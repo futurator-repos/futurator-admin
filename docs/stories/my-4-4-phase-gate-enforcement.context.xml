@@ -1,0 +1,190 @@
+<![CDATA[<story-context id="my-4-4-phase-gate-enforcement" v="1.0">
+  <metadata>
+    <epicId>MY-4</epicId>
+    <storyId>4</storyId>
+    <title>Phase Gate Enforcement</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-4-4-phase-gate-enforcement.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>phase transitions validated against maturity requirements before allowing progression</iWant>
+    <soThat>the system prevents premature jumps (e.g., coding before architecture is defined)</soThat>
+    <tasks>
+      <task id="1" ac="1">Define phase gate rules as queryable configuration
+        <subtask>Create /home/ubuntu/scripts/lib/phase-gates.mjs defining all 6 phase gate transitions with their requirements</subtask>
+        <subtask>Each gate rule specifies: source phase, target phase, required node types, minimum maturity per type, minimum count per type</subtask>
+        <subtask>Gate rules: Discovery to Planning (brainstorm/brief at 0.4, count 1); Planning to Solutioning (prd at 0.6, count 1, requirement at 0.4, count 1); Solutioning to Implementation (architecture at 0.6, count 1, tech-spec at 0.4, count 1); Implementation to QA (code avg maturity 0.6 + all stories completed); QA to Release (test-plan at 0.6 + critical tests passing); Release to Support (deployment successful + release notes)</subtask>
+        <subtask>Export function getGateRequirements(sourcePhase, targetPhase) returning the rules</subtask>
+      </task>
+      <task id="2" ac="2">Implement gate check logic via Memgraph queries
+        <subtask>Create /home/ubuntu/scripts/lib/check-phase-gate.mjs that queries Memgraph to evaluate gate requirements</subtask>
+        <subtask>For each gate rule, run Cypher query to find nodes of required type in source phase and check maturity scores</subtask>
+        <subtask>Aggregate results: count qualifying nodes, compute average maturity where needed, identify nodes below threshold</subtask>
+        <subtask>Return gate result object: {passed: boolean, warnings: [{rule, actual, required, missingNodes}]}</subtask>
+      </task>
+      <task id="3" ac="3">Implement soft gate warning system
+        <subtask>When gate check returns passed: false, emit a structured warning (not an error) to the pipeline output</subtask>
+        <subtask>Warning format: Phase gate warning: {sourcePhase} to {targetPhase} Missing: {list of unmet requirements with current vs required maturity}</subtask>
+        <subtask>Pipeline continues after warning (soft gate, not hard blocker)</subtask>
+        <subtask>Warning included in pipeline job result (DynamoDB futurator-agent-jobs) so it surfaces in Labs UI</subtask>
+      </task>
+      <task id="4" ac="4">Track gate status in pending-work.md
+        <subtask>After each gate check, update knowledge/system/pending-work.md with a Phase Gates section</subtask>
+        <subtask>List each phase transition attempted with unmet requirements</subtask>
+        <subtask>Include specific nodes needing maturity improvement with current and target maturity scores</subtask>
+        <subtask>Remove entries from pending-work.md when gate requirements are subsequently met</subtask>
+      </task>
+      <task id="5" ac="5,6">Log gate checks and integrate into compilation flow
+        <subtask>Log every gate check in knowledge/log.md: timestamp, projectId, attempted transition, gate status (passed/warned), missing items</subtask>
+        <subtask>Integrate gate checks into pre-dev compilation step (Story 4.1): after a new node is created, determine which phase it belongs to and check if upstream phase gate is satisfied</subtask>
+        <subtask>Phase detection logic: infer target phase from article type being created (prd means Planning phase, check Discovery to Planning gate)</subtask>
+        <subtask>Gate checks also run at epic transition points (planning to solutioning, solutioning to implementation)</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">The system enforces the phase gates defined in architecture doc section 6.3: Discovery to Planning requires at least 1 brainstorm/brief node at maturity >= 0.4; Planning to Solutioning requires PRD at maturity >= 0.6 and requirements at >= 0.4; Solutioning to Implementation requires architecture at >= 0.6 and tech spec at >= 0.4; Implementation to QA requires all epic stories completed and code nodes at >= 0.6 avg; QA to Release requires test plan at >= 0.6 and all critical tests passing; Release to Support requires deployment successful and release notes generated</criterion>
+    <criterion id="2">When a pipeline or agent session attempts to create nodes in a downstream phase, the system checks if gate requirements are met by querying node maturity in Memgraph</criterion>
+    <criterion id="3">If gate requirements are NOT met, a warning is emitted listing what is missing — the pipeline continues (soft gate, not a hard blocker)</criterion>
+    <criterion id="4">Gate status is tracked in knowledge/system/pending-work.md with a section listing unmet gate requirements per phase transition</criterion>
+    <criterion id="5">Phase gate checks are logged in knowledge/log.md with timestamp, attempted transition, gate status (passed/warned), and missing items</criterion>
+    <criterion id="6">Gate checks run as part of the pre-dev compilation step (Story 4.1) — evaluated whenever a new node is created in a phase that requires upstream phase completion</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.3 Maturity Scoring</section>
+        <snippet>Phase gates from Mycelium adapted for Labs: Discovery to Planning (brainstorm/brief at 0.4), Planning to Solutioning (PRD at 0.6, requirements at 0.4), Solutioning to Implementation (architecture at 0.6, tech spec at 0.4), Implementation to QA (all stories completed, code at 0.6 avg), QA to Release (test plan at 0.6, critical tests passing), Release to Support (deployment successful, release notes generated). The compilation step updates maturity scores based on signals present in article content.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.5 Pre-Development Phase Compilation</section>
+        <snippet>Pre-dev compilation runs after each document generation or revision session. This is the integration point for gate checks: after a new node is created, determine its phase and check upstream gate satisfaction. When a planning document changes, the compiler traverses the graph and flags downstream nodes.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.1 Node Status Lifecycle</section>
+        <snippet>Node status lifecycle: active (created/refined) to flagged (upstream change detected) to superseded (newer version) to pruned (archived). Gate checks evaluate nodes in active status to determine if phase transition requirements are satisfied.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>Node properties include: nodeId, projectId, type, phase, status, maturity, title, summary, tags. Cypher queries filter by projectId, type, phase, and status to evaluate gate requirements. Vector index knowledge_index for semantic search.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>2 Architecture Overview</section>
+        <snippet>Knowledge directory structure includes knowledge/system/pending-work.md for cross-cutting synthesis including phase gate status tracking. DynamoDB futurator-agent-jobs stores pipeline job results where gate warnings surface to the UI.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, executeStep, executeShellStep, updateJobFields</symbol>
+        <lines>375-650</lines>
+        <reason>Pipeline executor where gate check results are stored. Gate warnings must be included in the job result via updateJobFields so they surface in the Labs UI. The executeShellStep function runs the gate check script as a shell step in the COMPILE sequence.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>AgentJob, StepResult, PipelineStep</symbol>
+        <lines>66-101</lines>
+        <reason>AgentJob.stepResults and StepResult.validationResults are where gate check warnings will be stored. Gate warnings use the existing ValidationResult structure (label, passed, details) to surface in the UI.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/epic-workflow.ts</path>
+        <kind>types</kind>
+        <symbol>EpicStatus, StoryStatus, EpicWorkflow</symbol>
+        <lines>1-79</lines>
+        <reason>Epic and story status types determine Implementation to QA gate check (all stories must be done). The EpicWorkflow.stories array with StoryStatus is queried to verify all epic stories are completed before allowing QA phase entry.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>test-script</kind>
+        <symbol>neo4j driver session.run pattern</symbol>
+        <lines>30-45</lines>
+        <reason>Demonstrates the Cypher execution pattern used in gate check queries. Gate checks run Cypher queries like MATCH (n:Node {projectId, type, phase, status: 'active'}) WHERE n.maturity >= threshold RETURN count(n).</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/project-registry.ts</path>
+        <kind>types</kind>
+        <symbol>ProjectRegistry</symbol>
+        <lines>1-31</lines>
+        <reason>Project registry provides projectId for scoping all Memgraph gate queries to the correct project context.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="daemon-scripts">
+        <package name="neo4j-driver" version="latest" note="Memgraph Bolt connectivity for gate check Cypher queries (from Epic 1)" />
+        <package name="gray-matter" version="latest" note="Frontmatter parsing for reading pending-work.md and log.md" />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="architecture">Phase gates are SOFT gates (warnings), not hard blockers. This is personal developer tooling, not enterprise governance. The system warns when skipping ahead but does not prevent pipeline execution.</constraint>
+    <constraint type="architecture">Gate checks evaluate nodes with status: active only. Flagged, superseded, and pruned nodes do not count toward gate satisfaction.</constraint>
+    <constraint type="architecture">The 7-phase model is: Discovery, Planning, Solutioning, Implementation, QA, Release, Support. Gate checks are most valuable during pre-dev phases (first 4 transitions) where skipping ahead is most common and costly.</constraint>
+    <constraint type="convention">Gate check results are stored in DynamoDB (futurator-agent-jobs) via the existing ValidationResult interface for UI display, and in knowledge/system/pending-work.md for wiki-based tracking.</constraint>
+    <constraint type="dependency">Requires Story 4.1 (Document Generation Compilation Hook) as the integration point for gate checks during pre-dev compilation.</constraint>
+    <constraint type="dependency">Requires Epic 1 complete (Memgraph with schema, maturity scores populated on nodes by compilation steps).</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>phase-gates.mjs module</name>
+      <kind>library module</kind>
+      <signature>getGateRequirements(sourcePhase, targetPhase) returns array of {type: string[], minMaturity: number, minCount?: number, aggregate?: 'avg'}; getPhaseForArticleType(articleType) returns phase string</signature>
+      <path>/home/ubuntu/scripts/lib/phase-gates.mjs</path>
+    </interface>
+    <interface>
+      <name>check-phase-gate.mjs module</name>
+      <kind>library module</kind>
+      <signature>checkPhaseGate(projectId, sourcePhase, targetPhase) returns {passed: boolean, warnings: [{rule, actual, required, missingNodes}]}</signature>
+      <path>/home/ubuntu/scripts/lib/check-phase-gate.mjs</path>
+    </interface>
+    <interface>
+      <name>Gate check Cypher queries</name>
+      <kind>database query</kind>
+      <signature>MATCH (n:Node {projectId: $projectId, status: 'active'}) WHERE n.type IN $requiredTypes AND n.phase = $sourcePhase AND n.maturity >= $minMaturity RETURN count(n) AS qualifying_count, avg(n.maturity) AS avg_maturity</signature>
+      <path>/home/ubuntu/scripts/lib/check-phase-gate.mjs</path>
+    </interface>
+    <interface>
+      <name>pending-work.md Phase Gates section</name>
+      <kind>wiki article section</kind>
+      <signature>## Phase Gates section in knowledge/system/pending-work.md listing unmet gate requirements per phase transition with node-level detail (nodeId, current maturity, required maturity)</signature>
+      <path>knowledge/system/pending-work.md</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Tests should verify all 6 phase gate rules, Memgraph query accuracy, soft warning behavior (pipeline continues), pending-work.md tracking, log.md entries, and integration with the pre-dev compilation flow. Unit tests for phase-gates.mjs configuration and check-phase-gate.mjs evaluation logic. Integration tests with Memgraph containing nodes at various maturity levels.</standards>
+    <locations>
+      <location>/home/ubuntu/scripts/__tests__/phase-gates.test.mjs</location>
+      <location>/home/ubuntu/scripts/__tests__/check-phase-gate.test.mjs</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Create a project with 1 brainstorm node at maturity 0.5 and verify Discovery to Planning gate passes. Create another project with no brainstorm nodes and verify the gate warns. Test all 6 gate transitions with nodes at boundary maturity values.</idea>
+      <idea ac="2">Create a prd article (entering Planning phase) when no brainstorm/brief nodes exist in Discovery phase. Verify the gate check runs automatically and detects the missing upstream nodes by querying Memgraph.</idea>
+      <idea ac="3">Trigger a gate check that fails and verify: (a) a structured warning is emitted, (b) the warning lists specific missing requirements with current vs required maturity, (c) the pipeline continues executing subsequent steps without error.</idea>
+      <idea ac="4">Trigger a failed gate check and verify knowledge/system/pending-work.md is updated with a Phase Gates section listing the unmet requirements. Then satisfy the gate and verify the entry is removed from pending-work.md.</idea>
+      <idea ac="5">Run several gate checks (some passing, some failing) and verify knowledge/log.md contains entries for each with timestamp, projectId, transition, status (passed/warned), and missing items.</idea>
+      <idea ac="6">Create a solutioning node (architecture article) via pre-dev compilation and verify the Planning to Solutioning gate check runs automatically as part of the compilation step. Verify the gate check evaluates PRD maturity >= 0.6 and requirement maturity >= 0.4.</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

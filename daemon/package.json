@@ -1,0 +1,14 @@
+{
+  "name": "futurator-agent-daemon",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node agent-daemon.mjs",
+    "dev": "node --watch agent-daemon.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1024.0",
+    "@aws-sdk/lib-dynamodb": "^3.1024.0"
+  }
+}

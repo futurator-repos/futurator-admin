@@ -1,0 +1,131 @@
+<story-context id="my-5-3-conversation-pipeline-type" v="1.0">
+  <metadata>
+    <epicId>MY-5</epicId>
+    <storyId>3</storyId>
+    <title>Conversation Pipeline Type</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-5-3-conversation-pipeline-type.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>a new pipeline type for interactive codebase conversations (not build-oriented)</iWant>
+    <soThat>I can ask questions, brainstorm, and analyze my project with full knowledge graph context</soThat>
+    <tasks>
+      <task id="1" title="Define conversation pipeline in daemon" ac="1,7">
+        <subtask id="1.1">Add conversation pipeline type to the daemon's pipeline registry (alongside story, epic)</subtask>
+        <subtask id="1.2">Define the pipeline agent: ASSISTANT with name "Project Assistant", model opus, allowed tools Read,Grep,Glob,Bash</subtask>
+        <subtask id="1.3">Define the pipeline step sequence: gather-context, graph-search, respond, compile-conversation (conditional), sync</subtask>
+        <subtask id="1.4">Configure variable capture: step outputs stored as PROJECT_CONTEXT, GRAPH_RESULTS for prompt interpolation</subtask>
+      </task>
+      <task id="2" title="Implement Step 1 — gather-context shell step" ac="2,7">
+        <subtask id="2.1">Create shell command that reads knowledge/index.md and knowledge/system/pending-work.md from the project working directory</subtask>
+        <subtask id="2.2">Append a file tree via find . -type f ... | head -200</subtask>
+        <subtask id="2.3">Capture combined output as PROJECT_CONTEXT variable</subtask>
+        <subtask id="2.4">Handle missing files gracefully (pending-work.md may not exist yet)</subtask>
+      </task>
+      <task id="3" title="Implement Step 2 — graph-search shell step" ac="3,7">
+        <subtask id="3.1">Create shell command: node /home/ubuntu/scripts/graph-search.mjs --project {{projectId}} --query "{{USER_QUERY}}" --top-k 15 --hops 3</subtask>
+        <subtask id="3.2">Capture output as GRAPH_RESULTS variable</subtask>
+        <subtask id="3.3">Handle empty results (no nodes in Memgraph yet) — pipeline should still proceed</subtask>
+      </task>
+      <task id="4" title="Implement Step 3 — conversational agent step" ac="4,5,6">
+        <subtask id="4.1">Create the agent prompt template with {{PROJECT_CONTEXT}}, {{GRAPH_RESULTS}}, and {{USER_QUERY}} interpolation points</subtask>
+        <subtask id="4.2">Include instructions for the agent to reference wiki articles by [[wikilink]] notation</subtask>
+        <subtask id="4.3">Include instructions for ---NEW_KNOWLEDGE--- block extraction when conversations produce new insights</subtask>
+        <subtask id="4.4">Configure agent with allowedTools: Read,Grep,Glob,Bash for live code exploration</subtask>
+        <subtask id="4.5">Set agent model to opus for complex multi-step reasoning</subtask>
+      </task>
+      <task id="5" title="Define the NEW_KNOWLEDGE extraction format" ac="6">
+        <subtask id="5.1">Document the structured block format: ---NEW_KNOWLEDGE--- / ---END_NEW_KNOWLEDGE--- with type, title, content, links fields</subtask>
+        <subtask id="5.2">Create a parser that extracts NEW_KNOWLEDGE blocks from agent output</subtask>
+        <subtask id="5.3">Store extracted knowledge items for the conditional compilation step (Story 5.4)</subtask>
+      </task>
+      <task id="6" title="Pipeline integration test" ac="1,2,3,4">
+        <subtask id="6.1">Register the conversation pipeline in the daemon and verify it appears in the pipeline list</subtask>
+        <subtask id="6.2">Trigger a test conversation pipeline for a project with populated Memgraph</subtask>
+        <subtask id="6.3">Verify Step 1 captures project context correctly</subtask>
+        <subtask id="6.4">Verify Step 2 returns GraphRAG results for the query</subtask>
+        <subtask id="6.5">Verify Step 3 agent responds with contextual awareness</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">A new conversation pipeline type is defined in the daemon pipeline system alongside existing story and epic pipelines</criterion>
+    <criterion id="2">Step 1 (gather-context): a shell step gathers project context — reads index.md, pending-work.md, and generates a file tree (capped at 200 entries)</criterion>
+    <criterion id="3">Step 2 (graph-search): a shell step calls graph-search.mjs with the user's query, --top-k 15, and --hops 3 to get GraphRAG results</criterion>
+    <criterion id="4">Step 3 (respond): a conversational agent (Opus model) responds with full project context + graph search results, with access to Read, Grep, Glob, Bash tools for live code exploration</criterion>
+    <criterion id="5">The agent references wiki articles and decisions by their [[wikilinks]]</criterion>
+    <criterion id="6">If the conversation produces new knowledge, it is captured in a ---NEW_KNOWLEDGE--- / ---END_NEW_KNOWLEDGE--- structured block with type, title, content, and links fields</criterion>
+    <criterion id="7">The pipeline captures step outputs as named variables (PROJECT_CONTEXT, GRAPH_RESULTS, USER_QUERY) for prompt interpolation</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc path="docs/concepts/mycelium-labs-architecture.md" sections="7.1 Conversation Pipeline, 7.2 Self-Reflection Mode, 5.1 The Four-Layer Search Cascade">Full conversation pipeline definition with step details, agent prompt template, and NEW_KNOWLEDGE format</doc>
+      <doc path="docs/stories/my-5-3-conversation-pipeline-type.md">Source story file with pipeline definition and agent prompt details</doc>
+      <doc path="docs/stories/my-5-1-graphrag-search-tool.md">Story 5.1 — Step 2 dependency (graph-search.mjs)</doc>
+      <doc path="docs/stories/my-5-2-four-layer-search-cascade.md">Story 5.2 — search cascade available as agent tool</doc>
+    </docs>
+    <code>
+      <file path="daemon/agent-daemon.mjs" relevance="Core pipeline executor; executePipeline() runs steps sequentially; executeShellStep() handles shell steps with captureAs; runAgent() spawns Claude CLI for agent steps; substituteTemplate() handles {{VAR}} interpolation — this is where the conversation pipeline will be registered and executed</file>
+      <file path="functions/shared/types/agent-orchestrator.ts" relevance="PipelineDefinition interface with agents and steps; PipelineStep type with both agent (prompt, agentId, extractors) and shell (command, captureAs) variants; AgentConfig with model, allowedTools fields — the conversation pipeline must conform to these types</file>
+      <file path="daemon/scripts/test-memgraph.mjs" relevance="Memgraph connection pattern; referenced by graph-search.mjs which is called in Step 2</file>
+    </code>
+    <dependencies>
+      <package name="@aws-sdk/client-dynamodb" version="^3.1024.0" purpose="DynamoDB client for job state management (existing daemon dependency)" />
+      <package name="@aws-sdk/lib-dynamodb" version="^3.1024.0" purpose="DynamoDB document client for job state management (existing daemon dependency)" />
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="architecture">The conversation pipeline is stateless per run — all context comes from knowledge graph and live tools, not conversation memory. The knowledge graph IS the memory.</constraint>
+    <constraint type="pipeline-conformance">Pipeline definition must conform to the PipelineDefinition interface in functions/shared/types/agent-orchestrator.ts</constraint>
+    <constraint type="model">Agent step uses model 'opus' for complex multi-step reasoning about the codebase</constraint>
+    <constraint type="tools">Agent has access to Read,Grep,Glob,Bash tools for live code exploration during conversations</constraint>
+    <constraint type="variable-flow">Shell step outputs must be captured via captureAs and interpolated into agent prompts via {{VAR}} template substitution</constraint>
+    <constraint type="graceful-degradation">Pipeline must proceed even if graph-search returns empty results (new project with no Memgraph data yet)</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface type="pipeline-definition">
+      <description>Conversation pipeline registered in daemon pipeline system</description>
+      <agents>ASSISTANT: { name: 'Project Assistant', allowedTools: 'Read,Grep,Glob,Bash', model: 'opus' }</agents>
+      <steps>gather-context (shell) -> graph-search (shell) -> respond (agent) -> compile-conversation (agent, conditional) -> sync (shell)</steps>
+      <variables>PROJECT_CONTEXT, GRAPH_RESULTS, USER_QUERY, NEW_KNOWLEDGE</variables>
+    </interface>
+    <interface type="new-knowledge-format">
+      <description>Structured block format for capturing insights from conversations</description>
+      <format>---NEW_KNOWLEDGE---\n- type: decision | insight | requirement | risk\n  title: ...\n  content: ...\n  links: [related wiki articles]\n---END_NEW_KNOWLEDGE---</format>
+    </interface>
+    <interface type="upstream-dependency">
+      <description>Step 2 calls graph-search.mjs (Story 5.1) via shell command</description>
+    </interface>
+    <interface type="downstream-consumer">
+      <description>Story 5.4 consumes NEW_KNOWLEDGE blocks for compilation; Story 5.5 builds reflection variant on this pipeline</description>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>
+      <standard>Pipeline definition validates against PipelineDefinition TypeScript interface</standard>
+      <standard>Template substitution tested for all {{VAR}} placeholders</standard>
+      <standard>Integration tests require daemon running with DynamoDB and Memgraph</standard>
+    </standards>
+    <locations>
+      <location>daemon/__tests__/conversation-pipeline.test.mjs</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Verify conversation pipeline can be registered alongside story and epic pipelines in daemon</idea>
+      <idea ac="2">Test gather-context step: create test knowledge/index.md and pending-work.md; verify captured PROJECT_CONTEXT contains both files and file tree</idea>
+      <idea ac="3">Test graph-search step: mock graph-search.mjs output; verify GRAPH_RESULTS variable is captured correctly</idea>
+      <idea ac="4">Verify agent step receives interpolated PROJECT_CONTEXT, GRAPH_RESULTS, and USER_QUERY in its prompt; verify model is set to opus; verify allowedTools includes Read,Grep,Glob,Bash</idea>
+      <idea ac="5">Verify agent prompt template contains instructions for [[wikilink]] referencing</idea>
+      <idea ac="6">Test NEW_KNOWLEDGE parser: provide agent output containing ---NEW_KNOWLEDGE--- block; verify extraction of type, title, content, links fields</idea>
+      <idea ac="7">Test substituteTemplate with PROJECT_CONTEXT, GRAPH_RESULTS, USER_QUERY variables; verify all placeholders are replaced</idea>
+    </ideas>
+  </tests>
+</story-context>

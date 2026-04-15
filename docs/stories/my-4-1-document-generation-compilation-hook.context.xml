@@ -1,0 +1,196 @@
+<![CDATA[<story-context id="my-4-1-document-generation-compilation-hook" v="1.0">
+  <metadata>
+    <epicId>MY-4</epicId>
+    <storyId>1</storyId>
+    <title>Document Generation Compilation Hook</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-4-1-document-generation-compilation-hook.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>a compilation step triggered after any document generation session in pre-dev phases</iWant>
+    <soThat>PRDs, architecture specs, and planning documents are automatically decomposed into knowledge nodes</soThat>
+    <tasks>
+      <task id="1" ac="2">Define agent-to-article-type mapping
+        <subtask>Create mapping configuration: PM to prd/requirement/epic-plan/story-plan; Analyst to brief/research/competitive-analysis; Architect to architecture/tech-spec/api-spec/data-model/adr; UX to ux-spec</subtask>
+        <subtask>Map each article type to its phase directory: discovery/ for brainstorm/brief/research, planning/ for prd/requirement/epic-plan/story-plan, solutioning/ for architecture/tech-spec/api-spec/data-model/adr/ux-spec</subtask>
+        <subtask>Add mapping to a shared config module at /home/ubuntu/scripts/lib/article-types.mjs</subtask>
+      </task>
+      <task id="2" ac="1,2,3">Create pre-dev compilation step logic
+        <subtask>Create /home/ubuntu/scripts/compile-predev.mjs as the pre-dev compilation entry point</subtask>
+        <subtask>Accept arguments: --project, --document-path, --agent-type, --session-id</subtask>
+        <subtask>Parse the generated document to extract frontmatter fields (title, type, phase, status, tags)</subtask>
+        <subtask>Create or update the wiki article in knowledge/{phase}/{slug}.md using the standard article format</subtask>
+        <subtask>Scan the document for cross-references and generate [[wikilinks]] in Dependencies, Derived From, Informs sections</subtask>
+      </task>
+      <task id="3" ac="4">Integrate maturity assessment
+        <subtask>Implement maturity scoring logic per architecture doc section 6.3 (purpose defined, dependencies listed, acceptance criteria present, etc.)</subtask>
+        <subtask>Map assessment to 0.0-1.0 scale: Raw (0.0-0.2), Early (0.2-0.4), Partial (0.4-0.6), Solid (0.6-0.8), Ready (0.8-1.0)</subtask>
+        <subtask>Store maturity score in article frontmatter maturity field</subtask>
+      </task>
+      <task id="4" ac="5,6">Wire embed + sync + impact propagation
+        <subtask>After article creation/update, call graph-sync.mjs --project {projectId} --knowledge-dir {workingDir}/knowledge to embed and upsert to Memgraph</subtask>
+        <subtask>After sync, run impact propagation (Story 3.5) traversing graph from updated node following outgoing edges up to 4 hops, flag downstream nodes per weight/hop formula</subtask>
+        <subtask>Update flagged article frontmatter with status: flagged and flagReason referencing the changed upstream node</subtask>
+      </task>
+      <task id="5" ac="1,7">Integrate into existing document generation pipelines
+        <subtask>Extend generateDocumentPipeline() to append a COMPILE step after the document generation agent step completes</subtask>
+        <subtask>The COMPILE step sequence: shell (extract document path) then agent (compile to wiki article) then shell (embed + sync + impact propagation)</subtask>
+        <subtask>Log compilation record to knowledge/log.md: timestamp, session-id, agent-type, article-type, nodeId, maturity score</subtask>
+        <subtask>Update knowledge/index.md with new/updated article entry</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">When a PM, Analyst, Architect, or UX agent session generates or revises a document, a COMPILE step runs automatically after the document generation pipeline completes</criterion>
+    <criterion id="2">The compilation creates/updates wiki articles for the generated document, stored as a typed article (prd, architecture, tech-spec, ux-spec, brainstorm, brief, research, etc.) in the appropriate phase directory under knowledge/</criterion>
+    <criterion id="3">[[wikilinks]] are generated linking the new article to related existing nodes (requirements, decisions, code articles, discovery nodes)</criterion>
+    <criterion id="4">Maturity score (0.0-1.0) is assessed based on content completeness and stored in the article frontmatter</criterion>
+    <criterion id="5">The article is embedded via Voyage AI and synced to Memgraph via graph-sync.mjs</criterion>
+    <criterion id="6">Impact propagation runs after sync — if the document revises an existing node, downstream nodes are flagged for review per Story 3.5 rules (score >= 0.5 critical, score >= 0.1 moderate)</criterion>
+    <criterion id="7">Compilation results are logged in knowledge/log.md with timestamp, article type, nodeId, and maturity score</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.5 Pre-Development Phase Compilation</section>
+        <snippet>Each document generation endpoint already creates a pipeline job. The compilation step is appended. PM generates PRD then COMPILE: decompose PRD into requirement nodes, create planning nodes, link requirements to discovery nodes (DERIVED_FROM), assess maturity, flag impacted downstream nodes, embed + sync to Memgraph.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.1 Compilation Triggers</section>
+        <snippet>Discovery/Planning/Solutioning phases: after each document generation or revision session, decompose conversation into typed nodes, link to existing graph, update maturity scores, flag impacted downstream nodes for review.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step</section>
+        <snippet>The COMPILE step is a hybrid shell + agent sequence: Step A shell diff extraction ($0), Step B agent Knowledge Compiler (creates/updates articles, wikilinks, index, log), Step C shell embed and sync via graph-sync.mjs. This same 3-step pattern applies to pre-dev compilation.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Article types by phase: Discovery (brainstorm, brief, research, evidence, competitive-analysis), Planning (prd, requirement, epic-plan, story-plan, risk, decision), Solutioning (architecture, tech-spec, api-spec, data-model, adr, ux-spec). Standard article format with frontmatter (title, type, phase, status, maturity, created, updated, createdByEpic, tags).</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.3 Maturity Scoring</section>
+        <snippet>Score 0.0-0.2 Raw, 0.2-0.4 Early, 0.4-0.6 Partial (minimum for phase gate), 0.6-0.8 Solid (ready for downstream), 0.8-1.0 Ready (production-grade). LLM assesses what maturity signals are confirmed and what is still missing.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.2 Impact Propagation</section>
+        <snippet>Impact score = edge_weight / (hops ^ 1.5). Thresholds: score >= 0.5 flagged critical, score >= 0.1 flagged moderate, score less than 0.1 no flag. Edge weights: DEPENDS_ON 1.0, CONFLICTS_WITH 0.9, SUPERSEDES 0.8, DERIVED_FROM 0.7, VALIDATES 0.6, REFINES 0.5, ENABLES 0.5, INFORMS 0.3.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>8 edge types with weights. Wiki sections map to edge types: Dependencies to DEPENDS_ON, Derived From to DERIVED_FROM, Informs to INFORMS, Validates to VALIDATES, Supersedes to SUPERSEDES, Conflicts With to CONFLICTS_WITH, Enables to ENABLES.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, executeStep, executeShellStep, runAgent</symbol>
+        <lines>430-650</lines>
+        <reason>The pipeline executor where the COMPILE step will be appended to document generation pipelines. executeStep handles both agent and shell steps. The 3-step COMPILE pattern (shell + agent + shell) uses the existing step infrastructure.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineStep, PipelineStepType, PipelineDefinition, AgentJob</symbol>
+        <lines>1-84</lines>
+        <reason>Pipeline step types define the agent and shell step model. COMPILE steps use the existing PipelineStep interface with stepType 'agent' and 'shell'. Variables store is used for passing document paths between steps.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/project-registry.ts</path>
+        <kind>types</kind>
+        <symbol>ProjectRegistry, SessionMeta, FileManifestEntry</symbol>
+        <lines>1-31</lines>
+        <reason>Project registry tracks sessions and file manifests. The compilation hook uses projectId and ec2Path to locate the knowledge directory and associate compilation output with the correct project.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>test-script</kind>
+        <symbol>neo4j driver usage pattern</symbol>
+        <lines>1-143</lines>
+        <reason>Demonstrates the Memgraph connection pattern (neo4j-driver, bolt://localhost:7687) that graph-sync.mjs will use. Shows session management and Cypher execution patterns.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="daemon-scripts">
+        <package name="neo4j-driver" version="latest" note="Memgraph Bolt connectivity for graph-sync.mjs (from Epic 1)" />
+        <package name="voyageai" version="latest" note="Voyage AI SDK for embedding articles (from Story 1.4)" />
+        <package name="gray-matter" version="latest" note="Frontmatter parsing for wiki articles" />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="architecture">The compilation step is appended to existing document generation pipelines — it does NOT create a new pipeline. Each document generation endpoint already creates a pipeline job; the COMPILE step is added at the end.</constraint>
+    <constraint type="architecture">Wiki markdown files on EC2 are the source of truth. Memgraph is a disposable query accelerator rebuilt from wiki content. The compilation step writes articles first, then syncs to Memgraph.</constraint>
+    <constraint type="cost">Compilation must use the 3-step pattern: shell ($0) + agent (~$0.03-0.08) + shell (~$0.001). Total per-compilation cost under $0.10.</constraint>
+    <constraint type="infrastructure">All scripts run on EC2 (t4g.small, 2GB RAM). Memgraph memory limit is 512MB. Scripts must be memory-efficient — process articles sequentially, not all in memory.</constraint>
+    <constraint type="convention">Article file naming: knowledge/{phase}/{slug}.md. Code files use -- for path separators (src--components--auth.tsx.md). Non-code articles use kebab-case slug.</constraint>
+    <constraint type="dependency">Requires Epic 1 complete (Memgraph, schema, wiki structure, embeddings, graph-sync) and Story 3.5 (Impact Propagation Engine).</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>compile-predev.mjs CLI</name>
+      <kind>CLI script</kind>
+      <signature>node /home/ubuntu/scripts/compile-predev.mjs --project {projectId} --document-path {path} --agent-type {pm|analyst|architect|ux} --session-id {sessionId}</signature>
+      <path>/home/ubuntu/scripts/compile-predev.mjs</path>
+    </interface>
+    <interface>
+      <name>graph-sync.mjs CLI</name>
+      <kind>CLI script</kind>
+      <signature>node /home/ubuntu/scripts/graph-sync.mjs --project {projectId} --knowledge-dir {workingDir}/knowledge --state-file {workingDir}/.mycelium/compile-state.json</signature>
+      <path>/home/ubuntu/scripts/graph-sync.mjs</path>
+    </interface>
+    <interface>
+      <name>article-types.mjs module</name>
+      <kind>library module</kind>
+      <signature>getArticleTypes(agentType) returns array of article type strings; getPhaseDir(articleType) returns phase directory name</signature>
+      <path>/home/ubuntu/scripts/lib/article-types.mjs</path>
+    </interface>
+    <interface>
+      <name>Impact propagation Cypher</name>
+      <kind>database query</kind>
+      <signature>MATCH (updated:Node {nodeId: $updatedNodeId})-[:INFORMS|ENABLES|DERIVED_FROM*1..4]->(downstream:Node) WHERE downstream.status = 'active' SET downstream.status = 'flagged'</signature>
+      <path>daemon/scripts/test-memgraph.mjs</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Tests should verify the compilation pipeline integration, article creation, wikilink generation, maturity scoring, and graph sync. Unit tests for article-types.mjs mapping and maturity scoring logic. Integration tests for the full compile-predev.mjs flow with mock documents. E2E tests verifying Memgraph nodes are created after compilation.</standards>
+    <locations>
+      <location>/home/ubuntu/scripts/__tests__/compile-predev.test.mjs</location>
+      <location>/home/ubuntu/scripts/__tests__/article-types.test.mjs</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Trigger a PM agent document generation pipeline and verify that a COMPILE step runs automatically after the document generation step completes. Check pipeline job stepResults includes a compile step.</idea>
+      <idea ac="2">Generate a PRD document via PM agent and verify a wiki article is created at knowledge/planning/{slug}.md with correct frontmatter (type: prd, phase: planning, status: active).</idea>
+      <idea ac="3">Compile an architecture document and verify [[wikilinks]] are generated in Dependencies and Derived From sections linking to existing requirement and discovery nodes.</idea>
+      <idea ac="4">Compile a document and verify the maturity score is assessed and stored in frontmatter. A PRD with full acceptance criteria should score >= 0.6; a bare outline should score 0.2-0.4.</idea>
+      <idea ac="5">After compilation, verify the article is embedded via Voyage AI (1024-dim vector) and a corresponding node exists in Memgraph with matching nodeId and embedding.</idea>
+      <idea ac="6">Modify an existing PRD (recompile), then verify downstream requirement and decision nodes have status: flagged with appropriate flagReason. Check that impact score thresholds are applied correctly (>= 0.5 critical, >= 0.1 moderate).</idea>
+      <idea ac="7">After compilation, verify knowledge/log.md contains a new entry with timestamp, article type, nodeId, and maturity score.</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

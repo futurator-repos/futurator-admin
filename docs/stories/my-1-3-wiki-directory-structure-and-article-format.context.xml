@@ -1,0 +1,152 @@
+<story-context id="my-1-3-wiki-directory-structure-and-article-format" v="1.0">
+  <metadata>
+    <epicId>MY-1</epicId>
+    <storyId>3</storyId>
+    <title>Wiki Directory Structure and Article Format</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-1-3-wiki-directory-structure-and-article-format.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>the wiki directory structure created in each project workspace with a defined article format</iWant>
+    <soThat>compiled knowledge has a consistent, organized home following the Karpathy wiki pattern</soThat>
+
+    <tasks>
+      <task id="1" title="Create wiki initialization script init-wiki.sh" acs="1,6,7">
+        <subtask id="1.1">Create /home/ubuntu/scripts/init-wiki.sh as a shell script</subtask>
+        <subtask id="1.2">Accept two arguments: projectId (e.g., spyhunter) and workingDir (e.g., /home/ubuntu/projects/spyhunter)</subtask>
+        <subtask id="1.3">Create all phase directories under ${workingDir}/knowledge/: code/, decisions/, requirements/, discovery/, planning/, solutioning/, qa/, system/, archive/</subtask>
+        <subtask id="1.4">Use mkdir -p to ensure idempotency — no errors if directories already exist</subtask>
+        <subtask id="1.5">Create files only if they do not already exist (use -f check before writing)</subtask>
+        <subtask id="1.6">Make script executable (chmod +x)</subtask>
+      </task>
+      <task id="2" title="Initialize index.md with catalog structure" acs="2">
+        <subtask id="2.1">Create ${workingDir}/knowledge/index.md with project name header</subtask>
+        <subtask id="2.2">Include empty sections for each phase: Discovery, Planning, Solutioning, Implementation, QA, Release, Support, System</subtask>
+        <subtask id="2.3">Each section has a placeholder for article listings (table or list format)</subtask>
+      </task>
+      <task id="3" title="Initialize log.md with creation entry" acs="3">
+        <subtask id="3.1">Create ${workingDir}/knowledge/log.md with operations log header</subtask>
+        <subtask id="3.2">Append creation entry with timestamp: | {date} | Wiki initialized for {projectId} | init-wiki.sh |</subtask>
+      </task>
+      <task id="4" title="Create system articles" acs="1">
+        <subtask id="4.1">Create ${workingDir}/knowledge/system/dependency-map.md with frontmatter (type: system, phase: system, status: active)</subtask>
+        <subtask id="4.2">Create ${workingDir}/knowledge/system/deployment-manifest.md with frontmatter</subtask>
+        <subtask id="4.3">Create ${workingDir}/knowledge/system/debt-registry.md with frontmatter</subtask>
+        <subtask id="4.4">Create ${workingDir}/knowledge/system/pending-work.md with frontmatter</subtask>
+      </task>
+      <task id="5" title="Create .mycelium/ metadata directory" acs="4,5">
+        <subtask id="5.1">Create ${workingDir}/.mycelium/ directory</subtask>
+        <subtask id="5.2">Create compile-state.json with empty object {}</subtask>
+        <subtask id="5.3">Create embeddings-queue.json with empty array []</subtask>
+      </task>
+      <task id="6" title="Validate initialization" acs="1,2,3,4,5">
+        <subtask id="6.1">Run init-wiki.sh with a test project</subtask>
+        <subtask id="6.2">Verify all directories exist via find</subtask>
+        <subtask id="6.3">Verify index.md contains project name</subtask>
+        <subtask id="6.4">Verify log.md contains creation entry</subtask>
+        <subtask id="6.5">Verify .mycelium/compile-state.json is valid JSON</subtask>
+        <subtask id="6.6">Run script again on same project — verify no content is overwritten</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">The following directory structure is created under /home/ubuntu/projects/{name}/knowledge/: index.md, log.md, code/, decisions/, requirements/, discovery/, planning/, solutioning/, qa/, system/ (with pre-created files: dependency-map.md, deployment-manifest.md, debt-registry.md, pending-work.md), archive/</criterion>
+    <criterion id="2">index.md is initialized with the project name and empty catalog structure</criterion>
+    <criterion id="3">log.md is initialized with a creation entry</criterion>
+    <criterion id="4">.mycelium/compile-state.json is created with empty state {}</criterion>
+    <criterion id="5">.mycelium/embeddings-queue.json is created with empty array []</criterion>
+    <criterion id="6">The initialization script takes projectId and workingDir as arguments</criterion>
+    <criterion id="7">The script is idempotent — running it on an existing project does not overwrite existing content</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>2 Architecture Overview</section>
+        <snippet>Project workspace layout: /home/ubuntu/projects/{name}/ with knowledge/ directory containing index.md, log.md, phase directories (code/, decisions/, requirements/, discovery/, planning/, solutioning/, qa/, system/, archive/), and .mycelium/ metadata directory with compile-state.json and embeddings-queue.json</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Article format with YAML frontmatter (title, type, phase, status, maturity, created, updated, createdByEpic, createdByStory, lastMutatedByStory, tags). File naming: knowledge/{phase}/{slug}.md with -- for path separators. Article body sections: Purpose, Key Exports, Dependencies, Dependents, Signals, Missing Signals, Notes. Article types by phase table.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>9 Decisions Log</section>
+        <snippet>D1: Wiki markdown as persistence (Karpathy pattern), human-readable, LLM-maintainable. D7: Phase-organized directories with typed articles. D9: Wiki as source of truth, Memgraph rebuilt from wiki.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/memgraph/setup-memgraph.sh</path>
+        <kind>existing-script</kind>
+        <symbol>set -euo pipefail, mkdir -p, function pattern</symbol>
+        <reason>Reference for shell script structure, idempotency patterns (mkdir -p, file existence checks), and setup script conventions used in the project</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/project-registry.ts</path>
+        <kind>type-definition</kind>
+        <symbol>ProjectRegistry interface, ec2Path field</symbol>
+        <reason>Defines project workspace path convention (ec2Path: /home/ubuntu/projects/{name}) that init-wiki.sh must respect</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <package name="bash" version="system" reason="Shell script — no additional dependencies required"/>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint>No dependency on Story MY-1.1 — this story can run in parallel with Memgraph setup</constraint>
+    <constraint>Script must be idempotent — mkdir -p for directories, -f existence checks before writing files</constraint>
+    <constraint>Shell script (not Node.js) — simpler, no dependencies, faster execution</constraint>
+    <constraint>All system articles must include proper YAML frontmatter (type: system, phase: system, status: active)</constraint>
+    <constraint>File naming convention: slug uses -- for path separators in code files (e.g., src--components--auth.tsx.md)</constraint>
+    <constraint>The /home/ubuntu/scripts/ directory should already exist from Story 1.1, but the script should create it if missing</constraint>
+    <constraint>Article frontmatter schema must match exactly what Memgraph nodes expect (Story 1.2) — same property names</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>init-wiki.sh CLI</name>
+      <endpoint>/home/ubuntu/scripts/init-wiki.sh</endpoint>
+      <protocol>CLI (bash)</protocol>
+      <details>Arguments: $1=projectId (e.g., spyhunter), $2=workingDir (e.g., /home/ubuntu/projects/spyhunter). Creates knowledge/ directory tree and .mycelium/ metadata under workingDir.</details>
+    </interface>
+    <interface>
+      <name>Article Frontmatter Schema</name>
+      <protocol>YAML frontmatter in markdown</protocol>
+      <details>Required fields: title, type, phase, status, maturity, created, updated, createdByEpic, createdByStory, lastMutatedByStory, tags. Status values: active, superseded, flagged, pruned.</details>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>
+      <standard>Manual validation via script execution — run init-wiki.sh on a test project and verify directory tree, file contents, and idempotency</standard>
+      <standard>File existence checks — verify all 9 phase directories, index.md, log.md, 4 system articles, and 2 .mycelium files</standard>
+      <standard>Idempotency test — run script twice on same project, verify no content overwritten</standard>
+    </standards>
+    <locations>
+      <location>daemon/scripts/init-wiki.sh (the script itself, tested by execution)</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Run init-wiki.sh with test projectId, then use find to list all created directories and files; verify against expected structure</idea>
+      <idea ac="2">Check index.md contains the project name header and all 8 phase sections (Discovery through System)</idea>
+      <idea ac="3">Check log.md contains a creation entry with date and projectId</idea>
+      <idea ac="4">Parse .mycelium/compile-state.json with jq and verify it equals {}</idea>
+      <idea ac="5">Parse .mycelium/embeddings-queue.json with jq and verify it equals []</idea>
+      <idea ac="6">Run init-wiki.sh without arguments — verify usage help is printed</idea>
+      <idea ac="7">Write custom content to index.md, run init-wiki.sh again, verify custom content is preserved</idea>
+    </ideas>
+  </tests>
+</story-context>

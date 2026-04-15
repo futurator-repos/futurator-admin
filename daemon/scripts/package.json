@@ -1,0 +1,24 @@
+{
+  "name": "futurator-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Mycelium knowledge graph utility scripts",
+  "scripts": {
+    "test-memgraph": "node test-memgraph.mjs",
+    "test-memgraph:persist": "node test-memgraph.mjs --persist",
+    "test-memgraph:json": "node test-memgraph.mjs --json",
+    "init-memgraph": "node init-memgraph.mjs",
+    "init-memgraph:validate": "node init-memgraph.mjs --validate",
+    "init-memgraph:json": "node init-memgraph.mjs --json",
+    "graph-sync": "node graph-sync.mjs",
+    "init-wiki": "bash init-wiki.sh",
+    "bootstrap-scan": "node bootstrap-scan.mjs",
+    "bootstrap-deps": "node bootstrap-deps.mjs",
+    "bootstrap-decisions": "node bootstrap-decisions.mjs",
+    "bootstrap-verify": "node bootstrap-verify.mjs"
+  },
+  "dependencies": {
+    "neo4j-driver": "^5.27.0"
+  }
+}

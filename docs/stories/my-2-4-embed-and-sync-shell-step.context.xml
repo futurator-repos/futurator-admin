@@ -1,0 +1,196 @@
+<![CDATA[<story-context id="my-2-4-embed-and-sync-shell-step" v="1.0">
+  <metadata>
+    <epicId>MY-2</epicId>
+    <storyId>4</storyId>
+    <title>Embed and Sync Shell Step</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-2-4-embed-and-sync-shell-step.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>a shell step that embeds new/changed wiki articles and syncs them to Memgraph after compilation</iWant>
+    <soThat>the GraphRAG index stays current with the latest compiled knowledge</soThat>
+    <tasks>
+      <task id="1" ac="1,2,3,4">Define the embed-sync shell step in the pipeline
+        <subtask>Add the compile-sync shell step to generateStoryPipeline() after the compile-knowledge step</subtask>
+        <subtask>Set the command to call node /home/ubuntu/scripts/graph-sync.mjs with --project, --knowledge-dir, and --state-file flags</subtask>
+        <subtask>Template the command with {{projectId}} and {{workingDir}} variables</subtask>
+        <subtask>Set appropriate timeout (e.g., 60000ms to account for Voyage AI API latency)</subtask>
+      </task>
+      <task id="2" ac="1,2,3,4">Integrate graph-sync.mjs invocation
+        <subtask>Verify graph-sync.mjs from Story 1.5 is deployed to /home/ubuntu/scripts/ on EC2</subtask>
+        <subtask>Verify the script reads compile-state.json, diffs content hashes, embeds changed articles, and upserts to Memgraph</subtask>
+        <subtask>Verify the script updates compile-state.json with new hashes after sync</subtask>
+        <subtask>Ensure the script outputs sync summary (articles processed, nodes upserted, edges created) to stdout for pipeline event capture</subtask>
+      </task>
+      <task id="3" ac="5">Integrate S3 backup step
+        <subtask>Append aws s3 sync command to the shell step (or chain as a separate command after graph-sync)</subtask>
+        <subtask>Configure S3 path as s3://futurator-ai-website/knowledge-live/{{projectId}}/</subtask>
+        <subtask>Use --delete flag to remove articles that have been archived</subtask>
+        <subtask>Ensure S3 backup errors are logged but do not fail the step (best-effort backup)</subtask>
+      </task>
+      <task id="4" ac="1,4">Handle edge cases and error recovery
+        <subtask>Handle first-ever sync (empty compile-state.json) — should process all articles</subtask>
+        <subtask>Handle Voyage AI API failures with retry logic (already built into lib/voyage-embed.mjs from Story 1.4)</subtask>
+        <subtask>Handle Memgraph connection failures — log error, skip sync, preserve compile-state for next attempt</subtask>
+        <subtask>Ensure partial sync does not corrupt compile-state.json (write atomically with temp file + rename)</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">All new/changed wiki articles are detected via content hash comparison against .mycelium/compile-state.json</criterion>
+    <criterion id="2">Changed articles are embedded via Voyage AI (voyage-3-large, 1024-dim) and upserted into Memgraph as nodes with all frontmatter properties and embedding vectors</criterion>
+    <criterion id="3">Edges from [[wikilinks]] in articles are created/updated in Memgraph using the typed edge model (DEPENDS_ON, DERIVED_FROM, INFORMS, etc.)</criterion>
+    <criterion id="4">.mycelium/compile-state.json is updated with new content hashes after successful sync</criterion>
+    <criterion id="5">The wiki directory is backed up to S3 at s3://futurator-ai-website/knowledge-live/{projectId}/ after sync</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step — Step C</section>
+        <snippet>Step C — Embed and sync (shell, ~3s, ~$0.001): node /home/ubuntu/scripts/graph-sync.mjs --project ${projectId} --knowledge-dir ${workingDir}/knowledge --state-file ${workingDir}/.mycelium/compile-state.json. Process: reads compile-state.json for content hashes, diffs current articles, calls Voyage AI for 1024-dim embeddings, upserts into Memgraph (node properties from frontmatter, embedding vector, edges from [[wikilinks]]), updates compile-state.json.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>Node properties: nodeId, projectId, type, phase, status, maturity, title, summary, tags, createdByEpic, createdByStory, lastMutatedByStory, created, updated, embedding (1024-dim Voyage AI). Vector index knowledge_index on :Node(embedding) with dimension 1024, capacity 50000, metric cos, scalar_kind f16. 8 edge types with weights: DEPENDS_ON, DERIVED_FROM, INFORMS, REFINES, VALIDATES, SUPERSEDES, CONFLICTS_WITH, ENABLES.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>2 Architecture Overview</section>
+        <snippet>.mycelium/ directory contains compile-state.json (hashes of last compile) and embeddings-queue.json (pending re-embeds). Memgraph runs as Docker container on EC2, port 7687, memory limit 512MB.</snippet>
+      </doc>
+      <doc>
+        <path>docs/epics-mycelium-devs.md</path>
+        <title>Mycelium Devs Epic Breakdown</title>
+        <section>Epic 2 / Story 2.4</section>
+        <snippet>Story 2.4 acceptance criteria for embed and sync shell step. Depends on Epic 1 stories 1.4 (voyage-embed.mjs), 1.5 (graph-sync.mjs), and 1.6 (S3 backup).</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>functions/api/index.ts</path>
+        <kind>api</kind>
+        <symbol>generateStoryPipeline</symbol>
+        <lines>486-607</lines>
+        <reason>The function where the compile-sync shell step definition is added. The step is a PipelineStep with stepType: 'shell', command calling graph-sync.mjs with templated project and directory arguments, and a 60000ms timeout.</reason>
+      </file>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executeShellStep</symbol>
+        <lines>430-523</lines>
+        <reason>Shell step executor on EC2. Spawns bash process with the command, captures stdout/stderr, handles timeout and exit codes. The graph-sync.mjs command will be executed through this mechanism.</reason>
+      </file>
+      <file>
+        <path>daemon/memgraph/docker-compose.yml</path>
+        <kind>infrastructure</kind>
+        <symbol>memgraph service</symbol>
+        <lines>1-26</lines>
+        <reason>Memgraph Docker container configuration. The graph-sync.mjs script connects to Memgraph at bolt://localhost:7687. Container must be running for the sync step to succeed.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>test</kind>
+        <symbol>neo4j.driver connection pattern</symbol>
+        <lines>1-143</lines>
+        <reason>Reference implementation for Memgraph Bolt connectivity using neo4j-driver. Shows the connection pattern (neo4j.driver(BOLT_URI) -> session.run(cypher)) that graph-sync.mjs will use for upserts.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/package.json</path>
+        <kind>manifest</kind>
+        <symbol>dependencies</symbol>
+        <lines>1-16</lines>
+        <reason>Current dependencies: neo4j-driver ^5.27.0. The graph-sync.mjs script (from Story 1.5) will also need the voyageai or node-fetch package for Voyage AI embedding API calls.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineStep</symbol>
+        <lines>35-58</lines>
+        <reason>PipelineStep interface for the shell step: command, timeout (60000), captureAs, onFail. The compile-sync step may not need captureAs since it is the last step in the COMPILE phase.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="ec2-scripts">
+        <package name="neo4j-driver" version="^5.27.0" note="Already installed in daemon/scripts/. Used by graph-sync.mjs for Memgraph Bolt connectivity." />
+        <package name="voyageai" note="Required by graph-sync.mjs (Story 1.5) and lib/voyage-embed.mjs (Story 1.4) for Voyage AI embedding API calls. voyage-3-large model, 1024 dimensions." />
+      </ecosystem>
+      <ecosystem name="aws-cli">
+        <package name="aws-cli" note="Used for S3 backup: aws s3 sync knowledge/ s3://futurator-ai-website/knowledge-live/{projectId}/. Pre-installed on EC2 with IAM role credentials." />
+      </ecosystem>
+      <ecosystem name="epic-1-prerequisites">
+        <package name="graph-sync.mjs" note="From Story 1.5. Deployed to /home/ubuntu/scripts/. Handles content hash diffing, Voyage AI embedding, and Memgraph upsert." />
+        <package name="lib/voyage-embed.mjs" note="From Story 1.4. Voyage AI embedding helper with retry logic. Used by graph-sync.mjs." />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="cost">Embedding cost is approximately $0.001 for a typical 10-50 article re-embed batch via Voyage AI. Total step cost is minimal. Voyage AI batch API supports up to 128 inputs per call.</constraint>
+    <constraint type="timing">Execution time is approximately 3 seconds plus Voyage AI API call time. Timeout should be set to 60000ms to account for API latency. Memgraph upserts are fast (sub-second for typical batch sizes).</constraint>
+    <constraint type="prerequisites">This step depends on infrastructure from three Epic 1 stories: Story 1.4 (lib/voyage-embed.mjs), Story 1.5 (graph-sync.mjs), Story 1.6 (S3 backup). If these are not deployed, the step should fail gracefully.</constraint>
+    <constraint type="atomicity">compile-state.json must be written atomically (temp file + rename) to prevent corruption from partial writes. A corrupted state file would cause unnecessary re-embedding of all articles on the next run.</constraint>
+    <constraint type="memgraph">Memgraph must be running on localhost:7687 for the sync to succeed. If Memgraph is down, graph-sync.mjs should log the error and preserve compile-state for the next attempt.</constraint>
+    <constraint type="s3-backup">S3 backup is best-effort. Backup failures should be logged but should not fail the compile-sync step. The aws s3 sync command should use the --delete flag to keep S3 in sync with the local wiki.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>graph-sync.mjs CLI</name>
+      <kind>command-line interface</kind>
+      <signature>node /home/ubuntu/scripts/graph-sync.mjs --project {projectId} --knowledge-dir {workingDir}/knowledge --state-file {workingDir}/.mycelium/compile-state.json</signature>
+      <path>/home/ubuntu/scripts/graph-sync.mjs</path>
+    </interface>
+    <interface>
+      <name>Memgraph Bolt Protocol</name>
+      <kind>database protocol</kind>
+      <signature>bolt://localhost:7687 — Cypher queries for MERGE/SET node upserts and CREATE/MERGE edge operations</signature>
+      <path>daemon/memgraph/docker-compose.yml</path>
+    </interface>
+    <interface>
+      <name>Voyage AI Embedding API</name>
+      <kind>external API</kind>
+      <signature>POST https://api.voyageai.com/v1/embeddings — model: voyage-3-large, input_type: document, output_dimension: 1024. Returns embedding vectors for article content.</signature>
+      <path>/home/ubuntu/scripts/lib/voyage-embed.mjs</path>
+    </interface>
+    <interface>
+      <name>S3 wiki backup</name>
+      <kind>storage</kind>
+      <signature>aws s3 sync {workingDir}/knowledge/ s3://futurator-ai-website/knowledge-live/{projectId}/ --delete</signature>
+      <path>functions/api/index.ts</path>
+    </interface>
+    <interface>
+      <name>compile-state.json</name>
+      <kind>state file</kind>
+      <signature>JSON object mapping article paths to content hashes: { "code/src--app.tsx.md": "sha256:abc123...", ... }. Used for incremental sync — only changed articles are re-embedded.</signature>
+      <path>{workingDir}/.mycelium/compile-state.json</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Testing focuses on the shell step definition in generateStoryPipeline() and the integration with graph-sync.mjs. Unit tests verify the command template and timeout. Integration tests require EC2 infrastructure (Memgraph, Voyage AI credentials).</standards>
+    <locations>
+      <location>functions/api/index.ts</location>
+      <location>/home/ubuntu/scripts/graph-sync.mjs</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Create wiki articles with known content, set compile-state.json with old hashes for some articles, run graph-sync.mjs, and verify it detects the changed articles. Verify unchanged articles are skipped.</idea>
+      <idea ac="2">Run graph-sync.mjs with changed articles. Query Memgraph to verify nodes exist with correct properties (nodeId, type, phase, status, tags) and that embedding vectors are 1024-dimensional.</idea>
+      <idea ac="3">Create articles with [[wikilinks]] in Dependencies and Dependents sections. Run graph-sync.mjs. Query Memgraph for edges and verify correct edge types (DEPENDS_ON, DERIVED_FROM, etc.) based on section placement.</idea>
+      <idea ac="4">Run graph-sync.mjs successfully. Verify compile-state.json has updated hashes for all processed articles. Run again with no changes and verify no articles are re-embedded (incremental sync works).</idea>
+      <idea ac="5">After graph-sync.mjs completes, verify aws s3 sync uploads the knowledge/ directory to s3://futurator-ai-website/knowledge-live/{projectId}/. Verify deleted articles are removed from S3 (--delete flag).</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

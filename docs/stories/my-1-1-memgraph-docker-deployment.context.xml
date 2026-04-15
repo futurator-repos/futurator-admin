@@ -1,0 +1,199 @@
+<![CDATA[<story-context id="my-1-1-memgraph-docker-deployment" v="1.0">
+  <metadata>
+    <epicId>MY-1</epicId>
+    <storyId>1</storyId>
+    <title>Memgraph Docker Deployment on EC2</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-1-1-memgraph-docker-deployment.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>Memgraph running as a Docker container on the existing EC2 instance with persistent storage and auto-restart</iWant>
+    <soThat>I have a graph database with native vector index support available for the Mycelium knowledge graph</soThat>
+    <tasks>
+      <task id="1" ac="1">Install Docker and docker-compose on EC2
+        <subtask>SSH into EC2 via SSM or connect via daemon</subtask>
+        <subtask>Install Docker Engine for Ubuntu ARM64 (apt-get install docker-ce docker-ce-cli containerd.io)</subtask>
+        <subtask>Install docker-compose plugin (apt-get install docker-compose-plugin)</subtask>
+        <subtask>Add ubuntu user to docker group (usermod -aG docker ubuntu)</subtask>
+        <subtask>Enable Docker service on boot (systemctl enable docker)</subtask>
+        <subtask>Verify with docker --version and docker compose version</subtask>
+      </task>
+      <task id="2" ac="2,3,4,5,6,8">Create docker-compose.yml for Memgraph
+        <subtask>Create /home/ubuntu/memgraph/docker-compose.yml</subtask>
+        <subtask>Configure ports: 7687:7687 (Bolt), 7444:7444 (monitoring)</subtask>
+        <subtask>Configure volume: memgraph-data:/var/lib/memgraph</subtask>
+        <subtask>Set command flags: --memory-limit=512 --storage-parallel-schema-recovery=true --log-level=WARNING</subtask>
+        <subtask>Set container resource limit: memory 600M</subtask>
+        <subtask>Set restart policy: unless-stopped</subtask>
+        <subtask>Use image memgraph/memgraph:latest (ARM64 support)</subtask>
+      </task>
+      <task id="3" ac="2,7">Start Memgraph and verify
+        <subtask>Run docker compose up -d from /home/ubuntu/memgraph/</subtask>
+        <subtask>Verify container running: docker ps | grep memgraph</subtask>
+        <subtask>Check logs: docker logs futurator-memgraph</subtask>
+        <subtask>Verify port 7687 listening: ss -tlnp | grep 7687</subtask>
+      </task>
+      <task id="4" ac="7">Create connection test script
+        <subtask>Create /home/ubuntu/scripts/test-memgraph.mjs</subtask>
+        <subtask>Install neo4j-driver package in scripts directory</subtask>
+        <subtask>Script connects to bolt://localhost:7687, runs RETURN 1 AS test</subtask>
+        <subtask>Script reports connection status, Memgraph version, memory usage</subtask>
+        <subtask>Run test and confirm success</subtask>
+      </task>
+      <task id="5" ac="4,5">Verify persistence and restart behavior
+        <subtask>Insert test node via Cypher: CREATE (n:Test {name: 'persistence-check'})</subtask>
+        <subtask>Restart container: docker compose restart</subtask>
+        <subtask>Query test node to confirm persistence</subtask>
+        <subtask>Clean up test node</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">Docker and docker-compose are installed on EC2 instance i-0826d68c316ae97dd (Ubuntu 24.04 ARM64)</criterion>
+    <criterion id="2">Memgraph container is running and accessible on port 7687 (Bolt protocol)</criterion>
+    <criterion id="3">Memgraph is configured with --memory-limit=512 and --log-level=WARNING</criterion>
+    <criterion id="4">Container restart policy is unless-stopped (survives EC2 reboots)</criterion>
+    <criterion id="5">Data is persisted via Docker volume memgraph-data at /var/lib/memgraph</criterion>
+    <criterion id="6">Container memory is limited to 600MB via Docker deploy resources</criterion>
+    <criterion id="7">A connection test script validates Bolt connectivity and basic Cypher query execution</criterion>
+    <criterion id="8">Monitoring port 7444 is exposed for optional observability</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>8.2 Memgraph Deployment</section>
+        <snippet>Complete docker-compose.yml specification for Memgraph including ports (7687, 7444), volume (memgraph-data), memory limits (512MB internal, 600M container), restart policy (unless-stopped), and command flags.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>8.1 EC2 Instance</section>
+        <snippet>Instance i-0826d68c316ae97dd, t4g.small (2 vCPU, 2GB RAM), Ubuntu 24.04 ARM64, Elastic IP 54.86.226.233, IAM Role develope-it-ec2-ssm. Memory budget: OS ~200MB + daemon ~100MB + Memgraph ~512MB + Claude CLI ~1000MB = ~1.8GB peak.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>Node constraint on nodeId, vector index knowledge_index on :Node(embedding) with 1024 dimensions, cosine metric, f16 scalar. 8 edge types with weights. Schema to be initialized in Story MY-1.2.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>9 Decisions Log</section>
+        <snippet>D2: Memgraph chosen over DynamoDB-only adjacency for semantic + structural search combined. D4: Docker on same EC2 for zero additional cost and single-instance simplicity.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/develope-it-ec2-plan.md</path>
+        <title>Develope-IT EC2 Daemon Integration Plan</title>
+        <section>Context</section>
+        <snippet>EC2 daemon architecture: daemon polls DynamoDB for jobs, spawns claude -p subprocesses. EC2 flow: Lambda starts instance via SSM, daemon runs, stops when complete.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/futurator-agent-orchestrator-architecture.md</path>
+        <title>Futurator Agent Orchestrator Architecture</title>
+        <section>System Architecture</section>
+        <snippet>System architecture for the agent orchestrator. Daemon runs on EC2, polls DynamoDB for jobs, spawns Claude CLI sessions with streaming output back to browser UI.</snippet>
+      </doc>
+      <doc>
+        <path>docs/epics-mycelium-devs.md</path>
+        <title>Mycelium Devs Epic Breakdown</title>
+        <section>Epic 1 / Story 1.1</section>
+        <snippet>Story 1.1 acceptance criteria and technical notes for Memgraph Docker deployment. Foundation story — no prerequisites. Subsequent stories 1.2-1.6 depend on this.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executeShellStep, executeStep</symbol>
+        <lines>430-710</lines>
+        <reason>The agent daemon runs on the same EC2 instance where Memgraph will be deployed. Understanding its resource usage (Node.js ~100MB) is critical for memory budgeting. Future stories will modify this file to add compilation steps.</reason>
+      </file>
+      <file>
+        <path>daemon/package.json</path>
+        <kind>manifest</kind>
+        <symbol>dependencies</symbol>
+        <reason>Current daemon dependencies: @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb. Future stories will add neo4j-driver here or in a separate scripts package.json.</reason>
+      </file>
+      <file>
+        <path>daemon/.env.example</path>
+        <kind>config</kind>
+        <symbol>environment variables</symbol>
+        <reason>Current env vars: AWS_REGION, AGENT_JOBS_TABLE, AGENT_EVENTS_TABLE, POLL_INTERVAL_MS. No Docker or Memgraph vars yet — this story doesn't modify the daemon, but future stories will add MEMGRAPH_URI.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineStep, PipelineStepType, PipelineDefinition</symbol>
+        <lines>1-58</lines>
+        <reason>Pipeline step types that will be extended in Epic 2 to support compilation steps. This story doesn't modify them, but understanding the step model is important context.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="daemon-scripts">
+        <package name="neo4j-driver" version="latest" note="Required for Memgraph Bolt connectivity. Memgraph is Neo4j Bolt-compatible. Will be installed in /home/ubuntu/scripts/package.json (new)." />
+      </ecosystem>
+      <ecosystem name="ec2-infrastructure">
+        <package name="docker-ce" note="Docker Engine for Ubuntu ARM64. Install via apt from Docker official repo." />
+        <package name="docker-compose-plugin" note="Docker Compose V2 plugin. Install via apt." />
+        <package name="memgraph/memgraph:latest" note="Memgraph Docker image. Supports linux/arm64. In-memory graph database with native vector index support." />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="infrastructure">EC2 instance is t4g.small with 2GB RAM. Memgraph memory limit MUST be set to 512MB (--memory-limit=512) and container limit to 600M. Total system peak ~1.8GB. Monitor for OOM — may require upgrade to t4g.medium.</constraint>
+    <constraint type="architecture">Memgraph is NOT the source of truth — wiki markdown files are. Memgraph is a disposable query accelerator rebuilt from wiki content. Data loss in Memgraph is recoverable but costly (re-embedding).</constraint>
+    <constraint type="platform">EC2 runs Ubuntu 24.04 ARM64 (aarch64). All Docker images must support ARM64 architecture. Memgraph official image supports this.</constraint>
+    <constraint type="networking">Memgraph ports (7687, 7444) should only be accessible from localhost (EC2 internal). Do NOT expose to public internet. The daemon connects locally.</constraint>
+    <constraint type="persistence">Docker volume memgraph-data must persist across container restarts. Use named volume, not bind mount, for Docker-managed lifecycle.</constraint>
+    <constraint type="operations">Container must use restart: unless-stopped so it survives EC2 reboots but can be manually stopped for maintenance.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>Memgraph Bolt Protocol</name>
+      <kind>database protocol</kind>
+      <signature>bolt://localhost:7687 — Neo4j-compatible Bolt protocol for Cypher queries</signature>
+      <path>/home/ubuntu/memgraph/docker-compose.yml</path>
+    </interface>
+    <interface>
+      <name>Memgraph Monitoring</name>
+      <kind>monitoring endpoint</kind>
+      <signature>http://localhost:7444 — Memgraph monitoring and metrics</signature>
+      <path>/home/ubuntu/memgraph/docker-compose.yml</path>
+    </interface>
+    <interface>
+      <name>neo4j-driver connection</name>
+      <kind>library API</kind>
+      <signature>neo4j.driver('bolt://localhost:7687') → session.run(cypher) → result.records</signature>
+      <path>/home/ubuntu/scripts/test-memgraph.mjs</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>This story runs entirely on EC2 infrastructure, not in the local project. Testing is manual/scripted verification: Docker installation check, container health check, Bolt connectivity test, persistence test (insert → restart → query), and memory usage monitoring. The test-memgraph.mjs script serves as both the verification tool and the pattern for future Memgraph interactions.</standards>
+    <locations>
+      <location>/home/ubuntu/scripts/test-memgraph.mjs</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Verify Docker and docker-compose are installed: run docker --version and docker compose version, check exit codes</idea>
+      <idea ac="2">Verify Memgraph container is running: docker ps shows futurator-memgraph, port 7687 is listening (ss -tlnp)</idea>
+      <idea ac="3">Verify Memgraph config: docker inspect futurator-memgraph shows correct command flags (--memory-limit=512, --log-level=WARNING)</idea>
+      <idea ac="4,5">Persistence test: create node → restart container → query node → confirm it exists → delete test node</idea>
+      <idea ac="6">Memory limit test: docker stats futurator-memgraph shows memory limit at 600M</idea>
+      <idea ac="7">Connection test: run test-memgraph.mjs, verify it connects and executes RETURN 1 AS test successfully</idea>
+      <idea ac="8">Monitoring port test: curl http://localhost:7444 returns a response (or verify port is listening)</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

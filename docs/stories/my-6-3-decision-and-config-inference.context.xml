@@ -1,0 +1,188 @@
+<![CDATA[<story-context id="my-6-3-decision-and-config-inference" v="1.0">
+  <metadata>
+    <epicId>MY-6</epicId>
+    <storyId>3</storyId>
+    <title>Decision and Config Inference</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-6-3-decision-and-config-inference.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>architectural decisions automatically inferred from configuration files and package manifests</iWant>
+    <soThat>the knowledge graph captures the "why" behind technology choices even for existing projects</soThat>
+    <tasks>
+      <task id="1" ac="1">Implement config file reader
+        <subtask>Create /home/ubuntu/scripts/bootstrap-decisions.mjs — decision inference orchestrator</subtask>
+        <subtask>Discover and read config/manifest files: package.json, tsconfig.json, Dockerfile, docker-compose.yml, .env.example, README.md, .eslintrc.*, .prettierrc.*, jest.config.*, vite.config.*, next.config.*, tailwind.config.*, webpack.config.*</subtask>
+        <subtask>Parse package.json dependencies and devDependencies — classify into categories (framework, state management, routing, styling, testing, build tools, utilities)</subtask>
+        <subtask>Parse tsconfig.json for compiler options that reflect architectural choices (strict mode, path aliases, target, module resolution)</subtask>
+        <subtask>Parse Docker/compose files for deployment and infrastructure decisions</subtask>
+      </task>
+      <task id="2" ac="2,3,6">Implement decision inference agent step
+        <subtask>Create agent prompt for the Decision Inferrer role — analyzes config data and produces decision articles</subtask>
+        <subtask>Infer framework decision (e.g., React, Next.js, Vue, Express) from dependencies and config files</subtask>
+        <subtask>Infer database decision from dependencies (e.g., prisma, mongoose, pg, dynamodb-toolbox) and connection configs</subtask>
+        <subtask>Infer auth approach from dependencies and code patterns (e.g., jwt, passport, next-auth, cognito)</subtask>
+        <subtask>Infer styling decision from dependencies and configs (e.g., Tailwind, styled-components, CSS modules, SCSS)</subtask>
+        <subtask>Infer build/bundler decision from configs and scripts (e.g., Vite, webpack, esbuild, Next.js built-in)</subtask>
+        <subtask>Infer testing strategy from dependencies and configs (e.g., Jest, Vitest, Playwright, Cypress)</subtask>
+        <subtask>Infer deployment strategy from Docker, CI/CD configs, and package.json scripts</subtask>
+        <subtask>Set maturity between 0.3 (weak inference) and 0.5 (strong evidence) based on number of config signals</subtask>
+      </task>
+      <task id="3" ac="2,3,4">Generate decision articles
+        <subtask>Write decision articles to knowledge/decisions/ using naming convention {category}-{choice}.md (e.g., framework-nextjs.md, styling-tailwind.md)</subtask>
+        <subtask>Each article follows standard wiki format with frontmatter: type: decision, phase: solutioning, status: active</subtask>
+        <subtask>Include ## Context section with inferred rationale from usage patterns</subtask>
+        <subtask>Include ## Chosen Option with the detected technology and version</subtask>
+        <subtask>Include ## Evidence listing specific files and config entries that demonstrate the choice</subtask>
+        <subtask>Include empty ## Alternatives Considered section for future user refinement</subtask>
+        <subtask>Add INFORMS edges via [[wikilinks]] in an ## Informs section pointing to code articles that use the decision</subtask>
+      </task>
+      <task id="4" ac="5,7">Generate architecture overview
+        <subtask>Create knowledge/solutioning/architecture-overview.md — a synthesized summary of all inferred decisions, tech stack diagram, and project structure overview</subtask>
+        <subtask>Include [[wikilinks]] to each decision article and key code articles</subtask>
+        <subtask>Set frontmatter: type: architecture, phase: solutioning, status: active, maturity: 0.4</subtask>
+        <subtask>Update knowledge/index.md with all new decision articles and the architecture overview</subtask>
+        <subtask>Append decision inference record to knowledge/log.md</subtask>
+      </task>
+      <task id="5" ac="1">Pipeline integration
+        <subtask>Register as stage 3 of the brownfield-bootstrap pipeline (runs after scan, can run in parallel with deps stage)</subtask>
+        <subtask>Emit pipeline events: { type: progress, stage: decisions, decisionsInferred: X }</subtask>
+        <subtask>Log summary: decisions inferred, config files analyzed, maturity distribution</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">The decision inference agent reads package.json, tsconfig.json, Dockerfile, docker-compose.yml, .env.example, README.md, and other config/manifest files in the project root</criterion>
+    <criterion id="2">Decision articles are created in knowledge/decisions/ for major technology choices: framework, database, auth provider, styling approach, bundler, testing framework, deployment strategy, etc.</criterion>
+    <criterion id="3">Each decision article includes: Context (inferred from usage patterns), Chosen Option (the technology/approach detected), Evidence (which files and configs demonstrate the choice), and Alternatives Considered (left empty for user refinement)</criterion>
+    <criterion id="4">Decision articles have INFORMS edges (via [[wikilinks]]) to the code articles that use/implement them</criterion>
+    <criterion id="5">A synthesized architecture overview article is created at knowledge/solutioning/architecture-overview.md summarizing all inferred decisions</criterion>
+    <criterion id="6">Decision articles are assigned lower maturity (0.3-0.5) since they are reverse-engineered, not explicitly documented</criterion>
+    <criterion id="7">knowledge/index.md is updated to include all new decision and solutioning articles</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Article types by phase: Solutioning phase includes architecture, tech-spec, api-spec, data-model, adr, ux-spec created by Architect/UX agents. Decision articles use type: decision, phase: solutioning. Standard frontmatter format with title, type, phase, status, maturity, created, updated, tags.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>INFORMS edge type (weight 0.3): A provides context for B. Used for decision-to-code relationships. ## Informs section in wiki articles maps to outgoing INFORMS edges. Decision articles INFORM code articles that implement them.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>Phase 9 — Bootstrap Pipeline (Brownfield)</section>
+        <snippet>Decision inference: package.json, configs to decision articles. Third stage of the pipeline. Can run in parallel with dependency extraction since they write to different wiki directories.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step</section>
+        <snippet>Step B Knowledge Compiler extracts architectural decisions from WORK_SUMMARY: library choices, pattern selections, API design decisions. Creates/updates articles in knowledge/decisions/. Links to the code articles that implement them.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, executeStep, runAgent</symbol>
+        <lines>526-715</lines>
+        <reason>The bootstrap-decisions step runs as stage 3 of the brownfield-bootstrap pipeline. Can use an agent step with the Decision Inferrer prompt. Understanding prompt injection via template substitution ({{VAR}}) for passing config file contents to the agent.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineStep, AgentConfig</symbol>
+        <lines>1-58</lines>
+        <reason>Agent step configuration for the Decision Inferrer. Needs allowedTools: Read,Glob,Grep,Write,Edit. Model selection for inference quality (may benefit from opus-level reasoning).</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/project-registry.ts</path>
+        <kind>types</kind>
+        <symbol>ProjectRegistry</symbol>
+        <lines>1-31</lines>
+        <reason>Project registry provides the ec2Path to locate config files in the project root. Decision articles link back to the project context.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="story-dependencies">
+        <package name="Story 6.1 (Codebase Scan Agent)" note="Must complete first — provides the code articles that decision articles link to via INFORMS edges." />
+        <package name="Story 1.3 (Wiki Directory Structure)" note="knowledge/decisions/ and knowledge/solutioning/ directories must exist." />
+        <package name="Can run in parallel with Story 6.2" note="Both read from scan output (Story 6.1) but write to different wiki directories." />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="maturity">Inferred decisions use lower maturity: 0.3 for weak inference (single config signal), 0.5 for strong evidence (multiple config files and widespread usage). This signals to users and agents that these decisions should be reviewed and refined.</constraint>
+    <constraint type="architecture">Decision articles use INFORMS edges (not DEPENDS_ON) to link to code articles. INFORMS has weight 0.3 reflecting advisory rather than structural relationships. The ## Informs section maps to outgoing INFORMS edges per architecture doc section 3.2.</constraint>
+    <constraint type="parallelism">This story can run in parallel with Story 6.2 since both read from Story 6.1 output but write to different wiki directories (decisions/ and solutioning/ vs. code/).</constraint>
+    <constraint type="completeness">Alternatives Considered section is intentionally left empty. These are reverse-engineered decisions — the original alternatives were not documented. Users refine later.</constraint>
+    <constraint type="accuracy">Decision inference must be evidence-based. Every detected technology choice must cite specific files and config entries in the Evidence section. Speculative inferences without file evidence should not be created.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>Config File Discovery</name>
+      <kind>file system</kind>
+      <signature>Glob patterns for project root: package.json, tsconfig.json, Dockerfile, docker-compose.yml, .env.example, README.md, .eslintrc.*, .prettierrc.*, jest.config.*, vite.config.*, next.config.*, tailwind.config.*, webpack.config.*</signature>
+      <path>/home/ubuntu/projects/{name}/</path>
+    </interface>
+    <interface>
+      <name>Decision Article Format</name>
+      <kind>markdown file</kind>
+      <signature>knowledge/decisions/{category}-{choice}.md: frontmatter (type: decision, phase: solutioning, status: active, maturity: 0.3-0.5) + sections (Context, Chosen Option, Evidence, Alternatives Considered, Informs)</signature>
+      <path>/home/ubuntu/projects/{name}/knowledge/decisions/</path>
+    </interface>
+    <interface>
+      <name>Architecture Overview</name>
+      <kind>markdown file</kind>
+      <signature>knowledge/solutioning/architecture-overview.md: frontmatter (type: architecture, phase: solutioning, maturity: 0.4) + synthesized summary of all decisions + [[wikilinks]] to decision and code articles</signature>
+      <path>/home/ubuntu/projects/{name}/knowledge/solutioning/architecture-overview.md</path>
+    </interface>
+    <interface>
+      <name>INFORMS Edge Convention</name>
+      <kind>convention</kind>
+      <signature>[[code/src--app--layout.tsx]] in ## Informs section of a decision article becomes an outgoing INFORMS edge from the decision to the code article node in Memgraph</signature>
+      <path>docs/concepts/mycelium-labs-architecture.md</path>
+    </interface>
+    <interface>
+      <name>Pipeline Events</name>
+      <kind>DynamoDB event</kind>
+      <signature>futurator-agent-events: { eventType: progress, stage: decisions, decisionsInferred: X }</signature>
+      <path>daemon/agent-daemon.mjs</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Testing verifies: (1) config files in the project root are discovered and read, (2) decision articles are created for each major technology choice, (3) each article has all required sections (Context, Chosen Option, Evidence, Alternatives Considered, Informs), (4) INFORMS wikilinks point to valid code articles, (5) architecture overview synthesizes all decisions, (6) maturity scores are between 0.3 and 0.5, (7) index.md is updated. Tests run on EC2 against a bootstrapped project with known tech stack.</standards>
+    <locations>
+      <location>/home/ubuntu/scripts/bootstrap-decisions.mjs</location>
+      <location>/home/ubuntu/projects/{name}/knowledge/decisions/</location>
+      <location>/home/ubuntu/projects/{name}/knowledge/solutioning/architecture-overview.md</location>
+    </locations>
+    <ideas>
+      <idea ac="1">For a project with package.json, tsconfig.json, and Dockerfile: verify all three are read by the decision inference agent. Check log output for config file discovery messages.</idea>
+      <idea ac="2">For a Next.js project: verify decision articles exist for at minimum framework (nextjs), and any detected styling/testing/database choices. Check knowledge/decisions/ directory for expected files.</idea>
+      <idea ac="3">Read a decision article (e.g., framework-nextjs.md): verify ## Context explains usage, ## Chosen Option names the technology and version, ## Evidence lists specific files, ## Alternatives Considered exists (even if empty).</idea>
+      <idea ac="4">Grep decision articles for [[wikilinks]] in ## Informs sections: verify each linked code article exists in knowledge/code/. Count total INFORMS edges created.</idea>
+      <idea ac="5">Read knowledge/solutioning/architecture-overview.md: verify it contains [[wikilinks]] to decision articles, has frontmatter with type: architecture and maturity: 0.4, and summarizes the tech stack.</idea>
+      <idea ac="6">Parse frontmatter of all decision articles: verify maturity values are between 0.3 and 0.5 inclusive. No decision should have maturity above 0.5 (reverse-engineered).</idea>
+      <idea ac="7">Read knowledge/index.md after decision inference: verify all new decision articles and the architecture-overview are listed with correct type and path.</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

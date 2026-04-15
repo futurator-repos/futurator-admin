@@ -1,0 +1,122 @@
+<story-context id="my-5-1-graphrag-search-tool" v="1.0">
+  <metadata>
+    <epicId>MY-5</epicId>
+    <storyId>1</storyId>
+    <title>GraphRAG Search Tool (graph-search.mjs)</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-5-1-graphrag-search-tool.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>a command-line tool that performs combined vector search + graph traversal in Memgraph</iWant>
+    <soThat>agents can find conceptually related nodes even without keyword overlap, plus their structural neighbors</soThat>
+    <tasks>
+      <task id="1" title="Create graph-search.mjs module scaffold" ac="7">
+        <subtask id="1.1">Create /home/ubuntu/scripts/graph-search.mjs with both CLI entry point and exported graphSearch(projectId, queryText, opts) function</subtask>
+        <subtask id="1.2">Parse CLI flags (--project, --query, --top-k, --hops, --min-similarity) using process.argv or a lightweight arg parser</subtask>
+        <subtask id="1.3">Add neo4j-driver import for Memgraph connection (reuse pattern from test-memgraph.mjs)</subtask>
+        <subtask id="1.4">Add lib/voyage-embed.mjs import for query embedding</subtask>
+      </task>
+      <task id="2" title="Implement query embedding step" ac="2">
+        <subtask id="2.1">Call embedText(queryText, 'query') from lib/voyage-embed.mjs to get the 1024-dim query vector</subtask>
+        <subtask id="2.2">Handle embedding errors with a clear error message and non-zero exit code</subtask>
+        <subtask id="2.3">Log embedding latency to stdout for performance tracking</subtask>
+      </task>
+      <task id="3" title="Implement combined GraphRAG Cypher query" ac="3,4,5">
+        <subtask id="3.1">Open a Memgraph session via neo4j-driver (bolt://localhost:7687)</subtask>
+        <subtask id="3.2">Execute the combined Cypher query: vector_search.search() for top-K similar nodes, then OPTIONAL MATCH traversal N hops</subtask>
+        <subtask id="3.3">Map query results into the output JSON schema: {nodeId, type, phase, title, maturity, similarity, relationships[]}</subtask>
+        <subtask id="3.4">Close the Memgraph session after query completes</subtask>
+      </task>
+      <task id="4" title="Implement CLI output and error handling" ac="1,6">
+        <subtask id="4.1">Print results as a JSON array to stdout (for daemon shell step capture)</subtask>
+        <subtask id="4.2">Print performance timing (embed latency + query latency) to stderr</subtask>
+        <subtask id="4.3">Handle no-results case gracefully (return empty array, not an error)</subtask>
+        <subtask id="4.4">Validate required flags (--project, --query) and print usage on missing args</subtask>
+        <subtask id="4.5">Add a --verbose flag for debug output (query plan, raw records)</subtask>
+      </task>
+      <task id="5" title="Verify end-to-end with test queries" ac="3,5,6">
+        <subtask id="5.1">Run graph-search.mjs against a Memgraph populated by graph-sync.mjs (Story 1.5)</subtask>
+        <subtask id="5.2">Verify similarity filtering removes results below threshold</subtask>
+        <subtask id="5.3">Verify graph traversal returns related nodes beyond direct vector matches</subtask>
+        <subtask id="5.4">Measure execution time and confirm under 3 seconds</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">graph-search.mjs accepts CLI flags: --project, --query, --top-k (default 10), --hops (default 2), --min-similarity (default 0.6)</criterion>
+    <criterion id="2">The query text is embedded via Voyage AI using input type 'query' (asymmetric search against document-embedded articles)</criterion>
+    <criterion id="3">A combined Cypher query runs: vector_search.search() for top-K similar nodes, then traverses the graph N hops from each match</criterion>
+    <criterion id="4">Results are returned as a JSON array of {nodeId, type, phase, title, maturity, similarity, relationships[]}</criterion>
+    <criterion id="5">Results are filtered by minSimilarity threshold (default 0.6)</criterion>
+    <criterion id="6">The tool executes in under 3 seconds for typical queries against a populated Memgraph</criterion>
+    <criterion id="7">The module is both a CLI tool (callable via node graph-search.mjs ...) and an importable ES module (exports graphSearch())</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc path="docs/concepts/mycelium-labs-architecture.md" sections="5.1 The Four-Layer Search Cascade, 5.2 GraphRAG Query Patterns, 5.3 Search Tool for Agents">Architecture document with GraphRAG query patterns and search tool spec</doc>
+      <doc path="docs/stories/my-5-1-graphrag-search-tool.md">Source story file with full dev notes</doc>
+    </docs>
+    <code>
+      <file path="daemon/agent-daemon.mjs" relevance="Pipeline executor; shows how shell steps capture output via captureAs variable; pattern for spawning CLI tools from daemon</file>
+      <file path="daemon/scripts/test-memgraph.mjs" relevance="Reference implementation for Memgraph Bolt connection via neo4j-driver; session open/close pattern; CLI arg parsing</file>
+      <file path="functions/shared/types/agent-orchestrator.ts" relevance="PipelineStep type definition showing shell step interface (command, captureAs, timeout); AgentJob schema</file>
+    </code>
+    <dependencies>
+      <package name="neo4j-driver" version="^5.27.0" purpose="Bolt protocol driver for Memgraph (Neo4j-compatible); used for Cypher queries including vector_search.search()" />
+      <package name="node-fetch" version="latest" purpose="HTTP client for Voyage AI embedding API calls (or native fetch if Node 18+)" />
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="performance">Tool must execute in under 3 seconds for typical queries against a populated Memgraph instance</constraint>
+    <constraint type="api">Voyage AI embedding uses model 'voyage-3-large', 1024-dim vectors, input_type 'query' for asymmetric search</constraint>
+    <constraint type="compatibility">Module must work as both CLI (node graph-search.mjs --args) and ES module import (export graphSearch())</constraint>
+    <constraint type="infrastructure">Memgraph runs on bolt://localhost:7687 on the EC2 instance; vector index 'knowledge_index' must already exist (Story 1.2)</constraint>
+    <constraint type="output">Results go to stdout as JSON array; timing/debug info goes to stderr (so daemon shell step captureAs gets clean JSON)</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface type="function-export">
+      <signature>async function graphSearch(projectId: string, queryText: string, opts?: { topK?: number, hops?: number, minSimilarity?: number }): Promise&lt;SearchResult[]&gt;</signature>
+      <returnType>Array of {nodeId, type, phase, title, maturity, similarity, relationships: Array of {nodeId, type, title, relationship}}</returnType>
+    </interface>
+    <interface type="cli">
+      <usage>node graph-search.mjs --project &lt;id&gt; --query &lt;text&gt; [--top-k 10] [--hops 2] [--min-similarity 0.6] [--verbose]</usage>
+      <stdout>JSON array of search results</stdout>
+      <stderr>Performance timing, debug output</stderr>
+    </interface>
+    <interface type="cypher-query">
+      <description>Combined vector search + graph traversal Cypher query</description>
+      <query>CALL vector_search.search('knowledge_index', $topK, $queryVector) YIELD node, similarity WHERE similarity > $minSimilarity AND node.projectId = $projectId OPTIONAL MATCH (node)-[r*1..N]-(related) WHERE related.status IN ['active', 'flagged'] RETURN node, similarity, collect(DISTINCT {nodeId, type, title, relationship}) AS related ORDER BY similarity DESC</query>
+    </interface>
+    <interface type="upstream-dependency">
+      <description>Depends on lib/voyage-embed.mjs from Story 1.4 for embedText(text, inputType) function</description>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>
+      <standard>Unit tests for CLI argument parsing and validation</standard>
+      <standard>Integration tests require a running Memgraph instance with populated vector index</standard>
+      <standard>Performance assertions: total execution under 3 seconds</standard>
+    </standards>
+    <locations>
+      <location>daemon/scripts/__tests__/graph-search.test.mjs</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Test CLI flag parsing: verify --project and --query are required, verify defaults for --top-k (10), --hops (2), --min-similarity (0.6)</idea>
+      <idea ac="2">Mock Voyage AI API call; verify input_type is 'query' (not 'document'); verify 1024-dim vector returned</idea>
+      <idea ac="3">With a test Memgraph populated with known nodes, verify vector_search.search returns semantically similar nodes and OPTIONAL MATCH traversal returns structural neighbors</idea>
+      <idea ac="4">Verify output JSON schema matches {nodeId, type, phase, title, maturity, similarity, relationships[]} for each result</idea>
+      <idea ac="5">Insert nodes with known similarity scores; query with minSimilarity=0.8 and verify low-similarity nodes are excluded</idea>
+      <idea ac="6">Time a typical query and assert it completes in under 3000ms</idea>
+      <idea ac="7">Import graphSearch from the module and call it programmatically; verify it returns the same results as CLI invocation</idea>
+    </ideas>
+  </tests>
+</story-context>

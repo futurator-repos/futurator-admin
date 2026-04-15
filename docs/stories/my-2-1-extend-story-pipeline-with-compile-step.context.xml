@@ -1,0 +1,188 @@
+<![CDATA[<story-context id="my-2-1-extend-story-pipeline-with-compile-step" v="1.0">
+  <metadata>
+    <epicId>MY-2</epicId>
+    <storyId>1</storyId>
+    <title>Extend Story Pipeline with COMPILE Step</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-2-1-extend-story-pipeline-with-compile-step.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>the existing story pipeline extended to include a COMPILE step after the REVIEWER step</iWant>
+    <soThat>every completed story automatically triggers knowledge compilation</soThat>
+    <tasks>
+      <task id="1" ac="1,2">Add COMPILE step definitions to generateStoryPipeline()
+        <subtask>Open functions/api/index.ts and locate generateStoryPipeline()</subtask>
+        <subtask>Append compile-diff shell step after the reviewer step — runs git diff --name-status HEAD~1 HEAD with fallback to find</subtask>
+        <subtask>Append compile-knowledge agent step with agentId: 'COMPILER', prompt template referencing {{DIFF_MANIFEST}} and {{WORK_SUMMARY}}</subtask>
+        <subtask>Append compile-sync shell step calling node /home/ubuntu/scripts/graph-sync.mjs</subtask>
+        <subtask>Wire captureAs on each step so outputs chain correctly</subtask>
+      </task>
+      <task id="2" ac="1,3">Add COMPILER agent configuration
+        <subtask>Add COMPILER agent entry to the agents record in the pipeline definition</subtask>
+        <subtask>Configure allowed tools: Read, Write, Edit, Glob, Grep</subtask>
+        <subtask>Set appropriate model and effort parameters for the compiler agent</subtask>
+      </task>
+      <task id="3" ac="4">Implement non-blocking error handling for COMPILE phase
+        <subtask>Wrap the three compile steps in a try/catch boundary in the daemon's executePipeline() loop</subtask>
+        <subtask>On compile step failure, log the error and emit a warning event but allow the pipeline to complete</subtask>
+        <subtask>Ensure onFail.action for compile steps is set to 'fail' at step level but the pipeline treats the COMPILE phase as non-blocking</subtask>
+      </task>
+      <task id="4" ac="6">Add compilationStatus field to workflow types
+        <subtask>Extend EpicStory interface in functions/shared/types/epic-workflow.ts with compilationStatus?: 'success' | 'failed' | 'skipped'</subtask>
+        <subtask>Update the story status update logic to set compilationStatus based on compile step outcomes</subtask>
+        <subtask>Mirror the type addition in src/types/epic-workflow.ts for frontend awareness</subtask>
+      </task>
+      <task id="5" ac="3">Emit pipeline status events for compile sub-steps
+        <subtask>Ensure each compile step emits start/complete/failed events to futurator-agent-events</subtask>
+        <subtask>Include step ID, timing, and article counts in event payloads</subtask>
+        <subtask>Verify events appear in the existing event streaming infrastructure</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">The generateStoryPipeline() function appends three new steps after the REVIEWER step: compile-diff (shell), compile-knowledge (agent), compile-sync (shell)</criterion>
+    <criterion id="2">The COMPILE phase begins only after the REVIEWER step passes</criterion>
+    <criterion id="3">Pipeline status events are emitted for each compilation sub-step (compile-diff, compile-knowledge, compile-sync)</criterion>
+    <criterion id="4">Compilation failure does NOT fail the overall story pipeline — the story is still marked as completed</criterion>
+    <criterion id="5">Each compilation sub-step captures output for the next step via the captureAs pattern (e.g., DIFF_MANIFEST from diff-extract feeds into compile-knowledge)</criterion>
+    <criterion id="6">A compilationStatus field is added to story/epic workflow tracking with values: 'success' | 'failed' | 'skipped'</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step (Daemon Integration)</section>
+        <snippet>Extended pipeline: DEV -> build-check -> server-check -> REVIEWER -> COMPILE -> (done). The COMPILE step is a hybrid shell + agent sequence: Step A (diff extraction, shell, ~2s, $0), Step B (knowledge compilation, agent, ~$0.03-0.08), Step C (embed and sync, shell, ~3s, ~$0.001). Allowed tools for COMPILER: Read,Write,Edit,Glob,Grep.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.1 Compilation Triggers</section>
+        <snippet>Implementation phase trigger: after STORY completion. Compile steps: 1. Diff files (shell, $0), 2. Create/update code articles, 3. Extract decisions from WORK_SUMMARY, 4. Update dependency map, 5. Embed new/changed nodes, 6. Sync to Memgraph.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Every knowledge artifact is a markdown file following the Karpathy wiki pattern. Article format: YAML frontmatter (title, type, phase, status, maturity, dates, tags) + sections (Purpose, Key Exports, Dependencies, Dependents, Signals, Missing Signals, Notes). File naming: knowledge/{phase}/{slug}.md with -- for path separators.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/labs-testing-pipeline-plan.md</path>
+        <title>Labs Testing Pipeline Plan</title>
+        <section>1.3 Pipeline Definition Changes</section>
+        <snippet>Existing generateStoryPipeline() structure. The pipeline currently has DEV, build-check, server-check, and REVIEWER steps. This story extends it with compilation steps.</snippet>
+      </doc>
+      <doc>
+        <path>docs/epics-mycelium-devs.md</path>
+        <title>Mycelium Devs Epic Breakdown</title>
+        <section>Epic 2 / Story 2.1</section>
+        <snippet>Story 2.1 epic-level acceptance criteria for extending the story pipeline with a COMPILE step.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>functions/api/index.ts</path>
+        <kind>api</kind>
+        <symbol>generateStoryPipeline</symbol>
+        <lines>486-607</lines>
+        <reason>The function to extend. Currently returns a PipelineDefinition with agents DEV and REVIEWER and steps: dev, review, retry. Must be extended to add COMPILER agent and three compile steps (compile-diff, compile-knowledge, compile-sync) after the review step.</reason>
+      </file>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, executeStep, executeShellStep</symbol>
+        <lines>430-731</lines>
+        <reason>Pipeline executor that runs both agent and shell steps. The captureAs pattern (line ~470: variables[step.captureAs] = stdout) is already implemented for shell steps. The executePipeline() function's step loop (line 666-714) is where non-blocking error handling for the COMPILE phase would be implemented.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineStep, PipelineStepType, AgentConfig, PipelineDefinition</symbol>
+        <lines>1-107</lines>
+        <reason>Type definitions for pipeline steps. PipelineStep supports both agent and shell stepTypes. AgentConfig defines agent name, tools, and model. No new types needed — the existing types fully support the compile steps. captureAs, command, timeout already defined.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/epic-workflow.ts</path>
+        <kind>types</kind>
+        <symbol>EpicStory, StoryStatus</symbol>
+        <lines>38-50</lines>
+        <reason>EpicStory interface must be extended with compilationStatus?: 'success' | 'failed' | 'skipped'. Currently has status, jobId, dependsOn, wave, hasBrowserTests, criteria, visualTests.</reason>
+      </file>
+      <file>
+        <path>src/types/epic-workflow.ts</path>
+        <kind>types</kind>
+        <symbol>EpicStory</symbol>
+        <lines>38-50</lines>
+        <reason>Frontend mirror of the EpicStory interface. Must be updated in sync with the backend type to add compilationStatus field.</reason>
+      </file>
+      <file>
+        <path>functions/shared/repositories/epic-workflow-repository.ts</path>
+        <kind>repository</kind>
+        <symbol>updateEpicFields</symbol>
+        <lines>26-54</lines>
+        <reason>DynamoDB persistence for EpicWorkflow records. The updateEpicFields function handles partial updates. compilationStatus will be persisted through this function when updating story status after compilation.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="existing">
+        <package name="@aws-sdk/client-dynamodb" note="Already installed. Used for pipeline events emission." />
+        <package name="@aws-sdk/lib-dynamodb" note="Already installed. Used for job state updates." />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="architecture">Compilation is non-blocking. A compilation failure must never prevent a story from being marked as completed. Knowledge compilation is an enhancement layer, not a gate.</constraint>
+    <constraint type="cost">The COMPILE phase adds ~$0.03-0.08 per story (agent step) + ~$0.001 (embedding). The shell steps are free. Total additional cost per story: approximately $0.03-0.08.</constraint>
+    <constraint type="ordering">The three compile steps must execute sequentially: compile-diff produces DIFF_MANIFEST, which feeds compile-knowledge, which produces articles that compile-sync embeds. The captureAs chaining must be correct.</constraint>
+    <constraint type="types">The EpicStory type change in functions/shared/types/epic-workflow.ts MUST be mirrored in src/types/epic-workflow.ts to keep frontend and backend types in sync.</constraint>
+    <constraint type="infrastructure">Compile steps depend on infrastructure from Epic 1 (wiki directory, Memgraph, graph-sync.mjs). If Epic 1 is not yet deployed, compilation should gracefully skip (compilationStatus: 'skipped').</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>generateStoryPipeline()</name>
+      <kind>function</kind>
+      <signature>function generateStoryPipeline(story: EpicStory, epicTitle: string, workingDir: string, opts: { devModel?: string; devEffort?: string; reviewerModel?: string; reviewerEffort?: string }): PipelineDefinition</signature>
+      <path>functions/api/index.ts</path>
+    </interface>
+    <interface>
+      <name>captureAs pipeline variable chaining</name>
+      <kind>protocol</kind>
+      <signature>Shell step sets captureAs: 'DIFF_MANIFEST' -> stdout captured into variables['DIFF_MANIFEST'] -> Agent step prompt uses {{DIFF_MANIFEST}} template substitution</signature>
+      <path>daemon/agent-daemon.mjs</path>
+    </interface>
+    <interface>
+      <name>Pipeline event emission</name>
+      <kind>protocol</kind>
+      <signature>pushEvent(jobId, stepId, agentId, eventType, data) -> PutCommand to futurator-agent-events table with TTL</signature>
+      <path>daemon/agent-daemon.mjs</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Unit tests for the generateStoryPipeline() output structure. Integration tests verifying the daemon can execute the extended pipeline with compile steps. Type checking to ensure compilationStatus field is correctly defined in both frontend and backend types.</standards>
+    <locations>
+      <location>functions/api/index.ts</location>
+      <location>functions/shared/types/epic-workflow.ts</location>
+      <location>src/types/epic-workflow.ts</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Verify generateStoryPipeline() returns a PipelineDefinition with steps array containing compile-diff, compile-knowledge, compile-sync after the review/retry steps. Verify COMPILER agent is defined in the agents record with correct allowedTools.</idea>
+      <idea ac="2">Verify compile-diff step is positioned after the review step in the steps array. Confirm no compile step runs if the reviewer has not passed.</idea>
+      <idea ac="3">Verify each compile step has valid stepType (shell or agent) and produces events via the existing pushEvent mechanism. Check that step_start and step_complete events are emitted.</idea>
+      <idea ac="4">Simulate a compile step failure and verify the story pipeline still completes with status COMPLETED. Verify compilationStatus is set to 'failed' but story status is 'done'.</idea>
+      <idea ac="5">Verify compile-diff has captureAs: 'DIFF_MANIFEST'. Verify compile-knowledge prompt includes {{DIFF_MANIFEST}}. Verify variable chaining propagates stdout correctly.</idea>
+      <idea ac="6">Verify EpicStory interface in both functions/shared/types/epic-workflow.ts and src/types/epic-workflow.ts includes compilationStatus optional field with correct union type.</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

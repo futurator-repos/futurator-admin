@@ -1,0 +1,25 @@
+# Memgraph — Knowledge Graph Database for Mycelium
+# Runs on EC2 instance i-0826d68c316ae97dd (t4g.small, Ubuntu 24.04 ARM64)
+# Source: docs/concepts/mycelium-labs-architecture.md section 8.2
+
+services:
+  memgraph:
+    image: memgraph/memgraph:latest
+    container_name: futurator-memgraph
+    ports:
+      - "7687:7687"    # Bolt protocol (Cypher queries)
+      - "7444:7444"    # Monitoring
+    volumes:
+      - memgraph-data:/var/lib/memgraph
+    restart: unless-stopped
+    command: >
+      --memory-limit=512
+      --storage-parallel-schema-recovery=true
+      --log-level=WARNING
+    deploy:
+      resources:
+        limits:
+          memory: 600M
+
+volumes:
+  memgraph-data:

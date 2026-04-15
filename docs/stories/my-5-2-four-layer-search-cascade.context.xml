@@ -1,0 +1,137 @@
+<story-context id="my-5-2-four-layer-search-cascade" v="1.0">
+  <metadata>
+    <epicId>MY-5</epicId>
+    <storyId>2</storyId>
+    <title>4-Layer Search Cascade Implementation</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-5-2-four-layer-search-cascade.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>a search cascade that combines GraphRAG, wiki article reading, grep, and raw file read in sequence</iWant>
+    <soThat>agents get progressively deeper context: conceptual to compiled to textual to raw</soThat>
+    <tasks>
+      <task id="1" title="Create search cascade module" ac="6,7">
+        <subtask id="1.1">Create /home/ubuntu/scripts/lib/search-cascade.mjs exporting searchCascade(projectId, query, opts)</subtask>
+        <subtask id="1.2">Define the result type structure: { graphResults[], wikiArticles[], grepMatches[], sourceFiles[] }</subtask>
+        <subtask id="1.3">Accept options: topK, hops, minSimilarity, grepPatterns[], maxSourceFiles</subtask>
+        <subtask id="1.4">Import graphSearch from graph-search.mjs for Layer 1</subtask>
+      </task>
+      <task id="2" title="Implement Layer 1 — GraphRAG search" ac="1,5">
+        <subtask id="2.1">Call graphSearch(projectId, query, { topK, hops, minSimilarity }) to get vector + traversal results</subtask>
+        <subtask id="2.2">Extract the list of nodeId values from results to feed into Layer 2</subtask>
+        <subtask id="2.3">Rank results by similarity score, preserving the full result objects</subtask>
+        <subtask id="2.4">Handle empty results gracefully (return early with empty cascade result)</subtask>
+      </task>
+      <task id="3" title="Implement Layer 2 — Wiki article reading" ac="2,5">
+        <subtask id="3.1">For each nodeId from Layer 1, construct the wiki article path: {knowledgeDir}/{nodeId}.md</subtask>
+        <subtask id="3.2">Read each wiki article, parsing frontmatter and body sections (Purpose, Dependencies, Dependents, Missing Signals)</subtask>
+        <subtask id="3.3">Extract source file paths from code-type articles (nodeId maps to actual source file path: replace -- with /, strip .md suffix)</subtask>
+        <subtask id="3.4">Collect all [[wikilinks]] from articles for context enrichment</subtask>
+        <subtask id="3.5">Handle missing articles gracefully (stale node warning)</subtask>
+      </task>
+      <task id="4" title="Implement Layer 3 — Grep precision search" ac="3,5">
+        <subtask id="4.1">Build a list of source file paths from Layer 2's code-type articles</subtask>
+        <subtask id="4.2">Run ripgrep (rg) on those specific files for patterns derived from the query and wiki signals</subtask>
+        <subtask id="4.3">Capture line numbers, matched content, and surrounding context (3 lines before/after)</subtask>
+        <subtask id="4.4">Support additional grep patterns passed via grepPatterns[] option</subtask>
+        <subtask id="4.5">Limit grep output to prevent context overflow (max 50 matches per file)</subtask>
+      </task>
+      <task id="5" title="Implement Layer 4 — Raw file read" ac="4,5">
+        <subtask id="5.1">From Layer 3's grep results, identify the top files by match density</subtask>
+        <subtask id="5.2">Read full source code for the top N files (configurable via maxSourceFiles, default 5)</subtask>
+        <subtask id="5.3">Include file metadata (path, size, last modified) in the result</subtask>
+        <subtask id="5.4">Return file contents as strings in the cascade result object</subtask>
+      </task>
+      <task id="6" title="Create CLI wrapper for standalone use" ac="1,7">
+        <subtask id="6.1">Add CLI entry point that accepts --project, --query, and cascade options</subtask>
+        <subtask id="6.2">Print each layer's results to stdout with clear layer separators</subtask>
+        <subtask id="6.3">Support --layer flag to run only up to a specific layer</subtask>
+        <subtask id="6.4">Support --json flag for machine-readable output</subtask>
+      </task>
+      <task id="7" title="Integration test with populated Memgraph" ac="1,2,3,4,5">
+        <subtask id="7.1">Run cascade against a project with nodes in Memgraph and wiki articles on disk</subtask>
+        <subtask id="7.2">Verify Layer 1 returns relevant nodes</subtask>
+        <subtask id="7.3">Verify Layer 2 reads corresponding wiki articles</subtask>
+        <subtask id="7.4">Verify Layer 3 finds code patterns in the identified files</subtask>
+        <subtask id="7.5">Verify Layer 4 returns full source of the most relevant files</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">Layer 1 (GraphRAG): calls graph-search.mjs to return top semantically + structurally related nodes from Memgraph</criterion>
+    <criterion id="2">Layer 2 (Wiki): reads the wiki articles (knowledge/{nodeId}.md) for top-ranked nodes, extracting purpose, decisions, dependencies, and missing signals</criterion>
+    <criterion id="3">Layer 3 (Grep): runs ripgrep on source files for exact pattern matches within the files identified by Layers 1-2</criterion>
+    <criterion id="4">Layer 4 (Read): provides full source code for the specific files targeted for modification</criterion>
+    <criterion id="5">Each layer's results feed into the next layer's targeting (GraphRAG nodeIds to wiki article paths to grep file targets to read file paths)</criterion>
+    <criterion id="6">The cascade is callable as an importable function from daemon pipeline steps (not CLI-only)</criterion>
+    <criterion id="7">The cascade returns a structured result object containing outputs from all four layers</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc path="docs/concepts/mycelium-labs-architecture.md" sections="5.1 The Four-Layer Search Cascade, 5.2 GraphRAG Query Patterns, 5.3 Search Tool for Agents">Architecture document defining the cascade ordering rationale and each layer's role</doc>
+      <doc path="docs/stories/my-5-2-four-layer-search-cascade.md">Source story file with cascade data flow diagrams</doc>
+      <doc path="docs/stories/my-5-1-graphrag-search-tool.md">Story 5.1 — Layer 1 dependency (graph-search.mjs)</doc>
+    </docs>
+    <code>
+      <file path="daemon/agent-daemon.mjs" relevance="Pipeline executor showing shell step pattern; executeShellStep captures stdout via captureAs; shows how cascade would be invoked from pipeline steps</file>
+      <file path="daemon/scripts/test-memgraph.mjs" relevance="Memgraph connection pattern using neo4j-driver; session lifecycle reference</file>
+      <file path="functions/shared/types/agent-orchestrator.ts" relevance="PipelineStep type with shell step interface; captureAs variable mechanism used by cascade results</file>
+    </code>
+    <dependencies>
+      <package name="neo4j-driver" version="^5.27.0" purpose="Memgraph connectivity via Bolt protocol (used indirectly through graph-search.mjs)" />
+      <package name="ripgrep" version="system" purpose="System-installed rg binary for Layer 3 grep precision search" />
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="architecture">Layers must execute in strict order: GraphRAG -> Wiki -> Grep -> Read. Each layer feeds results to the next.</constraint>
+    <constraint type="compatibility">Module must be importable as ES module (searchCascade function) and usable as CLI tool</constraint>
+    <constraint type="data-flow">Layer 1 nodeIds feed Layer 2 article paths; Layer 2 source file paths feed Layer 3 grep targets; Layer 3 match-dense files feed Layer 4 reads</constraint>
+    <constraint type="performance">Grep output capped at 50 matches per file to prevent context overflow</constraint>
+    <constraint type="performance">Layer 4 defaults to max 5 source files to keep context manageable</constraint>
+    <constraint type="wiki-convention">Wiki article paths use -- for directory separators in code nodeIds (e.g., code/src--components--auth.tsx.md)</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface type="function-export">
+      <signature>async function searchCascade(projectId: string, query: string, opts?: { topK?: number, hops?: number, minSimilarity?: number, grepPatterns?: string[], maxSourceFiles?: number }): Promise&lt;CascadeResult&gt;</signature>
+      <returnType>{ graphResults: SearchResult[], wikiArticles: WikiArticle[], grepMatches: GrepMatch[], sourceFiles: SourceFile[] }</returnType>
+    </interface>
+    <interface type="cli">
+      <usage>node search-cascade.mjs --project &lt;id&gt; --query &lt;text&gt; [--layer 1-4] [--json] [--top-k 10] [--hops 2]</usage>
+      <stdout>Layered results with separators or JSON output</stdout>
+    </interface>
+    <interface type="upstream-dependency">
+      <description>Imports graphSearch() from graph-search.mjs (Story 5.1) for Layer 1</description>
+    </interface>
+    <interface type="downstream-consumer">
+      <description>Used by conversation pipeline (Story 5.3) as an agent tool for deeper exploration</description>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>
+      <standard>Unit tests for each layer in isolation with mocked inputs</standard>
+      <standard>Integration tests require running Memgraph, wiki articles on disk, and source code files</standard>
+      <standard>Verify data flow: each layer's output correctly feeds the next layer's input</standard>
+    </standards>
+    <locations>
+      <location>daemon/scripts/__tests__/search-cascade.test.mjs</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Mock graphSearch to return known nodeIds; verify Layer 1 passes them correctly to Layer 2</idea>
+      <idea ac="2">Create test wiki articles on disk; verify Layer 2 parses frontmatter, Purpose, Dependencies, Missing Signals sections</idea>
+      <idea ac="3">Create test source files with known patterns; verify Layer 3 rg finds matches with correct line numbers and context</idea>
+      <idea ac="4">Verify Layer 4 reads full file contents for the top N files by match density from Layer 3</idea>
+      <idea ac="5">Run full cascade; verify nodeIds from L1 appear in L2 article paths, L2 source paths appear in L3 grep targets, L3 top files appear in L4 reads</idea>
+      <idea ac="6">Import searchCascade as ES module; call programmatically and verify structured result</idea>
+      <idea ac="7">Verify CascadeResult object contains all four arrays (graphResults, wikiArticles, grepMatches, sourceFiles)</idea>
+    </ideas>
+  </tests>
+</story-context>

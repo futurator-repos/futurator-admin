@@ -1,0 +1,202 @@
+<![CDATA[<story-context id="my-6-1-codebase-scan-agent" v="1.0">
+  <metadata>
+    <epicId>MY-6</epicId>
+    <storyId>1</storyId>
+    <title>Codebase Scan Agent</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-6-1-codebase-scan-agent.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>an agent that scans an existing project's file tree and generates wiki articles for every relevant source file</iWant>
+    <soThat>existing projects can be brought into the knowledge graph without manual documentation</soThat>
+    <tasks>
+      <task id="1" ac="1,6">Create bootstrap pipeline definition
+        <subtask>Define brownfield-bootstrap pipeline in the daemon pipeline registry with four sequential stages (scan, deps, decisions, populate)</subtask>
+        <subtask>Create pipeline job type bootstrap in futurator-agent-jobs DynamoDB table schema</subtask>
+        <subtask>Wire up pipeline event emission for progress tracking (scanning file X of Y)</subtask>
+        <subtask>Add --project and --working-dir CLI arguments to the bootstrap entry point</subtask>
+      </task>
+      <task id="2" ac="2,7,8">Implement file tree scanner
+        <subtask>Create /home/ubuntu/scripts/bootstrap-scan.mjs — the scan orchestrator script</subtask>
+        <subtask>Implement file discovery using Glob with configurable extension filters (.ts, .tsx, .js, .jsx, .py, .md, .json, .yaml, .yml, .sh, .css, .scss)</subtask>
+        <subtask>Implement exclusion list: node_modules/, .git/, dist/, build/, .next/, coverage/, .mycelium/, knowledge/</subtask>
+        <subtask>Sort discovered files by directory depth (process shallow files first for better dependency context)</subtask>
+        <subtask>Chunk file list into batches of 10-20 for agent processing</subtask>
+      </task>
+      <task id="3" ac="2,3,4">Implement wiki article generation agent step
+        <subtask>Create agent prompt for the Knowledge Compiler role — reads source files and generates wiki articles following the standard article format from architecture doc section 3.1</subtask>
+        <subtask>For each file in a batch: read file content, analyze purpose, identify exports/functions, detect imports, infer signals and missing signals</subtask>
+        <subtask>Generate frontmatter with: title (source path), type: code, phase: implementation, status: active, maturity: 0.5, created/updated dates, tags (inferred from content)</subtask>
+        <subtask>Use file naming convention: knowledge/code/{slug}.md where slug uses -- for path separators (e.g., src--components--auth.tsx.md)</subtask>
+        <subtask>Generate preliminary [[wikilinks]] based on detected import statements</subtask>
+        <subtask>Allowed agent tools: Read, Write, Edit, Glob, Grep</subtask>
+      </task>
+      <task id="4" ac="1,5">Initialize wiki structure and populate index
+        <subtask>Call init-wiki.sh ${projectId} ${workingDir} to create directory structure before scanning begins</subtask>
+        <subtask>After all batches complete, generate knowledge/index.md with the complete catalog (title, type, status, path for each article)</subtask>
+        <subtask>Generate initial knowledge/log.md entry recording the bootstrap scan (timestamp, file count, article count)</subtask>
+      </task>
+      <task id="5" ac="6,8">Progress tracking and error handling
+        <subtask>Emit pipeline events after each batch completes: { type: progress, stage: scan, batch: N, total: M, filesProcessed: X }</subtask>
+        <subtask>Implement retry logic for individual file failures (skip file, log error, continue)</subtask>
+        <subtask>Write scan manifest to .mycelium/bootstrap-manifest.json with list of all scanned files and their generated article paths</subtask>
+        <subtask>Log total scan duration and cost estimate to knowledge/log.md</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">Given an existing project at /home/ubuntu/projects/{name}/ with source code but no knowledge/ directory, the scan agent initializes the wiki directory structure using the init-wiki.sh script (Story 1.3)</criterion>
+    <criterion id="2">For each relevant source file (filtered by extension: .ts, .tsx, .js, .jsx, .py, .md, .json, etc.), a wiki article is created in knowledge/code/ with Purpose, Key Exports, Dependencies, Dependents, Signals, and Missing Signals sections</criterion>
+    <criterion id="3">Articles include correct frontmatter: type code, phase implementation, status active, maturity 0.5 (reverse-engineered, not authored)</criterion>
+    <criterion id="4">[[wikilinks]] connect files that import each other (preliminary — refined in Story 6.2)</criterion>
+    <criterion id="5">knowledge/index.md is populated with the complete catalog of generated articles</criterion>
+    <criterion id="6">Progress is emitted as pipeline events for UI tracking (percentage complete, current file)</criterion>
+    <criterion id="7">Files in node_modules/, .git/, dist/, build/, .next/, and other generated directories are excluded</criterion>
+    <criterion id="8">The agent processes files in batches of 10-20 to manage context window and avoid token limits</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Every knowledge artifact is a markdown file following the Karpathy wiki pattern. Standard article format includes frontmatter (title, type, phase, status, maturity, created, updated, createdByEpic, createdByStory, tags) and sections (Purpose, Key Exports, Dependencies, Dependents, Signals, Missing Signals). File naming convention: knowledge/{phase}/{slug}.md where slug uses -- for path separators.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>Phase 9 — Bootstrap Pipeline (Brownfield)</section>
+        <snippet>One-time pipeline that reads an existing codebase and generates the initial wiki + graph. Scope: codebase scan agent (file tree to code articles), dependency extraction (import analysis to edges), decision inference (package.json, configs to decision articles), full Memgraph population from generated wiki.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step</section>
+        <snippet>Knowledge Compiler agent pattern: reads changed files, generates/updates wiki articles with frontmatter and [[wikilinks]], updates index.md and log.md. Allowed tools: Read, Write, Edit, Glob, Grep. This pattern is reused for the bootstrap scan agent with modifications for batch processing.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>2. Architecture Overview</section>
+        <snippet>Project workspace at /home/ubuntu/projects/{name}/ with knowledge/ directory structure: index.md, log.md, code/, decisions/, requirements/, discovery/, planning/, solutioning/, qa/, system/, archive/. Local metadata in .mycelium/ (compile-state.json, embeddings-queue.json).</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>Edge types derived from [[wikilinks]] in articles. ## Dependencies maps to outgoing DEPENDS_ON edges. ## Dependents maps to incoming DEPENDS_ON edges. 8 relationship types total: DEPENDS_ON, DERIVED_FROM, INFORMS, REFINES, VALIDATES, SUPERSEDES, CONFLICTS_WITH, ENABLES.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, executeStep, executeShellStep, runAgent, pushEvent</symbol>
+        <lines>1-828</lines>
+        <reason>The bootstrap pipeline will be executed by this daemon. Understanding the pipeline execution model (sequential steps, shell steps, agent steps, variable extraction, event emission) is critical for defining the brownfield-bootstrap pipeline. The bootstrap entry point will submit a job to DynamoDB that this daemon picks up.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineDefinition, PipelineStep, PipelineStepType, AgentConfig, AgentJob</symbol>
+        <lines>1-160</lines>
+        <reason>Defines the pipeline step model used by the daemon. The bootstrap pipeline must conform to PipelineDefinition with agents map and steps array. Steps can be agent or shell type. Extractors and validations available for variable passing between steps.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/project-registry.ts</path>
+        <kind>types</kind>
+        <symbol>ProjectRegistry, ProjectStatus</symbol>
+        <lines>1-31</lines>
+        <reason>The bootstrap pipeline reads from futurator-project-registry to locate the project's ec2Path. The ProjectRegistry type defines the project record structure. Story 6.4 will extend this with knowledgeGraph metadata.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>utility</kind>
+        <symbol>neo4j.driver, session.run</symbol>
+        <lines>1-143</lines>
+        <reason>Demonstrates the Memgraph Bolt connection pattern using neo4j-driver. The bootstrap verification step (Story 6.4) will use the same connection pattern for verification queries.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="daemon-scripts">
+        <package name="neo4j-driver" version="^5.27.0" note="Already installed in daemon/scripts. Used for Memgraph Bolt connectivity in verification steps." />
+      </ecosystem>
+      <ecosystem name="ec2-scripts">
+        <package name="glob" note="File discovery for scanning source trees. Node.js built-in fs.glob or npm glob package." />
+      </ecosystem>
+      <ecosystem name="ec2-infrastructure">
+        <package name="init-wiki.sh" note="Wiki directory initialization script from Story 1.3. Creates knowledge/ directory structure." />
+        <package name="graph-sync.mjs" note="Article embedding and Memgraph upsert from Story 1.5. Used in Story 6.4 but articles must be compatible." />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="performance">Heavy-lift operation: 100-500 source files, 5-30 minutes duration, ~$0.50-2.00 in API calls. Batching is essential — 10-20 files per agent call to stay within context windows.</constraint>
+    <constraint type="maturity">Brownfield articles start at maturity 0.5 (lower than greenfield 0.7) because they are reverse-engineered, not authored. Users refine later.</constraint>
+    <constraint type="infrastructure">Runs on EC2 t4g.small (2GB RAM). Must share resources with Memgraph (~512MB) and daemon (~100MB). File processing is I/O-bound, not memory-bound.</constraint>
+    <constraint type="architecture">Wiki markdown files are the source of truth. Memgraph is rebuilt from wiki content. All generated articles must follow the standard format from architecture doc section 3.1.</constraint>
+    <constraint type="exclusion">Must exclude: node_modules/, .git/, dist/, build/, .next/, coverage/, .mycelium/, knowledge/. These are generated directories that should never be scanned.</constraint>
+    <constraint type="dependencies">Requires Epic 1 complete: Memgraph running (1.1), schema initialized (1.2), wiki structure (1.3), Voyage AI (1.4), graph-sync (1.5). This is the first story in Epic 6.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>Bootstrap Pipeline Job</name>
+      <kind>DynamoDB record</kind>
+      <signature>futurator-agent-jobs: { jobId, status: PENDING, pipeline: { agents: { scanner: {...} }, steps: [...] }, workingDir }</signature>
+      <path>functions/shared/types/agent-orchestrator.ts</path>
+    </interface>
+    <interface>
+      <name>Pipeline Event Emission</name>
+      <kind>DynamoDB event</kind>
+      <signature>futurator-agent-events: { jobId, eventSeq, eventType: progress/step_start/step_complete, stage: scan, batch, total, filesProcessed }</signature>
+      <path>daemon/agent-daemon.mjs</path>
+    </interface>
+    <interface>
+      <name>Bootstrap Manifest</name>
+      <kind>JSON file</kind>
+      <signature>.mycelium/bootstrap-manifest.json: { scannedFiles: [{ sourcePath, articlePath, slug }], scanDate, fileCount, articleCount }</signature>
+      <path>/home/ubuntu/projects/{name}/.mycelium/bootstrap-manifest.json</path>
+    </interface>
+    <interface>
+      <name>Wiki Article Format</name>
+      <kind>markdown file</kind>
+      <signature>knowledge/code/{slug}.md: YAML frontmatter (title, type, phase, status, maturity, tags) + sections (Purpose, Key Exports, Dependencies, Dependents, Signals, Missing Signals)</signature>
+      <path>/home/ubuntu/projects/{name}/knowledge/code/</path>
+    </interface>
+    <interface>
+      <name>init-wiki.sh</name>
+      <kind>shell script</kind>
+      <signature>init-wiki.sh ${projectId} ${workingDir} — creates knowledge/ directory structure</signature>
+      <path>/home/ubuntu/scripts/init-wiki.sh</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Testing verifies: (1) wiki directory structure is created, (2) correct number of articles generated matching source file count minus exclusions, (3) article frontmatter has required fields with correct values, (4) [[wikilinks]] are syntactically valid, (5) index.md contains all articles, (6) pipeline events are emitted to DynamoDB, (7) excluded directories produce zero articles, (8) batch size stays within 10-20 files. Tests run on EC2 against a real project directory.</standards>
+    <locations>
+      <location>/home/ubuntu/scripts/bootstrap-scan.mjs</location>
+      <location>/home/ubuntu/projects/{name}/knowledge/</location>
+      <location>/home/ubuntu/projects/{name}/.mycelium/bootstrap-manifest.json</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Verify init-wiki.sh creates knowledge/ with all subdirectories (code/, decisions/, requirements/, discovery/, planning/, solutioning/, qa/, system/, archive/). Check directory existence after scan completes.</idea>
+      <idea ac="2">Count articles in knowledge/code/ and compare against source file count (minus excluded dirs). Each article must have Purpose, Key Exports, Dependencies, Dependents, Signals, Missing Signals sections.</idea>
+      <idea ac="3">Parse frontmatter of 5 random articles: verify type=code, phase=implementation, status=active, maturity=0.5, created and updated dates present, tags array non-empty.</idea>
+      <idea ac="4">Grep all articles for [[wikilinks]]: verify each link target matches an existing article slug in knowledge/code/. Allow some unresolved links (refined in Story 6.2).</idea>
+      <idea ac="5">Read knowledge/index.md: verify it contains an entry for every article in knowledge/code/. Each entry should have title, type, status, and path.</idea>
+      <idea ac="6">Query futurator-agent-events for the bootstrap jobId: verify progress events exist with stage=scan, batch numbers, and filesProcessed counts.</idea>
+      <idea ac="7">Verify zero articles exist for paths containing node_modules, .git, dist, build, .next, coverage. Grep bootstrap-manifest.json for these paths — should find none.</idea>
+      <idea ac="8">Read bootstrap-manifest.json: verify batch sizes are between 10-20 files. Check that total batches = ceil(fileCount / batchSize).</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

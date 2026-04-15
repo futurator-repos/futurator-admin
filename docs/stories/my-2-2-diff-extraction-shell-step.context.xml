@@ -1,0 +1,159 @@
+<![CDATA[<story-context id="my-2-2-diff-extraction-shell-step" v="1.0">
+  <metadata>
+    <epicId>MY-2</epicId>
+    <storyId>2</storyId>
+    <title>Diff Extraction Shell Step</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-2-2-diff-extraction-shell-step.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>a shell step that extracts the list of changed files after a story completes</iWant>
+    <soThat>the Knowledge Compiler knows exactly which files to process</soThat>
+    <tasks>
+      <task id="1" ac="1,2,6">Implement the diff extraction shell command
+        <subtask>Define the compile-diff shell step in generateStoryPipeline() with the git diff command</subtask>
+        <subtask>Set captureAs: 'DIFF_MANIFEST' so the output is available to the next step</subtask>
+        <subtask>Ensure the command runs in the project's workingDir via cd ${workingDir}</subtask>
+        <subtask>Validate output format matches STATUS\tFILENAME for each changed file</subtask>
+      </task>
+      <task id="2" ac="3,4">Implement the fallback detection mechanism
+        <subtask>Add 2>/dev/null || fallback to find command when git diff fails</subtask>
+        <subtask>Configure find with -not -path exclusions for node_modules/, .git/, and knowledge/</subtask>
+        <subtask>Ensure the find fallback produces compatible output format (map found files to A\tFILENAME)</subtask>
+      </task>
+      <task id="3" ac="5">Handle the compile marker file
+        <subtask>Create .mycelium/last-compile-marker if it does not exist (first compilation)</subtask>
+        <subtask>After successful diff extraction, update the marker with touch .mycelium/last-compile-marker</subtask>
+        <subtask>Ensure the marker update is appended to the shell command so it only runs on success</subtask>
+      </task>
+      <task id="4" ac="4">Add directory exclusion filters
+        <subtask>For git diff mode: pipe through grep -v to exclude node_modules/, .git/, knowledge/</subtask>
+        <subtask>For find fallback mode: use -not -path arguments for each excluded directory</subtask>
+        <subtask>Verify exclusions work for nested paths (e.g., src/node_modules/ should still be excluded)</subtask>
+      </task>
+      <task id="5" ac="1,2,3">Test edge cases
+        <subtask>Verify behavior when no files have changed (empty DIFF_MANIFEST)</subtask>
+        <subtask>Verify behavior on first-ever compilation (no git history, no marker file)</subtask>
+        <subtask>Verify behavior when git repository has uncommitted changes</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">The diff extraction step outputs a DIFF_MANIFEST listing all created, modified, and deleted files</criterion>
+    <criterion id="2">When git history is available, the step uses git diff --name-status HEAD~1 HEAD to determine changes</criterion>
+    <criterion id="3">When git is not available, the step falls back to find . -newer .mycelium/last-compile-marker -type f to detect changes by timestamp</criterion>
+    <criterion id="4">The output excludes node_modules/, .git/, and knowledge/ directories</criterion>
+    <criterion id="5">The step updates .mycelium/last-compile-marker timestamp after successful extraction</criterion>
+    <criterion id="6">The output format is one line per file: STATUS\tFILENAME (A=added, M=modified, D=deleted)</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step — Step A</section>
+        <snippet>Step A — Diff extraction (shell, ~2s, $0): cd ${workingDir} &amp;&amp; git diff --name-status HEAD~1 HEAD 2>/dev/null || find . -newer .mycelium/last-compile-marker -type f -not -path './node_modules/*' -not -path './.git/*'. Output: DIFF_MANIFEST — list of created, modified, deleted files.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.1 Compilation Triggers</section>
+        <snippet>Implementation phase trigger: after STORY completion. Step 1 is diff files (shell, $0). The diff is the input to the knowledge compiler agent.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>2 Architecture Overview</section>
+        <snippet>Project workspace layout: /home/ubuntu/projects/{name}/ contains src/, knowledge/, and .mycelium/ (local graph metadata including compile-state.json and embeddings-queue.json). The .mycelium/ directory holds compilation state.</snippet>
+      </doc>
+      <doc>
+        <path>docs/epics-mycelium-devs.md</path>
+        <title>Mycelium Devs Epic Breakdown</title>
+        <section>Epic 2 / Story 2.2</section>
+        <snippet>Story 2.2 acceptance criteria for diff extraction shell step.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>functions/api/index.ts</path>
+        <kind>api</kind>
+        <symbol>generateStoryPipeline</symbol>
+        <lines>486-607</lines>
+        <reason>The function where the compile-diff shell step definition is added. The step is a PipelineStep with stepType: 'shell', command containing the git diff / find fallback, and captureAs: 'DIFF_MANIFEST'.</reason>
+      </file>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executeShellStep</symbol>
+        <lines>430-523</lines>
+        <reason>Shell step executor. When a shell step completes, stdout is captured via variables[step.captureAs] = stdout (line 470). The captureAs mechanism is how DIFF_MANIFEST is made available to the compile-knowledge agent step. Also handles timeout, exit code checking, and stderr capture.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineStep</symbol>
+        <lines>35-58</lines>
+        <reason>PipelineStep interface defines shell step properties: command (string), timeout (number), expectExitCode (number), captureAs (string), captureStderrAs (string), onFail. All fields needed for the compile-diff step are already in this interface.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="shell">
+        <package name="git" note="Used for git diff --name-status HEAD~1 HEAD. Available on EC2 instance. Falls back to find if git is not available or fails." />
+        <package name="find" note="GNU find for fallback file detection by timestamp. Uses -newer flag with .mycelium/last-compile-marker as reference." />
+        <package name="grep" note="Used to filter exclusions (node_modules/, .git/, knowledge/) from git diff output." />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="cost">This step has zero API cost. It is a pure shell command running on EC2. Execution time is approximately 2 seconds.</constraint>
+    <constraint type="output-format">Output MUST be one line per file in STATUS\tFILENAME format. git diff --name-status naturally produces this (e.g., M\tsrc/app.tsx). The find fallback must format output to match (map found files to A\tFILENAME).</constraint>
+    <constraint type="exclusions">Must exclude node_modules/, .git/, and knowledge/ directories from the diff output. These directories contain either third-party code, version control metadata, or compiled knowledge (which would create circular compilation).</constraint>
+    <constraint type="idempotency">The .mycelium/last-compile-marker must only be updated AFTER successful diff extraction. If the step fails, the marker remains unchanged so the next run picks up all changes since the last successful compile.</constraint>
+    <constraint type="first-run">On first-ever compilation, there may be no git history and no marker file. The command must handle both cases gracefully — either producing a complete diff or treating all files as new (A status).</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>DIFF_MANIFEST variable</name>
+      <kind>pipeline variable</kind>
+      <signature>captureAs: 'DIFF_MANIFEST' -> multiline string of STATUS\tFILENAME lines captured from shell stdout</signature>
+      <path>functions/api/index.ts</path>
+    </interface>
+    <interface>
+      <name>Shell step command</name>
+      <kind>bash command</kind>
+      <signature>cd ${workingDir} &amp;&amp; (git diff --name-status HEAD~1 HEAD 2>/dev/null | grep -v -E 'node_modules/|\.git/|knowledge/' || find . -newer .mycelium/last-compile-marker -type f -not -path './node_modules/*' -not -path './.git/*' -not -path './knowledge/*' | sed 's/^/A\t/') &amp;&amp; touch .mycelium/last-compile-marker</signature>
+      <path>functions/api/index.ts</path>
+    </interface>
+    <interface>
+      <name>.mycelium/last-compile-marker</name>
+      <kind>marker file</kind>
+      <signature>Empty file whose mtime serves as reference for find -newer fallback. Located at ${workingDir}/.mycelium/last-compile-marker.</signature>
+      <path>${workingDir}/.mycelium/last-compile-marker</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Shell command testing via controlled execution in a temporary directory. Verify output format, exclusion filters, and marker file behavior. Edge case testing for empty diffs, first-run scenarios, and git-less environments.</standards>
+    <locations>
+      <location>functions/api/index.ts</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Run the shell command in a test project directory with known file changes. Verify DIFF_MANIFEST contains expected file list with correct STATUS codes.</idea>
+      <idea ac="2">In a git repo with a recent commit, verify git diff --name-status HEAD~1 HEAD produces correct output. Check that added, modified, and deleted files have correct A/M/D status codes.</idea>
+      <idea ac="3">In a directory without git, verify the find fallback executes. Touch .mycelium/last-compile-marker, create new files, then verify find detects them with A status.</idea>
+      <idea ac="4">Create test files in node_modules/, .git/, and knowledge/ directories. Verify these are excluded from both git diff and find fallback outputs.</idea>
+      <idea ac="5">Run the command, check that .mycelium/last-compile-marker exists and has an updated mtime. Run again with no new changes and verify empty DIFF_MANIFEST.</idea>
+      <idea ac="6">Parse the output line by line. Verify each line matches the regex pattern ^[AMD]\t.+$. Verify tab separation between status and filename.</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

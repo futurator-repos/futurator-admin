@@ -1,0 +1,205 @@
+<![CDATA[<story-context id="my-3-4-pruning-scan-and-node-archival" v="1.0">
+  <metadata>
+    <epicId>MY-3</epicId>
+    <storyId>4</storyId>
+    <title>Pruning Scan and Node Archival</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-3-4-pruning-scan-and-node-archival.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>superseded nodes with no active dependents automatically identified and archived</iWant>
+    <soThat>the knowledge graph stays current and dead knowledge doesn't pollute search results</soThat>
+    <tasks>
+      <task id="1" ac="1">Implement pruning scan Cypher query
+        <subtask>Create pruning-scan.mjs script at /home/ubuntu/scripts/pruning-scan.mjs</subtask>
+        <subtask>Execute the pruning candidates Cypher query: find superseded nodes with no active DEPENDS_ON dependents</subtask>
+        <subtask>Return candidate list as JSON with nodeId, title, type, lastUpdated, supersededBy</subtask>
+        <subtask>Accept --project and --knowledge-dir flags</subtask>
+      </task>
+      <task id="2" ac="2">Implement confirmation mode
+        <subtask>Default mode outputs candidate list to stdout as formatted table</subtask>
+        <subtask>Accept --confirm flag or interactive prompt to proceed</subtask>
+        <subtask>Allow selective pruning by passing specific --node-ids</subtask>
+      </task>
+      <task id="3" ac="3,8">Implement auto-prune mode
+        <subtask>Accept --auto flag that skips confirmation and archives all candidates</subtask>
+        <subtask>Auto mode is triggered by deployment compilation pipeline (Story 3.3)</subtask>
+        <subtask>Validate that auto-prune is only called from deployment context</subtask>
+      </task>
+      <task id="4" ac="4">Implement article archival
+        <subtask>Move markdown files from knowledge/{phase}/{slug}.md to knowledge/archive/{phase}--{slug}.md</subtask>
+        <subtask>Preserve full article content (articles are recoverable)</subtask>
+        <subtask>Update frontmatter: status: pruned, prunedAt: {date}, prunedReason</subtask>
+        <subtask>Ensure knowledge/archive/ directory exists</subtask>
+      </task>
+      <task id="5" ac="5">Implement Memgraph node removal
+        <subtask>For each pruned node: MATCH (n:Node {nodeId: $nodeId}) DETACH DELETE n</subtask>
+        <subtask>DETACH DELETE removes the node and all its edges</subtask>
+        <subtask>Verify deletion with follow-up existence check</subtask>
+        <subtask>Log each deletion to stdout</subtask>
+      </task>
+      <task id="6" ac="6,7">Update index and log
+        <subtask>Remove pruned articles from knowledge/index.md catalog entries</subtask>
+        <subtask>Append pruning records to knowledge/log.md with format: [PRUNED] {date} | {nodeId} | Reason</subtask>
+        <subtask>Update knowledge/system/pending-work.md to remove entries for pruned nodes</subtask>
+      </task>
+      <task id="7" ac="8">Integrate with deployment compilation pipeline
+        <subtask>Deployment compilation (Story 3.3) calls pruning as part of prune-sync shell step</subtask>
+        <subtask>Pruning runs AFTER deploy-nodes agent step (which marks code as deployed)</subtask>
+        <subtask>Pruning runs BEFORE final graph-sync (so sync reflects pruned state)</subtask>
+        <subtask>Add --auto flag when called from deployment pipeline context</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">The pruning scan queries Memgraph for all nodes with status: superseded that have no incoming DEPENDS_ON edges from active nodes</criterion>
+    <criterion id="2">In default mode, pruning candidates are listed for confirmation before archival</criterion>
+    <criterion id="3">In --auto mode, pruning candidates are archived automatically without confirmation</criterion>
+    <criterion id="4">Pruned articles are moved from knowledge/{phase}/ to knowledge/archive/ with their full content preserved</criterion>
+    <criterion id="5">Pruned nodes are removed from Memgraph (deleted from the graph database)</criterion>
+    <criterion id="6">knowledge/index.md is updated to remove entries for archived articles</criterion>
+    <criterion id="7">knowledge/log.md records each pruned article with the reason for pruning and timestamp</criterion>
+    <criterion id="8">Pruning only executes as part of deployment compilation — never during active development</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.1 Node Status Lifecycle</section>
+        <snippet>Status lifecycle: active -> flagged -> superseded -> pruned. Pruned nodes are moved to knowledge/archive/, removed from Memgraph, removed from index.md. S3 archive retains content. Pruning requires: no active dependents + deployment passed.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>5.2 GraphRAG Query Patterns</section>
+        <snippet>Pruning candidates Cypher: MATCH (n:Node) WHERE n.status = 'superseded' AND n.projectId = $projectId AND NOT (n)&lt;-[:DEPENDS_ON]-(:Node {status: 'active'}) RETURN n.nodeId, n.title, n.type ORDER BY n.updated ASC. Impact analysis query: MATCH path = (target)&lt;-[:DEPENDS_ON|VALIDATES*1..5]-(affected) for verification before pruning.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.2 Impact Propagation</section>
+        <snippet>Edge weights relevant to pruning: DEPENDS_ON (1.0) blocks pruning if active dependent exists, SUPERSEDES (0.8) indicates replacement relationship, VALIDATES (0.6) test coverage that may need updating if validated node is pruned.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.4 Deployment Compilation Step</section>
+        <snippet>Prune scan runs as step 3 of deploy-compile pipeline. The --prune flag on graph-sync.mjs invokes pruning-scan.mjs in --auto mode. Order: shell snapshot -> agent deploy-nodes -> shell prune-sync.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>File naming convention: knowledge/{phase}/{slug}.md. Archived files use flat naming: knowledge/archive/{phase}--{slug}.md. Frontmatter includes status field (active | superseded | flagged | pruned).</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executeShellStep, executePipeline</symbol>
+        <lines>430-523</lines>
+        <reason>The daemon executes the prune-sync shell step as part of the deploy-compile pipeline. Understanding shell step execution (command template substitution, exit code handling, onFail config) is critical for integrating pruning-scan.mjs.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>script</kind>
+        <symbol>neo4j-driver connection, session.run(cypher)</symbol>
+        <reason>Reference implementation for Memgraph Bolt connectivity. pruning-scan.mjs will use the same neo4j-driver pattern to execute the pruning candidates Cypher query and DETACH DELETE operations.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/package.json</path>
+        <kind>manifest</kind>
+        <symbol>dependencies</symbol>
+        <reason>Package manifest for the scripts directory. pruning-scan.mjs will be added to this ecosystem and may need the neo4j-driver dependency listed here.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineStep, PipelineStepType</symbol>
+        <lines>33-58</lines>
+        <reason>The prune-sync shell step in the deploy-compile pipeline must conform to PipelineStep with stepType: shell. Understanding captureAs and onFail config options for error handling.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="scripts">
+        <package name="neo4j-driver" note="Memgraph Bolt connectivity for pruning candidates Cypher query and DETACH DELETE operations" />
+      </ecosystem>
+      <ecosystem name="system">
+        <package name="fs" note="Node.js built-in for file move operations (rename from knowledge/{phase}/ to knowledge/archive/)" />
+        <package name="path" note="Node.js built-in for path manipulation in archive file naming" />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="safety">Pruning ONLY happens after deployment — never during active development (AC #8). Auto-prune must validate it is called from deployment pipeline context.</constraint>
+    <constraint type="dependency-check">A superseded node is NOT pruned if any active node depends on it. The Cypher query must check for incoming DEPENDS_ON edges from active nodes.</constraint>
+    <constraint type="reversibility">Archived articles retain full content — pruning is reversible. Articles are moved, not deleted. The S3 backup includes the archive/ directory.</constraint>
+    <constraint type="naming">Archived files use flat naming convention: {phase}--{slug}.md to avoid recreating phase subdirectories inside archive/.</constraint>
+    <constraint type="ordering">Pruning runs AFTER deploy-nodes agent step (which marks code as deployed) and BEFORE final graph-sync (so the sync reflects the pruned state).</constraint>
+    <constraint type="dependency">This story depends on Epic 2 (story compilation) and Story 3.3 (deployment compilation pipeline provides the trigger for pruning).</constraint>
+    <constraint type="memgraph">DETACH DELETE removes the node AND all its edges. This is irreversible in Memgraph — the graph-sync can rebuild from wiki files if needed, but pruned articles are in archive/ and won't be synced.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>pruning-scan.mjs CLI</name>
+      <kind>CLI script</kind>
+      <signature>node /home/ubuntu/scripts/pruning-scan.mjs --project {projectId} --knowledge-dir {dir} [--auto] [--confirm] [--node-ids id1,id2]</signature>
+      <path>/home/ubuntu/scripts/pruning-scan.mjs</path>
+    </interface>
+    <interface>
+      <name>Pruning candidates Cypher query</name>
+      <kind>Cypher query</kind>
+      <signature>MATCH (n:Node) WHERE n.status = 'superseded' AND n.projectId = $projectId AND NOT (n)&lt;-[:DEPENDS_ON]-(:Node {status: 'active'}) RETURN n.nodeId, n.title, n.type ORDER BY n.updated ASC</signature>
+      <path>Memgraph</path>
+    </interface>
+    <interface>
+      <name>Node deletion Cypher</name>
+      <kind>Cypher query</kind>
+      <signature>MATCH (n:Node {nodeId: $nodeId}) DETACH DELETE n</signature>
+      <path>Memgraph</path>
+    </interface>
+    <interface>
+      <name>Archive file naming</name>
+      <kind>convention</kind>
+      <signature>knowledge/archive/{phase}--{slug}.md — flat naming, no subdirectories inside archive/</signature>
+      <path>knowledge/archive/</path>
+    </interface>
+    <interface>
+      <name>graph-sync.mjs --prune integration</name>
+      <kind>CLI flag</kind>
+      <signature>The --prune flag on graph-sync.mjs invokes pruning-scan.mjs --auto within the deployment compilation pipeline</signature>
+      <path>/home/ubuntu/scripts/graph-sync.mjs</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Tests verify pruning scan accuracy, archival correctness, Memgraph node removal, and deployment-only execution constraint. Integration tests require a running Memgraph instance with test nodes in various statuses. Unit tests can verify file move operations and index/log updates against mock file systems.</standards>
+    <locations>
+      <location>/home/ubuntu/scripts/pruning-scan.mjs</location>
+      <location>/home/ubuntu/scripts/graph-sync.mjs</location>
+      <location>knowledge/archive/</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Integration test: seed Memgraph with superseded nodes (some with active dependents, some without). Verify pruning scan returns only nodes with NO active dependents.</idea>
+      <idea ac="2">Unit test: in default mode, pruning-scan.mjs outputs a formatted table to stdout and does not modify any files until confirmation.</idea>
+      <idea ac="3">Integration test: in --auto mode, pruning-scan.mjs archives all candidates without prompting. Verify archived files exist in knowledge/archive/.</idea>
+      <idea ac="4">Unit test: verify archived articles are moved (not copied) from knowledge/{phase}/ to knowledge/archive/{phase}--{slug}.md. Verify frontmatter is updated with status: pruned, prunedAt, prunedReason.</idea>
+      <idea ac="5">Integration test: after pruning, verify MATCH (n:Node {nodeId: $prunedId}) returns no results in Memgraph. Verify all edges to/from the pruned node are also removed.</idea>
+      <idea ac="6">Unit test: verify knowledge/index.md no longer contains entries for pruned articles after pruning completes.</idea>
+      <idea ac="7">Unit test: verify knowledge/log.md contains [PRUNED] entries with correct format: date, nodeId, and reason including the superseding node reference.</idea>
+      <idea ac="8">Integration test: attempt to run pruning outside of deployment context (without --auto from pipeline). Verify it requires explicit confirmation and warns that pruning should only happen post-deployment.</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

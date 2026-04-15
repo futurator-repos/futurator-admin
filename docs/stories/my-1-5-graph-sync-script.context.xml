@@ -1,0 +1,225 @@
+<story-context id="my-1-5-graph-sync-script" v="1.0">
+  <metadata>
+    <epicId>MY-1</epicId>
+    <storyId>5</storyId>
+    <title>Graph Sync Script (Embed + Memgraph Upsert)</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-1-5-graph-sync-script.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>a script that reads wiki articles, embeds them via Voyage AI, and upserts nodes+edges into Memgraph</iWant>
+    <soThat>the knowledge graph in Memgraph stays synchronized with the wiki files</soThat>
+
+    <tasks>
+      <task id="1" title="Create graph-sync.mjs with CLI argument parsing" acs="7">
+        <subtask id="1.1">Create /home/ubuntu/scripts/graph-sync.mjs</subtask>
+        <subtask id="1.2">Parse CLI arguments: --project {projectId}, --knowledge-dir {path}, --state-file {path} (defaults to {knowledge-dir}/../.mycelium/compile-state.json)</subtask>
+        <subtask id="1.3">Parse optional --full-resync flag</subtask>
+        <subtask id="1.4">Validate required arguments and provide usage help if missing</subtask>
+      </task>
+      <task id="2" title="Implement content hash diffing" acs="1,2">
+        <subtask id="2.1">Read compile-state.json — a map of { "article-path": "content-hash" }</subtask>
+        <subtask id="2.2">Scan all .md files in knowledge/ recursively (excluding archive/)</subtask>
+        <subtask id="2.3">For each article, compute MD5 hash of article body (excluding frontmatter date fields to avoid unnecessary re-embeds)</subtask>
+        <subtask id="2.4">Compare current hash against stored hash — identify new, changed, and deleted articles</subtask>
+        <subtask id="2.5">If --full-resync flag is set, treat all articles as changed regardless of hash</subtask>
+        <subtask id="2.6">Log: [graph-sync] Found {n} new, {m} changed, {d} deleted articles</subtask>
+      </task>
+      <task id="3" title="Parse article frontmatter and wikilinks" acs="3,4">
+        <subtask id="3.1">Parse YAML frontmatter from each article (title, type, phase, status, maturity, tags, createdByEpic, createdByStory, lastMutatedByStory, created, updated)</subtask>
+        <subtask id="3.2">Extract [[wikilinks]] from article body sections</subtask>
+        <subtask id="3.3">Map wikilinks to edge types based on section heading: ## Dependencies -> DEPENDS_ON (outgoing), ## Dependents -> DEPENDS_ON (incoming/reverse), ## Derived From -> DERIVED_FROM, ## Informs -> INFORMS, ## Validates -> VALIDATES, ## Supersedes -> SUPERSEDES, ## Conflicts With -> CONFLICTS_WITH (bidirectional), ## Enables -> ENABLES</subtask>
+        <subtask id="3.4">Store parsed wikilink targets and their corresponding edge types</subtask>
+      </task>
+      <task id="4" title="Embed changed articles via Voyage AI" acs="3">
+        <subtask id="4.1">Import embedBatch from lib/voyage-embed.mjs</subtask>
+        <subtask id="4.2">Prepare text for embedding: concatenate article title + purpose section + key exports (first 500 tokens representative content)</subtask>
+        <subtask id="4.3">Batch embed all changed articles using embedBatch(texts, 'document')</subtask>
+        <subtask id="4.4">Associate each returned embedding with its article</subtask>
+        <subtask id="4.5">Log embedding stats: [graph-sync] Embedded {n} articles, {tokens} tokens, ~${cost}</subtask>
+      </task>
+      <task id="5" title="Upsert nodes into Memgraph" acs="3">
+        <subtask id="5.1">Connect to Memgraph via bolt://localhost:7687 using neo4j-driver</subtask>
+        <subtask id="5.2">For each changed article, execute MERGE + SET with all frontmatter properties and embedding vector</subtask>
+        <subtask id="5.3">For deleted articles (hash present in state but file removed), set status: pruned on the node</subtask>
+        <subtask id="5.4">Log: [graph-sync] Upserted {n} nodes, pruned {d} nodes</subtask>
+      </task>
+      <task id="6" title="Create/update edges from wikilinks" acs="4">
+        <subtask id="6.1">For each article's parsed wikilinks, MERGE edges with correct type and weight</subtask>
+        <subtask id="6.2">Handle incoming edges (## Dependents creates edges pointing TO the current node)</subtask>
+        <subtask id="6.3">Handle bidirectional edges (CONFLICTS_WITH creates edges in both directions)</subtask>
+        <subtask id="6.4">Remove stale edges for deleted wikilinks</subtask>
+        <subtask id="6.5">Assign correct weight per edge type from architecture doc</subtask>
+        <subtask id="6.6">Log: [graph-sync] Created/updated {n} edges, removed {d} stale edges</subtask>
+      </task>
+      <task id="7" title="Update compile-state.json" acs="5">
+        <subtask id="7.1">After successful upsert, write updated hash map to compile-state.json</subtask>
+        <subtask id="7.2">Remove entries for deleted articles</subtask>
+        <subtask id="7.3">Use atomic write (write to temp file then rename) to prevent corruption on crash</subtask>
+      </task>
+      <task id="8" title="End-to-end validation" acs="1,2,3,4,5,6,7">
+        <subtask id="8.1">Create 3 test wiki articles with frontmatter and wikilinks</subtask>
+        <subtask id="8.2">Run graph-sync.mjs — verify all 3 nodes created in Memgraph with embeddings</subtask>
+        <subtask id="8.3">Verify edges created from wikilinks</subtask>
+        <subtask id="8.4">Modify one article — run again — verify only the changed article is re-embedded</subtask>
+        <subtask id="8.5">Run with --full-resync — verify all articles are re-processed</subtask>
+        <subtask id="8.6">Delete one article — run again — verify node is marked as pruned</subtask>
+        <subtask id="8.7">Clean up test data</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">The script reads .mycelium/compile-state.json for content hashes of the last sync</criterion>
+    <criterion id="2">The script identifies new or changed articles by comparing current content hashes against stored hashes</criterion>
+    <criterion id="3">For each changed article: embeds via Voyage AI and upserts node in Memgraph with all frontmatter properties + embedding vector</criterion>
+    <criterion id="4">The script parses [[wikilinks]] from article sections (Dependencies, Dependents, etc.) and creates/updates typed edges in Memgraph</criterion>
+    <criterion id="5">The script updates compile-state.json with new hashes after successful sync</criterion>
+    <criterion id="6">The script supports a --full-resync flag that re-processes all articles regardless of hash</criterion>
+    <criterion id="7">The script accepts --project and --knowledge-dir flags</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>4.2 Story Compilation Step</section>
+        <snippet>Step C (embed and sync shell command): node /home/ubuntu/scripts/graph-sync.mjs --project ${projectId} --knowledge-dir ${workingDir}/knowledge --state-file ${workingDir}/.mycelium/compile-state.json. Script reads compile-state.json, diffs articles, embeds changed via Voyage AI, upserts into Memgraph, updates compile-state.json.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>Edge types with weights: DEPENDS_ON 1.0, DERIVED_FROM 0.7, INFORMS 0.3, REFINES 0.5, VALIDATES 0.6, SUPERSEDES 0.8, CONFLICTS_WITH 0.9, ENABLES 0.5. Wikilink-to-edge mapping table showing section heading to edge type and direction.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Article frontmatter schema (title, type, phase, status, maturity, tags, etc.). File naming convention: knowledge/{phase}/{slug}.md. Article body sections map to graph edges via [[wikilinks]].</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>8.3 Voyage AI Integration</section>
+        <snippet>Batch embedding config: batchSize 128, inputTypes: article=document. Cost: $0.06 per 1M tokens. Re-embedding after compilation: ~10-50 articles = less than $0.003.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>9 Decisions Log</section>
+        <snippet>D1: Wiki markdown as persistence, D9: Wiki as source of truth, Memgraph rebuilt from wiki at any time.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>existing-script</kind>
+        <symbol>neo4j.driver, session.run, driver.close</symbol>
+        <reason>Reference for neo4j-driver connection pattern and Cypher query execution; graph-sync.mjs reuses same connectivity approach</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/package.json</path>
+        <kind>config</kind>
+        <symbol>neo4j-driver ^5.27.0, type: module</symbol>
+        <reason>Provides neo4j-driver dependency. graph-sync.mjs should be added to scripts section.</reason>
+      </file>
+      <file>
+        <path>daemon/memgraph/docker-compose.yml</path>
+        <kind>infra</kind>
+        <symbol>futurator-memgraph, port 7687</symbol>
+        <reason>Confirms Memgraph Bolt endpoint for graph-sync.mjs connection</reason>
+      </file>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>substituteTemplate, shell step execution via spawn</symbol>
+        <reason>graph-sync.mjs is called as a shell step in compilation pipelines. The daemon substitutes {{projectId}} and {{workingDir}} template variables.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/project-registry.ts</path>
+        <kind>type-definition</kind>
+        <symbol>ProjectRegistry, ec2Path, fileManifest</symbol>
+        <reason>Defines project workspace paths. The --knowledge-dir argument points to ${ec2Path}/knowledge/.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <package name="neo4j-driver" version="^5.27.0" reason="Bolt protocol client for Memgraph upserts — already installed"/>
+      <package name="voyage-embed.mjs" version="local" reason="Embedding helper module from Story 1.4 — imported as lib/voyage-embed.mjs"/>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint>Story MY-1.2 must be complete — Memgraph schema and vector index must be initialized before graph-sync can upsert</constraint>
+    <constraint>Story MY-1.3 must be complete — wiki directory structure must exist to have articles to scan</constraint>
+    <constraint>Story MY-1.4 must be complete — voyage-embed.mjs module must be available for embedding</constraint>
+    <constraint>Incremental by default — only re-embeds changed articles to minimize Voyage AI cost (~$0.003 per story compilation)</constraint>
+    <constraint>Atomic state file writes — write to temp file then rename to prevent compile-state.json corruption on crash</constraint>
+    <constraint>MD5 hash excludes frontmatter date fields (created, updated) to avoid unnecessary re-embeds when only timestamps change</constraint>
+    <constraint>Archive directory excluded from scanning — articles in knowledge/archive/ are not synced</constraint>
+    <constraint>Edge weight values must exactly match architecture doc: DEPENDS_ON=1.0, DERIVED_FROM=0.7, INFORMS=0.3, REFINES=0.5, VALIDATES=0.6, SUPERSEDES=0.8, CONFLICTS_WITH=0.9, ENABLES=0.5</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>graph-sync.mjs CLI</name>
+      <endpoint>/home/ubuntu/scripts/graph-sync.mjs</endpoint>
+      <protocol>CLI (Node.js)</protocol>
+      <details>Arguments: --project {projectId} (required), --knowledge-dir {path} (required), --state-file {path} (optional, defaults to {knowledge-dir}/../.mycelium/compile-state.json), --full-resync (optional flag). Called by daemon shell steps in compilation pipelines.</details>
+    </interface>
+    <interface>
+      <name>Memgraph Bolt Protocol</name>
+      <endpoint>bolt://localhost:7687</endpoint>
+      <protocol>Bolt (Neo4j-compatible)</protocol>
+      <details>MERGE + SET for node upserts with all frontmatter properties and embedding vector. MERGE for edge creation/updates. DELETE for stale edge removal.</details>
+    </interface>
+    <interface>
+      <name>Voyage AI embedBatch</name>
+      <protocol>ESM import from lib/voyage-embed.mjs</protocol>
+      <details>embedBatch(texts, 'document') returns number[][] (N x 1024-dim). Called with article content for embedding before Memgraph upsert.</details>
+    </interface>
+    <interface>
+      <name>compile-state.json</name>
+      <protocol>JSON file</protocol>
+      <details>Map of { "article-relative-path": "md5-content-hash" }. Read at start for diffing, written at end after successful sync. Located at {workingDir}/.mycelium/compile-state.json.</details>
+    </interface>
+    <interface>
+      <name>Cypher — Node Upsert</name>
+      <query>MERGE (n:Node {nodeId: $nodeId}) SET n.projectId = $projectId, n.type = $type, n.phase = $phase, n.status = $status, n.maturity = $maturity, n.title = $title, n.summary = $summary, n.tags = $tags, n.createdByEpic = $createdByEpic, n.createdByStory = $createdByStory, n.lastMutatedByStory = $lastMutatedByStory, n.created = $created, n.updated = $updated, n.embedding = $embedding</query>
+    </interface>
+    <interface>
+      <name>Cypher — Edge Upsert</name>
+      <query>MATCH (a:Node {nodeId: $sourceId}), (b:Node {nodeId: $targetId}) MERGE (a)-[r:EDGE_TYPE]->(b) SET r.weight = $weight</query>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>
+      <standard>End-to-end validation with real Memgraph instance and test wiki articles</standard>
+      <standard>Incremental sync validation — modify one article, verify only that article is re-embedded</standard>
+      <standard>Full resync validation — verify --full-resync flag processes all articles</standard>
+      <standard>Deletion handling — remove article file, verify node status set to pruned</standard>
+      <standard>Edge derivation — verify wikilinks in article sections produce correct edge types and directions</standard>
+    </standards>
+    <locations>
+      <location>daemon/scripts/graph-sync.mjs (the sync script)</location>
+      <location>daemon/scripts/lib/voyage-embed.mjs (dependency from Story 1.4)</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Create compile-state.json with known hashes, run graph-sync, verify it reads and uses those hashes for diffing</idea>
+      <idea ac="2">Create 3 articles, run graph-sync, verify 3 reported as new. Modify 1, run again, verify 1 changed + 2 unchanged</idea>
+      <idea ac="3">After sync, query Memgraph: MATCH (n:Node) WHERE n.projectId = $testProject RETURN n — verify all frontmatter properties and embedding present on each node</idea>
+      <idea ac="4">Create article with ## Dependencies containing [[code/other-file]], run sync, verify DEPENDS_ON edge exists from article node to other-file node. Test all 8 edge type mappings.</idea>
+      <idea ac="5">After sync, read compile-state.json — verify it contains hashes for all synced articles</idea>
+      <idea ac="6">Run with --full-resync — verify all articles processed even if hashes unchanged</idea>
+      <idea ac="7">Run without --project — verify usage help printed and non-zero exit code</idea>
+    </ideas>
+  </tests>
+</story-context>

@@ -1,0 +1,199 @@
+<![CDATA[<story-context id="my-4-3-decision-extraction-from-architecture" v="1.0">
+  <metadata>
+    <epicId>MY-4</epicId>
+    <storyId>3</storyId>
+    <title>Decision Extraction from Architecture Sessions</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-4-3-decision-extraction-from-architecture.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>architectural decisions automatically extracted and stored as decision nodes with full lineage</iWant>
+    <soThat>every "why" is captured, connected to the requirements it addresses, and traceable to the code that implements it</soThat>
+    <tasks>
+      <task id="1" ac="1,4">Implement decision extraction from architecture documents
+        <subtask>Create /home/ubuntu/scripts/lib/extract-decisions.mjs for parsing architecture session output and extracting discrete decisions</subtask>
+        <subtask>Identify decision patterns: technology choices (we chose X over Y), pattern selections (using the repository pattern), API design choices (REST over GraphQL), data model decisions (single table vs multi-table)</subtask>
+        <subtask>For each extracted decision, generate an ADR-format article with sections: Context, Options Considered, Chosen Option, Rationale, Consequences</subtask>
+        <subtask>Generate unique nodeId: decisions/{project-slug}--{decision-slug}</subtask>
+        <subtask>Set frontmatter: type: adr, phase: solutioning, status: active, tags derived from domain context</subtask>
+      </task>
+      <task id="2" ac="2">Create DERIVED_FROM edges to requirements
+        <subtask>For each decision, identify which requirements it addresses by matching against existing requirement nodes in Memgraph (semantic search + keyword matching)</subtask>
+        <subtask>Add Derived From section with [[wikilinks]] to matched requirement articles</subtask>
+        <subtask>Run graph-sync.mjs to create DERIVED_FROM edges (weight 0.7) from decision nodes to requirement nodes</subtask>
+        <subtask>If no matching requirements found, log a warning (decision exists without traceability)</subtask>
+      </task>
+      <task id="3" ac="3,6">Create placeholder code articles with INFORMS edges
+        <subtask>Analyze each decision to infer what code files it implies (e.g., JWT auth implies an auth component, a JWT utility, a token store)</subtask>
+        <subtask>Create placeholder articles in knowledge/code/ with status: suggested, maturity: 0.1, and Purpose describing expected implementation</subtask>
+        <subtask>Add Informs section in decision article with [[wikilinks]] to placeholder code articles</subtask>
+        <subtask>Run graph-sync.mjs to create INFORMS edges (weight 0.3) from decision nodes to placeholder code nodes</subtask>
+        <subtask>When Dev agent creates actual code files during story compilation, detect matching placeholders and transition: status suggested to active, update maturity, preserve INFORMS edge</subtask>
+      </task>
+      <task id="4" ac="5">Implement conflict detection
+        <subtask>When a new decision is extracted, query Memgraph for existing decisions in same domain (same tags, similar topic via vector similarity > 0.8)</subtask>
+        <subtask>If potential conflict found, use Knowledge Compiler agent to assess whether the two decisions genuinely contradict</subtask>
+        <subtask>If confirmed conflict: create CONFLICTS_WITH edge (weight 0.9, bidirectional) between decision nodes</subtask>
+        <subtask>Add Conflicts With section in both decision articles with [[wikilinks]]</subtask>
+        <subtask>Log conflict in knowledge/log.md and add entry to knowledge/system/pending-work.md for human review</subtask>
+      </task>
+      <task id="5" ac="1">Integrate into pre-dev compilation flow
+        <subtask>Hook extract-decisions.mjs into pre-dev compilation step (Story 4.1) for article types: architecture, tech-spec, api-spec, data-model, adr</subtask>
+        <subtask>Handle architecture revisions: diff against existing decision nodes, update changed, add new, mark obsolete as status: superseded</subtask>
+        <subtask>Run impact propagation (Story 3.5) after decision updates to flag downstream code nodes</subtask>
+        <subtask>Update knowledge/index.md with all new decision and placeholder code articles</subtask>
+        <subtask>Log extraction results in knowledge/log.md: architecture nodeId, decision count, conflict count, placeholder count</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">When an Architect agent session produces or revises technical documents (architecture, tech-spec, api-spec, data-model), the compilation step extracts explicit decisions as separate articles in knowledge/decisions/</criterion>
+    <criterion id="2">Each decision article has DERIVED_FROM edges to the requirement nodes it addresses (linking back to Story 4.2 requirement decomposition)</criterion>
+    <criterion id="3">Each decision article has INFORMS edges to placeholder code articles created with status: suggested representing code that the architecture implies will exist but has not been written yet</criterion>
+    <criterion id="4">Decision articles include: context, options considered, chosen option, rationale, and consequences following the ADR format</criterion>
+    <criterion id="5">If a new decision contradicts an existing decision in the same domain, a CONFLICTS_WITH edge is created between the two decision nodes</criterion>
+    <criterion id="6">When the Dev agent later creates actual code files, the placeholder status: suggested articles transition to status: active and the INFORMS edges are preserved</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.5 Pre-Development Phase Compilation</section>
+        <snippet>Architect generates tech spec then COMPILE: Extract decision nodes (knowledge/decisions/), create solutioning nodes (knowledge/solutioning/), link decisions to requirements (DERIVED_FROM), link decisions to future code articles (INFORMS) as placeholder edges, embed + sync.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>Edge types: DERIVED_FROM (weight 0.7), INFORMS (weight 0.3), CONFLICTS_WITH (weight 0.9, bidirectional). Node properties include status (active, superseded, flagged, suggested, pruned). Wiki sections map to edge types.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.1 Node Status Lifecycle</section>
+        <snippet>Status transitions: created to active, upstream change detected to flagged, newer version created to superseded, no active dependents to pruned. Additionally: suggested status for placeholder nodes that represent architectural intent before code exists.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.2 Impact Propagation</section>
+        <snippet>Impact score = edge_weight / (hops ^ 1.5). CONFLICTS_WITH weight 0.9 (contradiction, must review). INFORMS weight 0.3 (context, may review). After decision update, traverse INFORMS and ENABLES edges to flag downstream code nodes.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Solutioning phase article types: architecture, tech-spec, api-spec, data-model, adr, ux-spec. Created by Architect and UX agents. Article format includes Purpose, Dependencies, Dependents, Derived From, Informs, Conflicts With sections.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.3 Maturity Scoring</section>
+        <snippet>Solutioning to Implementation gate requires architecture at >= 0.6, tech spec at >= 0.4. ADR nodes are scored based on completeness: context stated, options evaluated, rationale documented, consequences identified.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, executeStep, runAgent</symbol>
+        <lines>525-650</lines>
+        <reason>Pipeline executor where decision extraction integrates as a sub-step within the COMPILE agent step. The agent step uses the Knowledge Compiler to assess conflicts via semantic comparison.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineStep, PipelineDefinition</symbol>
+        <lines>1-58</lines>
+        <reason>Pipeline step types used by the compilation flow. Decision extraction runs within the agent step of the 3-step COMPILE pattern.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/project-registry.ts</path>
+        <kind>types</kind>
+        <symbol>ProjectRegistry</symbol>
+        <lines>1-31</lines>
+        <reason>Project registry provides projectId for scoping Memgraph queries during conflict detection (vector similarity search within same project).</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>test-script</kind>
+        <symbol>neo4j driver session pattern</symbol>
+        <lines>30-45</lines>
+        <reason>Demonstrates Cypher execution pattern for creating and querying DERIVED_FROM, INFORMS, and CONFLICTS_WITH edges. Conflict detection queries use vector_search.search() combined with tag matching.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="daemon-scripts">
+        <package name="neo4j-driver" version="latest" note="Memgraph Bolt connectivity for conflict detection queries and edge verification (from Epic 1)" />
+        <package name="voyageai" version="latest" note="Voyage AI SDK for semantic similarity search during conflict detection (from Story 1.4)" />
+        <package name="gray-matter" version="latest" note="Frontmatter parsing for architecture and decision articles" />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="architecture">Decision nodes use ADR format (Context, Options Considered, Chosen Option, Rationale, Consequences). This is a well-established pattern for architecture decision records.</constraint>
+    <constraint type="architecture">Placeholder code articles have status: suggested and maturity: 0.1. They represent architectural intent before implementation. When actual code is created, placeholders transition to status: active — the INFORMS edge is preserved.</constraint>
+    <constraint type="architecture">Conflict detection uses both structural (tag overlap) and semantic (vector similarity > 0.8) matching. The Knowledge Compiler agent makes the final determination of genuine contradiction.</constraint>
+    <constraint type="architecture">CONFLICTS_WITH edges are bidirectional (weight 0.9). Both conflicting decision articles get Conflicts With sections with mutual [[wikilinks]]. Conflicts are logged to pending-work.md for human review.</constraint>
+    <constraint type="dependency">Requires Story 4.1 (Document Generation Compilation Hook) and Story 4.2 (Requirement Decomposition) — decisions link back to requirement nodes via DERIVED_FROM.</constraint>
+    <constraint type="dependency">Requires Epic 1 complete (Memgraph with vector index for semantic search, graph-sync) and Story 3.5 (Impact Propagation Engine).</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>extract-decisions.mjs module</name>
+      <kind>library module</kind>
+      <signature>extractDecisions(architectureContent, docSlug, projectId) returns array of {nodeId, title, context, optionsConsidered, chosenOption, rationale, consequences, linkedRequirements, placeholderCode, maturity}</signature>
+      <path>/home/ubuntu/scripts/lib/extract-decisions.mjs</path>
+    </interface>
+    <interface>
+      <name>compile-predev.mjs hook</name>
+      <kind>integration point</kind>
+      <signature>When articleType in [architecture, tech-spec, api-spec, data-model, adr]: call extractDecisions() then create articles then check conflicts then run graph-sync.mjs</signature>
+      <path>/home/ubuntu/scripts/compile-predev.mjs</path>
+    </interface>
+    <interface>
+      <name>Conflict detection Cypher</name>
+      <kind>database query</kind>
+      <signature>MATCH (d1:Node {type: 'adr', projectId: $projectId}), (d2:Node {type: 'adr', projectId: $projectId}) WHERE d1.nodeId != d2.nodeId AND any(tag IN d1.tags WHERE tag IN d2.tags) RETURN d1, d2, vector_similarity(d1.embedding, d2.embedding) AS sim WHERE sim > 0.8</signature>
+      <path>/home/ubuntu/scripts/lib/extract-decisions.mjs</path>
+    </interface>
+    <interface>
+      <name>Traceability chain Cypher</name>
+      <kind>database query</kind>
+      <signature>MATCH (req:Node {type: 'requirement'})-[:DERIVED_FROM]->(dec:Node {type: 'adr'})-[:INFORMS]->(code:Node {type: 'code'}) WHERE req.projectId = $projectId RETURN req.title, dec.title, code.title, code.status</signature>
+      <path>/home/ubuntu/scripts/lib/extract-decisions.mjs</path>
+    </interface>
+    <interface>
+      <name>ADR article format</name>
+      <kind>wiki article</kind>
+      <signature>Frontmatter: title, type: adr, phase: solutioning, status: active, maturity. Sections: Context, Options Considered, Chosen Option, Rationale, Consequences, Derived From (requirements), Informs (placeholder code), Conflicts With (if any), Signals, Missing Signals.</signature>
+      <path>knowledge/decisions/{slug}.md</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Tests should verify decision extraction accuracy from architecture documents, ADR article creation, DERIVED_FROM edge creation to requirements, INFORMS edge creation to placeholder code, conflict detection, and placeholder-to-active transition. Unit tests for extract-decisions.mjs parsing. Integration tests with sample architecture documents and existing requirement nodes.</standards>
+    <locations>
+      <location>/home/ubuntu/scripts/__tests__/extract-decisions.test.mjs</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Compile an architecture document containing 3 technology decisions and verify 3 separate ADR articles are created in knowledge/decisions/ with unique nodeIds and correct frontmatter (type: adr, phase: solutioning).</idea>
+      <idea ac="2">After decision extraction, query Memgraph to verify each decision node has DERIVED_FROM edges (weight 0.7) to at least one requirement node from Story 4.2. Verify the Derived From section contains [[wikilinks]] to the matched requirements.</idea>
+      <idea ac="3">After decision extraction, verify placeholder code articles exist in knowledge/code/ with status: suggested and maturity: 0.1. Verify INFORMS edges (weight 0.3) exist from decision nodes to placeholder code nodes in Memgraph.</idea>
+      <idea ac="4">Verify each ADR article contains all required sections: Context, Options Considered, Chosen Option, Rationale, Consequences. Verify the content is extracted accurately from the source architecture document.</idea>
+      <idea ac="5">Create two decisions in the same domain (same tags, e.g., authentication). Verify the system detects the potential conflict, creates a CONFLICTS_WITH edge (weight 0.9), and adds entries to both articles Conflicts With sections and to pending-work.md.</idea>
+      <idea ac="6">Create placeholder code articles via decision extraction, then simulate a Dev agent story compilation that creates the actual code files. Verify placeholders transition from status: suggested to status: active, maturity increases, and INFORMS edges are preserved.</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

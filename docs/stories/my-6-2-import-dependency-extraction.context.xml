@@ -1,0 +1,192 @@
+<![CDATA[<story-context id="my-6-2-import-dependency-extraction" v="1.0">
+  <metadata>
+    <epicId>MY-6</epicId>
+    <storyId>2</storyId>
+    <title>Import Dependency Extraction</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-6-2-import-dependency-extraction.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>import/require statements automatically analyzed to create DEPENDS_ON edges between code articles</iWant>
+    <soThat>the dependency graph accurately reflects the actual code structure</soThat>
+    <tasks>
+      <task id="1" ac="1,6,7">Implement import parser
+        <subtask>Create /home/ubuntu/scripts/bootstrap-deps.mjs — dependency extraction orchestrator</subtask>
+        <subtask>Implement TypeScript/JavaScript import parsing: import X from '...', import { X } from '...', import * as X from '...', require('...')</subtask>
+        <subtask>Implement Python import parsing: import X, from X import Y</subtask>
+        <subtask>Implement CSS/SCSS import parsing: @import '...', @use '...'</subtask>
+        <subtask>Resolve relative paths (./, ../) to absolute file paths within the project</subtask>
+        <subtask>Handle barrel exports — when an import points to a directory or index.ts, trace through to the actual re-exported modules</subtask>
+        <subtask>Classify imports as internal (project files) vs. external (npm packages, stdlib)</subtask>
+      </task>
+      <task id="2" ac="2,3">Map imports to wiki article slugs
+        <subtask>Convert resolved file paths to wiki article slugs: src/utils/jwt.ts to code/src--utils--jwt.ts</subtask>
+        <subtask>Read the bootstrap manifest (.mycelium/bootstrap-manifest.json) to validate that target articles exist</subtask>
+        <subtask>For each source file, build the complete list of internal dependencies and dependents</subtask>
+        <subtask>Handle files not in the manifest (referenced but excluded from scan) — log as unresolved imports</subtask>
+      </task>
+      <task id="3" ac="3,7">Update wiki articles with dependency edges
+        <subtask>For each code article in knowledge/code/, update the ## Dependencies section with outgoing [[wikilinks]] and import descriptions</subtask>
+        <subtask>Update the ## Dependents section with incoming [[wikilinks]] (reverse edges)</subtask>
+        <subtask>List external dependencies (npm packages) in a separate ## External Dependencies subsection without [[wikilinks]]</subtask>
+        <subtask>Preserve existing article content (Purpose, Key Exports, Signals, etc.) — only modify Dependencies/Dependents sections</subtask>
+      </task>
+      <task id="4" ac="4,5">Generate dependency map and detect cycles
+        <subtask>Build the full dependency adjacency list from all parsed imports</subtask>
+        <subtask>Run cycle detection algorithm (DFS-based) on the adjacency list</subtask>
+        <subtask>Generate knowledge/system/dependency-map.md with: summary statistics (total files, total edges, circular count), full dependency listing per file, circular dependency section with cycle paths</subtask>
+        <subtask>Update knowledge/index.md to include the dependency-map article</subtask>
+        <subtask>Append dependency extraction record to knowledge/log.md</subtask>
+      </task>
+      <task id="5" ac="1">Pipeline integration and progress tracking
+        <subtask>Register as stage 2 of the brownfield-bootstrap pipeline (runs after scan stage completes)</subtask>
+        <subtask>Emit pipeline events: { type: progress, stage: deps, filesProcessed: X, edgesCreated: Y }</subtask>
+        <subtask>Log summary: total dependencies extracted, circular dependencies found, unresolved imports</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">Import/require/from statements are parsed from each source file in the project</criterion>
+    <criterion id="2">Imports are mapped to their corresponding wiki article paths using the -- slug convention (e.g., import from '../utils/jwt' maps to [[code/src--utils--jwt.ts]])</criterion>
+    <criterion id="3">DEPENDS_ON edges are created in wiki articles' Dependencies and Dependents sections via [[wikilinks]]</criterion>
+    <criterion id="4">knowledge/system/dependency-map.md is generated with the full import graph (listing every file and its direct dependencies)</criterion>
+    <criterion id="5">Circular dependencies are detected, logged, and noted in dependency-map.md with a dedicated section</criterion>
+    <criterion id="6">Barrel exports (index.ts re-exports) are resolved — imports from a directory are traced to the actual source file</criterion>
+    <criterion id="7">External dependencies (npm packages) are listed in articles but do not generate cross-article [[wikilinks]] (no wiki article exists for them)</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>Edge types derived from [[wikilinks]] in articles. ## Dependencies maps to outgoing DEPENDS_ON edges (weight 1.0). ## Dependents maps to incoming DEPENDS_ON edges (reverse). Section header to edge type mapping: Dependencies->DEPENDS_ON, Dependents->DEPENDS_ON (incoming), Derived From->DERIVED_FROM, Informs->INFORMS, Validates->VALIDATES, Supersedes->SUPERSEDES, Conflicts With->CONFLICTS_WITH, Enables->ENABLES.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Article Dependencies/Dependents section format uses [[wikilinks]] with descriptions. Example: ## Dependencies - [[code/src--utils--jwt.ts]] — token validation and refresh. File naming convention: knowledge/{phase}/{slug}.md where slug uses -- for path separators.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>Phase 9 — Bootstrap Pipeline (Brownfield)</section>
+        <snippet>Dependency extraction: import analysis to edges. Second stage of the pipeline after codebase scan. Creates the structural backbone of the knowledge graph.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step</section>
+        <snippet>Step B Knowledge Compiler updates dependency map (knowledge/system/dependency-map.md) with new import relationships. Uses [[wikilinks]] for all cross-references. Dependencies and Dependents become graph edges via graph-sync.mjs.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, executeStep, executeShellStep</symbol>
+        <lines>430-715</lines>
+        <reason>The bootstrap-deps step runs as stage 2 of the brownfield-bootstrap pipeline executed by this daemon. Can be either a shell step (regex-based fast pass) or an agent step (for complex resolution). Understanding step types and variable passing is essential.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineStep, PipelineStepType, ExtractorConfig</symbol>
+        <lines>1-100</lines>
+        <reason>Pipeline step definition including shell steps with captureAs for stdout capture. The dependency extraction can use a shell step for regex-based import parsing with output captured as a variable, then an agent step for resolution.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/project-registry.ts</path>
+        <kind>types</kind>
+        <symbol>ProjectRegistry</symbol>
+        <lines>1-31</lines>
+        <reason>Project registry locates the project ec2Path for file resolution. Import paths must be resolved relative to the project root.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>utility</kind>
+        <symbol>neo4j.driver, session.run</symbol>
+        <lines>1-143</lines>
+        <reason>Connection pattern for Memgraph. The dependency edges created by this story will become Memgraph DEPENDS_ON edges when graph-sync runs in Story 6.4.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="ec2-scripts">
+        <package name="typescript" note="Optional: for parsing tsconfig.json paths aliases to resolve aliased imports like @/components/." />
+      </ecosystem>
+      <ecosystem name="story-dependencies">
+        <package name="Story 6.1 (Codebase Scan Agent)" note="Must complete first — provides wiki articles in knowledge/code/ and bootstrap-manifest.json that this story reads and updates." />
+        <package name="Story 1.3 (Wiki Directory Structure)" note="knowledge/system/ directory must exist for the dependency-map article." />
+        <package name="Story 1.5 (Graph Sync)" note="The [[wikilinks]] created here become Memgraph edges when graph-sync runs in Story 6.4." />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="data-integrity">Must preserve existing article content (Purpose, Key Exports, Signals, Missing Signals) — only modify Dependencies, Dependents, and External Dependencies sections. Articles were generated by Story 6.1 and contain valuable reverse-engineered content.</constraint>
+    <constraint type="accuracy">Import path resolution must handle: relative paths (./, ../), aliased paths (@/ from tsconfig.json), directory imports (resolve to index.ts/index.js), barrel re-exports (trace through to actual source). Incorrect resolution creates wrong edges.</constraint>
+    <constraint type="architecture">External dependencies (npm packages) must NOT generate [[wikilinks]] — there are no wiki articles for npm packages. They are listed in a separate subsection for informational purposes only.</constraint>
+    <constraint type="consistency">Wiki article slugs must use the -- convention from Story 6.1: src/utils/jwt.ts becomes code/src--utils--jwt.ts. Slug mismatches break graph edges.</constraint>
+    <constraint type="dependencies">Runs after Story 6.1 completes. Reads .mycelium/bootstrap-manifest.json to map file paths to article slugs. Can run in parallel with Story 6.3 since they modify different wiki directories.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>Bootstrap Manifest Input</name>
+      <kind>JSON file</kind>
+      <signature>.mycelium/bootstrap-manifest.json: { scannedFiles: [{ sourcePath, articlePath, slug }] } — maps source files to their wiki article paths</signature>
+      <path>/home/ubuntu/projects/{name}/.mycelium/bootstrap-manifest.json</path>
+    </interface>
+    <interface>
+      <name>Wiki Article Update</name>
+      <kind>markdown file</kind>
+      <signature>knowledge/code/{slug}.md: update ## Dependencies with outgoing [[wikilinks]], update ## Dependents with incoming [[wikilinks]], add ## External Dependencies for npm packages</signature>
+      <path>/home/ubuntu/projects/{name}/knowledge/code/</path>
+    </interface>
+    <interface>
+      <name>Dependency Map Output</name>
+      <kind>markdown file</kind>
+      <signature>knowledge/system/dependency-map.md: frontmatter (type: system, phase: system, status: active) + summary statistics + per-file dependency listing + circular dependency section</signature>
+      <path>/home/ubuntu/projects/{name}/knowledge/system/dependency-map.md</path>
+    </interface>
+    <interface>
+      <name>Pipeline Events</name>
+      <kind>DynamoDB event</kind>
+      <signature>futurator-agent-events: { eventType: progress, stage: deps, filesProcessed, edgesCreated }</signature>
+      <path>daemon/agent-daemon.mjs</path>
+    </interface>
+    <interface>
+      <name>Wikilink to Edge Mapping</name>
+      <kind>convention</kind>
+      <signature>[[code/src--utils--jwt.ts]] in ## Dependencies section becomes DEPENDS_ON edge from this article to code/src--utils--jwt.ts node in Memgraph</signature>
+      <path>docs/concepts/mycelium-labs-architecture.md</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Testing verifies: (1) import statements are correctly parsed from TypeScript/JavaScript/Python/CSS files, (2) relative paths resolve to correct absolute paths, (3) article slugs match the -- convention, (4) Dependencies and Dependents sections are updated bidirectionally, (5) circular dependencies are detected and reported, (6) barrel exports are resolved to actual source files, (7) external npm packages are listed separately without [[wikilinks]]. Tests run on EC2 against a bootstrapped project.</standards>
+    <locations>
+      <location>/home/ubuntu/scripts/bootstrap-deps.mjs</location>
+      <location>/home/ubuntu/projects/{name}/knowledge/code/</location>
+      <location>/home/ubuntu/projects/{name}/knowledge/system/dependency-map.md</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Select 5 source files with known imports. Parse them with bootstrap-deps.mjs and verify all import/require/from statements are extracted. Compare against manual count.</idea>
+      <idea ac="2">For a file importing ../utils/jwt: verify the resolved slug is code/src--utils--jwt.ts (or correct relative resolution). Check that the slug exists in bootstrap-manifest.json.</idea>
+      <idea ac="3">Read a code article after dependency extraction: verify ## Dependencies contains outgoing [[wikilinks]] and the target article's ## Dependents contains a reverse [[wikilink]] back. Bidirectional consistency check.</idea>
+      <idea ac="4">Read knowledge/system/dependency-map.md: verify it contains summary statistics (file count, edge count), per-file dependency listing, and the circular dependencies section exists.</idea>
+      <idea ac="5">If the project has known circular dependencies (e.g., A imports B imports A): verify they are listed in the circular dependency section of dependency-map.md with the full cycle path.</idea>
+      <idea ac="6">Create a test directory with index.ts that re-exports from ./inner.ts. Import from the directory in another file. Verify the resolved dependency points to inner.ts, not index.ts.</idea>
+      <idea ac="7">Read a code article that imports from npm (e.g., react, lodash): verify npm packages appear in ## External Dependencies without [[wikilinks]], and do NOT appear in ## Dependencies with [[wikilinks]].</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

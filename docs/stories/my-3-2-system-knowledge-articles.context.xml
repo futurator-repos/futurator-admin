@@ -1,0 +1,192 @@
+<![CDATA[<story-context id="my-3-2-system-knowledge-articles" v="1.0">
+  <metadata>
+    <epicId>MY-3</epicId>
+    <storyId>2</storyId>
+    <title>System Knowledge Articles</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-3-2-system-knowledge-articles.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>system-level knowledge articles automatically maintained by the compilation pipeline</iWant>
+    <soThat>cross-cutting concerns (pending work, deployment state, tech debt) are always visible as a project dashboard</soThat>
+    <tasks>
+      <task id="1" ac="5">Define system article frontmatter and format
+        <subtask>Create standard frontmatter template for system articles: type: system, phase: system, status: active, maturity: 1.0</subtask>
+        <subtask>Define section structure for each of the four system articles</subtask>
+        <subtask>Ensure system articles use [[wikilinks]] to reference the nodes they catalog</subtask>
+      </task>
+      <task id="2" ac="1,6">Implement pending-work.md generation
+        <subtask>Query all nodes from knowledge/index.md (or Memgraph) with maturity less than 0.6 or status: flagged</subtask>
+        <subtask>Group results by phase with counts and summaries</subtask>
+        <subtask>For flagged nodes, include flagReason and flagSeverity</subtask>
+        <subtask>Sort within each phase by maturity ascending (most incomplete first)</subtask>
+        <subtask>Integrate into epic compilation agent prompt (COMPILER generates this article)</subtask>
+      </task>
+      <task id="3" ac="2,6,7">Implement dependency-map.md generation
+        <subtask>Full regeneration mode (epic compilation): traverse all DEPENDS_ON edges, render as hierarchical list</subtask>
+        <subtask>Incremental mode (story compilation): append new DEPENDS_ON edges without rewriting the entire file</subtask>
+        <subtask>Include dependency direction and edge count per node</subtask>
+        <subtask>Flag circular dependencies if detected</subtask>
+      </task>
+      <task id="4" ac="3,6">Implement debt-registry.md generation
+        <subtask>Scan all articles for Missing Signals sections — each missing signal is a potential debt item</subtask>
+        <subtask>Scan for explicit tech debt markers (TODO, HACK, WORKAROUND, tech debt)</subtask>
+        <subtask>Assign severity based on article maturity and gap nature</subtask>
+        <subtask>Record origin story from article frontmatter for traceability</subtask>
+        <subtask>Group by severity then by phase</subtask>
+      </task>
+      <task id="5" ac="4,6">Implement deployment-manifest.md generation
+        <subtask>List all code articles with status: deployed — include deploy date, epic, and deploy URL</subtask>
+        <subtask>List all code articles with status: active not yet deployed — pending deployment</subtask>
+        <subtask>Include summary counts: deployed vs. pending vs. superseded</subtask>
+        <subtask>Link to latest knowledge/release/deploy-{date}.md record</subtask>
+      </task>
+      <task id="6" ac="6,7">Integrate system article generation into compilation pipeline
+        <subtask>Add system article regeneration as a task in epic compilation COMPILER agent prompt (Story 3.1)</subtask>
+        <subtask>Add incremental dependency-map.md update as a task in story compilation COMPILER agent prompt (Epic 2)</subtask>
+        <subtask>Ensure knowledge/index.md includes entries for all four system articles</subtask>
+        <subtask>System articles are synced to Memgraph as nodes with type: system during graph-sync</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">knowledge/system/pending-work.md lists all nodes with maturity less than 0.6 or status flagged, grouped by phase (discovery, planning, solutioning, implementation, qa, release, support)</criterion>
+    <criterion id="2">knowledge/system/dependency-map.md shows the top-level import graph across all code articles, derived from DEPENDS_ON edges</criterion>
+    <criterion id="3">knowledge/system/debt-registry.md lists items flagged as tech debt with severity (critical, moderate, low), origin story, and description</criterion>
+    <criterion id="4">knowledge/system/deployment-manifest.md tracks which code articles are deployed vs. pending deployment, with last deploy date and deploy URL</criterion>
+    <criterion id="5">Each system article has valid frontmatter with type: system and phase: system</criterion>
+    <criterion id="6">System articles are fully regenerated on each epic compilation (not incrementally updated)</criterion>
+    <criterion id="7">Story-level compilation only updates dependency-map.md incrementally (adding new edges, not regenerating)</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>2 Architecture Overview</section>
+        <snippet>knowledge/system/ directory structure: dependency-map.md, deployment-manifest.md, debt-registry.md, pending-work.md. These are cross-cutting synthesis articles maintained by the compilation pipeline.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>5.2 GraphRAG Query Patterns</section>
+        <snippet>Pending work Cypher query: MATCH nodes with status IN [active, flagged] AND maturity less than 0.6, ORDER BY phase priority then maturity ascending. This query pattern drives pending-work.md generation.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.3 Maturity Scoring</section>
+        <snippet>Maturity scores 0.0-1.0: Raw (0.0-0.2), Early (0.2-0.4), Partial (0.4-0.6), Solid (0.6-0.8), Ready (0.8-1.0). Nodes below 0.6 appear in pending-work.md.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.3 Epic Compilation Step</section>
+        <snippet>Epic compilation COMPILER agent prompt includes task 6: Update knowledge/system/pending-work.md. System articles are regenerated during this step.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Article types by phase: System phase includes dependency-map, deployment-manifest, debt-registry, pending-work — all created by compilation step (cross-cutting). Frontmatter includes type, phase, status, maturity fields.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>Edge types with weights: DEPENDS_ON (1.0), DERIVED_FROM (0.7), INFORMS (0.3), REFINES (0.5), VALIDATES (0.6), SUPERSEDES (0.8), CONFLICTS_WITH (0.9), ENABLES (0.5). Dependencies section maps to outgoing DEPENDS_ON edges.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step</section>
+        <snippet>Story compilation agent task 5: Update knowledge/system/dependency-map.md with new import relationships. This is the incremental update mode for dependency-map.md.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, runAgent, substituteTemplate</symbol>
+        <lines>430-731</lines>
+        <reason>The daemon executes the compilation pipeline whose COMPILER agent generates system articles. Understanding the pipeline execution flow is critical for integrating system article generation into the agent prompt.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/epic-workflow.ts</path>
+        <kind>types</kind>
+        <symbol>EpicWorkflow, EpicStatus</symbol>
+        <lines>1-79</lines>
+        <reason>Epic status determines when full regeneration occurs (epic compilation on completed). The deployment-manifest.md tracks deploy state which maps to EpicStatus deployed.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineDefinition, PipelineStep, AgentConfig</symbol>
+        <lines>1-58</lines>
+        <reason>The COMPILER agent step within the pipeline must have its prompt updated to include system article generation tasks. The pipeline definition structure constrains how system article generation is integrated.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="compilation-pipeline">
+        <package name="neo4j-driver" note="Memgraph queries for pending-work.md generation (querying nodes by maturity/status) and dependency-map.md (traversing DEPENDS_ON edges)" />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="regeneration">System articles are FULLY regenerated on each epic compilation (AC #6). They are not incrementally updated. The COMPILER agent rewrites them from scratch based on current graph state.</constraint>
+    <constraint type="incremental">EXCEPTION: dependency-map.md is updated incrementally during story compilation (AC #7). Only new DEPENDS_ON edges are appended, not the full file rewritten.</constraint>
+    <constraint type="dependency">This story depends on Epic 2 (story compilation must be working) and Story 3.1 (epic compilation pipeline must exist for the full regeneration trigger).</constraint>
+    <constraint type="maturity">System articles always have maturity: 1.0 because they are always current by definition (regenerated from live data). They should never appear in pending-work.md themselves.</constraint>
+    <constraint type="architecture">Wiki files are the source of truth. System articles are generated files that live on EC2 within each project's knowledge/system/ directory and are backed up to S3.</constraint>
+    <constraint type="wikilinks">System articles MUST use [[wikilinks]] to reference the nodes they catalog. This ensures edges are created in Memgraph during graph-sync, connecting system articles to the nodes they describe.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>System article frontmatter</name>
+      <kind>data format</kind>
+      <signature>type: system, phase: system, status: active, maturity: 1.0, created: {date}, updated: {date}</signature>
+      <path>knowledge/system/*.md</path>
+    </interface>
+    <interface>
+      <name>Pending work query</name>
+      <kind>Cypher query</kind>
+      <signature>MATCH (n:Node) WHERE n.projectId = $projectId AND n.status IN ['active', 'flagged'] AND n.maturity &lt; 0.6 RETURN n.nodeId, n.type, n.phase, n.title, n.maturity, n.status ORDER BY phase priority, maturity ASC</signature>
+      <path>Memgraph / knowledge/index.md</path>
+    </interface>
+    <interface>
+      <name>COMPILER agent prompt extension</name>
+      <kind>prompt integration</kind>
+      <signature>Additional tasks added to COMPILER prompt for system article generation (epic compilation: full regen, story compilation: incremental dependency-map only)</signature>
+      <path>Pipeline definition in generateEpicCompilePipeline() and generateStoryPipeline()</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Tests verify system article content and format. Each system article must have valid frontmatter, correct grouping/sorting, and valid [[wikilinks]]. Integration tests should run against a test knowledge base with known nodes at various maturity levels and statuses.</standards>
+    <locations>
+      <location>knowledge/system/pending-work.md</location>
+      <location>knowledge/system/dependency-map.md</location>
+      <location>knowledge/system/debt-registry.md</location>
+      <location>knowledge/system/deployment-manifest.md</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Verify pending-work.md lists nodes grouped by all 7 phases in correct order, with nodes sorted by maturity ascending. Test with a knowledge base containing flagged and low-maturity nodes across multiple phases.</idea>
+      <idea ac="2">Verify dependency-map.md shows DEPENDS_ON relationships as a hierarchical list with correct direction (A depends on B). Test with articles that have known Dependencies sections.</idea>
+      <idea ac="3">Verify debt-registry.md includes items from Missing Signals sections and explicit tech debt markers (TODO, HACK). Verify severity assignment and origin story attribution.</idea>
+      <idea ac="4">Verify deployment-manifest.md correctly categorizes articles as deployed vs. pending. Test with a mix of status: deployed, status: active, and status: superseded articles.</idea>
+      <idea ac="5">Verify each system article has frontmatter with type: system and phase: system. Parse YAML frontmatter and assert required fields.</idea>
+      <idea ac="6">Verify that running epic compilation produces completely fresh system articles (not appended to old content). Compare article content before and after to confirm full regeneration.</idea>
+      <idea ac="7">Verify that story compilation only appends new edges to dependency-map.md without rewriting existing content. Check file diff shows additions only.</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

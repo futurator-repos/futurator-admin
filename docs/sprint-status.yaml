@@ -1,0 +1,222 @@
+# generated: 2026-04-06
+# project: Futurator-Admin
+# project_key: Futurator-Admin
+# tracking_system: file-system
+# story_location: {project-root}/docs/stories
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic exists in epic file but not contexted
+#   - contexted: Next epic tech context created by *epic-tech-context (required)
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - drafted: Story file created in stories folder by *create-story
+#   - ready-for-dev: Draft approved and story context created by *story-ready
+#   - in-progress: Developer actively working on implementation by *dev-story
+#   - review: Implementation complete, ready for review by *code-review
+#   - done: Story completed by *story-done
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - completed: Retrospective has been done by *retrospective
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epics should be 'contexted' before stories can be 'drafted'
+# - SM typically drafts next story ONLY after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', dev reviews, then Dev moves to 'done'
+
+generated: "2026-04-06"
+project: "Futurator-Admin"
+project_key: "Futurator-Admin"
+tracking_system: "file-system"
+story_location: "{project-root}/docs/stories"
+
+development_status:
+  # ── Epic 0: Project Scaffolding & Infrastructure ──
+  epic-0: done
+  0-1-nextjs-project-initialization: done
+  0-2-dev-tooling-eslint-prettier-knip-husky: done
+  0-3-sst-initialization-and-infrastructure: done
+  0-4-dynamodb-tables: done
+  0-5-hono-api-router-with-health-endpoint: done
+  0-6-identity-broker-registration-and-ssm-parameters: done
+  0-7-google-oauth-authentication-flow: done
+  0-8-app-shell-and-layout: done
+  0-9-vitest-testing-setup: done
+  0-10-ci-pipeline-script: done
+  epic-0-retrospective: optional
+
+  # ── Epic 1: AWS Tagging Foundation ──
+  epic-1: done
+  1-1-tag-audit-script: done
+  1-2-bulk-retroactive-tagging: done
+  1-3-activate-cost-allocation-tags: done
+  1-4-tag-compliance-api-endpoint: done
+  epic-1-retrospective: optional
+
+  # ── Epic 2: Project Registry ──
+  epic-2: done
+  2-1-project-data-model-and-repository: done
+  2-2-seed-all-projects: done
+  2-3-project-api-endpoints: done
+  2-4-project-registry-dashboard: done
+  2-5-project-detail-page: done
+  epic-2-retrospective: optional
+
+  # ── Epic 3: AWS Cost Dashboard ──
+  epic-3: done
+  3-1-cost-aggregation-lambda: done
+  3-2-cost-api-endpoints: done
+  3-3-portfolio-cost-dashboard-ui: done
+  3-4-per-project-cost-view: done
+  3-5-cost-anomaly-detection-display: done
+  3-6-budget-setup-and-tracking: done
+  epic-3-retrospective: optional
+
+  # ── Epic 4: AWS Resource Map ──
+  epic-4: done
+  4-1-resource-discovery-lambda: done
+  4-2-resource-api-endpoints: done
+  4-3-resource-map-ui: done
+  4-4-basic-consistency-audit: done
+  epic-4-retrospective: optional
+
+  # ── Epic 5: Multi-Provider Cost Aggregation (MVP 2) ──
+  epic-5: done
+  5-1-cost-provider-abstraction-layer: done
+  5-2-google-cloud-cost-integration: done
+  5-3-api-provider-cost-integrations: done
+  5-4-manual-cost-entry: done
+  5-5-unified-multi-provider-dashboard: done
+  epic-5-retrospective: optional
+
+  # ── Epic 6: Resource Scheduler (MVP 2) ──
+  epic-6: done
+  6-1-schedule-data-model-and-crud-api: done
+  6-2-eventbridge-scheduler-integration: done
+  6-3-ec2-start-stop-actions: done
+  6-4-ecs-task-start-stop-actions: done
+  6-5-scheduler-dashboard-ui: done
+  epic-6-retrospective: optional
+
+  # ── Epic 7: Identity Dashboard (MVP 2) ──
+  epic-7: done
+  7-1-cognito-user-sync-lambda: done
+  7-2-user-directory-api-and-ui: done
+  7-3-per-project-user-counts: done
+  epic-7-retrospective: optional
+
+  # ── Epic 8: Alert Management (MVP 2) ──
+  epic-8: done
+  8-1-cloudwatch-alarm-discovery: done
+  8-2-budget-breach-notifications: done
+  8-3-unified-alert-dashboard: done
+  8-4-email-notification-routing: done
+  epic-8-retrospective: optional
+
+  # ── Epic 9 (PH-1): Theme & Shell Overhaul ──
+  epic-9: backlog
+  9-1-port-futurator-oklch-design-tokens: done
+  9-2-add-dark-light-theme-toggle: done
+  9-3-update-typography-to-geist: done
+  9-4-user-dropdown-in-sidebar: done
+  9-5-dark-mode-token-migration: done
+  epic-9-retrospective: optional
+
+  # ── Epic 10 (PH-2): Project Data Model Expansion ──
+  epic-10: backlog
+  10-1-expand-typescript-types-and-zod-schemas: done
+  10-2-data-migration-script: done
+  10-3-update-api-hooks-and-client-types: done
+  10-4-public-projects-api-endpoint: done
+  epic-10-retrospective: optional
+
+  # ── Epic 11 (PH-3): Project List View ──
+  epic-11: backlog
+  11-1-project-list-row-component: done
+  11-2-filter-bar-with-sorting: done
+  11-3-create-project-button-informational: done
+  epic-11-retrospective: optional
+
+  # ── Epic 12 (PH-4): Project Edit Modal Core ──
+  epic-12: backlog
+  12-1-edit-modal-shell-with-accordion: done
+  12-2-identity-section: done
+  12-3-descriptions-section-with-char-counters: done
+  12-4-save-flow-with-validation: done
+  epic-12-retrospective: optional
+
+  # ── Epic 13 (PH-5): Rich Editing Components ──
+  epic-13: backlog
+  13-1-chip-input-with-autocomplete: done
+  13-2-feature-editor-multi-provider-chips: done
+  13-3-media-manager-component: done
+  13-4-team-section: done
+  epic-13-retrospective: optional
+
+  # ── Epic 14 (PH-6): Homepage Publish Pipeline ──
+  epic-14: backlog
+  14-1-s3-static-json-export-on-save: done
+  14-2-cloudfront-cache-invalidation: done
+  14-3-futurator-homepage-integration: done
+  epic-14-retrospective: optional
+
+  # ══════════════════════════════════════════════════════
+  # MODULE: Mycelium Devs (from epics-mycelium-devs.md)
+  # ══════════════════════════════════════════════════════
+
+  # ── Epic 1 (MY-1): Knowledge Foundation & Memgraph Infrastructure ──
+  epic-my-1: backlog
+  my-1-1-memgraph-docker-deployment: review
+  my-1-2-memgraph-schema-and-vector-index: review
+  my-1-3-wiki-directory-structure-and-article-format: review
+  my-1-4-voyage-ai-embedding-helper-module: review
+  my-1-5-graph-sync-script: review
+  my-1-6-s3-wiki-backup-integration: review
+  epic-my-1-retrospective: optional
+
+  # ── Epic 2 (MY-2): Story Compilation Pipeline ──
+  epic-my-2: backlog
+  my-2-1-extend-story-pipeline-with-compile-step: review
+  my-2-2-diff-extraction-shell-step: review
+  my-2-3-knowledge-compiler-agent-step: review
+  my-2-4-embed-and-sync-shell-step: review
+  my-2-5-compilation-status-tracking: review
+  epic-my-2-retrospective: optional
+
+  # ── Epic 3 (MY-3): Epic & Deployment Lifecycle ──
+  epic-my-3: backlog
+  my-3-1-epic-compilation-pipeline: review
+  my-3-2-system-knowledge-articles: review
+  my-3-3-deployment-compilation-pipeline: review
+  my-3-4-pruning-scan-and-node-archival: review
+  my-3-5-impact-propagation-engine: review
+  epic-my-3-retrospective: optional
+
+  # ── Epic 4 (MY-4): Pre-Development Phase Compilation ──
+  epic-my-4: backlog
+  my-4-1-document-generation-compilation-hook: review
+  my-4-2-requirement-decomposition-from-prds: review
+  my-4-3-decision-extraction-from-architecture: review
+  my-4-4-phase-gate-enforcement: review
+  epic-my-4-retrospective: optional
+
+  # ── Epic 5 (MY-5): Conversational Agent ──
+  epic-my-5: backlog
+  my-5-1-graphrag-search-tool: review
+  my-5-2-four-layer-search-cascade: review
+  my-5-3-conversation-pipeline-type: review
+  my-5-4-conversation-to-knowledge-compilation: review
+  my-5-5-self-reflection-mode: review
+  epic-my-5-retrospective: optional
+
+  # ── Epic 6 (MY-6): Brownfield Bootstrap ──
+  epic-my-6: backlog
+  my-6-1-codebase-scan-agent: review
+  my-6-2-import-dependency-extraction: review
+  my-6-3-decision-and-config-inference: review
+  my-6-4-full-graph-population-and-verification: review
+  epic-my-6-retrospective: optional

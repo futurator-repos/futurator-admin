@@ -1,0 +1,186 @@
+<![CDATA[<story-context id="my-2-3-knowledge-compiler-agent-step" v="1.0">
+  <metadata>
+    <epicId>MY-2</epicId>
+    <storyId>3</storyId>
+    <title>Knowledge Compiler Agent Step</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-2-3-knowledge-compiler-agent-step.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>an agent step that reads the diff manifest and creates/updates wiki articles for each changed file</iWant>
+    <soThat>code changes are automatically decomposed into structured knowledge nodes</soThat>
+    <tasks>
+      <task id="1" ac="1,2,3">Define the COMPILER agent step in the pipeline
+        <subtask>Add the compile-knowledge step to generateStoryPipeline() after the compile-diff step</subtask>
+        <subtask>Set stepType: 'agent', agentId: 'COMPILER'</subtask>
+        <subtask>Craft the prompt template injecting {{DIFF_MANIFEST}}, {{WORK_SUMMARY}}, story acceptance criteria, and epic title</subtask>
+        <subtask>Configure allowed tools: Read, Write, Edit, Glob, Grep</subtask>
+        <subtask>Set captureAs: 'COMPILE_RESULT' to capture compilation output for the sync step</subtask>
+      </task>
+      <task id="2" ac="1,2,3,4,8">Implement the Knowledge Compiler prompt
+        <subtask>Write the system prompt for the COMPILER agent following the architecture doc section 4.2 Step B specification</subtask>
+        <subtask>Include instructions for creating new code articles with the standard article format (frontmatter + Purpose/Key Exports/Dependencies/Dependents/Signals/Missing Signals/Notes)</subtask>
+        <subtask>Include instructions for updating existing articles and revising lastMutatedByStory</subtask>
+        <subtask>Include instructions for marking deleted files as status: superseded</subtask>
+        <subtask>Include instructions for extracting decisions (library choices, pattern selections, API design) from WORK_SUMMARY</subtask>
+        <subtask>Mandate [[wikilinks]] format for all cross-references</subtask>
+      </task>
+      <task id="3" ac="1,8">Implement wiki article creation logic
+        <subtask>Define the article frontmatter template with fields: title, type (code), phase (implementation), status (active), maturity, created, updated, createdByEpic, createdByStory, lastMutatedByStory, tags</subtask>
+        <subtask>Define the file naming convention: knowledge/code/{slug}.md where slug uses -- for path separators (e.g., src--components--auth.tsx.md)</subtask>
+        <subtask>Include wikilink generation instructions for Dependencies and Dependents sections based on import analysis</subtask>
+      </task>
+      <task id="4" ac="5,6">Implement dependency map and index updates
+        <subtask>Add instructions in the compiler prompt to update knowledge/system/dependency-map.md with new import relationships</subtask>
+        <subtask>Add instructions to update knowledge/index.md with new article entries (slug, title, type, status)</subtask>
+        <subtask>Ensure index entries link to their articles via relative paths</subtask>
+      </task>
+      <task id="5" ac="7">Implement compilation logging
+        <subtask>Add instructions to append a record to knowledge/log.md with: timestamp, story ID, compilation type, articles created/updated/superseded counts</subtask>
+        <subtask>Define the log entry format for consistency across story and epic compilations</subtask>
+      </task>
+      <task id="6" ac="1,8">Validate article format compliance
+        <subtask>Verify created articles match the Karpathy wiki pattern from architecture doc section 3.1</subtask>
+        <subtask>Verify wikilinks resolve to valid knowledge/ paths</subtask>
+        <subtask>Verify frontmatter YAML is valid and contains all required fields</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">For each new file in DIFF_MANIFEST: a wiki article is created in knowledge/code/ with full frontmatter (title, type, phase, status, maturity, dates, tags) and sections (Purpose, Key Exports, Dependencies, Dependents, Signals, Missing Signals, Notes)</criterion>
+    <criterion id="2">For each modified file: the existing wiki article is updated with revised content and lastMutatedByStory is set to the current story ID</criterion>
+    <criterion id="3">For deleted files: the corresponding article's status is set to superseded</criterion>
+    <criterion id="4">Architectural decisions from the WORK_SUMMARY are extracted and saved to knowledge/decisions/ as decision articles</criterion>
+    <criterion id="5">knowledge/system/dependency-map.md is updated with new import relationships discovered from the changed files</criterion>
+    <criterion id="6">knowledge/index.md is updated with new/changed article entries</criterion>
+    <criterion id="7">knowledge/log.md gets a compilation record appended with timestamp, story ID, and article count</criterion>
+    <criterion id="8">All cross-references between articles use [[wikilinks]] format (e.g., [[code/src--components--auth.tsx]])</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step — Step B</section>
+        <snippet>Step B — Knowledge compilation (agent, ~$0.03-0.08). Prompt injected with DIFF_MANIFEST, WORK_SUMMARY, knowledge/index.md, and story acceptance criteria. Agent task: For each changed file: create/update wiki articles, extract decisions from WORK_SUMMARY, update dependency-map.md, update index.md, update log.md. Use [[wikilinks]] for all cross-references. Allowed tools: Read,Write,Edit,Glob,Grep.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Article format: YAML frontmatter (title, type, phase, status, maturity, created, updated, createdByEpic, createdByStory, lastMutatedByStory, tags) followed by sections: Purpose, Key Exports, Dependencies, Dependents, Signals, Missing Signals, Notes. File naming convention: knowledge/{phase}/{slug}.md where slug uses -- for path separators in code files (e.g., src--components--auth.tsx.md).</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>Edges derived from [[wikilinks]] in articles. Section-to-edge mapping: Dependencies section -> DEPENDS_ON outgoing, Dependents section -> DEPENDS_ON incoming, Derived From -> DERIVED_FROM, Informs -> INFORMS, Validates -> VALIDATES, Supersedes -> SUPERSEDES, Conflicts With -> CONFLICTS_WITH bidirectional, Enables -> ENABLES. Wikilink placement determines edge type in Memgraph.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>2 Architecture Overview — Project Workspace</section>
+        <snippet>knowledge/ directory structure: index.md (master catalog), log.md (append-only ops log), code/ (one article per file), decisions/ (architecture choices), requirements/, discovery/, planning/, solutioning/, qa/, system/ (dependency-map.md, deployment-manifest.md, debt-registry.md, pending-work.md), archive/ (pruned nodes).</snippet>
+      </doc>
+      <doc>
+        <path>docs/epics-mycelium-devs.md</path>
+        <title>Mycelium Devs Epic Breakdown</title>
+        <section>Epic 2 / Story 2.3</section>
+        <snippet>Story 2.3 acceptance criteria for knowledge compiler agent step.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>functions/api/index.ts</path>
+        <kind>api</kind>
+        <symbol>generateStoryPipeline</symbol>
+        <lines>486-607</lines>
+        <reason>The function where the compile-knowledge agent step is defined. The step uses agentId: 'COMPILER' and a prompt template with {{DIFF_MANIFEST}} and {{WORK_SUMMARY}} variables. The COMPILER agent must be added to the agents record.</reason>
+      </file>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>runAgent, substituteTemplate, executeStep</symbol>
+        <lines>91-99, 183-336, 527-639</lines>
+        <reason>Agent step executor. substituteTemplate() replaces {{VAR}} placeholders with values from the variable store. runAgent() spawns the Claude CLI process with allowed tools and captures output. executeStep() orchestrates the agent execution including extractors and variable capture.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>AgentConfig, PipelineStep</symbol>
+        <lines>7-58</lines>
+        <reason>AgentConfig defines the COMPILER agent configuration: name, allowedTools ('Read,Write,Edit,Glob,Grep'), model. PipelineStep for the agent step: id, agentId, prompt with template variables, captureAs for COMPILE_RESULT.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="agent-tools">
+        <package name="Read" note="COMPILER agent tool for reading source files to understand their purpose and exports." />
+        <package name="Write" note="COMPILER agent tool for creating new wiki articles in knowledge/ directories." />
+        <package name="Edit" note="COMPILER agent tool for updating existing wiki articles (revising content, updating frontmatter)." />
+        <package name="Glob" note="COMPILER agent tool for finding existing wiki articles by pattern matching." />
+        <package name="Grep" note="COMPILER agent tool for searching across wiki articles for cross-references and existing content." />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="cost">Agent step costs approximately $0.03-0.08 per compilation depending on diff size. This is the most expensive sub-step in the COMPILE phase. Model selection impacts cost — sonnet is preferred for cost efficiency.</constraint>
+    <constraint type="article-format">Articles MUST follow the Karpathy wiki pattern: YAML frontmatter delimited by --- followed by structured sections (Purpose, Key Exports, Dependencies, Dependents, Signals, Missing Signals, Notes). All frontmatter fields are required.</constraint>
+    <constraint type="naming">File naming convention: knowledge/code/{slug}.md where slug replaces path separators with -- (e.g., src/components/auth.tsx becomes src--components--auth.tsx.md). This naming enables bidirectional mapping between source files and wiki articles.</constraint>
+    <constraint type="wikilinks">All cross-references MUST use [[wikilinks]] format (e.g., [[code/src--components--auth.tsx]]). Wikilink section placement determines edge type in Memgraph. Dependencies section links become DEPENDS_ON edges.</constraint>
+    <constraint type="idempotency">The compiler must be idempotent. Running compilation twice on the same diff should produce the same result. Existing articles should be updated in place, not duplicated.</constraint>
+    <constraint type="scope">The compiler ONLY processes files listed in DIFF_MANIFEST. It does not scan the entire codebase. This keeps compilation time proportional to change size.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>DIFF_MANIFEST input variable</name>
+      <kind>pipeline variable</kind>
+      <signature>{{DIFF_MANIFEST}} — multiline string of STATUS\tFILENAME lines from the compile-diff shell step. Each line is A (added), M (modified), or D (deleted) followed by a tab and the relative file path.</signature>
+      <path>functions/api/index.ts</path>
+    </interface>
+    <interface>
+      <name>WORK_SUMMARY input variable</name>
+      <kind>pipeline variable</kind>
+      <signature>{{WORK_SUMMARY}} — extracted from the Dev agent's output between ---WORK_SUMMARY--- and ---END_WORK_SUMMARY--- delimiters. Contains a brief summary of files created/modified and what was done.</signature>
+      <path>functions/api/index.ts</path>
+    </interface>
+    <interface>
+      <name>COMPILE_RESULT output variable</name>
+      <kind>pipeline variable</kind>
+      <signature>captureAs: 'COMPILE_RESULT' — captures the COMPILER agent's final output for downstream steps (compile-sync).</signature>
+      <path>functions/api/index.ts</path>
+    </interface>
+    <interface>
+      <name>Wiki article format</name>
+      <kind>file format</kind>
+      <signature>YAML frontmatter (title, type, phase, status, maturity, created, updated, createdByEpic, createdByStory, lastMutatedByStory, tags) + markdown sections (Purpose, Key Exports, Dependencies with [[wikilinks]], Dependents with [[wikilinks]], Signals, Missing Signals, Notes)</signature>
+      <path>knowledge/code/{slug}.md</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Testing focuses on the COMPILER agent prompt correctness and the resulting wiki article format compliance. Unit tests verify prompt template includes all required variables. Integration tests verify the agent produces valid articles when given a sample DIFF_MANIFEST.</standards>
+    <locations>
+      <location>functions/api/index.ts</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Provide a DIFF_MANIFEST with new files (A status). Verify the COMPILER creates articles in knowledge/code/ with complete frontmatter and all required sections. Validate YAML frontmatter parses correctly.</idea>
+      <idea ac="2">Provide a DIFF_MANIFEST with modified files (M status) where existing articles exist. Verify the COMPILER updates the article content and sets lastMutatedByStory to the current story ID. Verify updated date is changed.</idea>
+      <idea ac="3">Provide a DIFF_MANIFEST with deleted files (D status). Verify the COMPILER sets the corresponding article's frontmatter status to superseded.</idea>
+      <idea ac="4">Provide a WORK_SUMMARY containing an architectural decision (e.g., "chose Zustand over Redux for state management"). Verify the COMPILER creates an article in knowledge/decisions/ with the decision details and links to implementing code articles.</idea>
+      <idea ac="5">After compilation, verify knowledge/system/dependency-map.md contains import relationships from the changed files. Check that new imports create new entries in the map.</idea>
+      <idea ac="6">After compilation, verify knowledge/index.md contains entries for all new/changed articles with correct slug, title, type, and status.</idea>
+      <idea ac="7">After compilation, verify knowledge/log.md has a new record appended with timestamp, story ID, and counts of articles created/updated/superseded.</idea>
+      <idea ac="8">Scan all created/updated articles for cross-references. Verify all use [[wikilinks]] format. Verify no raw file paths or URLs are used for internal knowledge references.</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

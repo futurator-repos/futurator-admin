@@ -1,0 +1,201 @@
+<![CDATA[<story-context id="my-2-5-compilation-status-tracking" v="1.0">
+  <metadata>
+    <epicId>MY-2</epicId>
+    <storyId>5</storyId>
+    <title>Compilation Status Tracking and Error Handling</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-2-5-compilation-status-tracking.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>compilation status tracked per story and surfaced in the pipeline events</iWant>
+    <soThat>I can monitor compilation health and debug failures without affecting story delivery</soThat>
+    <tasks>
+      <task id="1" ac="1">Extend workflow types with compilation metadata
+        <subtask>Add compilationStatus?: 'success' | 'failed' | 'skipped' to EpicStory in functions/shared/types/epic-workflow.ts</subtask>
+        <subtask>Add compilationStartedAt?: string and compilationCompletedAt?: string timestamps to EpicStory</subtask>
+        <subtask>Add compilationArticleCounts?: { created: number; updated: number; superseded: number } to EpicStory</subtask>
+        <subtask>Mirror all type additions in src/types/epic-workflow.ts for frontend consumption</subtask>
+      </task>
+      <task id="2" ac="2">Implement compilation timing capture
+        <subtask>Record compilationStartedAt when the compile-diff step begins</subtask>
+        <subtask>Record compilationCompletedAt when the compile-sync step completes (or when any compile step fails)</subtask>
+        <subtask>Calculate duration and include in the completion event payload</subtask>
+        <subtask>Extract article counts from the COMPILER agent output and/or graph-sync.mjs stdout</subtask>
+      </task>
+      <task id="3" ac="2,3">Emit structured compilation events
+        <subtask>Emit a compilation-started event to futurator-agent-events when the COMPILE phase begins</subtask>
+        <subtask>Emit a compilation-completed event with status, timing, and article counts on success</subtask>
+        <subtask>Emit a compilation-failed event with error message and stack trace on failure</subtask>
+        <subtask>Ensure events include storyId, epicId, and projectId for correlation</subtask>
+      </task>
+      <task id="4" ac="4">Implement non-blocking error handling
+        <subtask>Wrap the COMPILE phase execution in a try/catch in the pipeline orchestrator</subtask>
+        <subtask>On catch: set compilationStatus: 'failed', emit warning event, but allow story to proceed to done status</subtask>
+        <subtask>Set compilationStatus: 'skipped' when the COMPILE phase is skipped (e.g., no diff, or Epic 1 infra not yet deployed)</subtask>
+        <subtask>Set compilationStatus: 'success' only when all three compile sub-steps complete without error</subtask>
+      </task>
+      <task id="5" ac="5">Update knowledge log with compilation results
+        <subtask>On successful compilation: append a success record to knowledge/log.md (already handled by COMPILER agent in Story 2.3, verify it works)</subtask>
+        <subtask>On failed compilation: append a failure record to knowledge/log.md with error summary — this requires a fallback write since the COMPILER agent may have been the step that failed</subtask>
+        <subtask>Define a consistent log entry format: | {timestamp} | {storyId} | {status} | {articles_created}/{articles_updated}/{articles_superseded} | {error_summary} |</subtask>
+      </task>
+      <task id="6" ac="1">Persist compilation status to DynamoDB
+        <subtask>Update the EpicWorkflow repository to persist compilationStatus and metadata when updating story status</subtask>
+        <subtask>Ensure the existing updateStoryStatus() or equivalent function handles the new fields</subtask>
+        <subtask>Verify the frontend can read and display compilationStatus from the API response</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">The story's workflow record includes compilationStatus: 'success' | 'failed' | 'skipped' reflecting the outcome of the COMPILE phase</criterion>
+    <criterion id="2">Compilation timing (start time, end time, duration) and article counts (created, updated, superseded) are recorded in pipeline events</criterion>
+    <criterion id="3">Compilation errors are logged with full stack traces in agent events emitted to futurator-agent-events</criterion>
+    <criterion id="4">A failed compilation emits a warning event but the story is still marked as completed (non-blocking)</criterion>
+    <criterion id="5">knowledge/log.md records both successful and failed compilation attempts with timestamps and error summaries</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step</section>
+        <snippet>The COMPILE step is non-blocking: compilation failure does NOT fail the story pipeline. The story is still marked as completed. Compilation is an enhancement layer, not a gate. Three sub-steps: compile-diff (shell), compile-knowledge (agent), compile-sync (shell).</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.1 Compilation Triggers</section>
+        <snippet>Implementation phase trigger: after STORY completion. The compilation trigger model defines when compilation happens and what it produces. Status tracking ensures visibility into compilation health.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.3 DynamoDB Tables</section>
+        <snippet>Existing tables: futurator-agent-jobs (pipeline state), futurator-agent-events (streaming events with TTL), futurator-epic-workflows (epic definitions, stories, statuses), futurator-project-registry (project metadata). No new tables needed — compilation status is stored within the existing EpicStory records in futurator-epic-workflows.</snippet>
+      </doc>
+      <doc>
+        <path>docs/epics-mycelium-devs.md</path>
+        <title>Mycelium Devs Epic Breakdown</title>
+        <section>Epic 2 / Story 2.5</section>
+        <snippet>Story 2.5 acceptance criteria for compilation status tracking and error handling. Observability and reliability layer for the compilation pipeline.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>functions/shared/types/epic-workflow.ts</path>
+        <kind>types</kind>
+        <symbol>EpicStory, StoryStatus</symbol>
+        <lines>38-50</lines>
+        <reason>EpicStory interface to extend with compilationStatus, compilationStartedAt, compilationCompletedAt, and compilationArticleCounts fields. Current fields: storyId, order, title, description, status, jobId, dependsOn, wave, hasBrowserTests, criteria, visualTests.</reason>
+      </file>
+      <file>
+        <path>src/types/epic-workflow.ts</path>
+        <kind>types</kind>
+        <symbol>EpicStory</symbol>
+        <lines>38-50</lines>
+        <reason>Frontend mirror of EpicStory interface. Must be updated in sync with the backend type to add all compilation metadata fields.</reason>
+      </file>
+      <file>
+        <path>functions/shared/repositories/epic-workflow-repository.ts</path>
+        <kind>repository</kind>
+        <symbol>updateEpicFields</symbol>
+        <lines>26-54</lines>
+        <reason>DynamoDB persistence for EpicWorkflow records. Uses UpdateCommand with dynamic expression building. compilationStatus and metadata will be persisted through this function when updating the stories array within the epic record.</reason>
+      </file>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, pushEvent, updateJobFields</symbol>
+        <lines>63-87, 377-401, 641-731</lines>
+        <reason>Pipeline executor where non-blocking error handling is implemented. pushEvent() emits events to futurator-agent-events DynamoDB table. updateJobFields() persists pipeline state. The COMPILE phase try/catch and compilationStatus determination happen in executePipeline().</reason>
+      </file>
+      <file>
+        <path>functions/api/index.ts</path>
+        <kind>api</kind>
+        <symbol>generateStoryPipeline</symbol>
+        <lines>486-607</lines>
+        <reason>Pipeline definition where compile steps are defined (Stories 2.1-2.4). This story adds observability to those steps. The story status update logic that sets compilationStatus after pipeline completion is in the API handlers that process job completion callbacks.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>AgentEventType, AgentEvent</symbol>
+        <lines>111-159</lines>
+        <reason>Event type definitions. AgentEventType currently includes: text_delta, tool_use, tool_result, result, status, step_start, step_complete, step_error, extraction, validation. May need to extend with compilation-specific event types (compilation-started, compilation-completed, compilation-failed) or use existing status type.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="existing">
+        <package name="@aws-sdk/client-dynamodb" note="Already installed. Used for pipeline event emission to futurator-agent-events." />
+        <package name="@aws-sdk/lib-dynamodb" note="Already installed. Used for EpicWorkflow persistence via PutCommand/UpdateCommand." />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="architecture">Compilation is enhancement, not gate. A story with status 'done' can have compilationStatus 'failed'. These are orthogonal fields. The compilationStatus field must never block story completion.</constraint>
+    <constraint type="types">All type additions to functions/shared/types/epic-workflow.ts MUST be mirrored in src/types/epic-workflow.ts. Both files define the EpicStory interface — one for backend, one for frontend.</constraint>
+    <constraint type="events">Compilation events use the existing futurator-agent-events table and pushEvent() mechanism. Events have a 7-day TTL (expireAt). Events must include jobId, stepId, agentId for correlation with the pipeline event stream.</constraint>
+    <constraint type="error-handling">The try/catch for the COMPILE phase must be at the right level — wrapping all three compile steps. Individual step failures within the COMPILE phase should be captured, but the outer pipeline should continue to mark the story as completed.</constraint>
+    <constraint type="log-fallback">When the COMPILER agent fails, the daemon itself must write the failure record to knowledge/log.md. This requires the daemon to have write access to the project workspace (it already does via workingDir).</constraint>
+    <constraint type="backward-compat">Existing stories without compilation should have compilationStatus undefined (not 'skipped'). The field is optional in the type definition. Only stories processed after this feature is deployed will have a compilationStatus value.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>compilationStatus field</name>
+      <kind>data field</kind>
+      <signature>compilationStatus?: 'success' | 'failed' | 'skipped' — optional field on EpicStory interface. Set after COMPILE phase completes or fails.</signature>
+      <path>functions/shared/types/epic-workflow.ts</path>
+    </interface>
+    <interface>
+      <name>compilationArticleCounts field</name>
+      <kind>data field</kind>
+      <signature>compilationArticleCounts?: { created: number; updated: number; superseded: number } — counts of articles processed during compilation. Extracted from COMPILER agent output.</signature>
+      <path>functions/shared/types/epic-workflow.ts</path>
+    </interface>
+    <interface>
+      <name>Compilation events</name>
+      <kind>protocol</kind>
+      <signature>pushEvent(jobId, 'compile-*', agentId, 'compilation-started|compilation-completed|compilation-failed', { compilationStatus, timing, articleCounts, errorMessage })</signature>
+      <path>daemon/agent-daemon.mjs</path>
+    </interface>
+    <interface>
+      <name>knowledge/log.md entry format</name>
+      <kind>file format</kind>
+      <signature>| {timestamp} | {storyId} | {status: success|failed} | {created}/{updated}/{superseded} | {error_summary or 'OK'} |</signature>
+      <path>{workingDir}/knowledge/log.md</path>
+    </interface>
+    <interface>
+      <name>updateEpicFields persistence</name>
+      <kind>repository method</kind>
+      <signature>updateEpicFields(epicId, { stories: updatedStories }) — persists the stories array including compilationStatus metadata to DynamoDB</signature>
+      <path>functions/shared/repositories/epic-workflow-repository.ts</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Testing covers type correctness, event emission, non-blocking error handling, and DynamoDB persistence. Unit tests verify type definitions compile. Integration tests simulate compilation success, failure, and skip scenarios to verify correct status assignment and event emission.</standards>
+    <locations>
+      <location>functions/shared/types/epic-workflow.ts</location>
+      <location>src/types/epic-workflow.ts</location>
+      <location>daemon/agent-daemon.mjs</location>
+      <location>functions/shared/repositories/epic-workflow-repository.ts</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Verify EpicStory interface in both type files includes compilationStatus, compilationStartedAt, compilationCompletedAt, and compilationArticleCounts optional fields. Run TypeScript compiler to validate types.</idea>
+      <idea ac="2">Simulate a successful compilation pipeline run. Verify compilation-completed event contains compilationStartedAt, compilationCompletedAt, duration, and article counts (created, updated, superseded).</idea>
+      <idea ac="3">Simulate a compile step failure (e.g., COMPILER agent crashes). Verify a compilation-failed event is emitted with the error message and stack trace. Verify the event appears in the futurator-agent-events table.</idea>
+      <idea ac="4">Simulate a compile step failure. Verify the story pipeline still completes with status COMPLETED. Verify the story's compilationStatus is set to 'failed' while status remains 'done'. Verify no error is thrown to the caller.</idea>
+      <idea ac="5">After a successful compilation, verify knowledge/log.md has a new success entry. After a failed compilation (simulate COMPILER agent failure), verify knowledge/log.md has a failure entry with error summary written by the daemon fallback.</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

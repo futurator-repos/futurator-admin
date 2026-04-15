@@ -1,0 +1,204 @@
+<![CDATA[<story-context id="my-3-3-deployment-compilation-pipeline" v="1.0">
+  <metadata>
+    <epicId>MY-3</epicId>
+    <storyId>3</storyId>
+    <title>Deployment Compilation Pipeline</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-3-3-deployment-compilation-pipeline.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>a compilation pipeline triggered after successful deployment</iWant>
+    <soThat>wiki snapshots are archived, deployed code is marked, and deployment records are created for full release traceability</soThat>
+    <tasks>
+      <task id="1" ac="1">Create deployment completion listener
+        <subtask>Hook into the deployment pipeline completion event to detect successful deploys</subtask>
+        <subtask>Create generateDeployCompilePipeline() function that builds the three-step pipeline definition (shell -> agent -> shell)</subtask>
+        <subtask>Enqueue the deploy-compile job to futurator-agent-jobs with projectId, PROJECT_NAME, DEPLOY_URL, and date context</subtask>
+        <subtask>Emit pipeline status events for each compilation sub-step</subtask>
+      </task>
+      <task id="2" ac="2">Implement S3 wiki snapshot shell step
+        <subtask>Create shell step that tars the knowledge/ directory</subtask>
+        <subtask>Upload tarball to s3://futurator-ai-website/knowledge-archives/{projectId}/{date}.tar.gz</subtask>
+        <subtask>Each archive is a new file (versioned by date), never overwritten</subtask>
+        <subtask>Clean up local /tmp/ tarball after successful upload</subtask>
+        <subtask>Snapshot failure logs a warning but does not block remaining compilation steps</subtask>
+      </task>
+      <task id="3" ac="3,4,5,6">Implement COMPILER agent deploy-nodes step
+        <subtask>Create agent step with agentId: COMPILER and post-deployment prompt from architecture doc section 4.4</subtask>
+        <subtask>Agent creates knowledge/release/deploy-{date}.md with deployment metadata and [[wikilinks]] to deployed code articles</subtask>
+        <subtask>Agent marks code articles with completed epic status as status: deployed in frontmatter</subtask>
+        <subtask>Agent updates knowledge/system/deployment-manifest.md with latest deploy info</subtask>
+        <subtask>Agent appends deployment event to knowledge/log.md</subtask>
+        <subtask>Agent updates knowledge/index.md to include the new deploy record</subtask>
+      </task>
+      <task id="4" ac="7">Implement full graph resync with prune flag
+        <subtask>Add shell step calling graph-sync.mjs with --full-resync --prune flags</subtask>
+        <subtask>The --prune flag tells graph-sync to remove nodes whose articles have been moved to knowledge/archive/ (prepared for Story 3.4)</subtask>
+        <subtask>Include S3 live backup of knowledge/ directory after sync</subtask>
+      </task>
+      <task id="5" ac="3">Create knowledge/release/ directory support
+        <subtask>Ensure knowledge/release/ directory is part of wiki initialization script (init-wiki.sh from Story 1.3)</subtask>
+        <subtask>Define deployment record article format: type: deployment-record, phase: release, status: active</subtask>
+        <subtask>Deployment record includes sections: Summary, Deployed Articles, Deploy Configuration, Release Notes</subtask>
+      </task>
+      <task id="6" ac="1">Error handling
+        <subtask>Deploy compilation failure does NOT affect the deployment status (app is already deployed)</subtask>
+        <subtask>Each step has independent error handling — snapshot failure does not block node marking</subtask>
+        <subtask>Errors logged to futurator-agent-events with full context</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">When a deployment pipeline completes successfully (S3 sync + CloudFront invalidation), a deploy-compile pipeline job is automatically created and enqueued</criterion>
+    <criterion id="2">The wiki directory is archived as a versioned tarball to s3://futurator-ai-website/knowledge-archives/{projectId}/{date}.tar.gz</criterion>
+    <criterion id="3">A deployment record article is created at knowledge/release/deploy-{date}.md with: epic title, story count, deploy URL, and list of all code articles included in the deploy</criterion>
+    <criterion id="4">All code articles whose epic status is completed are marked status: deployed</criterion>
+    <criterion id="5">knowledge/system/deployment-manifest.md is updated with the deployment details (deploy date, URL, deployed article list)</criterion>
+    <criterion id="6">knowledge/log.md records the deployment event with timestamp and summary</criterion>
+    <criterion id="7">A full Memgraph resync runs after the agent step completes</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.4 Deployment Compilation Step</section>
+        <snippet>Pipeline definition for deploy-compile: three steps (shell snapshot -> agent deploy-nodes -> shell prune-sync). Shell step tars knowledge/ and uploads to S3. Agent creates deploy record, marks code as deployed, runs prune scan. Shell step runs graph-sync with --full-resync --prune.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.1 Compilation Triggers</section>
+        <snippet>Release phase trigger: After DEPLOYMENT completion — snapshot wiki to S3, mark deployed code nodes, update deployment-manifest, prune superseded nodes with no active dependents, create release-notes article, Memgraph cleanup.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.1 Node Status Lifecycle</section>
+        <snippet>Status transitions: active -> flagged -> superseded -> pruned. This story handles the active -> deployed transition for code articles. The deployment event also sets the stage for pruning in Story 3.4.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Release phase article types: deployment-record, release-notes. Created by deploy pipeline. File naming: knowledge/{phase}/{slug}.md. Frontmatter includes type, phase, status, maturity.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.3 DynamoDB Tables</section>
+        <snippet>futurator-agent-jobs for pipeline job state. futurator-epic-workflows tracks epic status including deployed. futurator-project-registry.knowledgeGraph has lastPruneAt field.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, executeShellStep, executeStep, runAgent, substituteTemplate</symbol>
+        <lines>430-731</lines>
+        <reason>The daemon executes the deploy-compile pipeline. The three-step pipeline (shell -> agent -> shell) must conform to PipelineDefinition. Shell steps handle S3 snapshot and graph-sync. Agent step handles deploy record creation and node marking.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/epic-workflow.ts</path>
+        <kind>types</kind>
+        <symbol>EpicWorkflow, EpicStatus</symbol>
+        <lines>1-79</lines>
+        <reason>EpicStatus includes deployed. The deploy compilation marks code articles as deployed and updates the epic workflow. deployUrl and deployedAt fields on EpicWorkflow record deployment details.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineDefinition, PipelineStep, PipelineStepType</symbol>
+        <lines>1-58</lines>
+        <reason>The deploy-compile pipeline uses both stepType: shell (snapshot, prune-sync) and stepType: agent (deploy-nodes). Shell step onFail config is critical — snapshot failure should not block remaining steps.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>script</kind>
+        <symbol>neo4j-driver connection pattern</symbol>
+        <reason>Reference for Memgraph connectivity used in the prune-sync shell step (graph-sync.mjs with --prune flag).</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="daemon">
+        <package name="@aws-sdk/client-dynamodb" note="DynamoDB client for deploy-compile job enqueuing" />
+        <package name="@aws-sdk/lib-dynamodb" note="DynamoDB document client for PutCommand" />
+      </ecosystem>
+      <ecosystem name="scripts">
+        <package name="neo4j-driver" note="Memgraph connectivity for graph-sync with --prune flag" />
+      </ecosystem>
+      <ecosystem name="infrastructure">
+        <package name="aws-cli" note="aws s3 cp command for uploading wiki snapshot tarball to S3" />
+        <package name="tar" note="tar -czf for creating knowledge/ directory archive" />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="non-blocking">Deploy compilation failure MUST NOT affect the deployment status. The app is already deployed — compilation is post-processing knowledge archival and node marking.</constraint>
+    <constraint type="step-independence">Each step has independent error handling. Snapshot failure does NOT block deploy-node marking. Node marking failure does NOT block graph-sync. Use onFail: { action: 'fail' } selectively.</constraint>
+    <constraint type="dependency">This story depends on Epic 2 (story compilation) and Story 3.1 (epic compilation pipeline provides the pattern). It sets the stage for Story 3.4 (pruning scan).</constraint>
+    <constraint type="ordering">Pipeline step order is critical: shell (snapshot) -> agent (deploy-nodes) -> shell (prune-sync). The snapshot must happen before any node status changes. The graph-sync must happen after all article updates.</constraint>
+    <constraint type="archival">S3 archives are versioned by date, never overwritten. Each deployment creates a new tarball. Full history is retained for rollback of knowledge state.</constraint>
+    <constraint type="release-directory">knowledge/release/ is a new directory that must be created by init-wiki.sh. Deployment record articles use type: deployment-record, phase: release.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>generateDeployCompilePipeline</name>
+      <kind>function</kind>
+      <signature>generateDeployCompilePipeline(projectId: string, projectName: string, deployUrl: string, date: string, workingDir: string): PipelineDefinition</signature>
+      <path>daemon/agent-daemon.mjs (or new module)</path>
+    </interface>
+    <interface>
+      <name>S3 wiki snapshot</name>
+      <kind>shell command</kind>
+      <signature>cd {{workingDir}} &amp;&amp; tar -czf /tmp/knowledge-{{projectId}}-{{date}}.tar.gz knowledge/ &amp;&amp; aws s3 cp /tmp/knowledge-{{projectId}}-{{date}}.tar.gz s3://futurator-ai-website/knowledge-archives/{{projectId}}/{{date}}.tar.gz</signature>
+      <path>Shell step in deploy-compile pipeline</path>
+    </interface>
+    <interface>
+      <name>COMPILER agent (deploy context)</name>
+      <kind>agent identity</kind>
+      <signature>agentId: COMPILER with post-deployment prompt. Template variables: PROJECT_NAME, DEPLOY_URL, date, projectId</signature>
+      <path>Pipeline agent config within deploy-compile pipeline definition</path>
+    </interface>
+    <interface>
+      <name>graph-sync.mjs --full-resync --prune</name>
+      <kind>CLI script</kind>
+      <signature>node /home/ubuntu/scripts/graph-sync.mjs --project {{projectId}} --full-resync --prune --knowledge-dir {{workingDir}}/knowledge --state-file {{workingDir}}/.mycelium/compile-state.json</signature>
+      <path>/home/ubuntu/scripts/graph-sync.mjs</path>
+    </interface>
+    <interface>
+      <name>Deployment record article</name>
+      <kind>data format</kind>
+      <signature>Frontmatter: type: deployment-record, phase: release, status: active. Sections: Summary, Deployed Articles, Deploy Configuration, Release Notes</signature>
+      <path>knowledge/release/deploy-{date}.md</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Tests verify the three-step pipeline: S3 snapshot creation, deploy record article generation, and graph-sync with --prune. Integration tests require S3 access, a running Memgraph instance, and the daemon. Shell step tests can be run independently with mock knowledge/ directories.</standards>
+    <locations>
+      <location>daemon/agent-daemon.mjs</location>
+      <location>/home/ubuntu/scripts/graph-sync.mjs</location>
+      <location>knowledge/release/</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Unit test: generateDeployCompilePipeline() returns a PipelineDefinition with 3 steps (shell snapshot, agent deploy-nodes, shell prune-sync) in correct order with all template variables</idea>
+      <idea ac="2">Integration test: after snapshot step, verify tarball exists at s3://futurator-ai-website/knowledge-archives/{projectId}/{date}.tar.gz. Extract and verify contents match knowledge/ directory.</idea>
+      <idea ac="3">Integration test: after deploy-nodes agent runs, verify knowledge/release/deploy-{date}.md exists with valid frontmatter (type: deployment-record, phase: release) and contains epic title, deploy URL, and [[wikilinks]] to code articles</idea>
+      <idea ac="4">Integration test: after agent runs, verify code articles with completed epic status have frontmatter updated to status: deployed</idea>
+      <idea ac="5">Integration test: verify knowledge/system/deployment-manifest.md contains deploy date, URL, and correct counts of deployed vs. pending articles</idea>
+      <idea ac="6">Integration test: verify knowledge/log.md contains a deployment event entry with timestamp and summary matching the deploy</idea>
+      <idea ac="7">Integration test: after pipeline completes, Memgraph nodes reflect deployed status and new deploy record node exists with type: deployment-record</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

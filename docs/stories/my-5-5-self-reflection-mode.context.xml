@@ -1,0 +1,141 @@
+<story-context id="my-5-5-self-reflection-mode" v="1.0">
+  <metadata>
+    <epicId>MY-5</epicId>
+    <storyId>5</storyId>
+    <title>Self-Reflection Mode</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-5-5-self-reflection-mode.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>a specialized conversation variant where the agent analyzes the project's overall health</iWant>
+    <soThat>I can ask "what's the current state?" and get a comprehensive, graph-informed assessment</soThat>
+    <tasks>
+      <task id="1" title="Create self-reflection pipeline variant" ac="1">
+        <subtask id="1.1">Define a reflection sub-type of the conversation pipeline (or a separate pipeline type conversation-reflection)</subtask>
+        <subtask id="1.2">Configure the pipeline to use the reflection-specific prompt template instead of the general conversation prompt</subtask>
+        <subtask id="1.3">Add trigger detection: if the user query contains "reflect", "current state", "health check", or "what needs work", route to the reflection variant</subtask>
+        <subtask id="1.4">Configure the agent model as opus (same as conversation pipeline)</subtask>
+      </task>
+      <task id="2" title="Implement low-maturity node query step" ac="2">
+        <subtask id="2.1">Create a shell step that queries Memgraph for all nodes with maturity less than 0.6, ordered by phase then maturity ASC</subtask>
+        <subtask id="2.2">Capture query results as LOW_MATURITY_NODES variable for prompt interpolation</subtask>
+        <subtask id="2.3">Use graph-search.mjs or a dedicated Cypher script for this query</subtask>
+      </task>
+      <task id="3" title="Implement system document reading step" ac="3">
+        <subtask id="3.1">Create a shell step that reads knowledge/system/pending-work.md and knowledge/system/debt-registry.md</subtask>
+        <subtask id="3.2">Handle missing files gracefully</subtask>
+        <subtask id="3.3">Capture combined output as SYSTEM_DOCS variable</subtask>
+      </task>
+      <task id="4" title="Implement flagged node query step" ac="4">
+        <subtask id="4.1">Create a Cypher query for all flagged nodes with missingSignals property</subtask>
+        <subtask id="4.2">Capture results as FLAGGED_NODES variable</subtask>
+        <subtask id="4.3">Include missingSignals property in results for the agent to analyze</subtask>
+      </task>
+      <task id="5" title="Create the self-reflection agent prompt" ac="5">
+        <subtask id="5.1">Build a specialized prompt template with {{PROJECT_CONTEXT}}, {{LOW_MATURITY_NODES}}, {{SYSTEM_DOCS}}, {{FLAGGED_NODES}} interpolation</subtask>
+        <subtask id="5.2">Instruct the agent to produce structured report: Maturity Heatmap, Flagged Items, Technical Debt, Missing Test Coverage, Suggested Next Actions</subtask>
+        <subtask id="5.3">Instruct the agent to produce the report in ---NEW_KNOWLEDGE--- format for auto-compilation via Story 5.4</subtask>
+      </task>
+      <task id="6" title="Compile reflection as system article" ac="6">
+        <subtask id="6.1">After agent produces reflection report, compile it as knowledge/system/reflection-{YYYY-MM-DD}.md</subtask>
+        <subtask id="6.2">Set frontmatter: type: reflection, phase: system, status: active, maturity: 0.8</subtask>
+        <subtask id="6.3">Include [[wikilinks]] to all nodes referenced in the report</subtask>
+        <subtask id="6.4">Embed and sync to Memgraph via graph-sync.mjs</subtask>
+        <subtask id="6.5">Update knowledge/log.md with the reflection entry</subtask>
+      </task>
+      <task id="7" title="End-to-end test" ac="1,2,3,4,5,6">
+        <subtask id="7.1">Trigger a self-reflection pipeline for a project with varied maturity nodes</subtask>
+        <subtask id="7.2">Verify the report includes all five sections</subtask>
+        <subtask id="7.3">Verify the reflection is compiled as a system article on disk</subtask>
+        <subtask id="7.4">Verify the reflection node appears in Memgraph with correct embedding</subtask>
+        <subtask id="7.5">Verify subsequent GraphRAG searches can find the reflection article</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">A self-reflection pipeline variant is triggered when a user requests project reflection (e.g., "Reflect on the current state of SpyHunter")</criterion>
+    <criterion id="2">The agent queries all nodes with maturity less than 0.6 from Memgraph to identify areas needing work</criterion>
+    <criterion id="3">The agent reads knowledge/system/pending-work.md and knowledge/system/debt-registry.md for existing tracked issues</criterion>
+    <criterion id="4">The agent reads all flagged nodes (status = 'flagged') and their flag reasons from Memgraph</criterion>
+    <criterion id="5">The agent synthesizes a structured report including: maturity heatmap by phase, flagged items requiring review, technical debt identified, missing test coverage, suggested next actions (prioritized)</criterion>
+    <criterion id="6">The reflection output is compiled as a system type article in knowledge/system/ (e.g., knowledge/system/reflection-{date}.md)</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc path="docs/concepts/mycelium-labs-architecture.md" sections="7.2 Self-Reflection Mode, 7.1 Conversation Pipeline, 5.2 GraphRAG Query Patterns">Self-reflection specification; base conversation pipeline; Cypher patterns for pending work and pruning candidates queries</doc>
+      <doc path="docs/stories/my-5-5-self-reflection-mode.md">Source story file with Cypher queries, reflection article format, and full flow description</doc>
+      <doc path="docs/stories/my-5-3-conversation-pipeline-type.md">Story 5.3 — base conversation pipeline that this variant extends</doc>
+      <doc path="docs/stories/my-5-4-conversation-to-knowledge-compilation.md">Story 5.4 — compilation path reused for reflection report persistence</doc>
+    </docs>
+    <code>
+      <file path="daemon/agent-daemon.mjs" relevance="Pipeline executor; conversation pipeline definition where reflection variant will be registered; executeShellStep() for Cypher query steps; runAgent() for the reflection agent step; substituteTemplate() for {{LOW_MATURITY_NODES}}, {{FLAGGED_NODES}}, {{SYSTEM_DOCS}} interpolation</file>
+      <file path="functions/shared/types/agent-orchestrator.ts" relevance="PipelineDefinition and PipelineStep types; reflection pipeline must conform to these interfaces; shell step captureAs for Cypher query result variables</file>
+      <file path="daemon/scripts/test-memgraph.mjs" relevance="Memgraph Bolt connection pattern; used for low-maturity and flagged node Cypher queries</file>
+    </code>
+    <dependencies>
+      <package name="neo4j-driver" version="^5.27.0" purpose="Memgraph queries for low-maturity nodes and flagged nodes (via dedicated Cypher scripts or graph-search.mjs)" />
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="architecture">Self-reflection is a specialized variant of the conversation pipeline (Story 5.3), not a completely separate pipeline. It extends the same step structure with reflection-specific query steps and prompt.</constraint>
+    <constraint type="model">Uses opus model for complex synthesis and multi-phase analysis of project health</constraint>
+    <constraint type="report-structure">Report must contain five sections: Maturity Heatmap by Phase, Flagged Items Requiring Review, Technical Debt Identified, Missing Test Coverage, Suggested Next Actions (prioritized)</constraint>
+    <constraint type="maturity">Reflection articles are compiled at maturity 0.8 (high) because they are agent-synthesized analyses, not informal conversation insights</constraint>
+    <constraint type="compilation-reuse">Reflection uses the same ---NEW_KNOWLEDGE--- and compilation path as Story 5.4 to persist the report as a wiki article</constraint>
+    <constraint type="graceful-degradation">Pipeline must handle projects with no flagged nodes, no debt-registry.md, or no pending-work.md gracefully</constraint>
+    <constraint type="trigger-detection">Reflection variant is activated by keyword detection in user query: "reflect", "current state", "health check", "what needs work"</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface type="pipeline-definition">
+      <description>Self-reflection pipeline variant extending the conversation pipeline</description>
+      <agents>ASSISTANT: { name: 'Project Assistant', allowedTools: 'Read,Grep,Glob,Bash', model: 'opus' }</agents>
+      <steps>gather-context (shell) -> query-low-maturity (shell) -> read-system-docs (shell) -> query-flagged (shell) -> reflect (agent) -> compile-reflection (conditional) -> sync (shell)</steps>
+      <variables>PROJECT_CONTEXT, LOW_MATURITY_NODES, SYSTEM_DOCS, FLAGGED_NODES, NEW_KNOWLEDGE</variables>
+    </interface>
+    <interface type="cypher-query">
+      <description>Low-maturity nodes query</description>
+      <query>MATCH (n:Node) WHERE n.projectId = $projectId AND n.status IN ['active', 'flagged'] AND n.maturity &lt; 0.6 RETURN n.nodeId, n.type, n.phase, n.title, n.maturity, n.status ORDER BY CASE n.phase WHEN 'discovery' THEN 1 ... END ASC, n.maturity ASC</query>
+    </interface>
+    <interface type="cypher-query">
+      <description>Flagged nodes query</description>
+      <query>MATCH (n:Node) WHERE n.projectId = $projectId AND n.status = 'flagged' RETURN n.nodeId, n.type, n.phase, n.title, n.maturity, n.missingSignals ORDER BY n.phase, n.maturity ASC</query>
+    </interface>
+    <interface type="wiki-article">
+      <description>Compiled reflection article format</description>
+      <path>knowledge/system/reflection-{YYYY-MM-DD}.md</path>
+      <frontmatter>type: reflection, phase: system, status: active, maturity: 0.8, tags: [reflection, health-check, sprint-planning]</frontmatter>
+      <sections>Maturity Heatmap, Flagged Items, Technical Debt, Test Coverage Gaps, Suggested Next Actions</sections>
+    </interface>
+    <interface type="upstream-dependency">
+      <description>Extends Story 5.3 conversation pipeline; uses Story 5.4 compilation path for persistence; uses graph-search.mjs (Story 5.1) or dedicated Cypher scripts</description>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>
+      <standard>Integration tests require Memgraph populated with nodes of varying maturity and status</standard>
+      <standard>Verify reflection report contains all five required sections</standard>
+      <standard>Verify compiled article conforms to wiki article format with correct frontmatter</standard>
+    </standards>
+    <locations>
+      <location>daemon/__tests__/self-reflection.test.mjs</location>
+      <location>daemon/scripts/__tests__/reflection-query.test.mjs</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Test trigger detection: queries containing "reflect", "current state", "health check", "what needs work" should route to reflection variant</idea>
+      <idea ac="2">Populate Memgraph with nodes at maturity 0.3, 0.5, 0.7, 0.9; verify query returns only nodes below 0.6 ordered by phase then maturity</idea>
+      <idea ac="3">Create test pending-work.md and debt-registry.md; verify shell step reads both; test with missing files to verify graceful handling</idea>
+      <idea ac="4">Populate Memgraph with flagged nodes having missingSignals property; verify query returns them with missingSignals included</idea>
+      <idea ac="5">Verify reflection agent output contains all five sections: Maturity Heatmap, Flagged Items, Technical Debt, Missing Test Coverage, Suggested Next Actions</idea>
+      <idea ac="6">Verify reflection article is written to knowledge/system/reflection-{date}.md with type: reflection, phase: system, maturity: 0.8; verify it appears in Memgraph after graph-sync</idea>
+    </ideas>
+  </tests>
+</story-context>

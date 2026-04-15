@@ -1,0 +1,129 @@
+<story-context id="my-5-4-conversation-to-knowledge-compilation" v="1.0">
+  <metadata>
+    <epicId>MY-5</epicId>
+    <storyId>4</storyId>
+    <title>Conversation-to-Knowledge Compilation</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-5-4-conversation-to-knowledge-compilation.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>new knowledge generated during conversations automatically compiled into the wiki and graph</iWant>
+    <soThat>insights, decisions, and discoveries from conversations don't get lost</soThat>
+    <tasks>
+      <task id="1" title="Implement NEW_KNOWLEDGE block parser" ac="1">
+        <subtask id="1.1">Create a parser function in /home/ubuntu/scripts/lib/knowledge-parser.mjs that extracts structured knowledge items from agent output</subtask>
+        <subtask id="1.2">Parse the YAML-like format within ---NEW_KNOWLEDGE--- / ---END_NEW_KNOWLEDGE--- delimiters</subtask>
+        <subtask id="1.3">Validate each extracted item has required fields (type, title, content)</subtask>
+        <subtask id="1.4">Return an array of parsed knowledge items or empty array if no block found</subtask>
+      </task>
+      <task id="2" title="Implement knowledge type to phase directory mapping" ac="2,3">
+        <subtask id="2.1">Define the mapping: decision to knowledge/decisions/, insight to knowledge/discovery/, requirement to knowledge/requirements/, risk to knowledge/planning/</subtask>
+        <subtask id="2.2">Generate article slugs from titles: lowercase, replace spaces with hyphens, remove special characters</subtask>
+        <subtask id="2.3">Handle slug collisions by appending a numeric suffix</subtask>
+        <subtask id="2.4">Construct the full file path: {knowledgeDir}/{phaseDir}/{slug}.md</subtask>
+      </task>
+      <task id="3" title="Create wiki articles from knowledge items" ac="2,3,4">
+        <subtask id="3.1">Generate frontmatter: title, type, phase, status: active, maturity: 0.3, created/updated timestamps, tags</subtask>
+        <subtask id="3.2">Write the article body with Purpose section (from content field)</subtask>
+        <subtask id="3.3">Add Dependencies section with [[wikilinks]] from the links field</subtask>
+        <subtask id="3.4">Write the article to the appropriate phase directory on disk</subtask>
+      </task>
+      <task id="4" title="Integrate with graph-sync for embedding and Memgraph upsert" ac="5">
+        <subtask id="4.1">After writing all new articles, call graph-sync.mjs --project {{projectId}} --knowledge-dir {{knowledgeDir}}</subtask>
+        <subtask id="4.2">graph-sync.mjs will detect the new articles via content hash comparison and process them (embed + upsert)</subtask>
+        <subtask id="4.3">Verify new nodes appear in Memgraph with correct embeddings and edge connections</subtask>
+      </task>
+      <task id="5" title="Update log.md and index.md" ac="6">
+        <subtask id="5.1">Append an entry to knowledge/log.md with timestamp, source conversation ID, and list of created articles</subtask>
+        <subtask id="5.2">Update knowledge/index.md catalog to include the new articles</subtask>
+        <subtask id="5.3">Include the pipeline job ID / conversation ID in the log entry for traceability</subtask>
+      </task>
+      <task id="6" title="Wire compilation step into conversation pipeline" ac="1">
+        <subtask id="6.1">Add the compile-conversation step to the conversation pipeline definition (after the respond step)</subtask>
+        <subtask id="6.2">Make the step conditional — only runs if NEW_KNOWLEDGE was extracted from the agent's response</subtask>
+        <subtask id="6.3">Add the sync shell step after compilation to trigger graph-sync.mjs</subtask>
+        <subtask id="6.4">Test the full flow: conversation to knowledge extraction to article creation to embedding to Memgraph sync</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">When a conversation pipeline completes and the agent produced a ---NEW_KNOWLEDGE--- block, the compilation step runs automatically</criterion>
+    <criterion id="2">Each knowledge item is created as a wiki article in the appropriate phase directory (knowledge/{phase}/)</criterion>
+    <criterion id="3">The article type matches the knowledge type: decision to decisions/, insight to discovery/, requirement to requirements/, risk to planning/</criterion>
+    <criterion id="4">[[wikilinks]] are created in the new article to the related articles mentioned in the links field of the knowledge block</criterion>
+    <criterion id="5">The new article is embedded via Voyage AI and synced to Memgraph via graph-sync.mjs</criterion>
+    <criterion id="6">knowledge/log.md records the conversation-derived compilation with a timestamp and source conversation ID</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc path="docs/concepts/mycelium-labs-architecture.md" sections="7.1 Conversation Pipeline, 4 Compilation Pipeline, 3.1 Wiki Articles">Pipeline definition showing conditional compilation step; general compilation pattern; wiki article format for generated articles</doc>
+      <doc path="docs/stories/my-5-4-conversation-to-knowledge-compilation.md">Source story file with knowledge lifecycle and type mapping details</doc>
+      <doc path="docs/stories/my-5-3-conversation-pipeline-type.md">Story 5.3 — conversation pipeline where compilation step is wired in</doc>
+    </docs>
+    <code>
+      <file path="daemon/agent-daemon.mjs" relevance="Pipeline executor; executeStep() handles both agent and shell steps; runExtractors() with 'between' type can extract ---NEW_KNOWLEDGE--- blocks using startDelimiter/endDelimiter; substituteTemplate() interpolates extracted variables into subsequent step prompts</file>
+      <file path="functions/shared/types/agent-orchestrator.ts" relevance="ExtractorConfig with 'between' type for delimiter-based extraction; PipelineStep with extractors field; used to configure NEW_KNOWLEDGE extraction</file>
+      <file path="daemon/scripts/test-memgraph.mjs" relevance="Memgraph connection pattern; graph-sync.mjs (Story 1.5) uses same pattern for upsert</file>
+    </code>
+    <dependencies>
+      <package name="neo4j-driver" version="^5.27.0" purpose="Used indirectly via graph-sync.mjs for Memgraph upsert of new knowledge nodes" />
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="wiki-format">Generated articles must follow the standard wiki format: YAML frontmatter (title, type, phase, status, maturity, created, updated, tags) followed by Purpose, Dependencies sections</constraint>
+    <constraint type="maturity">Conversation-derived knowledge starts at maturity 0.3 (low) because it is informal and may need validation</constraint>
+    <constraint type="knowledge-type-mapping">decision -> knowledge/decisions/, insight -> knowledge/discovery/, requirement -> knowledge/requirements/, risk -> knowledge/planning/</constraint>
+    <constraint type="idempotency">Slug collision handling must append numeric suffix to avoid overwriting existing articles</constraint>
+    <constraint type="traceability">log.md entries must include pipeline job ID / conversation ID for audit trail</constraint>
+    <constraint type="conditional-execution">Compilation step only runs if NEW_KNOWLEDGE block was extracted; pipeline should complete normally if no new knowledge was produced</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface type="function-export">
+      <signature>function parseNewKnowledge(agentOutput: string): KnowledgeItem[]</signature>
+      <returnType>Array of { type: 'decision'|'insight'|'requirement'|'risk', title: string, content: string, links: string[] }</returnType>
+    </interface>
+    <interface type="function-export">
+      <signature>async function compileKnowledge(projectId: string, knowledgeDir: string, items: KnowledgeItem[], conversationId: string): Promise&lt;string[]&gt;</signature>
+      <returnType>Array of created article file paths</returnType>
+    </interface>
+    <interface type="extractor-config">
+      <description>Daemon extractor config for NEW_KNOWLEDGE block extraction</description>
+      <config>{ type: 'between', startDelimiter: '---NEW_KNOWLEDGE---', endDelimiter: '---END_NEW_KNOWLEDGE---' }</config>
+    </interface>
+    <interface type="upstream-dependency">
+      <description>Story 5.3 provides the conversation pipeline where this compilation step is wired in; Story 1.5 provides graph-sync.mjs for embedding and Memgraph upsert</description>
+    </interface>
+    <interface type="downstream-consumer">
+      <description>Story 5.5 self-reflection uses the same compilation path to persist reflection reports</description>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>
+      <standard>Unit tests for NEW_KNOWLEDGE parser with various block formats</standard>
+      <standard>Unit tests for knowledge type to phase directory mapping</standard>
+      <standard>Unit tests for slug generation and collision handling</standard>
+      <standard>Integration tests for full compilation flow (parser to article to graph-sync)</standard>
+    </standards>
+    <locations>
+      <location>daemon/scripts/__tests__/knowledge-parser.test.mjs</location>
+      <location>daemon/scripts/__tests__/knowledge-compiler.test.mjs</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Test parser with agent output containing ---NEW_KNOWLEDGE--- block; verify extraction triggers compilation step</idea>
+      <idea ac="2">Create a knowledge item of each type; verify articles are written to correct phase directories (decisions/, discovery/, requirements/, planning/)</idea>
+      <idea ac="3">Verify type mapping: decision -> decisions/, insight -> discovery/, requirement -> requirements/, risk -> planning/</idea>
+      <idea ac="4">Create a knowledge item with links: [auth.tsx, jwt-utils.ts]; verify generated article contains [[code/src--components--auth.tsx]] and [[code/src--utils--jwt.ts]] wikilinks</idea>
+      <idea ac="5">After compilation, verify graph-sync.mjs was called and new nodes appear in Memgraph with embeddings</idea>
+      <idea ac="6">Verify knowledge/log.md was appended with timestamp, conversation-compile action, article titles, and conversation ID</idea>
+    </ideas>
+  </tests>
+</story-context>

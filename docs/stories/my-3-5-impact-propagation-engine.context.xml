@@ -1,0 +1,217 @@
+<![CDATA[<story-context id="my-3-5-impact-propagation-engine" v="1.0">
+  <metadata>
+    <epicId>MY-3</epicId>
+    <storyId>5</storyId>
+    <title>Impact Propagation Engine</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-3-5-impact-propagation-engine.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>changes to any node to automatically flag downstream nodes for review based on graph traversal</iWant>
+    <soThat>upstream changes (e.g., requirement revision) visibly ripple to all affected artifacts, making the impact of every change explicit</soThat>
+    <tasks>
+      <task id="1" ac="1,2">Create impact propagation module
+        <subtask>Create lib/impact-propagation.mjs at /home/ubuntu/scripts/lib/impact-propagation.mjs</subtask>
+        <subtask>Accept updatedNodeId and projectId as inputs</subtask>
+        <subtask>Connect to Memgraph and execute impact traversal query (all edge types, 1-4 hops, active downstream nodes only)</subtask>
+        <subtask>Calculate impact score: edge_weight / (hops ^ 1.5) where edge_weight is the weight of the first edge in the path</subtask>
+        <subtask>When multiple paths reach the same downstream node, use the highest impact score</subtask>
+      </task>
+      <task id="2" ac="3,4,5">Implement flagging logic
+        <subtask>Score >= 0.5: set status: flagged, flagSeverity: critical, flagReason referencing upstream node</subtask>
+        <subtask>Score >= 0.1 and less than 0.5: set status: flagged, flagSeverity: moderate</subtask>
+        <subtask>Score less than 0.1: no flag</subtask>
+        <subtask>Update flagged nodes in Memgraph via Cypher SET operations</subtask>
+        <subtask>Update flagged articles' frontmatter on disk with status: flagged, flagSeverity, flagReason</subtask>
+      </task>
+      <task id="3" ac="6">Implement impact logging
+        <subtask>Append impact record to knowledge/log.md: [IMPACT] {date} | Source: {nodeId} | Critical: N | Moderate: M | Total: T</subtask>
+        <subtask>For critical flags, append details about which nodes were flagged</subtask>
+        <subtask>Return impact summary as JSON for pipeline event reporting</subtask>
+      </task>
+      <task id="4" ac="7">Integrate with story compilation
+        <subtask>After Knowledge Compiler updates articles, identify nodes with content hash changes</subtask>
+        <subtask>For each changed node, call propagateImpact(nodeId, projectId)</subtask>
+        <subtask>Impact propagation runs AFTER compilation but BEFORE graph-sync</subtask>
+      </task>
+      <task id="5" ac="7">Integrate with epic compilation
+        <subtask>After epic COMPILER updates maturity scores and marks supersessions, propagate impact for all changed nodes</subtask>
+        <subtask>Supersession marking triggers impact propagation on the superseding (new) node, not the superseded (old) node</subtask>
+      </task>
+      <task id="6" ac="7">Integrate with deployment compilation
+        <subtask>After deploy-nodes agent marks code as deployed, propagate impact for status changes</subtask>
+        <subtask>Deployment-related impact is lower severity — status changes to deployed are informational</subtask>
+      </task>
+      <task id="7" ac="7">Integrate with pre-dev compilation
+        <subtask>Most critical integration: planning document changes after development flag all downstream code articles</subtask>
+        <subtask>Use architecture doc Cypher for requirement-change impact traversal</subtask>
+        <subtask>Note: pre-dev compilation is implemented in Epic 4, but engine must support it</subtask>
+      </task>
+      <task id="8" ac="2">Edge weight configuration
+        <subtask>Define edge weights as a configuration object: DEPENDS_ON 1.0, CONFLICTS_WITH 0.9, SUPERSEDES 0.8, DERIVED_FROM 0.7, VALIDATES 0.6, REFINES 0.5, ENABLES 0.5, INFORMS 0.3</subtask>
+        <subtask>Impact score formula: EDGE_WEIGHTS[edgeType] / (hops ^ 1.5)</subtask>
+        <subtask>Export weights configuration for external adjustment</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">When a node is updated (content change detected by compilation), impact propagation traverses the graph from the updated node following outgoing edges up to 4 hops</criterion>
+    <criterion id="2">Impact score is calculated as edge_weight / (hops ^ 1.5) for each downstream node reached</criterion>
+    <criterion id="3">Nodes with impact score >= 0.5 are flagged as critical with status: flagged and flagSeverity: critical</criterion>
+    <criterion id="4">Nodes with impact score >= 0.1 are flagged as moderate with status: flagged and flagSeverity: moderate</criterion>
+    <criterion id="5">Flagged nodes include a flagReason property referencing the updated upstream node</criterion>
+    <criterion id="6">Impact results are logged in knowledge/log.md with the source node, number of flagged nodes, and severity breakdown</criterion>
+    <criterion id="7">Impact propagation runs as part of every compilation step (story, epic, deployment, and pre-dev)</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.2 Impact Propagation</section>
+        <snippet>Impact score formula: edge_weight / (hops ^ 1.5). Edge weights: DEPENDS_ON 1.0, CONFLICTS_WITH 0.9, SUPERSEDES 0.8, DERIVED_FROM 0.7, VALIDATES 0.6, REFINES 0.5, ENABLES 0.5, INFORMS 0.3. Thresholds: >= 0.5 critical, >= 0.1 moderate, &lt; 0.1 no flag.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.5 Pre-Development Phase Compilation</section>
+        <snippet>Impact propagation Cypher: MATCH (updated:Node {nodeId: $updatedNodeId}) MATCH (updated)-[:INFORMS|ENABLES|DERIVED_FROM*1..4]->(downstream:Node) WHERE downstream.status = 'active' SET downstream.status = 'flagged'. Key behavior: when a planning document changes, compiler traverses graph and flags all downstream nodes.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.1 Node Status Lifecycle</section>
+        <snippet>Status transitions: active -> flagged (upstream change detected) -> reviewed -> active (updated). Impact propagation drives the active -> flagged transition based on graph traversal when upstream nodes change.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>5.2 GraphRAG Query Patterns</section>
+        <snippet>Impact analysis query: MATCH (target:Node {nodeId: $targetNode}) MATCH path = (target)&lt;-[:DEPENDS_ON|VALIDATES*1..5]-(affected) RETURN affected.nodeId, affected.type, affected.title, length(path) AS hops ORDER BY hops ASC. Used for verifying impact reach.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>8 edge types with weights: DEPENDS_ON (1.0), DERIVED_FROM (0.7), INFORMS (0.3), REFINES (0.5), VALIDATES (0.6), SUPERSEDES (0.8), CONFLICTS_WITH (0.9), ENABLES (0.5). Edges derived from [[wikilinks]] in article sections.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step</section>
+        <snippet>Story compilation pipeline: DEV -> build-check -> REVIEWER -> COMPILE -> done. Impact propagation should run after the COMPILE agent step but before graph-sync shell step.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.3 Epic Compilation Step</section>
+        <snippet>Epic compilation: agent consolidate (supersession scan, maturity update) -> shell graph-resync. Impact propagation runs after consolidation identifies changed nodes, before graph-resync.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, executeStep, executeShellStep</symbol>
+        <lines>430-731</lines>
+        <reason>The daemon orchestrates the pipeline steps. Impact propagation must be integrated into the pipeline execution flow — either as a new shell step or as part of the COMPILE agent prompt. Understanding step ordering and variable passing is critical.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>script</kind>
+        <symbol>neo4j-driver connection, session.run(cypher)</symbol>
+        <reason>Reference implementation for Memgraph Bolt connectivity. impact-propagation.mjs will use the same neo4j-driver pattern for graph traversal queries and SET operations on flagged nodes.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineStep, PipelineStepType</symbol>
+        <lines>33-58</lines>
+        <reason>Impact propagation may be implemented as a shell step in the pipeline (stepType: shell calling impact-propagation.mjs) or invoked within the COMPILE agent step. Pipeline step structure determines the integration approach.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/epic-workflow.ts</path>
+        <kind>types</kind>
+        <symbol>EpicWorkflow, EpicStatus</symbol>
+        <lines>1-79</lines>
+        <reason>Epic status transitions trigger compilation which in turn triggers impact propagation. Understanding which status changes produce which compilation events helps design the propagation integration points.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="scripts">
+        <package name="neo4j-driver" note="Memgraph Bolt connectivity for impact traversal Cypher queries and SET operations on flagged nodes" />
+      </ecosystem>
+      <ecosystem name="scripts-lib">
+        <package name="(no external deps)" note="impact-propagation.mjs is a library module in /home/ubuntu/scripts/lib/ alongside voyage-embed.mjs. Uses neo4j-driver from parent package.json." />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="performance">Impact propagation traverses up to 4 hops. The 1.5 exponent decay ensures natural falloff: 1-hop always flagged for strong edges, 4-hop rarely flagged. Must not cause flag storms — the decay formula is critical.</constraint>
+    <constraint type="idempotency">Multiple paths to the same downstream node use the HIGHEST impact score. Do not double-flag — take max score across all paths.</constraint>
+    <constraint type="ordering">Impact propagation runs AFTER compilation (article changes written) but BEFORE graph-sync (so flagged status is included in the Memgraph sync).</constraint>
+    <constraint type="dual-update">Flagged status must be updated in BOTH places: Memgraph (via Cypher SET) AND wiki article frontmatter (on disk). Wiki is source of truth; Memgraph is the query accelerator.</constraint>
+    <constraint type="all-compilations">Engine must support all four compilation contexts: story, epic, deployment, and pre-dev. Pre-dev compilation (Epic 4) is built later, but the engine API must accommodate it now.</constraint>
+    <constraint type="dependency">This story depends on Epic 2 (story compilation provides the primary integration point) and Story 1.5 (graph-sync for Memgraph traversal). Also depends on Story 3.1 and 3.3 for epic and deployment integration points.</constraint>
+    <constraint type="supersession">When a node is superseded, impact propagation triggers on the SUPERSEDING (new) node, not the superseded (old) node. The old node is being replaced — downstream consumers need to know about the new version.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>propagateImpact</name>
+      <kind>function export</kind>
+      <signature>propagateImpact(updatedNodeId: string, projectId: string, opts?: { knowledgeDir?: string }): Promise&lt;ImpactSummary&gt;</signature>
+      <path>/home/ubuntu/scripts/lib/impact-propagation.mjs</path>
+    </interface>
+    <interface>
+      <name>EDGE_WEIGHTS</name>
+      <kind>config export</kind>
+      <signature>export const EDGE_WEIGHTS = { DEPENDS_ON: 1.0, CONFLICTS_WITH: 0.9, SUPERSEDES: 0.8, DERIVED_FROM: 0.7, VALIDATES: 0.6, REFINES: 0.5, ENABLES: 0.5, INFORMS: 0.3 }</signature>
+      <path>/home/ubuntu/scripts/lib/impact-propagation.mjs</path>
+    </interface>
+    <interface>
+      <name>Impact traversal Cypher</name>
+      <kind>Cypher query</kind>
+      <signature>MATCH (updated:Node {nodeId: $updatedNodeId}) MATCH path = (updated)-[rels:DEPENDS_ON|DERIVED_FROM|INFORMS|REFINES|VALIDATES|SUPERSEDES|CONFLICTS_WITH|ENABLES*1..4]->(downstream:Node) WHERE downstream.status = 'active' AND downstream.projectId = $projectId RETURN downstream.nodeId, downstream.type, downstream.title, edgeTypes, edgeWeights, hops</signature>
+      <path>Memgraph</path>
+    </interface>
+    <interface>
+      <name>Flagging Cypher</name>
+      <kind>Cypher query</kind>
+      <signature>MATCH (n:Node {nodeId: $nodeId}) SET n.status = 'flagged', n.flagSeverity = $severity, n.flagReason = 'Upstream node ' + $updatedNodeId + ' was modified' RETURN n.nodeId</signature>
+      <path>Memgraph</path>
+    </interface>
+    <interface>
+      <name>Impact log format</name>
+      <kind>data format</kind>
+      <signature>[IMPACT] {date} | Source: {updatedNodeId} | Critical: {N} | Moderate: {M} | Total downstream: {T}</signature>
+      <path>knowledge/log.md</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>Tests require a running Memgraph instance seeded with a test graph of known topology. Unit tests verify impact score calculation and threshold logic. Integration tests verify end-to-end propagation: node update -> graph traversal -> flagging -> log entry. Edge cases: circular graphs, disconnected nodes, multiple paths to same node.</standards>
+    <locations>
+      <location>/home/ubuntu/scripts/lib/impact-propagation.mjs</location>
+      <location>knowledge/log.md</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Integration test: seed Memgraph with a chain of 5 nodes connected by DEPENDS_ON edges. Update the root node. Verify propagation reaches nodes at hops 1-4 but NOT hop 5 (max 4 hops).</idea>
+      <idea ac="2">Unit test: verify impact score calculation. DEPENDS_ON (1.0) at 1 hop = 1.0, at 2 hops = 0.35, at 3 hops = 0.19, at 4 hops = 0.125. INFORMS (0.3) at 2 hops = 0.106.</idea>
+      <idea ac="3">Integration test: verify nodes with score >= 0.5 (e.g., direct DEPENDS_ON at 1 hop) have status: flagged and flagSeverity: critical in both Memgraph and article frontmatter.</idea>
+      <idea ac="4">Integration test: verify nodes with score >= 0.1 and less than 0.5 (e.g., DEPENDS_ON at 2 hops) have flagSeverity: moderate.</idea>
+      <idea ac="5">Integration test: verify flagReason contains the updated upstream nodeId string (e.g., 'Upstream node code/src--auth.tsx was modified').</idea>
+      <idea ac="6">Integration test: after propagation, verify knowledge/log.md contains [IMPACT] entry with correct source node, critical count, moderate count, and total downstream count.</idea>
+      <idea ac="7">Integration test: trigger impact propagation from story compilation context, epic compilation context, and deployment compilation context. Verify it runs in each. Pre-dev context deferred to Epic 4 but API must accept the call.</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

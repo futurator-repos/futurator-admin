@@ -1,0 +1,165 @@
+<story-context id="my-1-4-voyage-ai-embedding-helper-module" v="1.0">
+  <metadata>
+    <epicId>MY-1</epicId>
+    <storyId>4</storyId>
+    <title>Voyage AI Embedding Helper Module</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-1-4-voyage-ai-embedding-helper-module.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>a reusable module that embeds text via the Voyage AI API and returns 1024-dim vectors</iWant>
+    <soThat>wiki articles can be embedded for vector search in Memgraph</soThat>
+
+    <tasks>
+      <task id="1" title="Create the embedding module voyage-embed.mjs" acs="1,2,4">
+        <subtask id="1.1">Create /home/ubuntu/scripts/lib/voyage-embed.mjs</subtask>
+        <subtask id="1.2">Read VOYAGE_API_KEY from process.env — throw descriptive error if not set</subtask>
+        <subtask id="1.3">Implement embedText(text, inputType = 'document') — single text embedding</subtask>
+        <subtask id="1.4">Call Voyage AI API: POST https://api.voyageai.com/v1/embeddings with model voyage-3-large</subtask>
+        <subtask id="1.5">Pass input_type parameter (document for articles, query for search queries)</subtask>
+        <subtask id="1.6">Parse response and return the 1024-dimensional embedding array</subtask>
+        <subtask id="1.7">Validate that returned embedding has exactly 1024 dimensions</subtask>
+      </task>
+      <task id="2" title="Implement batch embedding" acs="3">
+        <subtask id="2.1">Implement embedBatch(texts, inputType = 'document') — array of texts</subtask>
+        <subtask id="2.2">Enforce maximum batch size of 128 inputs per call</subtask>
+        <subtask id="2.3">If input exceeds 128, chunk into multiple API calls automatically</subtask>
+        <subtask id="2.4">Return array of 1024-dim embeddings in the same order as inputs</subtask>
+        <subtask id="2.5">Handle partial batch failures — retry failed chunks, return results for successful ones</subtask>
+      </task>
+      <task id="3" title="Implement retry logic with exponential backoff" acs="5">
+        <subtask id="3.1">Wrap API calls in retry logic — max 3 attempts</subtask>
+        <subtask id="3.2">Implement exponential backoff: 1s, 2s, 4s delays between retries</subtask>
+        <subtask id="3.3">Retry on HTTP 429 (rate limit), 500, 502, 503, 504 status codes</subtask>
+        <subtask id="3.4">Throw after 3 failed attempts with descriptive error including status code and response body</subtask>
+        <subtask id="3.5">Log each retry attempt with attempt number and wait duration</subtask>
+      </task>
+      <task id="4" title="Implement cost tracking and logging" acs="6">
+        <subtask id="4.1">Parse usage.total_tokens from API response</subtask>
+        <subtask id="4.2">Log token usage per call to stdout: [voyage-embed] Embedded {n} texts, {tokens} tokens, cost ~${cost}</subtask>
+        <subtask id="4.3">Calculate approximate cost based on $0.06 per 1M tokens for voyage-3-large</subtask>
+        <subtask id="4.4">Maintain a session-level token counter accessible via getUsageStats()</subtask>
+      </task>
+      <task id="5" title="Validate module end-to-end" acs="1,2,3,4,5,6">
+        <subtask id="5.1">Test single text embedding — verify 1024 dimensions returned</subtask>
+        <subtask id="5.2">Test batch embedding with 5 sample texts — verify 5 x 1024-dim arrays returned</subtask>
+        <subtask id="5.3">Test document vs query input types — verify both succeed</subtask>
+        <subtask id="5.4">Test with invalid API key — verify descriptive error</subtask>
+        <subtask id="5.5">Test with empty string input — verify graceful handling</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">A VOYAGE_API_KEY environment variable is read from the EC2 instance</criterion>
+    <criterion id="2">The module returns a 1024-dimensional float array from voyage-3-large when called with a text string</criterion>
+    <criterion id="3">The module supports batch embedding (up to 128 inputs per call)</criterion>
+    <criterion id="4">The module distinguishes between document input type (for articles) and query input type (for searches)</criterion>
+    <criterion id="5">The module handles API errors with retries (max 3, exponential backoff)</criterion>
+    <criterion id="6">The module logs token usage for cost tracking</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>8.3 Voyage AI Integration</section>
+        <snippet>VOYAGE_CONFIG: model voyage-3-large, dimensions 1024, batchSize 128, inputTypes: article=document, query=query. Cost: $0.06 per 1M tokens. Average wiki article ~500 tokens. 2000 articles = $0.06 total. Re-embedding after compilation: ~10-50 articles = less than $0.003.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>3.2 Memgraph Schema</section>
+        <snippet>Embedding dimension 1024, vector index config referencing voyage-3-large. Node embedding property stores 1024-dim float array.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>5.3 Search Tool for Agents</section>
+        <snippet>graph-search.mjs usage of query input type for search embeddings. Embeds query text with input_type: query for asymmetric retrieval.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>9 Decisions Log</section>
+        <snippet>D3: Voyage AI voyage-3-large chosen for superior code retrieval, already used in Mycelium, cost negligible at scale</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>existing-script</kind>
+        <symbol>ESM import pattern, process.env usage, error handling</symbol>
+        <reason>Reference for ESM module conventions, process.env pattern, and error handling style used across scripts</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/package.json</path>
+        <kind>config</kind>
+        <symbol>type: module</symbol>
+        <reason>Confirms ESM module system. No additional npm dependencies needed — uses native fetch (Node.js 18+)</reason>
+      </file>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>log function, spawn/execSync patterns</symbol>
+        <reason>Reference for logging conventions and how scripts are invoked from the daemon. The voyage-embed module will be imported by graph-sync.mjs (Story 1.5) which is called as a shell step.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <package name="native-fetch" version="Node.js 18+" reason="Uses built-in fetch API — no additional HTTP library needed"/>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint>No dependency on Story MY-1.1 or MY-1.2 — this story can run in parallel</constraint>
+    <constraint>Requires VOYAGE_API_KEY environment variable set on EC2 instance</constraint>
+    <constraint>No additional npm dependencies — uses native fetch (Node.js 18+ built-in)</constraint>
+    <constraint>Node.js ESM module (.mjs extension) — must use export syntax</constraint>
+    <constraint>Module placed in lib/ subdirectory: /home/ubuntu/scripts/lib/voyage-embed.mjs</constraint>
+    <constraint>Voyage AI API rate limits — implement exponential backoff to handle 429 responses</constraint>
+    <constraint>Batch size hard limit of 128 inputs per API call — must chunk larger batches automatically</constraint>
+    <constraint>Cost tracking is informational logging only — no persistent storage of usage stats</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>Voyage AI Embeddings API</name>
+      <endpoint>POST https://api.voyageai.com/v1/embeddings</endpoint>
+      <protocol>HTTPS REST</protocol>
+      <details>Headers: Authorization: Bearer {VOYAGE_API_KEY}, Content-Type: application/json. Request body: {"model": "voyage-3-large", "input": ["text"], "input_type": "document"|"query"}. Response: {"data": [{"embedding": [...1024 floats...], "index": 0}], "usage": {"total_tokens": N}}.</details>
+    </interface>
+    <interface>
+      <name>Module Exports</name>
+      <protocol>ESM (import/export)</protocol>
+      <details>embedText(text, inputType='document') returns number[] (1024-dim). embedBatch(texts, inputType='document') returns number[][] (N x 1024-dim). getUsageStats() returns {totalTokens, totalCost, callCount}.</details>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>
+      <standard>Live API validation — requires VOYAGE_API_KEY to be set for end-to-end tests</standard>
+      <standard>Dimension validation — every returned embedding must be exactly 1024 floats</standard>
+      <standard>Order preservation — batch embeddings must return in same order as inputs</standard>
+      <standard>Error handling — invalid API key, empty input, network failures must produce descriptive errors</standard>
+    </standards>
+    <locations>
+      <location>daemon/scripts/lib/voyage-embed.mjs (module with exported functions)</location>
+      <location>A test runner script or inline validation in Task 5</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Unset VOYAGE_API_KEY, import module, call embedText — verify descriptive error thrown</idea>
+      <idea ac="2">Call embedText with sample text — verify returned array has exactly 1024 elements, all numbers</idea>
+      <idea ac="3">Call embedBatch with 5 texts — verify 5 embeddings returned each with 1024 dims. Call with 200 texts — verify auto-chunking (ceil(200/128) = 2 API calls)</idea>
+      <idea ac="4">Call embedText with inputType='document' then with inputType='query' — verify both return valid embeddings (embeddings will differ due to asymmetric model)</idea>
+      <idea ac="5">Mock HTTP 429 response — verify 3 retry attempts with increasing delays. Verify final throw after 3 failures.</idea>
+      <idea ac="6">After embedText call, call getUsageStats() — verify totalTokens > 0, totalCost > 0, callCount = 1</idea>
+    </ideas>
+  </tests>
+</story-context>

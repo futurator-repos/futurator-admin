@@ -1,0 +1,203 @@
+<![CDATA[<story-context id="my-3-1-epic-compilation-pipeline" v="1.0">
+  <metadata>
+    <epicId>MY-3</epicId>
+    <storyId>1</storyId>
+    <title>Epic Compilation Pipeline</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-3-1-epic-compilation-pipeline.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>a compilation pipeline triggered when an epic transitions to completed status</iWant>
+    <soThat>cross-story knowledge is synthesized, superseded nodes are detected, and maturity scores are updated</soThat>
+    <tasks>
+      <task id="1" ac="1">Create epic status transition listener
+        <subtask>Hook into the epic workflow status state machine to detect completed transitions</subtask>
+        <subtask>Create generateEpicCompilePipeline() function that builds the two-step pipeline definition</subtask>
+        <subtask>Enqueue the epic-compile job to futurator-agent-jobs with epicId, projectId, and EPIC_TITLE context</subtask>
+        <subtask>Emit pipeline status events for each compilation sub-step to futurator-agent-events</subtask>
+      </task>
+      <task id="2" ac="2,3,4,5,6">Implement COMPILER agent consolidation step
+        <subtask>Create the agent step definition with agentId: COMPILER and prompt from architecture doc section 4.3</subtask>
+        <subtask>Inject EPIC_TITLE, STORY_COUNT, and INDEX_CONTENT (from knowledge/index.md) into the agent prompt</subtask>
+        <subtask>Agent reads all knowledge/code/ articles filtered by createdByEpic or lastMutatedByStory matching this epic's stories</subtask>
+        <subtask>Agent writes knowledge/planning/epic-{epicId}-synthesis.md with cross-story synthesis</subtask>
+        <subtask>Agent runs supersession scan — marks older as status: superseded and adds [[supersedes]] links</subtask>
+        <subtask>Agent reassesses maturity scores for related requirement/decision nodes based on implementation outcomes</subtask>
+        <subtask>Agent runs lint pass — checks for contradictions, orphan nodes, stale [[wikilinks]]</subtask>
+        <subtask>Agent updates knowledge/system/pending-work.md with incomplete items</subtask>
+        <subtask>Agent updates knowledge/index.md and appends compilation record to knowledge/log.md</subtask>
+      </task>
+      <task id="3" ac="7">Implement full graph resync shell step
+        <subtask>Add shell step calling node /home/ubuntu/scripts/graph-sync.mjs --project {{projectId}} --full-resync --knowledge-dir {{workingDir}}/knowledge --state-file {{workingDir}}/.mycelium/compile-state.json</subtask>
+        <subtask>Full resync re-embeds all articles regardless of content hash, capturing maturity/status/supersession changes</subtask>
+        <subtask>Include S3 backup of knowledge/ directory after sync</subtask>
+      </task>
+      <task id="4" ac="5,8">Implement lint output formatting
+        <subtask>Define lint output format: [WARN] for non-critical, [CRITICAL] for contradictions and broken references</subtask>
+        <subtask>Warnings appended to knowledge/log.md with timestamp and epic context</subtask>
+        <subtask>Critical issues written to knowledge/system/pending-work.md with severity and remediation hints</subtask>
+      </task>
+      <task id="5" ac="1">Error handling and non-blocking behavior
+        <subtask>Epic compilation failure does NOT revert the epic's completed status</subtask>
+        <subtask>Compilation errors are logged in futurator-agent-events with full stack traces</subtask>
+        <subtask>Add compilationStatus: success | failed | skipped to epic workflow record</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">When an epic's status transitions to completed in the workflow, an epic-compile pipeline job is automatically created and enqueued</criterion>
+    <criterion id="2">A COMPILER agent reads all code articles created/modified by this epic's stories and creates a cross-story synthesis article at knowledge/planning/epic-{epicId}-synthesis.md</criterion>
+    <criterion id="3">The COMPILER performs a supersession scan: finds articles where a later story overwrote an earlier story's work, marks older versions as status: superseded, and adds [[supersedes]] links</criterion>
+    <criterion id="4">Maturity scores are updated for all requirement/decision nodes related to this epic based on what was actually implemented</criterion>
+    <criterion id="5">A lint pass detects contradictions between articles, orphan nodes with no edges, and stale cross-references to renamed/deleted files</criterion>
+    <criterion id="6">knowledge/system/pending-work.md is updated with remaining incomplete items from this epic</criterion>
+    <criterion id="7">A full Memgraph resync (--full-resync) runs after the agent step completes</criterion>
+    <criterion id="8">Lint warnings are written to knowledge/log.md; critical issues are added to knowledge/system/pending-work.md</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.3 Epic Compilation Step</section>
+        <snippet>Pipeline definition for epic-compile: two steps (agent consolidate + shell graph-resync). COMPILER agent prompt covers cross-story synthesis, supersession scan, maturity update, lint pass, pending-work update, and index/log updates.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.1 Compilation Triggers</section>
+        <snippet>After EPIC completion: 1. Cross-story synthesis, 2. Detect superseded nodes, 3. Update maturity scores, 4. Lint pass, 5. Update pending-work.md, 6. Full Memgraph resync.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.1 Node Status Lifecycle</section>
+        <snippet>Status transitions: active -> flagged -> superseded -> pruned. This story handles active -> superseded via the supersession scan. Pruning to archive happens in Story 3.4 after deployment.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>6.3 Maturity Scoring</section>
+        <snippet>Maturity scores 0.0-1.0 with labels: Raw (0.0-0.2), Early (0.2-0.4), Partial (0.4-0.6), Solid (0.6-0.8), Ready (0.8-1.0). Phase gates require minimum maturity thresholds per transition.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.1 Wiki Articles</section>
+        <snippet>Article format with frontmatter (title, type, phase, status, maturity, createdByEpic, createdByStory, lastMutatedByStory, tags) and sections (Purpose, Dependencies, Dependents, Signals, Missing Signals). File naming: knowledge/{phase}/{slug}.md.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>3.3 DynamoDB Tables</section>
+        <snippet>futurator-agent-jobs for pipeline job state, futurator-agent-events for streaming events (TTL), futurator-epic-workflows for epic definitions/stories/statuses. No new DynamoDB tables needed.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Integration Architecture</title>
+        <section>4.2 Story Compilation Step</section>
+        <snippet>Story compilation pattern: shell diff extraction -> agent knowledge compilation -> shell embed and sync. The epic compilation extends this by adding cross-story synthesis and supersession scanning on top of the per-story pattern.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>executePipeline, executeStep, executeShellStep, runAgent, substituteTemplate</symbol>
+        <lines>430-731</lines>
+        <reason>The daemon executes pipeline jobs. The epic-compile pipeline must conform to the PipelineDefinition structure the daemon expects. Key patterns: shell steps use executeShellStep() with command template substitution, agent steps use runAgent() with Claude CLI. The daemon supports both stepType: shell and stepType: agent.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/epic-workflow.ts</path>
+        <kind>types</kind>
+        <symbol>EpicWorkflow, EpicStatus, EpicStory, StoryStatus</symbol>
+        <lines>1-79</lines>
+        <reason>Defines EpicStatus type: draft | ready | in_progress | in_review | fixing | completed | failed | deployed. The generateEpicCompilePipeline() function must detect the completed transition. The EpicWorkflow interface will need a compilationStatus field added.</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/agent-orchestrator.ts</path>
+        <kind>types</kind>
+        <symbol>PipelineDefinition, PipelineStep, PipelineStepType, AgentConfig, AgentJob</symbol>
+        <lines>1-160</lines>
+        <reason>Defines the pipeline structure the daemon consumes. PipelineStep supports stepType: agent | shell. AgentConfig has name, allowedTools, disallowedTools, model. The epic-compile pipeline definition must match these types.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/test-memgraph.mjs</path>
+        <kind>script</kind>
+        <symbol>neo4j-driver connection pattern</symbol>
+        <reason>Reference implementation for Memgraph Bolt connectivity. The graph-resync shell step uses the same neo4j-driver pattern to connect and upsert nodes/edges.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <ecosystem name="daemon">
+        <package name="@aws-sdk/client-dynamodb" note="DynamoDB client for job enqueuing and event publishing" />
+        <package name="@aws-sdk/lib-dynamodb" note="DynamoDB document client for PutCommand, UpdateCommand, QueryCommand" />
+      </ecosystem>
+      <ecosystem name="scripts">
+        <package name="neo4j-driver" note="Memgraph Bolt connectivity for full resync shell step (graph-sync.mjs)" />
+      </ecosystem>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint type="cost">Epic compilation is heavier than story compilation (~$0.10-0.20 per run vs. ~$0.03-0.08). The COMPILER agent must read and reason across ALL articles touched by the epic. Optimize prompt to minimize token usage.</constraint>
+    <constraint type="non-blocking">Epic compilation failure MUST NOT revert the epic's completed status. The app is already built — compilation is post-processing knowledge synthesis.</constraint>
+    <constraint type="dependency">This story depends on Epic 2 being complete. Story compilation pipeline must be operational so individual story articles exist for the epic compiler to synthesize.</constraint>
+    <constraint type="ordering">The agent step (consolidate) must complete BEFORE the shell step (graph-resync). Supersession marking and maturity updates must be written to wiki files before Memgraph sync.</constraint>
+    <constraint type="architecture">Wiki markdown files are the source of truth. Memgraph is a disposable query accelerator rebuilt from wiki content. The COMPILER agent writes to wiki files; graph-sync reads wiki files and upserts to Memgraph.</constraint>
+    <constraint type="status-lifecycle">The supersession scan handles active -> superseded transitions ONLY. Pruning (superseded -> pruned, moving to archive/) is handled by Story 3.4 after deployment.</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>generateEpicCompilePipeline</name>
+      <kind>function</kind>
+      <signature>generateEpicCompilePipeline(epicId: string, projectId: string, epicTitle: string, storyCount: number, workingDir: string): PipelineDefinition</signature>
+      <path>daemon/agent-daemon.mjs (or new module)</path>
+    </interface>
+    <interface>
+      <name>Epic status transition hook</name>
+      <kind>event listener</kind>
+      <signature>Detects EpicStatus transition to completed, triggers pipeline enqueue</signature>
+      <path>functions/shared/types/epic-workflow.ts (type), Lambda function (implementation)</path>
+    </interface>
+    <interface>
+      <name>graph-sync.mjs --full-resync</name>
+      <kind>CLI script</kind>
+      <signature>node /home/ubuntu/scripts/graph-sync.mjs --project {projectId} --full-resync --knowledge-dir {workingDir}/knowledge --state-file {workingDir}/.mycelium/compile-state.json</signature>
+      <path>/home/ubuntu/scripts/graph-sync.mjs</path>
+    </interface>
+    <interface>
+      <name>COMPILER agent</name>
+      <kind>agent identity</kind>
+      <signature>agentId: COMPILER, allowedTools: Read,Write,Edit,Glob,Grep, model: sonnet (or default)</signature>
+      <path>Pipeline agent config within epic-compile pipeline definition</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>This story modifies pipeline infrastructure on EC2. Tests should verify: (1) pipeline generation produces valid PipelineDefinition matching agent-orchestrator types, (2) epic status transition correctly triggers enqueue, (3) COMPILER agent prompt contains all required template variables, (4) graph-resync shell step executes with --full-resync flag. Integration testing requires a running Memgraph instance and the daemon.</standards>
+    <locations>
+      <location>daemon/agent-daemon.mjs</location>
+      <location>/home/ubuntu/scripts/graph-sync.mjs</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Unit test: generateEpicCompilePipeline() returns a PipelineDefinition with 2 steps (agent consolidate + shell graph-resync), correct agentId COMPILER, and all template variables (EPIC_TITLE, STORY_COUNT, INDEX_CONTENT, projectId)</idea>
+      <idea ac="2">Integration test: after COMPILER agent runs, verify knowledge/planning/epic-{epicId}-synthesis.md exists with valid frontmatter (type: planning, phase: planning) and content sections</idea>
+      <idea ac="3">Integration test: after supersession scan, verify superseded articles have status: superseded in frontmatter and [[supersedes]] links point to the superseding article</idea>
+      <idea ac="4">Integration test: verify maturity scores for requirement/decision nodes are updated (not the same as before compilation) after COMPILER runs</idea>
+      <idea ac="5">Integration test: lint output contains [WARN] and/or [CRITICAL] entries when contradictions or orphan nodes exist in the test knowledge base</idea>
+      <idea ac="6">Integration test: knowledge/system/pending-work.md lists nodes with maturity less than 0.6 or status flagged, grouped by phase</idea>
+      <idea ac="7">Integration test: after pipeline completes, Memgraph contains updated nodes reflecting supersession and maturity changes from the compilation</idea>
+      <idea ac="8">Integration test: knowledge/log.md contains lint warnings with timestamps; knowledge/system/pending-work.md contains critical lint issues with remediation hints</idea>
+    </ideas>
+  </tests>
+</story-context>]]>

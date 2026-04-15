@@ -1,0 +1,174 @@
+<story-context id="my-1-6-s3-wiki-backup-integration" v="1.0">
+  <metadata>
+    <epicId>MY-1</epicId>
+    <storyId>6</storyId>
+    <title>S3 Wiki Backup Integration</title>
+    <status>drafted</status>
+    <generatedAt>2026-04-14</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/my-1-6-s3-wiki-backup-integration.md</sourceStoryPath>
+  </metadata>
+
+  <story>
+    <asA>developer</asA>
+    <iWant>the wiki directory backed up to S3 after each sync operation</iWant>
+    <soThat>knowledge is durably stored and recoverable if the EC2 instance fails</soThat>
+
+    <tasks>
+      <task id="1" title="Create S3 backup script backup-wiki.sh" acs="1,2,5">
+        <subtask id="1.1">Create /home/ubuntu/scripts/backup-wiki.sh as a shell script</subtask>
+        <subtask id="1.2">Accept two arguments: projectId and knowledgeDir (path to the knowledge/ directory)</subtask>
+        <subtask id="1.3">Construct S3 destination path: s3://futurator-ai-website/knowledge-live/${projectId}/</subtask>
+        <subtask id="1.4">Execute aws s3 sync ${knowledgeDir} ${s3Path} --delete</subtask>
+        <subtask id="1.5">The --delete flag ensures articles moved to archive/ or removed are also cleaned from S3</subtask>
+        <subtask id="1.6">Make script executable (chmod +x)</subtask>
+      </task>
+      <task id="2" title="Implement error handling and best-effort behavior" acs="4">
+        <subtask id="2.1">Wrap aws s3 sync command in try/catch (|| true in shell) so failures do not propagate</subtask>
+        <subtask id="2.2">Log errors to stderr: [backup-wiki] ERROR: S3 sync failed for {projectId}: {error}</subtask>
+        <subtask id="2.3">Log success to stdout: [backup-wiki] Synced {projectId} knowledge to S3 ({n} files uploaded)</subtask>
+        <subtask id="2.4">Set a timeout of 30 seconds — if sync exceeds this, log warning and continue</subtask>
+      </task>
+      <task id="3" title="Integrate with graph-sync.mjs" acs="1,2">
+        <subtask id="3.1">Add S3 backup as a final step in graph-sync.mjs — call backup-wiki.sh after successful Memgraph sync</subtask>
+        <subtask id="3.2">Alternatively, expose as a standalone callable script that graph-sync.mjs invokes via child_process.exec</subtask>
+        <subtask id="3.3">Pass projectId and knowledgeDir from graph-sync's existing arguments</subtask>
+        <subtask id="3.4">Ensure backup failure does not affect graph-sync's exit code (non-blocking)</subtask>
+      </task>
+      <task id="4" title="Verify IAM permissions" acs="1">
+        <subtask id="4.1">Confirm EC2 IAM role develope-it-ec2-ssm has s3:PutObject, s3:DeleteObject, s3:ListBucket permissions on futurator-ai-website bucket</subtask>
+        <subtask id="4.2">Test with aws s3 ls s3://futurator-ai-website/ to verify access</subtask>
+        <subtask id="4.3">If permissions are missing, document what needs to be added (do not modify IAM directly)</subtask>
+      </task>
+      <task id="5" title="Validate performance and correctness" acs="1,2,3,5">
+        <subtask id="5.1">Initialize a test project wiki with init-wiki.sh</subtask>
+        <subtask id="5.2">Run backup-wiki.sh — verify all files appear at s3://futurator-ai-website/knowledge-live/{testProjectId}/</subtask>
+        <subtask id="5.3">Modify one article and run again — verify only the changed file is uploaded</subtask>
+        <subtask id="5.4">Measure sync time for incremental change — confirm under 10 seconds</subtask>
+        <subtask id="5.5">Delete an article locally and run with --delete — verify it is removed from S3</subtask>
+        <subtask id="5.6">Clean up test data from S3: aws s3 rm --recursive s3://futurator-ai-website/knowledge-live/{testProjectId}/</subtask>
+      </task>
+    </tasks>
+  </story>
+
+  <acceptanceCriteria>
+    <criterion id="1">The entire knowledge/ directory is synced to s3://futurator-ai-website/knowledge-live/{projectId}/ after a compilation or sync completes</criterion>
+    <criterion id="2">Only changed files are uploaded (using aws s3 sync differential behavior)</criterion>
+    <criterion id="3">The sync completes in under 10 seconds for typical incremental changes</criterion>
+    <criterion id="4">Errors are logged but do not fail the pipeline (backup is best-effort)</criterion>
+    <criterion id="5">The --delete flag is used so that archived/removed articles are also removed from S3</criterion>
+  </acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>8.4 S3 Storage</section>
+        <snippet>S3 paths: s3://futurator-ai-website/knowledge-live/{projectId}/ for live wiki backup (overwritten each sync), s3://futurator-ai-website/knowledge-archives/{projectId}/{date}.tar.gz for versioned snapshots (retained indefinitely, Epic 3).</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>8.1 EC2 Instance</section>
+        <snippet>IAM role develope-it-ec2-ssm with S3 access. Instance i-0826d68c316ae97dd, t4g.small, Ubuntu 24.04 ARM64.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>4.2 Story Compilation Step</section>
+        <snippet>S3 backup as part of compilation flow. Step C calls graph-sync.mjs which embeds and syncs to Memgraph. S3 backup follows as a post-sync step.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/mycelium-labs-architecture.md</path>
+        <title>Mycelium-Labs Architecture Document</title>
+        <section>9 Decisions Log</section>
+        <snippet>D1: Wiki markdown as persistence. D9: Wiki as source of truth, recoverable from S3. Knowledge hierarchy: wiki files (EC2) -> S3 knowledge-live (backup) -> S3 knowledge-archives (versioned) -> Memgraph (query accelerator, rebuilt from wiki).</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <file>
+        <path>daemon/memgraph/setup-memgraph.sh</path>
+        <kind>existing-script</kind>
+        <symbol>set -euo pipefail, function pattern, error handling</symbol>
+        <reason>Reference for shell script conventions, error handling patterns, and idempotency approach used in the project</reason>
+      </file>
+      <file>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon</kind>
+        <symbol>spawn, execSync, child_process</symbol>
+        <reason>graph-sync.mjs invokes backup-wiki.sh via child_process.exec. The daemon's shell step execution pattern shows how scripts are called with timeout and error handling.</reason>
+      </file>
+      <file>
+        <path>daemon/scripts/package.json</path>
+        <kind>config</kind>
+        <symbol>scripts section</symbol>
+        <reason>May add backup-wiki script entry for convenience, though it is primarily a shell script</reason>
+      </file>
+      <file>
+        <path>functions/shared/types/project-registry.ts</path>
+        <kind>type-definition</kind>
+        <symbol>ProjectRegistry, ec2Path</symbol>
+        <reason>Defines project workspace paths. knowledge/ directory is at ${ec2Path}/knowledge/ which is the source for S3 backup.</reason>
+      </file>
+    </code>
+
+    <dependencies>
+      <package name="aws-cli" version="system" reason="Uses aws s3 sync command — AWS CLI must be installed on EC2 instance (already present)"/>
+      <package name="bash" version="system" reason="Shell script with timeout support"/>
+    </dependencies>
+  </artifacts>
+
+  <constraints>
+    <constraint>Story MY-1.3 must be complete — wiki directory structure must exist to have content to back up</constraint>
+    <constraint>Best-effort design — S3 backup must NEVER block or fail the pipeline. Errors logged and swallowed.</constraint>
+    <constraint>EC2 IAM role develope-it-ec2-ssm must have s3:PutObject, s3:DeleteObject, s3:ListBucket on futurator-ai-website bucket</constraint>
+    <constraint>30-second timeout — if sync exceeds this, log warning and continue (do not block pipeline)</constraint>
+    <constraint>Use --delete flag with aws s3 sync to clean up removed/archived articles from S3</constraint>
+    <constraint>knowledge-live/ path is separate from knowledge-archives/ — live backups are latest-state-only, archives are versioned tarballs</constraint>
+    <constraint>Backup failure must not affect graph-sync.mjs exit code — non-blocking integration</constraint>
+    <constraint>Zero additional infrastructure cost — uses existing S3 bucket and IAM role</constraint>
+  </constraints>
+
+  <interfaces>
+    <interface>
+      <name>backup-wiki.sh CLI</name>
+      <endpoint>/home/ubuntu/scripts/backup-wiki.sh</endpoint>
+      <protocol>CLI (bash)</protocol>
+      <details>Arguments: $1=projectId (e.g., spyhunter), $2=knowledgeDir (path to knowledge/ directory). Syncs knowledge/ to s3://futurator-ai-website/knowledge-live/{projectId}/ with --delete flag.</details>
+    </interface>
+    <interface>
+      <name>AWS S3 Sync</name>
+      <endpoint>s3://futurator-ai-website/knowledge-live/{projectId}/</endpoint>
+      <protocol>AWS S3 API (via aws CLI)</protocol>
+      <details>aws s3 sync ${knowledgeDir} s3://futurator-ai-website/knowledge-live/${projectId}/ --delete. Differential upload — only changed files transferred. --delete removes files from S3 that are no longer in local source.</details>
+    </interface>
+    <interface>
+      <name>graph-sync.mjs integration</name>
+      <protocol>child_process.exec from Node.js</protocol>
+      <details>graph-sync.mjs calls backup-wiki.sh as a final step after Memgraph sync completes. Failure is caught and logged but does not affect graph-sync exit code.</details>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards>
+      <standard>S3 sync validation — verify files appear in S3 at correct path after backup</standard>
+      <standard>Incremental upload validation — modify one file, verify only that file is transferred</standard>
+      <standard>Deletion validation — remove local file, verify --delete flag removes it from S3</standard>
+      <standard>Performance validation — measure sync time for incremental changes, confirm under 10 seconds</standard>
+      <standard>Error resilience — simulate S3 failure (invalid credentials), verify script exits cleanly with logged error</standard>
+    </standards>
+    <locations>
+      <location>daemon/scripts/backup-wiki.sh (the backup script)</location>
+      <location>daemon/scripts/graph-sync.mjs (integration point — calls backup-wiki.sh as final step)</location>
+    </locations>
+    <ideas>
+      <idea ac="1">Run init-wiki.sh to create test project, then backup-wiki.sh — verify aws s3 ls shows all files at knowledge-live/{testProjectId}/</idea>
+      <idea ac="2">Add a new article file, run backup again — check aws s3 sync output shows only the new file uploaded</idea>
+      <idea ac="3">Measure time for incremental backup of 1 changed file with time command — verify under 10s</idea>
+      <idea ac="4">Temporarily revoke S3 permissions or use invalid credentials — verify script logs error but exits with code 0</idea>
+      <idea ac="5">Delete a local article file, run backup — verify aws s3 ls no longer shows the deleted file at the S3 path</idea>
+    </ideas>
+  </tests>
+</story-context>
