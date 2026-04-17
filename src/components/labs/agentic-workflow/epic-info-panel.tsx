@@ -466,9 +466,15 @@ function PublishSection({
 
   const deployUrl = deployJob?.variables?.DEPLOY_URL || epic.deployUrl;
   const deployStatus = deployJob?.variables?.DEPLOY_STATUS;
+  const deployDetails = deployJob?.variables?.DEPLOY_DETAILS;
   const appName = epic.workingDir.split('/').filter(Boolean).pop() || 'app';
   const isRunning = deployJob?.status === 'PENDING' || deployJob?.status === 'RUNNING';
   const allStoriesDone = epic.stories.every((s) => s.status === 'done');
+  // The agent can exit COMPLETED but not actually succeed — e.g. Claude asked
+  // for permission on an Edit it wasn't allowed to do, or never emitted
+  // DEPLOY_STATUS. Treat "COMPLETED without DEPLOY_STATUS=success" as failure
+  // so the UI surfaces it instead of collapsing to empty.
+  const completedWithoutSuccess = deployJob?.status === 'COMPLETED' && deployStatus !== 'success';
 
   return (
     <div className="rounded border border-input p-3 space-y-2">
@@ -497,18 +503,10 @@ function PublishSection({
         </div>
       )}
 
-      {deployUrl && !isRunning && (
+      {deployUrl && !isRunning && deployStatus === 'success' && (
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-xs">
-            <span
-              className={
-                deployStatus === 'success'
-                  ? 'text-green-500 font-medium'
-                  : 'text-yellow-500 font-medium'
-              }
-            >
-              {deployStatus === 'success' ? 'Published' : 'Deployed'}
-            </span>
+            <span className="text-green-500 font-medium">Published</span>
             <a
               href={deployUrl}
               target="_blank"
@@ -525,7 +523,34 @@ function PublishSection({
       )}
 
       {deployJob?.status === 'FAILED' && (
-        <div className="text-xs text-red-500">Deploy failed. Try again.</div>
+        <div className="space-y-1">
+          <p className="text-xs text-red-500">Deploy failed.</p>
+          {deployJob.errorMessage && (
+            <p className="text-[10px] text-red-400">{deployJob.errorMessage}</p>
+          )}
+        </div>
+      )}
+
+      {completedWithoutSuccess && (
+        <div className="space-y-1 rounded border border-red-900/60 bg-red-950/30 p-2">
+          <p className="text-xs text-red-400 font-medium">Deploy did not complete successfully</p>
+          <p className="text-[10px] text-muted-foreground">
+            The agent finished without emitting{' '}
+            <code className="font-mono">DEPLOY_STATUS: success</code>. Most likely it tried a tool
+            it wasn&apos;t allowed to use or the build failed.
+          </p>
+          {deployDetails && <p className="text-[10px] text-yellow-400">Details: {deployDetails}</p>}
+          {(deployJobId || epic.deployJobId) && (
+            <details className="mt-1">
+              <summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">
+                Show agent log
+              </summary>
+              <div className="mt-1">
+                <StoryLiveOutput jobId={(deployJobId || epic.deployJobId)!} />
+              </div>
+            </details>
+          )}
+        </div>
       )}
     </div>
   );

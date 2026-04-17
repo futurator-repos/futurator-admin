@@ -17,6 +17,47 @@ Do this before anything else, every time, no exceptions.
 - Always refer to this project as "Futurator-Admin" not "the project"
 - When asked to create a file, confirm the path before writing
 
+## Recent changes
+
+- **2026-04-17 (EO-7.2):** new epics default to `useEpicOrchestrator: true`.
+  `createEpic` in `functions/shared/repositories/epic-workflow-repository.ts`
+  applies the default only when the caller omits the field. Existing epics are
+  not backfilled. To opt out on a new epic, pass `useEpicOrchestrator: false`
+  explicitly.
+
+## ⛔ DEPLOY SAFETY — DO NOT SYNC `out/` TO `futurator-ai-website`
+
+This admin app's static export (`out/`) belongs at **`admin.futurator.ai`** and is
+deployed by **`sst deploy`** to its own SST-managed bucket
+(`futurator-admin-production-adminsiteassetsbucket-*`). It must **NEVER** be
+synced to `s3://futurator-ai-website/` — that bucket hosts the public homepage at
+`futurator.ai`, which is a separate Next.js project at
+`/Users/ricardoarayafarias/GetReal/Clients/futurator`.
+
+**Forbidden — will break futurator.ai:**
+
+```bash
+aws s3 sync out/ s3://futurator-ai-website/         # ❌ NO
+aws s3 sync out/ s3://futurator-ai-website/ --delete # ❌ NO
+```
+
+**Allowed admin writes to `futurator-ai-website` (scoped paths only):**
+
+| Path                          | Writer                                          | Purpose                           |
+| ----------------------------- | ----------------------------------------------- | --------------------------------- |
+| `data/projects.json`          | `functions/shared/export-public-projects.ts`    | Public projects list for homepage |
+| `media/<projectId>/`          | API pre-signed upload endpoint                  | Project media uploaded by admin   |
+| `apps/<appName>/`             | Deploy Agent (`/api/epic-workflows/:id/deploy`) | Published Vite/React user apps    |
+| `knowledge-live/<projectId>/` | Daemon `s3-backup.mjs`                          | Mycelium knowledge graph backups  |
+
+**Historical incident (2026-04-15):** the admin `out/` was synced to the bucket
+root, overwriting `index.html`. Visitors to futurator.ai got the admin AuthGuard
+spinner → Google OAuth redirect instead of the homepage. Recovery required
+running `scripts/deploy.sh` from the homepage repo (which preserves the four
+scoped paths above).
+
+To deploy this admin app: **`sst deploy`** — never a manual `aws s3 sync`.
+
 ## HELLO WORLD SIGNAL
 
 If the user says "ping", respond with exactly:

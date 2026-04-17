@@ -9,8 +9,12 @@ import { docClient, TABLE_NAMES } from '../dynamo-client';
 import type { EpicWorkflow } from '../types/epic-workflow';
 
 export async function createEpic(epic: EpicWorkflow): Promise<EpicWorkflow> {
-  await docClient.send(new PutCommand({ TableName: TABLE_NAMES.epicWorkflows, Item: epic }));
-  return epic;
+  // EO-7.2: new epics default to the orchestrator path. Epics created before
+  // the flip keep their existing value (no backfill) because this default
+  // only applies when the caller omits the field.
+  const item: EpicWorkflow = { ...epic, useEpicOrchestrator: epic.useEpicOrchestrator ?? true };
+  await docClient.send(new PutCommand({ TableName: TABLE_NAMES.epicWorkflows, Item: item }));
+  return item;
 }
 
 export async function getAllEpics(): Promise<EpicWorkflow[]> {

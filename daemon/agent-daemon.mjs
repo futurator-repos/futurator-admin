@@ -17,6 +17,7 @@ import {
   UpdateCommand,
   PutCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { spawn, execSync } from 'child_process';
 import { mkdirSync, existsSync } from 'fs';
 import { totalmem, freemem, loadavg } from 'os';
@@ -28,6 +29,21 @@ import {
   writeCompilationLog,
   parseArticleCounts,
 } from './pipelines/compile-events.mjs';
+import { createNdjsonForwarder } from './forwarder/ndjson-forwarder.mjs';
+import { createDdbEventStore } from './forwarder/ddb-event-store.mjs';
+import { createDaemonReceiver } from './receiver/http-receiver.mjs';
+import {
+  selectHandler,
+  validateEpicDevJob,
+  JOB_HANDLER_EPIC_DEV,
+} from './pipelines/job-router.mjs';
+import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
+import {
+  findStaleJobs,
+  buildResumeJob,
+  DEFAULT_STALE_MS,
+} from './pipelines/stale-heartbeat.mjs';
+import { randomUUID } from 'node:crypto';
 
 // Resolve the full path to `claude` binary at startup
 let CLAUDE_BIN = 'claude';
@@ -46,15 +62,106 @@ const REGION = process.env.AWS_REGION || 'us-east-1';
 const JOBS_TABLE = process.env.AGENT_JOBS_TABLE || 'futurator-agent-jobs';
 const EVENTS_TABLE = process.env.AGENT_EVENTS_TABLE || 'futurator-agent-events';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS || '3000', 10);
+const API_KEY_SSM_PARAM = process.env.ANTHROPIC_API_KEY_SSM_PARAM || '/futurator/daemon/anthropic-api-key';
+const API_KEY_REFRESH_MS = parseInt(process.env.API_KEY_REFRESH_MS || String(2 * 60 * 1000), 10);
+const AUTH_PROBE_INTERVAL_MS = parseInt(process.env.AUTH_PROBE_INTERVAL_MS || String(5 * 60 * 1000), 10);
+const EVENT_LOG_DIR = process.env.FUTURATOR_EVENT_LOG_DIR || '/var/log/futurator/events';
+const FORWARDER_POLL_MS = parseInt(process.env.FORWARDER_POLL_MS || '250', 10);
+const DAEMON_RECEIVER_PORT = parseInt(process.env.FUTURATOR_DAEMON_PORT || '17631', 10);
+const STALE_HEARTBEAT_MS = parseInt(process.env.STALE_HEARTBEAT_MS || String(DEFAULT_STALE_MS), 10);
+const STALE_SCAN_INTERVAL_MS = parseInt(process.env.STALE_SCAN_INTERVAL_MS || '30000', 10);
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
   marshallOptions: { removeUndefinedValues: true },
 });
+const ssm = new SSMClient({ region: REGION });
+
+// ── Anthropic API key + auth health (Option E from ec2-auth-lifecycle-analysis.md) ──
+// Daemon prefers an API key from SSM over the OAuth `.credentials.json` file, because
+// the OAuth flow has no headless refresh path and expires every 12-24h. The API key
+// never expires, so this is the fix for the "Not logged in" failures.
+let apiKeyLoadedAt = 0;
+let apiKeySource = 'none'; // 'ssm' | 'env' | 'oauth-fallback' | 'none'
+const authState = {
+  valid: null, // null until first probe
+  checkedAt: null,
+  error: null,
+};
+
+async function loadApiKeyFromSsm(reason = 'startup') {
+  // Static env-provided key always wins (local dev, CI, opt-out).
+  if (process.env.ANTHROPIC_API_KEY && apiKeySource !== 'ssm') {
+    apiKeySource = 'env';
+    apiKeyLoadedAt = Date.now();
+    return;
+  }
+  try {
+    const { Parameter } = await ssm.send(
+      new GetParameterCommand({ Name: API_KEY_SSM_PARAM, WithDecryption: true }),
+    );
+    const value = Parameter?.Value?.trim();
+    if (!value) throw new Error('SSM parameter is empty');
+    process.env.ANTHROPIC_API_KEY = value;
+    apiKeySource = 'ssm';
+    apiKeyLoadedAt = Date.now();
+    log('info', `Anthropic API key loaded from SSM (${reason})`, { param: API_KEY_SSM_PARAM });
+  } catch (err) {
+    // Fall back to whatever OAuth credentials.json provides — don't fail hard.
+    if (apiKeySource === 'none') apiKeySource = 'oauth-fallback';
+    log('warn', `Could not read API key from SSM (${reason}); falling back to OAuth`, {
+      param: API_KEY_SSM_PARAM,
+      err: err.message,
+    });
+  }
+}
+
+function probeAuth() {
+  return new Promise((resolve) => {
+    const args = ['-p', 'ok', '--model', 'haiku', '--output-format', 'json'];
+    const proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, FORCE_COLOR: '0' },
+      timeout: 20000,
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (c) => (stdout += c.toString()));
+    proc.stderr.on('data', (c) => (stderr += c.toString()));
+    proc.on('error', (err) => {
+      authState.valid = false;
+      authState.error = `probe spawn failed: ${err.message}`;
+      authState.checkedAt = new Date().toISOString();
+      resolve();
+    });
+    proc.on('close', (code) => {
+      const combined = stderr + stdout;
+      const authFailed = isAuthFailureOutput(combined) || (code !== 0 && /login|auth/i.test(combined));
+      authState.valid = !authFailed && code === 0;
+      authState.error = authState.valid ? null : (stderr.trim() || `exit ${code}`).slice(0, 200);
+      authState.checkedAt = new Date().toISOString();
+      log(authState.valid ? 'info' : 'warn', `Auth probe: ${authState.valid ? 'OK' : 'FAIL'}`, {
+        source: apiKeySource,
+        err: authState.error,
+      });
+      resolve();
+    });
+  });
+}
+
+function isAuthFailureOutput(text) {
+  if (!text) return false;
+  return /401|authentication_error|unauthenticated|Failed to authenticate|Not logged in|Please run \/login|Invalid[- ]?(api[- ]?key|bearer)/i.test(
+    text,
+  );
+}
 
 const jobEventSeqs = new Map(); // jobId -> last seq number
 const activeJobs = new Map(); // jobId -> { startedAt, workingDir, stepId, agentId, pid, model }
-const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT || '5', 10);
+// t2.micro has 1.8GB RAM; each Claude process uses ~150-300MB. 2 concurrent = safe.
+const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT || '2', 10);
 let shuttingDown = false;
+let ndjsonForwarder = null;
+let daemonReceiver = null;
 
 function log(level, msg, data = {}) {
   const entry = {
@@ -271,13 +378,24 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
     });
 
     proc.on('close', (code) => {
-      // Check for auth errors in stderr or stdout
+      // Check for auth errors in stderr or stdout — also catch the silent-failure
+      // pattern where Claude CLI exits 0 with $0 cost and empty output (seen when
+      // the OAuth token is expired but stream-json mode swallowed the error).
       const allOutput = stderrBuffer + (finalResult?.result || '');
-      const isAuthError = /401|authentication_error|unauthenticated|Failed to authenticate/i.test(allOutput);
+      const isAuthError = isAuthFailureOutput(allOutput);
+      const silentZeroCost =
+        code === 0 && finalResult && (finalResult.total_cost_usd || 0) === 0 && !finalResult.result?.trim();
       const isRateLimit = /429|rate.?limit/i.test(allOutput);
 
-      if (isAuthError) {
-        const msg = 'Claude Code authentication failed. OAuth token may have expired. Re-transfer credentials from your Mac.';
+      if (isAuthError || silentZeroCost) {
+        // Mark auth as invalid so the next heartbeat reflects reality immediately.
+        authState.valid = false;
+        authState.error = (silentZeroCost ? 'silent zero-cost failure' : allOutput.slice(0, 200)) || 'auth failure';
+        authState.checkedAt = new Date().toISOString();
+        const msg =
+          apiKeySource === 'ssm'
+            ? 'Claude credentials expired or invalid — update the API key in SSM parameter ' + API_KEY_SSM_PARAM + ' and no restart is needed.'
+            : 'Claude credentials expired — re-authorize from EC2 settings (or provision an API key via SSM ' + API_KEY_SSM_PARAM + ').';
         log('error', msg);
         pushEvent(jobId, stepId, agentId, 'step_error', { text: msg });
         return reject(new Error(msg));
@@ -451,11 +569,81 @@ async function writeHeartbeat() {
             freeMem: Math.round(mem.freeMem / 1024 / 1024),
             loadAvg: mem.loadAvg.map((v) => Math.round(v * 100) / 100),
           },
+          auth: {
+            valid: authState.valid,
+            checkedAt: authState.checkedAt,
+            error: authState.error,
+            source: apiKeySource,
+            apiKeyLoadedAt: apiKeyLoadedAt ? new Date(apiKeyLoadedAt).toISOString() : null,
+          },
         },
       }),
     );
   } catch {
     // Non-critical
+  }
+}
+
+// ── Stale-heartbeat scan for crash-resume (EO-4.5) ──
+// Query RUNNING epic-dev jobs, find ones whose lastHeartbeatAt is older
+// than STALE_HEARTBEAT_MS, mark them STALE, and create a fresh PENDING
+// job that carries the accumulated waveResults forward via
+// resumeFromWaveResults. The poll loop will then pick the new job up
+// and spawn a new orchestrator that skips completed waves.
+let lastStaleScanAt = 0;
+
+async function scanStaleEpicDevJobs() {
+  try {
+    const { Items } = await ddb.send(
+      new QueryCommand({
+        TableName: JOBS_TABLE,
+        IndexName: 'status-createdAt-index',
+        KeyConditionExpression: '#s = :running',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':running': 'RUNNING' },
+        Limit: 50,
+      }),
+    );
+
+    if (!Items || Items.length === 0) return;
+
+    const stale = findStaleJobs(Items, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS });
+    if (stale.length === 0) return;
+
+    for (const job of stale) {
+      // Skip jobs currently running on THIS daemon — they aren't actually
+      // dead; their heartbeat is just behind because the pipeline module
+      // doesn't tick updatedAt continuously.
+      if (activeJobs.has(job.jobId)) continue;
+
+      const newJobId = randomUUID();
+      const nowIso = new Date().toISOString();
+      const resumeJob = buildResumeJob(job, { newJobId, now: nowIso });
+
+      log('warn', `Stale epic-dev job detected — resuming`, {
+        staleJobId: job.jobId.slice(0, 8),
+        newJobId: newJobId.slice(0, 8),
+        waves: resumeJob.resumeFromWaveResults ? Object.keys(resumeJob.resumeFromWaveResults).length : 0,
+      });
+
+      try {
+        await ddb.send(
+          new PutCommand({
+            TableName: JOBS_TABLE,
+            Item: resumeJob,
+          }),
+        );
+        await updateJobFields(job.jobId, {
+          status: 'STALE',
+          errorMessage: `Orchestrator heartbeat stale >${Math.round(STALE_HEARTBEAT_MS / 1000)}s — resumed as ${newJobId}`,
+          resumedAsJobId: newJobId,
+        });
+      } catch (err) {
+        log('error', `Failed to schedule resume for ${job.jobId.slice(0, 8)}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    log('error', `Stale scan failed: ${err.message}`);
   }
 }
 
@@ -891,6 +1079,62 @@ async function executePipeline(job) {
   ))}`);
 }
 
+// ── Epic-dev pipeline dispatcher (EO-4.3) ──
+
+async function executeEpicDevJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  const validation = validateEpicDevJob(job);
+  if (!validation.ok) {
+    throw new Error(`epic-dev job rejected: ${validation.reason}`);
+  }
+
+  log('info', `[${short}] Routing to epic-dev pipeline`, {
+    epicId: job.epicId,
+    stories: job.epicDevPayload?.stories?.length,
+    model: job.epicDevPayload?.orchestratorModel,
+  });
+
+  const entry = activeJobs.get(jobId);
+  if (entry) {
+    entry.stepId = 'epic-dev';
+    entry.agentId = 'orchestrator';
+    entry.model = job.epicDevPayload?.orchestratorModel || null;
+  }
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'epic-dev',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  const result = await runEpicDevPipeline({
+    job,
+    eventLogDir: EVENT_LOG_DIR,
+    daemonPort: DAEMON_RECEIVER_PORT,
+    claudeBin: CLAUDE_BIN,
+    spawn,
+    logger: {
+      info: (msg) => log('info', msg),
+      warn: (msg) => log('warn', msg),
+      error: (msg) => log('error', msg),
+    },
+  });
+
+  const ok = result.exitCode === 0;
+  log(ok ? 'info' : 'error', `[${short}] Orchestrator exited`, {
+    code: result.exitCode,
+    durationMs: result.durationMs,
+  });
+
+  await updateJobFields(jobId, {
+    status: ok ? 'COMPLETED' : 'FAILED',
+    errorMessage: ok ? undefined : `orchestrator exit code ${result.exitCode}`,
+    orchestratorDurationMs: result.durationMs,
+  });
+}
+
 // ── Poll loop ──
 
 async function runJobAsync(job) {
@@ -901,12 +1145,19 @@ async function runJobAsync(job) {
   });
   jobEventSeqs.set(job.jobId, 0);
 
-  log('info', `[${job.jobId.slice(0, 8)}] Job started (${activeJobs.size}/${MAX_CONCURRENT} concurrent)`);
-  log('info', `[${job.jobId.slice(0, 8)}]   Steps: ${job.pipeline?.steps?.length || 0}`);
-  log('info', `[${job.jobId.slice(0, 8)}]   Agents: ${Object.keys(job.pipeline?.agents || {}).join(', ')}`);
+  const handler = selectHandler(job);
+  log('info', `[${job.jobId.slice(0, 8)}] Job started (${activeJobs.size}/${MAX_CONCURRENT} concurrent) handler=${handler}`);
+  if (handler !== JOB_HANDLER_EPIC_DEV) {
+    log('info', `[${job.jobId.slice(0, 8)}]   Steps: ${job.pipeline?.steps?.length || 0}`);
+    log('info', `[${job.jobId.slice(0, 8)}]   Agents: ${Object.keys(job.pipeline?.agents || {}).join(', ')}`);
+  }
 
   try {
-    await executePipeline(job);
+    if (handler === JOB_HANDLER_EPIC_DEV) {
+      await executeEpicDevJob(job);
+    } else {
+      await executePipeline(job);
+    }
   } catch (err) {
     log('error', `[${job.jobId.slice(0, 8)}] Job failed: ${err.message}`);
     try {
@@ -928,11 +1179,66 @@ async function poll() {
   log('info', `  Interval:   ${POLL_INTERVAL}ms`);
   log('info', `  Concurrency: ${MAX_CONCURRENT} jobs`);
   log('info', `  Claude:     ${CLAUDE_BIN}`);
+  log('info', `  API key SSM param: ${API_KEY_SSM_PARAM}`);
+
+  await loadApiKeyFromSsm('startup');
+  await probeAuth();
+
+  // NDJSON event forwarder: tails per-job logs written by emit-event.sh and
+  // mirrors them into the events table with monotonic eventSeq + idempotent puts.
+  try {
+    const store = createDdbEventStore({ ddb, tableName: EVENTS_TABLE });
+    ndjsonForwarder = createNdjsonForwarder({
+      logDir: EVENT_LOG_DIR,
+      store,
+      pollMs: FORWARDER_POLL_MS,
+      logger: {
+        warn: (msg) => log('warn', msg),
+        error: (msg) => log('error', msg),
+        info: () => {},
+      },
+    });
+    await ndjsonForwarder.start();
+    log('info', `NDJSON forwarder started`, { logDir: EVENT_LOG_DIR, pollMs: FORWARDER_POLL_MS });
+  } catch (err) {
+    log('error', `NDJSON forwarder failed to start: ${err.message}`);
+  }
+
+  // Loopback HTTP receiver for wave-complete / heartbeat from orchestrator subagents.
+  try {
+    daemonReceiver = createDaemonReceiver({
+      ddb,
+      jobsTable: JOBS_TABLE,
+      logger: {
+        warn: (msg) => log('warn', msg),
+        error: (msg) => log('error', msg),
+        info: (msg) => log('info', msg),
+      },
+    });
+    const addr = await daemonReceiver.listen(DAEMON_RECEIVER_PORT, '127.0.0.1');
+    log('info', `Daemon receiver listening`, { host: addr.address, port: addr.port });
+  } catch (err) {
+    log('error', `Daemon receiver failed to start: ${err.message}`);
+  }
+
+  setInterval(() => {
+    loadApiKeyFromSsm('refresh').catch((e) => log('error', `API key refresh failed: ${e.message}`));
+  }, API_KEY_REFRESH_MS).unref();
+  setInterval(() => {
+    probeAuth().catch((e) => log('error', `Auth probe failed: ${e.message}`));
+  }, AUTH_PROBE_INTERVAL_MS).unref();
+
   log('info', 'Polling for PENDING jobs...\n');
 
   while (!shuttingDown) {
     try {
       await writeHeartbeat();
+
+      // Stale-heartbeat scan (EO-4.5) — throttled so we don't hammer DDB.
+      if (Date.now() - lastStaleScanAt >= STALE_SCAN_INTERVAL_MS) {
+        lastStaleScanAt = Date.now();
+        scanStaleEpicDevJobs().catch((e) => log('error', `Stale scan uncaught: ${e.message}`));
+      }
 
       // Only query if we have available slots
       const availableSlots = MAX_CONCURRENT - activeJobs.size;
@@ -971,6 +1277,22 @@ async function shutdown(signal) {
   log('warn', `Received ${signal}. Shutting down... (${activeJobs.size} active jobs)`);
   shuttingDown = true;
 
+  if (ndjsonForwarder) {
+    try {
+      await ndjsonForwarder.stop();
+    } catch (err) {
+      log('error', `NDJSON forwarder stop failed: ${err.message}`);
+    }
+  }
+
+  if (daemonReceiver) {
+    try {
+      await daemonReceiver.close();
+    } catch (err) {
+      log('error', `Daemon receiver close failed: ${err.message}`);
+    }
+  }
+
   for (const jobId of activeJobs.keys()) {
     log('warn', `Marking active job ${jobId.slice(0, 8)} as FAILED (interrupted)`);
     try {
@@ -988,5 +1310,18 @@ async function shutdown(signal) {
 
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+// SIGUSR1 = hot-reload the Anthropic API key from SSM and re-probe auth.
+// Triggered by the admin API after /api/ec2/set-anthropic-key so rotations
+// propagate within seconds — no restart, no killed jobs.
+process.on('SIGUSR1', async () => {
+  log('info', 'SIGUSR1 received — hot-reloading API key from SSM');
+  try {
+    await loadApiKeyFromSsm('sigusr1');
+    await probeAuth();
+  } catch (err) {
+    log('error', `SIGUSR1 reload failed: ${err.message}`);
+  }
+});
 
 poll();

@@ -8,6 +8,13 @@ import type {
   OfficeLogEntry,
 } from '@/types/agentic-office';
 import type { EpicStory } from '@/types/epic-workflow';
+import type { OrchestratorAnimationIntent } from '@/components/agentic-office/event-translator';
+import {
+  applyOrchestratorIntent,
+  initialOrchestratorSceneState,
+  reconcileFromStories,
+  type OrchestratorSceneState,
+} from '@/components/agentic-office/scene/orchestrator-scene-state';
 
 const MAX_DESKS = 10;
 const MAX_LOG = 80;
@@ -31,6 +38,11 @@ interface OfficeStoreState {
   isPaused: boolean;
   speed: number;
   eventLog: OfficeLogEntry[];
+
+  // Orchestrator visualization state (Epic 6)
+  orchestrator: OrchestratorSceneState;
+  applyOrchestratorIntent: (intent: OrchestratorAnimationIntent) => void;
+  reconcileOrchestratorFromStories: (stories: EpicStory[]) => void;
 
   // Actions
   spawnWorker: (worker: OfficeWorker) => void;
@@ -86,6 +98,14 @@ export const useOfficeStore = create<OfficeStoreState>((set, get) => ({
   isPaused: false,
   speed: 1,
   eventLog: [],
+
+  orchestrator: initialOrchestratorSceneState(),
+
+  applyOrchestratorIntent: (intent) =>
+    set((s) => ({ orchestrator: applyOrchestratorIntent(s.orchestrator, intent) })),
+
+  reconcileOrchestratorFromStories: (stories) =>
+    set((s) => ({ orchestrator: reconcileFromStories(s.orchestrator, stories) })),
 
   spawnWorker: (worker) =>
     set((s) => {

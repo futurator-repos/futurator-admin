@@ -25,6 +25,7 @@ const mainItems: NavItem[] = [
   { href: '/schedules', label: 'Schedules', icon: '⏰' },
   { href: '/users', label: 'Users', icon: '👥' },
   { href: '/alerts', label: 'Alerts', icon: '🔔' },
+  { href: '/reports', label: 'Reports', icon: '📈' },
 ];
 
 const sections: NavSection[] = [

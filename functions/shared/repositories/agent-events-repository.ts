@@ -1,4 +1,4 @@
-import { BatchWriteCommand, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchWriteCommand, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { docClient, TABLE_NAMES } from '../dynamo-client';
 import type { AgentEvent } from '../types/agent-orchestrator';
 
@@ -51,6 +51,27 @@ export async function deleteEventsForJob(jobId: string): Promise<number> {
   } while (lastKey);
 
   return deleted;
+}
+
+/**
+ * Paginated scan of the agent-events table. Used by offline reporting
+ * (EO-7.3 metrics dashboard) — never on a hot path. The 7-day TTL keeps the
+ * table bounded, so a full scan is acceptable here.
+ */
+export async function scanAllEvents(): Promise<AgentEvent[]> {
+  const out: AgentEvent[] = [];
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const result = await docClient.send(
+      new ScanCommand({
+        TableName: TABLE_NAMES.agentEvents,
+        ExclusiveStartKey,
+      }),
+    );
+    if (result.Items) out.push(...(result.Items as AgentEvent[]));
+    ExclusiveStartKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (ExclusiveStartKey);
+  return out;
 }
 
 export async function getEventsAfter(

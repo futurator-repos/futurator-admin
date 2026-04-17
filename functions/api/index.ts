@@ -21,11 +21,17 @@ import * as alertRepo from '../shared/repositories/alert-repository';
 import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as agentEventsRepo from '../shared/repositories/agent-events-repository';
 import { createAgentJobSchema } from '../shared/schemas/agent-orchestrator-schema';
+import { resolveBlockerSchema } from '../shared/schemas/resolve-blocker-schema';
+import { validateEpicForOrchestratorStart } from '../shared/services/epic-dev-launcher';
+import { aggregateOrchestratorMetrics } from '../shared/services/epic-orchestrator-metrics';
+import { enqueueResumeJob } from '../shared/services/resume-job';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
 import * as registryRepo from '../shared/repositories/project-registry-repository';
 import type { EpicStory } from '../shared/types/epic-workflow';
 import type { PipelineDefinition } from '../shared/types/agent-orchestrator';
 import { exportPublicProjects } from '../shared/export-public-projects';
+import { renderFlatLog, filterEvents } from '../shared/rendering/flat-log';
+import type { AgentEvent } from '../shared/types/agent-orchestrator';
 import {
   S3Client,
   PutObjectCommand,
@@ -39,7 +45,13 @@ import {
   StopInstancesCommand,
   DescribeInstancesCommand,
 } from '@aws-sdk/client-ec2';
-import { SSMClient, SendCommandCommand, GetCommandInvocationCommand } from '@aws-sdk/client-ssm';
+import {
+  SSMClient,
+  SendCommandCommand,
+  GetCommandInvocationCommand,
+  PutParameterCommand,
+  GetParameterCommand,
+} from '@aws-sdk/client-ssm';
 import { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { format } from 'date-fns';
 
@@ -361,6 +373,47 @@ app.post('/api/costs/manual', async (c) => {
   return c.json({ id: manualId }, 201);
 });
 
+// ── Reports ──
+// EO-7.3: Epic-orchestrator metrics — aggregated from futurator-agent-events.
+// Query params: from (ISO or epoch ms), to (ISO or epoch ms), project, useEpicOrchestrator.
+app.get('/api/reports/epic-orchestrator-metrics', async (c) => {
+  const parseBoundary = (raw: string | undefined): number | undefined => {
+    if (!raw) return undefined;
+    const asNum = Number(raw);
+    if (Number.isFinite(asNum) && asNum > 10_000_000_000) return asNum; // epoch ms
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+  const from = parseBoundary(c.req.query('from'));
+  const to = parseBoundary(c.req.query('to'));
+  const projectId = c.req.query('project') || undefined;
+  const useEpicOrchestrator = c.req.query('useEpicOrchestrator');
+
+  let events = await agentEventsRepo.scanAllEvents();
+
+  // When `useEpicOrchestrator=true`, restrict to events that belong to an
+  // epic-dev job. When `false`, restrict to events that do not. This gives
+  // operators a direct before/after comparison from the same table.
+  if (useEpicOrchestrator === 'true' || useEpicOrchestrator === 'false') {
+    const jobIds = new Set(events.map((e) => e.jobId));
+    const phaseByJob = new Map<string, string | undefined>();
+    await Promise.all(
+      Array.from(jobIds).map(async (jobId) => {
+        const job = await agentJobsRepo.getJobById(jobId);
+        phaseByJob.set(jobId, job?.phase);
+      }),
+    );
+    const wantOrchestrator = useEpicOrchestrator === 'true';
+    events = events.filter((e) => {
+      const isOrch = phaseByJob.get(e.jobId) === 'epic-dev';
+      return wantOrchestrator ? isOrch : !isOrch;
+    });
+  }
+
+  const metrics = aggregateOrchestratorMetrics(events, { from, to, projectId });
+  return c.json({ filter: { from, to, projectId, useEpicOrchestrator }, metrics });
+});
+
 // ── Resources ──
 app.get('/api/projects/:id/resources', async (c) => {
   const resources = await resourceRepo.getResourcesByProject(c.req.param('id'));
@@ -517,6 +570,58 @@ app.get('/api/agent-jobs/:id/events', async (c) => {
   return c.json({ events, lastSeq });
 });
 
+// Flat-log renderer: plain-text hierarchical trace of all events tied to an epic.
+// Paste-friendly format for reasoning about orchestrator behavior during dev.
+app.get('/api/epic-workflows/:epicId/flat-log', async (c) => {
+  const epicId = c.req.param('epicId');
+  const epic = await epicRepo.getEpicById(epicId);
+  if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
+
+  const jobIdParam = c.req.query('jobId');
+  const jobIds = new Set<string>();
+  if (jobIdParam) {
+    jobIds.add(jobIdParam);
+  } else {
+    for (const story of epic.stories || []) {
+      if (story.jobId) jobIds.add(story.jobId);
+    }
+    for (const jobId of Object.values(epic.waveBuildJobs || {})) {
+      if (jobId) jobIds.add(jobId);
+    }
+    if (epic.qaJobId) jobIds.add(epic.qaJobId);
+    if (epic.poJobId) jobIds.add(epic.poJobId);
+    if (epic.deployJobId) jobIds.add(epic.deployJobId);
+  }
+
+  const perJobLimit = 500;
+  const collected: AgentEvent[] = [];
+  for (const jobId of jobIds) {
+    const { events } = await agentEventsRepo.getEventsAfter(jobId, '000000', perJobLimit);
+    for (const e of events) {
+      // Stamp epicId so the prefix renders correctly even if a producer forgot.
+      collected.push({ ...e, epicId: e.epicId || epicId });
+    }
+  }
+  collected.sort((a, b) => {
+    if (a.timestamp !== b.timestamp) return a.timestamp < b.timestamp ? -1 : 1;
+    return a.seq - b.seq;
+  });
+
+  const waveStr = c.req.query('wave');
+  const limitStr = c.req.query('limit');
+  const filtered = filterEvents(collected, {
+    since: c.req.query('since') || undefined,
+    role: c.req.query('role') || undefined,
+    storyId: c.req.query('storyId') || undefined,
+    wave: waveStr !== undefined ? Number(waveStr) : undefined,
+    limit: limitStr !== undefined ? Number(limitStr) : undefined,
+  });
+
+  const body = renderFlatLog(filtered);
+  c.header('Content-Type', 'text/plain; charset=utf-8');
+  return c.body(body);
+});
+
 app.get('/api/daemon/status', async (c) => {
   const heartbeat = await agentJobsRepo.getJobById('DAEMON_HEARTBEAT');
   if (!heartbeat?.updatedAt) {
@@ -574,7 +679,8 @@ function generateStoryPipeline(
       COMPILER: {
         name: 'Knowledge Compiler',
         allowedTools: 'Read,Write,Edit,Glob,Grep',
-        model: 'sonnet',
+        // Haiku sufficient for structured markdown — Sonnet caused OOM on t2.micro
+        model: 'haiku',
       },
     },
     steps: [
@@ -873,9 +979,7 @@ Working directory: ${workingDir}
 }
 
 // ── Parse visual test definitions from YAML-like text output ──
-function parseVisualTests(
-  raw: string,
-): {
+function parseVisualTests(raw: string): {
   id: string;
   criteriaRef: string;
   description: string;
@@ -1876,6 +1980,264 @@ app.post('/api/epic-workflows/:id/stories/:storyId/run', async (c) => {
   return c.json({ jobId, storyId }, 201);
 });
 
+// ── Epic Orchestrator: start a single `phase: 'epic-dev'` job (EO-4.4) ──
+// Feature-flagged by `epic.useEpicOrchestrator`. When the flag is off the
+// endpoint returns 409 so the UI can fall back to legacy per-story buttons.
+app.post('/api/epic-workflows/:id/start', async (c) => {
+  const epicId = c.req.param('id');
+  const user = c.get('user');
+
+  const epic = await epicRepo.getEpicById(epicId);
+  if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
+
+  const validation = validateEpicForOrchestratorStart(epic);
+  if (!validation.ok) {
+    if (validation.code === 'flag-disabled') {
+      return c.json(
+        { error: { code: 'useEpicOrchestrator-disabled', message: validation.message } },
+        409,
+      );
+    }
+    const detail =
+      validation.code === 'inference-missing' && validation.missingInferenceFor
+        ? `${validation.message} Run inference first: ${validation.missingInferenceFor.join(', ')}`
+        : validation.message;
+    throw new ValidationError(detail);
+  }
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const projectId = epic.workingDir.split('/').filter(Boolean).pop() || epicId;
+
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user.userId,
+    workingDir: epic.workingDir,
+    pipeline: { agents: {}, steps: [] },
+    phase: 'epic-dev',
+    epicId,
+    projectId,
+    epicDevPayload: validation.payload,
+  });
+
+  await epicRepo.updateEpicFields(epicId, {
+    status: 'in_progress',
+    orchestratorJobId: jobId,
+  });
+
+  return c.json({ jobId }, 201);
+});
+
+// ── Resolve Blocker (EO-5.2): amend / skip / retry a blocked story ──
+// Three actions, mutually exclusive. `amend` and `retry` enqueue a resume
+// epic-dev job; `skip` does not. The optimistic-lock field
+// `expectedBlockerReportedAt` guards against a second operator resolving a
+// stale blocker in another tab.
+const resolveBlockerThrottle = new Map<string, number>();
+const RESOLVE_BLOCKER_THROTTLE_MS = 5000;
+
+app.post('/api/epic-workflows/:id/stories/:storyId/resolve-blocker', async (c) => {
+  const epicId = c.req.param('id');
+  const storyId = c.req.param('storyId');
+  const user = c.get('user');
+
+  // Lightweight in-memory throttle per (epic, story). Intentionally
+  // single-instance — a Lambda cold start resets it, which at worst lets one
+  // stray click through before the next 409 `not-blocked` kicks in.
+  const throttleKey = `${epicId}:${storyId}`;
+  const lastResolvedAt = resolveBlockerThrottle.get(throttleKey) ?? 0;
+  const nowMs = Date.now();
+  if (nowMs - lastResolvedAt < RESOLVE_BLOCKER_THROTTLE_MS) {
+    return c.json(
+      {
+        error: {
+          code: 'rate-limited',
+          message: 'Please wait a few seconds before resolving this blocker again.',
+        },
+      },
+      429,
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    throw new ValidationError('Request body must be valid JSON');
+  }
+
+  const parsed = resolveBlockerSchema.safeParse(body);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => `${i.path.join('.') || 'body'}: ${i.message}`)
+      .join('; ');
+    throw new ValidationError(issues);
+  }
+  const input = parsed.data;
+
+  const epic = await epicRepo.getEpicById(epicId);
+  if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
+
+  if (epic.status === 'deployed' || epic.status === 'completed') {
+    return c.json(
+      {
+        error: {
+          code: 'epic-terminal',
+          message: `Cannot resolve a blocker on a ${epic.status} epic.`,
+        },
+      },
+      409,
+    );
+  }
+
+  const story = epic.stories.find((s) => s.storyId === storyId);
+  if (!story) throw new NotFoundError('Story', storyId);
+
+  if (story.status !== 'blocked' || !story.blocker) {
+    return c.json(
+      {
+        error: {
+          code: 'not-blocked',
+          message: `Story ${storyId} is not in a blocked state (current: ${story.status}).`,
+        },
+      },
+      409,
+    );
+  }
+
+  if (
+    input.expectedBlockerReportedAt &&
+    input.expectedBlockerReportedAt !== story.blocker.reportedAt
+  ) {
+    return c.json(
+      {
+        error: {
+          code: 'blocker-changed',
+          message:
+            'This blocker has been updated since the drawer opened. Reload the story to see the latest state.',
+        },
+      },
+      409,
+    );
+  }
+
+  const resolvedAt = new Date().toISOString();
+  const resolvedBy = user.userId;
+
+  let newStatus: 'pending' | 'skipped';
+  let resumeJobId: string | null = null;
+  let amendedFields: Array<keyof EpicStory> | undefined;
+  const warnings: string[] = [];
+
+  if (input.action === 'skip') {
+    newStatus = 'skipped';
+  } else if (input.action === 'retry') {
+    newStatus = 'pending';
+  } else {
+    newStatus = 'pending';
+    amendedFields = Object.keys(input.amendedStory) as Array<keyof EpicStory>;
+  }
+
+  const resolutionRecord = {
+    resolvedAt,
+    resolvedBy,
+    action: input.action,
+    reason: input.reason,
+    ...(amendedFields ? { amendedFields } : {}),
+  };
+
+  const updatedStories = epic.stories.map((s) => {
+    if (s.storyId !== storyId) return s;
+    const base: EpicStory = {
+      ...s,
+      status: newStatus,
+      blocker: undefined,
+      resolutionHistory: [...(s.resolutionHistory ?? []), resolutionRecord],
+    };
+    if (input.action === 'amend') {
+      return { ...base, ...input.amendedStory };
+    }
+    return base;
+  });
+
+  await epicRepo.updateEpicFields(epicId, { stories: updatedStories });
+
+  if (input.action !== 'skip') {
+    const shouldResume =
+      input.action === 'amend' || (input.action === 'retry' && input.resumeImmediately);
+    if (shouldResume) {
+      try {
+        const { jobId } = await enqueueResumeJob(
+          {
+            epicId,
+            userId: resolvedBy,
+            priorJobId: epic.orchestratorJobId,
+          },
+          {
+            getEpicById: epicRepo.getEpicById,
+            getJobById: agentJobsRepo.getJobById,
+            createJob: agentJobsRepo.createJob,
+            newJobId: () => crypto.randomUUID(),
+            now: () => new Date(),
+          },
+        );
+        resumeJobId = jobId;
+        await epicRepo.updateEpicFields(epicId, {
+          status: 'in_progress',
+          orchestratorJobId: jobId,
+        });
+      } catch (err) {
+        warnings.push('resume-enqueue-failed');
+        console.error('[resolve-blocker] resume enqueue failed', err);
+      }
+    }
+  }
+
+  // Emit blocker_resolved event for the observability spine.
+  try {
+    const correlationJobId = resumeJobId ?? epic.orchestratorJobId ?? epicId;
+    await agentEventsRepo.pushEvent({
+      jobId: correlationJobId,
+      eventSeq: `${resolvedAt}#${crypto.randomUUID()}`,
+      seq: nowMs,
+      timestamp: resolvedAt,
+      stepId: 'resolve-blocker',
+      agentId: 'api-resolve-blocker',
+      eventType: 'blocker_resolved',
+      epicId,
+      storyId,
+      role: 'orchestrator',
+      waveNumber: story.blocker.waveNumber,
+      payload: {
+        action: input.action,
+        resolvedBy,
+        reason: input.reason,
+        ...(amendedFields ? { amendedFields } : {}),
+        ...(resumeJobId ? { resumeJobId } : {}),
+      },
+    });
+  } catch (err) {
+    console.error('[resolve-blocker] event emit failed', err);
+  }
+
+  resolveBlockerThrottle.set(throttleKey, nowMs);
+
+  return c.json(
+    {
+      ok: true,
+      storyId,
+      newStatus,
+      resumeJobId,
+      resolvedAt,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    },
+    200,
+  );
+});
+
 // ── PO Review: run a product owner pipeline against the completed epic ──
 app.post('/api/epic-workflows/:id/po-review', async (c) => {
   const epicId = c.req.param('id');
@@ -2268,6 +2630,7 @@ app.get('/api/ec2/status', async (c) => {
     maxConcurrent: (hb?.maxConcurrent as number) ?? 0,
     processes: (hb?.processes as unknown[]) ?? [],
     system: (hb?.system as Record<string, unknown>) ?? null,
+    auth: (hb?.auth as Record<string, unknown>) ?? null,
   });
 });
 
@@ -2319,6 +2682,84 @@ app.post('/api/ec2/start-daemon', async (c) => {
   return c.json({ commandId, message: 'Daemon start command sent' });
 });
 
+const ANTHROPIC_KEY_SSM_PARAM = '/futurator/daemon/anthropic-api-key';
+
+// Admin UI rotates the Anthropic API key the daemon uses (Option E in
+// ec2-auth-lifecycle-analysis.md). The daemon re-reads SSM every 10 min so no
+// restart is needed — in-flight jobs keep running with the current process env,
+// and newly spawned claude subprocesses pick up the rotated key.
+app.post('/api/ec2/set-anthropic-key', async (c) => {
+  const { apiKey } = (await c.req.json()) as { apiKey?: string };
+  const trimmed = apiKey?.trim();
+  if (!trimmed) {
+    return c.json({ error: { code: 'MISSING', message: 'apiKey is required' } }, 400);
+  }
+  if (!/^sk-ant-(api03|admin)-/.test(trimmed)) {
+    return c.json(
+      {
+        error: {
+          code: 'INVALID_FORMAT',
+          message: 'Expected an Anthropic API key (sk-ant-api03-...)',
+        },
+      },
+      400,
+    );
+  }
+  await ssmClient.send(
+    new PutParameterCommand({
+      Name: ANTHROPIC_KEY_SSM_PARAM,
+      Value: trimmed,
+      Type: 'SecureString',
+      Overwrite: true,
+    }),
+  );
+
+  // Tell the daemon to hot-reload immediately via SIGUSR1 (handled in
+  // daemon/agent-daemon.mjs). Fire-and-forget — if the instance is stopped
+  // or the daemon isn't running, the next SSM polling cycle (2 min) will
+  // still pick up the new key on startup.
+  let signalSent = false;
+  try {
+    const { state } = await getInstanceState();
+    if (state === 'running') {
+      await sendSsmCommand("pkill -USR1 -f 'agent-daemon.mjs' || true");
+      signalSent = true;
+    }
+  } catch (err) {
+    console.warn('SIGUSR1 dispatch failed (non-fatal):', err);
+  }
+
+  return c.json({
+    ok: true,
+    param: ANTHROPIC_KEY_SSM_PARAM,
+    signalSent,
+    message: signalSent
+      ? 'API key stored. Daemon was signalled — the new key should be live in ~5s.'
+      : 'API key stored. Daemon will load it on next SSM poll (≤2 min) or when it starts.',
+  });
+});
+
+app.get('/api/ec2/anthropic-key-status', async (c) => {
+  try {
+    const { Parameter } = await ssmClient.send(
+      new GetParameterCommand({ Name: ANTHROPIC_KEY_SSM_PARAM, WithDecryption: false }),
+    );
+    const v = Parameter?.Value || '';
+    return c.json({
+      exists: true,
+      param: ANTHROPIC_KEY_SSM_PARAM,
+      lastModified: Parameter?.LastModifiedDate || null,
+      preview: v ? `${v.slice(0, 12)}…${v.slice(-4)}` : null,
+    });
+  } catch (err) {
+    const name = (err as { name?: string }).name || '';
+    if (name === 'ParameterNotFound') {
+      return c.json({ exists: false, param: ANTHROPIC_KEY_SSM_PARAM });
+    }
+    throw err;
+  }
+});
+
 app.post('/api/ec2/refresh-credentials', async (c) => {
   const { state } = await getInstanceState();
   if (state !== 'running') {
@@ -2333,18 +2774,23 @@ app.post('/api/ec2/refresh-credentials', async (c) => {
     return c.json({ error: { code: 'MISSING', message: 'Credentials payload required' } }, 400);
   }
 
-  // Write credentials to EC2 via SSM using base64 to avoid shell escaping issues
+  // Write credentials to EC2 via SSM using base64 to avoid shell escaping issues.
+  // Claude CLI reads .credentials.json per-invocation, so we intentionally DO NOT
+  // restart the daemon here — restarting would SIGTERM every in-flight agent job
+  // (see ec2-auth-lifecycle-analysis.md Problem 3). The next spawned claude
+  // process will pick up the new file automatically.
   const b64 = Buffer.from(credentials.trim()).toString('base64');
   const writeCmd = [
     `echo '${b64}' | base64 -d > /home/ubuntu/.claude/.credentials.json`,
     'chown ubuntu:ubuntu /home/ubuntu/.claude/.credentials.json',
-    'sudo systemctl restart futurator-daemon',
-    'sleep 2',
-    'sudo systemctl is-active futurator-daemon',
+    'chmod 600 /home/ubuntu/.claude/.credentials.json',
   ].join(' && ');
 
   const commandId = await sendSsmCommand(writeCmd);
-  return c.json({ commandId, message: 'Credentials written and daemon restarted' });
+  return c.json({
+    commandId,
+    message: 'Credentials written. In-flight jobs were NOT interrupted.',
+  });
 });
 
 app.post('/api/ec2/disable', async (c) => {
@@ -2630,7 +3076,10 @@ app.post('/api/epic-workflows/:id/deploy', async (c) => {
     agents: {
       DEPLOY: {
         name: 'DevOps Deploy',
-        allowedTools: 'Bash,Read',
+        // Edit + Write are required because vite.config.ts usually needs a
+        // base path patch before `npm run build` can produce a correctly-
+        // prefixed bundle. Without these the agent halts asking for approval.
+        allowedTools: 'Bash,Read,Edit,Write,Glob',
         model: 'haiku',
       },
     },
@@ -2638,32 +3087,43 @@ app.post('/api/epic-workflows/:id/deploy', async (c) => {
       {
         id: 'deploy',
         agentId: 'DEPLOY',
-        prompt: `You are a DevOps engineer. Build and deploy a React/Vite app to production.
+        prompt: `You are a headless DevOps automation. You run non-interactively — there is NO human to grant permission. Do not ask for confirmation. Do not suggest commands for a human to run. Use the tools directly.
 
-Working directory: ${epic.workingDir}
-App name: ${appName}
-S3 destination: s3://futurator-ai-website/${s3Path}/
+Goal: build and publish the React/Vite app at ${epic.workingDir} to s3://futurator-ai-website/${s3Path}/ so it is reachable at ${publicUrl}.
 
-Instructions:
-1. cd ${epic.workingDir}
-2. Run: npm run build
-3. Find the build output directory (usually "dist" for Vite)
-4. Upload to S3: aws s3 sync dist/ s3://futurator-ai-website/${s3Path}/ --delete
-5. Invalidate CloudFront: aws cloudfront create-invalidation --distribution-id E1BI1YWMTLSDTE --paths "/apps/${appName}/*"
+Steps (execute in order, each step must succeed before the next):
 
-IMPORTANT: The Vite config may need a base path. Before building, check if vite.config.ts has a base setting.
-If not, set it: Add \`base: '/apps/${appName}/'\` to the defineConfig in vite.config.ts.
-Then rebuild.
+1. Read ${epic.workingDir}/vite.config.ts (or .js). If it does not contain \`base: '/apps/${appName}/'\`, Edit the file to add that entry inside defineConfig({ ... }). Do this BEFORE building.
 
-Output:
+2. Run the build: \`cd ${epic.workingDir} && npm run build\`. If build fails because of missing deps, run \`npm install\` and retry the build once. Do not proceed past this step unless the build succeeds.
+
+3. Identify the build output directory (Vite defaults to \`dist\`, but check the build log). Confirm it exists with \`ls\`.
+
+4. Sync to S3: \`aws s3 sync <outputDir>/ s3://futurator-ai-website/${s3Path}/ --delete\`
+
+5. Invalidate CloudFront: \`aws cloudfront create-invalidation --distribution-id E1BI1YWMTLSDTE --paths "/apps/${appName}/*"\`
+
+When finished, output these three lines EXACTLY — they are machine-parsed:
+
 DEPLOY_URL: ${publicUrl}
-DEPLOY_STATUS: success or failed
-DEPLOY_DETAILS: [what you did]`,
+DEPLOY_STATUS: success
+DEPLOY_DETAILS: <one-sentence summary of what you did>
+
+If ANY step above failed and you cannot recover, instead output:
+
+DEPLOY_URL: ${publicUrl}
+DEPLOY_STATUS: failed
+DEPLOY_DETAILS: <which step failed and why>
+
+Never end the session without emitting a DEPLOY_STATUS line. Never ask for permission.`,
         extractors: {
           DEPLOY_URL: { type: 'regex', pattern: 'DEPLOY_URL:\\s*(https?://[^\\s]+)' },
           DEPLOY_STATUS: { type: 'regex', pattern: 'DEPLOY_STATUS:\\s*(\\w+)' },
+          DEPLOY_DETAILS: { type: 'regex', pattern: 'DEPLOY_DETAILS:\\s*(.+)' },
         },
-        validations: [],
+        validations: [
+          { type: 'equals', left: 'DEPLOY_STATUS', right: 'success', label: 'Deploy succeeded' },
+        ],
       },
     ],
   };

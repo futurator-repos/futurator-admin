@@ -4,7 +4,7 @@ import { ChevronRight } from 'lucide-react';
 import { useAgentJob } from '@/hooks/use-agent-job';
 import { StoryLiveOutput } from './story-live-output';
 import { StoryResult } from './story-result';
-import type { EpicStory } from '@/types/epic-workflow';
+import type { BlockerCode, EpicStory } from '@/types/epic-workflow';
 
 interface StoryCardProps {
   story: EpicStory;
@@ -13,6 +13,21 @@ interface StoryCardProps {
   canRun: boolean;
   showRunButton: boolean;
   onRun: () => void;
+  onResolveBlocker?: (story: EpicStory) => void;
+}
+
+const BLOCKER_CODE_SHORT: Record<BlockerCode, string> = {
+  'ambiguous-ac': 'AMBIGUOUS AC',
+  'insufficient-touch-points': 'TOUCH POINTS',
+  'missing-dependency': 'MISSING DEP',
+  'architectural-conflict': 'ARCH CONFLICT',
+  'context-gap': 'CONTEXT GAP',
+  environment: 'ENVIRONMENT',
+};
+
+function shortenBlockerCode(code?: BlockerCode): string {
+  if (!code) return 'UNKNOWN';
+  return BLOCKER_CODE_SHORT[code] ?? code.toUpperCase();
 }
 
 function shortModel(model?: string): string {
@@ -55,6 +70,8 @@ function getStatusDot(status: string): string {
       return 'bg-orange-500 animate-pulse';
     case 'failed':
       return 'bg-red-500';
+    case 'blocked':
+      return 'bg-amber-500 animate-pulse';
     default:
       return 'bg-muted-foreground/30';
   }
@@ -72,13 +89,16 @@ function getStatusBadgeClasses(status: string): string {
       return 'border-orange-500/30 text-orange-500';
     case 'failed':
       return 'border-red-500/30 text-red-500';
+    case 'blocked':
+      return 'border-amber-500/40 bg-amber-500/10 text-amber-400';
     default:
       return 'border-border text-muted-foreground';
   }
 }
 
-function getStatusLabel(status: string): string {
+function getStatusLabel(status: string, story?: EpicStory): string {
   if (status === 'in_review') return 'REVIEW';
+  if (status === 'blocked') return `BLOCKED · ${shortenBlockerCode(story?.blocker?.code)}`;
   return status.toUpperCase();
 }
 
@@ -89,12 +109,14 @@ export function StoryCard({
   canRun,
   showRunButton,
   onRun,
+  onResolveBlocker,
 }: StoryCardProps) {
   const { data: job } = useAgentJob(story.jobId || null);
 
   const isRunning = story.status === 'running';
   const isDone = story.status === 'done';
   const isFailed = story.status === 'failed';
+  const isBlocked = story.status === 'blocked';
   const stepResults = job?.stepResults || [];
 
   const currentStep = job?.stepResults?.[job.stepResults.length - 1];
@@ -126,7 +148,9 @@ export function StoryCard({
       ? 'ring-1 ring-purple-500/30'
       : story.status === 'fixing'
         ? 'ring-1 ring-orange-500/30'
-        : '';
+        : isBlocked
+          ? 'ring-1 ring-amber-500/40'
+          : '';
 
   return (
     <div className={`border-b border-border/10 last:border-b-0 ${ringClass}`}>
@@ -197,9 +221,9 @@ export function StoryCard({
         {/* Status badge — hide when running (timer is enough) */}
         {!isRunning && (
           <span
-            className={`text-[10px] h-5 px-1.5 uppercase border rounded flex items-center justify-center w-16 shrink-0 ${getStatusBadgeClasses(story.status)}`}
+            className={`text-[10px] h-5 px-1.5 uppercase border rounded flex items-center justify-center shrink-0 ${isBlocked ? 'min-w-[10rem]' : 'w-16'} ${getStatusBadgeClasses(story.status)}`}
           >
-            {getStatusLabel(story.status)}
+            {getStatusLabel(story.status, story)}
           </span>
         )}
 
@@ -215,11 +239,60 @@ export function StoryCard({
             Run
           </button>
         )}
+
+        {/* Resolve Blocker button */}
+        {isBlocked && onResolveBlocker && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onResolveBlocker(story);
+            }}
+            className="rounded bg-amber-500/80 px-3 py-1 text-xs text-white hover:bg-amber-500 shrink-0"
+          >
+            Resolve Blocker
+          </button>
+        )}
       </button>
 
       {/* Expanded content */}
       {expanded && (
         <div className="px-3 py-3 bg-secondary/5 border-t border-border/10 space-y-3 ml-8">
+          {/* Blocker summary — visible without expanding the card further */}
+          {isBlocked && story.blocker && (
+            <div className="rounded border border-amber-500/40 bg-amber-500/5 p-3 text-xs space-y-2">
+              <div className="flex items-center gap-2 text-amber-400 font-medium">
+                <span>BLOCKED — {shortenBlockerCode(story.blocker.code)}</span>
+                <span className="text-[10px] text-amber-400/70 font-mono">
+                  attempt {story.blocker.reportedByAttempt} · {story.blocker.severity}
+                </span>
+              </div>
+              <div className="text-muted-foreground">
+                <span className="text-foreground/80 font-medium">Description: </span>
+                {story.blocker.description}
+              </div>
+              {story.blocker.suggestedResolution && (
+                <div className="text-muted-foreground">
+                  <span className="text-foreground/80 font-medium">Suggested: </span>
+                  {story.blocker.suggestedResolution}
+                </div>
+              )}
+              {story.blocker.affectedPath && (
+                <div className="text-muted-foreground font-mono text-[11px]">
+                  <span className="text-foreground/80 font-medium">Path: </span>
+                  {story.blocker.affectedPath}
+                </div>
+              )}
+              {onResolveBlocker && (
+                <button
+                  onClick={() => onResolveBlocker(story)}
+                  className="rounded bg-amber-500/80 px-3 py-1 text-xs text-white hover:bg-amber-500"
+                >
+                  Resolve Blocker ▸
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Live output — most important when running */}
           {isRunning && story.jobId && <StoryLiveOutput jobId={story.jobId} />}
 

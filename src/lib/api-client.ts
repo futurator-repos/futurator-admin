@@ -68,10 +68,16 @@ class ApiClient {
     }
 
     if (!response.ok) {
-      const error = await response
+      const parsed = await response
         .json()
         .catch(() => ({ error: { code: 'UNKNOWN', message: 'Request failed' } }));
-      throw new Error(error.error?.message || 'Request failed');
+      const err = new Error(parsed.error?.message || 'Request failed') as Error & {
+        code?: string;
+        status?: number;
+      };
+      err.code = parsed.error?.code;
+      err.status = response.status;
+      throw err;
     }
 
     return response.json();

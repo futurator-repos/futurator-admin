@@ -267,10 +267,13 @@ export function EpicGenerator({
               <span className="text-red-500 font-medium text-sm">PM Agent Failed</span>
             </div>
             <p className="text-xs text-red-400">{pmError}</p>
-            {pmError.includes('authentication') && (
+            {(pmError.includes('authentication') ||
+              pmError.includes('credentials expired') ||
+              pmError.includes('API key')) && (
               <p className="text-[10px] text-muted-foreground">
-                The Claude Code OAuth token on EC2 has expired. Re-transfer credentials from your
-                Mac or re-run claude auth login on the instance.
+                Claude credentials on EC2 are invalid. Rotate the API key in SSM
+                (/futurator/daemon/anthropic-api-key) — no daemon restart is required, the next
+                spawned agent will pick it up.
               </p>
             )}
             <button

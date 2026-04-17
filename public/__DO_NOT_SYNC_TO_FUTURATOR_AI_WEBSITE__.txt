@@ -1,0 +1,22 @@
+⛔ DO NOT SYNC THIS DIRECTORY TO s3://futurator-ai-website/
+
+This is the FUTURATOR-ADMIN static export (`next build` → `out/`).
+
+Correct deploy target:
+  - admin.futurator.ai (SST-managed bucket: futurator-admin-production-adminsiteassetsbucket-*)
+  - Deployed via `sst deploy` from /Users/ricardoarayafarias/GetReal/Futurator-Admin
+
+WRONG deploy target:
+  - s3://futurator-ai-website/  ← hosts the PUBLIC HOMEPAGE at futurator.ai
+  - That homepage is a separate Next.js project at:
+        /Users/ricardoarayafarias/GetReal/Clients/futurator
+  - Deploy IT with: ./scripts/deploy.sh from that repo
+
+The admin app is allowed to write to scoped paths inside futurator-ai-website
+(data/, media/, apps/, knowledge-live/) via the API and Deploy Agent — but
+NEVER sync the whole `out/` directory to that bucket's root.
+
+Historical incident: 2026-04-15 — admin out/ was synced to bucket root,
+overwriting index.html. Visitors got the AuthGuard spinner → Google OAuth
+redirect instead of the homepage. Recovery required re-running the homepage
+project's scripts/deploy.sh.

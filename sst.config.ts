@@ -229,6 +229,37 @@ export default $config({
             `arn:aws:cloudfront::${AWS_ACCOUNT_ID}:distribution/${FUTURATOR_CF_DISTRIBUTION_ID}`,
           ],
         },
+        // ec2-auth-lifecycle fix (Option E): admin UI rotates the Anthropic API key
+        // used by the EC2 daemon. Parameter is a SecureString so KMS perms are needed.
+        // The EC2 instance role reads this same parameter — that policy is attached
+        // externally to the instance role (see docs/concepts/ec2-auth-lifecycle-analysis.md).
+        {
+          actions: ['ssm:GetParameter', 'ssm:PutParameter', 'ssm:DescribeParameters'],
+          resources: [
+            `arn:aws:ssm:us-east-1:${AWS_ACCOUNT_ID}:parameter/futurator/daemon/anthropic-api-key`,
+          ],
+        },
+        {
+          actions: ['kms:Encrypt', 'kms:Decrypt', 'kms:GenerateDataKey'],
+          resources: [`arn:aws:kms:us-east-1:${AWS_ACCOUNT_ID}:alias/aws/ssm`],
+        },
+        // EC2 daemon control (develope-it): /api/ec2/status, /api/ec2/enable,
+        // /api/ec2/disable, /api/ec2/start-daemon, /api/ec2/refresh-credentials,
+        // /api/ec2/set-anthropic-key (SIGUSR1 via SSM Run Command), file browser,
+        // CloudWatch metrics. SST rewrites the Lambda inline policy from this
+        // list on every deploy, so anything removed here silently breaks the UI.
+        {
+          actions: ['ec2:DescribeInstances', 'ec2:StartInstances', 'ec2:StopInstances'],
+          resources: ['*'],
+        },
+        {
+          actions: ['ssm:SendCommand', 'ssm:GetCommandInvocation'],
+          resources: ['*'],
+        },
+        {
+          actions: ['cloudwatch:GetMetricData'],
+          resources: ['*'],
+        },
       ],
       url: {
         cors: {

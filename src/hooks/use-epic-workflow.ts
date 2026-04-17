@@ -103,6 +103,20 @@ export function useRunStory() {
   });
 }
 
+// Epic Orchestrator start (EO-4.4/4.6). Returns the jobId for the single
+// `phase: 'epic-dev'` job that covers the entire epic. Surfaces 409
+// responses so the caller can fall back to per-story mode when the flag
+// is disabled server-side.
+export function useStartEpicOrchestrator() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (epicId: string) =>
+      api.post<{ jobId: string }>(`/epic-workflows/${epicId}/start`, {}),
+    onSuccess: (_, epicId) =>
+      queryClient.invalidateQueries({ queryKey: ['epic-workflow', epicId] }),
+  });
+}
+
 export function useRunPoReview() {
   const queryClient = useQueryClient();
   return useMutation({

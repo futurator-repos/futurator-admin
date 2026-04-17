@@ -14,8 +14,59 @@ export type StoryStatus =
   | 'fixing'
   | 'done'
   | 'failed'
-  | 'skipped';
+  | 'skipped'
+  | 'blocked';
 export type CompilationStatus = 'success' | 'failed' | 'skipped';
+
+// ── Blocker taxonomy (Epic 5) ──
+
+export type BlockerCode =
+  | 'ambiguous-ac'
+  | 'insufficient-touch-points'
+  | 'missing-dependency'
+  | 'architectural-conflict'
+  | 'context-gap'
+  | 'environment';
+
+export type BlockerSeverity = 'hard' | 'soft';
+
+export type BlockerResolutionAction = 'amend' | 'skip' | 'retry';
+
+// ── Touch-point inference (Epic 3) ──
+
+export type StoryComplexity = 'trivial' | 'standard' | 'complex' | 'architectural';
+export type ReviewRigor = 'light' | 'standard' | 'strict';
+export type InferenceConfidence = 'low' | 'medium' | 'high';
+
+export interface InferenceMetadata {
+  inferredAt: string;
+  model: 'haiku';
+  confidence: InferenceConfidence;
+  reasoning?: string;
+  retries?: number;
+}
+
+export interface BlockerRecord {
+  code: BlockerCode;
+  severity: BlockerSeverity;
+  description: string;
+  affectedPath?: string;
+  suggestedResolution: string;
+  requestedTouchPointExpansion?: string[];
+  attemptsBeforeBlock: number;
+  reportedAt: string;
+  reportedByAttempt: number;
+  waveNumber: number;
+  subagentId?: string;
+}
+
+export interface BlockerResolutionRecord {
+  resolvedAt: string;
+  resolvedBy: string;
+  action: BlockerResolutionAction;
+  reason: string;
+  amendedFields?: Array<keyof EpicStory>;
+}
 
 export interface CompilationArticleCounts {
   created: number;
@@ -75,6 +126,16 @@ export interface EpicStory {
   compilationStartedAt?: string;
   compilationCompletedAt?: string;
   compilationArticleCounts?: CompilationArticleCounts;
+
+  // ── Touch-point inference (Epic 3) ──
+  touchPoints?: string[];
+  complexity?: StoryComplexity;
+  reviewRigor?: ReviewRigor;
+  inferenceMetadata?: InferenceMetadata;
+
+  // ── Blocker state (Epic 5) ──
+  blocker?: BlockerRecord;
+  resolutionHistory?: BlockerResolutionRecord[];
 }
 
 // ── Epic ──
@@ -100,6 +161,11 @@ export interface EpicWorkflow {
   deployJobId?: string;
   deployUrl?: string;
   deployedAt?: string;
+
+  // ── Epic Orchestrator (Epic 4) ──
+  useEpicOrchestrator?: boolean;
+  orchestratorJobId?: string;
+
   createdAt: string;
   updatedAt: string;
   createdBy: string;

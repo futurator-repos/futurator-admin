@@ -42,7 +42,9 @@ export function getCompilerAgent() {
     COMPILER: {
       name: 'Knowledge Compiler',
       allowedTools: 'Read,Write,Edit,Glob,Grep',
-      model: 'sonnet',
+      // Haiku is sufficient for structured markdown templating.
+      // Sonnet caused OOM on t2.micro when 5 compilers ran in parallel.
+      model: 'haiku',
     },
   };
 }

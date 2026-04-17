@@ -4,8 +4,9 @@ import { AppShell } from '@/components/layout/app-shell';
 import { AuthGuard } from '@/components/auth/auth-guard';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useEc2Metrics, useEc2Snapshot } from '@/hooks/use-ec2-metrics';
-import { useEc2Status, useEnableEc2, useDisableEc2 } from '@/hooks/use-ec2-daemon';
+import { useEc2Status, useDisableEc2, useStartAndVerify } from '@/hooks/use-ec2-daemon';
 import { useQueryClient } from '@tanstack/react-query';
+import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 const RANGES = [
   { value: '1h', label: '1 Hour' },
@@ -132,14 +133,16 @@ function MonitorContent() {
   const [range, setRange] = useState('1h');
   const queryClient = useQueryClient();
 
-  const { data: ec2Status } = useEc2Status(true);
-  const enableEc2 = useEnableEc2();
+  const { data: ec2Status, isLoading: statusLoading, error: statusError } = useEc2Status(true);
+  const startVerify = useStartAndVerify();
   const disableEc2 = useDisableEc2();
 
   const isRunning = ec2Status?.state === 'running';
   const isPending = ec2Status?.state === 'pending';
   const isStopping = ec2Status?.state === 'stopping';
-  const isTransitioning = isPending || isStopping || enableEc2.isPending || disableEc2.isPending;
+  const isTransitioning = isPending || isStopping || startVerify.isRunning || disableEc2.isPending;
+  const authValid = ec2Status?.auth?.valid;
+  const authBroken = isRunning && authValid === false;
 
   const { data: metrics, isFetching: metricsFetching } = useEc2Metrics(range, isRunning);
   const { data: snapshotData, isFetching: snapshotFetching } = useEc2Snapshot(isRunning);
@@ -159,9 +162,16 @@ function MonitorContent() {
     if (isRunning) {
       disableEc2.mutate(undefined);
     } else {
-      enableEc2.mutate(undefined);
+      startVerify.reset();
+      startVerify.run();
     }
   };
+
+  const displayState = statusLoading
+    ? 'loading'
+    : statusError
+      ? 'error'
+      : ec2Status?.state || 'unknown';
 
   return (
     <div className="space-y-4">
@@ -176,15 +186,44 @@ function MonitorContent() {
                 ? 'bg-green-900 text-green-400'
                 : isPending || isStopping
                   ? 'bg-yellow-900 text-yellow-400'
-                  : 'bg-muted text-muted-foreground'
+                  : statusError
+                    ? 'bg-red-900 text-red-400'
+                    : 'bg-muted text-muted-foreground'
             }`}
+            title={statusError ? (statusError as Error).message : undefined}
           >
-            {ec2Status?.state || 'unknown'}
+            {displayState}
           </span>
+          {isRunning && ec2Status?.daemonAlive && (
+            <span className="rounded px-2 py-0.5 text-[10px] font-mono bg-green-900/40 text-green-400">
+              daemon ✓
+            </span>
+          )}
+          {isRunning && ec2Status && !ec2Status.daemonAlive && (
+            <span className="rounded px-2 py-0.5 text-[10px] font-mono bg-yellow-900/40 text-yellow-400">
+              daemon down
+            </span>
+          )}
+          {authValid === true && (
+            <span
+              className="flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono bg-green-900/40 text-green-400"
+              title="Claude Code auth probe OK"
+            >
+              <CheckCircle2 className="h-3 w-3" /> auth
+            </span>
+          )}
+          {authBroken && (
+            <span
+              className="flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono bg-red-900/40 text-red-400"
+              title={ec2Status?.auth?.error || 'Auth probe failed'}
+            >
+              <AlertTriangle className="h-3 w-3" /> auth expired
+            </span>
+          )}
           {ec2Status?.publicIp && (
             <span className="text-xs text-muted-foreground font-mono">{ec2Status.publicIp}</span>
           )}
-          {/* Start / Stop toggle */}
+          {/* Start & Verify / Stop toggle */}
           <button
             onClick={handleToggleEc2}
             disabled={isTransitioning}
@@ -193,19 +232,70 @@ function MonitorContent() {
                 ? 'bg-red-900/60 text-red-400 hover:bg-red-900'
                 : 'bg-green-900/60 text-green-400 hover:bg-green-900'
             }`}
+            title={startVerify.isRunning ? startVerify.detail : undefined}
           >
-            {isTransitioning
-              ? isPending
-                ? 'Starting...'
+            {startVerify.isRunning
+              ? startVerify.step.replace('-', ' ') + '…'
+              : isPending
+                ? 'Starting…'
                 : isStopping
-                  ? 'Stopping...'
-                  : 'Working...'
-              : isRunning
-                ? 'Stop Instance'
-                : 'Start Instance'}
+                  ? 'Stopping…'
+                  : disableEc2.isPending
+                    ? 'Stopping…'
+                    : isRunning
+                      ? 'Stop Instance'
+                      : 'Start & Verify'}
           </button>
         </div>
       </div>
+
+      {/* Orchestrated flow status banner */}
+      {startVerify.isRunning && (
+        <Card>
+          <CardContent className="pt-4 space-y-1">
+            <p className="text-xs text-yellow-500 font-medium">
+              {startVerify.step.replace('-', ' ')}
+            </p>
+            <p className="text-[11px] text-muted-foreground">{startVerify.detail}</p>
+          </CardContent>
+        </Card>
+      )}
+      {startVerify.step === 'error' && (
+        <Card className="border-red-900">
+          <CardContent className="pt-4 space-y-2">
+            <p className="text-xs text-red-400 font-medium">Start & Verify failed</p>
+            <p className="text-[11px] text-muted-foreground">{startVerify.error}</p>
+            <button
+              onClick={() => {
+                startVerify.reset();
+                startVerify.run();
+              }}
+              className="rounded-md bg-red-900 px-3 py-1 text-xs text-red-100 hover:bg-red-800"
+            >
+              Retry
+            </button>
+          </CardContent>
+        </Card>
+      )}
+      {startVerify.step === 'done' && (
+        <Card className="border-green-900/60">
+          <CardContent className="pt-4">
+            <p className="text-xs text-green-400 font-medium flex items-center gap-1">
+              <CheckCircle2 className="h-3 w-3" />
+              Daemon running and Claude authorized.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+      {statusError && !startVerify.isRunning && (
+        <Card className="border-red-900/60">
+          <CardContent className="pt-4">
+            <p className="text-xs text-red-400">
+              Failed to load EC2 status: {(statusError as Error).message}
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       {!isRunning && !isPending && (
         <Card>

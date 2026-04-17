@@ -1,6 +1,16 @@
 // ── Job status ──
 
-export type AgentJobStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+export type AgentJobStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'COMPLETE_WITH_BLOCKED_STORIES' // epic-dev: non-blocker stories all APPROVED; blockers remain
+  | 'STALE'; // epic-dev: heartbeat exceeded threshold, awaiting resume respawn
+
+// ── Epic-dev phase discriminator (Arch Doc §3) ──
+
+export type AgentJobPhase = 'epic-dev' | 'epic-review' | 'epic-build';
 
 // ── Pipeline definition (user-configured) ──
 
@@ -87,6 +97,81 @@ export interface AgentJob {
   compilationStatus?: 'success' | 'failed' | 'skipped';
   compilationStartedAt?: string;
   compilationCompletedAt?: string;
+
+  // Epic-dev discriminator (Arch Doc §3). When `phase` is absent the job uses
+  // the legacy per-step pipeline above; when `phase === 'epic-dev'` the daemon
+  // routes to `epic-dev-pipeline.mjs` and consumes the fields below.
+  phase?: AgentJobPhase;
+  epicId?: string;
+  projectId?: string;
+  epicDevPayload?: EpicDevJobPayload;
+  waveResults?: Record<string, WaveResult>;
+  resumeFromWaveResults?: Record<string, WaveResult>;
+  lastHeartbeatAt?: string;
+}
+
+// ── Epic-dev payload types (Arch Doc §3) ──
+
+export type OrchestratorModel = 'opus' | 'sonnet';
+export type StoryComplexity = 'trivial' | 'standard' | 'complex' | 'architectural';
+export type ReviewRigor = 'light' | 'standard' | 'strict';
+export type StoryOutcomeStatus = 'APPROVED' | 'FAILED' | 'BLOCKED' | 'SKIPPED';
+export type BlockerCode =
+  | 'ambiguous-ac'
+  | 'insufficient-touch-points'
+  | 'missing-dependency'
+  | 'architectural-conflict'
+  | 'context-gap'
+  | 'environment';
+
+export interface StoryManifestEntry {
+  storyId: string;
+  title: string;
+  wave: number;
+  acceptanceCriteria: string[];
+  touchPoints: string[];
+  complexity: StoryComplexity;
+  reviewRigor: ReviewRigor;
+  rubricEmphasis?: string[];
+  dependsOn?: string[];
+}
+
+export interface BlockerRecord {
+  code: BlockerCode;
+  severity: 'hard' | 'soft';
+  description: string;
+  affectedPath?: string;
+  suggestedResolution?: string;
+  detectedAt: number;
+}
+
+export interface StoryOutcome {
+  status: StoryOutcomeStatus;
+  attempts: number;
+  reviewAttempts: number;
+  filesTouched: string[];
+  finalDiff?: string;
+  blocker?: BlockerRecord;
+  terminalFailure?: string;
+}
+
+export interface WaveResult {
+  waveNumber: number;
+  stories: Record<string, StoryOutcome>;
+  durationMs: number;
+  completedAt: number;
+  persistedAt?: string;
+  epicId?: string;
+}
+
+export interface EpicDevJobPayload {
+  orchestratorModel: OrchestratorModel;
+  maxParallel: number;
+  maxRemediationRounds: number;
+  epicGoal: string;
+  contextDigest: string;
+  rubric: string;
+  stories: StoryManifestEntry[];
 }
 
 export interface StepResult {
@@ -127,7 +212,33 @@ export type AgentEventType =
   | 'validation'
   | 'compilation-started'
   | 'compilation-completed'
-  | 'compilation-failed';
+  | 'compilation-failed'
+  // Epic-dev orchestrator (Observability Spine §6.1)
+  | 'epic_start'
+  | 'epic_complete'
+  | 'epic_failed'
+  | 'wave_start'
+  | 'wave_complete'
+  | 'wave_split'
+  | 'wave_collision'
+  | 'subagent_dispatch'
+  | 'subagent_return'
+  | 'dev_blocker_reported'
+  | 'story_blocked'
+  | 'blocker_resolved'
+  | 'touch_points_expanded'
+  | 'context_expanded'
+  | 'review_verdict'
+  | 'remediation_start'
+  | 'story_failed_terminally'
+  // Touch-point inference (Epic 3)
+  | 'inference_start'
+  | 'story_inferred'
+  | 'wave_conflict_autosplit'
+  | 'inference_failed'
+  | 'inference_complete';
+
+export type AgentRole = 'orchestrator' | 'dev' | 'reviewer';
 
 export interface AgentEvent {
   jobId: string;
@@ -176,6 +287,14 @@ export interface AgentEvent {
   articlesCreated?: number;
   articlesUpdated?: number;
   articlesSuperseded?: number;
+
+  // Epic-dev orchestrator correlation (Observability Spine §6.2)
+  waveNumber?: number;
+  role?: AgentRole;
+  subagentId?: string;
+  attempt?: number;
+  correlationId?: string;
+  payload?: Record<string, unknown>;
 
   // TTL
   expireAt: number;

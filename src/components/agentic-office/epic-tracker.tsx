@@ -4,7 +4,13 @@ import { useEpicWorkflow } from '@/hooks/use-epic-workflow';
 import { useAgentJob } from '@/hooks/use-agent-job';
 import { useAgentEvents } from '@/hooks/use-agent-events';
 import { useOfficeStore } from '@/stores/office-store';
-import { translateEvent, type TranslationContext } from './event-translator';
+import {
+  translateEvent,
+  translateOrchestratorIntent,
+  isOrchestratorEventType,
+  type TranslationContext,
+} from './event-translator';
+import type { OrchestratorEvent } from '@/types/agent-orchestrator';
 import { StoryTracker } from './story-tracker';
 import { nextWorkerAppearance } from './scene/office-constants';
 import type { WorkerRole } from '@/types/agentic-office';
@@ -28,6 +34,15 @@ export function EpicTracker({ epicId }: { epicId: string }) {
   const qaSpawned = useRef(false);
   const poSpawned = useRef(false);
   const deploySpawned = useRef(false);
+
+  // Reconcile orchestrator scene state (blocker cards, blocked/terminal-fail
+  // desks) from the authoritative DDB story records whenever the epic loads
+  // or its stories change. Event stream drives animation; DDB state drives
+  // cold-load rendering (Epic 6.3 persistence AC).
+  useEffect(() => {
+    if (!epic?.stories) return;
+    store.getState().reconcileOrchestratorFromStories(epic.stories);
+  }, [epic?.stories, store]);
 
   // Spawn PM worker at whiteboard when epic starts (in_progress)
   useEffect(() => {
@@ -419,6 +434,16 @@ function JobEventBridge({
 
     for (const event of newEvents) {
       if (event.eventType === 'text_delta') continue; // skip raw text — too noisy
+
+      // Forward orchestrator-shaped events to the scene state (Epic 6).
+      // Gate on the orchestrator event vocabulary so regular tool_use /
+      // step_* events don't trip the translator's unknown-event warn branch.
+      if (isOrchestratorEventType(event.eventType)) {
+        const intent = translateOrchestratorIntent(event as unknown as OrchestratorEvent);
+        if (intent.type !== 'noop') {
+          store.getState().applyOrchestratorIntent(intent);
+        }
+      }
 
       const actions = translateEvent(event, ctx);
       for (const action of actions) {

@@ -11,6 +11,7 @@ import {
   Clock,
   DollarSign,
   Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   useEpicWorkflow,
@@ -20,6 +21,7 @@ import {
   useRunPoReview,
   useRunVisualQa,
   useStartDevServer,
+  useStartEpicOrchestrator,
   useDeleteEpic,
 } from '@/hooks/use-epic-workflow';
 import { useAgentJob, useAgentJobs } from '@/hooks/use-agent-job';
@@ -27,6 +29,7 @@ import { StoryCard } from './story-card';
 import { EpicInfoPanel } from './epic-info-panel';
 import { EpicGenerator } from './epic-generator';
 import { EpicTree } from './epic-tree';
+import { ResolveBlockerDrawer } from './resolve-blocker-drawer';
 import type { EpicStory, EpicWorkflow } from '@/types/epic-workflow';
 
 function formatElapsedMs(ms: number): string {
@@ -233,6 +236,10 @@ export function AgenticWorkflow() {
 
   const completedCount = epic?.stories.filter((s) => s.status === 'done').length || 0;
   const totalStories = epic?.stories.length || 0;
+  const blockedCount = epic?.stories.filter((s) => s.status === 'blocked').length || 0;
+
+  // EO-5.5 drawer target — lifted to parent so there's a single drawer instance.
+  const [resolveStoryId, setResolveStoryId] = useState<string | null>(null);
 
   // Group stories by wave
   const waves = useMemo(() => {
@@ -494,6 +501,12 @@ export function AgenticWorkflow() {
                 {completedCount}/{totalStories}
               </span>
             </div>
+            {blockedCount > 0 && (
+              <div className="flex items-center gap-1.5 text-amber-400">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                <span className="font-mono">{blockedCount} blocked</span>
+              </div>
+            )}
             {(versionAggregate.totalTimeMs > 0 || versionAggregate.hasLive) && (
               <div
                 className={`flex items-center gap-1.5 ${versionAggregate.hasLive ? 'text-yellow-500' : ''}`}
@@ -709,7 +722,11 @@ export function AgenticWorkflow() {
                 setYoloMode(next);
                 if (epicId) updateEpic.mutate({ epicId, yoloMode: next });
               }}
+              onUseEpicOrchestratorChange={(next) => {
+                if (epicId) updateEpic.mutate({ epicId, useEpicOrchestrator: next });
+              }}
               onRunStory={handleRunStory}
+              onResolveBlocker={(story) => setResolveStoryId(story.storyId)}
             />
           ) : (
             <EpicTree epic={epic} />
@@ -720,6 +737,18 @@ export function AgenticWorkflow() {
           <Loader2 className="h-4 w-4 animate-spin mr-2" />
           Loading...
         </div>
+      )}
+
+      {/* Resolve Blocker drawer (EO-5.5) — single instance mounted at root */}
+      {epicId && (
+        <ResolveBlockerDrawer
+          epicId={epicId}
+          story={epic?.stories.find((s) => s.storyId === resolveStoryId) ?? null}
+          open={resolveStoryId !== null}
+          onOpenChange={(next) => {
+            if (!next) setResolveStoryId(null);
+          }}
+        />
       )}
     </div>
   );
@@ -736,7 +765,9 @@ function DevsWorkflowView({
   onToggleStory,
   yoloMode,
   onYoloChange,
+  onUseEpicOrchestratorChange,
   onRunStory,
+  onResolveBlocker,
 }: {
   epic: EpicWorkflow;
   waves: [number, EpicStory[]][];
@@ -747,11 +778,20 @@ function DevsWorkflowView({
   onToggleStory: (id: string) => void;
   yoloMode: boolean;
   onYoloChange: (v: boolean) => void;
+  onUseEpicOrchestratorChange: (v: boolean) => void;
   onRunStory: (s: EpicStory) => void;
+  onResolveBlocker?: (story: EpicStory) => void;
 }) {
   const { data: poJob } = useAgentJob(epic.poJobId || null);
   const poVerdict = poJob?.variables?.VERDICT;
   const poCost = poJob?.totalCost;
+
+  const startOrchestrator = useStartEpicOrchestrator();
+  const orchestratorOn = !!epic.useEpicOrchestrator;
+  const toggleDisabled = epic.status === 'in_progress';
+  const canStartEpic =
+    orchestratorOn &&
+    (epic.status === 'ready' || epic.status === 'fixing' || epic.status === 'failed');
 
   return (
     <div className="space-y-0">
@@ -775,9 +815,43 @@ function DevsWorkflowView({
             status={epic.deployUrl ? 'deployed' : 'pending'}
             href={epic.deployUrl}
           />
+          {orchestratorOn && (
+            <button
+              type="button"
+              onClick={() => startOrchestrator.mutate(epic.epicId)}
+              disabled={!canStartEpic || startOrchestrator.isPending}
+              className="flex items-center gap-1.5 rounded-md border border-primary/50 bg-primary/10 px-2.5 py-1.5 text-xs text-primary hover:bg-primary/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title={
+                !canStartEpic
+                  ? `Epic must be ready/fixing/failed to start (current: ${epic.status})`
+                  : 'Start the epic orchestrator — one job for the entire epic'
+              }
+            >
+              {startOrchestrator.isPending ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <Activity className="h-3 w-3" />
+              )}
+              <span>Start Epic</span>
+            </button>
+          )}
         </div>
-        <YoloToggle checked={yoloMode} onChange={onYoloChange} />
+        <div className="flex items-center gap-4">
+          <OrchestratorToggle
+            checked={orchestratorOn}
+            disabled={toggleDisabled}
+            onChange={onUseEpicOrchestratorChange}
+          />
+          <YoloToggle checked={yoloMode} onChange={onYoloChange} />
+        </div>
       </div>
+      {startOrchestrator.error && (
+        <div className="px-1 py-2 text-xs text-red-400">
+          {startOrchestrator.error instanceof Error
+            ? startOrchestrator.error.message
+            : 'Failed to start orchestrator'}
+        </div>
+      )}
 
       {/* Epic info panel (expandable) */}
       <details className="border-b border-border/20">
@@ -880,6 +954,7 @@ function DevsWorkflowView({
               canRun={story.status === 'pending' || story.status === 'failed'}
               showRunButton={!yoloMode || story.status === 'failed'}
               onRun={() => onRunStory(story)}
+              onResolveBlocker={onResolveBlocker}
             />
           ))}
         {waves.filter(([w]) => w === selectedWave).flatMap(([, s]) => s).length === 0 && (
@@ -948,6 +1023,44 @@ function YoloToggle({ checked, onChange }: { checked: boolean; onChange: (v: boo
         type="button"
         onClick={() => onChange(!checked)}
         className={`h-5 w-9 rounded-full transition-colors ${checked ? 'bg-green-500' : 'bg-muted'}`}
+      >
+        <span
+          className={`block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+            checked ? 'translate-x-4' : 'translate-x-0.5'
+          }`}
+        />
+      </button>
+    </div>
+  );
+}
+
+/* ── Epic Orchestrator toggle (EO-4.6) ── */
+function OrchestratorToggle({
+  checked,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div
+      className="flex items-center gap-2"
+      title={
+        disabled
+          ? 'Cannot change orchestrator mode while the epic is in progress'
+          : 'Run the entire epic as one orchestrator job instead of per-story'
+      }
+    >
+      <span className="text-xs text-muted-foreground">Orchestrator</span>
+      <button
+        type="button"
+        onClick={() => !disabled && onChange(!checked)}
+        disabled={disabled}
+        className={`h-5 w-9 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+          checked ? 'bg-primary' : 'bg-muted'
+        }`}
       >
         <span
           className={`block h-3.5 w-3.5 rounded-full bg-white transition-transform ${

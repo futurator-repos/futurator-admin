@@ -17,6 +17,18 @@ export const COLORS = {
   plantPot: 0xb8845a,
   whiteboard: 0xf0f0f0,
   whiteboardFrame: 0x888888,
+  supervisorDesk: 0x7a6a9a,
+  reviewBooth: 0x4a6a8a,
+  reviewBoothSeat: 0x6a8aaa,
+  blockerCard: 0xf3c76a,
+  blockerCardText: 0x3a2a10,
+  amberRing: 0xf3a83a,
+  terminalFailRibbon: 0xcc3344,
+  statusRingGreen: 0x4acc6a,
+  statusRingYellow: 0xe8c85a,
+  statusRingOrange: 0xe58a3a,
+  statusRingRed: 0xcc3344,
+  statusRingIdle: 0x5a5a6a,
   meetingTable: 0x7a6a5a,
   kitchenCounter: 0xaaaaaa,
   coffeeMachine: 0x333333,
@@ -54,6 +66,10 @@ export const LOCATIONS: Record<string, LocationDef> = {
   whiteboard: { x: 6, z: 0, label: 'Whiteboard', type: 'stand' },
   entrance: { x: 0, z: 7, label: 'Entrance', type: 'stand' },
   hallway: { x: 0, z: 0, label: 'Hallway', type: 'stand' },
+  // Supervisor (orchestrator) — adjacent to the whiteboard, always seated.
+  'supervisor-desk': { x: 5, z: -2, label: 'Supervisor', type: 'desk' },
+  // Reviewer booth — distinct from dev-row desks.
+  'review-booth': { x: 1.5, z: 3.5, label: 'Review Booth', type: 'stand' },
 };
 
 // ── Seat offsets ──

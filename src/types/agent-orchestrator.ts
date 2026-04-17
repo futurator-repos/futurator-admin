@@ -147,3 +147,38 @@ export interface CreateAgentJobInput {
   workingDir: string;
   pipeline: PipelineDefinition;
 }
+
+// ── Orchestrator events (Epic Orchestrator, arch doc §9) ──
+
+export type OrchestratorEventType =
+  | 'epic_start'
+  | 'epic_complete'
+  | 'epic_failed'
+  | 'wave_start'
+  | 'wave_complete'
+  | 'wave_split'
+  | 'wave_collision'
+  | 'touch_points_expanded'
+  | 'subagent_dispatch'
+  | 'subagent_return'
+  | 'dev_blocker_reported'
+  | 'story_blocked'
+  | 'review_verdict'
+  | 'remediation_start'
+  | 'story_failed_terminally'
+  | 'blocker_resolved';
+
+export type OrchestratorRole = 'orchestrator' | 'dev' | 'reviewer';
+
+export interface OrchestratorEvent {
+  jobId: string;
+  epicId?: string;
+  storyId?: string;
+  role?: OrchestratorRole;
+  subagentId?: string;
+  attempt?: number;
+  correlationId?: string;
+  eventType: OrchestratorEventType | string;
+  payload?: Record<string, unknown>;
+  ts: number;
+}

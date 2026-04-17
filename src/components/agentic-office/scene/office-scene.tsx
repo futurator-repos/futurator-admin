@@ -16,6 +16,21 @@ import {
   buildLounge,
   buildPlant,
 } from './office-furniture';
+import {
+  buildSupervisorDesk,
+  buildReviewBooth,
+  buildStatusRing,
+  colorForSupervisorStatus,
+  buildAttemptBadge,
+  buildAmberRing,
+  buildRedRibbon,
+  buildBlockerCard,
+  blockerCardPosition,
+  buildReviewerConnector,
+  updateReviewerConnector,
+  type AmberRing,
+  type AttemptBadge,
+} from './orchestrator-meshes';
 import { createWorkerMesh, applyPose, lerp, type WorkerMesh } from './office-worker';
 import { createChatBubble, updateBubble, type BubbleState } from './office-chat-bubble';
 import {
@@ -128,6 +143,29 @@ export function OfficeScene() {
     scene.add(buildMeetingTable(6, 3));
     scene.add(buildWhiteboard(6, 0));
     scene.add(buildLounge(2, -5));
+
+    // ── Supervisor desk + status ring (Epic 6.2) ──
+    const supervisorLoc = LOCATIONS['supervisor-desk'];
+    const supervisorDesk = buildSupervisorDesk(supervisorLoc.x, supervisorLoc.z);
+    scene.add(supervisorDesk);
+    const statusRing = buildStatusRing();
+    statusRing.position.set(supervisorLoc.x, 1.7, supervisorLoc.z);
+    scene.add(statusRing);
+
+    // ── Review booth (Epic 6.2) ──
+    const boothLoc = LOCATIONS['review-booth'];
+    const reviewBooth = buildReviewBooth(boothLoc.x, boothLoc.z);
+    scene.add(reviewBooth);
+
+    // Whiteboard location — for blocker cards layout.
+    const whiteboardLoc = LOCATIONS.whiteboard;
+
+    // Orchestrator-overlay maps (per-storyId / per-card instances).
+    const attemptBadges = new Map<string, AttemptBadge>();
+    const amberRings = new Map<string, AmberRing>();
+    const redRibbons = new Map<string, THREE.Mesh>();
+    const blockerCardMeshes = new Map<string, THREE.Mesh>();
+    const reviewerConnectors = new Map<string, THREE.Line>();
 
     // ── Monitor screen states ──
     const screenStates: ReturnType<typeof createScreenState>[] = [];
@@ -420,18 +458,33 @@ export function OfficeScene() {
 
         // Seated animations
         if (ws.state === 'seated') {
-          const wi = [...workerMap.keys()].indexOf(
-            [...workerMap.entries()].find(([, v]) => v === ws)?.[0] ?? '',
-          );
+          const entries = [...workerMap.entries()];
+          const workerEntry = entries.find(([, v]) => v === ws);
+          const wi = workerEntry ? entries.indexOf(workerEntry) : 0;
           const br = Math.sin(time * 1.5 + wi * 1.3) * 0.008;
           m._body.position.y = ws.curPose.bodyY + br;
           m._shoulder.position.y = ws.curPose.bodyY + 0.2 + br;
 
           const loc = LOCATIONS[ws.curLoc];
           if (loc?.type === 'desk') {
-            const ty = Math.sin(time * 8 + wi * 2) * 0.06;
-            m._lA.rotation.x = ws.curPose.armRot + ty;
-            m._rA.rotation.x = ws.curPose.armRot - ty;
+            // Suppress typing motion on blocked/terminal-fail desks so the
+            // worker reads as idle/motionless (Epic 6.4).
+            const workerData = workerEntry
+              ? useOfficeStore.getState().workers.get(workerEntry[0])
+              : null;
+            const storyIdForDesk = workerData?.storyId ?? null;
+            const deskState = storyIdForDesk
+              ? useOfficeStore.getState().orchestrator.deskStates[storyIdForDesk]
+              : undefined;
+            const isQuiet = deskState?.blocked || deskState?.terminalFail;
+            if (isQuiet) {
+              m._lA.rotation.x = ws.curPose.armRot;
+              m._rA.rotation.x = ws.curPose.armRot;
+            } else {
+              const ty = Math.sin(time * 8 + wi * 2) * 0.06;
+              m._lA.rotation.x = ws.curPose.armRot + ty;
+              m._rA.rotation.x = ws.curPose.armRot - ty;
+            }
           }
         }
 
@@ -484,6 +537,189 @@ export function OfficeScene() {
       // ── Update whiteboard post-its (throttled ~3fps) ──
       if (Math.floor(time * 3) !== Math.floor((time - dt) * 3)) {
         updateWhiteboard(wbState, store.kanbanStories, store.activeEpicIds);
+      }
+
+      // ── Orchestrator overlays (Epic 6.2–6.4) ──────────────────────────
+      const orch = store.orchestrator;
+
+      // Supervisor status ring colour.
+      const ringMat = statusRing.material as THREE.MeshBasicMaterial;
+      const targetStatusColor = colorForSupervisorStatus(orch.supervisorStatus);
+      if (ringMat.color.getHex() !== targetStatusColor) {
+        ringMat.color.setHex(targetStatusColor);
+      }
+      statusRing.rotation.z = time * 0.6;
+
+      // Per-desk attempt badges, amber rings, red ribbons.
+      const deskOccupancy = store.deskAssignments;
+      const storyIdByDesk = new Map<number, string>();
+      for (let i = 0; i < deskOccupancy.length; i++) {
+        const occId = deskOccupancy[i];
+        if (!occId) continue;
+        const w = store.workers.get(occId);
+        if (w?.storyId) storyIdByDesk.set(i, w.storyId);
+      }
+      const deskIndexByStory = new Map<string, number>();
+      for (const [deskIdx, sId] of storyIdByDesk) deskIndexByStory.set(sId, deskIdx);
+
+      // Add / update overlays for each story the orchestrator knows about.
+      for (const [storyId, deskState] of Object.entries(orch.deskStates)) {
+        const deskIdx = deskIndexByStory.get(storyId);
+        const loc = deskIdx != null ? LOCATIONS[`desk-${deskIdx}`] : null;
+        if (!loc) continue;
+
+        // Attempt badge (visible when attempt > 1).
+        if (deskState.attempt > 1) {
+          let badge = attemptBadges.get(storyId);
+          if (!badge) {
+            badge = buildAttemptBadge(deskState.attempt);
+            badge.sprite.position.set(loc.x + 0.55, 1.55, loc.z);
+            scene.add(badge.sprite);
+            attemptBadges.set(storyId, badge);
+          } else {
+            badge.setAttempt(deskState.attempt);
+            badge.sprite.position.set(loc.x + 0.55, 1.55, loc.z);
+          }
+        } else {
+          const badge = attemptBadges.get(storyId);
+          if (badge) {
+            scene.remove(badge.sprite);
+            badge.sprite.material.map?.dispose();
+            badge.sprite.material.dispose();
+            attemptBadges.delete(storyId);
+          }
+        }
+
+        // Amber pulsing ring (blocked).
+        if (deskState.blocked && !deskState.terminalFail) {
+          let ring = amberRings.get(storyId);
+          if (!ring) {
+            ring = buildAmberRing();
+            ring.mesh.position.set(loc.x, 0.04, loc.z);
+            scene.add(ring.mesh);
+            amberRings.set(storyId, ring);
+          }
+          ring.tick(time);
+        } else {
+          const ring = amberRings.get(storyId);
+          if (ring) {
+            scene.remove(ring.mesh);
+            (ring.mesh.material as THREE.Material).dispose();
+            amberRings.delete(storyId);
+          }
+        }
+
+        // Terminal-fail red ribbon.
+        if (deskState.terminalFail) {
+          let ribbon = redRibbons.get(storyId);
+          if (!ribbon) {
+            ribbon = buildRedRibbon();
+            ribbon.position.set(loc.x, 0.75, loc.z + 0.32);
+            scene.add(ribbon);
+            redRibbons.set(storyId, ribbon);
+          }
+        } else {
+          const ribbon = redRibbons.get(storyId);
+          if (ribbon) {
+            scene.remove(ribbon);
+            (ribbon.material as THREE.Material).dispose();
+            redRibbons.delete(storyId);
+          }
+        }
+      }
+
+      // Cull overlays for stories no longer in orch state.
+      for (const [storyId, badge] of attemptBadges) {
+        if (!orch.deskStates[storyId]) {
+          scene.remove(badge.sprite);
+          badge.sprite.material.map?.dispose();
+          badge.sprite.material.dispose();
+          attemptBadges.delete(storyId);
+        }
+      }
+      for (const [storyId, ring] of amberRings) {
+        if (!orch.deskStates[storyId]) {
+          scene.remove(ring.mesh);
+          (ring.mesh.material as THREE.Material).dispose();
+          amberRings.delete(storyId);
+        }
+      }
+      for (const [storyId, ribbon] of redRibbons) {
+        if (!orch.deskStates[storyId]) {
+          scene.remove(ribbon);
+          (ribbon.material as THREE.Material).dispose();
+          redRibbons.delete(storyId);
+        }
+      }
+
+      // Blocker cards on the whiteboard (Epic 6.3).
+      const cardOrder = Object.keys(orch.blockerCards).sort();
+      for (const storyId of cardOrder) {
+        let mesh = blockerCardMeshes.get(storyId);
+        if (!mesh) {
+          mesh = buildBlockerCard(storyId);
+          scene.add(mesh);
+          blockerCardMeshes.set(storyId, mesh);
+        }
+      }
+      // Reposition the whole set so the grid stays tidy as cards come/go.
+      cardOrder.forEach((storyId, idx) => {
+        const mesh = blockerCardMeshes.get(storyId);
+        if (!mesh) return;
+        const pos = blockerCardPosition(idx, whiteboardLoc.x, whiteboardLoc.z);
+        mesh.position.set(pos.x, pos.y, pos.z);
+      });
+      // Cull removed cards.
+      for (const [storyId, mesh] of blockerCardMeshes) {
+        if (!orch.blockerCards[storyId]) {
+          scene.remove(mesh);
+          const mat = mesh.material as THREE.MeshBasicMaterial;
+          mat.map?.dispose();
+          mat.dispose();
+          blockerCardMeshes.delete(storyId);
+        }
+      }
+
+      // Reviewer ↔ dev connector lines (Epic 6.2).
+      // Pair by storyId + role against the actual spawned office workers —
+      // orchestrator subagentIds and office worker IDs are separate identity
+      // spaces today, so we reconcile through the shared story assignment.
+      const reviewerStoryIds = new Set<string>();
+      for (const reviewer of Object.values(orch.reviewers)) reviewerStoryIds.add(reviewer.storyId);
+
+      const pairKeys = new Set<string>();
+      for (const storyId of reviewerStoryIds) {
+        const reviewerWorker = [...store.workers.values()].find(
+          (w) => w.role === 'REVIEWER' && w.storyId === storyId,
+        );
+        const devWorker = [...store.workers.values()].find(
+          (w) => w.role === 'DEV' && w.storyId === storyId,
+        );
+        if (!reviewerWorker || !devWorker) continue;
+        const fromLoc = LOCATIONS[reviewerWorker.location];
+        const toLoc = LOCATIONS[devWorker.location];
+        if (!fromLoc || !toLoc) continue;
+
+        const key = `story::${storyId}`;
+        pairKeys.add(key);
+        const from = new THREE.Vector3(fromLoc.x, 1.0, fromLoc.z);
+        const to = new THREE.Vector3(toLoc.x, 1.0, toLoc.z);
+        let line = reviewerConnectors.get(key);
+        if (!line) {
+          line = buildReviewerConnector(from, to);
+          scene.add(line);
+          reviewerConnectors.set(key, line);
+        } else {
+          updateReviewerConnector(line, from, to);
+        }
+      }
+      for (const [key, line] of reviewerConnectors) {
+        if (!pairKeys.has(key)) {
+          scene.remove(line);
+          line.geometry.dispose();
+          (line.material as THREE.Material).dispose();
+          reviewerConnectors.delete(key);
+        }
       }
 
       ren.render(scene, cam);

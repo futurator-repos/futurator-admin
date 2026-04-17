@@ -21,7 +21,7 @@ import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { CloudFrontClient, CreateInvalidationCommand } from '@aws-sdk/client-cloudfront';
 
 const REGION = 'us-east-1';
-const TABLE = 'futurator-admin-dev-ProjectsTableTable-swomtonk';
+const TABLE = 'futurator-admin-production-ProjectsTableTable-wxrwdohd';
 const BUCKET = 'futurator-ai-website';
 const DISTRIBUTION_ID = 'E1BI1YWMTLSDTE';
 
