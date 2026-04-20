@@ -1,7 +1,6 @@
 'use client';
 
-const BROKER_URL =
-  process.env.NEXT_PUBLIC_BROKER_URL || 'https://vnfmz85xj1.execute-api.us-east-1.amazonaws.com/v1';
+const BROKER_URL = process.env.NEXT_PUBLIC_BROKER_URL || 'https://auth.futurator.ai/v1';
 
 export function LoginButton() {
   const handleLogin = () => {

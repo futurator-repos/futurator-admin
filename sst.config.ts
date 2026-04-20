@@ -201,11 +201,10 @@ export default $config({
         AGENT_EVENTS_TABLE: agentEventsTable.name,
         EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
         PROJECT_REGISTRY_TABLE: projectRegistryTable.name,
-        IDENTITY_BROKER_URL: 'https://vnfmz85xj1.execute-api.us-east-1.amazonaws.com/v1',
-        IDENTITY_BROKER_JWKS_URL:
-          'https://vnfmz85xj1.execute-api.us-east-1.amazonaws.com/v1/.well-known/jwks.json',
-        IDENTITY_BROKER_CLIENT_ID: 'app_d0eaa7fcc0b74d9301e6b0efe9526b20',
-        IDENTITY_BROKER_CLIENT_SECRET: '9YRtqOGPfuJyBsshSVjZXxTKeDQi7LjXOlTa0rlnZQM',
+        IDENTITY_BROKER_URL: 'https://auth.futurator.ai/v1',
+        IDENTITY_BROKER_JWKS_URL: 'https://auth.futurator.ai/v1/.well-known/jwks.json',
+        IDENTITY_BROKER_CLIENT_ID: 'app_0ed7f7e62b277aca1c1d16a8ee370384',
+        IDENTITY_BROKER_CLIENT_SECRET: '7_oGr8sFcjcRRcO5Z8W_ZbjAupqfNyoiu0TmvPMRp_Q',
         ALLOWED_ORIGIN: 'https://admin.futurator.ai',
         // Futurator.ai homepage publish pipeline (Stories 14-1, 14-2)
         FUTURATOR_PUBLIC_BUCKET,
