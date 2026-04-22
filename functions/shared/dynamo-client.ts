@@ -18,4 +18,8 @@ export const TABLE_NAMES = {
   agentEvents: process.env.AGENT_EVENTS_TABLE || 'futurator-agent-events',
   epicWorkflows: process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflows',
   projectRegistry: process.env.PROJECT_REGISTRY_TABLE || 'futurator-project-registry',
+  partyProjects: process.env.PARTY_PROJECTS_TABLE || 'futurator-party-projects',
+  partySessions: process.env.PARTY_SESSIONS_TABLE || 'futurator-party-sessions',
+  plans: process.env.PLANS_TABLE || 'futurator-plans',
+  attentionItems: process.env.ATTENTION_ITEMS_TABLE || 'futurator-attention-items',
 } as const;

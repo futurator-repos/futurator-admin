@@ -83,7 +83,12 @@ export interface AgentJob {
   updatedAt: string;
   createdBy: string;
   workingDir: string;
-  pipeline: PipelineDefinition;
+  /**
+   * Optional for jobs dispatched by `jobType` rather than the legacy per-step
+   * pipeline (e.g., Party Epic 15: party-bootstrap/inspect/turn). Legacy jobs
+   * set this; epic-dev jobs also provide it for the daemon poll loop's logging.
+   */
+  pipeline?: PipelineDefinition;
 
   // Runtime state (written by daemon)
   currentStepIndex?: number;
@@ -92,6 +97,13 @@ export interface AgentJob {
   stepResults?: StepResult[];
   totalCost?: number;
   errorMessage?: string;
+
+  // Pipeline Enhancement Plan v2, Phase A.3 — retry ladder state.
+  // retryAttempt is 0 for the original run and increments on each re-queue.
+  // retryAfter is an ISO timestamp; the poll loop skips PENDING jobs whose
+  // retryAfter is in the future.
+  retryAttempt?: number;
+  retryAfter?: string;
 
   // Compilation metadata (MY-2 Story Compilation Pipeline)
   compilationStatus?: 'success' | 'failed' | 'skipped';
@@ -108,6 +120,42 @@ export interface AgentJob {
   waveResults?: Record<string, WaveResult>;
   resumeFromWaveResults?: Record<string, WaveResult>;
   lastHeartbeatAt?: string;
+
+  // Party module (Epic 15) — alternate execution model dispatched by the
+  // daemon's job-router via `jobType`. Each payload is optional and mutually
+  // exclusive; exactly one is set per party job.
+  jobType?:
+    | 'party-bootstrap'
+    | 'party-inspect'
+    | 'party-turn'
+    | 'party-docs-sync'
+    | 'party-docs-unlink';
+  partyBootstrapPayload?: {
+    projectId: string;
+    projectPath: string;
+    forceReinstall?: boolean;
+    createFolder?: boolean;
+  };
+  partyInspectPayload?: {
+    projectId: string;
+    projectPath: string;
+  };
+  partyTurnPayload?: {
+    sessionId: string;
+    content: string;
+  };
+  partyDocsSyncPayload?: {
+    projectId: string;
+    projectPath: string;
+    filename: string;
+    s3Bucket: string;
+    s3Key: string;
+  };
+  partyDocsUnlinkPayload?: {
+    projectId: string;
+    projectPath: string;
+    filename: string;
+  };
 }
 
 // ── Epic-dev payload types (Arch Doc §3) ──

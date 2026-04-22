@@ -169,6 +169,72 @@ export default $config({
       },
     });
 
+    // ── Labs Party Tables (Epic 15) ──
+    const partyProjectsTable = new sst.aws.Dynamo('PartyProjectsTable', {
+      fields: { projectId: 'string' },
+      primaryIndex: { hashKey: 'projectId' },
+      transform: {
+        table: {
+          name: 'futurator-party-projects',
+          billingMode: 'PAY_PER_REQUEST',
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    const partySessionsTable = new sst.aws.Dynamo('PartySessionsTable', {
+      fields: {
+        sessionId: 'string',
+        GSI1PK: 'string',
+        GSI1SK: 'string',
+      },
+      primaryIndex: { hashKey: 'sessionId' },
+      globalIndexes: {
+        GSI1: { hashKey: 'GSI1PK', rangeKey: 'GSI1SK' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-party-sessions',
+          billingMode: 'PAY_PER_REQUEST',
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ── Plan-Based Labs (Epic 17) ──
+    const plansTable = new sst.aws.Dynamo('PlansTable', {
+      fields: { planId: 'string' },
+      primaryIndex: { hashKey: 'planId' },
+      transform: {
+        table: {
+          name: 'futurator-plans',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ── Attention Inbox (Pipeline Enhancement Plan v2 — Phase A) ──
+    // Stores resilience signals (daemon-shutdown-timeout, policy-violation,
+    // retry-exhausted, tamper-reverted, budget-warning, etc.). Written by
+    // both the API Lambda (reducer path) and the daemon directly (inline
+    // signals). Daemon IAM perms for this table are attached to the EC2
+    // role `develope-it-ec2-ssm` out-of-band — update that policy whenever
+    // this table changes.
+    const attentionItemsTable = new sst.aws.Dynamo('AttentionItemsTable', {
+      fields: { planId: 'string', itemId: 'string' },
+      primaryIndex: { hashKey: 'planId', rangeKey: 'itemId' },
+      transform: {
+        table: {
+          name: 'futurator-attention-items',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── API Lambda ──
     const api = new sst.aws.Function('Api', {
       handler: 'functions/api/index.handler',
@@ -188,6 +254,10 @@ export default $config({
         agentEventsTable,
         epicWorkflowsTable,
         projectRegistryTable,
+        partyProjectsTable,
+        partySessionsTable,
+        plansTable,
+        attentionItemsTable,
       ],
       environment: {
         PROJECTS_TABLE: projectsTable.name,
@@ -201,6 +271,13 @@ export default $config({
         AGENT_EVENTS_TABLE: agentEventsTable.name,
         EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
         PROJECT_REGISTRY_TABLE: projectRegistryTable.name,
+        PARTY_PROJECTS_TABLE: partyProjectsTable.name,
+        PARTY_SESSIONS_TABLE: partySessionsTable.name,
+        PLANS_TABLE: plansTable.name,
+        ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
+        PROJECTS_ROOT: '/home/ubuntu/projects',
+        BMAD_VERSION: '6.3.0',
+        BMAD_AGENTS_SOURCE: '/home/ubuntu/bmad-agents-source/bmad/agents',
         IDENTITY_BROKER_URL: 'https://auth.futurator.ai/v1',
         IDENTITY_BROKER_JWKS_URL: 'https://auth.futurator.ai/v1/.well-known/jwks.json',
         IDENTITY_BROKER_CLIENT_ID: 'app_0ed7f7e62b277aca1c1d16a8ee370384',
@@ -221,6 +298,19 @@ export default $config({
             `arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/media/*`,
           ],
         },
+        // Party project docs (party-module §doc-upload): presigned PUT + list
+        // + delete under party-docs/<projectId>/. Daemon on EC2 pulls these
+        // via `aws s3 cp` using its instance role (separate perms below).
+        {
+          actions: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject'],
+          resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/party-docs/*`],
+        },
+        {
+          actions: ['s3:ListBucket'],
+          resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}`],
+          // No prefix condition — Lambda is trusted and we already scope by
+          // prefix in the API handler.
+        },
         // Story 14-2: invalidate CloudFront cache after S3 write
         {
           actions: ['cloudfront:CreateInvalidation'],
@@ -228,25 +318,13 @@ export default $config({
             `arn:aws:cloudfront::${AWS_ACCOUNT_ID}:distribution/${FUTURATOR_CF_DISTRIBUTION_ID}`,
           ],
         },
-        // ec2-auth-lifecycle fix (Option E): admin UI rotates the Anthropic API key
-        // used by the EC2 daemon. Parameter is a SecureString so KMS perms are needed.
-        // The EC2 instance role reads this same parameter — that policy is attached
-        // externally to the instance role (see docs/concepts/ec2-auth-lifecycle-analysis.md).
-        {
-          actions: ['ssm:GetParameter', 'ssm:PutParameter', 'ssm:DescribeParameters'],
-          resources: [
-            `arn:aws:ssm:us-east-1:${AWS_ACCOUNT_ID}:parameter/futurator/daemon/anthropic-api-key`,
-          ],
-        },
-        {
-          actions: ['kms:Encrypt', 'kms:Decrypt', 'kms:GenerateDataKey'],
-          resources: [`arn:aws:kms:us-east-1:${AWS_ACCOUNT_ID}:alias/aws/ssm`],
-        },
         // EC2 daemon control (develope-it): /api/ec2/status, /api/ec2/enable,
-        // /api/ec2/disable, /api/ec2/start-daemon, /api/ec2/refresh-credentials,
-        // /api/ec2/set-anthropic-key (SIGUSR1 via SSM Run Command), file browser,
-        // CloudWatch metrics. SST rewrites the Lambda inline policy from this
-        // list on every deploy, so anything removed here silently breaks the UI.
+        // /api/ec2/disable, /api/ec2/start-daemon, file browser, CloudWatch
+        // metrics. Auth is handled OUT-OF-BAND by the operator's Mac helper
+        // pushing Keychain OAuth directly to EC2 via SSM — nothing Anthropic-
+        // related runs through this Lambda.
+        // SST rewrites the Lambda inline policy from this list on every
+        // deploy, so anything removed here silently breaks the UI.
         {
           actions: ['ec2:DescribeInstances', 'ec2:StartInstances', 'ec2:StopInstances'],
           resources: ['*'],
@@ -258,6 +336,38 @@ export default $config({
         {
           actions: ['cloudwatch:GetMetricData'],
           resources: ['*'],
+        },
+        // Identity Broker management (Phase 1+): the API Lambda calls the
+        // broker's self-service GET /apps/{appId} endpoint, which requires
+        // the registration key in the X-Registration-Key header. Key lives
+        // in SSM as a SecureString so KMS Decrypt is also needed.
+        {
+          actions: ['ssm:GetParameter'],
+          resources: [
+            'arn:aws:ssm:us-east-1:835745294770:parameter/futurator-core/prod/REGISTRATION_API_KEY',
+          ],
+        },
+        {
+          actions: ['kms:Decrypt'],
+          resources: ['arn:aws:kms:us-east-1:835745294770:alias/aws/ssm'],
+        },
+        // Identity Broker management (Phase 2.5): the Admin UI is the
+        // authoritative writer of each app's broker-credentials into
+        // Secrets Manager, so consumer apps read the secret at runtime
+        // instead of humans copy-pasting it. Path convention is
+        // `futurator/{appId-env}/broker-credentials`.
+        {
+          actions: [
+            'secretsmanager:CreateSecret',
+            'secretsmanager:PutSecretValue',
+            'secretsmanager:GetSecretValue',
+            'secretsmanager:DescribeSecret',
+            'secretsmanager:UpdateSecret',
+            'secretsmanager:TagResource',
+          ],
+          resources: [
+            'arn:aws:secretsmanager:us-east-1:835745294770:secret:futurator/*/broker-credentials-*',
+          ],
         },
       ],
       url: {
@@ -377,6 +487,25 @@ export default $config({
             resources: ['arn:aws:cognito-idp:us-east-1:835745294770:userpool/us-east-1_djPwzFjUe'],
           },
         ],
+      },
+    });
+
+    // ── Cron: Wave Completion Check (Story 16.2, extended by Story 17.4 for plan-waves) ──
+    new sst.aws.Cron('WaveCompletionCheck', {
+      schedule: 'rate(1 minute)',
+      function: {
+        handler: 'functions/cron/wave-completion-check.handler',
+        runtime: 'nodejs22.x',
+        architecture: 'arm64',
+        memory: '256 MB',
+        timeout: '120 seconds',
+        link: [agentJobsTable, epicWorkflowsTable, plansTable, attentionItemsTable],
+        environment: {
+          AGENT_JOBS_TABLE: agentJobsTable.name,
+          EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
+          PLANS_TABLE: plansTable.name,
+          ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
+        },
       },
     });
 

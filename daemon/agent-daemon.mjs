@@ -13,13 +13,13 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
+  GetCommand,
   QueryCommand,
   UpdateCommand,
   PutCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { spawn, execSync } from 'child_process';
-import { mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync } from 'fs';
 import { totalmem, freemem, loadavg } from 'os';
 import { isCompileStep as _isCompileStep, COMPILE_STEP_IDS as _COMPILE_STEP_IDS } from './pipelines/compile-pipeline.mjs';
 import {
@@ -32,17 +32,49 @@ import {
 import { createNdjsonForwarder } from './forwarder/ndjson-forwarder.mjs';
 import { createDdbEventStore } from './forwarder/ddb-event-store.mjs';
 import { createDaemonReceiver } from './receiver/http-receiver.mjs';
+import { createEpicRepo } from './pipelines/lib/epic-repo.mjs';
 import {
   selectHandler,
   validateEpicDevJob,
+  validatePartyBootstrapJob,
+  validatePartyInspectJob,
+  validatePartyTurnJob,
+  validatePartyDocsSyncJob,
+  validatePartyDocsUnlinkJob,
   JOB_HANDLER_EPIC_DEV,
+  JOB_HANDLER_PARTY_BOOTSTRAP,
+  JOB_HANDLER_PARTY_INSPECT,
+  JOB_HANDLER_PARTY_TURN,
+  JOB_HANDLER_PARTY_DOCS_SYNC,
+  JOB_HANDLER_PARTY_DOCS_UNLINK,
 } from './pipelines/job-router.mjs';
 import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
+import { runPartyBootstrap } from './pipelines/party-bootstrap.mjs';
+import { runPartyInspect } from './pipelines/party-inspector.mjs';
+import { runPartyTurn } from './pipelines/party-turn.mjs';
+import { runPartyDocsSync } from './pipelines/party-docs-sync.mjs';
+import { runPartyDocsUnlink } from './pipelines/party-docs-unlink.mjs';
 import {
   findStaleJobs,
   buildResumeJob,
   DEFAULT_STALE_MS,
 } from './pipelines/stale-heartbeat.mjs';
+import {
+  registerChild,
+  unregisterChild,
+  signalAllChildren,
+  waitForAllChildrenToExit,
+  killAllChildren,
+  getChildCount,
+} from './pipelines/lib/child-tracker.mjs';
+import {
+  writeAttentionItem,
+  resolvePlanIdFromEpicId,
+} from './pipelines/lib/attention-writer.mjs';
+import {
+  assertSpawnAllowed,
+  ShellGuardViolation,
+} from './pipelines/lib/shell-guard.mjs';
 import { randomUUID } from 'node:crypto';
 
 // Resolve the full path to `claude` binary at startup
@@ -61,58 +93,103 @@ try {
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const JOBS_TABLE = process.env.AGENT_JOBS_TABLE || 'futurator-agent-jobs';
 const EVENTS_TABLE = process.env.AGENT_EVENTS_TABLE || 'futurator-agent-events';
+const EPICS_TABLE = process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflows';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS || '3000', 10);
-const API_KEY_SSM_PARAM = process.env.ANTHROPIC_API_KEY_SSM_PARAM || '/futurator/daemon/anthropic-api-key';
-const API_KEY_REFRESH_MS = parseInt(process.env.API_KEY_REFRESH_MS || String(2 * 60 * 1000), 10);
-const AUTH_PROBE_INTERVAL_MS = parseInt(process.env.AUTH_PROBE_INTERVAL_MS || String(5 * 60 * 1000), 10);
+const OAUTH_CREDS_PATH =
+  process.env.CLAUDE_CREDENTIALS_PATH || '/home/ubuntu/.claude/.credentials.json';
+// Re-read OAuth file + probe hourly. Access tokens expire ~24h and the CLI
+// refreshes them per-invocation using the refresh_token, so hourly is plenty.
+const AUTH_PROBE_INTERVAL_MS = parseInt(process.env.AUTH_PROBE_INTERVAL_MS || String(60 * 60 * 1000), 10);
 const EVENT_LOG_DIR = process.env.FUTURATOR_EVENT_LOG_DIR || '/var/log/futurator/events';
 const FORWARDER_POLL_MS = parseInt(process.env.FORWARDER_POLL_MS || '250', 10);
 const DAEMON_RECEIVER_PORT = parseInt(process.env.FUTURATOR_DAEMON_PORT || '17631', 10);
 const STALE_HEARTBEAT_MS = parseInt(process.env.STALE_HEARTBEAT_MS || String(DEFAULT_STALE_MS), 10);
 const STALE_SCAN_INTERVAL_MS = parseInt(process.env.STALE_SCAN_INTERVAL_MS || '30000', 10);
+// Pipeline Enhancement Plan v2 — Phase A.1: graceful shutdown window. On
+// SIGTERM/SIGINT the daemon SIGTERMs tracked children, waits this long, then
+// SIGKILLs any stragglers and emits daemon-shutdown-timeout attention items.
+const GRACEFUL_SHUTDOWN_MS = parseInt(process.env.GRACEFUL_SHUTDOWN_MS || '30000', 10);
+
+// Pipeline Enhancement Plan v2 — Phase A.3: retry ladder. Transient step
+// failures (non-policy, non-auth) re-queue as PENDING with retryAfter set to
+// now + the corresponding delay. After MAX_RETRIES exhausted the job is
+// FAILED for real and a high-severity retry-exhausted attention item is
+// written.
+const RETRY_DELAYS_MS = [30_000, 120_000, 480_000]; // 30s → 2m → 8m
+const MAX_RETRIES = RETRY_DELAYS_MS.length;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
   marshallOptions: { removeUndefinedValues: true },
 });
-const ssm = new SSMClient({ region: REGION });
 
-// ── Anthropic API key + auth health (Option E from ec2-auth-lifecycle-analysis.md) ──
-// Daemon prefers an API key from SSM over the OAuth `.credentials.json` file, because
-// the OAuth flow has no headless refresh path and expires every 12-24h. The API key
-// never expires, so this is the fix for the "Not logged in" failures.
-let apiKeyLoadedAt = 0;
-let apiKeySource = 'none'; // 'ssm' | 'env' | 'oauth-fallback' | 'none'
+// ── Claude Code OAuth auth (Max subscription only, no fallback) ──
+//
+// The daemon NEVER uses an Anthropic API key. All agent work counts against
+// the operator's Claude Max subscription via the OAuth tokens at
+// OAUTH_CREDS_PATH. Those tokens are pushed from the operator's Mac Keychain
+// via scripts/mac-oauth-sync.sh (manual) or scripts/mac-oauth-server.mjs
+// (the always-on localhost helper, triggered on-demand by the admin UI's
+// Re-authorize button and also on a launchd timer).
+//
+// If the OAuth file is missing or the `claude` CLI rejects it, jobs fail —
+// we do not attempt to authenticate any other way. The operator clicks
+// Re-authorize in the UI to push fresh tokens from their Mac.
 const authState = {
-  valid: null, // null until first probe
+  valid: null, // null until first probe, true/false after
   checkedAt: null,
   error: null,
+  loadedAt: null, // when we last read the OAuth file
+  hasFile: false, // does the file exist + parse?
+  hasRefresh: false, // does the file contain a refresh_token?
+  expiresAt: null, // unix ms from the accessToken (CLI refreshes per-use)
+  subscriptionType: null, // "max" / "pro" / ...
 };
 
-async function loadApiKeyFromSsm(reason = 'startup') {
-  // Static env-provided key always wins (local dev, CI, opt-out).
-  if (process.env.ANTHROPIC_API_KEY && apiKeySource !== 'ssm') {
-    apiKeySource = 'env';
-    apiKeyLoadedAt = Date.now();
+function tryOAuthFile() {
+  try {
+    const raw = readFileSync(OAUTH_CREDS_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    // Real Keychain format (verified): { claudeAiOauth: { accessToken, refreshToken, expiresAt, scopes, subscriptionType, rateLimitTier } }
+    // Legacy / alternate flat format: { accessToken, refreshToken, ... }
+    const oauth = parsed?.claudeAiOauth || parsed?.oauth || parsed;
+    if (!oauth?.accessToken || oauth.accessToken.length < 30) return null;
+    return {
+      accessToken: oauth.accessToken,
+      hasRefresh: !!oauth.refreshToken,
+      expiresAt: typeof oauth.expiresAt === 'number' ? oauth.expiresAt : null,
+      subscriptionType: oauth.subscriptionType || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function loadOAuth(reason = 'startup') {
+  // CRITICAL: if ANYTHING has set ANTHROPIC_API_KEY in our process env, remove
+  // it. Claude CLI prioritises that env var over the OAuth file and would
+  // silently bill against an API key instead of the Max subscription.
+  if ('ANTHROPIC_API_KEY' in process.env) {
+    delete process.env.ANTHROPIC_API_KEY;
+  }
+  const info = tryOAuthFile();
+  if (!info) {
+    authState.hasFile = false;
+    authState.hasRefresh = false;
+    authState.expiresAt = null;
+    authState.subscriptionType = null;
+    log('warn', `OAuth file missing or unreadable at ${OAUTH_CREDS_PATH} (${reason})`);
     return;
   }
-  try {
-    const { Parameter } = await ssm.send(
-      new GetParameterCommand({ Name: API_KEY_SSM_PARAM, WithDecryption: true }),
-    );
-    const value = Parameter?.Value?.trim();
-    if (!value) throw new Error('SSM parameter is empty');
-    process.env.ANTHROPIC_API_KEY = value;
-    apiKeySource = 'ssm';
-    apiKeyLoadedAt = Date.now();
-    log('info', `Anthropic API key loaded from SSM (${reason})`, { param: API_KEY_SSM_PARAM });
-  } catch (err) {
-    // Fall back to whatever OAuth credentials.json provides — don't fail hard.
-    if (apiKeySource === 'none') apiKeySource = 'oauth-fallback';
-    log('warn', `Could not read API key from SSM (${reason}); falling back to OAuth`, {
-      param: API_KEY_SSM_PARAM,
-      err: err.message,
-    });
-  }
+  authState.hasFile = true;
+  authState.hasRefresh = info.hasRefresh;
+  authState.expiresAt = info.expiresAt;
+  authState.subscriptionType = info.subscriptionType;
+  authState.loadedAt = Date.now();
+  log('info', `OAuth loaded from ${OAUTH_CREDS_PATH} (${reason})`, {
+    subscription: info.subscriptionType,
+    hasRefresh: info.hasRefresh,
+    accessExpiresAt: info.expiresAt ? new Date(info.expiresAt).toISOString() : null,
+  });
 }
 
 function probeAuth() {
@@ -120,7 +197,9 @@ function probeAuth() {
     const args = ['-p', 'ok', '--model', 'haiku', '--output-format', 'json'];
     const proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, FORCE_COLOR: '0' },
+      // Belt-and-suspenders: strip ANTHROPIC_API_KEY from child env so the CLI
+      // cannot pick it up even if something sets it after daemon startup.
+      env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
       timeout: 20000,
     });
     let stdout = '';
@@ -135,12 +214,20 @@ function probeAuth() {
     });
     proc.on('close', (code) => {
       const combined = stderr + stdout;
-      const authFailed = isAuthFailureOutput(combined) || (code !== 0 && /login|auth/i.test(combined));
-      authState.valid = !authFailed && code === 0;
-      authState.error = authState.valid ? null : (stderr.trim() || `exit ${code}`).slice(0, 200);
+      // CLI may exit 0 with is_error=true on rate limit / quota / OAuth reject.
+      let parsed = null;
+      try {
+        const trimmed = combined.trim();
+        if (trimmed.startsWith('{')) parsed = JSON.parse(trimmed);
+      } catch {}
+      const claudeReportedError = parsed?.is_error === true;
+      const ok = !claudeReportedError && code === 0 && !isAuthFailureOutput(combined);
+      authState.valid = ok;
+      authState.error = ok
+        ? null
+        : (parsed?.result || stderr.trim() || `exit ${code}`).slice(0, 300);
       authState.checkedAt = new Date().toISOString();
-      log(authState.valid ? 'info' : 'warn', `Auth probe: ${authState.valid ? 'OK' : 'FAIL'}`, {
-        source: apiKeySource,
+      log(ok ? 'info' : 'warn', `Auth probe: ${ok ? 'OK' : 'FAIL'}`, {
         err: authState.error,
       });
       resolve();
@@ -148,9 +235,15 @@ function probeAuth() {
   });
 }
 
+function stripApiKey(env) {
+  const clean = { ...env };
+  delete clean.ANTHROPIC_API_KEY;
+  return clean;
+}
+
 function isAuthFailureOutput(text) {
   if (!text) return false;
-  return /401|authentication_error|unauthenticated|Failed to authenticate|Not logged in|Please run \/login|Invalid[- ]?(api[- ]?key|bearer)/i.test(
+  return /401|authentication_error|unauthenticated|Failed to authenticate|Not logged in|Please run \/login/i.test(
     text,
   );
 }
@@ -326,13 +419,29 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
       }
     }
 
+    try {
+      assertSpawnAllowed(process.execPath, [CLAUDE_BIN, ...args], cwd);
+    } catch (err) {
+      if (err instanceof ShellGuardViolation) {
+        log('error', `shell-guard refused agent step ${stepId}: ${err.message}`, err.details);
+        handleGuardViolation(jobId, { ...err.details, stepId, agentId });
+        return reject(err);
+      }
+      throw err;
+    }
     // Use node directly to execute claude's cli.js — avoids shell interpretation
     // issues AND works on Linux where spawn without shell can't handle shebangs
     const proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, FORCE_COLOR: '0' },
+      // stripApiKey: defense against anything setting ANTHROPIC_API_KEY at
+      // runtime. The daemon authenticates exclusively via the Max-subscription
+      // OAuth file at OAUTH_CREDS_PATH; if the env var leaks into a spawn the
+      // CLI prioritises it and we'd silently switch to API-key billing.
+      env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
     });
+
+    registerChild(jobId, proc);
 
     // Track PID and model in heartbeat
     const entry = activeJobs.get(jobId);
@@ -344,6 +453,7 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
 
     // Handle spawn failures (ENOENT, permissions, etc.)
     proc.on('error', (err) => {
+      unregisterChild(jobId, proc);
       const msg = err.code === 'ENOENT'
         ? `Claude CLI not found at ${CLAUDE_BIN}. Is it installed?`
         : `Failed to spawn claude: ${err.message}`;
@@ -378,6 +488,7 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
     });
 
     proc.on('close', (code) => {
+      unregisterChild(jobId, proc);
       // Check for auth errors in stderr or stdout — also catch the silent-failure
       // pattern where Claude CLI exits 0 with $0 cost and empty output (seen when
       // the OAuth token is expired but stream-json mode swallowed the error).
@@ -393,9 +504,7 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
         authState.error = (silentZeroCost ? 'silent zero-cost failure' : allOutput.slice(0, 200)) || 'auth failure';
         authState.checkedAt = new Date().toISOString();
         const msg =
-          apiKeySource === 'ssm'
-            ? 'Claude credentials expired or invalid — update the API key in SSM parameter ' + API_KEY_SSM_PARAM + ' and no restart is needed.'
-            : 'Claude credentials expired — re-authorize from EC2 settings (or provision an API key via SSM ' + API_KEY_SSM_PARAM + ').';
+          'Claude Code OAuth expired on EC2 — click Re-authorize in the admin UI to push fresh tokens from your Mac Keychain.';
         log('error', msg);
         pushEvent(jobId, stepId, agentId, 'step_error', { text: msg });
         return reject(new Error(msg));
@@ -573,8 +682,11 @@ async function writeHeartbeat() {
             valid: authState.valid,
             checkedAt: authState.checkedAt,
             error: authState.error,
-            source: apiKeySource,
-            apiKeyLoadedAt: apiKeyLoadedAt ? new Date(apiKeyLoadedAt).toISOString() : null,
+            hasFile: authState.hasFile,
+            hasRefresh: authState.hasRefresh,
+            loadedAt: authState.loadedAt ? new Date(authState.loadedAt).toISOString() : null,
+            expiresAt: authState.expiresAt ? new Date(authState.expiresAt).toISOString() : null,
+            subscriptionType: authState.subscriptionType,
           },
         },
       }),
@@ -668,11 +780,35 @@ async function executeShellStep(jobId, step, workingDir, variables) {
   const startMs = Date.now();
 
   return new Promise((resolve) => {
+    const effectiveCwd = workingDir || process.env.HOME;
+    try {
+      assertSpawnAllowed('bash', ['-c', command], effectiveCwd);
+    } catch (err) {
+      if (err instanceof ShellGuardViolation) {
+        log('error', `shell-guard refused shell step ${step.id}: ${err.message}`, err.details);
+        handleGuardViolation(jobId, { ...err.details, command: command.slice(0, 200), stepId: step.id });
+        return resolve({
+          passed: false,
+          stepResult: {
+            stepId: step.id,
+            agentId: '__shell__',
+            status: 'error',
+            cost: 0,
+            durationMs: 0,
+            errorMessage: err.message,
+            extractedVariables: {},
+            validationResults: [],
+          },
+        });
+      }
+      throw err;
+    }
     const proc = spawn('bash', ['-c', command], {
-      cwd: workingDir || process.env.HOME,
+      cwd: effectiveCwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, FORCE_COLOR: '0' },
     });
+    registerChild(jobId, proc);
 
     let stdout = '';
     let stderr = '';
@@ -687,6 +823,7 @@ async function executeShellStep(jobId, step, workingDir, variables) {
     proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
 
     proc.on('close', async (code) => {
+      unregisterChild(jobId, proc);
       clearTimeout(timer);
       const durationMs = Date.now() - startMs;
       const passed = !killed && code === expectCode;
@@ -725,6 +862,7 @@ async function executeShellStep(jobId, step, workingDir, variables) {
     });
 
     proc.on('error', async (err) => {
+      unregisterChild(jobId, proc);
       clearTimeout(timer);
       await pushEvent(jobId, step.id, '__shell__', 'step_error', {
         text: `Shell spawn failed: ${err.message}`,
@@ -1115,6 +1253,8 @@ async function executeEpicDevJob(job) {
     daemonPort: DAEMON_RECEIVER_PORT,
     claudeBin: CLAUDE_BIN,
     spawn,
+    pushEvent,
+    onGuardViolation: (jid, details) => handleGuardViolation(jid, details),
     logger: {
       info: (msg) => log('info', msg),
       warn: (msg) => log('warn', msg),
@@ -1133,6 +1273,269 @@ async function executeEpicDevJob(job) {
     errorMessage: ok ? undefined : `orchestrator exit code ${result.exitCode}`,
     orchestratorDurationMs: result.durationMs,
   });
+}
+
+// ── Party Module (Epic 15) ──
+
+const PARTY_PROJECTS_TABLE = process.env.PARTY_PROJECTS_TABLE || 'futurator-party-projects';
+const PARTY_SESSIONS_TABLE = process.env.PARTY_SESSIONS_TABLE || 'futurator-party-sessions';
+const PARTY_PROJECTS_ROOT = process.env.PROJECTS_ROOT || '/home/ubuntu/projects';
+const PARTY_BMAD_VERSION = process.env.BMAD_VERSION || '6.3.0';
+const PARTY_BMAD_AGENTS_SOURCE =
+  process.env.BMAD_AGENTS_SOURCE || '/home/ubuntu/bmad-agents-source/bmad/agents';
+const PARTY_BMAD_AGENTS_SOURCE_REPO =
+  process.env.BMAD_AGENTS_SOURCE_REPO || '/home/ubuntu/bmad-agents-source';
+const PARTY_EXPECTED_AGENT_COUNT = parseInt(
+  process.env.PARTY_EXPECTED_AGENT_COUNT || '6',
+  10,
+);
+
+async function updatePartyProjectState(projectId, patch) {
+  const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
+  if (entries.length === 0) return;
+  entries.push(['updatedAt', new Date().toISOString()]);
+  const names = {};
+  const values = {};
+  const sets = [];
+  for (const [k, v] of entries) {
+    names[`#${k}`] = k;
+    values[`:${k}`] = v;
+    sets.push(`#${k} = :${k}`);
+  }
+  await ddb.send(
+    new UpdateCommand({
+      TableName: PARTY_PROJECTS_TABLE,
+      Key: { projectId },
+      UpdateExpression: `SET ${sets.join(', ')}`,
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+    }),
+  );
+}
+
+async function partyGetSession(sessionId) {
+  const result = await ddb.send(
+    new GetCommand({ TableName: PARTY_SESSIONS_TABLE, Key: { sessionId } }),
+  );
+  return result?.Item || null;
+}
+
+async function partySetClaudeSessionId(sessionId, claudeSessionId) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: PARTY_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'SET claudeSessionId = :cid',
+      ConditionExpression:
+        'attribute_exists(sessionId) AND attribute_not_exists(claudeSessionId)',
+      ExpressionAttributeValues: { ':cid': claudeSessionId },
+    }),
+  );
+}
+
+async function partyIncrementTurn(sessionId) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: PARTY_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'ADD turnCount :one SET lastTurnAt = :now',
+      ExpressionAttributeValues: { ':one': 1, ':now': new Date().toISOString() },
+    }),
+  );
+}
+
+async function partyReleaseSessionLock(sessionId, finalStatus) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: PARTY_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'SET #status = :s, lastTurnAt = :now',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':s': finalStatus,
+        ':now': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+function buildPartyCtx() {
+  return {
+    pushEvent,
+    updateProjectState: updatePartyProjectState,
+    expectedBmadVersion: PARTY_BMAD_VERSION,
+    customAgentsSourceDir: PARTY_BMAD_AGENTS_SOURCE,
+    customAgentsSourceRepo: PARTY_BMAD_AGENTS_SOURCE_REPO,
+    expectedAgentCount: PARTY_EXPECTED_AGENT_COUNT,
+    projectsRoot: PARTY_PROJECTS_ROOT,
+  };
+}
+
+async function executePartyBootstrapJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  const validation = validatePartyBootstrapJob(job);
+  if (!validation.ok) {
+    throw new Error(`party-bootstrap job rejected: ${validation.reason}`);
+  }
+
+  log('info', `[${short}] Routing to party-bootstrap pipeline`, {
+    projectId: job.partyBootstrapPayload?.projectId,
+    projectPath: job.partyBootstrapPayload?.projectPath,
+    forceReinstall: job.partyBootstrapPayload?.forceReinstall === true,
+  });
+
+  const entry = activeJobs.get(jobId);
+  if (entry) {
+    entry.stepId = 'party-bootstrap';
+    entry.agentId = '__party__';
+  }
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'party-bootstrap',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  await runPartyBootstrap(job, buildPartyCtx());
+
+  await updateJobFields(jobId, { status: 'COMPLETED' });
+  log('info', `[${short}] party-bootstrap completed`);
+}
+
+async function executePartyInspectJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  const validation = validatePartyInspectJob(job);
+  if (!validation.ok) {
+    throw new Error(`party-inspect job rejected: ${validation.reason}`);
+  }
+
+  log('info', `[${short}] Routing to party-inspect pipeline`, {
+    projectId: job.partyInspectPayload?.projectId,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'party-inspect',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  await runPartyInspect(job, buildPartyCtx());
+
+  await updateJobFields(jobId, { status: 'COMPLETED' });
+  log('info', `[${short}] party-inspect completed`);
+}
+
+async function executePartyTurnJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  const validation = validatePartyTurnJob(job);
+  if (!validation.ok) {
+    throw new Error(`party-turn job rejected: ${validation.reason}`);
+  }
+
+  log('info', `[${short}] Routing to party-turn pipeline`, {
+    sessionId: job.partyTurnPayload?.sessionId,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'party-turn',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  try {
+    await runPartyTurn(job, {
+      pushEvent,
+      getSession: partyGetSession,
+      setClaudeSessionId: partySetClaudeSessionId,
+      incrementTurn: partyIncrementTurn,
+      releaseSessionLock: partyReleaseSessionLock,
+      claudeBin: CLAUDE_BIN,
+      spawn,
+      // ANTHROPIC_API_KEY is set on process.env by loadApiKeyFromSsm; the
+      // spawned child inherits it via the default env-inheritance path.
+      env: {},
+      logger: {
+        info: (msg) => log('info', msg),
+        warn: (msg) => log('warn', msg),
+        error: (msg) => log('error', msg),
+      },
+    });
+    await updateJobFields(jobId, { status: 'COMPLETED' });
+    log('info', `[${short}] party-turn completed`);
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] party-turn failed: ${err?.message || err}`);
+    throw err;
+  }
+}
+
+async function executePartyDocsSyncJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+  const validation = validatePartyDocsSyncJob(job);
+  if (!validation.ok) {
+    throw new Error(`party-docs-sync job rejected: ${validation.reason}`);
+  }
+  log('info', `[${short}] Routing to party-docs-sync pipeline`, {
+    projectId: job.partyDocsSyncPayload?.projectId,
+    filename: job.partyDocsSyncPayload?.filename,
+  });
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'party-docs-sync',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+  try {
+    await runPartyDocsSync(job, { pushEvent });
+    await updateJobFields(jobId, { status: 'COMPLETED' });
+    log('info', `[${short}] party-docs-sync completed`);
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] party-docs-sync failed: ${err?.message || err}`);
+    throw err;
+  }
+}
+
+async function executePartyDocsUnlinkJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+  const validation = validatePartyDocsUnlinkJob(job);
+  if (!validation.ok) {
+    throw new Error(`party-docs-unlink job rejected: ${validation.reason}`);
+  }
+  log('info', `[${short}] Routing to party-docs-unlink pipeline`, {
+    projectId: job.partyDocsUnlinkPayload?.projectId,
+    filename: job.partyDocsUnlinkPayload?.filename,
+  });
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'party-docs-unlink',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+  try {
+    await runPartyDocsUnlink(job, { pushEvent });
+    await updateJobFields(jobId, { status: 'COMPLETED' });
+    log('info', `[${short}] party-docs-unlink completed`);
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] party-docs-unlink failed: ${err?.message || err}`);
+    throw err;
+  }
 }
 
 // ── Poll loop ──
@@ -1155,19 +1558,102 @@ async function runJobAsync(job) {
   try {
     if (handler === JOB_HANDLER_EPIC_DEV) {
       await executeEpicDevJob(job);
+    } else if (handler === JOB_HANDLER_PARTY_BOOTSTRAP) {
+      await executePartyBootstrapJob(job);
+    } else if (handler === JOB_HANDLER_PARTY_INSPECT) {
+      await executePartyInspectJob(job);
+    } else if (handler === JOB_HANDLER_PARTY_TURN) {
+      await executePartyTurnJob(job);
+    } else if (handler === JOB_HANDLER_PARTY_DOCS_SYNC) {
+      await executePartyDocsSyncJob(job);
+    } else if (handler === JOB_HANDLER_PARTY_DOCS_UNLINK) {
+      await executePartyDocsUnlinkJob(job);
     } else {
       await executePipeline(job);
     }
   } catch (err) {
     log('error', `[${job.jobId.slice(0, 8)}] Job failed: ${err.message}`);
     try {
-      await updateJobFields(job.jobId, { status: 'FAILED', errorMessage: err.message });
+      await handleJobFailure(job, err);
     } catch (updateErr) {
-      log('error', `[${job.jobId.slice(0, 8)}] Failed to mark as FAILED: ${updateErr.message}`);
+      log('error', `[${job.jobId.slice(0, 8)}] Failure handler failed: ${updateErr.message}`);
     }
   } finally {
     activeJobs.delete(job.jobId);
     jobEventSeqs.delete(job.jobId);
+  }
+}
+
+/**
+ * Pipeline Enhancement Plan v2 — Phase A.3. Decide between retrying the job
+ * (re-queue as PENDING with a backoff) or marking it FAILED for good.
+ * Non-retriable: shell-guard violations, auth failures, and jobs that
+ * already exhausted MAX_RETRIES.
+ */
+async function handleJobFailure(job, err) {
+  const message = err?.message || String(err);
+  const nonRetriable =
+    err?.name === 'ShellGuardViolation' ||
+    /OAuth expired|authentication expired|Not logged in|Please run \/login/i.test(message);
+
+  const currentAttempt = job.retryAttempt || 0;
+  const nextAttempt = currentAttempt + 1;
+  const canRetry = !nonRetriable && nextAttempt <= MAX_RETRIES;
+
+  if (canRetry) {
+    const delayMs = RETRY_DELAYS_MS[currentAttempt];
+    const retryAfter = new Date(Date.now() + delayMs).toISOString();
+    log(
+      'warn',
+      `[${job.jobId.slice(0, 8)}] retry ${nextAttempt}/${MAX_RETRIES} scheduled for ${retryAfter} (delay ${delayMs}ms)`,
+    );
+    await updateJobFields(job.jobId, {
+      status: 'PENDING',
+      retryAttempt: nextAttempt,
+      retryAfter,
+      errorMessage: `retry ${nextAttempt}/${MAX_RETRIES} queued: ${message}`.slice(0, 500),
+    });
+    return;
+  }
+
+  // Final failure: mark FAILED and emit a retry-exhausted attention item
+  // (skip the attention item for non-retriable auth errors — operator needs
+  // to see the fix-auth banner, not a stale item).
+  await updateJobFields(job.jobId, {
+    status: 'FAILED',
+    errorMessage: nonRetriable
+      ? message
+      : `retry exhausted after ${MAX_RETRIES} attempts: ${message}`,
+  });
+
+  if (!nonRetriable) {
+    try {
+      const planId = await resolvePlanIdFromEpicId(ddb, job.epicId);
+      if (planId) {
+        await writeAttentionItem(
+          ddb,
+          {
+            planId,
+            severity: 'high',
+            category: 'retry-exhausted',
+            title: `Step failed after ${MAX_RETRIES} retries`,
+            body:
+              `Step exhausted its retry budget (${RETRY_DELAYS_MS
+                .map((d) => `${Math.round(d / 1000)}s`)
+                .join(' / ')}). Final error: ${message.slice(0, 300)}`,
+            context: { jobId: job.jobId, epicId: job.epicId },
+            suggestedActions: [
+              { label: 'Retry step', kind: 'retry-step' },
+              { label: 'Open logs', kind: 'open-logs' },
+              { label: 'Open story', kind: 'open-story' },
+            ],
+          },
+          log,
+        );
+      }
+    } catch (attnErr) {
+      log('error', `Failed to write retry-exhausted attention item: ${attnErr.message}`);
+    }
   }
 }
 
@@ -1179,9 +1665,9 @@ async function poll() {
   log('info', `  Interval:   ${POLL_INTERVAL}ms`);
   log('info', `  Concurrency: ${MAX_CONCURRENT} jobs`);
   log('info', `  Claude:     ${CLAUDE_BIN}`);
-  log('info', `  API key SSM param: ${API_KEY_SSM_PARAM}`);
+  log('info', `  OAuth file: ${OAUTH_CREDS_PATH}`);
 
-  await loadApiKeyFromSsm('startup');
+  loadOAuth('startup');
   await probeAuth();
 
   // NDJSON event forwarder: tails per-job logs written by emit-event.sh and
@@ -1206,9 +1692,11 @@ async function poll() {
 
   // Loopback HTTP receiver for wave-complete / heartbeat from orchestrator subagents.
   try {
+    const epicRepo = createEpicRepo({ ddb, tableName: EPICS_TABLE });
     daemonReceiver = createDaemonReceiver({
       ddb,
       jobsTable: JOBS_TABLE,
+      epicRepo,
       logger: {
         warn: (msg) => log('warn', msg),
         error: (msg) => log('error', msg),
@@ -1221,10 +1709,11 @@ async function poll() {
     log('error', `Daemon receiver failed to start: ${err.message}`);
   }
 
+  // Re-check OAuth + probe on a slow interval. The Mac helper pushes fresh
+  // tokens on a similar cadence (and on-demand via the UI button), so we
+  // don't need to spin.
   setInterval(() => {
-    loadApiKeyFromSsm('refresh').catch((e) => log('error', `API key refresh failed: ${e.message}`));
-  }, API_KEY_REFRESH_MS).unref();
-  setInterval(() => {
+    loadOAuth('interval');
     probeAuth().catch((e) => log('error', `Auth probe failed: ${e.message}`));
   }, AUTH_PROBE_INTERVAL_MS).unref();
 
@@ -1243,13 +1732,17 @@ async function poll() {
       // Only query if we have available slots
       const availableSlots = MAX_CONCURRENT - activeJobs.size;
       if (availableSlots > 0) {
+        const nowIso = new Date().toISOString();
         const { Items } = await ddb.send(
           new QueryCommand({
             TableName: JOBS_TABLE,
             IndexName: 'status-createdAt-index',
             KeyConditionExpression: '#s = :pending',
+            // Pipeline Enhancement Plan v2 — Phase A.3: skip jobs still
+            // inside their retry backoff window (retryAfter > now).
+            FilterExpression: 'attribute_not_exists(retryAfter) OR retryAfter <= :now',
             ExpressionAttributeNames: { '#s': 'status' },
-            ExpressionAttributeValues: { ':pending': 'PENDING' },
+            ExpressionAttributeValues: { ':pending': 'PENDING', ':now': nowIso },
             Limit: availableSlots,
             ScanIndexForward: true,
           }),
@@ -1271,10 +1764,77 @@ async function poll() {
   }
 }
 
+// ── Shell-guard violation → attention item ──
+//
+// Pipeline Enhancement Plan v2 — Phase A.2. Called by spawn wrappers when
+// shell-guard refuses a spawn. Looks up planId via job.epicId and writes a
+// high-severity policy-violation attention item. Never throws.
+function handleGuardViolation(jobId, details) {
+  (async () => {
+    try {
+      const row = await ddb.send(
+        new GetCommand({
+          TableName: JOBS_TABLE,
+          Key: { jobId },
+          ProjectionExpression: 'epicId',
+        }),
+      );
+      const epicId = row.Item?.epicId;
+      const planId = await resolvePlanIdFromEpicId(ddb, epicId);
+      if (!planId) return;
+      const reason =
+        details?.kind === 'cwd'
+          ? `cwd "${details.cwd}" escaped allowed roots`
+          : details?.kind === 'arg'
+            ? `${details.command} arg "${details.arg}" escaped allowed roots`
+            : details?.kind === 'script'
+              ? `bash script: ${details.command} targets "${details.arg}" outside allowed roots`
+              : 'spawn refused by shell-guard';
+      await writeAttentionItem(
+        ddb,
+        {
+          planId,
+          severity: 'high',
+          category: 'policy-violation',
+          title: 'Shell-guard refused a spawn',
+          body:
+            `The daemon's shell-guard refused a spawn because it escaped the ` +
+            `allowed project roots. Step: ${details?.stepId || 'n/a'}. Reason: ${reason}. ` +
+            `The step failed cleanly — no processes were created.`,
+          context: {
+            jobId,
+            epicId,
+            stepId: details?.stepId,
+          },
+          suggestedActions: [
+            { label: 'Open logs', kind: 'open-logs' },
+            { label: 'Open story', kind: 'open-story' },
+          ],
+        },
+        log,
+      );
+    } catch (err) {
+      log('error', `handleGuardViolation failed: ${err.message}`);
+    }
+  })();
+}
+
 // ── Graceful shutdown ──
+//
+// Pipeline Enhancement Plan v2 — Phase A.1.
+// On SIGTERM/SIGINT: stop accepting new work, SIGTERM every tracked child,
+// wait up to GRACEFUL_SHUTDOWN_MS (default 30s), then SIGKILL stragglers.
+// Children that exit cleanly within the window let their own close handlers
+// update job status; only the SIGKILL'd jobs get marked FAILED here and get
+// a daemon-shutdown-timeout attention item.
 
 async function shutdown(signal) {
-  log('warn', `Received ${signal}. Shutting down... (${activeJobs.size} active jobs)`);
+  const initialActive = activeJobs.size;
+  const initialChildren = getChildCount();
+  log(
+    'warn',
+    `Received ${signal}. Graceful shutdown begun — ${initialActive} active jobs, ${initialChildren} tracked children, ${GRACEFUL_SHUTDOWN_MS}ms window`,
+  );
   shuttingDown = true;
 
   if (ndjsonForwarder) {
@@ -1293,15 +1853,73 @@ async function shutdown(signal) {
     }
   }
 
-  for (const jobId of activeJobs.keys()) {
-    log('warn', `Marking active job ${jobId.slice(0, 8)} as FAILED (interrupted)`);
-    try {
-      await updateJobFields(jobId, {
-        status: 'FAILED',
-        errorMessage: `Daemon interrupted by ${signal}`,
-      });
-    } catch (err) {
-      log('error', `Failed to update job on shutdown: ${err.message}`);
+  // Step 1: SIGTERM every tracked child so they can flush and exit cleanly.
+  const signaled = signalAllChildren('SIGTERM');
+  log('info', `SIGTERM sent to ${signaled} tracked children — waiting up to ${GRACEFUL_SHUTDOWN_MS}ms`);
+
+  // Step 2: wait for children to exit, or the window elapses.
+  const allExited = await waitForAllChildrenToExit(GRACEFUL_SHUTDOWN_MS);
+
+  if (allExited) {
+    log('info', 'All tracked children exited within graceful window');
+  } else {
+    // Step 3: SIGKILL stragglers and record which jobs got force-killed.
+    const survivors = [];
+    for (const jobId of activeJobs.keys()) {
+      survivors.push(jobId);
+    }
+    const killed = killAllChildren();
+    log(
+      'warn',
+      `Graceful window elapsed — SIGKILL'd ${killed} children; ${survivors.length} jobs will be marked FAILED with daemon-shutdown-timeout`,
+    );
+
+    // Step 4: mark surviving jobs FAILED + emit an attention item each.
+    for (const jobId of survivors) {
+      try {
+        await updateJobFields(jobId, {
+          status: 'FAILED',
+          errorMessage: `Daemon ${signal} — step did not exit within ${GRACEFUL_SHUTDOWN_MS}ms graceful window`,
+        });
+      } catch (err) {
+        log('error', `Failed to update job on shutdown: ${err.message}`);
+      }
+
+      // Resolve planId via the job's epicId for the attention item.
+      try {
+        const row = await ddb.send(
+          new GetCommand({
+            TableName: JOBS_TABLE,
+            Key: { jobId },
+            ProjectionExpression: 'epicId',
+          }),
+        );
+        const epicId = row.Item?.epicId;
+        const planId = await resolvePlanIdFromEpicId(ddb, epicId);
+        if (planId) {
+          await writeAttentionItem(
+            ddb,
+            {
+              planId,
+              severity: 'medium',
+              category: 'daemon-shutdown-timeout',
+              title: `Daemon ${signal} during running step`,
+              body:
+                `The daemon received ${signal} and the in-flight step did not exit within the ` +
+                `${GRACEFUL_SHUTDOWN_MS}ms graceful window. The step was force-killed and the job ` +
+                `was marked FAILED. Retry the step when the daemon is back up.`,
+              context: { jobId, epicId },
+              suggestedActions: [
+                { label: 'Open story', kind: 'open-story' },
+                { label: 'Retry step', kind: 'retry-step' },
+              ],
+            },
+            log,
+          );
+        }
+      } catch (err) {
+        log('error', `Failed to write shutdown attention item: ${err.message}`);
+      }
     }
   }
 
@@ -1311,13 +1929,14 @@ async function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-// SIGUSR1 = hot-reload the Anthropic API key from SSM and re-probe auth.
-// Triggered by the admin API after /api/ec2/set-anthropic-key so rotations
-// propagate within seconds — no restart, no killed jobs.
+// SIGUSR1 = fresh OAuth tokens just landed at OAUTH_CREDS_PATH — re-read the
+// file and re-probe. Triggered by scripts/mac-oauth-sync.sh (the Mac →
+// Keychain → SSM pipeline) after a successful push. No restart, no killed
+// jobs — in-flight spawns keep their own env and new spawns get the new file.
 process.on('SIGUSR1', async () => {
-  log('info', 'SIGUSR1 received — hot-reloading API key from SSM');
+  log('info', 'SIGUSR1 received — reloading OAuth and re-probing');
   try {
-    await loadApiKeyFromSsm('sigusr1');
+    loadOAuth('sigusr1');
     await probeAuth();
   } catch (err) {
     log('error', `SIGUSR1 reload failed: ${err.message}`);

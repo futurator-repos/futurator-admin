@@ -27,6 +27,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn as realSpawn } from 'node:child_process';
 import { mergeRubric } from './lib/rubric-merge.mjs';
+import { registerChild, unregisterChild } from './lib/child-tracker.mjs';
+import { assertSpawnAllowed, ShellGuardViolation } from './lib/shell-guard.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -251,9 +253,11 @@ export async function runEpicDevPipeline(opts) {
   }
 
   const args = [
+    '-p', prompt,
     '--model', payload.orchestratorModel,
-    '--print',
-    '--permission-mode', 'acceptEdits',
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--permission-mode', 'bypassPermissions',
   ];
 
   logger.info?.(
@@ -261,27 +265,108 @@ export async function runEpicDevPipeline(opts) {
       `model=${payload.orchestratorModel} stories=${payload.stories.length}`,
   );
 
+  const pushEvent = opts.pushEvent;
+  const stepId = 'epic-dev';
+  const agentId = 'orchestrator';
+
+  if (pushEvent) {
+    try {
+      await pushEvent(job.jobId, stepId, agentId, 'step_start', {
+        text: `Orchestrator starting — ${payload.stories.length} stories across ${new Set(payload.stories.map((s) => s.wave)).size} waves`,
+      });
+    } catch (err) {
+      logger.warn?.(`[epic-dev-pipeline] failed to push step_start: ${err.message}`);
+    }
+  }
+
   const startedAt = now();
+
+  try {
+    assertSpawnAllowed(claudeBin, args, projectRoot);
+  } catch (err) {
+    if (err instanceof ShellGuardViolation) {
+      logger.error?.(`[epic-dev-pipeline] shell-guard refused spawn: ${err.message}`);
+      if (opts.onGuardViolation) {
+        try {
+          opts.onGuardViolation(job.jobId, err.details);
+        } catch {
+          // never let the violation hook throw
+        }
+      }
+      throw err;
+    }
+    throw err;
+  }
 
   const child = spawn(claudeBin, args, {
     cwd: projectRoot,
     env: { ...process.env, ...(opts.env || {}) },
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
+  registerChild(job.jobId, child);
 
   const stdoutFile = createWriteStream(stdoutPath, { flags: 'a' });
   const stderrFile = createWriteStream(stderrPath, { flags: 'a' });
 
   let stdoutBuffered = '';
   let stderrBuffered = '';
+  let lineBuffer = '';
+  let finalResult = null;
 
-  teeStream({
-    source: child.stdout,
-    file: stdoutFile,
-    sink: (chunk) => {
-      stdoutBuffered += chunk;
-      logger.info?.(`[orchestrator:${job.jobId}] ${chunk.trimEnd()}`);
-    },
+  const processEvent = async (event) => {
+    if (!pushEvent) return;
+    try {
+      if (event.type === 'stream_event') {
+        const delta = event.event?.delta;
+        if (delta?.type === 'text_delta' && delta.text) {
+          await pushEvent(job.jobId, stepId, agentId, 'text_delta', { text: delta.text });
+        }
+      } else if (event.type === 'assistant') {
+        const content = event.message?.content || [];
+        for (const block of content) {
+          if (block.type === 'tool_use') {
+            await pushEvent(job.jobId, stepId, agentId, 'tool_use', {
+              toolName: block.name,
+              toolInput: JSON.stringify(block.input).slice(0, 2000),
+            });
+          } else if (block.type === 'text' && block.text) {
+            await pushEvent(job.jobId, stepId, agentId, 'text_delta', { text: block.text });
+          }
+        }
+      } else if (event.type === 'tool_result') {
+        const output =
+          typeof event.output === 'string'
+            ? event.output.slice(0, 2000)
+            : JSON.stringify(event.output).slice(0, 2000);
+        await pushEvent(job.jobId, stepId, agentId, 'tool_result', { toolOutput: output });
+      } else if (event.type === 'result') {
+        finalResult = event;
+      }
+    } catch (err) {
+      logger.warn?.(`[epic-dev-pipeline] event push failed: ${err.message}`);
+    }
+  };
+
+  child.stdout.on('data', async (chunk) => {
+    const text = chunk.toString('utf8');
+    stdoutBuffered += text;
+    try {
+      stdoutFile.write(chunk);
+    } catch {
+      // ignore log write errors
+    }
+    lineBuffer += text;
+    const lines = lineBuffer.split('\n');
+    lineBuffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        await processEvent(event);
+      } catch {
+        logger.info?.(`[orchestrator:${job.jobId}] ${line.slice(0, 500)}`);
+      }
+    }
   });
   teeStream({
     source: child.stderr,
@@ -292,19 +377,14 @@ export async function runEpicDevPipeline(opts) {
     },
   });
 
-  try {
-    child.stdin?.write?.(prompt);
-    child.stdin?.end?.();
-  } catch {
-    // fall through to close handler
-  }
-
   const exitCode = await new Promise((resolvePromise) => {
     child.on('error', (err) => {
+      unregisterChild(job.jobId, child);
       logger.error?.(`[epic-dev-pipeline] spawn error: ${err.message}`);
       resolvePromise(-1);
     });
     child.on('close', async (code) => {
+      unregisterChild(job.jobId, child);
       await Promise.all([
         new Promise((r) => stdoutFile.end(r)),
         new Promise((r) => stderrFile.end(r)),
@@ -317,6 +397,29 @@ export async function runEpicDevPipeline(opts) {
   logger.info?.(
     `[epic-dev-pipeline] orchestrator exited job=${job.jobId} code=${exitCode} duration=${durationMs}ms`,
   );
+
+  if (pushEvent) {
+    try {
+      if (exitCode === 0) {
+        const cost = finalResult?.total_cost_usd || 0;
+        await pushEvent(job.jobId, stepId, agentId, 'step_complete', {
+          cost,
+          sessionId: finalResult?.session_id || '',
+          durationMs,
+          text: JSON.stringify({
+            numTurns: finalResult?.num_turns || 0,
+            durationMs,
+          }),
+        });
+      } else {
+        await pushEvent(job.jobId, stepId, agentId, 'step_error', {
+          text: `Orchestrator exited with code ${exitCode}${stderrBuffered ? `: ${stderrBuffered.slice(0, 500)}` : ''}`,
+        });
+      }
+    } catch (err) {
+      logger.warn?.(`[epic-dev-pipeline] failed to push terminal event: ${err.message}`);
+    }
+  }
 
   return {
     exitCode,

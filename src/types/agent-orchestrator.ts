@@ -102,6 +102,10 @@ export interface AgentJob {
   stepResults?: StepResult[];
   totalCost?: number;
   errorMessage?: string;
+  /** Phase A.3 retry ladder: 0 for original run, increments on each re-queue. */
+  retryAttempt?: number;
+  /** Phase A.3 retry ladder: ISO timestamp gating daemon re-pick. */
+  retryAfter?: string;
 }
 
 // ── Events ──

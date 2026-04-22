@@ -12,6 +12,7 @@ import {
   manualCostSchema,
 } from '../shared/schemas/project-schema';
 import * as projectRepo from '../shared/repositories/project-repository';
+import * as identityBrokerRepo from '../shared/repositories/identity-broker-repository';
 import * as costRepo from '../shared/repositories/cost-repository';
 import * as resourceRepo from '../shared/repositories/resource-repository';
 import * as auditRepo from '../shared/repositories/audit-repository';
@@ -20,14 +21,57 @@ import * as userRepo from '../shared/repositories/user-repository';
 import * as alertRepo from '../shared/repositories/alert-repository';
 import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as agentEventsRepo from '../shared/repositories/agent-events-repository';
+import * as partyProjectsRepo from '../shared/repositories/party-projects-repository';
+import * as partySessionsRepo from '../shared/repositories/party-sessions-repository';
+import {
+  bootstrapInputSchema,
+  projectIdSchema,
+  createSessionInputSchema,
+  sessionIdSchema,
+  sendMessageInputSchema,
+  createPartyProjectInputSchema,
+  docUploadUrlInputSchema,
+  docSyncInputSchema,
+} from '../shared/schemas/party-schema';
+import {
+  EXPECTED_AGENT_COUNT,
+  PARTY_DOC_ALLOWED_CONTENT_TYPES,
+  PARTY_DOCS_S3_PREFIX,
+} from '../shared/types/party';
 import { createAgentJobSchema } from '../shared/schemas/agent-orchestrator-schema';
 import { resolveBlockerSchema } from '../shared/schemas/resolve-blocker-schema';
 import { validateEpicForOrchestratorStart } from '../shared/services/epic-dev-launcher';
+import { launchPipelineWave, findFirstWave } from '../shared/services/pipeline-launcher';
+import { launchStoryRerun } from '../shared/services/story-rerun-launcher';
+import { launchVisualQa } from '../shared/services/visual-qa-launcher';
+import { launchDevServer } from '../shared/services/dev-server-launcher';
+import { generateStoryPipeline } from '../shared/pipelines/story-pipeline';
 import { aggregateOrchestratorMetrics } from '../shared/services/epic-orchestrator-metrics';
 import { enqueueResumeJob } from '../shared/services/resume-job';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
+import * as planRepo from '../shared/repositories/plan-repository';
+import * as attentionRepo from '../shared/repositories/attention-items-repository';
+import type { AttentionStatus } from '../shared/types/attention';
+import { buildQaReport } from '../shared/repositories/qa-report-aggregator';
+import {
+  parseVisualTests as sharedParseVisualTests,
+  buildQaPipeline as sharedBuildQaPipeline,
+} from '../shared/pipelines/visual-qa-pipeline';
 import * as registryRepo from '../shared/repositories/project-registry-repository';
-import type { EpicStory } from '../shared/types/epic-workflow';
+import type { EpicStory, EpicWorkflow } from '../shared/types/epic-workflow';
+import type { Plan } from '../shared/types/plan';
+import { planCreateInputSchema, planPatchSchema } from '../shared/schemas/plan-schema';
+import {
+  bootstrapPlanFolder,
+  writePlanMarkdown,
+  movePlanFolderToTrash,
+  restorePlanFolder,
+  deletePlanFolder,
+} from '../shared/services/plan-folder-service';
+import { generatePmPlanPipeline } from '../shared/pipelines/pm-plan-pipeline';
+import { generatePlanBuildPipeline } from '../shared/pipelines/plan-build-pipeline';
+import { parsePlanOutput, applyPlanOutput } from '../shared/services/plan-generation-service';
+import { computePlanWaves, epicsInPlanWave } from '../shared/services/plan-waves';
 import type { PipelineDefinition } from '../shared/types/agent-orchestrator';
 import { exportPublicProjects } from '../shared/export-public-projects';
 import { renderFlatLog, filterEvents } from '../shared/rendering/flat-log';
@@ -37,6 +81,7 @@ import {
   PutObjectCommand,
   ListObjectsV2Command,
   DeleteObjectsCommand,
+  DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
@@ -45,13 +90,7 @@ import {
   StopInstancesCommand,
   DescribeInstancesCommand,
 } from '@aws-sdk/client-ec2';
-import {
-  SSMClient,
-  SendCommandCommand,
-  GetCommandInvocationCommand,
-  PutParameterCommand,
-  GetParameterCommand,
-} from '@aws-sdk/client-ssm';
+import { SSMClient, SendCommandCommand, GetCommandInvocationCommand } from '@aws-sdk/client-ssm';
 import { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { format } from 'date-fns';
 
@@ -202,6 +241,54 @@ app.get('/api/projects/:id', async (c) => {
   const project = await projectRepo.getProjectById(c.req.param('id'));
   if (!project) throw new NotFoundError('Project', c.req.param('id'));
   return c.json(project);
+});
+
+// Identity Broker — read-only view of an app's broker registration.
+app.get('/api/identity-broker/apps/:appId', async (c) => {
+  const result = await identityBrokerRepo.fetchAppConfig(c.req.param('appId'));
+  if (!result.found) return c.json({ registered: false });
+  return c.json({ registered: true, app: result.app });
+});
+
+// Drift report — compares broker state against our Secrets Manager entry.
+app.get('/api/identity-broker/apps/:appId/drift', async (c) => {
+  const report = await identityBrokerRepo.describeDrift(c.req.param('appId'));
+  return c.json(report);
+});
+
+// Register an app. The plain clientSecret is written directly into AWS
+// Secrets Manager at `futurator/{appId}/broker-credentials` and is never
+// returned to the browser — the UI only sees the (sanitized) metadata.
+app.post('/api/identity-broker/apps/:appId', async (c) => {
+  const appId = c.req.param('appId');
+  const body = (await c.req.json().catch(() => ({}))) as {
+    name?: string;
+    type?: 'web' | 'mobile' | 'service';
+    baseUrl?: string;
+    redirectUris?: string[];
+    allowedOrigins?: string[];
+  };
+  if (!body.name) {
+    throw new ValidationError('name is required');
+  }
+  const result = await identityBrokerRepo.registerApp({
+    appId,
+    name: body.name,
+    type: body.type,
+    baseUrl: body.baseUrl,
+    redirectUris: body.redirectUris,
+    allowedOrigins: body.allowedOrigins,
+  });
+  return c.json(result);
+});
+
+// Rotate an app's client secret. Broker issues a new secret with a 1h
+// overlap window (old secret still valid), we overwrite the Secrets
+// Manager entry, browser only sees metadata (never the secret itself).
+app.post('/api/identity-broker/apps/:appId/rotate', async (c) => {
+  const appId = c.req.param('appId');
+  const result = await identityBrokerRepo.rotateAppSecret(appId);
+  return c.json(result);
 });
 
 app.put('/api/projects/:id', async (c) => {
@@ -633,394 +720,9 @@ app.get('/api/daemon/status', async (c) => {
 
 // ── Epic Workflows (Labs — Agentic Workflow) ──
 
-function generateStoryPipeline(
-  story: EpicStory,
-  epicTitle: string,
-  workingDir: string,
-  opts: {
-    devModel?: string;
-    devEffort?: string;
-    reviewerModel?: string;
-    reviewerEffort?: string;
-    epicId?: string;
-  },
-): PipelineDefinition {
-  // Derive projectId from workingDir: /home/ubuntu/projects/{name}/
-  // Strip trailing slashes before splitting to avoid empty string from pop()
-  const projectId = workingDir.replace(/\/+$/, '').split('/').filter(Boolean).pop() || 'unknown';
-
-  // Note: compile step definitions below are kept in sync with
-  // daemon/pipelines/compile-pipeline.mjs (the canonical reusable module).
-  // The daemon imports isCompileStep() and event helpers from those modules.
-  // The inline definitions here are the pipeline-generation source of truth
-  // since generateStoryPipeline() runs in Lambda (separate from the daemon).
-
-  return {
-    // Inject STORY_ID, EPIC_ID, PROJECT_ID into initial variables so they're
-    // available throughout the pipeline (e.g., for compile log fallback entries)
-    initialVariables: {
-      STORY_ID: story.storyId,
-      EPIC_ID: opts.epicId || '(not provided)',
-      PROJECT_ID: projectId,
-    },
-    maxIterations: 3,
-    agents: {
-      DEV: {
-        name: 'Developer',
-        allowedTools: 'Bash,Read,Edit,Write,Glob,Grep',
-        model: opts.devModel || undefined,
-      },
-      REVIEWER: {
-        name: 'Code Reviewer',
-        allowedTools: 'Read,Grep,Glob',
-        disallowedTools: 'Write,Edit',
-        model: opts.reviewerModel || undefined,
-      },
-      COMPILER: {
-        name: 'Knowledge Compiler',
-        allowedTools: 'Read,Write,Edit,Glob,Grep',
-        // Haiku sufficient for structured markdown — Sonnet caused OOM on t2.micro
-        model: 'haiku',
-      },
-    },
-    steps: [
-      // 1. Dev implements story
-      {
-        id: 'dev',
-        agentId: 'DEV',
-        prompt: `You are a senior developer working on the "${epicTitle}" project.
-
-This is attempt {{ITERATION}} of {{MAX_ITERATIONS}} for this story.
-
-## Story to implement:
-${story.title}
-
-${story.description}
-
-## Instructions:
-- Implement ONLY this story. Do not work on other stories.
-- Working directory: ${workingDir}
-- If this is the first story, set up the project structure.
-- Output a brief summary of what you did (not full file contents, show diffs or summaries).${
-          story.hasBrowserTests
-            ? `
-- This story has browser-testable criteria (marked [needs_browser=true]). After implementing the code, also output visual test definitions describing how to verify each browser criterion:
-
----VISUAL_TESTS---
-- id: VT-${story.storyId}-1
-  criteriaRef: AC-1
-  description: "What to verify visually"
-  setup: "How to reach the testable state (e.g., load page, navigate to section)"
-  action: "none | keypress:Space | click:.selector"
-  expect: "What the correct result looks like"
----END_VISUAL_TESTS---
-
-Write one test per needs_browser=true criterion. Be specific about what the visual result should look like.`
-            : ''
-        }
-- End with:
----WORK_SUMMARY---
-[Brief summary of files created/modified and what was done]
----END_WORK_SUMMARY---`,
-        extractors: {
-          WORK_SUMMARY: {
-            type: 'between',
-            startDelimiter: '---WORK_SUMMARY---',
-            endDelimiter: '---END_WORK_SUMMARY---',
-          },
-          ...(story.hasBrowserTests && {
-            VISUAL_TESTS: {
-              type: 'between' as const,
-              startDelimiter: '---VISUAL_TESTS---',
-              endDelimiter: '---END_VISUAL_TESTS---',
-            },
-          }),
-        },
-        validations: [],
-      },
-
-      // 2. Code review
-      {
-        id: 'review',
-        agentId: 'REVIEWER',
-        prompt: `You are a code reviewer (attempt {{ITERATION}} of {{MAX_ITERATIONS}}).
-
-Review the work done for this story in the project at ${workingDir}.
-
-## Story:
-${story.title}
-
-${story.description}
-
-## Developer's summary:
-{{WORK_SUMMARY}}
-
-## Review checklist:
-1. Do all files mentioned in the acceptance criteria exist?
-2. Does the code follow the project structure?
-3. Are the acceptance criteria met?
-4. Is the code quality acceptable (no obvious bugs, proper types)?${
-          story.hasBrowserTests
-            ? `
-5. This story has browser-testable criteria. Verify the developer included visual test definitions (between ---VISUAL_TESTS--- and ---END_VISUAL_TESTS--- markers) that cover all needs_browser=true criteria. Each test definition must have: id, criteriaRef, description, setup, and expect fields.`
-            : ''
-        }
-
-Output: VERDICT: PASS or VERDICT: FAIL
-Then: FEEDBACK: [specific findings — what passed, what needs fixing]
-
-Be constructive. If the code is close but has minor issues, PASS with suggestions.`,
-        extractors: {
-          VERDICT: { type: 'regex', pattern: 'VERDICT:\\s*\\*{0,2}(PASS|FAIL)\\*{0,2}' },
-          FEEDBACK: { type: 'regex', pattern: 'FEEDBACK:\\s*([\\s\\S]+?)$' },
-        },
-        validations: [
-          { type: 'equals', left: 'VERDICT', right: 'PASS', label: 'Code review approved' },
-        ],
-        loopTo: 'retry',
-      },
-
-      // 3. Dev retry on review failure
-      {
-        id: 'retry',
-        agentId: 'DEV',
-        resumeFromStep: 'dev',
-        prompt: `The code reviewer checked your work (attempt {{ITERATION}} of {{MAX_ITERATIONS}}).
-
-Feedback: {{FEEDBACK}}
-Verdict: {{VERDICT}}
-
-Fix the issues mentioned. Output only what you changed, then:
----WORK_SUMMARY---
-[Updated summary of changes]
----END_WORK_SUMMARY---`,
-        extractors: {
-          WORK_SUMMARY: {
-            type: 'between',
-            startDelimiter: '---WORK_SUMMARY---',
-            endDelimiter: '---END_WORK_SUMMARY---',
-          },
-        },
-        validations: [],
-      },
-
-      // ── COMPILE phase (non-blocking: failures do NOT fail the story pipeline) ──
-      // Note: these inline definitions mirror daemon/pipelines/compile-pipeline.mjs
-
-      // 4. Diff extraction -- identifies changed files
-      {
-        id: 'compile-diff',
-        stepType: 'shell' as const,
-        command: `cd ${workingDir} && mkdir -p .mycelium && (git diff --name-status HEAD~1 HEAD 2>/dev/null | { grep -v -E 'node_modules/|\\.git/|knowledge/|\\.mycelium/' || true; } || find . -newer .mycelium/last-compile-marker -type f -not -path './node_modules/*' -not -path './.git/*' -not -path './knowledge/*' -not -path './.mycelium/*' 2>/dev/null | sed 's|^\\./||' | sed 's/^/A\\t/') && touch .mycelium/last-compile-marker`,
-        timeout: 15000,
-        captureAs: 'DIFF_MANIFEST',
-        onFail: { action: 'fail' as const, injectAs: 'COMPILE_DIFF_ERROR' },
-      },
-      {
-        id: 'compile-knowledge',
-        stepType: 'agent' as const,
-        agentId: 'COMPILER',
-        prompt: `You are the Knowledge Compiler for the "${epicTitle}" project.
-
-For each changed file listed in DIFF_MANIFEST below:
-
-1. If a wiki article already exists in knowledge/code/ for this file:
-   - UPDATE it: revise Purpose, Dependencies, Dependents, Signals, Missing Signals
-   - Update frontmatter: lastMutatedByStory: "${story.storyId}", updated date, maturity score
-
-2. If no article exists:
-   - CREATE one following the standard article format
-   - Set frontmatter: createdByStory: "${story.storyId}", createdByEpic: "${opts.epicId || '(not provided)'}", type: code, phase: implementation, status: active
-
-3. For deleted files (D status): mark their article status: superseded
-
-4. Extract any architectural DECISIONS from WORK_SUMMARY:
-   - Library choices, pattern selections, API design decisions
-   - Create/update articles in knowledge/decisions/
-   - Link to the code articles that implement them
-
-5. Update knowledge/system/dependency-map.md with new import relationships
-
-6. Update knowledge/index.md — add new articles, update changed entries
-
-7. Append a compilation record to knowledge/log.md:
-   | {ISO timestamp} | ${story.storyId} | success | {created}/{updated}/{superseded} | OK |
-
-Use [[wikilinks]] for ALL cross-references (e.g., [[code/src--components--auth.tsx]]).
-File naming: knowledge/code/{slug}.md where slug uses -- for path separators.
-Article frontmatter fields: title, type, phase, status, maturity, created, updated, createdByEpic, createdByStory, lastMutatedByStory, tags.
-Article sections: Purpose, Key Exports, Dependencies (with [[wikilinks]]), Dependents (with [[wikilinks]]), Signals, Missing Signals, Notes.
-
-Working directory: ${workingDir}
-Read source files to understand purpose, exports, and imports before writing articles.
-
-## Story Acceptance Criteria
-${story.description}
-
-## Changed Files (DIFF_MANIFEST)
-\`\`\`
-{{DIFF_MANIFEST}}
-\`\`\`
-
-## Developer Work Summary
-{{WORK_SUMMARY}}`,
-        captureAs: 'COMPILE_RESULT',
-        extractors: {},
-        validations: [],
-        onFail: { action: 'fail' as const },
-      },
-      {
-        id: 'compile-sync',
-        stepType: 'shell' as const,
-        command: `node /home/ubuntu/scripts/graph-sync.mjs --project ${projectId} --knowledge-dir ${workingDir}/knowledge --state-file ${workingDir}/.mycelium/compile-state.json && aws s3 sync ${workingDir}/knowledge/ s3://futurator-ai-website/knowledge-live/${projectId}/ 2>&1 || echo "S3 backup skipped (non-critical)"`,
-        timeout: 60000,
-        onFail: { action: 'fail' as const, injectAs: 'COMPILE_SYNC_ERROR' },
-      },
-    ],
-  };
-}
-
-// ── Wave-level build + server check pipeline ──
-function generateWaveBuildPipeline(
-  workingDir: string,
-  waveNum: number,
-  storyTitles: string[],
-): PipelineDefinition {
-  return {
-    maxIterations: 3,
-    agents: {
-      DEV: {
-        name: 'Build Fixer',
-        allowedTools: 'Bash,Read,Edit,Write,Glob,Grep',
-        model: 'sonnet',
-      },
-    },
-    steps: [
-      // 1. Build check
-      {
-        id: 'build-check',
-        stepType: 'shell' as const,
-        command: `cd ${workingDir} && npm run build 2>&1`,
-        timeout: 60000,
-        captureAs: 'BUILD_OUTPUT',
-        captureStderrAs: 'BUILD_OUTPUT',
-        onFail: {
-          action: 'retry_step' as const,
-          targetStep: 'dev-build-fix',
-          injectAs: 'BUILD_ERROR',
-        },
-        loopTo: 'dev-build-fix',
-      },
-      // 2. Build fix (loop-only)
-      {
-        id: 'dev-build-fix',
-        agentId: 'DEV',
-        prompt: `The project build failed after completing wave ${waveNum} stories:
-${storyTitles.map((t) => `- ${t}`).join('\n')}
-
-Build error:
-{{BUILD_ERROR}}
-
-Fix ONLY the build errors. Do not refactor or add features.
-Working directory: ${workingDir}
-
----WORK_SUMMARY---
-[What you fixed]
----END_WORK_SUMMARY---`,
-        extractors: {
-          WORK_SUMMARY: {
-            type: 'between',
-            startDelimiter: '---WORK_SUMMARY---',
-            endDelimiter: '---END_WORK_SUMMARY---',
-          },
-        },
-        validations: [],
-      },
-      // 3. Server health check
-      {
-        id: 'server-check',
-        stepType: 'shell' as const,
-        command: `kill $(lsof -ti:5173) 2>/dev/null; sleep 1; cd ${workingDir} && (npm run dev -- --host 0.0.0.0 &) && STATUS=000; for i in $(seq 1 15); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5173 2>/dev/null); [ "$STATUS" = "200" ] && break; done; kill $(lsof -ti:5173) 2>/dev/null; [ "$STATUS" = "200" ]`,
-        timeout: 30000,
-        captureAs: 'SERVER_OUTPUT',
-        captureStderrAs: 'SERVER_ERROR',
-        onFail: {
-          action: 'retry_step' as const,
-          targetStep: 'dev-server-fix',
-          injectAs: 'SERVER_ERROR',
-        },
-        loopTo: 'dev-server-fix',
-      },
-      // 4. Server fix (loop-only)
-      {
-        id: 'dev-server-fix',
-        agentId: 'DEV',
-        prompt: `The dev server failed to start after wave ${waveNum}. Error:
-
-{{SERVER_ERROR}}
-
-Fix the issue so the app serves correctly on port 5173.
-Working directory: ${workingDir}
-
----WORK_SUMMARY---
-[What you fixed]
----END_WORK_SUMMARY---`,
-        extractors: {
-          WORK_SUMMARY: {
-            type: 'between',
-            startDelimiter: '---WORK_SUMMARY---',
-            endDelimiter: '---END_WORK_SUMMARY---',
-          },
-        },
-        validations: [],
-      },
-    ],
-  };
-}
-
-// ── Parse visual test definitions from YAML-like text output ──
-function parseVisualTests(raw: string): {
-  id: string;
-  criteriaRef: string;
-  description: string;
-  setup: string;
-  action?: string;
-  expect: string;
-}[] {
-  const tests: {
-    id: string;
-    criteriaRef: string;
-    description: string;
-    setup: string;
-    action?: string;
-    expect: string;
-  }[] = [];
-
-  // Split on "- id:" to get individual test blocks
-  const blocks = raw.split(/(?=^- id:)/m).filter((b) => b.trim().startsWith('- id:'));
-
-  for (const block of blocks) {
-    const id = block.match(/^- id:\s*(.+)/m)?.[1]?.trim() || '';
-    const criteriaRef = block.match(/criteriaRef:\s*(.+)/m)?.[1]?.trim() || '';
-    const description = block.match(/description:\s*"?([^"\n]+)"?/m)?.[1]?.trim() || '';
-    const setup = block.match(/setup:\s*"?([^"\n]+)"?/m)?.[1]?.trim() || '';
-    const action = block.match(/action:\s*"?([^"\n]+)"?/m)?.[1]?.trim();
-    const expect = block.match(/expect:\s*"?([^"\n]+)"?/m)?.[1]?.trim() || '';
-
-    if (id && description) {
-      tests.push({
-        id,
-        criteriaRef,
-        description,
-        setup,
-        action: action === 'none' ? undefined : action,
-        expect,
-      });
-    }
-  }
-
-  return tests;
-}
+// Use the shared extractor — kept as a local alias so existing callers
+// (story-output watchers, etc.) don't all need re-importing at once.
+const parseVisualTests = sharedParseVisualTests;
 
 // ── Session capture helper: extract session metadata from completed story job ──
 async function captureSessionToRegistry(
@@ -1133,29 +835,40 @@ app.post('/api/epic-workflows/generate', async (c) => {
       {
         id: 'generate_epic',
         agentId: 'PM',
-        prompt: `You are a senior Product Manager. A user has described a product idea. Your job is to create a structured epic with stories, dependencies, and acceptance criteria.
+        prompt: `You are a senior Product Manager. A user has described a product intent. Your job is to create a structured epic with stories, dependencies, acceptance criteria, AND per-story touch-point inference so the orchestrator can run immediately.
 
-## Product Idea:
+## Product Intent:
 ${idea}
 
 ## Tech Stack:
 React + TypeScript + Vite (frontend web app)
 
 ## Instructions:
-1. Break the idea into 5-10 small, implementable stories
+1. Break the intent into 5-10 small, implementable stories
 2. The FIRST story must always scaffold the project (npm create vite, folder structure, types)
 3. Each subsequent story should create ONE component or module
 4. The LAST story should assemble everything in App.tsx
 5. Maximize parallelism — stories that don't depend on each other should be in the same wave
 6. Each story must have clear, testable acceptance criteria
 7. Think about dependencies carefully — a component can only be used if it's been built
-8. For each acceptance criterion in each story, classify whether verifying it requires a running browser:
-   - needs_browser="true": visual appearance, layout, animations, user interactions, responsive behavior, canvas rendering, CSS styling
+8. For each acceptance criterion, classify whether verifying it requires a running browser:
+   - needs_browser="true": visual appearance, layout, animations, interactions, responsive behavior, canvas rendering, CSS styling
    - needs_browser="false": code structure, file existence, types, build success, API logic, package installation, data transformations
-9. Add a <testing_profile> section based on the overall app:
-   - has_browser_tests: true if ANY criterion across ANY story has needs_browser="true"
-   - viewport: recommended viewport size (e.g., "800x600" for games, "1280x720" for dashboards, "375x667" for mobile-first)
-   - interaction_model: primary input method ("keyboard", "mouse", "touch", or combinations like "keyboard,mouse")
+9. Add a <testing_profile> based on the overall app:
+   - has_browser_tests: true if ANY criterion has needs_browser="true"
+   - viewport: recommended size (e.g., "800x600" for games, "1280x720" for dashboards, "375x667" for mobile-first)
+   - interaction_model: primary input ("keyboard", "mouse", "touch", or combos like "keyboard,mouse")
+10. For EACH story, emit inference fields so the orchestrator can dispatch subagents without a separate pass:
+    - <touch_points>: comma-separated glob patterns of the files the story will create/modify (e.g. "src/components/Board.tsx,src/types/game.ts"). For scaffolding use "package.json,vite.config.ts,src/**". Be specific; avoid "**".
+    - <complexity>: one of trivial | standard | complex | architectural
+      * trivial: single small file, pure presentation, <50 LOC
+      * standard: 1-3 files, typical component or module
+      * complex: multi-file feature, non-trivial logic, state coordination
+      * architectural: cross-cutting, touches scaffolding or shared types
+    - <review_rigor>: one of light | standard | strict
+      * light: trivial UI, no business logic
+      * standard: typical component
+      * strict: shared types, core logic, scaffolding, or anything other stories depend on
 
 Output your epic in this EXACT XML format (no markdown, no explanation, ONLY the XML):
 
@@ -1175,6 +888,9 @@ Output your epic in this EXACT XML format (no markdown, no explanation, ONLY the
     <story id="S1">
       <title>Story 1 — Scaffold & Core Types</title>
       <depends_on></depends_on>
+      <touch_points>package.json,vite.config.ts,tsconfig.json,src/main.tsx,src/types/game.ts</touch_points>
+      <complexity>architectural</complexity>
+      <review_rigor>strict</review_rigor>
       <description>
         As a developer, I want the project scaffolded...
 
@@ -1186,6 +902,9 @@ Output your epic in this EXACT XML format (no markdown, no explanation, ONLY the
     <story id="S2">
       <title>Story 2 — Some Component</title>
       <depends_on>S1</depends_on>
+      <touch_points>src/components/SomeComponent.tsx,src/components/SomeComponent.css</touch_points>
+      <complexity>standard</complexity>
+      <review_rigor>standard</review_rigor>
       <description>
         As a user, I want...
 
@@ -1194,28 +913,19 @@ Output your epic in this EXACT XML format (no markdown, no explanation, ONLY the
         - [needs_browser=true] Component renders at correct size
       </description>
     </story>
-    <story id="S3">
-      <title>Story 3 — Another Component</title>
-      <depends_on>S1</depends_on>
-      <description>...</description>
-    </story>
-    <story id="S4">
-      <title>Story 4 — Assembly</title>
-      <depends_on>S2,S3</depends_on>
-      <description>...</description>
-    </story>
   </stories>
 </epic>
 
 IMPORTANT RULES:
 - depends_on uses comma-separated story IDs (S1,S2,S3) or empty for no deps
 - Story IDs are S1, S2, S3... (sequential)
-- The first story (S1) always has NO dependencies
+- The first story (S1) always has NO dependencies and is typically architectural/strict
 - The last story assembles everything and depends on all component stories
 - Maximize stories that can run in parallel (same wave = same depends_on set)
-- Each story should modify 1-3 files maximum
+- Each story should modify 1-3 files maximum (except scaffolding)
 - Every acceptance criterion MUST include the [needs_browser=true/false] prefix
-- needs_browser="true" on the criterion tag in <acceptance_criteria> section
+- EVERY story MUST have <touch_points>, <complexity>, and <review_rigor> — no exceptions
+- Touch-points must not overlap between stories in the same wave (otherwise they must depend on each other)
 - Output ONLY the XML, nothing else`,
         extractors: {
           EPIC_XML: { type: 'between', startDelimiter: '<epic>', endDelimiter: '</epic>' },
@@ -1276,6 +986,9 @@ app.post('/api/epic-workflows/from-xml', async (c) => {
   const epicDesc = descMatch?.[1]?.trim() || '';
   const epicAC = criteriaMatches.map((m) => m[2].trim()).join('\n');
 
+  const COMPLEXITY_VALUES = new Set(['trivial', 'standard', 'complex', 'architectural']);
+  const REVIEW_RIGOR_VALUES = new Set(['light', 'standard', 'strict']);
+
   const rawStories = storyMatches.map((m) => {
     const storyId = m[1];
     const content = m[2];
@@ -1302,6 +1015,31 @@ app.post('/api/epic-workflows/from-xml', async (c) => {
     }));
     const hasBrowserTests = criteria.some((c) => c.needsBrowser);
 
+    // Extract inference fields emitted by the PM so the orchestrator can start without a prep pass.
+    const tpRaw = content.match(/<touch_points>([\s\S]*?)<\/touch_points>/)?.[1]?.trim() || '';
+    const touchPoints = tpRaw
+      ? tpRaw
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [];
+    const complexityRaw =
+      content
+        .match(/<complexity>([\s\S]*?)<\/complexity>/)?.[1]
+        ?.trim()
+        .toLowerCase() || '';
+    const rigorRaw =
+      content
+        .match(/<review_rigor>([\s\S]*?)<\/review_rigor>/)?.[1]
+        ?.trim()
+        .toLowerCase() || '';
+    const complexity = COMPLEXITY_VALUES.has(complexityRaw)
+      ? (complexityRaw as 'trivial' | 'standard' | 'complex' | 'architectural')
+      : undefined;
+    const reviewRigor = REVIEW_RIGOR_VALUES.has(rigorRaw)
+      ? (rigorRaw as 'light' | 'standard' | 'strict')
+      : undefined;
+
     return {
       storyId,
       title: storyTitle,
@@ -1309,6 +1047,9 @@ app.post('/api/epic-workflows/from-xml', async (c) => {
       dependsOn: depIds,
       criteria,
       hasBrowserTests,
+      touchPoints,
+      complexity,
+      reviewRigor,
     };
   });
 
@@ -1321,6 +1062,9 @@ app.post('/api/epic-workflows/from-xml', async (c) => {
     status: 'pending' as const,
     dependsOn: s.dependsOn,
     ...(s.criteria.length > 0 && { criteria: s.criteria, hasBrowserTests: s.hasBrowserTests }),
+    ...(s.touchPoints.length > 0 && { touchPoints: s.touchPoints }),
+    ...(s.complexity && { complexity: s.complexity }),
+    ...(s.reviewRigor && { reviewRigor: s.reviewRigor }),
   }));
 
   // Compute waves
@@ -1342,29 +1086,772 @@ app.post('/api/epic-workflows/from-xml', async (c) => {
   }
   const storiesWithWaves = stories.map((s) => ({ ...s, wave: computeWave(s.storyId) }));
 
+  // If the PM emitted inference for every story the epic is immediately runnable
+  // by the orchestrator; otherwise it stays in draft and a later prep pass is required.
+  const allInferred =
+    storiesWithWaves.length > 0 &&
+    storiesWithWaves.every(
+      (s) => (s.touchPoints?.length ?? 0) > 0 && s.complexity && s.reviewRigor,
+    );
+
   const epicId = crypto.randomUUID();
   const now = new Date().toISOString();
 
+  // Story 16.1: honor the caller's execution-mode choice. `useEpicOrchestrator`
+  // arrives as a boolean on the request body (from the UI toggle). If omitted,
+  // epic-workflow-repository.ts:createEpic still defaults to true.
   const epic = await epicRepo.createEpic({
     epicId,
     title: epicTitle,
     description: epicDesc,
     acceptanceCriteria: epicAC,
     workingDir: workingDir || '',
-    status: 'draft',
+    status: allInferred ? 'ready' : 'draft',
     stories: storiesWithWaves,
     testingProfile,
-    yoloMode: !!body.yoloMode,
+    yoloMode: body.yoloMode !== false,
     devModel: body.devModel,
     devEffort: body.devEffort,
     reviewerModel: body.reviewerModel,
     reviewerEffort: body.reviewerEffort,
+    ...(typeof body.useEpicOrchestrator === 'boolean' && {
+      useEpicOrchestrator: body.useEpicOrchestrator,
+    }),
     createdAt: now,
     updatedAt: now,
     createdBy: user.userId,
   });
 
-  return c.json({ epicId: epic.epicId, storiesCount: storiesWithWaves.length }, 201);
+  // Single-click flow: if caller opted in and every story is inferred, spawn
+  // the execution jobs in the same round-trip so the UI can skip the
+  // separate "Start Epic" click.
+  //
+  // Two launch paths, selected by epic.useEpicOrchestrator:
+  //   - true  (default, orchestrator mode): single `phase='epic-dev'` job
+  //   - false (pipeline mode — Story 16.1): one step-based job per wave-1 story
+  let orchestratorJobId: string | undefined;
+  let pipelineStoryJobIds: string[] | undefined;
+  let pipelineWaveNumber: number | undefined;
+  if (body.autoStart === true && allInferred) {
+    if (epic.useEpicOrchestrator === false) {
+      // If stories exist, launch the first wave; otherwise skip silently — the
+      // manual /start button will surface the 400 if the operator clicks
+      // without fixing the epic.
+      if (epic.stories && epic.stories.length > 0) {
+        const firstWave = findFirstWave(epic);
+        const launch = await launchPipelineWave(epic, firstWave, user.userId, now, {
+          generatePipeline: generateStoryPipeline,
+          createJob: agentJobsRepo.createJob,
+          uuid: () => crypto.randomUUID(),
+        });
+        if (launch.ok) {
+          await epicRepo.updateEpicFields(epic.epicId, {
+            status: 'in_progress',
+            stories: launch.updatedStories,
+          });
+          pipelineStoryJobIds = launch.jobIds;
+          pipelineWaveNumber = launch.waveNumber;
+        }
+      }
+    } else {
+      const validation = validateEpicForOrchestratorStart(epic);
+      if (validation.ok) {
+        const jobId = crypto.randomUUID();
+        const projectId = epic.workingDir.split('/').filter(Boolean).pop() || epic.epicId;
+        await agentJobsRepo.createJob({
+          jobId,
+          status: 'PENDING',
+          createdAt: now,
+          updatedAt: now,
+          createdBy: user.userId,
+          workingDir: epic.workingDir,
+          pipeline: { agents: {}, steps: [] },
+          phase: 'epic-dev',
+          epicId: epic.epicId,
+          projectId,
+          epicDevPayload: validation.payload,
+        });
+        await epicRepo.updateEpicFields(epic.epicId, {
+          status: 'in_progress',
+          orchestratorJobId: jobId,
+        });
+        orchestratorJobId = jobId;
+      }
+    }
+  }
+
+  return c.json(
+    {
+      epicId: epic.epicId,
+      storiesCount: storiesWithWaves.length,
+      ...(orchestratorJobId && { orchestratorJobId }),
+      ...(pipelineStoryJobIds && {
+        storyJobIds: pipelineStoryJobIds,
+        waveNumber: pipelineWaveNumber,
+      }),
+    },
+    201,
+  );
+});
+
+// ── Plans (Epic 17) ──
+// Plan is the top-level Labs unit — an atomic product intent owning 1..N
+// epics, a canonical name (= folder slug = deploy slug), and a persistent
+// plan.md on disk. See docs/epics-plan-based-labs.md.
+
+app.get('/api/plans', async (c) => {
+  const plans = await planRepo.getAllPlans();
+  const summaries = plans
+    .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
+    .map(planRepo.toPlanSummary);
+  return c.json(summaries);
+});
+
+app.get('/api/plans/:id', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  // Hydrate epics array for the detail view.
+  const epics: EpicWorkflow[] = [];
+  for (const epicId of plan.epicIds) {
+    const epic = await epicRepo.getEpicById(epicId);
+    if (epic) epics.push(epic);
+  }
+  return c.json({ ...plan, epics });
+});
+
+app.post('/api/plans', async (c) => {
+  const body = await c.req.json();
+  const user = c.get('user');
+  const parsed = planCreateInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
+  }
+  const input = parsed.data;
+
+  const planId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const plan: Plan = {
+    planId,
+    name: input.name,
+    displayName: input.displayName,
+    intent: input.intent,
+    description: '',
+    status: 'concept',
+    epicIds: [],
+    workingDir: `/home/ubuntu/projects/${input.name}`,
+    devModel: input.devModel,
+    devEffort: input.devEffort,
+    reviewerModel: input.reviewerModel,
+    reviewerEffort: input.reviewerEffort,
+    testModel: input.testModel || 'sonnet',
+    yoloMode: input.yoloMode,
+    executionMode: input.executionMode || 'pipeline',
+    rigor: input.rigor || 'mvp',
+    testingProfile: input.testingProfile,
+    totalCostUsd: 0,
+    totalStories: 0,
+    doneStories: 0,
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user.userId,
+  };
+
+  await planRepo.createPlan(plan);
+
+  // Bootstrap the EC2 folder + plan.md. If SSM fails, flip the plan to
+  // archived with an error note — never leave an orphan DDB row pointing at
+  // a non-existent folder.
+  try {
+    await bootstrapPlanFolder(plan, [], { sendSsmCommand, waitForSsmOutput });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[Plans] Bootstrap failed for ${plan.planId} (${plan.name}): ${message}`);
+    await planRepo.updatePlanFields(plan.planId, {
+      status: 'archived',
+      description: `Bootstrap failed: ${message}`,
+    });
+    const archived = await planRepo.getPlanById(plan.planId);
+    return c.json({ plan: archived, warning: 'bootstrap-failed' }, 201);
+  }
+
+  return c.json({ plan }, 201);
+});
+
+// POST /api/plans/from-intent — one-shot create plan + kick off PM-plan job.
+//
+// The client polls the returned pmJobId. When the job reaches COMPLETED,
+// the client calls POST /api/plans/:id/apply-plan?jobId=<pmJobId> to
+// persist the PM's output. Two separate calls (rather than a single
+// fire-and-forget) keeps parse errors surfaceable to the operator.
+app.post('/api/plans/from-intent', async (c) => {
+  const body = await c.req.json();
+  const user = c.get('user');
+  const parsed = planCreateInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
+  }
+  const input = parsed.data;
+
+  const planId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const plan: Plan = {
+    planId,
+    name: input.name,
+    displayName: input.displayName,
+    intent: input.intent,
+    description: '',
+    status: 'concept',
+    epicIds: [],
+    workingDir: `/home/ubuntu/projects/${input.name}`,
+    devModel: input.devModel,
+    devEffort: input.devEffort,
+    reviewerModel: input.reviewerModel,
+    reviewerEffort: input.reviewerEffort,
+    testModel: input.testModel || 'sonnet',
+    yoloMode: input.yoloMode,
+    executionMode: input.executionMode || 'pipeline',
+    rigor: input.rigor || 'mvp',
+    testingProfile: input.testingProfile,
+    totalCostUsd: 0,
+    totalStories: 0,
+    doneStories: 0,
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user.userId,
+  };
+
+  await planRepo.createPlan(plan);
+
+  // Bootstrap folder + initial plan.md with just the intent (epics empty).
+  try {
+    await bootstrapPlanFolder(plan, [], { sendSsmCommand, waitForSsmOutput });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[Plans] Bootstrap failed for ${planId}: ${message}`);
+    await planRepo.updatePlanFields(planId, {
+      status: 'archived',
+      description: `Bootstrap failed: ${message}`,
+    });
+    return c.json({ error: { code: 'BOOTSTRAP_FAILED', message } }, 500);
+  }
+
+  // Kick off the PM-plan job.
+  // IMPORTANT: pass the slug (plan.name), NOT displayName, to the PM. The
+  // PM's output JSON includes `plan.name`, which apply-plan validates
+  // against the kebab-case regex — displayName would fail validation.
+  const pmJobId = crypto.randomUUID();
+  const pipeline = generatePmPlanPipeline({
+    planName: plan.name,
+    intent: plan.intent,
+    executionMode: plan.executionMode,
+    devModel: plan.devModel,
+  });
+  await agentJobsRepo.createJob({
+    jobId: pmJobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user.userId,
+    workingDir: plan.workingDir,
+    pipeline,
+  });
+
+  return c.json({ planId, pmJobId, plan }, 201);
+});
+
+// POST /api/plans/:id/apply-plan?jobId=X — parse PM job output + create epics.
+// If `jobId` is omitted, finds the most recent COMPLETED pm-plan job for this
+// plan's workingDir and applies it. This is the recovery path when the UI
+// loses track of the pmJobId (e.g., tab closed mid-generation).
+app.post('/api/plans/:id/apply-plan', async (c) => {
+  const planId = c.req.param('id');
+  let jobId = c.req.query('jobId');
+
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  if (!jobId) {
+    // Auto-discover: scan jobs for the most recent COMPLETED pm-plan job
+    // whose workingDir matches this plan's.
+    const allJobs = await agentJobsRepo.scanAllJobs();
+    const candidates = allJobs
+      .filter(
+        (j) =>
+          j.workingDir === plan.workingDir && j.status === 'COMPLETED' && j.variables?.PLAN_JSON,
+      )
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    if (candidates.length === 0) {
+      throw new ValidationError('No completed pm-plan job found for this plan.');
+    }
+    jobId = candidates[0].jobId;
+  }
+
+  const job = await agentJobsRepo.getJobById(jobId);
+  if (!job) throw new NotFoundError('Job', jobId);
+  if (job.status !== 'COMPLETED') {
+    throw new ValidationError(`Job ${jobId} is ${job.status}, not COMPLETED`);
+  }
+
+  let output;
+  try {
+    output = parsePlanOutput(job);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: { code: 'PARSE_FAILED', message } }, 400);
+  }
+
+  const result = await applyPlanOutput(plan, output, {
+    createEpic: epicRepo.createEpic,
+    updatePlanFields: planRepo.updatePlanFields,
+    uuid: () => crypto.randomUUID(),
+    now: () => new Date().toISOString(),
+  });
+
+  // Sync plan.md with the new epic tree (best-effort).
+  try {
+    await writePlanMarkdown(result.plan, result.epics, { sendSsmCommand, waitForSsmOutput });
+  } catch (err) {
+    console.warn(
+      `[Plans] plan.md sync after apply failed: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+
+  return c.json({ plan: result.plan, epics: result.epics });
+});
+
+// POST /api/plans/:id/regenerate — start a fresh PM-plan job on the same intent.
+// Existing epic tree is NOT dropped; the client applies the new output via
+// /apply-plan which (as of V1) appends — if the operator wants a clean slate
+// they should delete epics first via the UI's tree editor.
+app.post('/api/plans/:id/regenerate', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  if (plan.status !== 'concept') {
+    throw new ValidationError(`Cannot regenerate a plan in status "${plan.status}" — only concept`);
+  }
+
+  const pmJobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const pipeline = generatePmPlanPipeline({
+    planName: plan.name,
+    intent: plan.intent,
+    executionMode: plan.executionMode,
+    devModel: plan.devModel,
+  });
+  await agentJobsRepo.createJob({
+    jobId: pmJobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user.userId,
+    workingDir: plan.workingDir,
+    pipeline,
+  });
+
+  return c.json({ planId, pmJobId }, 202);
+});
+
+// POST /api/plans/:id/start — kick the plan from concept into developing.
+// Launches plan-wave 0: every epic with no deps starts its story-wave 0 now.
+// Subsequent plan-waves get launched by the wave-completion cron as each
+// wave's epics all complete + pass their per-wave build-checks.
+app.post('/api/plans/:id/start', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  if (plan.status !== 'concept') {
+    throw new ValidationError(
+      `Plan must be in "concept" status to start; current status: ${plan.status}`,
+    );
+  }
+
+  const epics: EpicWorkflow[] = [];
+  for (const epicId of plan.epicIds) {
+    const epic = await epicRepo.getEpicById(epicId);
+    if (epic) epics.push(epic);
+  }
+  if (epics.length === 0) {
+    throw new ValidationError('Plan has no epics to start — generate them first via /apply-plan');
+  }
+
+  const planWaves = computePlanWaves(epics);
+  const firstWaveEpics = epicsInPlanWave(epics, planWaves, 0);
+  if (firstWaveEpics.length === 0) {
+    throw new ValidationError('Plan-wave 0 is empty — check epic dependencies for cycles');
+  }
+
+  const now = new Date().toISOString();
+  const jobsByEpic: Record<string, string[]> = {};
+
+  // Phase C.3: cascade plan-level rigor + test config into each pipeline.
+  const planOpts = {
+    rigor: plan.rigor,
+    testModel: plan.testModel,
+    hasBrowserTests: plan.testingProfile?.hasBrowserTests,
+  };
+  for (const epic of firstWaveEpics) {
+    const result = await launchPipelineWave(
+      epic,
+      findFirstWave(epic),
+      user.userId,
+      now,
+      {
+        generatePipeline: generateStoryPipeline,
+        createJob: agentJobsRepo.createJob,
+        uuid: () => crypto.randomUUID(),
+      },
+      planOpts,
+    );
+    if (!result.ok) {
+      throw new ValidationError(`Launch failed for epic ${epic.epicId}: ${result.message}`);
+    }
+    jobsByEpic[epic.epicId] = result.jobIds;
+    await epicRepo.updateEpicFields(epic.epicId, {
+      status: 'in_progress',
+      stories: result.updatedStories,
+    });
+  }
+
+  // Also persist `epicWave` on each epic for UI rendering.
+  for (const epic of epics) {
+    const epicWave = planWaves[epic.epicId] ?? 0;
+    if (epic.epicWave !== epicWave) {
+      await epicRepo.updateEpicFields(epic.epicId, { epicWave });
+    }
+  }
+
+  await planRepo.updatePlanFields(planId, { status: 'developing', startedAt: now });
+
+  return c.json({ planId, jobsByEpic, waveNumber: 0 }, 201);
+});
+
+app.patch('/api/plans/:id', async (c) => {
+  const planId = c.req.param('id');
+  const body = await c.req.json();
+  const parsed = planPatchSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
+  }
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  await planRepo.updatePlanFields(planId, parsed.data);
+  const updated = await planRepo.getPlanById(planId);
+  if (!updated) throw new NotFoundError('Plan', planId);
+
+  // Best-effort plan.md sync. If SSM fails (instance stopped), still return
+  // the patched plan with a warning so the client can show drift.
+  const epics: EpicWorkflow[] = [];
+  for (const epicId of updated.epicIds) {
+    const epic = await epicRepo.getEpicById(epicId);
+    if (epic) epics.push(epic);
+  }
+  const warnings: string[] = [];
+  try {
+    await writePlanMarkdown(updated, epics, { sendSsmCommand, waitForSsmOutput });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[Plans] plan.md sync failed for ${planId}: ${message}`);
+    warnings.push('plan-md-not-synced');
+  }
+  return c.json({ plan: updated, ...(warnings.length > 0 && { warnings }) });
+});
+
+// POST /api/plans/:id/archive — soft-delete (Story 17.7).
+// Moves folder to .trash, cancels running jobs, flips plan to archived.
+// Reversible via /restore within the 14-day retention window.
+app.post('/api/plans/:id/archive', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  if (plan.status === 'archived') {
+    return c.json({ plan, noop: true });
+  }
+
+  // Cancel any running jobs for this plan's epics.
+  for (const epicId of plan.epicIds) {
+    const epic = await epicRepo.getEpicById(epicId);
+    if (!epic) continue;
+    for (const story of epic.stories) {
+      if (!story.jobId) continue;
+      const job = await agentJobsRepo.getJobById(story.jobId);
+      if (!job || ['COMPLETED', 'FAILED', 'STALE'].includes(job.status)) continue;
+      await agentJobsRepo.updateJobFields(story.jobId, {
+        status: 'FAILED',
+        errorMessage: 'cancelled-by-archive',
+      });
+    }
+  }
+
+  const timestamp = new Date().toISOString();
+  let archivePath: string | undefined;
+  try {
+    archivePath = await movePlanFolderToTrash(plan, timestamp, {
+      sendSsmCommand,
+      waitForSsmOutput,
+    });
+  } catch (err) {
+    console.warn(`[Plans] archive folder move failed: ${err}`);
+  }
+
+  await planRepo.updatePlanFields(planId, {
+    status: 'archived',
+    preArchiveStatus: plan.status,
+    archivedAt: timestamp,
+    archivePath,
+  });
+  const updated = await planRepo.getPlanById(planId);
+  return c.json({ plan: updated });
+});
+
+// POST /api/plans/:id/restore — bring an archived plan back to its prior status.
+app.post('/api/plans/:id/restore', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  if (plan.status !== 'archived') {
+    throw new ValidationError(`Plan is ${plan.status}, not archived — nothing to restore`);
+  }
+  try {
+    await restorePlanFolder(plan, { sendSsmCommand, waitForSsmOutput });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new AppError('RESTORE_FAILED', `Folder restore failed: ${message}`, 500);
+  }
+  await planRepo.updatePlanFields(planId, {
+    status: plan.preArchiveStatus || 'concept',
+    preArchiveStatus: undefined,
+    archivedAt: undefined,
+    archivePath: undefined,
+  });
+  const updated = await planRepo.getPlanById(planId);
+  return c.json({ plan: updated });
+});
+
+// DELETE /api/plans/:id — hard-delete with cascade (Story 17.7).
+// Removes: epic rows, agent-jobs for this plan, agent-events for those jobs,
+// EC2 folder (or .trash folder if archived), the plan row itself.
+app.delete('/api/plans/:id', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  const results: Array<{ step: string; status: 'done' | 'skipped' | 'error'; detail?: string }> =
+    [];
+
+  // 1. Gather job IDs from all epics under this plan.
+  const jobIdsToDelete: string[] = [];
+  const epicsToDelete: string[] = [];
+  for (const epicId of plan.epicIds) {
+    const epic = await epicRepo.getEpicById(epicId);
+    if (!epic) continue;
+    epicsToDelete.push(epicId);
+    for (const story of epic.stories) {
+      if (story.jobId) jobIdsToDelete.push(story.jobId);
+    }
+    if (epic.waveBuildJobs) {
+      Object.values(epic.waveBuildJobs).forEach((id) => jobIdsToDelete.push(id));
+    }
+    if (epic.qaJobId) jobIdsToDelete.push(epic.qaJobId);
+    if (epic.poJobId) jobIdsToDelete.push(epic.poJobId);
+  }
+  if (plan.planBuildJobId) jobIdsToDelete.push(plan.planBuildJobId);
+
+  // 2. Delete events + jobs.
+  let eventsDeleted = 0;
+  let jobsDeleted = 0;
+  for (const jobId of jobIdsToDelete) {
+    try {
+      eventsDeleted += await agentEventsRepo.deleteEventsForJob(jobId);
+      await agentJobsRepo.deleteJob(jobId);
+      jobsDeleted++;
+    } catch (err) {
+      results.push({ step: `job:${jobId.slice(0, 8)}`, status: 'error', detail: String(err) });
+    }
+  }
+  results.push({ step: 'events', status: 'done', detail: `${eventsDeleted} events` });
+  results.push({ step: 'jobs', status: 'done', detail: `${jobsDeleted} jobs` });
+
+  // 3. Delete epic rows.
+  for (const epicId of epicsToDelete) {
+    try {
+      await epicRepo.deleteEpic(epicId);
+    } catch (err) {
+      results.push({ step: `epic:${epicId.slice(0, 8)}`, status: 'error', detail: String(err) });
+    }
+  }
+  results.push({ step: 'epics', status: 'done', detail: `${epicsToDelete.length} epics` });
+
+  // 4. Delete EC2 folder (or .trash folder).
+  try {
+    await deletePlanFolder(plan, { sendSsmCommand, waitForSsmOutput });
+    results.push({ step: 'folder', status: 'done' });
+  } catch (err) {
+    results.push({ step: 'folder', status: 'error', detail: String(err) });
+  }
+
+  // 5. Delete the plan row.
+  await planRepo.deletePlan(planId);
+  results.push({ step: 'plan', status: 'done' });
+
+  return c.json({ planId, name: plan.name, results });
+});
+
+// ── QA Review (Pipeline Enhancement Plan v2 — QA pillar) ──
+//
+// GET /api/plans/:id/qa-report
+//   Returns a plan-wide aggregation of AC/VQA/Gate pillars + per-epic
+//   breakdown + filtered attention items. Pure aggregation over existing
+//   epic rows + agent jobs + attention items — no new state.
+
+app.get('/api/plans/:id/qa-report', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  // Hydrate all epics for the plan.
+  const epics: EpicWorkflow[] = [];
+  for (const epicId of plan.epicIds ?? []) {
+    const epic = await epicRepo.getEpicById(epicId);
+    if (epic) epics.push(epic);
+  }
+
+  // Collect every jobId we care about: qaJobId, poJobId, waveBuildJobs values.
+  const jobIdSet = new Set<string>();
+  for (const epic of epics) {
+    if (epic.qaJobId) jobIdSet.add(epic.qaJobId);
+    if (epic.poJobId) jobIdSet.add(epic.poJobId);
+    if (epic.waveBuildJobs) {
+      for (const id of Object.values(epic.waveBuildJobs)) jobIdSet.add(id);
+    }
+  }
+  const jobsById: Record<string, import('../shared/types/agent-orchestrator').AgentJob> = {};
+  for (const jobId of jobIdSet) {
+    const job = await agentJobsRepo.getJobById(jobId);
+    if (job) jobsById[jobId] = job;
+  }
+
+  const attentionItems = await attentionRepo.listAttentionItems(planId);
+
+  const report = buildQaReport({ plan, epics, jobsById, attentionItems });
+  return c.json(report);
+});
+
+// POST /api/plans/:id/qa-review
+//   Fans out: enqueues a Visual QA job for every epic with visual tests.
+//   Called by the manual "Run QA Review" button AND by the wave-completion
+//   cron when plan.autoRunQa is true. Skipped epics (no visual tests or
+//   already running) are reported in the response.
+app.post('/api/plans/:id/qa-review', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  const results: Array<{ epicId: string; jobId?: string; skipped?: string }> = [];
+  const now = new Date().toISOString();
+
+  for (const epicId of plan.epicIds ?? []) {
+    const epic = await epicRepo.getEpicById(epicId);
+    if (!epic) {
+      results.push({ epicId, skipped: 'epic-not-found' });
+      continue;
+    }
+    const result = await launchVisualQa(epic, user.userId, now, {
+      getJobById: agentJobsRepo.getJobById,
+      createJob: agentJobsRepo.createJob,
+      parseVisualTests,
+      buildQaPipeline,
+      uuid: () => crypto.randomUUID(),
+    });
+    if (!result.ok) {
+      results.push({ epicId, skipped: result.message });
+      continue;
+    }
+    const patch: Partial<import('../shared/types/epic-workflow').EpicWorkflow> = {
+      qaJobId: result.jobId,
+      status: 'in_review',
+    };
+    if (result.storiesChanged) patch.stories = result.updatedStories;
+    await epicRepo.updateEpicFields(epicId, patch);
+    results.push({ epicId, jobId: result.jobId });
+  }
+
+  return c.json({ planId, results }, 201);
+});
+
+// ── Attention Inbox (Pipeline Enhancement Plan v2 — Phase A) ──
+//
+// GET /api/plans/:id/attention-items?status=open|resolving|resolved
+//   Returns items for a plan. Default filter is every status.
+//   Sort: severity desc, then createdAt desc (Q8).
+// POST /api/plans/:id/attention-items/:itemId/resolve
+//   Flips an item to status=resolved.
+// POST /api/plans/:id/attention-items/:itemId/reopen
+//   Flips a resolved item back to open (useful if a resolution was premature).
+
+const ATTENTION_SEVERITY_RANK: Record<string, number> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+app.get('/api/plans/:id/attention-items', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) return c.json({ error: 'Plan not found' }, 404);
+
+  const items = await attentionRepo.listAttentionItems(planId);
+
+  const statusFilter = c.req.query('status');
+  const filtered = statusFilter ? items.filter((it) => it.status === statusFilter) : items;
+
+  filtered.sort((a, b) => {
+    const sa = ATTENTION_SEVERITY_RANK[a.severity] || 0;
+    const sb = ATTENTION_SEVERITY_RANK[b.severity] || 0;
+    if (sa !== sb) return sb - sa;
+    return b.createdAt.localeCompare(a.createdAt);
+  });
+
+  const unresolvedCount = items.filter((it) => it.status !== 'resolved').length;
+
+  return c.json({ items: filtered, unresolvedCount, total: items.length });
+});
+
+app.post('/api/plans/:id/attention-items/:itemId/resolve', async (c) => {
+  const planId = c.req.param('id');
+  const itemId = c.req.param('itemId');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) return c.json({ error: 'Plan not found' }, 404);
+  const updated = await attentionRepo.updateAttentionStatus(
+    planId,
+    itemId,
+    'resolved' as AttentionStatus,
+  );
+  if (!updated) return c.json({ error: 'Attention item not found' }, 404);
+  return c.json({ item: updated });
+});
+
+app.post('/api/plans/:id/attention-items/:itemId/reopen', async (c) => {
+  const planId = c.req.param('id');
+  const itemId = c.req.param('itemId');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) return c.json({ error: 'Plan not found' }, 404);
+  const updated = await attentionRepo.updateAttentionStatus(
+    planId,
+    itemId,
+    'open' as AttentionStatus,
+  );
+  if (!updated) return c.json({ error: 'Attention item not found' }, 404);
+  return c.json({ item: updated });
 });
 
 app.post('/api/epic-workflows', async (c) => {
@@ -1414,7 +1901,7 @@ app.post('/api/epic-workflows', async (c) => {
     workingDir: body.workingDir || '',
     status: 'draft',
     stories: storiesWithWaves,
-    yoloMode: !!body.yoloMode,
+    yoloMode: body.yoloMode !== false,
     devModel: body.devModel,
     devEffort: body.devEffort,
     reviewerModel: body.reviewerModel,
@@ -1450,316 +1937,62 @@ app.get('/api/epic-workflows/:id', async (c) => {
   const epic = await epicRepo.getEpicById(c.req.param('id'));
   if (!epic) throw new NotFoundError('EpicWorkflow', c.req.param('id'));
 
-  const user = c.get('user');
   let finalStories = epic.stories;
   let finalStatus = epic.status;
   let needsUpdate = false;
 
-  // ── Sync-on-read: check running stories' job statuses ──
+  // ── Sync-on-read: check queued/running stories' job statuses ──
   const syncedStories = await Promise.all(
     epic.stories.map(async (story) => {
-      if (story.status !== 'running' || !story.jobId) return story;
-      const job = await agentJobsRepo.getJobById(story.jobId);
+      // Only stories with a jobId in a non-terminal state get synced.
+      const syncable = (story.status === 'queued' || story.status === 'running') && story.jobId;
+      if (!syncable) return story;
+      const job = await agentJobsRepo.getJobById(story.jobId!);
       if (!job) return story;
       if (job.status === 'COMPLETED') {
         needsUpdate = true;
         const updated: typeof story = { ...story, status: 'done' as const };
-
-        // Extract visual test definitions from job variables if story has browser tests
         const rawVT = job.variables?.VISUAL_TESTS;
         if (story.hasBrowserTests && rawVT) {
           updated.visualTests = parseVisualTests(rawVT);
         }
-
         return updated;
       }
       if (job.status === 'FAILED') {
         needsUpdate = true;
         return { ...story, status: 'failed' as const };
       }
+      // Promote queued → running when daemon has picked up the job.
+      if (story.status === 'queued' && job.status === 'RUNNING') {
+        needsUpdate = true;
+        return { ...story, status: 'running' as const };
+      }
+      // Demote running → queued if the daemon restarted and the job is
+      // back to PENDING (rare but possible).
+      if (story.status === 'running' && job.status === 'PENDING') {
+        needsUpdate = true;
+        return { ...story, status: 'queued' as const };
+      }
       return story;
     }),
   );
   finalStories = syncedStories;
-
-  // ── Wave build checks: trigger when all stories in a wave complete ──
-  if (needsUpdate) {
-    const waveBuildJobs = { ...(epic.waveBuildJobs || {}) };
-    const waveMap = new Map<number, typeof finalStories>();
-    for (const s of finalStories) {
-      const w = s.wave ?? 0;
-      if (!waveMap.has(w)) waveMap.set(w, []);
-      waveMap.get(w)!.push(s);
-    }
-
-    for (const [waveNum, waveStories] of waveMap) {
-      const waveKey = String(waveNum);
-      // Skip if build check already triggered for this wave
-      if (waveBuildJobs[waveKey]) continue;
-      // Check if all stories in wave are done (not just running/pending)
-      const allWaveDone = waveStories.every((s) => s.status === 'done');
-      if (!allWaveDone) continue;
-
-      console.log(
-        `[Wave ${waveNum}] All ${waveStories.length} stories done — triggering build check`,
-      );
-
-      const buildPipeline = generateWaveBuildPipeline(
-        epic.workingDir,
-        waveNum,
-        waveStories.map((s) => s.title),
-      );
-
-      const buildJobId = crypto.randomUUID();
-      const now = new Date().toISOString();
-      await agentJobsRepo.createJob({
-        jobId: buildJobId,
-        status: 'PENDING',
-        createdAt: now,
-        updatedAt: now,
-        createdBy: user.userId,
-        workingDir: epic.workingDir,
-        pipeline: buildPipeline,
-      });
-
-      waveBuildJobs[waveKey] = buildJobId;
-    }
-
-    // Save if any new wave build jobs were triggered
-    if (Object.keys(waveBuildJobs).length !== Object.keys(epic.waveBuildJobs || {}).length) {
-      await epicRepo.updateEpicFields(epic.epicId, { waveBuildJobs });
-    }
-  }
 
   // ── Session capture: extract session metadata from completed stories ──
   if (needsUpdate) {
     const appName = epic.workingDir.split('/').filter(Boolean).pop() || '';
     if (appName) {
       // Fire-and-forget: capture session data for newly-done stories
-      const newlyDone = finalStories.filter(
-        (s) =>
-          s.status === 'done' &&
-          epic.stories.find((os) => os.storyId === s.storyId)?.status === 'running',
-      );
+      const newlyDone = finalStories.filter((s) => {
+        if (s.status !== 'done') return false;
+        const prev = epic.stories.find((os) => os.storyId === s.storyId)?.status;
+        return prev === 'running' || prev === 'queued';
+      });
       for (const story of newlyDone) {
         if (!story.jobId) continue;
         captureSessionToRegistry(appName, epic, story).catch((err) =>
           console.error(`[Registry] Session capture failed for ${story.storyId}:`, err.message),
         );
-      }
-    }
-  }
-
-  // ── Server-side YOLO: if yoloMode is on, trigger any newly-ready stories ──
-  if (epic.yoloMode) {
-    const doneSet = new Set(finalStories.filter((s) => s.status === 'done').map((s) => s.storyId));
-    const waveBuildJobs = epic.waveBuildJobs || {};
-
-    // Check which waves have passed their build checks
-    const waveBuildPassed = new Set<number>();
-    for (const [waveKey, jobId] of Object.entries(waveBuildJobs)) {
-      const job = await agentJobsRepo.getJobById(jobId);
-      if (job?.status === 'COMPLETED') waveBuildPassed.add(Number(waveKey));
-    }
-
-    // A story is ready if: deps done AND all dependency waves have passed build checks
-    const readyToStart = finalStories.filter((s) => {
-      if (s.status !== 'pending' && s.status !== 'failed') return false;
-      if (!(s.dependsOn || []).every((d) => doneSet.has(d))) return false;
-
-      // Check that all waves of dependency stories have completed build checks
-      const depWaves = new Set<number>();
-      for (const depId of s.dependsOn || []) {
-        const depStory = finalStories.find((ds) => ds.storyId === depId);
-        if (depStory?.wave !== undefined) depWaves.add(depStory.wave);
-      }
-      for (const w of depWaves) {
-        if (waveBuildJobs[String(w)] && !waveBuildPassed.has(w)) return false; // build check running/pending
-      }
-      return true;
-    });
-
-    if (readyToStart.length > 0) {
-      console.log(
-        `[YOLO] Server triggering ${readyToStart.length} ready stories for epic ${epic.epicId.slice(0, 8)}`,
-      );
-
-      for (const story of readyToStart) {
-        const pipeline = generateStoryPipeline(story, epic.title, epic.workingDir, {
-          devModel: epic.devModel,
-          devEffort: epic.devEffort,
-          reviewerModel: epic.reviewerModel,
-          reviewerEffort: epic.reviewerEffort,
-          epicId: epic.epicId,
-        });
-
-        const jobId = crypto.randomUUID();
-        const now = new Date().toISOString();
-        await agentJobsRepo.createJob({
-          jobId,
-          status: 'PENDING',
-          createdAt: now,
-          updatedAt: now,
-          createdBy: user.userId,
-          workingDir: epic.workingDir,
-          pipeline,
-        });
-
-        finalStories = finalStories.map((s) =>
-          s.storyId === story.storyId ? { ...s, status: 'running' as const, jobId } : s,
-        );
-        needsUpdate = true;
-        console.log(`[YOLO] Server triggered story ${story.storyId} → job ${jobId.slice(0, 8)}`);
-      }
-    }
-
-    // All stories done AND all wave builds passed → proceed to QA/PO
-    const allStoriesDone =
-      finalStories.length > 0 && finalStories.every((s) => s.status === 'done');
-    const allWaveBuildsPassed =
-      Object.keys(waveBuildJobs).length > 0
-        ? Object.keys(waveBuildJobs).every((w) => waveBuildPassed.has(Number(w)))
-        : true;
-    const allDone = allStoriesDone && allWaveBuildsPassed;
-
-    if (allDone) {
-      const hasBrowserTests = epic.testingProfile?.hasBrowserTests;
-
-      // Step 1: If has browser tests and no QA job yet → trigger Visual QA
-      if (hasBrowserTests && !epic.qaJobId) {
-        console.log(`[YOLO] Server triggering Visual QA for epic ${epic.epicId.slice(0, 8)}`);
-
-        // Collect visual tests from stories
-        const allVisualTests = finalStories
-          .filter((s) => s.visualTests && s.visualTests.length > 0)
-          .flatMap((s) =>
-            s.visualTests!.map((vt) => ({ ...vt, storyId: s.storyId, storyTitle: s.title })),
-          );
-
-        if (allVisualTests.length > 0) {
-          const viewport = epic.testingProfile?.viewport || '1280x720';
-          const qaPipeline = buildQaPipeline(epic.workingDir, epic.title, viewport, allVisualTests);
-
-          const qaJobId = crypto.randomUUID();
-          const now = new Date().toISOString();
-          await agentJobsRepo.createJob({
-            jobId: qaJobId,
-            status: 'PENDING',
-            createdAt: now,
-            updatedAt: now,
-            createdBy: user.userId,
-            workingDir: epic.workingDir,
-            pipeline: qaPipeline,
-          });
-
-          await epicRepo.updateEpicFields(epic.epicId, { qaJobId, status: 'in_review' });
-          return c.json({ ...epic, stories: finalStories, qaJobId, status: 'in_review' as const });
-        }
-      }
-
-      // Step 2: If QA completed, check result before proceeding to PO
-      if (epic.qaJobId) {
-        const qaJob = await agentJobsRepo.getJobById(epic.qaJobId);
-        if (qaJob?.status === 'RUNNING' || qaJob?.status === 'PENDING') {
-          // QA still running — return current state
-          if (needsUpdate) {
-            await epicRepo.updateEpicFields(epic.epicId, {
-              stories: finalStories,
-              status: 'in_review',
-            });
-          }
-          return c.json({ ...epic, stories: finalStories, status: 'in_review' as const });
-        }
-        if (qaJob?.status === 'COMPLETED') {
-          const qaVerdict = qaJob.variables?.OVERALL_VERDICT;
-          if (qaVerdict !== 'PASS') {
-            // QA failed — don't trigger PO yet
-            if (needsUpdate) {
-              await epicRepo.updateEpicFields(epic.epicId, {
-                stories: finalStories,
-                status: 'fixing',
-              });
-            }
-            return c.json({ ...epic, stories: finalStories, status: 'fixing' as const });
-          }
-          // QA passed — fall through to PO trigger
-        }
-        // QA failed to run — fall through to PO anyway
-      }
-
-      // Step 3: Trigger PO review (no browser tests, or QA passed)
-      if (!epic.poJobId) {
-        console.log(`[YOLO] Server triggering PO review for epic ${epic.epicId.slice(0, 8)}`);
-
-        const poPipeline: PipelineDefinition = {
-          maxIterations: 1,
-          agents: {
-            PO: { name: 'Product Owner', allowedTools: 'Read,Grep,Glob,Bash', model: 'opus' },
-          },
-          steps: [
-            {
-              id: 'po_review',
-              agentId: 'PO',
-              prompt: `You are a Product Owner performing final acceptance testing on a completed epic.
-
-## Epic: ${epic.title}
-
-## Description:
-${epic.description}
-
-## Acceptance Criteria (must ALL be met):
-${epic.acceptanceCriteria}
-
-## Stories that were implemented:
-${epic.stories.map((s) => `- ${s.title}`).join('\n')}
-
-## Instructions:
-1. The code is in the current working directory (${epic.workingDir}).
-2. Read key files to verify the implementation matches the epic description.
-3. Run \`npm run build\` or \`tsc --noEmit\` to verify it compiles.
-4. Check each acceptance criterion against the actual code.
-5. Be strict but fair.
-
-Output format:
----PO_REPORT---
-VERDICT: PASS or FAIL
-
-CRITERIA CHECK:
-[For each criterion: ✓ or ✗ with brief reason]
-
-OVERALL FEEDBACK:
-[2-3 sentences on the delivery]
-
-SUGGESTED NEXT STEPS:
-[What would you do next?]
----END_PO_REPORT---`,
-              extractors: {
-                PO_REPORT: {
-                  type: 'between',
-                  startDelimiter: '---PO_REPORT---',
-                  endDelimiter: '---END_PO_REPORT---',
-                },
-                VERDICT: { type: 'regex', pattern: 'VERDICT:\\s*\\*{0,2}(PASS|FAIL)\\*{0,2}' },
-              },
-              validations: [],
-            },
-          ],
-        };
-
-        const poJobId = crypto.randomUUID();
-        const now = new Date().toISOString();
-        await agentJobsRepo.createJob({
-          jobId: poJobId,
-          status: 'PENDING',
-          createdAt: now,
-          updatedAt: now,
-          createdBy: user.userId,
-          workingDir: epic.workingDir,
-          pipeline: poPipeline,
-        });
-
-        await epicRepo.updateEpicFields(epic.epicId, { poJobId });
-        return c.json({ ...epic, stories: finalStories, poJobId, status: 'completed' as const });
       }
     }
   }
@@ -1939,6 +2172,7 @@ app.delete('/api/epic-workflows/:id', async (c) => {
   return c.json({ epicId, appName, results });
 });
 
+// ── Re-run a single story with a fresh step-based pipeline. Story 16.3. ──
 app.post('/api/epic-workflows/:id/stories/:storyId/run', async (c) => {
   const epicId = c.req.param('id');
   const storyId = c.req.param('storyId');
@@ -1947,42 +2181,34 @@ app.post('/api/epic-workflows/:id/stories/:storyId/run', async (c) => {
   const epic = await epicRepo.getEpicById(epicId);
   if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
 
-  const story = epic.stories.find((s) => s.storyId === storyId);
-  if (!story) throw new NotFoundError('Story', storyId);
-
-  const pipeline = generateStoryPipeline(story, epic.title, epic.workingDir, {
-    devModel: epic.devModel,
-    devEffort: epic.devEffort,
-    reviewerModel: epic.reviewerModel,
-    reviewerEffort: epic.reviewerEffort,
-    epicId: epic.epicId,
-  });
-
-  const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
+  const result = await launchStoryRerun(epic, storyId, user.userId, now, {
+    generatePipeline: generateStoryPipeline,
+    createJob: agentJobsRepo.createJob,
+    uuid: () => crypto.randomUUID(),
+  });
+  if (!result.ok) {
+    throw new NotFoundError('Story', storyId);
+  }
 
-  await agentJobsRepo.createJob({
-    jobId,
-    status: 'PENDING',
-    createdAt: now,
-    updatedAt: now,
-    createdBy: user.userId,
-    workingDir: epic.workingDir,
-    pipeline,
+  await epicRepo.updateEpicFields(epicId, {
+    stories: result.updatedStories,
+    status: 'in_progress',
   });
 
-  // Update story status and jobId
-  const updatedStories = epic.stories.map((s) =>
-    s.storyId === storyId ? { ...s, status: 'running' as const, jobId } : s,
-  );
-  await epicRepo.updateEpicFields(epicId, { stories: updatedStories, status: 'in_progress' });
-
-  return c.json({ jobId, storyId }, 201);
+  return c.json({ jobId: result.jobId, storyId }, 201);
 });
 
-// ── Epic Orchestrator: start a single `phase: 'epic-dev'` job (EO-4.4) ──
-// Feature-flagged by `epic.useEpicOrchestrator`. When the flag is off the
-// endpoint returns 409 so the UI can fall back to legacy per-story buttons.
+// ── Start an epic. Mode selected by `epic.useEpicOrchestrator`:
+//   - true  (default): single `phase='epic-dev'` orchestrator job (EO-4.4)
+//   - false (Story 16.1): one step-based pipeline job per wave-1 story
+//
+// Response shape differs by mode:
+//   - orchestrator → `{ jobId }`
+//   - pipeline     → `{ jobIds, waveNumber }`
+//
+// TODO(16.2): enqueue wave N+1 when wave N completes (wave-completion cron +
+// wave-build-check). Currently pipeline mode only enqueues wave 1.
 app.post('/api/epic-workflows/:id/start', async (c) => {
   const epicId = c.req.param('id');
   const user = c.get('user');
@@ -1990,6 +2216,30 @@ app.post('/api/epic-workflows/:id/start', async (c) => {
   const epic = await epicRepo.getEpicById(epicId);
   if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
 
+  // Pipeline mode — Story 16.1. (Only wave 1 is launched here; Story 16.2's
+  // wave-completion cron enqueues wave N+1 as each wave completes.)
+  if (epic.useEpicOrchestrator === false) {
+    if (!epic.stories || epic.stories.length === 0) {
+      throw new ValidationError('Epic has no stories to start');
+    }
+    const now = new Date().toISOString();
+    const firstWave = findFirstWave(epic);
+    const launch = await launchPipelineWave(epic, firstWave, user.userId, now, {
+      generatePipeline: generateStoryPipeline,
+      createJob: agentJobsRepo.createJob,
+      uuid: () => crypto.randomUUID(),
+    });
+    if (!launch.ok) {
+      throw new ValidationError(launch.message);
+    }
+    await epicRepo.updateEpicFields(epicId, {
+      status: 'in_progress',
+      stories: launch.updatedStories,
+    });
+    return c.json({ jobIds: launch.jobIds, waveNumber: launch.waveNumber }, 201);
+  }
+
+  // Orchestrator mode (default) — unchanged from EO-4.4.
   const validation = validateEpicForOrchestratorStart(epic);
   if (!validation.ok) {
     if (validation.code === 'flag-disabled') {
@@ -2030,6 +2280,21 @@ app.post('/api/epic-workflows/:id/start', async (c) => {
 
   return c.json({ jobId }, 201);
 });
+
+// Pipeline-mode launcher — Story 16.1.
+//
+// Creates one PENDING step-based job per story in wave 1 (the lowest wave
+// number on the epic). Mutates the stories array in-place to record
+// `story.jobId` + `story.status='running'` and persists the updated array
+// back to the epic row in a single updateEpicFields call. Returns the
+// created jobIds + the wave number, or a 400-friendly failure struct if
+// wave 1 is empty.
+//
+// Pipeline only enqueues wave 1. Multi-wave gating (Story 16.2) will wait
+// for wave N COMPLETED + wave-build-check passing before enqueuing wave N+1.
+// (launchPipelineWave + findFirstWave extracted to
+// functions/shared/services/pipeline-launcher.ts for unit-testability
+// without booting the full Hono app.)
 
 // ── Resolve Blocker (EO-5.2): amend / skip / retry a blocked story ──
 // Three actions, mutually exclusive. `amend` and `retry` enqueue a resume
@@ -2240,214 +2505,21 @@ app.post('/api/epic-workflows/:id/stories/:storyId/resolve-blocker', async (c) =
 
 // ── PO Review: run a product owner pipeline against the completed epic ──
 app.post('/api/epic-workflows/:id/po-review', async (c) => {
-  const epicId = c.req.param('id');
-  const user = c.get('user');
-
-  const epic = await epicRepo.getEpicById(epicId);
-  if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
-
-  const poPipeline: PipelineDefinition = {
-    maxIterations: 1,
-    agents: {
-      PO: {
-        name: 'Product Owner',
-        allowedTools: 'Read,Grep,Glob,Bash',
-        model: 'opus',
+  return c.json(
+    {
+      error: {
+        code: 'legacy-pipeline-removed',
+        message: 'PO review pipeline has been removed. Orchestrator handles review inline.',
       },
     },
-    steps: [
-      {
-        id: 'po_review',
-        agentId: 'PO',
-        prompt: `You are a Product Owner performing final acceptance testing on a completed epic.
-
-## Epic: ${epic.title}
-
-## Description:
-${epic.description}
-
-## Acceptance Criteria (must ALL be met):
-${epic.acceptanceCriteria}
-
-## Stories that were implemented:
-${epic.stories.map((s) => `- ${s.title}`).join('\n')}
-
-## Instructions:
-1. The code is in the current working directory (${epic.workingDir}).
-2. Read key files to verify the implementation matches the epic description.
-3. If this is a Node/TypeScript project, run \`npm run build\` or \`tsc --noEmit\` to verify it compiles.
-4. Check each acceptance criterion against the actual code.
-5. Be strict but fair. If the criteria are met, pass it.
-
-Output format:
----PO_REPORT---
-VERDICT: PASS or FAIL
-
-CRITERIA CHECK:
-[For each acceptance criterion, show: ✓ or ✗ and a brief reason]
-
-OVERALL FEEDBACK:
-[2-3 sentences on the quality of the delivery]
-
-SUGGESTED NEXT STEPS:
-[What would you do next if you were the PO?]
----END_PO_REPORT---`,
-        extractors: {
-          PO_REPORT: {
-            type: 'between',
-            startDelimiter: '---PO_REPORT---',
-            endDelimiter: '---END_PO_REPORT---',
-          },
-          VERDICT: { type: 'regex', pattern: 'VERDICT:\\s*\\*{0,2}(PASS|FAIL)\\*{0,2}' },
-        },
-        validations: [],
-      },
-    ],
-  };
-
-  const jobId = crypto.randomUUID();
-  const now = new Date().toISOString();
-
-  await agentJobsRepo.createJob({
-    jobId,
-    status: 'PENDING',
-    createdAt: now,
-    updatedAt: now,
-    createdBy: user.userId,
-    workingDir: epic.workingDir,
-    pipeline: poPipeline,
-  });
-
-  await epicRepo.updateEpicFields(epicId, { poJobId: jobId });
-
-  return c.json({ jobId, epicId }, 201);
+    410,
+  );
 });
 
-// ── Build Visual QA pipeline definition ──
-function buildQaPipeline(
-  workingDir: string,
-  epicTitle: string,
-  viewport: string,
-  allVisualTests: {
-    id: string;
-    description: string;
-    setup: string;
-    action?: string;
-    expect: string;
-    storyTitle: string;
-  }[],
-): PipelineDefinition {
-  // Group tests by story for a cleaner summary
-  const testSummary = allVisualTests
-    .map((t) => `- ${t.id}: ${t.description} (expect: ${t.expect})`)
-    .join('\n');
-
-  return {
-    maxIterations: 1,
-    agents: {
-      QA: {
-        name: 'Visual QA Tester',
-        allowedTools: 'Bash,Read,Write,Glob',
-        model: 'sonnet',
-      },
-    },
-    steps: [
-      // 1. Start dev server
-      {
-        id: 'qa-start-server',
-        stepType: 'shell' as const,
-        command: `kill $(lsof -ti:5173) 2>/dev/null; sleep 1; cd ${workingDir} && (npm run dev -- --host 0.0.0.0 &) && STATUS=000; for i in $(seq 1 20); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5173 2>/dev/null); [ "$STATUS" = "200" ] && break; done; [ "$STATUS" = "200" ]`,
-        timeout: 45000,
-        captureAs: 'SERVER_STATUS',
-        onFail: { action: 'fail' as const, injectAs: 'SERVER_ERROR' },
-      },
-
-      // 2. QA Agent — simple screenshot + evaluation approach
-      {
-        id: 'qa-evaluate',
-        agentId: 'QA',
-        prompt: `You are a Visual QA Tester. The app "${epicTitle}" is running at http://localhost:5173.
-Viewport: ${viewport}
-
-## Your Task
-Take screenshots of the app's main states and evaluate visual quality. Do NOT write complex test scripts.
-
-## Simple Approach — use these exact commands:
-
-1. Take a screenshot of the main page:
-\`\`\`bash
-npx playwright screenshot --viewport-size="${viewport}" http://localhost:5173 /tmp/vt-screenshots/main.png 2>&1
-\`\`\`
-
-2. Check that the screenshot was created:
-\`\`\`bash
-ls -la /tmp/vt-screenshots/
-\`\`\`
-
-3. Read the app's source code to understand what SHOULD render:
-\`\`\`bash
-cat ${workingDir}/src/App.tsx
-\`\`\`
-
-4. Use the DOM to verify key elements exist on the page:
-\`\`\`bash
-npx playwright evaluate --viewport-size="${viewport}" "document.querySelectorAll('[data-testid]').length + ' testids, ' + document.querySelectorAll('canvas, svg, img').length + ' visual elements'" http://localhost:5173 2>&1
-\`\`\`
-
-## Visual Tests to Evaluate:
-${testSummary}
-
-## How to Evaluate
-- Read App.tsx to understand expected visual structure
-- The screenshot confirms the app renders without blank screen / crash
-- DOM queries confirm key elements exist
-- If the app shows content (not blank/error), most visual criteria PASS
-- Only FAIL tests where the expected element is clearly missing from the code
-
-## Output Format
----QA_REPORT---
-OVERALL_VERDICT: PASS or FAIL
-
-SCREENSHOT: /tmp/vt-screenshots/main.png (captured: yes/no)
-DOM_ELEMENTS: [count of data-testid, visual elements found]
-
-RESULTS:
-${allVisualTests.map((t) => `- ${t.id}: PASS or FAIL — [one-line observation]`).join('\n')}
-
-FAILED_TESTS:
-[comma-separated IDs or "none"]
-
-OBSERVATIONS:
-[1-2 sentences on overall visual quality]
----END_QA_REPORT---`,
-        extractors: {
-          QA_REPORT: {
-            type: 'between',
-            startDelimiter: '---QA_REPORT---',
-            endDelimiter: '---END_QA_REPORT---',
-          },
-          OVERALL_VERDICT: {
-            type: 'regex',
-            pattern: 'OVERALL_VERDICT:\\s*\\*{0,2}(PASS|FAIL)\\*{0,2}',
-          },
-          FAILED_TESTS: {
-            type: 'regex',
-            pattern: 'FAILED_TESTS:\\s*([\\s\\S]*?)(?:\\n\\n|\\nOBSERVATIONS:)',
-          },
-        },
-        validations: [],
-      },
-
-      // 3. Kill dev server
-      {
-        id: 'qa-stop-server',
-        stepType: 'shell' as const,
-        command: `kill $(lsof -ti:5173) 2>/dev/null; echo "Server stopped"`,
-        timeout: 5000,
-      },
-    ],
-  };
-}
+// Local alias to the shared helper (see ../shared/pipelines/visual-qa-pipeline).
+// The inlined definition that used to live here has been moved — if you need
+// to edit the QA prompt or extractors, do it in the shared module.
+const buildQaPipeline = sharedBuildQaPipeline;
 
 // ── Visual QA: run consolidated visual testing after all stories complete ──
 app.post('/api/epic-workflows/:id/visual-qa', async (c) => {
@@ -2457,66 +2529,31 @@ app.post('/api/epic-workflows/:id/visual-qa', async (c) => {
   const epic = await epicRepo.getEpicById(epicId);
   if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
 
-  // Collect visual tests from stories — backfill from jobs if not yet stored
-  let storiesUpdated = false;
-  const enrichedStories = await Promise.all(
-    epic.stories.map(async (story) => {
-      if (story.visualTests && story.visualTests.length > 0) return story;
-      if (!story.hasBrowserTests || !story.jobId) return story;
-      const job = await agentJobsRepo.getJobById(story.jobId);
-      const rawVT = job?.variables?.VISUAL_TESTS;
-      if (!rawVT) return story;
-      const parsed = parseVisualTests(rawVT);
-      if (parsed.length > 0) {
-        storiesUpdated = true;
-        return { ...story, visualTests: parsed };
-      }
-      return story;
-    }),
-  );
-
-  if (storiesUpdated) {
-    await epicRepo.updateEpicFields(epicId, { stories: enrichedStories });
-  }
-
-  const allVisualTests = enrichedStories
-    .filter((s) => s.visualTests && s.visualTests.length > 0)
-    .flatMap((s) =>
-      s.visualTests!.map((vt) => ({ ...vt, storyId: s.storyId, storyTitle: s.title })),
-    );
-
-  if (allVisualTests.length === 0) {
-    return c.json(
-      {
-        error:
-          'No visual tests defined in any story. Dev agents may not have produced VISUAL_TESTS output.',
-      },
-      400,
-    );
-  }
-
-  const viewport = epic.testingProfile?.viewport || '1280x720';
-  const qaPipeline = buildQaPipeline(epic.workingDir, epic.title, viewport, allVisualTests);
-
-  const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
-
-  await agentJobsRepo.createJob({
-    jobId,
-    status: 'PENDING',
-    createdAt: now,
-    updatedAt: now,
-    createdBy: user.userId,
-    workingDir: epic.workingDir,
-    pipeline: qaPipeline,
+  const result = await launchVisualQa(epic, user.userId, now, {
+    getJobById: agentJobsRepo.getJobById,
+    createJob: agentJobsRepo.createJob,
+    parseVisualTests,
+    buildQaPipeline,
+    uuid: () => crypto.randomUUID(),
   });
+  if (!result.ok) {
+    return c.json({ error: result.message }, 400);
+  }
 
-  await epicRepo.updateEpicFields(epicId, { qaJobId: jobId, status: 'in_review' });
+  const patch: Partial<import('../shared/types/epic-workflow').EpicWorkflow> = {
+    qaJobId: result.jobId,
+    status: 'in_review',
+  };
+  if (result.storiesChanged) {
+    patch.stories = result.updatedStories;
+  }
+  await epicRepo.updateEpicFields(epicId, patch);
 
-  return c.json({ jobId, epicId }, 201);
+  return c.json({ jobId: result.jobId, epicId }, 201);
 });
 
-// ── Start Dev Server: launch `npm run dev` in background and capture URL ──
+// ── Start Dev Server: launch `npm run dev` in background and capture URL. ──
 app.post('/api/epic-workflows/:id/dev-server', async (c) => {
   const epicId = c.req.param('id');
   const user = c.get('user');
@@ -2524,63 +2561,21 @@ app.post('/api/epic-workflows/:id/dev-server', async (c) => {
   const epic = await epicRepo.getEpicById(epicId);
   if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
 
-  const devServerPipeline: PipelineDefinition = {
-    maxIterations: 1,
-    agents: {
-      OPS: {
-        name: 'DevOps',
-        allowedTools: 'Bash',
-        model: 'haiku',
-      },
-    },
-    steps: [
-      {
-        id: 'start_server',
-        agentId: 'OPS',
-        prompt: `You are a DevOps agent. Start the dev server for the project in the current working directory (${epic.workingDir}).
+  // Fetch the EC2 public IP server-side so the agent doesn't have to deal
+  // with IMDSv2 token auth from inside the Claude sandbox. The agent was
+  // returning the private 172.31.x.x address, which is useless externally.
+  const { state, publicIp } = await getInstanceState();
+  if (state !== 'running' || !publicIp) {
+    throw new AppError('EC2_NOT_RUNNING', `EC2 is ${state} or has no public IP`, 400);
+  }
 
-Instructions:
-1. First, check if package.json exists with: \`cat package.json | head -20\`
-2. If node_modules is missing, run \`npm install\` first.
-3. Start the dev server in background with --host 0.0.0.0 so it's accessible externally:
-   \`nohup npm run dev -- --host 0.0.0.0 > /tmp/futurator-devserver.log 2>&1 & echo "PID=$!"\`
-4. Wait 8 seconds for the server to boot: \`sleep 8\`
-5. Read the log to find the URL: \`cat /tmp/futurator-devserver.log\`
-6. Get the public IP of this machine: \`curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo localhost\`
-7. The URL should use the public IP, not localhost.
-
-Output format:
-DEV_SERVER_URL: http://[PUBLIC_IP]:5173
-DEV_SERVER_PID: [the PID you captured]
-STATUS: running
-
-If you fail, output:
-STATUS: failed
-REASON: [what went wrong]`,
-        extractors: {
-          DEV_SERVER_URL: { type: 'regex', pattern: 'DEV_SERVER_URL:\\s*(https?://[^\\s]+)' },
-          DEV_SERVER_PID: { type: 'regex', pattern: 'DEV_SERVER_PID:\\s*(\\d+)' },
-          STATUS: { type: 'regex', pattern: 'STATUS:\\s*(\\w+)' },
-        },
-        validations: [],
-      },
-    ],
-  };
-
-  const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
-
-  await agentJobsRepo.createJob({
-    jobId,
-    status: 'PENDING',
-    createdAt: now,
-    updatedAt: now,
-    createdBy: user.userId,
-    workingDir: epic.workingDir,
-    pipeline: devServerPipeline,
+  const { jobId } = await launchDevServer(epic, user.userId, now, publicIp, {
+    createJob: agentJobsRepo.createJob,
+    uuid: () => crypto.randomUUID(),
   });
 
-  return c.json({ jobId, epicId }, 201);
+  return c.json({ jobId, epicId, publicUrl: `http://${publicIp}:5173` }, 201);
 });
 
 // ── EC2 Daemon Control (develope-it) ──
@@ -2668,11 +2663,16 @@ app.post('/api/ec2/start-daemon', async (c) => {
     );
   }
 
-  // Pull latest daemon code from S3 (in case it was updated) then start the service
+  // Pull latest daemon code from S3 (in case it was updated) then start the service.
+  // Syncs agent-daemon.mjs + the full daemon/ tree (pipelines, forwarder, receiver,
+  // scripts) so any pipeline change deployed via `aws s3 cp` reaches EC2 on restart.
   const bootstrap = [
     'cd /opt/futurator-daemon',
-    'sudo aws s3 cp s3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/agent-daemon.mjs ./agent-daemon.mjs',
-    'sudo chown ubuntu:ubuntu ./agent-daemon.mjs',
+    'sudo aws s3 cp s3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/daemon/agent-daemon.mjs ./agent-daemon.mjs',
+    'sudo aws s3 sync s3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/daemon/pipelines/ ./pipelines/ --exclude "__tests__/*"',
+    'sudo aws s3 sync s3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/daemon/forwarder/ ./forwarder/',
+    'sudo aws s3 sync s3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/daemon/receiver/ ./receiver/',
+    'sudo chown -R ubuntu:ubuntu ./agent-daemon.mjs ./pipelines ./forwarder ./receiver',
     'sudo systemctl restart futurator-daemon',
     'sleep 2',
     'sudo systemctl is-active futurator-daemon',
@@ -2682,116 +2682,11 @@ app.post('/api/ec2/start-daemon', async (c) => {
   return c.json({ commandId, message: 'Daemon start command sent' });
 });
 
-const ANTHROPIC_KEY_SSM_PARAM = '/futurator/daemon/anthropic-api-key';
-
-// Admin UI rotates the Anthropic API key the daemon uses (Option E in
-// ec2-auth-lifecycle-analysis.md). The daemon re-reads SSM every 10 min so no
-// restart is needed — in-flight jobs keep running with the current process env,
-// and newly spawned claude subprocesses pick up the rotated key.
-app.post('/api/ec2/set-anthropic-key', async (c) => {
-  const { apiKey } = (await c.req.json()) as { apiKey?: string };
-  const trimmed = apiKey?.trim();
-  if (!trimmed) {
-    return c.json({ error: { code: 'MISSING', message: 'apiKey is required' } }, 400);
-  }
-  if (!/^sk-ant-(api03|admin)-/.test(trimmed)) {
-    return c.json(
-      {
-        error: {
-          code: 'INVALID_FORMAT',
-          message: 'Expected an Anthropic API key (sk-ant-api03-...)',
-        },
-      },
-      400,
-    );
-  }
-  await ssmClient.send(
-    new PutParameterCommand({
-      Name: ANTHROPIC_KEY_SSM_PARAM,
-      Value: trimmed,
-      Type: 'SecureString',
-      Overwrite: true,
-    }),
-  );
-
-  // Tell the daemon to hot-reload immediately via SIGUSR1 (handled in
-  // daemon/agent-daemon.mjs). Fire-and-forget — if the instance is stopped
-  // or the daemon isn't running, the next SSM polling cycle (2 min) will
-  // still pick up the new key on startup.
-  let signalSent = false;
-  try {
-    const { state } = await getInstanceState();
-    if (state === 'running') {
-      await sendSsmCommand("pkill -USR1 -f 'agent-daemon.mjs' || true");
-      signalSent = true;
-    }
-  } catch (err) {
-    console.warn('SIGUSR1 dispatch failed (non-fatal):', err);
-  }
-
-  return c.json({
-    ok: true,
-    param: ANTHROPIC_KEY_SSM_PARAM,
-    signalSent,
-    message: signalSent
-      ? 'API key stored. Daemon was signalled — the new key should be live in ~5s.'
-      : 'API key stored. Daemon will load it on next SSM poll (≤2 min) or when it starts.',
-  });
-});
-
-app.get('/api/ec2/anthropic-key-status', async (c) => {
-  try {
-    const { Parameter } = await ssmClient.send(
-      new GetParameterCommand({ Name: ANTHROPIC_KEY_SSM_PARAM, WithDecryption: false }),
-    );
-    const v = Parameter?.Value || '';
-    return c.json({
-      exists: true,
-      param: ANTHROPIC_KEY_SSM_PARAM,
-      lastModified: Parameter?.LastModifiedDate || null,
-      preview: v ? `${v.slice(0, 12)}…${v.slice(-4)}` : null,
-    });
-  } catch (err) {
-    const name = (err as { name?: string }).name || '';
-    if (name === 'ParameterNotFound') {
-      return c.json({ exists: false, param: ANTHROPIC_KEY_SSM_PARAM });
-    }
-    throw err;
-  }
-});
-
-app.post('/api/ec2/refresh-credentials', async (c) => {
-  const { state } = await getInstanceState();
-  if (state !== 'running') {
-    return c.json(
-      { error: { code: 'NOT_RUNNING', message: `Instance is ${state}, not running` } },
-      400,
-    );
-  }
-
-  const { credentials } = (await c.req.json()) as { credentials: string };
-  if (!credentials?.trim()) {
-    return c.json({ error: { code: 'MISSING', message: 'Credentials payload required' } }, 400);
-  }
-
-  // Write credentials to EC2 via SSM using base64 to avoid shell escaping issues.
-  // Claude CLI reads .credentials.json per-invocation, so we intentionally DO NOT
-  // restart the daemon here — restarting would SIGTERM every in-flight agent job
-  // (see ec2-auth-lifecycle-analysis.md Problem 3). The next spawned claude
-  // process will pick up the new file automatically.
-  const b64 = Buffer.from(credentials.trim()).toString('base64');
-  const writeCmd = [
-    `echo '${b64}' | base64 -d > /home/ubuntu/.claude/.credentials.json`,
-    'chown ubuntu:ubuntu /home/ubuntu/.claude/.credentials.json',
-    'chmod 600 /home/ubuntu/.claude/.credentials.json',
-  ].join(' && ');
-
-  const commandId = await sendSsmCommand(writeCmd);
-  return c.json({
-    commandId,
-    message: 'Credentials written. In-flight jobs were NOT interrupted.',
-  });
-});
+// OAuth is handled entirely by the operator's Mac → Keychain → SSM Run Command
+// pipeline (see scripts/mac-oauth-sync.sh and scripts/mac-oauth-server.mjs).
+// The admin UI's Re-authorize button hits http://127.0.0.1:9876/sync on the
+// operator's laptop, not the API Lambda — there is nothing API-key-related
+// for this Lambda to do.
 
 app.post('/api/ec2/disable', async (c) => {
   const { state } = await getInstanceState();
@@ -2849,6 +2744,259 @@ async function waitForSsmOutput(commandId: string, timeout = 15000): Promise<str
   }
   throw new AppError('SSM_TIMEOUT', 'SSM command timed out', 504);
 }
+
+// Delete a folder under /home/ubuntu/projects/ OR /home/ubuntu/.claude/projects/.
+// Hard-restricted to those namespaces so the endpoint can never become an
+// arbitrary rm -rf gun.
+//
+// Path A — /home/ubuntu/projects/<name>: full cascade. Removes the EC2
+// folder AND its matching ~/.claude/projects/-home-ubuntu-projects-<name>
+// transcript folder (otherwise transcripts accumulate as orphans —
+// investigated 2026-04-18, 17 orphans = 40 MB). Also cascades to AWS:
+// matching epic-workflow rows, agent-job rows, project-registry entry, and
+// S3 apps/<name>/ artifacts in futurator-ai-website, so a single delete
+// leaves no dangling references.
+//
+// Path B — /home/ubuntu/.claude/projects/<session-folder>: just removes that
+// Claude Code transcript folder. No AWS cascade.
+app.delete('/api/ec2/files', async (c) => {
+  const { state } = await getInstanceState();
+  if (state !== 'running') {
+    throw new AppError('EC2_NOT_RUNNING', `EC2 instance is ${state}`, 400);
+  }
+
+  const path = c.req.query('path') || '';
+  const PROJECT_FOLDER_RE = /^\/home\/ubuntu\/projects\/([\w.\-]+)$/;
+  const CLAUDE_SESSION_RE = /^\/home\/ubuntu\/\.claude\/projects\/([\w.\-]+)$/;
+
+  const projectMatch = PROJECT_FOLDER_RE.exec(path);
+  const claudeMatch = CLAUDE_SESSION_RE.exec(path);
+
+  if (!projectMatch && !claudeMatch) {
+    throw new ValidationError(
+      'Path must be /home/ubuntu/projects/<name> or /home/ubuntu/.claude/projects/<name> with safe characters only',
+    );
+  }
+  const name = (projectMatch?.[1] ?? claudeMatch?.[1]) || '';
+  if (name === '.' || name === '..' || name === '') {
+    throw new ValidationError('Invalid folder name');
+  }
+
+  // ── Path B: Claude Code transcript folder — simple rm, no cascade.
+  if (claudeMatch) {
+    const cmd = [
+      `target=$(realpath "${path}" 2>/dev/null)`,
+      `case "$target" in /home/ubuntu/.claude/projects/*) ;; *) echo "REFUSED: realpath outside .claude/projects/"; exit 1;; esac`,
+      `case "$target" in /home/ubuntu/.claude/projects) echo "REFUSED: would delete .claude/projects root"; exit 1;; esac`,
+      `rm -rf "$target"`,
+      `echo "DELETED $target"`,
+    ].join('\n');
+
+    const commandId = await sendSsmCommand(cmd);
+    const output = await waitForSsmOutput(commandId);
+
+    if (!output.includes(`DELETED ${path}`)) {
+      throw new AppError('DELETE_FAILED', `Delete refused: ${output.slice(0, 300)}`, 400);
+    }
+
+    return c.json({
+      ok: true,
+      path,
+      kind: 'claude-session' as const,
+      output: output.trim(),
+      results: [{ step: 'ec2-filesystem', status: 'done', detail: path }],
+    });
+  }
+
+  // ── Path A: project folder — full EC2 + AWS cascade.
+  // Claude CLI encodes the cwd as the transcript folder name with `/` → `-`.
+  // So /home/ubuntu/projects/foo becomes -home-ubuntu-projects-foo.
+  const transcriptDir = `/home/ubuntu/.claude/projects/-home-ubuntu-projects-${name}`;
+
+  const results: { step: string; status: string; detail?: string }[] = [];
+
+  // 1. Find matching epic(s) — convention: epic.workingDir ends in /<name>.
+  // There can be more than one if an epic was re-created with the same app
+  // name; delete them all so no stale rows survive.
+  let matchingEpics: EpicWorkflow[] = [];
+  try {
+    const allEpics = await epicRepo.getAllEpics();
+    matchingEpics = allEpics.filter((e) => {
+      const epicAppName = e.workingDir?.split('/').filter(Boolean).pop() || '';
+      return epicAppName === name;
+    });
+    results.push({
+      step: 'epics-lookup',
+      status: 'done',
+      detail: `${matchingEpics.length} epic(s) matched`,
+    });
+  } catch (err: unknown) {
+    results.push({
+      step: 'epics-lookup',
+      status: 'error',
+      detail: String((err as Error)?.message ?? err),
+    });
+  }
+
+  // 2. Delete agent jobs attached to those epics.
+  const jobIds: string[] = [];
+  for (const epic of matchingEpics) {
+    for (const story of epic.stories || []) {
+      if (story.jobId) jobIds.push(story.jobId);
+    }
+    if (epic.qaJobId) jobIds.push(epic.qaJobId);
+    if (epic.poJobId) jobIds.push(epic.poJobId);
+    if (epic.deployJobId) jobIds.push(epic.deployJobId);
+    if (epic.orchestratorJobId) jobIds.push(epic.orchestratorJobId);
+    if (epic.waveBuildJobs) {
+      for (const jobId of Object.values(epic.waveBuildJobs)) jobIds.push(jobId);
+    }
+  }
+  if (jobIds.length > 0) {
+    let jobsDeleted = 0;
+    await Promise.all(
+      jobIds.map(async (jobId) => {
+        try {
+          await agentJobsRepo.deleteJob(jobId);
+          jobsDeleted++;
+        } catch {
+          /* job may already be gone */
+        }
+      }),
+    );
+    results.push({
+      step: 'agent-jobs',
+      status: 'done',
+      detail: `${jobsDeleted}/${jobIds.length} jobs`,
+    });
+  } else {
+    results.push({ step: 'agent-jobs', status: 'skipped', detail: 'no jobs' });
+  }
+
+  // 3. Delete S3 deployed artifacts at apps/<name>/ (best-effort).
+  try {
+    const s3 = new S3Client({ region: 'us-east-1' });
+    const prefix = `apps/${name}/`;
+    const list = await s3.send(
+      new ListObjectsV2Command({ Bucket: 'futurator-ai-website', Prefix: prefix }),
+    );
+    const objects = list.Contents?.map((o) => ({ Key: o.Key! })) || [];
+    if (objects.length > 0) {
+      await s3.send(
+        new DeleteObjectsCommand({
+          Bucket: 'futurator-ai-website',
+          Delete: { Objects: objects },
+        }),
+      );
+      results.push({ step: 's3-artifacts', status: 'done', detail: `${objects.length} files` });
+    } else {
+      results.push({ step: 's3-artifacts', status: 'skipped', detail: 'no artifacts' });
+    }
+  } catch (err: unknown) {
+    results.push({
+      step: 's3-artifacts',
+      status: 'error',
+      detail: String((err as Error)?.message ?? err),
+    });
+  }
+
+  // 4. Delete EC2 folder + cascade .claude transcripts via SSM.
+  // Belt-and-suspenders: realpath both targets and refuse anything that
+  // escapes its expected namespace (defends against symlink shenanigans).
+  // Transcript cleanup is best-effort: missing folder does NOT fail the call.
+  // NOTE: join with '\n' (not '; ') — `if ...; then;` is a shell syntax error
+  // because `then`/`else` must be followed by a command, not a semicolon.
+  const cmd = [
+    `target=$(realpath "${path}" 2>/dev/null)`,
+    `case "$target" in /home/ubuntu/projects/*) ;; *) echo "REFUSED: realpath outside projects/"; exit 1;; esac`,
+    `case "$target" in /home/ubuntu/projects) echo "REFUSED: would delete projects root"; exit 1;; esac`,
+    `rm -rf "$target"`,
+    `echo "DELETED $target"`,
+    `if [ -d "${transcriptDir}" ]; then`,
+    `  trans_real=$(realpath "${transcriptDir}" 2>/dev/null)`,
+    `  case "$trans_real" in /home/ubuntu/.claude/projects/-home-ubuntu-projects-*) rm -rf "$trans_real" && echo "DELETED $trans_real" ;; *) echo "SKIP transcript (unexpected realpath: $trans_real)" ;; esac`,
+    `else`,
+    `  echo "SKIP no transcript at ${transcriptDir}"`,
+    `fi`,
+  ].join('\n');
+
+  let transcriptDeleted = false;
+  try {
+    const commandId = await sendSsmCommand(cmd);
+    const output = await waitForSsmOutput(commandId);
+    if (!output.includes(`DELETED ${path}`)) {
+      throw new AppError('DELETE_FAILED', `Delete refused: ${output.slice(0, 300)}`, 400);
+    }
+    transcriptDeleted = output.includes(
+      `DELETED /home/ubuntu/.claude/projects/-home-ubuntu-projects-${name}`,
+    );
+    results.push({ step: 'ec2-filesystem', status: 'done', detail: output.trim() });
+  } catch (err: unknown) {
+    if (err instanceof AppError) throw err; // surface hard-refusals as HTTP error
+    results.push({
+      step: 'ec2-filesystem',
+      status: 'error',
+      detail: String((err as Error)?.message ?? err),
+    });
+  }
+
+  // 5. Delete project-registry row (best-effort — may not exist yet).
+  try {
+    await registryRepo.deleteProject(name);
+    results.push({ step: 'project-registry', status: 'done' });
+  } catch {
+    results.push({ step: 'project-registry', status: 'skipped' });
+  }
+
+  // 6. Delete party-sessions for this project, then the party-projects row
+  // itself. The Labs project picker reads from partyProjects, so if we skip
+  // this step the deleted project keeps appearing in the dropdown.
+  try {
+    const sessionsDeleted = await partySessionsRepo.deleteSessionsByProject(name);
+    results.push({
+      step: 'party-sessions',
+      status: 'done',
+      detail: `${sessionsDeleted} sessions`,
+    });
+  } catch (err: unknown) {
+    results.push({
+      step: 'party-sessions',
+      status: 'error',
+      detail: String((err as Error)?.message ?? err),
+    });
+  }
+  try {
+    await partyProjectsRepo.deleteProject(name);
+    results.push({ step: 'party-projects', status: 'done' });
+  } catch {
+    results.push({ step: 'party-projects', status: 'skipped' });
+  }
+
+  // 7. Delete the matching epic row(s) last.
+  let epicsDeleted = 0;
+  for (const epic of matchingEpics) {
+    try {
+      await epicRepo.deleteEpic(epic.epicId);
+      epicsDeleted++;
+    } catch {
+      /* best-effort */
+    }
+  }
+  results.push({
+    step: 'epic-records',
+    status: matchingEpics.length === 0 ? 'skipped' : 'done',
+    detail: `${epicsDeleted}/${matchingEpics.length}`,
+  });
+
+  return c.json({
+    ok: true,
+    path,
+    kind: 'project' as const,
+    transcriptDir,
+    transcriptDeleted,
+    results,
+  });
+});
 
 app.get('/api/ec2/files', async (c) => {
   const { state } = await getInstanceState();
@@ -3117,9 +3265,21 @@ DEPLOY_DETAILS: <which step failed and why>
 
 Never end the session without emitting a DEPLOY_STATUS line. Never ask for permission.`,
         extractors: {
-          DEPLOY_URL: { type: 'regex', pattern: 'DEPLOY_URL:\\s*(https?://[^\\s]+)' },
-          DEPLOY_STATUS: { type: 'regex', pattern: 'DEPLOY_STATUS:\\s*(\\w+)' },
-          DEPLOY_DETAILS: { type: 'regex', pattern: 'DEPLOY_DETAILS:\\s*(.+)' },
+          // Tolerant to markdown decoration the agent sometimes applies
+          // despite the "plain text" instruction (the dev-server agent did
+          // exactly this on 2026-04-21 with `**DEV_SERVER_URL:**`).
+          DEPLOY_URL: {
+            type: 'regex',
+            pattern: '[*_`]*DEPLOY_URL[*_`]*:\\s*[*_`]*\\s*(https?://[^\\s*_`]+)',
+          },
+          DEPLOY_STATUS: {
+            type: 'regex',
+            pattern: '[*_`]*DEPLOY_STATUS[*_`]*:\\s*[*_`]*\\s*(\\w+)',
+          },
+          DEPLOY_DETAILS: {
+            type: 'regex',
+            pattern: '[*_`]*DEPLOY_DETAILS[*_`]*:\\s*[*_`]*\\s*(.+)',
+          },
         },
         validations: [
           { type: 'equals', left: 'DEPLOY_STATUS', right: 'success', label: 'Deploy succeeded' },
@@ -3522,6 +3682,411 @@ app.get('/api/apps', async (c) => {
   apps.sort((a, b) => order[a.appStatus] - order[b.appStatus]);
 
   return c.json(apps);
+});
+
+// ════════════════════════════════════════════════════════════════
+// Labs Party Module (Epic 15)
+// ════════════════════════════════════════════════════════════════
+
+const PARTY_PROJECTS_ROOT = process.env.PROJECTS_ROOT || '/home/ubuntu/projects';
+
+function resolvePartyProjectPath(projectId: string): string {
+  const parsed = projectIdSchema.safeParse(projectId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid projectId');
+  }
+  return `${PARTY_PROJECTS_ROOT}/${parsed.data}`;
+}
+
+app.get('/api/party/projects', async (c) => {
+  const projects = await partyProjectsRepo.listProjects();
+  return c.json({ projects, expectedAgentCount: EXPECTED_AGENT_COUNT });
+});
+
+app.get('/api/party/projects/:id', async (c) => {
+  const projectId = c.req.param('id');
+  const parsed = projectIdSchema.safeParse(projectId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid projectId');
+  }
+  const project = await partyProjectsRepo.getProject(parsed.data);
+  if (!project) throw new NotFoundError('PartyProject', parsed.data);
+  return c.json(project);
+});
+
+app.post('/api/party/projects/:id/bootstrap', async (c) => {
+  const projectId = c.req.param('id');
+  const projectPath = resolvePartyProjectPath(projectId);
+
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = bootstrapInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
+  }
+  const forceReinstall = parsed.data.forceReinstall === true;
+  const createFolder = parsed.data.createFolder === true;
+
+  await partyProjectsRepo.upsertProjectFromFilesystem(projectId, projectPath);
+
+  const jobId = crypto.randomUUID();
+  const lock = await partyProjectsRepo.tryAcquireBootstrapLock(projectId, jobId);
+  if (!lock.ok) {
+    if (lock.reason === 'BOOTSTRAP_IN_PROGRESS') {
+      throw new AppError('BOOTSTRAP_IN_PROGRESS', 'Bootstrap already in progress', 409);
+    }
+    throw new NotFoundError('PartyProject', projectId);
+  }
+
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: c.get('user').userId,
+    workingDir: projectPath,
+    jobType: 'party-bootstrap',
+    partyBootstrapPayload: { projectId, projectPath, forceReinstall, createFolder },
+  });
+
+  return c.json({ jobId, projectId }, 201);
+});
+
+/**
+ * Create a brand-new Party project — used to stand up a "canonical" chat
+ * project (e.g. bmad-canon) without going through the Plan-creation flow.
+ * Upserts the DDB row, then enqueues a bootstrap job with `createFolder=true`
+ * so the daemon mkdir's the folder and runs BMAD install + custom-agent
+ * injection in one shot.
+ */
+app.post('/api/party/projects', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = createPartyProjectInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
+  }
+  const projectId = parsed.data.projectId;
+  const projectPath = resolvePartyProjectPath(projectId);
+
+  await partyProjectsRepo.upsertProjectFromFilesystem(projectId, projectPath);
+
+  const jobId = crypto.randomUUID();
+  const lock = await partyProjectsRepo.tryAcquireBootstrapLock(projectId, jobId);
+  if (!lock.ok) {
+    if (lock.reason === 'BOOTSTRAP_IN_PROGRESS') {
+      throw new AppError('BOOTSTRAP_IN_PROGRESS', 'Bootstrap already in progress', 409);
+    }
+    throw new NotFoundError('PartyProject', projectId);
+  }
+
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: c.get('user').userId,
+    workingDir: projectPath,
+    jobType: 'party-bootstrap',
+    partyBootstrapPayload: {
+      projectId,
+      projectPath,
+      forceReinstall: false,
+      createFolder: true,
+    },
+  });
+
+  return c.json({ jobId, projectId, projectPath }, 201);
+});
+
+/**
+ * Party project docs — small in-chat knowledge tray so agents can reason over
+ * user-uploaded files. Docs live at S3 `futurator-ai-website/party-docs/<id>/`
+ * AND get rsynced to `/home/ubuntu/projects/<id>/docs/` on upload so Claude's
+ * Read tool picks them up during a party turn.
+ */
+function partyDocsBucket(): string {
+  const bucket = process.env.FUTURATOR_PUBLIC_BUCKET;
+  if (!bucket) throw new AppError('CONFIG_ERROR', 'FUTURATOR_PUBLIC_BUCKET not set', 500);
+  return bucket;
+}
+
+function partyDocS3Key(projectId: string, filename: string): string {
+  return `${PARTY_DOCS_S3_PREFIX}/${projectId}/${filename}`;
+}
+
+function sanitizeDocFilename(filename: string): string {
+  // Keep extension + basename; strip path separators and odd chars.
+  const base = filename.replace(/^.*[\\/]/, '');
+  return base.replace(/[^\w.\-]/g, '_').slice(0, 200);
+}
+
+app.post('/api/party/projects/:id/docs/upload-url', async (c) => {
+  const projectId = c.req.param('id');
+  const parsedId = projectIdSchema.safeParse(projectId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid projectId');
+  }
+  const project = await partyProjectsRepo.getProject(parsedId.data);
+  if (!project) throw new NotFoundError('PartyProject', parsedId.data);
+
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = docUploadUrlInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
+  }
+  if (!PARTY_DOC_ALLOWED_CONTENT_TYPES.includes(parsed.data.contentType)) {
+    throw new ValidationError(
+      `contentType must be one of: ${PARTY_DOC_ALLOWED_CONTENT_TYPES.join(', ')}`,
+    );
+  }
+  const filename = sanitizeDocFilename(parsed.data.filename);
+  if (!filename) throw new ValidationError('filename resolves to empty after sanitization');
+
+  const bucket = partyDocsBucket();
+  const key = partyDocS3Key(parsedId.data, filename);
+  const s3 = new S3Client({});
+  const command = new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    ContentType: parsed.data.contentType,
+    CacheControl: 'no-store',
+  });
+  const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 300 });
+  return c.json({ uploadUrl, s3Bucket: bucket, s3Key: key, filename });
+});
+
+app.post('/api/party/projects/:id/docs/synced', async (c) => {
+  const projectId = c.req.param('id');
+  const parsedId = projectIdSchema.safeParse(projectId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid projectId');
+  }
+  const project = await partyProjectsRepo.getProject(parsedId.data);
+  if (!project) throw new NotFoundError('PartyProject', parsedId.data);
+  const projectPath = resolvePartyProjectPath(parsedId.data);
+
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = docSyncInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
+  }
+  const filename = sanitizeDocFilename(parsed.data.filename);
+  const bucket = partyDocsBucket();
+  const expectedKey = partyDocS3Key(parsedId.data, filename);
+  if (parsed.data.s3Key !== expectedKey) {
+    throw new ValidationError(`s3Key must be ${expectedKey} (got ${parsed.data.s3Key})`);
+  }
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: c.get('user').userId,
+    workingDir: projectPath,
+    jobType: 'party-docs-sync',
+    partyDocsSyncPayload: {
+      projectId: parsedId.data,
+      projectPath,
+      filename,
+      s3Bucket: bucket,
+      s3Key: expectedKey,
+    },
+  });
+
+  return c.json({ jobId, projectId: parsedId.data, filename }, 201);
+});
+
+app.get('/api/party/projects/:id/docs', async (c) => {
+  const projectId = c.req.param('id');
+  const parsedId = projectIdSchema.safeParse(projectId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid projectId');
+  }
+  const bucket = partyDocsBucket();
+  const prefix = `${PARTY_DOCS_S3_PREFIX}/${parsedId.data}/`;
+  const s3 = new S3Client({});
+  const result = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix }));
+  const docs = (result.Contents ?? [])
+    .filter((obj) => obj.Key && obj.Key !== prefix)
+    .map((obj) => ({
+      filename: obj.Key!.slice(prefix.length),
+      s3Key: obj.Key!,
+      size: obj.Size ?? 0,
+      uploadedAt: obj.LastModified?.toISOString() ?? null,
+    }));
+  return c.json({ projectId: parsedId.data, docs });
+});
+
+app.delete('/api/party/projects/:id/docs/:filename', async (c) => {
+  const projectId = c.req.param('id');
+  const filenameRaw = c.req.param('filename');
+  const parsedId = projectIdSchema.safeParse(projectId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid projectId');
+  }
+  const project = await partyProjectsRepo.getProject(parsedId.data);
+  if (!project) throw new NotFoundError('PartyProject', parsedId.data);
+
+  const filename = sanitizeDocFilename(decodeURIComponent(filenameRaw));
+  if (!filename) throw new ValidationError('invalid filename');
+  const projectPath = resolvePartyProjectPath(parsedId.data);
+
+  // Delete S3 object first (authoritative); daemon unlink is best-effort.
+  const bucket = partyDocsBucket();
+  const s3 = new S3Client({});
+  try {
+    await s3.send(
+      new DeleteObjectCommand({ Bucket: bucket, Key: partyDocS3Key(parsedId.data, filename) }),
+    );
+  } catch {
+    // If the S3 object was already gone we still enqueue the EC2 unlink.
+  }
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: c.get('user').userId,
+    workingDir: projectPath,
+    jobType: 'party-docs-unlink',
+    partyDocsUnlinkPayload: {
+      projectId: parsedId.data,
+      projectPath,
+      filename,
+    },
+  });
+
+  return c.json({ jobId, projectId: parsedId.data, filename });
+});
+
+app.post('/api/party/projects/:id/inspect', async (c) => {
+  const projectId = c.req.param('id');
+  const projectPath = resolvePartyProjectPath(projectId);
+  await partyProjectsRepo.upsertProjectFromFilesystem(projectId, projectPath);
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: c.get('user').userId,
+    workingDir: projectPath,
+    jobType: 'party-inspect',
+    partyInspectPayload: { projectId, projectPath },
+  });
+
+  return c.json({ jobId, projectId }, 201);
+});
+
+app.post('/api/party/sessions', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = createSessionInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
+  }
+  const project = await partyProjectsRepo.getProject(parsed.data.projectId);
+  if (!project) throw new NotFoundError('PartyProject', parsed.data.projectId);
+  if (project.bmadStatus !== 'HEALTHY') {
+    throw new AppError(
+      'PROJECT_NOT_HEALTHY',
+      `Cannot start party: project bmadStatus is ${project.bmadStatus}`,
+      409,
+    );
+  }
+  const session = await partySessionsRepo.createSession({
+    projectId: project.projectId,
+    projectPath: project.path,
+    topic: parsed.data.topic,
+    bmadVersionAtStart: project.bmadVersion || 'unknown',
+  });
+  return c.json(session, 201);
+});
+
+app.get('/api/party/sessions/:id', async (c) => {
+  const sessionId = c.req.param('id');
+  const parsed = sessionIdSchema.safeParse(sessionId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const session = await partySessionsRepo.getSession(parsed.data);
+  if (!session) throw new NotFoundError('PartySession', parsed.data);
+  return c.json(session);
+});
+
+app.get('/api/party/projects/:projectId/sessions', async (c) => {
+  const projectId = c.req.param('projectId');
+  const parsed = projectIdSchema.safeParse(projectId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid projectId');
+  }
+  const sessions = await partySessionsRepo.listSessionsByProject(parsed.data);
+  return c.json({ sessions });
+});
+
+app.post('/api/party/sessions/:id/messages', async (c) => {
+  const sessionId = c.req.param('id');
+  const parsedId = sessionIdSchema.safeParse(sessionId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const parsedBody = sendMessageInputSchema.safeParse(body);
+  if (!parsedBody.success) {
+    throw new ValidationError(parsedBody.error.errors[0]?.message || 'invalid body');
+  }
+
+  const session = await partySessionsRepo.getSession(parsedId.data);
+  if (!session) throw new NotFoundError('PartySession', parsedId.data);
+
+  const lock = await partySessionsRepo.tryAcquireSessionLock(parsedId.data);
+  if (!lock.ok) {
+    if (lock.reason === 'SESSION_BUSY') {
+      throw new AppError('SESSION_BUSY', 'Session is already processing a turn', 409);
+    }
+    if (lock.reason === 'NOT_ACTIVE') {
+      throw new AppError(
+        'SESSION_NOT_ACTIVE',
+        'Session is not ACTIVE or IDLE and cannot accept a message',
+        409,
+      );
+    }
+    throw new NotFoundError('PartySession', parsedId.data);
+  }
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: c.get('user').userId,
+    workingDir: session.projectPath,
+    jobType: 'party-turn',
+    partyTurnPayload: { sessionId: parsedId.data, content: parsedBody.data.content },
+  });
+
+  return c.json({ jobId, sessionId: parsedId.data }, 202);
+});
+
+app.get('/api/party/sessions/:id/events', async (c) => {
+  const sessionId = c.req.param('id');
+  const parsed = sessionIdSchema.safeParse(sessionId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const afterSeq = c.req.query('after') || '000000';
+  const { events, lastSeq } = await agentEventsRepo.getEventsAfter(parsed.data, afterSeq);
+  return c.json({ events, lastSeq });
 });
 
 // Global error handler
