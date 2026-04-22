@@ -1,0 +1,225 @@
+import type { AgentJob } from '../types/agent-orchestrator';
+import type { EpicWorkflow, EpicStory } from '../types/epic-workflow';
+import type { Plan } from '../types/plan';
+import { reduceEpicWaves, type WaveReducerDeps } from './wave-reducer';
+import { computePlanWaves, epicsInPlanWave, maxPlanWave } from './plan-waves';
+import { launchPipelineWave, findFirstWave } from './pipeline-launcher';
+import type { PipelineDefinition } from '../types/agent-orchestrator';
+
+/**
+ * Outer reducer — drives a Plan through its plan-wave state machine.
+ *
+ * Per tick:
+ *   1. Run the inner reducer (reduceEpicWaves) on every epic under the plan.
+ *   2. Check the current plan-wave: if all its epics are `completed`,
+ *      launch plan-wave N+1 (kick off each epic's story-wave 0).
+ *   3. When the last plan-wave completes, create a plan-build-check job.
+ *   4. When plan-build-check completes, flip plan → `review`.
+ *   5. If any epic goes to `fixing`, plan goes to `fixing` until operator
+ *      recovers.
+ *
+ * This is pure + deps-injected for testability. The cron handler passes in
+ * repository functions.
+ */
+
+export interface PlanReducerDeps extends WaveReducerDeps {
+  updatePlanFields: (planId: string, patch: Partial<Plan>) => Promise<void>;
+  /**
+   * Pipeline builder for the plan-level final build-check. In production this
+   * is `generatePlanBuildPipeline` from functions/shared/pipelines; in tests,
+   * a stub.
+   */
+  generatePlanBuildPipeline: (workingDir: string, planName: string) => PipelineDefinition;
+}
+
+export type PlanReducerResult =
+  | { kind: 'no-op'; reason: 'no-epics' | 'plan-terminal' | 'wave-running' }
+  | { kind: 'plan-wave-launched'; waveNumber: number; epicIds: string[] }
+  | { kind: 'plan-build-check-created'; jobId: string }
+  | { kind: 'plan-build-check-pending' }
+  | { kind: 'plan-completed' }
+  | { kind: 'plan-fixing'; reason: 'epic-fixing' | 'build-check-failed' };
+
+const TERMINAL_EPIC_STATUSES = new Set(['completed', 'fixing']);
+
+function isEpicSuccessful(epic: EpicWorkflow): boolean {
+  return epic.status === 'completed';
+}
+
+function anyEpicFixing(epics: EpicWorkflow[]): boolean {
+  return epics.some((e) => e.status === 'fixing');
+}
+
+function epicLaunched(epic: EpicWorkflow): boolean {
+  return epic.stories.some((s) => s.jobId);
+}
+
+const TERMINAL_JOB_STATUSES = new Set<AgentJob['status']>([
+  'COMPLETED',
+  'FAILED',
+  'COMPLETE_WITH_BLOCKED_STORIES',
+  'STALE',
+]);
+
+const SUCCESS_JOB_STATUSES = new Set<AgentJob['status']>([
+  'COMPLETED',
+  'COMPLETE_WITH_BLOCKED_STORIES',
+]);
+
+export async function reducePlan(
+  plan: Plan,
+  epics: EpicWorkflow[],
+  deps: PlanReducerDeps,
+): Promise<PlanReducerResult> {
+  if (epics.length === 0) {
+    return { kind: 'no-op', reason: 'no-epics' };
+  }
+  if (plan.status !== 'developing' && plan.status !== 'fixing') {
+    return { kind: 'no-op', reason: 'plan-terminal' };
+  }
+
+  // Phase C.3: cascade plan-level options into pipeline builders.
+  const planOpts = {
+    rigor: plan.rigor,
+    testModel: plan.testModel,
+    hasBrowserTests: plan.testingProfile?.hasBrowserTests,
+  };
+
+  // ── 1. Inner pass: advance each epic's internal story waves. ─────────
+  for (const epic of epics) {
+    try {
+      await reduceEpicWaves(epic, deps, planOpts);
+    } catch (err) {
+      // Per-epic errors shouldn't block others. The inner cron (which calls
+      // reduceEpicWaves directly too) also logs these.
+      console.warn(`[PlanReducer] inner reducer failed for epic ${epic.epicId}: ${err}`);
+    }
+  }
+
+  // ── 2. Re-fetch epics to see post-inner state (or trust the passed-in
+  //       ones — caller is responsible for providing fresh rows). For the
+  //       cron we re-query below. ──
+
+  // Guard: if any epic is fixing, plan goes to fixing.
+  if (anyEpicFixing(epics)) {
+    if (plan.status !== 'fixing') {
+      await deps.updatePlanFields(plan.planId, { status: 'fixing' });
+    }
+    return { kind: 'plan-fixing', reason: 'epic-fixing' };
+  }
+
+  // ── 3. Compute plan-waves + find the current one. ────────────────────
+  const planWaves = computePlanWaves(epics);
+  const maxWave = maxPlanWave(planWaves);
+
+  // Current plan-wave: the highest wave with any launched epic.
+  const launchedEpics = epics.filter(epicLaunched);
+  if (launchedEpics.length === 0) {
+    // Plan was flipped to developing but no epic has launched yet.
+    // /plans/:id/start should have launched plan-wave 0 — if it didn't, do it
+    // now as a recovery. (Idempotent.)
+    const firstWaveEpics = epicsInPlanWave(epics, planWaves, 0);
+    const launchedIds: string[] = [];
+    for (const epic of firstWaveEpics) {
+      const result = await launchPipelineWave(
+        epic,
+        findFirstWave(epic),
+        plan.createdBy,
+        deps.now(),
+        deps,
+        planOpts,
+      );
+      if (result.ok) {
+        launchedIds.push(epic.epicId);
+        // Persist the story-wave launch on the epic row.
+        await deps.updateEpicFields(epic.epicId, {
+          stories: result.updatedStories,
+          status: 'in_progress',
+        });
+      }
+    }
+    if (launchedIds.length > 0) {
+      return { kind: 'plan-wave-launched', waveNumber: 0, epicIds: launchedIds };
+    }
+    return { kind: 'no-op', reason: 'wave-running' };
+  }
+
+  const currentPlanWave = Math.max(...launchedEpics.map((e) => planWaves[e.epicId] ?? 0));
+  const currentPlanWaveEpics = epicsInPlanWave(epics, planWaves, currentPlanWave);
+
+  // ── 4. Check if current plan-wave is fully done. ─────────────────────
+  const allCurrentDone = currentPlanWaveEpics.every(isEpicSuccessful);
+  if (!allCurrentDone) {
+    // Wave still running — inner reducer handles per-epic progression.
+    return { kind: 'no-op', reason: 'wave-running' };
+  }
+
+  // ── 5. Advance to plan-wave N+1 or run final build-check. ────────────
+  const nextWave = currentPlanWave + 1;
+  if (nextWave <= maxWave) {
+    const nextWaveEpics = epicsInPlanWave(epics, planWaves, nextWave);
+    // Only launch those that haven't launched yet (idempotent).
+    const toLaunch = nextWaveEpics.filter((e) => !epicLaunched(e));
+    if (toLaunch.length === 0) {
+      return { kind: 'no-op', reason: 'wave-running' };
+    }
+    const launchedIds: string[] = [];
+    for (const epic of toLaunch) {
+      const result = await launchPipelineWave(
+        epic,
+        findFirstWave(epic),
+        plan.createdBy,
+        deps.now(),
+        deps,
+        planOpts,
+      );
+      if (result.ok) {
+        launchedIds.push(epic.epicId);
+        await deps.updateEpicFields(epic.epicId, {
+          stories: result.updatedStories,
+          status: 'in_progress',
+        });
+      }
+    }
+    return { kind: 'plan-wave-launched', waveNumber: nextWave, epicIds: launchedIds };
+  }
+
+  // ── 6. All plan-waves done. Handle final plan-build-check. ───────────
+  if (!plan.planBuildJobId) {
+    // Create it.
+    const jobId = deps.uuid();
+    const now = deps.now();
+    const pipeline = deps.generatePlanBuildPipeline(plan.workingDir, plan.name);
+    await deps.createJob({
+      jobId,
+      status: 'PENDING',
+      createdAt: now,
+      updatedAt: now,
+      createdBy: plan.createdBy,
+      workingDir: plan.workingDir,
+      pipeline,
+    });
+    await deps.updatePlanFields(plan.planId, { planBuildJobId: jobId });
+    return { kind: 'plan-build-check-created', jobId };
+  }
+
+  // Build-check already exists — check its status.
+  const buildJob = await deps.getJobById(plan.planBuildJobId);
+  if (!buildJob || !TERMINAL_JOB_STATUSES.has(buildJob.status)) {
+    return { kind: 'plan-build-check-pending' };
+  }
+  if (!SUCCESS_JOB_STATUSES.has(buildJob.status)) {
+    if (plan.status !== 'fixing') {
+      await deps.updatePlanFields(plan.planId, { status: 'fixing' });
+    }
+    return { kind: 'plan-fixing', reason: 'build-check-failed' };
+  }
+
+  // Build-check passed → plan complete.
+  await deps.updatePlanFields(plan.planId, { status: 'review', reviewAt: deps.now() });
+  return { kind: 'plan-completed' };
+}
+
+// Re-export for cron handler use.
+export type { Plan, EpicStory };
+export { TERMINAL_EPIC_STATUSES };
