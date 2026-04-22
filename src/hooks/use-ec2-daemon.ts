@@ -19,12 +19,19 @@ export interface SystemStats {
   loadAvg: number[]; // [1m, 5m, 15m]
 }
 
+// Shape mirrors what the daemon writes into DAEMON_HEARTBEAT.auth in
+// daemon/agent-daemon.mjs. Claude Max OAuth is the only auth path, so the
+// fields below describe the OAuth file at /home/ubuntu/.claude/.credentials.json
+// and the result of the last `claude -p ok` probe.
 export interface AuthState {
-  valid: boolean | null;
-  checkedAt: string | null;
-  error: string | null;
-  source: 'ssm' | 'env' | 'oauth-fallback' | 'none' | null;
-  apiKeyLoadedAt: string | null;
+  valid: boolean | null; // null until first probe completes
+  checkedAt: string | null; // ISO of last probe
+  error: string | null; // one-line error when valid=false
+  hasFile: boolean; // OAuth file exists + parses
+  hasRefresh: boolean; // file contains a refresh_token (needed for auto-refresh)
+  loadedAt: string | null; // when the daemon last re-read the file
+  expiresAt: string | null; // accessToken expiry (CLI refreshes per-use)
+  subscriptionType: string | null; // "max", "pro", ...
 }
 
 export interface Ec2Status {
@@ -65,6 +72,28 @@ export function useStartEc2Daemon() {
   });
 }
 
+/**
+ * Restart the daemon in place (systemctl restart). Same underlying endpoint
+ * as useStartEc2Daemon — the shell command on EC2 is idempotent, so this is
+ * semantically "restart if running, start if not".
+ *
+ * Phase A.1 (graceful shutdown) gives the current subprocess up to 30s to
+ * flush before SIGKILL, so this is safe to call even mid-wave; in-flight
+ * steps that don't exit cleanly are marked FAILED with
+ * daemon-shutdown-timeout and surface in the attention inbox.
+ */
+export function useRestartEc2Daemon() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post<{ commandId: string; message: string }>('/ec2/start-daemon', {}),
+    onSuccess: () => {
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['ec2-status'] });
+      }, 3000);
+    },
+  });
+}
+
 export function useDisableEc2() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -73,28 +102,60 @@ export function useDisableEc2() {
   });
 }
 
-export function useSetAnthropicKey() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (apiKey: string) =>
-      api.post<{ ok: boolean; signalSent: boolean; message: string }>('/ec2/set-anthropic-key', {
-        apiKey,
-      }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['ec2-status'] }),
-  });
+// Re-authorize EC2 by asking the operator's Mac helper
+// (scripts/mac-oauth-server.mjs, listening on http://127.0.0.1:9876) to
+// push fresh Claude Code OAuth from Keychain → EC2 via SSM. The helper then
+// sends SIGUSR1 to the daemon, which re-reads the file and re-probes within
+// seconds. Modern browsers allow HTTPS pages to fetch http://localhost
+// without mixed-content blocking.
+export type ReauthErrorKind = 'helper_not_running' | 'sync_failed' | 'unknown';
+
+export interface ReauthError {
+  kind: ReauthErrorKind;
+  message: string;
+  stderr?: string;
 }
 
-export function useAnthropicKeyStatus() {
-  return useQuery({
-    queryKey: ['anthropic-key-status'],
-    queryFn: () =>
-      api.get<{
-        exists: boolean;
-        param: string;
-        lastModified: string | null;
-        preview: string | null;
-      }>('/ec2/anthropic-key-status'),
-    refetchInterval: 30_000,
+export interface ReauthResult {
+  ok: boolean;
+  ts: string | null;
+  trigger: string | null;
+  exitCode: number | null;
+  message: string;
+}
+
+const MAC_HELPER_URL = 'http://127.0.0.1:9876';
+
+export function useReauthorizeEc2() {
+  const queryClient = useQueryClient();
+  return useMutation<ReauthResult, ReauthError>({
+    mutationFn: async () => {
+      let resp: Response;
+      try {
+        resp = await fetch(`${MAC_HELPER_URL}/sync`, { method: 'POST' });
+      } catch {
+        // Browser throws TypeError on connection-refused → helper isn't running.
+        throw {
+          kind: 'helper_not_running',
+          message: 'Mac helper not running on 127.0.0.1:9876',
+        } satisfies ReauthError;
+      }
+      const body = (await resp.json().catch(() => null)) as ReauthResult | null;
+      if (!resp.ok || !body?.ok) {
+        throw {
+          kind: 'sync_failed',
+          message: body?.message || `helper returned HTTP ${resp.status}`,
+          stderr: (body as unknown as { stderr?: string })?.stderr,
+        } satisfies ReauthError;
+      }
+      return body;
+    },
+    onSuccess: () => {
+      // Daemon re-probes within ~5s of SIGUSR1; refetch heartbeat shortly.
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['ec2-status'] });
+      }, 5000);
+    },
   });
 }
 
@@ -183,15 +244,17 @@ export function useStartAndVerify() {
         intervalMs: 3_000,
       });
 
-      // Step 5: wait for auth probe to succeed
+      // Step 5: wait for auth probe to succeed — the Mac helper pushes OAuth
+      // automatically when the admin UI loads, but we still wait for the
+      // daemon to confirm it probed successfully against the Max subscription.
       setStep('verifying-auth');
-      setDetail('Verifying Claude Code authentication with Anthropic…');
+      setDetail('Verifying Claude Code auth against your Max subscription…');
       await waitFor(
         async () => {
           const s = await api.get<Ec2Status>('/ec2/status');
           return s.auth?.valid === true;
         },
-        { timeoutMs: 90_000, intervalMs: 3_000 },
+        { timeoutMs: 120_000, intervalMs: 3_000 },
       );
 
       setStep('done');
