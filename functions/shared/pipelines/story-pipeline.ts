@@ -173,6 +173,28 @@ ${story.description}
 - Working directory: ${workingDir}
 - If this is the first story, set up the project structure.
 - Output a brief summary of what you did (not full file contents, show diffs or summaries).${
+          testsOn
+            ? `
+
+## Test contract (CRITICAL — tests already exist)
+
+The TEST agent has already authored the failing tests for this story. They
+are the source of truth for function names, field names, and signatures.
+
+\`\`\`
+{{TEST_FILES}}
+\`\`\`
+
+Rules:
+1. **Do NOT create, overwrite, or edit any file listed above.** The tests
+   are fixed; your code must conform to them, not the other way around.
+2. **Read each test file first** before writing your implementation so
+   you match the exact exported names and type shapes the tests import.
+3. If the story wording contradicts the tests (e.g. story says
+   "destroyedBrickIds", test imports "destroyedIds"), **follow the test**.
+4. Tamper-check ${tamperOn ? '(enabled)' : '(disabled at this rigor)'} will ${tamperOn ? 'auto-revert any edits to test files and fail the step' : 'be skipped, but the next rigor tier would catch violations — treat the rule as binding anyway'}.`
+            : ''
+        }${
           story.hasBrowserTests
             ? `
 - This story has browser-testable criteria (marked [needs_browser=true]). After implementing the code, also output visual test definitions describing how to verify each browser criterion:
@@ -238,11 +260,23 @@ Write one test per needs_browser=true criterion. Be specific about what the visu
               stepType: 'shell' as const,
               command:
                 `cd ${workingDir} && ` +
-                // Compute the set of test files TEST agent authored
-                // (captured in {{TEST_FILES}}). Trim blanks.
-                `echo "{{TEST_FILES}}" | tr '\\n' '\\0' | xargs -0 -n1 | grep -vE '^\\s*$' > /tmp/tamper-expected.txt 2>/dev/null || true; ` +
-                // List test files changed since TEST agent's commit/checkpoint.
-                `git --no-pager diff --name-only HEAD -- \\$(cat /tmp/tamper-expected.txt 2>/dev/null) 2>/dev/null > /tmp/tamper-dirty.txt || true; ` +
+                // Compute the set of test files TEST agent authored. The
+                // {{TEST_FILES}} var is the raw capture BETWEEN the fence
+                // markers — which INCLUDES the fences themselves. Strip
+                // the fence lines, blanks, and any line that doesn't look
+                // like a filesystem path before feeding to git.
+                `echo "{{TEST_FILES}}" | tr '\\n' '\\0' | xargs -0 -n1 ` +
+                `| grep -vE '^\\s*$' ` +
+                `| grep -vE '^---' ` +
+                `| grep -E '\\.(test|spec)\\.[jt]sx?$|^e2e/|^tests/' ` +
+                `> /tmp/tamper-expected.txt 2>/dev/null || true; ` +
+                `if [ ! -s /tmp/tamper-expected.txt ]; then ` +
+                `  echo __TAMPER_CLEAN__ '(no test files extracted)'; ` +
+                `  exit 0; ` +
+                `fi; ` +
+                // Check for unstaged or staged edits to those files since
+                // TEST committed them. `diff --name-only HEAD` covers both.
+                `git --no-pager diff --name-only HEAD -- \\$(cat /tmp/tamper-expected.txt) 2>/dev/null > /tmp/tamper-dirty.txt || true; ` +
                 `if [ -s /tmp/tamper-dirty.txt ]; then ` +
                 `  echo __TAMPER_DETECTED__; cat /tmp/tamper-dirty.txt; ` +
                 `  git checkout -- \\$(cat /tmp/tamper-dirty.txt) || true; ` +

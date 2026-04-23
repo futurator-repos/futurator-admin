@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { useAgentJob } from '@/hooks/use-agent-job';
 import { useAgentEvents } from '@/hooks/use-agent-events';
+import { CopyLogButton } from '@/components/labs/plan-dashboard/shared/copy-log-button';
 
 const TOOL_ICONS: Record<string, string> = {
   Read: '\u{1F4C4}',
@@ -151,20 +152,35 @@ function EventLogSection({
 }) {
   const [isOpen, setIsOpen] = useState(false);
 
+  // Rebuild a merged, chronologically-sorted event array for clipboard copy.
+  // Excludes resultEvents (those are already attached to their tool_use via
+  // the renderer below) to keep the pasted log terse.
+  const mergedEvents = [
+    ...stepStartEvents,
+    ...toolEvents,
+    ...resultEvents,
+    ...extractionEvents,
+    ...validationEvents,
+    ...errorEvents,
+  ].sort((a, b) => a.seq - b.seq);
+
   return (
     <div>
-      <button
-        type="button"
-        onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <ChevronRight className={`h-3 w-3 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
-        <span>
-          Event Log ({toolEvents.length} tools, {extractionEvents.length} extractions,{' '}
-          {validationEvents.length} validations
-          {errorEvents.length > 0 ? `, ${errorEvents.length} errors` : ''})
-        </span>
-      </button>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => setIsOpen(!isOpen)}
+          className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ChevronRight className={`h-3 w-3 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+          <span>
+            Event Log ({toolEvents.length} tools, {extractionEvents.length} extractions,{' '}
+            {validationEvents.length} validations
+            {errorEvents.length > 0 ? `, ${errorEvents.length} errors` : ''})
+          </span>
+        </button>
+        <CopyLogButton events={mergedEvents} compact />
+      </div>
 
       {isOpen && (
         <div className="mt-2 pl-4 rounded border border-input max-h-64 overflow-y-auto font-mono text-[10px]">

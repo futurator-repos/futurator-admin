@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { AgentPhaseBlock } from './agent-phase-block';
 import { DebugPanel } from './debug-panel';
+import { CopyLogButton } from '@/components/labs/plan-dashboard/shared/copy-log-button';
 import type { AgentEvent, AgentJob, AgentJobStatus } from '@/types/agent-orchestrator';
 
 interface LiveOutputPanelProps {
@@ -91,7 +92,10 @@ export function LiveOutputPanel({ events, job, isPolling }: LiveOutputPanelProps
       {/* Step output panels */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Live Output</CardTitle>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-sm">Live Output</CardTitle>
+            <CopyLogButton events={events} compact />
+          </div>
         </CardHeader>
         <CardContent>
           {stepGroups.length === 0 && (

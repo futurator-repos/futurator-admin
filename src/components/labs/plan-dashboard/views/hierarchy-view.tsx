@@ -20,6 +20,7 @@ import { ACTIVE_STORY_STATUSES, STORY_STATUS_META, epicStatusColor } from '../co
 import { MetricChip } from '../shared/metric-chip';
 import { StatusPill } from '../shared/status-pill';
 import { LogEntry } from '../shared/log-entry';
+import { CopyLogButton } from '../shared/copy-log-button';
 
 // ── Top-level view ───────────────────────────────────────────────────
 
@@ -788,32 +789,35 @@ function StoryDetailPanel({ story, epicId }: { story: DashboardStory; epicId: st
               }}
             >
               <SectionLabel noMargin>Live log</SectionLabel>
-              {isActive && (
-                <span
-                  style={{
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 9,
-                    color: 'var(--accent-purple)',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.22em',
-                  }}
-                >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {isActive && (
                   <span
-                    className="animate-pulse-soft"
                     style={{
-                      background: 'var(--accent-purple)',
-                      width: 5,
-                      height: 5,
-                      borderRadius: '50%',
-                      display: 'inline-block',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 9,
+                      color: 'var(--accent-purple)',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.22em',
                     }}
-                  />
-                  streaming
-                </span>
-              )}
+                  >
+                    <span
+                      className="animate-pulse-soft"
+                      style={{
+                        background: 'var(--accent-purple)',
+                        width: 5,
+                        height: 5,
+                        borderRadius: '50%',
+                        display: 'inline-block',
+                      }}
+                    />
+                    streaming
+                  </span>
+                )}
+                <CopyLogButton events={events} compact />
+              </div>
             </div>
             <div
               style={{
@@ -912,6 +916,8 @@ function StoryLogsPane({ events }: { events: import('@/types/agent-orchestrator'
     [events, selected],
   );
 
+  // Render text mirrors CopyLogButton's formatEventsForClipboard so the
+  // pasted text and the on-screen text stay identical.
   const text = useMemo(() => {
     return filtered
       .map((ev) => {
@@ -927,15 +933,6 @@ function StoryLogsPane({ events }: { events: import('@/types/agent-orchestrator'
       })
       .join('\n\n');
   }, [filtered]);
-
-  const [copied, setCopied] = useState(false);
-  const handleCopy = () => {
-    if (typeof navigator === 'undefined' || !navigator.clipboard) return;
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  };
 
   return (
     <div>
@@ -964,25 +961,7 @@ function StoryLogsPane({ events }: { events: import('@/types/agent-orchestrator'
             />
           ))}
         </div>
-        <button
-          type="button"
-          onClick={handleCopy}
-          disabled={filtered.length === 0}
-          style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 10,
-            letterSpacing: '0.1em',
-            textTransform: 'uppercase',
-            padding: '6px 12px',
-            border: '1px solid var(--border)',
-            background: 'transparent',
-            color: copied ? 'var(--success, #10b981)' : 'var(--text-mute)',
-            cursor: filtered.length === 0 ? 'not-allowed' : 'pointer',
-            opacity: filtered.length === 0 ? 0.5 : 1,
-          }}
-        >
-          {copied ? 'Copied!' : 'Copy to clipboard'}
-        </button>
+        <CopyLogButton events={filtered} label="Copy to clipboard" />
       </div>
       <pre
         style={{
