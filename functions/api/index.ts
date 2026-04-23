@@ -1212,11 +1212,54 @@ app.get('/api/plans/:id', async (c) => {
   const plan = await planRepo.getPlanById(planId);
   if (!plan) throw new NotFoundError('Plan', planId);
 
-  // Hydrate epics array for the detail view.
+  // Hydrate epics array for the detail view. Also sync-on-read: the
+  // per-story live status sits on the epic row, but the daemon updates
+  // job.status (not story.status) when it picks up / completes a job.
+  // Without this sync the UI would show `queued` indefinitely after a
+  // Retry until the wave-completion cron next ticks (up to 60s later).
+  // Mirrors the sync logic on GET /api/epic-workflows/:id but trimmed:
+  // no session capture, no epic-status recomputation — those are handled
+  // by the wave-reducer cron.
   const epics: EpicWorkflow[] = [];
   for (const epicId of plan.epicIds) {
     const epic = await epicRepo.getEpicById(epicId);
-    if (epic) epics.push(epic);
+    if (!epic) continue;
+    let changed = false;
+    const syncedStories = await Promise.all(
+      epic.stories.map(async (story) => {
+        const syncable = (story.status === 'queued' || story.status === 'running') && story.jobId;
+        if (!syncable) return story;
+        const job = await agentJobsRepo.getJobById(story.jobId!);
+        if (!job) return story;
+        if (job.status === 'COMPLETED') {
+          changed = true;
+          return { ...story, status: 'done' as const };
+        }
+        if (job.status === 'FAILED') {
+          changed = true;
+          return { ...story, status: 'failed' as const };
+        }
+        // Promote queued → running when daemon has picked up the job.
+        if (story.status === 'queued' && job.status === 'RUNNING') {
+          changed = true;
+          return { ...story, status: 'running' as const };
+        }
+        // Demote running → queued if daemon restarted the job back to PENDING
+        // (e.g. daemon-shutdown-timeout re-queue). The Phase A.3 retry ladder
+        // also does this via retryAfter.
+        if (story.status === 'running' && job.status === 'PENDING') {
+          changed = true;
+          return { ...story, status: 'queued' as const };
+        }
+        return story;
+      }),
+    );
+    if (changed) {
+      await epicRepo.updateEpicFields(epic.epicId, { stories: syncedStories });
+      epics.push({ ...epic, stories: syncedStories });
+    } else {
+      epics.push(epic);
+    }
   }
   return c.json({ ...plan, epics });
 });
@@ -1787,6 +1830,63 @@ app.post('/api/plans/:id/qa-review', async (c) => {
   return c.json({ planId, results }, 201);
 });
 
+// POST /api/epic-workflows/:id/stories/:storyId/send-back
+//   QA Review "Send back to dev" action. Appends a QA note to the story's
+//   description, flips status to `fixing`, and re-launches the story pipeline
+//   so the daemon picks it up. Used by the failure drawer on the QA page.
+app.post('/api/epic-workflows/:id/stories/:storyId/send-back', async (c) => {
+  const epicId = c.req.param('id');
+  const storyId = c.req.param('storyId');
+  const user = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const note = typeof body?.note === 'string' ? body.note.trim() : '';
+  const sourceLabel = typeof body?.source === 'string' ? body.source : 'QA Review';
+
+  const epic = await epicRepo.getEpicById(epicId);
+  if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
+  const storyIdx = epic.stories.findIndex((s) => s.storyId === storyId);
+  if (storyIdx < 0) throw new NotFoundError('Story', storyId);
+
+  // Append a signed, timestamped note so remediation history survives.
+  const now = new Date().toISOString();
+  const story = epic.stories[storyIdx];
+  const trimmedDesc = story.description.replace(/\s+$/, '');
+  const noteBlock = note
+    ? `\n\n---\n**${sourceLabel} · ${now}**\n${note}\n`
+    : `\n\n---\n**${sourceLabel} · ${now}** — sent back for fixing.\n`;
+  const updatedStories = [...epic.stories];
+  updatedStories[storyIdx] = {
+    ...story,
+    description: trimmedDesc + noteBlock,
+    status: 'fixing',
+  };
+
+  await epicRepo.updateEpicFields(epicId, {
+    stories: updatedStories,
+    status: 'fixing',
+  });
+
+  // Re-launch the story via the existing launcher so the daemon picks it up.
+  const result = await launchStoryRerun(epic, storyId, user.userId, now, {
+    generatePipeline: generateStoryPipeline,
+    createJob: agentJobsRepo.createJob,
+    uuid: () => crypto.randomUUID(),
+  });
+  if (!result.ok) {
+    // Story was updated; re-launch can fail (e.g. deleted mid-request).
+    return c.json({ storyId, status: 'fixing', jobId: null, warning: 'rerun-failed' }, 200);
+  }
+  // launchStoryRerun already patches stories[] with the new jobId — use its
+  // output so we don't clobber the status flip we just did.
+  const finalStories = result.updatedStories.map((s) =>
+    s.storyId === storyId
+      ? { ...s, status: 'fixing' as const, description: updatedStories[storyIdx].description }
+      : s,
+  );
+  await epicRepo.updateEpicFields(epicId, { stories: finalStories });
+  return c.json({ storyId, status: 'fixing', jobId: result.jobId }, 201);
+});
+
 // ── Attention Inbox (Pipeline Enhancement Plan v2 — Phase A) ──
 //
 // GET /api/plans/:id/attention-items?status=open|resolving|resolved
@@ -2181,12 +2281,41 @@ app.post('/api/epic-workflows/:id/stories/:storyId/run', async (c) => {
   const epic = await epicRepo.getEpicById(epicId);
   if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
 
+  // Phase C.3: cascade plan.rigor / testModel / testingProfile into the
+  // rerun's pipeline. Without this, a retry on a 'production' plan would
+  // silently rebuild with 'mvp' rigor (no tamper-check, no red-gate) —
+  // behaviour would differ from the original run.
+  let planOpts:
+    | {
+        rigor?: import('../shared/types/plan').PlanRigor;
+        testModel?: string;
+        hasBrowserTests?: boolean;
+      }
+    | undefined;
+  if (epic.planId) {
+    const plan = await planRepo.getPlanById(epic.planId);
+    if (plan) {
+      planOpts = {
+        rigor: plan.rigor,
+        testModel: plan.testModel,
+        hasBrowserTests: plan.testingProfile?.hasBrowserTests,
+      };
+    }
+  }
+
   const now = new Date().toISOString();
-  const result = await launchStoryRerun(epic, storyId, user.userId, now, {
-    generatePipeline: generateStoryPipeline,
-    createJob: agentJobsRepo.createJob,
-    uuid: () => crypto.randomUUID(),
-  });
+  const result = await launchStoryRerun(
+    epic,
+    storyId,
+    user.userId,
+    now,
+    {
+      generatePipeline: generateStoryPipeline,
+      createJob: agentJobsRepo.createJob,
+      uuid: () => crypto.randomUUID(),
+    },
+    planOpts,
+  );
   if (!result.ok) {
     throw new NotFoundError('Story', storyId);
   }
