@@ -34,6 +34,14 @@ export function generateStoryPipeline(
     rigor?: PlanRigor;
     /** When true, also author Playwright browser tests (not just unit). */
     hasBrowserTests?: boolean;
+    /**
+     * Story A.6: how the deployed project is started for runtime verification
+     * (e.g. `python3 -m http.server 8080`, `npm run dev`, `vite`). Surfaced
+     * to DEV/REVIEWER/COMPILER prompts via `<run_command>` so the DEV does
+     * NOT spin up its own ad-hoc `npm run dev` / `node --check` loops just
+     * to confirm syntax. Defaults to a vanilla static server.
+     */
+    runCommand?: string;
   },
 ): PipelineDefinition {
   // Derive projectId from workingDir: /home/ubuntu/projects/{name}/
@@ -43,6 +51,10 @@ export function generateStoryPipeline(
   const testsOn = rigor !== 'prototype';
   const tamperOn = rigor === 'production';
   const redGateOn = rigor === 'production';
+  // Story A.6: <run_command> default (Python static server) — overridable at
+  // plan creation. Wired into the DEV prompt's VERIFICATION section so the
+  // dev knows the canonical "how do I run this" command instead of guessing.
+  const runCommand = opts.runCommand || 'python3 -m http.server 8080';
 
   return {
     initialVariables: {
@@ -75,8 +87,10 @@ export function generateStoryPipeline(
       COMPILER: {
         name: 'Knowledge Compiler',
         allowedTools: 'Read,Write,Edit,Glob,Grep',
-        // Haiku sufficient for structured markdown — Sonnet caused OOM on t2.micro
-        model: 'haiku',
+        // Story A.1: env-gated, default 'haiku'. Set COMPILER_MODEL=sonnet to
+        // roll back if Haiku output quality regresses on a given epic.
+        // Haiku is also kinder on t2.micro memory than Sonnet.
+        model: process.env.COMPILER_MODEL || 'haiku',
       },
     },
     steps: [
@@ -172,7 +186,18 @@ ${story.description}
 - Implement ONLY this story. Do not work on other stories.
 - Working directory: ${workingDir}
 - If this is the first story, set up the project structure.
-- Output a brief summary of what you did (not full file contents, show diffs or summaries).${
+- Output a brief summary of what you did (not full file contents, show diffs or summaries).
+
+## DISCOVERY (Story A.6):
+- The story title, description, and acceptance criteria are inline above. The plan and adjacent files are part of the working directory at ${workingDir}.
+- Do NOT run \`ls\`, \`find\`, \`tree\`, or \`Bash cat\` on the project directory. The story spec tells you exactly which files to create/edit.
+- Do NOT spawn the Task / Agent / Explore subagents — they re-read the codebase from scratch and burn 10–25 tool calls per turn for context you already have.
+- Read at most the files you intend to modify. Do them in ONE message with parallel Read calls — never one Read per turn.
+
+## VERIFICATION (Story A.6):
+- Do NOT Read a file you just Wrote or Edited. The Write/Edit tools error when they fail; their absence of an error IS the verification.
+- Do NOT run \`npm run dev\`, \`node --check\`, or \`node --input-type=module\` for ad-hoc syntax checks. The project's runtime command is: \`${runCommand}\`. The build/test gates downstream of this step will catch real regressions.
+- Visual tests live at \`${workingDir}/visual-tests.md\` (the daemon merges your \`---VISUAL_TESTS---\` block into that file automatically, Story A.2). Treat it as the contract — your code must make every entry pass at runtime.${
           testsOn
             ? `
 
@@ -315,7 +340,7 @@ ${story.description}
 4. Is the code quality acceptable (no obvious bugs, proper types)?${
           story.hasBrowserTests
             ? `
-5. This story has browser-testable criteria. Verify the developer included visual test definitions (between ---VISUAL_TESTS--- and ---END_VISUAL_TESTS--- markers) that cover all needs_browser=true criteria. Each test definition must have: id, criteriaRef, description, setup, and expect fields.`
+5. This story has browser-testable criteria. Visual tests are at \`${workingDir}/visual-tests.md\` — the daemon writes this file from the dev's \`---VISUAL_TESTS---\` block automatically (Story A.2). Verify each [needs_browser=true] criterion has a matching entry there with id, criteriaRef, description, setup, and expect fields. Do NOT FAIL the story for "missing visual-tests block in dev output" — that block is consumed and persisted by the daemon, not retained in the dev's text.`
             : ''
         }
 
@@ -325,7 +350,16 @@ Then: FEEDBACK: [specific findings — what passed, what needs fixing]
 Be constructive. If the code is close but has minor issues, PASS with suggestions.`,
         extractors: {
           VERDICT: { type: 'regex', pattern: 'VERDICT:\\s*\\*{0,2}(PASS|FAIL)\\*{0,2}' },
-          FEEDBACK: { type: 'regex', pattern: 'FEEDBACK:\\s*([\\s\\S]+?)$' },
+          // Story A.5: tolerate markdown variants the reviewer occasionally
+          // emits (`**FEEDBACK:**`, `**FEEDBACK**:`, `*FEEDBACK*:`). Without
+          // this, the extractor missed the label entirely → variables had no
+          // FEEDBACK → the retry prompt rendered literal `{{FEEDBACK}}` and
+          // burned a turn while the dev asked the operator for the missing
+          // text (dino3 e3w0s3 incident).
+          FEEDBACK: {
+            type: 'regex',
+            pattern: '\\*{0,2}FEEDBACK\\*{0,2}\\s*:\\s*([\\s\\S]+?)$',
+          },
         },
         validations: [
           { type: 'equals', left: 'VERDICT', right: 'PASS', label: 'Code review approved' },
@@ -360,11 +394,44 @@ Fix the issues mentioned. Output only what you changed, then:
       // ── COMPILE phase (non-blocking: failures do NOT fail the story pipeline) ──
       // Note: these inline definitions mirror daemon/pipelines/compile-pipeline.mjs
 
+      // Story A.3: per-story commit. Runs after the review loop terminates so
+      // HEAD~1..HEAD always scopes to a single story's edits — kills the old
+      // `find -newer .mycelium/last-compile-marker` fallback that swept node_modules.
+      // --allow-empty so degenerate stories (no edits) still produce a commit
+      // and the next story's HEAD~1..HEAD remains story-scoped.
+      // The shell-quote escape on title (`replace(/'/g, "'\\''")`) is what lets
+      // titles with apostrophes survive bash single-quoting.
+      {
+        id: 'compile-commit-on-pass',
+        stepType: 'shell' as const,
+        command:
+          `cd ${workingDir} && git add -A && ` +
+          `git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
+          `commit --allow-empty -m 'story: ${story.storyId} — ${story.title.replace(/'/g, "'\\''")}'`,
+        timeout: 30000,
+        captureAs: 'STORY_COMMIT_OUTPUT',
+        onFail: { action: 'fail' as const, injectAs: 'STORY_COMMIT_ERROR' },
+      },
+
       // 4. Diff extraction -- identifies changed files
+      // Story A.3: simplified. The per-story commit above guarantees HEAD~1
+      // points at the prior-story tip, so `git diff --name-status HEAD~1 HEAD`
+      // is the only diff source we need. Empty output here means the dev
+      // produced zero in-scope edits — surfaced as a loud failure so the
+      // operator sees a `compile-sync-failed` attention item instead of
+      // silently documenting node_modules via the old `find -newer` fallback.
       {
         id: 'compile-diff',
         stepType: 'shell' as const,
-        command: `cd ${workingDir} && mkdir -p .mycelium && (git diff --name-status HEAD~1 HEAD 2>/dev/null | { grep -v -E 'node_modules/|\\.git/|knowledge/|\\.mycelium/' || true; } || find . -newer .mycelium/last-compile-marker -type f -not -path './node_modules/*' -not -path './.git/*' -not -path './knowledge/*' -not -path './.mycelium/*' 2>/dev/null | sed 's|^\\./||' | sed 's/^/A\\t/') && touch .mycelium/last-compile-marker`,
+        command:
+          `cd ${workingDir} && mkdir -p .mycelium && ` +
+          `DIFF=$(git diff --name-status HEAD~1 HEAD 2>/dev/null | ` +
+          `{ grep -v -E 'node_modules/|\\.git/|knowledge/|\\.mycelium/' || true; }); ` +
+          `if [ -z "$DIFF" ]; then ` +
+          `  echo 'EMPTY_DIFF: per-story commit produced no in-scope changes' >&2; ` +
+          `  exit 1; ` +
+          `fi; ` +
+          `printf '%s\\n' "$DIFF"`,
         timeout: 15000,
         captureAs: 'DIFF_MANIFEST',
         onFail: { action: 'fail' as const, injectAs: 'COMPILE_DIFF_ERROR' },
@@ -422,10 +489,33 @@ ${story.description}
         validations: [],
         onFail: { action: 'fail' as const },
       },
+      // Story A.4: verify post-sync. Drop the legacy `|| echo "skipped"`
+      // patterns that swallowed errors silently — if graph-sync or s3 sync
+      // fails (or sync succeeds but the target bucket is empty), the step now
+      // exits non-zero and the daemon writes a `compile-sync-failed`
+      // attention item (see daemon/agent-daemon.mjs compile catch-block).
+      // Memgraph node-count verification is intentionally deferred — mgconsole
+      // is slower and adds run-time variability; the wave-close compiler
+      // (Epic E) will fold it into a single async post-wave check.
       {
         id: 'compile-sync',
         stepType: 'shell' as const,
-        command: `node /home/ubuntu/scripts/graph-sync.mjs --project ${projectId} --knowledge-dir ${workingDir}/knowledge --state-file ${workingDir}/.mycelium/compile-state.json && aws s3 sync ${workingDir}/knowledge/ s3://futurator-ai-website/knowledge-live/${projectId}/ 2>&1 || echo "S3 backup skipped (non-critical)"`,
+        command:
+          `set -e; ` +
+          `cd ${workingDir} && ` +
+          `node /home/ubuntu/scripts/graph-sync.mjs ` +
+          `--project ${projectId} ` +
+          `--knowledge-dir ${workingDir}/knowledge ` +
+          `--state-file ${workingDir}/.mycelium/compile-state.json && ` +
+          `aws s3 sync ${workingDir}/knowledge/ ` +
+          `s3://futurator-ai-website/knowledge-live/${projectId}/ && ` +
+          `S3_COUNT=$(aws s3 ls s3://futurator-ai-website/knowledge-live/${projectId}/ ` +
+          `--recursive --summarize 2>/dev/null | awk '/Total Objects:/ {print $3}'); ` +
+          `if [ -z "$S3_COUNT" ] || [ "$S3_COUNT" -eq 0 ]; then ` +
+          `  echo 'EMPTY_S3_MIRROR: knowledge-live/${projectId} has 0 objects after sync' >&2; ` +
+          `  exit 1; ` +
+          `fi; ` +
+          `echo "S3 mirror verified: $S3_COUNT objects under knowledge-live/${projectId}/"`,
         timeout: 60000,
         onFail: { action: 'fail' as const, injectAs: 'COMPILE_SYNC_ERROR' },
       },

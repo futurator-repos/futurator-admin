@@ -155,14 +155,28 @@ Read the file at ${workingDir}/knowledge/index.md to understand the current cata
  * Identifies whether a pipeline step belongs to the COMPILE phase.
  * Used by the daemon to implement non-blocking error handling.
  *
+ * Story A.3 added `compile-commit-on-pass` — a per-story `git commit` that
+ * runs immediately before compile-diff so HEAD~1..HEAD always scopes to a
+ * single story's edits, killing the `find -newer` fallback.
+ *
  * @param {string} stepId — the pipeline step ID
  * @returns {boolean}
  */
 export function isCompileStep(stepId) {
-  return ['compile-diff', 'compile-knowledge', 'compile-sync'].includes(stepId);
+  return [
+    'compile-commit-on-pass',
+    'compile-diff',
+    'compile-knowledge',
+    'compile-sync',
+  ].includes(stepId);
 }
 
 /**
  * All compile step IDs in execution order.
  */
-export const COMPILE_STEP_IDS = ['compile-diff', 'compile-knowledge', 'compile-sync'];
+export const COMPILE_STEP_IDS = [
+  'compile-commit-on-pass',
+  'compile-diff',
+  'compile-knowledge',
+  'compile-sync',
+];

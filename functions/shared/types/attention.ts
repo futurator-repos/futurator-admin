@@ -8,6 +8,17 @@ export type AttentionCategory =
   | 'budget-warning'
   | 'test-gate-failed'
   | 'dev-server-down'
+  // Story A.4: surfaced when a per-story compile/sync step exits non-zero —
+  // either compile-diff produced no in-scope changes, the per-story commit
+  // failed, S3 mirror was empty after sync, or Memgraph upsert reported zero
+  // nodes. Operator gets to decide whether to retrigger the story or move on.
+  | 'compile-sync-failed'
+  // Pipeline v1 — Story 1.2 (universal escalation extractors).
+  // 'agent-escalated' = agent emitted ---ESCALATE--- with structured payload.
+  // 'agent-needs-human' = agent emitted ---NEED-HUMAN--- shortcut with a question.
+  // Both route to NEEDS_ATTENTION; neither triggers a retry.
+  | 'agent-escalated'
+  | 'agent-needs-human'
   | 'other';
 
 export type AttentionStatus = 'open' | 'resolving' | 'resolved';

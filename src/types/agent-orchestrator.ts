@@ -143,6 +143,13 @@ export interface AgentEvent {
   validationLabel?: string;
   validationPassed?: boolean;
   validationDetails?: string;
+  /**
+   * Story A.7: 6-char uppercase prefix derived from the story UUID, attached
+   * by the daemon when a per-story pipeline emits the event. Empty/absent for
+   * orchestrator/party jobs. The Logs tab UI renders this as `[ABC123]` in
+   * the action header so parallel-story logs are easy to disambiguate.
+   */
+  storyShortId?: string;
 }
 
 // ── Create input ──
