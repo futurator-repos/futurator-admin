@@ -19,6 +19,21 @@ export type AttentionCategory =
   // Both route to NEEDS_ATTENTION; neither triggers a retry.
   | 'agent-escalated'
   | 'agent-needs-human'
+  // Story 1.3 — daemon-side loop detector forced the step to exit.
+  | 'loop-detected'
+  // Story 1.4 — pre-flight validator failure (e.g. folder-exists). Step
+  // never spawned Claude; operator must fix the precondition and retry.
+  | 'preflight-failed'
+  // Story C.2/C.5: per-AC reviewer escalation. Emitted when the structured
+  // ---REVIEW_CRITERIA--- block has at least one `needs-human` verdict.
+  // Operator opens Talk → answers → Apply Output → final verdict drives
+  // wave advancement.
+  | 'reviewer-needs-human'
+  // Story C.2: REVIEWER did not emit a parseable ---REVIEW_CRITERIA--- block.
+  // Distinct category from `agent-escalated` so operators can spot prompt
+  // drift quickly. Daemon also forces the next loop iteration to ask the
+  // reviewer to re-emit.
+  | 'prompt-format'
   | 'other';
 
 export type AttentionStatus = 'open' | 'resolving' | 'resolved';
