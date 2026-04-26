@@ -16,7 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { useCreatePlanFromIntent } from '@/hooks/use-plans';
+import { useCreatePlanFromIntent, useCreateEmptyBmadPlan } from '@/hooks/use-plans';
 import { ChevronDown, Loader2 } from 'lucide-react';
 
 const PLAN_NAME_REGEX = /^[a-z][a-z0-9-]{2,40}$/;
@@ -64,21 +64,59 @@ export function NewPlanForm({ onCreated }: { onCreated?: (planId: string) => voi
   const [browserTestsRaw, setBrowserTestsRaw] = useState(true);
   const browserTestsDefault = rigor !== 'prototype';
   const hasBrowserTests = browserTestsDirty ? browserTestsRaw : browserTestsDefault;
+  // QA Review — auto-enqueue QA once the last dev wave completes. Rigor-
+  // derived default (production=on, everything else=off). Editable manually.
+  const [autoRunQaDirty, setAutoRunQaDirty] = useState(false);
+  const [autoRunQaRaw, setAutoRunQaRaw] = useState(false);
+  const autoRunQaDefault = rigor === 'production';
+  const autoRunQa = autoRunQaDirty ? autoRunQaRaw : autoRunQaDefault;
+  // Party Mode (BMAD) — install the 14-agent roster at plan creation so the
+  // Party Mode stage can host codebase discussions. Defaults ON.
+  const [bmadEnabled, setBmadEnabled] = useState(true);
+  // Empty BMAD mode — skip the PM job entirely. Creates the plan + BMAD
+  // skeleton with no auto-generated epics. Useful when the user wants a
+  // blank canvas to drive themselves.
+  const [emptyMode, setEmptyMode] = useState(false);
 
   const create = useCreatePlanFromIntent();
+  const createEmpty = useCreateEmptyBmadPlan();
+  const submitting = create.isPending || createEmpty.isPending;
+  const submitError = (create.error || createEmpty.error) as Error | null;
 
   const suggestedAppName = useMemo(() => slugify(displayName), [displayName]);
   const effectiveAppName = appNameDirty ? appName : suggestedAppName;
 
   const appNameValid = PLAN_NAME_REGEX.test(effectiveAppName);
   const displayNameValid = displayName.trim().length > 0;
-  const canSubmit =
-    displayNameValid && appNameValid && intent.trim().length >= 10 && !create.isPending;
+  // Empty mode skips the PM, so the intent textarea is optional. The API
+  // schema still requires intent.length >= 10, so we substitute a placeholder
+  // when the field is blank.
+  const intentValid = emptyMode ? true : intent.trim().length >= 10;
+  const canSubmit = displayNameValid && appNameValid && intentValid && !submitting;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!canSubmit) return;
     try {
+      if (emptyMode) {
+        const { plan } = await createEmpty.mutateAsync({
+          name: effectiveAppName,
+          displayName: displayName.trim(),
+          intent: intent.trim() || 'Empty BMAD scaffold — no PM-generated epics.',
+          executionMode,
+          devModel,
+          reviewerModel,
+          testModel,
+          yoloMode,
+          rigor,
+          testingProfile: { hasBrowserTests },
+          autoRunQa,
+          bmadEnabled: true,
+        });
+        onCreated?.(plan.planId);
+        router.push(`/labs/?planId=${plan.planId}`);
+        return;
+      }
       const { plan, pmJobId } = await create.mutateAsync({
         name: effectiveAppName,
         displayName: displayName.trim(),
@@ -90,6 +128,8 @@ export function NewPlanForm({ onCreated }: { onCreated?: (planId: string) => voi
         yoloMode,
         rigor,
         testingProfile: { hasBrowserTests },
+        autoRunQa,
+        bmadEnabled,
       });
       // Notify the parent (e.g. to close the form) then ALWAYS navigate to
       // the new plan's dashboard. The old behavior of only navigating when
@@ -116,7 +156,7 @@ export function NewPlanForm({ onCreated }: { onCreated?: (planId: string) => voi
               placeholder="Brick Breaker Game"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              disabled={create.isPending}
+              disabled={submitting}
               autoFocus
             />
             <p className="text-xs text-muted-foreground">
@@ -135,7 +175,7 @@ export function NewPlanForm({ onCreated }: { onCreated?: (planId: string) => voi
                 setAppName(e.target.value);
                 setAppNameDirty(true);
               }}
-              disabled={create.isPending}
+              disabled={submitting}
             />
             {effectiveAppName && !appNameValid && (
               <p className="text-xs text-destructive">
@@ -149,19 +189,28 @@ export function NewPlanForm({ onCreated }: { onCreated?: (planId: string) => voi
             </p>
           </div>
 
-          {/* 3. Intent — the long-form brief passed to the PM. */}
+          {/* 3. Intent — the long-form brief passed to the PM. Optional in empty mode. */}
           <div className="space-y-1">
-            <Label htmlFor="intent">What are you building?</Label>
+            <Label htmlFor="intent">
+              What are you building?
+              {emptyMode && (
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  (optional in empty mode)
+                </span>
+              )}
+            </Label>
             <Textarea
               id="intent"
-              rows={8}
+              rows={emptyMode ? 4 : 8}
               placeholder={
-                'Describe your product intent…\nExample: "Create a classic brick-breaker game with keyboard paddle controls, 5 levels, and a score counter."'
+                emptyMode
+                  ? 'Optional — leave blank for a truly empty BMAD scaffold.'
+                  : 'Describe your product intent…\nExample: "Create a classic brick-breaker game with keyboard paddle controls, 5 levels, and a score counter."'
               }
               value={intent}
               onChange={(e) => setIntent(e.target.value)}
               className="resize-y"
-              disabled={create.isPending}
+              disabled={submitting}
             />
           </div>
 
@@ -246,7 +295,61 @@ export function NewPlanForm({ onCreated }: { onCreated?: (planId: string) => voi
                     </span>
                   </div>
                 </div>
-                <div />
+                {/* Auto-run QA Review once the last Developing wave completes.
+                    Default follows rigor (production=on, else off). */}
+                <div className="space-y-1">
+                  <Label>Auto-run QA Review</Label>
+                  <div className="flex h-9 items-center">
+                    <Switch
+                      checked={autoRunQa}
+                      onCheckedChange={(v) => {
+                        setAutoRunQaRaw(v);
+                        setAutoRunQaDirty(true);
+                      }}
+                    />
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {autoRunQa
+                        ? 'Auto-enqueue Visual QA when Dev finishes'
+                        : 'Manual only — click Run QA Review'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Party Mode (BMAD) — installs the 14-agent roster so the Party
+                  Mode stage can host debates about this codebase. */}
+              <div className="space-y-1">
+                <Label>Party Mode (BMAD)</Label>
+                <div className="flex h-9 items-center">
+                  <Switch
+                    checked={emptyMode ? true : bmadEnabled}
+                    onCheckedChange={setBmadEnabled}
+                    disabled={emptyMode}
+                  />
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    {emptyMode
+                      ? 'Forced ON — empty mode always installs BMAD'
+                      : bmadEnabled
+                        ? 'Install BMAD + 8 custom agents — agents can read this project and debate it in Party Mode'
+                        : 'No BMAD — Party Mode will offer a one-click install later'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Empty BMAD — skip the PM job and create a blank-canvas plan
+                  with just the BMAD skeleton. Use when you want to drive the
+                  workflow yourself instead of letting the PM agent generate
+                  epics from your intent. */}
+              <div className="space-y-1">
+                <Label>Empty BMAD (skip PM)</Label>
+                <div className="flex h-9 items-center">
+                  <Switch checked={emptyMode} onCheckedChange={setEmptyMode} />
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    {emptyMode
+                      ? 'No PM job — creates plan + BMAD scaffold only, zero epics'
+                      : 'PM agent generates epics from your intent (default)'}
+                  </span>
+                </div>
               </div>
 
               <div className="grid grid-cols-3 gap-3">
@@ -293,16 +396,22 @@ export function NewPlanForm({ onCreated }: { onCreated?: (planId: string) => voi
             </CollapsibleContent>
           </Collapsible>
 
-          {create.error && (
+          {submitError && (
             <div className="rounded-md border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
-              {(create.error as Error).message}
+              {submitError.message}
             </div>
           )}
 
           <div className="flex items-center justify-end gap-2 pt-2">
             <Button type="submit" disabled={!canSubmit}>
-              {create.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {create.isPending ? 'Creating plan + spawning PM agent…' : 'Generate Plan'}
+              {submitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {submitting
+                ? emptyMode
+                  ? 'Creating plan + installing BMAD…'
+                  : 'Creating plan + spawning PM agent…'
+                : emptyMode
+                  ? 'Create Empty BMAD Plan'
+                  : 'Generate Plan'}
             </Button>
           </div>
         </form>
