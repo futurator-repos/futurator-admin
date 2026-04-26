@@ -50,5 +50,84 @@ export function createEpicRepo({ ddb, tableName = DEFAULT_TABLE } = {}) {
     );
   }
 
-  return { getEpicById, persistInferenceResult };
+  /**
+   * Flip a single story's `status` on the epic. Two-step because DynamoDB
+   * cannot filter list items by predicate: fetch to find the index, then
+   * update `stories[<idx>].status` in-place.
+   */
+  async function updateStoryStatus(epicId, storyId, status) {
+    const epic = await getEpicById(epicId);
+    if (!epic || !Array.isArray(epic.stories)) {
+      return { updated: false, reason: 'epic-or-stories-not-found' };
+    }
+    const idx = epic.stories.findIndex((s) => s.storyId === storyId);
+    if (idx === -1) {
+      return { updated: false, reason: 'story-not-found', storyId };
+    }
+    const now = new Date().toISOString();
+    await ddb.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { epicId },
+        UpdateExpression:
+          `SET #stories[${idx}].#status = :s, #stories[${idx}].#updatedAt = :now, #updatedAt = :now`,
+        ExpressionAttributeNames: {
+          '#stories': 'stories',
+          '#status': 'status',
+          '#updatedAt': 'updatedAt',
+        },
+        ExpressionAttributeValues: {
+          ':s': status,
+          ':now': now,
+        },
+      }),
+    );
+    return { updated: true, storyId, status, index: idx };
+  }
+
+  /**
+   * Persist a story's `workSummary` (Story B.6) — the verbatim
+   * `---WORK_SUMMARY--- … ---END_WORK_SUMMARY---` block extracted from the
+   * DEV / retry agent. Sibling stories in the same wave read this via the
+   * Story Context Pack so they don't have to re-discover what the prior
+   * stories shipped. Last-write-wins per story (later retries replace
+   * earlier ones).
+   */
+  async function persistStoryWorkSummary(epicId, storyId, workSummary) {
+    const epic = await getEpicById(epicId);
+    if (!epic || !Array.isArray(epic.stories)) {
+      return { updated: false, reason: 'epic-or-stories-not-found' };
+    }
+    const idx = epic.stories.findIndex((s) => s.storyId === storyId);
+    if (idx === -1) {
+      return { updated: false, reason: 'story-not-found', storyId };
+    }
+    const now = new Date().toISOString();
+    await ddb.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { epicId },
+        UpdateExpression:
+          `SET #stories[${idx}].#workSummary = :ws, #stories[${idx}].#workSummaryAt = :now, #updatedAt = :now`,
+        ExpressionAttributeNames: {
+          '#stories': 'stories',
+          '#workSummary': 'workSummary',
+          '#workSummaryAt': 'workSummaryAt',
+          '#updatedAt': 'updatedAt',
+        },
+        ExpressionAttributeValues: {
+          ':ws': workSummary,
+          ':now': now,
+        },
+      }),
+    );
+    return { updated: true, storyId, index: idx };
+  }
+
+  return {
+    getEpicById,
+    persistInferenceResult,
+    updateStoryStatus,
+    persistStoryWorkSummary,
+  };
 }

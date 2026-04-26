@@ -8,8 +8,9 @@ export type EpicStatus =
   | 'failed'
   | 'deployed';
 export type StoryStatus =
-  | 'pending'
-  | 'running'
+  | 'pending' // never launched (no jobId yet)
+  | 'queued' // job created PENDING; waiting for daemon slot
+  | 'running' // daemon actively executing
   | 'in_review'
   | 'fixing'
   | 'done'
@@ -127,6 +128,13 @@ export interface EpicStory {
   compilationCompletedAt?: string;
   compilationArticleCounts?: CompilationArticleCounts;
 
+  // ── Work summary (Epic B.6) ──
+  // Verbatim WORK_SUMMARY block extracted from the DEV / retry agent and
+  // persisted by the daemon. Sibling stories in the same wave read it via
+  // the Story Context Pack. Last-write-wins.
+  workSummary?: string;
+  workSummaryAt?: string;
+
   // ── Touch-point inference (Epic 3) ──
   touchPoints?: string[];
   complexity?: StoryComplexity;
@@ -142,6 +150,12 @@ export interface EpicStory {
 
 export interface EpicWorkflow {
   epicId: string;
+  /** FK to Plan (Epic 17). */
+  planId?: string;
+  /** Epic-level dependency graph — IDs of epics that must complete first. */
+  dependsOnEpics?: string[];
+  /** Computed from dependsOnEpics. 0 = runs first. */
+  epicWave?: number;
   title: string;
   description: string;
   acceptanceCriteria: string;
