@@ -39,6 +39,24 @@ So that {{value_benefit}}.
 
 **Prerequisites:** {{dependencies_on_previous_stories}}
 
+**Touch Points:** {{touch_points}}
+
+<!-- Pipeline-v1 dev-correction Story D.2: REQUIRED. List the file paths the
+     story will create or modify (one per line, glob patterns OK). The
+     wave-conflict resolver uses this to serialize stories that would
+     collide on the same file. Sentinels:
+       - `<EPIC_WIDE>` — cross-cutting refactor; gets its own wave
+       - omit / leave blank — legacy default; wave-isolated for safety
+     Be precise. If a story has no clear file set, restate its scope
+     until it does. -->
+
+**Forbidden Areas:** {{forbidden_areas}}
+
+<!-- Optional. File regions / paths the story MUST NOT modify (e.g.,
+     "HUD rendering", "src/utils/auth.ts"). The reviewer's daemon-side
+     scope check pre-fills `scope-forbidden: fail` ACs in the structured
+     ---REVIEW_CRITERIA--- block when the diff matches anything here. -->
+
 **Technical Notes:** {{implementation_guidance}}
 
 <!-- End story repeat -->

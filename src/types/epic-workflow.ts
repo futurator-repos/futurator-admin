@@ -137,6 +137,8 @@ export interface EpicStory {
 
   // ── Touch-point inference (Epic 3) ──
   touchPoints?: string[];
+  /** Story D.1 — file paths / globs the story MUST NOT modify. */
+  forbiddenAreas?: string[];
   complexity?: StoryComplexity;
   reviewRigor?: ReviewRigor;
   inferenceMetadata?: InferenceMetadata;

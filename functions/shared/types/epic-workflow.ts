@@ -140,6 +140,14 @@ export interface EpicStory {
 
   // ── Touch-point inference (Epic 3) ──
   touchPoints?: string[];
+  /**
+   * Story D.1 — file paths or glob patterns the story MUST NOT modify. The
+   * REVIEWER pre-fills `scope-forbidden: fail — modified <file> in
+   * forbiddenAreas` ACs in the structured `---REVIEW_CRITERIA---` block when
+   * a story's diff overlaps any entry here. Optional; absent → no
+   * forbidden areas (the default for legacy stories).
+   */
+  forbiddenAreas?: string[];
   complexity?: StoryComplexity;
   reviewRigor?: ReviewRigor;
   inferenceMetadata?: InferenceMetadata;

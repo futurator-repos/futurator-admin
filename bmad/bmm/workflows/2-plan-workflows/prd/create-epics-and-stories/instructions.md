@@ -117,6 +117,25 @@ And [additional criteria as needed]
 
 **Prerequisites:** Only previous stories (never forward dependencies)
 
+**Touch Points (REQUIRED — pipeline-v1 dev-correction Story D.2):**
+For each story, declare `touchPoints` — the file paths it will create or
+modify. Be precise: list every file the story will touch. If a story doesn't
+have a clear file set, restate the story scope until it does. The
+wave-conflict resolver uses this to serialize stories that would collide on
+the same file (e.g. two stories that both edit `src/main.js` are pushed into
+sequential waves rather than launched in parallel).
+
+For HARD cases (cross-cutting refactors, integration stories that touch many
+files), declare `touchPoints: ['<EPIC_WIDE>']` — a sentinel that excludes
+the story from parallel waves entirely (it gets its own wave with no
+siblings).
+
+**Forbidden Areas (OPTIONAL):** Declare `forbiddenAreas` — file regions or
+concerns the story MUST NOT modify (e.g., "HUD rendering",
+"src/utils/auth.ts"). The reviewer's daemon-side scope check pre-fills
+`scope-forbidden: fail` ACs in the structured `---REVIEW_CRITERIA---` block
+when the diff matches anything here.
+
 **Technical Notes:** Implementation guidance, affected components, compliance requirements
 
 Ensure stories are:
