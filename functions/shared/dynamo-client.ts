@@ -22,4 +22,7 @@ export const TABLE_NAMES = {
   partySessions: process.env.PARTY_SESSIONS_TABLE || 'futurator-party-sessions',
   plans: process.env.PLANS_TABLE || 'futurator-plans',
   attentionItems: process.env.ATTENTION_ITEMS_TABLE || 'futurator-attention-items',
+  // Pipeline v1 — Epic 3 (Talk-to-agent) tables.
+  agentSessions: process.env.AGENT_SESSIONS_TABLE || 'futurator-agent-sessions',
+  agentConversations: process.env.AGENT_CONVERSATIONS_TABLE || 'futurator-agent-conversations',
 } as const;

@@ -56,6 +56,27 @@ export function signalAllChildren(signal = 'SIGTERM') {
 }
 
 /**
+ * FU-3 — signal every child registered for a specific jobId. Used by the
+ * abort path so an operator-driven Abort kills only the targeted job's
+ * children, not every in-flight subprocess.
+ */
+export function signalChildrenForJob(jobId, signal = 'SIGTERM') {
+  if (!jobId) return 0;
+  const set = children.get(jobId);
+  if (!set) return 0;
+  let n = 0;
+  for (const proc of set) {
+    try {
+      proc.kill(signal);
+      n += 1;
+    } catch {
+      // already exited
+    }
+  }
+  return n;
+}
+
+/**
  * Resolve once all tracked children have exited, or after timeoutMs.
  * Returns true if all exited, false on timeout.
  */

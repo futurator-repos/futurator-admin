@@ -1,4 +1,20 @@
 // ── Job status ──
+//
+// State machine (Pipeline v1 — Epic 1, Story 1.1):
+//
+//   PENDING → RUNNING → COMPLETED                         (happy path)
+//                     → FAILED                            (only via Abort, or unrecoverable infra error)
+//                     → COMPLETE_WITH_BLOCKED_STORIES     (epic-dev: non-blocker stories APPROVED)
+//                     → STALE                             (epic-dev heartbeat lost; awaits resume respawn)
+//                     → NEEDS_ATTENTION                   (recoverable failure — escalation, loop, preflight, ceiling, etc.)
+//
+//   NEEDS_ATTENTION → COMPLETED_VIA_SALVAGE               (operator Salvage)
+//                   → MANUALLY_SKIPPED                    (operator Skip; pipeline step must be skipTolerant)
+//                   → FAILED                              (operator Abort)
+//                   (Retry creates a NEW job with retryOf=originalJobId; original stays NEEDS_ATTENTION.)
+//
+// Authoritative classification helpers live in `agent-job-state-machine.ts`.
+// Wave/plan reducers MUST go through those helpers — never inline membership checks.
 
 export type AgentJobStatus =
   | 'PENDING'
@@ -6,7 +22,64 @@ export type AgentJobStatus =
   | 'COMPLETED'
   | 'FAILED'
   | 'COMPLETE_WITH_BLOCKED_STORIES' // epic-dev: non-blocker stories all APPROVED; blockers remain
-  | 'STALE'; // epic-dev: heartbeat exceeded threshold, awaiting resume respawn
+  | 'STALE' // epic-dev: heartbeat exceeded threshold, awaiting resume respawn
+  | 'NEEDS_ATTENTION' // recoverable failure; awaiting operator action (Pipeline v1 §8)
+  | 'COMPLETED_VIA_SALVAGE' // terminal success: extracted output applied without re-running the agent
+  | 'COMPLETED_VIA_TALK' // terminal success: applied via a Talk-to-agent conversation (Story 3.6)
+  | 'MANUALLY_SKIPPED'; // terminal: operator skipped a skipTolerant step
+
+// ── Escalation + trigger metadata (Pipeline v1 §9.2 + §FR-9) ──
+
+/**
+ * Triggered-by enum identifies why a job transitioned to NEEDS_ATTENTION (or
+ * FAILED via Abort). Surfaced verbatim on attention items and the failed-step
+ * panel. Values are added incrementally as each consuming story lands:
+ *
+ *   - 'AGENT_ESCALATED'   — Story 1.2 (---ESCALATE--- protocol)
+ *   - 'AGENT_NEEDS_HUMAN' — Story 1.2 (---NEED-HUMAN--- protocol)
+ *   - 'LOOP_DETECTED'     — Story 1.3 (loop detector forced exit)
+ *   - 'PREFLIGHT_FAILED'  — Story 1.4 (validator failure pre-spawn)
+ *   - 'POSTVALIDATE_FAILED' — Story 1.4-adjacent (post-step validator)
+ *   - 'COST_CEILING'      — Story 4.3 (cost cap hit)
+ *   - 'TIME_CEILING'      — Story 4.2 (wall-clock cap hit)
+ *   - 'QUOTA_EXHAUSTED'   — Story 2.3 (Anthropic 429 daily/monthly)
+ *   - 'CAPACITY_TIMEOUT'  — Story 2.1 (slot acquisition timeout)
+ *   - 'RETRY_EXHAUSTED'   — pre-existing daemon retry ladder cap
+ *   - 'OPERATOR_ABORT'    — Story 1.8 (manual Abort from UI)
+ */
+export type JobTriggeredBy =
+  | 'AGENT_ESCALATED'
+  | 'AGENT_NEEDS_HUMAN'
+  // Story C.2/C.5: REVIEWER emitted at least one `needs-human` AC verdict in
+  // the structured ---REVIEW_CRITERIA--- block. Distinct from the agent-level
+  // ---NEED-HUMAN--- shortcut so the operator sees per-AC questions in the
+  // attention inbox and the apply-output flow can route to the reviewer
+  // re-prompt rather than a generic resume.
+  | 'REVIEWER_NEEDS_HUMAN'
+  | 'LOOP_DETECTED'
+  | 'PREFLIGHT_FAILED'
+  | 'POSTVALIDATE_FAILED'
+  | 'COST_CEILING'
+  | 'TIME_CEILING'
+  | 'QUOTA_EXHAUSTED'
+  | 'CAPACITY_TIMEOUT'
+  | 'RETRY_EXHAUSTED'
+  | 'OPERATOR_ABORT';
+
+/**
+ * Structured escalation payload emitted by the agent via the ---ESCALATE---
+ * or ---NEED-HUMAN--- protocols (Pipeline v1 §8.6). Populated by the
+ * universal extractors (Story 1.2). May also be synthesized by the daemon
+ * for non-agent-driven triggers (loop detector, preflight, ceilings) so the
+ * failed-step panel and inbox have a uniform render shape.
+ */
+export interface EscalationPayload {
+  whatFailed: string;
+  whatTried: string[];
+  whyStuck: string;
+  recommendedAction?: 'retry' | 'salvage' | 'skip' | 'talk' | 'abort';
+  humanQuestion?: string;
+}
 
 // ── Epic-dev phase discriminator (Arch Doc §3) ──
 
@@ -42,6 +115,22 @@ export interface ValidationConfig {
 // Step type discriminator
 export type PipelineStepType = 'agent' | 'shell';
 
+/**
+ * Pipeline v1 — Story 1.4. Pre-flight check declarations. Run before the
+ * step's Claude spawn (or shell command). On failure the step transitions
+ * directly to NEEDS_ATTENTION with triggeredBy=PREFLIGHT_FAILED — no quota
+ * spent. Future check types per PRD §FR-6 (port-free, dependency-installed,
+ * dev-server-reachable, env-var-set, disk-space-available) extend the union.
+ */
+export type PreflightCheck = { check: 'folder-exists'; path: string; writable_by?: string };
+
+/**
+ * Pipeline v1 — Story 2.5. Override the runtime default concurrency-class
+ * assignment for a step. Default rules: party/agent-turn → interactive;
+ * focused-plan steps → critical; everything else → background.
+ */
+export type ConcurrencyClass = 'interactive' | 'critical' | 'background';
+
 export interface PipelineStep {
   id: string;
   stepType?: PipelineStepType; // default 'agent' for backward compat
@@ -65,6 +154,26 @@ export interface PipelineStep {
     targetStep?: string;
     injectAs?: string; // variable name to inject error output into
   };
+
+  // Pipeline v1 — failure-recovery + scheduling metadata.
+  /** Story 1.4 — pre-flight checks that must pass before spawn. */
+  preconditions?: PreflightCheck[];
+  /**
+   * Story 1.7 — when true, operator may Skip a NEEDS_ATTENTION job for this
+   * step. Default false: most steps' output is required by downstream steps.
+   */
+  skipTolerant?: boolean;
+  /**
+   * Story 1.5 — when explicitly false, Salvage is disabled regardless of
+   * which extractors fired. Default true.
+   */
+  salvageable?: boolean;
+  /** Story 4.2 — wall-clock ceiling. Default by agent kind. */
+  timeCeilingMs?: number;
+  /** Story 2.5 — override the runtime default concurrency-class assignment. */
+  concurrencyClass?: ConcurrencyClass;
+  /** Story 1.6 — per-step cap on the consecutive retry chain. Default 3. */
+  maxConsecutiveRetries?: number;
 }
 
 export interface PipelineDefinition {
@@ -105,6 +214,65 @@ export interface AgentJob {
   retryAttempt?: number;
   retryAfter?: string;
 
+  // ── Pipeline v1 — Failure recovery surface (Epic 1, §9.2) ──
+  /**
+   * IDs of attention items written for this job. Multiple items can accrete
+   * across a job's lifetime (e.g. preflight then escalate then retry-exhaust).
+   */
+  attentionItemIds?: string[];
+  /**
+   * Names of extractors that fired before the job hit NEEDS_ATTENTION. If
+   * non-empty AND the pipeline step's `salvageable !== false`, the operator
+   * may invoke Salvage (Story 1.5) to apply these variables as if the step
+   * had succeeded.
+   */
+  salvageableExtractors?: string[];
+  /**
+   * Why the job entered NEEDS_ATTENTION (or was Aborted into FAILED). Drives
+   * the failed-step panel header copy and inbox filter chips.
+   */
+  triggeredBy?: JobTriggeredBy;
+  /**
+   * Structured "agent's last words" payload. Populated either by the agent
+   * via the ---ESCALATE--- / ---NEED-HUMAN--- protocols (Story 1.2) or
+   * synthesized by the daemon for non-agent-driven triggers.
+   */
+  escalationPayload?: EscalationPayload;
+  /**
+   * If this job was created by Story 1.6's Retry action, this points to the
+   * original job. The retry chain is followed to enforce the per-step max
+   * consecutive retries cap.
+   */
+  retryOf?: string;
+
+  // Pipeline v1 — Concurrency + QoS (Stories 2.2, 2.4, 6.1).
+  /**
+   * Story 2.2 — derived class for this job's SessionPool admission. Defaults
+   * by job kind; operator can override via /api/jobs/:id/promote-class.
+   */
+  concurrencyClass?: ConcurrencyClass;
+  /**
+   * Story 2.4 — set true when an interactive request needs the slot held
+   * by this background job. Pipeline runner releases the slot at the next
+   * step boundary, then re-enqueues this job.
+   */
+  pauseAfterCurrentStep?: boolean;
+  /** Story 6.1 — operator-chosen scheduling priority. */
+  priority?: 'now' | 'nightly' | 'weekend';
+  /** Story 4.1 — running cost meter persisted by the daemon per turn. */
+  costSoFarUsd?: number;
+  /** Story 4.3 — per-job ceiling. Default $5; raised by operator action. */
+  costCeilingUsd?: number;
+  /** Story 4.2 — wall-clock cap. Default by agent kind. */
+  timeCeilingMs?: number;
+
+  /**
+   * Story 1.8 / FU-3 — operator pressed Abort on a RUNNING job. Daemon
+   * heartbeat polls this flag, SIGTERMs the active child, and flips the
+   * job to FAILED on subprocess exit.
+   */
+  abortRequested?: boolean;
+
   // Compilation metadata (MY-2 Story Compilation Pipeline)
   compilationStatus?: 'success' | 'failed' | 'skipped';
   compilationStartedAt?: string;
@@ -129,7 +297,18 @@ export interface AgentJob {
     | 'party-inspect'
     | 'party-turn'
     | 'party-docs-sync'
-    | 'party-docs-unlink';
+    | 'party-docs-unlink'
+    // Pipeline v1 — Epic 3 (Talk-to-agent) — operator-driven conversation turn.
+    | 'agent-turn';
+  /** Story 3.5 — payload for `jobType: 'agent-turn'` jobs. */
+  agentTurnPayload?: {
+    conversationId: string;
+    sessionId: string;
+    claudeSessionId?: string;
+    content: string;
+    mode: 'fresh' | 'resume' | 'compact-resume';
+    systemPromptSource?: string;
+  };
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;

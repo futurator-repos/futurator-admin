@@ -38,6 +38,13 @@ const STATUS_LABELS: Record<AgentJobStatus, string> = {
   RUNNING: 'Pipeline running',
   COMPLETED: 'Pipeline complete',
   FAILED: 'Pipeline failed',
+  // Pipeline v1 — Story 1.1.
+  COMPLETE_WITH_BLOCKED_STORIES: 'Pipeline complete (with blocked stories)',
+  STALE: 'Pipeline stale (heartbeat lost)',
+  NEEDS_ATTENTION: 'Paused — needs attention',
+  COMPLETED_VIA_SALVAGE: 'Salvaged (operator applied output)',
+  COMPLETED_VIA_TALK: 'Applied via Talk-to-agent',
+  MANUALLY_SKIPPED: 'Manually skipped',
 };
 
 export function LiveOutputPanel({ events, job, isPolling }: LiveOutputPanelProps) {

@@ -1,4 +1,9 @@
 import type { AgentJob, PipelineDefinition } from '../types/agent-orchestrator';
+import {
+  isTerminal as isJobStatusTerminal,
+  isSuccess as isJobStatusSuccess,
+  isPaused as isJobStatusPaused,
+} from '../types/agent-job-state-machine';
 import type { EpicStory, EpicWorkflow } from '../types/epic-workflow';
 import type { AttentionItem } from '../types/attention';
 import {
@@ -24,26 +29,14 @@ import {
  */
 
 // ── Terminal status helpers ────────────────────────────────────────────────
+//
+// Authoritative classification lives in `agent-job-state-machine.ts` as of
+// Pipeline v1 / Story 1.1. Local aliases keep the call sites in this file
+// readable; do not redefine these sets inline.
 
-const TERMINAL_STATUSES = new Set<AgentJob['status']>([
-  'COMPLETED',
-  'FAILED',
-  'COMPLETE_WITH_BLOCKED_STORIES',
-  'STALE',
-]);
-
-const SUCCESS_STATUSES = new Set<AgentJob['status']>([
-  'COMPLETED',
-  'COMPLETE_WITH_BLOCKED_STORIES',
-]);
-
-function isTerminal(status: AgentJob['status']): boolean {
-  return TERMINAL_STATUSES.has(status);
-}
-
-function isSuccess(status: AgentJob['status']): boolean {
-  return SUCCESS_STATUSES.has(status);
-}
+const isTerminal = isJobStatusTerminal;
+const isSuccess = isJobStatusSuccess;
+const isPaused = isJobStatusPaused;
 
 // ── Deps + result types ────────────────────────────────────────────────────
 
@@ -77,6 +70,7 @@ export type WaveReducerResult =
       reason: 'no-stories' | 'wave-running' | 'all-waves-done' | 'epic-fixing' | 'no-current-wave';
     }
   | { kind: 'story-statuses-synced'; waveNumber: number }
+  | { kind: 'wave-paused'; waveNumber: number; needsAttentionStoryIds: string[] }
   | { kind: 'wave-failed'; waveNumber: number; failedStoryIds: string[] }
   | { kind: 'wave-build-check-created'; waveNumber: number; jobId: string }
   | { kind: 'wave-build-check-pending'; waveNumber: number }
@@ -122,6 +116,25 @@ export async function reduceEpicWaves(
     }
     const job = await deps.getJobById(story.jobId);
     jobsByStory.set(story.storyId, job);
+  }
+
+  // Story 1.1: NEEDS_ATTENTION pauses the wave. Sibling jobs continue running
+  // — we don't propagate — but advancement is blocked until the operator
+  // resolves the paused job (Salvage/Retry/Skip/Abort, Stories 1.5-1.8).
+  // We surface a distinct `wave-paused` result so observability can tell the
+  // difference between "still working" and "waiting on a human."
+  const needsAttentionStoryIds = currentWaveStories
+    .filter((s) => {
+      const job = jobsByStory.get(s.storyId);
+      return job !== null && job !== undefined && isPaused(job.status);
+    })
+    .map((s) => s.storyId);
+  if (needsAttentionStoryIds.length > 0) {
+    return {
+      kind: 'wave-paused',
+      waveNumber: currentWave,
+      needsAttentionStoryIds,
+    };
   }
 
   const allTerminal = currentWaveStories.every((s) => {

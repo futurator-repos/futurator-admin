@@ -1,10 +1,13 @@
-import type { AgentJob } from '../types/agent-orchestrator';
 import type { EpicWorkflow, EpicStory } from '../types/epic-workflow';
 import type { Plan } from '../types/plan';
 import { reduceEpicWaves, type WaveReducerDeps } from './wave-reducer';
 import { computePlanWaves, epicsInPlanWave, maxPlanWave } from './plan-waves';
 import { launchPipelineWave, findFirstWave } from './pipeline-launcher';
 import type { PipelineDefinition } from '../types/agent-orchestrator';
+import {
+  isTerminal as isJobStatusTerminal,
+  isSuccess as isJobStatusSuccess,
+} from '../types/agent-job-state-machine';
 
 /**
  * Outer reducer — drives a Plan through its plan-wave state machine.
@@ -54,17 +57,10 @@ function epicLaunched(epic: EpicWorkflow): boolean {
   return epic.stories.some((s) => s.jobId);
 }
 
-const TERMINAL_JOB_STATUSES = new Set<AgentJob['status']>([
-  'COMPLETED',
-  'FAILED',
-  'COMPLETE_WITH_BLOCKED_STORIES',
-  'STALE',
-]);
-
-const SUCCESS_JOB_STATUSES = new Set<AgentJob['status']>([
-  'COMPLETED',
-  'COMPLETE_WITH_BLOCKED_STORIES',
-]);
+// Story 1.1: classification delegated to `agent-job-state-machine`. Salvage
+// (COMPLETED_VIA_SALVAGE) and Skip (MANUALLY_SKIPPED) count as success here
+// — the operator's decision is taken as authoritative for plan-build-check
+// completion just like it is for story-wave advancement.
 
 export async function reducePlan(
   plan: Plan,
@@ -205,10 +201,12 @@ export async function reducePlan(
 
   // Build-check already exists — check its status.
   const buildJob = await deps.getJobById(plan.planBuildJobId);
-  if (!buildJob || !TERMINAL_JOB_STATUSES.has(buildJob.status)) {
+  if (!buildJob || !isJobStatusTerminal(buildJob.status)) {
+    // NEEDS_ATTENTION on the plan-build-check is also surfaced here as
+    // "pending" — the plan stays in `developing` while the operator decides.
     return { kind: 'plan-build-check-pending' };
   }
-  if (!SUCCESS_JOB_STATUSES.has(buildJob.status)) {
+  if (!isJobStatusSuccess(buildJob.status)) {
     if (plan.status !== 'fixing') {
       await deps.updatePlanFields(plan.planId, { status: 'fixing' });
     }

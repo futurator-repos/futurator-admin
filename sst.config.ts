@@ -235,6 +235,46 @@ export default $config({
       },
     });
 
+    // ── Pipeline v1 — Epic 3 (Talk-to-agent) tables ──
+    const agentSessionsTable = new sst.aws.Dynamo('AgentSessionsTable', {
+      fields: {
+        sessionId: 'string',
+        jobId: 'string',
+        stepId: 'string',
+      },
+      primaryIndex: { hashKey: 'sessionId' },
+      globalIndexes: {
+        'jobId-stepId-index': { hashKey: 'jobId', rangeKey: 'stepId' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-agent-sessions',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    const agentConversationsTable = new sst.aws.Dynamo('AgentConversationsTable', {
+      fields: {
+        conversationId: 'string',
+        sessionId: 'string',
+      },
+      primaryIndex: { hashKey: 'conversationId' },
+      globalIndexes: {
+        'sessionId-index': { hashKey: 'sessionId' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-agent-conversations',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── API Lambda ──
     const api = new sst.aws.Function('Api', {
       handler: 'functions/api/index.handler',
@@ -258,6 +298,8 @@ export default $config({
         partySessionsTable,
         plansTable,
         attentionItemsTable,
+        agentSessionsTable,
+        agentConversationsTable,
       ],
       environment: {
         PROJECTS_TABLE: projectsTable.name,
@@ -275,6 +317,8 @@ export default $config({
         PARTY_SESSIONS_TABLE: partySessionsTable.name,
         PLANS_TABLE: plansTable.name,
         ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
+        AGENT_SESSIONS_TABLE: agentSessionsTable.name,
+        AGENT_CONVERSATIONS_TABLE: agentConversationsTable.name,
         PROJECTS_ROOT: '/home/ubuntu/projects',
         BMAD_VERSION: '6.3.0',
         BMAD_AGENTS_SOURCE: '/home/ubuntu/bmad-agents-source/bmad/agents',
@@ -487,6 +531,28 @@ export default $config({
             resources: ['arn:aws:cognito-idp:us-east-1:835745294770:userpool/us-east-1_djPwzFjUe'],
           },
         ],
+      },
+    });
+
+    // ── Cron: Attention Digest (Pipeline v1, Story 6.4) ──
+    // Hourly. Surveys every plan's attention items + per-user
+    // emailDigestEnabled flag and (when SES IAM lands) sends a digest.
+    new sst.aws.Cron('AttentionDigest', {
+      schedule: 'rate(1 hour)',
+      function: {
+        handler: 'functions/cron/attention-digest.handler',
+        runtime: 'nodejs22.x',
+        architecture: 'arm64',
+        memory: '256 MB',
+        timeout: '60 seconds',
+        link: [plansTable, attentionItemsTable, usersTable],
+        environment: {
+          PLANS_TABLE: plansTable.name,
+          ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
+          USERS_TABLE: usersTable.name,
+        },
+        // SES send permission ships when the verified-sender lands; for
+        // now the cron logs the digest payload and returns.
       },
     });
 

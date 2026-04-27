@@ -11,13 +11,25 @@
 
 export const JOB_HANDLER_LEGACY = 'legacy';
 export const JOB_HANDLER_EPIC_DEV = 'epic-dev';
+export const JOB_HANDLER_PARTY_BOOTSTRAP = 'party-bootstrap';
+export const JOB_HANDLER_PARTY_INSPECT = 'party-inspect';
+export const JOB_HANDLER_PARTY_TURN = 'party-turn';
+export const JOB_HANDLER_PARTY_DOCS_SYNC = 'party-docs-sync';
+export const JOB_HANDLER_PARTY_DOCS_UNLINK = 'party-docs-unlink';
+// Pipeline v1 — Epic 3 (Talk-to-agent v1).
+export const JOB_HANDLER_AGENT_TURN = 'agent-turn';
 
 /**
  * Decide which handler should run a given job.
  *
  * Returns one of:
- *   - 'epic-dev' when `job.phase === 'epic-dev'`
- *   - 'legacy'   for every other job (including undefined phase)
+ *   - 'party-bootstrap' when `job.jobType === 'party-bootstrap'`
+ *   - 'party-inspect'   when `job.jobType === 'party-inspect'`
+ *   - 'party-turn'      when `job.jobType === 'party-turn'`
+ *   - 'epic-dev'        when `job.phase === 'epic-dev'`
+ *   - 'legacy'          for every other job (including undefined phase)
+ *
+ * Party jobs take precedence over `phase` since they have no phase.
  *
  * This function is intentionally pure — no I/O, no spawning. Keeping it
  * pure lets us unit-test the dispatch without mocking the Claude CLI or
@@ -25,6 +37,12 @@ export const JOB_HANDLER_EPIC_DEV = 'epic-dev';
  */
 export function selectHandler(job) {
   if (!job || typeof job !== 'object') return JOB_HANDLER_LEGACY;
+  if (job.jobType === 'party-bootstrap') return JOB_HANDLER_PARTY_BOOTSTRAP;
+  if (job.jobType === 'party-inspect') return JOB_HANDLER_PARTY_INSPECT;
+  if (job.jobType === 'party-turn') return JOB_HANDLER_PARTY_TURN;
+  if (job.jobType === 'party-docs-sync') return JOB_HANDLER_PARTY_DOCS_SYNC;
+  if (job.jobType === 'party-docs-unlink') return JOB_HANDLER_PARTY_DOCS_UNLINK;
+  if (job.jobType === 'agent-turn') return JOB_HANDLER_AGENT_TURN;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
 }
@@ -44,6 +62,63 @@ export function validateEpicDevJob(job) {
   if (!p.orchestratorModel) return { ok: false, reason: 'orchestratorModel-missing' };
   if (!Array.isArray(p.stories) || p.stories.length === 0) {
     return { ok: false, reason: 'stories-empty' };
+  }
+  return { ok: true };
+}
+
+export function validatePartyBootstrapJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'party-bootstrap') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.partyBootstrapPayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'partyBootstrapPayload-missing' };
+  if (!p.projectId) return { ok: false, reason: 'projectId-missing' };
+  if (!p.projectPath) return { ok: false, reason: 'projectPath-missing' };
+  return { ok: true };
+}
+
+export function validatePartyInspectJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'party-inspect') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.partyInspectPayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'partyInspectPayload-missing' };
+  if (!p.projectId) return { ok: false, reason: 'projectId-missing' };
+  if (!p.projectPath) return { ok: false, reason: 'projectPath-missing' };
+  return { ok: true };
+}
+
+export function validatePartyTurnJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'party-turn') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.partyTurnPayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'partyTurnPayload-missing' };
+  if (!p.sessionId) return { ok: false, reason: 'sessionId-missing' };
+  if (!p.content || typeof p.content !== 'string') return { ok: false, reason: 'content-missing' };
+  return { ok: true };
+}
+
+export function validatePartyDocsSyncJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'party-docs-sync') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.partyDocsSyncPayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'partyDocsSyncPayload-missing' };
+  if (!p.projectId || !p.projectPath || !p.filename || !p.s3Bucket || !p.s3Key) {
+    return { ok: false, reason: 'partyDocsSyncPayload-incomplete' };
+  }
+  return { ok: true };
+}
+
+export function validatePartyDocsUnlinkJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'party-docs-unlink') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.partyDocsUnlinkPayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'partyDocsUnlinkPayload-missing' };
+  if (!p.projectId || !p.projectPath || !p.filename) {
+    return { ok: false, reason: 'partyDocsUnlinkPayload-incomplete' };
   }
   return { ok: true };
 }

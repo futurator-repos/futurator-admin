@@ -1,6 +1,42 @@
 // ── Job status ──
+//
+// Pipeline v1 (Story 1.1) extends the enum with NEEDS_ATTENTION,
+// COMPLETED_VIA_SALVAGE, and MANUALLY_SKIPPED. See
+// `functions/shared/types/agent-orchestrator.ts` for the canonical
+// definition + state-machine documentation.
 
-export type AgentJobStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+export type AgentJobStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'COMPLETE_WITH_BLOCKED_STORIES'
+  | 'STALE'
+  | 'NEEDS_ATTENTION'
+  | 'COMPLETED_VIA_SALVAGE'
+  | 'COMPLETED_VIA_TALK'
+  | 'MANUALLY_SKIPPED';
+
+export type JobTriggeredBy =
+  | 'AGENT_ESCALATED'
+  | 'AGENT_NEEDS_HUMAN'
+  | 'LOOP_DETECTED'
+  | 'PREFLIGHT_FAILED'
+  | 'POSTVALIDATE_FAILED'
+  | 'COST_CEILING'
+  | 'TIME_CEILING'
+  | 'QUOTA_EXHAUSTED'
+  | 'CAPACITY_TIMEOUT'
+  | 'RETRY_EXHAUSTED'
+  | 'OPERATOR_ABORT';
+
+export interface EscalationPayload {
+  whatFailed: string;
+  whatTried: string[];
+  whyStuck: string;
+  recommendedAction?: 'retry-with-hint' | 'skip-step' | 'ask-human' | 'abort-job';
+  humanQuestion?: string;
+}
 
 // ── Pipeline definition (user-configured) ──
 
@@ -32,6 +68,10 @@ export interface ValidationConfig {
 // Step type discriminator
 export type PipelineStepType = 'agent' | 'shell';
 
+export type PreflightCheck = { check: 'folder-exists'; path: string; writable_by?: string };
+
+export type ConcurrencyClass = 'interactive' | 'critical' | 'background';
+
 export interface PipelineStep {
   id: string;
   stepType?: PipelineStepType; // default 'agent' for backward compat
@@ -55,6 +95,14 @@ export interface PipelineStep {
     targetStep?: string;
     injectAs?: string;
   };
+
+  // Pipeline v1 — failure-recovery + scheduling metadata.
+  preconditions?: PreflightCheck[];
+  skipTolerant?: boolean;
+  salvageable?: boolean;
+  timeCeilingMs?: number;
+  concurrencyClass?: ConcurrencyClass;
+  maxConsecutiveRetries?: number;
 }
 
 export interface PipelineDefinition {
@@ -106,6 +154,15 @@ export interface AgentJob {
   retryAttempt?: number;
   /** Phase A.3 retry ladder: ISO timestamp gating daemon re-pick. */
   retryAfter?: string;
+
+  // Pipeline v1 — Failure recovery surface (Stories 1.1–1.8).
+  attentionItemIds?: string[];
+  salvageableExtractors?: string[];
+  triggeredBy?: JobTriggeredBy;
+  escalationPayload?: EscalationPayload;
+  retryOf?: string;
+  epicId?: string;
+  projectId?: string;
 }
 
 // ── Events ──

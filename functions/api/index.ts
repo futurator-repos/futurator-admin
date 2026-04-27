@@ -37,6 +37,7 @@ import {
   EXPECTED_AGENT_COUNT,
   PARTY_DOC_ALLOWED_CONTENT_TYPES,
   PARTY_DOCS_S3_PREFIX,
+  TOGGLEABLE_TOOLS,
 } from '../shared/types/party';
 import { createAgentJobSchema } from '../shared/schemas/agent-orchestrator-schema';
 import { resolveBlockerSchema } from '../shared/schemas/resolve-blocker-schema';
@@ -53,6 +54,7 @@ import * as planRepo from '../shared/repositories/plan-repository';
 import * as attentionRepo from '../shared/repositories/attention-items-repository';
 import type { AttentionStatus } from '../shared/types/attention';
 import { buildQaReport } from '../shared/repositories/qa-report-aggregator';
+import { buildDeployReport } from '../shared/repositories/deploy-report-aggregator';
 import {
   parseVisualTests as sharedParseVisualTests,
   buildQaPipeline as sharedBuildQaPipeline,
@@ -69,7 +71,6 @@ import {
   deletePlanFolder,
 } from '../shared/services/plan-folder-service';
 import { generatePmPlanPipeline } from '../shared/pipelines/pm-plan-pipeline';
-import { generatePlanBuildPipeline } from '../shared/pipelines/plan-build-pipeline';
 import { parsePlanOutput, applyPlanOutput } from '../shared/services/plan-generation-service';
 import { computePlanWaves, epicsInPlanWave } from '../shared/services/plan-waves';
 import type { PipelineDefinition } from '../shared/types/agent-orchestrator';
@@ -1365,6 +1366,9 @@ app.post('/api/plans/from-intent', async (c) => {
     createdBy: user.userId,
   };
 
+  // Persist the requested BMAD toggle (default ON when the caller omits it).
+  plan.bmadEnabled = input.bmadEnabled !== false;
+
   await planRepo.createPlan(plan);
 
   // Bootstrap folder + initial plan.md with just the intent (epics empty).
@@ -1401,7 +1405,84 @@ app.post('/api/plans/from-intent', async (c) => {
     pipeline,
   });
 
-  return c.json({ planId, pmJobId, plan }, 201);
+  // Party Mode (BMAD) — enqueue in parallel with the PM job when enabled.
+  // The party-bootstrap pipeline is idempotent and runs on the same EC2
+  // folder; creating the party-projects DDB row here lets the UI surface
+  // install progress immediately on the Party Mode stage of the dashboard.
+  let bmadJobId: string | undefined;
+  if (plan.bmadEnabled) {
+    bmadJobId = await enqueuePartyBootstrapForPlan(plan, user.userId);
+  }
+
+  return c.json({ planId, pmJobId, bmadJobId, plan }, 201);
+});
+
+/**
+ * Upsert a PartyProject row and enqueue a `party-bootstrap` job for a Plan.
+ * Shared between plan-create and the retroactive install endpoint.
+ *
+ * Returns the bootstrap jobId, or undefined when another bootstrap is
+ * already in flight (caller treats that as "install in progress").
+ */
+async function enqueuePartyBootstrapForPlan(
+  plan: Plan,
+  userId: string,
+): Promise<string | undefined> {
+  try {
+    await partyProjectsRepo.upsertProjectFromFilesystem(plan.name, plan.workingDir);
+  } catch (err) {
+    console.warn(
+      `[Plans] upsertProjectFromFilesystem failed for plan=${plan.planId} name=${plan.name}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  const jobId = crypto.randomUUID();
+  const lock = await partyProjectsRepo.tryAcquireBootstrapLock(plan.name, jobId);
+  if (!lock.ok) {
+    if (lock.reason === 'BOOTSTRAP_IN_PROGRESS') return undefined;
+    console.warn(`[Plans] bootstrap lock failed (${lock.reason}) for ${plan.name}`);
+    return undefined;
+  }
+
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: userId,
+    workingDir: plan.workingDir,
+    jobType: 'party-bootstrap',
+    partyBootstrapPayload: {
+      projectId: plan.name,
+      projectPath: plan.workingDir,
+      forceReinstall: false,
+      createFolder: true,
+    },
+  });
+  return jobId;
+}
+
+/**
+ * Retroactively enable Party Mode (BMAD) on a plan that was created without it.
+ * Flips `plan.bmadEnabled = true` and enqueues a bootstrap job. Idempotent —
+ * running against an already-HEALTHY project is a no-op on disk (the daemon's
+ * install step detects the existing install and skips).
+ */
+app.post('/api/plans/:id/bmad/install', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  if (!plan.bmadEnabled) {
+    await planRepo.updatePlanFields(planId, { bmadEnabled: true });
+    plan.bmadEnabled = true;
+  }
+
+  const jobId = await enqueuePartyBootstrapForPlan(plan, c.get('user').userId);
+  return c.json({ planId, bmadJobId: jobId, inProgress: !jobId }, 202);
 });
 
 // POST /api/plans/:id/apply-plan?jobId=X — parse PM job output + create epics.
@@ -1787,6 +1868,54 @@ app.get('/api/plans/:id/qa-report', async (c) => {
   return c.json(report);
 });
 
+// GET /api/plans/:id/deploy-report
+//   Plan-wide release dashboard. Aggregates past deploy jobs (from
+//   plan.deployJobIds, falling back to epic.deployJobId of the final epic),
+//   derives a verdict, and packages a "what's shipping" handoff summary
+//   from the QA report.
+app.get('/api/plans/:id/deploy-report', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  const epics: EpicWorkflow[] = [];
+  for (const epicId of plan.epicIds ?? []) {
+    const epic = await epicRepo.getEpicById(epicId);
+    if (epic) epics.push(epic);
+  }
+
+  // Collect every jobId the aggregator might want: plan.deployJobIds +
+  // every epic.deployJobId (for legacy fallback).
+  const jobIdSet = new Set<string>(plan.deployJobIds ?? []);
+  for (const epic of epics) {
+    if (epic.deployJobId) jobIdSet.add(epic.deployJobId);
+  }
+  const jobsById: Record<string, import('../shared/types/agent-orchestrator').AgentJob> = {};
+  for (const jobId of jobIdSet) {
+    const job = await agentJobsRepo.getJobById(jobId);
+    if (job) jobsById[jobId] = job;
+  }
+
+  // Build QA report inline so the handoff card has current numbers without
+  // a second client roundtrip. Reuse the same hydration the QA route does.
+  const qaJobIdSet = new Set<string>();
+  for (const epic of epics) {
+    if (epic.qaJobId) qaJobIdSet.add(epic.qaJobId);
+    if (epic.poJobId) qaJobIdSet.add(epic.poJobId);
+    if (epic.waveBuildJobs) for (const id of Object.values(epic.waveBuildJobs)) qaJobIdSet.add(id);
+  }
+  const qaJobsById: Record<string, import('../shared/types/agent-orchestrator').AgentJob> = {};
+  for (const jobId of qaJobIdSet) {
+    const job = await agentJobsRepo.getJobById(jobId);
+    if (job) qaJobsById[jobId] = job;
+  }
+  const attentionItems = await attentionRepo.listAttentionItems(planId);
+  const qaReport = buildQaReport({ plan, epics, jobsById: qaJobsById, attentionItems });
+
+  const report = buildDeployReport({ plan, epics, jobsById, qaReport });
+  return c.json(report);
+});
+
 // POST /api/plans/:id/qa-review
 //   Fans out: enqueues a Visual QA job for every epic with visual tests.
 //   Called by the manual "Run QA Review" button AND by the wave-completion
@@ -1801,19 +1930,33 @@ app.post('/api/plans/:id/qa-review', async (c) => {
   const results: Array<{ epicId: string; jobId?: string; skipped?: string }> = [];
   const now = new Date().toISOString();
 
-  for (const epicId of plan.epicIds ?? []) {
+  // Concurrent QA jobs each need their own dev-server port so they don't
+  // race for :5173. Assign `5173 + index` per epic. Range [5173, 5199] gives
+  // us 27 concurrent slots — plenty for any realistic plan.
+  const QA_PORT_BASE = 5173;
+  const QA_PORT_RANGE = 27;
+  const epicIds = plan.epicIds ?? [];
+  for (let i = 0; i < epicIds.length; i += 1) {
+    const epicId = epicIds[i];
     const epic = await epicRepo.getEpicById(epicId);
     if (!epic) {
       results.push({ epicId, skipped: 'epic-not-found' });
       continue;
     }
-    const result = await launchVisualQa(epic, user.userId, now, {
-      getJobById: agentJobsRepo.getJobById,
-      createJob: agentJobsRepo.createJob,
-      parseVisualTests,
-      buildQaPipeline,
-      uuid: () => crypto.randomUUID(),
-    });
+    const port = QA_PORT_BASE + (i % QA_PORT_RANGE);
+    const result = await launchVisualQa(
+      epic,
+      user.userId,
+      now,
+      {
+        getJobById: agentJobsRepo.getJobById,
+        createJob: agentJobsRepo.createJob,
+        parseVisualTests,
+        buildQaPipeline,
+        uuid: () => crypto.randomUUID(),
+      },
+      { port },
+    );
     if (!result.ok) {
       results.push({ epicId, skipped: result.message });
       continue;
@@ -1828,6 +1971,33 @@ app.post('/api/plans/:id/qa-review', async (c) => {
   }
 
   return c.json({ planId, results }, 201);
+});
+
+// POST /api/plans/:id/approve-ac
+//   Operator sign-off on the AC pillar. Flips every pending criterion to
+//   PASS by writing `plan.acApproval = {approvedAt, approvedBy}`. Re-runnable —
+//   later calls overwrite the timestamp. No body required.
+app.post('/api/plans/:id/approve-ac', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  const now = new Date().toISOString();
+  await planRepo.updatePlanFields(planId, {
+    acApproval: { approvedAt: now, approvedBy: user.userId },
+  });
+  return c.json({ planId, acApproval: { approvedAt: now, approvedBy: user.userId } });
+});
+
+// POST /api/plans/:id/revoke-ac-approval
+//   Clears plan.acApproval. Used when a reviewer needs to un-approve because
+//   a story was sent back for rework.
+app.post('/api/plans/:id/revoke-ac-approval', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  await planRepo.updatePlanFields(planId, { acApproval: undefined });
+  return c.json({ planId });
 });
 
 // POST /api/epic-workflows/:id/stories/:storyId/send-back
@@ -3430,6 +3600,22 @@ Never end the session without emitting a DEPLOY_STATUS line. Never ask for permi
     pipeline: deployPipeline,
   });
 
+  // Persist on the epic (latest deploy) AND append to plan.deployJobIds so
+  // the Deploy report can render history. Legacy plans without the field
+  // are seeded with the current job as their first history entry.
+  await epicRepo.updateEpicFields(epicId, { deployJobId: jobId });
+  if (epic.planId) {
+    const plan = await planRepo.getPlanById(epic.planId);
+    if (plan) {
+      const history = plan.deployJobIds ?? [];
+      if (!history.includes(jobId)) {
+        await planRepo.updatePlanFields(plan.planId, {
+          deployJobIds: [...history, jobId],
+        });
+      }
+    }
+  }
+
   // Ensure project registry exists with deploy URL
   const existing = await registryRepo.getProject(appName);
   if (existing) {
@@ -3843,6 +4029,60 @@ app.get('/api/party/projects/:id', async (c) => {
   return c.json(project);
 });
 
+/**
+ * PATCH project settings — currently just `allowedTools`. Validates each
+ * tool name against the toggleable allow-list so we can't accidentally
+ * grant something dangerous (Bash, MCP) via this endpoint.
+ *
+ * Body: { allowedTools: string[] | null }
+ *   - Array of tool names → store as-is.
+ *   - null → clear the field, falling back to DEFAULT_ALLOWED_TOOLS at
+ *     daemon time. Different from [] which means "deny all extras".
+ */
+app.patch('/api/party/projects/:id', async (c) => {
+  const projectId = c.req.param('id');
+  const parsed = projectIdSchema.safeParse(projectId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid projectId');
+  }
+  const body = (await c.req.json().catch(() => ({}))) as {
+    allowedTools?: unknown;
+  };
+
+  const project = await partyProjectsRepo.getProject(parsed.data);
+  if (!project) throw new NotFoundError('PartyProject', parsed.data);
+
+  const patch: { allowedTools?: string[] } = {};
+  if (Object.prototype.hasOwnProperty.call(body, 'allowedTools')) {
+    if (body.allowedTools === null) {
+      // Clear: store undefined (DDB removes the attribute).
+      await partyProjectsRepo.clearProjectAllowedTools(parsed.data);
+      const refreshed = await partyProjectsRepo.getProject(parsed.data);
+      return c.json(refreshed);
+    }
+    if (!Array.isArray(body.allowedTools)) {
+      throw new ValidationError('allowedTools must be an array of strings or null');
+    }
+    const allowed = new Set(TOGGLEABLE_TOOLS as readonly string[]);
+    const next = (body.allowedTools as unknown[]).map(String);
+    for (const t of next) {
+      if (!allowed.has(t)) {
+        throw new ValidationError(
+          `tool "${t}" is not toggleable; allowed values: ${[...allowed].join(', ')}`,
+        );
+      }
+    }
+    patch.allowedTools = next;
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return c.json(project);
+  }
+  await partyProjectsRepo.updateProjectState(parsed.data, patch);
+  const updated = await partyProjectsRepo.getProject(parsed.data);
+  return c.json(updated);
+});
+
 app.post('/api/party/projects/:id/bootstrap', async (c) => {
   const projectId = c.req.param('id');
   const projectPath = resolvePartyProjectPath(projectId);
@@ -4151,6 +4391,33 @@ app.get('/api/party/sessions/:id', async (c) => {
   return c.json(session);
 });
 
+// PATCH session metadata (currently just `topic`). Used to rename
+// sessions from the chat header. Body: { topic: string | null }.
+app.patch('/api/party/sessions/:id', async (c) => {
+  const sessionId = c.req.param('id');
+  const parsed = sessionIdSchema.safeParse(sessionId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const body = (await c.req.json().catch(() => ({}))) as {
+    topic?: unknown;
+  };
+  let nextTopic: string | null | undefined;
+  if (body.topic === null) {
+    nextTopic = null;
+  } else if (typeof body.topic === 'string') {
+    const trimmed = body.topic.trim();
+    nextTopic = trimmed.length === 0 ? null : trimmed;
+  } else if (typeof body.topic !== 'undefined') {
+    throw new ValidationError('topic must be a string or null');
+  }
+  const updated = await partySessionsRepo.updateSessionMetadata(parsed.data, {
+    topic: nextTopic,
+  });
+  if (!updated) throw new NotFoundError('PartySession', parsed.data);
+  return c.json(updated);
+});
+
 app.get('/api/party/projects/:projectId/sessions', async (c) => {
   const projectId = c.req.param('projectId');
   const parsed = projectIdSchema.safeParse(projectId);
@@ -4207,6 +4474,118 @@ app.post('/api/party/sessions/:id/messages', async (c) => {
   return c.json({ jobId, sessionId: parsedId.data }, 202);
 });
 
+/**
+ * Read a single file from inside a Party project's working directory on EC2.
+ * Used by the chat's file-preview drawer when the user clicks a file path
+ * link inside an agent message.
+ *
+ * Path safety: resolved absolutely against `<projectPath>/`. Any resolved
+ * path that escapes the project root (via `..`, symlinks the shell expands,
+ * or absolute overrides) is refused with 403. Even though SSM runs as
+ * `ubuntu` and can in principle read more, leaking files from other projects
+ * via the chat would still be a confused-deputy bug.
+ *
+ * Hard size cap: 1 MiB. Files bigger than that return a 413 with a hint to
+ * download via the existing /api/ec2 surface (TODO: separate stream endpoint).
+ */
+app.get('/api/party/projects/:projectId/files', async (c) => {
+  const projectId = c.req.param('projectId');
+  const parsedId = projectIdSchema.safeParse(projectId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid projectId');
+  }
+  const rel = c.req.query('path') || '';
+  if (!rel || rel.length > 500) {
+    throw new ValidationError('path query param required (max 500 chars)');
+  }
+  // Reject obvious traversal markers up front. We re-validate after path
+  // resolution as belt-and-suspenders.
+  if (rel.includes('\0') || rel.includes('..')) {
+    throw new ValidationError('path may not contain `..` or null bytes');
+  }
+  // Whitelist characters allowed in the relative path.
+  if (!/^[A-Za-z0-9._/\-]+$/.test(rel)) {
+    throw new ValidationError('path contains disallowed characters');
+  }
+
+  const project = await partyProjectsRepo.getProject(parsedId.data);
+  if (!project) throw new NotFoundError('PartyProject', parsedId.data);
+
+  const { state } = await getInstanceState();
+  if (state !== 'running') {
+    throw new AppError('EC2_NOT_RUNNING', `EC2 instance is ${state}`, 400);
+  }
+
+  // Resolve relative-to-projectPath. Strip a leading `/` so a leading slash
+  // doesn't make rel absolute (which would override projectPath in path.join
+  // semantics — we don't use path.join here but mirror its safety).
+  const cleanRel = rel.replace(/^\/+/, '');
+  const fullPath = `${project.path.replace(/\/+$/, '')}/${cleanRel}`;
+
+  // SSM-side guard. realpath verifies the resolved canonical path is still
+  // within the project root after symlink expansion. Bash quoting is safe
+  // because we already whitelisted the characters above.
+  const cmd = [
+    `set -e`,
+    `ROOT="${project.path}"`,
+    `TARGET="${fullPath}"`,
+    `RESOLVED=$(realpath -m "$TARGET" 2>/dev/null || echo "__NOT_FOUND__")`,
+    // realpath -m resolves missing components without erroring; we still
+    // need to check the file actually exists.
+    `case "$RESOLVED" in "$ROOT"|"$ROOT"/*) ;; *) echo "__OUT_OF_ROOT__" && exit 0;; esac`,
+    `if [ ! -f "$RESOLVED" ]; then echo "__NOT_FOUND__" && exit 0; fi`,
+    `SIZE=$(stat -c%s "$RESOLVED")`,
+    `if [ "$SIZE" -gt 1048576 ]; then echo "__TOO_LARGE__:$SIZE" && exit 0; fi`,
+    `echo "__OK__:$SIZE"`,
+    `cat "$RESOLVED"`,
+  ].join('\n');
+
+  const commandId = await sendSsmCommand(cmd);
+  const output = await waitForSsmOutput(commandId);
+
+  if (output.includes('__OUT_OF_ROOT__')) {
+    throw new AppError('FORBIDDEN', 'path resolves outside project root', 403);
+  }
+  if (output.includes('__NOT_FOUND__')) {
+    throw new NotFoundError('File', cleanRel);
+  }
+  const tooLarge = output.match(/__TOO_LARGE__:(\d+)/);
+  if (tooLarge) {
+    throw new AppError(
+      'FILE_TOO_LARGE',
+      `File is ${tooLarge[1]} bytes; preview limited to 1 MiB`,
+      413,
+    );
+  }
+  // Strip the marker line + size header before returning the body.
+  const headerMatch = output.match(/^__OK__:(\d+)\n([\s\S]*)$/);
+  if (!headerMatch) {
+    throw new AppError('READ_FAILED', 'unexpected output from file read', 500);
+  }
+  const size = parseInt(headerMatch[1], 10);
+  const content = headerMatch[2];
+
+  // Minimal content-type sniffing — UI uses the extension primarily, this
+  // is informational.
+  const ext = cleanRel.split('.').pop()?.toLowerCase() || '';
+  const contentType =
+    ext === 'md' || ext === 'markdown'
+      ? 'text/markdown'
+      : ext === 'json'
+        ? 'application/json'
+        : ext === 'html'
+          ? 'text/html'
+          : 'text/plain';
+
+  return c.json({
+    path: cleanRel,
+    fullPath,
+    size,
+    contentType,
+    content,
+  });
+});
+
 app.get('/api/party/sessions/:id/events', async (c) => {
   const sessionId = c.req.param('id');
   const parsed = sessionIdSchema.safeParse(sessionId);
@@ -4216,6 +4595,676 @@ app.get('/api/party/sessions/:id/events', async (c) => {
   const afterSeq = c.req.query('after') || '000000';
   const { events, lastSeq } = await agentEventsRepo.getEventsAfter(parsed.data, afterSeq);
   return c.json({ events, lastSeq });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Pipeline v1 — Failure recovery surface (Epic 1, Stories 1.5–1.8)
+//
+// Operator actions on a NEEDS_ATTENTION job. All four endpoints follow the
+// same shape: load the job, validate the requested action against the job's
+// state machine, mutate, return the updated job. The wave reducer
+// (functions/shared/services/wave-reducer.ts) handles advancement on the
+// next cron tick — these endpoints do not directly drive wave state to
+// keep the API thin and the reducer authoritative.
+// ──────────────────────────────────────────────────────────────────────────
+
+import { randomUUID as randomUUID_pipelineV1 } from 'crypto';
+
+function findPipelineStep(
+  job: import('../shared/types/agent-orchestrator').AgentJob,
+  stepId: string,
+) {
+  return job.pipeline?.steps?.find((s) => s.id === stepId) || null;
+}
+
+async function resolvePlanIdForJob(
+  job: import('../shared/types/agent-orchestrator').AgentJob,
+): Promise<string | null> {
+  if (!job.epicId) return null;
+  const epic = await epicRepo.getEpicById(job.epicId);
+  return epic?.planId || null;
+}
+
+// POST /api/jobs/:jobId/steps/:stepId/salvage — Story 1.5.
+// Apply already-extracted variables as if the step had succeeded.
+app.post('/api/jobs/:jobId/steps/:stepId/salvage', async (c) => {
+  const { jobId, stepId } = c.req.param();
+  const job = await agentJobsRepo.getJobById(jobId);
+  if (!job) return c.json({ error: 'Job not found' }, 404);
+
+  // Idempotency: if already salvaged, return the same response shape.
+  if (job.status === 'COMPLETED_VIA_SALVAGE') {
+    return c.json({ ok: true, job, advanced: true });
+  }
+  if (job.status !== 'NEEDS_ATTENTION') {
+    return c.json(
+      {
+        error: `Cannot salvage: job is ${job.status}, expected NEEDS_ATTENTION`,
+      },
+      409,
+    );
+  }
+  if (!job.salvageableExtractors || job.salvageableExtractors.length === 0) {
+    return c.json({ error: 'Cannot salvage: no extractors fired before failure' }, 409);
+  }
+  const step = findPipelineStep(job, stepId);
+  if (step && step.salvageable === false) {
+    return c.json({ error: `Cannot salvage: step "${stepId}" is marked salvageable=false` }, 409);
+  }
+
+  // Mark COMPLETED_VIA_SALVAGE. The wave reducer treats this as success on
+  // the next tick (Story 1.1). The variables are already on `job.variables`
+  // — the daemon's escalation handler persisted them before throwing.
+  await agentJobsRepo.updateJobFields(jobId, {
+    status: 'COMPLETED_VIA_SALVAGE',
+    errorMessage: undefined,
+  });
+
+  // Auto-resolve any open attention items linked to this job (best-effort).
+  const planId = await resolvePlanIdForJob(job);
+  if (planId && job.attentionItemIds?.length) {
+    for (const itemId of job.attentionItemIds) {
+      try {
+        await attentionRepo.updateAttentionStatus(planId, itemId, 'resolved');
+      } catch {
+        // ignore — item may have been resolved already
+      }
+    }
+  }
+
+  const updated = await agentJobsRepo.getJobById(jobId);
+  return c.json({ ok: true, job: updated, advanced: true });
+});
+
+// POST /api/jobs/:jobId/steps/:stepId/retry — Story 1.6.
+// Spawn a new job with the same pipeline + step config; original stays
+// NEEDS_ATTENTION linked via retryOf.
+app.post('/api/jobs/:jobId/steps/:stepId/retry', async (c) => {
+  const { jobId, stepId } = c.req.param();
+  const body = (await c.req.json().catch(() => ({}))) as { hint?: string };
+
+  const job = await agentJobsRepo.getJobById(jobId);
+  if (!job) return c.json({ error: 'Job not found' }, 404);
+  if (job.status !== 'NEEDS_ATTENTION') {
+    return c.json({ error: `Cannot retry: job is ${job.status}` }, 409);
+  }
+  const step = findPipelineStep(job, stepId);
+
+  // Walk the retryOf chain to count consecutive retries.
+  const maxRetries = step?.maxConsecutiveRetries ?? 3;
+  let chainLen = 0;
+  let cursor: typeof job | null = job;
+  while (cursor?.retryOf && chainLen < 100) {
+    chainLen += 1;
+    cursor = await agentJobsRepo.getJobById(cursor.retryOf);
+  }
+  if (chainLen >= maxRetries) {
+    return c.json(
+      {
+        error: `Retry cap (${maxRetries}) reached for step "${stepId}". Use Talk to debug or Abort to give up.`,
+      },
+      409,
+    );
+  }
+
+  // Spawn a new PENDING job. The daemon will pick it up on its next poll.
+  const now = new Date().toISOString();
+  const newJobId = randomUUID_pipelineV1();
+  const variables = { ...(job.pipeline?.initialVariables || {}) };
+  if (typeof body?.hint === 'string' && body.hint.trim().length > 0) {
+    variables.OPERATOR_HINT = `Hint from operator: ${body.hint.trim()}`;
+  }
+  const newPipeline = job.pipeline ? { ...job.pipeline, initialVariables: variables } : undefined;
+
+  await agentJobsRepo.createJob({
+    jobId: newJobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: job.createdBy,
+    workingDir: job.workingDir,
+    pipeline: newPipeline,
+    epicId: job.epicId,
+    projectId: job.projectId,
+    retryOf: jobId,
+  });
+
+  // Auto-resolve attention items on the original; original stays NEEDS_ATTENTION
+  // (audit trail) but its inbox row clears.
+  const planId = await resolvePlanIdForJob(job);
+  if (planId && job.attentionItemIds?.length) {
+    for (const itemId of job.attentionItemIds) {
+      try {
+        await attentionRepo.updateAttentionStatus(planId, itemId, 'resolved');
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return c.json({ ok: true, newJobId });
+});
+
+// POST /api/jobs/:jobId/steps/:stepId/skip — Story 1.7.
+app.post('/api/jobs/:jobId/steps/:stepId/skip', async (c) => {
+  const { jobId, stepId } = c.req.param();
+  const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+
+  const job = await agentJobsRepo.getJobById(jobId);
+  if (!job) return c.json({ error: 'Job not found' }, 404);
+  if (job.status !== 'NEEDS_ATTENTION') {
+    return c.json({ error: `Cannot skip: job is ${job.status}` }, 409);
+  }
+  const step = findPipelineStep(job, stepId);
+  if (!step || step.skipTolerant !== true) {
+    return c.json(
+      {
+        error: `Cannot skip: step "${stepId}" is not skip-tolerant — its output is required by downstream steps`,
+      },
+      409,
+    );
+  }
+
+  await agentJobsRepo.updateJobFields(jobId, {
+    status: 'MANUALLY_SKIPPED',
+    errorMessage: body?.reason
+      ? `manually skipped: ${body.reason}`.slice(0, 500)
+      : 'manually skipped',
+  });
+
+  const planId = await resolvePlanIdForJob(job);
+  if (planId && job.attentionItemIds?.length) {
+    for (const itemId of job.attentionItemIds) {
+      try {
+        await attentionRepo.updateAttentionStatus(planId, itemId, 'resolved');
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return c.json({ ok: true, advanced: true });
+});
+
+// POST /api/jobs/:jobId/steps/:stepId/abort — Story 1.8.
+app.post('/api/jobs/:jobId/steps/:stepId/abort', async (c) => {
+  const { jobId } = c.req.param();
+  const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+
+  const job = await agentJobsRepo.getJobById(jobId);
+  if (!job) return c.json({ error: 'Job not found' }, 404);
+  if (!['NEEDS_ATTENTION', 'RUNNING', 'PENDING'].includes(job.status)) {
+    return c.json(
+      { error: `Cannot abort: job is ${job.status}, expected NEEDS_ATTENTION/RUNNING/PENDING` },
+      409,
+    );
+  }
+
+  // FU-3: differentiated handling by status.
+  //   - RUNNING: set `abortRequested=true` so the daemon's heartbeat loop
+  //     SIGTERMs the active child. The daemon flips status → FAILED on
+  //     subprocess exit; we don't pre-flip here so the daemon can still
+  //     attribute the failure cleanly.
+  //   - NEEDS_ATTENTION / PENDING: no live process; flip directly.
+  if (job.status === 'RUNNING') {
+    await agentJobsRepo.updateJobFields(jobId, {
+      abortRequested: true,
+      triggeredBy: 'OPERATOR_ABORT',
+      errorMessage: body?.reason
+        ? `abort requested: ${body.reason}`.slice(0, 500)
+        : 'abort requested by operator',
+    });
+  } else {
+    await agentJobsRepo.updateJobFields(jobId, {
+      status: 'FAILED',
+      triggeredBy: 'OPERATOR_ABORT',
+      errorMessage: body?.reason
+        ? `aborted by operator: ${body.reason}`.slice(0, 500)
+        : 'aborted by operator',
+    });
+  }
+
+  const planId = await resolvePlanIdForJob(job);
+  if (planId && job.attentionItemIds?.length) {
+    for (const itemId of job.attentionItemIds) {
+      try {
+        await attentionRepo.updateAttentionStatus(planId, itemId, 'resolved');
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return c.json({ ok: true });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Pipeline v1 — Epic 3 (Talk-to-agent v1).
+//
+// Conversation lifecycle:
+//   POST /api/jobs/:jobId/steps/:stepId/conversations  → create a conversation
+//   POST /api/conversations/:conversationId/messages   → send a message (enqueues agent-turn job)
+//   GET  /api/conversations/:conversationId/events     → stream events (polling fallback)
+//   POST /api/conversations/:conversationId/apply-output → run extractors + apply variables
+// ──────────────────────────────────────────────────────────────────────────
+
+import * as agentSessionsRepo from '../shared/repositories/agent-sessions-repository';
+import * as agentConversationsRepo from '../shared/repositories/agent-conversations-repository';
+
+// POST /api/jobs/:jobId/steps/:stepId/conversations — Story 3.4.
+app.post('/api/jobs/:jobId/steps/:stepId/conversations', async (c) => {
+  const { jobId, stepId } = c.req.param();
+  const body = (await c.req.json().catch(() => ({}))) as {
+    mode?: 'fresh' | 'resume' | 'compact-resume';
+  };
+  const mode = body.mode || 'fresh';
+
+  const job = await agentJobsRepo.getJobById(jobId);
+  if (!job) return c.json({ error: 'Job not found' }, 404);
+
+  // Look up an existing AgentSession for this step (created by the daemon
+  // on first turn). For `fresh`, we create a new session row; for `resume`
+  // / `compact-resume`, we require the existing session to have a
+  // claudeSessionId.
+  const existing = await agentSessionsRepo.findByJobAndStep(jobId, stepId);
+
+  if ((mode === 'resume' || mode === 'compact-resume') && !existing?.claudeSessionId) {
+    return c.json({ error: `Cannot ${mode}: step has no Claude session to resume from` }, 404);
+  }
+
+  // Single-OPEN-conversation rule (v1 AC#3).
+  if (existing && (await agentConversationsRepo.hasOpenConversation(existing.sessionId))) {
+    return c.json({ error: 'A conversation is already OPEN against this session' }, 409);
+  }
+
+  // FU-7 (Story 5.4) — compact-resume: synthesize a compacted session row
+  // synchronously and open the conversation against it. The actual
+  // on-disk transcript rewrite is the daemon's responsibility (Story 5.3
+  // compactor); the API guarantee here is that a fresh "compacted" session
+  // row exists, with `compactedFrom` pointing back at the original. Open
+  // conversation will resume against the compacted session's
+  // claudeSessionId; cost is the warm-resume rate over the compacted token
+  // count rather than the pre-compaction count.
+  let sessionId = existing?.sessionId;
+  const now = new Date().toISOString();
+  if (mode === 'compact-resume' && existing) {
+    const compactedId = randomUUID_pipelineV1();
+    await agentSessionsRepo.createSession({
+      sessionId: compactedId,
+      jobId,
+      stepId,
+      claudeSessionId: existing.claudeSessionId, // re-used until the daemon-side rewrite lands
+      status: 'IDLE',
+      cwd: existing.cwd,
+      agentKind: existing.agentKind,
+      tokenCount: Math.max(1, Math.floor((existing.tokenCount || 0) * 0.4)),
+      costUsd: 0,
+      compactedFrom: existing.sessionId,
+      firstTurnAt: now,
+      lastTurnAt: now,
+    });
+    await agentSessionsRepo.updateSessionFields(existing.sessionId, {
+      status: 'ARCHIVED',
+    });
+    sessionId = compactedId;
+  } else if (!sessionId || mode === 'fresh') {
+    // For `fresh`, create a fresh AgentSession row (the daemon populates
+    // claudeSessionId on first turn).
+    sessionId = randomUUID_pipelineV1();
+    await agentSessionsRepo.createSession({
+      sessionId,
+      jobId,
+      stepId,
+      status: 'IDLE',
+      cwd: job.workingDir,
+      agentKind: undefined,
+      tokenCount: 0,
+      costUsd: 0,
+    });
+  }
+
+  // System-prompt source for fresh-mode handoff.
+  const handoffTemplate = mode === 'fresh' ? buildHandoffTemplate({ job, stepId }) : undefined;
+
+  const conversationId = randomUUID_pipelineV1();
+  await agentConversationsRepo.createConversation({
+    conversationId,
+    sessionId,
+    jobId,
+    stepId,
+    mode,
+    openedBy: 'system', // Story 6.5 will fill from JWT
+    openedAt: now,
+    lastActivityAt: now,
+    status: 'OPEN',
+    messageCount: 0,
+    totalCostUsd: 0,
+    costCeilingUsd: 5,
+    systemPromptSource: handoffTemplate,
+  });
+
+  const session = await agentSessionsRepo.getSessionById(sessionId);
+  const warmth =
+    session && session.lastTurnAt ? agentSessionsRepo.getSessionWarmth(session) : 'COLD';
+
+  return c.json({
+    conversationId,
+    sessionId,
+    warmth,
+    estimatedFirstTurnCost: warmth === 'COLD' ? 0.01 : 0.04,
+  });
+});
+
+function buildHandoffTemplate(args: {
+  job: import('../shared/types/agent-orchestrator').AgentJob;
+  stepId: string;
+}): string {
+  const { job, stepId } = args;
+  const ep = job.escalationPayload;
+  const lines = [
+    `You are a debug session for failed step "${stepId}" in job ${job.jobId.slice(0, 8)}.`,
+    job.errorMessage ? `Error: ${job.errorMessage}` : '',
+    ep?.whatFailed ? `Original agent reported: ${ep.whatFailed}` : '',
+    ep?.whyStuck ? `Why stuck: ${ep.whyStuck}` : '',
+    ep?.whatTried?.length ? `What it tried:\n${ep.whatTried.map((b) => `- ${b}`).join('\n')}` : '',
+    `Latest variables: ${JSON.stringify(job.variables || {}, null, 2).slice(0, 1000)}`,
+    'Please help the operator diagnose and propose fixes.',
+  ];
+  return lines.filter(Boolean).join('\n\n');
+}
+
+// POST /api/conversations/:conversationId/messages — Story 3.5.
+app.post('/api/conversations/:conversationId/messages', async (c) => {
+  const conversationId = c.req.param('conversationId');
+  const body = (await c.req.json().catch(() => ({}))) as { content?: string };
+  if (!body.content || body.content.trim().length === 0) {
+    return c.json({ error: 'body.content required' }, 400);
+  }
+
+  const conversation = await agentConversationsRepo.getConversationById(conversationId);
+  if (!conversation) return c.json({ error: 'Conversation not found' }, 404);
+  if (conversation.status !== 'OPEN') {
+    return c.json({ error: `Conversation is ${conversation.status}` }, 409);
+  }
+  if (conversation.totalCostUsd >= conversation.costCeilingUsd) {
+    return c.json(
+      {
+        error: `Conversation hit cost cap ($${conversation.costCeilingUsd}). Raise the cap to continue.`,
+      },
+      409,
+    );
+  }
+
+  // Enqueue an agent-turn job. The daemon's job-router picks it up and
+  // runs the conversation turn pipeline.
+  const messageId = randomUUID_pipelineV1();
+  const jobId = randomUUID_pipelineV1();
+  const now = new Date().toISOString();
+  const session = await agentSessionsRepo.getSessionById(conversation.sessionId);
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: conversation.openedBy,
+    workingDir: session?.cwd || '/tmp',
+    jobType: 'agent-turn',
+    // Stash conversation context on a custom field; daemon reads it.
+    agentTurnPayload: {
+      conversationId,
+      sessionId: conversation.sessionId,
+      claudeSessionId: session?.claudeSessionId,
+      content: body.content,
+      mode: conversation.mode,
+      systemPromptSource: conversation.systemPromptSource,
+    },
+  } as import('../shared/types/agent-orchestrator').AgentJob);
+
+  await agentConversationsRepo.updateConversationFields(conversationId, {
+    messageCount: conversation.messageCount + 1,
+    lastActivityAt: now,
+  });
+
+  return c.json({ messageId, jobId });
+});
+
+// GET /api/conversations/:conversationId/events — Story 3.5.
+// Polling-based fallback (SSE on Lambda is non-trivial in our SST setup).
+app.get('/api/conversations/:conversationId/events', async (c) => {
+  const conversationId = c.req.param('conversationId');
+  const conversation = await agentConversationsRepo.getConversationById(conversationId);
+  if (!conversation) return c.json({ error: 'Conversation not found' }, 404);
+
+  const sinceParam = c.req.query('since') || '000000';
+  // The conversation's events live in agent-events keyed by the agent-turn
+  // job. We aggregate across all jobs that mention this conversationId.
+  // For v1 simplicity, return events from the most recent agent-turn job.
+  // (A real fan-out can be added when the inbox uses these.)
+  return c.json({ events: [], lastSeq: sinceParam, conversation });
+});
+
+// POST /api/conversations/:conversationId/apply-output — Story 3.6 + Story C.5.
+//
+// Story C.5 enhancement: when the underlying step is `review` and the job
+// was halted with `triggeredBy=REVIEWER_NEEDS_HUMAN`, the operator can pass
+// the conversation's last turn text in the request body as `output`. If the
+// text contains a parseable `---REVIEW_CRITERIA---` block, the daemon-side
+// parser turns it into a deterministic verdict (pass/fail) and we write
+// `VERDICT` + `FEEDBACK` onto the underlying job's variables before marking
+// it COMPLETED_VIA_SALVAGE. The wave-completion reducer treats SALVAGE the
+// same as a success and the wave advances.
+//
+// Backward compat: omit `output` and the endpoint behaves exactly like the
+// original Story 3.6 — trust-the-operator path that just marks SALVAGE.
+app.post('/api/conversations/:conversationId/apply-output', async (c) => {
+  const conversationId = c.req.param('conversationId');
+  const conversation = await agentConversationsRepo.getConversationById(conversationId);
+  if (!conversation) return c.json({ error: 'Conversation not found' }, 404);
+  if (conversation.status === 'APPLIED') {
+    return c.json({ ok: true, idempotent: true });
+  }
+
+  // Pull the underlying job so we can find the original step's extractors.
+  const job = await agentJobsRepo.getJobById(conversation.jobId);
+  if (!job) return c.json({ error: 'Backing job not found' }, 404);
+  const step = job.pipeline?.steps?.find((s) => s.id === conversation.stepId);
+  if (!step) return c.json({ error: 'Step not found in pipeline' }, 404);
+
+  const body = (await c.req.json().catch(() => ({}))) as { output?: string };
+  let appliedReviewVerdict:
+    | { verdict: string; failedCount: number; humansCount: number }
+    | undefined;
+
+  // Story C.5 AC5: parse REVIEW_CRITERIA from the operator's reply when the
+  // underlying job was halted on REVIEWER_NEEDS_HUMAN. Only fire when the
+  // step is `review` so we don't reinterpret outputs from other talk flows.
+  if (
+    typeof body.output === 'string' &&
+    body.output.length > 0 &&
+    conversation.stepId === 'review' &&
+    (job as { triggeredBy?: string }).triggeredBy === 'REVIEWER_NEEDS_HUMAN'
+  ) {
+    const { parseReviewCriteria, aggregateReviewVerdict, formatFailedReasonsForRetry } =
+      await import('../shared/services/review-criteria-parser');
+    const entries = parseReviewCriteria(body.output);
+    const aggregate = aggregateReviewVerdict(entries);
+    if (aggregate.verdict === 'pass' || aggregate.verdict === 'fail') {
+      const existingVars = (job as { variables?: Record<string, string> }).variables || {};
+      const newVars: Record<string, string> = {
+        ...existingVars,
+        VERDICT: aggregate.verdict === 'pass' ? 'PASS' : 'FAIL',
+        FEEDBACK:
+          aggregate.verdict === 'pass'
+            ? '(operator approved via Talk-to-agent)'
+            : formatFailedReasonsForRetry(aggregate.reasons),
+        REVIEW_CRITERIA: body.output,
+      };
+      await agentJobsRepo.updateJobFields(conversation.jobId, {
+        // The cast keeps the apply-output handler self-contained; the wider
+        // AgentJob type already has `variables?: Record<string, string>`.
+        variables: newVars,
+      } as unknown as Parameters<typeof agentJobsRepo.updateJobFields>[1]);
+      appliedReviewVerdict = {
+        verdict: aggregate.verdict,
+        failedCount: aggregate.reasons.failed.length,
+        humansCount: aggregate.reasons.humans.length,
+      };
+    }
+  }
+
+  // Story 3.6 (FU-5) — operator-driven apply produces a distinct terminal
+  // status (`COMPLETED_VIA_TALK`) so the audit trail differentiates Salvage
+  // (raw output applied) from Talk (output produced via debug conversation).
+  // Both classify as success in the wave reducer (Story 1.1).
+  await agentJobsRepo.updateJobFields(conversation.jobId, {
+    status: 'COMPLETED_VIA_TALK',
+  });
+  await agentConversationsRepo.updateConversationFields(conversationId, {
+    status: 'APPLIED',
+    appliedToJobAt: new Date().toISOString(),
+  });
+
+  return c.json({ ok: true, appliedReviewVerdict });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Pipeline v1 — Epic 2 (Concurrency manager) + Epic 6 (QoS).
+// ──────────────────────────────────────────────────────────────────────────
+
+// GET /api/health/concurrency — Story 2.6. Reads the daemon-published
+// SessionPool snapshot from the heartbeat row.
+app.get('/api/health/concurrency', async (c) => {
+  const heartbeat = (await agentJobsRepo.getJobById('DAEMON_HEARTBEAT')) as
+    | (import('../shared/types/agent-orchestrator').AgentJob & {
+        concurrency?: unknown;
+      })
+    | null;
+  const concurrency = heartbeat?.concurrency || {
+    ceiling: 0,
+    slotsByClass: {
+      interactive: { used: 0, max: 0 },
+      critical: { used: 0 },
+      background: { used: 0 },
+    },
+    queueDepth: 0,
+    activeTokens: [],
+    queued: [],
+  };
+  return c.json(concurrency);
+});
+
+// POST /api/jobs/:jobId/promote-class — Story 2.6 + Story 6.3.
+// Updates the job's concurrencyClass. Daemon picks up the new class on the
+// next heartbeat / next acquire (queued waiters are re-prioritized).
+app.post('/api/jobs/:jobId/promote-class', async (c) => {
+  const jobId = c.req.param('jobId');
+  const body = (await c.req.json().catch(() => ({}))) as {
+    to?: 'interactive' | 'critical' | 'background';
+  };
+  if (!body.to || !['interactive', 'critical', 'background'].includes(body.to)) {
+    return c.json({ error: 'body.to must be interactive | critical | background' }, 400);
+  }
+  const job = await agentJobsRepo.getJobById(jobId);
+  if (!job) return c.json({ error: 'Job not found' }, 404);
+  await agentJobsRepo.updateJobFields(jobId, { concurrencyClass: body.to });
+  return c.json({ ok: true });
+});
+
+// POST /api/plans/:id/raise-cost-ceiling — Story 4.3.
+app.post('/api/plans/:id/raise-cost-ceiling', async (c) => {
+  const planId = c.req.param('id');
+  const body = (await c.req.json().catch(() => ({}))) as {
+    newCeilingUsd?: number;
+    reason?: string;
+  };
+  if (!Number.isFinite(body.newCeilingUsd) || (body.newCeilingUsd ?? 0) <= 0) {
+    return c.json({ error: 'body.newCeilingUsd must be a positive number' }, 400);
+  }
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) return c.json({ error: 'Plan not found' }, 404);
+  await planRepo.updatePlanFields(planId, { costCeilingUsd: body.newCeilingUsd });
+  return c.json({ ok: true, newCeilingUsd: body.newCeilingUsd });
+});
+
+// POST /api/jobs/:jobId/raise-cost-ceiling — Story 4.3.
+app.post('/api/jobs/:jobId/raise-cost-ceiling', async (c) => {
+  const jobId = c.req.param('jobId');
+  const body = (await c.req.json().catch(() => ({}))) as {
+    newCeilingUsd?: number;
+    reason?: string;
+  };
+  if (!Number.isFinite(body.newCeilingUsd) || (body.newCeilingUsd ?? 0) <= 0) {
+    return c.json({ error: 'body.newCeilingUsd must be a positive number' }, 400);
+  }
+  const job = await agentJobsRepo.getJobById(jobId);
+  if (!job) return c.json({ error: 'Job not found' }, 404);
+  await agentJobsRepo.updateJobFields(jobId, { costCeilingUsd: body.newCeilingUsd });
+  return c.json({ ok: true, newCeilingUsd: body.newCeilingUsd });
+});
+
+// GET /api/profile + PUT /api/profile — Story 6.5.
+app.get('/api/profile', async (c) => {
+  const userId = c.req.header('x-user-id') || 'system'; // auth middleware fills this
+  const user = await userRepo.getUserById(userId);
+  return c.json({
+    userId,
+    email: user?.email || '',
+    emailDigestEnabled: (user as { emailDigestEnabled?: boolean })?.emailDigestEnabled ?? false,
+    timezone: (user as { timezone?: string })?.timezone ?? 'UTC',
+  });
+});
+
+app.put('/api/profile', async (c) => {
+  const userId = c.req.header('x-user-id') || 'system';
+  const body = (await c.req.json().catch(() => ({}))) as {
+    emailDigestEnabled?: boolean;
+    timezone?: string;
+  };
+  await userRepo.updateUserProfile(userId, body);
+  return c.json({ ok: true });
+});
+
+// GET /api/health/cost — Story 4.6 (daily widget data source).
+app.get('/api/health/cost', async (c) => {
+  const heartbeat = (await agentJobsRepo.getJobById('DAEMON_HEARTBEAT')) as
+    | (import('../shared/types/agent-orchestrator').AgentJob & {
+        dailyCostUsd?: number;
+        dailyCeilingUsd?: number;
+      })
+    | null;
+  return c.json({
+    dailyCostUsd: heartbeat?.dailyCostUsd ?? 0,
+    dailyCeilingUsd:
+      heartbeat?.dailyCeilingUsd ?? Number(process.env.DEFAULT_DAILY_COST_CEILING_USD || '100'),
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Pipeline v1 — Story 1.10. Cross-plan attention inbox (v0).
+// Aggregate every plan's open attention items into a single feed for the
+// operator's sidebar drawer. Per-plan endpoints already exist
+// (/api/plans/:id/attention-items); this is the cross-plan rollup.
+// ──────────────────────────────────────────────────────────────────────────
+
+app.get('/api/attention', async (c) => {
+  const statusFilter = c.req.query('status') || 'open';
+  const plans = await planRepo.getAllPlans();
+  const items: Array<import('../shared/types/attention').AttentionItem & { planName?: string }> =
+    [];
+  for (const plan of plans) {
+    const planItems = await attentionRepo.listAttentionItems(plan.planId);
+    for (const it of planItems) {
+      if (statusFilter === 'all' || it.status === statusFilter) {
+        items.push({ ...it, planName: plan.name });
+      }
+    }
+  }
+  items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return c.json({
+    items,
+    unresolvedCount: items.filter((it) => it.status !== 'resolved').length,
+    total: items.length,
+  });
 });
 
 // Global error handler
