@@ -3,6 +3,21 @@ import type { PipelineDefinition, PipelineStep } from '../types/agent-orchestrat
 import type { PlanRigor } from '../types/plan';
 
 /**
+ * Story E.1 — feature flag for the wave-close knowledge compiler. When
+ * `true`, the per-story `compile-knowledge` + `compile-sync` steps are
+ * excluded from the story pipeline; the story ends after `compile-diff`
+ * and a separate wave-compile job (Epic E.2) batches all of the wave's
+ * knowledge work into a single Haiku turn. Default `false` keeps the
+ * legacy per-story flow until E.2's cron dispatcher is wired live.
+ *
+ * Read at pipeline-build time (the API Lambda + cron build pipelines).
+ * Exposed via a getter so tests can flip the env var per-case.
+ */
+export function isWaveCloseCompilerEnabled(): boolean {
+  return process.env.WAVE_CLOSE_COMPILER_ENABLED === 'true';
+}
+
+/**
  * Per-story step-based pipeline.
  *
  * Phase C.3 extended this with rigor-gated test steps:
@@ -55,6 +70,11 @@ export function generateStoryPipeline(
   // plan creation. Wired into the DEV prompt's VERIFICATION section so the
   // dev knows the canonical "how do I run this" command instead of guessing.
   const runCommand = opts.runCommand || 'python3 -m http.server 8080';
+  // Story E.1: gate the per-story compile-knowledge + compile-sync steps
+  // behind the wave-close-compiler feature flag. compile-commit-on-pass and
+  // compile-diff still run — they collect the data the wave-close compiler
+  // (Epic E.2) consumes from each story.
+  const waveCloseEnabled = isWaveCloseCompilerEnabled();
 
   return {
     initialVariables: {
@@ -173,7 +193,16 @@ e2e/home.spec.ts
       {
         id: 'dev',
         agentId: 'DEV',
-        prompt: `You are a senior developer working on the "${epicTitle}" project.
+        // Story B.2: <project_context> sits at the very top of the prompt so
+        // the daemon's per-story serialized context pack is in the cacheable
+        // prefix — DEV / REVIEWER / COMPILER all see the byte-identical block
+        // and the prompt cache hits across roles. Daemon populates
+        // PROJECT_CONTEXT before any step runs.
+        prompt: `<project_context>
+{{PROJECT_CONTEXT}}
+</project_context>
+
+You are a senior developer working on the "${epicTitle}" project.
 
 This is attempt {{ITERATION}} of {{MAX_ITERATIONS}} for this story.
 
@@ -188,9 +217,9 @@ ${story.description}
 - If this is the first story, set up the project structure.
 - Output a brief summary of what you did (not full file contents, show diffs or summaries).
 
-## DISCOVERY (Story A.6):
-- The story title, description, and acceptance criteria are inline above. The plan and adjacent files are part of the working directory at ${workingDir}.
-- Do NOT run \`ls\`, \`find\`, \`tree\`, or \`Bash cat\` on the project directory. The story spec tells you exactly which files to create/edit.
+## DISCOVERY (Stories A.6 + B.2):
+- Your \`<project_context>\` block above already contains the project tree, plan, story spec, acceptance criteria, touch points, adjacent file heads, knowledge index, recent diffs, and prior story work summaries. Read it before doing anything else.
+- Do NOT re-read what's already in \`<project_context>\`. Do NOT run \`ls\`, \`find\`, \`tree\`, or \`Bash cat\` on the project directory.
 - Do NOT spawn the Task / Agent / Explore subagents — they re-read the codebase from scratch and burn 10–25 tool calls per turn for context you already have.
 - Read at most the files you intend to modify. Do them in ONE message with parallel Read calls — never one Read per turn.
 
@@ -318,20 +347,43 @@ Write one test per needs_browser=true criterion. Be specific about what the visu
         : []),
 
       // 2. Code review
+      // Story B.3: REVIEWER prompt opens with the same `<project_context>`
+      // block as DEV (B.2). Same byte position → prompt cache hits across
+      // DEV→REVIEWER for the same story. The story spec inside
+      // `<project_context>.storySpec` is the single source of truth — the
+      // old inline `## Story:` block is removed.
+      // Stories C.1/C.3/C.4: REVIEWER now emits a structured
+      // `---REVIEW_CRITERIA---` block (one verdict per AC). Daemon parses
+      // it deterministically. CONSTRAINTS section caps tool use at 5 calls
+      // and bans Glob / find / Bash ls / Read-on-dir. Story spec lives in
+      // <project_context>; the worker has no story files on disk.
       {
         id: 'review',
         agentId: 'REVIEWER',
-        prompt: `You are a code reviewer (attempt {{ITERATION}} of {{MAX_ITERATIONS}}).
+        prompt: `<project_context>
+{{PROJECT_CONTEXT}}
+</project_context>
 
-Review the work done for this story in the project at ${workingDir}.
+You are a code reviewer (attempt {{ITERATION}} of {{MAX_ITERATIONS}}).
 
-## Story:
-${story.title}
-
-${story.description}
+The story spec, acceptance criteria, touch points, plan, project tree, knowledge index, and recent diffs are all in your \`<project_context>\` block above. Use them.
 
 ## Developer's summary:
 {{WORK_SUMMARY}}
+
+## DISCOVERY (Stories B.3 + C.4):
+- Story spec, AC, project tree, adjacent file heads, and recent diffs are in \`<project_context>\`. Do NOT re-read them from disk.
+- The complete story spec is in \`<project_context>.storySpec\`. The story spec is NOT stored on the project box (the EC2 worker). Do NOT search the filesystem for \`**/*.story.md\`, \`**/*acceptance*\`, \`**/*test*.md\`, or any other story-spec lookalike.
+- The only canonical visual-tests path is \`${workingDir}/visual-tests.md\` (written by the daemon from the dev's \`---VISUAL_TESTS---\` block, Story A.2). There is no \`knowledge/tests/visual-tests.md\` — do not look there.
+- The changed-file list is in \`<project_context>.recentDiffs\` and the touch points are in \`<project_context>.storySpec.touchPoints\`.
+
+## CONSTRAINTS (Story C.3):
+- Hard tool budget: 5 tool calls maximum for the whole review.
+- Do all reads in ONE message with parallel calls. Never sequential.
+- Do NOT use Glob, find, or Bash ls.
+- Do NOT Read directories — Read takes file paths only.
+- Do NOT re-grep for symbols you can already see in the diff.
+- A loop detector force-escalates at 6 repeated tool calls (defense in depth).
 
 ## Review checklist:
 1. Do all files mentioned in the acceptance criteria exist?
@@ -340,25 +392,40 @@ ${story.description}
 4. Is the code quality acceptable (no obvious bugs, proper types)?${
           story.hasBrowserTests
             ? `
-5. This story has browser-testable criteria. Visual tests are at \`${workingDir}/visual-tests.md\` — the daemon writes this file from the dev's \`---VISUAL_TESTS---\` block automatically (Story A.2). Verify each [needs_browser=true] criterion has a matching entry there with id, criteriaRef, description, setup, and expect fields. Do NOT FAIL the story for "missing visual-tests block in dev output" — that block is consumed and persisted by the daemon, not retained in the dev's text.`
+5. This story has browser-testable criteria. Visual tests live at \`${workingDir}/visual-tests.md\` — the daemon writes this file from the dev's \`---VISUAL_TESTS---\` block automatically (Story A.2). Verify each [needs_browser=true] criterion (see \`<project_context>.storySpec.acceptanceCriteria\`) has a matching entry there with id, criteriaRef, description, setup, and expect fields. Do NOT FAIL the story for "missing visual-tests block in dev output" — that block is consumed and persisted by the daemon, not retained in the dev's text.`
             : ''
         }
 
-Output: VERDICT: PASS or VERDICT: FAIL
-Then: FEEDBACK: [specific findings — what passed, what needs fixing]
+─────────────────────────────────────────────────────────────────
+OUTPUT CONTRACT — REQUIRED (Story C.1):
 
-Be constructive. If the code is close but has minor issues, PASS with suggestions.`,
+Emit one line per acceptance criterion inside this envelope:
+
+  ---REVIEW_CRITERIA---
+  AC-1: pass
+  AC-2: fail — <one-line reason, ≤120 chars>
+  AC-3: needs-human — <one-line question to the operator>
+  ---END_REVIEW_CRITERIA---
+
+Verdict values: pass | fail | needs-human. Use \`needs-human\` for
+subjective acceptance criteria you cannot deterministically check
+(visual aesthetic, "is this enough?", domain judgement). The daemon
+aggregates: any fail → retry; any needs-human → operator handoff.
+
+Do NOT also emit "VERDICT: PASS/FAIL" prose — the daemon derives the
+overall verdict from the structured block above. Free-form prose
+after the envelope is fine for context but is ignored by the parser.
+─────────────────────────────────────────────────────────────────
+
+Be constructive. If the code is close but has minor issues, mark the affected ACs \`pass\` and write your suggestions as free-form prose AFTER the closing envelope.`,
         extractors: {
-          VERDICT: { type: 'regex', pattern: 'VERDICT:\\s*\\*{0,2}(PASS|FAIL)\\*{0,2}' },
-          // Story A.5: tolerate markdown variants the reviewer occasionally
-          // emits (`**FEEDBACK:**`, `**FEEDBACK**:`, `*FEEDBACK*:`). Without
-          // this, the extractor missed the label entirely → variables had no
-          // FEEDBACK → the retry prompt rendered literal `{{FEEDBACK}}` and
-          // burned a turn while the dev asked the operator for the missing
-          // text (dino3 e3w0s3 incident).
-          FEEDBACK: {
-            type: 'regex',
-            pattern: '\\*{0,2}FEEDBACK\\*{0,2}\\s*:\\s*([\\s\\S]+?)$',
+          // Story C.1/C.2: structured per-AC verdicts. The daemon parses
+          // this block (review-criteria-parser.mjs) and synthesizes
+          // VERDICT + FEEDBACK from the result.
+          REVIEW_CRITERIA: {
+            type: 'between',
+            startDelimiter: '---REVIEW_CRITERIA---',
+            endDelimiter: '---END_REVIEW_CRITERIA---',
           },
         },
         validations: [
@@ -436,15 +503,57 @@ Fix the issues mentioned. Output only what you changed, then:
         captureAs: 'DIFF_MANIFEST',
         onFail: { action: 'fail' as const, injectAs: 'COMPILE_DIFF_ERROR' },
       },
-      {
-        id: 'compile-knowledge',
-        stepType: 'agent' as const,
-        agentId: 'COMPILER',
-        prompt: `You are the Knowledge Compiler for the "${epicTitle}" project.
+      // Story B.4: COMPILER prompt opens with the same `<project_context>`
+      // block as DEV (B.2) and REVIEWER (B.3) — byte-identical prefix → cache
+      // hits across all three roles for this story. The diff + dev work
+      // summary (DEV's post-state) live in `<step_input>` AFTER the context
+      // block, so the compiler doesn't have to re-Read the source files DEV
+      // just edited.
+      // Story B.5: knowledge/index.md must use the tight one-line-purpose
+      // format (`<path> — <one-line-purpose>`).
+      // Story E.1: skipped entirely when WAVE_CLOSE_COMPILER_ENABLED — the
+      // wave-compile job (Epic E.2) handles knowledge for the whole wave.
+      ...(waveCloseEnabled
+        ? ([] as PipelineStep[])
+        : ([
+            {
+              id: 'compile-knowledge',
+              stepType: 'agent' as const,
+              agentId: 'COMPILER',
+              prompt: `<project_context>
+{{PROJECT_CONTEXT}}
+</project_context>
 
-For each changed file listed in DIFF_MANIFEST below:
+You are the Knowledge Compiler for the "${epicTitle}" project.
 
-1. If a wiki article already exists in knowledge/code/ for this file:
+The plan, story spec, project tree, knowledge index, and prior-wave WORK_SUMMARYs are in your \`<project_context>\` block above. The story's diff + DEV's WORK_SUMMARY (the post-state of this story's edits) are in \`<step_input>\` below.
+
+<step_input>
+## Changed files (git diff --name-status HEAD~1 HEAD)
+\`\`\`
+{{DIFF_MANIFEST}}
+\`\`\`
+
+## DEV WORK_SUMMARY
+{{WORK_SUMMARY}}
+
+## REVIEWER VERDICT
+{{VERDICT}}
+
+## REVIEWER FEEDBACK
+{{FEEDBACK}}
+</step_input>
+
+## DISCOVERY (Story B.4):
+- Do NOT re-Read the source files DEV just edited — their post-state is summarized in \`<step_input>\` above. Read source only when you need a precise quote for a knowledge article.
+- Do NOT Read \`knowledge/log.md\`, \`knowledge/system/dependency-map.md\`, or \`knowledge/code/*.md\` unless you intend to edit them. The article catalog is in \`<project_context>.knowledgeIndex\` (one line per article).
+- Do NOT Glob, find, or Bash ls.
+
+## Compilation rules
+
+For each changed file listed in \`<step_input>.DIFF_MANIFEST\`:
+
+1. If a wiki article already exists in \`knowledge/code/\` for this file:
    - UPDATE it: revise Purpose, Dependencies, Dependents, Signals, Missing Signals
    - Update frontmatter: lastMutatedByStory: "${story.storyId}", updated date, maturity score
 
@@ -456,39 +565,33 @@ For each changed file listed in DIFF_MANIFEST below:
 
 4. Extract any architectural DECISIONS from WORK_SUMMARY:
    - Library choices, pattern selections, API design decisions
-   - Create/update articles in knowledge/decisions/
+   - Create/update articles in \`knowledge/decisions/\`
    - Link to the code articles that implement them
 
-5. Update knowledge/system/dependency-map.md with new import relationships
+5. Update \`knowledge/system/dependency-map.md\` with new import relationships
 
-6. Update knowledge/index.md — add new articles, update changed entries
+6. Update \`knowledge/index.md\` — add new articles, update changed entries.
+   **Required format (Story B.5):** every entry is one line of the form
+   \`- <path> — <one-line-purpose>\` (≤120 chars total). Example:
+   \`- code/main.js.md — Game loop, state machine, drawScene orchestrator.\`
+   Anything before the \` — \` separator is the path; anything after is the
+   one-line purpose. Migrate any existing entries that lack this shape.
 
-7. Append a compilation record to knowledge/log.md:
+7. Append a compilation record to \`knowledge/log.md\`:
    | {ISO timestamp} | ${story.storyId} | success | {created}/{updated}/{superseded} | OK |
 
 Use [[wikilinks]] for ALL cross-references (e.g., [[code/src--components--auth.tsx]]).
-File naming: knowledge/code/{slug}.md where slug uses -- for path separators.
+File naming: \`knowledge/code/{slug}.md\` where slug uses \`--\` for path separators.
 Article frontmatter fields: title, type, phase, status, maturity, created, updated, createdByEpic, createdByStory, lastMutatedByStory, tags.
 Article sections: Purpose, Key Exports, Dependencies (with [[wikilinks]]), Dependents (with [[wikilinks]]), Signals, Missing Signals, Notes.
 
-Working directory: ${workingDir}
-Read source files to understand purpose, exports, and imports before writing articles.
-
-## Story Acceptance Criteria
-${story.description}
-
-## Changed Files (DIFF_MANIFEST)
-\`\`\`
-{{DIFF_MANIFEST}}
-\`\`\`
-
-## Developer Work Summary
-{{WORK_SUMMARY}}`,
-        captureAs: 'COMPILE_RESULT',
-        extractors: {},
-        validations: [],
-        onFail: { action: 'fail' as const },
-      },
+Working directory: ${workingDir}`,
+              captureAs: 'COMPILE_RESULT',
+              extractors: {},
+              validations: [],
+              onFail: { action: 'fail' as const },
+            },
+          ] as PipelineStep[])),
       // Story A.4: verify post-sync. Drop the legacy `|| echo "skipped"`
       // patterns that swallowed errors silently — if graph-sync or s3 sync
       // fails (or sync succeeds but the target bucket is empty), the step now
@@ -497,28 +600,34 @@ ${story.description}
       // Memgraph node-count verification is intentionally deferred — mgconsole
       // is slower and adds run-time variability; the wave-close compiler
       // (Epic E) will fold it into a single async post-wave check.
-      {
-        id: 'compile-sync',
-        stepType: 'shell' as const,
-        command:
-          `set -e; ` +
-          `cd ${workingDir} && ` +
-          `node /home/ubuntu/scripts/graph-sync.mjs ` +
-          `--project ${projectId} ` +
-          `--knowledge-dir ${workingDir}/knowledge ` +
-          `--state-file ${workingDir}/.mycelium/compile-state.json && ` +
-          `aws s3 sync ${workingDir}/knowledge/ ` +
-          `s3://futurator-ai-website/knowledge-live/${projectId}/ && ` +
-          `S3_COUNT=$(aws s3 ls s3://futurator-ai-website/knowledge-live/${projectId}/ ` +
-          `--recursive --summarize 2>/dev/null | awk '/Total Objects:/ {print $3}'); ` +
-          `if [ -z "$S3_COUNT" ] || [ "$S3_COUNT" -eq 0 ]; then ` +
-          `  echo 'EMPTY_S3_MIRROR: knowledge-live/${projectId} has 0 objects after sync' >&2; ` +
-          `  exit 1; ` +
-          `fi; ` +
-          `echo "S3 mirror verified: $S3_COUNT objects under knowledge-live/${projectId}/"`,
-        timeout: 60000,
-        onFail: { action: 'fail' as const, injectAs: 'COMPILE_SYNC_ERROR' },
-      },
+      // Story E.1: skipped entirely when WAVE_CLOSE_COMPILER_ENABLED — the
+      // wave-compile job (Epic E.2) does the sync for the whole wave atomically.
+      ...(waveCloseEnabled
+        ? ([] as PipelineStep[])
+        : ([
+            {
+              id: 'compile-sync',
+              stepType: 'shell' as const,
+              command:
+                `set -e; ` +
+                `cd ${workingDir} && ` +
+                `node /home/ubuntu/scripts/graph-sync.mjs ` +
+                `--project ${projectId} ` +
+                `--knowledge-dir ${workingDir}/knowledge ` +
+                `--state-file ${workingDir}/.mycelium/compile-state.json && ` +
+                `aws s3 sync ${workingDir}/knowledge/ ` +
+                `s3://futurator-ai-website/knowledge-live/${projectId}/ && ` +
+                `S3_COUNT=$(aws s3 ls s3://futurator-ai-website/knowledge-live/${projectId}/ ` +
+                `--recursive --summarize 2>/dev/null | awk '/Total Objects:/ {print $3}'); ` +
+                `if [ -z "$S3_COUNT" ] || [ "$S3_COUNT" -eq 0 ]; then ` +
+                `  echo 'EMPTY_S3_MIRROR: knowledge-live/${projectId} has 0 objects after sync' >&2; ` +
+                `  exit 1; ` +
+                `fi; ` +
+                `echo "S3 mirror verified: $S3_COUNT objects under knowledge-live/${projectId}/"`,
+              timeout: 60000,
+              onFail: { action: 'fail' as const, injectAs: 'COMPILE_SYNC_ERROR' },
+            },
+          ] as PipelineStep[])),
     ],
   };
 }
