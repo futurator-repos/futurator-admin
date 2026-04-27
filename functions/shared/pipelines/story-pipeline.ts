@@ -121,7 +121,11 @@ export function generateStoryPipeline(
             {
               id: 'test-author',
               agentId: 'TEST',
-              prompt: `You are the TEST agent authoring tests for story ${story.storyId}.
+              prompt: `<project_context>
+{{PROJECT_CONTEXT}}
+</project_context>
+
+You are the TEST agent authoring tests for story ${story.storyId}.
 
 Working directory: ${workingDir}
 
@@ -130,7 +134,32 @@ ${story.title}
 
 ${story.description}
 
-## Your job
+## DISCOVERY (dino4 fix 2026-04-27 — extends Story A.6 hygiene to TEST):
+- Project tree, plan, story spec, AC, knowledge index, recent diffs, and prior story work summaries are inlined in your \`<project_context>\` block above. Read it FIRST before any tool call.
+- Do NOT spawn the Task / Agent / Explore subagents. They re-read the codebase and burn 10–25 tool calls per turn for context you already have.
+- Do NOT run \`ls\`, \`find\`, \`tree\`, or \`Bash cat\` on the project directory.
+- Read at most the existing test files you intend to UPDATE (in ONE message with parallel Read calls). Do NOT speculatively Read source files — the dev will write them next, and your job is the tests, not the source.
+
+## VERIFICATION (dino4 fix):
+- Do NOT run \`npm test\`, \`npx vitest\`, \`npm run dev\`, or any test/build runner. The downstream \`test-gate-red\` (production rigor only) and \`test-verify\` (mvp+) shell steps run them for you. Your job is to author tests, not verify they fail.
+- Do NOT Read a file you just Wrote — Write/Edit error on failure; their silent return IS the verification.
+
+## EARLY-EXIT (dino4 fix — no-op detection):
+If the story's acceptance criteria are ALREADY covered by existing test files in this project (e.g. a prior TEST-agent run left behind \`src/foo.story.test.ts\`), DO NOT re-author them. Instead emit:
+
+\`\`\`
+---TEST_FILES---
+[paths of existing files that cover this story's ACs]
+---END_TEST_FILES---
+
+---WORK_SUMMARY---
+No changes required — tests for story ${story.storyId} already authored: <list paths>. Each AC is mapped: AC-1 → <test file:line range>, etc.
+---END_WORK_SUMMARY---
+\`\`\`
+
+…and stop. The dev agent will run those existing tests as the contract. Do NOT keep editing or "improving" tests that already cover the AC — that's the loop that burned $20+ per attempt on dino4 e2w0s1.
+
+## Your job (when tests do NOT already exist)
 1. Write unit tests that cover the acceptance criteria of this story.
 2. Put unit tests beside the code they cover (e.g. \`src/foo/bar.test.ts\`) or under \`__tests__/\`.${
                 opts.hasBrowserTests
@@ -143,7 +172,7 @@ ${story.description}
 
 ## Rules
 - Only write in test paths: \`**/*.test.*\`, \`__tests__/**\`, \`e2e/**\`, \`tests/**\`.
-- Output the list of test files you authored at the end:
+- Output the list of test files you authored (or recognized as already covering the AC) at the end:
 
 ---TEST_FILES---
 src/foo.test.ts
@@ -151,7 +180,7 @@ e2e/home.spec.ts
 ---END_TEST_FILES---
 
 ---WORK_SUMMARY---
-[What tests you wrote and why]
+[What tests you wrote and why — OR "No changes required" per EARLY-EXIT above]
 ---END_WORK_SUMMARY---`,
               extractors: {
                 TEST_FILES: {
@@ -468,11 +497,28 @@ Fix the issues mentioned. Output only what you changed, then:
       // and the next story's HEAD~1..HEAD remains story-scoped.
       // The shell-quote escape on title (`replace(/'/g, "'\\''")`) is what lets
       // titles with apostrophes survive bash single-quoting.
+      // Story A.3 + dino4 fix (2026-04-27): self-bootstrap. Plans don't
+      // always have a `.git/` (the plan-folder bootstrap doesn't `git init`),
+      // and the daemon has no other place to call `git init` deterministically.
+      // We make compile-commit-on-pass idempotent: if the cwd isn't a git
+      // tree yet, init it and stamp a baseline commit so the per-story
+      // commit always has a HEAD~1 for `compile-diff` to compare against.
+      // Without this, every story's compile phase exited 128 ("not a git
+      // repository") and the runaway-retry path burned $20+ per attempt.
       {
         id: 'compile-commit-on-pass',
         stepType: 'shell' as const,
         command:
-          `cd ${workingDir} && git add -A && ` +
+          `cd ${workingDir} && ` +
+          // Bootstrap: init repo + baseline commit if needed.
+          `if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then ` +
+          `  git init -q && ` +
+          `  git -c user.email=daemon@futurator.local -c user.name='Daemon' add -A && ` +
+          `  git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
+          `    commit --allow-empty -q -m 'baseline (auto-bootstrap by daemon)'; ` +
+          `fi && ` +
+          // Story commit (always)
+          `git add -A && ` +
           `git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
           `commit --allow-empty -m 'story: ${story.storyId} — ${story.title.replace(/'/g, "'\\''")}'`,
         timeout: 30000,
