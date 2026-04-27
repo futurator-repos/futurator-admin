@@ -563,13 +563,50 @@ subagent-prompt.md.tpl` interpolate `{{storyId}}` at line 1. Every
 
 ## Dev-correction 2nd iteration — wiring deferrals
 
-| Field                         | Value                                                                                                                                                                                                                                                           |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Stage corrected**           | **Developing** — specifically the per-story `DEV → REVIEWER → COMPILER → SYNC` pipeline that runs inside a wave during the Developing stage of a Plan                                                                                                           |
-| **Source plan**               | `docs/concepts/epics-and-stories-pipelinev1-dev-correction.md` (28 stories across Epics A–E)                                                                                                                                                                    |
-| **Pure-function libs landed** | 2026-04-27 across 5 commits: `85b399e` (A) → `8851af3` (B) → `e052ab0` (C) → `b34dfb0` (D) → `25926a4` (E)                                                                                                                                                      |
-| **Tests landed**              | 366 passing — every library has co-located unit tests; cross-impl parity tests pin daemon `.mjs` and Lambda `.ts` parsers                                                                                                                                       |
-| **Wiring deferred**           | This section. The libraries are imported by code that lives alongside heavy pipelinev1 sibling-plan modifications in `agent-daemon.mjs` / `functions/api/index.ts` / cron files. To keep blast radius small, the wiring waits for one focused integration pass. |
+| Field                         | Value                                                                                                                                                                                                                                                                                          |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Stage corrected**           | **Developing** — specifically the per-story `DEV → REVIEWER → COMPILER → SYNC` pipeline that runs inside a wave during the Developing stage of a Plan                                                                                                                                          |
+| **Source plan**               | `docs/concepts/epics-and-stories-pipelinev1-dev-correction.md` (28 stories across Epics A–E)                                                                                                                                                                                                   |
+| **Pure-function libs landed** | 2026-04-27 across 5 commits: `85b399e` (A) → `e052ab0` (C) → `8851af3` (B) → `b34dfb0` (D) → `25926a4` (E)                                                                                                                                                                                     |
+| **Deploy**                    | 2026-04-27 ~10:15 UTC: `git push origin main` (1465 objects, all 6 epic + doc commits live on origin/main) + `npx sst deploy --stage production` (Lambda + cron + admin static) + `bash scripts/rsync-daemon.sh` + `sudo systemctl restart futurator-daemon` (PID 48653, 32.9M RSS, 11 tasks). |
+| **Tests landed**              | 366 passing — every library has co-located unit tests; cross-impl parity tests pin daemon `.mjs` and Lambda `.ts` parsers                                                                                                                                                                      |
+
+### Post-deploy state (2026-04-27)
+
+> **Most of the 1st-iteration "wiring" already shipped — but is not yet in git.**
+>
+> The original `daemon/agent-daemon.mjs` + `functions/api/index.ts` +
+> `functions/shared/types/agent-orchestrator.ts` modifications I authored
+> alongside Epics A/B/C were left in the working tree (not committed) when
+> the library commits landed, to keep blast radius small. When the user
+> ran `sst deploy` + `rsync-daemon.sh` on 2026-04-27, those uncommitted
+> working-tree changes were bundled into the build and deployed to
+> production. So the runtime has the wiring; git's origin/main does not.
+>
+> Concretely, **what's deployed but not committed to git** (= "git-divergent"):
+>
+> - `daemon/agent-daemon.mjs` — items #1–#7 below (visual-tests merge hook,
+>   substituteTemplateLib import, jobStoryShortIds + withStoryPrefix,
+>   context-pack resolver hook, persistStoryWorkSummary call,
+>   REVIEW_CRITERIA parser hook, handleEscalation REVIEWER_NEEDS_HUMAN
+>   branch).
+> - `functions/api/index.ts` — item #12 (`/apply-output` parses operator's
+>   REVIEW_CRITERIA reply when `triggeredBy === 'REVIEWER_NEEDS_HUMAN'`).
+> - `functions/shared/types/agent-orchestrator.ts` — item #13
+>   (`'REVIEWER_NEEDS_HUMAN'` in `JobTriggeredBy`).
+>
+> **Implication:** If anyone clones origin/main fresh and rebuilds,
+> they'll get a DIFFERENT runtime than what's deployed. The 2nd iteration
+> commit's first job is to commit the working tree to bring git back in
+> sync with infrastructure.
+>
+> **What's still NOT deployed and NOT in working tree** (= truly deferred,
+> need new wiring code): items #8 (D.4 scope-violation pre-fill),
+> #9 (D.5 prework-check daemon routing), #10 + #11 (E.3 wave-compile
+> prompt swap + atomic file writes), #14 (D.5 `COMPLETED_VIA_PREWORK`
+> status enum), #15 (E.2 wave-compile cron dispatcher),
+> #16 (D.3 `resolveWaves` plan-reducer integration),
+> #17 (D.3 `assertWaveScopeNonOverlapping` launcher check).
 
 ### Why a single 2nd iteration?
 
@@ -596,7 +633,10 @@ Touch-Point inference pipeline (Epic 3), or the Plan-build pipeline.
 
 ### What to wire — by file
 
-Mark each item `Status: open | in-progress | done` as it lands.
+Status legend:
+
+- ✅ **LIVE** — deployed to production runtime (Lambda or daemon-on-EC2) via the 2026-04-27 working-tree deploy. Code is on the running infrastructure but NOT yet on origin/main. The 2nd iteration commit needs to commit it so git matches runtime.
+- ⏳ **DEFERRED** — not in working tree, not deployed. Requires new wiring code.
 
 #### `daemon/agent-daemon.mjs`
 
@@ -604,7 +644,7 @@ The daemon already has the new module imports — they were added in
 the deferred branch and never committed alongside the libraries. The
 2nd iteration commit re-applies them and closes the loop. Hooks:
 
-1. **A.2 — visual-tests-writer merge hook.** After
+1. ✅ **LIVE — A.2 — visual-tests-writer merge hook.** After
    `runExtractors` returns `extracted.VISUAL_TESTS`, call
    `mergeVisualTestsBlock({ projectDir: workingDir, block: extracted.VISUAL_TESTS })`
    from `daemon/pipelines/lib/visual-tests-writer.mjs`. On success
@@ -613,14 +653,14 @@ the deferred branch and never committed alongside the libraries. The
    BEFORE the reviewer step starts, so place inside the
    post-extraction loop in `executeStep`.
 
-2. **A.5 — `substituteTemplate` hoisted to lib.** Replace the inline
+2. ✅ **LIVE — A.5 — `substituteTemplate` hoisted to lib.** Replace the inline
    `substituteTemplate` function with a thin wrapper around
    `substituteTemplateLib` from
    `daemon/pipelines/lib/template-substitution.mjs` (already shipped),
    passing the daemon's `log` as the `onMissing` callback. Behavior
    unchanged; testability improved.
 
-3. **A.7 — `storyShortId` log decoration.** Add a module-scope
+3. ✅ **LIVE — A.7 — `storyShortId` log decoration.** Add a module-scope
    `jobStoryShortIds = new Map()`. Populate it in `executePipeline`
    from `pipeline.initialVariables.STORY_ID` (uppercased, first 6
    chars). Add helpers `storyShortIdForJob(jobId)` and
@@ -631,7 +671,7 @@ iteration`, `Pipeline COMPLETED`, etc.) with the prefix.
    `storyShortId` so the Logs tab can render `[ABC123]` per row. Clear
    the map in `runJobAsync`'s `finally`.
 
-4. **B.2 — context-pack resolver hook.** Before the steps loop in
+4. ✅ **LIVE — B.2 — context-pack resolver hook.** Before the steps loop in
    `executePipeline`:
 
    ```js
@@ -650,7 +690,7 @@ iteration`, `Pipeline COMPLETED`, etc.) with the prefix.
    This populates `{{PROJECT_CONTEXT}}` for the DEV/REVIEWER/COMPILER
    prompts (the prompts already reference it as of `25926a4`).
 
-5. **B.6 — `workSummary` persistence.** After
+5. ✅ **LIVE — B.6 — `workSummary` persistence.** After
    `extractedVariables.WORK_SUMMARY` is captured AND `step.id` is
    `'dev'` or `'retry'` AND `variables.EPIC_ID` is set, call
    `epicRepo.persistStoryWorkSummary(epicId, storyId, workSummary)`.
@@ -658,7 +698,7 @@ iteration`, `Pipeline COMPLETED`, etc.) with the prefix.
    Module-scope `epicRepo = createEpicRepo({ ddb, tableName: EPICS_TABLE })`
    already exists for the daemon receiver — reuse the same instance.
 
-6. **C.2 — REVIEW_CRITERIA parser hook.** After extractors run, when
+6. ✅ **LIVE — C.2 — REVIEW_CRITERIA parser hook.** After extractors run, when
    `step.id === 'review'` AND `extracted.REVIEW_CRITERIA` is present:
    parse via `parseReviewCriteria` + `aggregateReviewVerdict` (from
    `daemon/pipelines/lib/review-criteria-parser.mjs`) and synthesize
@@ -673,13 +713,13 @@ iteration`, `Pipeline COMPLETED`, etc.) with the prefix.
 salvageableExtractors: ['REVIEW_CRITERIA', 'WORK_SUMMARY'] })`
      so `runJobAsync`'s catch routes to NEEDS_ATTENTION.
 
-7. **C.5 — `handleEscalation` recognizes `REVIEWER_NEEDS_HUMAN`.** Add
+7. ✅ **LIVE — C.5 — `handleEscalation` recognizes `REVIEWER_NEEDS_HUMAN`.** Add
    the new triggeredBy as a category branch (`'reviewer-needs-human'`,
    already in the AttentionCategory union) with `severity: 'medium'`
    and a distinct title. Keeps the operator inbox UX consistent with
    the existing agent-escalated / agent-needs-human paths.
 
-8. **D.4 — scope-violation pre-fill.** Before the C.2 parser runs,
+8. ⏳ **DEFERRED — D.4 — scope-violation pre-fill.** Before the C.2 parser runs,
    compute scope violations from the dev's diff and prepend
    auto-generated `scope-touchpoints-N: fail` / `scope-forbidden-N:
 fail` lines to `extracted.REVIEW_CRITERIA`. Use
@@ -690,7 +730,7 @@ fail` lines to `extracted.REVIEW_CRITERIA`. Use
    reviewer's own AC verdicts run through the same parser and join
    the daemon-prefilled scope ACs deterministically.
 
-9. **D.5 — prework-check + COMPLETED_VIA_PREWORK routing.**
+9. ⏳ **DEFERRED — D.5 — prework-check + COMPLETED_VIA_PREWORK routing.**
    - In `context-pack-resolver.mjs` (or a thin wrapper called before
      the resolver), invoke
      `collectRecentTouchPointWork({ projectDir, sinceTime: planStart, touchPoints })`
@@ -704,7 +744,7 @@ fail` lines to `extracted.REVIEW_CRITERIA`. Use
      `agent-orchestrator.ts` below), persist the cited shas, advance
      the wave reducer.
 
-10. **E.3 — wave-compile prompt swap.** When the daemon picks up a
+10. ⏳ **DEFERRED — E.3 — wave-compile prompt swap.** When the daemon picks up a
     `pipelineKind: 'wave-compile'` job, it must replace the
     `WAVE_COMPILE_PROMPT_PLACEHOLDER` on the `wave-compile-knowledge`
     step with the real prompt from
@@ -715,7 +755,7 @@ fail` lines to `extracted.REVIEW_CRITERIA`. Use
     detectable sentinel so the daemon can hard-fail with a clear
     message if the wiring drifts.
 
-11. **E.3 — atomic per-file write of WAVE_KNOWLEDGE_OUTPUT.** After
+11. ⏳ **DEFERRED — E.3 — atomic per-file write of WAVE_KNOWLEDGE_OUTPUT.** After
     the wave-compile-knowledge step, parse
     `variables.WAVE_KNOWLEDGE_OUTPUT` via `parseWaveKnowledgeOutput`
     (same library) and `fs.writeFile` each `entries[i].content` to
@@ -725,7 +765,7 @@ fail` lines to `extracted.REVIEW_CRITERIA`. Use
 
 #### `functions/api/index.ts`
 
-12. **C.5 — `/apply-output` parses operator's REVIEW_CRITERIA reply.**
+12. ✅ **LIVE — C.5 — `/apply-output` parses operator's REVIEW_CRITERIA reply.**
     The endpoint already accepts an optional `output` field in the
     request body and is wired to call `parseReviewCriteria` +
     `aggregateReviewVerdict` from
@@ -739,18 +779,18 @@ fail` lines to `extracted.REVIEW_CRITERIA`. Use
 
 #### `functions/shared/types/agent-orchestrator.ts`
 
-13. **C.5 — Add `'REVIEWER_NEEDS_HUMAN'` to `JobTriggeredBy`.**
+13. ✅ **LIVE — C.5 — Add `'REVIEWER_NEEDS_HUMAN'` to `JobTriggeredBy`.**
     Single-line addition; the daemon's `handleEscalation` already
     branches on the literal in the deferred wiring (item 7 above).
 
-14. **D.5 — Add `'COMPLETED_VIA_PREWORK'` to `AgentJobStatus`.** Also
+14. ⏳ **DEFERRED — D.5 — Add `'COMPLETED_VIA_PREWORK'` to `AgentJobStatus`.** Also
     register it in `agent-job-state-machine.ts` `TERMINAL_STATUSES` +
     `SUCCESS_STATUSES` (wave reducers MUST go through those helpers).
     Allowed transition: `RUNNING → COMPLETED_VIA_PREWORK`.
 
 #### `functions/cron/wave-completion-check.ts`
 
-15. **E.2 — Wave-compile dispatcher.** When all stories in a wave are
+15. ⏳ **DEFERRED — E.2 — Wave-compile dispatcher.** When all stories in a wave are
     DONE AND build-check / server-check pass:
     ```ts
     import { generateWaveCompilePipeline } from '../shared/pipelines/wave-compile-pipeline';
@@ -778,7 +818,7 @@ fail` lines to `extracted.REVIEW_CRITERIA`. Use
 
 #### `functions/shared/services/plan-reducer.ts`
 
-16. **D.3 — `resolveWaves` at plan-build.** When the plan reducer
+16. ⏳ **DEFERRED — D.3 — `resolveWaves` at plan-build.** When the plan reducer
     builds the initial wave assignment for a freshly-planned epic,
     call `resolveWaves(stories)` from
     `functions/shared/services/wave-conflict-resolver.ts` and write
@@ -789,7 +829,7 @@ fail` lines to `extracted.REVIEW_CRITERIA`. Use
 
 #### `functions/shared/services/pipeline-launcher.ts`
 
-17. **D.3 — Defensive runtime check.** At the top of
+17. ⏳ **DEFERRED — D.3 — Defensive runtime check.** At the top of
     `launchPipelineWave` after filtering `waveStories`, call
     `assertWaveScopeNonOverlapping(waveStories)` from
     `wave-conflict-resolver.ts`. Throws a structured
@@ -798,77 +838,188 @@ fail` lines to `extracted.REVIEW_CRITERIA`. Use
 
 ### Wiring sequence (recommended)
 
-When the parallel pipelinev1 sibling-track is at a coherent point and
-the operator is ready to land the 2nd iteration in one PR, recommend
-this order to keep partial-rollback options:
+> **Update post-2026-04-27-deploy:** Steps 1–5 are already LIVE on
+> infrastructure (deployed via working tree); the 2nd iteration
+> commit just needs to commit those changes to git so origin/main
+> matches runtime. Steps 6–8 are the genuinely-new wiring work.
 
-1. Type additions (items 13, 14) — pure type union extensions; no
-   behavior change. **Smoke**: `tsc --noEmit` clean.
-2. agent-daemon.mjs items 2 (substituteTemplate hoist) + 3
-   (storyShortId) — pure observability; no behavior change. **Smoke**:
-   daemon imports cleanly via `node --check`; events carry
-   `storyShortId` in DDB.
-3. agent-daemon.mjs item 1 (visual-tests merge) + item 5 (workSummary
-   persistence) — single-purpose hooks; failures are best-effort.
-   **Smoke**: run a story, verify `visual-tests.md` materializes and
-   `epic.stories[i].workSummary` is populated.
-4. agent-daemon.mjs item 4 (context-pack resolver) — populates
-   `PROJECT_CONTEXT`. The DEV/REVIEWER/COMPILER prompts (already
-   committed) consume it. **Smoke**: agent prompt logs show the
-   context block at the cacheable prefix position.
-5. agent-daemon.mjs items 6 + 7 (REVIEW_CRITERIA parser +
-   handleEscalation extension) + item 12 (`/apply-output`). **Smoke**:
-   force a story with one needs-human AC; observe job → NEEDS_ATTENTION
-   with `category: 'reviewer-needs-human'`; resolve via Talk-to-agent
-   apply-output; wave advances.
-6. agent-daemon.mjs item 8 (scope-violation pre-fill) +
-   `plan-reducer.ts` item 16 + `pipeline-launcher.ts` item 17.
-   **Smoke**: synthetic plan with overlapping touchPoints fails at
-   plan-build with the wave-conflict error; a DEV diff that touches an
-   out-of-scope file gets a `scope-touchpoints` AC failure on review.
-7. agent-daemon.mjs item 9 (prework-check) — gated by item 14's
-   status enum. **Smoke**: a story whose touchPoints are already
-   covered by recent commits completes via `COMPLETED_VIA_PREWORK`
-   without spawning a full DEV turn.
-8. `wave-completion-check.ts` item 15 + agent-daemon.mjs items 10 +
-   11 (wave-compile prompt swap + atomic file writes). Set
-   `WAVE_CLOSE_COMPILER_ENABLED=true` only after smoke. **Smoke**:
+The order keeps partial-rollback options:
+
+1. **Commit-already-live (LIVE)** — single git commit that captures
+   the working-tree changes that shipped on 2026-04-27 to
+   `daemon/agent-daemon.mjs` (items 1, 2, 3, 4, 5, 6, 7),
+   `functions/api/index.ts` (item 12), and
+   `functions/shared/types/agent-orchestrator.ts` (item 13). Adds the
+   `'REVIEWER_NEEDS_HUMAN'` JobTriggeredBy literal so type-checks pass.
+   **Smoke**: `tsc --noEmit` clean; `npx vitest run` no regressions
+   beyond the 4 pre-existing `epic-dev-pipeline.test.mjs` failures.
+
+2. **D.5 type additions** — `'COMPLETED_VIA_PREWORK'` to
+   `AgentJobStatus` + register in `agent-job-state-machine.ts`'s
+   `TERMINAL_STATUSES` + `SUCCESS_STATUSES` (item 14). Pure type
+   union extension; no runtime change yet. **Smoke**: `tsc --noEmit`
+   clean; wave reducer's tests still green.
+
+3. **D.3 wave-conflict integration** — `plan-reducer.ts` calls
+   `resolveWaves()` at plan-build time (item 16) +
+   `pipeline-launcher.ts` calls `assertWaveScopeNonOverlapping()` at
+   wave launch (item 17). **Smoke**: synthetic plan with overlapping
+   touchPoints serialises into different waves at plan-build; if the
+   data ever drifts, the launcher's defensive throw surfaces it as a
+   `wave-conflict` attention item.
+
+4. **D.4 daemon scope-violation pre-fill** — daemon item 8. Pre-fills
+   `scope-touchpoints-N: fail` / `scope-forbidden-N: fail` AC lines
+   into the structured REVIEW_CRITERIA block before the C.2 parser
+   runs. **Smoke**: a DEV diff that adds an out-of-scope file gets a
+   `scope-touchpoints` AC failure on review without the reviewer
+   having to notice.
+
+5. **D.5 prework-check daemon routing** — daemon item 9. After step 2
+   ships the COMPLETED_VIA_PREWORK enum, wire the prework path:
+   `<recent_work>` enrichment in the context pack +
+   `detectNoChangesRequired` post-DEV → status flip. **Smoke**: a
+   story whose touchPoints are already covered by recent commits
+   terminates via `COMPLETED_VIA_PREWORK` without spawning a full DEV
+   turn (~$0.05 + ≤1 minute vs $0.30 + ~3 minutes today).
+
+6. **E.2 + E.3 wave-close compiler activation** —
+   `wave-completion-check.ts` cron dispatcher (item 15) +
+   agent-daemon.mjs prompt swap + atomic file writes (items 10, 11).
+   Keep `WAVE_CLOSE_COMPILER_ENABLED=false` until smoke passes. Then
+   flip to `true` per-Lambda env var in `sst.config.ts`. **Smoke**:
    3-story wave runs to DONE without per-story compile; one
    wave-compile job dispatches; all knowledge articles produced
-   atomically.
+   atomically. Per-epic compile time should drop from ~33 min to
+   ~5 min.
 
-### What's already done vs deferred
+### What's already done vs deferred — post-deploy 2026-04-27
 
-| ID  | Stage      | Library/types                                                                   | Wiring                                                                                        |
-| --- | ---------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| A.1 | Developing | ✅ committed (`85b399e`)                                                        | ✅ landed in story-pipeline.ts via `25926a4`                                                  |
-| A.2 | Developing | ✅ visual-tests-writer.mjs (`85b399e`)                                          | ⏳ daemon hook (item 1)                                                                       |
-| A.3 | Developing | ✅ compile-commit-on-pass step + simplified compile-diff (`85b399e`)            | ✅ pipeline already invokes                                                                   |
-| A.4 | Developing | ✅ AttentionCategory + sync verify command (`85b399e`)                          | ⏳ daemon attention-write on compile failure (folded into item 6/8 paths)                     |
-| A.5 | Developing | ✅ template-substitution.mjs (`85b399e`)                                        | ⏳ daemon `substituteTemplate` hoist (item 2)                                                 |
-| A.6 | Developing | ✅ DEV prompt updates (`25926a4`)                                               | ✅ landed                                                                                     |
-| A.7 | Developing | ✅ AgentEvent.storyShortId field + UI render (`85b399e`)                        | ⏳ daemon log decoration + event tagging (item 3)                                             |
-| B.1 | Developing | ✅ story-context-pack.mjs (`8851af3`)                                           | ✅ pure module                                                                                |
-| B.2 | Developing | ✅ context-pack-resolver.mjs + DEV prompt (`8851af3` + `25926a4`)               | ⏳ daemon resolver call (item 4)                                                              |
-| B.3 | Developing | ✅ REVIEWER prompt (`25926a4`)                                                  | ✅ consumes `{{PROJECT_CONTEXT}}` once item 4 lands                                           |
-| B.4 | Developing | ✅ COMPILER prompt (`25926a4`)                                                  | ✅ consumes `{{PROJECT_CONTEXT}}` once item 4 lands                                           |
-| B.5 | Developing | ✅ parseKnowledgeIndex + format spec in COMPILER prompt (`8851af3` + `25926a4`) | ✅ Compiler agent maintains the format on the next compile                                    |
-| B.6 | Developing | ✅ workSummary type + persistStoryWorkSummary helper (`8851af3`)                | ⏳ daemon persistence call (item 5)                                                           |
-| C.1 | Developing | ✅ REVIEWER prompt + REVIEW_CRITERIA contract (`25926a4`)                       | ✅ contract live                                                                              |
-| C.2 | Developing | ✅ review-criteria-parser .mjs + .ts (`e052ab0`)                                | ⏳ daemon parser hook (item 6)                                                                |
-| C.3 | Developing | ✅ REVIEWER CONSTRAINTS prompt (`25926a4`)                                      | ✅ live                                                                                       |
-| C.4 | Developing | ✅ REVIEWER DISCOVERY language (`25926a4`)                                      | ✅ live                                                                                       |
-| C.5 | Developing | ✅ AttentionCategory + TS port + `/apply-output` shape (`e052ab0`)              | ⏳ JobTriggeredBy addition + handleEscalation branch + apply-output re-wire (items 7, 12, 13) |
-| D.1 | Developing | ✅ forbiddenAreas type (`b34dfb0`)                                              | ✅ live                                                                                       |
-| D.2 | Developing | ✅ planner workflow doc (`b34dfb0`)                                             | ✅ next plan run uses it                                                                      |
-| D.3 | Developing | ✅ wave-conflict-resolver.ts (`b34dfb0`)                                        | ⏳ plan-reducer + launcher integration (items 16, 17)                                         |
-| D.4 | Developing | ✅ scope-violation-detector.mjs (`b34dfb0`)                                     | ⏳ daemon pre-fill into REVIEW_CRITERIA (item 8)                                              |
-| D.5 | Developing | ✅ prework-check.mjs (`b34dfb0`)                                                | ⏳ AgentJobStatus addition + context-pack enrichment + daemon detector (items 9, 14)          |
-| E.1 | Developing | ✅ feature flag + step gating (`25926a4`)                                       | ✅ live (default off)                                                                         |
-| E.2 | Developing | ✅ wave-compile-pipeline.ts (`25926a4`)                                         | ⏳ cron dispatcher (item 15)                                                                  |
-| E.3 | Developing | ✅ wave-knowledge-output-parser.mjs + buildWaveCompilePrompt (`25926a4`)        | ⏳ daemon prompt swap + atomic file writes (items 10, 11)                                     |
-| E.4 | Developing | ✅ concurrencyClass='background' on pipeline (`25926a4`)                        | ✅ pipeline declares it                                                                       |
-| E.5 | Developing | ✅ find -newer fallback removed (`85b399e`)                                     | ✅ live                                                                                       |
+Three states in the runtime/git matrix:
+
+- 🟢 **In git AND live in production**
+- 🟡 **Live in production but not yet on origin/main** — deployed via 2026-04-27 working-tree `sst deploy` + `rsync-daemon.sh`. The 2nd iteration commit captures these so git matches runtime.
+- 🔴 **Not deployed, not in working tree** — genuinely deferred, requires new wiring code.
+
+| ID  | Stage      | Library/types (committed)                                                               | Runtime wiring                                                                                                                      |
+| --- | ---------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| A.1 | Developing | 🟢 `process.env.COMPILER_MODEL` in `story-pipeline.ts` (`85b399e`, `25926a4`)           | 🟢 live                                                                                                                             |
+| A.2 | Developing | 🟢 `visual-tests-writer.mjs` (`85b399e`)                                                | 🟡 daemon hook live in production (item 1) — not in git                                                                             |
+| A.3 | Developing | 🟢 `compile-commit-on-pass` + simplified `compile-diff` (`85b399e`)                     | 🟢 live                                                                                                                             |
+| A.4 | Developing | 🟢 `compile-sync` verify + `compile-sync-failed` category (`85b399e`)                   | 🟢 live                                                                                                                             |
+| A.5 | Developing | 🟢 `template-substitution.mjs` (`85b399e`)                                              | 🟡 daemon hoist live in production (item 2) — not in git                                                                            |
+| A.6 | Developing | 🟢 DEV prompt DISCOVERY/VERIFICATION + `<run_command>` (`25926a4`)                      | 🟢 live                                                                                                                             |
+| A.7 | Developing | 🟢 `AgentEvent.storyShortId` + UI render (`85b399e`)                                    | 🟡 daemon log decoration + event tagging live in production (item 3) — not in git                                                   |
+| B.1 | Developing | 🟢 `story-context-pack.mjs` (`8851af3`)                                                 | 🟢 pure module                                                                                                                      |
+| B.2 | Developing | 🟢 `context-pack-resolver.mjs` + DEV prompt `<project_context>` (`8851af3` + `25926a4`) | 🟡 daemon resolver call live in production (item 4) — not in git                                                                    |
+| B.3 | Developing | 🟢 REVIEWER prompt (`25926a4`)                                                          | 🟢 live (consumes `PROJECT_CONTEXT` set by daemon's runtime resolver)                                                               |
+| B.4 | Developing | 🟢 COMPILER prompt (`25926a4`)                                                          | 🟢 live                                                                                                                             |
+| B.5 | Developing | 🟢 `parseKnowledgeIndex` + format spec in COMPILER prompt (`8851af3` + `25926a4`)       | 🟢 Compiler agent maintains the format on the next compile                                                                          |
+| B.6 | Developing | 🟢 `workSummary` type + `persistStoryWorkSummary` helper (`8851af3`)                    | 🟡 daemon persistence call live in production (item 5) — not in git                                                                 |
+| C.1 | Developing | 🟢 REVIEWER prompt + REVIEW_CRITERIA contract (`25926a4`)                               | 🟢 contract live                                                                                                                    |
+| C.2 | Developing | 🟢 review-criteria-parser `.mjs` + `.ts` (`e052ab0`)                                    | 🟡 daemon parser hook live in production (item 6) — not in git                                                                      |
+| C.3 | Developing | 🟢 REVIEWER CONSTRAINTS prompt (`25926a4`)                                              | 🟢 live                                                                                                                             |
+| C.4 | Developing | 🟢 REVIEWER DISCOVERY language (`25926a4`)                                              | 🟢 live                                                                                                                             |
+| C.5 | Developing | 🟢 AttentionCategory + TS port + `/apply-output` shape (`e052ab0`)                      | 🟡 `JobTriggeredBy` literal + `handleEscalation` branch + `/apply-output` re-wire live in production (items 7, 12, 13) — not in git |
+| D.1 | Developing | 🟢 `forbiddenAreas` type (`b34dfb0`)                                                    | 🟢 live                                                                                                                             |
+| D.2 | Developing | 🟢 planner workflow doc (`b34dfb0`)                                                     | 🟢 next plan run uses it                                                                                                            |
+| D.3 | Developing | 🟢 `wave-conflict-resolver.ts` (`b34dfb0`)                                              | 🔴 `plan-reducer` + `pipeline-launcher` integration not yet wired (items 16, 17)                                                    |
+| D.4 | Developing | 🟢 `scope-violation-detector.mjs` (`b34dfb0`)                                           | 🔴 daemon pre-fill into REVIEW_CRITERIA not yet wired (item 8)                                                                      |
+| D.5 | Developing | 🟢 `prework-check.mjs` (`b34dfb0`)                                                      | 🔴 `AgentJobStatus` addition + context-pack enrichment + daemon detector not yet wired (items 9, 14)                                |
+| E.1 | Developing | 🟢 feature flag + step gating (`25926a4`)                                               | 🟢 live (default OFF)                                                                                                               |
+| E.2 | Developing | 🟢 `wave-compile-pipeline.ts` (`25926a4`)                                               | 🔴 cron dispatcher not yet wired (item 15)                                                                                          |
+| E.3 | Developing | 🟢 `wave-knowledge-output-parser.mjs` + `buildWaveCompilePrompt` (`25926a4`)            | 🔴 daemon prompt swap + atomic file writes not yet wired (items 10, 11)                                                             |
+| E.4 | Developing | 🟢 `concurrencyClass='background'` on pipeline (`25926a4`)                              | 🟢 pipeline declares it                                                                                                             |
+| E.5 | Developing | 🟢 `find -newer` fallback removed (`85b399e`)                                           | 🟢 live                                                                                                                             |
+
+**Summary of impact for the next test run:**
+
+What's actually firing (24/28 stories): every prompt, every cache-stable `<project_context>` block, every visual-tests merge, every per-story commit, every storyShortId-prefixed log line, every REVIEW_CRITERIA-parsed verdict, every workSummary persistence, every reviewer-needs-human → NEEDS_ATTENTION + Talk-to-agent flow.
+
+What's NOT firing (4 deferred items):
+
+- D.3 wave-conflict serialization at plan-build (silent collisions possible if the planner emits overlapping touchPoints in the same wave)
+- D.4 auto scope-violation in REVIEW_CRITERIA (reviewer agent must catch out-of-scope diffs manually)
+- D.5 prework "no changes required" fast path (no-op stories still spawn a full DEV turn)
+- E.2 + E.3 wave-close compiler (per-story compile-knowledge still runs; `WAVE_CLOSE_COMPILER_ENABLED` defaults to `false`)
+
+### Smoke-test runbook for the first new plan post-deploy
+
+Run a small (3–5 story) plan and watch for these signals to confirm the
+2026-04-27 deploy is firing all the LIVE corrections:
+
+#### Per-story signals (Logs tab + DDB)
+
+- **Logs tab events carry `[ABC123]` prefix** (first 6 chars of the
+  story UUID, uppercased). Two parallel stories' events should be easy
+  to disambiguate. (Story A.7)
+- **`extraction PROJECT_CONTEXT = ...` event** fires before the dev
+  step starts; the `variableValue` preview should show
+  `<!-- story-context-pack v1 -->` followed by sections for plan,
+  story spec, project tree, recent diffs, prior summaries. (Story B.2)
+- **`status visual-tests.md updated (N entries; +M new, ~K replaced)`**
+  fires after the DEV step when the story has browser tests. The file
+  should exist on the worker at `<projectDir>/visual-tests.md`. (Story A.2)
+- **`extraction REVIEW_CRITERIA = ...`** fires after the reviewer step.
+  Followed by a daemon log line:
+  `REVIEW_CRITERIA → verdict=pass (pass=N, fail=0, needsHuman=0, malformed=0)`.
+  (Story C.2)
+- **`epic.stories[i].workSummary` populated** in DDB after each DEV
+  step. (Story B.6)
+- **One `git commit` per story** in the project repo on the worker.
+  Author: `Daemon <daemon@futurator.local>`. Message: `story: <id> — <title>`.
+  (Story A.3)
+- **`compile-diff` exits 0 with a clean per-story file list.** No
+  `find -newer` invocations. (Story A.3 + A.4)
+- **`compile-sync` verifies S3 mirror** with
+  `S3 mirror verified: N objects under knowledge-live/<projectId>/`.
+  Failure → `compile-sync-failed` attention item. (Story A.4)
+
+#### Reviewer needs-human flow (force one ambiguous AC)
+
+To exercise C.5 end-to-end, write a story with at least one AC that's
+deliberately subjective (e.g., "the colour palette feels game-show-ish").
+The reviewer should emit `AC-N: needs-human — <question>` and you should see:
+
+1. Job → `NEEDS_ATTENTION` with `triggeredBy: REVIEWER_NEEDS_HUMAN` in the row.
+2. Inbox at `/inbox` shows a new item with category `reviewer-needs-human`.
+3. Click "Talk to agent" → opens a fresh-mode conversation. Type a verdict
+   reply (with or without an updated `---REVIEW_CRITERIA---` block).
+4. Click "Apply output". If your reply contained a parseable
+   `---REVIEW_CRITERIA---` block with the underlying step's verdict mapped,
+   the response includes `appliedReviewVerdict: { verdict: 'pass', ... }`.
+   The job flips to `COMPLETED_VIA_SALVAGE` and the wave advances.
+
+#### Things that will NOT happen yet (4 deferred items)
+
+- A story that touches a file outside its declared `touchPoints` will
+  NOT auto-fail review. The reviewer agent might catch it; the daemon
+  won't enforce it. (D.4)
+- A story whose `touchPoints` are already covered by recent commits
+  will still spawn a full DEV cycle. No `COMPLETED_VIA_PREWORK` short-
+  circuit. (D.5)
+- A wave's per-story `compile-knowledge` + `compile-sync` will run
+  N times (one per story). The wave-close batched compile is gated
+  on `WAVE_CLOSE_COMPILER_ENABLED=true` AND items 10/11/15. (E.2 + E.3)
+- If the planner emits two stories with overlapping `touchPoints` in
+  the same wave, they will run in parallel and silently overwrite each
+  other's edits. (D.3) **Mitigation**: Plan with `dependsOn` between
+  same-file stories until item 16/17 lands, OR force serialised waves
+  by hand.
+
+#### Health check before testing
+
+```bash
+# Local: make sure git is clean of unintended drift
+git status -s | head
+
+# EC2: confirm daemon is running with the post-deploy code
+ssh -i ~/.ssh/debatator-memgraph.pem ubuntu@ec2-54-86-226-233.compute-1.amazonaws.com \
+  "sudo systemctl is-active futurator-daemon && sudo journalctl -u futurator-daemon --since '5 min ago' --no-pager | tail -20"
+```
+
+The daemon should be `active`, with no startup errors and a recent
+`Agent daemon started` log line (or its equivalent).
 
 ### Out of scope for the 2nd iteration
 
