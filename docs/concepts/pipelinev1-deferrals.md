@@ -943,6 +943,87 @@ What's NOT firing (4 deferred items):
 - D.5 prework "no changes required" fast path (no-op stories still spawn a full DEV turn)
 - E.2 + E.3 wave-close compiler (per-story compile-knowledge still runs; `WAVE_CLOSE_COMPILER_ENABLED` defaults to `false`)
 
+### Concurrency tuning (post-deploy 2026-04-27)
+
+**Symptom on dino4 first run:** Wave 0 with 4 parallel-eligible stories ran
+only one at a time. Diagnosis below — and the env-var fix is now applied
+on EC2.
+
+The daemon has **two layered concurrency caps** and they must be in sync:
+
+1. **Legacy poll-loop cap (`agent-daemon.mjs:330`):**
+
+   ```
+   MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT || '2', 10)
+   ```
+
+   Gates how many PENDING jobs the daemon's poll loop fetches per cycle.
+   `availableSlots = MAX_CONCURRENT - activeJobs.size`.
+
+2. **SessionPool slot ceiling (`daemon/lib/session-pool.mjs:13–15`)** —
+   added by pipelinev1 sibling Story 2.1/2.5:
+   ```
+   total ceiling                  = MAX_CONCURRENT_TOTAL          (env, default 2)
+   reserved for interactive       = MAX_CONCURRENT_INTERACTIVE_RESERVED  (env, default 1)
+   critical + background combined = ceiling − reserved            = 1 (default!)
+   ```
+
+The defaults gave critical+background **only 1 slot** — so per-story dev
+jobs (which class as `'background'` per the SessionPool's "everything
+else → background" heuristic) ran sequentially even when the wave had 4
+parallel-eligible stories.
+
+**Applied fix (2026-04-27, ~11:13 UTC):** appended to
+`/opt/futurator-daemon/.env`:
+
+```
+# Pipeline-v1 dev-correction tuning (2026-04-27)
+MAX_CONCURRENT_TOTAL=4
+MAX_CONCURRENT_INTERACTIVE_RESERVED=1
+MAX_CONCURRENT=4
+```
+
+Restarted daemon via `sudo systemctl restart futurator-daemon`. Verified
+in the heartbeat row: `ceiling: 4`, `freeSlots.background: 2`, and
+3 simultaneous dev jobs running on dino4 within seconds of restart.
+
+**Memory budget on t2.micro (live capture):**
+| Configuration | Total claude RSS | System used | Available |
+|---|---|---|---|
+| 1 claude (default) | ~232 MB | ~700 MB | ~1.1 GB |
+| 3 claudes (current cap) | ~730 MB | ~1055 MB | ~781 MB |
+| 4 claudes (if `RESERVED=0`) | ~970 MB | ~1290 MB | ~547 MB (tight) |
+
+**To unlock the full 4 simultaneous:** set
+`MAX_CONCURRENT_INTERACTIVE_RESERVED=0`. Trade-off: a Talk-to-agent
+request mid-wave has to wait for a dev slot to free. Acceptable when
+the operator isn't actively chatting.
+
+**To unlock more than 4** (typical wave size 5-8): upgrade `t2.micro`
+→ `t3.medium` (4 GB RAM, on-demand ~$30/mo). Then ceiling=8,
+RESERVED=2 runs 6 dev jobs comfortably.
+
+**Operator decision tree:**
+
+- "I'm only doing pipeline work, no Talk-to-agent right now" → set `RESERVED=0`, `ceiling=4`. Full 4 parallel.
+- "Talk-to-agent is in flight or might be" → keep `RESERVED=1`, `ceiling=4`. 3 parallel + 1 reserved for the operator.
+- "Wave sizes routinely 6+" → bump ceiling to 5-6 and watch for OOM in `journalctl -u futurator-daemon`.
+- "OOM events appearing" → revert `MAX_CONCURRENT_TOTAL` to 3 immediately, then plan the t3.medium upgrade.
+
+**Health check after every concurrency change:**
+
+```bash
+ssh -i ~/.ssh/debatator-memgraph.pem ubuntu@ec2-54-86-226-233.compute-1.amazonaws.com \
+  "sudo systemctl is-active futurator-daemon && \
+   ps -eo rss,comm | grep claude && \
+   free -m | head -2"
+```
+
+Expect `active`, N claude processes (one per simultaneous job), and
+≥400 MB available. If available <300 MB, dial back.
+
+---
+
 ### Smoke-test runbook for the first new plan post-deploy
 
 Run a small (3–5 story) plan and watch for these signals to confirm the
