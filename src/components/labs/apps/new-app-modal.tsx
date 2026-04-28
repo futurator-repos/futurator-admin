@@ -16,6 +16,7 @@ import { Label } from '@/components/ui/label';
 import { useApps, useCreateApp } from '@/hooks/use-apps';
 import { links } from '@/lib/links';
 import { BoilerplatePicker } from '@/components/labs/boilerplate-picker';
+import { IconPicker } from '@/components/labs/apps/icon-picker';
 import { getBoilerplateClientView } from '@/lib/boilerplate-registry-client-view';
 import type { BoilerplateType } from '@/types/app';
 
@@ -127,7 +128,7 @@ export function NewAppModal({
         onOpenChange(next);
       }}
     >
-      <DialogContent>
+      <DialogContent className="sm:max-w-[640px] max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Create a new App</DialogTitle>
           <DialogDescription>
@@ -184,16 +185,7 @@ export function NewAppModal({
             />
           </div>
 
-          <div className="space-y-1.5">
-            <Label htmlFor="app-icon">Icon</Label>
-            <Input
-              id="app-icon"
-              value={icon}
-              onChange={(e) => setIcon(e.target.value)}
-              maxLength={4}
-              className="w-20 text-center text-xl"
-            />
-          </div>
+          <IconPicker value={icon} onChange={setIcon} disabled={create.isPending} />
 
           <BoilerplatePicker
             value={boilerplateType}
