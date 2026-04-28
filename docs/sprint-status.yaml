@@ -275,10 +275,10 @@ development_status:
   # Parallel: 1.6 (Roadmap), 1.7 (Settings), 1.8 (Timer Intel — 7 stories).
 
   # ── Epic PV2-P1-1: Prerequisite settle (PR-1 → PR-12) ──
-  epic-pv2-p1-1: backlog
-  pv2-p1-1-1-mint-fine-grained-pat: backlog          # blocked on operator
-  pv2-p1-1-2-add-sst-secret-and-link: review         # code-only done; deploy + secret-set deferred to operator
-  pv2-p1-1-3-configure-daemon-git-identity: backlog  # blocked on 1.1.1 + 1.1.2 deploy
+  epic-pv2-p1-1: review
+  pv2-p1-1-1-mint-fine-grained-pat: review           # PAT minted, scopes incl. workflow:write, set as SST secret
+  pv2-p1-1-2-add-sst-secret-and-link: review         # deployed; verified via /api/github/status connected:true
+  pv2-p1-1-3-configure-daemon-git-identity: review   # script shipped + wired into daemon startup; runs on next EC2 restart
   epic-pv2-p1-1-retrospective: optional
 
   # ── Epic PV2-P1-2: GitHub connector + API routes ──
@@ -290,9 +290,9 @@ development_status:
   epic-pv2-p1-2-retrospective: optional
 
   # ── Epic PV2-P1-3: Boilerplate template repos + registry ──
-  epic-pv2-p1-3: backlog
-  pv2-p1-3-1-template-nextjs-full-content: backlog   # needs PAT + gh CLI
-  pv2-p1-3-2-stub-template-repos: backlog            # needs PAT
+  epic-pv2-p1-3: review
+  pv2-p1-3-1-template-nextjs-full-content: review    # repo created at futurator-repos/template-nextjs, is_template=true
+  pv2-p1-3-2-stub-template-repos: review             # template-sst, template-vite, template-mobile created + marked as templates
   pv2-p1-3-3-boilerplate-registry: review            # 19 tests passing
   epic-pv2-p1-3-retrospective: optional
 
