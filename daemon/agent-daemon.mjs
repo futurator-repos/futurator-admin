@@ -80,6 +80,10 @@ import {
   ShellGuardViolation,
 } from './pipelines/lib/shell-guard.mjs';
 import { mergeVisualTestsBlock } from './pipelines/lib/visual-tests-writer.mjs';
+// Pipeline v2.0 efficiency fix T0.1 — detect ---DONE--- + ---WORK_SUMMARY---
+// in agent prose so COST_HARD-after-DONE terminations resolve as success
+// instead of triggering a re-spawn loop. See daemon/lib/done-detector.mjs.
+import { hasDoneAndWorkSummary } from './lib/done-detector.mjs';
 import { randomUUID } from 'node:crypto';
 
 // Resolve the full path to `claude` binary at startup
@@ -124,6 +128,18 @@ const GRACEFUL_SHUTDOWN_MS = parseInt(process.env.GRACEFUL_SHUTDOWN_MS || '30000
 // written.
 const RETRY_DELAYS_MS = [30_000, 120_000, 480_000]; // 30s → 2m → 8m
 const MAX_RETRIES = RETRY_DELAYS_MS.length;
+
+// Pipeline v2.0 Efficiency Fix T0.3 — story pipelines (per-story DEV→
+// REVIEWER→COMPILER) get a tighter retry budget than the generic ladder.
+// dino1 forensic: a no-op story burned ~$40 across ~5 dev re-spawns before
+// the operator manually abandoned. T0.1's COST_HARD-after-DONE detector is
+// the primary fix; this is defense-in-depth for the case where dev fails
+// BEFORE emitting ---DONE---. Default 2 attempts (1 retry).
+const MAX_DEV_ATTEMPTS_PER_STORY = parseInt(
+  process.env.MAX_DEV_ATTEMPTS_PER_STORY || '2',
+  10,
+);
+const STORY_PIPELINE_MAX_RETRIES = Math.max(0, MAX_DEV_ATTEMPTS_PER_STORY - 1);
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
   marshallOptions: { removeUndefinedValues: true },
@@ -498,6 +514,12 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
     let buffer = '';
     let finalResult = null;
     let stderrBuffer = '';
+    // T0.1: accumulate the agent's prose output across all stream events so the
+    // close-handler can scan for ---DONE--- + ---WORK_SUMMARY--- when the CLI
+    // terminates non-zero. Capped at 64 KB to bound memory; the markers
+    // typically land in the last few KB of agent output.
+    let agentTextBuffer = '';
+    const AGENT_TEXT_BUFFER_CAP = 64 * 1024;
 
     // Handle spawn failures (ENOENT, permissions, etc.)
     proc.on('error', (err) => {
@@ -521,6 +543,27 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
           const event = JSON.parse(line);
           processStreamEvent(jobId, stepId, agentId, event);
           if (event.type === 'result') finalResult = event;
+          // T0.1: accumulate agent prose for COST_HARD-after-DONE detection.
+          // Two paths emit text: stream_event/text_delta (incremental) and
+          // assistant/text-block (final). Keep both; cap at 64 KB.
+          if (agentTextBuffer.length < AGENT_TEXT_BUFFER_CAP) {
+            if (
+              event.type === 'stream_event' &&
+              event.event?.delta?.type === 'text_delta' &&
+              typeof event.event.delta.text === 'string'
+            ) {
+              agentTextBuffer += event.event.delta.text;
+            } else if (
+              event.type === 'assistant' &&
+              Array.isArray(event.message?.content)
+            ) {
+              for (const block of event.message.content) {
+                if (block?.type === 'text' && typeof block.text === 'string') {
+                  agentTextBuffer += block.text;
+                }
+              }
+            }
+          }
         } catch {
           // Non-JSON line
         }
@@ -566,6 +609,41 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
       }
 
       if (code !== 0 && !finalResult) {
+        // T0.1 — Pipeline v2.0 efficiency fix.
+        // If the agent emitted ---DONE--- + ---WORK_SUMMARY--- before the CLI
+        // forced a termination (typically COST_HARD), the work is captured.
+        // Synthesize a finalResult so executePipeline can run extractors
+        // against the buffered text and proceed normally. Without this, the
+        // job re-enqueues and the same conclusion is re-discovered next time
+        // at full cost — dino1 burned ~$35 on this loop.
+        if (hasDoneAndWorkSummary(agentTextBuffer)) {
+          log(
+            'warn',
+            `Step ${stepId}: forced termination (exit ${code}) AFTER ---DONE--- emitted; treating as success`,
+            { bufferBytes: agentTextBuffer.length, stderr: stderrBuffer.slice(0, 200) },
+          );
+          pushEvent(jobId, stepId, agentId, 'status', {
+            text: `[SYSTEM] terminationReason=COST_HARD_AFTER_DONE — agent emitted ---DONE--- before termination; treating as success`,
+          });
+          return resolve({
+            type: 'result',
+            // Cost is unknown (no result event arrived); 0 keeps rollups stable.
+            // Observability sees the COST_HARD log line + the synthesized event.
+            total_cost_usd: 0,
+            session_id: '',
+            // executePipeline reads result.result for runExtractors; the buffer
+            // contains the agent's full prose including all envelope markers.
+            result: agentTextBuffer.slice(-AGENT_TEXT_BUFFER_CAP),
+            modelUsage: {},
+            duration_ms: 0,
+            num_turns: 0,
+            usage: { input_tokens: 0, output_tokens: 0 },
+            // Tag for downstream observability — not consumed by executePipeline
+            // today, but cheap to surface for future debugging.
+            _terminationReason: 'COST_HARD_AFTER_DONE',
+          });
+        }
+
         const errorDetail = stderrBuffer.trim() || `Process exited with code ${code}`;
         log('error', `Step ${stepId} failed: ${errorDetail}`);
         pushEvent(jobId, stepId, agentId, 'step_error', {
@@ -1904,22 +1982,32 @@ async function handleJobFailure(job, err) {
     /OAuth expired|authentication expired|Not logged in|Please run \/login/i.test(message) ||
     isConversationalTurn;
 
+  // T0.3 — Pipeline v2.0 efficiency fix.
+  // Story pipelines (per-story DEV→REVIEWER→COMPILER) get a tighter budget:
+  // a no-op story that DEV genuinely fails on shouldn't retry up to the
+  // generic 3-attempt ladder ($5+ per attempt). Default 2 attempts (1 retry).
+  // T0.1 catches the COST_HARD-after-DONE case; this is the safety net for
+  // genuine pre-DONE failures.
+  const isStoryPipeline = Boolean(job.pipeline?.initialVariables?.STORY_ID);
+  const effectiveMaxRetries = isStoryPipeline ? STORY_PIPELINE_MAX_RETRIES : MAX_RETRIES;
+
   const currentAttempt = job.retryAttempt || 0;
   const nextAttempt = currentAttempt + 1;
-  const canRetry = !nonRetriable && nextAttempt <= MAX_RETRIES;
+  const canRetry = !nonRetriable && nextAttempt <= effectiveMaxRetries;
 
   if (canRetry) {
-    const delayMs = RETRY_DELAYS_MS[currentAttempt];
+    // Story pipelines reuse the same backoff ladder, just truncated.
+    const delayMs = RETRY_DELAYS_MS[currentAttempt] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1];
     const retryAfter = new Date(Date.now() + delayMs).toISOString();
     log(
       'warn',
-      `[${job.jobId.slice(0, 8)}] retry ${nextAttempt}/${MAX_RETRIES} scheduled for ${retryAfter} (delay ${delayMs}ms)`,
+      `[${job.jobId.slice(0, 8)}] retry ${nextAttempt}/${effectiveMaxRetries} scheduled for ${retryAfter} (delay ${delayMs}ms)${isStoryPipeline ? ' [story-pipeline]' : ''}`,
     );
     await updateJobFields(job.jobId, {
       status: 'PENDING',
       retryAttempt: nextAttempt,
       retryAfter,
-      errorMessage: `retry ${nextAttempt}/${MAX_RETRIES} queued: ${message}`.slice(0, 500),
+      errorMessage: `retry ${nextAttempt}/${effectiveMaxRetries} queued: ${message}`.slice(0, 500),
     });
     return;
   }
@@ -1931,30 +2019,58 @@ async function handleJobFailure(job, err) {
     status: 'FAILED',
     errorMessage: nonRetriable
       ? message
-      : `retry exhausted after ${MAX_RETRIES} attempts: ${message}`,
+      : `retry exhausted after ${effectiveMaxRetries} attempts: ${message}`,
+    // T0.3 — surface the trigger reason on the job row so the UI can
+    // disambiguate "step failed once" from "exhausted dev budget".
+    ...(isStoryPipeline && !nonRetriable
+      ? { triggeredBy: 'DEV_RETRY_BUDGET_EXHAUSTED' }
+      : {}),
   });
 
   if (!nonRetriable) {
     try {
       const planId = await resolvePlanIdFromEpicId(ddb, job.epicId);
       if (planId) {
+        // T0.3: distinct attention category for story-pipeline budget exhaustion
+        // so operators can spot dev-loop pathologies at a glance and the inbox
+        // can render targeted resolution actions (Salvage with last
+        // WORK_SUMMARY vs. generic Retry).
+        const category = isStoryPipeline ? 'dev-retry-exhausted' : 'retry-exhausted';
+        const title = isStoryPipeline
+          ? `Story DEV exhausted retry budget (${effectiveMaxRetries + 1} attempts)`
+          : `Step failed after ${effectiveMaxRetries} retries`;
+        const body = isStoryPipeline
+          ? `Story DEV step failed ${effectiveMaxRetries + 1} time(s) without emitting ---DONE---. ` +
+            `If the scaffold already implements the AC, salvage with the last WORK_SUMMARY. ` +
+            `Final error: ${message.slice(0, 300)}`
+          : `Step exhausted its retry budget (${RETRY_DELAYS_MS
+              .map((d) => `${Math.round(d / 1000)}s`)
+              .join(' / ')}). Final error: ${message.slice(0, 300)}`;
         await writeAttentionItem(
           ddb,
           {
             planId,
             severity: 'high',
-            category: 'retry-exhausted',
-            title: `Step failed after ${MAX_RETRIES} retries`,
-            body:
-              `Step exhausted its retry budget (${RETRY_DELAYS_MS
-                .map((d) => `${Math.round(d / 1000)}s`)
-                .join(' / ')}). Final error: ${message.slice(0, 300)}`,
-            context: { jobId: job.jobId, epicId: job.epicId },
-            suggestedActions: [
-              { label: 'Retry step', kind: 'retry-step' },
-              { label: 'Open logs', kind: 'open-logs' },
-              { label: 'Open story', kind: 'open-story' },
-            ],
+            category,
+            title,
+            body,
+            context: {
+              jobId: job.jobId,
+              epicId: job.epicId,
+              ...(isStoryPipeline ? { storyId: job.pipeline?.initialVariables?.STORY_ID } : {}),
+            },
+            suggestedActions: isStoryPipeline
+              ? [
+                  { label: 'Salvage with last WORK_SUMMARY', kind: 'salvage-step' },
+                  { label: 'Retry step', kind: 'retry-step' },
+                  { label: 'Skip story', kind: 'skip-step' },
+                  { label: 'Open logs', kind: 'open-logs' },
+                ]
+              : [
+                  { label: 'Retry step', kind: 'retry-step' },
+                  { label: 'Open logs', kind: 'open-logs' },
+                  { label: 'Open story', kind: 'open-story' },
+                ],
           },
           log,
         );

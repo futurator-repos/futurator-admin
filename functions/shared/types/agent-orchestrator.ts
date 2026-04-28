@@ -44,6 +44,10 @@ export type AgentJobStatus =
  *   - 'QUOTA_EXHAUSTED'   — Story 2.3 (Anthropic 429 daily/monthly)
  *   - 'CAPACITY_TIMEOUT'  — Story 2.1 (slot acquisition timeout)
  *   - 'RETRY_EXHAUSTED'   — pre-existing daemon retry ladder cap
+ *   - 'DEV_RETRY_BUDGET_EXHAUSTED' — Pipeline v2.0 T0.3 (story-pipeline-
+ *      specific budget; tighter than the generic ladder to bound waste on
+ *      no-op DEV loops — see docs/concepts/pipeline-v2/pipeline-v2-0-
+ *      efficency-fixes.md §T0.3)
  *   - 'OPERATOR_ABORT'    — Story 1.8 (manual Abort from UI)
  */
 export type JobTriggeredBy =
@@ -57,6 +61,7 @@ export type JobTriggeredBy =
   | 'QUOTA_EXHAUSTED'
   | 'CAPACITY_TIMEOUT'
   | 'RETRY_EXHAUSTED'
+  | 'DEV_RETRY_BUDGET_EXHAUSTED'
   | 'OPERATOR_ABORT';
 
 /**

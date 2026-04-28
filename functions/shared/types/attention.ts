@@ -3,6 +3,13 @@ export type AttentionSeverity = 'low' | 'medium' | 'high' | 'critical';
 export type AttentionCategory =
   | 'policy-violation'
   | 'retry-exhausted'
+  // Pipeline v2.0 efficiency fix T0.3: distinct from the generic
+  // 'retry-exhausted' so operators can spot a story-pipeline DEV loop at a
+  // glance. Triggered when a story's dev step fails MAX_DEV_ATTEMPTS_PER_STORY
+  // times (default 2) without emitting ---DONE---. Resolution actions favor
+  // Salvage-with-last-WORK_SUMMARY over the generic Retry to discourage
+  // burning more budget on the same conclusion.
+  | 'dev-retry-exhausted'
   | 'daemon-shutdown-timeout'
   | 'tamper-reverted'
   | 'budget-warning'
