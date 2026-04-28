@@ -104,15 +104,27 @@ export function generateStoryPipeline(
     },
     maxIterations: 3,
     agents: {
+      // Pipeline v2.0 PR-3 — explicit `disallowedTools` on every agent so
+      // dino1-style subagent spawns (REVIEWER calling the Explore subagent,
+      // burning ~$0.50 per review) are unbypassable at the CLI layer. The
+      // allowedTools list already restricts the surface; disallowedTools
+      // is belt-and-suspenders against CLI semantic drift.
       DEV: {
         name: 'Developer',
         allowedTools: 'Bash,Read,Edit,Write,Glob,Grep',
+        // Bash IS allowed (runCommand); B8 deny-pattern enforces sub-command
+        // hygiene. Task/Agent (subagent spawn), WebFetch/WebSearch (network
+        // round-trips) have no place in a story DEV step.
+        disallowedTools: 'Task,Agent,WebFetch,WebSearch',
         model: opts.devModel || undefined,
       },
       REVIEWER: {
         name: 'Code Reviewer',
+        // No Bash, no Write/Edit — reviewer's job is read-only. The diff is
+        // pre-computed by `compile-diff` and passed via the prompt; reviewer
+        // doesn't need to shell out for anything.
         allowedTools: 'Read,Grep,Glob',
-        disallowedTools: 'Write,Edit',
+        disallowedTools: 'Write,Edit,Bash,Task,Agent,WebFetch,WebSearch',
         model: opts.reviewerModel || undefined,
       },
       // Phase C.3: TEST agent (Tier 1). Scoped to writing test files only —
@@ -122,11 +134,16 @@ export function generateStoryPipeline(
       TEST: {
         name: 'Test Author',
         allowedTools: 'Bash,Read,Write,Edit,Glob,Grep',
+        disallowedTools: 'Task,Agent,WebFetch,WebSearch',
         model: opts.testModel || 'sonnet',
       },
       COMPILER: {
         name: 'Knowledge Compiler',
+        // No Bash — knowledge-graph ops are pure file IO; compiler doesn't
+        // shell out. (T1.3's bash-first compile moves the mechanical 90% of
+        // this work to shell scripts run by the daemon, not the agent.)
         allowedTools: 'Read,Write,Edit,Glob,Grep',
+        disallowedTools: 'Bash,Task,Agent,WebFetch,WebSearch',
         // Story A.1: env-gated, default 'haiku'. Set COMPILER_MODEL=sonnet to
         // roll back if Haiku output quality regresses on a given epic.
         // Haiku is also kinder on t2.micro memory than Sonnet.

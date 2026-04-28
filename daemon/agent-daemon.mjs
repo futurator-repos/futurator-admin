@@ -67,10 +67,15 @@ import {
   registerChild,
   unregisterChild,
   signalAllChildren,
+  signalChildrenForJob,
   waitForAllChildrenToExit,
   killAllChildren,
   getChildCount,
 } from './pipelines/lib/child-tracker.mjs';
+// Pipeline v2.0 efficiency fix B8 — deterministic deny-pattern enforcement
+// for Bash tool_use events. Replaces prompt prose ("Do NOT run npm create
+// vite") with SIGTERM-on-match. See daemon/lib/bash-deny-patterns.mjs.
+import { matchesDenyPattern } from './lib/bash-deny-patterns.mjs';
 import {
   writeAttentionItem,
   resolvePlanIdFromEpicId,
@@ -716,6 +721,78 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
 
 // ── Process stream-json events ──
 
+/**
+ * Pipeline v2.0 B8 — handle a denied Bash command.
+ *
+ * SIGTERM the active child for this jobId, push a step_error event for
+ * observability, and write a 'tamper-reverted' attention item so the
+ * operator can review what the agent attempted. The child's close handler
+ * will subsequently reject runAgent — handleJobFailure decides whether
+ * the job is retriable (story pipelines retry once per T0.3; the agent
+ * gets a fresh attempt with the same prompt and presumably tries again,
+ * which this gate will block again — net effect: predictable failure).
+ *
+ * The deny is non-bypassable: there's no way for the agent to "negotiate"
+ * past it via prompt jiggling. The pattern matching happens before the
+ * tool_result event is emitted back to the agent, but the bash command
+ * has already started executing — the SIGTERM is best-effort harm
+ * reduction, not pre-execution prevention. Future: pair with
+ * `--disallowedTools=Bash` on agents that don't need Bash at all
+ * (REVIEWER, COMPILER) so the surface area is even smaller.
+ */
+async function handleDeniedBashCommand({ jobId, stepId, agentId, command, verdict }) {
+  log(
+    'error',
+    `[${jobId.slice(0, 8)}] B8 deny — killing child: pattern=${verdict.label} cmd=${command.slice(0, 200)}`,
+  );
+  await pushEvent(jobId, stepId, agentId, 'step_error', {
+    text: `[B8] Bash command denied by deny-pattern (${verdict.label}): ${verdict.reason}`,
+    deniedCommand: command.slice(0, 500),
+    deniedPattern: verdict.label,
+  });
+
+  // SIGTERM only this job's children. Other in-flight jobs are unaffected.
+  try {
+    const signaled = signalChildrenForJob(jobId, 'SIGTERM');
+    log('warn', `[${jobId.slice(0, 8)}] B8: SIGTERMed ${signaled} child(ren)`);
+  } catch (sigErr) {
+    log('error', `[${jobId.slice(0, 8)}] B8: SIGTERM failed: ${sigErr.message}`);
+  }
+
+  // Surface to the operator inbox. Best-effort; failure here is non-fatal.
+  try {
+    const planId = await resolvePlanIdFromEpicId(ddb, /* epicId */ null);
+    // We don't have epicId in this scope; the writer accepts a falsy planId
+    // and skips DDB writes silently. The step_error event above is the
+    // primary surface; the attention item is the secondary one.
+    if (planId) {
+      await writeAttentionItem(
+        ddb,
+        {
+          planId,
+          severity: 'high',
+          category: 'tamper-reverted',
+          title: `Agent attempted denied Bash command (B8: ${verdict.label})`,
+          body:
+            `The ${agentId || 'agent'} step "${stepId}" attempted a Bash command ` +
+            `that the daemon's B8 deny-pattern enforcement classified as harmful: ` +
+            `${verdict.reason}. Command (truncated): \`${command.slice(0, 300)}\`. ` +
+            `The child process was SIGTERM-ed; the job will fail with a step_error. ` +
+            `If this is a false-positive, edit daemon/lib/bash-deny-patterns.mjs.`,
+          context: { jobId, stepId, agentId, deniedPattern: verdict.label },
+          suggestedActions: [
+            { label: 'Open logs', kind: 'open-logs' },
+            { label: 'Open story', kind: 'open-story' },
+          ],
+        },
+        log,
+      );
+    }
+  } catch (attnErr) {
+    log('error', `[${jobId.slice(0, 8)}] B8: attention-item write failed: ${attnErr.message}`);
+  }
+}
+
 async function processStreamEvent(jobId, stepId, agentId, event) {
   switch (event.type) {
     case 'stream_event': {
@@ -733,6 +810,27 @@ async function processStreamEvent(jobId, stepId, agentId, event) {
             toolName: block.name,
             toolInput: JSON.stringify(block.input).slice(0, 2000),
           });
+
+          // Pipeline v2.0 B8 — Bash deny-pattern enforcement.
+          // The CLI's --allowedTools flag controls which tools are AVAILABLE,
+          // but it can't sub-restrict Bash command shapes. We enforce
+          // scaffolding-prohibition (npm create vite, git init, rm -rf .,
+          // etc.) at the daemon by SIGTERM-ing the child as soon as we
+          // observe a denied command. The agent's prompt no longer needs
+          // a PROJECT BASELINE prose paragraph — the rule is unbypassable
+          // at the process layer.
+          if (block.name === 'Bash' && typeof block.input?.command === 'string') {
+            const verdict = matchesDenyPattern(block.input.command);
+            if (verdict.denied) {
+              await handleDeniedBashCommand({
+                jobId,
+                stepId,
+                agentId,
+                command: block.input.command,
+                verdict,
+              });
+            }
+          }
         }
         if (block.type === 'text' && block.text) {
           await pushEvent(jobId, stepId, agentId, 'text_delta', { text: block.text });
