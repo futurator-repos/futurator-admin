@@ -93,6 +93,11 @@ import { hasDoneAndWorkSummary } from './lib/done-detector.mjs';
 // short-circuits no-op stories without spawning the LLM. See
 // daemon/lib/prework-gate.mjs.
 import { evaluatePreworkGate, renderGateEvidence } from './lib/prework-gate.mjs';
+// Pipeline v2.0 PR-4 — touch-point inference. When the planner left a
+// story's `touchPoints` empty, the daemon infers them at dispatch time
+// (heuristic-first, Haiku fallback) so the prework gate / scope-violation
+// detector / wave-conflict resolver have valid inputs.
+import { inferTouchPoints } from './lib/touch-point-inference.mjs';
 import { writeFile as fsWriteFile, mkdir as fsMkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
@@ -162,6 +167,10 @@ const PREWORK_GATE_ENABLED = (process.env.PREWORK_GATE_ENABLED || 'true') !== 'f
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
   marshallOptions: { removeUndefinedValues: true },
 });
+
+// Module-scope epic-row accessor — shared by the receiver and by the
+// touch-point inference helper (PR-4). Single instance per daemon process.
+const epicRepo = createEpicRepo({ ddb, tableName: EPICS_TABLE });
 
 // ── Claude Code OAuth auth (Max subscription only, no fallback) ──
 //
@@ -1399,6 +1408,115 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
 // ── Compile step identification (imported from compile-pipeline.mjs) ──
 const isCompileStep = _isCompileStep;
 
+// Pipeline v2.0 PR-4 — touch-point inference at dispatch time.
+// Default ON. Disable via TOUCH_POINT_INFERENCE_ENABLED=false.
+// LLM fallback can be disabled separately via TOUCH_POINT_LLM_FALLBACK_ENABLED=false
+// (heuristic-only mode — useful in $0-cost environments / CI).
+const TOUCH_POINT_INFERENCE_ENABLED =
+  (process.env.TOUCH_POINT_INFERENCE_ENABLED || 'true') !== 'false';
+const TOUCH_POINT_LLM_FALLBACK_ENABLED =
+  (process.env.TOUCH_POINT_LLM_FALLBACK_ENABLED || 'true') !== 'false';
+
+/**
+ * Pipeline v2.0 PR-4 — ensure the story has touchPoints[] before the gate runs.
+ *
+ * If `variables.TOUCH_POINTS` is missing or `'[]'`, infer touchPoints from the
+ * story's AC text (heuristic first, Haiku fallback) and persist the result
+ * back to the epic row so subsequent dispatches reuse it. Updates
+ * `variables.TOUCH_POINTS` in place.
+ *
+ * Best-effort — never throws. Failure leaves variables.TOUCH_POINTS empty
+ * and the prework gate falls through to spawn DEV (the v1 behavior).
+ *
+ * @param {object} variables - in/out: variables.TOUCH_POINTS may be mutated.
+ * @param {string} workingDir
+ */
+async function inferAndPersistTouchPointsIfEmpty(jobId, variables, workingDir) {
+  if (!TOUCH_POINT_INFERENCE_ENABLED) return;
+
+  // Already populated? Skip.
+  let existing = [];
+  try {
+    existing = JSON.parse(variables.TOUCH_POINTS || '[]');
+  } catch {
+    /* malformed — re-infer */
+  }
+  if (Array.isArray(existing) && existing.length > 0) return;
+
+  const epicId = variables.EPIC_ID;
+  const storyId = variables.STORY_ID;
+  if (!epicId || !storyId || !workingDir) return;
+
+  // Look up the story so we have the description + AC text.
+  let story;
+  try {
+    const epic = await epicRepo.getEpicById(epicId);
+    story = epic?.stories?.find((s) => s.storyId === storyId);
+  } catch (err) {
+    log('warn', `[${jobId.slice(0, 8)}] touch-point inference: epic fetch failed: ${err.message}`);
+    return;
+  }
+  if (!story) return;
+
+  let result;
+  try {
+    result = await inferTouchPoints({
+      projectDir: workingDir,
+      story: {
+        title: story.title,
+        description: story.description,
+        acceptanceCriteria:
+          (story.criteria || [])
+            .map((c) => `- ${c.text || c.description || ''}`)
+            .join('\n') || '',
+      },
+      opts: { skipLlm: !TOUCH_POINT_LLM_FALLBACK_ENABLED },
+    });
+  } catch (err) {
+    log(
+      'warn',
+      `[${jobId.slice(0, 8)}] touch-point inference threw (non-blocking): ${err.message}`,
+    );
+    return;
+  }
+
+  log(
+    'info',
+    `[${jobId.slice(0, 8)}] touch-point inference: source=${result.source} count=${result.touchPoints.length} reason="${result.reason || ''}"`,
+  );
+
+  if (result.touchPoints.length === 0) {
+    // Nothing to do — variables.TOUCH_POINTS stays empty; the gate will fall
+    // through naturally.
+    await pushEvent(jobId, '__touch_point_inference__', 'orchestrator', 'status', {
+      text: `[SYSTEM] touch-points: source=none — ${result.reason || 'no paths inferred'}`,
+    });
+    return;
+  }
+
+  // Persist back to the epic row + update in-memory variables.
+  try {
+    const persisted = await epicRepo.updateStoryTouchPoints(epicId, storyId, result.touchPoints, {
+      source: result.source,
+    });
+    if (persisted.updated) {
+      log('info', `[${jobId.slice(0, 8)}] persisted ${result.touchPoints.length} touchPoint(s) to epic row`);
+    }
+  } catch (err) {
+    // Persistence failure is non-fatal — the inference still informs the
+    // current run via variables.TOUCH_POINTS.
+    log(
+      'warn',
+      `[${jobId.slice(0, 8)}] touch-point persistence failed (non-blocking): ${err.message}`,
+    );
+  }
+
+  variables.TOUCH_POINTS = JSON.stringify(result.touchPoints);
+  await pushEvent(jobId, '__touch_point_inference__', 'orchestrator', 'status', {
+    text: `[SYSTEM] touch-points: source=${result.source} paths=${JSON.stringify(result.touchPoints).slice(0, 300)}`,
+  });
+}
+
 /**
  * Pipeline v2.0 T0.2 — run the pre-DEV gate for a story-pipeline job.
  * Reads AC_TEXT / TOUCH_POINTS / PLAN_START_TIME from the job's pipeline
@@ -1499,6 +1617,10 @@ async function executePipeline(job) {
   const isStoryPipeline = Boolean(variables.STORY_ID);
   const hasDevStep = steps.some((s) => s.id === 'dev');
   if (PREWORK_GATE_ENABLED && isStoryPipeline && hasDevStep && workingDir) {
+    // Pipeline v2.0 PR-4 — infer touchPoints if the planner left them empty.
+    // Runs before the gate so Signal 1 (commits in scope) and Signal 2 (AC
+    // exports in touchPoint files) actually have inputs to evaluate.
+    await inferAndPersistTouchPointsIfEmpty(jobId, variables, workingDir);
     try {
       const gateResult = await runPreworkGateForJob(job, variables, workingDir);
       if (gateResult.shouldSkipDev) {
@@ -2317,7 +2439,8 @@ async function poll() {
 
   // Loopback HTTP receiver for wave-complete / heartbeat from orchestrator subagents.
   try {
-    const epicRepo = createEpicRepo({ ddb, tableName: EPICS_TABLE });
+    // epicRepo is module-scope (hoisted for shared use with PR-4 touch-point
+    // inference); the receiver passes it through to its handlers.
     daemonReceiver = createDaemonReceiver({
       ddb,
       jobsTable: JOBS_TABLE,

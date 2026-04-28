@@ -124,10 +124,69 @@ export function createEpicRepo({ ddb, tableName = DEFAULT_TABLE } = {}) {
     return { updated: true, storyId, index: idx };
   }
 
+  /**
+   * Pipeline v2.0 PR-4 — backfill a story's `touchPoints[]` after the daemon
+   * inferred them at dispatch time. Same fetch-then-update pattern as
+   * `updateStoryStatus`. Idempotent: re-running with the same value is a
+   * cheap no-op.
+   *
+   * @param {string} epicId
+   * @param {string} storyId
+   * @param {string[]} touchPoints
+   * @param {object} [meta] - optional inference metadata to persist alongside
+   * @param {'heuristic'|'llm'|'none'} [meta.source]
+   * @returns {Promise<{updated:boolean, reason?:string, storyId?:string}>}
+   */
+  async function updateStoryTouchPoints(epicId, storyId, touchPoints, meta = {}) {
+    if (!Array.isArray(touchPoints)) {
+      return { updated: false, reason: 'touchPoints must be an array' };
+    }
+    const epic = await getEpicById(epicId);
+    if (!epic || !Array.isArray(epic.stories)) {
+      return { updated: false, reason: 'epic-or-stories-not-found' };
+    }
+    const idx = epic.stories.findIndex((s) => s.storyId === storyId);
+    if (idx === -1) {
+      return { updated: false, reason: 'story-not-found', storyId };
+    }
+    const now = new Date().toISOString();
+    const updateExpr = [
+      `#stories[${idx}].#touchPoints = :tp`,
+      `#stories[${idx}].#touchPointsAt = :now`,
+      `#updatedAt = :now`,
+    ];
+    const exprNames = {
+      '#stories': 'stories',
+      '#touchPoints': 'touchPoints',
+      '#touchPointsAt': 'touchPointsAt',
+      '#updatedAt': 'updatedAt',
+    };
+    const exprValues = {
+      ':tp': touchPoints,
+      ':now': now,
+    };
+    if (meta.source) {
+      updateExpr.push(`#stories[${idx}].#touchPointsSource = :src`);
+      exprNames['#touchPointsSource'] = 'touchPointsSource';
+      exprValues[':src'] = meta.source;
+    }
+    await ddb.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { epicId },
+        UpdateExpression: `SET ${updateExpr.join(', ')}`,
+        ExpressionAttributeNames: exprNames,
+        ExpressionAttributeValues: exprValues,
+      }),
+    );
+    return { updated: true, storyId, index: idx };
+  }
+
   return {
     getEpicById,
     persistInferenceResult,
     updateStoryStatus,
     persistStoryWorkSummary,
+    updateStoryTouchPoints,
   };
 }
