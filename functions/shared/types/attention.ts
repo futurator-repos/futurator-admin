@@ -34,6 +34,18 @@ export type AttentionCategory =
   // drift quickly. Daemon also forces the next loop iteration to ask the
   // reviewer to re-emit.
   | 'prompt-format'
+  // Pipeline v2 Phase 1 / Story 1.4.3: an App-bootstrap saga step failed
+  // (clone, materialize, inject, npm install, BMAD install, commit/push).
+  // Title carries the failing step + slug; suggestedActions includes
+  // "Re-run bootstrap" and "Mark App failed and delete".
+  | 'pv2-app-bootstrap-failed'
+  // Pipeline v2 Phase 1 / Story 1.4.4: the saga's `deleteRepo` rollback
+  // itself failed after a DDB transaction error, leaving an orphaned
+  // GitHub repo that an operator must clean up by hand.
+  | 'pv2-app-bootstrap-rollback-orphan'
+  // Pipeline v2 Phase 1 / Story 1.8.7: a plan's category time exceeded the
+  // cohort median by ≥3× (info) or ≥5× (medium). Deep-link → /labs?planId=#timing.
+  | 'pv2-timer-cohort-outlier'
   | 'other';
 
 export type AttentionStatus = 'open' | 'resolving' | 'resolved';

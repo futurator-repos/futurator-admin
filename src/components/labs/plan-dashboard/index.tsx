@@ -39,10 +39,12 @@ import { PIPELINE_STAGES, pipelineStageIndexFor, type PipelineStage } from './co
 import { HierarchyView } from './views/hierarchy-view';
 import { KanbanView } from './views/kanban-view';
 import { GanttView } from './views/gantt-view';
-import { DeployView } from './views/deploy-view';
 import { PlanReviewView } from './views/plan-review-view';
+import { QaReviewView } from './views/qa-review-view';
+import { DeployStageView } from './views/deploy-stage-view';
 import { StagePlaceholder } from './views/stage-placeholder';
-import { Party } from '@/components/labs/party';
+import { PlanPartyView } from './views/plan-party-view';
+import { TimingPanel } from './timing-panel';
 
 type StageId = PipelineStage['id'];
 type ViewId = StageId | 'party';
@@ -50,7 +52,7 @@ type ViewId = StageId | 'party';
 const STAGE_KEY = 'labs.plan-dashboard.stage';
 const SUBTAB_KEY = 'labs.plan-dashboard.subtab';
 const VALID_STAGES: StageId[] = PIPELINE_STAGES.map((s) => s.id);
-const VALID_SUBTABS: DevelopingSubtab[] = ['hierarchy', 'kanban', 'gantt', 'deploy'];
+const VALID_SUBTABS: DevelopingSubtab[] = ['hierarchy', 'kanban', 'gantt'];
 
 function isStage(v: string | null): v is StageId {
   return v !== null && (VALID_STAGES as string[]).includes(v);
@@ -63,7 +65,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
   const router = useRouter();
   const params = useSearchParams();
   const urlPmJobId = params.get('pmJobId');
-  const { data: plan, isLoading, refetch } = usePlan(planId);
+  const { data: plan, isLoading, error: planError, refetch } = usePlan(planId);
   const apply = useApplyPlanOutput(planId);
 
   // ── View/stage state ────────────────────────────────────────────────
@@ -186,6 +188,70 @@ export function PlanDashboard({ planId }: { planId: string }) {
   const planAgg = useMemo(() => (dashboard ? aggregatePlan(dashboard) : null), [dashboard]);
 
   // ── Loading / not-found states ─────────────────────────────────────
+  // "Plan not found" takes priority over "loading" — once the query has
+  // errored (typically 404), stop the spinner and show a real error.
+  const planNotFound =
+    !!planError &&
+    (planError instanceof Error ? /\b404\b|not.?found/i.test(planError.message) : false);
+
+  if (planNotFound || (!isLoading && !plan)) {
+    // Detect the common "ellipsis-pasted URL" case so the user gets a
+    // precise fix instead of a generic "plan not found" page.
+    const looksEllipsized =
+      planId.includes('\u2026') || planId.includes('…') || planId.includes('%E2%80%A6');
+    return (
+      <div style={{ padding: 40, maxWidth: 640 }}>
+        <Link
+          href="/labs/"
+          style={{ color: 'var(--text-dim)', fontSize: 12, textDecoration: 'none' }}
+        >
+          ← Back to Labs
+        </Link>
+        <h2 style={{ color: 'var(--destructive)', marginTop: 24, fontSize: 20 }}>Plan not found</h2>
+        <p style={{ color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.55, fontSize: 13 }}>
+          No plan matches the ID in the URL:
+        </p>
+        <code
+          style={{
+            display: 'block',
+            marginTop: 8,
+            padding: '6px 10px',
+            background: 'var(--bg-elev)',
+            border: '1px solid var(--border)',
+            borderRadius: 4,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 12,
+            color: 'var(--foreground)',
+            wordBreak: 'break-all',
+          }}
+        >
+          {planId}
+        </code>
+        {looksEllipsized && (
+          <p
+            style={{
+              marginTop: 14,
+              padding: 12,
+              background: 'color-mix(in srgb, var(--warning, #d97706) 8%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--warning, #d97706) 30%, transparent)',
+              borderRadius: 4,
+              fontSize: 12.5,
+              color: 'var(--text-dim)',
+              lineHeight: 1.55,
+            }}
+          >
+            <strong style={{ color: 'var(--foreground)' }}>
+              The URL contains an ellipsis (…) character.
+            </strong>{' '}
+            This usually means the URL was copy-pasted from a display-truncated source (e.g. a chat
+            message, dashboard link preview). Go back to Labs and click the plan directly from the
+            list.
+          </p>
+        )}
+      </div>
+    );
+  }
+
   if (isLoading || !plan) {
     return (
       <div
@@ -204,20 +270,6 @@ export function PlanDashboard({ planId }: { planId: string }) {
       >
         <Loader2 size={14} className="animate-spin" />
         Loading plan…
-      </div>
-    );
-  }
-
-  if (!plan.planId) {
-    return (
-      <div style={{ padding: 40 }}>
-        <Link
-          href="/labs/"
-          style={{ color: 'var(--text-dim)', fontSize: 12, textDecoration: 'none' }}
-        >
-          ← Back to Labs
-        </Link>
-        <p style={{ color: 'var(--destructive)', marginTop: 16 }}>Plan not found.</p>
       </div>
     );
   }
@@ -275,22 +327,18 @@ export function PlanDashboard({ planId }: { planId: string }) {
             )}
             {activeSubtab === 'kanban' && <KanbanView plan={dashboard} />}
             {activeSubtab === 'gantt' && <GanttView plan={dashboard} tNow={tNow} />}
-            {activeSubtab === 'deploy' && <DeployView plan={plan} />}
           </>
         )}
 
-        {activeView === 'qa' && (
-          <StagePlaceholder
-            stage="QA Review"
-            note="Visual QA + PO audit reports will live here once the dev-run completes. For now, run QA from Developing → Deploy."
-          />
+        {/* Story 1.8.4 — Timing panel: shown for developing and qa stages */}
+        {(activeView === 'developing' || activeView === 'qa') && (
+          <div style={{ marginBottom: 16 }}>
+            <TimingPanel planId={planId} />
+          </div>
         )}
-        {activeView === 'deploy' && (
-          <StagePlaceholder
-            stage="Deploy"
-            note="Promotion to production + deploy history will live here. Live dev server, Visual QA, and Publish controls are under Developing → Deploy."
-          />
-        )}
+
+        {activeView === 'qa' && <QaReviewView planId={planId} />}
+        {activeView === 'deploy' && <DeployStageView plan={plan} />}
         {activeView === 'published' && (
           <StagePlaceholder
             stage="Published"
@@ -298,7 +346,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
           />
         )}
 
-        {activeView === 'party' && <Party />}
+        {activeView === 'party' && <PlanPartyView plan={plan} />}
       </div>
     </div>
   );

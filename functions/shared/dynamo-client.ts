@@ -21,8 +21,11 @@ export const TABLE_NAMES = {
   partyProjects: process.env.PARTY_PROJECTS_TABLE || 'futurator-party-projects',
   partySessions: process.env.PARTY_SESSIONS_TABLE || 'futurator-party-sessions',
   plans: process.env.PLANS_TABLE || 'futurator-plans',
+  apps: process.env.APPS_TABLE || 'futurator-apps',
   attentionItems: process.env.ATTENTION_ITEMS_TABLE || 'futurator-attention-items',
   // Pipeline v1 — Epic 3 (Talk-to-agent) tables.
   agentSessions: process.env.AGENT_SESSIONS_TABLE || 'futurator-agent-sessions',
   agentConversations: process.env.AGENT_CONVERSATIONS_TABLE || 'futurator-agent-conversations',
+  // Pipeline v2 Phase 1 — Story 1.8.6: cron-aggregated cohort baselines.
+  timingSummary: process.env.TIMING_SUMMARY_TABLE || 'futurator-timing-summary',
 } as const;

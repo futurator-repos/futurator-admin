@@ -220,3 +220,115 @@ development_status:
   my-6-3-decision-and-config-inference: review
   my-6-4-full-graph-population-and-verification: review
   epic-my-6-retrospective: optional
+
+  # ══════════════════════════════════════════════════════
+  # MODULE: Labs Party (from epics-party-module.md)
+  # ══════════════════════════════════════════════════════
+
+  # ── Epic 15 (Party): Labs Party Mode — shipped 2026-04-20 ──
+  epic-15: contexted
+  15-1-bmad-per-project-install-and-inspection: review
+  15-2-party-session-orchestration-and-turn-loop: review
+  15-3-labs-party-ui: review
+  epic-15-retrospective: optional
+
+  # ══════════════════════════════════════════════════════
+  # MODULE: Orchestration Recovery (from epics-orchestration-recovery.md)
+  # Undoing the single-outer-Claude orchestrator from 73ac1ae in favor of
+  # explicit per-story step-based pipeline control. See also
+  # docs/recovery-orchestration-plan.md for the investigation + option analysis.
+  # ══════════════════════════════════════════════════════
+
+  # ── Epic 16 (Recovery): Step-Based Epic Pipeline ──
+  epic-16: contexted
+  16-1-wire-step-based-path-in-start: review
+  16-2-multi-wave-gating-and-wave-build-check: review
+  16-3-restore-visual-qa-dev-server-story-run: review
+  16-4-retire-orchestrator-path: backlog  # deferred until step-based proven
+  epic-16-retrospective: optional
+
+  # ══════════════════════════════════════════════════════
+  # MODULE: Plan-Based Labs (from epics-plan-based-labs.md)
+  # Replaces Epic as the top-level Labs unit with a first-class Plan object
+  # (intent + plan.md + 1..N epics + epic-level deps). Fresh-start: all
+  # legacy DDB + EC2 project data wiped 2026-04-21 before Epic 17 ships.
+  # ══════════════════════════════════════════════════════
+
+  # ── Epic 17 (Plan-Based Labs): Labs Restructure ──
+  epic-17: contexted
+  17-1-plan-data-model-and-crud: review
+  17-2-plan-folder-bootstrap-and-plan-md: review
+  17-3-pm-agent-plan-output: review
+  17-4-epic-level-deps-and-plan-waves: review
+  17-5-plans-list-and-new-plan-form: review
+  17-6-plan-detail-page: review
+  17-7-archive-and-safe-delete: review
+  17-8-retire-legacy-concepts: review
+  epic-17-retrospective: optional
+
+  # ════════════════════════════════════════════════════════════════════
+  # ──────────────  PIPELINE v2 — PHASE 1: SUBSTRATE  ──────────────────
+  # ════════════════════════════════════════════════════════════════════
+  # Source plan: docs/concepts/pipeline-v2/epics-pipeline-v2-phase-1.md
+  # Spec:        docs/concepts/pipeline-v2/futurator-pipeline-v2-5-consolidated.md
+  # 8 epics, 26 stories. Critical path: 1.1 → 1.2 → 1.3 → 1.4.
+  # Parallel: 1.6 (Roadmap), 1.7 (Settings), 1.8 (Timer Intel — 7 stories).
+
+  # ── Epic PV2-P1-1: Prerequisite settle (PR-1 → PR-12) ──
+  epic-pv2-p1-1: backlog
+  pv2-p1-1-1-mint-fine-grained-pat: backlog          # blocked on operator
+  pv2-p1-1-2-add-sst-secret-and-link: review         # code-only done; deploy + secret-set deferred to operator
+  pv2-p1-1-3-configure-daemon-git-identity: backlog  # blocked on 1.1.1 + 1.1.2 deploy
+  epic-pv2-p1-1-retrospective: optional
+
+  # ── Epic PV2-P1-2: GitHub connector + API routes ──
+  epic-pv2-p1-2: backlog
+  pv2-p1-2-1-github-connector-base-and-status: review        # connector base + 35 tests
+  pv2-p1-2-2-github-connector-read-surface: review           # listRepos/getRepo/getRepoTree/getFileContent
+  pv2-p1-2-3-github-connector-create-from-template: review   # createRepoFromTemplate + deleteRepo
+  pv2-p1-2-4-github-hono-routes: review                      # 6 routes + 25 tests
+  epic-pv2-p1-2-retrospective: optional
+
+  # ── Epic PV2-P1-3: Boilerplate template repos + registry ──
+  epic-pv2-p1-3: backlog
+  pv2-p1-3-1-template-nextjs-full-content: backlog   # needs PAT + gh CLI
+  pv2-p1-3-2-stub-template-repos: backlog            # needs PAT
+  pv2-p1-3-3-boilerplate-registry: review            # 19 tests passing
+  epic-pv2-p1-3-retrospective: optional
+
+  # ── Epic PV2-P1-4: App-bootstrap saga + extended New App modal ──
+  epic-pv2-p1-4: review
+  pv2-p1-4-1-extended-new-app-modal: review                  # type+BMAD picker, slug validation
+  pv2-p1-4-2-app-create-saga-validate-and-create-repo: review # validate + createRepoFromTemplate
+  pv2-p1-4-3-daemon-app-bootstrap-pipeline: review           # 6 idempotent steps + Gate G-6
+  pv2-p1-4-4-atomic-app-and-job-write: review                # TransactWriteCommand + rollback (G-7)
+  epic-pv2-p1-4-retrospective: optional
+
+  # ── Epic PV2-P1-5: App detail Repository badge + Source tab ──
+  epic-pv2-p1-5: review
+  pv2-p1-5-1-app-detail-repository-badge: review             # GitBranch icon, repo+pushed_at chip
+  pv2-p1-5-2-app-detail-source-tab: review                   # 2-pane tree+reader, virtual tree
+  epic-pv2-p1-5-retrospective: optional
+
+  # ── Epic PV2-P1-6: Pipeline v2 Roadmap visibility ──
+  epic-pv2-p1-6: review
+  pv2-p1-6-1-v2-roadmap-strip: review                # done — typecheck/lint clean
+  pv2-p1-6-2-labs-roadmap-page: review               # done — typecheck/lint clean
+  epic-pv2-p1-6-retrospective: optional
+
+  # ── Epic PV2-P1-7: Settings → GitHub panel ──
+  epic-pv2-p1-7: review
+  pv2-p1-7-1-settings-github-panel: review           # PAT rotation UI + daily age-check cron (13 tests)
+  epic-pv2-p1-7-retrospective: optional
+
+  # ── Epic PV2-P1-8: Timer Intelligence module ──
+  epic-pv2-p1-8: backlog
+  pv2-p1-8-1-timer-classifier: review                # 79 tests, 35 event types mapped
+  pv2-p1-8-2-timer-slicer: review                    # slicer + aggregator + MECE gate (32 tests)
+  pv2-p1-8-3-timer-api-endpoints: review             # 4 routes + forensic builder (23 tests)
+  pv2-p1-8-4-plan-dashboard-timing-panel: review     # live stacked bar + forensic export button
+  pv2-p1-8-5-app-performance-badge-and-tab: review   # badge + tab + drift markers + cohort chip
+  pv2-p1-8-6-cohort-aggregation-cron: review         # TimingSummary table + 6h cron (18 tests)
+  pv2-p1-8-7-escalator-and-forensic-export: review   # 3× escalator wired into wave-completion-check
+  epic-pv2-p1-8: review
+  epic-pv2-p1-8-retrospective: optional

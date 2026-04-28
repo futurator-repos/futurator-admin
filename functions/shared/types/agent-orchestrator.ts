@@ -25,7 +25,6 @@ export type AgentJobStatus =
   | 'STALE' // epic-dev: heartbeat exceeded threshold, awaiting resume respawn
   | 'NEEDS_ATTENTION' // recoverable failure; awaiting operator action (Pipeline v1 §8)
   | 'COMPLETED_VIA_SALVAGE' // terminal success: extracted output applied without re-running the agent
-  | 'COMPLETED_VIA_TALK' // terminal success: applied via a Talk-to-agent conversation (Story 3.6)
   | 'MANUALLY_SKIPPED'; // terminal: operator skipped a skipTolerant step
 
 // ── Escalation + trigger metadata (Pipeline v1 §9.2 + §FR-9) ──
@@ -50,12 +49,6 @@ export type AgentJobStatus =
 export type JobTriggeredBy =
   | 'AGENT_ESCALATED'
   | 'AGENT_NEEDS_HUMAN'
-  // Story C.2/C.5: REVIEWER emitted at least one `needs-human` AC verdict in
-  // the structured ---REVIEW_CRITERIA--- block. Distinct from the agent-level
-  // ---NEED-HUMAN--- shortcut so the operator sees per-AC questions in the
-  // attention inbox and the apply-output flow can route to the reviewer
-  // re-prompt rather than a generic resume.
-  | 'REVIEWER_NEEDS_HUMAN'
   | 'LOOP_DETECTED'
   | 'PREFLIGHT_FAILED'
   | 'POSTVALIDATE_FAILED'
@@ -115,22 +108,6 @@ export interface ValidationConfig {
 // Step type discriminator
 export type PipelineStepType = 'agent' | 'shell';
 
-/**
- * Pipeline v1 — Story 1.4. Pre-flight check declarations. Run before the
- * step's Claude spawn (or shell command). On failure the step transitions
- * directly to NEEDS_ATTENTION with triggeredBy=PREFLIGHT_FAILED — no quota
- * spent. Future check types per PRD §FR-6 (port-free, dependency-installed,
- * dev-server-reachable, env-var-set, disk-space-available) extend the union.
- */
-export type PreflightCheck = { check: 'folder-exists'; path: string; writable_by?: string };
-
-/**
- * Pipeline v1 — Story 2.5. Override the runtime default concurrency-class
- * assignment for a step. Default rules: party/agent-turn → interactive;
- * focused-plan steps → critical; everything else → background.
- */
-export type ConcurrencyClass = 'interactive' | 'critical' | 'background';
-
 export interface PipelineStep {
   id: string;
   stepType?: PipelineStepType; // default 'agent' for backward compat
@@ -154,26 +131,6 @@ export interface PipelineStep {
     targetStep?: string;
     injectAs?: string; // variable name to inject error output into
   };
-
-  // Pipeline v1 — failure-recovery + scheduling metadata.
-  /** Story 1.4 — pre-flight checks that must pass before spawn. */
-  preconditions?: PreflightCheck[];
-  /**
-   * Story 1.7 — when true, operator may Skip a NEEDS_ATTENTION job for this
-   * step. Default false: most steps' output is required by downstream steps.
-   */
-  skipTolerant?: boolean;
-  /**
-   * Story 1.5 — when explicitly false, Salvage is disabled regardless of
-   * which extractors fired. Default true.
-   */
-  salvageable?: boolean;
-  /** Story 4.2 — wall-clock ceiling. Default by agent kind. */
-  timeCeilingMs?: number;
-  /** Story 2.5 — override the runtime default concurrency-class assignment. */
-  concurrencyClass?: ConcurrencyClass;
-  /** Story 1.6 — per-step cap on the consecutive retry chain. Default 3. */
-  maxConsecutiveRetries?: number;
 }
 
 export interface PipelineDefinition {
@@ -245,34 +202,6 @@ export interface AgentJob {
    */
   retryOf?: string;
 
-  // Pipeline v1 — Concurrency + QoS (Stories 2.2, 2.4, 6.1).
-  /**
-   * Story 2.2 — derived class for this job's SessionPool admission. Defaults
-   * by job kind; operator can override via /api/jobs/:id/promote-class.
-   */
-  concurrencyClass?: ConcurrencyClass;
-  /**
-   * Story 2.4 — set true when an interactive request needs the slot held
-   * by this background job. Pipeline runner releases the slot at the next
-   * step boundary, then re-enqueues this job.
-   */
-  pauseAfterCurrentStep?: boolean;
-  /** Story 6.1 — operator-chosen scheduling priority. */
-  priority?: 'now' | 'nightly' | 'weekend';
-  /** Story 4.1 — running cost meter persisted by the daemon per turn. */
-  costSoFarUsd?: number;
-  /** Story 4.3 — per-job ceiling. Default $5; raised by operator action. */
-  costCeilingUsd?: number;
-  /** Story 4.2 — wall-clock cap. Default by agent kind. */
-  timeCeilingMs?: number;
-
-  /**
-   * Story 1.8 / FU-3 — operator pressed Abort on a RUNNING job. Daemon
-   * heartbeat polls this flag, SIGTERMs the active child, and flips the
-   * job to FAILED on subprocess exit.
-   */
-  abortRequested?: boolean;
-
   // Compilation metadata (MY-2 Story Compilation Pipeline)
   compilationStatus?: 'success' | 'failed' | 'skipped';
   compilationStartedAt?: string;
@@ -298,17 +227,10 @@ export interface AgentJob {
     | 'party-turn'
     | 'party-docs-sync'
     | 'party-docs-unlink'
-    // Pipeline v1 — Epic 3 (Talk-to-agent) — operator-driven conversation turn.
-    | 'agent-turn';
-  /** Story 3.5 — payload for `jobType: 'agent-turn'` jobs. */
-  agentTurnPayload?: {
-    conversationId: string;
-    sessionId: string;
-    claudeSessionId?: string;
-    content: string;
-    mode: 'fresh' | 'resume' | 'compact-resume';
-    systemPromptSource?: string;
-  };
+    // Pipeline v2 Phase 1 / Story 1.4.4 — daemon-side App-bootstrap saga
+    // (clone → materialize worktree → inject placeholders → npm install →
+    // BMAD bootstrap → commit + push). Payload below.
+    | 'app-bootstrap';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -334,6 +256,15 @@ export interface AgentJob {
     projectId: string;
     projectPath: string;
     filename: string;
+  };
+  /**
+   * Pipeline v2 Phase 1 / Story 1.4.4 — payload consumed by
+   * `daemon/pipelines/app-bootstrap.mjs`. Set when `jobType === 'app-bootstrap'`.
+   */
+  appBootstrapPayload?: {
+    appId: string;
+    boilerplateType: 'nextjs' | 'sst' | 'vite' | 'mobile';
+    bmadEnabled: boolean;
   };
 }
 

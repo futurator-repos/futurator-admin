@@ -202,14 +202,41 @@ export default $config({
     });
 
     // ── Plan-Based Labs (Epic 17) ──
+    // Extended by App/Plan v1 (Story 1.4) with appId-createdAt-index GSI for
+    // App-aware queries. Plans now carry an `appId` field linking to an Apps
+    // row; the GSI lets `listPlansByApp(appId)` resolve in one Query.
     const plansTable = new sst.aws.Dynamo('PlansTable', {
-      fields: { planId: 'string' },
+      fields: {
+        planId: 'string',
+        appId: 'string',
+        createdAt: 'string',
+      },
       primaryIndex: { hashKey: 'planId' },
+      globalIndexes: {
+        'appId-createdAt-index': { hashKey: 'appId', rangeKey: 'createdAt' },
+      },
       transform: {
         table: {
           name: 'futurator-plans',
           billingMode: 'PAY_PER_REQUEST',
           pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ── App/Plan v1 (Story 1.4) — Apps table ──
+    // Apps are the immortal top-level unit; Plans are iterations beneath them.
+    // Slug is the partition key (URL segment + working-tree folder), no GSIs
+    // needed in v1 (single-tenant, table is small). PITR omitted because the
+    // table is regenerable from Plans + deploy jobs.
+    const appsTable = new sst.aws.Dynamo('AppsTable', {
+      fields: { appId: 'string' },
+      primaryIndex: { hashKey: 'appId' },
+      transform: {
+        table: {
+          name: 'futurator-apps',
+          billingMode: 'PAY_PER_REQUEST',
           tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
         },
       },
@@ -234,6 +261,14 @@ export default $config({
         },
       },
     });
+
+    // ── Pipeline v2 — Phase 1 (Story 1.1.2) — GitHub PAT secret ──
+    // Used by the daemon and API to authenticate GitHub API calls (create repo,
+    // push commits, read PR status). Value is set out-of-band by the operator:
+    //   npx sst secret set GithubPat <value>          (production stage)
+    //   npx sst secret set GithubPat <value> --stage dev  (dev stage)
+    // NEVER commit a real PAT value. Local dev falls back to GITHUB_PAT in .env.local.
+    const githubPat = new sst.Secret('GithubPat');
 
     // ── Pipeline v1 — Epic 3 (Talk-to-agent) tables ──
     const agentSessionsTable = new sst.aws.Dynamo('AgentSessionsTable', {
@@ -275,6 +310,23 @@ export default $config({
       },
     });
 
+    // ── Pipeline v2 Phase 1 — Story 1.8.6: TimingSummary (cron-aggregated cohort baselines) ──
+    // PK: cohortKey (<templateType>#<planKind>#<epicCountBucket>), SK: lastUpdated (ISO-8601)
+    const timingSummaryTable = new sst.aws.Dynamo('TimingSummaryTable', {
+      fields: {
+        cohortKey: 'string',
+        lastUpdated: 'string',
+      },
+      primaryIndex: { hashKey: 'cohortKey', rangeKey: 'lastUpdated' },
+      transform: {
+        table: {
+          name: 'futurator-timing-summary',
+          billingMode: 'PAY_PER_REQUEST',
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── API Lambda ──
     const api = new sst.aws.Function('Api', {
       handler: 'functions/api/index.handler',
@@ -297,9 +349,12 @@ export default $config({
         partyProjectsTable,
         partySessionsTable,
         plansTable,
+        appsTable,
         attentionItemsTable,
         agentSessionsTable,
         agentConversationsTable,
+        timingSummaryTable,
+        githubPat,
       ],
       environment: {
         PROJECTS_TABLE: projectsTable.name,
@@ -316,9 +371,11 @@ export default $config({
         PARTY_PROJECTS_TABLE: partyProjectsTable.name,
         PARTY_SESSIONS_TABLE: partySessionsTable.name,
         PLANS_TABLE: plansTable.name,
+        APPS_TABLE: appsTable.name,
         ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
         AGENT_SESSIONS_TABLE: agentSessionsTable.name,
         AGENT_CONVERSATIONS_TABLE: agentConversationsTable.name,
+        TIMING_SUMMARY_TABLE: timingSummaryTable.name,
         PROJECTS_ROOT: '/home/ubuntu/projects',
         BMAD_VERSION: '6.3.0',
         BMAD_AGENTS_SOURCE: '/home/ubuntu/bmad-agents-source/bmad/agents',
@@ -394,6 +451,12 @@ export default $config({
         {
           actions: ['kms:Decrypt'],
           resources: ['arn:aws:kms:us-east-1:835745294770:alias/aws/ssm'],
+        },
+        // Story 1.7.1: PAT rotation — write the new PAT + rotated-at timestamp
+        // to the custom /futurator/_pipeline/* SSM paths.
+        {
+          actions: ['ssm:PutParameter', 'ssm:GetParameter'],
+          resources: ['arn:aws:ssm:us-east-1:835745294770:parameter/futurator/_pipeline/*'],
         },
         // Identity Broker management (Phase 2.5): the Admin UI is the
         // authoritative writer of each app's broker-credentials into
@@ -557,6 +620,8 @@ export default $config({
     });
 
     // ── Cron: Wave Completion Check (Story 16.2, extended by Story 17.4 for plan-waves) ──
+    // Story 1.8.7: also links timingSummaryTable + appsTable + agentEventsTable
+    // so the post-terminal escalator (evaluateThresholds) can read cohort baselines.
     new sst.aws.Cron('WaveCompletionCheck', {
       schedule: 'rate(1 minute)',
       function: {
@@ -565,13 +630,81 @@ export default $config({
         architecture: 'arm64',
         memory: '256 MB',
         timeout: '120 seconds',
-        link: [agentJobsTable, epicWorkflowsTable, plansTable, attentionItemsTable],
+        link: [
+          agentJobsTable,
+          agentEventsTable,
+          epicWorkflowsTable,
+          plansTable,
+          appsTable,
+          attentionItemsTable,
+          timingSummaryTable,
+        ],
         environment: {
           AGENT_JOBS_TABLE: agentJobsTable.name,
+          AGENT_EVENTS_TABLE: agentEventsTable.name,
           EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
           PLANS_TABLE: plansTable.name,
+          APPS_TABLE: appsTable.name,
+          ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
+          TIMING_SUMMARY_TABLE: timingSummaryTable.name,
+        },
+      },
+    });
+
+    // ── Cron: Timing Aggregator (Story 1.8.6 — Pipeline v2 Phase 1) ──
+    // Every 6 hours. Scans delivered plans, groups by cohortKey, computes
+    // median + P90 per category, upserts one TimingSummary row per cohort
+    // with ≥5 samples.
+    new sst.aws.Cron('TimingAggregator', {
+      schedule: 'rate(6 hours)',
+      function: {
+        handler: 'functions/cron/timing-aggregator.handler',
+        runtime: 'nodejs22.x',
+        architecture: 'arm64',
+        memory: '512 MB',
+        timeout: '300 seconds',
+        link: [
+          appsTable,
+          plansTable,
+          epicWorkflowsTable,
+          agentJobsTable,
+          agentEventsTable,
+          timingSummaryTable,
+        ],
+        environment: {
+          APPS_TABLE: appsTable.name,
+          PLANS_TABLE: plansTable.name,
+          EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
+          AGENT_JOBS_TABLE: agentJobsTable.name,
+          AGENT_EVENTS_TABLE: agentEventsTable.name,
+          TIMING_SUMMARY_TABLE: timingSummaryTable.name,
+        },
+      },
+    });
+
+    // ── Cron: PAT Age Check (Story 1.7.1 — Pipeline v2 Phase 1) ──
+    // Daily. Reads the last PAT rotation timestamp from SSM and writes an
+    // attention item when the PAT is approaching or past its quarterly cadence.
+    new sst.aws.Cron('PatAgeCheck', {
+      schedule: 'cron(0 9 * * ? *)',
+      function: {
+        handler: 'functions/cron/pat-age-check.handler',
+        runtime: 'nodejs22.x',
+        architecture: 'arm64',
+        memory: '256 MB',
+        timeout: '30 seconds',
+        link: [attentionItemsTable],
+        environment: {
           ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
         },
+        permissions: [
+          {
+            // Read the rotated-at timestamp + PAT (via SSM).
+            // PutParameter is NOT granted here — rotation is API-driven.
+            actions: ['ssm:GetParameter'],
+            resources: ['arn:aws:ssm:us-east-1:835745294770:parameter/futurator/_pipeline/*'],
+          },
+        ],
       },
     });
 

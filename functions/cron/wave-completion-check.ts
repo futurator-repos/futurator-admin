@@ -2,6 +2,8 @@ import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
 import * as planRepo from '../shared/repositories/plan-repository';
 import * as attentionRepo from '../shared/repositories/attention-items-repository';
+// Story 1.8.7 — 3× escalator: fire-and-forget after plan is marked delivered
+import { evaluateThresholds } from '../shared/timer/escalator';
 import { generateStoryPipeline } from '../shared/pipelines/story-pipeline';
 import { generateWaveBuildPipeline } from '../shared/pipelines/wave-build-pipeline';
 import { generatePlanBuildPipeline } from '../shared/pipelines/plan-build-pipeline';
@@ -51,7 +53,9 @@ export const handler = async () => {
     // ── 1. Plans pass — the authoritative entrypoint post-Story 17.4. ──
     const plans = await planRepo.getAllPlans();
     plansScanned = plans.length;
-    const activePlans = plans.filter((p) => p.status === 'developing' || p.status === 'fixing');
+    const activePlans = plans.filter(
+      (p) => p.status === 'developing' || p.status === 'fixing' || p.status === 'review',
+    );
 
     for (const plan of activePlans) {
       try {
@@ -87,17 +91,29 @@ export const handler = async () => {
         // visual tests but no QA job yet. Manual re-runs remain available via
         // POST /api/plans/:id/qa-review.
         if (result.kind === 'plan-completed' && plan.autoRunQa) {
-          for (const epic of epicsForPlan) {
+          // Per-epic port so parallel QA runs don't race for :5173. Mirrors
+          // the manual /api/plans/:id/qa-review fan-out logic.
+          const QA_PORT_BASE = 5173;
+          const QA_PORT_RANGE = 27;
+          for (let i = 0; i < epicsForPlan.length; i += 1) {
+            const epic = epicsForPlan[i];
             if (epic.qaJobId) continue; // already has a run
             try {
               const now = new Date().toISOString();
-              const qaResult = await launchVisualQa(epic, plan.createdBy, now, {
-                getJobById: agentJobsRepo.getJobById,
-                createJob: agentJobsRepo.createJob,
-                parseVisualTests,
-                buildQaPipeline,
-                uuid: () => crypto.randomUUID(),
-              });
+              const port = QA_PORT_BASE + (i % QA_PORT_RANGE);
+              const qaResult = await launchVisualQa(
+                epic,
+                plan.createdBy,
+                now,
+                {
+                  getJobById: agentJobsRepo.getJobById,
+                  createJob: agentJobsRepo.createJob,
+                  parseVisualTests,
+                  buildQaPipeline,
+                  uuid: () => crypto.randomUUID(),
+                },
+                { port },
+              );
               if (qaResult.ok) {
                 const patch: Partial<EpicWorkflow> = { qaJobId: qaResult.jobId };
                 if (qaResult.storiesChanged) patch.stories = qaResult.updatedStories;
@@ -119,6 +135,41 @@ export const handler = async () => {
                 planId: plan.planId,
                 epicId: epic.epicId,
                 error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+        }
+
+        // Deploy-completion detection: when plan is in `review` and its
+        // latest deploy job transitioned to COMPLETED, flip plan status to
+        // `delivered` so the Published pipeline dot lights up. If the job
+        // FAILED, the plan stays in `review` (operator can retry from the
+        // Deploy stage's release strip).
+        if (plan.status === 'review') {
+          const latestDeployJobId =
+            plan.deployJobIds?.[plan.deployJobIds.length - 1] ??
+            epicsForPlan.slice().sort((a, b) => (b.epicWave ?? 0) - (a.epicWave ?? 0))[0]
+              ?.deployJobId;
+          if (latestDeployJobId) {
+            const deployJob = await agentJobsRepo.getJobById(latestDeployJobId);
+            if (deployJob?.status === 'COMPLETED') {
+              const deployUrl = deployJob.variables?.DEPLOY_URL;
+              await planRepo.updatePlanFields(plan.planId, {
+                status: 'delivered',
+                deployUrl,
+              });
+              log('info', 'wave-completion-check', 'plan marked delivered', {
+                planId: plan.planId,
+                deployJobId: latestDeployJobId,
+                deployUrl,
+              });
+              // Story 1.8.7 — 3× escalator: compare timing vs cohort baseline.
+              // Fire-and-forget — never block the terminal write on this.
+              void evaluateThresholds(plan.planId).catch((err: unknown) => {
+                log('error', 'wave-completion-check', 'escalator failed (non-fatal)', {
+                  planId: plan.planId,
+                  error: err instanceof Error ? err.message : String(err),
+                });
               });
             }
           }

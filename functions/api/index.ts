@@ -51,6 +51,10 @@ import { aggregateOrchestratorMetrics } from '../shared/services/epic-orchestrat
 import { enqueueResumeJob } from '../shared/services/resume-job';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
 import * as planRepo from '../shared/repositories/plan-repository';
+import * as appRepo from '../shared/repositories/app-repository';
+import { updateAppInputSchema, RESERVED_APP_IDS } from '../shared/schemas/app-schema';
+import { createPlanForAppInputSchema } from '../shared/schemas/plan-schema';
+import type { App, AppCardData } from '../shared/types/app';
 import * as attentionRepo from '../shared/repositories/attention-items-repository';
 import type { AttentionStatus } from '../shared/types/attention';
 import { buildQaReport } from '../shared/repositories/qa-report-aggregator';
@@ -92,8 +96,38 @@ import {
   DescribeInstancesCommand,
 } from '@aws-sdk/client-ec2';
 import { SSMClient, SendCommandCommand, GetCommandInvocationCommand } from '@aws-sdk/client-ssm';
+// Story 1.7.1 — PAT rotation + SSM read
+import { rotatePat, readRotatedAt, InvalidPatError } from '../shared/github/rotate-pat';
+import { z } from 'zod';
 import { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { format } from 'date-fns';
+// Story 1.2.4 — GitHub connector + schema
+import {
+  checkConnection,
+  listRepos,
+  getRepo,
+  getRepoTree,
+  getFileContent,
+  createRepoFromTemplate,
+  deleteRepo,
+  GitHubError,
+} from '../shared/github/connector';
+import { BOILERPLATE_REGISTRY } from '../shared/boilerplates/registry';
+import { githubCreateRepoSchema } from '../shared/schemas/github-create-repo-schema';
+// Story 1.4.2 — App-create saga schema (extends legacy createAppInputSchema
+// with `boilerplateType` + `bmadEnabled`).
+import { appCreateInputSchema } from '../shared/schemas/app-create-schema';
+// Story 1.8.3 — Timer Intelligence API routes
+import { sliceForPlan } from '../shared/timer/slicer';
+import { aggregateByCategory } from '../shared/timer/aggregator';
+import { timingCohortQuerySchema } from '../shared/schemas/timing-cohort-query-schema';
+import { buildForensicPayload } from '../shared/timer/forensic-builder';
+import type { CohortBaseline } from '../shared/timer/forensic-builder';
+import type { TimerCategory } from '../shared/timer/types';
+// Story 1.8.6 — cohort read from cron-aggregated TimingSummary table
+import { getCohortByKey } from '../shared/repositories/timing-summary-repository';
+import { buildCohortKey } from '../shared/timer/cohort';
+import { THRESHOLDS } from '../shared/timer/pipeline-timer-thresholds';
 
 const EC2_INSTANCE_ID = process.env.EC2_INSTANCE_ID || 'i-0826d68c316ae97dd';
 const ec2Client = new EC2Client({ region: 'us-east-1' });
@@ -229,6 +263,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path === '/api/auth/refresh') return next();
   if (c.req.path === '/api/auth/logout') return next();
   if (c.req.path === '/api/public/projects') return next();
+  if (c.req.path === '/api/github/status') return next();
   return authMiddleware(c, next);
 });
 
@@ -3959,8 +3994,12 @@ Output ONLY the XML.`,
   return c.json({ jobId, projectId, workingDir: project.ec2Path }, 201);
 });
 
-// ── Apps list (all epics with computed status) ──
-app.get('/api/apps', async (c) => {
+// ── Apps list (legacy — all epics with computed status) ──
+// App/Plan v1 (Story 2.1) reclaims /api/apps for the new Apps namespace.
+// This legacy endpoint moves to /api/development/apps to match its consumer
+// route at /development/apps. See `agentic-office/index.tsx` and
+// `use-epic-workflow.ts` for the consumers.
+app.get('/api/development/apps', async (c) => {
   const resp = await epicRepo.getAllEpics();
   const apps = resp.map((e) => {
     let appStatus: 'conceptualized' | 'in_development' | 'deployed';
@@ -5267,6 +5306,846 @@ app.get('/api/attention', async (c) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// App/Plan v1 — Plan lifecycle transitions (Epic 2, Story 2.6)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/plans/:planId/transition — transition a Plan to a new status,
+ * validated against `PLAN_LEGAL_TRANSITIONS`. When transitioning to
+ * `abandoned`, the App's workingTreeStatus is flipped to
+ * `dirty-from-abandoned-plan` (the daemon then refuses dispatches until
+ * the operator clicks "Mark resolved"; see Story 6.5 + Epic 3).
+ *
+ * Body: `{ to: 'developing' | 'review' | 'delivered' | 'abandoned' | ... }`
+ */
+app.post('/api/plans/:planId/transition', authMiddleware, async (c) => {
+  const planId = c.req.param('planId');
+  const body = await c.req.json();
+  const to = typeof body?.to === 'string' ? body.to : null;
+  if (!to) {
+    throw new ValidationError('Body must include `to: <PlanStatus>`.');
+  }
+
+  const updated = await planRepo.transitionPlanStatus(planId, to as Plan['status']);
+
+  // App/Plan v1 (Stories 3.3 + 3.1) — when abandoning, atomically:
+  //   (a) mark the App's working tree dirty (daemon refuses dispatches)
+  //   (b) sweep PENDING jobs for this Plan and mark them ORPHANED
+  //
+  // v1 uses sequential writes (not a transactWrite) — DDB transactWrite caps
+  // at 100 items and a Plan with many PENDING jobs could exceed that. The
+  // daemon's canDispatchJob guard is the safety net: any job we miss here
+  // gets ORPHANED on its next dispatch attempt.
+  if (to === 'abandoned' && updated.appId) {
+    await appRepo
+      .updateApp(updated.appId, { workingTreeStatus: 'dirty-from-abandoned-plan' })
+      .catch((err) => {
+        console.error('Failed to mark App workingTreeStatus dirty on abandon:', err);
+      });
+
+    // Sweep PENDING jobs for this Plan and mark ORPHANED.
+    // AgentJob doesn't carry a top-level `planId` field in v1; jobs link to
+    // Plans via their pipeline variables (EPIC_ID → Plan via epic.planId).
+    // For the v1 abandon sweep, we rely on the daemon's canDispatchJob guard
+    // (Story 3.2) to mark jobs ORPHANED when they next try to dispatch — that
+    // path resolves planId from the Plan row and works for every job kind.
+    // A direct planId-indexed sweep is a v1.x improvement once the AgentJob
+    // schema gains a denormalized planId field.
+  }
+
+  return c.json({ plan: updated });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// App/Plan v1 — App lifecycle API (Epic 2, Stories 2.1–2.5)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Compute the UI-friendly `derivedStatus` for an App grid card from raw inputs.
+ * Order matters: dirty-tree dominates everything else; building dominates live.
+ */
+function deriveAppStatus(app: App, activePlan: Plan | null): AppCardData['derivedStatus'] {
+  if (app.workingTreeStatus === 'dirty-from-abandoned-plan') return 'dirty-tree';
+  if (activePlan) return 'building';
+  if (app.currentlyDeployedPlanId) return 'live';
+  return 'no-deploy';
+}
+
+/** GET /api/apps — Apps grid data, enriched with planCount + currentlyLiveLabel + derivedStatus. */
+app.get('/api/apps', authMiddleware, async (c) => {
+  const apps = await appRepo.listApps();
+
+  const cards: AppCardData[] = await Promise.all(
+    apps.map(async (a) => {
+      const plans = await planRepo.listPlansByApp(a.appId);
+      const activePlan =
+        plans.find((p) => ['concept', 'developing', 'review', 'fixing'].includes(p.status)) ?? null;
+      const liveplan = a.currentlyDeployedPlanId
+        ? plans.find((p) => p.planId === a.currentlyDeployedPlanId)
+        : null;
+      return {
+        ...a,
+        planCount: plans.length,
+        currentlyLiveLabel: liveplan?.iterationLabel ?? liveplan?.displayName ?? null,
+        derivedStatus: deriveAppStatus(a, activePlan),
+      };
+    }),
+  );
+
+  return c.json({ apps: cards });
+});
+
+/**
+ * POST /api/apps — Pipeline v2 App-bootstrap saga (Stories 1.4.2 + 1.4.4).
+ *
+ * Saga steps (single in-process flow, in-memory chain — no DDB intermediate):
+ *
+ *   1. Validate         — Zod, slug regex, slug not in DDB Apps, slug not at
+ *                         github.com/futurator-repos/<slug> (404 = available,
+ *                         200 = taken → 409). RESERVED_APP_IDS still apply.
+ *   2. Create repo      — `createRepoFromTemplate(futurator-repos, <template>,
+ *                         <slug>)`. On `existing: true` → 409 with suggestion.
+ *   3. Atomic write     — `createAppAndBootstrapJob(app, job)` writes BOTH
+ *                         the App row AND the daemon-pickup `app-bootstrap`
+ *                         job in one TransactWriteCommand.
+ *   4. Rollback (G-7)   — If step 3 throws, delete the GitHub repo via
+ *                         `deleteRepo`. If THAT fails, write a high-severity
+ *                         attention item flagging the orphaned repo. Either
+ *                         way, return 500 to the caller — the rollback's
+ *                         success/failure must not mask the original error.
+ *
+ * Backward compat: legacy callers omit `boilerplateType` / `bmadEnabled`.
+ * Defaults applied here: `'nextjs'` and `true` (for the only wired type).
+ */
+app.post('/api/apps', authMiddleware, async (c) => {
+  const body = await c.req.json();
+  const parsed = appCreateInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
+  }
+  const input = parsed.data;
+
+  // Apply backward-compat defaults BEFORE the saga starts.
+  const boilerplateType = input.boilerplateType ?? 'nextjs';
+  const bmadEnabled =
+    input.bmadEnabled ?? (BOILERPLATE_REGISTRY[boilerplateType].bmadSupported ? true : false);
+
+  // ── Step 1: validate ────────────────────────────────────────────────────
+  // The Zod schema already enforced slug shape + 80-char display name. Reject
+  // reserved slugs (homepage S3 collisions) and DDB collisions before we
+  // burn a GitHub API call.
+  if (RESERVED_APP_IDS.has(input.appId)) {
+    throw new AppError(
+      'APP_ID_RESERVED',
+      `App slug "${input.appId}" is reserved (collides with homepage S3 paths).`,
+      400,
+    );
+  }
+  const existingApp = await appRepo.getApp(input.appId);
+  if (existingApp) {
+    throw new AppError('APP_ID_TAKEN', `App "${input.appId}" already exists.`, 409);
+  }
+  // GitHub-side slug check. 404 = available; 200 = taken; anything else
+  // bubbles up as a connector GitHubError.
+  try {
+    await getRepo('futurator-repos', input.appId);
+    // Reaching here = 200 = repo exists.
+    throw new AppError(
+      'REPO_EXISTS',
+      `A repo at github.com/futurator-repos/${input.appId} already exists. Pick a different name.`,
+      409,
+    );
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    if (err instanceof GitHubError && err.status === 404) {
+      // Available — continue saga.
+    } else if (err instanceof GitHubError) {
+      // Auth, rate-limit, etc. — surface as the connector status.
+      return c.json({ error: { code: 'GITHUB_ERROR', message: err.message } }, err.status as 400);
+    } else {
+      throw err;
+    }
+  }
+
+  // ── Step 2: create repo ─────────────────────────────────────────────────
+  const meta = BOILERPLATE_REGISTRY[boilerplateType];
+  const [templateOwner, templateRepoName] = meta.templateRepo.split('/');
+
+  let createdRepo: { html_url?: string; default_branch?: string } | undefined;
+  try {
+    const { data } = await createRepoFromTemplate(templateOwner, templateRepoName, input.appId);
+    if ('existing' in data && data.existing) {
+      throw new AppError(
+        'REPO_EXISTS',
+        `A repo at github.com/futurator-repos/${input.appId} already exists. Pick a different name.`,
+        409,
+      );
+    }
+    createdRepo = data;
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    if (err instanceof GitHubError) {
+      return c.json({ error: { code: 'GITHUB_ERROR', message: err.message } }, err.status as 400);
+    }
+    throw err;
+  }
+
+  // ── Steps 3+4: atomic App row + bootstrap job, with saga rollback ──────
+  const now = new Date().toISOString();
+  const app: App = {
+    appId: input.appId,
+    displayName: input.displayName.trim(),
+    icon: input.icon,
+    workingDir: `/home/ubuntu/projects/${input.appId}`,
+    executionMode: input.executionMode ?? 'pipeline',
+    currentlyDeployedPlanId: null,
+    deployJobIds: [],
+    workingTreeStatus: 'clean',
+    boilerplateType,
+    bmadEnabled,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const jobId = crypto.randomUUID();
+  const job = {
+    jobId,
+    status: 'PENDING' as const,
+    createdAt: now,
+    updatedAt: now,
+    createdBy: c.get('user')?.userId ?? 'system',
+    workingDir: app.workingDir,
+    jobType: 'app-bootstrap' as const,
+    appBootstrapPayload: {
+      appId: input.appId,
+      boilerplateType,
+      bmadEnabled,
+    },
+  };
+
+  try {
+    await appRepo.createAppAndBootstrapJob(app, job);
+  } catch (txErr) {
+    // Rollback: delete the GitHub repo we just created. Best-effort — log
+    // failures but do NOT let them swallow the original tx error.
+    let rollbackOk = true;
+    let rollbackErrMsg: string | undefined;
+    try {
+      await deleteRepo('futurator-repos', input.appId);
+    } catch (delErr) {
+      rollbackOk = false;
+      rollbackErrMsg = delErr instanceof Error ? delErr.message : String(delErr);
+      // Surface the orphaned-repo attention item so an operator can clean up.
+      try {
+        await attentionRepo.createAttentionItem({
+          // We synthesize a planId namespace for App-level items (no Plan
+          // exists yet). Stable + greppable.
+          planId: `app:${input.appId}`,
+          itemId: crypto.randomUUID(),
+          createdAt: new Date().toISOString(),
+          resolvedAt: null,
+          severity: 'high',
+          category: 'pv2-app-bootstrap-rollback-orphan',
+          title: `Orphaned GitHub repo futurator-repos/${input.appId}`,
+          body:
+            `App-create transaction failed AND the GitHub rollback also failed. ` +
+            `The repo is orphaned and must be deleted by hand. ` +
+            `Original tx error: ${txErr instanceof Error ? txErr.message : String(txErr)}. ` +
+            `Rollback error: ${rollbackErrMsg}`,
+          context: { jobId },
+          suggestedActions: [
+            { label: 'Open repo', kind: 'open-logs' },
+            { label: 'Archive', kind: 'archive' },
+          ],
+          status: 'open',
+        });
+      } catch {
+        // Even attention-write failed — operator-side runbook will catch it.
+      }
+    }
+    const txMsg = txErr instanceof Error ? txErr.message : String(txErr);
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        message: `app-create transaction failed`,
+        appId: input.appId,
+        rollbackOk,
+        txError: txMsg,
+        rollbackError: rollbackErrMsg,
+      }),
+    );
+    throw new AppError(
+      'APP_CREATE_FAILED',
+      `Failed to create App "${input.appId}". ${
+        rollbackOk
+          ? 'GitHub repo was rolled back.'
+          : 'GitHub rollback also failed — see attention item for orphan.'
+      }`,
+      500,
+    );
+  }
+
+  // 201 with the App row + jobId so the UI can navigate to detail and start
+  // polling for the daemon's bootstrap status flip.
+  return c.json(
+    {
+      app,
+      jobId,
+      // Surface the repo metadata for the UI's "Repository badge" mount.
+      repo: createdRepo
+        ? {
+            htmlUrl: createdRepo.html_url,
+            defaultBranch: createdRepo.default_branch,
+          }
+        : null,
+    },
+    201,
+  );
+});
+
+/** GET /api/apps/:appId — App detail (App + plans[] + activePlan + recentDeploys). */
+app.get('/api/apps/:appId', authMiddleware, async (c) => {
+  const appId = c.req.param('appId');
+  const appRow = await appRepo.getApp(appId);
+  if (!appRow) {
+    throw new AppError('APP_NOT_FOUND', `App "${appId}" not found.`, 404);
+  }
+
+  const plans = await planRepo.listPlansByApp(appId);
+  const activePlan = await planRepo.getActivePlanForApp(appId);
+
+  // Last 5 deploy jobs from App.deployJobIds[]; missing jobs are skipped silently.
+  const recentDeployIds = appRow.deployJobIds.slice(-5);
+  const recentDeploys = (
+    await Promise.all(
+      recentDeployIds.map(async (jobId) => {
+        try {
+          return await agentJobsRepo.getJobById(jobId);
+        } catch {
+          return null;
+        }
+      }),
+    )
+  ).filter(Boolean);
+
+  return c.json({ app: appRow, plans, activePlan, recentDeploys });
+});
+
+/** PATCH /api/apps/:appId — Update mutable App fields. */
+app.patch('/api/apps/:appId', authMiddleware, async (c) => {
+  const appId = c.req.param('appId');
+  const body = await c.req.json();
+  const parsed = updateAppInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
+  }
+  const updated = await appRepo.updateApp(appId, parsed.data);
+  return c.json({ app: updated });
+});
+
+/** DELETE /api/apps/:appId — Hard delete + cascade to all Plans + their Epics. */
+app.delete('/api/apps/:appId', authMiddleware, async (c) => {
+  const appId = c.req.param('appId');
+  const appRow = await appRepo.getApp(appId);
+  if (!appRow) {
+    throw new AppError('APP_NOT_FOUND', `App "${appId}" not found.`, 404);
+  }
+
+  // Cascade: list Plans, delete each Plan's Epics, delete the Plans, then the App.
+  // Sequential (not transactional) — DDB transactWrite caps at 100; cascading
+  // an App with many Plans + Epics could exceed it. Partial-failure recovery
+  // is via the wipe script (scripts/wipe-pre-app-plan-v1.mjs).
+  const plans = await planRepo.listPlansByApp(appId);
+  for (const plan of plans) {
+    for (const epicId of plan.epicIds || []) {
+      await epicRepo.deleteEpic(epicId).catch(() => undefined);
+    }
+    await planRepo.deletePlan(plan.planId).catch(() => undefined);
+  }
+  await appRepo.deleteApp(appId);
+
+  return c.json({ deleted: true, appId });
+});
+
+/** POST /api/apps/:appId/plans — Create a Plan, enforcing concurrency + initial-uniqueness. */
+app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
+  const appId = c.req.param('appId');
+  const body = await c.req.json();
+  const parsed = createPlanForAppInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
+  }
+
+  const appRow = await appRepo.getApp(appId);
+  if (!appRow) {
+    throw new AppError('APP_NOT_FOUND', `App "${appId}" not found.`, 404);
+  }
+
+  const active = await planRepo.getActivePlanForApp(appId);
+  if (active) {
+    throw new AppError(
+      'PLAN_ALREADY_ACTIVE',
+      `App "${appId}" already has an active Plan: ${active.planId} (${active.status}). Finish or abandon it before starting another.`,
+      409,
+    );
+  }
+
+  const existingPlans = await planRepo.listPlansByApp(appId);
+  if (parsed.data.kind === 'initial' && existingPlans.length > 0) {
+    throw new AppError(
+      'INITIAL_PLAN_ALREADY_EXISTS',
+      `App "${appId}" already has an initial Plan. Subsequent iterations must be kind=change or kind=experiment.`,
+      409,
+    );
+  }
+  if (parsed.data.kind !== 'initial' && existingPlans.length === 0) {
+    throw new AppError(
+      'FIRST_PLAN_MUST_BE_INITIAL',
+      `App "${appId}" has no Plans yet — the first one must be kind=initial.`,
+      409,
+    );
+  }
+
+  const now = new Date().toISOString();
+  const planId = `plan_${appId}_${Date.now().toString(36)}`;
+  const user = c.get('user');
+  const plan: Plan = {
+    planId,
+    appId,
+    kind: parsed.data.kind,
+    name: appId, // legacy alias — equal to appId for App/Plan v1 Plans
+    intent: parsed.data.intent,
+    description: '',
+    displayName: parsed.data.displayName ?? `${appId} — ${parsed.data.kind}`,
+    status: 'concept',
+    epicIds: [],
+    workingDir: appRow.workingDir,
+    executionMode: parsed.data.executionMode ?? appRow.executionMode,
+    rigor:
+      parsed.data.rigor ??
+      existingPlans.filter((p) => p.status === 'delivered').at(-1)?.rigor ??
+      'mvp',
+    totalCostUsd: 0,
+    totalStories: 0,
+    doneStories: 0,
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user.email,
+  };
+  await planRepo.createPlan(plan);
+
+  // For kind=initial Plans, enqueue the existing greenfield PM-plan pipeline —
+  // same flow as POST /api/plans/from-intent. This generates the epic/story
+  // breakdown from intent so the operator doesn't have to click Regenerate
+  // manually on their first Plan.
+  let pmJobId: string | undefined;
+  if (parsed.data.kind === 'initial') {
+    pmJobId = crypto.randomUUID();
+    const pipeline = generatePmPlanPipeline({
+      planName: plan.name,
+      intent: plan.intent,
+      executionMode: plan.executionMode,
+      devModel: plan.devModel,
+    });
+    await agentJobsRepo.createJob({
+      jobId: pmJobId,
+      status: 'PENDING',
+      createdAt: now,
+      updatedAt: now,
+      createdBy: user.email,
+      workingDir: plan.workingDir,
+      pipeline,
+    });
+  }
+
+  // For kind=change|experiment Plans, the PM-augmentation runtime (AP-D1)
+  // is deferred — the Plan stays in `concept` with empty epicIds until the
+  // daemon-side handler is wired. Operator can click Regenerate to fall back
+  // to the legacy PM flow in the meantime.
+
+  return c.json({ plan, pmJobId }, 201);
+});
+
+/** POST /api/apps/:appId/redeploy — v1 rollback by re-syncing a prior bundle. */
+app.post('/api/apps/:appId/redeploy', authMiddleware, async (c) => {
+  const appId = c.req.param('appId');
+  const body = await c.req.json();
+  const deployJobId = typeof body?.deployJobId === 'string' ? body.deployJobId : null;
+  if (!deployJobId) {
+    throw new ValidationError('deployJobId is required (must be one of App.deployJobIds[]).');
+  }
+
+  const appRow = await appRepo.getApp(appId);
+  if (!appRow) {
+    throw new AppError('APP_NOT_FOUND', `App "${appId}" not found.`, 404);
+  }
+  if (!appRow.deployJobIds.includes(deployJobId)) {
+    throw new AppError(
+      'DEPLOY_JOB_NOT_IN_APP_HISTORY',
+      `Deploy job "${deployJobId}" is not in this App's deploy history. Cannot re-deploy a bundle that doesn't belong to this App.`,
+      400,
+    );
+  }
+
+  // The actual re-deploy work (S3 sync of the prior bundle to apps/<appId>/)
+  // is wired in a follow-up — Epic 2.5 ships the API endpoint + history-list
+  // validation; the daemon-side redeploy pipeline lands alongside Epic 4's
+  // pipeline plumbing. Returning 202 with sourceDeployJobId for now signals
+  // the API contract is ready.
+  return c.json({ status: 'accepted', appId, sourceDeployJobId: deployJobId }, 202);
+});
+
+// ── Timer Intelligence routes (Story 1.8.3) ──
+
+// GET /api/plans/:planId/timing
+//   Returns per-plan timing aggregate + live status.
+//   sliceForPlan collects slices across all jobs in the plan.
+//   planTotalMs is derived from the first/last slice timestamps (not plan fields)
+//   because AgentJob has no explicit startedAt/endedAt (Story 1.8.2 contract).
+app.get('/api/plans/:planId/timing', async (c) => {
+  const planId = c.req.param('planId');
+
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  const slices = await sliceForPlan(planId);
+  const aggregate = aggregateByCategory(slices);
+
+  // Wall-clock from first/last slice, not from plan fields
+  let planTotalMs = 0;
+  if (slices.length >= 2) {
+    const first = new Date(slices[0].startedAt).getTime();
+    const last = new Date(slices[slices.length - 1].endedAt).getTime();
+    planTotalMs = Math.max(0, last - first);
+  } else if (slices.length === 1) {
+    planTotalMs = slices[0].durationMs;
+  }
+
+  const isLive = slices.some((s) => s.isLive === true);
+
+  return c.json({ planId, slices, aggregate, planTotalMs, isLive });
+});
+
+// GET /api/apps/:appId/timing
+//   Returns timing summaries for the last 20 completed plans on this App,
+//   plus an aggregate summed across those plans.
+//   Terminal-success statuses: 'delivered' (v1 happy path).
+//   Legacy 'archived' plans are excluded — they may contain abandoned work.
+app.get('/api/apps/:appId/timing', async (c) => {
+  const appId = c.req.param('appId');
+
+  const app_ = await appRepo.getApp(appId);
+  if (!app_) throw new NotFoundError('App', appId);
+
+  // Load all plans for this app, filter to terminal-success, take last 20
+  const allPlans = await planRepo.listPlansByApp(appId);
+  const TERMINAL_SUCCESS: ReadonlySet<string> = new Set(['delivered']);
+  const completed = allPlans
+    .filter((p) => TERMINAL_SUCCESS.has(p.status))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 20);
+
+  // Per-plan timing
+  const recentPlans: Array<{
+    planId: string;
+    planLabel: string;
+    startedAt: string | null;
+    endedAt: string | null;
+    durationMs: number;
+    byCategory: ReturnType<typeof aggregateByCategory>['byCategory'];
+  }> = [];
+
+  // Running app-wide aggregate accumulators
+  const appTotals: Record<string, number> = {};
+  let appTotalMs = 0;
+
+  for (const plan of completed) {
+    const slices = await sliceForPlan(plan.planId);
+    const agg = aggregateByCategory(slices);
+
+    let startedAt: string | null = null;
+    let endedAt: string | null = null;
+    let durationMs = 0;
+
+    if (slices.length > 0) {
+      startedAt = slices[0].startedAt;
+      endedAt = slices[slices.length - 1].endedAt;
+      durationMs = Math.max(0, new Date(endedAt).getTime() - new Date(startedAt).getTime());
+    }
+
+    // Accumulate into app-level totals
+    for (const [cat, summary] of Object.entries(agg.byCategory)) {
+      appTotals[cat] = (appTotals[cat] ?? 0) + (summary as { totalMs: number }).totalMs;
+    }
+    appTotalMs += agg.totalMs;
+
+    recentPlans.push({
+      planId: plan.planId,
+      planLabel: plan.iterationLabel ?? plan.displayName ?? plan.name,
+      startedAt,
+      endedAt,
+      durationMs,
+      byCategory: agg.byCategory,
+    });
+  }
+
+  // Build app-level aggregate with same shape as AggregationResult.byCategory
+  const appByCategory = Object.fromEntries(
+    Object.entries(appTotals).map(([cat, totalMs]) => [cat, { totalMs, count: 0 }]),
+  ) as ReturnType<typeof aggregateByCategory>['byCategory'];
+
+  return c.json({
+    appId,
+    recentPlans,
+    appAggregate: { byCategory: appByCategory, totalMs: appTotalMs },
+  });
+});
+
+// GET /api/timing/cohort?templateType=<>&planKind=<>&epicCount=<>
+//
+//   Story 1.8.6: reads from the cron-aggregated TimingSummary DDB table
+//   (a single DDB Get, O(1) instead of the previous full scan).
+//
+//   Returns 422 on invalid params. Returns 404 with { error: 'cohort-insufficient', samples: 0 }
+//   when the row is missing or has fewer than THRESHOLDS.minSamples plans.
+//
+//   The dashboards already render the "accumulating" pill on 404 — the first
+//   6 hours after Phase 1 deploy will return 404 for all cohorts until the
+//   timing-aggregator cron has run at least once.
+app.get('/api/timing/cohort', async (c) => {
+  // Validate query params
+  const parsed = timingCohortQuerySchema.safeParse({
+    templateType: c.req.query('templateType'),
+    planKind: c.req.query('planKind'),
+    epicCount: c.req.query('epicCount'),
+  });
+  if (!parsed.success) {
+    throw new ValidationError(
+      parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+    );
+  }
+  const { templateType, planKind, epicCount } = parsed.data;
+
+  // Build the cohortKey and look up the pre-aggregated row
+  const cohortKey = buildCohortKey(templateType, planKind, epicCount);
+  const row = await getCohortByKey(cohortKey);
+
+  if (!row || row.samples < THRESHOLDS.minSamples) {
+    return c.json({ error: 'cohort-insufficient', samples: row?.samples ?? 0 }, 404);
+  }
+
+  // Re-shape byCategory to the CohortBaseline shape consumers expect:
+  //   { medianMs, p90Ms }  (count is internal to the cron)
+  const byCategory = Object.fromEntries(
+    Object.entries(row.byCategory).map(([cat, stats]) => [
+      cat,
+      { medianMs: stats.medianMs, p90Ms: stats.p90Ms },
+    ]),
+  ) as Record<TimerCategory, { medianMs: number; p90Ms: number }>;
+
+  return c.json({
+    samples: row.samples,
+    medianMs: row.medianMs,
+    p90Ms: row.p90Ms,
+    byCategory,
+  });
+});
+
+// GET /api/plans/:planId/timing/forensic
+//   Returns a downloadable JSON file shaped for paste-into-Claude analysis.
+//   The cohort field is null when there are fewer than 5 matching plans.
+//   Content-Disposition triggers a browser download.
+app.get('/api/plans/:planId/timing/forensic', async (c) => {
+  const planId = c.req.param('planId');
+
+  // Story 1.8.6: cohort fetcher now reads from the pre-aggregated TimingSummary
+  // table instead of scanning all apps + plans inline.
+  const cohortFetcher = async (
+    tmplType: string,
+    pKind: string,
+    epics: number,
+  ): Promise<CohortBaseline | null> => {
+    const key = buildCohortKey(tmplType, pKind, epics);
+    const row = await getCohortByKey(key);
+    if (!row || row.samples < THRESHOLDS.minSamples) return null;
+
+    const byCategory = Object.fromEntries(
+      Object.entries(row.byCategory).map(([cat, stats]) => [
+        cat,
+        { medianMs: stats.medianMs, p90Ms: stats.p90Ms },
+      ]),
+    ) as Record<TimerCategory, { medianMs: number; p90Ms: number }>;
+
+    return {
+      samples: row.samples,
+      medianMs: row.medianMs,
+      p90Ms: row.p90Ms,
+      byCategory,
+    };
+  };
+
+  const payload = await buildForensicPayload(planId, cohortFetcher);
+  if (!payload) throw new NotFoundError('Plan', planId);
+
+  const filename = `${planId}-forensic.json`;
+  return c.body(JSON.stringify(payload, null, 2), 200, {
+    'Content-Type': 'application/json',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+  });
+});
+
+// ── GitHub connector routes (Story 1.2.4) ──
+
+// GET /api/github/status — public (no auth). Calls checkConnection().
+app.get('/api/github/status', async (c) => {
+  const result = await checkConnection();
+  if (!result.connected) {
+    return c.json({ connected: false, error: result.error, rateLimit: result.rateLimit }, 503);
+  }
+  return c.json({ connected: true, login: result.login, rateLimit: result.rateLimit });
+});
+
+// GET /api/github/repos — list all repos in futurator-repos org.
+app.get('/api/github/repos', authMiddleware, async (c) => {
+  try {
+    const { data: repos, rateLimit } = await listRepos();
+    return c.json({ repos, rateLimit });
+  } catch (err) {
+    if (err instanceof GitHubError) {
+      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+    }
+    throw err;
+  }
+});
+
+// POST /api/github/repos — create a repo from a boilerplate template.
+app.post('/api/github/repos', authMiddleware, async (c) => {
+  const body = await c.req.json();
+  const parsed = githubCreateRepoSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
+  }
+  const { templateType, name } = parsed.data;
+
+  const meta = BOILERPLATE_REGISTRY[templateType];
+  // templateRepo is "futurator-repos/template-nextjs" — split into owner + repo
+  const [templateOwner, templateRepo] = meta.templateRepo.split('/');
+
+  try {
+    const { data, rateLimit } = await createRepoFromTemplate(templateOwner, templateRepo, name);
+    if ('existing' in data && data.existing) {
+      return c.json({ error: 'repo-exists', repo: data.repo, rateLimit }, 409);
+    }
+    return c.json({ repo: data, rateLimit }, 201);
+  } catch (err) {
+    if (err instanceof GitHubError) {
+      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+    }
+    throw err;
+  }
+});
+
+// GET /api/github/repos/:owner/:name — single repo metadata.
+app.get('/api/github/repos/:owner/:name', authMiddleware, async (c) => {
+  const owner = c.req.param('owner');
+  const name = c.req.param('name');
+  try {
+    const { data: repo, rateLimit } = await getRepo(owner, name);
+    return c.json({ repo, rateLimit });
+  } catch (err) {
+    if (err instanceof GitHubError) {
+      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+    }
+    throw err;
+  }
+});
+
+// GET /api/github/repos/:owner/:name/tree — recursive file tree.
+app.get('/api/github/repos/:owner/:name/tree', authMiddleware, async (c) => {
+  const owner = c.req.param('owner');
+  const name = c.req.param('name');
+  const branch = c.req.query('branch');
+  try {
+    const { data, rateLimit } = await getRepoTree(owner, name, branch);
+    return c.json({ tree: data.tree, truncated: data.truncated, count: data.count, rateLimit });
+  } catch (err) {
+    if (err instanceof GitHubError) {
+      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+    }
+    throw err;
+  }
+});
+
+// GET /api/github/repos/:owner/:name/files — file content.
+app.get('/api/github/repos/:owner/:name/files', authMiddleware, async (c) => {
+  const owner = c.req.param('owner');
+  const name = c.req.param('name');
+  const filePath = c.req.query('path');
+  const ref = c.req.query('ref');
+
+  if (!filePath) {
+    throw new ValidationError('query param ?path= is required');
+  }
+
+  try {
+    const { data, rateLimit } = await getFileContent(owner, name, filePath, ref);
+    if ('tooLarge' in data && data.tooLarge) {
+      return c.json({ tooLarge: true, size: data.size, rateLimit });
+    }
+    return c.json({ ...data, rateLimit });
+  } catch (err) {
+    if (err instanceof GitHubError) {
+      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+    }
+    throw err;
+  }
+});
+
+// PUT /api/github/pat — Story 1.7.1. Rotate the GitHub PAT.
+// Auth-required. Validates the token against GitHub before writing to SSM.
+// The PAT value is NEVER logged, echoed in responses, or stored in DynamoDB.
+const rotatePATSchema = z.object({
+  pat: z.string().min(1, 'PAT must not be empty'),
+});
+
+app.get('/api/github/rotated-at', authMiddleware, async (c) => {
+  try {
+    const rotatedAt = await readRotatedAt(ssmClient);
+    return c.json({ rotatedAt });
+  } catch {
+    return c.json({ rotatedAt: null });
+  }
+});
+
+app.put('/api/github/pat', authMiddleware, async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    throw new ValidationError('Request body must be valid JSON');
+  }
+
+  const parsed = rotatePATSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
+  }
+
+  // The PAT is used ONLY in the rotatePat call — never logged or returned.
+  const { pat: candidateToken } = parsed.data;
+
+  try {
+    const result = await rotatePat(candidateToken, ssmClient);
+    return c.json({ rotated: true, login: result.login, rotatedAt: result.rotatedAt });
+  } catch (err) {
+    if (err instanceof InvalidPatError) {
+      return c.json({ error: 'invalid-pat', message: err.message }, 422);
+    }
+    const msg = err instanceof Error ? err.message : 'Unknown error during PAT rotation';
+    return c.json({ error: 'rotation-failed', message: msg }, 502);
+  }
+});
+
 // Global error handler
 app.onError((err, c) => {
   if (err instanceof AppError) {
@@ -5284,4 +6163,5 @@ app.notFound((c) => {
   );
 });
 
+export { app };
 export const handler = handle(app);

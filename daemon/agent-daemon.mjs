@@ -41,13 +41,14 @@ import {
   validatePartyTurnJob,
   validatePartyDocsSyncJob,
   validatePartyDocsUnlinkJob,
+  validateAppBootstrapJob,
   JOB_HANDLER_EPIC_DEV,
   JOB_HANDLER_PARTY_BOOTSTRAP,
   JOB_HANDLER_PARTY_INSPECT,
   JOB_HANDLER_PARTY_TURN,
   JOB_HANDLER_PARTY_DOCS_SYNC,
   JOB_HANDLER_PARTY_DOCS_UNLINK,
-  JOB_HANDLER_AGENT_TURN,
+  JOB_HANDLER_APP_BOOTSTRAP,
 } from './pipelines/job-router.mjs';
 import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
 import { runPartyBootstrap } from './pipelines/party-bootstrap.mjs';
@@ -55,7 +56,8 @@ import { runPartyInspect } from './pipelines/party-inspector.mjs';
 import { runPartyTurn } from './pipelines/party-turn.mjs';
 import { runPartyDocsSync } from './pipelines/party-docs-sync.mjs';
 import { runPartyDocsUnlink } from './pipelines/party-docs-unlink.mjs';
-import { runAgentTurn } from './pipelines/agent-turn.mjs';
+// Pipeline v2 / Story 1.4.3 — App-bootstrap saga (steps 3–5).
+import { runAppBootstrap } from './pipelines/app-bootstrap.mjs';
 import {
   findStaleJobs,
   buildResumeJob,
@@ -65,7 +67,6 @@ import {
   registerChild,
   unregisterChild,
   signalAllChildren,
-  signalChildrenForJob,
   waitForAllChildrenToExit,
   killAllChildren,
   getChildCount,
@@ -79,65 +80,7 @@ import {
   ShellGuardViolation,
 } from './pipelines/lib/shell-guard.mjs';
 import { mergeVisualTestsBlock } from './pipelines/lib/visual-tests-writer.mjs';
-import { substituteTemplate as substituteTemplateLib } from './pipelines/lib/template-substitution.mjs';
-import { resolveAndSerializeContextPack } from './pipelines/lib/context-pack-resolver.mjs';
-import {
-  parseReviewCriteria,
-  aggregateReviewVerdict,
-  formatFailedReasonsForRetry,
-  formatHumanQuestionsForAttention,
-} from './pipelines/lib/review-criteria-parser.mjs';
-import {
-  EXIT_SIGNALS_PROMPT_SUFFIX,
-  mergeUniversalExtractors,
-  detectEscalation,
-} from './pipelines/lib/exit-signals.mjs';
-import { LoopDetector, LOOP_HINT_MESSAGE } from './pipelines/lib/loop-detector.mjs';
-import { runPreflight } from './pipelines/lib/preflight.mjs';
-import { SessionPool, CapacitySaturated, CapacityTimeout } from './lib/session-pool.mjs';
-import { CostMeter } from './lib/cost-meter.mjs';
-import { resolveTimeCeilingMs, scheduleTimeCeilingTimers } from './lib/time-ceiling.mjs';
 import { randomUUID } from 'node:crypto';
-
-// ── SessionPool — Pipeline v1, Story 2.1 ──────────────────────────────────
-// One process-wide instance. Reads env vars at construction.
-const sessionPool = new SessionPool();
-
-// ── CostMeter — Pipeline v1, Story 4.1. Initialized post-DDB-bootstrap. ──
-let costMeter = null;
-const DEFAULT_PER_JOB_COST_CEILING_USD = Number(
-  process.env.DEFAULT_PER_JOB_COST_CEILING_USD || '5',
-);
-const DEFAULT_DAILY_COST_CEILING_USD = Number(
-  process.env.DEFAULT_DAILY_COST_CEILING_USD || '100',
-);
-
-/**
- * Default-class derivation per Story 2.2. Falls back to the step's declared
- * `concurrencyClass` (Story 2.5) when present.
- */
-function deriveConcurrencyClass(job) {
-  if (job?.concurrencyClass) return job.concurrencyClass;
-  if (job?.jobType === 'party-turn' || job?.jobType === 'agent-turn') return 'interactive';
-  return 'background';
-}
-
-// ── Universal escalation signal — Story 1.2 ───────────────────────────────
-// Thrown by `executeStep` when an agent emits ---ESCALATE--- or
-// ---NEED-HUMAN---. `runJobAsync` short-circuits its catch handler to mark
-// NEEDS_ATTENTION (not FAILED, not retried) and write a structured attention
-// item populated from `payload`.
-class EscalationSignal extends Error {
-  constructor({ jobId, stepId, triggeredBy, escalationPayload, salvageableExtractors }) {
-    super(`Agent ${stepId} emitted ${triggeredBy}`);
-    this.name = 'EscalationSignal';
-    this.jobId = jobId;
-    this.stepId = stepId;
-    this.triggeredBy = triggeredBy; // 'AGENT_ESCALATED' | 'AGENT_NEEDS_HUMAN'
-    this.escalationPayload = escalationPayload;
-    this.salvageableExtractors = salvageableExtractors || [];
-  }
-}
 
 // Resolve the full path to `claude` binary at startup
 let CLAUDE_BIN = 'claude';
@@ -156,6 +99,8 @@ const REGION = process.env.AWS_REGION || 'us-east-1';
 const JOBS_TABLE = process.env.AGENT_JOBS_TABLE || 'futurator-agent-jobs';
 const EVENTS_TABLE = process.env.AGENT_EVENTS_TABLE || 'futurator-agent-events';
 const EPICS_TABLE = process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflows';
+// Pipeline v2 / Story 1.4.3 — App-bootstrap saga reads + updates the App row.
+const APPS_TABLE = process.env.APPS_TABLE || 'futurator-apps';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS || '3000', 10);
 const OAUTH_CREDS_PATH =
   process.env.CLAUDE_CREDENTIALS_PATH || '/home/ubuntu/.claude/.credentials.json';
@@ -183,15 +128,6 @@ const MAX_RETRIES = RETRY_DELAYS_MS.length;
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
   marshallOptions: { removeUndefinedValues: true },
 });
-
-// FU-1 — CostMeter wired post-DDB. Used by runAgent's result-event handler
-// + the heartbeat (FU-4) to surface daily totals to the API.
-costMeter = new CostMeter(ddb, { jobsTable: JOBS_TABLE });
-
-// Story B.6: shared epic-repo handle for persisting per-story workSummary
-// from inside executeStep. The receiver's local handle (line ~2363) keeps
-// using the same instance via dependency injection.
-const epicRepo = createEpicRepo({ ddb, tableName: EPICS_TABLE });
 
 // ── Claude Code OAuth auth (Max subscription only, no fallback) ──
 //
@@ -320,11 +256,6 @@ function isAuthFailureOutput(text) {
 }
 
 const jobEventSeqs = new Map(); // jobId -> last seq number
-// Story A.7: per-job mapping to a 6-char story prefix (uppercase). Populated
-// by executePipeline at start, consumed by pushEvent + step-scope log calls
-// so each event/log line can be attributed to a story without changing the
-// event-table schema. Cleared in the job's finally block.
-const jobStoryShortIds = new Map(); // jobId -> "ABC123"
 const activeJobs = new Map(); // jobId -> { startedAt, workingDir, stepId, agentId, pid, model }
 // t2.micro has 1.8GB RAM; each Claude process uses ~150-300MB. 2 concurrent = safe.
 const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT || '2', 10);
@@ -380,18 +311,6 @@ async function loadMaxEventSeq(jobId) {
   }
 }
 
-// Story A.7: derive the 6-char story prefix from the daemon's per-job map.
-// Returns '' when the job has no story bound (orchestrator/party jobs).
-function storyShortIdForJob(jobId) {
-  return jobStoryShortIds.get(jobId) || '';
-}
-
-// Story A.7: prepend `[ABC123] ` to a log message when the job has a bound
-// storyShortId. Cheap; no allocation when the prefix is empty.
-function withStoryPrefix(shortId, msg) {
-  return shortId ? `[${shortId}] ${msg}` : msg;
-}
-
 async function pushEvent(jobId, stepId, agentId, eventType, data = {}) {
   // Seed the in-memory counter from DDB the first time we see this jobId in
   // this process. See loadMaxEventSeq() for why.
@@ -402,10 +321,6 @@ async function pushEvent(jobId, stepId, agentId, eventType, data = {}) {
   const current = (jobEventSeqs.get(jobId) || 0) + 1;
   jobEventSeqs.set(jobId, current);
   const seq = String(current).padStart(6, '0');
-  // Story A.7: opportunistically tag every event with the bound story
-  // shortId so the UI's Logs tab can render `[ABC123]` per row. Caller can
-  // override by passing a `storyShortId` in `data`.
-  const storyShortId = data.storyShortId ?? storyShortIdForJob(jobId);
   try {
     await ddb.send(
       new PutCommand({
@@ -418,7 +333,6 @@ async function pushEvent(jobId, stepId, agentId, eventType, data = {}) {
           stepId,
           agentId,
           eventType,
-          ...(storyShortId ? { storyShortId } : {}),
           ...data,
           expireAt: Math.floor(Date.now() / 1000) + 7 * 86400,
         },
@@ -430,34 +344,16 @@ async function pushEvent(jobId, stepId, agentId, eventType, data = {}) {
 }
 
 // ── Template substitution: replace {{VAR}} with values from variables store ──
-// Story A.5: hoisted into pipelines/lib/template-substitution.mjs so the
-// FEEDBACK round-trip can be unit-tested. We keep the same logging behavior
-// here — warn per-miss — by injecting a callback.
 
 function substituteTemplate(template, variables) {
-  return substituteTemplateLib(template, variables, (varName) => {
+  return template.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
+    if (varName in variables) {
+      log('debug', `Template substitution: {{${varName}}} → ${variables[varName].length} chars`);
+      return variables[varName];
+    }
     log('warn', `Template variable {{${varName}}} not found in store, leaving as-is`);
+    return match;
   });
-}
-
-/**
- * Story 1.4 — substitute `${VAR}`-style placeholders in a preflight check
- * descriptor before running it. Supports the special `${workingDir}` token
- * (passed in alongside the variable map) plus any uppercase variable
- * already in `variables`.
- */
-function substitutePreconditionPaths(check, variables, workingDir) {
-  function expand(value) {
-    if (typeof value !== 'string') return value;
-    return value
-      .replace(/\$\{workingDir\}/g, workingDir || '')
-      .replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (_match, name) =>
-        Object.prototype.hasOwnProperty.call(variables || {}, name) ? variables[name] : '',
-      );
-  }
-  const out = { ...check };
-  if (typeof out.path === 'string') out.path = expand(out.path);
-  return out;
 }
 
 // ── Extract variables from agent output ──
@@ -550,7 +446,7 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
     if (opts.disallowedTools) args.push('--disallowedTools', opts.disallowedTools);
     if (opts.model) args.push('--model', opts.model);
 
-    log('info', withStoryPrefix(storyShortIdForJob(jobId), `Spawning claude for step ${stepId} (agent ${agentId})`), {
+    log('info', `Spawning claude for step ${stepId} (agent ${agentId})`, {
       resume: opts.resume || 'none',
       model: opts.model || 'default',
       promptLen: prompt.length,
@@ -603,35 +499,6 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
     let finalResult = null;
     let stderrBuffer = '';
 
-    // Story 1.3: per-step loop detector + state shared with the stream
-    // processor so it can ask us to terminate.
-    const loopDetector = new LoopDetector();
-    const loopState = { hintsLogged: 0, forceEscalate: null };
-
-    // FU-1 (Story 4.3) + FU-2 (Story 4.2): per-step cost + time enforcement.
-    // `ceilingState` is shared with the close handler so it can surface a
-    // structured COST_CEILING / TIME_CEILING signal instead of misclassifying
-    // the SIGTERM we send.
-    const ceilingState = { tripped: null }; // 'COST_CEILING' | 'TIME_CEILING' | null
-    const cancelTimeCeiling = scheduleTimeCeilingTimers(opts.timeCeilingMs, {
-      onWarn: (remainingMs) => {
-        log('warn', `[time-ceiling] step ${stepId} ~${Math.round(remainingMs / 1000)}s remaining`);
-        pushEvent(jobId, stepId, agentId, 'status', {
-          text: `[TIME WARN] approximately ${Math.round(remainingMs / 1000)}s remaining; please complete or escalate via ---ESCALATE---.`,
-        });
-      },
-      onTerminate: () => {
-        if (ceilingState.tripped || proc.killed) return;
-        ceilingState.tripped = 'TIME_CEILING';
-        log('error', `[time-ceiling] step ${stepId} HARD KILL — exceeded ${opts.timeCeilingMs}ms`);
-        pushEvent(jobId, stepId, agentId, 'status', {
-          text: `[TIME HARD] step exceeded ceiling; terminating.`,
-        });
-        proc.kill('SIGTERM');
-        setTimeout(() => proc.kill && !proc.killed && proc.kill('SIGKILL'), 5000).unref?.();
-      },
-    });
-
     // Handle spawn failures (ENOENT, permissions, etc.)
     proc.on('error', (err) => {
       unregisterChild(jobId, proc);
@@ -652,35 +519,8 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
-          processStreamEvent(jobId, stepId, agentId, event, { loopDetector, loopState, proc });
-          if (event.type === 'result') {
-            finalResult = event;
-            // FU-1: record cost on every turn-result event. Some pipelines
-            // emit multiple `result` events (multi-turn); accrue all of them.
-            const turnCost = event.total_cost_usd || 0;
-            if (turnCost > 0 && costMeter) {
-              costMeter
-                .recordTurn(jobId, opts.sessionRowId, turnCost)
-                .then((newTotal) => {
-                  if (!Number.isFinite(newTotal) || ceilingState.tripped) return;
-                  const ceiling = opts.costCeilingUsd || DEFAULT_PER_JOB_COST_CEILING_USD;
-                  const decision = costMeter.decideAction(newTotal, ceiling);
-                  if (decision.action === 'warn') {
-                    pushEvent(jobId, stepId, agentId, 'status', {
-                      text: `[COST WARN] $${newTotal.toFixed(2)} of $${ceiling.toFixed(2)} ceiling.`,
-                    });
-                  } else if (decision.action === 'terminate' && !proc.killed) {
-                    ceilingState.tripped = 'COST_CEILING';
-                    log('error', `[cost-ceiling] step ${stepId} HARD KILL — $${newTotal.toFixed(2)} >= $${ceiling.toFixed(2)}`);
-                    pushEvent(jobId, stepId, agentId, 'status', {
-                      text: `[COST HARD] $${newTotal.toFixed(2)} hit ceiling; terminating.`,
-                    });
-                    proc.kill('SIGTERM');
-                  }
-                })
-                .catch((err) => log('error', `[cost-meter] recordTurn failed: ${err.message}`));
-            }
-          }
+          processStreamEvent(jobId, stepId, agentId, event);
+          if (event.type === 'result') finalResult = event;
         } catch {
           // Non-JSON line
         }
@@ -697,30 +537,6 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
 
     proc.on('close', (code) => {
       unregisterChild(jobId, proc);
-      cancelTimeCeiling();
-
-      // FU-1/FU-2: if a cost or time ceiling tripped, surface the structured
-      // signal first — the SIGTERM we sent would otherwise look like an exit
-      // code failure to downstream classifiers.
-      if (ceilingState.tripped) {
-        const err = new Error(`${ceilingState.tripped} tripped during step ${stepId}`);
-        err.name = 'CeilingTripped';
-        err.ceilingTripped = ceilingState.tripped;
-        return reject(err);
-      }
-
-      // Story 1.3: if the loop detector forced a kill, surface the structured
-      // signal *first* — before falling through auth/rate-limit/exit-code
-      // checks, all of which could mis-classify the SIGTERM we sent.
-      if (loopState.forceEscalate) {
-        const err = new Error(
-          `loop-detected: ${loopState.forceEscalate.toolName} repeated ${loopState.forceEscalate.repeatCount}x`,
-        );
-        err.name = 'LoopForceEscalate';
-        err.loopForceEscalate = loopState.forceEscalate;
-        return reject(err);
-      }
-
       // Check for auth errors in stderr or stdout — also catch the silent-failure
       // pattern where Claude CLI exits 0 with $0 cost and empty output (seen when
       // the OAuth token is expired but stream-json mode swallowed the error).
@@ -809,20 +625,7 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
 
 // ── Process stream-json events ──
 
-/**
- * Processes one stream-json event from the Claude CLI subprocess.
- *
- * Story 1.3: when a `tool_use` block is observed, feeds it to the per-step
- * LoopDetector and records the decision on `loopState`. The transport layer
- * (runAgent) reads `loopState.forceEscalate` after the proc closes and
- * surfaces it as a `LoopForceEscalate` rejection so executeStep can convert
- * to an EscalationSignal with triggeredBy=LOOP_DETECTED.
- *
- * @param {object} ctx
- * @param {LoopDetector} [ctx.loopDetector]
- * @param {{ forceEscalate?: object, hintsLogged: number }} [ctx.loopState]
- */
-async function processStreamEvent(jobId, stepId, agentId, event, ctx = {}) {
+async function processStreamEvent(jobId, stepId, agentId, event) {
   switch (event.type) {
     case 'stream_event': {
       const delta = event.event?.delta;
@@ -839,44 +642,6 @@ async function processStreamEvent(jobId, stepId, agentId, event, ctx = {}) {
             toolName: block.name,
             toolInput: JSON.stringify(block.input).slice(0, 2000),
           });
-          // Story 1.3: loop detection on each tool call.
-          if (ctx.loopDetector && ctx.loopState) {
-            try {
-              const decision = ctx.loopDetector.observe(block.name, block.input);
-              if (decision.action === 'hint') {
-                ctx.loopState.hintsLogged = (ctx.loopState.hintsLogged || 0) + 1;
-                log(
-                  'warn',
-                  `[loop] HINT step ${stepId}: ${block.name} repeated ${decision.repeatCount}x`,
-                );
-                // claude CLI does not support mid-turn system-message
-                // injection. Surface the hint as a status event so it shows
-                // in the live log; the agent will see it on the next turn
-                // it reads its own transcript or via an operator nudge.
-                await pushEvent(jobId, stepId, agentId, 'status', {
-                  text: `[LOOP HINT] ${LOOP_HINT_MESSAGE} (repeated ${decision.repeatCount}x)`,
-                });
-              } else if (decision.action === 'force-escalate' && !ctx.loopState.forceEscalate) {
-                ctx.loopState.forceEscalate = {
-                  repeatCount: decision.repeatCount,
-                  toolName: decision.repeatedToolCall.toolName,
-                  args: decision.repeatedToolCall.args,
-                };
-                log(
-                  'error',
-                  `[loop] FORCE-ESCALATE step ${stepId}: ${block.name} repeated ${decision.repeatCount}x — terminating subprocess`,
-                );
-                await pushEvent(jobId, stepId, agentId, 'status', {
-                  text: `[LOOP FORCED] ${block.name} repeated ${decision.repeatCount}x — terminating step.`,
-                });
-                // Best-effort terminate so the step closes promptly. The
-                // close handler will see the loopState flag and reject.
-                if (ctx.proc && !ctx.proc.killed) ctx.proc.kill('SIGTERM');
-              }
-            } catch (loopErr) {
-              log('error', `loop-detector error (non-fatal): ${loopErr.message}`);
-            }
-          }
         }
         if (block.type === 'text' && block.text) {
           await pushEvent(jobId, stepId, agentId, 'text_delta', { text: block.text });
@@ -929,32 +694,6 @@ const DAEMON_SOURCE = process.env.DAEMON_SOURCE || 'local';
 
 async function writeHeartbeat() {
   try {
-    // FU-3: poll for abortRequested on every active job. When set, SIGTERM
-    // the child (via the shared child-tracker map). The child's `close`
-    // handler then naturally rejects the runAgent promise, runJobAsync
-    // routes to handleJobFailure, which marks FAILED.
-    for (const [jobId, info] of activeJobs) {
-      try {
-        const row = await ddb.send(
-          new GetCommand({
-            TableName: JOBS_TABLE,
-            Key: { jobId },
-            ProjectionExpression: 'abortRequested',
-          }),
-        );
-        if (row.Item?.abortRequested) {
-          log('warn', `[abort] operator requested abort of ${jobId.slice(0, 8)} — SIGTERM`);
-          const n = signalChildrenForJob(jobId, 'SIGTERM');
-          log('info', `[abort] signaled ${n} child(ren) for ${jobId.slice(0, 8)}`);
-          // Clear the flag so we don't re-signal each tick.
-          await updateJobFields(jobId, { abortRequested: false });
-        }
-      } catch {
-        // best-effort — never let abort polling break heartbeat writes
-      }
-      void info;
-    }
-
     const processes = [];
     for (const [jobId, info] of activeJobs) {
       processes.push({
@@ -970,27 +709,11 @@ async function writeHeartbeat() {
 
     const mem = { totalMem: totalmem(), freeMem: freemem(), loadAvg: loadavg() };
 
-    // Story 2.6: snapshot SessionPool state on the heartbeat row so the
-    // /api/health/concurrency endpoint can read it without an extra round-trip.
-    const concurrency = sessionPool.predict();
-
-    // FU-4: roll up daily cost for the /api/health/cost widget. Best-effort —
-    // a transient scan failure should not block the heartbeat write.
-    let dailyCostUsd = 0;
-    try {
-      if (costMeter) dailyCostUsd = await costMeter.getDailyCost();
-    } catch (err) {
-      log('warn', `[cost-meter] daily aggregation failed: ${err.message}`);
-    }
-
     await ddb.send(
       new PutCommand({
         TableName: JOBS_TABLE,
         Item: {
           jobId: 'DAEMON_HEARTBEAT',
-          concurrency,
-          dailyCostUsd,
-          dailyCeilingUsd: DEFAULT_DAILY_COST_CEILING_USD,
           status: 'ALIVE',
           source: DAEMON_SOURCE,
           updatedAt: new Date().toISOString(),
@@ -1092,14 +815,11 @@ async function executeShellStep(jobId, step, workingDir, variables) {
   const command = substituteTemplate(step.command, variables);
   const timeout = step.timeout || 30000;
   const expectCode = step.expectExitCode ?? 0;
-  // Story A.7: prefix step-scope log lines with `[ABC123]` when this job
-  // belongs to a story.
-  const _shortId = storyShortIdForJob(jobId);
 
   log('info', `\n${'='.repeat(60)}`);
-  log('info', withStoryPrefix(_shortId, `STEP: ${step.id} (Shell command)`));
+  log('info', `STEP: ${step.id} (Shell command)`);
   log('info', `${'='.repeat(60)}`);
-  log('debug', withStoryPrefix(_shortId, `Command: ${command}`));
+  log('debug', `Command: ${command}`);
 
   await pushEvent(jobId, step.id, '__shell__', 'step_start', {
     text: `Shell: ${command.slice(0, 120)}`,
@@ -1331,53 +1051,16 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
     throw new Error(`Step ${step.id} references unknown agent "${step.agentId}"`);
   }
 
-  // Story A.7: prefix step-scope log lines with `[ABC123]` when this job
-  // belongs to a story.
-  const _shortId = storyShortIdForJob(jobId);
-
   log('info', `\n${'='.repeat(60)}`);
-  log('info', withStoryPrefix(_shortId, `STEP: ${step.id} (Agent ${step.agentId} — ${agent.name})`));
+  log('info', `STEP: ${step.id} (Agent ${step.agentId} — ${agent.name})`);
   log('info', `${'='.repeat(60)}`);
 
-  // 0. Pre-flight checks (Story 1.4). Fail fast — no Claude spawn if a
-  // precondition like `folder-exists` is unmet.
-  if (step.preconditions && step.preconditions.length > 0) {
-    const substituted = step.preconditions.map((c) => substitutePreconditionPaths(c, variables, workingDir));
-    const preflightResult = await runPreflight(substituted);
-    if (!preflightResult.ok) {
-      log(
-        'error',
-        withStoryPrefix(_shortId, `pre-flight FAILED for step ${step.id}: ${preflightResult.message}`),
-      );
-      throw new EscalationSignal({
-        jobId,
-        stepId: step.id,
-        triggeredBy: 'PREFLIGHT_FAILED',
-        escalationPayload: {
-          whatFailed: preflightResult.message,
-          whatTried: [],
-          whyStuck:
-            'Pre-flight check failed before Claude was invoked. Fix the precondition and retry.',
-          recommendedAction: 'retry-with-hint',
-        },
-        salvageableExtractors: [],
-      });
-    }
-  }
-
   // 1. Template substitution
-  let prompt = substituteTemplate(step.prompt, variables);
-  log('debug', withStoryPrefix(_shortId, `Prompt after substitution: ${prompt.length} chars`));
+  const prompt = substituteTemplate(step.prompt, variables);
+  log('debug', `Prompt after substitution: ${prompt.length} chars`);
 
   // 2. Resolve session resume
   const resumeSession = step.resumeFromStep ? sessions[step.resumeFromStep] : undefined;
-
-  // Story 1.2: append the universal exit-signal protocol on first turn
-  // (no `--resume`). Resumed sessions already saw the suffix on their
-  // initial turn — re-appending would burn tokens for no gain.
-  if (!resumeSession) {
-    prompt = prompt + '\n\n' + EXIT_SIGNALS_PROMPT_SUFFIX;
-  }
   if (step.resumeFromStep) {
     if (resumeSession) {
       log('info', `Resuming session from step ${step.resumeFromStep}: ${resumeSession}`);
@@ -1386,64 +1069,14 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
     }
   }
 
-  // 3. Run agent. Catch LoopForceEscalate (Story 1.3) and CeilingTripped
-  // (FU-1/FU-2) and reshape into the unified EscalationSignal so
-  // `runJobAsync`'s catch routes to NEEDS_ATTENTION.
-  let result;
-  try {
-    const activeEntry = activeJobs.get(jobId);
-    result = await runAgent(jobId, step.id, step.agentId, prompt, {
-      workingDir: workingDir || process.env.HOME,
-      allowedTools: agent.allowedTools,
-      disallowedTools: agent.disallowedTools,
-      model: agent.model,
-      resume: resumeSession,
-      // FU-2: wall-clock cap. Pipeline step override > agent-kind default.
-      timeCeilingMs: resolveTimeCeilingMs(step, agent),
-      // FU-1: per-job cost cap, stashed on activeJobs entry at job start.
-      costCeilingUsd: activeEntry?.costCeilingUsd,
-      sessionRowId: undefined,
-    });
-  } catch (runErr) {
-    if (runErr && runErr.name === 'CeilingTripped') {
-      const triggeredBy = runErr.ceilingTripped; // 'COST_CEILING' | 'TIME_CEILING'
-      throw new EscalationSignal({
-        jobId,
-        stepId: step.id,
-        triggeredBy,
-        escalationPayload: {
-          whatFailed:
-            triggeredBy === 'COST_CEILING'
-              ? 'Per-job cost ceiling reached'
-              : 'Per-step time ceiling reached',
-          whatTried: [],
-          whyStuck:
-            'The daemon terminated the step at its hard ceiling. Raise the ceiling and retry, or salvage extracted output if any.',
-          recommendedAction: 'retry-with-hint',
-        },
-        salvageableExtractors: [],
-      });
-    }
-    if (runErr && runErr.name === 'LoopForceEscalate') {
-      const lf = runErr.loopForceEscalate;
-      throw new EscalationSignal({
-        jobId,
-        stepId: step.id,
-        triggeredBy: 'LOOP_DETECTED',
-        escalationPayload: {
-          whatFailed: `Tool "${lf.toolName}" repeated ${lf.repeatCount} times without progress`,
-          whatTried: [
-            `Same call to "${lf.toolName}" with args: ${JSON.stringify(lf.args).slice(0, 200)}`,
-          ],
-          whyStuck:
-            `Loop detector forced an exit after ${lf.repeatCount} repeated invocations of the same tool call. The agent may need a different approach or operator guidance.`,
-          recommendedAction: 'ask-human',
-        },
-        salvageableExtractors: [],
-      });
-    }
-    throw runErr;
-  }
+  // 3. Run agent
+  const result = await runAgent(jobId, step.id, step.agentId, prompt, {
+    workingDir: workingDir || process.env.HOME,
+    allowedTools: agent.allowedTools,
+    disallowedTools: agent.disallowedTools,
+    model: agent.model,
+    resume: resumeSession,
+  });
 
   const resultText = result?.result || '';
   const sessionId = result?.session_id || '';
@@ -1469,12 +1102,9 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
     validationResults: [],
   };
 
-  // 4. Run extractors — merged with universal escalation extractors (Story 1.2).
-  // The universal set is registered on every step so any agent can signal
-  // ---DONE--- / ---ESCALATE--- / ---NEED-HUMAN--- without per-pipeline boilerplate.
-  const mergedExtractors = mergeUniversalExtractors(step.extractors);
-  if (Object.keys(mergedExtractors).length > 0) {
-    const extracted = runExtractors(resultText, mergedExtractors);
+  // 4. Run extractors
+  if (step.extractors && Object.keys(step.extractors).length > 0) {
+    const extracted = runExtractors(resultText, step.extractors);
     stepResult.extractedVariables = extracted;
 
     for (const [varName, varValue] of Object.entries(extracted)) {
@@ -1482,27 +1112,7 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
       await pushEvent(jobId, step.id, step.agentId, 'extraction', {
         variableName: varName,
         variableValue: varValue.slice(0, 500),
-        extractorType: mergedExtractors[varName].type,
-      });
-    }
-
-    // Story 1.2: if the agent signaled escalation or human-needed, throw a
-    // typed signal so `runJobAsync` can route to NEEDS_ATTENTION instead of
-    // the retry/FAILED ladder. The dispatch logic lives in `detectEscalation`
-    // — keeping it pure makes it unit-testable independent of the daemon.
-    const escalation = detectEscalation(extracted, resultText);
-    if (escalation) {
-      // Persist the partial result + extracted variables before signaling so
-      // a Salvage / Talk-to-agent path can still see them.
-      stepResults.push(stepResult);
-      await updateJobFields(jobId, { variables, sessions, stepResults });
-
-      throw new EscalationSignal({
-        jobId,
-        stepId: step.id,
-        triggeredBy: escalation.triggeredBy,
-        escalationPayload: escalation.escalationPayload,
-        salvageableExtractors: escalation.salvageableExtractors,
+        extractorType: step.extractors[varName].type,
       });
     }
 
@@ -1567,145 +1177,6 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
         }
       }
     }
-
-    // Story B.6: persist DEV / retry WORK_SUMMARY back to the epic.stories
-    // row so sibling stories in the same wave can see it via the next
-    // story's context-pack (`prevWorkSummaries`). Last-write-wins per
-    // story; persisting after each retry is fine — the latest summary is
-    // always the most accurate description of what's currently committed.
-    // Best-effort: a failure here does not derail the pipeline.
-    if (
-      extracted.WORK_SUMMARY &&
-      (step.id === 'dev' || step.id === 'retry') &&
-      variables.EPIC_ID &&
-      variables.EPIC_ID !== '(not provided)' &&
-      variables.STORY_ID
-    ) {
-      try {
-        const result = await epicRepo.persistStoryWorkSummary(
-          variables.EPIC_ID,
-          variables.STORY_ID,
-          extracted.WORK_SUMMARY,
-        );
-        if (!result.updated) {
-          log(
-            'warn',
-            `workSummary persist skipped: ${result.reason}`,
-            { epicId: variables.EPIC_ID, storyId: variables.STORY_ID },
-          );
-        }
-      } catch (err) {
-        log('error', `workSummary persist failed: ${err.message}`, {
-          epicId: variables.EPIC_ID,
-          storyId: variables.STORY_ID,
-        });
-      }
-    }
-
-    // Story C.2: REVIEWER emitted a structured ---REVIEW_CRITERIA--- block.
-    // Parse it deterministically; synthesize VERDICT + FEEDBACK so the
-    // existing review-step validation + retry loop work unchanged.
-    //   • all pass         → VERDICT='PASS'
-    //   • any fail         → VERDICT='FAIL', FEEDBACK = only failed-AC reasons
-    //   • any needs-human  → throw EscalationSignal (REVIEWER_NEEDS_HUMAN);
-    //                        runJobAsync routes to NEEDS_ATTENTION + writes
-    //                        a `reviewer-needs-human` attention item.
-    //   • malformed block  → VERDICT='FAIL', FEEDBACK asks reviewer to
-    //                        re-emit + writes a `prompt-format` attention
-    //                        item so operators see prompt drift quickly.
-    if (extracted.REVIEW_CRITERIA && step.id === 'review') {
-      const entries = parseReviewCriteria(extracted.REVIEW_CRITERIA);
-      const aggregate = aggregateReviewVerdict(entries);
-      const _shortIdRC = storyShortIdForJob(jobId);
-
-      log(
-        'info',
-        withStoryPrefix(
-          _shortIdRC,
-          `REVIEW_CRITERIA → verdict=${aggregate.verdict} (pass=${aggregate.counts.pass}, fail=${aggregate.counts.fail}, needsHuman=${aggregate.counts.needsHuman}, malformed=${aggregate.counts.malformed})`,
-        ),
-      );
-
-      if (aggregate.verdict === 'pass') {
-        variables.VERDICT = 'PASS';
-        variables.FEEDBACK = '(all acceptance criteria passed)';
-      } else if (aggregate.verdict === 'fail') {
-        variables.VERDICT = 'FAIL';
-        variables.FEEDBACK = formatFailedReasonsForRetry(aggregate.reasons);
-      } else if (aggregate.verdict === 'malformed') {
-        variables.VERDICT = 'FAIL';
-        variables.FEEDBACK =
-          'Reviewer must re-emit a parseable `---REVIEW_CRITERIA---` block. ' +
-          'Prior parse errors:\n' +
-          aggregate.parseErrors
-            .map((e) => `- ${e.acId || '(no acId)'}: ${e.error}`)
-            .join('\n');
-        // Surface the prompt drift to the operator. Best-effort.
-        try {
-          const planId = await resolvePlanIdFromEpicId(ddb, variables.EPIC_ID);
-          if (planId) {
-            await writeAttentionItem(
-              ddb,
-              {
-                planId,
-                severity: 'medium',
-                category: 'prompt-format',
-                title: `Reviewer emitted malformed REVIEW_CRITERIA block`,
-                body:
-                  `On step \`${step.id}\` for story ${variables.STORY_ID}. The retry loop will ask the reviewer to re-emit. Parse errors:\n` +
-                  aggregate.parseErrors
-                    .map((e) => `- ${e.acId || '(no acId)'}: ${e.error}`)
-                    .join('\n'),
-                context: {
-                  jobId,
-                  epicId: variables.EPIC_ID,
-                  storyId: variables.STORY_ID,
-                  stepId: step.id,
-                },
-                suggestedActions: [
-                  { label: 'Open logs', kind: 'open-logs' },
-                  { label: 'Open story', kind: 'open-story' },
-                ],
-              },
-              log,
-            );
-          }
-        } catch (attnErr) {
-          log('error', `prompt-format attention write failed: ${attnErr.message}`);
-        }
-      } else if (aggregate.verdict === 'needs-human') {
-        // Story C.5: route to operator handoff. Throw EscalationSignal so
-        // runJobAsync's catch block transitions the job to NEEDS_ATTENTION
-        // and writes the reviewer-needs-human attention item via
-        // handleEscalation. We package the per-AC questions into the
-        // standard EscalationPayload shape so the inbox + Talk flow can
-        // render them with the same UI as agent-level escalations.
-        const humanQuestionsBody = formatHumanQuestionsForAttention(aggregate.reasons);
-        throw new EscalationSignal({
-          jobId,
-          stepId: step.id,
-          triggeredBy: 'REVIEWER_NEEDS_HUMAN',
-          escalationPayload: {
-            whatFailed:
-              aggregate.reasons.humans.length === 1
-                ? `Reviewer asked operator about ${aggregate.reasons.humans[0].acId}`
-                : `Reviewer asked operator about ${aggregate.reasons.humans.length} acceptance criteria`,
-            whatTried: aggregate.reasons.failed.map(
-              (f) => `${f.acId}: ${f.reason}`,
-            ),
-            whyStuck: 'One or more acceptance criteria require human judgement.',
-            recommendedAction: 'talk',
-            humanQuestion:
-              aggregate.reasons.humans.length === 1
-                ? aggregate.reasons.humans[0].question
-                : humanQuestionsBody,
-          },
-          salvageableExtractors: ['REVIEW_CRITERIA', 'WORK_SUMMARY'].filter(
-            (k) => k in variables,
-          ),
-        });
-      }
-    }
   }
 
   // 5. Run validations
@@ -1731,7 +1202,7 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   stepResults.push(stepResult);
 
   await updateJobFields(jobId, { variables, sessions, stepResults });
-  log('info', withStoryPrefix(_shortId, `Step ${step.id} done. Variables: [${Object.keys(variables).join(', ')}]`));
+  log('info', `Step ${step.id} done. Variables: [${Object.keys(variables).join(', ')}]`);
 
   return { allPassed, stepResult };
 }
@@ -1754,17 +1225,6 @@ async function executePipeline(job) {
   const sessions = {};
   const stepResults = [];
 
-  // Story A.7: bind a 6-char story prefix for the duration of the job so
-  // every event + log emitted from this pipeline carries `[ABC123]`. The
-  // STORY_ID always lands in initialVariables for legacy per-story jobs;
-  // for non-story jobs (orchestrator/party — which run via different
-  // dispatchers anyway) the prefix is empty and the helpers no-op.
-  const rawStoryId = String(pipeline.initialVariables?.STORY_ID || '');
-  const storyShortId = rawStoryId ? rawStoryId.slice(0, 6).toUpperCase() : '';
-  if (storyShortId) {
-    jobStoryShortIds.set(jobId, storyShortId);
-  }
-
   // Compilation tracking metadata
   let compilationStatus = undefined; // 'success' | 'failed' | 'skipped' | undefined
   let compilationStartedAt = undefined;
@@ -1776,64 +1236,22 @@ async function executePipeline(job) {
   // Check if this pipeline has compile steps
   const hasCompileSteps = steps.some((s) => isCompileStep(s.id));
 
-  log('info', withStoryPrefix(storyShortId, `Pipeline starting: ${steps.length} steps, ${Object.keys(agents).length} agents, maxIterations: ${maxIterations}`));
+  log('info', `Pipeline starting: ${steps.length} steps, ${Object.keys(agents).length} agents, maxIterations: ${maxIterations}`);
   if (loopTargetIds.size > 0) {
-    log('info', withStoryPrefix(storyShortId, `Loop-only steps (skipped in linear flow): [${[...loopTargetIds].join(', ')}]`));
+    log('info', `Loop-only steps (skipped in linear flow): [${[...loopTargetIds].join(', ')}]`);
   }
   if (hasCompileSteps) {
-    log('info', withStoryPrefix(storyShortId, `COMPILE phase detected: steps will be non-blocking`));
+    log('info', `COMPILE phase detected: steps will be non-blocking`);
   }
 
   await updateJobFields(jobId, { status: 'RUNNING', currentStepIndex: 0 });
-
-  // Story B.2: assemble the canonical Story Context Pack and stash it as
-  // `variables.PROJECT_CONTEXT` so DEV / REVIEWER / COMPILER prompts all
-  // see byte-identical content via `{{PROJECT_CONTEXT}}` substitution.
-  // Resolver never throws — on any failure it returns a stub body so the
-  // pipeline still runs.
-  try {
-    const resolved = await resolveAndSerializeContextPack({
-      ddb,
-      job,
-      variables,
-      logger: {
-        info: (msg) => log('info', withStoryPrefix(storyShortId, msg)),
-        warn: (msg) => log('warn', withStoryPrefix(storyShortId, msg)),
-        error: (msg) => log('error', withStoryPrefix(storyShortId, msg)),
-      },
-    });
-    variables.PROJECT_CONTEXT = resolved.body;
-    if (resolved.failure) {
-      log(
-        'warn',
-        withStoryPrefix(storyShortId, `context-pack stub used (${resolved.failure})`),
-      );
-    } else {
-      log(
-        'info',
-        withStoryPrefix(
-          storyShortId,
-          `context-pack assembled (${resolved.body.length} bytes${
-            resolved.pack?.meta?.truncated?.length ? `, truncated: ${resolved.pack.meta.truncated.length}` : ''
-          })`,
-        ),
-      );
-    }
-  } catch (err) {
-    // resolveAndSerializeContextPack catches its own errors, but defensive.
-    log(
-      'warn',
-      withStoryPrefix(storyShortId, `context-pack assembly threw: ${err.message}`),
-    );
-    variables.PROJECT_CONTEXT = '<!-- context-pack unavailable -->';
-  }
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
 
     // Skip loop-only steps in normal linear flow — they only run during loop iterations
     if (loopTargetIds.has(step.id)) {
-      log('info', withStoryPrefix(storyShortId, `Skipping "${step.id}" (loop-only step, runs only during retry)`));
+      log('info', `Skipping "${step.id}" (loop-only step, runs only during retry)`);
       continue;
     }
 
@@ -1877,7 +1295,7 @@ async function executePipeline(job) {
             workingDir,
           };
 
-          log('info', withStoryPrefix(storyShortId, `Compilation phase SUCCEEDED (${durationMs}ms, ${articleCounts.created} created, ${articleCounts.updated} updated, ${articleCounts.superseded} superseded)`));
+          log('info', `Compilation phase SUCCEEDED (${durationMs}ms, ${articleCounts.created} created, ${articleCounts.updated} updated, ${articleCounts.superseded} superseded)`);
 
           await emitCompilationCompleted(pushEvent, jobId, compilationCtx, {
             status: 'success',
@@ -1908,7 +1326,7 @@ async function executePipeline(job) {
           workingDir,
         };
 
-        log('warn', withStoryPrefix(storyShortId, `Compilation step ${step.id} failed (NON-BLOCKING): ${compileErr.message}`));
+        log('warn', `Compilation step ${step.id} failed (NON-BLOCKING): ${compileErr.message}`);
 
         // Emit typed compilation-failed event via compile-events module
         await emitCompilationFailed(pushEvent, jobId, compilationCtx, compileErr, compilationStartedAt);
@@ -1949,7 +1367,7 @@ async function executePipeline(job) {
         variables.ITERATION = String(iteration + 1); // 1st attempt was iteration 1, this is 2+
         variables.MAX_ITERATIONS = String(maxIterations);
 
-        log('info', withStoryPrefix(storyShortId, `\n*** LOOP iteration ${iteration}/${maxIterations - 1}: running "${retryStep.id}" then re-checking "${step.id}" (attempt ${iteration + 1}/${maxIterations}) ***`));
+        log('info', `\n*** LOOP iteration ${iteration}/${maxIterations - 1}: running "${retryStep.id}" then re-checking "${step.id}" (attempt ${iteration + 1}/${maxIterations}) ***`);
 
         await pushEvent(jobId, step.id, step.agentId || '__shell__', 'status', {
           text: `Loop iteration ${iteration}: re-running ${retryStep.id} then ${step.id} (attempt ${iteration + 1}/${maxIterations})`,
@@ -1993,7 +1411,7 @@ async function executePipeline(job) {
     compilationArticleCounts,
   });
 
-  log('info', withStoryPrefix(storyShortId, `\nPipeline COMPLETED. Total cost: $${totalCost.toFixed(4)}${compilationStatus ? ` | Compilation: ${compilationStatus}` : ''}`));
+  log('info', `\nPipeline COMPLETED. Total cost: $${totalCost.toFixed(4)}${compilationStatus ? ` | Compilation: ${compilationStatus}` : ''}`);
   log('info', `Final variables: ${JSON.stringify(Object.fromEntries(
     Object.entries(variables).map(([k, v]) => [k, v.slice(0, 60)])
   ))}`);
@@ -2341,58 +1759,97 @@ async function executePartyDocsUnlinkJob(job) {
   }
 }
 
+// Pipeline v2 / Story 1.4.3 — App-bootstrap saga executor.
+//
+// Reads + writes the futurator-apps row directly via the daemon's `ddb` client
+// (the daemon doesn't import the TS repository module). Re-uses the party
+// context for the BMAD step and the shared attention-writer for failure
+// surfacing.
+async function getAppRow(appId) {
+  const result = await ddb.send(
+    new GetCommand({ TableName: APPS_TABLE, Key: { appId } }),
+  );
+  return result.Item || null;
+}
+
+async function patchAppRow(appId, patch) {
+  const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
+  if (entries.length === 0) return;
+  entries.push(['updatedAt', new Date().toISOString()]);
+  const names = {};
+  const values = {};
+  const expressions = [];
+  for (const [k, v] of entries) {
+    names[`#${k}`] = k;
+    values[`:${k}`] = v;
+    expressions.push(`#${k} = :${k}`);
+  }
+  await ddb.send(
+    new UpdateCommand({
+      TableName: APPS_TABLE,
+      Key: { appId },
+      UpdateExpression: `SET ${expressions.join(', ')}`,
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+      ConditionExpression: 'attribute_exists(appId)',
+    }),
+  );
+}
+
+async function executeAppBootstrapJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  const validation = validateAppBootstrapJob(job);
+  if (!validation.ok) {
+    throw new Error(`app-bootstrap job rejected: ${validation.reason}`);
+  }
+
+  log('info', `[${short}] Routing to app-bootstrap pipeline`, {
+    appId: job.appBootstrapPayload?.appId,
+    boilerplateType: job.appBootstrapPayload?.boilerplateType,
+    bmadEnabled: job.appBootstrapPayload?.bmadEnabled === true,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'app-bootstrap',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  try {
+    await runAppBootstrap(job, {
+      pushEvent,
+      getApp: getAppRow,
+      updateApp: patchAppRow,
+      writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
+      partyCtx: buildPartyCtx(),
+      runPartyBootstrap,
+    });
+    await updateJobFields(jobId, { status: 'COMPLETED' });
+    log('info', `[${short}] app-bootstrap completed`);
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] app-bootstrap failed: ${err?.message || err}`);
+    throw err;
+  }
+}
+
 // ── Poll loop ──
 
 async function runJobAsync(job) {
-  // Story 2.2: every Claude-spawning job acquires a SessionPool slot. The
-  // class derives from job.concurrencyClass / jobType. Failure to acquire
-  // is converted to NEEDS_ATTENTION (interactive timeout = CapacitySaturated;
-  // critical timeout = CapacityTimeout) without spawning anything.
-  const slotClass = deriveConcurrencyClass(job);
-  let token;
-  try {
-    token = await sessionPool.acquire(slotClass, {
-      jobId: job.jobId,
-      planId: job.planId,
-      epicId: job.epicId,
-    });
-  } catch (acquireErr) {
-    if (acquireErr instanceof CapacitySaturated || acquireErr instanceof CapacityTimeout) {
-      const triggeredBy =
-        acquireErr instanceof CapacityTimeout ? 'CAPACITY_TIMEOUT' : 'QUOTA_EXHAUSTED';
-      log('warn', `[${job.jobId.slice(0, 8)}] SessionPool admission failed (${triggeredBy}): ${acquireErr.message}`);
-      try {
-        await updateJobFields(job.jobId, {
-          status: 'NEEDS_ATTENTION',
-          triggeredBy,
-          escalationPayload: {
-            whatFailed: acquireErr.message,
-            whatTried: [],
-            whyStuck: `Pool was saturated for ${slotClass} class. Wait for capacity or promote priority.`,
-            recommendedAction: 'retry-with-hint',
-          },
-        });
-      } catch {
-        // ignore — telemetry-only
-      }
-      return;
-    }
-    throw acquireErr;
-  }
-
   activeJobs.set(job.jobId, {
     startedAt: new Date().toISOString(),
     workingDir: job.workingDir || '',
     stepId: null, agentId: null, pid: null, model: null,
-    sessionPoolToken: token,
-    // FU-1: per-job cost ceiling read once at start; runAgent picks it up
-    // from the in-memory entry to avoid a DDB round-trip per turn.
-    costCeilingUsd: job.costCeilingUsd ?? DEFAULT_PER_JOB_COST_CEILING_USD,
   });
   jobEventSeqs.set(job.jobId, 0);
 
   const handler = selectHandler(job);
-  log('info', `[${job.jobId.slice(0, 8)}] Job started (${activeJobs.size}/${MAX_CONCURRENT} concurrent, slot=${slotClass}) handler=${handler}`);
+  log('info', `[${job.jobId.slice(0, 8)}] Job started (${activeJobs.size}/${MAX_CONCURRENT} concurrent) handler=${handler}`);
   if (handler !== JOB_HANDLER_EPIC_DEV) {
     log('info', `[${job.jobId.slice(0, 8)}]   Steps: ${job.pipeline?.steps?.length || 0}`);
     log('info', `[${job.jobId.slice(0, 8)}]   Agents: ${Object.keys(job.pipeline?.agents || {}).join(', ')}`);
@@ -2411,146 +1868,21 @@ async function runJobAsync(job) {
       await executePartyDocsSyncJob(job);
     } else if (handler === JOB_HANDLER_PARTY_DOCS_UNLINK) {
       await executePartyDocsUnlinkJob(job);
-    } else if (handler === JOB_HANDLER_AGENT_TURN) {
-      // Story 3.3 — generic conversational turn for Talk-to-agent.
-      await runAgentTurn(job, { ddb, log, pushEvent, claudeBin: CLAUDE_BIN });
-      await updateJobFields(job.jobId, { status: 'COMPLETED' });
+    } else if (handler === JOB_HANDLER_APP_BOOTSTRAP) {
+      await executeAppBootstrapJob(job);
     } else {
       await executePipeline(job);
     }
   } catch (err) {
-    // Story 1.2: an agent-signaled escalation routes to NEEDS_ATTENTION
-    // instead of the retry → FAILED ladder. The agent has explicitly asked
-    // for human input; retrying would just burn quota.
-    if (err && err.name === 'EscalationSignal') {
-      log(
-        'info',
-        `[${job.jobId.slice(0, 8)}] Agent signaled ${err.triggeredBy} on step ${err.stepId}; routing to NEEDS_ATTENTION`,
-      );
-      try {
-        await handleEscalation(job, err);
-      } catch (escErr) {
-        log('error', `[${job.jobId.slice(0, 8)}] Escalation handler failed: ${escErr.message}`);
-      }
-    } else {
-      log('error', `[${job.jobId.slice(0, 8)}] Job failed: ${err.message}`);
-      try {
-        await handleJobFailure(job, err);
-      } catch (updateErr) {
-        log('error', `[${job.jobId.slice(0, 8)}] Failure handler failed: ${updateErr.message}`);
-      }
+    log('error', `[${job.jobId.slice(0, 8)}] Job failed: ${err.message}`);
+    try {
+      await handleJobFailure(job, err);
+    } catch (updateErr) {
+      log('error', `[${job.jobId.slice(0, 8)}] Failure handler failed: ${updateErr.message}`);
     }
   } finally {
-    // Story 2.2: always release the SessionPool slot, even on crash.
-    try {
-      sessionPool.release(token);
-    } catch {
-      // never let a release-failure hide the original error
-    }
     activeJobs.delete(job.jobId);
     jobEventSeqs.delete(job.jobId);
-    // Story A.7: clear the per-job story prefix so a rescheduled job with
-    // the same jobId (defensive — usually rescheduled jobs get fresh IDs)
-    // doesn't inherit a stale shortId.
-    jobStoryShortIds.delete(job.jobId);
-  }
-}
-
-/**
- * Pipeline v1 — Story 1.2. Agent-signaled escalation handler. Marks the
- * job NEEDS_ATTENTION (not FAILED, not retried), persists the structured
- * escalation payload, and writes a single attention item populated from
- * the agent's own words. Idempotent — never throws.
- */
-async function handleEscalation(job, signal) {
-  const { stepId, triggeredBy, escalationPayload, salvageableExtractors } = signal;
-  const itemId = randomUUID();
-
-  // Persist NEEDS_ATTENTION + payload + the salvageable-extractor snapshot.
-  // This is the source of truth the failed-step panel (Story 1.9) and the
-  // Salvage API (Story 1.5) both read from.
-  try {
-    await updateJobFields(job.jobId, {
-      status: 'NEEDS_ATTENTION',
-      triggeredBy,
-      escalationPayload,
-      salvageableExtractors,
-      attentionItemIds: [...(job.attentionItemIds || []), itemId],
-      errorMessage: `${triggeredBy}: ${(escalationPayload && escalationPayload.whatFailed) || 'agent escalated'}`.slice(0, 500),
-    });
-  } catch (writeErr) {
-    log('error', `[${job.jobId.slice(0, 8)}] failed to mark NEEDS_ATTENTION: ${writeErr.message}`);
-  }
-
-  // Best-effort attention item. The cron-side reducer (Phase B.4) also
-  // writes items on wave failure; the inbox dedupes by (planId, jobId,
-  // category) within a 60s window so duplicates don't surface.
-  try {
-    const planId = await resolvePlanIdFromEpicId(ddb, job.epicId);
-    if (planId) {
-      const isNeedHuman = triggeredBy === 'AGENT_NEEDS_HUMAN';
-      const isLoop = triggeredBy === 'LOOP_DETECTED';
-      const isPreflight = triggeredBy === 'PREFLIGHT_FAILED';
-      // Story C.5: per-AC reviewer escalation gets its own category +
-      // title so the operator inbox surfaces the reviewer's question
-      // distinctly from generic agent escalations.
-      const isReviewerHuman = triggeredBy === 'REVIEWER_NEEDS_HUMAN';
-      const title = isLoop
-        ? `Loop detected on step ${stepId}`
-        : isPreflight
-          ? `Pre-flight check failed for step ${stepId}`
-          : isReviewerHuman
-            ? `Reviewer needs operator input on ${stepId}`
-            : isNeedHuman
-              ? `Agent needs human input on step ${stepId}`
-              : `Agent escalated on step ${stepId}`;
-      const body = [
-        escalationPayload?.whatFailed && `**What failed:** ${escalationPayload.whatFailed}`,
-        escalationPayload?.whatTried?.length &&
-          `**What I tried:**\n${escalationPayload.whatTried.map((b) => `- ${b}`).join('\n')}`,
-        escalationPayload?.whyStuck && `**Why stuck:** ${escalationPayload.whyStuck}`,
-        escalationPayload?.recommendedAction &&
-          `**Recommended action:** ${escalationPayload.recommendedAction}`,
-        escalationPayload?.humanQuestion && `**Question:** ${escalationPayload.humanQuestion}`,
-      ]
-        .filter(Boolean)
-        .join('\n\n');
-      const category = isLoop
-        ? 'loop-detected'
-        : isPreflight
-          ? 'preflight-failed'
-          : isReviewerHuman
-            ? 'reviewer-needs-human'
-            : isNeedHuman
-              ? 'agent-needs-human'
-              : 'agent-escalated';
-      await writeAttentionItem(
-        ddb,
-        {
-          planId,
-          severity: isNeedHuman || isReviewerHuman ? 'medium' : 'high',
-          category,
-          title,
-          body: body || `Agent invoked ${triggeredBy} but emitted no structured payload.`,
-          context: {
-            jobId: job.jobId,
-            epicId: job.epicId,
-            storyId: job.epicDevPayload ? undefined : undefined, // populated by per-pipeline jobs via variables; reducer fills it on rewrite
-            stepId,
-          },
-          suggestedActions: [
-            ...(salvageableExtractors?.length
-              ? [{ label: 'Salvage extracted output', kind: 'retry-step' }]
-              : []),
-            { label: 'Open story', kind: 'open-story' },
-            { label: 'Open logs', kind: 'open-logs' },
-          ],
-        },
-        log,
-      );
-    }
-  } catch (attnErr) {
-    log('error', `[${job.jobId.slice(0, 8)}] escalation attention-item write failed: ${attnErr.message}`);
   }
 }
 
@@ -2668,6 +2000,7 @@ async function poll() {
 
   // Loopback HTTP receiver for wave-complete / heartbeat from orchestrator subagents.
   try {
+    const epicRepo = createEpicRepo({ ddb, tableName: EPICS_TABLE });
     daemonReceiver = createDaemonReceiver({
       ddb,
       jobsTable: JOBS_TABLE,
@@ -2918,4 +2251,32 @@ process.on('SIGUSR1', async () => {
   }
 });
 
-poll();
+// Story 1.1.3 — configure git identity (PAT from SSM → global git config)
+// before the main poll loop. Idempotent. Failure here is fatal because every
+// git op the daemon will subsequently run depends on it.
+async function configureGitIdentity() {
+  if (process.env.SKIP_GIT_IDENTITY === '1') {
+    log('info', 'configure-git-identity skipped (SKIP_GIT_IDENTITY=1)');
+    return;
+  }
+  const scriptPath = new URL('./scripts/configure-git-identity.sh', import.meta.url).pathname;
+  await new Promise((resolve, reject) => {
+    const child = spawn('bash', [scriptPath], { stdio: 'inherit' });
+    child.on('exit', code => {
+      if (code === 0) resolve();
+      else reject(new Error(`configure-git-identity.sh exited ${code}`));
+    });
+    child.on('error', reject);
+  });
+}
+
+(async () => {
+  try {
+    await configureGitIdentity();
+  } catch (err) {
+    log('error', `configure-git-identity failed: ${err.message}`);
+    log('error', 'Daemon refusing to start — fix PAT or set SKIP_GIT_IDENTITY=1 to bypass.');
+    process.exit(3);
+  }
+  poll();
+})();
