@@ -78,14 +78,20 @@ export function PlanDashboard({ planId }: { planId: string }) {
     : 'concept';
 
   // Active view can be any pipeline stage OR "party" (the right-side chip).
+  //
+  // Bug fix (2026-04-28): previously this fell through to localStorage when no
+  // ?stage URL param was present. Result: a freshly-created plan in 'concept'
+  // status would render as 'developing' (or wherever the operator was last
+  // viewing on a different plan). The pipeline strip then displayed
+  // "Developing — in progress" while the actual plan status was still
+  // 'concept' — operator confusion, only visible by clicking Regenerate
+  // (which the API rejects unless status === 'concept', proving the
+  // mismatch). Now: defaultStage (= plan.status) wins when no URL param;
+  // localStorage is only used to preserve the operator's last view DURING
+  // an active plan dashboard session, not across plans.
   const activeView: ViewId = useMemo(() => {
     if (urlStage === 'party') return 'party';
     if (isStage(urlStage)) return urlStage;
-    if (typeof window !== 'undefined') {
-      const stored = window.localStorage.getItem(STAGE_KEY);
-      if (stored === 'party') return 'party';
-      if (isStage(stored)) return stored;
-    }
     return defaultStage;
   }, [urlStage, defaultStage]);
 

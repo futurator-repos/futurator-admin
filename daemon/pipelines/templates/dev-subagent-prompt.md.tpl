@@ -8,6 +8,22 @@ Touch points (edit only these):
 Sibling stories in this wave are editing the following paths — do NOT touch:
 {{siblingGlobs}}
 
+PROJECT BASELINE — a working scaffold is ALREADY in place:
+- The working directory is the cloned & customized boilerplate (Pipeline v2
+  Phase 1 — Next.js 16 / SST / Vite / etc., as the operator picked).
+- `package.json`, `tsconfig.json`, `src/`, framework config files all exist
+  AND are already wired. The project compiles and builds today.
+- BMAD may already be installed at `_bmad/` (if the operator enabled it).
+- A `plan.md` lives at the repo root — it's the operator-facing plan
+  document, not a stray file.
+- Do NOT run `npm create vite`, `npx create-next-app`, `tsc --init`, or any
+  other scaffolding command. They will conflict with the existing setup.
+- Do NOT scaffold to `/tmp` and copy files back — this race-conditions with
+  sibling stories and overwrites their work.
+- BUILD on top of the existing structure. Add files inside `src/` (or
+  wherever the touch-point globs point). Edit existing files where the AC
+  requires it. Don't re-create what's already there.
+
 Context (pre-digested):
 {{contextDigest}}
 

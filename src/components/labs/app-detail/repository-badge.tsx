@@ -14,11 +14,17 @@
  * call would be needed — but no such route exists in the current connector.
  * Deferred to Phase 2: show `pushed_at` formatted as "last push" instead.
  *
- * Hides entirely when: app.boilerplateType is unset OR app.bootstrappedAt is
- * undefined (legacy / in-flight apps).
+ * Hides entirely when: app.boilerplateType is unset (pre-1.4 legacy app, no
+ * GitHub repo). When boilerplateType is set but bootstrappedAt is missing,
+ * the badge shows with a "Scaffold pending…" pill — the GitHub repo URL is
+ * valid the moment createRepoFromTemplate returns; only the daemon's
+ * post-create scaffold (placeholder substitution + BMAD install + commit
+ * customisation) is in-flight. Hiding the URL until daemon completes was the
+ * original Story 1.5.1 design but proved confusing — operators can't see
+ * the link they just created.
  */
 
-import { GitBranch, TriangleAlert } from 'lucide-react';
+import { GitBranch, TriangleAlert, Loader2 } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useGithubRepoSummary } from '@/hooks/use-github-repo-summary';
 import type { App } from '@/types/app';
@@ -41,13 +47,22 @@ interface RepositoryBadgeProps {
 }
 
 export function RepositoryBadge({ app }: RepositoryBadgeProps) {
-  // Guard: only show for Story 1.4+ bootstrapped apps.
-  if (!app.boilerplateType || !app.bootstrappedAt) return null;
+  // Guard: only show for Story 1.4+ apps that have a GitHub repo. The repo
+  // URL is valid as soon as the saga's createRepoFromTemplate returns, so
+  // we don't need to wait for daemon-side bootstrap to complete.
+  if (!app.boilerplateType) return null;
 
-  return <RepositoryBadgeInner appId={app.appId} />;
+  const scaffoldPending = !app.bootstrappedAt;
+  return <RepositoryBadgeInner appId={app.appId} scaffoldPending={scaffoldPending} />;
 }
 
-function RepositoryBadgeInner({ appId }: { appId: string }) {
+function RepositoryBadgeInner({
+  appId,
+  scaffoldPending,
+}: {
+  appId: string;
+  scaffoldPending: boolean;
+}) {
   const { data, isLoading, error } = useGithubRepoSummary(appId);
 
   const githubUrl = `https://github.com/futurator-repos/${appId}`;
@@ -121,6 +136,17 @@ function RepositoryBadgeInner({ appId }: { appId: string }) {
       <span className="text-muted-foreground" title={repo.pushed_at ?? undefined}>
         last push: {pushedLabel}
       </span>
+
+      {/* Scaffold-in-flight pill — daemon hasn't completed post-create steps */}
+      {scaffoldPending && (
+        <span
+          className="inline-flex items-center gap-1 rounded-full bg-warning/10 px-2 py-0.5 text-[11px] text-warning border border-warning/20"
+          title="Daemon is still injecting placeholder values + installing BMAD. Refresh in a moment."
+        >
+          <Loader2 className="size-3 animate-spin" aria-hidden />
+          Scaffold pending
+        </span>
+      )}
     </div>
   );
 }
