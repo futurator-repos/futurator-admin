@@ -25,6 +25,10 @@ export type AgentJobStatus =
   | 'STALE' // epic-dev: heartbeat exceeded threshold, awaiting resume respawn
   | 'NEEDS_ATTENTION' // recoverable failure; awaiting operator action (Pipeline v1 §8)
   | 'COMPLETED_VIA_SALVAGE' // terminal success: extracted output applied without re-running the agent
+  | 'COMPLETED_VIA_PREWORK' // Pipeline v2.0 T0.2: daemon-side gate verified the AC was already
+  // satisfied (recent commits + named exports + tsc clean) BEFORE spawning DEV.
+  // Terminal success; no LLM was invoked. Wave/plan reducers treat this like
+  // any other COMPLETED_VIA_* status.
   | 'MANUALLY_SKIPPED'; // terminal: operator skipped a skipTolerant step
 
 // ── Escalation + trigger metadata (Pipeline v1 §9.2 + §FR-9) ──

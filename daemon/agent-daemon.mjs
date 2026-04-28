@@ -84,6 +84,11 @@ import { mergeVisualTestsBlock } from './pipelines/lib/visual-tests-writer.mjs';
 // in agent prose so COST_HARD-after-DONE terminations resolve as success
 // instead of triggering a re-spawn loop. See daemon/lib/done-detector.mjs.
 import { hasDoneAndWorkSummary } from './lib/done-detector.mjs';
+// Pipeline v2.0 efficiency fix T0.2 — daemon-side pre-DEV gate that
+// short-circuits no-op stories without spawning the LLM. See
+// daemon/lib/prework-gate.mjs.
+import { evaluatePreworkGate, renderGateEvidence } from './lib/prework-gate.mjs';
+import { writeFile as fsWriteFile, mkdir as fsMkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
 // Resolve the full path to `claude` binary at startup
@@ -140,6 +145,14 @@ const MAX_DEV_ATTEMPTS_PER_STORY = parseInt(
   10,
 );
 const STORY_PIPELINE_MAX_RETRIES = Math.max(0, MAX_DEV_ATTEMPTS_PER_STORY - 1);
+
+// Pipeline v2.0 Efficiency Fix T0.2 — daemon-side pre-DEV gate.
+// When enabled (default), executePipeline runs three deterministic signals
+// (recent commits + AC named exports present in touchPoints + tsc clean)
+// before spawning the dev step. If all green, the job short-circuits to
+// COMPLETED_VIA_PREWORK without spawning any agent. dino1 forensic projects
+// this would have eliminated 7 of 9 DEV spawns on pre-scaffolded boilerplates.
+const PREWORK_GATE_ENABLED = (process.env.PREWORK_GATE_ENABLED || 'true') !== 'false';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
   marshallOptions: { removeUndefinedValues: true },
@@ -1288,6 +1301,61 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
 // ── Compile step identification (imported from compile-pipeline.mjs) ──
 const isCompileStep = _isCompileStep;
 
+/**
+ * Pipeline v2.0 T0.2 — run the pre-DEV gate for a story-pipeline job.
+ * Reads AC_TEXT / TOUCH_POINTS / PLAN_START_TIME from the job's pipeline
+ * variables (seeded by generateStoryPipeline), invokes the pure
+ * `evaluatePreworkGate`, and writes the evidence markdown to
+ * `<workingDir>/.context/wave-N-story-<id>.md` for observability and (when
+ * the gate falls through) for the running DEV agent to optionally Read.
+ *
+ * Returns { shouldSkipDev, reason, evidenceMarkdownPath?, evidence }.
+ *
+ * Never throws on internal failures — caller falls through to spawn DEV.
+ */
+async function runPreworkGateForJob(job, variables, workingDir) {
+  let touchPoints = [];
+  try {
+    const raw = variables.TOUCH_POINTS || '[]';
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) touchPoints = parsed.filter((p) => typeof p === 'string');
+  } catch {
+    // malformed TOUCH_POINTS — treat as no touchPoints (gate falls through)
+  }
+
+  const verdict = await evaluatePreworkGate({
+    projectDir: workingDir,
+    planStartTime: variables.PLAN_START_TIME || null,
+    touchPoints,
+    acText: variables.AC_TEXT || '',
+    runCommand: variables.RUN_COMMAND || undefined,
+  });
+
+  // Persist evidence to disk for observability + agent-side context (T1.5
+  // will plumb the path into the dev prompt's touchPoints in a later PR;
+  // for now the file simply exists).
+  let evidenceMarkdownPath = null;
+  try {
+    const storyId = variables.STORY_ID || 'unknown';
+    const waveNum = variables.WAVE_NUMBER || '0';
+    const dir = `${workingDir.replace(/\/+$/, '')}/.context`;
+    await fsMkdir(dir, { recursive: true });
+    const filename = `wave-${waveNum}-story-${storyId}.md`;
+    evidenceMarkdownPath = `${dir}/${filename}`;
+    const md = renderGateEvidence(verdict, storyId);
+    if (md) await fsWriteFile(evidenceMarkdownPath, md, 'utf8');
+  } catch (writeErr) {
+    log('warn', `prework-gate: failed to write evidence file (non-fatal): ${writeErr.message}`);
+  }
+
+  return {
+    shouldSkipDev: !verdict.shouldSpawnDev,
+    reason: verdict.reason,
+    evidenceMarkdownPath,
+    evidence: verdict.evidence,
+  };
+}
+
 async function executePipeline(job) {
   const { jobId, pipeline } = job;
 
@@ -1323,6 +1391,41 @@ async function executePipeline(job) {
   }
 
   await updateJobFields(jobId, { status: 'RUNNING', currentStepIndex: 0 });
+
+  // ── Pipeline v2.0 T0.2 — daemon-side pre-DEV gate ──
+  // Run before the first step. If all three signals (recent commits + AC
+  // named exports present in touchPoints + tsc clean) pass, short-circuit the
+  // entire pipeline to COMPLETED_VIA_PREWORK. No LLM is invoked. dino1
+  // forensic: 7 of 9 stories were no-ops; this gate would have skipped them
+  // for ~$0.02 each instead of ~$0.30 each via the agent-emits-sentinel path.
+  const isStoryPipeline = Boolean(variables.STORY_ID);
+  const hasDevStep = steps.some((s) => s.id === 'dev');
+  if (PREWORK_GATE_ENABLED && isStoryPipeline && hasDevStep && workingDir) {
+    try {
+      const gateResult = await runPreworkGateForJob(job, variables, workingDir);
+      if (gateResult.shouldSkipDev) {
+        log('info', `[${jobId.slice(0, 8)}] prework gate PASSED — skipping DEV; reason: ${gateResult.reason}`);
+        await pushEvent(jobId, '__prework_gate__', 'orchestrator', 'status', {
+          text: `[SYSTEM] prework-gate=skip-dev — ${gateResult.reason}`,
+        });
+        await updateJobFields(jobId, {
+          status: 'COMPLETED_VIA_PREWORK',
+          variables,
+          stepResults,
+          totalCost: 0,
+          preworkGateEvidence: gateResult.evidenceMarkdownPath || undefined,
+        });
+        return;
+      }
+      log('info', `[${jobId.slice(0, 8)}] prework gate fell through — spawning DEV; reason: ${gateResult.reason}`);
+      await pushEvent(jobId, '__prework_gate__', 'orchestrator', 'status', {
+        text: `[SYSTEM] prework-gate=spawn-dev — ${gateResult.reason}`,
+      });
+    } catch (gateErr) {
+      // Gate must NEVER block the pipeline. Log + fall through to spawn DEV.
+      log('warn', `[${jobId.slice(0, 8)}] prework gate threw (non-blocking): ${gateErr.message}`);
+    }
+  }
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];

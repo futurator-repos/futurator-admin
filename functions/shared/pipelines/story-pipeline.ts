@@ -57,6 +57,14 @@ export function generateStoryPipeline(
      * to confirm syntax. Defaults to a vanilla static server.
      */
     runCommand?: string;
+    /**
+     * Pipeline v2.0 T0.2 — daemon-side pre-DEV gate.
+     * ISO timestamp passed verbatim to `git log --since=` when the gate
+     * checks for recent commits in the story's touchPoints. Plan-build /
+     * launcher should set this to `plan.createdAt`. Optional; absent
+     * disables Signal 1 (commits) and the gate falls through to spawn DEV.
+     */
+    planStartTime?: string;
   },
 ): PipelineDefinition {
   // Derive projectId from workingDir: /home/ubuntu/projects/{name}/
@@ -81,6 +89,18 @@ export function generateStoryPipeline(
       STORY_ID: story.storyId,
       EPIC_ID: opts.epicId || '(not provided)',
       PROJECT_ID: projectId,
+      // Pipeline v2.0 T0.2 — daemon-side pre-DEV gate inputs. The daemon's
+      // executePipeline reads these BEFORE spawning the dev step; if all
+      // three signals (recent commits + AC exports + tsc clean) pass, the
+      // job short-circuits to COMPLETED_VIA_PREWORK without spawning the
+      // LLM. Empty / unset values disable individual signals (gate falls
+      // through to spawn DEV normally).
+      AC_TEXT: story.description || '',
+      TOUCH_POINTS: JSON.stringify(story.touchPoints || []),
+      PLAN_START_TIME: opts.planStartTime || '',
+      // Surface runCommand for the daemon's cached typecheck (Signal 3) so
+      // it doesn't have to default to `npx tsc --noEmit`.
+      RUN_COMMAND: runCommand,
     },
     maxIterations: 3,
     agents: {

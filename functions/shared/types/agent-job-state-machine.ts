@@ -32,19 +32,23 @@ const TERMINAL_STATUSES: ReadonlySet<AgentJobStatus> = new Set([
   'STALE',
   'COMPLETED_VIA_SALVAGE',
   'COMPLETED_VIA_TALK',
+  'COMPLETED_VIA_PREWORK', // Pipeline v2.0 T0.2 — daemon pre-DEV gate skip
   'MANUALLY_SKIPPED',
+  'ORPHANED', // App/Plan v1 — Plan went terminal before this job dispatched
 ]);
 
 /**
  * Statuses that count as "the wave can advance past this story." Salvage,
- * Talk-apply, and Skip are explicit operator decisions to move forward, so
- * they advance the wave even though they aren't a clean COMPLETED.
+ * Talk-apply, Prework-skip, and Skip are explicit decisions (operator or
+ * daemon) to move forward, so they advance the wave even though they aren't
+ * a clean COMPLETED.
  */
 const SUCCESS_STATUSES: ReadonlySet<AgentJobStatus> = new Set([
   'COMPLETED',
   'COMPLETE_WITH_BLOCKED_STORIES',
   'COMPLETED_VIA_SALVAGE',
   'COMPLETED_VIA_TALK',
+  'COMPLETED_VIA_PREWORK', // Pipeline v2.0 T0.2
   'MANUALLY_SKIPPED',
 ]);
 
@@ -89,6 +93,7 @@ const ALLOWED_TRANSITIONS: Record<AgentJobStatus, ReadonlySet<AgentJobStatus>> =
   RUNNING: new Set<AgentJobStatus>([
     'COMPLETED',
     'COMPLETE_WITH_BLOCKED_STORIES',
+    'COMPLETED_VIA_PREWORK', // Pipeline v2.0 T0.2 — pre-DEV gate skip mid-pipeline
     'FAILED',
     'STALE',
     'NEEDS_ATTENTION',
@@ -106,8 +111,20 @@ const ALLOWED_TRANSITIONS: Record<AgentJobStatus, ReadonlySet<AgentJobStatus>> =
   STALE: new Set<AgentJobStatus>(['PENDING']), // resume respawn re-enqueues a new attempt
   COMPLETED_VIA_SALVAGE: new Set<AgentJobStatus>(),
   COMPLETED_VIA_TALK: new Set<AgentJobStatus>(),
+  COMPLETED_VIA_PREWORK: new Set<AgentJobStatus>(),
   MANUALLY_SKIPPED: new Set<AgentJobStatus>(),
+  // App/Plan v1 — daemon writes ORPHANED before any spawn; terminal.
+  ORPHANED: new Set<AgentJobStatus>(),
 };
+
+/** App/Plan v1 — extra transitions allowed in addition to the table above. */
+const APP_PLAN_V1_EXTRA_TRANSITIONS: Array<[AgentJobStatus, AgentJobStatus]> = [
+  ['PENDING', 'ORPHANED'], // daemon canDispatchJob: Plan terminal before dispatch
+];
+
+for (const [from, to] of APP_PLAN_V1_EXTRA_TRANSITIONS) {
+  (ALLOWED_TRANSITIONS[from] as Set<AgentJobStatus>).add(to);
+}
 
 export function canTransition(from: AgentJobStatus, to: AgentJobStatus): boolean {
   return ALLOWED_TRANSITIONS[from].has(to);
