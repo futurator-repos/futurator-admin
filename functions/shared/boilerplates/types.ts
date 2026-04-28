@@ -55,4 +55,48 @@ export interface BoilerplateMetadata {
   defaultManifestSeed?: unknown;
   /** Phase 3: SKILL-SCOUT default skill loadout (shape tightened in Phase 3). */
   defaultSkillLoadout?: string[];
+
+  // ── Pipeline v2.0 PR-5: PM-prompt context ───────────────────────────────
+  //
+  // Consumed by `buildPmPlanPrompt` to generate boilerplate-aware Plan JSON
+  // instead of the previous "every plan is Vite+React+TS" hardcode. When
+  // missing the prompt falls back to a generic shape; populate this for any
+  // boilerplate that has its own conventions.
+  pmContext?: {
+    /** One-line framework descriptor used in the PM prompt header. */
+    framework: string;
+    /**
+     * Files / structure that are ALREADY in the cloned boilerplate. The PM
+     * agent must NOT propose stories that "set up" these — they exist.
+     * Examples: "package.json with Next.js 16 deps", "src/app/page.tsx",
+     * "tsconfig.json strict mode".
+     */
+    scaffoldedAlready: string[];
+    /**
+     * Conventional file locations the PM should reference when writing story
+     * descriptions. Boilerplate-specific so the LLM doesn't invent paths.
+     */
+    conventions: {
+      /** Where domain types live, e.g. "src/types/" or "app/types/". */
+      typesPath: string;
+      /** Source root, e.g. "src/" or "app/". */
+      sourceRoot: string;
+      /** Where pages/routes live, e.g. "src/app/" (Next 15+) or "src/pages/" (Vite). */
+      pagesOrAppPath: string;
+      /** Where shared components live. */
+      componentsPath: string;
+      /** Where the global stylesheet is. */
+      stylesPath: string;
+      /** Where unit tests are colocated, e.g. "src/**\/__tests__/". */
+      testsPath: string;
+      /** Top-level config files the PM should leave alone unless intent requires it. */
+      configFiles: string[];
+    };
+    /**
+     * Example AC bullets that match this boilerplate's voice. Used as the
+     * "match this style" exemplar in the prompt. 3-5 entries; verifiable;
+     * boilerplate-specific (e.g., Next: "next dev exits 0", Vite: "vite build exits 0").
+     */
+    exampleAcceptanceCriteria: string[];
+  };
 }

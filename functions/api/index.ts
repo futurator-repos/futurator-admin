@@ -112,7 +112,7 @@ import {
   deleteRepo,
   GitHubError,
 } from '../shared/github/connector';
-import { BOILERPLATE_REGISTRY } from '../shared/boilerplates/registry';
+import { BOILERPLATE_REGISTRY, type BoilerplateType } from '../shared/boilerplates/registry';
 import { githubCreateRepoSchema } from '../shared/schemas/github-create-repo-schema';
 // Story 1.4.2 — App-create saga schema (extends legacy createAppInputSchema
 // with `boilerplateType` + `bmadEnabled`).
@@ -1424,11 +1424,16 @@ app.post('/api/plans/from-intent', async (c) => {
   // PM's output JSON includes `plan.name`, which apply-plan validates
   // against the kebab-case regex — displayName would fail validation.
   const pmJobId = crypto.randomUUID();
+  // PR-5: legacy /from-intent path doesn't have an App; default to nextjs
+  // (the only `wired` boilerplate in Phase 1). Future: deprecate this path
+  // entirely once App/Plan v1 is the only Plan-creation entrypoint.
   const pipeline = generatePmPlanPipeline({
     planName: plan.name,
     intent: plan.intent,
     executionMode: plan.executionMode,
     devModel: plan.devModel,
+    boilerplateType: 'nextjs',
+    rigor: plan.rigor,
   });
   await agentJobsRepo.createJob({
     jobId: pmJobId,
@@ -1596,11 +1601,25 @@ app.post('/api/plans/:id/regenerate', async (c) => {
 
   const pmJobId = crypto.randomUUID();
   const now = new Date().toISOString();
+  // PR-5: look up boilerplateType from the App (if Plan is App-scoped) so the
+  // regenerated PM prompt uses the right framework conventions. Falls back to
+  // 'nextjs' for legacy plans not tied to an App.
+  let regenBoilerplateType: BoilerplateType = 'nextjs';
+  if (plan.appId) {
+    try {
+      const appRow = await appRepo.getApp(plan.appId);
+      if (appRow?.boilerplateType) regenBoilerplateType = appRow.boilerplateType;
+    } catch {
+      // best-effort — fall through to default
+    }
+  }
   const pipeline = generatePmPlanPipeline({
     planName: plan.name,
     intent: plan.intent,
     executionMode: plan.executionMode,
     devModel: plan.devModel,
+    boilerplateType: regenBoilerplateType,
+    rigor: plan.rigor,
   });
   await agentJobsRepo.createJob({
     jobId: pmJobId,
@@ -5742,11 +5761,16 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
   let pmJobId: string | undefined;
   if (parsed.data.kind === 'initial') {
     pmJobId = crypto.randomUUID();
+    // PR-5: thread the App's boilerplateType + Plan's rigor into the PM
+    // prompt so it generates ACs that match the actual scaffold (not the
+    // hardcoded "Vite+React+TS" example from the v1 prompt).
     const pipeline = generatePmPlanPipeline({
       planName: plan.name,
       intent: plan.intent,
       executionMode: plan.executionMode,
       devModel: plan.devModel,
+      boilerplateType: appRow.boilerplateType ?? 'nextjs',
+      rigor: plan.rigor,
     });
     await agentJobsRepo.createJob({
       jobId: pmJobId,

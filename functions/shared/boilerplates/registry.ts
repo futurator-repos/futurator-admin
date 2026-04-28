@@ -35,6 +35,33 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     ],
     bmadSupported: true,
     defaultDeployFlavor: 'static-site',
+    pmContext: {
+      framework: 'Next.js 16 with App Router (TypeScript, strict mode)',
+      scaffoldedAlready: [
+        'package.json with Next.js 16, React 19, TypeScript deps installed',
+        'tsconfig.json (strict mode, paths alias `@/*` → `./src/*`)',
+        'next.config.ts with output: "export" for static-site deploy',
+        'src/app/layout.tsx + src/app/page.tsx (App Router root)',
+        'src/app/globals.css (Tailwind v4 wired)',
+        'src/components/ui/ (shadcn primitives)',
+        '_bmad/ (BMAD agents installed)',
+      ],
+      conventions: {
+        typesPath: 'src/types/',
+        sourceRoot: 'src/',
+        pagesOrAppPath: 'src/app/',
+        componentsPath: 'src/components/',
+        stylesPath: 'src/app/globals.css',
+        testsPath: 'src/**/__tests__/',
+        configFiles: ['package.json', 'tsconfig.json', 'next.config.ts', 'tailwind.config.ts'],
+      },
+      exampleAcceptanceCriteria: [
+        'npm run build exits with code 0',
+        'tsc --noEmit reports zero errors',
+        'src/app/page.tsx renders without hydration warnings in dev mode',
+        'All exports from src/types/index.ts are importable via `@/types`',
+      ],
+    },
   },
 
   sst: {
@@ -59,6 +86,29 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     ],
     bmadSupported: false,
     defaultDeployFlavor: 'sst-app',
+    pmContext: {
+      framework: 'SST v4 (TypeScript) — Lambda + DynamoDB serverless app',
+      scaffoldedAlready: [
+        'package.json with SST v4 deps',
+        'sst.config.ts (Pulumi-based)',
+        'tsconfig.json (strict mode)',
+        'functions/ root directory (Lambda handlers)',
+      ],
+      conventions: {
+        typesPath: 'functions/shared/types/',
+        sourceRoot: 'functions/',
+        pagesOrAppPath: 'functions/api/',
+        componentsPath: 'functions/api/handlers/',
+        stylesPath: '',
+        testsPath: 'functions/**/__tests__/',
+        configFiles: ['package.json', 'tsconfig.json', 'sst.config.ts'],
+      },
+      exampleAcceptanceCriteria: [
+        'sst dev exits cleanly when started',
+        'tsc --noEmit reports zero errors',
+        'New Lambda handler at functions/api/<route>.ts responds to a synthetic event',
+      ],
+    },
   },
 
   vite: {
@@ -83,6 +133,32 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     ],
     bmadSupported: false,
     defaultDeployFlavor: 'spa-on-cloudfront',
+    pmContext: {
+      framework: 'Vite + React + TypeScript (strict mode)',
+      scaffoldedAlready: [
+        'package.json with Vite, React 19, TypeScript deps',
+        'tsconfig.json (strict mode)',
+        'vite.config.ts',
+        'index.html (Vite entry)',
+        'src/main.tsx (React root)',
+        'src/App.tsx',
+      ],
+      conventions: {
+        typesPath: 'src/types/',
+        sourceRoot: 'src/',
+        pagesOrAppPath: 'src/pages/',
+        componentsPath: 'src/components/',
+        stylesPath: 'src/index.css',
+        testsPath: 'src/**/*.test.{ts,tsx}',
+        configFiles: ['package.json', 'tsconfig.json', 'vite.config.ts'],
+      },
+      exampleAcceptanceCriteria: [
+        'vite build exits with code 0',
+        'tsc --noEmit reports zero errors',
+        'src/App.tsx renders without console errors at localhost:5173',
+        'All exports from src/types/index.ts are importable',
+      ],
+    },
   },
 
   mobile: {
@@ -107,6 +183,29 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     ],
     bmadSupported: false,
     defaultDeployFlavor: 'mobile-store',
+    pmContext: {
+      framework: 'Expo (React Native + TypeScript)',
+      scaffoldedAlready: [
+        'package.json with Expo SDK + React Native deps',
+        'tsconfig.json',
+        'app.json (Expo config)',
+        'App.tsx',
+      ],
+      conventions: {
+        typesPath: 'src/types/',
+        sourceRoot: 'src/',
+        pagesOrAppPath: 'src/screens/',
+        componentsPath: 'src/components/',
+        stylesPath: '',
+        testsPath: 'src/**/__tests__/',
+        configFiles: ['package.json', 'tsconfig.json', 'app.json'],
+      },
+      exampleAcceptanceCriteria: [
+        'npx expo start launches without errors',
+        'tsc --noEmit reports zero errors',
+        'App renders on iOS simulator without runtime errors',
+      ],
+    },
   },
 };
 
