@@ -760,6 +760,41 @@ app.get('/api/daemon/status', async (c) => {
 // (story-output watchers, etc.) don't all need re-importing at once.
 const parseVisualTests = sharedParseVisualTests;
 
+// ── Pipeline v2.0 PR-6 (A): build resume-from-session payload for retries ──
+//
+// Reads the prior job's runtime state (variables, sessions, stepResults) so
+// the new retry job can skip already-`complete` steps and `--resume <prior
+// session>` on the failed step. Returns undefined when no prior job exists
+// or it has no useful state — callers pass undefined to launchStoryRerun
+// for a fresh-start retry (legacy v1 behavior).
+async function buildPriorJobStateFromStory(story: { jobId?: string }): Promise<
+  | {
+      variables?: Record<string, string>;
+      sessions?: Record<string, string>;
+      stepResults?: import('../shared/types/agent-orchestrator').StepResult[];
+    }
+  | undefined
+> {
+  if (!story.jobId) return undefined;
+  let priorJob;
+  try {
+    priorJob = await agentJobsRepo.getJobById(story.jobId);
+  } catch {
+    return undefined;
+  }
+  if (!priorJob) return undefined;
+  // Only carry forward if there's something worth carrying.
+  const hasVars = priorJob.variables && Object.keys(priorJob.variables).length > 0;
+  const hasSessions = priorJob.sessions && Object.keys(priorJob.sessions).length > 0;
+  const hasResults = Array.isArray(priorJob.stepResults) && priorJob.stepResults.length > 0;
+  if (!hasVars && !hasSessions && !hasResults) return undefined;
+  return {
+    variables: priorJob.variables,
+    sessions: priorJob.sessions,
+    stepResults: priorJob.stepResults,
+  };
+}
+
 // ── Session capture helper: extract session metadata from completed story job ──
 async function captureSessionToRegistry(
   appName: string,
@@ -2091,11 +2126,24 @@ app.post('/api/epic-workflows/:id/stories/:storyId/send-back', async (c) => {
   });
 
   // Re-launch the story via the existing launcher so the daemon picks it up.
-  const result = await launchStoryRerun(epic, storyId, user.userId, now, {
-    generatePipeline: generateStoryPipeline,
-    createJob: agentJobsRepo.createJob,
-    uuid: () => crypto.randomUUID(),
-  });
+  // PR-6 (A): carry forward the prior job's stepResults + sessions + variables
+  // so the daemon's executePipeline can skip already-complete steps and
+  // --resume <prior session> on the failed step. Without this, the QA send-back
+  // would replay every step from zero — wasting cost on already-done work.
+  const priorJobState = await buildPriorJobStateFromStory(story);
+  const result = await launchStoryRerun(
+    epic,
+    storyId,
+    user.userId,
+    now,
+    {
+      generatePipeline: generateStoryPipeline,
+      createJob: agentJobsRepo.createJob,
+      uuid: () => crypto.randomUUID(),
+    },
+    undefined,
+    priorJobState,
+  );
   if (!result.ok) {
     // Story was updated; re-launch can fail (e.g. deleted mid-request).
     return c.json({ storyId, status: 'fixing', jobId: null, warning: 'rerun-failed' }, 200);
@@ -2527,6 +2575,13 @@ app.post('/api/epic-workflows/:id/stories/:storyId/run', async (c) => {
     }
   }
 
+  // PR-6 (A): retry resumes from the prior job's session — skips already-
+  // `complete` steps and --resumes the failed step's session for warm cache
+  // hits. Without this, every retry replays every step from zero.
+  const storyForResume = epic.stories.find((s) => s.storyId === storyId);
+  const priorJobState = storyForResume
+    ? await buildPriorJobStateFromStory(storyForResume)
+    : undefined;
   const now = new Date().toISOString();
   const result = await launchStoryRerun(
     epic,
@@ -2539,6 +2594,7 @@ app.post('/api/epic-workflows/:id/stories/:storyId/run', async (c) => {
       uuid: () => crypto.randomUUID(),
     },
     planOpts,
+    priorJobState,
   );
   if (!result.ok) {
     throw new NotFoundError('Story', storyId);
@@ -5833,22 +5889,42 @@ app.get('/api/plans/:planId/timing', async (c) => {
   const plan = await planRepo.getPlanById(planId);
   if (!plan) throw new NotFoundError('Plan', planId);
 
-  const slices = await sliceForPlan(planId);
-  const aggregate = aggregateByCategory(slices);
+  // Pipeline v2.0 PR-6 (F) — wrap the slicer/aggregator pipeline in a try/catch
+  // so a single bad event row in DDB (legacy schema, malformed timestamp, etc.)
+  // doesn't 500 the whole timing dashboard. Return an empty timing payload
+  // with a non-fatal warning instead. Operator still sees the plan; debug
+  // info goes to CloudWatch.
+  try {
+    const slices = await sliceForPlan(planId);
+    const aggregate = aggregateByCategory(slices);
 
-  // Wall-clock from first/last slice, not from plan fields
-  let planTotalMs = 0;
-  if (slices.length >= 2) {
-    const first = new Date(slices[0].startedAt).getTime();
-    const last = new Date(slices[slices.length - 1].endedAt).getTime();
-    planTotalMs = Math.max(0, last - first);
-  } else if (slices.length === 1) {
-    planTotalMs = slices[0].durationMs;
+    // Wall-clock from first/last slice, not from plan fields
+    let planTotalMs = 0;
+    if (slices.length >= 2) {
+      const first = new Date(slices[0].startedAt).getTime();
+      const last = new Date(slices[slices.length - 1].endedAt).getTime();
+      planTotalMs = Math.max(0, last - first);
+    } else if (slices.length === 1) {
+      planTotalMs = slices[0].durationMs;
+    }
+
+    const isLive = slices.some((s) => s.isLive === true);
+
+    return c.json({ planId, slices, aggregate, planTotalMs, isLive });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[timing] sliceForPlan failed for ${planId}: ${message}. Returning empty payload.`,
+    );
+    return c.json({
+      planId,
+      slices: [],
+      aggregate: { byCategory: {}, totalMs: 0 },
+      planTotalMs: 0,
+      isLive: false,
+      _warning: `Timing data unavailable: ${message.slice(0, 200)}`,
+    });
   }
-
-  const isLive = slices.some((s) => s.isLive === true);
-
-  return c.json({ planId, slices, aggregate, planTotalMs, isLive });
 });
 
 // GET /api/apps/:appId/timing

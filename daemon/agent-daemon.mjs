@@ -85,10 +85,11 @@ import {
   ShellGuardViolation,
 } from './pipelines/lib/shell-guard.mjs';
 import { mergeVisualTestsBlock } from './pipelines/lib/visual-tests-writer.mjs';
-// Pipeline v2.0 efficiency fix T0.1 — detect ---DONE--- + ---WORK_SUMMARY---
-// in agent prose so COST_HARD-after-DONE terminations resolve as success
-// instead of triggering a re-spawn loop. See daemon/lib/done-detector.mjs.
-import { hasDoneAndWorkSummary } from './lib/done-detector.mjs';
+// Pipeline v2.0 efficiency fixes T0.1 + PR-6(B) — detect step-output
+// completion in agent prose so forced terminations (COST_HARD, OAuth
+// expiry, OOM-kill, SIGTERM) resolve as success when the agent has
+// already finished its work. See daemon/lib/done-detector.mjs.
+import { isStepOutputComplete, classifyCompletion } from './lib/done-detector.mjs';
 // Pipeline v2.0 efficiency fix T0.2 — daemon-side pre-DEV gate that
 // short-circuits no-op stories without spawning the LLM. See
 // daemon/lib/prework-gate.mjs.
@@ -478,6 +479,111 @@ function runValidations(validations, variables) {
   return results;
 }
 
+// ── Pipeline v2.0 PR-6 (B+): Auth recovery loop ────────────────────────
+//
+// Wraps `runAgent` with a retry-on-auth-failure loop. dino1 retry forensic
+// (2026-04-29): OAuth expired AFTER REVIEWER finished; without recovery,
+// the daemon marked the job FAILED non-retriable. Now:
+//
+//   1. Call runAgent.
+//   2. If it rejects with err.code === 'AUTH_FAILED' (set by close handler
+//      when output buffer was empty — i.e. truly mid-stream auth death):
+//        a. loadOAuth('auth-error-recovery') — re-read the credentials file
+//           in case the Mac Keychain push or hourly probe already refreshed
+//           the access_token.
+//        b. probeAuth() — verify the new token works. If it does, retry the
+//           same step with the same prompt + same opts. The agent restarts
+//           but the working dir already has any committed work.
+//   3. Backoff: 5s before first recovery retry, 30s before second.
+//   4. After 2 failed recoveries: re-throw the original error so handleJobFailure
+//      routes to NEEDS_ATTENTION with category 'auth-recovery-failed'.
+//
+// Notes:
+//   - Buffer-recovery (PR-6 B) handles "auth died AFTER complete output" —
+//     in that case runAgent resolves successfully and this wrapper is a no-op.
+//   - The recovery loop only kicks in when the agent died mid-stream with no
+//     captured work. That's the case worth retrying.
+//   - Auth-recovery does NOT count against MAX_DEV_ATTEMPTS_PER_STORY (T0.3) —
+//     auth failures are infrastructure, not bad-prompt failures.
+const AUTH_RECOVERY_BACKOFF_MS = [5_000, 30_000];
+// PR-6 (C): if the OAuth access token expires within this window, force a
+// pre-spawn reload + probe. Eliminates the "token died mid-stream" race for
+// the common case where the Mac Keychain push happened recently and the
+// fresh tokens are sitting in the file but `authState.expiresAt` is stale.
+const PRESPAWN_EXPIRY_THRESHOLD_MS = 5 * 60 * 1000;
+
+async function runAgentWithAuthRecovery(jobId, stepId, agentId, prompt, opts = {}) {
+  let attempt = 0;
+  let lastErr = null;
+  while (attempt <= AUTH_RECOVERY_BACKOFF_MS.length) {
+    // PR-6 (C): pre-spawn token-expiry check. Refresh-from-file if the access
+    // token expires soon — cheap insurance against the race that bit dino1's
+    // reviewer step.
+    if (
+      authState.expiresAt &&
+      authState.expiresAt - Date.now() < PRESPAWN_EXPIRY_THRESHOLD_MS
+    ) {
+      log(
+        'info',
+        `[${jobId.slice(0, 8)}] pre-spawn: access token expires in <${Math.round(PRESPAWN_EXPIRY_THRESHOLD_MS / 60_000)}min, reloading OAuth file`,
+        { expiresAt: new Date(authState.expiresAt).toISOString() },
+      );
+      try {
+        loadOAuth(`pre-spawn-${stepId}`);
+      } catch (preErr) {
+        log('warn', `[${jobId.slice(0, 8)}] pre-spawn OAuth reload threw: ${preErr.message}`);
+      }
+    }
+
+    try {
+      return await runAgent(jobId, stepId, agentId, prompt, opts);
+    } catch (err) {
+      const isAuthErr = err?.code === 'AUTH_FAILED';
+      if (!isAuthErr || attempt >= AUTH_RECOVERY_BACKOFF_MS.length) {
+        // Either non-auth failure (re-throw immediately) OR exhausted recovery.
+        if (isAuthErr) {
+          // Tag the final error so handleJobFailure can route to a distinct
+          // attention category instead of the generic auth-expired path.
+          err.code = 'AUTH_RECOVERY_EXHAUSTED';
+          err.authRecoveryAttempts = attempt;
+        }
+        throw err;
+      }
+
+      lastErr = err;
+      const backoffMs = AUTH_RECOVERY_BACKOFF_MS[attempt];
+      attempt += 1;
+      log(
+        'warn',
+        `[${jobId.slice(0, 8)}] auth recovery attempt ${attempt}/${AUTH_RECOVERY_BACKOFF_MS.length}: re-reading OAuth + sleeping ${backoffMs}ms`,
+      );
+      pushEvent(jobId, stepId, agentId, 'status', {
+        text: `[SYSTEM] auth-recovery attempt ${attempt}/${AUTH_RECOVERY_BACKOFF_MS.length} — reloading OAuth file in ${Math.round(backoffMs / 1000)}s`,
+      });
+
+      await new Promise((r) => setTimeout(r, backoffMs));
+      try {
+        loadOAuth(`auth-error-recovery-${attempt}`);
+        await probeAuth();
+      } catch (probeErr) {
+        log('warn', `[${jobId.slice(0, 8)}] auth recovery probe threw: ${probeErr.message}`);
+        // Fall through — retry runAgent anyway; the next iteration's reject
+        // will surface the actual auth issue if probe was lying.
+      }
+      if (!authState.valid) {
+        log(
+          'warn',
+          `[${jobId.slice(0, 8)}] auth recovery: probe still invalid after reload; will retry anyway in case Mac Keychain push is in flight`,
+        );
+      } else {
+        log('info', `[${jobId.slice(0, 8)}] auth recovery: OAuth re-validated; retrying step`);
+      }
+    }
+  }
+  // unreachable; while-loop returns or throws
+  throw lastErr;
+}
+
 // ── Run a single Claude CLI agent ──
 
 function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
@@ -621,11 +727,48 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
         authState.valid = false;
         authState.error = (silentZeroCost ? 'silent zero-cost failure' : allOutput.slice(0, 200)) || 'auth failure';
         authState.checkedAt = new Date().toISOString();
+
+        // Pipeline v2.0 PR-6 (B) — save the buffer if the agent already
+        // emitted complete output. dino1 retry forensic (2026-04-29): the
+        // REVIEWER fully emitted ---REVIEW_CRITERIA--- + END marker, then
+        // OAuth expired ~291ms later. Without this branch, that complete
+        // verdict was thrown away and the job marked FAILED. With it, the
+        // captured output is treated as success and the orchestrator
+        // advances normally — operator only sees the auth-expired warning.
+        const completionKind = classifyCompletion(agentTextBuffer);
+        if (completionKind !== 'none') {
+          log(
+            'warn',
+            `Step ${stepId}: OAuth expired AFTER agent completed (${completionKind}); saving captured output as success`,
+            { bufferBytes: agentTextBuffer.length, completionKind },
+          );
+          pushEvent(jobId, stepId, agentId, 'status', {
+            text: `[SYSTEM] terminationReason=AUTH_EXPIRED_AFTER_OUTPUT (${completionKind}) — saving captured output; auth flagged for next spawn`,
+          });
+          return resolve({
+            type: 'result',
+            total_cost_usd: 0,
+            session_id: '',
+            result: agentTextBuffer.slice(-AGENT_TEXT_BUFFER_CAP),
+            modelUsage: {},
+            duration_ms: 0,
+            num_turns: 0,
+            usage: { input_tokens: 0, output_tokens: 0 },
+            _terminationReason: 'AUTH_EXPIRED_AFTER_OUTPUT',
+            _completionKind: completionKind,
+          });
+        }
+
+        // Genuine auth failure mid-stream with no captured work. Reject
+        // with a tagged error so the runAgentWithAuthRecovery wrapper
+        // (PR-6 B+) can catch it and attempt recovery.
         const msg =
           'Claude Code OAuth expired on EC2 — click Re-authorize in the admin UI to push fresh tokens from your Mac Keychain.';
         log('error', msg);
         pushEvent(jobId, stepId, agentId, 'step_error', { text: msg });
-        return reject(new Error(msg));
+        const err = new Error(msg);
+        err.code = 'AUTH_FAILED'; // recognized by runAgentWithAuthRecovery
+        return reject(err);
       }
 
       if (isRateLimit) {
@@ -636,21 +779,25 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
       }
 
       if (code !== 0 && !finalResult) {
-        // T0.1 — Pipeline v2.0 efficiency fix.
-        // If the agent emitted ---DONE--- + ---WORK_SUMMARY--- before the CLI
-        // forced a termination (typically COST_HARD), the work is captured.
-        // Synthesize a finalResult so executePipeline can run extractors
-        // against the buffered text and proceed normally. Without this, the
-        // job re-enqueues and the same conclusion is re-discovered next time
-        // at full cost — dino1 burned ~$35 on this loop.
-        if (hasDoneAndWorkSummary(agentTextBuffer)) {
+        // T0.1 + PR-6(B) — Pipeline v2.0 efficiency fix.
+        // If the agent emitted complete output (DEV: ---DONE---+
+        // ---WORK_SUMMARY---; REVIEWER: ---REVIEW_CRITERIA---+
+        // ---END_REVIEW_CRITERIA---; COMPILER: ---DONE---) before the CLI
+        // forced a termination (typically COST_HARD, but also OOM-kill,
+        // SIGTERM, etc.), the work is captured. Synthesize a finalResult so
+        // executePipeline can run extractors against the buffered text and
+        // proceed normally. Without this, the job re-enqueues and the same
+        // conclusion is re-discovered at full cost — dino1 burned ~$35 on
+        // this loop.
+        const completionKind = classifyCompletion(agentTextBuffer);
+        if (completionKind !== 'none') {
           log(
             'warn',
-            `Step ${stepId}: forced termination (exit ${code}) AFTER ---DONE--- emitted; treating as success`,
-            { bufferBytes: agentTextBuffer.length, stderr: stderrBuffer.slice(0, 200) },
+            `Step ${stepId}: forced termination (exit ${code}) AFTER ${completionKind} completion; treating as success`,
+            { bufferBytes: agentTextBuffer.length, completionKind, stderr: stderrBuffer.slice(0, 200) },
           );
           pushEvent(jobId, stepId, agentId, 'status', {
-            text: `[SYSTEM] terminationReason=COST_HARD_AFTER_DONE — agent emitted ---DONE--- before termination; treating as success`,
+            text: `[SYSTEM] terminationReason=FORCED_TERMINATION_AFTER_OUTPUT (${completionKind}) — agent emitted completion markers before termination; treating as success`,
           });
           return resolve({
             type: 'result',
@@ -667,7 +814,8 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
             usage: { input_tokens: 0, output_tokens: 0 },
             // Tag for downstream observability — not consumed by executePipeline
             // today, but cheap to surface for future debugging.
-            _terminationReason: 'COST_HARD_AFTER_DONE',
+            _terminationReason: 'FORCED_TERMINATION_AFTER_OUTPUT',
+            _completionKind: completionKind,
           });
         }
 
@@ -1267,8 +1415,10 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
     }
   }
 
-  // 3. Run agent
-  const result = await runAgent(jobId, step.id, step.agentId, prompt, {
+  // 3. Run agent (PR-6 B+: wrapped with auth-recovery — if OAuth dies
+  // mid-stream with no captured output, the wrapper will reload the file
+  // and retry up to 2x before escalating to NEEDS_ATTENTION).
+  const result = await runAgentWithAuthRecovery(jobId, step.id, step.agentId, prompt, {
     workingDir: workingDir || process.env.HOME,
     allowedTools: agent.allowedTools,
     disallowedTools: agent.disallowedTools,
@@ -1584,8 +1734,27 @@ async function executePipeline(job) {
   const workingDir = job.workingDir;
 
   const variables = { ITERATION: '1', MAX_ITERATIONS: String(maxIterations), ...(pipeline.initialVariables || {}) };
-  const sessions = {};
-  const stepResults = [];
+  // Pipeline v2.0 PR-6 (A) — retry resume-from-session.
+  // When a retry job is created via launchStoryRerun + buildPriorJobStateFromStory,
+  // pipeline.initialSessions / initialStepResults carry the prior job's runtime
+  // state. Seeding sessions[] enables `--resume <prior session>` on the failed
+  // step (warm cache hits). Seeding stepResults[] lets the steps loop skip
+  // already-`complete` steps so we don't re-run DEV when DEV already finished.
+  const sessions = { ...(pipeline.initialSessions || {}) };
+  const stepResults = Array.isArray(pipeline.initialStepResults)
+    ? [...pipeline.initialStepResults]
+    : [];
+  const completedStepIds = new Set(
+    stepResults.filter((sr) => sr?.status === 'complete').map((sr) => sr?.stepId).filter(Boolean),
+  );
+  const isRetryResume = stepResults.length > 0 || Object.keys(sessions).length > 0;
+  if (isRetryResume) {
+    log(
+      'info',
+      `[${jobId.slice(0, 8)}] retry-resume: ${completedStepIds.size} step(s) carrying forward as complete, ${Object.keys(sessions).length} session(s) available for --resume`,
+      { completedSteps: [...completedStepIds] },
+    );
+  }
 
   // Compilation tracking metadata
   let compilationStatus = undefined; // 'success' | 'failed' | 'skipped' | undefined
@@ -1654,6 +1823,39 @@ async function executePipeline(job) {
     if (loopTargetIds.has(step.id)) {
       log('info', `Skipping "${step.id}" (loop-only step, runs only during retry)`);
       continue;
+    }
+
+    // Pipeline v2.0 PR-6 (A) — retry-resume: skip steps that already
+    // completed in the prior job. The prior step's stepResult is already
+    // in stepResults[] (carried over from initialStepResults), so the
+    // orchestrator's downstream consumers see "step done" without re-spawning.
+    if (isRetryResume && completedStepIds.has(step.id)) {
+      log(
+        'info',
+        `[${jobId.slice(0, 8)}] retry-resume: skipping "${step.id}" (prior job marked complete)`,
+      );
+      await pushEvent(jobId, step.id, '__resume__', 'status', {
+        text: `[SYSTEM] retry-resume: step "${step.id}" already complete in prior job; skipping`,
+      });
+      continue;
+    }
+
+    // Pipeline v2.0 PR-6 (A) — for the first step that DID NOT complete in
+    // the prior job, set resumeFromStep so the agent --resumes the prior
+    // step's session (warm cache, conversation history). The agent's text
+    // history still reflects what already happened on the previous attempt;
+    // the daemon doesn't need to re-feed prior context.
+    if (
+      isRetryResume &&
+      step.stepType !== 'shell' &&
+      !step.resumeFromStep &&
+      sessions[step.id]
+    ) {
+      step.resumeFromStep = step.id; // resolve via sessions[step.resumeFromStep]
+      log(
+        'info',
+        `[${jobId.slice(0, 8)}] retry-resume: step "${step.id}" will --resume prior session ${sessions[step.id].slice(0, 8)}…`,
+      );
     }
 
     await updateJobFields(jobId, { currentStepIndex: i });
@@ -2300,9 +2502,15 @@ async function handleJobFailure(job, err) {
   // producing a duplicate round in the UI. Fail visibly; the user sees the
   // error banner and chooses whether to resend.
   const isConversationalTurn = job.jobType === 'party-turn';
+  // PR-6 (B+): AUTH_RECOVERY_EXHAUSTED is the wrapper's tag after 2 failed
+  // OAuth re-reads. Treat it as a distinct nonRetriable category — the
+  // attention item below uses 'auth-recovery-failed' instead of the generic
+  // auth banner, and the job row carries triggeredBy='AUTH_RECOVERY_EXHAUSTED'.
+  const isAuthRecoveryExhausted = err?.code === 'AUTH_RECOVERY_EXHAUSTED';
   const nonRetriable =
     err?.name === 'ShellGuardViolation' ||
     /OAuth expired|authentication expired|Not logged in|Please run \/login/i.test(message) ||
+    isAuthRecoveryExhausted ||
     isConversationalTurn;
 
   // T0.3 — Pipeline v2.0 efficiency fix.
@@ -2332,6 +2540,53 @@ async function handleJobFailure(job, err) {
       retryAfter,
       errorMessage: `retry ${nextAttempt}/${effectiveMaxRetries} queued: ${message}`.slice(0, 500),
     });
+    return;
+  }
+
+  // PR-6 (B+): if auth recovery was exhausted, mark NEEDS_ATTENTION (not
+  // FAILED) so the operator can re-authorize and click Retry — at which
+  // point PR-6 (A)'s resume-from-session takes over and the work isn't
+  // re-done from scratch.
+  if (isAuthRecoveryExhausted) {
+    await updateJobFields(job.jobId, {
+      status: 'NEEDS_ATTENTION',
+      errorMessage: `OAuth recovery failed after ${err?.authRecoveryAttempts || 2} reload attempts: ${message}`.slice(0, 500),
+      triggeredBy: 'AUTH_RECOVERY_EXHAUSTED',
+    });
+    try {
+      const planId = await resolvePlanIdFromEpicId(ddb, job.epicId);
+      if (planId) {
+        await writeAttentionItem(
+          ddb,
+          {
+            planId,
+            severity: 'critical',
+            category: 'auth-recovery-failed',
+            title: 'OAuth recovery exhausted — re-authorize required',
+            body:
+              `The daemon attempted ${err?.authRecoveryAttempts || 2} OAuth reloads ` +
+              `but the access token remained invalid. Click "Re-Authorize" in the ` +
+              `admin UI to push fresh tokens from your Mac Keychain to EC2. After ` +
+              `that, click Retry on this job — the resume-from-session path will ` +
+              `pick up where the agent left off without re-running completed steps.`,
+            context: {
+              jobId: job.jobId,
+              epicId: job.epicId,
+              storyId: job.pipeline?.initialVariables?.STORY_ID,
+              authRecoveryAttempts: err?.authRecoveryAttempts || 2,
+            },
+            suggestedActions: [
+              { label: 'Re-Authorize', kind: 'open-logs' /* admin-ui surfaces auth banner */ },
+              { label: 'Retry step', kind: 'retry-step' },
+              { label: 'Open logs', kind: 'open-logs' },
+            ],
+          },
+          log,
+        );
+      }
+    } catch (attnErr) {
+      log('error', `Failed to write auth-recovery-failed attention item: ${attnErr.message}`);
+    }
     return;
   }
 

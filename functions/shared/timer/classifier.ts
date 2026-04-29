@@ -69,7 +69,17 @@ function lookupTable(eventType: AgentEventType): TimerCategory {
     case 'inference_complete':
       return row.default; // role override applied in classify() below
     default:
-      return assertNever(eventType);
+      // Pipeline v2.0 PR-6 (F) — runtime resilience.
+      // The compile-time exhaustiveness check still runs (TypeScript narrows
+      // `eventType` to `never` here), but at runtime DDB rows may contain
+      // legacy or unknown event types from prior schema versions or external
+      // emitters. Falling through to 'unattributed' instead of throwing
+      // assertNever fixes the timing API 500 we observed when an event row
+      // had an unrecognized eventType. The void-cast keeps the
+      // exhaustiveness check on by suppressing the unused-var warning while
+      // we silently classify unknown events as 'unattributed'.
+      void (eventType as never);
+      return 'unattributed';
   }
 }
 

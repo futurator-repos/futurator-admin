@@ -10,6 +10,12 @@ export type AttentionCategory =
   // Salvage-with-last-WORK_SUMMARY over the generic Retry to discourage
   // burning more budget on the same conclusion.
   | 'dev-retry-exhausted'
+  // Pipeline v2.0 PR-6 (B+): the daemon's auth-recovery wrapper attempted 2
+  // OAuth reloads after a mid-stream auth failure but the access token
+  // remained invalid. Operator must Re-Authorize from the admin UI; once
+  // tokens are fresh, clicking Retry resumes from the prior session
+  // (PR-6 A) without re-running completed steps.
+  | 'auth-recovery-failed'
   | 'daemon-shutdown-timeout'
   | 'tamper-reverted'
   | 'budget-warning'

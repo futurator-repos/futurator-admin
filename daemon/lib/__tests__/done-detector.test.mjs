@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { hasDoneAndWorkSummary } from '../done-detector.mjs';
+import {
+  hasDoneAndWorkSummary,
+  isStepOutputComplete,
+  classifyCompletion,
+} from '../done-detector.mjs';
 
 describe('hasDoneAndWorkSummary — T0.1 cost-ceiling-after-DONE detector', () => {
   it('returns false on empty/non-string inputs', () => {
@@ -74,5 +78,101 @@ All functions are pure, return new Dino objects, and the dino stays above GROUND
 ---END_WORK_SUMMARY---
 `;
     expect(hasDoneAndWorkSummary(text)).toBe(true);
+  });
+});
+
+describe('isStepOutputComplete — PR-6 generalized detector', () => {
+  it('returns false on empty/non-string', () => {
+    expect(isStepOutputComplete('')).toBe(false);
+    expect(isStepOutputComplete(null)).toBe(false);
+    expect(isStepOutputComplete(undefined)).toBe(false);
+    expect(isStepOutputComplete(42)).toBe(false);
+  });
+
+  it('accepts DEV completion (DONE + WORK_SUMMARY)', () => {
+    const text = `Done.
+
+---DONE---
+
+---WORK_SUMMARY---
+Implemented X.
+---END_WORK_SUMMARY---`;
+    expect(isStepOutputComplete(text)).toBe(true);
+    expect(classifyCompletion(text)).toBe('dev');
+  });
+
+  it('accepts REVIEWER completion (REVIEW_CRITERIA bracket pair)', () => {
+    // The dino-N forensic shape: reviewer emits the verdict block, OAuth
+    // expires AFTER the END marker.
+    const text = `Looks good.
+
+---REVIEW_CRITERIA---
+AC-1: pass
+AC-2: pass
+---END_REVIEW_CRITERIA---`;
+    expect(isStepOutputComplete(text)).toBe(true);
+    expect(classifyCompletion(text)).toBe('reviewer');
+  });
+
+  it('accepts generic completion (DONE on own line, no WORK_SUMMARY)', () => {
+    // COMPILER agent's contract — emits ---DONE--- without a structured summary.
+    const text = `Compiled successfully.
+
+---DONE---`;
+    expect(isStepOutputComplete(text)).toBe(true);
+    expect(classifyCompletion(text)).toBe('generic');
+  });
+
+  it('returns false on prose without any markers', () => {
+    expect(isStepOutputComplete('Just some prose. No markers here.')).toBe(false);
+    expect(classifyCompletion('Just some prose.')).toBe('none');
+  });
+
+  it('returns false when ---REVIEW_CRITERIA--- is opened but not closed', () => {
+    // Real-world half-truncation — agent started the block but stream cut off.
+    const text = `---REVIEW_CRITERIA---
+AC-1: pass`;
+    expect(isStepOutputComplete(text)).toBe(false);
+  });
+
+  it('rejects inline marker false-positives', () => {
+    // Tool input containing the literal but not on its own line.
+    const text = 'The agent ran ---DONE--- as a literal in an Edit call.';
+    expect(isStepOutputComplete(text)).toBe(false);
+  });
+
+  it('reviewer match has priority over generic when both could fire', () => {
+    // Both REVIEWER bracket pair AND a stray ---DONE--- present. The most
+    // specific match wins for diagnostic purposes.
+    const text = `---REVIEW_CRITERIA---
+AC-1: pass
+---END_REVIEW_CRITERIA---
+
+---DONE---`;
+    expect(classifyCompletion(text)).toBe('reviewer');
+    expect(isStepOutputComplete(text)).toBe(true);
+  });
+
+  it('handles realistic dino-N OAuth-after-REVIEW shape', () => {
+    // Excerpt copied from dino1 retry forensic (2026-04-29). REVIEWER fully
+    // emitted the verdict, then OAuth expired ~291ms later.
+    const text = `## Review: Collision Detection & Game-Over Flow
+
+### Code Analysis
+
+The implementation is clean...
+
+---REVIEW_CRITERIA---
+AC-1: pass
+AC-2: pass
+AC-3: pass
+AC-4: needsan — hitbox forgiveness is subjective
+AC-5: pass
+---END_REVIEW_CRITERIA---
+
+### Minor suggestion (non-blocking)
+...`;
+    expect(isStepOutputComplete(text)).toBe(true);
+    expect(classifyCompletion(text)).toBe('reviewer');
   });
 });

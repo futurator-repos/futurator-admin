@@ -692,12 +692,20 @@ Working directory: ${workingDir}`,
               id: 'compile-sync',
               stepType: 'shell' as const,
               command:
+                // Pipeline v2.0 PR-6 (E) — graph-sync.mjs is optional Mycelium
+                // tooling that may not be deployed on every EC2 host. Skip
+                // cleanly with a logged warning instead of failing the step
+                // when the script is missing. The S3 mirror sync still runs.
                 `set -e; ` +
                 `cd ${workingDir} && ` +
-                `node /home/ubuntu/scripts/graph-sync.mjs ` +
-                `--project ${projectId} ` +
-                `--knowledge-dir ${workingDir}/knowledge ` +
-                `--state-file ${workingDir}/.mycelium/compile-state.json && ` +
+                `if [ -f /home/ubuntu/scripts/graph-sync.mjs ]; then ` +
+                `  node /home/ubuntu/scripts/graph-sync.mjs ` +
+                `    --project ${projectId} ` +
+                `    --knowledge-dir ${workingDir}/knowledge ` +
+                `    --state-file ${workingDir}/.mycelium/compile-state.json; ` +
+                `else ` +
+                `  echo "[compile-sync] graph-sync.mjs not deployed — skipping Memgraph upsert (non-critical)"; ` +
+                `fi && ` +
                 `aws s3 sync ${workingDir}/knowledge/ ` +
                 `s3://futurator-ai-website/knowledge-live/${projectId}/ && ` +
                 `S3_COUNT=$(aws s3 ls s3://futurator-ai-website/knowledge-live/${projectId}/ ` +

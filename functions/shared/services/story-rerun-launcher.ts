@@ -38,6 +38,22 @@ export type StoryRerunResult =
   | { ok: true; jobId: string; updatedStories: EpicStory[] }
   | { ok: false; code: 'story-not-found'; message: string };
 
+/**
+ * Pipeline v2.0 PR-6 (A) — optional prior-job carry-forward inputs.
+ *
+ * When provided, the new retry job's pipeline is seeded with the prior
+ * job's runtime state so the daemon's executePipeline can:
+ *   - Skip steps whose `initialStepResults[i].status === 'complete'`
+ *   - `--resume <prior session>` on the failed step for warm-context cache hits
+ *   - Carry forward extracted variables (AC_TEXT, TOUCH_POINTS, etc.) so the
+ *     prework gate / scope detector / etc. don't lose context.
+ */
+export interface PriorJobState {
+  variables?: Record<string, string>;
+  sessions?: Record<string, string>;
+  stepResults?: AgentJob['stepResults'];
+}
+
 export async function launchStoryRerun(
   epic: EpicWorkflow,
   storyId: string,
@@ -45,6 +61,7 @@ export async function launchStoryRerun(
   now: string,
   deps: StoryRerunDeps,
   planOpts?: PlanExecutionOpts,
+  priorJobState?: PriorJobState,
 ): Promise<StoryRerunResult> {
   const story = epic.stories.find((s) => s.storyId === storyId);
   if (!story) {
@@ -65,6 +82,24 @@ export async function launchStoryRerun(
     rigor: planOpts?.rigor,
     hasBrowserTests: planOpts?.hasBrowserTests,
   });
+
+  // PR-6 (A): merge prior runtime state into the pipeline definition. The
+  // daemon's executePipeline reads initialStepResults/initialSessions and
+  // skips already-complete steps + resumes the failed step's session.
+  if (priorJobState) {
+    if (priorJobState.variables && Object.keys(priorJobState.variables).length > 0) {
+      pipeline.initialVariables = {
+        ...(pipeline.initialVariables || {}),
+        ...priorJobState.variables,
+      };
+    }
+    if (priorJobState.stepResults && priorJobState.stepResults.length > 0) {
+      pipeline.initialStepResults = priorJobState.stepResults;
+    }
+    if (priorJobState.sessions && Object.keys(priorJobState.sessions).length > 0) {
+      pipeline.initialSessions = priorJobState.sessions;
+    }
+  }
 
   const jobId = deps.uuid();
   await deps.createJob({

@@ -52,6 +52,11 @@ export type AgentJobStatus =
  *      specific budget; tighter than the generic ladder to bound waste on
  *      no-op DEV loops — see docs/concepts/pipeline-v2/pipeline-v2-0-
  *      efficency-fixes.md §T0.3)
+ *   - 'AUTH_RECOVERY_EXHAUSTED' — Pipeline v2.0 PR-6 (B+): daemon attempted
+ *      2 OAuth reloads after mid-stream auth failure; access token still
+ *      invalid. Job lands in NEEDS_ATTENTION (not FAILED) so operator can
+ *      Re-Authorize + click Retry; resume-from-session (PR-6 A) picks up
+ *      where the agent left off.
  *   - 'OPERATOR_ABORT'    — Story 1.8 (manual Abort from UI)
  */
 export type JobTriggeredBy =
@@ -66,6 +71,7 @@ export type JobTriggeredBy =
   | 'CAPACITY_TIMEOUT'
   | 'RETRY_EXHAUSTED'
   | 'DEV_RETRY_BUDGET_EXHAUSTED'
+  | 'AUTH_RECOVERY_EXHAUSTED'
   | 'OPERATOR_ABORT';
 
 /**
@@ -147,6 +153,25 @@ export interface PipelineDefinition {
   steps: PipelineStep[];
   maxIterations?: number; // max loop retries (default 1 = no retry)
   initialVariables?: Record<string, string>; // variables injected at pipeline start (e.g., STORY_ID, EPIC_ID)
+
+  // ── Pipeline v2.0 PR-6 (A): retry resume-from-session ──────────────────
+  //
+  // When a retry job is created from a prior failed/needs-attention job,
+  // these fields carry forward the prior runtime state so the daemon's
+  // executePipeline can:
+  //   1. Skip steps whose `initialStepResults[i].status === 'complete'`
+  //      (no need to re-run DEV when the prior attempt's DEV finished
+  //      successfully — only the failed step + onwards re-run).
+  //   2. For the failed step, set `step.resumeFromStep` so the agent
+  //      `--resume <session>`'s the prior step's session — warm context,
+  //      cache hits, conversation history all preserved.
+  //
+  // launchStoryRerun + the job-step retry endpoint populate these. Fresh
+  // (non-retry) story dispatches leave them undefined.
+  /** Prior job's `stepResults` to seed at pipeline start (skip already-`complete` steps). */
+  initialStepResults?: StepResult[];
+  /** Prior job's `sessions` map (stepId → claudeSessionId) for `--resume` continuity. */
+  initialSessions?: Record<string, string>;
 }
 
 // ── Job (stored in DynamoDB) ──
