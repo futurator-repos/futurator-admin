@@ -89,6 +89,27 @@ export interface AttentionItem {
   context: AttentionContext;
   suggestedActions: AttentionAction[];
   status: AttentionStatus;
+
+  // ── Pipeline v2.0 PR-7 (G+H+I): idempotent upsert + recurrence count ────
+  //
+  // dedupKey is a stable identifier for the underlying logical failure (e.g.,
+  // "wave-reducer:test-gate-failed:<storyId>"). Multiple emitters of the same
+  // failure produce ONE row keyed on (planId, dedupKey) instead of N rows
+  // keyed on (planId, itemId). Reducers / cron / daemon retry attempts all
+  // dedupe naturally via `upsertOpenAttentionItem`.
+  //
+  // dino1 forensic (2026-04-29): a single stuck story produced 224 attention
+  // items because every wave-reducer tick wrote a new row. With dedupKey the
+  // operator sees one row with `recurrenceCount: 86`.
+  //
+  // Optional for backwards-compat — pre-PR-7 rows have no dedupKey and use
+  // itemId as their primary identifier. New writes from PR-7+ should always
+  // supply one.
+  dedupKey?: string;
+  /** ISO timestamp of the most-recent upsert that matched this row. Defaults to createdAt. */
+  lastSeenAt?: string;
+  /** Number of times the same logical failure has been observed. 1 for first write, increments on each upsert hit. */
+  recurrenceCount?: number;
 }
 
 export interface AttentionItemSummary {

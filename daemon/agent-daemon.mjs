@@ -78,6 +78,7 @@ import {
 import { matchesDenyPattern } from './lib/bash-deny-patterns.mjs';
 import {
   writeAttentionItem,
+  autoResolveAttentionByDedupKey,
   resolvePlanIdFromEpicId,
 } from './pipelines/lib/attention-writer.mjs';
 import {
@@ -1558,6 +1559,50 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
 // ── Compile step identification (imported from compile-pipeline.mjs) ──
 const isCompileStep = _isCompileStep;
 
+/**
+ * Pipeline v2.0 PR-7 (I) — auto-resolve attention items when a story-pipeline
+ * job lands in a SUCCESS state (COMPLETED, COMPLETED_VIA_PREWORK,
+ * COMPLETED_VIA_SALVAGE).
+ *
+ * Resolves the dedupKeys that the daemon + wave-reducer would have created
+ * for this story's prior failures. Operator no longer sees stale failure
+ * items in the inbox after a successful retry.
+ *
+ * Best-effort: each resolve is fire-and-forget. Failure to resolve doesn't
+ * break the success path.
+ */
+async function autoResolveStoryAttentionOnSuccess(jobId, variables) {
+  const storyId = variables?.STORY_ID;
+  const epicId = variables?.EPIC_ID;
+  if (!storyId || !epicId) return;
+  let planId;
+  try {
+    planId = await resolvePlanIdFromEpicId(ddb, epicId);
+  } catch {
+    return;
+  }
+  if (!planId) return;
+
+  // dedupKey scheme — must match the writer call sites in this file +
+  // functions/shared/services/wave-reducer.ts. If a key isn't present in
+  // the table, autoResolveAttentionByDedupKey returns false silently.
+  const keys = [
+    `wave-reducer:test-gate-failed:${storyId}`,
+    `dev-retry-exhausted:${storyId}`,
+    `retry-exhausted:${jobId}`,
+  ];
+  for (const dedupKey of keys) {
+    try {
+      await autoResolveAttentionByDedupKey(ddb, planId, dedupKey, log);
+    } catch (err) {
+      log('warn', `auto-resolve attention failed (non-critical): ${err.message}`, {
+        planId,
+        dedupKey,
+      });
+    }
+  }
+}
+
 // Pipeline v2.0 PR-4 — touch-point inference at dispatch time.
 // Default ON. Disable via TOUCH_POINT_INFERENCE_ENABLED=false.
 // LLM fallback can be disabled separately via TOUCH_POINT_LLM_FALLBACK_ENABLED=false
@@ -1804,6 +1849,11 @@ async function executePipeline(job) {
           totalCost: 0,
           preworkGateEvidence: gateResult.evidenceMarkdownPath || undefined,
         });
+        // PR-7 (I) — clear stale attention items from prior failures of the
+        // same story (typical: operator clicked Retry after a failure and
+        // the prework gate now finds the AC already satisfied by the prior
+        // attempt's commits).
+        await autoResolveStoryAttentionOnSuccess(jobId, variables);
         return;
       }
       log('info', `[${jobId.slice(0, 8)}] prework gate fell through — spawning DEV; reason: ${gateResult.reason}`);
@@ -2013,6 +2063,12 @@ async function executePipeline(job) {
     compilationCompletedAt,
     compilationArticleCounts,
   });
+
+  // PR-7 (I) — clear any open attention rows that were created by prior
+  // failed attempts of this same story. The wave-reducer's
+  // 'wave-reducer:test-gate-failed' rows + the daemon's
+  // 'dev-retry-exhausted' rows both auto-resolve here.
+  await autoResolveStoryAttentionOnSuccess(jobId, variables);
 
   log('info', `\nPipeline COMPLETED. Total cost: $${totalCost.toFixed(4)}${compilationStatus ? ` | Compilation: ${compilationStatus}` : ''}`);
   log('info', `Final variables: ${JSON.stringify(Object.fromEntries(
@@ -2560,6 +2616,10 @@ async function handleJobFailure(job, err) {
           ddb,
           {
             planId,
+            // PR-7 (G): plan-scoped, not job-scoped — repeated auth-recovery
+            // failures across different jobs in the same plan dedupe to one
+            // row. Operator's action (Re-Authorize) fixes them all at once.
+            dedupKey: `auth-recovery-failed:${planId}`,
             severity: 'critical',
             category: 'auth-recovery-failed',
             title: 'OAuth recovery exhausted — re-authorize required',
@@ -2624,10 +2684,18 @@ async function handleJobFailure(job, err) {
           : `Step exhausted its retry budget (${RETRY_DELAYS_MS
               .map((d) => `${Math.round(d / 1000)}s`)
               .join(' / ')}). Final error: ${message.slice(0, 300)}`;
+        // PR-7 (G): one row per (story, exhaustion-category). A retry that
+        // fails again bumps recurrence; a successful retry auto-resolves
+        // the row via PR-7 (I) in executePipeline.
+        const storyId = job.pipeline?.initialVariables?.STORY_ID;
+        const dedupKey = isStoryPipeline && storyId
+          ? `${category}:${storyId}`
+          : `${category}:${job.jobId}`;
         await writeAttentionItem(
           ddb,
           {
             planId,
+            dedupKey,
             severity: 'high',
             category,
             title,
@@ -2635,7 +2703,7 @@ async function handleJobFailure(job, err) {
             context: {
               jobId: job.jobId,
               epicId: job.epicId,
-              ...(isStoryPipeline ? { storyId: job.pipeline?.initialVariables?.STORY_ID } : {}),
+              ...(isStoryPipeline ? { storyId } : {}),
             },
             suggestedActions: isStoryPipeline
               ? [

@@ -10,13 +10,18 @@ export interface AttentionListResponse {
 }
 
 /**
- * Attention items, with client-side dedupe applied.
+ * Attention items with optional client-side dedupe.
  *
- * Phase B.5: daemon and wave-reducer both write items (Q4 "both", Q13
- * "daemon also writes"). When the same failure pops up from both sources
- * we get duplicate cards. Collapse items where (title + storyId) match and
- * createdAt falls inside a 60-second window; keep the earliest, surface a
- * `duplicateCount` so the card can show "+N".
+ * Pipeline v2.0 PR-7 (G+H): rows written via the new upsert path carry a
+ * `dedupKey` + `recurrenceCount` and are already collapsed server-side —
+ * one row per logical failure, recurrenceCount tracks observation count.
+ * For those rows, this function just maps `recurrenceCount → duplicateCount`
+ * (subtracting 1 because the card shows "+N more" while recurrenceCount
+ * counts the row itself).
+ *
+ * Legacy pre-PR-7 rows (no dedupKey) still go through the original
+ * (title + storyId, 60s window) bucket logic — necessary until those rows
+ * age out of the table.
  */
 export interface DedupedAttentionItem extends AttentionItem {
   duplicateCount: number;
@@ -25,13 +30,27 @@ export interface DedupedAttentionItem extends AttentionItem {
 const DEDUPE_WINDOW_MS = 60_000;
 
 export function dedupeAttentionItems(items: AttentionItem[]): DedupedAttentionItem[] {
-  const sorted = [...items].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  // Split server-deduped (PR-7+) from legacy rows.
+  const serverDeduped: DedupedAttentionItem[] = [];
+  const legacy: AttentionItem[] = [];
+  for (const item of items) {
+    if (item.dedupKey) {
+      const recurrence = item.recurrenceCount ?? 1;
+      serverDeduped.push({
+        ...item,
+        duplicateCount: Math.max(0, recurrence - 1),
+      });
+    } else {
+      legacy.push(item);
+    }
+  }
+
+  // Legacy bucketing — same algorithm as before for non-PR-7 rows.
+  const sorted = [...legacy].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const buckets = new Map<string, DedupedAttentionItem>();
   for (const item of sorted) {
     const storyKey = item.context?.storyId || '-';
     const baseKey = `${item.title}::${storyKey}`;
-    // Look for an existing bucket within the window; because `sorted` is
-    // asc, the first match is the earliest.
     let bucket: DedupedAttentionItem | undefined;
     for (const [key, existing] of buckets) {
       if (!key.startsWith(baseKey)) continue;
@@ -44,15 +63,13 @@ export function dedupeAttentionItems(items: AttentionItem[]): DedupedAttentionIt
     if (bucket) {
       bucket.duplicateCount += 1;
     } else {
-      // Use createdAt in the key so non-overlapping bursts of the same
-      // title+storyId get separate buckets.
       buckets.set(`${baseKey}::${item.createdAt}`, {
         ...item,
         duplicateCount: 0,
       });
     }
   }
-  return Array.from(buckets.values());
+  return [...serverDeduped, ...Array.from(buckets.values())];
 }
 
 export function useAttentionItems(planId: string | null, statusFilter?: AttentionStatus) {

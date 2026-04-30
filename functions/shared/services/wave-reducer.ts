@@ -173,9 +173,10 @@ export async function reduceEpicWaves(
       status: 'fixing',
     });
 
-    // Phase B.4: synthesize one attention item per failed story. Daemon
-    // may have already written an item for the same jobId (retry-exhausted);
-    // UI dedupes client-side on (title, storyId) within a 60s window.
+    // Pipeline v2.0 PR-7 (G+H): synthesize ONE upsert per failed story keyed
+    // on `wave-reducer:test-gate-failed:<storyId>`. Reducer ticks (cron, every
+    // status flip) that observe the same failure now bump `recurrenceCount`
+    // instead of writing duplicate rows. dino1 forensic: 224 dupes → 1 row.
     if (deps.writeAttentionItem && epic.planId) {
       for (const storyId of failedStoryIds) {
         const story = mutableById.get(storyId);
@@ -184,7 +185,7 @@ export async function reduceEpicWaves(
         await deps
           .writeAttentionItem({
             planId: epic.planId,
-            itemId: deps.uuid(),
+            itemId: deps.uuid(), // legacy field; daemon writer ignores when dedupKey is set
             createdAt: deps.now(),
             resolvedAt: null,
             severity: 'high',
@@ -205,6 +206,9 @@ export async function reduceEpicWaves(
               { label: 'Retry step', kind: 'retry-step' },
             ],
             status: 'open',
+            // PR-7 (G): stable identifier so subsequent reducer ticks bump
+            // recurrence instead of creating duplicates.
+            dedupKey: `wave-reducer:test-gate-failed:${storyId}`,
           })
           .catch(() => {
             // swallow — attention writes must never break the reducer
@@ -258,7 +262,8 @@ export async function reduceEpicWaves(
       status: 'fixing',
     });
 
-    // Phase B.4: attention item for the failed build-check.
+    // Pipeline v2.0 PR-7 (G+H): one upsert per (epic, wave) build-check.
+    // Cron ticks during the operator's debugging session don't multiply rows.
     if (deps.writeAttentionItem && epic.planId) {
       await deps
         .writeAttentionItem({
@@ -282,6 +287,7 @@ export async function reduceEpicWaves(
             { label: 'Retry step', kind: 'retry-step' },
           ],
           status: 'open',
+          dedupKey: `wave-reducer:wave-build-check-failed:${epic.epicId}:${currentWave}`,
         })
         .catch(() => {
           // swallow — attention writes must never break the reducer
