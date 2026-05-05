@@ -419,6 +419,56 @@ const BASELINE_DIFF_AUGMENTS: Array<{ path: string; content: string }> = [
   },
 ];
 
+// ── PR-41 — Frozen-file husky pre-commit hook (Story 2-A-5-2) ─────────────
+//
+// Defense-in-depth alongside the runtime tamper-check (Story 2-A-5-1). Per
+// v2.5 §16: the husky pre-commit hook reads .pipeline/frozen.txt and
+// refuses commits that touch any file listed there. Even if the
+// `--disallowedTools` glob is somehow bypassed, git won't accept the
+// commit.
+//
+// The hook is a no-op when `.pipeline/frozen.txt` is missing — for
+// projects that haven't run a v2 plan yet, or for legacy commits
+// originating outside the pipeline.
+
+const FROZEN_FILE_PRECOMMIT_SH = `#!/usr/bin/env bash
+# Pipeline v2 — frozen-file pre-commit guard (Story 2-A-5-2 / v2.5 §16).
+# Refuses to commit changes to any file listed in .pipeline/frozen.txt.
+# No-op when .pipeline/frozen.txt is missing.
+
+if [ ! -f .pipeline/frozen.txt ]; then
+  exit 0
+fi
+
+# Iterate staged files; fail with a clear message on the first match.
+violations=""
+while IFS= read -r staged; do
+  if grep -qxF "$staged" .pipeline/frozen.txt 2>/dev/null; then
+    violations="$violations\n  $staged"
+  fi
+done < <(git diff --cached --name-only)
+
+if [ -n "$violations" ]; then
+  echo "BLOCKED: pre-commit refuses staged changes to frozen files:" >&2
+  printf "$violations\\n" >&2
+  echo "" >&2
+  echo "These files were locked at the end of the test-author step." >&2
+  echo "If you legitimately need to modify them, the pipeline's" >&2
+  echo "tamper-check + acceptBaselineDrift mechanism is the path." >&2
+  exit 1
+fi
+
+exit 0
+`;
+
+// Frozen-file augments. Husky integration: the hook installs into
+// .husky/pre-commit alongside the existing lint-staged hook (the daemon's
+// `husky install` runs as part of post-create scaffolding for nextjs-base
+// per BMAD's pre-existing setup).
+const FROZEN_FILE_AUGMENTS: Array<{ path: string; content: string }> = [
+  { path: '.husky/pre-commit-frozen', content: FROZEN_FILE_PRECOMMIT_SH },
+];
+
 // PR-13 — nextjs-base config extracted to a top-level const so derivative
 // starter packs can spread it (`{ ...NEXTJS_BASE_PACK, type: 'nextjs-...' }`)
 // during the registry literal's construction. Inlining inside the literal
@@ -503,7 +553,10 @@ const NEXTJS_BASE_PACK: BoilerplateMetadata = {
     regressCheckPath: 'scripts/check-regressions.sh',
     testRunner: 'vitest',
   },
-  augmentFiles: BASELINE_DIFF_AUGMENTS,
+  // PR-35 + PR-41 — base augments concat baseline-diff scripts +
+  // frozen-file husky guard. createStarterPack merges starter-specific
+  // augments on top.
+  augmentFiles: [...BASELINE_DIFF_AUGMENTS, ...FROZEN_FILE_AUGMENTS],
 };
 
 /**

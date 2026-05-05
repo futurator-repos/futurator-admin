@@ -22,6 +22,41 @@ const workingDir = '/home/ubuntu/projects/foo';
  * docs/concepts/pipeline-v2/baseline-diff-design.md §3.2.
  */
 
+describe('PR-41 — tamper-check promoted to mvp+ rigor (Story 2-A-5-1)', () => {
+  it('prototype rigor — tamper-check absent', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'prototype',
+    });
+    const ids = pipeline.steps.map((s) => s.id);
+    expect(ids).not.toContain('tamper-check');
+  });
+
+  it('mvp rigor — tamper-check present (newly enabled by PR-41)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const ids = pipeline.steps.map((s) => s.id);
+    expect(ids).toContain('tamper-check');
+  });
+
+  it('production rigor — tamper-check still present (was already enabled)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'production',
+    });
+    const ids = pipeline.steps.map((s) => s.id);
+    expect(ids).toContain('tamper-check');
+  });
+
+  it('tamper-check sits between test-verify and baseline-regression', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const ids = pipeline.steps.map((s) => s.id);
+    expect(ids.indexOf('tamper-check')).toBeGreaterThan(ids.indexOf('test-verify'));
+    expect(ids.indexOf('tamper-check')).toBeLessThan(ids.indexOf('baseline-regression'));
+  });
+});
+
 describe('PR-40 — single-pass test-verify (Story 2-A-6-1)', () => {
   it('test-verify uses vitest --changed HEAD~1 with npm test fallback', () => {
     const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {

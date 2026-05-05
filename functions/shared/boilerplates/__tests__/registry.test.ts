@@ -248,3 +248,36 @@ describe('PR-35 — baseline-diff regression gate', () => {
     expect(cgPaths).toContain('src/game/types.ts');
   });
 });
+
+describe('PR-41 — frozen-file pre-commit hook (Story 2-A-5-2)', () => {
+  it('nextjs-base ships .husky/pre-commit-frozen as an augment', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-base'];
+    const paths = (meta.augmentFiles ?? []).map((f) => f.path);
+    expect(paths).toContain('.husky/pre-commit-frozen');
+  });
+
+  it('hook is a bash script that reads .pipeline/frozen.txt', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-base'];
+    const hook = meta.augmentFiles?.find((f) => f.path === '.husky/pre-commit-frozen');
+    expect(hook?.content.startsWith('#!/usr/bin/env bash')).toBe(true);
+    expect(hook?.content).toContain('.pipeline/frozen.txt');
+    expect(hook?.content).toContain('git diff --cached --name-only');
+    expect(hook?.content).toContain('BLOCKED');
+  });
+
+  it('hook is no-op when frozen.txt missing (legacy + fresh-clone safe)', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-base'];
+    const hook = meta.augmentFiles?.find((f) => f.path === '.husky/pre-commit-frozen');
+    expect(hook?.content).toContain('exit 0');
+    expect(hook?.content).toMatch(/if \[ ! -f \.pipeline\/frozen\.txt/);
+  });
+
+  it.each(['nextjs-canvas-game', 'nextjs-form-app', 'nextjs-dashboard'] as BoilerplateType[])(
+    '%s — inherits the frozen-file hook from nextjs-base',
+    (type) => {
+      const meta = BOILERPLATE_REGISTRY[type];
+      const paths = (meta.augmentFiles ?? []).map((f) => f.path);
+      expect(paths).toContain('.husky/pre-commit-frozen');
+    },
+  );
+});

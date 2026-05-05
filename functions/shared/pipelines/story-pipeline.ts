@@ -82,7 +82,13 @@ export function generateStoryPipeline(
   const rigor: PlanRigor = opts.rigor || 'mvp';
   const boilerplateKind: BoilerplateType = opts.boilerplateKind || 'nextjs-base';
   const testsOn = rigor !== 'prototype';
-  const tamperOn = rigor === 'production';
+  // PR-41 (Story 2-A-5-1): tamper-check promoted from production-only to
+  // mvp+. The Phase 1 implementation gated this to production rigor because
+  // it was untested at lower rigors; v2.5 §16 specifies mvp+ scope and the
+  // brick-breaker incident class fires regardless of rigor. The shell
+  // snippet below is unchanged in mechanics — `git diff --name-only HEAD`
+  // against the TEST-authored file set, auto-revert on detection.
+  const tamperOn = testsOn;
   const redGateOn = rigor === 'production';
   // Story A.6: <run_command> default (Python static server) — overridable at
   // plan creation. Wired into the DEV prompt's VERIFICATION section so the
