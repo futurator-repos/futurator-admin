@@ -22,6 +22,35 @@ const workingDir = '/home/ubuntu/projects/foo';
  * docs/concepts/pipeline-v2/baseline-diff-design.md §3.2.
  */
 
+describe('PR-40 — single-pass test-verify (Story 2-A-6-1)', () => {
+  it('test-verify uses vitest --changed HEAD~1 with npm test fallback', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'test-verify');
+    expect(step?.stepType).toBe('shell');
+    expect(step?.command).toContain('npx vitest run --changed HEAD~1');
+    expect(step?.command).toContain('|| npm test');
+  });
+
+  it('DEV prompt forbids running tests (single-pass discipline)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const dev = pipeline.steps.find((s) => s.id === 'dev');
+    expect(dev?.prompt).toMatch(/Do NOT run.*npm test/);
+    expect(dev?.prompt).toMatch(/single-pass/i);
+  });
+
+  it('test-verify still skipped under prototype rigor (no test-on)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'prototype',
+    });
+    const ids = pipeline.steps.map((s) => s.id);
+    expect(ids).not.toContain('test-verify');
+  });
+});
+
 describe('PR-36 baseline-regression step', () => {
   it('prototype rigor — step is absent', () => {
     const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {

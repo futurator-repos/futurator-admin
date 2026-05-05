@@ -294,9 +294,10 @@ ${story.description}
 - Do NOT spawn the Task / Agent / Explore subagents — they re-read the codebase from scratch and burn 10–25 tool calls per turn for context you already have.
 - Read at most the files you intend to modify. Do them in ONE message with parallel Read calls — never one Read per turn.
 
-## VERIFICATION (Story A.6):
+## VERIFICATION (Story A.6 + PR-40 Story 2-A-6-1):
 - Do NOT Read a file you just Wrote or Edited. The Write/Edit tools error when they fail; their absence of an error IS the verification.
 - Do NOT run \`npm run dev\`, \`node --check\`, or \`node --input-type=module\` for ad-hoc syntax checks. The project's runtime command is: \`${runCommand}\`. The build/test gates downstream of this step will catch real regressions.
+- Do NOT run \`npm test\`, \`npx vitest\`, or any test runner. The pipeline's \`test-verify\` step (single-pass per v2.5 §17) runs the suite immediately after this step and is authoritative. Running tests yourself doubles cost and turn count for the same signal.
 - Visual tests live at \`${workingDir}/visual-tests.md\` (the daemon merges your \`---VISUAL_TESTS---\` block into that file automatically, Story A.2). Treat it as the contract — your code must make every entry pass at runtime.${
           testsOn
             ? `
@@ -357,14 +358,29 @@ Write one test per needs_browser=true criterion. Be specific about what the visu
         validations: [],
       },
 
-      // Phase C.3: test-verify (mvp + production). Assert tests now pass
-      // after dev's changes. Skipped for prototype.
+      // Phase C.3 + PR-40 (Story 2-A-6-1): test-verify (mvp + production).
+      //
+      // v2.5 §17 single-pass-verification — DEV is instructed to NOT run
+      // tests itself (see DEV prompt); test-verify is the authoritative
+      // single pass. Optimization: try the changed-files-only run first
+      // (`vitest --changed HEAD~1`); if vitest can't determine the changed
+      // set or the project doesn't use git history that way, fall back to
+      // the full suite. Both modes use the same exit code semantics.
+      //
+      // The `npx vitest run` form is preferred over `npm test` for the
+      // changed-files mode because npm wrapper scripts often don't pass
+      // `--changed` through cleanly. The fallback to `npm test` after the
+      // `||` keeps the gate honest if vitest CLI flags drift.
       ...(testsOn
         ? ([
             {
               id: 'test-verify',
               stepType: 'shell' as const,
-              command: `cd ${workingDir} && npm test --silent > /tmp/test-verify.log 2>&1; tail -80 /tmp/test-verify.log || true`,
+              command:
+                `cd ${workingDir} && ` +
+                `(npx vitest run --changed HEAD~1 --silent > /tmp/test-verify.log 2>&1 || ` +
+                `npm test --silent > /tmp/test-verify.log 2>&1); ` +
+                `tail -80 /tmp/test-verify.log || true`,
               timeout: 180000,
               captureAs: 'TEST_VERIFY_OUTPUT',
               expectExitCode: 0,
