@@ -1,4 +1,5 @@
 import type { PipelineDefinition } from '../types/agent-orchestrator';
+import { buildAgentConfig } from './role-policy';
 
 /**
  * Wave-level build + server-check pipeline.
@@ -18,11 +19,14 @@ export function generateWaveBuildPipeline(
   return {
     maxIterations: 3,
     agents: {
-      DEV: {
+      // PR-32 — DEV-as-Build-Fixer policy resolved from RolePolicy.
+      DEV: buildAgentConfig({
+        boilerplateKind: 'nextjs-base',
+        rigor: 'mvp',
+        role: 'DEV',
         name: 'Build Fixer',
-        allowedTools: 'Bash,Read,Edit,Write,Glob,Grep',
         model: 'sonnet',
-      },
+      }),
     },
     steps: [
       // 1. Build check

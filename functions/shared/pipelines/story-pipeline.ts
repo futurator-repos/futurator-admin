@@ -1,6 +1,8 @@
 import type { EpicStory } from '../types/epic-workflow';
 import type { PipelineDefinition, PipelineStep } from '../types/agent-orchestrator';
 import type { PlanRigor } from '../types/plan';
+import type { BoilerplateType } from '../boilerplates/registry';
+import { buildAgentConfig } from './role-policy';
 
 /**
  * Story E.1 — feature flag for the wave-close knowledge compiler. When
@@ -47,6 +49,13 @@ export function generateStoryPipeline(
     epicId?: string;
     /** Plan rigor dial — drives which test steps are included. Defaults to 'mvp'. */
     rigor?: PlanRigor;
+    /**
+     * Boilerplate kind — drives the typed RolePolicy resolver (PR-32). Today
+     * the resolver doesn't branch on kind, but the field exists so future
+     * Phase 2-D work (per-stack test runners, Vite vs Next.js conventions)
+     * can plug in without touching every call site.
+     */
+    boilerplateKind?: BoilerplateType;
     /** When true, also author Playwright browser tests (not just unit). */
     hasBrowserTests?: boolean;
     /**
@@ -71,6 +80,7 @@ export function generateStoryPipeline(
   // Strip trailing slashes before splitting to avoid empty string from pop()
   const projectId = workingDir.replace(/\/+$/, '').split('/').filter(Boolean).pop() || 'unknown';
   const rigor: PlanRigor = opts.rigor || 'mvp';
+  const boilerplateKind: BoilerplateType = opts.boilerplateKind || 'nextjs-base';
   const testsOn = rigor !== 'prototype';
   const tamperOn = rigor === 'production';
   const redGateOn = rigor === 'production';
@@ -104,51 +114,46 @@ export function generateStoryPipeline(
     },
     maxIterations: 3,
     agents: {
-      // Pipeline v2.0 PR-3 — explicit `disallowedTools` on every agent so
-      // dino1-style subagent spawns (REVIEWER calling the Explore subagent,
-      // burning ~$0.50 per review) are unbypassable at the CLI layer. The
-      // allowedTools list already restricts the surface; disallowedTools
-      // is belt-and-suspenders against CLI semantic drift.
-      DEV: {
+      // PR-32 — agent allowlists resolved from the typed RolePolicy at spawn
+      // time. The resolver carries forward Phase 1 PR-3's tightening (PR-3
+      // baseline deny: Task / Agent / WebFetch / WebSearch on every role) and
+      // adds the v2.5 §10 read-only stance for REVIEWER/COMPILER. Tunable in
+      // one place (`role-policy.ts`); call sites stay declarative.
+      DEV: buildAgentConfig({
+        boilerplateKind,
+        rigor,
+        role: 'DEV',
         name: 'Developer',
-        allowedTools: 'Bash,Read,Edit,Write,Glob,Grep',
-        // Bash IS allowed (runCommand); B8 deny-pattern enforces sub-command
-        // hygiene. Task/Agent (subagent spawn), WebFetch/WebSearch (network
-        // round-trips) have no place in a story DEV step.
-        disallowedTools: 'Task,Agent,WebFetch,WebSearch',
         model: opts.devModel || undefined,
-      },
-      REVIEWER: {
+      }),
+      REVIEWER: buildAgentConfig({
+        boilerplateKind,
+        rigor,
+        role: 'REVIEWER',
         name: 'Code Reviewer',
-        // No Bash, no Write/Edit — reviewer's job is read-only. The diff is
-        // pre-computed by `compile-diff` and passed via the prompt; reviewer
-        // doesn't need to shell out for anything.
-        allowedTools: 'Read,Grep,Glob',
-        disallowedTools: 'Write,Edit,Bash,Task,Agent,WebFetch,WebSearch',
         model: opts.reviewerModel || undefined,
-      },
+      }),
       // Phase C.3: TEST agent (Tier 1). Scoped to writing test files only —
       // unit tests in `*.test.*` / `__tests__/**` and browser tests in
       // `e2e/**` / `tests/**`. The tamper-check step (C.4) enforces that
       // Dev doesn't edit these outputs.
-      TEST: {
+      TEST: buildAgentConfig({
+        boilerplateKind,
+        rigor,
+        role: 'TEST',
         name: 'Test Author',
-        allowedTools: 'Bash,Read,Write,Edit,Glob,Grep',
-        disallowedTools: 'Task,Agent,WebFetch,WebSearch',
         model: opts.testModel || 'sonnet',
-      },
-      COMPILER: {
+      }),
+      COMPILER: buildAgentConfig({
+        boilerplateKind,
+        rigor,
+        role: 'COMPILER',
         name: 'Knowledge Compiler',
-        // No Bash — knowledge-graph ops are pure file IO; compiler doesn't
-        // shell out. (T1.3's bash-first compile moves the mechanical 90% of
-        // this work to shell scripts run by the daemon, not the agent.)
-        allowedTools: 'Read,Write,Edit,Glob,Grep',
-        disallowedTools: 'Bash,Task,Agent,WebFetch,WebSearch',
         // Story A.1: env-gated, default 'haiku'. Set COMPILER_MODEL=sonnet to
         // roll back if Haiku output quality regresses on a given epic.
         // Haiku is also kinder on t2.micro memory than Sonnet.
         model: process.env.COMPILER_MODEL || 'haiku',
-      },
+      }),
     },
     steps: [
       // Phase C.3: TEST agent authors failing tests BEFORE dev runs (mvp +

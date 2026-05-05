@@ -2,6 +2,7 @@ import type { PipelineDefinition } from '../types/agent-orchestrator';
 import { buildPmPlanPrompt } from '../prompts/pm-plan-prompt';
 import type { BoilerplateType } from '../boilerplates/registry';
 import type { PlanRigor } from '../types/plan';
+import { buildAgentConfig } from './role-policy';
 
 /**
  * PM-plan pipeline — single-step agent invocation that outputs Plan JSON.
@@ -34,11 +35,14 @@ export function generatePmPlanPipeline(args: {
   return {
     maxIterations: 2,
     agents: {
-      PM: {
+      // PR-32 — PM allowlist resolved from typed RolePolicy.
+      PM: buildAgentConfig({
+        boilerplateKind: args.boilerplateType,
+        rigor: args.rigor,
+        role: 'PM',
         name: 'Product Manager',
-        allowedTools: 'Read',
         model: args.devModel || 'sonnet',
-      },
+      }),
     },
     steps: [
       {

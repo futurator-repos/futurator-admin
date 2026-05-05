@@ -4,6 +4,7 @@ import type {
   ConcurrencyClass,
 } from '../types/agent-orchestrator';
 import type { EpicStory } from '../types/epic-workflow';
+import { buildAgentConfig } from './role-policy';
 
 /**
  * Wave-compile pipeline — Epic E.2 / E.3 / E.4 (pipeline-v1 dev correction).
@@ -119,13 +120,22 @@ export function generateWaveCompilePipeline(input: WaveCompilePipelineInput): Pi
     },
     maxIterations: 1,
     agents: {
-      COMPILER: {
+      // PR-32 — wave COMPILER policy resolved from RolePolicy. Note: this
+      // closes a Phase-1 oversight where the wave-compile COMPILER had no
+      // `disallowedTools` (the story-pipeline COMPILER did via PR-3). The
+      // resolver normalizes both to deny `Bash,Task,Agent,WebFetch,WebSearch`.
+      // Boilerplate kind + rigor default — wave-compile runs after the wave
+      // has completed and doesn't carry plan context yet (Story 2-A-1-2 will
+      // thread these through).
+      COMPILER: buildAgentConfig({
+        boilerplateKind: 'nextjs-base',
+        rigor: 'mvp',
+        role: 'COMPILER',
         name: 'Wave Knowledge Compiler',
-        allowedTools: 'Read,Write,Edit,Glob,Grep',
         // Story A.1 / E.4: env-gated, default 'haiku'. Sonnet caused OOM
         // when running on t2.micro alongside dev work.
         model: compilerModel || process.env.COMPILER_MODEL || 'haiku',
-      },
+      }),
     },
     steps: [
       // Step 1: collect the wave diff into a single string the compiler agent

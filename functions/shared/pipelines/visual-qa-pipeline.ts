@@ -38,14 +38,11 @@
  */
 
 import type { PipelineDefinition } from '../types/agent-orchestrator';
-import type {
-  VisualTestDef,
-  VisualTestFlowStep,
-  VisualTestLevel,
-} from '../types/epic-workflow';
+import type { VisualTestDef, VisualTestFlowStep, VisualTestLevel } from '../types/epic-workflow';
 import type { Plan } from '../types/plan';
 import type { BoilerplateMetadata } from '../boilerplates/types';
 import { parseVisualTestViewport, formatViewport } from '../services/visual-test-classifier';
+import { buildAgentConfig } from './role-policy';
 
 // ── Parser ───────────────────────────────────────────────────────────
 
@@ -64,38 +61,29 @@ import { parseVisualTestViewport, formatViewport } from '../services/visual-test
  */
 export function parseVisualTests(raw: string): VisualTestDef[] {
   const tests: VisualTestDef[] = [];
-  const blocks = raw
-    .split(/(?=^- id:)/m)
-    .filter((b) => b.trim().startsWith('- id:'));
+  const blocks = raw.split(/(?=^- id:)/m).filter((b) => b.trim().startsWith('- id:'));
 
   for (const block of blocks) {
     const id = block.match(/^- id:\s*(.+)/m)?.[1]?.trim() || '';
     const criteriaRef = block.match(/criteriaRef:\s*(.+)/m)?.[1]?.trim() || '';
-    const description =
-      block.match(/description:\s*"?([^"\n]+)"?/m)?.[1]?.trim() || '';
+    const description = block.match(/description:\s*"?([^"\n]+)"?/m)?.[1]?.trim() || '';
     const setup = block.match(/setup:\s*"?([^"\n]+)"?/m)?.[1]?.trim() || '';
     const action = block.match(/action:\s*"?([^"\n]+)"?/m)?.[1]?.trim();
     const expect = block.match(/expect:\s*"?([^"\n]+)"?/m)?.[1]?.trim() || '';
 
     // PR-8 fields. All optional in source — the classifier fills gaps.
-    const levelRaw = block.match(/level:\s*(L0|L1|L2)/m)?.[1] as
-      | VisualTestLevel
-      | undefined;
+    const levelRaw = block.match(/level:\s*(L0|L1|L2)/m)?.[1] as VisualTestLevel | undefined;
     const viewport = block.match(/viewport:\s*(\d+\s*[,x]\s*\d+)/m)?.[1]?.trim();
     const url = block.match(/url:\s*"?([^"\n]+)"?/m)?.[1]?.trim();
     const judge = block.match(/judge:\s*\|\s*\n([\s\S]*?)(?=\n\s*\w+:|$)/m)?.[1]?.trim();
-    const expectTextRaw = block.match(
-      /expectText:\s*\[([^\]]*)\]/m,
-    )?.[1];
+    const expectTextRaw = block.match(/expectText:\s*\[([^\]]*)\]/m)?.[1];
     const expectText = expectTextRaw
       ? expectTextRaw
           .split(',')
           .map((s) => s.trim().replace(/^['"]|['"]$/g, ''))
           .filter(Boolean)
       : undefined;
-    const consoleErrorAllowRaw = block.match(
-      /consoleErrorAllow:\s*\[([^\]]*)\]/m,
-    )?.[1];
+    const consoleErrorAllowRaw = block.match(/consoleErrorAllow:\s*\[([^\]]*)\]/m)?.[1];
     const consoleErrorAllow = consoleErrorAllowRaw
       ? consoleErrorAllowRaw
           .split(',')
@@ -105,9 +93,7 @@ export function parseVisualTests(raw: string): VisualTestDef[] {
 
     // Nested screenshot block: `screenshot:\n    selector: ...\n    waitFor: ...`
     let screenshot: VisualTestDef['screenshot'];
-    const screenshotMatch = block.match(
-      /screenshot:\s*\n((?:\s{4,}[\w-]+:.*\n?)+)/m,
-    );
+    const screenshotMatch = block.match(/screenshot:\s*\n((?:\s{4,}[\w-]+:.*\n?)+)/m);
     if (screenshotMatch) {
       const inner = screenshotMatch[1];
       const selector = inner.match(/selector:\s*['"]?([^'"\n]+)['"]?/)?.[1]?.trim();
@@ -160,9 +146,7 @@ function parseFlowSteps(raw: string): VisualTestFlowStep[] {
   const steps: VisualTestFlowStep[] = [];
   const stepBlocks = raw.split(/(?=\s+-\s*action:)/m).filter((s) => /action:/.test(s));
   for (const sb of stepBlocks) {
-    const action = sb.match(/action:\s*(\w+)/)?.[1] as
-      | VisualTestFlowStep['action']
-      | undefined;
+    const action = sb.match(/action:\s*(\w+)/)?.[1] as VisualTestFlowStep['action'] | undefined;
     if (!action) continue;
     const url = sb.match(/url:\s*['"]?([^'"\n]+)['"]?/)?.[1]?.trim();
     const selector = sb.match(/selector:\s*['"]?([^'"\n]+)['"]?/)?.[1]?.trim();
@@ -407,8 +391,7 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
   const warmupMs = boilerplate?.warmupMs ?? 0;
   // Default boots a Vite-style server. Boilerplate-aware callers pass
   // the right command via qaContext.devCommand.
-  const devCommand =
-    boilerplate?.devCommand ?? `npm run dev -- --host 0.0.0.0 --port`;
+  const devCommand = boilerplate?.devCommand ?? `npm run dev -- --host 0.0.0.0 --port`;
 
   // L0 / L1 / L2 partition. Caller has classified everything by now —
   // any unclassified test is treated as L0 (safest default; pure bash).
@@ -843,11 +826,16 @@ export function buildQaPipeline(
   return {
     maxIterations: 1,
     agents: {
-      QA: {
+      // PR-32 — QA policy resolved from RolePolicy. The resolver adds the
+      // PR-3 baseline deny (Task,Agent,WebFetch,WebSearch) which the
+      // hand-written declaration lacked. Same allowlist as before.
+      QA: buildAgentConfig({
+        boilerplateKind: 'nextjs-base',
+        rigor: 'mvp',
+        role: 'QA',
         name: 'Visual QA Tester',
-        allowedTools: 'Bash,Read,Write,Glob',
         model: 'sonnet',
-      },
+      }),
     },
     steps: [
       {
@@ -879,11 +867,28 @@ FAILED_TESTS:
 [comma-separated IDs or "none"]
 ---END_QA_REPORT---`,
         extractors: {
-          QA_REPORT: { type: 'between', startDelimiter: '---QA_REPORT---', endDelimiter: '---END_QA_REPORT---' },
-          OVERALL_VERDICT: { type: 'regex', pattern: '[*_`]*OVERALL_VERDICT[*_`]*:\\s*[*_`]*\\s*(PASS|FAIL)' },
-          OVERVIEW_URL: { type: 'regex', pattern: '[*_`]*OVERVIEW_URL[*_`]*:\\s*(https?://[^\\s*_`]+)' },
-          SCREENSHOTS: { type: 'between', startDelimiter: 'SCREENSHOTS:', endDelimiter: 'RESULTS:' },
-          FAILED_TESTS: { type: 'regex', pattern: '[*_`]*FAILED_TESTS[*_`]*:\\s*([\\s\\S]*?)(?:\\n\\n|\\nOBSERVATIONS:|---END)' },
+          QA_REPORT: {
+            type: 'between',
+            startDelimiter: '---QA_REPORT---',
+            endDelimiter: '---END_QA_REPORT---',
+          },
+          OVERALL_VERDICT: {
+            type: 'regex',
+            pattern: '[*_`]*OVERALL_VERDICT[*_`]*:\\s*[*_`]*\\s*(PASS|FAIL)',
+          },
+          OVERVIEW_URL: {
+            type: 'regex',
+            pattern: '[*_`]*OVERVIEW_URL[*_`]*:\\s*(https?://[^\\s*_`]+)',
+          },
+          SCREENSHOTS: {
+            type: 'between',
+            startDelimiter: 'SCREENSHOTS:',
+            endDelimiter: 'RESULTS:',
+          },
+          FAILED_TESTS: {
+            type: 'regex',
+            pattern: '[*_`]*FAILED_TESTS[*_`]*:\\s*([\\s\\S]*?)(?:\\n\\n|\\nOBSERVATIONS:|---END)',
+          },
         },
         validations: [],
       },

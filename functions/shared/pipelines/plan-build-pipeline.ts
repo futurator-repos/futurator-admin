@@ -1,4 +1,5 @@
 import type { PipelineDefinition } from '../types/agent-orchestrator';
+import { buildAgentConfig } from './role-policy';
 
 /**
  * Plan-level final integration check.
@@ -29,11 +30,14 @@ export function generatePlanBuildPipeline(
   return {
     maxIterations: 2,
     agents: {
-      DEV: {
+      // PR-32 — DEV-as-Integration-Fixer policy resolved from RolePolicy.
+      DEV: buildAgentConfig({
+        boilerplateKind: 'nextjs-base',
+        rigor: 'mvp',
+        role: 'DEV',
         name: 'Integration Fixer',
-        allowedTools: 'Bash,Read,Edit,Write,Glob,Grep',
         model: 'sonnet',
-      },
+      }),
     },
     steps: [
       // 1. Build check
