@@ -16,6 +16,11 @@
  * [Source: docs/concepts/mycelium-labs-architecture.md#4.4-Deployment-Compilation-Step]
  */
 
+import {
+  buildAllowedToolsString,
+  buildDisallowedToolsString,
+} from './lib/role-policy.mjs';
+
 // ── COMPILER Agent Prompt Template (Post-Deployment) ──
 
 const DEPLOY_COMPILE_PROMPT = `Post-deployment compilation for {{PROJECT_NAME}}.
@@ -128,7 +133,9 @@ export function getDeployCompileSteps(projectId, deployUrl, date) {
         stepType: 'agent',
         agentId: 'COMPILER',
         prompt: DEPLOY_COMPILE_PROMPT,
-        allowedTools: 'Read,Write,Edit,Glob,Grep',
+        // PR-32b — resolved from the daemon role-policy mirror.
+        allowedTools: buildAllowedToolsString('DEPLOY'),
+        disallowedTools: buildDisallowedToolsString('DEPLOY'),
         templateVars: {
           projectId,
           DEPLOY_URL: deployUrl,

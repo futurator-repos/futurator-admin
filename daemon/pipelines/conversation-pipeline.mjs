@@ -19,6 +19,7 @@
  */
 
 import { resolve, join } from 'path';
+import { buildAgentConfig } from './lib/role-policy.mjs';
 
 // ── NEW_KNOWLEDGE parser ────────────────────────────────────────────
 
@@ -191,11 +192,10 @@ export function getConversationPipeline(projectId, userQuery, workingDir, opts =
       projectId,
     },
     agents: {
-      ASSISTANT: {
-        name: 'Project Assistant',
-        allowedTools: 'Read,Grep,Glob,Bash',
-        model,
-      },
+      // PR-32b — CONVERSATION role from the daemon role-policy mirror. Adds
+      // the PR-3 baseline deny + Write/Edit deny the hand-written agent
+      // lacked. Same allowed surface (Bash + Glob + Grep + Read).
+      ASSISTANT: buildAgentConfig({ role: 'CONVERSATION', name: 'Project Assistant', model }),
     },
     steps: [
       // Step 1: Gather project context (shell, ~3s, $0)

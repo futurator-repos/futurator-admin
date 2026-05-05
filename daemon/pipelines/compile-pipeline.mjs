@@ -16,6 +16,7 @@
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { buildAgentConfig } from './lib/role-policy.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -35,17 +36,21 @@ function loadCompilerPrompt() {
 /**
  * Returns the COMPILER agent configuration for the pipeline definition.
  *
- * @returns {{ COMPILER: { name: string, allowedTools: string, model: string } }}
+ * PR-32b — uses the daemon-side role-policy mirror so the allow/deny
+ * strings stay byte-identical to the API Lambda's story-pipeline COMPILER
+ * (parity test in functions/shared/pipelines/__tests__/role-policy-parity.test.ts).
+ *
+ * @returns {{ COMPILER: { name: string, allowedTools: string, disallowedTools: string, model: string } }}
  */
 export function getCompilerAgent() {
   return {
-    COMPILER: {
+    COMPILER: buildAgentConfig({
+      role: 'COMPILER',
       name: 'Knowledge Compiler',
-      allowedTools: 'Read,Write,Edit,Glob,Grep',
       // Haiku is sufficient for structured markdown templating.
       // Sonnet caused OOM on t2.micro when 5 compilers ran in parallel.
       model: 'haiku',
-    },
+    }),
   };
 }
 

@@ -16,6 +16,7 @@
 import { resolve, join } from 'path';
 import neo4j from 'neo4j-driver';
 import { readFile, writeFile, mkdir, access, appendFile } from 'fs/promises';
+import { buildAgentConfig } from './lib/role-policy.mjs';
 
 const BOLT_URI = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
 
@@ -415,11 +416,8 @@ try {
       projectId,
     },
     agents: {
-      ASSISTANT: {
-        name: 'Project Health Analyst',
-        allowedTools: 'Read,Grep,Glob,Bash',
-        model,
-      },
+      // PR-32b — REFLECTION role from the daemon role-policy mirror.
+      ASSISTANT: buildAgentConfig({ role: 'REFLECTION', name: 'Project Health Analyst', model }),
     },
     steps: [
       // Step 1: Gather project context (same as conversation pipeline)

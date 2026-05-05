@@ -12,7 +12,19 @@ import type { Role } from '../role-policy';
 import type { BoilerplateType } from '../../boilerplates/registry';
 import type { PlanRigor } from '../../types/plan';
 
-const ALL_ROLES: Role[] = ['API_AUTHOR', 'TEST', 'DEV', 'REVIEWER', 'COMPILER', 'QA', 'PM'];
+const ALL_ROLES: Role[] = [
+  'API_AUTHOR',
+  'TEST',
+  'DEV',
+  'REVIEWER',
+  'COMPILER',
+  'QA',
+  'PM',
+  // PR-32b — daemon-only roles
+  'CONVERSATION',
+  'REFLECTION',
+  'DEPLOY',
+];
 const ALL_RIGORS: PlanRigor[] = ['prototype', 'mvp', 'production'];
 const ALL_KINDS: BoilerplateType[] = [
   'nextjs-base',
@@ -55,13 +67,15 @@ describe('resolveRolePolicy — cartesian coverage', () => {
     }
   });
 
-  it('every role has Bash denied except DEV / TEST / QA / API_AUTHOR (not API_AUTHOR — Bash also denied)', () => {
-    // Bash allowed: TEST, DEV, QA. Denied for everyone else.
+  it('every role has Bash denied except DEV / TEST / QA / CONVERSATION / REFLECTION (Bash-allowed roles)', () => {
+    // Bash allowed: TEST, DEV, QA (story pipeline) + CONVERSATION, REFLECTION
+    // (daemon-only, PR-32b — they shell out for context gathering).
+    const BASH_ALLOWED_ROLES = new Set<Role>(['TEST', 'DEV', 'QA', 'CONVERSATION', 'REFLECTION']);
     for (const role of ALL_ROLES) {
       const policy = resolveRolePolicy('nextjs-base', 'mvp', role);
       const bashAllowed = policy.allowedTools.includes('Bash');
       const bashDenied = policy.disallowedTools.includes('Bash');
-      const expectedAllowed = role === 'TEST' || role === 'DEV' || role === 'QA';
+      const expectedAllowed = BASH_ALLOWED_ROLES.has(role);
       expect(bashAllowed, `${role} bash allowed`).toBe(expectedAllowed);
       expect(bashDenied, `${role} bash denied`).toBe(!expectedAllowed);
     }

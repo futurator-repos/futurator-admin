@@ -15,6 +15,11 @@
  * [Source: docs/concepts/mycelium-labs-architecture.md#4.3-Epic-Compilation-Step]
  */
 
+import {
+  buildAllowedToolsString,
+  buildDisallowedToolsString,
+} from './lib/role-policy.mjs';
+
 // ── COMPILER Agent Prompt Template ──
 
 const EPIC_COMPILE_PROMPT = `You are the Knowledge Compiler performing an EPIC-LEVEL compilation.
@@ -109,7 +114,11 @@ export function getEpicCompileSteps(projectId, epicId) {
         stepType: 'agent',
         agentId: 'COMPILER',
         prompt: EPIC_COMPILE_PROMPT,
-        allowedTools: 'Read,Write,Edit,Glob,Grep',
+        // PR-32b — resolved from the daemon role-policy mirror so this stays
+        // byte-identical to story-pipeline COMPILER (parity test enforces).
+        // Adds the PR-3 baseline deny that the hand-written string lacked.
+        allowedTools: buildAllowedToolsString('COMPILER'),
+        disallowedTools: buildDisallowedToolsString('COMPILER'),
         templateVars: {
           projectId,
           epicId,

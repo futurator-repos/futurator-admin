@@ -50,6 +50,16 @@ export const RoleSchema = z.enum([
   'COMPILER',
   'QA',
   'PM',
+  // ── Daemon-only roles (PR-32b) ────────────────────────────────────────
+  // The API Lambda never spawns these — they're created by daemon-
+  // orchestrated background jobs (knowledge compile, deploy compile,
+  // conversational agent, self-reflection). Defined here so the schema
+  // covers the full role surface; the daemon mirrors them in
+  // `daemon/pipelines/lib/role-policy.mjs` with byte-identical output
+  // (parity test enforces).
+  'CONVERSATION',
+  'REFLECTION',
+  'DEPLOY',
 ]);
 export type Role = z.infer<typeof RoleSchema>;
 
@@ -138,6 +148,24 @@ const ROLE_BASE: Record<Role, { allowed: readonly string[]; deniedExtras: readon
     allowed: ['Read'],
     deniedExtras: ['Bash', 'Write', 'Edit'],
   },
+
+  // ── Daemon-only roles (PR-32b — see RoleSchema comment) ─────────────────
+  CONVERSATION: {
+    // Read-mostly + Bash for context-gathering shells. No Write/Edit.
+    allowed: ['Bash', 'Read', 'Grep', 'Glob'],
+    deniedExtras: ['Write', 'Edit'],
+  },
+  REFLECTION: {
+    // Health analyst — same shape as CONVERSATION.
+    allowed: ['Bash', 'Read', 'Grep', 'Glob'],
+    deniedExtras: ['Write', 'Edit'],
+  },
+  DEPLOY: {
+    // Deploy compile mutates a small set of knowledge files. Same
+    // allowlist as COMPILER; the prompt is what differs.
+    allowed: ['Read', 'Write', 'Edit', 'Glob', 'Grep'],
+    deniedExtras: ['Bash'],
+  },
 };
 
 // ── Turn caps per rigor (v2.5 §17 matrix) ──────────────────────────────────
@@ -153,6 +181,10 @@ const TURN_CAPS: Record<PlanRigor, Partial<Record<Role, number | null>>> = {
     COMPILER: null,
     QA: null,
     PM: null,
+    // Daemon-only roles — no caps (background jobs, single-pass agents)
+    CONVERSATION: null,
+    REFLECTION: null,
+    DEPLOY: null,
   },
   mvp: {
     API_AUTHOR: 2,
@@ -162,6 +194,9 @@ const TURN_CAPS: Record<PlanRigor, Partial<Record<Role, number | null>>> = {
     COMPILER: null,
     QA: null,
     PM: null,
+    CONVERSATION: null,
+    REFLECTION: null,
+    DEPLOY: null,
   },
   production: {
     API_AUTHOR: 2,
@@ -171,6 +206,9 @@ const TURN_CAPS: Record<PlanRigor, Partial<Record<Role, number | null>>> = {
     COMPILER: null,
     QA: 8,
     PM: 6,
+    CONVERSATION: null,
+    REFLECTION: null,
+    DEPLOY: null,
   },
 };
 
