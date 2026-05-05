@@ -12,6 +12,11 @@ import type { AgentJobStatus, AgentRole } from '../types/agent-orchestrator';
  * - qa            Dedicated QA agent (future role). Reserved for Phase 2.
  * - po            Product-owner / spec-clarification agent. Reserved for Phase 2.
  * - architect     ARCHITECT agent pass (Phase 2). Reserved.
+ * - baseline-check Phase 2-A Story 2-A-4-3 (PR-36) — `baseline-regression`
+ *                 shell step running `scripts/check-regressions.sh` per
+ *                 v2.5 §14. Captures the time the baseline-diff gate
+ *                 spends comparing previously-passing tests against
+ *                 post-DEV state.
  * - compile       Orchestrator machinery: wave/step lifecycle, extraction, validation,
  *                 inference, context-expansion. Does not advance deliverable directly.
  * - human-wait    Time the job is paused waiting for operator action (NEEDS_ATTENTION
@@ -40,6 +45,7 @@ export type TimerCategory =
   | 'qa'
   | 'po'
   | 'architect'
+  | 'baseline-check'
   | 'compile'
   | 'human-wait'
   | 'machine-wait'

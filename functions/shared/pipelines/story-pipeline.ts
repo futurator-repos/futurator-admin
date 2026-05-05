@@ -417,6 +417,55 @@ Write one test per needs_browser=true criterion. Be specific about what the visu
           ] as PipelineStep[])
         : []),
 
+      // PR-36 — baseline-diff regression gate (Story 2-A-4-3). v2.5 §14.
+      //
+      // Runs `scripts/check-regressions.sh` against the wave's baseline. The
+      // script handles three exit cases:
+      //   - exit 0 + "BASELINE_OK"             → no regressions
+      //   - exit 0 + "BASELINE_EMPTY"          → no baseline yet (first
+      //     wave or brownfield app — the gate is no-op until PR-36b ships
+      //     the wave-start capture hook)
+      //   - exit 1 + "BASELINE_REGRESSION_DETECTED REGRESSION_COUNT=<n>"
+      //     → previously-passing tests now fail. mvp+ rigor blocks; the
+      //     rigor branching lives inside the script.
+      //   - exit 2 + "TEST_RUNNER_FAILURE"     → runner crash; distinct
+      //     attention category. PR-36b wires the per-exit-code attention
+      //     surface; today the daemon falls through to its generic
+      //     `step-failed` attention.
+      //
+      // Skipped under prototype rigor (the script also short-circuits
+      // there, but skipping here saves a shell spawn). Skipped when the
+      // boilerplate's `baselineCapture` is null — encoded by the daemon
+      // dispatching with a `BASELINE_GATE_DISABLED` env flag (PR-36b);
+      // for now mvp+ runs the step unconditionally and relies on the
+      // script's BASELINE_EMPTY path.
+      ...(testsOn
+        ? ([
+            {
+              id: 'baseline-regression',
+              stepType: 'shell' as const,
+              command:
+                `cd ${workingDir} && ` +
+                // Skip the gate entirely if check-regressions.sh hasn't been
+                // written to the worktree yet. Brownfield apps created
+                // before PR-35 don't have it; the boilerplate-sync action
+                // (v2.5 §13.2) is the supported recovery. Until then,
+                // BASELINE_GATE_SKIPPED is a clean log marker.
+                `if [ ! -f scripts/check-regressions.sh ]; then ` +
+                `  echo 'BASELINE_GATE_SKIPPED: scripts/check-regressions.sh not found ' \\` +
+                `       '(brownfield app — sync from boilerplate to enable)'; ` +
+                `  exit 0; ` +
+                `fi; ` +
+                `PROJECT_DIR=${workingDir} RIGOR=${rigor} ` +
+                `bash scripts/check-regressions.sh`,
+              timeout: 240000,
+              captureAs: 'BASELINE_OUTPUT',
+              expectExitCode: 0,
+              onFail: { action: 'fail' as const, injectAs: 'BASELINE_ERROR' },
+            },
+          ] as PipelineStep[])
+        : []),
+
       // 2. Code review
       // Story B.3: REVIEWER prompt opens with the same `<project_context>`
       // block as DEV (B.2). Same byte position → prompt cache hits across
