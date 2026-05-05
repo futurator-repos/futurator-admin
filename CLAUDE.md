@@ -19,11 +19,17 @@ Do this before anything else, every time, no exceptions.
 
 ## Recent changes
 
+- **2026-04-21 (Epic 17 — Plan-Based Labs):** Labs is now organized around a
+  first-class **Plan** object: one intent → 1..N epics → stories → waves. A
+  Plan owns its name (= folder slug = deploy URL slug, locked at creation),
+  a persistent `plan.md` on disk, and an epic-level dependency graph that
+  drives plan-waves in addition to the existing story-waves. UI home is the
+  Plans list at `/labs`; individual plans open via `/labs?planId=<id>`.
+  Legacy pre-wipe: all DDB rows + EC2 project folders were cleared
+  2026-04-21 before Epic 17 shipped. Do not try to restore historical epics.
 - **2026-04-17 (EO-7.2):** new epics default to `useEpicOrchestrator: true`.
-  `createEpic` in `functions/shared/repositories/epic-workflow-repository.ts`
-  applies the default only when the caller omits the field. Existing epics are
-  not backfilled. To opt out on a new epic, pass `useEpicOrchestrator: false`
-  explicitly.
+  (Superseded by Epic 17 — use `Plan.executionMode` instead; legacy epics
+  still honor this flag.)
 
 ## ⛔ DEPLOY SAFETY — DO NOT SYNC `out/` TO `futurator-ai-website`
 

@@ -231,10 +231,29 @@ export function useStartAndVerify() {
         intervalMs: 3_000,
       });
 
-      // Step 3: start the daemon service (idempotent — systemctl restart)
+      // Step 3: start the daemon service (idempotent — systemctl restart).
+      // After a fresh EC2 boot, SSM agent takes ~60–90s to register even
+      // though the instance reports state=running. The API surfaces that
+      // window as 503 + code SSM_NOT_READY; tolerate it here and keep
+      // retrying every 5s for up to 2 minutes.
       setStep('starting-daemon');
-      setDetail('Pulling latest daemon code and starting service…');
-      await withRetry(() => api.post('/ec2/start-daemon', {}), 3);
+      setDetail('Waiting for SSM agent to register, then starting daemon…');
+      await waitFor(
+        async () => {
+          try {
+            await api.post('/ec2/start-daemon', {});
+            return true;
+          } catch (err) {
+            const e = err as Error & { code?: string; status?: number };
+            if (e.code === 'SSM_NOT_READY' || e.status === 503) {
+              setDetail('SSM agent still registering — retrying…');
+              return false;
+            }
+            throw e;
+          }
+        },
+        { timeoutMs: 120_000, intervalMs: 5_000 },
+      );
 
       // Step 4: wait for fresh heartbeat
       setStep('waiting-daemon');

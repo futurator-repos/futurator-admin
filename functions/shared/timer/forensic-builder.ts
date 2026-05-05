@@ -236,7 +236,10 @@ async function collectRawEvents(plan: Plan): Promise<AgentEvent[]> {
   }
 
   const PAGE_SIZE = 200;
-  const SEQ_START = '';
+  // DDB rejects empty strings for key-attribute comparisons; '000000' is
+  // lexicographically less than every real eventSeq ('000001'+). See slicer.ts
+  // SEQ_START — same fix applies here (2026-05-04 timer-intel debug).
+  const SEQ_START = '000000';
 
   const allEvents: AgentEvent[] = [];
 

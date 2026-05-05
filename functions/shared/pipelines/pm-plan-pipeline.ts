@@ -24,6 +24,11 @@ export function generatePmPlanPipeline(args: {
   devModel?: string;
   boilerplateType: BoilerplateType;
   rigor: PlanRigor;
+  /**
+   * PR-23d — pass plan kind through so the PM prompt can render the
+   * brownfield clause for `change` plans.
+   */
+  kind?: 'initial' | 'change' | 'experiment';
 }): PipelineDefinition {
   const prompt = buildPmPlanPrompt(args);
   return {

@@ -47,7 +47,14 @@ export function usePlanTiming(planId: string | null) {
       if (q.state.error) return false;
       const data = q.state.data;
       if (!data) return false;
-      return data.isLive ? 5_000 : false;
+      // PR-17 — bumped from 5 s to 60 s. The 5 s cadence was costing one
+      // full slicer recompute every tick (~17 DDB reads × N jobs). Backend
+      // now caches in-memory with a 30 s TTL, so even within a single
+      // 60 s poll cycle, cold-start hits compute and the next 1-2 polls
+      // are cache hits. Net cost: ~12× fewer DDB reads per active polling
+      // operator. UX impact: timing data refreshes once per minute while
+      // a plan is in flight — operators don't watch this real-time anyway.
+      return data.isLive ? 60_000 : false;
     },
   });
 

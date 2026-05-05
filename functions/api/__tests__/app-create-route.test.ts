@@ -229,13 +229,14 @@ describe('POST /api/apps — happy path', () => {
     const res = await postCreateApp({
       appId: 'happy-app',
       displayName: 'Happy App',
+      // PR-13 — accept legacy 'nextjs' input; saga normalizes to 'nextjs-base'.
       boilerplateType: 'nextjs',
       bmadEnabled: true,
     });
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.app.appId).toBe('happy-app');
-    expect(body.app.boilerplateType).toBe('nextjs');
+    expect(body.app.boilerplateType).toBe('nextjs-base');
     expect(body.app.bmadEnabled).toBe(true);
     expect(typeof body.jobId).toBe('string');
     expect(body.jobId.length).toBeGreaterThan(10);
@@ -264,7 +265,8 @@ describe('POST /api/apps — happy path', () => {
     });
     expect(res.status).toBe(201);
     const body = await res.json();
-    expect(body.app.boilerplateType).toBe('nextjs');
+    // PR-13 — default normalized to 'nextjs-base' (legacy 'nextjs' alias maps here).
+    expect(body.app.boilerplateType).toBe('nextjs-base');
     expect(body.app.bmadEnabled).toBe(true);
   });
 });

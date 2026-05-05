@@ -164,6 +164,94 @@ step.id)` — if no row exists, create one; either way `addUsage(...)`
 
 ## P1 — Medium scope, infra-dependent, or behavior-changing
 
+### P1.0a — `compile-diff` empty-diff false-failure cascades into dev re-spawn loop **(URGENT — costs money)**
+
+- **AC ref.** Story `my-2-2` (diff-extraction shell step) + the wave-completion check that decides whether a story is done.
+- **Current state.** When the dev agent correctly identifies that a story's
+  target file is **already implemented** (e.g., from a prior wave attempt
+  that committed), it emits `WORK_SUMMARY: No changes needed` and `---DONE---`.
+  The reviewer passes both ACs cleanly. But the post-review
+  `compile-diff` shell step (Mycelium knowledge-compiler) errors with:
+  ```
+  Shell FAILED: exit 1. EMPTY_DIFF: per-story commit produced no in-scope changes
+  ```
+  The error is **logged as `Compilation FAILED (non-blocking)`** but
+  something downstream (wave-completion check, story-done detection, or the
+  orchestrator's success-condition predicate) is treating the missing
+  knowledge-graph compilation as "story not done" — and **re-launching dev
+  for the same story over and over.** Each re-spawn does ~$5 of work
+  (reads the same two files, sees they're complete, terminates with
+  `[COST HARD] $5.X hit ceiling`), then the cycle repeats.
+- **Observed incident (2026-04-27, dino7).** Story
+  `baf73df9-0744-4195-afa4-63ba67f36897` (collision.js + score) was
+  reviewed PASS at 21:54:00. By 21:56:34 the dev agent had been
+  re-spawned **6+ times in 2 minutes**, each terminating with
+  `[COST HARD] $5.80 → $5.87 → $5.90 → $5.95 → $5.98 → $5.98`.
+  Approximate burn: **~$30 on a single already-complete story** before the
+  operator manually abandoned the Plan. Per-spawn cost ceiling is doing
+  its job (limiting blast radius per spawn) but the orchestrator is
+  re-spawning regardless.
+- **Why deferred.** The Mycelium compile-phase landed in `review` status
+  but the empty-diff edge case wasn't covered — every prior test had dev
+  producing real diffs. The "no changes needed" path only became reachable
+  after the per-story commit step (Story `my-2-2`) shipped, since before
+  that, the working-tree state didn't carry forward between wave attempts.
+- **Suggested approach.** Two layered fixes:
+  1. **Make `compile-diff` exit 0 on EMPTY_DIFF** when the dev step's
+     extracted `WORK_SUMMARY` contains `No changes needed` (or matches a
+     more general "no-op success" signal). The shell would read the dev
+     step's variable from the job row and short-circuit. File: the
+     shell-step that runs `git diff --name-status HEAD~1 HEAD` (likely
+     `daemon/pipelines/lib/compile-diff.mjs` or wherever the
+     `compile-phase` step is configured). Emit a `KNOWLEDGE_COMPILE_SKIPPED`
+     event so observability still records the no-op.
+  2. **Treat compile-phase failure as TRULY non-blocking** in the wave
+     reducer + orchestrator's "is this story done?" predicate. If a
+     reviewer passed all ACs, the story is done — knowledge-graph
+     compilation is purely opportunistic enrichment and must NEVER block
+     wave advancement. Audit `functions/shared/services/wave-reducer.ts`
+     and the daemon's wave-completion check
+     (`functions/cron/wave-completion-check.ts`) to confirm that a story
+     with `review.status='pass' AND compile-phase.status='failed'` is
+     classified as `done`, not `needs-rerun`.
+- **Gotchas.**
+  - Per-spawn cost ceiling caught the bleeding at $5/spawn; without it,
+    a single retry loop could burn $50–$100 before anyone notices.
+    **Keep the per-spawn cap regardless** of how this is fixed.
+  - The dev agent does NOT detect "I just terminated due to cost ceiling"
+    on the next spawn — each spawn starts fresh and re-discovers
+    completion. So cost-ceiling termination is not a self-healing signal;
+    the orchestrator has to break the loop.
+  - When abandoning a Plan stuck in this loop, the daemon's
+    `canDispatchJob` guard (Story 3.2) correctly refuses further dispatches
+    once `Plan.status='abandoned'` — that's the operator's escape hatch.
+- **Workaround until fixed.** If you see `[COST HARD]` repeating on the
+  same story within 1–2 minutes, **abandon the Plan immediately** to break
+  the loop. The story is functionally done (reviewer passed); the
+  abandonment is purely to halt the cost burn. Then start a fresh Plan if
+  needed.
+
+### P1.0b — Per-story compile-phase needs visible "skipped" / "n/a" surface
+
+- **AC ref.** Story `my-2-2` + observability spine.
+- **Current state.** When `compile-diff` errors with `EMPTY_DIFF`, the
+  event log shows `Compilation FAILED (non-blocking)` which reads scary
+  to the operator and is hard to distinguish from a real compilation
+  failure. There's no UI surface that says "this story didn't need
+  compilation, here's why."
+- **Why deferred.** The "(non-blocking)" suffix was a lazy disclaimer
+  added in the Mycelium-2 build because the failure mode was rare; we
+  expected to fix it later when it actually fired regularly.
+- **Suggested approach.** Once P1.0a's fix lands, change the
+  `Compilation FAILED (non-blocking)` log to either
+  `Compilation SKIPPED — no in-scope diff (story was already complete)`
+  on the EMPTY_DIFF path, or hide it from the live-log stream entirely
+  (only log on actual failures). Surface the difference in the story
+  detail view as a chip (`compile: skipped` vs `compile: failed`).
+- **Gotchas.** The wave-reducer change in P1.0a needs to land first;
+  otherwise relabelling the log line without fixing the cascade just
+  hides the bug rather than fixing it.
+
 ### P1.1 — Story 3.3 full party-turn → agent-turn refactor
 
 - **AC ref.** Story 3.3 AC#3: _"`party-turn.mjs` is rewritten as a thin
@@ -1143,6 +1231,107 @@ The following are deliberately NOT in this iteration's scope:
   side-channel. If the project repo on EC2 has stale `.mycelium/`
   directories, the wave-compile sync (item 11) is fine — it doesn't
   read from there. Cleanup is purely cosmetic.
+
+---
+
+## App/Plan v1 — Brownfield Iteration Model (built 2026-04-27)
+
+> **Source spec:** `docs/tech-spec-app-plan-v1.md`
+> **Source plan:** `docs/epics-app-plan-v1.md` (7 epics, 34 stories)
+> **Supersedes:** `docs/concepts/published-feedback-loop-mvp.md` (bug-fix-only design)
+> **Sprint status:** `docs/sprint-status.yaml` `epic-ap-1` … `epic-ap-7`
+
+### What shipped in this batch
+
+- App entity + repo + Zod schemas (Stories 1.1, 1.2)
+- Plan schema modifications: `appId`, `kind`, `intent` ≥10 chars, `iterationLabel`, `noTouchPaths`, new `abandoned` status (Story 1.3)
+- Legacy fields (`name`, `workingDir`, `deployJobIds`) marked `@deprecated` rather than removed — additive migration
+- SST infra: `AppsTable` (PAY_PER_REQUEST, no PITR) + `appId-createdAt-index` GSI on Plans table (Story 1.4)
+- Pre-epic wipe script `scripts/wipe-pre-app-plan-v1.mjs` — Plans + Epics ONLY, never Projects (Story 1.5; H1 fix from gate-check)
+- Seven new App-centric API endpoints + `POST /api/plans/:planId/transition` (Stories 2.1–2.6)
+- Daemon `canDispatchJob` 3-check guard (Plan-terminal / App-tree-dirty / concurrency) — Story 3.2
+- `ORPHANED` job status across enum + state machine + atomic abandon side-effect (App.workingTreeStatus flip) — Stories 3.1, 3.3
+- PM-augmentation prompt template + parser + renderer (Stories 4.1–4.3)
+- Frontend: Apps grid + App detail with Plan timeline + dirty-tree banner + concurrency banner + deploys panel + new App/Plan modals + settings/delete dialogs + status-driven Plan actions bar + URL integrity guard with redirect (Epics 5–7)
+- Centralized link builder `src/lib/links.ts` for the URL migration
+- Playwright smoke `app-navigation.smoke.spec.ts`
+- Tests: 437 passing on the App/Plan v1 surface (typecheck clean)
+
+### Deferred — App/Plan v1 follow-ups
+
+#### AP-D1 — PM-augmentation runtime job-router wiring (P0)
+
+- **AC ref.** Story 4.4.
+- **Current state.** Prompt template, parser, and renderer are committed and unit-tested. The daemon-side handler that picks up a `concept`-status non-initial Plan, spawns Claude with restricted tools, runs the parser, and applies the result via DDB transactWrite is **not yet wired**. The API endpoint `POST /api/apps/:appId/plans` creates the Plan in `concept` but does NOT enqueue a `pm-augmentation` job (the comment in `functions/api/index.ts` notes the deferral).
+- **Why deferred.** Wiring requires substantial daemon integration: a new pipeline kind in `daemon/pipelines/job-router.mjs`, restricted-tools grant on the `claude` CLI spawn, atomic apply step that creates Epic records linked to `planId`, and retry/escalation loop hooks. Out of scope for the initial App/Plan v1 PR; the artifacts ship first so Epic 4 can be picked up cold.
+- **Suggested approach.** Create `daemon/pipelines/pm-augmentation-pipeline.mjs` that loads Plan + App + prior Plans, calls `renderPmAugmentationPrompt`, spawns `claude -p --allowedTools=Read,Grep,Glob,Bash`, captures stdout, calls `parsePmAugmentationResult`, and writes Plan updates + Epic creations in a single `transactWrite`. Add a job kind to `job-router.mjs` and have the API enqueue it on Plan creation (uncomment the placeholder in the `POST /apps/:appId/plans` handler).
+- **Gotchas.** The `Bash` tool grant is broad — pin an allowlist (`git log/blame/show`, `find`, `wc`, `head`, `tail`) in the prompt body itself, since the `claude` CLI's `--allowedTools` doesn't differentiate Bash sub-commands. The atomic apply may exceed the 100-item DDB transactWrite cap if the prompt proposes many epics; fall back to non-atomic with explicit error surfacing.
+
+#### AP-D2 — Atomic abandon transactWrite for PENDING jobs (P1)
+
+- **AC ref.** Story 3.3.
+- **Current state.** Plan abandon flips `Plan.status='abandoned'` and `App.workingTreeStatus='dirty-from-abandoned-plan'` non-atomically (sequential writes). PENDING jobs for the abandoned Plan are NOT swept to `ORPHANED` at abandon time — the daemon's `canDispatchJob` guard catches them on next dispatch (Story 3.2 path).
+- **Why deferred.** AgentJob doesn't carry a top-level `planId` field; jobs link to Plans transitively via pipeline variables (`EPIC_ID` → epic.planId). A planId-indexed sweep at abandon time would require either denormalizing planId onto the job row OR scanning the entire jobs table (expensive). The daemon-guard fallback is functionally sufficient.
+- **Suggested approach.** Either (a) add `planId` to the AgentJob shape, populate it at every createJob site, then write the abandon sweep with a planId GSI scan; or (b) explicit cron sweep that calls `canDispatchJob` against all PENDING jobs whenever an App's `workingTreeStatus` flips. (a) is cleaner long-term.
+- **Gotchas.** Don't kill RUNNING jobs at abandon — let them finish, output discarded since the Plan is terminal. SIGTERM mid-edit produces a *worse* dirty state.
+
+#### AP-D3 — `OrphanedJobsPerHour` CloudWatch metric (P2)
+
+- **AC ref.** Story 3.4.
+- **Current state.** No metric emitted; orphan count is observable only via DDB scan + status filter.
+- **Why deferred.** Pure observability hook — not blocking the feature shipping. Requires `@aws-sdk/client-cloudwatch` PutMetricData wiring on the daemon, plus alarm config in SST or out-of-band.
+- **Suggested approach.** Emit per-App metric on every `markJobOrphaned` call from `daemon/agent-daemon.mjs`. Suggested alarm threshold: ≥3/hour for any single App. Add to `daemon/pipelines/lib/cloudwatch-metrics.mjs` (new file).
+
+#### AP-D4 — Deprecated Plan fields cleanup (P1)
+
+- **AC ref.** Spec §"Removed (now on App)".
+- **Current state.** `Plan.name`, `Plan.workingDir`, `Plan.deployJobIds[]`, `Plan.useEpicOrchestrator` retained on the type, marked `@deprecated`. Statuses `'fixing'` and `'archived'` retained in the union for backward-compat with existing callers (story-rerun-launcher, plan-reducer, archive flow, etc.).
+- **Why deferred.** Removing them up-front would cascade compile errors across ~20 in-flight files modified by parallel pipeline-v1 work (epic-orchestrator, dev correction Epic A–E, party-module, etc.). The additive migration ships v1 cleanly without disturbing those branches.
+- **Suggested approach.** After v2 (GitHub branching) lands, do a cleanup pass: grep for each deprecated field, switch consumers to `App.workingDir` / `App.deployJobIds` / new equivalents, then remove. The `'fixing'` status becomes redundant once App/Plan v1 callers fully replace the legacy `delivered → fixing → delivered` cycle with a new Plan iteration.
+- **Gotchas.** `App.deployJobIds` is App-scoped (across all Plans); `Plan.deployJobIds` was Plan-scoped. The cleanup needs to migrate any reads that assume "this Plan's deploys" to "this App's deploys filtered by Plan".
+
+#### AP-D5 — `Discard changes` in dirty-tree banner (P2)
+
+- **AC ref.** Story 6.5 (epic file Technical Notes).
+- **Current state.** The dirty-tree banner ships with a `Mark resolved` button (flag flip — operator vouches the tree is clean). The `Discard changes` action that was sketched in the team discussion (rsync from a snapshot of the last delivery) is NOT shipped.
+- **Why deferred.** Without git (v2) or a snapshot-on-delivery mechanism (v1.x), there is no way to actually restore the tree to a known-clean state. Operators must manually clean via SSM if needed.
+- **Suggested approach.** Either (a) v1.5: add a daemon-side snapshot step on every `delivered → archived` deploy that copies the working dir to `/home/ubuntu/projects/.snapshots/<appId>/<planId>/`, then a `Discard` API endpoint rsyncs back; or (b) defer entirely to v2 once branches+stash exist. (a) is achievable but adds disk pressure; (b) is cleaner.
+
+#### AP-D6 — `View affected files` drawer (P2)
+
+- **AC ref.** Story 6.5 (epic file Technical Notes).
+- **Current state.** Banner shows the warning copy but the `View affected files` button is NOT in the shipped UI (DirtyTreeBanner currently exposes only `Mark resolved`).
+- **Why deferred.** Best-effort `git status --porcelain` lookup requires either a `.git` directory in the working tree (not guaranteed in pipeline v1 — git integration is v2) or a daemon-side `find -newer` against the last-delivered timestamp. Either path adds a daemon endpoint + UI drawer for marginal v1 value.
+- **Suggested approach.** Wait for v2 GitHub integration; the drawer becomes trivial (`git diff --name-only HEAD@{1}`). v1 ships without it.
+
+#### AP-D7 — App-scoped S3 bundle cleanup on delete (P1)
+
+- **AC ref.** Gate-check finding M3.
+- **Current state.** `DELETE /api/apps/:appId` cascade-deletes Plans + Epics + the App row, but does NOT clean up the deploy bundles at `s3://futurator-ai-website/apps/<appId>/`. A new App created later with the same slug would inherit the prior bundles silently.
+- **Why deferred.** Slug reuse after hard-delete is an edge case in v1 single-tenant usage; the operator can manually `aws s3 rm` if the bundle conflicts. Adding a cleanup step requires daemon-side S3 perms + a redeploy job kind (see AP-D8 below for the redeploy/cleanup pipeline).
+- **Suggested approach.** When ready, add an `s3-bundle-cleanup` job kind to the daemon, enqueued from the DELETE App handler. Include `apps/<slug>/` and `apps/<slug>/deploys/*` in the cleanup. Or: add a pre-create check that warns the operator if the slug has lingering bundles.
+
+#### AP-D8 — Redeploy pipeline runtime (P0)
+
+- **AC ref.** Story 2.5.
+- **Current state.** `POST /api/apps/:appId/redeploy` validates the deployJobId against `App.deployJobIds[]` and returns `202 { status: 'accepted', appId, sourceDeployJobId }`. The actual S3 sync of the prior bundle to `apps/<appId>/` is NOT executed — there's no daemon-side handler yet.
+- **Why deferred.** Same shape problem as AP-D1: requires a new job kind with daemon dispatch wiring. The API contract is in place so the UI's `Re-deploy` button works (returns 202); the deploy itself doesn't happen.
+- **Suggested approach.** Add `daemon/pipelines/redeploy-pipeline.mjs` that runs `aws s3 sync s3://futurator-ai-website/apps/<appId>/deploys/<jobId>/ s3://futurator-ai-website/apps/<appId>/`, then updates `App.currentlyDeployedPlanId` to the Plan that produced `<jobId>`. Wire into `job-router.mjs` and have the API enqueue a job (uncomment the placeholder).
+- **Gotchas.** Confirm with infra that deploy bundles ARE retained at versioned S3 paths — if not, this story expands to also amend the existing deploy pipeline to write versioned copies, which is a larger lift.
+
+#### AP-D9 — `Bash` tool allowlist for PM-augmentation (P0)
+
+- **AC ref.** Gate-check finding M1.
+- **Current state.** PM-augmentation prompt grants `Read, Grep, Glob, Bash`. Bash is broad (any shell command).
+- **Why deferred.** Folded into AP-D1 — the runtime wiring story owns the tool-grant enforcement. The prompt body explicitly states "you are read-only" but `claude --allowedTools` doesn't sub-restrict Bash.
+- **Suggested approach.** When wiring AP-D1, embed the explicit allowlist in the prompt body (`git log/blame/show`, `find`, `wc`, `head`, `tail`). Optionally swap Bash for a custom `safe-bash` wrapper script invoked via Bash that filters commands.
+
+#### AP-D10 — Plan-actions bar `Edit Proposal` (P1)
+
+- **AC ref.** Story 7.2.
+- **Current state.** The `concept`-state actions bar renders an `Edit Proposal` button, but it is a no-op (UI shell only). Operators cannot yet edit the PM-augmentation-proposed epics/stories before approving.
+- **Why deferred.** Requires reusing or extending the existing plan-edit dialog (used by the legacy plans-list UI) to operate on the new `Plan.epicIds[]` + `Plan.noTouchPaths[]` shape. Out of scope for the initial App/Plan v1 PR.
+- **Suggested approach.** Either (a) reuse `src/components/labs/plans/plan-edit-modal.tsx` (if extant) with new fields wired in; or (b) add a separate `EditProposalDialog` that lets the operator edit `iterationLabel`, `noTouchPaths`, and the proposed epics/stories before clicking `Approve & Start Building`.
 
 ---
 

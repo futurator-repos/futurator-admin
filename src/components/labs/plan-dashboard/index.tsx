@@ -128,6 +128,10 @@ export function PlanDashboard({ planId }: { planId: string }) {
   const { data: pmJob } = useAgentJob(pmJobId);
 
   const [applied, setApplied] = useState<Set<string>>(new Set());
+  // PR-25 — track auto-discover attempts so we don't loop. Keyed by planId
+  // because the discover path doesn't know the pmJobId until the API
+  // responds.
+  const [autoDiscovered, setAutoDiscovered] = useState<Set<string>>(new Set());
   useEffect(() => {
     if (!pmJob || !pmJobId || !plan) return;
     if (pmJob.status !== 'COMPLETED') return;
@@ -149,6 +153,35 @@ export function PlanDashboard({ planId }: { planId: string }) {
       })
       .catch((err) => console.error('[PlanDashboard] apply failed', err));
   }, [pmJob, pmJobId, plan, applied, apply, refetch, router, params]);
+
+  // PR-25 — auto-discover fallback for the regenerate-without-pmJobId-in-URL
+  // path. After PR-24 wipes existing epics, the URL no longer has a pmJobId
+  // (it's only set by the new-plan modal at first creation). Result: hard
+  // refresh shows "No epics yet, click Regenerate" even though the new
+  // PM output IS already in DDB and ready to apply.
+  // Fix: when plan exists, has 0 epics, and no pmJobId is known, call
+  // /apply-plan without a jobId — the API endpoint already auto-discovers
+  // the most recent COMPLETED pm-plan job for the plan's workingDir
+  // (functions/api/index.ts:1596 candidates list). One-shot per planId.
+  useEffect(() => {
+    if (!plan) return;
+    if (pmJobId) return; // Use the explicit-pmJobId path above
+    if ((plan.epicIds?.length ?? 0) > 0) return;
+    if (autoDiscovered.has(planId)) return;
+    if (plan.status !== 'concept') return; // Only meaningful in concept stage
+    setAutoDiscovered((s) => new Set(s).add(planId));
+    apply
+      .mutateAsync({}) // jobId omitted → API auto-discovers
+      .then(() => refetch())
+      .catch((err) => {
+        // ValidationError "No completed pm-plan job found" is expected on
+        // brand-new plans (the modal's initial PM hasn't completed yet).
+        // Quiet the noise — let the existing pmJobId path handle that case.
+        if (!/No completed pm-plan job/i.test(String(err?.message || ''))) {
+          console.error('[PlanDashboard] auto-discover apply failed', err);
+        }
+      });
+  }, [plan, planId, pmJobId, autoDiscovered, apply, refetch]);
 
   // ── Job metric hydration (for Hierarchy/Kanban/Gantt views) ────────
   const jobIds = useMemo<string[]>(() => {

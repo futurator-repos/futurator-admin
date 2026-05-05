@@ -80,11 +80,31 @@ function actionIcon(a: Action): string {
   return '\u2022';
 }
 
+function formatActionForCopy(a: Action, idx: number): string {
+  const header = `[${idx + 1}] ${a.timestamp} · ${a.agentId || '?'}/${a.stepId || '?'} · ${a.type}`;
+  if (a.type === 'tool_use') {
+    const parts = [header, `  tool: ${a.toolName}`];
+    if (a.toolInput) parts.push(`  input: ${a.toolInput}`);
+    if (a.toolOutput) parts.push(`  output: ${a.toolOutput}`);
+    return parts.join('\n');
+  }
+  if (a.type === 'step_start') return `${header}\n  ${a.text || ''}`;
+  if (a.type === 'step_complete') return `${header}\n  Step ${a.stepId} complete`;
+  if (a.type === 'error') return `${header}\n  ERROR: ${a.text || ''}`;
+  if (a.type === 'status') return `${header}\n  ${a.text || ''}`;
+  if (a.type === 'extraction')
+    return `${header}\n  ${a.variableName} = ${a.variableValue || ''}`;
+  if (a.type === 'validation')
+    return `${header}\n  ${a.validationPassed ? 'PASS' : 'FAIL'}: ${a.validationLabel || ''}`;
+  return header;
+}
+
 export function StoryLiveOutput({ jobId }: StoryLiveOutputProps) {
   const { data: job } = useAgentJob(jobId);
   const { events } = useAgentEvents(jobId, job?.status);
   const [actionsExpanded, setActionsExpanded] = useState(true);
   const [expandedAction, setExpandedAction] = useState<number | null>(null);
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle');
 
   // Build action list: tool calls with their matched results, status, extractions, validations
   const actions = useMemo(() => {
@@ -178,6 +198,19 @@ export function StoryLiveOutput({ jobId }: StoryLiveOutputProps) {
 
   const lastAction = actions[actions.length - 1];
 
+  const copyAllActions = async () => {
+    const blocks = actions.map((a, i) => formatActionForCopy(a, i));
+    const banner = `Orchestrator actions — job ${jobId} — ${actions.length} entries — exported ${new Date().toISOString()}`;
+    const payload = [banner, '='.repeat(banner.length), '', ...blocks].join('\n\n');
+    try {
+      await navigator.clipboard.writeText(payload);
+      setCopyStatus('copied');
+    } catch {
+      setCopyStatus('error');
+    }
+    setTimeout(() => setCopyStatus('idle'), 1600);
+  };
+
   if (events.length === 0 && !job) {
     return (
       <p className="text-xs text-muted-foreground py-2">Waiting for daemon to pick up job...</p>
@@ -196,23 +229,50 @@ export function StoryLiveOutput({ jobId }: StoryLiveOutputProps) {
       {/* Actions section */}
       {actions.length > 0 && (
         <div className="rounded border border-input">
-          <button
-            type="button"
-            onClick={() => setActionsExpanded(!actionsExpanded)}
-            className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-accent/30"
-          >
-            <div className="flex items-center gap-2 min-w-0 text-xs">
+          <div className="w-full flex items-center justify-between px-3 py-2 hover:bg-accent/30">
+            <button
+              type="button"
+              onClick={() => setActionsExpanded(!actionsExpanded)}
+              className="flex items-center gap-2 min-w-0 text-xs text-left flex-1"
+            >
               <span className="font-semibold">Actions ({actions.length})</span>
               {lastAction && (
                 <span className="text-muted-foreground truncate font-mono text-[11px]">
                   {actionIcon(lastAction)} {actionSummary(lastAction)}
                 </span>
               )}
+            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  copyAllActions();
+                }}
+                title="Copy all actions (with inputs + outputs) to clipboard"
+                className={`rounded border px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                  copyStatus === 'copied'
+                    ? 'border-green-500/60 bg-green-500/10 text-green-500'
+                    : copyStatus === 'error'
+                      ? 'border-red-500/60 bg-red-500/10 text-red-500'
+                      : 'border-input text-muted-foreground hover:text-foreground hover:bg-accent/40'
+                }`}
+              >
+                {copyStatus === 'copied'
+                  ? '\u2713 Copied'
+                  : copyStatus === 'error'
+                    ? 'Copy failed'
+                    : 'Copy logs'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setActionsExpanded(!actionsExpanded)}
+                className="text-muted-foreground text-xs"
+              >
+                {actionsExpanded ? '\u25BC' : '\u25B6'}
+              </button>
             </div>
-            <span className="text-muted-foreground text-xs shrink-0">
-              {actionsExpanded ? '\u25BC' : '\u25B6'}
-            </span>
-          </button>
+          </div>
           {actionsExpanded && (
             <div className="border-t border-input max-h-72 overflow-y-auto">
               {actions.map((a, i) => {

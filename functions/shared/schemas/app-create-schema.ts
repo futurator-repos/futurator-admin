@@ -35,11 +35,27 @@ import { appExecutionModeSchema } from './app-schema';
  */
 export const PV2_APP_SLUG_REGEX = /^[a-z][a-z0-9-]{1,39}$/;
 
-export const boilerplateTypeSchema = z.enum(['nextjs', 'sst', 'vite', 'mobile'], {
-  errorMap: () => ({
-    message: "boilerplateType must be one of: 'nextjs', 'sst', 'vite', 'mobile'",
-  }),
-});
+// PR-13 — `nextjs` renamed to `nextjs-base`; new starter packs added.
+// Legacy `'nextjs'` is still accepted for backward compat with apps already
+// in flight; consumers normalize via `normalizeBoilerplateType`.
+export const boilerplateTypeSchema = z.enum(
+  [
+    'nextjs-base',
+    'nextjs-canvas-game',
+    'nextjs-form-app',
+    'nextjs-dashboard',
+    'sst',
+    'vite',
+    'mobile',
+    'nextjs', // legacy alias — normalized to nextjs-base
+  ],
+  {
+    errorMap: () => ({
+      message:
+        "boilerplateType must be one of: 'nextjs-base', 'nextjs-canvas-game', 'nextjs-form-app', 'nextjs-dashboard', 'sst', 'vite', 'mobile' (or legacy 'nextjs')",
+    }),
+  },
+);
 
 export const appCreateInputSchema = z
   .object({

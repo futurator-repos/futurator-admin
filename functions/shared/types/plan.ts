@@ -87,6 +87,39 @@ export interface Plan {
    */
   autoRunQa?: boolean;
 
+  /**
+   * Party Mode (BMAD) toggle — chosen at plan creation (default ON).
+   *
+   * When `true`, plan creation enqueues a `party-bootstrap` job for the
+   * plan's workingDir: installs BMAD 6.3.x, injects the 8 custom agents,
+   * and creates a PartyProject row keyed by `plan.name`. The Party Mode
+   * stage on the dashboard then surfaces a full chat UI scoped to this
+   * project — agents have Read/Grep/Glob access to the codebase.
+   *
+   * When `false`, the Party Mode stage shows a one-click "Install BMAD"
+   * affordance so the operator can retrofit Party Mode later.
+   */
+  bmadEnabled?: boolean;
+
+  /**
+   * QA → AC manual sign-off. When set, the AC pillar in the QA report treats
+   * every criterion as explicitly approved (regardless of PO job state).
+   * Written by POST /api/plans/:id/approve-ac. Clearable so a reviewer can
+   * un-approve if a story needs rework.
+   */
+  acApproval?: {
+    approvedAt: string;
+    approvedBy: string;
+  };
+
+  /**
+   * Ordered list of every deploy job ever run for this plan (oldest first).
+   * Appended by POST /api/epic-workflows/:id/deploy. The Deploy stage reads
+   * this to render deploy history. Legacy plans without this field fall
+   * back to `epic.deployJobId` of the final epic.
+   */
+  deployJobIds?: string[];
+
   // ── Denormalized rollups for fast list rendering ──
   totalCostUsd: number;
   totalStories: number;
@@ -99,6 +132,48 @@ export interface Plan {
   reviewAt?: string;
   /** Plan-level final build-check job — set by the wave-completion cron when last epic-wave completes. */
   planBuildJobId?: string;
+  /**
+   * Pipeline v2.0 PR-8a — plan-scoped Visual QA job. Replaces the legacy
+   * per-epic `EpicWorkflow.qaJobId` fan-out (one QA job per epic) with a
+   * single QA job that boots one dev server and runs every visual test
+   * across every epic+story in the plan. Legacy `epic.qaJobId` is read
+   * by the dashboard as a fallback for plans created before PR-8a.
+   *
+   * Pipeline v2.0 PR-8d — under the new aggregate+execute split this is
+   * the EXECUTE jobId; the aggregate jobId lives on `qaAggregateJobId`.
+   */
+  qaJobId?: string;
+
+  // ── Pipeline v2.0 PR-8 (Q4) — operator-gated test contract ──────────
+  //
+  // The QA stage runs in two phases. Phase 1 (`qa-aggregate`) produces
+  // `visual-tests-draft.md` + classifier output and pauses for operator
+  // review. Phase 2 (`qa-execute`) runs after the operator POSTs to
+  // `/api/plans/:id/qa-contract/approve`.
+  /** Aggregate-stage jobId — produced when QA is initiated. */
+  qaAggregateJobId?: string;
+  /**
+   * State of the operator-gated contract:
+   *   • `pending` — qa-aggregate emitted a draft, awaiting operator review
+   *   • `approved` — operator approved; qa-execute has been launched
+   *   • `rejected` — operator chose to cancel QA for this plan
+   *
+   * Absent on legacy plans that ran QA before PR-8 (treat as 'approved').
+   */
+  qaContractStatus?: 'pending' | 'approved' | 'rejected';
+  /** ISO timestamp of the most recent contract status transition. */
+  qaContractDecidedAt?: string;
+  /** User who approved/rejected the contract. */
+  qaContractDecidedBy?: string;
+  /**
+   * Pipeline v2.0 PR-8 (Q5.2) — plan-level QA cost ceiling. When the
+   * sum of per-test costs in qa-execute would exceed this, remaining
+   * tests are marked `skipped-budget` and the operator gets a
+   * "QA stopped at X/Y due to budget" signal. Defaults to $1
+   * (redesign §7.2). 0 = no cap.
+   */
+  qaCostBudgetUsd?: number;
+
   /** Previous status when archived, so restore can return to the right state. */
   preArchiveStatus?: PlanStatus;
   archivedAt?: string;

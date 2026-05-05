@@ -37,6 +37,7 @@ const sections: NavSection[] = [
       { href: '/development/apps', label: 'Apps', icon: '🚀' },
       { href: '/development/monitor', label: 'EC2 Monitor', icon: '📊' },
       { href: '/development/agentic-office', label: 'Agentic Office', icon: '🏢' },
+      { href: '/debates', label: 'Debates', icon: '💬' },
       { href: '/labs', label: 'Labs', icon: '🧪' },
     ],
   },

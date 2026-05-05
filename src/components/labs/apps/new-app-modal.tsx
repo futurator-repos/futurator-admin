@@ -44,7 +44,9 @@ export function NewAppModal({
   const [displayName, setDisplayName] = useState('');
   const [icon, setIcon] = useState('📦');
   const [executionMode, setExecutionMode] = useState<'pipeline' | 'orchestrator'>('orchestrator');
-  const [boilerplateType, setBoilerplateType] = useState<BoilerplateType>('nextjs');
+  // PR-13 — default starter is `nextjs-base`. Operator picks a derivative
+  // (canvas-game, form-app, dashboard) when their intent matches a domain.
+  const [boilerplateType, setBoilerplateType] = useState<BoilerplateType>('nextjs-base');
   const [bmadEnabled, setBmadEnabled] = useState<boolean>(true);
   /**
    * Server-side error from the saga (e.g. 409 REPO_EXISTS). Cleared on each
@@ -71,7 +73,7 @@ export function NewAppModal({
     setDisplayName('');
     setIcon('📦');
     setExecutionMode('orchestrator');
-    setBoilerplateType('nextjs');
+    setBoilerplateType('nextjs-base');
     setBmadEnabled(true);
     setServerError(null);
   };

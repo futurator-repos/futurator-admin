@@ -6,10 +6,13 @@
  * (sourced from JWT). The daemon's batch scheduler honors `timezone`
  * (Story 6.2 — once timezone-aware date math is plumbed; v1 falls back
  * to UTC).
+ *
+ * Story 1.7.1: Added link to GitHub integration sub-page (/settings/github).
  */
 import { useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { api } from '@/lib/api-client';
+import Link from 'next/link';
 import { AppShell } from '@/components/layout/app-shell';
 import { AuthGuard } from '@/components/auth/auth-guard';
 import { Button } from '@/components/ui/button';
@@ -64,6 +67,18 @@ function SettingsForm({ initial, refetch }: { initial: Profile; refetch: () => u
         <p className="text-sm text-muted-foreground">
           Personal preferences. Applied per-user; the daemon picks them up via the users table.
         </p>
+      </div>
+
+      {/* Sub-pages */}
+      <div className="rounded border bg-card p-4 space-y-2">
+        <h2 className="text-sm font-semibold">Integrations</h2>
+        <Link
+          href="/settings/github"
+          className="flex items-center justify-between rounded px-3 py-2 text-sm hover:bg-muted transition-colors"
+        >
+          <span>GitHub Integration</span>
+          <span className="text-muted-foreground text-xs">PAT status · rate limit · rotation →</span>
+        </Link>
       </div>
 
       <div className="rounded border bg-card p-4 space-y-4">

@@ -2,8 +2,15 @@
  * Pipeline v2 phase metadata — shared between the Roadmap strip (Story 1.6.1)
  * and the full /labs/roadmap page (Story 1.6.2).
  *
- * Story counts are a hardcoded snapshot of sprint-status.yaml as of 2026-04-27.
- * Reading sprint-status.yaml at runtime is deferred to Phase 2.
+ * Story counts are a hardcoded snapshot of sprint-status.yaml. Real
+ * live-reading from sprint-status.yaml is still deferred to Phase 2.
+ *
+ * 2026-05-05 — Phase 1 wrap. All 26 Phase 1 stories shipped; 4/5 ship-gate
+ * conditions PASS, #4 (3× escalator cohort accumulation) is data-dependent
+ * and satisfies organically as more plans run. Stabilisation pass shipped
+ * as PR-1 → PR-31 (see §14 of epics-pipeline-v2-phase-1.md). Phase 2 entry
+ * point begins at Phase 2-A — Inner-loop discipline; PR-2/3/4/5 already
+ * touched ~30% of that scope.
  */
 
 // ── Story progress snapshot ────────────────────────────────────────────────
@@ -12,10 +19,12 @@
 export const PHASE_1_TOTAL_STORIES = 26;
 
 /**
- * Phase 1 stories currently marked done. Updated manually per sprint; real
- * live-reading from sprint-status.yaml lands in Phase 2.
+ * Phase 1 stories shipped (built + deployed + validated end-to-end). Tracked
+ * informally — sprint-status.yaml has these at `review` (workflow's terminal
+ * pre-retrospective state); we treat shipped + production-validated as the
+ * UI signal. Formal *story-done sweep deferred.
  */
-export const PHASE_1_DONE_STORIES = 2; // 1.6.1 + 1.6.2 shipped
+export const PHASE_1_DONE_STORIES = 26;
 
 /** 0–100 integer progress percentage for Phase 1. */
 export const PHASE_1_PROGRESS_PCT = Math.round(
@@ -59,7 +68,7 @@ const PHASE_1: PhaseData = {
   number: 1,
   title: 'Phase 1 — Substrate',
   tagline: 'GitHub-backed Apps, typed boilerplates, roadmap visibility, Timer Intelligence',
-  status: 'active',
+  status: 'done',
   duration: '~16–18 dev days',
   summary:
     'GitHub repo per App, typed boilerplates (Next.js / SST / Vite / Mobile), real ' +
@@ -98,56 +107,56 @@ const PHASE_1: PhaseData = {
       title: 'Epic 1.1 — Prerequisite settle (PR-1 → PR-12)',
       effort: 'S×3',
       stories: 3,
-      status: 'backlog',
+      status: 'done',
     },
     {
       id: 'pv2-p1-2',
       title: 'Epic 1.2 — GitHub connector + API routes',
       effort: 'M×4',
       stories: 4,
-      status: 'backlog',
+      status: 'done',
     },
     {
       id: 'pv2-p1-3',
       title: 'Epic 1.3 — Boilerplate template repos + registry',
       effort: 'M×3',
       stories: 3,
-      status: 'backlog',
+      status: 'done',
     },
     {
       id: 'pv2-p1-4',
       title: 'Epic 1.4 — App-bootstrap saga + extended New App modal',
       effort: 'M×4',
       stories: 4,
-      status: 'backlog',
+      status: 'done',
     },
     {
       id: 'pv2-p1-5',
       title: 'Epic 1.5 — App detail Repository badge + Source tab',
       effort: 'M×2',
       stories: 2,
-      status: 'backlog',
+      status: 'done',
     },
     {
       id: 'pv2-p1-6',
       title: 'Epic 1.6 — Pipeline v2 Roadmap visibility',
       effort: 'M×2',
       stories: 2,
-      status: 'in-progress',
+      status: 'done',
     },
     {
       id: 'pv2-p1-7',
       title: 'Epic 1.7 — Settings → GitHub panel',
       effort: 'M×1',
       stories: 1,
-      status: 'backlog',
+      status: 'done',
     },
     {
       id: 'pv2-p1-8',
       title: 'Epic 1.8 — Timer Intelligence module',
       effort: 'M×7',
       stories: 7,
-      status: 'backlog',
+      status: 'done',
     },
   ],
 };
@@ -158,7 +167,7 @@ const PHASE_2: PhaseData = {
   number: 2,
   title: 'Phase 2 — Pipeline',
   tagline: 'The 11-step inner loop, branch-per-story, ARCHITECT + aws.manifest.yaml',
-  status: 'pending',
+  status: 'active',
   duration: '~25–30 dev days',
   summary:
     'The 11-step inner loop with tool allowlists at spawn time, branch-per-story ' +
@@ -193,7 +202,7 @@ const PHASE_2: PhaseData = {
       title: 'Phase A — Inner-loop discipline (10 items, partially shipped)',
       effort: '~11 days',
       stories: 10,
-      status: 'backlog',
+      status: 'in-progress',
     },
     {
       id: 'pv2-p2-B',

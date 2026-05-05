@@ -53,93 +53,147 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Futurator-specific extended palette (available as Tailwind utilities) */
+  --color-bg-elev: var(--bg-elev);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border-2: var(--border-2);
+  --color-text-dim: var(--text-dim);
+  --color-text-mute: var(--text-mute);
+  --color-text-faint: var(--text-faint);
+  --color-amber: var(--amber);
+  --color-cyan: var(--cyan);
+  --color-red: var(--red);
+  --color-purple: var(--accent-purple);
+  --color-green: var(--success);
 }
 
+/*
+ * Futurator palette — matches the homepage aesthetic (futurator.ai).
+ * Defaults are tuned for DARK mode (the intended default for the admin hub).
+ * Light mode inverts backgrounds and darkens semantic hues ~15% to preserve
+ * WCAG AA contrast on white.
+ */
+
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  /* ── Light mode ── */
+  --background: #fafafb;
+  --foreground: #0a0b0f;
+  --card: #ffffff;
+  --card-foreground: #0a0b0f;
+  --popover: #ffffff;
+  --popover-foreground: #0a0b0f;
+  --primary: #0a0b0f;
+  --primary-foreground: #fafafb;
+  --secondary: #f4f4f6;
+  --secondary-foreground: #0a0b0f;
+  --muted: #f4f4f6;
+  --muted-foreground: #52555d;
+  --accent: #f4f4f6;
+  --accent-foreground: #0a0b0f;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: #e4e5e9;
+  --input: #e4e5e9;
+  --ring: #6b6f78;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-  --accent-blue: #3b82f6;
+  --sidebar: #f4f4f6;
+  --sidebar-foreground: #0a0b0f;
+  --sidebar-primary: #0a0b0f;
+  --sidebar-primary-foreground: #fafafb;
+  --sidebar-accent: #e4e5e9;
+  --sidebar-accent-foreground: #0a0b0f;
+  --sidebar-border: #e4e5e9;
+  --sidebar-ring: #6b6f78;
+
+  /* Semantic accent hues — darkened for AA on white */
+  --accent-blue: #4a6b92;
   --accent-purple: #7c3aed;
   --success: #059669;
-  --warning: #d97706;
+  --success-foreground: #ffffff;
+  --warning: #b45309;
+  --warning-foreground: #ffffff;
+  --info: #0369a1;
+  --info-foreground: #ffffff;
   --published: var(--success);
   --unpublished: var(--muted-foreground);
+
+  /* Futurator extras — light-mode tuned */
+  --bg-elev: #ffffff;
+  --surface: #f4f4f6;
+  --surface-2: #eceef2;
+  --border-2: #cdced2;
+  --text-dim: #52555d;
+  --text-mute: #6b6f78;
+  --text-faint: #a0a3ab;
+  --amber: #b45309;
+  --cyan: #0e7490;
+  --red: #dc2626;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.145 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.145 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.985 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.396 0.141 25.723);
-  --destructive-foreground: oklch(0.637 0.237 25.331);
-  --border: oklch(0.269 0 0);
-  --input: oklch(0.269 0 0);
-  --ring: oklch(0.439 0 0);
+  /* ── Dark mode — Futurator homepage palette (the default) ── */
+  --background: #050608;
+  --foreground: #ededee;
+  --card: #0a0b0f;
+  --card-foreground: #ededee;
+  --popover: #0a0b0f;
+  --popover-foreground: #ededee;
+  --primary: #ededee;
+  --primary-foreground: #050608;
+  --secondary: #101217;
+  --secondary-foreground: #ededee;
+  --muted: #161920;
+  --muted-foreground: #a0a3ab;
+  --accent: #161920;
+  --accent-foreground: #ededee;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #1c1f27;
+  --input: #1c1f27;
+  --ring: #2a2e38;
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.269 0 0);
-  --sidebar-ring: oklch(0.439 0 0);
-  --accent-blue: #8fc9ff;
+  --sidebar: #0a0b0f;
+  --sidebar-foreground: #ededee;
+  --sidebar-primary: #ededee;
+  --sidebar-primary-foreground: #050608;
+  --sidebar-accent: #161920;
+  --sidebar-accent-foreground: #ededee;
+  --sidebar-border: #1c1f27;
+  --sidebar-ring: #2a2e38;
+
+  --accent-blue: #7893b8;
   --accent-purple: #a78bfa;
-  --success: #34d399;
-  --success-foreground: oklch(0.1 0 0);
-  --warning: #fbbf24;
-  --warning-foreground: oklch(0.1 0 0);
-  --info: #60a5fa;
-  --info-foreground: oklch(0.98 0 0);
+  --success: #22c55e;
+  --success-foreground: #050608;
+  --warning: #d1a54f;
+  --warning-foreground: #050608;
+  --info: #8ab4c7;
+  --info-foreground: #050608;
   --published: var(--success);
   --unpublished: var(--muted-foreground);
+
+  /* Futurator extras — dark-mode tuned (verbatim from prototype) */
+  --bg-elev: #0a0b0f;
+  --surface: #101217;
+  --surface-2: #161920;
+  --border-2: #2a2e38;
+  --text-dim: #a0a3ab;
+  --text-mute: #6b6f78;
+  --text-faint: #3c404a;
+  --amber: #d1a54f;
+  --cyan: #8ab4c7;
+  --red: #ef4444;
 }
 
 @layer base {
@@ -215,4 +269,233 @@
 }
 .dark ::-webkit-scrollbar-thumb:hover {
   background: var(--muted-foreground);
+}
+
+/* ── Party Mode — chat utilities ─────────────────────────────── */
+
+/* Streaming cursor: solid green block that blinks while a message streams */
+@keyframes party-cursor-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+.party-stream-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  background: var(--success);
+  vertical-align: text-bottom;
+  margin-left: 2px;
+  animation: party-cursor-blink 1s infinite;
+}
+
+/* Typing dots — shown next to in-flight status lines in ProcessingIndicator */
+@keyframes party-typing-bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+.party-typing-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  margin: 0 1.5px;
+  animation: party-typing-bounce 1.2s infinite ease-in-out;
+}
+.party-typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.party-typing-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* Soft pulse used for "BMad Master is routing your message" line */
+@keyframes party-soft-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.party-soft-pulse {
+  animation: party-soft-pulse 1.8s infinite ease-in-out;
+}
+
+/* Avatar active ring — currently streaming speaker */
+@keyframes party-avatar-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 50%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--success) 0%, transparent);
+  }
+}
+.party-avatar-active {
+  animation: party-avatar-ring 1.6s infinite ease-out;
+}
+
+/* Inline keyboard hint chip */
+.party-kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted-foreground);
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  line-height: 1.3;
+}
+
+/* Mention pill — @Name */
+.party-mention {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent-blue) 14%, transparent);
+  color: var(--accent-blue);
+  font-weight: 500;
+}
+
+/* File-path link — foo/bar.ts. Used both as <a> (legacy) and <button>
+   (drawer-trigger) — reset button defaults so layout is identical. */
+.party-link-file {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  color: var(--accent-purple);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent-purple) 35%, transparent);
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  display: inline;
+  line-height: inherit;
+}
+.party-link-file:hover {
+  text-decoration-style: solid;
+  color: color-mix(in srgb, var(--accent-purple) 70%, white);
+}
+
+/* External link — adds ↗ suffix */
+.party-link-ext::after {
+  content: ' ↗';
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+
+/* Blockquote */
+.party-quote {
+  border-left: 2px solid color-mix(in srgb, var(--success) 35%, transparent);
+  padding: 2px 0 2px 12px;
+  color: var(--muted-foreground);
+  font-style: italic;
+  margin: 8px 0;
+}
+
+/* Turn divider */
+.party-turn-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 14px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.party-turn-divider-line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border), transparent);
+}
+.party-turn-divider-label {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--muted);
+  font-weight: 500;
+}
+
+/* Token highlight palette (used by code highlighter) */
+.party-tok-keyword {
+  color: #fdba74;
+}
+.party-tok-string {
+  color: #a5b4fc;
+}
+.party-tok-number {
+  color: #f0abfc;
+}
+.party-tok-type {
+  color: #7dd3fc;
+}
+.party-tok-comment {
+  color: #6b7280;
+}
+
+/* ── V2 Discord-style additions (party-mode-ui2) ──────────────── */
+
+/* Skeleton shimmer used while waiting for Claude's first chunk */
+@keyframes party-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+.party-shimmer {
+  background: linear-gradient(90deg, #1f2024 0%, #2a2c31 50%, #1f2024 100%);
+  background-size: 200% 100%;
+  animation: party-shimmer 1.6s infinite linear;
+}
+
+/* Mid-round orchestrator note — soft fade-in when its turn arrives */
+@keyframes party-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.party-mid-note {
+  animation: party-fade-in 220ms ease-out;
+}
+
+/* V2 column resize handle — invisible until hover, then blue accent */
+.party-resize-handle {
+  width: 4px;
+  background: transparent;
+  cursor: col-resize;
+  flex-shrink: 0;
+  transition: background-color 120ms;
+}
+.party-resize-handle:hover,
+.party-resize-handle[data-dragging='true'] {
+  background: rgba(88, 101, 242, 0.5);
 }

@@ -1,0 +1,210 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Labs — Plan Dashboard</title>
+<link rel="stylesheet" href="styles.css"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="data.js"></script>
+<script type="text/babel" src="helpers.jsx"></script>
+<script type="text/babel" src="ProjectSelector.jsx"></script>
+<script type="text/babel" src="Pipeline.jsx"></script>
+<script type="text/babel" src="HierarchyView.jsx"></script>
+<script type="text/babel" src="KanbanView.jsx"></script>
+<script type="text/babel" src="GanttView.jsx"></script>
+
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+function Header({ project, setProject }) {
+  return (
+    <header style={{
+      display: "flex", alignItems: "center", gap: 18,
+      padding: "18px 40px",
+      borderBottom: "1px solid var(--border)",
+      background: "var(--bg)",
+      position: "sticky", top: 0, zIndex: 50,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        <h1 style={{
+          fontSize: 17, fontWeight: 300, color: "var(--text)",
+          letterSpacing: "0.42em", textTransform: "uppercase",
+        }}>L A B S</h1>
+        <span style={{ width: 1, height: 14, background: "var(--border-2)" }}/>
+        <span className="mono" style={{ fontSize: 9, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.22em" }}>
+          Plans
+        </span>
+      </div>
+      <div style={{ marginLeft: 8 }}>
+        <ProjectSelector current={project} onChange={setProject}/>
+      </div>
+      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 14, fontSize: 10 }} className="mono">
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+          <span className="dot dot-pulse" style={{ background: "var(--green)", width: 6, height: 6 }}/>
+          Daemon
+        </span>
+        <span style={{ color: "var(--text-faint)" }}>·</span>
+        <span style={{ color: "var(--text-mute)", letterSpacing: "0.08em", textTransform: "uppercase" }}>EC2</span>
+        <span style={{ color: "var(--text-faint)" }}>·</span>
+        <span style={{ color: "var(--text-mute)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+          <span style={{ color: "var(--text)" }}>2</span> / 3 slots
+        </span>
+        <span style={{ color: "var(--text-faint)" }}>·</span>
+        <span style={{ color: "var(--text-mute)", cursor: "pointer", letterSpacing: "0.08em", textTransform: "uppercase" }}>↻ Re-auth</span>
+      </div>
+    </header>
+  );
+}
+
+function ProjectHero({ project }) {
+  const meta = STATUS_META[project.status];
+  const pct = project.totalStories ? Math.round((project.doneStories / project.totalStories) * 100) : 0;
+  return (
+    <div style={{ padding: "40px 40px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 10, color: "var(--text-faint)", marginBottom: 18, textTransform: "uppercase", letterSpacing: "0.18em" }} className="mono">
+        <span style={{ cursor: "pointer" }}>← Labs</span>
+        <span>/</span>
+        <span>Plans</span>
+        <span>/</span>
+        <span style={{ color: "var(--text-dim)" }}>{project.name}</span>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 28, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 320 }}>
+          <h2 style={{
+            fontSize: 56, fontWeight: 200, color: "var(--text)",
+            letterSpacing: "-0.02em", lineHeight: 1,
+            fontFamily: "var(--font-display)",
+          }}>{project.name}</h2>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 14 }}>
+            <span className="mono" style={{
+              fontSize: 9, color: meta.color,
+              textTransform: "uppercase", letterSpacing: "0.22em",
+              padding: "4px 10px", borderRadius: 2,
+              border: `1px solid ${meta.color}55`,
+              background: `${meta.color}0c`,
+            }}>
+              {meta.label}
+            </span>
+            <span className="mono" style={{ fontSize: 10, color: "var(--text-mute)", letterSpacing: "0.04em" }}>
+              {project.path}
+            </span>
+          </div>
+        </div>
+
+        {/* Metric strip */}
+        <div style={{ display: "flex", gap: 32, alignItems: "center" }} className="mono">
+          <Metric label="Stories" value={`${project.doneStories}/${project.totalStories}`} color="var(--text)"/>
+          <Metric label="Progress" value={`${pct}%`} color="var(--text)"/>
+          <Metric label="Cost" value={`$${project.cost.toFixed(2)}`} color="var(--amber)"/>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value, color }) {
+  return (
+    <div style={{ textAlign: "right" }}>
+      <div style={{ fontSize: 8, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.22em", marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 22, color, fontWeight: 300, letterSpacing: "-0.01em" }}>{value}</div>
+    </div>
+  );
+}
+
+function Tabs({ active, setActive }) {
+  const progressTabs = [
+    { id: "hierarchy", label: "Hierarchy" },
+    { id: "kanban",    label: "Kanban" },
+    { id: "gantt",     label: "Gantt" },
+  ];
+  return (
+    <div style={{ padding: "28px 40px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 0, borderBottom: "1px solid var(--border)" }}>
+        {progressTabs.map(t => {
+          const on = active === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setActive(t.id)}
+              style={{
+                padding: "14px 24px", fontSize: 12,
+                color: on ? "var(--text)" : "var(--text-mute)",
+                fontWeight: 400,
+                letterSpacing: "0.14em", textTransform: "uppercase",
+                borderBottom: `1px solid ${on ? "var(--text)" : "transparent"}`,
+                marginBottom: -1,
+                transition: "color 150ms, border-color 150ms",
+              }}
+              onMouseEnter={e => { if (!on) e.currentTarget.style.color = "var(--text-dim)"; }}
+              onMouseLeave={e => { if (!on) e.currentTarget.style.color = "var(--text-mute)"; }}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10, paddingBottom: 10 }}>
+          <button style={{
+            fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+            padding: "6px 14px", border: "1px solid var(--border-2)", borderRadius: 2,
+            color: "var(--text-dim)", background: "transparent",
+          }}>Regenerate</button>
+          <button style={{
+            fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+            padding: "6px 14px", border: "1px solid var(--text)", borderRadius: 2,
+            color: "var(--bg)", background: "var(--text)", fontWeight: 500,
+          }}>Start development →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ViewSwitcher({ active }) {
+  const [seen, setSeen] = useState({ [active]: true });
+  useEffect(() => { setSeen(s => ({ ...s, [active]: true })); }, [active]);
+
+  return (
+    <div style={{ padding: "24px 40px 60px" }}>
+      {seen.hierarchy && (
+        <div style={{ display: active === "hierarchy" ? "block" : "none" }}><HierarchyView/></div>
+      )}
+      {seen.kanban && (
+        <div style={{ display: active === "kanban" ? "block" : "none" }}><KanbanView/></div>
+      )}
+      {seen.gantt && (
+        <div style={{ display: active === "gantt" ? "block" : "none" }}><GanttView/></div>
+      )}
+    </div>
+  );
+}
+
+function App() {
+  const [project, setProject] = useState(() => PROJECTS.find(p => p.id === "pong"));
+  const [active, setActive] = useState(() => localStorage.getItem("labs.view") || "hierarchy");
+  useEffect(() => { localStorage.setItem("labs.view", active); }, [active]);
+
+  return (
+    <div>
+      <Header project={project} setProject={setProject}/>
+      <ProjectHero project={project}/>
+      <div style={{ padding: "0 40px" }}>
+        <Pipeline project={project}/>
+      </div>
+      <Tabs active={active} setActive={setActive}/>
+      <ViewSwitcher active={active}/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

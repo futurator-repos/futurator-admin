@@ -1,0 +1,3650 @@
+{
+  "schemaVersion": "timer-intel-v1.0",
+  "plan": {
+    "appId": "dino-runner-1",
+    "createdAt": "2026-05-05T09:12:55.881Z",
+    "createdBy": "rica.araya.f@gmail.com",
+    "deployJobIds": [
+      "b784e775-13a1-429a-9ba7-0117ab967a6c"
+    ],
+    "description": "Wires the SVG sprite assets already present in /public/sprites/ into the existing canvas render pipeline. Adds a shared sprite-loader/cache utility, then refactors DinoRender.tsx, ObstacleRender.tsx, and GroundRender.tsx to use drawImage (falling back to fillRect when images are not yet loaded), and threads the sprite cache through GameRenderer.tsx.",
+    "displayName": "dino-runner-1 — change",
+    "doneStories": 5,
+    "epicIds": [
+      "72b25c45-354d-4686-8921-213a538d44fd"
+    ],
+    "executionMode": "orchestrator",
+    "intent": "plan-2 wave-0 already added SVG  sprites, ObstacleEntity.variant,  score-bracket difficulty, and sky  background interpolation — the  wiring is missing. Refactor  DinoRender.tsx, ObstacleRender.tsx, and  GroundRender.tsx to use the SVG  sprites from /public/sprites/ via drawImage, with fillRect  fallback.",
+    "kind": "change",
+    "name": "dino-runner-3-finish-sprites",
+    "planBuildJobId": "a1057d91-b470-4e88-8caa-210bdf2c57b1",
+    "planId": "plan_dino-runner-1_moseuhc9",
+    "rigor": "prototype",
+    "startedAt": "2026-05-05T09:16:47.562Z",
+    "status": "developing",
+    "totalCostUsd": 2.7543743000000003,
+    "totalStories": 5,
+    "updatedAt": "2026-05-05T09:38:29.256Z",
+    "workingDir": "/home/ubuntu/projects/dino-runner-1"
+  },
+  "slices": [
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000001",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:16:48.701Z",
+      "endedAt": "2026-05-05T09:16:48.818Z",
+      "durationMs": 117,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000002",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:16:48.818Z",
+      "endedAt": "2026-05-05T09:16:48.832Z",
+      "durationMs": 14,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000003",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:16:48.832Z",
+      "endedAt": "2026-05-05T09:16:55.166Z",
+      "durationMs": 6334,
+      "agentRole": "dev",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000004",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:16:55.166Z",
+      "endedAt": "2026-05-05T09:16:55.687Z",
+      "durationMs": 521,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000005",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:16:55.687Z",
+      "endedAt": "2026-05-05T09:17:00.747Z",
+      "durationMs": 5060,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000006",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:00.747Z",
+      "endedAt": "2026-05-05T09:17:00.909Z",
+      "durationMs": 162,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000007",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:00.909Z",
+      "endedAt": "2026-05-05T09:17:04.852Z",
+      "durationMs": 3943,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000008",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:04.852Z",
+      "endedAt": "2026-05-05T09:17:11.307Z",
+      "durationMs": 6455,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000009",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:11.307Z",
+      "endedAt": "2026-05-05T09:17:13.662Z",
+      "durationMs": 2355,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000010",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:13.662Z",
+      "endedAt": "2026-05-05T09:17:14.243Z",
+      "durationMs": 581,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000011",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:14.243Z",
+      "endedAt": "2026-05-05T09:17:28.220Z",
+      "durationMs": 13977,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000012",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:28.220Z",
+      "endedAt": "2026-05-05T09:17:28.402Z",
+      "durationMs": 182,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000013",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:28.402Z",
+      "endedAt": "2026-05-05T09:17:28.403Z",
+      "durationMs": 1,
+      "agentRole": "dev",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000014",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:28.403Z",
+      "endedAt": "2026-05-05T09:17:28.427Z",
+      "durationMs": 24,
+      "agentRole": "dev",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000015",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:28.427Z",
+      "endedAt": "2026-05-05T09:17:34.944Z",
+      "durationMs": 6517,
+      "agentRole": "reviewer",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000016",
+      "category": "review",
+      "startedAt": "2026-05-05T09:17:34.944Z",
+      "endedAt": "2026-05-05T09:17:34.956Z",
+      "durationMs": 12,
+      "agentRole": "reviewer",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000017",
+      "category": "review",
+      "startedAt": "2026-05-05T09:17:34.956Z",
+      "endedAt": "2026-05-05T09:17:35.348Z",
+      "durationMs": 392,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000018",
+      "category": "review",
+      "startedAt": "2026-05-05T09:17:35.348Z",
+      "endedAt": "2026-05-05T09:17:50.134Z",
+      "durationMs": 14786,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000019",
+      "category": "review",
+      "startedAt": "2026-05-05T09:17:50.134Z",
+      "endedAt": "2026-05-05T09:17:50.402Z",
+      "durationMs": 268,
+      "agentRole": "reviewer",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000020",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:50.402Z",
+      "endedAt": "2026-05-05T09:17:50.402Z",
+      "durationMs": 0,
+      "agentRole": "reviewer",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000021",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:50.402Z",
+      "endedAt": "2026-05-05T09:17:50.409Z",
+      "durationMs": 7,
+      "agentRole": "reviewer",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000022",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:50.409Z",
+      "endedAt": "2026-05-05T09:17:50.414Z",
+      "durationMs": 5,
+      "agentRole": "reviewer",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000023",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:50.414Z",
+      "endedAt": "2026-05-05T09:17:50.435Z",
+      "durationMs": 21,
+      "agentRole": "reviewer",
+      "eventType": "validation"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000024",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:50.435Z",
+      "endedAt": "2026-05-05T09:17:50.442Z",
+      "durationMs": 7,
+      "agentRole": "__compiler__",
+      "eventType": "compilation-started"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000025",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:50.442Z",
+      "endedAt": "2026-05-05T09:17:50.490Z",
+      "durationMs": 48,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000026",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:50.490Z",
+      "endedAt": "2026-05-05T09:17:50.507Z",
+      "durationMs": 17,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000027",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:50.507Z",
+      "endedAt": "2026-05-05T09:17:50.531Z",
+      "durationMs": 24,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000028",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:50.531Z",
+      "endedAt": "2026-05-05T09:17:50.547Z",
+      "durationMs": 16,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000029",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:50.547Z",
+      "endedAt": "2026-05-05T09:17:50.557Z",
+      "durationMs": 10,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000030",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:50.557Z",
+      "endedAt": "2026-05-05T09:17:50.582Z",
+      "durationMs": 25,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000031",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:17:50.582Z",
+      "endedAt": "2026-05-05T09:17:59.721Z",
+      "durationMs": 9139,
+      "agentRole": "compiler",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000032",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:59.721Z",
+      "endedAt": "2026-05-05T09:17:59.732Z",
+      "durationMs": 11,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000033",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:59.732Z",
+      "endedAt": "2026-05-05T09:17:59.775Z",
+      "durationMs": 43,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000034",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:17:59.775Z",
+      "endedAt": "2026-05-05T09:18:01.894Z",
+      "durationMs": 2119,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000035",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:18:01.894Z",
+      "endedAt": "2026-05-05T09:18:02.059Z",
+      "durationMs": 165,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000036",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:18:02.059Z",
+      "endedAt": "2026-05-05T09:18:02.235Z",
+      "durationMs": 176,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000037",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:18:02.235Z",
+      "endedAt": "2026-05-05T09:18:15.101Z",
+      "durationMs": 12866,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000038",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:18:15.101Z",
+      "endedAt": "2026-05-05T09:18:41.734Z",
+      "durationMs": 26633,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000039",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:18:41.734Z",
+      "endedAt": "2026-05-05T09:18:45.484Z",
+      "durationMs": 3750,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000040",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:18:45.484Z",
+      "endedAt": "2026-05-05T09:18:50.450Z",
+      "durationMs": 4966,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000041",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:18:50.450Z",
+      "endedAt": "2026-05-05T09:18:54.292Z",
+      "durationMs": 3842,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000042",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:18:54.292Z",
+      "endedAt": "2026-05-05T09:18:57.068Z",
+      "durationMs": 2776,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000043",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:18:57.068Z",
+      "endedAt": "2026-05-05T09:19:01.194Z",
+      "durationMs": 4126,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000044",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:19:01.194Z",
+      "endedAt": "2026-05-05T09:19:08.275Z",
+      "durationMs": 7081,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000045",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:19:08.275Z",
+      "endedAt": "2026-05-05T09:19:14.325Z",
+      "durationMs": 6050,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000046",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:19:14.325Z",
+      "endedAt": "2026-05-05T09:19:14.501Z",
+      "durationMs": 176,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000047",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:19:14.501Z",
+      "endedAt": "2026-05-05T09:19:14.557Z",
+      "durationMs": 56,
+      "agentRole": "compiler",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000048",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:19:14.557Z",
+      "endedAt": "2026-05-05T09:19:15.598Z",
+      "durationMs": 1041,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000049",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:19:15.598Z",
+      "endedAt": "2026-05-05T09:19:15.660Z",
+      "durationMs": 62,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000050",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:19:15.660Z",
+      "endedAt": "2026-05-05T09:19:17.182Z",
+      "durationMs": 1522,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000051",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:19:17.182Z",
+      "endedAt": "2026-05-05T09:19:17.184Z",
+      "durationMs": 2,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000052",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:19:17.184Z",
+      "endedAt": "2026-05-05T09:19:17.198Z",
+      "durationMs": 14,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000053",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:19:17.198Z",
+      "endedAt": "2026-05-05T09:19:17.211Z",
+      "durationMs": 13,
+      "agentRole": "__compiler__",
+      "eventType": "compilation-completed"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000054",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:19:17.211Z",
+      "endedAt": "2026-05-05T09:19:18.016Z",
+      "durationMs": 805,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000055",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:19:18.016Z",
+      "endedAt": "2026-05-05T09:19:18.023Z",
+      "durationMs": 7,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "6a220d2d-71b8-490d-9f16-e258edf492bd",
+      "eventSeq": "000056",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:19:18.023Z",
+      "endedAt": "2026-05-05T09:19:18.037Z",
+      "durationMs": 14,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "__inter_job__",
+      "eventSeq": "000056->000001",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:19:18.037Z",
+      "endedAt": "2026-05-05T09:24:41.667Z",
+      "durationMs": 323630,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000001",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:24:41.667Z",
+      "endedAt": "2026-05-05T09:24:41.675Z",
+      "durationMs": 8,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000001",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:24:41.672Z",
+      "endedAt": "2026-05-05T09:24:41.679Z",
+      "durationMs": 7,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000002",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:24:41.675Z",
+      "endedAt": "2026-05-05T09:24:41.700Z",
+      "durationMs": 25,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000002",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:24:41.679Z",
+      "endedAt": "2026-05-05T09:24:41.692Z",
+      "durationMs": 13,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000003",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:24:41.692Z",
+      "endedAt": "2026-05-05T09:24:47.699Z",
+      "durationMs": 6007,
+      "agentRole": "dev",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000003",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:24:41.700Z",
+      "endedAt": "2026-05-05T09:24:48.892Z",
+      "durationMs": 7192,
+      "agentRole": "dev",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000004",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:24:47.699Z",
+      "endedAt": "2026-05-05T09:24:48.989Z",
+      "durationMs": 1290,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000004",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:24:48.892Z",
+      "endedAt": "2026-05-05T09:24:49.906Z",
+      "durationMs": 1014,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000005",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:24:48.989Z",
+      "endedAt": "2026-05-05T09:24:49.423Z",
+      "durationMs": 434,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000006",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:24:49.423Z",
+      "endedAt": "2026-05-05T09:24:56.570Z",
+      "durationMs": 7147,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000005",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:24:49.906Z",
+      "endedAt": "2026-05-05T09:24:50.110Z",
+      "durationMs": 204,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000006",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:24:50.110Z",
+      "endedAt": "2026-05-05T09:24:53.409Z",
+      "durationMs": 3299,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000007",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:24:53.409Z",
+      "endedAt": "2026-05-05T09:24:53.519Z",
+      "durationMs": 110,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000008",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:24:53.519Z",
+      "endedAt": "2026-05-05T09:24:58.945Z",
+      "durationMs": 5426,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000007",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:24:56.570Z",
+      "endedAt": "2026-05-05T09:25:01.956Z",
+      "durationMs": 5386,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000009",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:24:58.945Z",
+      "endedAt": "2026-05-05T09:25:09.298Z",
+      "durationMs": 10353,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000008",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:01.956Z",
+      "endedAt": "2026-05-05T09:25:04.831Z",
+      "durationMs": 2875,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000009",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:04.831Z",
+      "endedAt": "2026-05-05T09:25:05.380Z",
+      "durationMs": 549,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000010",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:05.380Z",
+      "endedAt": "2026-05-05T09:25:09.767Z",
+      "durationMs": 4387,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000010",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:09.298Z",
+      "endedAt": "2026-05-05T09:25:11.789Z",
+      "durationMs": 2491,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000011",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:09.767Z",
+      "endedAt": "2026-05-05T09:25:14.511Z",
+      "durationMs": 4744,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000011",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:11.789Z",
+      "endedAt": "2026-05-05T09:25:12.437Z",
+      "durationMs": 648,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000012",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:12.437Z",
+      "endedAt": "2026-05-05T09:25:29.947Z",
+      "durationMs": 17510,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000012",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:14.511Z",
+      "endedAt": "2026-05-05T09:25:14.948Z",
+      "durationMs": 437,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000013",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:14.948Z",
+      "endedAt": "2026-05-05T09:25:18.437Z",
+      "durationMs": 3489,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000014",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:18.437Z",
+      "endedAt": "2026-05-05T09:25:22.139Z",
+      "durationMs": 3702,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000015",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:22.139Z",
+      "endedAt": "2026-05-05T09:25:22.434Z",
+      "durationMs": 295,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000016",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:22.434Z",
+      "endedAt": "2026-05-05T09:25:37.445Z",
+      "durationMs": 15011,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000013",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:29.947Z",
+      "endedAt": "2026-05-05T09:25:30.368Z",
+      "durationMs": 421,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000014",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:30.368Z",
+      "endedAt": "2026-05-05T09:25:35.686Z",
+      "durationMs": 5318,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000015",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:35.686Z",
+      "endedAt": "2026-05-05T09:25:45.036Z",
+      "durationMs": 9350,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000017",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:37.445Z",
+      "endedAt": "2026-05-05T09:25:40.158Z",
+      "durationMs": 2713,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000018",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:40.158Z",
+      "endedAt": "2026-05-05T09:25:44.166Z",
+      "durationMs": 4008,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000019",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:44.166Z",
+      "endedAt": "2026-05-05T09:25:47.557Z",
+      "durationMs": 3391,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000016",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:45.036Z",
+      "endedAt": "2026-05-05T09:25:45.259Z",
+      "durationMs": 223,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000017",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:25:45.259Z",
+      "endedAt": "2026-05-05T09:25:45.260Z",
+      "durationMs": 1,
+      "agentRole": "dev",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000018",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:25:45.260Z",
+      "endedAt": "2026-05-05T09:25:45.267Z",
+      "durationMs": 7,
+      "agentRole": "dev",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000019",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:25:45.267Z",
+      "endedAt": "2026-05-05T09:25:45.275Z",
+      "durationMs": 8,
+      "agentRole": "dev",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000020",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:25:45.275Z",
+      "endedAt": "2026-05-05T09:25:45.302Z",
+      "durationMs": 27,
+      "agentRole": "dev",
+      "eventType": "status"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000021",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:25:45.302Z",
+      "endedAt": "2026-05-05T09:25:49.457Z",
+      "durationMs": 4155,
+      "agentRole": "reviewer",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000020",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:47.557Z",
+      "endedAt": "2026-05-05T09:25:48.045Z",
+      "durationMs": 488,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000021",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:48.045Z",
+      "endedAt": "2026-05-05T09:25:48.445Z",
+      "durationMs": 400,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000022",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:48.445Z",
+      "endedAt": "2026-05-05T09:25:52.372Z",
+      "durationMs": 3927,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000022",
+      "category": "review",
+      "startedAt": "2026-05-05T09:25:49.457Z",
+      "endedAt": "2026-05-05T09:25:49.975Z",
+      "durationMs": 518,
+      "agentRole": "reviewer",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000023",
+      "category": "review",
+      "startedAt": "2026-05-05T09:25:49.975Z",
+      "endedAt": "2026-05-05T09:25:50.489Z",
+      "durationMs": 514,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000024",
+      "category": "review",
+      "startedAt": "2026-05-05T09:25:50.489Z",
+      "endedAt": "2026-05-05T09:25:50.834Z",
+      "durationMs": 345,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000025",
+      "category": "review",
+      "startedAt": "2026-05-05T09:25:50.834Z",
+      "endedAt": "2026-05-05T09:25:53.689Z",
+      "durationMs": 2855,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000023",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:25:52.372Z",
+      "endedAt": "2026-05-05T09:26:09.854Z",
+      "durationMs": 17482,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000026",
+      "category": "review",
+      "startedAt": "2026-05-05T09:25:53.689Z",
+      "endedAt": "2026-05-05T09:25:54.273Z",
+      "durationMs": 584,
+      "agentRole": "reviewer",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000027",
+      "category": "review",
+      "startedAt": "2026-05-05T09:25:54.273Z",
+      "endedAt": "2026-05-05T09:25:54.954Z",
+      "durationMs": 681,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000028",
+      "category": "review",
+      "startedAt": "2026-05-05T09:25:54.954Z",
+      "endedAt": "2026-05-05T09:26:03.671Z",
+      "durationMs": 8717,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000029",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:03.671Z",
+      "endedAt": "2026-05-05T09:26:03.685Z",
+      "durationMs": 14,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000030",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:03.685Z",
+      "endedAt": "2026-05-05T09:26:07.523Z",
+      "durationMs": 3838,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000031",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:07.523Z",
+      "endedAt": "2026-05-05T09:26:10.193Z",
+      "durationMs": 2670,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000024",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:09.854Z",
+      "endedAt": "2026-05-05T09:26:10.098Z",
+      "durationMs": 244,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000025",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:10.098Z",
+      "endedAt": "2026-05-05T09:26:10.098Z",
+      "durationMs": 0,
+      "agentRole": "dev",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000026",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:10.098Z",
+      "endedAt": "2026-05-05T09:26:10.104Z",
+      "durationMs": 6,
+      "agentRole": "dev",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000027",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:10.104Z",
+      "endedAt": "2026-05-05T09:26:10.110Z",
+      "durationMs": 6,
+      "agentRole": "dev",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000028",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:26:10.110Z",
+      "endedAt": "2026-05-05T09:26:10.131Z",
+      "durationMs": 21,
+      "agentRole": "dev",
+      "eventType": "status"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000029",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:10.131Z",
+      "endedAt": "2026-05-05T09:26:15.471Z",
+      "durationMs": 5340,
+      "agentRole": "reviewer",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000032",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:10.193Z",
+      "endedAt": "2026-05-05T09:26:12.842Z",
+      "durationMs": 2649,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000033",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:12.842Z",
+      "endedAt": "2026-05-05T09:26:15.836Z",
+      "durationMs": 2994,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000030",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:15.471Z",
+      "endedAt": "2026-05-05T09:26:15.484Z",
+      "durationMs": 13,
+      "agentRole": "reviewer",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000031",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:15.484Z",
+      "endedAt": "2026-05-05T09:26:15.958Z",
+      "durationMs": 474,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000034",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:15.836Z",
+      "endedAt": "2026-05-05T09:26:29.678Z",
+      "durationMs": 13842,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000032",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:15.958Z",
+      "endedAt": "2026-05-05T09:26:16.370Z",
+      "durationMs": 412,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000033",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:16.370Z",
+      "endedAt": "2026-05-05T09:26:25.518Z",
+      "durationMs": 9148,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000034",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:25.518Z",
+      "endedAt": "2026-05-05T09:26:25.775Z",
+      "durationMs": 257,
+      "agentRole": "reviewer",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000035",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:25.775Z",
+      "endedAt": "2026-05-05T09:26:25.776Z",
+      "durationMs": 1,
+      "agentRole": "reviewer",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000036",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:25.776Z",
+      "endedAt": "2026-05-05T09:26:25.782Z",
+      "durationMs": 6,
+      "agentRole": "reviewer",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000037",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:25.782Z",
+      "endedAt": "2026-05-05T09:26:25.789Z",
+      "durationMs": 7,
+      "agentRole": "reviewer",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000038",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:25.789Z",
+      "endedAt": "2026-05-05T09:26:25.809Z",
+      "durationMs": 20,
+      "agentRole": "reviewer",
+      "eventType": "validation"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000039",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:25.809Z",
+      "endedAt": "2026-05-05T09:26:25.815Z",
+      "durationMs": 6,
+      "agentRole": "__compiler__",
+      "eventType": "compilation-started"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000040",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:25.815Z",
+      "endedAt": "2026-05-05T09:26:25.842Z",
+      "durationMs": 27,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000041",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:25.842Z",
+      "endedAt": "2026-05-05T09:26:25.848Z",
+      "durationMs": 6,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000042",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:25.848Z",
+      "endedAt": "2026-05-05T09:26:25.869Z",
+      "durationMs": 21,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000043",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:25.869Z",
+      "endedAt": "2026-05-05T09:26:31.590Z",
+      "durationMs": 5721,
+      "agentRole": "compiler",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000035",
+      "category": "review",
+      "startedAt": "2026-05-05T09:26:29.678Z",
+      "endedAt": "2026-05-05T09:26:29.928Z",
+      "durationMs": 250,
+      "agentRole": "reviewer",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000036",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:29.928Z",
+      "endedAt": "2026-05-05T09:26:29.928Z",
+      "durationMs": 0,
+      "agentRole": "reviewer",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000037",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:29.928Z",
+      "endedAt": "2026-05-05T09:26:29.935Z",
+      "durationMs": 7,
+      "agentRole": "reviewer",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000038",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:29.935Z",
+      "endedAt": "2026-05-05T09:26:29.941Z",
+      "durationMs": 6,
+      "agentRole": "reviewer",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000039",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:29.941Z",
+      "endedAt": "2026-05-05T09:26:29.961Z",
+      "durationMs": 20,
+      "agentRole": "reviewer",
+      "eventType": "validation"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000040",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:29.961Z",
+      "endedAt": "2026-05-05T09:26:29.967Z",
+      "durationMs": 6,
+      "agentRole": "__compiler__",
+      "eventType": "compilation-started"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000041",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:29.967Z",
+      "endedAt": "2026-05-05T09:26:29.984Z",
+      "durationMs": 17,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000042",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:29.984Z",
+      "endedAt": "2026-05-05T09:26:29.992Z",
+      "durationMs": 8,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000043",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:29.992Z",
+      "endedAt": "2026-05-05T09:26:30.014Z",
+      "durationMs": 22,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000044",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:26:30.014Z",
+      "endedAt": "2026-05-05T09:26:40.702Z",
+      "durationMs": 10688,
+      "agentRole": "compiler",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000044",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:31.590Z",
+      "endedAt": "2026-05-05T09:26:31.803Z",
+      "durationMs": 213,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000045",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:31.803Z",
+      "endedAt": "2026-05-05T09:26:32.302Z",
+      "durationMs": 499,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000046",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:32.302Z",
+      "endedAt": "2026-05-05T09:26:32.496Z",
+      "durationMs": 194,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000047",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:32.496Z",
+      "endedAt": "2026-05-05T09:26:32.513Z",
+      "durationMs": 17,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000048",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:32.513Z",
+      "endedAt": "2026-05-05T09:26:36.341Z",
+      "durationMs": 3828,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000049",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:36.341Z",
+      "endedAt": "2026-05-05T09:26:36.523Z",
+      "durationMs": 182,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000050",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:36.523Z",
+      "endedAt": "2026-05-05T09:26:36.722Z",
+      "durationMs": 199,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000051",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:36.722Z",
+      "endedAt": "2026-05-05T09:26:37.054Z",
+      "durationMs": 332,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000052",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:37.054Z",
+      "endedAt": "2026-05-05T09:26:37.160Z",
+      "durationMs": 106,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000053",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:37.160Z",
+      "endedAt": "2026-05-05T09:26:44.891Z",
+      "durationMs": 7731,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000045",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:40.702Z",
+      "endedAt": "2026-05-05T09:26:40.717Z",
+      "durationMs": 15,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000046",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:40.717Z",
+      "endedAt": "2026-05-05T09:26:40.744Z",
+      "durationMs": 27,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000047",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:40.744Z",
+      "endedAt": "2026-05-05T09:26:40.748Z",
+      "durationMs": 4,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000048",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:40.748Z",
+      "endedAt": "2026-05-05T09:26:42.980Z",
+      "durationMs": 2232,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000049",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:42.980Z",
+      "endedAt": "2026-05-05T09:26:43.241Z",
+      "durationMs": 261,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000050",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:43.241Z",
+      "endedAt": "2026-05-05T09:26:43.357Z",
+      "durationMs": 116,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000051",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:43.357Z",
+      "endedAt": "2026-05-05T09:26:51.018Z",
+      "durationMs": 7661,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000054",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:44.891Z",
+      "endedAt": "2026-05-05T09:27:01.909Z",
+      "durationMs": 17018,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000052",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:51.018Z",
+      "endedAt": "2026-05-05T09:26:51.442Z",
+      "durationMs": 424,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000053",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:51.442Z",
+      "endedAt": "2026-05-05T09:26:51.481Z",
+      "durationMs": 39,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000054",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:51.481Z",
+      "endedAt": "2026-05-05T09:26:53.300Z",
+      "durationMs": 1819,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000055",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:26:53.300Z",
+      "endedAt": "2026-05-05T09:27:02.718Z",
+      "durationMs": 9418,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000055",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:01.909Z",
+      "endedAt": "2026-05-05T09:27:09.261Z",
+      "durationMs": 7352,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000056",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:02.718Z",
+      "endedAt": "2026-05-05T09:27:05.807Z",
+      "durationMs": 3089,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000057",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:05.807Z",
+      "endedAt": "2026-05-05T09:27:09.437Z",
+      "durationMs": 3630,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000056",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:09.261Z",
+      "endedAt": "2026-05-05T09:27:12.705Z",
+      "durationMs": 3444,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000058",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:09.437Z",
+      "endedAt": "2026-05-05T09:27:12.096Z",
+      "durationMs": 2659,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000059",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:12.096Z",
+      "endedAt": "2026-05-05T09:27:15.368Z",
+      "durationMs": 3272,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000057",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:12.705Z",
+      "endedAt": "2026-05-05T09:27:18.434Z",
+      "durationMs": 5729,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000060",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:15.368Z",
+      "endedAt": "2026-05-05T09:27:18.390Z",
+      "durationMs": 3022,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000061",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:18.390Z",
+      "endedAt": "2026-05-05T09:27:22.519Z",
+      "durationMs": 4129,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000058",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:18.434Z",
+      "endedAt": "2026-05-05T09:27:26.131Z",
+      "durationMs": 7697,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000062",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:22.519Z",
+      "endedAt": "2026-05-05T09:27:25.521Z",
+      "durationMs": 3002,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000063",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:25.521Z",
+      "endedAt": "2026-05-05T09:27:28.554Z",
+      "durationMs": 3033,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000059",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:26.131Z",
+      "endedAt": "2026-05-05T09:27:26.362Z",
+      "durationMs": 231,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000060",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:27:26.362Z",
+      "endedAt": "2026-05-05T09:27:26.377Z",
+      "durationMs": 15,
+      "agentRole": "compiler",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000061",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:27:26.377Z",
+      "endedAt": "2026-05-05T09:27:26.417Z",
+      "durationMs": 40,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000062",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:26.417Z",
+      "endedAt": "2026-05-05T09:27:26.420Z",
+      "durationMs": 3,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000063",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:26.420Z",
+      "endedAt": "2026-05-05T09:27:26.428Z",
+      "durationMs": 8,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000064",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:26.428Z",
+      "endedAt": "2026-05-05T09:27:26.434Z",
+      "durationMs": 6,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000065",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:27:26.434Z",
+      "endedAt": "2026-05-05T09:27:26.448Z",
+      "durationMs": 14,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "de106121-c7ac-4744-9e69-350100c9fc0e",
+      "eventSeq": "000066",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:27:26.448Z",
+      "endedAt": "2026-05-05T09:27:26.455Z",
+      "durationMs": 7,
+      "agentRole": "__compiler__",
+      "eventType": "compilation-completed"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000001",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:27:27.050Z",
+      "endedAt": "2026-05-05T09:27:27.058Z",
+      "durationMs": 8,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000002",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:27:27.058Z",
+      "endedAt": "2026-05-05T09:27:27.070Z",
+      "durationMs": 12,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000003",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:27:27.070Z",
+      "endedAt": "2026-05-05T09:27:32.935Z",
+      "durationMs": 5865,
+      "agentRole": "dev",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000064",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:28.554Z",
+      "endedAt": "2026-05-05T09:27:30.238Z",
+      "durationMs": 1684,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000065",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:30.238Z",
+      "endedAt": "2026-05-05T09:27:38.656Z",
+      "durationMs": 8418,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000004",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:32.935Z",
+      "endedAt": "2026-05-05T09:27:33.897Z",
+      "durationMs": 962,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000005",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:33.897Z",
+      "endedAt": "2026-05-05T09:27:34.535Z",
+      "durationMs": 638,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000006",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:34.535Z",
+      "endedAt": "2026-05-05T09:27:39.931Z",
+      "durationMs": 5396,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000066",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:38.656Z",
+      "endedAt": "2026-05-05T09:27:45.368Z",
+      "durationMs": 6712,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000007",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:39.931Z",
+      "endedAt": "2026-05-05T09:27:40.304Z",
+      "durationMs": 373,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000008",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:40.304Z",
+      "endedAt": "2026-05-05T09:27:43.059Z",
+      "durationMs": 2755,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000009",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:43.059Z",
+      "endedAt": "2026-05-05T09:27:43.067Z",
+      "durationMs": 8,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000010",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:43.067Z",
+      "endedAt": "2026-05-05T09:27:45.968Z",
+      "durationMs": 2901,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000067",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:45.368Z",
+      "endedAt": "2026-05-05T09:27:46.991Z",
+      "durationMs": 1623,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000011",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:45.968Z",
+      "endedAt": "2026-05-05T09:27:51.316Z",
+      "durationMs": 5348,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000068",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:46.991Z",
+      "endedAt": "2026-05-05T09:27:50.103Z",
+      "durationMs": 3112,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000069",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:50.103Z",
+      "endedAt": "2026-05-05T09:27:56.639Z",
+      "durationMs": 6536,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000012",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:51.316Z",
+      "endedAt": "2026-05-05T09:27:54.274Z",
+      "durationMs": 2958,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000013",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:54.274Z",
+      "endedAt": "2026-05-05T09:27:55.280Z",
+      "durationMs": 1006,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000014",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:55.280Z",
+      "endedAt": "2026-05-05T09:27:55.850Z",
+      "durationMs": 570,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000015",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:55.850Z",
+      "endedAt": "2026-05-05T09:28:02.225Z",
+      "durationMs": 6375,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000070",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:27:56.639Z",
+      "endedAt": "2026-05-05T09:28:05.263Z",
+      "durationMs": 8624,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000016",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:28:02.225Z",
+      "endedAt": "2026-05-05T09:28:02.696Z",
+      "durationMs": 471,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000017",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:28:02.696Z",
+      "endedAt": "2026-05-05T09:28:14.530Z",
+      "durationMs": 11834,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000071",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:28:05.263Z",
+      "endedAt": "2026-05-05T09:28:05.451Z",
+      "durationMs": 188,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000072",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:05.451Z",
+      "endedAt": "2026-05-05T09:28:05.466Z",
+      "durationMs": 15,
+      "agentRole": "compiler",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000073",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:05.466Z",
+      "endedAt": "2026-05-05T09:28:05.504Z",
+      "durationMs": 38,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000074",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:28:05.504Z",
+      "endedAt": "2026-05-05T09:28:05.508Z",
+      "durationMs": 4,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000075",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:28:05.508Z",
+      "endedAt": "2026-05-05T09:28:05.514Z",
+      "durationMs": 6,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000076",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:05.514Z",
+      "endedAt": "2026-05-05T09:28:05.529Z",
+      "durationMs": 15,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "2e2effb4-247f-4a80-9c19-3155d19913a4",
+      "eventSeq": "000077",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:05.529Z",
+      "endedAt": "2026-05-05T09:28:05.535Z",
+      "durationMs": 6,
+      "agentRole": "__compiler__",
+      "eventType": "compilation-completed"
+    },
+    {
+      "jobId": "__inter_job__",
+      "eventSeq": "000077->000018",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:28:05.535Z",
+      "endedAt": "2026-05-05T09:28:14.530Z",
+      "durationMs": 8995,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000018",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:28:14.530Z",
+      "endedAt": "2026-05-05T09:28:14.781Z",
+      "durationMs": 251,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000019",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:14.781Z",
+      "endedAt": "2026-05-05T09:28:14.781Z",
+      "durationMs": 0,
+      "agentRole": "dev",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000020",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:14.781Z",
+      "endedAt": "2026-05-05T09:28:14.788Z",
+      "durationMs": 7,
+      "agentRole": "dev",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000021",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:14.788Z",
+      "endedAt": "2026-05-05T09:28:14.794Z",
+      "durationMs": 6,
+      "agentRole": "dev",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000022",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:28:14.794Z",
+      "endedAt": "2026-05-05T09:28:14.816Z",
+      "durationMs": 22,
+      "agentRole": "dev",
+      "eventType": "status"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000023",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:14.816Z",
+      "endedAt": "2026-05-05T09:28:19.579Z",
+      "durationMs": 4763,
+      "agentRole": "reviewer",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000024",
+      "category": "review",
+      "startedAt": "2026-05-05T09:28:19.579Z",
+      "endedAt": "2026-05-05T09:28:20.525Z",
+      "durationMs": 946,
+      "agentRole": "reviewer",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000025",
+      "category": "review",
+      "startedAt": "2026-05-05T09:28:20.525Z",
+      "endedAt": "2026-05-05T09:28:20.553Z",
+      "durationMs": 28,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000026",
+      "category": "review",
+      "startedAt": "2026-05-05T09:28:20.553Z",
+      "endedAt": "2026-05-05T09:28:24.192Z",
+      "durationMs": 3639,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000027",
+      "category": "review",
+      "startedAt": "2026-05-05T09:28:24.192Z",
+      "endedAt": "2026-05-05T09:28:24.743Z",
+      "durationMs": 551,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000028",
+      "category": "review",
+      "startedAt": "2026-05-05T09:28:24.743Z",
+      "endedAt": "2026-05-05T09:28:33.238Z",
+      "durationMs": 8495,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000029",
+      "category": "review",
+      "startedAt": "2026-05-05T09:28:33.238Z",
+      "endedAt": "2026-05-05T09:28:36.374Z",
+      "durationMs": 3136,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000030",
+      "category": "review",
+      "startedAt": "2026-05-05T09:28:36.374Z",
+      "endedAt": "2026-05-05T09:28:47.658Z",
+      "durationMs": 11284,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000031",
+      "category": "review",
+      "startedAt": "2026-05-05T09:28:47.658Z",
+      "endedAt": "2026-05-05T09:28:47.844Z",
+      "durationMs": 186,
+      "agentRole": "reviewer",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000032",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:47.844Z",
+      "endedAt": "2026-05-05T09:28:47.844Z",
+      "durationMs": 0,
+      "agentRole": "reviewer",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000033",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:47.844Z",
+      "endedAt": "2026-05-05T09:28:47.849Z",
+      "durationMs": 5,
+      "agentRole": "reviewer",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000034",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:47.849Z",
+      "endedAt": "2026-05-05T09:28:47.854Z",
+      "durationMs": 5,
+      "agentRole": "reviewer",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000035",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:47.854Z",
+      "endedAt": "2026-05-05T09:28:47.874Z",
+      "durationMs": 20,
+      "agentRole": "reviewer",
+      "eventType": "validation"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000036",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:47.874Z",
+      "endedAt": "2026-05-05T09:28:47.880Z",
+      "durationMs": 6,
+      "agentRole": "__compiler__",
+      "eventType": "compilation-started"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000037",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:47.880Z",
+      "endedAt": "2026-05-05T09:28:47.895Z",
+      "durationMs": 15,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000038",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:28:47.895Z",
+      "endedAt": "2026-05-05T09:28:47.903Z",
+      "durationMs": 8,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000039",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:47.903Z",
+      "endedAt": "2026-05-05T09:28:47.961Z",
+      "durationMs": 58,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000040",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:28:47.961Z",
+      "endedAt": "2026-05-05T09:29:05.291Z",
+      "durationMs": 17330,
+      "agentRole": "compiler",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000041",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:05.291Z",
+      "endedAt": "2026-05-05T09:29:05.431Z",
+      "durationMs": 140,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000042",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:05.431Z",
+      "endedAt": "2026-05-05T09:29:05.470Z",
+      "durationMs": 39,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000043",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:05.470Z",
+      "endedAt": "2026-05-05T09:29:05.483Z",
+      "durationMs": 13,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000044",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:05.483Z",
+      "endedAt": "2026-05-05T09:29:07.806Z",
+      "durationMs": 2323,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000045",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:07.806Z",
+      "endedAt": "2026-05-05T09:29:08.239Z",
+      "durationMs": 433,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000046",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:08.239Z",
+      "endedAt": "2026-05-05T09:29:10.948Z",
+      "durationMs": 2709,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000047",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:10.948Z",
+      "endedAt": "2026-05-05T09:29:16.843Z",
+      "durationMs": 5895,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000048",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:16.843Z",
+      "endedAt": "2026-05-05T09:29:17.250Z",
+      "durationMs": 407,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000049",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:17.250Z",
+      "endedAt": "2026-05-05T09:29:17.307Z",
+      "durationMs": 57,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000050",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:17.307Z",
+      "endedAt": "2026-05-05T09:29:24.407Z",
+      "durationMs": 7100,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000051",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:24.407Z",
+      "endedAt": "2026-05-05T09:29:26.141Z",
+      "durationMs": 1734,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000052",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:26.141Z",
+      "endedAt": "2026-05-05T09:29:28.857Z",
+      "durationMs": 2716,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000053",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:28.857Z",
+      "endedAt": "2026-05-05T09:29:30.705Z",
+      "durationMs": 1848,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000054",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:30.705Z",
+      "endedAt": "2026-05-05T09:29:33.325Z",
+      "durationMs": 2620,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000055",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:33.325Z",
+      "endedAt": "2026-05-05T09:29:35.973Z",
+      "durationMs": 2648,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000056",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:35.973Z",
+      "endedAt": "2026-05-05T09:29:36.823Z",
+      "durationMs": 850,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000057",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:36.823Z",
+      "endedAt": "2026-05-05T09:29:38.406Z",
+      "durationMs": 1583,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000058",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:38.406Z",
+      "endedAt": "2026-05-05T09:29:44.318Z",
+      "durationMs": 5912,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000059",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:44.318Z",
+      "endedAt": "2026-05-05T09:29:55.421Z",
+      "durationMs": 11103,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000060",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:29:55.421Z",
+      "endedAt": "2026-05-05T09:30:05.025Z",
+      "durationMs": 9604,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000061",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:30:05.025Z",
+      "endedAt": "2026-05-05T09:30:05.285Z",
+      "durationMs": 260,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000062",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:30:05.285Z",
+      "endedAt": "2026-05-05T09:30:05.447Z",
+      "durationMs": 162,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000063",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:30:05.447Z",
+      "endedAt": "2026-05-05T09:30:08.781Z",
+      "durationMs": 3334,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000064",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:30:08.781Z",
+      "endedAt": "2026-05-05T09:30:09.076Z",
+      "durationMs": 295,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000065",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:30:09.076Z",
+      "endedAt": "2026-05-05T09:30:11.574Z",
+      "durationMs": 2498,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000066",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:30:11.574Z",
+      "endedAt": "2026-05-05T09:30:13.627Z",
+      "durationMs": 2053,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000067",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:30:13.627Z",
+      "endedAt": "2026-05-05T09:30:18.331Z",
+      "durationMs": 4704,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000068",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:30:18.331Z",
+      "endedAt": "2026-05-05T09:30:27.531Z",
+      "durationMs": 9200,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000069",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:30:27.531Z",
+      "endedAt": "2026-05-05T09:30:27.741Z",
+      "durationMs": 210,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000070",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:30:27.741Z",
+      "endedAt": "2026-05-05T09:30:27.756Z",
+      "durationMs": 15,
+      "agentRole": "compiler",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000071",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:30:27.756Z",
+      "endedAt": "2026-05-05T09:30:27.798Z",
+      "durationMs": 42,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000072",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:30:27.798Z",
+      "endedAt": "2026-05-05T09:30:27.801Z",
+      "durationMs": 3,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000073",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:30:27.801Z",
+      "endedAt": "2026-05-05T09:30:27.806Z",
+      "durationMs": 5,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000074",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:30:27.806Z",
+      "endedAt": "2026-05-05T09:30:27.818Z",
+      "durationMs": 12,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "74b3a712-89de-466f-a3ea-f623e3de0005",
+      "eventSeq": "000075",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:30:27.818Z",
+      "endedAt": "2026-05-05T09:30:27.823Z",
+      "durationMs": 5,
+      "agentRole": "__compiler__",
+      "eventType": "compilation-completed"
+    },
+    {
+      "jobId": "__inter_job__",
+      "eventSeq": "000075->000001",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:30:27.823Z",
+      "endedAt": "2026-05-05T09:31:51.994Z",
+      "durationMs": 84171,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000001",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:31:51.994Z",
+      "endedAt": "2026-05-05T09:31:52.109Z",
+      "durationMs": 115,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000002",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:31:52.109Z",
+      "endedAt": "2026-05-05T09:31:52.123Z",
+      "durationMs": 14,
+      "agentRole": "orchestrator",
+      "eventType": "status"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000003",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:31:52.123Z",
+      "endedAt": "2026-05-05T09:32:06.043Z",
+      "durationMs": 13920,
+      "agentRole": "dev",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000004",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:32:06.043Z",
+      "endedAt": "2026-05-05T09:32:06.574Z",
+      "durationMs": 531,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000005",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:32:06.574Z",
+      "endedAt": "2026-05-05T09:32:07.050Z",
+      "durationMs": 476,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000006",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:32:07.050Z",
+      "endedAt": "2026-05-05T09:32:07.586Z",
+      "durationMs": 536,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000007",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:32:07.586Z",
+      "endedAt": "2026-05-05T09:32:23.028Z",
+      "durationMs": 15442,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000008",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:32:23.028Z",
+      "endedAt": "2026-05-05T09:32:26.955Z",
+      "durationMs": 3927,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000009",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:32:26.955Z",
+      "endedAt": "2026-05-05T09:32:31.120Z",
+      "durationMs": 4165,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000010",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:32:31.120Z",
+      "endedAt": "2026-05-05T09:32:36.265Z",
+      "durationMs": 5145,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000011",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:32:36.265Z",
+      "endedAt": "2026-05-05T09:32:36.643Z",
+      "durationMs": 378,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000012",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:32:36.643Z",
+      "endedAt": "2026-05-05T09:32:44.023Z",
+      "durationMs": 7380,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000013",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:32:44.023Z",
+      "endedAt": "2026-05-05T09:32:44.884Z",
+      "durationMs": 861,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000014",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:32:44.884Z",
+      "endedAt": "2026-05-05T09:33:04.416Z",
+      "durationMs": 19532,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000015",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:33:04.416Z",
+      "endedAt": "2026-05-05T09:33:07.366Z",
+      "durationMs": 2950,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000016",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:33:07.366Z",
+      "endedAt": "2026-05-05T09:33:14.571Z",
+      "durationMs": 7205,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000017",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:33:14.571Z",
+      "endedAt": "2026-05-05T09:33:45.463Z",
+      "durationMs": 30892,
+      "agentRole": "dev",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000018",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:33:45.463Z",
+      "endedAt": "2026-05-05T09:33:45.632Z",
+      "durationMs": 169,
+      "agentRole": "dev",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000019",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:33:45.632Z",
+      "endedAt": "2026-05-05T09:33:45.633Z",
+      "durationMs": 1,
+      "agentRole": "dev",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000020",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:33:45.633Z",
+      "endedAt": "2026-05-05T09:33:45.639Z",
+      "durationMs": 6,
+      "agentRole": "dev",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000021",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:33:45.639Z",
+      "endedAt": "2026-05-05T09:33:45.647Z",
+      "durationMs": 8,
+      "agentRole": "dev",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000022",
+      "category": "machine-wait",
+      "startedAt": "2026-05-05T09:33:45.647Z",
+      "endedAt": "2026-05-05T09:33:45.678Z",
+      "durationMs": 31,
+      "agentRole": "dev",
+      "eventType": "status"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000023",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:33:45.678Z",
+      "endedAt": "2026-05-05T09:33:51.963Z",
+      "durationMs": 6285,
+      "agentRole": "reviewer",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000024",
+      "category": "review",
+      "startedAt": "2026-05-05T09:33:51.963Z",
+      "endedAt": "2026-05-05T09:33:53.450Z",
+      "durationMs": 1487,
+      "agentRole": "reviewer",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000025",
+      "category": "review",
+      "startedAt": "2026-05-05T09:33:53.450Z",
+      "endedAt": "2026-05-05T09:33:53.656Z",
+      "durationMs": 206,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000026",
+      "category": "review",
+      "startedAt": "2026-05-05T09:33:53.656Z",
+      "endedAt": "2026-05-05T09:33:53.736Z",
+      "durationMs": 80,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000027",
+      "category": "review",
+      "startedAt": "2026-05-05T09:33:53.736Z",
+      "endedAt": "2026-05-05T09:33:54.003Z",
+      "durationMs": 267,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000028",
+      "category": "review",
+      "startedAt": "2026-05-05T09:33:54.003Z",
+      "endedAt": "2026-05-05T09:34:07.755Z",
+      "durationMs": 13752,
+      "agentRole": "reviewer",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000029",
+      "category": "review",
+      "startedAt": "2026-05-05T09:34:07.755Z",
+      "endedAt": "2026-05-05T09:34:08.125Z",
+      "durationMs": 370,
+      "agentRole": "reviewer",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000030",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:34:08.125Z",
+      "endedAt": "2026-05-05T09:34:08.125Z",
+      "durationMs": 0,
+      "agentRole": "reviewer",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000031",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:34:08.125Z",
+      "endedAt": "2026-05-05T09:34:08.133Z",
+      "durationMs": 8,
+      "agentRole": "reviewer",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000032",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:34:08.133Z",
+      "endedAt": "2026-05-05T09:34:08.140Z",
+      "durationMs": 7,
+      "agentRole": "reviewer",
+      "eventType": "extraction"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000033",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:34:08.140Z",
+      "endedAt": "2026-05-05T09:34:08.161Z",
+      "durationMs": 21,
+      "agentRole": "reviewer",
+      "eventType": "validation"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000034",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:34:08.161Z",
+      "endedAt": "2026-05-05T09:34:08.167Z",
+      "durationMs": 6,
+      "agentRole": "__compiler__",
+      "eventType": "compilation-started"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000035",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:34:08.167Z",
+      "endedAt": "2026-05-05T09:34:08.275Z",
+      "durationMs": 108,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000036",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:08.275Z",
+      "endedAt": "2026-05-05T09:34:08.281Z",
+      "durationMs": 6,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000037",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:34:08.281Z",
+      "endedAt": "2026-05-05T09:34:08.300Z",
+      "durationMs": 19,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000038",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:34:08.300Z",
+      "endedAt": "2026-05-05T09:34:08.316Z",
+      "durationMs": 16,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000039",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:08.316Z",
+      "endedAt": "2026-05-05T09:34:08.321Z",
+      "durationMs": 5,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000040",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:34:08.321Z",
+      "endedAt": "2026-05-05T09:34:08.340Z",
+      "durationMs": 19,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000041",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:34:08.340Z",
+      "endedAt": "2026-05-05T09:34:21.039Z",
+      "durationMs": 12699,
+      "agentRole": "compiler",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000042",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:21.039Z",
+      "endedAt": "2026-05-05T09:34:21.186Z",
+      "durationMs": 147,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000043",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:21.186Z",
+      "endedAt": "2026-05-05T09:34:22.818Z",
+      "durationMs": 1632,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000044",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:22.818Z",
+      "endedAt": "2026-05-05T09:34:25.928Z",
+      "durationMs": 3110,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000045",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:25.928Z",
+      "endedAt": "2026-05-05T09:34:31.099Z",
+      "durationMs": 5171,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000046",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:31.099Z",
+      "endedAt": "2026-05-05T09:34:33.241Z",
+      "durationMs": 2142,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000047",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:33.241Z",
+      "endedAt": "2026-05-05T09:34:35.371Z",
+      "durationMs": 2130,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000048",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:35.371Z",
+      "endedAt": "2026-05-05T09:34:40.385Z",
+      "durationMs": 5014,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000049",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:40.385Z",
+      "endedAt": "2026-05-05T09:34:47.350Z",
+      "durationMs": 6965,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000050",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:47.350Z",
+      "endedAt": "2026-05-05T09:34:52.845Z",
+      "durationMs": 5495,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000051",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:34:52.845Z",
+      "endedAt": "2026-05-05T09:35:04.881Z",
+      "durationMs": 12036,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000052",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:04.881Z",
+      "endedAt": "2026-05-05T09:35:07.349Z",
+      "durationMs": 2468,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000053",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:07.349Z",
+      "endedAt": "2026-05-05T09:35:11.417Z",
+      "durationMs": 4068,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000054",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:11.417Z",
+      "endedAt": "2026-05-05T09:35:19.102Z",
+      "durationMs": 7685,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000055",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:19.102Z",
+      "endedAt": "2026-05-05T09:35:20.352Z",
+      "durationMs": 1250,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000056",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:20.352Z",
+      "endedAt": "2026-05-05T09:35:26.062Z",
+      "durationMs": 5710,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000057",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:26.062Z",
+      "endedAt": "2026-05-05T09:35:30.105Z",
+      "durationMs": 4043,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000058",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:30.105Z",
+      "endedAt": "2026-05-05T09:35:33.339Z",
+      "durationMs": 3234,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000059",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:33.339Z",
+      "endedAt": "2026-05-05T09:35:36.688Z",
+      "durationMs": 3349,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000060",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:36.688Z",
+      "endedAt": "2026-05-05T09:35:37.983Z",
+      "durationMs": 1295,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000061",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:37.983Z",
+      "endedAt": "2026-05-05T09:35:44.646Z",
+      "durationMs": 6663,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000062",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:44.646Z",
+      "endedAt": "2026-05-05T09:35:48.402Z",
+      "durationMs": 3756,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000063",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:35:48.402Z",
+      "endedAt": "2026-05-05T09:36:03.180Z",
+      "durationMs": 14778,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000064",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:36:03.180Z",
+      "endedAt": "2026-05-05T09:36:03.212Z",
+      "durationMs": 32,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000065",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:36:03.212Z",
+      "endedAt": "2026-05-05T09:36:11.061Z",
+      "durationMs": 7849,
+      "agentRole": "compiler",
+      "eventType": "tool_use"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000066",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:36:11.061Z",
+      "endedAt": "2026-05-05T09:36:11.275Z",
+      "durationMs": 214,
+      "agentRole": "compiler",
+      "eventType": "text_delta"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000067",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:36:11.275Z",
+      "endedAt": "2026-05-05T09:36:11.291Z",
+      "durationMs": 16,
+      "agentRole": "compiler",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000068",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:36:11.291Z",
+      "endedAt": "2026-05-05T09:36:13.313Z",
+      "durationMs": 2022,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000069",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:36:13.313Z",
+      "endedAt": "2026-05-05T09:36:13.345Z",
+      "durationMs": 32,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000070",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:36:13.345Z",
+      "endedAt": "2026-05-05T09:36:13.373Z",
+      "durationMs": 28,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000071",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:36:13.373Z",
+      "endedAt": "2026-05-05T09:36:13.383Z",
+      "durationMs": 10,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000072",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:36:13.383Z",
+      "endedAt": "2026-05-05T09:36:14.924Z",
+      "durationMs": 1541,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000073",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:36:14.924Z",
+      "endedAt": "2026-05-05T09:36:14.925Z",
+      "durationMs": 1,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000074",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:36:14.925Z",
+      "endedAt": "2026-05-05T09:36:14.938Z",
+      "durationMs": 13,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000075",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:36:14.938Z",
+      "endedAt": "2026-05-05T09:36:14.949Z",
+      "durationMs": 11,
+      "agentRole": "__compiler__",
+      "eventType": "compilation-completed"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000076",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:36:14.949Z",
+      "endedAt": "2026-05-05T09:36:15.987Z",
+      "durationMs": 1038,
+      "agentRole": "__shell__",
+      "eventType": "step_start"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000077",
+      "category": "dev",
+      "startedAt": "2026-05-05T09:36:15.987Z",
+      "endedAt": "2026-05-05T09:36:15.993Z",
+      "durationMs": 6,
+      "agentRole": "__shell__",
+      "eventType": "tool_result"
+    },
+    {
+      "jobId": "05b4b189-8f53-43a6-9800-117c1e251767",
+      "eventSeq": "000078",
+      "category": "compile",
+      "startedAt": "2026-05-05T09:36:15.993Z",
+      "endedAt": "2026-05-05T09:36:16.005Z",
+      "durationMs": 12,
+      "agentRole": "__shell__",
+      "eventType": "step_complete"
+    }
+  ],
+  "aggregate": {
+    "byCategory": {
+      "dev": {
+        "totalMs": 723730,
+        "count": 209
+      },
+      "test-author": {
+        "totalMs": 0,
+        "count": 0
+      },
+      "test-execute": {
+        "totalMs": 0,
+        "count": 0
+      },
+      "review": {
+        "totalMs": 110660,
+        "count": 37
+      },
+      "qa": {
+        "totalMs": 0,
+        "count": 0
+      },
+      "po": {
+        "totalMs": 0,
+        "count": 0
+      },
+      "architect": {
+        "totalMs": 0,
+        "count": 0
+      },
+      "compile": {
+        "totalMs": 127947,
+        "count": 92
+      },
+      "human-wait": {
+        "totalMs": 0,
+        "count": 0
+      },
+      "machine-wait": {
+        "totalMs": 417230,
+        "count": 17
+      },
+      "git": {
+        "totalMs": 0,
+        "count": 0
+      },
+      "bootstrap": {
+        "totalMs": 0,
+        "count": 0
+      },
+      "fix": {
+        "totalMs": 0,
+        "count": 0
+      },
+      "idle": {
+        "totalMs": 0,
+        "count": 0
+      },
+      "unattributed": {
+        "totalMs": 0,
+        "count": 0
+      }
+    },
+    "totalMs": 1379567
+  },
+  "cohort": null,
+  "narrative": "Total attributed time: 23m 0s. Largest category: dev (52%, 12m 4s). Smallest meaningful category: review (8%, 1m 51s). No cohort baseline yet (need 5+ similar plans). Collect more plans to unlock cohort-based recommendations.",
+  "_note": "events[] omitted by default — pass ?include=events for the full payload"
+}

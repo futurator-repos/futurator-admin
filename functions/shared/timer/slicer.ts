@@ -51,8 +51,17 @@ const IDLE_DOWNGRADE_EVENT_TYPES: ReadonlySet<string> = new Set([
   'epic_complete',
 ]);
 
-/** Sentinel for getEventsAfter: start from the very beginning of the stream. */
-const SEQ_START = '';
+/**
+ * Sentinel for getEventsAfter: start from the very beginning of the stream.
+ *
+ * DynamoDB rejects empty strings in key-attribute comparison values
+ * (`KeyConditionExpression: eventSeq > :after`), so we use '000000' which is
+ * lexicographically less than every real eventSeq (zero-padded 6-digit
+ * starting at '000001'). 2026-05-04: previously this was `''` and the timing
+ * dashboard silently fell into the catch-all error path on every poll —
+ * the panel showed 00:00 because `slices = []` was returned silently.
+ */
+const SEQ_START = '000000';
 
 /** Max events fetched per page from DynamoDB. */
 const PAGE_SIZE = 200;
@@ -107,8 +116,16 @@ function buildJobContext(
   activeStatus: AgentJobStatus,
 ): JobContext {
   // agentRole: prefer the event's `role` field (set by orchestrator events),
-  // fall back to agentId which is the role string for daemon-emitted events.
-  const agentRole: string = event.role ?? event.agentId ?? 'dev';
+  // fall back to agentId which is the pipeline-ID string for daemon-emitted
+  // events. Daemon emits `agentId: 'DEV' | 'REVIEWER' | 'COMPILER'`
+  // (uppercase pipeline IDs), but the classifier table keys are lowercase
+  // role strings (matching the AgentRole type union). Lowercase the value
+  // before returning so byRole lookups in CLASSIFICATION_TABLE actually
+  // match — without this, every reviewer event falls through to default
+  // 'dev' and the timing dashboard reports 0 % review time.
+  // 2026-05-04 dino-runner-1 forensic: 87 % dev / 0 % review across all
+  // jobs despite 6 reviewer steps. Root cause was this case mismatch.
+  const agentRole: string = (event.role ?? event.agentId ?? 'dev').toLowerCase();
   const jobKind: string = job.jobType ?? 'pipeline';
   const retryCount: number = job.retryAttempt ?? 0;
 
@@ -291,5 +308,50 @@ export async function sliceForPlan(planId: string): Promise<TimerSlice[]> {
   // Sort all slices by startedAt ascending
   allSlices.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
 
-  return allSlices;
+  // PR-23b — emit synthetic machine-wait slices for inter-job gaps.
+  //
+  // The slicer's per-job pass only produces slices BETWEEN events within a
+  // single job. Wave-boundary wait time (last event of wave-N's last job →
+  // first event of wave-N+1's first job) is the cron's poll cycle plus
+  // launch latency — typically 60-90 s per wave boundary. Without this
+  // pass that time is lost: machine-wait reports as 0 % even when the
+  // plan spent ~22 % of its wall-clock waiting for the cron to detect
+  // wave close + launch the next wave.
+  //
+  // Algorithm: walk the SORTED slices and for each pair (A, B) where
+  // A.jobId !== B.jobId AND B.startedAt > A.endedAt, insert a synthetic
+  // slice spanning A.endedAt → B.startedAt with category='machine-wait'.
+  //
+  // Skipped when:
+  //   • Same job (intra-job gaps already classified inside sliceForJob).
+  //   • Negative gap (parallel siblings — wave-N stories overlap; one
+  //     starts before the other finishes — that's NOT wait time).
+  //   • Gap < 1000 ms (sub-second gaps are noise, not real waits).
+  //
+  // 2026-05-04 dino-runner-1 forensic showed 254 s of inter-job gaps
+  // entirely missed; this surfaces them as machine-wait correctly.
+  const filledSlices: TimerSlice[] = [];
+  const INTER_JOB_GAP_MIN_MS = 1000;
+  for (let i = 0; i < allSlices.length; i++) {
+    filledSlices.push(allSlices[i]);
+    const cur = allSlices[i];
+    const next = allSlices[i + 1];
+    if (!next) continue;
+    if (cur.jobId === next.jobId) continue;
+    const gapMs =
+      new Date(next.startedAt).getTime() - new Date(cur.endedAt).getTime();
+    if (gapMs < INTER_JOB_GAP_MIN_MS) continue;
+    filledSlices.push({
+      jobId: '__inter_job__',
+      eventSeq: `${cur.eventSeq}->${next.eventSeq}`,
+      category: 'machine-wait' as TimerCategory,
+      startedAt: cur.endedAt,
+      endedAt: next.startedAt,
+      durationMs: gapMs,
+      agentRole: 'orchestrator',
+      eventType: 'status',
+    });
+  }
+
+  return filledSlices;
 }

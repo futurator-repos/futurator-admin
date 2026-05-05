@@ -1,0 +1,52 @@
+/* Labs — Plan Dashboard. Dark engineering aesthetic; green primary. */
+:root {
+  /* Futurator homepage vibe — near-black, thin type, monochrome with restrained accents */
+  --bg: #050608;
+  --bg-elev: #0a0b0f;
+  --surface: #101217;
+  --surface-2: #161920;
+  --border: #1c1f27;
+  --border-2: #2a2e38;
+  --text: #ededee;
+  --text-dim: #a0a3ab;
+  --text-mute: #6b6f78;
+  --text-faint: #3c404a;
+
+  --green: #22c55e;
+  --green-2: #16a34a;
+  --green-soft: #22c55e14;
+  --purple: #a78bfa;
+  --purple-2: #8b5cf6;
+  --amber: #d1a54f;
+  --red: #ef4444;
+  --blue: #7893b8;
+  --cyan: #8ab4c7;
+
+  --font-sans: 'Inter', 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Inter', 'DM Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: var(--bg); color: var(--text); font-family: var(--font-sans); font-size: 14px; min-height: 100vh; }
+body { overflow-x: hidden; }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-2); }
+
+button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+button:focus { outline: none; }
+input, textarea { font-family: inherit; color: inherit; background: none; border: none; }
+input:focus, textarea:focus { outline: none; }
+
+@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes slideDown { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes popIn { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: scale(1); } }
+@keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.dot-pulse { animation: pulse 1.4s ease-in-out infinite; }

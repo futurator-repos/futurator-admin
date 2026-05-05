@@ -201,6 +201,30 @@ export default $config({
       },
     });
 
+    // ── Party Mode — Inline Q&A (text-selection mini-panel) ──
+    // Stores per-selection follow-up questions answered by direct calls to the
+    // Anthropic API (not the Claude CLI). Anchored to a session + roundId +
+    // snippet so the UI can scroll the chat back to the highlight on click.
+    // PK: questionId. GSI: sessionId-createdAt-index → list per session, newest-first.
+    const partyInlineQuestionsTable = new sst.aws.Dynamo('PartyInlineQuestionsTable', {
+      fields: {
+        questionId: 'string',
+        sessionId: 'string',
+        createdAt: 'string',
+      },
+      primaryIndex: { hashKey: 'questionId' },
+      globalIndexes: {
+        'sessionId-createdAt-index': { hashKey: 'sessionId', rangeKey: 'createdAt' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-party-inline-questions',
+          billingMode: 'PAY_PER_REQUEST',
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── Plan-Based Labs (Epic 17) ──
     // Extended by App/Plan v1 (Story 1.4) with appId-createdAt-index GSI for
     // App-aware queries. Plans now carry an `appId` field linking to an Apps
@@ -269,6 +293,13 @@ export default $config({
     //   npx sst secret set GithubPat <value> --stage dev  (dev stage)
     // NEVER commit a real PAT value. Local dev falls back to GITHUB_PAT in .env.local.
     const githubPat = new sst.Secret('GithubPat');
+
+    // ── Party Mode — Anthropic API key for inline Q&A on text selections ──
+    // Set with:
+    //   npx sst secret set AnthropicApiKey <sk-ant-…> --stage production
+    // Local dev fallback: ANTHROPIC_API_KEY in .env.local (used by the Hono
+    // app when it can't read the secret-resolved Lambda env var).
+    const anthropicApiKey = new sst.Secret('AnthropicApiKey');
 
     // ── Pipeline v1 — Epic 3 (Talk-to-agent) tables ──
     const agentSessionsTable = new sst.aws.Dynamo('AgentSessionsTable', {
@@ -348,6 +379,7 @@ export default $config({
         projectRegistryTable,
         partyProjectsTable,
         partySessionsTable,
+        partyInlineQuestionsTable,
         plansTable,
         appsTable,
         attentionItemsTable,
@@ -355,6 +387,7 @@ export default $config({
         agentConversationsTable,
         timingSummaryTable,
         githubPat,
+        anthropicApiKey,
       ],
       environment: {
         PROJECTS_TABLE: projectsTable.name,
@@ -370,6 +403,10 @@ export default $config({
         PROJECT_REGISTRY_TABLE: projectRegistryTable.name,
         PARTY_PROJECTS_TABLE: partyProjectsTable.name,
         PARTY_SESSIONS_TABLE: partySessionsTable.name,
+        PARTY_INLINE_QUESTIONS_TABLE: partyInlineQuestionsTable.name,
+        // Anthropic SDK reads this directly. SST resolves the secret to the
+        // Lambda env at deploy time.
+        ANTHROPIC_API_KEY: anthropicApiKey.value,
         PLANS_TABLE: plansTable.name,
         APPS_TABLE: appsTable.name,
         ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
@@ -405,6 +442,17 @@ export default $config({
         {
           actions: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject'],
           resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/party-docs/*`],
+        },
+        // PR-16 — Plan forensic snapshots. When a plan reaches terminal
+        // status (delivered/archived) the forensic JSON is computed once and
+        // cached under timing/<planId>-forensic.json. Subsequent
+        // /timing/forensic GETs read from S3 instead of re-running the
+        // slicer + aggregator + cohort fetcher (~$0 vs ~17 DDB reads per
+        // call). Scoped to timing/* — does not collide with the public
+        // homepage's other paths (data/, media/, apps/, knowledge-live/).
+        {
+          actions: ['s3:PutObject', 's3:GetObject'],
+          resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/timing/*`],
         },
         {
           actions: ['s3:ListBucket'],
@@ -484,7 +532,7 @@ export default $config({
             'https://futurator.ai',
             'http://localhost:3000',
           ],
-          allowMethods: ['GET', 'POST', 'PUT', 'DELETE'],
+          allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
           allowHeaders: ['Content-Type', 'Authorization', 'X-Correlation-Id'],
           allowCredentials: true,
         },

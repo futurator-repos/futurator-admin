@@ -40,3 +40,23 @@ export function useResolveGlobalAttention() {
     },
   });
 }
+
+/**
+ * PR-9 #4 — bulk-resolve every open attention item for a plan. Bell drawer
+ * uses this to let the operator clear pre-PR-7 noise (or any plan whose
+ * failures are no longer actionable) without per-row clicks.
+ */
+export function useResolveAllForPlan() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (planId: string) =>
+      api.post<{ planId: string; resolvedCount: number }>(
+        `/plans/${planId}/attention-items/resolve-all`,
+        {},
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['attention'] });
+      queryClient.invalidateQueries({ queryKey: ['attention-items'] });
+    },
+  });
+}

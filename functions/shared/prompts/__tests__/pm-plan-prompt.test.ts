@@ -9,7 +9,7 @@ const baseArgs = {
 
 describe('buildPmPlanPrompt — boilerplate-aware contract', () => {
   describe('nextjs', () => {
-    const prompt = buildPmPlanPrompt({ ...baseArgs, boilerplateType: 'nextjs', rigor: 'mvp' });
+    const prompt = buildPmPlanPrompt({ ...baseArgs, boilerplateType: 'nextjs-base', rigor: 'mvp' });
 
     it('mentions Next.js as the framework', () => {
       expect(prompt).toContain('Next.js');
@@ -66,7 +66,7 @@ describe('buildPmPlanPrompt — boilerplate-aware contract', () => {
     it('prototype guidance suggests 1-3 ACs per story', () => {
       const prompt = buildPmPlanPrompt({
         ...baseArgs,
-        boilerplateType: 'nextjs',
+        boilerplateType: 'nextjs-base',
         rigor: 'prototype',
       });
       expect(prompt).toContain('Prototype rigor');
@@ -76,7 +76,7 @@ describe('buildPmPlanPrompt — boilerplate-aware contract', () => {
     it('mvp guidance suggests 3-5 ACs per story', () => {
       const prompt = buildPmPlanPrompt({
         ...baseArgs,
-        boilerplateType: 'nextjs',
+        boilerplateType: 'nextjs-base',
         rigor: 'mvp',
       });
       expect(prompt).toContain('MVP rigor');
@@ -86,7 +86,7 @@ describe('buildPmPlanPrompt — boilerplate-aware contract', () => {
     it('production guidance suggests 4-6 ACs per story', () => {
       const prompt = buildPmPlanPrompt({
         ...baseArgs,
-        boilerplateType: 'nextjs',
+        boilerplateType: 'nextjs-base',
         rigor: 'production',
       });
       expect(prompt).toContain('Production rigor');
@@ -108,7 +108,7 @@ describe('buildPmPlanPrompt — boilerplate-aware contract', () => {
       const prompt = buildPmPlanPrompt({
         ...baseArgs,
         planName: 'my-cool-plan',
-        boilerplateType: 'nextjs',
+        boilerplateType: 'nextjs-base',
         rigor: 'mvp',
       });
       expect(prompt).toContain('my-cool-plan');
@@ -118,7 +118,7 @@ describe('buildPmPlanPrompt — boilerplate-aware contract', () => {
       const prompt = buildPmPlanPrompt({
         ...baseArgs,
         intent: 'Build a fancy thing',
-        boilerplateType: 'nextjs',
+        boilerplateType: 'nextjs-base',
         rigor: 'mvp',
       });
       expect(prompt).toContain('Build a fancy thing');

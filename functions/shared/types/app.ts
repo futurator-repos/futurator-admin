@@ -26,7 +26,18 @@ export type AppWorkingTreeStatus = 'clean' | 'dirty-from-abandoned-plan';
  * default to `'nextjs'` when undefined (matching the Story 1.8.3 fallback
  * cited in Story 1.4.4 constraints).
  */
-export type AppBoilerplateType = 'nextjs' | 'sst' | 'vite' | 'mobile';
+// PR-13 — `nextjs` renamed to `nextjs-base`; new starter packs added.
+// Legacy 'nextjs' kept for backward-compat with already-stored App rows;
+// consumers normalize via `normalizeBoilerplateType` from registry.ts.
+export type AppBoilerplateType =
+  | 'nextjs-base'
+  | 'nextjs-canvas-game'
+  | 'nextjs-form-app'
+  | 'nextjs-dashboard'
+  | 'sst'
+  | 'vite'
+  | 'mobile'
+  | 'nextjs'; // legacy
 
 export interface App {
   /** Primary key. Kebab-case slug, locked at creation. URL segment under `futurator.ai/apps/<appId>/`. */

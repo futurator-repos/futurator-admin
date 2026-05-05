@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Party Mode — Redesign</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" src="../design-canvas.jsx"></script>
+  <script src="data.js"></script>
+  <script type="text/babel" src="rich-text.jsx"></script>
+  <script type="text/babel" src="ui.jsx"></script>
+  <script type="text/babel" src="chat.jsx"></script>
+
+  <script type="text/babel" data-presets="react">
+    const W = 1280;
+    const H = 800;
+
+    function App() {
+      return (
+        <DesignCanvas>
+          <DCSection id="main" title="Party Mode — full-screen chat" subtitle="Project info collapsed into the selector; tabs + chat take the full viewport. Slack-style grouping, avatar rail, turn dividers.">
+            <DCArtboard id="idle" label="A · Live conversation (streaming)" width={W} height={H}>
+              <ChatScreen phase="streaming" layout="slack" />
+            </DCArtboard>
+            <DCArtboard id="processing" label="B · Processing / agents spawning" width={W} height={H}>
+              <ChatScreen phase="processing" layout="slack" />
+            </DCArtboard>
+            <DCArtboard id="sending" label="C · Just sent, awaiting first token" width={W} height={H}>
+              <ChatScreen phase="sending" layout="slack" />
+            </DCArtboard>
+            <DCArtboard id="empty" label="D · Empty state · roster + prompts" width={W} height={H}>
+              <ChatScreen phase="empty" layout="slack" />
+            </DCArtboard>
+          </DCSection>
+
+          <DCSection id="details" title="Key details" subtitle="Close-ups of the new selector, processing indicator, and rich markdown rendering.">
+            <DCArtboard id="switcher" label="Project selector · palette open" width={720} height={560}>
+              <SwitcherDetail />
+            </DCArtboard>
+            <DCArtboard id="processing-detail" label="Processing indicator · multi-stage" width={720} height={420}>
+              <ProcessingDetail />
+            </DCArtboard>
+            <DCArtboard id="message-detail" label="Agent message · rich markdown" width={720} height={720}>
+              <MessageDetail />
+            </DCArtboard>
+            <DCArtboard id="composer-detail" label="Composer · processing + stop" width={720} height={260}>
+              <ComposerDetail />
+            </DCArtboard>
+          </DCSection>
+        </DesignCanvas>
+      );
+    }
+
+    function SwitcherDetail() {
+      const [project, setProject] = React.useState(PROJECTS[0]);
+      return (
+        <div style={{ width: '100%', height: '100%', background: 'var(--bg)', padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ fontSize: 11, color: 'var(--fg-dim)', fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: 0.08 }}>
+            Open the switcher · click a row to swap projects
+          </div>
+          <ProjectSwitcher project={project} onSelect={setProject} />
+          <div style={{ flex: 1 }} />
+          <div style={{ fontSize: 12, color: 'var(--fg-muted)', lineHeight: 1.6 }}>
+            The pill carries everything from the old sidebar card: status dot, path, health chip, bmad version, agent count, last-inspected time. Clicking opens a searchable palette listing all projects with labels for <em>status</em>, <em>version</em>, <em>agent count</em>, <em>size</em>, <em>last activity</em>, and <em>session count</em>.
+          </div>
+        </div>
+      );
+    }
+
+    function ProcessingDetail() {
+      return (
+        <div style={{ width: '100%', height: '100%', background: 'var(--bg)', padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ fontSize: 11, color: 'var(--fg-dim)', fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: 0.08 }}>
+            Staged progress — visible until the first agent starts streaming
+          </div>
+          <ProcessingIndicator
+            stage="BMad Master is routing your message"
+            statusLines={[
+              { text: 'Analyzing topic & project context', state: 'done' },
+              { text: 'Selecting best-fit agents from BMAD roster', state: 'done' },
+              { text: 'Spawning 4 agents · claude-sonnet-4-5', state: 'running' },
+              { text: 'Streaming multi-agent response', state: 'pending' },
+            ]}
+          />
+          <div style={{ fontSize: 12, color: 'var(--fg-muted)', lineHeight: 1.5 }}>
+            Once streaming starts, this collapses to a small "Winston is composing…" footer with a typing indicator next to the avatar.
+          </div>
+        </div>
+      );
+    }
+
+    function MessageDetail() {
+      const sample = `Here's a scoring function you can drop in. It's **pure**, deterministic, and *easy to test*:
+
+\`\`\`typescript
+interface ScoreEvent {
+  kind: 'foundation' | 'tableau' | 'undo' | 'time-bonus';
+  value: number;
+  timestamp: number;
+}
+
+function computeScore(events: ScoreEvent[]): number {
+  return events.reduce(
+    (acc, e) => acc + e.value * modifier(e.kind),
+    0,
+  );
+}
+\`\`\`
+
+> The pure-function approach means we can replay any game to verify scores, which kills an entire class of bugs.
+
+### Next steps
+
+1. Wire this into \`src/game/score.ts\`
+2. Add tests in \`tests/score.spec.ts\`
+3. Review with @Sally before UI work
+
+Docs in [scoring-research.md](https://example.com) and [Klondike variants](https://en.wikipedia.org/wiki/Klondike_(solitaire)).`;
+      return (
+        <div className="scroll-thin" style={{ width: '100%', height: '100%', background: 'var(--bg)', padding: 16, overflowY: 'auto' }}>
+          <PartyMessageCard speaker="winston" content={sample} />
+        </div>
+      );
+    }
+
+    function ComposerDetail() {
+      const [v, setV] = React.useState('What about time-based bonuses?');
+      return (
+        <div style={{ width: '100%', height: '100%', background: 'var(--bg)', padding: 20 }}>
+          <Composer value={v} onChange={setV} onSend={() => {}} onStop={() => {}} isProcessing={true} />
+        </div>
+      );
+    }
+
+    // Expose PartyMessageCard to this scope
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

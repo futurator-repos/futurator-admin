@@ -224,8 +224,18 @@ export async function reduceEpicWaves(
   }
 
   // ── 3. All wave-N stories are COMPLETED. Ensure wave build-check exists. ──
+  //
+  // PR-30 (2026-05-05) — for prototype rigor, skip wave-build-check entirely
+  // and advance directly to wave N+1 / epic completion. The check runs
+  // `npm run build` + `next dev` health-check between every wave (~5 min on
+  // t4g.small) which is overkill when each story already passed REVIEWER's
+  // verdict + per-story `tsc --noEmit`. mvp/production rigor still get the
+  // safety net.
+  // Plan-3 of dino-runner-1 measured 5m 26s dead time per wave boundary
+  // — 3 wave boundaries × 5 min = 15 min of idle on a 5-story plan.
+  const skipWaveBuildCheck = planOpts?.rigor === 'prototype';
   const existingBuildCheckId = epic.waveBuildJobs?.[String(currentWave)];
-  if (!existingBuildCheckId) {
+  if (!skipWaveBuildCheck && !existingBuildCheckId) {
     const jobId = deps.uuid();
     const now = deps.now();
     const pipeline = deps.generateWaveBuildPipeline(
@@ -251,53 +261,61 @@ export async function reduceEpicWaves(
   }
 
   // ── 4. Build-check exists; gate on its status. ─────────────────────────
-  const buildCheckJob = await deps.getJobById(existingBuildCheckId);
-  if (!buildCheckJob || !isTerminal(buildCheckJob.status)) {
-    return { kind: 'wave-build-check-pending', waveNumber: currentWave };
-  }
-  if (!isSuccess(buildCheckJob.status)) {
-    // Build failed — halt the epic for operator intervention.
-    await deps.updateEpicFields(epic.epicId, {
-      stories: mutable,
-      status: 'fixing',
-    });
-
-    // Pipeline v2.0 PR-7 (G+H): one upsert per (epic, wave) build-check.
-    // Cron ticks during the operator's debugging session don't multiply rows.
-    if (deps.writeAttentionItem && epic.planId) {
-      await deps
-        .writeAttentionItem({
-          planId: epic.planId,
-          itemId: deps.uuid(),
-          createdAt: deps.now(),
-          resolvedAt: null,
-          severity: 'high',
-          category: 'test-gate-failed',
-          title: `Wave ${currentWave} build-check failed`,
-          body:
-            `All wave-${currentWave} stories in epic "${epic.title}" completed, but the ` +
-            `automated wave-build-check (job ${existingBuildCheckId}) finished with ` +
-            `status=${buildCheckJob.status}. Fix the build and re-run the check.`,
-          context: {
-            epicId: epic.epicId,
-            jobId: existingBuildCheckId,
-          },
-          suggestedActions: [
-            { label: 'Open logs', kind: 'open-logs' },
-            { label: 'Retry step', kind: 'retry-step' },
-          ],
-          status: 'open',
-          dedupKey: `wave-reducer:wave-build-check-failed:${epic.epicId}:${currentWave}`,
-        })
-        .catch(() => {
-          // swallow — attention writes must never break the reducer
-        });
+  //
+  // PR-30 — prototype rigor short-circuits this entire block. We persist
+  // story statuses (still needed for the UI rollups) and fall through to
+  // advance to the next wave / mark epic completed without running the
+  // build-check.
+  if (skipWaveBuildCheck) {
+    await deps.updateEpicFields(epic.epicId, { stories: mutable });
+  } else {
+    const buildCheckJob = await deps.getJobById(existingBuildCheckId);
+    if (!buildCheckJob || !isTerminal(buildCheckJob.status)) {
+      return { kind: 'wave-build-check-pending', waveNumber: currentWave };
     }
+    if (!isSuccess(buildCheckJob.status)) {
+      // Build failed — halt the epic for operator intervention.
+      await deps.updateEpicFields(epic.epicId, {
+        stories: mutable,
+        status: 'fixing',
+      });
 
-    return { kind: 'wave-build-check-failed', waveNumber: currentWave };
+      // Pipeline v2.0 PR-7 (G+H): one upsert per (epic, wave) build-check.
+      if (deps.writeAttentionItem && epic.planId) {
+        await deps
+          .writeAttentionItem({
+            planId: epic.planId,
+            itemId: deps.uuid(),
+            createdAt: deps.now(),
+            resolvedAt: null,
+            severity: 'high',
+            category: 'test-gate-failed',
+            title: `Wave ${currentWave} build-check failed`,
+            body:
+              `All wave-${currentWave} stories in epic "${epic.title}" completed, but the ` +
+              `automated wave-build-check (job ${existingBuildCheckId}) finished with ` +
+              `status=${buildCheckJob.status}. Fix the build and re-run the check.`,
+            context: {
+              epicId: epic.epicId,
+              jobId: existingBuildCheckId,
+            },
+            suggestedActions: [
+              { label: 'Open logs', kind: 'open-logs' },
+              { label: 'Retry step', kind: 'retry-step' },
+            ],
+            status: 'open',
+            dedupKey: `wave-reducer:wave-build-check-failed:${epic.epicId}:${currentWave}`,
+          })
+          .catch(() => {
+            // swallow — attention writes must never break the reducer
+          });
+      }
+
+      return { kind: 'wave-build-check-failed', waveNumber: currentWave };
+    }
   }
 
-  // ── 5. Build-check passed → advance to wave N+1 or mark epic completed. ─
+  // ── 5. Build-check passed (or skipped) → advance wave or complete epic. ─
   const nextWave = currentWave + 1;
   const nextWaveStories = epic.stories.filter((s) => (s.wave ?? 0) === nextWave);
   if (nextWaveStories.length === 0) {

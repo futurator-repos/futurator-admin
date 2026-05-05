@@ -1,7 +1,28 @@
-import type { AgentEvent, OrchestratorEvent, OrchestratorRole } from '@/types/agent-orchestrator';
-import type { OfficeAction, WorkerRole, LocationKey } from '@/types/agentic-office';
+import type {
+  AgentEvent,
+  OrchestratorEvent,
+  OrchestratorRole,
+} from '@/types/agent-orchestrator';
+import type { CharacterId, OfficeAction, PersonaRole } from './types';
+import type { OrchestratorAnimationIntent } from './orchestrator-scene-state';
 
-// ── Parse tool input to extract the most human-readable part ──
+// Re-export the intent/status types so consumers don't need two imports.
+export type { OrchestratorAnimationIntent, SupervisorStatus } from './orchestrator-scene-state';
+
+// ── Translation context ──
+// Tracker code knows which persona owns which story — the translator just
+// emits actions scoped to that persona. `role` is included so the translator
+// can emit role-appropriate phrasing.
+
+export interface TranslationContext {
+  characterId: CharacterId;
+  role: PersonaRole;
+  epicId: string;
+  storyId: string;
+  storyTitle: string;
+}
+
+// ── Helpers ──
 
 function parseToolInput(input?: string): string {
   if (!input) return '';
@@ -11,6 +32,24 @@ function parseToolInput(input?: string): string {
   } catch {
     return input.slice(0, 80);
   }
+}
+
+/** Secondary Task-tool fields — subagent_type + description. */
+function parseTaskTool(input?: string): { subagentType?: string; description?: string } {
+  if (!input) return {};
+  try {
+    const parsed = JSON.parse(input);
+    return {
+      subagentType: parsed.subagent_type,
+      description: parsed.description,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function isTestFile(path: string): boolean {
+  return /\.test\.(ts|tsx|js|jsx|mjs)$|\/__tests__\/|\/e2e\/|\/tests\//.test(path);
 }
 
 function basename(path: string): string {
@@ -23,12 +62,20 @@ function truncateCommand(cmd: string): string {
   return cmd;
 }
 
-// ── Classify bash commands ──
-
 function classifyBashCommand(cmd: string): { emoji: string; message: string } {
   const lower = cmd.toLowerCase();
-  if (lower.includes('npm test') || lower.includes('vitest') || lower.includes('jest')) {
+  if (
+    lower.includes('npx vitest') ||
+    lower.includes('vitest run') ||
+    lower.includes('vitest ') ||
+    lower.includes('npm test') ||
+    lower.includes('npm run test') ||
+    lower.includes('jest')
+  ) {
     return { emoji: '🧪', message: 'Running tests...' };
+  }
+  if (lower.includes('npx playwright') || lower.includes('playwright test')) {
+    return { emoji: '🎭', message: 'Running Playwright e2e...' };
   }
   if (
     lower.includes('npm run build') ||
@@ -46,6 +93,12 @@ function classifyBashCommand(cmd: string): { emoji: string; message: string } {
   if (lower.includes('npm run dev') || lower.includes('npm start')) {
     return { emoji: '🚀', message: 'Starting dev server...' };
   }
+  if (lower.startsWith('tree ') || lower.startsWith('find ') || lower.startsWith('ls ')) {
+    return { emoji: '📂', message: 'Exploring files...' };
+  }
+  if (lower.startsWith('cat ') || lower.startsWith('head ') || lower.startsWith('tail ')) {
+    return { emoji: '📄', message: 'Reading a file...' };
+  }
   if (lower.includes('git ')) {
     return { emoji: '📋', message: 'Running git command...' };
   }
@@ -55,21 +108,10 @@ function classifyBashCommand(cmd: string): { emoji: string; message: string } {
   return { emoji: '⚡', message: `Running: ${truncateCommand(cmd)}` };
 }
 
-// ── Main translator ──
+// ── Per-agent event translator ──
+// Turns a single AgentEvent into zero or more OfficeActions against the
+// persona named in ctx.characterId. Empty array = ignore.
 
-export interface TranslationContext {
-  workerId: string;
-  role: WorkerRole;
-  epicId: string;
-  storyId: string;
-  storyTitle: string;
-  deskLocation: LocationKey | null;
-}
-
-/**
- * Translates a raw AgentEvent into zero or more OfficeActions.
- * Returns an empty array if the event should be ignored.
- */
 export function translateEvent(event: AgentEvent, ctx: TranslationContext): OfficeAction[] {
   const ts = Date.now();
   const actions: OfficeAction[] = [];
@@ -81,21 +123,40 @@ export function translateEvent(event: AgentEvent, ctx: TranslationContext): Offi
         const stepId = event.stepId;
         const isBuilding = stepId === 'build-check';
         const isServer = stepId === 'server-check';
+        const isTestVerify = stepId === 'test-verify';
+        const isTestGateRed = stepId === 'test-gate-red';
+        const isTamper = stepId === 'tamper-check';
         actions.push({
           type: 'chat',
-          workerId: ctx.workerId,
+          characterId: ctx.characterId,
           message: isBuilding
             ? 'Running build...'
             : isServer
               ? 'Checking server...'
-              : 'Running check...',
-          emoji: isBuilding ? '🔨' : isServer ? '🌐' : '⚡',
+              : isTestVerify
+                ? 'Running tests...'
+                : isTestGateRed
+                  ? 'Verifying tests fail first...'
+                  : isTamper
+                    ? 'Scanning for tamper...'
+                    : 'Running check...',
+          emoji: isBuilding
+            ? '🔨'
+            : isServer
+              ? '🌐'
+              : isTestVerify
+                ? '✅'
+                : isTestGateRed
+                  ? '🚦'
+                  : isTamper
+                    ? '🔎'
+                    : '⚡',
           timestamp: ts,
         });
       } else if (agentId === 'DEV') {
         actions.push({
           type: 'chat',
-          workerId: ctx.workerId,
+          characterId: ctx.characterId,
           message: `Starting on ${ctx.storyTitle}`,
           emoji: '💪',
           timestamp: ts,
@@ -103,9 +164,26 @@ export function translateEvent(event: AgentEvent, ctx: TranslationContext): Offi
       } else if (agentId === 'REVIEWER') {
         actions.push({
           type: 'chat',
-          workerId: ctx.workerId,
+          characterId: ctx.characterId,
           message: 'Reviewing the code...',
           emoji: '👀',
+          timestamp: ts,
+        });
+      } else if (agentId === 'TEST') {
+        const stepId = event.stepId;
+        const msg =
+          stepId === 'test-author'
+            ? 'Writing tests...'
+            : stepId === 'test-verify'
+              ? 'Checking tests pass...'
+              : stepId === 'tamper-check'
+                ? 'Scanning for tamper...'
+                : 'Running tests...';
+        actions.push({
+          type: 'chat',
+          characterId: ctx.characterId,
+          message: msg,
+          emoji: '🧪',
           timestamp: ts,
         });
       }
@@ -122,37 +200,73 @@ export function translateEvent(event: AgentEvent, ctx: TranslationContext): Offi
         case 'Glob':
           actions.push({
             type: 'chat',
-            workerId: ctx.workerId,
+            characterId: ctx.characterId,
             message: input ? `Looking at ${basename(input)}` : 'Reading files...',
             emoji: '🔍',
+            tier: 'action',
+            toolKind: 'read',
             timestamp: ts,
           });
           break;
         case 'Edit':
           actions.push({
             type: 'chat',
-            workerId: ctx.workerId,
-            message: input ? `Editing ${basename(input)}` : 'Editing code...',
-            emoji: '✏️',
+            characterId: ctx.characterId,
+            message: input
+              ? isTestFile(input)
+                ? `Updating test: ${basename(input)}`
+                : `Editing ${basename(input)}`
+              : 'Editing code...',
+            emoji: input && isTestFile(input) ? '🧪' : '✏️',
+            tier: 'action',
+            toolKind: 'edit',
             timestamp: ts,
           });
           break;
         case 'Write':
           actions.push({
             type: 'chat',
-            workerId: ctx.workerId,
-            message: input ? `Creating ${basename(input)}` : 'Writing new file...',
-            emoji: '📝',
+            characterId: ctx.characterId,
+            message: input
+              ? isTestFile(input)
+                ? `Writing test: ${basename(input)}`
+                : `Creating ${basename(input)}`
+              : 'Writing new file...',
+            emoji: input && isTestFile(input) ? '🧪' : '📝',
+            tier: 'action',
+            toolKind: 'write',
             timestamp: ts,
           });
           break;
+        case 'Task': {
+          const t = parseTaskTool(event.toolInput);
+          const label = t.description
+            ? t.description.length > 42
+              ? `${t.description.slice(0, 40)}…`
+              : t.description
+            : t.subagentType
+              ? `Dispatching ${t.subagentType}…`
+              : 'Dispatching subagent…';
+          actions.push({
+            type: 'chat',
+            characterId: ctx.characterId,
+            message: label,
+            emoji: '🤖',
+            tier: 'action',
+            toolKind: 'other',
+            timestamp: ts,
+          });
+          break;
+        }
         case 'Bash': {
           const { emoji, message } = classifyBashCommand(input);
           actions.push({
             type: 'chat',
-            workerId: ctx.workerId,
+            characterId: ctx.characterId,
             message,
             emoji,
+            tier: 'action',
+            toolKind: 'bash',
             timestamp: ts,
           });
           break;
@@ -161,9 +275,11 @@ export function translateEvent(event: AgentEvent, ctx: TranslationContext): Offi
           if (toolName) {
             actions.push({
               type: 'chat',
-              workerId: ctx.workerId,
+              characterId: ctx.characterId,
               message: `Using ${toolName}...`,
               emoji: '🔧',
+              tier: 'action',
+              toolKind: 'other',
               timestamp: ts,
             });
           }
@@ -175,17 +291,19 @@ export function translateEvent(event: AgentEvent, ctx: TranslationContext): Offi
       if (event.validationPassed === true) {
         actions.push({
           type: 'milestone',
-          workerId: ctx.workerId,
+          characterId: ctx.characterId,
           message: event.validationLabel ?? 'All checks passed!',
           emoji: '🎉',
+          milestone: 'cheer',
           timestamp: ts,
         });
       } else if (event.validationPassed === false) {
         actions.push({
           type: 'milestone',
-          workerId: ctx.workerId,
+          characterId: ctx.characterId,
           message: event.validationLabel ?? 'Found issues...',
           emoji: '😤',
+          milestone: 'neutral',
           timestamp: ts,
         });
       }
@@ -197,9 +315,10 @@ export function translateEvent(event: AgentEvent, ctx: TranslationContext): Offi
         const pass = event.variableValue?.toUpperCase() === 'PASS';
         actions.push({
           type: 'milestone',
-          workerId: ctx.workerId,
+          characterId: ctx.characterId,
           message: pass ? 'Approved!' : 'Needs more work',
           emoji: pass ? '👍' : '👎',
+          milestone: pass ? 'cheer' : 'neutral',
           timestamp: ts,
         });
       }
@@ -212,27 +331,61 @@ export function translateEvent(event: AgentEvent, ctx: TranslationContext): Offi
         const stepId = event.stepId;
         const isBuilding = stepId === 'build-check';
         const isServer = stepId === 'server-check';
+        const isTestVerify = stepId === 'test-verify';
+        const isTestGateRed = stepId === 'test-gate-red';
+        const isTamper = stepId === 'tamper-check';
         actions.push({
           type: 'milestone',
-          workerId: ctx.workerId,
-          message: isBuilding ? 'Build passed!' : isServer ? 'Server OK!' : 'Check passed!',
+          characterId: ctx.characterId,
+          message: isBuilding
+            ? 'Build passed!'
+            : isServer
+              ? 'Server OK!'
+              : isTestVerify
+                ? 'Tests green!'
+                : isTestGateRed
+                  ? 'Red confirmed — tests fail as expected'
+                  : isTamper
+                    ? 'Tamper scan clean'
+                    : 'Check passed!',
           emoji: '✅',
+          milestone: 'cheer',
           timestamp: ts,
         });
       } else if (agentId === 'DEV') {
         actions.push({
           type: 'milestone',
-          workerId: ctx.workerId,
+          characterId: ctx.characterId,
           message: 'Done coding!',
           emoji: '✅',
+          milestone: 'cheer',
           timestamp: ts,
         });
       } else if (agentId === 'REVIEWER') {
         actions.push({
           type: 'milestone',
-          workerId: ctx.workerId,
+          characterId: ctx.characterId,
           message: 'Review complete!',
           emoji: '📝',
+          milestone: 'neutral',
+          timestamp: ts,
+        });
+      } else if (agentId === 'TEST') {
+        const stepId = event.stepId;
+        const msg =
+          stepId === 'test-author'
+            ? 'Tests authored!'
+            : stepId === 'test-verify'
+              ? 'Tests pass!'
+              : stepId === 'tamper-check'
+                ? 'No tamper detected'
+                : 'Tests done!';
+        actions.push({
+          type: 'milestone',
+          characterId: ctx.characterId,
+          message: msg,
+          emoji: '🧪',
+          milestone: 'cheer',
           timestamp: ts,
         });
       }
@@ -245,27 +398,46 @@ export function translateEvent(event: AgentEvent, ctx: TranslationContext): Offi
         const stepId = event.stepId;
         const isBuilding = stepId === 'build-check';
         const isServer = stepId === 'server-check';
+        const isTestVerify = stepId === 'test-verify';
+        const isTamper = stepId === 'tamper-check';
         actions.push({
           type: 'milestone',
-          workerId: ctx.workerId,
-          message: isBuilding ? 'Build failed!' : isServer ? 'Server crashed!' : 'Check failed!',
+          characterId: ctx.characterId,
+          message: isBuilding
+            ? 'Build failed!'
+            : isServer
+              ? 'Server crashed!'
+              : isTestVerify
+                ? 'Tests failed!'
+                : isTamper
+                  ? 'Tamper detected — reverted'
+                  : 'Check failed!',
           emoji: '❌',
+          milestone: 'defeat',
+          timestamp: ts,
+        });
+      } else if (errorAgentId === 'TEST') {
+        actions.push({
+          type: 'milestone',
+          characterId: ctx.characterId,
+          message: 'Test step failed...',
+          emoji: '🧪',
+          milestone: 'defeat',
           timestamp: ts,
         });
       } else {
         actions.push({
           type: 'milestone',
-          workerId: ctx.workerId,
+          characterId: ctx.characterId,
           message: 'Something went wrong...',
           emoji: '⚠️',
+          milestone: 'defeat',
           timestamp: ts,
         });
       }
       break;
     }
 
-    // text_delta, tool_result, result, status — ignored for chat bubbles
-    // (text_delta is handled via periodic sampling in StoryTracker)
     default:
       break;
   }
@@ -274,27 +446,21 @@ export function translateEvent(event: AgentEvent, ctx: TranslationContext): Offi
 }
 
 /**
- * Create a "thinking" chat action from accumulated text deltas.
- * Called periodically (every ~5s) rather than on every text_delta event.
+ * Periodic "Thinking..." bubble from accumulated text_delta events.
+ * Scene code calls this every ~5s instead of per delta.
  */
-export function createThinkingAction(workerId: string): OfficeAction {
+export function createThinkingAction(characterId: CharacterId): OfficeAction {
   return {
     type: 'chat',
-    workerId,
+    characterId,
     message: 'Thinking...',
     emoji: '🤔',
     timestamp: Date.now(),
   };
 }
 
-// ── Orchestrator animation intents (Epic 6) ─────────────────────────────────
+// ── Orchestrator-wide events ──────────────────────────────────────────────
 
-/**
- * Event types emitted by the epic orchestrator. A single shared event stream
- * carries both the legacy per-step events (tool_use, step_*, text_delta) and
- * these orchestrator-wide events — consumers gate on this set before routing
- * an event through `translateOrchestratorIntent`.
- */
 export const ORCHESTRATOR_EVENT_TYPES: ReadonlySet<string> = new Set([
   'epic_start',
   'epic_complete',
@@ -318,111 +484,6 @@ export function isOrchestratorEventType(eventType: string): boolean {
   return ORCHESTRATOR_EVENT_TYPES.has(eventType);
 }
 
-//
-// Each orchestrator event is translated into a single typed animation intent
-// that the Three.js scene consumes to drive discrete visual changes (spawn,
-// despawn, place card, flash band, etc.). Unknown events return a `noop`
-// intent rather than throwing so stray/future events never break the scene.
-
-export type SupervisorStatus = 'dispatching' | 'waiting' | 'conflict' | 'failed';
-
-export type OrchestratorAnimationIntent =
-  | {
-      type: 'supervisor_dispatch';
-      status: SupervisorStatus;
-      epicId: string;
-      maxParallel?: number;
-      storyCount?: number;
-      totalWaves?: number;
-    }
-  | { type: 'supervisor_complete'; epicId: string; summary?: unknown }
-  | { type: 'supervisor_fail'; epicId: string; reason?: string }
-  | {
-      type: 'wave_band_activate';
-      waveNumber: number;
-      storyIds: string[];
-    }
-  | {
-      type: 'wave_band_deactivate';
-      waveNumber: number;
-      outcomes?: Record<string, string>;
-    }
-  | {
-      type: 'wave_collision_flash';
-      waveNumber: number;
-      storyId?: string;
-      siblingStoryId?: string;
-      offendingFiles?: string[];
-      subWaves?: string[][];
-    }
-  | {
-      type: 'touch_points_update';
-      storyId: string;
-      before?: string[];
-      after?: string[];
-      source?: string;
-    }
-  | {
-      type: 'dev_spawn';
-      storyId: string;
-      subagentId: string;
-      attempt: number;
-    }
-  | {
-      type: 'reviewer_spawn';
-      storyId: string;
-      subagentId: string;
-      attempt: number;
-    }
-  | {
-      type: 'dev_despawn';
-      storyId: string;
-      subagentId: string;
-      durationMs?: number;
-    }
-  | {
-      type: 'reviewer_despawn';
-      storyId: string;
-      subagentId: string;
-      durationMs?: number;
-    }
-  | {
-      type: 'remediation_respawn';
-      storyId: string;
-      subagentId?: string;
-      attempt: number;
-    }
-  | {
-      type: 'review_verdict_pulse';
-      storyId: string;
-      verdict: string;
-      attempt: number;
-      findings?: unknown[];
-    }
-  | {
-      type: 'blocker_card_place';
-      storyId: string;
-      blockerCode?: string;
-      description?: string;
-    }
-  | {
-      type: 'blocker_card_remove';
-      storyId: string;
-      action?: 'amend' | 'skip' | 'retry';
-    }
-  | {
-      type: 'story_desk_blocked_ring';
-      storyId: string;
-      blockerCode?: string;
-      suggestedResolution?: string;
-    }
-  | {
-      type: 'story_desk_terminal_fail';
-      storyId: string;
-      reason?: string;
-    }
-  | { type: 'noop'; reason: string };
-
 function str(payload: Record<string, unknown> | undefined, key: string): string | undefined {
   const v = payload?.[key];
   return typeof v === 'string' ? v : undefined;
@@ -441,9 +502,6 @@ function strArray(payload: Record<string, unknown> | undefined, key: string): st
 /**
  * Translate a raw orchestrator event into a single typed animation intent.
  * Unknown event types log a warn and return a `noop` intent — never throws.
- *
- * See arch doc §9.2 for the event vocabulary and §10.3 for the visual
- * treatment each intent drives.
  */
 export function translateOrchestratorIntent(event: OrchestratorEvent): OrchestratorAnimationIntent {
   const p = event.payload;
@@ -615,8 +673,6 @@ export function translateOrchestratorIntent(event: OrchestratorEvent): Orchestra
       };
 
     default:
-      // Never throw on unknown events — log and return a noop so the scene
-      // keeps rendering whatever it already has.
       console.warn(`[orchestrator-translator] unknown event type: ${event.eventType}`);
       return { type: 'noop', reason: `unknown event type: ${event.eventType}` };
   }

@@ -168,6 +168,7 @@ export function isCompileStep(stepId) {
     'compile-diff',
     'compile-knowledge',
     'compile-sync',
+    'compile-push', // PR-19 — git push origin HEAD after the S3 mirror sync
   ].includes(stepId);
 }
 
@@ -179,4 +180,5 @@ export const COMPILE_STEP_IDS = [
   'compile-diff',
   'compile-knowledge',
   'compile-sync',
+  'compile-push', // PR-19
 ];

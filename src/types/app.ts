@@ -11,8 +11,20 @@ export type AppDerivedStatus = 'live' | 'building' | 'dirty-tree' | 'no-deploy';
 /**
  * Story 1.4 contract — boilerplate type for GitHub-backed Apps.
  * Added as optional so pre-1.4 legacy apps keep their existing shape.
+ *
+ * PR-13 — `nextjs` renamed to `nextjs-base`; new starter packs added.
+ * Legacy 'nextjs' kept as a union member for App rows already in DDB; the
+ * client-side `getBoilerplateClientView` normalizes it to `nextjs-base`.
  */
-export type BoilerplateType = 'nextjs' | 'sst' | 'vite' | 'mobile';
+export type BoilerplateType =
+  | 'nextjs-base'
+  | 'nextjs-canvas-game'
+  | 'nextjs-form-app'
+  | 'nextjs-dashboard'
+  | 'sst'
+  | 'vite'
+  | 'mobile'
+  | 'nextjs'; // legacy
 
 export interface App {
   appId: string;

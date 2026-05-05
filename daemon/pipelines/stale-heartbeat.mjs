@@ -19,9 +19,39 @@ export const DEFAULT_STALE_MS = 5 * 60 * 1000;
  * Returns true when the job is a RUNNING epic-dev job whose heartbeat
  * is older than `staleMs`. Jobs that have never heartbeated since
  * transitioning to RUNNING are considered stale against `updatedAt`.
+ *
+ * Kept for backwards-compat with the orchestrator-resume path
+ * (`buildResumeJob` only knows how to resume epic-dev jobs).
  */
 export function isStale(job, { now = Date.now(), staleMs = DEFAULT_STALE_MS } = {}) {
   if (!job || job.status !== 'RUNNING' || job.phase !== 'epic-dev') return false;
+  const ref = job.lastHeartbeatAt || job.updatedAt;
+  if (!ref) return false;
+  const refMs = Date.parse(ref);
+  if (Number.isNaN(refMs)) return false;
+  return now - refMs > staleMs;
+}
+
+/**
+ * PR-28 — broader staleness predicate that catches per-story dev pipeline
+ * jobs, not just epic-dev orchestrator jobs.
+ *
+ * Rationale: when the daemon is killed mid-execution (OOM on t4g.small,
+ * SIGKILL, etc.), per-story RUNNING jobs sit in DDB forever because the
+ * orchestrator-only `isStale` filters them out. Result: wave-reducer
+ * never sees them as terminal → wave never advances → operator must
+ * manually clean up. Plan-2 of dino-runner-1 (2026-05-04) hung 3 wave-1
+ * stories this way.
+ *
+ * This predicate is more permissive: any RUNNING job (regardless of
+ * phase) whose heartbeat or updatedAt timestamp is older than `staleMs`
+ * counts as stale. Callers route the result differently:
+ *   • epic-dev jobs → buildResumeJob (continues the orchestrator)
+ *   • everything else → mark STALE + emit attention item, no auto-resume
+ *     (story state is too fragile to safely rebuild from outside)
+ */
+export function isStaleAnyPhase(job, { now = Date.now(), staleMs = DEFAULT_STALE_MS } = {}) {
+  if (!job || job.status !== 'RUNNING') return false;
   const ref = job.lastHeartbeatAt || job.updatedAt;
   if (!ref) return false;
   const refMs = Date.parse(ref);

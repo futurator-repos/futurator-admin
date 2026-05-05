@@ -8,7 +8,16 @@ import type { BoilerplateType } from '../registry';
 
 // All members of the union, kept in sync manually. If you add a new
 // BoilerplateType and forget to add it here the tests below will catch it.
-const ALL_TYPES: BoilerplateType[] = ['nextjs', 'sst', 'vite', 'mobile'];
+// PR-13 — `nextjs` renamed to `nextjs-base`; new starter packs added.
+const ALL_TYPES: BoilerplateType[] = [
+  'nextjs-base',
+  'nextjs-canvas-game',
+  'nextjs-form-app',
+  'nextjs-dashboard',
+  'sst',
+  'vite',
+  'mobile',
+];
 
 describe('BOILERPLATE_REGISTRY — structural coverage', () => {
   it('has an entry for every BoilerplateType', () => {
@@ -54,8 +63,8 @@ describe('BOILERPLATE_REGISTRY — structural coverage', () => {
 
 describe('getBoilerplateMetadata', () => {
   it('returns the metadata for a known type', () => {
-    const meta = getBoilerplateMetadata('nextjs');
-    expect(meta.type).toBe('nextjs');
+    const meta = getBoilerplateMetadata('nextjs-base');
+    expect(meta.type).toBe('nextjs-base');
     expect(meta.status).toBe('wired');
     expect(meta.bmadSupported).toBe(true);
   });
@@ -69,9 +78,10 @@ describe('getBoilerplateMetadata', () => {
 });
 
 describe('getWiredBoilerplateTypes', () => {
-  it('returns exactly ["nextjs"] in Phase 1', () => {
+  it('includes nextjs-base + nextjs-canvas-game (PR-13 Phase 1)', () => {
     const wired = getWiredBoilerplateTypes();
-    expect(wired).toEqual(['nextjs']);
+    expect(wired).toContain('nextjs-base');
+    expect(wired).toContain('nextjs-canvas-game');
   });
 
   it('returns only types whose status is wired', () => {
@@ -82,8 +92,8 @@ describe('getWiredBoilerplateTypes', () => {
   });
 });
 
-describe('nextjs registry entry — spot-check AC values', () => {
-  const meta = BOILERPLATE_REGISTRY['nextjs'];
+describe('nextjs-base registry entry — spot-check AC values', () => {
+  const meta = BOILERPLATE_REGISTRY['nextjs-base'];
 
   it('has the correct templateRepo', () => {
     expect(meta.templateRepo).toBe('futurator-repos/template-nextjs');
@@ -110,13 +120,63 @@ describe('nextjs registry entry — spot-check AC values', () => {
   });
 });
 
+describe('PR-13 — starter pack inheritance', () => {
+  it('nextjs-canvas-game inherits postCreateSteps from nextjs-base', () => {
+    const base = BOILERPLATE_REGISTRY['nextjs-base'];
+    const cg = BOILERPLATE_REGISTRY['nextjs-canvas-game'];
+    expect(cg.postCreateSteps).toEqual(base.postCreateSteps);
+  });
+
+  it('nextjs-canvas-game declares baseStarter + augmentFiles + scaffoldContract', () => {
+    const cg = BOILERPLATE_REGISTRY['nextjs-canvas-game'];
+    expect(cg.baseStarter).toBe('nextjs-base');
+    expect(cg.domain).toBe('game');
+    expect(Array.isArray(cg.augmentFiles)).toBe(true);
+    expect((cg.augmentFiles ?? []).length).toBeGreaterThan(0);
+    expect(cg.scaffoldContract?.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it('nextjs-canvas-game first augment file is SCAFFOLD.md mirroring scaffoldContract', () => {
+    const cg = BOILERPLATE_REGISTRY['nextjs-canvas-game'];
+    expect(cg.augmentFiles?.[0].path).toBe('SCAFFOLD.md');
+    expect(cg.augmentFiles?.[0].content).toBe(cg.scaffoldContract);
+  });
+
+  it('nextjs-canvas-game augments include the documented primitives', () => {
+    const cg = BOILERPLATE_REGISTRY['nextjs-canvas-game'];
+    const paths = (cg.augmentFiles ?? []).map((f) => f.path);
+    for (const required of [
+      'src/game/types.ts',
+      'src/game/physics.ts',
+      'src/game/state-machine.ts',
+      'src/hooks/useGameLoop.ts',
+      'src/hooks/useKeyboard.ts',
+      'src/components/GameCanvas.tsx',
+    ]) {
+      expect(paths).toContain(required);
+    }
+  });
+});
+
 describe('stub types — spot-check', () => {
+  // PR-13: nextjs-form-app + nextjs-dashboard are also stubs in Phase 1.
+  // bmadSupported follows the parent (nextjs-base) so they STILL inherit
+  // bmad-bootstrap as a post-create step.
   it.each(['sst', 'vite', 'mobile'] as BoilerplateType[])(
     '%s has status stub and bmadSupported=false',
     (type) => {
       const meta = BOILERPLATE_REGISTRY[type];
       expect(meta.status).toBe('stub');
       expect(meta.bmadSupported).toBe(false);
+    },
+  );
+
+  it.each(['nextjs-form-app', 'nextjs-dashboard'] as BoilerplateType[])(
+    '%s — Phase 1 stub, inherits bmadSupported=true from nextjs-base',
+    (type) => {
+      const meta = BOILERPLATE_REGISTRY[type];
+      expect(meta.status).toBe('stub');
+      expect(meta.bmadSupported).toBe(true);
     },
   );
 

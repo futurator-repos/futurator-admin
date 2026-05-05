@@ -83,6 +83,21 @@ export interface AcceptanceCriterion {
   needsBrowser: boolean;
 }
 
+/**
+ * Pipeline v2.0 PR-8 — three-level test routing. Mirrors
+ * `functions/shared/types/epic-workflow.ts`.
+ */
+export type VisualTestLevel = 'L0' | 'L1' | 'L2';
+
+export interface VisualTestFlowStep {
+  action: 'navigate' | 'click' | 'wait' | 'screenshot' | 'fill';
+  url?: string;
+  selector?: string;
+  value?: string;
+  ms?: number;
+  label?: string;
+}
+
 export interface VisualTestDef {
   id: string;
   criteriaRef: string;
@@ -90,6 +105,30 @@ export interface VisualTestDef {
   setup: string;
   action?: string;
   expect: string;
+  level?: VisualTestLevel;
+  levelOverridden?: boolean;
+  viewport?: string;
+  screenshot?: {
+    selector?: string;
+    waitFor?: string;
+  };
+  flow?: VisualTestFlowStep[];
+  judge?: string;
+  url?: string;
+  consoleErrorAllow?: string[];
+  expectText?: string[];
+  budgetWallclockSec?: number;
+  budgetCostUsd?: number;
+}
+
+export interface VisualTestResult {
+  testId: string;
+  level: VisualTestLevel;
+  verdict: 'pass' | 'fail' | 'uncertain' | 'skipped-budget' | 'errored';
+  rationale?: string;
+  screenshotUrl?: string;
+  costUsd?: number;
+  durationMs?: number;
 }
 
 // ── Testing profile & review steps ──

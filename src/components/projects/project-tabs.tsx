@@ -5,15 +5,26 @@ import { STATUS_COLORS, CATEGORY_LABELS } from '@/lib/constants';
 import { CostPieChart } from '@/components/charts/cost-pie-chart';
 import { CostTrendLine } from '@/components/charts/cost-trend-line';
 import { BudgetBar } from '@/components/charts/budget-bar';
+import { IdentityBrokerPanel } from '@/components/projects/identity-broker-panel';
 import { useProjectCosts } from '@/hooks/use-costs';
 import { useProjectResources } from '@/hooks/use-resources';
 import { useUIStore } from '@/stores/ui-store';
 import type { Project } from '@/types/project';
 
+// Legacy bare-name broker registrations for projects whose id doesn't match
+// the broker's. Surfaced in the Identity Broker tab as a migration banner —
+// new registrations follow the `{projectId}-{env}` convention.
+const LEGACY_BROKER_APP_ID: Record<string, string> = {
+  'admin-hub': 'futurator-admin',
+  contento: 'contento',
+  songster: 'songster',
+};
+
 export function ProjectTabs({ project }: { project: Project }) {
   const { dateRange, setDateRange } = useUIStore();
   const { data: costData } = useProjectCosts(project.projectId, dateRange);
   const { data: resourceData } = useProjectResources(project.projectId);
+  const legacyBrokerAppId = LEGACY_BROKER_APP_ID[project.projectId];
 
   return (
     <Tabs defaultValue="overview">
@@ -24,6 +35,7 @@ export function ProjectTabs({ project }: { project: Project }) {
         <TabsTrigger value="resources">
           Resources {resourceData ? `(${resourceData.total})` : ''}
         </TabsTrigger>
+        <TabsTrigger value="identity-broker">Identity Broker</TabsTrigger>
       </TabsList>
       <TabsContent value="overview" className="mt-4 space-y-4">
         <div className="grid grid-cols-2 gap-4">
@@ -154,6 +166,13 @@ export function ProjectTabs({ project }: { project: Project }) {
         ) : (
           <p className="text-sm text-muted-foreground">Loading resources...</p>
         )}
+      </TabsContent>
+      <TabsContent value="identity-broker" className="mt-4">
+        <IdentityBrokerPanel
+          projectId={project.projectId}
+          projectName={project.name}
+          legacyAppIdFallback={legacyBrokerAppId}
+        />
       </TabsContent>
     </Tabs>
   );

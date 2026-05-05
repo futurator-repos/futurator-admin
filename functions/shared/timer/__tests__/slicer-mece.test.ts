@@ -80,9 +80,15 @@ function setupMocks(): void {
     if (jobId !== 'job-orch-1') {
       return { events: [], lastSeq: afterSeq };
     }
-    // First call: afterSeq === '' — return all events
-    // Subsequent calls with a non-empty afterSeq (cursor) return nothing
-    if (afterSeq === '') {
+    // First call: afterSeq is the SEQ_START sentinel (currently '000000',
+    // historically ''). PR-14a (2026-05-04) bumped the sentinel from empty
+    // string to '000000' because DDB rejects empty strings in key
+    // comparisons; tests accept both for backwards-compat.
+    // Subsequent calls with a real cursor (e.g. '0031') return nothing
+    // because the fixture's events are all already returned in the first
+    // response (events.length < PAGE_SIZE=200).
+    const isStartCursor = afterSeq === '' || afterSeq === '000000';
+    if (isStartCursor) {
       const events = [...EVENTS];
       const lastSeq = events[events.length - 1]?.eventSeq ?? '';
       return { events, lastSeq };

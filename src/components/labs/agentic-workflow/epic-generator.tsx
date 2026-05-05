@@ -1,10 +1,11 @@
 'use client';
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useAgentJob } from '@/hooks/use-agent-job';
 import { useAgentEvents } from '@/hooks/use-agent-events';
 import { useGenerateEpic, useCreateEpicFromXml } from '@/hooks/use-epic-workflow';
 import { StoryLiveOutput } from './story-live-output';
+import { ReauthorizeButton } from '@/components/labs/reauthorize-button';
 
 interface EpicGeneratorProps {
   workingDir: string;
@@ -22,6 +23,9 @@ interface ParsedStory {
   description: string;
   dependsOn: string[];
   wave: number;
+  touchPoints?: string[];
+  complexity?: 'trivial' | 'standard' | 'complex' | 'architectural';
+  reviewRigor?: 'light' | 'standard' | 'strict';
 }
 
 interface ParsedEpic {
@@ -52,6 +56,13 @@ function parseEpicFromXml(xml: string): ParsedEpic {
   }));
 
   const storyMatches = [...xml.matchAll(/<story\s+id="(S\d+)">([\s\S]*?)<\/story>/g)];
+  const COMPLEXITY: ParsedStory['complexity'][] = [
+    'trivial',
+    'standard',
+    'complex',
+    'architectural',
+  ];
+  const RIGOR: ParsedStory['reviewRigor'][] = ['light', 'standard', 'strict'];
   const stories = storyMatches.map((m) => {
     const id = m[1];
     const content = m[2];
@@ -64,7 +75,29 @@ function parseEpicFromXml(xml: string): ParsedEpic {
           .map((d) => d.trim())
           .filter(Boolean)
       : [];
-    return { id, title: storyTitle, description: desc, dependsOn: depIds, wave: 0 };
+    const tpRaw = content.match(/<touch_points>([\s\S]*?)<\/touch_points>/)?.[1]?.trim() || '';
+    const touchPoints = tpRaw
+      ? tpRaw
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [];
+    const complexityRaw = (
+      content.match(/<complexity>([\s\S]*?)<\/complexity>/)?.[1]?.trim() || ''
+    ).toLowerCase() as ParsedStory['complexity'];
+    const rigorRaw = (
+      content.match(/<review_rigor>([\s\S]*?)<\/review_rigor>/)?.[1]?.trim() || ''
+    ).toLowerCase() as ParsedStory['reviewRigor'];
+    return {
+      id,
+      title: storyTitle,
+      description: desc,
+      dependsOn: depIds,
+      wave: 0,
+      ...(touchPoints.length > 0 && { touchPoints }),
+      ...(complexityRaw && COMPLEXITY.includes(complexityRaw) && { complexity: complexityRaw }),
+      ...(rigorRaw && RIGOR.includes(rigorRaw) && { reviewRigor: rigorRaw }),
+    };
   });
 
   // Compute waves
@@ -100,13 +133,20 @@ function epicToXml(epic: ParsedEpic): string {
     .join('\n');
 
   const storiesXml = epic.stories
-    .map(
-      (s) => `    <story id="${s.id}">
+    .map((s) => {
+      const inference = [
+        s.touchPoints?.length ? `      <touch_points>${s.touchPoints.join(',')}</touch_points>` : null,
+        s.complexity ? `      <complexity>${s.complexity}</complexity>` : null,
+        s.reviewRigor ? `      <review_rigor>${s.reviewRigor}</review_rigor>` : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+      return `    <story id="${s.id}">
       <title>${s.title}</title>
       <depends_on>${s.dependsOn.join(',')}</depends_on>
-      <description>${s.description}</description>
-    </story>`,
-    )
+${inference ? inference + '\n' : ''}      <description>${s.description}</description>
+    </story>`;
+    })
     .join('\n');
 
   return `<epic>
@@ -137,9 +177,16 @@ export function EpicGenerator({
 }: EpicGeneratorProps) {
   const [idea, setIdea] = useState('');
   const [pmJobId, setPmJobId] = useState<string | null>(null);
+  const [pmStartedAt, setPmStartedAt] = useState<number | null>(null);
+  const [pmElapsed, setPmElapsed] = useState(0);
   const [epicXml, setEpicXml] = useState<string | null>(null);
   const [parsedEpic, setParsedEpic] = useState<ParsedEpic | null>(null);
   const [editingStory, setEditingStory] = useState<string | null>(null);
+  // Story 16.1: execution-mode toggle. Default = orchestrator (current behavior
+  // shipped in 73ac1ae). Pipeline = per-story step-based jobs.
+  const [executionMode, setExecutionMode] = useState<'orchestrator' | 'pipeline'>(
+    'orchestrator',
+  );
 
   const generateEpic = useGenerateEpic();
   const createFromXml = useCreateEpicFromXml();
@@ -176,6 +223,8 @@ export function EpicGenerator({
   function handleGenerate() {
     if (!idea.trim() || !workingDir.trim()) return;
     setEpicXml(null);
+    setPmStartedAt(Date.now());
+    setPmElapsed(0);
     generateEpic.mutate(
       { idea: idea.trim(), workingDir: workingDir.trim() },
       {
@@ -190,13 +239,41 @@ export function EpicGenerator({
     );
   }
 
+  const allInferred = useMemo(() => {
+    if (!parsedEpic || parsedEpic.stories.length === 0) return false;
+    return parsedEpic.stories.every(
+      (s) => (s.touchPoints?.length ?? 0) > 0 && s.complexity && s.reviewRigor,
+    );
+  }, [parsedEpic]);
+
   function handleStartDevelopment() {
     if (!epicXml) return;
     createFromXml.mutate(
-      { xml: epicXml, workingDir, yoloMode, devModel, devEffort, reviewerModel, reviewerEffort },
+      {
+        xml: epicXml,
+        workingDir,
+        yoloMode,
+        devModel,
+        devEffort,
+        reviewerModel,
+        reviewerEffort,
+        autoStart: allInferred,
+        useEpicOrchestrator: executionMode === 'orchestrator',
+      },
       {
         onSuccess: (data) => {
-          console.log('[PM] Epic created:', data.epicId, 'stories:', data.storiesCount);
+          const launchSummary = data.orchestratorJobId
+            ? `orchestrator:${data.orchestratorJobId}`
+            : data.storyJobIds?.length
+              ? `pipeline:wave${data.waveNumber}:${data.storyJobIds.length} jobs`
+              : '(no auto-start)';
+          console.log(
+            '[PM] Epic created:',
+            data.epicId,
+            'stories:',
+            data.storiesCount,
+            launchSummary,
+          );
           onEpicCreated(data.epicId);
         },
       },
@@ -204,6 +281,14 @@ export function EpicGenerator({
   }
 
   const isGenerating = pmJob?.status === 'PENDING' || pmJob?.status === 'RUNNING';
+
+  useEffect(() => {
+    if (!isGenerating || !pmStartedAt) return;
+    const id = setInterval(() => {
+      setPmElapsed(Math.floor((Date.now() - pmStartedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [isGenerating, pmStartedAt]);
   const pmFailed =
     pmJob?.status === 'FAILED' || (pmJob?.status === 'COMPLETED' && !generatedXml && pmJobId);
   const pmError =
@@ -214,16 +299,16 @@ export function EpicGenerator({
 
   return (
     <div className="space-y-4">
-      {/* Idea input */}
+      {/* Intent input */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Product Manager Agent</CardTitle>
+          <CardTitle className="text-sm">Intent Design</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <textarea
             value={idea}
             onChange={(e) => setIdea(e.target.value)}
-            placeholder='Describe your product idea... e.g. "I want a basic game like Guess the Number with difficulty levels, score tracking, and a polished UI"'
+            placeholder='Describe your product intent... e.g. "I want a basic game like Guess the Number with difficulty levels, score tracking, and a polished UI"'
             rows={3}
             className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
           />
@@ -248,9 +333,12 @@ export function EpicGenerator({
       {pmJobId && isGenerating && (
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">
-              PM Agent Working...
-              <span className="ml-2 inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-500" />
+            <CardTitle className="text-sm flex items-center gap-2">
+              <span>PM Agent Working...</span>
+              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-500" />
+              <span className="text-xs font-mono text-muted-foreground">
+                thinking for {pmElapsed}s
+              </span>
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -269,12 +357,15 @@ export function EpicGenerator({
             <p className="text-xs text-red-400">{pmError}</p>
             {(pmError.includes('authentication') ||
               pmError.includes('credentials expired') ||
-              pmError.includes('API key')) && (
-              <p className="text-[10px] text-muted-foreground">
-                Claude credentials on EC2 are invalid. Rotate the API key in SSM
-                (/futurator/daemon/anthropic-api-key) — no daemon restart is required, the next
-                spawned agent will pick it up.
-              </p>
+              pmError.toLowerCase().includes('oauth') ||
+              pmError.includes('Re-authorize')) && (
+              <div className="space-y-2">
+                <p className="text-[10px] text-muted-foreground">
+                  Claude Code OAuth on EC2 has expired. Click below to push fresh tokens from your
+                  Mac Keychain — the daemon re-probes within seconds, no restart.
+                </p>
+                <ReauthorizeButton />
+              </div>
             )}
             <button
               onClick={handleGenerate}
@@ -313,12 +404,60 @@ export function EpicGenerator({
                 <span className="text-xs text-muted-foreground">
                   {parsedEpic.stories.length} stories · {waves.length} waves
                 </span>
+                {/* Story 16.1: Execution-mode toggle */}
+                <div
+                  className="inline-flex items-center rounded-md border border-input bg-background"
+                  role="radiogroup"
+                  aria-label="Execution mode"
+                >
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={executionMode === 'orchestrator'}
+                    onClick={() => setExecutionMode('orchestrator')}
+                    title="Single outer Claude process decides dev/review/retry internally. 3D office scene + resolve-blocker drawer render its events."
+                    className={`h-7 px-2 text-[10px] rounded-l-md transition-colors ${
+                      executionMode === 'orchestrator'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'text-muted-foreground hover:bg-secondary/50'
+                    }`}
+                  >
+                    Orchestrator
+                  </button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={executionMode === 'pipeline'}
+                    onClick={() => setExecutionMode('pipeline')}
+                    title="One claude -p per story per step — dev, review, retry-loop, compile-*. Per-story logs and wave progress in the existing UI."
+                    className={`h-7 px-2 text-[10px] rounded-r-md transition-colors ${
+                      executionMode === 'pipeline'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'text-muted-foreground hover:bg-secondary/50'
+                    }`}
+                  >
+                    Pipeline
+                  </button>
+                </div>
                 <button
                   onClick={handleStartDevelopment}
                   disabled={createFromXml.isPending}
+                  title={
+                    allInferred
+                      ? executionMode === 'orchestrator'
+                        ? 'Creates epic and immediately starts the orchestrator'
+                        : 'Creates epic and immediately starts wave-1 stories as per-story jobs'
+                      : 'Creates epic (must be started manually — some stories are missing inference fields)'
+                  }
                   className="rounded-md bg-green-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
                 >
-                  {createFromXml.isPending ? 'Creating...' : 'Start Development'}
+                  {createFromXml.isPending
+                    ? allInferred
+                      ? 'Starting...'
+                      : 'Creating...'
+                    : allInferred
+                      ? 'Start Epic'
+                      : 'Create Epic (draft)'}
                 </button>
               </div>
             </div>

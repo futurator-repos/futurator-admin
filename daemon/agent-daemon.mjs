@@ -19,7 +19,8 @@ import {
   PutCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { spawn, execSync } from 'child_process';
-import { mkdirSync, existsSync, readFileSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, statSync } from 'fs';
+import { createHash } from 'node:crypto';
 import { totalmem, freemem, loadavg } from 'os';
 import { isCompileStep as _isCompileStep, COMPILE_STEP_IDS as _COMPILE_STEP_IDS } from './pipelines/compile-pipeline.mjs';
 import {
@@ -33,6 +34,22 @@ import { createNdjsonForwarder } from './forwarder/ndjson-forwarder.mjs';
 import { createDdbEventStore } from './forwarder/ddb-event-store.mjs';
 import { createDaemonReceiver } from './receiver/http-receiver.mjs';
 import { createEpicRepo } from './pipelines/lib/epic-repo.mjs';
+// PR-11 #1 — wire the review-criteria parser/aggregator that was built but
+// never imported. Without these the validation `VERDICT === PASS` always
+// fails (VERDICT is never set), so reviewer pass verdicts get treated as
+// fails and the loop spins 3× before bailing.
+import {
+  parseReviewCriteria,
+  aggregateReviewVerdict,
+  formatFailedReasonsForRetry,
+  formatHumanQuestionsForAttention,
+} from './pipelines/lib/review-criteria-parser.mjs';
+// PR-11 #2 — wire the Story Context Pack assembler that was built (Epic B.2)
+// but never imported. Without this the reviewer prompt's
+// `<project_context>{{PROJECT_CONTEXT}}</project_context>` reaches the LLM
+// with the literal placeholder; reviewer can't see story spec/ACs and
+// hallucinates verdicts.
+import { resolveAndSerializeContextPack } from './pipelines/lib/context-pack-resolver.mjs';
 import {
   selectHandler,
   validateEpicDevJob,
@@ -61,6 +78,7 @@ import { runAppBootstrap } from './pipelines/app-bootstrap.mjs';
 import {
   findStaleJobs,
   buildResumeJob,
+  isStaleAnyPhase,
   DEFAULT_STALE_MS,
 } from './pipelines/stale-heartbeat.mjs';
 import {
@@ -80,6 +98,7 @@ import {
   writeAttentionItem,
   autoResolveAttentionByDedupKey,
   resolvePlanIdFromEpicId,
+  addCostToPlan,
 } from './pipelines/lib/attention-writer.mjs';
 import {
   assertSpawnAllowed,
@@ -122,6 +141,8 @@ const EVENTS_TABLE = process.env.AGENT_EVENTS_TABLE || 'futurator-agent-events';
 const EPICS_TABLE = process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflows';
 // Pipeline v2 / Story 1.4.3 — App-bootstrap saga reads + updates the App row.
 const APPS_TABLE = process.env.APPS_TABLE || 'futurator-apps';
+// PR-22 — post-deploy writebacks read the plan row to derive App linkage.
+const PLANS_TABLE = process.env.PLANS_TABLE || 'futurator-plans';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS || '3000', 10);
 const OAUTH_CREDS_PATH =
   process.env.CLAUDE_CREDENTIALS_PATH || '/home/ubuntu/.claude/.credentials.json';
@@ -303,7 +324,35 @@ function isAuthFailureOutput(text) {
 const jobEventSeqs = new Map(); // jobId -> last seq number
 const activeJobs = new Map(); // jobId -> { startedAt, workingDir, stepId, agentId, pid, model }
 // t2.micro has 1.8GB RAM; each Claude process uses ~150-300MB. 2 concurrent = safe.
-const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT || '2', 10);
+// PR-29 — concurrency cap. Default 2; override with MAX_CONCURRENT env var.
+//
+// 2026-05-04 plan-2 dino-runner-1: 3 wave-1 stories ran in parallel and each
+// dev agent issued an `npm run build` / `npx tsc --noEmit` Bash tool call
+// within the same second. On a t4g.small (2GB RAM) the daemon (~150MB) +
+// 3 claude subprocesses (~450MB) + 3 npm/tsc child processes
+// (~500-800MB each) blew past available memory. Linux OOM killer fired,
+// daemon got SIGKILL'd, all 3 jobs left orphaned RUNNING in DDB.
+//
+// Memory-aware cap: when totalmem < 3 GB, hard-cap at 2 regardless of env
+// override. Bigger instances (t4g.medium 4GB+) honour the env var.
+//
+// Note: this caps DAEMON-LEVEL job concurrency. Individual stories that
+// run in parallel as part of a single wave (e.g. 3 stories in wave-1)
+// are still launched simultaneously by the cron — but the daemon will
+// only pick up MAX_CONCURRENT of them at a time, queuing the rest.
+const SMALL_HOST_MEM_THRESHOLD_BYTES = 3 * 1024 * 1024 * 1024; // 3 GB
+const SMALL_HOST_MAX_CONCURRENT = 2;
+const _envConcurrent = parseInt(process.env.MAX_CONCURRENT || '2', 10);
+const _isSmallHost = totalmem() < SMALL_HOST_MEM_THRESHOLD_BYTES;
+const MAX_CONCURRENT = _isSmallHost
+  ? Math.min(_envConcurrent, SMALL_HOST_MAX_CONCURRENT)
+  : _envConcurrent;
+if (_isSmallHost && _envConcurrent > SMALL_HOST_MAX_CONCURRENT) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[daemon] MAX_CONCURRENT=${_envConcurrent} ignored — host has <3GB RAM, capping at ${SMALL_HOST_MAX_CONCURRENT} (PR-29 OOM protection)`,
+  );
+}
 let shuttingDown = false;
 let ndjsonForwarder = null;
 let daemonReceiver = null;
@@ -1009,6 +1058,35 @@ async function processStreamEvent(jobId, stepId, agentId, event) {
 
 // ── Update job fields helper ──
 
+/**
+ * PR-12 — variables that MUST NOT be persisted to the agent-jobs DDB row.
+ *
+ * `PROJECT_CONTEXT` is the serialized Story Context Pack (PR-11 #2):
+ * project tree + recent diffs + knowledge index + adjacent file heads. It
+ * routinely runs >100 KB and pushes the row past DDB's 400 KB item limit,
+ * which surfaces as:
+ *
+ *   ExpressionAttributeValues contains invalid value:
+ *   Item size has exceeded the maximum allowed size for key :variables
+ *
+ * The pack is rebuilt at job-pickup from DDB anyway (idempotent assembly),
+ * so persisting it is wasted bytes — strip it at the persist boundary.
+ *
+ * Add other vars here if their persisted state is genuinely transient
+ * (i.e., reconstructible from job metadata + working tree).
+ */
+const TRANSIENT_VARS = new Set(['PROJECT_CONTEXT']);
+
+function stripTransientVars(variables) {
+  if (!variables || typeof variables !== 'object') return variables;
+  const out = {};
+  for (const [k, v] of Object.entries(variables)) {
+    if (TRANSIENT_VARS.has(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 async function updateJobFields(jobId, fields) {
   const entries = Object.entries(fields).filter(([, v]) => v !== undefined);
   if (entries.length === 0) return;
@@ -1147,6 +1225,73 @@ async function scanStaleEpicDevJobs() {
         });
       } catch (err) {
         log('error', `Failed to schedule resume for ${job.jobId.slice(0, 8)}: ${err.message}`);
+      }
+    }
+
+    // PR-28 — also catch per-story dev pipeline jobs (phase != 'epic-dev')
+    // that are stuck RUNNING. We don't auto-resume them (story state is too
+    // fragile to rebuild from outside the daemon's in-memory tracker), but
+    // we DO mark them STALE + write an attention item so the wave-reducer
+    // sees them as terminal and the operator can decide what to do.
+    //
+    // 2026-05-04 plan-2 dino-runner-1: 3 wave-1 stories sat RUNNING for an
+    // hour after the daemon got OOM-killed during 3 parallel npm builds.
+    // Without this pass they would have stayed RUNNING forever after EC2
+    // restart (the new daemon's activeJobs Map is empty so nothing claims
+    // them, and the orchestrator-only `findStaleJobs` filtered them out).
+    const otherStale = (Items || []).filter(
+      (j) =>
+        j.status === 'RUNNING' &&
+        j.phase !== 'epic-dev' &&
+        !activeJobs.has(j.jobId) &&
+        isStaleAnyPhase(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }),
+    );
+    for (const job of otherStale) {
+      try {
+        await updateJobFields(job.jobId, {
+          status: 'STALE',
+          errorMessage: `Heartbeat stale >${Math.round(STALE_HEARTBEAT_MS / 1000)}s — daemon likely crashed mid-execution. Operator action required.`,
+        });
+        log('warn', `[${job.jobId.slice(0, 8)}] non-orchestrator stale job marked STALE (phase=${job.phase || 'pipeline'})`);
+        // Best-effort attention item. Skip if the resolver can't find a planId
+        // (legacy jobs without epicId linkage).
+        try {
+          const planId = job.epicId
+            ? await resolvePlanIdFromEpicId(ddb, job.epicId)
+            : null;
+          if (planId) {
+            await writeAttentionItem(
+              ddb,
+              {
+                planId,
+                severity: 'high',
+                category: 'daemon-crash-stale-job',
+                title: `Story job stalled — daemon may have crashed`,
+                body:
+                  `Job ${job.jobId} for story ${job.epicId || ''} hit a stale-heartbeat ` +
+                  `threshold (${Math.round(STALE_HEARTBEAT_MS / 1000)}s). The daemon was ` +
+                  `most likely killed by the OS (OOM) during heavy parallel work. The job ` +
+                  `has been marked STALE; the wave-reducer will treat it as failed and ` +
+                  `the operator can re-run the story from the dashboard.`,
+                context: {
+                  jobId: job.jobId,
+                  epicId: job.epicId,
+                  stepId: 'unknown',
+                },
+                suggestedActions: [
+                  { label: 'Open logs', kind: 'open-logs' },
+                  { label: 'Re-run story', kind: 'retry-step' },
+                ],
+                dedupKey: `daemon-crash-stale:${job.jobId}`,
+              },
+              log,
+            );
+          }
+        } catch (attnErr) {
+          log('warn', `attention-item write failed for stale ${job.jobId.slice(0, 8)}: ${attnErr.message}`);
+        }
+      } catch (err) {
+        log('error', `Failed to mark ${job.jobId.slice(0, 8)} STALE: ${err.message}`);
       }
     }
   } catch (err) {
@@ -1383,7 +1528,12 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   if (step.stepType === 'shell') {
     const { passed, stepResult } = await executeShellStep(jobId, step, workingDir, variables);
     stepResults.push(stepResult);
-    await updateJobFields(jobId, { variables, sessions, stepResults });
+    // PR-12 — strip transient PROJECT_CONTEXT before DDB persist (item size).
+    await updateJobFields(jobId, {
+      variables: stripTransientVars(variables),
+      sessions,
+      stepResults,
+    });
 
     if (!passed && step.onFail?.action === 'fail') {
       throw new Error(`Shell step ${step.id} failed`);
@@ -1463,6 +1613,66 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
         variableValue: varValue.slice(0, 500),
         extractorType: step.extractors[varName].type,
       });
+    }
+
+    // PR-11 #1 — derive VERDICT + FEEDBACK from REVIEW_CRITERIA.
+    //
+    // The reviewer step's prompt instructs the agent to emit a structured
+    // `---REVIEW_CRITERIA--- AC-1: pass / AC-2: fail — reason ---END_REVIEW_CRITERIA---`
+    // block (see story-pipeline.ts §"OUTPUT CONTRACT — REQUIRED (Story C.1)").
+    // The parser + aggregator were built (review-criteria-parser.mjs) but
+    // never wired into the daemon, so the validation `VERDICT === PASS`
+    // always failed (VERDICT was never set) and the retry prompt's
+    // `{{FEEDBACK}}` / `{{VERDICT}}` placeholders were never substituted.
+    //
+    // We derive both AFTER the raw extractors run but BEFORE validations,
+    // so the validation matrix sees a populated VERDICT.
+    if (extracted.REVIEW_CRITERIA && !variables.VERDICT) {
+      try {
+        const entries = parseReviewCriteria(extracted.REVIEW_CRITERIA);
+        const agg = aggregateReviewVerdict(entries);
+        if (agg.verdict === 'pass') {
+          variables.VERDICT = 'PASS';
+          variables.FEEDBACK = '';
+        } else if (agg.verdict === 'needs-human') {
+          // Treat needs-human as a non-blocking pass for the validation gate
+          // (the work is done, the operator just needs to confirm subjective
+          // judgment) but capture the questions for the attention inbox.
+          variables.VERDICT = 'PASS';
+          variables.FEEDBACK = formatHumanQuestionsForAttention(agg.reasons.humans);
+        } else if (agg.verdict === 'fail') {
+          variables.VERDICT = 'FAIL';
+          variables.FEEDBACK = formatFailedReasonsForRetry(agg.reasons.failed);
+        } else {
+          // 'malformed' — reviewer didn't emit a parseable block. Surface to
+          // the retry agent so it knows to ask the reviewer for a re-emit.
+          variables.VERDICT = 'FAIL';
+          variables.FEEDBACK = `Reviewer emitted a malformed REVIEW_CRITERIA block (${agg.parseErrors.map((e) => e.error).join('; ')}). Please re-emit per the contract.`;
+        }
+        log('info', `Review verdict derived: ${variables.VERDICT}`, {
+          counts: agg.counts,
+          aggregate: agg.verdict,
+        });
+        await pushEvent(jobId, step.id, step.agentId, 'extraction', {
+          variableName: 'VERDICT',
+          variableValue: variables.VERDICT,
+          extractorType: 'derived-from-REVIEW_CRITERIA',
+        });
+        if (variables.FEEDBACK) {
+          await pushEvent(jobId, step.id, step.agentId, 'extraction', {
+            variableName: 'FEEDBACK',
+            variableValue: variables.FEEDBACK.slice(0, 500),
+            extractorType: 'derived-from-REVIEW_CRITERIA',
+          });
+        }
+      } catch (err) {
+        log('error', `REVIEW_CRITERIA aggregation failed: ${err.message}`);
+        // Defensive: if parsing throws, fall through with VERDICT=FAIL so the
+        // retry prompt at least has a defined value rather than the literal
+        // `{{VERDICT}}` placeholder.
+        variables.VERDICT = 'FAIL';
+        variables.FEEDBACK = `REVIEW_CRITERIA parser threw: ${err.message}`;
+      }
     }
 
     // Story A.2: when VISUAL_TESTS is captured, materialize it on disk so the
@@ -1550,7 +1760,25 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
 
   stepResults.push(stepResult);
 
-  await updateJobFields(jobId, { variables, sessions, stepResults });
+  // PR-12 — strip transient PROJECT_CONTEXT before DDB persist (item size).
+  await updateJobFields(jobId, {
+    variables: stripTransientVars(variables),
+    sessions,
+    stepResults,
+  });
+
+  // PR-14b — roll the step's USD cost into the parent plan's totalCostUsd.
+  // Fire-and-forget; resolves planId via job.epicId (cached). Without this
+  // every plan's "Cost" rollup shows $0.00 even when stepResults sum to
+  // real money — observed on dino-runner-1 (~$3.34 across 6 stories with
+  // plan.totalCostUsd: 0).
+  const stepCost = stepResult.cost || 0;
+  if (stepCost > 0 && variables.EPIC_ID && variables.EPIC_ID !== '(not provided)') {
+    addCostToPlan(ddb, variables.EPIC_ID, stepCost, {
+      warn: (m) => log('warn', m),
+    }).catch((err) => log('warn', `addCostToPlan error: ${err.message}`));
+  }
+
   log('info', `Step ${step.id} done. Variables: [${Object.keys(variables).join(', ')}]`);
 
   return { allPassed, stepResult };
@@ -1779,6 +2007,40 @@ async function executePipeline(job) {
   const workingDir = job.workingDir;
 
   const variables = { ITERATION: '1', MAX_ITERATIONS: String(maxIterations), ...(pipeline.initialVariables || {}) };
+
+  // PR-11 #2 — assemble the Story Context Pack (Epic B.2) and inject as
+  // PROJECT_CONTEXT so the reviewer prompt's `<project_context>` actually
+  // contains storySpec / touchPoints / recentDiffs / projectTree. Before
+  // this fix the placeholder was left literal and the reviewer hallucinated
+  // ACs from the developer's summary alone.
+  //
+  // Best-effort: the resolver never throws, returns a stub failure pack on
+  // any error so the pipeline still runs. Skipped when PROJECT_CONTEXT is
+  // already populated (lets future callers pre-compute it API-side).
+  if (!variables.PROJECT_CONTEXT && variables.STORY_ID) {
+    try {
+      const { body, failure } = await resolveAndSerializeContextPack({
+        ddb,
+        job,
+        variables,
+        logger: { info: (m) => log('info', m), warn: (m) => log('warn', m), error: (m) => log('error', m) },
+      });
+      variables.PROJECT_CONTEXT = body || '';
+      if (failure) {
+        log('warn', `[${jobId.slice(0, 8)}] context pack stub: ${failure}`);
+      } else {
+        log('info', `[${jobId.slice(0, 8)}] context pack assembled (${body.length} chars)`);
+      }
+    } catch (err) {
+      log('error', `[${jobId.slice(0, 8)}] context pack resolver threw: ${err.message}`);
+      variables.PROJECT_CONTEXT = `<!-- context pack failed: ${err.message} -->`;
+    }
+  } else if (!variables.PROJECT_CONTEXT) {
+    // No STORY_ID — orchestrator-level or pipeline-init-only jobs. Use a
+    // benign empty marker so {{PROJECT_CONTEXT}} doesn't survive substitute.
+    variables.PROJECT_CONTEXT = '<!-- no story context (job has no STORY_ID variable) -->';
+  }
+
   // Pipeline v2.0 PR-6 (A) — retry resume-from-session.
   // When a retry job is created via launchStoryRerun + buildPriorJobStateFromStory,
   // pipeline.initialSessions / initialStepResults carry the prior job's runtime
@@ -1984,6 +2246,47 @@ async function executePipeline(job) {
         // Emit typed compilation-failed event via compile-events module
         await emitCompilationFailed(pushEvent, jobId, compilationCtx, compileErr, compilationStartedAt);
 
+        // PR-14e — surface compile failures in the attention inbox.
+        // Compile is non-blocking by design (knowledge graph rebuild is
+        // idempotent — next story can rebuild what was missed) so the
+        // pipeline continues. Without an attention item the failure is
+        // silent: dino-runner-1 had 3/6 compile steps fail and operator
+        // had no UI signal at all. Dedup-key per (planId, storyId, stepId)
+        // so a re-run on the same story upserts instead of multiplying.
+        try {
+          const planId = await resolvePlanIdFromEpicId(ddb, variables.EPIC_ID);
+          if (planId) {
+            await writeAttentionItem(
+              ddb,
+              {
+                planId,
+                severity: 'medium',
+                category: 'compile-failed',
+                title: `Knowledge compiler failed for story ${variables.STORY_ID || 'unknown'}`,
+                body:
+                  `Compile step "${step.id}" threw: ${compileErr.message.slice(0, 400)}\n\n` +
+                  `Compile is non-blocking — the rest of the pipeline continued. ` +
+                  `Knowledge graph for this story is missing; the next compile run ` +
+                  `will rebuild from the live diff.`,
+                context: {
+                  jobId,
+                  epicId: variables.EPIC_ID,
+                  storyId: variables.STORY_ID,
+                  stepId: step.id,
+                },
+                suggestedActions: [
+                  { label: 'Open logs', kind: 'open-logs' },
+                  { label: 'Open story', kind: 'open-story' },
+                ],
+                dedupKey: `compile-failed:${planId}:${variables.STORY_ID || 'unknown'}:${step.id}`,
+              },
+              log,
+            );
+          }
+        } catch (attnErr) {
+          log('error', `Failed to write compile-failed attention item: ${attnErr.message}`);
+        }
+
         // Write failure record to knowledge/log.md via compile-events module
         await writeCompilationLog(
           workingDir,
@@ -2069,6 +2372,18 @@ async function executePipeline(job) {
   // 'wave-reducer:test-gate-failed' rows + the daemon's
   // 'dev-retry-exhausted' rows both auto-resolve here.
   await autoResolveStoryAttentionOnSuccess(jobId, variables);
+
+  // PR-22 — post-deploy writebacks. When the just-completed job was a
+  // successful deploy (DEPLOY agent + DEPLOY_STATUS=success), propagate
+  // state back to the parent App + Plan rows so the Apps grid can render
+  // "live" and the plan dashboard's deployedAt timestamp populates.
+  // Without this, deploys land at S3/CloudFront but the UI keeps showing
+  // the App as "no-deploy" and Plan.deployedAt stays null. (2026-05-04
+  // dino-runner-1: deploy succeeded, app live, but currentlyDeployedPlanId
+  // remained null.) Fire-and-forget; never blocks the main loop.
+  postDeployWriteback(job, variables).catch((err) =>
+    log('warn', `[${jobId.slice(0, 8)}] post-deploy writeback threw: ${err?.message || err}`),
+  );
 
   log('info', `\nPipeline COMPLETED. Total cost: $${totalCost.toFixed(4)}${compilationStatus ? ` | Compilation: ${compilationStatus}` : ''}`);
   log('info', `Final variables: ${JSON.stringify(Object.fromEntries(
@@ -2418,6 +2733,119 @@ async function executePartyDocsUnlinkJob(job) {
   }
 }
 
+/**
+ * PR-22 — post-deploy writebacks.
+ *
+ * Detects when the just-completed job was a successful deploy and updates
+ * the App + Plan rows so the UI can render "live" status.
+ *
+ * Detection signal: `variables.DEPLOY_STATUS === 'success'` AND
+ * `variables.DEPLOY_URL` populated. Both are set by the DEPLOY agent's
+ * pipeline (functions/api/index.ts /api/epic-workflows/:id/deploy).
+ *
+ * Resolution chain (best-effort, never throws):
+ *   job.epicId → epic row → epic.planId → plan row → plan.appId → app row
+ *
+ * Writes:
+ *   • App.currentlyDeployedPlanId = planId
+ *   • App.deployJobIds — append jobId (deduped)
+ *   • Plan.deployedAt = now
+ *   • Plan.deployUrl = DEPLOY_URL (for the deploy panel)
+ *
+ * Skipped silently when:
+ *   • DEPLOY_STATUS not 'success' (or missing)
+ *   • epic / plan / app row can't be resolved
+ *   • App row missing (orchestrator-mode legacy plans without an App)
+ */
+async function postDeployWriteback(job, variables) {
+  if (!variables || variables.DEPLOY_STATUS !== 'success') return;
+  if (!job?.epicId) return;
+
+  const short = job.jobId.slice(0, 8);
+  let epic;
+  try {
+    const er = await ddb.send(new GetCommand({ TableName: EPICS_TABLE, Key: { epicId: job.epicId } }));
+    epic = er.Item;
+  } catch (err) {
+    log('warn', `[${short}] post-deploy: epic read failed: ${err.message}`);
+    return;
+  }
+  if (!epic?.planId) return;
+
+  let plan;
+  try {
+    const pr = await ddb.send(new GetCommand({ TableName: PLANS_TABLE, Key: { planId: epic.planId } }));
+    plan = pr.Item;
+  } catch (err) {
+    log('warn', `[${short}] post-deploy: plan read failed: ${err.message}`);
+    return;
+  }
+  if (!plan) return;
+
+  const now = new Date().toISOString();
+  const deployUrl = variables.DEPLOY_URL || undefined;
+
+  // Update Plan row: deployedAt + deployUrl. Always issue this; legacy plans
+  // without appId still benefit from the timestamp.
+  try {
+    const planUpdate = ['deployedAt = :now', 'updatedAt = :now'];
+    const planValues = { ':now': now };
+    if (deployUrl) {
+      planUpdate.push('deployUrl = :url');
+      planValues[':url'] = deployUrl;
+    }
+    await ddb.send(
+      new UpdateCommand({
+        TableName: PLANS_TABLE,
+        Key: { planId: plan.planId },
+        UpdateExpression: `SET ${planUpdate.join(', ')}`,
+        ExpressionAttributeValues: planValues,
+        ConditionExpression: 'attribute_exists(planId)',
+      }),
+    );
+  } catch (err) {
+    log('warn', `[${short}] post-deploy: plan update failed: ${err.message}`);
+  }
+
+  // Update App row: currentlyDeployedPlanId + deployJobIds append.
+  // Skip when plan has no appId (legacy non-App-scoped plan — nothing to update).
+  if (!plan.appId) {
+    log('info', `[${short}] post-deploy: plan ${plan.planId} has no appId — App writeback skipped (legacy plan)`);
+    return;
+  }
+  try {
+    // Read existing deployJobIds to dedupe before append.
+    const ar = await ddb.send(new GetCommand({ TableName: APPS_TABLE, Key: { appId: plan.appId } }));
+    const app = ar.Item;
+    if (!app) {
+      log('warn', `[${short}] post-deploy: App ${plan.appId} not found — App writeback skipped`);
+      return;
+    }
+    const existing = Array.isArray(app.deployJobIds) ? app.deployJobIds : [];
+    const nextIds = existing.includes(job.jobId) ? existing : [...existing, job.jobId];
+    await ddb.send(
+      new UpdateCommand({
+        TableName: APPS_TABLE,
+        Key: { appId: plan.appId },
+        UpdateExpression:
+          'SET currentlyDeployedPlanId = :planId, deployJobIds = :jobs, updatedAt = :now',
+        ExpressionAttributeValues: {
+          ':planId': plan.planId,
+          ':jobs': nextIds,
+          ':now': now,
+        },
+        ConditionExpression: 'attribute_exists(appId)',
+      }),
+    );
+    log(
+      'info',
+      `[${short}] post-deploy: writeback OK — app=${plan.appId} plan=${plan.planId} jobs=${nextIds.length}`,
+    );
+  } catch (err) {
+    log('warn', `[${short}] post-deploy: App update failed: ${err.message}`);
+  }
+}
+
 // Pipeline v2 / Story 1.4.3 — App-bootstrap saga executor.
 //
 // Reads + writes the futurator-apps row directly via the daemon's `ddb` client
@@ -2729,6 +3157,20 @@ async function handleJobFailure(job, err) {
 
 async function poll() {
   log('info', 'Agent daemon started');
+  // Print a deploy fingerprint so logs make stale deploys obvious. The
+  // 2026-05-02 dino1 incident took hours to diagnose because the daemon
+  // was running 2-week-old code from before PR-11/12/13 — yet logs gave
+  // no indication of which version was live. SHA-256 over agent-daemon.mjs
+  // identifies the bytes; mtime ties it to a calendar date.
+  try {
+    const selfPath = new URL(import.meta.url).pathname;
+    const buf = readFileSync(selfPath);
+    const sha = createHash('sha256').update(buf).digest('hex').slice(0, 12);
+    const stat = statSync(selfPath);
+    log('info', `  Build:      sha256=${sha} mtime=${stat.mtime.toISOString()} bytes=${buf.length}`);
+  } catch (err) {
+    log('warn', `  Build:      <fingerprint failed: ${err.message}>`);
+  }
   log('info', `  Region:     ${REGION}`);
   log('info', `  Jobs table: ${JOBS_TABLE}`);
   log('info', `  Events:     ${EVENTS_TABLE}`);

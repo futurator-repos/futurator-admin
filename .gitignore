@@ -22,3 +22,15 @@ build/
 
 # debug
 npm-debug.log*
+
+# Pipeline v2.0 PR-8f — esbuild output for daemon shell-step `node -e` calls.
+# Built by scripts/build-daemon-bundles.mjs (run by scripts/rsync-daemon.sh).
+daemon/lib/*-bundle.cjs
+
+# Vendored agentic-office prototype sub-project (own package.json, gltf assets,
+# 600+ files). Reference material only — do not commit.
+docs/concepts/agentic-office/
+
+# Three.js runtime 3D models (gltf/glb, ~150MB). Host on S3 and load at runtime
+# instead of bloating git history.
+public/models/

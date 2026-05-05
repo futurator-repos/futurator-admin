@@ -52,8 +52,15 @@ const TREE_EXCLUDE = new Set([
   'knowledge',
 ]);
 const TREE_EXCLUDE_FILE_EXT = new Set(['.lock', '.log', '.pid']);
-const HEAD_LINES_FULL = 50;
-const HEAD_LINES_TRUNCATED = 20;
+// PR-15 — head-50 was too small. Most files in a starter pack grow past
+// 50 lines after wave 0 (e.g. types.ts, reducer.ts), so DEV/REVIEWER
+// re-Read every file from disk because the prompt only showed the first
+// 50 lines. dino-runner-1 forensic counted 16 reads of types.ts alone.
+// 300 lines covers ~95 % of game/utility files in a prototype run; the
+// existing token-budget guard still drops the largest digests if we
+// exceed `tokenBudget * APPROX_BYTES_PER_TOKEN`.
+const HEAD_LINES_FULL = 300;
+const HEAD_LINES_TRUNCATED = 100;
 const PLAN_MD_REL = 'plan.md';
 const KNOWLEDGE_INDEX_REL = 'knowledge/index.md';
 const RECENT_DIFFS_LIMIT = 20;

@@ -2,15 +2,16 @@
  * Daemon-local HTTP receiver (Observability Spine §5).
  *
  * Binds to 127.0.0.1 only — trust boundary is the loopback interface,
- * so no auth is required. Two endpoints:
+ * so no auth is required. Endpoints:
  *
  *   POST /wave-complete  { jobId, epicId, wave, results }
  *     → agent-jobs row: waveResults[<wave>] = { ...results, epicId, persistedAt }
- *     → { ok: true, persistedAt }
  *
  *   POST /heartbeat      { jobId, ts? }
  *     → agent-jobs row: lastHeartbeatAt = ts
- *     → { ok: true }
+ *
+ *   POST /story-status   { jobId?, epicId, storyId, status }
+ *     → epic-workflows row: stories[i].status = <status> (epicRepo required)
  *
  * DynamoDB client is injected so tests can swap it for an in-memory fake.
  */
@@ -25,6 +26,7 @@ const BODY_LIMIT_BYTES = 64 * 1024;
 export function createDaemonReceiver({
   ddb,
   jobsTable,
+  epicRepo = null,
   logger = console,
   now = () => new Date().toISOString(),
 } = {}) {
@@ -34,6 +36,17 @@ export function createDaemonReceiver({
   if (!jobsTable || typeof jobsTable !== 'string') {
     throw new Error('createDaemonReceiver: jobsTable is required');
   }
+
+  const ALLOWED_STORY_STATUSES = new Set([
+    'pending',
+    'running',
+    'in_review',
+    'fixing',
+    'done',
+    'failed',
+    'skipped',
+    'blocked',
+  ]);
 
   let server = null;
 
@@ -69,6 +82,33 @@ export function createDaemonReceiver({
     );
 
     return { status: 200, body: { ok: true, persistedAt } };
+  }
+
+  async function handleStoryStatus(body) {
+    const { jobId, epicId, storyId, status } = body || {};
+    if (!epicId || !storyId || !status) {
+      return {
+        status: 400,
+        body: { ok: false, error: 'epicId, storyId, status required' },
+      };
+    }
+    if (!ALLOWED_STORY_STATUSES.has(status)) {
+      return {
+        status: 400,
+        body: { ok: false, error: `invalid status: ${status}` },
+      };
+    }
+    if (!epicRepo || typeof epicRepo.updateStoryStatus !== 'function') {
+      return {
+        status: 503,
+        body: { ok: false, error: 'epicRepo not configured on receiver' },
+      };
+    }
+    const result = await epicRepo.updateStoryStatus(epicId, storyId, status);
+    return {
+      status: result.updated ? 200 : 404,
+      body: { ...result, jobId, epicId, storyId, status },
+    };
   }
 
   async function handleHeartbeat(body) {
@@ -126,6 +166,8 @@ export function createDaemonReceiver({
           result = await handleWaveComplete(body);
         } else if (req.url === '/heartbeat') {
           result = await handleHeartbeat(body);
+        } else if (req.url === '/story-status') {
+          result = await handleStoryStatus(body);
         } else {
           result = { status: 404, body: { ok: false, error: 'not found' } };
         }

@@ -40,13 +40,30 @@ interface CategoryShare {
 
 function buildShares(
   byCategory: Partial<Record<TimerCategory, { totalMs: number; count: number }>>,
-  planTotalMs: number,
+  _planTotalMsIgnored: number,
 ): CategoryShare[] {
-  const total = planTotalMs > 0 ? planTotalMs : 1;
+  // PR-27 — percentages are now expressed as a share of TOTAL ATTRIBUTED
+  // WORK TIME (sum of all category slice durations), NOT wall-clock.
+  //
+  // Wall-clock denominator broke the math when parallel jobs overlapped:
+  // 4 stories running in parallel for 7m wall-clock produced ~28m of dev
+  // slices, so `dev / wallClock = 4×` showing as 400 % (or >100 % at
+  // minimum). Plan 2 of dino-runner-1 displayed Dev 102.9 % + Review 4.3 %
+  // + Compile 12.4 % + Machine-Wait 67.5 % = 187 % total — confusing.
+  //
+  // With sumMs as the denominator, percentages ALWAYS sum to 100 %.
+  // The chart now reads as "of all work time, X % was dev, Y % was
+  // review, …". Wall-clock is still rendered separately as the panel
+  // header value (`formatDuration(planTotalMs)`).
+  const sumMs = Object.values(byCategory).reduce(
+    (a, c) => a + (c?.totalMs ?? 0),
+    0,
+  );
+  const denom = sumMs > 0 ? sumMs : 1;
   return TIMER_CATEGORY_ORDER.flatMap((cat) => {
     const entry = byCategory[cat];
     if (!entry || entry.totalMs <= 0) return [];
-    return [{ category: cat, totalMs: entry.totalMs, pct: (entry.totalMs / total) * 100 }];
+    return [{ category: cat, totalMs: entry.totalMs, pct: (entry.totalMs / denom) * 100 }];
   });
 }
 

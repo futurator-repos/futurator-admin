@@ -5,6 +5,7 @@ const ATTENTION_TABLE =
   process.env.ATTENTION_ITEMS_TABLE || 'futurator-attention-items';
 const EPICS_TABLE =
   process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflows';
+const PLANS_TABLE = process.env.PLANS_TABLE || 'futurator-plans';
 
 // Cache epicId → planId lookups so attention bursts don't hammer DDB.
 const planIdCache = new Map();
@@ -29,6 +30,46 @@ export async function resolvePlanIdFromEpicId(ddb, epicId) {
     return planId;
   } catch {
     return null;
+  }
+}
+
+/**
+ * PR-14b — roll up a step's USD cost into the parent plan's `totalCostUsd`.
+ *
+ * Called fire-and-forget from `executeStep` after a step_complete with
+ * non-zero cost. Looks up the plan via the job's epicId (cached) and issues
+ * `UpdateItem ADD totalCostUsd :delta`. If the plan can't be resolved
+ * (orchestrator-level jobs without epic context, party jobs, etc.) we
+ * silently skip — cost still lives on the job's stepResults for forensic.
+ *
+ * 2026-05-04 dino-runner-1 forensic showed plan.totalCostUsd: 0 even
+ * though stepResults summed to ~$3.34. Per-job cost was always there;
+ * just never rolled up.
+ *
+ * Returns true on successful update, false otherwise. Errors are logged
+ * via the optional logger but do not propagate.
+ */
+export async function addCostToPlan(ddb, epicId, costUsd, logger) {
+  if (!ddb || !epicId || !costUsd || costUsd <= 0) return false;
+  const planId = await resolvePlanIdFromEpicId(ddb, epicId);
+  if (!planId) return false;
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: PLANS_TABLE,
+        Key: { planId },
+        UpdateExpression: 'ADD totalCostUsd :delta SET updatedAt = :now',
+        ExpressionAttributeValues: {
+          ':delta': costUsd,
+          ':now': new Date().toISOString(),
+        },
+        ConditionExpression: 'attribute_exists(planId)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    logger?.warn?.(`addCostToPlan: failed for plan ${planId}: ${err.message}`);
+    return false;
   }
 }
 

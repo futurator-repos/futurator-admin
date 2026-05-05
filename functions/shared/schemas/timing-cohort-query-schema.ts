@@ -7,8 +7,20 @@ import { z } from 'zod';
  * inside the Zod schema file (the registry imports BoilerplateMetadata which has
  * side-effects from registry.ts initialization). Story 1.3.3 owns the canonical
  * definition; this schema stays in sync via the string literal union.
+ *
+ * PR-13 (2026-05-04) — added the four nextjs-* starter pack subtypes that
+ * inherit from nextjs-base. `nextjs` is kept for legacy App rows pre-rename.
  */
-export const boilerplateTypeSchema = z.enum(['nextjs', 'sst', 'vite', 'mobile']);
+export const boilerplateTypeSchema = z.enum([
+  'nextjs',
+  'nextjs-base',
+  'nextjs-canvas-game',
+  'nextjs-form-app',
+  'nextjs-dashboard',
+  'sst',
+  'vite',
+  'mobile',
+]);
 
 /**
  * PlanKind mirrors `PlanKind` from `functions/shared/types/plan.ts`.

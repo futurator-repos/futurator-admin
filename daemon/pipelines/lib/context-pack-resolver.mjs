@@ -130,9 +130,32 @@ export async function resolveAndSerializeContextPack(input) {
     }
   }
 
+  // PR-15 — expand touchPoints with files declared by SIBLING DONE stories
+  // earlier in this epic. dino-runner-1 forensic showed DEV in story 4
+  // re-reading types.ts/physics.ts/state-machine.ts from disk because they
+  // weren't in story 4's declared touchPoints — the agent didn't know they
+  // existed in the project state. Including them in fileDigests means the
+  // pack ships their contents inline, killing redundant Read tool calls.
+  // Capped at 30 paths to avoid runaway prompt growth on epics with many
+  // stories; the token-budget guard further trims if we exceed budget.
+  const ownTouchPoints = Array.isArray(story.touchPoints) ? story.touchPoints : [];
+  const siblingTouchPoints = stories
+    .filter(
+      (s) =>
+        s &&
+        s.storyId !== storyId &&
+        s.status === 'done' &&
+        Array.isArray(s.touchPoints),
+    )
+    .flatMap((s) => s.touchPoints);
+  const mergedTouchPoints = Array.from(
+    new Set([...ownTouchPoints, ...siblingTouchPoints]),
+  ).slice(0, 30);
+  const expandedStory = { ...story, touchPoints: mergedTouchPoints };
+
   return runAssembler({
     plan,
-    story,
+    story: expandedStory,
     prevStoriesInWave,
     projectDir,
     waveStartTime,

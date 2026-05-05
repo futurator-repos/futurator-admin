@@ -26,6 +26,15 @@ export function buildPmPlanPrompt(args: {
   boilerplateType: BoilerplateType;
   /** Plan rigor — drives expected AC density. */
   rigor: PlanRigor;
+  /**
+   * PR-23d — plan kind: 'initial' (first plan on this App) vs 'change'
+   * (additive plan on top of existing shipped code). When 'change', the
+   * PM must read existing files via the project tree + knowledge index
+   * and propose ADDITIVE stories only — never recreate types, primitives,
+   * or files that already exist on disk. Defaults to 'initial' for legacy
+   * plans without a kind field.
+   */
+  kind?: 'initial' | 'change' | 'experiment';
 }): string {
   const meta = BOILERPLATE_REGISTRY[args.boilerplateType];
   if (!meta) {
@@ -89,6 +98,8 @@ When writing story descriptions and ACs, use these paths verbatim:
 Sample ACs that match this boilerplate's conventions:
 ${ctx.exampleAcceptanceCriteria.map((c) => `  - "${c}"`).join('\n')}
 
+${meta.scaffoldContract ? renderScaffoldContractBlock(meta.scaffoldContract) : ''}
+${args.kind === 'change' ? renderBrownfieldClause() : ''}
 ## Rigor: ${args.rigor}
 
 ${rigorGuidance}
@@ -198,6 +209,93 @@ JSON in a code block.
 - Output the JSON between the fences. Nothing else.
 
 Output the JSON now.`;
+}
+
+/**
+ * PR-13 Phase 2 — render the starter pack's scaffold contract as a hard
+ * constraint block at the top of the PM prompt. This is the difference
+ * between "boilerplate is advisory" and "boilerplate is contractually
+ * forbidden territory."
+ *
+ * The contract content comes verbatim from the registry (mirror of the
+ * SCAFFOLD.md in augment files). The PM is told upfront that any story
+ * touching pre-baked files will be REJECTED at the API layer, so it
+ * doesn't waste tokens emitting them.
+ */
+function renderScaffoldContractBlock(scaffoldContract: string): string {
+  return `## SCAFFOLD CONTRACT (READ FIRST — STRICT)
+
+This App was scaffolded from a starter pack that pre-bakes domain primitives.
+You MUST treat the contract below as inviolable: any story whose touch points
+fall inside the "Pre-baked" file list, or whose title matches a "Forbidden
+story pattern", will be REJECTED at the API layer and force a Regenerate cycle.
+Match your stories to the "Required story patterns" instead.
+
+\`\`\`
+${scaffoldContract.trim()}
+\`\`\`
+
+`;
+}
+
+/**
+ * PR-23d — brownfield clause for kind='change' plans.
+ *
+ * Plan kind 'change' means the App already has shipped code from a prior plan.
+ * The PM must spec ADDITIVE stories only — never recreate types/primitives/
+ * files that already exist. The story-context-pack ships the project tree
+ * + knowledge index for free, but without an explicit clause the PM tends
+ * to propose "Define core game types" stories even when types.ts already
+ * exists with 50+ lines of dino-domain interfaces.
+ *
+ * 2026-05-04 — added before plan 2 of dino-runner-1 to prevent
+ * re-scaffolding regression on the second iteration.
+ */
+function renderBrownfieldClause(): string {
+  return `## BROWNFIELD MODE (READ — STRICT)
+
+This is a **change plan** on top of an already-shipped App. There is existing
+code on disk from prior plans. Your job is to propose ADDITIVE stories that
+build on what's there, NOT to recreate it.
+
+### Hard rules
+
+1. **Never propose stories that "Define X types", "Set up Y", "Create Z
+   component" if X/Y/Z already exists.** Use the project tree + knowledge
+   index in your context to verify. If you're unsure, prefer "Extend X with
+   <new field/feature>" over "Define X".
+2. **Reuse existing primitives.** Hooks, helpers, reducers, render components
+   from the prior plan's stories ARE part of the substrate now. Story
+   descriptions should reference them by path (e.g. "extend
+   \`src/game/reducer.ts\` with a NEW action…", not "create a reducer").
+3. **Touch-points must point at REAL files** in most stories. A change-plan
+   story whose only touch points are NEW file paths is suspicious — most
+   change work modifies existing files.
+4. **Every story description should reference the existing code by name**,
+   making it explicit what's being extended/modified versus newly created.
+
+### Anti-patterns (will be flagged at review)
+
+- "Implement game state machine" → already exists; should be "Add <new
+  action> to existing state machine in \`src/game/reducer.ts\`".
+- "Create render components" → already exist as DinoRender, ObstacleRender,
+  GroundRender; should be "Refactor DinoRender to support sprite assets" or
+  "Add <new entity> render component".
+- A wave-0 story without any \`dependsOn\` AND without any pre-existing file
+  in its touch points is the smoking gun. Ask yourself: "is the dev going
+  to read prior plan's code before writing this?". If no, the story is
+  probably wrong.
+
+### What good change-plan stories look like
+
+- "Add cactus-variant rendering — modify \`src/components/canvas/ObstacleRender.tsx\`
+  to switch between 3 SVG sprites based on \`obstacle.variant\` field."
+- "Wire pause-on-blur — extend \`src/game/reducer.ts\` with PAUSE/RESUME
+  actions; subscribe to \`document.visibilitychange\` in \`src/app/page.tsx\`."
+- "Add high-score persistence — new \`src/game/highscore.ts\` reading/writing
+  \`localStorage\`; called from existing GAME_OVER reducer case."
+
+`;
 }
 
 function renderRigorGuidance(rigor: PlanRigor): string {

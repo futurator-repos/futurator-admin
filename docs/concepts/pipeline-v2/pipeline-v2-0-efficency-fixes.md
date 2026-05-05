@@ -311,16 +311,35 @@ The order minimizes risk and maximizes immediate operator wins. **PR-1 is alread
 
 | PR          | Scope                                                                                                               | Diff size  | Why this order                                                                           |
 | ----------- | ------------------------------------------------------------------------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------- |
-| ✅ **PR-1** | T0.1 + T0.3                                                                                                         | ~150 lines | Stops the bleeding. Already landed.                                                      |
-| **PR-2**    | T0.2 daemon-side prework gate                                                                                       | ~250 lines | Eliminates LLM cost for no-op stories entirely. Unblocks safe testing of subsequent PRs. |
-| **PR-3**    | Tool allowlist + B8 deny-pattern + delete PROJECT BASELINE paragraph                                                | ~100 lines | Enforces what dino1 prompts couldn't. Reviewer cost drops ~50%.                          |
-| **PR-4**    | T1.1 (D.4 scope) + T1.2 (D.3 wave-conflict) + B3 (scope-diff gate)                                                  | ~150 lines | All already-built libs; just wiring.                                                     |
-| **PR-5**    | B1 (pre-DEV tsc baseline) + B2 (post-DEV tsc/lint gate) + B4 (verdict reconciliation) + B5 (diff-significance gate) | ~300 lines | Compresses what reviewer + compiler must decide.                                         |
-| **PR-6**    | T1.3 (bash-first wave-compile) + T1.6 (empty-diff skip extension)                                                   | ~400 lines | Largest of the bunch but isolated to compile path. Behind `WAVE_CLOSE_COMPILER_ENABLED`. |
-| **PR-7**    | T1.4 (per-plan ceiling) + T1.5 (filesystem wave-context) + T1.7 (daemon-stale banner)                               | ~250 lines | Final structural wins.                                                                   |
-| **PR-8**    | T2.x (cache-stable templates, dedupe boilerplate, legacy token tracking, inbox actions)                             | ~200 lines | Cleanups, bundled.                                                                       |
+| ✅ **PR-1** | T0.1 + T0.3                                                                                                                                                          | ~150 lines  | Stops the bleeding. Landed `12c3cce`.                                                                                                              |
+| ✅ **PR-2** | T0.2 daemon-side prework gate                                                                                                                                        | ~1041 lines | Eliminates LLM cost for no-op stories. Landed `9435f64`.                                                                                           |
+| ✅ **PR-3** | Tool allowlist tightening + B8 deny-pattern + delete PROJECT BASELINE prose                                                                                          | ~390 lines  | Landed `8657598`. Reviewer cost drops ~50%.                                                                                                        |
+| ✅ **PR-4** | Touch-point inference (heuristic + LLM fallback)                                                                                                                     | ~1041 lines | NEW — surfaced after PR-2 testing. Landed `9435f64`.                                                                                               |
+| ✅ **PR-5** | Boilerplate-aware PM prompt                                                                                                                                          | ~573 lines  | NEW — surfaced after dino3 forensic. Landed `57f8e4d`.                                                                                             |
+| ✅ **PR-6** | Retry resilience + auth recovery + cleanups (T0.1+T0.3 generalized to all forced terminations; auth-recovery loop; pre-spawn token check; reviewer protocol guard; graph-sync skip; timing API 500) | ~671 lines  | Landed `8714152`.                                                                                                                                  |
+| ✅ **PR-7** | Attention hygiene + Labs-root bell (idempotent upsert, auto-resolve on success, Labs-nav bell, recurrence count) | ~680 lines | Landed `d32af45`. Required deploy-unblock (CloudFront state divergence) to ship. |
+| **PR-8**    | **QA stage redesign** — see `qa-stage-redesign.md` for the full spec                                                                                                 | ~5 phases   | Plan-scoped, level-routed (L0/L1/L2), operator-gated test contract, per-test budgets + triage drawer. Replaces epic-scoped fan-out.                |
+| **PR-9**    | Cleanups bundle (was originally PR-8): T2.x — cache-stable templates, dedupe boilerplate, legacy token tracking, inbox actions, T1.3 bash-first wave-compile, T1.4 per-plan ceiling, T1.5 filesystem wave-context, T1.7 daemon-stale banner, T1.6 empty-diff skip | ~600 lines  | Bundled cleanups. Several items already partially shipped via earlier PRs; this rolls up the remainder.                                            |
 
 After PR-2 lands, you can run `dino2` end-to-end and verify the bleeding has stopped. Subsequent PRs are incremental wins, not blocking issues.
+
+### PR-8: QA stage redesign — phased rollout
+
+The QA stage redesign is too large to land in one PR and is documented separately at `docs/concepts/pipeline-v2/qa-stage-redesign.md` (companion to the dino1 forensic at `qa-stage-forensic-and-brainstorm.md`). It splits into 5 phases that ship independently, each reversible:
+
+| Phase    | Scope                                                                  | Effort      | Solves problems                                          |
+| -------- | ---------------------------------------------------------------------- | ----------- | -------------------------------------------------------- |
+| **PR-8a (Q1)** | Plan-scoped QA (kill epic-fan-out)                                     | ~3 days     | #1 (duplication), #2 (memory pressure), #9 (port collisions) |
+| **PR-8b (Q2)** | Bash-first qa-prepare (move screenshot capture out of LLM)             | ~1.5 days   | #4 (boilerplate-blind), #5 (viewport syntax), #7 (partial), #9 |
+| **PR-8c (Q4)** | Test contract operator-gate (`qa-aggregate` + decision card + approval) | ~3 days     | #3 (unreviewed tests), Failures A/B/C                    |
+| **PR-8d (Q3)** | Three-level routing (L0 bash / L1 Haiku / L2 Sonnet)                   | ~4 days     | #7 (LLM doing bash work), cost reduction kicks in        |
+| **PR-8e (Q5)** | Per-test budgets + QA report drawer with retry/edit-and-retry          | ~3 days     | #6 (no escalation), #8 (224 attention items), #10 (only abandon) |
+
+**Recommended order**: Q1 → Q2 → Q4 → Q3 → Q5. Q1 alone delivers ~80% of the value (eliminates t2.micro hangs + duplication). Q3 is the cost-reduction phase but depends on Q4 (the test contract is what levels operate on). Q5 is the operator UX layer; ships last.
+
+**Total estimated effort**: ~14 days at solo-dev pace, but realistically ~21 days given typical sprawl in Q3 (the schema design interacts with the daemon parser, dev-agent emit format, contract format, and UI).
+
+See `qa-stage-redesign.md` §13 for the per-step task breakdown and §14 for the open design questions (whether Haiku is sufficient at L1, whether prototype rigor should skip the contract gate, etc).
 
 ---
 

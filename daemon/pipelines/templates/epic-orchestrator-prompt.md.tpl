@@ -51,7 +51,7 @@ For every story in wave K, read `touchPoints`. If any two stories' globs overlap
 
 Invoke `Task` in a single message with one call per story in this (sub-)wave, up to {{maxParallel}} in flight. Choose `subagent_type` by `complexity`. Include the effort keyword in the prompt per the model/effort policy.
 
-Emit `subagent_dispatch` per story before the message.
+Emit `subagent_dispatch` per story before the message. **Also POST story-status `running` for every story you are about to dispatch** (see "Story status emission" below) — this is what makes the UI show the story flip from pending to running. Do this BEFORE the Task dispatch.
 
 ### Step 3 — Collect dev results
 
@@ -68,16 +68,16 @@ For every story whose dev returned without a hard blocker, invoke `Task` with `s
 
 Compute `diff` via: `Bash git diff HEAD -- <filesTouched>` per story.
 
-Emit `subagent_dispatch` per reviewer call.
+Emit `subagent_dispatch` per reviewer call. **Also POST story-status `in_review`** for each story before the reviewer dispatch.
 
 ### Step 5 — Collect verdicts
 
 Parse each `<VERDICT>`. Emit `review_verdict` per story. Then:
 
-- APPROVE → story done for wave.
-- REQUEST_CHANGES, attempt < {{maxRemediationRounds}} → emit `remediation_start`, go to Step 6 for this story.
-- REQUEST_CHANGES, attempt == {{maxRemediationRounds}} → emit `story_failed_terminally`; do not block the wave; proceed.
-- Malformed verdict → re-dispatch reviewer once. Still malformed → FAILED with `reviewer_protocol_violation`.
+- APPROVE → story done for wave. **POST story-status `done`** for this story.
+- REQUEST_CHANGES, attempt < {{maxRemediationRounds}} → emit `remediation_start`, **POST story-status `fixing`**, go to Step 6 for this story.
+- REQUEST_CHANGES, attempt == {{maxRemediationRounds}} → emit `story_failed_terminally`, **POST story-status `failed`**; do not block the wave; proceed.
+- Malformed verdict → re-dispatch reviewer once. Still malformed → FAILED with `reviewer_protocol_violation`. **POST story-status `failed`.**
 
 ### Step 6 — Remediation round
 
@@ -98,7 +98,29 @@ Proceed to wave K+1.
 
 ## Blocker handling
 
-Per blocker decision matrix. Auto-recover `insufficient-touch-points`, `context-gap`, `environment` (each at most one retry per story). Escalate others with `story_blocked` event.
+Per blocker decision matrix. Auto-recover `insufficient-touch-points`, `context-gap`, `environment` (each at most one retry per story). Escalate others with `story_blocked` event and **POST story-status `blocked`**.
+
+## Story status emission
+
+The admin UI reads `epic.stories[i].status` to render progress. You MUST POST a status update for every story transition using this endpoint:
+
+```
+Bash: curl -s -X POST http://localhost:{{daemonPort}}/story-status \
+        -H 'Content-Type: application/json' \
+        -d '{"jobId":"{{jobId}}","epicId":"{{epicId}}","storyId":"<STORY_ID>","status":"<STATUS>"}'
+```
+
+Allowed statuses: `pending`, `running`, `in_review`, `fixing`, `done`, `failed`, `skipped`, `blocked`.
+
+Transition map:
+- Before dispatching dev subagent → `running`
+- When dev returns and you dispatch reviewer → `in_review`
+- Reviewer APPROVE → `done`
+- Reviewer REQUEST_CHANGES (remediation) → `fixing`
+- Terminal failure after max remediations → `failed`
+- Unrecoverable blocker → `blocked`
+
+Batch multiple curls in a single Bash message when dispatching a whole wave — one per story is required.
 
 ## Resume on crash
 

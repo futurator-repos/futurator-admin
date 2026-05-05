@@ -1,0 +1,379 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { reduceEpicWaves, type WaveReducerDeps } from '../wave-reducer';
+import type { EpicStory, EpicWorkflow } from '../../types/epic-workflow';
+import type { AgentJob, PipelineDefinition } from '../../types/agent-orchestrator';
+
+// Test fixtures + factories -------------------------------------------------
+
+function makeStory(id: string, wave: number, overrides: Partial<EpicStory> = {}): EpicStory {
+  return {
+    storyId: id,
+    order: Number(id.replace(/\D/g, '')) || 0,
+    title: `Story ${id}`,
+    description: 'acceptance criteria',
+    status: 'pending',
+    wave,
+    touchPoints: ['src/a.ts'],
+    complexity: 'standard',
+    reviewRigor: 'standard',
+    ...overrides,
+  };
+}
+
+function makeEpic(stories: EpicStory[], overrides: Partial<EpicWorkflow> = {}): EpicWorkflow {
+  return {
+    epicId: 'EPIC-1',
+    title: 'Ship feature X',
+    description: 'goal text',
+    acceptanceCriteria: '',
+    workingDir: '/home/ubuntu/projects/alpha',
+    status: 'in_progress',
+    stories,
+    useEpicOrchestrator: false,
+    createdAt: '2026-04-20T00:00:00.000Z',
+    updatedAt: '2026-04-20T00:00:00.000Z',
+    createdBy: 'tester',
+    devModel: 'sonnet',
+    reviewerModel: 'haiku',
+    ...overrides,
+  };
+}
+
+function stubPipeline(): PipelineDefinition {
+  return { agents: {}, steps: [] };
+}
+
+function fakeJob(jobId: string, status: AgentJob['status']): AgentJob {
+  return {
+    jobId,
+    status,
+    createdAt: '2026-04-20T00:00:00.000Z',
+    updatedAt: '2026-04-20T00:00:01.000Z',
+    createdBy: 'tester',
+    workingDir: '/home/ubuntu/projects/alpha',
+    pipeline: stubPipeline(),
+  };
+}
+
+// Dep factory — each test stubs job statuses via a Map lookup.
+function makeDeps(
+  jobStatuses: Record<string, AgentJob['status']>,
+  opts: { uuidSeed?: string } = {},
+): {
+  deps: WaveReducerDeps;
+  getJobById: ReturnType<typeof vi.fn>;
+  createJob: ReturnType<typeof vi.fn>;
+  updateEpicFields: ReturnType<typeof vi.fn>;
+  generateWaveBuildPipeline: ReturnType<typeof vi.fn>;
+  generatePipeline: ReturnType<typeof vi.fn>;
+  uuid: ReturnType<typeof vi.fn>;
+} {
+  let counter = 0;
+  const getJobById = vi.fn(async (jobId: string): Promise<AgentJob | null> => {
+    const status = jobStatuses[jobId];
+    return status ? fakeJob(jobId, status) : null;
+  });
+  const createJob = vi.fn(async () => undefined);
+  const updateEpicFields = vi.fn(async () => undefined);
+  const generateWaveBuildPipeline = vi.fn((): PipelineDefinition => stubPipeline());
+  const generatePipeline = vi.fn((): PipelineDefinition => stubPipeline());
+  const uuid = vi.fn(() => `${opts.uuidSeed || 'job'}-${++counter}`);
+  const now = () => '2026-04-20T01:00:00.000Z';
+  return {
+    deps: {
+      getJobById,
+      createJob,
+      updateEpicFields,
+      generateWaveBuildPipeline,
+      generatePipeline,
+      uuid,
+      now,
+    },
+    getJobById,
+    createJob,
+    updateEpicFields,
+    generateWaveBuildPipeline,
+    generatePipeline,
+    uuid,
+  };
+}
+
+// Tests ---------------------------------------------------------------------
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+describe('reduceEpicWaves — gating', () => {
+  it('no-op when stories array is empty', async () => {
+    const epic = makeEpic([]);
+    const { deps } = makeDeps({});
+    const result = await reduceEpicWaves(epic, deps);
+    expect(result).toEqual({ kind: 'no-op', reason: 'no-stories' });
+  });
+
+  it('no-op when no story has been launched yet (no jobId)', async () => {
+    const epic = makeEpic([makeStory('S-1', 0), makeStory('S-2', 0)]);
+    const { deps } = makeDeps({});
+    const result = await reduceEpicWaves(epic, deps);
+    expect(result).toEqual({ kind: 'no-op', reason: 'no-current-wave' });
+  });
+
+  it('no-op while any current-wave job is still RUNNING', async () => {
+    const epic = makeEpic([
+      makeStory('S-1', 0, { jobId: 'j-1', status: 'running' }),
+      makeStory('S-2', 0, { jobId: 'j-2', status: 'running' }),
+    ]);
+    const { deps, updateEpicFields, createJob } = makeDeps({
+      'j-1': 'COMPLETED',
+      'j-2': 'RUNNING',
+    });
+    const result = await reduceEpicWaves(epic, deps);
+    expect(result).toEqual({ kind: 'no-op', reason: 'wave-running' });
+    expect(updateEpicFields).not.toHaveBeenCalled();
+    expect(createJob).not.toHaveBeenCalled();
+  });
+});
+
+describe('reduceEpicWaves — NEEDS_ATTENTION pausing (Story 1.1)', () => {
+  it('returns wave-paused when any current-wave job is NEEDS_ATTENTION; does not advance, does not flip status', async () => {
+    const epic = makeEpic([
+      makeStory('S-1', 0, { jobId: 'j-1', status: 'running' }),
+      makeStory('S-2', 0, { jobId: 'j-2', status: 'running' }),
+    ]);
+    const { deps, updateEpicFields, createJob } = makeDeps({
+      'j-1': 'COMPLETED',
+      'j-2': 'NEEDS_ATTENTION',
+    });
+    const result = await reduceEpicWaves(epic, deps);
+    expect(result).toEqual({
+      kind: 'wave-paused',
+      waveNumber: 0,
+      needsAttentionStoryIds: ['S-2'],
+    });
+    // Does not propagate: epic row is not mutated, no build-check is created.
+    expect(updateEpicFields).not.toHaveBeenCalled();
+    expect(createJob).not.toHaveBeenCalled();
+  });
+
+  it('treats COMPLETED_VIA_SALVAGE as success — wave advances to build-check', async () => {
+    const epic = makeEpic([
+      makeStory('S-1', 0, { jobId: 'j-1', status: 'running' }),
+      makeStory('S-2', 0, { jobId: 'j-2', status: 'running' }),
+    ]);
+    const { deps, createJob } = makeDeps(
+      { 'j-1': 'COMPLETED', 'j-2': 'COMPLETED_VIA_SALVAGE' },
+      { uuidSeed: 'build' },
+    );
+    const result = await reduceEpicWaves(epic, deps);
+    expect(result.kind).toBe('wave-build-check-created');
+    expect(createJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats MANUALLY_SKIPPED as success — wave advances to build-check', async () => {
+    const epic = makeEpic([
+      makeStory('S-1', 0, { jobId: 'j-1', status: 'running' }),
+      makeStory('S-2', 0, { jobId: 'j-2', status: 'running' }),
+    ]);
+    const { deps, createJob } = makeDeps(
+      { 'j-1': 'COMPLETED', 'j-2': 'MANUALLY_SKIPPED' },
+      { uuidSeed: 'build' },
+    );
+    const result = await reduceEpicWaves(epic, deps);
+    expect(result.kind).toBe('wave-build-check-created');
+    expect(createJob).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('reduceEpicWaves — wave completion → build-check', () => {
+  it('creates wave-build-check when all current-wave jobs COMPLETED and no build-check exists', async () => {
+    const epic = makeEpic([
+      makeStory('S-1', 0, { jobId: 'j-1', status: 'running' }),
+      makeStory('S-2', 0, { jobId: 'j-2', status: 'running' }),
+      makeStory('S-3', 1), // wave 2, not yet launched
+    ]);
+    const { deps, createJob, updateEpicFields, generateWaveBuildPipeline } = makeDeps(
+      { 'j-1': 'COMPLETED', 'j-2': 'COMPLETED' },
+      { uuidSeed: 'build' },
+    );
+
+    const result = await reduceEpicWaves(epic, deps);
+
+    expect(result).toEqual({
+      kind: 'wave-build-check-created',
+      waveNumber: 0,
+      jobId: 'build-1',
+    });
+    expect(createJob).toHaveBeenCalledOnce();
+    expect(createJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobId: 'build-1',
+        status: 'PENDING',
+        workingDir: '/home/ubuntu/projects/alpha',
+      }),
+    );
+    expect(generateWaveBuildPipeline).toHaveBeenCalledWith(
+      '/home/ubuntu/projects/alpha',
+      0,
+      ['Story S-1', 'Story S-2'],
+    );
+    expect(updateEpicFields).toHaveBeenCalledWith(
+      'EPIC-1',
+      expect.objectContaining({
+        waveBuildJobs: { '0': 'build-1' },
+        stories: expect.arrayContaining([
+          expect.objectContaining({ storyId: 'S-1', status: 'done' }),
+          expect.objectContaining({ storyId: 'S-2', status: 'done' }),
+        ]),
+      }),
+    );
+  });
+
+  it('is idempotent — re-running with build-check already created does NOT create another', async () => {
+    const epic = makeEpic(
+      [
+        makeStory('S-1', 0, { jobId: 'j-1', status: 'done' }),
+        makeStory('S-2', 0, { jobId: 'j-2', status: 'done' }),
+      ],
+      { waveBuildJobs: { '0': 'build-1' } },
+    );
+    const { deps, createJob, updateEpicFields } = makeDeps({
+      'j-1': 'COMPLETED',
+      'j-2': 'COMPLETED',
+      'build-1': 'RUNNING', // build-check still running
+    });
+
+    const result = await reduceEpicWaves(epic, deps);
+
+    expect(result).toEqual({ kind: 'wave-build-check-pending', waveNumber: 0 });
+    expect(createJob).not.toHaveBeenCalled();
+    expect(updateEpicFields).not.toHaveBeenCalled();
+  });
+});
+
+describe('reduceEpicWaves — failure paths', () => {
+  it('sets epic.status = "fixing" when any current-wave story failed, and does NOT create a build-check', async () => {
+    const epic = makeEpic([
+      makeStory('S-1', 0, { jobId: 'j-1', status: 'running' }),
+      makeStory('S-2', 0, { jobId: 'j-2', status: 'running' }),
+    ]);
+    const { deps, createJob, updateEpicFields } = makeDeps({
+      'j-1': 'COMPLETED',
+      'j-2': 'FAILED',
+    });
+
+    const result = await reduceEpicWaves(epic, deps);
+
+    expect(result).toEqual({
+      kind: 'wave-failed',
+      waveNumber: 0,
+      failedStoryIds: ['S-2'],
+    });
+    expect(createJob).not.toHaveBeenCalled();
+    expect(updateEpicFields).toHaveBeenCalledWith(
+      'EPIC-1',
+      expect.objectContaining({
+        status: 'fixing',
+        stories: expect.arrayContaining([
+          expect.objectContaining({ storyId: 'S-1', status: 'done' }),
+          expect.objectContaining({ storyId: 'S-2', status: 'failed' }),
+        ]),
+      }),
+    );
+  });
+
+  it('sets epic.status = "fixing" when wave-build-check fails', async () => {
+    const epic = makeEpic(
+      [
+        makeStory('S-1', 0, { jobId: 'j-1', status: 'done' }),
+        makeStory('S-2', 0, { jobId: 'j-2', status: 'done' }),
+      ],
+      { waveBuildJobs: { '0': 'build-1' } },
+    );
+    const { deps, createJob, updateEpicFields } = makeDeps({
+      'j-1': 'COMPLETED',
+      'j-2': 'COMPLETED',
+      'build-1': 'FAILED',
+    });
+
+    const result = await reduceEpicWaves(epic, deps);
+
+    expect(result).toEqual({ kind: 'wave-build-check-failed', waveNumber: 0 });
+    expect(createJob).not.toHaveBeenCalled();
+    expect(updateEpicFields).toHaveBeenCalledWith(
+      'EPIC-1',
+      expect.objectContaining({ status: 'fixing' }),
+    );
+  });
+});
+
+describe('reduceEpicWaves — next-wave advancement', () => {
+  it('launches wave N+1 when build-check COMPLETED and nextWaveStories exist', async () => {
+    const epic = makeEpic(
+      [
+        makeStory('S-1', 0, { jobId: 'j-1', status: 'done' }),
+        makeStory('S-2', 0, { jobId: 'j-2', status: 'done' }),
+        makeStory('S-3', 1),
+        makeStory('S-4', 1),
+      ],
+      { waveBuildJobs: { '0': 'build-1' } },
+    );
+    const { deps, createJob, updateEpicFields, generatePipeline } = makeDeps(
+      {
+        'j-1': 'COMPLETED',
+        'j-2': 'COMPLETED',
+        'build-1': 'COMPLETED',
+      },
+      { uuidSeed: 'next' },
+    );
+
+    const result = await reduceEpicWaves(epic, deps);
+
+    expect(result).toMatchObject({
+      kind: 'next-wave-launched',
+      waveNumber: 1,
+      jobIds: ['next-1', 'next-2'],
+    });
+    expect(createJob).toHaveBeenCalledTimes(2);
+    expect(generatePipeline).toHaveBeenCalledTimes(2);
+    // Per-story pipelines launched for S-3 and S-4 (wave 1).
+    expect(generatePipeline.mock.calls.map((c) => (c[0] as EpicStory).storyId).sort()).toEqual([
+      'S-3',
+      'S-4',
+    ]);
+    expect(updateEpicFields).toHaveBeenCalledWith(
+      'EPIC-1',
+      expect.objectContaining({
+        status: 'in_progress',
+        stories: expect.arrayContaining([
+          expect.objectContaining({ storyId: 'S-3', jobId: 'next-1', status: 'queued' }),
+          expect.objectContaining({ storyId: 'S-4', jobId: 'next-2', status: 'queued' }),
+        ]),
+      }),
+    );
+  });
+
+  it('marks epic.status = "completed" when build-check COMPLETED and no next wave exists', async () => {
+    const epic = makeEpic(
+      [
+        makeStory('S-1', 0, { jobId: 'j-1', status: 'done' }),
+        makeStory('S-2', 0, { jobId: 'j-2', status: 'done' }),
+      ],
+      { waveBuildJobs: { '0': 'build-1' } },
+    );
+    const { deps, createJob, updateEpicFields } = makeDeps({
+      'j-1': 'COMPLETED',
+      'j-2': 'COMPLETED',
+      'build-1': 'COMPLETED',
+    });
+
+    const result = await reduceEpicWaves(epic, deps);
+
+    expect(result).toEqual({ kind: 'epic-completed' });
+    expect(createJob).not.toHaveBeenCalled(); // no new story jobs
+    expect(updateEpicFields).toHaveBeenCalledWith(
+      'EPIC-1',
+      expect.objectContaining({ status: 'completed' }),
+    );
+  });
+});

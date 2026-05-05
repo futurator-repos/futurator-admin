@@ -23,6 +23,16 @@ import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as agentEventsRepo from '../shared/repositories/agent-events-repository';
 import * as partyProjectsRepo from '../shared/repositories/party-projects-repository';
 import * as partySessionsRepo from '../shared/repositories/party-sessions-repository';
+import * as inlineQuestionsRepo from '../shared/repositories/inline-questions-repository';
+import {
+  INLINE_QUESTION_DEFAULT_MODEL,
+  INLINE_QUESTION_MAX_TOKENS,
+  INLINE_QUESTION_SNIPPET_MAX,
+  INLINE_QUESTION_QUESTION_MAX,
+  INLINE_QUESTION_CONTEXT_MAX,
+  type InlineQuestion,
+} from '../shared/types/inline-question';
+import Anthropic from '@anthropic-ai/sdk';
 import {
   bootstrapInputSchema,
   projectIdSchema,
@@ -44,7 +54,12 @@ import { resolveBlockerSchema } from '../shared/schemas/resolve-blocker-schema';
 import { validateEpicForOrchestratorStart } from '../shared/services/epic-dev-launcher';
 import { launchPipelineWave, findFirstWave } from '../shared/services/pipeline-launcher';
 import { launchStoryRerun } from '../shared/services/story-rerun-launcher';
-import { launchVisualQa } from '../shared/services/visual-qa-launcher';
+import {
+  launchVisualQa,
+  launchPlanQaAggregate,
+  launchPlanQaExecute,
+} from '../shared/services/visual-qa-launcher';
+import { resolveQaContext } from '../shared/services/qa-boilerplate-resolver';
 import { launchDevServer } from '../shared/services/dev-server-launcher';
 import { generateStoryPipeline } from '../shared/pipelines/story-pipeline';
 import { aggregateOrchestratorMetrics } from '../shared/services/epic-orchestrator-metrics';
@@ -62,6 +77,8 @@ import { buildDeployReport } from '../shared/repositories/deploy-report-aggregat
 import {
   parseVisualTests as sharedParseVisualTests,
   buildQaPipeline as sharedBuildQaPipeline,
+  buildQaAggregatePipeline,
+  buildQaExecutePipeline,
 } from '../shared/pipelines/visual-qa-pipeline';
 import * as registryRepo from '../shared/repositories/project-registry-repository';
 import type { EpicStory, EpicWorkflow } from '../shared/types/epic-workflow';
@@ -84,6 +101,7 @@ import type { AgentEvent } from '../shared/types/agent-orchestrator';
 import {
   S3Client,
   PutObjectCommand,
+  GetObjectCommand,
   ListObjectsV2Command,
   DeleteObjectsCommand,
   DeleteObjectCommand,
@@ -112,7 +130,11 @@ import {
   deleteRepo,
   GitHubError,
 } from '../shared/github/connector';
-import { BOILERPLATE_REGISTRY, type BoilerplateType } from '../shared/boilerplates/registry';
+import {
+  BOILERPLATE_REGISTRY,
+  normalizeBoilerplateType,
+  type BoilerplateType,
+} from '../shared/boilerplates/registry';
 import { githubCreateRepoSchema } from '../shared/schemas/github-create-repo-schema';
 // Story 1.4.2 — App-create saga schema (extends legacy createAppInputSchema
 // with `boilerplateType` + `bmadEnabled`).
@@ -1467,8 +1489,10 @@ app.post('/api/plans/from-intent', async (c) => {
     intent: plan.intent,
     executionMode: plan.executionMode,
     devModel: plan.devModel,
-    boilerplateType: 'nextjs',
+    // PR-13 — `nextjs` was renamed to `nextjs-base` (the registry key).
+    boilerplateType: 'nextjs-base',
     rigor: plan.rigor,
+    kind: plan.kind, // PR-23d — drives the brownfield clause for change plans.
   });
   await agentJobsRepo.createJob({
     jobId: pmJobId,
@@ -1621,9 +1645,15 @@ app.post('/api/plans/:id/apply-plan', async (c) => {
 });
 
 // POST /api/plans/:id/regenerate — start a fresh PM-plan job on the same intent.
-// Existing epic tree is NOT dropped; the client applies the new output via
-// /apply-plan which (as of V1) appends — if the operator wants a clean slate
-// they should delete epics first via the UI's tree editor.
+//
+// PR-24 (2026-05-04) — regenerate is now atomic: existing epic tree is
+// DROPPED before the new PM job spawns. Reasoning: the v1 "append" behaviour
+// + the frontend's auto-apply skip-when-epics-exist guard combined to make
+// regenerate silently no-op when a plan already had epics (the new PM
+// output sat in DDB unused). Operators expect "regenerate" to mean "wipe
+// and rebuild" — that's now what it does. To preserve a prior plan
+// version, snapshot it BEFORE clicking regenerate (forensic export +
+// the immutable AgentJob row both retain the prior PLAN_JSON).
 app.post('/api/plans/:id/regenerate', async (c) => {
   const planId = c.req.param('id');
   const user = c.get('user');
@@ -1634,16 +1664,42 @@ app.post('/api/plans/:id/regenerate', async (c) => {
     throw new ValidationError(`Cannot regenerate a plan in status "${plan.status}" — only concept`);
   }
 
+  // PR-24 — drop existing epics + reset plan rollups so the auto-apply
+  // hook on the frontend (plan-dashboard/index.tsx) treats this as a
+  // first-time apply. Errors during epic deletion are logged but never
+  // block the regenerate; orphan epic rows are harmless (DDB TTL eventually
+  // sweeps them via the App-delete cascade) but inconsistent state is
+  // worse than a few stragglers.
+  if (plan.epicIds && plan.epicIds.length > 0) {
+    for (const epicId of plan.epicIds) {
+      try {
+        await epicRepo.deleteEpic(epicId);
+      } catch (err) {
+        console.warn(
+          `[regenerate] failed to delete epic ${epicId}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+    await planRepo.updatePlanFields(planId, {
+      epicIds: [],
+      totalStories: 0,
+      doneStories: 0,
+    });
+  }
+
   const pmJobId = crypto.randomUUID();
   const now = new Date().toISOString();
   // PR-5: look up boilerplateType from the App (if Plan is App-scoped) so the
   // regenerated PM prompt uses the right framework conventions. Falls back to
-  // 'nextjs' for legacy plans not tied to an App.
-  let regenBoilerplateType: BoilerplateType = 'nextjs';
+  // 'nextjs-base' for legacy plans not tied to an App. PR-13 normalizes
+  // legacy 'nextjs' values to 'nextjs-base' via normalizeBoilerplateType.
+  let regenBoilerplateType: BoilerplateType = 'nextjs-base';
   if (plan.appId) {
     try {
       const appRow = await appRepo.getApp(plan.appId);
-      if (appRow?.boilerplateType) regenBoilerplateType = appRow.boilerplateType;
+      if (appRow?.boilerplateType) {
+        regenBoilerplateType = normalizeBoilerplateType(appRow.boilerplateType);
+      }
     } catch {
       // best-effort — fall through to default
     }
@@ -1655,6 +1711,7 @@ app.post('/api/plans/:id/regenerate', async (c) => {
     devModel: plan.devModel,
     boilerplateType: regenBoilerplateType,
     rigor: plan.rigor,
+    kind: plan.kind, // PR-23d
   });
   await agentJobsRepo.createJob({
     jobId: pmJobId,
@@ -1902,12 +1959,27 @@ app.delete('/api/plans/:id', async (c) => {
   }
   results.push({ step: 'epics', status: 'done', detail: `${epicsToDelete.length} epics` });
 
-  // 4. Delete EC2 folder (or .trash folder).
-  try {
-    await deletePlanFolder(plan, { sendSsmCommand, waitForSsmOutput });
-    results.push({ step: 'folder', status: 'done' });
-  } catch (err) {
-    results.push({ step: 'folder', status: 'error', detail: String(err) });
+  // 4. Delete EC2 folder — but ONLY for legacy plans where the
+  // workingDir is plan-owned. PR-10 #2: App/Plan v1 plans share the
+  // App's workingDir across every plan; deleting the folder when one
+  // v1 plan is removed would nuke the App + every other plan's work.
+  // Detect v1 by `plan.appId` presence (set at /api/apps/:id/plans
+  // creation). Legacy plans created via /api/plans/from-intent have
+  // no appId and own their folder, so the rm -rf is correct there.
+  const planAppId = (plan as Plan & { appId?: string }).appId;
+  if (planAppId) {
+    results.push({
+      step: 'folder',
+      status: 'skipped',
+      detail: 'App/Plan v1: workingDir owned by the App, not deleted',
+    });
+  } else {
+    try {
+      await deletePlanFolder(plan, { sendSsmCommand, waitForSsmOutput });
+      results.push({ step: 'folder', status: 'done' });
+    } catch (err) {
+      results.push({ step: 'folder', status: 'error', detail: String(err) });
+    }
   }
 
   // 5. Delete the plan row.
@@ -1936,8 +2008,11 @@ app.get('/api/plans/:id/qa-report', async (c) => {
     if (epic) epics.push(epic);
   }
 
-  // Collect every jobId we care about: qaJobId, poJobId, waveBuildJobs values.
+  // Collect every jobId we care about: plan.qaJobId (PR-8a plan-scoped QA),
+  // each epic's qaJobId (legacy per-epic QA), each epic's poJobId, and every
+  // wave-build job referenced by waveBuildJobs.
   const jobIdSet = new Set<string>();
+  if (plan.qaJobId) jobIdSet.add(plan.qaJobId);
   for (const epic of epics) {
     if (epic.qaJobId) jobIdSet.add(epic.qaJobId);
     if (epic.poJobId) jobIdSet.add(epic.poJobId);
@@ -1986,8 +2061,11 @@ app.get('/api/plans/:id/deploy-report', async (c) => {
   }
 
   // Build QA report inline so the handoff card has current numbers without
-  // a second client roundtrip. Reuse the same hydration the QA route does.
+  // a second client roundtrip. Reuse the same hydration the QA route does
+  // — plan.qaJobId (PR-8a plan-scoped) + every epic's qaJobId/poJobId +
+  // wave-build jobs.
   const qaJobIdSet = new Set<string>();
+  if (plan.qaJobId) qaJobIdSet.add(plan.qaJobId);
   for (const epic of epics) {
     if (epic.qaJobId) qaJobIdSet.add(epic.qaJobId);
     if (epic.poJobId) qaJobIdSet.add(epic.poJobId);
@@ -2006,60 +2084,275 @@ app.get('/api/plans/:id/deploy-report', async (c) => {
 });
 
 // POST /api/plans/:id/qa-review
-//   Fans out: enqueues a Visual QA job for every epic with visual tests.
-//   Called by the manual "Run QA Review" button AND by the wave-completion
-//   cron when plan.autoRunQa is true. Skipped epics (no visual tests or
-//   already running) are reported in the response.
+//   Pipeline v2.0 PR-8d — launches the QA AGGREGATE stage. Plan-scoped
+//   (PR-8a) + operator-gated (PR-8d): the aggregate stage produces
+//   `visual-tests-draft.md` + a contract-review report, then PAUSES.
+//   The execute stage runs after the operator calls
+//   `POST /api/plans/:id/qa-contract/approve`.
+//
+//   Called by the manual "Run QA Review" button and by the
+//   wave-completion cron when `plan.autoRunQa` is true.
 app.post('/api/plans/:id/qa-review', async (c) => {
   const planId = c.req.param('id');
   const user = c.get('user');
   const plan = await planRepo.getPlanById(planId);
   if (!plan) throw new NotFoundError('Plan', planId);
 
-  const results: Array<{ epicId: string; jobId?: string; skipped?: string }> = [];
-  const now = new Date().toISOString();
-
-  // Concurrent QA jobs each need their own dev-server port so they don't
-  // race for :5173. Assign `5173 + index` per epic. Range [5173, 5199] gives
-  // us 27 concurrent slots — plenty for any realistic plan.
-  const QA_PORT_BASE = 5173;
-  const QA_PORT_RANGE = 27;
   const epicIds = plan.epicIds ?? [];
-  for (let i = 0; i < epicIds.length; i += 1) {
-    const epicId = epicIds[i];
+  const epics: import('../shared/types/epic-workflow').EpicWorkflow[] = [];
+  const skippedEpics: Array<{ epicId: string; reason: string }> = [];
+  for (const epicId of epicIds) {
     const epic = await epicRepo.getEpicById(epicId);
     if (!epic) {
-      results.push({ epicId, skipped: 'epic-not-found' });
+      skippedEpics.push({ epicId, reason: 'epic-not-found' });
       continue;
     }
-    const port = QA_PORT_BASE + (i % QA_PORT_RANGE);
-    const result = await launchVisualQa(
-      epic,
-      user.userId,
-      now,
-      {
-        getJobById: agentJobsRepo.getJobById,
-        createJob: agentJobsRepo.createJob,
-        parseVisualTests,
-        buildQaPipeline,
-        uuid: () => crypto.randomUUID(),
-      },
-      { port },
-    );
-    if (!result.ok) {
-      results.push({ epicId, skipped: result.message });
-      continue;
-    }
-    const patch: Partial<import('../shared/types/epic-workflow').EpicWorkflow> = {
-      qaJobId: result.jobId,
-      status: 'in_review',
-    };
-    if (result.storiesChanged) patch.stories = result.updatedStories;
-    await epicRepo.updateEpicFields(epicId, patch);
-    results.push({ epicId, jobId: result.jobId });
+    epics.push(epic);
   }
 
-  return c.json({ planId, results }, 201);
+  const now = new Date().toISOString();
+  // PR-8g — resolve the App's boilerplate qaContext so qa-prepare boots
+  // the right dev server (port, command, healthcheck, warmup, console
+  // allowlist). Without this, Next.js Apps fall back to Vite defaults
+  // and qa-prepare fails at the healthcheck loop.
+  const boilerplate = await resolveQaContext(plan, { getApp: appRepo.getApp });
+  const result = await launchPlanQaAggregate(
+    plan,
+    epics,
+    user.userId,
+    now,
+    {
+      getJobById: agentJobsRepo.getJobById,
+      createJob: agentJobsRepo.createJob,
+      parseVisualTests,
+      buildQaAggregatePipeline,
+      buildQaExecutePipeline,
+      uuid: () => crypto.randomUUID(),
+    },
+    { boilerplate },
+  );
+
+  if (!result.ok) {
+    return c.json({ planId, error: result.message, skippedEpics }, 400);
+  }
+
+  // Persist aggregate jobId + flip contract status to `pending`.
+  await planRepo.updatePlanFields(planId, {
+    qaAggregateJobId: result.jobId,
+    qaContractStatus: 'pending',
+  });
+  for (const [epicId, stories] of result.updatedStoriesByEpic) {
+    await epicRepo.updateEpicFields(epicId, { stories });
+  }
+
+  return c.json(
+    {
+      planId,
+      jobId: result.jobId,
+      stage: 'aggregate',
+      testCount: result.testCount,
+      epicCount: epics.length,
+      skippedEpics,
+    },
+    201,
+  );
+});
+
+// POST /api/plans/:id/qa-contract/approve
+//   Pipeline v2.0 PR-8d (Q4.2) — operator approves the QA test contract
+//   produced by the aggregate stage. Body may carry edited test fields:
+//
+//     { tests: [{ id, level?, expect?, ... }, ...] }
+//
+//   When omitted, the body's tests default to the aggregate-stage's
+//   classified output as-is. The endpoint launches the EXECUTE pipeline,
+//   persists `plan.qaJobId`, and flips `plan.qaContractStatus = 'approved'`.
+app.post('/api/plans/:id/qa-contract/approve', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  if (!plan.qaAggregateJobId) {
+    throw new AppError(
+      'NO_AGGREGATE_JOB',
+      'Cannot approve a QA contract before qa-aggregate has run.',
+      400,
+    );
+  }
+  if (plan.qaContractStatus !== 'pending') {
+    throw new AppError(
+      'CONTRACT_NOT_PENDING',
+      `QA contract is in state '${plan.qaContractStatus ?? 'unknown'}', expected 'pending'.`,
+      400,
+    );
+  }
+
+  // Re-hydrate epics + flatten tests. Operator overrides from body
+  // (if any) merge in by `testId`.
+  const body = await c.req.json().catch(() => ({}));
+  const overrides = new Map<string, Partial<import('../shared/types/epic-workflow').VisualTestDef>>();
+  if (Array.isArray(body?.tests)) {
+    for (const t of body.tests) {
+      if (typeof t?.id === 'string') overrides.set(t.id, t);
+    }
+  }
+
+  const epics: import('../shared/types/epic-workflow').EpicWorkflow[] = [];
+  for (const epicId of plan.epicIds ?? []) {
+    const epic = await epicRepo.getEpicById(epicId);
+    if (epic) epics.push(epic);
+  }
+
+  type FlatTest = import('../shared/types/epic-workflow').VisualTestDef & {
+    storyId: string;
+    storyTitle: string;
+    epicId?: string;
+    epicTitle?: string;
+  };
+  const flatTests: FlatTest[] = [];
+  for (const epic of epics) {
+    for (const story of epic.stories) {
+      for (const vt of story.visualTests ?? []) {
+        const ovr = overrides.get(vt.id);
+        flatTests.push({
+          ...vt,
+          ...(ovr ?? {}),
+          // Mark levelOverridden when operator explicitly changed level.
+          levelOverridden: ovr?.level !== undefined && ovr.level !== vt.level,
+          storyId: story.storyId,
+          storyTitle: story.title,
+          epicId: epic.epicId,
+          epicTitle: epic.title,
+        });
+      }
+    }
+  }
+
+  const now = new Date().toISOString();
+  // PR-8g — boilerplate-aware execute (Next.js → :3000, Vite → :5173, etc).
+  const boilerplate = await resolveQaContext(plan, { getApp: appRepo.getApp });
+  const result = await launchPlanQaExecute(
+    plan,
+    flatTests,
+    user.userId,
+    now,
+    {
+      getJobById: agentJobsRepo.getJobById,
+      createJob: agentJobsRepo.createJob,
+      parseVisualTests,
+      buildQaAggregatePipeline,
+      buildQaExecutePipeline,
+      uuid: () => crypto.randomUUID(),
+    },
+    { boilerplate },
+  );
+
+  if (!result.ok) {
+    return c.json({ planId, error: result.message }, 400);
+  }
+
+  await planRepo.updatePlanFields(planId, {
+    qaJobId: result.jobId,
+    qaContractStatus: 'approved',
+    qaContractDecidedAt: now,
+    qaContractDecidedBy: user.userId,
+  });
+
+  return c.json(
+    {
+      planId,
+      jobId: result.jobId,
+      stage: 'execute',
+      testCount: result.testCount,
+      contractStatus: 'approved',
+    },
+    201,
+  );
+});
+
+// POST /api/plans/:id/qa-contract/reject
+//   Operator decides not to run QA. Sets contract status to 'rejected'
+//   without launching an execute job. Reversible — operator can re-run
+//   the QA aggregate via POST /api/plans/:id/qa-review.
+app.post('/api/plans/:id/qa-contract/reject', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  const now = new Date().toISOString();
+  await planRepo.updatePlanFields(planId, {
+    qaContractStatus: 'rejected',
+    qaContractDecidedAt: now,
+    qaContractDecidedBy: user.userId,
+  });
+  return c.json({ planId, contractStatus: 'rejected' });
+});
+
+// POST /api/plans/:id/qa-tests/:testId/retry
+//   Pipeline v2.0 PR-8e (Q5.4) — single-test retry. Operator clicks
+//   "retry this test only" in the QA drawer. Spawns a new execute job
+//   restricted to one test at the test's level (cheap: ~$0.005 for L1,
+//   $0 for L0). Does NOT replace plan.qaJobId — appends to a retry
+//   history (or, for now, just creates the job and returns the jobId
+//   for the caller to track). UI iteration deferred to follow-up.
+app.post('/api/plans/:id/qa-tests/:testId/retry', async (c) => {
+  const planId = c.req.param('id');
+  const testId = c.req.param('testId');
+  const user = c.get('user');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  // Find the test in the plan's epics+stories.
+  type FlatTest = import('../shared/types/epic-workflow').VisualTestDef & {
+    storyId: string;
+    storyTitle: string;
+    epicId?: string;
+    epicTitle?: string;
+  };
+  let target: FlatTest | undefined;
+  for (const epicId of plan.epicIds ?? []) {
+    const epic = await epicRepo.getEpicById(epicId);
+    if (!epic) continue;
+    for (const story of epic.stories) {
+      const vt = story.visualTests?.find((v) => v.id === testId);
+      if (vt) {
+        target = {
+          ...vt,
+          storyId: story.storyId,
+          storyTitle: story.title,
+          epicId: epic.epicId,
+          epicTitle: epic.title,
+        };
+        break;
+      }
+    }
+    if (target) break;
+  }
+  if (!target) throw new NotFoundError('VisualTest', testId);
+
+  const now = new Date().toISOString();
+  // PR-8g — single-test retries also need the right boilerplate context.
+  const boilerplate = await resolveQaContext(plan, { getApp: appRepo.getApp });
+  const result = await launchPlanQaExecute(
+    plan,
+    [target],
+    user.userId,
+    now,
+    {
+      getJobById: agentJobsRepo.getJobById,
+      createJob: agentJobsRepo.createJob,
+      parseVisualTests,
+      buildQaAggregatePipeline,
+      buildQaExecutePipeline,
+      uuid: () => crypto.randomUUID(),
+    },
+    { boilerplate },
+  );
+  if (!result.ok) {
+    return c.json({ planId, testId, error: result.message }, 400);
+  }
+  return c.json({ planId, testId, retryJobId: result.jobId }, 201);
 });
 
 // POST /api/plans/:id/approve-ac
@@ -2224,6 +2517,37 @@ app.post('/api/plans/:id/attention-items/:itemId/reopen', async (c) => {
   );
   if (!updated) return c.json({ error: 'Attention item not found' }, 404);
   return c.json({ item: updated });
+});
+
+// POST /api/plans/:id/attention-items/resolve-all
+//   PR-9 #4 — bulk-resolve every open attention item for a plan. Operator
+//   triggers from the bell drawer when a plan accumulates pre-PR-7 noise
+//   (the recurring per-tick rows that landed before the idempotent
+//   upsert) or after a known-bad story is intentionally archived.
+//
+//   Returns `{ planId, resolvedCount }`. Already-resolved rows are
+//   skipped (the underlying conditional update is a no-op for them).
+app.post('/api/plans/:id/attention-items/resolve-all', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) return c.json({ error: 'Plan not found' }, 404);
+
+  const items = await attentionRepo.listAttentionItems(planId);
+  let resolvedCount = 0;
+  for (const item of items) {
+    if (item.status === 'resolved') continue;
+    try {
+      const updated = await attentionRepo.updateAttentionStatus(
+        planId,
+        item.itemId,
+        'resolved' as AttentionStatus,
+      );
+      if (updated) resolvedCount += 1;
+    } catch {
+      // Best-effort — one bad row shouldn't block the rest.
+    }
+  }
+  return c.json({ planId, resolvedCount });
 });
 
 app.post('/api/epic-workflows', async (c) => {
@@ -3087,8 +3411,35 @@ app.post('/api/ec2/start-daemon', async (c) => {
     'sudo systemctl is-active futurator-daemon',
   ].join(' && ');
 
-  const commandId = await sendSsmCommand(bootstrap);
-  return c.json({ commandId, message: 'Daemon start command sent' });
+  // After a fresh boot the EC2 reports state=running before the SSM Agent has
+  // registered with the SSM service (~60–90s gap). SendCommand throws
+  // `InvalidInstanceId: Instances not in a valid state for account` during
+  // that window. Surface this as a typed 503 so the client can keep polling
+  // instead of treating it as a fatal "Internal server error."
+  try {
+    const commandId = await sendSsmCommand(bootstrap);
+    return c.json({ commandId, message: 'Daemon start command sent' });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const name = err instanceof Error ? err.name : '';
+    const isSsmNotReady =
+      name === 'InvalidInstanceId' ||
+      /not in a valid state/i.test(msg) ||
+      /InvalidInstanceId/i.test(msg);
+    if (isSsmNotReady) {
+      return c.json(
+        {
+          error: {
+            code: 'SSM_NOT_READY',
+            message:
+              'SSM agent on EC2 has not registered yet — typical 60–90s after instance start. Retry shortly.',
+          },
+        },
+        503,
+      );
+    }
+    throw err;
+  }
 });
 
 // OAuth is handled entirely by the operator's Mac → Keychain → SSM Run Command
@@ -3407,17 +3758,28 @@ app.delete('/api/ec2/files', async (c) => {
   });
 });
 
-app.get('/api/ec2/files', async (c) => {
+// Defense in depth: every browseable path must live under /home/ubuntu so the
+// SSM-backed file endpoints can never be coerced into reading /etc, /root,
+// instance-metadata mount points, etc. The regex on top of this rejects shell
+// metacharacters and traversal segments.
+const EC2_BROWSE_ROOT = '/home/ubuntu';
+
+function assertSafeEc2Path(p: string): void {
+  if (!/^\/[\w/.\-]+$/.test(p)) throw new ValidationError('Invalid path');
+  if (p.includes('..')) throw new ValidationError('Invalid path');
+  if (p !== EC2_BROWSE_ROOT && !p.startsWith(`${EC2_BROWSE_ROOT}/`)) {
+    throw new ValidationError(`Path must be under ${EC2_BROWSE_ROOT}`);
+  }
+}
+
+app.get('/api/ec2/files', authMiddleware, async (c) => {
   const { state } = await getInstanceState();
   if (state !== 'running') {
     throw new AppError('EC2_NOT_RUNNING', `EC2 instance is ${state}`, 400);
   }
 
-  const dirPath = c.req.query('path') || '/home/ubuntu';
-  // Sanitize: only allow absolute paths, no shell metacharacters
-  if (!/^\/[\w/.\-]+$/.test(dirPath)) {
-    throw new ValidationError('Invalid path');
-  }
+  const dirPath = c.req.query('path') || EC2_BROWSE_ROOT;
+  assertSafeEc2Path(dirPath);
 
   // ls -p appends / to directories, --group-directories-first for easier parsing
   const cmd = `ls -lAp --group-directories-first --time-style=long-iso "${dirPath}" 2>&1 || echo "__LS_ERROR__"`;
@@ -3453,6 +3815,135 @@ app.get('/api/ec2/files', async (c) => {
     .filter(Boolean);
 
   return c.json({ path: dirPath, entries });
+});
+
+// Read a single file under /home/ubuntu. Returns text inline for editor
+// rendering or base64 for images / binary so the UI can build a data: URL or
+// trigger a download. Hard-capped at 2 MB — bigger files come back with
+// `tooLarge: true` so the frontend can offer a download instead of choking the
+// browser.
+const EC2_FILE_MAX_BYTES = 2 * 1024 * 1024;
+const TEXT_EXTS = new Set([
+  'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs',
+  'json', 'jsonc', 'md', 'mdx', 'txt', 'log',
+  'yaml', 'yml', 'toml', 'ini', 'env',
+  'html', 'htm', 'xml', 'svg',
+  'css', 'scss', 'sass', 'less',
+  'sh', 'bash', 'zsh', 'fish',
+  'py', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'hpp', 'cs', 'php', 'swift', 'kt',
+  'sql', 'graphql', 'gql',
+  'gitignore', 'dockerignore', 'dockerfile', 'editorconfig', 'prettierrc',
+]);
+const IMAGE_EXTS: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  // image/vnd.microsoft.icon is the IANA-registered MIME and is decoded by
+  // every modern browser when fed via blob URL. The legacy image/x-icon was
+  // unreliable in Chrome data-URL flows.
+  ico: 'image/vnd.microsoft.icon',
+  // svg is intentionally classified as text so it lands in the code editor by
+  // default; the viewer offers a Source/Preview toggle for it.
+};
+const PDF_MIME = 'application/pdf';
+
+function classifyFile(
+  name: string,
+): { kind: 'text'; mime: string } | { kind: 'image'; mime: string } | { kind: 'pdf'; mime: string } | { kind: 'binary'; mime: string } {
+  const lower = name.toLowerCase();
+  const ext = lower.includes('.') ? lower.split('.').pop()! : lower;
+  if (ext === 'pdf') return { kind: 'pdf', mime: PDF_MIME };
+  if (IMAGE_EXTS[ext]) return { kind: 'image', mime: IMAGE_EXTS[ext] };
+  if (TEXT_EXTS.has(ext)) return { kind: 'text', mime: 'text/plain' };
+  // Files with no extension (LICENSE, README, Makefile, Dockerfile) are
+  // overwhelmingly text — try them as text and let the frontend deal with
+  // any decode failures.
+  if (!lower.includes('.')) return { kind: 'text', mime: 'text/plain' };
+  return { kind: 'binary', mime: 'application/octet-stream' };
+}
+
+app.get('/api/ec2/files/content', authMiddleware, async (c) => {
+  const { state } = await getInstanceState();
+  if (state !== 'running') {
+    throw new AppError('EC2_NOT_RUNNING', `EC2 instance is ${state}`, 400);
+  }
+
+  const filePath = c.req.query('path');
+  if (!filePath) throw new ValidationError('query param ?path= is required');
+  assertSafeEc2Path(filePath);
+
+  const name = filePath.split('/').pop() || '';
+  const classified = classifyFile(name);
+
+  // Single SSM round-trip: validate, stat, optionally base64. The sentinel
+  // tokens let us distinguish "not a file", "too large", and "ok" without
+  // having to issue separate commands.
+  const script = [
+    `f="${filePath}"`,
+    'if [ ! -e "$f" ]; then echo "__NOT_FOUND__"; exit 0; fi',
+    'if [ ! -f "$f" ]; then echo "__NOT_FILE__"; exit 0; fi',
+    'sz=$(stat -c%s "$f")',
+    'mt=$(stat -c%Y "$f")',
+    `if [ "$sz" -gt ${EC2_FILE_MAX_BYTES} ]; then echo "__TOO_LARGE__:$sz:$mt"; exit 0; fi`,
+    'echo "__META__:$sz:$mt"',
+    'echo "__CONTENT_START__"',
+    'base64 -w0 "$f"',
+    'echo',
+  ].join('\n');
+
+  const commandId = await sendSsmCommand(script);
+  const raw = await waitForSsmOutput(commandId);
+  const output = raw.trimEnd();
+
+  if (output.startsWith('__NOT_FOUND__')) throw new NotFoundError('File', filePath);
+  if (output.startsWith('__NOT_FILE__')) {
+    throw new ValidationError('Path is not a regular file');
+  }
+
+  if (output.startsWith('__TOO_LARGE__')) {
+    const [, sz, mt] = output.split('\n')[0].split(':');
+    return c.json({
+      tooLarge: true,
+      size: Number(sz),
+      mtime: Number(mt) * 1000,
+      kind: classified.kind,
+      mime: classified.mime,
+      maxBytes: EC2_FILE_MAX_BYTES,
+    });
+  }
+
+  const lines = output.split('\n');
+  const metaLine = lines.find((l) => l.startsWith('__META__:'));
+  const startIdx = lines.findIndex((l) => l === '__CONTENT_START__');
+  if (!metaLine || startIdx === -1) {
+    throw new AppError('SSM_PARSE', 'Unexpected SSM output format', 502);
+  }
+  const [, szStr, mtStr] = metaLine.split(':');
+  const size = Number(szStr);
+  const mtime = Number(mtStr) * 1000;
+  const base64 = lines.slice(startIdx + 1).join('').trim();
+
+  if (classified.kind === 'text') {
+    let content: string;
+    try {
+      content = Buffer.from(base64, 'base64').toString('utf-8');
+    } catch {
+      // Fall through and return as binary so the frontend can offer a download.
+      return c.json({
+        kind: 'binary' as const,
+        mime: 'application/octet-stream',
+        size,
+        mtime,
+        base64,
+      });
+    }
+    return c.json({ kind: 'text' as const, mime: classified.mime, size, mtime, content });
+  }
+
+  return c.json({ kind: classified.kind, mime: classified.mime, size, mtime, base64 });
 });
 
 // ── EC2 Metrics (CloudWatch) ──
@@ -4542,6 +5033,172 @@ app.get('/api/party/projects/:projectId/sessions', async (c) => {
   return c.json({ sessions });
 });
 
+/**
+ * Cross-project listing — backs the Debates page. Returns every session
+ * across every party project, newest-activity-first. The Debates UI groups
+ * by `projectId` (which equals `appId` in App-scoped flows) for rendering.
+ */
+app.get('/api/party/sessions', async (c) => {
+  const sessions = await partySessionsRepo.listAllSessions();
+  sessions.sort((a, b) => {
+    const aT = a.lastTurnAt ?? a.createdAt;
+    const bT = b.lastTurnAt ?? b.createdAt;
+    return bT.localeCompare(aT);
+  });
+  return c.json({ sessions });
+});
+
+// ════════════════════════════════════════════════════════════════
+// Party Mode — Inline Q&A on text selections
+// ════════════════════════════════════════════════════════════════
+
+const INLINE_Q_SYSTEM_PROMPT = [
+  'You are a quick-explain helper inside a chat about a software project.',
+  'A user has selected a snippet of text from one of the agents and asked a',
+  'follow-up question about it. Answer the question concisely (2–4 sentences),',
+  'in plain prose, grounded in the selected snippet.',
+  '',
+  'Rules:',
+  '- Be direct. No preamble like "Great question" or "I\'ll explain".',
+  '- Stay grounded in the snippet — do not speculate beyond it.',
+  '- If the snippet is too short to answer reliably, say so in one line.',
+  '- No markdown headers. Inline code (`like-this`) is fine when natural.',
+].join('\n');
+
+app.post('/api/party/sessions/:id/inline-questions', async (c) => {
+  const sessionId = c.req.param('id');
+  const parsedId = sessionIdSchema.safeParse(sessionId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const session = await partySessionsRepo.getSession(parsedId.data);
+  if (!session) throw new NotFoundError('PartySession', parsedId.data);
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    question?: unknown;
+    anchor?: {
+      roundId?: unknown;
+      agentName?: unknown;
+      snippet?: unknown;
+      contextBefore?: unknown;
+      contextAfter?: unknown;
+    };
+  };
+
+  const question = typeof body.question === 'string' ? body.question.trim() : '';
+  if (!question) throw new ValidationError('question is required');
+  if (question.length > INLINE_QUESTION_QUESTION_MAX) {
+    throw new ValidationError(`question must be ≤ ${INLINE_QUESTION_QUESTION_MAX} chars`);
+  }
+
+  const a = body.anchor || {};
+  const roundId = typeof a.roundId === 'string' ? a.roundId : '';
+  const snippetRaw = typeof a.snippet === 'string' ? a.snippet : '';
+  if (!roundId) throw new ValidationError('anchor.roundId is required');
+  if (!snippetRaw.trim()) throw new ValidationError('anchor.snippet is required');
+  const snippet = snippetRaw.slice(0, INLINE_QUESTION_SNIPPET_MAX);
+  const contextBefore = (typeof a.contextBefore === 'string' ? a.contextBefore : '').slice(
+    -INLINE_QUESTION_CONTEXT_MAX,
+  );
+  const contextAfter = (typeof a.contextAfter === 'string' ? a.contextAfter : '').slice(
+    0,
+    INLINE_QUESTION_CONTEXT_MAX,
+  );
+  const agentName = typeof a.agentName === 'string' ? a.agentName.slice(0, 64) : undefined;
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new AppError(
+      'ANTHROPIC_API_KEY_MISSING',
+      'Inline Q&A is not configured. Set the ANTHROPIC_API_KEY SST secret.',
+      503,
+    );
+  }
+  const anthropic = new Anthropic({ apiKey });
+
+  const userMessage = [
+    'Selected snippet (verbatim):',
+    '"""',
+    snippet,
+    '"""',
+    contextBefore || contextAfter
+      ? `\nSurrounding context (for disambiguation only): "…${contextBefore}[${snippet.slice(0, 30)}…]${contextAfter}…"`
+      : '',
+    `\nUser question: ${question}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  let answer = '';
+  let usage: InlineQuestion['usage'];
+  try {
+    const resp = await anthropic.messages.create({
+      model: INLINE_QUESTION_DEFAULT_MODEL,
+      max_tokens: INLINE_QUESTION_MAX_TOKENS,
+      system: [
+        {
+          type: 'text',
+          text: INLINE_Q_SYSTEM_PROMPT,
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
+      messages: [{ role: 'user', content: userMessage }],
+    });
+    const firstText = resp.content.find((b) => b.type === 'text');
+    answer = firstText && firstText.type === 'text' ? firstText.text.trim() : '';
+    usage = {
+      inputTokens: resp.usage.input_tokens,
+      outputTokens: resp.usage.output_tokens,
+      cacheReadInputTokens: resp.usage.cache_read_input_tokens ?? undefined,
+      cacheCreationInputTokens: resp.usage.cache_creation_input_tokens ?? undefined,
+    };
+  } catch (err) {
+    if (err instanceof Anthropic.APIError) {
+      throw new AppError(
+        'ANTHROPIC_API_ERROR',
+        `Anthropic API error (${err.status}): ${err.message}`,
+        err.status === 429 ? 429 : 502,
+      );
+    }
+    throw err;
+  }
+  if (!answer) {
+    throw new AppError('ANTHROPIC_EMPTY_ANSWER', 'Anthropic returned no text', 502);
+  }
+
+  const user = c.get('user');
+  const stored: InlineQuestion = {
+    questionId: crypto.randomUUID(),
+    sessionId: parsedId.data,
+    projectId: session.projectId,
+    createdAt: new Date().toISOString(),
+    createdBy: user.userId,
+    anchor: {
+      roundId,
+      agentName,
+      snippet,
+      contextBefore,
+      contextAfter,
+    },
+    question,
+    answer,
+    model: INLINE_QUESTION_DEFAULT_MODEL,
+    usage,
+  };
+  await inlineQuestionsRepo.createInlineQuestion(stored);
+  return c.json(stored, 201);
+});
+
+app.get('/api/party/sessions/:id/inline-questions', async (c) => {
+  const sessionId = c.req.param('id');
+  const parsedId = sessionIdSchema.safeParse(sessionId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const questions = await inlineQuestionsRepo.listInlineQuestionsBySession(parsedId.data);
+  return c.json({ questions });
+});
+
 app.post('/api/party/sessions/:id/messages', async (c) => {
   const sessionId = c.req.param('id');
   const parsedId = sessionIdSchema.safeParse(sessionId);
@@ -5502,7 +6159,8 @@ app.post('/api/apps', authMiddleware, async (c) => {
   const input = parsed.data;
 
   // Apply backward-compat defaults BEFORE the saga starts.
-  const boilerplateType = input.boilerplateType ?? 'nextjs';
+  // PR-13 — accept legacy 'nextjs' input via normalizeBoilerplateType.
+  const boilerplateType = normalizeBoilerplateType(input.boilerplateType);
   const bmadEnabled =
     input.bmadEnabled ?? (BOILERPLATE_REGISTRY[boilerplateType].bmadSupported ? true : false);
 
@@ -5544,7 +6202,8 @@ app.post('/api/apps', authMiddleware, async (c) => {
   }
 
   // ── Step 2: create repo ─────────────────────────────────────────────────
-  const meta = BOILERPLATE_REGISTRY[boilerplateType];
+  // boilerplateType is already normalized above; safe to index registry.
+  const meta = BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType];
   const [templateOwner, templateRepoName] = meta.templateRepo.split('/');
 
   let createdRepo: { html_url?: string; default_branch?: string } | undefined;
@@ -5596,6 +6255,11 @@ app.post('/api/apps', authMiddleware, async (c) => {
       appId: input.appId,
       boilerplateType,
       bmadEnabled,
+      // PR-13 — pass starter pack augment files through to the daemon so it
+      // can write them on top of the base after inject-values. Empty for
+      // base starters and for stub types.
+      augmentFiles:
+        BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType].augmentFiles,
     },
   };
 
@@ -5785,11 +6449,23 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
   const now = new Date().toISOString();
   const planId = `plan_${appId}_${Date.now().toString(36)}`;
   const user = c.get('user');
+  // PR-10 #1 — multi-plan-per-app collision fix. The legacy `plan.name`
+  // doubled as a slug AND uniqueness key; in App/Plan v1 every plan on
+  // the same App should be allowed (they share the App's workingDir).
+  // Resolution:
+  //   • If operator supplied `name`, use it (validated by the schema).
+  //   • Else auto-generate `${appId}-${kind}-${shortHash}` so the second
+  //     plan stops colliding with the first.
+  // The shared workingDir comes from `appRow.workingDir` regardless of
+  // plan.name, so the slug is now purely a label, not a path component.
+  const planName =
+    parsed.data.name ??
+    `${appId}-${parsed.data.kind}-${Date.now().toString(36).slice(-5)}`;
   const plan: Plan = {
     planId,
     appId,
     kind: parsed.data.kind,
-    name: appId, // legacy alias — equal to appId for App/Plan v1 Plans
+    name: planName,
     intent: parsed.data.intent,
     description: '',
     displayName: parsed.data.displayName ?? `${appId} — ${parsed.data.kind}`,
@@ -5815,7 +6491,11 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
   // breakdown from intent so the operator doesn't have to click Regenerate
   // manually on their first Plan.
   let pmJobId: string | undefined;
-  if (parsed.data.kind === 'initial') {
+  // PR-23d — auto-launch PM for ALL plan kinds, not just `initial`. Change
+  // plans get the brownfield clause; experiment plans skip it. Without
+  // this, kind='change' plans landed in `concept` with no PM job and the
+  // operator had to click Regenerate to kick the PM off.
+  if (parsed.data.kind === 'initial' || parsed.data.kind === 'change' || parsed.data.kind === 'experiment') {
     pmJobId = crypto.randomUUID();
     // PR-5: thread the App's boilerplateType + Plan's rigor into the PM
     // prompt so it generates ACs that match the actual scaffold (not the
@@ -5827,6 +6507,7 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
       devModel: plan.devModel,
       boilerplateType: appRow.boilerplateType ?? 'nextjs',
       rigor: plan.rigor,
+      kind: parsed.data.kind, // PR-23d — brownfield mode for kind='change'.
     });
     await agentJobsRepo.createJob({
       jobId: pmJobId,
@@ -5878,16 +6559,45 @@ app.post('/api/apps/:appId/redeploy', authMiddleware, async (c) => {
 
 // ── Timer Intelligence routes (Story 1.8.3) ──
 
+/**
+ * PR-17 — in-memory timing cache (per-Lambda-container).
+ *
+ * Live plans get polled every 60 s by the frontend; without caching every
+ * poll re-runs `sliceForPlan` (~17 DDB reads × 6 jobs for a 6-story run).
+ * Lambda warm containers persist module-level state across invocations,
+ * so a Map keyed by planId with a short TTL collapses the read cost.
+ *
+ * Cold start: pays the full slicer cost once (~600 ms). Warm hit: ~5 ms.
+ *
+ * Terminal plans skip this cache and use the PR-16 S3 snapshot path on
+ * `/timing/forensic` instead. The live `/timing` endpoint here only needs
+ * to be cheap, not authoritative — wave-boundary updates land within the
+ * TTL window naturally.
+ */
+const TIMING_CACHE_TTL_MS = 30_000;
+const timingCache = new Map<string, { payload: unknown; expiresAt: number }>();
+
 // GET /api/plans/:planId/timing
 //   Returns per-plan timing aggregate + live status.
 //   sliceForPlan collects slices across all jobs in the plan.
 //   planTotalMs is derived from the first/last slice timestamps (not plan fields)
 //   because AgentJob has no explicit startedAt/endedAt (Story 1.8.2 contract).
+//   ?fresh=1 bypasses the in-memory cache (PR-17).
 app.get('/api/plans/:planId/timing', async (c) => {
   const planId = c.req.param('planId');
+  const skipCache = c.req.query('fresh') === '1';
 
   const plan = await planRepo.getPlanById(planId);
   if (!plan) throw new NotFoundError('Plan', planId);
+
+  // PR-17 — try the in-memory cache first. Active polling will hit this
+  // path; the slicer only runs on TTL expiry.
+  if (!skipCache) {
+    const cached = timingCache.get(planId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return c.json({ ...(cached.payload as object), _cached: true });
+    }
+  }
 
   // Pipeline v2.0 PR-6 (F) — wrap the slicer/aggregator pipeline in a try/catch
   // so a single bad event row in DDB (legacy schema, malformed timestamp, etc.)
@@ -5909,8 +6619,26 @@ app.get('/api/plans/:planId/timing', async (c) => {
     }
 
     const isLive = slices.some((s) => s.isLive === true);
+    const payload = { planId, slices, aggregate, planTotalMs, isLive };
 
-    return c.json({ planId, slices, aggregate, planTotalMs, isLive });
+    // PR-17 — cache the result. Live plans get TTL; terminal/idle plans
+    // don't need the cache because they're stable (the data doesn't change
+    // between polls). Skip the cache write on `?fresh=1` so a forced
+    // refresh doesn't immediately repopulate stale data.
+    if (!skipCache && isLive) {
+      timingCache.set(planId, {
+        payload,
+        expiresAt: Date.now() + TIMING_CACHE_TTL_MS,
+      });
+      // Cap the cache size; a single Lambda container won't see thousands
+      // of distinct plans, but defensive bound prevents runaway memory.
+      if (timingCache.size > 100) {
+        const firstKey = timingCache.keys().next().value;
+        if (firstKey) timingCache.delete(firstKey);
+      }
+    }
+
+    return c.json(payload);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(
@@ -6056,8 +6784,95 @@ app.get('/api/timing/cohort', async (c) => {
 //   Returns a downloadable JSON file shaped for paste-into-Claude analysis.
 //   The cohort field is null when there are fewer than 5 matching plans.
 //   Content-Disposition triggers a browser download.
+//
+// PR-16 — terminal-status snapshot cache:
+//   When the plan has reached a terminal status (delivered / archived /
+//   review with all stories done), the forensic payload is cached at
+//   `s3://${FUTURATOR_PUBLIC_BUCKET}/timing/<planId>-forensic.json` after
+//   the first computation. Subsequent GETs stream from S3 (~$0 read,
+//   ~50 ms vs ~600 ms for live recompute). For non-terminal plans the
+//   route always recomputes (data is changing) and never writes a snapshot
+//   so we don't poison the cache with mid-run data.
+//   ?fresh=1 skips the cache (force-recompute) — useful after a manual
+//   regenerate or operator audit.
+//
+//   Bucket scope: see sst.config.ts permissions block — `timing/*` is a
+//   distinct prefix from data/, media/, apps/, knowledge-live/.
+const FORENSIC_S3_BUCKET = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
+
+function isPlanTerminalForForensic(plan: { status?: string; doneStories?: number; totalStories?: number }): boolean {
+  if (plan.status === 'delivered' || plan.status === 'archived') return true;
+  // 'review' is terminal for snapshot purposes only when every story is done
+  // (i.e. the work won't change unless the operator clicks Send Back to Dev,
+  // which transitions to 'developing' — at that point we'd want a fresh snapshot).
+  if (
+    plan.status === 'review' &&
+    typeof plan.doneStories === 'number' &&
+    typeof plan.totalStories === 'number' &&
+    plan.totalStories > 0 &&
+    plan.doneStories === plan.totalStories
+  ) {
+    return true;
+  }
+  return false;
+}
+
 app.get('/api/plans/:planId/timing/forensic', async (c) => {
   const planId = c.req.param('planId');
+  const includeEvents = c.req
+    .query('include')
+    ?.split(',')
+    .map((s) => s.trim())
+    .includes('events');
+  const skipCache = c.req.query('fresh') === '1';
+  const filename = `${planId}-forensic.json`;
+  const s3Key = `timing/${planId}-forensic.json`;
+
+  // PR-16 — try S3 first (terminal plans only; we never cache live data).
+  // Plan freshness is determined by checking the row first; the S3 read is
+  // a single GetObject and only happens when we believe it might exist.
+  if (!skipCache) {
+    try {
+      const plan = await planRepo.getPlanById(planId);
+      if (plan && isPlanTerminalForForensic(plan)) {
+        try {
+          const s3 = new S3Client({ region: 'us-east-1' });
+          const obj = await s3.send(
+            new GetObjectCommand({ Bucket: FORENSIC_S3_BUCKET, Key: s3Key }),
+          );
+          const cached = await obj.Body?.transformToString();
+          if (cached) {
+            const parsed = JSON.parse(cached) as Record<string, unknown>;
+            // The cached object was written WITH events. Strip on read if
+            // the caller didn't ask for them — keeps the cache canonical
+            // (a single object) while honouring PR-14d's opt-in default.
+            if (!includeEvents) {
+              delete parsed.events;
+              parsed._note =
+                'events[] omitted by default — pass ?include=events for the full payload';
+            }
+            parsed._fromCache = true;
+            return c.body(JSON.stringify(parsed, null, 2), 200, {
+              'Content-Type': 'application/json',
+              'Content-Disposition': `attachment; filename="${filename}"`,
+            });
+          }
+        } catch (err) {
+          // S3 NoSuchKey → fall through to live compute (first-time access).
+          // Other errors (perms, network) → also fall through; better to
+          // serve fresh data than 500 the operator.
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!/NoSuchKey|NotFound/i.test(msg)) {
+            console.warn(`[forensic-cache] S3 GET failed for ${planId}: ${msg}`);
+          }
+        }
+      }
+    } catch (err) {
+      // Plan lookup failed — let buildForensicPayload below do its own NotFound check.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[forensic-cache] plan lookup failed for ${planId}: ${msg}`);
+    }
+  }
 
   // Story 1.8.6: cohort fetcher now reads from the pre-aggregated TimingSummary
   // table instead of scanning all apps + plans inline.
@@ -6088,8 +6903,38 @@ app.get('/api/plans/:planId/timing/forensic', async (c) => {
   const payload = await buildForensicPayload(planId, cohortFetcher);
   if (!payload) throw new NotFoundError('Plan', planId);
 
-  const filename = `${planId}-forensic.json`;
-  return c.body(JSON.stringify(payload, null, 2), 200, {
+  // PR-16 — write the snapshot to S3 if the plan is terminal. Always include
+  // events in the cached object so future GETs with ?include=events don't
+  // need to recompute. Fire-and-forget (don't block the response).
+  if (isPlanTerminalForForensic(payload.plan)) {
+    const cacheable = JSON.stringify(payload, null, 2);
+    const s3 = new S3Client({ region: 'us-east-1' });
+    s3.send(
+      new PutObjectCommand({
+        Bucket: FORENSIC_S3_BUCKET,
+        Key: s3Key,
+        Body: cacheable,
+        ContentType: 'application/json',
+        CacheControl: 'private, max-age=0, must-revalidate',
+      }),
+    ).catch((err) => {
+      console.warn(`[forensic-cache] S3 PUT failed for ${planId}: ${err instanceof Error ? err.message : err}`);
+    });
+  }
+
+  // PR-14d — by default, omit the raw `events[]` array. Slices, aggregate,
+  // narrative, and cohort are sufficient for charts + cohort comparisons,
+  // and `events` is ~50 % of payload bytes (442 events × full text on the
+  // dino-runner-1 export = 9800 lines, halved without). Pass
+  // `?include=events` to fetch the full payload for replay/debugging.
+  const out: Record<string, unknown> = { ...payload };
+  if (!includeEvents) {
+    delete out.events;
+    out._note =
+      'events[] omitted by default — pass ?include=events for the full payload';
+  }
+
+  return c.body(JSON.stringify(out, null, 2), 200, {
     'Content-Type': 'application/json',
     'Content-Disposition': `attachment; filename="${filename}"`,
   });
@@ -6128,7 +6973,8 @@ app.post('/api/github/repos', authMiddleware, async (c) => {
   }
   const { templateType, name } = parsed.data;
 
-  const meta = BOILERPLATE_REGISTRY[templateType];
+  // PR-13 — accept legacy 'nextjs' input via normalizeBoilerplateType.
+  const meta = BOILERPLATE_REGISTRY[normalizeBoilerplateType(templateType)];
   // templateRepo is "futurator-repos/template-nextjs" — split into owner + repo
   const [templateOwner, templateRepo] = meta.templateRepo.split('/');
 

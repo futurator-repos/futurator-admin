@@ -1,13 +1,15 @@
-# Pipeline Enhancement v2 — Phases A–C Implementation Handoff
+# Pipeline Enhancement v2 — Phases A–D Implementation Handoff
 
 **Audience:** another agent working on an adjacent feature in Futurator-Admin.
 **Scope:** read this before touching the daemon, the wave/plan reducers, the
 story-pipeline builder, or the plan-dashboard UI. Follows
 `docs/concepts/pipeline-enhancement-plan-v2.md`.
 
-Phase A shipped resilience foundations. Phase B shipped the attention inbox.
-Phase C shipped rigor + TEST agent + Logs tab. Phase D (polish) has not been
-built yet.
+**All four phases shipped + deployed** (2026-04-22 → 2026-04-23).
+A = resilience foundations. B = attention inbox. C = rigor + TEST agent +
+Logs tab. D = polish (budget banner, epic attention dot, retry pill).
+A post-phase runtime-controls split (Daemon + Claude Code panels + Restart
+button) is also in scope at the bottom.
 
 ---
 
@@ -343,6 +345,106 @@ pre-signed URL route). Not built; MVP value is already usable.
 
 ---
 
+## Phase D — Polish (SHIPPED)
+
+### D.1 Budget warning banner
+
+`src/components/labs/plan-dashboard/budget-banner.tsx` — loud amber banner
+that renders above the pipeline stepper when `plan.totalCostUsd` exceeds a
+rigor-specific threshold:
+
+```ts
+const THRESHOLDS: Record<PlanRigor, number> = {
+  prototype: 5,
+  mvp: 10,
+  production: 25,
+};
+```
+
+Dismissal is tracked in `sessionStorage` per plan
+(`budget-banner-dismissed:<planId>` key → last-dismissed dollar amount).
+The banner re-arms when spend grows more than $1 beyond the dismissed
+level — so a $1.23 extra spend after you dismissed at $12 will re-alarm
+at $13+.
+
+**Lazy init pattern:** state is initialized inside `useState(() => ...)`
+rather than in a `useEffect`. This avoids the `react-hooks/set-state-in-effect`
+lint error and is SSR-safe (`typeof window === 'undefined'` check inside the
+initializer).
+
+Rendered from `src/components/labs/plan-dashboard/index.tsx` between
+`<ProjectHero>` and `<Pipeline>`.
+
+### D.2 Epic attention dot
+
+`src/components/labs/plan-dashboard/views/hierarchy-view.tsx` —
+`HierarchyView` calls `useAttentionItems(plan.id)` once and builds a
+`epicId → unresolvedCount` map, passed down to each `<EpicCard>` as
+`attentionCount`. When > 0, an amber pill (`<EpicAttentionDot>`) renders
+next to the status label:
+
+```
+E1  Foundation  IN PROGRESS  ● 2
+```
+
+Tooltip shows `"N unresolved attention items on this epic"`. Styled as a
+rounded chip with an amber dot + count, matching the budget-banner amber
+for visual consistency.
+
+### D.3 Retry-count pill on story rows
+
+Story rows gain a `<RetryPill>` when the linked `AgentJob` has
+`retryAttempt > 0`. Renders as `retry N/3` in the same amber palette:
+
+```
+▶ S-123 Implement ball physics … 50% 2m 3k $0.12 RUNNING  retry 2/3
+```
+
+**Schema extension:** `AgentJob` now formally declares `retryAttempt` +
+`retryAfter` (Phase A.3 wrote these dynamically; Phase D.3 locks them
+into the types so the UI can read them).
+
+**Adapter:** `DashboardStory` gains `retryAttempt` + `maxRetries`; the
+adapter (`src/components/labs/plan-dashboard/adapter.ts`) reads
+`job?.retryAttempt ?? 0` and hard-codes `maxRetries: 3` (the daemon's
+current ladder length).
+
+**Grid change:** the story row's `gridTemplateColumns` went from
+`'24px 60px 1fr auto auto auto auto auto'` (8 cols) to a 9-column layout
+to make room for the pill. If you add more metric chips on the row,
+update the grid accordingly.
+
+---
+
+## Runtime Controls Split (post-phase, SHIPPED)
+
+`src/components/labs/runtime-controls.tsx` replaces the single-row
+`<Ec2Toggle>` + `<DaemonStatus>` in `LabsHeader` (and `app/labs/page.tsx`)
+with two visually grouped panels sharing the `ec2-status` query:
+
+- **Daemon panel** — Local/EC2 toggle, state chip (with heartbeat-time
+  tooltip), active/max-concurrent count, and a new **Restart** button.
+  Restart calls `useRestartEc2Daemon()` (new hook hitting the existing
+  `POST /api/ec2/start-daemon` endpoint, which is already idempotent
+  `systemctl restart`). Restart confirms before firing (warns about the
+  Phase A.1 30s graceful window), shows a spinner while the SSM command
+  runs, and re-invalidates `ec2-status` 3s after the command returns.
+- **Claude Code panel** — OAuth status chip (`oauth` green / `auth
+  expired` red / `probing` spinner) + `<ReauthorizeButton>`. Renders only
+  when EC2 mode is selected AND the instance is `running` (nothing to
+  authorize in local mode).
+
+Shared `<PanelShell>` keeps both containers visually consistent (monospace
+uppercase label → separator dot → content). Old `ec2-toggle.tsx` +
+`daemon-status.tsx` are kept in the tree as references but no longer
+imported from production routes.
+
+**If you add a new daemon action:** put it in `DaemonPanel`. Add a new
+hook in `src/hooks/use-ec2-daemon.ts` if it hits an endpoint. The panel
+already handles spinner + confirm patterns — mimic `handleRestart`.
+
+---
+
 ## Invariants to preserve
 
 1. **Never register a spawn without unregistering.** Breaks graceful
@@ -355,21 +457,42 @@ pre-signed URL route). Not built; MVP value is already usable.
    optional for test injectability.
 5. **Story rows must have `id="story-<storyId>"`** for the dock's
    scroll-to-story behavior. If you rebuild the hierarchy, keep this.
+6. **Story row grid has 9 columns.** Adding another metric chip means
+   extending the `gridTemplateColumns` in `StoryRow`. See D.3.
+7. **Runtime-controls panels share one `useEc2Status` query.** Don't
+   mount two `RuntimeControls` on the same screen — they'd double-poll.
 
 ---
 
 ## Known deferred / future work
 
-- **Phase D** (not shipped): budget banner, attention badges on the
-  pipeline stepper + epic rows, retry-count pills on story rows.
-- **S3 log persistence** — see C.5 deferred note.
-- **`tamperCount` tracking + 3-strike attention item** — see C.4.
+- **S3 log persistence** — see C.5 deferred note. Events table has a
+  7-day TTL; logs older than that are not retrievable.
+- **`tamperCount` tracking + 3-strike `tamper-reverted` attention item**
+  — see C.4 deferred note. Current design relies on Phase A.3 retry
+  ladder as the eventual backstop.
 - **Attention items for `budget-warning` / `dev-server-down`** — category
-  values are defined but no writer sites yet.
-- **EC2 IAM policy update** for `dynamodb:*Item` on
-  `futurator-attention-items` — the daemon will silently fail to write
-  attention items until this is added to the `develope-it-ec2-ssm` role
-  out-of-band.
+  values are defined in `AttentionCategory` union but no writer sites
+  exist yet. D.1 surfaces budget visually but doesn't emit an item.
+- **Attention badges on the pipeline stepper** — the v2 plan mentioned
+  this as a Phase D polish but it wasn't shipped. Only epic rows got
+  the badge (D.2). Can be added to `plan-dashboard/pipeline.tsx` if
+  needed.
+
+## Deploy status (as of 2026-04-23)
+
+- `sst deploy --stage production` → complete.
+- `futurator-attention-items` DDB table → ACTIVE.
+- `develope-it-ec2-ssm` IAM role `dynamodb-access` policy → updated to
+  include `futurator-attention-items`, `…/index/*`, and
+  `futurator-plans` (the last was also missing pre-fix).
+- Daemon on `i-0826d68c316ae97dd` → restarted via SSM, `systemctl
+  is-active` = `active`. New `shell-guard.mjs`, `child-tracker.mjs`,
+  `attention-writer.mjs`, updated `agent-daemon.mjs`,
+  `epic-dev-pipeline.mjs`, `party-turn.mjs` are live in
+  `/opt/futurator-daemon/`.
+- 5 commits landed on `main` locally (not pushed to remote); see
+  `git log --oneline -6` for the chain.
 
 ---
 
@@ -394,7 +517,13 @@ pre-signed URL route). Not built; MVP value is already usable.
 | Attention hook + dedupe                | `src/hooks/use-attention-items.ts`                              |
 | Attention dock                         | `src/components/labs/plan-dashboard/attention-dock.tsx`         |
 | New-plan form (rigor UI)               | `src/components/labs/plans/new-plan-form.tsx`                   |
-| Story detail (Logs tab)                | `src/components/labs/plan-dashboard/views/hierarchy-view.tsx`   |
+| Story detail (Logs tab + retry pill)   | `src/components/labs/plan-dashboard/views/hierarchy-view.tsx`   |
+| Budget banner (D.1)                    | `src/components/labs/plan-dashboard/budget-banner.tsx`          |
+| Dashboard adapter (retryAttempt pass)  | `src/components/labs/plan-dashboard/adapter.ts`                 |
+| Runtime controls split                 | `src/components/labs/runtime-controls.tsx`                      |
+| Labs header (hosts runtime-controls)   | `src/components/labs/plan-dashboard/labs-header.tsx`            |
+| Labs plans page (also hosts controls)  | `src/app/labs/page.tsx`                                         |
+| useRestartEc2Daemon hook               | `src/hooks/use-ec2-daemon.ts`                                   |
 | SST attention table                    | `sst.config.ts` (`AttentionItemsTable`)                         |
 
 **Plan doc (decisions, not code):** `docs/concepts/pipeline-enhancement-plan-v2.md`.

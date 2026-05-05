@@ -99,4 +99,93 @@ export interface BoilerplateMetadata {
      */
     exampleAcceptanceCriteria: string[];
   };
+
+  // ── Pipeline v2.0 PR-8 (Q2.3) — QA-stage context ────────────────────────
+  //
+  // Consumed by the qa-prepare shell step so each boilerplate boots its
+  // dev server with the right command, port, and warm-up. Replaces the
+  // PR-7-and-earlier hardcode that assumed every plan was Vite at :5173.
+  // Reviewer addendum §16.11 motivated extending the registry instead of
+  // duplicating these constants in the qa pipeline.
+  qaContext?: {
+    /** Default dev-server port. Bash kills any process on this port before
+     *  boot, so it MUST be unique per boilerplate. Vite=5173, Next=3000. */
+    defaultPort: number;
+    /** HTTP path the boot loop curl-checks for HTTP 200. Usually `/`. */
+    healthcheckPath: string;
+    /** Shell command (run from `workingDir`) that boots the dev server.
+     *  Must background itself and write logs; qa-prepare does NOT add
+     *  any subshell-detach wrapping (see visual-qa-pipeline for the
+     *  detach idiom). Example: `npm run dev -- --host 0.0.0.0 --port`. */
+    devCommand: string;
+    /** Extra ms to wait AFTER the healthcheck returns 200 before taking
+     *  screenshots — covers SSR shells that 200 immediately but render
+     *  asynchronously (Next.js, SST). 0 for client-rendered Vite. */
+    warmupMs: number;
+    /** Console-error regex patterns the QA stage tolerates. Each entry
+     *  matches a substring of a console.error line; matched lines do not
+     *  count toward an L0 console-error failure. */
+    consoleErrorAllowList: string[];
+  };
+
+  // ── PR-13 — Starter pack architecture (Option A) ────────────────────────
+  //
+  // Each registry entry can optionally be a "starter pack" — a curated
+  // domain-specific scaffold that pre-bakes the primitives an LLM would
+  // otherwise re-derive every plan. See
+  // docs/concepts/pipeline-v2/starter-pack-architecture.md for the full
+  // design.
+
+  /**
+   * If set, this entry IS a starter pack inheriting from `baseStarter`.
+   * The daemon's app-bootstrap saga clones the BASE template repo, then
+   * writes `augmentFiles[]` on top, then commits + pushes. Inline-augment
+   * model — see §3 of the architecture doc for rationale.
+   *
+   * Undefined for `*-base` entries; their `templateRepo` is the actual
+   * GitHub template the daemon clones.
+   */
+  baseStarter?: BoilerplateType;
+
+  /**
+   * Domain taxonomy for the recommender + UI grouping. `general` is the
+   * fallback when no specific domain matches (`*-base` entries).
+   */
+  domain?: 'general' | 'game' | 'form' | 'dashboard' | 'ecommerce' | 'api';
+
+  /**
+   * Plain-English capability sentences fed verbatim to the recommender's
+   * Haiku call. Examples: "Canvas2D rendering with RAF game loop",
+   * "Multi-step form wizards with zod validation".
+   */
+  capabilities?: string[];
+
+  /**
+   * Sample intents this starter handles well. Pasted into the recommender
+   * prompt as positive examples. 3-5 entries.
+   */
+  exampleIntents?: string[];
+
+  /**
+   * Files to write on top of the base after clone, before commit. Each
+   * entry is `{ path: <relative-to-workingDir>, content: <UTF-8 string> }`.
+   * The first entry by convention is `SCAFFOLD.md` (mirrored as
+   * `scaffoldContract` for fast PM access without disk reads).
+   *
+   * The daemon's app-bootstrap step writes these atomically — on any
+   * write error, the saga fails and the operator retries.
+   */
+  augmentFiles?: Array<{ path: string; content: string }>;
+
+  /**
+   * Mirror of the SCAFFOLD.md augment file, embedded as a string so the
+   * API Lambda can include it in the PM prompt without depending on the
+   * cloned working tree being readable from Lambda. Stays in sync with
+   * `augmentFiles[0]` via a registry-level test.
+   *
+   * The PM prompt builder reads this as the AUTHORITATIVE contract: any
+   * story whose touch points intersect the contract's "Pre-baked" file
+   * list is REJECTED at API time.
+   */
+  scaffoldContract?: string;
 }

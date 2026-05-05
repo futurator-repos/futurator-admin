@@ -6,7 +6,6 @@ import {
   Server,
   CheckCircle2,
   ExternalLink,
-  Plus,
   Loader2,
   Clock,
   DollarSign,
@@ -25,7 +24,9 @@ import {
   useDeleteEpic,
 } from '@/hooks/use-epic-workflow';
 import { useAgentJob, useAgentJobs } from '@/hooks/use-agent-job';
+import { useLabsStore, normalizeAppName, epicStatusToStage, VERSION_STAGES } from '@/stores/labs-store';
 import { StoryCard } from './story-card';
+import { StoryLiveOutput } from './story-live-output';
 import { EpicInfoPanel } from './epic-info-panel';
 import { EpicGenerator } from './epic-generator';
 import { EpicTree } from './epic-tree';
@@ -59,70 +60,27 @@ const EFFORT_OPTIONS = [
   { value: 'max', label: 'Max' },
 ];
 
-const EPIC_ID_KEY = 'futurator.labs.agenticWorkflow.epicId';
-
-function readStoredEpicId(): string | null {
-  if (typeof window === 'undefined') return null;
-  return window.localStorage.getItem(EPIC_ID_KEY);
-}
-
-function storeEpicId(id: string | null) {
-  if (typeof window === 'undefined') return;
-  if (id) window.localStorage.setItem(EPIC_ID_KEY, id);
-  else window.localStorage.removeItem(EPIC_ID_KEY);
-}
-
-type VersionStage = 'concept' | 'development' | 'review' | 'deploy' | 'delivered';
-
-const VERSION_STAGES: { id: VersionStage; label: string }[] = [
-  { id: 'concept', label: 'Concept' },
-  { id: 'development', label: 'Development' },
-  { id: 'review', label: 'Review' },
-  { id: 'deploy', label: 'Deploy' },
-  { id: 'delivered', label: 'Delivered' },
-];
-
-function epicStatusToStage(status?: string): VersionStage {
-  switch (status) {
-    case 'draft':
-    case 'ready':
-      return 'concept';
-    case 'in_progress':
-    case 'fixing':
-      return 'development';
-    case 'in_review':
-      return 'review';
-    case 'completed':
-      return 'deploy';
-    case 'deployed':
-      return 'delivered';
-    case 'failed':
-      return 'development';
-    default:
-      return 'concept';
-  }
-}
-
 export function AgenticWorkflow() {
-  const [epicId, setEpicIdState] = useState<string | null>(() => readStoredEpicId());
-  const setEpicId = (id: string | null) => {
-    storeEpicId(id);
-    setEpicIdState(id);
-  };
-  const [appName, setAppName] = useState('');
-  const workingDir = appName.trim()
-    ? `/home/ubuntu/projects/${appName.trim().toLowerCase().replace(/\s+/g, '-')}`
-    : '';
-  const [devModel, setDevModel] = useState('');
-  const [devEffort, setDevEffort] = useState('');
+  const { activeAppName, setActiveAppName } = useLabsStore();
+  const { data: epicList } = useEpicList();
+
+  // Resolve epicId from activeAppName via epicList
+  const epicId = useMemo(() => {
+    if (!activeAppName) return null;
+    const match = epicList?.find((e) => normalizeAppName(e.appName) === activeAppName);
+    return match?.epicId || null;
+  }, [activeAppName, epicList]);
+
+  const workingDir = activeAppName ? `/home/ubuntu/projects/${activeAppName}` : '';
+  const [devModel, setDevModel] = useState('sonnet');
+  const [devEffort, setDevEffort] = useState('medium');
   const [reviewerModel, setReviewerModel] = useState('sonnet');
-  const [reviewerEffort, setReviewerEffort] = useState('');
-  const [yoloMode, setYoloMode] = useState(false);
+  const [reviewerEffort, setReviewerEffort] = useState('medium');
+  const [yoloMode, setYoloMode] = useState(true);
   const [, setActiveStoryId] = useState<string | null>(null);
   const [expandedStory, setExpandedStory] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<'workflow' | 'tree'>('workflow');
   const [selectedWave, setSelectedWave] = useState<number>(0);
-  const [showProjectDropdown, setShowProjectDropdown] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const updateEpic = useUpdateEpic();
@@ -131,23 +89,14 @@ export function AgenticWorkflow() {
   const runPoReview = useRunPoReview();
   const runVisualQa = useRunVisualQa();
   const startDevServer = useStartDevServer();
-  const { data: epic, error: epicError, refetch: refetchEpic } = useEpicWorkflow(epicId);
-  const { data: epicList } = useEpicList();
-
-  // Clear stale epicId if the epic no longer exists (deleted or 404)
-  useEffect(() => {
-    if (epicId && epicError && epicError.message?.includes('not found')) {
-      console.log('[Labs] Clearing stale epicId from localStorage:', epicId.slice(0, 8));
-      setEpicId(null);
-    }
-  }, [epicId, epicError]);
+  const { data: epic, refetch: refetchEpic } = useEpicWorkflow(epicId);
 
   // Sync yoloMode from loaded epic
   const epicYoloSynced = useRef<string | null>(null);
   useEffect(() => {
     if (epic && epicId && epicYoloSynced.current !== epicId) {
       epicYoloSynced.current = epicId;
-      setYoloMode(!!epic.yoloMode);
+      setYoloMode(epic.yoloMode ?? true);
     }
   }, [epic, epicId]);
 
@@ -169,7 +118,6 @@ export function AgenticWorkflow() {
   const yoloDevServerTriggered = useRef<boolean>(false);
 
   useEffect(() => {
-    // YOLO only applies to epics that are actively in development (have stories, not draft)
     if (!yoloMode || !epic || !epicId || epic.status === 'draft' || epic.stories.length === 0) {
       yoloTriggeredStoryIds.current = new Set();
       yoloQaTriggered.current = false;
@@ -294,7 +242,6 @@ export function AgenticWorkflow() {
       }
     }
 
-    // Wave aggregates
     const wAgg = new Map<number, { durationMs: number; cost: number; hasLive: boolean }>();
     for (const [waveNum, waveStories] of waves) {
       let durationMs = 0,
@@ -311,7 +258,6 @@ export function AgenticWorkflow() {
       wAgg.set(waveNum, { durationMs, cost, hasLive: live });
     }
 
-    // Version aggregate
     let totalTimeMs = 0,
       totalCost = 0,
       anyLive = false;
@@ -324,176 +270,65 @@ export function AgenticWorkflow() {
     return { versionAggregate: { totalTimeMs, totalCost, hasLive: anyLive }, waveAggregates: wAgg };
   }, [epic?.stories, allJobIds, jobResults, waves, tickNow]);
 
-  // Stage for pipeline display
   const currentStage = epicStatusToStage(epic?.status);
   const currentStageIndex = VERSION_STAGES.findIndex((s) => s.id === currentStage);
 
-  // Select the current epic summary for dropdown display
-  const currentEpicSummary = epicList?.find((e) => e.epicId === epicId);
-
-  // Ensure selectedWave is valid
   useEffect(() => {
     if (waves.length > 0 && !waves.some(([w]) => w === selectedWave)) {
       setSelectedWave(waves[0][0]);
     }
   }, [waves, selectedWave]);
 
+  if (!activeAppName) {
+    return (
+      <div className="rounded-md border border-dashed border-border p-8 text-center text-sm text-muted-foreground mt-4">
+        Select a project above, or create a new one to start developing.
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-0">
-      {/* ── Compact project header ── */}
-      <div className="flex items-center gap-3 px-1 pb-3">
-        {/* Project dropdown */}
-        <div className="relative">
-          <button
-            onClick={() => setShowProjectDropdown(!showProjectDropdown)}
-            className="flex items-center gap-2 rounded-md border border-input bg-secondary/20 px-3 py-1.5 text-sm hover:bg-secondary/40 transition-colors min-w-[180px]"
-          >
-            <span
-              className={`w-2 h-2 rounded-full shrink-0 ${
-                currentEpicSummary
-                  ? currentEpicSummary.status === 'deployed'
-                    ? 'bg-blue-400'
-                    : currentEpicSummary.status === 'completed'
-                      ? 'bg-green-500'
-                      : currentEpicSummary.doneStories > 0
-                        ? 'bg-yellow-500'
-                        : 'bg-muted-foreground/40'
-                  : 'bg-muted-foreground/40'
-              }`}
-            />
-            <span className="truncate font-medium">
-              {currentEpicSummary
-                ? currentEpicSummary.title?.replace(/^Epic:\s*/i, '') || currentEpicSummary.appName
-                : epicId
-                  ? 'Loading...'
-                  : 'Select project'}
-            </span>
-            {currentEpicSummary && (
-              <span className="text-[10px] text-muted-foreground font-mono ml-auto">
-                {currentEpicSummary.doneStories}/{currentEpicSummary.totalStories}
-              </span>
-            )}
-            <svg
-              className="h-3 w-3 text-muted-foreground shrink-0"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
+      {/* Header — delete + stats */}
+      {epic && (
+        <div className="flex items-center gap-3 px-1 pb-3">
+          {!confirmDelete ? (
+            <button
+              onClick={() => setConfirmDelete(true)}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-red-400 transition-colors"
+              title="Delete project"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M19 9l-7 7-7-7"
-              />
-            </svg>
-          </button>
-
-          {/* Dropdown menu */}
-          {showProjectDropdown && epicList && epicList.length > 0 && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setShowProjectDropdown(false)} />
-              <div className="absolute top-full left-0 mt-1 z-50 w-72 rounded-lg border border-border bg-popover shadow-lg overflow-hidden">
-                {epicList.map((ep) => {
-                  const progress =
-                    ep.totalStories > 0 ? (ep.doneStories / ep.totalStories) * 100 : 0;
-                  return (
-                    <button
-                      key={ep.epicId}
-                      onClick={() => {
-                        setEpicId(ep.epicId);
-                        setExpandedStory(null);
-                        setShowProjectDropdown(false);
-                      }}
-                      className={`w-full text-left px-3 py-2.5 hover:bg-secondary/30 transition-colors border-b border-border/20 last:border-b-0 ${
-                        ep.epicId === epicId ? 'bg-secondary/20' : ''
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`w-2 h-2 rounded-full shrink-0 ${
-                            ep.status === 'deployed'
-                              ? 'bg-blue-400'
-                              : ep.status === 'completed'
-                                ? 'bg-green-500'
-                                : ep.doneStories > 0
-                                  ? 'bg-yellow-500'
-                                  : 'bg-muted-foreground/40'
-                          }`}
-                        />
-                        <span className="text-sm font-medium truncate flex-1">
-                          {ep.title?.replace(/^Epic:\s*/i, '') || ep.appName}
-                        </span>
-                        <span className="text-[10px] text-muted-foreground font-mono">
-                          {ep.doneStories}/{ep.totalStories}
-                        </span>
-                      </div>
-                      {ep.totalStories > 0 && (
-                        <div className="mt-1.5 h-1 rounded-full bg-muted overflow-hidden">
-                          <div
-                            className="h-full bg-green-500 transition-all"
-                            style={{ width: `${progress}%` }}
-                          />
-                        </div>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </>
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete
+            </button>
+          ) : (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-red-400">Delete this epic?</span>
+              <button
+                onClick={() => setConfirmDelete(false)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (!epicId) return;
+                  deleteEpic.mutate(epicId, {
+                    onSuccess: () => {
+                      setActiveAppName(null);
+                      setExpandedStory(null);
+                      setConfirmDelete(false);
+                    },
+                  });
+                }}
+                disabled={deleteEpic.isPending}
+                className="rounded bg-red-600 px-2 py-0.5 text-white hover:bg-red-700 disabled:opacity-50"
+              >
+                {deleteEpic.isPending ? 'Deleting...' : 'Confirm'}
+              </button>
+            </div>
           )}
-        </div>
 
-        <button
-          onClick={() => {
-            setEpicId(null);
-            setExpandedStory(null);
-            setConfirmDelete(false);
-          }}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          New
-        </button>
-
-        {/* Delete project — inline with confirmation */}
-        {epicId && !confirmDelete && (
-          <button
-            onClick={() => setConfirmDelete(true)}
-            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-red-400 transition-colors"
-            title="Delete project"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        )}
-        {epicId && confirmDelete && (
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-red-400">Delete?</span>
-            <button
-              onClick={() => setConfirmDelete(false)}
-              className="text-muted-foreground hover:text-foreground"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={() => {
-                deleteEpic.mutate(epicId, {
-                  onSuccess: () => {
-                    setEpicId(null);
-                    setExpandedStory(null);
-                    setConfirmDelete(false);
-                  },
-                });
-              }}
-              disabled={deleteEpic.isPending}
-              className="rounded bg-red-600 px-2 py-0.5 text-white hover:bg-red-700 disabled:opacity-50"
-            >
-              {deleteEpic.isPending ? 'Deleting...' : 'Confirm'}
-            </button>
-          </div>
-        )}
-
-        {/* Aggregated stats */}
-        {epic && (
           <div className="hidden md:flex items-center gap-4 text-xs text-muted-foreground ml-auto">
             <div className="flex items-center gap-1.5">
               <CheckCircle2 className="h-3.5 w-3.5" />
@@ -522,10 +357,10 @@ export function AgenticWorkflow() {
               </div>
             )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* ── Version container ── */}
+      {/* Version container */}
       {epic && (
         <div className="rounded-lg border border-border/40 bg-secondary/5 px-4 py-3 mb-2">
           <div className="flex items-center justify-between gap-4">
@@ -579,7 +414,7 @@ export function AgenticWorkflow() {
         </div>
       )}
 
-      {/* ── View tabs ── */}
+      {/* View tabs */}
       {epic && (
         <div className="flex items-center gap-4 px-1 pb-2 border-b border-border/30">
           <button
@@ -607,29 +442,15 @@ export function AgenticWorkflow() {
         </div>
       )}
 
-      {/* ── Content ── */}
-      {!epicId ? (
-        /* New epic creation */
+      {/* Content */}
+      {!epic ? (
         <div className="mt-4 space-y-4">
-          {/* Config bar */}
           <div className="rounded-lg border border-border/50 p-4">
+            <div className="mb-3 text-xs text-muted-foreground">
+              New epic for <span className="font-mono text-foreground">{activeAppName}</span> · will
+              target <span className="font-mono text-foreground">{workingDir}</span>
+            </div>
             <div className="flex flex-wrap items-end gap-4">
-              <div className="flex-1 min-w-[250px]">
-                <label className="mb-1 block text-xs text-muted-foreground">App Name</label>
-                <input
-                  type="text"
-                  value={appName}
-                  onChange={(e) => setAppName(e.target.value)}
-                  placeholder="guess-the-number"
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-                {workingDir && (
-                  <p className="mt-0.5 text-[10px] text-muted-foreground font-mono">
-                    {workingDir} &rarr; futurator.ai/apps/
-                    {appName.trim().toLowerCase().replace(/\s+/g, '-')}/
-                  </p>
-                )}
-              </div>
               <div>
                 <label className="mb-1 block text-xs text-muted-foreground">Dev Model</label>
                 <select
@@ -703,10 +524,13 @@ export function AgenticWorkflow() {
             reviewerModel={reviewerModel}
             reviewerEffort={reviewerEffort}
             yoloMode={yoloMode}
-            onEpicCreated={(id) => setEpicId(id)}
+            onEpicCreated={() => {
+              // The new epic's appName matches activeAppName; useEpicList will
+              // refetch and expose the epicId via our derivation.
+            }}
           />
         </div>
-      ) : epic ? (
+      ) : (
         <>
           {activeView === 'workflow' ? (
             <DevsWorkflowView
@@ -732,14 +556,8 @@ export function AgenticWorkflow() {
             <EpicTree epic={epic} />
           )}
         </>
-      ) : (
-        <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
-          <Loader2 className="h-4 w-4 animate-spin mr-2" />
-          Loading...
-        </div>
       )}
 
-      {/* Resolve Blocker drawer (EO-5.5) — single instance mounted at root */}
       {epicId && (
         <ResolveBlockerDrawer
           epicId={epicId}
@@ -795,7 +613,6 @@ function DevsWorkflowView({
 
   return (
     <div className="space-y-0">
-      {/* Action bar */}
       <div className="flex items-center justify-between gap-3 py-2.5 px-1 border-b border-border/20">
         <div className="flex items-center gap-2.5">
           <ActionButton
@@ -815,15 +632,15 @@ function DevsWorkflowView({
             status={epic.deployUrl ? 'deployed' : 'pending'}
             href={epic.deployUrl}
           />
-          {orchestratorOn && (
+          {canStartEpic && (
             <button
               type="button"
               onClick={() => startOrchestrator.mutate(epic.epicId)}
-              disabled={!canStartEpic || startOrchestrator.isPending}
+              disabled={startOrchestrator.isPending}
               className="flex items-center gap-1.5 rounded-md border border-primary/50 bg-primary/10 px-2.5 py-1.5 text-xs text-primary hover:bg-primary/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               title={
-                !canStartEpic
-                  ? `Epic must be ready/fixing/failed to start (current: ${epic.status})`
+                epic.status === 'fixing' || epic.status === 'failed'
+                  ? 'Restart the epic orchestrator after a fix'
                   : 'Start the epic orchestrator — one job for the entire epic'
               }
             >
@@ -832,7 +649,11 @@ function DevsWorkflowView({
               ) : (
                 <Activity className="h-3 w-3" />
               )}
-              <span>Start Epic</span>
+              <span>
+                {epic.status === 'fixing' || epic.status === 'failed'
+                  ? 'Restart Epic'
+                  : 'Start Epic'}
+              </span>
             </button>
           )}
         </div>
@@ -853,7 +674,18 @@ function DevsWorkflowView({
         </div>
       )}
 
-      {/* Epic info panel (expandable) */}
+      {epic.orchestratorJobId && (
+        <div className="py-3 px-1 border-b border-border/20">
+          <div className="flex items-center gap-2 mb-2">
+            <Activity className="h-3.5 w-3.5 text-green-500 animate-pulse" />
+            <span className="text-xs font-medium text-foreground">
+              Orchestrator running — developing all waves autonomously
+            </span>
+          </div>
+          <StoryLiveOutput jobId={epic.orchestratorJobId} />
+        </div>
+      )}
+
       <details className="border-b border-border/20">
         <summary className="px-1 py-2 cursor-pointer text-xs text-muted-foreground hover:text-foreground flex items-center gap-1.5">
           <svg
@@ -871,7 +703,6 @@ function DevsWorkflowView({
         </div>
       </details>
 
-      {/* Wave tabs */}
       {waves.length > 0 && (
         <div className="flex items-center gap-2 overflow-x-auto py-2.5 px-1">
           {waves.map(([waveNum, waveStories]) => {
@@ -940,7 +771,6 @@ function DevsWorkflowView({
         </div>
       )}
 
-      {/* Story list for selected wave */}
       <div className="rounded-lg border border-border/30 overflow-hidden">
         {waves
           .filter(([w]) => w === selectedWave)
@@ -975,7 +805,7 @@ function ActionButton({
   statusText,
   href,
 }: {
-  icon: React.ElementType;
+  icon: React.ComponentType<{ className?: string }>;
   label: string;
   status: 'running' | 'pass' | 'pending' | 'deployed';
   statusText?: string;
@@ -1014,7 +844,6 @@ function ActionButton({
   return <div className={className}>{inner}</div>;
 }
 
-/* ── YOLO toggle ── */
 function YoloToggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <div className="flex items-center gap-2">
@@ -1034,7 +863,6 @@ function YoloToggle({ checked, onChange }: { checked: boolean; onChange: (v: boo
   );
 }
 
-/* ── Epic Orchestrator toggle (EO-4.6) ── */
 function OrchestratorToggle({
   checked,
   disabled,
@@ -1059,7 +887,7 @@ function OrchestratorToggle({
         onClick={() => !disabled && onChange(!checked)}
         disabled={disabled}
         className={`h-5 w-9 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-          checked ? 'bg-primary' : 'bg-muted'
+          checked ? 'bg-green-500' : 'bg-muted'
         }`}
       >
         <span

@@ -100,13 +100,20 @@ export interface CreatePlanForAppInput {
   executionMode?: 'pipeline' | 'orchestrator';
   displayName?: string;
   rigor?: 'prototype' | 'mvp' | 'production';
+  /** PR-10 #1 — optional plan slug. Auto-generated server-side if omitted. */
+  name?: string;
 }
 
 export function useCreatePlanForApp(appId: string | null | undefined) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: CreatePlanForAppInput) =>
-      api.post<{ plan: Plan }>(`/apps/${appId}/plans`, input).then((r) => r.plan),
+      // Server returns { plan, pmJobId } for kind=initial — caller needs pmJobId
+      // to navigate to /labs?planId=X&pmJobId=Y so PlanDashboard auto-polls +
+      // auto-applies the PM output. Without pmJobId on the URL, the plan
+      // opens stuck in 'concept' status with the operator-confusing
+      // "Regenerate" button as the only forward path.
+      api.post<{ plan: Plan; pmJobId?: string }>(`/apps/${appId}/plans`, input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['app', appId] });
       qc.invalidateQueries({ queryKey: ['apps'] });

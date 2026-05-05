@@ -30,6 +30,7 @@
 import { runBareClone } from '../lib/app-bootstrap-steps/bare-clone.mjs';
 import { runMaterializeWorktree } from '../lib/app-bootstrap-steps/materialize-worktree.mjs';
 import { runInjectValues } from '../lib/app-bootstrap-steps/inject-values.mjs';
+import { runApplyStarterAugments } from '../lib/app-bootstrap-steps/apply-starter-augments.mjs';
 import { runNpmInstall } from '../lib/app-bootstrap-steps/npm-install.mjs';
 import { runBmadBootstrap } from '../lib/app-bootstrap-steps/bmad-bootstrap.mjs';
 import { runCommitAndPush } from '../lib/app-bootstrap-steps/commit-and-push.mjs';
@@ -38,6 +39,7 @@ export const APP_BOOTSTRAP_STEPS = [
   'bare-clone',
   'materialize-worktree',
   'inject-values',
+  'apply-starter-augments', // PR-13 — starter pack files written on top of base
   'npm-install',
   'bmad-bootstrap',
   'commit-and-push',
@@ -47,14 +49,29 @@ export const APP_BOOTSTRAP_STEPS = [
  * Slim view of `functions/shared/boilerplates/registry.ts`. The daemon
  * cannot import the TS module directly. Update this table whenever the
  * registry changes a value the daemon depends on.
+ *
+ * PR-13 — `nextjs` renamed to `nextjs-base`; new starter pack entries
+ * derive their config from nextjs-base (they share the templateRepo + the
+ * same npm-install/bmad-bootstrap behavior). The `augmentFiles` per
+ * starter come through `appBootstrapPayload.augmentFiles` so the daemon
+ * doesn't have to mirror the registry's content.
  */
+const NEXTJS_VIEW = {
+  runtime: 'node',
+  bmadSupported: true,
+  isStub: false,
+  targetFiles: ['package.json', 'README.md', 'CLAUDE.md'],
+};
+
 const BOILERPLATE_VIEW = {
-  nextjs: {
-    runtime: 'node',
-    bmadSupported: true,
-    isStub: false,
-    targetFiles: ['package.json', 'README.md', 'CLAUDE.md'],
-  },
+  // Canonical key (PR-13).
+  'nextjs-base': NEXTJS_VIEW,
+  // Legacy alias — App rows created before PR-13 stored 'nextjs'.
+  nextjs: NEXTJS_VIEW,
+  // PR-13 starters derive config from nextjs-base.
+  'nextjs-canvas-game': NEXTJS_VIEW,
+  'nextjs-form-app': NEXTJS_VIEW,
+  'nextjs-dashboard': NEXTJS_VIEW,
   sst: {
     runtime: 'node',
     bmadSupported: false,
@@ -134,6 +151,7 @@ export async function runAppBootstrap(job, ctx) {
     bareClone: steps.bareClone ?? runBareClone,
     materializeWorktree: steps.materializeWorktree ?? runMaterializeWorktree,
     injectValues: steps.injectValues ?? runInjectValues,
+    applyStarterAugments: steps.applyStarterAugments ?? runApplyStarterAugments,
     npmInstall: steps.npmInstall ?? runNpmInstall,
     bmadBootstrap: steps.bmadBootstrap ?? runBmadBootstrap,
     commitAndPush: steps.commitAndPush ?? runCommitAndPush,
@@ -199,6 +217,18 @@ export async function runAppBootstrap(job, ctx) {
     await emitCompleted('inject-values', {
       modified: injectResult.modified,
       visited: injectResult.visited?.length ?? 0,
+    });
+
+    // PR-13 — APPLY-STARTER-AUGMENTS (no-op for base starters / stubs)
+    await emitStarted('apply-starter-augments');
+    const augmentResult = await stepFns.applyStarterAugments({
+      workingDir: worktreeDir,
+      augmentFiles: payload.augmentFiles,
+      onOutput: makeOutputSink('apply-starter-augments'),
+    });
+    await emitCompleted('apply-starter-augments', {
+      written: augmentResult.written,
+      skipped: !!augmentResult.skipped,
     });
 
     // 4. NPM-INSTALL (skipped on stubs / non-node runtimes)

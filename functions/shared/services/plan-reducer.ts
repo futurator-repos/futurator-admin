@@ -92,6 +92,29 @@ export async function reducePlan(
     }
   }
 
+  // PR-23c — roll up `doneStories` onto the plan row. The wave-reducer
+  // flips story.status to 'done' but never propagates the rollup count
+  // to the parent plan, so plan.doneStories stays at the value it had
+  // when the plan was created (usually 0). The dashboard's "X/N stories"
+  // counter is computed live from epic.stories so the UI looks correct,
+  // but the persisted field — which the deploy panel and forensic
+  // narrative read — is wrong. Counted across all epics each tick;
+  // cheap (epics already in memory) and idempotent.
+  // 2026-05-04 dino-runner-1 finished with 6/6 done in UI but
+  // plan.doneStories: 0 in DDB. Fixed by this rollup.
+  const doneStories = epics.reduce(
+    (sum, e) => sum + (e.stories ?? []).filter((s) => s.status === 'done').length,
+    0,
+  );
+  if (doneStories !== plan.doneStories) {
+    try {
+      await deps.updatePlanFields(plan.planId, { doneStories });
+    } catch (err) {
+      // Cosmetic field; never block the reducer on a write failure.
+      console.warn(`[PlanReducer] doneStories rollup failed: ${err}`);
+    }
+  }
+
   // ── 2. Re-fetch epics to see post-inner state (or trust the passed-in
   //       ones — caller is responsible for providing fresh rows). For the
   //       cron we re-query below. ──
@@ -181,6 +204,18 @@ export async function reducePlan(
   }
 
   // ── 6. All plan-waves done. Handle final plan-build-check. ───────────
+  //
+  // PR-31b (2026-05-05) — for prototype rigor, skip plan-build-check entirely
+  // and flip directly to `review`. Per-story `tsc --noEmit` + REVIEWER verdict
+  // (and, for mvp/production rigor, wave-build-checks) already cover this.
+  // The final integration check costs ~1-2min per plan and is one more place
+  // a Next.js-flag bug can quietly fail. Mirrors PR-30 for wave-build-check.
+  // mvp/production rigor still get the safety net.
+  if (planOpts.rigor === 'prototype') {
+    await deps.updatePlanFields(plan.planId, { status: 'review', reviewAt: deps.now() });
+    return { kind: 'plan-completed' };
+  }
+
   if (!plan.planBuildJobId) {
     // Create it.
     const jobId = deps.uuid();

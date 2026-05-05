@@ -3,6 +3,14 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api-client';
 import type { EpicWorkflow, CreateEpicInput } from '@/types/epic-workflow';
 
+export interface PmAttachment {
+  key: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  kind: 'reference' | 'asset';
+}
+
 export interface EpicSummary {
   epicId: string;
   title: string;
@@ -110,8 +118,15 @@ export function useRunStory() {
 export function useStartEpicOrchestrator() {
   const queryClient = useQueryClient();
   return useMutation({
+    // Response shape depends on the epic's `useEpicOrchestrator` flag:
+    //   - true  → `{ jobId }` (single phase='epic-dev' job)
+    //   - false → `{ jobIds, waveNumber }` (one step-based job per wave-1 story)
+    // Story 16.1 added the Pipeline branch; callers should handle both shapes.
     mutationFn: (epicId: string) =>
-      api.post<{ jobId: string }>(`/epic-workflows/${epicId}/start`, {}),
+      api.post<{ jobId?: string; jobIds?: string[]; waveNumber?: number }>(
+        `/epic-workflows/${epicId}/start`,
+        {},
+      ),
     onSuccess: (_, epicId) =>
       queryClient.invalidateQueries({ queryKey: ['epic-workflow', epicId] }),
   });
@@ -173,7 +188,7 @@ export interface AppEntry {
 export function usePublishedApps() {
   return useQuery({
     queryKey: ['published-apps'],
-    queryFn: () => api.get<AppEntry[]>('/apps'),
+    queryFn: () => api.get<AppEntry[]>('/development/apps'),
   });
 }
 
@@ -226,7 +241,23 @@ export function useCreateEpicFromXml() {
       devEffort?: string;
       reviewerModel?: string;
       reviewerEffort?: string;
-    }) => api.post<{ epicId: string; storiesCount: number }>('/epic-workflows/from-xml', input),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['epic-workflow'] }),
+      autoStart?: boolean;
+      // Story 16.1: when false, the /start endpoint (and the autoStart branch
+      // inside /from-xml) creates per-story step-based pipeline jobs instead
+      // of a single `phase='epic-dev'` orchestrator job.
+      useEpicOrchestrator?: boolean;
+    }) =>
+      api.post<{
+        epicId: string;
+        storiesCount: number;
+        orchestratorJobId?: string;
+        storyJobIds?: string[];
+        waveNumber?: number;
+      }>('/epic-workflows/from-xml', input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['epic-list'] });
+      queryClient.invalidateQueries({ queryKey: ['epic-workflow'] });
+    },
   });
 }
+

@@ -21,7 +21,11 @@
 import { useState } from 'react';
 import { Bell, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useGlobalAttention, useResolveGlobalAttention } from '@/hooks/use-global-attention';
+import {
+  useGlobalAttention,
+  useResolveGlobalAttention,
+  useResolveAllForPlan,
+} from '@/hooks/use-global-attention';
 import type { AttentionSeverity, AttentionItem } from '../../../functions/shared/types/attention';
 import type { GlobalAttentionItem } from '@/hooks/use-global-attention';
 
@@ -84,6 +88,7 @@ function GlobalAttentionDrawer({
 }) {
   const router = useRouter();
   const resolve = useResolveGlobalAttention();
+  const resolveAll = useResolveAllForPlan();
 
   // Group by plan, sort plans alphabetically, sort items within plan by
   // severity desc then createdAt desc.
@@ -148,11 +153,35 @@ function GlobalAttentionDrawer({
           )}
           {groups.map((group) => (
             <section key={group.planId} className="border-b border-border last:border-b-0">
-              <header className="flex items-center justify-between px-4 py-2 bg-muted/40 sticky top-0">
-                <span className="text-[11px] font-mono uppercase tracking-wide text-muted-foreground">
+              <header className="flex items-center justify-between px-4 py-2 bg-muted/40 sticky top-0 gap-2">
+                <span className="text-[11px] font-mono uppercase tracking-wide text-muted-foreground truncate">
                   {group.planName}
                 </span>
-                <span className="text-[10px] text-muted-foreground">{group.items.length}</span>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <span className="text-[10px] text-muted-foreground tabular-nums">
+                    {group.items.length}
+                  </span>
+                  {/* PR-9 #4 — bulk-resolve all open items for this plan. Useful for
+                      pre-PR-7 noise (where each cron tick wrote a fresh row before
+                      the idempotent upsert landed). */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (
+                        confirm(
+                          `Resolve all ${group.items.length} open attention items for "${group.planName}"?`,
+                        )
+                      ) {
+                        resolveAll.mutate(group.planId);
+                      }
+                    }}
+                    disabled={resolveAll.isPending}
+                    className="text-[10px] font-mono uppercase tracking-wide text-muted-foreground border border-border rounded px-1.5 py-0.5 hover:text-foreground hover:bg-background disabled:opacity-50"
+                    title="Resolve every open item for this plan"
+                  >
+                    Clear all
+                  </button>
+                </div>
               </header>
               <ul className="divide-y divide-border">
                 {group.items.map((item) => (
@@ -180,6 +209,25 @@ function GlobalAttentionDrawer({
   );
 }
 
+/**
+ * PR-9 #5 — humanize a timestamp into "3h ago" / "2d ago" / etc. so the
+ * operator can tell at-a-glance which incident an item belongs to without
+ * cross-referencing logs. Falls back to ISO date for items >30d old.
+ */
+function relativeTime(iso: string): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return iso;
+  const diffSec = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (diffSec < 60) return 'just now';
+  const diffMin = Math.round(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHour = Math.round(diffMin / 60);
+  if (diffHour < 24) return `${diffHour}h ago`;
+  const diffDay = Math.round(diffHour / 24);
+  if (diffDay < 30) return `${diffDay}d ago`;
+  return new Date(then).toISOString().slice(0, 10);
+}
+
 function AttentionRow({
   item,
   onOpen,
@@ -192,9 +240,13 @@ function AttentionRow({
   isResolving: boolean;
 }) {
   const recurrence = item.recurrenceCount ?? 1;
+  // PR-9 #5 — `lastSeenAt` is set by the PR-7 idempotent upsert; legacy items
+  // (pre-PR-7, the 224 noise the user is seeing) don't have it, so fall back
+  // to `createdAt`. ISO timestamp on hover for precise inspection.
+  const seenAt = item.lastSeenAt ?? item.createdAt;
   return (
     <li className="px-4 py-3">
-      <div className="flex items-baseline gap-2">
+      <div className="flex items-baseline gap-2 flex-wrap">
         <span
           className={`inline-flex items-center rounded border px-1.5 py-0 text-[9px] font-mono uppercase tracking-wide ${SEVERITY_BADGE_CLASS[item.severity]}`}
         >
@@ -209,6 +261,12 @@ function AttentionRow({
             {recurrence}×
           </span>
         )}
+        <span
+          title={seenAt}
+          className="ml-auto text-[10px] font-mono text-muted-foreground tabular-nums"
+        >
+          {relativeTime(seenAt)}
+        </span>
       </div>
       <h4 className="mt-1.5 text-sm leading-tight text-foreground">{item.title}</h4>
       {item.body && (

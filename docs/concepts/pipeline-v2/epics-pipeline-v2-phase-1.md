@@ -2,8 +2,9 @@
 
 | Field            | Value                                                                                                                                                                                                                                                                      |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Status**       | Draft for execution                                                                                                                                                                                                                                                        |
+| **Status**       | **Shipped 2026-05-05** — 26/26 stories built + deployed + validated; ship-gate 4/5 pass, #4 (3× escalator cohort) data-dependent, satisfies organically. Stabilisation pass shipped as PR-1 → PR-31; see §14 below.                                                        |
 | **Authored**     | 2026-04-27                                                                                                                                                                                                                                                                 |
+| **Wrapped**      | 2026-05-05                                                                                                                                                                                                                                                                 |
 | **Source spec**  | `docs/concepts/pipeline-v2/futurator-pipeline-v2-5-consolidated.md` (v2.5 consolidated, 3,507 lines)                                                                                                                                                                       |
 | **Phase scope**  | Substrate — GitHub-backed Apps with typed boilerplates, real PAT integration with `futurator-repos` org, the Pipeline v2 Roadmap strip for big-picture visibility, and the foundational **Timer Intelligence** measurement layer that every subsequent phase will leverage |
 | **Effort**       | ~16–18 dev days, ~22–26 stories across 8 epics                                                                                                                                                                                                                             |
@@ -1165,3 +1166,90 @@ If those nine steps work without intervention or hand-holding, Phase 1 is done.
 
 When Phase 1 ships, this doc gets a status flip to `Shipped 2026-MM-DD` and
 the equivalent Phase-2 doc takes over.
+
+---
+
+## 14. Phase 1 hardening pass — PR-1 → PR-31 (shipped 2026-04-30 → 2026-05-05)
+
+This section was authored at wrap. The original §1–§13 captured *what to build*;
+this section captures *what was hardened on top of it* before declaring Phase 1
+done. Three end-to-end runs against `dino-runner-1` exposed bugs invisible at
+unit-test scope; each PR below maps to a real failure mode observed in
+forensic JSON or production telemetry, plus the fix that closed it.
+
+### Mapping to existing Phase 1 epics
+
+| Epic | PRs that reinforced it | What changed |
+|---|---|---|
+| Epic 1.3 — Boilerplate | PR-13 | StarterPack architecture refactor; touch-point validation; daemon-side augment-write; 4-type dropdown in NewAppModal |
+| Epic 1.8 — Timer Intelligence | PR-14a-e, PR-16, PR-17, PR-23b, PR-27 | Classifier role-case fix; `plan.totalCostUsd` rollup; forensic `?include=events` opt-in; compile-failure attention surface; terminal-status S3 snapshot; wave-boundary snapshot (replace 5s polling); machine-wait synthetic slices for inter-job gaps; TimingPanel % denominator fix |
+| Cross-cutting | PR-1 → PR-12 (committed); PR-15 → PR-31 (deployed, working tree) | Pipeline correctness, daemon resilience, prototype rigor end-to-end, brownfield support, deploy writebacks |
+
+### Stabilisation PR catalogue
+
+**Bundled commits (PR-1 → PR-7, in git):**
+- **PR-1** — cost-ceiling-after-DONE detector + retry budget + efficiency-fixes plan
+- **PR-2** — daemon-side pre-DEV gate (T0.2)
+- **PR-3** — tool allowlist tightening + B8 deny-pattern + delete PROJECT BASELINE prose *(also seeds Phase 2-A)*
+- **PR-4** — touch-point inference at dispatch time *(also seeds Phase 2-A)*
+- **PR-5** — boilerplate-aware PM prompt *(also seeds Phase 2-A)*
+- **PR-6** — retry resilience + auth recovery + cleanups
+- **PR-7** — attention hygiene + Labs-root bell
+
+**Deployed but uncommitted (PR-8 → PR-31, working tree):**
+- **PR-8** (a–g) — Visual QA pillar redesign: plan-scoped qaJobId, qa-prepare/judge-l0/l1/l2/aggregate steps, contract approval gate, per-test budgets, rigor-aware classifier, boilerplate-aware QA launcher
+- **PR-9** (1–6) — Concept-stage UX: pmJobId pass-through, PM logs surface, AC rendering, bulk-resolve attention, createdAt timestamps in bell
+- **PR-10** (1–4) — Plan delete safety: custom slug + auto-unique fallback, App/Plan-v1-safe delete, App-aware UI exposure
+- **PR-11** (1–3) — REVIEWER aggregation in daemon + PROJECT_CONTEXT default + injection
+- **PR-12** — Strip transient PROJECT_CONTEXT before DDB persist (size budget)
+- **PR-13** (1–5) — StarterPack registry refactor + PM touch-point validation + daemon augment-write + NewAppModal starter dropdown
+- **PR-14** (a–e) — Timer Intel: slicer lowercase agentRole, `plan.totalCostUsd` rollup on `step_complete`, strip `[timing-debug]`, forensic `?include=events` opt-in, compile-failure attention surface
+- **PR-15** — `PROJECT_CONTEXT` ships full file contents (kills 50% of Read tool calls)
+- **PR-16** — Forensic snapshot at terminal-status (write S3, route 302)
+- **PR-17** — Wave-boundary timing snapshot (kill 5s polling)
+- **PR-18** — Audit `compilation-failed` 50% root cause
+- **PR-19** — Per-story `git push` after `compile-sync`
+- **PR-20** — Audit parallel-wave commit gap (waves 2/3 lost)
+- **PR-21** — VQA pillar respects `rigor === 'prototype'` (mark `skipped`, unblock Promote)
+- **PR-22** — Post-deploy DDB writebacks (`App.currentlyDeployedPlanId`, `deployJobIds`, `plan.deployedAt`)
+- **PR-23** (a–d) — EC2 working-tree cleanup commits + machine-wait synthetic slices + `plan.doneStories` rollup + brownfield-aware PM prompt (`kind=change`)
+- **PR-24** — Regenerate endpoint clears existing epics atomically
+- **PR-25** — Auto-apply hook auto-discovers PM job when URL lacks pmJobId
+- **PR-26** — Wave-build server-check uses correct Next.js host flag (drops `--host`)
+- **PR-27** — TimingPanel percentages denominator = `aggregate.totalMs` (not `planTotalMs`)
+- **PR-28** — Stale-heartbeat scanner covers per-story dev-pipeline jobs (not just orchestrator)
+- **PR-29** — `MAX_CONCURRENT` default 4 → 2 (memory-aware on t4g.small)
+- **PR-30** — Skip wave-build-check for prototype rigor (kills 5min wave-boundary dead-time)
+- **PR-31a** — Drop `--host` flag from plan-build-pipeline (mirror of PR-26 in sibling file)
+- **PR-31b** — Skip plan-build-check for prototype rigor (mirror of PR-30 at plan level)
+
+### Observed end-to-end runs
+
+| Plan | Date | Outcome | Notes |
+|---|---|---|---|
+| `plan_dino-runner-1_moo8zzmz` | 2026-05-02 | Surfaced PR-14 → PR-21 bug list | Initial dino game, prototype rigor, Next.js boilerplate |
+| `plan_dino-runner-1_moseuhc9` | 2026-05-05 | Clean: 5/5 stories, deployed live | Brownfield (`kind=change`) sprite-wiring; validated PR-23d, PR-28-30, PR-31a-b |
+
+### Ship-gate scorecard at wrap
+
+| # | Condition | Status | Evidence |
+|---|---|---|---|
+| 1 | E2E App creation in 90s | PASS | `dino-runner-1`, `futurator-website` created cleanly |
+| 2 | 4 boilerplate types selectable, 3 gracefully empty | PASS | PR-13 NewAppModal dropdown |
+| 3 | Timer Intelligence + forensic JSON export | PASS | `plan_dino-runner-1_moseuhc9-forensic.json` exported and re-analysed |
+| 4 | 3× escalator fires after cohort accumulation | DATA-DEPENDENT | Story 1.8.7 wired the escalator; cohort needs ≥5 same-shape plans (currently ~3 nextjs-canvas-game). Not a code blocker; satisfies organically |
+| 5 | Roadmap strip on every App detail | PASS | Story 1.6.1 + 1.6.2 |
+
+### Hand-off to Phase 2
+
+PR-2/3/4/5 already touched ~30% of Phase 2-A — Inner-loop discipline:
+- **Daemon-side pre-DEV gate** (PR-2) covers Phase 2-A item "TEST red-gate before DEV"
+- **Tool allowlist tightening** (PR-3) is the seed of Phase 2-A item "Tool allowlists at spawn time" (currently coarse — Phase 2 needs spawn-time policy doc)
+- **Touch-point inference at dispatch** (PR-4) is foundational for Phase 2-A item "Per-story scoped touch points"
+- **Boilerplate-aware PM prompt** (PR-5) is part of Phase 2-A item "PM emits typed plan against boilerplate kind"
+
+Real Phase 2 net-new starts at **branch-per-story `wip/<storyId>` worktrees**
+(Phase 2-B, foundational) and **ARCHITECT + `aws.manifest.yaml`** (Phase 2-D-1,
+biggest unknown). The Phase 2 epics doc has not yet been authored — it is the
+first artefact the Phase 2 session needs to produce, sourced from
+`futurator-pipeline-v2-5-consolidated.md` §51–54 (Phases A, B, D).

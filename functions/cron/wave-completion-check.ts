@@ -1,7 +1,9 @@
 import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
 import * as planRepo from '../shared/repositories/plan-repository';
+import * as appRepo from '../shared/repositories/app-repository';
 import * as attentionRepo from '../shared/repositories/attention-items-repository';
+import { resolveQaContext } from '../shared/services/qa-boilerplate-resolver';
 // Story 1.8.7 — 3× escalator: fire-and-forget after plan is marked delivered
 import { evaluateThresholds } from '../shared/timer/escalator';
 import { generateStoryPipeline } from '../shared/pipelines/story-pipeline';
@@ -9,10 +11,13 @@ import { generateWaveBuildPipeline } from '../shared/pipelines/wave-build-pipeli
 import { generatePlanBuildPipeline } from '../shared/pipelines/plan-build-pipeline';
 import { type WaveReducerDeps } from '../shared/services/wave-reducer';
 import { reducePlan, type PlanReducerDeps } from '../shared/services/plan-reducer';
-import { launchVisualQa } from '../shared/services/visual-qa-launcher';
-import { parseVisualTests, buildQaPipeline } from '../shared/pipelines/visual-qa-pipeline';
+import { launchPlanQaAggregate } from '../shared/services/visual-qa-launcher';
+import {
+  parseVisualTests,
+  buildQaAggregatePipeline,
+  buildQaExecutePipeline,
+} from '../shared/pipelines/visual-qa-pipeline';
 import { log } from '../shared/logger';
-import type { EpicWorkflow } from '../shared/types/epic-workflow';
 
 /**
  * Wave-completion cron — Story 16.2 + Story 17.4.
@@ -86,57 +91,68 @@ export const handler = async () => {
           result,
         });
 
-        // QA auto-enqueue: when the plan just flipped to `review` AND
-        // `autoRunQa` is enabled, kick off Visual QA for every epic that has
-        // visual tests but no QA job yet. Manual re-runs remain available via
-        // POST /api/plans/:id/qa-review.
-        if (result.kind === 'plan-completed' && plan.autoRunQa) {
-          // Per-epic port so parallel QA runs don't race for :5173. Mirrors
-          // the manual /api/plans/:id/qa-review fan-out logic.
-          const QA_PORT_BASE = 5173;
-          const QA_PORT_RANGE = 27;
-          for (let i = 0; i < epicsForPlan.length; i += 1) {
-            const epic = epicsForPlan[i];
-            if (epic.qaJobId) continue; // already has a run
-            try {
-              const now = new Date().toISOString();
-              const port = QA_PORT_BASE + (i % QA_PORT_RANGE);
-              const qaResult = await launchVisualQa(
-                epic,
-                plan.createdBy,
-                now,
-                {
-                  getJobById: agentJobsRepo.getJobById,
-                  createJob: agentJobsRepo.createJob,
-                  parseVisualTests,
-                  buildQaPipeline,
-                  uuid: () => crypto.randomUUID(),
-                },
-                { port },
-              );
-              if (qaResult.ok) {
-                const patch: Partial<EpicWorkflow> = { qaJobId: qaResult.jobId };
-                if (qaResult.storiesChanged) patch.stories = qaResult.updatedStories;
-                await epicRepo.updateEpicFields(epic.epicId, patch);
-                log('info', 'wave-completion-check', 'auto-enqueued QA', {
-                  planId: plan.planId,
-                  epicId: epic.epicId,
-                  jobId: qaResult.jobId,
-                });
-              } else {
-                log('info', 'wave-completion-check', 'auto-QA skipped', {
-                  planId: plan.planId,
-                  epicId: epic.epicId,
-                  reason: qaResult.message,
-                });
+        // Pipeline v2.0 PR-8d — auto-enqueue the QA AGGREGATE stage. When
+        // the plan flips to `review` AND `autoRunQa` is enabled AND
+        // there's no aggregate or execute QA job yet, launch the aggregate
+        // stage. The execute stage runs after the operator approves the
+        // contract via POST /api/plans/:id/qa-contract/approve.
+        //
+        // PR-8a's plan-scoping is preserved: ONE aggregate per plan,
+        // never per-epic. PR-8a's `launchPlanVisualQa` (single-stage) is
+        // still exported for callers that don't want the contract gate;
+        // the cron now uses `launchPlanQaAggregate` instead.
+        if (
+          result.kind === 'plan-completed' &&
+          plan.autoRunQa &&
+          !plan.qaJobId &&
+          !plan.qaAggregateJobId
+        ) {
+          try {
+            const now = new Date().toISOString();
+            // PR-8g — auto-enqueue uses the App's boilerplate qaContext too.
+            const boilerplate = await resolveQaContext(plan, { getApp: appRepo.getApp });
+            const qaResult = await launchPlanQaAggregate(
+              plan,
+              epicsForPlan,
+              plan.createdBy,
+              now,
+              {
+                getJobById: agentJobsRepo.getJobById,
+                createJob: agentJobsRepo.createJob,
+                parseVisualTests,
+                buildQaAggregatePipeline,
+                buildQaExecutePipeline,
+                uuid: () => crypto.randomUUID(),
+              },
+              { boilerplate },
+            );
+            if (qaResult.ok) {
+              // Persist aggregate job + transition contract status to
+              // `pending` — operator review gate now active.
+              await planRepo.updatePlanFields(plan.planId, {
+                qaAggregateJobId: qaResult.jobId,
+                qaContractStatus: 'pending',
+              });
+              for (const [epicId, stories] of qaResult.updatedStoriesByEpic) {
+                await epicRepo.updateEpicFields(epicId, { stories });
               }
-            } catch (err) {
-              log('error', 'wave-completion-check', 'auto-QA enqueue failed', {
+              log('info', 'wave-completion-check', 'auto-enqueued QA aggregate stage', {
                 planId: plan.planId,
-                epicId: epic.epicId,
-                error: err instanceof Error ? err.message : String(err),
+                jobId: qaResult.jobId,
+                testCount: qaResult.testCount,
+                epicCount: epicsForPlan.length,
+              });
+            } else {
+              log('info', 'wave-completion-check', 'auto-QA aggregate skipped', {
+                planId: plan.planId,
+                reason: qaResult.message,
               });
             }
+          } catch (err) {
+            log('error', 'wave-completion-check', 'auto-QA aggregate enqueue failed', {
+              planId: plan.planId,
+              error: err instanceof Error ? err.message : String(err),
+            });
           }
         }
 

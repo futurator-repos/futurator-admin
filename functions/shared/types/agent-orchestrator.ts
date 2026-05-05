@@ -297,8 +297,18 @@ export interface AgentJob {
    */
   appBootstrapPayload?: {
     appId: string;
-    boilerplateType: 'nextjs' | 'sst' | 'vite' | 'mobile';
+    // PR-13 — keep this loose (`string`) so adding new starter packs in
+    // the registry doesn't require a coordinated daemon rebuild. Daemon
+    // validates against the registry at runtime.
+    boilerplateType: string;
     bmadEnabled: boolean;
+    /**
+     * PR-13 — starter pack augment files. The API Lambda reads
+     * `BOILERPLATE_REGISTRY[boilerplateType].augmentFiles` and embeds
+     * them here so the daemon doesn't need its own copy of the registry.
+     * Written to the working tree between inject-values and npm-install.
+     */
+    augmentFiles?: Array<{ path: string; content: string }>;
   };
 }
 

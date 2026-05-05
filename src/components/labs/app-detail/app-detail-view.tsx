@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useApp } from '@/hooks/use-apps';
 import { useGithubRepoSummary } from '@/hooks/use-github-repo-summary';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
@@ -15,6 +16,7 @@ import { DeleteAppDialog } from './delete-app-dialog';
 import { V2RoadmapStrip } from './v2-roadmap-strip';
 import { SourceTabContent } from './source-tab';
 import { PerformanceTab } from './performance-tab';
+import { AppPartyView } from './app-party-view';
 
 interface DeployRow {
   jobId: string;
@@ -31,6 +33,14 @@ export function AppDetailView({ appId }: { appId: string }) {
   const [newPlanOpen, setNewPlanOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  // Allow deep-linking to a specific tab via `?tab=party` (used by Debates).
+  const params = useSearchParams();
+  const tabParam = params.get('tab');
+  const initialTab =
+    tabParam === 'party' || tabParam === 'source' || tabParam === 'performance'
+      ? tabParam
+      : 'overview';
 
   // Pre-fetch repo summary so the Source tab has defaultBranch without an
   // additional waterfall. We can only know if the app is bootstrapped after the
@@ -90,10 +100,11 @@ export function AppDetailView({ appId }: { appId: string }) {
       <V2RoadmapStrip />
 
       {/* Story 1.5.2 — Tabbed content: Overview + Source + Performance */}
-      <Tabs defaultValue="overview">
+      <Tabs defaultValue={initialTab}>
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           {hasSourceTab && <TabsTrigger value="source">Source</TabsTrigger>}
+          <TabsTrigger value="party">Party</TabsTrigger>
           {/* Story 1.8.5 — Performance tab (always shown; empty state when no plans) */}
           <TabsTrigger value="performance">Performance</TabsTrigger>
         </TabsList>
@@ -114,6 +125,10 @@ export function AppDetailView({ appId }: { appId: string }) {
             <SourceTabContent app={app} defaultBranch={defaultBranch} />
           </TabsContent>
         )}
+
+        <TabsContent value="party" className="mt-4">
+          <AppPartyView app={app} />
+        </TabsContent>
 
         <TabsContent value="performance" className="mt-4">
           <PerformanceTab appId={app.appId} app={app} />

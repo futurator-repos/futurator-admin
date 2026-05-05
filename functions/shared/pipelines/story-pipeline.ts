@@ -718,6 +718,32 @@ Working directory: ${workingDir}`,
               timeout: 60000,
               onFail: { action: 'fail' as const, injectAs: 'COMPILE_SYNC_ERROR' },
             },
+            // PR-19 — push the per-story commit to GitHub.
+            //
+            // 2026-05-04 dino-runner-1 forensic: the daemon's
+            // `compile-commit-on-pass` step was committing locally but the
+            // commits never made it to the GitHub remote. The bootstrap
+            // saga's commit-and-push.mjs runs once at App-creation; per-
+            // story compile commits had no pusher until this step.
+            //
+            // Soft-fail by design: a push conflict (network blip, manual
+            // operator commit, fast-forward issue) shouldn't stall the
+            // pipeline. The next story's compile-push or a manual
+            // `git push` resolves drift. We log a GIT_PUSH_WARN sentinel
+            // so operators can grep for it in logs if commits ever stop
+            // landing on origin.
+            {
+              id: 'compile-push',
+              stepType: 'shell' as const,
+              command:
+                `cd ${workingDir} && ` +
+                `git push origin HEAD 2>&1 || ` +
+                `(echo 'GIT_PUSH_WARN: push failed (network/conflict/auth) — local commit retained' >&2 ; ` +
+                `echo "[compile-push] continuing — next compile-push will retry"; true)`,
+              timeout: 30000,
+              captureAs: 'GIT_PUSH_OUTPUT',
+              onFail: { action: 'continue' as const },
+            },
           ] as PipelineStep[])),
     ],
   };
