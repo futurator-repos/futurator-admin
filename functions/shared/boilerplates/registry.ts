@@ -335,6 +335,90 @@ export function GameCanvas({ render, redrawTrigger, className }: GameCanvasProps
   { path: 'src/components/canvas/.gitkeep', content: '' },
 ];
 
+// ── PR-35 — Baseline-diff regression gate scripts ──────────────────────────
+//
+// Per `docs/concepts/pipeline-v2/baseline-diff-design.md` §3. The daemon's
+// app-bootstrap saga writes these into the working tree as augment files
+// alongside SCAFFOLD.md. Wave-start hook calls capture-test-baseline.sh;
+// post-DEV hook calls check-regressions.sh.
+//
+// All Next.js-derived boilerplates (base + canvas-game + form-app +
+// dashboard) inherit them via `createStarterPack`'s augment merge.
+
+const CAPTURE_TEST_BASELINE_SH = `#!/usr/bin/env bash
+# Pipeline v2 baseline-diff — wave-start capture.
+# See docs/concepts/pipeline-v2/baseline-diff-design.md §3.1.
+set -e
+cd "\${PROJECT_DIR:?PROJECT_DIR required}"
+mkdir -p .pipeline
+npm test --silent --reporter=json > .pipeline/baseline.json 2>&1 || true
+if ! command -v jq >/dev/null 2>&1; then
+  echo "jq not installed — baseline capture cannot continue" >&2
+  exit 2
+fi
+jq -r '.testResults[].assertionResults[]
+       | select(.status=="passed") | .fullName' \\
+  .pipeline/baseline.json 2>/dev/null | sort > .pipeline/baseline-passing.txt
+echo "captured $(wc -l < .pipeline/baseline-passing.txt | tr -d ' ') passing tests"
+`;
+
+const CHECK_REGRESSIONS_SH = `#!/usr/bin/env bash
+# Pipeline v2 baseline-diff — post-DEV regression check.
+# See docs/concepts/pipeline-v2/baseline-diff-design.md §3.2.
+set -e
+cd "\${PROJECT_DIR:?PROJECT_DIR required}"
+mkdir -p .pipeline
+if [ ! -s .pipeline/baseline-passing.txt ]; then
+  echo "BASELINE_EMPTY: skip regression check"
+  exit 0
+fi
+
+npm test --silent --reporter=json > .pipeline/after.json 2>&1 || true
+if ! command -v jq >/dev/null 2>&1; then
+  echo "jq not installed — regression check cannot continue" >&2
+  exit 2
+fi
+jq -r '.testResults[].assertionResults[]
+       | select(.status=="passed") | .fullName' \\
+  .pipeline/after.json 2>/dev/null | sort > .pipeline/after-passing.txt
+
+# Distinct case: runner produced empty after-passing — likely runner crash.
+if [ ! -s .pipeline/after-passing.txt ]; then
+  echo "TEST_RUNNER_FAILURE: post-DEV run produced zero passing tests" >&2
+  echo "Inspect .pipeline/after.json for the runner error."
+  exit 2
+fi
+
+regressions=$(comm -23 .pipeline/baseline-passing.txt .pipeline/after-passing.txt)
+if [ -n "$regressions" ]; then
+  echo "BASELINE_REGRESSION_DETECTED"
+  echo "$regressions" | head -5
+  count=$(echo "$regressions" | wc -l | tr -d ' ')
+  echo "REGRESSION_COUNT=$count"
+
+  case "\${RIGOR:-mvp}" in
+    prototype)
+      echo "WARNING — proceeding under prototype rigor"
+      exit 0
+      ;;
+    mvp|production)
+      exit 1
+      ;;
+  esac
+fi
+echo "BASELINE_OK"
+`;
+
+const BASELINE_DIFF_AUGMENTS: Array<{ path: string; content: string }> = [
+  { path: 'scripts/capture-test-baseline.sh', content: CAPTURE_TEST_BASELINE_SH },
+  { path: 'scripts/check-regressions.sh', content: CHECK_REGRESSIONS_SH },
+  // .gitignore entry so .pipeline/ doesn't pollute commits.
+  {
+    path: '.pipeline/.gitignore',
+    content: '# Pipeline v2 baseline-diff working dir — never commit\n*\n!.gitignore\n',
+  },
+];
+
 // PR-13 — nextjs-base config extracted to a top-level const so derivative
 // starter packs can spread it (`{ ...NEXTJS_BASE_PACK, type: 'nextjs-...' }`)
 // during the registry literal's construction. Inlining inside the literal
@@ -412,6 +496,14 @@ const NEXTJS_BASE_PACK: BoilerplateMetadata = {
       'Download the React DevTools',
     ],
   },
+  // PR-35 — baseline-diff regression gate config + scripts. Inherited by
+  // all nextjs-* starter packs via createStarterPack's augment merge.
+  baselineCapture: {
+    scriptPath: 'scripts/capture-test-baseline.sh',
+    regressCheckPath: 'scripts/check-regressions.sh',
+    testRunner: 'vitest',
+  },
+  augmentFiles: BASELINE_DIFF_AUGMENTS,
 };
 
 /**
@@ -428,12 +520,27 @@ function createStarterPack(
     domain: NonNullable<BoilerplateMetadata['domain']>;
   },
 ): BoilerplateMetadata {
+  // PR-35 — concat base augments (baseline-diff scripts) with starter-
+  // specific augments so derivative packs don't lose the base files when
+  // they declare their own `augmentFiles`. Order: overrides first (so a
+  // starter's SCAFFOLD.md stays at position 0 — registry-level invariant);
+  // base augments after (minus any path the override shadows).
+  const baseAugments = NEXTJS_BASE_PACK.augmentFiles ?? [];
+  const overrideAugments = overrides.augmentFiles ?? [];
+  const overridePaths = new Set(overrideAugments.map((a) => a.path));
+  const mergedAugments = [
+    ...overrideAugments,
+    ...baseAugments.filter((a) => !overridePaths.has(a.path)),
+  ];
+
   return {
     ...NEXTJS_BASE_PACK,
     type,
     baseStarter: 'nextjs-base',
     status: overrides.status ?? 'wired',
     ...overrides,
+    // Augments are explicitly merged (the spread above would replace).
+    augmentFiles: mergedAugments.length > 0 ? mergedAugments : undefined,
   };
 }
 
@@ -502,6 +609,8 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
       warmupMs: 4000,
       consoleErrorAllowList: ['DEBUG\\sSDK', 'Pulumi\\sup'],
     },
+    // PR-35 — stub: no test runner shipped yet. Daemon skips the gate.
+    baselineCapture: null,
   },
 
   vite: {
@@ -560,6 +669,8 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
       warmupMs: 0,
       consoleErrorAllowList: ['vite\\b.*HMR'],
     },
+    // PR-35 — stub: no test runner shipped yet. Daemon skips the gate.
+    baselineCapture: null,
   },
 
   mobile: {
@@ -617,6 +728,8 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
       warmupMs: 5000,
       consoleErrorAllowList: ['expo-cli', 'react-native-web.*deprecated'],
     },
+    // PR-35 — stub: no test runner shipped yet. Daemon skips the gate.
+    baselineCapture: null,
   },
 
   // ── PR-13 — Starter packs derived from nextjs-base ────────────────────────

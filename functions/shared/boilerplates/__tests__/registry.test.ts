@@ -187,3 +187,64 @@ describe('stub types — spot-check', () => {
     expect(meta.defaultStack.buildCommand).toBe('npx expo build');
   });
 });
+
+describe('PR-35 — baseline-diff regression gate', () => {
+  it('nextjs-base declares baselineCapture pointing at the shipped scripts', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-base'];
+    expect(meta.baselineCapture).not.toBeNull();
+    expect(meta.baselineCapture?.scriptPath).toBe('scripts/capture-test-baseline.sh');
+    expect(meta.baselineCapture?.regressCheckPath).toBe('scripts/check-regressions.sh');
+    expect(meta.baselineCapture?.testRunner).toBe('vitest');
+  });
+
+  it.each(['nextjs-canvas-game', 'nextjs-form-app', 'nextjs-dashboard'] as BoilerplateType[])(
+    '%s — inherits baselineCapture from nextjs-base',
+    (type) => {
+      const base = BOILERPLATE_REGISTRY['nextjs-base'];
+      const meta = BOILERPLATE_REGISTRY[type];
+      expect(meta.baselineCapture).toEqual(base.baselineCapture);
+    },
+  );
+
+  it.each(['sst', 'vite', 'mobile'] as BoilerplateType[])(
+    '%s (stub) — declares baselineCapture: null so daemon skips the gate',
+    (type) => {
+      const meta = BOILERPLATE_REGISTRY[type];
+      expect(meta.baselineCapture).toBeNull();
+    },
+  );
+
+  it('nextjs-base ships the two shell scripts as augment files', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-base'];
+    const paths = (meta.augmentFiles ?? []).map((f) => f.path);
+    expect(paths).toContain('scripts/capture-test-baseline.sh');
+    expect(paths).toContain('scripts/check-regressions.sh');
+    expect(paths).toContain('.pipeline/.gitignore');
+  });
+
+  it('shell scripts are bash-shebanged and reference jq + comm', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-base'];
+    const capture = meta.augmentFiles?.find((f) => f.path === 'scripts/capture-test-baseline.sh');
+    const check = meta.augmentFiles?.find((f) => f.path === 'scripts/check-regressions.sh');
+    expect(capture?.content.startsWith('#!/usr/bin/env bash')).toBe(true);
+    expect(capture?.content).toContain('jq');
+    expect(check?.content.startsWith('#!/usr/bin/env bash')).toBe(true);
+    expect(check?.content).toContain('comm -23');
+    expect(check?.content).toContain('BASELINE_REGRESSION_DETECTED');
+    expect(check?.content).toContain('TEST_RUNNER_FAILURE');
+  });
+
+  it('starter packs inherit the baseline-diff augments AND keep their own', () => {
+    const base = BOILERPLATE_REGISTRY['nextjs-base'];
+    const cg = BOILERPLATE_REGISTRY['nextjs-canvas-game'];
+    const basePaths = new Set((base.augmentFiles ?? []).map((f) => f.path));
+    const cgPaths = (cg.augmentFiles ?? []).map((f) => f.path);
+    // Every base augment is present in canvas-game.
+    for (const p of basePaths) {
+      expect(cgPaths, `canvas-game inherits ${p}`).toContain(p);
+    }
+    // Canvas-game also has its own (e.g. SCAFFOLD.md, src/game/types.ts).
+    expect(cgPaths).toContain('SCAFFOLD.md');
+    expect(cgPaths).toContain('src/game/types.ts');
+  });
+});

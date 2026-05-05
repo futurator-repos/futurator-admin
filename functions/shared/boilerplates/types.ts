@@ -56,6 +56,25 @@ export interface BoilerplateMetadata {
   /** Phase 3: SKILL-SCOUT default skill loadout (shape tightened in Phase 3). */
   defaultSkillLoadout?: string[];
 
+  /**
+   * Pipeline v2 Phase 2-A Story 2-A-4-2 (PR-35) — baseline-diff regression
+   * gate config. `null` for stub boilerplates that haven't shipped tests
+   * yet (SST / Vite / Mobile in Phase 2); the daemon skips the gate when
+   * null. Wired starters point at scripts shipped in the template repo.
+   *
+   * See `docs/concepts/pipeline-v2/baseline-diff-design.md` for the full
+   * design (capture-test-baseline.sh + check-regressions.sh, daemon hook
+   * placement, rigor matrix, acceptBaselineDrift mechanism).
+   */
+  baselineCapture?: {
+    /** Path within the working tree to the wave-start capture script. */
+    scriptPath: string;
+    /** Path within the working tree to the post-DEV regression check. */
+    regressCheckPath: string;
+    /** Stable name for the test runner — surfaced in attention items. */
+    testRunner: 'vitest' | 'jest' | 'playwright' | 'mocha';
+  } | null;
+
   // ── Pipeline v2.0 PR-5: PM-prompt context ───────────────────────────────
   //
   // Consumed by `buildPmPlanPrompt` to generate boilerplate-aware Plan JSON
