@@ -20,6 +20,10 @@ import {
   serializeStoryContextPack,
   DEFAULT_RUN_COMMAND,
 } from './story-context-pack.mjs';
+import {
+  validateProjectContextPack,
+  formatValidationErrors,
+} from './project-context-schema.mjs';
 
 const EPIC_WORKFLOWS_TABLE_DEFAULT = 'futurator-epic-workflows';
 const PLANS_TABLE_DEFAULT = 'futurator-plans';
@@ -36,7 +40,12 @@ const PLANS_TABLE_DEFAULT = 'futurator-plans';
  *   plansTable?: string,
  *   logger?: { info: Function, warn: Function, error: Function },
  * }} input
- * @returns {Promise<{ body: string, pack: object | null, failure?: string }>}
+ * @returns {Promise<{
+ *   body: string,
+ *   pack: object | null,
+ *   failure?: string,
+ *   validationErrors?: string[]  // PR-33: present iff the assembled pack failed schema validation
+ * }>}
  */
 export async function resolveAndSerializeContextPack(input) {
   const {
@@ -173,6 +182,21 @@ async function runAssembler({ plan, story, prevStoriesInWave, projectDir, waveSt
       waveStartTime,
       onWarning: (e) => log.info?.(`context-pack: ${e.type}${e.detail ? ' — ' + e.detail : ''}`),
     });
+
+    // PR-33 — validate the assembled pack against the typed schema before
+    // serializing into the prompt. Catches accretion-grown shape drift
+    // (e.g. PR-15 added fileContents but a future stub forgets it). On
+    // failure, warn + return a structured `validationErrors` field so the
+    // caller path can emit `attention.context-pack-invalid` with the
+    // failing field paths. Pipeline still proceeds with the stub body.
+    const validation = validateProjectContextPack(pack);
+    if (!validation.ok) {
+      const summary = formatValidationErrors(validation.errors);
+      log.warn?.(`context-pack-resolver: pack failed validation:\n${summary}`);
+      const stub = stubFailure(`pack-invalid: ${validation.errors.length} error(s)`);
+      return { ...stub, validationErrors: validation.errors };
+    }
+
     return { body: serializeStoryContextPack(pack), pack };
   } catch (err) {
     log.warn?.(`context-pack-resolver: assembler threw: ${err.message}`);

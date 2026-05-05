@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { resolveAndSerializeContextPack } from '../context-pack-resolver.mjs';
+import { validateProjectContextPack } from '../project-context-schema.mjs';
 
 function makeTmpProject() {
   const dir = mkdtempSync(join(tmpdir(), 'ctx-resolver-'));
@@ -122,5 +123,46 @@ describe('resolveAndSerializeContextPack', () => {
     expect(out.pack.prevWorkSummaries).toHaveLength(1);
     expect(out.pack.prevWorkSummaries[0].storyId).toBe('S-1');
     expect(out.body).toContain('S-1 — Prev A');
+  });
+
+  // PR-33 — regression fence: every happy-path resolver output must produce a
+  // pack the schema validator accepts. If a future PR-15-style accretion
+  // changes the assembler shape, this test fails before the malformed pack
+  // ships into a prompt.
+  it('happy-path packs always pass schema validation', async () => {
+    const story = {
+      storyId: 'S-1',
+      title: 'Build foo',
+      description: 'foo desc',
+      criteria: [{ id: 'AC-1', text: 'foo works' }],
+      touchPoints: ['src/main.js'],
+      wave: 0,
+    };
+    const epic = {
+      epicId: 'E-1',
+      planId: 'P-1',
+      stories: [story],
+      startedAt: '2026-01-01T00:00:00.000Z',
+    };
+    const out = await resolveAndSerializeContextPack({
+      ddb: fakeDdb(epic, { planId: 'P-1' }),
+      job: { jobId: 'j1', workingDir: dir },
+      variables: { STORY_ID: 'S-1', EPIC_ID: 'E-1' },
+    });
+    expect(out.pack).not.toBeNull();
+    const validation = validateProjectContextPack(out.pack);
+    expect(validation, JSON.stringify(validation, null, 2)).toEqual({ ok: true });
+    expect(out.validationErrors).toBeUndefined();
+  });
+
+  it('disk-only path (no epic) also produces a schema-valid pack', async () => {
+    const out = await resolveAndSerializeContextPack({
+      ddb: fakeDdb(null, null),
+      job: { jobId: 'j1', workingDir: dir },
+      variables: { STORY_ID: 'S-1', EPIC_ID: '(not provided)' },
+    });
+    expect(out.pack).not.toBeNull();
+    const validation = validateProjectContextPack(out.pack);
+    expect(validation).toEqual({ ok: true });
   });
 });
