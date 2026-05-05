@@ -40,6 +40,52 @@
 
 const BASELINE_DENY = ['Task', 'Agent', 'WebFetch', 'WebSearch'];
 
+// PR-38 — per-rigor turn caps from v2.5 §17. `null` (or absent) → no cap.
+// Mirrors functions/shared/pipelines/role-policy.ts TURN_CAPS exactly.
+// The mvp matrix is the daemon's default since most daemon-spawned roles
+// (CONVERSATION/REFLECTION/DEPLOY/COMPILER) run as background work without
+// rigor context — they get null. Story-pipeline roles (TEST/DEV/REVIEWER/
+// API_AUTHOR/QA/PM) DO receive rigor today via opts.rigor; for those the
+// MJS resolver still returns the table value below.
+const TURN_CAPS_BY_RIGOR = {
+  prototype: {
+    API_AUTHOR: null,
+    TEST: 6,
+    DEV: 8,
+    REVIEWER: 4,
+    COMPILER: null,
+    QA: null,
+    PM: null,
+    CONVERSATION: null,
+    REFLECTION: null,
+    DEPLOY: null,
+  },
+  mvp: {
+    API_AUTHOR: 2,
+    TEST: 8,
+    DEV: 10,
+    REVIEWER: 6,
+    COMPILER: null,
+    QA: null,
+    PM: null,
+    CONVERSATION: null,
+    REFLECTION: null,
+    DEPLOY: null,
+  },
+  production: {
+    API_AUTHOR: 2,
+    TEST: 10,
+    DEV: 12,
+    REVIEWER: 8,
+    COMPILER: null,
+    QA: 8,
+    PM: 6,
+    CONVERSATION: null,
+    REFLECTION: null,
+    DEPLOY: null,
+  },
+};
+
 const ROLE_BASE = {
   // ── Shared roles (mirror the TS resolver exactly) ─────────────────────
   API_AUTHOR: {
@@ -94,10 +140,21 @@ const ROLE_BASE = {
 /**
  * Resolve and serialize an AgentConfig for the daemon's spawn loop.
  *
- * @param {{ role: keyof typeof ROLE_BASE, name: string, model?: string }} args
- * @returns {{ name: string, allowedTools: string, disallowedTools: string, model?: string }}
+ * @param {{
+ *   role: keyof typeof ROLE_BASE,
+ *   name: string,
+ *   model?: string,
+ *   rigor?: 'prototype' | 'mvp' | 'production',
+ * }} args
+ * @returns {{
+ *   name: string,
+ *   allowedTools: string,
+ *   disallowedTools: string,
+ *   model?: string,
+ *   maxTurns?: number,
+ * }}
  */
-export function buildAgentConfig({ role, name, model }) {
+export function buildAgentConfig({ role, name, model, rigor }) {
   const base = ROLE_BASE[role];
   if (!base) {
     throw new Error(`role-policy: unknown role "${role}". Known: ${Object.keys(ROLE_BASE).join(', ')}`);
@@ -110,6 +167,15 @@ export function buildAgentConfig({ role, name, model }) {
     disallowedTools: disallowed.join(','),
   };
   if (model !== undefined) out.model = model;
+  // PR-38 — apply per-rigor turn cap when rigor is provided. Daemon-only
+  // roles + missing rigor → no cap. The Claude CLI treats missing
+  // `--max-turns` as no cap.
+  if (rigor && TURN_CAPS_BY_RIGOR[rigor]) {
+    const cap = TURN_CAPS_BY_RIGOR[rigor][role];
+    if (typeof cap === 'number' && cap > 0) {
+      out.maxTurns = cap;
+    }
+  }
   return out;
 }
 

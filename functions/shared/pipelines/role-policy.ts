@@ -256,12 +256,18 @@ export function resolveRolePolicy(
  * else in the codebase should reason about `RolePolicy` directly.
  */
 export function policyToAgentConfig(policy: RolePolicy, name: string, model?: string): AgentConfig {
-  return {
+  const cfg: AgentConfig = {
     name,
     allowedTools: policy.allowedTools.join(','),
     disallowedTools: policy.disallowedTools.join(','),
     model,
   };
+  // PR-38 — propagate the rigor-derived turn cap. Daemon emits `--max-turns`
+  // when set; the Claude CLI defaults to no cap when absent.
+  if (typeof policy.maxTurns === 'number' && policy.maxTurns > 0) {
+    cfg.maxTurns = policy.maxTurns;
+  }
+  return cfg;
 }
 
 /**

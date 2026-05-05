@@ -100,6 +100,20 @@ export interface AgentConfig {
   allowedTools?: string;
   disallowedTools?: string;
   model?: string; // e.g. 'sonnet', 'opus', 'haiku', 'claude-sonnet-4-6'
+  /**
+   * Pipeline v2 Phase 2-A Story 2-A-1-2 (PR-38) — per-rigor turn cap from
+   * the v2.5 §17 matrix. Resolved at spawn time by `role-policy`'s
+   * `buildAgentConfig` (TS or MJS). Daemon emits `--max-turns <n>` to the
+   * Claude CLI when set; absent / zero / negative → no cap.
+   *
+   * Today's matrix:
+   *   prototype: TEST=6, DEV=8, REVIEWER=4
+   *   mvp:       API_AUTHOR=2, TEST=8, DEV=10, REVIEWER=6
+   *   production: API_AUTHOR=2, TEST=10, DEV=12, REVIEWER=8, QA=8, PM=6
+   *
+   * Other roles + rigors → undefined (no cap).
+   */
+  maxTurns?: number;
 }
 
 export type ExtractorType = 'regex' | 'between';

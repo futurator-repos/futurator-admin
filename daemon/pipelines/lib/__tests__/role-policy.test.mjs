@@ -92,3 +92,44 @@ describe('step-level helpers', () => {
     expect(buildDisallowedToolsString('COMPILER')).toBe('Agent,Bash,Task,WebFetch,WebSearch');
   });
 });
+
+describe('PR-38 — per-rigor turn caps in MJS resolver', () => {
+  it('returns no maxTurns when rigor is absent (background jobs)', () => {
+    const cfg = buildAgentConfig({ role: 'DEV', name: 'Developer' });
+    expect(cfg.maxTurns).toBeUndefined();
+  });
+
+  it('mvp DEV → maxTurns=10 (matches v2.5 §17 matrix)', () => {
+    const cfg = buildAgentConfig({ role: 'DEV', name: 'Developer', rigor: 'mvp' });
+    expect(cfg.maxTurns).toBe(10);
+  });
+
+  it('production REVIEWER → maxTurns=8', () => {
+    const cfg = buildAgentConfig({ role: 'REVIEWER', name: 'Reviewer', rigor: 'production' });
+    expect(cfg.maxTurns).toBe(8);
+  });
+
+  it('prototype TEST → maxTurns=6', () => {
+    const cfg = buildAgentConfig({ role: 'TEST', name: 'Test Author', rigor: 'prototype' });
+    expect(cfg.maxTurns).toBe(6);
+  });
+
+  it('COMPILER has no cap at any rigor', () => {
+    for (const rigor of ['prototype', 'mvp', 'production']) {
+      const cfg = buildAgentConfig({ role: 'COMPILER', name: 'Compiler', rigor });
+      expect(cfg.maxTurns).toBeUndefined();
+    }
+  });
+
+  it('daemon-only roles (CONVERSATION/REFLECTION/DEPLOY) have no cap', () => {
+    for (const role of ['CONVERSATION', 'REFLECTION', 'DEPLOY']) {
+      const cfg = buildAgentConfig({ role, name: '_', rigor: 'production' });
+      expect(cfg.maxTurns).toBeUndefined();
+    }
+  });
+
+  it('unknown rigor → no cap (graceful degrade)', () => {
+    const cfg = buildAgentConfig({ role: 'DEV', name: '_', rigor: 'experimental' });
+    expect(cfg.maxTurns).toBeUndefined();
+  });
+});

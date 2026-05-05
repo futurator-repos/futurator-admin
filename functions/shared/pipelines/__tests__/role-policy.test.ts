@@ -237,4 +237,31 @@ describe('policyToAgentConfig', () => {
     const cfg = policyToAgentConfig(policy, 'Developer');
     expect(cfg.model).toBeUndefined();
   });
+
+  // PR-38 — turn caps propagate from RolePolicy through to AgentConfig.
+  it('propagates maxTurns when RolePolicy carries one (mvp DEV → 10)', () => {
+    const policy = resolveRolePolicy('nextjs-base', 'mvp', 'DEV');
+    const cfg = policyToAgentConfig(policy, 'Developer');
+    expect(cfg.maxTurns).toBe(10);
+  });
+
+  it('propagates maxTurns through buildAgentConfig (production DEV → 12)', () => {
+    const cfg = buildAgentConfig({
+      boilerplateKind: 'nextjs-base',
+      rigor: 'production',
+      role: 'DEV',
+      name: 'Developer',
+    });
+    expect(cfg.maxTurns).toBe(12);
+  });
+
+  it('omits maxTurns when policy has none (e.g. COMPILER at any rigor)', () => {
+    const cfg = buildAgentConfig({
+      boilerplateKind: 'nextjs-base',
+      rigor: 'production',
+      role: 'COMPILER',
+      name: 'Compiler',
+    });
+    expect(cfg.maxTurns).toBeUndefined();
+  });
 });

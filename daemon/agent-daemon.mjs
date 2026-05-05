@@ -644,6 +644,12 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
     if (opts.allowedTools) args.push('--allowedTools', opts.allowedTools);
     if (opts.disallowedTools) args.push('--disallowedTools', opts.disallowedTools);
     if (opts.model) args.push('--model', opts.model);
+    // PR-38 — per-rigor turn cap from the agent's RolePolicy. Resolved at
+    // spawn-time via role-policy.mjs::buildAgentConfig and threaded through
+    // runAgentWithAuthRecovery (line 1572). Absent → no cap.
+    if (typeof opts.maxTurns === 'number' && opts.maxTurns > 0) {
+      args.push('--max-turns', String(opts.maxTurns));
+    }
 
     log('info', `Spawning claude for step ${stepId} (agent ${agentId})`, {
       resume: opts.resume || 'none',
@@ -1574,6 +1580,8 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
     allowedTools: agent.allowedTools,
     disallowedTools: agent.disallowedTools,
     model: agent.model,
+    // PR-38 — per-rigor turn cap from RolePolicy.
+    maxTurns: agent.maxTurns,
     resume: resumeSession,
   });
 
