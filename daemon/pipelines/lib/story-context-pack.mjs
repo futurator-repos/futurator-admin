@@ -181,6 +181,14 @@ export async function buildStoryContextPack(input) {
   let headLineCount = HEAD_LINES_FULL;
   let fileDigests = collectFileDigests(projectDir, touchPointPaths, headLineCount);
 
+  // PR-42 (Story 2-A-2-2) — auto-populate existingTests + publicExports
+  // per v2.5 §11.1. The TEST prompt template renders existingTests as
+  // "immutable contracts" so TEST never re-authors a test that already
+  // covers a story's AC. publicExports gives DEV the canonical type/
+  // constant names without re-Reading them from disk.
+  const existingTests = collectExistingTests(projectDir);
+  const publicExports = collectPublicExports(projectDir);
+
   // Cache-stable size guard: serialize, measure, retry with shorter heads
   // if over budget. Cheap (one extra serialize on overrun).
   const draftPack = {
@@ -189,6 +197,8 @@ export async function buildStoryContextPack(input) {
     storySpec,
     projectTree,
     fileDigests,
+    existingTests,
+    publicExports,
     recentDiffs,
     prevWorkSummaries,
     knowledgeIndex,
@@ -304,6 +314,51 @@ export function serializeStoryContextPack(pack) {
   }
   out.push('');
 
+  // PR-42 (Story 2-A-2-2) — existingTests + publicExports per v2.5 §11.1.
+  // The TEST prompt template treats `existingTests` entries as immutable
+  // contracts; DEV uses `publicExports` to get the canonical names without
+  // re-Reading the files from disk.
+  out.push('## Existing tests (immutable contracts)');
+  const tests = pack.existingTests || [];
+  if (tests.length === 0) {
+    out.push('_(no test files yet — TEST will author the first ones)_');
+  } else {
+    out.push(
+      'These test files are the source of truth for function names, field names, and signatures.',
+    );
+    out.push('TEST must NOT re-author tests that already cover a story\'s AC. DEV must conform.');
+    out.push('');
+    for (const t of tests) {
+      out.push(`- ${t}`);
+    }
+  }
+  out.push('');
+
+  out.push('## Public exports');
+  const types = pack.publicExports?.types || [];
+  const constants = pack.publicExports?.constants || [];
+  if (types.length === 0 && constants.length === 0) {
+    out.push('_(no public exports yet — types/constants directories empty or missing)_');
+  } else {
+    if (types.length > 0) {
+      out.push('### Types');
+      out.push('```ts');
+      for (const line of types) {
+        out.push(line);
+      }
+      out.push('```');
+    }
+    if (constants.length > 0) {
+      out.push('### Constants');
+      out.push('```ts');
+      for (const line of constants) {
+        out.push(line);
+      }
+      out.push('```');
+    }
+  }
+  out.push('');
+
   out.push('## Knowledge index');
   out.push('```');
   out.push(pack.knowledgeIndex ? pack.knowledgeIndex.trimEnd() : '(knowledge/index.md not found)');
@@ -400,6 +455,80 @@ function buildProjectTree(projectDir, maxDepth) {
   }
   walk(root, 0);
   return lines.join('\n');
+}
+
+/**
+ * PR-42 — collect every test file the project ships, sorted. Used by the
+ * TEST prompt to know which test files are "immutable contracts" (v2.5
+ * §11.1). Falls back to a recursive readdir scan when not in a git tree.
+ *
+ * @param {string} projectDir
+ * @returns {string[]} relative paths, sorted alphabetically, capped at 200
+ */
+function collectExistingTests(projectDir) {
+  // Prefer git ls-files for speed + ignore-rule honoring.
+  try {
+    const out = execSync(
+      'git ls-files "*.test.ts" "*.test.tsx" "*.test.js" "*.spec.ts" "*.spec.tsx" "*.spec.js"',
+      {
+        cwd: projectDir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5_000,
+      },
+    );
+    const files = out
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .sort();
+    return files.slice(0, 200);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * PR-42 — extract `^export` lines from `src/types/*.ts` and
+ * `src/constants/*.ts`. Each entry is the full source line so DEV can
+ * see the exported names + types without re-Reading the file. v2.5 §11.1.
+ *
+ * @param {string} projectDir
+ * @returns {{ types: string[], constants: string[] }}
+ */
+function collectPublicExports(projectDir) {
+  const out = { types: [], constants: [] };
+  for (const [key, sub] of [
+    ['types', 'src/types'],
+    ['constants', 'src/constants'],
+  ]) {
+    try {
+      const subDir = join(projectDir, sub);
+      if (!existsSync(subDir)) continue;
+      const entries = readdirSync(subDir, { withFileTypes: true });
+      for (const e of entries) {
+        if (!e.isFile() || !e.name.endsWith('.ts')) continue;
+        const abs = join(subDir, e.name);
+        try {
+          const raw = readFileSync(abs, 'utf8');
+          const exportLines = raw
+            .split('\n')
+            .filter((l) => /^export\s+(type|interface|const|function|class|enum)\b/.test(l))
+            .map((l) => l.trim())
+            // Strip trailing block-open `{` so output stays single-line.
+            .map((l) => l.replace(/\s*\{\s*$/, ''))
+            .slice(0, 50);
+          out[key].push(...exportLines);
+        } catch {
+          // skip unreadable file
+        }
+      }
+      out[key].sort();
+    } catch {
+      // skip on any error — pack still useful
+    }
+  }
+  return out;
 }
 
 function collectFileDigests(projectDir, touchPoints, headLineCount) {

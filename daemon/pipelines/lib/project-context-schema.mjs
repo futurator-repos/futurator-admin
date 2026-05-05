@@ -39,6 +39,9 @@ const REQUIRED_TOP_LEVEL = [
   'storySpec',
   'projectTree',
   'fileDigests',
+  // PR-42 (Story 2-A-2-2) — existingTests + publicExports.
+  'existingTests',
+  'publicExports',
   'recentDiffs',
   'prevWorkSummaries',
   'knowledgeIndex',
@@ -121,6 +124,31 @@ export function validateProjectContextPack(pack) {
       if ('truncated' in d && typeof d.truncated !== BOOLEAN) {
         errors.push(`fileDigests["${path}"].truncated: expected boolean if present`);
       }
+    }
+  }
+
+  // PR-42 — existingTests: array of relative path strings.
+  if (!Array.isArray(pack.existingTests)) {
+    errors.push('existingTests: expected array');
+  } else {
+    for (let i = 0; i < pack.existingTests.length; i++) {
+      if (typeof pack.existingTests[i] !== STRING) {
+        errors.push(`existingTests[${i}]: expected string`);
+        break;
+      }
+    }
+  }
+
+  // PR-42 — publicExports: { types: string[], constants: string[] }
+  const exports_ = pack.publicExports;
+  if (exports_ === null || typeof exports_ !== OBJECT) {
+    errors.push('publicExports: expected object');
+  } else {
+    if (!Array.isArray(exports_.types)) {
+      errors.push('publicExports.types: expected array');
+    }
+    if (!Array.isArray(exports_.constants)) {
+      errors.push('publicExports.constants: expected array');
     }
   }
 

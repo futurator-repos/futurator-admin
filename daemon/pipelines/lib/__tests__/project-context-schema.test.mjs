@@ -21,6 +21,9 @@ function validPack(overrides = {}) {
     fileDigests: {
       'src/main.js': { sha: 'abc123', head: '// main', lines: 1 },
     },
+    // PR-42 — new required fields.
+    existingTests: [],
+    publicExports: { types: [], constants: [] },
     recentDiffs: 'abc1234 init',
     prevWorkSummaries: [],
     knowledgeIndex: '',
@@ -73,6 +76,64 @@ describe('validateProjectContextPack — happy path', () => {
       }),
     );
     expect(result.ok).toBe(true);
+  });
+
+  // PR-42 — existingTests + publicExports happy paths.
+  it('accepts pack with populated existingTests + publicExports', () => {
+    const result = validateProjectContextPack(
+      validPack({
+        existingTests: [
+          'src/foo.test.ts',
+          'src/types/index.test.ts',
+          'e2e/home.spec.ts',
+        ],
+        publicExports: {
+          types: ['export type GameStatus = "idle" | "playing" | "paused" | "over";'],
+          constants: ['export const MAX_BRICKS = 64;'],
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('PR-42 — existingTests + publicExports validation', () => {
+  it('rejects pack missing existingTests', () => {
+    const pack = validPack();
+    delete pack.existingTests;
+    const r = validateProjectContextPack(pack);
+    expect(r.ok).toBe(false);
+    expect(r.errors).toContain('missing required field: existingTests');
+  });
+
+  it('rejects pack missing publicExports', () => {
+    const pack = validPack();
+    delete pack.publicExports;
+    const r = validateProjectContextPack(pack);
+    expect(r.ok).toBe(false);
+    expect(r.errors).toContain('missing required field: publicExports');
+  });
+
+  it('rejects existingTests with non-string entry', () => {
+    const r = validateProjectContextPack(
+      validPack({ existingTests: ['src/foo.test.ts', 42] }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.includes('existingTests[1]'))).toBe(true);
+  });
+
+  it('rejects publicExports.types as non-array', () => {
+    const r = validateProjectContextPack(
+      validPack({ publicExports: { types: 'export const X = 1;', constants: [] } }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.includes('publicExports.types'))).toBe(true);
+  });
+
+  it('rejects publicExports as non-object', () => {
+    const r = validateProjectContextPack(validPack({ publicExports: null }));
+    expect(r.ok).toBe(false);
+    expect(r.errors).toContain('publicExports: expected object');
   });
 });
 
