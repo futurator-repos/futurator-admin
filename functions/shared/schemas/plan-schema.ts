@@ -41,8 +41,101 @@ export const planStatusSchema = z.enum([
 // App/Plan v1 — Plan kind + brownfield-iteration schemas
 // ─────────────────────────────────────────────────────────────────────
 
-/** App/Plan v1 — Plan kind enum. */
-export const planKindSchema = z.enum(['initial', 'change', 'experiment']);
+/**
+ * Plan kind enum.
+ *
+ * App/Plan v1 (Phase 1) shipped with three kinds: `initial | change | experiment`.
+ *
+ * Pipeline v2 Phase 2-A Story 2-A-7-1 (PR-39) extends per v2.5 §5 with seven
+ * additional kinds. Existing rows keep their existing kind (no backfill); new
+ * plans select from the full set.
+ *
+ * | Kind                  | Phase introduced | Use case                                                                                                  |
+ * | --------------------- | ---------------- | --------------------------------------------------------------------------------------------------------- |
+ * | `initial`             | Phase 1          | First plan against a fresh App — sets up the project.                                                     |
+ * | `change`              | Phase 1          | Brownfield modification of an existing App.                                                                |
+ * | `experiment`          | Phase 1          | Speculative work that may not ship; lives outside the App's main lineage.                                  |
+ * | `feature`             | Phase 2 (PR-39)  | New user-facing capability on top of an existing App. Default for most v2 plans.                            |
+ * | `bugfix`              | Phase 2 (PR-39)  | Targeted fix for a defect; PM emits a regression-test story by default.                                    |
+ * | `maintenance`         | Phase 2 (PR-39)  | Refactor / dependency-bump / cleanup with no user-facing surface change.                                    |
+ * | `prototype-on-top`    | Phase 2 (PR-39)  | Experiment branch that pivots off main — `experiment/<plan-slug>` namespace (Phase 2-B-8).                  |
+ * | `hotfix`              | Phase 2 (PR-39)  | Branches off the production semver tag (Phase 2-B-8); skips PO/QA gates per v2.5 §50.4.                     |
+ * | `rigor-upgrade`       | Phase 2 (PR-39)  | Promotes an App's rigor (prototype → mvp → production); auto-generates the brownfield-audit epic.           |
+ * | `implementation-spec` | Phase 2 (PR-39)  | Auto-generated at App creation — runs ARCHITECT T1 + manifest commit + CDK bootstrap (Phase 2-D-6).        |
+ *
+ * The new kinds are wired into:
+ * - PM prompt (boilerplate-aware) — chooses an appropriate template per kind.
+ * - Plan-build / wave-build branching — `hotfix` skips PO/QA stub-gates;
+ *   `experiment` + `prototype-on-top` never auto-merge (Phase 2-B).
+ * - Branch namespace selection (Phase 2-B-8) — drives `wip/` vs
+ *   `experiment/<plan-slug>` vs `hotfix/<issue-slug>`.
+ */
+export const planKindSchema = z.enum([
+  // Phase 1 (App/Plan v1)
+  'initial',
+  'change',
+  'experiment',
+  // Phase 2-A Story 2-A-7-1 (PR-39)
+  'feature',
+  'bugfix',
+  'maintenance',
+  'prototype-on-top',
+  'hotfix',
+  'rigor-upgrade',
+  'implementation-spec',
+]);
+export type PlanKind = z.infer<typeof planKindSchema>;
+
+/**
+ * Phase 1 kinds — preserved for legacy callers and migration code paths.
+ */
+export const LEGACY_PLAN_KINDS = ['initial', 'change', 'experiment'] as const;
+
+/**
+ * Phase 2 kinds — added by PR-39. New plans should prefer these where
+ * applicable; the PM prompt + UI surface them as the primary options.
+ */
+export const PHASE_2_PLAN_KINDS = [
+  'feature',
+  'bugfix',
+  'maintenance',
+  'prototype-on-top',
+  'hotfix',
+  'rigor-upgrade',
+  'implementation-spec',
+] as const;
+
+/**
+ * Kinds that branch off something other than `main` (Phase 2-B-8 — branch
+ * namespace selection). Daemon's git-init step uses this to pick the
+ * branch base + namespace.
+ *
+ *   - `experiment`        → `experiment/<plan-slug>` off main
+ *   - `prototype-on-top`  → `experiment/<plan-slug>` off main
+ *   - `hotfix`            → `hotfix/<plan-slug>` off the latest production semver tag
+ *
+ * All other kinds → `wip/<storyId>` off main (or off the previous wave's
+ * merge SHA for non-first waves).
+ */
+export const NON_MAIN_PLAN_KINDS: ReadonlyArray<PlanKind> = [
+  'experiment',
+  'prototype-on-top',
+  'hotfix',
+];
+
+/**
+ * Kinds that skip the PO/QA gate stubs (per v2.5 §50.4 hotfix). Today these
+ * gates aren't fully implemented; the field is here so PR-44 + Phase 3
+ * gate enforcement can branch on it without re-deriving the rule.
+ */
+export const SKIP_PO_QA_GATES_KINDS: ReadonlyArray<PlanKind> = ['hotfix'];
+
+/**
+ * Type guard — narrows `string` to `PlanKind`.
+ */
+export function isPlanKind(value: unknown): value is PlanKind {
+  return planKindSchema.safeParse(value).success;
+}
 
 /**
  * App/Plan v1 — legal Plan status transitions. Used by the API layer

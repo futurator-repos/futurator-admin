@@ -2,6 +2,7 @@ import type { PipelineDefinition } from '../types/agent-orchestrator';
 import { buildPmPlanPrompt } from '../prompts/pm-plan-prompt';
 import type { BoilerplateType } from '../boilerplates/registry';
 import type { PlanRigor } from '../types/plan';
+import type { PlanKind } from '../schemas/plan-schema';
 import { buildAgentConfig } from './role-policy';
 
 /**
@@ -28,8 +29,14 @@ export function generatePmPlanPipeline(args: {
   /**
    * PR-23d — pass plan kind through so the PM prompt can render the
    * brownfield clause for `change` plans.
+   *
+   * PR-39 (Story 2-A-7-1) — extended with the Phase 2 kinds. PM prompt
+   * builder is responsible for branching on the new kinds; until that
+   * landed, the prompt uses the brownfield clause for any kind in
+   * { 'change', 'feature', 'bugfix', 'maintenance' } (i.e. anything
+   * acting on an existing App).
    */
-  kind?: 'initial' | 'change' | 'experiment';
+  kind?: PlanKind;
 }): PipelineDefinition {
   const prompt = buildPmPlanPrompt(args);
   return {
