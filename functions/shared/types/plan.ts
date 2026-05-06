@@ -125,6 +125,25 @@ export interface Plan {
   totalStories: number;
   doneStories: number;
 
+  /**
+   * Pipeline v2 Phase 2-A — Story 2-A-misc-2 / PR-45.
+   *
+   * Plan-level cost ceiling (USD). Set by the create endpoints from
+   * `defaultCostCeiling(rigor)` (functions/shared/services/cost-ceiling-defaults.ts).
+   * Defaults: prototype $5, mvp $20, production $50.
+   *
+   * The daemon's cost-meter (`daemon/lib/cost-meter.mjs::decideAction`) compares
+   * `plan.totalCostUsd` against this ceiling per turn:
+   *   - `cost < 0.8 × ceiling` → `continue`
+   *   - `0.8 × ≤ cost < ceiling` → `warn` (attention.cost-ceiling-warning)
+   *   - `cost ≥ ceiling`        → `terminate` (attention.cost-ceiling-block)
+   *
+   * Operator can raise via `POST /api/plans/:id/raise-cost-ceiling`. Existing
+   * Plan rows lacking this field continue to run with no ceiling enforcement
+   * (back-compat).
+   */
+  costCeilingUsd?: number;
+
   // ── Lifecycle + archival ──
   /** Set when plan transitions to `developing`. */
   startedAt?: string;

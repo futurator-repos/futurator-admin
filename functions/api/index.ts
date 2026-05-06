@@ -60,6 +60,7 @@ import {
   launchPlanQaExecute,
 } from '../shared/services/visual-qa-launcher';
 import { resolveQaContext } from '../shared/services/qa-boilerplate-resolver';
+import { defaultCostCeiling } from '../shared/services/cost-ceiling-defaults';
 import { launchDevServer } from '../shared/services/dev-server-launcher';
 import { generateStoryPipeline } from '../shared/pipelines/story-pipeline';
 import { aggregateOrchestratorMetrics } from '../shared/services/epic-orchestrator-metrics';
@@ -1389,6 +1390,8 @@ app.post('/api/plans', async (c) => {
     totalCostUsd: 0,
     totalStories: 0,
     doneStories: 0,
+    // PR-45 — rigor-keyed default cost ceiling (USD).
+    costCeilingUsd: defaultCostCeiling(input.rigor || 'mvp'),
     createdAt: now,
     updatedAt: now,
     createdBy: user.userId,
@@ -1453,6 +1456,8 @@ app.post('/api/plans/from-intent', async (c) => {
     totalCostUsd: 0,
     totalStories: 0,
     doneStories: 0,
+    // PR-45 — rigor-keyed default cost ceiling (USD).
+    costCeilingUsd: defaultCostCeiling(input.rigor || 'mvp'),
     createdAt: now,
     updatedAt: now,
     createdBy: user.userId,
@@ -2191,7 +2196,10 @@ app.post('/api/plans/:id/qa-contract/approve', async (c) => {
   // Re-hydrate epics + flatten tests. Operator overrides from body
   // (if any) merge in by `testId`.
   const body = await c.req.json().catch(() => ({}));
-  const overrides = new Map<string, Partial<import('../shared/types/epic-workflow').VisualTestDef>>();
+  const overrides = new Map<
+    string,
+    Partial<import('../shared/types/epic-workflow').VisualTestDef>
+  >();
   if (Array.isArray(body?.tests)) {
     for (const t of body.tests) {
       if (typeof t?.id === 'string') overrides.set(t.id, t);
@@ -3824,15 +3832,56 @@ app.get('/api/ec2/files', authMiddleware, async (c) => {
 // browser.
 const EC2_FILE_MAX_BYTES = 2 * 1024 * 1024;
 const TEXT_EXTS = new Set([
-  'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs',
-  'json', 'jsonc', 'md', 'mdx', 'txt', 'log',
-  'yaml', 'yml', 'toml', 'ini', 'env',
-  'html', 'htm', 'xml', 'svg',
-  'css', 'scss', 'sass', 'less',
-  'sh', 'bash', 'zsh', 'fish',
-  'py', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'hpp', 'cs', 'php', 'swift', 'kt',
-  'sql', 'graphql', 'gql',
-  'gitignore', 'dockerignore', 'dockerfile', 'editorconfig', 'prettierrc',
+  'ts',
+  'tsx',
+  'js',
+  'jsx',
+  'mjs',
+  'cjs',
+  'json',
+  'jsonc',
+  'md',
+  'mdx',
+  'txt',
+  'log',
+  'yaml',
+  'yml',
+  'toml',
+  'ini',
+  'env',
+  'html',
+  'htm',
+  'xml',
+  'svg',
+  'css',
+  'scss',
+  'sass',
+  'less',
+  'sh',
+  'bash',
+  'zsh',
+  'fish',
+  'py',
+  'rb',
+  'go',
+  'rs',
+  'java',
+  'c',
+  'h',
+  'cpp',
+  'hpp',
+  'cs',
+  'php',
+  'swift',
+  'kt',
+  'sql',
+  'graphql',
+  'gql',
+  'gitignore',
+  'dockerignore',
+  'dockerfile',
+  'editorconfig',
+  'prettierrc',
 ]);
 const IMAGE_EXTS: Record<string, string> = {
   png: 'image/png',
@@ -3852,7 +3901,11 @@ const PDF_MIME = 'application/pdf';
 
 function classifyFile(
   name: string,
-): { kind: 'text'; mime: string } | { kind: 'image'; mime: string } | { kind: 'pdf'; mime: string } | { kind: 'binary'; mime: string } {
+):
+  | { kind: 'text'; mime: string }
+  | { kind: 'image'; mime: string }
+  | { kind: 'pdf'; mime: string }
+  | { kind: 'binary'; mime: string } {
   const lower = name.toLowerCase();
   const ext = lower.includes('.') ? lower.split('.').pop()! : lower;
   if (ext === 'pdf') return { kind: 'pdf', mime: PDF_MIME };
@@ -3924,7 +3977,10 @@ app.get('/api/ec2/files/content', authMiddleware, async (c) => {
   const [, szStr, mtStr] = metaLine.split(':');
   const size = Number(szStr);
   const mtime = Number(mtStr) * 1000;
-  const base64 = lines.slice(startIdx + 1).join('').trim();
+  const base64 = lines
+    .slice(startIdx + 1)
+    .join('')
+    .trim();
 
   if (classified.kind === 'text') {
     let content: string;
@@ -6258,8 +6314,7 @@ app.post('/api/apps', authMiddleware, async (c) => {
       // PR-13 — pass starter pack augment files through to the daemon so it
       // can write them on top of the base after inject-values. Empty for
       // base starters and for stub types.
-      augmentFiles:
-        BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType].augmentFiles,
+      augmentFiles: BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType].augmentFiles,
     },
   };
 
@@ -6459,8 +6514,7 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
   // The shared workingDir comes from `appRow.workingDir` regardless of
   // plan.name, so the slug is now purely a label, not a path component.
   const planName =
-    parsed.data.name ??
-    `${appId}-${parsed.data.kind}-${Date.now().toString(36).slice(-5)}`;
+    parsed.data.name ?? `${appId}-${parsed.data.kind}-${Date.now().toString(36).slice(-5)}`;
   const plan: Plan = {
     planId,
     appId,
@@ -6480,6 +6534,14 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
     totalCostUsd: 0,
     totalStories: 0,
     doneStories: 0,
+    // PR-45 — rigor-keyed default cost ceiling (USD). Resolved from the
+    // same precedence chain as `rigor` above so an inherited rigor still
+    // triggers the matching ceiling.
+    costCeilingUsd: defaultCostCeiling(
+      parsed.data.rigor ??
+        existingPlans.filter((p) => p.status === 'delivered').at(-1)?.rigor ??
+        'mvp',
+    ),
     createdAt: now,
     updatedAt: now,
     createdBy: user.email,
@@ -6495,7 +6557,11 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
   // plans get the brownfield clause; experiment plans skip it. Without
   // this, kind='change' plans landed in `concept` with no PM job and the
   // operator had to click Regenerate to kick the PM off.
-  if (parsed.data.kind === 'initial' || parsed.data.kind === 'change' || parsed.data.kind === 'experiment') {
+  if (
+    parsed.data.kind === 'initial' ||
+    parsed.data.kind === 'change' ||
+    parsed.data.kind === 'experiment'
+  ) {
     pmJobId = crypto.randomUUID();
     // PR-5: thread the App's boilerplateType + Plan's rigor into the PM
     // prompt so it generates ACs that match the actual scaffold (not the
@@ -6800,7 +6866,11 @@ app.get('/api/timing/cohort', async (c) => {
 //   distinct prefix from data/, media/, apps/, knowledge-live/.
 const FORENSIC_S3_BUCKET = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
 
-function isPlanTerminalForForensic(plan: { status?: string; doneStories?: number; totalStories?: number }): boolean {
+function isPlanTerminalForForensic(plan: {
+  status?: string;
+  doneStories?: number;
+  totalStories?: number;
+}): boolean {
   if (plan.status === 'delivered' || plan.status === 'archived') return true;
   // 'review' is terminal for snapshot purposes only when every story is done
   // (i.e. the work won't change unless the operator clicks Send Back to Dev,
@@ -6918,7 +6988,9 @@ app.get('/api/plans/:planId/timing/forensic', async (c) => {
         CacheControl: 'private, max-age=0, must-revalidate',
       }),
     ).catch((err) => {
-      console.warn(`[forensic-cache] S3 PUT failed for ${planId}: ${err instanceof Error ? err.message : err}`);
+      console.warn(
+        `[forensic-cache] S3 PUT failed for ${planId}: ${err instanceof Error ? err.message : err}`,
+      );
     });
   }
 
@@ -6930,8 +7002,7 @@ app.get('/api/plans/:planId/timing/forensic', async (c) => {
   const out: Record<string, unknown> = { ...payload };
   if (!includeEvents) {
     delete out.events;
-    out._note =
-      'events[] omitted by default — pass ?include=events for the full payload';
+    out._note = 'events[] omitted by default — pass ?include=events for the full payload';
   }
 
   return c.body(JSON.stringify(out, null, 2), 200, {
