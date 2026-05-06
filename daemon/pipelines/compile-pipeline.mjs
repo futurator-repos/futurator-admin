@@ -55,11 +55,26 @@ export function getCompilerAgent() {
 }
 
 /**
- * Returns the 3-step COMPILE phase as a PipelineStep array.
+ * Returns the 5-step COMPILE phase as a PipelineStep array (PR-44).
  *
- * Step A: compile-diff   (shell)  — git diff extraction, produces DIFF_MANIFEST
- * Step B: compile-knowledge (agent) — Knowledge Compiler creates/updates wiki articles
- * Step C: compile-sync   (shell)  — embeds articles via Voyage AI, upserts to Memgraph, S3 backup
+ * Step 0: compile-commit-on-pass (shell) — per-story local git commit so
+ *         HEAD~1..HEAD always scopes to a single story's edits.
+ * Step A: compile-diff       (shell) — git diff extraction → DIFF_MANIFEST.
+ * Step B: compile-knowledge  (agent) — Knowledge Compiler creates/updates
+ *         wiki articles.
+ * Step C: compile-sync       (shell) — embed articles via Voyage AI, upsert
+ *         to Memgraph, S3 backup.
+ * Step D: compile-push       (shell, PR-44, soft-fail) — push origin HEAD so
+ *         per-story commits reach GitHub. Mirrors PR-19 from the step-based
+ *         pipeline. Soft-fail (network blip, conflict) shouldn't stall the
+ *         pipeline; the next compile-push or a manual `git push` resolves.
+ *
+ * History — PR-44 (2026-05-06): added `compile-commit-on-pass` and
+ * `compile-push` to the orchestrator path. brick-breaker forensic
+ * (docs/concepts/logs/plan_brick-breaker_mou3l51l-forensic-review.md §F-3)
+ * showed eleven stories' commits never reached GitHub because the
+ * orchestrator path's compile sequence had no push step. Step-based
+ * pipeline gained these via PR-A.3 + PR-19; orchestrator was missed.
  *
  * @param {string} projectId  — project identifier for graph-sync and S3 paths
  * @param {string} workingDir — absolute path to the project workspace
@@ -105,7 +120,39 @@ ${storyContext.acceptanceCriteria || '(not provided)'}
 Read the file at ${workingDir}/knowledge/index.md to understand the current catalog before making changes.
 `;
 
+  // Escape single quotes in the story title for shell single-quoting.
+  const escapedTitle = String(storyContext.title || storyId).replace(/'/g, "'\\''");
+
   return [
+    // PR-44 — Step 0: Per-story commit. Runs before compile-diff so
+    // HEAD~1..HEAD always scopes to a single story's edits and the next
+    // wave has a clean git state to diff against. Mirrors PR-A.3 from the
+    // step-based pipeline. Idempotent: if the cwd isn't a git tree yet,
+    // init it and stamp a baseline commit. Without this, brick-breaker-
+    // style runs land all eleven stories on the EC2 working tree without
+    // any commits → nothing to push at compile-push.
+    {
+      id: 'compile-commit-on-pass',
+      stepType: 'shell',
+      command:
+        `cd ${workingDir} && ` +
+        // Bootstrap: init repo + baseline commit if needed.
+        `if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then ` +
+        `  git init -q && ` +
+        `  git -c user.email=daemon@futurator.local -c user.name='Daemon' add -A && ` +
+        `  git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
+        `    commit --allow-empty -q -m 'baseline (auto-bootstrap by daemon)'; ` +
+        `fi && ` +
+        // Story commit (always — --allow-empty so degenerate stories still
+        // produce a commit and the next story's HEAD~1..HEAD remains valid).
+        `git add -A && ` +
+        `git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
+        `commit --allow-empty -m 'story: ${storyId} — ${escapedTitle}'`,
+      timeout: 30000,
+      captureAs: 'STORY_COMMIT_OUTPUT',
+      onFail: { action: 'fail', injectAs: 'STORY_COMMIT_ERROR' },
+    },
+
     // Step A: Diff extraction (shell, ~2s, $0)
     {
       id: 'compile-diff',
@@ -152,6 +199,33 @@ Read the file at ${workingDir}/knowledge/index.md to understand the current cata
         action: 'fail',
         injectAs: 'COMPILE_SYNC_ERROR',
       },
+    },
+
+    // PR-44 — Step D: Push the per-story commit to GitHub. Mirrors PR-19
+    // from the step-based pipeline.
+    //
+    // Soft-fail by design: a push conflict (network blip, manual operator
+    // commit, fast-forward issue, branch protection) shouldn't stall the
+    // pipeline. The next story's compile-push or a manual `git push`
+    // resolves drift. We log a GIT_PUSH_WARN sentinel so operators can
+    // grep for it in logs if commits ever stop landing on origin.
+    //
+    // brick-breaker forensic §F-3 — eleven stories' work lived only on
+    // the EC2 working tree. PR-44 closes that silent-data-loss gap for
+    // operators on the orchestrator path (PR-43 redirects new Apps to
+    // the step-based pipeline by default; this is the safety net for
+    // existing Apps still on orchestrator).
+    {
+      id: 'compile-push',
+      stepType: 'shell',
+      command:
+        `cd ${workingDir} && ` +
+        `git push origin HEAD 2>&1 || ` +
+        `(echo 'GIT_PUSH_WARN: push failed (network/conflict/auth) — local commit retained' >&2 ; ` +
+        `echo "[compile-push] continuing — next compile-push will retry"; true)`,
+      timeout: 30000,
+      captureAs: 'GIT_PUSH_OUTPUT',
+      onFail: { action: 'continue' },
     },
   ];
 }
