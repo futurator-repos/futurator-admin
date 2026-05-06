@@ -58,7 +58,20 @@ export async function createApp(args: CreateAppArgs): Promise<App> {
     displayName: args.displayName,
     icon: args.icon,
     workingDir: `/home/ubuntu/projects/${args.appId}`,
-    executionMode: args.executionMode ?? 'orchestrator',
+    // Pipeline v2 Phase 2-A Story 2-A-misc-pr43 — default flipped from
+    // 'orchestrator' to 'pipeline' on 2026-05-06. brick-breaker forensic
+    // (`docs/concepts/logs/plan_brick-breaker_mou3l51l-forensic-review.md`
+    // §F-1) showed Apps inherited 'orchestrator' silently because of this
+    // default, which then routed every Plan via the legacy orchestrator
+    // path — bypassing every Phase 2-A improvement (PR-32 → PR-42).
+    //
+    // Plans inherit App.executionMode (functions/api/index.ts:6475:
+    // `executionMode: parsed.data.executionMode ?? appRow.executionMode`)
+    // so flipping here cascades to all new Plans automatically.
+    //
+    // Existing Apps retain their persisted executionMode unchanged — no
+    // migration. Operators can override via the New App form.
+    executionMode: args.executionMode ?? 'pipeline',
     currentlyDeployedPlanId: null,
     deployJobIds: [],
     workingTreeStatus: 'clean',

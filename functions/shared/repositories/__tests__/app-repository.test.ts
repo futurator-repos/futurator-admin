@@ -74,11 +74,14 @@ describe('createApp', () => {
     expect(created.workingTreeStatus).toBe('clean');
     expect(created.currentlyDeployedPlanId).toBe(null);
     expect(created.deployJobIds).toEqual([]);
-    expect(created.executionMode).toBe('orchestrator'); // default
+    // PR-43 (2026-05-06) — default flipped to 'pipeline'. brick-breaker
+    // forensic showed App default of 'orchestrator' silently routed every
+    // new Plan via the legacy orchestrator path, bypassing PR-32 → PR-42.
+    expect(created.executionMode).toBe('pipeline'); // default after PR-43
     expect(sendMock).toHaveBeenCalledTimes(2);
   });
 
-  it('uses provided executionMode override', async () => {
+  it('uses provided executionMode override (pipeline)', async () => {
     sendMock.mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({});
 
     const created = await createApp({
@@ -88,6 +91,20 @@ describe('createApp', () => {
     });
 
     expect(created.executionMode).toBe('pipeline');
+  });
+
+  // PR-43 — explicit override to legacy orchestrator path still respected
+  // (operators may need to opt back in for repro / hotfix).
+  it('uses provided executionMode override (orchestrator opt-in)', async () => {
+    sendMock.mockResolvedValueOnce({ Item: undefined }).mockResolvedValueOnce({});
+
+    const created = await createApp({
+      appId: 'dino3',
+      displayName: 'Dino Runner v3',
+      executionMode: 'orchestrator',
+    });
+
+    expect(created.executionMode).toBe('orchestrator');
   });
 
   it('rejects invalid slug format', async () => {

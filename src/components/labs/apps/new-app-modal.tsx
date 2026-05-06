@@ -43,7 +43,11 @@ export function NewAppModal({
   const [slug, setSlug] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [icon, setIcon] = useState('📦');
-  const [executionMode, setExecutionMode] = useState<'pipeline' | 'orchestrator'>('orchestrator');
+  // PR-43 (2026-05-06) — default flipped from 'orchestrator' to 'pipeline'
+  // to match the API/repository default. brick-breaker forensic confirmed
+  // the orchestrator path bypasses every Phase 2-A improvement; pipeline
+  // is now the canonical path. Operator can override via the form.
+  const [executionMode, setExecutionMode] = useState<'pipeline' | 'orchestrator'>('pipeline');
   // PR-13 — default starter is `nextjs-base`. Operator picks a derivative
   // (canvas-game, form-app, dashboard) when their intent matches a domain.
   const [boilerplateType, setBoilerplateType] = useState<BoilerplateType>('nextjs-base');
