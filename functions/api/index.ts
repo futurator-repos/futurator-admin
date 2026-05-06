@@ -6288,7 +6288,10 @@ app.post('/api/apps', authMiddleware, async (c) => {
     displayName: input.displayName.trim(),
     icon: input.icon,
     workingDir: `/home/ubuntu/projects/${input.appId}`,
-    executionMode: input.executionMode ?? 'pipeline',
+    // PR-46 — pipeline is the only supported path; ignore client override.
+    // The 'orchestrator' enum value remains in the type union for back-compat
+    // with persisted App rows from before PR-46.
+    executionMode: 'pipeline',
     currentlyDeployedPlanId: null,
     deployJobIds: [],
     workingTreeStatus: 'clean',
@@ -6526,7 +6529,11 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
     status: 'concept',
     epicIds: [],
     workingDir: appRow.workingDir,
-    executionMode: parsed.data.executionMode ?? appRow.executionMode,
+    // PR-46 — pipeline is the only supported path. Ignore the App's
+    // persisted executionMode and any client-supplied override; orchestrator
+    // is retired. The 'orchestrator' enum value remains for back-compat with
+    // existing Plan rows but new Plans always run on the pipeline.
+    executionMode: 'pipeline',
     rigor:
       parsed.data.rigor ??
       existingPlans.filter((p) => p.status === 'delivered').at(-1)?.rigor ??

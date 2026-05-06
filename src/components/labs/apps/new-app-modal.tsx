@@ -43,11 +43,16 @@ export function NewAppModal({
   const [slug, setSlug] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [icon, setIcon] = useState('📦');
-  // PR-43 (2026-05-06) — default flipped from 'orchestrator' to 'pipeline'
-  // to match the API/repository default. brick-breaker forensic confirmed
-  // the orchestrator path bypasses every Phase 2-A improvement; pipeline
-  // is now the canonical path. Operator can override via the form.
-  const [executionMode, setExecutionMode] = useState<'pipeline' | 'orchestrator'>('pipeline');
+  // PR-46 (2026-05-06) — orchestrator path retired from the New App form.
+  // The brick-breaker-2 run on 2026-05-06 confirmed the step-based pipeline
+  // is functional and orchestrator's purpose (driving the legacy epic-dev
+  // single-Claude path) is no longer needed. The 'orchestrator' enum value
+  // is retained in the type union for back-compat with persisted App rows
+  // but no NEW data writes set it.
+  //
+  // Hardcoded to 'pipeline' — no operator-facing toggle. Re-enable via a
+  // hidden flag (e.g. ?legacy=1) if a regression ever requires repro.
+  const executionMode = 'pipeline' as const;
   // PR-13 — default starter is `nextjs-base`. Operator picks a derivative
   // (canvas-game, form-app, dashboard) when their intent matches a domain.
   const [boilerplateType, setBoilerplateType] = useState<BoilerplateType>('nextjs-base');
@@ -76,7 +81,7 @@ export function NewAppModal({
     setSlug('');
     setDisplayName('');
     setIcon('📦');
-    setExecutionMode('orchestrator');
+    // PR-46 — executionMode is hardcoded to 'pipeline'; nothing to reset.
     setBoilerplateType('nextjs-base');
     setBmadEnabled(true);
     setServerError(null);
@@ -217,31 +222,10 @@ export function NewAppModal({
             </div>
           )}
 
-          <div className="space-y-1.5">
-            <Label>Execution mode</Label>
-            <div className="flex gap-4">
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  name="execution-mode"
-                  value="orchestrator"
-                  checked={executionMode === 'orchestrator'}
-                  onChange={() => setExecutionMode('orchestrator')}
-                />
-                Orchestrator (recommended)
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  name="execution-mode"
-                  value="pipeline"
-                  checked={executionMode === 'pipeline'}
-                  onChange={() => setExecutionMode('pipeline')}
-                />
-                Legacy pipeline
-              </label>
-            </div>
-          </div>
+          {/* PR-46 — execution mode toggle removed. Pipeline is the only
+           * supported path now. The 'orchestrator' enum value remains in
+           * the type union for back-compat with persisted App rows but
+           * no new App is created with it. */}
 
           {serverError && <p className="text-sm text-destructive">{serverError}</p>}
         </div>

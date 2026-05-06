@@ -395,11 +395,26 @@ Write one test per needs_browser=true criterion. Be specific about what the visu
           ] as PipelineStep[])
         : []),
 
-      // Phase C.4: tamper-check (production only). If the dev agent edited
+      // Phase C.4 + PR-41 (mvp+): tamper-check. If the dev agent edited
       // test files authored in test-author, revert those files and fail
-      // the step so the loop can retry with a fresh attempt. Implemented
-      // as a self-contained shell snippet so the daemon doesn't need a
-      // bespoke step type.
+      // the step so the loop can retry with a fresh attempt.
+      //
+      // PR-46 (2026-05-06) — heredoc rewrite. The previous inline
+      // `echo "{{TEST_FILES}}" | tr ... | grep -vE '^---' | grep -E '...'`
+      // chain failed on Linux bash with "syntax error near unexpected
+      // token `('" when the multi-line {{TEST_FILES}} value (which
+      // includes the fence markers per the 'between' extractor's
+      // inclusive semantics, agent-daemon.mjs:475) interacted with the
+      // surrounding single-quoted regexes. Confirmed on brick-breaker-2
+      // 2026-05-06 with mvp rigor.
+      //
+      // Robust pattern: write the raw {{TEST_FILES}} block (fence
+      // markers + paths + blanks) to .pipeline/tamper-input.txt via a
+      // quoted-delimiter heredoc — the heredoc body is NOT subject to
+      // shell expansion or quote interpretation (POSIX guarantee), so
+      // arbitrary multi-line content lands verbatim. Then a single grep
+      // filters the actual paths and the rest of the logic proceeds
+      // unchanged.
       ...(tamperOn
         ? ([
             {
@@ -407,16 +422,17 @@ Write one test per needs_browser=true criterion. Be specific about what the visu
               stepType: 'shell' as const,
               command:
                 `cd ${workingDir} && ` +
-                // Compute the set of test files TEST agent authored. The
-                // {{TEST_FILES}} var is the raw capture BETWEEN the fence
-                // markers — which INCLUDES the fences themselves. Strip
-                // the fence lines, blanks, and any line that doesn't look
-                // like a filesystem path before feeding to git.
-                `echo "{{TEST_FILES}}" | tr '\\n' '\\0' | xargs -0 -n1 ` +
-                `| grep -vE '^\\s*$' ` +
-                `| grep -vE '^---' ` +
-                `| grep -E '\\.(test|spec)\\.[jt]sx?$|^e2e/|^tests/' ` +
-                `> /tmp/tamper-expected.txt 2>/dev/null || true; ` +
+                `mkdir -p .pipeline && ` +
+                // Write {{TEST_FILES}} verbatim to disk. The quoted
+                // 'EOF_TAMPER' delimiter prevents shell expansion inside
+                // the heredoc body — multi-line + paren + quote content
+                // all land literally.
+                `cat > .pipeline/tamper-input.txt << 'EOF_TAMPER'\n` +
+                `{{TEST_FILES}}\n` +
+                `EOF_TAMPER\n` +
+                // Filter to actual test file paths (drops fence markers,
+                // blank lines, anything not matching a test-path regex).
+                `grep -E '\\.(test|spec)\\.[jt]sx?$|^e2e/|^tests/' .pipeline/tamper-input.txt > /tmp/tamper-expected.txt 2>/dev/null || true; ` +
                 `if [ ! -s /tmp/tamper-expected.txt ]; then ` +
                 `  echo __TAMPER_CLEAN__ '(no test files extracted)'; ` +
                 `  exit 0; ` +

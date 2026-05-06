@@ -27,11 +27,14 @@ export function AppSettingsDialog({
   const update = useUpdateApp(app.appId);
   const [displayName, setDisplayName] = useState(app.displayName);
   const [icon, setIcon] = useState(app.icon ?? '📦');
-  const [executionMode, setExecutionMode] = useState(app.executionMode);
+  // PR-46 — executionMode is no longer operator-editable. Pipeline is the
+  // only supported path; pre-existing Apps with executionMode='orchestrator'
+  // continue to work (their persisted value is honored at runtime) but the
+  // settings dialog no longer surfaces the toggle.
 
   const submit = () => {
     update.mutate(
-      { displayName: displayName.trim(), icon: icon || undefined, executionMode },
+      { displayName: displayName.trim(), icon: icon || undefined },
       { onSuccess: () => onOpenChange(false) },
     );
   };
@@ -65,29 +68,10 @@ export function AppSettingsDialog({
               className="w-20 text-center text-xl"
             />
           </div>
-          <div className="space-y-1.5">
-            <Label>Execution mode (default for new Plans)</Label>
-            <div className="flex gap-4">
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  name="settings-mode"
-                  checked={executionMode === 'orchestrator'}
-                  onChange={() => setExecutionMode('orchestrator')}
-                />
-                Orchestrator
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  name="settings-mode"
-                  checked={executionMode === 'pipeline'}
-                  onChange={() => setExecutionMode('pipeline')}
-                />
-                Legacy pipeline
-              </label>
-            </div>
-          </div>
+          {/* PR-46 — Execution mode toggle removed. Pipeline is the only
+           * supported path. Apps created before PR-46 retain their
+           * persisted executionMode at runtime; they just can't be
+           * toggled via this dialog anymore. */}
           {update.error && (
             <p className="text-sm text-destructive">{(update.error as Error).message}</p>
           )}
