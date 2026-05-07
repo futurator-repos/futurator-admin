@@ -298,12 +298,26 @@ export function serializeStoryContextPack(pack) {
   out.push('```');
   out.push('');
 
-  out.push('## Adjacent files (touch points)');
+  // PR-51 (2026-05-07) — split touch-point files into "existing" (on disk
+  // with digestible content) and "to create" (declared in touchPoints but
+  // not yet on disk). Previously both were rendered in the same section
+  // and DEV agents sometimes mistook the `(file not found)` placeholder
+  // for an actual file at that path → confused Read attempts +
+  // hallucinated content.
+  //
+  // brick-breaker-3 forensic showed DEV in story 1 doing 17+ Reads
+  // because the context-pack didn't make it visually clear which paths
+  // were existing files vs paths to create. Split sections give DEV an
+  // unambiguous signal.
   const digestKeys = Object.keys(pack.fileDigests || {}).sort();
-  if (digestKeys.length === 0) {
-    out.push('_(no touch-point files digested — story may be brand new)_');
+  const existingKeys = digestKeys.filter((k) => pack.fileDigests[k].sha !== 'missing');
+  const pendingKeys = digestKeys.filter((k) => pack.fileDigests[k].sha === 'missing');
+
+  out.push('## Adjacent files (existing on disk)');
+  if (existingKeys.length === 0) {
+    out.push('_(no existing touch-point files — story may be brand new)_');
   } else {
-    for (const path of digestKeys) {
+    for (const path of existingKeys) {
       const d = pack.fileDigests[path];
       const trunc = d.truncated ? ' (truncated)' : '';
       out.push(`### \`${path}\` — sha:${d.sha}${trunc}`);
@@ -313,6 +327,23 @@ export function serializeStoryContextPack(pack) {
     }
   }
   out.push('');
+
+  // PR-51 — explicit "to create" section. DEV agent reads this and knows
+  // these paths are EXPECTED to be empty; it should CREATE them, not
+  // attempt to Read them.
+  if (pendingKeys.length > 0) {
+    out.push('## Adjacent files (to create — these do NOT exist yet)');
+    out.push(
+      'These paths are declared in `storySpec.touchPoints` but are not on ' +
+        'disk yet. DEV is expected to CREATE them. Do NOT use the Read tool ' +
+        'on these paths — Read will fail and waste a turn.',
+    );
+    out.push('');
+    for (const path of pendingKeys) {
+      out.push(`- \`${path}\``);
+    }
+    out.push('');
+  }
 
   // PR-42 (Story 2-A-2-2) — existingTests + publicExports per v2.5 §11.1.
   // The TEST prompt template treats `existingTests` entries as immutable

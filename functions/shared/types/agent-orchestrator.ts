@@ -149,6 +149,23 @@ export interface PipelineStep {
   validations?: ValidationConfig[];
   loopTo?: string; // step ID: if validations fail, run that step then re-check this one
 
+  /**
+   * Pipeline v2 Phase 2-A — PR-51 (2026-05-07).
+   *
+   * When `true`, the daemon re-resolves PROJECT_CONTEXT before this step
+   * executes (so the agent sees the post-state of prior steps' writes).
+   * When `false`, the step uses the cached PROJECT_CONTEXT from job start.
+   * When absent, the daemon applies the default rule:
+   *   - `review`, `retry`, `compile-knowledge` → refresh
+   *   - everything else → no refresh
+   *
+   * Cost: one extra context-pack assembly per refreshed step (~50ms +
+   * file reads). Saves agent tool calls (REVIEWER's typical 3-5 Reads
+   * after DEV writes go to zero when the pack already reflects the
+   * post-state).
+   */
+  refreshContext?: boolean;
+
   // Shell-specific
   command?: string; // bash command to execute
   timeout?: number; // ms, default 30000

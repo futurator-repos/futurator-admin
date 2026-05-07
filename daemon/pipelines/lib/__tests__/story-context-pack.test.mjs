@@ -223,6 +223,41 @@ describe('buildStoryContextPack', () => {
     expect(out).toContain('## Recent diffs');
     expect(out).toContain('## Prior story work summaries');
   });
+
+  // PR-51 — split touch-points into existing vs to-create sections.
+  it('serializer splits existing files from pending-create files', async () => {
+    const pack = await buildStoryContextPack({
+      story: {
+        ...sampleStory(),
+        touchPoints: ['src/main.js', 'src/does-not-exist-yet.js'],
+      },
+      projectDir: dir,
+    });
+    const out = serializeStoryContextPack(pack);
+    expect(out).toContain('## Adjacent files (existing on disk)');
+    expect(out).toContain('## Adjacent files (to create — these do NOT exist yet)');
+    // existing file is in the existing section
+    const existingSectionStart = out.indexOf('## Adjacent files (existing on disk)');
+    const pendingSectionStart = out.indexOf('## Adjacent files (to create');
+    expect(out.slice(existingSectionStart, pendingSectionStart)).toContain('src/main.js');
+    expect(out.slice(existingSectionStart, pendingSectionStart)).not.toContain(
+      'src/does-not-exist-yet.js',
+    );
+    // pending file is in the pending section
+    expect(out.slice(pendingSectionStart)).toContain('src/does-not-exist-yet.js');
+    // pending section warns DEV not to Read these
+    expect(out.slice(pendingSectionStart)).toMatch(/do NOT use the Read tool/i);
+  });
+
+  it('serializer omits the pending section when all touch-points exist', async () => {
+    const pack = await buildStoryContextPack({
+      story: { ...sampleStory(), touchPoints: ['src/main.js'] },
+      projectDir: dir,
+    });
+    const out = serializeStoryContextPack(pack);
+    expect(out).toContain('## Adjacent files (existing on disk)');
+    expect(out).not.toContain('## Adjacent files (to create');
+  });
 });
 
 describe('parseKnowledgeIndex', () => {

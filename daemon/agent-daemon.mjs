@@ -2034,27 +2034,75 @@ async function executePipeline(job) {
   // this fix the placeholder was left literal and the reviewer hallucinated
   // ACs from the developer's summary alone.
   //
+  // PR-51 (2026-05-07) — refactored into a helper so steps with
+  // `refreshContext: true` (review + retry per story-pipeline.ts) can
+  // re-assemble the pack mid-job. brick-breaker-3 forensic showed that
+  // PROJECT_CONTEXT was static across all steps within a job, so REVIEWER
+  // couldn't see DEV's writes via the context pack and had to spend
+  // tool calls Reading the files. With per-step refresh, REVIEWER's
+  // pack reflects DEV's post-state and tool calls drop.
+  //
   // Best-effort: the resolver never throws, returns a stub failure pack on
-  // any error so the pipeline still runs. Skipped when PROJECT_CONTEXT is
-  // already populated (lets future callers pre-compute it API-side).
-  if (!variables.PROJECT_CONTEXT && variables.STORY_ID) {
+  // any error so the pipeline still runs. validationErrors[] surfaces as
+  // attention.context-pack-invalid (Story 2-A-2-1 / PR-33).
+  async function refreshProjectContext(reason) {
     try {
-      const { body, failure } = await resolveAndSerializeContextPack({
+      const { body, failure, validationErrors } = await resolveAndSerializeContextPack({
         ddb,
         job,
         variables,
-        logger: { info: (m) => log('info', m), warn: (m) => log('warn', m), error: (m) => log('error', m) },
+        logger: {
+          info: (m) => log('info', m),
+          warn: (m) => log('warn', m),
+          error: (m) => log('error', m),
+        },
       });
       variables.PROJECT_CONTEXT = body || '';
       if (failure) {
-        log('warn', `[${jobId.slice(0, 8)}] context pack stub: ${failure}`);
+        log('warn', `[${jobId.slice(0, 8)}] context pack stub (${reason}): ${failure}`);
       } else {
-        log('info', `[${jobId.slice(0, 8)}] context pack assembled (${body.length} chars)`);
+        log(
+          'info',
+          `[${jobId.slice(0, 8)}] context pack ${reason} (${body.length} chars)`,
+        );
+      }
+      // PR-51 — when validation fails, emit a medium-severity attention
+      // item so the operator knows the agent is running with a
+      // potentially malformed context. Pipeline still proceeds with the
+      // stub body (PR-33's fail-open semantics preserved).
+      if (validationErrors && validationErrors.length > 0 && variables.PLAN_ID) {
+        try {
+          await writeAttentionItem(
+            ddb,
+            {
+              planId: variables.PLAN_ID,
+              dedupKey: `context-pack-invalid:${jobId}:${reason}`,
+              severity: 'medium',
+              category: 'context-pack-invalid',
+              title: `PROJECT_CONTEXT validation failed (${reason})`,
+              body:
+                `${validationErrors.length} validation error(s) — pipeline ` +
+                `proceeded with stub body.\n\n` +
+                validationErrors
+                  .slice(0, 10)
+                  .map((e) => `- ${e}`)
+                  .join('\n'),
+              context: { jobId, reason },
+            },
+            (level, msg, data) => log(level, msg, data),
+          );
+        } catch (attnErr) {
+          log('warn', `[${jobId.slice(0, 8)}] attention.context-pack-invalid emit failed: ${attnErr.message}`);
+        }
       }
     } catch (err) {
-      log('error', `[${jobId.slice(0, 8)}] context pack resolver threw: ${err.message}`);
+      log('error', `[${jobId.slice(0, 8)}] context pack resolver threw (${reason}): ${err.message}`);
       variables.PROJECT_CONTEXT = `<!-- context pack failed: ${err.message} -->`;
     }
+  }
+
+  if (!variables.PROJECT_CONTEXT && variables.STORY_ID) {
+    await refreshProjectContext('initial-assembly');
   } else if (!variables.PROJECT_CONTEXT) {
     // No STORY_ID — orchestrator-level or pipeline-init-only jobs. Use a
     // benign empty marker so {{PROJECT_CONTEXT}} doesn't survive substitute.
@@ -2196,6 +2244,27 @@ async function executePipeline(job) {
     // step transition; no scan / no extra event. The story dashboard reads
     // `job.currentStepId` directly.
     await updateJobFields(jobId, { currentStepIndex: i, currentStepId: step.id });
+
+    // PR-51 (2026-05-07) — refresh PROJECT_CONTEXT before steps that
+    // benefit from seeing prior step's writes (review sees DEV's edits;
+    // retry sees DEV's first-attempt writes). Skip when STORY_ID is
+    // absent (orchestrator-level jobs) or when the step opts out.
+    //
+    // Default refresh-eligible steps: review, retry, compile-knowledge.
+    // Other steps (test-author, dev, test-verify, tamper-check,
+    // baseline-regression, compile-diff, compile-sync, compile-push)
+    // either don't benefit (they run BEFORE / DURING DEV's writes) or
+    // produce their own diff (compile-diff explicitly reads HEAD).
+    //
+    // The step's `refreshContext` field overrides this default when set.
+    const REFRESH_BY_DEFAULT = new Set(['review', 'retry', 'compile-knowledge']);
+    const shouldRefresh =
+      typeof step.refreshContext === 'boolean'
+        ? step.refreshContext
+        : REFRESH_BY_DEFAULT.has(step.id);
+    if (shouldRefresh && variables.STORY_ID && i > 0) {
+      await refreshProjectContext(`pre-${step.id}`);
+    }
 
     // ── Non-blocking COMPILE phase handling ──
     if (isCompileStep(step.id)) {
