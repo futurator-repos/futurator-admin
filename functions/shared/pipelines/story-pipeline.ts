@@ -439,10 +439,21 @@ Write one test per needs_browser=true criterion. Be specific about what the visu
                 `fi; ` +
                 // Check for unstaged or staged edits to those files since
                 // TEST committed them. `diff --name-only HEAD` covers both.
-                `git --no-pager diff --name-only HEAD -- \\$(cat /tmp/tamper-expected.txt) 2>/dev/null > /tmp/tamper-dirty.txt || true; ` +
+                //
+                // PR-47 (2026-05-07) — removed the `\\$` escape on the
+                // command substitutions. The original `\\$(cat ...)` was a
+                // misguided attempt to escape the dollar sign at the
+                // template-literal layer, but it produces `\$(...)` in
+                // bash, which is parsed as `\` (escape) + `$(...)`
+                // (subshell). After a heredoc closes, bash treats the
+                // following `(` as an unexpected token. This was a
+                // dormant bug since C.4 — the step was production-only
+                // until PR-41 promoted it to mvp+, and no production
+                // plan had ever exercised it.
+                `git --no-pager diff --name-only HEAD -- $(cat /tmp/tamper-expected.txt) 2>/dev/null > /tmp/tamper-dirty.txt || true; ` +
                 `if [ -s /tmp/tamper-dirty.txt ]; then ` +
                 `  echo __TAMPER_DETECTED__; cat /tmp/tamper-dirty.txt; ` +
-                `  git checkout -- \\$(cat /tmp/tamper-dirty.txt) || true; ` +
+                `  git checkout -- $(cat /tmp/tamper-dirty.txt) || true; ` +
                 `  exit 1; ` +
                 `else ` +
                 `  echo __TAMPER_CLEAN__; ` +
