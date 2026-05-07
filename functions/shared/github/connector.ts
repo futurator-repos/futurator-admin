@@ -31,6 +31,9 @@ import type {
   FileContent,
   FileTooLarge,
   ConnectorResult,
+  GitHubCommit,
+  GitHubBranch,
+  GitHubPullRequest,
 } from './types';
 
 // Re-export everything so consumers only need one import path
@@ -43,6 +46,9 @@ export type {
   FileContent,
   FileTooLarge,
   ConnectorResult,
+  GitHubCommit,
+  GitHubBranch,
+  GitHubPullRequest,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -497,4 +503,60 @@ export async function deleteRepo(
     method: 'DELETE',
   });
   return { data: { deleted: true }, rateLimit };
+}
+
+// ---------------------------------------------------------------------------
+// Git graph surface — commits / branches / pull requests
+// ---------------------------------------------------------------------------
+
+/**
+ * listCommits — GET /repos/{owner}/{name}/commits
+ *
+ * Returns commits reachable from `opts.sha` (defaults to the repo's default
+ * branch). Newest first. Caps at GitHub's per_page=100.
+ */
+export async function listCommits(
+  owner: string,
+  name: string,
+  opts: { sha?: string; perPage?: number } = {},
+): Promise<ConnectorResult<GitHubCommit[]>> {
+  const perPage = Math.min(Math.max(opts.perPage ?? 30, 1), 100);
+  const qs = new URLSearchParams({ per_page: String(perPage) });
+  if (opts.sha) qs.set('sha', opts.sha);
+  return githubFetch<GitHubCommit[]>(`/repos/${owner}/${name}/commits?${qs.toString()}`);
+}
+
+/**
+ * listBranches — GET /repos/{owner}/{name}/branches
+ *
+ * Returns up to 100 branches (one page). Sufficient for the GitGraph view —
+ * we only ever render a handful of branch lanes.
+ */
+export async function listBranches(
+  owner: string,
+  name: string,
+): Promise<ConnectorResult<GitHubBranch[]>> {
+  return githubFetch<GitHubBranch[]>(`/repos/${owner}/${name}/branches?per_page=100`);
+}
+
+/**
+ * listPullRequests — GET /repos/{owner}/{name}/pulls
+ *
+ * `state` defaults to 'all' so we can show both open and merged PRs in the
+ * graph (the prototype displays both). Sorted by recently updated first.
+ */
+export async function listPullRequests(
+  owner: string,
+  name: string,
+  opts: { state?: 'open' | 'closed' | 'all'; perPage?: number } = {},
+): Promise<ConnectorResult<GitHubPullRequest[]>> {
+  const state = opts.state ?? 'all';
+  const perPage = Math.min(Math.max(opts.perPage ?? 30, 1), 100);
+  const qs = new URLSearchParams({
+    state,
+    per_page: String(perPage),
+    sort: 'updated',
+    direction: 'desc',
+  });
+  return githubFetch<GitHubPullRequest[]>(`/repos/${owner}/${name}/pulls?${qs.toString()}`);
 }

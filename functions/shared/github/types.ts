@@ -95,6 +95,42 @@ export interface FileTooLarge {
 }
 
 // ---------------------------------------------------------------------------
+// Git graph shapes (commits / branches / pull requests)
+// ---------------------------------------------------------------------------
+
+export interface GitHubCommit {
+  sha: string;
+  parents: { sha: string }[];
+  commit: {
+    message: string;
+    author: { name: string; email: string; date: string };
+  };
+  /** Null when the committer email isn't tied to a GitHub user. */
+  author: { login: string; avatar_url: string } | null;
+  html_url: string;
+}
+
+export interface GitHubBranch {
+  name: string;
+  commit: { sha: string };
+  protected: boolean;
+}
+
+export interface GitHubPullRequest {
+  number: number;
+  title: string;
+  state: 'open' | 'closed';
+  /** Convenience flag GitHub adds on `closed` PRs that were merged. */
+  merged_at: string | null;
+  merge_commit_sha: string | null;
+  head: { ref: string; sha: string };
+  base: { ref: string };
+  user: { login: string; avatar_url: string } | null;
+  html_url: string;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
 // Connector return envelope
 // ---------------------------------------------------------------------------
 

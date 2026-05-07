@@ -39,6 +39,7 @@ import { PIPELINE_STAGES, pipelineStageIndexFor, type PipelineStage } from './co
 import { HierarchyView } from './views/hierarchy-view';
 import { KanbanView } from './views/kanban-view';
 import { GanttView } from './views/gantt-view';
+import { GitGraphView } from './views/git-graph-view';
 import { PlanReviewView } from './views/plan-review-view';
 import { QaReviewView } from './views/qa-review-view';
 import { DeployStageView } from './views/deploy-stage-view';
@@ -52,7 +53,7 @@ type ViewId = StageId | 'party';
 const STAGE_KEY = 'labs.plan-dashboard.stage';
 const SUBTAB_KEY = 'labs.plan-dashboard.subtab';
 const VALID_STAGES: StageId[] = PIPELINE_STAGES.map((s) => s.id);
-const VALID_SUBTABS: DevelopingSubtab[] = ['hierarchy', 'kanban', 'gantt'];
+const VALID_SUBTABS: DevelopingSubtab[] = ['hierarchy', 'kanban', 'gantt', 'gitgraph'];
 
 function isStage(v: string | null): v is StageId {
   return v !== null && (VALID_STAGES as string[]).includes(v);
@@ -169,6 +170,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
     if ((plan.epicIds?.length ?? 0) > 0) return;
     if (autoDiscovered.has(planId)) return;
     if (plan.status !== 'concept') return; // Only meaningful in concept stage
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setAutoDiscovered((s) => new Set(s).add(planId));
     apply
       .mutateAsync({}) // jobId omitted → API auto-discovers
@@ -366,6 +368,12 @@ export function PlanDashboard({ planId }: { planId: string }) {
             )}
             {activeSubtab === 'kanban' && <KanbanView plan={dashboard} />}
             {activeSubtab === 'gantt' && <GanttView plan={dashboard} tNow={tNow} />}
+            {activeSubtab === 'gitgraph' && (
+              <GitGraphView
+                appId={plan.appId ?? plan.workingDir.split('/').filter(Boolean).pop() ?? null}
+                planName={plan.displayName ?? plan.name}
+              />
+            )}
           </>
         )}
 

@@ -3,22 +3,23 @@
 /**
  * Developing sub-tabs — shown only while viewing the Developing stage.
  *
- * Three views: Hierarchy, Kanban, Gantt. Deploy lives on its own Pipeline
- * stage (reached via "Promote to Deploy" from QA Review or by clicking the
- * Deploy node in the pipeline bar). Party Mode is a top-level pipeline
- * button.
+ * Four views: Hierarchy, Kanban, Gantt, GitGraph. Deploy lives on its own
+ * Pipeline stage (reached via "Promote to Deploy" from QA Review or by
+ * clicking the Deploy node in the pipeline bar). Party Mode is a top-level
+ * pipeline button.
  *
  * Note: `'deploy'` retained in DevelopingSubtab union for backward-compat
  * with any persisted `?subtab=deploy` URLs in user history; it just no
  * longer surfaces as a tab.
  */
 
-export type DevelopingSubtab = 'hierarchy' | 'kanban' | 'gantt' | 'deploy';
+export type DevelopingSubtab = 'hierarchy' | 'kanban' | 'gantt' | 'gitgraph' | 'deploy';
 
 const SUBTABS: { id: DevelopingSubtab; label: string }[] = [
   { id: 'hierarchy', label: 'Hierarchy' },
   { id: 'kanban', label: 'Kanban' },
   { id: 'gantt', label: 'Gantt' },
+  { id: 'gitgraph', label: 'GitGraph' },
 ];
 
 export function DevelopingSubtabs({

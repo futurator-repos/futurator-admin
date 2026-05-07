@@ -129,8 +129,12 @@ import {
   getFileContent,
   createRepoFromTemplate,
   deleteRepo,
+  listCommits,
+  listBranches,
+  listPullRequests,
   GitHubError,
 } from '../shared/github/connector';
+import type { GitHubCommit } from '../shared/github/connector';
 import {
   BOILERPLATE_REGISTRY,
   normalizeBoilerplateType,
@@ -7118,6 +7122,70 @@ app.get('/api/github/repos/:owner/:name/files', authMiddleware, async (c) => {
       return c.json({ tooLarge: true, size: data.size, rateLimit });
     }
     return c.json({ ...data, rateLimit });
+  } catch (err) {
+    if (err instanceof GitHubError) {
+      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+    }
+    throw err;
+  }
+});
+
+// GET /api/github/repos/:owner/:name/git-graph — bundled commit/branch/PR
+// payload that powers the Plan Dashboard "GitGraph" subtab. One round-trip
+// per refresh: parallel calls to /commits, /branches, /pulls, plus a small
+// per-branch top-up so feature branches contribute commits the default-
+// branch fetch would have missed. Auth-required.
+app.get('/api/github/repos/:owner/:name/git-graph', authMiddleware, async (c) => {
+  const owner = c.req.param('owner');
+  const name = c.req.param('name');
+  const limit = Math.min(Math.max(parseInt(c.req.query('limit') ?? '40', 10) || 40, 5), 100);
+
+  try {
+    // Resolve repo first so we know the default branch + can short-circuit
+    // 404s with a typed error before burning extra rate-limit on the rest.
+    const { data: repo } = await getRepo(owner, name);
+
+    const [commitsRes, branchesRes, pullsRes] = await Promise.all([
+      listCommits(owner, name, { sha: repo.default_branch, perPage: limit }),
+      listBranches(owner, name),
+      listPullRequests(owner, name, { state: 'all', perPage: Math.min(limit, 30) }),
+    ]);
+
+    // Top up with commits unique to non-default branches. Cap to a few
+    // branches so a runaway repo doesn't trigger many extra API calls.
+    const otherBranches = branchesRes.data
+      .filter((b) => b.name !== repo.default_branch)
+      .slice(0, 5);
+    const topupResults = await Promise.all(
+      otherBranches.map((b) =>
+        listCommits(owner, name, { sha: b.commit.sha, perPage: 10 }).catch(() => null),
+      ),
+    );
+
+    const merged = new Map<string, GitHubCommit>();
+    for (const c of commitsRes.data) merged.set(c.sha, c);
+    for (const r of topupResults) {
+      if (!r) continue;
+      for (const c of r.data) if (!merged.has(c.sha)) merged.set(c.sha, c);
+    }
+
+    const finalCommits = [...merged.values()]
+      .sort((a, b) => b.commit.author.date.localeCompare(a.commit.author.date))
+      .slice(0, limit);
+
+    return c.json({
+      repo: {
+        name: repo.name,
+        full_name: repo.full_name,
+        description: repo.description,
+        default_branch: repo.default_branch,
+        html_url: repo.html_url,
+      },
+      commits: finalCommits,
+      branches: branchesRes.data,
+      pullRequests: pullsRes.data,
+      rateLimit: pullsRes.rateLimit,
+    });
   } catch (err) {
     if (err instanceof GitHubError) {
       return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
