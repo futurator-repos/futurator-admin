@@ -669,10 +669,24 @@ Fix the issues mentioned. Output only what you changed, then:
       // 4. Diff extraction -- identifies changed files
       // Story A.3: simplified. The per-story commit above guarantees HEAD~1
       // points at the prior-story tip, so `git diff --name-status HEAD~1 HEAD`
-      // is the only diff source we need. Empty output here means the dev
-      // produced zero in-scope edits — surfaced as a loud failure so the
-      // operator sees a `compile-sync-failed` attention item instead of
-      // silently documenting node_modules via the old `find -newer` fallback.
+      // is the only diff source we need.
+      //
+      // PR-52 (2026-05-07) — empty-diff classification softened. Pre-PR-52
+      // an empty diff failed the step loud, surfacing a `compile-failed`
+      // attention item. brick-breaker-3 retry showed this fires falsely
+      // when a story is RETRIED after a tamper-check failure: the retry's
+      // DEV correctly says "no changes needed" (files already exist from
+      // prior attempt's writes), the per-story commit is `--allow-empty`,
+      // HEAD~1..HEAD has no diff, and the loud-fail fired on a healthy
+      // pipeline path. With PR-52, an empty diff prints
+      // `EMPTY_DIFF_BY_DESIGN` and exits 0 — compile-knowledge has
+      // nothing to catalog (DIFF_MANIFEST is the empty marker), but the
+      // pipeline continues without the false attention.
+      //
+      // The original loud-fail intent (catch node_modules sweeps via the
+      // old `find -newer` fallback) is preserved by Story A.3's removal
+      // of that fallback — the `find -newer` code path is gone, so an
+      // empty diff today is genuinely empty, not a sweep miss.
       {
         id: 'compile-diff',
         stepType: 'shell' as const,
@@ -681,8 +695,9 @@ Fix the issues mentioned. Output only what you changed, then:
           `DIFF=$(git diff --name-status HEAD~1 HEAD 2>/dev/null | ` +
           `{ grep -v -E 'node_modules/|\\.git/|knowledge/|\\.mycelium/' || true; }); ` +
           `if [ -z "$DIFF" ]; then ` +
-          `  echo 'EMPTY_DIFF: per-story commit produced no in-scope changes' >&2; ` +
-          `  exit 1; ` +
+          `  echo 'EMPTY_DIFF_BY_DESIGN: per-story commit produced no in-scope changes ' \\` +
+          `       '(retry / no-op story); compile phase will emit nothing'; ` +
+          `  exit 0; ` +
           `fi; ` +
           `printf '%s\\n' "$DIFF"`,
         timeout: 15000,

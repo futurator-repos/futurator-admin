@@ -22,6 +22,20 @@ const workingDir = '/home/ubuntu/projects/foo';
  * docs/concepts/pipeline-v2/baseline-diff-design.md §3.2.
  */
 
+describe('PR-52 — compile-diff EMPTY_DIFF graceful (no false attention on retry)', () => {
+  it('compile-diff exits 0 with EMPTY_DIFF_BY_DESIGN marker when nothing in scope', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-diff');
+    expect(step?.stepType).toBe('shell');
+    expect(step?.command).toContain('EMPTY_DIFF_BY_DESIGN');
+    // Empty path now exits 0, NOT 1 (the loud-fail).
+    expect(step?.command).toContain('exit 0;');
+    expect(step?.command).not.toContain("'EMPTY_DIFF: per-story commit");
+  });
+});
+
 describe('PR-41 — tamper-check promoted to mvp+ rigor (Story 2-A-5-1)', () => {
   it('prototype rigor — tamper-check absent', () => {
     const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
