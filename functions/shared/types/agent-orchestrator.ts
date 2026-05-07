@@ -206,6 +206,21 @@ export interface AgentJob {
 
   // Runtime state (written by daemon)
   currentStepIndex?: number;
+  /**
+   * Pipeline v2 Phase 2-A — PR-50 (2026-05-07).
+   *
+   * Denormalized current step ID — written by the daemon on every step
+   * transition alongside `currentStepIndex` (agent-daemon.mjs ~L2193).
+   * Used by the UI to render a per-story status badge ('test', 'dev',
+   * 'review', 'compile', 'retry', etc.) without re-resolving
+   * `pipeline.steps[currentStepIndex].id` on every render.
+   *
+   * Single DDB write per step transition — no extra events, no scans.
+   * Bash-event-driven by design (the daemon's existing `step_start`
+   * push is the trigger; the field update is part of that same code
+   * path).
+   */
+  currentStepId?: string;
   variables?: Record<string, string>;
   sessions?: Record<string, string>; // stepId → Claude session ID
   stepResults?: StepResult[];

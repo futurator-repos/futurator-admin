@@ -5,6 +5,8 @@ import { useAgentJob } from '@/hooks/use-agent-job';
 import { StoryLiveOutput } from './story-live-output';
 import { StoryResult } from './story-result';
 import type { BlockerCode, EpicStory } from '@/types/epic-workflow';
+// PR-50 — friendly per-step status label.
+import { formatStepStatus, stepStatusTone } from '@/lib/step-status-labels';
 
 interface StoryCardProps {
   story: EpicStory;
@@ -122,22 +124,14 @@ export function StoryCard({
   const currentStep = job?.stepResults?.[job.stepResults.length - 1];
   const model = shortModel(currentStep?.model);
 
-  const currentPipelineStep = job?.pipeline?.steps?.[job?.currentStepIndex ?? 0];
-  const phaseLabel = isRunning
-    ? currentPipelineStep?.id === 'build-check'
-      ? 'Building...'
-      : currentPipelineStep?.id === 'server-check'
-        ? 'Server check...'
-        : currentPipelineStep?.id === 'dev-build-fix'
-          ? 'Fixing build...'
-          : currentPipelineStep?.id === 'dev-server-fix'
-            ? 'Fixing server...'
-            : currentPipelineStep?.agentId === 'REVIEWER'
-              ? 'In Review...'
-              : currentPipelineStep?.id === 'retry'
-                ? 'Fixing...'
-                : 'Developing...'
-    : null;
+  // PR-50 — per-story status from the daemon's denormalized field
+  // (`job.currentStepId`, written on every step transition). Falls back
+  // to `pipeline.steps[currentStepIndex].id` for jobs that pre-date PR-50.
+  const currentStepId =
+    job?.currentStepId ?? job?.pipeline?.steps?.[job?.currentStepIndex ?? 0]?.id ?? null;
+  const stepStatusLabel = isRunning ? formatStepStatus(currentStepId) : null;
+  const stepStatusToneClass = stepStatusTone(stepStatusLabel);
+  const phaseLabel = isRunning ? (stepStatusLabel ? `${stepStatusLabel}…` : 'Developing…') : null;
 
   const totalDuration = stepResults.reduce((s, r) => s + (r.durationMs || 0), 0);
   const totalCost = job?.totalCost || 0;
@@ -199,9 +193,13 @@ export function StoryCard({
             <span className="font-mono text-yellow-500 text-xs animate-pulse">0s</span>
           ))}
 
-        {/* Phase label when running */}
+        {/* Phase label when running — PR-50: tone-coded per step type so
+         *   reviewing / fixing / building visibly differ from generic
+         *   developing. */}
         {isRunning && phaseLabel && (
-          <span className="text-[10px] text-yellow-500 font-medium shrink-0">{phaseLabel}</span>
+          <span className={`text-[10px] font-medium shrink-0 ${stepStatusToneClass}`}>
+            {phaseLabel}
+          </span>
         )}
 
         {/* Duration when done */}

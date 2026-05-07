@@ -145,6 +145,12 @@ export interface AgentJob {
   workingDir: string;
   pipeline: PipelineDefinition;
   currentStepIndex?: number;
+  /**
+   * PR-50 (2026-05-07) — denormalized current step ID written by the
+   * daemon on every step transition. Used by per-story status badges
+   * (`src/lib/step-status-labels.ts::formatStepStatus`).
+   */
+  currentStepId?: string;
   variables?: Record<string, string>;
   sessions?: Record<string, string>;
   stepResults?: StepResult[];

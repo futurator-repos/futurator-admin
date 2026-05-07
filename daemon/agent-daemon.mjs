@@ -2190,7 +2190,12 @@ async function executePipeline(job) {
       );
     }
 
-    await updateJobFields(jobId, { currentStepIndex: i });
+    // PR-50 (2026-05-07) — denormalize the step ID alongside the index so
+    // the UI can render a per-story status badge without re-resolving
+    // pipeline.steps[currentStepIndex] on every poll. Single DDB write per
+    // step transition; no scan / no extra event. The story dashboard reads
+    // `job.currentStepId` directly.
+    await updateJobFields(jobId, { currentStepIndex: i, currentStepId: step.id });
 
     // ── Non-blocking COMPILE phase handling ──
     if (isCompileStep(step.id)) {
