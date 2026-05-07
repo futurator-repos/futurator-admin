@@ -31,13 +31,23 @@ export const CLASSIFICATION_TABLE: Record<AgentEventType, EventClassification> =
   // ── Streaming agent output ──────────────────────────────────────────────
   // text_delta is the agent "thinking out loud". Route by role:
   //   reviewer  → review
+  //   test      → test-author    (PR-49: was leaking into 'dev')
+  //   compiler  → compile        (PR-49: was leaking into 'dev')
   //   dev (0 retries) → dev
   //   dev (retries)   → fix  [handled in classifier.ts via retryCount]
   //   orchestrator    → compile (planning thoughts, not deliverable work)
   //   unknown role    → dev  (most common agent)
+  //
+  // PR-49 (2026-05-07) — added `test` + `compiler` overrides. brick-breaker-3
+  // forensic showed these roles' events leaking into the `dev` bucket
+  // (`test|tool_use → dev`: 96 events; `compiler|tool_use → dev`: 178
+  // events), so the dashboard's `dev` slice was inflated by 50%+ and the
+  // `test-author` / `compile` buckets read 0ms.
   text_delta: {
     byRole: {
       reviewer: 'review',
+      test: 'test-author',
+      compiler: 'compile',
       orchestrator: 'compile',
     },
     default: 'dev',
@@ -45,11 +55,15 @@ export const CLASSIFICATION_TABLE: Record<AgentEventType, EventClassification> =
 
   // ── Tool invocations ─────────────────────────────────────────────────────
   // Reviewer using tools (e.g. reading files) is still review time.
+  // TEST agent using tools (Glob, Read, Write) → test-author work.
+  // COMPILER using tools (Read, Write, Edit) → compile work.
   // Orchestrator using tools is compile/planning.
   // Dev using tools is dev (or fix on retry — classifier adjusts).
   tool_use: {
     byRole: {
       reviewer: 'review',
+      test: 'test-author',
+      compiler: 'compile',
       orchestrator: 'compile',
     },
     default: 'dev',
@@ -59,6 +73,8 @@ export const CLASSIFICATION_TABLE: Record<AgentEventType, EventClassification> =
   tool_result: {
     byRole: {
       reviewer: 'review',
+      test: 'test-author',
+      compiler: 'compile',
       orchestrator: 'compile',
     },
     default: 'dev',
@@ -69,6 +85,8 @@ export const CLASSIFICATION_TABLE: Record<AgentEventType, EventClassification> =
   result: {
     byRole: {
       reviewer: 'review',
+      test: 'test-author',
+      compiler: 'compile',
       orchestrator: 'compile',
     },
     default: 'dev',

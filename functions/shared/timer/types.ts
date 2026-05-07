@@ -17,6 +17,10 @@ import type { AgentJobStatus, AgentRole } from '../types/agent-orchestrator';
  *                 v2.5 §14. Captures the time the baseline-diff gate
  *                 spends comparing previously-passing tests against
  *                 post-DEV state.
+ * - tamper-check  Phase 2-A PR-49 (2026-05-07) — `tamper-check` shell step
+ *                 (v2.5 §16). Captures time spent verifying DEV didn't
+ *                 modify TEST-authored test files; auto-revert + DEV
+ *                 retry on detection.
  * - compile       Orchestrator machinery: wave/step lifecycle, extraction, validation,
  *                 inference, context-expansion. Does not advance deliverable directly.
  * - human-wait    Time the job is paused waiting for operator action (NEEDS_ATTENTION
@@ -46,6 +50,7 @@ export type TimerCategory =
   | 'po'
   | 'architect'
   | 'baseline-check'
+  | 'tamper-check'
   | 'compile'
   | 'human-wait'
   | 'machine-wait'

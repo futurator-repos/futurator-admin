@@ -70,6 +70,46 @@ const MATRIX: MatrixRow[] = [
     'review',
   ],
   ['result + reviewer → review', 'result', { agentRole: 'reviewer', retryCount: 0 }, 'review'],
+
+  // ── test-author + compile (PR-49 role overrides) ──────────────────────────
+  [
+    'text_delta + test → test-author',
+    'text_delta',
+    { agentRole: 'test', retryCount: 0 },
+    'test-author',
+  ],
+  [
+    'tool_use + test → test-author',
+    'tool_use',
+    { agentRole: 'test', retryCount: 0 },
+    'test-author',
+  ],
+  [
+    'tool_result + test → test-author',
+    'tool_result',
+    { agentRole: 'test', retryCount: 0 },
+    'test-author',
+  ],
+  ['result + test → test-author', 'result', { agentRole: 'test', retryCount: 0 }, 'test-author'],
+  [
+    'text_delta + compiler → compile',
+    'text_delta',
+    { agentRole: 'compiler', retryCount: 0 },
+    'compile',
+  ],
+  [
+    'tool_use + compiler → compile',
+    'tool_use',
+    { agentRole: 'compiler', retryCount: 0 },
+    'compile',
+  ],
+  [
+    'tool_result + compiler → compile',
+    'tool_result',
+    { agentRole: 'compiler', retryCount: 0 },
+    'compile',
+  ],
+  ['result + compiler → compile', 'result', { agentRole: 'compiler', retryCount: 0 }, 'compile'],
   [
     'review_verdict (any role) → review',
     'review_verdict',

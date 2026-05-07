@@ -1635,7 +1635,19 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
     //
     // We derive both AFTER the raw extractors run but BEFORE validations,
     // so the validation matrix sees a populated VERDICT.
-    if (extracted.REVIEW_CRITERIA && !variables.VERDICT) {
+    //
+    // PR-48 (2026-05-07) — re-derive UNCONDITIONALLY when REVIEW_CRITERIA
+    // is captured. The previous `!variables.VERDICT` guard meant iteration
+    // 2's review reused iteration 1's VERDICT — fine in steady state, but
+    // brick-breaker-3 forensic showed cases where iteration 1 didn't
+    // populate VERDICT (likely stale daemon code), then iteration 2's
+    // fresh REVIEW_CRITERIA wasn't re-parsed because `!variables.VERDICT`
+    // was false (still unset, but the check evaluates `!undefined` → true,
+    // so ACTUALLY this should fire). The real cause was an older daemon
+    // image without this code. Re-deriving every iteration guarantees the
+    // verdict reflects THIS iteration's REVIEW_CRITERIA, never a prior
+    // one — defensive consistency at zero cost (parser is pure + cheap).
+    if (extracted.REVIEW_CRITERIA) {
       try {
         const entries = parseReviewCriteria(extracted.REVIEW_CRITERIA);
         const agg = aggregateReviewVerdict(entries);

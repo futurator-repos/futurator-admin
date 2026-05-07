@@ -21,6 +21,9 @@ export interface AggregationResult {
 }
 
 // All valid categories — used to seed zero-entries so every key is always present.
+// PR-49 (2026-05-07) — added 'baseline-check' (was missing since PR-36) and
+// 'tamper-check' (new in PR-49). Without these, the forensic JSON's
+// `aggregate.byCategory` map didn't surface the new categories.
 const ALL_CATEGORIES: TimerCategory[] = [
   'dev',
   'test-author',
@@ -29,6 +32,8 @@ const ALL_CATEGORIES: TimerCategory[] = [
   'qa',
   'po',
   'architect',
+  'baseline-check',
+  'tamper-check',
   'compile',
   'human-wait',
   'machine-wait',

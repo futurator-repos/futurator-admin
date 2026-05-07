@@ -35,6 +35,7 @@ import { getPlanById } from '../repositories/plan-repository';
 import { getEpicById } from '../repositories/epic-workflow-repository';
 import { isTerminal } from '../types/agent-job-state-machine';
 import { classify } from './classifier';
+import { resolveStepCategory } from './step-category-map';
 import type { JobContext, TimerCategory, TimerSlice } from './types';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -194,7 +195,12 @@ export async function sliceForJob(jobId: string): Promise<TimerSlice[]> {
     const durationMs = new Date(endedAt).getTime() - new Date(startedAt).getTime();
 
     const ctx = buildJobContext(job, eventA, activeStatus);
-    const category = classify(eventA, ctx);
+    // PR-49 — stepId override takes precedence over classifier's role+
+    // event-type chain for shell steps (test-verify, tamper-check,
+    // baseline-regression, compile-commit-on-pass, compile-push, etc.).
+    // Falls back to the classifier when the stepId isn't mapped.
+    const stepOverride = resolveStepCategory(eventA.stepId);
+    const category = stepOverride ?? classify(eventA, ctx);
 
     const slice: TimerSlice = applyIdleDowngrade({
       jobId,
@@ -213,7 +219,9 @@ export async function sliceForJob(jobId: string): Promise<TimerSlice[]> {
   // Emit the trailing slice for the last event
   const lastEvent = events[events.length - 1];
   const lastCtx = buildJobContext(job, lastEvent, activeStatus);
-  const lastCategory = classify(lastEvent, lastCtx);
+  // PR-49 — same stepId override as inter-event slices.
+  const lastStepOverride = resolveStepCategory(lastEvent.stepId);
+  const lastCategory = lastStepOverride ?? classify(lastEvent, lastCtx);
 
   if (terminal) {
     // Terminal job: span last event → job.updatedAt (proxy for endedAt)
@@ -338,8 +346,7 @@ export async function sliceForPlan(planId: string): Promise<TimerSlice[]> {
     const next = allSlices[i + 1];
     if (!next) continue;
     if (cur.jobId === next.jobId) continue;
-    const gapMs =
-      new Date(next.startedAt).getTime() - new Date(cur.endedAt).getTime();
+    const gapMs = new Date(next.startedAt).getTime() - new Date(cur.endedAt).getTime();
     if (gapMs < INTER_JOB_GAP_MIN_MS) continue;
     filledSlices.push({
       jobId: '__inter_job__',
