@@ -1,5 +1,6 @@
 import type { PipelineDefinition } from '../types/agent-orchestrator';
 import { buildAgentConfig } from './role-policy';
+import { buildFrameworkDetectSnippet } from './framework-detect';
 
 /**
  * Plan-level final integration check.
@@ -83,11 +84,25 @@ Working directory: ${workingDir}
         validations: [],
       },
       // 3. Server health check — uses nohup + redirect to avoid daemon-stdout-hang (see 2026-04-21 incident)
+      //
+      // PR-59 (2026-05-13) — runtime framework detection. Was hardcoded to
+      // 5173 (Vite default); fails silently on Next.js / Remix / Expo / etc.
+      // The detect snippet inspects package.json and exports QA_PORT,
+      // QA_DEV_CMD, QA_HEALTH_PATH appropriate to the actual stack.
       {
         id: 'plan-server-check',
         stepType: 'shell' as const,
-        command: `kill $(lsof -ti:5173) 2>/dev/null; sleep 1; cd ${workingDir} && nohup npm run dev > /tmp/plan-devserver.log 2>&1 & sleep 2; STATUS=000; for i in $(seq 1 20); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5173 2>/dev/null); [ "$STATUS" = "200" ] && break; done; kill $(lsof -ti:5173) 2>/dev/null; [ "$STATUS" = "200" ]`,
-        timeout: 45000,
+        command: [
+          buildFrameworkDetectSnippet({ cwd: workingDir }),
+          `kill $(lsof -ti:$QA_PORT) 2>/dev/null; sleep 1`,
+          `cd ${workingDir} && nohup $QA_DEV_CMD > /tmp/plan-devserver-$QA_PORT.log 2>&1 </dev/null &`,
+          `sleep 2`,
+          `STATUS=000`,
+          `for i in $(seq 1 30); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$QA_PORT$QA_HEALTH_PATH 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
+          `kill $(lsof -ti:$QA_PORT) 2>/dev/null`,
+          `[ "$STATUS" = "200" ] || { echo "PLAN_SERVER_CHECK_FAILED: framework=$QA_FRAMEWORK port=$QA_PORT"; tail -40 /tmp/plan-devserver-$QA_PORT.log >&2 || true; exit 1; }`,
+        ].join('\n'),
+        timeout: 60000,
         captureAs: 'SERVER_OUTPUT',
         captureStderrAs: 'SERVER_ERROR',
         onFail: { action: 'fail' as const, injectAs: 'SERVER_ERROR' },

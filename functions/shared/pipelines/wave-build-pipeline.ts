@@ -1,5 +1,6 @@
 import type { PipelineDefinition } from '../types/agent-orchestrator';
 import { buildAgentConfig } from './role-policy';
+import { buildFrameworkDetectSnippet } from './framework-detect';
 
 /**
  * Wave-level build + server-check pipeline.
@@ -82,11 +83,26 @@ Working directory: ${workingDir}
       // For Vite-based starters (still in stub status as of PR-13), the
       // package.json `dev` script should ALSO encode `--host 0.0.0.0`
       // explicitly. Pipeline stays framework-agnostic.
+      // PR-59 (2026-05-13) — runtime framework detection.
+      //
+      // Was hardcoded to port 5173 (Vite default). Plans on Next.js,
+      // Expo, Remix, etc. would silently fail this gate because the
+      // dev server binds elsewhere (3000 / 19006 / etc.). The detect
+      // snippet reads `package.json` and exports QA_PORT / QA_DEV_CMD
+      // appropriate to the framework, so this gate works for any stack.
       {
         id: 'server-check',
         stepType: 'shell' as const,
-        command: `kill $(lsof -ti:5173) 2>/dev/null; sleep 1; cd ${workingDir} && (npm run dev &) && STATUS=000; for i in $(seq 1 15); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5173 2>/dev/null); [ "$STATUS" = "200" ] && break; done; kill $(lsof -ti:5173) 2>/dev/null; [ "$STATUS" = "200" ]`,
-        timeout: 30000,
+        command: [
+          buildFrameworkDetectSnippet({ cwd: workingDir }),
+          `kill $(lsof -ti:$QA_PORT) 2>/dev/null; sleep 1`,
+          `cd ${workingDir} && (nohup $QA_DEV_CMD > /tmp/wave-build-devserver-$QA_PORT.log 2>&1 </dev/null &)`,
+          `STATUS=000`,
+          `for i in $(seq 1 30); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$QA_PORT$QA_HEALTH_PATH 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
+          `kill $(lsof -ti:$QA_PORT) 2>/dev/null`,
+          `[ "$STATUS" = "200" ] || { echo "SERVER_CHECK_FAILED: framework=$QA_FRAMEWORK port=$QA_PORT"; tail -40 /tmp/wave-build-devserver-$QA_PORT.log >&2 || true; exit 1; }`,
+        ].join('\n'),
+        timeout: 60000,
         captureAs: 'SERVER_OUTPUT',
         captureStderrAs: 'SERVER_ERROR',
         onFail: {

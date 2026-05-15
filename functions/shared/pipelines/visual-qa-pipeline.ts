@@ -43,6 +43,7 @@ import type { Plan } from '../types/plan';
 import type { BoilerplateMetadata } from '../boilerplates/types';
 import { parseVisualTestViewport, formatViewport } from '../services/visual-test-classifier';
 import { buildAgentConfig } from './role-policy';
+import { buildFrameworkDetectSnippet } from './framework-detect';
 
 // ── Parser ───────────────────────────────────────────────────────────
 
@@ -386,12 +387,28 @@ export function buildQaAggregatePipeline(inputs: QaPipelineInputs): PipelineDefi
  */
 export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefinition {
   const { plan, allVisualTests, snapshotPrefix, jobId, boilerplate } = inputs;
-  const port = inputs.port ?? boilerplate?.defaultPort ?? DEFAULT_QA_PORT;
-  const healthcheck = boilerplate?.healthcheckPath ?? '/';
+  // PR-59 (2026-05-13) — framework detection moved to runtime.
+  //
+  // Previously, port + devCommand + healthcheck path were resolved at
+  // pipeline-build time from `boilerplate.qaContext` (BOILERPLATE_REGISTRY
+  // lookup keyed on App.boilerplateType). When the registered type drifts
+  // from what the working dir actually contains — e.g. App created as
+  // `nextjs-canvas-game` but PM generated Vite code — qa-prepare boots
+  // with the wrong flags (--hostname vs --host) and the dev server never
+  // becomes ready. spyhunter-1 hit this 2026-05-08: --hostname rejected
+  // by Vite CLI, every retry stalled.
+  //
+  // Fix: the qa-prepare bash command now reads `package.json` at runtime
+  // via `buildFrameworkDetectSnippet()`. Detection works for vite, next,
+  // remix, expo, sveltekit, nuxt; falls back to Vite-flavoured defaults
+  // for unknown frameworks. Operator can still override port via
+  // `inputs.port` (kept for the rare manual case).
   const warmupMs = boilerplate?.warmupMs ?? 0;
-  // Default boots a Vite-style server. Boilerplate-aware callers pass
-  // the right command via qaContext.devCommand.
-  const devCommand = boilerplate?.devCommand ?? `npm run dev -- --host 0.0.0.0 --port`;
+  const forcePort = inputs.port;
+  // `port` retained as a *fallback* used by steps that run after qa-prepare
+  // (qa-l0/l1/l2, qa-cleanup) — those steps read `qa-port.txt` written by
+  // qa-prepare and fall back to this value only if the file is missing.
+  const port = inputs.port ?? boilerplate?.defaultPort ?? DEFAULT_QA_PORT;
 
   // L0 / L1 / L2 partition. Caller has classified everything by now —
   // any unclassified test is treated as L0 (safest default; pure bash).
@@ -416,26 +433,42 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
         id: 'qa-prepare',
         stepType: 'shell',
         command: [
+          // PR-59 — runtime framework detection. Sets QA_PORT, QA_DEV_CMD,
+          // QA_HEALTH_PATH, QA_FRAMEWORK by inspecting package.json. All
+          // subsequent commands in this step use those bash variables.
+          buildFrameworkDetectSnippet({ cwd: plan.workingDir, forcePort }),
           `mkdir -p ${tmpResultsDir} ${tmpResultsDir}/screenshots`,
+          `# Persist QA_PORT so downstream steps (qa-l1, qa-cleanup) read it`,
+          `# without re-detecting. Cheap belt-and-braces — re-detect would also work.`,
+          `echo "$QA_PORT" > ${tmpResultsDir}/qa-port.txt`,
           `# Kill any process holding our port (defense in depth — Q1 dropped fan-out so this is rarely needed)`,
-          `kill $(lsof -ti:${port}) 2>/dev/null || true`,
+          `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
           `sleep 1`,
           `cd ${plan.workingDir}`,
-          `# Detached subshell so npm reparents to init and bash never wait4()s on it`,
-          `(nohup ${devCommand} ${port} > ${tmpResultsDir}/devserver.log 2>&1 </dev/null &)`,
-          `# Healthcheck loop`,
+          `# Detached subshell so npm reparents to init and bash never wait4()s on it.`,
+          `# QA_DEV_CMD is set by the framework-detect snippet above.`,
+          `(nohup $QA_DEV_CMD > ${tmpResultsDir}/devserver.log 2>&1 </dev/null &)`,
+          `# Healthcheck loop — 60 attempts (was 30) to give Next.js / SvelteKit cold starts headroom.`,
           `STATUS=000`,
-          `for i in $(seq 1 30); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${port}${healthcheck} 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
-          `[ "$STATUS" = "200" ] || { echo "QA_PREPARE_ERROR: server boot failed"; exit 1; }`,
+          `for i in $(seq 1 60); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$QA_PORT$QA_HEALTH_PATH 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
+          `[ "$STATUS" = "200" ] || { echo "QA_PREPARE_ERROR: server boot failed (framework=$QA_FRAMEWORK port=$QA_PORT)"; tail -40 ${tmpResultsDir}/devserver.log >&2 || true; exit 1; }`,
           warmupMs > 0 ? `sleep $((${warmupMs} / 1000))` : `# no warmup`,
           `# Overview screenshot`,
-          `npx playwright screenshot --viewport-size=1280,720 --wait-for-timeout=2000 http://localhost:${port}${healthcheck} ${tmpResultsDir}/screenshots/overview.png 2>&1 || true`,
+          `npx playwright screenshot --viewport-size=1280,720 --wait-for-timeout=2000 http://localhost:$QA_PORT$QA_HEALTH_PATH ${tmpResultsDir}/screenshots/overview.png 2>&1 || true`,
           `# Per-test screenshots driven by tests JSON. Parallel batches of 5.`,
-          `node -e "$(cat <<'NODE_EOF'`,
+          `# QA_PORT exported via env so the heredoc stays single-quoted —`,
+          `# protects against $ characters inside test descriptions in tests JSON.`,
+          `# PR-60 (2026-05-13) — explicit process.exit(0) at end of IIFE.`,
+          `# Without it, the unconsumed child.stdout pipes (we only listen on`,
+          `# child.stderr) pin Node's event loop after Playwright children`,
+          `# close, and bash waits forever on \`node\` until the step timeout`,
+          `# SIGKILLs it (exit null). spyhunter-1 forensic 2026-05-13.`,
+          `echo "[qa-prepare] $(date -u +%H:%M:%S) capturing per-test screenshots…"`,
+          `QA_PORT=$QA_PORT node -e "$(cat <<'NODE_EOF'`,
           `const { execSync, spawn } = require('child_process');`,
           `const fs = require('fs');`,
           `const tests = ${testsJson};`,
-          `const port = ${port};`,
+          `const port = parseInt(process.env.QA_PORT, 10);`,
           `const dir = '${tmpResultsDir}/screenshots';`,
           `const failures = [];`,
           `function runOne(t) { return new Promise((resolve) => {`,
@@ -443,10 +476,14 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `  const vp = (t.viewport || '1280,720').replace(/x/i, ',');`,
           `  const out = dir + '/' + t.id + '.png';`,
           `  const args = ['playwright', 'screenshot', '--viewport-size=' + vp, '--wait-for-timeout=2000', url, out];`,
-          `  const child = spawn('npx', args, { stdio: 'pipe', timeout: 20000 });`,
+          `  const child = spawn('npx', args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 });`,
           `  let stderr = '';`,
+          `  // Drain both stdout and stderr — leaving stdout unread can pin`,
+          `  // Node's event loop after the child closes (PR-60).`,
+          `  child.stdout.on('data', () => {});`,
           `  child.stderr.on('data', (d) => { stderr += d.toString(); });`,
           `  child.on('close', (code) => { if (code !== 0) failures.push({ id: t.id, error: stderr.slice(0, 200) }); resolve(); });`,
+          `  child.on('error', (e) => { failures.push({ id: t.id, error: 'spawn: ' + String(e).slice(0, 150) }); resolve(); });`,
           `}); }`,
           `(async () => {`,
           `  const batchSize = 5;`,
@@ -455,15 +492,23 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `  }`,
           `  fs.writeFileSync('${tmpResultsDir}/screenshot-failures.json', JSON.stringify(failures));`,
           `  console.log('SCREENSHOTS_CAPTURED: ' + (tests.length - failures.length) + '/' + tests.length);`,
-          `})();`,
+          `  // PR-60 — force exit. Belt-and-braces in case any stdio handle`,
+          `  // remains ref'd despite the drain handlers above.`,
+          `  process.exit(0);`,
+          `})().catch((e) => { console.error('SCREENSHOT_LOOP_ERROR:', e); process.exit(1); });`,
           `NODE_EOF`,
           `)"`,
-          `# Upload all screenshots to S3 in parallel`,
+          `echo "[qa-prepare] $(date -u +%H:%M:%S) uploading screenshots to S3…"`,
+          `# Upload all screenshots to S3 in parallel.`,
+          `# PR-60 (2026-05-13) — each upload is wrapped in \`timeout 30\` so a`,
+          `# single hanging aws-cli call (IAM token refresh, throttling, etc.)`,
+          `# can't stall the whole step until the daemon SIGKILLs it.`,
           `for f in ${tmpResultsDir}/screenshots/*.png; do`,
           `  base=$(basename "$f")`,
-          `  aws s3 cp "$f" "s3://futurator-ai-website/${snapshotPrefix}$base" --content-type image/png > /dev/null 2>&1 &`,
+          `  timeout 30 aws s3 cp "$f" "s3://futurator-ai-website/${snapshotPrefix}$base" --content-type image/png > /dev/null 2>&1 &`,
           `done`,
           `wait`,
+          `echo "[qa-prepare] $(date -u +%H:%M:%S) S3 uploads done"`,
           `# Capture console errors from the dev-server log for L0 console-error checks`,
           `grep -iE 'error|warn' ${tmpResultsDir}/devserver.log > ${tmpResultsDir}/console-errors.log 2>/dev/null || true`,
           `echo "QA_PREPARE_OK"`,
@@ -783,7 +828,11 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
         id: 'qa-cleanup',
         stepType: 'shell',
         command: [
-          `kill $(lsof -ti:${port}) 2>/dev/null || true`,
+          // PR-59 — port is whatever qa-prepare wrote; fallback to the
+          // pipeline default if the file is missing (qa-prepare crashed
+          // before writing it).
+          `QA_PORT=$(cat ${tmpResultsDir}/qa-port.txt 2>/dev/null || echo ${port})`,
+          `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
           `# Archive logs to S3 for post-mortem`,
           `aws s3 cp ${tmpResultsDir}/devserver.log s3://futurator-ai-website/${snapshotPrefix}devserver.log --content-type text/plain > /dev/null 2>&1 || true`,
           `aws s3 cp ${tmpResultsDir}/console-errors.log s3://futurator-ai-website/${snapshotPrefix}console-errors.log --content-type text/plain > /dev/null 2>&1 || true`,
