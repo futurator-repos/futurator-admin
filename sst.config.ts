@@ -16,6 +16,40 @@ export default $config({
   },
   async run() {
     // ──────────────────────────────────────────────────────────────
+    // PR-61 (2026-05-13) — build version stamp.
+    //
+    // Compute the git short hash + ISO timestamp at deploy time and pipe
+    // them into the API Lambda's env so `/api/health` can report which
+    // build is live. The Sidebar fetches /api/health and cross-checks
+    // against its own `NEXT_PUBLIC_BUILD_HASH` (set in next.config.ts)
+    // so the operator can visually confirm the running build matches
+    // what they just deployed.
+    //
+    // Mirror of the logic in next.config.ts so both sides stamp the
+    // *same* commit (assuming a clean working tree). Dirty trees get a
+    // `-dirty` suffix so the hash doesn't lie.
+    // ──────────────────────────────────────────────────────────────
+    const { execSync: _execSync } = await import('node:child_process');
+    const _gitHash = (() => {
+      try {
+        return _execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim();
+      } catch {
+        return 'dev';
+      }
+    })();
+    const _gitDirty = (() => {
+      try {
+        return _execSync('git status --porcelain', { encoding: 'utf8' }).trim().length > 0
+          ? '-dirty'
+          : '';
+      } catch {
+        return '';
+      }
+    })();
+    const BUILD_HASH = _gitHash + _gitDirty;
+    const BUILD_TIME = new Date().toISOString();
+
+    // ──────────────────────────────────────────────────────────────
     // Futurator.ai public homepage publish pipeline (Stories 14-1, 14-2, 13-3)
     // The S3 bucket and CloudFront distribution are externally managed
     // (the futurator.ai homepage is a separate Next.js project deployed
@@ -424,6 +458,9 @@ export default $config({
         // Futurator.ai homepage publish pipeline (Stories 14-1, 14-2)
         FUTURATOR_PUBLIC_BUCKET,
         FUTURATOR_CF_DISTRIBUTION_ID,
+        // PR-61 — build version stamp surfaced by /api/health
+        BUILD_HASH,
+        BUILD_TIME,
       },
       permissions: [
         // Story 14-1: write public projects JSON to futurator.ai bucket

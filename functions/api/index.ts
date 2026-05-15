@@ -173,8 +173,19 @@ const app = new Hono<Env>();
 // Do NOT add Hono CORS middleware — it causes duplicate headers
 
 // Health (public)
+//
+// PR-61 — also reports `buildHash` + `buildTime` so the SPA can compare
+// its inlined NEXT_PUBLIC_BUILD_HASH against the live API build. The two
+// are set from the same git short hash at deploy time (see sst.config.ts
+// + next.config.ts). When they diverge, the Sidebar shows a warning and
+// the operator knows their browser bundle is stale.
 app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', timestamp: new Date().toISOString() });
+  return c.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    buildHash: process.env.BUILD_HASH ?? 'unknown',
+    buildTime: process.env.BUILD_TIME ?? 'unknown',
+  });
 });
 
 // Auth me — returns user from Bearer token

@@ -31,29 +31,29 @@ There is no CI pipeline. There are no GitHub Actions. There is no automated pre-
 
 ### SST-managed (single command: `npx sst deploy --stage production`)
 
-| # | Target | Type | Defined in `sst.config.ts` line | Bundle |
-|---|---|---|---|---|
-| 1 | `Api` | Lambda Function URL (256 MB, 30 s, arm64, nodejs22.x) | 331 | esbuild from `functions/api/index.ts` |
-| 2 | `AuthCallback` | Lambda Function URL (256 MB, 10 s) | 495 | esbuild from `functions/auth/callback.ts` |
-| 3 | `CostAggregator` | Cron (06:00 UTC daily) → Lambda (512 MB, 60 s) | 515 | esbuild from `functions/cron/cost-aggregator.ts` |
-| 4 | `ResourceDiscoverer` | Cron (07:00 UTC daily) → Lambda (512 MB, 120 s) | 535 | esbuild from `functions/cron/resource-discoverer.ts` |
-| 5 | `TagAuditor` | Cron (07:30 UTC daily) → Lambda (512 MB, 60 s) | 563 | esbuild from `functions/cron/tag-auditor.ts` |
-| 6 | `UserSync` | Cron (08:00 UTC daily) → Lambda (256 MB, 30 s) | 578 | esbuild from `functions/cron/user-sync.ts` |
-| 7 | `AttentionDigest` | Cron (rate(1 hour)) → Lambda (256 MB, 60 s) | 603 | esbuild from `functions/cron/attention-digest.ts` |
-| 8 | `WaveCompletionCheck` | Cron (rate(1 minute)) → Lambda (256 MB, 120 s) | 625 | esbuild from `functions/cron/wave-completion-check.ts` |
-| 9 | `TimingAggregator` | Cron (rate(6 hours)) → Lambda (512 MB, 300 s) | 658 | esbuild from `functions/cron/timing-aggregator.ts` |
-| 10 | `PatAgeCheck` | Cron (09:00 UTC daily) → Lambda (256 MB, 30 s) | 688 | esbuild from `functions/cron/pat-age-check.ts` |
-| 11 | `ScheduleExecutor` | Lambda (256 MB, 120 s, no schedule, no URL — invoked from API) | 713 | esbuild from `functions/cron/schedule-executor.ts` |
-| 12 | `AdminSite` | S3 bucket + CloudFront + Route53 A/AAAA + ACM cert + CF Function + KV Store | 736 | `npm run build` (Next.js static export → `out/`) |
-| 13 | DynamoDB tables (×18) | `sst.aws.Dynamo` resources | 33–328 | DDB API calls; no bundle |
-| 14 | `GithubPat` | SST Secret (encrypted in Pulumi state, surfaced as Lambda env at deploy) | 271 | Secret value comes from `npx sst secret set` (see below) |
-| 14b | `AnthropicApiKey` | SST Secret — backs the Debates inline-Q&A endpoint via `claude-haiku-4-5`. Resolved into the `Api` Lambda's `ANTHROPIC_API_KEY` env var at deploy. Without it, `POST /api/party/sessions/:id/inline-questions` returns 503 `ANTHROPIC_API_KEY_MISSING`. | 277 | `npx sst secret set AnthropicApiKey <sk-ant-…> --stage production` |
+| #   | Target                | Type                                                                                                                                                                                                                                                    | Defined in `sst.config.ts` line | Bundle                                                             |
+| --- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------ |
+| 1   | `Api`                 | Lambda Function URL (256 MB, 30 s, arm64, nodejs22.x)                                                                                                                                                                                                   | 331                             | esbuild from `functions/api/index.ts`                              |
+| 2   | `AuthCallback`        | Lambda Function URL (256 MB, 10 s)                                                                                                                                                                                                                      | 495                             | esbuild from `functions/auth/callback.ts`                          |
+| 3   | `CostAggregator`      | Cron (06:00 UTC daily) → Lambda (512 MB, 60 s)                                                                                                                                                                                                          | 515                             | esbuild from `functions/cron/cost-aggregator.ts`                   |
+| 4   | `ResourceDiscoverer`  | Cron (07:00 UTC daily) → Lambda (512 MB, 120 s)                                                                                                                                                                                                         | 535                             | esbuild from `functions/cron/resource-discoverer.ts`               |
+| 5   | `TagAuditor`          | Cron (07:30 UTC daily) → Lambda (512 MB, 60 s)                                                                                                                                                                                                          | 563                             | esbuild from `functions/cron/tag-auditor.ts`                       |
+| 6   | `UserSync`            | Cron (08:00 UTC daily) → Lambda (256 MB, 30 s)                                                                                                                                                                                                          | 578                             | esbuild from `functions/cron/user-sync.ts`                         |
+| 7   | `AttentionDigest`     | Cron (rate(1 hour)) → Lambda (256 MB, 60 s)                                                                                                                                                                                                             | 603                             | esbuild from `functions/cron/attention-digest.ts`                  |
+| 8   | `WaveCompletionCheck` | Cron (rate(1 minute)) → Lambda (256 MB, 120 s)                                                                                                                                                                                                          | 625                             | esbuild from `functions/cron/wave-completion-check.ts`             |
+| 9   | `TimingAggregator`    | Cron (rate(6 hours)) → Lambda (512 MB, 300 s)                                                                                                                                                                                                           | 658                             | esbuild from `functions/cron/timing-aggregator.ts`                 |
+| 10  | `PatAgeCheck`         | Cron (09:00 UTC daily) → Lambda (256 MB, 30 s)                                                                                                                                                                                                          | 688                             | esbuild from `functions/cron/pat-age-check.ts`                     |
+| 11  | `ScheduleExecutor`    | Lambda (256 MB, 120 s, no schedule, no URL — invoked from API)                                                                                                                                                                                          | 713                             | esbuild from `functions/cron/schedule-executor.ts`                 |
+| 12  | `AdminSite`           | S3 bucket + CloudFront + Route53 A/AAAA + ACM cert + CF Function + KV Store                                                                                                                                                                             | 736                             | `npm run build` (Next.js static export → `out/`)                   |
+| 13  | DynamoDB tables (×18) | `sst.aws.Dynamo` resources                                                                                                                                                                                                                              | 33–328                          | DDB API calls; no bundle                                           |
+| 14  | `GithubPat`           | SST Secret (encrypted in Pulumi state, surfaced as Lambda env at deploy)                                                                                                                                                                                | 271                             | Secret value comes from `npx sst secret set` (see below)           |
+| 14b | `AnthropicApiKey`     | SST Secret — backs the Debates inline-Q&A endpoint via `claude-haiku-4-5`. Resolved into the `Api` Lambda's `ANTHROPIC_API_KEY` env var at deploy. Without it, `POST /api/party/sessions/:id/inline-questions` returns 503 `ANTHROPIC_API_KEY_MISSING`. | 277                             | `npx sst secret set AnthropicApiKey <sk-ant-…> --stage production` |
 
 ### Manually managed (separate commands)
 
-| # | Target | Type | Defined in | Bundle |
-|---|---|---|---|---|
-| 15 | **EC2 daemon** at `/opt/futurator-daemon/` on `i-0826d68c316ae97dd` | Long-running Node.js 22 process under systemd | NOT in `sst.config.ts` — managed out-of-band | rsync, **no transpilation** — source `.mjs` files run as-is |
+| #   | Target                                                              | Type                                          | Defined in                                   | Bundle                                                      |
+| --- | ------------------------------------------------------------------- | --------------------------------------------- | -------------------------------------------- | ----------------------------------------------------------- |
+| 15  | **EC2 daemon** at `/opt/futurator-daemon/` on `i-0826d68c316ae97dd` | Long-running Node.js 22 process under systemd | NOT in `sst.config.ts` — managed out-of-band | rsync, **no transpilation** — source `.mjs` files run as-is |
 
 ---
 
@@ -112,20 +112,20 @@ Source `.mjs` files copy verbatim. Node 22 on EC2 executes them directly — no 
 
 ## Shared modules (cross-target imports)
 
-| Path | Imported by |
-|---|---|
-| `functions/shared/repositories/*` | API Lambda + every cron Lambda |
-| `functions/shared/services/wave-reducer.ts` | API Lambda + WaveCompletionCheck cron |
-| `functions/shared/services/plan-reducer.ts` | API Lambda + WaveCompletionCheck cron |
-| `functions/shared/services/visual-qa-launcher.ts` | API Lambda + WaveCompletionCheck cron |
-| `functions/shared/services/pipeline-launcher.ts` | API Lambda + WaveCompletionCheck cron |
-| `functions/shared/types/*` | All Lambdas + AdminSite UI (type-only — zero runtime cost) |
-| `functions/shared/timer/*` | API Lambda + TimingAggregator cron + AdminSite UI |
-| `functions/shared/boilerplates/registry.ts` | API Lambda + AdminSite UI |
-| `functions/shared/pipelines/*` | API Lambda + WaveCompletionCheck cron |
-| `functions/shared/prompts/*` | API Lambda only |
+| Path                                              | Imported by                                                |
+| ------------------------------------------------- | ---------------------------------------------------------- |
+| `functions/shared/repositories/*`                 | API Lambda + every cron Lambda                             |
+| `functions/shared/services/wave-reducer.ts`       | API Lambda + WaveCompletionCheck cron                      |
+| `functions/shared/services/plan-reducer.ts`       | API Lambda + WaveCompletionCheck cron                      |
+| `functions/shared/services/visual-qa-launcher.ts` | API Lambda + WaveCompletionCheck cron                      |
+| `functions/shared/services/pipeline-launcher.ts`  | API Lambda + WaveCompletionCheck cron                      |
+| `functions/shared/types/*`                        | All Lambdas + AdminSite UI (type-only — zero runtime cost) |
+| `functions/shared/timer/*`                        | API Lambda + TimingAggregator cron + AdminSite UI          |
+| `functions/shared/boilerplates/registry.ts`       | API Lambda + AdminSite UI                                  |
+| `functions/shared/pipelines/*`                    | API Lambda + WaveCompletionCheck cron                      |
+| `functions/shared/prompts/*`                      | API Lambda only                                            |
 
-**The daemon does NOT share any code with `functions/**`.** It has parallel implementations (e.g., `daemon/pipelines/lib/review-criteria-parser.mjs` mirrors `functions/shared/services/review-criteria-parser.ts`). Cross-impl parity is enforced by tests, not shared imports.
+**The daemon does NOT share any code with `functions/**`.** It has parallel implementations (e.g., `daemon/pipelines/lib/review-criteria-parser.mjs`mirrors`functions/shared/services/review-criteria-parser.ts`). Cross-impl parity is enforced by tests, not shared imports.
 
 ---
 
@@ -188,10 +188,10 @@ aws ssm describe-parameters --filters "Key=Name,Values=/futurator/_pipeline/gith
 
 > **Never paste a secret onto the command line directly** — it lands in shell history. Use `read -s`, `pbpaste`, or env-var indirection.
 
-| Secret | Consumer | Failure mode if unset |
-|---|---|---|
-| `GithubPat` | API Lambda + EC2 daemon (via SSM `/futurator/_pipeline/github-pat`) | Daemon fails to start (`configure-git-identity.sh`); App-bootstrap saga errors. |
-| `AnthropicApiKey` | API Lambda only — backs Debates inline-Q&A | `POST /api/party/sessions/:id/inline-questions` returns 503 `ANTHROPIC_API_KEY_MISSING`. The rest of the chat (party-turn pipeline) is unaffected — that path goes through the Claude CLI on EC2 with OAuth, not this key. |
+| Secret            | Consumer                                                            | Failure mode if unset                                                                                                                                                                                                      |
+| ----------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GithubPat`       | API Lambda + EC2 daemon (via SSM `/futurator/_pipeline/github-pat`) | Daemon fails to start (`configure-git-identity.sh`); App-bootstrap saga errors.                                                                                                                                            |
+| `AnthropicApiKey` | API Lambda only — backs Debates inline-Q&A                          | `POST /api/party/sessions/:id/inline-questions` returns 503 `ANTHROPIC_API_KEY_MISSING`. The rest of the chat (party-turn pipeline) is unaffected — that path goes through the Claude CLI on EC2 with OAuth, not this key. |
 
 The `GithubPat` value is independently stored at SSM `/futurator/_pipeline/github-pat` (SecureString) so the EC2 daemon's `configure-git-identity.sh` startup hook can find it. Keeping these two stores in sync is manual. `AnthropicApiKey` lives only in SST/Pulumi state — the daemon does NOT need it (daemon authenticates via the Claude Max OAuth file at `/home/ubuntu/.claude/.credentials.json`).
 
@@ -201,20 +201,20 @@ The `GithubPat` value is independently stored at SSM `/futurator/_pipeline/githu
 
 ### Daemon location
 
-| Field | Value |
-|---|---|
-| Instance ID | `i-0826d68c316ae97dd` |
-| Public IP | `54.86.226.233` (Elastic IP, survives stop/start) |
-| DNS | `ec2-54-86-226-233.compute-1.amazonaws.com` |
-| OS | Ubuntu (Linux) |
-| User | `ubuntu` |
-| SSH key | `~/.ssh/debatator-memgraph.pem` |
-| Service unit | `/etc/systemd/system/futurator-daemon.service` |
-| Code path | `/opt/futurator-daemon/` |
-| Env file | `/opt/futurator-daemon/.env` |
-| Log destination | `journalctl -u futurator-daemon` (no separate log file) |
-| OAuth credentials | `/home/ubuntu/.claude/.credentials.json` |
-| IAM role | `develope-it-ec2-ssm` |
+| Field             | Value                                                   |
+| ----------------- | ------------------------------------------------------- |
+| Instance ID       | `i-0826d68c316ae97dd`                                   |
+| Public IP         | `54.86.226.233` (Elastic IP, survives stop/start)       |
+| DNS               | `ec2-54-86-226-233.compute-1.amazonaws.com`             |
+| OS                | Ubuntu (Linux)                                          |
+| User              | `ubuntu`                                                |
+| SSH key           | `~/.ssh/debatator-memgraph.pem`                         |
+| Service unit      | `/etc/systemd/system/futurator-daemon.service`          |
+| Code path         | `/opt/futurator-daemon/`                                |
+| Env file          | `/opt/futurator-daemon/.env`                            |
+| Log destination   | `journalctl -u futurator-daemon` (no separate log file) |
+| OAuth credentials | `/home/ubuntu/.claude/.credentials.json`                |
+| IAM role          | `develope-it-ec2-ssm`                                   |
 
 ### Update daemon code
 
@@ -300,14 +300,14 @@ aws s3 sync out/ s3://futurator-ai-website/ --delete # ❌ NO
 
 The admin Lambda IS allowed to write **scoped paths** in that public bucket:
 
-| Path | Writer | Purpose |
-|---|---|---|
-| `data/projects.json` | `functions/shared/export-public-projects.ts` | Public projects list for homepage |
-| `media/<projectId>/` | API pre-signed upload endpoint | Project media uploaded by admin |
-| `apps/<appName>/` | Deploy Agent (`/api/epic-workflows/:id/deploy`) | Published Vite/React user apps |
-| `knowledge-live/<projectId>/` | Daemon's compile-sync step | Mycelium knowledge graph backups |
-| `qa-snapshots/<appId>/<jobId>/` | Visual QA agent (when wired) | Per-job test screenshots |
-| `party-docs/<projectId>/` | API presigned PUT (party module) | Party agent doc uploads |
+| Path                            | Writer                                          | Purpose                           |
+| ------------------------------- | ----------------------------------------------- | --------------------------------- |
+| `data/projects.json`            | `functions/shared/export-public-projects.ts`    | Public projects list for homepage |
+| `media/<projectId>/`            | API pre-signed upload endpoint                  | Project media uploaded by admin   |
+| `apps/<appName>/`               | Deploy Agent (`/api/epic-workflows/:id/deploy`) | Published Vite/React user apps    |
+| `knowledge-live/<projectId>/`   | Daemon's compile-sync step                      | Mycelium knowledge graph backups  |
+| `qa-snapshots/<appId>/<jobId>/` | Visual QA agent (when wired)                    | Per-job test screenshots          |
+| `party-docs/<projectId>/`       | API presigned PUT (party module)                | Party agent doc uploads           |
 
 The Admin static-site bucket name is `futurator-admin-production-adminsiteassetsbucket-<random-suffix>` — never the public bucket.
 
@@ -474,28 +474,61 @@ aws lambda update-function-code \
 
 ## Verifying a deploy
 
+### Quick check: the build-hash strip (PR-61)
+
+Every build stamps the **git short hash** into two places:
+
+| Where                  | How                                                                                            | Visible to operator                                  |
+| ---------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Static export (`out/`) | `next.config.ts` inlines `NEXT_PUBLIC_BUILD_HASH` via `execSync('git rev-parse --short HEAD')` | Sidebar shows `v abc1234` under "Futurator Admin"    |
+| API Lambda env         | `sst.config.ts` sets `BUILD_HASH` from the same `execSync`                                     | `GET /api/health` returns `{ buildHash, buildTime }` |
+
+A dirty working tree (uncommitted M files) appends `-dirty` to both hashes so the indicator doesn't lie.
+
+**The Sidebar fetches `/api/health` on mount** and cross-checks the API's hash against its own. When they match: just the version string. When they diverge: an orange dot appears next to the hash, with a tooltip explaining the bundle is stale. Hard-refresh (Cmd+Shift+R) clears it.
+
+### Curl-based smoke
+
 After `npx sst deploy --stage production` reports `✓ Complete`:
 
+> **CloudFront routing trap:** The SPA's API calls **bypass CloudFront** — `NEXT_PUBLIC_API_URL` is set to the Lambda Function URL directly at build time (`sst.config.ts`). `https://admin.futurator.ai/api/*` falls through to S3 and returns the SPA shell HTML, not the Lambda. Hit the Lambda URL directly when smoke-testing.
+
 ```bash
-# Site
+# Site loads (HTML)
 curl -sS -o /dev/null -w "admin: http=%{http_code}\n" https://admin.futurator.ai/
 
-# API
-curl -sS -o /dev/null -w "api/health: http=%{http_code}\n" https://admin.futurator.ai/api/health
+# API health — use the Lambda Function URL printed by `sst deploy`
+API_URL=https://rudarnjfpu2ujs76fhz6oajciu0slvcu.lambda-url.us-east-1.on.aws
+curl -sS $API_URL/api/health
+# Expect: {"status":"ok","timestamp":"…","buildHash":"<short-hash>","buildTime":"…"}
 
-# Lambda code freshness — extract a unique string from your change
+# Cross-check the API hash matches what you just shipped
+API_HASH=$(curl -sS $API_URL/api/health | python3 -c 'import json,sys;print(json.load(sys.stdin)["buildHash"])')
+LOCAL_HASH=$(git rev-parse --short HEAD)$(git status --porcelain | head -1 | grep -q . && echo '-dirty')
+echo "API: $API_HASH  Local: $LOCAL_HASH"
+[ "$API_HASH" = "$LOCAL_HASH" ] || echo "⚠ API has not picked up the new build yet"
+```
+
+For UI verification: open `admin.futurator.ai` in an **incognito window** (no cache), check the Sidebar's `v…` strip matches `git rev-parse --short HEAD` of the commit you just deployed.
+
+### Deep verification: code freshness
+
+When you want bit-level certainty (e.g., diagnosing whether the deploy actually picked up a file change):
+
+```bash
+# Lambda code — extract a unique string from your change
 URL=$(aws lambda get-function --function-name <function-name> --region us-east-1 \
   --query 'Code.Location' --output text)
 curl -sS -o /tmp/lambda.zip "$URL"
 unzip -p /tmp/lambda.zip 2>/dev/null | grep -c "<some-unique-string-from-your-PR>"
 
-# Static-site bundles — same idea, but JS chunks live in S3:
+# Static-site bundles — JS chunks live in S3:
 aws s3api list-buckets --query 'Buckets[?contains(Name, `adminsite`)].Name' --output text
 aws s3 cp s3://<adminsite-bucket-name>/_next/static/chunks/ /tmp/chunks/ --recursive --quiet
 grep -lE "<some-unique-string-from-your-PR>" /tmp/chunks/*.js | head
 ```
 
-Recent CloudFront cache may serve old JS for up to 5 minutes after invalidation finishes. Hard-refresh your browser (Cmd+Shift+R) or wait it out.
+Recent CloudFront cache may serve old JS for up to 5 minutes after invalidation finishes. Hard-refresh your browser (Cmd+Shift+R) or wait it out — the Sidebar's mismatch indicator clears once your browser has the new bundle.
 
 ---
 
@@ -530,15 +563,15 @@ Anything you don't recognize → investigate before assuming it's safe.
 
 When this doc and these files disagree, **the files win**. Update this doc to match.
 
-| File | What it defines |
-|---|---|
-| `sst.config.ts` | Lambdas + cron schedules + DDB tables + secrets + AdminSite + IAM permissions |
-| `next.config.ts` | Static export config; type-check tolerance |
-| `package.json` | npm scripts; dev dependencies |
-| `tsconfig.json` | TS path aliases; include/exclude |
-| `.husky/pre-commit` | The only enforced pre-commit gate |
-| `scripts/rsync-daemon.sh` | Daemon deploy script |
-| `daemon/package.json` | Daemon's runtime deps (separate from root) |
-| `docs/concepts/pipeline-v2/pipeline-v2-0-efficency-fixes.md` | Active pipeline-efficiency work (PR-1..N tracking) |
-| `docs/concepts/pipelinev1-deferrals.md` | v1 backlog + cross-references |
-| `docs/concepts/debates-mobile-handoff.md` | Mobile-dev handoff for the Debates feature (URL contract, REST surface, parser, agent roster) |
+| File                                                         | What it defines                                                                               |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `sst.config.ts`                                              | Lambdas + cron schedules + DDB tables + secrets + AdminSite + IAM permissions                 |
+| `next.config.ts`                                             | Static export config; type-check tolerance                                                    |
+| `package.json`                                               | npm scripts; dev dependencies                                                                 |
+| `tsconfig.json`                                              | TS path aliases; include/exclude                                                              |
+| `.husky/pre-commit`                                          | The only enforced pre-commit gate                                                             |
+| `scripts/rsync-daemon.sh`                                    | Daemon deploy script                                                                          |
+| `daemon/package.json`                                        | Daemon's runtime deps (separate from root)                                                    |
+| `docs/concepts/pipeline-v2/pipeline-v2-0-efficency-fixes.md` | Active pipeline-efficiency work (PR-1..N tracking)                                            |
+| `docs/concepts/pipelinev1-deferrals.md`                      | v1 backlog + cross-references                                                                 |
+| `docs/concepts/debates-mobile-handoff.md`                    | Mobile-dev handoff for the Debates feature (URL contract, REST surface, parser, agent roster) |

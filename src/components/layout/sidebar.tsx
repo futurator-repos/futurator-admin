@@ -1,9 +1,10 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/ui-store';
+import { API_BASE_URL } from '@/lib/constants';
 
 interface NavItem {
   href: string;
@@ -130,7 +131,12 @@ export function Sidebar() {
       )}
     >
       <div className="flex h-14 items-center border-b border-border px-4">
-        {!sidebarCollapsed && <span className="text-lg font-semibold">Futurator Admin</span>}
+        {!sidebarCollapsed && (
+          <div className="flex flex-col leading-tight">
+            <span className="text-lg font-semibold">Futurator Admin</span>
+            <BuildVersionLine />
+          </div>
+        )}
         <button
           onClick={toggleSidebar}
           className="ml-auto text-muted-foreground hover:text-foreground"
@@ -158,5 +164,73 @@ export function Sidebar() {
         ))}
       </nav>
     </aside>
+  );
+}
+
+/**
+ * PR-61 — build-version line shown directly under "Futurator Admin".
+ *
+ * Shows the static-export's git short hash (inlined at build time via
+ * NEXT_PUBLIC_BUILD_HASH) and fetches /api/health to compare against the
+ * live Lambda's BUILD_HASH. Mismatch → orange dot + "stale" hint so the
+ * operator knows their browser bundle is out of date (cached CSS chunks
+ * returning 403 from S3 after a fresh deploy is the canonical symptom).
+ *
+ * Why a plain fetch instead of the api-client wrapper:
+ *   /api/health is public — we don't need (or want) the Authorization
+ *   header and 401-refresh dance. Keeping this independent means the
+ *   indicator works even on /login before the user authenticates.
+ */
+function BuildVersionLine() {
+  const webHash = process.env.NEXT_PUBLIC_BUILD_HASH ?? 'unknown';
+  const webTime = process.env.NEXT_PUBLIC_BUILD_TIME ?? 'unknown';
+  const [apiHash, setApiHash] = useState<string | null>(null);
+  const [apiTime, setApiTime] = useState<string | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    // API_BASE_URL already ends in `/api` (see src/lib/constants.ts).
+    const baseUrl = (API_BASE_URL ?? '').replace(/\/+$/, '');
+    fetch(`${baseUrl}/health`, { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((data: { buildHash?: string; buildTime?: string }) => {
+        if (cancelled) return;
+        setApiHash(data?.buildHash ?? 'unknown');
+        setApiTime(data?.buildTime ?? null);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setApiError(e instanceof Error ? e.message : 'fetch-failed');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const mismatch = apiHash !== null && apiHash !== webHash && apiHash !== 'unknown';
+  const tooltip = [
+    `UI build: ${webHash} · ${webTime}`,
+    apiHash ? `API build: ${apiHash}${apiTime ? ` · ${apiTime}` : ''}` : 'API: checking…',
+    apiError ? `API check failed: ${apiError}` : '',
+    mismatch ? '\n⚠ Stale UI bundle. Hard-refresh (Cmd+Shift+R) to load the latest deploy.' : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  return (
+    <span
+      title={tooltip}
+      className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-mono"
+      style={{ fontFamily: 'var(--font-mono)' }}
+    >
+      v{webHash}
+      {mismatch && (
+        <span
+          aria-label="UI build does not match API build"
+          className="inline-block h-1.5 w-1.5 rounded-full"
+          style={{ background: 'var(--warning, #f97316)' }}
+        />
+      )}
+    </span>
   );
 }
