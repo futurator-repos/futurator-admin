@@ -18,7 +18,7 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join, basename, dirname } from 'path';
-import neo4j from 'neo4j-driver';
+import { createDriver } from './lib/memgraph-driver.mjs';
 import {
   parseFrontmatter,
   serializeFrontmatter,
@@ -571,10 +571,9 @@ export async function decomposeRequirements(prdPath, knowledgeDir, opts = {}) {
   });
 
   // If Memgraph is available, verify DERIVED_FROM edges
-  const boltUri = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
   let edgeResults = [];
   try {
-    const driver = neo4j.driver(boltUri);
+    const driver = createDriver();
     const session = driver.session();
     try {
       // Verify edges after graph-sync would have run

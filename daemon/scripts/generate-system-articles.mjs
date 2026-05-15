@@ -19,13 +19,12 @@
  * [Source: docs/concepts/mycelium-labs-architecture.md#5.2-GraphRAG-Query-Patterns]
  */
 
-import neo4j from 'neo4j-driver';
+import { createDriver } from './lib/memgraph-driver.mjs';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
 // ── Config ──
 
-const BOLT_URI = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
 const PHASES_ORDER = ['discovery', 'planning', 'solutioning', 'implementation', 'qa', 'release', 'support'];
 
 // ── CLI Args ──
@@ -95,7 +94,7 @@ function toString(val) {
 
 // ── Memgraph Connection ──
 
-const driver = neo4j.driver(BOLT_URI);
+const driver = createDriver();
 
 async function runQuery(cypher, params = {}) {
   const session = driver.session();

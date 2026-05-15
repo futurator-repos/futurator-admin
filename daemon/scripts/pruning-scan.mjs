@@ -20,13 +20,9 @@
  * [Source: docs/concepts/mycelium-labs-architecture.md#6.1-Node-Status-Lifecycle]
  */
 
-import neo4j from 'neo4j-driver';
+import { createDriver } from './lib/memgraph-driver.mjs';
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'fs';
 import { join, basename, dirname } from 'path';
-
-// ── Config ──
-
-const BOLT_URI = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
 
 // ── CLI Args ──
 
@@ -110,7 +106,7 @@ function updateFrontmatter(filePath, updates) {
 
 // ── Memgraph Connection ──
 
-const driver = neo4j.driver(BOLT_URI);
+const driver = createDriver();
 
 async function runQuery(cypher, params = {}) {
   const session = driver.session();

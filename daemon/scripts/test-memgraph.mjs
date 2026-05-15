@@ -10,9 +10,8 @@
  *   node test-memgraph.mjs --json       # Output JSON (for automation)
  */
 
-import neo4j from 'neo4j-driver';
+import { createDriver, BOLT_URI } from './lib/memgraph-driver.mjs';
 
-const BOLT_URI = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
 const args = process.argv.slice(2);
 const persistMode = args.includes('--persist');
 const jsonMode = args.includes('--json');
@@ -26,7 +25,7 @@ const results = {
   errors: [],
 };
 
-const driver = neo4j.driver(BOLT_URI);
+const driver = createDriver();
 
 try {
   // Test 1: Basic connectivity

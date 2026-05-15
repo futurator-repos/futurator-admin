@@ -13,13 +13,14 @@
  * longer surfaces as a tab.
  */
 
-export type DevelopingSubtab = 'hierarchy' | 'kanban' | 'gantt' | 'gitgraph' | 'deploy';
+export type DevelopingSubtab = 'hierarchy' | 'kanban' | 'gantt' | 'gitgraph' | 'graph' | 'deploy';
 
 const SUBTABS: { id: DevelopingSubtab; label: string }[] = [
   { id: 'hierarchy', label: 'Hierarchy' },
   { id: 'kanban', label: 'Kanban' },
   { id: 'gantt', label: 'Gantt' },
   { id: 'gitgraph', label: 'GitGraph' },
+  { id: 'graph', label: 'Graph' },
 ];
 
 export function DevelopingSubtabs({

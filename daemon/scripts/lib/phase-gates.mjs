@@ -16,7 +16,7 @@
  *   node phase-gates.mjs --from <phase> --to <phase> --project <id>
  */
 
-import neo4j from 'neo4j-driver';
+import { createDriver } from './memgraph-driver.mjs';
 
 // ── Phase Definitions ──
 
@@ -497,8 +497,7 @@ async function main() {
     process.exit(1);
   }
 
-  const boltUri = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
-  const driver = neo4j.driver(boltUri);
+  const driver = createDriver();
 
   try {
     if (fullReport) {

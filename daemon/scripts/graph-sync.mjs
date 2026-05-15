@@ -13,17 +13,19 @@
  *   node graph-sync.mjs --project spyhunter --knowledge-dir /path/to/knowledge --skip-backup
  *
  * Environment:
- *   MEMGRAPH_URI     — Bolt URI (default: bolt://localhost:7687)
- *   VOYAGE_API_KEY   — Required for embedding
+ *   MEMGRAPH_URI       — Bolt URI (default: bolt://localhost:7687)
+ *   MEMGRAPH_USER      — Optional; if set, basic auth is enabled
+ *   MEMGRAPH_PASSWORD  — Paired with MEMGRAPH_USER
+ *   VOYAGE_API_KEY     — Required for embedding
  */
 
-import { readdir, readFile, writeFile, rename, stat } from 'node:fs/promises';
+import { readdir, readFile, writeFile, rename, stat, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, relative, dirname, basename } from 'node:path';
 import { existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import neo4j from 'neo4j-driver';
+import { createDriver } from './lib/memgraph-driver.mjs';
 import { embedBatch, getUsageStats, resetUsageStats } from './lib/voyage-embed.mjs';
 import { backupToS3 } from './lib/s3-backup.mjs';
 
@@ -372,6 +374,7 @@ async function main() {
 
   if (articlesToProcess.length === 0 && deletedNodeIds.length === 0) {
     log('Nothing to sync — all articles up to date');
+    await writeGraphSnapshot(config);
     if (!config.skipBackup) {
       await runS3Backup(config);
     }
@@ -416,8 +419,7 @@ async function main() {
   }
 
   // ── Step 6: Upsert nodes into Memgraph ───────────────────────────
-  const BOLT_URI = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
-  const driver = neo4j.driver(BOLT_URI);
+  const driver = createDriver();
 
   try {
     const session = driver.session();
@@ -575,6 +577,9 @@ async function main() {
   await writeCompileState(config.stateFile, newState);
   log(`Updated compile-state.json (${Object.keys(newState).length} entries)`);
 
+  // ── Step 8.5: Graph snapshot for in-app visualization ────────────
+  await writeGraphSnapshot(config);
+
   // ── Step 9: S3 Backup (non-blocking) ─────────────────────────────
   if (!config.skipBackup) {
     await runS3Backup(config);
@@ -583,6 +588,86 @@ async function main() {
   // ── Summary ──────────────────────────────────────────────────────
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   log(`Sync complete in ${elapsed}s`);
+}
+
+/**
+ * Write a graph snapshot JSON to `knowledge/_graph/graph-snapshot.json` for the
+ * project. The admin UI's Development → Graph tab fetches this from the public
+ * S3 bucket (picked up by the existing S3 sync) and renders it with a force
+ * graph. Embeddings are intentionally NOT included — the snapshot is for
+ * visualization, not search (search lives in graph-search.mjs).
+ *
+ * Non-blocking: errors are logged but do not fail compile-sync.
+ */
+async function writeGraphSnapshot(config) {
+  try {
+    const driver = createDriver();
+    const session = driver.session();
+    try {
+      const nodeResult = await session.run(
+        `MATCH (n:Node {projectId: $projectId})
+         RETURN n.nodeId AS id, n.type AS type, n.phase AS phase, n.status AS status,
+                n.title AS title, n.summary AS summary, n.maturity AS maturity, n.tags AS tags,
+                n.createdByStory AS createdByStory, n.lastMutatedByStory AS lastMutatedByStory,
+                n.updated AS updated`,
+        { projectId: config.project }
+      );
+      const edgeResult = await session.run(
+        `MATCH (a:Node {projectId: $projectId})-[r]->(b:Node {projectId: $projectId})
+         RETURN a.nodeId AS source, b.nodeId AS target, type(r) AS type, r.weight AS weight`,
+        { projectId: config.project }
+      );
+
+      const toNum = (v) =>
+        v && typeof v.toNumber === 'function' ? v.toNumber() : v ?? null;
+
+      const nodes = nodeResult.records.map((rec) => ({
+        id: rec.get('id'),
+        type: rec.get('type'),
+        phase: rec.get('phase'),
+        status: rec.get('status'),
+        title: rec.get('title'),
+        summary: rec.get('summary'),
+        maturity: toNum(rec.get('maturity')) ?? 0,
+        tags: rec.get('tags') ?? [],
+        createdByStory: rec.get('createdByStory') ?? null,
+        lastMutatedByStory: rec.get('lastMutatedByStory') ?? null,
+        updated: rec.get('updated') ?? null,
+      }));
+
+      const edges = edgeResult.records.map((rec) => ({
+        source: rec.get('source'),
+        target: rec.get('target'),
+        type: rec.get('type'),
+        weight: toNum(rec.get('weight')) ?? 1.0,
+      }));
+
+      const snapshot = {
+        projectId: config.project,
+        generatedAt: new Date().toISOString(),
+        nodeCount: nodes.length,
+        edgeCount: edges.length,
+        nodes,
+        edges,
+      };
+
+      const snapshotDir = join(config.knowledgeDir, '_graph');
+      await mkdir(snapshotDir, { recursive: true });
+      const snapshotPath = join(snapshotDir, 'graph-snapshot.json');
+      const tmpPath = snapshotPath + '.tmp';
+      await writeFile(tmpPath, JSON.stringify(snapshot, null, 2), 'utf-8');
+      await rename(tmpPath, snapshotPath);
+
+      log(
+        `Wrote graph snapshot: ${nodes.length} nodes, ${edges.length} edges → _graph/graph-snapshot.json`
+      );
+    } finally {
+      await session.close();
+      await driver.close();
+    }
+  } catch (err) {
+    logError(`graph-snapshot write failed (non-blocking): ${err.message}`);
+  }
 }
 
 /**

@@ -4,7 +4,7 @@
  *
  * Idempotent script that:
  *   1. Creates uniqueness constraint on Node.nodeId
- *   2. Creates vector index knowledge_index (1024-dim, cosine, f16, 50k capacity)
+ *   2. Creates vector index node_embedding_index (1024-dim, cosine, f16, 50k capacity)
  *   3. Validates all 8 edge types with test nodes
  *   4. Validates vector search with a test embedding
  *   5. Cleans up all test data
@@ -15,9 +15,7 @@
  *   node init-memgraph.mjs --json       # Output JSON results
  */
 
-import neo4j from 'neo4j-driver';
-
-const BOLT_URI = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
+import { createDriver, BOLT_URI } from './lib/memgraph-driver.mjs';
 const args = process.argv.slice(2);
 const validateMode = args.includes('--validate');
 const jsonMode = args.includes('--json');
@@ -93,13 +91,13 @@ async function createConstraint(session) {
 }
 
 /**
- * Create vector index knowledge_index on :Node(embedding).
+ * Create vector index node_embedding_index on :Node(embedding).
  * Config: 1024 dimensions, cosine metric, f16 scalar, 50k capacity.
  * Idempotent: catches "already exists" errors.
  */
 async function createVectorIndex(session) {
-  log('Creating vector index knowledge_index...');
-  const query = `CREATE VECTOR INDEX knowledge_index ON :Node(embedding)
+  log('Creating vector index node_embedding_index...');
+  const query = `CREATE VECTOR INDEX node_embedding_index ON :Node(embedding)
     WITH CONFIG {
       "dimension": 1024,
       "capacity": 50000,
@@ -239,8 +237,9 @@ async function validateVectorSearch(session) {
 
     // Search with the same vector (should return similarity ~1.0)
     const searchResult = await session.run(
-      `CALL vector_search.search('knowledge_index', 5, $queryVector)
+      `CALL vector_search.search('node_embedding_index', 5, $queryVector)
        YIELD node, similarity
+       WITH node, similarity
        WHERE node.nodeId = $nodeId
        RETURN node.nodeId AS nodeId, similarity`,
       { queryVector: embedding, nodeId: testNodeId }
@@ -271,7 +270,7 @@ async function validateVectorSearch(session) {
 
 // ── Main ─────────────────────────────────────────────────────────────
 
-const driver = neo4j.driver(BOLT_URI);
+const driver = createDriver();
 
 try {
   // Wait for Memgraph to be ready

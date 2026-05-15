@@ -16,9 +16,8 @@
  */
 
 import neo4j from 'neo4j-driver';
+import { createDriver } from './lib/memgraph-driver.mjs';
 import { embedText } from './lib/voyage-embed.mjs';
-
-const BOLT_URI = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
 
 // ── Arg parser ──────────────────────────────────────────────────────
 
@@ -86,7 +85,7 @@ export async function graphSearch(projectId, queryText, opts = {}) {
   dbg(`Embedding latency: ${embedMs}ms (${queryVector.length}-dim vector)`);
 
   // Step 2: Run combined Cypher — vector search + graph traversal
-  const driver = neo4j.driver(BOLT_URI);
+  const driver = createDriver();
   const session = driver.session();
 
   try {
@@ -98,8 +97,9 @@ export async function graphSearch(projectId, queryText, opts = {}) {
     const hopsSafe = Math.max(1, Math.min(10, Math.floor(hops)));
 
     const cypher = `
-      CALL vector_search.search('knowledge_index', $topK, $queryVector)
+      CALL vector_search.search('node_embedding_index', $topK, $queryVector)
       YIELD node, similarity
+      WITH node, similarity
       WHERE similarity > $minSimilarity AND node.projectId = $projectId
       OPTIONAL MATCH (node)-[r*1..${hopsSafe}]-(related)
       WHERE related.status IN ['active', 'flagged']

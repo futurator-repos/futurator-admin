@@ -142,7 +142,11 @@ async function runVerificationQueries(projectId, expectedArticleCount) {
     };
   }
 
-  const driver = neo4j.driver(BOLT_URI);
+  const memgraphUser = process.env.MEMGRAPH_USER;
+  const memgraphPassword = process.env.MEMGRAPH_PASSWORD;
+  const driver = memgraphUser
+    ? neo4j.driver(BOLT_URI, neo4j.auth.basic(memgraphUser, memgraphPassword || ''))
+    : neo4j.driver(BOLT_URI);
   const results = {
     nodeCount: { passed: false, value: 0, expected: expectedArticleCount },
     edgeCount: { passed: false, value: 0, byType: {} },

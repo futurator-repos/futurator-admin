@@ -21,7 +21,7 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join, basename, dirname } from 'path';
-import neo4j from 'neo4j-driver';
+import { createDriver } from './lib/memgraph-driver.mjs';
 import {
   parseFrontmatter,
   serializeFrontmatter,
@@ -804,10 +804,9 @@ export async function extractDecisions(sessionOutput, knowledgeDir, opts = {}) {
   const revision = handleDecisionRevision(decisions, docSlug, knowledgeDir);
 
   // Connect to Memgraph if available
-  const boltUri = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
   let driver;
   try {
-    driver = neo4j.driver(boltUri);
+    driver = createDriver();
     // Test connection
     const testSession = driver.session();
     await testSession.run('RETURN 1');
