@@ -25,9 +25,29 @@
  *     exits 0 with an empty `files` array.
  */
 
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, extname, relative } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
+
+// Slice C — directories the brownfield scan should never descend into.
+// Kept narrow: deps, build output, test fixtures, wiki, AST cache.
+const SCAN_EXCLUDE_DIRS = new Set([
+  'node_modules',
+  '.git',
+  '.next',
+  '.turbo',
+  '.cache',
+  'dist',
+  'build',
+  'out',
+  'coverage',
+  '.vercel',
+  '.sst',
+  'knowledge',
+  '.mycelium',
+  '.claude',
+  'public',
+]);
 
 // ── SCHEMA ──────────────────────────────────────────────────────────────
 //
@@ -385,6 +405,7 @@ function parseArgs() {
     stdin: false,
     diffManifest: null,
     diffManifestFile: null,
+    scan: false, // Slice C — full-repo walk mode
     help: false,
   };
   for (let i = 0; i < args.length; i++) {
@@ -405,6 +426,9 @@ function parseArgs() {
       case '--diff-manifest-file':
         out.diffManifestFile = args[++i];
         break;
+      case '--scan':
+        out.scan = true;
+        break;
       case '--help':
       case '-h':
         out.help = true;
@@ -414,6 +438,37 @@ function parseArgs() {
         process.exit(2);
     }
   }
+  return out;
+}
+
+/**
+ * Walk `root` finding every source file with a supported extension. Skips
+ * the common ignore-dirs above. Returns paths relative to `root`.
+ */
+async function scanRepoFiles(root) {
+  const out = [];
+  async function walk(dir) {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (SCAN_EXCLUDE_DIRS.has(entry.name)) continue;
+        if (entry.name.startsWith('.') && entry.name !== '.') continue; // hidden dirs
+        await walk(full);
+      } else if (entry.isFile()) {
+        const ext = extname(entry.name).toLowerCase();
+        if (languageForExtension(ext)) {
+          out.push(relative(root, full));
+        }
+      }
+    }
+  }
+  await walk(root);
   return out;
 }
 
@@ -464,6 +519,10 @@ async function main() {
 
   // Resolve file list from one of the input modes
   let files = args.files ?? null;
+  if (!files && args.scan) {
+    // Slice C — brownfield bootstrap: walk the whole working dir.
+    files = await scanRepoFiles(args.root);
+  }
   if (!files && args.stdin) {
     const text = await readStdin();
     files = text
