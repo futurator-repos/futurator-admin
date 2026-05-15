@@ -56,6 +56,10 @@ const TURN_CAPS_BY_RIGOR = {
     COMPILER: null,
     QA: null,
     PM: null,
+    SKILL_SCOUT: 4,
+    REFLECTOR: 4,
+    TRIAGE: 4,
+    ARCHITECT: 4,
     CONVERSATION: null,
     REFLECTION: null,
     DEPLOY: null,
@@ -68,6 +72,10 @@ const TURN_CAPS_BY_RIGOR = {
     COMPILER: null,
     QA: null,
     PM: null,
+    SKILL_SCOUT: 6,
+    REFLECTOR: 6,
+    TRIAGE: 6,
+    ARCHITECT: 6,
     CONVERSATION: null,
     REFLECTION: null,
     DEPLOY: null,
@@ -80,6 +88,10 @@ const TURN_CAPS_BY_RIGOR = {
     COMPILER: null,
     QA: 8,
     PM: 6,
+    SKILL_SCOUT: 8,
+    REFLECTOR: 8,
+    TRIAGE: 8,
+    ARCHITECT: 8,
     CONVERSATION: null,
     REFLECTION: null,
     DEPLOY: null,
@@ -115,6 +127,39 @@ const ROLE_BASE = {
   PM: {
     allowed: ['Read'],
     deniedExtras: ['Bash', 'Write', 'Edit'],
+  },
+
+  // ── Phase 3 (PR-72 / Story 3-C-3-1) ─────────────────────────────────────
+  // SKILL-SCOUT: read-mostly resolver, Bash for license/freshness checks.
+  // Manifest writes flow through the daemon's skill-installer helper, not
+  // the agent's own tool calls — Write/Edit/NotebookEdit denied.
+  SKILL_SCOUT: {
+    allowed: ['Bash', 'Read', 'Grep', 'Glob'],
+    deniedExtras: ['Write', 'Edit', 'NotebookEdit'],
+  },
+
+  // ── Phase 3 (PR-74/75 / Story 3-E-2-1) ──────────────────────────────────
+  // REFLECTOR: strictly propose-only per v2.5 §38.2. Bash denied at the
+  // CLI layer — git read verbs flow through @futurator/mcp-git-readonly
+  // (3-C-9). Distinct from REFLECTION (daemon v1 health analyst).
+  REFLECTOR: {
+    allowed: ['Read', 'Grep', 'Glob'],
+    deniedExtras: ['Write', 'Edit', 'NotebookEdit', 'Bash'],
+  },
+
+  // ── Phase 3 (PR-81 / Story 3-E-6-1) ─────────────────────────────────────
+  // TRIAGE: relevance-ranker for cross-plan feedback. Read-only.
+  TRIAGE: {
+    allowed: ['Read', 'Grep', 'Glob'],
+    deniedExtras: ['Write', 'Edit', 'NotebookEdit', 'Bash'],
+  },
+
+  // ── Phase 2-D (PR-90 / Story 2-D-6-1) ───────────────────────────────────
+  // ARCHITECT: AWS/integrations manifest resolver. Bash allowed for
+  // `cdk diff` / `cdk synth` / aws CLI verification.
+  ARCHITECT: {
+    allowed: ['Bash', 'Read', 'Grep', 'Glob'],
+    deniedExtras: ['Write', 'Edit', 'NotebookEdit'],
   },
 
   // ── Daemon-only roles (no API Lambda equivalent) ──────────────────────
@@ -211,4 +256,27 @@ export const KNOWN_ROLES = Object.keys(ROLE_BASE);
  * The roles this resolver shares with `functions/shared/pipelines/role-policy.ts`.
  * Used by the parity test to know which roles to cross-validate.
  */
-export const SHARED_ROLES = ['API_AUTHOR', 'TEST', 'DEV', 'REVIEWER', 'COMPILER', 'QA', 'PM'];
+export const SHARED_ROLES = [
+  'API_AUTHOR',
+  'TEST',
+  'DEV',
+  'REVIEWER',
+  'COMPILER',
+  'QA',
+  'PM',
+  // PR-72 (Story 3-C-3-1) — SKILL-SCOUT spawned both from daemon
+  // (T1 app-bootstrap, T2 plan pipeline) and from API Lambda
+  // (T3 brownfield audit via POST /api/skills/audit). Parity test
+  // cross-validates both sides.
+  'SKILL_SCOUT',
+  // PR-74 (Story 3-E-2-1) — REFLECTOR spawned from the daemon's
+  // low-priority slot on wave/plan close. TS definition is the
+  // pipeline definition source of truth; MJS mirror handles spawn.
+  'REFLECTOR',
+  // PR-81 (Story 3-E-6-1) — TRIAGE spawned on feedback-item arrival.
+  // Cross-validated TS↔MJS parity at the role-policy level.
+  'TRIAGE',
+  // PR-90 (Story 2-D-6-1) — ARCHITECT spawned at T1/T2/T3 manifest-
+  // resolution moments. Cross-validated TS↔MJS parity.
+  'ARCHITECT',
+];

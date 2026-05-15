@@ -75,6 +75,29 @@ export interface BoilerplateMetadata {
     testRunner: 'vitest' | 'jest' | 'playwright' | 'mocha';
   } | null;
 
+  /**
+   * Pipeline v2 Phase 3-C Story 3-C-2-1 (PR-71) — project skill manifest
+   * paths. `null` for stub boilerplates that don't ship the skill
+   * scaffold yet (SST / Vite / Mobile in Phase 1 stubs); the daemon
+   * skips SKILL-SCOUT for those types until they're wired.
+   *
+   * `manifestPath` is the lockfile-semantics YAML the daemon reads to
+   * compute the Skills-Used commit metadata line (Story 3-C-4-1) and the
+   * Skills-Manifest-Sha SHA. `syncScriptPath` is the in-project Node
+   * script (`npx skills sync`) operators or the daemon invoke to fetch
+   * declared skill bodies from federation sources.
+   *
+   * See v2.5 §36 + `docs/concepts/pipeline-v2/epics-pipeline-v2-phase-3.md`
+   * Story 3-C-2-1 for the full design (sync semantics, drift detection,
+   * gitignore policy on `.claude/skills/`).
+   */
+  skillManifest?: {
+    /** Path within the working tree to the manifest YAML, e.g. `.claude/skills.manifest.yaml`. */
+    manifestPath: string;
+    /** Path within the working tree to the Node sync script, e.g. `scripts/skills-sync.mjs`. */
+    syncScriptPath: string;
+  } | null;
+
   // ── Pipeline v2.0 PR-5: PM-prompt context ───────────────────────────────
   //
   // Consumed by `buildPmPlanPrompt` to generate boilerplate-aware Plan JSON

@@ -1160,42 +1160,121 @@ the equivalent Phase 3 doc takes over.
 
 ---
 
-## 16. Phase 2 hardening pass — PR-32 → PR-?? (in progress)
+## 16. Phase 2 stabilisation pass — PR-32 → PR-68 (shipped 2026-05-06 → 2026-05-14)
 
-This section will be authored at wrap (mirror Phase 1 §14). Each PR maps to a
-real failure mode observed during Phase 2 implementation runs against
-`dino-runner-1` (or a fresh `nextjs-canvas-game` App), with the fix that closed
-it.
+Phase 2's design-doc itemized PR-32 → PR-44 (the §4 prerequisite-resolutions
+table). The actual implementation continued with 24 additional PRs that
+closed real failure modes observed in Phase 2-A implementation runs against
+`dino-runner-1`, `nextjs-canvas-game`, `brick-breaker`, and the `spyhunter-1`
+forensic. Each PR below maps to a real symptom + the fix that closed it.
 
-### Stabilisation PR catalogue (in flight)
+This section follows the Phase 1 §14 wrap pattern but is **interim, not final**:
+Phase 2-B (branch-per-story worktrees, wave-merge, distributed merge lock,
+plan tagging, branch protection) and Phase 2-D (ARCHITECT + `aws.manifest.yaml`
+
+- CDK + OIDC + cost engine) are still backlog. Phase 3 doc-writing began
+  2026-05-15 with Phase 2 still active per the parallel-planning decision.
+
+### Mapping to existing Phase 2 epics
+
+| Epic                                                 | PRs that reinforced it                                        | What changed                                                                                                                                                                                                                                                                      |
+| ---------------------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Epic 2-A-1 — Tool policy as code                     | PR-32, PR-32b, PR-38                                          | Typed `RolePolicy` schema + spawn-time resolver; daemon-side mirror so daemon respects the same policy; per-rigor turn caps wired through daemon.                                                                                                                                 |
+| Epic 2-A-2 — Context pack as typed contract          | PR-33, PR-42, PR-51                                           | `PROJECT_CONTEXT` Zod schema + inject-time validation; auto-populate `existingTests` + `publicExports`; freshness window + pending-create split.                                                                                                                                  |
+| Epic 2-A-4 — Baseline-diff regression gate           | PR-34, PR-35, PR-36                                           | Design doc; starter scripts (`capture-test-baseline.sh` + `check-regressions.sh`); daemon wiring + attention surface. `acceptBaselineDrift` (Story 2-A-4-4) still backlog.                                                                                                        |
+| Epic 2-A-5 — Tamper-check + frozen-file pre-commit   | PR-41, PR-46, PR-47                                           | Runtime tamper-check at mvp+ + frozen-file husky hook; pipeline-only + heredoc fix; `$(...)` escape removal (shell-injection class).                                                                                                                                              |
+| Epic 2-A-6 — Single-pass verification                | PR-40                                                         | Drop DEV's redundant `npx vitest run`; single verification pass in `test-verify` step.                                                                                                                                                                                            |
+| Epic 2-A-7 — `Plan.kind` enum + metrics CSV          | PR-39                                                         | `Plan.kind` enum expansion (Story 2-A-7-1). Metrics CSV per-wave threshold (Story 2-A-7-2) still backlog.                                                                                                                                                                         |
+| Cross-cutting QA pillar hardening                    | PR-43, PR-44, PR-48, PR-49, PR-50, PR-52, PR-59, PR-60, PR-61 | Flip `App.executionMode` default to `pipeline`; orchestrator path emits per-story commit + push; review-criteria re-derive + Timer fixes; per-story step status badge; compile-diff empty-diff graceful; runtime framework detection; qa-prepare hang fix; build-hash visibility. |
+| Cross-cutting cost governance                        | PR-45                                                         | Rigor-keyed cost ceiling defaults on plan create (production-rigor doesn't inherit prototype's tight envelope by default).                                                                                                                                                        |
+| **Stub-and-ship guardrails** (spyhunter-1 fix class) | PR-62, PR-63, PR-64, PR-65, PR-67, PR-68                      | Visual-test classifier floor on `needsBrowser`; PM/Dev screen-verifiable AC prompts; test-author integration-test contract; review-runtime Haiku judge; compile-commit non-empty diff guard; wave-build bundle-source-check.                                                      |
+
+### Stabilisation PR catalogue
+
+**Phase 2-A inner-loop discipline (PR-32 → PR-44, design-doc-itemized):**
 
 - **PR-32** — typed RolePolicy schema + spawn-time resolver (Story 2-A-1-1)
-- **PR-33** — PROJECT_CONTEXT Zod schema + inject-time validation (Story 2-A-2-1)
-- **PR-34** — baseline-diff design doc (Story 2-A-4-1)
-- **PR-35** — (sequenced from PR-34) baseline scripts in starter (Story 2-A-4-2)
-- **PR-36** — (sequenced from PR-34) daemon wiring + attention surface (Story 2-A-4-3)
-- **PR-37** — (sequenced from PR-34) `acceptBaselineDrift` mechanism (Story 2-A-4-4)
-- **PR-38..** — append as Phase 2-A stories ship
+- **PR-32b** — daemon-side role-policy mirror (Story 2-A-1-1 reinforcement)
+- **PR-33** — PROJECT_CONTEXT typed validation (Story 2-A-2-1)
+- **PR-34** — baseline-diff regression gate design (Story 2-A-4-1)
+- **PR-35** — baseline-diff starter scripts + registry field (Story 2-A-4-2)
+- **PR-36** — baseline-regression step in story pipeline (Story 2-A-4-3)
+- _PR-37 (acceptBaselineDrift mechanism, Story 2-A-4-4) deferred — still backlog_
+- **PR-38** — per-rigor turn caps wired through daemon (Story 2-A-1-2)
+- **PR-39** — Plan.kind enum expansion (Story 2-A-7-1)
+- **PR-40** — single-pass test verification (Story 2-A-6-1)
+- **PR-41** — tamper-check at mvp+ + frozen-file husky hook (Stories 2-A-5-1 + 2-A-5-2)
+- **PR-42** — existingTests + publicExports in PROJECT_CONTEXT (Story 2-A-2-2)
+- **PR-43** — flip App.executionMode default to 'pipeline' (cross-cutting)
+- **PR-44** — orchestrator path emits per-story commit + push (precursor to Phase 2-B)
+
+**Phase 2 stabilisation pass (PR-45 → PR-68, observed-failure-driven):**
+
+- **PR-45** — rigor-keyed cost ceiling defaults on plan create (operator was hitting cost ceilings on production-rigor plans that inherited prototype's envelope)
+- **PR-46** — pipeline-only + tamper-check heredoc fix (mvp+ tamper-check pulling in non-pipeline files; heredoc-quoting bug in the SHA-256 snapshot helper)
+- **PR-47** — tamper-check `$(...)` escape removal (shell injection if a frozen file path contained command-substitution syntax)
+- **PR-48** — review-criteria re-derive (REVIEWER was re-using stale criteria after touch-point shifts)
+- **PR-49** — Timer fixes (slice-attribution drift on parallel waves; bundled with PR-48)
+- **PR-50** — per-story step status badge (bash event-driven, was previously polling DDB every 5s)
+- **PR-51** — PROJECT_CONTEXT freshness + pending-create split (PROJECT_CONTEXT was being injected with stale fileTree on plan-create-then-pause scenarios)
+- **PR-52** — compile-diff empty-diff graceful (empty diff was emitting a false "knowledge compile failed" attention; cosmetic but noisy)
+- _PR-53–PR-58 unused — reserved for backfill (e.g. PR-37 acceptBaselineDrift slot)_
+- **PR-59** — runtime framework detection (`buildFrameworkDetectSnippet` auto-detects Next.js / SvelteKit / Vite / Remix output dirs at runtime instead of assuming Next.js)
+- **PR-60** — qa-prepare hang fix (visual-qa-prepare was hanging on missing build output; gracefully skips with `QA_PREPARE_SKIPPED`)
+- **PR-61** — build-hash visibility (sidebar shows current build hash, `/api/health` returns it, docs explain rotation)
+- **PR-62** — visual-test classifier floor on `needsBrowser` (browser ACs can't be downgraded to L0 even under prototype rigor; bash checks can't tell a working button from a missing one)
+- **PR-63** — PM + Dev prompts emit screen-verifiable AC text and rich visualTests (browser AC guidance demands concrete observable signals: count + color/style + position + FAIL clause)
+- **PR-64** — test-author integration test contract (when story has browser ACs, test-author must emit AT LEAST ONE integration test that boots the framework's entry point through the standard testing harness; explicitly forbids mocking the framework render)
+- **PR-65** — review-runtime step (inserted between `review` and `retry` for browser-AC stories at mvp+ rigor; boots dev server via `buildFrameworkDetectSnippet`, takes one Playwright screenshot, Haiku judges each browser AC against it)
+- _PR-66 unused — reserved gap_
+- **PR-67** — compile-commit-on-pass non-empty diff guard (catches the spyhunter-1 "files committed but not staged" pattern: zero source files staged → STORY_COMMIT_EMPTY)
+- **PR-68** — wave-build bundle-source-check (after `npm run build` succeeds, scans every `.js.map` under the bundler's output dir and confirms every required touch point appears in some sourcemap's `.sources[]`; catches the "file committed but not imported from entry" failure mode)
 
 ### Observed end-to-end runs (cohort tracker)
 
-| Plan                                     | Date       | Outcome                                     | Cohort count |
-| ---------------------------------------- | ---------- | ------------------------------------------- | ------------ |
-| `plan_dino-runner-1_moo8zzmz`            | 2026-05-02 | (Phase 1) Surfaced PR-14 → PR-21            | 1            |
-| `plan_dino-runner-1_moseuhc9`            | 2026-05-05 | (Phase 1) Clean: 5/5 stories, deployed live | 2            |
-| _(append per-plan as Phase 2 work runs)_ |            |                                             |              |
+| Plan                                                 | Date       | Outcome                                                                                                          | Surfaced PRs                     |
+| ---------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| `plan_brick-breaker_mou3l51l`                        | 2026-05-08 | Forensic review: classifier floor regression                                                                     | PR-62 source                     |
+| `plan_brick-breaker-3_mou8s2zv`                      | 2026-05-09 | Re-run with PR-62 in place                                                                                       | validates PR-62                  |
+| `plan_spyhunter-1_movg4zat`                          | 2026-05-13 | **Stub-and-ship incident**: GameScene compiled fine, main.ts never imported it; passed all gates, shipped broken | PR-62, 63, 64, 65, 67, 68 source |
+| Wave 1 re-run (post PR-62/63/67/68) on new plan      | 2026-05-14 | Bundle-source-check catches missing import at wave-time                                                          | validates PR-67/68               |
+| Wave 2 re-run (post PR-64/65) on new browser-AC plan | 2026-05-14 | Review-runtime + integration-test contract catch stub                                                            | validates PR-64/65               |
 
-When cohort count ≥ 5, flip Phase 1 ship-gate #4 to **PASS** in
-`epics-pipeline-v2-phase-1.md` §14.
+### Ship-gate scorecard (live, 2026-05-15)
 
-### Ship-gate scorecard (live)
+| #   | Sub-condition                                                | Status      | Evidence                                                                                               |
+| --- | ------------------------------------------------------------ | ----------- | ------------------------------------------------------------------------------------------------------ |
+| 1   | All 11 steps fire and are observable                         | **PARTIAL** | api-author step (Epic 2-A-3) still backlog; other 10 steps observable in forensic JSON                 |
+| 2   | Per-story branch isolation works under parallelism           | **BACKLOG** | Phase 2-B-1/2/3 not shipped; stories still merge to main directly                                      |
+| 3   | Wave merge `--no-ff` with full re-run                        | **BACKLOG** | Phase 2-B-3 not shipped                                                                                |
+| 4   | Inner-loop discipline gates fire with rigor-correct behavior | **PASS**    | tamper-check (PR-41/46/47) + baseline-diff (PR-35/36) + review-runtime (PR-65) + bundle-source (PR-68) |
+| 5   | Timer Intelligence per-category attribution complete         | **PASS**    | Categories shipped through PR-49; MECE invariant holds on all post-PR-49 plans                         |
 
-| #   | Sub-condition                                                | Status | Evidence                                        |
-| --- | ------------------------------------------------------------ | ------ | ----------------------------------------------- |
-| 1   | All 11 steps fire and are observable                         | TODO   | Forensic JSON shape                             |
-| 2   | Per-story branch isolation works under parallelism           | TODO   | `git log` + worktree directories                |
-| 3   | Wave merge `--no-ff` with full re-run                        | TODO   | `git log main --merges`                         |
-| 4   | Inner-loop discipline gates fire with rigor-correct behavior | TODO   | tamper-check / baseline-diff / api-author tests |
-| 5   | Timer Intelligence per-category attribution complete         | TODO   | Timing panel + MECE test                        |
+**Phase 2-B (git substrate)** — branch-per-story `wip/`, worktrees, wave-merge,
+distributed merge lock, plan tagging, branch protection by rigor, stream
+branches, daemon GC, experiment/hotfix namespaces: **0/12 items shipped**.
+This is the largest open Phase 2 surface and the prerequisite for Phase 3-S
+speculation `explore/` branches.
 
-Hand-off to Phase 3 will live below this scorecard once all five PASS.
+**Phase 2-D (AWS + integrations)** — Layer A/B credentials, `aws.manifest.yaml`
+
+- `integrations.manifest.yaml` schemas, ARCHITECT agent, CDK generation,
+  GitHub Actions OIDC, cost engine, brownfield audit, demo env promotion: **0/18
+  items shipped**. Phase 3-F brownfield migration depends on this; Phase 3-C
+  skill manifest infra is independent (manifest+resolver pattern is the only
+  shared abstraction).
+
+### Hand-off note to Phase 3
+
+Phase 3 doc-writing (2026-05-15) proceeded with Phase 2 still active per the
+parallel-planning decision. Phase 3 stories that depend on Phase 2-B/2-D
+substrate are itemized in §11 of `epics-pipeline-v2-phase-3.md`
+(sub-phase dependency graph); none can ship until their Phase 2 prerequisite
+ships. The unblocked Phase 3 entry point is **Phase 3-C-1-1 (federation
+manifest schema + storage)** which depends only on the daemon's existing
+file-loading + SSM-secret patterns from Phase 1.
+
+PR numbering continues: Phase 3 starts at **PR-69**. PR-37, PR-53–PR-58,
+and PR-66 are unused gaps in the Phase 2 sequence and remain reserved for
+any backfill Phase 2 work (notably the deferred Story 2-A-4-4
+`acceptBaselineDrift` and the Phase 2-B/2-D items).

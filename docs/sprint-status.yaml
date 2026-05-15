@@ -332,3 +332,168 @@ development_status:
   pv2-p1-8-7-escalator-and-forensic-export: review   # 3× escalator wired into wave-completion-check
   epic-pv2-p1-8: review
   epic-pv2-p1-8-retrospective: optional
+
+  # ════════════════════════════════════════════════════════════════════
+  # ─────────────  PIPELINE v2 — PHASE 3: COMPOUNDING  ─────────────────
+  # ════════════════════════════════════════════════════════════════════
+  # Source plan: docs/concepts/pipeline-v2/epics-pipeline-v2-phase-3.md
+  # Spec:        docs/concepts/pipeline-v2/futurator-pipeline-v2-5-consolidated.md
+  # Authored:    2026-05-15. 26 stories across 4 sub-phases (3-C, 3-E, 3-F, 3-S)
+  #              + per-project F.4 runbook instances (one new story per project).
+  # PRs:         PR-69 → PR-87 (continues from Phase 2's PR-32 → PR-68 actual shipped).
+  # Entry point: 3-C (Skills) is the manifest layer the other three plug into.
+
+  # ────────────────────────────────────────────────────────────────────
+  # Phase 3-C — Skills managed resource (9 stories, ~17 days)
+  # ────────────────────────────────────────────────────────────────────
+
+  # ── Epic PV2-P3-C-1: Federation manifest + resolver (PR-69/70) ──
+  epic-pv2-p3-c-1: contexted                            # in-progress
+  pv2-p3-c-1-1-federation-manifest: review              # PR-69 implementation ready 2026-05-15
+  pv2-p3-c-1-2-federation-resolver: review              # PR-70 implementation ready 2026-05-15
+  epic-pv2-p3-c-1-retrospective: optional
+
+  # ── Epic PV2-P3-C-2: Project skill manifest + sync (PR-71) ──
+  epic-pv2-p3-c-2: contexted                            # in-progress
+  pv2-p3-c-2-1-project-skill-manifest: review           # PR-71 implementation ready 2026-05-15
+  epic-pv2-p3-c-2-retrospective: optional
+
+  # ── Epic PV2-P3-C-3: SKILL-SCOUT agent + T1/T2/T3 triggers (PR-72) ──
+  epic-pv2-p3-c-3: contexted                              # in-progress
+  pv2-p3-c-3-1-skill-scout-agent: review                  # PR-72 pipeline + Role + tests
+  pv2-p3-c-3-2-skill-scout-triggers-t1-t2-t3: review      # PR-72 runner + disposition + forensic; trigger-point wiring (T1 post-bootstrap, T2 pre-PM, T3 API route) follow-on
+  epic-pv2-p3-c-3-retrospective: optional
+
+  # ── Epic PV2-P3-C-4: Skills in commit metadata (PR-73) ──
+  epic-pv2-p3-c-4: contexted                              # in-progress
+  pv2-p3-c-4-1-skills-used-commit-metadata: review        # PR-73 helper + tests + wired into compile-pipeline
+  epic-pv2-p3-c-4-retrospective: optional
+
+  # ── Epic PV2-P3-C-5: SKILL-SCOUT triggers T4–T8 (PR-79) ──
+  epic-pv2-p3-c-5: contexted                              # in-progress
+  pv2-p3-c-5-1-skill-scout-t4-t5: review                  # PR-79 schema+prompt+detectors+debouncer
+  pv2-p3-c-5-2-skill-scout-t6-t7-t8: review               # PR-79 cluster-detector + T7 args + T8 schedule + deltas
+  epic-pv2-p3-c-5-retrospective: optional
+
+  # ── Epic PV2-P3-C-6: Auto-distillation in COMPILER ──
+  epic-pv2-p3-c-6: backlog
+  pv2-p3-c-6-1-compiler-distillation-signals: backlog
+  epic-pv2-p3-c-6-retrospective: optional
+
+  # ── Epic PV2-P3-C-7: Skill-creator sub-plan automation ──
+  epic-pv2-p3-c-7: backlog
+  pv2-p3-c-7-1-skill-creator-subplan: backlog
+  epic-pv2-p3-c-7-retrospective: optional
+
+  # ── Epic PV2-P3-C-8: Cross-project propagation via weekly refresh ──
+  epic-pv2-p3-c-8: backlog
+  pv2-p3-c-8-1-cross-project-propagation: backlog
+  epic-pv2-p3-c-8-retrospective: optional
+
+  # ── Epic PV2-P3-C-9: Private CodeArtifact MCP server registry ──
+  epic-pv2-p3-c-9: backlog
+  pv2-p3-c-9-1-codeartifact-mcp: backlog
+  epic-pv2-p3-c-9-retrospective: optional
+
+  # ────────────────────────────────────────────────────────────────────
+  # Phase 3-E — Reflection loop (10 stories, ~17 days)
+  # ────────────────────────────────────────────────────────────────────
+
+  # ── Epic PV2-P3-E-1: Inter-agent memory stores (PR-77) ──
+  epic-pv2-p3-e-1: contexted                            # in-progress
+  pv2-p3-e-1-1-memory-stores: review                    # PR-77 implementation ready 2026-05-15
+  epic-pv2-p3-e-1-retrospective: optional
+
+  # ── Epic PV2-P3-E-2: REFLECTOR agent (PR-74/75) ──
+  epic-pv2-p3-e-2: contexted                              # in-progress
+  pv2-p3-e-2-1-reflector-agent: review                    # PR-74 pipeline + role + prompt + runner
+  pv2-p3-e-2-2-reflector-triggers-and-slot: review        # PR-74 runner + shouldFireReflection + forensic; quiet-window scheduler follow-on
+  epic-pv2-p3-e-2-retrospective: optional
+
+  # ── Epic PV2-P3-E-3: Reflection Inbox UI (PR-76) ──
+  epic-pv2-p3-e-3: contexted                              # in-progress
+  pv2-p3-e-3-1-reflection-inbox-ui: review                # PR-76 DDB + service + API + page + panel + reflector-apply stub; unified-diff + global-bell + REFLECTOR-APPLY commit follow-on
+  epic-pv2-p3-e-3-retrospective: optional
+
+  # ── Epic PV2-P3-E-4: Project CLAUDE.md flow (PR-80) ──
+  epic-pv2-p3-e-4: contexted                              # in-progress
+  pv2-p3-e-4-1-claude-md-flow: review                     # PR-80 template augment + claude-md-loader + system-prompt builder; PM/DEV prompt extensions follow-on
+  epic-pv2-p3-e-4-retrospective: optional
+
+  # ── Epic PV2-P3-E-5: Skill promotion path (project → org-wide) (PR-83) ──
+  epic-pv2-p3-e-5: contexted                              # in-progress
+  pv2-p3-e-5-1-skill-promotion: review                    # PR-83 copy + manifest-rewrite + demotion-eligibility + stack-fingerprint + cleanup; PR-open against futurator-skills follow-on
+  epic-pv2-p3-e-5-retrospective: optional
+
+  # ── Epic PV2-P3-E-6: Triage agent + cross-plan history (PR-81) ──
+  epic-pv2-p3-e-6: contexted                              # in-progress
+  pv2-p3-e-6-1-triage-agent: review                       # PR-81 role + pipeline + prompt + relevance scoring; daemon-side feedback-arrival hook follow-on
+  epic-pv2-p3-e-6-retrospective: optional
+
+  # ── Epic PV2-P3-E-7: Tool-wrap-it threshold scoring (PR-79) ──
+  epic-pv2-p3-e-7: backlog
+  pv2-p3-e-7-1-wrap-it-threshold: backlog
+  epic-pv2-p3-e-7-retrospective: optional
+
+  # ── Epic PV2-P3-E-8: Persona evolution + versioning (PR-82) ──
+  epic-pv2-p3-e-8: contexted                              # in-progress
+  pv2-p3-e-8-1-persona-evolution: review                  # PR-82 Plan.personaPinned + persona-loader + snapshot-latest; futurator-personas repo + PR-on-confirm follow-on
+  epic-pv2-p3-e-8-retrospective: optional
+
+  # ── Epic PV2-P3-E-9: Pre-flight allowlist on REFLECTOR proposals (PR-78) ──
+  epic-pv2-p3-e-9: contexted                              # in-progress
+  pv2-p3-e-9-1-preflight-allowlist: review                # PR-78 allowlist + applyPreflight; integrated into reflector-runner output path
+  epic-pv2-p3-e-9-retrospective: optional
+
+  # ── Epic PV2-P3-E-10: REFLECTOR-REVIEWER (defer-after-baseline) ──
+  epic-pv2-p3-e-10: backlog                          # defer-after-baseline tag
+  pv2-p3-e-10-1-reflector-reviewer: backlog          # defer-after-baseline tag
+  epic-pv2-p3-e-10-retrospective: optional
+
+  # ────────────────────────────────────────────────────────────────────
+  # Phase 3-F — Brownfield migration (4 stories fixed + 2/project)
+  # ────────────────────────────────────────────────────────────────────
+
+  # ── Epic PV2-P3-F-1: Brownfield audit plan template (PR-84) ──
+  epic-pv2-p3-f-1: backlog
+  pv2-p3-f-1-1-brownfield-audit-template: backlog
+  epic-pv2-p3-f-1-retrospective: optional
+
+  # ── Epic PV2-P3-F-2: cdk import for existing resources (PR-85) ──
+  epic-pv2-p3-f-2: backlog
+  pv2-p3-f-2-1-cdk-import-orchestration: backlog
+  epic-pv2-p3-f-2-retrospective: optional
+
+  # ── Epic PV2-P3-F-3: Rigor-upgrade plan auto-generation (PR-86) ──
+  epic-pv2-p3-f-3: backlog
+  pv2-p3-f-3-1-rigor-upgrade-template: backlog
+  epic-pv2-p3-f-3-retrospective: optional
+
+  # ── Epic PV2-P3-F-4: Per-project migration runbook (PR-87) ──
+  # One story instance per Futurator project — author as projects migrate.
+  # Order: dino-runner-1 first (smoke test), then Songster / goMAD /
+  # Mycelium / Atlassinator, then remaining projects.
+  epic-pv2-p3-f-4: backlog
+  pv2-p3-f-4-1-migration-runbooks: backlog
+  epic-pv2-p3-f-4-retrospective: optional
+
+  # ────────────────────────────────────────────────────────────────────
+  # Phase 3-S — Speculation + production rigor (3 stories, ~6 days)
+  # Pulled from spec Phase B.10 + D.12 + D.15 per 2026-05-14 scoping.
+  # ────────────────────────────────────────────────────────────────────
+
+  # ── Epic PV2-P3-S-1: Speculation infrastructure + EVALUATOR (PR-80/81) ──
+  epic-pv2-p3-s-1: backlog
+  pv2-p3-s-1-1-explore-infrastructure: backlog
+  pv2-p3-s-1-2-evaluator-agent: backlog
+  epic-pv2-p3-s-1-retrospective: optional
+
+  # ── Epic PV2-P3-S-2: Production deploy gate + 24h soak (PR-82) ──
+  epic-pv2-p3-s-2: backlog
+  pv2-p3-s-2-1-production-deploy-gate: backlog
+  epic-pv2-p3-s-2-retrospective: optional
+
+  # ── Epic PV2-P3-S-3: Drift detection + cost-overrun (PR-83) ──
+  epic-pv2-p3-s-3: backlog
+  pv2-p3-s-3-1-drift-cost-overrun-cron: backlog
+  epic-pv2-p3-s-3-retrospective: optional

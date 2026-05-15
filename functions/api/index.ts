@@ -73,6 +73,9 @@ import { createPlanForAppInputSchema } from '../shared/schemas/plan-schema';
 import type { App, AppCardData } from '../shared/types/app';
 import * as attentionRepo from '../shared/repositories/attention-items-repository';
 import type { AttentionStatus } from '../shared/types/attention';
+// PR-76 (Story 3-E-3-1) — Reflection Inbox service + types.
+import * as reflectionsService from '../shared/services/reflections-service';
+import type { ReflectionStatus } from '../shared/types/reflection';
 import { buildQaReport } from '../shared/repositories/qa-report-aggregator';
 import { buildDeployReport } from '../shared/repositories/deploy-report-aggregator';
 import {
@@ -2539,6 +2542,68 @@ app.post('/api/plans/:id/attention-items/:itemId/reopen', async (c) => {
     'open' as AttentionStatus,
   );
   if (!updated) return c.json({ error: 'Attention item not found' }, 404);
+  return c.json({ item: updated });
+});
+
+// ── Pipeline v2 Phase 3 — Story 3-E-3-1 (PR-76): Reflection Inbox routes ──
+// GET    /api/reflections?projectSlug=&status=          — list (filter optional)
+// GET    /api/reflections/:projectSlug/:id              — single
+// POST   /api/reflections/:projectSlug/:id/confirm
+// POST   /api/reflections/:projectSlug/:id/decline
+// POST   /api/reflections/:projectSlug/:id/defer
+//
+// Confirmation triggers the daemon's REFLECTOR-APPLY pipeline out-of-band
+// (stub today — Story 3-E-3-1 follow-on lands the actual git-commit
+// integration); the API just records the decision so the UI reflects it.
+app.get('/api/reflections', async (c) => {
+  const projectSlug = c.req.query('projectSlug') || undefined;
+  const status = c.req.query('status') as ReflectionStatus | undefined;
+  const items = await reflectionsService.listReflections({ projectSlug, status });
+  const pendingCount = items.filter((it) => it.status === 'pending').length;
+  return c.json({ items, pendingCount, total: items.length });
+});
+
+app.get('/api/reflections/:projectSlug/:id', async (c) => {
+  const projectSlug = c.req.param('projectSlug');
+  const id = c.req.param('id');
+  const item = await reflectionsService.getReflection(projectSlug, id);
+  if (!item) return c.json({ error: 'Reflection not found' }, 404);
+  return c.json({ item });
+});
+
+app.post('/api/reflections/:projectSlug/:id/confirm', async (c) => {
+  const projectSlug = c.req.param('projectSlug');
+  const id = c.req.param('id');
+  const updated = await reflectionsService.applyDecision({
+    projectSlug,
+    id,
+    decision: 'confirm',
+  });
+  if (!updated) return c.json({ error: 'Reflection not found' }, 404);
+  return c.json({ item: updated });
+});
+
+app.post('/api/reflections/:projectSlug/:id/decline', async (c) => {
+  const projectSlug = c.req.param('projectSlug');
+  const id = c.req.param('id');
+  const updated = await reflectionsService.applyDecision({
+    projectSlug,
+    id,
+    decision: 'decline',
+  });
+  if (!updated) return c.json({ error: 'Reflection not found' }, 404);
+  return c.json({ item: updated });
+});
+
+app.post('/api/reflections/:projectSlug/:id/defer', async (c) => {
+  const projectSlug = c.req.param('projectSlug');
+  const id = c.req.param('id');
+  const updated = await reflectionsService.applyDecision({
+    projectSlug,
+    id,
+    decision: 'defer',
+  });
+  if (!updated) return c.json({ error: 'Reflection not found' }, 404);
   return c.json({ item: updated });
 });
 

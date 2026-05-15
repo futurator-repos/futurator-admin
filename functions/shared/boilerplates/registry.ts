@@ -469,6 +469,255 @@ const FROZEN_FILE_AUGMENTS: Array<{ path: string; content: string }> = [
   { path: '.husky/pre-commit-frozen', content: FROZEN_FILE_PRECOMMIT_SH },
 ];
 
+// ── PR-71 — Project skill manifest + sync script (Story 3-C-2-1) ──────────
+//
+// Every wired starter ships:
+//   1. `.claude/skills.manifest.yaml`     — empty manifest scaffold; SKILL-
+//                                            SCOUT T1 (Story 3-C-3-2) writes
+//                                            the first set of pins.
+//   2. `scripts/skills-sync.mjs`         — Node CLI invoked as `npx skills
+//                                            sync` (or `node scripts/skills-
+//                                            sync.mjs`). Fetches each declared
+//                                            skill into `.claude/skills/<n>/`,
+//                                            verifies SHA matches the manifest
+//                                            entry's `version` pin, exits 0
+//                                            on clean sync / 2 on drift.
+//   3. `.claude/skills/.gitignore`       — Skills are vendored via sync;
+//                                            only `SKILL.md` + `meta.json`
+//                                            are committed. Skill bodies
+//                                            (examples/, templates/, etc.)
+//                                            stay local.
+//
+// v2.5 §36 + Phase 3 doc Story 3-C-2-1.
+
+const SKILLS_MANIFEST_YAML = `# Project skill manifest — Pipeline v2.5 §36
+# Operators don't edit by hand; SKILL-SCOUT (Story 3-C-3-2) writes pins
+# at project init (T1) and at every plan intent (T2). Run
+#   node scripts/skills-sync.mjs
+# to materialize the listed skills into .claude/skills/<name>/.
+project: __APP_SLUG__
+manifest-version: 1
+generated-by: bootstrap@v2.5
+core: []
+stack: []
+domain: []
+vendor: []
+plans: {}
+gaps: []
+`;
+
+const SKILLS_SYNC_MJS = `#!/usr/bin/env node
+/**
+ * skills-sync.mjs — Pipeline v2 Phase 3 / Story 3-C-2-1.
+ *
+ * Reads .claude/skills.manifest.yaml from cwd. For each declared skill,
+ * fetches its SKILL.md (+ optional helpers) from the federation source's
+ * GitHub repo, pinned by sha:/tag: in the manifest, verifies the local
+ * SHA matches, and writes to .claude/skills/<name>/.
+ *
+ * Exit codes:
+ *   0  clean sync (all skills materialized + SHAs match)
+ *   1  fatal error (manifest missing/malformed, network)
+ *   2  drift — at least one local skill's SHA does not match the pin.
+ *      Operator runs the script again with --resync to overwrite local,
+ *      or invokes SKILL-SCOUT (\`/skills audit\`) to re-pin the manifest.
+ *
+ * No external deps beyond Node stdlib + yaml (transitive via project root).
+ */
+
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs';
+import { createHash } from 'node:crypto';
+import { join, dirname } from 'path';
+import { parse as parseYaml } from 'yaml';
+
+const MANIFEST_PATH = '.claude/skills.manifest.yaml';
+const SKILLS_DIR = '.claude/skills';
+const RESYNC = process.argv.includes('--resync');
+
+function die(msg, code = 1) {
+  console.error('[skills-sync] ' + msg);
+  process.exit(code);
+}
+
+function sha256(text) {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+function rawUrl(sourceRepo, refPart, path) {
+  return \`https://raw.githubusercontent.com/\${sourceRepo}/\${refPart}/\${path}\`;
+}
+
+async function fetchSkillFile(sourceUrl, version, path) {
+  const refPart = version.startsWith('sha:') ? version.slice(4) : version.slice(4);
+  const u = new URL(sourceUrl);
+  const repo = u.pathname.replace(/^\\/+|\\/+$/g, '');
+  const url = rawUrl(repo, refPart, path);
+  const headers = { Accept: 'text/plain' };
+  if (process.env.GITHUB_PAT) headers.Authorization = \`Bearer \${process.env.GITHUB_PAT}\`;
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error(\`HTTP \${res.status} for \${url}\`);
+  return await res.text();
+}
+
+if (!existsSync(MANIFEST_PATH)) die(\`manifest missing: \${MANIFEST_PATH}\`);
+let manifest;
+try {
+  manifest = parseYaml(readFileSync(MANIFEST_PATH, 'utf-8'));
+} catch (e) {
+  die(\`manifest parse failed: \${e.message}\`);
+}
+
+const FEDERATION_PATH = process.env.FUTURATOR_FEDERATION_PATH
+  || join(process.env.HOME || '', '.futurator', 'skill-federation.yaml');
+if (!existsSync(FEDERATION_PATH)) {
+  die(\`federation missing: \${FEDERATION_PATH} (operator must author this)\`);
+}
+const federation = parseYaml(readFileSync(FEDERATION_PATH, 'utf-8'));
+const sourceById = new Map();
+for (const src of federation.sources || []) sourceById.set(src.id, src);
+
+const ALL_ENTRIES = [
+  ...(manifest.core || []),
+  ...(manifest.stack || []),
+  ...(manifest.domain || []),
+  ...(manifest.vendor || []),
+];
+
+if (ALL_ENTRIES.length === 0) {
+  console.log('[skills-sync] manifest declares no skills — nothing to sync');
+  process.exit(0);
+}
+
+let drift = 0;
+for (const entry of ALL_ENTRIES) {
+  const source = sourceById.get(entry.source);
+  if (!source) {
+    console.error(\`[skills-sync] WARN skipped \${entry.skill}: source '\${entry.source}' not in federation\`);
+    continue;
+  }
+  const skillDir = join(SKILLS_DIR, entry.skill);
+  const skillMdPath = join(skillDir, 'SKILL.md');
+  let skillMd;
+  try {
+    skillMd = await fetchSkillFile(source.url, entry.version, \`\${entry.skill}/SKILL.md\`);
+  } catch (e) {
+    console.error(\`[skills-sync] ERROR fetch \${entry.skill}@\${entry.source}: \${e.message}\`);
+    drift++;
+    continue;
+  }
+  const remoteSha = sha256(skillMd);
+  if (existsSync(skillMdPath) && !RESYNC) {
+    const localSha = sha256(readFileSync(skillMdPath, 'utf-8'));
+    if (localSha !== remoteSha) {
+      console.error(\`[skills-sync] DRIFT \${entry.skill}@\${entry.source}: local SHA \${localSha.slice(0, 8)} != remote \${remoteSha.slice(0, 8)}\`);
+      drift++;
+      continue;
+    }
+    console.log(\`[skills-sync] OK    \${entry.skill}@\${entry.source}\`);
+    continue;
+  }
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(skillMdPath, skillMd, 'utf-8');
+  console.log(\`[skills-sync] WROTE \${entry.skill}@\${entry.source} (\${remoteSha.slice(0, 8)})\`);
+}
+
+if (drift > 0) {
+  console.error(\`[skills-sync] \${drift} drift(s) — rerun with --resync to overwrite local, or run /skills audit to re-pin\`);
+  process.exit(2);
+}
+console.log('[skills-sync] all skills in sync');
+process.exit(0);
+`;
+
+const SKILLS_DIR_GITIGNORE = `# Skill bodies are vendored via scripts/skills-sync.mjs (Story 3-C-2-1).
+# Skill manifests + meta.json are the source of truth and are committed;
+# the full skill content is fetched on demand from federation sources.
+*
+!.gitignore
+!*/SKILL.md
+!*/meta.json
+`;
+
+const SKILL_MANIFEST_AUGMENTS: Array<{ path: string; content: string }> = [
+  { path: '.claude/skills.manifest.yaml', content: SKILLS_MANIFEST_YAML },
+  { path: 'scripts/skills-sync.mjs', content: SKILLS_SYNC_MJS },
+  { path: '.claude/skills/.gitignore', content: SKILLS_DIR_GITIGNORE },
+];
+
+// ── PR-80 — Project CLAUDE.md template (Story 3-E-4-1) ────────────────────
+//
+// Per v2.5 §41.1 — the project's living document. PM agent populates the
+// "What this is" section at project init; DEV agent appends to
+// "Architecture decisions" on milestone-story completion; REFLECTOR
+// proposes additions to "Patterns to use / avoid" and "Constraints
+// discovered" via the Reflection Inbox (Story 3-E-3-1).
+//
+// The template OVERWRITES whatever the external template-nextjs repo's
+// CLAUDE.md scaffolds. v2.5 §41.1 is the source of truth for shape; the
+// boilerplate stays in sync via this augment.
+
+const CLAUDE_MD_TEMPLATE = `# Project: __APP_DISPLAY_NAME__
+
+> **Slug:** __APP_SLUG__
+> **Repo:** https://github.com/futurator-repos/__APP_SLUG__
+> **Created:** (set by daemon on first commit)
+
+## What this is
+
+<!-- PM agent populates from project intent at init -->
+<!-- One paragraph. The reader (or agent) opening this project for the
+     first time should learn the user-facing purpose in three sentences. -->
+
+## Architecture decisions
+
+<!-- Append-only. Each entry: date — decision — rationale — proposed by.
+     DEV agent appends on completing a milestone story (Story 3-E-4-1).
+     Past entries are immutable; superseding decisions go below, never
+     edit-in-place. -->
+
+## Constraints discovered
+
+<!-- REFLECTOR promotes things like "this client doesn't allow third-party
+     fonts", "deployment region must be eu-central-1 for GDPR".
+     Operator approval gates each addition (Reflection Inbox). -->
+
+## Patterns to use
+
+<!-- Project-specific patterns. REFLECTOR promotes from "what worked
+     repeatedly" — v2.5 §44 Tier 0. -->
+
+## Patterns to avoid
+
+<!-- REFLECTOR promotes from "what hurt". Past mistakes that should
+     stop showing up in future DEV output. -->
+
+## Domain glossary
+
+<!-- PM seeds at init from operator-named terms; subsequent agents append
+     new terminology as they encounter it. -->
+
+## Skills loaded by default for this project
+
+<!-- Pointer to .claude/skills.manifest.yaml (the lockfile). This section
+     lists the human-readable rationale: which skills, why they're here. -->
+
+## AWS scoping reminder
+
+<!-- For stream branches and operator terminals: which AWS profile to use,
+     which resources are in-scope. Customized at project init from
+     aws.manifest.yaml when ARCHITECT runs (Phase 2-D wire). -->
+
+## Known issues / future enhancements
+
+<!-- REFLECTOR promotes from "future-enhancement" proposals. Items here
+     are NOT scheduled work — they're observations the operator may
+     elevate to a plan when ready. -->
+`;
+
+const CLAUDE_MD_AUGMENTS: Array<{ path: string; content: string }> = [
+  { path: 'CLAUDE.md', content: CLAUDE_MD_TEMPLATE },
+];
+
 // PR-13 — nextjs-base config extracted to a top-level const so derivative
 // starter packs can spread it (`{ ...NEXTJS_BASE_PACK, type: 'nextjs-...' }`)
 // during the registry literal's construction. Inlining inside the literal
@@ -500,7 +749,9 @@ const NEXTJS_BASE_PACK: BoilerplateMetadata = {
   postCreateSteps: [
     {
       id: 'inject-app-values',
-      targetFiles: ['package.json', 'README.md', 'CLAUDE.md'],
+      // PR-71 (Story 3-C-2-1): skills.manifest.yaml carries
+      // `project: __APP_SLUG__` per the augment template.
+      targetFiles: ['package.json', 'README.md', 'CLAUDE.md', '.claude/skills.manifest.yaml'],
     },
     { id: 'npm-install' },
     { id: 'bmad-bootstrap' },
@@ -553,10 +804,21 @@ const NEXTJS_BASE_PACK: BoilerplateMetadata = {
     regressCheckPath: 'scripts/check-regressions.sh',
     testRunner: 'vitest',
   },
-  // PR-35 + PR-41 — base augments concat baseline-diff scripts +
-  // frozen-file husky guard. createStarterPack merges starter-specific
-  // augments on top.
-  augmentFiles: [...BASELINE_DIFF_AUGMENTS, ...FROZEN_FILE_AUGMENTS],
+  // PR-71 — Project skill manifest + sync script (Story 3-C-2-1).
+  // Inherited by all nextjs-* starter packs.
+  skillManifest: {
+    manifestPath: '.claude/skills.manifest.yaml',
+    syncScriptPath: 'scripts/skills-sync.mjs',
+  },
+  // PR-35 + PR-41 + PR-71 + PR-80 — base augments concat baseline-diff
+  // scripts + frozen-file husky guard + skill manifest scaffold + CLAUDE.md
+  // template. createStarterPack merges starter-specific augments on top.
+  augmentFiles: [
+    ...BASELINE_DIFF_AUGMENTS,
+    ...FROZEN_FILE_AUGMENTS,
+    ...SKILL_MANIFEST_AUGMENTS,
+    ...CLAUDE_MD_AUGMENTS,
+  ],
 };
 
 /**
@@ -664,6 +926,8 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     },
     // PR-35 — stub: no test runner shipped yet. Daemon skips the gate.
     baselineCapture: null,
+    // PR-71 — stub: no skill scaffold shipped yet. Daemon skips SKILL-SCOUT.
+    skillManifest: null,
   },
 
   vite: {
@@ -724,6 +988,8 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     },
     // PR-35 — stub: no test runner shipped yet. Daemon skips the gate.
     baselineCapture: null,
+    // PR-71 — stub: no skill scaffold shipped yet. Daemon skips SKILL-SCOUT.
+    skillManifest: null,
   },
 
   mobile: {
@@ -783,6 +1049,8 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     },
     // PR-35 — stub: no test runner shipped yet. Daemon skips the gate.
     baselineCapture: null,
+    // PR-71 — stub: no skill scaffold shipped yet. Daemon skips SKILL-SCOUT.
+    skillManifest: null,
   },
 
   // ── PR-13 — Starter packs derived from nextjs-base ────────────────────────

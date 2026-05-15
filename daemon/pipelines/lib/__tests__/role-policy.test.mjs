@@ -18,12 +18,36 @@ describe('daemon role-policy mirror', () => {
         'COMPILER',
         'QA',
         'PM',
+        // PR-72 (Story 3-C-3-1)
+        'SKILL_SCOUT',
+        // PR-74 (Story 3-E-2-1)
+        'REFLECTOR',
+        // PR-81 (Story 3-E-6-1)
+        'TRIAGE',
+        // PR-90 (Story 2-D-6-1)
+        'ARCHITECT',
         'CONVERSATION',
         'REFLECTION',
         'DEPLOY',
       ]),
     );
-    expect(SHARED_ROLES).toEqual(['API_AUTHOR', 'TEST', 'DEV', 'REVIEWER', 'COMPILER', 'QA', 'PM']);
+    expect(SHARED_ROLES).toEqual([
+      'API_AUTHOR',
+      'TEST',
+      'DEV',
+      'REVIEWER',
+      'COMPILER',
+      'QA',
+      'PM',
+      // PR-72 — SKILL-SCOUT cross-validated by parity test
+      'SKILL_SCOUT',
+      // PR-74 — REFLECTOR cross-validated by parity test
+      'REFLECTOR',
+      // PR-81 — TRIAGE cross-validated by parity test
+      'TRIAGE',
+      // PR-90 — ARCHITECT cross-validated by parity test
+      'ARCHITECT',
+    ]);
   });
 
   it('throws with a clear message for unknown roles', () => {

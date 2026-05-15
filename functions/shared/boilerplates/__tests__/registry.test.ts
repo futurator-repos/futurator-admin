@@ -106,7 +106,14 @@ describe('nextjs-base registry entry — spot-check AC values', () => {
 
   it('inject-app-values targets the correct files', () => {
     const injectStep = meta.postCreateSteps.find((s) => s.id === 'inject-app-values');
-    expect(injectStep?.targetFiles).toEqual(['package.json', 'README.md', 'CLAUDE.md']);
+    // PR-71 (Story 3-C-2-1) extended this list with .claude/skills.manifest.yaml
+    // so the `project: __APP_SLUG__` placeholder is substituted at bootstrap.
+    expect(injectStep?.targetFiles).toEqual([
+      'package.json',
+      'README.md',
+      'CLAUDE.md',
+      '.claude/skills.manifest.yaml',
+    ]);
   });
 
   it('defaultStack matches the nextjs AC spec', () => {
@@ -213,6 +220,48 @@ describe('PR-35 — baseline-diff regression gate', () => {
       expect(meta.baselineCapture).toBeNull();
     },
   );
+});
+
+describe('PR-71 — Project skill manifest (Story 3-C-2-1)', () => {
+  it('nextjs-base declares skillManifest pointing at the shipped paths', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-base'];
+    expect(meta.skillManifest).not.toBeNull();
+    expect(meta.skillManifest?.manifestPath).toBe('.claude/skills.manifest.yaml');
+    expect(meta.skillManifest?.syncScriptPath).toBe('scripts/skills-sync.mjs');
+  });
+
+  it.each(['nextjs-canvas-game', 'nextjs-form-app', 'nextjs-dashboard'] as BoilerplateType[])(
+    '%s — inherits skillManifest from nextjs-base',
+    (type) => {
+      const base = BOILERPLATE_REGISTRY['nextjs-base'];
+      const meta = BOILERPLATE_REGISTRY[type];
+      expect(meta.skillManifest).toEqual(base.skillManifest);
+    },
+  );
+
+  it.each(['sst', 'vite', 'mobile'] as BoilerplateType[])(
+    '%s (stub) — declares skillManifest: null so daemon skips SKILL-SCOUT',
+    (type) => {
+      const meta = BOILERPLATE_REGISTRY[type];
+      expect(meta.skillManifest).toBeNull();
+    },
+  );
+
+  it('nextjs-base ships the empty manifest + sync script + gitignore as augment files', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-base'];
+    const paths = (meta.augmentFiles ?? []).map((f) => f.path);
+    expect(paths).toContain('.claude/skills.manifest.yaml');
+    expect(paths).toContain('scripts/skills-sync.mjs');
+    expect(paths).toContain('.claude/skills/.gitignore');
+  });
+
+  it('empty manifest contains the slug placeholder for inject-app-values', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-base'];
+    const manifest = (meta.augmentFiles ?? []).find(
+      (f) => f.path === '.claude/skills.manifest.yaml',
+    );
+    expect(manifest?.content).toMatch(/project: __APP_SLUG__/);
+  });
 
   it('nextjs-base ships the two shell scripts as augment files', () => {
     const meta = BOILERPLATE_REGISTRY['nextjs-base'];

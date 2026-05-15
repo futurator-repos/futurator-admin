@@ -228,52 +228,68 @@ const PHASE_3: PhaseData = {
   title: 'Phase 3 — Compounding',
   tagline: 'Skills federation, REFLECTOR, speculation explore/ branches, production rigor',
   status: 'pending',
-  duration: '~25–30 dev days',
+  duration: '~44 dev days fixed (+ 2/project for migration runbooks)',
   summary:
-    'Skills federation + SKILL-SCOUT, REFLECTOR + Reflection Inbox, speculation ' +
-    'explore/ branches with EVALUATOR, production rigor with 24 h soak, drift ' +
-    'detection, and persona evolution. v2.5 Parts C, E, F.',
+    'Skills federation + SKILL-SCOUT (3-C), REFLECTOR + Reflection Inbox + memory ' +
+    'stores (3-E), brownfield migration of pre-v2 projects (3-F), speculation explore/ ' +
+    'branches with EVALUATOR + 24 h soak + drift detection (3-S). v2.5 Parts IV–VI + ' +
+    'speculation (Part III §28) and production rigor (Part V §36) pulled from spec ' +
+    'Phase B.10 and D.12/D.15 per 2026-05-14 scoping.',
   narrative:
     'Phase 3 is where the system compounds its own learning. ' +
-    'SKILL-SCOUT proposes skill adds/removes/upgrades at four trigger points. ' +
-    'REFLECTOR observes each completed wave and plan, proposes CLAUDE.md edits and ' +
-    'skill candidates — always propose-only, never auto-apply. ' +
-    'The Reflection Inbox (reusing the Feedback Inbox component) routes proposals ' +
-    'to the operator. ' +
+    'SKILL-SCOUT proposes skill adds/removes/upgrades at eight trigger points (T1–T8). ' +
+    'REFLECTOR observes each completed wave and plan, proposes CLAUDE.md edits, skill ' +
+    'candidates, persona refinements, and tool-wrapper opportunities — always propose-' +
+    'only, never auto-apply. The Reflection Inbox (reusing the attention-dock component ' +
+    'family) routes proposals to the operator. ' +
     'Speculation explore/ branches let two implementations race; EVALUATOR declares ' +
     'a winner by applying a defined winner-rule. ' +
-    'Production rigor adds a 24 h soak gate, drift detection, and ' +
-    'a required-review branch-protection policy on main.',
+    'Production rigor adds a 24 h soak gate, drift detection (weekly cdk diff), and ' +
+    'cost-overrun monitoring. ' +
+    'Brownfield audit (Plan.kind: brownfield-audit) brings existing Futurator projects ' +
+    'into v2 management without recreation, using cdk import.',
   shipGate:
-    'REFLECTOR fires after a completed plan and produces at least one proposal in the ' +
-    'Reflection Inbox. A skill promoted from a project-local skill to org-wide is ' +
-    'visible in the federation manifest. An explore/ speculation branch runs and ' +
-    'EVALUATOR declares a winner. A plan tagged production rigor passes the 24 h soak.',
+    'A production-rigor plan exercises every Phase 3 mechanism end-to-end: SKILL-SCOUT ' +
+    'proposal lands in the manifest; explore/ speculation runs and EVALUATOR declares ' +
+    'a winner; REFLECTOR fires post-close and produces an inbox proposal; the 24 h ' +
+    'staging soak passes and the operator promotes to production. Cross-cutting: one ' +
+    'brownfield audit on an existing project completes with three manifests committed ' +
+    'and cdk diff returning empty post-import.',
   deferrals: [
     'Claude Managed Agents (MA) migration — opt-in per project, blocked on EU residency (Phase G)',
-    'Brownfield audit for pre-v2 Futurator projects (Phase F, ~2 days per project)',
-    'REFLECTOR-REVIEWER (guard against compromised reflection) — after Phase 3 baseline',
+    'REFLECTOR-REVIEWER full multi-LLM verdict pipeline — ships baseline allowlist only, Haiku second-pass deferred-after-baseline',
+    'Skill-set-as-speculation production-rigor variant — basic speculation lands; skill-set variant deferred to v2.6',
+    'Persona forking — forbidden per v2.5 §42; capability variation lives in skill manifest',
+    'MCP transport switch from stdio to HTTP — deferred until federation has > 10 skills',
+    'Cross-organization skill federation — Phase 3 is single-org; multi-org is v2.7+',
   ],
   epics: [
     {
-      id: 'pv2-p3-C',
-      title: 'Phase C — Skills managed resource (9 items)',
+      id: 'pv2-p3-c',
+      title: 'Phase 3-C — Skills managed resource (9 stories)',
       effort: '~17 days',
       stories: 9,
-      status: 'backlog',
+      status: 'in-progress',
     },
     {
-      id: 'pv2-p3-E',
-      title: 'Phase E — Reflection loop (10 items)',
+      id: 'pv2-p3-e',
+      title: 'Phase 3-E — Reflection loop (10 stories)',
       effort: '~17 days',
       stories: 10,
+      status: 'in-progress',
+    },
+    {
+      id: 'pv2-p3-f',
+      title: 'Phase 3-F — Brownfield migration (4 stories + 2/project)',
+      effort: '~4 days fixed + 2/proj',
+      stories: 4,
       status: 'backlog',
     },
     {
-      id: 'pv2-p3-F',
-      title: 'Phase F — Brownfield migration (4 items + 2/project)',
-      effort: '~4 days fixed',
-      stories: 4,
+      id: 'pv2-p3-s',
+      title: 'Phase 3-S — Speculation + production rigor (3 stories)',
+      effort: '~6 days',
+      stories: 3,
       status: 'backlog',
     },
   ],

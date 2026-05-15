@@ -320,6 +320,26 @@ export default $config({
       },
     });
 
+    // ── Pipeline v2 Phase 3 — Story 3-E-3-1 (PR-76): Reflection Inbox ──
+    // REFLECTOR proposals stored per-project. PK = projectSlug (Query for
+    // labs UI per-project view); SK = id (ULID-shape, sort-friendly).
+    // Cross-project list at /labs/reflections uses Scan — proposal volume
+    // is low (single-digit per plan-close). PITR enabled because losing
+    // operator-confirmed proposals would silently regress the knowledge
+    // ratchet.
+    const reflectionsTable = new sst.aws.Dynamo('ReflectionsTable', {
+      fields: { projectSlug: 'string', id: 'string' },
+      primaryIndex: { hashKey: 'projectSlug', rangeKey: 'id' },
+      transform: {
+        table: {
+          name: 'futurator-reflections',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── Pipeline v2 — Phase 1 (Story 1.1.2) — GitHub PAT secret ──
     // Used by the daemon and API to authenticate GitHub API calls (create repo,
     // push commits, read PR status). Value is set out-of-band by the operator:
@@ -417,6 +437,7 @@ export default $config({
         plansTable,
         appsTable,
         attentionItemsTable,
+        reflectionsTable,
         agentSessionsTable,
         agentConversationsTable,
         timingSummaryTable,
@@ -444,6 +465,7 @@ export default $config({
         PLANS_TABLE: plansTable.name,
         APPS_TABLE: appsTable.name,
         ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
+        REFLECTIONS_TABLE: reflectionsTable.name,
         AGENT_SESSIONS_TABLE: agentSessionsTable.name,
         AGENT_CONVERSATIONS_TABLE: agentConversationsTable.name,
         TIMING_SUMMARY_TABLE: timingSummaryTable.name,

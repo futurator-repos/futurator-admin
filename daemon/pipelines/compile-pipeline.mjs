@@ -17,6 +17,19 @@ import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { buildAgentConfig } from './lib/role-policy.mjs';
+import { buildSkillsCommitFlags, quoteFlagsForShell } from './lib/commit-metadata.mjs';
+
+/**
+ * PR-73 (Story 3-C-4-1) — render the additional `-m '<body>'` flags the
+ * compile-commit-on-pass step appends to its `git commit` invocation.
+ * Returns a leading-space-prefixed string for direct shell concatenation,
+ * or empty string when no flags apply (prototype rigor, etc.).
+ */
+function buildSkillsCommitFlagsForShell(rigor, workingDir, loadedSkills) {
+  const flags = buildSkillsCommitFlags({ rigor, workingDir, loadedSkills });
+  if (flags.length === 0) return '';
+  return ' -m ' + quoteFlagsForShell(flags).join(' -m ');
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -86,7 +99,23 @@ export function getCompilerAgent() {
  * @param {string} [storyContext.epicTitle] — epic title
  * @returns {Array} PipelineStep array for the COMPILE phase
  */
-export function getCompileSteps(projectId, workingDir, epicId, storyId, storyContext = {}) {
+/**
+ * PR-73 (Story 3-C-4-1) — opts.rigor + opts.loadedSkills extend the
+ * per-story commit message with `Skills-Used:` + `Skills-Manifest-Sha:`
+ * lines under mvp+ rigor. Both default to safe no-op values so existing
+ * callers that haven't been migrated yet keep emitting the pre-PR-73
+ * commit shape (subject only).
+ */
+export function getCompileSteps(
+  projectId,
+  workingDir,
+  epicId,
+  storyId,
+  storyContext = {},
+  opts = {},
+) {
+  const rigor = opts.rigor || 'prototype';
+  const loadedSkills = Array.isArray(opts.loadedSkills) ? opts.loadedSkills : [];
   const compilerPrompt = loadCompilerPrompt();
 
   // Build the full prompt with context injections
@@ -164,7 +193,13 @@ Read the file at ${workingDir}/knowledge/index.md to understand the current cata
         `  exit 1; ` +
         `fi && ` +
         `git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
-        `commit -m 'story: ${storyId} — ${escapedTitle}'`,
+        // PR-73 (Story 3-C-4-1) — append Skills-Used + Skills-Manifest-Sha
+        // metadata lines under mvp+ rigor via repeated -m flags. Git
+        // joins multi-m bodies with blank lines, producing a queryable
+        // commit message that `git log --grep="Skills-Used:..."` finds.
+        `commit -m 'story: ${storyId} — ${escapedTitle}'${
+          buildSkillsCommitFlagsForShell(rigor, workingDir, loadedSkills)
+        }`,
       timeout: 30000,
       captureAs: 'STORY_COMMIT_OUTPUT',
       onFail: { action: 'fail', injectAs: 'STORY_COMMIT_ERROR' },

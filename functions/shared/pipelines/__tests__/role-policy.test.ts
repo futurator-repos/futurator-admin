@@ -20,6 +20,14 @@ const ALL_ROLES: Role[] = [
   'COMPILER',
   'QA',
   'PM',
+  // PR-72 — Phase 3 SKILL-SCOUT (Story 3-C-3-1)
+  'SKILL_SCOUT',
+  // PR-74 — Phase 3 REFLECTOR (Story 3-E-2-1)
+  'REFLECTOR',
+  // PR-81 — Phase 3 TRIAGE (Story 3-E-6-1)
+  'TRIAGE',
+  // PR-90 — Phase 2-D ARCHITECT (Story 2-D-6-1)
+  'ARCHITECT',
   // PR-32b — daemon-only roles
   'CONVERSATION',
   'REFLECTION',
@@ -67,10 +75,20 @@ describe('resolveRolePolicy — cartesian coverage', () => {
     }
   });
 
-  it('every role has Bash denied except DEV / TEST / QA / CONVERSATION / REFLECTION (Bash-allowed roles)', () => {
+  it('every role has Bash denied except DEV / TEST / QA / SKILL_SCOUT / CONVERSATION / REFLECTION (Bash-allowed roles)', () => {
     // Bash allowed: TEST, DEV, QA (story pipeline) + CONVERSATION, REFLECTION
-    // (daemon-only, PR-32b — they shell out for context gathering).
-    const BASH_ALLOWED_ROLES = new Set<Role>(['TEST', 'DEV', 'QA', 'CONVERSATION', 'REFLECTION']);
+    // (daemon-only, PR-32b — they shell out for context gathering) +
+    // SKILL_SCOUT (PR-72 — Bash for license/freshness/collision verification
+    // of candidate skills).
+    const BASH_ALLOWED_ROLES = new Set<Role>([
+      'TEST',
+      'DEV',
+      'QA',
+      'SKILL_SCOUT',
+      'ARCHITECT',
+      'CONVERSATION',
+      'REFLECTION',
+    ]);
     for (const role of ALL_ROLES) {
       const policy = resolveRolePolicy('nextjs-base', 'mvp', role);
       const bashAllowed = policy.allowedTools.includes('Bash');
@@ -104,6 +122,33 @@ describe('resolveRolePolicy — cartesian coverage', () => {
     const policy = resolveRolePolicy('nextjs-base', 'mvp', 'PM');
     expect(policy.allowedTools).toEqual(['Read']);
   });
+
+  it('SKILL_SCOUT — Bash + Read + Grep + Glob; Write/Edit/NotebookEdit denied', () => {
+    const policy = resolveRolePolicy('nextjs-base', 'mvp', 'SKILL_SCOUT');
+    expect(policy.allowedTools).toContain('Bash');
+    expect(policy.allowedTools).toContain('Read');
+    expect(policy.allowedTools).toContain('Grep');
+    expect(policy.allowedTools).toContain('Glob');
+    expect(policy.allowedTools).not.toContain('Write');
+    expect(policy.allowedTools).not.toContain('Edit');
+    expect(policy.disallowedTools).toContain('Write');
+    expect(policy.disallowedTools).toContain('Edit');
+    expect(policy.disallowedTools).toContain('NotebookEdit');
+  });
+
+  it('REFLECTOR — Read + Grep + Glob only; Write/Edit/NotebookEdit/Bash all denied', () => {
+    const policy = resolveRolePolicy('nextjs-base', 'mvp', 'REFLECTOR');
+    expect(policy.allowedTools).toContain('Read');
+    expect(policy.allowedTools).toContain('Grep');
+    expect(policy.allowedTools).toContain('Glob');
+    expect(policy.allowedTools).not.toContain('Write');
+    expect(policy.allowedTools).not.toContain('Edit');
+    expect(policy.allowedTools).not.toContain('Bash');
+    expect(policy.disallowedTools).toContain('Write');
+    expect(policy.disallowedTools).toContain('Edit');
+    expect(policy.disallowedTools).toContain('NotebookEdit');
+    expect(policy.disallowedTools).toContain('Bash');
+  });
 });
 
 describe('resolveRolePolicy — turn caps (v2.5 §17)', () => {
@@ -121,6 +166,14 @@ describe('resolveRolePolicy — turn caps (v2.5 §17)', () => {
     ['production', 'REVIEWER', 8],
     ['production', 'QA', 8],
     ['production', 'PM', 6],
+    // PR-72 (Story 3-C-3-1) — SKILL-SCOUT turn caps
+    ['prototype', 'SKILL_SCOUT', 4],
+    ['mvp', 'SKILL_SCOUT', 6],
+    ['production', 'SKILL_SCOUT', 8],
+    // PR-74 (Story 3-E-2-1) — REFLECTOR turn caps (bounded by inbox window)
+    ['prototype', 'REFLECTOR', 4],
+    ['mvp', 'REFLECTOR', 6],
+    ['production', 'REFLECTOR', 8],
   ] as const)('%s rigor / %s role → maxTurns=%i', (rigor, role, expected) => {
     const policy = resolveRolePolicy('nextjs-base', rigor, role);
     expect(policy.maxTurns).toBe(expected);

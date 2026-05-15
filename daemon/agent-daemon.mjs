@@ -121,6 +121,10 @@ import { evaluatePreworkGate, renderGateEvidence } from './lib/prework-gate.mjs'
 import { inferTouchPoints } from './lib/touch-point-inference.mjs';
 import { writeFile as fsWriteFile, mkdir as fsMkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { createFederationCache, manifestSha } from './lib/federation-loader.mjs';
+import { startFederationBackupSchedule } from './lib/federation-backup.mjs';
+import { createFederationResolver } from './lib/federation-resolver.mjs';
+import { createMemoryStore, provisionMemoryRoot } from './lib/memory-store.mjs';
 
 // Resolve the full path to `claude` binary at startup
 let CLAUDE_BIN = 'claude';
@@ -217,6 +221,20 @@ const authState = {
   expiresAt: null, // unix ms from the accessToken (CLI refreshes per-use)
   subscriptionType: null, // "max" / "pro" / ...
 };
+
+// Phase 3 / Story 3-C-1-1 — skill federation cache + backup schedule.
+// Loaded at startup from ~/.futurator/skill-federation.yaml (overridable via
+// FUTURATOR_FEDERATION_PATH); refreshed via SIGUSR1 alongside OAuth reload.
+// Daily S3 backup tick is started in the main IIFE and stored here for
+// shutdown teardown.
+let federationCache = null;
+let federationResolver = null;
+let federationBackupHandles = null;
+
+// Phase 3 / Story 3-E-1-1 — inter-agent memory store. Provisioned at
+// startup (idempotent); accessed via createMemoryStore() handle by REFLECTOR,
+// TRIAGE, and agents writing to inbox/* outbox files.
+let memoryStore = null;
 
 function tryOAuthFile() {
   try {
@@ -3444,6 +3462,14 @@ async function shutdown(signal) {
   );
   shuttingDown = true;
 
+  // Phase 3 / Story 3-C-1-1 — clear federation backup interval so the
+  // event loop can drain.
+  if (federationBackupHandles) {
+    clearTimeout(federationBackupHandles.startupTimer);
+    clearInterval(federationBackupHandles.intervalHandle);
+    federationBackupHandles = null;
+  }
+
   if (ndjsonForwarder) {
     try {
       await ndjsonForwarder.stop();
@@ -3540,6 +3566,10 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 // file and re-probe. Triggered by scripts/mac-oauth-sync.sh (the Mac →
 // Keychain → SSM pipeline) after a successful push. No restart, no killed
 // jobs — in-flight spawns keep their own env and new spawns get the new file.
+//
+// Phase 3 / Story 3-C-1-1 multiplexes this signal: the skill federation
+// cache also re-reads `~/.futurator/skill-federation.yaml`. Operators
+// editing either resource use the same `kill -USR1 <daemon-pid>`.
 process.on('SIGUSR1', async () => {
   log('info', 'SIGUSR1 received — reloading OAuth and re-probing');
   try {
@@ -3547,6 +3577,32 @@ process.on('SIGUSR1', async () => {
     await probeAuth();
   } catch (err) {
     log('error', `SIGUSR1 reload failed: ${err.message}`);
+  }
+  if (federationCache) {
+    try {
+      const result = federationCache.refresh();
+      if (result.error) {
+        log(
+          'error',
+          `SIGUSR1 federation refresh fell back: ${result.error} (path=${result.path})`,
+        );
+      } else if (result.changed) {
+        log(
+          'info',
+          `SIGUSR1 federation refreshed: ${result.source} (${result.previousSha.slice(0, 8)} → ${result.newSha.slice(0, 8)})`,
+        );
+      } else {
+        log('info', 'SIGUSR1 federation refresh: no change');
+      }
+    } catch (err) {
+      log('error', `SIGUSR1 federation refresh failed: ${err.message}`);
+    }
+  }
+  // Story 3-C-1-2 — drop the resolver's per-source index cache so next
+  // resolveSkill() re-fetches against the (possibly new) source set.
+  if (federationResolver) {
+    federationResolver.invalidate();
+    log('info', 'SIGUSR1 federation-resolver: index cache invalidated');
   }
 });
 
@@ -3577,5 +3633,64 @@ async function configureGitIdentity() {
     log('error', 'Daemon refusing to start — fix PAT or set SKIP_GIT_IDENTITY=1 to bypass.');
     process.exit(3);
   }
+
+  // Phase 3 / Story 3-C-1-1 — load skill federation manifest. Missing file
+  // falls back to the embedded default (Anthropic-official + futurator-
+  // internal + community at p99). Parse/validation errors fall back to the
+  // same default but log an error — operator authors a valid file or accepts
+  // the default until SKILL-SCOUT (3-C-3) starts consuming it.
+  try {
+    const federationPath = process.env.FUTURATOR_FEDERATION_PATH || undefined;
+    federationCache = createFederationCache(federationPath);
+    const { manifest, source, path: loadedPath, error } = federationCache.get();
+    if (error) {
+      log(
+        'error',
+        `federation-loader: ${error} (path=${loadedPath}) — using embedded default`,
+      );
+    } else {
+      log(
+        'info',
+        `federation-loader: ${source} (path=${loadedPath}, ${manifest.sources.length} sources, sha=${manifestSha(manifest).slice(0, 8)})`,
+      );
+    }
+    // Start the daily S3 backup. Disabled in env=test or when explicitly
+    // opted out — operators on tiny EBS quotas can skip the S3 write.
+    if (process.env.FUTURATOR_FEDERATION_BACKUP_DISABLED !== '1') {
+      federationBackupHandles = startFederationBackupSchedule(
+        () => federationCache?.get(),
+        log,
+      );
+      log('info', 'federation-backup: daily schedule armed');
+    }
+    // Story 3-C-1-2 — resolver built on top of the cache. SKILL-SCOUT
+    // (3-C-3) will be the primary consumer.
+    federationResolver = createFederationResolver(federationCache);
+    log('info', 'federation-resolver: ready');
+  } catch (err) {
+    log('error', `federation-loader setup failed: ${err.message}`);
+  }
+
+  // Phase 3 / Story 3-E-1-1 — provision the inter-agent memory hierarchy
+  // (/mnt/memory by default; FUTURATOR_MEMORY_ROOT for tests + alt mounts).
+  // Idempotent — re-running the daemon adds no new dirs. REFLECTOR (3-E-2)
+  // and TRIAGE (3-E-6) consume `memoryStore` directly.
+  try {
+    const memProvision = provisionMemoryRoot();
+    memoryStore = createMemoryStore();
+    if (memProvision.created.length > 0) {
+      log(
+        'info',
+        `memory-store: provisioned ${memProvision.created.length} dir(s) under ${memProvision.root}`,
+      );
+    } else {
+      log('info', `memory-store: ready at ${memProvision.root} (already provisioned)`);
+    }
+  } catch (err) {
+    // Memory-store failure is non-fatal — REFLECTOR/TRIAGE features degrade
+    // gracefully (those agents check memoryStore != null before using).
+    log('error', `memory-store setup failed: ${err.message}`);
+  }
+
   poll();
 })();

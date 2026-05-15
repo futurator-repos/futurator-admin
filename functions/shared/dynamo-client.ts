@@ -16,6 +16,7 @@ export const TABLE_NAMES = {
   alerts: process.env.ALERTS_TABLE || 'futurator-admin-alerts',
   agentJobs: process.env.AGENT_JOBS_TABLE || 'futurator-agent-jobs',
   agentEvents: process.env.AGENT_EVENTS_TABLE || 'futurator-agent-events',
+  partyEvents: process.env.PARTY_EVENTS_TABLE || 'futurator-party-events',
   epicWorkflows: process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflows',
   projectRegistry: process.env.PROJECT_REGISTRY_TABLE || 'futurator-project-registry',
   partyProjects: process.env.PARTY_PROJECTS_TABLE || 'futurator-party-projects',
@@ -30,4 +31,9 @@ export const TABLE_NAMES = {
   agentConversations: process.env.AGENT_CONVERSATIONS_TABLE || 'futurator-agent-conversations',
   // Pipeline v2 Phase 1 — Story 1.8.6: cron-aggregated cohort baselines.
   timingSummary: process.env.TIMING_SUMMARY_TABLE || 'futurator-timing-summary',
+  // Pipeline v2 Phase 3 — Story 3-E-3-1 (PR-76): Reflection Inbox storage.
+  // Partition by projectSlug so the labs UI per-project view + the cross-
+  // project /labs/reflections list both read efficiently. Sort key is the
+  // proposal id (ULID-shape).
+  reflections: process.env.REFLECTIONS_TABLE || 'futurator-reflections',
 } as const;

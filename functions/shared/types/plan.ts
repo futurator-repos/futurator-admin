@@ -199,6 +199,26 @@ export interface Plan {
   /** Where the folder was moved on archive (e.g. `/home/ubuntu/.trash/plans/foo-2026…`). */
   archivePath?: string;
 
+  /**
+   * Pipeline v2 Phase 3 / Story 3-E-8-1 (PR-82) — persona version pin.
+   *
+   * BMAD personas (Bedrock, Nimbus, Docker Harbor, Rick) are versioned
+   * independently in the `futurator-personas` org repo. Plans pin a
+   * persona version AT CREATION TIME — the latest tag per persona is
+   * snapshotted into this field. **Updating a persona repo doesn't
+   * retroactively change running plans.** v2.5 §42.
+   *
+   * Missing field = plan was created before PR-82 (or before any
+   * persona had a tag); daemon falls back to the latest tag at session
+   * start, with a one-line log marker so operators can see the implicit
+   * pin.
+   *
+   * Shape: `Record<personaName, semver>` (e.g. `{ bedrock: 'v1.2.0',
+   * nimbus: 'v0.4.0' }`). Keys are persona names; values are semver tags
+   * (with or without the `v` prefix accepted).
+   */
+  personaPinned?: Record<string, string>;
+
   createdAt: string;
   updatedAt: string;
   createdBy: string;

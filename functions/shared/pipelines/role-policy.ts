@@ -50,6 +50,33 @@ export const RoleSchema = z.enum([
   'COMPILER',
   'QA',
   'PM',
+  // ── Phase 3 roles (PR-72 / Story 3-C-3-1) ─────────────────────────────
+  // SKILL-SCOUT resolves the federation manifest against plan intent and
+  // proposes manifest edits via the decision card. Read-only on the
+  // filesystem (Write/Edit denied); Bash is allowed for license-header,
+  // freshness, and description-collision verification.
+  'SKILL_SCOUT',
+  // ── Phase 3 (PR-74/75 / Story 3-E-2-1) ────────────────────────────────
+  // REFLECTOR observes completed plans / waves / stories and emits
+  // structured proposals to inbox/reflections.md. Bash is denied at the
+  // CLI layer (v2.5 §38.2 propose-only invariant) — git read verbs are
+  // exposed via the @futurator/mcp-git-readonly MCP wrapper (3-C-9),
+  // never via raw shell. Distinct from the existing REFLECTION role
+  // which is the v1 daemon self-health-analyst.
+  'REFLECTOR',
+  // ── Phase 3 (PR-81 / Story 3-E-6-1) ───────────────────────────────────
+  // TRIAGE consumes a feedback item + cross-plan history (with project-
+  // match weighting per v2.5 §43) and proposes a bugfix plan. Same
+  // propose-only invariant as REFLECTOR — output is a decision card,
+  // not a manifest edit.
+  'TRIAGE',
+  // ── Phase 2-D (PR-90 / Story 2-D-6-1) ─────────────────────────────────
+  // ARCHITECT resolves plan intent against the project's aws.manifest.yaml
+  // and integrations.manifest.yaml. Same role-shape as SKILL-SCOUT:
+  // read-mostly + Bash for `cdk diff` / `cdk synth` / aws cli (via the
+  // future MCP wrappers from Phase 3-C-9). Manifest writes flow through
+  // the daemon's manifest-applier — never the agent's own Edit/Write.
+  'ARCHITECT',
   // ── Daemon-only roles (PR-32b) ────────────────────────────────────────
   // The API Lambda never spawns these — they're created by daemon-
   // orchestrated background jobs (knowledge compile, deploy compile,
@@ -149,6 +176,48 @@ const ROLE_BASE: Record<Role, { allowed: readonly string[]; deniedExtras: readon
     deniedExtras: ['Bash', 'Write', 'Edit'],
   },
 
+  // ── Phase 3 (PR-72 / Story 3-C-3-1) ─────────────────────────────────────
+  SKILL_SCOUT: {
+    // Read-mostly + Bash for license/freshness/collision verification of
+    // candidate skills. Write/Edit denied — manifest writes flow through
+    // the daemon's skill-installer helper (Agent: SKILL-SCOUT commit
+    // metadata), not the agent's own tool calls. NotebookEdit also denied.
+    allowed: ['Bash', 'Read', 'Grep', 'Glob'],
+    deniedExtras: ['Write', 'Edit', 'NotebookEdit'],
+  },
+
+  // ── Phase 3 (PR-74/75 / Story 3-E-2-1) ──────────────────────────────────
+  REFLECTOR: {
+    // Strictly propose-only per v2.5 §38.2. Bash is denied at the CLI
+    // layer — git read verbs come from the @futurator/mcp-git-readonly
+    // MCP wrapper (3-C-9). Write / Edit / NotebookEdit all denied because
+    // REFLECTOR's only output channel is the structured proposal block
+    // appended to inbox/reflections.md by the daemon runner (not by the
+    // agent itself).
+    allowed: ['Read', 'Grep', 'Glob'],
+    deniedExtras: ['Write', 'Edit', 'NotebookEdit', 'Bash'],
+  },
+
+  // ── Phase 3 (PR-81 / Story 3-E-6-1) ─────────────────────────────────────
+  TRIAGE: {
+    // Read-only like REFLECTOR. Triage agent reads cross-project history +
+    // current feedback item; output is a proposed bugfix plan card the
+    // operator confirms. No write tools — plan creation flows through the
+    // existing API surface, not this agent's tool calls.
+    allowed: ['Read', 'Grep', 'Glob'],
+    deniedExtras: ['Write', 'Edit', 'NotebookEdit', 'Bash'],
+  },
+
+  // ── Phase 2-D (PR-90 / Story 2-D-6-1) ───────────────────────────────────
+  ARCHITECT: {
+    // Read-mostly + Bash for cdk diff / cdk synth / aws CLI verification.
+    // Manifest writes are NOT through the agent's Edit/Write — the daemon's
+    // manifest-applier handles them after the operator confirms the
+    // decision card. Same pattern as SKILL-SCOUT (PR-72).
+    allowed: ['Bash', 'Read', 'Grep', 'Glob'],
+    deniedExtras: ['Write', 'Edit', 'NotebookEdit'],
+  },
+
   // ── Daemon-only roles (PR-32b — see RoleSchema comment) ─────────────────
   CONVERSATION: {
     // Read-mostly + Bash for context-gathering shells. No Write/Edit.
@@ -181,6 +250,15 @@ const TURN_CAPS: Record<PlanRigor, Partial<Record<Role, number | null>>> = {
     COMPILER: null,
     QA: null,
     PM: null,
+    // PR-72 (Story 3-C-3-1) — read-mostly resolver, single-pass.
+    SKILL_SCOUT: 4,
+    // PR-74 (Story 3-E-2-1) — REFLECTOR scoped by inbox frontmatter
+    // diff window per v2.5 §38.3; tight cap holds even in production.
+    REFLECTOR: 4,
+    // PR-81 (Story 3-E-6-1) — TRIAGE is a single-shot relevance ranker.
+    TRIAGE: 4,
+    // PR-90 (Story 2-D-6-1) — ARCHITECT bounded by manifest size; tight cap.
+    ARCHITECT: 4,
     // Daemon-only roles — no caps (background jobs, single-pass agents)
     CONVERSATION: null,
     REFLECTION: null,
@@ -194,6 +272,10 @@ const TURN_CAPS: Record<PlanRigor, Partial<Record<Role, number | null>>> = {
     COMPILER: null,
     QA: null,
     PM: null,
+    SKILL_SCOUT: 6,
+    REFLECTOR: 6,
+    TRIAGE: 6,
+    ARCHITECT: 6,
     CONVERSATION: null,
     REFLECTION: null,
     DEPLOY: null,
@@ -206,6 +288,12 @@ const TURN_CAPS: Record<PlanRigor, Partial<Record<Role, number | null>>> = {
     COMPILER: null,
     QA: 8,
     PM: 6,
+    // Opus when authoring per PR-72; cap larger to allow license-review
+    // depth under production rigor.
+    SKILL_SCOUT: 8,
+    REFLECTOR: 8,
+    TRIAGE: 8,
+    ARCHITECT: 8,
     CONVERSATION: null,
     REFLECTION: null,
     DEPLOY: null,

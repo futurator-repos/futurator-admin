@@ -19,7 +19,10 @@
 > - `pipeline-v2-0-efficency-fixes.md` — PR-1..PR-58 tracking
 > - `pipeline-v2-logic-overview.md` — overall reducer flow
 > - `epics-pipeline-v2-phase-2.md` §16 — PR-32..PR-68 stabilisation catalogue
-> - `epics-pipeline-v2-phase-3.md` — Phase 3 epic plan (PR-69..PR-87+)
+>   (and the wrap-PR catalogue PR-84..PR-101 lands here at next doc refresh)
+> - `epics-pipeline-v2-phase-3.md` — Phase 3 epic plan (PR-69..PR-87 enumerated;
+>   additional Phase 3 stories landed via PR-78..PR-83 are mapped in
+>   sprint-status.yaml)
 >   This file extends them; it is NOT a substitute. When this document and a
 >   sibling disagree, **the sibling wins** if it's about _design_; this file
 >   wins if it's about _recently shipped behaviour_ (PR-59..PR-68 +
@@ -1013,7 +1016,7 @@ and we'll iterate.
 - [ ] `compile-commit-on-pass` produced a non-empty diff for every story
 - [ ] `wave-build-pipeline` ran with `bundle-source-check` step present
 - [ ] `[bundle-source-check] all N touch points reachable from the
-    bundle entry` log line appeared
+  bundle entry` log line appeared
 - [ ] No `BUNDLE_ORPHAN_FILES` errors
 
 ### Wave N (features with browser ACs)
@@ -1157,7 +1160,11 @@ The Phase 3 + Phase 2 stories that remain are either **trigger-wiring
 follow-ons** (each ~½ day, bounded contract from a sibling helper) or
 **operator-side org provisioning** (no code).
 
-### Still uncovered
+### Mycelium + cross-cutting QA gaps (not blocking Phase 2/3 substrate)
+
+These are operator-surface gaps that exist outside the Phase 2/3 work I
+shipped — they're tracked here so a single doc has the full "what
+should happen vs. what really happens" picture for the next plan run.
 
 - **bootstrap-ast.mjs auto-trigger from app-bootstrap.** Slice C ships
   the script; the daemon's `app-bootstrap.mjs` pipeline still needs the
@@ -1193,14 +1200,78 @@ follow-ons** (each ~½ day, bounded contract from a sibling helper) or
 - **Tamper-check for non-test files.** Currently only protects test
   files between test-author and dev. A dev agent that "fixes" their own
   prior story's source files mid-run isn't caught.
-- **Per-story `wip/<storyId>` branches + worktrees** (Phase 2-B, 0/12
-  shipped). Stories still commit directly to `main` via per-story
-  push (PR-19). Phase 3-S `explore/` speculation is blocked on this.
-- **`aws.manifest.yaml` + ARCHITECT + CDK** (Phase 2-D, 0/18 shipped).
-  Phase 3-F brownfield migration is blocked on this.
 
-If you start hitting one of these in Phase 3, that's the signal to ship
-the corresponding PR.
+### Trigger-wiring follow-ons (substrate shipped, daemon hooks pending)
+
+The substrate is now shipped; these are the small bounded daemon-loop
+hooks that activate each piece. Each ~½ day, contract clear from the
+sibling helper.
+
+| Symptom in plan run                                | Follow-on PR                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------------- |
+| No SKILL-SCOUT card at app-bootstrap / plan intent | PR-72-followup (T1/T2/T3 daemon hooks)                                |
+| No ARCHITECT card on AWS plan intent               | PR-90-followup (T1/T2/T3 daemon hooks)                                |
+| No `Skills-Used:` content on commits               | PR-73-followup (`loadedSkills[]` tracking per agent invocation)       |
+| No REFLECTOR ceremony at plan close                | PR-74-followup (quiet-window scheduler + low-priority slot)           |
+| Confirm in Reflection Inbox doesn't land a commit  | PR-76-followup (on-disk REFLECTOR-APPLY)                              |
+| No global-bell sparkle / no unified diff           | PR-76-followup (UI polish)                                            |
+| Stories still commit on primary worktree           | PR-86-followup (`git worktree add/remove` story-pipeline hooks)       |
+| Story commits land directly on main                | PR-95-followup (wave-merge `--no-ff` orchestration + merge lock gate) |
+| `metrics.csv` empty                                | PR-84-followup (`step_complete` tee into the helper)                  |
+| No baseline-drift decision card on regression      | PR-92-followup (card render + PR-label scan)                          |
+| No API-AUTHOR step running                         | PR-91-followup (story-pipeline step insertion)                        |
+| No T5 SKILL-SCOUT fire on `npm install <dep>`      | PR-79-followup (git-hook on package.json edit)                        |
+| No T6 SKILL-SCOUT fire on REVIEWER cluster         | PR-79-followup (COMPILER post-wave cluster check)                     |
+| No T8 weekly refresh card                          | PR-79-followup (Monday 06:00 UTC cron)                                |
+| No drift detection cron                            | PR-96-followup (weekly `cdk diff` Lambda)                             |
+| No 24h soak when production tag lands              | PR-98-followup (CloudWatch poller cron)                               |
+| Skill manifest empty after SKILL-SCOUT confirm     | PR-72-followup (skill-installer wire)                                 |
+| CLAUDE.md not prepended to agent system prompts    | PR-80-followup (spawn-loop adopts `buildAgentSystemPrompt`)           |
+
+### Operator-side org provisioning (not code)
+
+These are not pull requests — they are AWS / GitHub operations the
+operator runs manually before the corresponding substrate activates:
+
+- Author `~/.futurator/skill-federation.yaml` (loader falls back to
+  the embedded default when missing).
+- Create `futurator-skills` GitHub repo + `index.json` listing org
+  skills (federation resolver's primary source after auto-trust).
+- Create `futurator-personas` GitHub repo with seed personas
+  (`bedrock`, `nimbus`, `docker-harbor`, `rick`) + semver tags per file.
+- Create `futurator-org-memory` GitHub repo with seed content
+  (`brand-voice.md`, `bmad-conventions.md`, `aws-patterns.md`,
+  `known-pitfalls.md`).
+- Provision CodeArtifact domain `futurator` + repo `mcp` (Phase 3-C-9).
+- Create `s3://futurator-config/` bucket (federation-backup writes
+  here daily).
+- Provision AWS Layer B per-project IAM roles + OIDC provider trust.
+  Brownfield-audit plan (3-F-1) drives these once it runs end-to-end
+  with ARCHITECT (PR-90).
+
+### Phase 2-D / 2-B / Phase 3 items still on the backlog
+
+- **Layer C ephemeral session credentials** (Phase 2-D-10) —
+  production-rigor per-plan session policy. Still backlog.
+- **Reactive ARCHITECT triggers** (Phase 2-D-11) — T4 cost-shape
+  speculation, T5 cost overrun, T6 drift, T7 secret rotation due,
+  T8 vendor change scan.
+- **`aws-env-demo` promotion path** (Phase 2-D-14) — preview-backend
+  → persistent demo env transition.
+- **Sandbox account integration** (Phase 2-D-15) — SKILL-SCOUT
+  skill-authoring sub-plan AWS sandbox.
+- **REFLECTOR-REVIEWER** (Phase 3-E-10, defer-after-baseline) —
+  Haiku second-pass validator before proposals hit the inbox.
+- **Claude Managed Agents migration** (Phase G, opt-in per project,
+  blocked on EU residency + 30-day checkpoint TTL).
+- **Daemon GC pass extension** (Phase 2-B-7) — consumes PR-86
+  worktree paths + PR-100 stream archive. Mostly wiring.
+- **`experiment/` + `hotfix/` branch helpers** (Phase 2-B-8) —
+  builders exist in PR-86; daemon orchestration around them is
+  follow-on.
+
+If you start hitting one of these in a plan run, that's the signal to
+prioritize the corresponding wire-in or operator-side provisioning.
 
 ---
 
@@ -1219,8 +1290,13 @@ the corresponding PR.
 
 ---
 
-_Last reviewed: 2026-05-16 against HEAD `d168114-dirty` + Phase 3 PRs
-PR-69/70/71/72/73/74/76/77 in working tree + Mycelium activation
-sequence (Memgraph live + Graph viewer + tree-sitter Slice A/B/C, see
-PRs #1–#4 against `main`). When the next plan ships and reality drifts,
-edit inline rather than appending notes._
+_Last reviewed: 2026-05-16 against HEAD `d168114-dirty` + 36 substrate
+stories in working tree (Phase 3 PR-69..PR-83 + Phase 2 wrap
+PR-84..PR-101 — federation, SKILL-SCOUT + 8 triggers, REFLECTOR + inbox,
+memory store, commit metadata template, ARCHITECT, API-AUTHOR,
+acceptBaselineDrift, AWS+integrations manifest schemas, CDK generation,
+cost engine, soak poller, wave-merge --no-ff, stream archive,
+plan-tag/semver, OIDC naming, Implementation Spec template) + Mycelium
+activation sequence (Memgraph live + Graph viewer + tree-sitter Slice
+A/B/C, see PRs #1–#4 against `main`). When the next plan ships and
+reality drifts, edit inline rather than appending notes._
