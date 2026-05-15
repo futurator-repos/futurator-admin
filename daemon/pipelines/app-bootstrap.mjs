@@ -287,6 +287,37 @@ export async function runAppBootstrap(job, ctx) {
       bmadEnabled,
     });
 
+    // PR-72-followup + PR-90-followup — emit T1 readiness markers per
+    // v2.5 §38 (SKILL-SCOUT) + §28 (ARCHITECT). Operator sees these in
+    // the forensic JSON; the dedicated spawn-integration PR will pick
+    // these markers up and enqueue agent-job rows for SKILL-SCOUT /
+    // ARCHITECT. PM combines their proposals into one decision card
+    // (v2.5 §27.3) when both fire.
+    await pushEvent?.(
+      job.jobId,
+      'completed',
+      '__app_bootstrap__',
+      'pv2.skill-scout.queued',
+      {
+        appId,
+        trigger: 'T1',
+        boilerplateType,
+        reason: 'project init — full federation sweep',
+      },
+    );
+    await pushEvent?.(
+      job.jobId,
+      'completed',
+      '__app_bootstrap__',
+      'pv2.architect.queued',
+      {
+        appId,
+        trigger: 'T1',
+        boilerplateType,
+        reason: 'project init — greenfield AWS scaffold proposal',
+      },
+    );
+
     return {
       ok: true,
       appId,

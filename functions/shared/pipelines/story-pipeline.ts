@@ -4,6 +4,20 @@ import type { PlanRigor } from '../types/plan';
 import type { BoilerplateType } from '../boilerplates/registry';
 import { buildAgentConfig } from './role-policy';
 import { buildFrameworkDetectSnippet } from './framework-detect';
+// PR-91-followup (Story 2-A-3-1) — API-AUTHOR step before test-author.
+import { buildApiAuthorPrompt } from '../prompts/api-author-prompt';
+
+/**
+ * PR-91-followup gate. Stub boilerplates (sst / vite / mobile) don't ship
+ * a test infrastructure today; running API-AUTHOR against them would
+ * produce a `.d.ts` no test imports from. Local mirror of the same
+ * decision in `api-author-pipeline.ts::shouldRunApiAuthor` — duplicated
+ * here so this file doesn't take a dep on api-author-pipeline.ts at the
+ * step-construction boundary.
+ */
+function shouldRunApiAuthorForKind(kind: BoilerplateType): boolean {
+  return kind !== 'sst' && kind !== 'vite' && kind !== 'mobile';
+}
 
 /**
  * Story E.1 — feature flag for the wave-close knowledge compiler. When
@@ -151,6 +165,16 @@ export function generateStoryPipeline(
         name: 'Test Author',
         model: opts.testModel || 'sonnet',
       }),
+      // PR-91-followup (Story 2-A-3-1) — API-AUTHOR agent. Emits the
+      // frozen `.d.ts` between PM and TEST so both TEST and DEV import
+      // names from the same surface. Skipped under prototype rigor; the
+      // step itself is conditional (see steps[] below).
+      API_AUTHOR: buildAgentConfig({
+        boilerplateKind,
+        rigor,
+        role: 'API_AUTHOR',
+        name: 'API Author',
+      }),
       COMPILER: buildAgentConfig({
         boilerplateKind,
         rigor,
@@ -163,6 +187,35 @@ export function generateStoryPipeline(
       }),
     },
     steps: [
+      // PR-91-followup (Story 2-A-3-1) — API-AUTHOR step runs BEFORE
+      // test-author so TEST and DEV both `import type { ... } from
+      // './index'` against the same frozen surface. Skipped under
+      // prototype rigor (no test infrastructure to anchor names to);
+      // skipped for stub boilerplates that haven't shipped tests.
+      // Module dir is inferred from the story's touch points at
+      // dispatch time — wiring threads `opts.apiAuthorModuleDir`.
+      ...(testsOn && shouldRunApiAuthorForKind(boilerplateKind)
+        ? ([
+            {
+              id: 'api-author',
+              agentId: 'API_AUTHOR',
+              prompt: buildApiAuthorPrompt({
+                storyId: story.storyId,
+                storyTitle: story.title,
+                acceptanceCriteria: story.description || '',
+                // Touch-point inference happens daemon-side at dispatch;
+                // when absent, the daemon emits attention.api-author-
+                // ambiguous-module and the operator picks. Until the
+                // inference wire-in lands, the empty string causes the
+                // agent to declare the module relative to the story id.
+                moduleDir: 'src',
+                existingExports: { types: [], constants: [] },
+              }),
+              extractors: {},
+              validations: [],
+            },
+          ] as PipelineStep[])
+        : ([] as PipelineStep[])),
       // Phase C.3: TEST agent authors failing tests BEFORE dev runs (mvp +
       // production). Skipped for prototype.
       ...(testsOn

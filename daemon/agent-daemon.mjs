@@ -125,6 +125,8 @@ import { createFederationCache, manifestSha } from './lib/federation-loader.mjs'
 import { startFederationBackupSchedule } from './lib/federation-backup.mjs';
 import { createFederationResolver } from './lib/federation-resolver.mjs';
 import { createMemoryStore, provisionMemoryRoot } from './lib/memory-store.mjs';
+// PR-80-followup — CLAUDE.md prepend per v2.5 §41.3.
+import { readClaudeMd } from './lib/claude-md-loader.mjs';
 
 // Resolve the full path to `claude` binary at startup
 let CLAUDE_BIN = 'claude';
@@ -667,6 +669,12 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
     // runAgentWithAuthRecovery (line 1572). Absent → no cap.
     if (typeof opts.maxTurns === 'number' && opts.maxTurns > 0) {
       args.push('--max-turns', String(opts.maxTurns));
+    }
+    // PR-80-followup — CLAUDE.md prepended to every agent's system prompt
+    // per v2.5 §41.3. The loader caps the file at 100KB so we never blow
+    // past the CLI's argv limits.
+    if (typeof opts.appendSystemPrompt === 'string' && opts.appendSystemPrompt.length > 0) {
+      args.push('--append-system-prompt', opts.appendSystemPrompt);
     }
 
     log('info', `Spawning claude for step ${stepId} (agent ${agentId})`, {
@@ -1593,14 +1601,35 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   // 3. Run agent (PR-6 B+: wrapped with auth-recovery — if OAuth dies
   // mid-stream with no captured output, the wrapper will reload the file
   // and retry up to 2x before escalating to NEEDS_ATTENTION).
+  //
+  // PR-80-followup — read CLAUDE.md from the project working tree and
+  // pass it as --append-system-prompt. The loader handles truncation
+  // (100KB cap) + returns null when missing (no-op). Provenance lands
+  // in the forensic via `step.append_system_prompt_sha`.
+  const effectiveCwd = workingDir || process.env.HOME;
+  const claudeMd = readClaudeMd(effectiveCwd);
+  const appendSystemPrompt = claudeMd && !claudeMd.truncated
+    ? `# Project CLAUDE.md\n\n${claudeMd.content}`
+    : undefined;
+  if (claudeMd) {
+    pushEvent(jobId, step.id, step.agentId, 'claude_md_loaded', {
+      text: `CLAUDE.md ${claudeMd.truncated ? 'truncated' : 'loaded'} from ${effectiveCwd}`,
+      sha: claudeMd.sha,
+      sizeBytes: claudeMd.sizeBytes,
+      truncated: claudeMd.truncated,
+    });
+  }
+
   const result = await runAgentWithAuthRecovery(jobId, step.id, step.agentId, prompt, {
-    workingDir: workingDir || process.env.HOME,
+    workingDir: effectiveCwd,
     allowedTools: agent.allowedTools,
     disallowedTools: agent.disallowedTools,
     model: agent.model,
     // PR-38 — per-rigor turn cap from RolePolicy.
     maxTurns: agent.maxTurns,
     resume: resumeSession,
+    // PR-80-followup
+    appendSystemPrompt,
   });
 
   const resultText = result?.result || '';
