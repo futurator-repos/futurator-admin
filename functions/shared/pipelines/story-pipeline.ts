@@ -329,18 +329,80 @@ Rules:
         }${
           story.hasBrowserTests
             ? `
-- This story has browser-testable criteria (marked [needs_browser=true]). After implementing the code, also output visual test definitions describing how to verify each browser criterion:
+## VISUAL TESTS (CRITICAL — PR-63 contract)
+
+This story has browser-testable criteria (marked [needs_browser=true]). Each
+such criterion MUST have a corresponding visual-test entry emitted between
+the fences below. The QA pipeline routes every entry to an LLM judge that
+will look at a screenshot of your built code and decide pass/fail from the
+PIXELS — not from your tests, not from your diff. So **the test's \`judge:\`
+block is what your code is actually graded against.**
+
+Required fields per entry:
+
+  - \`id:\` — unique within the story, e.g. \`VT-${story.storyId}-1\`
+  - \`criteriaRef:\` — the AC id this verifies (e.g. \`AC-S5-2\`)
+  - \`description:\` — what to verify, in one sentence
+  - \`setup:\` — how to get the page to the testable state
+  - \`expect:\` — what the correct visual result looks like (concrete, no
+    "looks fine" / "renders correctly" — the classifier rejects vague text)
+  - \`level:\` — one of \`L0\` / \`L1\` / \`L2\`:
+      • \`L0\` — bash-only check (HTTP 200, console-error scan, expectText
+        substring). Use ONLY for non-visual ACs that happen to be browser-
+        reachable (e.g., "the API returns 200 when called from the page").
+      • \`L1\` — single-screenshot Haiku judge. **The default for any AC that
+        describes how something LOOKS on screen.** ~$0.005/test.
+      • \`L2\` — multi-step Sonnet judge with a flow. Use when the AC
+        requires interacting before judging (click → screenshot → verify).
+  - \`judge:\` — REQUIRED for L1 + L2. Plain-English success criteria that a
+    person looking at the screenshot can apply. Phrase it as a check, not
+    a description. Bad: "the chart renders correctly". Good: "a bar chart
+    with exactly 3 vertical blue bars (#1E88E5) appears in the center of
+    the page; if any of: chart missing / wrong number of bars / wrong
+    color → FAIL."
+
+If the criterion only checks something that happens to render text (e.g.
+"the error message 'Invalid input' appears in red"), prefer \`L1\` over
+\`L0\` — L0's \`expectText:\` doesn't verify color, position, or visibility,
+just that the substring exists in the page source.
+
+Output format:
 
 ---VISUAL_TESTS---
 - id: VT-${story.storyId}-1
-  criteriaRef: AC-1
-  description: "What to verify visually"
-  setup: "How to reach the testable state (e.g., load page, navigate to section)"
-  action: "none | keypress:Space | click:.selector"
-  expect: "What the correct result looks like"
+  criteriaRef: AC-S<storyNum>-<n>
+  description: <one sentence>
+  setup: <how to reach the state>
+  expect: <concrete description of correct result>
+  level: L1
+  judge: |
+    <one-line success criterion phrased as a check; describe what is
+    visible (element, color, position, count, text) and explicit FAIL
+    conditions. The judge sees ONLY the screenshot + this text.>
 ---END_VISUAL_TESTS---
 
-Write one test per needs_browser=true criterion. Be specific about what the visual result should look like.`
+Examples of GOOD \`judge:\` text (framework-agnostic):
+  • Form button:    "the form's primary CTA labeled 'Save' is visible, has a
+                     filled background distinct from the page background,
+                     and is positioned below the input fields. FAIL if
+                     missing, hidden, or styled as plain text."
+  • Data chart:     "a bar chart with at least 2 vertical bars of distinct
+                     heights is visible. FAIL if the chart area is empty or
+                     shows a 'no data' placeholder."
+  • Animation:      "the loading spinner is positioned center-screen and
+                     visibly rotated relative to its initial state (the
+                     screenshot is taken after T+500ms). FAIL if static or
+                     absent."
+  • Game canvas:    "the canvas shows the player sprite AND at least one
+                     enemy sprite simultaneously. FAIL if only the player
+                     is visible or the canvas is empty."
+  • Marketing hero: "the page's H1 reads exactly '<expected text>', styled
+                     with the brand font and at least 32px in size. FAIL if
+                     missing, wrong text, or styled as body copy."
+
+Write ONE visual test per needs_browser=true criterion. The text in
+\`judge:\` is what catches integration bugs the per-story unit tests cannot
+(e.g., 'module exists but is never wired to the entry point').`
             : ''
         }
 - End with:
@@ -657,10 +719,27 @@ Fix the issues mentioned. Output only what you changed, then:
           `  git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
           `    commit --allow-empty -q -m 'baseline (auto-bootstrap by daemon)'; ` +
           `fi && ` +
-          // Story commit (always)
+          // Story commit. PR-67 (2026-05-15) — non-empty diff guard. Removes
+          // --allow-empty for the story commit (baseline keeps it). The
+          // spyhunter-1 forensic showed a commit titled "Wire boss spawn,
+          // combat, and win/lose conditions" containing only metadata files
+          // (.pipeline, node_modules/.vite, visual-tests.md) while the
+          // entire src/app/ src/components/GameScene.ts src/hooks/useGameLoop.ts
+          // sat untracked in the working tree. The story was marked done
+          // because tests passed and the commit ran. This guard forces
+          // step failure when nothing source-y was staged, so the
+          // upstream orchestrator can't silently mark such a story done.
           `git add -A && ` +
+          `SOURCE_CHANGES=$(git diff --cached --name-only | grep -vE '^(node_modules/|\\.pipeline/|\\.mycelium/|knowledge/|visual-tests(-draft)?\\.md$|\\.context/)' | wc -l) && ` +
+          `if [ "$SOURCE_CHANGES" -eq 0 ]; then ` +
+          `  echo "STORY_COMMIT_EMPTY: no source-code changes staged for story ${story.storyId}." >&2; ` +
+          `  echo "Working tree status:" >&2; git status --short >&2; ` +
+          `  echo "Staged for commit:" >&2; git diff --cached --name-only >&2; ` +
+          `  echo "Likely cause: the dev agent's writes weren't tracked by git (new top-level dir not staged, or wrote to a different cwd). Investigate before marking the story done." >&2; ` +
+          `  exit 1; ` +
+          `fi && ` +
           `git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
-          `commit --allow-empty -m 'story: ${story.storyId} — ${story.title.replace(/'/g, "'\\''")}'`,
+          `commit -m 'story: ${story.storyId} — ${story.title.replace(/'/g, "'\\''")}'`,
         timeout: 30000,
         captureAs: 'STORY_COMMIT_OUTPUT',
         onFail: { action: 'fail' as const, injectAs: 'STORY_COMMIT_ERROR' },
@@ -810,14 +889,15 @@ Working directory: ${workingDir}`,
               id: 'compile-sync',
               stepType: 'shell' as const,
               command:
-                // Pipeline v2.0 PR-6 (E) — graph-sync.mjs is optional Mycelium
-                // tooling that may not be deployed on every EC2 host. Skip
-                // cleanly with a logged warning instead of failing the step
-                // when the script is missing. The S3 mirror sync still runs.
+                // graph-sync.mjs ships with the daemon at
+                // /opt/futurator-daemon/scripts/graph-sync.mjs (rsync target).
+                // Existence check kept as a safety net for fresh hosts where
+                // rsync hasn't run yet — logs a warning and continues with the
+                // S3 sync rather than failing the step.
                 `set -e; ` +
                 `cd ${workingDir} && ` +
-                `if [ -f /home/ubuntu/scripts/graph-sync.mjs ]; then ` +
-                `  node /home/ubuntu/scripts/graph-sync.mjs ` +
+                `if [ -f /opt/futurator-daemon/scripts/graph-sync.mjs ]; then ` +
+                `  node /opt/futurator-daemon/scripts/graph-sync.mjs ` +
                 `    --project ${projectId} ` +
                 `    --knowledge-dir ${workingDir}/knowledge ` +
                 `    --state-file ${workingDir}/.mycelium/compile-state.json; ` +

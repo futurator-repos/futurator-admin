@@ -163,3 +163,54 @@ describe('PR-36 baseline-regression step', () => {
     expect(step?.onFail?.injectAs).toBe('BASELINE_ERROR');
   });
 });
+
+/**
+ * PR-67 (2026-05-15) — compile-commit-on-pass non-empty diff guard.
+ *
+ * spyhunter-1 forensic 2026-05-13: a commit titled "Wire boss spawn..."
+ * contained only .pipeline/tamper-input.txt + node_modules/.vite/...
+ * + visual-tests.md — zero source code. With --allow-empty the story
+ * marked itself done while its implementation sat untracked in the
+ * working tree. The guard fails the step when nothing source-y is
+ * staged so the orchestrator can't silently mark such a story done.
+ */
+describe('PR-67 — compile-commit-on-pass non-empty diff guard', () => {
+  it('story commit drops --allow-empty (forces failure on empty source diffs)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    expect(step?.stepType).toBe('shell');
+    // The story-commit line uses `commit -m ...` without --allow-empty.
+    // The baseline-bootstrap commit (earlier in the same command) DOES
+    // keep --allow-empty — verify we didn't strip it too aggressively.
+    expect(step?.command).toMatch(/commit -m 'story:/);
+    expect(step?.command).toContain("commit --allow-empty -q -m 'baseline");
+  });
+
+  it('counts staged source changes and fails with STORY_COMMIT_EMPTY when zero', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    expect(step?.command).toContain('SOURCE_CHANGES=');
+    expect(step?.command).toContain('STORY_COMMIT_EMPTY');
+    // The exclusion regex filters out the directories/files that are not
+    // source code (node_modules, pipeline metadata, knowledge, visual-tests,
+    // story context). If the count is 0 after that, exit 1.
+    expect(step?.command).toMatch(
+      /grep -vE.*node_modules.*pipeline.*mycelium.*knowledge.*visual-tests.*context/,
+    );
+    expect(step?.command).toMatch(/if \[ "\$SOURCE_CHANGES" -eq 0 \]/);
+    expect(step?.command).toContain('exit 1');
+  });
+
+  it('failure surfaces working-tree + staged paths for diagnosis', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    expect(step?.command).toContain('git status --short');
+    expect(step?.command).toContain('git diff --cached --name-only');
+  });
+});

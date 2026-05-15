@@ -143,11 +143,28 @@ Read the file at ${workingDir}/knowledge/index.md to understand the current cata
         `  git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
         `    commit --allow-empty -q -m 'baseline (auto-bootstrap by daemon)'; ` +
         `fi && ` +
-        // Story commit (always — --allow-empty so degenerate stories still
-        // produce a commit and the next story's HEAD~1..HEAD remains valid).
+        // Story commit. PR-67 (2026-05-15) — removed --allow-empty and
+        // added a non-empty diff guard. spyhunter-1 forensic showed a
+        // commit titled "Wire boss spawn, combat, and win/lose
+        // conditions" whose actual diff contained only
+        // .pipeline/tamper-input.txt + node_modules/.vite metadata +
+        // visual-tests.md — zero source code. With --allow-empty the
+        // story marked itself "done" while its implementation lived
+        // only in the working tree (entire src/app/, src/components/
+        // GameScene.ts, src/hooks/useGameLoop.ts untracked). Failing
+        // loud forces the upstream orchestrator to handle the case
+        // where the dev's writes didn't make it into git.
         `git add -A && ` +
+        `SOURCE_CHANGES=$(git diff --cached --name-only | grep -vE '^(node_modules/|\\.pipeline/|\\.mycelium/|knowledge/|visual-tests(-draft)?\\.md$|\\.context/)' | wc -l) && ` +
+        `if [ "$SOURCE_CHANGES" -eq 0 ]; then ` +
+        `  echo "STORY_COMMIT_EMPTY: no source-code changes staged for story ${storyId}." >&2; ` +
+        `  echo "Working tree contents:" >&2; git status --short >&2; ` +
+        `  echo "Staged for commit:" >&2; git diff --cached --name-only >&2; ` +
+        `  echo "Likely cause: the dev agent's writes weren't tracked by git (new top-level directories may have been added outside the staged paths, or the agent wrote to a different cwd). Investigate before marking the story done." >&2; ` +
+        `  exit 1; ` +
+        `fi && ` +
         `git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
-        `commit --allow-empty -m 'story: ${storyId} — ${escapedTitle}'`,
+        `commit -m 'story: ${storyId} — ${escapedTitle}'`,
       timeout: 30000,
       captureAs: 'STORY_COMMIT_OUTPUT',
       onFail: { action: 'fail', injectAs: 'STORY_COMMIT_ERROR' },

@@ -52,6 +52,10 @@ export interface WaveReducerDeps extends PipelineLauncherDeps {
     workingDir: string,
     waveNumber: number,
     storyTitles: string[],
+    /** PR-68 — touch-point paths the wave's stories were supposed to
+     *  create/modify. wave-build greps the production bundle's sourcemaps
+     *  for each. Pass `[]` to skip the check. */
+    requiredSources?: string[],
   ) => PipelineDefinition;
   now: () => string;
   /**
@@ -238,10 +242,29 @@ export async function reduceEpicWaves(
   if (!skipWaveBuildCheck && !existingBuildCheckId) {
     const jobId = deps.uuid();
     const now = deps.now();
+    // PR-68 — flatten the wave's touchPoints so wave-build can verify each
+    // is reachable from the production bundle's sourcemaps. Dedupe so a
+    // file claimed by two stories isn't checked twice. Filter to source-ish
+    // paths (skip config files / docs / tests — those typically aren't in
+    // the entry bundle and would false-positive).
+    const requiredSources = Array.from(
+      new Set(
+        currentWaveStories
+          .flatMap((s) => (s as { touchPoints?: string[] }).touchPoints ?? [])
+          .filter(
+            (p) =>
+              p.startsWith('src/') &&
+              !p.endsWith('.test.ts') &&
+              !p.endsWith('.test.tsx') &&
+              !p.endsWith('.spec.ts'),
+          ),
+      ),
+    );
     const pipeline = deps.generateWaveBuildPipeline(
       epic.workingDir,
       currentWave,
       currentWaveStories.map((s) => s.title),
+      requiredSources,
     );
     await deps.createJob({
       jobId,

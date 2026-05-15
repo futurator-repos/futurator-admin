@@ -11,11 +11,21 @@ import { buildFrameworkDetectSnippet } from './framework-detect';
  *
  * Story 16.2 extracted this out of `functions/api/index.ts` so the cron-driven
  * wave-completion reducer can share it without bundling the Hono app.
+ *
+ * @param requiredSources — file paths (story touch points) that the wave's
+ *   stories were supposed to write. PR-68 adds a `bundle-source-check`
+ *   step that scans build sourcemaps for each path; any missing path
+ *   means the file exists in source but is orphaned (no import path from
+ *   the entry). Pass `[]` or omit to disable the check. Framework-agnostic:
+ *   sourcemap `.sources` arrays are emitted by Vite, Rollup, Webpack,
+ *   esbuild, Turbopack, and SvelteKit; the check works for any project
+ *   that ships sourcemaps.
  */
 export function generateWaveBuildPipeline(
   workingDir: string,
   waveNum: number,
   storyTitles: string[],
+  requiredSources: string[] = [],
 ): PipelineDefinition {
   return {
     maxIterations: 3,
@@ -70,6 +80,95 @@ Working directory: ${workingDir}
         },
         validations: [],
       },
+      // 2.5. PR-68 (2026-05-15) — bundle-source-check.
+      //
+      // After `npm run build` succeeds, verify every file the wave's stories
+      // were supposed to touch is REACHABLE from the entry point — not just
+      // sitting orphaned in `src/`. We grep the production sourcemaps'
+      // `.sources[]` arrays (which list every source file compiled into the
+      // bundle, surviving minification). If a story's touch point doesn't
+      // appear in any sourcemap, the build is "green" but the code is dead.
+      //
+      // Framework-agnostic: Vite, Rollup, Webpack, esbuild, Turbopack, and
+      // SvelteKit all emit standard sourcemaps with a `.sources` array.
+      // The check is skipped (exits 0 with a marker) when:
+      //   - no requiredSources were declared
+      //   - no sourcemap files exist (rare — production minified builds
+      //     usually ship maps; bare `vite build --sourcemap=false` skips this)
+      //
+      // spyhunter-1 forensic 2026-05-13: `src/components/GameScene.ts`,
+      // `src/app/page.ts`, `src/hooks/useGameLoop.ts` were all in the source
+      // tree but `src/main.ts` (Vite's entry per `index.html`) never imported
+      // them. Bundle source-check would have caught it instantly: those
+      // paths would have been missing from every sourcemap.
+      ...(requiredSources.length > 0
+        ? [
+            {
+              id: 'bundle-source-check',
+              stepType: 'shell' as const,
+              command: [
+                `cd ${workingDir}`,
+                // Detect bundler output dir. Order matters: Next.js export
+                // (`out/_next/`) before plain `out/`; SvelteKit before Vite.
+                `OUT=""`,
+                `for cand in out/_next/static/chunks .next/static/chunks .svelte-kit/output/client/_app build/client/_app dist out build; do`,
+                `  if [ -d "$cand" ]; then OUT="$cand"; break; fi`,
+                `done`,
+                `if [ -z "$OUT" ]; then echo "BUNDLE_CHECK_SKIPPED: no recognised build output dir under ${workingDir}"; exit 0; fi`,
+                `echo "[bundle-source-check] scanning sourcemaps under $OUT/"`,
+                // Concatenate every sourcemap's `.sources` field. `find` is
+                // POSIX-portable; `node -e` parses the JSON because `jq` isn't
+                // guaranteed on EC2.
+                `MAPS=$(find "$OUT" -type f -name '*.js.map' 2>/dev/null)`,
+                `if [ -z "$MAPS" ]; then echo "BUNDLE_CHECK_SKIPPED: no .js.map files found under $OUT/ — build without sourcemaps cannot be verified"; exit 0; fi`,
+                `node -e "$(cat <<'NODE_EOF'`,
+                `const fs = require('fs');`,
+                `const path = require('path');`,
+                `const required = ${JSON.stringify(requiredSources)};`,
+                `const maps = process.argv.slice(1);`,
+                `const allSources = new Set();`,
+                `for (const m of maps) {`,
+                `  try {`,
+                `    const j = JSON.parse(fs.readFileSync(m, 'utf8'));`,
+                `    if (Array.isArray(j.sources)) for (const s of j.sources) allSources.add(s);`,
+                `  } catch (e) { console.error('[bundle-source-check] skip bad map:', m, String(e).slice(0,80)); }`,
+                `}`,
+                `// Match by suffix: sourcemap entries are often prefixed with`,
+                `// '../../../src/...' or 'webpack:///./src/...'. A trailing-slash`,
+                `// suffix match is robust to all of them.`,
+                `const missing = [];`,
+                `for (const tp of required) {`,
+                `  // Normalise both sides: strip leading ./ and any '..' prefixes.`,
+                `  const norm = tp.replace(/^\\.\\//, '');`,
+                `  let found = false;`,
+                `  for (const src of allSources) {`,
+                `    if (src.endsWith('/' + norm) || src.endsWith(norm)) { found = true; break; }`,
+                `  }`,
+                `  if (!found) missing.push(tp);`,
+                `}`,
+                `if (missing.length > 0) {`,
+                `  console.error('BUNDLE_ORPHAN_FILES: the following wave-${waveNum} touch points are not reachable from the build entry:');`,
+                `  for (const m of missing) console.error('  - ' + m);`,
+                `  console.error('');`,
+                `  console.error('Likely cause: the file was written but not imported by anything in the entry-point import graph. Common patterns:');`,
+                `  console.error('  • Vite scaffold leaves src/main.ts pointing at a stub; new code in src/app/ or src/components/ never gets imported.');`,
+                `  console.error('  • A new module exists but the entry (or its parent component) never imports it.');`,
+                `  console.error('  • The dev wrote to a different path than the touchPoint declared in the plan.');`,
+                `  console.error('');`,
+                `  console.error('Hint: open the framework entry file (index.html, src/main.ts, app/layout.tsx, etc.) and verify it imports the touch points above (or imports something that does).');`,
+                `  process.exit(1);`,
+                `}`,
+                `console.log('[bundle-source-check] all ' + required.length + ' touch points reachable from the bundle entry');`,
+                `NODE_EOF`,
+                `)" $MAPS`,
+              ].join('\n'),
+              timeout: 30000,
+              captureAs: 'BUNDLE_CHECK_OUTPUT' as const,
+              captureStderrAs: 'BUNDLE_CHECK_ERROR' as const,
+              onFail: { action: 'fail' as const, injectAs: 'BUNDLE_CHECK_ERROR' as const },
+            },
+          ]
+        : []),
       // 3. Server health check.
       //
       // PR-26 (2026-05-04) — dropped the `-- --host 0.0.0.0` argument that

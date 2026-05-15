@@ -372,21 +372,50 @@ export async function launchPlanQaAggregate(
     return { ok: false, code: 'no-visual-tests', message: 'Plan has no epics.' };
   }
 
-  // Backfill + flatten — same shape as `launchPlanVisualQa`, classify
-  // each test up-front so the aggregate stage's classifier output
-  // matches what the execute stage will route on.
-  // PR-8f #2 — pass plan.rigor so the launcher's pre-classification
-  // matches the qa-aggregate shell step's output (both apply the
-  // rigor floor).
+  // Backfill stories first (in case the dev agent left bare visualTests
+  // blocks the schema needs to fill in), then build an AC-needsBrowser
+  // map so per-test classification (below) can raise browser ACs to L1+.
   const updatedStoriesByEpic = new Map<string, EpicStory[]>();
-  const allVisualTests: FlatVisualTest[] = [];
+  const enrichedEpics: Array<{
+    epicId: string;
+    epicTitle: string;
+    stories: EpicStory[];
+  }> = [];
   for (const epic of epics) {
     const { stories: enriched, changed } = await backfillVisualTests(epic.stories, deps);
     if (changed) updatedStoriesByEpic.set(epic.epicId, enriched);
-    for (const s of enriched) {
+    enrichedEpics.push({ epicId: epic.epicId, epicTitle: epic.title, stories: enriched });
+  }
+
+  // Q4.3 — collect every acceptance criterion across the plan's epics
+  // so qa-aggregate's coverage check can flag needsBrowser ACs without
+  // tests. PR-62 — same map is reused to drive the per-test needsBrowser
+  // floor in classifyVisualTest below.
+  const acceptanceCriteria: Array<{ id: string; needsBrowser: boolean }> = [];
+  const needsBrowserByAcId = new Map<string, boolean>();
+  for (const epic of enrichedEpics) {
+    for (const story of epic.stories) {
+      for (const c of story.criteria ?? []) {
+        acceptanceCriteria.push({ id: c.id, needsBrowser: c.needsBrowser });
+        needsBrowserByAcId.set(c.id, c.needsBrowser);
+      }
+    }
+  }
+
+  // Now classify each test with both rigor + the AC's needsBrowser flag.
+  // PR-8f #2 — pass plan.rigor so the launcher's pre-classification
+  // matches the qa-aggregate shell step's output (both apply the
+  // rigor floor).
+  // PR-62 — pass acNeedsBrowser so browser-tagged ACs never get L0.
+  const allVisualTests: FlatVisualTest[] = [];
+  for (const epic of enrichedEpics) {
+    for (const s of epic.stories) {
       if (!s.visualTests || s.visualTests.length === 0) continue;
       for (const vt of s.visualTests) {
-        const c = classifyVisualTest(vt, plan.rigor);
+        const acNeedsBrowser = vt.criteriaRef
+          ? (needsBrowserByAcId.get(vt.criteriaRef) ?? false)
+          : false;
+        const c = classifyVisualTest(vt, plan.rigor, acNeedsBrowser);
         allVisualTests.push({
           ...vt,
           level: c.level,
@@ -394,7 +423,7 @@ export async function launchPlanQaAggregate(
           storyId: s.storyId,
           storyTitle: s.title,
           epicId: epic.epicId,
-          epicTitle: epic.title,
+          epicTitle: epic.epicTitle,
         });
       }
     }
@@ -412,18 +441,6 @@ export async function launchPlanQaAggregate(
   const jobId = deps.uuid();
   const appName = plan.name;
   const snapshotPrefix = `qa-snapshots/${appName}/${jobId}/`;
-
-  // Q4.3 — collect every acceptance criterion across the plan's epics
-  // so qa-aggregate's coverage check can flag needsBrowser ACs without
-  // tests.
-  const acceptanceCriteria: Array<{ id: string; needsBrowser: boolean }> = [];
-  for (const epic of epics) {
-    for (const story of epic.stories) {
-      for (const c of story.criteria ?? []) {
-        acceptanceCriteria.push({ id: c.id, needsBrowser: c.needsBrowser });
-      }
-    }
-  }
 
   const pipeline = deps.buildQaAggregatePipeline({
     plan,

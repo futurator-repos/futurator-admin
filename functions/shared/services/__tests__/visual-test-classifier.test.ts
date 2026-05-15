@@ -350,9 +350,7 @@ describe('aggregateVisualTests — coverage + specificity rollup', () => {
   it('flags tests with no criteriaRef', () => {
     const tests = [vt('vt-orphan', { criteriaRef: '', level: 'L0' })];
     const report = aggregateVisualTests(tests, []);
-    expect(
-      report.coverageWarnings.some((w) => w.kind === 'tests-without-criteria-ref'),
-    ).toBe(true);
+    expect(report.coverageWarnings.some((w) => w.kind === 'tests-without-criteria-ref')).toBe(true);
   });
 
   it('emits specificity warnings for vague expects', () => {
@@ -397,5 +395,101 @@ describe('aggregateVisualTests — coverage + specificity rollup', () => {
     ];
     const report = aggregateVisualTests(tests, []);
     expect(report.estimatedCostUsd).toBeCloseTo(0.02, 5);
+  });
+});
+
+/**
+ * PR-62 (2026-05-15) — needsBrowser floor.
+ *
+ * Browser-tagged ACs cannot be verified by L0 (bash-only checks: HTTP 200,
+ * screenshot non-blank, console errors, expectText substring). spyhunter-1
+ * shipped a game with no enemies because all 26 needsBrowser ACs silently
+ * classified to L0 ("page rendered, screenshot > 2KB" → pass). The fix:
+ * when an AC needsBrowser, the test associated with it cannot stay at L0
+ * — even if the rigor ceiling is L0 (prototype).
+ */
+describe('classifyVisualTest — needsBrowser floor (PR-62)', () => {
+  it('raises a default-L0 test to L1 when AC needsBrowser', () => {
+    const t = vt('vt-1', { expect: 'something specific to verify on screen' });
+    // Without needsBrowser → L0 (no flow/screenshot/expectText → smoke check)
+    expect(classifyVisualTest(t).level).toBe('L0');
+    // With needsBrowser → raised to L1
+    const result = classifyVisualTest(t, undefined, true);
+    expect(result.level).toBe('L1');
+    expect(result.reason).toMatch(/needsBrowser/);
+  });
+
+  it('raises a URL+expectText L0 test to L1 when AC needsBrowser', () => {
+    const t = vt('vt-2', {
+      url: '/dashboard',
+      expectText: ['Welcome back'],
+    });
+    expect(classifyVisualTest(t).level).toBe('L0');
+    expect(classifyVisualTest(t, undefined, true).level).toBe('L1');
+  });
+
+  it('does NOT raise tests already at L1 or higher', () => {
+    const t = vt('vt-3', {
+      screenshot: { selector: '#chart' },
+      expect: 'the bar chart renders with three blue bars at heights 30/60/90px',
+    });
+    // Shape gives L1 directly
+    expect(classifyVisualTest(t).level).toBe('L1');
+    // Re-classifying with needsBrowser=true stays L1 (not bumped to L2)
+    expect(classifyVisualTest(t, undefined, true).level).toBe('L1');
+  });
+
+  it('does NOT raise tests when AC does not need browser (default behaviour preserved)', () => {
+    const t = vt('vt-4', { expect: 'some smoke check that the page exists' });
+    expect(classifyVisualTest(t).level).toBe('L0');
+    expect(classifyVisualTest(t, undefined, false).level).toBe('L0');
+    // Omitting the argument also keeps the old behaviour.
+    expect(classifyVisualTest(t).level).toBe('L0');
+  });
+
+  it('OVERRIDES the rigor cap: prototype + needsBrowser still ships at L1', () => {
+    // Prototype rigor caps at L0 normally. needsBrowser should win.
+    const t = vt('vt-5', { expect: 'login button is visible and clickable' });
+    expect(classifyVisualTest(t, 'prototype').level).toBe('L0');
+    const result = classifyVisualTest(t, 'prototype', true);
+    expect(result.level).toBe('L1');
+    expect(result.reason).toMatch(/needsBrowser/);
+    // rigorFloored flag is cleared when needsBrowser wins
+    expect(result.rigorFloored).toBeUndefined();
+  });
+
+  it('coexists with rigor cap: needsBrowser on production-rigor L2 stays L2', () => {
+    const t = vt('vt-6', {
+      flow: [
+        { action: 'navigate', url: '/' },
+        { action: 'click', selector: '#go' },
+        { action: 'screenshot', label: 'after' },
+      ],
+      expect: 'navigation lands on the next page',
+    });
+    expect(classifyVisualTest(t, 'production', true).level).toBe('L2');
+  });
+
+  it('aggregateVisualTests indexes needsBrowser by AC id and applies the floor', () => {
+    const browserTest = vt('vt-7', {
+      criteriaRef: 'AC-needs-browser',
+      expect: 'a button renders in the corner of the form',
+    });
+    const nonBrowserTest = vt('vt-8', {
+      criteriaRef: 'AC-internal',
+      expect: 'the migration function returns a non-empty array',
+    });
+    const acs = [
+      { id: 'AC-needs-browser', needsBrowser: true },
+      { id: 'AC-internal', needsBrowser: false },
+    ];
+    const report = aggregateVisualTests([browserTest, nonBrowserTest], acs);
+    // The browser test was L0 by shape, raised to L1 by the AC floor.
+    const browserClass = report.classifications.find((c) => c.testId === 'vt-7');
+    expect(browserClass?.classification.level).toBe('L1');
+    expect(browserClass?.classification.reason).toMatch(/needsBrowser/);
+    // The non-browser test stays at L0.
+    const nonBrowserClass = report.classifications.find((c) => c.testId === 'vt-8');
+    expect(nonBrowserClass?.classification.level).toBe('L0');
   });
 });

@@ -216,6 +216,9 @@ describe('reduceEpicWaves — wave completion → build-check', () => {
       '/home/ubuntu/projects/alpha',
       0,
       ['Story S-1', 'Story S-2'],
+      // PR-68 — fourth arg is the required-sources list (deduped touch
+      // points from the wave's stories, filtered to src/ paths).
+      ['src/a.ts'],
     );
     expect(updateEpicFields).toHaveBeenCalledWith(
       'EPIC-1',

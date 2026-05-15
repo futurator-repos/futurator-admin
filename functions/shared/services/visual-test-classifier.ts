@@ -13,10 +13,7 @@
  * The qa-aggregate shell step shells out to `node` which calls into this.
  */
 
-import type {
-  VisualTestDef,
-  VisualTestLevel,
-} from '../types/epic-workflow';
+import type { VisualTestDef, VisualTestLevel } from '../types/epic-workflow';
 import type { PlanRigor } from '../types/plan';
 
 // ── Viewport parser (Q2.2) ────────────────────────────────────────────
@@ -149,22 +146,35 @@ function capLevel(target: VisualTestLevel, ceiling: VisualTestLevel): VisualTest
  *  4. If only `test.url` + `test.expectText` are present → L0 (deterministic).
  *  5. Otherwise (default fallback) → L0 with "vague-expect" reason.
  *
- *  6. Final pass: floor the chosen level to rigor's ceiling per
- *     redesign §6.2. prototype caps at L0; mvp at L1; production at L2.
- *     `rigorFloored` is set when this rule actually kicked in so the
- *     operator card can show "(forced L0 by prototype rigor)".
+ *  6. Floor the chosen level to rigor's ceiling per redesign §6.2.
+ *     prototype caps at L0; mvp at L1; production at L2.
+ *     `rigorFloored` is set when this rule kicked in.
  *
- * The "concrete expect" check is critical: an L1 test with vague expect
- * text wastes Haiku money returning "uncertain"; defaulting it to L0
- * preserves the bash-first axiom.
+ *  7. PR-62 (2026-05-15) — needsBrowser floor. If the AC linked to this
+ *     test has `needsBrowser: true`, the level CANNOT be L0. L0 only
+ *     checks HTTP 200 + screenshot non-blank + console errors + optional
+ *     expectText substring — none of which can verify that a button is
+ *     visible, a chart has data, an animation plays, or a game canvas
+ *     has the expected entities. Browser-tagged ACs require pixel-level
+ *     judgment, which only L1+ provides. This OVERRIDES the rigor cap
+ *     (a `prototype` plan with browser ACs still pays for L1 — operators
+ *     who don't want the cost should mark the AC `needsBrowser: false`).
+ *     spyhunter-1 forensic 2026-05-13: 26 browser ACs silently passed at
+ *     L0 because the page rendered, even though most of the game
+ *     content (enemies, gadgets, boss) was missing.
  *
  * @param planRigor — the plan's rigor dial. When provided, caps the
  *   classifier output at the corresponding level. Omit for callers
  *   that don't have plan context (e.g., classifier unit tests).
+ * @param acNeedsBrowser — when true, raises the floor to L1 because
+ *   pixel-level verification is required. Pass the AC's `needsBrowser`
+ *   flag from the story spec; omit for callers that don't have AC
+ *   context.
  */
 export function classifyVisualTest(
   test: VisualTestDef,
   planRigor?: PlanRigor,
+  acNeedsBrowser?: boolean,
 ): ClassificationResult {
   // Run shape-based classification first; cap by rigor in a single
   // post-processing step so the rigorFloored flag is accurate.
@@ -211,21 +221,36 @@ export function classifyVisualTest(
     }
   }
 
-  // Rigor floor — last so it overrides every shape-based decision.
+  // Rigor cap — applied before the needsBrowser floor so that
+  // needsBrowser can override even a rigor-capped L0.
+  let level = result.level;
+  let reason = result.reason;
+  let rigorFloored = false;
   if (planRigor) {
     const ceiling = RIGOR_MAX_LEVEL[planRigor];
-    const capped = capLevel(result.level, ceiling);
-    if (capped !== result.level) {
-      return {
-        ...result,
-        level: capped,
-        reason: `${result.reason} (forced ${capped} by ${planRigor} rigor — was ${result.level})`,
-        rigorFloored: true,
-      };
+    const capped = capLevel(level, ceiling);
+    if (capped !== level) {
+      reason = `${reason} (forced ${capped} by ${planRigor} rigor — was ${level})`;
+      level = capped;
+      rigorFloored = true;
     }
   }
 
-  return result;
+  // PR-62 — needsBrowser floor (after rigor cap so it wins).
+  if (acNeedsBrowser && level === 'L0') {
+    reason = `${reason} (raised to L1: AC needsBrowser — L0 cannot verify visual behavior)`;
+    level = 'L1';
+    // Not a rigor floor — clear the flag in case rigor capped earlier;
+    // operator-facing card should attribute the raise to needsBrowser.
+    rigorFloored = false;
+  }
+
+  return {
+    ...result,
+    level,
+    reason,
+    ...(rigorFloored ? { rigorFloored: true } : {}),
+  };
 }
 
 // ── Coverage + specificity rollups (Q4.1) ────────────────────────────
@@ -285,10 +310,22 @@ export function aggregateVisualTests(
   acceptanceCriteria: ReadonlyArray<{ id: string; needsBrowser: boolean }>,
   planRigor?: PlanRigor,
 ): AggregateReport {
-  const classifications = tests.map((t) => ({
-    testId: t.id,
-    classification: classifyVisualTest(t, planRigor),
-  }));
+  // PR-62 — index needsBrowser by AC id so per-test classification can
+  // raise the floor for browser-tagged criteria. Tests whose criteriaRef
+  // doesn't match any AC default to acNeedsBrowser=false (safest — they
+  // get the shape-based level + rigor cap only).
+  const needsBrowserByAcId = new Map<string, boolean>();
+  for (const ac of acceptanceCriteria) {
+    needsBrowserByAcId.set(ac.id, ac.needsBrowser);
+  }
+
+  const classifications = tests.map((t) => {
+    const acNeedsBrowser = t.criteriaRef ? (needsBrowserByAcId.get(t.criteriaRef) ?? false) : false;
+    return {
+      testId: t.id,
+      classification: classifyVisualTest(t, planRigor, acNeedsBrowser),
+    };
+  });
 
   const byLevel: Record<VisualTestLevel, number> = { L0: 0, L1: 0, L2: 0 };
   for (const c of classifications) byLevel[c.classification.level] += 1;
@@ -366,8 +403,7 @@ export function aggregateVisualTests(
   let estimatedWallclockSec = 0;
   for (const { testId, classification } of classifications) {
     const t = tests.find((x) => x.id === testId)!;
-    estimatedCostUsd +=
-      t.budgetCostUsd ?? DEFAULT_COST_BY_LEVEL[classification.level];
+    estimatedCostUsd += t.budgetCostUsd ?? DEFAULT_COST_BY_LEVEL[classification.level];
     estimatedWallclockSec +=
       t.budgetWallclockSec ?? DEFAULT_WALLCLOCK_BY_LEVEL[classification.level];
   }

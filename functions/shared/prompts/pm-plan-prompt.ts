@@ -154,6 +154,28 @@ that can share a wave.**
 - Each story is ~1-3 hours of agent time.
 - Each story has the AC count appropriate for the rigor (see "Rigor" above).
   Mark \`needsBrowser: true\` for criteria that need visual/DOM verification.
+- **Browser AC text must be SCREEN-VERIFIABLE.** When \`needsBrowser: true\`,
+  phrase the criterion so a person looking at a screenshot can apply it
+  without reading the source code. Concrete observable signal beats
+  general adjectives. (PR-63)
+
+  ❌ Vague (FAIL the classifier's specificity check):
+    - "The login form renders correctly."
+    - "The chart displays the data."
+    - "Game canvas works."
+
+  ✅ Concrete (passes specificity, supports the QA judge):
+    - "The login form is visible with two inputs labeled 'Email' and
+      'Password' stacked vertically, and a 'Sign in' button below them."
+    - "A bar chart with at least three vertical bars of distinct heights
+      is visible in the dashboard panel labeled 'Monthly revenue'."
+    - "The game canvas shows the player sprite AND at least one enemy
+      sprite simultaneously at any time during the playing state."
+
+  Rule of thumb: include count + color/style + position + a FAIL clause
+  whenever it's not obvious. The dev agent will mirror this concrete
+  voice into the story's visualTests \`judge:\` block, which is the actual
+  contract the QA judge applies.
 - Titles are action-oriented ("Implement useGameLoop hook", not "The
   useGameLoop hook").
 - **Stories must respect the existing boilerplate** — if the AC says
