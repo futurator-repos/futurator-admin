@@ -214,3 +214,182 @@ describe('PR-67 — compile-commit-on-pass non-empty diff guard', () => {
     expect(step?.command).toContain('git diff --cached --name-only');
   });
 });
+
+/**
+ * PR-64 (2026-05-15) — test-author integration test contract.
+ *
+ * spyhunter-1 forensic 2026-05-13: every unit test passed but the production
+ * bundle didn't import the integrated modules. Unit tests with mocked DOM
+ * cannot catch "module exists but is never imported from the entry point" —
+ * only an integration test that boots the real app can. The fix: when a
+ * story has browser ACs, the test-author prompt demands at least one
+ * integration test that exercises the framework's actual entry, asserts
+ * observable state (not mocks), and uses the framework's standard testing
+ * harness.
+ *
+ * Framework-agnostic — the prompt enumerates React, Vue, Solid, Svelte,
+ * Canvas/game, and plain-DOM patterns. Any UI project benefits.
+ */
+describe('PR-64 — test-author integration test contract', () => {
+  it('test-author prompt demands integration test when hasBrowserTests is set', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+      hasBrowserTests: true,
+    });
+    const ta = pipeline.steps.find((s) => s.id === 'test-author');
+    expect(ta).toBeDefined();
+    expect((ta as { prompt: string }).prompt).toContain('integration test contract');
+    expect((ta as { prompt: string }).prompt).toMatch(/FRAMEWORK ENTRY POINT/i);
+  });
+
+  it('integration test contract is omitted for non-browser stories (no over-prompting)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const ta = pipeline.steps.find((s) => s.id === 'test-author');
+    expect((ta as { prompt: string }).prompt ?? '').not.toContain('integration test contract');
+  });
+
+  it('lists framework-agnostic harness options (React, Vue, Svelte, Canvas, plain DOM)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+      hasBrowserTests: true,
+    });
+    const prompt = (pipeline.steps.find((s) => s.id === 'test-author') as { prompt: string })
+      .prompt;
+    expect(prompt).toContain('@testing-library/react');
+    expect(prompt).toContain('@vue/test-utils');
+    expect(prompt).toContain('@testing-library/svelte');
+    expect(prompt).toContain('Canvas/game');
+    expect(prompt).toContain('Plain DOM');
+  });
+
+  it('explicitly forbids the unit-mock anti-pattern', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+      hasBrowserTests: true,
+    });
+    const prompt = (pipeline.steps.find((s) => s.id === 'test-author') as { prompt: string })
+      .prompt;
+    expect(prompt).toContain('Anti-patterns');
+    expect(prompt).toMatch(/function X was called once[\s\S]*unit\s+guarantee/i);
+  });
+});
+
+/**
+ * PR-65 (2026-05-15) — review-runtime step.
+ *
+ * For browser-AC stories at mvp+ rigor, boot the dev server, take one
+ * screenshot, ask Haiku per-AC. UNCERTAIN passes (foundation stories
+ * don't yet render). FAIL loops to retry. SKIPPED on dev-server boot
+ * failure. Framework-agnostic via buildFrameworkDetectSnippet.
+ */
+describe('PR-65 — review-runtime step', () => {
+  const browserStory = {
+    ...story,
+    hasBrowserTests: true,
+    criteria: [{ id: 'AC-1', text: 'A button labelled Save is visible.', needsBrowser: true }],
+  } as unknown as EpicStory;
+
+  it('is inserted only when story has browser ACs', () => {
+    const noBrowser = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    expect(noBrowser.steps.map((s) => s.id)).not.toContain('review-runtime');
+
+    const withBrowser = generateStoryPipeline(browserStory, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    expect(withBrowser.steps.map((s) => s.id)).toContain('review-runtime');
+  });
+
+  it('is skipped under prototype rigor (no testsOn) to avoid Haiku spend on smoke runs', () => {
+    const pipeline = generateStoryPipeline(browserStory, 'Test Epic', workingDir, {
+      rigor: 'prototype',
+    });
+    expect(pipeline.steps.map((s) => s.id)).not.toContain('review-runtime');
+  });
+
+  it('sits between review and retry; loopTo retry on failure (dev fix path)', () => {
+    const pipeline = generateStoryPipeline(browserStory, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const ids = pipeline.steps.map((s) => s.id);
+    expect(ids.indexOf('review')).toBeLessThan(ids.indexOf('review-runtime'));
+    expect(ids.indexOf('review-runtime')).toBeLessThan(ids.indexOf('retry'));
+    const step = pipeline.steps.find((s) => s.id === 'review-runtime');
+    expect((step as { loopTo?: string }).loopTo).toBe('retry');
+    expect((step as { onFail?: { targetStep: string } }).onFail?.targetStep).toBe('retry');
+  });
+
+  it('SKIPPED on dev-server boot failure (foundation stories pass cleanly)', () => {
+    const pipeline = generateStoryPipeline(browserStory, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'review-runtime');
+    const cmd = String((step as { command: string }).command);
+    expect(cmd).toContain('RUNTIME_REVIEW_SKIPPED: dev server did not boot');
+  });
+
+  it('inlines only browser ACs as JSON (filters out internal ACs)', () => {
+    const mixed = {
+      ...story,
+      hasBrowserTests: true,
+      criteria: [
+        { id: 'AC-1', text: 'Browser visible thing', needsBrowser: true },
+        { id: 'AC-2', text: 'Internal contract', needsBrowser: false },
+      ],
+    } as unknown as EpicStory;
+    const pipeline = generateStoryPipeline(mixed, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const cmd = String(
+      (pipeline.steps.find((s) => s.id === 'review-runtime') as { command: string }).command,
+    );
+    expect(cmd).toContain('"AC-1"');
+    expect(cmd).toContain('Browser visible thing');
+    expect(cmd).not.toContain('AC-2');
+    expect(cmd).not.toContain('Internal contract');
+  });
+
+  it('spawns claude haiku with --print + reads prompt from stdin', () => {
+    const pipeline = generateStoryPipeline(browserStory, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const cmd = String(
+      (pipeline.steps.find((s) => s.id === 'review-runtime') as { command: string }).command,
+    );
+    expect(cmd).toContain("spawn('claude'");
+    expect(cmd).toContain("'--model'");
+    expect(cmd).toContain("'haiku'");
+    expect(cmd).toContain('child.stdin.write(prompt)');
+    expect(cmd).toContain('child.stdin.end()');
+  });
+
+  it('UNCERTAIN passes; FAIL exits 1 with the screenshot URL surfaced', () => {
+    const pipeline = generateStoryPipeline(browserStory, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const cmd = String(
+      (pipeline.steps.find((s) => s.id === 'review-runtime') as { command: string }).command,
+    );
+    expect(cmd).toContain("v.verdict === 'FAIL'");
+    expect(cmd).toContain('RUNTIME_REVIEW_FAILED');
+    expect(cmd).toContain('Screenshot: ');
+    expect(cmd).toContain('process.exit(1)');
+    // UNCERTAIN is mentioned in the verdict rules but is NOT used to fail.
+    expect(cmd).toMatch(/UNCERTAIN[\s\S]*future state|UNCERTAIN[\s\S]*foundation/);
+  });
+
+  it('uses framework-detect so any web stack works (no hard-coded port 5173)', () => {
+    const pipeline = generateStoryPipeline(browserStory, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const cmd = String(
+      (pipeline.steps.find((s) => s.id === 'review-runtime') as { command: string }).command,
+    );
+    expect(cmd).toContain('$QA_PORT');
+    expect(cmd).toContain('$QA_DEV_CMD');
+    expect(cmd).toContain('$QA_HEALTH_PATH');
+  });
+});

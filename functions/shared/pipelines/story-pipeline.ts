@@ -3,6 +3,7 @@ import type { PipelineDefinition, PipelineStep } from '../types/agent-orchestrat
 import type { PlanRigor } from '../types/plan';
 import type { BoilerplateType } from '../boilerplates/registry';
 import { buildAgentConfig } from './role-policy';
+import { buildFrameworkDetectSnippet } from './framework-detect';
 
 /**
  * Story E.1 — feature flag for the wave-close knowledge compiler. When
@@ -212,11 +213,64 @@ No changes required — tests for story ${story.storyId} already authored: <list
 2. Put unit tests beside the code they cover (e.g. \`src/foo/bar.test.ts\`) or under \`__tests__/\`.${
                 opts.hasBrowserTests
                   ? `
-3. Additionally, write Playwright browser tests under \`e2e/\` covering the [needs_browser=true] criteria.`
+3. **PR-64 (integration test contract)** — Because this story has
+   browser-testable ACs, you MUST also author at least ONE integration
+   test that exercises the framework's actual entry point with realistic
+   wiring. Unit tests that mock the DOM/canvas/framework cannot catch
+   "module exists but is never imported from the entry" — only an
+   integration test that boots the real app can. This is the bug class
+   that lets stories ship green while their code is orphaned.
+
+   The integration test must, at minimum:
+
+     (a) Import or invoke the FRAMEWORK ENTRY POINT — not the unit under
+         test directly. Look at the project's \`index.html\`,
+         \`src/main.{ts,tsx,jsx,js}\`, \`app/layout.tsx\`, or equivalent.
+     (b) Use the framework's standard testing harness:
+         • React (Vite/Next/Remix): \`@testing-library/react\` + jsdom
+           or happy-dom. \`render(<App />)\`; assert with \`screen.getBy*\`.
+         • Vue/Nuxt: \`@vue/test-utils\` + happy-dom.
+         • Solid: \`@solidjs/testing-library\`.
+         • Svelte/SvelteKit: \`@testing-library/svelte\` + jsdom.
+         • Canvas/game: jsdom + \`canvas\` (or \`canvas-mock\`); run the
+           game loop for N ticks via \`requestAnimationFrame\` polyfill
+           or \`vi.useFakeTimers()\`, then inspect observable state
+           (\`game.entities.length\`, \`ctx.drawImage\` call args).
+         • Plain DOM/no framework: jsdom; assert via \`document.querySelector\`.
+     (c) Assert OBSERVABLE state, not internal mocks. Examples per kind:
+         • Form: assert the rendered DOM has the expected inputs by label,
+           that submitting fires \`fetch\` to the right URL with expected
+           body, that error messages appear in the right \`<div>\`.
+         • Dashboard: assert the chart's SVG has the expected number of
+           \`<rect>\` or \`<path>\` elements; assert the panel header text
+           matches.
+         • Animation: advance fake timers; assert the element's class or
+           style differs between t=0 and t=500ms.
+         • Game: spin frames for ~1 second of simulated time; assert
+           entity counts / state-machine state advances as the AC
+           describes.
+         • Marketing site: \`render(<Page />)\`; assert the H1 text matches
+           the spec.
+
+   ❌ Anti-patterns the integration test must NOT use:
+     • Mocking the framework's render function so calls are observed
+       without rendering happening.
+     • Asserting only "function X was called once" — that's a unit
+       guarantee, not an integration one.
+     • Testing the module in isolation when the AC describes what the
+       USER sees on screen.
+
+   Put integration tests under \`src/__tests__/integration/\` (or
+   \`tests/integration/\` if the project already has that root). Name the
+   file after the AC it verifies. ONE integration test for the story's
+   primary user-visible AC is sufficient; unit tests still cover the
+   detailed sub-cases.
+
+4. (Optional) Additionally, write Playwright browser tests under \`e2e/\` covering the [needs_browser=true] criteria when the project already has Playwright wired up.`
                   : ''
               }
-4. DO NOT implement the feature code — only the tests.
-5. Tests MUST initially fail (red state). The Dev agent will make them pass.
+5. DO NOT implement the feature code — only the tests.
+6. Tests MUST initially fail (red state). The Dev agent will make them pass.
 
 ## Rules
 - Only write in test paths: \`**/*.test.*\`, \`__tests__/**\`, \`e2e/**\`, \`tests/**\`.
@@ -664,6 +718,136 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
         ],
         loopTo: 'retry',
       },
+
+      // 2.5. PR-65 (2026-05-15) — review-runtime.
+      //
+      // For stories with browser-tagged ACs at mvp+ rigor, boot the actual
+      // dev server, take one screenshot, and ask Haiku whether each AC is
+      // satisfied looking at the pixels. This is the gate that catches
+      // "all unit tests pass, build is green, code review passed, but the
+      // page in a browser doesn't match the AC text" — i.e. the
+      // spyhunter-1 failure mode where every static gate green-lit a
+      // bundle that didn't actually wire the integration.
+      //
+      // Framework-agnostic: uses buildFrameworkDetectSnippet so it works
+      // for Vite, Next, Remix, Expo, SvelteKit, Nuxt, or any project
+      // whose package.json has a `dev` script.
+      //
+      // Failure modes:
+      //   • Dev server fails to boot in 60s — emits RUNTIME_REVIEW_SKIPPED
+      //     (some foundation stories don't produce a renderable app yet);
+      //     the step passes so foundation work isn't blocked.
+      //   • Screenshot capture fails — same SKIPPED behaviour.
+      //   • Haiku judges any AC as FAIL — exit 1, loopTo 'retry' for dev fix.
+      //   • Haiku judges all ACs UNCERTAIN — passes (e.g., a "types story"
+      //     where browser ACs describe future behaviour not yet visible).
+      //
+      // Cost: ~$0.005 per story-with-browser-ACs (one Haiku call) +
+      //       ~5-10s dev server boot + screenshot.
+      ...(testsOn && story.hasBrowserTests && story.criteria
+        ? ([
+            {
+              id: 'review-runtime',
+              stepType: 'shell' as const,
+              command: [
+                buildFrameworkDetectSnippet({ cwd: workingDir }),
+                `mkdir -p /tmp/review-${story.storyId}`,
+                `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
+                `sleep 1`,
+                `cd ${workingDir} && (nohup $QA_DEV_CMD > /tmp/review-${story.storyId}/devserver.log 2>&1 </dev/null &)`,
+                `STATUS=000`,
+                `for i in $(seq 1 30); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$QA_PORT$QA_HEALTH_PATH 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
+                `if [ "$STATUS" != "200" ]; then echo "RUNTIME_REVIEW_SKIPPED: dev server did not boot (status=$STATUS framework=$QA_FRAMEWORK port=$QA_PORT). This is normal for foundation stories that don't yet render a UI."; tail -30 /tmp/review-${story.storyId}/devserver.log >&2 || true; kill $(lsof -ti:$QA_PORT) 2>/dev/null; exit 0; fi`,
+                `# Take overview screenshot of the running app.`,
+                `npx playwright screenshot --viewport-size=1280,720 --wait-for-timeout=2000 http://localhost:$QA_PORT$QA_HEALTH_PATH /tmp/review-${story.storyId}/overview.png 2>&1 || { echo "RUNTIME_REVIEW_SKIPPED: playwright screenshot failed — likely a framework that doesn't render at /"; kill $(lsof -ti:$QA_PORT) 2>/dev/null; exit 0; }`,
+                `# Upload to S3 so the operator can see it post-mortem AND so Haiku can fetch it.`,
+                `SCREENSHOT_KEY="review-screenshots/${story.storyId}/$(date -u +%s).png"`,
+                `timeout 30 aws s3 cp /tmp/review-${story.storyId}/overview.png "s3://futurator-ai-website/$SCREENSHOT_KEY" --content-type image/png > /dev/null 2>&1 || true`,
+                `SCREENSHOT_URL="https://futurator.ai/$SCREENSHOT_KEY"`,
+                `# Kill dev server BEFORE the Haiku call so we don't hold the port for ~30s of inference.`,
+                `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
+                `echo "[review-runtime] screenshot at $SCREENSHOT_URL"`,
+                `# Haiku judges the screenshot against the story's browser ACs.`,
+                `# We pass the ACs as JSON via env var (heredoc + single-quoted`,
+                `# NODE_EOF stays safe against $ chars in AC text).`,
+                `STORY_BROWSER_ACS=${JSON.stringify(
+                  (story.criteria ?? [])
+                    .filter((c) => c.needsBrowser)
+                    .map((c) => ({ id: c.id, text: c.text })),
+                )}`,
+                `SCREENSHOT_URL="$SCREENSHOT_URL" STORY_BROWSER_ACS="$STORY_BROWSER_ACS" node -e "$(cat <<'NODE_EOF'`,
+                `const { spawn } = require('child_process');`,
+                `const acs = JSON.parse(process.env.STORY_BROWSER_ACS || '[]');`,
+                `const screenshotUrl = process.env.SCREENSHOT_URL;`,
+                `if (acs.length === 0) { console.log('RUNTIME_REVIEW_SKIPPED: no browser ACs to judge'); process.exit(0); }`,
+                `const acList = acs.map((a, i) => '  ' + a.id + ': ' + a.text).join('\\n');`,
+                `const prompt = [`,
+                `  'You are an automated visual reviewer.',`,
+                `  'Inspect this screenshot of a running app: ' + screenshotUrl,`,
+                `  '',`,
+                `  'The acceptance criteria below describe what the user should be able to SEE on screen.',`,
+                `  'For each AC, decide if it is satisfied based ONLY on what is visible in the screenshot.',`,
+                `  '',`,
+                `  'Acceptance criteria:',`,
+                `  acList,`,
+                `  '',`,
+                `  'Output EXACTLY one line per AC in this format (no other text):',`,
+                `  '<AC-id>: PASS|FAIL|UNCERTAIN — <one-line rationale ≤140 chars>',`,
+                `  '',`,
+                `  'Verdict rules:',`,
+                `  '  PASS — the AC is observably satisfied in the screenshot.',`,
+                `  '  FAIL — the AC is contradicted (e.g., expected button missing, expected chart empty, expected entity not visible).',`,
+                `  '  UNCERTAIN — the AC describes future state, internal behaviour, or anything not visible at this stage of development. Foundation stories that produce no visible UI should return UNCERTAIN for all ACs.',`,
+                `].join('\\n');`,
+                `const child = spawn('claude', ['--print', '--model', 'haiku', '--output-format', 'text'], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 60000 });`,
+                `let out = '', err = '';`,
+                `child.stdin.write(prompt); child.stdin.end();`,
+                `child.stdout.on('data', d => { out += d.toString(); });`,
+                `child.stderr.on('data', d => { err += d.toString(); });`,
+                `child.on('close', (code) => {`,
+                `  if (code !== 0) { console.error('RUNTIME_REVIEW_SKIPPED: haiku exit ' + code + ': ' + err.slice(0, 200)); process.exit(0); }`,
+                `  const lines = out.split('\\n').map(l => l.trim()).filter(Boolean);`,
+                `  const verdicts = [];`,
+                `  for (const line of lines) {`,
+                `    const m = line.match(/^([A-Za-z0-9_-]+):\\s*(PASS|FAIL|UNCERTAIN)\\s*[—-]?\\s*(.*)$/i);`,
+                `    if (m) verdicts.push({ id: m[1], verdict: m[2].toUpperCase(), rationale: (m[3] || '').slice(0, 200) });`,
+                `  }`,
+                `  if (verdicts.length === 0) { console.error('RUNTIME_REVIEW_SKIPPED: could not parse Haiku output: ' + out.slice(0, 400)); process.exit(0); }`,
+                `  const fails = verdicts.filter(v => v.verdict === 'FAIL');`,
+                `  console.log('---RUNTIME_REVIEW---');`,
+                `  console.log('SCREENSHOT_URL: ' + screenshotUrl);`,
+                `  for (const v of verdicts) console.log(v.id + ': ' + v.verdict + ' — ' + v.rationale);`,
+                `  console.log('---END_RUNTIME_REVIEW---');`,
+                `  if (fails.length > 0) {`,
+                `    console.error('');`,
+                `    console.error('RUNTIME_REVIEW_FAILED: ' + fails.length + ' AC(s) failed visual review of the running app:');`,
+                `    for (const f of fails) console.error('  - ' + f.id + ': ' + f.rationale);`,
+                `    console.error('');`,
+                `    console.error('Screenshot: ' + screenshotUrl);`,
+                `    console.error('The dev server booted and rendered, but the result does not match the AC text. Common causes:');`,
+                `    console.error('  • A module was written but is not imported from the entry point.');`,
+                `    console.error('  • A render loop / state-machine update is wired but not driving the visual change.');`,
+                `    console.error('  • An asset is referenced but the path is wrong / asset never loaded.');`,
+                `    process.exit(1);`,
+                `  }`,
+                `  console.log('[review-runtime] all ' + verdicts.length + ' browser ACs PASS or UNCERTAIN');`,
+                `  process.exit(0);`,
+                `});`,
+                `NODE_EOF`,
+                `)"`,
+              ].join('\n'),
+              timeout: 180000,
+              captureAs: 'RUNTIME_REVIEW_OUTPUT' as const,
+              captureStderrAs: 'RUNTIME_REVIEW_ERROR' as const,
+              onFail: {
+                action: 'retry_step' as const,
+                targetStep: 'retry',
+                injectAs: 'FEEDBACK',
+              },
+              loopTo: 'retry',
+            },
+          ] as PipelineStep[])
+        : []),
 
       // 3. Dev retry on review failure
       {
