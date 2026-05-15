@@ -23,6 +23,13 @@
 > - `epics-pipeline-v2-phase-3.md` — Phase 3 epic plan (PR-69..PR-87 enumerated;
 >   additional Phase 3 stories landed via PR-78..PR-83 are mapped in
 >   sprint-status.yaml)
+> - **`testing-v2-substrate.md`** — **the hands-on test plan for the
+>   deployed substrate (2026-05-16)**: pre-flight checks, new-app +
+>   new-plan scenario (CLAUDE.md prepend, API-AUTHOR step, SKILL-SCOUT +
+>   ARCHITECT T1 markers, fresh skills manifest), brownfield-plan
+>   scenario, manual Reflection Inbox exercise, substrate-readiness
+>   matrix per PR. **Use this when actually testing in production.**
+>
 >   This file extends them; it is NOT a substitute. When this document and a
 >   sibling disagree, **the sibling wins** if it's about _design_; this file
 >   wins if it's about _recently shipped behaviour_ (PR-59..PR-68 +
@@ -1016,7 +1023,7 @@ and we'll iterate.
 - [ ] `compile-commit-on-pass` produced a non-empty diff for every story
 - [ ] `wave-build-pipeline` ran with `bundle-source-check` step present
 - [ ] `[bundle-source-check] all N touch points reachable from the
-  bundle entry` log line appeared
+bundle entry` log line appeared
 - [ ] No `BUNDLE_ORPHAN_FILES` errors
 
 ### Wave N (features with browser ACs)
