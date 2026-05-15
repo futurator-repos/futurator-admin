@@ -374,6 +374,7 @@ async function main() {
 
   if (articlesToProcess.length === 0 && deletedNodeIds.length === 0) {
     log('Nothing to sync — all articles up to date');
+    await processAstFacts(config);
     await writeGraphSnapshot(config);
     if (!config.skipBackup) {
       await runS3Backup(config);
@@ -577,6 +578,9 @@ async function main() {
   await writeCompileState(config.stateFile, newState);
   log(`Updated compile-state.json (${Object.keys(newState).length} entries)`);
 
+  // ── Step 8.4: AST grounding (Slice B) ────────────────────────────
+  await processAstFacts(config);
+
   // ── Step 8.5: Graph snapshot for in-app visualization ────────────
   await writeGraphSnapshot(config);
 
@@ -588,6 +592,241 @@ async function main() {
   // ── Summary ──────────────────────────────────────────────────────
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   log(`Sync complete in ${elapsed}s`);
+}
+
+// ── Slice B: AST → Memgraph translation ────────────────────────────────
+
+/**
+ * Convert a file path (e.g. `src/game/dino.ts`) to the same `code/<slug>`
+ * nodeId convention the wiki articles use (`code/src--game--dino.ts`). Keeps
+ * sub-file nodes consistent with their parent file's nodeId.
+ */
+function fileToCodeNodeId(relPath) {
+  return `code/${relPath.replace(/\//g, '--')}`;
+}
+
+/** Composite nodeId for a sub-file entity. */
+function subNodeId(fileNodeId, kind, name) {
+  return `${fileNodeId}#${kind}:${name}`;
+}
+
+/**
+ * Resolve a relative import like `./types` or `../physics` to a known file
+ * nodeId. Returns null if the source is external (e.g. `lodash`, `@/lib/x`)
+ * or if the path doesn't match any file in the AST facts.
+ *
+ * For prototype scope: only relative paths (`./` / `../`). Path-alias
+ * resolution (tsconfig `paths`, `@/`) is a follow-up.
+ */
+function resolveImportSource(fromFile, importSource, knownFiles) {
+  if (!importSource.startsWith('.')) return null;
+
+  // Compute the target path relative to the project root.
+  const fromDir = fromFile.split('/').slice(0, -1).join('/');
+  const parts = (fromDir ? fromDir + '/' : '') + importSource;
+  const segs = [];
+  for (const p of parts.split('/')) {
+    if (p === '' || p === '.') continue;
+    if (p === '..') segs.pop();
+    else segs.push(p);
+  }
+  const target = segs.join('/');
+
+  // Try each common extension + index.* convention.
+  const candidates = [
+    target + '.ts',
+    target + '.tsx',
+    target + '.js',
+    target + '.jsx',
+    target + '.mjs',
+    target + '/index.ts',
+    target + '/index.tsx',
+    target + '/index.js',
+    target + '/index.jsx',
+  ];
+  for (const c of candidates) {
+    if (knownFiles.has(c)) return c;
+  }
+  return null;
+}
+
+/**
+ * Read .mycelium/ast-facts.json and MERGE :Function / :Class nodes and
+ * :DEFINES / :IMPORTS / :CALLS edges. Co-exists with the file-level wiki
+ * nodes already upserted by the main flow — sub-file nodes use a composite
+ * nodeId (`<file-nodeId>#function:<name>`) so they don't collide with
+ * anything else.
+ *
+ * The kind field on :Node disambiguates:
+ *   - "file" → wiki-article nodes (existing behaviour)
+ *   - "function" / "class" → AST-derived sub-file nodes
+ *
+ * Wiki nodes (already upserted in this session) do not have `kind` set yet;
+ * we set kind="file" on every file-level node we know about from AST_FACTS
+ * so the graph snapshot can distinguish them.
+ */
+async function processAstFacts(config) {
+  const factsPath = join(config.knowledgeDir, '..', '.mycelium', 'ast-facts.json');
+  if (!existsSync(factsPath)) {
+    log('AST facts not found, skipping AST → graph translation');
+    return;
+  }
+  const raw = await readFile(factsPath, 'utf-8');
+  let facts;
+  try {
+    facts = JSON.parse(raw);
+  } catch (err) {
+    logError(`AST facts JSON malformed: ${err.message}`);
+    return;
+  }
+  if (!facts || !Array.isArray(facts.files) || facts.files.length === 0) {
+    return;
+  }
+
+  // Build a set of file paths we have facts for, so we can resolve imports.
+  const knownFiles = new Set(facts.files.map((f) => f.path));
+
+  const driver = createDriver();
+  const session = driver.session();
+  let funcUpserts = 0;
+  let classUpserts = 0;
+  let definesEdges = 0;
+  let importsEdges = 0;
+  let callsEdges = 0;
+
+  try {
+  for (const file of facts.files) {
+    if (file.parseError) continue;
+    const fileNodeId = fileToCodeNodeId(file.path);
+
+    // Mark the parent file node as kind="file" — idempotent SET.
+    // The file's :Node may not exist yet if Compiler hasn't written a wiki
+    // article for it (e.g. AST_FACTS covers more files than article diff).
+    // MERGE-without-SET-on-create would create incomplete nodes; we only
+    // SET kind on existing ones.
+    await session.run(
+      `MATCH (n:Node {nodeId: $nodeId, projectId: $projectId})
+       WHERE n.kind IS NULL OR n.kind = ''
+       SET n.kind = 'file'`,
+      { nodeId: fileNodeId, projectId: config.project }
+    );
+
+    // Functions
+    for (const fn of file.functions || []) {
+      const fnNodeId = subNodeId(fileNodeId, 'function', fn.name);
+      await session.run(
+        `MERGE (n:Node {nodeId: $nodeId})
+         SET n.projectId = $projectId, n.kind = 'function',
+             n.name = $name, n.fnKind = $fnKind,
+             n.exported = $exported, n.params = $params,
+             n.line = $line, n.endLine = $endLine,
+             n.parentFile = $parentFile, n.className = $className,
+             n.title = $title,
+             n.type = 'code', n.status = 'active', n.phase = 'implementation'`,
+        {
+          nodeId: fnNodeId,
+          projectId: config.project,
+          name: fn.name,
+          fnKind: fn.kind || 'function',
+          exported: !!fn.exported,
+          params: Array.isArray(fn.params) ? fn.params : [],
+          line: fn.line ?? 0,
+          endLine: fn.endLine ?? 0,
+          parentFile: fileNodeId,
+          className: fn.className ?? '',
+          title: fn.className ? `${fn.className}.${fn.name}()` : `${fn.name}()`,
+        }
+      );
+      funcUpserts++;
+
+      // file -[:DEFINES]-> function
+      await session.run(
+        `MATCH (f:Node {nodeId: $fileId, projectId: $projectId})
+         MATCH (fn:Node {nodeId: $fnId})
+         MERGE (f)-[:DEFINES]->(fn)`,
+        { fileId: fileNodeId, fnId: fnNodeId, projectId: config.project }
+      );
+      definesEdges++;
+    }
+
+    // Classes
+    for (const cls of file.classes || []) {
+      const clsNodeId = subNodeId(fileNodeId, 'class', cls.name);
+      await session.run(
+        `MERGE (n:Node {nodeId: $nodeId})
+         SET n.projectId = $projectId, n.kind = 'class',
+             n.name = $name, n.extends = $extendsName,
+             n.line = $line, n.endLine = $endLine,
+             n.parentFile = $parentFile,
+             n.title = $title,
+             n.type = 'code', n.status = 'active', n.phase = 'implementation'`,
+        {
+          nodeId: clsNodeId,
+          projectId: config.project,
+          name: cls.name,
+          extendsName: cls.extends ?? '',
+          line: cls.line ?? 0,
+          endLine: cls.endLine ?? 0,
+          parentFile: fileNodeId,
+          title: `class ${cls.name}`,
+        }
+      );
+      classUpserts++;
+
+      await session.run(
+        `MATCH (f:Node {nodeId: $fileId, projectId: $projectId})
+         MATCH (c:Node {nodeId: $clsId})
+         MERGE (f)-[:DEFINES]->(c)`,
+        { fileId: fileNodeId, clsId: clsNodeId, projectId: config.project }
+      );
+      definesEdges++;
+    }
+
+    // Imports — file → file edges for relative imports we can resolve.
+    for (const imp of file.imports || []) {
+      const resolved = resolveImportSource(file.path, imp.source, knownFiles);
+      if (!resolved) continue; // external or unresolvable — skip silently
+      const targetNodeId = fileToCodeNodeId(resolved);
+      // Only create the edge if both endpoints exist as :Node already.
+      // If the target file doesn't have a wiki article yet we skip — Slice
+      // C (brownfield bootstrap) will seed orphan files later.
+      const r = await session.run(
+        `MATCH (a:Node {nodeId: $fromId, projectId: $projectId})
+         MATCH (b:Node {nodeId: $toId, projectId: $projectId})
+         MERGE (a)-[:IMPORTS]->(b)
+         RETURN 1`,
+        { fromId: fileNodeId, toId: targetNodeId, projectId: config.project }
+      );
+      if (r.records.length > 0) importsEdges++;
+    }
+
+    // Calls — same-file resolution only for v1. Cross-file calls need
+    // import-resolved callees, which requires another pass; deferred.
+    const functionsInFile = new Map(
+      (file.functions || []).map((fn) => [fn.name, subNodeId(fileNodeId, 'function', fn.name)])
+    );
+    for (const call of file.calls || []) {
+      if (!call.fromFunction) continue;
+      const callerId = functionsInFile.get(call.fromFunction);
+      const calleeId = functionsInFile.get(call.callee);
+      if (!callerId || !calleeId) continue;
+      await session.run(
+        `MATCH (caller:Node {nodeId: $callerId})
+         MATCH (callee:Node {nodeId: $calleeId})
+         MERGE (caller)-[:CALLS]->(callee)`,
+        { callerId, calleeId }
+      );
+      callsEdges++;
+    }
+  }
+
+  log(
+    `AST grounding: ${funcUpserts} functions, ${classUpserts} classes, ${definesEdges} DEFINES, ${importsEdges} IMPORTS, ${callsEdges} CALLS`
+  );
+  } finally {
+    await session.close();
+    await driver.close();
+  }
 }
 
 /**
@@ -609,7 +848,12 @@ async function writeGraphSnapshot(config) {
          RETURN n.nodeId AS id, n.type AS type, n.phase AS phase, n.status AS status,
                 n.title AS title, n.summary AS summary, n.maturity AS maturity, n.tags AS tags,
                 n.createdByStory AS createdByStory, n.lastMutatedByStory AS lastMutatedByStory,
-                n.updated AS updated`,
+                n.updated AS updated,
+                coalesce(n.kind, 'file') AS kind,
+                n.name AS astName, n.parentFile AS parentFile,
+                n.line AS line, n.endLine AS endLine, n.exported AS exported,
+                n.params AS params, n.className AS className,
+                n.fnKind AS fnKind, n.extends AS extendsName`,
         { projectId: config.project }
       );
       const edgeResult = await session.run(
@@ -621,19 +865,49 @@ async function writeGraphSnapshot(config) {
       const toNum = (v) =>
         v && typeof v.toNumber === 'function' ? v.toNumber() : v ?? null;
 
-      const nodes = nodeResult.records.map((rec) => ({
-        id: rec.get('id'),
-        type: rec.get('type'),
-        phase: rec.get('phase'),
-        status: rec.get('status'),
-        title: rec.get('title'),
-        summary: rec.get('summary'),
-        maturity: toNum(rec.get('maturity')) ?? 0,
-        tags: rec.get('tags') ?? [],
-        createdByStory: rec.get('createdByStory') ?? null,
-        lastMutatedByStory: rec.get('lastMutatedByStory') ?? null,
-        updated: rec.get('updated') ?? null,
-      }));
+      const nodes = nodeResult.records.map((rec) => {
+        const kind = rec.get('kind') ?? 'file';
+        const base = {
+          id: rec.get('id'),
+          kind,
+          type: rec.get('type'),
+          phase: rec.get('phase'),
+          status: rec.get('status'),
+          title: rec.get('title'),
+          summary: rec.get('summary'),
+          maturity: toNum(rec.get('maturity')) ?? 0,
+          tags: rec.get('tags') ?? [],
+          createdByStory: rec.get('createdByStory') ?? null,
+          lastMutatedByStory: rec.get('lastMutatedByStory') ?? null,
+          updated: rec.get('updated') ?? null,
+        };
+        // Surface AST-specific fields only when present, so wiki-only nodes
+        // don't carry empty/null clutter that bloats the snapshot.
+        if (kind === 'function') {
+          return {
+            ...base,
+            name: rec.get('astName'),
+            parentFile: rec.get('parentFile'),
+            line: toNum(rec.get('line')) ?? 0,
+            endLine: toNum(rec.get('endLine')) ?? 0,
+            exported: rec.get('exported') ?? false,
+            params: rec.get('params') ?? [],
+            className: rec.get('className') || null,
+            fnKind: rec.get('fnKind') || 'function',
+          };
+        }
+        if (kind === 'class') {
+          return {
+            ...base,
+            name: rec.get('astName'),
+            parentFile: rec.get('parentFile'),
+            line: toNum(rec.get('line')) ?? 0,
+            endLine: toNum(rec.get('endLine')) ?? 0,
+            extends: rec.get('extendsName') || null,
+          };
+        }
+        return base;
+      });
 
       const edges = edgeResult.records.map((rec) => ({
         source: rec.get('source'),

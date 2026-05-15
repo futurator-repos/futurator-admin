@@ -9,15 +9,21 @@ const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
 
 const S3_BASE = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
 
-const NODE_COLORS: Record<string, string> = {
-  code: '#3b82f6',
-  decision: '#a855f7',
-  system: '#f97316',
-  requirement: '#22c55e',
+// Color palette keyed by node *kind* (Slice B). `kind` distinguishes the
+// AST-derived sub-file nodes from the file-level wiki nodes; falls back to
+// node.type for legacy snapshots that don't yet carry a `kind` field.
+const NODE_COLORS_BY_KIND: Record<string, string> = {
+  file: '#3b82f6', // blue — wiki-article / source file
+  function: '#22d3ee', // cyan — AST function
+  class: '#a855f7', // purple — AST class
+  decision: '#f0abfc', // pink — wiki decision article
+  system: '#f97316', // orange — wiki system article
+  requirement: '#22c55e', // green — wiki requirement article
   unknown: '#64748b',
 };
 
 const EDGE_COLORS: Record<string, string> = {
+  // Wiki-derived (Compiler [[wikilinks]])
   DEPENDS_ON: '#94a3b8',
   DERIVED_FROM: '#60a5fa',
   REFINES: '#22d3ee',
@@ -26,10 +32,16 @@ const EDGE_COLORS: Record<string, string> = {
   CONFLICTS_WITH: '#f43f5e',
   ENABLES: '#facc15',
   INFORMS: '#a3a3a3',
+  // AST-derived (Slice B)
+  DEFINES: '#0ea5e9',
+  IMPORTS: '#ec4899',
+  CALLS: '#f59e0b',
 };
 
 type GraphNode = {
   id: string;
+  /** kind comes from Slice B; legacy snapshots omit it, default to type. */
+  kind?: string;
   type: string;
   phase: string;
   status: string;
@@ -40,7 +52,29 @@ type GraphNode = {
   createdByStory: string | null;
   lastMutatedByStory: string | null;
   updated: string | null;
+  // Sub-file (AST) extras — present when kind is 'function' or 'class'.
+  name?: string;
+  parentFile?: string;
+  line?: number;
+  endLine?: number;
+  exported?: boolean;
+  params?: string[];
+  className?: string | null;
+  fnKind?: string;
+  extends?: string | null;
 };
+
+/** Resolve color for a node — prefer kind, fall back to type. */
+function colorForNode(n: GraphNode): string {
+  const key = n.kind ?? n.type;
+  return NODE_COLORS_BY_KIND[key] ?? NODE_COLORS_BY_KIND.unknown;
+}
+
+/** Smaller radius for AST-derived sub-file nodes so files dominate visually. */
+function radiusForNode(n: GraphNode): number {
+  if (n.kind === 'function' || n.kind === 'class') return 3;
+  return 6;
+}
 
 type GraphEdge = {
   source: string;
@@ -171,11 +205,18 @@ export function GraphViewer({
     }
   };
 
-  const nodeTypeBreakdown = useMemo(() => {
+  // Filter state — toggles per node kind + edge type. Defaults to "show
+  // everything" so first impression matches reality. The function-density
+  // can be hidden via the "function" toggle when the graph is too busy.
+  const [hiddenKinds, setHiddenKinds] = useState<Set<string>>(new Set());
+  const [hiddenEdges, setHiddenEdges] = useState<Set<string>>(new Set());
+
+  const nodeKindBreakdown = useMemo(() => {
     if (!snapshot) return {};
     const out: Record<string, number> = {};
     for (const n of snapshot.nodes) {
-      out[n.type] = (out[n.type] ?? 0) + 1;
+      const k = n.kind ?? n.type;
+      out[k] = (out[k] ?? 0) + 1;
     }
     return out;
   }, [snapshot]);
@@ -188,6 +229,37 @@ export function GraphViewer({
     }
     return out;
   }, [snapshot]);
+
+  // Apply filters to graphData
+  const filteredGraphData = useMemo(() => {
+    const allNodes = graphData.nodes as GraphNode[];
+    const visibleNodes = allNodes.filter((n) => !hiddenKinds.has(n.kind ?? n.type));
+    const visibleIds = new Set(visibleNodes.map((n) => n.id));
+    const visibleLinks = (graphData.links as GraphEdge[]).filter(
+      (e) =>
+        !hiddenEdges.has(e.type) &&
+        visibleIds.has(e.source as unknown as string) &&
+        visibleIds.has(e.target as unknown as string),
+    );
+    return { nodes: visibleNodes, links: visibleLinks };
+  }, [graphData, hiddenKinds, hiddenEdges]);
+
+  function toggleKind(k: string) {
+    setHiddenKinds((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+  }
+  function toggleEdge(t: string) {
+    setHiddenEdges((prev) => {
+      const next = new Set(prev);
+      if (next.has(t)) next.delete(t);
+      else next.add(t);
+      return next;
+    });
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -290,16 +362,31 @@ export function GraphViewer({
               Last fetched: {lastFetchedAt.toLocaleTimeString()}
             </div>
           )}
-          <div className="ml-auto flex flex-wrap gap-3 text-xs">
-            {Object.entries(nodeTypeBreakdown).map(([t, n]) => (
-              <span key={t} className="flex items-center gap-1">
-                <span
-                  className="inline-block h-2.5 w-2.5 rounded-full"
-                  style={{ background: NODE_COLORS[t] ?? NODE_COLORS.unknown }}
-                />
-                {t}: {n}
-              </span>
-            ))}
+          <div className="ml-auto flex flex-wrap gap-2 text-xs">
+            {Object.entries(nodeKindBreakdown).map(([k, n]) => {
+              const hidden = hiddenKinds.has(k);
+              return (
+                <button
+                  key={k}
+                  onClick={() => toggleKind(k)}
+                  className={`flex items-center gap-1 rounded-md border px-2 py-0.5 transition-opacity ${
+                    hidden ? 'opacity-40 line-through' : ''
+                  }`}
+                  style={{
+                    borderColor: NODE_COLORS_BY_KIND[k] ?? NODE_COLORS_BY_KIND.unknown,
+                  }}
+                  title={hidden ? `Show ${k}` : `Hide ${k}`}
+                >
+                  <span
+                    className="inline-block h-2.5 w-2.5 rounded-full"
+                    style={{
+                      background: NODE_COLORS_BY_KIND[k] ?? NODE_COLORS_BY_KIND.unknown,
+                    }}
+                  />
+                  {k}: {n}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -322,18 +409,17 @@ export function GraphViewer({
           )}
           {snapshot && (
             <ForceGraph2D
-              graphData={graphData}
+              graphData={filteredGraphData}
               width={size.width}
               height={size.height}
               nodeLabel={(n: object) => {
                 const g = n as unknown as GraphNode;
-                return `${g.title} (${g.type})`;
+                const kind = g.kind ?? g.type;
+                return `${g.title} (${kind})`;
               }}
-              nodeColor={(n: object) => {
-                const g = n as unknown as GraphNode;
-                return NODE_COLORS[g.type] ?? NODE_COLORS.unknown;
-              }}
-              nodeRelSize={5}
+              nodeColor={(n: object) => colorForNode(n as unknown as GraphNode)}
+              nodeVal={(n: object) => radiusForNode(n as unknown as GraphNode)}
+              nodeRelSize={3}
               linkColor={(l: object) => {
                 const e = l as unknown as GraphEdge;
                 return EDGE_COLORS[e.type] ?? EDGE_COLORS.DEPENDS_ON;
@@ -363,8 +449,8 @@ export function GraphViewer({
               </div>
               <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
                 <div>
-                  <span className="text-muted-foreground">Type: </span>
-                  {selectedNode.type}
+                  <span className="text-muted-foreground">Kind: </span>
+                  {selectedNode.kind ?? selectedNode.type}
                 </div>
                 <div>
                   <span className="text-muted-foreground">Phase: </span>
@@ -379,6 +465,50 @@ export function GraphViewer({
                   {selectedNode.maturity}
                 </div>
               </div>
+              {/* AST-specific fields for function/class nodes (Slice B) */}
+              {(selectedNode.kind === 'function' || selectedNode.kind === 'class') && (
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 rounded-md border border-border bg-muted/30 p-2 text-xs">
+                  {selectedNode.parentFile && (
+                    <div className="col-span-2">
+                      <span className="text-muted-foreground">Parent file: </span>
+                      <span className="font-mono">{selectedNode.parentFile}</span>
+                    </div>
+                  )}
+                  {selectedNode.line ? (
+                    <div>
+                      <span className="text-muted-foreground">Lines: </span>
+                      {selectedNode.line}
+                      {selectedNode.endLine ? `–${selectedNode.endLine}` : ''}
+                    </div>
+                  ) : null}
+                  {selectedNode.kind === 'function' && (
+                    <div>
+                      <span className="text-muted-foreground">Exported: </span>
+                      {selectedNode.exported ? 'yes' : 'no'}
+                    </div>
+                  )}
+                  {selectedNode.className && (
+                    <div className="col-span-2">
+                      <span className="text-muted-foreground">Class: </span>
+                      <span className="font-mono">{selectedNode.className}</span>
+                    </div>
+                  )}
+                  {selectedNode.kind === 'class' && selectedNode.extends && (
+                    <div className="col-span-2">
+                      <span className="text-muted-foreground">Extends: </span>
+                      <span className="font-mono">{selectedNode.extends}</span>
+                    </div>
+                  )}
+                  {selectedNode.kind === 'function' &&
+                    selectedNode.params &&
+                    selectedNode.params.length > 0 && (
+                      <div className="col-span-2">
+                        <span className="text-muted-foreground">Params: </span>
+                        <span className="font-mono">({selectedNode.params.join(', ')})</span>
+                      </div>
+                    )}
+                </div>
+              )}
               {selectedNode.tags && selectedNode.tags.length > 0 && (
                 <div className="flex flex-wrap gap-1">
                   {selectedNode.tags.map((t) => (
@@ -411,20 +541,32 @@ export function GraphViewer({
             <div className="space-y-3 text-xs text-muted-foreground">
               <div>Click a node to inspect.</div>
               <div className="border-t border-border pt-2">
-                <div className="font-semibold text-foreground mb-1">Edge types</div>
-                {Object.entries(edgeTypeBreakdown).map(([t, n]) => (
-                  <div key={t} className="flex items-center gap-2">
-                    <span
-                      className="inline-block h-2 w-6 rounded"
-                      style={{
-                        background: EDGE_COLORS[t] ?? EDGE_COLORS.DEPENDS_ON,
-                      }}
-                    />
-                    <span>
-                      {t}: {n}
-                    </span>
-                  </div>
-                ))}
+                <div className="font-semibold text-foreground mb-1">
+                  Edge types (click to filter)
+                </div>
+                {Object.entries(edgeTypeBreakdown).map(([t, n]) => {
+                  const hidden = hiddenEdges.has(t);
+                  return (
+                    <button
+                      key={t}
+                      onClick={() => toggleEdge(t)}
+                      className={`flex w-full items-center gap-2 rounded px-1 py-0.5 text-left transition-opacity hover:bg-muted ${
+                        hidden ? 'opacity-40 line-through' : ''
+                      }`}
+                      title={hidden ? `Show ${t}` : `Hide ${t}`}
+                    >
+                      <span
+                        className="inline-block h-2 w-6 rounded"
+                        style={{
+                          background: EDGE_COLORS[t] ?? EDGE_COLORS.DEPENDS_ON,
+                        }}
+                      />
+                      <span>
+                        {t}: {n}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ) : (
