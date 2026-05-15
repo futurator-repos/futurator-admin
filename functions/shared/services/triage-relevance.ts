@@ -60,7 +60,9 @@ export function classifyMatchTier(
   if (sourceProject === targetProject) return 'same-project';
   if (productFamilies) {
     for (const slugs of Object.values(productFamilies)) {
-      const set = Array.isArray(slugs) ? new Set(slugs) : slugs;
+      const set: ReadonlySet<string> = Array.isArray(slugs)
+        ? new Set(slugs)
+        : (slugs as ReadonlySet<string>);
       if (set.has(sourceProject) && set.has(targetProject)) return 'same-family';
     }
   }

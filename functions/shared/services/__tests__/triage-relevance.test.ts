@@ -9,6 +9,7 @@ import {
   topRelevant,
   MATCH_MODIFIERS,
   NOT_RELEVANT_DECAY,
+  type RelevanceResult,
 } from '../triage-relevance';
 
 const FAMILIES = {
@@ -123,7 +124,7 @@ describe('computeRelevance', () => {
 
 describe('topRelevant', () => {
   it('returns top 3 by default, descending', () => {
-    const candidates = [
+    const candidates: Array<{ case: string; relevance: RelevanceResult }> = [
       {
         case: 'A',
         relevance: { score: 0.2, tier: 'cross-product', modifier: 0.4, decayed: false },
@@ -131,16 +132,16 @@ describe('topRelevant', () => {
       { case: 'B', relevance: { score: 0.9, tier: 'same-project', modifier: 1.0, decayed: false } },
       { case: 'C', relevance: { score: 0.5, tier: 'same-family', modifier: 0.7, decayed: false } },
       { case: 'D', relevance: { score: 0.7, tier: 'same-project', modifier: 1.0, decayed: false } },
-    ] as const;
+    ];
     const top = topRelevant({ candidates });
     expect(top.map((t) => t.case)).toEqual(['B', 'D', 'C']);
   });
 
   it('respects custom limit', () => {
-    const candidates = [
+    const candidates: Array<{ case: string; relevance: RelevanceResult }> = [
       { case: 'A', relevance: { score: 0.9, tier: 'same-project', modifier: 1, decayed: false } },
       { case: 'B', relevance: { score: 0.5, tier: 'same-project', modifier: 1, decayed: false } },
-    ] as const;
+    ];
     expect(topRelevant({ candidates, limit: 1 })).toHaveLength(1);
   });
 });
