@@ -967,6 +967,50 @@ Fix the issues mentioned. Output only what you changed, then:
         captureAs: 'DIFF_MANIFEST',
         onFail: { action: 'fail' as const, injectAs: 'COMPILE_DIFF_ERROR' },
       },
+      // Slice A — tree-sitter AST grounding for the COMPILER.
+      // Runs ast-extract.mjs over every Added/Modified file in DIFF_MANIFEST
+      // and writes the structural facts (functions, classes, imports, calls)
+      // to .mycelium/ast-facts.json. The Compiler prompt below splices these
+      // facts into a <ground_truth> block so the agent stops re-deriving
+      // structure and focuses on Purpose/Decisions/Signals.
+      //
+      // Non-blocking: ast-extract.mjs always exits 0 (best-effort), and the
+      // step itself uses `onFail: continue` so a missing grammar or a parse
+      // error in one file never blocks compile-knowledge. The Compiler
+      // simply falls through to its pre-Slice-A behaviour when AST_FACTS
+      // is empty.
+      //
+      // Fast: tree-sitter is sub-100ms even on hundreds of files; no Voyage
+      // / Claude / Memgraph calls here.
+      ...(waveCloseEnabled
+        ? ([] as PipelineStep[])
+        : ([
+            {
+              id: 'compile-ast',
+              stepType: 'shell' as const,
+              command:
+                // Best-effort: this shell always exits 0 so the step never
+                // fails — when tree-sitter is missing, a parse blows up, or
+                // node itself crashes, we still emit a minimal JSON shell so
+                // the Compiler prompt's `{{AST_FACTS}}` interpolation has
+                // something to consume. The `|| true` after `node ... .mjs`
+                // swallows ast-extract's `process.exit(1)` fatal path.
+                `cd ${workingDir} && mkdir -p .mycelium && ` +
+                `if [ -f /opt/futurator-daemon/scripts/ast-extract.mjs ]; then ` +
+                `  node /opt/futurator-daemon/scripts/ast-extract.mjs ` +
+                `    --root ${workingDir} ` +
+                `    --diff-manifest "{{DIFF_MANIFEST}}" ` +
+                `    > .mycelium/ast-facts.json 2>/tmp/ast-extract-err.log || true; ` +
+                `  cat .mycelium/ast-facts.json 2>/dev/null || ` +
+                `    echo '{"fileCount":0,"files":[],"error":"ast-facts.json missing"}'; ` +
+                `else ` +
+                `  echo '{"fileCount":0,"files":[],"error":"ast-extract.mjs not deployed"}'; ` +
+                `fi`,
+              timeout: 60000,
+              captureAs: 'AST_FACTS',
+              onFail: { action: 'fail' as const, injectAs: 'AST_FACTS_ERROR' },
+            },
+          ] as PipelineStep[])),
       // Story B.4: COMPILER prompt opens with the same `<project_context>`
       // block as DEV (B.2) and REVIEWER (B.3) — byte-identical prefix → cache
       // hits across all three roles for this story. The diff + dev work
@@ -1008,10 +1052,31 @@ The plan, story spec, project tree, knowledge index, and prior-wave WORK_SUMMARY
 {{FEEDBACK}}
 </step_input>
 
-## DISCOVERY (Story B.4):
-- Do NOT re-Read the source files DEV just edited — their post-state is summarized in \`<step_input>\` above. Read source only when you need a precise quote for a knowledge article.
+<ground_truth>
+## AST facts (tree-sitter, deterministic — Slice A)
+
+For each Added/Modified file in DIFF_MANIFEST, the structural facts below
+were extracted by tree-sitter (NOT by an LLM). They are the canonical
+source for imports, exported functions/classes, and call sites. **Do not
+re-derive these by reading the source files — use them as-is.** Focus
+your wiki article authoring on Purpose, Decisions, Signals, and Missing
+Signals; let the AST facts tell the story of *what's defined* and *what
+calls what*.
+
+If the block is empty or absent (\`fileCount: 0\`), tree-sitter was
+unavailable or all changed files were non-code (markdown, config, etc.).
+In that case fall back to the diff-only behaviour.
+
+\`\`\`json
+{{AST_FACTS}}
+\`\`\`
+</ground_truth>
+
+## DISCOVERY (Story B.4 + Slice A):
+- Do NOT re-Read the source files DEV just edited — their post-state is summarized in \`<step_input>\` above AND their structural facts are in \`<ground_truth>\` above. Read source only when you need a precise quote that the AST facts don't cover.
 - Do NOT Read \`knowledge/log.md\`, \`knowledge/system/dependency-map.md\`, or \`knowledge/code/*.md\` unless you intend to edit them. The article catalog is in \`<project_context>.knowledgeIndex\` (one line per article).
 - Do NOT Glob, find, or Bash ls.
+- When you write \`Dependencies\` / \`Dependents\` / \`Key Exports\` sections in a wiki article, prefer the names that appear in \`<ground_truth>.files[].imports/functions/classes\` over names you remember from the diff — the AST is correct, your memory might not be.
 
 ## Compilation rules
 
