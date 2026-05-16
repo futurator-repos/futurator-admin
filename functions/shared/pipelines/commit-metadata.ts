@@ -1,0 +1,130 @@
+/**
+ * commit-metadata.ts — Pipeline v2 Phase 3 / Story 3-C-4-1 (PR-73) +
+ * Story 2-B-1-1 (PR-85) wired into the LAMBDA-built shell.
+ *
+ * The daemon used to expose JS helpers
+ * (daemon/pipelines/lib/commit-metadata.mjs) that read the manifest
+ * synchronously from disk and returned pre-computed trailer strings. That
+ * design assumed the pipeline steps were constructed at runtime on EC2.
+ * In production today the Lambda builds the per-story pipeline JSON ahead
+ * of time and persists it to DynamoDB — the daemon just polls and runs.
+ * The Lambda has no access to the worktree's `.claude/skills.manifest.yaml`
+ * (it lives on EC2), so trailers must be COMPUTED IN SHELL at execution
+ * time.
+ *
+ * What this module emits:
+ *
+ *   git -c user.email=... -c user.name='Daemon' commit -m "$COMMIT_MSG"
+ *
+ * where $COMMIT_MSG is a single string with embedded newlines: the
+ * subject, then (under mvp+) `Skills-Used:` and (when the manifest file
+ * exists) `Skills-Manifest-Sha:`. Git treats `\n\n` inside `-m` as the
+ * boundary between subject and body, and the body trailers stay grep-able:
+ *
+ *   git log --grep="Skills-Used:.*music-theory-engine"
+ *   git log --grep="Skills-Manifest-Sha:.*a3f9c2e"
+ *
+ * Rigor matrix (v2.5 §42):
+ *   prototype  → both lines omitted
+ *   mvp        → both lines emitted (Skills-Used may be empty when no
+ *                skills were loaded; Manifest-Sha emitted if manifest
+ *                file exists)
+ *   production → both lines emitted (manifest sha required)
+ *
+ * The Skills-Used contents come from `.context/loaded-skills.json` in the
+ * working tree — a JSON array of `{source, skill}` objects the daemon
+ * writes as agents load skills. When the file is missing/empty the
+ * line emits as `Skills-Used:` (label only) — presence-for-grep still
+ * holds, content fills in once the daemon's loaded-skills tracking lands.
+ */
+
+import type { PlanRigor } from '../types/plan';
+
+/**
+ * Build the bash snippet that produces the per-story git commit message
+ * and runs `git commit`. Inserts trailers under mvp+ rigor.
+ *
+ * The returned snippet expects to be concatenated INSIDE an existing
+ * `cd <workingDir> && ...` chain — it does not change directories.
+ *
+ * @returns a single-line bash snippet (no leading/trailing whitespace,
+ *          no `&&` prefix/suffix — caller decides chaining)
+ */
+export function buildCommitShellSnippet(args: {
+  storyId: string;
+  storyTitle: string;
+  rigor: PlanRigor;
+}): string {
+  const escapedTitle = args.storyTitle.replace(/'/g, "'\\''");
+  const subject = `story: ${args.storyId} — ${escapedTitle}`;
+
+  const GIT_PREFIX = `git -c user.email=daemon@futurator.local -c user.name='Daemon'`;
+
+  if (args.rigor === 'prototype') {
+    return `${GIT_PREFIX} commit -m 'subject_placeholder'`.replace(
+      "'subject_placeholder'",
+      `'${subject}'`,
+    );
+  }
+
+  // mvp+: compute trailers in shell and concatenate into a single -m
+  // payload with embedded blank lines. Newlines inside double-quoted
+  // bash strings survive into `git commit -m`, so we don't need the
+  // multi-`-m` form.
+  //
+  // We wrap the whole thing in a subshell `( ... )` and separate
+  // statements with `;` so the if/then/fi control flow parses correctly
+  // (joining with `&&` between `then` and the body is invalid bash).
+  // The subshell's exit code is its last command's — `git commit` —
+  // so an outer `&&`-chain failure still propagates cleanly.
+  //
+  // The Skills-Used reader is intentionally defensive — if node is
+  // unavailable, the JSON malformed, or any step throws, SKILLS_CSV ends
+  // up empty and we still emit the label-only line (presence for grep).
+  const nodeReader =
+    `node -e ` +
+    `"try { const a = require('./.context/loaded-skills.json'); ` +
+    `const items = Array.isArray(a) ? a : []; ` +
+    `const set = new Set(items.filter(s => s && s.skill && s.source).map(s => s.skill + '@' + s.source)); ` +
+    `console.log([...set].sort((x,y) => x.localeCompare(y)).join(', ')); ` +
+    `} catch (e) { process.exit(0); }" 2>/dev/null || true`;
+
+  const statements = [
+    `SKILLS_CSV=""`,
+    `if [ -f .context/loaded-skills.json ] && [ -s .context/loaded-skills.json ]; then SKILLS_CSV=$(${nodeReader}); fi`,
+    `MANIFEST_SHA=""`,
+    `if [ -f .claude/skills.manifest.yaml ]; then MANIFEST_SHA=$(sha256sum .claude/skills.manifest.yaml 2>/dev/null | awk '{print $1}'); fi`,
+    `COMMIT_MSG='${subject}'`,
+    `if [ -n "$SKILLS_CSV" ]; then COMMIT_MSG=$(printf '%s\\n\\nSkills-Used: %s' "$COMMIT_MSG" "$SKILLS_CSV"); else COMMIT_MSG=$(printf '%s\\n\\nSkills-Used:' "$COMMIT_MSG"); fi`,
+    `if [ -n "$MANIFEST_SHA" ]; then COMMIT_MSG=$(printf '%s\\n\\nSkills-Manifest-Sha: %s' "$COMMIT_MSG" "$MANIFEST_SHA"); fi`,
+    `${GIT_PREFIX} commit -m "$COMMIT_MSG"`,
+  ];
+  return `( ${statements.join('; ')} )`;
+}
+
+/**
+ * Parse the `Skills-Used:` value out of a commit message body. Returns
+ * the array of `<skill>@<source>` tokens, or empty when the line is
+ * absent / empty. Mirrors the daemon's parser so analytics consumers can
+ * agree on the format.
+ */
+export function parseSkillsUsedLine(commitMessage: string): string[] {
+  const m = String(commitMessage).match(/^Skills-Used:\s*(.*?)\s*$/m);
+  if (!m) return [];
+  const body = m[1];
+  if (!body) return [];
+  return body
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Parse the `Skills-Manifest-Sha:` value out of a commit message body.
+ * Returns the SHA-256 hex string (lowercase 64 chars), or null when
+ * absent or malformed.
+ */
+export function parseSkillsManifestShaLine(commitMessage: string): string | null {
+  const m = String(commitMessage).match(/^Skills-Manifest-Sha:\s*([a-f0-9]{64})\s*$/m);
+  return m ? m[1] : null;
+}

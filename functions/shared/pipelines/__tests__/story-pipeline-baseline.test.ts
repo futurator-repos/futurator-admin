@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { execSync } from 'node:child_process';
 import { generateStoryPipeline } from '../story-pipeline';
 import type { EpicStory } from '../../types/epic-workflow';
 
@@ -31,8 +32,79 @@ describe('PR-52 — compile-diff EMPTY_DIFF graceful (no false attention on retr
     expect(step?.stepType).toBe('shell');
     expect(step?.command).toContain('EMPTY_DIFF_BY_DESIGN');
     // Empty path now exits 0, NOT 1 (the loud-fail).
-    expect(step?.command).toContain('exit 0;');
+    expect(step?.command).toContain('exit 0');
     expect(step?.command).not.toContain("'EMPTY_DIFF: per-story commit");
+  });
+});
+
+describe('Task #55 — compile-diff defensive rewrite (no-parent + always exits 0)', () => {
+  it('handles first-commit / no-parent case via empty-tree fallback', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-diff');
+    // Probe HEAD~1; fall back to empty-tree sha when it doesn't exist.
+    expect(step?.command).toContain('git rev-parse --verify HEAD~1');
+    expect(step?.command).toContain('git hash-object -t tree /dev/null');
+    // The diff uses the resolved BASE_REF variable, not literal HEAD~1.
+    expect(step?.command).toContain('git diff --name-status "$BASE_REF" HEAD');
+  });
+
+  it('always exits 0 (informational step — failure here must not break the pipeline)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-diff');
+    // The terminal statement is an explicit `exit 0`.
+    expect(step?.command).toMatch(/;\s*exit 0$/);
+    // And the step's onFail.action is NOT 'fail' — the daemon already
+    // classifies compile-* failures as non-blocking; the shell now
+    // codifies that intent so transient failures don't surface
+    // compilation-failed events.
+    expect(step?.onFail?.action).toBeUndefined();
+  });
+
+  it('survives `cd` failure (working dir missing) without breaking the step', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-diff');
+    // `cd ... || exit 0` guard: if the working dir vanished between
+    // compile-commit-on-pass and compile-diff (unlikely but possible
+    // under cleanup race), we exit cleanly instead of cascade-failing.
+    expect(step?.command).toContain(`cd ${workingDir} || exit 0`);
+  });
+
+  /**
+   * Regression: the array-join('; ') style produced `then;` / `else;` /
+   * `fi; if` patterns that are syntax errors in bash. Pipe the generated
+   * shell through `bash -n` (syntax-check, no exec) so any future
+   * refactor that re-introduces the bug fails immediately at unit-test
+   * time instead of waiting for an EC2 plan run to surface it.
+   */
+  it('compile-diff shell is syntactically valid bash (`bash -n`)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-diff');
+    const cmd = (step as { command: string }).command;
+    // `bash -n -c '<script>'` parses without executing; exits 0 on valid
+    // syntax, non-zero on parse error. The thrown error message includes
+    // the line/column for easy diagnosis.
+    expect(() => {
+      execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' });
+    }).not.toThrow();
+  });
+
+  it('compile-commit-on-pass shell is syntactically valid bash (`bash -n`)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    const cmd = (step as { command: string }).command;
+    expect(() => {
+      execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' });
+    }).not.toThrow();
   });
 });
 
@@ -181,11 +253,17 @@ describe('PR-67 — compile-commit-on-pass non-empty diff guard', () => {
     });
     const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
     expect(step?.stepType).toBe('shell');
-    // The story-commit line uses `commit -m ...` without --allow-empty.
-    // The baseline-bootstrap commit (earlier in the same command) DOES
-    // keep --allow-empty — verify we didn't strip it too aggressively.
-    expect(step?.command).toMatch(/commit -m 'story:/);
+    // The story-commit line under mvp+ rigor is now built by the
+    // commit-metadata trailer helper (PR-73 + PR-85): the subject lives in
+    // `COMMIT_MSG='story: ...'` and the final invocation is
+    // `commit -m "$COMMIT_MSG"`. Verify the subject is present and that
+    // the story commit is NOT `--allow-empty` (the bootstrap baseline
+    // commit DOES keep --allow-empty and stays present).
+    expect(step?.command).toContain(`COMMIT_MSG='story: ${story.storyId}`);
+    expect(step?.command).toContain('commit -m "$COMMIT_MSG"');
     expect(step?.command).toContain("commit --allow-empty -q -m 'baseline");
+    // Belt and suspenders: the story-commit invocation must NOT use --allow-empty.
+    expect(step?.command).not.toMatch(/commit --allow-empty -m "\$COMMIT_MSG"/);
   });
 
   it('counts staged source changes and fails with STORY_COMMIT_EMPTY when zero', () => {

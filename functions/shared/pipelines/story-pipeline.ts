@@ -6,6 +6,11 @@ import { buildAgentConfig } from './role-policy';
 import { buildFrameworkDetectSnippet } from './framework-detect';
 // PR-91-followup (Story 2-A-3-1) — API-AUTHOR step before test-author.
 import { buildApiAuthorPrompt } from '../prompts/api-author-prompt';
+// PR-73 + PR-85 wired in: shell-time trailer emission for the per-story
+// commit (Skills-Used / Skills-Manifest-Sha). Previously the helpers lived
+// in the daemon and were never imported; now they live here so the
+// Lambda-built compile-commit-on-pass actually emits them under mvp+.
+import { buildCommitShellSnippet } from './commit-metadata';
 
 /**
  * PR-91-followup gate. Stub boilerplates (sst / vite / mobile) don't ship
@@ -975,8 +980,18 @@ Fix the issues mentioned. Output only what you changed, then:
           `  echo "Likely cause: the dev agent's writes weren't tracked by git (new top-level dir not staged, or wrote to a different cwd). Investigate before marking the story done." >&2; ` +
           `  exit 1; ` +
           `fi && ` +
-          `git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
-          `commit -m 'story: ${story.storyId} — ${story.title.replace(/'/g, "'\\''")}'`,
+          // PR-73 + PR-85 (Story 3-C-4-1 + Story 2-B-1-1) — commit-message
+          // trailers: `Skills-Used:` and `Skills-Manifest-Sha:` so future
+          // analytics can do `git log --grep="Skills-Used:.*music-theory-engine"`
+          // and forensic reconstruction can pin a manifest SHA. The Lambda
+          // can't read EC2's `.claude/skills.manifest.yaml`, so the trailer
+          // values are computed in shell at exec time. Omitted under
+          // prototype rigor (v2.5 §42).
+          buildCommitShellSnippet({
+            storyId: story.storyId,
+            storyTitle: story.title,
+            rigor,
+          }),
         timeout: 30000,
         captureAs: 'STORY_COMMIT_OUTPUT',
         onFail: { action: 'fail' as const, injectAs: 'STORY_COMMIT_ERROR' },
@@ -1006,19 +1021,52 @@ Fix the issues mentioned. Output only what you changed, then:
       {
         id: 'compile-diff',
         stepType: 'shell' as const,
+        // Task #55 (2026-05-16) — defensive rewrite. The original shell
+        // intermittently exited non-zero in production (job a895fc71
+        // dino-5 plan) even though the same command verbatim ran fine
+        // when replayed against the worktree afterwards. Root cause never
+        // pinned — could be transient fs lock, a HEAD~1 race during the
+        // tail end of compile-commit-on-pass, or output capture quirks
+        // under daemon load. This step is purely informational (it
+        // populates DIFF_MANIFEST for compile-knowledge to read); a
+        // failure here should never break the pipeline. The new shell:
+        //
+        //   - handles the no-parent (first commit) case via empty-tree
+        //     fallback (`git hash-object -t tree /dev/null`)
+        //   - ALWAYS exits 0 (downstream tolerates empty DIFF_MANIFEST)
+        //   - keeps PR-52's EMPTY_DIFF_BY_DESIGN marker so retried stories
+        //     stay grep-able as the "no-op success" case
+        //
+        // The daemon already classified prior compile-diff failures as
+        // non-blocking (`compilation-failed` event with no story-error),
+        // so codifying that intent in shell removes a class of false-
+        // alarm attention items.
+        // Hand-formatted because `if … then … else … fi` cannot be joined
+        // with `;` separators — bash treats `then;` and `else;` as syntax
+        // errors. Each `;` below sits BETWEEN commands, never adjacent to
+        // a control-flow keyword.
         command:
-          `cd ${workingDir} && mkdir -p .mycelium && ` +
-          `DIFF=$(git diff --name-status HEAD~1 HEAD 2>/dev/null | ` +
+          `cd ${workingDir} || exit 0; ` +
+          `mkdir -p .mycelium || true; ` +
+          `if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then ` +
+          `  BASE_REF="HEAD~1"; ` +
+          `else ` +
+          `  BASE_REF=$(git hash-object -t tree /dev/null 2>/dev/null); ` +
+          `fi; ` +
+          `DIFF=$(git diff --name-status "$BASE_REF" HEAD 2>/dev/null | ` +
           `{ grep -v -E 'node_modules/|\\.git/|knowledge/|\\.mycelium/' || true; }); ` +
           `if [ -z "$DIFF" ]; then ` +
-          `  echo 'EMPTY_DIFF_BY_DESIGN: per-story commit produced no in-scope changes ' \\` +
-          `       '(retry / no-op story); compile phase will emit nothing'; ` +
-          `  exit 0; ` +
+          `  echo 'EMPTY_DIFF_BY_DESIGN: per-story commit produced no in-scope changes (retry / no-op story); compile phase will emit nothing'; ` +
+          `else ` +
+          `  printf '%s\\n' "$DIFF"; ` +
           `fi; ` +
-          `printf '%s\\n' "$DIFF"`,
+          `exit 0`,
         timeout: 15000,
         captureAs: 'DIFF_MANIFEST',
-        onFail: { action: 'fail' as const, injectAs: 'COMPILE_DIFF_ERROR' },
+        // No `onFail.action: 'fail'` — the shell can no longer exit
+        // non-zero; if the daemon's spawn fails outright the daemon
+        // still records it as step_error and the rest of the pipeline
+        // proceeds (compile-knowledge tolerates missing DIFF_MANIFEST).
       },
       // Slice A — tree-sitter AST grounding for the COMPILER.
       // Runs ast-extract.mjs over every Added/Modified file in DIFF_MANIFEST
