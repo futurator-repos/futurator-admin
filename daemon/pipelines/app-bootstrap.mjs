@@ -60,7 +60,16 @@ const NEXTJS_VIEW = {
   runtime: 'node',
   bmadSupported: true,
   isStub: false,
-  targetFiles: ['package.json', 'README.md', 'CLAUDE.md'],
+  // PR-71 (Story 3-C-2-1): `.claude/skills.manifest.yaml` ships the
+  // `project: __APP_SLUG__` placeholder via the boilerplate augments and
+  // depends on inject-values for substitution. Mirror of the TS registry's
+  // postCreateSteps[0].targetFiles for nextjs-base.
+  targetFiles: [
+    'package.json',
+    'README.md',
+    'CLAUDE.md',
+    '.claude/skills.manifest.yaml',
+  ],
 };
 
 const BOILERPLATE_VIEW = {
