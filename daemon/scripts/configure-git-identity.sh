@@ -63,7 +63,12 @@ git config --global user.name  "Futurator Daemon"
 # Smoke-test: ls-remote against any futurator-repos repo. If this fails, the PAT
 # scope or rate-limit is wrong — surface clearly so the daemon doesn't start
 # silently broken.
-SMOKE_REPO="${FUTURATOR_GIT_SMOKE_REPO:-https://github.com/futurator-repos/futurator-core.git}"
+#
+# Default points at `template-nextjs.git` — Phase 1 PR-4 guarantees this repo
+# exists for the boilerplate scaffolding flow. Earlier default `futurator-
+# core.git` was a placeholder that was never created; 2026-05-16 incident
+# (PAT valid, ls-remote against missing repo failed) burned down to this fix.
+SMOKE_REPO="${FUTURATOR_GIT_SMOKE_REPO:-https://github.com/futurator-repos/template-nextjs.git}"
 if ! git ls-remote "$SMOKE_REPO" HEAD >/dev/null 2>&1; then
   echo "[configure-git-identity] ERROR: smoke-test ls-remote failed against $SMOKE_REPO" >&2
   echo "[configure-git-identity] Likely causes: PAT lacks Contents:read on the org, PAT expired, or repo URL changed." >&2
