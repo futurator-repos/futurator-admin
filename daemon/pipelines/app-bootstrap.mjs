@@ -229,10 +229,18 @@ export async function runAppBootstrap(job, ctx) {
     });
 
     // PR-13 — APPLY-STARTER-AUGMENTS (no-op for base starters / stubs)
+    // 2026-05-16: thread appId/displayName/initDate so the augment
+    // contents (e.g. `__APP_SLUG__` in `.claude/skills.manifest.yaml`,
+    // `__APP_DISPLAY_NAME__` in `CLAUDE.md`) get substituted in-memory
+    // before write. inject-values runs BEFORE this step, so without
+    // this threading the augment files would ship raw placeholders.
     await emitStarted('apply-starter-augments');
     const augmentResult = await stepFns.applyStarterAugments({
       workingDir: worktreeDir,
       augmentFiles: payload.augmentFiles,
+      appId,
+      displayName: appRow.displayName ?? appId,
+      initDate: new Date().toISOString(),
       onOutput: makeOutputSink('apply-starter-augments'),
     });
     await emitCompleted('apply-starter-augments', {

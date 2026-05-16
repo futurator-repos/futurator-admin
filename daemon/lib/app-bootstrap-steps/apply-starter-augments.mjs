@@ -53,15 +53,55 @@ function resolveSafePath(workingDir, relPath) {
 }
 
 /**
+ * Substitute the same `__APP_SLUG__` / `__APP_DISPLAY_NAME__` / `__INIT_DATE__`
+ * + Mustache variants that inject-values handles, but applied IN-MEMORY to
+ * the augment content before writing. Necessary because apply-starter-
+ * augments runs AFTER inject-values; without this, augment files like
+ * `.claude/skills.manifest.yaml` and `CLAUDE.md` ship raw `__APP_SLUG__`
+ * placeholders forever (2026-05-16 dino-5/-6 incident).
+ *
+ * Pure string ops; no I/O. Kept inline (no shared helper) because the
+ * inject-values step's substitution table is small and we don't want a
+ * cross-file dep that could go out of sync silently.
+ */
+function substitutePlaceholders(content, { appId, displayName, initDate }) {
+  let out = content;
+  if (appId) {
+    out = out.split('__APP_SLUG__').join(appId).split('{{APP_SLUG}}').join(appId);
+  }
+  if (displayName) {
+    out = out
+      .split('__APP_DISPLAY_NAME__')
+      .join(displayName)
+      .split('{{APP_DISPLAY_NAME}}')
+      .join(displayName);
+  }
+  if (initDate) {
+    out = out.split('__INIT_DATE__').join(initDate).split('{{INIT_DATE}}').join(initDate);
+  }
+  return out;
+}
+
+/**
  * Run the apply-starter-augments step.
  *
  * @param {object} input
  * @param {string} input.workingDir       — `/home/ubuntu/projects/<slug>`
  * @param {AugmentFile[] | undefined} input.augmentFiles
+ * @param {string}   [input.appId]        — for placeholder substitution
+ * @param {string}   [input.displayName]  — for placeholder substitution
+ * @param {string}   [input.initDate]     — for placeholder substitution
  * @param {function} [input.onOutput]     — `(text) => void` for log streaming
  * @returns {Promise<{ written: number; skipped: boolean }>}
  */
-export async function runApplyStarterAugments({ workingDir, augmentFiles, onOutput }) {
+export async function runApplyStarterAugments({
+  workingDir,
+  augmentFiles,
+  appId,
+  displayName,
+  initDate,
+  onOutput,
+}) {
   const log = (msg) => {
     if (typeof onOutput === 'function') onOutput(msg + '\n');
   };
@@ -80,9 +120,14 @@ export async function runApplyStarterAugments({ workingDir, augmentFiles, onOutp
     }
     const abs = resolveSafePath(workingDir, file.path);
     await mkdir(dirname(abs), { recursive: true });
-    await writeFile(abs, file.content, 'utf8');
+    // 2026-05-16 fix: substitute placeholders in-memory before write so
+    // augment files (e.g. `.claude/skills.manifest.yaml`, `CLAUDE.md`)
+    // get the right slug/displayName even though inject-values ran
+    // before this step (the augment files didn't exist yet at that time).
+    const content = substitutePlaceholders(file.content, { appId, displayName, initDate });
+    await writeFile(abs, content, 'utf8');
     written += 1;
-    log(`wrote ${file.path} (${file.content.length} bytes)`);
+    log(`wrote ${file.path} (${content.length} bytes)`);
   }
 
   log(`apply-starter-augments: ${written} file(s) written.`);
