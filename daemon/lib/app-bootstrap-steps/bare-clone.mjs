@@ -57,6 +57,58 @@ export async function runBareClone({
 
   await execGit(['clone', '--bare', cloneUrl, baredir], { onOutput });
 
+  // 2026-05-16 — async template-copy race fix.
+  //
+  // GitHub's POST /repos/{template}/generate returns 201 immediately when
+  // the repo *record* exists, but the actual template-content copy is
+  // asynchronous. If the daemon clones before the copy completes, the
+  // bare clone succeeds with zero refs (empty repo) and the downstream
+  // `git worktree add … main` fails with "fatal: invalid reference: main".
+  //
+  // Fix: after the initial clone, poll for the default branch ref with
+  // exponential backoff (1s, 2s, 4s, 8s, 16s — total max ~31s). On each
+  // tick, `git fetch origin 'refs/heads/*:refs/heads/*'` to pull the now-
+  // available refs into the bare clone. Bail out the moment we see any
+  // ref, or after the budget runs out.
+  const FETCH_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000];
+  const hasAnyRef = async () => {
+    try {
+      const { stdout } = await execGit(['-C', baredir, 'show-ref', '--heads']);
+      return stdout.trim().length > 0;
+    } catch {
+      // `show-ref` exits non-zero when there are no refs. Treat as "no refs yet".
+      return false;
+    }
+  };
+
+  if (!(await hasAnyRef())) {
+    onOutput?.('stderr', `[bare-clone] no refs after initial clone — async template-copy race, polling…\n`);
+    let succeeded = false;
+    for (const delayMs of FETCH_BACKOFF_MS) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      try {
+        await execGit(['-C', baredir, 'fetch', 'origin', 'refs/heads/*:refs/heads/*'], {
+          onOutput,
+        });
+      } catch (e) {
+        // Fetch failure is non-fatal mid-poll; the next backoff retries.
+        onOutput?.('stderr', `[bare-clone] fetch retry: ${e.message}\n`);
+      }
+      if (await hasAnyRef()) {
+        succeeded = true;
+        onOutput?.('stderr', `[bare-clone] refs visible after ${delayMs}ms backoff\n`);
+        break;
+      }
+    }
+    if (!succeeded) {
+      throw new Error(
+        `bare-clone: no refs in ${baredir} after ${FETCH_BACKOFF_MS.reduce((a, b) => a + b, 0)}ms backoff — ` +
+          `GitHub's template-copy may have stalled. Check https://github.com/futurator-repos/${appId} ` +
+          `manually; if it has commits, just re-run; if it's empty, the template-generate API call failed silently.`,
+      );
+    }
+  }
+
   return { skipped: false, baredir };
 }
 
