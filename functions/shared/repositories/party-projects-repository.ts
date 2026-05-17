@@ -85,26 +85,35 @@ export async function upsertProjectFromFilesystem(projectId: string, path: strin
 export async function createBrownfieldProjectRow(
   projectId: string,
   path: string,
-  opts: { gitRepoUrl: string; gitBranch: string },
+  opts: {
+    gitRepoUrl: string;
+    gitBranch: string;
+    patSecretName?: string;
+    envVars?: Record<string, string>;
+  },
 ): Promise<boolean> {
   const now = new Date().toISOString();
+  const item: Record<string, unknown> = {
+    projectId,
+    path,
+    kind: 'brownfield',
+    bmadStatus: 'MISSING' as BmadStatus,
+    expectedAgentCount: EXPECTED_AGENT_COUNT,
+    gitRepoUrl: opts.gitRepoUrl,
+    gitBranch: opts.gitBranch,
+    lastPulledAt: null,
+    lastCommitSha: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  if (opts.patSecretName) item.patSecretName = opts.patSecretName;
+  if (opts.envVars && Object.keys(opts.envVars).length > 0) item.envVars = opts.envVars;
+
   try {
     await docClient.send(
       new PutCommand({
         TableName: TABLE_NAMES.partyProjects,
-        Item: {
-          projectId,
-          path,
-          kind: 'brownfield',
-          bmadStatus: 'MISSING' as BmadStatus,
-          expectedAgentCount: EXPECTED_AGENT_COUNT,
-          gitRepoUrl: opts.gitRepoUrl,
-          gitBranch: opts.gitBranch,
-          lastPulledAt: null,
-          lastCommitSha: null,
-          createdAt: now,
-          updatedAt: now,
-        },
+        Item: item,
         ConditionExpression: 'attribute_not_exists(projectId)',
       }),
     );
@@ -114,6 +123,55 @@ export async function createBrownfieldProjectRow(
     if (error.name === 'ConditionalCheckFailedException') return false;
     throw err;
   }
+}
+
+/**
+ * Migrate-module — update the env-var map on a brownfield project row.
+ * Encrypted at rest by DDB's default KMS. Operator-initiated via
+ * `PATCH /api/migrations/:id` body `envVars` field.
+ */
+export async function updateBrownfieldEnvVars(
+  projectId: string,
+  envVars: Record<string, string>,
+): Promise<void> {
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.partyProjects,
+      Key: { projectId },
+      UpdateExpression: 'SET envVars = :ev, updatedAt = :now',
+      ConditionExpression: 'attribute_exists(projectId) AND #k = :brownfield',
+      ExpressionAttributeNames: { '#k': 'kind' },
+      ExpressionAttributeValues: {
+        ':ev': envVars,
+        ':now': new Date().toISOString(),
+        ':brownfield': 'brownfield',
+      },
+    }),
+  );
+}
+
+/**
+ * Migrate-module — record the Secrets Manager secret name holding this
+ * project's PAT. Called by the API after `CreateSecretCommand` succeeds.
+ */
+export async function updateBrownfieldPatSecretName(
+  projectId: string,
+  patSecretName: string,
+): Promise<void> {
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.partyProjects,
+      Key: { projectId },
+      UpdateExpression: 'SET patSecretName = :ps, updatedAt = :now',
+      ConditionExpression: 'attribute_exists(projectId) AND #k = :brownfield',
+      ExpressionAttributeNames: { '#k': 'kind' },
+      ExpressionAttributeValues: {
+        ':ps': patSecretName,
+        ':now': new Date().toISOString(),
+        ':brownfield': 'brownfield',
+      },
+    }),
+  );
 }
 
 export async function deleteProject(projectId: string): Promise<void> {

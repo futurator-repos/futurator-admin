@@ -45,6 +45,24 @@ export interface PartyProject {
   lastPulledAt?: string | null;
   /** Brownfield-only — HEAD SHA captured at last clone/refresh. */
   lastCommitSha?: string | null;
+  /**
+   * Migrate-module — AWS Secrets Manager secret name holding the
+   * fine-grained PAT for THIS brownfield project. Defaults to
+   * `futurator/brownfield-pat/<projectId>` so the daemon can derive it
+   * without an extra lookup. When unset (legacy rows like the original
+   * `applicator` migration), the daemon falls back to the shared
+   * `futurator/labs-brownfield-github-pat`.
+   */
+  patSecretName?: string;
+  /**
+   * Migrate-module — environment variables the project needs at runtime.
+   * Written verbatim to `<projectPath>/.env` after clone + refresh.
+   * Stored in DDB (encrypted at rest with AWS-managed KMS); operator can
+   * rotate via the Migrate UI. Use Secrets Manager for the PAT (above)
+   * because IAM scoping is per-secret; envVars are not subject to the
+   * same auth boundary so DDB is fine.
+   */
+  envVars?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 }
@@ -98,12 +116,22 @@ export interface PartyBootstrapJobPayload {
   kind?: PartyProjectKind;
   gitRepoUrl?: string;
   gitBranch?: string;
+  /**
+   * Migrate-module — per-project PAT lookup. Daemon resolves this via
+   * Secrets Manager before the clone step. Falls back to the legacy
+   * shared secret when absent (back-compat for `applicator`).
+   */
+  patSecretName?: string;
+  /** Migrate-module — env vars written to <projectPath>/.env post-clone. */
+  envVars?: Record<string, string>;
 }
 
 export interface PartyRefreshJobPayload {
   projectId: string;
   projectPath: string;
   gitBranch: string;
+  /** Migrate-module — re-syncs <projectPath>/.env after `git reset --hard`. */
+  envVars?: Record<string, string>;
 }
 
 export interface PartyInspectJobPayload {
@@ -183,6 +211,14 @@ export const GITHUB_HTTPS_URL_REGEX = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(
 
 /** Failure reason emitted when a brownfield clone lacks BMAD. */
 export const FAIL_REASON_BMAD_NOT_FOUND = 'BMAD_NOT_FOUND_IN_REPO';
+
+/** Derive the Secrets Manager secret name for a brownfield project's PAT. */
+export function brownfieldPatSecretNameFor(projectId: string): string {
+  return `futurator/brownfield-pat/${projectId}`;
+}
+
+/** Legacy shared secret name (pre-Migrate-module migrations like `applicator`). */
+export const LEGACY_SHARED_BROWNFIELD_PAT_SECRET = 'futurator/labs-brownfield-github-pat';
 export const MAX_MESSAGE_BYTES = 8192;
 // BMAD 6.3.x stock install yields 6 agents (bmad-agent-{analyst,tech-writer,pm,
 // ux-designer,architect,dev}). Custom-agent overlay (8 more) is deferred to a

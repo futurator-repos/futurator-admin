@@ -94,7 +94,50 @@ export const brownfieldProjectInputSchema = z.object({
     .max(120)
     .regex(/^\S+$/, 'gitBranch must not contain whitespace')
     .default('main'),
+  /**
+   * Migrate-module — fine-grained PAT for THIS project. Stored in AWS
+   * Secrets Manager as `futurator/brownfield-pat/<projectId>`. Optional
+   * for back-compat with legacy `applicator` migration (which used the
+   * shared secret).
+   */
+  pat: z
+    .string()
+    .regex(/^(github_pat_|ghp_|github_token_)/, 'pat must be a GitHub PAT')
+    .max(255)
+    .optional(),
+  /**
+   * Migrate-module — env vars written to `<projectPath>/.env` post-clone.
+   * Keys must be UPPER_SNAKE_CASE.
+   */
+  envVars: z
+    .record(
+      z.string().regex(/^[A-Z_][A-Z0-9_]*$/, 'env var key must be UPPER_SNAKE_CASE'),
+      z.string().max(8192),
+    )
+    .optional(),
 });
+
+/**
+ * PATCH /api/migrations/:id body — operator can rotate the PAT and/or
+ * update env vars without re-cloning.
+ */
+export const updateMigrationInputSchema = z
+  .object({
+    pat: z
+      .string()
+      .regex(/^(github_pat_|ghp_|github_token_)/, 'pat must be a GitHub PAT')
+      .max(255)
+      .optional(),
+    envVars: z
+      .record(
+        z.string().regex(/^[A-Z_][A-Z0-9_]*$/, 'env var key must be UPPER_SNAKE_CASE'),
+        z.string().max(8192),
+      )
+      .optional(),
+  })
+  .refine((v) => v.pat !== undefined || v.envVars !== undefined, {
+    message: 'must include at least one of: pat, envVars',
+  });
 
 /**
  * Discriminated union over `kind` for POST /api/party/projects. Clients that
@@ -143,5 +186,6 @@ export type CreatePartyProjectInput = z.infer<typeof createPartyProjectInputSche
 export type GreenfieldProjectInput = z.infer<typeof greenfieldProjectInputSchema>;
 export type BrownfieldProjectInput = z.infer<typeof brownfieldProjectInputSchema>;
 export type RefreshProjectParams = z.infer<typeof refreshProjectParamsSchema>;
+export type UpdateMigrationInput = z.infer<typeof updateMigrationInputSchema>;
 export type DocUploadUrlInput = z.infer<typeof docUploadUrlInputSchema>;
 export type DocSyncInput = z.infer<typeof docSyncInputSchema>;
