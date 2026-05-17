@@ -31,6 +31,8 @@ import {
   tryAcquireRefreshLock,
   releaseRefreshLock,
   updateProjectAfterRefresh,
+  updateBrownfieldEnvVars,
+  updateBrownfieldPatSecretName,
 } from '../party-projects-repository';
 
 function extract(command: unknown) {
@@ -307,5 +309,70 @@ describe('updateProjectAfterRefresh', () => {
     expect(values[':lastCommitSha']).toBe('abc1234567');
     expect(values[':customAgentsSHA']).toBe('sha256-abc');
     expect(values[':lastInspectedAt']).toBe('2026-05-17T12:00:00.000Z');
+  });
+});
+
+describe('createBrownfieldProjectRow — Migrate-module extensions', () => {
+  it('persists patSecretName + envVars when provided', async () => {
+    sendMock.mockResolvedValue({});
+    await createBrownfieldProjectRow('songster', '/home/ubuntu/projects/songster', {
+      gitRepoUrl: 'https://github.com/foo/songster.git',
+      gitBranch: 'main',
+      patSecretName: 'futurator/brownfield-pat/songster',
+      envVars: { OPENAI_API_KEY: 'sk-1', LINKEDIN_API_KEY: 'li-2' },
+    });
+    const input = extract(sendMock.mock.calls[0][0]);
+    const item = input.Item as Record<string, unknown>;
+    expect(item.patSecretName).toBe('futurator/brownfield-pat/songster');
+    expect(item.envVars).toEqual({ OPENAI_API_KEY: 'sk-1', LINKEDIN_API_KEY: 'li-2' });
+  });
+
+  it('omits patSecretName + envVars when absent (legacy back-compat)', async () => {
+    sendMock.mockResolvedValue({});
+    await createBrownfieldProjectRow('applicator', '/home/ubuntu/projects/applicator', {
+      gitRepoUrl: 'https://github.com/x/applicator.git',
+      gitBranch: 'main',
+    });
+    const input = extract(sendMock.mock.calls[0][0]);
+    const item = input.Item as Record<string, unknown>;
+    expect(item.patSecretName).toBeUndefined();
+    expect(item.envVars).toBeUndefined();
+  });
+
+  it("omits envVars when the map is empty (don't write `{}`)", async () => {
+    sendMock.mockResolvedValue({});
+    await createBrownfieldProjectRow('songster', '/home/ubuntu/projects/songster', {
+      gitRepoUrl: 'https://github.com/x/songster.git',
+      gitBranch: 'main',
+      envVars: {},
+    });
+    const input = extract(sendMock.mock.calls[0][0]);
+    const item = input.Item as Record<string, unknown>;
+    expect(item.envVars).toBeUndefined();
+  });
+});
+
+describe('updateBrownfieldEnvVars', () => {
+  it('writes envVars + bumps updatedAt with kind=brownfield condition', async () => {
+    sendMock.mockResolvedValue({});
+    await updateBrownfieldEnvVars('songster', { OPENAI_API_KEY: 'sk-new' });
+    const input = extract(sendMock.mock.calls[0][0]);
+    expect(input.UpdateExpression).toContain('envVars = :ev');
+    const values = input.ExpressionAttributeValues as Record<string, unknown>;
+    expect(values[':ev']).toEqual({ OPENAI_API_KEY: 'sk-new' });
+    expect(values[':brownfield']).toBe('brownfield');
+    expect(input.ConditionExpression).toContain('#k = :brownfield');
+  });
+});
+
+describe('updateBrownfieldPatSecretName', () => {
+  it('persists patSecretName with kind=brownfield condition', async () => {
+    sendMock.mockResolvedValue({});
+    await updateBrownfieldPatSecretName('songster', 'futurator/brownfield-pat/songster');
+    const input = extract(sendMock.mock.calls[0][0]);
+    expect(input.UpdateExpression).toContain('patSecretName = :ps');
+    const values = input.ExpressionAttributeValues as Record<string, unknown>;
+    expect(values[':ps']).toBe('futurator/brownfield-pat/songster');
+    expect(values[':brownfield']).toBe('brownfield');
   });
 });

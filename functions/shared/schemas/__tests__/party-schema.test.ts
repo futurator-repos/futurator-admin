@@ -10,6 +10,7 @@ import {
   brownfieldProjectInputSchema,
   createPartyProjectInputSchema,
   refreshProjectParamsSchema,
+  updateMigrationInputSchema,
 } from '../party-schema';
 
 describe('projectIdSchema', () => {
@@ -296,5 +297,88 @@ describe('partySessionSchema', () => {
 
   it('rejects negative turnCount', () => {
     expect(partySessionSchema.safeParse({ ...base, turnCount: -1 }).success).toBe(false);
+  });
+});
+
+describe('brownfieldProjectInputSchema — Migrate-module extensions (pat + envVars)', () => {
+  const base = {
+    kind: 'brownfield' as const,
+    name: 'songster',
+    gitRepoUrl: 'https://github.com/foo/songster.git',
+  };
+
+  it('accepts optional pat with valid prefix', () => {
+    expect(brownfieldProjectInputSchema.safeParse({ ...base, pat: 'github_pat_abc' }).success).toBe(
+      true,
+    );
+    expect(brownfieldProjectInputSchema.safeParse({ ...base, pat: 'ghp_abc' }).success).toBe(true);
+  });
+
+  it('rejects pat without recognized prefix', () => {
+    const r = brownfieldProjectInputSchema.safeParse({ ...base, pat: 'random-string' });
+    expect(r.success).toBe(false);
+  });
+
+  it('accepts optional envVars with UPPER_SNAKE_CASE keys', () => {
+    const r = brownfieldProjectInputSchema.safeParse({
+      ...base,
+      envVars: { OPENAI_API_KEY: 'sk-1', LINKEDIN_API_KEY: 'li-2' },
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('rejects envVars with lowercase keys', () => {
+    const r = brownfieldProjectInputSchema.safeParse({
+      ...base,
+      envVars: { openai_key: 'sk-1' },
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('rejects envVars with hyphen-containing keys', () => {
+    const r = brownfieldProjectInputSchema.safeParse({
+      ...base,
+      envVars: { 'FOO-BAR': 'baz' },
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('still works without pat or envVars (legacy back-compat)', () => {
+    expect(brownfieldProjectInputSchema.safeParse(base).success).toBe(true);
+  });
+});
+
+describe('updateMigrationInputSchema', () => {
+  it('accepts pat-only update', () => {
+    expect(updateMigrationInputSchema.safeParse({ pat: 'github_pat_x' }).success).toBe(true);
+  });
+
+  it('accepts envVars-only update', () => {
+    expect(updateMigrationInputSchema.safeParse({ envVars: { FOO: 'bar' } }).success).toBe(true);
+  });
+
+  it('accepts both pat and envVars', () => {
+    expect(
+      updateMigrationInputSchema.safeParse({
+        pat: 'github_pat_x',
+        envVars: { FOO: 'bar' },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects an empty body', () => {
+    const r = updateMigrationInputSchema.safeParse({});
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.errors[0]?.message).toMatch(/at least one/);
+    }
+  });
+
+  it('rejects invalid pat prefix', () => {
+    expect(updateMigrationInputSchema.safeParse({ pat: 'random' }).success).toBe(false);
+  });
+
+  it('rejects invalid envVars keys', () => {
+    expect(updateMigrationInputSchema.safeParse({ envVars: { foo: 'bar' } }).success).toBe(false);
   });
 });
