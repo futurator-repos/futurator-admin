@@ -462,6 +462,168 @@ export default $config({
       },
     });
 
+    // ──────────────────────────────────────────────────────────────
+    // Story 18.2 — FreeAgentSessionsTable (Epic 18: Free Claude Code Agent)
+    //
+    // One row per free-agent session. PK is the session UUID. Two GSIs:
+    //   - operator-recent-index: for "my recent sessions" (Story 18.6 list UI)
+    //   - scope-recent-index: for "conversations about this plan / app"
+    // 90-day TTL on `expiresAt` (epoch seconds) keeps the table bounded.
+    //
+    // The FreeAgentSessionRole (Story 18.1) already grants r/w on this table
+    // by NAME — creating it here activates those permissions.
+    // ──────────────────────────────────────────────────────────────
+    const freeAgentSessionsTable = new sst.aws.Dynamo('FreeAgentSessionsTable', {
+      fields: {
+        sessionId: 'string',
+        operatorId: 'string',
+        scopeIdComposite: 'string',
+        lastActivityAt: 'string',
+      },
+      primaryIndex: { hashKey: 'sessionId' },
+      globalIndexes: {
+        'operator-recent-index': { hashKey: 'operatorId', rangeKey: 'lastActivityAt' },
+        'scope-recent-index': { hashKey: 'scopeIdComposite', rangeKey: 'lastActivityAt' },
+      },
+      ttl: 'expiresAt',
+      transform: {
+        table: {
+          name: 'futurator-free-agent-sessions',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ──────────────────────────────────────────────────────────────
+    // Story 18.1 — FreeAgentSessionRole (Epic 18: Free Claude Code Agent)
+    //
+    // A standalone IAM role assumed per-session by the free-agent chat
+    // widget. Each session gets its own short-lived STS credentials
+    // (1h max) carrying session tags (`project`, `sessionId`, `operator`)
+    // that resolve into the inline permissions policy at runtime — so
+    // S3 reads are scoped to the session's project and DDB writes are
+    // restricted to the session's own conversation rows.
+    //
+    // Trust: any IAM role in this account whose ARN matches the API
+    //        Lambda's name prefix (`futurator-admin-production-Api*`).
+    //        Caller must set all three session tags (project / sessionId
+    //        / operator) per the inline policy's Null condition.
+    // Scope: read-only on shared pipeline state; own-conversation
+    //        writes only; explicit deny on iam/secretsmanager/lambda
+    //        destructive actions.
+    //
+    // The new free-agent DDB tables (`futurator-free-agent-sessions`,
+    // `futurator-free-agent-conversations`) are referenced here by NAME;
+    // they are introduced in Stories 18.2 and 18.6 respectively. IAM
+    // permissions on a not-yet-existing table are legal — they become
+    // effective when the table is created.
+    // ──────────────────────────────────────────────────────────────
+    const accountId = aws.getCallerIdentityOutput().accountId;
+
+    const freeAgentSessionRole = new aws.iam.Role('FreeAgentSessionRole', {
+      name: 'futurator-free-agent-session',
+      description: 'Story 18.1 - per-session role for the Free Claude Code Agent widget',
+      maxSessionDuration: 3600,
+      assumeRolePolicy: accountId.apply((acctId) =>
+        JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [
+            {
+              Sid: 'TrustApiLambdaWithSessionTags',
+              Effect: 'Allow',
+              Principal: { AWS: `arn:aws:iam::${acctId}:root` },
+              Action: ['sts:AssumeRole', 'sts:TagSession'],
+              Condition: {
+                StringLike: {
+                  'aws:PrincipalArn': `arn:aws:iam::${acctId}:role/futurator-admin-production-Api*`,
+                },
+                Null: {
+                  'aws:RequestTag/project': 'false',
+                  'aws:RequestTag/sessionId': 'false',
+                  'aws:RequestTag/operator': 'false',
+                },
+              },
+            },
+          ],
+        }),
+      ),
+      tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+    });
+
+    new aws.iam.RolePolicy('FreeAgentSessionRolePolicy', {
+      role: freeAgentSessionRole.id,
+      policy: accountId.apply((acctId) =>
+        JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [
+            {
+              Sid: 'ReadProjectKnowledgeLive',
+              Effect: 'Allow',
+              Action: ['s3:GetObject'],
+              Resource: [
+                `arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/knowledge-live/\${aws:PrincipalTag/project}/*`,
+              ],
+            },
+            {
+              Sid: 'ListProjectKnowledgeLive',
+              Effect: 'Allow',
+              Action: ['s3:ListBucket'],
+              Resource: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}`],
+              Condition: {
+                StringLike: {
+                  's3:prefix': ['knowledge-live/${aws:PrincipalTag/project}/*'],
+                },
+              },
+            },
+            {
+              Sid: 'ReadPipelineState',
+              Effect: 'Allow',
+              Action: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan'],
+              Resource: [
+                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-agent-jobs`,
+                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-agent-jobs/index/*`,
+                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-attention-items`,
+                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-plans`,
+                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-free-agent-conversations`,
+                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-free-agent-sessions`,
+              ],
+            },
+            {
+              Sid: 'WriteOwnConversations',
+              Effect: 'Allow',
+              Action: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+              Resource: [
+                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-free-agent-conversations`,
+              ],
+              Condition: {
+                'ForAllValues:StringEquals': {
+                  'dynamodb:LeadingKeys': ['${aws:PrincipalTag/sessionId}'],
+                },
+              },
+            },
+            {
+              Sid: 'ExplicitDenyDestructive',
+              Effect: 'Deny',
+              Action: [
+                'iam:*',
+                'lambda:UpdateFunctionCode',
+                'lambda:DeleteFunction',
+                'secretsmanager:GetSecretValue',
+                'secretsmanager:PutSecretValue',
+                's3:DeleteObject',
+                's3:PutBucketPolicy',
+                'dynamodb:DeleteTable',
+                'dynamodb:UpdateTable',
+              ],
+              Resource: ['*'],
+            },
+          ],
+        }),
+      ),
+    });
+
     // ── API Lambda ──
     const api = new sst.aws.Function('Api', {
       handler: 'functions/api/index.handler',
@@ -491,6 +653,7 @@ export default $config({
         agentSessionsTable,
         agentConversationsTable,
         timingSummaryTable,
+        freeAgentSessionsTable,
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
@@ -520,6 +683,13 @@ export default $config({
         AGENT_SESSIONS_TABLE: agentSessionsTable.name,
         AGENT_CONVERSATIONS_TABLE: agentConversationsTable.name,
         TIMING_SUMMARY_TABLE: timingSummaryTable.name,
+        // Story 18.1 — ARN the API Lambda passes to STS AssumeRoleCommand
+        // when minting per-session free-agent credentials. Read by
+        // `functions/shared/lib/free-agent-iam.ts:assumeFreeAgentSessionRole`.
+        FREE_AGENT_SESSION_ROLE_ARN: freeAgentSessionRole.arn,
+        // Story 18.2 — free-agent sessions table. Consumed by both the API
+        // Lambda (when creating sessions) and the daemon (when running them).
+        FREE_AGENT_SESSIONS_TABLE: freeAgentSessionsTable.name,
         PROJECTS_ROOT: '/home/ubuntu/projects',
         BMAD_VERSION: '6.3.0',
         BMAD_AGENTS_SOURCE: '/home/ubuntu/bmad-agents-source/bmad/agents',
@@ -563,6 +733,15 @@ export default $config({
         {
           actions: ['s3:PutObject', 's3:GetObject'],
           resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/timing/*`],
+        },
+        // Story 18.1 — let the API Lambda assume the FreeAgentSessionRole
+        // with session tags when opening a new free-agent chat session. The
+        // role's trust policy further restricts to this Lambda's role ARN
+        // prefix; this permission only gates the *caller's* ability to invoke
+        // STS at all.
+        {
+          actions: ['sts:AssumeRole', 'sts:TagSession'],
+          resources: [freeAgentSessionRole.arn],
         },
         {
           actions: ['s3:ListBucket'],
