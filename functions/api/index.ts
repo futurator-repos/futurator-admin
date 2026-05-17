@@ -42,6 +42,7 @@ import {
   createPartyProjectInputSchema,
   docUploadUrlInputSchema,
   docSyncInputSchema,
+  refreshProjectParamsSchema,
 } from '../shared/schemas/party-schema';
 import {
   EXPECTED_AGENT_COUNT,
@@ -4863,11 +4864,15 @@ app.post('/api/party/projects/:id/bootstrap', async (c) => {
 });
 
 /**
- * Create a brand-new Party project — used to stand up a "canonical" chat
- * project (e.g. bmad-canon) without going through the Plan-creation flow.
- * Upserts the DDB row, then enqueues a bootstrap job with `createFolder=true`
- * so the daemon mkdir's the folder and runs BMAD install + custom-agent
- * injection in one shot.
+ * Create a brand-new Party project. Accepts BOTH:
+ *
+ *   - Greenfield (legacy): `{ projectId }` — daemon mkdirs the folder and
+ *     runs the full BMAD install + custom-agent injection pipeline.
+ *   - Brownfield (Story 15.4): `{ kind: 'brownfield', name, gitRepoUrl,
+ *     gitBranch? }` — daemon clones the upstream GitHub repo (via PAT)
+ *     into the folder and verifies the cloned repo already has BMAD.
+ *
+ * The shape is validated through a zod discriminated union on `kind`.
  */
 app.post('/api/party/projects', async (c) => {
   const body = await c.req.json().catch(() => ({}));
@@ -4875,10 +4880,30 @@ app.post('/api/party/projects', async (c) => {
   if (!parsed.success) {
     throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
   }
-  const projectId = parsed.data.projectId;
+
+  const input = parsed.data;
+  const isBrownfield = input.kind === 'brownfield';
+  const projectId = isBrownfield ? input.name : input.projectId;
   const projectPath = resolvePartyProjectPath(projectId);
 
-  await partyProjectsRepo.upsertProjectFromFilesystem(projectId, projectPath);
+  if (isBrownfield) {
+    const created = await partyProjectsRepo.createBrownfieldProjectRow(projectId, projectPath, {
+      gitRepoUrl: input.gitRepoUrl,
+      gitBranch: input.gitBranch,
+    });
+    if (!created) {
+      // Row already exists — operator must delete it before re-registering as
+      // a brownfield project. (Or future story: support "convert greenfield
+      // → brownfield" — out of scope here.)
+      throw new AppError(
+        'PROJECT_ALREADY_EXISTS',
+        `Party project "${projectId}" already exists`,
+        409,
+      );
+    }
+  } else {
+    await partyProjectsRepo.upsertProjectFromFilesystem(projectId, projectPath);
+  }
 
   const jobId = crypto.randomUUID();
   const lock = await partyProjectsRepo.tryAcquireBootstrapLock(projectId, jobId);
@@ -4890,6 +4915,24 @@ app.post('/api/party/projects', async (c) => {
   }
 
   const now = new Date().toISOString();
+  const partyBootstrapPayload = isBrownfield
+    ? {
+        projectId,
+        projectPath,
+        forceReinstall: false,
+        createFolder: false,
+        kind: 'brownfield' as const,
+        gitRepoUrl: input.gitRepoUrl,
+        gitBranch: input.gitBranch,
+      }
+    : {
+        projectId,
+        projectPath,
+        forceReinstall: false,
+        createFolder: true,
+        kind: 'greenfield' as const,
+      };
+
   await agentJobsRepo.createJob({
     jobId,
     status: 'PENDING',
@@ -4898,15 +4941,92 @@ app.post('/api/party/projects', async (c) => {
     createdBy: c.get('user').userId,
     workingDir: projectPath,
     jobType: 'party-bootstrap',
-    partyBootstrapPayload: {
-      projectId,
-      projectPath,
-      forceReinstall: false,
-      createFolder: true,
+    partyBootstrapPayload,
+  });
+
+  return c.json(
+    { jobId, projectId, projectPath, kind: isBrownfield ? 'brownfield' : 'greenfield' },
+    201,
+  );
+});
+
+/**
+ * Story 15.4 — refresh a brownfield project. Enqueues a party-refresh job
+ * which runs `git fetch origin && git reset --hard origin/<branch>` in the
+ * project folder, then re-runs the inspector.
+ *
+ * Errors:
+ *   400 INVALID_FOR_GREENFIELD — project.kind === 'greenfield'
+ *   404 NotFound                — projectId missing
+ *   409 PROJECT_BUSY            — a session for this project has status=PROCESSING
+ *   409 REFRESH_IN_PROGRESS     — another refresh already holds the lock
+ */
+app.post('/api/party/projects/:id/refresh', async (c) => {
+  const projectId = c.req.param('id');
+  const parsed = refreshProjectParamsSchema.safeParse({ projectId });
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid projectId');
+  }
+
+  const project = await partyProjectsRepo.getProject(parsed.data.projectId);
+  if (!project) throw new NotFoundError('PartyProject', parsed.data.projectId);
+  if (project.kind !== 'brownfield') {
+    throw new AppError(
+      'INVALID_FOR_GREENFIELD',
+      'Refresh is only valid for brownfield Party projects',
+      400,
+    );
+  }
+  if (!project.gitBranch) {
+    throw new AppError(
+      'INVALID_FOR_GREENFIELD',
+      'Brownfield project is missing gitBranch — cannot refresh',
+      400,
+    );
+  }
+
+  const sessionBusy = await partySessionsRepo.hasProcessingSession(parsed.data.projectId);
+  if (sessionBusy) {
+    throw new AppError(
+      'PROJECT_BUSY',
+      'A session for this project is currently processing a turn',
+      409,
+    );
+  }
+
+  const lock = await partyProjectsRepo.tryAcquireRefreshLock(parsed.data.projectId);
+  if (!lock.ok) {
+    if (lock.reason === 'REFRESH_IN_PROGRESS') {
+      throw new AppError('REFRESH_IN_PROGRESS', 'Refresh already in progress', 409);
+    }
+    if (lock.reason === 'NOT_FOUND') {
+      throw new NotFoundError('PartyProject', parsed.data.projectId);
+    }
+    throw new AppError(
+      'INVALID_STATE',
+      `Cannot refresh from current state: ${project.bmadStatus}`,
+      409,
+    );
+  }
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: c.get('user').userId,
+    workingDir: project.path,
+    jobType: 'party-refresh',
+    partyRefreshPayload: {
+      projectId: parsed.data.projectId,
+      projectPath: project.path,
+      gitBranch: project.gitBranch,
     },
   });
 
-  return c.json({ jobId, projectId, projectPath }, 201);
+  return c.json({ jobId, projectId: parsed.data.projectId }, 202);
 });
 
 /**

@@ -7,6 +7,9 @@ import {
   sendMessageInputSchema,
   partyProjectSchema,
   partySessionSchema,
+  brownfieldProjectInputSchema,
+  createPartyProjectInputSchema,
+  refreshProjectParamsSchema,
 } from '../party-schema';
 
 describe('projectIdSchema', () => {
@@ -110,6 +113,7 @@ describe('partyProjectSchema', () => {
   const base = {
     projectId: 'battleship',
     path: '/home/ubuntu/projects/battleship',
+    kind: 'greenfield' as const,
     bmadStatus: 'HEALTHY' as const,
     expectedAgentCount: 23,
     createdAt: '2026-04-17T00:00:00.000Z',
@@ -120,12 +124,145 @@ describe('partyProjectSchema', () => {
     expect(partyProjectSchema.safeParse(base).success).toBe(true);
   });
 
+  it('accepts a brownfield project with git fields (Story 15.4 AC #1)', () => {
+    const result = partyProjectSchema.safeParse({
+      ...base,
+      kind: 'brownfield',
+      gitRepoUrl: 'https://github.com/foo/songster.git',
+      gitBranch: 'main',
+      lastPulledAt: '2026-05-17T00:00:00.000Z',
+      lastCommitSha: 'abc1234567',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts REFRESHING as a valid bmadStatus', () => {
+    expect(partyProjectSchema.safeParse({ ...base, bmadStatus: 'REFRESHING' }).success).toBe(true);
+  });
+
   it('rejects an invalid bmadStatus', () => {
     expect(partyProjectSchema.safeParse({ ...base, bmadStatus: 'WEIRD' }).success).toBe(false);
   });
 
+  it('rejects an invalid kind', () => {
+    expect(partyProjectSchema.safeParse({ ...base, kind: 'cyborg' }).success).toBe(false);
+  });
+
   it('rejects a path that does not start with /', () => {
     expect(partyProjectSchema.safeParse({ ...base, path: 'relative/path' }).success).toBe(false);
+  });
+});
+
+describe('brownfieldProjectInputSchema (Story 15.4 AC #2)', () => {
+  const base = {
+    kind: 'brownfield' as const,
+    name: 'songster',
+    gitRepoUrl: 'https://github.com/foo/songster',
+  };
+
+  it('accepts an HTTPS GitHub URL without .git', () => {
+    expect(brownfieldProjectInputSchema.safeParse(base).success).toBe(true);
+  });
+
+  it('accepts an HTTPS GitHub URL with .git', () => {
+    expect(
+      brownfieldProjectInputSchema.safeParse({
+        ...base,
+        gitRepoUrl: 'https://github.com/foo/songster.git',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('applies the default gitBranch=main when omitted', () => {
+    const r = brownfieldProjectInputSchema.safeParse(base);
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.gitBranch).toBe('main');
+  });
+
+  it('accepts an explicit gitBranch', () => {
+    expect(brownfieldProjectInputSchema.safeParse({ ...base, gitBranch: 'develop' }).success).toBe(
+      true,
+    );
+  });
+
+  it('rejects SSH GitHub URLs', () => {
+    expect(
+      brownfieldProjectInputSchema.safeParse({
+        ...base,
+        gitRepoUrl: 'git@github.com:foo/songster.git',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects non-GitHub HTTPS URLs', () => {
+    expect(
+      brownfieldProjectInputSchema.safeParse({
+        ...base,
+        gitRepoUrl: 'https://gitlab.com/foo/songster',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects names violating the kebab-case regex', () => {
+    expect(brownfieldProjectInputSchema.safeParse({ ...base, name: 'UPPER' }).success).toBe(false);
+    expect(
+      brownfieldProjectInputSchema.safeParse({ ...base, name: 'has_underscore' }).success,
+    ).toBe(false);
+    expect(brownfieldProjectInputSchema.safeParse({ ...base, name: '' }).success).toBe(false);
+  });
+
+  it('rejects gitBranch containing whitespace', () => {
+    expect(
+      brownfieldProjectInputSchema.safeParse({ ...base, gitBranch: 'my branch' }).success,
+    ).toBe(false);
+  });
+
+  it('rejects missing kind discriminator', () => {
+    const { kind: _omit, ...without } = base;
+    void _omit;
+    expect(brownfieldProjectInputSchema.safeParse(without).success).toBe(false);
+  });
+});
+
+describe('createPartyProjectInputSchema (discriminated union)', () => {
+  it('accepts the legacy greenfield shape (back-compat)', () => {
+    expect(createPartyProjectInputSchema.safeParse({ projectId: 'bmad-canon' }).success).toBe(true);
+  });
+
+  it('accepts an explicit greenfield kind', () => {
+    expect(
+      createPartyProjectInputSchema.safeParse({ kind: 'greenfield', projectId: 'bmad-canon' })
+        .success,
+    ).toBe(true);
+  });
+
+  it('accepts a brownfield shape with kind, name, gitRepoUrl', () => {
+    const r = createPartyProjectInputSchema.safeParse({
+      kind: 'brownfield',
+      name: 'songster',
+      gitRepoUrl: 'https://github.com/foo/songster.git',
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('rejects a brownfield shape with an invalid URL', () => {
+    expect(
+      createPartyProjectInputSchema.safeParse({
+        kind: 'brownfield',
+        name: 'songster',
+        gitRepoUrl: 'not-a-url',
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('refreshProjectParamsSchema', () => {
+  it('accepts a valid projectId', () => {
+    expect(refreshProjectParamsSchema.safeParse({ projectId: 'songster' }).success).toBe(true);
+  });
+
+  it('rejects an invalid projectId', () => {
+    expect(refreshProjectParamsSchema.safeParse({ projectId: 'UPPER' }).success).toBe(false);
   });
 });
 

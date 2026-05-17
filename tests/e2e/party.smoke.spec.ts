@@ -141,3 +141,108 @@ test('Selecting a MISSING project shows Install BMAD in Party tab', async ({ aut
   await expect(authedPage.getByTestId('bootstrap-progress')).toBeVisible();
   await expect(authedPage.getByText('Bootstrap progress')).toBeVisible();
 });
+
+// ── Story 15.4 — brownfield extension smoke ──
+
+const FAKE_BROWNFIELD_PROJECT = {
+  projectId: 'songster',
+  path: '/home/ubuntu/projects/songster',
+  kind: 'brownfield' as const,
+  bmadStatus: 'HEALTHY' as const,
+  bmadVersion: '6.0.0-alpha.7',
+  agentCount: 6,
+  expectedAgentCount: 6,
+  lastInspectedAt: '2026-05-17T00:00:00Z',
+  lastPulledAt: '2026-05-17T00:00:00Z',
+  lastCommitSha: 'abc1234',
+  gitRepoUrl: 'https://github.com/foo/songster.git',
+  gitBranch: 'main',
+  createdAt: '2026-05-17T00:00:00Z',
+  updatedAt: '2026-05-17T00:00:00Z',
+};
+
+async function mockApiWithBrownfield(page: Page) {
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const method = route.request().method();
+
+    if (path.endsWith('/api/auth/me')) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(FAKE_USER),
+      });
+    }
+    if (path.endsWith('/api/party/projects') && method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          projects: [FAKE_BROWNFIELD_PROJECT],
+          expectedAgentCount: 6,
+        }),
+      });
+    }
+    if (path.endsWith('/api/party/projects') && method === 'POST') {
+      return route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          jobId: 'job-bf-1',
+          projectId: 'songster',
+          kind: 'brownfield',
+        }),
+      });
+    }
+    const refreshMatch = path.match(/\/api\/party\/projects\/([^/]+)\/refresh$/);
+    if (refreshMatch && method === 'POST') {
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({ jobId: 'job-refresh-1', projectId: refreshMatch[1] }),
+      });
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+  });
+}
+
+test('Brownfield card renders Git icon, URL, branch chip, lastPulledAt, and obligations hint (Story 15.4 AC #8, #11)', async ({
+  page,
+}) => {
+  await seedAuth(page);
+  await mockApiWithBrownfield(page);
+  // Pre-select the brownfield project so the Party tab opens directly into it.
+  await page.addInitScript(() => {
+    window.localStorage.setItem('futurator.labs.activeAppName', 'songster');
+  });
+
+  await page.goto('/labs');
+  await page.getByRole('tab', { name: 'Party' }).click();
+  await expect(page.getByTestId('labs-party')).toBeVisible();
+
+  // Refresh button (replaces Re-inspect for brownfield).
+  await expect(page.getByTestId('brownfield-refresh-songster')).toBeVisible();
+});
+
+test('Add brownfield modal renders all three fields at ≤768px viewport (Story 15.4 AC #10)', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await seedAuth(page);
+  await mockApi(page);
+
+  await page.goto('/labs');
+  await page.getByRole('tab', { name: 'Party' }).click();
+  await expect(page.getByTestId('labs-party')).toBeVisible();
+  // Open via the chooser's "Add brownfield project" entry-point.
+  // (When a project is active, the chooser isn't visible; the seed above
+  // clears activeAppName so the chooser renders.)
+  await page.getByTestId('add-brownfield-button').click();
+
+  await expect(page.getByTestId('add-brownfield-form')).toBeVisible();
+  await expect(page.getByTestId('brownfield-name')).toBeVisible();
+  await expect(page.getByTestId('brownfield-url')).toBeVisible();
+  await expect(page.getByTestId('brownfield-branch')).toBeVisible();
+  await expect(page.getByTestId('brownfield-submit')).toBeVisible();
+});

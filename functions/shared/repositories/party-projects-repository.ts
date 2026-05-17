@@ -9,11 +9,25 @@ import { docClient, TABLE_NAMES } from '../dynamo-client';
 import { EXPECTED_AGENT_COUNT } from '../types/party';
 import type { BmadStatus, PartyProject } from '../types/party';
 
+/**
+ * Lazy-migrate legacy rows missing the `kind` discriminator (Story 15.4 AC #1).
+ * Pre-15.4 rows existed before the field; they are greenfield by definition.
+ * No DDB write — the migration is read-side only.
+ */
+function applyLazyKind(item: Record<string, unknown> | undefined): PartyProject | null {
+  if (!item) return null;
+  const row = item as unknown as PartyProject;
+  if (row.kind === undefined) {
+    return { ...row, kind: 'greenfield' };
+  }
+  return row;
+}
+
 export async function getProject(projectId: string): Promise<PartyProject | null> {
   const result = await docClient.send(
     new GetCommand({ TableName: TABLE_NAMES.partyProjects, Key: { projectId } }),
   );
-  return (result.Item as PartyProject) || null;
+  return applyLazyKind(result.Item);
 }
 
 export async function listProjects(): Promise<PartyProject[]> {
@@ -23,7 +37,12 @@ export async function listProjects(): Promise<PartyProject[]> {
     const result = await docClient.send(
       new ScanCommand({ TableName: TABLE_NAMES.partyProjects, ExclusiveStartKey }),
     );
-    if (result.Items) out.push(...(result.Items as PartyProject[]));
+    if (result.Items) {
+      for (const raw of result.Items) {
+        const row = applyLazyKind(raw);
+        if (row) out.push(row);
+      }
+    }
     ExclusiveStartKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
   } while (ExclusiveStartKey);
   return out;
@@ -42,6 +61,7 @@ export async function upsertProjectFromFilesystem(projectId: string, path: strin
         Item: {
           projectId,
           path,
+          kind: 'greenfield',
           bmadStatus: 'MISSING' as BmadStatus,
           expectedAgentCount: EXPECTED_AGENT_COUNT,
           createdAt: now,
@@ -53,6 +73,46 @@ export async function upsertProjectFromFilesystem(projectId: string, path: strin
   } catch (err) {
     const error = err as { name?: string };
     if (error.name !== 'ConditionalCheckFailedException') throw err;
+  }
+}
+
+/**
+ * Create a brownfield project row from API input (Story 15.4 AC #2). Mirrors
+ * `upsertProjectFromFilesystem` but carries `kind='brownfield'` and the git
+ * fields. Returns true if a new row was written; false if the row already
+ * existed (so callers can return a 409 if they need creation semantics).
+ */
+export async function createBrownfieldProjectRow(
+  projectId: string,
+  path: string,
+  opts: { gitRepoUrl: string; gitBranch: string },
+): Promise<boolean> {
+  const now = new Date().toISOString();
+  try {
+    await docClient.send(
+      new PutCommand({
+        TableName: TABLE_NAMES.partyProjects,
+        Item: {
+          projectId,
+          path,
+          kind: 'brownfield',
+          bmadStatus: 'MISSING' as BmadStatus,
+          expectedAgentCount: EXPECTED_AGENT_COUNT,
+          gitRepoUrl: opts.gitRepoUrl,
+          gitBranch: opts.gitBranch,
+          lastPulledAt: null,
+          lastCommitSha: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+        ConditionExpression: 'attribute_not_exists(projectId)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    const error = err as { name?: string };
+    if (error.name === 'ConditionalCheckFailedException') return false;
+    throw err;
   }
 }
 
@@ -109,6 +169,10 @@ export type BootstrapLockResult =
   | { ok: true }
   | { ok: false; reason: 'BOOTSTRAP_IN_PROGRESS' | 'NOT_FOUND' };
 
+export type RefreshLockResult =
+  | { ok: true }
+  | { ok: false; reason: 'REFRESH_IN_PROGRESS' | 'NOT_FOUND' | 'INVALID_STATE' };
+
 /**
  * Atomically transition a project to INSTALLING. Allowed from: MISSING, HEALTHY,
  * DRIFTED, FAILED, CORRUPTED. Fails with BOOTSTRAP_IN_PROGRESS if already INSTALLING.
@@ -149,4 +213,81 @@ export async function tryAcquireBootstrapLock(
     }
     throw err;
   }
+}
+
+/**
+ * Atomically transition a brownfield project from HEALTHY|DRIFTED → REFRESHING
+ * (Story 15.4 AC #7). Returns INVALID_STATE for any other source state.
+ */
+export async function tryAcquireRefreshLock(projectId: string): Promise<RefreshLockResult> {
+  const now = new Date().toISOString();
+  try {
+    await docClient.send(
+      new UpdateCommand({
+        TableName: TABLE_NAMES.partyProjects,
+        Key: { projectId },
+        UpdateExpression: 'SET bmadStatus = :refreshing, updatedAt = :now',
+        ConditionExpression: 'attribute_exists(projectId) AND bmadStatus IN (:healthy, :drifted)',
+        ExpressionAttributeValues: {
+          ':refreshing': 'REFRESHING',
+          ':now': now,
+          ':healthy': 'HEALTHY',
+          ':drifted': 'DRIFTED',
+        },
+      }),
+    );
+    return { ok: true };
+  } catch (err) {
+    const error = err as { name?: string };
+    if (error.name === 'ConditionalCheckFailedException') {
+      const row = await getProject(projectId);
+      if (!row) return { ok: false, reason: 'NOT_FOUND' };
+      if (row.bmadStatus === 'REFRESHING') return { ok: false, reason: 'REFRESH_IN_PROGRESS' };
+      return { ok: false, reason: 'INVALID_STATE' };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Release the refresh lock by setting bmadStatus to `next` (typically HEALTHY
+ * or FAILED). Unlike acquisition this is unconditional — callers own the
+ * decision of which terminal state to enter.
+ */
+export async function releaseRefreshLock(
+  projectId: string,
+  next: 'HEALTHY' | 'FAILED',
+): Promise<void> {
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.partyProjects,
+      Key: { projectId },
+      UpdateExpression: 'SET bmadStatus = :next, updatedAt = :now',
+      ExpressionAttributeValues: {
+        ':next': next,
+        ':now': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+/**
+ * Typed wrapper over `updateProjectState` for the post-refresh write. Keeps
+ * the daemon-side caller surface narrow: only the fields that change on a
+ * successful refresh.
+ */
+export async function updateProjectAfterRefresh(
+  projectId: string,
+  patch: {
+    lastPulledAt: string;
+    lastCommitSha: string;
+    customAgentsSHA: string;
+    agentCount?: number;
+    failureReason?: string;
+  },
+): Promise<void> {
+  await updateProjectState(projectId, {
+    ...patch,
+    lastInspectedAt: patch.lastPulledAt,
+  });
 }

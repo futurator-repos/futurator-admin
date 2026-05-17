@@ -39,6 +39,26 @@ export async function listSessionsByProject(projectId: string): Promise<PartySes
 }
 
 /**
+ * Cheap "is anything actively turning?" check used by the refresh endpoint
+ * (Story 15.4 AC #7). Returns true if any session for this project has
+ * `status='PROCESSING'`. Caller treats true as a 409 PROJECT_BUSY response.
+ */
+export async function hasProcessingSession(projectId: string): Promise<boolean> {
+  const result = await docClient.send(
+    new QueryCommand({
+      TableName: TABLE_NAMES.partySessions,
+      IndexName: 'GSI1',
+      KeyConditionExpression: 'GSI1PK = :pk',
+      FilterExpression: '#status = :processing',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: { ':pk': projectId, ':processing': 'PROCESSING' },
+      Limit: 1,
+    }),
+  );
+  return (result.Items?.length ?? 0) > 0;
+}
+
+/**
  * Cross-project listing for the Debates page. Single-tenant, expected
  * cardinality is small (dozens of sessions per workspace), so a Scan is
  * cheaper than maintaining a second GSI keyed on a constant partition.

@@ -355,6 +355,18 @@ export default $config({
     // app when it can't read the secret-resolved Lambda env var).
     const anthropicApiKey = new sst.Secret('AnthropicApiKey');
 
+    // ── Story 15.4 — Brownfield Party PAT ──
+    // Fine-grained GitHub PAT scoped contents:read on the four target repos
+    // (debatator, applicator, songster, futurator). Loaded once at daemon
+    // startup; used to clone private repos into PROJECTS_ROOT/<projectId>.
+    // Set with:
+    //   npx sst secret set BrownfieldGithubPat <github_pat_…> --stage production
+    // The daemon's IAM role needs secretsmanager:GetSecretValue on this ARN
+    // (granted via sst link below — sst.Secret IAM is auto-resolved for
+    // linked functions; the EC2 daemon reads BROWNFIELD_PAT_SECRET_NAME from
+    // its env and calls GetSecretValueCommand directly).
+    const brownfieldGithubPat = new sst.Secret('BrownfieldGithubPat');
+
     // ── Pipeline v1 — Epic 3 (Talk-to-agent) tables ──
     const agentSessionsTable = new sst.aws.Dynamo('AgentSessionsTable', {
       fields: {
@@ -443,6 +455,7 @@ export default $config({
         timingSummaryTable,
         githubPat,
         anthropicApiKey,
+        brownfieldGithubPat,
       ],
       environment: {
         PROJECTS_TABLE: projectsTable.name,

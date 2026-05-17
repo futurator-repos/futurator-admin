@@ -20,6 +20,12 @@ const STATUS_STYLES: Record<BmadStatus, { label: string; className: string }> = 
     label: 'Corrupted',
     className: 'bg-red-900/40 text-red-400 border border-red-900/60',
   },
+  // Story 15.4 — brownfield refresh in progress. Same blue-pulse tone as
+  // INSTALLING since the UX intent is the same: a transient busy state.
+  REFRESHING: {
+    label: 'Refreshing…',
+    className: 'bg-blue-900/40 text-blue-400 border border-blue-900/60 animate-pulse',
+  },
 };
 
 interface Props {

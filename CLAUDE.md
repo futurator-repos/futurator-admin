@@ -19,6 +19,16 @@ Do this before anything else, every time, no exceptions.
 
 ## Recent changes
 
+- **2026-05-17 (Story 15.4 — Brownfield Party projects):** Labs Party now
+  supports registering existing private GitHub repos as **brownfield**
+  Party projects in addition to greenfield BMAD-installed ones. A
+  brownfield Party project clones a repo into `PROJECTS_ROOT/<name>` and
+  uses the repo's own pre-installed BMAD. One-way sync: operator pushes
+  to GitHub from their laptop, then taps **Refresh** on the project card;
+  the daemon runs `git fetch origin && git reset --hard origin/<branch>`.
+  The daemon never pushes back to GitHub. See "Labs Party — Brownfield
+  Usage" below for the contract.
+
 - **2026-04-21 (Epic 17 — Plan-Based Labs):** Labs is now organized around a
   first-class **Plan** object: one intent → 1..N epics → stories → waves. A
   Plan owns its name (= folder slug = deploy URL slug, locked at creation),
@@ -63,6 +73,51 @@ running `scripts/deploy.sh` from the homepage repo (which preserves the four
 scoped paths above).
 
 To deploy this admin app: **`sst deploy`** — never a manual `aws s3 sync`.
+
+## Labs Party — Brownfield Usage
+
+A brownfield Party project lets you initiate BMAD party-mode debates against
+an existing private GitHub repo from mobile, without running the project
+through the full Labs pipeline.
+
+**Registration:** click **Add brownfield project** in the Labs → Party
+chooser, fill in:
+
+- **Name** — kebab-case, becomes the folder under `PROJECTS_ROOT`
+- **GitHub HTTPS URL** — `https://github.com/<owner>/<repo>(.git)?`
+- **Branch** — defaults to `main`
+
+The daemon clones the repo with a fine-grained PAT (stored in AWS Secrets
+Manager — see `daemon/README.md`) and verifies it already has BMAD
+installed (`bmad/_cfg/agent-manifest.csv` ≥ 1 row). On verify failure
+the project is set to `FAILED` with `failureReason='BMAD_NOT_FOUND_IN_REPO'`
+— add BMAD to the upstream repo and re-register.
+
+**Obligations contract: Push first, then Refresh — EC2 mirrors GitHub.**
+
+- The operator's **laptop is the source of truth.** Commit and push from
+  your laptop only; the daemon never pushes back to GitHub.
+- Incidental edits agents make during a debate are wiped on the next
+  Refresh (`git reset --hard origin/<branch>`). Treat the EC2 working
+  copy as disposable.
+- If a debate generates a BMAD artifact you want to keep, it will land at
+  `<projectPath>/docs/` per the repo's own `bmad/bmm/config.yaml`. Pull
+  it back into your laptop checkout the normal way (or just download it
+  via the existing files endpoint).
+
+**Current brownfield targets:** `debatator`, `applicator`, `songster`,
+`futurator` (homepage repo). The PAT in Secrets Manager is scoped
+`contents:read` on exactly these four repos.
+
+**Deferred (NOT in MVP):**
+
+- No Memgraph / mycelium ingestion of brownfield repos.
+- No path-scoped Edit/Write restrictions — `claude -p --permission-mode
+acceptEdits` posture is identical to greenfield. Investigation
+  confirmed path-scoped restrictions would require `settings.json` +
+  PreToolUse hooks (not a single CLI flag); deferred until trivially
+  achievable.
+- No daemon-side push to GitHub. Ever.
 
 ## HELLO WORLD SIGNAL
 

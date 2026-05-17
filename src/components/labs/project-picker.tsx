@@ -45,6 +45,10 @@ const BMAD_BADGE: Record<BmadStatus, { label: string; className: string }> = {
     label: 'Corrupted',
     className: 'text-red-400 border-red-900/60 bg-red-900/30',
   },
+  REFRESHING: {
+    label: 'Refreshing…',
+    className: 'text-blue-400 border-blue-900/60 bg-blue-900/30 animate-pulse',
+  },
 };
 
 const STAGE_COLOR: Record<string, string> = {
@@ -175,7 +179,10 @@ export function ProjectPicker() {
           className="h-[7px] w-[7px] rounded-full shrink-0"
           style={{
             background: active ? statusDotColor(active) : '#6b7280',
-            boxShadow: active?.bmad?.bmadStatus === 'HEALTHY' ? '0 0 0 2px rgba(74,222,128,0.18)' : undefined,
+            boxShadow:
+              active?.bmad?.bmadStatus === 'HEALTHY'
+                ? '0 0 0 2px rgba(74,222,128,0.18)'
+                : undefined,
           }}
         />
         {active ? (

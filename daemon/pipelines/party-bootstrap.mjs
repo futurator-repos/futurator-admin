@@ -18,12 +18,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { installBmad } from './lib/bmad-install.mjs';
 import { syncCustomAgents } from './lib/custom-agent-sync.mjs';
 import { rebuildManifest } from './lib/rebuild-manifest.mjs';
 import { computeCustomAgentsSHA } from './lib/custom-agents-sha.mjs';
 import { injectCustomAgents } from './lib/inject-custom-agents.mjs';
+import { cloneRepo } from './lib/git-clone.mjs';
 
 const STEPS = [
   'validate',
@@ -37,9 +38,30 @@ const STEPS = [
   'persist',
 ];
 
+const BROWNFIELD_STEPS = ['clone-repo', 'verify', 'compute-sha', 'persist'];
+
 export async function runPartyBootstrap(job, ctx) {
   const payload = job.partyBootstrapPayload || {};
-  const { projectId, projectPath, forceReinstall = false, createFolder = false } = payload;
+  const {
+    projectId,
+    projectPath,
+    forceReinstall = false,
+    createFolder = false,
+    kind = 'greenfield',
+    gitRepoUrl,
+    gitBranch,
+  } = payload;
+
+  if (!projectId || !projectPath) {
+    throw new Error('runPartyBootstrap: payload missing projectId/projectPath');
+  }
+
+  // Story 15.4 — brownfield branch. Skips BMAD install + custom-agent sync;
+  // the cloned repo already ships its own bmad/ tree.
+  if (kind === 'brownfield') {
+    return runBrownfieldBootstrap({ job, ctx, projectId, projectPath, gitRepoUrl, gitBranch });
+  }
+
   const {
     pushEvent,
     updateProjectState,
@@ -49,10 +71,6 @@ export async function runPartyBootstrap(job, ctx) {
     expectedAgentCount,
     projectsRoot,
   } = ctx;
-
-  if (!projectId || !projectPath) {
-    throw new Error('runPartyBootstrap: payload missing projectId/projectPath');
-  }
 
   let currentStep = 'validate';
 
@@ -313,10 +331,14 @@ export async function runPartyBootstrap(job, ctx) {
 
 function runGitRefresh(repoDir, onOutput) {
   return new Promise((resolve, reject) => {
-    const child = spawn('bash', ['-c', 'git fetch --depth 1 origin main && git reset --hard origin/main'], {
-      cwd: repoDir,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = spawn(
+      'bash',
+      ['-c', 'git fetch --depth 1 origin main && git reset --hard origin/main'],
+      {
+        cwd: repoDir,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
     child.stdout.on('data', (c) => onOutput?.({ stream: 'stdout', data: c.toString('utf8') }));
     child.stderr.on('data', (c) => onOutput?.({ stream: 'stderr', data: c.toString('utf8') }));
     child.on('error', reject);
@@ -328,3 +350,192 @@ function runGitRefresh(repoDir, onOutput) {
 }
 
 export const PARTY_BOOTSTRAP_STEPS = STEPS;
+export const PARTY_BOOTSTRAP_BROWNFIELD_STEPS = BROWNFIELD_STEPS;
+
+/**
+ * Brownfield bootstrap (Story 15.4). Runs only 4 steps:
+ *   1. clone-repo    — git clone via PAT into projectPath
+ *   2. verify        — assert bmad/_cfg/agent-manifest.csv exists with ≥ 1 row
+ *   3. compute-sha   — SHA over bmad/agents/ (empty input is acceptable)
+ *   4. persist       — set HEALTHY + lastPulledAt + lastCommitSha
+ *
+ * On verify failure: FAILED with failureReason='BMAD_NOT_FOUND_IN_REPO'.
+ */
+async function runBrownfieldBootstrap({ job, ctx, projectId, projectPath, gitRepoUrl, gitBranch }) {
+  const { pushEvent, updateProjectState, brownfieldToken, projectsRoot } = ctx;
+
+  if (!gitRepoUrl) throw new Error('runBrownfieldBootstrap: gitRepoUrl is required');
+  if (!gitBranch) throw new Error('runBrownfieldBootstrap: gitBranch is required');
+  if (!brownfieldToken) {
+    throw new Error(
+      'runBrownfieldBootstrap: brownfieldToken not loaded — daemon must read Secrets Manager at startup',
+    );
+  }
+  if (projectsRoot && !projectPath.startsWith(projectsRoot)) {
+    throw new Error(`projectPath ${projectPath} must be under ${projectsRoot}`);
+  }
+
+  let currentStep = 'clone-repo';
+
+  async function emitStepStarted(step) {
+    currentStep = step;
+    await pushEvent(job.jobId, step, '__party__', 'party.bootstrap.step.started', {
+      projectId,
+      step,
+      kind: 'brownfield',
+    });
+  }
+  async function emitStepCompleted(step, details = {}) {
+    await pushEvent(job.jobId, step, '__party__', 'party.bootstrap.step.completed', {
+      projectId,
+      step,
+      kind: 'brownfield',
+      ...details,
+    });
+  }
+  async function emitStepOutput(step, stream, data) {
+    await pushEvent(job.jobId, step, '__party__', 'party.bootstrap.step.output', {
+      projectId,
+      step,
+      kind: 'brownfield',
+      stream,
+      data,
+    });
+  }
+
+  try {
+    // 1. CLONE-REPO — wipe any prior content (brownfield re-install replaces
+    // the folder; refresh uses fetch+reset instead so this branch never
+    // tramples a working tree mid-session). The bootstrap lock guarantees
+    // no concurrent operations on this project.
+    await emitStepStarted('clone-repo');
+    if (existsSync(projectPath)) {
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+    // Ensure parent directory exists; git clone creates the leaf folder itself.
+    const parent = projectPath.slice(0, projectPath.lastIndexOf('/'));
+    if (parent) mkdirSync(parent, { recursive: true });
+
+    await cloneRepo({
+      repoUrl: gitRepoUrl,
+      branch: gitBranch,
+      token: brownfieldToken,
+      targetPath: projectPath,
+      depth: 50,
+      ctx: { emit: (stream, data) => emitStepOutput('clone-repo', stream, data) },
+    });
+    await emitStepCompleted('clone-repo');
+
+    // 2. VERIFY — the cloned repo must already have BMAD installed.
+    await emitStepStarted('verify');
+    const manifestPath = `${projectPath}/bmad/_cfg/agent-manifest.csv`;
+    const newLayoutManifestPath = `${projectPath}/_bmad/_config/agent-manifest.csv`;
+    let manifestFile = null;
+    if (existsSync(manifestPath)) manifestFile = manifestPath;
+    else if (existsSync(newLayoutManifestPath)) manifestFile = newLayoutManifestPath;
+
+    if (!manifestFile) {
+      throw new BmadNotFoundError(
+        `bmad manifest not found at bmad/_cfg/agent-manifest.csv or _bmad/_config/agent-manifest.csv inside ${gitRepoUrl}`,
+      );
+    }
+    const manifestText = readFileSync(manifestFile, 'utf8');
+    const rows = manifestText.split(/\r?\n/).filter((l) => l.length > 0);
+    const rowCount = Math.max(0, rows.length - 1); // minus header
+    if (rowCount < 1) {
+      throw new BmadNotFoundError(`bmad manifest is empty in cloned repo ${gitRepoUrl}`);
+    }
+    await emitStepCompleted('verify', {
+      rowCount,
+      manifestFile: manifestFile.replace(projectPath, '<projectPath>'),
+    });
+
+    // 3. COMPUTE-SHA — same helper as greenfield; safe on empty bmad/agents/.
+    await emitStepStarted('compute-sha');
+    const customAgentsSHA = computeCustomAgentsSHA(`${projectPath}/bmad/agents`);
+    await emitStepCompleted('compute-sha', { customAgentsSHA });
+
+    // 4. PERSIST — record the new HEAD SHA and pulled-at timestamp.
+    await emitStepStarted('persist');
+    const headSha = await readGitHeadSha(projectPath);
+    const now = new Date().toISOString();
+    await updateProjectState(projectId, {
+      bmadStatus: 'HEALTHY',
+      customAgentsSHA,
+      agentCount: rowCount,
+      lastInspectedAt: now,
+      lastPulledAt: now,
+      lastCommitSha: headSha,
+      failureReason: undefined,
+    });
+    await emitStepCompleted('persist');
+
+    await pushEvent(job.jobId, 'completed', '__party__', 'party.bootstrap.completed', {
+      projectId,
+      kind: 'brownfield',
+      agentCount: rowCount,
+      customAgentsSHA,
+      lastCommitSha: headSha,
+      lastPulledAt: now,
+    });
+
+    return {
+      ok: true,
+      kind: 'brownfield',
+      agentCount: rowCount,
+      customAgentsSHA,
+      lastCommitSha: headSha,
+    };
+  } catch (err) {
+    const isBmadMissing = err instanceof BmadNotFoundError;
+    const reason = err.message || String(err);
+    const failureReason = isBmadMissing ? 'BMAD_NOT_FOUND_IN_REPO' : `${currentStep}: ${reason}`;
+    await updateProjectState(projectId, {
+      bmadStatus: 'FAILED',
+      failureReason,
+    }).catch(() => {});
+    await pushEvent(job.jobId, currentStep, '__party__', 'party.bootstrap.step.failed', {
+      projectId,
+      kind: 'brownfield',
+      step: currentStep,
+      reason,
+    });
+    await pushEvent(job.jobId, 'failed', '__party__', 'party.bootstrap.failed', {
+      projectId,
+      kind: 'brownfield',
+      step: currentStep,
+      reason,
+      failureReason,
+    });
+    throw err;
+  }
+}
+
+class BmadNotFoundError extends Error {
+  constructor(msg) {
+    super(msg);
+    this.name = 'BmadNotFoundError';
+  }
+}
+
+export function readGitHeadSha(repoPath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', ['rev-parse', 'HEAD'], {
+      cwd: repoPath,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (c) => {
+      stdout += c.toString('utf8');
+    });
+    child.stderr.on('data', (c) => {
+      stderr += c.toString('utf8');
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(`git rev-parse HEAD exited with code ${code}: ${stderr.trim()}`));
+    });
+  });
+}

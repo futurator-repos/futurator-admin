@@ -1,0 +1,514 @@
+<story-context id="bmad/bmm/workflows/4-implementation/story-context/template" v="1.0">
+  <metadata>
+    <epicId>15</epicId>
+    <storyId>4</storyId>
+    <title>Brownfield Party Project Bootstrap &amp; Refresh</title>
+    <status>drafted</status>
+    <generatedAt>2026-05-17</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/15-4-brownfield-party-project-bootstrap.md</sourceStoryPath>
+    <storyKey>15-4-brownfield-party-project-bootstrap</storyKey>
+  </metadata>
+
+  <story>
+    <asA><![CDATA[Richie (operator of Futurator-Admin)]]></asA>
+    <iWant><![CDATA[to register existing private GitHub repos as brownfield Party projects on EC2, with one-way sync from GitHub → EC2 controlled by an explicit Refresh action]]></iWant>
+    <soThat><![CDATA[I can initiate BMAD party-mode debates against my real codebases (debatator, applicator, songster, futurator) from mobile, anywhere, while continuing to commit and push from my laptop as the single source of truth]]></soThat>
+    <tasks><![CDATA[
+Types, schemas, and repository extensions:
+- Modify functions/shared/types/party.ts — add `kind: 'greenfield' | 'brownfield'`, `gitRepoUrl?: string`, `gitBranch?: string`, `lastPulledAt?: string | null`, `lastCommitSha?: string | null` to PartyProject. Extend PartyEventType union with `party.refresh.*` events. (AC #1, #6)
+- Modify functions/shared/schemas/party-schema.ts — add BrownfieldProjectInputSchema (zod), enforce HTTPS GitHub URL regex, default `gitBranch='main'`. Add RefreshRequestParamsSchema. Use .safeParse() only. (AC #2, #6)
+- Modify functions/shared/repositories/party-projects-repository.ts — lazy `kind='greenfield'` migration on read; extend putProject to accept brownfield fields; add `tryAcquireRefreshLock(projectId)` (conditional UpdateCommand HEALTHY|DRIFTED → REFRESHING); add `releaseRefreshLock(projectId, newStatus)`; add `updateProjectAfterRefresh(projectId, { lastPulledAt, lastCommitSha, customAgentsSHA })`. (AC #1, #6, #7)
+- Extend functions/shared/repositories/__tests__/party-projects-repository.test.ts and functions/shared/schemas/__tests__/party-schema.test.ts per AC #12.
+
+Daemon — git-clone helper (secret-safe):
+- Create daemon/pipelines/lib/git-clone.mjs exporting `cloneRepo({ repoUrl, branch, token, targetPath, depth, ctx })`. Construct tokenized URL in-memory; spawn `git clone --branch <branch> --depth <depth> <tokenized-url> <targetPath>`; redact raw token in captured stdout/stderr before emit/log; throw redacted error on non-zero exit. (AC #3, #4)
+- Create daemon/pipelines/__tests__/git-clone.test.mjs — mock child_process.spawn; tokenization, redaction (multiple raw-token formats), non-zero-exit. (AC #4, #12)
+
+Daemon — bootstrap (extended for brownfield):
+- Modify daemon/pipelines/party-bootstrap.mjs — at entry, branch on `job.partyBootstrapPayload.kind`. Greenfield path unchanged (existing 9-step pipeline). Brownfield path runs ONLY: `clone-repo` → `verify` (assert bmad/_cfg/agent-manifest.csv exists with ≥1 row) → `compute-sha` (reuse custom-agents-sha.mjs; OK if bmad/agents/ empty) → `persist`. On verify failure: bmadStatus='FAILED', failureReason='BMAD_NOT_FOUND_IN_REPO', no retry. (AC #3, #5)
+- Extend daemon/pipelines/__tests__/party-bootstrap.test.mjs per AC #12.
+
+Daemon — refresh pipeline:
+- Create daemon/pipelines/party-refresh.mjs exporting `runPartyRefresh(job, ctx)`. Steps: (a) acquire lock; (b) `git fetch origin && git reset --hard origin/<branch>` via spawn; (c) recompute customAgentsSHA; (d) re-run inspector verify; (e) read new HEAD SHA via `git rev-parse HEAD`; (f) updateProjectAfterRefresh + releaseRefreshLock(projectId, 'HEALTHY'). Emit party.refresh.* events. On any error: releaseRefreshLock(projectId, 'FAILED'), emit party.refresh.failed. (AC #6, #7)
+- Create daemon/pipelines/__tests__/party-refresh.test.mjs per AC #12.
+
+Daemon — startup PAT load + job routing:
+- Modify daemon/agent-daemon.mjs — at startup, load brownfield PAT once via @aws-sdk/client-secrets-manager GetSecretValueCommand for `futurator/labs-brownfield-github-pat`. Store in module-scoped BROWNFIELD_GH_TOKEN. Pass into runPartyBootstrap and runPartyRefresh via ctx. On load failure log and continue — only brownfield jobs fail. (AC #4)
+- Modify daemon/pipelines/job-router.mjs — export JOB_HANDLER_PARTY_REFRESH; dispatch 'party-refresh'; add validatePartyRefreshJob. (AC #6)
+
+API routes:
+- Modify functions/api/index.ts — (a) update POST /api/party/projects to accept both shapes via zod discriminatedUnion('kind', [...]); on brownfield, derive projectId from kebab-cased name, validate URL, enqueue party-bootstrap with payload.kind='brownfield'; (b) add POST /api/party/projects/:id/refresh — validate :id; load project; 400 INVALID_FOR_GREENFIELD if greenfield; session-busy check → 409 PROJECT_BUSY; acquire refresh lock → 409 REFRESH_IN_PROGRESS on conflict; enqueue party-refresh; return { jobId }. (AC #2, #6, #7)
+
+Infrastructure (SST):
+- Modify sst.config.ts — declare sst.Secret('BrownfieldGithubPat') mirroring GithubPat pattern; grant daemon EC2 IAM role and API Lambda role secretsmanager:GetSecretValue on the secret ARN; wire BROWNFIELD_PAT_SECRET_NAME env var. (AC #4)
+- Operational (one-time, NOT in PR): create the AWS Secrets Manager secret with a fine-grained PAT scoped to `contents:read` on debatator, applicator, songster, futurator. Document in daemon/README.md.
+
+Frontend — types, hooks, components:
+- Modify src/types/party.ts — re-export the new fields. (AC #1)
+- Modify src/hooks/use-party-projects.ts — add useCreateBrownfieldProjectMutation() and useRefreshProjectMutation(); invalidate ['party','projects'] on success; reuse the 1500ms event-poll pattern from use-party-bootstrap.ts for refresh job. (AC #2, #6, #8)
+- Create src/components/labs/party/add-brownfield-form.tsx — modal with name/gitRepoUrl/gitBranch fields; inline regex validation; calls useCreateBrownfieldProjectMutation. Named export. (AC #8)
+- Modify src/components/labs/party/project-list.tsx — brownfield card variant (Git icon, truncated URL, branch chip, relative lastPulledAt, obligations hint per AC #11, Refresh action). (AC #8, #11)
+- Modify src/components/labs/party/index.tsx — add "Add Brownfield Project" button in page header; mount <AddBrownfieldForm /> modal with open-state in party-store.ts; gated by Ec2Toggle. (AC #8)
+- Modify src/stores/party-store.ts — add isBrownfieldFormOpen + open/close actions. (AC #8)
+- Extend tests/e2e/party.smoke.spec.ts — viewport-768 modal render test + brownfield-card-render test with mocked project list. (AC #10, #12)
+
+Documentation:
+- Modify CLAUDE.md — add "Labs Party — Brownfield Usage" section: registration steps, obligations contract ("Push first, then Refresh — EC2 mirrors GitHub"), the four current target repos, deferred concerns (no Memgraph ingestion, no daemon push). (AC #11)
+- Modify daemon/README.md — document the one-time Secrets Manager secret creation step.
+
+Validation:
+- Run npm run ci end-to-end; zero warnings, all tests pass, build succeeds. (AC #13)
+- EC2 dev manual verification: register all four repos, transition to HEALTHY, tap Refresh, start a party session. (AC #13)
+    ]]></tasks>
+  </story>
+
+  <acceptanceCriteria><![CDATA[
+AC #1 — PartyProject is extended with `kind: 'greenfield' | 'brownfield'` (discriminator), optional gitRepoUrl, gitBranch (default 'main'), lastPulledAt, lastCommitSha. Existing rows lazy-migrate to kind='greenfield' on first read.
+
+AC #2 — POST /api/party/projects with `{ name, kind: 'brownfield', gitRepoUrl, gitBranch? }`: gitRepoUrl matches `^https://github\.com/[\w.-]+/[\w.-]+(\.git)?$`; name kebab-cased to projectId (^[a-z0-9][a-z0-9-]{0,63}$); gitBranch defaults to 'main'. On success the row is created with kind='brownfield', bmadStatus='INSTALLING', and a party-bootstrap job is enqueued with payload.kind='brownfield'. Greenfield path unchanged.
+
+AC #3 — On brownfield bootstrap, the pipeline runs ONLY: (a) clone-repo (`git clone --branch <gitBranch> --depth 50 <tokenized-url> <projectPath>`), (b) verify (assert bmad/_cfg/agent-manifest.csv exists with ≥1 row), (c) compute-sha (reuse custom-agents-sha.mjs; empty bmad/agents/ acceptable), (d) persist (HEALTHY, bmadVersion, agentCount, lastPulledAt=now, lastCommitSha). Steps refresh-source, install (npx bmad-method), sync-agents are SKIPPED. Events emitted via the existing observability spine.
+
+AC #4 — Brownfield PAT loaded once at daemon startup from AWS Secrets Manager secret `futurator/labs-brownfield-github-pat` (fine-grained, contents:read scope, restricted to the 4 target repos). PAT never logged, never written to any DDB row, never in event payloads. Tokenized clone URL `https://x-access-token:<token>@github.com/<owner>/<repo>.git` constructed in-memory; raw token redacted to `https://***@github.com/<owner>/<repo>.git` in captured stdout/stderr/event output via the new daemon/pipelines/lib/git-clone.mjs helper. Redaction unit test required.
+
+AC #5 — Brownfield clone without bmad/_cfg/agent-manifest.csv at verify-time: bmadStatus='FAILED', failureReason='BMAD_NOT_FOUND_IN_REPO', no auto-retry, event party.bootstrap.failed emitted with reason field.
+
+AC #6 — New endpoint POST /api/party/projects/:id/refresh (auth-gated). Greenfield → 400 INVALID_FOR_GREENFIELD. Brownfield → enqueue party-refresh job; daemon runs `git fetch origin && git reset --hard origin/<gitBranch>`, recomputes customAgentsSHA, re-verifies, persists lastPulledAt + lastCommitSha; emits party.refresh.completed with new SHA.
+
+AC #7 — Refresh while same project's refresh job is PROCESSING → 409 REFRESH_IN_PROGRESS. Refresh while any session for the project has status='PROCESSING' → 409 PROJECT_BUSY. Lock is conditional UpdateCommand on the project row transitioning `bmadStatus IN ('HEALTHY','DRIFTED') → 'REFRESHING'`; session-busy check queries futurator-party-sessions GSI1 (PK=projectId) filtering status='PROCESSING'.
+
+AC #8 — Admin UI: "Add Brownfield Project" button in Labs Party page header opens a 3-field modal (name, gitRepoUrl, gitBranch default 'main') with inline regex validation. On submit calls POST /api/party/projects with the brownfield shape, closes modal, invalidates ['party','projects']. Brownfield cards display Git Lucide icon, middle-truncated gitRepoUrl (>40 chars), branch chip, lastPulledAt as relative time, and a Refresh secondary action (replacing Re-inspect for brownfield). While the refresh job is PROCESSING the button shows a spinning state and the card badge displays REFRESHING.
+
+AC #9 — First turn of a brownfield party session uses /bmad-party-mode slash command unchanged. Agents read the cloned repo via Claude Code's native Read/Glob/Grep under existing --permission-mode acceptEdits. Per [[brownfield-party-permission-mode]] memory NO path-scoped restrictions are added; incidental edits are wiped by `git reset --hard` on next refresh. BMAD-workflow artifacts land at <projectPath>/docs/ per each repo's own bmad/bmm/config.yaml:output_folder; retrievable via existing GET /api/party/projects/:id/files unchanged.
+
+AC #10 — Mobile UX parity at ≤768px: modal form visually correct, brownfield card layout reflows (Git+URL one row, branch chip + lastPulledAt next row, action buttons full-width). Playwright smoke test tests/e2e/party.smoke.spec.ts includes a viewport-768 assertion that the modal renders all three input fields without horizontal scroll.
+
+AC #11 — Visible obligations reminder on each brownfield card: small muted text near lastPulledAt reading "Push first, then Refresh — EC2 mirrors GitHub". No automation; operator owns the commit/push/refresh loop. Documented in CLAUDE.md under a new "Labs Party — Brownfield Usage" section.
+
+AC #12 — All new and extended unit tests pass: party-projects-repository.test.ts (brownfield row, lazy migration, refresh-lock paths, updateProjectAfterRefresh); party-schema.test.ts (BrownfieldProjectInputSchema positive + negative); party-bootstrap.test.mjs (brownfield clone-success, missing-BMAD failure, secret redaction); party-refresh.test.mjs (NEW — fetch+reset, refresh-lock conflict, busy-session, brownfield-only gate, git error paths); git-clone.test.mjs (NEW — URL tokenization, redaction filter, non-zero-exit).
+
+AC #13 — `npm run ci` passes end-to-end with zero lint warnings, passing typecheck, all tests, successful build. Manual EC2 verification: register debatator, applicator, songster, and futurator; each clones to its own PROJECTS_ROOT folder; each transitions to bmadStatus='HEALTHY'; tap Refresh on each → lastPulledAt and lastCommitSha update; start a session on each → agents read codebase and respond in multi-voice.
+  ]]></acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/epics-party-module.md</path>
+        <title>Epic 15 — Labs Party Mode</title>
+        <section>Story 15.4 — Brownfield Party Project Bootstrap &amp; Refresh</section>
+        <snippet>Canonical scope, ACs, prerequisites, and tech-notes for the brownfield extension. Adds 3 story points to a 13-pt epic for a total of 16 pts.</snippet>
+      </doc>
+      <doc>
+        <path>docs/tech-spec-party-module.md</path>
+        <title>Party Module Tech Spec</title>
+        <section>Bootstrap Pipeline Steps</section>
+        <snippet>Greenfield 8-step pipeline (validate, refresh-source, bmad-install, sync-agents, rebuild-manifest, compute-sha, verify, persist). The brownfield branch parallels this but executes only 4 steps (clone, verify, compute-sha, persist).</snippet>
+      </doc>
+      <doc>
+        <path>docs/tech-spec-party-module.md</path>
+        <title>Party Module Tech Spec</title>
+        <section>Inspector Steps</section>
+        <snippet>Inspector verifies bmad/_cfg/manifest.yaml exists, parses bmad/_cfg/agent-manifest.csv, recomputes customAgentsSHA. Brownfield verify step reuses the same checks.</snippet>
+      </doc>
+      <doc>
+        <path>docs/tech-spec-party-module.md</path>
+        <title>Party Module Tech Spec</title>
+        <section>Concurrency &amp; Locking</section>
+        <snippet>Conditional-update lock pattern used by tryAcquireBootstrapLock. The new tryAcquireRefreshLock mirrors it with the HEALTHY|DRIFTED → REFRESHING transition.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/15-1-bmad-per-project-install-and-inspection.md</path>
+        <title>Story 15.1 — BMAD per-project install &amp; inspection</title>
+        <section>AC #5 (CSV escaping) + AC #10 (test patterns)</section>
+        <snippet>RFC-4180 CSV-escaping behavior on agent-manifest.csv read (re-encountered in brownfield verify). Establishes the @aws-sdk/client-dynamodb and child_process mock patterns reused by the new tests.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/15-2-party-session-orchestration-and-turn-loop.md</path>
+        <title>Story 15.2 — Party session orchestration &amp; turn loop</title>
+        <section>AC #3 — claude -p invocation contract</section>
+        <snippet>Turn 1: /bmad-party-mode + session-id. Subsequent turns: --resume &lt;claudeSessionId&gt;. Brownfield sessions reuse this verbatim — no changes.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/15-3-labs-party-ui.md</path>
+        <title>Story 15.3 — Labs Party UI</title>
+        <section>AC #8 (Ec2Toggle gating) + AC #11 (Playwright smoke pattern)</section>
+        <snippet>Frontend foundation: project-list.tsx, project-status-badge.tsx, session-chat.tsx, hooks under src/hooks/use-party-*, party-store.ts. Add Brownfield button is gated by Ec2Toggle (hidden when mode !== 'ec2'). The Playwright auth-pre-seeded session pattern is the basis for the new viewport-768 test.</snippet>
+      </doc>
+      <doc>
+        <path>bmad/bmm/config.yaml</path>
+        <title>BMAD BMM module config</title>
+        <section>line 18 — output_folder</section>
+        <snippet>output_folder: '{project-root}/docs' — canonical BMAD artifact path. Each cloned brownfield repo carries its own bmad/bmm/config.yaml; debate-spawned BMAD workflows write into &lt;projectPath&gt;/docs/ accordingly.</snippet>
+      </doc>
+      <doc>
+        <path>CLAUDE.md</path>
+        <title>Project guidance for Claude Code</title>
+        <section>(NEW) Labs Party — Brownfield Usage</section>
+        <snippet>To be added in this story per AC #11: registration steps, the "Push first, then Refresh — EC2 mirrors GitHub" obligations contract, the four current target repos, deferred concerns (no Memgraph ingestion, no daemon push). Existing DEPLOY SAFETY rules remain unchanged.</snippet>
+      </doc>
+      <doc>
+        <path>memory/project_brownfield_party_candidates.md</path>
+        <title>User memory — brownfield party candidates</title>
+        <section>Target repos and rationale</section>
+        <snippet>The four target repos (debatator, applicator, songster, futurator) and the rationale for the batch (real codebases, mobile-accessible debates, dogfooding). One-way sync: laptop pushes to GitHub → EC2 pulls via git fetch &amp;&amp; git reset --hard. Daemon never pushes.</snippet>
+      </doc>
+      <doc>
+        <path>memory/feedback_brownfield_party_permission_mode.md</path>
+        <title>User memory — brownfield party permission mode</title>
+        <section>acceptEdits posture decision</section>
+        <snippet>Launch with --permission-mode acceptEdits. Do NOT add path-scoped Edit/Write restrictions unless achievable with a single CLI flag — investigation confirmed it requires settings.json + PreToolUse hooks. Incidental edits are wiped by git reset --hard on next refresh.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <artifact>
+        <path>functions/shared/types/party.ts</path>
+        <kind>type-module</kind>
+        <symbol>PartyProject, PartyEventType, PROJECT_ID_REGEX</symbol>
+        <lines>5-25, 93-114, 124</lines>
+        <reason>PartyProject is extended in-place (kind discriminator + 4 git fields). PartyEventType union receives 4 new party.refresh.* members. PROJECT_ID_REGEX is reused as the kebab-case derivation target for `name` → projectId in AC #2.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/schemas/party-schema.ts</path>
+        <kind>zod-schemas</kind>
+        <symbol>partyProjectSchema, createPartyProjectInputSchema, projectIdSchema</symbol>
+        <lines>4-8, 27-40, 65-67</lines>
+        <reason>createPartyProjectInputSchema becomes a discriminatedUnion on `kind`. BrownfieldProjectInputSchema (NEW) enforces the HTTPS GitHub URL regex and gitBranch default. partyProjectSchema is extended with the new optional fields. RefreshRequestParamsSchema (NEW) reuses projectIdSchema for :id validation.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/repositories/party-projects-repository.ts</path>
+        <kind>repository</kind>
+        <symbol>tryAcquireBootstrapLock, updateProjectState, getProject, listProjects</symbol>
+        <lines>12-30, 65-91, 108-152</lines>
+        <reason>tryAcquireRefreshLock (NEW) mirrors tryAcquireBootstrapLock structurally — conditional UpdateCommand on bmadStatus IN ('HEALTHY','DRIFTED') → 'REFRESHING'. getProject/listProjects add lazy kind='greenfield' migration on read. updateProjectAfterRefresh (NEW) is a typed wrapper over updateProjectState.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/party-bootstrap.mjs</path>
+        <kind>daemon-pipeline</kind>
+        <symbol>runPartyBootstrap, runGitRefresh, STEPS</symbol>
+        <lines>40-312, 314-328</lines>
+        <reason>Entry branches on job.partyBootstrapPayload.kind. Greenfield path unchanged. Brownfield path runs only clone-repo (calls git-clone.mjs) → verify → compute-sha → persist. runGitRefresh at line 314 is the prior-art for spawning git in a project cwd — pattern reused in the new party-refresh.mjs pipeline.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/job-router.mjs</path>
+        <kind>pure-router</kind>
+        <symbol>selectHandler, validatePartyBootstrapJob, validatePartyInspectJob</symbol>
+        <lines>12-48, 69-100</lines>
+        <reason>Add JOB_HANDLER_PARTY_REFRESH and dispatch 'party-refresh' inside selectHandler. Add validatePartyRefreshJob mirroring the existing validators (structural check on jobType + jobId + payload + projectId).</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon-bootstrap</kind>
+        <symbol>(startup PAT load + dispatch)</symbol>
+        <lines>n/a</lines>
+        <reason>Add one-time GetSecretValueCommand for futurator/labs-brownfield-github-pat at startup. Store in module-scoped const. Pass into runPartyBootstrap and runPartyRefresh via ctx. On load failure log and continue — greenfield jobs unaffected.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/api/index.ts</path>
+        <kind>hono-routes</kind>
+        <symbol>POST /api/party/projects, POST /api/party/projects/:id/bootstrap, resolvePartyProjectPath</symbol>
+        <lines>4749, 4827-4863, 4872-4910</lines>
+        <reason>POST /api/party/projects accepts a discriminatedUnion on `kind`. Brownfield branch derives projectId from kebab-cased name, validates URL, enqueues party-bootstrap with payload.kind='brownfield'. NEW route POST /api/party/projects/:id/refresh lives next to the existing bootstrap route; reuses agentJobsRepo.createJob + the same projectIdSchema validation pattern.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/party-inspector.mjs</path>
+        <kind>daemon-pipeline</kind>
+        <symbol>(verify step reuse)</symbol>
+        <lines>n/a</lines>
+        <reason>Existing inspector verify-step semantics (manifest CSV exists, ≥1 row, customAgentsSHA recompute) are reused by the brownfield bootstrap verify step and by the refresh re-verify.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/lib/custom-agents-sha.mjs</path>
+        <kind>daemon-helper</kind>
+        <symbol>computeCustomAgentsSHA</symbol>
+        <lines>n/a</lines>
+        <reason>Reused as the compute-sha step in brownfield bootstrap. Acceptable behavior when bmad/agents/ is empty (returns the SHA of empty input).</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/repositories/party-sessions-repository.ts</path>
+        <kind>repository</kind>
+        <symbol>(GSI1 PK=projectId query for session-busy check)</symbol>
+        <lines>n/a</lines>
+        <reason>The refresh endpoint's PROJECT_BUSY check queries the futurator-party-sessions GSI1 (PK=projectId) filtering for status='PROCESSING'. Implement helper here or inline in the route.</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/labs/party/index.tsx</path>
+        <kind>react-component</kind>
+        <symbol>Party (root component), PartyProjectChooser</symbol>
+        <lines>33-248, 336-423</lines>
+        <reason>Add "Add Brownfield Project" entry-point button in the page header; mount the new AddBrownfieldForm modal. Ec2Toggle-gated visibility per Story 15.3 AC #8.</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/labs/party/project-list.tsx</path>
+        <kind>react-component</kind>
+        <symbol>(card variants)</symbol>
+        <lines>n/a</lines>
+        <reason>Distinguish brownfield vs greenfield cards by project.kind. Brownfield variant renders Git Lucide icon, truncated gitRepoUrl, gitBranch chip, lastPulledAt relative time, the obligations hint, and the Refresh action (replacing Re-inspect).</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/labs/party/project-status-badge.tsx</path>
+        <kind>react-component</kind>
+        <symbol>ProjectStatusBadge</symbol>
+        <lines>n/a</lines>
+        <reason>Reuse as-is. New REFRESHING status uses the same semantic-token mapping (accent-blue animate-pulse) as INSTALLING.</reason>
+      </artifact>
+      <artifact>
+        <path>src/hooks/use-party-projects.ts</path>
+        <kind>react-query-hooks</kind>
+        <symbol>usePartyProjects, useBootstrapMutation, useInspectMutation</symbol>
+        <lines>10-24, 66-87, 89-98</lines>
+        <reason>Pattern reference for the two new mutations: useCreateBrownfieldProjectMutation (POST /party/projects with brownfield body) and useRefreshProjectMutation (POST /party/projects/:id/refresh). Both invalidate ['party','projects'] on success.</reason>
+      </artifact>
+      <artifact>
+        <path>src/hooks/use-party-bootstrap.ts</path>
+        <kind>react-query-hooks</kind>
+        <symbol>useBootstrapEvents</symbol>
+        <lines>10-56</lines>
+        <reason>The 1500ms event-poll pattern (stops on terminal event party.bootstrap.completed / .failed) is the template for polling the new party.refresh.* terminal events.</reason>
+      </artifact>
+      <artifact>
+        <path>src/stores/party-store.ts</path>
+        <kind>zustand-store</kind>
+        <symbol>(slice extension)</symbol>
+        <lines>n/a</lines>
+        <reason>Add isBrownfieldFormOpen: boolean + openBrownfieldForm()/closeBrownfieldForm() actions for the new modal.</reason>
+      </artifact>
+      <artifact>
+        <path>tests/e2e/party.smoke.spec.ts</path>
+        <kind>playwright-smoke</kind>
+        <symbol>(extension)</symbol>
+        <lines>n/a</lines>
+        <reason>Add viewport-768 assertion for the Add Brownfield modal + brownfield-card-render test using a mocked project list response. Reuse the auth-pre-seeded session pattern.</reason>
+      </artifact>
+      <artifact>
+        <path>sst.config.ts</path>
+        <kind>sst-infra</kind>
+        <symbol>partyProjectsTable, githubPat (sst.Secret), anthropicApiKey (sst.Secret)</symbol>
+        <lines>207, 343-356</lines>
+        <reason>Mirror the GithubPat sst.Secret pattern for a new BrownfieldGithubPat. Grant the daemon EC2 IAM role and the API Lambda role secretsmanager:GetSecretValue on the secret ARN. Wire BROWNFIELD_PAT_SECRET_NAME env var.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/lib/git-clone.mjs</path>
+        <kind>daemon-helper-NEW</kind>
+        <symbol>cloneRepo (NEW)</symbol>
+        <lines>n/a</lines>
+        <reason>NEW. Builds tokenized URL in-memory; spawns `git clone --branch &lt;b&gt; --depth &lt;d&gt; &lt;url&gt; &lt;target&gt;`; redacts the raw token in captured streams; throws redacted error on non-zero exit.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/party-refresh.mjs</path>
+        <kind>daemon-pipeline-NEW</kind>
+        <symbol>runPartyRefresh (NEW)</symbol>
+        <lines>n/a</lines>
+        <reason>NEW. Acquire lock → git fetch + reset --hard origin/&lt;branch&gt; → recompute customAgentsSHA → re-run verify → read new HEAD via git rev-parse HEAD → updateProjectAfterRefresh + releaseRefreshLock. Emits party.refresh.* events via the existing observability spine.</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/labs/party/add-brownfield-form.tsx</path>
+        <kind>react-component-NEW</kind>
+        <symbol>AddBrownfieldForm (NEW)</symbol>
+        <lines>n/a</lines>
+        <reason>NEW. shadcn Dialog with 3 fields (name, gitRepoUrl, gitBranch); inline regex validation; submit → useCreateBrownfieldProjectMutation. Named export only.</reason>
+      </artifact>
+    </code>
+
+    <dependencies>
+      <node>
+        <package name="@aws-sdk/client-secrets-manager" version="^3.1032.0">already in deps — used at daemon startup to load BROWNFIELD_GH_TOKEN via GetSecretValueCommand</package>
+        <package name="@aws-sdk/client-dynamodb" version="^3.1024.0">repository conditional updates for the refresh lock</package>
+        <package name="@aws-sdk/lib-dynamodb" version="^3.1024.0">document-client UpdateCommand / GetCommand used in party-projects-repository</package>
+        <package name="zod" version="^3">discriminatedUnion + safeParse for the extended create input schema</package>
+        <package name="@tanstack/react-query" version="^5">useMutation + queryClient.invalidateQueries for the two new mutations</package>
+        <package name="zustand" version="^5">isBrownfieldFormOpen state slice in party-store</package>
+        <package name="date-fns" version="^4">formatDistanceToNow for lastPulledAt relative-time rendering</package>
+        <package name="lucide-react" version="^1.7.0">Git icon for brownfield cards</package>
+        <package name="hono" version="^4.12.10">existing app surface for the two extended/new routes</package>
+        <package name="vitest" version="^3">unit tests for repository, schema, daemon pipelines (jsdom env, @/ alias)</package>
+        <package name="@playwright/test" version="^1.59.1">smoke test extension for the modal + brownfield card</package>
+        <package name="shadcn" version="^4.1.2">Dialog/Input/Label/Button primitives for the new form</package>
+      </node>
+      <bmad>
+        <component name="bmad/bmm/config.yaml">output_folder='{project-root}/docs' — each brownfield repo carries its own copy; debate-spawned BMAD workflows honor that path natively</component>
+        <component name="bmad/_cfg/agent-manifest.csv">verify-step gate — must exist with ≥1 row inside cloned repo</component>
+      </bmad>
+      <aws>
+        <component name="Secrets Manager secret: futurator/labs-brownfield-github-pat">fine-grained PAT scoped contents:read, restricted to 4 target repos. Created one-time outside this PR; loaded once at daemon startup.</component>
+        <component name="DynamoDB table: futurator-party-projects (existing)">extended with new optional attributes (kind, gitRepoUrl, gitBranch, lastPulledAt, lastCommitSha) — no schema change required (DDB is schemaless on non-key attrs)</component>
+        <component name="DynamoDB table: futurator-party-sessions (existing)">GSI1 (PK=projectId) used for the session-busy 409 PROJECT_BUSY check</component>
+      </aws>
+    </dependencies>
+  </artifacts>
+
+  <constraints><![CDATA[
+- Brownfield is an EXTENSION of PartyProject, not a new entity. NO new DDB tables, S3 buckets, or event spines. Reuse the existing party.bootstrap.*/party.refresh.* observability spine. [Source: docs/epics-party-module.md Story 15.4; tech-spec-party-module.md §Bootstrap Pipeline Steps]
+- Single source of truth = the operator's laptop's GitHub repo. EC2 mirrors GitHub via clone/refresh. The daemon NEVER writes back to GitHub. Incidental edits agents make during debates are wiped by `git reset --hard` on the next refresh. The obligations contract ("Push first, then Refresh — EC2 mirrors GitHub") is social, not technical. [Source: party-mode debate session 2026-05-16/17; CLAUDE.md per AC #11; memory project_brownfield_party_candidates.md]
+- Permission posture unchanged from greenfield: `claude -p --permission-mode acceptEdits`. NO path-scoped Edit/Write restrictions — investigation confirmed they require settings.json + PreToolUse hooks (not a single CLI flag), which fails the "must be simple" bar. [Source: memory feedback_brownfield_party_permission_mode.md]
+- BMAD ships WITH the cloned repo. Brownfield bootstrap SKIPS `npx bmad-method install` and the custom-agent sync from bmad-agents-source. If a debate needs a specific custom agent, the operator commits it into the upstream repo's bmad/agents/ — no admin-side push. [Source: party-mode debate session 2026-05-16/17]
+- Artifacts land at <projectPath>/docs/ per each repo's own bmad/bmm/config.yaml:output_folder. Retrievable via the existing GET /api/party/projects/:id/files endpoint with NO modifications. [Source: bmad/bmm/config.yaml:18]
+- Refresh lock = conditional UpdateCommand mirroring the existing tryAcquireBootstrapLock pattern. Session-busy check = query on futurator-party-sessions GSI1. [Source: party-projects-repository.ts:108-152]
+- All zod validation via .safeParse() only — never .parse() at the route boundary. Errors raised as ValidationError. [Source: CLAUDE.md "Validation" + Story 15.1 patterns]
+- Secrets (PAT) never logged, never written to any DDB row, never in event payloads. Redact `https://x-access-token:<token>@...` → `https://***@...` in all captured stdout/stderr/event output. [Source: AC #4 + ops practice]
+- DynamoDB multi-table convention — extend the existing futurator-party-projects table; do NOT introduce a separate brownfield-projects table. [Source: memory feedback_dynamodb_multi_table; CLAUDE.md]
+- API_BASE_URL stays relative in production (empty string + `/api`); NEXT_PUBLIC_API_URL only for local dev. [Source: CLAUDE.md "Key Conventions"]
+- `npm run ci` must pass with zero warnings: `eslint --max-warnings 0`, format:check, knip, typecheck, test, build. [Source: package.json:20]
+- Daemon runs on EC2; the daemon's IAM role needs secretsmanager:GetSecretValue on the new BrownfieldGithubPat ARN. The API Lambda role does NOT need access to this secret (the Lambda only enqueues jobs; the daemon does the cloning). [Source: AC #4]
+- One-way sync only — daemon never `git push`. Drift back to GitHub is the operator's responsibility (laptop → GitHub via `git push`). [Source: memory project_brownfield_party_candidates.md]
+- Re-running brownfield bootstrap on a HEALTHY project (manual reinstall trigger) re-clones into the same path; existing on-disk content is replaced by the fresh clone. (Behavior parity with greenfield re-install at the user-facing level; investigate if existing folder needs explicit removal before clone — initial spike acceptable.)
+  ]]></constraints>
+
+  <interfaces>
+    <interface>
+      <name>POST /api/party/projects</name>
+      <kind>REST endpoint (extended)</kind>
+      <signature><![CDATA[Request body — discriminatedUnion('kind'):
+  greenfield: { projectId: string }  // existing
+  brownfield: { name: string, kind: 'brownfield', gitRepoUrl: string, gitBranch?: string }
+
+Response 201: { jobId: string, projectId: string, projectPath?: string }
+Errors: 400 ValidationError (bad URL / name regex / branch whitespace); 409 BOOTSTRAP_IN_PROGRESS]]></signature>
+      <path>functions/api/index.ts:4872-4910</path>
+    </interface>
+    <interface>
+      <name>POST /api/party/projects/:id/refresh</name>
+      <kind>REST endpoint (NEW)</kind>
+      <signature><![CDATA[Path: :id — projectId, validated via projectIdSchema
+Request body: empty
+Response 202: { jobId: string }
+Errors:
+  400 INVALID_FOR_GREENFIELD — project.kind === 'greenfield'
+  404 NotFoundError — project does not exist
+  409 PROJECT_BUSY — a session for this project has status='PROCESSING'
+  409 REFRESH_IN_PROGRESS — another refresh holds the lock]]></signature>
+      <path>functions/api/index.ts (NEW route, adjacent to bootstrap route)</path>
+    </interface>
+    <interface>
+      <name>partyProjectsRepo.tryAcquireRefreshLock</name>
+      <kind>repository function (NEW)</kind>
+      <signature><![CDATA[(projectId: string) => Promise<{ ok: true } | { ok: false; reason: 'REFRESH_IN_PROGRESS' | 'NOT_FOUND' | 'INVALID_STATE' }>
+
+Behavior: conditional UpdateCommand. ConditionExpression:
+  attribute_exists(projectId) AND bmadStatus IN (:healthy, :drifted)
+On success: SET bmadStatus=:refreshing, updatedAt=:now
+On ConditionalCheckFailedException: re-fetch row and disambiguate (NOT_FOUND vs REFRESH_IN_PROGRESS vs INVALID_STATE for non-healthy/non-drifted states).]]></signature>
+      <path>functions/shared/repositories/party-projects-repository.ts</path>
+    </interface>
+    <interface>
+      <name>partyProjectsRepo.releaseRefreshLock</name>
+      <kind>repository function (NEW)</kind>
+      <signature><![CDATA[(projectId: string, newStatus: 'HEALTHY' | 'FAILED') => Promise<void>
+
+UpdateCommand SET bmadStatus = :next, updatedAt = :now]]></signature>
+      <path>functions/shared/repositories/party-projects-repository.ts</path>
+    </interface>
+    <interface>
+      <name>partyProjectsRepo.updateProjectAfterRefresh</name>
+      <kind>repository function (NEW)</kind>
+      <signature><![CDATA[(projectId: string, patch: { lastPulledAt: string; lastCommitSha: string; customAgentsSHA: string; agentCount?: number }) => Promise<void>
+
+Typed wrapper over updateProjectState. Caller is the daemon party-refresh pipeline.]]></signature>
+      <path>functions/shared/repositories/party-projects-repository.ts</path>
+    </interface>
+    <interface>
+      <name>cloneRepo</name>
+      <kind>daemon helper function (NEW)</kind>
+      <signature><![CDATA[cloneRepo({
+  repoUrl: string,        // https://github.com/<owner>/<repo>(.git)?
+  branch: string,         // e.g. 'main'
+  token: string,          // raw PAT — used in-memory only
+  targetPath: string,     // <PROJECTS_ROOT>/<projectId>
+  depth?: number,         // default 50
+  ctx: { emit: Function } // for piping redacted output as events
+}): Promise<void>
+
+Builds tokenized URL internally as `https://x-access-token:${token}@github.com/<owner>/<repo>.git`.
+Spawns `git clone --branch ${branch} --depth ${depth} <tokenized-url> ${targetPath}`.
+Captures stdout/stderr; redacts the raw token (and the tokenized URL form) before passing to ctx.emit or logger.
+Throws Error with redacted message on non-zero exit.]]></signature>
+      <path>daemon/pipelines/lib/git-clone.mjs (NEW)</path>
+    </interface>
+    <interface>
+      <name>runPartyRefresh</name>
+      <kind>daemon pipeline entry (NEW)</kind>
+      <signature><![CDATA[runPartyRefresh(job, ctx): Promise<{ ok: true, lastCommitSha: string, customAgentsSHA: string }>
+
+job.partyRefreshPayload: { projectId: string, projectPath: string, gitBranch: string }
+ctx: { pushEvent, updateProjectState, tryAcquireRefreshLock, releaseRefreshLock, updateProjectAfterRefresh, brownfieldToken, expectedAgentCount }
+
+Steps: acquire-lock → git-fetch-reset → compute-sha → verify → read-head-sha → persist → release-lock]]></signature>
+      <path>daemon/pipelines/party-refresh.mjs (NEW)</path>
+    </interface>
+    <interface>
+      <name>selectHandler / validatePartyRefreshJob (extension)</name>
+      <kind>job router additions</kind>
+      <signature><![CDATA[selectHandler(job): adds branch — if (job.jobType === 'party-refresh') return JOB_HANDLER_PARTY_REFRESH;
+
+validatePartyRefreshJob(job): { ok: true } | { ok: false; reason: string }
+  Required: job.jobId, job.jobType === 'party-refresh', job.partyRefreshPayload.{projectId, projectPath, gitBranch}]]></signature>
+      <path>daemon/pipelines/job-router.mjs</path>
+    </interface>
+    <interface>
+      <name>useCreateBrownfieldProjectMutation</name>
+      <kind>react-query hook (NEW)</kind>
+      <signature><![CDATA[() => UseMutationResult<{ jobId: string; projectId: string }, Error, { name: string; gitRepoUrl: string; gitBranch?: string }>
+
+Calls api.post('/party/projects', { name, kind: 'brownfield', gitRepoUrl, gitBranch }).
+On success: queryClient.invalidateQueries({ queryKey: ['party', 'projects'] }).]]></signature>
+      <path>src/hooks/use-party-projects.ts</path>
+    </interface>
+    <interface>
+      <name>useRefreshProjectMutation</name>
+      <kind>react-query hook (NEW)</kind>
+      <signature><![CDATA[() => UseMutationResult<{ jobId: string }, Error, string /* projectId */>
+
+Calls api.post(`/party/projects/${projectId}/refresh`, {}).
+On success: polls /agent-jobs/:jobId/events at 1500ms via existing event-poll pattern; invalidates ['party','projects'] on terminal event party.refresh.completed / .failed.]]></signature>
+      <path>src/hooks/use-party-projects.ts</path>
+    </interface>
+    <interface>
+      <name>BrownfieldProjectInputSchema (zod)</name>
+      <kind>zod schema (NEW)</kind>
+      <signature><![CDATA[z.object({
+  name: z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+  kind: z.literal('brownfield'),
+  gitRepoUrl: z.string().regex(/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(\.git)?$/),
+  gitBranch: z.string().min(1).max(120).regex(/^[^\s]+$/).default('main'),
+})
+
+Combined with the existing greenfield input via z.discriminatedUnion('kind', [...]).]]></signature>
+      <path>functions/shared/schemas/party-schema.ts</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards><![CDATA[
+Vitest jsdom environment with @/ alias and tests/setup.ts shared setup. Coverage includes src/** and functions/**. Repository tests use @aws-sdk/client-dynamodb DocumentClient mocks established in Story 15.1's party-projects-repository.test.ts; daemon pipeline tests use vitest's vi.mock on child_process.spawn (see existing party-bootstrap.test.mjs and party-turn.test.mjs for the pattern). Zod schema tests assert .safeParse() success/failure with explicit input shapes and target the discriminated-union branch separately. Playwright smoke tests run Chromium-only with auth pre-seeded in sessionStorage and API routes mocked via page.route(); the existing tests/e2e/party.smoke.spec.ts is the template for the modal + viewport-768 + brownfield-card assertions. Secret-redaction is tested by capturing the mocked spawn's stdout/stderr emitter output and asserting the raw token (a synthetic non-secret value) does NOT appear in any captured frame; the tokenized URL must appear only as the `https://***@...` redacted form.
+    ]]></standards>
+    <locations>
+      <location>functions/shared/repositories/__tests__/party-projects-repository.test.ts</location>
+      <location>functions/shared/schemas/__tests__/party-schema.test.ts</location>
+      <location>daemon/pipelines/__tests__/party-bootstrap.test.mjs</location>
+      <location>daemon/pipelines/__tests__/party-refresh.test.mjs (NEW)</location>
+      <location>daemon/pipelines/__tests__/git-clone.test.mjs (NEW)</location>
+      <location>daemon/pipelines/__tests__/job-router.test.mjs</location>
+      <location>tests/e2e/party.smoke.spec.ts</location>
+    </locations>
+    <ideas>
+      <idea ac="AC #1">Repository test — putting a brownfield row sets kind='brownfield' on read; reading a row with no kind attribute returns kind='greenfield' (lazy migration) without writing back.</idea>
+      <idea ac="AC #2">Schema test — BrownfieldProjectInputSchema accepts a valid HTTPS GitHub URL (with and without `.git`), rejects SSH `git@github.com:...`, rejects non-github hosts, rejects empty name, rejects names violating the kebab-case regex, rejects branch strings containing whitespace; default `gitBranch='main'` applied when omitted.</idea>
+      <idea ac="AC #2 + #6">API test — POST /api/party/projects with a brownfield body enqueues a job whose `partyBootstrapPayload.kind === 'brownfield'`; greenfield body path is unchanged.</idea>
+      <idea ac="AC #3">Daemon test — brownfield bootstrap success path runs exactly 4 steps (clone-repo, verify, compute-sha, persist) and emits party.bootstrap.completed; greenfield path still runs the full 8-step pipeline.</idea>
+      <idea ac="AC #4">Git-clone helper test — given repoUrl + raw token, the helper spawns git with a URL containing the token (assert via spawn-arg capture); captured stdout/stderr passed to ctx.emit never contains the raw token; the redacted form `https://***@github.com/...` is what appears in events.</idea>
+      <idea ac="AC #4">Daemon-startup test — if Secrets Manager throws (secret missing or AccessDenied), daemon logs and continues; greenfield bootstrap jobs continue to succeed; brownfield jobs fail fast with a clear "PAT not loaded" error.</idea>
+      <idea ac="AC #5">Daemon test — brownfield clone-success but verify finds no bmad/_cfg/agent-manifest.csv → bmadStatus='FAILED', failureReason='BMAD_NOT_FOUND_IN_REPO', no retry, party.bootstrap.failed emitted with reason field set.</idea>
+      <idea ac="AC #6">Repository test — tryAcquireRefreshLock from HEALTHY succeeds; from DRIFTED succeeds; from INSTALLING/REFRESHING/FAILED fails with appropriate reason (uses conditional UpdateCommand). releaseRefreshLock(projectId, 'HEALTHY' | 'FAILED') sets the next state.</idea>
+      <idea ac="AC #6">Daemon test — runPartyRefresh success path: git fetch + reset stub succeeds, SHA recomputed, verify passes, HEAD SHA read, updateProjectAfterRefresh called with the new lastPulledAt + lastCommitSha + customAgentsSHA, lock released to HEALTHY, party.refresh.completed emitted.</idea>
+      <idea ac="AC #6">Daemon test — runPartyRefresh failure path on git failure (e.g., network error mocked): lock released to FAILED, party.refresh.failed emitted, no partial mutation persisted.</idea>
+      <idea ac="AC #6 + #7">API test — POST refresh on greenfield → 400 INVALID_FOR_GREENFIELD. POST refresh while a session is PROCESSING → 409 PROJECT_BUSY. POST refresh while another refresh holds the lock → 409 REFRESH_IN_PROGRESS.</idea>
+      <idea ac="AC #8">Component test (vitest jsdom) — AddBrownfieldForm renders 3 inputs; submit button disabled until all 3 validate; valid submit calls the mutation with the right payload shape; close button cancels.</idea>
+      <idea ac="AC #8">Component test — project-list.tsx given a brownfield project renders the Git icon, truncated URL, branch chip, lastPulledAt relative time, the obligations hint string, and the Refresh action (not Re-inspect).</idea>
+      <idea ac="AC #10">Playwright — viewport={width:768,height:1024}: open the Add Brownfield modal; assert all 3 input fields are visible without horizontal scroll; submit-button is present and tappable.</idea>
+      <idea ac="AC #11">Smoke test — every brownfield card includes the literal text "Push first, then Refresh — EC2 mirrors GitHub" (or a stable substring) near lastPulledAt.</idea>
+      <idea ac="AC #12">Job-router test — selectHandler({ jobType: 'party-refresh' }) returns JOB_HANDLER_PARTY_REFRESH. validatePartyRefreshJob rejects missing payload / missing projectId / missing gitBranch with clear reasons.</idea>
+      <idea ac="AC #13">CI gate — `npm run ci` exits 0 with no eslint warnings (--max-warnings 0), knip clean, typecheck clean, all tests pass, build succeeds. Document the EC2 manual-verification command sequence in daemon/README.md or a story-internal note.</idea>
+    </ideas>
+  </tests>
+</story-context>

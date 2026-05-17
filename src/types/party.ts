@@ -1,10 +1,21 @@
-export type BmadStatus = 'MISSING' | 'INSTALLING' | 'HEALTHY' | 'DRIFTED' | 'CORRUPTED' | 'FAILED';
+export type BmadStatus =
+  | 'MISSING'
+  | 'INSTALLING'
+  | 'HEALTHY'
+  | 'DRIFTED'
+  | 'CORRUPTED'
+  | 'FAILED'
+  | 'REFRESHING';
 
 export type PartySessionStatus = 'ACTIVE' | 'PROCESSING' | 'IDLE' | 'ERROR' | 'ARCHIVED';
+
+/** Story 15.4 — discriminator for greenfield vs brownfield Party projects. */
+export type PartyProjectKind = 'greenfield' | 'brownfield';
 
 export interface PartyProject {
   projectId: string;
   path: string;
+  kind: PartyProjectKind;
   bmadStatus: BmadStatus;
   bmadVersion?: string;
   customAgentsSHA?: string;
@@ -19,6 +30,11 @@ export interface PartyProject {
    * extras (and leave only the always-allowed Read/Glob/Grep set).
    */
   allowedTools?: string[];
+  /** Story 15.4 — brownfield-only. */
+  gitRepoUrl?: string;
+  gitBranch?: string;
+  lastPulledAt?: string | null;
+  lastCommitSha?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -56,7 +72,13 @@ export type PartyEventType =
   | 'party.turn.assistant.agent'
   | 'party.turn.awaiting_user'
   | 'party.turn.completed'
-  | 'party.turn.error';
+  | 'party.turn.error'
+  | 'party.refresh.started'
+  | 'party.refresh.step.started'
+  | 'party.refresh.step.output'
+  | 'party.refresh.step.completed'
+  | 'party.refresh.completed'
+  | 'party.refresh.failed';
 
 export interface PartyEvent {
   jobId: string;
@@ -76,6 +98,21 @@ export interface PartyListProjectsResponse {
 }
 
 export interface PartyBootstrapResponse {
+  jobId: string;
+  projectId: string;
+  projectPath?: string;
+  kind?: PartyProjectKind;
+}
+
+/** Story 15.4 — brownfield create request body. */
+export interface CreateBrownfieldProjectInput {
+  name: string;
+  gitRepoUrl: string;
+  gitBranch?: string;
+}
+
+/** Story 15.4 — refresh response (202 Accepted). */
+export interface PartyRefreshResponse {
   jobId: string;
   projectId: string;
 }

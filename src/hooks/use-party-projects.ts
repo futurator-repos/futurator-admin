@@ -5,6 +5,8 @@ import type {
   PartyProject,
   PartyListProjectsResponse,
   PartyBootstrapResponse,
+  CreateBrownfieldProjectInput,
+  PartyRefreshResponse,
 } from '@/types/party';
 
 export function usePartyProjects(enabled = true) {
@@ -91,6 +93,49 @@ export function useInspectMutation() {
   return useMutation({
     mutationFn: (projectId: string) =>
       api.post<PartyBootstrapResponse>(`/party/projects/${projectId}/inspect`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['party', 'projects'] });
+    },
+  });
+}
+
+/**
+ * Story 15.4 — register a new brownfield Party project. POSTs the
+ * discriminated brownfield shape to /party/projects; on success the server
+ * creates the row and enqueues the clone job. Invalidates the projects
+ * list so the new card appears (status will be INSTALLING → HEALTHY as the
+ * daemon clones).
+ */
+export function useCreateBrownfieldProjectMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateBrownfieldProjectInput) =>
+      api.post<PartyBootstrapResponse>('/party/projects', {
+        kind: 'brownfield',
+        name: input.name,
+        gitRepoUrl: input.gitRepoUrl,
+        gitBranch: input.gitBranch || 'main',
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['party', 'projects'] });
+    },
+  });
+}
+
+/**
+ * Story 15.4 — refresh a brownfield Party project. POSTs to
+ * /party/projects/:id/refresh; the daemon runs git fetch + reset --hard
+ * and re-runs the inspector. Returns 202 with `{ jobId }`.
+ *
+ * Polling the job's events stops as soon as a terminal `party.refresh.*`
+ * event lands; consumers should use `useBootstrapEvents(jobId)` for the
+ * progress stream (the event-poll pattern is shared).
+ */
+export function useRefreshProjectMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (projectId: string) =>
+      api.post<PartyRefreshResponse>(`/party/projects/${projectId}/refresh`, {}),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['party', 'projects'] });
     },

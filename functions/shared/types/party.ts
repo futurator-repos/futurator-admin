@@ -1,10 +1,27 @@
-export type BmadStatus = 'MISSING' | 'INSTALLING' | 'HEALTHY' | 'DRIFTED' | 'CORRUPTED' | 'FAILED';
+export type BmadStatus =
+  | 'MISSING'
+  | 'INSTALLING'
+  | 'HEALTHY'
+  | 'DRIFTED'
+  | 'CORRUPTED'
+  | 'FAILED'
+  | 'REFRESHING';
 
 export type PartySessionStatus = 'ACTIVE' | 'PROCESSING' | 'IDLE' | 'ERROR' | 'ARCHIVED';
+
+/**
+ * Brownfield projects (Story 15.4) clone an existing GitHub repo into the
+ * project folder instead of running the full BMAD bootstrap. The `kind`
+ * discriminator gates which bootstrap branch the daemon runs and which UI
+ * card variant renders. Existing rows without a `kind` attribute are
+ * lazy-migrated to 'greenfield' on read by the repository.
+ */
+export type PartyProjectKind = 'greenfield' | 'brownfield';
 
 export interface PartyProject {
   projectId: string;
   path: string;
+  kind: PartyProjectKind;
   bmadStatus: BmadStatus;
   bmadVersion?: string;
   customAgentsSHA?: string;
@@ -20,6 +37,14 @@ export interface PartyProject {
    * explicitly deny all extra tools.
    */
   allowedTools?: string[];
+  /** Brownfield-only — HTTPS GitHub URL of the source repo. */
+  gitRepoUrl?: string;
+  /** Brownfield-only — branch tracked on EC2 (default 'main'). */
+  gitBranch?: string;
+  /** Brownfield-only — ISO timestamp of last successful clone or refresh. */
+  lastPulledAt?: string | null;
+  /** Brownfield-only — HEAD SHA captured at last clone/refresh. */
+  lastCommitSha?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -57,13 +82,28 @@ export type PartyJobType =
   | 'party-inspect'
   | 'party-turn'
   | 'party-docs-sync'
-  | 'party-docs-unlink';
+  | 'party-docs-unlink'
+  | 'party-refresh';
 
 export interface PartyBootstrapJobPayload {
   projectId: string;
   projectPath: string;
   forceReinstall?: boolean;
   createFolder?: boolean;
+  /**
+   * Brownfield-only payload extension (Story 15.4). When kind='brownfield',
+   * the daemon runs the 4-step clone/verify/sha/persist branch instead of
+   * the 8-step BMAD-install pipeline.
+   */
+  kind?: PartyProjectKind;
+  gitRepoUrl?: string;
+  gitBranch?: string;
+}
+
+export interface PartyRefreshJobPayload {
+  projectId: string;
+  projectPath: string;
+  gitBranch: string;
 }
 
 export interface PartyInspectJobPayload {
@@ -111,7 +151,18 @@ export type PartyEventType =
   | 'party.docs.sync.completed'
   | 'party.docs.sync.failed'
   | 'party.docs.unlink.started'
-  | 'party.docs.unlink.completed';
+  | 'party.docs.unlink.completed'
+  // Story 15.4 — refresh pipeline events. The lifecycle mirrors the
+  // bootstrap pipeline taxonomy: one `.started` per pipeline, one
+  // `.step.started` per step, optional `.step.output` for streamed
+  // stdout/stderr, one `.step.completed` per step, one terminal
+  // `.completed` or `.failed`.
+  | 'party.refresh.started'
+  | 'party.refresh.step.started'
+  | 'party.refresh.step.output'
+  | 'party.refresh.step.completed'
+  | 'party.refresh.completed'
+  | 'party.refresh.failed';
 
 export interface PartyEvent {
   jobId: string;
@@ -122,6 +173,16 @@ export interface PartyEvent {
 }
 
 export const PROJECT_ID_REGEX = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * HTTPS GitHub repo URL. Accepts both `.git` and non-`.git` forms. SSH
+ * (git@github.com:...) is intentionally rejected — brownfield clones use
+ * a fine-grained PAT over HTTPS.
+ */
+export const GITHUB_HTTPS_URL_REGEX = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(\.git)?$/;
+
+/** Failure reason emitted when a brownfield clone lacks BMAD. */
+export const FAIL_REASON_BMAD_NOT_FOUND = 'BMAD_NOT_FOUND_IN_REPO';
 export const MAX_MESSAGE_BYTES = 8192;
 // BMAD 6.3.x stock install yields 6 agents (bmad-agent-{analyst,tech-writer,pm,
 // ux-designer,architect,dev}). Custom-agent overlay (8 more) is deferred to a

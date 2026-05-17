@@ -11,6 +11,7 @@
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import {
   DynamoDBDocumentClient,
   GetCommand,
@@ -22,7 +23,10 @@ import { spawn, execSync } from 'child_process';
 import { mkdirSync, existsSync, readFileSync, statSync } from 'fs';
 import { createHash } from 'node:crypto';
 import { totalmem, freemem, loadavg } from 'os';
-import { isCompileStep as _isCompileStep, COMPILE_STEP_IDS as _COMPILE_STEP_IDS } from './pipelines/compile-pipeline.mjs';
+import {
+  isCompileStep as _isCompileStep,
+  COMPILE_STEP_IDS as _COMPILE_STEP_IDS,
+} from './pipelines/compile-pipeline.mjs';
 import {
   emitCompilationStarted,
   emitCompilationCompleted,
@@ -58,6 +62,7 @@ import {
   validatePartyTurnJob,
   validatePartyDocsSyncJob,
   validatePartyDocsUnlinkJob,
+  validatePartyRefreshJob,
   validateAppBootstrapJob,
   JOB_HANDLER_EPIC_DEV,
   JOB_HANDLER_PARTY_BOOTSTRAP,
@@ -65,6 +70,7 @@ import {
   JOB_HANDLER_PARTY_TURN,
   JOB_HANDLER_PARTY_DOCS_SYNC,
   JOB_HANDLER_PARTY_DOCS_UNLINK,
+  JOB_HANDLER_PARTY_REFRESH,
   JOB_HANDLER_APP_BOOTSTRAP,
 } from './pipelines/job-router.mjs';
 import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
@@ -73,6 +79,8 @@ import { runPartyInspect } from './pipelines/party-inspector.mjs';
 import { runPartyTurn } from './pipelines/party-turn.mjs';
 import { runPartyDocsSync } from './pipelines/party-docs-sync.mjs';
 import { runPartyDocsUnlink } from './pipelines/party-docs-unlink.mjs';
+// Story 15.4 — brownfield refresh pipeline.
+import { runPartyRefresh } from './pipelines/party-refresh.mjs';
 // Pipeline v2 / Story 1.4.3 — App-bootstrap saga (steps 3–5).
 import { runAppBootstrap } from './pipelines/app-bootstrap.mjs';
 import {
@@ -100,10 +108,7 @@ import {
   resolvePlanIdFromEpicId,
   addCostToPlan,
 } from './pipelines/lib/attention-writer.mjs';
-import {
-  assertSpawnAllowed,
-  ShellGuardViolation,
-} from './pipelines/lib/shell-guard.mjs';
+import { assertSpawnAllowed, ShellGuardViolation } from './pipelines/lib/shell-guard.mjs';
 import { mergeVisualTestsBlock } from './pipelines/lib/visual-tests-writer.mjs';
 // Pipeline v2.0 efficiency fixes T0.1 + PR-6(B) — detect step-output
 // completion in agent prose so forced terminations (COST_HARD, OAuth
@@ -135,7 +140,10 @@ try {
 } catch {
   // Fallback: try common locations
   for (const p of ['/usr/bin/claude', '/usr/local/bin/claude']) {
-    if (existsSync(p)) { CLAUDE_BIN = p; break; }
+    if (existsSync(p)) {
+      CLAUDE_BIN = p;
+      break;
+    }
   }
 }
 
@@ -154,7 +162,10 @@ const OAUTH_CREDS_PATH =
   process.env.CLAUDE_CREDENTIALS_PATH || '/home/ubuntu/.claude/.credentials.json';
 // Re-read OAuth file + probe hourly. Access tokens expire ~24h and the CLI
 // refreshes them per-invocation using the refresh_token, so hourly is plenty.
-const AUTH_PROBE_INTERVAL_MS = parseInt(process.env.AUTH_PROBE_INTERVAL_MS || String(60 * 60 * 1000), 10);
+const AUTH_PROBE_INTERVAL_MS = parseInt(
+  process.env.AUTH_PROBE_INTERVAL_MS || String(60 * 60 * 1000),
+  10,
+);
 const EVENT_LOG_DIR = process.env.FUTURATOR_EVENT_LOG_DIR || '/var/log/futurator/events';
 const FORWARDER_POLL_MS = parseInt(process.env.FORWARDER_POLL_MS || '250', 10);
 const DAEMON_RECEIVER_PORT = parseInt(process.env.FUTURATOR_DAEMON_PORT || '17631', 10);
@@ -179,10 +190,7 @@ const MAX_RETRIES = RETRY_DELAYS_MS.length;
 // the operator manually abandoned. T0.1's COST_HARD-after-DONE detector is
 // the primary fix; this is defense-in-depth for the case where dev fails
 // BEFORE emitting ---DONE---. Default 2 attempts (1 retry).
-const MAX_DEV_ATTEMPTS_PER_STORY = parseInt(
-  process.env.MAX_DEV_ATTEMPTS_PER_STORY || '2',
-  10,
-);
+const MAX_DEV_ATTEMPTS_PER_STORY = parseInt(process.env.MAX_DEV_ATTEMPTS_PER_STORY || '2', 10);
 const STORY_PIPELINE_MAX_RETRIES = Math.max(0, MAX_DEV_ATTEMPTS_PER_STORY - 1);
 
 // Pipeline v2.0 Efficiency Fix T0.2 — daemon-side pre-DEV gate.
@@ -384,8 +392,16 @@ function log(level, msg, data = {}) {
     msg,
     ...data,
   };
-  const prefix = { info: '\x1b[36mINFO\x1b[0m', warn: '\x1b[33mWARN\x1b[0m', error: '\x1b[31mERROR\x1b[0m', debug: '\x1b[90mDEBG\x1b[0m' };
-  console.log(`[${entry.ts}] ${prefix[level] || level} ${msg}`, Object.keys(data).length ? JSON.stringify(data) : '');
+  const prefix = {
+    info: '\x1b[36mINFO\x1b[0m',
+    warn: '\x1b[33mWARN\x1b[0m',
+    error: '\x1b[31mERROR\x1b[0m',
+    debug: '\x1b[90mDEBG\x1b[0m',
+  };
+  console.log(
+    `[${entry.ts}] ${prefix[level] || level} ${msg}`,
+    Object.keys(data).length ? JSON.stringify(data) : '',
+  );
 }
 
 // ── Push event to DynamoDB ──
@@ -589,10 +605,7 @@ async function runAgentWithAuthRecovery(jobId, stepId, agentId, prompt, opts = {
     // PR-6 (C): pre-spawn token-expiry check. Refresh-from-file if the access
     // token expires soon — cheap insurance against the race that bit dino1's
     // reviewer step.
-    if (
-      authState.expiresAt &&
-      authState.expiresAt - Date.now() < PRESPAWN_EXPIRY_THRESHOLD_MS
-    ) {
+    if (authState.expiresAt && authState.expiresAt - Date.now() < PRESPAWN_EXPIRY_THRESHOLD_MS) {
       log(
         'info',
         `[${jobId.slice(0, 8)}] pre-spawn: access token expires in <${Math.round(PRESPAWN_EXPIRY_THRESHOLD_MS / 60_000)}min, reloading OAuth file`,
@@ -724,7 +737,10 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
 
     // Track PID and model in heartbeat
     const entry = activeJobs.get(jobId);
-    if (entry) { entry.pid = proc.pid; entry.model = opts.model || 'default'; }
+    if (entry) {
+      entry.pid = proc.pid;
+      entry.model = opts.model || 'default';
+    }
 
     let buffer = '';
     let finalResult = null;
@@ -739,9 +755,10 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
     // Handle spawn failures (ENOENT, permissions, etc.)
     proc.on('error', (err) => {
       unregisterChild(jobId, proc);
-      const msg = err.code === 'ENOENT'
-        ? `Claude CLI not found at ${CLAUDE_BIN}. Is it installed?`
-        : `Failed to spawn claude: ${err.message}`;
+      const msg =
+        err.code === 'ENOENT'
+          ? `Claude CLI not found at ${CLAUDE_BIN}. Is it installed?`
+          : `Failed to spawn claude: ${err.message}`;
       log('error', msg);
       pushEvent(jobId, stepId, agentId, 'step_error', { text: msg });
       reject(new Error(msg));
@@ -768,10 +785,7 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
               typeof event.event.delta.text === 'string'
             ) {
               agentTextBuffer += event.event.delta.text;
-            } else if (
-              event.type === 'assistant' &&
-              Array.isArray(event.message?.content)
-            ) {
+            } else if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
               for (const block of event.message.content) {
                 if (block?.type === 'text' && typeof block.text === 'string') {
                   agentTextBuffer += block.text;
@@ -801,13 +815,17 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
       const allOutput = stderrBuffer + (finalResult?.result || '');
       const isAuthError = isAuthFailureOutput(allOutput);
       const silentZeroCost =
-        code === 0 && finalResult && (finalResult.total_cost_usd || 0) === 0 && !finalResult.result?.trim();
+        code === 0 &&
+        finalResult &&
+        (finalResult.total_cost_usd || 0) === 0 &&
+        !finalResult.result?.trim();
       const isRateLimit = /429|rate.?limit/i.test(allOutput);
 
       if (isAuthError || silentZeroCost) {
         // Mark auth as invalid so the next heartbeat reflects reality immediately.
         authState.valid = false;
-        authState.error = (silentZeroCost ? 'silent zero-cost failure' : allOutput.slice(0, 200)) || 'auth failure';
+        authState.error =
+          (silentZeroCost ? 'silent zero-cost failure' : allOutput.slice(0, 200)) || 'auth failure';
         authState.checkedAt = new Date().toISOString();
 
         // Pipeline v2.0 PR-6 (B) — save the buffer if the agent already
@@ -854,7 +872,8 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
       }
 
       if (isRateLimit) {
-        const msg = 'Claude Code rate limited (429). Too many concurrent requests. Retry in a moment.';
+        const msg =
+          'Claude Code rate limited (429). Too many concurrent requests. Retry in a moment.';
         log('warn', msg);
         pushEvent(jobId, stepId, agentId, 'step_error', { text: msg });
         return reject(new Error(msg));
@@ -876,7 +895,11 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
           log(
             'warn',
             `Step ${stepId}: forced termination (exit ${code}) AFTER ${completionKind} completion; treating as success`,
-            { bufferBytes: agentTextBuffer.length, completionKind, stderr: stderrBuffer.slice(0, 200) },
+            {
+              bufferBytes: agentTextBuffer.length,
+              completionKind,
+              stderr: stderrBuffer.slice(0, 200),
+            },
           );
           pushEvent(jobId, stepId, agentId, 'status', {
             text: `[SYSTEM] terminationReason=FORCED_TERMINATION_AFTER_OUTPUT (${completionKind}) — agent emitted completion markers before termination; treating as success`,
@@ -906,7 +929,9 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
         pushEvent(jobId, stepId, agentId, 'step_error', {
           text: `Step failed (exit ${code}): ${errorDetail.slice(0, 500)}`,
         });
-        return reject(new Error(`Step ${stepId} (agent ${agentId}) failed: ${errorDetail.slice(0, 200)}`));
+        return reject(
+          new Error(`Step ${stepId} (agent ${agentId}) failed: ${errorDetail.slice(0, 200)}`),
+        );
       }
 
       // Check if result contains auth error in text_delta
@@ -926,7 +951,8 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
       const cacheCreation = modelInfo.cacheCreationInputTokens || 0;
       const contextWindow = modelInfo.contextWindow || 0;
       const totalTokens = inputTokens + outputTokens + cacheCreation;
-      const contextPercent = contextWindow > 0 ? Math.round((totalTokens / contextWindow) * 100) : 0;
+      const contextPercent =
+        contextWindow > 0 ? Math.round((totalTokens / contextWindow) * 100) : 0;
 
       log('info', `Step ${stepId} complete`, {
         cost: `$${cost.toFixed(4)}`,
@@ -1240,7 +1266,9 @@ async function scanStaleEpicDevJobs() {
       log('warn', `Stale epic-dev job detected — resuming`, {
         staleJobId: job.jobId.slice(0, 8),
         newJobId: newJobId.slice(0, 8),
-        waves: resumeJob.resumeFromWaveResults ? Object.keys(resumeJob.resumeFromWaveResults).length : 0,
+        waves: resumeJob.resumeFromWaveResults
+          ? Object.keys(resumeJob.resumeFromWaveResults).length
+          : 0,
       });
 
       try {
@@ -1284,13 +1312,14 @@ async function scanStaleEpicDevJobs() {
           status: 'STALE',
           errorMessage: `Heartbeat stale >${Math.round(STALE_HEARTBEAT_MS / 1000)}s — daemon likely crashed mid-execution. Operator action required.`,
         });
-        log('warn', `[${job.jobId.slice(0, 8)}] non-orchestrator stale job marked STALE (phase=${job.phase || 'pipeline'})`);
+        log(
+          'warn',
+          `[${job.jobId.slice(0, 8)}] non-orchestrator stale job marked STALE (phase=${job.phase || 'pipeline'})`,
+        );
         // Best-effort attention item. Skip if the resolver can't find a planId
         // (legacy jobs without epicId linkage).
         try {
-          const planId = job.epicId
-            ? await resolvePlanIdFromEpicId(ddb, job.epicId)
-            : null;
+          const planId = job.epicId ? await resolvePlanIdFromEpicId(ddb, job.epicId) : null;
           if (planId) {
             await writeAttentionItem(
               ddb,
@@ -1320,7 +1349,10 @@ async function scanStaleEpicDevJobs() {
             );
           }
         } catch (attnErr) {
-          log('warn', `attention-item write failed for stale ${job.jobId.slice(0, 8)}: ${attnErr.message}`);
+          log(
+            'warn',
+            `attention-item write failed for stale ${job.jobId.slice(0, 8)}: ${attnErr.message}`,
+          );
         }
       } catch (err) {
         log('error', `Failed to mark ${job.jobId.slice(0, 8)} STALE: ${err.message}`);
@@ -1358,7 +1390,11 @@ async function executeShellStep(jobId, step, workingDir, variables) {
     } catch (err) {
       if (err instanceof ShellGuardViolation) {
         log('error', `shell-guard refused shell step ${step.id}: ${err.message}`, err.details);
-        handleGuardViolation(jobId, { ...err.details, command: command.slice(0, 200), stepId: step.id });
+        handleGuardViolation(jobId, {
+          ...err.details,
+          command: command.slice(0, 200),
+          stepId: step.id,
+        });
         return resolve({
           passed: false,
           stepResult: {
@@ -1427,15 +1463,25 @@ async function executeShellStep(jobId, step, workingDir, variables) {
 
     const timer = setTimeout(() => {
       killed = true;
-      log('warn', `[${jobId.slice(0, 8)}] Step ${step.id} exceeded ${timeout}ms — SIGKILL'ing process group`);
+      log(
+        'warn',
+        `[${jobId.slice(0, 8)}] Step ${step.id} exceeded ${timeout}ms — SIGKILL'ing process group`,
+      );
       // Negative pid sends signal to the whole process group (bash + npm +
       // vite + sub-shells). Fall back to per-proc kill if group kill is
       // rejected (e.g. EPERM).
       try {
         process.kill(-proc.pid, 'SIGKILL');
       } catch (e) {
-        log('warn', `[${jobId.slice(0, 8)}] group kill failed (${e.message}) — SIGKILL'ing bash alone`);
-        try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+        log(
+          'warn',
+          `[${jobId.slice(0, 8)}] group kill failed (${e.message}) — SIGKILL'ing bash alone`,
+        );
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+          /* ignore */
+        }
       }
       // Safety net: if proc.on('close') doesn't fire within 5s of SIGKILL,
       // force-resolve the Promise so the job's slot is freed regardless.
@@ -1499,13 +1545,15 @@ async function executeShellStep(jobId, step, workingDir, variables) {
         cost: 0,
         durationMs,
         extractedVariables: {},
-        validationResults: [{
-          label: `exit code ${code}${killed ? ' (timeout)' : ''}`,
-          passed,
-          details: passed
-            ? `Exited ${code} as expected`
-            : `Expected ${expectCode}, got ${code}${killed ? ' (killed)' : ''}. stderr: ${stderr.slice(0, 300)}`,
-        }],
+        validationResults: [
+          {
+            label: `exit code ${code}${killed ? ' (timeout)' : ''}`,
+            passed,
+            details: passed
+              ? `Exited ${code} as expected`
+              : `Expected ${expectCode}, got ${code}${killed ? ' (killed)' : ''}. stderr: ${stderr.slice(0, 300)}`,
+          },
+        ],
       };
 
       await pushEvent(jobId, step.id, '__shell__', passed ? 'step_complete' : 'step_error', {
@@ -1553,7 +1601,7 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   const entry = activeJobs.get(jobId);
   if (entry) {
     entry.stepId = step.id;
-    entry.agentId = step.stepType === 'shell' ? '__shell__' : (step.agentId || null);
+    entry.agentId = step.stepType === 'shell' ? '__shell__' : step.agentId || null;
   }
 
   // ── Branch on step type ──
@@ -1594,7 +1642,10 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
     if (resumeSession) {
       log('info', `Resuming session from step ${step.resumeFromStep}: ${resumeSession}`);
     } else {
-      log('warn', `Step ${step.id} wants to resume from ${step.resumeFromStep} but no session found`);
+      log(
+        'warn',
+        `Step ${step.id} wants to resume from ${step.resumeFromStep} but no session found`,
+      );
     }
   }
 
@@ -1608,9 +1659,8 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   // in the forensic via `step.append_system_prompt_sha`.
   const effectiveCwd = workingDir || process.env.HOME;
   const claudeMd = readClaudeMd(effectiveCwd);
-  const appendSystemPrompt = claudeMd && !claudeMd.truncated
-    ? `# Project CLAUDE.md\n\n${claudeMd.content}`
-    : undefined;
+  const appendSystemPrompt =
+    claudeMd && !claudeMd.truncated ? `# Project CLAUDE.md\n\n${claudeMd.content}` : undefined;
   if (claudeMd) {
     pushEvent(jobId, step.id, step.agentId, 'claude_md_loaded', {
       text: `CLAUDE.md ${claudeMd.truncated ? 'truncated' : 'loaded'} from ${effectiveCwd}`,
@@ -1764,11 +1814,7 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
           text: `visual-tests.md updated (${merge.totalEntries || 0} entries; +${merge.appendedRefs?.length || 0} new, ~${merge.replacedRefs?.length || 0} replaced)`,
         });
       } else {
-        log(
-          'error',
-          `visual-tests.md merge FAILED: ${merge.reason}`,
-          { path: merge.path },
-        );
+        log('error', `visual-tests.md merge FAILED: ${merge.reason}`, { path: merge.path });
         await pushEvent(jobId, step.id, step.agentId, 'step_error', {
           text: `visual-tests.md write failed: ${merge.reason}`,
         });
@@ -1782,8 +1828,7 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
                 severity: 'medium',
                 category: 'compile-sync-failed',
                 title: `visual-tests.md write failed`,
-                body:
-                  `The DEV agent emitted a VISUAL_TESTS block but it could not be parsed into ${merge.path}: ${merge.reason}. The reviewer will not see the visual tests this run.`,
+                body: `The DEV agent emitted a VISUAL_TESTS block but it could not be parsed into ${merge.path}: ${merge.reason}. The reviewer will not see the visual tests this run.`,
                 context: {
                   jobId,
                   epicId: variables.EPIC_ID,
@@ -1956,9 +2001,7 @@ async function inferAndPersistTouchPointsIfEmpty(jobId, variables, workingDir) {
         title: story.title,
         description: story.description,
         acceptanceCriteria:
-          (story.criteria || [])
-            .map((c) => `- ${c.text || c.description || ''}`)
-            .join('\n') || '',
+          (story.criteria || []).map((c) => `- ${c.text || c.description || ''}`).join('\n') || '',
       },
       opts: { skipLlm: !TOUCH_POINT_LLM_FALLBACK_ENABLED },
     });
@@ -1990,7 +2033,10 @@ async function inferAndPersistTouchPointsIfEmpty(jobId, variables, workingDir) {
       source: result.source,
     });
     if (persisted.updated) {
-      log('info', `[${jobId.slice(0, 8)}] persisted ${result.touchPoints.length} touchPoint(s) to epic row`);
+      log(
+        'info',
+        `[${jobId.slice(0, 8)}] persisted ${result.touchPoints.length} touchPoint(s) to epic row`,
+      );
     }
   } catch (err) {
     // Persistence failure is non-fatal — the inference still informs the
@@ -2073,7 +2119,11 @@ async function executePipeline(job) {
   const maxIterations = pipeline.maxIterations || 1;
   const workingDir = job.workingDir;
 
-  const variables = { ITERATION: '1', MAX_ITERATIONS: String(maxIterations), ...(pipeline.initialVariables || {}) };
+  const variables = {
+    ITERATION: '1',
+    MAX_ITERATIONS: String(maxIterations),
+    ...(pipeline.initialVariables || {}),
+  };
 
   // PR-11 #2 — assemble the Story Context Pack (Epic B.2) and inject as
   // PROJECT_CONTEXT so the reviewer prompt's `<project_context>` actually
@@ -2108,10 +2158,7 @@ async function executePipeline(job) {
       if (failure) {
         log('warn', `[${jobId.slice(0, 8)}] context pack stub (${reason}): ${failure}`);
       } else {
-        log(
-          'info',
-          `[${jobId.slice(0, 8)}] context pack ${reason} (${body.length} chars)`,
-        );
+        log('info', `[${jobId.slice(0, 8)}] context pack ${reason} (${body.length} chars)`);
       }
       // PR-51 — when validation fails, emit a medium-severity attention
       // item so the operator knows the agent is running with a
@@ -2139,11 +2186,17 @@ async function executePipeline(job) {
             (level, msg, data) => log(level, msg, data),
           );
         } catch (attnErr) {
-          log('warn', `[${jobId.slice(0, 8)}] attention.context-pack-invalid emit failed: ${attnErr.message}`);
+          log(
+            'warn',
+            `[${jobId.slice(0, 8)}] attention.context-pack-invalid emit failed: ${attnErr.message}`,
+          );
         }
       }
     } catch (err) {
-      log('error', `[${jobId.slice(0, 8)}] context pack resolver threw (${reason}): ${err.message}`);
+      log(
+        'error',
+        `[${jobId.slice(0, 8)}] context pack resolver threw (${reason}): ${err.message}`,
+      );
       variables.PROJECT_CONTEXT = `<!-- context pack failed: ${err.message} -->`;
     }
   }
@@ -2167,7 +2220,10 @@ async function executePipeline(job) {
     ? [...pipeline.initialStepResults]
     : [];
   const completedStepIds = new Set(
-    stepResults.filter((sr) => sr?.status === 'complete').map((sr) => sr?.stepId).filter(Boolean),
+    stepResults
+      .filter((sr) => sr?.status === 'complete')
+      .map((sr) => sr?.stepId)
+      .filter(Boolean),
   );
   const isRetryResume = stepResults.length > 0 || Object.keys(sessions).length > 0;
   if (isRetryResume) {
@@ -2189,7 +2245,10 @@ async function executePipeline(job) {
   // Check if this pipeline has compile steps
   const hasCompileSteps = steps.some((s) => isCompileStep(s.id));
 
-  log('info', `Pipeline starting: ${steps.length} steps, ${Object.keys(agents).length} agents, maxIterations: ${maxIterations}`);
+  log(
+    'info',
+    `Pipeline starting: ${steps.length} steps, ${Object.keys(agents).length} agents, maxIterations: ${maxIterations}`,
+  );
   if (loopTargetIds.size > 0) {
     log('info', `Loop-only steps (skipped in linear flow): [${[...loopTargetIds].join(', ')}]`);
   }
@@ -2215,7 +2274,10 @@ async function executePipeline(job) {
     try {
       const gateResult = await runPreworkGateForJob(job, variables, workingDir);
       if (gateResult.shouldSkipDev) {
-        log('info', `[${jobId.slice(0, 8)}] prework gate PASSED — skipping DEV; reason: ${gateResult.reason}`);
+        log(
+          'info',
+          `[${jobId.slice(0, 8)}] prework gate PASSED — skipping DEV; reason: ${gateResult.reason}`,
+        );
         await pushEvent(jobId, '__prework_gate__', 'orchestrator', 'status', {
           text: `[SYSTEM] prework-gate=skip-dev — ${gateResult.reason}`,
         });
@@ -2233,7 +2295,10 @@ async function executePipeline(job) {
         await autoResolveStoryAttentionOnSuccess(jobId, variables);
         return;
       }
-      log('info', `[${jobId.slice(0, 8)}] prework gate fell through — spawning DEV; reason: ${gateResult.reason}`);
+      log(
+        'info',
+        `[${jobId.slice(0, 8)}] prework gate fell through — spawning DEV; reason: ${gateResult.reason}`,
+      );
       await pushEvent(jobId, '__prework_gate__', 'orchestrator', 'status', {
         text: `[SYSTEM] prework-gate=spawn-dev — ${gateResult.reason}`,
       });
@@ -2272,12 +2337,7 @@ async function executePipeline(job) {
     // step's session (warm cache, conversation history). The agent's text
     // history still reflects what already happened on the previous attempt;
     // the daemon doesn't need to re-feed prior context.
-    if (
-      isRetryResume &&
-      step.stepType !== 'shell' &&
-      !step.resumeFromStep &&
-      sessions[step.id]
-    ) {
+    if (isRetryResume && step.stepType !== 'shell' && !step.resumeFromStep && sessions[step.id]) {
       step.resumeFromStep = step.id; // resolve via sessions[step.resumeFromStep]
       log(
         'info',
@@ -2324,11 +2384,21 @@ async function executePipeline(job) {
           projectId: variables.PROJECT_ID || 'unknown',
           workingDir,
         };
-        compilationStartedAt = await emitCompilationStarted(pushEvent, jobId, compilationCtx) || new Date().toISOString();
+        compilationStartedAt =
+          (await emitCompilationStarted(pushEvent, jobId, compilationCtx)) ||
+          new Date().toISOString();
       }
 
       try {
-        const { allPassed } = await executeStep(jobId, step, agents, workingDir, variables, sessions, stepResults);
+        const { allPassed } = await executeStep(
+          jobId,
+          step,
+          agents,
+          workingDir,
+          variables,
+          sessions,
+          stepResults,
+        );
 
         if (!allPassed) {
           throw new Error(`Compile step ${step.id} did not pass`);
@@ -2351,7 +2421,10 @@ async function executePipeline(job) {
             workingDir,
           };
 
-          log('info', `Compilation phase SUCCEEDED (${durationMs}ms, ${articleCounts.created} created, ${articleCounts.updated} updated, ${articleCounts.superseded} superseded)`);
+          log(
+            'info',
+            `Compilation phase SUCCEEDED (${durationMs}ms, ${articleCounts.created} created, ${articleCounts.updated} updated, ${articleCounts.superseded} superseded)`,
+          );
 
           await emitCompilationCompleted(pushEvent, jobId, compilationCtx, {
             status: 'success',
@@ -2385,7 +2458,13 @@ async function executePipeline(job) {
         log('warn', `Compilation step ${step.id} failed (NON-BLOCKING): ${compileErr.message}`);
 
         // Emit typed compilation-failed event via compile-events module
-        await emitCompilationFailed(pushEvent, jobId, compilationCtx, compileErr, compilationStartedAt);
+        await emitCompilationFailed(
+          pushEvent,
+          jobId,
+          compilationCtx,
+          compileErr,
+          compilationStartedAt,
+        );
 
         // PR-14e — surface compile failures in the attention inbox.
         // Compile is non-blocking by design (knowledge graph rebuild is
@@ -2449,7 +2528,15 @@ async function executePipeline(job) {
     }
 
     // ── Standard (non-compile) step execution ──
-    const { allPassed } = await executeStep(jobId, step, agents, workingDir, variables, sessions, stepResults);
+    const { allPassed } = await executeStep(
+      jobId,
+      step,
+      agents,
+      workingDir,
+      variables,
+      sessions,
+      stepResults,
+    );
 
     // ── Loop logic: if validations failed and loopTo is set, retry ──
     if (!allPassed && step.loopTo) {
@@ -2464,7 +2551,10 @@ async function executePipeline(job) {
         variables.ITERATION = String(iteration + 1); // 1st attempt was iteration 1, this is 2+
         variables.MAX_ITERATIONS = String(maxIterations);
 
-        log('info', `\n*** LOOP iteration ${iteration}/${maxIterations - 1}: running "${retryStep.id}" then re-checking "${step.id}" (attempt ${iteration + 1}/${maxIterations}) ***`);
+        log(
+          'info',
+          `\n*** LOOP iteration ${iteration}/${maxIterations - 1}: running "${retryStep.id}" then re-checking "${step.id}" (attempt ${iteration + 1}/${maxIterations}) ***`,
+        );
 
         await pushEvent(jobId, step.id, step.agentId || '__shell__', 'status', {
           text: `Loop iteration ${iteration}: re-running ${retryStep.id} then ${step.id} (attempt ${iteration + 1}/${maxIterations})`,
@@ -2474,7 +2564,15 @@ async function executePipeline(job) {
         await executeStep(jobId, retryStep, agents, workingDir, variables, sessions, stepResults);
 
         // Re-run the gate step (the one with loopTo)
-        const recheck = await executeStep(jobId, step, agents, workingDir, variables, sessions, stepResults);
+        const recheck = await executeStep(
+          jobId,
+          step,
+          agents,
+          workingDir,
+          variables,
+          sessions,
+          stepResults,
+        );
 
         if (recheck.allPassed) {
           log('info', `Loop resolved after ${iteration} iteration(s)`);
@@ -2492,9 +2590,10 @@ async function executePipeline(job) {
   const totalCost = stepResults.reduce((sum, sr) => sum + (sr.cost || 0), 0);
 
   // Parse article counts if compilation succeeded
-  const compilationArticleCounts = compilationStatus === 'success'
-    ? parseArticleCounts(variables.COMPILE_RESULT || '')
-    : undefined;
+  const compilationArticleCounts =
+    compilationStatus === 'success'
+      ? parseArticleCounts(variables.COMPILE_RESULT || '')
+      : undefined;
 
   await updateJobFields(jobId, {
     status: 'COMPLETED',
@@ -2526,10 +2625,16 @@ async function executePipeline(job) {
     log('warn', `[${jobId.slice(0, 8)}] post-deploy writeback threw: ${err?.message || err}`),
   );
 
-  log('info', `\nPipeline COMPLETED. Total cost: $${totalCost.toFixed(4)}${compilationStatus ? ` | Compilation: ${compilationStatus}` : ''}`);
-  log('info', `Final variables: ${JSON.stringify(Object.fromEntries(
-    Object.entries(variables).map(([k, v]) => [k, v.slice(0, 60)])
-  ))}`);
+  log(
+    'info',
+    `\nPipeline COMPLETED. Total cost: $${totalCost.toFixed(4)}${compilationStatus ? ` | Compilation: ${compilationStatus}` : ''}`,
+  );
+  log(
+    'info',
+    `Final variables: ${JSON.stringify(
+      Object.fromEntries(Object.entries(variables).map(([k, v]) => [k, v.slice(0, 60)])),
+    )}`,
+  );
 }
 
 // ── Epic-dev pipeline dispatcher (EO-4.3) ──
@@ -2600,10 +2705,48 @@ const PARTY_BMAD_AGENTS_SOURCE =
   process.env.BMAD_AGENTS_SOURCE || '/home/ubuntu/bmad-agents-source/bmad/agents';
 const PARTY_BMAD_AGENTS_SOURCE_REPO =
   process.env.BMAD_AGENTS_SOURCE_REPO || '/home/ubuntu/bmad-agents-source';
-const PARTY_EXPECTED_AGENT_COUNT = parseInt(
-  process.env.PARTY_EXPECTED_AGENT_COUNT || '6',
-  10,
-);
+const PARTY_EXPECTED_AGENT_COUNT = parseInt(process.env.PARTY_EXPECTED_AGENT_COUNT || '6', 10);
+
+// Story 15.4 — brownfield PAT. Loaded once at daemon startup from Secrets
+// Manager. Kept in module scope (never written to DDB, never logged, never
+// emitted in events). If the load fails (secret missing, IAM denied), the
+// daemon continues — only brownfield bootstrap/refresh jobs fail with a
+// clear "PAT not loaded" error. Greenfield jobs are unaffected.
+const BROWNFIELD_PAT_SECRET_NAME =
+  process.env.BROWNFIELD_PAT_SECRET_NAME || 'futurator/labs-brownfield-github-pat';
+let brownfieldGithubToken = null;
+
+const secretsClient = new SecretsManagerClient({ region: REGION });
+
+async function loadBrownfieldPat() {
+  try {
+    const result = await secretsClient.send(
+      new GetSecretValueCommand({ SecretId: BROWNFIELD_PAT_SECRET_NAME }),
+    );
+    const value = result?.SecretString;
+    if (!value) {
+      log('warn', `[brownfield-pat] secret ${BROWNFIELD_PAT_SECRET_NAME} has no SecretString`);
+      return;
+    }
+    // Accept both raw token strings and JSON-wrapped { token: "..." } forms.
+    let token = value;
+    if (value.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(value);
+        token = parsed.token || parsed.pat || value;
+      } catch {
+        // fall back to raw value
+      }
+    }
+    brownfieldGithubToken = token;
+    log('info', '[brownfield-pat] loaded — brownfield party bootstrap/refresh enabled');
+  } catch (err) {
+    log(
+      'warn',
+      `[brownfield-pat] failed to load secret ${BROWNFIELD_PAT_SECRET_NAME}: ${err.message} — brownfield jobs will fail until this is resolved`,
+    );
+  }
+}
 
 async function updatePartyProjectState(projectId, patch) {
   const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
@@ -2679,6 +2822,57 @@ async function partyIncrementTurn(sessionId) {
   );
 }
 
+/**
+ * Story 15.4 — atomically transition HEALTHY|DRIFTED → REFRESHING. Mirrors
+ * the API-side tryAcquireRefreshLock in functions/shared/repositories.
+ */
+async function partyTryAcquireRefreshLock(projectId) {
+  const now = new Date().toISOString();
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: PARTY_PROJECTS_TABLE,
+        Key: { projectId },
+        UpdateExpression: 'SET bmadStatus = :refreshing, updatedAt = :now',
+        ConditionExpression: 'attribute_exists(projectId) AND bmadStatus IN (:healthy, :drifted)',
+        ExpressionAttributeValues: {
+          ':refreshing': 'REFRESHING',
+          ':now': now,
+          ':healthy': 'HEALTHY',
+          ':drifted': 'DRIFTED',
+        },
+      }),
+    );
+    return { ok: true };
+  } catch (err) {
+    if (err?.name === 'ConditionalCheckFailedException') {
+      return { ok: false, reason: 'REFRESH_IN_PROGRESS_OR_INVALID_STATE' };
+    }
+    throw err;
+  }
+}
+
+async function partyReleaseRefreshLock(projectId, next) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: PARTY_PROJECTS_TABLE,
+      Key: { projectId },
+      UpdateExpression: 'SET bmadStatus = :next, updatedAt = :now',
+      ExpressionAttributeValues: {
+        ':next': next,
+        ':now': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+async function partyUpdateProjectAfterRefresh(projectId, patch) {
+  await updatePartyProjectState(projectId, {
+    ...patch,
+    lastInspectedAt: patch.lastPulledAt,
+  });
+}
+
 async function partyReleaseSessionLock(sessionId, finalStatus) {
   await ddb.send(
     new UpdateCommand({
@@ -2703,6 +2897,11 @@ function buildPartyCtx() {
     customAgentsSourceRepo: PARTY_BMAD_AGENTS_SOURCE_REPO,
     expectedAgentCount: PARTY_EXPECTED_AGENT_COUNT,
     projectsRoot: PARTY_PROJECTS_ROOT,
+    // Story 15.4 — brownfield wiring. brownfieldToken stays in module scope.
+    brownfieldToken: brownfieldGithubToken,
+    tryAcquireRefreshLock: partyTryAcquireRefreshLock,
+    releaseRefreshLock: partyReleaseRefreshLock,
+    updateProjectAfterRefresh: partyUpdateProjectAfterRefresh,
   };
 }
 
@@ -2737,6 +2936,35 @@ async function executePartyBootstrapJob(job) {
 
   await updateJobFields(jobId, { status: 'COMPLETED' });
   log('info', `[${short}] party-bootstrap completed`);
+}
+
+/**
+ * Story 15.4 — brownfield refresh job dispatch.
+ */
+async function executePartyRefreshJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  const validation = validatePartyRefreshJob(job);
+  if (!validation.ok) {
+    throw new Error(`party-refresh job rejected: ${validation.reason}`);
+  }
+
+  log('info', `[${short}] Routing to party-refresh pipeline`, {
+    projectId: job.partyRefreshPayload?.projectId,
+    gitBranch: job.partyRefreshPayload?.gitBranch,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'party-refresh',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  await runPartyRefresh(job, buildPartyCtx());
+
+  await updateJobFields(jobId, { status: 'COMPLETED' });
+  log('info', `[${short}] party-refresh completed`);
 }
 
 async function executePartyInspectJob(job) {
@@ -2905,7 +3133,9 @@ async function postDeployWriteback(job, variables) {
   const short = job.jobId.slice(0, 8);
   let epic;
   try {
-    const er = await ddb.send(new GetCommand({ TableName: EPICS_TABLE, Key: { epicId: job.epicId } }));
+    const er = await ddb.send(
+      new GetCommand({ TableName: EPICS_TABLE, Key: { epicId: job.epicId } }),
+    );
     epic = er.Item;
   } catch (err) {
     log('warn', `[${short}] post-deploy: epic read failed: ${err.message}`);
@@ -2915,7 +3145,9 @@ async function postDeployWriteback(job, variables) {
 
   let plan;
   try {
-    const pr = await ddb.send(new GetCommand({ TableName: PLANS_TABLE, Key: { planId: epic.planId } }));
+    const pr = await ddb.send(
+      new GetCommand({ TableName: PLANS_TABLE, Key: { planId: epic.planId } }),
+    );
     plan = pr.Item;
   } catch (err) {
     log('warn', `[${short}] post-deploy: plan read failed: ${err.message}`);
@@ -2951,12 +3183,17 @@ async function postDeployWriteback(job, variables) {
   // Update App row: currentlyDeployedPlanId + deployJobIds append.
   // Skip when plan has no appId (legacy non-App-scoped plan — nothing to update).
   if (!plan.appId) {
-    log('info', `[${short}] post-deploy: plan ${plan.planId} has no appId — App writeback skipped (legacy plan)`);
+    log(
+      'info',
+      `[${short}] post-deploy: plan ${plan.planId} has no appId — App writeback skipped (legacy plan)`,
+    );
     return;
   }
   try {
     // Read existing deployJobIds to dedupe before append.
-    const ar = await ddb.send(new GetCommand({ TableName: APPS_TABLE, Key: { appId: plan.appId } }));
+    const ar = await ddb.send(
+      new GetCommand({ TableName: APPS_TABLE, Key: { appId: plan.appId } }),
+    );
     const app = ar.Item;
     if (!app) {
       log('warn', `[${short}] post-deploy: App ${plan.appId} not found — App writeback skipped`);
@@ -2994,9 +3231,7 @@ async function postDeployWriteback(job, variables) {
 // context for the BMAD step and the shared attention-writer for failure
 // surfacing.
 async function getAppRow(appId) {
-  const result = await ddb.send(
-    new GetCommand({ TableName: APPS_TABLE, Key: { appId } }),
-  );
+  const result = await ddb.send(new GetCommand({ TableName: APPS_TABLE, Key: { appId } }));
   return result.Item || null;
 }
 
@@ -3072,15 +3307,24 @@ async function runJobAsync(job) {
   activeJobs.set(job.jobId, {
     startedAt: new Date().toISOString(),
     workingDir: job.workingDir || '',
-    stepId: null, agentId: null, pid: null, model: null,
+    stepId: null,
+    agentId: null,
+    pid: null,
+    model: null,
   });
   jobEventSeqs.set(job.jobId, 0);
 
   const handler = selectHandler(job);
-  log('info', `[${job.jobId.slice(0, 8)}] Job started (${activeJobs.size}/${MAX_CONCURRENT} concurrent) handler=${handler}`);
+  log(
+    'info',
+    `[${job.jobId.slice(0, 8)}] Job started (${activeJobs.size}/${MAX_CONCURRENT} concurrent) handler=${handler}`,
+  );
   if (handler !== JOB_HANDLER_EPIC_DEV) {
     log('info', `[${job.jobId.slice(0, 8)}]   Steps: ${job.pipeline?.steps?.length || 0}`);
-    log('info', `[${job.jobId.slice(0, 8)}]   Agents: ${Object.keys(job.pipeline?.agents || {}).join(', ')}`);
+    log(
+      'info',
+      `[${job.jobId.slice(0, 8)}]   Agents: ${Object.keys(job.pipeline?.agents || {}).join(', ')}`,
+    );
   }
 
   try {
@@ -3096,6 +3340,8 @@ async function runJobAsync(job) {
       await executePartyDocsSyncJob(job);
     } else if (handler === JOB_HANDLER_PARTY_DOCS_UNLINK) {
       await executePartyDocsUnlinkJob(job);
+    } else if (handler === JOB_HANDLER_PARTY_REFRESH) {
+      await executePartyRefreshJob(job);
     } else if (handler === JOB_HANDLER_APP_BOOTSTRAP) {
       await executeAppBootstrapJob(job);
     } else {
@@ -3175,7 +3421,11 @@ async function handleJobFailure(job, err) {
   if (isAuthRecoveryExhausted) {
     await updateJobFields(job.jobId, {
       status: 'NEEDS_ATTENTION',
-      errorMessage: `OAuth recovery failed after ${err?.authRecoveryAttempts || 2} reload attempts: ${message}`.slice(0, 500),
+      errorMessage:
+        `OAuth recovery failed after ${err?.authRecoveryAttempts || 2} reload attempts: ${message}`.slice(
+          0,
+          500,
+        ),
       triggeredBy: 'AUTH_RECOVERY_EXHAUSTED',
     });
     try {
@@ -3229,9 +3479,7 @@ async function handleJobFailure(job, err) {
       : `retry exhausted after ${effectiveMaxRetries} attempts: ${message}`,
     // T0.3 — surface the trigger reason on the job row so the UI can
     // disambiguate "step failed once" from "exhausted dev budget".
-    ...(isStoryPipeline && !nonRetriable
-      ? { triggeredBy: 'DEV_RETRY_BUDGET_EXHAUSTED' }
-      : {}),
+    ...(isStoryPipeline && !nonRetriable ? { triggeredBy: 'DEV_RETRY_BUDGET_EXHAUSTED' } : {}),
   });
 
   if (!nonRetriable) {
@@ -3250,16 +3498,15 @@ async function handleJobFailure(job, err) {
           ? `Story DEV step failed ${effectiveMaxRetries + 1} time(s) without emitting ---DONE---. ` +
             `If the scaffold already implements the AC, salvage with the last WORK_SUMMARY. ` +
             `Final error: ${message.slice(0, 300)}`
-          : `Step exhausted its retry budget (${RETRY_DELAYS_MS
-              .map((d) => `${Math.round(d / 1000)}s`)
-              .join(' / ')}). Final error: ${message.slice(0, 300)}`;
+          : `Step exhausted its retry budget (${RETRY_DELAYS_MS.map(
+              (d) => `${Math.round(d / 1000)}s`,
+            ).join(' / ')}). Final error: ${message.slice(0, 300)}`;
         // PR-7 (G): one row per (story, exhaustion-category). A retry that
         // fails again bumps recurrence; a successful retry auto-resolves
         // the row via PR-7 (I) in executePipeline.
         const storyId = job.pipeline?.initialVariables?.STORY_ID;
-        const dedupKey = isStoryPipeline && storyId
-          ? `${category}:${storyId}`
-          : `${category}:${job.jobId}`;
+        const dedupKey =
+          isStoryPipeline && storyId ? `${category}:${storyId}` : `${category}:${job.jobId}`;
         await writeAttentionItem(
           ddb,
           {
@@ -3308,7 +3555,10 @@ async function poll() {
     const buf = readFileSync(selfPath);
     const sha = createHash('sha256').update(buf).digest('hex').slice(0, 12);
     const stat = statSync(selfPath);
-    log('info', `  Build:      sha256=${sha} mtime=${stat.mtime.toISOString()} bytes=${buf.length}`);
+    log(
+      'info',
+      `  Build:      sha256=${sha} mtime=${stat.mtime.toISOString()} bytes=${buf.length}`,
+    );
   } catch (err) {
     log('warn', `  Build:      <fingerprint failed: ${err.message}>`);
   }
@@ -3517,7 +3767,10 @@ async function shutdown(signal) {
 
   // Step 1: SIGTERM every tracked child so they can flush and exit cleanly.
   const signaled = signalAllChildren('SIGTERM');
-  log('info', `SIGTERM sent to ${signaled} tracked children — waiting up to ${GRACEFUL_SHUTDOWN_MS}ms`);
+  log(
+    'info',
+    `SIGTERM sent to ${signaled} tracked children — waiting up to ${GRACEFUL_SHUTDOWN_MS}ms`,
+  );
 
   // Step 2: wait for children to exit, or the window elapses.
   const allExited = await waitForAllChildrenToExit(GRACEFUL_SHUTDOWN_MS);
@@ -3611,10 +3864,7 @@ process.on('SIGUSR1', async () => {
     try {
       const result = federationCache.refresh();
       if (result.error) {
-        log(
-          'error',
-          `SIGUSR1 federation refresh fell back: ${result.error} (path=${result.path})`,
-        );
+        log('error', `SIGUSR1 federation refresh fell back: ${result.error} (path=${result.path})`);
       } else if (result.changed) {
         log(
           'info',
@@ -3646,7 +3896,7 @@ async function configureGitIdentity() {
   const scriptPath = new URL('./scripts/configure-git-identity.sh', import.meta.url).pathname;
   await new Promise((resolve, reject) => {
     const child = spawn('bash', [scriptPath], { stdio: 'inherit' });
-    child.on('exit', code => {
+    child.on('exit', (code) => {
       if (code === 0) resolve();
       else reject(new Error(`configure-git-identity.sh exited ${code}`));
     });
@@ -3673,10 +3923,7 @@ async function configureGitIdentity() {
     federationCache = createFederationCache(federationPath);
     const { manifest, source, path: loadedPath, error } = federationCache.get();
     if (error) {
-      log(
-        'error',
-        `federation-loader: ${error} (path=${loadedPath}) — using embedded default`,
-      );
+      log('error', `federation-loader: ${error} (path=${loadedPath}) — using embedded default`);
     } else {
       log(
         'info',
@@ -3686,10 +3933,7 @@ async function configureGitIdentity() {
     // Start the daily S3 backup. Disabled in env=test or when explicitly
     // opted out — operators on tiny EBS quotas can skip the S3 write.
     if (process.env.FUTURATOR_FEDERATION_BACKUP_DISABLED !== '1') {
-      federationBackupHandles = startFederationBackupSchedule(
-        () => federationCache?.get(),
-        log,
-      );
+      federationBackupHandles = startFederationBackupSchedule(() => federationCache?.get(), log);
       log('info', 'federation-backup: daily schedule armed');
     }
     // Story 3-C-1-2 — resolver built on top of the cache. SKILL-SCOUT
@@ -3720,6 +3964,10 @@ async function configureGitIdentity() {
     // gracefully (those agents check memoryStore != null before using).
     log('error', `memory-store setup failed: ${err.message}`);
   }
+
+  // Story 15.4 — load the brownfield PAT once. Non-fatal: a missing/denied
+  // secret leaves brownfieldGithubToken=null and only brownfield jobs fail.
+  await loadBrownfieldPat();
 
   poll();
 })();

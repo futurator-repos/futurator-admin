@@ -1,23 +1,22 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import { formatDistanceToNow } from 'date-fns';
-import { Plus } from 'lucide-react';
+import { GitBranch, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { SessionChatV2 } from './v2/session-chat-v2';
 import { BootstrapProgress } from './bootstrap-progress';
 import { ProjectStatusBadge } from './project-status-badge';
 import { WelcomeEmpty } from './welcome-empty';
+import { AddBrownfieldForm } from './add-brownfield-form';
 import { usePartyStore } from '@/stores/party-store';
 import { useLabsStore, normalizeAppName } from '@/stores/labs-store';
 import {
   usePartyProjects,
   useBootstrapMutation,
   useInspectMutation,
+  useRefreshProjectMutation,
 } from '@/hooks/use-party-projects';
-import {
-  useCreateSessionMutation,
-  useSessionsForProject,
-} from '@/hooks/use-party-sessions';
+import { useCreateSessionMutation, useSessionsForProject } from '@/hooks/use-party-sessions';
 import { useCreatePartyProject } from '@/hooks/use-party-docs';
 import type { PartyProject, PartySession } from '@/types/party';
 
@@ -41,6 +40,7 @@ export function Party({ projectIdOverride }: PartyProps = {}) {
   const { data } = usePartyProjects();
   const bootstrap = useBootstrapMutation();
   const inspect = useInspectMutation();
+  const refresh = useRefreshProjectMutation();
   const createSession = useCreateSessionMutation();
   const createProject = useCreatePartyProject();
 
@@ -106,15 +106,18 @@ export function Party({ projectIdOverride }: PartyProps = {}) {
       );
     }
     return (
-      <PartyProjectChooser
-        projects={projects}
-        onSelect={(id) => setActiveAppName(id)}
-        onCreate={async (name) => {
-          const result = await createProject.mutateAsync(name);
-          setActiveAppName(result.projectId);
-        }}
-        creating={createProject.isPending}
-      />
+      <>
+        <PartyProjectChooser
+          projects={projects}
+          onSelect={(id) => setActiveAppName(id)}
+          onCreate={async (name) => {
+            const result = await createProject.mutateAsync(name);
+            setActiveAppName(result.projectId);
+          }}
+          creating={createProject.isPending}
+        />
+        <AddBrownfieldForm />
+      </>
     );
   }
 
@@ -154,9 +157,7 @@ export function Party({ projectIdOverride }: PartyProps = {}) {
                 ← {project.projectId}
               </button>
             ) : (
-              <span className="text-[11px] font-semibold text-foreground">
-                {project.projectId}
-              </span>
+              <span className="text-[11px] font-semibold text-foreground">{project.projectId}</span>
             )}
             <span className="font-mono">{project.path}</span>
             {project.bmadVersion && (
@@ -171,15 +172,28 @@ export function Party({ projectIdOverride }: PartyProps = {}) {
             )}
           </div>
           <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-[11px]"
-              disabled={inspect.isPending}
-              onClick={() => inspect.mutate(project.projectId)}
-            >
-              {inspect.isPending ? 'Inspecting…' : 'Re-inspect'}
-            </Button>
+            {project.kind === 'brownfield' ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-[11px]"
+                disabled={refresh.isPending}
+                onClick={() => refresh.mutate(project.projectId)}
+                data-testid={`brownfield-refresh-${project.projectId}`}
+              >
+                {refresh.isPending ? 'Refreshing…' : 'Refresh'}
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-[11px]"
+                disabled={inspect.isPending}
+                onClick={() => inspect.mutate(project.projectId)}
+              >
+                {inspect.isPending ? 'Inspecting…' : 'Re-inspect'}
+              </Button>
+            )}
             <Button
               size="sm"
               className="h-7 text-[11px]"
@@ -312,12 +326,12 @@ function SessionHistory({
                   {s.topic || 'Untitled session'}
                 </div>
                 <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground">
-                  <span>{s.turnCount} turn{s.turnCount === 1 ? '' : 's'}</span>
+                  <span>
+                    {s.turnCount} turn{s.turnCount === 1 ? '' : 's'}
+                  </span>
                   <span>·</span>
                   <span>{formatDistanceToNow(new Date(when))} ago</span>
-                  <span className="truncate font-mono opacity-60">
-                    {s.sessionId.slice(0, 8)}
-                  </span>
+                  <span className="truncate font-mono opacity-60">{s.sessionId.slice(0, 8)}</span>
                 </div>
               </div>
               <span
@@ -344,15 +358,29 @@ function PartyProjectChooser({ projects, onSelect, onCreate, creating }: Chooser
   const [newName, setNewName] = useState('bmad-canon');
   const normalized = normalizeAppName(newName);
   const canCreate = !!normalized && !creating;
+  const openBrownfieldForm = usePartyStore((s) => s.openBrownfieldForm);
+  const refresh = useRefreshProjectMutation();
 
   return (
     <div className="rounded-lg border border-border bg-card p-6 space-y-5">
-      <div>
-        <h3 className="text-sm font-semibold">Party projects</h3>
-        <p className="mt-1 text-xs text-muted-foreground">
-          A Party project is a folder on EC2 with BMAD installed. Each has its own
-          roster, session history, and doc tray.
-        </p>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-sm font-semibold">Party projects</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            A Party project is a folder on EC2 with BMAD installed. Each has its own roster, session
+            history, and doc tray.
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 text-[11px] shrink-0"
+          onClick={openBrownfieldForm}
+          data-testid="add-brownfield-button"
+        >
+          <GitBranch className="mr-1 h-3.5 w-3.5" />
+          Add brownfield project
+        </Button>
       </div>
 
       {projects.length > 0 && (
@@ -361,31 +389,41 @@ function PartyProjectChooser({ projects, onSelect, onCreate, creating }: Chooser
             Existing
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {projects.map((p) => (
-              <button
-                key={p.projectId}
-                type="button"
-                onClick={() => onSelect(p.projectId)}
-                className="flex items-center gap-2 rounded-md border border-border bg-muted/20 px-3 py-2 text-left hover:bg-muted/40 transition-colors"
-              >
-                <span
-                  className={`h-2 w-2 rounded-full shrink-0 ${
-                    p.bmadStatus === 'HEALTHY'
-                      ? 'bg-green-500'
-                      : p.bmadStatus === 'INSTALLING'
-                        ? 'bg-blue-400 animate-pulse'
-                        : 'bg-muted-foreground/40'
-                  }`}
+            {projects.map((p) =>
+              p.kind === 'brownfield' ? (
+                <BrownfieldProjectCard
+                  key={p.projectId}
+                  project={p}
+                  onSelect={onSelect}
+                  onRefresh={() => refresh.mutate(p.projectId)}
+                  refreshing={refresh.isPending && refresh.variables === p.projectId}
                 />
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium truncate">{p.projectId}</div>
-                  <div className="text-[10.5px] text-muted-foreground truncate">
-                    {p.bmadStatus}
-                    {p.agentCount != null && ` · ${p.agentCount} agents`}
+              ) : (
+                <button
+                  key={p.projectId}
+                  type="button"
+                  onClick={() => onSelect(p.projectId)}
+                  className="flex items-center gap-2 rounded-md border border-border bg-muted/20 px-3 py-2 text-left hover:bg-muted/40 transition-colors"
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full shrink-0 ${
+                      p.bmadStatus === 'HEALTHY'
+                        ? 'bg-green-500'
+                        : p.bmadStatus === 'INSTALLING'
+                          ? 'bg-blue-400 animate-pulse'
+                          : 'bg-muted-foreground/40'
+                    }`}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium truncate">{p.projectId}</div>
+                    <div className="text-[10.5px] text-muted-foreground truncate">
+                      {p.bmadStatus}
+                      {p.agentCount != null && ` · ${p.agentCount} agents`}
+                    </div>
                   </div>
-                </div>
-              </button>
-            ))}
+                </button>
+              ),
+            )}
           </div>
         </div>
       )}
@@ -414,10 +452,87 @@ function PartyProjectChooser({ projects, onSelect, onCreate, creating }: Chooser
           </Button>
         </div>
         <p className="text-[10.5px] text-muted-foreground">
-          Creates the folder on EC2, installs BMAD 6.3.x, and injects the 8 custom
-          agents (Ludwig, Pedrock, Sue Render, Rick &amp; co.).
+          Creates the folder on EC2, installs BMAD 6.3.x, and injects the 8 custom agents (Ludwig,
+          Pedrock, Sue Render, Rick &amp; co.).
         </p>
       </div>
+    </div>
+  );
+}
+
+// ── Story 15.4 — brownfield card variant ──
+// Rendered inside the chooser instead of the plain greenfield row. Shows the
+// Git icon, truncated upstream URL, branch chip, lastPulledAt relative time,
+// the operator obligations hint, and a Refresh secondary action.
+
+function truncateMiddle(s: string, max = 40): string {
+  if (s.length <= max) return s;
+  const head = Math.floor((max - 1) / 2);
+  const tail = max - 1 - head;
+  return s.slice(0, head) + '…' + s.slice(-tail);
+}
+
+interface BrownfieldCardProps {
+  project: PartyProject;
+  onSelect: (projectId: string) => void;
+  onRefresh: () => void;
+  refreshing: boolean;
+}
+
+function BrownfieldProjectCard({ project, onSelect, onRefresh, refreshing }: BrownfieldCardProps) {
+  const url = project.gitRepoUrl || '(no url)';
+  const branch = project.gitBranch || 'main';
+  const pulled = project.lastPulledAt ? new Date(project.lastPulledAt) : null;
+  const isRefreshing = refreshing || project.bmadStatus === 'REFRESHING';
+  const isInstalling = project.bmadStatus === 'INSTALLING';
+
+  return (
+    <div
+      className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/20 px-3 py-2"
+      data-testid={`brownfield-card-${project.projectId}`}
+      data-kind="brownfield"
+    >
+      <button
+        type="button"
+        onClick={() => onSelect(project.projectId)}
+        className="flex items-center gap-2 text-left hover:opacity-80 transition-opacity"
+      >
+        <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium truncate">{project.projectId}</div>
+          <div className="text-[10.5px] text-muted-foreground truncate font-mono" title={url}>
+            {truncateMiddle(url)}
+          </div>
+        </div>
+        <ProjectStatusBadge status={project.bmadStatus} title={project.failureReason} />
+      </button>
+
+      <div className="flex flex-wrap items-center gap-2 text-[10.5px]">
+        <span className="inline-flex items-center rounded-full border border-border bg-muted/40 px-1.5 py-0 font-mono text-muted-foreground">
+          {branch}
+        </span>
+        {pulled && (
+          <span className="text-muted-foreground">pulled {formatDistanceToNow(pulled)} ago</span>
+        )}
+      </div>
+
+      <p className="text-[10px] italic text-muted-foreground">
+        Push first, then Refresh — EC2 mirrors GitHub
+      </p>
+
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-6 w-full text-[11px]"
+        disabled={isRefreshing || isInstalling}
+        onClick={(e) => {
+          e.stopPropagation();
+          onRefresh();
+        }}
+        data-testid={`brownfield-refresh-${project.projectId}`}
+      >
+        {isRefreshing ? 'Refreshing…' : 'Refresh'}
+      </Button>
     </div>
   );
 }
@@ -490,12 +605,7 @@ function ProjectPanel({
           (project.bmadStatus === 'MISSING' ||
             project.bmadStatus === 'FAILED' ||
             project.bmadStatus === 'CORRUPTED') && (
-            <Button
-              size="sm"
-              className="h-7 text-[11px]"
-              disabled={installing}
-              onClick={onInstall}
-            >
+            <Button size="sm" className="h-7 text-[11px]" disabled={installing} onClick={onInstall}>
               {installing ? 'Installing…' : 'Install BMAD'}
             </Button>
           )}

@@ -16,6 +16,8 @@ export const JOB_HANDLER_PARTY_INSPECT = 'party-inspect';
 export const JOB_HANDLER_PARTY_TURN = 'party-turn';
 export const JOB_HANDLER_PARTY_DOCS_SYNC = 'party-docs-sync';
 export const JOB_HANDLER_PARTY_DOCS_UNLINK = 'party-docs-unlink';
+// Story 15.4 — brownfield refresh pipeline.
+export const JOB_HANDLER_PARTY_REFRESH = 'party-refresh';
 // Pipeline v2 / Story 1.4.3 — App-bootstrap saga (steps 3–5).
 export const JOB_HANDLER_APP_BOOTSTRAP = 'app-bootstrap';
 
@@ -42,6 +44,7 @@ export function selectHandler(job) {
   if (job.jobType === 'party-turn') return JOB_HANDLER_PARTY_TURN;
   if (job.jobType === 'party-docs-sync') return JOB_HANDLER_PARTY_DOCS_SYNC;
   if (job.jobType === 'party-docs-unlink') return JOB_HANDLER_PARTY_DOCS_UNLINK;
+  if (job.jobType === 'party-refresh') return JOB_HANDLER_PARTY_REFRESH;
   if (job.jobType === 'app-bootstrap') return JOB_HANDLER_APP_BOOTSTRAP;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
@@ -108,6 +111,22 @@ export function validatePartyDocsSyncJob(job) {
   if (!p.projectId || !p.projectPath || !p.filename || !p.s3Bucket || !p.s3Key) {
     return { ok: false, reason: 'partyDocsSyncPayload-incomplete' };
   }
+  return { ok: true };
+}
+
+/**
+ * Story 15.4 — refresh job structural check. Mirrors validatePartyBootstrapJob
+ * but requires `gitBranch` on the payload (brownfield-only operation).
+ */
+export function validatePartyRefreshJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'party-refresh') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.partyRefreshPayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'partyRefreshPayload-missing' };
+  if (!p.projectId) return { ok: false, reason: 'projectId-missing' };
+  if (!p.projectPath) return { ok: false, reason: 'projectPath-missing' };
+  if (!p.gitBranch) return { ok: false, reason: 'gitBranch-missing' };
   return { ok: true };
 }
 

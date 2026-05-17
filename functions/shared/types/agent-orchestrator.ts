@@ -307,6 +307,8 @@ export interface AgentJob {
     | 'party-turn'
     | 'party-docs-sync'
     | 'party-docs-unlink'
+    // Story 15.4 — brownfield refresh.
+    | 'party-refresh'
     // Pipeline v2 Phase 1 / Story 1.4.4 — daemon-side App-bootstrap saga
     // (clone → materialize worktree → inject placeholders → npm install →
     // BMAD bootstrap → commit + push). Payload below.
@@ -316,6 +318,18 @@ export interface AgentJob {
     projectPath: string;
     forceReinstall?: boolean;
     createFolder?: boolean;
+    /** Story 15.4 — discriminator. 'greenfield' (default) or 'brownfield'. */
+    kind?: 'greenfield' | 'brownfield';
+    /** Story 15.4 — brownfield only. */
+    gitRepoUrl?: string;
+    /** Story 15.4 — brownfield only. */
+    gitBranch?: string;
+  };
+  /** Story 15.4 — brownfield refresh payload. */
+  partyRefreshPayload?: {
+    projectId: string;
+    projectPath: string;
+    gitBranch: string;
   };
   partyInspectPayload?: {
     projectId: string;

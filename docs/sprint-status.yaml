@@ -225,11 +225,12 @@ development_status:
   # MODULE: Labs Party (from epics-party-module.md)
   # ══════════════════════════════════════════════════════
 
-  # ── Epic 15 (Party): Labs Party Mode — shipped 2026-04-20 ──
+  # ── Epic 15 (Party): Labs Party Mode — shipped 2026-04-20; brownfield extension added 2026-05-17 ──
   epic-15: contexted
   15-1-bmad-per-project-install-and-inspection: review
   15-2-party-session-orchestration-and-turn-loop: review
   15-3-labs-party-ui: review
+  15-4-brownfield-party-project-bootstrap: review  # brownfield extension — 3 Med review items resolved 2026-05-17; 130 tests pass
   epic-15-retrospective: optional
 
   # ══════════════════════════════════════════════════════
