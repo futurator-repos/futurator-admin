@@ -40,4 +40,8 @@ export const TABLE_NAMES = {
   // session; PK sessionId; GSI1 operator-recent-index; GSI2 scope-recent-index;
   // 90-day TTL via `expiresAt` (epoch seconds).
   freeAgentSessions: process.env.FREE_AGENT_SESSIONS_TABLE || 'futurator-free-agent-sessions',
+  // Epic 18 — Story 18.6: Free Claude Code Agent conversation messages.
+  // PK sessionId, SK messageIndex (zero-padded 6-digit). 90-day TTL.
+  freeAgentConversations:
+    process.env.FREE_AGENT_CONVERSATIONS_TABLE || 'futurator-free-agent-conversations',
 } as const;

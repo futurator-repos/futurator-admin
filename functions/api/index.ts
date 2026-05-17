@@ -25,6 +25,19 @@ import * as partyProjectsRepo from '../shared/repositories/party-projects-reposi
 import * as partySessionsRepo from '../shared/repositories/party-sessions-repository';
 // Epic 18 / Story 18.3 — Free Claude Code Agent audit endpoint.
 import * as freeAgentSessionsRepo from '../shared/repositories/free-agent-sessions-repository';
+// Epic 18 / Story 18.6 — conversation message persistence + thread list.
+import * as freeAgentConversationsRepo from '../shared/repositories/free-agent-conversations-repository';
+// Epic 18 / Story 18.5 — STS credentials minting + cost cap default.
+import {
+  assumeFreeAgentSessionRole,
+  refreshSessionCredentials,
+  type SessionCredentials,
+} from '../shared/lib/free-agent-iam';
+import {
+  CreateFreeAgentSessionInputSchema,
+  SendFreeAgentMessageInputSchema,
+} from '../shared/schemas/free-agent-schema';
+import { FREE_AGENT_DEFAULT_COST_CAP_USD } from '../shared/types/free-agent';
 import * as inlineQuestionsRepo from '../shared/repositories/inline-questions-repository';
 import {
   INLINE_QUESTION_DEFAULT_MODEL,
@@ -5624,6 +5637,325 @@ app.get('/api/party/sessions/:id/events', async (c) => {
   const afterSeq = c.req.query('after') || '000000';
   const { events, lastSeq } = await agentEventsRepo.getEventsAfter(parsed.data, afterSeq);
   return c.json({ events, lastSeq });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Epic 18 / Story 18.5 — Free Claude Code Agent session lifecycle routes.
+//
+// Four routes drive the end-to-end widget ↔ daemon flow:
+//   POST   /api/free-agent/sessions               — create session + AssumeRole
+//   POST   /api/free-agent/sessions/:id/messages  — enqueue a turn
+//   GET    /api/free-agent/sessions/:id           — current session state
+//   GET    /api/free-agent/sessions/:id/events    — long-poll events
+//
+// Per-session AWS credentials are minted by the API Lambda via STS and
+// cached in-memory (Map below). Credentials NEVER leave the server — they
+// flow to the daemon via the encrypted job-dispatch payload only.
+//
+// Lambda cold-start loses the cache; the next message-enqueue
+// re-AssumeRoles. Acceptable v1 trade-off per [[ship-mvp-add-complexity-later]].
+// ──────────────────────────────────────────────────────────────────────
+
+/**
+ * In-memory credential cache keyed by sessionId. Survives Lambda warm
+ * invocations; lost on cold start. Map growth is naturally bounded by
+ * concurrently-active sessions per warm instance.
+ */
+const freeAgentSessionCredentialsCache = new Map<string, SessionCredentials>();
+
+app.post('/api/free-agent/sessions', authMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = CreateFreeAgentSessionInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
+  }
+
+  const user = c.get('user');
+  if (!user?.userId) {
+    throw new AppError('UNAUTHENTICATED', 'Missing user context', 401);
+  }
+
+  const { scope, model } = parsed.data;
+  const costCapUsd = parsed.data.costCapUsd ?? FREE_AGENT_DEFAULT_COST_CAP_USD;
+  // Derive projectId from scope.id when scope.kind === 'project'; fall back to
+  // a synthetic id for non-project scopes (the daemon worktree path is still
+  // /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/).
+  const projectId = scope.kind === 'project' && scope.id ? scope.id : `_${scope.kind}`;
+  const sessionId = crypto.randomUUID();
+
+  const credentials = await assumeFreeAgentSessionRole({
+    projectId,
+    sessionId,
+    operatorId: user.userId,
+  });
+  freeAgentSessionCredentialsCache.set(sessionId, credentials);
+
+  const session = await freeAgentSessionsRepo.createSession({
+    sessionId,
+    operatorId: user.userId,
+    projectId,
+    scope,
+    model,
+    costCapUsd,
+  });
+
+  // NEVER include credentials in the response.
+  return c.json(
+    {
+      sessionId: session.sessionId,
+      status: session.status,
+      model: session.model,
+      costCapUsd: session.costCapUsd,
+      scope: session.scope,
+      scopeIdComposite: session.scopeIdComposite,
+      createdAt: session.createdAt,
+      expiration: credentials.expiration,
+    },
+    201,
+  );
+});
+
+app.post('/api/free-agent/sessions/:id/messages', authMiddleware, async (c) => {
+  const sessionId = c.req.param('id');
+  const parsedId = sessionIdSchema.safeParse(sessionId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = SendFreeAgentMessageInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
+  }
+
+  const session = await freeAgentSessionsRepo.getSession(parsedId.data);
+  if (!session) throw new NotFoundError('FreeAgentSession', parsedId.data);
+
+  const user = c.get('user');
+  if (!user || session.operatorId !== user.userId) {
+    throw new AppError('FORBIDDEN', 'Only the session owner can send messages', 403);
+  }
+
+  if (session.status === 'BUDGET_EXHAUSTED') {
+    throw new AppError(
+      'BUDGET_EXHAUSTED',
+      'Session is at its cost cap; raise the cap or end the session',
+      402,
+    );
+  }
+  if (session.status === 'ERROR' || session.status === 'EXPIRED') {
+    throw new AppError(
+      'INVALID_STATE',
+      `Session is in ${session.status} state; create a new conversation`,
+      409,
+    );
+  }
+
+  // Refresh credentials if near expiry (Story 18.1). Cache miss falls back
+  // to fresh AssumeRole.
+  let credentials = freeAgentSessionCredentialsCache.get(parsedId.data);
+  if (!credentials) {
+    credentials = await assumeFreeAgentSessionRole({
+      projectId: session.projectId,
+      sessionId: session.sessionId,
+      operatorId: session.operatorId,
+    });
+  } else {
+    const refreshed = await refreshSessionCredentials({
+      projectId: session.projectId,
+      sessionId: session.sessionId,
+      operatorId: session.operatorId,
+      expiration: credentials.expiration,
+    });
+    if (refreshed) credentials = refreshed;
+  }
+  freeAgentSessionCredentialsCache.set(parsedId.data, credentials);
+
+  const lock = await freeAgentSessionsRepo.acquireProcessingLock(parsedId.data);
+  if (!lock.ok) {
+    if (lock.reason === 'SESSION_BUSY') {
+      throw new AppError('SESSION_BUSY', 'A turn is already in progress', 409);
+    }
+    if (lock.reason === 'NOT_FOUND') {
+      throw new NotFoundError('FreeAgentSession', parsedId.data);
+    }
+    throw new AppError('INVALID_STATE', `Cannot send: session state is ${lock.reason}`, 409);
+  }
+
+  // Story 18.6 — persist the USER message BEFORE enqueueing the daemon job
+  // so the thread list + conversation history reflect the operator's input
+  // even if the daemon job fails. Assistant-message writes from the daemon on
+  // `free-agent.turn.complete` are deferred to v1.1 (would require a daemon-
+  // side facade duplicating the conversations repo DDB ops).
+  await freeAgentConversationsRepo.appendMessage({
+    sessionId: session.sessionId,
+    role: 'user',
+    content: parsed.data.content,
+  });
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user.userId,
+    workingDir: `/home/ubuntu/free-agent-worktrees/${session.projectId}/${session.sessionId}`,
+    jobType: 'free-agent-session',
+    freeAgentSessionPayload: {
+      sessionId: session.sessionId,
+      projectId: session.projectId,
+      scope: session.scope,
+      model: session.model,
+      costCapUsd: session.costCapUsd,
+      credentials,
+      messages: [{ role: 'user', content: parsed.data.content }],
+    },
+  });
+
+  return c.json({ jobId, status: 'PROCESSING' }, 202);
+});
+
+app.get('/api/free-agent/sessions/:id', authMiddleware, async (c) => {
+  const sessionId = c.req.param('id');
+  const parsed = sessionIdSchema.safeParse(sessionId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const session = await freeAgentSessionsRepo.getSession(parsed.data);
+  if (!session) throw new NotFoundError('FreeAgentSession', parsed.data);
+
+  const user = c.get('user');
+  if (!user || session.operatorId !== user.userId) {
+    throw new AppError('FORBIDDEN', 'Only the session owner can read state', 403);
+  }
+
+  return c.json({
+    sessionId: session.sessionId,
+    status: session.status,
+    model: session.model,
+    costCapUsd: session.costCapUsd,
+    costUsdAccumulated: session.costUsdAccumulated,
+    tokensInAccumulated: session.tokensInAccumulated ?? 0,
+    tokensOutAccumulated: session.tokensOutAccumulated ?? 0,
+    turnCount: session.turnCount,
+    lastActivityAt: session.lastActivityAt,
+    claudeSessionId: session.claudeSessionId ?? null,
+    errorReason: session.errorReason ?? null,
+    scope: session.scope,
+  });
+});
+
+app.get('/api/free-agent/sessions/:id/events', authMiddleware, async (c) => {
+  const sessionId = c.req.param('id');
+  const parsed = sessionIdSchema.safeParse(sessionId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const session = await freeAgentSessionsRepo.getSession(parsed.data);
+  if (!session) throw new NotFoundError('FreeAgentSession', parsed.data);
+
+  const user = c.get('user');
+  if (!user || session.operatorId !== user.userId) {
+    throw new AppError('FORBIDDEN', 'Only the session owner can read events', 403);
+  }
+
+  const afterSeq = c.req.query('after') || '000000';
+  const { events, lastSeq } = await agentEventsRepo.getEventsAfter(parsed.data, afterSeq, 200);
+  return c.json({ events, lastSeq });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Epic 18 / Story 18.6 — Free Claude Code Agent conversation persistence.
+//
+// Two routes:
+//   GET /api/free-agent/conversations?scope=<kind>:<id>&limit=N
+//     — recent sessions for the operator + scope (with first-user-message
+//       preview when available). Used by the panel-header hamburger dropdown.
+//   GET /api/free-agent/sessions/:id/messages
+//     — full conversation history for a session. Used by the loadSession
+//       action to seed the panel's thread on resume.
+// ──────────────────────────────────────────────────────────────────────
+
+app.get('/api/free-agent/conversations', authMiddleware, async (c) => {
+  const user = c.get('user');
+  if (!user?.userId) {
+    throw new AppError('UNAUTHENTICATED', 'Missing user context', 401);
+  }
+
+  const scopeParam = c.req.query('scope');
+  if (!scopeParam) {
+    throw new ValidationError('scope query param required (format: <kind>:<id>)');
+  }
+  // Accept "kind" or "kind:id". `workspace` has no id; everything else needs one.
+  const [scopeKind, scopeId] = scopeParam.split(':');
+  if (!scopeKind || (scopeKind !== 'workspace' && !scopeId)) {
+    throw new ValidationError('scope must be <kind>:<id> (or "workspace")');
+  }
+
+  const limitParam = c.req.query('limit');
+  const limit = limitParam ? Number.parseInt(limitParam, 10) : 20;
+  if (!Number.isFinite(limit) || limit < 1 || limit > 100) {
+    throw new ValidationError('limit must be 1-100');
+  }
+
+  const sessions = await freeAgentConversationsRepo.listSessionsByScope(
+    { kind: scopeKind, id: scopeId },
+    limit,
+  );
+
+  // Owner-only filtering. The GSI returns all sessions for the scope across
+  // operators (rare in v1's single-operator world but defensive).
+  const ownerSessions = sessions.filter((s) => s.operatorId === user.userId);
+
+  // Fetch first-user-message previews in parallel (bounded by `limit`).
+  const out = await Promise.all(
+    ownerSessions.map(async (s) => {
+      const preview = await freeAgentConversationsRepo
+        .getFirstUserMessagePreview(s.sessionId)
+        .catch(() => null);
+      return {
+        sessionId: s.sessionId,
+        scope: s.scope,
+        status: s.status,
+        model: s.model,
+        costUsdAccumulated: s.costUsdAccumulated,
+        turnCount: s.turnCount,
+        lastActivityAt: s.lastActivityAt,
+        firstUserMessagePreview: preview,
+      };
+    }),
+  );
+
+  return c.json(out);
+});
+
+app.get('/api/free-agent/sessions/:id/messages', authMiddleware, async (c) => {
+  const sessionId = c.req.param('id');
+  const parsed = sessionIdSchema.safeParse(sessionId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const session = await freeAgentSessionsRepo.getSession(parsed.data);
+  if (!session) throw new NotFoundError('FreeAgentSession', parsed.data);
+
+  const user = c.get('user');
+  if (!user || session.operatorId !== user.userId) {
+    throw new AppError('FORBIDDEN', 'Only the session owner can read messages', 403);
+  }
+
+  const messages = await freeAgentConversationsRepo.getMessages(parsed.data);
+  return c.json(
+    messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+      createdAt: m.createdAt,
+      tokensIn: m.tokensIn,
+      tokensOut: m.tokensOut,
+      costUsd: m.costUsd,
+      toolCalls: m.toolCalls,
+    })),
+  );
 });
 
 // ──────────────────────────────────────────────────────────────────────

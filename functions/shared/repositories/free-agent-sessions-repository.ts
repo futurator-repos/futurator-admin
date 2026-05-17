@@ -289,6 +289,27 @@ export async function updateTokens(
   );
 }
 
+/**
+ * Story 18.5 — update the session's per-session cost cap. The daemon reads
+ * `costCapUsd` from the session payload when constructing the next turn's
+ * `--max-budget-usd` CLI flag, so the new cap takes effect on the next
+ * message-enqueue (not retroactively to an in-flight turn).
+ *
+ * No-op when capUsd is non-finite, ≤0, or > FREE_AGENT_MAX_COST_CAP_USD (1000).
+ */
+export async function setCostCapUsd(sessionId: string, capUsd: number): Promise<void> {
+  if (!Number.isFinite(capUsd) || capUsd <= 0 || capUsd > 1000) return;
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.freeAgentSessions,
+      Key: { sessionId },
+      UpdateExpression: 'SET costCapUsd = :cap',
+      ConditionExpression: 'attribute_exists(sessionId)',
+      ExpressionAttributeValues: { ':cap': capUsd },
+    }),
+  );
+}
+
 /** Record the moment an external caller re-AssumeRole'd credentials for this session. */
 export async function setLastRefreshedAt(sessionId: string, isoTimestamp?: string): Promise<void> {
   const at = isoTimestamp ?? new Date().toISOString();

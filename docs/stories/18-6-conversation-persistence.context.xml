@@ -1,0 +1,233 @@
+<story-context id="bmad/bmm/workflows/4-implementation/story-context/template" v="1.0">
+  <metadata>
+    <epicId>18</epicId>
+    <storyId>6</storyId>
+    <title>Conversation persistence + thread list</title>
+    <status>drafted</status>
+    <generatedAt>2026-05-17</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/18-6-conversation-persistence.md</sourceStoryPath>
+    <storyKey>18-6-conversation-persistence</storyKey>
+  </metadata>
+
+  <story>
+    <asA><![CDATA[Richie (operator of Futurator-Admin)]]></asA>
+    <iWant><![CDATA[my free-agent conversations to persist across browser refreshes and be listed in a thread picker so I can resume prior sessions]]></iWant>
+    <soThat><![CDATA[the agent feels like a continuous collaborator across days/weeks, not a fresh ephemeral chat every time I open the widget]]></soThat>
+    <tasks><![CDATA[
+SST infrastructure:
+- Add FreeAgentConversationsTable to sst.config.ts (PK sessionId, SK messageIndex, TTL expiresAt, PITR). Link to API Lambda. Wire FREE_AGENT_CONVERSATIONS_TABLE env. (AC #1)
+
+Shared types + repository:
+- Add FreeAgentConversationMessage type to functions/shared/types/free-agent.ts. (AC #1, #2)
+- Add freeAgentConversations to TABLE_NAMES in dynamo-client.ts. (AC #1)
+- Create functions/shared/repositories/free-agent-conversations-repository.ts: appendMessage / getMessages / listSessionsByOperator (delegate) / listSessionsByScope (delegate). (AC #2)
+- Tests for all 4 functions. (AC #9)
+
+API routes:
+- Extend POST /api/free-agent/sessions/:id/messages to appendMessage(role='user') BEFORE enqueueing daemon job. (AC #3 partial)
+- Add GET /api/free-agent/conversations?scope=<kind>:<id>&limit=N. (AC #4)
+- Add GET /api/free-agent/sessions/:id/messages. (AC #4)
+- 2 new test files (AC #9).
+
+Frontend:
+- Create src/hooks/use-free-agent-conversations.ts (TanStack Query for list-by-scope + loadSession). (AC #5)
+- Create src/components/free-agent/thread-list-dropdown.tsx (hamburger UI). (AC #5, #6)
+- Modify panel-header.tsx to wire dropdown. (AC #5)
+- Modify use-free-agent-session.ts to add loadSession action. (AC #5)
+
+Validation:
+- npm run ci end-to-end. (AC #11)
+    ]]></tasks>
+  </story>
+
+  <acceptanceCriteria><![CDATA[
+AC #1 — futurator-free-agent-conversations table (PK sessionId, SK messageIndex, TTL expiresAt, PITR, PAY_PER_REQUEST).
+AC #2 — Repo with 4 functions: appendMessage, getMessages, listSessionsByOperator (delegate), listSessionsByScope (delegate).
+AC #3 — v1 scope: USER messages persisted by the API layer on POST /messages. Assistant messages deferred to v1.1 (daemon-side facade).
+AC #4 — 2 new API routes: GET /conversations?scope= and GET /sessions/:id/messages.
+AC #5 — Hamburger dropdown shows recent sessions for current scope; click loads session.
+AC #6 — "New conversation" entry at top resets active session.
+AC #7 — Resuming IDLE/EXPIRED: system message "Session resumed". (v1 lets POST /messages 409 surface the issue.)
+AC #8 — Resuming BUDGET_EXHAUSTED: existing Story 18.5 callout renders; composer disabled.
+AC #9 — New tests: repo + 2 route tests + extended widget test.
+AC #10 — Playwright extended: persistence across close/reopen + dropdown shows prior + click loads.
+AC #11 — npm run ci passes with no new regressions.
+  ]]></acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/epics-free-agent.md</path>
+        <title>Epic 18 — Story 18.6 section</title>
+        <section>Conversation persistence + thread list</section>
+        <snippet>Closes Epic 18 v1. Persistence + thread list are the "feels continuous" UX layer.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/18-2-session-lifecycle.md</path>
+        <title>Story 18.2 — sessions repo + GSIs</title>
+        <section>listSessionsByOperator, listSessionsByScope</section>
+        <snippet>The conversations repo delegates list-by-* to these existing functions. GSI shapes already documented.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/18-5-widget-session-wire-up.md</path>
+        <title>Story 18.5 — hook + panel-header</title>
+        <section>useFreeAgentSession + panel-header model selector + cost editor</section>
+        <snippet>This story extends the hook with a loadSession action and replaces the panel-header hamburger placeholder with the real dropdown.</snippet>
+      </doc>
+      <doc>
+        <path>memory/feedback_ship_mvp_add_later.md</path>
+        <title>User memory — ship MVP, add complexity later</title>
+        <section>Defer daemon-side assistant-message writes</section>
+        <snippet>v1 persists USER messages only; assistant messages stream from agent-events. v1.1 wires daemon-side facade for true persistence.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <artifact>
+        <path>functions/shared/repositories/free-agent-sessions-repository.ts</path>
+        <kind>repository-DELEGATE-TARGET</kind>
+        <symbol>listSessionsByOperator, listSessionsByScope</symbol>
+        <lines>n/a</lines>
+        <reason>The new conversations repo delegates list-by-* to these. Same GSI shapes; no need to duplicate.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/repositories/agent-events-repository.ts</path>
+        <kind>repository-reference</kind>
+        <symbol>pushEvent pattern</symbol>
+        <lines>7-17</lines>
+        <reason>Reference for the new appendMessage shape (PutCommand + TTL).</reason>
+      </artifact>
+      <artifact>
+        <path>functions/api/index.ts</path>
+        <kind>hono-routes</kind>
+        <symbol>POST /api/free-agent/sessions/:id/messages (Story 18.5)</symbol>
+        <lines>n/a (Story 18.5 route)</lines>
+        <reason>Extended in this story to call appendMessage(role='user') before enqueueing the daemon job.</reason>
+      </artifact>
+      <artifact>
+        <path>src/hooks/use-free-agent-session.ts</path>
+        <kind>react-hook</kind>
+        <symbol>existing hook + new loadSession action</symbol>
+        <lines>n/a (Story 18.5)</lines>
+        <reason>Extended with loadSession(sessionId) — calls GET /sessions/:id/messages and seeds the messages state.</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/free-agent/panel-header.tsx</path>
+        <kind>react-component</kind>
+        <symbol>Hamburger placeholder (Story 18.5)</symbol>
+        <lines>144-153</lines>
+        <reason>Replaced with the new ThreadListDropdown trigger.</reason>
+      </artifact>
+    </code>
+
+    <dependencies>
+      <node>
+        <package name="@aws-sdk/lib-dynamodb" version="^3.1024.0">existing — repository operations.</package>
+        <package name="@tanstack/react-query" version="^5">existing — new conversations hook.</package>
+        <package name="hono" version="^4.12.10">existing — 2 new routes.</package>
+        <package name="date-fns" version="^4">existing — formatDistanceToNow for thread list relative time.</package>
+        <package name="vitest" version="^3">existing — new test files.</package>
+      </node>
+      <aws>
+        <component name="DynamoDB table futurator-free-agent-conversations (NEW)">PK sessionId, SK messageIndex (string, 6-digit), TTL expiresAt, PAY_PER_REQUEST, PITR.</component>
+        <component name="DynamoDB table futurator-free-agent-sessions (Story 18.2)">Reused for list-by-* delegation.</component>
+      </aws>
+    </dependencies>
+  </artifacts>
+
+  <constraints><![CDATA[
+- One table per concern: futurator-free-agent-conversations is dedicated. [Source: memory feedback_dynamodb_multi_table]
+- v1 scope: USER messages persisted from API layer; assistant messages stream from agent-events (deferred to v1.1). [Source: memory feedback_ship_mvp_add_later; AC #3 framing]
+- messageIndex derivation: Query-count+1, zero-padded to 6 digits. Race-free per session because of Story 18.2's processing lock (only one POST /messages in flight per session). v1.1 daemon-side writes will need atomic counter.
+- listSessionsByOperator / listSessionsByScope delegate to the existing sessions repo; do NOT duplicate the GSI queries.
+- All zod validation via .safeParse(); never .parse() at the route boundary. [Source: CLAUDE.md]
+- Auth via authMiddleware on every new route; owner check via session.operatorId. [Source: existing party + Story 18.3/18.5 routes]
+- npm run ci must pass with no new regressions beyond pre-existing baseline. [Source: Story 18.5 CI summary]
+  ]]></constraints>
+
+  <interfaces>
+    <interface>
+      <name>FreeAgentConversationMessage (NEW)</name>
+      <kind>TypeScript type (NEW)</kind>
+      <signature><![CDATA[interface FreeAgentConversationMessage {
+  sessionId: string;
+  messageIndex: string;  // zero-padded 6-digit, e.g. "000001"
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  costUsd?: number;
+  createdAt: string;  // ISO-8601
+  toolCalls?: Array<{ id: string; name: string; input?: unknown }>;
+  expiresAt: number;  // epoch seconds (DynamoDB TTL)
+}]]></signature>
+      <path>functions/shared/types/free-agent.ts (extension)</path>
+    </interface>
+    <interface>
+      <name>free-agent-conversations-repository (NEW)</name>
+      <kind>repository (NEW)</kind>
+      <signature><![CDATA[
+appendMessage(input: {
+  sessionId: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  costUsd?: number;
+  toolCalls?: unknown[];
+}): Promise<FreeAgentConversationMessage>
+
+getMessages(sessionId: string): Promise<FreeAgentConversationMessage[]>
+
+listSessionsByOperator(operatorId: string, limit?: number): Promise<FreeAgentSession[]>
+  // delegates to freeAgentSessionsRepo.listSessionsByOperator
+
+listSessionsByScope(scope: { kind: string; id?: string }, limit?: number): Promise<FreeAgentSession[]>
+  // delegates to freeAgentSessionsRepo.listSessionsByScope]]></signature>
+      <path>functions/shared/repositories/free-agent-conversations-repository.ts (NEW)</path>
+    </interface>
+    <interface>
+      <name>GET /api/free-agent/conversations (NEW)</name>
+      <kind>REST endpoint (NEW)</kind>
+      <signature><![CDATA[Auth: JWT required.
+Query: scope=<kind>:<id> (e.g. scope=plan:dino-7), limit=20 (default)
+Response 200: Array<{
+  sessionId, scope, status, model, costUsdAccumulated,
+  turnCount, lastActivityAt, firstUserMessagePreview?: string
+}>
+Errors: 400 ValidationError (missing/malformed scope), 403 Forbidden]]></signature>
+      <path>functions/api/index.ts (NEW route)</path>
+    </interface>
+    <interface>
+      <name>GET /api/free-agent/sessions/:id/messages (NEW)</name>
+      <kind>REST endpoint (NEW)</kind>
+      <signature><![CDATA[Auth: JWT required.
+Response 200: Array<{ role, content, createdAt, tokensIn?, tokensOut?, costUsd?, toolCalls? }>
+Errors: 403, 404]]></signature>
+      <path>functions/api/index.ts (NEW route)</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards><![CDATA[
+Vitest jsdom for shared + API + component tests. Same patterns as Stories 18.2/18.3/18.5. Hook tests use @testing-library/react + QueryClientProvider wrapper + mocked fetch. No daemon test changes (assistant persistence is deferred to v1.1).
+    ]]></standards>
+    <locations>
+      <location>functions/shared/repositories/__tests__/free-agent-conversations-repository.test.ts (NEW)</location>
+      <location>functions/api/__tests__/free-agent-conversations-route.test.ts (NEW)</location>
+      <location>functions/api/__tests__/free-agent-messages-route.test.ts (NEW)</location>
+      <location>src/components/free-agent/__tests__/widget.test.tsx (EXTENDED — hamburger + load-session)</location>
+    </locations>
+    <ideas>
+      <idea ac="AC #2">repo test — appendMessage writes PutCommand with correct PK/SK/role/content/TTL; messageIndex derives from current count + 1.</idea>
+      <idea ac="AC #2">repo test — getMessages issues Query with KeyCondition on sessionId, sorted ascending.</idea>
+      <idea ac="AC #2">repo test — listSessionsByOperator delegates to sessions repo.</idea>
+      <idea ac="AC #3">route test — POST /messages calls appendMessage(role='user') BEFORE createJob; if appendMessage throws, no job is created.</idea>
+      <idea ac="AC #4">route test — GET /conversations?scope=plan:dino-7&limit=5 returns the array shape with previews.</idea>
+      <idea ac="AC #4">route test — GET /sessions/:id/messages returns owner messages; 403 for non-owner.</idea>
+      <idea ac="AC #5">component test — hamburger button click opens dropdown showing "New conversation" + recent sessions.</idea>
+      <idea ac="AC #6">component test — clicking "New conversation" entry resets activeSessionId to null.</idea>
+    </ideas>
+  </tests>
+</story-context>

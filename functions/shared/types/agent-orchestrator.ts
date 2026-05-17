@@ -312,7 +312,9 @@ export interface AgentJob {
     // Pipeline v2 Phase 1 / Story 1.4.4 — daemon-side App-bootstrap saga
     // (clone → materialize worktree → inject placeholders → npm install →
     // BMAD bootstrap → commit + push). Payload below.
-    | 'app-bootstrap';
+    | 'app-bootstrap'
+    // Epic 18 / Story 18.5 — Free Claude Code Agent session turn. Payload below.
+    | 'free-agent-session';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -369,6 +371,33 @@ export interface AgentJob {
      * Written to the working tree between inject-values and npm-install.
      */
     augmentFiles?: Array<{ path: string; content: string }>;
+  };
+
+  /**
+   * Epic 18 / Story 18.5 — payload consumed by
+   * `daemon/pipelines/free-agent-session.mjs`. Set when
+   * `jobType === 'free-agent-session'`.
+   *
+   * Credentials are minted by the API Lambda via STS AssumeRole (Story 18.1)
+   * and threaded through this payload to the daemon, then injected into the
+   * spawned `claude -p` subprocess via env vars. Never logged or persisted.
+   */
+  freeAgentSessionPayload?: {
+    sessionId: string;
+    projectId: string;
+    scope: {
+      kind: 'project' | 'plan' | 'app' | 'workspace';
+      id?: string;
+    };
+    model: string;
+    costCapUsd: number;
+    credentials: {
+      accessKeyId: string;
+      secretAccessKey: string;
+      sessionToken: string;
+      expiration: string;
+    };
+    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
   };
 }
 

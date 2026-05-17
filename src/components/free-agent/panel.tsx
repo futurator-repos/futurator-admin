@@ -1,9 +1,10 @@
 /**
- * panel.tsx — Story 18.4 (Epic 18: Free Claude Code Agent)
+ * panel.tsx — Story 18.4 (Epic 18: Free Claude Code Agent),
+ *             wired in Story 18.5 to consume useFreeAgentSession.
  *
- * Expanded chat panel. Fixed bottom-right, ~400×600px desktop, full-width
- * drawer up to 90vh on mobile (<768px). No modal backdrop — the dashboard
- * behind remains interactable.
+ * Fixed bottom-right, ~400×600px desktop, full-width drawer up to 90vh
+ * on mobile (<768px). No modal backdrop — the dashboard behind remains
+ * interactable.
  */
 
 'use client';
@@ -11,8 +12,11 @@
 import { FreeAgentPanelHeader } from './panel-header';
 import { FreeAgentMessageThread } from './message-thread';
 import { FreeAgentComposer } from './composer';
+import { useFreeAgentSession } from '@/hooks/use-free-agent-session';
 
 export function FreeAgentPanel() {
+  const session = useFreeAgentSession();
+
   return (
     <div
       role="dialog"
@@ -21,9 +25,17 @@ export function FreeAgentPanel() {
       className="fixed bottom-6 right-6 z-50 flex max-h-[90vh] w-[400px] max-w-[calc(100vw-3rem)] flex-col overflow-hidden rounded-lg border bg-background shadow-2xl sm:right-6 sm:w-[400px]"
       style={{ height: 'min(600px, 90vh)' }}
     >
-      <FreeAgentPanelHeader />
-      <FreeAgentMessageThread />
-      <FreeAgentComposer />
+      <FreeAgentPanelHeader
+        costUsdAccumulated={session.costUsdAccumulated}
+        costCapUsd={session.costCapUsd}
+        currentModel={session.currentModel}
+        onChangeModel={session.changeModel}
+        onChangeCostCap={session.setCostCapUsd}
+        onLoadSession={session.loadSession}
+        onNewConversation={session.resetSession}
+      />
+      <FreeAgentMessageThread messages={session.messages} />
+      <FreeAgentComposer isSending={session.isSending} onSend={session.sendMessage} />
     </div>
   );
 }

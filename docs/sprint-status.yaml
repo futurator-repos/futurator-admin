@@ -280,8 +280,8 @@ development_status:
   18-2-session-lifecycle: review
   18-3-audit-trail: review
   18-4-widget-shell: review
-  18-5-widget-session-wire-up: backlog
-  18-6-conversation-persistence: backlog
+  18-5-widget-session-wire-up: review
+  18-6-conversation-persistence: review
   # Deferred to v1.1 — promote when v1 ships:
   # 18-7-motion-polish: backlog
   # 18-8-pulse-trigger-semantics: backlog

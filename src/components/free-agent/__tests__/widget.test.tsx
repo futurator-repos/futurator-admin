@@ -8,13 +8,37 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, type RenderResult } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactElement } from 'react';
 
 // Mock next/navigation since jsdom has no Next router.
 vi.mock('next/navigation', () => ({
   usePathname: vi.fn(() => '/labs'),
   useSearchParams: vi.fn(() => new URLSearchParams()),
 }));
+
+// Story 18.5 — the panel uses TanStack Query via useFreeAgentSession.
+// Tests need a QueryClientProvider wrapper. Mock fetch so the hook's
+// network calls return empty data instead of hitting a real network.
+vi.stubGlobal(
+  'fetch',
+  vi.fn(async () =>
+    Promise.resolve(
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ),
+  ),
+);
+
+function renderWithQuery(ui: ReactElement): RenderResult {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+  });
+  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+}
 
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useFreeAgentStore } from '@/stores/free-agent-store';
@@ -41,7 +65,9 @@ function resetStores() {
   });
   localStorage.setItem(EC2_KEY, 'ec2');
   vi.mocked(usePathname).mockReturnValue('/labs');
-  vi.mocked(useSearchParams).mockReturnValue(new URLSearchParams());
+  vi.mocked(useSearchParams).mockReturnValue(
+    new URLSearchParams() as unknown as ReturnType<typeof useSearchParams>,
+  );
 }
 
 beforeEach(() => {
@@ -50,13 +76,13 @@ beforeEach(() => {
 
 describe('FreeAgentWidget — auth gating (AC #1)', () => {
   it('renders nothing when the user is unauthenticated', () => {
-    const { container } = render(<FreeAgentWidget />);
+    const { container } = renderWithQuery(<FreeAgentWidget />);
     expect(container).toBeEmptyDOMElement();
   });
 
   it('renders the FAB when authenticated', () => {
     useAuthStore.setState({ isAuthenticated: true });
-    render(<FreeAgentWidget />);
+    renderWithQuery(<FreeAgentWidget />);
     expect(screen.getByTestId('free-agent-fab')).toBeInTheDocument();
   });
 });
@@ -67,14 +93,14 @@ describe('FreeAgentWidget — open/close flow (AC #2, AC #3)', () => {
   });
 
   it('clicking the FAB opens the panel', () => {
-    render(<FreeAgentWidget />);
+    renderWithQuery(<FreeAgentWidget />);
     fireEvent.click(screen.getByTestId('free-agent-fab'));
     expect(screen.getByTestId('free-agent-panel')).toBeInTheDocument();
     expect(screen.queryByTestId('free-agent-fab')).not.toBeInTheDocument();
   });
 
   it('clicking the close button closes the panel', () => {
-    render(<FreeAgentWidget />);
+    renderWithQuery(<FreeAgentWidget />);
     fireEvent.click(screen.getByTestId('free-agent-fab'));
     fireEvent.click(screen.getByTestId('free-agent-close'));
     expect(screen.queryByTestId('free-agent-panel')).not.toBeInTheDocument();
@@ -89,7 +115,7 @@ describe('FreeAgentWidget — EC2 mode gating (AC #9)', () => {
 
   it('marks the FAB disabled when EC2 mode is local', () => {
     localStorage.setItem(EC2_KEY, 'local');
-    render(<FreeAgentWidget />);
+    renderWithQuery(<FreeAgentWidget />);
     const fab = screen.getByTestId('free-agent-fab');
     expect(fab).toHaveAttribute('data-disabled', 'true');
     expect(fab).toHaveAttribute('title', expect.stringContaining('Switch to EC2'));
@@ -97,13 +123,13 @@ describe('FreeAgentWidget — EC2 mode gating (AC #9)', () => {
 
   it('marks the FAB enabled when EC2 mode is ec2', () => {
     localStorage.setItem(EC2_KEY, 'ec2');
-    render(<FreeAgentWidget />);
+    renderWithQuery(<FreeAgentWidget />);
     expect(screen.getByTestId('free-agent-fab')).toHaveAttribute('data-disabled', 'false');
   });
 
   it('clicking the disabled FAB does NOT open the panel', () => {
     localStorage.setItem(EC2_KEY, 'local');
-    render(<FreeAgentWidget />);
+    renderWithQuery(<FreeAgentWidget />);
     fireEvent.click(screen.getByTestId('free-agent-fab'));
     expect(screen.queryByTestId('free-agent-panel')).not.toBeInTheDocument();
   });
@@ -115,15 +141,17 @@ describe('FreeAgentWidget — lens label (AC #4, AC #8)', () => {
   });
 
   it('shows the Workspace lens by default', () => {
-    render(<FreeAgentWidget />);
+    renderWithQuery(<FreeAgentWidget />);
     fireEvent.click(screen.getByTestId('free-agent-fab'));
     expect(screen.getByTestId('free-agent-lens-label')).toHaveTextContent('Assistant — Workspace');
   });
 
   it('shows a Plan: <id> lens when navigated to /labs?planId=...', () => {
     vi.mocked(usePathname).mockReturnValue('/labs');
-    vi.mocked(useSearchParams).mockReturnValue(new URLSearchParams('planId=plan-abc'));
-    render(<FreeAgentWidget />);
+    vi.mocked(useSearchParams).mockReturnValue(
+      new URLSearchParams('planId=plan-abc') as unknown as ReturnType<typeof useSearchParams>,
+    );
+    renderWithQuery(<FreeAgentWidget />);
     fireEvent.click(screen.getByTestId('free-agent-fab'));
     expect(screen.getByTestId('free-agent-lens-label')).toHaveTextContent(
       'Assistant — Plan: plan-abc',
@@ -132,7 +160,7 @@ describe('FreeAgentWidget — lens label (AC #4, AC #8)', () => {
 
   it('shows a Project: <id> lens on /labs/projects/:id', () => {
     vi.mocked(usePathname).mockReturnValue('/labs/projects/dino-7');
-    render(<FreeAgentWidget />);
+    renderWithQuery(<FreeAgentWidget />);
     fireEvent.click(screen.getByTestId('free-agent-fab'));
     expect(screen.getByTestId('free-agent-lens-label')).toHaveTextContent(
       'Assistant — Project: dino-7',
@@ -141,7 +169,7 @@ describe('FreeAgentWidget — lens label (AC #4, AC #8)', () => {
 
   it('shows scope-changed callout when scope changes mid-session', () => {
     useAuthStore.setState({ isAuthenticated: true });
-    render(<FreeAgentWidget />);
+    renderWithQuery(<FreeAgentWidget />);
     fireEvent.click(screen.getByTestId('free-agent-fab'));
     // Simulate a session in progress by setting activeSessionId via the store.
     act(() => {
@@ -248,7 +276,7 @@ describe('FreeAgentComposer — composer text persistence (AC #10)', () => {
   });
 
   it('preserves draft text across close/open', () => {
-    render(<FreeAgentWidget />);
+    renderWithQuery(<FreeAgentWidget />);
     fireEvent.click(screen.getByTestId('free-agent-fab'));
     const textarea = screen.getByTestId('free-agent-composer') as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: 'mid-thought draft' } });

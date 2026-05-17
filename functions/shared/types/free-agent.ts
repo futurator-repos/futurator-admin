@@ -42,6 +42,32 @@ export interface FreeAgentScope {
 /** Three labeled options surfaced in the v1 UI; raw strings also accepted. */
 export type ModelAlias = 'haiku' | 'sonnet' | 'opus';
 
+/**
+ * Story 18.6 — one row per message in a free-agent session.
+ * Stored in `futurator-free-agent-conversations` keyed by (sessionId, messageIndex).
+ */
+export interface FreeAgentConversationMessage {
+  sessionId: string;
+  /** Zero-padded 6-digit message index, e.g. `"000001"`. Used as the DDB sort key. */
+  messageIndex: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  costUsd?: number;
+  /** ISO-8601 UTC. */
+  createdAt: string;
+  toolCalls?: Array<{ id: string; name: string; input?: unknown }>;
+  /** Epoch seconds — DynamoDB TTL attribute. createdAt + 90d. */
+  expiresAt: number;
+}
+
+/** Default per-session cost cap (Story 18.5 AC #7). Operator can raise/lower from the panel header. */
+export const FREE_AGENT_DEFAULT_COST_CAP_USD = 10;
+
+/** Maximum cost cap an operator can set (defensive ceiling against typos). */
+export const FREE_AGENT_MAX_COST_CAP_USD = 1000;
+
 export interface FreeAgentSession {
   sessionId: string;
   operatorId: string;

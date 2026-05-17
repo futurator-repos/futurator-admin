@@ -1,0 +1,298 @@
+<story-context id="bmad/bmm/workflows/4-implementation/story-context/template" v="1.0">
+  <metadata>
+    <epicId>18</epicId>
+    <storyId>5</storyId>
+    <title>Widget ↔ session wire-up (long-poll streaming + model selector + cost editor)</title>
+    <status>drafted</status>
+    <generatedAt>2026-05-17</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/18-5-widget-session-wire-up.md</sourceStoryPath>
+    <storyKey>18-5-widget-session-wire-up</storyKey>
+  </metadata>
+
+  <story>
+    <asA><![CDATA[Richie (operator of Futurator-Admin)]]></asA>
+    <iWant><![CDATA[the chat panel to actually spawn a free-agent session when I send my first message, stream Claude's response live, and let me pick which model to use]]></iWant>
+    <soThat><![CDATA[the widget is functionally usable as an end-to-end working agent]]></soThat>
+    <tasks><![CDATA[
+API routes:
+- Add 4 routes to functions/api/index.ts: POST /sessions (create+AssumeRole), POST /sessions/:id/messages (lock+enqueue), GET /sessions/:id (state), GET /sessions/:id/events?after=<seq> (long-poll mirroring party-events). All JWT-gated; owner check via session.operatorId. (AC #1)
+- Add in-memory sessionCredentialsCache Map at top of api/index.ts. Acceptable v1 cache; cold-start re-AssumeRoles. (AC #1)
+
+Hook + wiring:
+- Create src/hooks/use-free-agent-session.ts. TanStack Query mutations for createSession + sendMessage. Polling query (1500ms while PROCESSING). Exposes messages, isSending, status, costUsdAccumulated, costCapUsd, sendMessage, setCostCapUsd. (AC #3, #8)
+- Wire panel.tsx + composer.tsx + message-thread.tsx through the hook.
+
+Model selector + cost editor:
+- Replace panel-header.tsx model placeholder with real dropdown (Haiku/Sonnet/Opus). Default Sonnet, sticky via localStorage. Mid-conversation change → fork session + emit "Started new conversation with <model>" system message. (AC #4, #5, #6)
+- Replace cost-burn placeholder with live $X.XX / $Y.YY readout. Amber >80%, red 100%. Inline editor for costCapUsd. Budget-exhausted callout above composer. (AC #7, #8)
+
+Repo extension:
+- Add setCostCapUsd(sessionId, capUsd) to free-agent-sessions-repository.ts.
+
+Constants:
+- Add FREE_AGENT_DEFAULT_COST_CAP_USD = 10 to functions/shared/types/free-agent.ts.
+
+Tests:
+- 3 new API route tests (mirror party-refresh-route.test.ts pattern) — happy path + 400/403/404/409/402 branches. (AC #9)
+- New hook test (use-free-agent-session.test.tsx). (AC #9)
+- Extended widget.test.tsx for model selector + cost editor + budget callout. (AC #9)
+- Extended Playwright smoke for send + model change + cost edit. (AC #10)
+
+Validation:
+- npm run ci end-to-end. (AC #12)
+    ]]></tasks>
+  </story>
+
+  <acceptanceCriteria><![CDATA[
+AC #1 — 4 API routes per spec; auth-gated; owner check via session.operatorId.
+AC #2 — Long-poll (NOT SSE) for v1 per existing party-events pattern. True SSE deferred to v1.1.
+AC #3 — Composer wired via new use-free-agent-session hook (TanStack Query mutations + polling query).
+AC #4 — Model selector dropdown: 3 labeled options + tooltip with full model ID.
+AC #5 — Default Sonnet 4.6; last-used sticky via localStorage 'futurator.free-agent.last-model'.
+AC #6 — Model change forks the session; "Started new conversation with <model>" system message.
+AC #7 — Cost cap default $10; inline editor in panel header; setCostCapUsd repo helper.
+AC #8 — Live cost-burn readout; amber >80%; red 100% + budget-exhausted callout above composer.
+AC #9 — Unit tests: 3 route tests + hook test + extended widget test.
+AC #10 — Playwright e2e extended: send + model change + cost edit.
+AC #11 — Manual EC2 verification (deferred to operator post-deploy).
+AC #12 — npm run ci passes with no new regressions beyond pre-existing baseline.
+  ]]></acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/epics-free-agent.md</path>
+        <title>Epic 18 — Story 18.5 section</title>
+        <section>Widget ↔ session wire-up</section>
+        <snippet>Canonical scope. AC #2 explicitly notes long-poll vs SSE choice; v1 ships long-poll per ship-MVP preference.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/18-1-per-session-iam-role-and-worktree.md</path>
+        <title>Story 18.1 — IAM + AssumeRole helpers</title>
+        <section>assumeFreeAgentSessionRole, refreshSessionCredentials</section>
+        <snippet>API Lambda calls these on POST /sessions and POST /messages respectively. Credentials never leave server memory.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/18-2-session-lifecycle.md</path>
+        <title>Story 18.2 — sessions repo + daemon handler</title>
+        <section>freeAgentSessionsRepo, daemon job payload contract</section>
+        <snippet>POST /messages enqueues a free-agent-session job matching the payload shape defined in 18.2 AC #1.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/18-4-widget-shell.md</path>
+        <title>Story 18.4 — widget shell</title>
+        <section>Composer onSend prop, panel-header placeholder slots</section>
+        <snippet>This story replaces the placeholders (model chip, cost-burn display, hamburger) with real interactivity.</snippet>
+      </doc>
+      <doc>
+        <path>memory/feedback_ship_mvp_add_later.md</path>
+        <title>User memory — ship MVP, add complexity later</title>
+        <section>SSE deferral + in-memory cache acceptance</section>
+        <snippet>Long-poll over SSE for v1; in-memory credential cache (Lambda warm) over a Redis/SSM cache for v1; localStorage over a backend preferences blob for last-used-model.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <artifact>
+        <path>functions/api/index.ts</path>
+        <kind>hono-routes</kind>
+        <symbol>existing /api/party/sessions/:id/events route (pattern reference); existing audit route (Story 18.3, similar shape)</symbol>
+        <lines>5616-5625 (party events); 5640-5722 (audit route)</lines>
+        <reason>Long-poll pattern + auth + owner-check shape. New 4 routes mirror these closely.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/lib/free-agent-iam.ts</path>
+        <kind>shared-helper-from-18.1</kind>
+        <symbol>assumeFreeAgentSessionRole, refreshSessionCredentials</symbol>
+        <lines>n/a</lines>
+        <reason>POST /sessions calls assumeFreeAgentSessionRole; POST /messages calls refreshSessionCredentials if near expiry.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/repositories/free-agent-sessions-repository.ts</path>
+        <kind>repository-EXTENDED</kind>
+        <symbol>createSession, acquireProcessingLock, getSession (+ NEW setCostCapUsd)</symbol>
+        <lines>n/a</lines>
+        <reason>Story 18.5 adds setCostCapUsd. Existing functions used directly by the new routes.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/repositories/agent-jobs-repository.ts</path>
+        <kind>repository-reference</kind>
+        <symbol>createJob (used to enqueue free-agent-session jobs)</symbol>
+        <lines>n/a (find via grep)</lines>
+        <reason>POST /messages enqueues via this. Payload shape per Story 18.2 AC #1.</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/free-agent/panel-header.tsx</path>
+        <kind>react-component-EXTENDED</kind>
+        <symbol>model chip placeholder, cost-burn placeholder</symbol>
+        <lines>n/a</lines>
+        <reason>Replaced with real dropdown + live readout + inline cost editor. Hamburger remains placeholder for Story 18.6.</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/free-agent/composer.tsx</path>
+        <kind>react-component-EXTENDED</kind>
+        <symbol>onSend prop, isSending prop</symbol>
+        <lines>n/a</lines>
+        <reason>Wired through the new use-free-agent-session hook.</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/free-agent/panel.tsx</path>
+        <kind>react-component-EXTENDED</kind>
+        <symbol>Panel container — consume hook + pass state to thread/composer/header</symbol>
+        <lines>n/a</lines>
+        <reason>The panel becomes the hook's primary consumer; subcomponents receive props.</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/free-agent/message-thread.tsx</path>
+        <kind>react-component</kind>
+        <symbol>messages prop (existing)</symbol>
+        <lines>n/a</lines>
+        <reason>Renders the hook-derived messages array unchanged. Handles role='system' for "Started new conversation" callouts.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/api/__tests__/party-refresh-route.test.ts</path>
+        <kind>api-test-reference</kind>
+        <symbol>(pattern reference)</symbol>
+        <lines>n/a</lines>
+        <reason>Mock auth + DDB shape. New tests follow same shape with mocked AssumeRole + agentJobsRepo.createJob.</reason>
+      </artifact>
+    </code>
+
+    <dependencies>
+      <node>
+        <package name="@tanstack/react-query" version="^5">existing — useMutation + useQuery with refetchInterval</package>
+        <package name="hono" version="^4.12.10">existing — 4 new routes</package>
+        <package name="zod" version="^3">existing — safeParse only</package>
+        <package name="@aws-sdk/client-sts" version="^3.1047.0">existing (from Story 18.1) — AssumeRole call</package>
+        <package name="@aws-sdk/lib-dynamodb" version="^3.1024.0">existing — repository operations</package>
+        <package name="vitest" version="^3">existing — new test files</package>
+      </node>
+      <aws>
+        <component name="FreeAgentSessionRole (Story 18.1)">Already provisioned. POST /sessions assumes it via STS.</component>
+        <component name="FreeAgentSessionsTable (Story 18.2)">Already provisioned. createSession writes here.</component>
+        <component name="agentJobsTable (existing)">POST /messages enqueues via agentJobsRepo.createJob.</component>
+        <component name="agentEventsTable (existing)">GET /events queries via agentEventsRepo.getEventsAfter.</component>
+      </aws>
+    </dependencies>
+  </artifacts>
+
+  <constraints><![CDATA[
+- Long-poll, NOT true SSE, for v1. Matches existing codebase pattern; avoids awslambda.streamifyResponse complexity. True SSE upgrade is v1.1. [Source: memory feedback_ship_mvp_add_later]
+- Credentials NEVER returned to browser. Server-side in-memory cache + daemon job payload only. XSS-exfiltration would be a high-severity defect. [Source: Story 18.1 security framing]
+- In-memory credential cache acceptable for v1 (Lambda warm-start preserves; cold-start re-AssumeRoles). Map<sessionId, SessionCredentials> at top of api/index.ts. [Source: AC #7 + ship-MVP preference]
+- Model change forks the session (new sessionId, new credentials). claudeSessionId is model-specific and can't be reused. [Source: AC #6]
+- Cost-cap updates via repository helper, NOT a dedicated PATCH endpoint. Reduces API surface. [Source: AC #7]
+- Last-used model via localStorage, NOT backend preferences blob. [Source: AC #5 + ship-MVP preference]
+- All zod validation via .safeParse() only. [Source: CLAUDE.md Validation]
+- Auth via authMiddleware on every new route; owner check via session.operatorId === c.get('user').userId. [Source: CLAUDE.md Auth + existing party route pattern]
+- Default cost cap $10. Constant in functions/shared/types/free-agent.ts. [Source: AC #7]
+- Poll interval 1500ms while status='PROCESSING'; stops on terminal status. Matches existing party-events polling. [Source: AC #3 + party.smoke.spec.ts]
+- npm run ci must pass with no new regressions beyond pre-existing baseline (4 epic-dev-pipeline failures + Plan.kind/TimerCategory typecheck + agent-daemon.mjs lint warnings + knip warnings). [Source: Story 18.4 CI summary]
+  ]]></constraints>
+
+  <interfaces>
+    <interface>
+      <name>POST /api/free-agent/sessions (NEW)</name>
+      <kind>REST endpoint (NEW)</kind>
+      <signature><![CDATA[Auth: JWT required.
+Body: { scope: {kind, id?}, model, costCapUsd? }
+Response 201: { sessionId, status: 'ACTIVE', model, costCapUsd, expiration: ISO-8601 }
+Errors: 400 ValidationError]]></signature>
+      <path>functions/api/index.ts (NEW route)</path>
+    </interface>
+    <interface>
+      <name>POST /api/free-agent/sessions/:id/messages (NEW)</name>
+      <kind>REST endpoint (NEW)</kind>
+      <signature><![CDATA[Auth: JWT required.
+Body: { content: string }
+Response 202: { jobId, status: 'PROCESSING' }
+Errors:
+  400 ValidationError (content >8192 bytes, invalid sessionId)
+  403 Forbidden (non-owner)
+  404 NotFound (session missing)
+  409 SESSION_BUSY (lock held)
+  402 BUDGET_EXHAUSTED (session at cap)]]></signature>
+      <path>functions/api/index.ts (NEW route)</path>
+    </interface>
+    <interface>
+      <name>GET /api/free-agent/sessions/:id (NEW)</name>
+      <kind>REST endpoint (NEW)</kind>
+      <signature><![CDATA[Auth: JWT required.
+Response 200: { sessionId, status, model, costCapUsd, costUsdAccumulated, tokensInAccumulated, tokensOutAccumulated, turnCount, lastActivityAt, claudeSessionId?, errorReason? }
+Errors: 403, 404]]></signature>
+      <path>functions/api/index.ts (NEW route)</path>
+    </interface>
+    <interface>
+      <name>GET /api/free-agent/sessions/:id/events?after=&lt;seq&gt; (NEW)</name>
+      <kind>REST endpoint (NEW)</kind>
+      <signature><![CDATA[Auth: JWT required.
+Query: after=<eventSeq> (default '000000')
+Response 200: { events: AgentEvent[], lastSeq: string }
+Errors: 403, 404]]></signature>
+      <path>functions/api/index.ts (NEW route)</path>
+    </interface>
+    <interface>
+      <name>setCostCapUsd (NEW repo function)</name>
+      <kind>repository function (NEW)</kind>
+      <signature><![CDATA[setCostCapUsd(sessionId: string, capUsd: number): Promise<void>
+
+Atomic UpdateCommand:
+  UpdateExpression: 'SET costCapUsd = :cap'
+  ConditionExpression: 'attribute_exists(sessionId)'
+  ExpressionAttributeValues: { ':cap': capUsd }
+
+Validates capUsd > 0 (no-op if invalid).]]></signature>
+      <path>functions/shared/repositories/free-agent-sessions-repository.ts (extension)</path>
+    </interface>
+    <interface>
+      <name>useFreeAgentSession (NEW hook)</name>
+      <kind>React hook (NEW)</kind>
+      <signature><![CDATA[function useFreeAgentSession(): {
+  messages: FreeAgentMessage[];
+  isSending: boolean;
+  status: FreeAgentSessionStatus | 'IDLE_NO_SESSION';
+  costUsdAccumulated: number;
+  costCapUsd: number;
+  tokensInAccumulated: number;
+  tokensOutAccumulated: number;
+  sendMessage(content: string): void;
+  setCostCapUsd(capUsd: number): void;
+  resetSession(): void;  // for model change forks
+}
+
+Internal: TanStack Query mutations for POST /sessions, POST /messages.
+Polling query GET /sessions/:id/events with refetchInterval=1500 while status='PROCESSING'.
+Aggregates streamed tokens into the active assistant message bubble.]]></signature>
+      <path>src/hooks/use-free-agent-session.ts (NEW)</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards><![CDATA[
+Vitest jsdom for hook + component tests. New API route tests use the existing party-refresh-route.test.ts pattern (mock authMiddleware + docClient.send). Hook tests use @testing-library/react + a QueryClientProvider wrapper + mocked fetch. The polling-stops-on-terminal-event test uses vi.useFakeTimers to advance past refetchInterval boundaries. No new Playwright complexity beyond the extended smoke per AC #10.
+    ]]></standards>
+    <locations>
+      <location>functions/api/__tests__/free-agent-create-session-route.test.ts (NEW)</location>
+      <location>functions/api/__tests__/free-agent-send-message-route.test.ts (NEW)</location>
+      <location>functions/api/__tests__/free-agent-events-route.test.ts (NEW)</location>
+      <location>src/hooks/__tests__/use-free-agent-session.test.tsx (NEW)</location>
+      <location>src/components/free-agent/__tests__/widget.test.tsx (EXTENDED — model selector + cost editor)</location>
+      <location>tests/e2e/free-agent-widget.smoke.spec.ts (EXTENDED — send + model change + cost edit)</location>
+    </locations>
+    <ideas>
+      <idea ac="AC #1">create-session route — happy path: validates input, calls AssumeRole (mocked), calls createSession, returns sessionId + metadata WITHOUT credentials. Asserts response body has no `accessKeyId`.</idea>
+      <idea ac="AC #1">send-message route — happy path: validates content, loads session, owner check, acquireProcessingLock, enqueues job with correct payload shape (sessionId, projectId, scope, model, costCapUsd, credentials, messages).</idea>
+      <idea ac="AC #1">send-message route — 409 SESSION_BUSY when acquireProcessingLock returns { ok: false, reason: 'SESSION_BUSY' }.</idea>
+      <idea ac="AC #1">send-message route — 402 BUDGET_EXHAUSTED when session.status === 'BUDGET_EXHAUSTED'.</idea>
+      <idea ac="AC #1">send-message route — 400 ValidationError when content > 8192 bytes.</idea>
+      <idea ac="AC #1">events route — proxies to agentEventsRepo.getEventsAfter(sessionId, afterSeq); returns events + lastSeq.</idea>
+      <idea ac="AC #3">hook — sendMessage triggers POST /sessions on first call (no session yet), then POST /messages.</idea>
+      <idea ac="AC #3">hook — polling stops when status transitions to ACTIVE (terminal for the turn).</idea>
+      <idea ac="AC #5">component test — model selector defaults to Sonnet; selecting Opus persists to localStorage; reopening defaults to Opus.</idea>
+      <idea ac="AC #6">component test — model change while activeSessionId set fires resetSession + emits system message "Started new conversation with Opus".</idea>
+      <idea ac="AC #7">component test — cost cap editor: click → type "20" → enter → display updates to "$0.00 / $20.00".</idea>
+      <idea ac="AC #8">component test — costUsdAccumulated/costCapUsd > 0.8 → amber styling; >= 1.0 → red + budget callout above composer.</idea>
+    </ideas>
+  </tests>
+</story-context>

@@ -497,6 +497,34 @@ export default $config({
     });
 
     // ──────────────────────────────────────────────────────────────
+    // Story 18.6 — FreeAgentConversationsTable (Epic 18: Free Claude Code Agent)
+    //
+    // One row per message in a free-agent session. PK is the sessionId; SK is
+    // a zero-padded 6-digit messageIndex so Query returns messages sorted
+    // ascending. 90-day TTL on `expiresAt` (epoch seconds) keeps the table
+    // bounded; conversation history outlasts the 7-day agent-events TTL.
+    //
+    // v1 writes USER messages from the API layer (POST /messages). Assistant-
+    // message writes from the daemon are deferred to v1.1.
+    // ──────────────────────────────────────────────────────────────
+    const freeAgentConversationsTable = new sst.aws.Dynamo('FreeAgentConversationsTable', {
+      fields: {
+        sessionId: 'string',
+        messageIndex: 'string',
+      },
+      primaryIndex: { hashKey: 'sessionId', rangeKey: 'messageIndex' },
+      ttl: 'expiresAt',
+      transform: {
+        table: {
+          name: 'futurator-free-agent-conversations',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ──────────────────────────────────────────────────────────────
     // Story 18.1 — FreeAgentSessionRole (Epic 18: Free Claude Code Agent)
     //
     // A standalone IAM role assumed per-session by the free-agent chat
@@ -654,6 +682,7 @@ export default $config({
         agentConversationsTable,
         timingSummaryTable,
         freeAgentSessionsTable,
+        freeAgentConversationsTable,
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
@@ -690,6 +719,8 @@ export default $config({
         // Story 18.2 — free-agent sessions table. Consumed by both the API
         // Lambda (when creating sessions) and the daemon (when running them).
         FREE_AGENT_SESSIONS_TABLE: freeAgentSessionsTable.name,
+        // Story 18.6 — free-agent conversations table (per-message rows).
+        FREE_AGENT_CONVERSATIONS_TABLE: freeAgentConversationsTable.name,
         PROJECTS_ROOT: '/home/ubuntu/projects',
         BMAD_VERSION: '6.3.0',
         BMAD_AGENTS_SOURCE: '/home/ubuntu/bmad-agents-source/bmad/agents',
