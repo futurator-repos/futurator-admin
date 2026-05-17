@@ -2442,6 +2442,50 @@ async function executePipeline(job) {
             'success',
             articleCounts,
           );
+
+          // 2026-05-17 dino-7 fix: auto-resolve any compile-failed attention
+          // items for this (planId, storyId, *) that were created by a prior
+          // step in this same job's compile phase. Pre-fix dino-7 left 2 open
+          // compile-failed items even though both stories' self-heal pass
+          // succeeded — the operator saw stale red badges forever. Since the
+          // overall compile phase succeeded, every per-step failure dedup key
+          // is moot.
+          //
+          // Compile step IDs from story-pipeline.ts: compile-commit-on-pass,
+          // compile-diff, compile-ast, compile-knowledge, compile-sync,
+          // compile-push. Resolve all six idempotently (autoResolveAttentionByDedupKey
+          // returns false silently when the row doesn't exist).
+          try {
+            const planId = await resolvePlanIdFromEpicId(ddb, variables.EPIC_ID);
+            const storyId = variables.STORY_ID || 'unknown';
+            if (planId && storyId !== 'unknown') {
+              const compileStepIds = [
+                'compile-commit-on-pass',
+                'compile-diff',
+                'compile-ast',
+                'compile-knowledge',
+                'compile-sync',
+                'compile-push',
+              ];
+              await Promise.all(
+                compileStepIds.map((sid) =>
+                  autoResolveAttentionByDedupKey(
+                    ddb,
+                    planId,
+                    `compile-failed:${planId}:${storyId}:${sid}`,
+                    log,
+                  ),
+                ),
+              );
+            }
+          } catch (resolveErr) {
+            // Resolution failures are cosmetic — never let them break the
+            // compile-sync success path.
+            log(
+              'warn',
+              `compile-failed attention auto-resolve failed (non-critical): ${resolveErr.message}`,
+            );
+          }
         }
       } catch (compileErr) {
         compilationStatus = 'failed';

@@ -1,6 +1,6 @@
 import type { PipelineDefinition } from '../types/agent-orchestrator';
 import { buildAgentConfig } from './role-policy';
-import { buildFrameworkDetectSnippet } from './framework-detect';
+import { buildFrameworkDetectSnippet, buildPortReclaimSnippet } from './framework-detect';
 
 /**
  * Wave-level build + server-check pipeline.
@@ -194,11 +194,14 @@ Working directory: ${workingDir}
         stepType: 'shell' as const,
         command: [
           buildFrameworkDetectSnippet({ cwd: workingDir }),
-          `kill $(lsof -ti:$QA_PORT) 2>/dev/null; sleep 1`,
+          // 2026-05-17 — multi-pass reclaim. Single port-kill misses
+          // daemon-forked Next.js / Vite / Expo orphans from prior waves
+          // running on the same EC2 host. See framework-detect.ts.
+          buildPortReclaimSnippet(),
           `cd ${workingDir} && (nohup $QA_DEV_CMD > /tmp/wave-build-devserver-$QA_PORT.log 2>&1 </dev/null &)`,
           `STATUS=000`,
           `for i in $(seq 1 30); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$QA_PORT$QA_HEALTH_PATH 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
-          `kill $(lsof -ti:$QA_PORT) 2>/dev/null`,
+          `kill $(lsof -ti:$QA_PORT) 2>/dev/null; pkill -TERM -f 'next dev' 2>/dev/null; pkill -TERM -f 'next-server' 2>/dev/null; true`,
           `[ "$STATUS" = "200" ] || { echo "SERVER_CHECK_FAILED: framework=$QA_FRAMEWORK port=$QA_PORT"; tail -40 /tmp/wave-build-devserver-$QA_PORT.log >&2 || true; exit 1; }`,
         ].join('\n'),
         timeout: 60000,

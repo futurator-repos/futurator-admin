@@ -43,18 +43,19 @@ export function usePlanTiming(planId: string | null) {
     enabled: !!planId,
     staleTime: 5 * 60 * 1000,
     refetchInterval: (q) => {
-      // Only poll while live. Stop on error.
+      // 2026-05-17 dino-7: previously gated on `data.isLive`, which froze
+      // the panel at "00:00" forever when the first poll landed before any
+      // job had emitted events (slices=[], isLive=false → polling stopped,
+      // never restarted as jobs spun up). Now we keep polling whenever
+      // there's no data, or data shows we haven't seen the first slice yet,
+      // or data shows live work — and only stop when we have a terminal
+      // payload (slices present, none live).
       if (q.state.error) return false;
       const data = q.state.data;
-      if (!data) return false;
-      // PR-17 — bumped from 5 s to 60 s. The 5 s cadence was costing one
-      // full slicer recompute every tick (~17 DDB reads × N jobs). Backend
-      // now caches in-memory with a 30 s TTL, so even within a single
-      // 60 s poll cycle, cold-start hits compute and the next 1-2 polls
-      // are cache hits. Net cost: ~12× fewer DDB reads per active polling
-      // operator. UX impact: timing data refreshes once per minute while
-      // a plan is in flight — operators don't watch this real-time anyway.
-      return data.isLive ? 60_000 : false;
+      if (!data) return 30_000;
+      if (data.isLive) return 60_000;
+      if (data.slices.length === 0) return 30_000;
+      return false;
     },
   });
 

@@ -1,6 +1,6 @@
 import type { PipelineDefinition } from '../types/agent-orchestrator';
 import { buildAgentConfig } from './role-policy';
-import { buildFrameworkDetectSnippet } from './framework-detect';
+import { buildFrameworkDetectSnippet, buildPortReclaimSnippet } from './framework-detect';
 
 /**
  * Plan-level final integration check.
@@ -94,12 +94,16 @@ Working directory: ${workingDir}
         stepType: 'shell' as const,
         command: [
           buildFrameworkDetectSnippet({ cwd: workingDir }),
-          `kill $(lsof -ti:$QA_PORT) 2>/dev/null; sleep 1`,
+          // 2026-05-17 dino-7: replaced `kill $(lsof -ti:$QA_PORT)` with the
+          // multi-pass reclaim helper. The single-port kill missed Next.js
+          // daemon-forked instances from prior plans on the same EC2 host
+          // and led to plan-server-check failures with "Another `next dev`".
+          buildPortReclaimSnippet(),
           `cd ${workingDir} && nohup $QA_DEV_CMD > /tmp/plan-devserver-$QA_PORT.log 2>&1 </dev/null &`,
           `sleep 2`,
           `STATUS=000`,
           `for i in $(seq 1 30); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$QA_PORT$QA_HEALTH_PATH 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
-          `kill $(lsof -ti:$QA_PORT) 2>/dev/null`,
+          `kill $(lsof -ti:$QA_PORT) 2>/dev/null; pkill -TERM -f 'next dev' 2>/dev/null; pkill -TERM -f 'next-server' 2>/dev/null; true`,
           `[ "$STATUS" = "200" ] || { echo "PLAN_SERVER_CHECK_FAILED: framework=$QA_FRAMEWORK port=$QA_PORT"; tail -40 /tmp/plan-devserver-$QA_PORT.log >&2 || true; exit 1; }`,
         ].join('\n'),
         timeout: 60000,

@@ -112,3 +112,44 @@ export function buildFrameworkDetectSnippet(opts: DetectionOpts): string {
 
   return lines.join('\n');
 }
+
+/**
+ * Build a bash snippet that aggressively reclaims a dev-server port before
+ * a fresh spawn. Used by plan-server-check + wave-build server-check.
+ *
+ * 2026-05-17 dino-7 incident: `kill $(lsof -ti:3000)` alone is insufficient
+ * when a prior step's `next dev` daemon-forked into a process that no longer
+ * holds the port but still owns the Next.js dev-server lockfile / RPC
+ * socket. The next `npm run dev` spawn fires up, says "Ready in 637ms",
+ * then immediately aborts with `⨯ Another \`next dev\` ...` from Next.js's
+ * own internal duplicate-instance detector — and the entire plan-build
+ * fails with exit 1.
+ *
+ * The cleanup needs three passes:
+ *   1. SIGTERM by process pattern (`pkill -f`) so daemon-forked next-dev /
+ *      vite / expo processes from prior plans on the same EC2 host die,
+ *      regardless of which port they're now hogging.
+ *   2. SIGKILL by port (`lsof -ti`) so anything actively bound to the port
+ *      is gone.
+ *   3. Sleep so the kernel reclaims the port + the Node runtime tears down
+ *      its lockfile (Next.js writes `.next/server-running.txt` on boot
+ *      and removes it on SIGTERM — racing here leaves the file).
+ *
+ * Both passes use `|| true` so an empty match doesn't fail the chain. The
+ * snippet expects `$QA_PORT` to already be exported (call buildFrameworkDetectSnippet
+ * first).
+ */
+export function buildPortReclaimSnippet(): string {
+  return [
+    `# Kill lingering dev-servers by name pattern (covers daemon-forked orphans`,
+    `# from prior plans on the same EC2 host that no longer hold the port).`,
+    `pkill -TERM -f 'next dev' 2>/dev/null || true`,
+    `pkill -TERM -f 'next-server' 2>/dev/null || true`,
+    `pkill -TERM -f 'vite.* serve' 2>/dev/null || true`,
+    `pkill -TERM -f 'expo start' 2>/dev/null || true`,
+    `# Kill by port as a backstop for anything still listening.`,
+    `kill -9 $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
+    `# Wait for port + Next.js lockfile teardown.`,
+    `sleep 2`,
+  ].join('\n');
+}
