@@ -17,6 +17,7 @@
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
+    "migrate-brownfield": "node scripts/migrate-brownfield.mjs",
     "ci": "npm run lint && npm run format:check && npm run knip && npm run typecheck && npm run test && npm run build",
     "prepare": "husky"
   },

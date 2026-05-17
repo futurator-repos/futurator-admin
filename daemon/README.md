@@ -99,3 +99,44 @@ and never included in event payloads. The git-clone helper
 (`daemon/pipelines/lib/git-clone.mjs`) redacts the raw token and the
 tokenized URL form (`https://x-access-token:<token>@...`) before passing
 captured stdout/stderr to the event spine.
+
+### Migration Runner
+
+For first-time migration of a brownfield repo, prefer the one-shot
+runner over hand-running each step:
+
+```bash
+# From the admin repo root:
+npm run migrate-brownfield -- \
+  --path ~/code/applicator \
+  --pat-file ~/.brownfield-pat \
+  --token <jwt-from-browser-devtools>
+```
+
+The runner is idempotent. It will:
+
+1. Pre-flight check the local clone (git repo present, BMAD installed,
+   origin remote is HTTPS GitHub, branch resolved, name kebab-case, PAT
+   prefix looks right, admin JWT shaped like a JWT).
+2. Ensure the AWS Secrets Manager secret exists (or rotate it with
+   `--rotate-pat`).
+3. Print the `aws iam put-role-policy` command for the daemon EC2 role
+   on first run, then exit. Re-run with `--skip-iam-check` once you've
+   attached it (the runner doesn't auto-escalate IAM privileges).
+4. Verify the admin API is reachable.
+5. Register the project via `POST /api/party/projects` (or skip if
+   already registered as brownfield).
+6. Stream `party.bootstrap.*` events until terminal.
+7. Verify `bmadStatus=HEALTHY` and that `lastCommitSha` matches local
+   HEAD.
+
+For pulling subsequent updates after pushing from your laptop, use
+`--refresh`:
+
+```bash
+npm run migrate-brownfield -- --path ~/code/applicator --refresh \
+  --token <jwt>
+```
+
+See `docs/concepts/brownfield-migration-runner-plan.md` for the full
+design rationale.
