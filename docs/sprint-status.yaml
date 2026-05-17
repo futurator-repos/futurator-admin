@@ -267,6 +267,32 @@ development_status:
   17-8-retire-legacy-concepts: review
   epic-17-retrospective: optional
 
+  # ══════════════════════════════════════════════════════
+  # MODULE: Free Agent (from epics-free-agent.md)
+  # Pipeline v2 enhancement — operator-initiated Claude Code chat widget
+  # with per-session IAM, path-confined worktrees, manual model selector.
+  # Source: party-mode debate "exploration-free-mode" 2026-05-17.
+  # ══════════════════════════════════════════════════════
+
+  # ── Epic 18 (Free Agent v1): On-demand chat widget + runtime ──
+  epic-18: backlog
+  18-1-per-session-iam-role-and-worktree: review
+  18-2-session-lifecycle: review
+  18-3-audit-trail: review
+  18-4-widget-shell: review
+  18-5-widget-session-wire-up: backlog
+  18-6-conversation-persistence: backlog
+  # Deferred to v1.1 — promote when v1 ships:
+  # 18-7-motion-polish: backlog
+  # 18-8-pulse-trigger-semantics: backlog
+  epic-18-retrospective: optional
+
+  # ── Epic 19 (Exploration Rigor v2): Findings pipeline ──
+  # Deferred placeholder — full stories expanded after Epic 18 ships.
+  # Source spec: ~/Downloads/futurator-pipeline-exploration-rigor-addendum.md
+  epic-19: backlog
+  epic-19-retrospective: optional
+
   # ════════════════════════════════════════════════════════════════════
   # ──────────────  PIPELINE v2 — PHASE 1: SUBSTRATE  ──────────────────
   # ════════════════════════════════════════════════════════════════════

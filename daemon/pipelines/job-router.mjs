@@ -20,6 +20,8 @@ export const JOB_HANDLER_PARTY_DOCS_UNLINK = 'party-docs-unlink';
 export const JOB_HANDLER_PARTY_REFRESH = 'party-refresh';
 // Pipeline v2 / Story 1.4.3 — App-bootstrap saga (steps 3–5).
 export const JOB_HANDLER_APP_BOOTSTRAP = 'app-bootstrap';
+// Epic 18 / Story 18.2 — Free Claude Code Agent session turn.
+export const JOB_HANDLER_FREE_AGENT_SESSION = 'free-agent-session';
 
 /**
  * Decide which handler should run a given job.
@@ -46,6 +48,7 @@ export function selectHandler(job) {
   if (job.jobType === 'party-docs-unlink') return JOB_HANDLER_PARTY_DOCS_UNLINK;
   if (job.jobType === 'party-refresh') return JOB_HANDLER_PARTY_REFRESH;
   if (job.jobType === 'app-bootstrap') return JOB_HANDLER_APP_BOOTSTRAP;
+  if (job.jobType === 'free-agent-session') return JOB_HANDLER_FREE_AGENT_SESSION;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
 }
@@ -155,5 +158,35 @@ export function validateAppBootstrapJob(job) {
   if (!p.appId) return { ok: false, reason: 'appId-missing' };
   if (!p.boilerplateType) return { ok: false, reason: 'boilerplateType-missing' };
   if (typeof p.bmadEnabled !== 'boolean') return { ok: false, reason: 'bmadEnabled-missing' };
+  return { ok: true };
+}
+
+/**
+ * Epic 18 / Story 18.2 — Free-agent session job structural check.
+ * Mirrors the existing party validators but requires the credentials envelope
+ * and a non-empty messages array.
+ */
+export function validateFreeAgentSessionJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'free-agent-session') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.freeAgentSessionPayload;
+  if (!p || typeof p !== 'object') {
+    return { ok: false, reason: 'freeAgentSessionPayload-missing' };
+  }
+  if (!p.sessionId) return { ok: false, reason: 'sessionId-missing' };
+  if (!p.projectId) return { ok: false, reason: 'projectId-missing' };
+  if (!p.model) return { ok: false, reason: 'model-missing' };
+  if (typeof p.costCapUsd !== 'number') return { ok: false, reason: 'costCapUsd-missing' };
+  if (!p.credentials || typeof p.credentials !== 'object') {
+    return { ok: false, reason: 'credentials-missing' };
+  }
+  const c = p.credentials;
+  if (!c.accessKeyId || !c.secretAccessKey || !c.sessionToken) {
+    return { ok: false, reason: 'credentials-incomplete' };
+  }
+  if (!Array.isArray(p.messages) || p.messages.length === 0) {
+    return { ok: false, reason: 'messages-empty' };
+  }
   return { ok: true };
 }

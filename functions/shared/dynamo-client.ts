@@ -36,4 +36,8 @@ export const TABLE_NAMES = {
   // project /labs/reflections list both read efficiently. Sort key is the
   // proposal id (ULID-shape).
   reflections: process.env.REFLECTIONS_TABLE || 'futurator-reflections',
+  // Epic 18 — Story 18.2: Free Claude Code Agent sessions. One row per
+  // session; PK sessionId; GSI1 operator-recent-index; GSI2 scope-recent-index;
+  // 90-day TTL via `expiresAt` (epoch seconds).
+  freeAgentSessions: process.env.FREE_AGENT_SESSIONS_TABLE || 'futurator-free-agent-sessions',
 } as const;

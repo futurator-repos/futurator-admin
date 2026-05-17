@@ -18,6 +18,7 @@ import {
   QueryCommand,
   UpdateCommand,
   PutCommand,
+  ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { spawn, execSync } from 'child_process';
 import { mkdirSync, existsSync, readFileSync, statSync } from 'fs';
@@ -64,6 +65,7 @@ import {
   validatePartyDocsUnlinkJob,
   validatePartyRefreshJob,
   validateAppBootstrapJob,
+  validateFreeAgentSessionJob,
   JOB_HANDLER_EPIC_DEV,
   JOB_HANDLER_PARTY_BOOTSTRAP,
   JOB_HANDLER_PARTY_INSPECT,
@@ -72,6 +74,7 @@ import {
   JOB_HANDLER_PARTY_DOCS_UNLINK,
   JOB_HANDLER_PARTY_REFRESH,
   JOB_HANDLER_APP_BOOTSTRAP,
+  JOB_HANDLER_FREE_AGENT_SESSION,
 } from './pipelines/job-router.mjs';
 import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
 import { runPartyBootstrap } from './pipelines/party-bootstrap.mjs';
@@ -83,6 +86,9 @@ import { runPartyDocsUnlink } from './pipelines/party-docs-unlink.mjs';
 import { runPartyRefresh } from './pipelines/party-refresh.mjs';
 // Pipeline v2 / Story 1.4.3 — App-bootstrap saga (steps 3–5).
 import { runAppBootstrap } from './pipelines/app-bootstrap.mjs';
+// Story 18.2 — Free Claude Code Agent session handler + GC scheduler.
+import { runFreeAgentSession } from './pipelines/free-agent-session.mjs';
+import { runFreeAgentGc } from './lib/free-agent-gc.mjs';
 import {
   findStaleJobs,
   buildResumeJob,
@@ -171,6 +177,12 @@ const FORWARDER_POLL_MS = parseInt(process.env.FORWARDER_POLL_MS || '250', 10);
 const DAEMON_RECEIVER_PORT = parseInt(process.env.FUTURATOR_DAEMON_PORT || '17631', 10);
 const STALE_HEARTBEAT_MS = parseInt(process.env.STALE_HEARTBEAT_MS || String(DEFAULT_STALE_MS), 10);
 const STALE_SCAN_INTERVAL_MS = parseInt(process.env.STALE_SCAN_INTERVAL_MS || '30000', 10);
+// Story 18.2 — Free Claude Code Agent GC. Daily by default; configurable for
+// testing on EC2 dev. The GC sweeps stale free-agent worktrees + reaps orphans.
+const FREE_AGENT_GC_INTERVAL_MS = parseInt(
+  process.env.FREE_AGENT_GC_INTERVAL_MS || String(24 * 60 * 60 * 1000),
+  10,
+);
 // Pipeline Enhancement Plan v2 — Phase A.1: graceful shutdown window. On
 // SIGTERM/SIGINT the daemon SIGTERMs tracked children, waits this long, then
 // SIGKILLs any stragglers and emits daemon-shutdown-timeout attention items.
@@ -1234,6 +1246,8 @@ async function writeHeartbeat() {
 // resumeFromWaveResults. The poll loop will then pick the new job up
 // and spawn a new orchestrator that skips completed waves.
 let lastStaleScanAt = 0;
+// Story 18.2 — last successful run of the free-agent GC ticker.
+let lastFreeAgentGcAt = 0;
 
 async function scanStaleEpicDevJobs() {
   try {
@@ -2743,6 +2757,9 @@ async function executeEpicDevJob(job) {
 
 const PARTY_PROJECTS_TABLE = process.env.PARTY_PROJECTS_TABLE || 'futurator-party-projects';
 const PARTY_SESSIONS_TABLE = process.env.PARTY_SESSIONS_TABLE || 'futurator-party-sessions';
+// Story 18.2 — Free Claude Code Agent sessions table (created by sst.config.ts).
+const FREE_AGENT_SESSIONS_TABLE =
+  process.env.FREE_AGENT_SESSIONS_TABLE || 'futurator-free-agent-sessions';
 const PARTY_PROJECTS_ROOT = process.env.PROJECTS_ROOT || '/home/ubuntu/projects';
 const PARTY_BMAD_VERSION = process.env.BMAD_VERSION || '6.3.0';
 const PARTY_BMAD_AGENTS_SOURCE =
@@ -2943,6 +2960,183 @@ async function partyReleaseSessionLock(sessionId, finalStatus) {
       },
     }),
   );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Story 18.2 — Free Claude Code Agent sessions repo facade (daemon-side).
+//
+// The TypeScript repository at functions/shared/repositories/free-agent-sessions-
+// repository.ts is the source of truth for shape/semantics. The daemon re-
+// implements the same DDB operations here because the .mjs daemon cannot
+// import .ts modules directly (same pattern as partyGetSession/etc above).
+// Keep the two in sync: any change to AC #7 or AC #8 contracts must land
+// in BOTH files.
+// ──────────────────────────────────────────────────────────────────────
+
+async function freeAgentGetSession(sessionId) {
+  const result = await ddb.send(
+    new GetCommand({ TableName: FREE_AGENT_SESSIONS_TABLE, Key: { sessionId } }),
+  );
+  return result?.Item || null;
+}
+
+async function freeAgentAcquireProcessingLock(sessionId) {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: FREE_AGENT_SESSIONS_TABLE,
+        Key: { sessionId },
+        UpdateExpression: 'SET #status = :processing, lastActivityAt = :now',
+        ConditionExpression: 'attribute_exists(sessionId) AND #status = :active',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':processing': 'PROCESSING',
+          ':active': 'ACTIVE',
+          ':now': new Date().toISOString(),
+        },
+      }),
+    );
+    return { ok: true };
+  } catch (err) {
+    if (err?.name === 'ConditionalCheckFailedException') {
+      const row = await freeAgentGetSession(sessionId);
+      if (!row) return { ok: false, reason: 'NOT_FOUND' };
+      if (row.status === 'PROCESSING') return { ok: false, reason: 'SESSION_BUSY' };
+      return { ok: false, reason: 'INVALID_STATE' };
+    }
+    throw err;
+  }
+}
+
+async function freeAgentReleaseProcessingLock(sessionId, newStatus) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: FREE_AGENT_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'SET #status = :s, lastActivityAt = :now',
+      ConditionExpression: 'attribute_exists(sessionId)',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: { ':s': newStatus, ':now': new Date().toISOString() },
+    }),
+  );
+}
+
+async function freeAgentSetClaudeSessionId(sessionId, claudeSessionId) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: FREE_AGENT_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'SET claudeSessionId = :cid',
+      ConditionExpression:
+        'attribute_exists(sessionId) AND (attribute_not_exists(claudeSessionId) OR claudeSessionId = :cid)',
+      ExpressionAttributeValues: { ':cid': claudeSessionId },
+    }),
+  );
+}
+
+async function freeAgentIncrementTurn(sessionId) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: FREE_AGENT_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'SET lastTurnAt = :now, lastActivityAt = :now ADD turnCount :one',
+      ConditionExpression: 'attribute_exists(sessionId)',
+      ExpressionAttributeValues: { ':now': new Date().toISOString(), ':one': 1 },
+    }),
+  );
+}
+
+async function freeAgentUpdateCostUsd(sessionId, costUsdDelta) {
+  if (!Number.isFinite(costUsdDelta) || costUsdDelta <= 0) return;
+  await ddb.send(
+    new UpdateCommand({
+      TableName: FREE_AGENT_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'ADD costUsdAccumulated :d',
+      ConditionExpression: 'attribute_exists(sessionId)',
+      ExpressionAttributeValues: { ':d': costUsdDelta },
+    }),
+  );
+}
+
+// Story 18.3 — token accumulation. Mirrors functions/shared/repositories/
+// free-agent-sessions-repository.ts:updateTokens.
+async function freeAgentUpdateTokens(sessionId, tokensIn, tokensOut) {
+  const safeIn = Number.isFinite(tokensIn) && tokensIn > 0 ? tokensIn : 0;
+  const safeOut = Number.isFinite(tokensOut) && tokensOut > 0 ? tokensOut : 0;
+  if (safeIn === 0 && safeOut === 0) return;
+  await ddb.send(
+    new UpdateCommand({
+      TableName: FREE_AGENT_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'ADD tokensInAccumulated :i, tokensOutAccumulated :o',
+      ConditionExpression: 'attribute_exists(sessionId)',
+      ExpressionAttributeValues: { ':i': safeIn, ':o': safeOut },
+    }),
+  );
+}
+
+async function freeAgentMarkBudgetExhausted(sessionId) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: FREE_AGENT_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'SET #status = :s, lastActivityAt = :now',
+      ConditionExpression: 'attribute_exists(sessionId) AND #status IN (:p0, :p1)',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':s': 'BUDGET_EXHAUSTED',
+        ':p0': 'PROCESSING',
+        ':p1': 'ACTIVE',
+        ':now': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+async function freeAgentMarkError(sessionId, reason) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: FREE_AGENT_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'SET #status = :s, errorReason = :r, lastActivityAt = :now',
+      ConditionExpression: 'attribute_exists(sessionId)',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':s': 'ERROR',
+        ':r': reason,
+        ':now': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+async function freeAgentListAllSessions() {
+  const out = [];
+  let ExclusiveStartKey;
+  do {
+    const result = await ddb.send(
+      new ScanCommand({ TableName: FREE_AGENT_SESSIONS_TABLE, ExclusiveStartKey }),
+    );
+    if (result.Items) out.push(...result.Items);
+    ExclusiveStartKey = result.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return out;
+}
+
+function buildFreeAgentSessionsRepoFacade() {
+  return {
+    getSession: freeAgentGetSession,
+    acquireProcessingLock: freeAgentAcquireProcessingLock,
+    releaseProcessingLock: freeAgentReleaseProcessingLock,
+    setClaudeSessionId: freeAgentSetClaudeSessionId,
+    incrementTurn: freeAgentIncrementTurn,
+    updateCostUsd: freeAgentUpdateCostUsd,
+    updateTokens: freeAgentUpdateTokens,
+    markBudgetExhausted: freeAgentMarkBudgetExhausted,
+    markError: freeAgentMarkError,
+    listAllSessions: freeAgentListAllSessions,
+  };
 }
 
 function buildPartyCtx() {
@@ -3316,6 +3510,58 @@ async function patchAppRow(appId, patch) {
   );
 }
 
+/**
+ * Story 18.2 — Free Claude Code Agent session turn handler.
+ *
+ * The API Lambda (Story 18.5) creates the session row + assumes STS
+ * credentials, then enqueues a free-agent-session job per user message.
+ * This function picks up that job, validates it, and dispatches into the
+ * pipeline implementation at daemon/pipelines/free-agent-session.mjs.
+ */
+async function executeFreeAgentSessionJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  const validation = validateFreeAgentSessionJob(job);
+  if (!validation.ok) {
+    throw new Error(`free-agent-session job rejected: ${validation.reason}`);
+  }
+
+  log('info', `[${short}] Routing to free-agent-session pipeline`, {
+    sessionId: job.freeAgentSessionPayload?.sessionId,
+    model: job.freeAgentSessionPayload?.model,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'free-agent-session',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  try {
+    await runFreeAgentSession(job, {
+      pushEvent,
+      sessionsRepo: buildFreeAgentSessionsRepoFacade(),
+      claudeBin: CLAUDE_BIN,
+      spawn,
+      logger: {
+        info: (msg) => log('info', msg),
+        warn: (msg) => log('warn', msg),
+        error: (msg) => log('error', msg),
+      },
+    });
+    await updateJobFields(jobId, { status: 'COMPLETED' });
+    log('info', `[${short}] free-agent-session completed`);
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] free-agent-session failed: ${err?.message || err}`);
+    throw err;
+  }
+}
+
 async function executeAppBootstrapJob(job) {
   const { jobId } = job;
   const short = jobId.slice(0, 8);
@@ -3401,6 +3647,8 @@ async function runJobAsync(job) {
       await executePartyRefreshJob(job);
     } else if (handler === JOB_HANDLER_APP_BOOTSTRAP) {
       await executeAppBootstrapJob(job);
+    } else if (handler === JOB_HANDLER_FREE_AGENT_SESSION) {
+      await executeFreeAgentSessionJob(job);
     } else {
       await executePipeline(job);
     }
@@ -3688,6 +3936,17 @@ async function poll() {
       if (Date.now() - lastStaleScanAt >= STALE_SCAN_INTERVAL_MS) {
         lastStaleScanAt = Date.now();
         scanStaleEpicDevJobs().catch((e) => log('error', `Stale scan uncaught: ${e.message}`));
+      }
+
+      // Story 18.2 — Free-agent worktree GC. Same throttled-scan pattern as
+      // above. Wiring deferred from Story 18.1 (Lambdas can't reach the EC2
+      // filesystem). Non-blocking; errors logged but not re-raised.
+      if (Date.now() - lastFreeAgentGcAt >= FREE_AGENT_GC_INTERVAL_MS) {
+        lastFreeAgentGcAt = Date.now();
+        runFreeAgentGc({
+          querySessionsScan: () => freeAgentListAllSessions(),
+          logFn: (level, msg, ctx) => log(level, msg, ctx),
+        }).catch((e) => log('error', `free-agent-gc uncaught: ${e.message}`));
       }
 
       // Only query if we have available slots

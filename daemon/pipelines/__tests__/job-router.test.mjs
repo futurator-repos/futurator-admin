@@ -3,9 +3,11 @@ import {
   selectHandler,
   validateEpicDevJob,
   validatePartyRefreshJob,
+  validateFreeAgentSessionJob,
   JOB_HANDLER_LEGACY,
   JOB_HANDLER_EPIC_DEV,
   JOB_HANDLER_PARTY_REFRESH,
+  JOB_HANDLER_FREE_AGENT_SESSION,
 } from '../job-router.mjs';
 
 describe('selectHandler', () => {
@@ -149,5 +151,107 @@ describe('validatePartyRefreshJob (Story 15.4)', () => {
     const j = baseJob();
     delete j.partyRefreshPayload.gitBranch;
     expect(validatePartyRefreshJob(j)).toMatchObject({ ok: false, reason: 'gitBranch-missing' });
+  });
+});
+
+describe('selectHandler — free-agent-session (Story 18.2)', () => {
+  it('routes jobType=free-agent-session to the free-agent-session handler', () => {
+    expect(selectHandler({ jobType: 'free-agent-session', jobId: 'j' })).toBe(
+      JOB_HANDLER_FREE_AGENT_SESSION,
+    );
+  });
+});
+
+describe('validateFreeAgentSessionJob (Story 18.2)', () => {
+  const baseJob = () => ({
+    jobId: 'job-fa',
+    jobType: 'free-agent-session',
+    freeAgentSessionPayload: {
+      sessionId: 'sid-1',
+      projectId: 'dino-7',
+      scope: { kind: 'plan', id: 'plan-abc' },
+      model: 'sonnet',
+      costCapUsd: 10,
+      credentials: {
+        accessKeyId: 'ASIAEXAMPLE12345678X',
+        secretAccessKey: 'a'.repeat(40),
+        sessionToken: 'tok',
+        expiration: '2026-05-17T20:00:00.000Z',
+      },
+      messages: [{ role: 'user', content: 'hello' }],
+    },
+  });
+
+  it('passes a well-formed free-agent-session job', () => {
+    expect(validateFreeAgentSessionJob(baseJob())).toEqual({ ok: true });
+  });
+
+  it('flags missing jobId', () => {
+    const j = baseJob();
+    delete j.jobId;
+    expect(validateFreeAgentSessionJob(j)).toMatchObject({ ok: false, reason: 'jobId-missing' });
+  });
+
+  it('flags wrong jobType', () => {
+    const j = baseJob();
+    j.jobType = 'party-turn';
+    expect(validateFreeAgentSessionJob(j)).toMatchObject({
+      ok: false,
+      reason: 'jobType-mismatch',
+    });
+  });
+
+  it('flags missing payload', () => {
+    const j = baseJob();
+    delete j.freeAgentSessionPayload;
+    expect(validateFreeAgentSessionJob(j)).toMatchObject({
+      ok: false,
+      reason: 'freeAgentSessionPayload-missing',
+    });
+  });
+
+  it('flags missing sessionId', () => {
+    const j = baseJob();
+    delete j.freeAgentSessionPayload.sessionId;
+    expect(validateFreeAgentSessionJob(j)).toMatchObject({
+      ok: false,
+      reason: 'sessionId-missing',
+    });
+  });
+
+  it('flags missing credentials', () => {
+    const j = baseJob();
+    delete j.freeAgentSessionPayload.credentials;
+    expect(validateFreeAgentSessionJob(j)).toMatchObject({
+      ok: false,
+      reason: 'credentials-missing',
+    });
+  });
+
+  it('flags incomplete credentials (missing sessionToken)', () => {
+    const j = baseJob();
+    delete j.freeAgentSessionPayload.credentials.sessionToken;
+    expect(validateFreeAgentSessionJob(j)).toMatchObject({
+      ok: false,
+      reason: 'credentials-incomplete',
+    });
+  });
+
+  it('flags missing costCapUsd', () => {
+    const j = baseJob();
+    delete j.freeAgentSessionPayload.costCapUsd;
+    expect(validateFreeAgentSessionJob(j)).toMatchObject({
+      ok: false,
+      reason: 'costCapUsd-missing',
+    });
+  });
+
+  it('flags empty messages array', () => {
+    const j = baseJob();
+    j.freeAgentSessionPayload.messages = [];
+    expect(validateFreeAgentSessionJob(j)).toMatchObject({
+      ok: false,
+      reason: 'messages-empty',
+    });
   });
 });

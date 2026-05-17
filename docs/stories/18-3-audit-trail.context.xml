@@ -1,0 +1,262 @@
+<story-context id="bmad/bmm/workflows/4-implementation/story-context/template" v="1.0">
+  <metadata>
+    <epicId>18</epicId>
+    <storyId>3</storyId>
+    <title>Audit trail (commit trailer + AWS-call instrumentation + DDB session record + audit endpoint)</title>
+    <status>drafted</status>
+    <generatedAt>2026-05-17</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/18-3-audit-trail.md</sourceStoryPath>
+    <storyKey>18-3-audit-trail</storyKey>
+  </metadata>
+
+  <story>
+    <asA><![CDATA[Richie (operator of Futurator-Admin)]]></asA>
+    <iWant><![CDATA[every action the free-agent takes — commits, AWS API calls, DDB writes — to be traceable back to a specific session, operator, and timestamp]]></iWant>
+    <soThat><![CDATA[if anything anomalous happens I can answer "what did the agent do?" in under 5 minutes via standard queries, not a forensic archaeology dig]]></soThat>
+    <tasks><![CDATA[
+Daemon — commit-msg hook:
+- Create daemon/pipelines/lib/free-agent-commit-msg-hook.sh — reads commit-msg file path ($1), checks if `Agent: FREE-AGENT-${FREE_AGENT_SESSION_ID}` already present, appends if not. Idempotent. (AC #1, AC #2)
+- Extend daemon/pipelines/lib/free-agent-worktree.mjs — add installCommitMsgHook({worktreePath, sessionId, hookScriptPath}). Writes script to <worktreePath>/.git/hooks/prepare-commit-msg with mode 0755. Idempotent: if existing hook present, append marker-bracketed block; don't overwrite. (AC #1, AC #2)
+- Extend daemon/pipelines/free-agent-session.mjs — pass FREE_AGENT_SESSION_ID=<sessionId> in spawn env. (AC #1)
+- Create daemon/pipelines/__tests__/free-agent-commit-msg-hook.test.mjs — execFile-based: appends trailer to clean message; no-op on already-tagged message; coexists with other agents' trailers. (AC #7)
+- Extend daemon/pipelines/__tests__/free-agent-worktree.test.mjs — hook installation tests (path, mode, idempotent re-install). (AC #7)
+
+Shared — token accumulation:
+- Extend functions/shared/types/free-agent.ts — add tokensInAccumulated + tokensOutAccumulated to FreeAgentSession. (AC #3)
+- Extend functions/shared/repositories/free-agent-sessions-repository.ts — add updateTokens(sessionId, tokensIn, tokensOut) using atomic ADD expression. (AC #3)
+- Extend functions/shared/repositories/__tests__/free-agent-sessions-repository.test.ts — ADD expression + no-op on zero/negative. (AC #7)
+
+Daemon — usage capture + AWS-call instrumentation:
+- Extend daemon/pipelines/free-agent-session.mjs — parse usage.{input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens} from stream-json result event; call sessionsRepo.updateTokens. (AC #3)
+- Extend agent-daemon.mjs facade — add freeAgentUpdateTokens; wire into buildFreeAgentSessionsRepoFacade. (AC #3)
+- Extend daemon/pipelines/free-agent-session.mjs — structure subprocess stderr forwarding so AWS-SDK errors include the sessionId tag in the emit event. (AC #4)
+- Extend daemon/pipelines/__tests__/free-agent-session.test.mjs — updateTokens called with parsed usage. (AC #7)
+
+API — audit endpoint:
+- Add GET /api/free-agent/sessions/:id/audit to functions/api/index.ts. Validate :id. Load session (404 if absent). Authorize: caller sub === session.operatorId OR admin scope. Query agent-events with jobId=sessionId. Build response { sessionId, session, events: [{timestamp, kind, detail}] }. (AC #5, AC #6)
+- Create functions/api/__tests__/free-agent-audit-route.test.ts — happy path + 403 + 404 + 400. (AC #7)
+
+Validation:
+- npm run ci end-to-end. (AC #9)
+    ]]></tasks>
+  </story>
+
+  <acceptanceCriteria><![CDATA[
+AC #1 — prepare-commit-msg hook installed by daemon at <worktreePath>/.git/hooks/prepare-commit-msg, adds `Agent: FREE-AGENT-<sessionId>` trailer via $FREE_AGENT_SESSION_ID env var injected at spawn time.
+AC #2 — Hook + install both idempotent. Hook: no-op on already-tagged message. Install: marker-bracketed append if existing hook present.
+AC #3 — updateTokens repo function + sessionsRepo facade extension + handler usage-parse + atomic ADD on tokensInAccumulated/tokensOutAccumulated.
+AC #4 — Subprocess stderr forwarded with sessionId tagging. CloudTrail metric filter deferred to v1.1 (non-trivial without real deploy).
+AC #5 — GET /api/free-agent/sessions/:id/audit returns { sessionId, session, events: [{timestamp, kind, detail}] } — events from agent-events filtered by sessionId.
+AC #6 — Auth-gated: owner OR admin. 403 otherwise. (Admin scope check defaults to owner-only if no clean pattern exists in api/index.ts; admin escalation is a one-line follow-up.)
+AC #7 — Unit tests pass: free-agent-commit-msg-hook.test.mjs (NEW), free-agent-worktree.test.mjs (EXTENDED), free-agent-session.test.mjs (EXTENDED), free-agent-sessions-repository.test.ts (EXTENDED), free-agent-audit-route.test.ts (NEW).
+AC #8 — Manual EC2 verification (deferred to operator post-deploy).
+AC #9 — npm run ci passes with no new regressions beyond pre-existing baseline.
+  ]]></acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/epics-free-agent.md</path>
+        <title>Epic 18 — Story 18.3 section</title>
+        <section>Audit trail (commit trailer + CloudTrail + DDB session record)</section>
+        <snippet>Canonical scope. CloudTrail filter spec'd but flagged as deferrable; daemon-side AWS instrumentation is the v1 path.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/18-1-per-session-iam-role-and-worktree.md</path>
+        <title>Story 18.1 — worktree foundation</title>
+        <section>ensureWorktree + writeFreeAgentSettings</section>
+        <snippet>The worktree creation + .claude/settings.json write that this story extends with .git/hooks/prepare-commit-msg installation.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/18-2-session-lifecycle.md</path>
+        <title>Story 18.2 — sessions repo + daemon handler</title>
+        <section>updateCostUsd + incrementTurn + handler stream-parsing</section>
+        <snippet>updateTokens (this story) mirrors updateCostUsd's ADD-expression pattern. Handler usage-parsing extends the existing stream-parsing block (handleLine).</snippet>
+      </doc>
+      <doc>
+        <path>memory/feedback_ship_mvp_add_later.md</path>
+        <title>User memory — ship MVP, add complexity later</title>
+        <section>Defer CloudTrail wiring until trivially achievable</section>
+        <snippet>The full CloudWatch metric filter is non-trivial without a verified deploy. Daemon-side stderr tagging is "good enough" for v1 and meets the spirit of AC #4 (anomalies are queryable by sessionId).</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <artifact>
+        <path>daemon/pipelines/lib/free-agent-worktree.mjs</path>
+        <kind>daemon-helper-EXTENDED</kind>
+        <symbol>ensureWorktree, writeFreeAgentSettings (extend with installCommitMsgHook)</symbol>
+        <lines>n/a</lines>
+        <reason>This story adds installCommitMsgHook(...) and wires the call into writeFreeAgentSettings or a new combined initializer. The atomic-write pattern from writeFreeAgentSettings carries over.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/free-agent-session.mjs</path>
+        <kind>daemon-pipeline-EXTENDED</kind>
+        <symbol>runFreeAgentSession (env, handleLine result-event parser)</symbol>
+        <lines>144-150 (env block); 218-241 (handleLine result event)</lines>
+        <reason>Add FREE_AGENT_SESSION_ID to the spawn env. In the result-event branch, parse usage.{input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens} and call sessionsRepo.updateTokens.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/repositories/free-agent-sessions-repository.ts</path>
+        <kind>repository-EXTENDED</kind>
+        <symbol>updateCostUsd (pattern), new updateTokens</symbol>
+        <lines>n/a (pattern reference)</lines>
+        <reason>updateTokens mirrors updateCostUsd: ADD expression with tokensIn/tokensOut deltas. No-op on zero/negative.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon-runtime-EXTENDED</kind>
+        <symbol>buildFreeAgentSessionsRepoFacade (add freeAgentUpdateTokens)</symbol>
+        <lines>n/a</lines>
+        <reason>Daemon-side facade mirror — same inline-DDB pattern as freeAgentUpdateCostUsd.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/api/index.ts</path>
+        <kind>hono-routes-EXTENDED</kind>
+        <symbol>auth middleware + existing party/sessions/:id/events route as auth+query reference</symbol>
+        <lines>n/a (find in file via grep)</lines>
+        <reason>New GET /api/free-agent/sessions/:id/audit route mirrors the auth + path-param-validation + repository-call pattern of existing session/event endpoints. Look at party-refresh-route or party-events route for the closest analog.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/repositories/agent-events-repository.ts</path>
+        <kind>repository-reference</kind>
+        <symbol>getEventsAfter (query pattern for events filtered by jobId)</symbol>
+        <lines>77-99</lines>
+        <reason>Audit endpoint queries agent-events with jobId=sessionId, ScanIndexForward=true. The existing getEventsAfter has the right shape; this story may reuse it or add a new variant without the `since` cursor.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/api/__tests__/party-refresh-route.test.ts</path>
+        <kind>api-test-reference</kind>
+        <symbol>(route test pattern)</symbol>
+        <lines>n/a</lines>
+        <reason>Pattern reference for the new audit-route test: mock dynamo + JWT, exercise success + 403 + 404 + 400 paths.</reason>
+      </artifact>
+    </code>
+
+    <dependencies>
+      <node>
+        <package name="@aws-sdk/lib-dynamodb" version="^3.1024.0">already in deps; used by repository ADD expression for updateTokens.</package>
+        <package name="hono" version="^4.12.10">already in deps; new audit route.</package>
+        <package name="vitest" version="^3">already in deps; new + extended test files.</package>
+      </node>
+      <aws>
+        <component name="DynamoDB table futurator-agent-events (existing)">Query target for the audit endpoint. PK = jobId (= sessionId for free-agent events). 7-day TTL.</component>
+        <component name="DynamoDB table futurator-free-agent-sessions (Story 18.2)">PK lookup for the audit endpoint's session-metadata header.</component>
+      </aws>
+      <git>
+        <component name="prepare-commit-msg hook">Git's standard hook contract. Receives commit-msg file path as $1; can read/modify it. Exits 0 on success.</component>
+      </git>
+    </dependencies>
+  </artifacts>
+
+  <constraints><![CDATA[
+- Hook install is best-effort additive — never overwrite an existing prepare-commit-msg hook. If present, append our marker-bracketed block: `# >>> futurator free-agent commit-msg trailer >>>` ... `# <<< futurator free-agent commit-msg trailer <<<` so re-install detects and skips.
+- FREE_AGENT_SESSION_ID env var is the contract between daemon spawn and hook script. Default to 'unknown' inside the hook if unset.
+- CloudTrail metric filter is deferred to v1.1. Daemon-side stderr tagging is the v1 substitute.
+- Admin scope check: if no clean pattern exists in functions/api/index.ts today, default audit endpoint to owner-only. Wire admin escalation as a one-line follow-up. [Source: memory feedback_ship_mvp_add_later]
+- Usage parsing: verify the exact shape (input_tokens vs cache_creation_input_tokens, etc.) on real EC2 result events. Parser should be defensive against missing fields.
+- All zod validation via .safeParse() only. [Source: CLAUDE.md Validation]
+- npm run ci must pass with no new regressions beyond pre-existing baseline (4 epic-dev-pipeline failures + Plan.kind/TimerCategory typecheck + knip warnings + 4 pre-existing agent-daemon.mjs lint warnings). [Source: Story 18.2 CI summary]
+- Production-only SST deploy guard: any infra changes only land on production deploys. This story adds no new SST resources, so no concern.
+  ]]></constraints>
+
+  <interfaces>
+    <interface>
+      <name>installCommitMsgHook (NEW)</name>
+      <kind>daemon helper function (NEW)</kind>
+      <signature><![CDATA[installCommitMsgHook({
+  worktreePath: string,
+  sessionId: string,
+  hookScriptPath?: string,  // default = FREE_AGENT_COMMIT_MSG_HOOK_SCRIPT
+  fs?: { existsSync, readFileSync, writeFileSync, chmodSync }
+}): void
+
+Behavior:
+  - If <worktreePath>/.git/hooks/prepare-commit-msg does NOT exist: write our hook script verbatim with mode 0o755.
+  - If it exists AND contains our marker `# >>> futurator free-agent commit-msg trailer >>>`: no-op (idempotent re-install).
+  - If it exists WITHOUT our marker: append our marker-bracketed block calling out to our script. Preserves existing hook logic.
+  - Idempotent.]]></signature>
+      <path>daemon/pipelines/lib/free-agent-worktree.mjs (extension)</path>
+    </interface>
+    <interface>
+      <name>free-agent-commit-msg-hook.sh (NEW)</name>
+      <kind>shell script (NEW)</kind>
+      <signature><![CDATA[#!/usr/bin/env bash
+# Args: $1 — commit-msg file path
+# Env:  FREE_AGENT_SESSION_ID (defaults to 'unknown')
+# Behavior: if `Agent: FREE-AGENT-${FREE_AGENT_SESSION_ID}` not in the file, append it as a trailer (separated by a blank line if needed). Idempotent.
+# Exit: 0 always (do not block the commit on hook errors).]]></signature>
+      <path>daemon/pipelines/lib/free-agent-commit-msg-hook.sh (NEW)</path>
+    </interface>
+    <interface>
+      <name>updateTokens (NEW)</name>
+      <kind>repository function (NEW)</kind>
+      <signature><![CDATA[updateTokens(sessionId: string, tokensIn: number, tokensOut: number): Promise<void>
+
+Atomic UpdateCommand:
+  UpdateExpression: 'ADD tokensInAccumulated :i, tokensOutAccumulated :o'
+  ConditionExpression: 'attribute_exists(sessionId)'
+  ExpressionAttributeValues: { ':i': tokensIn, ':o': tokensOut }
+
+No-op when both deltas are <= 0 or non-finite.]]></signature>
+      <path>functions/shared/repositories/free-agent-sessions-repository.ts (extension)</path>
+    </interface>
+    <interface>
+      <name>GET /api/free-agent/sessions/:id/audit (NEW)</name>
+      <kind>REST endpoint (NEW)</kind>
+      <signature><![CDATA[GET /api/free-agent/sessions/:id/audit
+Auth: Bearer JWT required.
+Authorization: caller.sub === session.operatorId OR admin scope.
+
+Response 200:
+{
+  sessionId: string,
+  session: {
+    status, model, costCapUsd, costUsdAccumulated,
+    tokensInAccumulated, tokensOutAccumulated,
+    turnCount, createdAt, lastActivityAt, lastTurnAt?,
+    claudeSessionId?, errorReason?
+  },
+  events: [
+    { timestamp: ISO-8601, kind: string, detail: object }
+  ]
+}
+
+Errors:
+  400 InvalidInput   — sessionId fails validation
+  403 Forbidden      — non-owner non-admin
+  404 NotFound       — session not found]]></signature>
+      <path>functions/api/index.ts (extension)</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards><![CDATA[
+Vitest jsdom for shared/api tests. Daemon .mjs tests use the same vi.hoisted + vi.mock pattern established in Stories 18.1/18.2. Bash script tests use child_process.execFile against a temp commit-msg file. API route tests use the existing party-refresh-route.test.ts pattern: mock auth context + DDB doc client; exercise success + 403/404/400. Per-AC mapping: 1=hook install + bash test, 2=idempotent install + bash no-op test, 3=updateTokens repo test + handler test, 4=daemon stderr-tag test (light), 5=audit-route happy path test, 6=audit-route 403 test, 7=this AC, 8=manual deferred.
+    ]]></standards>
+    <locations>
+      <location>daemon/pipelines/__tests__/free-agent-commit-msg-hook.test.mjs (NEW)</location>
+      <location>daemon/pipelines/__tests__/free-agent-worktree.test.mjs (EXTENDED)</location>
+      <location>daemon/pipelines/__tests__/free-agent-session.test.mjs (EXTENDED)</location>
+      <location>functions/shared/repositories/__tests__/free-agent-sessions-repository.test.ts (EXTENDED)</location>
+      <location>functions/api/__tests__/free-agent-audit-route.test.ts (NEW)</location>
+    </locations>
+    <ideas>
+      <idea ac="AC #1">commit-msg-hook.test.mjs — invoke the script with a temp file containing "fix: bug" and FREE_AGENT_SESSION_ID=sid-1; assert file contents end with `Agent: FREE-AGENT-sid-1`.</idea>
+      <idea ac="AC #2">commit-msg-hook.test.mjs — invoke with a temp file already containing the trailer; assert no duplicate trailer (file content unchanged).</idea>
+      <idea ac="AC #1">commit-msg-hook.test.mjs — invoke with a message that already contains another agent's trailer (e.g., `Carried-Forward-From: experiment/x`); assert OUR trailer is appended without disturbing the existing one.</idea>
+      <idea ac="AC #2">free-agent-worktree.test.mjs — installCommitMsgHook on a worktree with no existing hook → writes our script with mode 0755. Second call → no-op (file unchanged).</idea>
+      <idea ac="AC #2">free-agent-worktree.test.mjs — installCommitMsgHook on a worktree with an existing user hook → appends our marker-bracketed block. Re-install detects the marker and skips.</idea>
+      <idea ac="AC #3">free-agent-sessions-repository.test.ts — updateTokens(sid, 100, 50) issues ADD expression with both deltas. No-op when both are 0.</idea>
+      <idea ac="AC #3">free-agent-session.test.mjs — feed a result event with usage.{input_tokens: 100, output_tokens: 50} → sessionsRepo.updateTokens called with (100, 50).</idea>
+      <idea ac="AC #3">free-agent-session.test.mjs — handle cache fields: usage.{input_tokens: 50, cache_creation_input_tokens: 30, cache_read_input_tokens: 20, output_tokens: 10} → updateTokens called with (100, 10) (sum of input-equivalents for tokensIn).</idea>
+      <idea ac="AC #5">audit-route.test.ts — happy path: owner authenticated, session exists, events queryable → 200 with combined response.</idea>
+      <idea ac="AC #6">audit-route.test.ts — caller sub != session.operatorId AND no admin scope → 403 FORBIDDEN.</idea>
+      <idea ac="AC #5">audit-route.test.ts — events sorted ascending by timestamp.</idea>
+      <idea ac="AC #5">audit-route.test.ts — session not found → 404 NotFoundError.</idea>
+      <idea ac="AC #5">audit-route.test.ts — sessionId fails regex → 400 ValidationError.</idea>
+      <idea ac="AC #9">CI gate — npm run ci with no new regressions. Track the test count delta (+~12-15 new tests across the 5 files).</idea>
+    </ideas>
+  </tests>
+</story-context>

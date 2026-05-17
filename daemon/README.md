@@ -48,6 +48,56 @@ No inbound ports are opened on your Mac. The daemon only makes outbound calls to
 
 Press `Ctrl+C`. The daemon will gracefully mark any in-progress job as `FAILED` before exiting.
 
+## Free Agent worktree GC (Story 18.1 — Epic 18)
+
+The free-agent chat widget creates per-session git worktrees under
+`/home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/` (one per session)
+on branches `assist/<projectId>/<sessionId>`. These accumulate over time and
+need periodic cleanup.
+
+**Scheduled GC.** Story 18.2 will wire the GC to run daily inside the daemon
+loop (~03:00 UTC). The GC logic itself ships in Story 18.1 at
+`daemon/lib/free-agent-gc.mjs:runFreeAgentGc`; until 18.2 wires the
+scheduler, the function is callable but not automatically triggered.
+
+**Reap policy** (`daemon/lib/free-agent-gc.mjs`):
+
+- Reap any worktree whose session shows `status IN (IDLE, EXPIRED, BUDGET_EXHAUSTED)`
+  AND `lastActivityAt > 7 days ago`
+- Remove any worktree with no corresponding DDB session row (orphan)
+- Never reap a session whose status is `ACTIVE` or `PROCESSING`, regardless
+  of age (operator may be in a long-running investigation)
+
+**Manual reap (operator-facing).** If you need to remove a single session's
+worktree by hand (debugging, runaway session, etc.):
+
+```bash
+cd /home/ubuntu/futurator-admin
+node -e "
+  import('./daemon/pipelines/lib/free-agent-worktree.mjs').then(m =>
+    m.reapWorktree({ projectId: 'dino-7', sessionId: 'sess-abc' })
+  )
+"
+```
+
+The reap is idempotent — `git worktree remove --force` plus `git branch -D`,
+with an `fs.rmSync` fallback for orphans. "Not found" errors are silently
+treated as success.
+
+**Manual GC run (operator-facing).** To trigger a full sweep on demand:
+
+```bash
+node -e "
+  import('./daemon/lib/free-agent-gc.mjs').then(async m => {
+    const result = await m.runFreeAgentGc();
+    console.log(JSON.stringify(result, null, 2));
+  })
+"
+```
+
+Default behavior (pre-Story-18.2): treats all worktrees as orphans because
+no sessions table exists yet → cleans everything on disk.
+
 ## Brownfield Party PAT (Story 15.4)
 
 Brownfield Party projects clone private GitHub repos using a fine-grained

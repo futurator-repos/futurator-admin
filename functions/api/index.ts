@@ -23,6 +23,8 @@ import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as agentEventsRepo from '../shared/repositories/agent-events-repository';
 import * as partyProjectsRepo from '../shared/repositories/party-projects-repository';
 import * as partySessionsRepo from '../shared/repositories/party-sessions-repository';
+// Epic 18 / Story 18.3 — Free Claude Code Agent audit endpoint.
+import * as freeAgentSessionsRepo from '../shared/repositories/free-agent-sessions-repository';
 import * as inlineQuestionsRepo from '../shared/repositories/inline-questions-repository';
 import {
   INLINE_QUESTION_DEFAULT_MODEL,
@@ -5622,6 +5624,89 @@ app.get('/api/party/sessions/:id/events', async (c) => {
   const afterSeq = c.req.query('after') || '000000';
   const { events, lastSeq } = await agentEventsRepo.getEventsAfter(parsed.data, afterSeq);
   return c.json({ events, lastSeq });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Epic 18 / Story 18.3 — Free Claude Code Agent audit endpoint.
+//
+// GET /api/free-agent/sessions/:id/audit
+//   Returns a unified timeline: session metadata + all free-agent.* events
+//   emitted by the daemon handler (keyed by sessionId in agent-events).
+//
+// Auth: caller is the session owner (matching session.operatorId === user.userId).
+//   Admin-scope escalation is a one-line follow-up — no clean admin-scope
+//   pattern exists in this codebase yet, so v1 ships owner-only per
+//   [[ship-mvp-add-complexity-later]].
+// ──────────────────────────────────────────────────────────────────────
+app.get('/api/free-agent/sessions/:id/audit', authMiddleware, async (c) => {
+  const sessionId = c.req.param('id');
+  const parsed = sessionIdSchema.safeParse(sessionId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid sessionId');
+  }
+
+  const session = await freeAgentSessionsRepo.getSession(parsed.data);
+  if (!session) {
+    throw new NotFoundError('FreeAgentSession', parsed.data);
+  }
+
+  const user = c.get('user');
+  if (!user || session.operatorId !== user.userId) {
+    throw new AppError('FORBIDDEN', 'Only the session owner can read the audit timeline', 403);
+  }
+
+  // Paginate through all events for this session. The 90-day TTL on
+  // agent-events keeps the page count bounded; the safety cap below
+  // protects against runaway sessions.
+  const MAX_EVENTS = 5000;
+  const events: import('../shared/types/agent-orchestrator').AgentEvent[] = [];
+  let afterSeq = '000000';
+  for (let page = 0; page < 100; page += 1) {
+    const { events: pageEvents, lastSeq } = await agentEventsRepo.getEventsAfter(
+      parsed.data,
+      afterSeq,
+      200,
+    );
+    if (pageEvents.length === 0) break;
+    for (const ev of pageEvents) {
+      if (events.length >= MAX_EVENTS) break;
+      events.push(ev);
+    }
+    if (events.length >= MAX_EVENTS) break;
+    if (lastSeq === afterSeq) break; // no progress — terminator
+    afterSeq = lastSeq;
+  }
+
+  return c.json({
+    sessionId: session.sessionId,
+    session: {
+      status: session.status,
+      model: session.model,
+      costCapUsd: session.costCapUsd,
+      costUsdAccumulated: session.costUsdAccumulated,
+      tokensInAccumulated: session.tokensInAccumulated ?? 0,
+      tokensOutAccumulated: session.tokensOutAccumulated ?? 0,
+      turnCount: session.turnCount,
+      createdAt: session.createdAt,
+      lastActivityAt: session.lastActivityAt,
+      lastTurnAt: session.lastTurnAt ?? null,
+      claudeSessionId: session.claudeSessionId ?? null,
+      errorReason: session.errorReason ?? null,
+    },
+    events: events.map((ev) => ({
+      timestamp: ev.timestamp,
+      kind: ev.eventType,
+      detail: {
+        text: ev.text,
+        toolName: ev.toolName,
+        toolInput: ev.toolInput,
+        toolOutput: ev.toolOutput,
+        cost: ev.cost,
+        durationMs: ev.durationMs,
+        payload: ev.payload,
+      },
+    })),
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────

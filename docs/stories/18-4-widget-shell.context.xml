@@ -1,0 +1,231 @@
+<story-context id="bmad/bmm/workflows/4-implementation/story-context/template" v="1.0">
+  <metadata>
+    <epicId>18</epicId>
+    <storyId>4</storyId>
+    <title>Widget shell (FAB + panel + lens header)</title>
+    <status>drafted</status>
+    <generatedAt>2026-05-17</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/18-4-widget-shell.md</sourceStoryPath>
+    <storyKey>18-4-widget-shell</storyKey>
+  </metadata>
+
+  <story>
+    <asA><![CDATA[Richie (operator of Futurator-Admin)]]></asA>
+    <iWant><![CDATA[a floating chat button always visible in the bottom-right corner of the app, that expands into a chat panel when I click it]]></iWant>
+    <soThat><![CDATA[the free-agent is always one click away from any page without occupying screen real estate when I'm not using it]]></soThat>
+    <tasks><![CDATA[
+State + scope hook:
+- Create src/stores/free-agent-store.ts — Zustand store with { isOpen, currentScope, activeSessionId, composerText } + actions { open, close, toggle, setScope, setComposerText }. (AC #7)
+- Create src/components/free-agent/use-free-agent-scope.ts — hook reading usePathname + useSearchParams; derives scope per AC rules; subscribes to route changes so the store's currentScope stays in sync. (AC #7, AC #8)
+
+Components (src/components/free-agent/):
+- widget.tsx — root component. Reads isOpen; renders <Fab /> when closed, <Panel /> when open. Mounts the useFreeAgentScope subscription. (AC #1, AC #3)
+- fab.tsx — circular FAB 56×56px bottom-right, accent-blue, Lucide icon, tooltip. EC2-mode-aware disabled state. (AC #2, AC #9)
+- panel.tsx — expanded panel: fixed bottom-right, ~400×600px desktop, full-width drawer 90vh mobile. No modal backdrop. (AC #3)
+- panel-header.tsx — lens label ("Assistant — Project: dino-7" etc.) + placeholders for model selector/cost-burn/hamburger + close button. (AC #4, AC #8)
+- message-thread.tsx — scrollable thread; empty placeholder; user-right + assistant-left bubble rendering. (AC #4, AC #5)
+- composer.tsx — textarea (auto-grow 6 lines max), Cmd+Enter sends, Shift+Enter newline, Enter newline, send button + cost-display placeholder. (AC #4, AC #6)
+
+Global mount + EC2 gating:
+- Modify src/app/layout.tsx — mount <FreeAgentWidget /> inside the auth-gated wrapper. (AC #1)
+- Wire EC2 mode from existing Ec2Toggle store/hook into the FAB component. (AC #9)
+
+Playwright smoke:
+- Create tests/e2e/free-agent-widget.smoke.spec.ts — FAB visible on authed page, click opens panel with Workspace lens, navigation updates lens, close button closes, re-open preserves composer text. Reuse the auth-pre-seed pattern from tests/e2e/party.smoke.spec.ts. (AC #10)
+
+Validation:
+- npm run ci end-to-end. (AC #12)
+    ]]></tasks>
+  </story>
+
+  <acceptanceCriteria><![CDATA[
+AC #1 — <FreeAgentWidget /> mounted globally from src/app/layout.tsx, hidden pre-auth.
+AC #2 — FAB at rest: 56×56px circular, fixed bottom-right (24/24), z-index 50, accent-blue, soft shadow, Lucide chat-bubble icon, tooltip "Open free agent".
+AC #3 — Click → expanded panel ~400×600px desktop / full-width drawer 90vh mobile. No modal backdrop.
+AC #4 — Panel structure: header (lens label + placeholders + close), thread, composer. Cost-burn + model selector + hamburger are placeholder slots (Stories 18.5/18.6 wire them).
+AC #5 — Empty placeholder "Send a message to start". User-right + assistant-left bubble rendering. Streaming wiring deferred to 18.5.
+AC #6 — Composer: Cmd/Ctrl+Enter sends; Shift+Enter and bare Enter insert newline.
+AC #7 — Zustand store { isOpen, currentScope, activeSessionId, composerText } + actions { open, close, toggle, setScope, setComposerText }. useFreeAgentScope derives scope from pathname/searchParams.
+AC #8 — Lens updates on navigation while panel is open + "Scope changed — start new conversation?" callout (does NOT auto-fork; explicit user action only).
+AC #9 — EC2 mode local → FAB disabled/greyed + tooltip "Switch to EC2 to use the free agent".
+AC #10 — Playwright smoke covers FAB visibility, open + Workspace lens, navigate + lens update, close, re-open preserves composer.
+AC #11 — Conventions: kebab-case files, named exports only, @/ imports, Prettier 3 defaults, ESLint 9 max-warnings 0.
+AC #12 — npm run ci passes with no new regressions beyond the known pre-existing baseline (4 epic-dev-pipeline failures + Plan.kind/TimerCategory typecheck errors + 4 pre-existing agent-daemon.mjs lint warnings + knip warnings).
+  ]]></acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/epics-free-agent.md</path>
+        <title>Epic 18 — Story 18.4 section</title>
+        <section>Widget shell (FAB + panel + lens header)</section>
+        <snippet>Canonical scope. Backend mocked; motion polish deferred to Story 18.7; send/stream wiring deferred to Story 18.5.</snippet>
+      </doc>
+      <doc>
+        <path>CLAUDE.md</path>
+        <title>Project guidance — Frontend / Architecture</title>
+        <section>Frontend (/src), Key Conventions</section>
+        <snippet>Next.js 16 App Router; output: 'export' (static HTML, no SSR); trailingSlash: true; @/* path alias; Zustand for client state; TanStack Query 5-min staleTime; Tailwind 4 + shadcn/ui; semantic theme tokens (success, warning, accent-blue); Geist font. Auth via Bearer JWT in localStorage. No SSR — all state client-side.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/15-3-labs-party-ui.md</path>
+        <title>Story 15.3 — Labs Party UI</title>
+        <section>Source tree components</section>
+        <snippet>Closest analog component layout: src/components/labs/party/*, src/hooks/use-party-*, src/stores/party-store.ts. Playwright auth-pre-seed pattern + page.route() mocking pattern.</snippet>
+      </doc>
+      <doc>
+        <path>memory/feedback_ship_mvp_add_later.md</path>
+        <title>User memory — ship MVP, add complexity later</title>
+        <section>Motion deferral</section>
+        <snippet>Static FAB ships in v1; breathing pulse and spring open/close (Sue Render's full spec) deferred to Story 18.7. Default transition: all 0.2s ease is acceptable.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <artifact>
+        <path>src/stores/party-store.ts</path>
+        <kind>zustand-store-reference</kind>
+        <symbol>(Zustand pattern reference)</symbol>
+        <lines>n/a</lines>
+        <reason>Pattern reference for the new free-agent-store. Existing isXxxOpen + actions pattern (`openBrownfieldForm`, `closeBrownfieldForm` from Story 15.4) mirrors what the new store needs (`open`, `close`, `toggle`, etc.).</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/labs/party/*</path>
+        <kind>react-component-reference</kind>
+        <symbol>(component layout reference)</symbol>
+        <lines>n/a</lines>
+        <reason>Closest analog for layout + state-wiring conventions. Look at how index.tsx mounts subcomponents, how party-store is used, how session-chat renders messages.</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/labs/ec2-toggle.tsx</path>
+        <kind>react-component-reference</kind>
+        <symbol>Ec2Toggle (existing) — source of `mode === 'ec2' | 'local'`</symbol>
+        <lines>n/a</lines>
+        <reason>The widget needs to read this state to gate the FAB per AC #9. Either via a hook (use-ec2-status) or via the underlying store. Locate during implementation.</reason>
+      </artifact>
+      <artifact>
+        <path>src/app/layout.tsx</path>
+        <kind>nextjs-layout</kind>
+        <symbol>RootLayout (or equivalent)</symbol>
+        <lines>n/a (find via grep)</lines>
+        <reason>Mount point for the widget. Must mount AFTER the AuthGuard component so the widget is only visible to authenticated users.</reason>
+      </artifact>
+      <artifact>
+        <path>tests/e2e/party.smoke.spec.ts</path>
+        <kind>playwright-test-reference</kind>
+        <symbol>(auth-pre-seed + page.route mocking)</symbol>
+        <lines>n/a</lines>
+        <reason>Pattern reference for the new free-agent-widget.smoke.spec.ts. Reuse the sessionStorage auth seeding and page.route() interceptor patterns.</reason>
+      </artifact>
+      <artifact>
+        <path>src/components/ui/*</path>
+        <kind>shadcn-primitives-reference</kind>
+        <symbol>Button, Textarea, DropdownMenu (existing primitives)</symbol>
+        <lines>n/a</lines>
+        <reason>Use existing primitives to keep visual consistency with the rest of the app. Verify Tooltip availability during implementation (may be missing — fall back to native title attribute).</reason>
+      </artifact>
+    </code>
+
+    <dependencies>
+      <node>
+        <package name="zustand" version="^5">existing — for the new store</package>
+        <package name="@tanstack/react-query" version="^5">existing — not used in this story (backend deferred to 18.5) but tests should not break it</package>
+        <package name="lucide-react" version="^1.7.0">existing — for the FAB icon</package>
+        <package name="next" version="16.2.2">existing — usePathname, useSearchParams via 'next/navigation'</package>
+        <package name="react" version="19.2.4">existing</package>
+        <package name="shadcn" version="^4.1.2">existing — Button, Textarea primitives</package>
+        <package name="@playwright/test" version="^1.59.1">existing — for the new smoke test</package>
+      </node>
+      <nextjs>
+        <component name="usePathname / useSearchParams">from 'next/navigation'; pattern for client-side route observation in App Router.</component>
+        <component name="src/app/layout.tsx">RootLayout — global mount point for the widget.</component>
+      </nextjs>
+    </dependencies>
+  </artifacts>
+
+  <constraints><![CDATA[
+- Pure UI story. NO backend changes. Stories 18.5 and 18.6 wire send/stream/persist. [Source: epic Story 18.4]
+- Mount globally inside the auth-gated wrapper, NOT at the page-content level. The widget must only appear post-auth. [Source: AC #1 + CLAUDE.md DEPLOY SAFETY rationale]
+- Motion polish (Sue Render's breathing pulse + spring open/close + reduced-motion fallback) is deferred to Story 18.7. v1 ships with default `transition: all 0.2s ease`. [Source: memory feedback_ship_mvp_add_later; story Dev Notes]
+- EC2 toggle reuse: read mode from existing Ec2Toggle store/hook; do NOT duplicate that state. [Source: AC #9 + existing Story 15.x pattern]
+- Conventions: kebab-case files, named exports only, no default exports, @/* imports, Prettier 3 defaults, ESLint 9 max-warnings 0, Tailwind 4 utility classes. [Source: CLAUDE.md Key Conventions]
+- No SSR — all state client-side. Zustand store hydrates from defaults; useFreeAgentScope updates on route change. [Source: CLAUDE.md Next.js output: 'export']
+- Scope derivation order: project (labs/projects/:id, labs/party/:id) > plan (labs/plans/:id, labs?planId=) > app (apps/:id) > workspace (fallback). [Source: AC #4]
+- Composer keyboard: Cmd/Ctrl+Enter sends, Shift+Enter and bare Enter insert newline. Prevents accidental sends. [Source: AC #6]
+- No new dependencies added. Reuse existing zustand, lucide-react, shadcn primitives. [Source: existing package.json]
+- npm run ci must pass with no new regressions beyond pre-existing baseline. [Source: Story 18.3 CI summary]
+  ]]></constraints>
+
+  <interfaces>
+    <interface>
+      <name>free-agent-store (NEW)</name>
+      <kind>Zustand store (NEW)</kind>
+      <signature><![CDATA[interface FreeAgentStore {
+  isOpen: boolean;
+  currentScope: { kind: 'project' | 'plan' | 'app' | 'workspace'; id?: string };
+  activeSessionId: string | null;
+  composerText: string;
+  // actions
+  open(): void;
+  close(): void;
+  toggle(): void;
+  setScope(scope: FreeAgentStore['currentScope']): void;
+  setComposerText(text: string): void;
+  setActiveSessionId(id: string | null): void;
+}
+
+Initial state: isOpen=false, currentScope={kind:'workspace'}, activeSessionId=null, composerText=''.]]></signature>
+      <path>src/stores/free-agent-store.ts (NEW)</path>
+    </interface>
+    <interface>
+      <name>useFreeAgentScope (NEW)</name>
+      <kind>React hook (NEW)</kind>
+      <signature><![CDATA[function useFreeAgentScope(): { kind: 'project' | 'plan' | 'app' | 'workspace'; id?: string }
+
+Behavior:
+  - Reads usePathname() + useSearchParams() from 'next/navigation'.
+  - Derives the scope per the rules in AC #4.
+  - Subscribes to route changes via React effect; updates the store's currentScope on change.
+  - Returns the current scope (also accessible via the store).
+
+Side-effect: calls setScope from the store on mount and on route change.]]></signature>
+      <path>src/components/free-agent/use-free-agent-scope.ts (NEW)</path>
+    </interface>
+    <interface>
+      <name>FreeAgentWidget (NEW)</name>
+      <kind>React root component (NEW)</kind>
+      <signature><![CDATA[function FreeAgentWidget(): JSX.Element | null
+
+Renders:
+  - null when user is unauthenticated.
+  - <Fab /> when store.isOpen === false.
+  - <Panel /> when store.isOpen === true.
+  - Mounts the useFreeAgentScope subscription.]]></signature>
+      <path>src/components/free-agent/widget.tsx (NEW)</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards><![CDATA[
+Vitest for unit/component tests (jsdom env, @/ alias). For this story most tests are Playwright smoke-level: the panel rendering, FAB visibility, lens transition, composer text persistence. No deep interaction tests for keyboard handling in this story (those land naturally in Story 18.5 when send is wired). Reuse the auth-pre-seed pattern from tests/e2e/party.smoke.spec.ts (sessionStorage). Reuse page.route() interceptor pattern for the EC2-mode mocking. No backend tests (no new backend).
+    ]]></standards>
+    <locations>
+      <location>tests/e2e/free-agent-widget.smoke.spec.ts (NEW)</location>
+      <location>tests/e2e/party.smoke.spec.ts (REFERENCE — auth + route mocking pattern)</location>
+    </locations>
+    <ideas>
+      <idea ac="AC #1">e2e — FAB renders on an authenticated /labs page; not visible on /login (pre-auth).</idea>
+      <idea ac="AC #2">e2e — FAB has aria-label or accessible name "Open free agent"; visible in the bottom-right corner.</idea>
+      <idea ac="AC #3">e2e — clicking FAB makes the panel visible; closing makes the FAB visible again.</idea>
+      <idea ac="AC #4">e2e — opened panel header shows "Assistant — Workspace" lens by default (no route match).</idea>
+      <idea ac="AC #4">e2e — header has visible "Close" button that closes the panel.</idea>
+      <idea ac="AC #5">e2e — empty thread shows "Send a message to start" placeholder text.</idea>
+      <idea ac="AC #8">e2e — navigating to /labs?planId=plan-abc updates the lens to "Assistant — Plan: plan-abc" while the panel is open.</idea>
+      <idea ac="AC #8">e2e — after navigation, the panel shows a "Scope changed — start new conversation?" callout.</idea>
+      <idea ac="AC #9">e2e (deferred to Story 18.5 if EC2 toggle wiring is awkward in test fixture) — when EC2 mode is local, FAB is disabled.</idea>
+      <idea ac="AC #10">e2e — close panel, type "draft text" in composer, close panel, re-open — composer text persists.</idea>
+      <idea ac="AC #12">CI gate — npm run ci with no new regressions.</idea>
+    </ideas>
+  </tests>
+</story-context>

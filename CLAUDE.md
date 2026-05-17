@@ -19,6 +19,24 @@ Do this before anything else, every time, no exceptions.
 
 ## Recent changes
 
+- **2026-05-17 (Story 18.1 — Free Claude Code Agent foundation):** Epic 18
+  v1 starts with the security primitive: a standalone `FreeAgentSessionRole`
+  (`sst.config.ts`) assumed per-session via STS by the API Lambda, carrying
+  session tags (`project`, `sessionId`, `operator`) that resolve into a
+  read-scoped inline policy (knowledge-live S3 prefix scoped to the session's
+  project; DDB writes restricted to the session's own conversation rows; an
+  explicit-deny seatbelt on `iam:*`, `secretsmanager:*`,
+  `lambda:UpdateFunctionCode`, etc.). Worktrees live at
+  `/home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/` on branches
+  `assist/<projectId>/<sessionId>` — never shared with pipeline worktrees,
+  never auto-merged. A Claude Code `PreToolUse` hook
+  (`daemon/pipelines/lib/free-agent-path-hook.sh`) enforces filesystem
+  confinement on `Bash` invocations. GC runs daily inside the daemon (NOT as
+  an SST cron — Lambdas can't reach the EC2 worktree dir) reaping sessions
+  with `status IN (IDLE|EXPIRED|BUDGET_EXHAUSTED)` AND `lastActivityAt >7d`.
+  Daemon-side wiring of the GC ticker is deferred to Story 18.2.
+  See `docs/epics-free-agent.md`.
+
 - **2026-05-17 (Decommission stale SST stages):** The `ricardoarayafarias`
   and `dev` SST stages had been deployed months ago and never torn down.
   Because the shared agent/plan/epic DynamoDB tables are declared with

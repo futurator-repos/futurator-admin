@@ -1,0 +1,348 @@
+<story-context id="bmad/bmm/workflows/4-implementation/story-context/template" v="1.0">
+  <metadata>
+    <epicId>18</epicId>
+    <storyId>2</storyId>
+    <title>Session lifecycle (spawn / TTL / cost-cap / reap)</title>
+    <status>drafted</status>
+    <generatedAt>2026-05-17</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/18-2-session-lifecycle.md</sourceStoryPath>
+    <storyKey>18-2-session-lifecycle</storyKey>
+  </metadata>
+
+  <story>
+    <asA><![CDATA[Richie (operator of Futurator-Admin)]]></asA>
+    <iWant><![CDATA[the daemon to manage free-agent sessions with a strict lifecycle — spawn on first message, enforce a per-session cost cap and idle TTL, reap on close or timeout]]></iWant>
+    <soThat><![CDATA[no runaway session can silently burn Anthropic credits or hold an EC2 process indefinitely while I'm away from my desk]]></soThat>
+    <tasks><![CDATA[
+Infrastructure (SST):
+- Add FreeAgentSessionsTable (sst.aws.Dynamo) — PK sessionId, GSI1 operator-recent-index (operatorId, lastActivityAt), GSI2 scope-recent-index (scopeIdComposite, lastActivityAt), TTL on expiresAt, PITR enabled. Link to API Lambda. Add FREE_AGENT_SESSIONS_TABLE env var. Grant the daemon EC2 IAM role read/write on the table. (AC #9)
+
+Shared types + schemas + repository:
+- Create functions/shared/types/free-agent.ts — FreeAgentSession, FreeAgentSessionStatus union (ACTIVE | PROCESSING | IDLE | EXPIRED | BUDGET_EXHAUSTED | ERROR), FreeAgentScope ({kind: 'project'|'plan'|'app'|'workspace', id?: string}), ModelAlias ('haiku' | 'sonnet' | 'opus'). (AC #8)
+- Create functions/shared/schemas/free-agent-schema.ts — zod schemas for session creation + message send + status enum. Use .safeParse() only. (AC #8)
+- Add `freeAgentSessions` to TABLE_NAMES registry in functions/shared/dynamo-client.ts.
+- Create functions/shared/repositories/free-agent-sessions-repository.ts exporting 13 functions: createSession, getSession, acquireProcessingLock, releaseProcessingLock, setClaudeSessionId, markIdle, markExpired, markBudgetExhausted, markError, incrementTurn, updateCostUsd, listAllSessions, listSessionsByOperator, listSessionsByScope. (AC #7, AC #8)
+- Create __tests__/free-agent-sessions-repository.test.ts covering all 13 functions, lock acquire/release success+conflict paths, GSI query shape assertions, TTL calculation. (AC #11)
+
+Daemon — job handler:
+- Create daemon/pipelines/free-agent-session.mjs exporting runFreeAgentSession(job, ctx) implementing AC #2-7. Reuse runAgent-style spawn pattern (process.execPath + [CLAUDE_BIN, ...args] from agent-daemon.mjs:670+). Pipe credentials + FREE_AGENT_CONFINEMENT_ROOT via env. Parse stream-json output. Lock acquire (acquireProcessingLock), claudeSessionId capture on system.init, cost-cap exit detection (markBudgetExhausted), 600s SIGTERM-then-SIGKILL watchdog, error paths (markError).
+- Create __tests__/free-agent-session.test.mjs — first-turn + follow-up spawn args, claudeSessionId capture, cost-cap exit detection, watchdog, lock success/conflict, credential refresh, ensureWorktree call. (AC #11)
+
+Daemon — wire-up:
+- Modify daemon/pipelines/job-router.mjs — JOB_HANDLER_FREE_AGENT_SESSION constant, selectHandler branch on 'free-agent-session', validateFreeAgentSessionJob. (AC #1)
+- Modify daemon/agent-daemon.mjs — dispatch case for JOB_HANDLER_FREE_AGENT_SESSION + GC scheduler ticker per AC #10 (lastFreeAgentGcAt + FREE_AGENT_GC_INTERVAL_MS = 24h, throttled-scan pattern after writeHeartbeat). The GC scheduler is the wiring deferred from Story 18.1. (AC #1, AC #10)
+- Extend daemon/pipelines/__tests__/job-router.test.mjs — handler-selection + validator assertions. (AC #11)
+
+Validation:
+- Run `npm run ci` — verify zero new regressions beyond the known pre-existing failures from 18.1's CI run. (AC #12)
+    ]]></tasks>
+  </story>
+
+  <acceptanceCriteria><![CDATA[
+AC #1 — JOB_HANDLER_FREE_AGENT_SESSION constant + selectHandler dispatch on jobType='free-agent-session' + validateFreeAgentSessionJob in daemon/pipelines/job-router.mjs. Payload shape: { jobType, sessionId, projectId, scope: {kind, id}, model, costCapUsd, credentials, messages }.
+
+AC #2 — Job handler ensures worktree (Story 18.1 ensureWorktree), writes settings.json (writeFreeAgentSettings), spawns `claude -p <last-user-message> --model <model> --max-budget-usd <costCapUsd> --output-format stream-json --verbose --session-id <sessionId> --add-dir <worktreePath>` with cwd=worktreePath, AWS creds + FREE_AGENT_CONFINEMENT_ROOT in env.
+
+AC #3 — Subsequent turns use `--resume <claudeSessionId>` (captured from first-turn system.init). Stream-json events forwarded to futurator-agent-events with prefix free-agent.turn.*. claudeSessionId persisted via setClaudeSessionId.
+
+AC #4 — Idle TTL state machine driven by GC: ACTIVE + lastActivityAt > 30min → IDLE; IDLE + 2h further → EXPIRED; EXPIRED + 7d → worktree-eligible-for-reap (18.1 behavior). New message to EXPIRED session creates a fresh session record (forks); prior conversation persists in DDB.
+
+AC #5 — Cost-cap exit detection: subprocess non-zero exit + last result event has is_error=true + message matches budget-related signal → markBudgetExhausted + persist costUsdAccumulated + emit free-agent.budget.exhausted event. API 402 response is Story 18.5's concern; this story implements daemon-side state transition.
+
+AC #6 — Watchdog: 600s timeout (configurable via FREE_AGENT_TURN_TIMEOUT_MS env). SIGTERM first, 5s grace, SIGKILL second. Session → ERROR. Emits free-agent.turn.error with reason TIMEOUT.
+
+AC #7 — acquireProcessingLock(sessionId): conditional UpdateCommand ACTIVE → PROCESSING. Returns {ok: true} or {ok: false, reason: 'SESSION_BUSY'|'NOT_FOUND'|'INVALID_STATE'} after re-fetch disambiguation. releaseProcessingLock(sessionId, newStatus) inverse transition.
+
+AC #8 — free-agent-sessions-repository.ts exports 13 functions: createSession, getSession, acquireProcessingLock, releaseProcessingLock, setClaudeSessionId, markIdle, markExpired, markBudgetExhausted, markError, incrementTurn, updateCostUsd, listAllSessions, listSessionsByOperator, listSessionsByScope.
+
+AC #9 — DDB table futurator-free-agent-sessions: PK sessionId; GSI1 operator-recent-index (operatorId, lastActivityAt); GSI2 scope-recent-index (scopeIdComposite, lastActivityAt); TTL on expiresAt (90d from createdAt); PAY_PER_REQUEST; PITR enabled.
+
+AC #10 — GC scheduler from Story 18.1 wired into daemon poll loop via throttled-scan pattern (lastFreeAgentGcAt + FREE_AGENT_GC_INTERVAL_MS=24h). Now uses real listAllSessions from the new repository.
+
+AC #11 — Unit tests pass: free-agent-sessions-repository.test.ts (all 13 functions + locking), free-agent-session.test.mjs (handler + 8 named subscenarios), extended job-router.test.mjs (dispatch + validator).
+
+AC #12 — npm run ci passes end-to-end (no new regressions; pre-existing 4 epic-dev-pipeline failures + Plan.kind/TimerCategory typecheck errors unchanged).
+  ]]></acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/epics-free-agent.md</path>
+        <title>Epic 18 — Free Claude Code Agent (Pipeline v2 enhancement)</title>
+        <section>Story 18.2 — Session lifecycle</section>
+        <snippet>Canonical scope: daemon job handler + sessions repo + DDB table + GC wiring. Depends on Story 18.1 (worktree + IAM + credential helpers).</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/18-1-per-session-iam-role-and-worktree.md</path>
+        <title>Story 18.1 — Per-session IAM role + path-confined worktree</title>
+        <section>Completion Notes + Dev Notes</section>
+        <snippet>Foundation this story builds on. Key deferred items now in scope: GC scheduler wiring; sessions repo with typed listAllSessions to replace the pre-18.2 GC fallback. Key constraint: process.env can't be patched on a running subprocess — credential refresh applies to the NEXT spawn.</snippet>
+      </doc>
+      <doc>
+        <path>docs/stories/18-1-per-session-iam-role-and-worktree.context.xml</path>
+        <title>Story 18.1 context.xml</title>
+        <section>Constraints + Interfaces</section>
+        <snippet>Reuse: ensureWorktree, writeFreeAgentSettings, reapWorktree, assumeFreeAgentSessionRole, refreshSessionCredentials. The FreeAgentSessionRole IAM policy already grants r/w on futurator-free-agent-sessions by NAME — creating the table now makes those permissions effective.</snippet>
+      </doc>
+      <doc>
+        <path>CLAUDE.md</path>
+        <title>Project guidance for Claude Code (Futurator-Admin)</title>
+        <section>Backend / DynamoDB / Key Conventions + Recent changes (2026-05-17 Story 18.1)</section>
+        <snippet>One table per concern (multi-table). Zod safeParse only. npm run ci is the gate. Production-only deploy stage. Story 18.1 already added FreeAgentSessionRole + scoped IAM; this story adds the sessions table referenced therein.</snippet>
+      </doc>
+      <doc>
+        <path>memory/feedback_dynamodb_multi_table.md</path>
+        <title>User memory — DynamoDB multi-table preference</title>
+        <section>One table per concern</section>
+        <snippet>The new futurator-free-agent-sessions table is its own concern (the free agent's session lifecycle). Pipeline v1's agentSessionsTable/agentConversationsTable belong to a different active flow — do NOT reuse.</snippet>
+      </doc>
+      <doc>
+        <path>memory/feedback_ship_mvp_add_later.md</path>
+        <title>User memory — ship MVP, add complexity later</title>
+        <section>Defer complexity until evidence</section>
+        <snippet>Don't build a per-session status-state-machine UI; the GC sweep IS the only mechanism that transitions sessions through IDLE/EXPIRED. Don't add a status-index GSI for GC performance optimization until table size demonstrates need.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <artifact>
+        <path>daemon/pipelines/party-turn.mjs</path>
+        <kind>daemon-pipeline-reference</kind>
+        <symbol>runPartyTurn (Claude CLI spawn + --resume pattern)</symbol>
+        <lines>n/a (whole file)</lines>
+        <reason>Closest analog: spawns claude -p with stream-json output, captures claudeSessionId from system.init, persists it, uses --resume on follow-up turns. The free-agent-session.mjs handler follows the same shape but additionally: passes session credentials via env, passes FREE_AGENT_CONFINEMENT_ROOT for the path hook, uses --max-budget-usd, uses --add-dir for the worktree, watchdog at 600s instead of 180s.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/repositories/party-sessions-repository.ts</path>
+        <kind>repository-reference</kind>
+        <symbol>acquireSessionLock, releaseSessionLock, setClaudeSessionId, incrementTurn</symbol>
+        <lines>n/a</lines>
+        <reason>Direct pattern reference for the new sessions repo's lock primitive. Same conditional UpdateCommand shape with re-fetch disambiguation on ConditionalCheckFailedException.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon-runtime</kind>
+        <symbol>runAgent (Claude CLI spawn), main poll loop, throttled-scan pattern</symbol>
+        <lines>670-730, 3676-3724</lines>
+        <reason>(a) runAgent shows the exact spawn shape: process.execPath + [CLAUDE_BIN, ...args] avoiding shell, cwd, stdio pipe. The handler mirrors this but with the free-agent env additions. (b) The poll-loop's `lastStaleScanAt + STALE_SCAN_INTERVAL_MS` pattern at 3690-3692 is the template for the GC scheduler wiring (AC #10).</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/job-router.mjs</path>
+        <kind>pure-router</kind>
+        <symbol>selectHandler, JOB_HANDLER_PARTY_BOOTSTRAP / *_PARTY_TURN / *_PARTY_REFRESH</symbol>
+        <lines>12-48, 96-100</lines>
+        <reason>Add JOB_HANDLER_FREE_AGENT_SESSION constant + selectHandler branch + validateFreeAgentSessionJob mirroring existing party validators.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/lib/free-agent-worktree.mjs</path>
+        <kind>shared-helper-from-18.1</kind>
+        <symbol>ensureWorktree, writeFreeAgentSettings, FREE_AGENT_WORKTREES_ROOT</symbol>
+        <lines>n/a</lines>
+        <reason>Called by the new handler before first spawn (per AC #2). Idempotent — safe to call on every turn.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/lib/free-agent-iam.ts</path>
+        <kind>shared-helper-from-18.1</kind>
+        <symbol>refreshSessionCredentials, SessionCredentials type</symbol>
+        <lines>n/a</lines>
+        <reason>Called by the API Lambda (Story 18.5) BEFORE enqueueing the next-turn job to ensure fresh credentials. This story consumes the credentials from the job payload; refresh is a Story 18.5 concern.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/lib/free-agent-gc.mjs</path>
+        <kind>shared-helper-from-18.1</kind>
+        <symbol>runFreeAgentGc, defaultListProjectWorktrees</symbol>
+        <lines>n/a</lines>
+        <reason>Wired into daemon poll loop in this story per AC #10. The GC now calls the real listAllSessions from the new repository (replacing the pre-18.2 fallback that treated everything as orphan).</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/dynamo-client.ts</path>
+        <kind>shared-config</kind>
+        <symbol>docClient, TABLE_NAMES</symbol>
+        <lines>n/a</lines>
+        <reason>Add freeAgentSessions to TABLE_NAMES with the standard pattern: process.env.FREE_AGENT_SESSIONS_TABLE || 'futurator-free-agent-sessions'.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/repositories/agent-events-repository.ts</path>
+        <kind>shared-repo-reference</kind>
+        <symbol>pushEvent</symbol>
+        <lines>7-17</lines>
+        <reason>Event-emission pattern (PutCommand with 7-day TTL). Used by the handler to emit free-agent.turn.* events to futurator-agent-events keyed by sessionId.</reason>
+      </artifact>
+      <artifact>
+        <path>sst.config.ts</path>
+        <kind>sst-infra</kind>
+        <symbol>FreeAgentSessionRole (Story 18.1), partyProjectsTable / partySessionsTable (table shape reference)</symbol>
+        <lines>207-243, 466-606 (Story 18.1 additions)</lines>
+        <reason>Add new sst.aws.Dynamo('FreeAgentSessionsTable', ...) mirroring partySessionsTable's GSI shape. Add link to API Lambda + FREE_AGENT_SESSIONS_TABLE env var. The IAM role already grants r/w by name (Story 18.1) — no policy change needed.</reason>
+      </artifact>
+    </code>
+
+    <dependencies>
+      <node>
+        <package name="@aws-sdk/client-dynamodb" version="^3.1024.0">already in deps. Repository conditional UpdateCommand for the processing lock.</package>
+        <package name="@aws-sdk/lib-dynamodb" version="^3.1024.0">already in deps. DocumentClient for all repository operations.</package>
+        <package name="@aws-sdk/client-sts" version="^3.1047.0">already in deps (added Story 18.1). Not used by 18.2 directly — referenced via Story 18.1 helpers.</package>
+        <package name="zod" version="^3">already in deps. Schemas for the daemon-side job payload validator and the future API route input validation.</package>
+        <package name="vitest" version="^3">already in deps. Test harness.</package>
+      </node>
+      <aws>
+        <component name="DynamoDB table: futurator-free-agent-sessions (NEW in this story)">PK sessionId; GSI1 operator-recent-index (operatorId, lastActivityAt); GSI2 scope-recent-index (scopeIdComposite, lastActivityAt); TTL on expiresAt; PAY_PER_REQUEST; PITR enabled.</component>
+        <component name="FreeAgentSessionRole (existing from Story 18.1)">Already grants dynamodb:GetItem/Query/Scan + PutItem/UpdateItem on this table by NAME (with the dynamodb:LeadingKeys = ${aws:PrincipalTag/sessionId} condition for writes on the conversations table — sessions table has no such restriction because the daemon writes session metadata).</component>
+        <component name="EC2 daemon IAM role (existing, EXTENDED)">Needs read/write on the new sessions table (via sst.config.ts link/permissions). The daemon writes session metadata server-side; the free-agent role assumed by sessions is only for the agent's tool use.</component>
+        <component name="DynamoDB table: futurator-agent-events (existing)">Used for free-agent.turn.* events emitted by the new handler. Schema: jobId PK + eventSeq; for free-agent events, use sessionId as the jobId equivalent (sessions and jobs share an emit lane).</component>
+      </aws>
+      <claude-code>
+        <component name="claude -p CLI">Existing CLAUDE_BIN resolution + OAuth (--bypassPermissions not used). Flags this story uses: -p, --model, --max-budget-usd, --output-format stream-json, --verbose, --session-id, --resume, --add-dir, --append-system-prompt (optional).</component>
+        <component name="PreToolUse Bash hook (Story 18.1)">.claude/settings.json + free-agent-path-hook.sh installed by ensureWorktree+writeFreeAgentSettings. Daemon must pass FREE_AGENT_CONFINEMENT_ROOT=<worktreePath> in spawn env or the hook denies all Bash calls.</component>
+      </claude-code>
+    </dependencies>
+  </artifacts>
+
+  <constraints><![CDATA[
+- One table per concern — futurator-free-agent-sessions is dedicated to the free-agent runtime; do NOT extend Pipeline v1's agentSessionsTable. [Source: memory feedback_dynamodb_multi_table; Story 18.1 Completion Notes recon]
+- All zod validation via .safeParse() only — never .parse() at the boundary. [Source: CLAUDE.md Validation]
+- Credentials in the job payload are passed once; refresh logic lives in the API Lambda (Story 18.5). This story consumes credentials from the payload and pipes them into the CLI subprocess env. NEVER persist credentials in DDB or log them. [Source: Story 18.1 AC #2; daemon job-payload pattern]
+- The daemon's CLAUDE_BIN spawn pattern uses process.execPath + [CLAUDE_BIN, ...args] to avoid shell interpretation. Free-agent spawn MUST follow the same pattern. [Source: daemon/agent-daemon.mjs:670-730]
+- FREE_AGENT_CONFINEMENT_ROOT must be set in spawn env or the PreToolUse hook (Story 18.1) denies all Bash calls. The handler is responsible for setting it to the worktree path. [Source: Story 18.1 path-hook contract]
+- The new sessions table is referenced by NAME in the Story 18.1 IAM policy — creating the table here makes those permissions effective. No IAM policy changes required in this story. [Source: Story 18.1 sst.config.ts FreeAgentSessionRolePolicy]
+- Idle TTL state machine is GC-driven — no per-session timers. ACTIVE → IDLE @ 30min, IDLE → EXPIRED @ 2h, EXPIRED → worktree-reap-eligible @ 7d (existing 18.1 threshold). [Source: AC #4]
+- Watchdog: SIGTERM first, 5s grace, SIGKILL second. The Claude CLI's process group cleanup may need a moment; SIGKILL guarantees reap. [Source: AC #6]
+- Cost-cap exit shape from `--max-budget-usd` is not documented in the CLI help. Best-effort matcher: non-zero exit + is_error=true + message matches /budget.*exhausted|max.*budget|cost.*cap/i. Fallback: mark ERROR. [Source: AC #5; party-mode round 7]
+- GC scheduler uses the throttled-scan pattern from agent-daemon.mjs:3690-3692 (lastFreeAgentGcAt + 24h interval). Non-blocking call via .catch(log). [Source: AC #10]
+- API_BASE_URL stays relative in production (not applicable — no UI). [Source: CLAUDE.md Key Conventions]
+- Production-only SST deploy guard: any infra changes here only land on production deploys. Document this constraint in Completion Notes if relevant. [Source: CLAUDE.md Recent changes 2026-05-17 Decommission stale SST stages]
+- npm run ci must pass with zero warnings beyond the known pre-existing baseline (4 epic-dev-pipeline test failures + Plan.kind/TimerCategory typecheck errors). [Source: Story 18.1 CI summary]
+  ]]></constraints>
+
+  <interfaces>
+    <interface>
+      <name>runFreeAgentSession (daemon entry)</name>
+      <kind>daemon pipeline entry (NEW)</kind>
+      <signature><![CDATA[runFreeAgentSession(job, ctx): Promise<{ ok: true, claudeSessionId, costUsdDelta, turnCount } | { ok: false, reason }>
+
+job.freeAgentSessionPayload: {
+  sessionId: string,
+  projectId: string,
+  scope: { kind: 'project'|'plan'|'app'|'workspace', id?: string },
+  model: 'haiku' | 'sonnet' | 'opus' | string,
+  costCapUsd: number,
+  credentials: { accessKeyId, secretAccessKey, sessionToken, expiration },
+  messages: [{ role: 'user', content: string }]
+}
+
+ctx: { pushEvent, sessionsRepo, conversationsRepo (Story 18.6), spawn (injectable for tests), now, logFn }
+
+Behavior: acquire lock → ensure worktree + settings → spawn claude -p with --model/--max-budget-usd/--output-format stream-json/--session-id/--add-dir/--resume(N>0) → parse stream-json → emit free-agent.turn.* events → capture claudeSessionId on system.init → on close: release lock with appropriate next status. Watchdog at 600s. Cost-cap exit detection on non-zero+is_error+budget signal.]]></signature>
+      <path>daemon/pipelines/free-agent-session.mjs (NEW)</path>
+    </interface>
+    <interface>
+      <name>free-agent-sessions-repository (NEW)</name>
+      <kind>repository (NEW)</kind>
+      <signature><![CDATA[
+createSession(input: { sessionId, operatorId, projectId, scope, model, costCapUsd }): Promise<FreeAgentSession>
+  — initial state ACTIVE, turnCount=0, lastActivityAt=now, expiresAt=now+90d
+
+getSession(sessionId): Promise<FreeAgentSession | null>
+
+acquireProcessingLock(sessionId): Promise<{ok: true} | {ok: false, reason: 'SESSION_BUSY'|'NOT_FOUND'|'INVALID_STATE'}>
+  — conditional UpdateCommand ACTIVE → PROCESSING with re-fetch disambiguation
+
+releaseProcessingLock(sessionId, newStatus: 'ACTIVE'|'ERROR'|'BUDGET_EXHAUSTED'|'IDLE'): Promise<void>
+
+setClaudeSessionId(sessionId, claudeSessionId): Promise<void>
+  — first-turn capture from system.init event
+
+markIdle(sessionId): Promise<void>
+markExpired(sessionId): Promise<void>
+markBudgetExhausted(sessionId): Promise<void>
+markError(sessionId, reason: string): Promise<void>
+incrementTurn(sessionId): Promise<void>  — turnCount++, lastActivityAt=now, lastTurnAt=now
+updateCostUsd(sessionId, costUsdDelta: number): Promise<void>  — adds to costUsdAccumulated
+
+listAllSessions(): Promise<FreeAgentSession[]>  — full scan; bounded by 90d TTL
+listSessionsByOperator(operatorId, limit?): Promise<FreeAgentSession[]>  — GSI1 query (Story 18.6 consumer)
+listSessionsByScope(scopeKind, scopeId, limit?): Promise<FreeAgentSession[]>  — GSI2 query (Story 18.6 consumer)]]></signature>
+      <path>functions/shared/repositories/free-agent-sessions-repository.ts (NEW)</path>
+    </interface>
+    <interface>
+      <name>FreeAgentSession (type)</name>
+      <kind>TypeScript interface (NEW)</kind>
+      <signature><![CDATA[interface FreeAgentSession {
+  sessionId: string;
+  operatorId: string;
+  projectId: string;
+  scope: { kind: 'project' | 'plan' | 'app' | 'workspace'; id?: string };
+  scopeIdComposite: string;  // GSI2 PK: `${scope.kind}#${scope.id ?? '_'}`
+  status: 'ACTIVE' | 'PROCESSING' | 'IDLE' | 'EXPIRED' | 'BUDGET_EXHAUSTED' | 'ERROR';
+  model: string;
+  costCapUsd: number;
+  costUsdAccumulated: number;
+  claudeSessionId?: string;
+  turnCount: number;
+  createdAt: string;   // ISO-8601
+  lastActivityAt: string;
+  lastTurnAt?: string;
+  lastRefreshedAt?: string;
+  expiresAt: number;   // epoch seconds (DynamoDB TTL attribute)
+  errorReason?: string;
+}]]></signature>
+      <path>functions/shared/types/free-agent.ts (NEW)</path>
+    </interface>
+    <interface>
+      <name>validateFreeAgentSessionJob (extension)</name>
+      <kind>job-router validator (NEW)</kind>
+      <signature><![CDATA[validateFreeAgentSessionJob(job): { ok: true } | { ok: false; reason: string }
+  Asserts: job.jobId, job.jobType === 'free-agent-session', job.freeAgentSessionPayload exists with required nested fields (sessionId, projectId, scope.kind, model, costCapUsd, credentials.accessKeyId, messages array).]]></signature>
+      <path>daemon/pipelines/job-router.mjs (extension)</path>
+    </interface>
+    <interface>
+      <name>GC scheduler ticker (NEW in agent-daemon.mjs)</name>
+      <kind>poll-loop wiring (NEW)</kind>
+      <signature><![CDATA[Module-scoped state:
+  let lastFreeAgentGcAt = 0;
+  const FREE_AGENT_GC_INTERVAL_MS = Number(process.env.FREE_AGENT_GC_INTERVAL_MS) || 24 * 60 * 60 * 1000;
+
+Inside main poll loop, after writeHeartbeat():
+  if (Date.now() - lastFreeAgentGcAt >= FREE_AGENT_GC_INTERVAL_MS) {
+    lastFreeAgentGcAt = Date.now();
+    runFreeAgentGc({
+      querySessionsScan: () => sessionsRepo.listAllSessions(),
+      logFn: (level, msg, ctx) => log(level, msg, ctx),
+    }).catch((e) => log('error', `free-agent-gc uncaught: ${e.message}`));
+  }]]></signature>
+      <path>daemon/agent-daemon.mjs (extension)</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards><![CDATA[
+Vitest with jsdom for shared/repos (functions/**/__tests__/*.test.ts). Daemon tests use vi.mock on child_process.spawn + fs + the Story 18.1 helpers (free-agent-worktree.mjs, free-agent-iam.ts) following the patterns established in daemon/pipelines/__tests__/party-bootstrap.test.mjs and party-turn.test.mjs. Repository tests use @aws-sdk/lib-dynamodb DocumentClient mocks via aws-sdk-client-mock OR direct vi.mock of docClient.send. The conditional-update lock pattern tests must assert the ConditionExpression contents to verify atomicity (not just the happy path). Stream-json parsing tests construct controlled NDJSON sequences and feed them through the handler's stdout reader.
+    ]]></standards>
+    <locations>
+      <location>functions/shared/repositories/__tests__/free-agent-sessions-repository.test.ts (NEW)</location>
+      <location>daemon/pipelines/__tests__/free-agent-session.test.mjs (NEW)</location>
+      <location>daemon/pipelines/__tests__/job-router.test.mjs (EXTENDED)</location>
+      <location>daemon/pipelines/__tests__/party-bootstrap.test.mjs (REFERENCE — vi.mock spawn pattern)</location>
+      <location>daemon/pipelines/__tests__/party-turn.test.mjs (REFERENCE — claude -p spawn with --resume)</location>
+    </locations>
+    <ideas>
+      <idea ac="AC #1">job-router test — selectHandler({jobType: 'free-agent-session'}) returns JOB_HANDLER_FREE_AGENT_SESSION; validateFreeAgentSessionJob accepts a well-formed payload; rejects missing sessionId / missing credentials / missing messages with clear reason.</idea>
+      <idea ac="AC #2">free-agent-session test — first-turn happy path: stub ensureWorktree, stub writeFreeAgentSettings, stub spawn returns a fake child emitting a single system.init event followed by text_delta + result events. Assert spawn args contain --model sonnet, --max-budget-usd, --output-format stream-json, --session-id, --add-dir, cwd=worktreePath, env has AWS_ACCESS_KEY_ID + FREE_AGENT_CONFINEMENT_ROOT.</idea>
+      <idea ac="AC #3">free-agent-session test — follow-up turn (turnCount=1, claudeSessionId set): spawn args include --resume <claudeSessionId> and do NOT include --session-id. Assert claudeSessionId is NOT re-persisted (setClaudeSessionId called 0 times on N>0).</idea>
+      <idea ac="AC #3">free-agent-session test — stream-json parsing: feed a sequence of {type:'system',subtype:'init',session_id:'xyz'} + {type:'message_delta'} + {type:'result'} lines and assert events emitted to pushEvent are correctly prefixed free-agent.turn.* with the sessionId as jobId equivalent.</idea>
+      <idea ac="AC #4">repository test — markIdle and markExpired set the correct status; verify they only transition from compatible source states (ACTIVE → IDLE; IDLE → EXPIRED).</idea>
+      <idea ac="AC #5">free-agent-session test — cost-cap exit: stub spawn that exits with code 1 AND last emitted line is {type:'result', is_error:true, error:{message:'budget exhausted'}}. Assert markBudgetExhausted called; free-agent.budget.exhausted event emitted; releaseProcessingLock called with newStatus='BUDGET_EXHAUSTED'.</idea>
+      <idea ac="AC #6">free-agent-session test — watchdog: stub spawn returns a child that NEVER closes. Use fake timers (vi.useFakeTimers) to advance past 600s. Assert SIGTERM was sent, then SIGKILL 5s later. Assert markError called with reason='TIMEOUT'; free-agent.turn.error emitted.</idea>
+      <idea ac="AC #7">repository test — acquireProcessingLock from ACTIVE: succeeds with {ok: true}. From PROCESSING: returns {ok: false, reason: 'SESSION_BUSY'}. From non-existent sessionId: returns {ok: false, reason: 'NOT_FOUND'}. From IDLE/EXPIRED/BUDGET_EXHAUSTED/ERROR: returns {ok: false, reason: 'INVALID_STATE'}.</idea>
+      <idea ac="AC #7">repository test — releaseProcessingLock from PROCESSING to ACTIVE/ERROR/BUDGET_EXHAUSTED/IDLE succeeds; transition validity asserted via ConditionExpression in the test mock.</idea>
+      <idea ac="AC #8">repository test — createSession populates all required fields (status=ACTIVE, turnCount=0, lastActivityAt=now, expiresAt=now+90d in seconds, scopeIdComposite formatted correctly).</idea>
+      <idea ac="AC #8">repository test — incrementTurn atomically increments turnCount and updates lastActivityAt + lastTurnAt.</idea>
+      <idea ac="AC #8">repository test — updateCostUsd uses ADD/SET expression atomically (not GetItem-then-PutItem race).</idea>
+      <idea ac="AC #8">repository test — listSessionsByOperator queries GSI1 with operatorId; listSessionsByScope queries GSI2 with composite scope key; both return sorted-descending by lastActivityAt with limit honored.</idea>
+      <idea ac="AC #9">SST integration check (manual or via sst-introspection script) — the FreeAgentSessionsTable has the exact PK + GSI1 + GSI2 + TTL configuration. No unit test for SST itself; assertion is via deploy.</idea>
+      <idea ac="AC #10">daemon test (light) — the throttled-scan ticker fires runFreeAgentGc on the first iteration and not on the second within the 24h window. Use fake timers to advance 24h and assert second fire.</idea>
+      <idea ac="AC #11">CI gate — full npm run ci. Verify no new failures beyond the known pre-existing baseline (4 epic-dev-pipeline failures + Plan.kind/TimerCategory typecheck + knip warnings).</idea>
+    </ideas>
+  </tests>
+</story-context>

@@ -1,0 +1,479 @@
+<story-context id="bmad/bmm/workflows/4-implementation/story-context/template" v="1.0">
+  <metadata>
+    <epicId>18</epicId>
+    <storyId>1</storyId>
+    <title>Per-session IAM role + path-confined worktree</title>
+    <status>drafted</status>
+    <generatedAt>2026-05-17</generatedAt>
+    <generator>BMAD Story Context Workflow</generator>
+    <sourceStoryPath>docs/stories/18-1-per-session-iam-role-and-worktree.md</sourceStoryPath>
+    <storyKey>18-1-per-session-iam-role-and-worktree</storyKey>
+  </metadata>
+
+  <story>
+    <asA><![CDATA[Richie (operator of Futurator-Admin)]]></asA>
+    <iWant><![CDATA[each free-agent session to run under its own short-lived AWS IAM credentials inside a path-confined git worktree]]></iWant>
+    <soThat><![CDATA[a runaway or compromised session cannot damage shared infrastructure or escape its project's scope, even though the agent has full Claude Code tool access]]></soThat>
+    <tasks><![CDATA[
+Infrastructure (SST):
+- Modify sst.config.ts — add FreeAgentSessionRole as a standalone aws.iam.Role (trust policy: AssumeRole from API Lambda exec role only; inline permissions policy implementing AC #1's read-scope + explicit-deny). Export role ARN; grant the API Lambda execution role sts:AssumeRole + sts:TagSession on the new role's ARN (with a Condition requiring the project/sessionId session tags to be present). Add FREE_AGENT_SESSION_ROLE_ARN env var on the API Lambda. (AC #1, AC #2)
+- Add @aws-sdk/client-sts to root package.json (not currently a dependency).
+
+Shared library (functions/shared/lib/free-agent-iam.ts — NEW directory):
+- Create functions/shared/lib/free-agent-iam.ts exporting assumeFreeAgentSessionRole({projectId, sessionId, operatorId}): Promise<SessionCredentials>, refreshSessionCredentials(session): Promise<SessionCredentials | null>, and a redactCredentials(err) internal helper. Use @aws-sdk/client-sts AssumeRoleCommand with Tags + RoleSessionName (truncated to 64 chars) + DurationSeconds=3600. Type SessionCredentials = { accessKeyId, secretAccessKey, sessionToken, expiration }. (AC #2, AC #3)
+- Create functions/shared/lib/__tests__/free-agent-iam.test.ts — covers AssumeRole call shape, role-session-name truncation, refresh trigger at <5 min expiry, refresh no-op on fresh creds, credential redaction in thrown errors. (AC #8 a-d)
+
+Daemon — worktree manager:
+- Create daemon/pipelines/lib/free-agent-worktree.mjs exporting ensureWorktree({projectId, sessionId, defaultBranch}) (idempotent), writeFreeAgentSettings({worktreePath, projectId, sessionId}) (atomic .claude/settings.json write with PreToolUse hook reference), reapWorktree({projectId, sessionId}). Uses `git worktree add -b assist/<projectId>/<sessionId> <path> origin/<defaultBranch>` against the per-project bare repo. Detect existing worktree via <path>/.git presence + branch match. (AC #4, AC #5, AC #7)
+- Create daemon/pipelines/__tests__/free-agent-worktree.test.mjs — covers fresh create spawn args, idempotent return on existing worktree, settings.json atomic write with hook reference, GC reap of 7+ day idle session, GC NOT reaping ACTIVE/PROCESSING session, orphan worktree removal. Mock child_process.spawn + fs/promises. (AC #8 e-j)
+
+Daemon — path-confinement hook (bash):
+- Create daemon/pipelines/lib/free-agent-path-hook.sh — reads $CLAUDE_TOOL_NAME + $CLAUDE_TOOL_INPUT env. For Bash tool only: parses command, extracts cd <path> and absolute-path args, resolves relative to $PWD, asserts within $FREE_AGENT_CONFINEMENT_ROOT. Exits 1 (deny) with informative stderr on escape; 0 (allow) otherwise. $FREE_AGENT_CONFINEMENT_ROOT set per-session by daemon via spawn env. (AC #5)
+- Create daemon/pipelines/__tests__/free-agent-path-hook.test.mjs — invokes the bash script via child_process.execFile with controlled env; covers cd /etc rejection, cd src allow, relative + absolute + chained cd handling, informative stderr on rejection. (AC #8 k-n)
+
+Daemon — GC routine:
+- Implement GC logic per AC #6 — list /home/ubuntu/free-agent-worktrees/*/*/ via fs.readdir, look up sessions in futurator-free-agent-sessions (table introduced by Story 18.2; for 18.1 scaffold the GC reading session rows directly via @aws-sdk/lib-dynamodb ScanCommand with lastActivityAt < :sevenDaysAgo filter). Reap if status IN (IDLE,EXPIRED,BUDGET_EXHAUSTED) AND lastActivityAt > 7 days. Remove orphans with no DDB row. NEVER reap ACTIVE/PROCESSING regardless of age. Emit a single free-agent.gc.run summary event.
+- Decision point during implementation: fold GC into an existing cron Lambda (tag-auditor.ts or pat-age-check.ts under functions/cron/) OR create a new functions/cron/free-agent-gc.ts. Per [[ship-mvp-add-complexity-later]], prefer folding if cheap; create new if folding muddies an existing handler.
+- Wire cron schedule in sst.config.ts at `cron(0 3 * * ? *)` (daily 03:00 UTC). (AC #6)
+
+Documentation:
+- Modify CLAUDE.md — add a brief "Free Agent (Epic 18)" section noting the worktree path convention /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/ and the assist/<projectId>/<sessionId> branch namespace; point to docs/epics-free-agent.md as the canonical scope.
+- Modify daemon/README.md — document GC cadence (daily 03:00 UTC) and a manual reap recipe (`node -e "import('./pipelines/lib/free-agent-worktree.mjs').then(m => m.reapWorktree({projectId, sessionId}))"`).
+
+Validation:
+- Run npm run ci end-to-end; zero warnings, all tests pass, build succeeds. (AC #10)
+- EC2 dev manual verification per AC #9 steps 1-7: deploy role, verify scoped credentials via aws CLI (iam:list-users denied, dynamodb:get-item allowed, lambda:update-function-code denied, secretsmanager:get-secret-value denied), create worktree manually, verify hook rejects /tmp escape and allows in-scope ls.
+    ]]></tasks>
+  </story>
+
+  <acceptanceCriteria><![CDATA[
+AC #1 — New SST-managed IAM role FreeAgentSessionRole (in sst.config.ts) with trust policy allowing STS AssumeRole ONLY from the futurator-admin API Lambda's execution role ARN; permissions policy implements the read-scoped + explicit-deny pattern:
+  Allow: s3:GetObject/ListBucket on s3://futurator-ai-website/knowledge-live/${aws:PrincipalTag/project}/* (with s3:prefix resource condition).
+  Allow: dynamodb:GetItem/Query/Scan on futurator-agent-jobs (+ GSIs), futurator-attention-items, futurator-plans, futurator-free-agent-conversations, futurator-free-agent-sessions.
+  Allow: dynamodb:PutItem/UpdateItem on futurator-free-agent-conversations with dynamodb:LeadingKeys condition restricted to ${aws:PrincipalTag/sessionId}.
+  Explicit Deny on iam:*, lambda:UpdateFunctionCode, lambda:DeleteFunction, secretsmanager:GetSecretValue, secretsmanager:PutSecretValue, s3:DeleteObject, s3:PutBucketPolicy, dynamodb:DeleteTable, dynamodb:UpdateTable.
+
+AC #2 — ${project} and ${sessionId} in the policy resolve via STS session tags. Given functions/shared/lib/free-agent-iam.ts:assumeFreeAgentSessionRole(projectId, sessionId, operatorId), the AssumeRole call includes Tags: [{Key:'project',Value:projectId},{Key:'sessionId',Value:sessionId},{Key:'operator',Value:operatorId}], RoleSessionName: <projectId>--<sessionId>--<operatorId> truncated to 64 chars per STS limits, DurationSeconds: 3600. Returned credentials (AccessKeyId, SecretAccessKey, SessionToken, Expiration) are NEVER logged, NEVER written to event payloads, NEVER persisted in DDB — passed in-memory to the daemon via the existing encrypted job-dispatch payload.
+
+AC #3 — Given an active session whose credentials are within 5 min of Expiration (or already expired), when the operator sends a new message, then refreshSessionCredentials(session) is invoked first; re-runs AssumeRole with the same session tags; replaces credentials in the daemon's in-memory session state; the Claude CLI subprocess receives refreshed credentials via process.env on the next spawn (NOTE: process.env cannot be patched on a running subprocess — refresh applies to the NEXT turn). Session's lastRefreshedAt is updated in DDB.
+
+AC #4 — Given a free-agent session being created for the first time on a project, when daemon/pipelines/lib/free-agent-worktree.mjs:ensureWorktree({projectId, sessionId, defaultBranch}) is invoked, it creates a fresh worktree at /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/ via `git worktree add -b assist/<projectId>/<sessionId> <path> origin/<defaultBranch>`. Returns {worktreePath, branchName}. defaultBranch defaults to 'main' when not provided.
+
+AC #5 — Worktree path-confinement enforced by .claude/settings.json written into the worktree on create, containing a PreToolUse hook that rejects any Bash tool invocation whose effective working directory escapes /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/. Hook script at daemon/pipelines/lib/free-agent-path-hook.sh, templated per session, referenced by absolute path. Returns non-zero (deny) with clear stderr on escape, zero (allow) otherwise. Settings file is written ATOMICALLY (temp + rename) so a partial-write race cannot leave the hook half-configured.
+
+AC #6 — New cron schedule daemon-free-agent-gc runs daily at 03:00 UTC. GC routine: list worktrees under /home/ubuntu/free-agent-worktrees/*/*/; look up sessions in futurator-free-agent-sessions; REAP if status IN (IDLE,EXPIRED,BUDGET_EXHAUSTED) AND lastActivityAt >7 days ago via `git worktree remove --force <path>` + `git branch -D assist/<projectId>/<sessionId>`; REMOVE orphans with no DDB row; DO NOT reap ACTIVE/PROCESSING regardless of age. Emit single free-agent.gc.run event summarizing {reapedCount, orphansRemoved, kept}.
+
+AC #7 — ensureWorktree is idempotent. Given a session whose worktree already exists at the expected path, when ensureWorktree is called again, it returns the existing {worktreePath, branchName} WITHOUT re-cloning, WITHOUT erroring, WITHOUT modifying contents. Detection via existence check on <path>/.git + verify branch matches assist/<projectId>/<sessionId>.
+
+AC #8 — Unit tests pass:
+  functions/shared/lib/__tests__/free-agent-iam.test.ts (NEW): (a) AssumeRole call shape + session tags + role-session-name format and truncation + 3600s duration; (b) refreshSessionCredentials fires when expiry <5 min; (c) refreshSessionCredentials no-op when credentials fresh; (d) credentials never leak into thrown error messages.
+  daemon/pipelines/__tests__/free-agent-worktree.test.mjs (NEW): (e) fresh worktree create spawn args; (f) idempotent return on existing worktree; (g) settings.json written atomically with hook reference; (h) GC reaps 7+ day idle worktree; (i) GC does NOT reap ACTIVE session even if lastActivityAt >7 days; (j) GC removes orphan worktrees with no DDB row.
+  daemon/pipelines/__tests__/free-agent-path-hook.test.mjs (NEW): (k) hook rejects cd /etc && ls; (l) hook allows ls -la src/; (m) hook handles relative/absolute/chained cd; (n) informative stderr on rejection.
+
+AC #9 — Manual verification on EC2 dev: deploy role; from API Lambda call AssumeRole with test tags; using returned credentials in aws CLI: list-users → AccessDenied, get-item futurator-attention-items → success/NotFound (NOT AccessDenied), update-function-code → AccessDenied (explicit Deny), get-secret-value any-secret → AccessDenied. SSH to EC2; invoke ensureWorktree manually; verify worktree exists. cd into worktree; `claude -p "ls -la /tmp"` → hook rejects with informative stderr. `claude -p "ls -la ."` → hook allows; agent lists worktree contents. Document deviations in Dev Notes.
+
+AC #10 — `npm run ci` passes end-to-end (eslint --max-warnings 0, format:check, knip, typecheck, vitest, build).
+  ]]></acceptanceCriteria>
+
+  <artifacts>
+    <docs>
+      <doc>
+        <path>docs/epics-free-agent.md</path>
+        <title>Epic 18 — Free Claude Code Agent (Pipeline v2 enhancement)</title>
+        <section>Story 18.1 — Per-session IAM role + path-confined worktree</section>
+        <snippet>Canonical scope, ACs, prerequisites, and tech notes for the foundational architecture story. v1 carries the v2-shaped security/audit posture; layer-C write credentials deferred. Followed by Stories 18.2-18.6 in dependency order.</snippet>
+      </doc>
+      <doc>
+        <path>docs/concepts/pipeline-v2/pipelineV2-assessment.md</path>
+        <title>Pipeline v2 Assessment — plan_dino-7_mp8t4wak forensic</title>
+        <section>TL;DR + §2 Findings (P0-1 cron-dispatch divergence, P0-3 silent plan-build failure)</section>
+        <snippet>~3-hour manual forensic that motivates the Free Agent feature. A plan-scoped agent with read access to DDB + S3 + the project worktree would have surfaced "cron Lambda emitting legacy pipeline shape" in minutes. The "Maybe stuck. The signal is rate, not state." class is the operator-facing pain.</snippet>
+      </doc>
+      <doc>
+        <path>CLAUDE.md</path>
+        <title>Project guidance for Claude Code (Futurator-Admin)</title>
+        <section>Backend / DynamoDB / Key Conventions</section>
+        <snippet>Hono.js single-Lambda API; DynamoDB one-table-per-concern; auth via Identity Broker JWT in Authorization: Bearer header; zod schemas use .safeParse() only; API_BASE_URL stays relative in production; npm run ci is the gate (lint + format + knip + typecheck + test + build).</snippet>
+      </doc>
+      <doc>
+        <path>CLAUDE.md</path>
+        <title>Project guidance for Claude Code (Futurator-Admin)</title>
+        <section>DEPLOY SAFETY — DO NOT SYNC out/ TO futurator-ai-website</section>
+        <snippet>admin.futurator.ai and futurator.ai are SEPARATE buckets. Admin writes only scoped paths in the public bucket (knowledge-live/, data/projects.json, media/, apps/). FreeAgentSessionRole's s3 scope MUST stay confined to s3://futurator-ai-website/knowledge-live/${project}/* — never grant broader s3 access on the public bucket.</snippet>
+      </doc>
+      <doc>
+        <path>daemon/README.md</path>
+        <title>Futurator Agent Daemon README</title>
+        <section>(existing) — extended in this story with GC cadence + manual reap recipe</section>
+        <snippet>Existing daemon docs cover Claude CLI subprocess spawn, OAuth refresh, job polling, and SST-Secret PAT loads (BrownfieldGithubPat precedent). This story adds a new section documenting daily 03:00 UTC GC and the operator-facing manual reap command.</snippet>
+      </doc>
+      <doc>
+        <path>memory/feedback_ship_mvp_add_later.md</path>
+        <title>User memory — ship MVP, add complexity later</title>
+        <section>Design preference observed across the party-mode debate 2026-05-17</section>
+        <snippet>Operator prefers the simpler shippable shape. Informs the GC scope (no "extend session" UI), the cron consolidation decision (fold into existing if cheap), and the credential-refresh approach (don't kill running subprocesses — refresh applies to next turn). Surface richer alternatives as "if and when" not "we should design for this now."</snippet>
+      </doc>
+      <doc>
+        <path>memory/feedback_brownfield_party_permission_mode.md</path>
+        <title>User memory — brownfield party permission mode (path-scoped deferral)</title>
+        <section>acceptEdits posture rationale</section>
+        <snippet>Path-scoped Edit/Write restrictions for brownfield Party were deferred because they require settings.json + PreToolUse hooks (not a single CLI flag). Story 18.1 crosses the threshold for the Free Agent — settings.json + PreToolUse hook IS the path-confinement enforcement mechanism here. The trade-off has been re-evaluated for this higher-blast-radius surface.</snippet>
+      </doc>
+      <doc>
+        <path>memory/feedback_dynamodb_multi_table.md</path>
+        <title>User memory — DynamoDB multi-table preference</title>
+        <section>One table per concern</section>
+        <snippet>Never use single-table design. This story's IAM policy grants on futurator-free-agent-sessions / futurator-free-agent-conversations are designed to align with new dedicated tables (introduced in Stories 18.2 and 18.6). The 18.1 policy includes them by name so the role is correctly scoped on the first deploy of those tables.</snippet>
+      </doc>
+      <doc>
+        <path>~/Downloads/futurator-pipeline-exploration-rigor-addendum.md</path>
+        <title>Exploration Rigor Addendum (source spec for Epic 19)</title>
+        <section>§5 The carry-forward mechanism (informs Epic 18 runtime reusability)</section>
+        <snippet>External reference. Epic 19 (deferred) will reuse Epic 18's runtime for REFLECTOR-FINDINGS mode. Story 18.1's IAM role is intentionally scoped so Epic 19's exploration-rigor agent can extend (not replace) the same role with project-repo write capability on experiment/ branches.</snippet>
+      </doc>
+    </docs>
+
+    <code>
+      <artifact>
+        <path>sst.config.ts</path>
+        <kind>sst-infra</kind>
+        <symbol>brownfieldGithubPat (sst.Secret), permissions inline pattern (scheduleExecutor block), Lambda link pattern</symbol>
+        <lines>349-368, 442-480, 833-852</lines>
+        <reason>SST patterns to mirror: sst.Secret + GetSecretValue grants (349-368 BrownfieldGithubPat precedent for credentials lifecycle); per-Lambda inline permissions arrays (833-852 scheduleExecutor shows `permissions: [{actions, resources}]` shape with iam:PassRole + service-specific actions). Story 18.1 creates a STANDALONE role (not Lambda-attached) — use `aws.iam.Role` + `aws.iam.RolePolicy` Pulumi resources rather than SST's Lambda.permissions sugar.</reason>
+      </artifact>
+      <artifact>
+        <path>sst.config.ts</path>
+        <kind>sst-infra</kind>
+        <symbol>partyProjectsTable, partySessionsTable, attentionItemsTable, plansTable (table refs for the IAM resource arns)</symbol>
+        <lines>207-243, 266-291, 310-330</lines>
+        <reason>The FreeAgentSessionRole's permissions policy needs DDB resource ARNs for `futurator-agent-jobs`, `futurator-attention-items`, `futurator-plans`, `futurator-free-agent-conversations`, `futurator-free-agent-sessions`. First three exist (table refs in sst.config.ts); last two are introduced in Stories 18.2 (sessions) and 18.6 (conversations). Story 18.1 references them by NAME in the policy (`futurator-free-agent-sessions`, `futurator-free-agent-conversations`) — IAM is fine referencing tables that don't yet exist; permissions become effective when the tables are created.</reason>
+      </artifact>
+      <artifact>
+        <path>sst.config.ts</path>
+        <kind>sst-infra</kind>
+        <symbol>agentSessionsTable, agentConversationsTable (DORMANT Pipeline v1 tables — investigation point)</symbol>
+        <lines>371-408</lines>
+        <reason>Existing "Pipeline v1 — Epic 3 (Talk-to-agent)" tables (futurator-agent-sessions, futurator-agent-conversations) appear dormant. Story 18.1 does NOT create new tables, but flags this as an investigation point for Story 18.2 (sessions) and 18.6 (conversations): verify they are truly unused (`grep -r 'futurator-agent-sessions'` + check DDB row count) before creating new dedicated free-agent tables. Per [[dynamodb-multi-table-preference]], one concern per table — the free-agent IS a new concern, so creating new tables is the default path.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon-runtime</kind>
+        <symbol>runAgent (canonical Claude CLI spawn function)</symbol>
+        <lines>670-730</lines>
+        <reason>Canonical spawn pattern reused by Story 18.2 (free-agent-session job handler) and constrained by Story 18.1 (worktree cwd + path-hook env). Key points: `process.execPath` with `[CLAUDE_BIN, ...args]` rather than shell (line 726); `cwd: opts.workingDir` (line 728); existing `assertSpawnAllowed` shell-guard pre-check at line 723. The new worktree mechanism sets cwd to /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/ and injects $FREE_AGENT_CONFINEMENT_ROOT via spawn env.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/agent-daemon.mjs</path>
+        <kind>daemon-runtime</kind>
+        <symbol>CLAUDE_BIN resolution (startup), OAuth credentials loader, assertSpawnAllowed (shell-guard)</symbol>
+        <lines>134-162, 220-260, 723-724</lines>
+        <reason>Existing security primitives in the daemon: ShellGuardViolation at line 723-724 is the precedent for daemon-side guard hooks. The path-confinement PreToolUse hook in Story 18.1 lives at the Claude Code layer (not the daemon shell-guard layer) but their semantics are parallel — both reject before spawn/exec when scope violated.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/job-router.mjs</path>
+        <kind>pure-router</kind>
+        <symbol>selectHandler, JOB_HANDLER_PARTY_BOOTSTRAP / JOB_HANDLER_PARTY_TURN / JOB_HANDLER_PARTY_REFRESH constants</symbol>
+        <lines>12-48</lines>
+        <reason>Pattern for the new JOB_HANDLER_FREE_AGENT_SESSION constant + dispatch added in Story 18.2 (not 18.1). Story 18.1 doesn't touch the router but the file shape informs how the new handler will plug in.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/party-bootstrap.mjs</path>
+        <kind>daemon-pipeline</kind>
+        <symbol>runPartyBootstrap (pipeline pattern reference)</symbol>
+        <lines>40-312</lines>
+        <reason>Reference pattern for daemon-side pipelines that spawn subprocesses (git in this case, not claude). Story 18.1's worktree helper does NOT implement a pipeline but uses the same `child_process.spawn` + emit + error-handling shape. Reuse the helper's spawn-arg + redaction conventions documented here.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/lib/git-clone.mjs</path>
+        <kind>daemon-helper</kind>
+        <symbol>cloneRepo (NEW from Story 15.4 — spawn pattern reference)</symbol>
+        <lines>n/a</lines>
+        <reason>Direct precedent for spawning git from a daemon helper with sensitive-input redaction. Story 18.1's free-agent-worktree.mjs reuses the spawn shape (mock child_process.spawn for tests) but does NOT need redaction (no secrets in `git worktree add` invocation).</reason>
+      </artifact>
+      <artifact>
+        <path>functions/cron/pat-age-check.ts</path>
+        <kind>cron-lambda</kind>
+        <symbol>handler (PAT age-check cron precedent)</symbol>
+        <lines>n/a</lines>
+        <reason>Existing cron Lambda precedent for periodic credential/secret-related checks. If GC is implemented as a new functions/cron/free-agent-gc.ts file, this is the structural template. If folded into tag-auditor.ts or schedule-executor.ts, those are the alternatives. Implementation choice deferred to dev per [[ship-mvp-add-complexity-later]].</reason>
+      </artifact>
+      <artifact>
+        <path>functions/cron/tag-auditor.ts</path>
+        <kind>cron-lambda</kind>
+        <symbol>handler (daily cron Lambda alternative fold-target)</symbol>
+        <lines>n/a</lines>
+        <reason>Alternative fold-target if GC routine doesn't warrant its own Lambda. Already runs daily; adding a free-agent-GC pass would be a single function call. Trade-off: less observability vs lighter cold-start cost.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/repositories/party-projects-repository.ts</path>
+        <kind>repository</kind>
+        <symbol>tryAcquireBootstrapLock (conditional UpdateCommand pattern)</symbol>
+        <lines>108-152</lines>
+        <reason>Reference pattern for any future free-agent-session-repository locking semantics (Story 18.2). Not directly used by 18.1 but worth knowing the conditional-update + reason-disambiguation idiom for downstream stories.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/api/index.ts</path>
+        <kind>hono-routes</kind>
+        <symbol>POST /api/party/projects, POST /api/party/projects/:id/refresh (auth + zod + agentJobsRepo.createJob pattern)</symbol>
+        <lines>4749, 4872-4910</lines>
+        <reason>Pattern for the future POST /api/free-agent/sessions route (Story 18.5). 18.1 does NOT add API routes — it adds the assumeFreeAgentSessionRole helper that Story 18.5's POST route will call. Showing here for downstream context.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/lib/</path>
+        <kind>NEW-DIRECTORY</kind>
+        <symbol>(directory does not yet exist)</symbol>
+        <lines>n/a</lines>
+        <reason>functions/shared/ currently contains repositories/, schemas/, types/, and direct files (auth-middleware.ts, errors.ts, etc.). Story 18.1 creates the new `lib/` subdirectory for cross-cutting helpers (free-agent-iam.ts is the first occupant). Investigate whether existing helpers (e.g., what could be in errors.ts adjacent) should also be moved — DEFER such cleanup unless trivially mechanical.</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/lib/free-agent-worktree.mjs</path>
+        <kind>daemon-helper-NEW</kind>
+        <symbol>ensureWorktree, writeFreeAgentSettings, reapWorktree (NEW)</symbol>
+        <lines>n/a</lines>
+        <reason>NEW. Owns worktree lifecycle: create (idempotent), settings.json atomic write with PreToolUse hook reference, reap (used by GC). Spawn `git worktree add -b assist/<projectId>/<sessionId> <path> origin/<defaultBranch>` against per-project bare repo (path TBD during implementation — verify existing daemon convention).</reason>
+      </artifact>
+      <artifact>
+        <path>daemon/pipelines/lib/free-agent-path-hook.sh</path>
+        <kind>shell-script-NEW</kind>
+        <symbol>(bash script — PreToolUse hook)</symbol>
+        <lines>n/a</lines>
+        <reason>NEW. Templated per session. Reads $CLAUDE_TOOL_NAME + $CLAUDE_TOOL_INPUT JSON. For Bash tool only: parses command field, extracts cd/abs-path args, resolves vs $PWD, asserts within $FREE_AGENT_CONFINEMENT_ROOT. Exits 1 (deny) with informative stderr on escape; 0 (allow) otherwise. The hook is referenced by absolute path from the per-session .claude/settings.json file.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/shared/lib/free-agent-iam.ts</path>
+        <kind>shared-helper-NEW</kind>
+        <symbol>assumeFreeAgentSessionRole, refreshSessionCredentials, redactCredentials, SessionCredentials type (NEW)</symbol>
+        <lines>n/a</lines>
+        <reason>NEW. STS AssumeRole + credential refresh + error-redaction. Called by the API Lambda (no daemon usage in 18.1 — daemon receives credentials via job-dispatch payload in Story 18.2). Returns in-memory object; never persists secrets.</reason>
+      </artifact>
+      <artifact>
+        <path>functions/cron/free-agent-gc.ts (OR tag-auditor.ts extension)</path>
+        <kind>cron-lambda-NEW-or-extended</kind>
+        <symbol>GC routine</symbol>
+        <lines>n/a</lines>
+        <reason>NEW or EXTENDED. Daily 03:00 UTC. List worktrees, look up sessions (or scan futurator-free-agent-sessions when it exists), reap stale, remove orphans, never touch ACTIVE/PROCESSING. Emit one free-agent.gc.run summary event. Implementation location decision deferred to dev.</reason>
+      </artifact>
+    </code>
+
+    <dependencies>
+      <node>
+        <package name="@aws-sdk/client-sts" version="^3.x (TO ADD)">NEW dependency to root package.json. Used by functions/shared/lib/free-agent-iam.ts:assumeFreeAgentSessionRole. Pulls AssumeRoleCommand. Version should match existing @aws-sdk/* deps (currently ^3.1024.0 / ^3.1032.0).</package>
+        <package name="@aws-sdk/client-secrets-manager" version="^3.1032.0">already in root deps. NOT used directly by Story 18.1 (referenced as precedent for daemon-startup secret loading from Story 15.4).</package>
+        <package name="@aws-sdk/client-dynamodb" version="^3.1024.0">already in root + daemon deps. Used by GC routine to scan futurator-free-agent-sessions for stale-session detection.</package>
+        <package name="@aws-sdk/lib-dynamodb" version="^3.1024.0">already in root + daemon deps. Document-client wrapper for ScanCommand in GC.</package>
+        <package name="vitest" version="^3">already in root deps. Test harness for free-agent-iam.test.ts + free-agent-worktree.test.mjs + free-agent-path-hook.test.mjs. jsdom env + tests/setup.ts.</package>
+        <package name="zod" version="^3">already in root deps. Not directly used by 18.1 (no schemas added) — referenced for downstream stories that validate API inputs.</package>
+        <package name="hono" version="^4.12.10">already in root deps. Not used by 18.1 (no routes added) — Story 18.5 will add routes that call assumeFreeAgentSessionRole.</package>
+      </node>
+      <aws>
+        <component name="IAM Role: FreeAgentSessionRole (NEW)">Standalone aws.iam.Role (not Lambda-attached) with trust policy on the API Lambda exec role ARN + inline permissions policy per AC #1. Tags allowed for STS session-tagging.</component>
+        <component name="API Lambda execution role (existing, EXTENDED)">Granted sts:AssumeRole + sts:TagSession on FreeAgentSessionRole ARN with a Condition requiring the project + sessionId session tags. Existing role policy already covers DDB / SSM / other admin actions.</component>
+        <component name="EventBridge Schedule: cron(0 3 * * ? *) (NEW or REUSED)">Daily 03:00 UTC trigger for GC. New schedule if dedicated functions/cron/free-agent-gc.ts; reused/extended if folded into tag-auditor or schedule-executor.</component>
+        <component name="DynamoDB tables referenced by IAM policy">futurator-agent-jobs (existing), futurator-attention-items (existing), futurator-plans (existing), futurator-free-agent-conversations (created in Story 18.6), futurator-free-agent-sessions (created in Story 18.2). IAM policy references all five by name — Story 18.1 ships valid even before the new two are created; permissions become effective when tables exist.</component>
+        <component name="S3 prefix: s3://futurator-ai-website/knowledge-live/${project}/*">Existing prefix per [[futurator-dual-bucket-setup]] memory. FreeAgentSessionRole gets s3:GetObject + s3:ListBucket scoped via s3:prefix condition keyed off the project session tag. Never broader access on the public bucket.</component>
+      </aws>
+      <git>
+        <component name="git worktree (standard)">Used by ensureWorktree (`git worktree add -b <branch> <path> origin/<default>`) and reapWorktree (`git worktree remove --force <path>` + `git branch -D <branch>`). Investigate per-project bare-repo location during implementation (verify daemon convention).</component>
+      </git>
+      <claude-code>
+        <component name="Claude Code PreToolUse hook (settings.json contract)">.claude/settings.json with `hooks.PreToolUse[].matcher='Bash'` + `hooks[].command=<absolute hook script path>`. Hook reads $CLAUDE_TOOL_NAME, $CLAUDE_TOOL_INPUT env vars; non-zero exit denies. Standard Claude Code contract — verify against installed claude CLI version during implementation.</component>
+      </claude-code>
+    </dependencies>
+  </artifacts>
+
+  <constraints><![CDATA[
+- The per-session IAM role is the load-bearing security primitive for the entire Free Agent feature. All subsequent stories (18.2-18.6) inherit its scope. Get this story right or every later story becomes harder to reason about. [Source: party-mode debate 2026-05-17 Sean Tinel; docs/epics-free-agent.md Epic Goal]
+- Build the v2-shaped security posture from day one even though v1 features don't exercise it. Per-session role assumption is a 4-hour task today and a 4-week migration later. Do NOT ship a shared role. [Source: party-mode debate 2026-05-17 Rick round 5; docs/epics-free-agent.md Sequencing rationale]
+- Credentials NEVER persist. STS session token format (in-memory) → encrypted job-dispatch envelope → daemon spawn env. Replaced on refresh, not stored. Any DDB write or event payload containing accessKeyId is a defect. [Source: AC #2 + party-mode Sean]
+- Path-confinement enforced by Claude Code PreToolUse hook on Bash, NOT by IAM. IAM has DDB/S3 scopes; filesystem scope is hook-enforced. This is the "trivially achievable" threshold from [[brownfield-party-permission-mode]] memory — the Free Agent's blast radius crosses it. [Source: party-mode debate 2026-05-17 Sean round 1; memory feedback_brownfield_party_permission_mode]
+- Worktree paths NEVER shared with pipeline worktrees. Pipeline worktrees live elsewhere (verify during implementation — likely /home/ubuntu/worktrees/<project>/<plan>/). Free-agent worktrees ALWAYS at /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/. Different branch namespaces (assist/ vs wip/ vs experiment/), zero overlap. [Source: party-mode debate 2026-05-17 Ludwig round 1]
+- The assist/<projectId>/<sessionId> branch namespace is sacred. No pipeline tooling touches these branches. No auto-PR. No auto-merge. Operator manually cherry-picks anything they want to keep. [Source: party-mode debate 2026-05-17 Ludwig + Sean round 1]
+- GC is a safety net, not a feature. 7-day retention is intentionally conservative. If operators need longer-running investigations, raise the threshold — do NOT build an "extend session" UI. [Source: party-mode debate 2026-05-17 Pedrock; memory feedback_ship_mvp_add_later]
+- process.env CANNOT be patched on a running subprocess. Credential refresh applies to the NEXT spawn. Mid-flight AWS calls in a turn whose credentials expire WILL fail; daemon must NOT interrupt the turn but MUST refresh before the next spawn. Document this in daemon logs. [Source: AC #3 + implementation reality]
+- One table per concern. Free-agent IS a new concern; create new dedicated tables (futurator-free-agent-sessions in Story 18.2, futurator-free-agent-conversations in Story 18.6) rather than reuse dormant Pipeline-v1 tables. [Source: memory feedback_dynamodb_multi_table; CLAUDE.md Key Conventions]
+- S3 IAM scope MUST stay confined to knowledge-live/${project}/*. NEVER grant broader access on s3://futurator-ai-website. Public homepage at futurator.ai is in the same bucket; broader access creates risk per [[futurator-dual-bucket-setup]]. [Source: CLAUDE.md DEPLOY SAFETY block; memory project_dual_bucket_setup]
+- Explicit-deny block on iam:*, lambda:UpdateFunctionCode, lambda:DeleteFunction, secretsmanager:*, s3:DeleteObject, s3:PutBucketPolicy, dynamodb:DeleteTable, dynamodb:UpdateTable is the seatbelt — even if a permission is added upstream by accident, these stay denied. [Source: AC #1 + party-mode Sean round 1]
+- Layer C (per-session AWS WRITE credentials beyond own-conversation DDB writes) is NOT in v1. If operator needs the agent to do AWS writes, they run those in their own terminal. v2 may revisit. [Source: docs/epics-free-agent.md scope; party-mode round 5]
+- Reactive auto-spawn on pipeline failures was killed in party-mode round 2. Widget is operator-initiated only. Story 18.1 does NOT implement any spawn-trigger logic. [Source: party-mode debate 2026-05-17 round 2; docs/epics-free-agent.md Out of Scope]
+- All zod validation via .safeParse() only (where added downstream). Errors via AppError/ValidationError from functions/shared/errors.ts. [Source: CLAUDE.md Validation]
+- npm run ci must pass with zero warnings: eslint --max-warnings 0, format:check, knip, typecheck, vitest, build. [Source: CLAUDE.md Commands; package.json ci script]
+- API_BASE_URL stays relative in production. Not directly applicable to Story 18.1 (no UI code) but constrains downstream story 18.5. [Source: CLAUDE.md Key Conventions]
+- Atomic file writes for security-relevant files (settings.json): write to temp file in same directory, then rename. Avoids partial-write races where the hook could be half-configured. [Source: AC #5]
+  ]]></constraints>
+
+  <interfaces>
+    <interface>
+      <name>assumeFreeAgentSessionRole</name>
+      <kind>shared library function (NEW)</kind>
+      <signature><![CDATA[assumeFreeAgentSessionRole({
+  projectId: string,    // e.g. 'dino-7'
+  sessionId: string,    // uuid
+  operatorId: string,   // from JWT sub claim
+}): Promise<SessionCredentials>
+
+Calls @aws-sdk/client-sts AssumeRoleCommand:
+  RoleArn:           process.env.FREE_AGENT_SESSION_ROLE_ARN
+  RoleSessionName:   `${projectId}--${sessionId}--${operatorId}`.slice(0, 64)
+  DurationSeconds:   3600
+  Tags: [
+    { Key: 'project',    Value: projectId },
+    { Key: 'sessionId',  Value: sessionId },
+    { Key: 'operator',   Value: operatorId },
+  ]
+
+Returns: { accessKeyId, secretAccessKey, sessionToken, expiration } (ISO-8601 expiration).
+Throws (with credential redaction) on any STS error.]]></signature>
+      <path>functions/shared/lib/free-agent-iam.ts (NEW)</path>
+    </interface>
+    <interface>
+      <name>refreshSessionCredentials</name>
+      <kind>shared library function (NEW)</kind>
+      <signature><![CDATA[refreshSessionCredentials(session: { projectId, sessionId, operatorId, expiration }): Promise<SessionCredentials | null>
+
+Returns null if Date.now() < expiration - 5min (still fresh — no-op).
+Otherwise calls assumeFreeAgentSessionRole with same tags and returns fresh credentials.
+Caller is responsible for updating the daemon's in-memory session state and the session's lastRefreshedAt in DDB.]]></signature>
+      <path>functions/shared/lib/free-agent-iam.ts (NEW)</path>
+    </interface>
+    <interface>
+      <name>SessionCredentials (type)</name>
+      <kind>typescript type (NEW)</kind>
+      <signature><![CDATA[type SessionCredentials = {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken: string;
+  expiration: string;  // ISO-8601 UTC
+}
+
+NEVER persisted. NEVER logged. Always treated as in-memory transient data.]]></signature>
+      <path>functions/shared/lib/free-agent-iam.ts (NEW)</path>
+    </interface>
+    <interface>
+      <name>ensureWorktree</name>
+      <kind>daemon helper function (NEW)</kind>
+      <signature><![CDATA[ensureWorktree({
+  projectId: string,
+  sessionId: string,
+  defaultBranch?: string,  // default 'main'
+}): Promise<{ worktreePath: string, branchName: string }>
+
+Idempotent. If a worktree already exists at /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/ AND its branch matches assist/<projectId>/<sessionId>, returns the existing { worktreePath, branchName } without re-cloning or modifying contents.
+
+Otherwise spawns: git worktree add -b assist/<projectId>/<sessionId> <path> origin/<defaultBranch>
+against the per-project bare repo at /home/ubuntu/repos/<projectId>.git (verify path during implementation).]]></signature>
+      <path>daemon/pipelines/lib/free-agent-worktree.mjs (NEW)</path>
+    </interface>
+    <interface>
+      <name>writeFreeAgentSettings</name>
+      <kind>daemon helper function (NEW)</kind>
+      <signature><![CDATA[writeFreeAgentSettings({
+  worktreePath: string,
+  projectId: string,
+  sessionId: string,
+}): Promise<void>
+
+Writes .claude/settings.json atomically (temp + rename) inside the worktree, with shape:
+{
+  hooks: {
+    PreToolUse: [
+      {
+        matcher: 'Bash',
+        hooks: [
+          {
+            type: 'command',
+            command: '/absolute/path/to/daemon/pipelines/lib/free-agent-path-hook.sh'
+          }
+        ]
+      }
+    ]
+  }
+}
+The hook receives $FREE_AGENT_CONFINEMENT_ROOT via the spawn env set by the daemon when launching the Claude CLI for this session (in Story 18.2).]]></signature>
+      <path>daemon/pipelines/lib/free-agent-worktree.mjs (NEW)</path>
+    </interface>
+    <interface>
+      <name>reapWorktree</name>
+      <kind>daemon helper function (NEW)</kind>
+      <signature><![CDATA[reapWorktree({
+  projectId: string,
+  sessionId: string,
+}): Promise<void>
+
+Spawns: git worktree remove --force /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/
+Then:    git branch -D assist/<projectId>/<sessionId>
+Used by GC routine. Idempotent — succeeds even if path or branch already gone (treat 'not found' as success).]]></signature>
+      <path>daemon/pipelines/lib/free-agent-worktree.mjs (NEW)</path>
+    </interface>
+    <interface>
+      <name>free-agent-path-hook.sh (PreToolUse hook contract)</name>
+      <kind>shell script (NEW)</kind>
+      <signature><![CDATA[Invoked by Claude Code PreToolUse mechanism. Stdin: none. Env vars:
+  CLAUDE_TOOL_NAME           — 'Bash' for our matcher; pass-through allow on others
+  CLAUDE_TOOL_INPUT          — JSON: { command: string, ... } (Bash tool input)
+  FREE_AGENT_CONFINEMENT_ROOT — absolute path the agent must stay within
+  PWD                        — current working directory (provided by Claude Code)
+
+Behavior (Bash only):
+  - Parse CLAUDE_TOOL_INPUT.command
+  - Extract any `cd <path>` and absolute-path args
+  - Resolve each relative to $PWD
+  - If any resolved path is OUTSIDE $FREE_AGENT_CONFINEMENT_ROOT → exit 1 with stderr
+  - Otherwise → exit 0
+
+Exit code 0 = allow; non-zero = deny.]]></signature>
+      <path>daemon/pipelines/lib/free-agent-path-hook.sh (NEW)</path>
+    </interface>
+    <interface>
+      <name>GC routine entry point</name>
+      <kind>cron-Lambda handler (NEW or extension)</kind>
+      <signature><![CDATA[handler(event: ScheduledEvent): Promise<{ reapedCount, orphansRemoved, kept }>
+
+Steps:
+  1. fs.readdir /home/ubuntu/free-agent-worktrees/ → projectIds
+  2. for each projectId: fs.readdir → sessionIds
+  3. for each (projectId, sessionId): query futurator-free-agent-sessions for the row
+     (during 18.1 stub: ScanCommand with lastActivityAt < :sevenDaysAgo filter — Story 18.2 will provide a typed repository method)
+  4. Decide reap/keep/orphan per AC #6 rules
+  5. For reap candidates: invoke reapWorktree
+  6. For orphans: remove worktree path + branch
+  7. Emit single free-agent.gc.run event to futurator-agent-events
+  8. Return summary
+
+Scheduled via SST cron(0 3 * * ? *).]]></signature>
+      <path>functions/cron/free-agent-gc.ts (NEW) — OR extended tag-auditor.ts / schedule-executor.ts</path>
+    </interface>
+  </interfaces>
+
+  <tests>
+    <standards><![CDATA[
+Vitest with jsdom for shared/lib (functions/**/__tests__/*.test.ts). Daemon tests use vi.mock on child_process.spawn + fs/promises following the patterns established in daemon/pipelines/__tests__/party-bootstrap.test.mjs, party-turn.test.mjs, git-clone.test.mjs (new from Story 15.4). For the path-hook bash-script test, invoke via child_process.execFile with controlled env (CLAUDE_TOOL_NAME, CLAUDE_TOOL_INPUT JSON, FREE_AGENT_CONFINEMENT_ROOT, PWD) and assert exit code + stderr content. For the IAM test, mock @aws-sdk/client-sts AssumeRoleCommand using aws-sdk-client-mock or vitest's vi.mock — assert command input shape (RoleArn, RoleSessionName, DurationSeconds, Tags) and that thrown errors do NOT contain credential-looking strings (scrub by AKIA-prefix and the literal field names). Coverage targets in vitest.config: functions/shared/** (already covered) + daemon/pipelines/lib/** (new patterns will fall under existing daemon test config). NO new playwright tests in Story 18.1 (no UI). NO new integration tests against live AWS (manual verification per AC #9 handles that).
+    ]]></standards>
+    <locations>
+      <location>functions/shared/lib/__tests__/free-agent-iam.test.ts (NEW)</location>
+      <location>daemon/pipelines/__tests__/free-agent-worktree.test.mjs (NEW)</location>
+      <location>daemon/pipelines/__tests__/free-agent-path-hook.test.mjs (NEW)</location>
+      <location>daemon/pipelines/__tests__/party-bootstrap.test.mjs (REFERENCE — vi.mock spawn pattern)</location>
+      <location>daemon/pipelines/__tests__/git-clone.test.mjs (REFERENCE — daemon helper test pattern from Story 15.4)</location>
+    </locations>
+    <ideas>
+      <idea ac="AC #1">SST policy assertion (typecheck-time + integration-time) — the inline permissions policy JSON includes the Allow / Deny statements per AC #1; the explicit-Deny block lists all 9 destructive actions exactly. (Unit test: parse the SST-generated policy document if exposed; otherwise rely on the manual AC #9 verification.)</idea>
+      <idea ac="AC #2">free-agent-iam.test.ts — given (projectId, sessionId, operatorId), assumeFreeAgentSessionRole calls AssumeRoleCommand with Tags array containing exact (Key,Value) pairs, RoleSessionName matching `${projectId}--${sessionId}--${operatorId}`.slice(0, 64), DurationSeconds=3600. Mock returns synthetic credentials; assert the returned shape matches SessionCredentials type.</idea>
+      <idea ac="AC #2">free-agent-iam.test.ts — when STS throws (e.g., AccessDenied because role policy refuses session tags), the thrown error message does NOT contain any string matching /AKIA[A-Z0-9]{16}/ or 'accessKeyId' or 'sessionToken' verbatim. Use a synthetic AKIA-shaped value in the test to verify scrubbing.</idea>
+      <idea ac="AC #3">free-agent-iam.test.ts — refreshSessionCredentials returns null when given a session whose expiration is >5 min away. Returns fresh credentials when expiration is <5 min away. Returns fresh credentials when expiration is in the past.</idea>
+      <idea ac="AC #4">free-agent-worktree.test.mjs — given (projectId, sessionId), ensureWorktree on a fresh state spawns `git worktree add -b assist/<projectId>/<sessionId> /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/ origin/main` and returns the expected paths.</idea>
+      <idea ac="AC #4">free-agent-worktree.test.mjs — ensureWorktree honors a non-default defaultBranch argument (e.g., 'develop'); the spawn args reflect `origin/develop` instead of `origin/main`.</idea>
+      <idea ac="AC #5">free-agent-worktree.test.mjs — writeFreeAgentSettings writes the file to a temp path first, then renames. Verify the temp path is in the same directory as the final target (so rename is atomic on POSIX). Verify the file contents include the PreToolUse hook with matcher='Bash' and command pointing to the absolute hook script path.</idea>
+      <idea ac="AC #6">free-agent-worktree.test.mjs — GC with a session row at status='IDLE', lastActivityAt 8 days ago → reap invoked. Session at status='IDLE', lastActivityAt 6 days ago → reap NOT invoked. Session at status='ACTIVE', lastActivityAt 30 days ago → reap NOT invoked (regardless of age).</idea>
+      <idea ac="AC #6">free-agent-worktree.test.mjs — GC encounters a worktree path with no corresponding DDB session row → treated as orphan, removed. Asserted via reapWorktree spawn arg capture.</idea>
+      <idea ac="AC #6">free-agent-worktree.test.mjs — GC emits exactly one free-agent.gc.run event per invocation with payload { reapedCount: N, orphansRemoved: M, kept: K } matching the inputs.</idea>
+      <idea ac="AC #7">free-agent-worktree.test.mjs — given a worktree already exists at the expected path with the expected branch (mock fs.access succeeds, mock branch-check returns expected), ensureWorktree returns the existing paths WITHOUT calling spawn. Spawn-call count assertion.</idea>
+      <idea ac="AC #5">free-agent-path-hook.test.mjs — invoke the bash script with CLAUDE_TOOL_NAME='Bash', CLAUDE_TOOL_INPUT='{"command":"cd /etc && ls"}', FREE_AGENT_CONFINEMENT_ROOT='/home/ubuntu/free-agent-worktrees/p/s/', PWD='/home/ubuntu/free-agent-worktrees/p/s/'. Assert exit code 1 + stderr mentions '/etc' as the escape.</idea>
+      <idea ac="AC #5">free-agent-path-hook.test.mjs — invoke with CLAUDE_TOOL_INPUT='{"command":"ls -la src/"}', same PWD + ROOT. Assert exit code 0.</idea>
+      <idea ac="AC #5">free-agent-path-hook.test.mjs — invoke with CLAUDE_TOOL_INPUT='{"command":"cd /home/ubuntu/free-agent-worktrees/p/s/sub && ls"}', same ROOT. Assert exit code 0 (in-scope absolute cd).</idea>
+      <idea ac="AC #5">free-agent-path-hook.test.mjs — invoke with CLAUDE_TOOL_NAME='Read', CLAUDE_TOOL_INPUT='{"file_path":"/etc/passwd"}', same ROOT. Assert exit code 0 (hook only matches Bash; other tools pass through — Read/Write/Edit scope is enforced by IAM and Claude Code's own working-directory awareness, not by this hook).</idea>
+      <idea ac="AC #8">All three test files run under existing vitest config. `npm run test -- free-agent` runs the suite. Assert no console.error leaks during normal-path tests.</idea>
+      <idea ac="AC #9">Manual smoke checklist captured in the story's Dev Notes during EC2 verification — every step in AC #9 either passes or is annotated with the deviation observed. Verification artifacts (aws CLI outputs, hook stderr) saved to docs/concepts/logs/free-agent-story-18-1-verification.md (optional).</idea>
+      <idea ac="AC #10">CI gate — `npm run ci` exits 0 with no eslint warnings (--max-warnings 0), knip clean, typecheck clean (including the new @aws-sdk/client-sts types), all tests pass, build succeeds.</idea>
+    </ideas>
+  </tests>
+</story-context>
