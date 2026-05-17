@@ -40,6 +40,7 @@ const sections: NavSection[] = [
       { href: '/development/agentic-office', label: 'Agentic Office', icon: '🏢' },
       { href: '/development/graph', label: 'Graph', icon: '🕸️' },
       { href: '/debates', label: 'Debates', icon: '💬' },
+      { href: '/migrate', label: 'Migrate', icon: '🚚' },
       { href: '/labs', label: 'Labs', icon: '🧪' },
     ],
   },
