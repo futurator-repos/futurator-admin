@@ -11,7 +11,7 @@
  * tickets. It renders the same `<SessionChatV2>` component used inside the
  * App-detail Party tab, so feature parity is automatic.
  */
-import { Suspense, useMemo } from 'react';
+import { Suspense, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { formatDistanceToNow } from 'date-fns';
 import {
@@ -20,6 +20,7 @@ import {
   Loader2,
   MessageSquare,
   MessagesSquare,
+  Plus,
 } from 'lucide-react';
 import { AppShell } from '@/components/layout/app-shell';
 import { AuthGuard } from '@/components/auth/auth-guard';
@@ -28,6 +29,7 @@ import { useAllPartySessions } from '@/hooks/use-party-sessions';
 import { useApps } from '@/hooks/use-apps';
 import { useSession } from '@/hooks/use-party-session';
 import { SessionChatV2 } from '@/components/labs/party/v2/session-chat-v2';
+import { NewDebateDialog } from '@/components/debates/new-debate-dialog';
 import type { PartySession, PartySessionStatus } from '@/types/party';
 
 const STATUS_TONE: Record<PartySessionStatus, string> = {
@@ -100,9 +102,7 @@ function DebateChatView({ sessionId }: { sessionId: string }) {
           <span className="text-muted-foreground text-[11px]">/</span>
           <button
             type="button"
-            onClick={() =>
-              router.push(`/labs?appId=${encodeURIComponent(session.projectId)}`)
-            }
+            onClick={() => router.push(`/labs?appId=${encodeURIComponent(session.projectId)}`)}
             className="text-[12px] font-medium hover:underline truncate"
             title="Open App detail"
           >
@@ -118,9 +118,7 @@ function DebateChatView({ sessionId }: { sessionId: string }) {
           size="sm"
           className="h-7 text-[11px]"
           onClick={() =>
-            router.push(
-              `/labs?appId=${encodeURIComponent(session.projectId)}&tab=party`,
-            )
+            router.push(`/labs?appId=${encodeURIComponent(session.projectId)}&tab=party`)
           }
           title="Open inside the App's Party tab"
         >
@@ -132,13 +130,9 @@ function DebateChatView({ sessionId }: { sessionId: string }) {
         <SessionChatV2
           sessionId={sessionId}
           onClose={() => router.push('/debates')}
-          onPickSession={(id) =>
-            router.push(`/debates?sessionId=${encodeURIComponent(id)}`)
-          }
+          onPickSession={(id) => router.push(`/debates?sessionId=${encodeURIComponent(id)}`)}
           onNewSession={() =>
-            router.push(
-              `/labs?appId=${encodeURIComponent(session.projectId)}&tab=party`,
-            )
+            router.push(`/labs?appId=${encodeURIComponent(session.projectId)}&tab=party`)
           }
         />
       </div>
@@ -150,6 +144,7 @@ function DebatesListView() {
   const router = useRouter();
   const { data, isLoading, error } = useAllPartySessions();
   const { data: apps } = useApps();
+  const [isNewDebateOpen, setIsNewDebateOpen] = useState(false);
 
   const groups: AppGroup[] = useMemo(() => {
     const sessions = data?.sessions ?? [];
@@ -193,16 +188,27 @@ function DebatesListView() {
             Debates
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Every Party Mode session across every App. Each debate has its own URL —
-            share it, bookmark it, open it on your phone.
+            Every Party Mode session across every App. Each debate has its own URL — share it,
+            bookmark it, open it on your phone.
           </p>
         </div>
-        <div className="text-[11px] font-mono text-muted-foreground">
-          {data?.sessions.length ?? 0} session{(data?.sessions.length ?? 0) === 1 ? '' : 's'} ·
-          {' '}
-          {groups.length} app{groups.length === 1 ? '' : 's'}
+        <div className="flex items-center gap-3">
+          <div className="text-[11px] font-mono text-muted-foreground">
+            {data?.sessions.length ?? 0} session{(data?.sessions.length ?? 0) === 1 ? '' : 's'} ·{' '}
+            {groups.length} app{groups.length === 1 ? '' : 's'}
+          </div>
+          <Button
+            size="sm"
+            onClick={() => setIsNewDebateOpen(true)}
+            data-testid="new-debate-button"
+          >
+            <Plus className="mr-1 h-3.5 w-3.5" />
+            New debate
+          </Button>
         </div>
       </div>
+
+      <NewDebateDialog open={isNewDebateOpen} onOpenChange={setIsNewDebateOpen} />
 
       {isLoading && (
         <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-6 text-sm text-muted-foreground">
@@ -222,9 +228,18 @@ function DebatesListView() {
           <MessageSquare className="mx-auto mb-3 h-8 w-8 text-muted-foreground/60" />
           <h2 className="text-sm font-medium">No debates yet</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Open an App, click the <strong>Party</strong> tab, and start a new session — it&rsquo;ll
-            show up here.
+            Start one with the <strong>+ New debate</strong> button above, or open an App and click
+            the <strong>Party</strong> tab — either way it shows up here.
           </p>
+          <Button
+            size="sm"
+            className="mt-4"
+            onClick={() => setIsNewDebateOpen(true)}
+            data-testid="new-debate-button-empty"
+          >
+            <Plus className="mr-1 h-3.5 w-3.5" />
+            New debate
+          </Button>
         </div>
       )}
 
@@ -278,9 +293,7 @@ function DebatesListView() {
                           </span>
                           <span>·</span>
                           <span>{formatDistanceToNow(new Date(when))} ago</span>
-                          <span className="font-mono opacity-60">
-                            {s.sessionId.slice(0, 8)}
-                          </span>
+                          <span className="font-mono opacity-60">{s.sessionId.slice(0, 8)}</span>
                         </div>
                       </div>
                       <span
@@ -311,9 +324,7 @@ export default function DebatesPage() {
   return (
     <AuthGuard>
       <AppShell>
-        <Suspense
-          fallback={<div className="p-6 text-sm text-muted-foreground">Loading…</div>}
-        >
+        <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">Loading…</div>}>
           <DebatesContent />
         </Suspense>
       </AppShell>

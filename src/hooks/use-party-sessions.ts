@@ -31,6 +31,9 @@ export function useCreateSessionMutation() {
       qc.invalidateQueries({
         queryKey: ['party', 'sessions', 'by-project', session.projectId],
       });
+      // Also invalidate the cross-project listing used by the Debates page so
+      // the new session shows up without a manual refresh.
+      qc.invalidateQueries({ queryKey: ['party', 'sessions', 'all'] });
       qc.setQueryData(['party', 'session', session.sessionId], session);
     },
   });
