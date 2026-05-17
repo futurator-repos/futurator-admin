@@ -103,7 +103,10 @@ Working directory: ${workingDir}
           `sleep 2`,
           `STATUS=000`,
           `for i in $(seq 1 30); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$QA_PORT$QA_HEALTH_PATH 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
-          `kill $(lsof -ti:$QA_PORT) 2>/dev/null; pkill -TERM -f 'next dev' 2>/dev/null; pkill -TERM -f 'next-server' 2>/dev/null; true`,
+          // 2026-05-17 — use [c] bracket-class regex on pkill patterns so this
+          // cleanup line doesn't self-match the bash interpreter running it
+          // (see buildPortReclaimSnippet header comment for the full incident).
+          `kill $(lsof -ti:$QA_PORT) 2>/dev/null; pkill -TERM -f '[n]ext dev' 2>/dev/null; pkill -TERM -f '[n]ext-server' 2>/dev/null; true`,
           `[ "$STATUS" = "200" ] || { echo "PLAN_SERVER_CHECK_FAILED: framework=$QA_FRAMEWORK port=$QA_PORT"; tail -40 /tmp/plan-devserver-$QA_PORT.log >&2 || true; exit 1; }`,
         ].join('\n'),
         timeout: 60000,

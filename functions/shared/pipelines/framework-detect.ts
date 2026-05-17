@@ -140,16 +140,27 @@ export function buildFrameworkDetectSnippet(opts: DetectionOpts): string {
  * first).
  */
 export function buildPortReclaimSnippet(): string {
+  // 2026-05-17 snake-3 incident: the prior pkill patterns were bare strings
+  // that also appeared in this bash script's own argv (visible to pgrep via
+  // /proc/PID/cmdline). The script SIGTERM'd itself in <50ms every retry,
+  // making plan-server-check unsurvivable and stranding plans at "developing".
+  // Fix: wrap the first character of each pattern in a [c] regex class. The
+  // bracket-class matches the same single character at regex time, so real
+  // node/vite/expo processes match exactly as before — but the literal bytes
+  // of this script's argv now contain "[n]" / "[v]" / "[e]" rather than the
+  // bare pattern, so the script no longer self-matches. Classic pgrep trick.
+  // Comments here intentionally avoid spelling out the un-bracketed pattern
+  // strings (would re-introduce the self-match via this comment text).
   return [
     `# Kill lingering dev-servers by name pattern (covers daemon-forked orphans`,
     `# from prior plans on the same EC2 host that no longer hold the port).`,
-    `pkill -TERM -f 'next dev' 2>/dev/null || true`,
-    `pkill -TERM -f 'next-server' 2>/dev/null || true`,
-    `pkill -TERM -f 'vite.* serve' 2>/dev/null || true`,
-    `pkill -TERM -f 'expo start' 2>/dev/null || true`,
+    `pkill -TERM -f '[n]ext dev' 2>/dev/null || true`,
+    `pkill -TERM -f '[n]ext-server' 2>/dev/null || true`,
+    `pkill -TERM -f '[v]ite.* serve' 2>/dev/null || true`,
+    `pkill -TERM -f '[e]xpo start' 2>/dev/null || true`,
     `# Kill by port as a backstop for anything still listening.`,
     `kill -9 $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
-    `# Wait for port + Next.js lockfile teardown.`,
+    `# Wait for port + lockfile teardown.`,
     `sleep 2`,
   ].join('\n');
 }

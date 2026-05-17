@@ -137,6 +137,15 @@ export function assertArgsAllowed(command, args = [], roots = DEFAULT_ALLOWED_RO
  */
 export function assertShellScriptAllowed(script, roots = DEFAULT_ALLOWED_ROOTS) {
   if (typeof script !== 'string' || script.length === 0) return;
+  // 2026-05-17 snake-3 fix — strip single-quoted bash strings before
+  // scanning. Bash single-quotes are LITERAL (no $var, no \escape, single-
+  // quote cannot appear inside), so any `/` between them is text, never an
+  // argv path. Pre-strip removes a class of false positives like the literal
+  // " / " inside the EMPTY_DIFF_BY_DESIGN echo argument that was rejecting
+  // every story's compile-diff. Double-quoted strings are NOT stripped —
+  // those can expand $vars to real paths and skipping them would create a
+  // grep "$INJECTED" bypass.
+  const stripped = script.replace(/'[^']*'/g, "''");
   // For each traversal command token followed by an absolute path that's
   // outside the allowed roots, raise.
   const tools = Array.from(TRAVERSAL_COMMANDS).join('|');
@@ -145,7 +154,7 @@ export function assertShellScriptAllowed(script, roots = DEFAULT_ALLOWED_ROOTS) 
     'g',
   );
   let match;
-  while ((match = re.exec(script)) !== null) {
+  while ((match = re.exec(stripped)) !== null) {
     const tool = match[1];
     const path = match[2];
     // Flags like `-r` don't match the absolute-path group, so anything we

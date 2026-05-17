@@ -1247,10 +1247,21 @@ Working directory: ${workingDir}`,
                 `set -e; ` +
                 `cd ${workingDir} && ` +
                 `if [ -f /opt/futurator-daemon/scripts/graph-sync.mjs ]; then ` +
+                // 2026-05-17 snake-3 fix — tolerate graph-sync failures. The
+                // script currently imports neo4j-driver via memgraph-driver.mjs
+                // but daemon/package.json doesn't list it as a dep, so node
+                // crashes with ERR_MODULE_NOT_FOUND. With `set -e` that killed
+                // compile-sync before the (working) aws s3 sync ran, leaving
+                // every story's knowledge graph absent from S3. The Memgraph
+                // upsert is documented as non-critical secondary index — files
+                // on disk + S3 are the source of truth — so a `|| echo` here
+                // lets the S3 sync proceed even when Memgraph is unreachable
+                // or the driver is missing.
                 `  node /opt/futurator-daemon/scripts/graph-sync.mjs ` +
                 `    --project ${projectId} ` +
                 `    --knowledge-dir ${workingDir}/knowledge ` +
-                `    --state-file ${workingDir}/.mycelium/compile-state.json; ` +
+                `    --state-file ${workingDir}/.mycelium/compile-state.json ` +
+                `    || echo "[compile-sync] graph-sync crashed (non-critical) — proceeding with S3 sync"; ` +
                 `else ` +
                 `  echo "[compile-sync] graph-sync.mjs not deployed — skipping Memgraph upsert (non-critical)"; ` +
                 `fi && ` +
