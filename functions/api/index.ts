@@ -58,12 +58,14 @@ import {
   docUploadUrlInputSchema,
   docSyncInputSchema,
   refreshProjectParamsSchema,
+  updateMigrationInputSchema,
 } from '../shared/schemas/party-schema';
 import {
   EXPECTED_AGENT_COUNT,
   PARTY_DOC_ALLOWED_CONTENT_TYPES,
   PARTY_DOCS_S3_PREFIX,
   TOGGLEABLE_TOOLS,
+  brownfieldPatSecretNameFor,
 } from '../shared/types/party';
 import { createAgentJobSchema } from '../shared/schemas/agent-orchestrator-schema';
 import { resolveBlockerSchema } from '../shared/schemas/resolve-blocker-schema';
@@ -134,6 +136,13 @@ import {
   DescribeInstancesCommand,
 } from '@aws-sdk/client-ec2';
 import { SSMClient, SendCommandCommand, GetCommandInvocationCommand } from '@aws-sdk/client-ssm';
+import {
+  SecretsManagerClient,
+  CreateSecretCommand,
+  PutSecretValueCommand,
+  DeleteSecretCommand,
+  GetSecretValueCommand,
+} from '@aws-sdk/client-secrets-manager';
 // Story 1.7.1 — PAT rotation + SSM read
 import { rotatePat, readRotatedAt, InvalidPatError } from '../shared/github/rotate-pat';
 import { z } from 'zod';
@@ -4902,19 +4911,47 @@ app.post('/api/party/projects', async (c) => {
   const projectPath = resolvePartyProjectPath(projectId);
 
   if (isBrownfield) {
+    // Migrate-module — if the operator supplied a PAT, write it to a
+    // per-project Secrets Manager secret BEFORE creating the project row
+    // so the bootstrap job can resolve it.
+    let patSecretName: string | undefined;
+    if (input.pat) {
+      patSecretName = brownfieldPatSecretNameFor(projectId);
+      await ensureBrownfieldPatSecret(patSecretName, input.pat);
+    }
+
     const created = await partyProjectsRepo.createBrownfieldProjectRow(projectId, projectPath, {
       gitRepoUrl: input.gitRepoUrl,
       gitBranch: input.gitBranch,
+      patSecretName,
+      envVars: input.envVars,
     });
     if (!created) {
-      // Row already exists — operator must delete it before re-registering as
-      // a brownfield project. (Or future story: support "convert greenfield
-      // → brownfield" — out of scope here.)
       throw new AppError(
         'PROJECT_ALREADY_EXISTS',
         `Party project "${projectId}" already exists`,
         409,
       );
+    }
+
+    // Migrate-module — auto-write an Apps registry row so the brownfield
+    // project shows up in /labs Apps, /debates, and is reachable via
+    // /labs?appId=<id>&tab=party. Idempotent: if a clashing App already
+    // exists we surface a clean 409 so the operator can rename.
+    try {
+      await appRepo.createApp({
+        appId: projectId,
+        displayName: input.gitRepoUrl.replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, ''),
+        icon: '📨',
+        executionMode: 'orchestrator',
+      });
+    } catch (err) {
+      if (err instanceof AppError && err.code === 'APP_ID_TAKEN') {
+        // App already exists with this slug (probably from a prior migration
+        // attempt). Acceptable — Party UI will reuse it.
+      } else {
+        throw err;
+      }
     }
   } else {
     await partyProjectsRepo.upsertProjectFromFilesystem(projectId, projectPath);
@@ -4939,6 +4976,8 @@ app.post('/api/party/projects', async (c) => {
         kind: 'brownfield' as const,
         gitRepoUrl: input.gitRepoUrl,
         gitBranch: input.gitBranch,
+        ...(input.pat ? { patSecretName: brownfieldPatSecretNameFor(projectId) } : {}),
+        ...(input.envVars ? { envVars: input.envVars } : {}),
       }
     : {
         projectId,
@@ -5042,6 +5081,203 @@ app.post('/api/party/projects/:id/refresh', async (c) => {
   });
 
   return c.json({ jobId, projectId: parsed.data.projectId }, 202);
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Migrate-module endpoints (Story 15.6 — UI for brownfield migrations)
+//
+// Wraps the existing brownfield substrate with a CRUD surface dedicated
+// to migration management: per-project PAT secrets, env-var editing,
+// teardown. The Frontend's /migrate page consumes these.
+//
+// `POST /api/party/projects` (above) handles initial creation — these
+// routes handle the rest of the lifecycle.
+// ──────────────────────────────────────────────────────────────────────
+
+const secretsManagerClient = new SecretsManagerClient({
+  region: process.env.AWS_REGION || 'us-east-1',
+});
+
+/**
+ * Idempotent secret ensurance for per-project brownfield PATs.
+ * - Creates the secret if absent.
+ * - PutSecretValue if it already exists (rotation).
+ * Throws on any AWS error other than ResourceNotFoundException on the
+ * pre-check Get.
+ */
+async function ensureBrownfieldPatSecret(secretName: string, pat: string): Promise<void> {
+  try {
+    await secretsManagerClient.send(new GetSecretValueCommand({ SecretId: secretName }));
+    // Exists → rotate.
+    await secretsManagerClient.send(
+      new PutSecretValueCommand({ SecretId: secretName, SecretString: pat }),
+    );
+  } catch (err) {
+    const name = (err as { name?: string })?.name;
+    if (name !== 'ResourceNotFoundException') throw err;
+    await secretsManagerClient.send(
+      new CreateSecretCommand({
+        Name: secretName,
+        Description: 'Per-project fine-grained PAT for brownfield Party project',
+        SecretString: pat,
+      }),
+    );
+  }
+}
+
+/**
+ * GET /api/migrations — list every brownfield Party project, enriched
+ * with the App-row icon + displayName and a session count. The Migrate
+ * page's MigrationsList renders this.
+ */
+app.get('/api/migrations', async (c) => {
+  const allProjects = await partyProjectsRepo.listProjects();
+  const brownfield = allProjects.filter((p) => p.kind === 'brownfield');
+  const enriched = await Promise.all(
+    brownfield.map(async (p) => {
+      const [app, sessions] = await Promise.all([
+        appRepo.getApp(p.projectId).catch(() => null),
+        partySessionsRepo.listSessionsByProject(p.projectId).catch(() => []),
+      ]);
+      return {
+        projectId: p.projectId,
+        bmadStatus: p.bmadStatus,
+        gitRepoUrl: p.gitRepoUrl,
+        gitBranch: p.gitBranch,
+        lastPulledAt: p.lastPulledAt,
+        lastCommitSha: p.lastCommitSha,
+        patSecretName: p.patSecretName,
+        envVarKeys: Object.keys(p.envVars ?? {}).sort(),
+        envVarCount: Object.keys(p.envVars ?? {}).length,
+        // NEVER return env-var VALUES on a list — even if the operator is
+        // authed, the values are written-only via PATCH. They never leave
+        // DDB except into the daemon's process memory when writing .env.
+        displayName: app?.displayName ?? p.projectId,
+        icon: app?.icon ?? '📨',
+        sessionCount: sessions.length,
+        createdAt: p.createdAt,
+        updatedAt: p.updatedAt,
+      };
+    }),
+  );
+  enriched.sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+  return c.json({ migrations: enriched });
+});
+
+/**
+ * PATCH /api/migrations/:id — rotate the PAT and/or update env vars.
+ * Either field (or both) may be present. Refuses with 404 if the
+ * project is not a brownfield. Does NOT trigger a refresh — that's a
+ * separate explicit action via POST /:id/refresh which already exists.
+ */
+app.patch('/api/migrations/:id', async (c) => {
+  const projectId = c.req.param('id');
+  const parsedId = refreshProjectParamsSchema.safeParse({ projectId });
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid projectId');
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = updateMigrationInputSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
+  }
+
+  const project = await partyProjectsRepo.getProject(parsedId.data.projectId);
+  if (!project) throw new NotFoundError('PartyProject', parsedId.data.projectId);
+  if (project.kind !== 'brownfield') {
+    throw new AppError(
+      'NOT_BROWNFIELD',
+      `Project "${parsedId.data.projectId}" is greenfield; the Migrate module only manages brownfield projects.`,
+      400,
+    );
+  }
+
+  if (parsed.data.pat !== undefined) {
+    const secretName = project.patSecretName ?? brownfieldPatSecretNameFor(parsedId.data.projectId);
+    await ensureBrownfieldPatSecret(secretName, parsed.data.pat);
+    if (!project.patSecretName) {
+      await partyProjectsRepo.updateBrownfieldPatSecretName(parsedId.data.projectId, secretName);
+    }
+  }
+  if (parsed.data.envVars !== undefined) {
+    await partyProjectsRepo.updateBrownfieldEnvVars(parsedId.data.projectId, parsed.data.envVars);
+  }
+
+  const updated = await partyProjectsRepo.getProject(parsedId.data.projectId);
+  return c.json({
+    projectId: parsedId.data.projectId,
+    patRotated: parsed.data.pat !== undefined,
+    envVarKeys: Object.keys(updated?.envVars ?? {}).sort(),
+    envVarCount: Object.keys(updated?.envVars ?? {}).length,
+  });
+});
+
+/**
+ * DELETE /api/migrations/:id — full teardown.
+ * - Deletes the PartyProjects row
+ * - Deletes the Apps row (if it was auto-created)
+ * - Deletes all PartySessions for the project
+ * - Schedules the Secrets Manager secret for deletion (30-day recovery
+ *   window — AWS won't actually delete instantly, which gives the
+ *   operator a safety net)
+ *
+ * Does NOT delete the EC2 folder — if the operator re-migrates with
+ * the same name, the brownfield bootstrap's `rmSync` wipes it.
+ */
+app.delete('/api/migrations/:id', async (c) => {
+  const projectId = c.req.param('id');
+  const parsedId = refreshProjectParamsSchema.safeParse({ projectId });
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid projectId');
+  }
+
+  const project = await partyProjectsRepo.getProject(parsedId.data.projectId);
+  if (!project) throw new NotFoundError('PartyProject', parsedId.data.projectId);
+  if (project.kind !== 'brownfield') {
+    throw new AppError(
+      'NOT_BROWNFIELD',
+      `Project "${parsedId.data.projectId}" is greenfield; the Migrate module only manages brownfield projects.`,
+      400,
+    );
+  }
+
+  // Refuse to delete while a session is actively processing.
+  const sessionBusy = await partySessionsRepo.hasProcessingSession(parsedId.data.projectId);
+  if (sessionBusy) {
+    throw new AppError(
+      'PROJECT_BUSY',
+      'A session for this project is currently processing — wait for it to finish before deleting.',
+      409,
+    );
+  }
+
+  const deletedSessions = await partySessionsRepo.deleteSessionsByProject(parsedId.data.projectId);
+  await partyProjectsRepo.deleteProject(parsedId.data.projectId);
+  await appRepo.deleteApp(parsedId.data.projectId).catch(() => {});
+
+  let secretScheduled = false;
+  if (project.patSecretName) {
+    try {
+      await secretsManagerClient.send(new DeleteSecretCommand({ SecretId: project.patSecretName }));
+      secretScheduled = true;
+    } catch (err) {
+      const name = (err as { name?: string })?.name;
+      if (name !== 'ResourceNotFoundException') {
+        // Surface but don't fail the whole teardown.
+        console.warn(
+          `[migrations.delete] failed to schedule secret deletion: ${(err as Error).message}`,
+        );
+      }
+    }
+  }
+
+  return c.json({
+    projectId: parsedId.data.projectId,
+    sessionsDeleted: deletedSessions,
+    secretScheduled,
+    note: 'EC2 folder left intact; re-migration with the same name will wipe + re-clone it.',
+  });
 });
 
 /**
