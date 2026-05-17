@@ -16,6 +16,44 @@ export default $config({
   },
   async run() {
     // ──────────────────────────────────────────────────────────────
+    // 2026-05-17 — production-only deploy guard.
+    //
+    // The shared DynamoDB tables (`futurator-agent-jobs`, `futurator-plans`,
+    // `futurator-epic-workflows`, etc.) are declared with hardcoded
+    // `transform.table.name` values — no stage namespacing. Any stage that
+    // deploys cron Lambdas (especially WaveCompletionCheck at rate(1 min))
+    // writes to the SAME production data plane. This was the root cause of
+    // the snake-1 bifurcation: a stale `ricardoarayafarias` stage's cron
+    // ran 2026-04-28 code that pre-dated the substrate work, racing the
+    // production cron on wave-advancement and writing 8-step legacy job
+    // shapes into `futurator-agent-jobs`.
+    //
+    // Until the shared tables are stage-namespaced (a much larger refactor
+    // that would require new env vars + daemon table-name discovery), the
+    // only safe stage to deploy infra to is `production`. Local development
+    // uses `sst dev` (live-Lambda mode, no infra changes); operator-side
+    // experiments should run on a fork or against a personal AWS account.
+    //
+    // This guard refuses to provision any resource when the stage isn't
+    // `production`. Reachable via:
+    //   `sst deploy --stage <foo>`  → fatal.
+    //   `sst deploy`                → uses default stage (`production` per
+    //                                  the user's CLI config) → fine.
+    //   `sst dev`                   → runs only the linked Lambda locally,
+    //                                  doesn't reach this code path.
+    // ──────────────────────────────────────────────────────────────
+    if ($app.stage !== 'production') {
+      throw new Error(
+        `[sst.config] Stage "${$app.stage}" is not allowed to deploy infrastructure. ` +
+          `The shared agent/plan/epic DynamoDB tables are NOT stage-namespaced — ` +
+          `deploying crons or the API Lambda from this stage would write to ` +
+          `production data and reintroduce the 2026-05-17 bifurcation. ` +
+          `If you need an isolated environment, fork the repo to a separate AWS ` +
+          `account; if you just want local dev, use \`sst dev\` (live-Lambda mode).`,
+      );
+    }
+
+    // ──────────────────────────────────────────────────────────────
     // PR-61 (2026-05-13) — build version stamp.
     //
     // Compute the git short hash + ISO timestamp at deploy time and pipe

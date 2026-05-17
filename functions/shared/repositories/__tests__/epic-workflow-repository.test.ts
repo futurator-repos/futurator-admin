@@ -43,20 +43,25 @@ function puttedItem() {
   return input.Item;
 }
 
-describe('createEpic — EO-7.2 orchestrator default', () => {
+describe('createEpic — pipeline-mode default (2026-05-17, supersedes EO-7.2)', () => {
   beforeEach(() => {
     sendMock.mockReset();
     sendMock.mockResolvedValue({});
   });
 
-  it('defaults useEpicOrchestrator to true when the caller omits it', async () => {
+  it('defaults useEpicOrchestrator to false when the caller omits it', async () => {
+    // 2026-05-17: flipped from `?? true` to `?? false`. EO-7.2's
+    // orchestrator-default became dormant once Epic 17 introduced
+    // Plan.executionMode, and all pre-Epic-17 legacy epics were wiped
+    // on 2026-04-21. New epics created without explicit mode should
+    // take the substrate pipeline path, not the orchestrator path.
     const epic = baseEpic();
     delete (epic as Partial<EpicWorkflow>).useEpicOrchestrator;
 
     const saved = await createEpic(epic);
 
-    expect(saved.useEpicOrchestrator).toBe(true);
-    expect(puttedItem().useEpicOrchestrator).toBe(true);
+    expect(saved.useEpicOrchestrator).toBe(false);
+    expect(puttedItem().useEpicOrchestrator).toBe(false);
   });
 
   it('preserves useEpicOrchestrator: false when the caller explicitly sets it', async () => {

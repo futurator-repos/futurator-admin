@@ -96,6 +96,31 @@ export function findFirstWave(epic: Pick<EpicWorkflow, 'stories'>): number {
  * The caller is responsible for persisting `updatedStories` back to the
  * epic row — the launcher intentionally does no I/O beyond `createJob`.
  */
+/**
+ * 2026-05-17 runtime tripwire — abort if invoked from a non-production
+ * stage. Belt-and-suspenders against the sst.config.ts deploy-time guard:
+ * even if someone bypasses that guard (manually-built Lambda zip, forked
+ * deploy, debug-mode invocation), we refuse to write a PENDING job into
+ * the shared `futurator-agent-jobs` table when SST_STAGE indicates the
+ * caller is not production.
+ *
+ * SST stamps `SST_STAGE` into every linked Lambda's env. When the var is
+ * absent (local node tests, vitest, repl) we don't fire — the test suite
+ * relies on calling `launchPipelineWave` directly.
+ */
+function assertProductionStage(): void {
+  const stage = process.env.SST_STAGE;
+  if (stage && stage !== 'production') {
+    throw new Error(
+      `launchPipelineWave was called from SST_STAGE="${stage}" — this is ` +
+        `NOT allowed. The shared agent-jobs table is production-only; ` +
+        `writing from a non-production stage caused the 2026-05-17 ` +
+        `pipeline bifurcation. Decommission this stage or set ` +
+        `SST_STAGE=production explicitly.`,
+    );
+  }
+}
+
 export async function launchPipelineWave(
   epic: LaunchableEpic,
   waveNumber: number,
@@ -104,6 +129,7 @@ export async function launchPipelineWave(
   deps: PipelineLauncherDeps,
   planOpts?: PlanExecutionOpts,
 ): Promise<PipelineLaunchResult> {
+  assertProductionStage();
   if (!epic.stories || epic.stories.length === 0) {
     return {
       ok: false,

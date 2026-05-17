@@ -19,6 +19,32 @@ Do this before anything else, every time, no exceptions.
 
 ## Recent changes
 
+- **2026-05-17 (Decommission stale SST stages):** The `ricardoarayafarias`
+  and `dev` SST stages had been deployed months ago and never torn down.
+  Because the shared agent/plan/epic DynamoDB tables are declared with
+  hardcoded names (no stage namespacing), those stages' cron Lambdas were
+  writing to **production** data. The personal-stage `WaveCompletionCheck`
+  cron ran at `rate(1 minute)` from 2026-04-28 code that pre-dated the
+  Pipeline v2 substrate work — racing the production cron on
+  wave-advancement and writing 8-step legacy job shapes into
+  `futurator-agent-jobs` (snake-1 forensic: 4 of 11 stories landed on the
+  legacy shape). Mitigations:
+  1. Use `scripts/decommission-stale-stages.sh --phase=preflight|disable|delete`
+     to tear down non-prod Lambdas, EventBridge rules, S3 site buckets,
+     stage-namespaced DDB tables, and CloudWatch log groups. The shared
+     production tables are explicitly guarded against deletion.
+  2. `sst.config.ts` now throws at the top of `run()` when
+     `$app.stage !== 'production'` — refuses to deploy infra to any
+     non-prod stage. `sst dev` (live-Lambda mode) is unaffected.
+  3. `launchPipelineWave` in `functions/shared/services/pipeline-launcher.ts`
+     calls `assertProductionStage()` first, refusing to write a PENDING
+     job when `SST_STAGE` is set and not `production`.
+  4. `epic-workflow-repository.ts::createEpic` default flipped from
+     `useEpicOrchestrator: true` → `false`. The orchestrator path
+     (`daemon/pipelines/epic-dev-pipeline.mjs`) has no live production
+     callers post-Epic-17; the default `true` was a footgun for hand-crafted
+     epic-create payloads.
+
 - **2026-05-17 (Story 15.4 — Brownfield Party projects):** Labs Party now
   supports registering existing private GitHub repos as **brownfield**
   Party projects in addition to greenfield BMAD-installed ones. A
