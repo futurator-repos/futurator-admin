@@ -2867,8 +2867,20 @@ async function partyIncrementTurn(sessionId) {
 }
 
 /**
- * Story 15.4 — atomically transition HEALTHY|DRIFTED → REFRESHING. Mirrors
- * the API-side tryAcquireRefreshLock in functions/shared/repositories.
+ * Story 15.4 — idempotent transition to REFRESHING. The API route
+ * (`POST /api/party/projects/:id/refresh`) pre-acquires the lock via
+ * the SHARED `tryAcquireRefreshLock` before enqueueing the job, so by
+ * the time the daemon picks up the work the row is ALREADY in
+ * REFRESHING state. Treat that as "already acquired by us" rather than
+ * a conflict — otherwise every API-triggered refresh fails at step 1.
+ *
+ * For the bypass path (operator dispatches a `party-refresh` job
+ * directly without pre-acquiring), the conditional still transitions
+ * HEALTHY|DRIFTED → REFRESHING the normal way.
+ *
+ * The strict semantics live at the API layer (returns 409
+ * REFRESH_IN_PROGRESS when status is already REFRESHING) — the daemon
+ * just trusts that whoever enqueued the job has the right to refresh.
  */
 async function partyTryAcquireRefreshLock(projectId) {
   const now = new Date().toISOString();
@@ -2878,7 +2890,8 @@ async function partyTryAcquireRefreshLock(projectId) {
         TableName: PARTY_PROJECTS_TABLE,
         Key: { projectId },
         UpdateExpression: 'SET bmadStatus = :refreshing, updatedAt = :now',
-        ConditionExpression: 'attribute_exists(projectId) AND bmadStatus IN (:healthy, :drifted)',
+        ConditionExpression:
+          'attribute_exists(projectId) AND bmadStatus IN (:healthy, :drifted, :refreshing)',
         ExpressionAttributeValues: {
           ':refreshing': 'REFRESHING',
           ':now': now,
@@ -2890,7 +2903,7 @@ async function partyTryAcquireRefreshLock(projectId) {
     return { ok: true };
   } catch (err) {
     if (err?.name === 'ConditionalCheckFailedException') {
-      return { ok: false, reason: 'REFRESH_IN_PROGRESS_OR_INVALID_STATE' };
+      return { ok: false, reason: 'INVALID_STATE' };
     }
     throw err;
   }
