@@ -14,9 +14,9 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { computeCustomAgentsSHA } from './lib/custom-agents-sha.mjs';
-import { readGitHeadSha } from './party-bootstrap.mjs';
+import { readGitHeadSha, renderDotEnv } from './party-bootstrap.mjs';
 
 export const PARTY_REFRESH_STEPS = [
   'acquire-lock',
@@ -29,7 +29,7 @@ export const PARTY_REFRESH_STEPS = [
 
 export async function runPartyRefresh(job, ctx) {
   const payload = job.partyRefreshPayload || {};
-  const { projectId, projectPath, gitBranch } = payload;
+  const { projectId, projectPath, gitBranch, envVars } = payload;
   const {
     pushEvent,
     tryAcquireRefreshLock,
@@ -96,6 +96,21 @@ export async function runPartyRefresh(job, ctx) {
     await runGitFetchReset(projectPath, gitBranch, (chunk) =>
       emitStepOutput('git-fetch-reset', chunk.stream, chunk.data),
     );
+
+    // Migrate-module — re-sync .env after `git reset --hard`. The reset
+    // doesn't touch untracked files, but if the operator updated env
+    // vars via PATCH /api/migrations/:id between bootstrap and refresh,
+    // this is when those changes hit disk.
+    if (envVars && Object.keys(envVars).length > 0) {
+      const envBody = renderDotEnv(envVars);
+      writeFileSync(`${projectPath}/.env`, envBody, { mode: 0o600 });
+      await emitStepOutput(
+        'git-fetch-reset',
+        'stdout',
+        `re-synced .env with ${Object.keys(envVars).length} key(s)\n`,
+      );
+    }
+
     await emitStepCompleted('git-fetch-reset');
 
     // 3. COMPUTE-SHA

@@ -5077,6 +5077,12 @@ app.post('/api/party/projects/:id/refresh', async (c) => {
       projectId: parsed.data.projectId,
       projectPath: project.path,
       gitBranch: project.gitBranch,
+      // Migrate-module — thread env vars so the daemon re-syncs .env
+      // after the git reset. Refresh is the moment the operator's
+      // PATCH'd env-var updates take effect on disk.
+      ...(project.envVars && Object.keys(project.envVars).length > 0
+        ? { envVars: project.envVars }
+        : {}),
     },
   });
 

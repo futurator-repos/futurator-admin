@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -222,7 +222,7 @@ function makeBrownfieldJob(overrides = {}) {
 function makeBrownfieldCtx(overrides = {}) {
   return {
     ...makeCtx(),
-    brownfieldToken: 'ghp_fake_secret',
+    loadBrownfieldPat: vi.fn(async () => 'ghp_fake_secret'),
     ...overrides,
   };
 }
@@ -311,7 +311,9 @@ describe('runPartyBootstrap — brownfield happy path (Story 15.4 AC #3)', () =>
     arrangeGitHeadSha();
     vi.mocked(computeCustomAgentsSHA).mockReturnValue('sha-1');
 
-    const ctx = makeBrownfieldCtx({ brownfieldToken: 'ghp_super_secret_xyz' });
+    const ctx = makeBrownfieldCtx({
+      loadBrownfieldPat: vi.fn(async () => 'ghp_super_secret_xyz'),
+    });
     await runPartyBootstrap(makeBrownfieldJob(), ctx);
 
     // cloneRepo received the token in args.
@@ -369,12 +371,46 @@ describe('runPartyBootstrap — brownfield failure paths (Story 15.4 AC #5)', ()
     expect(failedCall[1].failureReason).toBe('BMAD_NOT_FOUND_IN_REPO');
   });
 
-  it('throws when brownfieldToken is missing from ctx', async () => {
-    const ctx = makeBrownfieldCtx({ brownfieldToken: undefined });
+  it('throws when loadBrownfieldPat returns null (secret missing or IAM denied)', async () => {
+    const ctx = makeBrownfieldCtx({
+      loadBrownfieldPat: vi.fn(async () => null),
+    });
     await expect(runPartyBootstrap(makeBrownfieldJob(), ctx)).rejects.toThrow(
-      /brownfieldToken not loaded/,
+      /PAT not loaded/,
     );
     // cloneRepo must NOT have been called.
     expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
+  });
+
+  it('passes patSecretName from payload to loadBrownfieldPat (per-project PAT)', async () => {
+    arrangeCloneSuccess();
+    arrangeGitHeadSha();
+    vi.mocked(computeCustomAgentsSHA).mockReturnValue('sha-1');
+
+    const loadSpy = vi.fn(async () => 'ghp_per_project_token');
+    const ctx = makeBrownfieldCtx({ loadBrownfieldPat: loadSpy });
+    const job = makeBrownfieldJob();
+    job.partyBootstrapPayload.patSecretName = 'futurator/brownfield-pat/songster';
+    await runPartyBootstrap(job, ctx);
+
+    expect(loadSpy).toHaveBeenCalledWith('futurator/brownfield-pat/songster');
+  });
+
+  it('writes envVars to <projectPath>/.env post-clone when payload includes them', async () => {
+    arrangeCloneSuccess();
+    arrangeGitHeadSha();
+    vi.mocked(computeCustomAgentsSHA).mockReturnValue('sha-1');
+
+    const ctx = makeBrownfieldCtx();
+    const job = makeBrownfieldJob();
+    job.partyBootstrapPayload.envVars = {
+      OPENAI_API_KEY: 'sk-fake',
+      LINKEDIN_API_KEY: 'li-fake',
+    };
+    await runPartyBootstrap(job, ctx);
+
+    const envBody = readFileSync(`${projectPath}/.env`, 'utf8');
+    expect(envBody).toContain('OPENAI_API_KEY="sk-fake"');
+    expect(envBody).toContain('LINKEDIN_API_KEY="li-fake"');
   });
 });

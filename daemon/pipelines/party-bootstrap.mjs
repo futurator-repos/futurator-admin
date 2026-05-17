@@ -18,7 +18,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { installBmad } from './lib/bmad-install.mjs';
 import { syncCustomAgents } from './lib/custom-agent-sync.mjs';
 import { rebuildManifest } from './lib/rebuild-manifest.mjs';
@@ -50,6 +50,8 @@ export async function runPartyBootstrap(job, ctx) {
     kind = 'greenfield',
     gitRepoUrl,
     gitBranch,
+    patSecretName,
+    envVars,
   } = payload;
 
   if (!projectId || !projectPath) {
@@ -59,7 +61,16 @@ export async function runPartyBootstrap(job, ctx) {
   // Story 15.4 — brownfield branch. Skips BMAD install + custom-agent sync;
   // the cloned repo already ships its own bmad/ tree.
   if (kind === 'brownfield') {
-    return runBrownfieldBootstrap({ job, ctx, projectId, projectPath, gitRepoUrl, gitBranch });
+    return runBrownfieldBootstrap({
+      job,
+      ctx,
+      projectId,
+      projectPath,
+      gitRepoUrl,
+      gitBranch,
+      patSecretName,
+      envVars,
+    });
   }
 
   const {
@@ -361,18 +372,36 @@ export const PARTY_BOOTSTRAP_BROWNFIELD_STEPS = BROWNFIELD_STEPS;
  *
  * On verify failure: FAILED with failureReason='BMAD_NOT_FOUND_IN_REPO'.
  */
-async function runBrownfieldBootstrap({ job, ctx, projectId, projectPath, gitRepoUrl, gitBranch }) {
-  const { pushEvent, updateProjectState, brownfieldToken, projectsRoot } = ctx;
+async function runBrownfieldBootstrap({
+  job,
+  ctx,
+  projectId,
+  projectPath,
+  gitRepoUrl,
+  gitBranch,
+  patSecretName,
+  envVars,
+}) {
+  const { pushEvent, updateProjectState, loadBrownfieldPat, projectsRoot } = ctx;
 
   if (!gitRepoUrl) throw new Error('runBrownfieldBootstrap: gitRepoUrl is required');
   if (!gitBranch) throw new Error('runBrownfieldBootstrap: gitBranch is required');
-  if (!brownfieldToken) {
+  if (typeof loadBrownfieldPat !== 'function') {
     throw new Error(
-      'runBrownfieldBootstrap: brownfieldToken not loaded — daemon must read Secrets Manager at startup',
+      'runBrownfieldBootstrap: ctx.loadBrownfieldPat not wired — daemon must export the secret loader',
     );
   }
   if (projectsRoot && !projectPath.startsWith(projectsRoot)) {
     throw new Error(`projectPath ${projectPath} must be under ${projectsRoot}`);
+  }
+
+  // Resolve per-project PAT (or fall back to the legacy shared secret
+  // when patSecretName is absent — applicator's case).
+  const brownfieldToken = await loadBrownfieldPat(patSecretName);
+  if (!brownfieldToken) {
+    throw new Error(
+      `runBrownfieldBootstrap: PAT not loaded for ${patSecretName || '(legacy shared secret)'} — check Secrets Manager + IAM`,
+    );
   }
 
   let currentStep = 'clone-repo';
@@ -424,6 +453,21 @@ async function runBrownfieldBootstrap({ job, ctx, projectId, projectPath, gitRep
       depth: 50,
       ctx: { emit: (stream, data) => emitStepOutput('clone-repo', stream, data) },
     });
+
+    // Migrate-module — write envVars to <projectPath>/.env post-clone so
+    // the project can actually run (e.g., LinkedIn API key for applicator).
+    // Pre-existing .gitignore should already exclude .env from any
+    // accidental commits back to GitHub. Empty/absent envVars → skip.
+    if (envVars && Object.keys(envVars).length > 0) {
+      const envBody = renderDotEnv(envVars);
+      writeFileSync(`${projectPath}/.env`, envBody, { mode: 0o600 });
+      await emitStepOutput(
+        'clone-repo',
+        'stdout',
+        `wrote .env with ${Object.keys(envVars).length} key(s)\n`,
+      );
+    }
+
     await emitStepCompleted('clone-repo');
 
     // 2. VERIFY — the cloned repo must already have BMAD installed.
@@ -516,6 +560,23 @@ class BmadNotFoundError extends Error {
     super(msg);
     this.name = 'BmadNotFoundError';
   }
+}
+
+/**
+ * Migrate-module — render a key/value env map to a `.env` file body.
+ * Values are NOT shell-quoted: standard dotenv loaders strip surrounding
+ * double quotes and treat the rest literally. We emit `KEY="value"`
+ * (with internal `"` escaped) so multi-line / special-char values work.
+ */
+export function renderDotEnv(vars) {
+  if (!vars || typeof vars !== 'object') return '';
+  const lines = [];
+  for (const key of Object.keys(vars).sort()) {
+    const value = vars[key] ?? '';
+    const escaped = String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    lines.push(`${key}="${escaped}"`);
+  }
+  return lines.join('\n') + '\n';
 }
 
 export function readGitHeadSha(repoPath) {

@@ -2768,26 +2768,49 @@ const PARTY_BMAD_AGENTS_SOURCE_REPO =
   process.env.BMAD_AGENTS_SOURCE_REPO || '/home/ubuntu/bmad-agents-source';
 const PARTY_EXPECTED_AGENT_COUNT = parseInt(process.env.PARTY_EXPECTED_AGENT_COUNT || '6', 10);
 
-// Story 15.4 — brownfield PAT. Loaded once at daemon startup from Secrets
-// Manager. Kept in module scope (never written to DDB, never logged, never
-// emitted in events). If the load fails (secret missing, IAM denied), the
-// daemon continues — only brownfield bootstrap/refresh jobs fail with a
-// clear "PAT not loaded" error. Greenfield jobs are unaffected.
-const BROWNFIELD_PAT_SECRET_NAME =
-  process.env.BROWNFIELD_PAT_SECRET_NAME || 'futurator/labs-brownfield-github-pat';
-let brownfieldGithubToken = null;
+// Story 15.4 + Migrate-module — brownfield PAT loader.
+//
+// Each brownfield project carries its own AWS Secrets Manager secret
+// (`futurator/brownfield-pat/<projectId>`) so different GitHub accounts
+// can be used per project. Legacy migrations (the original `applicator`)
+// fall back to the shared secret `futurator/labs-brownfield-github-pat`.
+//
+// Tokens are loaded ON DEMAND when a brownfield bootstrap or refresh
+// job starts. A 1-hour in-memory TTL cache keeps Secrets Manager calls
+// bounded under concurrent traffic. Tokens never land in DDB rows,
+// daemon logs, or event payloads — git-clone.mjs's redactor strips them.
+const LEGACY_SHARED_BROWNFIELD_PAT_SECRET = 'futurator/labs-brownfield-github-pat';
+const PAT_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 const secretsClient = new SecretsManagerClient({ region: REGION });
 
-async function loadBrownfieldPat() {
+/** in-memory cache keyed by secretName → { token, expiresAt } */
+const brownfieldPatCache = new Map();
+
+/**
+ * Resolve a fine-grained GitHub PAT from Secrets Manager. Caches for
+ * 1h to avoid hammering the API under concurrent brownfield work.
+ *
+ * @param {string} [secretName] — explicit secret name. Falls back to
+ *   the legacy shared secret when undefined (back-compat for the
+ *   `applicator` migration that pre-dated per-project secrets).
+ * @returns {Promise<string|null>} the token, or null if Secrets Manager
+ *   couldn't resolve it. Callers must handle null with a clear error
+ *   (we don't throw here so the daemon can keep processing greenfield
+ *   work even when a brownfield secret is misconfigured).
+ */
+async function loadBrownfieldPat(secretName) {
+  const id = secretName || LEGACY_SHARED_BROWNFIELD_PAT_SECRET;
+  const cached = brownfieldPatCache.get(id);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.token;
+  }
   try {
-    const result = await secretsClient.send(
-      new GetSecretValueCommand({ SecretId: BROWNFIELD_PAT_SECRET_NAME }),
-    );
+    const result = await secretsClient.send(new GetSecretValueCommand({ SecretId: id }));
     const value = result?.SecretString;
     if (!value) {
-      log('warn', `[brownfield-pat] secret ${BROWNFIELD_PAT_SECRET_NAME} has no SecretString`);
-      return;
+      log('warn', `[brownfield-pat] secret ${id} has no SecretString`);
+      return null;
     }
     // Accept both raw token strings and JSON-wrapped { token: "..." } forms.
     let token = value;
@@ -2799,12 +2822,31 @@ async function loadBrownfieldPat() {
         // fall back to raw value
       }
     }
-    brownfieldGithubToken = token;
-    log('info', '[brownfield-pat] loaded — brownfield party bootstrap/refresh enabled');
+    brownfieldPatCache.set(id, { token, expiresAt: Date.now() + PAT_CACHE_TTL_MS });
+    log('info', `[brownfield-pat] loaded ${id}`);
+    return token;
   } catch (err) {
     log(
       'warn',
-      `[brownfield-pat] failed to load secret ${BROWNFIELD_PAT_SECRET_NAME}: ${err.message} — brownfield jobs will fail until this is resolved`,
+      `[brownfield-pat] failed to load ${id}: ${err.message} — brownfield jobs using this secret will fail until resolved`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Probe the legacy shared secret at startup so the daemon logs report
+ * whether brownfield work is end-to-end ready. Non-fatal: per-project
+ * secrets resolve on-demand later.
+ */
+async function probeBrownfieldPatAtStartup() {
+  const ok = await loadBrownfieldPat(LEGACY_SHARED_BROWNFIELD_PAT_SECRET);
+  if (ok) {
+    log('info', '[brownfield-pat] startup probe: legacy shared secret reachable');
+  } else {
+    log(
+      'info',
+      '[brownfield-pat] startup probe: legacy shared secret not loaded (per-project secrets will load on-demand)',
     );
   }
 }
@@ -3148,8 +3190,11 @@ function buildPartyCtx() {
     customAgentsSourceRepo: PARTY_BMAD_AGENTS_SOURCE_REPO,
     expectedAgentCount: PARTY_EXPECTED_AGENT_COUNT,
     projectsRoot: PARTY_PROJECTS_ROOT,
-    // Story 15.4 — brownfield wiring. brownfieldToken stays in module scope.
-    brownfieldToken: brownfieldGithubToken,
+    // Story 15.4 + Migrate-module — brownfield wiring.
+    // Pipelines call `loadBrownfieldPat(secretName)` lazily with the
+    // per-project secret name from the job payload. Falls back to the
+    // shared secret when no name is provided (legacy `applicator`).
+    loadBrownfieldPat,
     tryAcquireRefreshLock: partyTryAcquireRefreshLock,
     releaseRefreshLock: partyReleaseRefreshLock,
     updateProjectAfterRefresh: partyUpdateProjectAfterRefresh,
@@ -4281,9 +4326,10 @@ async function configureGitIdentity() {
     log('error', `memory-store setup failed: ${err.message}`);
   }
 
-  // Story 15.4 — load the brownfield PAT once. Non-fatal: a missing/denied
-  // secret leaves brownfieldGithubToken=null and only brownfield jobs fail.
-  await loadBrownfieldPat();
+  // Story 15.4 — startup probe. Per-project secrets load lazily; this
+  // just surfaces a single log line so the operator knows whether the
+  // legacy shared secret is reachable.
+  await probeBrownfieldPatAtStartup();
 
   poll();
 })();
