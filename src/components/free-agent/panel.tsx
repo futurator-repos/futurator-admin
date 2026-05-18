@@ -35,7 +35,15 @@ export function FreeAgentPanel() {
         onNewConversation={session.resetSession}
       />
       <FreeAgentMessageThread messages={session.messages} />
-      <FreeAgentComposer isSending={session.isSending} onSend={session.sendMessage} />
+      {/* Treat both the in-flight POST AND the daemon-side PROCESSING window
+          as "sending" so the operator can't fire a second message that the API
+          would reject with 409 SESSION_BUSY. The daemon typically takes 5-15s
+          per turn; without this gate, rapid Cmd+↵ presses produced a stream
+          of 409s (2026-05-18 incident). */}
+      <FreeAgentComposer
+        isSending={session.isSending || session.status === 'PROCESSING'}
+        onSend={session.sendMessage}
+      />
     </div>
   );
 }

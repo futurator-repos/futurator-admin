@@ -101,17 +101,22 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
   const [lastSeq, setLastSeq] = useState<string>('000000');
   const activeAssistantIdRef = useRef<string | null>(null);
 
-  // Reset local state when the session changes. This is the "reset state on
-  // prop change" pattern documented in https://react.dev/learn/you-might-not-
-  // need-an-effect#resetting-all-state-when-a-prop-changes. A cleaner long-
-  // term fix would be to pass `key={activeSessionId}` from the parent so React
-  // remounts the hook's owner; but since this hook is consumed by the panel
-  // (which the operator expects to stay mounted across model-fork events), the
-  // ref-comparison alternative is the right shape here.
+  // Reset local state when the session changes BETWEEN two real sessions
+  // (resume / fork). Critically, we do NOT reset on the `null → newSessionId`
+  // transition that happens after the first message — `sendMessage()` adds
+  // the user message optimistically BEFORE createSession resolves, so resetting
+  // here would wipe the user's just-typed bubble. (Live regression observed
+  // 2026-05-18: every first "hello" disappeared the moment createSession
+  // returned because this effect cleared the messages array.)
   const prevSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (prevSessionIdRef.current !== activeSessionId) {
-      prevSessionIdRef.current = activeSessionId;
+    const prev = prevSessionIdRef.current;
+    prevSessionIdRef.current = activeSessionId;
+    // Only reset on non-null → non-null transition (real session switch).
+    // null → newId  : initial session creation; keep optimistic user message.
+    // newId → null  : explicit resetSession()/changeModel(); those callers
+    //                 clear messages themselves, so we don't double-clear.
+    if (prev && activeSessionId && prev !== activeSessionId) {
       setMessages([]);
       setLastSeq('000000');
       activeAssistantIdRef.current = null;
