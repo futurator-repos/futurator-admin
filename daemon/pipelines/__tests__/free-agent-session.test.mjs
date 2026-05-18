@@ -53,6 +53,7 @@ function makeWorktreeHelpers() {
       skipped: false,
     })),
     writeFreeAgentSettings: vi.fn(),
+    writeAgentMd: vi.fn(() => ({ finalPath: '/path/to/AGENT.md', bytes: 1234 })),
   };
 }
 
@@ -139,6 +140,11 @@ describe('runFreeAgentSession — first-turn spawn args (AC #2)', () => {
     expect(args).toContain('--session-id');
     expect(args).toContain('sid-1');
     expect(args).not.toContain('--resume');
+    // System-prompt nudge points the agent at AGENT.md (2026-05-18 fix —
+    // without this the agent doesn't know it has AWS DDB access).
+    expect(args).toContain('--append-system-prompt');
+    const sysPromptIdx = args.indexOf('--append-system-prompt');
+    expect(args[sysPromptIdx + 1]).toMatch(/AGENT\.md/);
 
     // cwd + env shape
     expect(opts.cwd).toBe('/home/ubuntu/free-agent-worktrees/dino-7/sid-1');
@@ -155,6 +161,17 @@ describe('runFreeAgentSession — first-turn spawn args (AC #2)', () => {
       sessionId: 'sid-1',
     });
     expect(worktreeHelpers.writeFreeAgentSettings).toHaveBeenCalledTimes(1);
+    // AGENT.md refreshed every turn with current scope/project context.
+    expect(worktreeHelpers.writeAgentMd).toHaveBeenCalledTimes(1);
+    expect(worktreeHelpers.writeAgentMd).toHaveBeenCalledWith(
+      expect.objectContaining({
+        worktreePath: '/home/ubuntu/free-agent-worktrees/dino-7/sid-1',
+        projectId: 'dino-7',
+        sessionId: 'sid-1',
+        scope: { kind: 'plan', id: 'plan-abc' },
+        planId: 'plan-abc',
+      }),
+    );
 
     // Lock is pre-acquired by the API Lambda before enqueue; daemon does NOT
     // re-acquire (would deadlock against the API's own PROCESSING write).

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import {
   ensureWorktree,
   writeFreeAgentSettings,
+  writeAgentMd,
   reapWorktree,
   installCommitMsgHook,
   branchNameFor,
@@ -457,5 +458,105 @@ describe('installCommitMsgHook (Story 18.3 AC #1, #2)', () => {
     expect(result).toEqual({ installed: false, mode: 'unreadable' });
     expect(fs.writeFileSync).not.toHaveBeenCalled();
     expect(fs.appendFileSync).not.toHaveBeenCalled();
+  });
+});
+
+describe('writeAgentMd (operator context — 2026-05-18)', () => {
+  const worktreePath = '/home/ubuntu/free-agent-worktrees/snake-4/sid-1';
+
+  it('writes AGENT.md to worktree root with project/plan/session context', () => {
+    const paths = new Map([[worktreePath, undefined]]);
+    const fs = makeFsShim(paths);
+    const fixedNow = () => new Date('2026-05-18T16:00:00.000Z');
+
+    const result = writeAgentMd({
+      worktreePath,
+      projectId: 'snake-4',
+      sessionId: 'sid-1',
+      scope: { kind: 'plan', id: 'plan_snake-4_xyz' },
+      planId: 'plan_snake-4_xyz',
+      operatorId: 'op-rick',
+      fs,
+      now: fixedNow,
+    });
+
+    expect(result.finalPath).toBe(`${worktreePath}/AGENT.md`);
+    expect(result.bytes).toBeGreaterThan(500);
+
+    const content = paths.get(`${worktreePath}/AGENT.md`);
+    // Required project / session context lines.
+    expect(content).toContain('snake-4');
+    expect(content).toContain('sid-1');
+    expect(content).toContain('plan_snake-4_xyz');
+    expect(content).toContain('op-rick');
+    expect(content).toContain('assist/snake-4/sid-1');
+    expect(content).toContain('2026-05-18T16:00:00.000Z');
+    // Tool surface documented.
+    expect(content).toContain('futurator-plans');
+    expect(content).toContain('futurator-agent-jobs');
+    expect(content).toContain('futurator-attention-items');
+    expect(content).toContain('aws dynamodb');
+    // Don't-try list documented.
+    expect(content).toContain('gh');
+    expect(content).toContain('secretsmanager');
+  });
+
+  it('uses atomic temp+rename', () => {
+    const paths = new Map([[worktreePath, undefined]]);
+    const fs = makeFsShim(paths);
+
+    writeAgentMd({
+      worktreePath,
+      projectId: 'snake-4',
+      sessionId: 'sid-1',
+      scope: { kind: 'app', id: 'snake-4' },
+      fs,
+    });
+
+    expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+    const tempPath = fs.writeFileSync.mock.calls[0][0];
+    expect(tempPath).toMatch(/^\/home\/ubuntu\/free-agent-worktrees\/snake-4\/sid-1\/\.AGENT\.md\.tmp-[a-f0-9]{12}$/);
+    expect(fs.renameSync).toHaveBeenCalledWith(tempPath, `${worktreePath}/AGENT.md`);
+  });
+
+  it('falls back gracefully when scope.id is absent (workspace scope)', () => {
+    const paths = new Map([[worktreePath, undefined]]);
+    const fs = makeFsShim(paths);
+
+    writeAgentMd({
+      worktreePath,
+      projectId: 'snake-4',
+      sessionId: 'sid-1',
+      scope: { kind: 'workspace' }, // no id
+      fs,
+    });
+
+    const content = paths.get(`${worktreePath}/AGENT.md`);
+    expect(content).toContain('workspace');
+    expect(content).toContain('_(none — scope is not plan)_');
+  });
+
+  it('throws when worktreePath does not exist', () => {
+    const paths = new Map(); // no worktree dir
+    const fs = makeFsShim(paths);
+
+    expect(() =>
+      writeAgentMd({
+        worktreePath,
+        projectId: 'snake-4',
+        sessionId: 'sid-1',
+        scope: { kind: 'app', id: 'snake-4' },
+        fs,
+      }),
+    ).toThrow(/worktreePath does not exist/);
+  });
+
+  it('throws on missing required args', () => {
+    expect(() => writeAgentMd({})).toThrow(/worktreePath required/);
+    expect(() => writeAgentMd({ worktreePath })).toThrow(/projectId required/);
+    expect(() => writeAgentMd({ worktreePath, projectId: 'x' })).toThrow(/sessionId required/);
+    expect(() => writeAgentMd({ worktreePath, projectId: 'x', sessionId: 's' })).toThrow(
+      /scope required/,
+    );
   });
 });

@@ -100,7 +100,7 @@ export async function runFreeAgentSession(job, ctx) {
   // API set. If a future entry point (e.g., a direct daemon invocation) needs
   // to acquire the lock itself, it must do so before calling this handler.
 
-  // ── 2. Ensure worktree + 3. settings ──
+  // ── 2. Ensure worktree + 3. settings + AGENT.md ──
   let worktreeInfo;
   try {
     const wt = worktreeHelpers || (await import('./lib/free-agent-worktree.mjs'));
@@ -110,6 +110,25 @@ export async function runFreeAgentSession(job, ctx) {
       projectId,
       sessionId,
     });
+    // Refresh AGENT.md every turn so it always reflects the current scope /
+    // sessionId / timestamp. Cheap (~3KB write) and lets resumed sessions
+    // pick up template updates without a fresh worktree.
+    if (typeof wt.writeAgentMd === 'function') {
+      try {
+        wt.writeAgentMd({
+          worktreePath: worktreeInfo.worktreePath,
+          projectId,
+          sessionId,
+          scope: payload.scope || { kind: 'workspace' },
+          planId: payload.scope?.kind === 'plan' ? payload.scope?.id : undefined,
+          operatorId: payload.operatorId,
+        });
+      } catch (mdErr) {
+        // AGENT.md is helpful-but-not-load-bearing — log and continue. We don't
+        // want a markdown-write failure to take the whole turn down.
+        logger.warn?.(`[free-agent-session] writeAgentMd failed: ${mdErr.message}`);
+      }
+    }
   } catch (err) {
     await sessionsRepo.markError(sessionId, `WORKTREE_FAILURE: ${err.message}`);
     await sessionsRepo.releaseProcessingLock(sessionId, 'ERROR');
@@ -119,6 +138,14 @@ export async function runFreeAgentSession(job, ctx) {
   // ── 4. Build spawn args ──
   const session = await sessionsRepo.getSession(sessionId);
   const isFirstTurn = !session?.claudeSessionId;
+
+  // System-prompt nudge points the agent at AGENT.md (which the daemon wrote
+  // above with the per-session operator context, tool surface, and DDB schema
+  // hints). Without this, the agent defaults to generic Claude Code instincts
+  // — tries `gh`, doesn't know it has AWS DDB read, treats plan questions as
+  // git-branch lookups (2026-05-18 first-light observation).
+  const systemPromptNudge =
+    'You are the Futurator Free Agent. **Your first action must be to read AGENT.md at the root of your current working directory** — it documents your AWS tool surface, available DynamoDB tables, the current project/plan/session scope, and which questions you can answer directly via `aws` CLI vs which would need the operator. Then respond to the operator concisely with file:line citations where applicable.';
 
   const args = [
     '--print',
@@ -134,6 +161,8 @@ export async function runFreeAgentSession(job, ctx) {
     'acceptEdits',
     '--add-dir',
     worktreeInfo.worktreePath,
+    '--append-system-prompt',
+    systemPromptNudge,
   ];
 
   if (isFirstTurn) {
