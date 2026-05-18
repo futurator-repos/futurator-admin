@@ -33,17 +33,24 @@ import {
 } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
+
+// Resolve hook script paths RELATIVE TO THIS FILE's location so the daemon
+// works regardless of where it's deployed. EC2 prod uses /opt/futurator-daemon/,
+// local dev uses /Users/<…>/Futurator-Admin/daemon/. Hardcoded
+// /home/ubuntu/futurator-admin paths previously caused the .claude/settings.json
+// PreToolUse hook to point at a non-existent script on prod (Bash invocations
+// would silently fail-closed because the hook returned non-zero).
+const _THIS_DIR = dirname(fileURLToPath(import.meta.url));
 
 export const FREE_AGENT_WORKTREES_ROOT = '/home/ubuntu/free-agent-worktrees';
 export const FREE_AGENT_REPOS_ROOT = '/home/ubuntu/repos';
-export const FREE_AGENT_PATH_HOOK_SCRIPT =
-  '/home/ubuntu/futurator-admin/daemon/pipelines/lib/free-agent-path-hook.sh';
+export const FREE_AGENT_PATH_HOOK_SCRIPT = join(_THIS_DIR, 'free-agent-path-hook.sh');
 
 // Story 18.3 — `prepare-commit-msg` hook installed per-session into the
 // worktree to append the `Agent: FREE-AGENT-<sessionId>` trailer.
-export const FREE_AGENT_COMMIT_MSG_HOOK_SCRIPT =
-  '/home/ubuntu/futurator-admin/daemon/pipelines/lib/free-agent-commit-msg-hook.sh';
+export const FREE_AGENT_COMMIT_MSG_HOOK_SCRIPT = join(_THIS_DIR, 'free-agent-commit-msg-hook.sh');
 
 // Sentinel markers that bracket our injected hook block when a pre-existing
 // user hook is already present. Used by installCommitMsgHook to detect-and-skip
