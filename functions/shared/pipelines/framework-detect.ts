@@ -156,8 +156,22 @@ export function buildPortReclaimSnippet(): string {
     `# from prior plans on the same EC2 host that no longer hold the port).`,
     `pkill -TERM -f '[n]ext dev' 2>/dev/null || true`,
     `pkill -TERM -f '[n]ext-server' 2>/dev/null || true`,
-    `pkill -TERM -f '[v]ite.* serve' 2>/dev/null || true`,
-    `pkill -TERM -f '[e]xpo start' 2>/dev/null || true`,
+    // 2026-05-18 snake-4 follow-up #1: dropped the `.*` from `[v]ite.* serve`.
+    // Greedy `.*` let the regex bridge across the entire script body: `vite`
+    // (in `grep -q "vite"` from framework-detect) + `.*` (matches anything)
+    // + ` serve` (the literal space-then-serve at the end of the pkill
+    // pattern itself) = match against the parent bash's cmdline. Result:
+    // bash SIGTERM'd itself in 34ms every time.
+    `pkill -TERM -f '[v]ite serve' 2>/dev/null || true`,
+    // 2026-05-18 snake-4 follow-up #2: removed the `[e]xpo start` pkill.
+    // The bracket trick stops the literal pattern string from self-matching,
+    // but the expo elif branch's QA_DEV_CMD itself contains the bare bytes
+    // `expo start` (in `'npx expo start --web --port '`), so the regex
+    // `expo start` still matched the parent bash. We don't ship Expo apps in
+    // Labs production, and the port-based kill below catches any expo dev
+    // server that holds its port. Re-add when we have an Expo target and a
+    // pkill pattern that survives the framework-detect script body (likely
+    // a path-anchored pattern matching `node_modules/.*expo`).
     `# Kill by port as a backstop for anything still listening.`,
     `kill -9 $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
     `# Wait for port + lockfile teardown.`,
