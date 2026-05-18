@@ -63,7 +63,11 @@ interface EventsResponse {
     timestamp: string;
     eventType: string;
     text?: string;
-    payload?: Record<string, unknown>;
+    /** Spread by daemon's pushEvent — `{tool: {name, input}}` lands here as
+     *  a top-level field, NOT nested under `payload`. */
+    tool?: { id?: string; name?: string; input?: Record<string, unknown> };
+    /** Catch-all for any other custom keys the daemon emits. */
+    [key: string]: unknown;
   }>;
   lastSeq: string;
 }
@@ -81,7 +85,7 @@ interface UseFreeAgentSessionApi {
   costCapUsd: number;
   tokensInAccumulated: number;
   tokensOutAccumulated: number;
-  sendMessage(content: string, images?: FreeAgentSendImage[]): void;
+  sendMessage(content: string, images?: FreeAgentSendImage[], previewUrls?: string[]): void;
   setCostCapUsd(capUsd: number): void;
   resetSession(): void;
   /** Forks the session with a new model (Story 18.5 AC #6). */
@@ -179,11 +183,13 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
           // what the agent is doing in real time (Bash commands, file reads,
           // etc.). Breaks the assistant text run so subsequent tokens go
           // into a new bubble after the tool call.
+          //
+          // The daemon's pushEvent spreads its data arg as TOP-LEVEL row
+          // fields, so the tool payload lands at `ev.tool`, NOT
+          // `ev.payload.tool`. Initial implementation got this wrong and
+          // rendered "TOOL Tool" with no content for every call.
           activeAssistantIdRef.current = null;
-          const tool = (ev.payload?.tool ?? {}) as {
-            name?: string;
-            input?: Record<string, unknown>;
-          };
+          const tool = ev.tool ?? {};
           next.push({
             id: `tool-${ev.eventSeq}`,
             role: 'tool',
@@ -303,27 +309,24 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
   );
 
   // Public API: sendMessage. Creates a session lazily on first call.
+  // `previewUrls` is parallel to `images` — blob: URLs the composer minted
+  // for thumbnail rendering. We attach them to the optimistic user message
+  // so the bubble itself shows the pasted image(s), not just a count.
   const sendMessage = useCallback(
-    (content: string, images?: FreeAgentSendImage[]) => {
+    (content: string, images?: FreeAgentSendImage[], previewUrls?: string[]) => {
       const trimmed = content.trim();
       const hasImages = Array.isArray(images) && images.length > 0;
       if (!trimmed && !hasImages) return; // text OR images is required
 
-      // Optimistically push the user message. If there are images we suffix
-      // a small marker so the operator sees that their paste landed (the
-      // base64 bytes themselves aren't rendered in the thread — keep the
-      // hook lean and let the daemon's reply reflect what it saw).
       const userId = `user-${Date.now()}`;
-      const optimisticContent = hasImages
-        ? `${content}${content ? '\n' : ''}📎 ${images.length} image${images.length === 1 ? '' : 's'} attached`
-        : content;
       setMessages((prev) => [
         ...prev,
         {
           id: userId,
           role: 'user',
-          content: optimisticContent,
+          content,
           timestamp: new Date().toISOString(),
+          imagePreviewUrls: previewUrls && previewUrls.length > 0 ? previewUrls : undefined,
         },
       ]);
 

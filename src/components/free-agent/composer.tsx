@@ -28,8 +28,14 @@ export interface ComposerImageAttachment {
 interface FreeAgentComposerProps {
   /** True while a turn is in flight (POST in progress or daemon PROCESSING). */
   isSending?: boolean;
-  /** Wire up by Story 18.5 — receives the text + (optional) image attachments. */
-  onSend?: (text: string, images?: Array<{ mediaType: string; base64: string }>) => void;
+  /** Wire up by Story 18.5 — receives the text + (optional) image attachments
+   *  (mediaType+base64 for the wire) plus a parallel array of preview URLs
+   *  the parent uses to render thumbnails in the user bubble. */
+  onSend?: (
+    text: string,
+    images?: Array<{ mediaType: string; base64: string }>,
+    previewUrls?: string[],
+  ) => void;
 }
 
 const MIN_ROWS = 1;
@@ -56,35 +62,28 @@ export function FreeAgentComposer({ isSending = false, onSend }: FreeAgentCompos
     el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
   }, [text]);
 
-  // Revoke any object URLs when component unmounts so the browser doesn't
-  // leak the underlying blobs.
-  useEffect(() => {
-    return () => {
-      for (const img of images) {
-        try {
-          URL.revokeObjectURL(img.previewUrl);
-        } catch {
-          /* ignore */
-        }
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // We intentionally do NOT revoke object URLs on unmount. Once `handleSend`
+  // hands a preview URL off to the parent it becomes part of a user-bubble
+  // in the thread — revoking would blank out the bubble image. Browser will
+  // GC the blob when the URL is no longer referenced anywhere. Unsent
+  // images that get removed via the X button revoke explicitly in
+  // handleRemoveImage.
 
   const canSend = (text.trim().length > 0 || images.length > 0) && !isSending;
 
   const handleSend = () => {
     if (!canSend) return;
     const wireImages = images.map((i) => ({ mediaType: i.mediaType, base64: i.base64 }));
-    onSend?.(text, wireImages.length > 0 ? wireImages : undefined);
-    // Clear preview URLs after send.
-    for (const img of images) {
-      try {
-        URL.revokeObjectURL(img.previewUrl);
-      } catch {
-        /* ignore */
-      }
-    }
+    const previewUrls = images.map((i) => i.previewUrl);
+    // Hand the preview URLs off to the parent — the bubble keeps rendering
+    // them after composer state clears, so the operator sees the image they
+    // sent in the chat thread. Parent OWNS the revoke lifecycle after this
+    // point (we don't revoke on send anymore).
+    onSend?.(
+      text,
+      wireImages.length > 0 ? wireImages : undefined,
+      previewUrls.length > 0 ? previewUrls : undefined,
+    );
     setImages([]);
     setPasteError(null);
     setText('');

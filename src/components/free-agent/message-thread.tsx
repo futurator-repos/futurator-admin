@@ -23,6 +23,9 @@ export interface FreeAgentMessage {
   toolName?: string;
   /** For role='tool': the full input payload, rendered in an expandable details. */
   toolInput?: Record<string, unknown>;
+  /** For role='user': blob URLs (from Cmd+V paste) rendered as thumbnails
+   *  above the text. Ephemeral — survive only until the page is reloaded. */
+  imagePreviewUrls?: string[];
 }
 
 interface FreeAgentMessageThreadProps {
@@ -116,6 +119,8 @@ function Bubble({ message }: { message: FreeAgentMessage }) {
   }
 
   const isUser = message.role === 'user';
+  const hasImages =
+    isUser && Array.isArray(message.imagePreviewUrls) && message.imagePreviewUrls.length > 0;
   return (
     <div
       className={`flex max-w-[85%] flex-col gap-1 ${
@@ -123,13 +128,28 @@ function Bubble({ message }: { message: FreeAgentMessage }) {
       }`}
       data-testid={isUser ? 'free-agent-user-bubble' : 'free-agent-assistant-bubble'}
     >
-      <div
-        className={`rounded-2xl px-3 py-2 text-sm ${
-          isUser ? 'bg-[color:var(--accent-blue,#3b82f6)] text-white' : 'bg-muted text-foreground'
-        }`}
-      >
-        {renderInline(message.content)}
-      </div>
+      {hasImages && (
+        <div className="flex flex-wrap justify-end gap-1.5" data-testid="free-agent-bubble-images">
+          {message.imagePreviewUrls!.map((url, idx) => (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              key={`${message.id}-img-${idx}`}
+              src={url}
+              alt={`Attachment ${idx + 1}`}
+              className="max-h-40 max-w-[200px] rounded-lg border object-cover shadow-sm"
+            />
+          ))}
+        </div>
+      )}
+      {message.content && (
+        <div
+          className={`rounded-2xl px-3 py-2 text-sm ${
+            isUser ? 'bg-[color:var(--accent-blue,#3b82f6)] text-white' : 'bg-muted text-foreground'
+          }`}
+        >
+          {renderInline(message.content)}
+        </div>
+      )}
       {message.timestamp && (
         <span className="text-[10px] text-muted-foreground">{formatTime(message.timestamp)}</span>
       )}
