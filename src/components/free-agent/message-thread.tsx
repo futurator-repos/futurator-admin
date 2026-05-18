@@ -1,14 +1,17 @@
 /**
  * message-thread.tsx — Story 18.4 (Epic 18: Free Claude Code Agent)
  *
- * Scrollable thread area. Story 18.4 only wires the empty-state placeholder
- * + the bubble rendering shape. Streaming wiring (TanStack subscription to
- * SSE) lands in Story 18.5.
+ * Scrollable thread area. Bubbles for user/assistant/system roles, plus a
+ * typing indicator surfaced when the daemon is processing a turn but hasn't
+ * streamed the first token yet.
+ *
+ * Auto-scrolls to the bottom whenever new content arrives so the operator
+ * sees streaming tokens land in real time without manual scrolling.
  */
 
 'use client';
 
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 
 export interface FreeAgentMessage {
   id: string;
@@ -20,10 +23,33 @@ export interface FreeAgentMessage {
 
 interface FreeAgentMessageThreadProps {
   messages?: FreeAgentMessage[];
+  /** True while the daemon is mid-turn — drives the typing indicator. */
+  isProcessing?: boolean;
 }
 
-export function FreeAgentMessageThread({ messages = [] }: FreeAgentMessageThreadProps) {
-  if (messages.length === 0) {
+export function FreeAgentMessageThread({
+  messages = [],
+  isProcessing = false,
+}: FreeAgentMessageThreadProps) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Auto-scroll on new tokens / typing indicator changes. Smooth so it doesn't
+  // jank when streaming long replies. Guard against jsdom (used in tests),
+  // where Element.scrollTo isn't implemented.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof el.scrollTo !== 'function') return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }, [messages, isProcessing]);
+
+  // Show the typing indicator when the daemon is working AND the last bubble
+  // is the user's message (no assistant tokens have arrived yet). Once tokens
+  // start streaming we hide the dots — the live-growing assistant bubble is
+  // its own activity indicator.
+  const last = messages[messages.length - 1];
+  const showTyping = isProcessing && (!last || last.role !== 'assistant');
+
+  if (messages.length === 0 && !isProcessing) {
     return (
       <div
         className="flex flex-1 flex-col items-center justify-center p-6 text-center"
@@ -36,12 +62,36 @@ export function FreeAgentMessageThread({ messages = [] }: FreeAgentMessageThread
 
   return (
     <div
+      ref={scrollRef}
       className="flex flex-1 flex-col gap-3 overflow-y-auto px-3 py-3"
       data-testid="free-agent-thread"
     >
       {messages.map((m) => (
         <Bubble key={m.id} message={m} />
       ))}
+      {showTyping && <TypingIndicator />}
+    </div>
+  );
+}
+
+function TypingIndicator() {
+  // Reuses the existing party-typing-bounce keyframe from globals.css so the
+  // animation cadence stays consistent with the rest of the app's chat surfaces.
+  return (
+    <div
+      className="flex max-w-[85%] flex-col items-start gap-1 self-start"
+      data-testid="free-agent-typing-indicator"
+      aria-label="Agent is typing"
+      role="status"
+    >
+      <div className="flex items-center gap-1.5 rounded-2xl bg-muted px-3 py-2.5 text-sm text-muted-foreground">
+        <span className="inline-flex items-center gap-0" aria-hidden="true">
+          <span className="party-typing-dot" />
+          <span className="party-typing-dot" />
+          <span className="party-typing-dot" />
+        </span>
+        <span className="sr-only">Agent is thinking…</span>
+      </div>
     </div>
   );
 }

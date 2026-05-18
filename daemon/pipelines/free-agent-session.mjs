@@ -13,7 +13,12 @@
  *        --model <model>
  *        --max-budget-usd <costCapUsd>
  *        --output-format stream-json --verbose
- *        --permission-mode acceptEdits
+ *        --permission-mode bypassPermissions
+ *          (PreToolUse path-confinement hook + the least-privilege IAM role
+ *          on the subprocess are the load-bearing security boundaries.
+ *          `acceptEdits` only auto-approves edits; Bash still prompts and
+ *          `-p` has no stdin, so AWS CLI calls hung indefinitely until the
+ *          agent gave up. Same posture as epic-dev-pipeline.mjs:260.)
  *        --session-id <sessionId>           (first turn only)
  *        --resume <claudeSessionId>         (follow-up turns only)
  *        --add-dir <worktreePath>
@@ -158,7 +163,7 @@ export async function runFreeAgentSession(job, ctx) {
     'stream-json',
     '--verbose',
     '--permission-mode',
-    'acceptEdits',
+    'bypassPermissions',
     '--add-dir',
     worktreeInfo.worktreePath,
     '--append-system-prompt',

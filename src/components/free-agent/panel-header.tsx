@@ -15,7 +15,7 @@
 'use client';
 
 import { useState, type KeyboardEvent } from 'react';
-import { X } from 'lucide-react';
+import { Loader2, X } from 'lucide-react';
 import { useFreeAgentStore } from '@/stores/free-agent-store';
 import { formatScopeLabel } from './use-free-agent-scope';
 import { ThreadListDropdown } from './thread-list-dropdown';
@@ -30,6 +30,8 @@ interface FreeAgentPanelHeaderProps {
   /** Story 18.6 — thread-list dropdown actions. */
   onLoadSession?: (sessionId: string) => void;
   onNewConversation?: () => void;
+  /** True while a daemon turn is in flight — drives the activity strip. */
+  isProcessing?: boolean;
 }
 
 const MODEL_OPTIONS: Array<{ value: string; label: string; fullId: string }> = [
@@ -46,6 +48,7 @@ export function FreeAgentPanelHeader({
   onChangeCostCap,
   onLoadSession,
   onNewConversation,
+  isProcessing = false,
 }: FreeAgentPanelHeaderProps = {}) {
   const scope = useFreeAgentStore((s) => s.currentScope);
   const close = useFreeAgentStore((s) => s.close);
@@ -166,6 +169,20 @@ export function FreeAgentPanelHeader({
           </button>
         </div>
       </div>
+
+      {isProcessing && (
+        <div
+          className="flex items-center gap-2 border-t border-[color:var(--accent-blue,#3b82f6)]/30 bg-[color:var(--accent-blue,#3b82f6)]/10 px-3 py-1"
+          data-testid="free-agent-processing-strip"
+          role="status"
+          aria-live="polite"
+        >
+          <Loader2 className="h-3 w-3 animate-spin text-[color:var(--accent-blue,#3b82f6)]" />
+          <span className="text-[11px] text-[color:var(--accent-blue,#3b82f6)]">
+            {currentModel.charAt(0).toUpperCase() + currentModel.slice(1)} is working…
+          </span>
+        </div>
+      )}
 
       {scopeChanged && (
         <div

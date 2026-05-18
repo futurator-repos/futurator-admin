@@ -17,6 +17,13 @@ import { useFreeAgentSession } from '@/hooks/use-free-agent-session';
 export function FreeAgentPanel() {
   const session = useFreeAgentSession();
 
+  // "Processing" covers both the in-flight POST AND the daemon-side window
+  // until releaseProcessingLock fires. Single source of truth drives the
+  // header activity strip, thread typing indicator, and composer disable
+  // (which prevents the 409 SESSION_BUSY storm from rapid Cmd+↵ presses
+  // observed 2026-05-18).
+  const isProcessing = session.isSending || session.status === 'PROCESSING';
+
   return (
     <div
       role="dialog"
@@ -33,17 +40,10 @@ export function FreeAgentPanel() {
         onChangeCostCap={session.setCostCapUsd}
         onLoadSession={session.loadSession}
         onNewConversation={session.resetSession}
+        isProcessing={isProcessing}
       />
-      <FreeAgentMessageThread messages={session.messages} />
-      {/* Treat both the in-flight POST AND the daemon-side PROCESSING window
-          as "sending" so the operator can't fire a second message that the API
-          would reject with 409 SESSION_BUSY. The daemon typically takes 5-15s
-          per turn; without this gate, rapid Cmd+↵ presses produced a stream
-          of 409s (2026-05-18 incident). */}
-      <FreeAgentComposer
-        isSending={session.isSending || session.status === 'PROCESSING'}
-        onSend={session.sendMessage}
-      />
+      <FreeAgentMessageThread messages={session.messages} isProcessing={isProcessing} />
+      <FreeAgentComposer isSending={isProcessing} onSend={session.sendMessage} />
     </div>
   );
 }

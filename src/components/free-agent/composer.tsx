@@ -68,7 +68,12 @@ export function FreeAgentComposer({ isSending = false, onSend }: FreeAgentCompos
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
           rows={MIN_ROWS}
-          placeholder="Send a message (⌘↵ or Ctrl+↵ to send, Shift+↵ for newline)"
+          placeholder={
+            isSending
+              ? 'Agent is working — wait for the reply before sending again'
+              : 'Send a message (⌘↵ or Ctrl+↵ to send, Shift+↵ for newline)'
+          }
+          disabled={isSending}
           aria-label="Message composer"
           data-testid="free-agent-composer"
           className="flex-1 resize-none rounded border bg-background px-2 py-1 text-sm leading-5 placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
