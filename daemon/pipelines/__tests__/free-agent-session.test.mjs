@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join as pathJoin } from 'node:path';
 
 import { runFreeAgentSession } from '../free-agent-session.mjs';
 
@@ -635,6 +638,122 @@ describe('runFreeAgentSession — worktree failure handling', () => {
       expect.stringContaining('WORKTREE_FAILURE'),
     );
     expect(sessionsRepo.releaseProcessingLock).toHaveBeenCalledWith('sid-1', 'ERROR');
+  });
+});
+
+describe('runFreeAgentSession — Cmd+Shift+4 image attachments', () => {
+  it('decodes payload images, writes to .agent-attachments/, and prepends prompt with file refs', async () => {
+    // Use a real tmp dir for the worktree so writeAttachments can actually
+    // mkdir + write decoded bytes. We then read the file back to verify the
+    // base64 decode round-trip.
+    const tmpWt = mkdtempSync(pathJoin(tmpdir(), 'free-agent-attach-test-'));
+    const child = new FakeChild();
+    const spawn = vi.fn(() => child);
+    const sessionsRepo = makeSessionsRepo();
+    const worktreeHelpers = {
+      ensureWorktree: vi.fn(async () => ({
+        worktreePath: tmpWt,
+        branchName: 'assist/dino-7/sid-1',
+        skipped: false,
+      })),
+      writeFreeAgentSettings: vi.fn(),
+      writeAgentMd: vi.fn(),
+    };
+
+    // 1×1 transparent PNG; base64 is well under any threshold so no risk of
+    // canvas-related failure.
+    const onePxPng =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+    const job = makeJob({
+      messages: [
+        {
+          role: 'user',
+          content: 'what is in this image?',
+          images: [{ mediaType: 'image/png', base64: onePxPng }],
+        },
+      ],
+    });
+
+    const promise = runFreeAgentSession(job, {
+      pushEvent: makePushEvent(),
+      sessionsRepo,
+      worktreeHelpers,
+      spawn,
+      logger: silentLogger(),
+    });
+
+    setTimeout(() => {
+      child.stdout.emit(
+        'data',
+        Buffer.from(
+          JSON.stringify({ type: 'system', subtype: 'init', session_id: 'claude-xyz' }) + '\n',
+        ),
+      );
+      child.stdout.emit(
+        'data',
+        Buffer.from(JSON.stringify({ type: 'result', total_cost_usd: 0 }) + '\n'),
+      );
+      child.emit('close', 0);
+    }, 5);
+
+    await promise;
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    const [, args] = spawn.mock.calls[0];
+    const printIdx = args.indexOf('--print');
+    expect(printIdx).toBeGreaterThanOrEqual(0);
+    const prompt = args[printIdx + 1];
+    // Attachment directive prepended; user's text preserved.
+    expect(prompt).toMatch(/\.agent-attachments\/0\.png/);
+    expect(prompt).toContain('what is in this image?');
+    expect(prompt).toMatch(/Read.*before answering/i);
+
+    // File round-trip: directory created, image bytes decoded correctly.
+    const expectedPath = pathJoin(tmpWt, '.agent-attachments', '0.png');
+    expect(existsSync(expectedPath)).toBe(true);
+    const decoded = readFileSync(expectedPath);
+    // PNG magic header.
+    expect(decoded[0]).toBe(0x89);
+    expect(decoded[1]).toBe(0x50);
+    expect(decoded[2]).toBe(0x4e);
+    expect(decoded[3]).toBe(0x47);
+
+    rmSync(tmpWt, { recursive: true, force: true });
+  });
+
+  it('does NOT prepend directive when images array is absent', async () => {
+    const child = new FakeChild();
+    const spawn = vi.fn(() => child);
+    const sessionsRepo = makeSessionsRepo();
+
+    const promise = runFreeAgentSession(makeJob(), {
+      pushEvent: makePushEvent(),
+      sessionsRepo,
+      worktreeHelpers: makeWorktreeHelpers(),
+      spawn,
+      logger: silentLogger(),
+    });
+    setTimeout(() => {
+      child.stdout.emit(
+        'data',
+        Buffer.from(
+          JSON.stringify({ type: 'system', subtype: 'init', session_id: 'c' }) + '\n',
+        ),
+      );
+      child.stdout.emit(
+        'data',
+        Buffer.from(JSON.stringify({ type: 'result', total_cost_usd: 0 }) + '\n'),
+      );
+      child.emit('close', 0);
+    }, 5);
+
+    await promise;
+    const [, args] = spawn.mock.calls[0];
+    const printIdx = args.indexOf('--print');
+    const prompt = args[printIdx + 1];
+    expect(prompt).not.toMatch(/\.agent-attachments/);
+    expect(prompt).not.toMatch(/Read.*before answering/i);
   });
 });
 

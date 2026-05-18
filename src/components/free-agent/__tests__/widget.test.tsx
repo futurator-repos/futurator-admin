@@ -218,7 +218,8 @@ describe('FreeAgentComposer — keyboard handling (AC #6)', () => {
     const textarea = screen.getByTestId('free-agent-composer');
     fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
 
-    expect(onSend).toHaveBeenCalledWith('hello world');
+    // 2nd arg is the optional images array — undefined when nothing pasted.
+    expect(onSend).toHaveBeenCalledWith('hello world', undefined);
     expect(useFreeAgentStore.getState().composerText).toBe('');
   });
 
@@ -232,7 +233,7 @@ describe('FreeAgentComposer — keyboard handling (AC #6)', () => {
       ctrlKey: true,
     });
 
-    expect(onSend).toHaveBeenCalledWith('linux send');
+    expect(onSend).toHaveBeenCalledWith('linux send', undefined);
   });
 
   it('Shift+Enter inserts a newline (does NOT send)', () => {

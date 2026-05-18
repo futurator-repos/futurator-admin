@@ -68,6 +68,11 @@ interface EventsResponse {
   lastSeq: string;
 }
 
+export interface FreeAgentSendImage {
+  mediaType: string;
+  base64: string;
+}
+
 interface UseFreeAgentSessionApi {
   messages: FreeAgentMessage[];
   isSending: boolean;
@@ -76,7 +81,7 @@ interface UseFreeAgentSessionApi {
   costCapUsd: number;
   tokensInAccumulated: number;
   tokensOutAccumulated: number;
-  sendMessage(content: string): void;
+  sendMessage(content: string, images?: FreeAgentSendImage[]): void;
   setCostCapUsd(capUsd: number): void;
   resetSession(): void;
   /** Forks the session with a new model (Story 18.5 AC #6). */
@@ -205,10 +210,17 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
 
   // POST /messages
   const sendMessageMutation = useMutation({
-    mutationFn: async (input: { sessionId: string; content: string }) => {
+    mutationFn: async (input: {
+      sessionId: string;
+      content: string;
+      images?: FreeAgentSendImage[];
+    }) => {
       return api.post<{ jobId: string; status: string }>(
         `/free-agent/sessions/${input.sessionId}/messages`,
-        { content: input.content },
+        {
+          content: input.content,
+          ...(input.images && input.images.length > 0 ? { images: input.images } : {}),
+        },
       );
     },
     onSuccess: () => {
@@ -238,14 +250,27 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
 
   // Public API: sendMessage. Creates a session lazily on first call.
   const sendMessage = useCallback(
-    (content: string) => {
-      if (!content.trim()) return;
+    (content: string, images?: FreeAgentSendImage[]) => {
+      const trimmed = content.trim();
+      const hasImages = Array.isArray(images) && images.length > 0;
+      if (!trimmed && !hasImages) return; // text OR images is required
 
-      // Optimistically push the user message.
+      // Optimistically push the user message. If there are images we suffix
+      // a small marker so the operator sees that their paste landed (the
+      // base64 bytes themselves aren't rendered in the thread — keep the
+      // hook lean and let the daemon's reply reflect what it saw).
       const userId = `user-${Date.now()}`;
+      const optimisticContent = hasImages
+        ? `${content}${content ? '\n' : ''}📎 ${images.length} image${images.length === 1 ? '' : 's'} attached`
+        : content;
       setMessages((prev) => [
         ...prev,
-        { id: userId, role: 'user', content, timestamp: new Date().toISOString() },
+        {
+          id: userId,
+          role: 'user',
+          content: optimisticContent,
+          timestamp: new Date().toISOString(),
+        },
       ]);
 
       if (!activeSessionId) {
@@ -253,12 +278,12 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
           { model: currentModel, scope },
           {
             onSuccess: (data) => {
-              sendMessageMutation.mutate({ sessionId: data.sessionId, content });
+              sendMessageMutation.mutate({ sessionId: data.sessionId, content, images });
             },
           },
         );
       } else {
-        sendMessageMutation.mutate({ sessionId: activeSessionId, content });
+        sendMessageMutation.mutate({ sessionId: activeSessionId, content, images });
       }
     },
     [activeSessionId, scope, currentModel, createSession, sendMessageMutation],

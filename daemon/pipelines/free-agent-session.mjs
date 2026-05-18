@@ -42,6 +42,12 @@
  */
 
 import { spawn as realSpawn } from 'node:child_process';
+import {
+  existsSync as fsExistsSync,
+  mkdirSync as fsMkdirSync,
+  writeFileSync as fsWriteFileSync,
+} from 'node:fs';
+import { join as pathJoin } from 'node:path';
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.FREE_AGENT_TURN_TIMEOUT_MS) || 600_000;
 const KILL_GRACE_MS = 5_000;
@@ -144,6 +150,19 @@ export async function runFreeAgentSession(job, ctx) {
   const session = await sessionsRepo.getSession(sessionId);
   const isFirstTurn = !session?.claudeSessionId;
 
+  // Cmd+Shift+4 attachments: the API forwards images in the payload as
+  // {mediaType, base64}. We decode each to <worktree>/.agent-attachments/
+  // (gitignored by convention since the worktree is single-use), then
+  // prepend a directive to the prompt so the agent knows to Read them.
+  // Same security boundary as everything else — the PreToolUse hook keeps
+  // file ops inside the worktree, and the agent's Read tool natively
+  // supports image files (PNG/JPEG/WebP/GIF).
+  const attachmentPaths = writeAttachments({
+    worktreePath: worktreeInfo.worktreePath,
+    images: lastUserMessage.images || [],
+    logger,
+  });
+
   // System-prompt nudge points the agent at AGENT.md (which the daemon wrote
   // above with the per-session operator context, tool surface, and DDB schema
   // hints). Without this, the agent defaults to generic Claude Code instincts
@@ -152,9 +171,14 @@ export async function runFreeAgentSession(job, ctx) {
   const systemPromptNudge =
     'You are the Futurator Free Agent. **Your first action must be to read AGENT.md at the root of your current working directory** — it documents your AWS tool surface, available DynamoDB tables, the current project/plan/session scope, and which questions you can answer directly via `aws` CLI vs which would need the operator. Then respond to the operator concisely with file:line citations where applicable.';
 
+  const attachmentDirective =
+    attachmentPaths.length > 0
+      ? `[The operator pasted ${attachmentPaths.length} image${attachmentPaths.length === 1 ? '' : 's'}. Read ${attachmentPaths.length === 1 ? 'it' : 'each'} with the Read tool before answering:\n${attachmentPaths.map((p) => `  - ${p}`).join('\n')}\n]\n\n`
+      : '';
+
   const args = [
     '--print',
-    lastUserMessage.content,
+    attachmentDirective + lastUserMessage.content,
     '--model',
     model,
     '--max-budget-usd',
@@ -390,6 +414,55 @@ export async function runFreeAgentSession(job, ctx) {
     totalTokensIn,
     totalTokensOut,
   };
+}
+
+const ATTACHMENT_DIRNAME = '.agent-attachments';
+const MEDIA_TYPE_EXTS = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+
+/**
+ * Decode `{mediaType, base64}` attachments into `<worktree>/.agent-attachments/`.
+ * Returns the relative paths (e.g. `./.agent-attachments/0.jpg`) for the prompt.
+ * Failures are non-fatal — the agent still gets the user's text, just without
+ * the visual context. Logged for debugging.
+ */
+function writeAttachments({ worktreePath, images, logger, fs }) {
+  if (!Array.isArray(images) || images.length === 0) return [];
+  const fsImpl = fs || {
+    existsSync: fsExistsSync,
+    mkdirSync: fsMkdirSync,
+    writeFileSync: fsWriteFileSync,
+  };
+  const dir = pathJoin(worktreePath, ATTACHMENT_DIRNAME);
+  try {
+    if (!fsImpl.existsSync(dir)) fsImpl.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    logger?.warn?.(`[free-agent-session] could not create attachments dir: ${err.message}`);
+    return [];
+  }
+
+  const written = [];
+  for (let i = 0; i < images.length; i += 1) {
+    const img = images[i];
+    const ext = MEDIA_TYPE_EXTS[img?.mediaType];
+    if (!ext || typeof img.base64 !== 'string') {
+      logger?.warn?.(`[free-agent-session] skipping attachment ${i}: bad shape`);
+      continue;
+    }
+    const filename = `${i}.${ext}`;
+    const fullPath = pathJoin(dir, filename);
+    try {
+      fsImpl.writeFileSync(fullPath, Buffer.from(img.base64, 'base64'));
+      written.push(`./${ATTACHMENT_DIRNAME}/${filename}`);
+    } catch (err) {
+      logger?.warn?.(`[free-agent-session] failed to write attachment ${i}: ${err.message}`);
+    }
+  }
+  return written;
 }
 
 function matchesBudgetSignal(resultEvent) {

@@ -6024,15 +6024,24 @@ app.post('/api/free-agent/sessions/:id/messages', authMiddleware, async (c) => {
     throw new AppError('INVALID_STATE', `Cannot send: session state is ${lock.reason}`, 409);
   }
 
+  // Optional Cmd+Shift+4 image attachments. Frontend pre-resizes + JPEG-encodes
+  // before sending; per-image cap 900KB base64 + max 4 images keeps the job
+  // payload comfortably under DDB's 400KB row ceiling (we also write a
+  // compact placeholder to the conversations table — full images live only
+  // in the ephemeral job payload, never persisted long-term).
+  const images = parsed.data.images ?? [];
+  const imageCountSuffix =
+    images.length > 0 ? ` 📎 ${images.length} image${images.length === 1 ? '' : 's'} attached` : '';
+
   // Story 18.6 — persist the USER message BEFORE enqueueing the daemon job
   // so the thread list + conversation history reflect the operator's input
-  // even if the daemon job fails. Assistant-message writes from the daemon on
-  // `free-agent.turn.complete` are deferred to v1.1 (would require a daemon-
-  // side facade duplicating the conversations repo DDB ops).
+  // even if the daemon job fails. Image bytes are NOT persisted in the
+  // conversations table (DDB row size limits + privacy); just the count
+  // marker so the thread list shows context.
   await freeAgentConversationsRepo.appendMessage({
     sessionId: session.sessionId,
     role: 'user',
-    content: parsed.data.content,
+    content: parsed.data.content + imageCountSuffix,
   });
 
   const jobId = crypto.randomUUID();
@@ -6052,7 +6061,13 @@ app.post('/api/free-agent/sessions/:id/messages', authMiddleware, async (c) => {
       model: session.model,
       costCapUsd: session.costCapUsd,
       credentials,
-      messages: [{ role: 'user', content: parsed.data.content }],
+      messages: [
+        {
+          role: 'user',
+          content: parsed.data.content,
+          ...(images.length > 0 ? { images } : {}),
+        },
+      ],
     },
   });
 

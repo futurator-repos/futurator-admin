@@ -35,9 +35,21 @@ export const CreateFreeAgentSessionInputSchema = z.object({
   costCapUsd: z.number().positive().max(1000).optional(),
 });
 
+/** Per-image attachment shape (Cmd+Shift+4 paste path). Frontend resizes +
+ *  re-encodes to JPEG before sending so the base64 payload fits comfortably
+ *  in the DDB job-payload row (400KB hard limit, shared with the rest of
+ *  the payload). 600KB base64 per image × 4 = 2.4MB cap; the API rejects
+ *  beyond. */
+export const FreeAgentImageAttachmentSchema = z.object({
+  mediaType: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif']),
+  /** Base64-encoded raw image bytes (no `data:` prefix). */
+  base64: z.string().min(1).max(900_000, 'attachment must be ≤900KB base64'),
+});
+
 /** Input shape for the API route POST /api/free-agent/sessions/:id/messages (Story 18.5). */
 export const SendFreeAgentMessageInputSchema = z.object({
   content: z.string().min(1).max(8192, 'message content must be ≤8192 bytes'),
+  images: z.array(FreeAgentImageAttachmentSchema).max(4).optional(),
 });
 
 /** Daemon-side job payload validator (informational; daemon also has its own
@@ -59,6 +71,7 @@ export const FreeAgentSessionJobPayloadSchema = z.object({
       z.object({
         role: z.enum(['user', 'assistant', 'system']),
         content: z.string(),
+        images: z.array(FreeAgentImageAttachmentSchema).max(4).optional(),
       }),
     )
     .min(1),
