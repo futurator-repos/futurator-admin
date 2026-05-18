@@ -117,6 +117,13 @@ export async function ensureWorktree({
     fs.mkdirSync(parent, { recursive: true });
   }
 
+  // Use the bare repo's LOCAL branch ref, not `origin/${defaultBranch}`.
+  // Pipeline v2 app bare repos (e.g. /home/ubuntu/repos/snake-4.git) are
+  // bootstrapped on EC2 directly — they have refs/heads/main but no `origin`
+  // remote. Brownfield bare repos that ARE clones still have refs/heads/main
+  // (copied from origin at clone time), so the local ref resolves in both
+  // cases. This avoided a `fatal: invalid reference: origin/main` regression
+  // on the snake-4 first-turn worktree spawn (2026-05-18).
   await execGit([
     '-C',
     bareDir,
@@ -125,7 +132,7 @@ export async function ensureWorktree({
     '-b',
     branchName,
     worktreePath,
-    `origin/${defaultBranch}`,
+    defaultBranch,
   ]);
 
   return { worktreePath, branchName, skipped: false };

@@ -93,7 +93,7 @@ describe('ensureWorktree (AC #4, AC #7)', () => {
       '-b',
       'assist/dino-7/sess-abc',
       '/home/ubuntu/free-agent-worktrees/dino-7/sess-abc',
-      'origin/main',
+      'main',
     ]);
     // Parent dir was created
     expect(fs.mkdirSync).toHaveBeenCalledWith('/home/ubuntu/free-agent-worktrees/dino-7', {
@@ -114,7 +114,8 @@ describe('ensureWorktree (AC #4, AC #7)', () => {
       execGit,
     });
 
-    expect(execGit).toHaveBeenCalledWith(expect.arrayContaining(['origin/develop']));
+    expect(execGit).toHaveBeenCalledWith(expect.arrayContaining(['develop']));
+    expect(execGit).not.toHaveBeenCalledWith(expect.arrayContaining(['origin/develop']));
   });
 
   it('returns the existing worktree without re-cloning when already present (AC #7)', async () => {
