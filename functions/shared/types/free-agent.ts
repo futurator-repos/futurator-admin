@@ -99,6 +99,9 @@ export interface FreeAgentSession {
   expiresAt: number;
   /** Set when status transitions to ERROR. */
   errorReason?: string;
+  /** Operator clicked Stop while a turn was running. Daemon polls and kills. */
+  cancelRequested?: boolean;
+  cancelRequestedAt?: string;
 }
 
 /** Input to `createSession`. Most fields are derived inside the repo. */

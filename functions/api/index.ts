@@ -2057,10 +2057,13 @@ app.get('/api/plans/:id/qa-report', async (c) => {
   }
 
   // Collect every jobId we care about: plan.qaJobId (PR-8a plan-scoped QA),
-  // each epic's qaJobId (legacy per-epic QA), each epic's poJobId, and every
+  // plan.qaAggregateJobId (PR-8d operator-gated aggregate — its
+  // AGGREGATE_OUTPUT is what the ContractGate UI renders), each epic's
+  // qaJobId (legacy per-epic QA), each epic's poJobId, and every
   // wave-build job referenced by waveBuildJobs.
   const jobIdSet = new Set<string>();
   if (plan.qaJobId) jobIdSet.add(plan.qaJobId);
+  if (plan.qaAggregateJobId) jobIdSet.add(plan.qaAggregateJobId);
   for (const epic of epics) {
     if (epic.qaJobId) jobIdSet.add(epic.qaJobId);
     if (epic.poJobId) jobIdSet.add(epic.poJobId);
@@ -6072,6 +6075,47 @@ app.post('/api/free-agent/sessions/:id/messages', authMiddleware, async (c) => {
   });
 
   return c.json({ jobId, status: 'PROCESSING' }, 202);
+});
+
+// POST /api/free-agent/sessions/:id/cancel
+//   Operator clicked Stop while the daemon is processing a turn. We set a
+//   soft signal on the session row; the daemon's runFreeAgentSession polls
+//   it every few seconds and SIGTERMs the `claude` subprocess on detection.
+//   Returns 202 if accepted; 409 INVALID_STATE if the session isn't currently
+//   PROCESSING (nothing to cancel).
+app.post('/api/free-agent/sessions/:id/cancel', authMiddleware, async (c) => {
+  const sessionId = c.req.param('id');
+  const parsed = sessionIdSchema.safeParse(sessionId);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid sessionId');
+  }
+
+  const session = await freeAgentSessionsRepo.getSession(parsed.data);
+  if (!session) throw new NotFoundError('FreeAgentSession', parsed.data);
+
+  const user = c.get('user');
+  if (!user || session.operatorId !== user.userId) {
+    throw new AppError('FORBIDDEN', 'Only the session owner can cancel a turn', 403);
+  }
+
+  if (session.status !== 'PROCESSING') {
+    throw new AppError(
+      'INVALID_STATE',
+      `Cannot cancel: session is ${session.status}, not PROCESSING`,
+      409,
+    );
+  }
+
+  try {
+    await freeAgentSessionsRepo.requestCancel(parsed.data);
+    return c.json({ ok: true, sessionId: parsed.data, cancelRequested: true }, 202);
+  } catch (err) {
+    const error = err as { name?: string };
+    if (error.name === 'ConditionalCheckFailedException') {
+      throw new AppError('INVALID_STATE', 'Session is no longer PROCESSING', 409);
+    }
+    throw err;
+  }
 });
 
 app.get('/api/free-agent/sessions/:id', authMiddleware, async (c) => {

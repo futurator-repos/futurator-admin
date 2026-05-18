@@ -3166,6 +3166,17 @@ async function freeAgentListAllSessions() {
   return out;
 }
 
+async function freeAgentClearCancelFlag(sessionId) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: FREE_AGENT_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'REMOVE cancelRequested, cancelRequestedAt',
+      ConditionExpression: 'attribute_exists(sessionId)',
+    }),
+  );
+}
+
 function buildFreeAgentSessionsRepoFacade() {
   return {
     getSession: freeAgentGetSession,
@@ -3177,6 +3188,7 @@ function buildFreeAgentSessionsRepoFacade() {
     updateTokens: freeAgentUpdateTokens,
     markBudgetExhausted: freeAgentMarkBudgetExhausted,
     markError: freeAgentMarkError,
+    clearCancelFlag: freeAgentClearCancelFlag,
     listAllSessions: freeAgentListAllSessions,
   };
 }

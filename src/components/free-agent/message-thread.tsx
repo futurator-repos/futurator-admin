@@ -15,10 +15,14 @@ import { useEffect, useRef, type ReactNode } from 'react';
 
 export interface FreeAgentMessage {
   id: string;
-  role: 'user' | 'assistant' | 'system';
+  role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
   /** Optional ISO-8601 timestamp; rendered as a tiny label below the bubble. */
   timestamp?: string;
+  /** For role='tool': raw tool name (Bash, Read, Edit, …) — used for the chip color. */
+  toolName?: string;
+  /** For role='tool': the full input payload, rendered in an expandable details. */
+  toolInput?: Record<string, unknown>;
 }
 
 interface FreeAgentMessageThreadProps {
@@ -107,6 +111,10 @@ function Bubble({ message }: { message: FreeAgentMessage }) {
     );
   }
 
+  if (message.role === 'tool') {
+    return <ToolBubble message={message} />;
+  }
+
   const isUser = message.role === 'user';
   return (
     <div
@@ -122,6 +130,44 @@ function Bubble({ message }: { message: FreeAgentMessage }) {
       >
         {renderInline(message.content)}
       </div>
+      {message.timestamp && (
+        <span className="text-[10px] text-muted-foreground">{formatTime(message.timestamp)}</span>
+      )}
+    </div>
+  );
+}
+
+function ToolBubble({ message }: { message: FreeAgentMessage }) {
+  // Tool calls render as a compact terminal-style entry. Inline-bash gets a
+  // monospace shell hint; other tools (Read, Edit, …) just show the tool name
+  // and a truncated input preview. Details expandable on click.
+  const isBash = (message.toolName || '').toLowerCase() === 'bash';
+  const previewMax = 200;
+  const preview =
+    message.content.length > previewMax
+      ? message.content.slice(0, previewMax) + '…'
+      : message.content;
+  const fullInputJson = message.toolInput ? JSON.stringify(message.toolInput, null, 2) : null;
+
+  return (
+    <div
+      className="flex max-w-full flex-col gap-1 self-start"
+      data-testid="free-agent-tool-bubble"
+      data-tool={message.toolName || 'unknown'}
+    >
+      <details className="group rounded-md border border-dashed bg-background/60 px-2 py-1.5">
+        <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
+          <span className="rounded bg-[color:var(--accent-blue,#3b82f6)]/15 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-[color:var(--accent-blue,#3b82f6)]">
+            {isBash ? '$ Bash' : message.toolName || 'Tool'}
+          </span>
+          <span className="truncate font-mono">{preview}</span>
+        </summary>
+        {fullInputJson && (
+          <pre className="mt-1.5 max-h-48 overflow-auto rounded bg-muted/60 p-2 font-mono text-[10px] leading-tight">
+            {fullInputJson}
+          </pre>
+        )}
+      </details>
       {message.timestamp && (
         <span className="text-[10px] text-muted-foreground">{formatTime(message.timestamp)}</span>
       )}

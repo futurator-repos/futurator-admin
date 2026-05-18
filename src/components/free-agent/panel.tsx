@@ -41,6 +41,8 @@ export function FreeAgentPanel() {
         onLoadSession={session.loadSession}
         onNewConversation={session.resetSession}
         isProcessing={isProcessing}
+        onCancel={session.cancelTurn}
+        isCancelling={session.isCancelling}
       />
       <FreeAgentMessageThread messages={session.messages} isProcessing={isProcessing} />
       <FreeAgentComposer isSending={isProcessing} onSend={session.sendMessage} />

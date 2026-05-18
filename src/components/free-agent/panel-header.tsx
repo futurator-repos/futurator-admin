@@ -15,7 +15,7 @@
 'use client';
 
 import { useState, type KeyboardEvent } from 'react';
-import { Loader2, X } from 'lucide-react';
+import { Loader2, Square, X } from 'lucide-react';
 import { useFreeAgentStore } from '@/stores/free-agent-store';
 import { formatScopeLabel } from './use-free-agent-scope';
 import { ThreadListDropdown } from './thread-list-dropdown';
@@ -32,6 +32,9 @@ interface FreeAgentPanelHeaderProps {
   onNewConversation?: () => void;
   /** True while a daemon turn is in flight — drives the activity strip. */
   isProcessing?: boolean;
+  /** Operator clicked Stop — kill the in-flight turn. */
+  onCancel?: () => void;
+  isCancelling?: boolean;
 }
 
 const MODEL_OPTIONS: Array<{ value: string; label: string; fullId: string }> = [
@@ -49,6 +52,8 @@ export function FreeAgentPanelHeader({
   onLoadSession,
   onNewConversation,
   isProcessing = false,
+  onCancel,
+  isCancelling = false,
 }: FreeAgentPanelHeaderProps = {}) {
   const scope = useFreeAgentStore((s) => s.currentScope);
   const close = useFreeAgentStore((s) => s.close);
@@ -172,15 +177,33 @@ export function FreeAgentPanelHeader({
 
       {isProcessing && (
         <div
-          className="flex items-center gap-2 border-t border-[color:var(--accent-blue,#3b82f6)]/30 bg-[color:var(--accent-blue,#3b82f6)]/10 px-3 py-1"
+          className="flex items-center justify-between gap-2 border-t border-[color:var(--accent-blue,#3b82f6)]/30 bg-[color:var(--accent-blue,#3b82f6)]/10 px-3 py-1"
           data-testid="free-agent-processing-strip"
           role="status"
           aria-live="polite"
         >
-          <Loader2 className="h-3 w-3 animate-spin text-[color:var(--accent-blue,#3b82f6)]" />
-          <span className="text-[11px] text-[color:var(--accent-blue,#3b82f6)]">
-            {currentModel.charAt(0).toUpperCase() + currentModel.slice(1)} is working…
-          </span>
+          <div className="flex items-center gap-2">
+            <Loader2 className="h-3 w-3 animate-spin text-[color:var(--accent-blue,#3b82f6)]" />
+            <span className="text-[11px] text-[color:var(--accent-blue,#3b82f6)]">
+              {isCancelling
+                ? 'Stopping…'
+                : `${currentModel.charAt(0).toUpperCase() + currentModel.slice(1)} is working…`}
+            </span>
+          </div>
+          {onCancel && (
+            <button
+              type="button"
+              data-testid="free-agent-stop"
+              aria-label="Stop the agent"
+              disabled={isCancelling}
+              onClick={onCancel}
+              className="flex items-center gap-1 rounded border border-red-500/40 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-red-600 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-400"
+              title="Stop the agent — kills the running subprocess"
+            >
+              <Square className="h-2.5 w-2.5 fill-current" strokeWidth={0} />
+              Stop
+            </button>
+          )}
         </div>
       )}
 

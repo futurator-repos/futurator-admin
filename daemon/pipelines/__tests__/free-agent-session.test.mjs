@@ -44,6 +44,7 @@ function makeSessionsRepo(overrides = {}) {
     updateTokens: vi.fn(async () => {}),
     markBudgetExhausted: vi.fn(async () => {}),
     markError: vi.fn(async () => {}),
+    clearCancelFlag: vi.fn(async () => {}),
     ...overrides,
   };
 }
@@ -754,6 +755,60 @@ describe('runFreeAgentSession — Cmd+Shift+4 image attachments', () => {
     const prompt = args[printIdx + 1];
     expect(prompt).not.toMatch(/\.agent-attachments/);
     expect(prompt).not.toMatch(/Read.*before answering/i);
+  });
+});
+
+describe('runFreeAgentSession — operator cancel (Stop button)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  it('kills subprocess + releases lock to ACTIVE + emits cancelled event when cancelRequested flips true', async () => {
+    const child = new FakeChild();
+    const spawn = vi.fn(() => child);
+    // First getSession (pre-spawn) returns baseSession. Subsequent calls
+    // (cancel poller) return a row with cancelRequested=true on the 2nd hit.
+    let getCallCount = 0;
+    const sessionsRepo = makeSessionsRepo({
+      getSession: vi.fn(async () => {
+        getCallCount += 1;
+        return getCallCount >= 2
+          ? { sessionId: 'sid-1', status: 'PROCESSING', cancelRequested: true, turnCount: 0 }
+          : { sessionId: 'sid-1', status: 'PROCESSING', turnCount: 0 };
+      }),
+    });
+    const pushEvent = makePushEvent();
+
+    const promise = runFreeAgentSession(makeJob(), {
+      pushEvent,
+      sessionsRepo,
+      worktreeHelpers: makeWorktreeHelpers(),
+      spawn,
+      logger: silentLogger(),
+    });
+
+    // Advance to trigger the cancel poller (2.5s interval).
+    await vi.advanceTimersByTimeAsync(2_600);
+    // Child should have been killed.
+    expect(child.killSignals).toContain('SIGTERM');
+
+    // Simulate the child exiting after SIGTERM.
+    child.emit('close', 143);
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toMatchObject({ ok: false, reason: 'CANCELLED' });
+    // Cancelled event emitted (not a generic error).
+    const cancelledCalls = pushEvent.mock.calls.filter(
+      (c) => c[3] === 'free-agent.turn.cancelled',
+    );
+    expect(cancelledCalls.length).toBe(1);
+    // Session released back to ACTIVE (NOT ERROR — user can keep chatting).
+    expect(sessionsRepo.releaseProcessingLock).toHaveBeenCalledWith('sid-1', 'ACTIVE');
+    expect(sessionsRepo.markError).not.toHaveBeenCalled();
+    // Cancel flag cleared after handoff.
+    expect(sessionsRepo.clearCancelFlag).toHaveBeenCalled();
   });
 });
 

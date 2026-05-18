@@ -89,6 +89,9 @@ interface UseFreeAgentSessionApi {
   currentModel: string;
   /** Story 18.6 — resume a prior session; loads its message history. */
   loadSession(sessionId: string): Promise<void>;
+  /** Operator clicked Stop — kill the in-flight turn. */
+  cancelTurn(): void;
+  isCancelling: boolean;
 }
 
 export function useFreeAgentSession(): UseFreeAgentSessionApi {
@@ -171,8 +174,34 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
             const idx = next.findIndex((m) => m.id === activeAssistantIdRef.current);
             if (idx >= 0) next[idx] = { ...next[idx], content: next[idx].content + ev.text };
           }
+        } else if (ev.eventType === 'free-agent.turn.tool_use') {
+          // Tool invocations stream in as their own bubble — operator sees
+          // what the agent is doing in real time (Bash commands, file reads,
+          // etc.). Breaks the assistant text run so subsequent tokens go
+          // into a new bubble after the tool call.
+          activeAssistantIdRef.current = null;
+          const tool = (ev.payload?.tool ?? {}) as {
+            name?: string;
+            input?: Record<string, unknown>;
+          };
+          next.push({
+            id: `tool-${ev.eventSeq}`,
+            role: 'tool',
+            content: formatToolCall(tool),
+            timestamp: ev.timestamp,
+            toolName: tool.name,
+            toolInput: tool.input,
+          });
         } else if (ev.eventType === 'free-agent.turn.complete') {
           activeAssistantIdRef.current = null;
+        } else if (ev.eventType === 'free-agent.turn.cancelled') {
+          activeAssistantIdRef.current = null;
+          next.push({
+            id: `system-cancelled-${ev.eventSeq}`,
+            role: 'system',
+            content: 'Stopped by operator',
+            timestamp: ev.timestamp,
+          });
         } else if (
           ev.eventType === 'free-agent.turn.error' ||
           ev.eventType === 'free-agent.budget.exhausted'
@@ -228,6 +257,31 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
       queryClient.invalidateQueries({ queryKey: ['free-agent-session', activeSessionId] });
     },
   });
+
+  // POST /cancel — operator pressed Stop while the daemon is mid-turn.
+  // We set a soft flag on the session row; the daemon polls it every 2.5s
+  // and SIGTERMs the `claude` subprocess on detection. Idempotent — pressing
+  // Stop multiple times is fine. 409 INVALID_STATE just means the turn
+  // already finished naturally between click and request.
+  const cancelTurnMutation = useMutation({
+    mutationFn: async (sessionId: string) => {
+      return api.post<{ ok: boolean; sessionId: string; cancelRequested: boolean }>(
+        `/free-agent/sessions/${sessionId}/cancel`,
+        {},
+      );
+    },
+  });
+
+  const cancelTurn = useCallback(() => {
+    if (!activeSessionId) return;
+    cancelTurnMutation.mutate(activeSessionId, {
+      // Eat the 409 (race: turn finished between click and request).
+      // The events stream will deliver the real terminal event.
+      onError: () => {
+        /* surfaced as a no-op; operator can try again if needed */
+      },
+    });
+  }, [activeSessionId, cancelTurnMutation]);
 
   // setCostCap is wired through the next message-enqueue (Story 18.5 AC #7
   // says it can be either via PATCH or via in-line update on next message).
@@ -381,6 +435,8 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
       changeModel,
       currentModel,
       loadSession,
+      cancelTurn,
+      isCancelling: cancelTurnMutation.isPending,
     }),
     [
       messages,
@@ -394,8 +450,34 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
       changeModel,
       currentModel,
       loadSession,
+      cancelTurn,
+      cancelTurnMutation.isPending,
     ],
   );
+}
+
+/**
+ * Render a tool-call event payload as a compact one-line description for the
+ * thread bubble preview. Bash invocations show the command directly; other
+ * tools show their name + first useful input field.
+ */
+function formatToolCall(tool: { name?: string; input?: Record<string, unknown> }): string {
+  const name = (tool.name || 'Tool').toLowerCase();
+  const input = tool.input || {};
+  if (name === 'bash' && typeof input.command === 'string') return input.command;
+  if (name === 'read' && typeof input.file_path === 'string') return input.file_path;
+  if (name === 'edit' && typeof input.file_path === 'string') return input.file_path;
+  if (name === 'write' && typeof input.file_path === 'string') return input.file_path;
+  if (name === 'grep' && typeof input.pattern === 'string') {
+    const path = typeof input.path === 'string' ? ` in ${input.path}` : '';
+    return `${input.pattern}${path}`;
+  }
+  if (name === 'glob' && typeof input.pattern === 'string') return input.pattern;
+  // Generic fallback: first string-valued field
+  for (const [, v] of Object.entries(input)) {
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return tool.name || 'Tool';
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

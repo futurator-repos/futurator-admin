@@ -310,6 +310,49 @@ export async function setCostCapUsd(sessionId: string, capUsd: number): Promise<
   );
 }
 
+/**
+ * Operator clicked Stop while the daemon is mid-turn. Sets a soft signal that
+ * the daemon's runFreeAgentSession polls every few seconds; on detection the
+ * daemon SIGTERMs the spawned `claude` subprocess and releases the lock back
+ * to ACTIVE so the operator can continue the session.
+ *
+ * Only valid while the session is actually PROCESSING — otherwise the cancel
+ * would just sit on a row with no daemon to consume it. The
+ * ConditionalCheckFailedException becomes a 409 INVALID_STATE at the API layer.
+ */
+export async function requestCancel(sessionId: string): Promise<void> {
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.freeAgentSessions,
+      Key: { sessionId },
+      UpdateExpression: 'SET cancelRequested = :t, cancelRequestedAt = :now',
+      ConditionExpression: 'attribute_exists(sessionId) AND #status = :processing',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':t': true,
+        ':now': new Date().toISOString(),
+        ':processing': 'PROCESSING' satisfies FreeAgentSessionStatus,
+      },
+    }),
+  );
+}
+
+/**
+ * Daemon-side: clear the cancel flag (called on every turn start AND after
+ * a successful cancel handoff) so a stale flag from a prior turn never bleeds
+ * into the next one.
+ */
+export async function clearCancelFlag(sessionId: string): Promise<void> {
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.freeAgentSessions,
+      Key: { sessionId },
+      UpdateExpression: 'REMOVE cancelRequested, cancelRequestedAt',
+      ConditionExpression: 'attribute_exists(sessionId)',
+    }),
+  );
+}
+
 /** Record the moment an external caller re-AssumeRole'd credentials for this session. */
 export async function setLastRefreshedAt(sessionId: string, isoTimestamp?: string): Promise<void> {
   const at = isoTimestamp ?? new Date().toISOString();
