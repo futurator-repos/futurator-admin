@@ -19,6 +19,27 @@ Do this before anything else, every time, no exceptions.
 
 ## Recent changes
 
+- **2026-05-18 (Migrate module — brownfield self-service):** New
+  top-level `/migrate` admin route owns brownfield Party project
+  lifecycle as a proper product feature (was previously a manual CLI +
+  shared-secret flow). 4-step wizard captures **per-project** GitHub
+  PAT + DDB-encrypted env vars (`KEY="value"` multiline editor with
+  UPPER_SNAKE_CASE validation and duplicate-key detection). PATs land
+  in AWS Secrets Manager at `futurator/brownfield-pat/<projectId>`
+  (API Lambda Create/Put/Get/Delete; daemon EC2 role Get-only); env
+  vars persist in `PartyProject.envVars` (DDB at-rest KMS — never
+  returned in GET responses, only KEYS surface). On bootstrap the
+  daemon resolves the per-project PAT via
+  `ctx.loadBrownfieldPat(secretName)` (1h in-process TTL cache) and
+  writes `<projectPath>/.env` at mode `0o600`. Refresh re-syncs
+  `.env`. New routes: `GET /api/migrations`, `PATCH /api/migrations/:id`
+  (rotate PAT or update envVars), `DELETE /api/migrations/:id`
+  (refuses `PROJECT_BUSY` while session is PROCESSING; secret scheduled
+  for deletion with 30-day recovery window). Legacy shared secret
+  `futurator/labs-brownfield-github-pat` retained as fallback for
+  applicator back-compat; Story 15.4 CLI runner also retained — both
+  feed the same Secrets Manager + DDB substrate.
+
 - **2026-05-17 (Story 18.1 — Free Claude Code Agent foundation):** Epic 18
   v1 starts with the security primitive: a standalone `FreeAgentSessionRole`
   (`sst.config.ts`) assumed per-session via STS by the API Lambda, carrying

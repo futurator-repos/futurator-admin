@@ -844,6 +844,27 @@ export default $config({
             'arn:aws:secretsmanager:us-east-1:835745294770:secret:futurator/*/broker-credentials-*',
           ],
         },
+        // Migrate-module (Epic 18, brownfield Party PAT vault):
+        // /migrate UI registers each brownfield project's PAT under
+        // `futurator/brownfield-pat/<projectId>`. The API Lambda owns
+        // the lifecycle (create on register, put on rotate, delete with
+        // 30-day recovery on teardown). Read happens here too because
+        // GET /api/migrations enriches list responses without exposing
+        // secret material. The daemon EC2 role has a parallel read-only
+        // grant for the same ARN pattern.
+        {
+          actions: [
+            'secretsmanager:CreateSecret',
+            'secretsmanager:PutSecretValue',
+            'secretsmanager:GetSecretValue',
+            'secretsmanager:DescribeSecret',
+            'secretsmanager:DeleteSecret',
+            'secretsmanager:TagResource',
+          ],
+          resources: [
+            'arn:aws:secretsmanager:us-east-1:835745294770:secret:futurator/brownfield-pat/*',
+          ],
+        },
       ],
       url: {
         cors: {
