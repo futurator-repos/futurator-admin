@@ -205,8 +205,124 @@ The CloudWatch metric filter spec'd in the original story is **deferred to v1.1*
 
 ### Change Log
 
-| Date       | Change                                                                                                                                          |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-05-17 | Story drafted from epic 18 (status → ready-for-dev → in-progress in same session)                                                               |
-| 2026-05-17 | Implementation complete: commit-msg hook + worktree installer + token accumulation + audit endpoint (34 new tests)                              |
-| 2026-05-17 | Status → review. AC #4 CloudTrail filter deferred to v1.1 (daemon-side tagging is the v1 substitute); admin-scope check defaulted to owner-only |
+| Date       | Change                                                                                                                                                                                                                                     |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2026-05-17 | Story drafted from epic 18 (status → ready-for-dev → in-progress in same session)                                                                                                                                                          |
+| 2026-05-17 | Implementation complete: commit-msg hook + worktree installer + token accumulation + audit endpoint (34 new tests)                                                                                                                         |
+| 2026-05-17 | Status → review. AC #4 CloudTrail filter deferred to v1.1 (daemon-side tagging is the v1 substitute); admin-scope check defaulted to owner-only                                                                                            |
+| 2026-05-17 | Senior Developer Review notes appended (Outcome: **Changes Requested** — 1 MEDIUM, 1 LOW finding). AC #1's runtime guarantee unmet: `installCommitMsgHook` is defined but never called from any production code path. Status → in-progress |
+
+---
+
+## Senior Developer Review (AI)
+
+**Reviewer:** Richie
+**Date:** 2026-05-17
+**Outcome:** ⚠️ **Changes Requested** — 1 MEDIUM finding (AC #1 runtime guarantee unmet) + 1 LOW finding (admin scope deferred). The MEDIUM is a ~3-line fix; everything else is solid.
+
+### Summary
+
+Story 18.3 builds out the audit trail in three layers: a `prepare-commit-msg` hook script that appends `Agent: FREE-AGENT-<sessionId>` to every commit, atomic token-accumulation writes to the sessions table, and a unified `GET /api/free-agent/sessions/:id/audit` endpoint that returns session metadata + the agent-events timeline. The bash hook is tested with 10 execFile-based scenarios; the installer's idempotency (fresh / re-install detect-and-skip / append-to-existing-user-hook) is covered by 6 worktree tests; `updateTokens` ADD-expression atomicity is verified at the repository level; the audit route owner-check and 403/404/400 branches are covered by 9 route tests. **One real defect:** `installCommitMsgHook` is exported from `daemon/pipelines/lib/free-agent-worktree.mjs:257` but **never called from any production code path** — neither `daemon/pipelines/free-agent-session.mjs` (the handler) nor `daemon/agent-daemon.mjs` (the dispatcher) nor `functions/api/index.ts` (the API route) invokes it. The implementer explicitly noted this in Architectural Decision #5 as "a one-line follow-up in Story 18.5's API route or in 18.2's `executeFreeAgentSessionJob`" — but Story 18.5 (verified separately) does not wire it either. Net effect: at runtime, no commit produced by any free-agent session will carry the trailer, defeating AC #1's primary user value. The fix is small (3 lines in the handler) but blocks AC #1 from being verifiably "done".
+
+### Key Findings
+
+**HIGH severity:** none.
+
+**MEDIUM severity:**
+
+1. **[MEDIUM] AC #1 runtime guarantee unmet — `installCommitMsgHook` is never called.** Grep confirms the function is only referenced from test files and the function itself: `grep -rE 'installCommitMsgHook' --include='*.ts,*.mjs,*.js' | grep -v __tests__` returns only `free-agent-worktree.mjs:49,257,270,271` (the export + internal comments). The daemon handler at `daemon/pipelines/free-agent-session.mjs:104-116` calls `ensureWorktree` and `writeFreeAgentSettings` but **NOT** `installCommitMsgHook`. The implementer's Architectural Decision #5 says this was intentional ("cleaner separation") and that "the next story" would wire it; verification against Story 18.5's POST /sessions + POST /messages routes (`functions/api/index.ts:5680-5800`) confirms 18.5 also does not call it. Therefore, AC #1's claim that "Every commit the free-agent produces inside its worktree carries a `Agent: FREE-AGENT-<sessionId>` trailer" is **not satisfied at runtime** — the hook is never installed, so git never invokes it, so the trailer never appears.
+   - **Required fix (3 lines):** Add an `installCommitMsgHook({ worktreePath: worktreeInfo.worktreePath, sessionId })` call inside the try-block in `daemon/pipelines/free-agent-session.mjs:104-116`, right after the `writeFreeAgentSettings` call. Import it from the same module: `const wt = worktreeHelpers || (await import('./lib/free-agent-worktree.mjs')); ... wt.installCommitMsgHook({worktreePath, sessionId})`.
+   - **Test fix:** Add one assertion to `daemon/pipelines/__tests__/free-agent-session.test.mjs` verifying `installCommitMsgHook` is called with `{worktreePath, sessionId}` after `writeFreeAgentSettings`.
+   - The hook script itself, the installer, the idempotency logic, and the env-var contract (`FREE_AGENT_SESSION_ID` at `:152` of the handler) are all correct. The only gap is the call site.
+
+**LOW severity:**
+
+1. **[LOW] AC #6 admin-scope escalation deferred.** The route at `functions/api/index.ts:5985-5988` is owner-only; admin scope wiring is deferred per Architectural Decision #1 / `[[ship-mvp-add-complexity-later]]`. This is a documented MVP trade-off, not a defect. Flag for v1.1 when an admin-only oversight workflow becomes useful.
+
+### Acceptance Criteria Coverage
+
+| AC  | Description                                                                                          | Status                      | Evidence                                                                                                                                                                                                                                                                                                                                                                                              |
+| --- | ---------------------------------------------------------------------------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Every commit carries `Agent: FREE-AGENT-<sessionId>` trailer via prepare-commit-msg hook             | ⚠️ **NOT WIRED**            | Hook script complete at `daemon/pipelines/lib/free-agent-commit-msg-hook.sh:23-60`; installer complete at `daemon/pipelines/lib/free-agent-worktree.mjs:257-325`; env-var contract complete at `daemon/pipelines/free-agent-session.mjs:152`. **But `installCommitMsgHook` is never invoked from production code** — no commit will ever carry the trailer at runtime. **MEDIUM finding #1**          |
+| 2   | Hook idempotent (no duplicate trailer); installer idempotent (marker-block skip on re-install)       | ✅ IMPLEMENTED              | Hook check at `free-agent-commit-msg-hook.sh:35` (`grep -qF "$TRAILER"`); installer marker check at `free-agent-worktree.mjs:305` (`COMMIT_MSG_HOOK_BLOCK_START` detect). Tested by 10 + 6 tests                                                                                                                                                                                                      |
+| 3   | DDB session row updated per turn with cumulative cost + tokens + lastActivityAt                      | ✅ IMPLEMENTED              | `updateTokens` in repo at `free-agent-sessions-repository.ts:273-290` (atomic ADD); handler call at `free-agent-session.mjs:335-340`; usage parsing at `:268-277` (sums `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` for in; `output_tokens` for out); defensive against missing facade method                                                                              |
+| 4   | Daemon-side AWS-call instrumentation (CloudTrail filter deferred; v1 = stderr tagging via sessionId) | ✅ IMPLEMENTED (substitute) | Stderr capture at `free-agent-session.mjs:211-213` (`stderrBuf`); included in error event payloads at `:297-299, :325` via `pushEvent(sessionId, ...)`. CloudTrail filter explicitly deferred to v1.1 per AC text and completion notes                                                                                                                                                                |
+| 5   | `GET /api/free-agent/sessions/:id/audit` returns `{ sessionId, session, events }` shape              | ✅ IMPLEMENTED              | Route at `functions/api/index.ts:5973-6042` — sessionId schema validation at `:5975-5978`; session fetch + 404 at `:5980-5983`; paginated event fetch at `:5993-6010` (200/page cap, 5000-event safety ceiling); response shape at `:6012-6041` matches AC #5 exactly                                                                                                                                 |
+| 6   | Auth-gated: owner OR admin-scope, else 403 FORBIDDEN                                                 | ⚠️ PARTIAL                  | Owner check at `:5985-5988` returns 403 FORBIDDEN. **Admin escalation deferred** per Architectural Decision #1 — documented as `[[ship-mvp-add-complexity-later]]` trade-off. **LOW finding #1**                                                                                                                                                                                                      |
+| 7   | Unit tests pass: 5 files                                                                             | ✅ IMPLEMENTED              | Re-verified: `free-agent-commit-msg-hook.test.mjs` (10), `free-agent-audit-route.test.ts` (9), `free-agent-worktree.test.mjs` (22 total, 6 from this extension), `free-agent-sessions-repository.test.ts` (29 total, 4 from this extension), `free-agent-session.test.mjs` (16 total, 5 from this extension). **All 19 newly-created file tests pass; full 34-test claim verified across extensions** |
+| 8   | Manual EC2 verification                                                                              | ⏸ DEFERRED                  | Properly unchecked + scoped to operator post-deploy. Recipes in AC #8 reproducible once 18.5 API lands                                                                                                                                                                                                                                                                                                |
+| 9   | `npm run ci` passes baseline                                                                         | ✅ IMPLEMENTED              | 2503/2507 at story-close per completion notes; same 4 pre-existing baseline failures; lint clean for new files                                                                                                                                                                                                                                                                                        |
+
+**Coverage:** 7 of 9 ACs fully met; 1 (AC #1) functionally implemented at unit level but not wired at runtime — **the AC's user-facing guarantee is unmet**; 1 (AC #6) partial with documented MVP trade-off; AC #8 properly deferred to operator.
+
+### Task Completion Validation
+
+| Task                                                                 | Marked | Verified                      | Evidence                                                                                             |
+| -------------------------------------------------------------------- | ------ | ----------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Create free-agent-commit-msg-hook.sh                                 | [x]    | ✅ Complete                   | 60-line bash script, executable, fully tested                                                        |
+| Extend free-agent-worktree.mjs with installCommitMsgHook             | [x]    | ✅ Complete (function exists) | `free-agent-worktree.mjs:257-325`. **But never called from production code** — see MEDIUM finding #1 |
+| Extend free-agent-session.mjs with FREE_AGENT_SESSION_ID env         | [x]    | ✅ Complete                   | Env var injected at `free-agent-session.mjs:152`                                                     |
+| Create free-agent-commit-msg-hook.test.mjs (10 tests)                | [x]    | ✅ Complete                   | 10 tests, all passing                                                                                |
+| Extend free-agent-worktree.test.mjs (6 new tests)                    | [x]    | ✅ Complete                   | 6 new tests within the 22-test file total                                                            |
+| Extend free-agent-sessions-repository.ts with updateTokens           | [x]    | ✅ Complete                   | `repo:273-290` (atomic ADD with zero-clamp guards)                                                   |
+| Extend free-agent-sessions-repository.test.ts (4 tests)              | [x]    | ✅ Complete                   | 4 new tests within the 29-test file total                                                            |
+| Extend free-agent-session.mjs with usage parsing + updateTokens call | [x]    | ✅ Complete                   | `:268-277` parsing, `:335-340` call site                                                             |
+| Extend agent-daemon.mjs with freeAgentUpdateTokens facade            | [x]    | ✅ Complete                   | Wired into facade per completion notes                                                               |
+| Extend free-agent-session.mjs stderr tagging                         | [x]    | ✅ Complete                   | Stderr included in error event payloads with sessionId                                               |
+| Extend free-agent-session.test.mjs (5 new tests)                     | [x]    | ✅ Complete                   | 5 new tests within the 16-test file total                                                            |
+| Add GET /api/free-agent/sessions/:id/audit                           | [x]    | ✅ Complete                   | `functions/api/index.ts:5973-6042`                                                                   |
+| Create free-agent-audit-route.test.ts (9 tests)                      | [x]    | ✅ Complete                   | 9 tests, all passing                                                                                 |
+| Run npm run ci                                                       | [x]    | ✅ Complete                   | 2503/2507 per completion notes                                                                       |
+
+**Summary:** 14 of 14 [x]-marked tasks verified — each individual task delivers its claimed function. **However, the task "Extend free-agent-worktree.mjs with installCommitMsgHook" delivers the function but the cross-cutting integration (calling it from the handler) was deliberately deferred by the implementer to "the next story", and that deferral did not materialize.** This is the gap the MEDIUM finding addresses.
+
+### Test Coverage and Gaps
+
+- **Hook script:** Excellent coverage (10 tests via execFile — adds trailer, idempotent on existing trailer, handles existing trailers from other agents, handles missing FREE_AGENT_SESSION_ID env, etc.).
+- **Hook installer:** Strong coverage (6 tests — fresh install / idempotent re-install / append to user-hook / custom path / required args / unreadable fallback).
+- **Token accumulation:** Strong coverage (4 repo tests for ADD/zero/negative/partial-zero).
+- **Usage parsing in handler:** Strong coverage (5 tests — simple usage, with cache, no-usage no-op, missing-updateTokens backward compat, env-var injection).
+- **Audit route:** Strong coverage (9 tests — happy path, 403 non-owner, 404 missing session, 400 invalid id).
+- **Coverage gap (advisory):** No integration test asserts `installCommitMsgHook` is invoked when the handler runs. Such a test would have caught MEDIUM finding #1 before it shipped. Add this test as part of the fix.
+
+### Architectural Alignment
+
+- **`[[ship-mvp-add-complexity-later]]` (memory):** Respected for AC #6 admin-scope deferral. Reasonable trade-off — admin scope is a one-line follow-up.
+- **Multi-table DDB preference:** Respected — `updateTokens` extends the existing sessions table, no new tables added.
+- **Existing route patterns:** Audit route mirrors the JWT auth + Zod validation + `safeParse` + `AppError`/`NotFoundError`/`ValidationError` pattern used throughout `functions/api/index.ts`. Good consistency.
+- **Daemon facade pattern:** `freeAgentUpdateTokens` added to the daemon-side facade per the established `.mjs`-can't-import-`.ts` constraint. Same drift risk as LOW finding #2 in Story 18.2's review.
+
+### Security Notes
+
+- **Audit endpoint is owner-only:** Correct for v1. The 403 returns FORBIDDEN error code; admin-scope wire-up is the one-line extension that AC #6 anticipates.
+- **5000-event safety ceiling on audit response:** Protects against runaway sessions / DoS via large event volumes. 200-events-per-page query batching is reasonable.
+- **Hook ALWAYS exits 0:** Per `free-agent-commit-msg-hook.sh:13-19` design comment — a hook failure must never block a commit. Correct posture for "cosmetic" tagging.
+- **Trailer reveals sessionId in git history:** SessionIds are UUIDs (high entropy, not credentials). Acceptable to expose in commit messages. Operator-friendly: `git log --grep="Agent: FREE-AGENT-<id>"` is the AC #8 verification recipe.
+- **No new IAM grants required:** Confirmed in completion notes — the audit endpoint reads tables already accessible to the API Lambda.
+
+### Best-Practices and References
+
+- **Git hook contract (prepare-commit-msg):** `$1 = path to commit-msg file, $2 = source, $3 = SHA during amend` — verified at hook lines 9-13. Standard git docs reference.
+- **DDB ADD expression atomicity:** Used by `updateTokens` and `updateCostUsd` for race-free accumulation; AWS-recommended pattern for counter updates.
+- **Hono.js route patterns:** Authentication via middleware injection + `c.get('user')` access pattern matches the existing routes in `functions/api/index.ts`.
+- **Idempotent installer pattern:** Marker-block bracketing (`# >>> ... <<<`) is the canonical approach for safely augmenting user-owned config files (similar to `~/.bashrc` snippets installed by package managers).
+
+### Action Items
+
+**Code Changes Required (MEDIUM):**
+
+- [ ] [MEDIUM] **Wire `installCommitMsgHook` into the daemon handler.** In `daemon/pipelines/free-agent-session.mjs:104-116`, inside the existing try-block, after the `wt.writeFreeAgentSettings(...)` call, add:
+  ```js
+  wt.installCommitMsgHook({
+    worktreePath: worktreeInfo.worktreePath,
+    sessionId,
+  });
+  ```
+  And extend `daemon/pipelines/__tests__/free-agent-session.test.mjs` with one new test asserting the call is made with `{worktreePath, sessionId}` after `writeFreeAgentSettings`. This is the unblocking change for AC #1's runtime guarantee. Estimated effort: 5 minutes including test.
+
+**Advisory Notes:**
+
+- [ ] [LOW] [v1.1] Wire admin scope into the audit endpoint at `functions/api/index.ts:5985-5988`. The auth block has the placeholder structure ready; just extend the condition: `if (!user || (session.operatorId !== user.userId && !user.scope?.includes('admin')))`.
+- [ ] [HARDENING — v1.1] Set up CloudWatch metric filter on `FreeAgentSessionRole` ARN per the original AC #4 spec. Requires verified deploy + CloudTrail-enabled account. The stderr-tagging substitute is acceptable for v1 but doesn't capture successful AWS calls (only errors).
+- Note: Token-parsing field names (`input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`) are educated guesses from Anthropic SDK shape; verify against real stream-json output on first EC2 dev run and adjust the parser at `daemon/pipelines/free-agent-session.mjs:268-277` if names differ.
+- Note: Audit endpoint pagination caps at 5000 events — sufficient for v1; revisit if sessions routinely exceed.

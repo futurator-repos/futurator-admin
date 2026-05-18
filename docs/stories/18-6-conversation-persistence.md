@@ -208,8 +208,138 @@ So that **the agent feels like a continuous collaborator across days/weeks, not 
 
 ### Change Log
 
-| Date       | Change                                                                                                                                           |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 2026-05-17 | Story drafted from epic 18 (status → in-progress in same session)                                                                                |
-| 2026-05-17 | Implementation complete: conversations table + repo + 2 API routes + USER-message persistence on POST /messages + hook + thread-list dropdown UI |
-| 2026-05-17 | Status → review. Assistant-message daemon-side writes + 2 route test files + widget test extensions + Playwright extension all deferred to v1.1  |
+| Date       | Change                                                                                                                                                                                                                                                                              |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-05-17 | Story drafted from epic 18 (status → in-progress in same session)                                                                                                                                                                                                                   |
+| 2026-05-17 | Implementation complete: conversations table + repo + 2 API routes + USER-message persistence on POST /messages + hook + thread-list dropdown UI                                                                                                                                    |
+| 2026-05-17 | Status → review. Assistant-message daemon-side writes + 2 route test files + widget test extensions + Playwright extension all deferred to v1.1                                                                                                                                     |
+| 2026-05-17 | Senior Developer Review notes appended (Outcome: **Changes Requested** — 1 MEDIUM finding, mirrors Story 18.5's gap). AC #9 contract unmet: 2 route test files don't exist + widget test extension didn't happen, despite the corresponding task marked `[x]`. Status → in-progress |
+
+---
+
+## Senior Developer Review (AI)
+
+**Reviewer:** Richie
+**Date:** 2026-05-17
+**Outcome:** ⚠️ **Changes Requested** — 1 MEDIUM finding (AC #9 test contract unmet, mirroring Story 18.5's gap). The conversations table + repository + 2 API routes + frontend hook + thread-list dropdown are all in place and work correctly; the test deferral is the only blocker.
+
+### Summary
+
+Story 18.6 ships the conversation persistence layer cleanly: dedicated `futurator-free-agent-conversations` table (PK sessionId, SK 6-digit zero-padded messageIndex, 90-day TTL, PITR), a 135-line repository with `appendMessage` + `getMessages` + GSI-delegate list functions + `getFirstUserMessagePreview` helper, USER-message persistence wired into the existing `POST /messages` route (before daemon enqueue, so a daemon failure doesn't lose the operator's input), two new API routes (`GET /conversations?scope=` and `GET /sessions/:id/messages`), and a `<ThreadListDropdown />` component wired into the panel header with "New conversation" + recent-session rows + relative time formatting. Six architectural decisions are well-justified: assistant-message persistence deferred to v1.1 (requires the daemon-side facade pattern from Story 18.2), Query-count+1 for messageIndex (race-free because the Story 18.2 processing lock serializes per-session writes), GSI delegation to the sessions repo (no duplication), simple scope query format, N+1 reads for previews (acceptable at limit=20), and resume-semantics-lean-on-existing-Story-18.5-surfaces. **Same shape as Story 18.5's gap:** AC #9 lists 4 test surfaces; only 1 exists (the conversations-repo test with 13 tests). The 2 route tests + widget test extension are deferred but their tasks are marked `[x]`.
+
+### Key Findings
+
+**HIGH severity:** none.
+
+**MEDIUM severity:**
+
+1. **[MEDIUM] AC #9 contract unmet (mirrors Story 18.5 finding):** Verified by `ls`:
+   - ❌ `functions/api/__tests__/free-agent-conversations-route.test.ts` — does not exist
+   - ❌ `functions/api/__tests__/free-agent-messages-route.test.ts` — does not exist
+   - ✅ `functions/shared/repositories/__tests__/free-agent-conversations-repository.test.ts` — exists, 13 tests, all passing
+   - ⚠️ `src/components/free-agent/__tests__/widget.test.tsx` — not extended with thread-list-dropdown assertions per AC #9 line 4
+
+   Task line 82 ("Create the 2 test files per AC #9") is marked `[x]`; reality is neither file exists. Completion notes "Deferred" #3 admits this. The widget test extension task isn't explicitly listed in Tasks/Subtasks but AC #9 line 4 requires it; "Deferred" #4 admits it didn't happen.
+
+   Net effect: the 2 new API routes have **zero direct test coverage**. The frontend ThreadListDropdown component has only the existing 47-test pass-through coverage (the panel-header swap is API-compatible). Regression risk bounded by route simplicity + existing repository test coverage; not bounded for the dropdown interaction logic.
+
+   **Required fix (one of):**
+   - **(A)** Implement the 3 missing test surfaces:
+     1. `functions/api/__tests__/free-agent-conversations-route.test.ts` — list happy path with scope filter, 401 unauthenticated, 400 missing-scope-param, 400 invalid-limit
+     2. `functions/api/__tests__/free-agent-messages-route.test.ts` — get full history happy path, 403 non-owner, 404 missing session
+     3. Extend `widget.test.tsx` with: dropdown renders sessions, "New conversation" entry resets active session, click load triggers `fetchSessionMessages`
+   - **(B)** Un-mark the `[x]` tasks and explicitly track the deferral as a v1.1 backlog item.
+
+   Same trade-off as Story 18.5's MEDIUM finding. The user can decide whether the test debt is acceptable to ship now or should land before status: done.
+
+**LOW severity:** none (architectural decisions noted below as advisory).
+
+### Acceptance Criteria Coverage
+
+| AC  | Description                                                                                                         | Status                                   | Evidence                                                                                                                                                                                                                                                         |
+| --- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | DDB table `futurator-free-agent-conversations` PK/SK/TTL/PITR + Lambda link                                         | ✅ IMPLEMENTED                           | `sst.config.ts:510-525` — fields, primaryIndex (hashKey sessionId + rangeKey messageIndex), ttl 'expiresAt', PAY_PER_REQUEST, pointInTimeRecovery enabled                                                                                                        |
+| 2   | Repository `appendMessage` + `getMessages` + `listSessionsByOperator` (delegate) + `listSessionsByScope` (delegate) | ✅ IMPLEMENTED                           | `functions/shared/repositories/free-agent-conversations-repository.ts:50-78` (appendMessage), `:85-102` (getMessages), `:105-110` (listSessionsByOperator delegate), `:113-118` (listSessionsByScope delegate); bonus `getFirstUserMessagePreview` at `:125-134` |
+| 3   | USER messages persisted from API layer; assistant deferred to v1.1                                                  | ✅ IMPLEMENTED (partial per AC text)     | `functions/api/index.ts:5789-5793` — `appendMessage({role:'user', content})` called BEFORE `agentJobsRepo.createJob`. v1.1 deferral documented (Architectural Decision #1)                                                                                       |
+| 4   | 2 new routes: `GET /conversations` + `GET /sessions/:id/messages`                                                   | ✅ IMPLEMENTED                           | `functions/api/index.ts:5914-5980` (`GET /conversations` with scope parsing + owner-filter + N+1 preview fetch) + `:5933` (`GET /sessions/:id/messages`)                                                                                                         |
+| 5   | Panel-header hamburger → recent-sessions dropdown with relative-time                                                | ✅ IMPLEMENTED                           | `src/components/free-agent/thread-list-dropdown.tsx` (137 lines) — "New conversation" entry at top, sessions list, `formatDistanceToNow` from date-fns, click-outside-to-close, click-row → onLoadSession callback. Wired into panel-header per File List        |
+| 6   | "New conversation" entry resets active session                                                                      | ✅ IMPLEMENTED                           | `thread-list-dropdown.tsx:73-82` (new-conversation button at top of menu, calls `onNewConversation` which clears `activeSessionId`)                                                                                                                              |
+| 7   | Resuming IDLE/EXPIRED — "Session resumed" marker + INVALID_STATE 409 on next send                                   | ✅ IMPLEMENTED (per documented decision) | Architectural Decision #6 documents leaning on existing Story 18.5 INVALID_STATE 409 response. No new code path needed                                                                                                                                           |
+| 8   | Resuming BUDGET_EXHAUSTED — thread loads + budget callout shown                                                     | ✅ IMPLEMENTED (per documented decision) | Same as AC #7 — Story 18.5's panel-header already renders the budget callout when `utilization >= 1`                                                                                                                                                             |
+| 9   | Unit tests pass: 4 test surfaces                                                                                    | ⚠️ **PARTIAL**                           | Only 1 of 4 exists (`free-agent-conversations-repository.test.ts` — 13 tests, all passing). 2 route tests + widget extension missing. **MEDIUM finding #1**                                                                                                      |
+| 10  | Playwright e2e extension: persistence + dropdown-shows-prior + click-loads-messages                                 | ⏸ DEFERRED                               | Per completion notes "Deferred" #5. Existing 4 smoke tests still cover basic mount/interaction                                                                                                                                                                   |
+| 11  | `npm run ci` passes baseline                                                                                        | ✅ IMPLEMENTED                           | 2563/2567 per completion notes; same 4 pre-existing baseline failures                                                                                                                                                                                            |
+
+**Coverage:** 9 of 11 ACs implemented; 1 (AC #9) partial — 1 of 4 test surfaces exists; 1 (AC #10) appropriately deferred to follow-up.
+
+### Task Completion Validation
+
+| Task                                                         | Marked | Verified                | Evidence                                                                 |
+| ------------------------------------------------------------ | ------ | ----------------------- | ------------------------------------------------------------------------ |
+| sst.config.ts FreeAgentConversationsTable                    | [x]    | ✅ Complete             | `sst.config.ts:510-525`                                                  |
+| Daemon EC2 IAM role grant (out-of-band, v1.1 prep)           | [x]    | ⏸ OPERATOR              | Documented as operator post-deploy (v1.1 prep, daemon doesn't write yet) |
+| FreeAgentConversationMessage type                            | [x]    | ✅ Complete             | Per File List + verified by repo importing it                            |
+| freeAgentConversations in TABLE_NAMES                        | [x]    | ✅ Complete             | Verified at `functions/shared/dynamo-client.ts` (grep earlier)           |
+| Create free-agent-conversations-repository.ts                | [x]    | ✅ Complete             | 135 lines, all 4 functions + bonus helper                                |
+| Create **tests**/free-agent-conversations-repository.test.ts | [x]    | ✅ Complete             | 13 tests, all passing                                                    |
+| Extend POST /messages to appendMessage(role='user')          | [x]    | ✅ Complete             | `functions/api/index.ts:5789-5793`                                       |
+| Add GET /api/free-agent/conversations route                  | [x]    | ✅ Complete             | `:5914-5980`                                                             |
+| Add GET /api/free-agent/sessions/:id/messages route          | [x]    | ✅ Complete             | `:5933+`                                                                 |
+| Create the 2 test files per AC #9                            | [x]    | ❌ **FALSE COMPLETION** | Neither file exists on disk. **MEDIUM finding #1**                       |
+| Create use-free-agent-conversations.ts hook                  | [x]    | ✅ Complete             | Per File List                                                            |
+| Create thread-list-dropdown.tsx                              | [x]    | ✅ Complete             | 137 lines, complete UI                                                   |
+| Modify panel-header.tsx with real dropdown                   | [x]    | ✅ Complete             | Per File List                                                            |
+| Add loadSession action to use-free-agent-session.ts          | [x]    | ✅ Complete             | Per File List                                                            |
+| Run npm run ci                                               | [x]    | ✅ Complete             | 2563/2567 per completion notes                                           |
+
+**Summary:** 14 of 15 [x]-marked tasks verified complete. **1 task falsely marked complete** ("Create the 2 test files per AC #9"). Triggers MEDIUM finding #1.
+
+### Test Coverage and Gaps
+
+- **Repository:** Strong coverage (13 tests covering all 4 functions + edge cases).
+- **API routes:** **ZERO direct test coverage** for the 2 new routes (`GET /conversations`, `GET /sessions/:id/messages`). Route logic includes scope param parsing + owner filtering + N+1 preview fetch + Promise.all parallelism — all worth covering.
+- **Frontend:** ThreadListDropdown has no targeted component test. Behavior is covered indirectly by the existing 47 widget tests (the panel-header swap is API-compatible — props default safely when callbacks absent), but the dropdown's own click-outside-to-close, isLoading state, empty state, and ConversationRow rendering are untested.
+- **Total new tests:** 13 (vs. AC #9's 4 surfaces × ~5-8 tests each = ~20-32 expected new tests).
+
+### Architectural Alignment
+
+- **Multi-table DDB preference (memory `[[dynamodb-multi-table-preference]]`):** Respected — dedicated conversations table, no overloading on the sessions table.
+- **GSI delegation (Architectural Decision #3):** Conversations repo's `listSessionsByOperator` / `listSessionsByScope` re-export Story 18.2's sessions-repo functions verbatim. No duplication. Clean.
+- **Race-free messageIndex via Query-count+1 (Architectural Decision #2):** Correct because Story 18.2's `acquireProcessingLock` serializes POST /messages per-session. Daemon-side writes will need an atomic counter — flagged for v1.1.
+- **N+1 reads for previews (Architectural Decision #5):** Acceptable at limit=20. Denormalize via `firstUserMessagePreview` attribute on session row if list grows. Documented mitigation path.
+- **Assistant-message persistence deferred to v1.1 (Architectural Decision #1):** Right scope cut — operator's input is the load-bearing artifact; assistant responses are reconstructible from agent-events (7-day TTL) for recent sessions. Daemon-side facade can land when v1 surfaces show the gap.
+- **`[[ship-mvp-add-complexity-later]]` (memory):** Respected throughout.
+
+### Security Notes
+
+- **Owner check on both new routes:** Verified at `GET /conversations:5943` (`ownerSessions = sessions.filter((s) => s.operatorId === user.userId)`) and `GET /sessions/:id/messages:5939` (session lookup + owner check pattern). Consistent with audit + events routes.
+- **Defensive owner filter on GSI returns:** Even though Story 18.2's GSI-by-scope returns all sessions for the scope, the route filters to owner-only. Defensive against future multi-operator scenarios.
+- **DDB conditional write on append (`free-agent-conversations-repository.ts:74`):** `attribute_not_exists(sessionId) AND attribute_not_exists(messageIndex)` prevents duplicate writes at the same (PK, SK) — race-defensive even though Story 18.2's lock should prevent concurrent appends.
+- **Content unbounded:** `AppendMessageInput.content` is `string` without max-length validation in the repo. Story 18.5's POST /messages route has 8192-byte UTF-8 cap (per AC #1) which is the primary defense; the repo trusts the route's validation. Acceptable pattern.
+
+### Best-Practices and References
+
+- **DynamoDB composite key (PK+SK) for time-series conversations:** Zero-padded SK enables ascending ScanIndexForward Query — canonical pattern for message threads.
+- **TTL on conversations table (90 days):** Outlasts the 7-day agent-events TTL — operators can read prior conversation contents long after the events have aged out. Correct trade-off.
+- **`getFirstUserMessagePreview` best-effort with null fallback:** Returns null when no message exists yet (session created but never sent to). UI handles via `sessionId.slice(0, 8)` fallback per `thread-list-dropdown.tsx:111-112`.
+- **Promise.all parallelism for preview fetches:** Correct shape for bounded N concurrent reads (limit=20 max).
+- **date-fns `formatDistanceToNow`:** Standard library for relative-time strings; matches the codebase's existing usage.
+
+### Action Items
+
+**Code Changes Required (MEDIUM):**
+
+- [ ] [MEDIUM] **Resolve the AC #9 contract** — same shape as Story 18.5's required fix:
+  1. `functions/api/__tests__/free-agent-conversations-route.test.ts` — happy path with scope filter, 401 unauthenticated, 400 missing/invalid scope param, 400 invalid limit, owner-filter assertion (sessions for other operators are filtered out)
+  2. `functions/api/__tests__/free-agent-messages-route.test.ts` — happy path returns full history, 403 non-owner, 404 missing session
+  3. Extend `src/components/free-agent/__tests__/widget.test.tsx` with thread-list-dropdown tests: dropdown renders sessions (with mocked `useFreeAgentConversations`), "New conversation" entry resets active session, click-row triggers `onLoadSession` callback, isLoading + empty states
+
+  Pattern reference: existing `free-agent-audit-route.test.ts` for route tests; existing widget tests for the component extensions. Estimated effort: 1-2 hours.
+
+**Advisory Notes:**
+
+- [ ] [v1.1] Implement the daemon-side `freeAgentConversations` facade matching the Story 18.2 sessions-facade pattern. Wire `appendMessage({role:'assistant', content})` into the daemon handler on `free-agent.turn.complete`. ~40 lines per the implementer's estimate.
+- [ ] [v1.1] Switch to an atomic counter on the session row (`messageCount` attribute + conditional UpdateCommand) once daemon-side writes ship — Query-count+1 is no longer race-free when the daemon joins the writers.
+- [ ] [v1.1+] If conversation lists grow past ~50 sessions per scope, denormalize `firstUserMessagePreview` into the session row to eliminate the N+1 read pattern.
+- Note: `O(n)` Query in `appendMessage` (fetches all messages to compute next index) becomes notable past ~100 messages per session. Acceptable v1 — most sessions will be ≤20 turns based on use-case framing — but worth measuring once real usage exists.
+- Note: Resume semantics for IDLE/EXPIRED/BUDGET_EXHAUSTED correctly lean on existing Story 18.5 surfaces (INVALID_STATE 409, budget callout). No new code path required; documented in Architectural Decision #6.
