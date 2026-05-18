@@ -36,6 +36,24 @@ describe('deriveScope (AC #4 route rules)', () => {
     });
   });
 
+  it('maps /labs?appId=... → app scope', () => {
+    expect(deriveScope('/labs', sp(['appId', 'snake-4']))).toEqual({
+      kind: 'app',
+      id: 'snake-4',
+    });
+  });
+
+  it('prefers appId over planId when both are present on /labs (real bare repo wins)', () => {
+    // Regression guard: the user's URL admin.futurator.ai/labs?appId=snake-4&planId=plan_…
+    // was previously deriving plan scope → projectId '_plan' → no bare repo on disk →
+    // daemon's ensureWorktree threw WORKTREE_FAILURE. App scope gives projectId='snake-4'
+    // which the Pipeline v2 bootstrap actually creates on EC2.
+    expect(deriveScope('/labs', sp(['appId', 'snake-4'], ['planId', 'plan_snake-4_xyz']))).toEqual({
+      kind: 'app',
+      id: 'snake-4',
+    });
+  });
+
   it('maps /apps/:id → app scope', () => {
     expect(deriveScope('/apps/my-app', sp())).toEqual({ kind: 'app', id: 'my-app' });
   });

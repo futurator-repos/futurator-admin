@@ -7,9 +7,15 @@
  * Rules (matches Story 18.4 AC #4):
  *   - /labs/projects/:id or /labs/party/:id → { kind: 'project', id }
  *   - /labs/plans/:id                       → { kind: 'plan', id }
+ *   - /labs   with ?appId=…                 → { kind: 'app', id }    (prefer app over plan when both present)
  *   - /labs   with ?planId=…                → { kind: 'plan', id }
  *   - /apps/:id                             → { kind: 'app', id }
  *   - anything else                         → { kind: 'workspace' }
+ *
+ * Why app-over-plan precedence on /labs: the daemon needs a real bare repo at
+ * /home/ubuntu/repos/<projectId>.git to spawn a worktree. Apps have one (from
+ * Pipeline v2 bootstrap); plans don't. When both appId and planId are in the
+ * URL, the appId points at a real working tree.
  */
 
 'use client';
@@ -30,6 +36,12 @@ export function deriveScope(pathname: string, searchParams: URLSearchParams): Fr
   // /labs/plans/:id
   const planRouteMatch = path.match(/^\/labs\/plans\/([^/]+)/);
   if (planRouteMatch) return { kind: 'plan', id: planRouteMatch[1] };
+
+  // /labs?appId=…  (preferred over planId — apps have real bare repos)
+  const appQuery = searchParams.get('appId');
+  if ((path === '/labs' || path === '') && appQuery) {
+    return { kind: 'app', id: appQuery };
+  }
 
   // /labs?planId=…  (the current Labs UI uses query params for plan selection)
   const planQuery = searchParams.get('planId');

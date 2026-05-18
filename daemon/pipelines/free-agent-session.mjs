@@ -92,12 +92,13 @@ export async function runFreeAgentSession(job, ctx) {
   if (!pushEvent) throw new Error('runFreeAgentSession: ctx.pushEvent required');
 
   // ── 1. Lock ──
-  const lockResult = await sessionsRepo.acquireProcessingLock(sessionId);
-  if (!lockResult.ok) {
-    throw new Error(
-      `runFreeAgentSession: could not acquire lock for ${sessionId} — ${lockResult.reason}`,
-    );
-  }
+  // The API Lambda's POST /messages route pre-acquires the processing lock
+  // (ACTIVE → PROCESSING) before enqueueing this job. The session is therefore
+  // already in PROCESSING when we run. Re-acquiring here would fail with
+  // SESSION_BUSY against a lock we ourselves are working under. The release
+  // path (`releaseProcessingLock`) at the end of the turn unwinds the lock the
+  // API set. If a future entry point (e.g., a direct daemon invocation) needs
+  // to acquire the lock itself, it must do so before calling this handler.
 
   // ── 2. Ensure worktree + 3. settings ──
   let worktreeInfo;

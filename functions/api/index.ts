@@ -5922,7 +5922,8 @@ app.post('/api/free-agent/sessions', authMiddleware, async (c) => {
   // Derive projectId from scope.id when scope.kind === 'project'; fall back to
   // a synthetic id for non-project scopes (the daemon worktree path is still
   // /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/).
-  const projectId = scope.kind === 'project' && scope.id ? scope.id : `_${scope.kind}`;
+  const projectId =
+    (scope.kind === 'project' || scope.kind === 'app') && scope.id ? scope.id : `_${scope.kind}`;
   const sessionId = crypto.randomUUID();
 
   const credentials = await assumeFreeAgentSessionRole({

@@ -156,8 +156,10 @@ describe('runFreeAgentSession — first-turn spawn args (AC #2)', () => {
     });
     expect(worktreeHelpers.writeFreeAgentSettings).toHaveBeenCalledTimes(1);
 
-    // Lock acquired, then released to ACTIVE on success
-    expect(sessionsRepo.acquireProcessingLock).toHaveBeenCalledWith('sid-1');
+    // Lock is pre-acquired by the API Lambda before enqueue; daemon does NOT
+    // re-acquire (would deadlock against the API's own PROCESSING write).
+    // It only releases back to ACTIVE on success.
+    expect(sessionsRepo.acquireProcessingLock).not.toHaveBeenCalled();
     expect(sessionsRepo.releaseProcessingLock).toHaveBeenCalledWith('sid-1', 'ACTIVE');
     expect(sessionsRepo.incrementTurn).toHaveBeenCalledWith('sid-1');
     expect(sessionsRepo.updateCostUsd).toHaveBeenCalledWith('sid-1', 0.03);
@@ -549,24 +551,45 @@ describe('runFreeAgentSession — watchdog (AC #6)', () => {
   });
 });
 
-describe('runFreeAgentSession — lock acquisition (AC #7)', () => {
-  it('throws when lock cannot be acquired', async () => {
-    const sessionsRepo = makeSessionsRepo({
-      acquireProcessingLock: vi.fn(async () => ({ ok: false, reason: 'SESSION_BUSY' })),
+describe('runFreeAgentSession — lock acquisition contract (AC #7)', () => {
+  it('does NOT call acquireProcessingLock — API Lambda pre-acquires before enqueue', async () => {
+    // Regression guard for the double-lock-acquire deadlock that stranded
+    // session d6547d46-e23a-446d-8df1-6c52e84df6a4 on 2026-05-18: API moved
+    // status to PROCESSING, then daemon tried to re-acquire and ALWAYS hit
+    // SESSION_BUSY. The session would have been re-acquirable only if the
+    // status were ACTIVE — which it isn't after the API's own write.
+    const child = new FakeChild();
+    const spawn = vi.fn(() => child);
+    const sessionsRepo = makeSessionsRepo();
+
+    const promise = runFreeAgentSession(makeJob(), {
+      pushEvent: makePushEvent(),
+      sessionsRepo,
+      worktreeHelpers: makeWorktreeHelpers(),
+      spawn,
+      logger: silentLogger(),
     });
 
-    await expect(
-      runFreeAgentSession(makeJob(), {
-        pushEvent: makePushEvent(),
-        sessionsRepo,
-        worktreeHelpers: makeWorktreeHelpers(),
-        spawn: vi.fn(),
-        logger: silentLogger(),
-      }),
-    ).rejects.toThrow(/SESSION_BUSY/);
+    // Emit a minimal stream-json so the handler exits cleanly.
+    setTimeout(() => {
+      child.stdout.emit(
+        'data',
+        Buffer.from(
+          JSON.stringify({ type: 'system', subtype: 'init', session_id: 'claude-xyz' }) + '\n',
+        ),
+      );
+      child.stdout.emit(
+        'data',
+        Buffer.from(JSON.stringify({ type: 'result', total_cost_usd: 0 }) + '\n'),
+      );
+      child.emit('close', 0);
+    }, 5);
 
-    // Spawn never called when lock fails.
-    expect(sessionsRepo.releaseProcessingLock).not.toHaveBeenCalled();
+    await promise;
+
+    expect(sessionsRepo.acquireProcessingLock).not.toHaveBeenCalled();
+    // But the release-on-completion path still fires.
+    expect(sessionsRepo.releaseProcessingLock).toHaveBeenCalledWith('sid-1', 'ACTIVE');
   });
 });
 
