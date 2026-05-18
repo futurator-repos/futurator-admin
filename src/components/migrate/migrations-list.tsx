@@ -4,9 +4,10 @@ import { useState } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { GitBranch, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useMigrations, useDeleteMigration } from '@/hooks/use-migrations';
+import { useMigrations } from '@/hooks/use-migrations';
 import { useRefreshProjectMutation } from '@/hooks/use-party-projects';
 import { ProjectStatusBadge } from '@/components/labs/party/project-status-badge';
+import { DeleteMigrationModal } from './delete-migration-modal';
 import type { Migration } from '@/types/migration';
 
 function truncateMiddle(s: string, max = 50): string {
@@ -26,8 +27,7 @@ function truncateMiddle(s: string, max = 50): string {
 export function MigrationsList({ highlight }: { highlight?: string | null }) {
   const { data, isLoading, error } = useMigrations();
   const refresh = useRefreshProjectMutation();
-  const del = useDeleteMigration();
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Migration | null>(null);
 
   if (isLoading) {
     return (
@@ -63,20 +63,16 @@ export function MigrationsList({ highlight }: { highlight?: string | null }) {
           isHighlighted={highlight === m.projectId}
           onRefresh={() => refresh.mutate(m.projectId)}
           refreshing={refresh.isPending && refresh.variables === m.projectId}
-          onRequestDelete={() => setConfirmDelete(m.projectId)}
-          confirmingDelete={confirmDelete === m.projectId}
-          onCancelDelete={() => setConfirmDelete(null)}
-          onConfirmDelete={async () => {
-            try {
-              await del.mutateAsync(m.projectId);
-              setConfirmDelete(null);
-            } catch {
-              // surface remains visible; error shown elsewhere if needed
-            }
-          }}
-          deleting={del.isPending && del.variables === m.projectId}
+          onRequestDelete={() => setPendingDelete(m)}
         />
       ))}
+      <DeleteMigrationModal
+        migration={pendingDelete}
+        open={pendingDelete !== null}
+        onOpenChange={(o) => {
+          if (!o) setPendingDelete(null);
+        }}
+      />
     </div>
   );
 }
@@ -87,16 +83,12 @@ interface CardProps {
   onRefresh: () => void;
   refreshing: boolean;
   onRequestDelete: () => void;
-  confirmingDelete: boolean;
-  onCancelDelete: () => void;
-  onConfirmDelete: () => void;
-  deleting: boolean;
 }
 
 function MigrationCard(p: CardProps) {
   const m = p.migration;
   const isRefreshing = p.refreshing || m.bmadStatus === 'REFRESHING';
-  const isBusy = isRefreshing || m.bmadStatus === 'INSTALLING' || p.deleting;
+  const isBusy = isRefreshing || m.bmadStatus === 'INSTALLING';
   const pulled = m.lastPulledAt ? new Date(m.lastPulledAt) : null;
   return (
     <div
@@ -151,41 +143,18 @@ function MigrationCard(p: CardProps) {
             <RefreshCw className={`mr-1 h-3 w-3 ${isRefreshing ? 'animate-spin' : ''}`} />
             {isRefreshing ? 'Refreshing…' : 'Refresh'}
           </Button>
-          {p.confirmingDelete ? (
-            <>
-              <Button
-                size="sm"
-                variant="destructive"
-                className="h-7 text-[11px]"
-                onClick={p.onConfirmDelete}
-                disabled={p.deleting}
-                data-testid={`migration-delete-confirm-${m.projectId}`}
-              >
-                {p.deleting ? 'Deleting…' : 'Confirm'}
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 text-[11px]"
-                onClick={p.onCancelDelete}
-                disabled={p.deleting}
-              >
-                Cancel
-              </Button>
-            </>
-          ) : (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 text-[11px] text-red-400 hover:bg-red-500/10"
-              onClick={p.onRequestDelete}
-              disabled={isBusy}
-              data-testid={`migration-delete-${m.projectId}`}
-            >
-              <Trash2 className="mr-1 h-3 w-3" />
-              Delete
-            </Button>
-          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 text-[11px] text-red-400 hover:bg-red-500/10"
+            onClick={p.onRequestDelete}
+            disabled={isBusy}
+            data-testid={`migration-delete-${m.projectId}`}
+            title="Open delete confirmation dialog"
+          >
+            <Trash2 className="mr-1 h-3 w-3" />
+            Delete…
+          </Button>
         </div>
       </div>
       {m.envVarKeys.length > 0 && (
