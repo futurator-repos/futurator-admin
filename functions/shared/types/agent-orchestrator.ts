@@ -371,6 +371,18 @@ export interface AgentJob {
      * Written to the working tree between inject-values and npm-install.
      */
     augmentFiles?: Array<{ path: string; content: string }>;
+    /**
+     * Epic 2 Story 2.2 (2026-05-19) — starter's default skill loadout.
+     * Each entry is a `<skill>@<source>` token. The daemon's
+     * `prepin-default-skills` step pins these into
+     * `.claude/skills.manifest.yaml` under `core[]` so the subsequent
+     * `vendor-skills` step (Story 2.3) can fetch each SKILL.md body.
+     *
+     * `null` for stub boilerplates (sst/vite/mobile); `undefined` for
+     * legacy app rows created before this field was threaded. Daemon
+     * treats both identically — prepin skips with `no-default-loadout`.
+     */
+    defaultSkillLoadout?: string[] | null;
   };
 
   /**

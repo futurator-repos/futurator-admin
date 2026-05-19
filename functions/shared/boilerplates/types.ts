@@ -6,7 +6,13 @@ import type { BoilerplateType } from './registry';
  * app-bootstrap pipeline does not duplicate work.
  */
 export interface PostCreateStep {
-  id: 'inject-app-values' | 'npm-install' | 'bmad-bootstrap' | 'commit-and-push';
+  id:
+    | 'inject-app-values'
+    | 'prepin-default-skills'
+    | 'vendor-skills'
+    | 'npm-install'
+    | 'bmad-bootstrap'
+    | 'commit-and-push';
   /**
    * For `inject-app-values` only: which files contain placeholders
    * (`__APP_SLUG__`, `__APP_DISPLAY_NAME__`) that the daemon will substitute.
@@ -53,8 +59,33 @@ export interface BoilerplateMetadata {
   defaultDeployFlavor?: 'static-site' | 'sst-app' | 'spa-on-cloudfront' | 'mobile-store';
   /** Phase 2: ARCHITECT default manifest seed (shape tightened in Phase 2). */
   defaultManifestSeed?: unknown;
-  /** Phase 3: SKILL-SCOUT default skill loadout (shape tightened in Phase 3). */
-  defaultSkillLoadout?: string[];
+  /**
+   * Pipeline v2 Phase 3-C Epic 2 (Story 2.1, 2026-05-19) — default skill
+   * loadout pre-pinned at app-bootstrap time, bypassing SKILL-SCOUT for
+   * the v1 cut. Each entry is a `<skill>@<source>` token where `<source>`
+   * matches a federation source id from
+   * `daemon/lib/federation-loader.mjs::EMBEDDED_DEFAULT_FEDERATION` (e.g.
+   * `anthropic-official`, `futurator-internal`).
+   *
+   * The new bootstrap step `prepin-default-skills` (Story 2.2) rewrites
+   * the empty `.claude/skills.manifest.yaml` scaffold (PR-71) to declare
+   * these under `core[]`. The subsequent `vendor-skills` step (Story 2.3)
+   * runs `scripts/skills-sync.mjs` to fetch each SKILL.md into
+   * `.claude/skills/<name>/`. Claude Code's built-in `Skill` tool then
+   * auto-activates them on relevance — verified by the Story 2.0 probe
+   * (`docs/concepts/logs/skills-probe-2026-05-19/`).
+   *
+   * `null` for stub boilerplates (sst/vite/mobile) — the daemon skips
+   * the prepin + vendor steps. `undefined` is treated identically by
+   * the step (skips with reason `no-default-loadout`); explicit `null`
+   * is preferred for documentation parity with `skillManifest` /
+   * `baselineCapture`.
+   *
+   * SKILL-SCOUT (Epic 3) will eventually replace this hardcoded loadout
+   * with intent-driven proposals — when that ships, this field becomes
+   * the bootstrap-time fallback for projects pre-SKILL-SCOUT.
+   */
+  defaultSkillLoadout?: string[] | null;
 
   /**
    * Pipeline v2 Phase 2-A Story 2-A-4-2 (PR-35) — baseline-diff regression
@@ -74,6 +105,22 @@ export interface BoilerplateMetadata {
     /** Stable name for the test runner — surfaced in attention items. */
     testRunner: 'vitest' | 'jest' | 'playwright' | 'mocha';
   } | null;
+
+  /**
+   * Pipeline v2 Phase 1 worktree rollout (2026-05-19) — post-merge
+   * validation command. Run by the wave-merge service in the coordinator
+   * worktree AFTER `git merge --no-ff wip/<storyId>` succeeds for all
+   * stories in the wave. Non-zero exit triggers `wave-build-failed`
+   * attention and flips the wave to `fixing`.
+   *
+   * `null` for stub boilerplates that haven't shipped test infra (sst /
+   * vite / mobile). The wave-merge service treats `null` as "skip
+   * validation, accept the clean merge" and logs a note. Adding a new
+   * framework = one-line registry change.
+   *
+   * See `docs/concepts/pipeline-v2/worktree-rollout-design.md` §4.
+   */
+  postMergeValidationCmd?: string | null;
 
   /**
    * Pipeline v2 Phase 3-C Story 3-C-2-1 (PR-71) — project skill manifest

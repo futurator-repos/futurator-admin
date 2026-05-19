@@ -247,6 +247,98 @@ describe('PR-71 — Project skill manifest (Story 3-C-2-1)', () => {
     },
   );
 
+  // ── Epic 2 Story 2.1 — defaultSkillLoadout (2026-05-19) ──────────────────
+  //
+  // The base + canvas-game + dashboard loadouts are the documented v1 set
+  // (per `docs/concepts/pipeline-v2/tech-spec-epic-2-default-skill-loadout.md`
+  // §1). form-app inherits from base; stubs declare null. SKILL.md activation
+  // happens via Claude Code's built-in Skill tool on prompt-relevance match
+  // (verified by the Story 2.0 probe; see docs/concepts/logs/skills-probe-2026-05-19/).
+
+  it('nextjs-base declares the base defaultSkillLoadout', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-base'];
+    expect(meta.defaultSkillLoadout).toEqual([
+      'frontend-design@anthropic-official',
+      'webapp-testing@anthropic-official',
+    ]);
+  });
+
+  it('nextjs-canvas-game overrides with canvas-design + frontend-design + algorithmic-art', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-canvas-game'];
+    expect(meta.defaultSkillLoadout).toEqual([
+      'canvas-design@anthropic-official',
+      'frontend-design@anthropic-official',
+      'algorithmic-art@anthropic-official',
+    ]);
+  });
+
+  it('nextjs-form-app inherits the base loadout (no override)', () => {
+    const base = BOILERPLATE_REGISTRY['nextjs-base'];
+    const meta = BOILERPLATE_REGISTRY['nextjs-form-app'];
+    expect(meta.defaultSkillLoadout).toEqual(base.defaultSkillLoadout);
+  });
+
+  it('nextjs-dashboard overrides with frontend-design only', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-dashboard'];
+    expect(meta.defaultSkillLoadout).toEqual(['frontend-design@anthropic-official']);
+  });
+
+  it.each(['sst', 'vite', 'mobile'] as BoilerplateType[])(
+    '%s (stub) — declares defaultSkillLoadout: null so daemon skips prepin + vendor',
+    (type) => {
+      const meta = BOILERPLATE_REGISTRY[type];
+      expect(meta.defaultSkillLoadout).toBeNull();
+    },
+  );
+
+  it('every nextjs-* loadout entry is a non-empty "<skill>@<source>" token', () => {
+    const nextjsTypes: BoilerplateType[] = [
+      'nextjs-base',
+      'nextjs-canvas-game',
+      'nextjs-form-app',
+      'nextjs-dashboard',
+    ];
+    for (const type of nextjsTypes) {
+      const meta = BOILERPLATE_REGISTRY[type];
+      expect(meta.defaultSkillLoadout, `${type} has a loadout`).not.toBeNull();
+      for (const token of meta.defaultSkillLoadout ?? []) {
+        expect(token, `${type} token shape`).toMatch(/^[a-z0-9-]+@[a-z0-9-]+$/);
+        const [skill, source] = token.split('@');
+        expect(skill.length, `${type} skill name`).toBeGreaterThan(0);
+        expect(source.length, `${type} source id`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('every loadout source matches a federation source id (anthropic-official only in v1)', () => {
+    // The embedded-default federation declares these source ids. When
+    // Epic 1.1 ships `futurator-internal` content + Epic 1.2 authors a
+    // real ~/.futurator/skill-federation.yaml, this test will need
+    // updating to widen the allowed source set.
+    const KNOWN_SOURCES = new Set(['anthropic-official', 'futurator-internal']);
+    const nextjsTypes: BoilerplateType[] = [
+      'nextjs-base',
+      'nextjs-canvas-game',
+      'nextjs-form-app',
+      'nextjs-dashboard',
+    ];
+    for (const type of nextjsTypes) {
+      for (const token of BOILERPLATE_REGISTRY[type].defaultSkillLoadout ?? []) {
+        const source = token.split('@')[1];
+        expect(KNOWN_SOURCES, `${type} token ${token} source`).toContain(source);
+      }
+    }
+  });
+
+  it('canvas-game references at least one canvas-specific skill (regression guard)', () => {
+    // Whole point of the canvas-game override: pick skills that wouldn't
+    // bubble up from the base loadout. Drift back to the base set is a
+    // silent regression of the starter's value proposition.
+    const meta = BOILERPLATE_REGISTRY['nextjs-canvas-game'];
+    const skillNames = (meta.defaultSkillLoadout ?? []).map((t) => t.split('@')[0]);
+    expect(skillNames).toContain('canvas-design');
+  });
+
   it('nextjs-base ships the empty manifest + sync script + gitignore as augment files', () => {
     const meta = BOILERPLATE_REGISTRY['nextjs-base'];
     const paths = (meta.augmentFiles ?? []).map((f) => f.path);

@@ -804,12 +804,23 @@ const NEXTJS_BASE_PACK: BoilerplateMetadata = {
     regressCheckPath: 'scripts/check-regressions.sh',
     testRunner: 'vitest',
   },
+  // 2026-05-19 Phase 1 worktree rollout — post-merge validation runs in
+  // the coordinator worktree after wave-merge completes successfully.
+  // Inherited by all nextjs-* starter packs via createStarterPack.
+  postMergeValidationCmd: 'npm test',
   // PR-71 — Project skill manifest + sync script (Story 3-C-2-1).
   // Inherited by all nextjs-* starter packs.
   skillManifest: {
     manifestPath: '.claude/skills.manifest.yaml',
     syncScriptPath: 'scripts/skills-sync.mjs',
   },
+  // Epic 2 Story 2.1 (2026-05-19) — default skill loadout pre-pinned at
+  // app-bootstrap time. The base loadout applies to any nextjs-* starter
+  // that doesn't override it (form-app inherits). canvas-game and dashboard
+  // override below with starter-specific picks. Story 2.0 probe confirmed
+  // these are auto-activated by Claude Code's built-in `Skill` tool when
+  // prompt content matches the SKILL.md frontmatter description.
+  defaultSkillLoadout: ['frontend-design@anthropic-official', 'webapp-testing@anthropic-official'],
   // PR-35 + PR-41 + PR-71 + PR-80 — base augments concat baseline-diff
   // scripts + frozen-file husky guard + skill manifest scaffold + CLAUDE.md
   // template. createStarterPack merges starter-specific augments on top.
@@ -928,6 +939,13 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     baselineCapture: null,
     // PR-71 — stub: no skill scaffold shipped yet. Daemon skips SKILL-SCOUT.
     skillManifest: null,
+    // Epic 2 Story 2.1 — stub: no skill scaffold + no SKILL.md auto-discovery
+    // value yet for SST projects (no canonical SST skill exists in
+    // anthropic-official). Daemon's prepin-default-skills step short-circuits
+    // on null. Revisit when an SST-specific skill ships in futurator-internal.
+    defaultSkillLoadout: null,
+    // 2026-05-19 Phase 1 — stub: no test infra, wave-merge skips validation.
+    postMergeValidationCmd: null,
   },
 
   vite: {
@@ -990,6 +1008,13 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     baselineCapture: null,
     // PR-71 — stub: no skill scaffold shipped yet. Daemon skips SKILL-SCOUT.
     skillManifest: null,
+    // Epic 2 Story 2.1 — stub: Vite + React would naturally want
+    // `frontend-design`, but skillManifest scaffold isn't shipped on this
+    // boilerplate yet, so prepin would have nothing to write into. Wire
+    // when the Vite starter graduates from stub status.
+    defaultSkillLoadout: null,
+    // 2026-05-19 Phase 1 — stub: no test infra, wave-merge skips validation.
+    postMergeValidationCmd: null,
   },
 
   mobile: {
@@ -1051,6 +1076,13 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     baselineCapture: null,
     // PR-71 — stub: no skill scaffold shipped yet. Daemon skips SKILL-SCOUT.
     skillManifest: null,
+    // Epic 2 Story 2.1 — stub: Expo mobile has no skillManifest scaffold
+    // yet and `react-native` runtime differs enough from web (no Canvas2D,
+    // different test infra) that base nextjs skills wouldn't transfer
+    // cleanly. Daemon skips prepin + vendor.
+    defaultSkillLoadout: null,
+    // 2026-05-19 Phase 1 — stub: no test infra, wave-merge skips validation.
+    postMergeValidationCmd: null,
   },
 
   // ── PR-13 — Starter packs derived from nextjs-base ────────────────────────
@@ -1072,6 +1104,18 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
       'Create a 2D platformer with jump and dash',
       'Top-down shooter with mouse aim',
       'Snake clone with score tracking',
+    ],
+    // Epic 2 Story 2.1 — canvas-game-specific loadout. `canvas-design` for
+    // 2D rendering idioms, `algorithmic-art` for procedural sprite/animation
+    // patterns (pixel-art snake heads, dino sprites, brick-breaker tiles).
+    // `frontend-design` retained from base for general UI conventions.
+    // `webapp-testing` dropped — canvas games rarely use DOM-centric tests
+    // and Vitest baseline is already enforced by the per-story test-author
+    // step.
+    defaultSkillLoadout: [
+      'canvas-design@anthropic-official',
+      'frontend-design@anthropic-official',
+      'algorithmic-art@anthropic-official',
     ],
     augmentFiles: NEXTJS_CANVAS_GAME_AUGMENTS,
     scaffoldContract: NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT,
@@ -1113,6 +1157,12 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
       'Reporting tool with filtered tables and charts',
       'Operations dashboard with KPI cards',
     ],
+    // Epic 2 Story 2.1 — dashboard-specific loadout. `frontend-design` is
+    // the primary value driver for dashboard layouts and information
+    // density. `webapp-testing` is dropped from the base loadout since
+    // dashboard stories tend to be data-shape changes that are better
+    // tested at the data-pipeline layer than via DOM tests.
+    defaultSkillLoadout: ['frontend-design@anthropic-official'],
   }),
 };
 

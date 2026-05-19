@@ -1,0 +1,10 @@
+Probe 1: enumerate skills in cwd
+==================================
+Command: claude -p --setting-sources project '...' (in /tmp/skills-probe-clean)
+Setup: .claude/skills/canvas-design/SKILL.md (11939 bytes, fetched from anthropics/skills/main)
+
+Output (one line):
+canvas-design, update-config, keybindings-help, simplify, fewer-permission-prompts, loop, schedule, claude-api, init, review, security-review
+
+Analysis: canvas-design appears FIRST in the enumerated list, before user-level skills
+(update-config, simplify, etc.). Project-cwd .claude/skills/ is auto-discovered.

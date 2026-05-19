@@ -7237,6 +7237,14 @@ app.post('/api/apps', authMiddleware, async (c) => {
       // can write them on top of the base after inject-values. Empty for
       // base starters and for stub types.
       augmentFiles: BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType].augmentFiles,
+      // Epic 2 Story 2.2 (2026-05-19) — thread the starter's default skill
+      // loadout to the daemon's prepin-default-skills step. The daemon
+      // can't import the TS registry, so the API Lambda is the canonical
+      // reader. `null` for stub boilerplates; `undefined` shouldn't
+      // happen now that the field is declared on every starter, but the
+      // daemon handles it identically as `no-default-loadout`.
+      defaultSkillLoadout:
+        BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType].defaultSkillLoadout ?? null,
     },
   };
 

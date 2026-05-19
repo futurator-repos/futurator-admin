@@ -29,6 +29,14 @@
 >   ARCHITECT T1 markers, fresh skills manifest), brownfield-plan
 >   scenario, manual Reflection Inbox exercise, substrate-readiness
 >   matrix per PR. **Use this when actually testing in production.**
+> - **`plan-skills-activation.md`** — **implementation plan (2026-05-19)
+>   to wire the Phase 3 skills substrate end-to-end.** Authored after
+>   the snake-4 forensic confirmed the substrate is dormant: CLAUDE.md
+>   is a 1942-byte empty scaffold across every agent invocation,
+>   `Skills-Used:` trailers are label-only, no SKILL.md files are
+>   vendored, SKILL-SCOUT never spawns. Seven epics from operator-side
+>   provisioning through observability; critical path is Epics 1→2→4→3
+>   (~4 weeks single-operator).
 >
 >   This file extends them; it is NOT a substitute. When this document and a
 >   sibling disagree, **the sibling wins** if it's about _design_; this file

@@ -31,7 +31,9 @@ import { runBareClone } from '../lib/app-bootstrap-steps/bare-clone.mjs';
 import { runMaterializeWorktree } from '../lib/app-bootstrap-steps/materialize-worktree.mjs';
 import { runInjectValues } from '../lib/app-bootstrap-steps/inject-values.mjs';
 import { runApplyStarterAugments } from '../lib/app-bootstrap-steps/apply-starter-augments.mjs';
+import { runPrepinDefaultSkills } from '../lib/app-bootstrap-steps/prepin-default-skills.mjs';
 import { runNpmInstall } from '../lib/app-bootstrap-steps/npm-install.mjs';
+import { runVendorSkills } from '../lib/app-bootstrap-steps/vendor-skills.mjs';
 import { runBmadBootstrap } from '../lib/app-bootstrap-steps/bmad-bootstrap.mjs';
 import { runCommitAndPush } from '../lib/app-bootstrap-steps/commit-and-push.mjs';
 
@@ -40,7 +42,9 @@ export const APP_BOOTSTRAP_STEPS = [
   'materialize-worktree',
   'inject-values',
   'apply-starter-augments', // PR-13 — starter pack files written on top of base
+  'prepin-default-skills',  // Epic 2 Story 2.2 — pin starter's defaultSkillLoadout
   'npm-install',
+  'vendor-skills',          // Epic 2 Story 2.3 — fetch SKILL.md bodies via skills-sync.mjs
   'bmad-bootstrap',
   'commit-and-push',
 ];
@@ -70,6 +74,13 @@ const NEXTJS_VIEW = {
     'CLAUDE.md',
     '.claude/skills.manifest.yaml',
   ],
+  // Epic 2 Story 2.2 (2026-05-19): defaultSkillLoadout is forwarded through
+  // appBootstrapPayload at job-create time and overrides this value at the
+  // call site (see line ~167 below). The undefined default here means
+  // "no override" — the per-starter loadout from the TS registry wins.
+  // Keeping the field declared on the view doc-block is a contract reminder
+  // for daemon-side readers; the runtime value comes through the payload.
+  defaultSkillLoadout: undefined,
 };
 
 const BOILERPLATE_VIEW = {
@@ -161,7 +172,9 @@ export async function runAppBootstrap(job, ctx) {
     materializeWorktree: steps.materializeWorktree ?? runMaterializeWorktree,
     injectValues: steps.injectValues ?? runInjectValues,
     applyStarterAugments: steps.applyStarterAugments ?? runApplyStarterAugments,
+    prepinDefaultSkills: steps.prepinDefaultSkills ?? runPrepinDefaultSkills,
     npmInstall: steps.npmInstall ?? runNpmInstall,
+    vendorSkills: steps.vendorSkills ?? runVendorSkills,
     bmadBootstrap: steps.bmadBootstrap ?? runBmadBootstrap,
     commitAndPush: steps.commitAndPush ?? runCommitAndPush,
   };
@@ -248,6 +261,25 @@ export async function runAppBootstrap(job, ctx) {
       skipped: !!augmentResult.skipped,
     });
 
+    // Epic 2 Story 2.2 — PREPIN-DEFAULT-SKILLS
+    // Reads the starter's defaultSkillLoadout from the payload (threaded
+    // by the API Lambda; see functions/api/index.ts:~7298) and writes
+    // entries into .claude/skills.manifest.yaml under core[]. Skips when
+    // the manifest is missing (stub boilerplates) or already has skills
+    // pinned. The subsequent vendor-skills step reads what we pinned
+    // here and materializes SKILL.md bodies onto disk.
+    await emitStarted('prepin-default-skills');
+    const prepinResult = await stepFns.prepinDefaultSkills({
+      worktreeDir,
+      defaultSkillLoadout: payload.defaultSkillLoadout,
+      onOutput: makeOutputSink('prepin-default-skills'),
+    });
+    await emitCompleted('prepin-default-skills', {
+      skipped: !!prepinResult.skipped,
+      reason: prepinResult.reason,
+      pinnedCount: prepinResult.pinnedCount,
+    });
+
     // 4. NPM-INSTALL (skipped on stubs / non-node runtimes)
     await emitStarted('npm-install');
     const npmResult = await stepFns.npmInstall({
@@ -260,6 +292,56 @@ export async function runAppBootstrap(job, ctx) {
       skipped: !!npmResult.skipped,
       reason: npmResult.reason,
     });
+
+    // Epic 2 Story 2.3 — VENDOR-SKILLS
+    // Spawns the in-worktree scripts/skills-sync.mjs which fetches each
+    // pinned SKILL.md from its federation source (GitHub raw API) and
+    // writes to .claude/skills/<name>/. Non-blocking: a hard failure
+    // (exit 1, e.g. missing ~/.futurator/skill-federation.yaml) surfaces
+    // a medium-severity attention but bootstrap continues. Drift
+    // (exit 2) surfaces low-severity attention. See vendor-skills.mjs
+    // for the full exit-code → outcome mapping.
+    await emitStarted('vendor-skills');
+    const vendorResult = await stepFns.vendorSkills({
+      worktreeDir,
+      skip: view.isStub === true,
+      onOutput: makeOutputSink('vendor-skills'),
+    });
+    await emitCompleted('vendor-skills', {
+      skipped: !!vendorResult.skipped,
+      reason: vendorResult.reason,
+      vendoredCount: vendorResult.vendoredCount,
+      drift: vendorResult.drift,
+      exitCode: vendorResult.exitCode,
+    });
+    // Surface a per-app attention item on vendor-skills failure or drift.
+    // dedupKey ensures repeat bootstraps don't multiply rows.
+    if (vendorResult.attentionCategory && typeof writeAttentionItem === 'function') {
+      try {
+        await writeAttentionItem({
+          planId: null,
+          appId,
+          category: vendorResult.attentionCategory,
+          severity: vendorResult.attentionSeverity ?? 'medium',
+          title:
+            vendorResult.attentionCategory === 'skill-manifest-out-of-sync'
+              ? `Skill manifest drift detected for ${appId} (${vendorResult.drift ?? 0} skill(s))`
+              : `Skill vendor sync failed for ${appId} (${vendorResult.reason ?? 'unknown'})`,
+          body: (vendorResult.stderr || '').slice(0, 1500),
+          dedupKey: `skill-vendor-${vendorResult.attentionCategory}:${appId}`,
+        });
+      } catch (attentionErr) {
+        // Non-fatal — log and continue. The bootstrap-failed attention
+        // path doesn't fire here because vendor-skills is non-blocking.
+        await pushEvent?.(
+          job.jobId,
+          'vendor-skills',
+          '__app_bootstrap__',
+          'pv2.app-bootstrap.attention-write-failed',
+          { appId, error: String(attentionErr?.message || attentionErr) },
+        );
+      }
+    }
 
     // 5. BMAD-BOOTSTRAP (skipped when not enabled or unsupported)
     await emitStarted('bmad-bootstrap');
