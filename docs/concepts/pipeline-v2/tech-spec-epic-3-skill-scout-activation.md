@@ -103,6 +103,83 @@ shifts as noted above.
 **Time budget for Story 3.0: 1 hour. Output: a 1-paragraph "verdict"
 appended to this §0.**
 
+### Verdict — 2026-05-20: ✅ ALL GREEN
+
+- **3.0a (job-router):** `daemon/pipelines/job-router.mjs::selectHandler`
+  is a clean if/else chain over `job.jobType` literals (9 branches today
+  for party-\*, app-bootstrap, free-agent-session, wave-merge). Adding
+  `'skill-scout'` is a one-line branch addition. The daemon's dispatch
+  in `agent-daemon.mjs:3939-3962` mirrors the same shape — one
+  `executeSkillScoutJob(job)` call follows the existing pattern.
+- **3.0b (plan-reducer):** `reducePlan()` already guards
+  `plan.status !== 'developing' && plan.status !== 'fixing'` at line
+  73 — meaning a plan held in `'draft'` status is **already a natural
+  reducer no-op**. The simpler design: keep `plan.status: 'draft'` +
+  `plan.pendingSkillScoutJobId` set until the operator confirms (or
+  timeout fires); then flip to `'developing'` from the API endpoint
+  handler that processes the confirm action. No new reducer state-
+  transition needed.
+- **3.0c (decision-card payload):** `buildDecisionCard()` already
+  returns `{context: {proposals: SkillProposal[], trigger, projectSlug,
+appId, planId, proposalCount}}`. The UI has everything it needs to
+  render the YAML diff client-side. No daemon-side payload shape
+  changes required.
+
+**Implication for 3.4 (T2 wire-in):** the plan-reducer wait gate
+becomes a 4-line check at the TOP of `reducePlan`, not a new state-
+machine branch. Reduces 3.4's effort estimate from 1 day to ~½ day.
+Total Epic 3 effort revised: **~4-4.5 dev-days** (was ~5).
+
+### Implementation status — 2026-05-20
+
+**Shipped in this commit:**
+
+- All runner modules, the installer, the daemon-side validator, the
+  pipeline builder, the API endpoint, the UI card, the type additions,
+  the bootstrap saga T1 enqueue, and 209 unit tests.
+
+**Deferred to follow-on (1-commit, ~30min):**
+
+- `daemon/agent-daemon.mjs` integration (4 small hunks):
+  1. import `JOB_HANDLER_SKILL_SCOUT` + `JOB_HANDLER_SKILL_INSTALL`
+  2. import `runSkillScoutJob`, `runSkillInstallJob`,
+     `validateSkillProposalsBlock`, `applyConfirmedProposals`
+  3. 2 dispatch branches in the `processJob` switch
+  4. 2 executor functions (`executeSkillScoutJob`,
+     `executeSkillInstallJob`)
+- The daemon file is currently dirty with Slice C (Phase 1 worktree
+  rollout) work that hasn't been committed. The Epic 3 daemon hunks
+  belong on top of Slice C, not on top of HEAD — so they're held back
+  until Slice C lands cleanly.
+- Working version with both Slice C + Epic 3 daemon changes is at
+  `/tmp/daemon-with-epic3.mjs.bak`.
+
+### Implementation deviations from spec
+
+Stories 3.1 through 3.6 shipped in a single dev session against HEAD
+`feat/treesitter-slice-c-brownfield-bootstrap`. A couple of design
+choices deviated from the spec for the better:
+
+- **3.4 wait gate moved out of `reducePlan` and INTO
+  `POST /api/plans/:id/start`**. The reducer already guards against
+  non-`developing`/`fixing` statuses; new plans live in `'concept'`
+  until /start fires, which means the reducer's natural no-op covers
+  the wait. The /start handler does the actual SKILL-SCOUT terminal-
+  status + open-card check + 5-min timeout escape valve.
+- **T2 enqueue runs in PARALLEL to PM** (not blocking PM dispatch).
+  The operator can hit "Start" only after both the PM-generated
+  epics exist AND any open SKILL-SCOUT card is resolved. This avoids
+  the "is the system broken?" UX during the SKILL-SCOUT spawn wait.
+- **`skill-install` jobType** introduced earlier than the spec's §6
+  positioning (it's plumbed in the same commit as 3.1). Cleaner DDB
+  fields + cleaner job-router branches.
+- **Daemon-side prompt+pipeline mirror** at
+  `daemon/lib/skill-scout-pipeline-builder.mjs` lets the T1 path
+  enqueue a baked pipeline from the daemon without round-tripping to
+  the API Lambda. T2 uses the canonical TS builder
+  (`generateSkillScoutPipeline`) since the API Lambda owns plan
+  creation anyway.
+
 ---
 
 ## 1. Story 3.1 — Daemon job-router branch for `jobType: 'skill-scout'`

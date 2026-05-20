@@ -27,6 +27,9 @@
  * when a new type lands.
  */
 
+import { randomUUID } from 'node:crypto';
+import { buildSkillScoutPipelineDaemon } from '../lib/skill-scout-pipeline-builder.mjs';
+
 import { runBareClone } from '../lib/app-bootstrap-steps/bare-clone.mjs';
 import { runMaterializeWorktree } from '../lib/app-bootstrap-steps/materialize-worktree.mjs';
 import { runInjectValues } from '../lib/app-bootstrap-steps/inject-values.mjs';
@@ -386,12 +389,19 @@ export async function runAppBootstrap(job, ctx) {
       bmadEnabled,
     });
 
-    // PR-72-followup + PR-90-followup — emit T1 readiness markers per
-    // v2.5 §38 (SKILL-SCOUT) + §28 (ARCHITECT). Operator sees these in
-    // the forensic JSON; the dedicated spawn-integration PR will pick
-    // these markers up and enqueue agent-job rows for SKILL-SCOUT /
-    // ARCHITECT. PM combines their proposals into one decision card
-    // (v2.5 §27.3) when both fire.
+    // Epic 3 Story 3.3 (2026-05-20) — T1 SKILL-SCOUT enqueue. Replaces
+    // the prior marker-only `.queued` event with a real PENDING job
+    // row. The daemon's main loop will pick it up next tick and route
+    // to executeSkillScoutJob → runSkillScoutJob.
+    //
+    // Backwards-compat: the `.queued` event is STILL emitted so any
+    // operator dashboard / forensic-parsing code that looks for that
+    // marker keeps working. The new `.enqueued` event carries the
+    // actual jobId so the operator can correlate back to the row.
+    //
+    // ctx.insertAgentJob is optional — when absent (idempotency unit
+    // tests, brownfield migration tools) the saga skips the insert and
+    // only emits the marker. Production always passes the inserter.
     await pushEvent?.(
       job.jobId,
       'completed',
@@ -404,6 +414,58 @@ export async function runAppBootstrap(job, ctx) {
         reason: 'project init — full federation sweep',
       },
     );
+
+    if (typeof ctx.insertAgentJob === 'function') {
+      try {
+        const scoutJobId = randomUUID();
+        const scoutPipeline = buildSkillScoutPipelineDaemon({
+          trigger: 'T1',
+          projectSlug: appId,
+          boilerplateKind: boilerplateType,
+          rigor: 'prototype', // T1 has no plan-rigor yet (v2.5 §38).
+        });
+        await ctx.insertAgentJob({
+          jobId: scoutJobId,
+          jobType: 'skill-scout',
+          status: 'PENDING',
+          workingDir: worktreeDir,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          createdBy: 'app-bootstrap-saga',
+          skillScoutPayload: {
+            trigger: 'T1',
+            projectSlug: appId,
+            appId,
+            planId: null,
+            rigor: 'prototype',
+          },
+          pipeline: scoutPipeline,
+        });
+        await pushEvent?.(
+          job.jobId,
+          'completed',
+          '__app_bootstrap__',
+          'pv2.skill-scout.enqueued',
+          {
+            appId,
+            trigger: 'T1',
+            scoutJobId,
+            reason: 'project init — full federation sweep',
+          },
+        );
+      } catch (insertErr) {
+        // Non-fatal — app-bootstrap completed; the operator can re-fire
+        // T1 manually via the API. Surface as a low-severity attention.
+        await pushEvent?.(
+          job.jobId,
+          'completed',
+          '__app_bootstrap__',
+          'pv2.skill-scout.enqueue-failed',
+          { appId, trigger: 'T1', error: String(insertErr?.message || insertErr) },
+        );
+      }
+    }
+
     await pushEvent?.(
       job.jobId,
       'completed',

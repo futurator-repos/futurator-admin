@@ -22,6 +22,19 @@ export const JOB_HANDLER_PARTY_REFRESH = 'party-refresh';
 export const JOB_HANDLER_APP_BOOTSTRAP = 'app-bootstrap';
 // Epic 18 / Story 18.2 — Free Claude Code Agent session turn.
 export const JOB_HANDLER_FREE_AGENT_SESSION = 'free-agent-session';
+// 2026-05-19 — Phase 1 worktree rollout. Wave-merge job runs the per-story
+// `git merge --no-ff` sequence + post-merge validation in a coordinator
+// worktree at /home/ubuntu/worktrees/<app>/<plan>/_merge/.
+export const JOB_HANDLER_WAVE_MERGE = 'wave-merge';
+// Epic 3 Story 3.1 (2026-05-20) — SKILL-SCOUT job runner. Spawns the
+// SKILL-SCOUT agent for T1 (post-bootstrap) / T2 (pre-PM) triggers,
+// extracts proposals JSON, validates via Zod, then either auto-confirms
+// (prototype + high-confidence T1/T2/T5/T7) or surfaces a decision card.
+export const JOB_HANDLER_SKILL_SCOUT = 'skill-scout';
+// Epic 3 Story 3.6 (2026-05-20) — SKILL-INSTALL job runner. Applies
+// operator-confirmed proposals to .claude/skills.manifest.yaml, re-runs
+// vendor-skills, commits with `Agent: SKILL-SCOUT` trailer.
+export const JOB_HANDLER_SKILL_INSTALL = 'skill-install';
 
 /**
  * Decide which handler should run a given job.
@@ -49,8 +62,33 @@ export function selectHandler(job) {
   if (job.jobType === 'party-refresh') return JOB_HANDLER_PARTY_REFRESH;
   if (job.jobType === 'app-bootstrap') return JOB_HANDLER_APP_BOOTSTRAP;
   if (job.jobType === 'free-agent-session') return JOB_HANDLER_FREE_AGENT_SESSION;
+  if (job.jobType === 'wave-merge') return JOB_HANDLER_WAVE_MERGE;
+  if (job.jobType === 'skill-scout') return JOB_HANDLER_SKILL_SCOUT;
+  if (job.jobType === 'skill-install') return JOB_HANDLER_SKILL_INSTALL;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
+}
+
+/**
+ * 2026-05-19 — wave-merge job validation. Wave-merge jobs carry a
+ * `waveMergePayload: { appId, planId, planSlug, epicId, waveNumber,
+ * storyIds[], postMergeValidationCmd }` so the runner has all inputs
+ * without doing additional DDB reads.
+ */
+export function validateWaveMergeJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'wave-merge') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.waveMergePayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'waveMergePayload-missing' };
+  if (!p.appId || !p.planId || !p.planSlug || !p.epicId) {
+    return { ok: false, reason: 'identity-fields-missing' };
+  }
+  if (typeof p.waveNumber !== 'number') return { ok: false, reason: 'waveNumber-missing' };
+  if (!Array.isArray(p.storyIds) || p.storyIds.length === 0) {
+    return { ok: false, reason: 'storyIds-empty' };
+  }
+  return { ok: true };
 }
 
 /**

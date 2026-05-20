@@ -59,6 +59,30 @@ export type AttentionCategory =
   // Pipeline v2 Phase 1 / Story 1.8.7: a plan's category time exceeded the
   // cohort median by ≥3× (info) or ≥5× (medium). Deep-link → /labs?planId=#timing.
   | 'pv2-timer-cohort-outlier'
+  // ── Epic 2 + Epic 3 (2026-05-19/20) — skill substrate categories ────
+  // Epic 2 Story 2.3 — vendor-skills exit 1 (federation missing /
+  // network / malformed manifest). Bootstrap completes; operator fixes
+  // upstream cause + re-runs sync.
+  | 'skill-sync-failed'
+  // Epic 2 Story 2.3 — vendor-skills exit 2 (one or more local SKILL.md
+  // SHAs don't match the pinned version). Non-blocking; operator runs
+  // `--resync` or re-pins via SKILL-SCOUT.
+  | 'skill-manifest-out-of-sync'
+  // Epic 3 Story 3.1 — SKILL-SCOUT decision card (v2.5 §37.2). Operator
+  // chooses confirm / edit / decline / defer.
+  | 'manifest-change-proposed'
+  // Epic 3 Story 3.1 — SKILL-SCOUT step failed (agent crash, manifest
+  // read error, OAuth death). Non-blocking; the project still has its
+  // pre-existing manifest.
+  | 'skill-scout-failed'
+  // Epic 3 Story 3.1 — SKILL-SCOUT emitted output that didn't match the
+  // Zod schema (missing fields, malformed JSON, version pin shape).
+  // Indicates prompt tuning is needed.
+  | 'skill-scout-output-invalid'
+  // Epic 3 Story 3.2 — operator-confirmed install failed (manifest
+  // write error, vendor sync hard-fail). Manifest changes were either
+  // partial or not committed.
+  | 'skill-install-failed'
   | 'other';
 
 export type AttentionStatus = 'open' | 'resolving' | 'resolved';

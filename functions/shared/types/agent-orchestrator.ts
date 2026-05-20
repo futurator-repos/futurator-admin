@@ -314,7 +314,14 @@ export interface AgentJob {
     // BMAD bootstrap → commit + push). Payload below.
     | 'app-bootstrap'
     // Epic 18 / Story 18.5 — Free Claude Code Agent session turn. Payload below.
-    | 'free-agent-session';
+    | 'free-agent-session'
+    // Pipeline v2 Phase 3-C Epic 3 (2026-05-20) — SKILL-SCOUT agent runs.
+    // T1: post-bootstrap (full federation sweep). T2: pre-PM (intent-
+    // targeted resolve). T3-T8: deferred wire-ins. Payload below.
+    | 'skill-scout'
+    // Epic 3 Story 3.6 — operator-confirmed (or auto-confirmed) skill
+    // install: apply manifest deltas + re-run vendor-skills + commit.
+    | 'skill-install';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -383,6 +390,76 @@ export interface AgentJob {
      * treats both identically — prepin skips with `no-default-loadout`.
      */
     defaultSkillLoadout?: string[] | null;
+  };
+
+  /**
+   * Pipeline v2 Phase 3-C Epic 3 / Story 3.1 (2026-05-20) — payload
+   * consumed by `daemon/pipelines/skill-scout-job-runner.mjs`. Set when
+   * `jobType === 'skill-scout'`.
+   *
+   * Each SKILL-SCOUT job runs a single agent step against the project's
+   * current `.claude/skills.manifest.yaml` + the federation manifest at
+   * `~/.futurator/skill-federation.yaml`, then either auto-confirms
+   * (prototype + high-confidence T1/T2/T5/T7) via `applyConfirmedProposals`
+   * or surfaces a decision card (mvp+ rigor, low confidence, or T3/T4/
+   * T6/T8 which never auto-confirm).
+   */
+  skillScoutPayload?: {
+    /** Which trigger fired. v2.5 §38 enumerates eight; v1 wires T1+T2. */
+    trigger: 'T1' | 'T2' | 'T3' | 'T4' | 'T5' | 'T6' | 'T7' | 'T8';
+    /** App slug = working-dir basename. */
+    projectSlug: string;
+    /** App row's `appId` — duplicates projectSlug today; kept distinct so
+     *  the multi-app monorepo future doesn't need a schema change. */
+    appId: string;
+    /** Set for T2 (plan-intent) + T4 (PM speculation) + T7 (stream
+     *  graduation). Null for T1/T3/T5/T6/T8 (app-level triggers). */
+    planId?: string | null;
+    /** Plan intent text — only present for T2. Used by the prompt to
+     *  ground proposals in the user's stated goal. */
+    planIntent?: string;
+    /** Drives the rigor matrix in disposeProposals. T1 hardcodes
+     *  'prototype' (no plan exists yet); T2+ inherit the plan's rigor. */
+    rigor: 'prototype' | 'mvp' | 'production';
+  };
+
+  /**
+   * Epic 3 Story 3.6 (2026-05-20) — payload consumed by
+   * `daemon/pipelines/skill-install-job-runner.mjs`. Set when
+   * `jobType === 'skill-install'`.
+   *
+   * Carries the proposals subset the operator confirmed (or
+   * auto-confirm in the T1/T2 prototype path). The daemon writes the
+   * manifest, re-runs vendor-skills, and commits with `Agent:
+   * SKILL-SCOUT` trailer.
+   */
+  skillInstallPayload?: {
+    projectSlug: string;
+    appId: string;
+    /** SkillScoutOutput shape minus the trigger context — proposals
+     *  are filtered by the operator's accept set if edit was used. */
+    output: {
+      trigger: 'T1' | 'T2' | 'T3' | 'T4' | 'T5' | 'T6' | 'T7' | 'T8';
+      projectSlug: string;
+      proposals: Array<{
+        kind: 'add' | 'remove' | 'upgrade';
+        source: string;
+        skill: string;
+        manifestBucket: 'core' | 'stack' | 'domain' | 'vendor';
+        version: string;
+        rationale: string;
+        verifyNotes: string;
+        confidence: number;
+      }>;
+    };
+    /** Whether the install came from auto-confirm or operator-confirm.
+     *  Affects the commit message attribution and the forensic event
+     *  payload but NOT the on-disk side effect. */
+    source: 'auto-confirm' | 'operator-confirm';
+    /** Attention-item ID the operator action originated from. Logged in
+     *  the forensic event so the decision-card → install lineage is
+     *  reconstructable. Absent for auto-confirm. */
+    originAttentionId?: string;
   };
 
   /**

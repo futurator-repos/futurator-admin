@@ -114,6 +114,7 @@ import {
   deletePlanFolder,
 } from '../shared/services/plan-folder-service';
 import { generatePmPlanPipeline } from '../shared/pipelines/pm-plan-pipeline';
+import { generateSkillScoutPipeline } from '../shared/pipelines/skill-scout-pipeline';
 import { parsePlanOutput, applyPlanOutput } from '../shared/services/plan-generation-service';
 import { computePlanWaves, epicsInPlanWave } from '../shared/services/plan-waves';
 import type { PipelineDefinition } from '../shared/types/agent-orchestrator';
@@ -1788,6 +1789,58 @@ app.post('/api/plans/:id/start', async (c) => {
     throw new ValidationError(
       `Plan must be in "concept" status to start; current status: ${plan.status}`,
     );
+  }
+
+  // Epic 3 Story 3.4 (2026-05-20) — T2 SKILL-SCOUT wait gate. If the
+  // plan has an outstanding SKILL-SCOUT job + an open decision card,
+  // refuse to start so the operator decides on skills BEFORE PM
+  // decomposition. Auto-confirm dispositions clear the FK + don't
+  // surface a card, so most plans pass this gate transparently. A
+  // 5-minute timeout escape valve below keeps stuck SKILL-SCOUT jobs
+  // from deadlocking the plan.
+  if (plan.pendingSkillScoutJobId) {
+    const scoutJob = await agentJobsRepo.getJobById(plan.pendingSkillScoutJobId).catch(() => null);
+    if (scoutJob) {
+      const TERMINAL = new Set(['COMPLETED', 'FAILED', 'STALE', 'COMPLETED_VIA_SALVAGE']);
+      const isTerminal = TERMINAL.has(scoutJob.status);
+      const ageMs = Date.now() - new Date(scoutJob.createdAt).getTime();
+      const timedOut = ageMs > 5 * 60 * 1000;
+      if (!isTerminal && !timedOut) {
+        throw new AppError(
+          'SKILL_SCOUT_PENDING',
+          `SKILL-SCOUT is still running for this plan (job ${plan.pendingSkillScoutJobId.slice(0, 8)}, age ${Math.round(ageMs / 1000)}s). Wait for it to finish then retry.`,
+          409,
+        );
+      }
+      if (isTerminal) {
+        // Check for an open `manifest-change-proposed` card on this plan.
+        const cards = await attentionRepo
+          .listAttentionItems(planId)
+          .catch(() => [] as Array<import('../shared/types/attention').AttentionItem>);
+        const openCard = cards.find(
+          (card) => card.category === 'manifest-change-proposed' && card.status === 'open',
+        );
+        if (openCard) {
+          throw new AppError(
+            'SKILL_SCOUT_CARD_OPEN',
+            `SKILL-SCOUT surfaced a manifest-change-proposed decision card (${openCard.itemId.slice(0, 8)}). Resolve it (confirm/edit/decline/defer) before starting the plan.`,
+            409,
+          );
+        }
+      }
+      // Either job is terminal + no open card, OR job timed out — both
+      // green-light the start. Clear the FK so subsequent checks skip
+      // this branch.
+      await planRepo.updatePlanFields(planId, { pendingSkillScoutJobId: null });
+      if (timedOut && !isTerminal) {
+        console.warn(
+          `[POST /api/plans/${planId}/start] SKILL-SCOUT timeout — proceeding without proposals`,
+        );
+      }
+    } else {
+      // FK points at a job row that doesn't exist. Clear it.
+      await planRepo.updatePlanFields(planId, { pendingSkillScoutJobId: null });
+    }
   }
 
   const epics: EpicWorkflow[] = [];
@@ -7520,12 +7573,176 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
     });
   }
 
+  // Epic 3 Story 3.4 (2026-05-20) — T2 SKILL-SCOUT enqueue. Runs in
+  // parallel to PM so the operator's click-to-Start latency isn't gated
+  // by SKILL-SCOUT spawn. The plan-start handler above blocks if a card
+  // is open at start time — that's the actual wait gate, not the
+  // reducer.
+  //
+  // We pass an EMPTY YAML scaffold for currentManifestYaml + a
+  // placeholder for federationYaml; the daemon's executeAgentStep
+  // substitutes the real content from the project's worktree at run
+  // time. Same trick as Story 3.3's daemon-side T1 enqueue, but the
+  // canonical TS builder is reused here since the API Lambda has the
+  // type system available.
+  let skillScoutJobId: string | undefined;
+  if (parsed.data.kind === 'initial' || parsed.data.kind === 'change') {
+    try {
+      skillScoutJobId = crypto.randomUUID();
+      const scoutPipeline = generateSkillScoutPipeline({
+        trigger: 'T2',
+        projectSlug: appId,
+        planIntent: plan.intent,
+        boilerplateKind: (appRow.boilerplateType ?? 'nextjs-base') as BoilerplateType,
+        rigor: plan.rigor ?? 'mvp',
+        // Empty YAML — daemon refreshes at run time via buildPromptContext.
+        currentManifestYaml: '',
+        federationYaml: '',
+      });
+      await agentJobsRepo.createJob({
+        jobId: skillScoutJobId,
+        status: 'PENDING',
+        createdAt: now,
+        updatedAt: now,
+        createdBy: user.email,
+        workingDir: plan.workingDir,
+        jobType: 'skill-scout',
+        skillScoutPayload: {
+          trigger: 'T2',
+          projectSlug: appId,
+          appId,
+          planId: plan.planId,
+          planIntent: plan.intent,
+          rigor: plan.rigor ?? 'mvp',
+        },
+        pipeline: scoutPipeline,
+      });
+      // Stamp the FK on the plan so /api/plans/:id/start can check it.
+      await planRepo.updatePlanFields(plan.planId, {
+        pendingSkillScoutJobId: skillScoutJobId,
+      });
+    } catch (scoutErr) {
+      // Non-fatal — plan creation succeeded; the operator can retry
+      // T2 manually. Don't surface 5xx for a SKILL-SCOUT enqueue
+      // failure on the happy path.
+      console.warn(`[POST /api/apps/${appId}/plans] T2 SKILL-SCOUT enqueue failed:`, scoutErr);
+      skillScoutJobId = undefined;
+    }
+  }
+
   // For kind=change|experiment Plans, the PM-augmentation runtime (AP-D1)
   // is deferred — the Plan stays in `concept` with empty epicIds until the
   // daemon-side handler is wired. Operator can click Regenerate to fall back
   // to the legacy PM flow in the meantime.
 
-  return c.json({ plan, pmJobId }, 201);
+  return c.json({ plan, pmJobId, skillScoutJobId }, 201);
+});
+
+/**
+ * Epic 3 Story 3.5 (2026-05-20) — SKILL-SCOUT decision card action endpoint.
+ *
+ * POST /api/skill-scout/proposals/:itemId/:action
+ *   action ∈ confirm | edit | decline | defer
+ *
+ *   - confirm: enqueue a skill-install job for ALL proposals on the card;
+ *              attention item → resolved
+ *   - edit:    enqueue a skill-install job for the subset in
+ *              body.acceptedProposals; attention item → resolved
+ *   - decline: attention item → resolved (status='resolved'), no install
+ *   - defer:   attention item → resolved (status='resolved'), no install
+ *
+ * The actual manifest write happens on the daemon side (Story 3.6's
+ * executeSkillInstallJob); this endpoint only validates the action,
+ * resolves the attention item, and queues the job-row.
+ */
+app.post('/api/skill-scout/proposals/:itemId/:action', authMiddleware, async (c) => {
+  const itemId = c.req.param('itemId');
+  const action = c.req.param('action');
+  if (!['confirm', 'edit', 'decline', 'defer'].includes(action)) {
+    throw new ValidationError(
+      `action must be one of: confirm | edit | decline | defer (got "${action}")`,
+    );
+  }
+
+  const planIdHint = c.req.query('planId');
+  if (!planIdHint) {
+    throw new ValidationError(
+      'planId query param is required (attention items are partitioned by planId).',
+    );
+  }
+  const item = await attentionRepo.getAttentionItem(planIdHint, itemId);
+  if (!item) {
+    throw new NotFoundError('AttentionItem', itemId);
+  }
+  if (item.category !== 'manifest-change-proposed') {
+    throw new ValidationError(
+      `attention item category must be manifest-change-proposed (got "${item.category}")`,
+    );
+  }
+
+  // decline + defer: just resolve the attention item.
+  if (action === 'decline' || action === 'defer') {
+    await attentionRepo.updateAttentionStatus(item.planId, itemId, 'resolved');
+    return c.json({ ok: true, action });
+  }
+
+  // confirm + edit: enqueue a skill-install job.
+  const body = (await c.req.json().catch(() => ({}))) as {
+    acceptedProposals?: unknown;
+  };
+
+  const context = (item.context ?? {}) as {
+    trigger?: string;
+    projectSlug?: string;
+    appId?: string;
+    proposals?: unknown[];
+  };
+  if (!Array.isArray(context.proposals) || !context.projectSlug || !context.trigger) {
+    throw new ValidationError(
+      'attention item context is missing required SKILL-SCOUT fields (proposals/projectSlug/trigger).',
+    );
+  }
+
+  let acceptedProposals: unknown[];
+  if (action === 'confirm') {
+    acceptedProposals = context.proposals;
+  } else {
+    if (!Array.isArray(body.acceptedProposals) || body.acceptedProposals.length === 0) {
+      throw new ValidationError(
+        '`acceptedProposals` (non-empty array) is required for action=edit.',
+      );
+    }
+    acceptedProposals = body.acceptedProposals;
+  }
+
+  const user = c.get('user');
+  const now = new Date().toISOString();
+  const installJobId = crypto.randomUUID();
+  await agentJobsRepo.createJob({
+    jobId: installJobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user.email,
+    workingDir: `/home/ubuntu/projects/${context.projectSlug}`,
+    jobType: 'skill-install',
+    skillInstallPayload: {
+      projectSlug: context.projectSlug,
+      appId: context.appId ?? context.projectSlug,
+      output: {
+        trigger: context.trigger as 'T1' | 'T2',
+        projectSlug: context.projectSlug,
+        proposals: acceptedProposals as never,
+      },
+      source: 'operator-confirm',
+      originAttentionId: itemId,
+    },
+  });
+
+  // Resolve the attention item once the job is queued.
+  await attentionRepo.updateAttentionStatus(item.planId, itemId, 'resolved');
+
+  return c.json({ ok: true, action, installJobId });
 });
 
 /** POST /api/apps/:appId/redeploy — v1 rollback by re-syncing a prior bundle. */

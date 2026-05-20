@@ -322,3 +322,72 @@ describe('runAppBootstrap — stub-type fast paths', () => {
     expect(stubSteps.bmadBootstrap.mock.calls[0][0].bmadEnabled).toBe(false);
   });
 });
+
+// ── Epic 3 Story 3.3 (2026-05-20) — T1 SKILL-SCOUT enqueue ──
+
+describe('runAppBootstrap — T1 SKILL-SCOUT enqueue (Epic 3 Story 3.3)', () => {
+  it('inserts a PENDING skill-scout job when ctx.insertAgentJob is provided', async () => {
+    const insertCalls = [];
+    const ctx = {
+      ...makeCtx(),
+      insertAgentJob: async (j) => {
+        insertCalls.push(j);
+      },
+    };
+
+    await runAppBootstrap(makeJob(), ctx);
+
+    expect(insertCalls).toHaveLength(1);
+    const scoutJob = insertCalls[0];
+    expect(scoutJob.jobType).toBe('skill-scout');
+    expect(scoutJob.status).toBe('PENDING');
+    expect(scoutJob.skillScoutPayload.trigger).toBe('T1');
+    expect(scoutJob.skillScoutPayload.appId).toBe('idem-app');
+    expect(scoutJob.skillScoutPayload.rigor).toBe('prototype');
+    expect(scoutJob.skillScoutPayload.planId).toBeNull();
+    // Pipeline baked at insert time.
+    expect(scoutJob.pipeline.steps).toHaveLength(1);
+    expect(scoutJob.pipeline.steps[0].id).toBe('skill-scout-resolve');
+    expect(scoutJob.pipeline.agents.SKILL_SCOUT).toBeDefined();
+
+    // Marker events still emit (forensic backwards-compat) PLUS the new
+    // `.enqueued` event that carries the actual jobId.
+    const queuedMarker = pushEventCalls.find((c) => c[3] === 'pv2.skill-scout.queued');
+    const enqueuedReal = pushEventCalls.find((c) => c[3] === 'pv2.skill-scout.enqueued');
+    expect(queuedMarker).toBeDefined();
+    expect(enqueuedReal).toBeDefined();
+    expect(enqueuedReal[4].scoutJobId).toBe(scoutJob.jobId);
+  });
+
+  it('falls back gracefully when ctx.insertAgentJob is absent', async () => {
+    // The legacy idempotency-test ctx (above) doesn't pass insertAgentJob.
+    // Bootstrap must complete cleanly, marker event still emits, but no
+    // job-row insert is attempted.
+    const ctx = makeCtx();
+    await runAppBootstrap(makeJob(), ctx);
+
+    const queuedMarker = pushEventCalls.find((c) => c[3] === 'pv2.skill-scout.queued');
+    const enqueuedReal = pushEventCalls.find((c) => c[3] === 'pv2.skill-scout.enqueued');
+    const enqueueFailed = pushEventCalls.find((c) => c[3] === 'pv2.skill-scout.enqueue-failed');
+    expect(queuedMarker).toBeDefined();
+    expect(enqueuedReal).toBeUndefined();
+    expect(enqueueFailed).toBeUndefined();
+  });
+
+  it('surfaces enqueue-failed event when insertAgentJob throws (non-fatal)', async () => {
+    const ctx = {
+      ...makeCtx(),
+      insertAgentJob: async () => {
+        throw new Error('DDB conditional check failed');
+      },
+    };
+    const result = await runAppBootstrap(makeJob(), ctx);
+    // Bootstrap STILL completes successfully — T1 enqueue failure is non-fatal.
+    expect(result.ok).toBe(true);
+    const failedEvent = pushEventCalls.find(
+      (c) => c[3] === 'pv2.skill-scout.enqueue-failed',
+    );
+    expect(failedEvent).toBeDefined();
+    expect(failedEvent[4].error).toContain('DDB conditional check failed');
+  });
+});

@@ -255,3 +255,24 @@ describe('validateFreeAgentSessionJob (Story 18.2)', () => {
     });
   });
 });
+
+// ── Epic 3 Story 3.1 + 3.6 (2026-05-20) — skill-scout + skill-install ──
+
+describe('selectHandler — skill-scout + skill-install (Epic 3)', () => {
+  it('routes jobType=skill-scout to the skill-scout handler', async () => {
+    const { selectHandler, JOB_HANDLER_SKILL_SCOUT } = await import('../../pipelines/job-router.mjs');
+    expect(selectHandler({ jobType: 'skill-scout', jobId: 'j' })).toBe(JOB_HANDLER_SKILL_SCOUT);
+  });
+
+  it('routes jobType=skill-install to the skill-install handler', async () => {
+    const { selectHandler, JOB_HANDLER_SKILL_INSTALL } = await import('../../pipelines/job-router.mjs');
+    expect(selectHandler({ jobType: 'skill-install', jobId: 'j' })).toBe(JOB_HANDLER_SKILL_INSTALL);
+  });
+
+  it('skill-scout takes precedence over phase=epic-dev', async () => {
+    const { selectHandler, JOB_HANDLER_SKILL_SCOUT } = await import('../../pipelines/job-router.mjs');
+    expect(
+      selectHandler({ jobType: 'skill-scout', phase: 'epic-dev', jobId: 'j' }),
+    ).toBe(JOB_HANDLER_SKILL_SCOUT);
+  });
+});

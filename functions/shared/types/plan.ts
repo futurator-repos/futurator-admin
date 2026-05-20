@@ -126,6 +126,20 @@ export interface Plan {
   doneStories: number;
 
   /**
+   * Pipeline v2 Phase 3-C Epic 3 / Story 3.4 (2026-05-20) — FK to the
+   * SKILL-SCOUT T2 job enqueued at plan creation. Cleared once the job
+   * terminates AND any surfaced decision card is resolved (operator
+   * confirms, declines, or defers). While set + non-null, the
+   * /api/plans/:id/start handler refuses to flip the plan to
+   * `developing` so the agent invocations downstream see the most
+   * current `.claude/skills/` state.
+   *
+   * The 5-min timeout net (Story 3.4) clears this field on stuck jobs
+   * so plans can't deadlock if SKILL-SCOUT hangs.
+   */
+  pendingSkillScoutJobId?: string | null;
+
+  /**
    * Pipeline v2 Phase 2-A — Story 2-A-misc-2 / PR-45.
    *
    * Plan-level cost ceiling (USD). Set by the create endpoints from
