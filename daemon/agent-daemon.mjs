@@ -150,6 +150,10 @@ import { validateSkillProposalsBlock } from './lib/skill-proposal-validator.mjs'
 import { applyConfirmedProposals } from './pipelines/skill-installer.mjs';
 // Epic 3 Story 3.6 — operator-confirm path.
 import { runSkillInstallJob } from './pipelines/skill-install-job-runner.mjs';
+// Epic 4 (2026-05-20) — track Skill tool_use activations into
+// .context/loaded-skills.json so the per-story commit's Skills-Used
+// trailer populates with real content.
+import { recordSkillActivation } from './lib/loaded-skills-tracker.mjs';
 import { startFederationBackupSchedule } from './lib/federation-backup.mjs';
 import { createFederationResolver } from './lib/federation-resolver.mjs';
 import { createMemoryStore, provisionMemoryRoot } from './lib/memory-store.mjs';
@@ -802,7 +806,7 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
-          processStreamEvent(jobId, stepId, agentId, event);
+          processStreamEvent(jobId, stepId, agentId, event, cwd);
           if (event.type === 'result') finalResult = event;
           // T0.1: accumulate agent prose for COST_HARD-after-DONE detection.
           // Two paths emit text: stream_event/text_delta (incremental) and
@@ -1087,7 +1091,7 @@ async function handleDeniedBashCommand({ jobId, stepId, agentId, command, verdic
   }
 }
 
-async function processStreamEvent(jobId, stepId, agentId, event) {
+async function processStreamEvent(jobId, stepId, agentId, event, workingDir) {
   switch (event.type) {
     case 'stream_event': {
       const delta = event.event?.delta;
@@ -1104,6 +1108,33 @@ async function processStreamEvent(jobId, stepId, agentId, event) {
             toolName: block.name,
             toolInput: JSON.stringify(block.input).slice(0, 2000),
           });
+
+          // Epic 4 (2026-05-20) — record Skill activations into
+          // .context/loaded-skills.json. Story 2.0 probe confirmed
+          // Claude Code's built-in `Skill` tool fires this exact event
+          // shape when the agent auto-activates a skill on prompt-content
+          // match. Best-effort: any error (manifest read, file write)
+          // is swallowed — the commit-trailer can tolerate a missing
+          // file (emits the label-only form).
+          if (block.name === 'Skill' && typeof block.input?.skill === 'string') {
+            try {
+              const result = recordSkillActivation({
+                workingDir,
+                skillName: block.input.skill,
+              });
+              if (result.written) {
+                await pushEvent(jobId, stepId, agentId, 'skill_activated', {
+                  skill: block.input.skill,
+                  source: result.source,
+                  totalLoaded: result.total,
+                });
+              }
+            } catch (err) {
+              // Don't surface as attention — the agent's behavior isn't
+              // affected by the trailer tracking failure.
+              log('warn', `[${jobId.slice(0, 8)}] loaded-skills tracker failed: ${err.message}`);
+            }
+          }
 
           // Pipeline v2.0 B8 — Bash deny-pattern enforcement.
           // The CLI's --allowedTools flag controls which tools are AVAILABLE,
