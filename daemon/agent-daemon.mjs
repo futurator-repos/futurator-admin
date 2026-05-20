@@ -66,6 +66,7 @@ import {
   validatePartyRefreshJob,
   validateAppBootstrapJob,
   validateFreeAgentSessionJob,
+  validateWaveMergeJob,
   JOB_HANDLER_EPIC_DEV,
   JOB_HANDLER_PARTY_BOOTSTRAP,
   JOB_HANDLER_PARTY_INSPECT,
@@ -75,6 +76,9 @@ import {
   JOB_HANDLER_PARTY_REFRESH,
   JOB_HANDLER_APP_BOOTSTRAP,
   JOB_HANDLER_FREE_AGENT_SESSION,
+  JOB_HANDLER_WAVE_MERGE,
+  JOB_HANDLER_SKILL_SCOUT,
+  JOB_HANDLER_SKILL_INSTALL,
 } from './pipelines/job-router.mjs';
 import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
 import { runPartyBootstrap } from './pipelines/party-bootstrap.mjs';
@@ -89,6 +93,10 @@ import { runAppBootstrap } from './pipelines/app-bootstrap.mjs';
 // Story 18.2 — Free Claude Code Agent session handler + GC scheduler.
 import { runFreeAgentSession } from './pipelines/free-agent-session.mjs';
 import { runFreeAgentGc } from './lib/free-agent-gc.mjs';
+// 2026-05-19 — Phase 1 worktree rollout. Materialize per-story worktrees
+// + node_modules symlinks before any pipeline step runs.
+import { setupStoryWorktree, teardownStoryWorktree } from './lib/story-worktree.mjs';
+import { startReaperTicker } from './lib/worktree-reaper.mjs';
 import {
   findStaleJobs,
   buildResumeJob,
@@ -133,6 +141,15 @@ import { inferTouchPoints } from './lib/touch-point-inference.mjs';
 import { writeFile as fsWriteFile, mkdir as fsMkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { createFederationCache, manifestSha } from './lib/federation-loader.mjs';
+// Epic 3 Story 3.1 (2026-05-20) — SKILL-SCOUT runner + daemon-side
+// shape validator (mirror of the TS Zod schema, see
+// daemon/lib/skill-proposal-validator.mjs).
+import { runSkillScoutJob } from './pipelines/skill-scout-job-runner.mjs';
+import { validateSkillProposalsBlock } from './lib/skill-proposal-validator.mjs';
+// Epic 3 Story 3.2 — the installer the runner calls for auto-confirm.
+import { applyConfirmedProposals } from './pipelines/skill-installer.mjs';
+// Epic 3 Story 3.6 — operator-confirm path.
+import { runSkillInstallJob } from './pipelines/skill-install-job-runner.mjs';
 import { startFederationBackupSchedule } from './lib/federation-backup.mjs';
 import { createFederationResolver } from './lib/federation-resolver.mjs';
 import { createMemoryStore, provisionMemoryRoot } from './lib/memory-store.mjs';
@@ -156,7 +173,7 @@ try {
 // ── Config ──
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
-const JOBS_TABLE = process.env.AGENT_JOBS_TABLE || 'futurator-agent-jobs';
+const JOBS_TABLE = process.env.JOBS_TABLE || 'futurator-agent-jobs';
 const EVENTS_TABLE = process.env.AGENT_EVENTS_TABLE || 'futurator-agent-events';
 const EPICS_TABLE = process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflows';
 // Pipeline v2 / Story 1.4.3 — App-bootstrap saga reads + updates the App row.
@@ -2272,6 +2289,57 @@ async function executePipeline(job) {
 
   await updateJobFields(jobId, { status: 'RUNNING', currentStepIndex: 0 });
 
+  // ── 2026-05-19 Phase 1 worktree rollout — per-story worktree setup ──
+  //
+  // When pipeline-launcher baked `workingDir` as
+  // `/home/ubuntu/worktrees/<app>/<plan>/<storyId>/`, materialize the
+  // worktree (git worktree add + node_modules symlink) before any step
+  // runs. Legacy paths (`/home/ubuntu/projects/<app>/`) skip this — they
+  // are operator-owned shared worktrees.
+  //
+  // Idempotent: setupStoryWorktree treats an existing-on-correct-branch
+  // worktree as a happy reuse (daemon restart picked up the same story).
+  if (
+    workingDir &&
+    workingDir.startsWith('/home/ubuntu/worktrees/') &&
+    variables.STORY_ID &&
+    variables.STORY_ID !== '(not provided)'
+  ) {
+    try {
+      // Path shape: /home/ubuntu/worktrees/<app>/<plan>/<storyId>/
+      const parts = workingDir.replace(/\/+$/, '').split('/').filter(Boolean);
+      // [home, ubuntu, worktrees, <app>, <plan>, <storyId>]
+      const appId = parts[3];
+      const planSlug = parts[4];
+      const storyId = parts[5];
+      if (!appId || !planSlug || !storyId) {
+        throw new Error(`workingDir does not match /home/ubuntu/worktrees/<app>/<plan>/<story>/ shape: ${workingDir}`);
+      }
+      const setup = await setupStoryWorktree({
+        appId,
+        planSlug,
+        storyId,
+        sourceWorktree: `/home/ubuntu/projects/${appId}`,
+        log: (level, msg) => log(level, msg),
+      });
+      log(
+        'info',
+        `[${jobId.slice(0, 8)}] story-worktree ${setup.reused ? 'reused' : 'created'}: ${setup.worktreeDir} on ${setup.branch} (node_modules ${setup.nodeModules.skipped ? 'skipped-no-lockfile' : setup.nodeModules.freshlyInstalled ? 'fresh-install' : 'symlinked'})`,
+      );
+    } catch (wtErr) {
+      // A worktree-setup failure is fatal — without it, the pipeline's
+      // shell steps `cd workingDir` to a non-existent path and explode.
+      // Mark the job FAILED with the underlying error.
+      log('error', `[${jobId.slice(0, 8)}] story-worktree setup failed: ${wtErr.message}`);
+      await updateJobFields(jobId, {
+        status: 'FAILED',
+        failedStepId: '__worktree_setup__',
+        failureReason: `Worktree setup failed: ${wtErr.message.slice(0, 200)}`,
+      });
+      throw wtErr;
+    }
+  }
+
   // ── Pipeline v2.0 T0.2 — daemon-side pre-DEV gate ──
   // Run before the first step. If all three signals (recent commits + AC
   // named exports present in touchPoints + tsc clean) pass, short-circuit the
@@ -2512,6 +2580,77 @@ async function executePipeline(job) {
           projectId: variables.PROJECT_ID || 'unknown',
           workingDir,
         };
+
+        // 2026-05-19 — Phase 0.1 of the worktree rollout plan
+        // (docs/concepts/pipeline-v2/worktree-rollout-plan.md). Pre-fix the
+        // daemon classified ALL compile-phase steps as non-blocking. That was
+        // correct for the knowledge-sidecar steps (compile-diff / compile-ast
+        // / compile-knowledge / compile-sync / compile-push) — those are
+        // idempotent rebuild operations and a transient failure should not
+        // kill the story. But `compile-commit-on-pass` is load-bearing: it's
+        // the actual git commit. If it fails the empty-commit guard
+        // (STORY_COMMIT_EMPTY, PR-67), no source landed and the story
+        // SHOULD fail. snake-4_mpcdwkto had 2 stories ship green with no
+        // commit because this override was missing.
+        //
+        // Honor `onFail.action: 'fail'` on compile-commit-on-pass specifically
+        // (the only compile step with that contract). Other compile steps
+        // continue to be non-blocking.
+        if (step.id === 'compile-commit-on-pass' && step.onFail?.action === 'fail') {
+          log(
+            'error',
+            `compile-commit-on-pass failed AND has onFail.action='fail' — blocking job. ${compileErr.message}`,
+          );
+          // Emit a high-severity attention item (vs the medium-severity
+          // compile-failed) so the operator sees this as a real story failure.
+          try {
+            const planId = await resolvePlanIdFromEpicId(ddb, variables.EPIC_ID);
+            if (planId) {
+              await writeAttentionItem(
+                ddb,
+                {
+                  planId,
+                  severity: 'high',
+                  category: 'story-commit-empty',
+                  title: `Story ${variables.STORY_ID || 'unknown'} produced no commit`,
+                  body:
+                    `compile-commit-on-pass refused to commit because no source-` +
+                    `code changes were staged. Likely cause: DEV agent wrote the ` +
+                    `file but a sibling story's commit step swept it via git add ` +
+                    `-A first (the snake-4_mpcdwkto subsumption race), OR DEV ` +
+                    `legitimately produced no source. Inspect the working tree ` +
+                    `and the dev session before retrying.\n\n` +
+                    `Step error: ${compileErr.message.slice(0, 400)}`,
+                  context: {
+                    jobId,
+                    epicId: variables.EPIC_ID,
+                    storyId: variables.STORY_ID,
+                    stepId: step.id,
+                  },
+                  suggestedActions: [
+                    { label: 'Open logs', kind: 'open-logs' },
+                    { label: 'Open story', kind: 'open-story' },
+                  ],
+                  dedupKey: `story-commit-empty:${planId}:${variables.STORY_ID || 'unknown'}`,
+                },
+                log,
+              );
+            }
+          } catch (attnErr) {
+            log('error', `Failed to write story-commit-empty attention: ${attnErr.message}`);
+          }
+          // Mark the job FAILED with the step id + error for forensic clarity,
+          // then re-throw so the outer try/catch in the job runner records
+          // the standard failure metadata.
+          await updateJobFields(jobId, {
+            status: 'FAILED',
+            failedStepId: step.id,
+            failureReason: `compile-commit-on-pass: ${compileErr.message.slice(0, 200)}`,
+          });
+          throw new Error(
+            `Story job failed: compile-commit-on-pass refused empty commit (${compileErr.message.slice(0, 150)})`,
+          );
+        }
 
         log('warn', `Compilation step ${step.id} failed (NON-BLOCKING): ${compileErr.message}`);
 
@@ -3648,6 +3787,17 @@ async function executeAppBootstrapJob(job) {
       writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
       partyCtx: buildPartyCtx(),
       runPartyBootstrap,
+      // Epic 3 Story 3.3 (2026-05-20) — saga inserts the T1 SKILL-SCOUT
+      // job row directly at bootstrap completion. Pass-through to DDB.
+      insertAgentJob: async (newJob) => {
+        await ddb.send(
+          new PutCommand({
+            TableName: JOBS_TABLE,
+            Item: newJob,
+            ConditionExpression: 'attribute_not_exists(jobId)',
+          }),
+        );
+      },
     });
     await updateJobFields(jobId, { status: 'COMPLETED' });
     log('info', `[${short}] app-bootstrap completed`);
@@ -3657,6 +3807,127 @@ async function executeAppBootstrapJob(job) {
       errorMessage: err?.message || String(err),
     });
     log('error', `[${short}] app-bootstrap failed: ${err?.message || err}`);
+    throw err;
+  }
+}
+
+/**
+ * 2026-05-19 — Phase 1 worktree rollout. Wave-merge job runner.
+ *
+ * Consumes `job.waveMergePayload` and dispatches to runWaveMerge in
+ * lib/wave-merge-runner.mjs. Translates the runner's structured outcome
+ * back into job-status updates:
+ *
+ *   success           → COMPLETED, plan branch pushed, wip branches reaped
+ *   merge-conflict    → FAILED with structured error (attention already raised)
+ *   wave-build-failed → FAILED with structured error (attention already raised)
+ *   no-stories        → COMPLETED (idempotent; wave had nothing to merge)
+ *   setup-failed      → FAILED (coordinator worktree could not be created)
+ */
+async function executeWaveMergeJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  const validation = validateWaveMergeJob(job);
+  if (!validation.ok) {
+    throw new Error(`wave-merge job rejected: ${validation.reason}`);
+  }
+
+  const p = job.waveMergePayload;
+  log('info', `[${short}] Routing to wave-merge runner`, {
+    appId: p.appId,
+    planSlug: p.planSlug,
+    epicId: p.epicId,
+    waveNumber: p.waveNumber,
+    stories: p.storyIds.length,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'wave-merge',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  // Resolve the boilerplate-defined post-merge validation command. Lookup
+  // the App row + boilerplate metadata; null when stub (skips validation).
+  let postMergeValidationCmd = p.postMergeValidationCmd ?? null;
+  if (postMergeValidationCmd === null) {
+    try {
+      const appRow = await getAppRow(p.appId);
+      const boilerplateType = appRow?.boilerplateType || 'nextjs-base';
+      // Resolve via the Lambda-built daemon-bundle (registry is TS; dynamic
+      // import keeps the daemon flexible if the bundle isn't present).
+      const { BOILERPLATE_REGISTRY } = await import(
+        '../sst-env-shared/boilerplate-registry-snapshot.mjs'
+      ).catch(() => ({ BOILERPLATE_REGISTRY: null }));
+      if (BOILERPLATE_REGISTRY && BOILERPLATE_REGISTRY[boilerplateType]) {
+        postMergeValidationCmd =
+          BOILERPLATE_REGISTRY[boilerplateType].postMergeValidationCmd ?? null;
+      } else {
+        // Fallback for current Phase 1 — all 4 active apps are Next.js so
+        // npm test is universally correct. When a non-Next boilerplate
+        // ships, the registry snapshot kicks in.
+        postMergeValidationCmd = 'npm test';
+      }
+    } catch (resolveErr) {
+      log(
+        'warn',
+        `[${short}] postMergeValidationCmd resolve failed (falling back to npm test): ${resolveErr.message}`,
+      );
+      postMergeValidationCmd = 'npm test';
+    }
+  }
+
+  try {
+    const { runWaveMerge } = await import('./lib/wave-merge-runner.mjs');
+    const result = await runWaveMerge({
+      appId: p.appId,
+      planId: p.planId,
+      planSlug: p.planSlug,
+      epicId: p.epicId,
+      waveNumber: p.waveNumber,
+      storyIds: p.storyIds,
+      postMergeValidationCmd,
+      writeAttention: (item) =>
+        writeAttentionItem(
+          ddb,
+          { ...item, planId: p.planId },
+          log,
+        ),
+      log,
+    });
+
+    if (result.outcome === 'success' || result.outcome === 'no-stories') {
+      await updateJobFields(jobId, {
+        status: 'COMPLETED',
+        waveMergeResult: {
+          outcome: result.outcome,
+          mergedStoryIds: result.mergedStoryIds || [],
+          coordinatorWorktree: result.coordinatorWorktree,
+          pushSha: result.pushSha,
+        },
+      });
+      log('info', `[${short}] wave-merge ${result.outcome} (merged ${result.mergedStoryIds?.length || 0})`);
+      return;
+    }
+
+    // merge-conflict / wave-build-failed / setup-failed
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: `wave-merge ${result.outcome}: ${result.conflictedAtStoryId || result.failingTests?.length || result.error || 'see attention items'}`,
+      waveMergeResult: result,
+    });
+    log('warn', `[${short}] wave-merge ${result.outcome}`);
+    // We do NOT throw — the failure is structured and the wave-reducer
+    // will see this terminal status on the next tick and flip the wave
+    // to `fixing` (existing wave-reducer behavior for non-success wave
+    // build-check jobs).
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] wave-merge runner threw: ${err?.message || err}`);
     throw err;
   }
 }
@@ -3706,6 +3977,12 @@ async function runJobAsync(job) {
       await executeAppBootstrapJob(job);
     } else if (handler === JOB_HANDLER_FREE_AGENT_SESSION) {
       await executeFreeAgentSessionJob(job);
+    } else if (handler === JOB_HANDLER_WAVE_MERGE) {
+      await executeWaveMergeJob(job);
+    } else if (handler === JOB_HANDLER_SKILL_SCOUT) {
+      await executeSkillScoutJob(job);
+    } else if (handler === JOB_HANDLER_SKILL_INSTALL) {
+      await executeSkillInstallJob(job);
     } else {
       await executePipeline(job);
     }
@@ -3719,6 +3996,159 @@ async function runJobAsync(job) {
   } finally {
     activeJobs.delete(job.jobId);
     jobEventSeqs.delete(job.jobId);
+  }
+}
+
+/**
+ * Pipeline v2 Phase 3-C Epic 3 / Story 3.1 (2026-05-20) — SKILL-SCOUT
+ * job runner. Reads the federation manifest + project skill manifest
+ * from disk, spawns the SKILL-SCOUT agent step via executeStep, then
+ * either auto-confirms (T1/T2/T5/T7 prototype + high confidence) by
+ * calling applyConfirmedProposals directly, or surfaces a decision
+ * card via writeAttentionItem.
+ *
+ * The single-step pipeline is baked into job.pipeline.steps[0] by
+ * `generateSkillScoutPipeline` (functions/shared/pipelines/skill-scout-
+ * pipeline.ts) at job-create time. This function just orchestrates the
+ * lifecycle via runSkillScoutJob's injected-deps contract.
+ */
+async function executeSkillScoutJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  log('info', `[${short}] Routing to skill-scout pipeline`, {
+    trigger: job.skillScoutPayload?.trigger,
+    projectSlug: job.skillScoutPayload?.projectSlug,
+    rigor: job.skillScoutPayload?.rigor,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'skill-scout',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  // Adapter: bridge runSkillScoutJob's executeAgentStep contract to the
+  // daemon's module-scoped executeStep. The runner expects a return
+  // shape of `{ variables, tokensConsumed }`; executeStep mutates the
+  // variables object in-place and returns { allPassed, stepResult }.
+  async function executeAgentStep(j, step, initialVars) {
+    const variables = { ...initialVars };
+    const sessions = {};
+    const stepResults = [];
+    const agents = j.pipeline?.agents || {};
+    const workingDir = j.workingDir || `/home/ubuntu/projects/${j.skillScoutPayload.projectSlug}`;
+    const { stepResult } = await executeStep(
+      jobId,
+      step,
+      agents,
+      workingDir,
+      variables,
+      sessions,
+      stepResults,
+    );
+    return {
+      variables,
+      tokensConsumed:
+        (stepResult?.inputTokens ?? 0) + (stepResult?.outputTokens ?? 0),
+    };
+  }
+
+  try {
+    const result = await runSkillScoutJob(job, {
+      federationCache,
+      getProjectPath: (slug) => `/home/ubuntu/projects/${slug}`,
+      executeAgentStep,
+      applyConfirmedProposals,
+      writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
+      pushEvent,
+      validateSkillProposalsBlock,
+    });
+
+    if (result.ok) {
+      await updateJobFields(jobId, {
+        status: 'COMPLETED',
+        skillScoutDisposition: result.disposition,
+        skillScoutProposalCount: result.proposalCount ?? 0,
+        skillScoutAcceptedCount: result.acceptedCount ?? 0,
+      });
+      log(
+        'info',
+        `[${short}] skill-scout completed (disposition=${result.disposition}, proposals=${result.proposalCount ?? 0})`,
+      );
+    } else {
+      await updateJobFields(jobId, {
+        status: 'FAILED',
+        errorMessage: result.error || result.reason || 'unknown',
+        skillScoutFailureReason: result.reason,
+      });
+      log('warn', `[${short}] skill-scout failed: ${result.reason}`);
+    }
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] skill-scout threw: ${err?.message || err}`);
+    throw err;
+  }
+}
+
+/**
+ * Pipeline v2 Phase 3-C Epic 3 / Story 3.6 (2026-05-20) — SKILL-INSTALL
+ * job runner. Operator-confirmed installs land here from the API
+ * Lambda's POST /api/skill-scout/proposals/:itemId/confirm path. Applies
+ * the manifest deltas, re-runs vendor-skills, and commits to git with
+ * `Agent: SKILL-SCOUT` trailer.
+ */
+async function executeSkillInstallJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  log('info', `[${short}] Routing to skill-install pipeline`, {
+    projectSlug: job.skillInstallPayload?.projectSlug,
+    source: job.skillInstallPayload?.source,
+    proposalCount: job.skillInstallPayload?.output?.proposals?.length,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'skill-install',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  try {
+    const result = await runSkillInstallJob(job, {
+      applyConfirmedProposals,
+      writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
+      pushEvent,
+      getProjectPath: (slug) => `/home/ubuntu/projects/${slug}`,
+    });
+
+    if (result.ok) {
+      await updateJobFields(jobId, {
+        status: 'COMPLETED',
+        skillInstallWritten: result.written,
+        skillInstallVendoredCount: result.vendoredCount,
+      });
+      log(
+        'info',
+        `[${short}] skill-install completed (written=${result.written}, vendored=${result.vendoredCount})`,
+      );
+    } else {
+      await updateJobFields(jobId, {
+        status: 'FAILED',
+        errorMessage: result.error || result.reason || 'unknown',
+      });
+      log('warn', `[${short}] skill-install failed: ${result.reason}`);
+    }
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] skill-install threw: ${err?.message || err}`);
+    throw err;
   }
 }
 
@@ -3982,6 +4412,68 @@ async function poll() {
     loadOAuth('interval');
     probeAuth().catch((e) => log('error', `Auth probe failed: ${e.message}`));
   }, AUTH_PROBE_INTERVAL_MS).unref();
+
+  // 2026-05-19 — Phase 1 worktree rollout. Hourly reaper for per-story
+  // worktrees + coordinator worktrees + node_modules store entries.
+  // First run after 5 min so the daemon doesn't reap stuff during
+  // startup race windows. See docs/concepts/pipeline-v2/worktree-rollout-design.md §3.
+  startReaperTicker(
+    {
+      log,
+      // Story-row lookup: find a story by (appId, planSlug, storyId).
+      // We don't have a direct (appId, planSlug, storyId) → story index;
+      // walk the epics under the plan and find the story by id.
+      findStoryByIds: async ({ appId, planSlug, storyId }) => {
+        const plan = await ddb
+          .send(
+            new ScanCommand({
+              TableName: PLANS_TABLE,
+              FilterExpression: '#nm = :nm AND appId = :app',
+              ExpressionAttributeNames: { '#nm': 'name' },
+              ExpressionAttributeValues: { ':nm': planSlug, ':app': appId },
+              Limit: 1,
+            }),
+          )
+          .then((r) => r.Items?.[0] || null)
+          .catch(() => null);
+        if (!plan || !Array.isArray(plan.epicIds)) return null;
+        for (const epicId of plan.epicIds) {
+          const epic = await ddb
+            .send(new GetCommand({ TableName: EPICS_TABLE, Key: { epicId } }))
+            .then((r) => r.Item || null)
+            .catch(() => null);
+          if (!epic || !Array.isArray(epic.stories)) continue;
+          const s = epic.stories.find((x) => x?.storyId === storyId);
+          if (s) return s;
+        }
+        return null;
+      },
+      getJobById: async (jobId) => {
+        return ddb
+          .send(new GetCommand({ TableName: JOBS_TABLE, Key: { jobId } }))
+          .then((r) => r.Item || null)
+          .catch(() => null);
+      },
+      findPlanByAppAndSlug: async (appId, planSlug) => {
+        return ddb
+          .send(
+            new ScanCommand({
+              TableName: PLANS_TABLE,
+              FilterExpression: '#nm = :nm AND appId = :app',
+              ExpressionAttributeNames: { '#nm': 'name' },
+              ExpressionAttributeValues: { ':nm': planSlug, ':app': appId },
+              Limit: 1,
+            }),
+          )
+          .then((r) => r.Items?.[0] || null)
+          .catch(() => null);
+      },
+    },
+    {
+      intervalMs: 60 * 60 * 1000, // 1 hour
+      initialDelayMs: 5 * 60 * 1000, // 5 min
+    },
+  );
 
   log('info', 'Polling for PENDING jobs...\n');
 
