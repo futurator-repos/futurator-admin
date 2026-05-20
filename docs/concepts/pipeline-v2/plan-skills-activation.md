@@ -216,6 +216,12 @@ move the needle?" signal we can buy for ~3 days of work.
 
 ## 5. Epic 3 — SKILL-SCOUT activation (T1 + T2 only)
 
+> **Detailed tech-spec at `tech-spec-epic-3-skill-scout-activation.md`**
+> (2026-05-19) — 7 stories, ~5 dev-days, with risk pre-flight (Story 3.0)
+> covering job-router extensibility, plan-reducer wait-state design, and
+> attention-payload shape verification. Read that doc before
+> implementing.
+
 Brings the dormant `daemon/pipelines/skill-scout-runner.mjs` to life for
 the two highest-value triggers. Runner is fully tested and orphaned today
 (zero importers in the daemon).

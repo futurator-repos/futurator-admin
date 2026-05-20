@@ -37,6 +37,18 @@
 >   vendored, SKILL-SCOUT never spawns. Seven epics from operator-side
 >   provisioning through observability; critical path is Epics 1→2→4→3
 >   (~4 weeks single-operator).
+> - **`tech-spec-epic-2-default-skill-loadout.md`** — Epic 2 tech
+>   spec (Stories 2.0-2.4). **Shipped 2026-05-19 (commit `0bb19fe`).**
+>   Pre-pins per-starter `defaultSkillLoadout` + vendors SKILL.md
+>   bodies at app-bootstrap time. First measurable signal of skills
+>   loading into agents.
+> - **`tech-spec-epic-3-skill-scout-activation.md`** — Epic 3 tech
+>   spec (Stories 3.0-3.7). Wakes up dormant SKILL-SCOUT for T1
+>   (post-bootstrap) + T2 (pre-PM) triggers. Auto-confirm under
+>   prototype rigor + high confidence; surface decision card with
+>   confirm/edit/decline/defer actions otherwise. Includes
+>   `skill-installer` module shared with operator-confirm path,
+>   plan-reducer wait gate with 5-min timeout safety net. ~5 dev-days.
 >
 >   This file extends them; it is NOT a substitute. When this document and a
 >   sibling disagree, **the sibling wins** if it's about _design_; this file
