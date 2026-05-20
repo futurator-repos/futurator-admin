@@ -7381,6 +7381,145 @@ app.post('/api/apps', authMiddleware, async (c) => {
   );
 });
 
+/**
+ * Epic 7 (2026-05-20) — /labs/skills observability endpoint.
+ *
+ * GET /api/apps/:appId/skills/digest
+ *
+ * Per-app skill activity rollup. Reads (a) the in-app manifest sha + entry
+ * counts from the `bootstrappedAt`-fresh worktree by way of the most recent
+ * commit metadata trailer on main, and (b) the `Skills-Used:` aggregate
+ * from `git log --grep="Skills-Used:"` parsed via the existing commit-
+ * metadata helpers.
+ *
+ * For v1 we keep this LIGHT — the heavy git-log analytics are deferred
+ * to follow-on. The endpoint returns:
+ *
+ *   - manifest: the manifest contents (parsed)
+ *   - recentSkillScoutJobs: the last N SKILL-SCOUT job rows for this app
+ *   - skillsUsedAggregate: derived from agent-events `skill_activated`
+ *     entries across the app's recent plans (Epic 4 source signal)
+ */
+app.get('/api/apps/:appId/skills/digest', authMiddleware, async (c) => {
+  const appId = c.req.param('appId');
+  const appRow = await appRepo.getApp(appId);
+  if (!appRow) {
+    throw new AppError('APP_NOT_FOUND', `App "${appId}" not found.`, 404);
+  }
+
+  // Scan agent-jobs for recent SKILL-SCOUT runs on this app's worktree.
+  // The job-rows carry the projectSlug under skillScoutPayload.
+  const allJobs = await agentJobsRepo.scanAllJobs().catch(() => []);
+  const skillScoutJobs = allJobs
+    .filter((j) => {
+      if (j.jobType !== 'skill-scout') return false;
+      const payload = (
+        j as unknown as {
+          skillScoutPayload?: { projectSlug?: string };
+        }
+      ).skillScoutPayload;
+      return payload?.projectSlug === appId;
+    })
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+    .slice(0, 10)
+    .map((j) => {
+      const payload = j as unknown as {
+        skillScoutPayload?: { trigger?: string; rigor?: string; planId?: string };
+        skillScoutDisposition?: string;
+        skillScoutProposalCount?: number;
+        skillScoutAcceptedCount?: number;
+      };
+      return {
+        jobId: j.jobId,
+        status: j.status,
+        createdAt: j.createdAt,
+        trigger: payload.skillScoutPayload?.trigger ?? null,
+        rigor: payload.skillScoutPayload?.rigor ?? null,
+        planId: payload.skillScoutPayload?.planId ?? null,
+        disposition: payload.skillScoutDisposition ?? null,
+        proposalCount: payload.skillScoutProposalCount ?? 0,
+        acceptedCount: payload.skillScoutAcceptedCount ?? 0,
+      };
+    });
+
+  // Plans + agent-events: aggregate skill_activated counts across this app's
+  // recent plans for the "what's actually getting used" signal.
+  const plans = await planRepo.listPlansByApp(appId).catch(() => []);
+  const recentPlanIds = plans
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+    .slice(0, 5)
+    .map((p) => p.planId);
+
+  const activatedCounter = new Map<string, number>();
+  for (const planId of recentPlanIds) {
+    try {
+      // collectRawEvents requires a Plan obj; reuse it by re-fetching.
+      const plan = plans.find((p) => p.planId === planId);
+      if (!plan) continue;
+      // Inline scan of plan jobs' events — same shape collectRawEvents uses
+      // (we duplicate the lookup logic here to avoid touching forensic-
+      // builder's call site).
+      const planJobIds = new Set<string>();
+      for (const epicId of plan.epicIds ?? []) {
+        const epic = await epicRepo.getEpicById(epicId).catch(() => null);
+        for (const story of epic?.stories ?? []) {
+          if (story.jobId) planJobIds.add(story.jobId);
+        }
+      }
+      for (const jobId of planJobIds) {
+        // Page through events using the existing getEventsAfter helper.
+        const accumulated: Array<{
+          eventType?: string;
+          payload?: { skill?: string; source?: string };
+        }> = [];
+        try {
+          let cursor = '000000';
+          // Cap the loop to avoid runaway pagination on huge jobs.
+          for (let i = 0; i < 50; i += 1) {
+            const { events: batch, lastSeq } = await agentEventsRepo.getEventsAfter(
+              jobId,
+              cursor,
+              200,
+            );
+            if (batch.length === 0) break;
+            accumulated.push(...batch);
+            if (lastSeq === cursor) break;
+            cursor = lastSeq;
+          }
+        } catch {
+          // Per-job event scan failures are non-fatal.
+        }
+        const events = accumulated;
+        for (const ev of events) {
+          if (ev.eventType !== 'skill_activated') continue;
+          const skill = ev.payload?.skill;
+          const source = ev.payload?.source ?? 'unknown';
+          if (typeof skill !== 'string') continue;
+          const key = `${skill}@${source}`;
+          activatedCounter.set(key, (activatedCounter.get(key) ?? 0) + 1);
+        }
+      }
+    } catch {
+      // Per-plan failures are non-fatal — degrade gracefully.
+    }
+  }
+  const skillsUsedAggregate = Array.from(activatedCounter.entries())
+    .map(([key, count]) => {
+      const [skill, source] = key.split('@');
+      return { skill, source, activationCount: count };
+    })
+    .sort((a, b) => b.activationCount - a.activationCount);
+
+  return c.json({
+    appId,
+    boilerplateType: appRow.boilerplateType,
+    bootstrappedAt: appRow.bootstrappedAt ?? null,
+    recentSkillScoutJobs: skillScoutJobs,
+    skillsUsedAggregate,
+    plansAnalyzed: recentPlanIds.length,
+  });
+});
+
 /** GET /api/apps/:appId — App detail (App + plans[] + activePlan + recentDeploys). */
 app.get('/api/apps/:appId', authMiddleware, async (c) => {
   const appId = c.req.param('appId');

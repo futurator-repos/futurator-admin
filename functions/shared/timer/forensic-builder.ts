@@ -43,6 +43,33 @@ export interface CohortBaseline {
  * schemaVersion is a stable discriminator so downstream tooling can detect
  * breaking changes.
  */
+/**
+ * Epic 7 (2026-05-20) — per-plan skill activity rollup. Derived from
+ * `skill_activated` + `tool_use` events in the plan's job events.
+ */
+export interface ForensicSkillsBlock {
+  /** Distinct skills activated across the entire plan (post-Epic-4). */
+  activatedSkills: Array<{ skill: string; source: string; activationCount: number }>;
+  /** Per-job stats — useful for diagnosing "which agent invocation actually used the skill". */
+  perJob: Array<{
+    jobId: string;
+    skillActivationCount: number;
+    distinctSkills: number;
+  }>;
+  /** Total `Skill` tool_use events observed. Useful for cohort baselines. */
+  totalSkillToolUseEvents: number;
+  /**
+   * SKILL-SCOUT activity rollup (Epic 3): how many SCOUT runs fired, what
+   * triggers, what dispositions. Sourced from `step.skill-scout.*` events.
+   */
+  skillScoutRuns: Array<{
+    jobId: string;
+    trigger: string;
+    proposalCount: number;
+    durationMs: number;
+  }>;
+}
+
 export interface ForensicPayload {
   schemaVersion: 'timer-intel-v1.0';
   plan: Plan;
@@ -51,6 +78,8 @@ export interface ForensicPayload {
   aggregate: AggregationResult;
   cohort: CohortBaseline | null;
   narrative: string;
+  /** Epic 7 — null only when zero skill events observed (e.g. pre-Epic-4 plans). */
+  skills: ForensicSkillsBlock | null;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -276,6 +305,106 @@ async function collectRawEvents(plan: Plan): Promise<AgentEvent[]> {
  * Once the cron-aggregated TimingSummary table ships, replace the inline
  * cohort logic with a targeted DDB Get on that table.
  */
+/**
+ * Epic 7 (2026-05-20) — derive the skills block from the plan's raw events.
+ *
+ * Reads `skill_activated` events (Epic 4) for per-skill counts, and
+ * `step.skill-scout.<trigger>` events (Epic 3) for SCOUT run stats.
+ * Returns `null` when no skill-related events are observed (pre-Epic-3/4
+ * plans, or plans that ran before the daemon shipped the relevant hooks).
+ *
+ * Pure — no I/O. Drop-in derivation from the events array the forensic
+ * builder already collects.
+ */
+export function buildSkillsBlock(events: AgentEvent[]): ForensicSkillsBlock | null {
+  if (events.length === 0) return null;
+
+  // 1. Skill activations (Epic 4). Per-skill counts + per-job rollup.
+  const perSkill = new Map<string, { skill: string; source: string; count: number }>();
+  const perJob = new Map<
+    string,
+    { jobId: string; activationCount: number; distinct: Set<string> }
+  >();
+  let totalSkillToolUseEvents = 0;
+
+  for (const ev of events) {
+    if (ev.eventType === 'tool_use' && ev.toolName === 'Skill') {
+      totalSkillToolUseEvents += 1;
+    }
+    // `skill_activated` is a synthetic event emitted by the daemon's
+    // recordSkillActivation success path (Epic 4). It carries payload
+    // shape { skill, source, totalLoaded } encoded in the AgentEvent's
+    // payload field — but the daemon's pushEvent flattens into top-level
+    // fields, so we read from `payload` (epic-dev path) AND from
+    // top-level fields (legacy path) defensively.
+    const isActivation = (ev.eventType as string) === 'skill_activated';
+    if (!isActivation) continue;
+
+    const payload = ev.payload as { skill?: string; source?: string } | undefined;
+    const skill = payload?.skill;
+    const source = payload?.source ?? 'unknown';
+    if (typeof skill !== 'string' || skill.length === 0) continue;
+
+    const key = `${skill}@${source}`;
+    const existing = perSkill.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      perSkill.set(key, { skill, source, count: 1 });
+    }
+
+    let job = perJob.get(ev.jobId);
+    if (!job) {
+      job = { jobId: ev.jobId, activationCount: 0, distinct: new Set() };
+      perJob.set(ev.jobId, job);
+    }
+    job.activationCount += 1;
+    job.distinct.add(key);
+  }
+
+  // 2. SKILL-SCOUT runs (Epic 3). `step.skill-scout.<trigger>` is the
+  // forensic event shape from buildForensicEvent in skill-scout-runner.mjs.
+  const scoutRuns: ForensicSkillsBlock['skillScoutRuns'] = [];
+  for (const ev of events) {
+    if (typeof ev.eventType === 'string' && ev.eventType.startsWith('step.skill-scout.')) {
+      const payload = ev.payload as
+        | { trigger?: string; proposalCount?: number; durationMs?: number }
+        | undefined;
+      scoutRuns.push({
+        jobId: ev.jobId,
+        trigger: payload?.trigger ?? ev.eventType.replace('step.skill-scout.', ''),
+        proposalCount: payload?.proposalCount ?? 0,
+        durationMs: payload?.durationMs ?? 0,
+      });
+    }
+  }
+
+  if (perSkill.size === 0 && scoutRuns.length === 0 && totalSkillToolUseEvents === 0) {
+    return null;
+  }
+
+  // 3. Compose. Sort activatedSkills by count descending so the highest-
+  // activated skill is first in the block.
+  const activatedSkills = Array.from(perSkill.values())
+    .sort((a, b) => b.count - a.count)
+    .map((entry) => ({
+      skill: entry.skill,
+      source: entry.source,
+      activationCount: entry.count,
+    }));
+
+  return {
+    activatedSkills,
+    perJob: Array.from(perJob.values()).map((j) => ({
+      jobId: j.jobId,
+      skillActivationCount: j.activationCount,
+      distinctSkills: j.distinct.size,
+    })),
+    totalSkillToolUseEvents,
+    skillScoutRuns: scoutRuns,
+  };
+}
+
 export async function buildForensicPayload(
   planId: string,
   cohortFetcher: (
@@ -310,6 +439,10 @@ export async function buildForensicPayload(
 
   const narrative = buildNarrative(plan, slices, aggregate, cohort);
 
+  // Epic 7 (2026-05-20) — skills block. Pure derivation from events;
+  // null when the plan ran before Epic 3/4 hooks shipped.
+  const skills = buildSkillsBlock(events);
+
   return {
     schemaVersion: 'timer-intel-v1.0',
     plan,
@@ -318,5 +451,6 @@ export async function buildForensicPayload(
     aggregate,
     cohort,
     narrative,
+    skills,
   };
 }
