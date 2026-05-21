@@ -98,6 +98,9 @@ import { runFreeAgentGc } from './lib/free-agent-gc.mjs';
 // + node_modules symlinks before any pipeline step runs.
 import { setupStoryWorktree, teardownStoryWorktree } from './lib/story-worktree.mjs';
 import { startReaperTicker } from './lib/worktree-reaper.mjs';
+// 2026-05-21 — auth-probe classifier (extracted so the false-FAIL fix
+// is unit-testable without bringing the daemon entry into the test).
+import { classifyAuthProbeResult } from './lib/auth-probe-classifier.mjs';
 import {
   findStaleJobs,
   buildResumeJob,
@@ -162,6 +165,7 @@ import { createFederationResolver } from './lib/federation-resolver.mjs';
 import { createMemoryStore, provisionMemoryRoot } from './lib/memory-store.mjs';
 // PR-80-followup — CLAUDE.md prepend per v2.5 §41.3.
 import { readClaudeMd } from './lib/claude-md-loader.mjs';
+import { createPatRetry } from './lib/pat-retry.mjs';
 
 // Resolve the full path to `claude` binary at startup
 let CLAUDE_BIN = 'claude';
@@ -357,8 +361,19 @@ function probeAuth() {
         const trimmed = combined.trim();
         if (trimmed.startsWith('{')) parsed = JSON.parse(trimmed);
       } catch {}
-      const claudeReportedError = parsed?.is_error === true;
-      const ok = !claudeReportedError && code === 0 && !isAuthFailureOutput(combined);
+      // 2026-05-21 — classifyAuthProbeResult is the pure decision matrix
+      // (lib/auth-probe-classifier.mjs). Pre-fix this inlined a strict
+      // `code === 0` check which flipped to FAIL on benign non-zero exits
+      // (rate-limit response headers, trace fragments, shutdown signals)
+      // even when is_error=false. The UI surfaced that as "auth expired"
+      // while the next agent spawn worked fine. Now: if Claude returned
+      // JSON with is_error=false and no auth-failure phrase, we trust
+      // the API result over the exit code.
+      const ok = classifyAuthProbeResult({
+        exitCode: code,
+        parsed,
+        combinedOutput: combined,
+      });
       authState.valid = ok;
       authState.error = ok
         ? null
@@ -366,6 +381,10 @@ function probeAuth() {
       authState.checkedAt = new Date().toISOString();
       log(ok ? 'info' : 'warn', `Auth probe: ${ok ? 'OK' : 'FAIL'}`, {
         err: authState.error,
+        // 2026-05-21 — surface the raw exit code so flaky non-zero exits
+        // are visible in the log even when we (correctly) call it OK.
+        exit: code,
+        parsed: parsed ? 'yes' : 'no',
       });
       resolve();
     });
@@ -2949,11 +2968,14 @@ const PARTY_EXPECTED_AGENT_COUNT = parseInt(process.env.PARTY_EXPECTED_AGENT_COU
 // fall back to the shared secret `futurator/labs-brownfield-github-pat`.
 //
 // Tokens are loaded ON DEMAND when a brownfield bootstrap or refresh
-// job starts. A 1-hour in-memory TTL cache keeps Secrets Manager calls
-// bounded under concurrent traffic. Tokens never land in DDB rows,
-// daemon logs, or event payloads — git-clone.mjs's redactor strips them.
+// job starts. A 60-second in-memory TTL cache keeps Secrets Manager calls
+// bounded under concurrent traffic while keeping rotation-detection latency
+// low (Story 19.6 — dropped from 1h to 60s per §12.4 risk 27; the binding
+// rotation-detection semantic is `withPatRetry`'s force-refresh-on-auth-fail
+// path below). Tokens never land in DDB rows, daemon logs, or event
+// payloads — git-clone.mjs's redactor strips them.
 const LEGACY_SHARED_BROWNFIELD_PAT_SECRET = 'futurator/labs-brownfield-github-pat';
-const PAT_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const PAT_CACHE_TTL_MS = 60 * 1000; // 60 seconds (Story 19.6 — was 1h)
 
 const secretsClient = new SecretsManagerClient({ region: REGION });
 
@@ -2962,21 +2984,28 @@ const brownfieldPatCache = new Map();
 
 /**
  * Resolve a fine-grained GitHub PAT from Secrets Manager. Caches for
- * 1h to avoid hammering the API under concurrent brownfield work.
+ * `PAT_CACHE_TTL_MS` (60s) to bound Secrets Manager call rate.
  *
  * @param {string} [secretName] — explicit secret name. Falls back to
  *   the legacy shared secret when undefined (back-compat for the
  *   `applicator` migration that pre-dated per-project secrets).
+ * @param {{ forceRefresh?: boolean }} [opts] — Story 19.6: when
+ *   `forceRefresh` is true, skip the cache, re-read from Secrets
+ *   Manager, and update the cache with the new value. `withPatRetry`
+ *   below uses this on the second pass after a GitHub auth failure.
  * @returns {Promise<string|null>} the token, or null if Secrets Manager
  *   couldn't resolve it. Callers must handle null with a clear error
  *   (we don't throw here so the daemon can keep processing greenfield
  *   work even when a brownfield secret is misconfigured).
  */
-async function loadBrownfieldPat(secretName) {
+async function loadBrownfieldPat(secretName, opts) {
+  const forceRefresh = Boolean(opts && opts.forceRefresh);
   const id = secretName || LEGACY_SHARED_BROWNFIELD_PAT_SECRET;
-  const cached = brownfieldPatCache.get(id);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.token;
+  if (!forceRefresh) {
+    const cached = brownfieldPatCache.get(id);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.token;
+    }
   }
   try {
     const result = await secretsClient.send(new GetSecretValueCommand({ SecretId: id }));
@@ -2996,7 +3025,7 @@ async function loadBrownfieldPat(secretName) {
       }
     }
     brownfieldPatCache.set(id, { token, expiresAt: Date.now() + PAT_CACHE_TTL_MS });
-    log('info', `[brownfield-pat] loaded ${id}`);
+    log('info', `[brownfield-pat] ${forceRefresh ? 'refreshed' : 'loaded'} ${id}`);
     return token;
   } catch (err) {
     log(
@@ -3006,6 +3035,16 @@ async function loadBrownfieldPat(secretName) {
     return null;
   }
 }
+
+// Story 19.6 — `withPatRetry(secretName, operation)` is built via the
+// `createPatRetry` factory in `./lib/pat-retry.mjs` so the heuristic +
+// retry-once contract are unit-testable without spinning up the daemon.
+// The factory closes over the real `loadBrownfieldPat` so callers get
+// rotation-detection retry on the actual Secrets Manager cache.
+const withPatRetry = createPatRetry({
+  loadPat: loadBrownfieldPat,
+  logger: { info: (msg) => log('info', msg) },
+});
 
 /**
  * Probe the legacy shared secret at startup so the daemon logs report
@@ -3379,7 +3418,12 @@ function buildPartyCtx() {
     // Pipelines call `loadBrownfieldPat(secretName)` lazily with the
     // per-project secret name from the job payload. Falls back to the
     // shared secret when no name is provided (legacy `applicator`).
+    // Story 19.6: `withPatRetry` wraps PAT-using operations with
+    // rotation-detection retry (force-refresh on GitHub auth failure,
+    // retry once). Pipeline-v2's compile-push uses this; party-push's
+    // checkpoint script (Story 20.2) wires it too, dormant until Epic 21.
     loadBrownfieldPat,
+    withPatRetry,
     tryAcquireRefreshLock: partyTryAcquireRefreshLock,
     releaseRefreshLock: partyReleaseRefreshLock,
     updateProjectAfterRefresh: partyUpdateProjectAfterRefresh,

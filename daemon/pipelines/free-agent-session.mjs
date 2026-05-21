@@ -49,6 +49,8 @@ import {
 } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 
+import { startCancelPoller } from './lib/cancel-poller.mjs';
+
 const DEFAULT_TIMEOUT_MS = Number(process.env.FREE_AGENT_TURN_TIMEOUT_MS) || 600_000;
 const KILL_GRACE_MS = 5_000;
 // Cancel-flag poll interval. 2.5s feels responsive in the UI without burning
@@ -226,15 +228,10 @@ export async function runFreeAgentSession(job, ctx) {
     model,
   });
 
-  // Clear any stale cancel flag from a prior turn before spawning. Otherwise
-  // a flag the operator never cleared could pre-cancel this fresh turn.
-  if (typeof sessionsRepo.clearCancelFlag === 'function') {
-    try {
-      await sessionsRepo.clearCancelFlag(sessionId);
-    } catch (clearErr) {
-      logger.warn?.(`[free-agent-session] clearCancelFlag (pre-spawn) failed: ${clearErr.message}`);
-    }
-  }
+  // Cancel-flag clearing happens inside `poller.stop()` below (Story 19.2 +
+  // §12.1.5 atomic-clear semantics). No pre-spawn clear needed: the poller
+  // owns the flag's lifecycle for this turn, and any stale flag from a prior
+  // turn is cleared by THAT turn's `poller.stop()`.
 
   // ── 5. Spawn + watchdog + cancel-poller + stream parse ──
   const child = spawn(claudeBin, args, {
@@ -244,42 +241,24 @@ export async function runFreeAgentSession(job, ctx) {
   });
 
   let timedOut = false;
-  let cancelled = false;
-  let killTimer = null;
-  // Cancel poller — checks the session row every CANCEL_POLL_MS for the
-  // `cancelRequested` flag set by POST /api/free-agent/sessions/:id/cancel.
-  // On true: SIGTERM the child (then SIGKILL after grace, same shape as
-  // the watchdog) and flag the close-handler so it emits a cancelled event
-  // instead of a generic error.
-  const cancelPoller = setInterval(async () => {
-    try {
-      const latest = await sessionsRepo.getSession(sessionId);
-      if (latest?.cancelRequested && !cancelled && !timedOut) {
-        cancelled = true;
-        logger.info?.(`[free-agent-session] cancel requested for ${sessionId.slice(0, 8)}; killing subprocess`);
-        try {
-          child.kill('SIGTERM');
-          killTimer = setTimeout(() => {
-            try {
-              child.kill('SIGKILL');
-            } catch {
-              /* best effort */
-            }
-          }, KILL_GRACE_MS);
-        } catch {
-          /* best effort */
-        }
-      }
-    } catch (err) {
-      // DDB read errors during polling shouldn't fail the turn — log and continue.
-      logger.warn?.(`[free-agent-session] cancel-poll read failed: ${err.message}`);
-    }
-  }, CANCEL_POLL_MS);
+  let watchdogKillTimer = null;
+  // Cancel poller (Story 19.3 — shared with party-turn via Story 20.7). Polls
+  // the session row every CANCEL_POLL_MS for `cancelRequested`. On true:
+  // SIGTERM the child, then SIGKILL after KILL_GRACE_MS. The close handler
+  // reads `poller.isCancelled()` to choose cancelled-event vs error-event.
+  const poller = startCancelPoller({
+    sessionsRepo,
+    sessionId,
+    child,
+    logger,
+    pollMs: CANCEL_POLL_MS,
+    killGraceMs: KILL_GRACE_MS,
+  });
   const watchdog = setTimeout(() => {
     timedOut = true;
     try {
       child.kill('SIGTERM');
-      killTimer = setTimeout(() => {
+      watchdogKillTimer = setTimeout(() => {
         try {
           child.kill('SIGKILL');
         } catch {
@@ -391,28 +370,23 @@ export async function runFreeAgentSession(job, ctx) {
   });
 
   clearTimeout(watchdog);
-  clearInterval(cancelPoller);
-  if (killTimer) clearTimeout(killTimer);
+  if (watchdogKillTimer) clearTimeout(watchdogKillTimer);
+  // `poller.stop()` clears the interval, clears the SIGKILL grace timer
+  // (cancel path), and always clears the cancel flag (atomic-clear, §13.2).
+  await poller.stop();
 
   // ── 7. Terminal-state branching ──
   // Operator clicked Stop. Treat the kill as a clean cancellation: release
   // the lock back to ACTIVE (NOT ERROR) so the operator can immediately
-  // continue the session with another message. Also clear the flag so the
-  // next turn doesn't see a stale one.
-  if (cancelled) {
+  // continue the session with another message. The cancel flag is already
+  // cleared by `poller.stop()` above.
+  if (poller.isCancelled()) {
     if (totalCostUsd > 0) await sessionsRepo.updateCostUsd(sessionId, totalCostUsd);
     await pushEvent(sessionId, 'turn', '__free-agent__', 'free-agent.turn.cancelled', {
       sessionId,
       reason: 'CANCELLED_BY_OPERATOR',
       exitCode,
     });
-    if (typeof sessionsRepo.clearCancelFlag === 'function') {
-      try {
-        await sessionsRepo.clearCancelFlag(sessionId);
-      } catch (clearErr) {
-        logger.warn?.(`[free-agent-session] clearCancelFlag (post-kill) failed: ${clearErr.message}`);
-      }
-    }
     await sessionsRepo.releaseProcessingLock(sessionId, 'ACTIVE');
     return { ok: false, reason: 'CANCELLED', claudeSessionId: capturedClaudeSessionId };
   }

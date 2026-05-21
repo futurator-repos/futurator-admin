@@ -274,3 +274,121 @@ export async function updateSessionMetadata(
   );
   return (result.Attributes as PartySession | undefined) ?? null;
 }
+
+/**
+ * Story 19.4 (party-push Epic 19) — set the operator-cancel flag on a session.
+ *
+ * Written by `POST /api/party/sessions/:id/cancel` (route lives in Epic 22).
+ * The daemon's shared cancel-poller polls for this flag and SIGTERMs the
+ * subprocess on `true`. Clearing is handled atomically by `poller.stop()`
+ * via {@link clearCancelFlag} below (§13.2 atomic-clear API).
+ *
+ * @example
+ * await setCancelRequested('a1b2c3d4-...');
+ */
+export async function setCancelRequested(sessionId: string): Promise<void> {
+  const now = new Date().toISOString();
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.partySessions,
+      Key: { sessionId },
+      UpdateExpression: 'SET cancelRequested = :true, cancelRequestedAt = :now, updatedAt = :now',
+      ConditionExpression: 'attribute_exists(sessionId)',
+      ExpressionAttributeValues: { ':true': true, ':now': now },
+    }),
+  );
+}
+
+/**
+ * Story 19.4 — clear the cancel flag. Called by the daemon's shared
+ * cancel-poller `stop()` (`daemon/pipelines/lib/cancel-poller.mjs`) on
+ * every turn close (both cancelled and non-cancelled paths) so a stale
+ * flag from a prior turn cannot pre-cancel the next turn.
+ *
+ * Idempotent — `REMOVE` against a missing attribute is a no-op in DDB.
+ *
+ * @example
+ * await clearCancelFlag('a1b2c3d4-...');
+ */
+export async function clearCancelFlag(sessionId: string): Promise<void> {
+  const now = new Date().toISOString();
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.partySessions,
+      Key: { sessionId },
+      UpdateExpression: 'REMOVE cancelRequested, cancelRequestedAt SET updatedAt = :now',
+      ConditionExpression: 'attribute_exists(sessionId)',
+      ExpressionAttributeValues: { ':now': now },
+    }),
+  );
+}
+
+/**
+ * Story 19.8 (party-push Epic 19) — look up a `PartySession` by the first
+ * 8 chars of its UUID (the form the filesystem path encodes via
+ * `/home/ubuntu/worktrees/<app>/_party/<sidShort>/`).
+ *
+ * The worktree reaper (Story 19.7 walker → Story 20.15 classifier) calls
+ * this to resolve a directory name back to its session row and decide
+ * whether to reap. Implementation is a DDB `Scan` with
+ * `begins_with(sessionId, prefix)` filter, `Limit: 5`. First match wins.
+ * Collision probability across 4.3B UUID prefixes is ~10⁻¹⁰; we still
+ * warn-log if more than one match comes back so a real collision
+ * (impossible-but-not-zero) leaves an audit trail.
+ *
+ * Input validation: only lowercase hex 8-char prefixes are accepted.
+ * This defends against accidentally passing a full UUID (which would
+ * scan with a 36-char `begins_with` and return nothing, silently).
+ *
+ * @example
+ * const session = await findBySessionIdShort('a1b2c3d4');
+ * if (session) console.log(session.sessionId);
+ */
+const SESSION_ID_SHORT_REGEX = /^[a-f0-9]{8}$/;
+
+export async function findBySessionIdShort(sessionIdShort: string): Promise<PartySession | null> {
+  if (typeof sessionIdShort !== 'string' || !SESSION_ID_SHORT_REGEX.test(sessionIdShort)) {
+    return null;
+  }
+  const result = await docClient.send(
+    new ScanCommand({
+      TableName: TABLE_NAMES.partySessions,
+      FilterExpression: 'begins_with(sessionId, :p)',
+      ExpressionAttributeValues: { ':p': sessionIdShort },
+      Limit: 5,
+    }),
+  );
+  const items = (result.Items as PartySession[]) || [];
+  if (items.length === 0) return null;
+  if (items.length > 1) {
+    console.warn(
+      `[party-sessions-repository] findBySessionIdShort('${sessionIdShort}'): ${items.length} matches — collision or rolled-back row? Returning first.`,
+    );
+  }
+  return items[0];
+}
+
+/**
+ * Story 19.4 — set the per-session worktree path during bootstrap (Story 20.6).
+ *
+ * Writes BOTH `worktreePath` (canonical post-party-push name) AND
+ * `projectPath` (the field `party-turn.mjs` reads for the subprocess `cwd`).
+ * Pinning them to the same value means the spawn code in `party-turn.mjs`
+ * doesn't change: when bootstrap rewrites a legacy session's path to its
+ * new worktree, the daemon picks it up on the next turn automatically.
+ *
+ * @example
+ * await setWorktreePath('a1b2c3d4-...', '/home/ubuntu/worktrees/applicator/_party/a1b2c3d4/');
+ */
+export async function setWorktreePath(sessionId: string, worktreePath: string): Promise<void> {
+  const now = new Date().toISOString();
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.partySessions,
+      Key: { sessionId },
+      UpdateExpression: 'SET worktreePath = :wt, projectPath = :wt, updatedAt = :now',
+      ConditionExpression: 'attribute_exists(sessionId)',
+      ExpressionAttributeValues: { ':wt': worktreePath, ':now': now },
+    }),
+  );
+}

@@ -1,0 +1,142 @@
+{
+  "$comment": "Canonical deny list for agent Bash invocations. Both daemon/pipelines/lib/party-tool-hook.sh (Story 20.3) and daemon/pipelines/lib/free-agent-path-hook.sh (Epic 18) consult this JSON. The party hook stamps explicit case statements from these lists; the free-agent hook does path-confinement and uses the secret_paths + secret_regex_patterns blocks defensively. Update here, regenerate downstream artifacts (a future scripts/build-agent-hooks.mjs generator will automate this).",
+
+  "git_mutation_commands": [
+    "push",
+    "commit",
+    "add",
+    "rm",
+    "reset",
+    "tag",
+    "remote",
+    "stash",
+    "cherry-pick",
+    "rebase",
+    "merge",
+    "filter-branch",
+    "replace",
+    "update-ref",
+    "symbolic-ref",
+    "fast-import",
+    "branch -D",
+    "branch -d",
+    "branch -m",
+    "checkout -b",
+    "checkout main",
+    "checkout master",
+    "checkout develop",
+    "switch main",
+    "switch master",
+    "switch develop",
+    "worktree add",
+    "worktree remove",
+    "worktree move",
+    "config",
+    "push --force",
+    "push --force-with-lease",
+    "push --delete",
+    "push -f",
+    "push -d"
+  ],
+
+  "$gitInlineFlagDanger": [
+    {
+      "pattern": "git -c ",
+      "reason": "git -c lets the agent set arbitrary inline config for one command (e.g. core.hooksPath=/dev/null disables repository hooks; protocol.allow=always bypasses transport restrictions). No legitimate agent use case in this codebase — always deny."
+    }
+  ],
+
+  "gh_mutation_commands": [
+    "pr create",
+    "pr merge",
+    "pr close",
+    "pr edit",
+    "repo create",
+    "repo delete",
+    "repo rename",
+    "repo transfer",
+    "release create",
+    "release delete",
+    "api -X POST",
+    "api -X PATCH",
+    "api -X PUT",
+    "api -X DELETE"
+  ],
+
+  "system_danger_commands": [
+    "rm -rf",
+    "chmod 777",
+    "chmod -R",
+    "chown",
+    "sudo",
+    "curl|bash",
+    "curl|sh",
+    "wget|bash",
+    "wget|sh"
+  ],
+
+  "secret_paths": [
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".git/config",
+    "~/.ssh",
+    "~/.aws",
+    "~/.claude/.credentials.json",
+    "secrets",
+    "id_rsa",
+    "id_ed25519"
+  ],
+
+  "secret_regex_patterns": [
+    "AKIA[0-9A-Z]{16}",
+    "github_pat_[A-Za-z0-9_]{30,}",
+    "ghp_[A-Za-z0-9]{30,}",
+    "sk-[A-Za-z0-9]{30,}",
+    "ANTHROPIC_API_KEY=sk-ant-[A-Za-z0-9_-]{30,}"
+  ],
+
+  "safe_readonly_commands": {
+    "$comment": "Auto-approve. Read-only git, read-only fs, repo introspection. The party hook checks these BEFORE the default-allow fall-through so common commands exit silently without firing the party.tool.default-allow audit event.",
+    "git_readonly": [
+      "status",
+      "diff",
+      "log",
+      "show",
+      "branch",
+      "fetch",
+      "ls-files",
+      "rev-parse",
+      "symbolic-ref",
+      "describe",
+      "blame",
+      "shortlog",
+      "remote -v",
+      "remote show"
+    ],
+    "fs_readonly": [
+      "ls",
+      "cat",
+      "head",
+      "tail",
+      "find",
+      "rg",
+      "grep",
+      "wc",
+      "file",
+      "stat",
+      "tree",
+      "pwd",
+      "echo"
+    ],
+    "gh_readonly": [
+      "pr view",
+      "pr list",
+      "pr diff",
+      "issue view",
+      "issue list",
+      "repo view",
+      "api /repos"
+    ]
+  }
+}

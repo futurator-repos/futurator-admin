@@ -83,6 +83,19 @@ export const TOGGLEABLE_TOOLS = ['WebSearch', 'WebFetch'] as const;
 export interface PartySession {
   sessionId: string;
   projectId: string;
+  /**
+   * Working-directory the daemon spawns `claude -p` in.
+   *
+   * Pre-party-push (legacy) — `/home/ubuntu/projects/<projectId>`, the
+   * single shared project folder.
+   *
+   * Post-party-push (Epic 20) — bootstrap rewrites this to the
+   * per-session worktree path (`/home/ubuntu/worktrees/<projectId>/_party/<sidShort>/`)
+   * so the daemon's `cwd: session.projectPath` line in party-turn.mjs
+   * still resolves correctly without code changes. The canonical
+   * worktree path also lands in `worktreePath` (below) for the
+   * reaper + delete cascade.
+   */
   projectPath: string;
   claudeSessionId: string | null;
   status: PartySessionStatus;
@@ -93,6 +106,31 @@ export interface PartySession {
   bmadVersionAtStart: string;
   GSI1PK: string;
   GSI1SK: string;
+  /**
+   * Story 19.4 (party-push Epic 19) — per-session worktree path. Written by
+   * the post-migration bootstrap (Story 20.6). Equal to `projectPath` for
+   * post-party-push sessions; undefined for legacy sessions that still use
+   * the shared `/home/ubuntu/projects/<projectId>` folder.
+   */
+  worktreePath?: string;
+  /**
+   * Story 19.4 — branch name `party/<projectId>/<sessionIdShort>`. Written
+   * by Story 20.6 bootstrap when the worktree is created. Undefined for
+   * legacy sessions.
+   */
+  partyBranch?: string;
+  /**
+   * Story 19.4 — operator cancel flag, set by `POST /api/party/sessions/:id/cancel`
+   * (route lives in Epic 22). The daemon's shared cancel-poller
+   * (`daemon/pipelines/lib/cancel-poller.mjs`, Story 19.2) reads this each
+   * tick and SIGTERMs the subprocess on `true`. Cleared atomically by
+   * `poller.stop()` at turn close (§13.2).
+   */
+  cancelRequested?: boolean;
+  /** Story 19.4 — ISO 8601 timestamp the cancel flag was set. */
+  cancelRequestedAt?: string;
+  /** Story 19.4 — ISO 8601 timestamp of the last write to this row. */
+  updatedAt?: string;
 }
 
 export type PartyJobType =
