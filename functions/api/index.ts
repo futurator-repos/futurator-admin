@@ -5975,6 +5975,179 @@ app.get('/api/party/sessions', async (c) => {
   return c.json({ sessions });
 });
 
+/**
+ * Story 20.10 (party-push Epic 20) — DELETE /api/party/sessions/:id cascade.
+ *
+ * Best-effort multi-step cleanup. Each step lands as a `CleanupStep` in the
+ * `results[]` response so the UI can show partial-success states. Steps:
+ *   1. archivePartyBranch    — push to archive/party/<app>/<sid> then drop live
+ *   2. cleanupPartyBranch    — defensive double-drop (idempotent if step 1 ran)
+ *   3. reapPartyWorktree     — git worktree remove --force + rm -rf
+ *   4. countResidualPartyCommits — informational; surfaces SHAs that landed on main
+ *   5. inline-questions delete — DDB cleanup for the unified inbox
+ *   6. settings.json cleanup  — /tmp/party-settings-<sid>.json
+ *   7. partySessionsRepo.deleteSession — final row delete
+ *
+ * Refuses with 409 SESSION_BUSY while the session is PROCESSING (mirror
+ * `DELETE /api/migrations/:id` semantics).
+ */
+app.delete('/api/party/sessions/:id', async (c) => {
+  const sessionId = c.req.param('id');
+  // Sanity check the UUID shape — every other party endpoint trusts the
+  // shape, but this one writes to disk + git so an attacker-controlled
+  // session id is worth gating.
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(sessionId)) {
+    throw new ValidationError(`invalid sessionId: ${sessionId}`);
+  }
+  const operatorId = c.get('user').userId;
+
+  const session = await partySessionsRepo.getSession(sessionId);
+  if (!session) throw new NotFoundError('PartySession', sessionId);
+
+  if (session.status === 'PROCESSING') {
+    throw new AppError(
+      'SESSION_BUSY',
+      'Session is currently processing a turn — wait for it to finish (or cancel it) before deleting.',
+      409,
+    );
+  }
+
+  const projectId = session.projectId;
+  const sessionIdShort = sessionId.slice(0, 8);
+  const ssmDeps = { sendSsmCommand, waitForSsmOutput };
+  const results: CleanupStep[] = [];
+
+  // Step 1 — archive + drop the live branch.
+  try {
+    const { archivePartyBranch } = await import('../shared/services/plan-folder-service');
+    const r = await archivePartyBranch({ workingDirSlug: projectId, sessionIdShort }, ssmDeps);
+    results.push(r);
+  } catch (err) {
+    results.push({
+      step: 'party-archive',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Step 2 — defensive double-drop. Idempotent if step 1 already dropped.
+  try {
+    const { cleanupPartyBranch } = await import('../shared/services/plan-folder-service');
+    const r = await cleanupPartyBranch({ workingDirSlug: projectId, sessionIdShort }, ssmDeps);
+    results.push(r);
+  } catch (err) {
+    results.push({
+      step: 'party-branch',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Step 3 — reap the per-session worktree.
+  try {
+    const { reapPartyWorktree } = await import('../shared/services/plan-folder-service');
+    const r = await reapPartyWorktree({ workingDirSlug: projectId, sessionIdShort }, ssmDeps);
+    results.push(r);
+  } catch (err) {
+    results.push({
+      step: 'party-worktree',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Step 4 — residual commits on main attributed to this Session-Id.
+  try {
+    const { countResidualPartyCommits } = await import('../shared/services/plan-folder-service');
+    const { count, sample } = await countResidualPartyCommits(
+      { workingDirSlug: projectId, sessionId },
+      ssmDeps,
+    );
+    results.push({
+      step: 'party-residual',
+      status: 'done',
+      detail:
+        count === 0
+          ? 'no residual commits on main'
+          : `${count} commit(s) on main; sample: ${sample.slice(0, 3).join(', ')}`,
+    });
+  } catch (err) {
+    results.push({
+      step: 'party-residual',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Step 5 — inline-question rows.
+  try {
+    const count = await inlineQuestionsRepo.deleteBySession(sessionId);
+    results.push({
+      step: 'inline-questions',
+      status: count > 0 ? 'done' : 'skipped',
+      detail: count > 0 ? `deleted ${count} question(s)` : 'no inline questions',
+    });
+  } catch (err) {
+    results.push({
+      step: 'inline-questions',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Step 6 — settings.json cleanup. The file is per-session, lives at
+  // /tmp/party-settings-<sidShort>.json (Story 20.7); SSM `rm -f` is
+  // idempotent (no error when the file is absent).
+  try {
+    const settingsPath = `/tmp/party-settings-${sessionIdShort}.json`;
+    const cmd = `rm -f "${settingsPath}" && echo "SETTINGS_RM_DONE"`;
+    const commandId = await sendSsmCommand(cmd);
+    const output = await waitForSsmOutput(commandId);
+    results.push({
+      step: 'party-settings-file',
+      status: output.includes('SETTINGS_RM_DONE') ? 'done' : 'error',
+      detail: output.includes('SETTINGS_RM_DONE')
+        ? `removed ${settingsPath} (or absent)`
+        : `unexpected output: ${output.slice(0, 200)}`,
+    });
+  } catch (err) {
+    results.push({
+      step: 'party-settings-file',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Step 7 — final DDB row delete. The session no longer needs to exist
+  // after the worktree + branches are gone.
+  try {
+    await partySessionsRepo.deleteSession(sessionId);
+    results.push({ step: 'session-row', status: 'done', detail: 'deleted' });
+  } catch (err) {
+    results.push({
+      step: 'session-row',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Audit log — structured single-line JSON to CloudWatch. A dedicated
+  // futurator-admin-audits table is deferred infrastructure work (same
+  // posture as Story 20.4's brownfield-topology audit).
+  console.log(
+    JSON.stringify({
+      audit: 'party.session.deleted',
+      operatorId,
+      sessionId,
+      projectId,
+      timestamp: new Date().toISOString(),
+      results: results.map((r) => ({ step: r.step, status: r.status, detail: r.detail })),
+    }),
+  );
+
+  return c.json({ deleted: true, sessionId, projectId, results });
+});
+
 // ════════════════════════════════════════════════════════════════
 // Party Mode — Inline Q&A on text selections
 // ════════════════════════════════════════════════════════════════

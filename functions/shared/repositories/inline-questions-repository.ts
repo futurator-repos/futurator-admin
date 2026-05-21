@@ -1,4 +1,4 @@
-import { PutCommand, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, QueryCommand, GetCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
 import { docClient, TABLE_NAMES } from '../dynamo-client';
 import type { InlineQuestion } from '../types/inline-question';
 
@@ -41,4 +41,28 @@ export async function listInlineQuestionsBySession(sessionId: string): Promise<I
     ExclusiveStartKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
   } while (ExclusiveStartKey);
   return out;
+}
+
+/**
+ * Story 20.10 — delete every inline question for a session, used by the
+ * `DELETE /api/party/sessions/:id` cascade. Best-effort: deletes are
+ * issued in parallel; the count of successfully-deleted rows is returned.
+ *
+ * @param sessionId
+ * @returns Promise of deleted count
+ */
+export async function deleteBySession(sessionId: string): Promise<number> {
+  const questions = await listInlineQuestionsBySession(sessionId);
+  if (questions.length === 0) return 0;
+  await Promise.all(
+    questions.map((q) =>
+      docClient.send(
+        new DeleteCommand({
+          TableName: TABLE_NAMES.partyInlineQuestions,
+          Key: { questionId: q.questionId },
+        }),
+      ),
+    ),
+  );
+  return questions.length;
 }

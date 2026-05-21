@@ -1,6 +1,6 @@
 # Story 20.11: App-delete cascade — party-cleanup step
 
-Status: TODO
+Status: DONE (2026-05-21)
 Depends on: 20.9 (party helpers), 20.10 (per-session cascade)
 
 ## Story

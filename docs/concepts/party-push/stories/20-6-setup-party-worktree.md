@@ -1,6 +1,6 @@
 # Story 20.6: Per-session party worktree setup (`setupPartyWorktree`)
 
-Status: TODO
+Status: DONE (2026-05-21)
 Depends on: 19.4 (PartySession has worktreePath field), 20.5 (bootstrap topology check)
 
 ## Story

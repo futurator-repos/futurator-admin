@@ -1,6 +1,6 @@
 # Story 20.15: Worktree-reaper real classifier (wire `findBySessionIdShort` into deps)
 
-Status: TODO
+Status: DONE (2026-05-21) — Tasks 1-4, 6 ✅; Task 5 (manual reaper trigger via SSM with a fake stale row) deferred to Story 20.16 post-rsync sweep
 Depends on: 19.7 (no-op classifier shipped), 19.8 (`findBySessionIdShort` exists)
 
 ## Story

@@ -39,6 +39,72 @@ const DEFAULT_ALLOWED_TOOLS = ['WebSearch', 'WebFetch'];
 // path and no longer exists post-6.3.x.
 const PARTY_MODE_PREFIX = '/bmad-party-mode';
 
+// ── Story 20.7 (party-push Epic 20) imports ──────────────────────────────
+// Lazy/conditional to keep the legacy code path zero-cost when
+// PARTY_PUSH_V1_ENABLED is unset.
+import { existsSync as fsExistsSync, writeFileSync as fsWriteFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname as pathDirname, join as pathJoin } from 'node:path';
+import { startCancelPoller } from './lib/cancel-poller.mjs';
+import { extractMarkers } from './lib/party-marker-extractor.mjs';
+
+function resolvePartyToolHookPath() {
+  // Lazy: only resolves when V1 actually fires. Some test environments
+  // load this module with a non-file: import.meta.url which would throw
+  // `URL must be of scheme file` at import time.
+  try {
+    return fileURLToPath(new URL('./lib/party-tool-hook.sh', import.meta.url));
+  } catch {
+    return pathJoin(pathDirname(fileURLToPath(import.meta.url)), 'lib/party-tool-hook.sh');
+  }
+}
+
+/**
+ * Story 20.7 feature flag. When set to '1' the daemon switches to the
+ * party-push wired path: per-session worktree cwd assertion, shared
+ * cancel-poller, `--settings` + `bypassPermissions`, default-allow audit
+ * ingest, marker extraction. Default OFF for safety until operator
+ * confirms the smoke test on `applicator`.
+ */
+function isPartyPushV1Enabled() {
+  const v = process.env.PARTY_PUSH_V1_ENABLED;
+  return v === '1' || v === 'true';
+}
+
+/**
+ * Returns `/tmp/party-settings-<sessionIdShort>.json`. Per `plan.md` §12.1.2,
+ * settings live OUTSIDE the worktree so a stray `git add -A` inside the
+ * checkpoint can't sweep them into the commit.
+ *
+ * @param {string} sessionId
+ * @returns {string}
+ */
+function getPartySettingsPath(sessionId) {
+  return `/tmp/party-settings-${sessionId.slice(0, 8)}.json`;
+}
+
+/**
+ * Write the per-session Claude Code settings.json with the PreToolUse
+ * party-tool-hook reference. Idempotent: if the file already exists with
+ * identical content, this is a no-op. Story 20.7 AC 3.
+ */
+function writePartySettings(sessionId) {
+  const settings = {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: 'Bash',
+          hooks: [{ type: 'command', command: resolvePartyToolHookPath() }],
+        },
+      ],
+    },
+  };
+  const path = getPartySettingsPath(sessionId);
+  const payload = JSON.stringify(settings, null, 2);
+  fsWriteFileSync(path, payload, { mode: 0o600 });
+  return path;
+}
+
 // Format contract — appended to Claude's system prompt via --append-system-prompt
 // so the UI can split a multi-agent response into per-agent cards reliably.
 //
@@ -180,6 +246,42 @@ export async function runPartyTurn(job, ctx) {
     throw new Error(`runPartyTurn: session ${sessionId} not found`);
   }
 
+  // ── Story 20.7 (party-push Epic 20) — pre-spawn gates ────────────────
+  const partyPushV1 = isPartyPushV1Enabled();
+  if (partyPushV1) {
+    // (1) cwd assertion — defend against reaper-mid-flight. The session's
+    // projectPath is the per-session worktree path (set by Story 20.6
+    // bootstrap). If it's been removed underfoot, fail loudly rather
+    // than spawn into a phantom cwd and silently produce garbage.
+    if (!fsExistsSync(session.projectPath)) {
+      await pushEvent(sessionId, 'turn', '__party__', 'party.turn.error', {
+        sessionId,
+        reason: 'WORKTREE_MISSING',
+        worktreePath: session.projectPath,
+        message:
+          'Per-session worktree no longer exists. Create a new session — this one is unrecoverable.',
+      });
+      try {
+        await releaseSessionLock(sessionId, 'ERROR');
+      } catch {
+        /* best effort */
+      }
+      throw new Error(`WORKTREE_MISSING: ${session.projectPath}`);
+    }
+
+    // (2) Clear any stale cancel flag from a prior turn BEFORE spawning.
+    // Otherwise a flag the operator never cleared could pre-cancel this
+    // fresh turn. (cancel-poller's stop() also clears, but only at the
+    // end of THIS turn — the pre-spawn clear handles cross-turn drift.)
+    if (typeof ctx.sessionsRepo?.clearCancelFlag === 'function') {
+      try {
+        await ctx.sessionsRepo.clearCancelFlag(sessionId);
+      } catch (err) {
+        logger.warn?.(`[party-turn] clearCancelFlag (pre-spawn) failed: ${err.message}`);
+      }
+    }
+  }
+
   // Resolve which extra tools (WebSearch, WebFetch, …) the user has
   // allowed for this project. Default → DEFAULT_ALLOWED_TOOLS so existing
   // projects work without a DDB migration. Empty array → user explicitly
@@ -212,13 +314,29 @@ export async function runPartyTurn(job, ctx) {
   // Claude to see them as two separate messages and hallucinate "I don't
   // have that skill" (even though the skill is registered).
   const prompt = isFirstTurn ? `${PARTY_MODE_PREFIX} ${content}` : content;
+  // Story 20.7 — party-push V1 swaps `acceptEdits` for `bypassPermissions`
+  // and injects `--settings <tmp>` pointing at a settings.json with the
+  // PreToolUse party-tool-hook reference. The hook (Story 20.3) provides
+  // the load-bearing security boundary; bypassPermissions auto-approves
+  // Edit/Write so the agent doesn't hang on confirm prompts in `-p` mode.
+  let partySettingsPath = null;
+  if (partyPushV1) {
+    try {
+      partySettingsPath = writePartySettings(sessionId);
+    } catch (err) {
+      logger.warn?.(
+        `[party-turn] writePartySettings failed (falling back to legacy spawn args): ${err.message}`,
+      );
+      partySettingsPath = null;
+    }
+  }
   const args = [
     '--print',
     '--output-format',
     'stream-json',
     '--verbose',
     '--permission-mode',
-    'acceptEdits',
+    partySettingsPath ? 'bypassPermissions' : 'acceptEdits',
     // Inject marker-based output contract. See PARTY_FORMAT_CONTRACT above.
     // Appended (not replaced) so BMAD's own party-mode skill prompt still
     // applies. The contract instructs Claude to wrap each agent in
@@ -226,6 +344,9 @@ export async function runPartyTurn(job, ctx) {
     '--append-system-prompt',
     PARTY_FORMAT_CONTRACT,
   ];
+  if (partySettingsPath) {
+    args.push('--settings', partySettingsPath);
+  }
   // Pass the per-project tool allowlist. Without this, WebSearch/WebFetch
   // get auto-denied in `-p` mode (the default permission flow can't
   // surface a prompt) and agents fall back to model knowledge.
@@ -247,6 +368,26 @@ export async function runPartyTurn(job, ctx) {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   registerChild(job.jobId, child);
+
+  // ── Story 20.7 — shared cancel-poller wiring ─────────────────────────
+  // When V1 is enabled AND the daemon has a sessionsRepo wired, poll the
+  // session row for cancelRequested. Cancellation SIGTERMs the child and
+  // flags isCancelled() so the close handler emits party.turn.cancelled
+  // instead of a generic error.
+  let cancelPoller = null;
+  if (partyPushV1 && ctx.sessionsRepo) {
+    try {
+      cancelPoller = startCancelPoller({
+        sessionsRepo: ctx.sessionsRepo,
+        sessionId,
+        child,
+        logger,
+      });
+    } catch (err) {
+      logger.warn?.(`[party-turn] startCancelPoller failed (continuing without): ${err.message}`);
+      cancelPoller = null;
+    }
+  }
 
   // Signal that the Claude subprocess is live — UI uses this to replace the
   // generic "routing" indicator with a concrete "waiting on first token"
@@ -270,6 +411,10 @@ export async function runPartyTurn(job, ctx) {
   let capturedClaudeSessionId = null;
   let timedOut = false;
   let killTimer = null;
+  // Story 20.7 — accumulate assistant text across the turn so we can run
+  // extractMarkers() once at close. Markers are emitted at the end of the
+  // orchestrator's final round; mid-turn fragments don't matter.
+  let assistantTextAccum = '';
 
   const watchdog = setTimeout(() => {
     timedOut = true;
@@ -299,7 +444,27 @@ export async function runPartyTurn(job, ctx) {
   });
 
   child.stderr?.on('data', (chunk) => {
-    stderrBuf += chunk.toString('utf8');
+    const text = chunk.toString('utf8');
+    stderrBuf += text;
+    // Story 20.7 — ingest party-tool-hook audit markers. Each occurrence
+    // of `[party-tool-hook] default-allow cmd=<cmd>` becomes a
+    // `party.tool.default-allow` event. Truncate cmd to 500 chars to bound
+    // the event payload (matches the hook's own truncation cap).
+    if (partyPushV1) {
+      const lines = text.split('\n');
+      for (const line of lines) {
+        const m = /^\[party-tool-hook\] default-allow cmd=(.+)$/.exec(line);
+        if (m) {
+          void pushEvent(sessionId, 'turn', '__system__', 'party.tool.default-allow', {
+            sessionId,
+            cmd: m[1].slice(0, 500),
+            turnCount: session.turnCount,
+          }).catch((err) =>
+            logger.warn?.(`[party-turn] default-allow event emit failed: ${err.message}`),
+          );
+        }
+      }
+    }
   });
 
   async function handleStreamLine(line) {
@@ -335,6 +500,7 @@ export async function runPartyTurn(job, ctx) {
       const blocks = parsed?.message?.content ?? [];
       for (const block of blocks) {
         if (block?.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
+          if (partyPushV1) assistantTextAccum += block.text;
           await pushEvent(sessionId, 'turn', '__party__', 'party.turn.assistant.token', {
             sessionId,
             text: block.text,
@@ -381,6 +547,31 @@ export async function runPartyTurn(job, ctx) {
   clearTimeout(watchdog);
   if (killTimer) clearTimeout(killTimer);
 
+  // Story 20.7 — stop the cancel-poller. `stop()` is async and always
+  // clears the cancel flag on the session row (atomic-clear API per
+  // Story 19.2 §13.2). Stop BEFORE the cancelled/error/completed branch
+  // so the flag is unconditionally cleared regardless of exit path.
+  const wasCancelled = cancelPoller ? cancelPoller.isCancelled() : false;
+  if (cancelPoller) {
+    try {
+      await cancelPoller.stop();
+    } catch (err) {
+      logger.warn?.(`[party-turn] cancelPoller.stop failed: ${err.message}`);
+    }
+  }
+
+  // Operator clicked Stop. Emit cancelled event + release lock back to
+  // ACTIVE (not ERROR — the operator can resume with another message).
+  if (wasCancelled) {
+    await pushEvent(sessionId, 'turn', '__party__', 'party.turn.cancelled', {
+      sessionId,
+      reason: 'CANCELLED_BY_OPERATOR',
+      exitCode,
+    });
+    await releaseSessionLock(sessionId, 'ACTIVE');
+    return { ok: false, reason: 'CANCELLED', claudeSessionId: capturedClaudeSessionId };
+  }
+
   if (timedOut) {
     await pushEvent(sessionId, 'turn', '__party__', 'party.turn.error', {
       sessionId,
@@ -405,13 +596,44 @@ export async function runPartyTurn(job, ctx) {
 
   await incrementTurn(sessionId);
   await releaseSessionLock(sessionId, 'ACTIVE');
+
+  // Story 20.7 — extract checkpoint + ASK_HUMAN markers from accumulated
+  // assistant text. ASK_HUMAN immediately becomes an event the UI's
+  // inline-questions list (Epic 22) will surface. CHECKPOINT_SUMMARY is
+  // returned in the result so a future post-round hook (Story 20.2's
+  // caller path) can run party-checkpoint.sh with the composed message.
+  let checkpoint = null;
+  if (partyPushV1 && assistantTextAccum.length > 0) {
+    try {
+      const { markers } = extractMarkers(assistantTextAccum);
+      for (const marker of markers) {
+        if (marker.kind === 'ASK_HUMAN') {
+          await pushEvent(sessionId, 'turn', '__party__', 'party.agent.question', {
+            sessionId,
+            question: marker.title || '',
+            turnCount: session.turnCount,
+          });
+        } else if (marker.kind === 'CHECKPOINT_SUMMARY') {
+          checkpoint = { title: marker.title || '', body: marker.body || '' };
+        }
+      }
+    } catch (err) {
+      logger.warn?.(`[party-turn] extractMarkers failed (non-fatal): ${err.message}`);
+    }
+  }
+
   await pushEvent(sessionId, 'turn', '__party__', 'party.turn.completed', {
     sessionId,
     claudeSessionId: capturedClaudeSessionId,
     exitCode,
+    ...(checkpoint ? { checkpoint } : {}),
   });
 
-  return { ok: true, claudeSessionId: capturedClaudeSessionId };
+  return {
+    ok: true,
+    claudeSessionId: capturedClaudeSessionId,
+    ...(checkpoint ? { checkpoint } : {}),
+  };
 }
 
 /**

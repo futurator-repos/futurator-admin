@@ -1,6 +1,6 @@
 # Story 20.7: Party-turn rewiring — cwd assertion + cancel-poller + settings.json + bypassPermissions
 
-Status: TODO
+Status: DONE (2026-05-21) — Tasks 1-7, 9, 11 ✅ (feature-flagged behind PARTY_PUSH_V1_ENABLED); Tasks 8 + 10 deferred (settings cleanup in 20.10 cascade; manual smoke post-rsync)
 Depends on: 19.2 (cancel-poller), 19.4 (PartySession fields), 20.3 (party-tool-hook), 20.6 (party worktree)
 
 ## Story

@@ -3094,6 +3094,47 @@ async function partyGetSession(sessionId) {
 }
 
 /**
+ * Story 20.15 — look up a PartySession by the first 8 chars of its UUID.
+ * The reaper's classifier hands the path-encoded `<sessionIdShort>` to
+ * this function to resolve it to a session row, then decides whether to
+ * reap based on the session's status + age.
+ *
+ * Same shape as `findBySessionIdShort` in the Lambda's
+ * `party-sessions-repository.ts` (Story 19.8): DDB `Scan` with
+ * `begins_with(sessionId, :p)`, limit 5, first match wins, warn-log on
+ * collisions.
+ *
+ * Validates the input shape (8-char lowercase hex) before scanning —
+ * defense against accidental full-UUID passes (which would scan with a
+ * 36-char prefix and return nothing).
+ *
+ * @param {string} sessionIdShort
+ * @returns {Promise<object | null>}
+ */
+async function partyFindBySessionIdShort(sessionIdShort) {
+  if (typeof sessionIdShort !== 'string' || !/^[a-f0-9]{8}$/.test(sessionIdShort)) {
+    return null;
+  }
+  const result = await ddb.send(
+    new ScanCommand({
+      TableName: PARTY_SESSIONS_TABLE,
+      FilterExpression: 'begins_with(sessionId, :p)',
+      ExpressionAttributeValues: { ':p': sessionIdShort },
+      Limit: 5,
+    }),
+  );
+  const items = result?.Items || [];
+  if (items.length === 0) return null;
+  if (items.length > 1) {
+    log(
+      'warn',
+      `[party-find-by-short] '${sessionIdShort}' matched ${items.length} sessions (collision?) — returning first`,
+    );
+  }
+  return items[0];
+}
+
+/**
  * Look up a Party project by id. Used by the party-turn pipeline to read
  * `allowedTools` so it can pass `--allowedTools` to Claude. Returns null
  * if the row is missing — caller falls back to defaults.
@@ -4641,6 +4682,12 @@ async function poll() {
           .then((r) => r.Items?.[0] || null)
           .catch(() => null);
       },
+      // Story 20.15 — wire the party-session lookup into the reaper deps.
+      // This lights up Story 19.7's no-op classifier: party worktrees
+      // under /home/ubuntu/worktrees/<app>/_party/<sidShort>/ are now
+      // evaluated for reap based on session.status + session.updatedAt
+      // age (>7 days terminal + stale → reap).
+      findPartySessionByShort: partyFindBySessionIdShort,
     },
     {
       intervalMs: 60 * 60 * 1000, // 1 hour

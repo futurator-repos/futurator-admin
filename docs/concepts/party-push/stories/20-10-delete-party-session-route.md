@@ -1,6 +1,6 @@
 # Story 20.10: `DELETE /api/party/sessions/:id` cascade route
 
-Status: TODO
+Status: DONE (2026-05-21) — Tasks 1-4, 6 ✅; Task 5 (DELETE-route integration tests) deferred to Story 20.16 sweep (the helpers themselves are covered by Story 20.9's 16 tests)
 Depends on: 20.9 (party cleanup helpers)
 
 ## Story
