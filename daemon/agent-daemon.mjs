@@ -79,6 +79,7 @@ import {
   JOB_HANDLER_WAVE_MERGE,
   JOB_HANDLER_SKILL_SCOUT,
   JOB_HANDLER_SKILL_INSTALL,
+  JOB_HANDLER_REFLECTOR,
 } from './pipelines/job-router.mjs';
 import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
 import { runPartyBootstrap } from './pipelines/party-bootstrap.mjs';
@@ -150,6 +151,8 @@ import { validateSkillProposalsBlock } from './lib/skill-proposal-validator.mjs'
 import { applyConfirmedProposals } from './pipelines/skill-installer.mjs';
 // Epic 3 Story 3.6 — operator-confirm path.
 import { runSkillInstallJob } from './pipelines/skill-install-job-runner.mjs';
+// Epic 6 wire-in (2026-05-20) — REFLECTOR job runner.
+import { runReflectorJob } from './pipelines/reflector-job-runner.mjs';
 // Epic 4 (2026-05-20) — track Skill tool_use activations into
 // .context/loaded-skills.json so the per-story commit's Skills-Used
 // trailer populates with real content.
@@ -4014,6 +4017,8 @@ async function runJobAsync(job) {
       await executeSkillScoutJob(job);
     } else if (handler === JOB_HANDLER_SKILL_INSTALL) {
       await executeSkillInstallJob(job);
+    } else if (handler === JOB_HANDLER_REFLECTOR) {
+      await executeReflectorJob(job);
     } else {
       await executePipeline(job);
     }
@@ -4179,6 +4184,99 @@ async function executeSkillInstallJob(job) {
       errorMessage: err?.message || String(err),
     });
     log('error', `[${short}] skill-install threw: ${err?.message || err}`);
+    throw err;
+  }
+}
+
+/**
+ * Epic 6 wire-in (2026-05-20) — REFLECTOR job runner. Plan-reducer
+ * enqueues these at plan close; we wrap runReflectorJob with the
+ * daemon's pushEvent + writeAttentionItem deps + (for v1) a stub
+ * runAgentStep that returns empty proposals — the real prompt + parser
+ * integration is the next iteration. With this scaffold in place,
+ * the cron-replay-safe enqueue path is exercised end-to-end and rows
+ * land in futurator-reflections (just none in v1 until the agent
+ * step + Zod proposal parser is wired).
+ */
+async function executeReflectorJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  log('info', `[${short}] Routing to reflector pipeline`, {
+    scope: job.reflectorPayload?.scope,
+    planId: job.reflectorPayload?.planId,
+    rigor: job.reflectorPayload?.rigor,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'reflector',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  // v1 SCAFFOLD: stub agent step. Next iteration replaces this with
+  // a real spawn via the daemon's executeStep + reflector-runner's
+  // prompt builder. The job-runner returns {ok: true, status: 'completed',
+  // proposalCount: 0} when proposals[] is empty — that's the v1
+  // honest signal.
+  async function runAgentStep() {
+    log('info', `[${short}] reflector agent-step stub returning empty proposals`);
+    return { proposals: [], tokensConsumed: 0 };
+  }
+
+  async function writeReflectionRow(row) {
+    // Best-effort DDB write into futurator-reflections. The table
+    // exists (per architecture.md §5.1) but has had no writers until
+    // this commit. We use the daemon's existing ddb client.
+    try {
+      await ddb.send(
+        new PutCommand({
+          TableName: process.env.REFLECTIONS_TABLE || 'futurator-reflections',
+          Item: {
+            ...row,
+            // Synthesize an id if the agent didn't provide one.
+            reflectionId: row.reflectionId || row.id || randomUUID(),
+          },
+        }),
+      );
+    } catch (err) {
+      log('warn', `[${short}] reflection-row write failed: ${err?.message || err}`);
+      throw err;
+    }
+  }
+
+  try {
+    const result = await runReflectorJob(job, {
+      runAgentStep,
+      writeReflectionRow,
+      writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
+      pushEvent,
+    });
+
+    if (result.ok) {
+      await updateJobFields(jobId, {
+        status: 'COMPLETED',
+        reflectorProposalCount: result.proposalCount ?? 0,
+        reflectorWrittenCount: result.writtenCount ?? 0,
+        reflectorStatus: result.status ?? 'completed',
+      });
+      log(
+        'info',
+        `[${short}] reflector completed (proposals=${result.proposalCount ?? 0}, written=${result.writtenCount ?? 0})`,
+      );
+    } else {
+      await updateJobFields(jobId, {
+        status: 'FAILED',
+        errorMessage: result.error || result.reason || 'unknown',
+      });
+      log('warn', `[${short}] reflector failed: ${result.reason}`);
+    }
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] reflector threw: ${err?.message || err}`);
     throw err;
   }
 }

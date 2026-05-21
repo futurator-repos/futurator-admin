@@ -934,6 +934,70 @@ Fix the issues mentioned. Output only what you changed, then:
       // ── COMPILE phase (non-blocking: failures do NOT fail the story pipeline) ──
       // Note: these inline definitions mirror daemon/pipelines/compile-pipeline.mjs
 
+      // Epic 5 wire-in (2026-05-20) — DEV appends an Architecture
+      // decision to CLAUDE.md on milestone stories. Gating: wave === 0
+      // (foundation stories are by definition architecture-shaping) OR
+      // the AC text begins with "Architecture:" (operator-tagged opt-in
+      // for non-wave-0 stories that still encode a decision).
+      //
+      // Non-blocking: a CLAUDE.md write failure should NEVER fail the
+      // story pipeline. The writer module is itself idempotent + soft-
+      // fails on missing files/sections.
+      //
+      // Position: AFTER review (which we know passed by virtue of
+      // reaching the compile phase) and BEFORE compile-commit-on-pass,
+      // so the CLAUDE.md edit gets bundled into the story commit and
+      // shows up in `git log` alongside the story's code changes.
+      ...(() => {
+        const isMilestone =
+          story.wave === 0 ||
+          (typeof story.description === 'string' &&
+            /^architecture:/i.test(story.description.trim()));
+        if (!isMilestone) return [] as PipelineStep[];
+
+        // JSON-stringify each value to survive shell + Node `-e` round-
+        // trip. The writer's idempotency-key prevents duplicates on retry.
+        const decisionText = story.title || `Wave-${story.wave ?? 0} foundation`;
+        // Pull the first ~120 chars of AC as the rationale (skipping the
+        // "Architecture:" prefix if present).
+        const rationaleRaw =
+          String(story.description ?? '')
+            .replace(/^architecture:\s*/i, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 200) || 'foundation milestone';
+        const argsJson = JSON.stringify({
+          workingDir: '.',
+          storyId: story.storyId,
+          decision: decisionText.slice(0, 200),
+          rationale: rationaleRaw,
+          storyTitle: decisionText.slice(0, 200),
+        });
+
+        return [
+          {
+            id: 'claude-md-append-decision',
+            stepType: 'shell' as const,
+            // Use `cd <workingDir>` + a small inline `node -e` that
+            // imports the daemon-resident writer module. Node's dynamic
+            // `import()` resolves the path on the daemon's filesystem;
+            // the daemon ships from /opt/futurator-daemon/ so the
+            // module path is stable across deploys.
+            command:
+              `cd ${workingDir} && ` +
+              `node -e "import('/opt/futurator-daemon/lib/claude-md-writer.mjs').then(m => ` +
+              `m.appendArchitectureDecision(${argsJson}).then(r => ` +
+              `console.log('claude-md-append-decision:', JSON.stringify(r))))" 2>&1 || true`,
+            timeout: 8000,
+            // Non-blocking by default: the daemon's executeShellStep
+            // only fails the job when `onFail.action === 'fail'`. We
+            // omit onFail entirely so a node error or module-resolution
+            // miss is logged as step_error but doesn't fail the story.
+            // The shell `|| true` is belt-and-suspenders.
+          } satisfies PipelineStep,
+        ];
+      })(),
+
       // Story A.3: per-story commit. Runs after the review loop terminates so
       // HEAD~1..HEAD always scopes to a single story's edits — kills the old
       // `find -newer .mycelium/last-compile-marker` fallback that swept node_modules.

@@ -321,7 +321,12 @@ export interface AgentJob {
     | 'skill-scout'
     // Epic 3 Story 3.6 — operator-confirmed (or auto-confirmed) skill
     // install: apply manifest deltas + re-run vendor-skills + commit.
-    | 'skill-install';
+    | 'skill-install'
+    // Epic 6 wire-in (2026-05-20) — REFLECTOR runs at plan close. The
+    // plan-reducer enqueues these; daemon's executeReflectorJob picks
+    // them up (Epic 6 follow-on — daemon dispatch wire is held back
+    // alongside the Slice C work).
+    | 'reflector';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -421,6 +426,26 @@ export interface AgentJob {
     /** Drives the rigor matrix in disposeProposals. T1 hardcodes
      *  'prototype' (no plan exists yet); T2+ inherit the plan's rigor. */
     rigor: 'prototype' | 'mvp' | 'production';
+  };
+
+  /**
+   * Epic 6 wire-in (2026-05-20) — REFLECTOR job payload. Set when
+   * `jobType === 'reflector'`. The plan-reducer enqueues these at
+   * plan close (status flip to 'review'); the daemon's
+   * executeReflectorJob (follow-on) reads this shape.
+   *
+   * Mirror of `buildReflectorJobPayload` in
+   * `daemon/lib/reflector-scheduler.mjs`. Schema-wise the two stay in
+   * lock-step.
+   */
+  reflectorPayload?: {
+    scope: 'plan' | 'wave' | 'story';
+    planId: string;
+    planSlug?: string;
+    projectSlug?: string;
+    rigor: 'prototype' | 'mvp' | 'production';
+    epicId?: string | null;
+    waveNumber?: number | null;
   };
 
   /**

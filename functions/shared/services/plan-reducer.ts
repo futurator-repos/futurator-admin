@@ -10,6 +10,63 @@ import {
 } from '../types/agent-job-state-machine';
 
 /**
+ * Epic 6 wire-in (2026-05-20) — plan-close REFLECTOR enqueue.
+ *
+ * Inlined here (rather than importing `daemon/lib/reflector-scheduler.mjs`
+ * directly) because this module is part of the TS Lambda build, not the
+ * daemon's mjs runtime. The logic mirrors `decidePlanCloseReflection` —
+ * single rigor + idempotency gate. Wire-in keeps the wired surface area
+ * to ONE file (plan-reducer.ts) so a single revert undoes the whole
+ * Epic 6 plan-close path.
+ *
+ * Wave-close REFLECTOR is a separate follow-on inside wave-reducer (not
+ * in this commit — wave-reducer.ts is dirty with Slice C work).
+ */
+async function maybeEnqueuePlanCloseReflector(plan: Plan, deps: PlanReducerDeps): Promise<void> {
+  // Idempotency: never re-fire.
+  if (plan.reflectorPlanCloseFiredAt) return;
+
+  // v2.5 §38.1 — plan-close reflection fires under any rigor (it's the
+  // cheapest scope; story-scope reflection is the one gated to prod).
+  // We respect that and ALWAYS attempt the enqueue on plan-close.
+  const now = new Date().toISOString();
+  const reflectorJobId = deps.uuid();
+  try {
+    await deps.createJob({
+      jobId: reflectorJobId,
+      status: 'PENDING' as const,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: plan.createdBy || 'reflector-scheduler',
+      workingDir: plan.workingDir,
+      // The daemon's job-router routes on jobType; the executor for
+      // 'reflector' is Epic 6's executeReflectorJob.
+      jobType: 'reflector',
+      reflectorPayload: {
+        scope: 'plan',
+        planId: plan.planId,
+        planSlug: plan.name,
+        projectSlug: (plan as Plan & { appId?: string }).appId ?? plan.name,
+        rigor: plan.rigor ?? 'mvp',
+        epicId: null,
+        waveNumber: null,
+      },
+      pipeline: null as unknown as PipelineDefinition,
+    });
+
+    // Stamp idempotency key on the plan row.
+    await deps.updatePlanFields(plan.planId, { reflectorPlanCloseFiredAt: now });
+  } catch (err) {
+    // Non-fatal — plan still completes. Surface via console.warn for
+    // operator triage (no attention-item dependency here to keep the
+    // reducer pure).
+    console.warn(
+      `[PlanReducer] REFLECTOR plan-close enqueue failed for ${plan.planId}: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
+
+/**
  * Outer reducer — drives a Plan through its plan-wave state machine.
  *
  * Per tick:
@@ -213,6 +270,8 @@ export async function reducePlan(
   // mvp/production rigor still get the safety net.
   if (planOpts.rigor === 'prototype') {
     await deps.updatePlanFields(plan.planId, { status: 'review', reviewAt: deps.now() });
+    // Epic 6 wire-in (2026-05-20) — fire REFLECTOR on plan close.
+    await maybeEnqueuePlanCloseReflector(plan, deps);
     return { kind: 'plan-completed' };
   }
 
@@ -250,6 +309,8 @@ export async function reducePlan(
 
   // Build-check passed → plan complete.
   await deps.updatePlanFields(plan.planId, { status: 'review', reviewAt: deps.now() });
+  // Epic 6 wire-in (2026-05-20) — fire REFLECTOR on plan close.
+  await maybeEnqueuePlanCloseReflector(plan, deps);
   return { kind: 'plan-completed' };
 }
 

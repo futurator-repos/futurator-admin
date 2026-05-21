@@ -276,3 +276,19 @@ describe('selectHandler — skill-scout + skill-install (Epic 3)', () => {
     ).toBe(JOB_HANDLER_SKILL_SCOUT);
   });
 });
+
+// ── Epic 6 wire-in (2026-05-20) — reflector jobType ──
+
+describe('selectHandler — reflector (Epic 6)', () => {
+  it('routes jobType=reflector to the reflector handler', async () => {
+    const { selectHandler, JOB_HANDLER_REFLECTOR } = await import('../../pipelines/job-router.mjs');
+    expect(selectHandler({ jobType: 'reflector', jobId: 'j' })).toBe(JOB_HANDLER_REFLECTOR);
+  });
+
+  it('reflector takes precedence over phase=epic-dev', async () => {
+    const { selectHandler, JOB_HANDLER_REFLECTOR } = await import('../../pipelines/job-router.mjs');
+    expect(
+      selectHandler({ jobType: 'reflector', phase: 'epic-dev', jobId: 'j' }),
+    ).toBe(JOB_HANDLER_REFLECTOR);
+  });
+});

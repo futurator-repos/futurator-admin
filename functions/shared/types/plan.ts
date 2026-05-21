@@ -140,6 +140,18 @@ export interface Plan {
   pendingSkillScoutJobId?: string | null;
 
   /**
+   * Epic 6 wire-in (2026-05-20) — REFLECTOR plan-close idempotency
+   * stamp. Set when the plan-reducer enqueues a REFLECTOR job at the
+   * plan's `review` transition. Once stamped, subsequent reducer
+   * ticks skip the enqueue branch (cron-replay-safe).
+   *
+   * Format: ISO timestamp. Stays set indefinitely — the operator can
+   * fire ad-hoc reflections via the Reflection Inbox UI if a re-run
+   * is desired.
+   */
+  reflectorPlanCloseFiredAt?: string | null;
+
+  /**
    * Pipeline v2 Phase 2-A — Story 2-A-misc-2 / PR-45.
    *
    * Plan-level cost ceiling (USD). Set by the create endpoints from

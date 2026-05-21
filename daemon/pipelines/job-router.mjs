@@ -35,6 +35,11 @@ export const JOB_HANDLER_SKILL_SCOUT = 'skill-scout';
 // operator-confirmed proposals to .claude/skills.manifest.yaml, re-runs
 // vendor-skills, commits with `Agent: SKILL-SCOUT` trailer.
 export const JOB_HANDLER_SKILL_INSTALL = 'skill-install';
+// Epic 6 wire-in (2026-05-20) — REFLECTOR job runner. Plan-reducer
+// enqueues these at plan close; the runner spawns the REFLECTOR agent
+// and writes proposals into futurator-reflections for the operator's
+// Reflection Inbox.
+export const JOB_HANDLER_REFLECTOR = 'reflector';
 
 /**
  * Decide which handler should run a given job.
@@ -65,6 +70,7 @@ export function selectHandler(job) {
   if (job.jobType === 'wave-merge') return JOB_HANDLER_WAVE_MERGE;
   if (job.jobType === 'skill-scout') return JOB_HANDLER_SKILL_SCOUT;
   if (job.jobType === 'skill-install') return JOB_HANDLER_SKILL_INSTALL;
+  if (job.jobType === 'reflector') return JOB_HANDLER_REFLECTOR;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
 }

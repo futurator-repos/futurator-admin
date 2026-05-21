@@ -1690,6 +1690,36 @@ app.post('/api/plans/:id/apply-plan', async (c) => {
     );
   }
 
+  // Epic 5 wire-in (2026-05-20) — PM seedWhatThisIs. Replaces the
+  // empty `## What this is` section in CLAUDE.md with the project
+  // intent (first ~3 sentences). Idempotent: the writer no-ops when
+  // the section is already populated, so re-applying a plan over an
+  // existing CLAUDE.md is safe.
+  //
+  // Best-effort via SSM. A failure here doesn't roll back the plan
+  // apply — the operator still has a fully-decomposed plan; only the
+  // CLAUDE.md narrative gets seeded next time PM runs.
+  try {
+    const workingDir = result.plan.workingDir;
+    if (workingDir && result.plan.intent) {
+      // Trim to first ~3 sentences for the seed (mirrors v2.5 §41.1
+      // "one paragraph" guidance). Shell-escape via JSON.stringify so
+      // newlines/quotes/etc. survive the SSM round-trip safely.
+      const purpose = String(result.plan.intent).split('\n').slice(0, 3).join(' ').trim();
+      const purposeJson = JSON.stringify(purpose);
+      const seedCmd =
+        `cd ${workingDir} && ` +
+        `node -e "import('/opt/futurator-daemon/lib/claude-md-writer.mjs').then(m => ` +
+        `m.seedWhatThisIs({ workingDir: '.', purpose: ${purposeJson} }).then(r => ` +
+        `console.log('seed-what-this-is:', JSON.stringify(r))))" 2>&1 || true`;
+      await sendSsmCommand(seedCmd);
+    }
+  } catch (err) {
+    console.warn(
+      `[Plans] CLAUDE.md seedWhatThisIs failed (non-fatal): ${err instanceof Error ? err.message : err}`,
+    );
+  }
+
   return c.json({ plan: result.plan, epics: result.epics });
 });
 
