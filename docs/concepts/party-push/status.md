@@ -52,10 +52,10 @@ Status legend: TODO / IN_PROGRESS / REVIEW / DONE / TODO / RESERVED.
 | #     | Story                                                           | Status                                                            | File                                                    |
 | ----- | --------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------- |
 | 20.1  | Party marker extractor                                          | **DONE** (2026-05-21)                                             | `stories/20-1-party-marker-extractor.md`                |
-| 20.2  | `party-checkpoint.sh` (push disabled)                           | TODO                                                              | `stories/20-2-party-checkpoint-script.md`               |
+| 20.2  | `party-checkpoint.sh` (push disabled)                           | **DONE** (2026-05-21)                                             | `stories/20-2-party-checkpoint-script.md`               |
 | 20.3  | `party-tool-hook.sh` + adversarial tests                        | **DONE** (2026-05-21)                                             | `stories/20-3-party-tool-hook-and-adversarial-tests.md` |
-| 20.4  | `POST /api/admin/migrate-brownfield/:projectId`                 | TODO                                                              | `stories/20-4-admin-migrate-brownfield-endpoint.md`     |
-| 20.5  | Bootstrap rejects non-bare topology                             | TODO (depends on 20.4)                                            | `stories/20-5-bootstrap-rejects-non-bare-topology.md`   |
+| 20.4  | `POST /api/admin/migrate-brownfield/:projectId`                 | **DONE** (2026-05-21, UI button + manual smoke deferred)          | `stories/20-4-admin-migrate-brownfield-endpoint.md`     |
+| 20.5  | Bootstrap rejects non-bare topology                             | **DONE** (2026-05-21, UI deep-link deferred to Epic 22)           | `stories/20-5-bootstrap-rejects-non-bare-topology.md`   |
 | 20.6  | Per-session party worktree setup                                | TODO                                                              | `stories/20-6-setup-party-worktree.md`                  |
 | 20.7  | Party-turn rewiring                                             | TODO                                                              | `stories/20-7-party-turn-rewiring.md`                   |
 | 20.8  | Orchestrator system-prompt update                               | **DONE** (2026-05-21)                                             | `stories/20-8-orchestrator-system-prompt.md`            |

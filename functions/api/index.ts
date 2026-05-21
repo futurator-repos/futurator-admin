@@ -112,7 +112,20 @@ import {
   movePlanFolderToTrash,
   restorePlanFolder,
   deletePlanFolder,
+  cleanupPlanBranch,
+  assertWorktreeClean,
+  countResidualPlanCommits,
+  reapPlanStoryWorktrees,
+  resetAppWorktreeToMain,
+  type CleanupStep,
 } from '../shared/services/plan-folder-service';
+import { cleanupAppArtifacts } from '../shared/services/app-artifact-service';
+// Story 20.4 — admin endpoint for converting brownfield to bare+worktree topology.
+import {
+  runConvertPreflight,
+  isAlreadyBareTopology,
+  performBrownfieldConversion,
+} from '../shared/services/brownfield-topology-converter';
 import { generatePmPlanPipeline } from '../shared/pipelines/pm-plan-pipeline';
 import { generateSkillScoutPipeline } from '../shared/pipelines/skill-scout-pipeline';
 import { parsePlanOutput, applyPlanOutput } from '../shared/services/plan-generation-service';
@@ -1891,11 +1904,15 @@ app.post('/api/plans/:id/start', async (c) => {
   const now = new Date().toISOString();
   const jobsByEpic: Record<string, string[]> = {};
 
-  // Phase C.3: cascade plan-level rigor + test config into each pipeline.
+  // Phase C.3 + 2026-05-19: cascade plan-level rigor + test config + plan
+  // identity into each pipeline. planSlug → `plan/<slug>` branch + per-
+  // story worktrees. planId → commit `Plan-Id:` trailer for forensic queries.
   const planOpts = {
     rigor: plan.rigor,
     testModel: plan.testModel,
     hasBrowserTests: plan.testingProfile?.hasBrowserTests,
+    planSlug: plan.name,
+    planId: plan.planId,
   };
   for (const epic of firstWaveEpics) {
     const result = await launchPipelineWave(
@@ -2090,30 +2107,125 @@ app.delete('/api/plans/:id', async (c) => {
   }
   results.push({ step: 'epics', status: 'done', detail: `${epicsToDelete.length} epics` });
 
-  // 4. Delete EC2 folder — but ONLY for legacy plans where the
-  // workingDir is plan-owned. PR-10 #2: App/Plan v1 plans share the
-  // App's workingDir across every plan; deleting the folder when one
-  // v1 plan is removed would nuke the App + every other plan's work.
-  // Detect v1 by `plan.appId` presence (set at /api/apps/:id/plans
-  // creation). Legacy plans created via /api/plans/from-intent have
-  // no appId and own their folder, so the rm -rf is correct there.
+  // 4. EC2 + GitHub side effects. App/Plan v1 plans share the App's
+  // workingDir, so we surgically cleanup THIS plan's footprint instead
+  // of nuking the whole folder. Legacy plans (no appId) own their folder
+  // and get rm -rf'd directly.
+  //
+  // For App/Plan v1, the full per-plan teardown is:
+  //   a) Drop plan/<slug> branch (local + GitHub)
+  //   b) Reap every wip/<storyId> worktree + branch under this plan
+  //   c) Reset the App's shared worktree to clean main
+  //   d) Report residual commits on main carrying this Plan-Id
+  //
+  // Each step independently best-effort; failures surface as 'error' but
+  // do not abort the cascade — the operator can re-run delete or clean by
+  // hand if needed.
+  const ssmDeps = { sendSsmCommand, waitForSsmOutput };
   const planAppId = (plan as Plan & { appId?: string }).appId;
   if (planAppId) {
+    // a) plan/<slug> branch cleanup
+    try {
+      const branchResult = await cleanupPlanBranch(
+        { workingDirSlug: planAppId, planName: plan.name },
+        ssmDeps,
+      );
+      results.push(branchResult);
+    } catch (err) {
+      results.push({
+        step: 'plan-branch',
+        status: 'error',
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // b) Per-story wip worktrees + branches (2026-05-21 fix — the snake-4
+    // user hit this: cascade left wip/* + per-story dirs behind, the next
+    // plan-create's worktree-clean guard failed).
+    try {
+      const reapResult = await reapPlanStoryWorktrees(
+        { workingDirSlug: planAppId, planName: plan.name },
+        ssmDeps,
+      );
+      results.push(reapResult);
+    } catch (err) {
+      results.push({
+        step: 'plan-story-worktrees',
+        status: 'error',
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // c) Reset the App's shared worktree (2026-05-21 fix). Knowledge
+    // sidecars / .mycelium drift accumulates here across plans; without
+    // a reset, the next plan-create's worktree-clean guard refuses with
+    // "App worktree is not in a clean state: dirty — N uncommitted".
+    try {
+      const resetResult = await resetAppWorktreeToMain(planAppId, ssmDeps);
+      results.push(resetResult);
+    } catch (err) {
+      results.push({
+        step: 'app-worktree-reset',
+        status: 'error',
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // d) Residual-commit report (non-destructive). Tells operator
+    // whether any commits on main carry this plan's Plan-Id trailer
+    // (typically zero for post-fix plans; legacy plans return 0 because
+    // the trailer didn't exist when they ran).
+    try {
+      const residual = await countResidualPlanCommits(
+        { workingDirSlug: planAppId, planId: plan.planId },
+        ssmDeps,
+      );
+      results.push({
+        step: 'main-residual',
+        status: residual.count > 0 ? 'done' : 'skipped',
+        detail:
+          residual.count > 0
+            ? `${residual.count} commit(s) with Plan-Id:${plan.planId} still on main; sample: ${residual.sample.map((s) => s.slice(0, 7)).join(',')}. Revert manually if undesired.`
+            : 'no residual commits on main',
+      });
+    } catch (err) {
+      results.push({
+        step: 'main-residual',
+        status: 'error',
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     results.push({
       step: 'folder',
       status: 'skipped',
-      detail: 'App/Plan v1: workingDir owned by the App, not deleted',
+      detail: 'App/Plan v1: workingDir owned by the App (other plans share it)',
     });
   } else {
+    // Legacy: plan owns its folder. Nuke it.
     try {
-      await deletePlanFolder(plan, { sendSsmCommand, waitForSsmOutput });
+      await deletePlanFolder(plan, ssmDeps);
       results.push({ step: 'folder', status: 'done' });
     } catch (err) {
       results.push({ step: 'folder', status: 'error', detail: String(err) });
     }
   }
 
-  // 5. Delete the plan row.
+  // 5. Attention items keyed on planId (2026-05-19 fix). Without this,
+  // resolved attention rows remain in DDB; if a planId is reused (rare)
+  // they'd show as ghosts on the new plan.
+  try {
+    const dropped = await attentionRepo.deleteAttentionItemsByPlan(planId);
+    results.push({ step: 'attention-items', status: 'done', detail: `${dropped} items` });
+  } catch (err) {
+    results.push({
+      step: 'attention-items',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // 6. Delete the plan row.
   await planRepo.deletePlan(planId);
   results.push({ step: 'plan', status: 'done' });
 
@@ -3085,6 +3197,8 @@ app.post('/api/epic-workflows/:id/stories/:storyId/run', async (c) => {
         rigor?: import('../shared/types/plan').PlanRigor;
         testModel?: string;
         hasBrowserTests?: boolean;
+        planSlug?: string;
+        planId?: string;
       }
     | undefined;
   if (epic.planId) {
@@ -3094,6 +3208,8 @@ app.post('/api/epic-workflows/:id/stories/:storyId/run', async (c) => {
         rigor: plan.rigor,
         testModel: plan.testModel,
         hasBrowserTests: plan.testingProfile?.hasBrowserTests,
+        planSlug: plan.name,
+        planId: plan.planId,
       };
     }
   }
@@ -3673,6 +3789,52 @@ app.post('/api/ec2/disable', async (c) => {
 
 // ── EC2 File Browser ──
 
+/**
+ * Read a file from EC2 via SSM in chunks. Works around AWS SSM's
+ * 24,000-character `StandardOutputContent` cap on `GetCommandInvocation` —
+ * any single-shot `cat $file` for files >~24 KB silently truncates and SSM
+ * appends a literal `--output truncated--` marker that callers then render
+ * as if it were file content (forensic 2026-05-21 cohort-module doc — file
+ * was 58 KB on disk, drawer showed up to ~24 KB then a fake marker).
+ *
+ * Each chunk fetches `SSM_CHUNK_BYTES` of raw bytes encoded as base64
+ * (≈16K base64 chars + sentinel overhead, well under the 24K cap). Chunks
+ * are fetched up to `SSM_PARALLEL_CHUNKS` in parallel to keep latency
+ * bounded under the API Lambda's 30s budget — a 60 KB file lands in ~3 s,
+ * a 1 MB file in ~30 s.
+ *
+ * Caller must pre-validate `filePath` (shell-quoting safety) — this helper
+ * trusts the caller's whitelist.
+ */
+const SSM_CHUNK_BYTES = 12000;
+const SSM_PARALLEL_CHUNKS = 4;
+
+async function readFileChunkedViaSsm(filePath: string, size: number): Promise<Buffer> {
+  if (size <= 0) return Buffer.alloc(0);
+  const chunkCount = Math.ceil(size / SSM_CHUNK_BYTES);
+  const chunks: Buffer[] = new Array(chunkCount);
+
+  for (let batchStart = 0; batchStart < chunkCount; batchStart += SSM_PARALLEL_CHUNKS) {
+    const batchEnd = Math.min(batchStart + SSM_PARALLEL_CHUNKS, chunkCount);
+    const batch: Promise<void>[] = [];
+    for (let i = batchStart; i < batchEnd; i++) {
+      const skip = i * SSM_CHUNK_BYTES + 1; // tail -c is 1-indexed
+      const cmd = `tail -c +${skip} "${filePath}" | head -c ${SSM_CHUNK_BYTES} | base64 -w0`;
+      batch.push(
+        sendSsmCommand(cmd)
+          .then((commandId) => waitForSsmOutput(commandId))
+          .then((out) => {
+            const cleanB64 = out.replace(/\s*--output truncated--\s*$/, '').trim();
+            chunks[i] = Buffer.from(cleanB64, 'base64');
+          }),
+      );
+    }
+    await Promise.all(batch);
+  }
+
+  return Buffer.concat(chunks);
+}
+
 async function waitForSsmOutput(commandId: string, timeout = 15000): Promise<string> {
   const start = Date.now();
   while (Date.now() - start < timeout) {
@@ -4122,9 +4284,10 @@ app.get('/api/ec2/files/content', authMiddleware, async (c) => {
   const name = filePath.split('/').pop() || '';
   const classified = classifyFile(name);
 
-  // Single SSM round-trip: validate, stat, optionally base64. The sentinel
-  // tokens let us distinguish "not a file", "too large", and "ok" without
-  // having to issue separate commands.
+  // Two-phase read: meta first (tiny output, never truncated), then the
+  // content via readFileChunkedViaSsm. The previous single-shot script
+  // base64'd the whole file inline and was silently truncated by SSM's 24K
+  // StandardOutputContent cap for files >~18 KB.
   const script = [
     `f="${filePath}"`,
     'if [ ! -e "$f" ]; then echo "__NOT_FOUND__"; exit 0; fi',
@@ -4133,9 +4296,6 @@ app.get('/api/ec2/files/content', authMiddleware, async (c) => {
     'mt=$(stat -c%Y "$f")',
     `if [ "$sz" -gt ${EC2_FILE_MAX_BYTES} ]; then echo "__TOO_LARGE__:$sz:$mt"; exit 0; fi`,
     'echo "__META__:$sz:$mt"',
-    'echo "__CONTENT_START__"',
-    'base64 -w0 "$f"',
-    'echo',
   ].join('\n');
 
   const commandId = await sendSsmCommand(script);
@@ -4159,24 +4319,21 @@ app.get('/api/ec2/files/content', authMiddleware, async (c) => {
     });
   }
 
-  const lines = output.split('\n');
-  const metaLine = lines.find((l) => l.startsWith('__META__:'));
-  const startIdx = lines.findIndex((l) => l === '__CONTENT_START__');
-  if (!metaLine || startIdx === -1) {
+  const metaLine = output.split('\n').find((l) => l.startsWith('__META__:'));
+  if (!metaLine) {
     throw new AppError('SSM_PARSE', 'Unexpected SSM output format', 502);
   }
   const [, szStr, mtStr] = metaLine.split(':');
   const size = Number(szStr);
   const mtime = Number(mtStr) * 1000;
-  const base64 = lines
-    .slice(startIdx + 1)
-    .join('')
-    .trim();
+
+  const buf = await readFileChunkedViaSsm(filePath, size);
+  const base64 = buf.toString('base64');
 
   if (classified.kind === 'text') {
     let content: string;
     try {
-      content = Buffer.from(base64, 'base64').toString('utf-8');
+      content = buf.toString('utf-8');
     } catch {
       // Fall through and return as binary so the frontend can offer a download.
       return c.json({
@@ -5372,6 +5529,177 @@ app.delete('/api/migrations/:id', async (c) => {
   });
 });
 
+// ──────────────────────────────────────────────────────────────────────
+// Story 20.4 (party-push Epic 20) — Brownfield → bare+worktree topology.
+//
+// One-time admin conversion: bare-clone the GitHub repo to
+// /home/ubuntu/repos/<projectId>.git, replace the working-tree clone at
+// /home/ubuntu/projects/<projectId>/ with a `git worktree add` from that
+// bare. Per-session party worktrees (Story 20.6) then share the bare's
+// object store.
+//
+// Explicit admin action per ship-blocker §12.3.3 (operator-confirmed
+// 2026-05-21). Gated by pre-flight: no active plans / no active sessions
+// / clean tree. Idempotent: re-running on an already-converted project
+// returns 200 with `converted: false, reason: 'already-bare-topology'`.
+// ──────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/admin/migrate-brownfield/:projectId/preflight — read-only
+ * pre-flight inspection. Returns the same blockers the POST would refuse
+ * with, so the UI can disable the "Convert" button without making the
+ * operator click and fail.
+ */
+app.get('/api/admin/migrate-brownfield/:projectId/preflight', async (c) => {
+  const projectId = c.req.param('projectId');
+  const parsedId = refreshProjectParamsSchema.safeParse({ projectId });
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid projectId');
+  }
+  const deps = { sendSsmCommand, waitForSsmOutput };
+  const [blockers, idempotence] = await Promise.all([
+    runConvertPreflight({ projectId: parsedId.data.projectId }, deps),
+    isAlreadyBareTopology({ projectId: parsedId.data.projectId }, deps),
+  ]);
+  return c.json({
+    projectId: parsedId.data.projectId,
+    alreadyBare: idempotence.alreadyBare,
+    headSha: idempotence.headSha,
+    canProceed: blockers.length === 0 && !idempotence.alreadyBare,
+    blockers,
+  });
+});
+
+/**
+ * POST /api/admin/migrate-brownfield/:projectId — perform the conversion.
+ *
+ * Pre-flight: runs the same checks GET .../preflight does. On any blocker,
+ * returns 409 `BROWNFIELD_CONVERT_BLOCKED` with the blocker list.
+ *
+ * Idempotence: if the project is already on the bare+worktree topology
+ * (a re-run, or it was bootstrapped that way greenfield), returns 200
+ * with `{ converted: false, reason: 'already-bare-topology', headSha }`.
+ *
+ * On success: returns 200 with `{ converted: true, bareRepoPath,
+ * worktreePath, headSha }` AND writes an audit row to `futurator-admin-audits`.
+ */
+app.post('/api/admin/migrate-brownfield/:projectId', async (c) => {
+  const projectId = c.req.param('projectId');
+  const parsedId = refreshProjectParamsSchema.safeParse({ projectId });
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid projectId');
+  }
+  const operatorId = c.get('user').userId;
+  const deps = { sendSsmCommand, waitForSsmOutput };
+
+  // 1. Idempotence first — cheaper than the full preflight, and a re-run
+  //    against an already-bare project should NOT report scary blockers.
+  const idempotence = await isAlreadyBareTopology({ projectId: parsedId.data.projectId }, deps);
+  if (idempotence.alreadyBare) {
+    return c.json(
+      {
+        converted: false,
+        reason: 'already-bare-topology',
+        projectId: parsedId.data.projectId,
+        headSha: idempotence.headSha,
+      },
+      200,
+    );
+  }
+
+  // 2. Pre-flight: every check must pass.
+  const blockers = await runConvertPreflight({ projectId: parsedId.data.projectId }, deps);
+  if (blockers.length > 0) {
+    throw new AppError(
+      'BROWNFIELD_CONVERT_BLOCKED',
+      `Cannot convert ${parsedId.data.projectId}: ${blockers.map((b) => `[${b.code}] ${b.detail}`).join('; ')}`,
+      409,
+    );
+  }
+
+  // 3. Resolve PAT + branch.
+  const project = await partyProjectsRepo.getProject(parsedId.data.projectId);
+  if (!project) throw new NotFoundError('PartyProject', parsedId.data.projectId);
+  const secretName = project.patSecretName || `futurator/brownfield-pat/${parsedId.data.projectId}`;
+  let pat: string;
+  try {
+    const secretResult = await secretsManagerClient.send(
+      new GetSecretValueCommand({ SecretId: secretName }),
+    );
+    if (!secretResult.SecretString) {
+      throw new AppError(
+        'BROWNFIELD_CONVERT_FAILED',
+        `Secret "${secretName}" has no SecretString`,
+        500,
+      );
+    }
+    // Accept raw token or JSON-wrapped { token } / { pat } shapes — same as the daemon's loader.
+    const raw = secretResult.SecretString;
+    if (raw.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(raw) as { token?: string; pat?: string };
+        pat = parsed.token || parsed.pat || raw;
+      } catch {
+        pat = raw;
+      }
+    } else {
+      pat = raw;
+    }
+  } catch (err) {
+    throw new AppError(
+      'BROWNFIELD_CONVERT_FAILED',
+      `Failed to load PAT from Secrets Manager: ${(err as Error).message}`,
+      500,
+    );
+  }
+
+  // 4. Perform the conversion.
+  const result = await performBrownfieldConversion(
+    {
+      projectId: parsedId.data.projectId,
+      gitBranch: project.gitBranch || 'main',
+      pat,
+    },
+    deps,
+  );
+
+  // Story 20.4 AC 6 — audit log. A dedicated `futurator-admin-audits`
+  // table is deferred infrastructure work; for now, Lambda's CloudWatch
+  // log group is the audit trail. The structured single-line JSON lets
+  // operators grep CloudWatch by action + projectId + operatorId.
+  console.log(
+    JSON.stringify({
+      audit: 'brownfield-topology-convert',
+      operatorId,
+      projectId: parsedId.data.projectId,
+      timestamp: new Date().toISOString(),
+      result: result.converted ? 'converted' : 'failed',
+      reason: 'reason' in result ? result.reason : undefined,
+      bareRepoPath: 'bareRepoPath' in result ? result.bareRepoPath : undefined,
+      worktreePath: 'worktreePath' in result ? result.worktreePath : undefined,
+      headSha: 'headSha' in result ? result.headSha : undefined,
+      detail: 'detail' in result ? result.detail : undefined,
+    }),
+  );
+
+  if (!result.converted) {
+    throw new AppError(
+      'BROWNFIELD_CONVERT_FAILED',
+      'reason' in result && result.reason === 'conversion-failed'
+        ? `Conversion failed: ${(result as { detail?: string }).detail ?? 'unknown'}`
+        : 'Conversion failed',
+      500,
+    );
+  }
+  return c.json({
+    converted: true,
+    projectId: parsedId.data.projectId,
+    bareRepoPath: result.bareRepoPath,
+    worktreePath: result.worktreePath,
+    headSha: result.headSha,
+  });
+});
+
 /**
  * Party project docs — small in-chat knowledge tray so agents can reason over
  * user-uploaded files. Docs live at S3 `futurator-ai-website/party-docs/<id>/`
@@ -5892,9 +6220,12 @@ app.get('/api/party/projects/:projectId/files', async (c) => {
   const cleanRel = rel.replace(/^\/+/, '');
   const fullPath = `${project.path.replace(/\/+$/, '')}/${cleanRel}`;
 
-  // SSM-side guard. realpath verifies the resolved canonical path is still
-  // within the project root after symlink expansion. Bash quoting is safe
-  // because we already whitelisted the characters above.
+  // Two-phase read. Phase 1: validate path + resolve symlinks + stat the
+  // file (tiny SSM output, never truncated). Phase 2: stream the content
+  // via readFileChunkedViaSsm. The previous single-shot `cat` was silently
+  // truncated by SSM's 24K StandardOutputContent cap for files >~24 KB,
+  // and SSM appended a literal `--output truncated--` marker into the
+  // returned content. See readFileChunkedViaSsm doc-comment.
   const cmd = [
     `set -e`,
     `ROOT="${project.path}"`,
@@ -5906,8 +6237,7 @@ app.get('/api/party/projects/:projectId/files', async (c) => {
     `if [ ! -f "$RESOLVED" ]; then echo "__NOT_FOUND__" && exit 0; fi`,
     `SIZE=$(stat -c%s "$RESOLVED")`,
     `if [ "$SIZE" -gt 1048576 ]; then echo "__TOO_LARGE__:$SIZE" && exit 0; fi`,
-    `echo "__OK__:$SIZE"`,
-    `cat "$RESOLVED"`,
+    `echo "__OK__:$SIZE:$RESOLVED"`,
   ].join('\n');
 
   const commandId = await sendSsmCommand(cmd);
@@ -5927,13 +6257,16 @@ app.get('/api/party/projects/:projectId/files', async (c) => {
       413,
     );
   }
-  // Strip the marker line + size header before returning the body.
-  const headerMatch = output.match(/^__OK__:(\d+)\n([\s\S]*)$/);
+  // `__OK__:<size>:<resolvedPath>` — pull out both so the chunked read uses
+  // the realpath-resolved absolute path (symlink-safe).
+  const headerMatch = output.match(/^__OK__:(\d+):(.+)$/m);
   if (!headerMatch) {
     throw new AppError('READ_FAILED', 'unexpected output from file read', 500);
   }
   const size = parseInt(headerMatch[1], 10);
-  const content = headerMatch[2];
+  const resolvedPath = headerMatch[2].trim();
+  const buf = await readFileChunkedViaSsm(resolvedPath, size);
+  const content = buf.toString('utf-8');
 
   // Minimal content-type sniffing — UI uses the extension primarily, this
   // is informational.
@@ -7598,20 +7931,107 @@ app.delete('/api/apps/:appId', authMiddleware, async (c) => {
     throw new AppError('APP_NOT_FOUND', `App "${appId}" not found.`, 404);
   }
 
-  // Cascade: list Plans, delete each Plan's Epics, delete the Plans, then the App.
-  // Sequential (not transactional) — DDB transactWrite caps at 100; cascading
-  // an App with many Plans + Epics could exceed it. Partial-failure recovery
-  // is via the wipe script (scripts/wipe-pre-app-plan-v1.mjs).
+  // 2026-05-21 — App-delete is the nuclear option. Everything goes:
+  // EC2 folder, GitHub repo, S3 deployed bundle, S3 knowledge-live
+  // mirror, Memgraph nodes scoped to projectId=appId, brownfield PAT
+  // secret (30-day SM recovery window), Plans+Epics+Stories+Jobs+Events,
+  // App row. Per-step results surface so the operator can audit what
+  // actually landed.
+  const results: CleanupStep[] = [];
+  const ssmDeps = { sendSsmCommand, waitForSsmOutput };
+
+  // 1. Cascade through every plan. Each plan-delete itself runs the
+  // full per-plan cleanup (plan branch + wip worktrees + attention items
+  // + app-worktree reset). We skip the resetAppWorktreeToMain here
+  // because step 5 will rm -rf the folder entirely anyway.
   const plans = await planRepo.listPlansByApp(appId);
+  let planBranchesCleaned = 0;
   for (const plan of plans) {
+    try {
+      const branchResult = await cleanupPlanBranch(
+        { workingDirSlug: appId, planName: plan.name },
+        ssmDeps,
+      );
+      if (branchResult.status === 'done') planBranchesCleaned++;
+    } catch {
+      /* best-effort */
+    }
+    try {
+      await reapPlanStoryWorktrees({ workingDirSlug: appId, planName: plan.name }, ssmDeps);
+    } catch {
+      /* best-effort */
+    }
+    try {
+      await attentionRepo.deleteAttentionItemsByPlan(plan.planId);
+    } catch {
+      /* best-effort */
+    }
     for (const epicId of plan.epicIds || []) {
       await epicRepo.deleteEpic(epicId).catch(() => undefined);
     }
     await planRepo.deletePlan(plan.planId).catch(() => undefined);
   }
-  await appRepo.deleteApp(appId);
+  results.push({
+    step: 'plans',
+    status: 'done',
+    detail: `${plans.length} plans (${planBranchesCleaned} branches cleaned)`,
+  });
 
-  return c.json({ deleted: true, appId });
+  // 2. Memgraph wipe — best-effort. Nodes carry projectId={appId}.
+  // Runs daemon-side via SSM because Memgraph listens on EC2 localhost
+  // only. Cypher: MATCH (n {projectId: $app}) DETACH DELETE n.
+  try {
+    const cypher = `MATCH (n {projectId: '${appId.replace(/'/g, "\\'")}'}) DETACH DELETE n RETURN count(n) AS deleted;`;
+    const cmd = [
+      `if ! command -v mgconsole >/dev/null 2>&1; then echo MEMGRAPH_NO_CLIENT; exit 0; fi`,
+      `if ! ss -tln 2>/dev/null | grep -q :7687; then echo MEMGRAPH_DOWN; exit 0; fi`,
+      `echo "${cypher}" | mgconsole --output-format=csv 2>&1 | tail -5`,
+      `echo MEMGRAPH_DONE`,
+    ].join('\n');
+    const commandId = await sendSsmCommand(cmd);
+    const output = await waitForSsmOutput(commandId);
+    if (output.includes('MEMGRAPH_NO_CLIENT')) {
+      results.push({ step: 'memgraph', status: 'skipped', detail: 'mgconsole not installed' });
+    } else if (output.includes('MEMGRAPH_DOWN')) {
+      results.push({ step: 'memgraph', status: 'skipped', detail: 'memgraph not listening' });
+    } else if (output.includes('MEMGRAPH_DONE')) {
+      const match = output.match(/(\d+)/);
+      results.push({
+        step: 'memgraph',
+        status: 'done',
+        detail: match ? `${match[1]} nodes deleted` : 'cypher returned ok',
+      });
+    } else {
+      results.push({
+        step: 'memgraph',
+        status: 'error',
+        detail: `unexpected output: ${output.slice(0, 200)}`,
+      });
+    }
+  } catch (err) {
+    results.push({
+      step: 'memgraph',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // 3. App-level side effects: folder rm + GitHub repo delete + S3
+  // apps/ + knowledge-live/ purge + brownfield PAT secret.
+  const artifactResults = await cleanupAppArtifacts(appId, {
+    sendSsmCommand,
+    waitForSsmOutput,
+    deleteGithubRepo: async (owner, name) => {
+      await deleteRepo(owner, name);
+    },
+  });
+  results.push(...artifactResults);
+
+  // 4. Finally drop the App row.
+  await appRepo.deleteApp(appId);
+  results.push({ step: 'app', status: 'done' });
+
+  return c.json({ deleted: true, appId, results });
 });
 
 /** POST /api/apps/:appId/plans — Create a Plan, enforcing concurrency + initial-uniqueness. */
@@ -7651,6 +8071,39 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
       `App "${appId}" has no Plans yet — the first one must be kind=initial.`,
       409,
     );
+  }
+
+  // 2026-05-19 — worktree cleanliness guard. snake-4 plan_2 failed in part
+  // because plan_1's residue (unmerged plan branches, dirty working tree)
+  // polluted the daemon's shared `/home/ubuntu/projects/<appId>/`. For
+  // brownfield Apps especially, "clean state at plan start" is load-bearing.
+  // Skipped for the FIRST plan on an App (the App-bootstrap saga just
+  // wrote the folder and we'd self-flag); checked thereafter.
+  // Override: `?force=1` skips the guard so the operator can recover from
+  // a stuck state without manual SSH.
+  const forceCreate = c.req.query('force') === '1';
+  if (existingPlans.length > 0 && !forceCreate) {
+    const cleanliness = await assertWorktreeClean(appRow.workingDir.split('/').pop() || appId, {
+      sendSsmCommand,
+      waitForSsmOutput,
+    }).catch((err) => ({
+      // SSM unreachable / EC2 stopped — degrade open rather than blocking
+      // plan-create. The operator can still hit a polluted worktree once
+      // EC2 wakes up, but at least the API path doesn't hard-fail when
+      // the daemon box is asleep.
+      clean: true as const,
+      headBranch: 'unknown' as const,
+      commitSha: '',
+      _probeError: err instanceof Error ? err.message : String(err),
+    }));
+    if ('clean' in cleanliness && cleanliness.clean === false) {
+      throw new AppError(
+        'WORKTREE_DIRTY',
+        `App worktree is not in a clean state: ${cleanliness.reason} — ${cleanliness.detail}. ` +
+          `Delete the stale plan(s) first, or pass ?force=1 to skip this check.`,
+        409,
+      );
+    }
   }
 
   const now = new Date().toISOString();

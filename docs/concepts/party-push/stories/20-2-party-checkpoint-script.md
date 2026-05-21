@@ -1,6 +1,6 @@
 # Story 20.2: `party-checkpoint.sh` script (push disabled)
 
-Status: TODO
+Status: DONE (2026-05-21) — script + tests shipped; JS push-wrapper (the "withPatRetry" half of 19.6 AC 3+4) deferred to Epic 21 (push itself is disabled in PR 1, so the wrapper has no callsite yet)
 
 ## Story
 

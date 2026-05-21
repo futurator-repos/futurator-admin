@@ -1,6 +1,6 @@
 # Story 20.4: `POST /api/admin/migrate-brownfield/:projectId` endpoint
 
-Status: TODO
+Status: DONE (2026-05-21) — Tasks 1-4 ✅; Task 5 (UI button) deferred to Epic 21; Task 6 (manual test on applicator) operator-driven post-deploy
 Depends on: ship-blocker §12.3.3 resolved (recommended: explicit admin action)
 
 ## Story

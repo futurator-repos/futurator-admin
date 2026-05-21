@@ -1,6 +1,6 @@
 # Story 20.5: Party-bootstrap rejects non-bare-topology projects
 
-Status: TODO
+Status: DONE (2026-05-21) — Tasks 1-3 ✅; Task 4 (UI deep-link in start-debate-modal) deferred to Epic 22 (UI half)
 Depends on: 20.4 (admin migration endpoint exists)
 
 ## Story

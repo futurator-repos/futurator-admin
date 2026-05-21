@@ -395,6 +395,46 @@ async function runBrownfieldBootstrap({
     throw new Error(`projectPath ${projectPath} must be under ${projectsRoot}`);
   }
 
+  // ── Story 20.5 (party-push Epic 20) — topology gate ─────────────────
+  // Refuse to bootstrap a brownfield project that hasn't been converted
+  // to the bare+worktree topology by Story 20.4's admin endpoint. Without
+  // the bare repo at /home/ubuntu/repos/<projectId>.git, party-push's
+  // per-session worktrees (Story 20.6) can't share the object store and
+  // the design degrades into "every session is a full clone" — defeating
+  // the whole point.
+  //
+  // Compatibility: this only fires for NEW bootstrap invocations. Sessions
+  // that already exist on a non-bare topology continue working until they
+  // end naturally; the next bootstrap on the same project is when the
+  // operator must run the admin migration.
+  const bareRepoPath = `/home/ubuntu/repos/${projectId}.git`;
+  const topologyCheckPassed = await ctx
+    .checkBareRepoExists?.(bareRepoPath)
+    .catch(() => false);
+  if (topologyCheckPassed === false) {
+    // emitStepFailed is defined further down — push the event directly here
+    // because we haven't entered the step-emission flow yet.
+    const reason = 'TOPOLOGY_NOT_MIGRATED';
+    const message =
+      `Brownfield project ${projectId} has not been converted to bare+worktree topology. ` +
+      `Operator must POST /api/admin/migrate-brownfield/${projectId} first.`;
+    await pushEvent(job.jobId, 'topology-check', '__party__', 'party.bootstrap.step.failed', {
+      projectId,
+      step: 'topology-check',
+      kind: 'brownfield',
+      reason,
+      message,
+      suggestedAction: 'run-admin-migrate',
+      migrateEndpoint: `POST /api/admin/migrate-brownfield/${projectId}`,
+    });
+    await pushEvent(job.jobId, 'topology-check', '__party__', 'party.bootstrap.failed', {
+      projectId,
+      reason,
+      message,
+    });
+    throw new Error(`${reason}: ${message}`);
+  }
+
   // Resolve per-project PAT (or fall back to the legacy shared secret
   // when patSecretName is absent — applicator's case).
   const brownfieldToken = await loadBrownfieldPat(patSecretName);
