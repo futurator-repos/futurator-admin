@@ -17,6 +17,27 @@ Do this before anything else, every time, no exceptions.
 - Always refer to this project as "Futurator-Admin" not "the project"
 - When asked to create a file, confirm the path before writing
 
+## Bash hook security posture (party + free-agent)
+
+Both Bash `PreToolUse` hooks — free-agent path-confinement
+(`daemon/pipelines/lib/free-agent-path-hook.sh`) and party command-confinement
+(`daemon/pipelines/lib/party-tool-hook.sh`) — fall through to **allow** when
+no rule fires. The load-bearing security is:
+
+1. **IAM least-privilege** on the spawned subprocess role (no `iam:*`, no
+   `secretsmanager:*`, no `lambda:UpdateFunctionCode`, scoped knowledge-live
+   S3 prefix, scoped DDB writes).
+2. **Per-hook explicit deny tiers**: path escape for free-agent
+   (`FREE_AGENT_CONFINEMENT_ROOT`); command / gh / system-danger / secret-path
+   for party (canonical deny list at `daemon/lib/git-deny-list.json`).
+
+The hooks are necessary, not sufficient. A subtle but documented trade-off:
+`node script.js` is default-allowed by the party hook, but if `script.js`
+shells out to `git push --force` the hook doesn't see the inner invocation.
+The IAM role's denial of arbitrary AWS access is the second layer; the
+deliberate choice for low maintenance over deny-everything-by-default is
+captured in Free Explorer §13.1 and operator-accepted 2026-05-21.
+
 ## Recent changes
 
 - **2026-05-18 (Migrate module — brownfield self-service):** New

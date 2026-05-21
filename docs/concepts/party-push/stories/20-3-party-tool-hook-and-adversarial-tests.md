@@ -1,6 +1,6 @@
 # Story 20.3: `party-tool-hook.sh` PreToolUse + adversarial test suite
 
-Status: TODO
+Status: DONE (2026-05-21)
 Depends on: 19.1 (`git-deny-list.json` exists)
 
 ## Story

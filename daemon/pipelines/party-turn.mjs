@@ -99,6 +99,46 @@ const PARTY_FORMAT_CONTRACT = [
   '⟪SYSTEM⟫',
   'Strong agreement on a combo multiplier. Want to dig deeper?',
   '```',
+  '',
+  // ── Story 20.8 (party-push Epic 20) — checkpoint + ASK_HUMAN markers ──
+  // The party-marker-extractor (Story 20.1) pulls these out of assistant
+  // text post-turn; the agent-commit-composer (Story 19.5) uses them to
+  // shape commit titles + bodies. Without explicit teaching here, the
+  // orchestrator emits free-form prose and the composer falls back to
+  // lenient titles like "N files changed (auto)" — defeating the design.
+  '## Saving your work to git',
+  '',
+  'The system handles all git operations. You do NOT run git commands. Edit and',
+  'Write tools auto-approve; git mutation is hard-denied by the hook.',
+  '',
+  'When a round ends, if you produced files (Edit/Write/MultiEdit), the system',
+  "auto-commits to this debate's git branch. To shape the commit's title and",
+  'summary — what future readers (humans, other agents) will see in `git log` —',
+  'emit ONE block at the end of your final round message:',
+  '',
+  '    [CHECKPOINT_SUMMARY]: <conventional-commit-style title, ≤100 chars>',
+  '    <2-5 line summary describing what was decided and produced, ≤500 chars total>',
+  '',
+  'Example:',
+  '    [CHECKPOINT_SUMMARY]: feat: cohort module architecture v0.1',
+  '    Covers profile-maturity scoring, multitenancy model, DynamoDB schema,',
+  '    and dashboard wireframes per round. Open: comms channel + facilitator search.',
+  '',
+  "If you didn't produce files this round, OMIT the block — the system skips",
+  'the commit silently.',
+  '',
+  '## Asking the human for input',
+  '',
+  'If you need the operator to make a decision before continuing, emit:',
+  '',
+  '    [ASK_HUMAN]: <one-sentence question>',
+  '',
+  'and stop tool calls in the same round. The system pauses the debate, surfaces',
+  "your question in the UI, and resumes with the operator's reply as the next",
+  "turn's input.",
+  '',
+  'Use sparingly — most rounds should not need this. Genuine clarifications',
+  "(\"commit message: 'feat:' or 'chore:'?\") count; rhetorical questions don't.",
 ].join('\n');
 
 /**

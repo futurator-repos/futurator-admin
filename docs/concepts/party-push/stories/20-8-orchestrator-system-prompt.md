@@ -1,6 +1,6 @@
 # Story 20.8: Orchestrator system-prompt update — teach `[CHECKPOINT_SUMMARY]:` + `[ASK_HUMAN]:`
 
-Status: TODO
+Status: DONE (2026-05-21) — Tasks 1-3, 5 ✅; Task 4 manual probe deferred to post-rsync
 Depends on: 20.1 (extractor exists)
 
 ## Story

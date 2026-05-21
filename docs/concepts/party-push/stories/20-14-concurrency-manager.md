@@ -1,6 +1,6 @@
 # Story 20.14: ConcurrencyManager — unified queue with interactive-first priority
 
-Status: TODO
+Status: PARTIAL (2026-05-21) — Tasks 1, 2, 3, 6, 7, 8 ✅; Tasks 4 + 5 (daemon poll-loop integration + status endpoint) deferred to Story 20.16's integration sweep
 Supersedes: an earlier draft of this story that proposed lane-partitioning (1 interactive + 1 batch slot).
 Operator decision (2026-05-21): build the abstraction NOW, single queue, interactive jobs jump ahead.
 
@@ -58,14 +58,26 @@ The operator explicitly rejected the partition (1 interactive + 1 batch). Reason
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Write `daemon/lib/concurrency-manager.mjs` per AC 1–7 (Tasks 4 wiring is separate)
-- [ ] Task 2: Job classifier in daemon (AC: 2)
-- [ ] Task 3: Manager unit tests (AC: 10)
-- [ ] Task 4: Wire into `agent-daemon.mjs` poll loop (AC: 6, 7) — feature-flagged per AC 9
-- [ ] Task 5: Daemon status endpoint integration (AC: 8)
-- [ ] Task 6: Document the no-starvation-guard tradeoff in JSDoc (AC: 4)
-- [ ] Task 7: Reserve `MAX_CONCURRENT_INTERACTIVE` env var slot in docs (AC: 5)
-- [ ] Task 8: Confirm tests + typecheck (AC: 10, 12)
+- [x] Task 1: Write `daemon/lib/concurrency-manager.mjs` per AC 1–7
+- [x] Task 2: Job classifier in daemon (AC: 2) — exported as `classifyJob(job)` from the same module
+- [x] Task 3: Manager unit tests (AC: 10) — 22 tests covering capacity, priority, never-preempt, snapshot, classifier failsafe, feature flag
+- [ ] Task 4: Wire into `agent-daemon.mjs` poll loop (AC: 6, 7) — **deferred to Story 20.16's integration sweep.** The poll-loop refactor needs to land alongside the live-daemon smoke test (the manager replaces a load-bearing scheduling primitive; landing in isolation without an end-to-end run is risky). Feature flag from AC 9 stays default-enabled so wiring lands "on" once it's in.
+- [ ] Task 5: Daemon status endpoint integration (AC: 8) — deferred to 20.16 alongside Task 4
+- [x] Task 6: Document the no-starvation-guard tradeoff in JSDoc (AC: 4) — both in the module header and in `classifyJob`'s neighbouring JSDoc
+- [x] Task 7: Reserve `MAX_CONCURRENT_INTERACTIVE` env var slot in docs (AC: 5) — documented in the module header's "Future-friendly extension points" section
+- [x] Task 8: Confirm tests + typecheck (AC: 10, 12) — 22/22 pass; typecheck baseline 79 maintained
+
+## Implementation notes (2026-05-21)
+
+- Module at `daemon/lib/concurrency-manager.mjs` (~210 lines, JSDoc-typed).
+- `ConcurrencyManager` is a class because the slot map is mutable state owned by one instance; `selectNext` is pure (no instance mutation) so priority policy is testable in isolation. Splitting `selectNext` from `tryAcquire` keeps the priority rule unit-testable and lets the daemon call them at different points in its poll tick.
+- Operator override 2026-05-21 captured prominently in the module header — anyone diffing this file vs. the original Story 20.14 draft sees immediately why partition was rejected.
+- `isConcurrencyManagerEnabled()`: defaults to TRUE when `PARTY_PUSH_CONCURRENCY_MANAGER` is unset. Operator sets to `'0'` or `'false'` to fall back to the legacy `activeJobs.size` counter (AC 9 safety rollback).
+- 22 tests pass: classifier coverage (4), constructor validation (2), capacity (3), release double-release-warn (1), priority (5: interactive-jumps-batch, FIFO-within-interactive, FIFO-within-batch, empty input, purity), never-preempts (1), snapshot accuracy + copy-safety (2), classifier failsafe (1), feature flag (3).
+- Tasks 4 + 5 (the daemon poll-loop wire-up + status endpoint) need to land alongside Story 20.16's integration sweep so:
+  1. The manager's RUNNING-vs-PENDING semantics can be validated against a real daemon tick (the `selectNext` window-size question — Limit: 20 vs. availableSlots — has subtle interactions with the existing `ScanIndexForward: true` query path).
+  2. The feature flag's flip is one operator action, not two.
+  3. Any regression in scheduling is caught in the same smoke window that catches party-push regressions.
 
 ## Dev Notes
 

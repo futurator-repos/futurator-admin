@@ -239,6 +239,34 @@ describe('runPartyTurn — missing session', () => {
   });
 });
 
+describe('runPartyTurn — Story 20.8 system-prompt marker contract', () => {
+  it('appends the [CHECKPOINT_SUMMARY]: + [ASK_HUMAN]: marker explanation to --append-system-prompt', async () => {
+    const ctx = makeCtx();
+    const child = fakeChild({
+      stdoutLines: [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 'claude-x' }),
+        JSON.stringify({ type: 'result' }),
+      ],
+      exitCode: 0,
+    });
+    ctx.spawn.mockReturnValue(child);
+
+    await runPartyTurn(turnJob('initial'), ctx);
+
+    const [, args] = ctx.spawn.mock.calls[0];
+    const sysIdx = args.indexOf('--append-system-prompt');
+    expect(sysIdx).toBeGreaterThanOrEqual(0);
+    const contractPayload = args[sysIdx + 1];
+    expect(contractPayload).toContain('## Saving your work to git');
+    expect(contractPayload).toContain('[CHECKPOINT_SUMMARY]:');
+    expect(contractPayload).toContain('## Asking the human for input');
+    expect(contractPayload).toContain('[ASK_HUMAN]:');
+    // Keep the existing party-output-format contract intact alongside.
+    expect(contractPayload).toContain('⟪AGENT:Name⟫');
+    expect(contractPayload).toContain('⟪SYSTEM⟫');
+  });
+});
+
 describe('runPartyTurn — payload validation', () => {
   it('throws when sessionId or content is missing', async () => {
     const ctx = makeCtx();

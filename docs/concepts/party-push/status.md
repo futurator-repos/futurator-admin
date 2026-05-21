@@ -49,24 +49,24 @@ Status legend: TODO / IN_PROGRESS / REVIEW / DONE / TODO / RESERVED.
 
 ## Epic 20 stories
 
-| #     | Story                                                           | Status                 | File                                                    |
-| ----- | --------------------------------------------------------------- | ---------------------- | ------------------------------------------------------- |
-| 20.1  | Party marker extractor                                          | **DONE** (2026-05-21)  | `stories/20-1-party-marker-extractor.md`                |
-| 20.2  | `party-checkpoint.sh` (push disabled)                           | TODO                   | `stories/20-2-party-checkpoint-script.md`               |
-| 20.3  | `party-tool-hook.sh` + adversarial tests                        | TODO                   | `stories/20-3-party-tool-hook-and-adversarial-tests.md` |
-| 20.4  | `POST /api/admin/migrate-brownfield/:projectId`                 | TODO                   | `stories/20-4-admin-migrate-brownfield-endpoint.md`     |
-| 20.5  | Bootstrap rejects non-bare topology                             | TODO (depends on 20.4) | `stories/20-5-bootstrap-rejects-non-bare-topology.md`   |
-| 20.6  | Per-session party worktree setup                                | TODO                   | `stories/20-6-setup-party-worktree.md`                  |
-| 20.7  | Party-turn rewiring                                             | TODO                   | `stories/20-7-party-turn-rewiring.md`                   |
-| 20.8  | Orchestrator system-prompt update                               | TODO                   | `stories/20-8-orchestrator-system-prompt.md`            |
-| 20.9  | Plan-folder-service party helpers                               | TODO                   | `stories/20-9-plan-folder-service-party-helpers.md`     |
-| 20.10 | `DELETE /api/party/sessions/:id` cascade                        | TODO                   | `stories/20-10-delete-party-session-route.md`           |
-| 20.11 | App-delete party-cleanup step                                   | TODO                   | `stories/20-11-app-delete-party-cleanup.md`             |
-| 20.12 | Pipeline-launcher `sourceCommitSha`                             | **DONE** (2026-05-21)  | `stories/20-12-pipeline-launcher-source-commit-sha.md`  |
-| 20.13 | `commit-metadata.ts` uses composer                              | **DONE** (2026-05-21)  | `stories/20-13-commit-metadata-uses-composer.md`        |
-| 20.14 | ConcurrencyManager — unified queue + interactive-first priority | TODO                   | `stories/20-14-concurrency-manager.md`                  |
-| 20.15 | Worktree-reaper real classifier                                 | TODO                   | `stories/20-15-worktree-reaper-real-classifier.md`      |
-| 20.16 | Integration test sweep + deploy                                 | TODO                   | `stories/20-16-integration-deploy.md`                   |
+| #     | Story                                                           | Status                                                            | File                                                    |
+| ----- | --------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------- |
+| 20.1  | Party marker extractor                                          | **DONE** (2026-05-21)                                             | `stories/20-1-party-marker-extractor.md`                |
+| 20.2  | `party-checkpoint.sh` (push disabled)                           | TODO                                                              | `stories/20-2-party-checkpoint-script.md`               |
+| 20.3  | `party-tool-hook.sh` + adversarial tests                        | **DONE** (2026-05-21)                                             | `stories/20-3-party-tool-hook-and-adversarial-tests.md` |
+| 20.4  | `POST /api/admin/migrate-brownfield/:projectId`                 | TODO                                                              | `stories/20-4-admin-migrate-brownfield-endpoint.md`     |
+| 20.5  | Bootstrap rejects non-bare topology                             | TODO (depends on 20.4)                                            | `stories/20-5-bootstrap-rejects-non-bare-topology.md`   |
+| 20.6  | Per-session party worktree setup                                | TODO                                                              | `stories/20-6-setup-party-worktree.md`                  |
+| 20.7  | Party-turn rewiring                                             | TODO                                                              | `stories/20-7-party-turn-rewiring.md`                   |
+| 20.8  | Orchestrator system-prompt update                               | **DONE** (2026-05-21)                                             | `stories/20-8-orchestrator-system-prompt.md`            |
+| 20.9  | Plan-folder-service party helpers                               | **DONE** (2026-05-21)                                             | `stories/20-9-plan-folder-service-party-helpers.md`     |
+| 20.10 | `DELETE /api/party/sessions/:id` cascade                        | TODO                                                              | `stories/20-10-delete-party-session-route.md`           |
+| 20.11 | App-delete party-cleanup step                                   | TODO                                                              | `stories/20-11-app-delete-party-cleanup.md`             |
+| 20.12 | Pipeline-launcher `sourceCommitSha`                             | **DONE** (2026-05-21)                                             | `stories/20-12-pipeline-launcher-source-commit-sha.md`  |
+| 20.13 | `commit-metadata.ts` uses composer                              | **DONE** (2026-05-21)                                             | `stories/20-13-commit-metadata-uses-composer.md`        |
+| 20.14 | ConcurrencyManager — unified queue + interactive-first priority | **PARTIAL** (2026-05-21 — module + tests; daemon wiring in 20.16) | `stories/20-14-concurrency-manager.md`                  |
+| 20.15 | Worktree-reaper real classifier                                 | TODO                                                              | `stories/20-15-worktree-reaper-real-classifier.md`      |
+| 20.16 | Integration test sweep + deploy                                 | TODO                                                              | `stories/20-16-integration-deploy.md`                   |
 
 ---
 
