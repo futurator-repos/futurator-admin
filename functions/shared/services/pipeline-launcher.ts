@@ -40,6 +40,17 @@ export interface PipelineLauncherDeps {
       epicId?: string;
       rigor?: PlanRigor;
       hasBrowserTests?: boolean;
+      /**
+       * 2026-05-19 — kebab-case plan slug. When set, the story pipeline's
+       * compile-commit-on-pass step checks out (creating if necessary)
+       * `plan/<slug>` before staging — so daemon commits land on a per-plan
+       * branch instead of the worktree's default (typically `main` for
+       * brownfield clones). Absent → preserves prior behaviour (commits to
+       * whatever branch the worktree is on).
+       */
+      planSlug?: string;
+      /** 2026-05-19 — DDB Plan row id. Stamped into commit trailers. */
+      planId?: string;
     },
   ) => PipelineDefinition;
   /** Agent-jobs repository `createJob` — or any shape-compatible async fn. */
@@ -57,6 +68,35 @@ export interface PlanExecutionOpts {
   rigor?: PlanRigor;
   testModel?: string;
   hasBrowserTests?: boolean;
+  /**
+   * 2026-05-19 — cascades into the story pipeline as the per-plan branch
+   * name (`plan/<slug>`). Set this to the Plan row's `name` field.
+   */
+  planSlug?: string;
+  /**
+   * 2026-05-19 — DDB Plan row id. Stamped into commit-message trailers
+   * (`Plan-Id: <id>`) so delete cascades can grep main for residual
+   * attribution. Set this to the Plan row's `planId` field.
+   */
+  planId?: string;
+  /**
+   * Story 20.12 (party-push Epic 20) — pin the per-story worktree to an
+   * exact commit SHA at job-creation time, instead of the plan branch's
+   * HEAD-at-execution-time. Pre-fix, a party-debate continuing after the
+   * operator clicked "Start story-pipeline from this branch" (Epic 22 UI)
+   * could move the goalposts mid-run — the pipeline would compile against
+   * whatever the party branch's HEAD happened to be when the daemon
+   * picked up the first story.
+   *
+   * When set, the story-pipeline's `compile-commit-on-pass` step does
+   * `git checkout <sha>` before `git checkout -b plan/<slug>` — the plan
+   * branch starts at the pinned SHA, not main's current HEAD. Validated
+   * upstream against `/^[a-f0-9]{40}$/`; the launcher trusts the value.
+   *
+   * Optional: when undefined, current behavior preserved (plan branch
+   * starts at main's HEAD).
+   */
+  sourceCommitSha?: string;
 }
 
 export type PipelineLaunchResult =
@@ -121,6 +161,23 @@ function assertProductionStage(): void {
   }
 }
 
+/**
+ * Story 20.12 — full-SHA validator. Returns true for exactly 40 lowercase
+ * hex chars. Callers (the API route accepting `sourceCommitSha` in the
+ * body) should validate input through this BEFORE handing it to
+ * `launchPipelineWave`, so a bad SHA returns 400 instead of producing a
+ * pipeline whose `git checkout <bad-sha>` will silently fail at runtime.
+ *
+ * Short SHAs (7-12 chars) are intentionally rejected — git accepts them
+ * but we want the baked pipeline's checkout to be unambiguous across
+ * worktree contexts.
+ */
+export const SOURCE_COMMIT_SHA_REGEX = /^[a-f0-9]{40}$/;
+
+export function isValidSourceCommitSha(sha: unknown): sha is string {
+  return typeof sha === 'string' && SOURCE_COMMIT_SHA_REGEX.test(sha);
+}
+
 export async function launchPipelineWave(
   epic: LaunchableEpic,
   waveNumber: number,
@@ -130,6 +187,14 @@ export async function launchPipelineWave(
   planOpts?: PlanExecutionOpts,
 ): Promise<PipelineLaunchResult> {
   assertProductionStage();
+  // Defensive: reject malformed `sourceCommitSha` at the launcher boundary
+  // in case an upstream caller forgot to validate. Throwing here forces a
+  // 500 (rather than silently baking a broken checkout into the job row).
+  if (planOpts?.sourceCommitSha && !SOURCE_COMMIT_SHA_REGEX.test(planOpts.sourceCommitSha)) {
+    throw new Error(
+      `launchPipelineWave: sourceCommitSha must be a 40-char lowercase hex string; received "${planOpts.sourceCommitSha}"`,
+    );
+  }
   if (!epic.stories || epic.stories.length === 0) {
     return {
       ok: false,
@@ -155,21 +220,45 @@ export async function launchPipelineWave(
     epicId: epic.epicId,
     rigor: planOpts?.rigor,
     hasBrowserTests: planOpts?.hasBrowserTests,
+    planSlug: planOpts?.planSlug,
+    planId: planOpts?.planId,
+    sourceCommitSha: planOpts?.sourceCommitSha,
   };
+
+  // 2026-05-19 — Phase 1 worktree rollout. When a planSlug is present the
+  // launcher computes the per-story worktree path
+  // `/home/ubuntu/worktrees/<app>/<plan>/<storyId>/` and bakes it into both
+  // the job row's `workingDir` AND every shell step's `cd ${workingDir}`
+  // (via generatePipeline). The daemon materializes the worktree on first
+  // pickup (git worktree add + node_modules symlink).
+  //
+  // Falls back to `epic.workingDir` (the App's shared worktree) when
+  // planSlug is absent, preserving the legacy single-worktree contract
+  // for plans created before the rollout or any caller that intentionally
+  // wants the old model.
+  const appWorktreeSlug = epic.workingDir.replace(/\/+$/, '').split('/').filter(Boolean).pop();
+  const useStoryWorktree = !!(planOpts?.planSlug && appWorktreeSlug);
+  const storyWorktreeFor = (storyId: string) =>
+    `/home/ubuntu/worktrees/${appWorktreeSlug}/${planOpts!.planSlug}/${storyId}`;
 
   const jobIds: string[] = [];
   const mutable = epic.stories.map((s) => ({ ...s }));
   const byId = new Map(mutable.map((s) => [s.storyId, s] as const));
   for (const story of waveStories) {
     const jobId = deps.uuid();
-    const pipeline = deps.generatePipeline(story, epic.title, epic.workingDir, opts);
+    const perStoryWorkingDir = useStoryWorktree ? storyWorktreeFor(story.storyId) : epic.workingDir;
+    const pipeline = deps.generatePipeline(story, epic.title, perStoryWorkingDir, opts);
     await deps.createJob({
       jobId,
       status: 'PENDING',
       createdAt: now,
       updatedAt: now,
       createdBy: userId,
-      workingDir: epic.workingDir,
+      // workingDir is the EFFECTIVE working dir: per-story worktree when
+      // useStoryWorktree, else the App's shared worktree. The daemon's
+      // job dispatcher checks this path against the worktree-root convention
+      // to decide whether to materialize a worktree before executing.
+      workingDir: perStoryWorkingDir,
       pipeline,
     });
     const updated = byId.get(story.storyId);

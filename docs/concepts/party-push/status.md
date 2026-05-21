@@ -51,7 +51,7 @@ Status legend: TODO / IN_PROGRESS / REVIEW / DONE / TODO / RESERVED.
 
 | #     | Story                                                           | Status                 | File                                                    |
 | ----- | --------------------------------------------------------------- | ---------------------- | ------------------------------------------------------- |
-| 20.1  | Party marker extractor                                          | TODO                   | `stories/20-1-party-marker-extractor.md`                |
+| 20.1  | Party marker extractor                                          | **DONE** (2026-05-21)  | `stories/20-1-party-marker-extractor.md`                |
 | 20.2  | `party-checkpoint.sh` (push disabled)                           | TODO                   | `stories/20-2-party-checkpoint-script.md`               |
 | 20.3  | `party-tool-hook.sh` + adversarial tests                        | TODO                   | `stories/20-3-party-tool-hook-and-adversarial-tests.md` |
 | 20.4  | `POST /api/admin/migrate-brownfield/:projectId`                 | TODO                   | `stories/20-4-admin-migrate-brownfield-endpoint.md`     |
@@ -62,8 +62,8 @@ Status legend: TODO / IN_PROGRESS / REVIEW / DONE / TODO / RESERVED.
 | 20.9  | Plan-folder-service party helpers                               | TODO                   | `stories/20-9-plan-folder-service-party-helpers.md`     |
 | 20.10 | `DELETE /api/party/sessions/:id` cascade                        | TODO                   | `stories/20-10-delete-party-session-route.md`           |
 | 20.11 | App-delete party-cleanup step                                   | TODO                   | `stories/20-11-app-delete-party-cleanup.md`             |
-| 20.12 | Pipeline-launcher `sourceCommitSha`                             | TODO                   | `stories/20-12-pipeline-launcher-source-commit-sha.md`  |
-| 20.13 | `commit-metadata.ts` uses composer                              | TODO                   | `stories/20-13-commit-metadata-uses-composer.md`        |
+| 20.12 | Pipeline-launcher `sourceCommitSha`                             | **DONE** (2026-05-21)  | `stories/20-12-pipeline-launcher-source-commit-sha.md`  |
+| 20.13 | `commit-metadata.ts` uses composer                              | **DONE** (2026-05-21)  | `stories/20-13-commit-metadata-uses-composer.md`        |
 | 20.14 | ConcurrencyManager — unified queue + interactive-first priority | TODO                   | `stories/20-14-concurrency-manager.md`                  |
 | 20.15 | Worktree-reaper real classifier                                 | TODO                   | `stories/20-15-worktree-reaper-real-classifier.md`      |
 | 20.16 | Integration test sweep + deploy                                 | TODO                   | `stories/20-16-integration-deploy.md`                   |

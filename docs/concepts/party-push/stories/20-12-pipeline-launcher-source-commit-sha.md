@@ -1,6 +1,6 @@
 # Story 20.12: Pipeline-launcher accepts `sourceCommitSha` parameter
 
-Status: TODO
+Status: DONE (2026-05-21)
 
 ## Story
 
@@ -25,12 +25,20 @@ so that a debate continuing after pipeline kickoff doesn't move the goalposts mi
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add `sourceCommitSha` to `PlanExecutionOpts` + thread through (AC: 1)
-- [ ] Task 2: Modify `compile-commit-on-pass` shell to pin when set (AC: 2)
-- [ ] Task 3: Validation (AC: 4)
-- [ ] Task 4: Test (AC: 6)
-- [ ] Task 5: Regression (AC: 5)
-- [ ] Task 6: Typecheck (AC: 7)
+- [x] Task 1: Add `sourceCommitSha` to `PlanExecutionOpts` + thread through (AC: 1)
+- [x] Task 2: Modify `compile-commit-on-pass` shell to pin when set (AC: 2)
+- [x] Task 3: Validation (AC: 4) — `SOURCE_COMMIT_SHA_REGEX = /^[a-f0-9]{40}$/` + `isValidSourceCommitSha(x)` helper exported from `pipeline-launcher.ts`; launcher also throws if a malformed SHA reaches it (belt-and-suspenders for upstream caller)
+- [x] Task 4: Test (AC: 6) — 5 new tests in `story-pipeline-source-pin.test.ts`
+- [x] Task 5: Regression (AC: 5) — 54 existing baseline tests stay green
+- [x] Task 6: Typecheck (AC: 7) — baseline 79 maintained
+
+## Implementation notes (2026-05-21)
+
+- `PlanExecutionOpts.sourceCommitSha?: string` threads through `launchPipelineWave` → `opts.sourceCommitSha` on the per-story pipeline → `generateStoryPipeline`'s `compile-commit-on-pass` step.
+- Shell injection point: `git checkout <sha> && ` lands BEFORE the existing plan-branch checkout block, so the subsequent `git checkout -b plan/<slug>` creates the branch starting at the pinned SHA. Verified by an indexOf-ordering test.
+- Validation: API routes that accept `sourceCommitSha` in their body (Epic 22's "Start story-pipeline from this branch" route) should call `isValidSourceCommitSha(sha)` first and 400 on false. The launcher itself throws if a malformed SHA reaches it — defense-in-depth against an upstream caller forgetting to validate.
+- Short SHAs (7-12 chars) intentionally rejected. Git would accept them but the baked pipeline's checkout must be unambiguous across worktree contexts (e.g., if the bare repo gets garbage-collected between bake-time and run-time, a 7-char ambiguous prefix could resolve to a different commit).
+- 5 tests added; 54 existing baseline tests stay green; `bash -n` syntax check passes for both pin and no-pin variants.
 
 ## Dev Notes
 

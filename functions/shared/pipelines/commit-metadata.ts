@@ -39,6 +39,7 @@
  */
 
 import type { PlanRigor } from '../types/plan';
+import { buildPipelineStructuredTrailers } from '../lib/agent-commit-composer';
 
 /**
  * Build the bash snippet that produces the per-story git commit message
@@ -47,6 +48,13 @@ import type { PlanRigor } from '../types/plan';
  * The returned snippet expects to be concatenated INSIDE an existing
  * `cd <workingDir> && ...` chain — it does not change directories.
  *
+ * 2026-05-19 — extended with the v2.5 §23 structured trailers (Plan-Id,
+ * Plan, Agent, Story, Wave, Epic-Id). Pre-fix the Lambda-built shell only
+ * emitted Skills-* lines, so the snake-4 forensic showed no Plan-Id on
+ * any commit and the gitgraph couldn't tell which plan made what. With
+ * trailers in place, future plan-delete cascades can grep main for
+ * `Plan-Id: <deleted>` and report residual commits to the operator.
+ *
  * @returns a single-line bash snippet (no leading/trailing whitespace,
  *          no `&&` prefix/suffix — caller decides chaining)
  */
@@ -54,17 +62,41 @@ export function buildCommitShellSnippet(args: {
   storyId: string;
   storyTitle: string;
   rigor: PlanRigor;
+  /** Stable DDB-row identifier for the Plan. Used for forensic queries. */
+  planId?: string;
+  /** Kebab-case Plan slug (also the per-plan branch name). */
+  planSlug?: string;
+  epicId?: string;
+  /** Story-wave index within the epic. */
+  wave?: number;
 }): string {
   const escapedTitle = args.storyTitle.replace(/'/g, "'\\''");
   const subject = `story: ${args.storyId} — ${escapedTitle}`;
 
   const GIT_PREFIX = `git -c user.email=daemon@futurator.local -c user.name='Daemon'`;
 
+  // Story 20.13 — v2.5 §23 structured trailers are now sourced from the
+  // shared `agent-commit-composer`. Same trailer ORDER (Agent, Plan-Id,
+  // Plan, Epic-Id, Wave, Story) the composer's `kind: 'pipeline'` branch
+  // produces, so pipeline-v2 commits stay byte-identical with party-push
+  // commits when grepped by v2.5 §23 keys. Skills-Used + Skills-Manifest-Sha
+  // remain shell-time computations (see below) — they can't be known at
+  // Lambda-snippet-build time.
+  const structuredBlock = buildPipelineStructuredTrailers({
+    storyId: args.storyId,
+    agent: 'DEV',
+    planId: args.planId,
+    plan: args.planSlug,
+    epicId: args.epicId,
+    wave: typeof args.wave === 'number' ? args.wave : undefined,
+  });
+
   if (args.rigor === 'prototype') {
-    return `${GIT_PREFIX} commit -m 'subject_placeholder'`.replace(
-      "'subject_placeholder'",
-      `'${subject}'`,
-    );
+    // Single-line subject + structured trailers via one -m. Each trailer
+    // on its own line (separated by blank line from subject per v2.5 §23).
+    const body = [subject, '', structuredBlock].join('\n');
+    const escaped = body.replace(/'/g, "'\\''");
+    return `${GIT_PREFIX} commit -m '${escaped}'`;
   }
 
   // mvp+: compute trailers in shell and concatenate into a single -m
@@ -89,12 +121,18 @@ export function buildCommitShellSnippet(args: {
     `console.log([...set].sort((x,y) => x.localeCompare(y)).join(', ')); ` +
     `} catch (e) { process.exit(0); }" 2>/dev/null || true`;
 
+  // Structured trailers block (v2.5 §23) — sourced from
+  // `buildPipelineStructuredTrailers` above (Story 20.13 delegates trailer
+  // assembly to the shared composer). Always present under mvp+.
   const statements = [
     `SKILLS_CSV=""`,
     `if [ -f .context/loaded-skills.json ] && [ -s .context/loaded-skills.json ]; then SKILLS_CSV=$(${nodeReader}); fi`,
     `MANIFEST_SHA=""`,
     `if [ -f .claude/skills.manifest.yaml ]; then MANIFEST_SHA=$(sha256sum .claude/skills.manifest.yaml 2>/dev/null | awk '{print $1}'); fi`,
     `COMMIT_MSG='${subject}'`,
+    // v2.5 §23 trailers come BEFORE Skills lines so a `git log --grep`
+    // for Plan-Id / Story / Wave is cheaper than a full message scan.
+    `COMMIT_MSG=$(printf '%s\\n\\n%s' "$COMMIT_MSG" '${structuredBlock.replace(/'/g, "'\\''")}')`,
     `if [ -n "$SKILLS_CSV" ]; then COMMIT_MSG=$(printf '%s\\n\\nSkills-Used: %s' "$COMMIT_MSG" "$SKILLS_CSV"); else COMMIT_MSG=$(printf '%s\\n\\nSkills-Used:' "$COMMIT_MSG"); fi`,
     `if [ -n "$MANIFEST_SHA" ]; then COMMIT_MSG=$(printf '%s\\n\\nSkills-Manifest-Sha: %s' "$COMMIT_MSG" "$MANIFEST_SHA"); fi`,
     `${GIT_PREFIX} commit -m "$COMMIT_MSG"`,

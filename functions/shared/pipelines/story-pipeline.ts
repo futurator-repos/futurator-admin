@@ -94,6 +94,33 @@ export function generateStoryPipeline(
      * disables Signal 1 (commits) and the gate falls through to spawn DEV.
      */
     planStartTime?: string;
+    /**
+     * 2026-05-19 — kebab-case plan slug. When set, compile-commit-on-pass
+     * switches the worktree to `plan/<slug>` before staging — so daemon
+     * commits land on a per-plan branch instead of the worktree's default
+     * branch (typically `main` for brownfield). Idempotent for parallel
+     * stories; absent → commits to current branch (legacy).
+     *
+     * Also stamped into commit-message trailer (`Plan: <slug>`).
+     */
+    planSlug?: string;
+    /**
+     * 2026-05-19 — DDB Plan row id. Stamped into commit-message trailer
+     * (`Plan-Id: <id>`). The plan-delete cascade greps `main` for residual
+     * commits with this id and reports the count to the operator.
+     */
+    planId?: string;
+    /**
+     * Story 20.12 (party-push Epic 20) — pin the per-story worktree to an
+     * exact commit SHA at pipeline-baking time. When set,
+     * `compile-commit-on-pass` runs `git checkout <sha>` BEFORE creating
+     * the plan branch — so the plan branch starts at the pinned SHA, not
+     * main's current HEAD. Caller (the launcher / API route) is
+     * responsible for validating `/^[a-f0-9]{40}$/`. Optional: when
+     * absent, the plan branch starts at the worktree's current HEAD
+     * (current behavior).
+     */
+    sourceCommitSha?: string;
   },
 ): PipelineDefinition {
   // Derive projectId from workingDir: /home/ubuntu/projects/{name}/
@@ -359,6 +386,47 @@ e2e/home.spec.ts
           ] as PipelineStep[])
         : []),
 
+      // 2026-05-19 — stage-test-files. Runs immediately after test-author so
+      // tamper-check's baseline is "what test files looked like when TEST
+      // finished", not "what they looked like at HEAD". Without this step the
+      // snake-4 Wave-0 failure pattern fires — test-author legitimately
+      // `Edit`s an existing tracked test file, the diff vs HEAD shows the
+      // change, tamper-check misattributes it to DEV.
+      //
+      // `git add -f` because a test path could be gitignored (e.g. e2e/).
+      // Best-effort: missing files are skipped silently. EARLY-EXIT from
+      // test-author (no new tests authored) drops through with no work.
+      ...(testsOn
+        ? ([
+            {
+              id: 'stage-test-files',
+              stepType: 'shell' as const,
+              command:
+                `cd ${workingDir} && ` +
+                `mkdir -p .pipeline && ` +
+                `cat > .pipeline/tamper-input.txt << 'EOF_TAMPER'\n` +
+                `{{TEST_FILES}}\n` +
+                `EOF_TAMPER\n` +
+                `grep -E '\\.(test|spec)\\.[jt]sx?$|^e2e/|^tests/' .pipeline/tamper-input.txt > /tmp/tamper-expected.txt 2>/dev/null || true; ` +
+                `if [ ! -s /tmp/tamper-expected.txt ]; then ` +
+                `  echo 'STAGE_TEST_FILES_SKIPPED: no test files extracted (test-author EARLY-EXIT or empty TEST_FILES)'; ` +
+                `  exit 0; ` +
+                `fi; ` +
+                `STAGED=0; SKIPPED=0; ` +
+                `while IFS= read -r f; do ` +
+                `  if [ -n "$f" ] && [ -f "$f" ]; then ` +
+                `    git add -f -- "$f" 2>/dev/null && STAGED=$((STAGED+1)) || SKIPPED=$((SKIPPED+1)); ` +
+                `  else SKIPPED=$((SKIPPED+1)); ` +
+                `  fi; ` +
+                `done < /tmp/tamper-expected.txt; ` +
+                `echo "STAGE_TEST_FILES_OK staged=$STAGED skipped=$SKIPPED"`,
+              timeout: 15000,
+              captureAs: 'STAGE_TEST_FILES_OUTPUT',
+              onFail: { action: 'continue' as const },
+            },
+          ] as unknown as PipelineStep[])
+        : ([] as PipelineStep[])),
+
       // Phase C.3: red-gate (production only). Runs tests and asserts they
       // FAIL — i.e. test-author wrote real tests, not tautologies that pass
       // without the feature code.
@@ -378,6 +446,33 @@ e2e/home.spec.ts
             },
           ] as PipelineStep[])
         : []),
+
+      // 2026-05-19 — Phase 0.2a: capture working-tree state right before
+      // DEV runs so compile-commit-on-pass can compute a per-story delta
+      // and stage only files DEV actually touched. Closes the snake-4
+      // subsumption race where Story B's `git add -A` swept Story A's
+      // just-written audio.ts. Best-effort; onFail: continue (commit-step
+      // falls back to legacy `git add -A` if baseline files are missing).
+      {
+        id: 'capture-dev-baseline',
+        stepType: 'shell' as const,
+        command:
+          `cd ${workingDir} && ` +
+          `mkdir -p .pipeline && ` +
+          `if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then ` +
+          `  git diff --name-only > .pipeline/${story.storyId}-baseline-dirty.txt 2>/dev/null || true; ` +
+          `  git ls-files --others --exclude-standard > .pipeline/${story.storyId}-baseline-untracked.txt 2>/dev/null || true; ` +
+          `  DIRTY_COUNT=$(wc -l < .pipeline/${story.storyId}-baseline-dirty.txt); ` +
+          `  UNTRACKED_COUNT=$(wc -l < .pipeline/${story.storyId}-baseline-untracked.txt); ` +
+          `  echo "BASELINE_CAPTURED story=${story.storyId} baseline_dirty=$DIRTY_COUNT baseline_untracked=$UNTRACKED_COUNT"; ` +
+          `else ` +
+          `  echo "BASELINE_SKIPPED_NOT_A_REPO story=${story.storyId}"; ` +
+          `fi`,
+        timeout: 10000,
+        captureAs: 'CAPTURE_DEV_BASELINE_OUTPUT',
+        onFail: { action: 'continue' as const },
+      } as unknown as PipelineStep,
+
       // 1. Dev implements story
       {
         id: 'dev',
@@ -611,23 +706,26 @@ Write ONE visual test per needs_browser=true criterion. The text in
                 `  echo __TAMPER_CLEAN__ '(no test files extracted)'; ` +
                 `  exit 0; ` +
                 `fi; ` +
-                // Check for unstaged or staged edits to those files since
-                // TEST committed them. `diff --name-only HEAD` covers both.
+                // 2026-05-19 — baseline fix. Pre-fix this was
+                //   `git diff --name-only HEAD -- $(cat ...)`
+                // i.e. diff working tree against the PRIOR STORY's commit,
+                // which falsely flags test-author's own edits as "DEV
+                // tampered". snake-4 Wave-0 forensic confirmed all three
+                // failures were test-author Edits, not DEV writes.
                 //
-                // PR-47 (2026-05-07) — removed the `\\$` escape on the
-                // command substitutions. The original `\\$(cat ...)` was a
-                // misguided attempt to escape the dollar sign at the
-                // template-literal layer, but it produces `\$(...)` in
-                // bash, which is parsed as `\` (escape) + `$(...)`
-                // (subshell). After a heredoc closes, bash treats the
-                // following `(` as an unexpected token. This was a
-                // dormant bug since C.4 — the step was production-only
-                // until PR-41 promoted it to mvp+, and no production
-                // plan had ever exercised it.
-                `git --no-pager diff --name-only HEAD -- $(cat /tmp/tamper-expected.txt) 2>/dev/null > /tmp/tamper-dirty.txt || true; ` +
+                // New baseline: stage-test-files (runs after test-author)
+                // stages every authored path. We now diff working tree
+                // against the INDEX (no ref arg) — anything in the diff
+                // is necessarily a post-stage modification, which is the
+                // exact DEV-tampering signal the gate is meant to catch.
+                `git --no-pager diff --name-only -- $(cat /tmp/tamper-expected.txt) 2>/dev/null > /tmp/tamper-dirty.txt || true; ` +
                 `if [ -s /tmp/tamper-dirty.txt ]; then ` +
                 `  echo __TAMPER_DETECTED__; cat /tmp/tamper-dirty.txt; ` +
-                `  git checkout -- $(cat /tmp/tamper-dirty.txt) || true; ` +
+                // Restore from index (stage-test-files baseline), NOT HEAD.
+                // `checkout-index -f --` overwrites the working tree with
+                // the staged blob — undoing DEV's edit while preserving
+                // test-author's legitimate authorship.
+                `  while IFS= read -r f; do [ -n "$f" ] && git checkout-index -f -- "$f" 2>/dev/null || true; done < /tmp/tamper-dirty.txt; ` +
                 `  exit 1; ` +
                 `else ` +
                 `  echo __TAMPER_CLEAN__; ` +
@@ -1025,36 +1123,77 @@ Fix the issues mentioned. Output only what you changed, then:
           `  git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
           `    commit --allow-empty -q -m 'baseline (auto-bootstrap by daemon)'; ` +
           `fi && ` +
-          // Story commit. PR-67 (2026-05-15) — non-empty diff guard. Removes
-          // --allow-empty for the story commit (baseline keeps it). The
-          // spyhunter-1 forensic showed a commit titled "Wire boss spawn,
-          // combat, and win/lose conditions" containing only metadata files
-          // (.pipeline, node_modules/.vite, visual-tests.md) while the
-          // entire src/app/ src/components/GameScene.ts src/hooks/useGameLoop.ts
-          // sat untracked in the working tree. The story was marked done
-          // because tests passed and the commit ran. This guard forces
-          // step failure when nothing source-y was staged, so the
-          // upstream orchestrator can't silently mark such a story done.
-          `git add -A && ` +
+          // Story 20.12 — source-commit pin (party-push Epic 20). When the
+          // launcher passed `sourceCommitSha`, check out that exact SHA in
+          // detached-HEAD mode FIRST, so the subsequent plan-branch checkout
+          // creates `plan/<slug>` starting from the pinned SHA instead of
+          // main's current HEAD. Idempotent: a second story in the same
+          // wave finds the branch already at the pinned SHA's history and
+          // the checkout is a no-op fast-forward.
+          (opts.sourceCommitSha ? `git checkout ${opts.sourceCommitSha} 2>/dev/null && ` : '') +
+          // 2026-05-19 — per-plan branch. When the launcher passed planSlug,
+          // commits land on `plan/<slug>` instead of the worktree's default
+          // (typically `main` for brownfield). Idempotent across parallel
+          // stories: first story creates with `-b`, rest fall through to
+          // plain checkout. No-op when planSlug is absent.
+          (opts.planSlug
+            ? `PLAN_BRANCH='plan/${opts.planSlug}' && ` +
+              `if [ "$(git symbolic-ref --short HEAD 2>/dev/null)" != "$PLAN_BRANCH" ]; then ` +
+              `  git checkout "$PLAN_BRANCH" 2>/dev/null || git checkout -b "$PLAN_BRANCH" 2>/dev/null || git checkout "$PLAN_BRANCH"; ` +
+              `fi && `
+            : '') +
+          // PR-67 + snake-4 2026-05-19 fix: snapshot-diff staging.
+          // capture-dev-baseline (step inserted before `dev`) wrote two
+          // baseline files. Compute the post-DEV delta and stage ONLY
+          // files this story's DEV touched. Falls back to `git add -A` if
+          // the baseline files are missing (bootstrap path).
+          `BASELINE_DIRTY=".pipeline/${story.storyId}-baseline-dirty.txt" && ` +
+          `BASELINE_UNTRACKED=".pipeline/${story.storyId}-baseline-untracked.txt" && ` +
+          `if [ -f "$BASELINE_DIRTY" ] && [ -f "$BASELINE_UNTRACKED" ]; then ` +
+          `  POST_DIRTY=$(mktemp) && POST_UNTRACKED=$(mktemp) && DELTA=$(mktemp) && ` +
+          `  git diff --name-only > "$POST_DIRTY" 2>/dev/null || true; ` +
+          `  git ls-files --others --exclude-standard > "$POST_UNTRACKED" 2>/dev/null || true; ` +
+          `  sort -o "$BASELINE_DIRTY" "$BASELINE_DIRTY" 2>/dev/null || true; ` +
+          `  sort -o "$BASELINE_UNTRACKED" "$BASELINE_UNTRACKED" 2>/dev/null || true; ` +
+          `  sort -o "$POST_DIRTY" "$POST_DIRTY" 2>/dev/null || true; ` +
+          `  sort -o "$POST_UNTRACKED" "$POST_UNTRACKED" 2>/dev/null || true; ` +
+          `  comm -23 "$POST_DIRTY" "$BASELINE_DIRTY" > "$DELTA" 2>/dev/null || true; ` +
+          `  comm -23 "$POST_UNTRACKED" "$BASELINE_UNTRACKED" >> "$DELTA" 2>/dev/null || true; ` +
+          `  SOURCE_DELTA=$(mktemp) && ` +
+          `  grep -vE '^(node_modules/|\\.pipeline/|\\.mycelium/|knowledge/|visual-tests(-draft)?\\.md$|\\.context/)' "$DELTA" > "$SOURCE_DELTA" 2>/dev/null || true; ` +
+          `  if [ -s "$SOURCE_DELTA" ]; then ` +
+          `    xargs -a "$SOURCE_DELTA" -d '\\n' -r git add -- 2>/dev/null || true; ` +
+          `  fi; ` +
+          `  git add -- .mycelium 2>/dev/null || true; ` +
+          `  git add -- knowledge 2>/dev/null || true; ` +
+          `  git add -- .context 2>/dev/null || true; ` +
+          `  git add -- .pipeline 2>/dev/null || true; ` +
+          `  DELTA_COUNT=$(wc -l < "$SOURCE_DELTA"); ` +
+          `  echo "SNAPSHOT_DIFF_STAGED story=${story.storyId} source_delta=$DELTA_COUNT"; ` +
+          `else ` +
+          `  echo "SNAPSHOT_DIFF_FALLBACK story=${story.storyId} reason=baseline_missing"; ` +
+          `  git add -A; ` +
+          `fi && ` +
+          // PR-67 guard preserved.
           `SOURCE_CHANGES=$(git diff --cached --name-only | grep -vE '^(node_modules/|\\.pipeline/|\\.mycelium/|knowledge/|visual-tests(-draft)?\\.md$|\\.context/)' | wc -l) && ` +
           `if [ "$SOURCE_CHANGES" -eq 0 ]; then ` +
           `  echo "STORY_COMMIT_EMPTY: no source-code changes staged for story ${story.storyId}." >&2; ` +
           `  echo "Working tree status:" >&2; git status --short >&2; ` +
           `  echo "Staged for commit:" >&2; git diff --cached --name-only >&2; ` +
-          `  echo "Likely cause: the dev agent's writes weren't tracked by git (new top-level dir not staged, or wrote to a different cwd). Investigate before marking the story done." >&2; ` +
+          `  echo "Likely cause: snapshot-diff filtered out DEV's writes (sibling story took them), or DEV produced no source changes." >&2; ` +
           `  exit 1; ` +
           `fi && ` +
-          // PR-73 + PR-85 (Story 3-C-4-1 + Story 2-B-1-1) — commit-message
-          // trailers: `Skills-Used:` and `Skills-Manifest-Sha:` so future
-          // analytics can do `git log --grep="Skills-Used:.*music-theory-engine"`
-          // and forensic reconstruction can pin a manifest SHA. The Lambda
-          // can't read EC2's `.claude/skills.manifest.yaml`, so the trailer
-          // values are computed in shell at exec time. Omitted under
-          // prototype rigor (v2.5 §42).
+          // PR-73 + PR-85 + 2026-05-19 — commit-message trailers including
+          // Plan-Id/Plan/Epic-Id/Wave (v2.5 §23). The buildCommitShellSnippet
+          // helper consumes opts.planId/planSlug for the structured block.
           buildCommitShellSnippet({
             storyId: story.storyId,
             storyTitle: story.title,
             rigor,
+            planId: opts.planId,
+            planSlug: opts.planSlug,
+            epicId: opts.epicId,
+            wave: typeof story.wave === 'number' ? story.wave : undefined,
           }),
         timeout: 30000,
         captureAs: 'STORY_COMMIT_OUTPUT',

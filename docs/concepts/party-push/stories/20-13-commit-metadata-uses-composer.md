@@ -1,6 +1,6 @@
 # Story 20.13: Pipeline-v2 `commit-metadata.ts` calls `composeAgentCommit`
 
-Status: TODO
+Status: DONE (2026-05-21)
 Depends on: 19.5 (composer exists + tested)
 
 ## Story
@@ -21,10 +21,18 @@ so that pipeline-v2 and party-push compose commits through one code path and `gi
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Refactor `buildCommitShellSnippet` to delegate (AC: 1, 2)
-- [ ] Task 2: Snapshot test (AC: 3)
-- [ ] Task 3: Existing tests stay green (AC: 3)
-- [ ] Task 4: Typecheck (AC: 5)
+- [x] Task 1: Refactor `buildCommitShellSnippet` to delegate (AC: 1, 2)
+- [x] Task 2: Snapshot test (AC: 3) — inline snapshot in `agent-commit-composer.test.ts`
+- [x] Task 3: Existing tests stay green (AC: 3) — 16/16 commit-metadata tests pass
+- [x] Task 4: Typecheck (AC: 5) — baseline 79 maintained
+
+## Implementation notes (2026-05-21)
+
+- Created TypeScript port at `functions/shared/lib/agent-commit-composer.ts`. Lambda + Daemon are separate packages (Lambda bundles via SST esbuild; Daemon rsyncs raw .mjs), so the composer ships in both languages. The two files emit byte-identical output for the same input (verified by parallel test suites).
+- Added `buildPipelineStructuredTrailers(args)` helper that emits ONLY the v2.5 §23 structured trailer lines (Agent, Plan-Id, Plan, Epic-Id, Wave, Story) — exclude Skills-Used + Skills-Manifest-Sha because those are computed at shell-exec time on EC2 (the Lambda can't know the worktree's `.context/loaded-skills.json` or manifest SHA).
+- Refactored `commit-metadata.ts::buildCommitShellSnippet` to call `buildPipelineStructuredTrailers` instead of inlining the trailer array. Removed the orphan `sanitizeTrailerValue` helper (its newline-collapse behavior moved into the composer's `trailerValue` helper).
+- Newline-in-trailer test (`Plan: bad\nslug` → `Plan: bad slug`) passes: trailer values are SINGLE-LINE by v2.5 §23 spec, the composer's `trailerValue` collapses `\r\n` to space before emitting.
+- 26 tests total: 16 existing commit-metadata tests stay green + 10 new TS composer tests (including the inline snapshot of a known canonical pipeline message).
 
 ## Dev Notes
 

@@ -1,6 +1,6 @@
 # Story 20.1: Party marker extractor (`[CHECKPOINT_SUMMARY]:` + `[ASK_HUMAN]:`)
 
-Status: TODO
+Status: DONE (2026-05-21)
 
 ## Story
 
@@ -34,9 +34,19 @@ so that the checkpoint composer + ASK_HUMAN event emitter have a single, determi
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Write the extractor per the adversarial spec (AC: 1–6)
-- [ ] Task 2: Write the test suite (AC: 7)
-- [ ] Task 3: Confirm tests + typecheck pass (AC: 8)
+- [x] Task 1: Write the extractor per the adversarial spec (AC: 1–6)
+- [x] Task 2: Write the test suite (AC: 7) — 19 tests
+- [x] Task 3: Confirm tests + typecheck pass (AC: 8) — 19/19 pass; typecheck baseline 79 maintained
+
+## Implementation notes (2026-05-21)
+
+- Module at `daemon/pipelines/lib/party-marker-extractor.mjs`, ~125 lines.
+- Implementation walks line-by-line with an `insideFence` flag (per dev-note advice — adversarial-safer than one big regex). Fence regex matches both ` ``` ` and `~~~`.
+- Marker regex `/^\[(CHECKPOINT_SUMMARY|ASK_HUMAN)\]:(.*)$/` enforces column-0 AND the trailing colon. Titles are post-colon text run through Story 19.5's `sanitize` (strips control + zero-width chars).
+- CHECKPOINT_SUMMARY body collection: scan forward until blank line OR another marker OR fence opener OR EOF. Body lines are joined with `\n`; if empty, body is `undefined` (not empty string — distinguishes "no body provided" from "empty body").
+- Last-wins dedup: walk markers backwards, keep first occurrence per kind (= LAST in source), then reverse + sort by canonical kind order (CHECKPOINT_SUMMARY before ASK_HUMAN).
+- `displayText` post-processing: collapse 3+ blank lines to 2, then trim leading/trailing blank lines (so gaps between stripped markers don't leave dangling whitespace).
+- 19 tests cover: happy path, empty input, no-markers input, ASK_HUMAN single-line, mixed markers, all 5 adversarial cases (fence, indent, missing-colon, last-wins, sanitize), body-terminator variants (blank/marker/fence/EOF), ASK_HUMAN with empty question, CHECKPOINT_SUMMARY with no body, non-string input rejection, displayText whitespace sanity.
 
 ## Dev Notes
 
