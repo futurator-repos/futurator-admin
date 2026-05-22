@@ -101,6 +101,15 @@ import { startReaperTicker } from './lib/worktree-reaper.mjs';
 // 2026-05-21 — auth-probe classifier (extracted so the false-FAIL fix
 // is unit-testable without bringing the daemon entry into the test).
 import { classifyAuthProbeResult } from './lib/auth-probe-classifier.mjs';
+// Story 20.14 (party-push Epic 20) — unified-queue ConcurrencyManager with
+// interactive-first priority. Wired in Story 20.16 (this file). Defaults
+// to enabled; operator can opt out with PARTY_PUSH_CONCURRENCY_MANAGER='0'
+// to fall back to the legacy `activeJobs.size`-gated path.
+import {
+  ConcurrencyManager,
+  classifyJob,
+  isConcurrencyManagerEnabled,
+} from './lib/concurrency-manager.mjs';
 import {
   findStaleJobs,
   buildResumeJob,
@@ -436,6 +445,30 @@ if (_isSmallHost && _envConcurrent > SMALL_HOST_MAX_CONCURRENT) {
     `[daemon] MAX_CONCURRENT=${_envConcurrent} ignored — host has <3GB RAM, capping at ${SMALL_HOST_MAX_CONCURRENT} (PR-29 OOM protection)`,
   );
 }
+
+// Story 20.16 — ConcurrencyManager instance. Lives alongside `activeJobs`:
+// the manager owns "is there capacity to dispatch?" + classifies + chooses
+// which PENDING to dispatch; `activeJobs` keeps the rich per-job metadata
+// the heartbeat reports (pid, model, agentId, …). Both updated in
+// runJobAsync's set/delete hooks so they never drift.
+//
+// When PARTY_PUSH_CONCURRENCY_MANAGER='0', the manager is still
+// instantiated (its snapshot stays useful in heartbeats) but the poll
+// loop falls back to the legacy `activeJobs.size`-vs-MAX_CONCURRENT gate.
+const CONCURRENCY_MANAGER_ENABLED = isConcurrencyManagerEnabled();
+const concurrencyManager = new ConcurrencyManager({
+  maxConcurrent: MAX_CONCURRENT,
+  classifier: classifyJob,
+  logger: {
+    info: (m) => log('info', m),
+    warn: (m) => log('warn', m),
+  },
+});
+// Story 20.14 AC 10 — DDB candidate window size when the manager is on.
+// We fetch up to 20 PENDING jobs instead of `MAX_CONCURRENT` so
+// `selectNext` can apply interactive-first priority across the queue —
+// not just the next free-slot count.
+const CM_CANDIDATE_LIMIT = 20;
 let shuttingDown = false;
 let ndjsonForwarder = null;
 let daemonReceiver = null;
@@ -1285,6 +1318,14 @@ async function writeHeartbeat() {
           createdAt: new Date().toISOString(),
           activeCount: activeJobs.size,
           maxConcurrent: MAX_CONCURRENT,
+          // Story 20.16 — ConcurrencyManager snapshot. Lives alongside
+          // the legacy `processes` array; UI diagnostics can use either.
+          // The snapshot is cheap to compute (in-memory map walk) so we
+          // emit it every heartbeat (~10s).
+          concurrency: {
+            enabled: CONCURRENCY_MANAGER_ENABLED,
+            ...concurrencyManager.getSnapshot(),
+          },
           processes,
           system: {
             totalMem: Math.round(mem.totalMem / 1024 / 1024),
@@ -4054,6 +4095,11 @@ async function executeWaveMergeJob(job) {
 // ── Poll loop ──
 
 async function runJobAsync(job) {
+  // Story 20.16 — acquire the manager slot up-front. Idempotent (selectNext
+  // path already pre-checked canAcquire) so this is effectively bookkeeping.
+  // When CM_DISABLED the call still runs but the legacy poll-loop gate is
+  // the load-bearing capacity check.
+  concurrencyManager.tryAcquire(job);
   activeJobs.set(job.jobId, {
     startedAt: new Date().toISOString(),
     workingDir: job.workingDir || '',
@@ -4117,6 +4163,9 @@ async function runJobAsync(job) {
   } finally {
     activeJobs.delete(job.jobId);
     jobEventSeqs.delete(job.jobId);
+    // Story 20.16 — release the manager slot. Idempotent; double-release
+    // is logged as a warn (helps catch lifecycle bugs without crashing).
+    concurrencyManager.release(job.jobId);
   }
 }
 
@@ -4572,7 +4621,10 @@ async function poll() {
   log('info', `  Jobs table: ${JOBS_TABLE}`);
   log('info', `  Events:     ${EVENTS_TABLE}`);
   log('info', `  Interval:   ${POLL_INTERVAL}ms`);
-  log('info', `  Concurrency: ${MAX_CONCURRENT} jobs`);
+  log(
+    'info',
+    `  Concurrency: ${MAX_CONCURRENT} jobs (ConcurrencyManager ${CONCURRENCY_MANAGER_ENABLED ? 'enabled — interactive-first' : 'disabled — legacy FIFO'})`,
+  );
   log('info', `  Claude:     ${CLAUDE_BIN}`);
   log('info', `  OAuth file: ${OAUTH_CREDS_PATH}`);
 
@@ -4718,10 +4770,19 @@ async function poll() {
         }).catch((e) => log('error', `free-agent-gc uncaught: ${e.message}`));
       }
 
-      // Only query if we have available slots
-      const availableSlots = MAX_CONCURRENT - activeJobs.size;
-      if (availableSlots > 0) {
+      // Story 20.16 — gate the DDB query on capacity. When the
+      // ConcurrencyManager is enabled, fetch a window (CM_CANDIDATE_LIMIT)
+      // so selectNext can apply interactive-first priority across the
+      // queue, then dispatch up to the free-slot count from that window.
+      // When disabled, fall back to the legacy MAX_CONCURRENT - size gate.
+      const hasCapacity = CONCURRENCY_MANAGER_ENABLED
+        ? concurrencyManager.canAcquire()
+        : activeJobs.size < MAX_CONCURRENT;
+      if (hasCapacity) {
         const nowIso = new Date().toISOString();
+        const queryLimit = CONCURRENCY_MANAGER_ENABLED
+          ? CM_CANDIDATE_LIMIT
+          : MAX_CONCURRENT - activeJobs.size;
         const { Items } = await ddb.send(
           new QueryCommand({
             TableName: JOBS_TABLE,
@@ -4732,16 +4793,35 @@ async function poll() {
             FilterExpression: 'attribute_not_exists(retryAfter) OR retryAfter <= :now',
             ExpressionAttributeNames: { '#s': 'status' },
             ExpressionAttributeValues: { ':pending': 'PENDING', ':now': nowIso },
-            Limit: availableSlots,
+            Limit: queryLimit,
             ScanIndexForward: true,
           }),
         );
 
         if (Items?.length > 0) {
-          for (const job of Items) {
-            if (activeJobs.has(job.jobId)) continue; // already in flight
-            // Fire-and-forget — job runs concurrently
-            runJobAsync(job).catch((e) => log('error', `runJobAsync uncaught: ${e.message}`));
+          if (CONCURRENCY_MANAGER_ENABLED) {
+            // Story 20.16 — priority-respecting dispatch loop. Iteratively
+            // pick the highest-priority candidate not already in flight and
+            // not the same row a prior iteration dispatched. Stops when
+            // either the window is exhausted or capacity runs out (a
+            // late-arriving in-flight job changed availableSlots).
+            const candidates = Items.filter((j) => !activeJobs.has(j.jobId));
+            const dispatched = new Set();
+            while (concurrencyManager.canAcquire() && candidates.length > dispatched.size) {
+              const pool = candidates.filter((j) => !dispatched.has(j.jobId));
+              const pick = concurrencyManager.selectNext(pool);
+              if (!pick) break;
+              dispatched.add(pick.jobId);
+              // Fire-and-forget; runJobAsync acquires the slot + releases on close.
+              runJobAsync(pick).catch((e) =>
+                log('error', `runJobAsync uncaught: ${e.message}`),
+              );
+            }
+          } else {
+            for (const job of Items) {
+              if (activeJobs.has(job.jobId)) continue;
+              runJobAsync(job).catch((e) => log('error', `runJobAsync uncaught: ${e.message}`));
+            }
           }
         }
       }
