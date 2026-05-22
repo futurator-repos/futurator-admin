@@ -151,6 +151,31 @@ export async function updateBrownfieldEnvVars(
 }
 
 /**
+ * Story 21.1 (party-push Epic 21) — flip a brownfield project's pushEnabled
+ * flag. Daemon-side `party-checkpoint.sh` reads `project.pushEnabled` before
+ * running the push step. Greenfield projects can also opt in but the UI only
+ * surfaces the toggle for brownfield (greenfield projects already auto-push
+ * via the existing deploy-agent pipeline).
+ */
+export async function updateProjectPushEnabled(
+  projectId: string,
+  pushEnabled: boolean,
+): Promise<void> {
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.partyProjects,
+      Key: { projectId },
+      UpdateExpression: 'SET pushEnabled = :pe, updatedAt = :now',
+      ConditionExpression: 'attribute_exists(projectId)',
+      ExpressionAttributeValues: {
+        ':pe': pushEnabled,
+        ':now': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+/**
  * Migrate-module — record the Secrets Manager secret name holding this
  * project's PAT. Called by the API after `CreateSecretCommand` succeeds.
  */

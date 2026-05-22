@@ -548,7 +548,7 @@ export async function listBranches(
 export async function listPullRequests(
   owner: string,
   name: string,
-  opts: { state?: 'open' | 'closed' | 'all'; perPage?: number } = {},
+  opts: { state?: 'open' | 'closed' | 'all'; perPage?: number; head?: string } = {},
 ): Promise<ConnectorResult<GitHubPullRequest[]>> {
   const state = opts.state ?? 'all';
   const perPage = Math.min(Math.max(opts.perPage ?? 30, 1), 100);
@@ -558,5 +558,43 @@ export async function listPullRequests(
     sort: 'updated',
     direction: 'desc',
   });
+  if (opts.head) qs.set('head', opts.head);
   return githubFetch<GitHubPullRequest[]>(`/repos/${owner}/${name}/pulls?${qs.toString()}`);
+}
+
+/**
+ * Story 22.3 — createPullRequest — POST /repos/{owner}/{name}/pulls
+ *
+ * Opens a PR from `head` (the source branch, e.g. `party/applicator/sid12345`)
+ * into `base` (the target branch, typically `main`). Used by the party-push
+ * checkpoint card's "Open PR" action.
+ *
+ * Requires the PAT scope `contents:write` AND `pull_requests:write`. The
+ * party-push Epic 21 toggle (Story 21.2) prompts for a PAT with both
+ * scopes when the operator enables push.
+ */
+export async function createPullRequest(
+  owner: string,
+  name: string,
+  input: {
+    title: string;
+    head: string;
+    base: string;
+    body?: string;
+    /** Default true; set false for ready-for-review PRs. */
+    draft?: boolean;
+  },
+): Promise<ConnectorResult<GitHubPullRequest>> {
+  const body = JSON.stringify({
+    title: input.title,
+    head: input.head,
+    base: input.base,
+    ...(input.body !== undefined ? { body: input.body } : {}),
+    ...(input.draft !== undefined ? { draft: input.draft } : {}),
+  });
+  return githubFetch<GitHubPullRequest>(`/repos/${owner}/${name}/pulls`, {
+    method: 'POST',
+    body,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }

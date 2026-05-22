@@ -381,4 +381,35 @@ describe('updateMigrationInputSchema', () => {
   it('rejects invalid envVars keys', () => {
     expect(updateMigrationInputSchema.safeParse({ envVars: { foo: 'bar' } }).success).toBe(false);
   });
+
+  // Story 21.2 — pushEnabled toggle gating.
+  it('accepts pushEnabled=true when accompanied by a fresh PAT', () => {
+    const r = updateMigrationInputSchema.safeParse({
+      pushEnabled: true,
+      pat: 'github_pat_abc',
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('rejects pushEnabled=true without a fresh PAT in same body', () => {
+    const r = updateMigrationInputSchema.safeParse({ pushEnabled: true });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.errors[0]?.message).toMatch(/contents:write PAT/);
+    }
+  });
+
+  it('accepts pushEnabled=false without requiring a PAT (operator demoting)', () => {
+    const r = updateMigrationInputSchema.safeParse({ pushEnabled: false });
+    expect(r.success).toBe(true);
+  });
+
+  it('accepts pushEnabled bundled with envVars and pat', () => {
+    const r = updateMigrationInputSchema.safeParse({
+      pat: 'github_pat_abc',
+      pushEnabled: true,
+      envVars: { FOO: 'bar' },
+    });
+    expect(r.success).toBe(true);
+  });
 });

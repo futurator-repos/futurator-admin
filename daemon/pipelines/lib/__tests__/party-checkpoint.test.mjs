@@ -35,9 +35,11 @@ function setupRepo({ branch }) {
   return repoDir;
 }
 
-function runScript({ branch, dir, message }) {
-  const result = spawnSync('bash', [SCRIPT, branch, dir], {
-    env: { ...process.env, PARTY_CHECKPOINT_SUDO: '' },
+function runScript({ branch, dir, message, push = false, envOverride = {} }) {
+  const args = [SCRIPT, branch, dir];
+  if (push) args.push('--push');
+  const result = spawnSync('bash', args, {
+    env: { ...process.env, PARTY_CHECKPOINT_SUDO: '', ...envOverride },
     input: message ?? '',
     encoding: 'utf-8',
   });
@@ -76,7 +78,9 @@ describe('party-checkpoint.sh — happy path', () => {
     const lines = r.stdout.split('\n').filter(Boolean);
     const sha = lines[lines.length - 1];
     expect(sha).toMatch(/^[a-f0-9]{40}$/);
-    expect(r.stdout).toContain('PUSH_DEFERRED:');
+    // Story 21.4 — push is gated; without --push flag the script logs PUSH_SKIPPED
+    // and exits 0. Default-off matches the project.pushEnabled=false common case.
+    expect(r.stdout).toContain('PUSH_SKIPPED: project pushEnabled=false');
   });
 });
 
@@ -173,5 +177,76 @@ describe('party-checkpoint.sh — empty commit message', () => {
     });
     expect(r.code).toBe(1);
     expect(r.stderr).toMatch(/EMPTY_COMMIT_MESSAGE/);
+  });
+});
+
+// Story 21.4 — push gating tests. The push step itself requires a real
+// remote, which the macOS test box can't reach; these tests cover the
+// two skip branches (no flag, no env) + the failure mode (push attempted,
+// no remote configured).
+describe('party-checkpoint.sh — push gating (Story 21.4)', () => {
+  it('skips push when --push flag absent (project pushEnabled=false)', () => {
+    const dir = setupRepo({ branch: 'party/applicator/c6b86fee' });
+    writeFileSync(join(dir, 'a.txt'), 'change\n');
+    const r = runScript({
+      branch: 'party/applicator/c6b86fee',
+      dir,
+      message:
+        'party(applicator/round-1): noop\n\nAgent: PARTY-ORCHESTRATOR\nSession-Id: c6b86fee-1111-2222-3333-444455556666\n',
+      // no push flag, no env
+    });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('PUSH_SKIPPED: project pushEnabled=false');
+  });
+
+  it('skips push when --push flag present but PARTY_PUSH_ENABLED env is off', () => {
+    const dir = setupRepo({ branch: 'party/applicator/c6b86fee' });
+    writeFileSync(join(dir, 'a.txt'), 'change\n');
+    const r = runScript({
+      branch: 'party/applicator/c6b86fee',
+      dir,
+      message:
+        'party(applicator/round-1): noop\n\nAgent: PARTY-ORCHESTRATOR\nSession-Id: c6b86fee-1111-2222-3333-444455556666\n',
+      push: true,
+      envOverride: { PARTY_PUSH_ENABLED: '' },
+    });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('PUSH_SKIPPED: env PARTY_PUSH_ENABLED not set');
+  });
+
+  it('attempts push when BOTH --push flag AND PARTY_PUSH_ENABLED=1; exits 5 if no remote', () => {
+    const dir = setupRepo({ branch: 'party/applicator/c6b86fee' });
+    writeFileSync(join(dir, 'a.txt'), 'change\n');
+    const r = runScript({
+      branch: 'party/applicator/c6b86fee',
+      dir,
+      message:
+        'party(applicator/round-1): noop\n\nAgent: PARTY-ORCHESTRATOR\nSession-Id: c6b86fee-1111-2222-3333-444455556666\n',
+      push: true,
+      envOverride: { PARTY_PUSH_ENABLED: '1' },
+    });
+    // No 'origin' remote in the test fixture → push fails. Exit 5 means
+    // commit landed but push failed; daemon will emit party.checkpoint.composed
+    // (not .pushed). Last stdout line is still the SHA so the daemon can
+    // record what landed locally.
+    expect(r.code).toBe(5);
+    expect(r.stderr).toMatch(/PUSH_FAILED/);
+    const lines = r.stdout.split('\n').filter(Boolean);
+    expect(lines[lines.length - 1]).toMatch(/^[a-f0-9]{40}$/);
+  });
+
+  it('accepts PARTY_PUSH_ENABLED=true (string) the same as 1', () => {
+    const dir = setupRepo({ branch: 'party/applicator/c6b86fee' });
+    writeFileSync(join(dir, 'a.txt'), 'change\n');
+    const r = runScript({
+      branch: 'party/applicator/c6b86fee',
+      dir,
+      message:
+        'party(applicator/round-1): noop\n\nAgent: PARTY-ORCHESTRATOR\nSession-Id: c6b86fee-1111-2222-3333-444455556666\n',
+      push: true,
+      envOverride: { PARTY_PUSH_ENABLED: 'true' },
+    });
+    expect(r.code).toBe(5); // push attempted, no remote → 5
+    expect(r.stderr).toMatch(/PUSH_FAILED/);
   });
 });

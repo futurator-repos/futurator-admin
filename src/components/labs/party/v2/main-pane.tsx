@@ -11,6 +11,7 @@ import {
   UserQuestionBanner,
   AgentCardSkeleton,
 } from './orchestrator-cards';
+import { CheckpointCard } from './checkpoint-card';
 import type { Round } from '../turn-adapter';
 import type { PartyBlock } from '../turn-parser';
 
@@ -42,6 +43,14 @@ interface Props {
   onClose?: () => void;
   /** Persist a new title. Receives null when cleared. */
   onRename?: (title: string | null) => void;
+  /**
+   * Story 22.5 — props needed by the CheckpointCard rendered inside each
+   * round when the round has a checkpoint event. Optional so the legacy
+   * party-mode (no party-push) renders without these.
+   */
+  sessionId?: string;
+  projectId?: string;
+  pushEnabled?: boolean;
 }
 
 /**
@@ -64,6 +73,9 @@ export function MainPane({
   onToggleTool,
   onClose,
   onRename,
+  sessionId,
+  projectId,
+  pushEnabled,
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -85,10 +97,7 @@ export function MainPane({
   }, [pinnedRoundId]);
 
   return (
-    <div
-      className="flex h-full flex-col"
-      style={{ background: COLORS.bgContent }}
-    >
+    <div className="flex h-full flex-col" style={{ background: COLORS.bgContent }}>
       <Header
         title={title}
         channel={channel}
@@ -109,8 +118,8 @@ export function MainPane({
               Start a debate
             </div>
             <div className="mt-2 text-[13px]">
-              Send a message in the left pane. Agents will respond in the
-              orchestrator&apos;s voice — each one gets its own card.
+              Send a message in the left pane. Agents will respond in the orchestrator&apos;s voice
+              — each one gets its own card.
             </div>
           </div>
         )}
@@ -122,6 +131,9 @@ export function MainPane({
             isFirst={i === 0}
             user={user}
             showSkeleton={showSkeleton && r.isInflight && r.blocks.length === 0}
+            sessionId={sessionId}
+            projectId={projectId}
+            pushEnabled={pushEnabled}
           />
         ))}
 
@@ -189,7 +201,7 @@ function Header({
       style={{
         height: 56,
         borderBottom: `1px solid ${COLORS.bgDeepest}`,
-        boxShadow: '0 1px 0 rgba(0,0,0,0.2)',
+        boxShadow: '0 1px 0 color-mix(in srgb, var(--foreground) 22%, transparent)',
       }}
     >
       <Hash className="h-4 w-4 shrink-0" style={{ color: COLORS.textMuted }} />
@@ -225,7 +237,8 @@ function Header({
           className="group flex min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors disabled:cursor-default"
           onMouseEnter={(e) => {
             if (!onRename) return;
-            e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+            e.currentTarget.style.background =
+              'color-mix(in srgb, var(--foreground) 5%, transparent)';
           }}
           onMouseLeave={(e) => {
             e.currentTarget.style.background = 'transparent';
@@ -264,7 +277,8 @@ function Header({
           style={{ color: COLORS.textMuted }}
           title="Close session"
           onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+            e.currentTarget.style.background =
+              'color-mix(in srgb, var(--foreground) 7%, transparent)';
             e.currentTarget.style.color = COLORS.textPrimary;
           }}
           onMouseLeave={(e) => {
@@ -307,11 +321,11 @@ function WebSearchToggle({
       className="mr-1 inline-flex items-center gap-1.5 rounded-md border px-2 py-[3px] text-[11px] font-medium transition-colors"
       style={{
         background: enabled
-          ? 'rgba(74,222,128,0.12)'
-          : 'rgba(255,255,255,0.04)',
+          ? 'color-mix(in srgb, var(--success) 18%, transparent)'
+          : 'color-mix(in srgb, var(--foreground) 5%, transparent)',
         borderColor: enabled
-          ? 'rgba(74,222,128,0.35)'
-          : 'rgba(255,255,255,0.08)',
+          ? 'color-mix(in srgb, var(--success) 45%, transparent)'
+          : 'color-mix(in srgb, var(--foreground) 10%, transparent)',
         color: enabled ? COLORS.accentLive : COLORS.textMuted,
       }}
     >
@@ -331,11 +345,17 @@ function RoundView({
   isFirst,
   user,
   showSkeleton,
+  sessionId,
+  projectId,
+  pushEnabled,
 }: {
   round: Round;
   isFirst: boolean;
   user: UserIdentity;
   showSkeleton: boolean;
+  sessionId?: string;
+  projectId?: string;
+  pushEnabled?: boolean;
 }) {
   const segments = segmentBlocks(round.blocks);
   const inflightAgentIdx = round.isInflight ? lastAgentIndex(round.blocks) : -1;
@@ -393,6 +413,15 @@ function RoundView({
 
       {segments.closeText && <OrchestratorClose text={segments.closeText} n={round.n} />}
 
+      {round.checkpoint && sessionId && projectId && (
+        <CheckpointCard
+          sessionId={sessionId}
+          projectId={projectId}
+          pushEnabled={pushEnabled === true}
+          checkpoint={round.checkpoint}
+        />
+      )}
+
       {showSkeleton && (
         <>
           <AgentCardSkeleton />
@@ -404,14 +433,14 @@ function RoundView({
         <div
           className="mx-6 mb-3 rounded-md px-3 py-2 text-[12px]"
           style={{
-            background: 'rgba(248,113,113,0.08)',
-            border: '1px solid rgba(248,113,113,0.3)',
-            color: '#fca5a5',
+            background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+            border: '1px solid color-mix(in srgb, var(--destructive) 35%, transparent)',
+            color: 'var(--destructive)',
           }}
         >
           Round {round.n} ended in error
-          {round.errorReason ? ` (${round.errorReason})` : ''}. Send a new
-          message below to continue.
+          {round.errorReason ? ` (${round.errorReason})` : ''}. Send a new message below to
+          continue.
         </div>
       )}
     </section>
@@ -426,11 +455,13 @@ function RoundDivider({ n, status }: { n: number; status: Round['status'] }) {
       <span
         className="rounded-[10px] px-2.5 py-[3px] font-mono text-[10.5px] font-semibold uppercase tracking-wider"
         style={{
-          background: live ? 'rgba(74,222,128,0.18)' : 'rgba(255,255,255,0.04)',
+          background: live
+            ? 'color-mix(in srgb, var(--success) 22%, transparent)'
+            : 'color-mix(in srgb, var(--foreground) 5%, transparent)',
           color: live ? COLORS.accentLive : COLORS.textMuted,
           border: live
-            ? '1px solid rgba(74,222,128,0.35)'
-            : '1px solid rgba(255,255,255,0.06)',
+            ? '1px solid color-mix(in srgb, var(--success) 45%, transparent)'
+            : '1px solid color-mix(in srgb, var(--foreground) 8%, transparent)',
         }}
       >
         {live && '● '}Round {n}
@@ -463,7 +494,11 @@ function segmentBlocks(blocks: PartyBlock[]): Segments {
 
   if (firstAgent === -1) {
     return {
-      openText: blocks.map((b) => b.text).join('\n\n').trim() || null,
+      openText:
+        blocks
+          .map((b) => b.text)
+          .join('\n\n')
+          .trim() || null,
       closeText: null,
       mainSequence: [],
     };

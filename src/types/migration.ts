@@ -27,6 +27,13 @@ export interface Migration {
   displayName: string;
   icon: string;
   sessionCount: number;
+  /**
+   * Story 21.1 (party-push Epic 21) — surfaces whether the operator has
+   * flipped the per-project "Push enabled" toggle. The UI uses this to
+   * render the toggle state; the daemon gates the checkpoint-push step on
+   * it server-side (UI value is informational, not load-bearing).
+   */
+  pushEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -58,6 +65,15 @@ export interface UpdateMigrationInput {
   pat?: string;
   /** Replaces the env-var map entirely. */
   envVars?: Record<string, string>;
+  /**
+   * Story 21.2 — flip the per-project "Push enabled" toggle. Flipping ON
+   * requires a fresh PAT in the same PATCH body (the existing PAT is
+   * contents:read; the upgrade scope is contents:write). The API rejects
+   * `pushEnabled: true` without `pat` because forgetting to rotate would
+   * leave checkpoint pushes failing silently in 30 days when the read-only
+   * PAT expires.
+   */
+  pushEnabled?: boolean;
 }
 
 export interface UpdateMigrationResponse {
@@ -65,6 +81,8 @@ export interface UpdateMigrationResponse {
   patRotated: boolean;
   envVarKeys: string[];
   envVarCount: number;
+  /** Story 21.2 — current state of the per-project push toggle. */
+  pushEnabled: boolean;
 }
 
 export interface DeleteMigrationResponse {

@@ -1,6 +1,6 @@
 # Party Push — Status Tracker
 
-**Last updated:** 2026-05-21 (planner takeover, epics + stories drafted)
+**Last updated:** 2026-05-22 (Epic 21 + 22 CODE-COMPLETE in autonomous run)
 **Owner:** Planner (Claude Opus 4.7), implementing solo
 **Source docs:** `plan.md` (design + reviews) · `epics.md` (epic definitions) · `stories/*.md` (per-story tasks)
 
@@ -23,12 +23,12 @@ Per `plan.md` §12.3. Each requires an explicit operator call. Defaults are revi
 
 ## Epic status
 
-| Epic | Slug                          | Status                                                                                | Stories                 | Notes                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ---- | ----------------------------- | ------------------------------------------------------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 19   | party-push-substrate          | **DONE** (2026-05-21 — Epic 19 complete, all 8 stories landed)                        | 8 (19.1–19.8)           | PR 0 substrate shipped. Free-agent + pipeline-v2 regressions stay green (1380/1384 daemon tests; 4 unrelated pre-existing failures in `epic-dev-pipeline.test.mjs`). Typecheck baseline 79 maintained. Deferred items: Story 19.3 AC 7 manual smoke (post-rsync), Story 19.6 AC 3+4 push-callsite wire-up (rolls into Story 20.2's JS push-wrapper), Story 19.6 AC 6 PAT-rotation smoke (post-PR-0 operator action). |
-| 20   | party-push-daemon             | **CODE-COMPLETE** (2026-05-21, 15/16 stories merged; 20.16 deploy is operator-driven) | 16 (20.1–20.16)         | All 15 implementable stories landed; Story 20.16 (integration sweep + rsync + sst deploy + manual smoke on `applicator`) requires operator action. Several stories carry deferred sub-tasks marked PARTIAL/Tasks-N (manual smokes, UI deep-links to Epic 22). Ship gate before flipping `PARTY_PUSH_V1_ENABLED=1`: run the integration sweep + smoke on applicator.                                                  |
-| 21   | party-push-ui-pat-toggle      | **RESERVED**                                                                          | (planner-owned, future) | UI half — PAT toggle + push enable. Starts after Epic 20 ships.                                                                                                                                                                                                                                                                                                                                                      |
-| 22   | party-push-ui-checkpoint-card | **RESERVED**                                                                          | (planner-owned, future) | UI half — checkpoint card + ASK_HUMAN inbox + audit endpoint. Starts after Epic 21.                                                                                                                                                                                                                                                                                                                                  |
+| Epic | Slug                          | Status                                                                                | Stories         | Notes                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---- | ----------------------------- | ------------------------------------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 19   | party-push-substrate          | **DONE** (2026-05-21 — Epic 19 complete, all 8 stories landed)                        | 8 (19.1–19.8)   | PR 0 substrate shipped. Free-agent + pipeline-v2 regressions stay green (1380/1384 daemon tests; 4 unrelated pre-existing failures in `epic-dev-pipeline.test.mjs`). Typecheck baseline 79 maintained. Deferred items: Story 19.3 AC 7 manual smoke (post-rsync), Story 19.6 AC 3+4 push-callsite wire-up (rolls into Story 20.2's JS push-wrapper), Story 19.6 AC 6 PAT-rotation smoke (post-PR-0 operator action). |
+| 20   | party-push-daemon             | **CODE-COMPLETE** (2026-05-21, 15/16 stories merged; 20.16 deploy is operator-driven) | 16 (20.1–20.16) | All 15 implementable stories landed; Story 20.16 (integration sweep + rsync + sst deploy + manual smoke on `applicator`) requires operator action. Several stories carry deferred sub-tasks marked PARTIAL/Tasks-N (manual smokes, UI deep-links to Epic 22). Ship gate before flipping `PARTY_PUSH_V1_ENABLED=1`: run the integration sweep + smoke on applicator.                                                  |
+| 21   | party-push-ui-pat-toggle      | **CODE-COMPLETE** (2026-05-22, 5/5 stories)                                           | 5 (21.1–21.5)   | UI half PR 2: pushEnabled type + repo helper + PATCH gate + Migrate UI modal + party-checkpoint.sh push (gated on env + per-project flag) + checkpoint event types + inline renderer wiring. Typecheck baseline 79 maintained; 12 party-checkpoint.sh tests + 6 party-turn-checkpoint integration tests green.                                                                                                       |
+| 22   | party-push-ui-checkpoint-card | **CODE-COMPLETE** (2026-05-22, 7/7 stories)                                           | 7 (22.1–22.7)   | UI half PR 3: PartyEvent typed union + audit endpoint + Open-PR endpoint + epic-start sourceCommitSha plumb-through + checkpoint card + ASK_HUMAN card + audit drawer. 9 party-events parser tests + 4 turn-adapter tests green. UI is browser-untested locally (no dev session this run).                                                                                                                           |
 
 Status legend: TODO / IN_PROGRESS / REVIEW / DONE / TODO / RESERVED.
 
@@ -67,6 +67,28 @@ Status legend: TODO / IN_PROGRESS / REVIEW / DONE / TODO / RESERVED.
 | 20.14 | ConcurrencyManager — unified queue + interactive-first priority | **PARTIAL** (2026-05-21 — module + tests; daemon wiring in 20.16) | `stories/20-14-concurrency-manager.md`                  |
 | 20.15 | Worktree-reaper real classifier                                 | **DONE** (2026-05-21, manual reaper smoke deferred to 20.16)      | `stories/20-15-worktree-reaper-real-classifier.md`      |
 | 20.16 | Integration test sweep + deploy                                 | TODO                                                              | `stories/20-16-integration-deploy.md`                   |
+
+## Epic 21 stories
+
+| #    | Story                                             | Status                | File                                                  |
+| ---- | ------------------------------------------------- | --------------------- | ----------------------------------------------------- |
+| 21.1 | PartyProject.pushEnabled type + repo plumbing     | **DONE** (2026-05-22) | `stories/21-1-party-project-push-enabled-type.md`     |
+| 21.2 | PATCH /api/migrations/:id pushEnabled toggle      | **DONE** (2026-05-22) | `stories/21-2-patch-migrations-push-enabled.md`       |
+| 21.3 | Migrate UI "Push enabled" toggle + modal          | **DONE** (2026-05-22) | `stories/21-3-migrate-ui-push-toggle.md`              |
+| 21.4 | Enable party-checkpoint.sh push step (gated)      | **DONE** (2026-05-22) | `stories/21-4-enable-party-checkpoint-push.md`        |
+| 21.5 | party.checkpoint.\* event types + inline renderer | **DONE** (2026-05-22) | `stories/21-5-checkpoint-event-types-and-renderer.md` |
+
+## Epic 22 stories
+
+| #    | Story                                            | Status                | File                                              |
+| ---- | ------------------------------------------------ | --------------------- | ------------------------------------------------- |
+| 22.1 | PartyEvent discriminated union                   | **DONE** (2026-05-22) | `stories/22-1-party-event-discriminated-union.md` |
+| 22.2 | GET /api/party/sessions/:id/audit endpoint       | **DONE** (2026-05-22) | `stories/22-2-audit-endpoint.md`                  |
+| 22.3 | POST /api/party/sessions/:id/checkpoints/:sha/pr | **DONE** (2026-05-22) | `stories/22-3-open-pr-endpoint.md`                |
+| 22.4 | epic-workflows /start sourceCommitSha extension  | **DONE** (2026-05-22) | `stories/22-4-pipelines-source-extension.md`      |
+| 22.5 | checkpoint-card.tsx React component              | **DONE** (2026-05-22) | `stories/22-5-checkpoint-card-component.md`       |
+| 22.6 | ASK_HUMAN card in right rail                     | **DONE** (2026-05-22) | `stories/22-6-ask-human-card.md`                  |
+| 22.7 | Audit drawer UI in party session                 | **DONE** (2026-05-22) | `stories/22-7-audit-drawer.md`                    |
 
 ---
 

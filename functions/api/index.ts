@@ -70,7 +70,11 @@ import {
 import { createAgentJobSchema } from '../shared/schemas/agent-orchestrator-schema';
 import { resolveBlockerSchema } from '../shared/schemas/resolve-blocker-schema';
 import { validateEpicForOrchestratorStart } from '../shared/services/epic-dev-launcher';
-import { launchPipelineWave, findFirstWave } from '../shared/services/pipeline-launcher';
+import {
+  launchPipelineWave,
+  findFirstWave,
+  isValidSourceCommitSha,
+} from '../shared/services/pipeline-launcher';
 import { launchStoryRerun } from '../shared/services/story-rerun-launcher';
 import {
   launchVisualQa,
@@ -3261,6 +3265,22 @@ app.post('/api/epic-workflows/:id/start', async (c) => {
   const epicId = c.req.param('id');
   const user = c.get('user');
 
+  // Story 22.4 (party-push Epic 22) — optional body shape:
+  //   { sourceCommitSha?: string, sourceBranch?: string }
+  // When present and validated, the launcher pins the per-story worktree
+  // to this exact SHA at job-create time (Story 20.12). UI uses this to
+  // start a story-pipeline from a specific party-debate checkpoint.
+  const startBody = await c.req.json().catch(() => ({}));
+  const sourceCommitSha =
+    typeof startBody?.sourceCommitSha === 'string' ? startBody.sourceCommitSha : undefined;
+  const sourceBranch =
+    typeof startBody?.sourceBranch === 'string' ? startBody.sourceBranch : undefined;
+  if (sourceCommitSha && !isValidSourceCommitSha(sourceCommitSha)) {
+    throw new ValidationError(
+      `sourceCommitSha must be a 40-char lowercase hex string; received "${sourceCommitSha}"`,
+    );
+  }
+
   const epic = await epicRepo.getEpicById(epicId);
   if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
 
@@ -3272,11 +3292,18 @@ app.post('/api/epic-workflows/:id/start', async (c) => {
     }
     const now = new Date().toISOString();
     const firstWave = findFirstWave(epic);
-    const launch = await launchPipelineWave(epic, firstWave, user.userId, now, {
-      generatePipeline: generateStoryPipeline,
-      createJob: agentJobsRepo.createJob,
-      uuid: () => crypto.randomUUID(),
-    });
+    const launch = await launchPipelineWave(
+      epic,
+      firstWave,
+      user.userId,
+      now,
+      {
+        generatePipeline: generateStoryPipeline,
+        createJob: agentJobsRepo.createJob,
+        uuid: () => crypto.randomUUID(),
+      },
+      sourceCommitSha || sourceBranch ? { sourceCommitSha, planSlug: undefined } : undefined,
+    );
     if (!launch.ok) {
       throw new ValidationError(launch.message);
     }
@@ -5404,6 +5431,9 @@ app.get('/api/migrations', async (c) => {
         displayName: app?.displayName ?? p.projectId,
         icon: app?.icon ?? '📨',
         sessionCount: sessions.length,
+        // Story 21.1 — surface the per-project Push toggle. Defaults to false
+        // for legacy rows that pre-date the field.
+        pushEnabled: p.pushEnabled === true,
         createdAt: p.createdAt,
         updatedAt: p.updatedAt,
       };
@@ -5452,6 +5482,16 @@ app.patch('/api/migrations/:id', async (c) => {
   if (parsed.data.envVars !== undefined) {
     await partyProjectsRepo.updateBrownfieldEnvVars(parsedId.data.projectId, parsed.data.envVars);
   }
+  if (parsed.data.pushEnabled !== undefined) {
+    // Story 21.2 — flip the per-project push toggle. The schema-level refine
+    // already enforces that pushEnabled=true comes with a fresh PAT; the
+    // PAT rotation above ran before this write, so daemon reads of the new
+    // secret will see the contents:write scope.
+    await partyProjectsRepo.updateProjectPushEnabled(
+      parsedId.data.projectId,
+      parsed.data.pushEnabled,
+    );
+  }
 
   const updated = await partyProjectsRepo.getProject(parsedId.data.projectId);
   return c.json({
@@ -5459,6 +5499,7 @@ app.patch('/api/migrations/:id', async (c) => {
     patRotated: parsed.data.pat !== undefined,
     envVarKeys: Object.keys(updated?.envVars ?? {}).sort(),
     envVarCount: Object.keys(updated?.envVars ?? {}).length,
+    pushEnabled: updated?.pushEnabled === true,
   });
 });
 
@@ -6146,6 +6187,213 @@ app.delete('/api/party/sessions/:id', async (c) => {
   );
 
   return c.json({ deleted: true, sessionId, projectId, results });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Story 22.2 (party-push Epic 22) — GET /api/party/sessions/:id/audit
+//
+// Returns the audit-relevant slice of a session's event stream: every
+// party.checkpoint.* + party.agent.question + party.tool.default-allow
+// event in chronological order. Used by the audit drawer (Story 22.7)
+// + the checkpoint card (Story 22.5) for the "history" tab.
+//
+// No cursor pagination yet — the per-session volume is bounded (10s to
+// 100s of audit-class events per active session). When this becomes a
+// scaling concern, fall back to `?after=<eventSeq>` like the events
+// endpoint already does.
+// ──────────────────────────────────────────────────────────────────────
+app.get('/api/party/sessions/:id/audit', async (c) => {
+  const sessionId = c.req.param('id');
+  const parsedId = sessionIdSchema.safeParse(sessionId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const session = await partySessionsRepo.getSession(parsedId.data);
+  if (!session) throw new NotFoundError('PartySession', parsedId.data);
+
+  const auditTypes = new Set<string>([
+    'party.checkpoint.composed',
+    'party.checkpoint.pushed',
+    'party.checkpoint.blocked',
+    'party.checkpoint.failed',
+    'party.agent.question',
+    'party.tool.default-allow',
+  ]);
+
+  // Page through the events table; events are keyed by jobId=sessionId so
+  // one Query call suffices (limited to 500 for safety).
+  const { events } = await agentEventsRepo.getEventsAfter(parsedId.data, '000000', 500);
+  const filtered = events
+    .filter((e) => auditTypes.has(String(e.eventType)))
+    .sort((a, b) => String(a.eventSeq).localeCompare(String(b.eventSeq)));
+
+  // Tally for the drawer header. Cheap because filtered is already small.
+  const tally = {
+    checkpointsPushed: 0,
+    checkpointsComposed: 0,
+    checkpointsBlocked: 0,
+    checkpointsFailed: 0,
+    questions: 0,
+    defaultAllows: 0,
+  };
+  for (const e of filtered) {
+    // Party events ride agent-events table; AgentEventType union is narrower
+    // than the runtime values, so coerce-to-string for the tally branches.
+    const t = String(e.eventType);
+    if (t === 'party.checkpoint.pushed') tally.checkpointsPushed++;
+    else if (t === 'party.checkpoint.composed') tally.checkpointsComposed++;
+    else if (t === 'party.checkpoint.blocked') tally.checkpointsBlocked++;
+    else if (t === 'party.checkpoint.failed') tally.checkpointsFailed++;
+    else if (t === 'party.agent.question') tally.questions++;
+    else if (t === 'party.tool.default-allow') tally.defaultAllows++;
+  }
+
+  return c.json({
+    sessionId: parsedId.data,
+    projectId: session.projectId,
+    partyBranch: session.partyBranch ?? null,
+    worktreePath: session.worktreePath ?? null,
+    tally,
+    events: filtered,
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Story 22.3 (party-push Epic 22) — POST /api/party/sessions/:id/checkpoints/:sha/pr
+//
+// Opens (or returns the existing) PR on `party/<projectId>/<sid>` → the
+// project's canonical branch (gitBranch or 'main'). The session id rather
+// than the projectId is the route key because:
+//   1. It scopes the PR title + body to a known session (we can quote the
+//      orchestrator's checkpoint summary).
+//   2. The frontend already has the sessionId in scope when rendering
+//      the checkpoint card; no extra lookup needed to navigate.
+//
+// Idempotent: if a PR already exists for this `head` branch, returns it.
+// Otherwise creates a new PR via the GitHub connector.
+// ──────────────────────────────────────────────────────────────────────
+app.post('/api/party/sessions/:id/checkpoints/:sha/pr', async (c) => {
+  const sessionId = c.req.param('id');
+  const sha = c.req.param('sha');
+  const parsedId = sessionIdSchema.safeParse(sessionId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid sessionId');
+  }
+  if (!/^[a-f0-9]{40}$/.test(sha)) {
+    throw new ValidationError(`commit sha must be 40 lowercase hex chars; got "${sha}"`);
+  }
+
+  const session = await partySessionsRepo.getSession(parsedId.data);
+  if (!session) throw new NotFoundError('PartySession', parsedId.data);
+  const project = await partyProjectsRepo.getProject(session.projectId);
+  if (!project) throw new NotFoundError('PartyProject', session.projectId);
+  if (project.kind !== 'brownfield' || !project.gitRepoUrl) {
+    throw new AppError(
+      'NOT_BROWNFIELD',
+      'Open-PR is only available on brownfield projects with a configured GitHub repo.',
+      400,
+    );
+  }
+  if (!project.pushEnabled) {
+    throw new AppError(
+      'PUSH_DISABLED',
+      'Project has not opted into push. Enable push in /migrate before opening a PR.',
+      409,
+    );
+  }
+  if (!session.partyBranch) {
+    throw new AppError(
+      'NO_PARTY_BRANCH',
+      'Session has no party branch — start a debate with party-push V1 enabled first.',
+      409,
+    );
+  }
+
+  // Parse owner/name out of gitRepoUrl (https://github.com/<owner>/<repo>(.git)?).
+  const m = project.gitRepoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
+  if (!m) {
+    throw new AppError(
+      'BAD_GITREPO_URL',
+      `Could not parse owner/repo from ${project.gitRepoUrl}`,
+      400,
+    );
+  }
+  const owner = m[1];
+  const name = m[2];
+  const base = project.gitBranch || 'main';
+
+  // Idempotency: if an open PR already exists with head=<owner>:<branch>, reuse.
+  // GitHub's listPRs head filter uses `owner:branch` form.
+  const { listPullRequests, createPullRequest } = await import('../shared/github/connector');
+  const existing = await listPullRequests(owner, name, {
+    state: 'open',
+    head: `${owner}:${session.partyBranch}`,
+    perPage: 5,
+  }).catch(() => ({
+    data: [] as Array<{ number: number; html_url: string; title: string; state: string }>,
+  }));
+  if (existing.data && existing.data.length > 0) {
+    const pr = existing.data[0];
+    return c.json({
+      prNumber: pr.number,
+      prUrl: pr.html_url,
+      title: pr.title,
+      state: pr.state,
+      reused: true,
+    });
+  }
+
+  // No existing PR — try to create one. Optional body comes from the
+  // request, falling back to a stable derived title + summary.
+  const body = await c.req.json().catch(() => ({}));
+  const title =
+    typeof body?.title === 'string' && body.title.length > 0
+      ? String(body.title).slice(0, 200)
+      : `Party debate ${session.sessionId.slice(0, 8)} on ${session.projectId}`;
+  const description =
+    typeof body?.body === 'string'
+      ? String(body.body).slice(0, 4000)
+      : `Opened from Futurator Party Mode session \`${session.sessionId}\`. Includes ${session.turnCount} rounds. Source commit: \`${sha}\`.`;
+
+  try {
+    const created = await createPullRequest(owner, name, {
+      title,
+      head: session.partyBranch,
+      base,
+      body: description,
+      draft: body?.draft !== false,
+    });
+    return c.json({
+      prNumber: created.data.number,
+      prUrl: created.data.html_url,
+      title: created.data.title,
+      state: created.data.state,
+      reused: false,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Common 422: "A pull request already exists for ..." — fall back to lookup.
+    if (/already exists/i.test(msg)) {
+      const refetch = await listPullRequests(owner, name, {
+        state: 'all',
+        head: `${owner}:${session.partyBranch}`,
+        perPage: 5,
+      }).catch(() => ({
+        data: [] as Array<{ number: number; html_url: string; title: string; state: string }>,
+      }));
+      if (refetch.data?.length > 0) {
+        const pr = refetch.data[0];
+        return c.json({
+          prNumber: pr.number,
+          prUrl: pr.html_url,
+          title: pr.title,
+          state: pr.state,
+          reused: true,
+        });
+      }
+    }
+    throw new AppError('PR_CREATE_FAILED', msg, 502);
+  }
 });
 
 // ════════════════════════════════════════════════════════════════

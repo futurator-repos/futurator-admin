@@ -33,6 +33,7 @@ import {
   updateProjectAfterRefresh,
   updateBrownfieldEnvVars,
   updateBrownfieldPatSecretName,
+  updateProjectPushEnabled,
 } from '../party-projects-repository';
 
 function extract(command: unknown) {
@@ -374,5 +375,26 @@ describe('updateBrownfieldPatSecretName', () => {
     const values = input.ExpressionAttributeValues as Record<string, unknown>;
     expect(values[':ps']).toBe('futurator/brownfield-pat/songster');
     expect(values[':brownfield']).toBe('brownfield');
+  });
+});
+
+describe('updateProjectPushEnabled (Story 21.1)', () => {
+  it('writes pushEnabled=true with attribute_exists guard', async () => {
+    sendMock.mockResolvedValue({});
+    await updateProjectPushEnabled('songster', true);
+    const input = extract(sendMock.mock.calls[0][0]);
+    expect(input.UpdateExpression).toBe('SET pushEnabled = :pe, updatedAt = :now');
+    expect(input.ConditionExpression).toBe('attribute_exists(projectId)');
+    const values = input.ExpressionAttributeValues as Record<string, unknown>;
+    expect(values[':pe']).toBe(true);
+    expect(typeof values[':now']).toBe('string');
+  });
+
+  it('writes pushEnabled=false (operator can disable)', async () => {
+    sendMock.mockResolvedValue({});
+    await updateProjectPushEnabled('songster', false);
+    const input = extract(sendMock.mock.calls[0][0]);
+    const values = input.ExpressionAttributeValues as Record<string, unknown>;
+    expect(values[':pe']).toBe(false);
   });
 });

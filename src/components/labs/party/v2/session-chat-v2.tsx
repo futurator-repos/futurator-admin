@@ -21,6 +21,8 @@ import { DocTray } from '../doc-tray';
 import { FileDrawerProvider } from './file-drawer';
 import { SelectionPopover } from './selection-popover';
 import { InlineQuestionsList } from './inline-questions-list';
+import { AgentQuestionsCard } from './agent-questions-card';
+import { AuditDrawer } from './audit-drawer';
 
 interface Props {
   sessionId: string;
@@ -49,10 +51,7 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
   const authUser = useAuthStore((s) => s.user);
   const [draft, setDraft] = useState('');
 
-  const adapted = useMemo(
-    () => adaptSession(events, session?.status),
-    [events, session?.status],
-  );
+  const adapted = useMemo(() => adaptSession(events, session?.status), [events, session?.status]);
   const { rounds, isProcessing } = adapted;
 
   // Anchor-scroll target. The right rail's "round" buttons set this; the
@@ -61,9 +60,12 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
   // earlier content (was the source of the "round 2 reset everything"
   // bug from the previous iteration).
   const [pinnedRoundId, setPinnedRoundId] = useState<string | null>(null);
+  // Story 22.7 — audit drawer open state. The toggle lives in the right rail
+  // footer; the drawer renders as a fullscreen portal over everything.
+  const [auditOpen, setAuditOpen] = useState(false);
 
   const inflightRound = adapted.activeRoundId
-    ? rounds.find((r) => r.id === adapted.activeRoundId) ?? null
+    ? (rounds.find((r) => r.id === adapted.activeRoundId) ?? null)
     : null;
   // Show the cold-start skeleton inside the in-flight round only. We never
   // render skeletons in front of completed rounds, so the user's earlier
@@ -101,9 +103,7 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
     // [Attached: …] header so the agents reliably notice them on this turn.
     // We only do this when the doc filename isn't already referenced in the
     // user's text (case-insensitive substring match).
-    const justUploaded = uploadStatus
-      .filter((s) => s.state === 'done')
-      .map((s) => s.filename);
+    const justUploaded = uploadStatus.filter((s) => s.state === 'done').map((s) => s.filename);
     const unreferenced = justUploaded.filter(
       (fn) => !content.toLowerCase().includes(fn.toLowerCase()),
     );
@@ -226,165 +226,186 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
 
   return (
     <FileDrawerProvider projectId={session.projectId ?? null}>
-    <div
-      className="flex h-full overflow-hidden"
-      style={{ background: COLORS.bgDeepest, color: COLORS.textPrimary }}
-      data-testid="session-chat-v2"
-    >
-      <aside style={{ width: leftWidth, minWidth: PANE_DEFAULTS.leftMin }}>
-        <LeftPane
-          rounds={rounds}
-          activeRoundId={pinnedRoundId ?? adapted.activeRoundId}
-          draft={draft}
-          onDraftChange={setDraft}
-          onSend={() => void handleSend()}
-          isProcessing={isProcessing || sendMessage.isPending}
-          isErrored={isErrored}
-          onAttach={handleAttach}
-          isUploading={uploadDoc.isPending}
-          acceptedTypes=".md,.markdown,.txt,.pdf,.json,.csv,.yml,.yaml,application/pdf,text/plain,text/markdown,application/json,text/csv,text/yaml"
-          sessions={sessionsForLeft}
-          activeSessionId={sessionId}
-          onPickSession={onPickSession}
-          onNewSession={onNewSession}
-        />
-      </aside>
-
       <div
-        className="party-resize-handle"
-        data-dragging={dragging === 'left' ? 'true' : 'false'}
-        onMouseDown={startLeftDrag}
-        role="separator"
-        aria-orientation="vertical"
-      />
-
-      <main className="flex flex-1 flex-col" style={{ minWidth: 0 }}>
-        {/* Doc tray + upload-status surface — kept above the main scroller so
-            users see what they just attached, what's in flight, and any
-            error reasons without opening DevTools. */}
-        {session.projectId && (
-          <div
-            className="px-5 py-2 space-y-1.5"
-            style={{ background: COLORS.bgContent, borderBottom: `1px solid ${COLORS.bgDeepest}` }}
-          >
-            {uploadStatus.length > 0 && (
-              <div className="space-y-1.5">
-                <div className="flex flex-wrap gap-1.5">
-                  {uploadStatus.map((s) => {
-                    const tone =
-                      s.state === 'uploading'
-                        ? 'border-blue-400/30 bg-blue-500/15 text-blue-300'
-                        : s.state === 'done'
-                          ? 'border-emerald-400/30 bg-emerald-500/15 text-emerald-300'
-                          : 'border-red-400/30 bg-red-500/15 text-red-300';
-                    return (
-                      <span
-                        key={s.filename}
-                        className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10.5px] font-mono ${tone}`}
-                        title={s.reason}
-                      >
-                        {s.state === 'uploading' && '⏳'}
-                        {s.state === 'done' && '✓'}
-                        {s.state === 'error' && '✕'}
-                        <span className="max-w-[220px] truncate">{s.filename}</span>
-                        {s.state === 'error' && s.reason && (
-                          <span className="opacity-80 truncate max-w-[220px]">— {s.reason}</span>
-                        )}
-                      </span>
-                    );
-                  })}
-                </div>
-                {uploadStatus.some((s) => s.state === 'done') && (
-                  <div className="flex items-start gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/5 px-2.5 py-1.5 text-[11px] text-emerald-200/90">
-                    <span aria-hidden>📄</span>
-                    <span>
-                      Uploaded. Type a follow-up message and click <strong>Send</strong> —
-                      the agents will read{' '}
-                      {uploadStatus
-                        .filter((s) => s.state === 'done')
-                        .map((s) => (
-                          <code
-                            key={s.filename}
-                            className="rounded bg-emerald-500/10 px-1 py-0.5 text-[10.5px] font-mono"
-                          >
-                            ./docs/{s.filename}
-                          </code>
-                        ))
-                        .reduce<React.ReactNode[]>(
-                          (acc, el, i) => (i === 0 ? [el] : [...acc, ', ', el]),
-                          [],
-                        )}{' '}
-                      on the next turn. (We&rsquo;ll auto-add an{' '}
-                      <code className="rounded bg-emerald-500/10 px-1 py-0.5 text-[10.5px] font-mono">
-                        [Attached: …]
-                      </code>{' '}
-                      header to your message if you don&rsquo;t mention the file by name.)
-                    </span>
-                  </div>
-                )}
-              </div>
-            )}
-            <DocTray
-              projectId={session.projectId}
-              onPickDoc={(filename) => {
-                const ref = `./docs/${filename}`;
-                setDraft((d) =>
-                  d.includes(ref)
-                    ? d
-                    : d.length > 0
-                      ? `${d.replace(/\s+$/, '')} ${ref} `
-                      : `Read ${ref} and `,
-                );
-              }}
-            />
-          </div>
-        )}
-        <div
-          ref={chatScopeRef}
-          data-party-chat-content
-          className="flex-1"
-          style={{ minHeight: 0 }}
-        >
-          <MainPane
-            title={sessionTitle}
-            channel={projectChannel}
-            rounds={rounds}
-            pinnedRoundId={pinnedRoundId}
-            showSkeleton={showSkeleton}
-            user={userIdentity}
-            allowedTools={project?.allowedTools}
-            onToggleTool={handleToggleTool}
-            onClose={onClose}
-            onRename={handleRename}
-          />
-        </div>
-      </main>
-
-      <div
-        className="party-resize-handle"
-        data-dragging={dragging === 'right' ? 'true' : 'false'}
-        onMouseDown={startRightDrag}
-        role="separator"
-        aria-orientation="vertical"
-      />
-
-      <aside
-        className="flex flex-col overflow-y-auto"
-        style={{ width: rightWidth, minWidth: PANE_DEFAULTS.rightMin }}
+        className="flex h-full overflow-hidden"
+        style={{ background: COLORS.bgDeepest, color: COLORS.textPrimary }}
+        data-testid="session-chat-v2"
       >
-        <div className="shrink-0">
-          <RoundRail
+        <aside style={{ width: leftWidth, minWidth: PANE_DEFAULTS.leftMin }}>
+          <LeftPane
             rounds={rounds}
             activeRoundId={pinnedRoundId ?? adapted.activeRoundId}
-            onSelect={(id) => setPinnedRoundId(id)}
+            draft={draft}
+            onDraftChange={setDraft}
+            onSend={() => void handleSend()}
+            isProcessing={isProcessing || sendMessage.isPending}
+            isErrored={isErrored}
+            onAttach={handleAttach}
+            isUploading={uploadDoc.isPending}
+            acceptedTypes=".md,.markdown,.txt,.pdf,.json,.csv,.yml,.yaml,application/pdf,text/plain,text/markdown,application/json,text/csv,text/yaml"
+            sessions={sessionsForLeft}
+            activeSessionId={sessionId}
+            onPickSession={onPickSession}
+            onNewSession={onNewSession}
           />
-        </div>
-        <InlineQuestionsList sessionId={sessionId} onJumpTo={jumpToAnchor} />
-      </aside>
+        </aside>
 
-      {/* Floating mini-panel triggered by text selection inside the chat. */}
-      <SelectionPopover sessionId={sessionId} scopeRef={chatScopeRef} />
-    </div>
+        <div
+          className="party-resize-handle"
+          data-dragging={dragging === 'left' ? 'true' : 'false'}
+          onMouseDown={startLeftDrag}
+          role="separator"
+          aria-orientation="vertical"
+        />
+
+        <main className="flex flex-1 flex-col" style={{ minWidth: 0 }}>
+          {/* Doc tray + upload-status surface — kept above the main scroller so
+            users see what they just attached, what's in flight, and any
+            error reasons without opening DevTools. */}
+          {session.projectId && (
+            <div
+              className="px-5 py-2 space-y-1.5"
+              style={{
+                background: COLORS.bgContent,
+                borderBottom: `1px solid ${COLORS.bgDeepest}`,
+              }}
+            >
+              {uploadStatus.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="flex flex-wrap gap-1.5">
+                    {uploadStatus.map((s) => {
+                      const tone =
+                        s.state === 'uploading'
+                          ? 'border-blue-400/30 bg-blue-500/15 text-blue-300'
+                          : s.state === 'done'
+                            ? 'border-emerald-400/30 bg-emerald-500/15 text-emerald-300'
+                            : 'border-red-400/30 bg-red-500/15 text-red-300';
+                      return (
+                        <span
+                          key={s.filename}
+                          className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10.5px] font-mono ${tone}`}
+                          title={s.reason}
+                        >
+                          {s.state === 'uploading' && '⏳'}
+                          {s.state === 'done' && '✓'}
+                          {s.state === 'error' && '✕'}
+                          <span className="max-w-[220px] truncate">{s.filename}</span>
+                          {s.state === 'error' && s.reason && (
+                            <span className="opacity-80 truncate max-w-[220px]">— {s.reason}</span>
+                          )}
+                        </span>
+                      );
+                    })}
+                  </div>
+                  {uploadStatus.some((s) => s.state === 'done') && (
+                    <div className="flex items-start gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/5 px-2.5 py-1.5 text-[11px] text-emerald-200/90">
+                      <span aria-hidden>📄</span>
+                      <span>
+                        Uploaded. Type a follow-up message and click <strong>Send</strong> — the
+                        agents will read{' '}
+                        {uploadStatus
+                          .filter((s) => s.state === 'done')
+                          .map((s) => (
+                            <code
+                              key={s.filename}
+                              className="rounded bg-emerald-500/10 px-1 py-0.5 text-[10.5px] font-mono"
+                            >
+                              ./docs/{s.filename}
+                            </code>
+                          ))
+                          .reduce<React.ReactNode[]>(
+                            (acc, el, i) => (i === 0 ? [el] : [...acc, ', ', el]),
+                            [],
+                          )}{' '}
+                        on the next turn. (We&rsquo;ll auto-add an{' '}
+                        <code className="rounded bg-emerald-500/10 px-1 py-0.5 text-[10.5px] font-mono">
+                          [Attached: …]
+                        </code>{' '}
+                        header to your message if you don&rsquo;t mention the file by name.)
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+              <DocTray
+                projectId={session.projectId}
+                onPickDoc={(filename) => {
+                  const ref = `./docs/${filename}`;
+                  setDraft((d) =>
+                    d.includes(ref)
+                      ? d
+                      : d.length > 0
+                        ? `${d.replace(/\s+$/, '')} ${ref} `
+                        : `Read ${ref} and `,
+                  );
+                }}
+              />
+            </div>
+          )}
+          <div
+            ref={chatScopeRef}
+            data-party-chat-content
+            className="flex-1"
+            style={{ minHeight: 0 }}
+          >
+            <MainPane
+              title={sessionTitle}
+              channel={projectChannel}
+              rounds={rounds}
+              pinnedRoundId={pinnedRoundId}
+              showSkeleton={showSkeleton}
+              user={userIdentity}
+              allowedTools={project?.allowedTools}
+              onToggleTool={handleToggleTool}
+              onClose={onClose}
+              onRename={handleRename}
+              sessionId={sessionId}
+              projectId={project?.projectId}
+              pushEnabled={project?.pushEnabled === true}
+            />
+          </div>
+        </main>
+
+        <div
+          className="party-resize-handle"
+          data-dragging={dragging === 'right' ? 'true' : 'false'}
+          onMouseDown={startRightDrag}
+          role="separator"
+          aria-orientation="vertical"
+        />
+
+        <aside
+          className="flex flex-col overflow-y-auto"
+          style={{ width: rightWidth, minWidth: PANE_DEFAULTS.rightMin }}
+        >
+          <div className="shrink-0">
+            <RoundRail
+              rounds={rounds}
+              activeRoundId={pinnedRoundId ?? adapted.activeRoundId}
+              onSelect={(id) => setPinnedRoundId(id)}
+            />
+          </div>
+          <AgentQuestionsCard events={events} onJumpToRound={(n) => jumpToAnchor(`r-${n + 1}`)} />
+          <InlineQuestionsList sessionId={sessionId} onJumpTo={jumpToAnchor} />
+          <div className="mt-auto shrink-0 px-3 py-2">
+            <button
+              type="button"
+              onClick={() => setAuditOpen(true)}
+              className="party-hover-tint w-full rounded-md border px-2 py-1.5 text-[11px]"
+              style={{ borderColor: 'var(--party-bg-deepest)', color: 'var(--party-text-muted)' }}
+              data-testid="open-audit-drawer"
+              title="Show all checkpoint, ASK_HUMAN, and tool default-allow events for this session"
+            >
+              Audit log
+            </button>
+          </div>
+        </aside>
+
+        <AuditDrawer sessionId={sessionId} open={auditOpen} onClose={() => setAuditOpen(false)} />
+
+        {/* Floating mini-panel triggered by text selection inside the chat. */}
+        <SelectionPopover sessionId={sessionId} scopeRef={chatScopeRef} />
+      </div>
     </FileDrawerProvider>
   );
 }

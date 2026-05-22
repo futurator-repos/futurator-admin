@@ -35,6 +35,12 @@ export interface PartyProject {
   gitBranch?: string;
   lastPulledAt?: string | null;
   lastCommitSha?: string | null;
+  /**
+   * Story 21.1 (party-push Epic 21) — per-project push toggle. When true,
+   * the daemon passes `--push` to party-checkpoint.sh. Mirrors the field
+   * in functions/shared/types/party.ts. Defaults to false for legacy rows.
+   */
+  pushEnabled?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -54,6 +60,16 @@ export interface PartySession {
   createdAt: string;
   topic?: string;
   bmadVersionAtStart: string;
+  /**
+   * Story 20.6 (party-push Epic 20) — per-session worktree path. Identical
+   * to `projectPath` for post-party-push sessions; undefined for legacy.
+   */
+  worktreePath?: string;
+  /**
+   * Story 19.4 — branch name `party/<projectId>/<sessionIdShort>`. Used by
+   * Story 22.3's Open-PR endpoint and Story 22.5's checkpoint card.
+   */
+  partyBranch?: string;
 }
 
 export type PartyEventType =
@@ -78,7 +94,14 @@ export type PartyEventType =
   | 'party.refresh.step.output'
   | 'party.refresh.step.completed'
   | 'party.refresh.completed'
-  | 'party.refresh.failed';
+  | 'party.refresh.failed'
+  // Story 21.4 + 21.5 + 22.x (party-push Epic 21 + Epic 22)
+  | 'party.checkpoint.composed'
+  | 'party.checkpoint.pushed'
+  | 'party.checkpoint.blocked'
+  | 'party.checkpoint.failed'
+  | 'party.agent.question'
+  | 'party.tool.default-allow';
 
 export interface PartyEvent {
   jobId: string;

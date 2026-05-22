@@ -17,7 +17,7 @@
  *     gets one continuous event stream per session across N turns.
  */
 
-import { spawn as realSpawn } from 'node:child_process';
+import { spawn as realSpawn, spawnSync as realSpawnSync } from 'node:child_process';
 import { registerChild, unregisterChild } from './lib/child-tracker.mjs';
 
 // 10 min. The party-mode skill spawns BMad Master who explores the project
@@ -47,6 +47,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname as pathDirname, join as pathJoin } from 'node:path';
 import { startCancelPoller } from './lib/cancel-poller.mjs';
 import { extractMarkers } from './lib/party-marker-extractor.mjs';
+import { composeAgentCommit } from './lib/agent-commit-composer.mjs';
 
 function resolvePartyToolHookPath() {
   // Lazy: only resolves when V1 actually fires. Some test environments
@@ -56,6 +57,18 @@ function resolvePartyToolHookPath() {
     return fileURLToPath(new URL('./lib/party-tool-hook.sh', import.meta.url));
   } catch {
     return pathJoin(pathDirname(fileURLToPath(import.meta.url)), 'lib/party-tool-hook.sh');
+  }
+}
+
+/**
+ * Story 21.4 — lazy resolver for party-checkpoint.sh. Same import.meta.url
+ * guard as the hook resolver — the test environment uses non-file URLs.
+ */
+function resolvePartyCheckpointScriptPath() {
+  try {
+    return fileURLToPath(new URL('./lib/party-checkpoint.sh', import.meta.url));
+  } catch {
+    return pathJoin(pathDirname(fileURLToPath(import.meta.url)), 'lib/party-checkpoint.sh');
   }
 }
 
@@ -622,18 +635,158 @@ export async function runPartyTurn(job, ctx) {
     }
   }
 
+  // Story 21.4 — when V1 is enabled AND a CHECKPOINT_SUMMARY was extracted
+  // AND the session has a partyBranch + worktreePath (Story 20.6 bootstrap
+  // populated these), run party-checkpoint.sh. The script is idempotent
+  // for the empty-porcelain case, so running it without changes is cheap.
+  // The --push flag is set iff the project has opted into push (Story 21.2).
+  let checkpointSha = null;
+  let checkpointPushed = false;
+  if (
+    partyPushV1 &&
+    checkpoint &&
+    session.partyBranch &&
+    (session.worktreePath || session.projectPath)
+  ) {
+    try {
+      // Resolve project.pushEnabled. If getProject is unwired or throws,
+      // default to false (safe: commit-only).
+      let pushOptIn = false;
+      if (typeof getProject === 'function' && session.projectId) {
+        try {
+          const project = await getProject(session.projectId);
+          pushOptIn = project?.pushEnabled === true;
+        } catch (err) {
+          logger.warn?.(`[party-turn] getProject for checkpoint failed: ${err.message}`);
+        }
+      }
+      const checkpointResult = await runCheckpointScript({
+        sessionId,
+        projectId: session.projectId,
+        branch: session.partyBranch,
+        worktreePath: session.worktreePath || session.projectPath,
+        turnCount: session.turnCount,
+        title: checkpoint.title,
+        summary: checkpoint.body,
+        push: pushOptIn,
+        spawnSync: ctx.spawnSync || realSpawnSync,
+        logger,
+      });
+      checkpointSha = checkpointResult.sha || null;
+      checkpointPushed = checkpointResult.pushed === true;
+      // Emit the appropriate checkpoint event. The event the UI cares
+      // about (Story 22.5) is either .pushed or .composed.
+      const evtType =
+        checkpointResult.code === 2
+          ? 'party.checkpoint.blocked'
+          : checkpointResult.code === 0 && checkpointResult.pushed
+            ? 'party.checkpoint.pushed'
+            : checkpointResult.code === 0
+              ? 'party.checkpoint.composed'
+              : 'party.checkpoint.failed';
+      await pushEvent(sessionId, 'turn', '__party__', evtType, {
+        sessionId,
+        projectId: session.projectId,
+        branch: session.partyBranch,
+        round: session.turnCount,
+        title: checkpoint.title,
+        summary: checkpoint.body,
+        commitSha: checkpointSha,
+        pushed: checkpointPushed,
+        exitCode: checkpointResult.code,
+        reason: checkpointResult.reason,
+      });
+    } catch (err) {
+      logger.warn?.(`[party-turn] runCheckpointScript failed (non-fatal): ${err.message}`);
+    }
+  }
+
   await pushEvent(sessionId, 'turn', '__party__', 'party.turn.completed', {
     sessionId,
     claudeSessionId: capturedClaudeSessionId,
     exitCode,
     ...(checkpoint ? { checkpoint } : {}),
+    ...(checkpointSha ? { checkpointSha, checkpointPushed } : {}),
   });
 
   return {
     ok: true,
     claudeSessionId: capturedClaudeSessionId,
     ...(checkpoint ? { checkpoint } : {}),
+    ...(checkpointSha ? { checkpointSha, checkpointPushed } : {}),
   };
+}
+
+/**
+ * Story 21.4 — runs party-checkpoint.sh as a subprocess for one turn. Pure
+ * IO + composer wrap; logic-light so it's easy to mock in tests.
+ *
+ * Returns:
+ *   { code, sha, pushed, reason }
+ *
+ *   code   — script exit (0 success/empty, 2 secrets, 3 branch mismatch,
+ *            4 worktree missing, 5 push attempted but failed).
+ *   sha    — 40-char SHA from the last stdout line when committed; null when empty.
+ *   pushed — true when the script's stdout contains 'PUSHED: ' (exit 0 + --push).
+ *   reason — short token suitable for an event payload (PUSHED|COMPOSED|EMPTY|
+ *            SECRETS_HIT|BRANCH_MISMATCH|WORKTREE_MISSING|PUSH_FAILED|OTHER).
+ */
+async function runCheckpointScript(opts) {
+  const {
+    sessionId,
+    projectId,
+    branch,
+    worktreePath,
+    turnCount,
+    title,
+    summary,
+    push,
+    spawnSync,
+    logger,
+  } = opts;
+  const composed = composeAgentCommit({
+    kind: 'party',
+    title: title || '(untitled)',
+    summary: summary || '',
+    sessionId,
+    projectId,
+    round: turnCount,
+    trigger: 'round-end-auto',
+  });
+  const scriptPath = resolvePartyCheckpointScriptPath();
+  const args = [scriptPath, branch, worktreePath];
+  if (push) args.push('--push');
+  const result = spawnSync('bash', args, {
+    input: composed.message,
+    encoding: 'utf-8',
+    env: process.env,
+  });
+  const stdout = (result.stdout || '').toString();
+  const stderr = (result.stderr || '').toString();
+  const code = result.status;
+  // Last non-empty line of stdout is the SHA (or STATUS_PORCELAIN_EMPTY).
+  const lastLine = stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .pop();
+  const isSha = typeof lastLine === 'string' && /^[a-f0-9]{40}$/.test(lastLine);
+  const sha = isSha ? lastLine : null;
+  const pushed = code === 0 && stdout.includes('PUSHED:');
+  let reason = 'OTHER';
+  if (code === 0 && lastLine === 'STATUS_PORCELAIN_EMPTY') reason = 'EMPTY';
+  else if (code === 0 && pushed) reason = 'PUSHED';
+  else if (code === 0 && stdout.includes('PUSH_SKIPPED')) reason = 'COMPOSED';
+  else if (code === 2) reason = 'SECRETS_HIT';
+  else if (code === 3) reason = 'BRANCH_MISMATCH';
+  else if (code === 4) reason = 'WORKTREE_MISSING';
+  else if (code === 5) reason = 'PUSH_FAILED';
+  if (code !== 0 && code !== null) {
+    logger?.warn?.(
+      `[party-turn] party-checkpoint.sh exit=${code} reason=${reason} stderr=${stderr.slice(0, 400)}`,
+    );
+  }
+  return { code, sha, pushed, reason };
 }
 
 /**

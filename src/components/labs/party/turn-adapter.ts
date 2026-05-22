@@ -11,11 +11,7 @@
  */
 
 import type { PartyEvent } from '@/types/party';
-import {
-  parseTurn,
-  mergeAssistantTokens,
-  type PartyBlock,
-} from './turn-parser';
+import { parseTurn, mergeAssistantTokens, type PartyBlock } from './turn-parser';
 
 export type RoundStatus = 'active' | 'done' | 'awaiting' | 'error';
 
@@ -31,6 +27,24 @@ export interface ToolCall {
   /** Trimmed tool input (file_path, command, pattern, etc). */
   input: Record<string, unknown>;
   /** ISO timestamp the daemon emitted the tool_use event. */
+  timestamp: string;
+}
+
+/**
+ * Story 21.5 / 22.5 — per-round checkpoint summary. Adapter collects the
+ * terminal checkpoint event of a round (composed | pushed | blocked |
+ * failed) so the round renderer can show a single card without re-scanning
+ * the full event stream.
+ */
+export interface RoundCheckpoint {
+  kind: 'composed' | 'pushed' | 'blocked' | 'failed';
+  title?: string;
+  summary?: string;
+  branch?: string;
+  commitSha?: string | null;
+  pushed: boolean;
+  reason: string;
+  exitCode: number | null;
   timestamp: string;
 }
 
@@ -62,6 +76,12 @@ export interface Round {
   errorReason?: string;
   /** True if this is the round currently in flight (matches session status). */
   isInflight: boolean;
+  /**
+   * Story 21.5 — terminal checkpoint event for this round, if one was
+   * emitted by the daemon. Render after the assistant blocks so the
+   * operator sees what landed in git after the agent finished speaking.
+   */
+  checkpoint?: RoundCheckpoint;
 }
 
 export interface AdaptedSession {
@@ -119,6 +139,43 @@ function splitIntoRawRounds(events: ReadonlyArray<PartyEvent>): RawRound[] {
   }
   if (current) rounds.push(current);
   return rounds;
+}
+
+/**
+ * Story 21.5 — pick the last checkpoint event in a round (composed | pushed |
+ * blocked | failed). When the daemon emits multiple (legacy + rewrite), the
+ * latest one wins.
+ */
+function collectCheckpoint(events: ReadonlyArray<PartyEvent>): RoundCheckpoint | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i] as PartyEvent & {
+      title?: string;
+      summary?: string;
+      branch?: string;
+      commitSha?: string | null;
+      pushed?: boolean;
+      reason?: string;
+      exitCode?: number | null;
+    };
+    let kind: RoundCheckpoint['kind'] | null = null;
+    if (ev.eventType === 'party.checkpoint.pushed') kind = 'pushed';
+    else if (ev.eventType === 'party.checkpoint.composed') kind = 'composed';
+    else if (ev.eventType === 'party.checkpoint.blocked') kind = 'blocked';
+    else if (ev.eventType === 'party.checkpoint.failed') kind = 'failed';
+    if (!kind) continue;
+    return {
+      kind,
+      title: ev.title,
+      summary: ev.summary,
+      branch: ev.branch,
+      commitSha: ev.commitSha ?? null,
+      pushed: ev.pushed === true,
+      reason: String(ev.reason ?? ''),
+      exitCode: typeof ev.exitCode === 'number' ? ev.exitCode : null,
+      timestamp: ev.timestamp || new Date().toISOString(),
+    };
+  }
+  return undefined;
 }
 
 function collectTools(events: ReadonlyArray<PartyEvent>): ToolCall[] {
@@ -184,6 +241,7 @@ export function adaptSession(
     const text = mergeAssistantTokens(r.events);
     const blocks = parseTurn(text);
     const tools = collectTools(r.events);
+    const checkpoint = collectCheckpoint(r.events);
 
     const speakers: string[] = [];
     for (const b of blocks) {
@@ -209,6 +267,7 @@ export function adaptSession(
       turns,
       errorReason,
       isInflight: isLast && status === 'active',
+      ...(checkpoint ? { checkpoint } : {}),
     };
   });
 

@@ -2,12 +2,13 @@
 
 import { useState } from 'react';
 import { formatDistanceToNow } from 'date-fns';
-import { GitBranch, Loader2, RefreshCw, Trash2 } from 'lucide-react';
+import { GitBranch, Loader2, RefreshCw, Trash2, Upload, UploadCloud } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useMigrations } from '@/hooks/use-migrations';
 import { useRefreshProjectMutation } from '@/hooks/use-party-projects';
 import { ProjectStatusBadge } from '@/components/labs/party/project-status-badge';
 import { DeleteMigrationModal } from './delete-migration-modal';
+import { PushEnabledModal } from './push-enabled-modal';
 import type { Migration } from '@/types/migration';
 
 function truncateMiddle(s: string, max = 50): string {
@@ -28,6 +29,13 @@ export function MigrationsList({ highlight }: { highlight?: string | null }) {
   const { data, isLoading, error } = useMigrations();
   const refresh = useRefreshProjectMutation();
   const [pendingDelete, setPendingDelete] = useState<Migration | null>(null);
+  // Story 21.3 — push toggle modal. `intent` is whichever direction the
+  // operator just clicked; the modal renders different copy + form fields
+  // for enable vs disable.
+  const [pendingPush, setPendingPush] = useState<{
+    migration: Migration;
+    intent: 'enable' | 'disable';
+  } | null>(null);
 
   if (isLoading) {
     return (
@@ -64,6 +72,7 @@ export function MigrationsList({ highlight }: { highlight?: string | null }) {
           onRefresh={() => refresh.mutate(m.projectId)}
           refreshing={refresh.isPending && refresh.variables === m.projectId}
           onRequestDelete={() => setPendingDelete(m)}
+          onRequestPushToggle={(intent) => setPendingPush({ migration: m, intent })}
         />
       ))}
       <DeleteMigrationModal
@@ -71,6 +80,14 @@ export function MigrationsList({ highlight }: { highlight?: string | null }) {
         open={pendingDelete !== null}
         onOpenChange={(o) => {
           if (!o) setPendingDelete(null);
+        }}
+      />
+      <PushEnabledModal
+        migration={pendingPush?.migration ?? null}
+        intent={pendingPush?.intent ?? 'enable'}
+        open={pendingPush !== null}
+        onOpenChange={(o) => {
+          if (!o) setPendingPush(null);
         }}
       />
     </div>
@@ -83,6 +100,7 @@ interface CardProps {
   onRefresh: () => void;
   refreshing: boolean;
   onRequestDelete: () => void;
+  onRequestPushToggle: (intent: 'enable' | 'disable') => void;
 }
 
 function MigrationCard(p: CardProps) {
@@ -132,6 +150,30 @@ function MigrationCard(p: CardProps) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <Button
+            size="sm"
+            variant={m.pushEnabled ? 'default' : 'outline'}
+            className={`h-7 text-[11px] ${
+              m.pushEnabled
+                ? 'bg-success/20 text-success-foreground hover:bg-success/30'
+                : 'text-muted-foreground'
+            }`}
+            disabled={isBusy}
+            onClick={() => p.onRequestPushToggle(m.pushEnabled ? 'disable' : 'enable')}
+            data-testid={`migration-push-toggle-${m.projectId}`}
+            title={
+              m.pushEnabled
+                ? 'Push is enabled — party-checkpoint pushes to GitHub. Click to disable.'
+                : 'Push is disabled — checkpoints commit locally only. Click to enable (requires contents:write PAT).'
+            }
+          >
+            {m.pushEnabled ? (
+              <UploadCloud className="mr-1 h-3 w-3" />
+            ) : (
+              <Upload className="mr-1 h-3 w-3 opacity-50" />
+            )}
+            Push: {m.pushEnabled ? 'on' : 'off'}
+          </Button>
           <Button
             size="sm"
             variant="outline"

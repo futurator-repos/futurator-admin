@@ -119,7 +119,9 @@ export const brownfieldProjectInputSchema = z.object({
 
 /**
  * PATCH /api/migrations/:id body — operator can rotate the PAT and/or
- * update env vars without re-cloning.
+ * update env vars without re-cloning. Story 21.2 (party-push Epic 21)
+ * adds the optional `pushEnabled` field — flipping ON must include a
+ * fresh contents:write PAT in the same request.
  */
 export const updateMigrationInputSchema = z
   .object({
@@ -134,10 +136,23 @@ export const updateMigrationInputSchema = z
         z.string().max(8192),
       )
       .optional(),
+    pushEnabled: z.boolean().optional(),
   })
-  .refine((v) => v.pat !== undefined || v.envVars !== undefined, {
-    message: 'must include at least one of: pat, envVars',
-  });
+  .refine((v) => v.pat !== undefined || v.envVars !== undefined || v.pushEnabled !== undefined, {
+    message: 'must include at least one of: pat, envVars, pushEnabled',
+  })
+  .refine(
+    // Story 21.2 — flipping pushEnabled ON requires a fresh PAT in the same
+    // body. The existing PAT (if any) was issued with contents:read; the
+    // upgraded scope is contents:write and must come from a new GitHub
+    // token. Disabling (pushEnabled=false) does NOT require a PAT — the
+    // operator may want to demote a project's PAT scope after rotation.
+    (v) => !(v.pushEnabled === true && v.pat === undefined),
+    {
+      message:
+        'enabling pushEnabled requires a fresh contents:write PAT in the same request (pat field)',
+    },
+  );
 
 /**
  * Discriminated union over `kind` for POST /api/party/projects. Clients that

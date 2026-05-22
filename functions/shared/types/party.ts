@@ -63,6 +63,15 @@ export interface PartyProject {
    * same auth boundary so DDB is fine.
    */
   envVars?: Record<string, string>;
+  /**
+   * Story 21.1 (party-push Epic 21) — when true, the daemon's
+   * `party-checkpoint.sh` is allowed to run its push step. Defaults to
+   * undefined (treated as false). Flipped on by the operator via the
+   * Migrate UI's "Push enabled" toggle, which atomically rotates the
+   * project's PAT to a contents:write scope at the same time. Per
+   * `plan.md` §1 decision 2 this is opt-in per project, never default-on.
+   */
+  pushEnabled?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -228,7 +237,27 @@ export type PartyEventType =
   | 'party.refresh.step.output'
   | 'party.refresh.step.completed'
   | 'party.refresh.completed'
-  | 'party.refresh.failed';
+  | 'party.refresh.failed'
+  // Story 21.4 + 21.5 (party-push Epic 21) — daemon-emitted checkpoint
+  // events. The .pushed variant carries `commitSha + branch + pushed:true`
+  // when party-checkpoint.sh successfully pushes to GitHub; .composed
+  // means the commit landed locally but push was gated off; .blocked
+  // means the secrets scan stopped the commit; .failed covers any other
+  // non-zero exit (incl. exit 5 = push attempted but failed — commit DID
+  // land locally with `pushed:false`).
+  | 'party.checkpoint.composed'
+  | 'party.checkpoint.pushed'
+  | 'party.checkpoint.blocked'
+  | 'party.checkpoint.failed'
+  // Story 20.7 (Epic 20) — already wired by party-turn.mjs but missing
+  // from the union. The agent-extracted ASK_HUMAN marker becomes this
+  // event; the UI's inline-questions list (Story 22.6) renders it.
+  | 'party.agent.question'
+  // Story 20.3 (Epic 20) — party-tool-hook.sh's default-allow audit
+  // emits this when it falls through to allow. The audit drawer
+  // (Story 22.7) surfaces these so operators can grow the deny-list
+  // from real signal.
+  | 'party.tool.default-allow';
 
 export interface PartyEvent {
   jobId: string;
