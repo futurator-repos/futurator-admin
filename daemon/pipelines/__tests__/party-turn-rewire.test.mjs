@@ -51,10 +51,17 @@ let worktreePath;
 function makeCtx(overrides = {}) {
   return {
     pushEvent: vi.fn(async () => {}),
+    // Pre-populate `worktreePath` + `partyBranch` so the lazy-setup branch
+    // added in Story 20.16 carryover (party-turn.mjs setupPartyWorktree call)
+    // SKIPS the setup. Tests that want to exercise the setup path can
+    // override `getSession` to return a session without these fields AND
+    // wire `setupPartyWorktree`'s deps (bare-repo fixture).
     getSession: vi.fn(async (sessionId) => ({
       sessionId,
       projectId: 'applicator',
       projectPath: worktreePath,
+      worktreePath,
+      partyBranch: `party/applicator/${SESSION_ID.slice(0, 8)}`,
       claudeSessionId: null,
       status: 'PROCESSING',
       turnCount: 0,
@@ -69,6 +76,7 @@ function makeCtx(overrides = {}) {
     sessionsRepo: {
       getSession: vi.fn(async () => ({ cancelRequested: false })),
       clearCancelFlag: vi.fn(async () => {}),
+      setWorktreePath: vi.fn(async () => {}),
     },
     claudeBin: 'claude',
     spawn: vi.fn(),
@@ -101,13 +109,17 @@ afterEach(() => {
 });
 
 describe('Story 20.7 — WORKTREE_MISSING gate (AC 4.1)', () => {
-  it('throws WORKTREE_MISSING when session.projectPath does not exist', async () => {
+  it('throws WORKTREE_MISSING when worktreePath is set on the session but the dir is gone (post-setup race)', async () => {
+    // Reaper deleted the worktree after the session row was populated.
+    // Lazy-setup is skipped (worktreePath + partyBranch present); the cwd
+    // assertion that runs immediately after fires.
     const ctx = makeCtx();
-    // Override getSession to return a non-existent path.
     ctx.getSession = vi.fn(async () => ({
       sessionId: SESSION_ID,
       projectId: 'applicator',
       projectPath: '/nonexistent/worktree/path',
+      worktreePath: '/nonexistent/worktree/path',
+      partyBranch: `party/applicator/${SESSION_ID.slice(0, 8)}`,
       claudeSessionId: null,
       status: 'PROCESSING',
       turnCount: 0,
@@ -117,12 +129,35 @@ describe('Story 20.7 — WORKTREE_MISSING gate (AC 4.1)', () => {
       GSI1SK: 'x',
     }));
     await expect(runPartyTurn(turnJob(), ctx)).rejects.toThrow(/WORKTREE_MISSING/);
-    // No spawn should have happened.
     expect(ctx.spawn).not.toHaveBeenCalled();
-    // The error event should have been emitted before the throw.
     const errorEvents = ctx.pushEvent.mock.calls.filter((c) => c[3] === 'party.turn.error');
     expect(errorEvents.length).toBeGreaterThan(0);
     expect(errorEvents[0][4].reason).toBe('WORKTREE_MISSING');
+  });
+
+  it('Story 20.16 lazy-setup — throws WORKTREE_SETUP_FAILED when the bare repo is missing pre-setup', async () => {
+    // Fresh session (no worktreePath / no partyBranch on the row).
+    // Lazy-setup tries setupPartyWorktree which throws if no bare repo —
+    // operator must run /api/admin/migrate-brownfield first.
+    const ctx = makeCtx();
+    ctx.getSession = vi.fn(async () => ({
+      sessionId: SESSION_ID,
+      projectId: 'applicator',
+      projectPath: worktreePath,
+      // intentionally NO worktreePath / partyBranch — fresh session row.
+      claudeSessionId: null,
+      status: 'PROCESSING',
+      turnCount: 0,
+      createdAt: 'x',
+      bmadVersionAtStart: '6.0.0-alpha.7',
+      GSI1PK: 'applicator',
+      GSI1SK: 'x',
+    }));
+    await expect(runPartyTurn(turnJob(), ctx)).rejects.toThrow(/WORKTREE_SETUP_FAILED/);
+    expect(ctx.spawn).not.toHaveBeenCalled();
+    const errorEvents = ctx.pushEvent.mock.calls.filter((c) => c[3] === 'party.turn.error');
+    expect(errorEvents.length).toBeGreaterThan(0);
+    expect(errorEvents[0][4].reason).toBe('WORKTREE_SETUP_FAILED');
   });
 });
 

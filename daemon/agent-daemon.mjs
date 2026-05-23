@@ -3298,6 +3298,41 @@ async function partyReleaseSessionLock(sessionId, finalStatus) {
   );
 }
 
+// Story 19.4 / 20.6 — persist the per-session worktree path + branch on
+// first lazy-setup (party-turn.mjs V1 path). Subsequent turns see the
+// fields on the session row and skip the setup.
+async function partySetWorktreePath(sessionId, { worktreePath, partyBranch }) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: PARTY_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression:
+        'SET worktreePath = :wp, partyBranch = :pb, projectPath = :wp, updatedAt = :now',
+      ExpressionAttributeValues: {
+        ':wp': worktreePath,
+        ':pb': partyBranch,
+        ':now': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+// Story 19.4 — clear the cancel flag at turn start (defense against stale
+// flags from a prior turn). cancel-poller.mjs's stop() also clears at
+// close; this is the cross-turn drift safety net.
+async function partyClearCancelFlag(sessionId) {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: PARTY_SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: 'REMOVE cancelRequested, cancelRequestedAt SET updatedAt = :now',
+      ExpressionAttributeValues: {
+        ':now': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Story 18.2 — Free Claude Code Agent sessions repo facade (daemon-side).
 //
@@ -3626,6 +3661,16 @@ async function executePartyTurnJob(job) {
       setClaudeSessionId: partySetClaudeSessionId,
       incrementTurn: partyIncrementTurn,
       releaseSessionLock: partyReleaseSessionLock,
+      // Story 20.6/19.4 facade — surfaces the daemon's DDB helpers as a
+      // minimal sessionsRepo so party-turn V1 can lazy-create worktrees,
+      // clear stale cancel flags, and (via cancel-poller) poll the cancel
+      // flag mid-turn. Each method is optional in party-turn (presence
+      // gates the behavior) so older daemons without these stay functional.
+      sessionsRepo: {
+        getSession: partyGetSession,
+        setWorktreePath: partySetWorktreePath,
+        clearCancelFlag: partyClearCancelFlag,
+      },
       claudeBin: CLAUDE_BIN,
       spawn,
       // ANTHROPIC_API_KEY is set on process.env by loadApiKeyFromSsm; the

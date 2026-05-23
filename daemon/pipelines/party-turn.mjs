@@ -48,6 +48,7 @@ import { dirname as pathDirname, join as pathJoin } from 'node:path';
 import { startCancelPoller } from './lib/cancel-poller.mjs';
 import { extractMarkers } from './lib/party-marker-extractor.mjs';
 import { composeAgentCommit } from './lib/agent-commit-composer.mjs';
+import { setupPartyWorktree, WorktreeSetupError } from './lib/party-worktree.mjs';
 
 function resolvePartyToolHookPath() {
   // Lazy: only resolves when V1 actually fires. Some test environments
@@ -262,10 +263,85 @@ export async function runPartyTurn(job, ctx) {
   // ── Story 20.7 (party-push Epic 20) — pre-spawn gates ────────────────
   const partyPushV1 = isPartyPushV1Enabled();
   if (partyPushV1) {
-    // (1) cwd assertion — defend against reaper-mid-flight. The session's
-    // projectPath is the per-session worktree path (set by Story 20.6
-    // bootstrap). If it's been removed underfoot, fail loudly rather
-    // than spawn into a phantom cwd and silently produce garbage.
+    // (1) Lazy worktree setup. POST /api/party/sessions creates the session
+    // row with `projectPath = project.path` (the LEGACY shared folder) and
+    // never calls setupPartyWorktree, so on the first turn we materialize
+    // the per-session worktree here. Story 20.6's setup is idempotent so
+    // subsequent turns are a no-op (reuse). Persist the resolved
+    // worktreePath + partyBranch back to the session row so audit + delete
+    // cascade + checkpoint emission see them.
+    //
+    // CRITICAL CONSTRAINT (2026-05-23): only run lazy-setup when the
+    // session is fresh (`claudeSessionId === null`). Claude Code namespaces
+    // per-session state by cwd-hash in ~/.claude/projects/; switching cwd
+    // between turns on an existing `--resume <id>` session breaks the
+    // session lookup and the subprocess exits 1 with no useful output. So:
+    //   - Fresh session (no claudeSessionId yet) → setup + persist + use worktree
+    //   - Existing session (claudeSessionId set) but no worktreePath → leave
+    //     it on the legacy shared folder for the rest of its life. New
+    //     sessions created from this point will get the worktree path.
+    //
+    // Stays silent (no exception, no event) when V1 was off when the
+    // session was created — operator may have re-enabled V1 mid-flight.
+    let resolvedWorktreePath = session.worktreePath || null;
+    let resolvedPartyBranch = session.partyBranch || null;
+    const isFreshSession = !session.claudeSessionId;
+    if (isFreshSession && (!resolvedWorktreePath || !resolvedPartyBranch)) {
+      try {
+        const setup = await setupPartyWorktree({
+          projectId: session.projectId,
+          sessionId,
+          log: (level, msg) => logger?.[level]?.(msg),
+        });
+        resolvedWorktreePath = setup.worktreePath;
+        resolvedPartyBranch = setup.branch;
+        if (typeof ctx.sessionsRepo?.setWorktreePath === 'function') {
+          try {
+            await ctx.sessionsRepo.setWorktreePath(sessionId, {
+              worktreePath: resolvedWorktreePath,
+              partyBranch: resolvedPartyBranch,
+            });
+            // Mutate the in-memory session so the rest of this turn uses
+            // the per-session worktree as cwd (instead of the legacy
+            // shared folder it was created with).
+            session.worktreePath = resolvedWorktreePath;
+            session.partyBranch = resolvedPartyBranch;
+            session.projectPath = resolvedWorktreePath;
+          } catch (writeErr) {
+            logger?.warn?.(
+              `[party-turn] setWorktreePath persist failed (continuing in-memory only): ${writeErr.message}`,
+            );
+            session.projectPath = resolvedWorktreePath;
+            session.worktreePath = resolvedWorktreePath;
+            session.partyBranch = resolvedPartyBranch;
+          }
+        } else {
+          // Repo doesn't expose setWorktreePath (older daemon code paths).
+          // Still use the worktree for this turn — better than the shared folder.
+          session.projectPath = resolvedWorktreePath;
+          session.worktreePath = resolvedWorktreePath;
+          session.partyBranch = resolvedPartyBranch;
+        }
+      } catch (setupErr) {
+        await pushEvent(sessionId, 'turn', '__party__', 'party.turn.error', {
+          sessionId,
+          reason:
+            setupErr instanceof WorktreeSetupError ? setupErr.reason : 'WORKTREE_SETUP_FAILED',
+          message: setupErr.message || String(setupErr),
+        });
+        try {
+          await releaseSessionLock(sessionId, 'ERROR');
+        } catch {
+          /* best effort */
+        }
+        throw setupErr;
+      }
+    }
+
+    // (2) cwd assertion — defend against reaper-mid-flight. After the
+    // lazy setup above, the worktree path SHOULD exist. If it doesn't,
+    // the reaper raced us (rare) and the only safe action is to fail
+    // loudly so the operator opens a new session.
     if (!fsExistsSync(session.projectPath)) {
       await pushEvent(sessionId, 'turn', '__party__', 'party.turn.error', {
         sessionId,
@@ -282,7 +358,7 @@ export async function runPartyTurn(job, ctx) {
       throw new Error(`WORKTREE_MISSING: ${session.projectPath}`);
     }
 
-    // (2) Clear any stale cancel flag from a prior turn BEFORE spawning.
+    // (3) Clear any stale cancel flag from a prior turn BEFORE spawning.
     // Otherwise a flag the operator never cleared could pre-cancel this
     // fresh turn. (cancel-poller's stop() also clears, but only at the
     // end of THIS turn — the pre-spawn clear handles cross-turn drift.)
