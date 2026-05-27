@@ -264,9 +264,270 @@ Per-session caps already exist (`$10` default). For autonomous operation, also n
 
 ## 7. Phased rollout
 
-Each phase ships independently and proves out the next. **Do not skip a phase.** The pause flag (5.6) must exist before any auto-merge.
+> **2026-05-27 RE-SEQUENCED.** The original 5-phase rollout (kept below as historical context in §7.OLD) targeted "Phase 1 ships in half a day" — that was for the v0 scope before the §9.2 resolution added inline merge-approval and before the operator decided to fold all originally-deferred items into the MVP. The binding implementer guide is now the 4-PR sequence in §7.1–§7.4, sized at ~8 days total.
+>
+> **Why re-sequence:** (a) §9.2 turned "open a PR" into "open a PR + inline approval card + 3 events + 3 endpoints," (b) the §7 binding rule ("pause flag must exist before any auto-merge") moves the kill switch from Phase 2 into PR B, and (c) the operator's confirmed v1 scope includes Rungs 1–5 plus the deferred items (DeployerLambda, auto-merge-green, retry-wave, daily spend enforcement, cycle cap enforcement, attention-items autotrigger). The PR boundaries below preserve the original safety-first property — each PR's smoke gate can be exercised before the next PR's surface lands — while folding everything into one coherent MVP.
 
-### Phase 1 — "Agent opens PRs" (~half-day)
+### §7.1 PR A — Free-Agent Unification (~½ day)
+
+**Source-of-truth doc:** `docs/concepts/free-agent-unification.md` §3.1–§3.11 (file-level work plan) + §4 (10 acceptance criteria).
+
+**Prerequisites:** party-push Epics 19–22 in production. ✅ MET as of 2026-05-27.
+
+**Scope:**
+
+- Move `/home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/` → `/home/ubuntu/worktrees/<projectId>/_assist/<sessionIdShort>/`. Same shared root + `_<reserved>` namespace pattern as party's `_party` worktrees.
+- Branch shortens: `assist/<projectId>/<fullUuid>` → `assist/<projectId>/<sessionIdShort>` (matches party convention).
+- Extend `daemon/lib/worktree-reaper.mjs` with the `_assist` namespace walker. Single reaper now sweeps per-story + coordinator + node-modules-store + party + assist namespaces.
+- One-time migration script at daemon startup (`daemon/lib/free-agent-unification-migration.mjs`): `rm -rf /home/ubuntu/free-agent-worktrees/`, mark in-flight free-agent sessions as `EXPIRED` with `errorReason='WORKTREE_UNIFICATION_MIGRATION'`. Sentinel file prevents re-run.
+- Delete `daemon/lib/free-agent-gc.mjs` (subsumed by the unified reaper).
+- CLAUDE.md "Recent changes" entry.
+
+**Smoke gate (do not start PR B until all green):**
+
+1. `npx vitest run daemon/ functions/` — green (pre-existing baseline failures stay green).
+2. `./scripts/rsync-daemon.sh` — daemon restarts cleanly; log shows `[unification-migration] complete: oldRoot=removed, sessionsMarked=N`.
+3. `ssh ec2 ls /home/ubuntu/free-agent-worktrees/` returns "No such file or directory".
+4. Operator opens a fresh free-agent chat on `snake-4`: spawned with `cwd=/home/ubuntu/worktrees/snake-4/_assist/<sid8>/`; tool calls render normally; `git status` (read-only allowed) shows the new branch.
+5. Open a chat on `applicator` (brownfield, already converted to bare topology): same behavior — `_assist` worktree comes off the same bare repo party uses.
+6. Reaper hourly sweep includes the new namespace: log line ends with `assist N/M scanned/reaped`.
+7. Existing party + pipeline-v2 flows unaffected (operator opens a party debate on applicator → still works).
+
+**Estimated effort:** ~4 hours of focused work.
+
+---
+
+### §7.2 PR B — Rung 1 + Pause/Kill Switch + Spend Instrumentation (~2.5 days)
+
+The phone-first remediation loop, with the safety net that **must** exist before any auto-merge surface lands.
+
+**Prerequisites:** PR A merged. Smoke gate green.
+
+**Scope:**
+
+**a. Bootstrap endpoint** (Gap 1 from the §9.1 RESOLVED block):
+
+- `POST /api/admin/bootstrap-self-edit-repo` — one-time admin action, idempotent. Mirrors Story 20.4's brownfield converter:
+  - Bare-clone `https://github.com/futurator-repos/futurator-admin.git` → `/home/ubuntu/repos/futurator-admin.git` (with admin GitHub PAT).
+  - `git worktree add /home/ubuntu/projects/futurator-admin main` as the operator's "checkout mirror" (read-only by convention; lets the operator's free-agent sessions diff against `main` without re-cloning).
+  - Idempotent: returns `{ converted: false, reason: 'already-bare-topology' }` on re-run.
+  - Audit row in CloudWatch.
+- ~1 hour. Same SSM-script + preflight pattern as Story 20.4.
+
+**b. Risk classifier (red / yellow / green)** (§9.6 layer 1):
+
+- New module `daemon/pipelines/lib/agent-risk-classifier.mjs` — pure function `classifyDiff(touchedPaths, additions, deletions) → { class, reasons[] }`.
+- `red` class: any touched path matches a pattern in `daemon/lib/agent-danger-paths.json`. v1 patterns:
+  - `daemon/**`, `functions/cron/**`, `sst.config.ts`, `functions/shared/auth-middleware.ts`, `functions/shared/repositories/**`, `.github/workflows/**`, `daemon/lib/agent-danger-paths.json` itself, `daemon/pipelines/lib/agent-risk-classifier.mjs` itself, `daemon/lib/git-deny-list.json`.
+- `yellow` class: more than 50 lines changed across non-test files, OR touched paths in `functions/api/index.ts`, OR new files in `src/components/labs/`.
+- `green` class: everything else — typically test-only diffs, docs, copy fixes, single-file UI tweaks.
+- Self-referential: the classifier source file is in `agent-danger-paths.json`. Any change to the classifier is `red`.
+
+**c. Spend instrumentation** (§9.5 gap-fix; enforcement deferred to PR C):
+
+- New DDB table `futurator-agent-spend-log` (PAY_PER_REQUEST, 90d TTL): `{ logId (PK), jobId, sessionId, projectId, agentClass, walltimeSec, costUsd, createdAt, GSI1PK=date, GSI1SK=createdAt }`.
+- Daemon `runJobAsync`'s finally block writes one row per completed job: `walltimeSec = (now - startedAt)/1000`, `costUsd = walltimeSec × 0.02` (the configurable constant; env var `AGENT_COST_PER_SEC`, default 0.02).
+- New repo helper `getDailySpend(date)` queries GSI1 by date.
+- Read-only in PR B — UI panel surfaces today's spend in the daemon-status pill. Enforcement (refuse new sessions when cap exceeded) lands in PR C.
+
+**d. Rung 1 surface — agent opens PRs:**
+
+- New API: `POST /api/free-agent/sessions/:id/open-pr` — body: `{ title, body? }`. Server-side flow:
+  1. Runs `agent-risk-classifier.mjs` against the session's assist-branch diff vs `main`. Classification result goes into the PR body + the event.
+  2. Daemon executes a new `daemon/pipelines/lib/free-agent-commit-push.sh` (mirror of `party-checkpoint.sh` — runs in the `_assist` worktree, secrets scan via `git-deny-list.json`, `git push --set-upstream origin assist/<app>/<sid8>`).
+  3. Uses the project's contents:write PAT (same Secrets Manager pattern as party-push Story 21.2). The Free Agent's PAT scope = `contents:write` + `pull_requests:write` on the brownfield repo (or the admin repo when targeting `futurator-admin`).
+  4. Opens the PR via the GitHub connector's `createPullRequest()` (already shipped by Story 22.3 — extend to populate the templated body with `riskClass`, `gateResults`, `diffSummary`, chat-session deep link, and `Risk-Class: <class>` label).
+  5. Emits `free-agent.merge.requested` event with `{ prNumber, prUrl, riskClass, diffSummary, gateResults }`.
+- New API: `POST /api/free-agent/sessions/:id/approve-merge` — server-side merge via `gh api -X PUT /repos/.../pulls/N/merge`. Emits `free-agent.merge.completed`. For `red` class, requires `{ typedConfirmation: <exact PR title> }` in the body (§9.1 non-negotiable rider).
+- New API: `POST /api/free-agent/sessions/:id/reject-merge` — closes PR via `gh api -X PATCH /repos/.../pulls/N -f state=closed`. Emits `free-agent.merge.rejected`. Reason gets injected back into the chat as the next user-turn so the agent can revise.
+
+**e. Inline merge-approval card** (the §9.2 UX surface):
+
+- New event types in `functions/shared/types/free-agent-events.ts`: `free-agent.merge.requested`, `free-agent.merge.completed`, `free-agent.merge.rejected`.
+- Frontend `src/components/free-agent/merge-approval-card.tsx`:
+  - Diff summary (file count + lines added/removed; expandable to show actual diff via `gh api /repos/.../pulls/N/files`).
+  - Gate pass/fail chips (lint / typecheck / test / secrets scan).
+  - Risk class chip (green/yellow/red).
+  - `[Approve]` and `[Reject + Explain]` buttons.
+  - For `red` class: replace `[Approve]` with a modal that requires the operator to type the PR title verbatim.
+- Renders inline in the free-agent widget's round stream (same pattern as party's CheckpointCard from Story 22.5).
+
+**f. Pause/kill switch** (moved from original Phase 2 — binding rule: must exist before auto-merge):
+
+- New DDB table `futurator-agent-flags`: `{ flagName (PK), value, updatedBy, updatedAt }`. v1 keys: `agent.paused: 'true' | 'false'`.
+- Daemon poll-loop checks the flag BEFORE claiming any PENDING job. Cached 5s.
+- New API: `POST /api/admin/pause`, `POST /api/admin/resume` (both require admin auth).
+- Panel header in the admin UI gets a global `[⏸ Pause agent]` toggle. Visible across all admin routes (lives in the existing daemon-status pill).
+- CLI shortcuts: `npm run agent:pause`, `npm run agent:resume`.
+- Pause is global across all agent classes (party + free-agent + pipeline-v2). Existing in-flight jobs complete normally; new sessions / new turns are blocked.
+
+**Smoke gate (do not start PR C until all green):**
+
+1. `npx vitest run` — green.
+2. Bootstrap endpoint: `curl -X POST /api/admin/bootstrap-self-edit-repo` → returns `{ converted: true, bareRepoPath, worktreePath, headSha }`. Re-run → returns `{ converted: false, reason: 'already-bare-topology' }`.
+3. **The "develop a new module" test:** operator opens a chat on `applicator`, asks: _"Add a new file `docs/agents/free-agent-smoke-test.md` with a 5-line summary of this conversation."_ Agent edits, commits to `_assist` branch, operator says _"open the PR"_ → agent calls `/open-pr` → push lands on GitHub at `assist/applicator/<sid8>` → inline card appears in chat with green risk class, all gates passing → operator taps `[Approve]` → server merges to `main` → chat shows "✅ Merged".
+4. **Red-class typed confirmation:** operator asks agent to "change `MAX_CONCURRENT` to 3 in `daemon/agent-daemon.mjs`". Classifier marks `red`. Inline card requires typed confirmation. Operator types the PR title verbatim → merge proceeds.
+5. **Reject flow:** operator asks for a fix → agent opens PR → operator taps `[Reject + Explain]` → enters "Use Map instead of object for the new cache". The rejection becomes a new user-turn in the chat. Agent re-investigates + opens a new PR.
+6. **Pause:** operator taps the panel header `[⏸ Pause agent]` toggle → opens a new chat in the same project → daemon does NOT claim the new turn job → DDB row stays `PENDING`. Operator taps Resume → job claims and runs.
+7. Daily spend pill shows today's accumulated wall-clock spend.
+
+**Estimated effort:** ~2.5 days of focused work.
+
+---
+
+### §7.3 PR C — Rung 2 + Rung 3 + Rung 4 (~3.5 days)
+
+Auto-merge green PRs + self-deploy via DeployerLambda + cycle/spend enforcement. The load-bearing PR — the most safety-critical surface in the MVP.
+
+**Prerequisites:** PR B merged. Smoke gate green. Operator has used the inline-approval card on at least 3 sessions to build confidence in classifier verdicts.
+
+**Scope:**
+
+**a. Auto-merge green PRs** (Rung 2):
+
+- New GitHub Actions workflow `.github/workflows/agent-auto-merge.yml`:
+  - Triggers on PR `opened` + `labeled` events with author = futurator-agent-bot (the contents:write PAT's identity).
+  - Runs gates: lint + typecheck + test + (party-push's existing) secrets scan + the classifier (re-runs from `main` per §9.6 layer 2).
+  - If all gates pass AND classifier returns `green` → posts approving review → enables auto-merge.
+- The classifier runs from `main` (load-bearing per §9.6 layer 2). The workflow checks out `main` first, runs the classifier on the PR's diff, then merges only on green. A PR can physically not relax its own classification.
+- `yellow` and `red` PRs are NEVER auto-merged. The inline-approval card still drives them.
+- The inline-approval card becomes informational ("auto-merged + deployed in 2m13s") for green-class PRs — `free-agent.merge.completed` event still fires.
+
+**b. Self-referential danger-list** (§9.6 layer 1, full coverage):
+
+- Extend `daemon/lib/agent-danger-paths.json` to cover `agent-risk-classifier.mjs`, `agent-danger-paths.json` itself, the new `.github/workflows/agent-auto-merge.yml`, `daemon/lib/git-deny-list.json`, `functions/cron/deployer-lambda.ts` (new in this PR), `functions/cron/health-watcher.ts` (new), `sst.config.ts`.
+- All listed paths trigger `red` class regardless of diff size. Operator approval (typed-confirmation card) is the only path to merge changes to these files. PR C ships the patterns, but the v1 enforcement is purely classifier-side.
+
+**c. DeployerLambda** (§9.1 RESOLVED + Rung 4):
+
+- New `functions/cron/deployer-lambda.ts` + SST resource. Triggered on `main` push via GitHub webhook (or cron poll every 60s as v1 fallback; webhook is the v2 refinement).
+- Flow:
+  1. Check `/opt/futurator-daemon/.last-rsync-mtime` via SSM. If rsync ran in the last 10 min (the §9.1 RESOLVED rsync-vs-DeployerLambda contract), back off. Write attention item: "operator-rsync detected at <time>, skipping self-deploy of <commitSha>."
+  2. Otherwise: snapshot `/opt/futurator-daemon/` → `/opt/.rollback/<timestamp>/` (full `cp -a`; preserves env, node_modules, OAuth tokens).
+  3. SSH (via SSM) into EC2, `cd /home/ubuntu/projects/futurator-admin`, `git pull origin main`, `rsync -a --delete /home/ubuntu/projects/futurator-admin/daemon/ /opt/futurator-daemon/`.
+  4. Restart systemd unit: `systemctl restart futurator-daemon`. Wait 60s.
+  5. Health-check loop (60s budget, 1 probe/sec): daemon must (a) be active per `systemctl is-active`, (b) write a fresh heartbeat row to DDB, (c) pass Auth probe (existing log line `Auth probe: OK`).
+  6. If breached: auto-rollback via `cp -a /opt/.rollback/<timestamp>/ /opt/futurator-daemon/ && systemctl restart futurator-daemon`. Emit `free-agent.deploy.rolled-back` event. Write attention item.
+  7. If healthy: emit `free-agent.deploy.completed` event with timing.
+- `sst.config.ts` adds the DeployerLambda with `iam:Restart` + `ssm:SendCommand` permissions scoped to the daemon instance.
+
+**d. Daily spend cap enforcement** (PR B's instrumentation now gated):
+
+- New env var `AGENT_DAILY_SPEND_CAP_USD` (default $200/day).
+- `POST /api/free-agent/sessions` (session creation) calls `getDailySpend(today)` first. If today's total >= cap → 429 with `{ code: 'DAILY_SPEND_CAP', spentUsd, capUsd }`.
+- Existing sessions stay readable (chat history accessible) but cannot start new turns. Operator sees `[⛔ Daily spend cap reached — $200/$200]` in the widget header.
+- Operator can override via `POST /api/admin/spend-cap/override-today` (one-day grace).
+
+**e. Cycle cap enforcement** (§9.5 — 3 fix→retry cycles per (plan, wave)):
+
+- New DDB table `futurator-fix-cycles`: `{ planId#waveNumber (PK), attempts, lastAttemptAt, sessionIds[], status: 'open' | 'exhausted' }`.
+- When a free-agent session opens a PR targeting a pipeline-v2 wave fix (detected by `merge.requested` event's `metadata.targetWaveFailure`), increment the counter. At 3 attempts, the agent's next `/open-pr` call returns 409 with `{ code: 'CYCLE_CAP_EXHAUSTED', planId, waveNumber, attempts: 3 }` and emits an attention item: "3 fix attempts exhausted on plan X wave Y — manual investigation needed."
+- The cap applies ONLY to pipeline-v2 wave fixes. Greenfield/brownfield module-development sessions (the §7.2 smoke-gate flow) are uncapped except by the daily spend cap.
+
+**Smoke gate (do not start PR D until all green):**
+
+1. `npx vitest run` — green.
+2. **Auto-merge green:** operator asks for a docs-only fix on `applicator`. Classifier returns `green`. Operator does NOT tap Approve. GitHub Actions runs, marks the PR mergeable, auto-merge fires. Operator gets a push notification "auto-merged + deployed" (PR D wires push; PR C just emits the event to the widget). Chat shows the merge-card in "auto-merged" state.
+3. **Self-deploy:** operator asks for a daemon-class change ("update WORKTREE_ROOT comment in `daemon/lib/worktree-paths.mjs`"). Classifier returns `red`. Inline card requires typed confirmation. Operator approves → PR merges to `main` → DeployerLambda triggers via webhook → snapshot taken at `/opt/.rollback/<ts>/` → rsync from worktree → restart → health-check passes → daemon comes back with the new code → emit `deploy.completed`.
+4. **Auto-rollback:** intentionally land a syntax error in the daemon (operator-driven test: edit + `rsync` directly). DeployerLambda's NEXT trigger detects the rsync-in-last-10-min, skips. Now intentionally land a syntax error VIA the agent (PR + merge path). DeployerLambda rsyncs → restart fails → health-check fails at 60s → snapshot restored → daemon comes back on the prior commit → attention item written.
+5. **Daily spend cap:** set `AGENT_DAILY_SPEND_CAP_USD=0.01` for the test. Try to open a new chat → 429 with `DAILY_SPEND_CAP`. Reset cap → works again.
+6. **Cycle cap:** manually create 3 free-agent sessions that target the same pipeline-v2 wave failure. Fourth attempt → 409 with `CYCLE_CAP_EXHAUSTED`. Attention item appears.
+7. **Self-referential gate:** operator tries to change `agent-risk-classifier.mjs` itself. Classifier (running from `main`) returns `red`. Card requires typed confirmation. Approved → PR merges; classifier on `main` advances on the next commit.
+
+**Estimated effort:** ~3.5 days of focused work.
+
+---
+
+### §7.4 PR D — Rung 5: Attention-Items Autotrigger + Push Notifications (~1.5 days)
+
+The "agent acts without me opening a chat" surface. The final rung.
+
+**Prerequisites:** PR C merged. Smoke gate green. Operator has watched at least one auto-merge-green PR self-deploy successfully.
+
+**Scope:**
+
+**a. `remediationPolicy` field on attention items** (§9.7 RESOLVED):
+
+- Add `remediationPolicy?: 'manual' | 'auto-draft' | 'auto-fix'` to the attention-items repo type. Default: `manual` (today's behavior for every item-type — no change for items already in the table).
+- Configurable per item-type via a new admin UI panel: `Settings → Agent → Remediation Policies` (table of all known item-type values × policy dropdown).
+- Initial defaults shipped in PR D: ALL types stay `manual`. Operator graduates types to `auto-draft` (then later `auto-fix`) as confidence builds.
+
+**b. Attention-items poller in the daemon:**
+
+- New ticker in `agent-daemon.mjs`, 30s cadence, gated by the pause flag (PR B's surface).
+- Each tick: scan `futurator-attention-items` for `status=open AND remediationPolicy IN ('auto-draft', 'auto-fix') AND agentSessionId is null` (last filter prevents double-spawn).
+- For each item: create a free-agent session (`POST /api/free-agent/sessions` server-side, bypassing the operator-auth layer with a special daemon-bot identity). Prime the first user-turn with the attention item's body. Stamp `agentSessionId` on the attention-item row.
+- For `auto-draft` policy: agent's flow stops at `merge.requested` (operator approves via inline card or push notification).
+- For `auto-fix` policy: if classifier returns `green` AND all gates pass, agent calls `/approve-merge` ITSELF (server-side endpoint, daemon-bot identity). For `yellow` or `red`: same as `auto-draft`.
+
+**c. CloudWatch → attention-items Lambda:**
+
+- New `functions/cron/cw-to-attention.ts` subscribed to a new SNS topic `futurator-cw-alarms`.
+- CloudWatch alarms (Lambda errors, API 5xx rate, DDB throttling, daemon heartbeat missing) → SNS → Lambda → write attention item with severity-based `remediationPolicy` mapping.
+- `sst.config.ts` provisions the SNS topic + the alarms + the Lambda.
+
+**d. Pipeline-v2 failure → attention item:**
+
+- Already happens today (pipeline-v2's wave-completion-check writes attention items on failure). Just verify the new `agentSessionId` stamping pattern doesn't break it.
+- Add `remediationPolicy: 'auto-draft'` as a suggested default for `pipeline-v2-wave-failed` items in the policy panel's seed (operator still has to opt in).
+
+**e. Retry-wave affordance** (§9.2 last-mile):
+
+- After `free-agent.merge.completed` for a PR with `metadata.targetWaveFailure` set, the inline card surfaces a `[Retry wave N]` button.
+- Tap → `POST /api/pipelines/:id/waves/:n/retry` (existing endpoint; just wire the UI call). Emits a new pipeline-v2 job. Chat shows "Wave N retry started — job ID …".
+- Single-tap only — never auto-retry per the §9.2 RESOLVED reasoning (avoids cascade).
+
+**f. Push notifications:**
+
+- PWA Push API + service worker (NOT APNS — simpler infra, no Apple Developer account required). Lives in `src/sw.ts` + `src/lib/push-subscribe.ts`.
+- New DDB table `futurator-push-subscriptions`: `{ subscriptionId, operatorId, endpoint, keys, createdAt }`. One row per device.
+- New API: `POST /api/admin/push/subscribe` (registers the subscription), `DELETE /api/admin/push/subscribe/:id`.
+- New module `functions/shared/push-sender.ts` — sends a push via the Web Push protocol (VAPID keys in Secrets Manager).
+- Wired into 4 event types: `free-agent.merge.requested` (yellow/red only — green auto-merges silently), `free-agent.deploy.rolled-back`, `free-agent.deploy.completed`, `agent.daily-spend.high` (warn at 80%).
+- Each notification deep-links to the relevant approval / status screen.
+
+**Smoke gate (PR D acceptance — this is the operator's go-live demo):**
+
+1. `npx vitest run` — green.
+2. **PWA push subscription:** operator opens `admin.futurator.ai` on phone (PWA-installed or browser). `Settings → Notifications` toggle ON → granted permission → subscription row in DDB. Test notification button → push arrives on phone.
+3. **Auto-draft cold-start:** operator graduates `pipeline-v2-wave-failed` to `auto-draft` via the policy panel. Manually fail a pipeline-v2 wave on a test plan. Within 30s, the daemon's poller spawns a free-agent session, the agent investigates + drafts a fix + opens a PR → operator's phone receives `agent.pr.opened` push → tap → opens widget on the approval card → tap Approve → merge → `[Retry wave N]` button → tap → wave retries → completes.
+4. **Auto-fix end-to-end:** operator graduates `low-risk-test-flake` to `auto-fix`. Manually create such an attention item. Agent self-spawns session, classifier marks green, gates pass, agent server-merges itself, DeployerLambda runs (if daemon-class) OR brownfield CI deploys, operator receives `auto-merged + deployed` push notification (informational only — no action needed).
+5. **CloudWatch → attention-item:** manually fire a CloudWatch alarm. SNS → Lambda → attention item appears. If its type is graduated to `auto-draft`, agent self-spawns within 30s.
+
+**Estimated effort:** ~1.5 days of focused work.
+
+---
+
+### §7.5 Total + sequencing summary
+
+| PR  | Title                                          | Days | Cumulative |
+| --- | ---------------------------------------------- | ---- | ---------- |
+| A   | Free-Agent Unification                         | 0.5  | 0.5        |
+| B   | Rung 1 + Pause + Spend Instrumentation         | 2.5  | 3.0        |
+| C   | Rung 2 + Rung 3 + Rung 4 + Spend/Cycle Enforce | 3.5  | 6.5        |
+| D   | Rung 5: Autotrigger + Push                     | 1.5  | 8.0        |
+
+**Hard rules between PRs:**
+
+- PR A → PR B: PR A's 7-step smoke gate must be green before PR B starts. The unification is the substrate; everything downstream assumes the unified path + reaper.
+- PR B → PR C: PR B's 7-step smoke gate must be green. The pause kill-switch must exist before auto-merge surfaces in PR C — this is the original §7's binding rule, preserved.
+- PR C → PR D: PR C's 7-step smoke gate must be green. The DeployerLambda + auto-rollback must be proven by an intentional-failure rollback test before any cold-start trigger fires.
+- Each PR ships its own commit + push + the equivalent of party-push's Story 20.16 deploy gate (rsync + sst deploy + operator-driven smoke). PR D's smoke gate IS the operator's go-live demo for the whole capability ladder.
+
+**What the operator can do at each milestone:**
+
+- After PR A: same Free Agent as today, but worktrees live in the unified namespace. Foundation for everything below.
+- After PR B: open a chat from phone, ask for any module/feature work, agent edits + commits + pushes + opens PR, inline card approves, merge lands. **Operator-confirmed test workflow ("develop a new module") works end-to-end as of this milestone.**
+- After PR C: green-class PRs land without operator taps. Daemon self-edits via DeployerLambda with auto-rollback. The system can fix itself; operator stays in the loop only on yellow/red.
+- After PR D: agent acts on attention items autonomously (with operator-set per-type policy). Phone vibrates when human input is needed. The operator's "from my phone" vision is fully shipped.
+
+---
+
+### §7.OLD Historical context — original 5-phase rollout (superseded 2026-05-27)
+
+The original phasing below is kept for reference. It was sized for the v0 scope (Phase 1 ships in ~half-day with no inline approval card and no auto-merge). The 2026-05-27 operator decision folded all originally-deferred items into the MVP, which is why §7.1–§7.4 above re-sequence the work into 4 PRs sized at ~8 days total. **Do not implement against the §7.OLD plan.**
+
+#### Phase 1 — "Agent opens PRs" (~half-day) [SUPERSEDED]
 
 - Write-scoped GitHub PAT stored in Secrets Manager
 - New tool wired into the agent's `claude -p` env: `gh pr create` invocation with templated body
@@ -276,7 +537,7 @@ Each phase ships independently and proves out the next. **Do not skip a phase.**
 
 Outcome: phone-driven remediation loop is real. Chat → agent drafts + opens PR → review on GitHub mobile → merge → existing CI deploys. No new Lambdas yet. Lowest possible risk.
 
-### Phase 2 — "Pause + kill switch" (~half-day)
+#### Phase 2 — "Pause + kill switch" (~half-day) [SUPERSEDED — folded into PR B]
 
 - futurator-agent-flags table + read in daemon poll loop
 - API route `POST /api/admin/pause` / `POST /api/admin/resume`
@@ -285,7 +546,7 @@ Outcome: phone-driven remediation loop is real. Chat → agent drafts + opens PR
 
 **Build this before Phase 3.** Auto-merge without a kill switch is irresponsible.
 
-### Phase 3 — "Auto-merge green PRs" (~1 day)
+#### Phase 3 — "Auto-merge green PRs" (~1 day) [SUPERSEDED — folded into PR C]
 
 - Risk classifier function (3.h above)
 - GitHub Actions workflow: if PR author = agent's PAT identity AND label = green AND all checks pass → auto-merge
@@ -294,7 +555,7 @@ Outcome: phone-driven remediation loop is real. Chat → agent drafts + opens PR
 
 Outcome: green-class fixes happen without operator intervention. The operator goes back to reading status updates rather than approving each one.
 
-### Phase 4 — "DeployerLambda + daemon self-update" (~1 day)
+#### Phase 4 — "DeployerLambda + daemon self-update" (~1 day) [SUPERSEDED — folded into PR C]
 
 - DeployerLambda built (5.4 above)
 - rsync-daemon.sh updated to write `.rollback/<timestamp>/` snapshot
@@ -302,7 +563,7 @@ Outcome: green-class fixes happen without operator intervention. The operator go
 
 Outcome: the cancel-poller bug we just hit could have been fixed by the agent.
 
-### Phase 5 — "Health-gate + auto-rollback" (~half-day)
+#### Phase 5 — "Health-gate + auto-rollback" (~half-day) [SUPERSEDED — folded into PR C]
 
 - WatcherLambda built (5.3 above)
 - CloudWatch alarms wired
