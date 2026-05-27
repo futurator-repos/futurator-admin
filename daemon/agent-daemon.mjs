@@ -3156,15 +3156,32 @@ async function partyFindBySessionIdShort(sessionIdShort) {
   if (typeof sessionIdShort !== 'string' || !/^[a-f0-9]{8}$/.test(sessionIdShort)) {
     return null;
   }
-  const result = await ddb.send(
-    new ScanCommand({
-      TableName: PARTY_SESSIONS_TABLE,
-      FilterExpression: 'begins_with(sessionId, :p)',
-      ExpressionAttributeValues: { ':p': sessionIdShort },
-      Limit: 5,
-    }),
-  );
-  const items = result?.Items || [];
+  // 2026-05-27 bug fix: previously this used `Limit: 5` which the AWS SDK
+  // interprets as "evaluate at most 5 items BEFORE applying the filter",
+  // NOT "return at most 5 matches". With >5 sessions in the table, the
+  // scan returned 0 matches for sessions outside the first 5 scanned
+  // rows — and the reaper's classifier interpreted that as
+  // `session-row-missing → reap`, deleting active worktrees mid-flight.
+  //
+  // Fix: paginate through the full table, stopping early when we've
+  // collected enough matches (3 is plenty — collision check + return
+  // first). Hex prefix is very selective so total matches across a
+  // ~100-row table is ~1.
+  const items = [];
+  let ExclusiveStartKey;
+  do {
+    const result = await ddb.send(
+      new ScanCommand({
+        TableName: PARTY_SESSIONS_TABLE,
+        FilterExpression: 'begins_with(sessionId, :p)',
+        ExpressionAttributeValues: { ':p': sessionIdShort },
+        ExclusiveStartKey,
+      }),
+    );
+    if (result?.Items?.length) items.push(...result.Items);
+    if (items.length >= 3) break;
+    ExclusiveStartKey = result?.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
   if (items.length === 0) return null;
   if (items.length > 1) {
     log(

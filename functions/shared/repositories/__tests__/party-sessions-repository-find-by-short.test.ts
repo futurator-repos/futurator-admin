@@ -41,8 +41,25 @@ describe('findBySessionIdShort — Story 19.8', () => {
     const input = extract(sendMock.mock.calls[0][0]);
     expect(input.FilterExpression).toBe('begins_with(sessionId, :p)');
     expect(input.ExpressionAttributeValues).toEqual({ ':p': 'a1b2c3d4' });
-    expect(input.Limit).toBe(5);
+    // 2026-05-27 — no Limit anymore; paginate via ExclusiveStartKey instead.
+    // (Previously Limit:5 caused a reaper bug — see implementation comment.)
+    expect(input.Limit).toBeUndefined();
     expect(input.TableName).toBe('test-party-sessions');
+  });
+
+  it('paginates when the first scan page returns no matches', async () => {
+    // Simulates the real bug: with >5 sessions, the first scan page
+    // (default Limit) returns 0 matches; we must follow LastEvaluatedKey
+    // until we either find a match or run out of pages.
+    sendMock
+      .mockResolvedValueOnce({ Items: [], LastEvaluatedKey: { sessionId: 'page1-end' } })
+      .mockResolvedValueOnce({ Items: [], LastEvaluatedKey: { sessionId: 'page2-end' } })
+      .mockResolvedValueOnce({
+        Items: [{ sessionId: '9fc4c7cd-5530-4720-b147-c9f099406a6c', status: 'ACTIVE' }],
+      });
+    const session = await findBySessionIdShort('9fc4c7cd');
+    expect(session?.sessionId).toBe('9fc4c7cd-5530-4720-b147-c9f099406a6c');
+    expect(sendMock).toHaveBeenCalledTimes(3);
   });
 
   it('returns null when the scan returns no items', async () => {

@@ -350,15 +350,32 @@ export async function findBySessionIdShort(sessionIdShort: string): Promise<Part
   if (typeof sessionIdShort !== 'string' || !SESSION_ID_SHORT_REGEX.test(sessionIdShort)) {
     return null;
   }
-  const result = await docClient.send(
-    new ScanCommand({
-      TableName: TABLE_NAMES.partySessions,
-      FilterExpression: 'begins_with(sessionId, :p)',
-      ExpressionAttributeValues: { ':p': sessionIdShort },
-      Limit: 5,
-    }),
-  );
-  const items = (result.Items as PartySession[]) || [];
+  // 2026-05-27 bug fix: previously `Limit: 5` which DDB interprets as
+  // "evaluate at most 5 items before applying the filter", NOT "return at
+  // most 5 matches". With >5 sessions in the table, the scan returned 0
+  // matches for sessions outside the first 5 scanned rows — and the
+  // reaper's classifier interpreted that as `session-row-missing → reap`,
+  // deleting active worktrees mid-flight (incident 2026-05-27 in
+  // session 9fc4c7cd).
+  //
+  // Fix: paginate through the full table, stop early when we've
+  // collected ≥3 matches (enough for the collision check). Hex prefix
+  // is very selective so this typically completes in one Scan page.
+  const items: PartySession[] = [];
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const result = await docClient.send(
+      new ScanCommand({
+        TableName: TABLE_NAMES.partySessions,
+        FilterExpression: 'begins_with(sessionId, :p)',
+        ExpressionAttributeValues: { ':p': sessionIdShort },
+        ExclusiveStartKey,
+      }),
+    );
+    if (result.Items?.length) items.push(...(result.Items as PartySession[]));
+    if (items.length >= 3) break;
+    ExclusiveStartKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (ExclusiveStartKey);
   if (items.length === 0) return null;
   if (items.length > 1) {
     console.warn(
