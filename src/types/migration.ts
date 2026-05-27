@@ -34,6 +34,8 @@ export interface Migration {
    * it server-side (UI value is informational, not load-bearing).
    */
   pushEnabled: boolean;
+  /** Opt-in: auto-open a draft PR after a successful checkpoint push. */
+  autoOpenPr: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -74,6 +76,11 @@ export interface UpdateMigrationInput {
    * PAT expires.
    */
   pushEnabled?: boolean;
+  /**
+   * Opt-in auto-PR. Independent of pushEnabled in the request (no PAT needed
+   * to flip it), but only has effect server-side when pushEnabled is also on.
+   */
+  autoOpenPr?: boolean;
 }
 
 export interface UpdateMigrationResponse {
@@ -83,6 +90,8 @@ export interface UpdateMigrationResponse {
   envVarCount: number;
   /** Story 21.2 — current state of the per-project push toggle. */
   pushEnabled: boolean;
+  /** Current state of the per-project auto-open-PR toggle. */
+  autoOpenPr: boolean;
 }
 
 export interface DeleteMigrationResponse {

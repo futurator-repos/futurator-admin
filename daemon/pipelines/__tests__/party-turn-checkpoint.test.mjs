@@ -85,6 +85,8 @@ function makeCtx(overrides = {}) {
     claudeBin: 'claude',
     spawn: vi.fn(),
     spawnSync: vi.fn(() => ({ status: 0, stdout: 'STATUS_PORCELAIN_EMPTY\n', stderr: '' })),
+    // Stub scoped-doc delivery — the real impl shells `aws s3 cp`.
+    syncDocs: vi.fn(async () => []),
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     ...overrides,
   };
@@ -200,6 +202,85 @@ describe('Story 21.4 — checkpoint runner integration', () => {
     expect(pushed).toBeTruthy();
     expect(pushed[4].pushed).toBe(true);
     expect(pushed[4].reason).toBe('PUSHED');
+  });
+
+  it('auto-opens a draft PR when project.autoOpenPr=true and the push succeeded', async () => {
+    const openPr = vi.fn(async () => ({
+      ok: true,
+      prNumber: 7,
+      prUrl: 'https://github.com/o/r/pull/7',
+      reused: false,
+    }));
+    const ctx = makeCtx({
+      getProject: vi.fn(async () => ({
+        projectId: 'applicator',
+        pushEnabled: true,
+        autoOpenPr: true,
+        gitRepoUrl: 'https://github.com/o/r',
+        gitBranch: 'main',
+        patSecretName: 'futurator/brownfield-pat/applicator',
+      })),
+      openPr,
+      loadPat: vi.fn(async () => 'github_pat_test'),
+    });
+    ctx.spawnSync.mockReturnValue({
+      status: 0,
+      stdout: `PUSHED: origin ${PARTY_BRANCH} @ abcdef0123456789abcdef0123456789abcdef01\nabcdef0123456789abcdef0123456789abcdef01\n`,
+      stderr: '',
+    });
+    ctx.spawn.mockReturnValue(
+      fakeChild({
+        stdoutLines: [
+          JSON.stringify({
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: CHECKPOINT_ASSISTANT_TEXT }] },
+          }),
+          JSON.stringify({ type: 'result' }),
+        ],
+        exitCode: 0,
+      }),
+    );
+
+    await runPartyTurn(turnJob(), ctx);
+
+    expect(openPr).toHaveBeenCalledTimes(1);
+    expect(openPr.mock.calls[0][0].branch).toBe(PARTY_BRANCH);
+    const prEvt = ctx.pushEvent.mock.calls.find((c) => c[3] === 'party.checkpoint.pr.opened');
+    expect(prEvt).toBeTruthy();
+    expect(prEvt[4].prNumber).toBe(7);
+    expect(prEvt[4].prUrl).toBe('https://github.com/o/r/pull/7');
+  });
+
+  it('does NOT auto-open a PR when push was gated off (commit-only)', async () => {
+    const openPr = vi.fn();
+    const ctx = makeCtx({
+      getProject: vi.fn(async () => ({
+        projectId: 'applicator',
+        pushEnabled: false,
+        autoOpenPr: true,
+      })),
+      openPr,
+    });
+    ctx.spawnSync.mockReturnValue({
+      status: 0,
+      stdout: 'PUSH_SKIPPED: project pushEnabled=false\nabcdef0123456789abcdef0123456789abcdef01\n',
+      stderr: '',
+    });
+    ctx.spawn.mockReturnValue(
+      fakeChild({
+        stdoutLines: [
+          JSON.stringify({
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: CHECKPOINT_ASSISTANT_TEXT }] },
+          }),
+          JSON.stringify({ type: 'result' }),
+        ],
+        exitCode: 0,
+      }),
+    );
+
+    await runPartyTurn(turnJob(), ctx);
+    expect(openPr).not.toHaveBeenCalled();
   });
 
   it('emits party.checkpoint.blocked on exit 2 (secrets hit)', async () => {

@@ -72,6 +72,13 @@ export interface PartyProject {
    * `plan.md` §1 decision 2 this is opt-in per project, never default-on.
    */
   pushEnabled?: boolean;
+  /**
+   * When true (and pushEnabled is true), the daemon auto-opens/updates a draft
+   * PR from this debate's `party/<id>/<short>` branch into the canonical branch
+   * after a successful checkpoint push. Opt-in per project; the explicit
+   * "Open PR" button on the checkpoint card works regardless of this flag.
+   */
+  autoOpenPr?: boolean;
   createdAt: string;
   updatedAt: string;
 }

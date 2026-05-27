@@ -11,7 +11,79 @@ import {
   createPartyProjectInputSchema,
   refreshProjectParamsSchema,
   updateMigrationInputSchema,
+  docUploadUrlInputSchema,
+  docSyncInputSchema,
+  docScopeQuerySchema,
 } from '../party-schema';
+
+describe('party doc scope schemas', () => {
+  const SID = '123e4567-e89b-12d3-a456-426614174000';
+
+  describe('docUploadUrlInputSchema', () => {
+    it('defaults scope to session and requires a sessionId', () => {
+      const ok = docUploadUrlInputSchema.safeParse({
+        filename: 'a.md',
+        contentType: 'text/markdown',
+        sessionId: SID,
+      });
+      expect(ok.success).toBe(true);
+      if (ok.success) expect(ok.data.scope).toBe('session');
+    });
+
+    it('rejects a session-scoped upload with no sessionId (the leak guard)', () => {
+      const res = docUploadUrlInputSchema.safeParse({
+        filename: 'a.md',
+        contentType: 'text/markdown',
+      });
+      expect(res.success).toBe(false);
+    });
+
+    it('allows a shared upload without a sessionId', () => {
+      const res = docUploadUrlInputSchema.safeParse({
+        filename: 'a.md',
+        contentType: 'text/markdown',
+        scope: 'shared',
+      });
+      expect(res.success).toBe(true);
+    });
+
+    it('rejects an unknown scope', () => {
+      const res = docUploadUrlInputSchema.safeParse({
+        filename: 'a.md',
+        contentType: 'text/markdown',
+        scope: 'global',
+        sessionId: SID,
+      });
+      expect(res.success).toBe(false);
+    });
+  });
+
+  describe('docSyncInputSchema', () => {
+    it('requires sessionId for session scope', () => {
+      expect(docSyncInputSchema.safeParse({ filename: 'a.md', s3Key: 'k' }).success).toBe(false);
+      expect(
+        docSyncInputSchema.safeParse({ filename: 'a.md', s3Key: 'k', sessionId: SID }).success,
+      ).toBe(true);
+    });
+  });
+
+  describe('docScopeQuerySchema', () => {
+    it('defaults to session scope and requires sessionId', () => {
+      expect(docScopeQuerySchema.safeParse({}).success).toBe(false);
+      expect(docScopeQuerySchema.safeParse({ sessionId: SID }).success).toBe(true);
+    });
+
+    it('accepts shared scope with no sessionId', () => {
+      expect(docScopeQuerySchema.safeParse({ scope: 'shared' }).success).toBe(true);
+    });
+
+    it('rejects a non-uuid sessionId', () => {
+      expect(docScopeQuerySchema.safeParse({ scope: 'session', sessionId: 'nope' }).success).toBe(
+        false,
+      );
+    });
+  });
+});
 
 describe('projectIdSchema', () => {
   it('accepts lowercase kebab-case ids', () => {
@@ -411,5 +483,15 @@ describe('updateMigrationInputSchema', () => {
       envVars: { FOO: 'bar' },
     });
     expect(r.success).toBe(true);
+  });
+
+  // Auto-PR toggle — flippable alone, no PAT required (push must already be on).
+  it('accepts autoOpenPr=true on its own (no PAT needed)', () => {
+    expect(updateMigrationInputSchema.safeParse({ autoOpenPr: true }).success).toBe(true);
+    expect(updateMigrationInputSchema.safeParse({ autoOpenPr: false }).success).toBe(true);
+  });
+
+  it('still rejects an empty body even with autoOpenPr in the union', () => {
+    expect(updateMigrationInputSchema.safeParse({}).success).toBe(false);
   });
 });

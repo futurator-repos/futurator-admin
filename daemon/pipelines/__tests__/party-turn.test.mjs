@@ -66,6 +66,8 @@ function makeCtx(overrides = {}) {
     claudeBin: 'claude',
     spawn: vi.fn(),
     logger: { info: () => {}, warn: () => {}, error: () => {} },
+    // Stub scoped-doc delivery — the real impl shells `aws s3 cp`.
+    syncDocs: vi.fn(async () => []),
     ...overrides,
   };
   return ctx;
@@ -131,6 +133,49 @@ describe('runPartyTurn — turn 1 (fresh session)', () => {
       '123e4567-e89b-12d3-a456-426614174000',
       'ACTIVE',
     );
+  });
+});
+
+describe('runPartyTurn — scoped doc delivery', () => {
+  it('appends delivered docs to --append-system-prompt as ./.party-uploads/ refs', async () => {
+    const ctx = makeCtx({ syncDocs: vi.fn(async () => ['cohort.md', 'notes.txt']) });
+    const child = fakeChild({
+      stdoutLines: [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 'claude-docs' }),
+        JSON.stringify({ type: 'result' }),
+      ],
+      exitCode: 0,
+    });
+    ctx.spawn.mockReturnValue(child);
+
+    await runPartyTurn(turnJob('use the docs'), ctx);
+
+    expect(ctx.syncDocs).toHaveBeenCalledOnce();
+    const [, args] = ctx.spawn.mock.calls[0];
+    const sysPrompt = args[args.indexOf('--append-system-prompt') + 1];
+    expect(sysPrompt).toContain('Reference documents for this debate');
+    expect(sysPrompt).toContain('./.party-uploads/cohort.md');
+    expect(sysPrompt).toContain('./.party-uploads/notes.txt');
+  });
+
+  it('omits the docs note when no docs are delivered', async () => {
+    const ctx = makeCtx({ syncDocs: vi.fn(async () => []) });
+    const child = fakeChild({
+      stdoutLines: [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 'claude-nodocs' }),
+        JSON.stringify({ type: 'result' }),
+      ],
+      exitCode: 0,
+    });
+    ctx.spawn.mockReturnValue(child);
+
+    await runPartyTurn(turnJob('no docs'), ctx);
+
+    const [, args] = ctx.spawn.mock.calls[0];
+    const sysPrompt = args[args.indexOf('--append-system-prompt') + 1];
+    // The static contract mentions .party-uploads (the write-guidance note);
+    // the per-session DOCS list is what must be absent when no docs exist.
+    expect(sysPrompt).not.toContain('Reference documents for this debate');
   });
 });
 

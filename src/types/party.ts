@@ -41,6 +41,8 @@ export interface PartyProject {
    * in functions/shared/types/party.ts. Defaults to false for legacy rows.
    */
   pushEnabled?: boolean;
+  /** Opt-in: auto-open a draft PR after a successful checkpoint push. */
+  autoOpenPr?: boolean;
   createdAt: string;
   updatedAt: string;
 }

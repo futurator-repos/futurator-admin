@@ -2,9 +2,17 @@
 
 import { useState } from 'react';
 import { formatDistanceToNow } from 'date-fns';
-import { GitBranch, Loader2, RefreshCw, Trash2, Upload, UploadCloud } from 'lucide-react';
+import {
+  GitBranch,
+  GitPullRequest,
+  Loader2,
+  RefreshCw,
+  Trash2,
+  Upload,
+  UploadCloud,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useMigrations } from '@/hooks/use-migrations';
+import { useMigrations, useUpdateMigration } from '@/hooks/use-migrations';
 import { useRefreshProjectMutation } from '@/hooks/use-party-projects';
 import { ProjectStatusBadge } from '@/components/labs/party/project-status-badge';
 import { DeleteMigrationModal } from './delete-migration-modal';
@@ -108,6 +116,11 @@ function MigrationCard(p: CardProps) {
   const isRefreshing = p.refreshing || m.bmadStatus === 'REFRESHING';
   const isBusy = isRefreshing || m.bmadStatus === 'INSTALLING';
   const pulled = m.lastPulledAt ? new Date(m.lastPulledAt) : null;
+  // Auto-PR toggle — no PAT needed (push must already be on), so it flips
+  // directly via PATCH rather than going through the push-enable modal.
+  const updateAutoPr = useUpdateMigration();
+  const toggleAutoPr = () =>
+    updateAutoPr.mutate({ projectId: m.projectId, autoOpenPr: !m.autoOpenPr });
   return (
     <div
       className={`rounded-md border bg-card p-4 ${
@@ -174,6 +187,33 @@ function MigrationCard(p: CardProps) {
             )}
             Push: {m.pushEnabled ? 'on' : 'off'}
           </Button>
+          {/* Auto-PR opt-in — only meaningful once push is enabled. */}
+          {m.pushEnabled && (
+            <Button
+              size="sm"
+              variant={m.autoOpenPr ? 'default' : 'outline'}
+              className={`h-7 text-[11px] ${
+                m.autoOpenPr
+                  ? 'bg-accent-blue/20 text-accent-blue hover:bg-accent-blue/30'
+                  : 'text-muted-foreground'
+              }`}
+              disabled={isBusy || updateAutoPr.isPending}
+              onClick={toggleAutoPr}
+              data-testid={`migration-autopr-toggle-${m.projectId}`}
+              title={
+                m.autoOpenPr
+                  ? 'Auto-PR is on — a draft PR opens automatically after each checkpoint push. Click to disable.'
+                  : 'Auto-PR is off — open PRs manually from the checkpoint card. Click to auto-open a draft PR on each push.'
+              }
+            >
+              {updateAutoPr.isPending ? (
+                <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+              ) : (
+                <GitPullRequest className="mr-1 h-3 w-3" />
+              )}
+              Auto-PR: {m.autoOpenPr ? 'on' : 'off'}
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"

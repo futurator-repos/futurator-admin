@@ -176,6 +176,30 @@ export async function updateProjectPushEnabled(
 }
 
 /**
+ * Flip a project's auto-open-PR opt-in. The daemon reads `project.autoOpenPr`
+ * after a successful checkpoint push and, when true, opens/updates a draft PR.
+ * Independent of pushEnabled (no PAT rotation needed) — but only has effect
+ * when pushEnabled is also true, since there's no pushed branch otherwise.
+ */
+export async function updateProjectAutoOpenPr(
+  projectId: string,
+  autoOpenPr: boolean,
+): Promise<void> {
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.partyProjects,
+      Key: { projectId },
+      UpdateExpression: 'SET autoOpenPr = :ap, updatedAt = :now',
+      ConditionExpression: 'attribute_exists(projectId)',
+      ExpressionAttributeValues: {
+        ':ap': autoOpenPr,
+        ':now': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+/**
  * Migrate-module — record the Secrets Manager secret name holding this
  * project's PAT. Called by the API after `CreateSecretCommand` succeeds.
  */

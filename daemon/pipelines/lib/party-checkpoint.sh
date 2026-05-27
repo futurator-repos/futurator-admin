@@ -96,8 +96,15 @@ if [[ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]]; then
   exit 3
 fi
 
+# `.party-uploads/` holds operator-attached reference docs that the turn
+# pipeline mirrors from S3 into the worktree. They are NOT the agent's work
+# product — exclude them from both the dirty-check and the stage so they
+# never trigger a spurious commit nor get pushed to the repo. Same pathspec
+# is applied to `git add` below to keep the two views consistent.
+UPLOADS_EXCLUDE=':(exclude).party-uploads'
+
 # Empty-porcelain short-circuit: nothing to commit, exit silently.
-PORCELAIN=$(run_git status --porcelain 2>/dev/null || true)
+PORCELAIN=$(run_git status --porcelain -- . "$UPLOADS_EXCLUDE" 2>/dev/null || true)
 if [[ -z "$PORCELAIN" ]]; then
   echo "STATUS_PORCELAIN_EMPTY"
   exit 0
@@ -118,7 +125,7 @@ fi
 # Stage everything BEFORE the secrets scan — the scan must run against
 # the staged diff (`git diff --cached`), not the working tree, because
 # untracked files don't appear in the working-tree diff at all.
-run_git add -A 2>&1 >/dev/null || {
+run_git add -A -- . "$UPLOADS_EXCLUDE" 2>&1 >/dev/null || {
   echo "GIT_ADD_FAILED" >&2
   exit 1
 }

@@ -42,13 +42,198 @@ const PARTY_MODE_PREFIX = '/bmad-party-mode';
 // ── Story 20.7 (party-push Epic 20) imports ──────────────────────────────
 // Lazy/conditional to keep the legacy code path zero-cost when
 // PARTY_PUSH_V1_ENABLED is unset.
-import { existsSync as fsExistsSync, writeFileSync as fsWriteFileSync } from 'node:fs';
+import {
+  existsSync as fsExistsSync,
+  writeFileSync as fsWriteFileSync,
+  mkdirSync as fsMkdirSync,
+  rmSync as fsRmSync,
+  readdirSync as fsReaddirSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname as pathDirname, join as pathJoin } from 'node:path';
 import { startCancelPoller } from './lib/cancel-poller.mjs';
 import { extractMarkers } from './lib/party-marker-extractor.mjs';
 import { composeAgentCommit } from './lib/agent-commit-composer.mjs';
 import { setupPartyWorktree, WorktreeSetupError } from './lib/party-worktree.mjs';
+
+// ── Scoped doc delivery (party-docs session/shared scoping) ──────────────
+// S3 is the source of truth for uploaded docs. At the start of every turn we
+// mirror (shared ∪ this session) into the worktree's `.party-uploads/` so the
+// agent reads exactly THIS debate's docs — no cross-session leak. The dir is
+// git-excluded by party-checkpoint.sh so reference files are never committed
+// or pushed. See functions/api/index.ts doc routes for the S3 key layout.
+const PARTY_DOCS_BUCKET = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
+const PARTY_DOCS_S3_PREFIX = 'party-docs';
+const PARTY_UPLOADS_DIRNAME = '.party-uploads';
+
+function runAwsS3CpRecursive(source, dest) {
+  return new Promise((resolve) => {
+    const child = realSpawn(
+      'aws',
+      ['s3', 'cp', '--recursive', '--only-show-errors', source, dest],
+      { stdio: ['ignore', 'ignore', 'pipe'] },
+    );
+    let stderr = '';
+    child.stderr?.on('data', (chunk) => {
+      stderr += chunk.toString('utf8');
+    });
+    child.on('error', () => resolve({ ok: false, stderr: 'spawn-failed' }));
+    child.on('close', (code) => resolve({ ok: code === 0, stderr: stderr.trim() }));
+  });
+}
+
+/**
+ * Mirror this session's scoped docs (shared ∪ session) from S3 into
+ * `<worktree>/.party-uploads/`, replacing whatever was there before so
+ * deletes propagate. Best-effort: any failure returns `[]` and the turn
+ * proceeds (a doc-sync hiccup must never abort a debate).
+ *
+ * @returns {Promise<string[]>} delivered filenames (basename only)
+ */
+async function syncSessionDocsToWorktree({ projectId, sessionId, worktreePath, logger }) {
+  if (!projectId || !sessionId || !worktreePath) return [];
+  if (!fsExistsSync(worktreePath)) return [];
+  const uploadsDir = pathJoin(worktreePath, PARTY_UPLOADS_DIRNAME);
+  try {
+    fsRmSync(uploadsDir, { recursive: true, force: true });
+    fsMkdirSync(uploadsDir, { recursive: true });
+  } catch (err) {
+    logger?.warn?.(`[party-turn] could not reset ${uploadsDir}: ${err.message}`);
+    return [];
+  }
+  const base = `s3://${PARTY_DOCS_BUCKET}/${PARTY_DOCS_S3_PREFIX}/${projectId}`;
+  // Shared first, then session — session wins on a filename collision.
+  await runAwsS3CpRecursive(`${base}/_shared/`, `${uploadsDir}/`);
+  await runAwsS3CpRecursive(`${base}/_session/${sessionId}/`, `${uploadsDir}/`);
+  try {
+    return fsReaddirSync(uploadsDir, { withFileTypes: true })
+      .filter((d) => d.isFile())
+      .map((d) => d.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * System-prompt fragment listing the delivered docs by their worktree-relative
+ * path. Appended to PARTY_FORMAT_CONTRACT each turn so the agent re-learns the
+ * doc set even on `--resume`. Empty string when there are no docs.
+ */
+function buildDocsNote(filenames) {
+  if (!filenames || filenames.length === 0) return '';
+  const list = filenames.map((f) => `- ./${PARTY_UPLOADS_DIRNAME}/${f}`).join('\n');
+  return [
+    '',
+    '',
+    '## Reference documents for this debate',
+    '',
+    'The operator attached these files for this debate. Read them with the Read',
+    'tool when relevant. They are reference material — do NOT edit them; the',
+    'system does not commit or push them to git.',
+    '',
+    list,
+  ].join('\n');
+}
+
+// ── Opt-in auto-PR (project.autoOpenPr) ──────────────────────────────────
+// After a successful checkpoint push, open (or reuse) a DRAFT PR from the
+// debate branch into the canonical branch so the generated deliverables are
+// immediately reviewable. Mirrors the idempotent logic of the explicit
+// Open-PR API route (functions/api/index.ts) but runs daemon-side using the
+// per-project PAT — no API auth round-trip. Self-contained REST via fetch.
+function parseOwnerRepo(gitRepoUrl) {
+  const m = String(gitRepoUrl || '').match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
+  return m ? { owner: m[1], repo: m[2] } : null;
+}
+
+async function ghFetch(path, pat, init = {}) {
+  const res = await fetch(`https://api.github.com${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'futurator-party-daemon',
+      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(init.headers || {}),
+    },
+  });
+  const text = await res.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    /* non-JSON error body */
+  }
+  return { status: res.status, ok: res.ok, json };
+}
+
+async function openOrReuseDraftPr({ project, branch, sha, title, summary, sessionId, loadPat, logger }) {
+  if (typeof loadPat !== 'function') return { ok: false, reason: 'NO_PAT_LOADER' };
+  const or = parseOwnerRepo(project?.gitRepoUrl);
+  if (!or) return { ok: false, reason: 'BAD_GITREPO_URL' };
+  const { owner, repo } = or;
+  const base = project?.gitBranch || 'main';
+
+  let pat = null;
+  try {
+    pat = await loadPat(project?.patSecretName);
+  } catch (err) {
+    logger?.warn?.(`[party-turn] auto-PR loadPat failed: ${err.message}`);
+  }
+  if (!pat) return { ok: false, reason: 'NO_PAT' };
+
+  const head = `${owner}:${branch}`;
+  // Idempotent: reuse an existing open PR for this head branch.
+  const existing = await ghFetch(
+    `/repos/${owner}/${repo}/pulls?state=open&head=${encodeURIComponent(head)}&per_page=5`,
+    pat,
+  );
+  if (existing.ok && Array.isArray(existing.json) && existing.json.length > 0) {
+    const pr = existing.json[0];
+    return { ok: true, prNumber: pr.number, prUrl: pr.html_url, reused: true };
+  }
+
+  const prTitle = (title && title.trim()) || `Party debate ${String(sessionId).slice(0, 8)}`;
+  const body = [
+    summary || 'Opened automatically from a Futurator party-mode debate.',
+    '',
+    `Source commit: \`${sha || 'unknown'}\``,
+    `Session: \`${sessionId}\``,
+    '',
+    '🤖 Auto-opened by party-push (autoOpenPr).',
+  ].join('\n');
+
+  const created = await ghFetch(`/repos/${owner}/${repo}/pulls`, pat, {
+    method: 'POST',
+    body: JSON.stringify({
+      title: prTitle.slice(0, 250),
+      head: branch,
+      base,
+      body: body.slice(0, 65000),
+      draft: true,
+    }),
+  });
+  if (created.ok && created.json) {
+    return { ok: true, prNumber: created.json.number, prUrl: created.json.html_url, reused: false };
+  }
+  // 422 "already exists" race → refetch and reuse.
+  if (created.status === 422) {
+    const refetch = await ghFetch(
+      `/repos/${owner}/${repo}/pulls?state=all&head=${encodeURIComponent(head)}&per_page=5`,
+      pat,
+    );
+    if (refetch.ok && Array.isArray(refetch.json) && refetch.json.length > 0) {
+      const pr = refetch.json[0];
+      return { ok: true, prNumber: pr.number, prUrl: pr.html_url, reused: true };
+    }
+  }
+  return {
+    ok: false,
+    reason: created.json?.message ? `GH_${created.status}: ${created.json.message}` : `GH_${created.status}`,
+  };
+}
 
 function resolvePartyToolHookPath() {
   // Lazy: only resolves when V1 actually fires. Some test environments
@@ -191,6 +376,13 @@ const PARTY_FORMAT_CONTRACT = [
   'The system handles all git operations. You do NOT run git commands. Edit and',
   'Write tools auto-approve; git mutation is hard-denied by the hook.',
   '',
+  'WHERE to write matters. Deliverables you want kept (architecture docs, tech',
+  'specs, ADRs, schemas) go in the repo under `docs/` (or the path the repo',
+  "conventions dictate) — only those get committed and pushed. Files under",
+  '`./.party-uploads/` are READ-ONLY reference inputs the operator attached for',
+  'this debate; never write or edit there — that directory is deliberately',
+  'excluded from every commit, so anything you put there is silently lost.',
+  '',
   'When a round ends, if you produced files (Edit/Write/MultiEdit), the system',
   "auto-commits to this debate's git branch. To shape the commit's title and",
   'summary — what future readers (humans, other agents) will see in `git log` —',
@@ -253,6 +445,13 @@ export async function runPartyTurn(job, ctx) {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     env = {},
     logger = console,
+    // Injectable for tests — defaults to the real S3→worktree mirror, which
+    // shells `aws s3 cp`. Tests stub it to avoid real network calls.
+    syncDocs = syncSessionDocsToWorktree,
+    // Opt-in auto-PR opener. Defaults to the real GitHub-REST impl; tests
+    // stub it. Resolves the per-project PAT via ctx.loadPat.
+    openPr = openOrReuseDraftPr,
+    loadPat,
   } = ctx;
 
   const session = await getSession(sessionId);
@@ -371,6 +570,28 @@ export async function runPartyTurn(job, ctx) {
     }
   }
 
+  // Mirror this session's scoped docs (shared ∪ session) from S3 into the
+  // worktree's .party-uploads/ so the agent reads exactly this debate's docs.
+  // Best-effort — never abort the turn on a doc-sync failure.
+  let docsNote = '';
+  try {
+    const deliveredDocs = await syncDocs({
+      projectId: session.projectId,
+      sessionId,
+      worktreePath: session.projectPath,
+      logger,
+    });
+    docsNote = buildDocsNote(deliveredDocs);
+    if (deliveredDocs.length > 0) {
+      logger.info?.(
+        `[party-turn] delivered ${deliveredDocs.length} doc(s) to ${PARTY_UPLOADS_DIRNAME}/ ` +
+          `for session=${sessionId.slice(0, 8)}`,
+      );
+    }
+  } catch (err) {
+    logger.warn?.(`[party-turn] doc delivery failed (continuing): ${err.message}`);
+  }
+
   // Resolve which extra tools (WebSearch, WebFetch, …) the user has
   // allowed for this project. Default → DEFAULT_ALLOWED_TOOLS so existing
   // projects work without a DDB migration. Empty array → user explicitly
@@ -431,7 +652,7 @@ export async function runPartyTurn(job, ctx) {
     // applies. The contract instructs Claude to wrap each agent in
     // `⟪AGENT:Name⟫` markers — the client parser splits on these.
     '--append-system-prompt',
-    PARTY_FORMAT_CONTRACT,
+    PARTY_FORMAT_CONTRACT + docsNote,
   ];
   if (partySettingsPath) {
     args.push('--settings', partySettingsPath);
@@ -725,17 +946,17 @@ export async function runPartyTurn(job, ctx) {
     (session.worktreePath || session.projectPath)
   ) {
     try {
-      // Resolve project.pushEnabled. If getProject is unwired or throws,
-      // default to false (safe: commit-only).
-      let pushOptIn = false;
+      // Resolve the project once. If getProject is unwired or throws, default
+      // to commit-only (pushOptIn=false) and no auto-PR.
+      let resolvedProject = null;
       if (typeof getProject === 'function' && session.projectId) {
         try {
-          const project = await getProject(session.projectId);
-          pushOptIn = project?.pushEnabled === true;
+          resolvedProject = await getProject(session.projectId);
         } catch (err) {
           logger.warn?.(`[party-turn] getProject for checkpoint failed: ${err.message}`);
         }
       }
+      const pushOptIn = resolvedProject?.pushEnabled === true;
       const checkpointResult = await runCheckpointScript({
         sessionId,
         projectId: session.projectId,
@@ -772,6 +993,51 @@ export async function runPartyTurn(job, ctx) {
         exitCode: checkpointResult.code,
         reason: checkpointResult.reason,
       });
+
+      // Opt-in auto-PR: after a successful PUSH, open (or reuse) a draft PR
+      // into the canonical branch. Gated on project.autoOpenPr; the explicit
+      // Open-PR button works independently of this. Non-fatal on failure.
+      if (checkpointPushed && resolvedProject?.autoOpenPr === true) {
+        try {
+          const prResult = await openPr({
+            project: resolvedProject,
+            branch: session.partyBranch,
+            sha: checkpointSha,
+            title: checkpoint.title,
+            summary: checkpoint.body,
+            sessionId,
+            loadPat,
+            logger,
+          });
+          await pushEvent(
+            sessionId,
+            'turn',
+            '__party__',
+            prResult?.ok ? 'party.checkpoint.pr.opened' : 'party.checkpoint.pr.failed',
+            {
+              sessionId,
+              projectId: session.projectId,
+              branch: session.partyBranch,
+              round: session.turnCount,
+              commitSha: checkpointSha,
+              prNumber: prResult?.prNumber ?? null,
+              prUrl: prResult?.prUrl ?? null,
+              reused: prResult?.reused === true,
+              reason: prResult?.reason ?? null,
+            },
+          );
+          if (prResult?.ok) {
+            logger.info?.(
+              `[party-turn] auto-PR ${prResult.reused ? 'reused' : 'opened'} ` +
+                `#${prResult.prNumber} for session=${sessionId.slice(0, 8)}`,
+            );
+          } else {
+            logger.warn?.(`[party-turn] auto-PR not opened: ${prResult?.reason || 'unknown'}`);
+          }
+        } catch (err) {
+          logger.warn?.(`[party-turn] auto-PR failed (non-fatal): ${err.message}`);
+        }
+      }
     } catch (err) {
       logger.warn?.(`[party-turn] runCheckpointScript failed (non-fatal): ${err.message}`);
     }

@@ -81,6 +81,8 @@ function makeCtx(overrides = {}) {
     claudeBin: 'claude',
     spawn: vi.fn(),
     logger: { info: () => {}, warn: () => {}, error: () => {} },
+    // Stub scoped-doc delivery — the real impl shells `aws s3 cp`.
+    syncDocs: vi.fn(async () => []),
     ...overrides,
   };
 }

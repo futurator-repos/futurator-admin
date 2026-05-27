@@ -95,14 +95,14 @@ export function SessionChat({ sessionId, onClose }: Props) {
   const { data: session } = useSession(sessionId);
   const { events } = useSessionEvents(sessionId, session?.status);
   const sendMessage = useSendMessageMutation(sessionId);
-  const uploadDoc = useUploadPartyDoc(session?.projectId ?? null);
+  const uploadDoc = useUploadPartyDoc(session?.projectId ?? null, sessionId);
   const [draft, setDraft] = useState('');
   const threadRef = useRef<HTMLDivElement | null>(null);
 
   async function handleAttach(files: File[]) {
     for (const file of files) {
       try {
-        await uploadDoc.mutateAsync(file);
+        await uploadDoc.mutateAsync({ file, scope: 'session' });
       } catch (err) {
         console.error('[Party] doc upload failed:', file.name, err);
       }
@@ -256,9 +256,7 @@ export function SessionChat({ sessionId, onClose }: Props) {
                   )}
 
                   {group.kind === 'user' && (
-                    <UserBubble
-                      content={(group.events[0] as { content?: string }).content || ''}
-                    />
+                    <UserBubble content={(group.events[0] as { content?: string }).content || ''} />
                   )}
 
                   {group.kind === 'assistant' && (
@@ -308,7 +306,7 @@ export function SessionChat({ sessionId, onClose }: Props) {
                 timed out).
               </div>
             )}
-            {session.projectId && <DocTray projectId={session.projectId} />}
+            {session.projectId && <DocTray projectId={session.projectId} sessionId={sessionId} />}
             <Composer
               value={draft}
               onChange={setDraft}

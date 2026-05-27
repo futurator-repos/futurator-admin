@@ -137,10 +137,18 @@ export const updateMigrationInputSchema = z
       )
       .optional(),
     pushEnabled: z.boolean().optional(),
+    // Opt-in auto-PR. Independent toggle — no PAT required to flip it (push
+    // must already be enabled for it to have any server-side effect).
+    autoOpenPr: z.boolean().optional(),
   })
-  .refine((v) => v.pat !== undefined || v.envVars !== undefined || v.pushEnabled !== undefined, {
-    message: 'must include at least one of: pat, envVars, pushEnabled',
-  })
+  .refine(
+    (v) =>
+      v.pat !== undefined ||
+      v.envVars !== undefined ||
+      v.pushEnabled !== undefined ||
+      v.autoOpenPr !== undefined,
+    { message: 'must include at least one of: pat, envVars, pushEnabled, autoOpenPr' },
+  )
   .refine(
     // Story 21.2 — flipping pushEnabled ON requires a fresh PAT in the same
     // body. The existing PAT (if any) was issued with contents:read; the
@@ -167,15 +175,47 @@ export const refreshProjectParamsSchema = z.object({
   projectId: projectIdSchema,
 });
 
-export const docUploadUrlInputSchema = z.object({
-  filename: z.string().min(1).max(255),
-  contentType: z.string().min(1).max(128),
-});
+/**
+ * Party docs are scoped. `session` docs belong to a single debate (S3 key
+ * `party-docs/<projectId>/_session/<sessionId>/<file>`); `shared` docs are
+ * project-level knowledge visible in every debate of the project
+ * (`party-docs/<projectId>/_shared/<file>`). Default is `session` so a plain
+ * upload never leaks across debates.
+ */
+export const docScopeSchema = z.enum(['session', 'shared']).default('session');
 
-export const docSyncInputSchema = z.object({
-  filename: z.string().min(1).max(255),
-  s3Key: z.string().min(1),
-});
+const requireSessionForSessionScope = (d: { scope: 'session' | 'shared'; sessionId?: string }) =>
+  d.scope === 'shared' || !!d.sessionId;
+const sessionScopeRefinement = {
+  message: 'sessionId is required for session-scoped docs',
+  path: ['sessionId'] as (string | number)[],
+};
+
+export const docUploadUrlInputSchema = z
+  .object({
+    filename: z.string().min(1).max(255),
+    contentType: z.string().min(1).max(128),
+    scope: docScopeSchema,
+    sessionId: sessionIdSchema.optional(),
+  })
+  .refine(requireSessionForSessionScope, sessionScopeRefinement);
+
+export const docSyncInputSchema = z
+  .object({
+    filename: z.string().min(1).max(255),
+    s3Key: z.string().min(1),
+    scope: docScopeSchema,
+    sessionId: sessionIdSchema.optional(),
+  })
+  .refine(requireSessionForSessionScope, sessionScopeRefinement);
+
+/** Query params for listing / deleting a scoped doc. */
+export const docScopeQuerySchema = z
+  .object({
+    scope: docScopeSchema,
+    sessionId: sessionIdSchema.optional(),
+  })
+  .refine(requireSessionForSessionScope, sessionScopeRefinement);
 
 export const createSessionInputSchema = z.object({
   projectId: projectIdSchema,
@@ -202,5 +242,7 @@ export type GreenfieldProjectInput = z.infer<typeof greenfieldProjectInputSchema
 export type BrownfieldProjectInput = z.infer<typeof brownfieldProjectInputSchema>;
 export type RefreshProjectParams = z.infer<typeof refreshProjectParamsSchema>;
 export type UpdateMigrationInput = z.infer<typeof updateMigrationInputSchema>;
+export type DocScope = z.infer<typeof docScopeSchema>;
 export type DocUploadUrlInput = z.infer<typeof docUploadUrlInputSchema>;
 export type DocSyncInput = z.infer<typeof docSyncInputSchema>;
+export type DocScopeQuery = z.infer<typeof docScopeQuerySchema>;

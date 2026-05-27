@@ -44,7 +44,7 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
   const { events } = useSessionEvents(sessionId, session?.status);
   const sendMessage = useSendMessageMutation(sessionId);
   const renameSession = useRenameSessionMutation(sessionId);
-  const uploadDoc = useUploadPartyDoc(session?.projectId ?? null);
+  const uploadDoc = useUploadPartyDoc(session?.projectId ?? null, sessionId);
   const { data: sessionsList } = useSessionsForProject(session?.projectId ?? null);
   const { data: project } = usePartyProject(session?.projectId ?? null);
   const updateProject = useUpdatePartyProject(session?.projectId ?? null);
@@ -155,7 +155,7 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
     setUploadStatus(files.map((f) => ({ filename: f.name, state: 'uploading' as const })));
     for (const file of files) {
       try {
-        await uploadDoc.mutateAsync(file);
+        await uploadDoc.mutateAsync({ file, scope: 'session' });
         console.log('[Party V2] uploaded', file.name);
         setUploadStatus((prev) =>
           prev.map((s) => (s.filename === file.name ? { ...s, state: 'done' as const } : s)),
@@ -225,7 +225,7 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
   }
 
   return (
-    <FileDrawerProvider projectId={session.projectId ?? null}>
+    <FileDrawerProvider projectId={session.projectId ?? null} sessionId={sessionId}>
       <div
         className="flex h-full overflow-hidden"
         style={{ background: COLORS.bgDeepest, color: COLORS.textPrimary }}
@@ -329,8 +329,9 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
               )}
               <DocTray
                 projectId={session.projectId}
+                sessionId={sessionId}
                 onPickDoc={(filename) => {
-                  const ref = `./docs/${filename}`;
+                  const ref = `./.party-uploads/${filename}`;
                   setDraft((d) =>
                     d.includes(ref)
                       ? d

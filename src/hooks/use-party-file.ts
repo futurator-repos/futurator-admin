@@ -16,17 +16,24 @@ export interface PartyFileResponse {
 }
 
 /**
- * Read one file from a Party project's working directory on EC2. Used by
- * the file-preview drawer in the chat. Backed by SSM with strong path-
+ * Read one file from a Party debate's working directory on EC2. Used by the
+ * file-preview drawer in the chat. When `sessionId` is provided the API reads
+ * from that session's per-debate WORKTREE (where agents write generated docs);
+ * without it, the legacy project folder. Backed by SSM with strong path-
  * traversal protection — see api/index.ts /api/party/projects/:projectId/files.
  */
-export function usePartyFile(projectId: string | null, path: string | null) {
+export function usePartyFile(
+  projectId: string | null,
+  path: string | null,
+  sessionId?: string | null,
+) {
   return useQuery({
-    queryKey: ['party-file', projectId, path],
-    queryFn: () =>
-      api.get<PartyFileResponse>(
-        `/party/projects/${projectId}/files?path=${encodeURIComponent(path!)}`,
-      ),
+    queryKey: ['party-file', projectId, sessionId ?? null, path],
+    queryFn: () => {
+      const qs = new URLSearchParams({ path: path! });
+      if (sessionId) qs.set('sessionId', sessionId);
+      return api.get<PartyFileResponse>(`/party/projects/${projectId}/files?${qs.toString()}`);
+    },
     enabled: !!projectId && !!path,
     staleTime: 30_000,
     retry: (failureCount, error) => {
