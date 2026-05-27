@@ -44,4 +44,10 @@ export const TABLE_NAMES = {
   // PK sessionId, SK messageIndex (zero-padded 6-digit). 90-day TTL.
   freeAgentConversations:
     process.env.FREE_AGENT_CONVERSATIONS_TABLE || 'futurator-free-agent-conversations',
+  // 2026-05-27 PR B — global agent feature flags (e.g. `agent.paused`).
+  // PK: flagName. Read by daemon (pre-claim gate) + API (GET state).
+  agentFlags: process.env.AGENT_FLAGS_TABLE || 'futurator-agent-flags',
+  // 2026-05-27 PR B — per-job spend log. PK: logId. GSI1 date+createdAt for
+  // `getDailySpend(today)`. 90d TTL.
+  agentSpendLog: process.env.AGENT_SPEND_LOG_TABLE || 'futurator-agent-spend-log',
 } as const;

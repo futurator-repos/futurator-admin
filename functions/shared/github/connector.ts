@@ -598,3 +598,56 @@ export async function createPullRequest(
     headers: { 'Content-Type': 'application/json' },
   });
 }
+
+/**
+ * 2026-05-27 PR B.d — mergePullRequest — PUT /repos/{owner}/{name}/pulls/{n}/merge
+ *
+ * Merge an open PR. Used by the Free Agent's `/approve-merge` endpoint once
+ * the operator approves the inline card. Default merge method is `squash`
+ * for self-edit clean-history (matches party-push convention).
+ *
+ * Requires the same `contents:write` + `pull_requests:write` PAT scopes as
+ * createPullRequest.
+ */
+export async function mergePullRequest(
+  owner: string,
+  name: string,
+  prNumber: number,
+  input?: {
+    /** Defaults to 'squash'. */
+    method?: 'merge' | 'squash' | 'rebase';
+    /** Commit title override; GitHub picks PR title by default. */
+    commit_title?: string;
+    commit_message?: string;
+  },
+): Promise<ConnectorResult<{ sha: string; merged: boolean; message: string }>> {
+  const body = JSON.stringify({
+    merge_method: input?.method ?? 'squash',
+    ...(input?.commit_title ? { commit_title: input.commit_title } : {}),
+    ...(input?.commit_message ? { commit_message: input.commit_message } : {}),
+  });
+  return githubFetch<{ sha: string; merged: boolean; message: string }>(
+    `/repos/${owner}/${name}/pulls/${prNumber}/merge`,
+    { method: 'PUT', body, headers: { 'Content-Type': 'application/json' } },
+  );
+}
+
+/**
+ * 2026-05-27 PR B.d — closePullRequest — PATCH /repos/{owner}/{name}/pulls/{n}
+ *
+ * Close (reject) an open PR without merging. Used by the Free Agent's
+ * `/reject-merge` endpoint. Reason gets injected back into the chat as the
+ * next user-turn so the agent can revise.
+ */
+export async function closePullRequest(
+  owner: string,
+  name: string,
+  prNumber: number,
+): Promise<ConnectorResult<GitHubPullRequest>> {
+  const body = JSON.stringify({ state: 'closed' });
+  return githubFetch<GitHubPullRequest>(`/repos/${owner}/${name}/pulls/${prNumber}`, {
+    method: 'PATCH',
+    body,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}

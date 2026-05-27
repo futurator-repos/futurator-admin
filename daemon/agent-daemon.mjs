@@ -2995,6 +2995,8 @@ const PARTY_SESSIONS_TABLE = process.env.PARTY_SESSIONS_TABLE || 'futurator-part
 // Story 18.2 — Free Claude Code Agent sessions table (created by sst.config.ts).
 const FREE_AGENT_SESSIONS_TABLE =
   process.env.FREE_AGENT_SESSIONS_TABLE || 'futurator-free-agent-sessions';
+// 2026-05-27 PR B.f — global agent feature flags (e.g. agent.paused).
+const AGENT_FLAGS_TABLE = process.env.AGENT_FLAGS_TABLE || 'futurator-agent-flags';
 const PARTY_PROJECTS_ROOT = process.env.PROJECTS_ROOT || '/home/ubuntu/projects';
 const PARTY_BMAD_VERSION = process.env.BMAD_VERSION || '6.3.0';
 const PARTY_BMAD_AGENTS_SOURCE =
@@ -3548,6 +3550,34 @@ async function freeAgentFindBySessionIdShort(sessionIdShort) {
     );
   }
   return items[0];
+}
+
+// 2026-05-27 PR B.f — cached `agent.paused` check. Daemon polls this BEFORE
+// claiming a PENDING job; when true, the poll loop skips dispatch entirely
+// (in-flight jobs complete normally). 5s cache balances responsiveness with
+// DDB read cost: a stop-the-world pause takes effect within 5s of the
+// operator's tap, with steady-state cost of one GetItem per 5s.
+const PAUSED_FLAG_CACHE_MS = 5_000;
+let _pausedCache = { value: false, fetchedAt: 0 };
+async function isAgentPausedCached() {
+  if (Date.now() - _pausedCache.fetchedAt < PAUSED_FLAG_CACHE_MS) {
+    return _pausedCache.value;
+  }
+  try {
+    const result = await ddb.send(
+      new GetCommand({
+        TableName: AGENT_FLAGS_TABLE,
+        Key: { flagName: 'agent.paused' },
+      }),
+    );
+    _pausedCache = { value: result?.Item?.value === 'true', fetchedAt: Date.now() };
+  } catch (err) {
+    // Fail-open: a DDB blip should NOT block job dispatch (would mask the
+    // problem and starve the queue). Surface to logs; treat as not-paused.
+    log('warn', `[paused-check] DDB read failed, treating as not-paused: ${err.message}`);
+    _pausedCache = { value: false, fetchedAt: Date.now() };
+  }
+  return _pausedCache.value;
 }
 
 async function freeAgentClearCancelFlag(sessionId) {
@@ -4203,6 +4233,7 @@ async function runJobAsync(job) {
   // When CM_DISABLED the call still runs but the legacy poll-loop gate is
   // the load-bearing capacity check.
   concurrencyManager.tryAcquire(job);
+  const jobStartMs = Date.now(); // 2026-05-27 PR B.c — spend instrumentation.
   activeJobs.set(job.jobId, {
     startedAt: new Date().toISOString(),
     workingDir: job.workingDir || '',
@@ -4269,8 +4300,75 @@ async function runJobAsync(job) {
     // Story 20.16 — release the manager slot. Idempotent; double-release
     // is logged as a warn (helps catch lifecycle bugs without crashing).
     concurrencyManager.release(job.jobId);
+    // 2026-05-27 PR B.c — spend instrumentation. One row per completed job.
+    // Failures (including handleJobFailure) still get a row — we want to
+    // count agent walltime regardless of outcome.
+    try {
+      await writeAgentSpendRow(job, jobStartMs);
+    } catch (err) {
+      log('warn', `[${job.jobId.slice(0, 8)}] spend log write failed: ${err.message}`);
+    }
   }
 }
+
+/**
+ * 2026-05-27 PR B.c — write one spend row per completed job.
+ *
+ * Spend = walltime × AGENT_COST_PER_SEC (env, default 0.02). Wall-clock is
+ * what we have; true token-level tracking is a deferred Phase 2 swap
+ * behind the same `getDailySpend` query (per §9.5 RESOLVED).
+ *
+ * agentClass derivation is a best-effort categorization for forensic
+ * queries — `other` is the default for jobTypes we don't explicitly map.
+ */
+const AGENT_SPEND_LOG_TABLE =
+  process.env.AGENT_SPEND_LOG_TABLE || 'futurator-agent-spend-log';
+const AGENT_COST_PER_SEC = (() => {
+  const v = parseFloat(process.env.AGENT_COST_PER_SEC || '0.02');
+  return Number.isFinite(v) && v >= 0 ? v : 0.02;
+})();
+const SPEND_TTL_SECONDS = 90 * 24 * 60 * 60;
+
+function classifyAgentForSpend(job) {
+  const t = job?.jobType || '';
+  if (t.startsWith('party-')) return 'party';
+  if (t === 'free-agent-session') return 'free-agent';
+  if (t === 'app-bootstrap') return 'app-bootstrap';
+  if (t === 'wave-merge' || t === 'epic-dev' || t === 'skill-scout' || t === 'skill-install' || t === 'reflector') {
+    return 'pipeline-v2';
+  }
+  return 'other';
+}
+
+async function writeAgentSpendRow(job, jobStartMs) {
+  const createdAt = new Date().toISOString();
+  const walltimeSec = Math.max(0, (Date.now() - jobStartMs) / 1000);
+  const costUsd = walltimeSec * AGENT_COST_PER_SEC;
+  await ddb.send(
+    new PutCommand({
+      TableName: AGENT_SPEND_LOG_TABLE,
+      Item: {
+        logId: randomUUID(),
+        jobId: job?.jobId,
+        sessionId:
+          job?.freeAgentSessionPayload?.sessionId ?? job?.partyTurnPayload?.sessionId ?? null,
+        projectId:
+          job?.projectId ??
+          job?.freeAgentSessionPayload?.projectId ??
+          job?.partyTurnPayload?.projectId ??
+          null,
+        agentClass: classifyAgentForSpend(job),
+        walltimeSec,
+        costUsd,
+        createdAt,
+        GSI1PK: createdAt.slice(0, 10), // UTC date
+        GSI1SK: createdAt,
+        expiresAt: Math.floor(Date.parse(createdAt) / 1000) + SPEND_TTL_SECONDS,
+      },
+    }),
+  );
+}
+
 
 /**
  * Pipeline v2 Phase 3-C Epic 3 / Story 3.1 (2026-05-20) — SKILL-SCOUT
@@ -4883,6 +4981,16 @@ async function poll() {
       // 2026-05-27 (unification) — the dedicated free-agent GC tick was
       // removed. Assist worktrees are now reaped by the hourly unified
       // `worktree-reaper.mjs` alongside per-story + party + store entries.
+
+      // 2026-05-27 PR B.f — global pause gate. When `agent.paused` is set
+      // (via POST /api/admin/pause), the poll loop skips dispatch entirely
+      // and waits for the next tick. In-flight jobs are NOT cancelled —
+      // they complete on their own; only NEW work is blocked.
+      const paused = await isAgentPausedCached();
+      if (paused) {
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+        continue;
+      }
 
       // Story 20.16 — gate the DDB query on capacity. When the
       // ConcurrencyManager is enabled, fetch a window (CM_CANDIDATE_LIMIT)

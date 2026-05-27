@@ -27,6 +27,14 @@ import * as partySessionsRepo from '../shared/repositories/party-sessions-reposi
 import * as freeAgentSessionsRepo from '../shared/repositories/free-agent-sessions-repository';
 // Epic 18 / Story 18.6 — conversation message persistence + thread list.
 import * as freeAgentConversationsRepo from '../shared/repositories/free-agent-conversations-repository';
+import * as agentFlagsRepo from '../shared/repositories/agent-flags-repository';
+import { AGENT_FLAG_KEYS } from '../shared/repositories/agent-flags-repository';
+import * as agentSpendRepo from '../shared/repositories/agent-spend-log-repository';
+import {
+  bootstrapAdminSelfEdit,
+  isAdminAlreadyBootstrapped,
+  loadAdminSelfEditPat,
+} from '../shared/services/admin-self-edit-bootstrap';
 // Epic 18 / Story 18.5 — STS credentials minting + cost cap default.
 import {
   assumeFreeAgentSessionRole,
@@ -57,6 +65,8 @@ import {
   createPartyProjectInputSchema,
   docUploadUrlInputSchema,
   docSyncInputSchema,
+  docScopeQuerySchema,
+  type DocScope,
   refreshProjectParamsSchema,
   updateMigrationInputSchema,
 } from '../shared/schemas/party-schema';
@@ -5434,6 +5444,8 @@ app.get('/api/migrations', async (c) => {
         // Story 21.1 — surface the per-project Push toggle. Defaults to false
         // for legacy rows that pre-date the field.
         pushEnabled: p.pushEnabled === true,
+        // Opt-in auto-PR toggle (defaults false for legacy rows).
+        autoOpenPr: p.autoOpenPr === true,
         createdAt: p.createdAt,
         updatedAt: p.updatedAt,
       };
@@ -5492,6 +5504,14 @@ app.patch('/api/migrations/:id', async (c) => {
       parsed.data.pushEnabled,
     );
   }
+  if (parsed.data.autoOpenPr !== undefined) {
+    // Independent opt-in — no PAT required. Only has effect when pushEnabled
+    // is also true (daemon checks both before opening the PR).
+    await partyProjectsRepo.updateProjectAutoOpenPr(
+      parsedId.data.projectId,
+      parsed.data.autoOpenPr,
+    );
+  }
 
   const updated = await partyProjectsRepo.getProject(parsedId.data.projectId);
   return c.json({
@@ -5500,6 +5520,7 @@ app.patch('/api/migrations/:id', async (c) => {
     envVarKeys: Object.keys(updated?.envVars ?? {}).sort(),
     envVarCount: Object.keys(updated?.envVars ?? {}).length,
     pushEnabled: updated?.pushEnabled === true,
+    autoOpenPr: updated?.autoOpenPr === true,
   });
 });
 
@@ -5741,11 +5762,139 @@ app.post('/api/admin/migrate-brownfield/:projectId', async (c) => {
   });
 });
 
+// ────────────────────────────────────────────────────────────────────────
+// 2026-05-27 PR B.f — Pause / kill switch
+//
+// The daemon's poll loop reads `agent.paused` (futurator-agent-flags) before
+// claiming any PENDING job. When 'true', new sessions / new turns across all
+// agent classes are blocked; in-flight jobs complete normally. The §7 binding
+// rule says this MUST exist before any auto-merge surface lands.
+//
+// Routes:
+//   GET    /api/admin/flags        — list all flag rows (UI panel header)
+//   POST   /api/admin/pause        — sets agent.paused = 'true'
+//   POST   /api/admin/resume       — sets agent.paused = 'false'
+//
+// Auth: blanket /api/* authMiddleware already in place. The codebase has no
+// finer-grained admin vs operator distinction; the admin app itself is the
+// trust boundary (cf. /api/admin/migrate-brownfield/* below).
+// ────────────────────────────────────────────────────────────────────────
+
+app.get('/api/admin/flags', async (c) => {
+  const rows = await agentFlagsRepo.listAllFlags();
+  return c.json({ flags: rows });
+});
+
+app.post('/api/admin/pause', async (c) => {
+  const operatorId = c.get('user').userId;
+  const row = await agentFlagsRepo.setFlag(AGENT_FLAG_KEYS.paused, 'true', operatorId);
+  return c.json({ paused: true, updatedBy: row.updatedBy, updatedAt: row.updatedAt });
+});
+
+app.post('/api/admin/resume', async (c) => {
+  const operatorId = c.get('user').userId;
+  const row = await agentFlagsRepo.setFlag(AGENT_FLAG_KEYS.paused, 'false', operatorId);
+  return c.json({ paused: false, updatedBy: row.updatedBy, updatedAt: row.updatedAt });
+});
+
 /**
- * Party project docs — small in-chat knowledge tray so agents can reason over
- * user-uploaded files. Docs live at S3 `futurator-ai-website/party-docs/<id>/`
- * AND get rsynced to `/home/ubuntu/projects/<id>/docs/` on upload so Claude's
- * Read tool picks them up during a party turn.
+ * GET /api/admin/spend?date=YYYY-MM-DD — daily spend rollup.
+ *
+ * 2026-05-27 PR B.c. The header pill calls this with today's UTC date;
+ * the operator's panel surfaces totalCostUsd in dollars + walltime in
+ * minutes. PR C will gate new sessions when totalCostUsd > the
+ * AGENT_DAILY_CAP env var.
+ *
+ * Defaults to today (UTC). Returns zeros when the day has no rows.
+ */
+app.get('/api/admin/spend', async (c) => {
+  const requested = c.req.query('date');
+  const date =
+    requested && /^\d{4}-\d{2}-\d{2}$/.test(requested) ? requested : agentSpendRepo.todayUtc();
+  const rollup = await agentSpendRepo.getDailySpend(date);
+  return c.json(rollup);
+});
+
+/**
+ * POST /api/admin/bootstrap-self-edit-repo — one-time admin action.
+ *
+ * 2026-05-27 PR B.a. Bare-clones the futurator-admin repo onto EC2 and
+ * sets up the operator checkout mirror so the Free Agent can host
+ * `_assist/<sid>` worktrees against the admin codebase. Idempotent — a
+ * re-run after success returns `{ converted: false, reason:
+ * 'already-bare-topology', headSha }`.
+ *
+ * Mirrors Story 20.4's brownfield converter shape (SSM script + preflight
+ * + audit row).
+ */
+app.post('/api/admin/bootstrap-self-edit-repo', async (c) => {
+  const operatorId = c.get('user').userId;
+  const deps = { sendSsmCommand, waitForSsmOutput };
+
+  // 1. Idempotence — cheaper than re-running the bootstrap; also covers
+  //    the "this EC2 has been bootstrapped from a prior run" case.
+  const idempotence = await isAdminAlreadyBootstrapped(deps);
+  if (idempotence.alreadyBare) {
+    return c.json({
+      converted: false,
+      reason: 'already-bare-topology',
+      bareRepoPath: '/home/ubuntu/repos/futurator-admin.git',
+      headSha: idempotence.headSha,
+    });
+  }
+
+  // 2. Load the PAT from Secrets Manager. Mirror of brownfield-pat flow.
+  let pat: string;
+  try {
+    pat = await loadAdminSelfEditPat();
+  } catch (err) {
+    throw new AppError(
+      'BOOTSTRAP_PAT_MISSING',
+      `Admin self-edit PAT secret not found or malformed: ${(err as Error).message}. ` +
+        `Create the secret manually before invoking this endpoint.`,
+      400,
+    );
+  }
+
+  // 3. Perform the bootstrap.
+  const result = await bootstrapAdminSelfEdit({ pat }, deps);
+  if (!result.converted) {
+    if ('detail' in result && result.detail) {
+      throw new AppError('BOOTSTRAP_FAILED', `Bootstrap failed: ${result.detail}`, 500);
+    }
+    throw new AppError('BOOTSTRAP_FAILED', 'Bootstrap failed', 500);
+  }
+
+  // 4. Audit row — best-effort CloudWatch via console.info (the Lambda's
+  //    log group is the audit trail; matches existing admin endpoints).
+  console.info(
+    JSON.stringify({
+      event: 'admin.self-edit-bootstrap',
+      operatorId,
+      bareRepoPath: result.bareRepoPath,
+      worktreePath: result.worktreePath,
+      headSha: result.headSha,
+      at: new Date().toISOString(),
+    }),
+  );
+
+  return c.json(result);
+});
+
+/**
+ * Party project docs — in-chat knowledge tray so agents can reason over
+ * user-uploaded files. Docs are SCOPED:
+ *
+ *   - `session` → `party-docs/<projectId>/_session/<sessionId>/<file>`
+ *     private to a single debate; a new debate starts with an empty tray.
+ *   - `shared`  → `party-docs/<projectId>/_shared/<file>`
+ *     project-level knowledge intentionally visible in every debate.
+ *
+ * S3 is the source of truth. The daemon mirrors the union (shared ∪ this
+ * session) into the per-session worktree's `.party-uploads/` at the start of
+ * each turn (see daemon/pipelines/party-turn.mjs) so Claude's Read tool sees
+ * exactly this debate's docs — no cross-session leak. Legacy flat keys
+ * (`party-docs/<projectId>/<file>`, pre-scoping) are no longer listed.
  */
 function partyDocsBucket(): string {
   const bucket = process.env.FUTURATOR_PUBLIC_BUCKET;
@@ -5753,8 +5902,19 @@ function partyDocsBucket(): string {
   return bucket;
 }
 
-function partyDocS3Key(projectId: string, filename: string): string {
-  return `${PARTY_DOCS_S3_PREFIX}/${projectId}/${filename}`;
+function partyDocS3Prefix(projectId: string, scope: DocScope, sessionId?: string): string {
+  if (scope === 'shared') return `${PARTY_DOCS_S3_PREFIX}/${projectId}/_shared/`;
+  // session scope — sessionId is guaranteed present by schema refinement.
+  return `${PARTY_DOCS_S3_PREFIX}/${projectId}/_session/${sessionId}/`;
+}
+
+function partyDocS3Key(
+  projectId: string,
+  scope: DocScope,
+  sessionId: string | undefined,
+  filename: string,
+): string {
+  return `${partyDocS3Prefix(projectId, scope, sessionId)}${filename}`;
 }
 
 function sanitizeDocFilename(filename: string): string {
@@ -5785,8 +5945,9 @@ app.post('/api/party/projects/:id/docs/upload-url', async (c) => {
   const filename = sanitizeDocFilename(parsed.data.filename);
   if (!filename) throw new ValidationError('filename resolves to empty after sanitization');
 
+  const { scope, sessionId } = parsed.data;
   const bucket = partyDocsBucket();
-  const key = partyDocS3Key(parsedId.data, filename);
+  const key = partyDocS3Key(parsedId.data, scope, sessionId, filename);
   const s3 = new S3Client({});
   const command = new PutObjectCommand({
     Bucket: bucket,
@@ -5795,7 +5956,7 @@ app.post('/api/party/projects/:id/docs/upload-url', async (c) => {
     CacheControl: 'no-store',
   });
   const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 300 });
-  return c.json({ uploadUrl, s3Bucket: bucket, s3Key: key, filename });
+  return c.json({ uploadUrl, s3Bucket: bucket, s3Key: key, filename, scope });
 });
 
 app.post('/api/party/projects/:id/docs/synced', async (c) => {
@@ -5806,7 +5967,6 @@ app.post('/api/party/projects/:id/docs/synced', async (c) => {
   }
   const project = await partyProjectsRepo.getProject(parsedId.data);
   if (!project) throw new NotFoundError('PartyProject', parsedId.data);
-  const projectPath = resolvePartyProjectPath(parsedId.data);
 
   const body = await c.req.json().catch(() => ({}));
   const parsed = docSyncInputSchema.safeParse(body);
@@ -5814,33 +5974,40 @@ app.post('/api/party/projects/:id/docs/synced', async (c) => {
     throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
   }
   const filename = sanitizeDocFilename(parsed.data.filename);
-  const bucket = partyDocsBucket();
-  const expectedKey = partyDocS3Key(parsedId.data, filename);
+  const { scope, sessionId } = parsed.data;
+  const expectedKey = partyDocS3Key(parsedId.data, scope, sessionId, filename);
   if (parsed.data.s3Key !== expectedKey) {
     throw new ValidationError(`s3Key must be ${expectedKey} (got ${parsed.data.s3Key})`);
   }
 
-  const jobId = crypto.randomUUID();
-  const now = new Date().toISOString();
-  await agentJobsRepo.createJob({
-    jobId,
-    status: 'PENDING',
-    createdAt: now,
-    updatedAt: now,
-    createdBy: c.get('user').userId,
-    workingDir: projectPath,
-    jobType: 'party-docs-sync',
-    partyDocsSyncPayload: {
-      projectId: parsedId.data,
-      projectPath,
-      filename,
-      s3Bucket: bucket,
-      s3Key: expectedKey,
-    },
-  });
-
-  return c.json({ jobId, projectId: parsedId.data, filename }, 201);
+  // No daemon copy job: S3 is the source of truth. The next party turn
+  // mirrors (shared ∪ this session) into the worktree's .party-uploads/ —
+  // see daemon/pipelines/party-turn.mjs::syncSessionDocsToWorktree. This
+  // endpoint only validates the upload landed at the canonical scoped key.
+  return c.json({ projectId: parsedId.data, filename, scope }, 201);
 });
+
+async function listPartyDocs(
+  s3: S3Client,
+  bucket: string,
+  projectId: string,
+  scope: DocScope,
+  sessionId?: string,
+): Promise<
+  { filename: string; s3Key: string; size: number; uploadedAt: string | null; scope: DocScope }[]
+> {
+  const prefix = partyDocS3Prefix(projectId, scope, sessionId);
+  const result = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix }));
+  return (result.Contents ?? [])
+    .filter((obj) => obj.Key && obj.Key !== prefix && !obj.Key.endsWith('/'))
+    .map((obj) => ({
+      filename: obj.Key!.slice(prefix.length),
+      s3Key: obj.Key!,
+      size: obj.Size ?? 0,
+      uploadedAt: obj.LastModified?.toISOString() ?? null,
+      scope,
+    }));
+}
 
 app.get('/api/party/projects/:id/docs', async (c) => {
   const projectId = c.req.param('id');
@@ -5848,19 +6015,25 @@ app.get('/api/party/projects/:id/docs', async (c) => {
   if (!parsedId.success) {
     throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid projectId');
   }
+  // sessionId is optional here (the project chooser lists shared docs with no
+  // active session); only validate it when present.
+  const sessionIdRaw = c.req.query('sessionId');
+  let sessionId: string | undefined;
+  if (sessionIdRaw) {
+    const parsedSid = sessionIdSchema.safeParse(sessionIdRaw);
+    if (!parsedSid.success) throw new ValidationError('invalid sessionId');
+    sessionId = parsedSid.data;
+  }
+
   const bucket = partyDocsBucket();
-  const prefix = `${PARTY_DOCS_S3_PREFIX}/${parsedId.data}/`;
   const s3 = new S3Client({});
-  const result = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix }));
-  const docs = (result.Contents ?? [])
-    .filter((obj) => obj.Key && obj.Key !== prefix)
-    .map((obj) => ({
-      filename: obj.Key!.slice(prefix.length),
-      s3Key: obj.Key!,
-      size: obj.Size ?? 0,
-      uploadedAt: obj.LastModified?.toISOString() ?? null,
-    }));
-  return c.json({ projectId: parsedId.data, docs });
+  const [shared, session] = await Promise.all([
+    listPartyDocs(s3, bucket, parsedId.data, 'shared'),
+    sessionId
+      ? listPartyDocs(s3, bucket, parsedId.data, 'session', sessionId)
+      : Promise.resolve([]),
+  ]);
+  return c.json({ projectId: parsedId.data, sessionId: sessionId ?? null, shared, session });
 });
 
 app.delete('/api/party/projects/:id/docs/:filename', async (c) => {
@@ -5875,37 +6048,29 @@ app.delete('/api/party/projects/:id/docs/:filename', async (c) => {
 
   const filename = sanitizeDocFilename(decodeURIComponent(filenameRaw));
   if (!filename) throw new ValidationError('invalid filename');
-  const projectPath = resolvePartyProjectPath(parsedId.data);
 
-  // Delete S3 object first (authoritative); daemon unlink is best-effort.
+  const parsedQuery = docScopeQuerySchema.safeParse({
+    scope: c.req.query('scope'),
+    sessionId: c.req.query('sessionId'),
+  });
+  if (!parsedQuery.success) {
+    throw new ValidationError(parsedQuery.error.errors[0]?.message || 'invalid scope/sessionId');
+  }
+  const { scope, sessionId } = parsedQuery.data;
+
+  // S3 is authoritative. The next party turn re-mirrors (shared ∪ session)
+  // into the worktree's .party-uploads/ — clearing the dir first — so the
+  // deleted doc disappears from the agent's view with no unlink job.
   const bucket = partyDocsBucket();
   const s3 = new S3Client({});
-  try {
-    await s3.send(
-      new DeleteObjectCommand({ Bucket: bucket, Key: partyDocS3Key(parsedId.data, filename) }),
-    );
-  } catch {
-    // If the S3 object was already gone we still enqueue the EC2 unlink.
-  }
+  await s3.send(
+    new DeleteObjectCommand({
+      Bucket: bucket,
+      Key: partyDocS3Key(parsedId.data, scope, sessionId, filename),
+    }),
+  );
 
-  const jobId = crypto.randomUUID();
-  const now = new Date().toISOString();
-  await agentJobsRepo.createJob({
-    jobId,
-    status: 'PENDING',
-    createdAt: now,
-    updatedAt: now,
-    createdBy: c.get('user').userId,
-    workingDir: projectPath,
-    jobType: 'party-docs-unlink',
-    partyDocsUnlinkPayload: {
-      projectId: parsedId.data,
-      projectPath,
-      filename,
-    },
-  });
-
-  return c.json({ jobId, projectId: parsedId.data, filename });
+  return c.json({ projectId: parsedId.data, filename, scope });
 });
 
 app.post('/api/party/projects/:id/inspect', async (c) => {

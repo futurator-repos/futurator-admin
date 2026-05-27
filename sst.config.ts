@@ -525,6 +525,62 @@ export default $config({
     });
 
     // ──────────────────────────────────────────────────────────────
+    // 2026-05-27 PR B — AgentFlagsTable
+    //
+    // Global feature flags read by the daemon before claiming PENDING jobs.
+    // v1 key: `agent.paused` ('true' | 'false'). Future keys: `agent.daily-
+    // spend-cap`, `agent.max-concurrent-override`, etc. Single-row reads;
+    // no GSI; no TTL. PK is the flag name. Cached 5s in the daemon.
+    //
+    // Writes only from API admin routes (/api/admin/pause + /resume). Reads
+    // from daemon (pre-claim gate) + API GET (header pill displays state).
+    // ──────────────────────────────────────────────────────────────
+    const agentFlagsTable = new sst.aws.Dynamo('AgentFlagsTable', {
+      fields: { flagName: 'string' },
+      primaryIndex: { hashKey: 'flagName' },
+      transform: {
+        table: {
+          name: 'futurator-agent-flags',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ──────────────────────────────────────────────────────────────
+    // 2026-05-27 PR B — AgentSpendLogTable
+    //
+    // One row per completed agent job — wall-clock × per-second cost.
+    // Per §9.5 RESOLVED: per-job wall-clock seconds × $0.02/sec (configurable
+    // via env AGENT_COST_PER_SEC). GSI1 (date, createdAt) for "today's
+    // accumulated spend" query. 90d TTL on `expiresAt` (epoch seconds).
+    //
+    // PR B writes the rows + read-only daily-spend pill. PR C enforces the
+    // cap (refuses new sessions when getDailySpend(today) > AGENT_DAILY_CAP).
+    // ──────────────────────────────────────────────────────────────
+    const agentSpendLogTable = new sst.aws.Dynamo('AgentSpendLogTable', {
+      fields: {
+        logId: 'string',
+        GSI1PK: 'string',
+        GSI1SK: 'string',
+      },
+      primaryIndex: { hashKey: 'logId' },
+      globalIndexes: {
+        'date-createdAt-index': { hashKey: 'GSI1PK', rangeKey: 'GSI1SK' },
+      },
+      ttl: 'expiresAt',
+      transform: {
+        table: {
+          name: 'futurator-agent-spend-log',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ──────────────────────────────────────────────────────────────
     // Story 18.1 — FreeAgentSessionRole (Epic 18: Free Claude Code Agent)
     //
     // A standalone IAM role assumed per-session by the free-agent chat
@@ -683,6 +739,8 @@ export default $config({
         timingSummaryTable,
         freeAgentSessionsTable,
         freeAgentConversationsTable,
+        agentFlagsTable,
+        agentSpendLogTable,
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
@@ -721,6 +779,10 @@ export default $config({
         FREE_AGENT_SESSIONS_TABLE: freeAgentSessionsTable.name,
         // Story 18.6 — free-agent conversations table (per-message rows).
         FREE_AGENT_CONVERSATIONS_TABLE: freeAgentConversationsTable.name,
+        // 2026-05-27 PR B — global agent feature flags (e.g. agent.paused).
+        AGENT_FLAGS_TABLE: agentFlagsTable.name,
+        // 2026-05-27 PR B — per-job spend rows (wall-clock × cost-per-sec).
+        AGENT_SPEND_LOG_TABLE: agentSpendLogTable.name,
         PROJECTS_ROOT: '/home/ubuntu/projects',
         BMAD_VERSION: '6.3.0',
         BMAD_AGENTS_SOURCE: '/home/ubuntu/bmad-agents-source/bmad/agents',
@@ -764,6 +826,29 @@ export default $config({
         {
           actions: ['s3:PutObject', 's3:GetObject'],
           resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/timing/*`],
+        },
+        // 2026-05-19 — App-delete cascade. DELETE /api/apps/:appId cleans up
+        // the App's deployed artifacts (`apps/<appId>/*`) and Mycelium
+        // mirror (`knowledge-live/<appId>/*`). Read + list + delete only;
+        // never write outside the App's own prefix. Scope is intentionally
+        // narrow — the homepage's other paths (data/, media/, party-docs/,
+        // timing/) remain off-limits to delete.
+        {
+          actions: ['s3:GetObject', 's3:DeleteObject'],
+          resources: [
+            `arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/apps/*`,
+            `arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/knowledge-live/*`,
+          ],
+        },
+        // s3:ListBucket has no Resource ARN below the bucket level — it
+        // applies to the bucket itself. We don't gate by prefix here
+        // (SST's permission shape is opinionated and rejects Pulumi's
+        // `condition: [{test, variable, values}]` form). Listing all
+        // keys is read-only; the actual destructive scope still rides
+        // on the GetObject+DeleteObject grant above, which IS narrow.
+        {
+          actions: ['s3:ListBucket'],
+          resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}`],
         },
         // Story 18.1 — let the API Lambda assume the FreeAgentSessionRole
         // with session tags when opening a new free-agent chat session. The

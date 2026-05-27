@@ -1,0 +1,17 @@
+{
+  "_comment": "2026-05-27 PR B.b — paths whose modification triggers `red` risk class. Any PR that touches one of these patterns MUST receive operator approval via typed confirmation; auto-merge never applies. Patterns use glob shapes parsed by daemon/pipelines/lib/agent-risk-classifier.mjs. See docs/concepts/free-mode-agent-exploration.md §5.2 + §9.6. Self-referential: this file and the classifier source are themselves listed, so any change to either is red-class.",
+  "red_patterns": [
+    "daemon/**",
+    "functions/cron/**",
+    "sst.config.ts",
+    "functions/shared/auth-middleware.ts",
+    "functions/shared/repositories/**",
+    ".github/workflows/**",
+    "daemon/lib/agent-danger-paths.json",
+    "daemon/pipelines/lib/agent-risk-classifier.mjs",
+    "daemon/lib/git-deny-list.json"
+  ],
+  "yellow_path_patterns": ["functions/api/index.ts", "src/components/labs/**"],
+  "yellow_line_threshold": 50,
+  "version": 1
+}
