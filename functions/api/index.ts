@@ -30,6 +30,8 @@ import * as freeAgentConversationsRepo from '../shared/repositories/free-agent-c
 import * as agentFlagsRepo from '../shared/repositories/agent-flags-repository';
 import { AGENT_FLAG_KEYS } from '../shared/repositories/agent-flags-repository';
 import * as agentSpendRepo from '../shared/repositories/agent-spend-log-repository';
+import * as fixCyclesRepo from '../shared/repositories/fix-cycles-repository';
+import { FIX_CYCLE_HARD_CAP } from '../shared/repositories/fix-cycles-repository';
 import {
   bootstrapAdminSelfEdit,
   isAdminAlreadyBootstrapped,
@@ -5825,6 +5827,40 @@ app.get('/api/admin/spend', async (c) => {
 });
 
 /**
+ * 2026-05-27 PR C.d — one-day override for the daily-spend cap.
+ *
+ * Sets `agent.spend-cap.override.<today>` = 'true' in `futurator-agent-flags`.
+ * The session-create gate consults this flag before refusing on cap. The flag
+ * keys itself by date so the override automatically expires at the next UTC
+ * day boundary — no expiry job needed.
+ */
+app.post('/api/admin/spend-cap/override-today', async (c) => {
+  const operatorId = c.get('user').userId;
+  const today = agentSpendRepo.todayUtc();
+  const flagName = `agent.spend-cap.override.${today}`;
+  const row = await agentFlagsRepo.setFlag(flagName, 'true', operatorId);
+  return c.json({
+    overridden: true,
+    date: today,
+    updatedBy: row.updatedBy,
+    updatedAt: row.updatedAt,
+  });
+});
+
+app.delete('/api/admin/spend-cap/override-today', async (c) => {
+  const operatorId = c.get('user').userId;
+  const today = agentSpendRepo.todayUtc();
+  const flagName = `agent.spend-cap.override.${today}`;
+  const row = await agentFlagsRepo.setFlag(flagName, 'false', operatorId);
+  return c.json({
+    overridden: false,
+    date: today,
+    updatedBy: row.updatedBy,
+    updatedAt: row.updatedAt,
+  });
+});
+
+/**
  * POST /api/admin/bootstrap-self-edit-repo — one-time admin action.
  *
  * 2026-05-27 PR B.a. Bare-clones the futurator-admin repo onto EC2 and
@@ -6947,6 +6983,29 @@ app.post('/api/free-agent/sessions', authMiddleware, async (c) => {
     throw new AppError('UNAUTHENTICATED', 'Missing user context', 401);
   }
 
+  // 2026-05-27 PR C.d — daily spend cap (§5.7 + §9.5 RESOLVED).
+  // Reads today's UTC rollup; refuses new sessions when total exceeds the
+  // cap UNLESS the operator has set an override flag for today.
+  const dailyCapUsd = (() => {
+    const raw = process.env.AGENT_DAILY_SPEND_CAP_USD;
+    const v = raw ? parseFloat(raw) : 200;
+    return Number.isFinite(v) && v > 0 ? v : 200;
+  })();
+  const today = agentSpendRepo.todayUtc();
+  const overrideFlag = await agentFlagsRepo.getFlag(`agent.spend-cap.override.${today}`);
+  const overridden = overrideFlag?.value === 'true';
+  if (!overridden) {
+    const spend = await agentSpendRepo.getDailySpend(today);
+    if (spend.totalCostUsd >= dailyCapUsd) {
+      throw new AppError(
+        'DAILY_SPEND_CAP',
+        `Today's agent spend ($${spend.totalCostUsd.toFixed(2)}) exceeds the daily cap ($${dailyCapUsd.toFixed(2)}). ` +
+          `Wait for the UTC day boundary, raise AGENT_DAILY_SPEND_CAP_USD, or grant a one-day override via /api/admin/spend-cap/override-today.`,
+        429,
+      );
+    }
+  }
+
   const { scope, model } = parsed.data;
   const costCapUsd = parsed.data.costCapUsd ?? FREE_AGENT_DEFAULT_COST_CAP_USD;
   // Derive projectId from scope.id when scope.kind === 'project'; fall back to
@@ -7228,6 +7287,15 @@ async function emitFreeAgentEvent(
 const openPrSchema = z.object({
   title: z.string().min(3).max(120),
   body: z.string().max(20_000).optional(),
+  /**
+   * 2026-05-27 PR C.e — when this PR is a fix-retry for a pipeline-v2
+   * wave failure, callers MUST provide this so the cycle-cap (3 attempts
+   * per (plan, wave)) can fire. Greenfield / brownfield module-dev PRs
+   * omit it and bypass the cap (still gated by daily spend).
+   */
+  targetWaveFailure: z
+    .object({ planId: z.string().min(1), waveNumber: z.number().int().nonnegative() })
+    .optional(),
 });
 
 app.post('/api/free-agent/sessions/:id/open-pr', authMiddleware, async (c) => {
@@ -7256,6 +7324,51 @@ app.post('/api/free-agent/sessions/:id/open-pr', authMiddleware, async (c) => {
       `Session already has an open PR (#${session.prNumber}). Approve or reject it first.`,
       409,
     );
+  }
+
+  // 2026-05-27 PR C.e — cycle cap. Only applies when targetWaveFailure is
+  // present (the caller flags the PR as a pipeline-v2 wave-fix attempt).
+  // At 3 prior attempts, refuse the 4th, mark exhausted, write attention.
+  const target = parsedBody.data.targetWaveFailure;
+  if (target) {
+    const cycle = await fixCyclesRepo.getCycle(target.planId, target.waveNumber);
+    if (cycle && cycle.attempts >= FIX_CYCLE_HARD_CAP) {
+      // Idempotent — already-exhausted rows stay exhausted.
+      await fixCyclesRepo.markExhausted(target.planId, target.waveNumber).catch(() => {
+        // Best-effort; the conditional ensures we never throw on race.
+      });
+      const itemId = `cycle-cap-${target.planId}-${target.waveNumber}`;
+      await attentionRepo
+        .createAttentionItem({
+          planId: target.planId,
+          itemId,
+          createdAt: new Date().toISOString(),
+          resolvedAt: null,
+          severity: 'high',
+          category: 'retry-exhausted',
+          title: `Free-agent fix cycle exhausted for wave ${target.waveNumber}`,
+          body:
+            `3 fix attempts exhausted on plan ${target.planId} wave ${target.waveNumber}. ` +
+            `Manual investigation needed; the agent has surfaced what it learned across the ` +
+            `attempts and is standing down. Sessions: ${(cycle.sessionIds ?? []).join(', ')}.`,
+          context: {
+            jobId: `${target.planId}#wave-${target.waveNumber}`,
+          },
+          suggestedActions: [],
+          status: 'open',
+          dedupKey: `free-agent-cycle-cap:${target.planId}:${target.waveNumber}`,
+        })
+        .catch(() => {
+          // Attention-item write is best-effort — failing here would just
+          // mask the cap error; the operator still sees the 409 response.
+        });
+      throw new AppError(
+        'CYCLE_CAP_EXHAUSTED',
+        `3 fix attempts exhausted on plan ${target.planId} wave ${target.waveNumber}. ` +
+          `Operator must investigate manually before further automated fixes.`,
+        409,
+      );
+    }
   }
 
   const worktreePath = session.worktreePath;
@@ -7395,7 +7508,22 @@ app.post('/api/free-agent/sessions/:id/open-pr', authMiddleware, async (c) => {
     riskReasons: classification.reasons,
     diffSummary: { additions, deletions, filesChanged: files.length },
     headSha: pushResult.headSha,
+    ...(target ? { targetWaveFailure: target } : {}),
   });
+
+  // 2026-05-27 PR C.e — count this attempt against the wave-fix cycle cap.
+  // Done AFTER the PR opens successfully so a push-failed attempt doesn't
+  // burn a slot. Best-effort: a DDB blip here doesn't fail the operator's
+  // request — the next attempt re-increments correctly.
+  if (target) {
+    await fixCyclesRepo
+      .recordAttempt(target.planId, target.waveNumber, parsedId.data)
+      .catch((err: Error) => {
+        console.warn(
+          `[fix-cycles] recordAttempt failed for ${target.planId}/${target.waveNumber}: ${err.message}`,
+        );
+      });
+  }
 
   return c.json({
     prNumber: prResult.data.number,

@@ -50,4 +50,7 @@ export const TABLE_NAMES = {
   // 2026-05-27 PR B — per-job spend log. PK: logId. GSI1 date+createdAt for
   // `getDailySpend(today)`. 90d TTL.
   agentSpendLog: process.env.AGENT_SPEND_LOG_TABLE || 'futurator-agent-spend-log',
+  // 2026-05-27 PR C.e — per-(plan,wave) fix-attempt counter. PK: cycleKey
+  // = `${planId}#${waveNumber}`. 30d TTL.
+  fixCycles: process.env.FIX_CYCLES_TABLE || 'futurator-fix-cycles',
 } as const;

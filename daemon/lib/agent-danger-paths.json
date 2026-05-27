@@ -9,9 +9,14 @@
     ".github/workflows/**",
     "daemon/lib/agent-danger-paths.json",
     "daemon/pipelines/lib/agent-risk-classifier.mjs",
-    "daemon/lib/git-deny-list.json"
+    "functions/shared/services/agent-risk-classifier.ts",
+    "daemon/lib/git-deny-list.json",
+    "functions/cron/deployer-lambda.ts",
+    "functions/cron/health-watcher.ts",
+    "functions/shared/services/free-agent-pat-loader.ts",
+    "functions/shared/services/admin-self-edit-bootstrap.ts"
   ],
   "yellow_path_patterns": ["functions/api/index.ts", "src/components/labs/**"],
   "yellow_line_threshold": 50,
-  "version": 1
+  "version": 2
 }

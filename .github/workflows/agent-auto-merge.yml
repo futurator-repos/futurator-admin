@@ -1,0 +1,125 @@
+# agent-auto-merge.yml — 2026-05-27 PR C.a.
+#
+# Auto-merge green-class PRs opened by the Free Agent. The classifier
+# runs from `main` (§9.6 layer 2 — load-bearing) so a PR cannot relax
+# its own classification by editing the classifier source.
+#
+# Trigger:
+#   - pull_request types `opened` + `labeled` (the open-pr endpoint
+#     adds the `Risk-Class: <class>` label, but the workflow re-runs
+#     the classifier from main regardless — the label is informational).
+#
+# Auth: GITHUB_TOKEN has `pull-requests: write` + `contents: write` so
+# the workflow can post a review + enable auto-merge. The token is
+# repo-scoped (no PAT needed).
+#
+# Skips:
+#   - PRs whose head ref doesn't match `assist/<proj>/<sid>`
+#     (this workflow ONLY governs free-agent PRs).
+#   - PRs from non-bot authors (defense-in-depth even though the
+#     futurator-agent-bot identity is the only one that should open
+#     these branches).
+#
+# Behavior on red / yellow:
+#   The workflow exits cleanly with a comment ("classification: yellow
+#   — auto-merge skipped; operator approval required"). The inline
+#   approval card in the admin UI drives the merge from there.
+
+name: agent-auto-merge
+
+on:
+  pull_request:
+    types: [opened, labeled, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  classify-and-merge:
+    if: |
+      startsWith(github.head_ref, 'assist/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (NOT the PR's tree — load-bearing per §9.6)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps (deterministic)
+        run: npm ci
+
+      - name: Fetch PR diff stats
+        id: diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          # Use the GitHub compare API — same shape the open-pr endpoint
+          # used to derive the classifier input.
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --jq '[.[] | {filename, additions, deletions}]' > pr-files.json
+          ADDITIONS=$(jq '[.[].additions] | add // 0' pr-files.json)
+          DELETIONS=$(jq '[.[].deletions] | add // 0' pr-files.json)
+          jq -r '.[].filename' pr-files.json > pr-paths.txt
+          echo "additions=${ADDITIONS}" >> "$GITHUB_OUTPUT"
+          echo "deletions=${DELETIONS}" >> "$GITHUB_OUTPUT"
+
+      - name: Classify (from main; not from PR)
+        id: classify
+        run: |
+          set -e
+          node --input-type=module -e "
+            import('./daemon/pipelines/lib/agent-risk-classifier.mjs').then(async ({classifyDiff, _resetDangerConfigCache}) => {
+              _resetDangerConfigCache();
+              const fs = await import('node:fs');
+              const paths = fs.readFileSync('pr-paths.txt','utf8').split('\n').filter(Boolean);
+              const additions = ${{ steps.diff.outputs.additions }};
+              const deletions = ${{ steps.diff.outputs.deletions }};
+              const result = classifyDiff({touchedPaths: paths, additions, deletions});
+              const out = JSON.stringify({class: result.class, reasons: result.reasons});
+              fs.writeFileSync('classification.json', out);
+              console.log(out);
+            }).catch((e) => { console.error(e); process.exit(1); });
+          "
+          CLASS=$(jq -r '.class' classification.json)
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+
+      - name: Run gates (lint + typecheck + test)
+        if: steps.classify.outputs.class == 'green'
+        id: gates
+        run: |
+          set -e
+          npm run lint
+          npm run typecheck
+          npm test -- --reporter=basic
+          echo "gates=passed" >> "$GITHUB_OUTPUT"
+
+      - name: Skip — non-green class
+        if: steps.classify.outputs.class != 'green'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          REASONS=$(jq -r '.reasons | map("- " + .) | join("\n")' classification.json)
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "🤖 **agent-auto-merge skipped**\n\nClassification (from \`main\`): \`${{ steps.classify.outputs.class }}\` — operator approval required via the inline card.\n\nReasons:\n${REASONS}"
+
+      - name: Approve + enable auto-merge
+        if: steps.classify.outputs.class == 'green' && steps.gates.outputs.gates == 'passed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          gh pr review "${PR_NUMBER}" --repo "${REPO}" --approve \
+            --body "🤖 **agent-auto-merge** — classifier (from \`main\`) returned \`green\` and all gates passed. Auto-merging."
+          gh pr merge "${PR_NUMBER}" --repo "${REPO}" --squash --auto

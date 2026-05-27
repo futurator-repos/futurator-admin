@@ -549,6 +549,37 @@ export default $config({
     });
 
     // ──────────────────────────────────────────────────────────────
+    // 2026-05-27 PR C.e — FixCyclesTable
+    //
+    // One row per (planId, waveNumber) pair tracking how many free-agent
+    // fix-attempt PRs have targeted that wave failure. At 3 attempts, the
+    // 4th /open-pr against the same wave returns 409 CYCLE_CAP_EXHAUSTED
+    // and writes an attention item ("3 fix attempts exhausted on plan X
+    // wave Y — manual investigation needed").
+    //
+    // Per §9.5 RESOLVED: the cap applies ONLY to pipeline-v2 wave fixes
+    // (sessions whose `/open-pr` carries `targetWaveFailure` metadata).
+    // Greenfield/brownfield module-development sessions are uncapped here;
+    // the daily-spend cap is their only backstop.
+    //
+    // 30-day TTL on `expiresAt`: a wave that drifts 30 days without retry
+    // is effectively abandoned; we re-claim the row.
+    // ──────────────────────────────────────────────────────────────
+    const fixCyclesTable = new sst.aws.Dynamo('FixCyclesTable', {
+      fields: { cycleKey: 'string' },
+      primaryIndex: { hashKey: 'cycleKey' },
+      ttl: 'expiresAt',
+      transform: {
+        table: {
+          name: 'futurator-fix-cycles',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ──────────────────────────────────────────────────────────────
     // 2026-05-27 PR B — AgentSpendLogTable
     //
     // One row per completed agent job — wall-clock × per-second cost.
@@ -741,6 +772,7 @@ export default $config({
         freeAgentConversationsTable,
         agentFlagsTable,
         agentSpendLogTable,
+        fixCyclesTable,
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
@@ -783,6 +815,8 @@ export default $config({
         AGENT_FLAGS_TABLE: agentFlagsTable.name,
         // 2026-05-27 PR B — per-job spend rows (wall-clock × cost-per-sec).
         AGENT_SPEND_LOG_TABLE: agentSpendLogTable.name,
+        // 2026-05-27 PR C.e — fix-cycle counter per (plan, wave).
+        FIX_CYCLES_TABLE: fixCyclesTable.name,
         PROJECTS_ROOT: '/home/ubuntu/projects',
         BMAD_VERSION: '6.3.0',
         BMAD_AGENTS_SOURCE: '/home/ubuntu/bmad-agents-source/bmad/agents',
@@ -1122,6 +1156,51 @@ export default $config({
           ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
           TIMING_SUMMARY_TABLE: timingSummaryTable.name,
         },
+      },
+    });
+
+    // ──────────────────────────────────────────────────────────────
+    // 2026-05-27 PR C.c — DeployerLambda (self-deploy daemon on main push)
+    //
+    // Cron-polls every 60s; when origin/main advances past
+    // agent.deployer.last-deployed-sha (futurator-agent-flags), runs the
+    // snapshot → rsync → restart → 60s-health-check → auto-rollback flow.
+    // The lambda is itself danger-listed (PR C.b) so changes to it require
+    // operator typed-confirmation.
+    //
+    // Timeout 5 min covers worst case: 60s SSM dispatch lag + 60s rsync +
+    // 60s restart + 60s health-check + 60s rollback budget.
+    //
+    // SSM permission is broad — the cron Lambda needs to send shell
+    // commands to the daemon EC2 instance for snapshot/rsync/restart/
+    // health-check. Scoped to the same instance the API Lambda already
+    // controls (no expanded blast radius).
+    // ──────────────────────────────────────────────────────────────
+    new sst.aws.Cron('DeployerLambda', {
+      schedule: 'rate(1 minute)',
+      function: {
+        handler: 'functions/cron/deployer-lambda.handler',
+        runtime: 'nodejs22.x',
+        architecture: 'arm64',
+        memory: '256 MB',
+        timeout: '300 seconds',
+        link: [agentFlagsTable, agentEventsTable, attentionItemsTable],
+        environment: {
+          AGENT_FLAGS_TABLE: agentFlagsTable.name,
+          AGENT_EVENTS_TABLE: agentEventsTable.name,
+          ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
+          EC2_INSTANCE_ID: process.env.EC2_INSTANCE_ID ?? 'i-0826d68c316ae97dd',
+        },
+        permissions: [
+          {
+            actions: [
+              'ssm:SendCommand',
+              'ssm:GetCommandInvocation',
+              'ssm:DescribeInstanceInformation',
+            ],
+            resources: ['*'],
+          },
+        ],
       },
     });
 
