@@ -1,6 +1,6 @@
 # Party Push — Status Tracker
 
-**Last updated:** 2026-05-22 (Story 20.16 code-complete: CM poll-loop wiring + status snapshot; deploy + manual smoke remain operator-driven)
+**Last updated:** 2026-05-27 (deploy + party-turn rewire smoke verified in production; checkpoint compose smoke + push-enable smoke still pending; 2 bugs found + fixed during the gate)
 **Owner:** Planner (Claude Opus 4.7), implementing solo
 **Source docs:** `plan.md` (design + reviews) · `epics.md` (epic definitions) · `stories/*.md` (per-story tasks)
 
@@ -101,14 +101,14 @@ Items the operator needs to act on, ordered by urgency.
 
 ### Story 20.16 — deploy gate (sequence is mandatory)
 
-All four epics are code-complete. Run these in order before flipping the live-traffic flags:
+All four epics are code-complete. Status of the deploy gate as of 2026-05-27:
 
-- [ ] **Task 2 — Rsync daemon to EC2.** `./scripts/rsync-daemon.sh` should report `Auth probe: OK` after the restart. Visible new artifacts: `/opt/futurator-daemon/lib/cancel-poller.mjs`, `/opt/futurator-daemon/lib/concurrency-manager.mjs`, `/opt/futurator-daemon/pipelines/lib/party-tool-hook.sh`, `/opt/futurator-daemon/pipelines/lib/party-checkpoint.sh`, `/opt/futurator-daemon/lib/git-deny-list.json`. The daemon's startup log should now include `Concurrency: 2 jobs (ConcurrencyManager enabled — interactive-first)`.
-- [ ] **Task 3 — `sst deploy --stage production`** — AdminSite + API Lambda + crons updated. New routes available: `GET /api/party/sessions/:id/audit`, `POST /api/party/sessions/:id/checkpoints/:sha/pr`, `POST /api/admin/migrate-brownfield/:projectId`, and PATCH `/api/migrations/:id` accepts `pushEnabled`.
-- [ ] **Task 4a — Brownfield conversion smoke** (Story 20.4): `POST /api/admin/migrate-brownfield/applicator` during a quiet window. Endpoint refuses if any pipeline-v2 plan / free-agent / party session is active. Verify `/home/ubuntu/repos/applicator.git` (bare) + `/home/ubuntu/projects/applicator/` (worktree on `main`) after the run.
-- [ ] **Task 4b — Party-turn rewire smoke** (Story 20.7 AC 5 + 20.6): set `PARTY_PUSH_V1_ENABLED=1` daemon-side, start a party session on the converted `applicator`, send one message. Confirm worktree at `/home/ubuntu/worktrees/applicator/_party/<sid>/` on `party/applicator/<sid>` branch + `/tmp/party-settings-<sid>.json` exists.
-- [ ] **Task 4c — Checkpoint compose smoke** (Story 21.4 commit-only path): in the same session, ask the agent to write a file + emit `[CHECKPOINT_SUMMARY]: …`. Verify `git log` on the party branch shows the commit with v2.5 §23 trailers; daemon emits `party.checkpoint.composed`.
-- [ ] **Task 4d — Delete cascade smoke** (Story 20.10): `curl -X DELETE /api/party/sessions/<sid>`. Response has 6 cascade steps; worktree gone, archive branch present, live branch dropped.
+- [x] **Task 2 — Rsync daemon to EC2** ✅ DONE 2026-05-22 (initial), 2026-05-23 (lazy-worktree fix), 2026-05-27 (reaper Limit:5 fix). Daemon log confirms `Agent daemon started` + `Concurrency: 2 jobs (ConcurrencyManager enabled — interactive-first)`. All Epic 19+20 artifacts present at `/opt/futurator-daemon/`.
+- [x] **Task 3 — `sst deploy --stage production`** ✅ DONE 2026-05-22 (initial), 2026-05-27 (reaper Limit:5 fix). `https://admin.futurator.ai` serving build `8b5b970` → `d84a5b1`. New routes confirmed live via `/api/health` (build hash) + 401 probe on `/api/party/sessions/:id/audit`.
+- [x] **Task 4a — Brownfield conversion smoke** ✅ DONE 2026-05-23. Applicator converted via SSH-driven script (operator chose SSH path to skip API auth/audit overhead). Stashed 3 untracked debate artifacts to `/tmp/applicator-debate-artifacts-1779538821.tgz` (44 KB) before the destructive `rm -rf`. Bare repo + worktree topology verified via `git worktree list`. DDB row's `lastCommitSha` advanced from `d013851` → `d4439d4` (origin/main).
+- [x] **Task 4b — Party-turn rewire smoke** ✅ DONE 2026-05-27. `PARTY_PUSH_V1_ENABLED=1` set on daemon 2026-05-23. New session `80aa7a05` on applicator: bootstrap created `/home/ubuntu/worktrees/applicator/_party/80aa7a05/` on branch `party/applicator/80aa7a05`, `/tmp/party-settings-80aa7a05.json` written, Round 1 + Round 2 both ran on the per-session worktree without contention. Two pre-fix sessions `80b9aadd` + `f02060a0` left in ERROR for delete-cascade smoke.
+- [ ] **Task 4c — Checkpoint compose smoke** (Story 21.4 commit-only path): ask the agent to write a file + emit `[CHECKPOINT_SUMMARY]: …`. Verify `git log` on the party branch shows the commit with v2.5 §23 trailers; daemon emits `party.checkpoint.composed`; CheckpointCard renders inline.
+- [ ] **Task 4d — Delete cascade smoke** (Story 20.10): use the two stuck sessions (`9fc4c7cd`, `f02060a0`) — UI Delete or `curl -X DELETE /api/party/sessions/<sid>`. Response has 6 cascade steps; worktree gone, archive branch present, live branch dropped, residual count = 0.
 - [ ] **Task 4e — Reaper trigger smoke** (Story 20.15 Task 5): set a stale ENDED session's `updatedAt` to >7d ago in DDB, run `systemctl restart futurator-daemon`. Confirm `party N/M` line in reaper summary.
 - [ ] **Task 5 — Hook adversarial smoke** (Story 20.3): in a running party session, ask the agent to run `git push origin party/x` via Bash. Hook denies with `DENIED: git mutation not allowed...`. Run `mkdir scratch` — emits `party.tool.default-allow` event audit line.
 - [ ] **Task — PAT-rotation smoke** (Story 19.6 AC 6): rotate the applicator brownfield PAT in `/migrate`. Verify pipeline-v2 picks up the new PAT without daemon restart.
@@ -117,6 +117,13 @@ All four epics are code-complete. Run these in order before flipping the live-tr
 - [ ] **Task — Audit drawer smoke** (Story 22.7): open the Audit log button in the right rail; confirm Checkpoints / Questions / Tool allows tabs populate.
 
 Order is important: `PARTY_PUSH_V1_ENABLED=1` is the gate for the party-turn rewire (Task 4b+). `PARTY_PUSH_ENABLED=1` is the gate for the push step (Task — Push-enable smoke onward). Flip them in that order; rollback is `unset` either flag.
+
+### Bugs found + fixed during the deploy gate
+
+| Date       | Commit    | Bug                                                                                                                                                                                                                                                                                                                                                                                         | Story link |
+| ---------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| 2026-05-23 | `0bf1a14` | **Story 20.6 wiring gap**: `setupPartyWorktree` shipped but nothing called it. `POST /api/party/sessions` left every session on the legacy shared folder. Fix: lazy-create worktree on first turn (gated on `claudeSessionId === null` so existing sessions stay cwd-locked for Claude Code's `--resume` to work).                                                                          | Story 20.6 |
+| 2026-05-27 | `d84a5b1` | **`findBySessionIdShort` Limit:5 bug**: DDB `Scan({ Limit: 5 })` evaluates at most 5 items before filtering, NOT returns 5 matches. With >5 sessions in the table, lookup returned 0 → reaper classifier `session-row-missing → REAP` → deleted active worktrees mid-flight (incident: session `9fc4c7cd`). Fix: paginate via `ExclusiveStartKey`. Same fix in daemon helper + Lambda repo. | Story 19.8 |
 
 ---
 
