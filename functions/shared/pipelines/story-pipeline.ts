@@ -1064,28 +1064,41 @@ Fix the issues mentioned. Output only what you changed, then:
             .replace(/\s+/g, ' ')
             .trim()
             .slice(0, 200) || 'foundation milestone';
-        const argsJson = JSON.stringify({
-          workingDir: '.',
-          storyId: story.storyId,
-          decision: decisionText.slice(0, 200),
-          rationale: rationaleRaw,
-          storyTitle: decisionText.slice(0, 200),
-        });
+        // 2026-05-27 (brick-breaker-11 Bug 3) — base64-encode the args.
+        // The previous build inlined `JSON.stringify(...)` (full of `"`)
+        // INSIDE a double-quoted `node -e "..."`, so the first `{"` closed
+        // the -e string and bash threw `syntax error near unexpected token
+        // '('` (exit 2). base64 is [A-Za-z0-9+/=] — no quotes, no `$`, no
+        // backslashes — so it survives the shell round-trip cleanly. The
+        // node script is SINGLE-quoted for the shell (base64 has no single
+        // quotes), and inside it we use double quotes freely.
+        const argsB64 = Buffer.from(
+          JSON.stringify({
+            workingDir: '.',
+            storyId: story.storyId,
+            decision: decisionText.slice(0, 200),
+            rationale: rationaleRaw,
+            storyTitle: decisionText.slice(0, 200),
+          }),
+        ).toString('base64');
 
         return [
           {
             id: 'claude-md-append-decision',
             stepType: 'shell' as const,
-            // Use `cd <workingDir>` + a small inline `node -e` that
-            // imports the daemon-resident writer module. Node's dynamic
-            // `import()` resolves the path on the daemon's filesystem;
-            // the daemon ships from /opt/futurator-daemon/ so the
-            // module path is stable across deploys.
+            // `cd <workingDir>` + a single-quoted `node -e` that imports
+            // the daemon-resident writer (the daemon rsyncs to
+            // /opt/futurator-daemon/ — see scripts/rsync-daemon.sh). The
+            // file:// URL form is the unambiguous way to dynamic-import an
+            // absolute path. Args arrive base64-encoded + JSON.parse'd
+            // back inside node.
             command:
               `cd ${workingDir} && ` +
-              `node -e "import('/opt/futurator-daemon/lib/claude-md-writer.mjs').then(m => ` +
-              `m.appendArchitectureDecision(${argsJson}).then(r => ` +
-              `console.log('claude-md-append-decision:', JSON.stringify(r))))" 2>&1 || true`,
+              `node -e 'import("file:///opt/futurator-daemon/lib/claude-md-writer.mjs")` +
+              `.then(m => m.appendArchitectureDecision(` +
+              `JSON.parse(Buffer.from("${argsB64}", "base64").toString("utf8"))` +
+              `).then(r => console.log("claude-md-append-decision:", JSON.stringify(r))))' ` +
+              `2>&1 || true`,
             timeout: 8000,
             // Non-blocking by default: the daemon's executeShellStep
             // only fails the job when `onFail.action === 'fail'`. We

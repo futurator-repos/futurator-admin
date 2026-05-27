@@ -787,3 +787,78 @@ describe('PR-65 — review-runtime step', () => {
     expect(cmd).toContain('$QA_HEALTH_PATH');
   });
 });
+
+// 2026-05-27 (brick-breaker-11 Bug 3) — Epic 5 claude-md-append-decision
+// shell-quoting fix. The step only emits for milestone stories (wave 0 OR
+// AC starts with "Architecture:"). Pre-fix it inlined JSON-with-quotes into
+// a double-quoted `node -e "..."` → bash `syntax error near unexpected token
+// '('` (exit 2). Fix: base64-encode the args + single-quote the node script.
+describe('Epic 5 — claude-md-append-decision shell-quoting (Bug 3)', () => {
+  const milestoneStory: EpicStory = {
+    storyId: 'story-abc-123',
+    order: 0,
+    wave: 0,
+    title: "Define core game domain types (it's a milestone)",
+    description: 'AC: exports Ball, Paddle, Brick, GameStatus, GameState.',
+    status: 'pending',
+    touchPoints: ['src/types/index.ts'],
+  } as EpicStory;
+
+  function appendStep() {
+    const pipeline = generateStoryPipeline(milestoneStory, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    return pipeline.steps.find((s) => s.id === 'claude-md-append-decision') as
+      | { command: string }
+      | undefined;
+  }
+
+  it('emits the step for a wave-0 milestone story', () => {
+    expect(appendStep()).toBeDefined();
+  });
+
+  it('does NOT emit for a non-milestone story (wave>0, no Architecture: prefix)', () => {
+    const pipeline = generateStoryPipeline(
+      { ...milestoneStory, wave: 2, description: 'AC: regular feature.' } as EpicStory,
+      'Test Epic',
+      workingDir,
+      { rigor: 'mvp' },
+    );
+    expect(pipeline.steps.find((s) => s.id === 'claude-md-append-decision')).toBeUndefined();
+  });
+
+  it('command is syntactically valid bash (`bash -n`) — the actual Bug 3 regression', () => {
+    const cmd = appendStep()!.command;
+    expect(() => {
+      execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' });
+    }).not.toThrow();
+  });
+
+  it('passes args base64-encoded, NOT as inline JSON (no bare {" in the command)', () => {
+    const cmd = appendStep()!.command;
+    // The defect was an inline JSON object inside double quotes.
+    expect(cmd).not.toContain('{"workingDir"');
+    expect(cmd).toContain('Buffer.from(');
+    expect(cmd).toContain('"base64"');
+    // node script is single-quoted for the shell.
+    expect(cmd).toContain("node -e '");
+  });
+
+  it('the embedded base64 round-trips to the correct args (decode + JSON.parse)', () => {
+    const cmd = appendStep()!.command;
+    const m = cmd.match(/Buffer\.from\("([A-Za-z0-9+/=]+)", "base64"\)/);
+    expect(m).not.toBeNull();
+    const decoded = JSON.parse(Buffer.from(m![1], 'base64').toString('utf8'));
+    expect(decoded.workingDir).toBe('.');
+    expect(decoded.storyId).toBe('story-abc-123');
+    // Apostrophe in the title survives the base64 round-trip cleanly.
+    expect(decoded.storyTitle).toContain("it's a milestone");
+    expect(decoded.decision).toContain('Define core game domain types');
+    expect(typeof decoded.rationale).toBe('string');
+  });
+
+  it('imports the writer via file:// URL (unambiguous absolute dynamic import)', () => {
+    const cmd = appendStep()!.command;
+    expect(cmd).toContain('import("file:///opt/futurator-daemon/lib/claude-md-writer.mjs")');
+  });
+});
