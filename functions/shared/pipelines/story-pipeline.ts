@@ -1133,14 +1133,37 @@ Fix the issues mentioned. Output only what you changed, then:
           (opts.sourceCommitSha ? `git checkout ${opts.sourceCommitSha} 2>/dev/null && ` : '') +
           // 2026-05-19 — per-plan branch. When the launcher passed planSlug,
           // commits land on `plan/<slug>` instead of the worktree's default
-          // (typically `main` for brownfield). Idempotent across parallel
-          // stories: first story creates with `-b`, rest fall through to
-          // plain checkout. No-op when planSlug is absent.
+          // (typically `main` for brownfield). No-op when planSlug is absent.
+          //
+          // 2026-05-27 BUGFIX (brick-breaker-11) — per-story worktree
+          // compatibility. Slice C runs each wave story in its OWN git
+          // worktree on its OWN `wip/<storyId>` branch (story-worktree.mjs
+          // `git worktree add -B wip/<storyId>`). Git allows a branch to be
+          // checked out in only ONE worktree at a time, so N parallel
+          // wave-0 stories all running `git checkout plan/<slug>` collide:
+          // the first wins, the rest die with
+          //   `fatal: 'plan/<slug>' is already used by worktree at <other>`
+          // (exit 128 → story FAILED; the daemon mislabels it "refused
+          // empty commit"). The pre-2026-05-27 comment claimed this was
+          // "idempotent across parallel stories" — true for the SHARED
+          // worktree model (stories serialize on one worktree), false for
+          // per-story worktrees.
+          //
+          // Fix: when we're already on a `wip/*` branch (per-story worktree),
+          // commit THERE — never touch `plan/<slug>`. Wave-merge (PR-95)
+          // fast-forwards `wip/<storyId>` → `plan/<slug>` serially behind the
+          // distributed merge lock afterwards. Only the legacy shared-worktree
+          // path (current branch is NOT `wip/*` — e.g. `main` or detached
+          // HEAD from a sourceCommitSha pin) checks out `plan/<slug>`.
           (opts.planSlug
             ? `PLAN_BRANCH='plan/${opts.planSlug}' && ` +
-              `if [ "$(git symbolic-ref --short HEAD 2>/dev/null)" != "$PLAN_BRANCH" ]; then ` +
-              `  git checkout "$PLAN_BRANCH" 2>/dev/null || git checkout -b "$PLAN_BRANCH" 2>/dev/null || git checkout "$PLAN_BRANCH"; ` +
-              `fi && `
+              `CUR_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || echo '')" && ` +
+              `case "$CUR_BRANCH" in ` +
+              `  wip/*) : ;; ` +
+              `  *) if [ "$CUR_BRANCH" != "$PLAN_BRANCH" ]; then ` +
+              `       git checkout "$PLAN_BRANCH" 2>/dev/null || git checkout -b "$PLAN_BRANCH" 2>/dev/null || git checkout "$PLAN_BRANCH"; ` +
+              `     fi ;; ` +
+              `esac && `
             : '') +
           // PR-67 + snake-4 2026-05-19 fix: snapshot-diff staging.
           // capture-dev-baseline (step inserted before `dev`) wrote two

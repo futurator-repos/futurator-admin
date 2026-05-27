@@ -143,6 +143,322 @@ describe('PR-41 — tamper-check promoted to mvp+ rigor (Story 2-A-5-1)', () => 
   });
 });
 
+describe('2026-05-19 — tamper-check baseline is the index (snake-4 fix)', () => {
+  it('stage-test-files step is present at mvp+ and runs right after test-author', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const ids = pipeline.steps.map((s) => s.id);
+    expect(ids).toContain('stage-test-files');
+    expect(ids.indexOf('stage-test-files')).toBeGreaterThan(ids.indexOf('test-author'));
+    expect(ids.indexOf('stage-test-files')).toBeLessThan(ids.indexOf('tamper-check'));
+  });
+
+  it('stage-test-files absent under prototype (no tamper-check, nothing to stage for)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'prototype',
+    });
+    const ids = pipeline.steps.map((s) => s.id);
+    expect(ids).not.toContain('stage-test-files');
+  });
+
+  it('tamper-check diffs against the index (no HEAD ref)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'tamper-check');
+    const cmd = (step as { command: string }).command;
+    // Pre-fix: `git diff --name-only HEAD -- $(cat ...)` (baseline=prior story HEAD).
+    // Post-fix: `git diff --name-only -- $(cat ...)` (baseline=index, post-stage-test-files).
+    expect(cmd).toContain('git --no-pager diff --name-only -- $(cat /tmp/tamper-expected.txt)');
+    expect(cmd).not.toContain('git --no-pager diff --name-only HEAD --');
+  });
+
+  it('tamper-check revert restores the staged blob (checkout-index, not checkout)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'tamper-check');
+    const cmd = (step as { command: string }).command;
+    expect(cmd).toContain('git checkout-index -f --');
+    // Old `git checkout -- $(cat /tmp/tamper-dirty.txt)` would revert to HEAD,
+    // which is the prior-story commit — clobbering test-author's legitimate
+    // edits. Make sure that exact construct is gone.
+    expect(cmd).not.toContain('git checkout -- $(cat /tmp/tamper-dirty.txt)');
+  });
+
+  it('stage-test-files + tamper-check shells are syntactically valid bash', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    for (const id of ['stage-test-files', 'tamper-check']) {
+      const step = pipeline.steps.find((s) => s.id === id);
+      const cmd = (step as { command: string }).command;
+      expect(() => {
+        execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' });
+      }, `bash -n failed for step ${id}`).not.toThrow();
+    }
+  });
+});
+
+describe('2026-05-19 — Phase 0.2a — capture-dev-baseline step', () => {
+  it('mvp rigor — capture-dev-baseline exists and runs right before dev', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const ids = pipeline.steps.map((s) => s.id);
+    expect(ids).toContain('capture-dev-baseline');
+    expect(ids.indexOf('capture-dev-baseline')).toBeLessThan(ids.indexOf('dev'));
+    // The whole post-test-author chain comes first.
+    expect(ids.indexOf('capture-dev-baseline')).toBeGreaterThan(ids.indexOf('test-author'));
+  });
+
+  it('writes baseline files under .pipeline/ keyed by storyId', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'capture-dev-baseline');
+    const cmd = (step as { command: string }).command;
+    expect(cmd).toContain(`.pipeline/${story.storyId}-baseline-dirty.txt`);
+    expect(cmd).toContain(`.pipeline/${story.storyId}-baseline-untracked.txt`);
+    expect(cmd).toContain('git diff --name-only');
+    expect(cmd).toContain('git ls-files --others --exclude-standard');
+  });
+
+  it('survives a non-git working tree (bootstrap path)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'capture-dev-baseline');
+    const cmd = (step as { command: string }).command;
+    // The capture is gated on `git rev-parse --is-inside-work-tree` so the
+    // bootstrap path (no repo yet) emits BASELINE_SKIPPED_NOT_A_REPO
+    // instead of erroring.
+    expect(cmd).toContain('git rev-parse --is-inside-work-tree');
+    expect(cmd).toContain('BASELINE_SKIPPED_NOT_A_REPO');
+  });
+
+  it('shell is syntactically valid bash', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'capture-dev-baseline');
+    const cmd = (step as { command: string }).command;
+    expect(() => {
+      execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' });
+    }).not.toThrow();
+  });
+
+  it('absent under prototype rigor (no DEV-baseline contract there)', () => {
+    // Currently the step is included regardless of rigor because the DEV
+    // step is always present. If we ever gate it on testsOn, this test
+    // will catch the drift.
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'prototype',
+    });
+    const ids = pipeline.steps.map((s) => s.id);
+    // Today the step IS present under prototype too (it's pure shell, no
+    // test dependency). Asserting that to lock the current contract:
+    expect(ids).toContain('capture-dev-baseline');
+  });
+});
+
+describe('2026-05-19 — Phase 0.2b — compile-commit-on-pass uses snapshot-diff', () => {
+  it('reads the per-story baseline files', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    const cmd = (step as { command: string }).command;
+    expect(cmd).toContain(`.pipeline/${story.storyId}-baseline-dirty.txt`);
+    expect(cmd).toContain(`.pipeline/${story.storyId}-baseline-untracked.txt`);
+  });
+
+  it('uses comm -23 to compute post − baseline delta', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    const cmd = (step as { command: string }).command;
+    expect(cmd).toContain('comm -23');
+  });
+
+  it('falls back to git add -A when baseline files are missing', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    const cmd = (step as { command: string }).command;
+    expect(cmd).toContain('SNAPSHOT_DIFF_FALLBACK');
+    expect(cmd).toContain('git add -A');
+  });
+
+  it('always stages infra paths regardless of delta (cross-wave knowledge updates)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    const cmd = (step as { command: string }).command;
+    expect(cmd).toContain('git add -- .mycelium');
+    expect(cmd).toContain('git add -- knowledge');
+    expect(cmd).toContain('git add -- .context');
+  });
+
+  it('preserves the SOURCE_CHANGES non-empty guard (PR-67 contract)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    const cmd = (step as { command: string }).command;
+    expect(cmd).toContain('STORY_COMMIT_EMPTY');
+    expect(cmd).toContain('SOURCE_CHANGES');
+    expect(cmd).toContain('exit 1');
+  });
+
+  it('step retains onFail.action="fail" so daemon (Phase 0.1) can block the job', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    expect(step?.onFail?.action).toBe('fail');
+  });
+
+  it('shell is syntactically valid bash (with + without planSlug)', () => {
+    for (const planSlug of [undefined, 'snake-4-change-x']) {
+      const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+        rigor: 'mvp',
+        planSlug,
+      });
+      const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+      const cmd = (step as { command: string }).command;
+      expect(
+        () => {
+          execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' });
+        },
+        `bash -n failed (planSlug=${planSlug ?? 'undefined'})`,
+      ).not.toThrow();
+    }
+  });
+});
+
+describe('2026-05-19 — plan-branch checkout in compile-commit-on-pass (brownfield safety)', () => {
+  it('absent when planSlug not provided (legacy behaviour, commits to current branch)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    const cmd = (step as { command: string }).command;
+    expect(cmd).not.toContain('PLAN_BRANCH=');
+    expect(cmd).not.toContain('plan/');
+  });
+
+  it('present when planSlug provided — checks out plan/<slug> idempotently', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+      planSlug: 'snake-4-change-ilunx',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    const cmd = (step as { command: string }).command;
+    expect(cmd).toContain("PLAN_BRANCH='plan/snake-4-change-ilunx'");
+    // Idempotent: try plain checkout first, fall back to -b for first story.
+    expect(cmd).toContain('git checkout "$PLAN_BRANCH"');
+    expect(cmd).toContain('git checkout -b "$PLAN_BRANCH"');
+    // Guarded by symbolic-ref equality so we don't churn the worktree on
+    // every story.
+    expect(cmd).toContain('git symbolic-ref --short HEAD');
+  });
+
+  it('compile-commit-on-pass shell with planSlug is syntactically valid bash', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+      planSlug: 'snake-4-change-ilunx',
+    });
+    const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+    const cmd = (step as { command: string }).command;
+    expect(() => {
+      execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' });
+    }).not.toThrow();
+  });
+
+  // 2026-05-27 (brick-breaker-11 fix) — per-story-worktree compatibility.
+  // The plan-branch checkout MUST be skipped when the worktree is already
+  // on a wip/* branch (Slice C per-story worktrees), or N parallel wave
+  // stories collide on `git checkout plan/<slug>` (only one worktree may
+  // hold a branch). See story-pipeline.ts compile-commit-on-pass comment.
+  describe('per-story-worktree branch collision guard', () => {
+    function commitStep(planSlug: string) {
+      const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+        rigor: 'mvp',
+        planSlug,
+      });
+      const step = pipeline.steps.find((s) => s.id === 'compile-commit-on-pass');
+      return (step as { command: string }).command;
+    }
+
+    it('skips plan/<slug> checkout when already on a wip/* branch (case guard present)', () => {
+      const cmd = commitStep('brick-breaker-11');
+      // The CUR_BRANCH probe + case statement that short-circuits wip/* must
+      // be present — that is the collision guard.
+      expect(cmd).toContain('CUR_BRANCH=');
+      expect(cmd).toMatch(/case "\$CUR_BRANCH" in/);
+      expect(cmd).toContain('wip/*) : ;;');
+    });
+
+    it('only the non-wip branch path runs the plan/<slug> checkout', () => {
+      const cmd = commitStep('brick-breaker-11');
+      // The checkout lines must sit inside the `*)` (non-wip) arm, AFTER
+      // the wip/* no-op arm — structurally, the wip/* arm precedes the
+      // checkout commands.
+      const wipArm = cmd.indexOf('wip/*) : ;;');
+      const checkout = cmd.indexOf('git checkout "$PLAN_BRANCH"');
+      expect(wipArm).toBeGreaterThan(-1);
+      expect(checkout).toBeGreaterThan(wipArm);
+    });
+
+    it('remains valid bash with the case guard', () => {
+      const cmd = commitStep('brick-breaker-11');
+      expect(() => {
+        execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' });
+      }).not.toThrow();
+    });
+
+    // Behavioural check: simulate a wip/* worktree and confirm the guard
+    // would NOT attempt the plan-branch checkout. We extract just the
+    // branch-selection fragment and run it against a fake git shim.
+    it('case guard leaves HEAD untouched when on wip/<storyId> (simulated)', () => {
+      // Minimal repro of the guard. Newline-joined — a `case` statement
+      // cannot be `&&`-chained between `in` and its first pattern.
+      const guard = [
+        `PLAN_BRANCH='plan/brick-breaker-11'`,
+        `CUR_BRANCH='wip/story-abc'`, // stub: pretend we're on wip/<story>
+        `CHECKED_OUT=no`,
+        `case "$CUR_BRANCH" in`,
+        `  wip/*) : ;;`,
+        `  *) CHECKED_OUT=yes ;;`,
+        `esac`,
+        `echo "$CHECKED_OUT"`,
+      ].join('\n');
+      const out = execSync(guard, { shell: '/bin/bash', encoding: 'utf8' }).trim();
+      expect(out).toBe('no'); // wip/* → checkout skipped
+    });
+
+    it('case guard DOES check out when on main (legacy shared-worktree, simulated)', () => {
+      const guard = [
+        `PLAN_BRANCH='plan/brick-breaker-11'`,
+        `CUR_BRANCH='main'`,
+        `CHECKED_OUT=no`,
+        `case "$CUR_BRANCH" in`,
+        `  wip/*) : ;;`,
+        `  *) if [ "$CUR_BRANCH" != "$PLAN_BRANCH" ]; then CHECKED_OUT=yes; fi ;;`,
+        `esac`,
+        `echo "$CHECKED_OUT"`,
+      ].join('\n');
+      const out = execSync(guard, { shell: '/bin/bash', encoding: 'utf8' }).trim();
+      expect(out).toBe('yes'); // main → plan/<slug> checkout runs
+    });
+  });
+});
+
 describe('PR-40 — single-pass test-verify (Story 2-A-6-1)', () => {
   it('test-verify uses vitest --changed HEAD~1 with npm test fallback', () => {
     const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
