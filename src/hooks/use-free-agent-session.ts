@@ -96,6 +96,10 @@ interface UseFreeAgentSessionApi {
   /** Operator clicked Stop — kill the in-flight turn. */
   cancelTurn(): void;
   isCancelling: boolean;
+  /** 2026-05-27 PR B.e — surfaced for the OpenPR affordance. */
+  sessionId: string | null;
+  turnCount: number;
+  hasOpenPr: boolean;
 }
 
 export function useFreeAgentSession(): UseFreeAgentSessionApi {
@@ -147,7 +151,10 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
     },
   });
 
-  // Poll events. Same gating; advances `lastSeq` on each successful page.
+  // Poll events. Faster cadence while PROCESSING (so streaming tokens are
+  // snappy); slower cadence otherwise so the merge.{requested,completed,
+  // rejected} events emitted by the API (PR B.d) still get picked up
+  // without operator-action.
   const eventsQuery = useQuery<EventsResponse>({
     queryKey: ['free-agent-events', activeSessionId, lastSeq],
     queryFn: async () => {
@@ -156,8 +163,13 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
       );
       return result;
     },
-    enabled: !!activeSessionId && sessionStateQuery.data?.status === 'PROCESSING',
-    refetchInterval: POLL_INTERVAL_MS,
+    enabled:
+      !!activeSessionId &&
+      sessionStateQuery.data?.status !== 'EXPIRED' &&
+      sessionStateQuery.data?.status !== 'BUDGET_EXHAUSTED' &&
+      sessionStateQuery.data?.status !== 'ERROR',
+    refetchInterval:
+      sessionStateQuery.data?.status === 'PROCESSING' ? POLL_INTERVAL_MS : POLL_INTERVAL_MS * 4,
   });
 
   // Aggregate events into messages.
@@ -222,12 +234,68 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
                 : 'Turn failed. Try again or open a new conversation.',
             timestamp: ev.timestamp,
           });
+        } else if (ev.eventType === 'free-agent.merge.requested') {
+          // 2026-05-27 PR B.e — inline merge-approval card. Renders as a
+          // dedicated bubble with role='merge'. Subsequent .completed /
+          // .rejected events mutate the same bubble's mergeRequest.state.
+          activeAssistantIdRef.current = null;
+          const prNumber = Number(ev.prNumber);
+          if (Number.isFinite(prNumber)) {
+            next.push({
+              id: `merge-${prNumber}`,
+              role: 'merge',
+              content: '',
+              timestamp: ev.timestamp,
+              mergeRequest: {
+                sessionId: activeSessionId ?? '',
+                prNumber,
+                prUrl: String(ev.prUrl ?? ''),
+                prTitle: String(ev.prTitle ?? ''),
+                riskClass: (ev.riskClass as 'red' | 'yellow' | 'green') ?? 'green',
+                riskReasons: Array.isArray(ev.riskReasons) ? (ev.riskReasons as string[]) : [],
+                diffSummary: (ev.diffSummary as {
+                  additions: number;
+                  deletions: number;
+                  filesChanged: number;
+                }) ?? { additions: 0, deletions: 0, filesChanged: 0 },
+                state: 'OPEN',
+              },
+            });
+          }
+        } else if (
+          ev.eventType === 'free-agent.merge.completed' ||
+          ev.eventType === 'free-agent.merge.rejected'
+        ) {
+          const prNumber = Number(ev.prNumber);
+          const targetId = `merge-${prNumber}`;
+          const idx = next.findIndex((m) => m.id === targetId);
+          if (idx >= 0 && next[idx].mergeRequest) {
+            next[idx] = {
+              ...next[idx],
+              mergeRequest: {
+                ...next[idx].mergeRequest!,
+                state: ev.eventType === 'free-agent.merge.completed' ? 'MERGED' : 'CLOSED',
+              },
+            };
+          }
+          if (ev.eventType === 'free-agent.merge.rejected' && typeof ev.reason === 'string') {
+            // Per §7.2.d, the rejection reason becomes the next user-turn so
+            // the agent can revise. Render it as an italicized system note
+            // immediately after the merge bubble for context — the actual
+            // user-turn injection is the daemon's job (deferred).
+            next.push({
+              id: `system-reject-${ev.eventSeq}`,
+              role: 'system',
+              content: `Rejected: "${ev.reason}"`,
+              timestamp: ev.timestamp,
+            });
+          }
         }
       }
       return next;
     });
     if (newSeq !== lastSeq) setLastSeq(newSeq);
-  }, [eventsQuery.data, lastSeq]);
+  }, [eventsQuery.data, lastSeq, activeSessionId]);
 
   // POST /sessions
   const createSession = useMutation({
@@ -423,6 +491,9 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
   const state = sessionStateQuery.data;
   const status: FreeAgentStatus = activeSessionId ? (state?.status ?? 'ACTIVE') : 'IDLE_NO_SESSION';
 
+  const hasOpenPr = messages.some((m) => m.role === 'merge' && m.mergeRequest?.state === 'OPEN');
+  const turnCount = state?.turnCount ?? 0;
+
   return useMemo<UseFreeAgentSessionApi>(
     () => ({
       messages,
@@ -440,6 +511,9 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
       loadSession,
       cancelTurn,
       isCancelling: cancelTurnMutation.isPending,
+      sessionId: activeSessionId,
+      turnCount,
+      hasOpenPr,
     }),
     [
       messages,
@@ -455,6 +529,9 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
       loadSession,
       cancelTurn,
       cancelTurnMutation.isPending,
+      activeSessionId,
+      turnCount,
+      hasOpenPr,
     ],
   );
 }

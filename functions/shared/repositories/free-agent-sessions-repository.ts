@@ -23,7 +23,9 @@ import {
   buildScopeIdComposite,
   type CreateFreeAgentSessionInput,
   type FreeAgentLockResult,
+  type FreeAgentPrState,
   type FreeAgentReleaseStatus,
+  type FreeAgentRiskClass,
   type FreeAgentSession,
   type FreeAgentSessionStatus,
 } from '../types/free-agent';
@@ -384,6 +386,66 @@ export async function requestCancel(sessionId: string): Promise<void> {
         ':now': new Date().toISOString(),
         ':processing': 'PROCESSING' satisfies FreeAgentSessionStatus,
       },
+    }),
+  );
+}
+
+/**
+ * 2026-05-27 PR B.d — set the PR state on a session after `/open-pr`
+ * succeeds. Upserts every PR-related field atomically. Subsequent calls
+ * overwrite (we model "open a NEW PR" as supersession; the prior PR's
+ * audit events stay in the event stream).
+ */
+export interface SetPrStateInput {
+  prNumber: number;
+  prUrl: string;
+  prHeadSha: string;
+  prState: FreeAgentPrState;
+  prRiskClass: FreeAgentRiskClass;
+  prRiskReasons: string[];
+  prTitle: string;
+}
+
+export async function setPrState(sessionId: string, input: SetPrStateInput): Promise<void> {
+  const nowIso = new Date().toISOString();
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.freeAgentSessions,
+      Key: { sessionId },
+      UpdateExpression:
+        'SET prNumber = :n, prUrl = :u, prHeadSha = :sha, prState = :s, ' +
+        'prRiskClass = :rc, prRiskReasons = :rr, prTitle = :t, prUpdatedAt = :now',
+      ConditionExpression: 'attribute_exists(sessionId)',
+      ExpressionAttributeValues: {
+        ':n': input.prNumber,
+        ':u': input.prUrl,
+        ':sha': input.prHeadSha,
+        ':s': input.prState,
+        ':rc': input.prRiskClass,
+        ':rr': input.prRiskReasons,
+        ':t': input.prTitle,
+        ':now': nowIso,
+      },
+    }),
+  );
+}
+
+/**
+ * Transition just the PR state (not the rest of the PR fields). Used by
+ * `/approve-merge` (OPEN → MERGED) and `/reject-merge` (OPEN → CLOSED).
+ */
+export async function transitionPrState(
+  sessionId: string,
+  newState: FreeAgentPrState,
+): Promise<void> {
+  const nowIso = new Date().toISOString();
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.freeAgentSessions,
+      Key: { sessionId },
+      UpdateExpression: 'SET prState = :s, prUpdatedAt = :now',
+      ConditionExpression: 'attribute_exists(sessionId) AND prState = :open',
+      ExpressionAttributeValues: { ':s': newState, ':now': nowIso, ':open': 'OPEN' },
     }),
   );
 }

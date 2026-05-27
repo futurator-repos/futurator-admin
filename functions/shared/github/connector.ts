@@ -633,6 +633,44 @@ export async function mergePullRequest(
 }
 
 /**
+ * 2026-05-27 PR B.d — compareCommits — GET /repos/{owner}/{name}/compare/{base}...{head}
+ *
+ * Returns the file list + line counts between two refs. Used by the open-pr
+ * flow to derive `additions` / `deletions` / `filesChanged` inputs to the
+ * agent-risk-classifier BEFORE the PR is opened, so the classification
+ * result can land in the PR body verbatim.
+ *
+ * GitHub URL-encodes `:` in `base...head` for refs that include them; head
+ * refs of shape `assist/<proj>/<sid8>` are slash-only and safe.
+ */
+export interface CompareCommitsResponse {
+  status: 'ahead' | 'behind' | 'identical' | 'diverged';
+  ahead_by: number;
+  behind_by: number;
+  total_commits: number;
+  files: Array<{
+    filename: string;
+    additions: number;
+    deletions: number;
+    changes: number;
+    status: string;
+  }>;
+}
+
+export async function compareCommits(
+  owner: string,
+  name: string,
+  base: string,
+  head: string,
+): Promise<ConnectorResult<CompareCommitsResponse>> {
+  const safeBase = encodeURIComponent(base);
+  const safeHead = encodeURIComponent(head);
+  return githubFetch<CompareCommitsResponse>(
+    `/repos/${owner}/${name}/compare/${safeBase}...${safeHead}`,
+  );
+}
+
+/**
  * 2026-05-27 PR B.d — closePullRequest — PATCH /repos/{owner}/{name}/pulls/{n}
  *
  * Close (reject) an open PR without merging. Used by the Free Agent's

@@ -118,7 +118,28 @@ export interface FreeAgentSession {
    * `partyBranch` field.
    */
   branchName?: string;
+  /**
+   * 2026-05-27 PR B.d — Rung 1 merge-request state. Set by `/open-pr`
+   * and transitioned by `/approve-merge` + `/reject-merge`. One in-flight
+   * PR per session at a time; opening a new one supersedes the prior.
+   */
+  prNumber?: number;
+  prUrl?: string;
+  prHeadSha?: string;
+  prState?: FreeAgentPrState;
+  prRiskClass?: FreeAgentRiskClass;
+  prRiskReasons?: string[];
+  /** Stored verbatim so red-class typed-confirmation can validate against it. */
+  prTitle?: string;
+  /** ISO; updated on every PR-state transition. */
+  prUpdatedAt?: string;
 }
+
+/** 2026-05-27 PR B.d — PR lifecycle states. */
+export type FreeAgentPrState = 'OPEN' | 'MERGED' | 'CLOSED';
+
+/** 2026-05-27 PR B.d — mirror of daemon agent-risk-classifier output. */
+export type FreeAgentRiskClass = 'red' | 'yellow' | 'green';
 
 /** Input to `createSession`. Most fields are derived inside the repo. */
 export interface CreateFreeAgentSessionInput {

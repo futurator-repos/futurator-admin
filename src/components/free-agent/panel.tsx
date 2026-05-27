@@ -12,6 +12,7 @@
 import { FreeAgentPanelHeader } from './panel-header';
 import { FreeAgentMessageThread } from './message-thread';
 import { FreeAgentComposer } from './composer';
+import { OpenPrAffordance } from './open-pr-affordance';
 import { useFreeAgentSession } from '@/hooks/use-free-agent-session';
 
 export function FreeAgentPanel() {
@@ -45,6 +46,11 @@ export function FreeAgentPanel() {
         isCancelling={session.isCancelling}
       />
       <FreeAgentMessageThread messages={session.messages} isProcessing={isProcessing} />
+      <OpenPrAffordance
+        sessionId={session.sessionId}
+        hasOpenPr={session.hasOpenPr}
+        turnCount={session.turnCount}
+      />
       <FreeAgentComposer isSending={isProcessing} onSend={session.sendMessage} />
     </div>
   );

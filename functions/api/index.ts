@@ -191,6 +191,15 @@ import {
   GitHubError,
 } from '../shared/github/connector';
 import type { GitHubCommit } from '../shared/github/connector';
+import * as githubConnector from '../shared/github/connector';
+import { loadFreeAgentPat } from '../shared/services/free-agent-pat-loader';
+import { resolveRepo } from '../shared/services/free-agent-repo-resolver';
+import {
+  countAssistCommitsAhead,
+  runPushScript,
+  buildPrBody,
+} from '../shared/services/free-agent-open-pr';
+import { classifyDiff } from '../shared/services/agent-risk-classifier';
 import {
   BOILERPLATE_REGISTRY,
   normalizeBoilerplateType,
@@ -6795,16 +6804,32 @@ app.get('/api/party/projects/:projectId/files', async (c) => {
   const project = await partyProjectsRepo.getProject(parsedId.data);
   if (!project) throw new NotFoundError('PartyProject', parsedId.data);
 
+  // Resolve the read ROOT. Files an agent generates during a debate live in
+  // the per-session WORKTREE (/home/ubuntu/worktrees/<id>/_party/<short>/),
+  // NOT the legacy project folder. When a sessionId is supplied, read from
+  // that session's worktreePath (→ projectPath → project.path fallbacks);
+  // without it, keep the legacy project-folder behavior for back-compat.
+  let baseRoot = project.path;
+  const sessionIdRaw = c.req.query('sessionId');
+  if (sessionIdRaw) {
+    const parsedSid = sessionIdSchema.safeParse(sessionIdRaw);
+    if (!parsedSid.success) throw new ValidationError('invalid sessionId');
+    const session = await partySessionsRepo.getSession(parsedSid.data);
+    if (session && session.projectId === parsedId.data) {
+      baseRoot = session.worktreePath || session.projectPath || project.path;
+    }
+  }
+
   const { state } = await getInstanceState();
   if (state !== 'running') {
     throw new AppError('EC2_NOT_RUNNING', `EC2 instance is ${state}`, 400);
   }
 
-  // Resolve relative-to-projectPath. Strip a leading `/` so a leading slash
-  // doesn't make rel absolute (which would override projectPath in path.join
+  // Resolve relative-to-baseRoot. Strip a leading `/` so a leading slash
+  // doesn't make rel absolute (which would override baseRoot in path.join
   // semantics — we don't use path.join here but mirror its safety).
   const cleanRel = rel.replace(/^\/+/, '');
-  const fullPath = `${project.path.replace(/\/+$/, '')}/${cleanRel}`;
+  const fullPath = `${baseRoot.replace(/\/+$/, '')}/${cleanRel}`;
 
   // Two-phase read. Phase 1: validate path + resolve symlinks + stat the
   // file (tiny SSM output, never truncated). Phase 2: stream the content
@@ -6814,7 +6839,7 @@ app.get('/api/party/projects/:projectId/files', async (c) => {
   // returned content. See readFileChunkedViaSsm doc-comment.
   const cmd = [
     `set -e`,
-    `ROOT="${project.path}"`,
+    `ROOT="${baseRoot}"`,
     `TARGET="${fullPath}"`,
     `RESOLVED=$(realpath -m "$TARGET" 2>/dev/null || echo "__NOT_FOUND__")`,
     // realpath -m resolves missing components without erroring; we still
@@ -7167,6 +7192,345 @@ app.get('/api/free-agent/sessions/:id/events', authMiddleware, async (c) => {
   const afterSeq = c.req.query('after') || '000000';
   const { events, lastSeq } = await agentEventsRepo.getEventsAfter(parsed.data, afterSeq, 200);
   return c.json({ events, lastSeq });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// 2026-05-27 PR B.d — Rung 1: agent opens PRs.
+//
+// Three endpoints + one shared event-emission helper. Operator-driven
+// (not auto-pilot); the agent never calls these — only the UI does, in
+// response to the operator's tap of the inline merge-approval card.
+// ────────────────────────────────────────────────────────────────────────
+
+const FREE_AGENT_APP_BASE_URL = process.env.ALLOWED_ORIGIN ?? 'https://admin.futurator.ai';
+
+async function emitFreeAgentEvent(
+  sessionId: string,
+  eventType: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  // Seq prefix '99-<ts>' sorts lexicographically AFTER all daemon-emitted
+  // 6-digit-padded seqs ('000123' < '99-<...>'), so the long-poll reads
+  // these in order. UUID disambiguates same-ms emissions.
+  const ts = Date.now();
+  await agentEventsRepo.pushEvent({
+    jobId: sessionId,
+    eventSeq: `99-${ts}-${crypto.randomUUID().slice(0, 8)}`,
+    seq: ts,
+    timestamp: new Date().toISOString(),
+    stepId: 'free-agent-merge',
+    agentId: '__free-agent__',
+    eventType: eventType as never, // free-agent.* eventType not in AgentEventType enum; same pattern as daemon
+    ...(data as { [k: string]: never }),
+  });
+}
+
+const openPrSchema = z.object({
+  title: z.string().min(3).max(120),
+  body: z.string().max(20_000).optional(),
+});
+
+app.post('/api/free-agent/sessions/:id/open-pr', authMiddleware, async (c) => {
+  const sessionId = c.req.param('id');
+  const parsedId = sessionIdSchema.safeParse(sessionId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const session = await freeAgentSessionsRepo.getSession(parsedId.data);
+  if (!session) throw new NotFoundError('FreeAgentSession', parsedId.data);
+
+  const user = c.get('user');
+  if (!user || session.operatorId !== user.userId) {
+    throw new AppError('FORBIDDEN', 'Only the session owner can open a PR', 403);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const parsedBody = openPrSchema.safeParse(body);
+  if (!parsedBody.success) {
+    throw new ValidationError(parsedBody.error.errors[0]?.message || 'invalid body');
+  }
+
+  if (session.prState === 'OPEN') {
+    throw new AppError(
+      'PR_ALREADY_OPEN',
+      `Session already has an open PR (#${session.prNumber}). Approve or reject it first.`,
+      409,
+    );
+  }
+
+  const worktreePath = session.worktreePath;
+  const branchName = session.branchName;
+  if (!worktreePath || !branchName) {
+    throw new AppError(
+      'SESSION_WORKTREE_MISSING',
+      'Session has no worktree yet. Send at least one message before opening a PR.',
+      409,
+    );
+  }
+
+  const repo = await resolveRepo(session.projectId).catch((err: Error) => {
+    throw new AppError('PROJECT_REPO_NOT_RESOLVED', err.message, 400);
+  });
+
+  const aheadCount = await countAssistCommitsAhead(worktreePath, {
+    sendSsmCommand,
+    waitForSsmOutput,
+  });
+  if (aheadCount === 0) {
+    throw new AppError(
+      'NO_COMMITS_TO_PUSH',
+      `Assist branch ${branchName} has no commits ahead of ${repo.defaultBranch}.`,
+      409,
+    );
+  }
+
+  // Per-project contents:write PAT.
+  let pat: string;
+  try {
+    pat = (await loadFreeAgentPat(session.projectId)).pat;
+  } catch (err) {
+    throw new AppError(
+      'PAT_MISSING',
+      `contents:write PAT not configured for ${session.projectId}: ${(err as Error).message}`,
+      400,
+    );
+  }
+
+  // 1. Push via the canonical script.
+  const pushResult = await runPushScript(
+    { branchName, worktreePath, repoUrl: repo.repoUrl, pat },
+    { sendSsmCommand, waitForSsmOutput },
+  );
+
+  if (pushResult.kind === 'secrets-hit') {
+    throw new AppError(
+      'SECRETS_HIT',
+      `Push blocked by secrets scan (pattern: ${pushResult.pattern}). Investigate the worktree before retrying.`,
+      409,
+    );
+  }
+  if (pushResult.kind === 'no-diff') {
+    throw new AppError('NO_DIFF_VS_BASE', 'Assist branch has no commits above main', 409);
+  }
+  if (pushResult.kind === 'branch-mismatch') {
+    throw new AppError('BRANCH_MISMATCH', `Worktree HEAD mismatch: ${pushResult.detail}`, 409);
+  }
+  if (pushResult.kind === 'push-failed') {
+    throw new AppError(
+      'PUSH_FAILED',
+      `Push failed: ${pushResult.reason}. Commit landed locally${pushResult.sha ? ` at ${pushResult.sha}` : ''}.`,
+      502,
+    );
+  }
+  if (pushResult.kind === 'worktree-missing') {
+    throw new AppError('WORKTREE_MISSING', 'Worktree directory disappeared between checks', 500);
+  }
+  if (pushResult.kind === 'unknown') {
+    throw new AppError(
+      'PUSH_UNKNOWN',
+      `Push script returned unrecognized output: ${pushResult.detail}`,
+      500,
+    );
+  }
+  // pushResult.kind === 'pushed' below.
+
+  // 2. Compute diff stats for the classifier via GitHub compare.
+  const compareResult = await githubConnector
+    .compareCommits(repo.owner, repo.name, repo.defaultBranch, branchName)
+    .catch((err: Error) => {
+      throw new AppError('COMPARE_FAILED', `GitHub compare failed: ${err.message}`, 502);
+    });
+  const files = compareResult.data.files ?? [];
+  const additions = files.reduce((acc, f) => acc + (f.additions ?? 0), 0);
+  const deletions = files.reduce((acc, f) => acc + (f.deletions ?? 0), 0);
+  const touchedPaths = files.map((f) => f.filename);
+
+  // 3. Classify.
+  const classification = classifyDiff({ touchedPaths, additions, deletions });
+
+  // 4. Build the PR body.
+  const composedBody = buildPrBody({
+    sessionId: parsedId.data,
+    riskClass: classification.class,
+    riskReasons: classification.reasons,
+    additions,
+    deletions,
+    filesChanged: files.length,
+    appBaseUrl: FREE_AGENT_APP_BASE_URL,
+  });
+
+  // 5. Create the PR.
+  const prResult = await githubConnector
+    .createPullRequest(repo.owner, repo.name, {
+      title: parsedBody.data.title,
+      head: branchName,
+      base: repo.defaultBranch,
+      body: parsedBody.data.body
+        ? `${parsedBody.data.body}\n\n---\n\n${composedBody}`
+        : composedBody,
+      draft: false,
+    })
+    .catch((err: Error) => {
+      throw new AppError('PR_CREATE_FAILED', `GitHub PR create failed: ${err.message}`, 502);
+    });
+
+  // 6. Persist PR state on the session row.
+  await freeAgentSessionsRepo.setPrState(parsedId.data, {
+    prNumber: prResult.data.number,
+    prUrl: prResult.data.html_url,
+    prHeadSha: pushResult.headSha,
+    prState: 'OPEN',
+    prRiskClass: classification.class,
+    prRiskReasons: classification.reasons,
+    prTitle: parsedBody.data.title,
+  });
+
+  // 7. Emit free-agent.merge.requested event.
+  await emitFreeAgentEvent(parsedId.data, 'free-agent.merge.requested', {
+    sessionId: parsedId.data,
+    prNumber: prResult.data.number,
+    prUrl: prResult.data.html_url,
+    prTitle: parsedBody.data.title,
+    riskClass: classification.class,
+    riskReasons: classification.reasons,
+    diffSummary: { additions, deletions, filesChanged: files.length },
+    headSha: pushResult.headSha,
+  });
+
+  return c.json({
+    prNumber: prResult.data.number,
+    prUrl: prResult.data.html_url,
+    headSha: pushResult.headSha,
+    riskClass: classification.class,
+    riskReasons: classification.reasons,
+    diffSummary: { additions, deletions, filesChanged: files.length },
+  });
+});
+
+const approveMergeSchema = z.object({
+  typedConfirmation: z.string().optional(),
+});
+
+app.post('/api/free-agent/sessions/:id/approve-merge', authMiddleware, async (c) => {
+  const sessionId = c.req.param('id');
+  const parsedId = sessionIdSchema.safeParse(sessionId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const session = await freeAgentSessionsRepo.getSession(parsedId.data);
+  if (!session) throw new NotFoundError('FreeAgentSession', parsedId.data);
+
+  const user = c.get('user');
+  if (!user || session.operatorId !== user.userId) {
+    throw new AppError('FORBIDDEN', 'Only the session owner can approve a merge', 403);
+  }
+  if (session.prState !== 'OPEN') {
+    throw new AppError(
+      'NO_OPEN_PR',
+      `Session has no open PR (current state: ${session.prState ?? 'none'})`,
+      409,
+    );
+  }
+
+  const reqBody = await c.req.json().catch(() => ({}));
+  const parsedBody = approveMergeSchema.safeParse(reqBody);
+  if (!parsedBody.success) {
+    throw new ValidationError(parsedBody.error.errors[0]?.message || 'invalid body');
+  }
+
+  // 2026-05-27 §9.1 non-negotiable rider — red-class requires typed
+  // confirmation matching the PR title verbatim.
+  if (session.prRiskClass === 'red') {
+    if (parsedBody.data.typedConfirmation !== session.prTitle) {
+      throw new AppError(
+        'TYPED_CONFIRMATION_REQUIRED',
+        'Red-class merges require typedConfirmation to match the PR title verbatim',
+        400,
+      );
+    }
+  }
+
+  const repo = await resolveRepo(session.projectId).catch((err: Error) => {
+    throw new AppError('PROJECT_REPO_NOT_RESOLVED', err.message, 400);
+  });
+
+  const mergeResult = await githubConnector
+    .mergePullRequest(repo.owner, repo.name, session.prNumber!, { method: 'squash' })
+    .catch((err: Error) => {
+      throw new AppError('MERGE_FAILED', `GitHub merge failed: ${err.message}`, 502);
+    });
+
+  await freeAgentSessionsRepo.transitionPrState(parsedId.data, 'MERGED');
+  await emitFreeAgentEvent(parsedId.data, 'free-agent.merge.completed', {
+    sessionId: parsedId.data,
+    prNumber: session.prNumber,
+    prUrl: session.prUrl,
+    mergeSha: mergeResult.data.sha,
+  });
+
+  return c.json({
+    prNumber: session.prNumber,
+    prUrl: session.prUrl,
+    mergeSha: mergeResult.data.sha,
+    merged: true,
+  });
+});
+
+const rejectMergeSchema = z.object({
+  reason: z.string().min(3).max(2000),
+});
+
+app.post('/api/free-agent/sessions/:id/reject-merge', authMiddleware, async (c) => {
+  const sessionId = c.req.param('id');
+  const parsedId = sessionIdSchema.safeParse(sessionId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid sessionId');
+  }
+  const session = await freeAgentSessionsRepo.getSession(parsedId.data);
+  if (!session) throw new NotFoundError('FreeAgentSession', parsedId.data);
+
+  const user = c.get('user');
+  if (!user || session.operatorId !== user.userId) {
+    throw new AppError('FORBIDDEN', 'Only the session owner can reject a merge', 403);
+  }
+  if (session.prState !== 'OPEN') {
+    throw new AppError(
+      'NO_OPEN_PR',
+      `Session has no open PR (current state: ${session.prState ?? 'none'})`,
+      409,
+    );
+  }
+
+  const reqBody = await c.req.json().catch(() => ({}));
+  const parsedBody = rejectMergeSchema.safeParse(reqBody);
+  if (!parsedBody.success) {
+    throw new ValidationError(parsedBody.error.errors[0]?.message || 'invalid body');
+  }
+
+  const repo = await resolveRepo(session.projectId).catch((err: Error) => {
+    throw new AppError('PROJECT_REPO_NOT_RESOLVED', err.message, 400);
+  });
+
+  await githubConnector
+    .closePullRequest(repo.owner, repo.name, session.prNumber!)
+    .catch((err: Error) => {
+      throw new AppError('CLOSE_FAILED', `GitHub close failed: ${err.message}`, 502);
+    });
+
+  await freeAgentSessionsRepo.transitionPrState(parsedId.data, 'CLOSED');
+  await emitFreeAgentEvent(parsedId.data, 'free-agent.merge.rejected', {
+    sessionId: parsedId.data,
+    prNumber: session.prNumber,
+    prUrl: session.prUrl,
+    reason: parsedBody.data.reason,
+  });
+
+  return c.json({
+    prNumber: session.prNumber,
+    prUrl: session.prUrl,
+    rejected: true,
+    reason: parsedBody.data.reason,
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────

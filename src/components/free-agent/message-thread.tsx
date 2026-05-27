@@ -12,10 +12,26 @@
 'use client';
 
 import { useEffect, useRef, type ReactNode } from 'react';
+import { MergeApprovalCard } from './merge-approval-card';
+
+export interface FreeAgentMergeRequest {
+  sessionId: string;
+  prNumber: number;
+  prUrl: string;
+  prTitle: string;
+  riskClass: 'red' | 'yellow' | 'green';
+  riskReasons: string[];
+  diffSummary: { additions: number; deletions: number; filesChanged: number };
+  state: 'OPEN' | 'MERGED' | 'CLOSED';
+}
 
 export interface FreeAgentMessage {
   id: string;
-  role: 'user' | 'assistant' | 'system' | 'tool';
+  /**
+   * 2026-05-27 PR B.e — added `merge` role for the inline approval card.
+   * Renders the MergeApprovalCard component in lieu of a text bubble.
+   */
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'merge';
   content: string;
   /** Optional ISO-8601 timestamp; rendered as a tiny label below the bubble. */
   timestamp?: string;
@@ -26,6 +42,8 @@ export interface FreeAgentMessage {
   /** For role='user': blob URLs (from Cmd+V paste) rendered as thumbnails
    *  above the text. Ephemeral — survive only until the page is reloaded. */
   imagePreviewUrls?: string[];
+  /** For role='merge': the inline-approval-card payload. */
+  mergeRequest?: FreeAgentMergeRequest;
 }
 
 interface FreeAgentMessageThreadProps {
@@ -116,6 +134,14 @@ function Bubble({ message }: { message: FreeAgentMessage }) {
 
   if (message.role === 'tool') {
     return <ToolBubble message={message} />;
+  }
+
+  if (message.role === 'merge' && message.mergeRequest) {
+    return (
+      <div className="max-w-[85%] self-start">
+        <MergeApprovalCard {...message.mergeRequest} />
+      </div>
+    );
   }
 
   const isUser = message.role === 'user';
