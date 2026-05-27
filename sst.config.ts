@@ -549,6 +549,64 @@ export default $config({
     });
 
     // ──────────────────────────────────────────────────────────────
+    // 2026-05-27 PR D.a — RemediationPoliciesTable
+    //
+    // Per-AttentionCategory mapping to a remediation policy
+    // ('manual' | 'auto-draft' | 'auto-fix'). The daemon's attention-
+    // poller (PR D.b) uses this to decide whether to spawn a free-agent
+    // session for newly-opened items. Operator-managed via the Settings
+    // → Agent → Remediation Policies panel.
+    //
+    // v1: all categories default to 'manual' on first read (the repo's
+    // `getPolicy()` returns 'manual' for absent rows). Operator graduates
+    // individual categories as confidence builds.
+    // ──────────────────────────────────────────────────────────────
+    const remediationPoliciesTable = new sst.aws.Dynamo('RemediationPoliciesTable', {
+      fields: { category: 'string' },
+      primaryIndex: { hashKey: 'category' },
+      transform: {
+        table: {
+          name: 'futurator-remediation-policies',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ──────────────────────────────────────────────────────────────
+    // 2026-05-27 PR D.f — PushSubscriptionsTable
+    //
+    // One row per device. PK subscriptionId (uuid). Body holds the
+    // PushSubscription endpoint + keys returned by the browser's
+    // pushManager.subscribe() call. GSI1 by operatorId so the
+    // push-sender can resolve "all devices for this operator" in one
+    // query.
+    //
+    // No TTL — operators may use the same browser for months. Stale
+    // subscriptions (404 from the Push gateway) are pruned by the
+    // push-sender on the next send attempt.
+    // ──────────────────────────────────────────────────────────────
+    const pushSubscriptionsTable = new sst.aws.Dynamo('PushSubscriptionsTable', {
+      fields: {
+        subscriptionId: 'string',
+        operatorId: 'string',
+      },
+      primaryIndex: { hashKey: 'subscriptionId' },
+      globalIndexes: {
+        'operator-index': { hashKey: 'operatorId' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-push-subscriptions',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ──────────────────────────────────────────────────────────────
     // 2026-05-27 PR C.e — FixCyclesTable
     //
     // One row per (planId, waveNumber) pair tracking how many free-agent
@@ -773,6 +831,8 @@ export default $config({
         agentFlagsTable,
         agentSpendLogTable,
         fixCyclesTable,
+        remediationPoliciesTable,
+        pushSubscriptionsTable,
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
@@ -817,6 +877,10 @@ export default $config({
         AGENT_SPEND_LOG_TABLE: agentSpendLogTable.name,
         // 2026-05-27 PR C.e — fix-cycle counter per (plan, wave).
         FIX_CYCLES_TABLE: fixCyclesTable.name,
+        // 2026-05-27 PR D.a — per-category remediation policy.
+        REMEDIATION_POLICIES_TABLE: remediationPoliciesTable.name,
+        // 2026-05-27 PR D.f — PWA push subscriptions.
+        PUSH_SUBSCRIPTIONS_TABLE: pushSubscriptionsTable.name,
         PROJECTS_ROOT: '/home/ubuntu/projects',
         BMAD_VERSION: '6.3.0',
         BMAD_AGENTS_SOURCE: '/home/ubuntu/bmad-agents-source/bmad/agents',
@@ -1156,6 +1220,40 @@ export default $config({
           ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
           TIMING_SUMMARY_TABLE: timingSummaryTable.name,
         },
+      },
+    });
+
+    // ──────────────────────────────────────────────────────────────
+    // 2026-05-27 PR D.c — CloudWatch → Attention Items bridge.
+    //
+    // SNS topic `futurator-cw-alarms` receives CloudWatch alarm
+    // notifications; this Lambda subscribes and writes corresponding
+    // attention-item rows. Wire each alarm in CloudWatch with an
+    // OK/ALARM action that publishes to this topic.
+    //
+    // The Lambda is intentionally light — classification + DDB write
+    // only. The Rung 5 autotrigger flow continues via the daemon's
+    // attention-poller (PR D.b) which spawns sessions based on the
+    // resolved remediation policy.
+    // ──────────────────────────────────────────────────────────────
+    const cwAlarmsTopic = new sst.aws.SnsTopic('CloudWatchAlarmsTopic', {
+      transform: {
+        topic: {
+          name: 'futurator-cw-alarms',
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    cwAlarmsTopic.subscribe('CloudWatchToAttention', {
+      handler: 'functions/cron/cw-to-attention.handler',
+      runtime: 'nodejs22.x',
+      architecture: 'arm64',
+      memory: '256 MB',
+      timeout: '30 seconds',
+      link: [attentionItemsTable],
+      environment: {
+        ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
       },
     });
 

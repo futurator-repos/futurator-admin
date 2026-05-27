@@ -53,4 +53,10 @@ export const TABLE_NAMES = {
   // 2026-05-27 PR C.e — per-(plan,wave) fix-attempt counter. PK: cycleKey
   // = `${planId}#${waveNumber}`. 30d TTL.
   fixCycles: process.env.FIX_CYCLES_TABLE || 'futurator-fix-cycles',
+  // 2026-05-27 PR D.a — per-AttentionCategory remediation policy.
+  // PK: category. Body: { policy, updatedBy, updatedAt }.
+  remediationPolicies: process.env.REMEDIATION_POLICIES_TABLE || 'futurator-remediation-policies',
+  // 2026-05-27 PR D.f — PWA push subscriptions. PK: subscriptionId. GSI1
+  // operator-index for "all devices for this operator" lookups.
+  pushSubscriptions: process.env.PUSH_SUBSCRIPTIONS_TABLE || 'futurator-push-subscriptions',
 } as const;

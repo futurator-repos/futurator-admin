@@ -1,4 +1,10 @@
-import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  BatchWriteCommand,
+  GetCommand,
+  PutCommand,
+  QueryCommand,
+  UpdateCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { docClient, TABLE_NAMES } from '../dynamo-client';
 import type {
@@ -40,6 +46,41 @@ export async function getAttentionItem(
 
 export async function createAttentionItem(item: AttentionItem): Promise<void> {
   await docClient.send(new PutCommand({ TableName: TABLE_NAMES.attentionItems, Item: item }));
+}
+
+/**
+ * 2026-05-27 PR D.b — claim an attention item for an agent session.
+ *
+ * Conditional update: succeeds only when `agentSessionId` is absent.
+ * Returns ALL_OLD on success so the caller knows the prior state; returns
+ * null when the conditional fails (another tick or claim raced us).
+ *
+ * Idempotent under concurrent ticks of the daemon's attention-poller.
+ */
+export async function claimForAgent(
+  planId: string,
+  itemId: string,
+  sessionId: string,
+): Promise<AttentionItem | null> {
+  const nowIso = new Date().toISOString();
+  try {
+    const result = await docClient.send(
+      new UpdateCommand({
+        TableName: TABLE_NAMES.attentionItems,
+        Key: { planId, itemId },
+        UpdateExpression: 'SET agentSessionId = :sid, agentClaimedAt = :now',
+        ConditionExpression: 'attribute_exists(itemId) AND attribute_not_exists(agentSessionId)',
+        ExpressionAttributeValues: { ':sid': sessionId, ':now': nowIso },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return (result.Attributes as AttentionItem) ?? null;
+  } catch (err) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      return null;
+    }
+    throw err;
+  }
 }
 
 export async function updateAttentionStatus(
@@ -179,6 +220,68 @@ export async function upsertOpenAttentionItem(input: {
  * Returns true if a row was resolved, false if nothing matched (already
  * resolved, never created, or wrong dedupKey).
  */
+/**
+ * 2026-05-19 — cascade-delete every attention item for a plan.
+ *
+ * Called from the plan-delete handler so attention items don't survive the
+ * plan they reference (pre-fix they did — the cascade flushed jobs/events/
+ * epics but never the operator surfaces, so a "deleted" plan would still
+ * show resolved-but-undeleted items if the operator ever re-created a
+ * planId by hand).
+ *
+ * Mechanics:
+ *   1. Page through `QueryCommand` on `planId` PK.
+ *   2. Batch DeleteRequests in groups of 25 (DDB hard cap).
+ *   3. Retry UnprocessedItems on each round.
+ *
+ * Returns the total count deleted. Idempotent: calling twice on the same
+ * plan returns 0 the second time.
+ */
+export async function deleteAttentionItemsByPlan(planId: string): Promise<number> {
+  if (!planId) return 0;
+  let deleted = 0;
+  // Page through items with a small projection (just the SK).
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const page = await docClient.send(
+      new QueryCommand({
+        TableName: TABLE_NAMES.attentionItems,
+        KeyConditionExpression: 'planId = :pid',
+        ExpressionAttributeValues: { ':pid': planId },
+        ProjectionExpression: 'planId, itemId',
+        ExclusiveStartKey,
+      }),
+    );
+    const items = (page.Items || []) as Array<{ planId: string; itemId: string }>;
+    // Batches of 25 (DDB BatchWriteItem cap).
+    type DelBatch = Record<string, Array<{ DeleteRequest: { Key: Record<string, string> } }>>;
+    for (let i = 0; i < items.length; i += 25) {
+      const slice = items.slice(i, i + 25);
+      let pending: DelBatch | undefined = {
+        [TABLE_NAMES.attentionItems]: slice.map((it) => ({
+          DeleteRequest: { Key: { planId: it.planId, itemId: it.itemId } },
+        })),
+      };
+      // Retry UnprocessedItems up to 3 times (per DDB best practice).
+      for (let attempt = 0; attempt < 3 && pending; attempt++) {
+        const current: DelBatch = pending;
+        const result = await docClient.send(new BatchWriteCommand({ RequestItems: current }));
+        const unprocessed = result.UnprocessedItems?.[TABLE_NAMES.attentionItems] as
+          | Array<{ DeleteRequest: { Key: Record<string, string> } }>
+          | undefined;
+        if (unprocessed && unprocessed.length > 0) {
+          pending = { [TABLE_NAMES.attentionItems]: unprocessed };
+        } else {
+          pending = undefined;
+        }
+      }
+      deleted += slice.length;
+    }
+    ExclusiveStartKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (ExclusiveStartKey);
+  return deleted;
+}
+
 export async function autoResolveByDedupKey(planId: string, dedupKey: string): Promise<boolean> {
   if (!planId || !dedupKey) return false;
   const itemId = dedupItemId(dedupKey);

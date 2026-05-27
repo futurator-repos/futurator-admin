@@ -47,6 +47,7 @@ import {
   RSYNC_BACKOFF_WINDOW_MS,
   HEALTH_CHECK_BUDGET_MS,
 } from '../shared/services/deployer-orchestrator';
+import { sendToAllOperatorsAsync } from '../shared/services/push-sender';
 
 const ssmClient = new SSMClient({});
 const EC2_INSTANCE_ID = process.env.EC2_INSTANCE_ID || 'i-INVALID';
@@ -256,6 +257,13 @@ export const handler = async () => {
         healthCheckMs: result.elapsedMs,
         snapshotPath,
       });
+      // 2026-05-27 PR D.f — push notify on successful self-deploy.
+      sendToAllOperatorsAsync({
+        title: 'Daemon self-deployed',
+        body: `${deployedSha.slice(0, 8)} healthy after ${Math.round(result.elapsedMs / 1000)}s.`,
+        url: '/labs',
+        tag: 'deploy-completed',
+      });
     } catch (healthErr) {
       // 8b. Rollback.
       const detail = (healthErr as Error).message;
@@ -290,6 +298,15 @@ export const handler = async () => {
         targetSha: deployedSha,
         failureReason: detail,
         rollbackSnapshot: snapshotPath,
+      });
+      // 2026-05-27 PR D.f — push notify on rollback (requireInteraction —
+      // the operator must see this even if the phone is locked).
+      sendToAllOperatorsAsync({
+        title: 'Daemon self-deploy ROLLED BACK',
+        body: `${deployedSha.slice(0, 8)}: ${detail}`,
+        url: '/labs',
+        tag: `deploy-rollback-${deployedSha.slice(0, 8)}`,
+        requireInteraction: true,
       });
       await attentionRepo
         .createAttentionItem({

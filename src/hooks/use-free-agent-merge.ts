@@ -106,3 +106,28 @@ export function useRejectMerge(sessionId: string | null) {
     },
   });
 }
+
+/**
+ * 2026-05-27 PR D.e — Retry-wave affordance.
+ *
+ * Calls POST /api/pipelines/:planId/waves/:waveNumber/retry. Used by the
+ * inline merge-approval card's [Retry wave N] button after merge.completed
+ * for PRs that carried a `targetWaveFailure`. Single-tap only per §9.2
+ * RESOLVED.
+ */
+export interface RetryWaveResponse {
+  planId: string;
+  waveNumber: number;
+  jobId: string;
+  message: string;
+}
+
+export function useRetryWave() {
+  return useMutation({
+    mutationFn: (input: { planId: string; waveNumber: number }) =>
+      api.post<RetryWaveResponse>(
+        `/api/pipelines/${encodeURIComponent(input.planId)}/waves/${input.waveNumber}/retry`,
+        {},
+      ),
+  });
+}

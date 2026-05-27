@@ -18,8 +18,8 @@
  */
 
 import { useState } from 'react';
-import { Check, ExternalLink, Loader2, ShieldAlert, X } from 'lucide-react';
-import { useApproveMerge, useRejectMerge } from '@/hooks/use-free-agent-merge';
+import { Check, ExternalLink, Loader2, RotateCcw, ShieldAlert, X } from 'lucide-react';
+import { useApproveMerge, useRejectMerge, useRetryWave } from '@/hooks/use-free-agent-merge';
 
 export interface MergeApprovalCardProps {
   sessionId: string;
@@ -31,6 +31,11 @@ export interface MergeApprovalCardProps {
   diffSummary: { additions: number; deletions: number; filesChanged: number };
   /** 'OPEN' on initial render; transitions on approve/reject events. */
   state: 'OPEN' | 'MERGED' | 'CLOSED';
+  /**
+   * 2026-05-27 PR D.e — present when the PR was a pipeline-v2 wave-fix.
+   * After merge, the card surfaces a [Retry wave N] button.
+   */
+  targetWaveFailure?: { planId: string; waveNumber: number };
 }
 
 function RiskChip({ riskClass }: { riskClass: 'red' | 'yellow' | 'green' }) {
@@ -61,6 +66,8 @@ export function MergeApprovalCard(props: MergeApprovalCardProps) {
   const [showRedModal, setShowRedModal] = useState(false);
 
   const isBusy = approve.isPending || reject.isPending;
+  const retryWave = useRetryWave();
+  const [retryMsg, setRetryMsg] = useState<string | null>(null);
 
   if (props.state === 'MERGED') {
     return (
@@ -77,6 +84,36 @@ export function MergeApprovalCard(props: MergeApprovalCardProps) {
             View on GitHub <ExternalLink className="inline h-3 w-3" />
           </a>
         </div>
+        {/* 2026-05-27 PR D.e — retry-wave affordance. Single-tap only. */}
+        {props.targetWaveFailure && !retryMsg && (
+          <div className="mt-2 flex items-center justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                if (!props.targetWaveFailure || retryWave.isPending) return;
+                retryWave.mutate(props.targetWaveFailure, {
+                  onSuccess: (resp) => setRetryMsg(resp.message),
+                  onError: (err) =>
+                    setRetryMsg(
+                      `Retry failed: ${err instanceof Error ? err.message : String(err)}`,
+                    ),
+                });
+              }}
+              disabled={retryWave.isPending}
+              className="inline-flex h-7 items-center gap-1 rounded-md border border-success/40 bg-success/10 px-2 text-[12px] font-medium text-success hover:bg-success/20 disabled:cursor-wait disabled:opacity-60"
+            >
+              {retryWave.isPending ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <RotateCcw className="h-3 w-3" />
+              )}
+              Retry wave {props.targetWaveFailure.waveNumber}
+            </button>
+          </div>
+        )}
+        {retryMsg && (
+          <div className="mt-2 text-[11px] italic text-muted-foreground">{retryMsg}</div>
+        )}
       </div>
     );
   }

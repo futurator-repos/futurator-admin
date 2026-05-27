@@ -101,6 +101,26 @@ export interface AttentionContext {
   stepId?: string;
 }
 
+/**
+ * 2026-05-27 PR D.a — per-item remediation policy.
+ *
+ *   manual     — operator must open the chat themselves (today's behavior;
+ *                no agent action without explicit operator intent).
+ *   auto-draft — daemon spawns a free-agent session, drafts a fix, opens
+ *                a PR, then STOPS. Operator approves via inline card or
+ *                push notification.
+ *   auto-fix   — same as auto-draft, but if classifier returns `green`
+ *                AND all gates pass, the daemon's bot identity calls
+ *                /approve-merge itself. Reserved for highly-confident
+ *                item types only (operator graduates types over time).
+ *
+ * Default is 'manual'. The policy can be set per-type via the operator
+ * UI's Settings → Agent → Remediation Policies panel (each entry maps
+ * an AttentionCategory to a policy). Per-item overrides are stored on
+ * the item row itself.
+ */
+export type RemediationPolicy = 'manual' | 'auto-draft' | 'auto-fix';
+
 export interface AttentionItem {
   planId: string;
   itemId: string;
@@ -134,6 +154,28 @@ export interface AttentionItem {
   lastSeenAt?: string;
   /** Number of times the same logical failure has been observed. 1 for first write, increments on each upsert hit. */
   recurrenceCount?: number;
+
+  // ── 2026-05-27 PR D.a — Rung 5 autotrigger surface ─────────────────────
+  /**
+   * Per-item override of the category-default remediation policy. When
+   * unset, the daemon's attention-poller falls back to the policy from
+   * `futurator-remediation-policies[item.category]`. When the resolved
+   * policy is `manual`, the item is operator-driven only (today's
+   * behavior — no agent action).
+   */
+  remediationPolicy?: RemediationPolicy;
+  /**
+   * Stamped by the daemon's attention-poller after it creates a free-
+   * agent session targeting this item. Used as a double-spawn guard:
+   * the poller refuses to claim items with a non-null `agentSessionId`.
+   * Cleared by the operator when re-opening the item (PR D out-of-scope).
+   */
+  agentSessionId?: string;
+  /**
+   * ISO timestamp the daemon claimed this item. Pairs with `agentSessionId`
+   * for forensic queries ("which items did the agent investigate today").
+   */
+  agentClaimedAt?: string;
 }
 
 export interface AttentionItemSummary {

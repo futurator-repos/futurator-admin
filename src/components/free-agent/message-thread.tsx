@@ -23,6 +23,13 @@ export interface FreeAgentMergeRequest {
   riskReasons: string[];
   diffSummary: { additions: number; deletions: number; filesChanged: number };
   state: 'OPEN' | 'MERGED' | 'CLOSED';
+  /**
+   * 2026-05-27 PR D.e — when the open-pr was a fix-retry against a
+   * pipeline-v2 wave failure, the merge-request carries the wave coords
+   * so the inline card can render the [Retry wave N] button after
+   * merge.completed.
+   */
+  targetWaveFailure?: { planId: string; waveNumber: number };
 }
 
 export interface FreeAgentMessage {

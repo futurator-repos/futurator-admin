@@ -32,6 +32,9 @@ import { AGENT_FLAG_KEYS } from '../shared/repositories/agent-flags-repository';
 import * as agentSpendRepo from '../shared/repositories/agent-spend-log-repository';
 import * as fixCyclesRepo from '../shared/repositories/fix-cycles-repository';
 import { FIX_CYCLE_HARD_CAP } from '../shared/repositories/fix-cycles-repository';
+import * as remediationPoliciesRepo from '../shared/repositories/remediation-policies-repository';
+import * as pushSubscriptionsRepo from '../shared/repositories/push-subscriptions-repository';
+import { getVapidPublicKey, sendToOperatorAsync } from '../shared/services/push-sender';
 import {
   bootstrapAdminSelfEdit,
   isAdminAlreadyBootstrapped,
@@ -1741,15 +1744,22 @@ app.post('/api/plans/:id/apply-plan', async (c) => {
     const workingDir = result.plan.workingDir;
     if (workingDir && result.plan.intent) {
       // Trim to first ~3 sentences for the seed (mirrors v2.5 §41.1
-      // "one paragraph" guidance). Shell-escape via JSON.stringify so
-      // newlines/quotes/etc. survive the SSM round-trip safely.
+      // "one paragraph" guidance).
       const purpose = String(result.plan.intent).split('\n').slice(0, 3).join(' ').trim();
-      const purposeJson = JSON.stringify(purpose);
+      // 2026-05-27 (Bug 3) — base64-encode the args. The previous build
+      // inlined `JSON.stringify(purpose)` (which begins with `"`) inside a
+      // double-quoted `node -e "..."`, so the leading `"` closed the -e
+      // string and bash threw a syntax error (same defect as the DEV
+      // claude-md-append-decision step). base64 is shell-safe; the node
+      // script is single-quoted and JSON.parses the decoded args.
+      const argsB64 = Buffer.from(JSON.stringify({ workingDir: '.', purpose })).toString('base64');
       const seedCmd =
         `cd ${workingDir} && ` +
-        `node -e "import('/opt/futurator-daemon/lib/claude-md-writer.mjs').then(m => ` +
-        `m.seedWhatThisIs({ workingDir: '.', purpose: ${purposeJson} }).then(r => ` +
-        `console.log('seed-what-this-is:', JSON.stringify(r))))" 2>&1 || true`;
+        `node -e 'import("file:///opt/futurator-daemon/lib/claude-md-writer.mjs")` +
+        `.then(m => m.seedWhatThisIs(` +
+        `JSON.parse(Buffer.from("${argsB64}", "base64").toString("utf8"))` +
+        `).then(r => console.log("seed-what-this-is:", JSON.stringify(r))))' ` +
+        `2>&1 || true`;
       await sendSsmCommand(seedCmd);
     }
   } catch (err) {
@@ -5860,6 +5870,170 @@ app.delete('/api/admin/spend-cap/override-today', async (c) => {
   });
 });
 
+// ────────────────────────────────────────────────────────────────────────
+// 2026-05-27 PR D.a — Remediation policies (per-AttentionCategory).
+//
+// Operator-managed via the Settings → Agent → Remediation Policies panel.
+// The daemon's attention-poller (PR D.b) consults `getPolicy(category)`
+// for every newly-opened attention item to decide whether to spawn a
+// free-agent session.
+// ────────────────────────────────────────────────────────────────────────
+
+app.get('/api/admin/remediation-policies', async (c) => {
+  const rows = await remediationPoliciesRepo.listAllPolicies();
+  return c.json({ policies: rows });
+});
+
+const setRemediationPolicySchema = z.object({
+  category: z.string().min(1).max(64),
+  policy: z.enum(['manual', 'auto-draft', 'auto-fix']),
+});
+
+app.put('/api/admin/remediation-policies', async (c) => {
+  const operatorId = c.get('user').userId;
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = setRemediationPolicySchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
+  }
+  const row = await remediationPoliciesRepo.setPolicy(
+    parsed.data.category as never,
+    parsed.data.policy,
+    operatorId,
+  );
+  return c.json(row);
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// 2026-05-27 PR D.f — PWA push subscriptions.
+//
+// Operator-facing surface:
+//   GET    /api/admin/push/vapid-public-key  — read the public key the
+//          browser needs for pushManager.subscribe()
+//   POST   /api/admin/push/subscribe         — register a subscription
+//   DELETE /api/admin/push/subscribe/:id     — unregister a device
+//   POST   /api/admin/push/test              — send a test notification to
+//          all the operator's devices (for the settings panel toggle)
+// ────────────────────────────────────────────────────────────────────────
+
+app.get('/api/admin/push/vapid-public-key', async (c) => {
+  const publicKey = await getVapidPublicKey();
+  if (!publicKey) {
+    throw new AppError(
+      'PUSH_NOT_CONFIGURED',
+      'VAPID keys not configured. Run `npx web-push generate-vapid-keys` and put the result into Secrets Manager at futurator/push/vapid-keys.',
+      503,
+    );
+  }
+  return c.json({ publicKey });
+});
+
+const subscribeSchema = z.object({
+  endpoint: z.string().url(),
+  keys: z.object({ p256dh: z.string().min(1), auth: z.string().min(1) }),
+  userAgent: z.string().max(512).optional(),
+});
+
+app.post('/api/admin/push/subscribe', async (c) => {
+  const operatorId = c.get('user').userId;
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = subscribeSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
+  }
+  const row = await pushSubscriptionsRepo.createSubscription({
+    operatorId,
+    endpoint: parsed.data.endpoint,
+    keys: parsed.data.keys,
+    userAgent: parsed.data.userAgent,
+  });
+  return c.json({ subscriptionId: row.subscriptionId, createdAt: row.createdAt }, 201);
+});
+
+app.delete('/api/admin/push/subscribe/:id', async (c) => {
+  const subscriptionId = c.req.param('id');
+  const sub = await pushSubscriptionsRepo.getSubscription(subscriptionId);
+  if (!sub) throw new NotFoundError('PushSubscription', subscriptionId);
+  const user = c.get('user');
+  if (!user || sub.operatorId !== user.userId) {
+    throw new AppError('FORBIDDEN', 'Only the subscription owner can unregister it', 403);
+  }
+  await pushSubscriptionsRepo.deleteSubscription(subscriptionId);
+  return c.json({ subscriptionId, unregistered: true });
+});
+
+app.post('/api/admin/push/test', async (c) => {
+  const operatorId = c.get('user').userId;
+  sendToOperatorAsync(operatorId, {
+    title: 'Futurator Admin — test notification',
+    body: 'Push subscriptions are working. You will receive these for free-agent + deploy events.',
+    url: '/',
+    tag: 'test',
+  });
+  return c.json({ sent: 'async', operatorId });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// 2026-05-27 PR D.e — Retry-wave affordance.
+//
+// Triggered by the inline merge-approval card's [Retry wave N] button
+// after free-agent.merge.completed for a PR with targetWaveFailure set.
+// Single-tap only per §9.2 RESOLVED — never automatic.
+//
+// v1 implementation: writes a high-severity attention item with title
+// "Wave N retry requested by operator". The operator sees it in the
+// attention bell + can manually trigger the wave-replay path (this
+// preserves the "operator gates each cycle" invariant). The wave-retry
+// machinery itself is pipeline-v2 work outside PR D's scope.
+//
+// A future enhancement enqueues a `wave-retry` agent-job that the
+// daemon picks up automatically; the API contract is forward-compatible
+// (returns { jobId } already).
+// ────────────────────────────────────────────────────────────────────────
+
+const retryWaveParamsSchema = z.object({
+  planId: z.string().min(1),
+  waveNumber: z.coerce.number().int().nonnegative(),
+});
+
+app.post('/api/pipelines/:planId/waves/:waveNumber/retry', async (c) => {
+  const operatorId = c.get('user').userId;
+  const parsed = retryWaveParamsSchema.safeParse({
+    planId: c.req.param('planId'),
+    waveNumber: c.req.param('waveNumber'),
+  });
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid params');
+  }
+  const { planId, waveNumber } = parsed.data;
+
+  const itemId = crypto.randomUUID();
+  await attentionRepo.createAttentionItem({
+    planId,
+    itemId,
+    createdAt: new Date().toISOString(),
+    resolvedAt: null,
+    severity: 'medium',
+    category: 'retry-exhausted',
+    title: `Wave ${waveNumber} retry requested by operator`,
+    body:
+      `Operator ${operatorId} requested a retry of wave ${waveNumber} on plan ${planId} ` +
+      `following a free-agent fix merge. The wave-replay machinery is pipeline-v2-side; ` +
+      `take action via the existing retry path in the pipeline dashboard.`,
+    context: { jobId: `${planId}#wave-${waveNumber}-retry` },
+    suggestedActions: [],
+    status: 'open',
+    dedupKey: `wave-retry:${planId}:${waveNumber}`,
+  });
+
+  return c.json({
+    planId,
+    waveNumber,
+    jobId: itemId,
+    message: `Wave ${waveNumber} retry requested — see the attention bell for the operator action.`,
+  });
+});
+
 /**
  * POST /api/admin/bootstrap-self-edit-repo — one-time admin action.
  *
@@ -7510,6 +7684,20 @@ app.post('/api/free-agent/sessions/:id/open-pr', authMiddleware, async (c) => {
     headSha: pushResult.headSha,
     ...(target ? { targetWaveFailure: target } : {}),
   });
+
+  // 2026-05-27 PR D.f — push notify on yellow/red merges. Green PRs
+  // auto-merge silently via the GitHub Actions workflow (PR C.a) — no
+  // operator action needed, so no notification spam.
+  if (classification.class !== 'green') {
+    sendToOperatorAsync(session.operatorId, {
+      title: `Free Agent opened PR #${prResult.data.number} (${classification.class})`,
+      body: parsedBody.data.title,
+      url: `/free-agent?session=${encodeURIComponent(parsedId.data)}`,
+      tag: `merge-approval-${prResult.data.number}`,
+      requireInteraction: classification.class === 'red',
+      data: { prNumber: prResult.data.number, sessionId: parsedId.data },
+    });
+  }
 
   // 2026-05-27 PR C.e — count this attempt against the wave-fix cycle cap.
   // Done AFTER the PR opens successfully so a push-failed attempt doesn't

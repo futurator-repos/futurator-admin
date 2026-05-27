@@ -99,6 +99,11 @@ import { runFreeAgentSession } from './pipelines/free-agent-session.mjs';
 // `/home/ubuntu/free-agent-worktrees/` root and marks in-flight free-agent
 // sessions EXPIRED so they re-spawn on the unified `_assist` path.
 import { maybeRunUnificationMigration } from './lib/free-agent-unification-migration.mjs';
+// 2026-05-27 PR D.b — attention-items poller (Rung 5 autotrigger).
+import {
+  startAttentionPoller,
+  composeAttentionPromptBody,
+} from './lib/attention-poller.mjs';
 // 2026-05-19 — Phase 1 worktree rollout. Materialize per-story worktrees
 // + node_modules symlinks before any pipeline step runs.
 import { setupStoryWorktree, teardownStoryWorktree } from './lib/story-worktree.mjs';
@@ -2997,6 +3002,10 @@ const FREE_AGENT_SESSIONS_TABLE =
   process.env.FREE_AGENT_SESSIONS_TABLE || 'futurator-free-agent-sessions';
 // 2026-05-27 PR B.f — global agent feature flags (e.g. agent.paused).
 const AGENT_FLAGS_TABLE = process.env.AGENT_FLAGS_TABLE || 'futurator-agent-flags';
+// 2026-05-27 PR D.a/b — attention items + per-category remediation policies.
+const ATTENTION_ITEMS_TABLE = process.env.ATTENTION_ITEMS_TABLE || 'futurator-attention-items';
+const REMEDIATION_POLICIES_TABLE =
+  process.env.REMEDIATION_POLICIES_TABLE || 'futurator-remediation-policies';
 const PARTY_PROJECTS_ROOT = process.env.PROJECTS_ROOT || '/home/ubuntu/projects';
 const PARTY_BMAD_VERSION = process.env.BMAD_VERSION || '6.3.0';
 const PARTY_BMAD_AGENTS_SOURCE =
@@ -3578,6 +3587,160 @@ async function isAgentPausedCached() {
     _pausedCache = { value: false, fetchedAt: Date.now() };
   }
   return _pausedCache.value;
+}
+
+// 2026-05-27 PR D.b — attention-poller helpers.
+//
+// scanOpenAttentionItems: full-table scan filtered on status='open' AND
+//   missing agentSessionId. The attention-items table is bounded by the
+//   plan TTLs upstream (a stuck plan never produces unbounded items per
+//   the PR-7 dedupKey pattern), so a paginated Scan is acceptable v1.
+//
+// getRemediationPolicy: GetItem on the per-category policies table.
+//   Absent rows resolve to 'manual' (the safe default — never spawn
+//   without an explicit operator opt-in).
+//
+// claimAttentionItemForAgent: conditional UpdateItem (succeeds only when
+//   `agentSessionId` is absent). Idempotent under concurrent ticks.
+//
+// enqueueFreeAgentSessionFromAttention: writes the free-agent row to
+//   the sessions table + a PENDING agent-job row that the daemon's
+//   own poll loop picks up. Mirrors the operator-driven flow but
+//   bypasses STS credentials (the daemon-bot identity uses the daemon's
+//   own EC2 instance role for AWS access; the agent's IAM scoping is
+//   the load-bearing security boundary as before).
+async function scanOpenAttentionItems() {
+  const items = [];
+  let ExclusiveStartKey;
+  do {
+    const result = await ddb.send(
+      new ScanCommand({
+        TableName: ATTENTION_ITEMS_TABLE,
+        FilterExpression: '#st = :open AND attribute_not_exists(agentSessionId)',
+        ExpressionAttributeNames: { '#st': 'status' },
+        ExpressionAttributeValues: { ':open': 'open' },
+        ExclusiveStartKey,
+      }),
+    );
+    if (result?.Items?.length) items.push(...result.Items);
+    ExclusiveStartKey = result?.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return items;
+}
+
+async function getRemediationPolicy(category) {
+  try {
+    const result = await ddb.send(
+      new GetCommand({
+        TableName: REMEDIATION_POLICIES_TABLE,
+        Key: { category },
+      }),
+    );
+    return result?.Item?.policy ?? 'manual';
+  } catch (err) {
+    log('warn', `[attention-poller] policy lookup failed for ${category}: ${err.message}`);
+    return 'manual';
+  }
+}
+
+async function claimAttentionItemForAgent({ planId, itemId, sessionId }) {
+  const nowIso = new Date().toISOString();
+  try {
+    const result = await ddb.send(
+      new UpdateCommand({
+        TableName: ATTENTION_ITEMS_TABLE,
+        Key: { planId, itemId },
+        UpdateExpression: 'SET agentSessionId = :sid, agentClaimedAt = :now',
+        ConditionExpression:
+          'attribute_exists(itemId) AND attribute_not_exists(agentSessionId)',
+        ExpressionAttributeValues: { ':sid': sessionId, ':now': nowIso },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return result.Attributes ?? null;
+  } catch (err) {
+    if (err?.name === 'ConditionalCheckFailedException') return null;
+    log('warn', `[attention-poller] claim failed for ${itemId}: ${err.message}`);
+    return null;
+  }
+}
+
+async function enqueueFreeAgentSessionFromAttention({ sessionId, item, autoFix }) {
+  const nowIso = new Date().toISOString();
+  const ninetyDaySec = 90 * 24 * 60 * 60;
+  const projectId =
+    (item.context && (item.context.projectId || item.context.appId)) ||
+    item.planId ||
+    '_attention';
+
+  // Write the free-agent session row first (mirrors POST /api/free-agent/sessions).
+  // Skipping STS credentials: the daemon-bot sessions run with the EC2 instance
+  // role's broader access; the load-bearing safety is still the PreToolUse hook
+  // path-confinement + danger-list classification.
+  await ddb.send(
+    new PutCommand({
+      TableName: FREE_AGENT_SESSIONS_TABLE,
+      Item: {
+        sessionId,
+        operatorId: '__daemon-bot__',
+        projectId,
+        scope: { kind: 'attention', id: item.itemId },
+        scopeIdComposite: `attention#${item.itemId}`,
+        status: 'ACTIVE',
+        model: process.env.FREE_AGENT_BOT_MODEL || 'claude-sonnet-4-6',
+        costCapUsd: parseFloat(process.env.FREE_AGENT_BOT_COST_CAP_USD || '5') || 5,
+        costUsdAccumulated: 0,
+        turnCount: 0,
+        createdAt: nowIso,
+        lastActivityAt: nowIso,
+        expiresAt: Math.floor(Date.now() / 1000) + ninetyDaySec,
+        // Mark the session as agent-spawned so downstream auto-fix logic
+        // can find it. Per §7.4.b: auto-fix sessions auto-merge themselves
+        // on green class — v1 ships the metadata; the auto-merge trigger is
+        // a v1.1 follow-up.
+        attentionItemRef: { planId: item.planId, itemId: item.itemId },
+        autoFix,
+      },
+    }),
+  );
+
+  // Now enqueue the PENDING agent-job for the daemon's own poll loop.
+  const jobId = randomUUID();
+  const primer = composeAttentionPromptBody(item);
+  await ddb.send(
+    new PutCommand({
+      TableName: JOBS_TABLE,
+      Item: {
+        jobId,
+        status: 'PENDING',
+        jobType: 'free-agent-session',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        createdBy: '__daemon-bot__',
+        workingDir: '',
+        freeAgentSessionPayload: {
+          sessionId,
+          projectId,
+          model: process.env.FREE_AGENT_BOT_MODEL || 'claude-sonnet-4-6',
+          costCapUsd: parseFloat(process.env.FREE_AGENT_BOT_COST_CAP_USD || '5') || 5,
+          // Credentials: the daemon-bot's STS credentials are derived
+          // inside free-agent-session.mjs from the EC2 instance role —
+          // not minted via the FreeAgentSessionRole assume-role path that
+          // the API uses. Use the operator's STS-equivalent placeholder
+          // shape so the handler's signature stays uniform; the IAM role
+          // attached to the EC2 instance is what actually authorizes.
+          credentials: {
+            accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+            sessionToken: process.env.AWS_SESSION_TOKEN || '',
+          },
+          messages: [{ role: 'user', content: primer }],
+          scope: { kind: 'attention', id: item.itemId },
+          operatorId: '__daemon-bot__',
+        },
+      },
+    }),
+  );
 }
 
 async function freeAgentClearCancelFlag(sessionId) {
@@ -4964,6 +5127,22 @@ async function poll() {
       intervalMs: 60 * 60 * 1000, // 1 hour
       initialDelayMs: 5 * 60 * 1000, // 5 min
     },
+  );
+
+  // 2026-05-27 PR D.b — Rung 5 attention-items poller. 30s cadence; gated
+  // by `agent.paused` (same flag as the main poll loop) so the operator's
+  // [⏸ Pause agent] stops autotriggers too. First tick after 60s to avoid
+  // probing DDB during the daemon's startup race window.
+  startAttentionPoller(
+    {
+      isPaused: isAgentPausedCached,
+      scanOpenItems: scanOpenAttentionItems,
+      getPolicy: getRemediationPolicy,
+      claimForAgent: claimAttentionItemForAgent,
+      enqueueSession: enqueueFreeAgentSessionFromAttention,
+      log: (level, msg, ctx) => log(level, msg, ctx),
+    },
+    { intervalMs: 30_000, initialDelayMs: 60_000 },
   );
 
   log('info', 'Polling for PENDING jobs...\n');

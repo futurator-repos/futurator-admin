@@ -259,6 +259,16 @@ export function useFreeAgentSession(): UseFreeAgentSessionApi {
                   filesChanged: number;
                 }) ?? { additions: 0, deletions: 0, filesChanged: 0 },
                 state: 'OPEN',
+                // 2026-05-27 PR D.e — carry the wave-failure coords so the
+                // card can surface [Retry wave N] after merge.completed.
+                ...((ev.targetWaveFailure as { planId: string; waveNumber: number } | undefined)
+                  ? {
+                      targetWaveFailure: ev.targetWaveFailure as {
+                        planId: string;
+                        waveNumber: number;
+                      },
+                    }
+                  : {}),
               },
             });
           }
