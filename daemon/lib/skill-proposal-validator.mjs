@@ -64,18 +64,50 @@ function validateProposal(p, idx) {
 }
 
 /**
+ * Strip the daemon's between-extractor framing to the bare JSON object.
+ *
+ * The daemon's `between` extractor (agent-daemon.mjs::runExtractors) slices
+ * `[startDelimiter .. endDelimiter]` INCLUSIVE — so the captured value is
+ * `---SKILL_PROPOSALS---\n{...}\n---END_SKILL_PROPOSALS---`, not the bare
+ * `{...}`. `JSON.parse` then chokes on the leading `---` ("No number after
+ * minus sign at position 1" — the brick-breaker-11 SKILL-SCOUT failure).
+ *
+ * Rather than change the shared extractor (WORK_SUMMARY / REVIEW_CRITERIA
+ * consumers rely on the inclusive behaviour), we make the SKILL-SCOUT
+ * validator delimiter-tolerant: extract the outermost `{ … }` object. This
+ * also absorbs any prose the agent wrapped around the block.
+ *
+ * @param {string} raw
+ * @returns {string} the JSON-object substring, or the trimmed input if no braces found
+ */
+export function stripToJsonObject(raw) {
+  const firstBrace = raw.indexOf('{');
+  const lastBrace = raw.lastIndexOf('}');
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
+    return raw.trim();
+  }
+  return raw.slice(firstBrace, lastBrace + 1);
+}
+
+/**
  * Validate a SKILL-SCOUT between-marker payload.
  *
  * @param {string} raw  — raw text captured by the daemon's `between` extractor
+ *                        (includes the `---SKILL_PROPOSALS---` delimiters)
  * @returns {{ ok: true, output: object } | { ok: false, error: string }}
  */
 export function validateSkillProposalsBlock(raw) {
   if (typeof raw !== 'string' || raw.trim().length === 0) {
     return fail('<root>', 'raw payload is empty');
   }
+  // Tolerate the between-extractor's inclusive delimiter framing.
+  const jsonText = stripToJsonObject(raw);
+  if (!jsonText.startsWith('{')) {
+    return fail('<root>', 'no JSON object found between delimiters');
+  }
   let parsed;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(jsonText);
   } catch (e) {
     return fail('<root>', `JSON parse failed: ${e.message}`);
   }

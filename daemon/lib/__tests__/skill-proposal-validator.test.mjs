@@ -8,7 +8,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { validateSkillProposalsBlock } from '../skill-proposal-validator.mjs';
+import {
+  validateSkillProposalsBlock,
+  stripToJsonObject,
+} from '../skill-proposal-validator.mjs';
 
 const VALID_PROPOSAL = {
   kind: 'add',
@@ -26,6 +29,58 @@ const VALID_OUTPUT = {
   projectSlug: 'dino-test-3',
   proposals: [VALID_PROPOSAL],
 };
+
+// 2026-05-27 (brick-breaker-11 Bug 2) — the daemon `between` extractor
+// hands the validator the delimiter-framed value, NOT bare JSON. These
+// tests lock in the delimiter-tolerant parse.
+describe('stripToJsonObject — between-extractor framing', () => {
+  it('strips the inclusive ---SKILL_PROPOSALS--- delimiters', () => {
+    const framed =
+      '---SKILL_PROPOSALS---\n' +
+      JSON.stringify(VALID_OUTPUT) +
+      '\n---END_SKILL_PROPOSALS---';
+    expect(stripToJsonObject(framed)).toBe(JSON.stringify(VALID_OUTPUT));
+  });
+
+  it('strips prose the agent wrapped around the object', () => {
+    const noisy = 'Here are my proposals:\n' + JSON.stringify(VALID_OUTPUT) + '\nDone.';
+    expect(stripToJsonObject(noisy)).toBe(JSON.stringify(VALID_OUTPUT));
+  });
+
+  it('returns trimmed input when no braces present', () => {
+    expect(stripToJsonObject('  ---SKILL_PROPOSALS------END---  ')).toBe(
+      '---SKILL_PROPOSALS------END---',
+    );
+  });
+});
+
+describe('validateSkillProposalsBlock — delimiter-framed (Bug 2 regression)', () => {
+  it('parses the exact framed shape the between-extractor produces', () => {
+    // Mirrors agent-daemon.mjs:601 — slice [startDelimiter .. endDelimiter] inclusive.
+    const framed =
+      '---SKILL_PROPOSALS---\n' +
+      JSON.stringify(VALID_OUTPUT, null, 2) +
+      '\n---END_SKILL_PROPOSALS---';
+    const r = validateSkillProposalsBlock(framed);
+    expect(r.ok).toBe(true);
+    expect(r.output.proposals).toHaveLength(1);
+    expect(r.output.trigger).toBe('T1');
+  });
+
+  it('parses framed empty-proposals output', () => {
+    const framed =
+      '---SKILL_PROPOSALS---\n{"trigger":"T2","projectSlug":"x","proposals":[]}\n---END_SKILL_PROPOSALS---';
+    const r = validateSkillProposalsBlock(framed);
+    expect(r.ok).toBe(true);
+    expect(r.output.proposals).toHaveLength(0);
+  });
+
+  it('rejects framing with no JSON object inside', () => {
+    const r = validateSkillProposalsBlock('---SKILL_PROPOSALS---\n(none)\n---END_SKILL_PROPOSALS---');
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('no JSON object found');
+  });
+});
 
 describe('validateSkillProposalsBlock — happy path', () => {
   it('accepts a well-formed output', () => {
@@ -74,10 +129,21 @@ describe('validateSkillProposalsBlock — rejection paths', () => {
     expect(r.error).toContain('JSON parse failed');
   });
 
-  it('rejects non-object top level', () => {
+  it('rejects non-object top level (no JSON object present)', () => {
+    // Post-Bug-2 fix: stripToJsonObject finds no `{`/`}` in a bare JSON
+    // string, so this is rejected at the brace-extraction gate rather
+    // than the "must be an object" type gate. Either way it's a rejection.
     const r = validateSkillProposalsBlock('"hello"');
     expect(r.ok).toBe(false);
-    expect(r.error).toContain('must be an object');
+    expect(r.error).toContain('no JSON object found');
+  });
+
+  it('rejects a non-object JSON value that DOES contain braces elsewhere', () => {
+    // A JSON array `[1, {"x":1}]` — stripToJsonObject grabs the inner
+    // object `{"x":1}` which parses but lacks trigger/projectSlug.
+    const r = validateSkillProposalsBlock('[1, {"x":1}]');
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('trigger');
   });
 
   it('rejects invalid trigger', () => {

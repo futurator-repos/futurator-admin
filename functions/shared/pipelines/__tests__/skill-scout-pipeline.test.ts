@@ -6,6 +6,7 @@ import { describe, it, expect } from 'vitest';
 import {
   generateSkillScoutPipeline,
   validateSkillProposalsBlock,
+  stripToJsonObject,
   SkillProposalSchema,
 } from '../skill-scout-pipeline';
 
@@ -138,6 +139,40 @@ describe('validateSkillProposalsBlock', () => {
     const result = validateSkillProposalsBlock('{not json');
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/JSON parse/);
+  });
+
+  // 2026-05-27 (brick-breaker-11 Bug 2) — the daemon `between` extractor
+  // slices [startDelimiter .. endDelimiter] INCLUSIVE, so the validator
+  // receives `---SKILL_PROPOSALS---\n{...}\n---END_SKILL_PROPOSALS---`.
+  // Pre-fix this failed with "No number after minus sign at position 1".
+  it('tolerates the inclusive between-extractor delimiter framing (Bug 2 regression)', () => {
+    const inner = JSON.stringify({
+      trigger: 'T1',
+      projectSlug: 'brick-breaker-11',
+      proposals: [
+        {
+          kind: 'add',
+          source: 'anthropic-official',
+          skill: 'skill-creator',
+          manifestBucket: 'core',
+          version: `sha:${SHA}`,
+          rationale: 'Project authoring primitive.',
+          verifyNotes: 'MIT; specific; no collision.',
+          confidence: 0.92,
+        },
+      ],
+    });
+    const framed = `---SKILL_PROPOSALS---\n${inner}\n---END_SKILL_PROPOSALS---`;
+    const result = validateSkillProposalsBlock(framed);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.output.proposals[0].skill).toBe('skill-creator');
+  });
+
+  it('stripToJsonObject extracts the object from delimiter framing', () => {
+    const inner = '{"trigger":"T2","projectSlug":"x","proposals":[]}';
+    expect(stripToJsonObject(`---SKILL_PROPOSALS---\n${inner}\n---END_SKILL_PROPOSALS---`)).toBe(
+      inner,
+    );
   });
 
   it('rejects bad version format', () => {

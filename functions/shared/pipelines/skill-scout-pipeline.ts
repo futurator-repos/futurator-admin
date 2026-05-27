@@ -57,6 +57,27 @@ export const SkillScoutOutputSchema = z.object({
 export type SkillScoutOutput = z.infer<typeof SkillScoutOutputSchema>;
 
 /**
+ * Strip the daemon's between-extractor framing to the bare JSON object.
+ *
+ * The daemon's `between` extractor (agent-daemon.mjs::runExtractors) captures
+ * `[startDelimiter .. endDelimiter]` INCLUSIVE, so the value handed to this
+ * validator is `---SKILL_PROPOSALS---\n{...}\n---END_SKILL_PROPOSALS---`, not
+ * the bare `{...}`. JSON.parse then fails on the leading `---`. Extract the
+ * outermost `{ … }` object (also absorbs any prose around the block).
+ *
+ * Mirror of `daemon/lib/skill-proposal-validator.mjs::stripToJsonObject` —
+ * keep both in lock-step.
+ */
+export function stripToJsonObject(raw: string): string {
+  const firstBrace = raw.indexOf('{');
+  const lastBrace = raw.lastIndexOf('}');
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
+    return raw.trim();
+  }
+  return raw.slice(firstBrace, lastBrace + 1);
+}
+
+/**
  * Parse SKILL-SCOUT's between-marker output. Returns `{ ok, output }` on
  * success or `{ ok: false, error }` with a human-readable Zod-error path.
  * The daemon's run loop uses this to decide whether to surface the card
@@ -65,9 +86,14 @@ export type SkillScoutOutput = z.infer<typeof SkillScoutOutputSchema>;
 export function validateSkillProposalsBlock(
   raw: string,
 ): { ok: true; output: SkillScoutOutput } | { ok: false; error: string } {
+  // Tolerate the between-extractor's inclusive delimiter framing.
+  const jsonText = stripToJsonObject(raw);
+  if (!jsonText.startsWith('{')) {
+    return { ok: false, error: '<root>: no JSON object found between delimiters' };
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(jsonText);
   } catch (e) {
     return { ok: false, error: `JSON parse failed: ${(e as Error).message}` };
   }
