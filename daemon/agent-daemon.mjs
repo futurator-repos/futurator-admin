@@ -91,9 +91,14 @@ import { runPartyDocsUnlink } from './pipelines/party-docs-unlink.mjs';
 import { runPartyRefresh } from './pipelines/party-refresh.mjs';
 // Pipeline v2 / Story 1.4.3 — App-bootstrap saga (steps 3–5).
 import { runAppBootstrap } from './pipelines/app-bootstrap.mjs';
-// Story 18.2 — Free Claude Code Agent session handler + GC scheduler.
+// Story 18.2 — Free Claude Code Agent session handler.
+// 2026-05-27 (unification) — `runFreeAgentGc` removed; its work is now part
+// of the unified `worktree-reaper.mjs` `_assist` namespace classifier.
 import { runFreeAgentSession } from './pipelines/free-agent-session.mjs';
-import { runFreeAgentGc } from './lib/free-agent-gc.mjs';
+// 2026-05-27 (unification) — one-shot startup migration: removes the old
+// `/home/ubuntu/free-agent-worktrees/` root and marks in-flight free-agent
+// sessions EXPIRED so they re-spawn on the unified `_assist` path.
+import { maybeRunUnificationMigration } from './lib/free-agent-unification-migration.mjs';
 // 2026-05-19 — Phase 1 worktree rollout. Materialize per-story worktrees
 // + node_modules symlinks before any pipeline step runs.
 import { setupStoryWorktree, teardownStoryWorktree } from './lib/story-worktree.mjs';
@@ -214,12 +219,9 @@ const FORWARDER_POLL_MS = parseInt(process.env.FORWARDER_POLL_MS || '250', 10);
 const DAEMON_RECEIVER_PORT = parseInt(process.env.FUTURATOR_DAEMON_PORT || '17631', 10);
 const STALE_HEARTBEAT_MS = parseInt(process.env.STALE_HEARTBEAT_MS || String(DEFAULT_STALE_MS), 10);
 const STALE_SCAN_INTERVAL_MS = parseInt(process.env.STALE_SCAN_INTERVAL_MS || '30000', 10);
-// Story 18.2 — Free Claude Code Agent GC. Daily by default; configurable for
-// testing on EC2 dev. The GC sweeps stale free-agent worktrees + reaps orphans.
-const FREE_AGENT_GC_INTERVAL_MS = parseInt(
-  process.env.FREE_AGENT_GC_INTERVAL_MS || String(24 * 60 * 60 * 1000),
-  10,
-);
+// 2026-05-27 (unification) — FREE_AGENT_GC_INTERVAL_MS removed. Assist
+// worktrees are now reaped by the unified hourly worktree-reaper alongside
+// per-story + party + node_modules-store entries.
 // Pipeline Enhancement Plan v2 — Phase A.1: graceful shutdown window. On
 // SIGTERM/SIGINT the daemon SIGTERMs tracked children, waits this long, then
 // SIGKILLs any stragglers and emits daemon-shutdown-timeout attention items.
@@ -1357,8 +1359,8 @@ async function writeHeartbeat() {
 // resumeFromWaveResults. The poll loop will then pick the new job up
 // and spawn a new orchestrator that skips completed waves.
 let lastStaleScanAt = 0;
-// Story 18.2 — last successful run of the free-agent GC ticker.
-let lastFreeAgentGcAt = 0;
+// 2026-05-27 (unification) — `lastFreeAgentGcAt` removed; assist worktrees
+// are reaped by the unified hourly worktree-reaper now.
 
 async function scanStaleEpicDevJobs() {
   try {
@@ -3512,6 +3514,42 @@ async function freeAgentListAllSessions() {
   return out;
 }
 
+/**
+ * 2026-05-27 (unification) — daemon-side `findBySessionIdShort` for the
+ * `_assist` worktree reaper. Same paginated Scan shape as
+ * `partyFindBySessionIdShort` (2026-05-27 bug fix above); the `Limit:5` was
+ * reaping active worktrees mid-flight in party — we apply the same lesson
+ * here proactively.
+ */
+async function freeAgentFindBySessionIdShort(sessionIdShort) {
+  if (typeof sessionIdShort !== 'string' || !/^[a-f0-9]{8}$/.test(sessionIdShort)) {
+    return null;
+  }
+  const items = [];
+  let ExclusiveStartKey;
+  do {
+    const result = await ddb.send(
+      new ScanCommand({
+        TableName: FREE_AGENT_SESSIONS_TABLE,
+        FilterExpression: 'begins_with(sessionId, :p)',
+        ExpressionAttributeValues: { ':p': sessionIdShort },
+        ExclusiveStartKey,
+      }),
+    );
+    if (result?.Items?.length) items.push(...result.Items);
+    if (items.length >= 3) break;
+    ExclusiveStartKey = result?.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  if (items.length === 0) return null;
+  if (items.length > 1) {
+    log(
+      'warn',
+      `[free-agent-find-by-short] '${sessionIdShort}' matched ${items.length} sessions (collision?) — returning first`,
+    );
+  }
+  return items[0];
+}
+
 async function freeAgentClearCancelFlag(sessionId) {
   await ddb.send(
     new UpdateCommand({
@@ -3678,6 +3716,9 @@ async function executePartyTurnJob(job) {
       setClaudeSessionId: partySetClaudeSessionId,
       incrementTurn: partyIncrementTurn,
       releaseSessionLock: partyReleaseSessionLock,
+      // Opt-in auto-PR (project.autoOpenPr) resolves the per-project PAT via
+      // this loader after a successful checkpoint push.
+      loadPat: loadBrownfieldPat,
       // Story 20.6/19.4 facade — surfaces the daemon's DDB helpers as a
       // minimal sessionsRepo so party-turn V1 can lazy-create worktrees,
       // clear stale cancel flags, and (via cancel-poller) poll the cancel
@@ -4741,8 +4782,22 @@ async function poll() {
     probeAuth().catch((e) => log('error', `Auth probe failed: ${e.message}`));
   }, AUTH_PROBE_INTERVAL_MS).unref();
 
+  // 2026-05-27 (unification) — one-shot startup migration. Removes the legacy
+  // `/home/ubuntu/free-agent-worktrees/` root, marks in-flight free-agent
+  // sessions as EXPIRED, and writes a sentinel so subsequent restarts skip
+  // the work. Best-effort: failures are logged but don't block daemon boot.
+  try {
+    await maybeRunUnificationMigration({
+      sessionsRepo: buildFreeAgentSessionsRepoFacade(),
+      log: (level, msg, ctx) => log(level, msg, ctx),
+    });
+  } catch (err) {
+    log('error', `[unification-migration] uncaught failure: ${err.message}`);
+  }
+
   // 2026-05-19 — Phase 1 worktree rollout. Hourly reaper for per-story
-  // worktrees + coordinator worktrees + node_modules store entries.
+  // worktrees + coordinator worktrees + node_modules store entries +
+  // (since 2026-05-27 unification) the `_assist` namespace.
   // First run after 5 min so the daemon doesn't reap stuff during
   // startup race windows. See docs/concepts/pipeline-v2/worktree-rollout-design.md §3.
   startReaperTicker(
@@ -4802,6 +4857,10 @@ async function poll() {
       // evaluated for reap based on session.status + session.updatedAt
       // age (>7 days terminal + stale → reap).
       findPartySessionByShort: partyFindBySessionIdShort,
+      // 2026-05-27 (unification) — wire the free-agent-session lookup
+      // into the reaper deps. Activates the `_assist` namespace classifier
+      // (see worktree-reaper.mjs `classifyAssistWorktree`).
+      findFreeAgentSessionByShort: freeAgentFindBySessionIdShort,
     },
     {
       intervalMs: 60 * 60 * 1000, // 1 hour
@@ -4821,16 +4880,9 @@ async function poll() {
         scanStaleEpicDevJobs().catch((e) => log('error', `Stale scan uncaught: ${e.message}`));
       }
 
-      // Story 18.2 — Free-agent worktree GC. Same throttled-scan pattern as
-      // above. Wiring deferred from Story 18.1 (Lambdas can't reach the EC2
-      // filesystem). Non-blocking; errors logged but not re-raised.
-      if (Date.now() - lastFreeAgentGcAt >= FREE_AGENT_GC_INTERVAL_MS) {
-        lastFreeAgentGcAt = Date.now();
-        runFreeAgentGc({
-          querySessionsScan: () => freeAgentListAllSessions(),
-          logFn: (level, msg, ctx) => log(level, msg, ctx),
-        }).catch((e) => log('error', `free-agent-gc uncaught: ${e.message}`));
-      }
+      // 2026-05-27 (unification) — the dedicated free-agent GC tick was
+      // removed. Assist worktrees are now reaped by the hourly unified
+      // `worktree-reaper.mjs` alongside per-story + party + store entries.
 
       // Story 20.16 — gate the DDB query on capacity. When the
       // ConcurrencyManager is enabled, fetch a window (CM_CANDIDATE_LIMIT)

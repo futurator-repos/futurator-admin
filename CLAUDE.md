@@ -40,6 +40,27 @@ captured in Free Explorer §13.1 and operator-accepted 2026-05-21.
 
 ## Recent changes
 
+- **2026-05-27 (Free-Agent Worktree Unification — PR A):** Free-agent
+  worktrees moved out of their own `/home/ubuntu/free-agent-worktrees/`
+  root into the shared `/home/ubuntu/worktrees/<projectId>/_assist/<sidShort>/`
+  topology used by party (`_party/`) and pipeline-v2 (per-story +
+  `_merge/`). Branch shortens to `assist/<projectId>/<sidShort>` to match
+  party. Single bare repo (`/home/ubuntu/repos/<projectId>.git`) is the
+  shared object store across all three agent classes. The dedicated
+  `daemon/lib/free-agent-gc.mjs` was deleted; its work is now part of
+  the unified `worktree-reaper.mjs` `_assist` namespace classifier
+  (terminal `IDLE`/`EXPIRED`/`BUDGET_EXHAUSTED`/`ERROR` + lastActivityAt
+
+  > 7d → reap). One-shot startup migration at
+  > `daemon/lib/free-agent-unification-migration.mjs` (sentinel-gated)
+  > removes the legacy root and marks in-flight free-agent sessions
+  > `EXPIRED` with `errorReason='WORKTREE_UNIFICATION_MIGRATION'`. The
+  > 2026-05-17 entry below is **superseded** for current-operator path
+  > guidance — paths in the new shape apply going forward. Brownfield
+  > free-agent now refuses to start with `BARE_REPO_MISSING` (specific
+  > event) if `/api/admin/migrate-brownfield/<projectId>` has not been
+  > run. See `docs/concepts/free-agent-unification.md`.
+
 - **2026-05-18 (Migrate module — brownfield self-service):** New
   top-level `/migrate` admin route owns brownfield Party project
   lifecycle as a proper product feature (was previously a manual CLI +
@@ -71,11 +92,14 @@ captured in Free Explorer §13.1 and operator-accepted 2026-05-21.
   `lambda:UpdateFunctionCode`, etc.). Worktrees live at
   `/home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/` on branches
   `assist/<projectId>/<sessionId>` — never shared with pipeline worktrees,
-  never auto-merged. A Claude Code `PreToolUse` hook
-  (`daemon/pipelines/lib/free-agent-path-hook.sh`) enforces filesystem
-  confinement on `Bash` invocations. GC runs daily inside the daemon (NOT as
-  an SST cron — Lambdas can't reach the EC2 worktree dir) reaping sessions
-  with `status IN (IDLE|EXPIRED|BUDGET_EXHAUSTED)` AND `lastActivityAt >7d`.
+  never auto-merged. **[Path + branch superseded 2026-05-27 by unification;
+  see the 2026-05-27 entry above. Security model is unchanged.]** A Claude
+  Code `PreToolUse` hook (`daemon/pipelines/lib/free-agent-path-hook.sh`)
+  enforces filesystem confinement on `Bash` invocations. GC runs daily
+  inside the daemon (NOT as an SST cron — Lambdas can't reach the EC2
+  worktree dir) reaping sessions with
+  `status IN (IDLE|EXPIRED|BUDGET_EXHAUSTED)` AND `lastActivityAt >7d`.
+  **[GC moved into the unified worktree-reaper 2026-05-27.]**
   Daemon-side wiring of the GC ticker is deferred to Story 18.2.
   See `docs/epics-free-agent.md`.
 

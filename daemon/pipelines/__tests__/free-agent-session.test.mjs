@@ -52,7 +52,7 @@ function makeSessionsRepo(overrides = {}) {
 function makeWorktreeHelpers() {
   return {
     ensureWorktree: vi.fn(async () => ({
-      worktreePath: '/home/ubuntu/free-agent-worktrees/dino-7/sid-1',
+      worktreePath: '/home/ubuntu/worktrees/dino-7/_assist/sid-1',
       branchName: 'assist/dino-7/sid-1',
       skipped: false,
     })),
@@ -139,7 +139,7 @@ describe('runFreeAgentSession — first-turn spawn args (AC #2)', () => {
     expect(args).toContain('--output-format');
     expect(args).toContain('stream-json');
     expect(args).toContain('--add-dir');
-    expect(args).toContain('/home/ubuntu/free-agent-worktrees/dino-7/sid-1');
+    expect(args).toContain('/home/ubuntu/worktrees/dino-7/_assist/sid-1');
     // First turn: --session-id, not --resume
     expect(args).toContain('--session-id');
     expect(args).toContain('sid-1');
@@ -151,12 +151,12 @@ describe('runFreeAgentSession — first-turn spawn args (AC #2)', () => {
     expect(args[sysPromptIdx + 1]).toMatch(/AGENT\.md/);
 
     // cwd + env shape
-    expect(opts.cwd).toBe('/home/ubuntu/free-agent-worktrees/dino-7/sid-1');
+    expect(opts.cwd).toBe('/home/ubuntu/worktrees/dino-7/_assist/sid-1');
     expect(opts.env.AWS_ACCESS_KEY_ID).toBe('ASIATEST1234567890XX');
     expect(opts.env.AWS_SECRET_ACCESS_KEY).toBe('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
     expect(opts.env.AWS_SESSION_TOKEN).toBe('tok-xyz');
     expect(opts.env.FREE_AGENT_CONFINEMENT_ROOT).toBe(
-      '/home/ubuntu/free-agent-worktrees/dino-7/sid-1',
+      '/home/ubuntu/worktrees/dino-7/_assist/sid-1',
     );
 
     // Worktree create + settings called BEFORE spawn
@@ -169,7 +169,7 @@ describe('runFreeAgentSession — first-turn spawn args (AC #2)', () => {
     expect(worktreeHelpers.writeAgentMd).toHaveBeenCalledTimes(1);
     expect(worktreeHelpers.writeAgentMd).toHaveBeenCalledWith(
       expect.objectContaining({
-        worktreePath: '/home/ubuntu/free-agent-worktrees/dino-7/sid-1',
+        worktreePath: '/home/ubuntu/worktrees/dino-7/_assist/sid-1',
         projectId: 'dino-7',
         sessionId: 'sid-1',
         scope: { kind: 'plan', id: 'plan-abc' },

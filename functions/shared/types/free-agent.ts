@@ -102,6 +102,22 @@ export interface FreeAgentSession {
   /** Operator clicked Stop while a turn was running. Daemon polls and kills. */
   cancelRequested?: boolean;
   cancelRequestedAt?: string;
+  /**
+   * 2026-05-27 (unification) — Per-session worktree path under the shared
+   * root. Set by `ensureWorktree` when the bare-repo + worktree topology
+   * creates the session worktree. Pre-unification sessions have no value
+   * (those sessions are all EXPIRED by the migration script and not
+   * resumable).
+   *
+   * Shape: `/home/ubuntu/worktrees/<projectId>/_assist/<sessionIdShort>/`.
+   */
+  worktreePath?: string;
+  /**
+   * 2026-05-27 (unification) — Per-session git branch.
+   * Shape: `assist/<projectId>/<sessionIdShort>`. Mirror of party's
+   * `partyBranch` field.
+   */
+  branchName?: string;
 }
 
 /** Input to `createSession`. Most fields are derived inside the repo. */

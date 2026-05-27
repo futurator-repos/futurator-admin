@@ -2,13 +2,23 @@
  * free-agent-worktree.mjs — Story 18.1 (Epic 18: Free Claude Code Agent)
  *
  * Manages the path-confined git worktrees that the daemon uses to host
- * free-agent sessions. Each session gets its own worktree at
- *   /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/
- * checked out to a fresh branch
- *   assist/<projectId>/<sessionId>
- * forked from the per-project bare repo at
- *   /home/ubuntu/repos/<projectId>.git
- * (same convention as `daemon/lib/app-bootstrap-steps/materialize-worktree.mjs`).
+ * free-agent sessions.
+ *
+ * 2026-05-27 (unification) — Free-agent worktrees now live under the same
+ * shared root as party + pipeline-v2 worktrees, in the reserved `_assist`
+ * namespace. See `docs/concepts/free-agent-unification.md` for rationale.
+ *
+ *   path:   /home/ubuntu/worktrees/<projectId>/_assist/<sessionIdShort>/
+ *   branch: assist/<projectId>/<sessionIdShort>
+ *
+ * Both path and branch carry the 8-char short form of the sessionId, mirroring
+ * party's `_party/<sidShort>/` convention. DDB keeps the full UUID for
+ * `sessionId`; everything path-facing or branch-facing is short-form.
+ *
+ * Worktrees are forked from the per-project bare repo at
+ * `/home/ubuntu/repos/<projectId>.git` via `git worktree add` (same as
+ * party + pipeline-v2). The bare repo is the shared object store; no clone
+ * cost per session.
  *
  * The worktree is the AGENT'S CONFINEMENT BOUNDARY. The Claude Code
  * PreToolUse hook written into `.claude/settings.json` is what enforces it
@@ -17,8 +27,8 @@
  * Used by:
  *   - daemon job handler for `free-agent-session` (Story 18.2) — calls
  *     `ensureWorktree` before spawning `claude -p`.
- *   - Daily GC cron (Story 18.1 AC #6) — calls `reapWorktree` on stale
- *     sessions and orphaned paths.
+ *   - Unified worktree reaper (`daemon/lib/worktree-reaper.mjs` `_assist`
+ *     namespace) — calls `reapWorktree` on stale terminal sessions.
  */
 
 import {
@@ -36,6 +46,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
+import { WORKTREE_ROOT_DEFAULT } from '../../lib/worktree-paths.mjs';
+import { BARE_REPOS_ROOT, bareRepoPath } from '../../lib/story-worktree.mjs';
+
 // Resolve hook script paths RELATIVE TO THIS FILE's location so the daemon
 // works regardless of where it's deployed. EC2 prod uses /opt/futurator-daemon/,
 // local dev uses /Users/<…>/Futurator-Admin/daemon/. Hardcoded
@@ -44,8 +57,18 @@ import { randomBytes } from 'node:crypto';
 // would silently fail-closed because the hook returned non-zero).
 const _THIS_DIR = dirname(fileURLToPath(import.meta.url));
 
-export const FREE_AGENT_WORKTREES_ROOT = '/home/ubuntu/free-agent-worktrees';
-export const FREE_AGENT_REPOS_ROOT = '/home/ubuntu/repos';
+// 2026-05-27 (unification) — free-agent worktrees now live under the shared
+// `/home/ubuntu/worktrees/` root in a reserved `_assist` namespace. The
+// `_<reserved>` underscore prefix can never collide with a plan slug because
+// worktree-paths.mjs's SLUG_RE rejects leading underscores.
+export const ASSIST_NAMESPACE = '_assist';
+
+// Re-exported for code (e.g. agent-daemon.mjs) that needs the shared roots.
+// `FREE_AGENT_REPOS_ROOT` retained as an alias for the shared `BARE_REPOS_ROOT`
+// so external callers don't need to know it's been unified.
+export const FREE_AGENT_REPOS_ROOT = BARE_REPOS_ROOT;
+export const FREE_AGENT_WORKTREES_ROOT = WORKTREE_ROOT_DEFAULT;
+
 export const FREE_AGENT_PATH_HOOK_SCRIPT = join(_THIS_DIR, 'free-agent-path-hook.sh');
 
 // Story 18.3 — `prepare-commit-msg` hook installed per-session into the
@@ -58,14 +81,31 @@ export const FREE_AGENT_COMMIT_MSG_HOOK_SCRIPT = join(_THIS_DIR, 'free-agent-com
 const COMMIT_MSG_HOOK_BLOCK_START = '# >>> futurator free-agent commit-msg trailer >>>';
 const COMMIT_MSG_HOOK_BLOCK_END = '# <<< futurator free-agent commit-msg trailer <<<';
 
-/** Branch name format used for free-agent commits. */
-export function branchNameFor(projectId, sessionId) {
-  return `assist/${projectId}/${sessionId}`;
+/**
+ * Short form (first 8 hex chars) used for filesystem path + branch.
+ * If sessionId is already 8 chars, it's returned as-is.
+ */
+function sessionIdShortForm(sessionId) {
+  if (typeof sessionId !== 'string') {
+    throw new Error('sessionIdShortForm: sessionId must be a string');
+  }
+  return sessionId.slice(0, 8);
 }
 
-/** Filesystem path the worktree lives at. */
-export function worktreePathFor(projectId, sessionId, root = FREE_AGENT_WORKTREES_ROOT) {
-  return join(root, projectId, sessionId);
+/**
+ * Branch name format used for free-agent commits.
+ * 2026-05-27 (unification) — short form `assist/<projectId>/<sidShort>`.
+ */
+export function branchNameFor(projectId, sessionId) {
+  return `assist/${projectId}/${sessionIdShortForm(sessionId)}`;
+}
+
+/**
+ * Filesystem path the worktree lives at.
+ * 2026-05-27 (unification) — `/home/ubuntu/worktrees/<projectId>/_assist/<sidShort>/`.
+ */
+export function worktreePathFor(projectId, sessionId, root = WORKTREE_ROOT_DEFAULT) {
+  return join(root, projectId, ASSIST_NAMESPACE, sessionIdShortForm(sessionId));
 }
 
 /**
@@ -77,8 +117,8 @@ export function worktreePathFor(projectId, sessionId, root = FREE_AGENT_WORKTREE
  * @param {string} args.projectId
  * @param {string} args.sessionId
  * @param {string} [args.defaultBranch='main']
- * @param {string} [args.reposRoot=FREE_AGENT_REPOS_ROOT]
- * @param {string} [args.worktreesRoot=FREE_AGENT_WORKTREES_ROOT]
+ * @param {string} [args.reposRoot=BARE_REPOS_ROOT]
+ * @param {string} [args.worktreesRoot=WORKTREE_ROOT_DEFAULT]
  * @param {object} [args.fs] — { existsSync, mkdirSync } shim for tests
  * @param {function} [args.execGit] — promise-returning git runner for tests
  * @returns {Promise<{worktreePath: string, branchName: string, skipped: boolean}>}
@@ -87,21 +127,26 @@ export async function ensureWorktree({
   projectId,
   sessionId,
   defaultBranch = 'main',
-  reposRoot = FREE_AGENT_REPOS_ROOT,
-  worktreesRoot = FREE_AGENT_WORKTREES_ROOT,
+  reposRoot = BARE_REPOS_ROOT,
+  worktreesRoot = WORKTREE_ROOT_DEFAULT,
   fs = { existsSync: fsExistsSync, mkdirSync: fsMkdirSync },
   execGit = defaultExecGit,
 } = {}) {
   if (!projectId) throw new Error('ensureWorktree: projectId required');
   if (!sessionId) throw new Error('ensureWorktree: sessionId required');
 
-  const bareDir = join(reposRoot, `${projectId}.git`);
+  // 2026-05-27 (unification) — derive bare repo path via the shared helper.
+  // When reposRoot is overridden (tests), use the legacy join-based shape.
+  const bareDir =
+    reposRoot === BARE_REPOS_ROOT ? bareRepoPath(projectId) : join(reposRoot, `${projectId}.git`);
   const worktreePath = worktreePathFor(projectId, sessionId, worktreesRoot);
   const branchName = branchNameFor(projectId, sessionId);
 
   if (!fs.existsSync(bareDir)) {
     throw new Error(
-      `ensureWorktree: bare repo not found at ${bareDir} — project must be bootstrapped first`,
+      `ensureWorktree: bare repo not found at ${bareDir}. ` +
+        `Brownfield projects must be migrated to the bare-repo topology first via ` +
+        `POST /api/admin/migrate-brownfield/${projectId} (see docs/concepts/party-push/plan.md §12.3.3).`,
     );
   }
 
@@ -243,6 +288,7 @@ export function writeAgentMd({
   const scopeLine = `- **Scope:** \`${scope.kind}\`${scope.id ? ` / \`${scope.id}\`` : ''}`;
   const operatorLine = operatorId ? `- **Operator:** \`${operatorId}\`` : '';
   const generatedAt = now().toISOString();
+  const branchName = branchNameFor(projectId, sessionId);
 
   const content = `# Free Agent — Operator Context
 
@@ -257,7 +303,7 @@ ${planLine}
 ${scopeLine}
 - **Session id:** \`${sessionId}\` (this also tags your STS credentials)
 - **Working tree:** \`${worktreePath}\` (this is your cwd; a fresh worktree of the \`${projectId}\` bare repo)
-- **Branch:** \`assist/${projectId}/${sessionId}\` (yours alone — the operator never edits here; pushes are not synced back to GitHub)
+- **Branch:** \`${branchName}\` (yours alone — the operator never edits here; pushes are not synced back to GitHub)
 ${operatorLine ? operatorLine + '\n' : ''}
 ## Tools you have
 
@@ -281,7 +327,7 @@ Anything under \`${worktreePath}\` is readable & writable. Paths outside it are 
 
 ### Git
 
-You're inside a git worktree on branch \`assist/${projectId}/${sessionId}\`. \`git log\`, \`git diff\`, \`git show\` all work normally. Commits land on your branch only and carry an \`Agent: FREE-AGENT-${sessionId}\` trailer automatically. **Do not push.**
+You're inside a git worktree on branch \`${branchName}\`. \`git log\`, \`git diff\`, \`git show\` all work normally. Commits land on your branch only and carry an \`Agent: FREE-AGENT-${sessionId}\` trailer automatically. **Do not push.**
 
 ## Tools you do NOT have (don't try them)
 
@@ -327,23 +373,24 @@ The operator sees your running cost in the panel header against a budget cap (de
  * @param {object} args
  * @param {string} args.projectId
  * @param {string} args.sessionId
- * @param {string} [args.reposRoot=FREE_AGENT_REPOS_ROOT]
- * @param {string} [args.worktreesRoot=FREE_AGENT_WORKTREES_ROOT]
+ * @param {string} [args.reposRoot=BARE_REPOS_ROOT]
+ * @param {string} [args.worktreesRoot=WORKTREE_ROOT_DEFAULT]
  * @param {function} [args.execGit]
  * @param {object} [args.fs] — { existsSync, rmSync } shim for tests
  */
 export async function reapWorktree({
   projectId,
   sessionId,
-  reposRoot = FREE_AGENT_REPOS_ROOT,
-  worktreesRoot = FREE_AGENT_WORKTREES_ROOT,
+  reposRoot = BARE_REPOS_ROOT,
+  worktreesRoot = WORKTREE_ROOT_DEFAULT,
   execGit = defaultExecGit,
   fs = { existsSync: fsExistsSync, rmSync: fsRmSync },
 } = {}) {
   if (!projectId) throw new Error('reapWorktree: projectId required');
   if (!sessionId) throw new Error('reapWorktree: sessionId required');
 
-  const bareDir = join(reposRoot, `${projectId}.git`);
+  const bareDir =
+    reposRoot === BARE_REPOS_ROOT ? bareRepoPath(projectId) : join(reposRoot, `${projectId}.git`);
   const worktreePath = worktreePathFor(projectId, sessionId, worktreesRoot);
   const branchName = branchNameFor(projectId, sessionId);
 

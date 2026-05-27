@@ -63,8 +63,10 @@ describe('branchNameFor / worktreePathFor (helpers)', () => {
     expect(branchNameFor('dino-7', 'sess-abc')).toBe('assist/dino-7/sess-abc');
   });
 
-  it('worktreePathFor returns <root>/<projectId>/<sessionId>', () => {
-    expect(worktreePathFor('dino-7', 'sess-abc', '/tmp/wt')).toBe('/tmp/wt/dino-7/sess-abc');
+  it('worktreePathFor returns <root>/<projectId>/_assist/<sessionIdShort>', () => {
+    expect(worktreePathFor('dino-7', 'sess-abc', '/tmp/wt')).toBe(
+      '/tmp/wt/dino-7/_assist/sess-abc',
+    );
   });
 });
 
@@ -82,7 +84,7 @@ describe('ensureWorktree (AC #4, AC #7)', () => {
     });
 
     expect(result.skipped).toBe(false);
-    expect(result.worktreePath).toBe('/home/ubuntu/free-agent-worktrees/dino-7/sess-abc');
+    expect(result.worktreePath).toBe('/home/ubuntu/worktrees/dino-7/_assist/sess-abc');
     expect(result.branchName).toBe('assist/dino-7/sess-abc');
 
     expect(execGit).toHaveBeenCalledTimes(1);
@@ -93,11 +95,11 @@ describe('ensureWorktree (AC #4, AC #7)', () => {
       'add',
       '-b',
       'assist/dino-7/sess-abc',
-      '/home/ubuntu/free-agent-worktrees/dino-7/sess-abc',
+      '/home/ubuntu/worktrees/dino-7/_assist/sess-abc',
       'main',
     ]);
     // Parent dir was created
-    expect(fs.mkdirSync).toHaveBeenCalledWith('/home/ubuntu/free-agent-worktrees/dino-7', {
+    expect(fs.mkdirSync).toHaveBeenCalledWith('/home/ubuntu/worktrees/dino-7/_assist', {
       recursive: true,
     });
   });
@@ -120,7 +122,7 @@ describe('ensureWorktree (AC #4, AC #7)', () => {
   });
 
   it('returns the existing worktree without re-cloning when already present (AC #7)', async () => {
-    const wtPath = '/home/ubuntu/free-agent-worktrees/dino-7/sess-abc';
+    const wtPath = '/home/ubuntu/worktrees/dino-7/_assist/sess-abc';
     const paths = new Set(['/home/ubuntu/repos/dino-7.git', wtPath, join(wtPath, '.git')]);
     const fs = makeFsShim(paths);
     const execGit = vi.fn();
@@ -147,6 +149,9 @@ describe('ensureWorktree (AC #4, AC #7)', () => {
     await expect(
       ensureWorktree({ projectId: 'dino-7', sessionId: 'sess-abc', fs, execGit }),
     ).rejects.toThrow(/bare repo not found/);
+    await expect(
+      ensureWorktree({ projectId: 'dino-7', sessionId: 'sess-abc', fs, execGit }),
+    ).rejects.toThrow(/POST \/api\/admin\/migrate-brownfield/);
     expect(execGit).not.toHaveBeenCalled();
   });
 
@@ -245,7 +250,7 @@ describe('writeFreeAgentSettings (AC #5 atomicity)', () => {
 
 describe('reapWorktree (AC #6 cleanup primitive)', () => {
   it('removes both the worktree and the branch via git', async () => {
-    const wtPath = '/home/ubuntu/free-agent-worktrees/dino-7/sess-abc';
+    const wtPath = '/home/ubuntu/worktrees/dino-7/_assist/sess-abc';
     const paths = new Set(['/home/ubuntu/repos/dino-7.git', wtPath]);
     const fs = makeFsShim(paths);
     const execGit = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
@@ -270,7 +275,7 @@ describe('reapWorktree (AC #6 cleanup primitive)', () => {
   });
 
   it('ignores git errors (idempotent) and falls back to rmSync for orphans', async () => {
-    const wtPath = '/home/ubuntu/free-agent-worktrees/dino-7/sess-abc';
+    const wtPath = '/home/ubuntu/worktrees/dino-7/_assist/sess-abc';
     const paths = new Set(['/home/ubuntu/repos/dino-7.git', wtPath]);
     const fs = makeFsShim(paths);
     const execGit = vi.fn().mockRejectedValue(new Error('not a working tree'));
@@ -283,7 +288,7 @@ describe('reapWorktree (AC #6 cleanup primitive)', () => {
   });
 
   it('handles missing bare repo gracefully (orphan removal still runs)', async () => {
-    const wtPath = '/home/ubuntu/free-agent-worktrees/dino-7/sess-abc';
+    const wtPath = '/home/ubuntu/worktrees/dino-7/_assist/sess-abc';
     const paths = new Set([wtPath]); // no bare repo
     const fs = makeFsShim(paths);
     const execGit = vi.fn();
@@ -307,7 +312,8 @@ describe('reapWorktree (AC #6 cleanup primitive)', () => {
 
   it('cleans up real on-disk temp dirs (integration-shape)', async () => {
     const tmpRoot = mkdtempSync(join(tmpdir(), 'reap-worktree-real-'));
-    const wtPath = join(tmpRoot, 'dino-7/sess-abc');
+    // 2026-05-27 unification — shape is <root>/<proj>/_assist/<sidShort>.
+    const wtPath = join(tmpRoot, 'dino-7/_assist/sess-abc');
     mkdirSync(wtPath, { recursive: true });
     writeFileSync(join(wtPath, 'sentinel'), 'present');
 
@@ -462,7 +468,7 @@ describe('installCommitMsgHook (Story 18.3 AC #1, #2)', () => {
 });
 
 describe('writeAgentMd (operator context — 2026-05-18)', () => {
-  const worktreePath = '/home/ubuntu/free-agent-worktrees/snake-4/sid-1';
+  const worktreePath = '/home/ubuntu/worktrees/snake-4/_assist/sid-1';
 
   it('writes AGENT.md to worktree root with project/plan/session context', () => {
     const paths = new Map([[worktreePath, undefined]]);
@@ -515,7 +521,7 @@ describe('writeAgentMd (operator context — 2026-05-18)', () => {
 
     expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
     const tempPath = fs.writeFileSync.mock.calls[0][0];
-    expect(tempPath).toMatch(/^\/home\/ubuntu\/free-agent-worktrees\/snake-4\/sid-1\/\.AGENT\.md\.tmp-[a-f0-9]{12}$/);
+    expect(tempPath).toMatch(/^\/home\/ubuntu\/worktrees\/snake-4\/_assist\/sid-1\/\.AGENT\.md\.tmp-[a-f0-9]{12}$/);
     expect(fs.renameSync).toHaveBeenCalledWith(tempPath, `${worktreePath}/AGENT.md`);
   });
 

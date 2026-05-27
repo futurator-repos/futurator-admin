@@ -23,15 +23,15 @@ This document captures the design space we explored, the safety primitives requi
 
 ## 2. Glossary
 
-| Term               | Meaning                                                                                                                                                                                                                                      |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Free Agent**     | The chat-widget agent on `admin.futurator.ai`. Operator opens it from a project / plan / app / workspace context, types questions, gets answers. Runs as a `claude -p` subprocess on EC2 inside a per-session worktree. See Epic 18.         |
-| **Pipeline v2**    | The autonomous plan-execution pipeline that generates code in waves of dev/test/review jobs. Lives in `daemon/pipelines/`. Distinct from the Free Agent. Both share the same daemon process + `MAX_CONCURRENT=2` cap.                        |
-| **Worktree**       | A git working tree checked out at a specific path. Free Agent uses `/home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/` on branch `assist/<projectId>/<sessionId>`. Pipeline v2 uses `/home/ubuntu/projects/<projectId>/` on `main`. |
-| **Sandbox**        | The composite security boundary: path-confinement Bash hook + IAM least-privilege role + worktree isolation.                                                                                                                                 |
-| **Invasion level** | The depth at which the agent can write/affect production. Used in this doc as a synonym for "capability rung."                                                                                                                               |
-| **Daemon**         | The Node.js process at `/opt/futurator-daemon/agent-daemon.mjs` that polls the `futurator-agent-jobs` DDB table and spawns `claude -p` subprocesses. The Free Agent is one of its job types.                                                 |
-| **DeployerLambda** | A hypothetical Lambda (does not exist yet) that owns daemon self-update — sits outside the daemon's process tree, so the daemon can safely update its own source without the bootstrap problem.                                              |
+| Term               | Meaning                                                                                                                                                                                                                                                                      |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Free Agent**     | The chat-widget agent on `admin.futurator.ai`. Operator opens it from a project / plan / app / workspace context, types questions, gets answers. Runs as a `claude -p` subprocess on EC2 inside a per-session worktree. See Epic 18.                                         |
+| **Pipeline v2**    | The autonomous plan-execution pipeline that generates code in waves of dev/test/review jobs. Lives in `daemon/pipelines/`. Distinct from the Free Agent. Both share the same daemon process + `MAX_CONCURRENT=2` cap.                                                        |
+| **Worktree**       | A git working tree checked out at a specific path. Free Agent uses `/home/ubuntu/worktrees/<projectId>/_assist/<sessionIdShort>/` on branch `assist/<projectId>/<sessionIdShort>` (2026-05-27 unification). Pipeline v2 uses `/home/ubuntu/projects/<projectId>/` on `main`. |
+| **Sandbox**        | The composite security boundary: path-confinement Bash hook + IAM least-privilege role + worktree isolation.                                                                                                                                                                 |
+| **Invasion level** | The depth at which the agent can write/affect production. Used in this doc as a synonym for "capability rung."                                                                                                                                                               |
+| **Daemon**         | The Node.js process at `/opt/futurator-daemon/agent-daemon.mjs` that polls the `futurator-agent-jobs` DDB table and spawns `claude -p` subprocesses. The Free Agent is one of its job types.                                                                                 |
+| **DeployerLambda** | A hypothetical Lambda (does not exist yet) that owns daemon self-update — sits outside the daemon's process tree, so the daemon can safely update its own source without the bootstrap problem.                                                                              |
 
 ---
 
@@ -49,8 +49,8 @@ What the Free Agent can do right now (in production):
 
 **Write (sandboxed):**
 
-- Files inside `/home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/`
-- Commits on its own `assist/<projectId>/<sessionId>` branch (with auto-trailer `Agent: FREE-AGENT-<sid>`)
+- Files inside `/home/ubuntu/worktrees/<projectId>/_assist/<sessionIdShort>/` _(2026-05-27 unification — was `/home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/`)_
+- Commits on its own `assist/<projectId>/<sessionIdShort>` branch (with auto-trailer `Agent: FREE-AGENT-<sid>`)
 - Run tests / lint / typecheck in the worktree, get real pass/fail signals
 
 **Cannot:**

@@ -821,6 +821,13 @@ The disk cost is ~10 MB per debate (verified — see §10.1), not 200 MB. The cl
 - MAX_CONCURRENT strategy on EC2 (Free Explorer §9.1 Q4 #1)
 - Whether to write the "Multi-Agent Operator Workflow" doc as PR 4 or before
 
+> **2026-05-27 follow-up.** Free-agent worktrees have been unified under the
+> same shared root in a follow-on PR (PR A in the free-mode rollout). New
+> path: `/home/ubuntu/worktrees/<projectId>/_assist/<sidShort>/`. Branch:
+> `assist/<projectId>/<sidShort>`. Single `worktree-reaper.mjs` now sweeps
+> per-story + `_merge` + `_party` + `_assist` in one tick. See
+> `docs/concepts/free-agent-unification.md`.
+
 ---
 
 ## 11 · Code patches — PR 0 + PR 1 (single-plan implementation)

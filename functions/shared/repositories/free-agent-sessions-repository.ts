@@ -81,6 +81,57 @@ export async function listSessionsByOperator(
   return (result.Items as FreeAgentSession[] | undefined) ?? [];
 }
 
+/**
+ * 2026-05-27 (unification) — lookup by first 8 chars of sessionId.
+ *
+ * The worktree reaper has only the short form (from the filesystem path
+ * `/home/ubuntu/worktrees/<app>/_assist/<sidShort>/`) and needs to resolve
+ * it back to the full session row to decide whether to reap.
+ *
+ * Implementation mirrors party's `findBySessionIdShort` (party-sessions-
+ * repository.ts §349) — DDB `Scan` with `begins_with(sessionId, :prefix)`,
+ * paginated to avoid the `Limit: 5` bug. Collision probability across 4.3B
+ * UUID prefixes is ~10⁻¹⁰; first match wins, warn-log on >1.
+ *
+ * Input validation: only lowercase hex 8-char prefixes are accepted.
+ */
+const SESSION_ID_SHORT_REGEX = /^[a-f0-9]{8}$/;
+
+export async function findBySessionIdShort(
+  sessionIdShort: string,
+): Promise<FreeAgentSession | null> {
+  if (typeof sessionIdShort !== 'string' || !SESSION_ID_SHORT_REGEX.test(sessionIdShort)) {
+    return null;
+  }
+  // 2026-05-27 — paginate. DDB `Limit` caps items EVALUATED before the
+  // FilterExpression runs, NOT matches returned. Party's incident on the
+  // same day had `Limit: 5` returning 0 matches for sessions outside the
+  // first 5 scanned rows; the reaper interpreted that as `session-row-
+  // missing → reap` and deleted active worktrees mid-flight.
+  const items: FreeAgentSession[] = [];
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const result = await docClient.send(
+      new ScanCommand({
+        TableName: TABLE_NAMES.freeAgentSessions,
+        FilterExpression: 'begins_with(sessionId, :p)',
+        ExpressionAttributeValues: { ':p': sessionIdShort },
+        ExclusiveStartKey,
+      }),
+    );
+    if (result.Items?.length) items.push(...(result.Items as FreeAgentSession[]));
+    if (items.length >= 3) break;
+    ExclusiveStartKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (ExclusiveStartKey);
+  if (items.length === 0) return null;
+  if (items.length > 1) {
+    console.warn(
+      `[free-agent-sessions-repository] findBySessionIdShort('${sessionIdShort}'): ${items.length} matches — collision or rolled-back row? Returning first.`,
+    );
+  }
+  return items[0];
+}
+
 /** Sessions about a specific scope (GSI2: scope-recent-index). */
 export async function listSessionsByScope(
   scope: { kind: string; id?: string },

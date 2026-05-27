@@ -50,6 +50,7 @@ import {
 import { join as pathJoin } from 'node:path';
 
 import { startCancelPoller } from './lib/cancel-poller.mjs';
+import { bareRepoPath } from '../lib/story-worktree.mjs';
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.FREE_AGENT_TURN_TIMEOUT_MS) || 600_000;
 const KILL_GRACE_MS = 5_000;
@@ -116,6 +117,33 @@ export async function runFreeAgentSession(job, ctx) {
   // path (`releaseProcessingLock`) at the end of the turn unwinds the lock the
   // API set. If a future entry point (e.g., a direct daemon invocation) needs
   // to acquire the lock itself, it must do so before calling this handler.
+
+  // 2026-05-27 (unification) — Free-agent now requires the bare-repo +
+  // worktree topology, same as party + pipeline-v2. Brownfield projects must
+  // have been migrated via POST /api/admin/migrate-brownfield/<projectId>
+  // before they can host free-agent sessions. We surface BARE_REPO_MISSING
+  // as a specific reason so the widget can render the operator-facing
+  // migration instruction instead of a generic WORKTREE_FAILURE.
+  //
+  // When `worktreeHelpers` is injected (tests), skip the precheck — the
+  // injected helper substitutes for the real worktree setup, and tests
+  // don't have a real bare repo on disk. Production never injects helpers.
+  if (!worktreeHelpers) {
+    const bareRepo = bareRepoPath(projectId);
+    if (!fsExistsSync(bareRepo)) {
+      await pushEvent(sessionId, 'turn', '__free-agent__', 'free-agent.turn.error', {
+        sessionId,
+        reason: 'BARE_REPO_MISSING',
+        detail:
+          `Bare repo at ${bareRepo} does not exist. Run ` +
+          `POST /api/admin/migrate-brownfield/${projectId} first ` +
+          `(see docs/concepts/party-push/plan.md §12.3.3).`,
+      });
+      await sessionsRepo.markError(sessionId, 'BARE_REPO_MISSING');
+      await sessionsRepo.releaseProcessingLock(sessionId, 'ERROR');
+      throw new Error(`Bare repo missing for ${projectId}`);
+    }
+  }
 
   // ── 2. Ensure worktree + 3. settings + AGENT.md ──
   let worktreeInfo;

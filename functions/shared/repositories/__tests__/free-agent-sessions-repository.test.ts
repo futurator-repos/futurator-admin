@@ -26,6 +26,7 @@ import {
   listAllSessions,
   listSessionsByOperator,
   listSessionsByScope,
+  findBySessionIdShort,
 } from '../free-agent-sessions-repository';
 
 function extract(command: unknown) {
@@ -329,5 +330,53 @@ describe('setLastRefreshedAt', () => {
       extract(sendMock.mock.calls[0][0]).ExpressionAttributeValues as Record<string, string>
     )[':t'];
     expect(Date.parse(value)).not.toBeNaN();
+  });
+});
+
+// 2026-05-27 (unification) — short-form lookup used by the worktree reaper.
+describe('findBySessionIdShort', () => {
+  it('returns null for non-hex / wrong-length prefixes', async () => {
+    expect(await findBySessionIdShort('not-hex!')).toBeNull();
+    expect(await findBySessionIdShort('abc')).toBeNull();
+    expect(await findBySessionIdShort('a1b2c3d4e5')).toBeNull();
+    expect(await findBySessionIdShort('A1B2C3D4')).toBeNull();
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  it('returns null when no rows match the prefix', async () => {
+    sendMock.mockResolvedValueOnce({ Items: [], LastEvaluatedKey: undefined });
+    expect(await findBySessionIdShort('a1b2c3d4')).toBeNull();
+    const input = extract(sendMock.mock.calls[0][0]);
+    expect(input.FilterExpression).toBe('begins_with(sessionId, :p)');
+    expect(input.ExpressionAttributeValues).toEqual({ ':p': 'a1b2c3d4' });
+    expect(input.Limit).toBeUndefined();
+  });
+
+  it('returns the first match across paginated scan pages', async () => {
+    sendMock
+      .mockResolvedValueOnce({ Items: [], LastEvaluatedKey: { k: 1 } })
+      .mockResolvedValueOnce({
+        Items: [{ sessionId: 'a1b2c3d4-...-uuid', status: 'ACTIVE' }],
+        LastEvaluatedKey: undefined,
+      });
+    const row = await findBySessionIdShort('a1b2c3d4');
+    expect(row?.sessionId).toBe('a1b2c3d4-...-uuid');
+    expect(sendMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns the first item and warns when multiple matches (collision)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendMock.mockResolvedValueOnce({
+      Items: [
+        { sessionId: 'a1b2c3d4-row-1' },
+        { sessionId: 'a1b2c3d4-row-2' },
+        { sessionId: 'a1b2c3d4-row-3' },
+      ],
+      LastEvaluatedKey: undefined,
+    });
+    const row = await findBySessionIdShort('a1b2c3d4');
+    expect(row?.sessionId).toBe('a1b2c3d4-row-1');
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

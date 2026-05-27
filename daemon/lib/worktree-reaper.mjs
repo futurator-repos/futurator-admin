@@ -15,11 +15,18 @@
  *   3. node_modules store entries under /home/ubuntu/.node_modules_store/<app>/<sha>/
  *      → reap when .refcount.json reads 0 AND no live symlink target the entry.
  *
+ *   4. Free-agent assist worktrees under /home/ubuntu/worktrees/<app>/_assist/<sidShort>/
+ *      → reap when the owning session is in a terminal status
+ *      (IDLE|EXPIRED|BUDGET_EXHAUSTED|ERROR) AND lastActivityAt is older than
+ *      7 days. Mirror of the `_party` namespace classifier. 2026-05-27
+ *      unification — see `docs/concepts/free-agent-unification.md`.
+ *
  * NAMESPACE BOUNDARIES (design doc §3):
- *   - This reaper NEVER touches /home/ubuntu/free-agent-worktrees/...
- *     (Epic 18's own reaper handles that).
  *   - This reaper NEVER touches /home/ubuntu/projects/<app>/ (legacy
  *     operator-owned shared worktrees).
+ *   - The legacy /home/ubuntu/free-agent-worktrees/ root was removed by the
+ *     one-shot unification migration; free-agent worktrees now share the
+ *     standard root under the `_assist` namespace.
  *
  * Idempotent: safe to invoke any number of times back-to-back.
  *
@@ -57,6 +64,17 @@ const PLAN_TERMINAL_STATUSES = new Set(['delivered', 'abandoned', 'archived']);
 export const PARTY_TERMINAL_STATUSES = new Set(['ENDED', 'CANCELLED', 'EXPIRED']);
 export const PARTY_STALE_TERMINAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+// 2026-05-27 unification — assist worktree namespace (`_assist/<sidShort>/`).
+// Free-agent sessions go to terminal `IDLE`/`EXPIRED`/`BUDGET_EXHAUSTED`/`ERROR`
+// via the API GC or daemon turn-end; 7d stale window matches party.
+export const ASSIST_TERMINAL_STATUSES = new Set([
+  'IDLE',
+  'EXPIRED',
+  'BUDGET_EXHAUSTED',
+  'ERROR',
+]);
+export const ASSIST_STALE_TERMINAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
 function runGit(args, cwd) {
   return new Promise((resolve) => {
     const child = spawn('sudo', ['-n', '-u', 'ubuntu', 'git', ...args], {
@@ -88,6 +106,8 @@ function* walkPerStoryWorktrees(root) {
       // slug. Skipping at this layer keeps per-story + party walkers
       // from double-walking the same paths.
       if (plan.name === '_party') continue;
+      // 2026-05-27 unification — same treatment for `_assist`.
+      if (plan.name === '_assist') continue;
       const planDir = join(appDir, plan.name);
       for (const story of readdirSync(planDir, { withFileTypes: true })) {
         if (!story.isDirectory()) continue;
@@ -125,6 +145,27 @@ function* walkPartyWorktrees(root) {
         appId: app.name,
         sessionIdShort: sid.name,
         fullPath: join(partyDir, sid.name),
+      };
+    }
+  }
+}
+
+/**
+ * 2026-05-27 unification — walk `/home/ubuntu/worktrees/<app>/_assist/<sidShort>/`
+ * and yield `{ appId, sessionIdShort, fullPath }`. Mirror of walkPartyWorktrees.
+ */
+function* walkAssistWorktrees(root) {
+  if (!existsSync(root)) return;
+  for (const app of readdirSync(root, { withFileTypes: true })) {
+    if (!app.isDirectory()) continue;
+    const assistDir = join(root, app.name, '_assist');
+    if (!existsSync(assistDir) || !statSync(assistDir).isDirectory()) continue;
+    for (const sid of readdirSync(assistDir, { withFileTypes: true })) {
+      if (!sid.isDirectory()) continue;
+      yield {
+        appId: app.name,
+        sessionIdShort: sid.name,
+        fullPath: join(assistDir, sid.name),
       };
     }
   }
@@ -239,6 +280,38 @@ async function classifyPartyWorktree({ entry, deps }) {
 }
 
 /**
+ * 2026-05-27 unification — resolve a free-agent assist worktree against the
+ * `futurator-free-agent-sessions` row. Mirrors classifyPartyWorktree:
+ *   - lookup not wired (e.g., in tests / boot before deps assembled) → keep
+ *   - session row missing → reap (orphan)
+ *   - session active (status not in ASSIST_TERMINAL_STATUSES) → keep
+ *   - session terminal but lastActivityAt < 7d ago → keep
+ *   - session terminal AND lastActivityAt > 7d ago → reap
+ */
+async function classifyAssistWorktree({ entry, deps }) {
+  if (typeof deps.findFreeAgentSessionByShort !== 'function') {
+    return { shouldReap: false, reason: 'lookup-not-wired' };
+  }
+  const session = await deps.findFreeAgentSessionByShort(entry.sessionIdShort).catch(() => null);
+  if (!session) return { shouldReap: true, reason: 'session-row-missing' };
+  if (!ASSIST_TERMINAL_STATUSES.has(session.status)) {
+    return { shouldReap: false, reason: `session-active (${session.status})` };
+  }
+  const lastActivityMs = session.lastActivityAt ? Date.parse(session.lastActivityAt) : 0;
+  const ageMs = Date.now() - lastActivityMs;
+  if (ageMs < ASSIST_STALE_TERMINAL_MS) {
+    return {
+      shouldReap: false,
+      reason: `session-terminal-but-fresh (${Math.round(ageMs / 3_600_000)}h ago)`,
+    };
+  }
+  return {
+    shouldReap: true,
+    reason: `session-terminal-and-stale (${Math.round(ageMs / 3_600_000)}h ago)`,
+  };
+}
+
+/**
  * Resolve a coordinator worktree against the plan row.
  */
 async function classifyCoordinatorWorktree({ entry, deps }) {
@@ -320,6 +393,7 @@ export async function runWorktreeReaper(deps) {
     coordinator: { scanned: 0, reaped: 0, errors: 0 },
     store: { scanned: 0, reaped: 0, errors: 0 },
     party: { scanned: 0, reaped: 0, errors: 0 },
+    assist: { scanned: 0, reaped: 0, errors: 0 },
     elapsedMs: 0,
   };
   const log = deps.log || (() => {});
@@ -401,7 +475,34 @@ export async function runWorktreeReaper(deps) {
     }
   }
 
-  // ── 4. node_modules store entries ─────────────────────────────────────
+  // ── 4. Assist worktrees (2026-05-27 unification) ──────────────────────
+  // Mirrors the party loop above. Reaper deps include
+  // `findFreeAgentSessionByShort` (wired in agent-daemon.mjs);
+  // when missing the classifier returns `lookup-not-wired` → keep.
+  for (const entry of walkAssistWorktrees(WORKTREE_ROOT_DEFAULT)) {
+    summary.assist.scanned++;
+    try {
+      const verdict = await classifyAssistWorktree({ entry, deps });
+      if (!verdict.shouldReap) continue;
+      log('info', `[reaper] assist REAP ${entry.fullPath} (${verdict.reason})`);
+      const bare = bareRepoPath(entry.appId);
+      if (existsSync(bare)) {
+        await runGit(
+          ['--git-dir', bare, 'worktree', 'remove', '--force', entry.fullPath],
+          LEGACY_PROJECTS_ROOT,
+        );
+      }
+      if (existsSync(entry.fullPath)) {
+        rmSync(entry.fullPath, { recursive: true, force: true });
+      }
+      summary.assist.reaped++;
+    } catch (err) {
+      summary.assist.errors++;
+      log('error', `[reaper] assist FAIL ${entry.fullPath}: ${err.message}`);
+    }
+  }
+
+  // ── 5. node_modules store entries ─────────────────────────────────────
   const liveTargets = collectLiveSymlinkTargets();
   for (const entry of walkStoreEntries(STORE_ROOT)) {
     summary.store.scanned++;
@@ -423,7 +524,7 @@ export async function runWorktreeReaper(deps) {
   summary.elapsedMs = Date.now() - t0;
   log(
     'info',
-    `[reaper] done in ${summary.elapsedMs}ms — per-story ${summary.perStory.reaped}/${summary.perStory.scanned}, coordinator ${summary.coordinator.reaped}/${summary.coordinator.scanned}, store ${summary.store.reaped}/${summary.store.scanned}, party ${summary.party.reaped}/${summary.party.scanned}`,
+    `[reaper] done in ${summary.elapsedMs}ms — per-story ${summary.perStory.reaped}/${summary.perStory.scanned}, coordinator ${summary.coordinator.reaped}/${summary.coordinator.scanned}, store ${summary.store.reaped}/${summary.store.scanned}, party ${summary.party.reaped}/${summary.party.scanned}, assist ${summary.assist.reaped}/${summary.assist.scanned}`,
   );
   return summary;
 }
