@@ -807,7 +807,17 @@ const NEXTJS_BASE_PACK: BoilerplateMetadata = {
   // 2026-05-19 Phase 1 worktree rollout — post-merge validation runs in
   // the coordinator worktree after wave-merge completes successfully.
   // Inherited by all nextjs-* starter packs via createStarterPack.
-  postMergeValidationCmd: 'npm test',
+  //
+  // 2026-05-28 — was `npm test`, but the scaffold ships NO `test` script
+  // (no vitest / no standalone tsc), so `npm test` always exited 1
+  // ("Missing script: test") → every wave falsely blocked. The real
+  // correctness gate that exists is `next build`, which type-checks
+  // (verified on EC2: "Running TypeScript ... Finished") AND compiles —
+  // exactly what validates a types/scaffold wave and catches cross-story
+  // integration breakage. Tests run too when a future scaffold adds a
+  // `test` script (`--if-present` is a no-op otherwise; the runner also
+  // treats a no-op/"no tests" exit as pass — defense in depth).
+  postMergeValidationCmd: 'npm run build && npm run test --if-present',
   // PR-71 — Project skill manifest + sync script (Story 3-C-2-1).
   // Inherited by all nextjs-* starter packs.
   skillManifest: {

@@ -32,6 +32,45 @@ import {
   postMergeCleanupBranches,
 } from './wave-merge.mjs';
 import { teardownStoryWorktree, bareRepoPath, LEGACY_PROJECTS_ROOT } from './story-worktree.mjs';
+import { materializeNodeModulesFromStore } from './node-modules-store.mjs';
+
+/**
+ * 2026-05-28 — default npm install used to seed the store when the
+ * coordinator's lockfile has no store entry yet (rare — usually the
+ * per-story setup already built it). Mirrors story-worktree's
+ * defaultInstallFn. Tests inject a no-op.
+ */
+function defaultCoordinatorInstallFn(cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'sudo',
+      ['-n', '-u', 'ubuntu', 'npm', 'install', '--prefer-offline', '--no-audit', '--no-fund'],
+      { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, CI: '1' } },
+    );
+    let stderr = '';
+    child.stderr.on('data', (b) => (stderr += b.toString('utf8').slice(-2000)));
+    child.on('close', (code) =>
+      code === 0 ? resolve() : reject(new Error(`npm install exit ${code}: ${stderr.slice(-500)}`)),
+    );
+    child.on('error', reject);
+  });
+}
+
+/**
+ * 2026-05-28 — recognise "the test command was a no-op, not a failure"
+ * signals in the post-merge validation output. A wave that legitimately
+ * ships no runtime tests (e.g. a types/scaffold wave) must not be treated
+ * as a build failure. Keyed off ground-truth output, never a prediction.
+ */
+export function isNoOpTestExit(output) {
+  if (!output) return false;
+  return (
+    /Missing script: ["']?test["']?/i.test(output) ||
+    /No test files found/i.test(output) ||
+    /No tests found/i.test(output) ||
+    /no test specified/i.test(output)
+  );
+}
 
 export const WORKTREE_ROOT_DEFAULT =
   process.env.FUTURATOR_WORKTREE_ROOT || '/home/ubuntu/worktrees';
@@ -231,6 +270,9 @@ export async function runWaveMerge({
   postMergeValidationCmd,
   writeAttention,
   log = () => {},
+  // 2026-05-28 — injectable for tests; defaults to npm install. Used only
+  // when the coordinator's lockfile has no store entry yet.
+  coordinatorInstallFn,
 }) {
   if (!storyIds || storyIds.length === 0) {
     return { outcome: 'no-stories' };
@@ -296,10 +338,44 @@ export async function runWaveMerge({
 
   // 3. Post-merge validation (if the boilerplate declared a command).
   if (postMergeValidationCmd) {
+    // 2026-05-28 — the coordinator worktree is created via `git worktree
+    // add` and (until now) had NO node_modules, so ANY validation command
+    // needing deps (`npm run build`, `npm test`, `tsc`) failed with
+    // exit 1/127 — silently blocking every wave on a Next-16 app. Provide
+    // a REAL node_modules (Turbopack rejects the store symlink) before
+    // running the gate. Lockfile-aware + idempotent across waves.
+    try {
+      const mat = await materializeNodeModulesFromStore({
+        appId,
+        worktreeDir: coordinatorDir,
+        installFn: coordinatorInstallFn || defaultCoordinatorInstallFn,
+        log,
+      });
+      log(
+        'info',
+        `[wave-merge] coordinator node_modules ${mat.materialized ? 'materialized' : `reused (${mat.skipped})`}`,
+      );
+    } catch (err) {
+      // If we can't provision deps the validation can't run meaningfully.
+      // Surface as setup-failed (not wave-build-failed) so the operator
+      // sees an infra problem, not a fake test failure.
+      log('error', `[wave-merge] node_modules materialization failed: ${err.message}`);
+      return { outcome: 'setup-failed', error: `node_modules: ${err.message}`, coordinatorWorktree: coordinatorDir };
+    }
+
     log('info', `[wave-merge] running post-merge validation: ${postMergeValidationCmd}`);
     const testRun = await runShell(postMergeValidationCmd, coordinatorDir, 900_000);
-    if (testRun.code !== 0) {
-      const failing = parseFailingTests(testRun.stdout + '\n' + testRun.stderr);
+    const combinedOut = testRun.stdout + '\n' + testRun.stderr;
+    // 2026-05-28 — a no-op test command (no test script / no test files) is
+    // NOT a wave failure. Treat as pass; the build half of the gate already
+    // validated compile + type-check.
+    if (testRun.code !== 0 && isNoOpTestExit(combinedOut)) {
+      log(
+        'info',
+        `[wave-merge] post-merge validation exited ${testRun.code} but output indicates no runnable tests — treating as pass`,
+      );
+    } else if (testRun.code !== 0) {
+      const failing = parseFailingTests(combinedOut);
       log(
         'warn',
         `[wave-merge] post-merge validation FAILED (exit ${testRun.code}); ${failing.length} failing test(s)`,

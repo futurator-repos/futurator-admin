@@ -7,7 +7,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { sortStoriesForMerge, coordinatorWorktreeDir } from '../wave-merge-runner.mjs';
+import {
+  sortStoriesForMerge,
+  coordinatorWorktreeDir,
+  isNoOpTestExit,
+} from '../wave-merge-runner.mjs';
 
 describe('sortStoriesForMerge', () => {
   it('sorts ascending by storyId (deterministic across runs)', () => {
@@ -61,5 +65,44 @@ describe('coordinatorWorktreeDir', () => {
     const p = coordinatorWorktreeDir({ appId: 'a', planSlug: 'b' });
     expect(p).toContain('/_merge');
     expect(p.endsWith('_merge')).toBe(true);
+  });
+});
+
+// 2026-05-28 — the wave-build gate must not treat a no-op test command
+// (no `test` script, or a runner that found zero test files) as a
+// failure. A types/scaffold wave legitimately ships no runtime tests.
+describe('isNoOpTestExit', () => {
+  it('matches npm "Missing script: test"', () => {
+    expect(isNoOpTestExit('npm error Missing script: "test"')).toBe(true);
+    expect(isNoOpTestExit('Missing script: test')).toBe(true);
+  });
+
+  it('matches the npm default "no test specified" fallback', () => {
+    expect(isNoOpTestExit('Error: no test specified')).toBe(true);
+  });
+
+  it('matches vitest "No test files found"', () => {
+    expect(isNoOpTestExit('No test files found, exiting with code 1')).toBe(true);
+  });
+
+  it('matches jest "No tests found"', () => {
+    expect(isNoOpTestExit('No tests found, exiting with code 1')).toBe(true);
+  });
+
+  it('does NOT match a real test failure', () => {
+    expect(
+      isNoOpTestExit('FAIL src/game/maze.test.ts\n  ✗ computes tile index\n  1 failed'),
+    ).toBe(false);
+  });
+
+  it('does NOT match a real build/compile error', () => {
+    expect(
+      isNoOpTestExit("src/game/types.ts(12,3): error TS2322: Type 'string' is not assignable"),
+    ).toBe(false);
+  });
+
+  it('returns false for empty / undefined output', () => {
+    expect(isNoOpTestExit('')).toBe(false);
+    expect(isNoOpTestExit(undefined)).toBe(false);
   });
 });
