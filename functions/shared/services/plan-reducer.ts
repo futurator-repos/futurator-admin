@@ -132,10 +132,16 @@ export async function reducePlan(
   }
 
   // Phase C.3: cascade plan-level options into pipeline builders.
+  // 2026-05-19 — planSlug + planId added. planSlug drives the
+  // `plan/<slug>` branch checkout in compile-commit-on-pass + activates
+  // the per-story-worktree path in wave-reducer/pipeline-launcher.
+  // planId is stamped into commit-message trailers (`Plan-Id:`).
   const planOpts = {
     rigor: plan.rigor,
     testModel: plan.testModel,
     hasBrowserTests: plan.testingProfile?.hasBrowserTests,
+    planSlug: plan.name,
+    planId: plan.planId,
   };
 
   // ── 1. Inner pass: advance each epic's internal story waves. ─────────
@@ -182,6 +188,18 @@ export async function reducePlan(
       await deps.updatePlanFields(plan.planId, { status: 'fixing' });
     }
     return { kind: 'plan-fixing', reason: 'epic-fixing' };
+  }
+
+  // No epic is fixing anymore. If the plan was parked in `fixing` from a
+  // prior failure that has since recovered (e.g. a wave-merge conflict that
+  // self-healed, or a build-check that passed on re-run), reset it to
+  // `developing` so the dashboard tracks reality instead of showing a stale
+  // red `fixing` while the plan is actively advancing. Mutate in-memory too:
+  // the build-check-failed branch below reads plan.status to decide whether
+  // to re-flip `fixing`. Terminal states are unreachable here (guard above).
+  if (plan.status === 'fixing') {
+    await deps.updatePlanFields(plan.planId, { status: 'developing' });
+    plan.status = 'developing';
   }
 
   // ── 3. Compute plan-waves + find the current one. ────────────────────

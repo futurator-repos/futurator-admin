@@ -24,7 +24,10 @@ function basePlan(overrides: Partial<Plan> = {}): Plan {
   };
 }
 
-function epic(id: string, opts: { deps?: string[]; status?: EpicWorkflow['status']; stories?: EpicStory[] } = {}): EpicWorkflow {
+function epic(
+  id: string,
+  opts: { deps?: string[]; status?: EpicWorkflow['status']; stories?: EpicStory[] } = {},
+): EpicWorkflow {
   return {
     epicId: id,
     planId: 'plan-1',
@@ -114,7 +117,10 @@ describe('reducePlan — gating', () => {
 describe('reducePlan — plan-wave advancement', () => {
   it('flips plan to fixing when any epic is fixing', async () => {
     const epics = [
-      epic('E1', { status: 'completed', stories: [{ ...runningStory('s1','j1'), status: 'done' }] }),
+      epic('E1', {
+        status: 'completed',
+        stories: [{ ...runningStory('s1', 'j1'), status: 'done' }],
+      }),
       epic('E2', { status: 'fixing' }),
     ];
     const { deps, updatePlanFields } = makeDeps();
@@ -156,7 +162,10 @@ describe('reducePlan — plan-wave advancement', () => {
       expect(result.epicIds).toEqual(['E2']);
     }
     // Epic E2 should have been set to in_progress.
-    expect(updateEpicFields).toHaveBeenCalledWith('E2', expect.objectContaining({ status: 'in_progress' }));
+    expect(updateEpicFields).toHaveBeenCalledWith(
+      'E2',
+      expect.objectContaining({ status: 'in_progress' }),
+    );
   });
 
   it('creates plan-build-check when all epics complete and no check exists', async () => {
@@ -170,8 +179,14 @@ describe('reducePlan — plan-wave advancement', () => {
     const result = await reducePlan(basePlan(), epics, deps);
     expect(result.kind).toBe('plan-build-check-created');
     expect(createJob).toHaveBeenCalledOnce();
-    expect(generatePlanBuildPipeline).toHaveBeenCalledWith('/home/ubuntu/projects/pong-classic', 'pong-classic');
-    expect(updatePlanFields).toHaveBeenCalledWith('plan-1', expect.objectContaining({ planBuildJobId: expect.any(String) }));
+    expect(generatePlanBuildPipeline).toHaveBeenCalledWith(
+      '/home/ubuntu/projects/pong-classic',
+      'pong-classic',
+    );
+    expect(updatePlanFields).toHaveBeenCalledWith(
+      'plan-1',
+      expect.objectContaining({ planBuildJobId: expect.any(String) }),
+    );
   });
 
   it('is idempotent — if planBuildJobId already set and job is RUNNING, returns pending', async () => {
@@ -199,7 +214,10 @@ describe('reducePlan — plan-wave advancement', () => {
     const { deps, updatePlanFields } = makeDeps({ 'pbc-1': 'COMPLETED' });
     const result = await reducePlan(plan, epics, deps);
     expect(result).toEqual({ kind: 'plan-completed' });
-    expect(updatePlanFields).toHaveBeenCalledWith('plan-1', expect.objectContaining({ status: 'review' }));
+    expect(updatePlanFields).toHaveBeenCalledWith(
+      'plan-1',
+      expect.objectContaining({ status: 'review' }),
+    );
   });
 
   it('flips plan to fixing when plan-build-check FAILED', async () => {
@@ -228,11 +246,48 @@ describe('reducePlan — plan-wave advancement', () => {
     const { deps, createJob, updatePlanFields, generatePlanBuildPipeline } = makeDeps();
     const result = await reducePlan(plan, epics, deps);
     expect(result).toEqual({ kind: 'plan-completed' });
-    expect(createJob).not.toHaveBeenCalled();
+    // Build-check is skipped for prototype rigor — proven by the plan-build
+    // pipeline never being generated. The single createJob call on close is
+    // the REFLECTOR enqueue (2026-05-20), not a plan-build-check.
     expect(generatePlanBuildPipeline).not.toHaveBeenCalled();
+    expect(createJob).toHaveBeenCalledTimes(1);
+    expect(createJob).toHaveBeenCalledWith(expect.objectContaining({ jobType: 'reflector' }));
     expect(updatePlanFields).toHaveBeenCalledWith(
       'plan-1',
       expect.objectContaining({ status: 'review' }),
     );
+  });
+
+  // 2026-05-28 — a plan parked in `fixing` (e.g. a wave-merge conflict that
+  // then self-healed) must drop back to `developing` once no epic is fixing,
+  // so the dashboard doesn't show a stale red label while the plan advances.
+  it('resets a stale plan.status=fixing to developing when it advances', async () => {
+    const epics = [
+      epic('E1', {
+        status: 'completed',
+        stories: [{ ...runningStory('s1', 'j1'), status: 'done' }],
+      }),
+      epic('E2', {
+        deps: ['E1'],
+        status: 'draft',
+        stories: [
+          {
+            storyId: 's2',
+            order: 0,
+            title: 's2',
+            description: '',
+            status: 'pending',
+            wave: 0,
+            touchPoints: [],
+            complexity: 'standard',
+            reviewRigor: 'standard',
+          },
+        ],
+      }),
+    ];
+    const { deps, updatePlanFields } = makeDeps();
+    const result = await reducePlan(basePlan({ status: 'fixing' }), epics, deps);
+    expect(result.kind).toBe('plan-wave-launched');
+    expect(updatePlanFields).toHaveBeenCalledWith('plan-1', { status: 'developing' });
   });
 });
