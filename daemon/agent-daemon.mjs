@@ -4320,17 +4320,22 @@ async function executeWaveMergeJob(job) {
         postMergeValidationCmd =
           BOILERPLATE_REGISTRY[boilerplateType].postMergeValidationCmd ?? null;
       } else {
-        // Fallback for current Phase 1 — all 4 active apps are Next.js so
-        // npm test is universally correct. When a non-Next boilerplate
-        // ships, the registry snapshot kicks in.
-        postMergeValidationCmd = 'npm test';
+        // 2026-05-28 — the registry snapshot (../sst-env-shared/
+        // boilerplate-registry-snapshot.mjs) is never generated, so this
+        // fallback is what ACTUALLY runs for every Next app. Was 'npm test',
+        // but the scaffold ships no `test` script → exit 1 → every wave
+        // falsely blocked. `next build` is the real gate that exists (it
+        // type-checks + compiles); tests run when a scaffold has them
+        // (`--if-present` is a no-op otherwise, and the runner treats a
+        // no-op test exit as pass). See fix(pipeline) 2026-05-28.
+        postMergeValidationCmd = 'npm run build && npm run test --if-present';
       }
     } catch (resolveErr) {
       log(
         'warn',
-        `[${short}] postMergeValidationCmd resolve failed (falling back to npm test): ${resolveErr.message}`,
+        `[${short}] postMergeValidationCmd resolve failed (falling back to build gate): ${resolveErr.message}`,
       );
-      postMergeValidationCmd = 'npm test';
+      postMergeValidationCmd = 'npm run build && npm run test --if-present';
     }
   }
 
