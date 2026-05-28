@@ -21,7 +21,7 @@
  * See `docs/concepts/pipeline-v2/worktree-rollout-design.md` §2 + §4.
  */
 
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { dirname } from 'node:path';
 import {
@@ -219,6 +219,34 @@ async function listConflictedFiles(cwd) {
 }
 
 /**
+ * 2026-05-28 — after the conflict-resolver runs, verify it actually removed
+ * every conflict marker. Returns the subset of `files` that STILL contain a
+ * `<<<<<<<`, `=======`, or `>>>>>>>` marker line. Empty array = clean.
+ *
+ * Reads files directly (the daemon can read the coordinator worktree) —
+ * pure + hermetically testable, no shell. Unreadable files are treated as
+ * "still conflicted" (conservative: we won't commit a tree we can't verify).
+ *
+ * Exported so the unit test can exercise the marker grammar.
+ */
+const CONFLICT_MARKER_RE = /^(<<<<<<<|=======|>>>>>>>)(\s|$)/m;
+
+export function filesWithConflictMarkers(files, cwd) {
+  const remaining = [];
+  for (const f of files) {
+    const abs = f.startsWith('/') ? f : `${cwd.replace(/\/$/, '')}/${f}`;
+    try {
+      const content = readFileSync(abs, 'utf8');
+      if (CONFLICT_MARKER_RE.test(content)) remaining.push(f);
+    } catch {
+      // Can't read it — conservative: treat as unresolved.
+      remaining.push(f);
+    }
+  }
+  return remaining;
+}
+
+/**
  * Try to extract a short list of failing test names from the
  * postMergeValidationCmd's stdout/stderr. Best-effort regex over the
  * common vitest / jest "FAIL" line shapes.
@@ -273,6 +301,14 @@ export async function runWaveMerge({
   // 2026-05-28 — injectable for tests; defaults to npm install. Used only
   // when the coordinator's lockfile has no store entry yet.
   coordinatorInstallFn,
+  // 2026-05-28 — self-healing merge. When a `wip/<story>` branch conflicts
+  // with already-merged siblings (e.g. two parallel stories both rewrote
+  // src/app/page.tsx), this resolver is invoked to integrate both sides
+  // and remove conflict markers. The daemon wires the real LLM-backed
+  // resolver; when absent (or it fails) the merge halts as before.
+  //   resolveConflict({ worktreeDir, conflictedFiles, conflictStoryId,
+  //     mergedStoryIds, planId, epicId, waveNumber }) => { resolved: boolean }
+  resolveConflict,
 }) {
   if (!storyIds || storyIds.length === 0) {
     return { outcome: 'no-stories' };
@@ -303,13 +339,67 @@ export async function runWaveMerge({
     const r = await runShell(command, coordinatorDir);
     const verdict = classifyWaveMergeOutcome({ mergeExit: r.code });
     if (verdict.outcome === 'merge-conflict') {
-      // Abort the half-merge so the worktree is in a re-tryable state.
-      await runGit(['merge', '--abort'], coordinatorDir);
       const conflictedFiles = await listConflictedFiles(coordinatorDir);
-      log(
-        'warn',
-        `[wave-merge] CONFLICT on wip/${storyId}: ${conflictedFiles.length} file(s); halting wave`,
-      );
+      log('warn', `[wave-merge] CONFLICT on wip/${storyId}: ${conflictedFiles.length} file(s)`);
+
+      // 2026-05-28 — SELF-HEALING. Parallel stories that touch a shared
+      // integration file (the recurring case: 3 render stories each
+      // rewrote src/app/page.tsx) inevitably collide. Rather than strand
+      // the wave with an unrecoverable halt, attempt an agent-backed
+      // resolution IN PLACE (conflict markers still present), then verify
+      // + commit. Only halt if resolution is unavailable or fails to
+      // produce a marker-free tree. The post-merge build gate is the
+      // backstop that catches a bad resolution (it won't compile).
+      if (typeof resolveConflict === 'function' && conflictedFiles.length > 0) {
+        log(
+          'info',
+          `[wave-merge] attempting auto-resolution of ${conflictedFiles.length} conflicted file(s) on wip/${storyId}`,
+        );
+        let resolvedOk = false;
+        try {
+          const res = await resolveConflict({
+            worktreeDir: coordinatorDir,
+            conflictedFiles,
+            conflictStoryId: storyId,
+            mergedStoryIds: [...merged],
+            planId,
+            epicId,
+            waveNumber,
+          });
+          if (res && res.resolved) {
+            const remaining = filesWithConflictMarkers(conflictedFiles, coordinatorDir);
+            if (remaining.length === 0) {
+              const add = await runGit(['add', '-A'], coordinatorDir);
+              const commit = await runGit(['commit', '--no-edit'], coordinatorDir);
+              if (add.code === 0 && commit.code === 0) {
+                log('info', `[wave-merge] auto-resolved + committed merge of wip/${storyId}`);
+                merged.push(storyId);
+                resolvedOk = true;
+              } else {
+                log(
+                  'warn',
+                  `[wave-merge] post-resolution commit failed (add=${add.code} commit=${commit.code}); halting`,
+                );
+              }
+            } else {
+              log(
+                'warn',
+                `[wave-merge] resolver left markers in ${remaining.length} file(s) (${remaining.join(', ')}); halting`,
+              );
+            }
+          } else {
+            log('warn', `[wave-merge] resolver reported unresolved; halting`);
+          }
+        } catch (err) {
+          log('warn', `[wave-merge] conflict resolver threw: ${err.message}; halting`);
+        }
+        if (resolvedOk) continue; // merged this story; proceed to next branch
+      }
+
+      // Halt path — resolution unavailable or failed. Abort the half-merge
+      // so the worktree is in a re-tryable state, then surface the conflict.
+      await runGit(['merge', '--abort'], coordinatorDir);
+      log('warn', `[wave-merge] halting wave on wip/${storyId} conflict`);
       const attn = buildMergeConflictAttention({
         planId,
         storyIds: ordered,
