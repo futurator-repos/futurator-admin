@@ -4280,120 +4280,6 @@ async function executeAppBootstrapJob(job) {
  *   no-stories        → COMPLETED (idempotent; wave had nothing to merge)
  *   setup-failed      → FAILED (coordinator worktree could not be created)
  */
-/**
- * 2026-05-28 — CONFLICT-RESOLVER agent for self-healing wave-merge.
- *
- * Invoked by runWaveMerge when a `wip/<story>` branch conflicts with
- * already-merged siblings. The conflict markers are LIVE in the coordinator
- * worktree (the merge is mid-flight, not aborted). We spawn `claude -p` with
- * cwd = the coordinator worktree, instruct it to integrate BOTH sides of
- * every conflict + remove all markers. The caller (runWaveMerge) then
- * verifies no markers remain and commits — so a lazy/incorrect agent can't
- * silently complete the merge (marker-check + the post-merge build gate are
- * the correctness backstops).
- *
- * Returns { resolved: true } when claude exits without error; the runner
- * does the authoritative marker verification. Returns { resolved: false }
- * on spawn error / timeout so the runner halts + raises the attention item.
- */
-function resolveWaveMergeConflict(
-  { worktreeDir, conflictedFiles, conflictStoryId, mergedStoryIds },
-  { short } = {},
-) {
-  return new Promise((resolve) => {
-    const fileList = conflictedFiles.map((f) => `  - ${f}`).join('\n');
-    const mergedList = (mergedStoryIds || []).map((s) => `  - wip/${s}`).join('\n') || '  (none)';
-    const prompt = [
-      'You are resolving git merge conflicts that occurred while integrating',
-      'PARALLEL stories into a wave branch. Multiple stories were developed',
-      'independently and have now collided on shared files.',
-      '',
-      'Conflicted files (each contains `<<<<<<< HEAD`, `=======`, `>>>>>>>` markers):',
-      fileList,
-      '',
-      'Branches already merged into HEAD:',
-      mergedList,
-      `Incoming branch causing the conflict: wip/${conflictStoryId}`,
-      '',
-      'Per-story intent is in `.context/wave-*-story-*.md` — read the relevant',
-      'ones before resolving.',
-      '',
-      'RESOLUTION RULES:',
-      '1. INTEGRATE BOTH SIDES. Preserve all functionality, imports, and exports',
-      '   from HEAD *and* the incoming branch. Never delete one side wholesale.',
-      '2. For app entry points / mount files (e.g. src/app/page.tsx) where each',
-      '   story wired its own component/renderer: combine them so EVERY',
-      '   component is imported and rendered together, not just one.',
-      '3. Remove EVERY conflict marker. The result must be valid TypeScript/TSX',
-      '   that compiles with `next build`.',
-      '4. Only edit the conflicted files listed above. Do not touch anything else.',
-      '',
-      'When finished, every listed file must contain zero `<<<<<<<`/`=======`/',
-      '`>>>>>>>` lines. Do NOT run git commands — just edit the files.',
-    ].join('\n');
-
-    const args = [
-      '-p',
-      prompt,
-      '--model',
-      process.env.WAVE_MERGE_RESOLVER_MODEL || 'sonnet',
-      '--permission-mode',
-      'bypassPermissions',
-      '--add-dir',
-      worktreeDir,
-    ];
-    log('info', `[${short || 'wave-merge'}] spawning conflict-resolver for ${conflictedFiles.length} file(s)`);
-
-    let settled = false;
-    const done = (resolved, reason) => {
-      if (settled) return;
-      settled = true;
-      if (!resolved) {
-        log('warn', `[${short || 'wave-merge'}] conflict-resolver: ${reason}`);
-      }
-      resolve({ resolved });
-    };
-
-    let proc;
-    try {
-      proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
-        cwd: worktreeDir,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
-      });
-    } catch (err) {
-      return done(false, `spawn threw: ${err.message}`);
-    }
-
-    // Resolver budget: generous (large conflicts), but bounded so a hung
-    // agent can't wedge the wave. 8 min.
-    const timer = setTimeout(() => {
-      try {
-        proc.kill('SIGKILL');
-      } catch {
-        /* best effort */
-      }
-      done(false, 'timed out after 8m');
-    }, 8 * 60 * 1000);
-
-    let stderrTail = '';
-    proc.stderr?.on('data', (c) => {
-      stderrTail = (stderrTail + c.toString('utf8')).slice(-1000);
-    });
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      done(false, `process error: ${err.message}`);
-    });
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-      // Trust the runner's marker-check for correctness; here we only gate
-      // on the process not erroring out catastrophically.
-      if (code === 0) return done(true);
-      done(false, `claude exited ${code}: ${stderrTail.slice(-200)}`);
-    });
-  });
-}
-
 async function executeWaveMergeJob(job) {
   const { jobId } = job;
   const short = jobId.slice(0, 8);
@@ -4470,11 +4356,6 @@ async function executeWaveMergeJob(job) {
           log,
         ),
       log,
-      // 2026-05-28 — self-healing merge. Spawns a CONFLICT-RESOLVER agent
-      // in the coordinator worktree to integrate parallel stories that
-      // collided on a shared file (recurring case: render stories all
-      // rewrote src/app/page.tsx). The runner verifies markers + commits.
-      resolveConflict: (args) => resolveWaveMergeConflict(args, { short }),
     });
 
     if (result.outcome === 'success' || result.outcome === 'no-stories') {
