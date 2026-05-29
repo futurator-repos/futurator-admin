@@ -358,6 +358,35 @@ export default $config({
       },
     });
 
+    // ── Wave Conflict Events (Story C — agentic-integration, 2026-05-29) ──
+    // Durable, queryable record of every wave-merge conflict (and, if a
+    // future Phase-2 MERGER agent ever auto-resolves, every resolution).
+    // This IS the "data on how common conflicts are" that worktree-rollout-
+    // design.md §2 named as the precondition for ever revisiting
+    // auto-resolution. PK = planId (operator "conflicts in this plan" query);
+    // SK = conflictId (ULID-shape). GSI appId-createdAt for the cross-plan
+    // conflict-rate view. Written by the daemon directly (inline, on the
+    // halt path) — the EC2 role `develope-it-ec2-ssm` needs PutItem + Query
+    // on this table, attached OUT-OF-BAND (same as futurator-attention-items;
+    // update that policy whenever this table changes). PITR on: losing
+    // conflict telemetry would silently re-open the door to a
+    // pressure-driven auto-resolution reversal with no data.
+    const waveConflictsTable = new sst.aws.Dynamo('WaveConflictsTable', {
+      fields: { planId: 'string', conflictId: 'string', appId: 'string', createdAt: 'string' },
+      primaryIndex: { hashKey: 'planId', rangeKey: 'conflictId' },
+      globalIndexes: {
+        'appId-createdAt-index': { hashKey: 'appId', rangeKey: 'createdAt' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-wave-conflicts',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── Pipeline v2 Phase 3 — Story 3-E-3-1 (PR-76): Reflection Inbox ──
     // REFLECTOR proposals stored per-project. PK = projectSlug (Query for
     // labs UI per-project view); SK = id (ULID-shape, sort-friendly).
@@ -822,6 +851,7 @@ export default $config({
         plansTable,
         appsTable,
         attentionItemsTable,
+        waveConflictsTable,
         reflectionsTable,
         agentSessionsTable,
         agentConversationsTable,
@@ -858,6 +888,7 @@ export default $config({
         PLANS_TABLE: plansTable.name,
         APPS_TABLE: appsTable.name,
         ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
+        WAVE_CONFLICTS_TABLE: waveConflictsTable.name,
         REFLECTIONS_TABLE: reflectionsTable.name,
         AGENT_SESSIONS_TABLE: agentSessionsTable.name,
         AGENT_CONVERSATIONS_TABLE: agentConversationsTable.name,

@@ -110,6 +110,7 @@ import { createPlanForAppInputSchema } from '../shared/schemas/plan-schema';
 import type { App, AppCardData } from '../shared/types/app';
 import * as attentionRepo from '../shared/repositories/attention-items-repository';
 import type { AttentionStatus } from '../shared/types/attention';
+import * as waveConflictRepo from '../shared/repositories/wave-conflict-repository';
 // PR-76 (Story 3-E-3-1) — Reflection Inbox service + types.
 import * as reflectionsService from '../shared/services/reflections-service';
 import type { ReflectionStatus } from '../shared/types/reflection';
@@ -1384,6 +1385,23 @@ app.get('/api/plans', async (c) => {
     .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
     .map(planRepo.toPlanSummary);
   return c.json(summaries);
+});
+
+// Story C (agentic-integration, 2026-05-29) — wave-merge conflict telemetry.
+// The operator "how often, and on which files, do waves conflict" view. This
+// is the conflict-rate data worktree-rollout-design.md §2 named as the
+// precondition for ever revisiting auto-resolution. Returns the raw events +
+// an aggregate summary (per-mode counts + the hot-file ranking).
+app.get('/api/plans/:id/conflicts', async (c) => {
+  const planId = c.req.param('id');
+  const events = await waveConflictRepo.listConflictsByPlan(planId);
+  return c.json({ events, summary: waveConflictRepo.summarizeConflicts(events) });
+});
+
+app.get('/api/apps/:appId/conflicts', async (c) => {
+  const appId = c.req.param('appId');
+  const events = await waveConflictRepo.listConflictsByApp(appId);
+  return c.json({ events, summary: waveConflictRepo.summarizeConflicts(events) });
 });
 
 app.get('/api/plans/:id', async (c) => {

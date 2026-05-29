@@ -21,7 +21,7 @@
  * See `docs/concepts/pipeline-v2/worktree-rollout-design.md` §2 + §4.
  */
 
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { dirname } from 'node:path';
 import {
@@ -87,6 +87,22 @@ export function coordinatorWorktreeDir({ appId, planSlug, root }) {
 }
 
 /**
+ * Story B (2026-05-29) — ephemeral per-candidate worktree path.
+ *
+ * `<root>/<app>/<plan>/_cand/<jobId>/`. Merges happen HERE on a detached
+ * HEAD off the current green tip — never on `plan/<slug>` directly — so a
+ * crash can never leave the published branch half-merged. `_cand` is a
+ * reserved namespace (like `_merge`/`_party`/`_assist`): the kebab-case slug
+ * regex rejects the leading underscore, and the reaper + listStoryWorktrees
+ * skip it, so it can never be mistaken for a per-story worktree.
+ */
+export function candidateWorktreeDir({ appId, planSlug, jobId, root }) {
+  if (!appId || !planSlug || !jobId)
+    throw new Error('candidateWorktreeDir: appId + planSlug + jobId required');
+  return `${root || WORKTREE_ROOT_DEFAULT}/${appId}/${planSlug}/_cand/${jobId}`;
+}
+
+/**
  * Sort wip storyIds for deterministic merge order. Sort ascending by
  * storyId (UUIDs sort lexicographically; deterministic across daemon
  * restarts). Caller can override if a wave-internal index is preferred.
@@ -141,81 +157,130 @@ function runShell(command, cwd, timeoutMs = 600_000) {
 }
 
 /**
- * Set up the coordinator worktree on `plan/<slug>`. Idempotent — if the
- * worktree already exists on the right branch, just refreshes from
- * origin to pick up any pushed updates.
+ * Best-effort removal of a git worktree (the worktree's git metadata + the
+ * directory). Idempotent; never throws. Used to reap the throwaway
+ * candidate worktree, and to retire any legacy `_merge` coordinator dir.
  */
-async function setupCoordinatorWorktree({ appId, planSlug, log }) {
+async function reapWorktree({ dir, bare, git, bareOpCwd, log }) {
+  if (!dir) return;
+  if (existsSync(bare)) {
+    await git(['--git-dir', bare, 'worktree', 'remove', '--force', dir], bareOpCwd);
+  }
+  if (existsSync(dir)) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (err) {
+      log('warn', `[wave-merge] candidate worktree rm failed (non-blocking): ${err.message}`);
+    }
+  }
+  if (existsSync(bare)) {
+    await git(['--git-dir', bare, 'worktree', 'prune'], bareOpCwd);
+  }
+}
+
+/**
+ * Story B (2026-05-29) — set up an EPHEMERAL candidate worktree, detached at
+ * the current green tip. Merges run here, never on `plan/<slug>`; the green
+ * branch is advanced atomically only after the build gate passes (see
+ * runWaveMerge). Returns the resolved green ref/SHA so the caller can do the
+ * compare-and-swap advance.
+ *
+ * Green tip resolution mirrors the prior coordinator logic:
+ *   - `plan/<slug>` if it already exists (wave-N, or a resumed wave), else
+ *   - `main` (wave-0 first merge — the same base wip/<storyId> forked from).
+ *
+ * Also retires any legacy `_merge` coordinator worktree it finds, so the
+ * advance-on-green `update-ref` is never blocked by `plan/<slug>` being
+ * checked out somewhere.
+ */
+async function setupCandidateWorktree({ appId, planSlug, jobId, git, bareOpCwd, log }) {
   const bare = bareRepoPath(appId);
   if (!existsSync(bare)) {
-    throw new Error(`setupCoordinatorWorktree: bare repo missing at ${bare}`);
+    throw new Error(`setupCandidateWorktree: bare repo missing at ${bare}`);
   }
-  const dir = coordinatorWorktreeDir({ appId, planSlug });
-  mkdirSync(dirname(dir), { recursive: true });
   const planBranch = `plan/${planSlug}`;
 
-  if (existsSync(dir)) {
-    const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], dir);
-    if (head.code === 0 && head.stdout.trim() === planBranch) {
-      log('info', `[wave-merge] reusing coordinator worktree at ${dir}`);
-      // Make sure we have the latest refs from origin.
-      await runGit(['fetch', 'origin', '--quiet'], dir);
-      return dir;
-    }
-    log('warn', `[wave-merge] coordinator dir exists on wrong branch (${head.stdout.trim()}); reaping`);
-    rmSync(dir, { recursive: true, force: true });
-    // Best-effort: also tell git the worktree is gone.
-    await runGit(['--git-dir', bare, 'worktree', 'prune'], LEGACY_PROJECTS_ROOT);
+  // Retire the legacy shared coordinator worktree if present — under the new
+  // model `plan/<slug>` is never checked out, so the atomic ref advance is
+  // unobstructed.
+  const legacyMerge = coordinatorWorktreeDir({ appId, planSlug });
+  if (existsSync(legacyMerge)) {
+    log('info', `[wave-merge] retiring legacy _merge coordinator worktree at ${legacyMerge}`);
+    await reapWorktree({ dir: legacyMerge, bare, git, bareOpCwd, log });
   }
 
-  // 2026-05-27 (brick-breaker-11 fix) — create plan/<slug> if absent.
-  //
-  // BEFORE the per-story-worktree fix, the first story's
-  // compile-commit-on-pass created plan/<slug> (it did `git checkout -b
-  // plan/<slug>` in the shared worktree). That collided across parallel
-  // per-story worktrees (a branch can only be checked out in one
-  // worktree), so compile-commit-on-pass no longer touches plan/<slug>
-  // — stories stay on their own wip/<storyId>. That makes WAVE-MERGE the
-  // sole owner of plan/<slug> creation.
-  //
-  // So: if plan/<slug> doesn't exist yet (wave-0 first merge), create it
-  // from `main` — the SAME base the wip/<storyId> branches forked from
-  // (story-worktree.mjs::resolveParentRef falls back to 'main'). The
-  // subsequent `--no-ff` merges of each wip branch then replay cleanly
-  // against that common ancestor. If it already exists (wave-N, or a
-  // resumed/retried wave), check it out as-is.
-  const check = await runGit(
+  // Resolve the green tip.
+  const check = await git(
     ['--git-dir', bare, 'rev-parse', '--verify', '--quiet', `refs/heads/${planBranch}`],
-    LEGACY_PROJECTS_ROOT,
+    bareOpCwd,
   );
   const planExists = check.code === 0 && check.stdout.trim().length === 40;
+  const greenRef = planExists ? `refs/heads/${planBranch}` : 'main';
 
-  const addArgs = planExists
-    ? ['--git-dir', bare, 'worktree', 'add', dir, planBranch]
-    : // `-b <newbranch> <dir> main` creates plan/<slug> from main's tip
-      // and checks it out at the coordinator dir in one step.
-      ['--git-dir', bare, 'worktree', 'add', '-b', planBranch, dir, 'main'];
+  const greenR = await git(['--git-dir', bare, 'rev-parse', '--verify', greenRef], bareOpCwd);
+  if (greenR.code !== 0 || greenR.stdout.trim().length !== 40) {
+    throw new Error(`setupCandidateWorktree: cannot resolve green ref ${greenRef}: ${greenR.stderr.trim()}`);
+  }
+  const greenSha = greenR.stdout.trim();
 
-  const add = await runGit(addArgs, LEGACY_PROJECTS_ROOT);
+  const dir = candidateWorktreeDir({ appId, planSlug, jobId });
+  // A stale candidate dir at this exact path (same jobId re-run) is reaped.
+  if (existsSync(dir)) {
+    await reapWorktree({ dir, bare, git, bareOpCwd, log });
+  }
+  mkdirSync(dirname(dir), { recursive: true });
+
+  // Detached worktree at the green SHA — a throwaway scratchpad. Merges move
+  // its detached HEAD; `plan/<slug>` is untouched until the green advance.
+  const add = await git(['--git-dir', bare, 'worktree', 'add', '--detach', dir, greenSha], bareOpCwd);
   if (add.code !== 0) {
-    throw new Error(`coordinator worktree add failed (exit ${add.code}): ${add.stderr.trim()}`);
+    throw new Error(`candidate worktree add failed (exit ${add.code}): ${add.stderr.trim()}`);
   }
   log(
     'info',
-    `[wave-merge] coordinator worktree created at ${dir} on ${planBranch} ` +
-      `(${planExists ? 'existing branch' : 'created from main'})`,
+    `[wave-merge] candidate worktree at ${dir} detached at green ${greenSha.slice(0, 7)} ` +
+      `(${planExists ? `plan/${planSlug}` : 'main'})`,
   );
-  return dir;
+  return { dir, bare, planBranch, planExists, greenRef, greenSha };
 }
 
 /**
  * Identify which files conflict in a half-merged state. Used to populate
  * the merge-conflict attention item's body.
  */
-async function listConflictedFiles(cwd) {
-  const r = await runGit(['diff', '--name-only', '--diff-filter=U'], cwd);
+async function listConflictedFiles(cwd, git = runGit) {
+  const r = await git(['diff', '--name-only', '--diff-filter=U'], cwd);
   if (r.code !== 0) return [];
   return r.stdout.split('\n').filter((l) => l.trim().length > 0);
+}
+
+/**
+ * Story C (2026-05-29) — capture the contents of conflicted files WHILE the
+ * conflict markers are still present, before `git merge --abort` destroys
+ * them. Returns `{ file, content }[]`, content truncated to a sane bound so
+ * a giant generated file can't blow up the attention item / DDB row. The
+ * conflict is otherwise unrecoverable after the abort — this is what makes a
+ * halted (or future auto-resolved) merge judgeable after the fact.
+ */
+const MAX_BLOB_BYTES = 64 * 1024;
+async function captureConflictBlobs(files, cwd, _git) {
+  const blobs = [];
+  for (const f of files) {
+    const abs = f.startsWith('/') ? f : `${cwd.replace(/\/$/, '')}/${f}`;
+    try {
+      const raw = readFileSync(abs, 'utf8');
+      const truncated = raw.length > MAX_BLOB_BYTES;
+      blobs.push({
+        file: f,
+        content: truncated ? raw.slice(0, MAX_BLOB_BYTES) : raw,
+        truncated,
+        bytes: Buffer.byteLength(raw, 'utf8'),
+      });
+    } catch {
+      blobs.push({ file: f, content: null, truncated: false, bytes: 0, unreadable: true });
+    }
+  }
+  return blobs;
 }
 
 /**
@@ -270,24 +335,41 @@ export async function runWaveMerge({
   postMergeValidationCmd,
   writeAttention,
   log = () => {},
+  // Story B (2026-05-29) — names the ephemeral candidate worktree
+  // (`_cand/<jobId>`). Required so concurrent/retried jobs never collide.
+  jobId = 'job',
   // 2026-05-28 — injectable for tests; defaults to npm install. Used only
-  // when the coordinator's lockfile has no store entry yet.
+  // when the candidate's lockfile has no store entry yet.
   coordinatorInstallFn,
+  // Story C (2026-05-29) — durable conflict-event sink. No-op by default;
+  // the daemon wires a DDB-backed recorder. Receives the full event shape.
+  recordConflictEvent = async () => {},
+  // Story B (2026-05-29) — injectable exec surface for hermetic real-git
+  // tests. Production defaults shell out as `sudo -u ubuntu`.
+  gitRunner = runGit,
+  shellRunner = runShell,
+  bareOpCwd = LEGACY_PROJECTS_ROOT,
 }) {
   if (!storyIds || storyIds.length === 0) {
     return { outcome: 'no-stories' };
   }
+  const git = gitRunner;
+  const shell = shellRunner;
 
-  // 1. Coordinator worktree.
-  let coordinatorDir;
+  // 1. Ephemeral candidate worktree, detached at the current green tip.
+  //    `plan/<slug>` is NOT touched here — it advances atomically only on
+  //    green (step 4). A crash mid-merge can never leave it half-merged.
+  let cand;
   try {
-    coordinatorDir = await setupCoordinatorWorktree({ appId, planSlug, log });
+    cand = await setupCandidateWorktree({ appId, planSlug, jobId, git, bareOpCwd, log });
   } catch (err) {
-    log('error', `[wave-merge] setup failed: ${err.message}`);
+    log('error', `[wave-merge] candidate setup failed: ${err.message}`);
     return { outcome: 'setup-failed', error: err.message };
   }
+  const { dir: candidateDir, bare, planBranch, planExists, greenSha } = cand;
 
-  // 2. Sequential `--no-ff` merges, halt on first conflict.
+  // 2. Sequential `--no-ff` merges into the candidate, halt on first
+  //    conflict (operator-resolve-only per worktree-rollout-design.md §2).
   const ordered = sortStoriesForMerge(storyIds);
   const merged = [];
   for (const storyId of ordered) {
@@ -299,38 +381,59 @@ export async function runWaveMerge({
       epicId,
       wave: waveNumber,
     });
-    log('info', `[wave-merge] merging wip/${storyId} into plan/${planSlug}`);
-    const r = await runShell(command, coordinatorDir);
+    log('info', `[wave-merge] merging wip/${storyId} into candidate (green ${greenSha.slice(0, 7)})`);
+    const r = await shell(command, candidateDir);
     const verdict = classifyWaveMergeOutcome({ mergeExit: r.code });
     if (verdict.outcome === 'merge-conflict') {
-      // Abort the half-merge so the worktree is in a re-tryable state.
-      await runGit(['merge', '--abort'], coordinatorDir);
-      const conflictedFiles = await listConflictedFiles(coordinatorDir);
+      // Story C — capture the conflicted blobs (WITH markers) BEFORE we
+      // abort, so the conflict is judgeable after the fact. `git
+      // merge --abort` would otherwise incinerate the evidence.
+      const conflictedFiles = await listConflictedFiles(candidateDir, git);
+      const conflictBlobs = await captureConflictBlobs(conflictedFiles, candidateDir, git);
+      // Abort the half-merge so the candidate is in a clean, re-tryable
+      // state (back to green + the prior clean merges) for the operator.
+      await git(['merge', '--abort'], candidateDir);
       log(
         'warn',
         `[wave-merge] CONFLICT on wip/${storyId}: ${conflictedFiles.length} file(s); halting wave`,
       );
-      const attn = buildMergeConflictAttention({
+      // Story C — durable telemetry. This is the conflict-rate data the
+      // 2026-05-19 decision named as the precondition for revisiting
+      // auto-resolution. Best-effort; never blocks the halt.
+      await recordConflictEvent({
         planId,
-        storyIds: ordered,
-        conflictedFiles,
-      });
+        epicId,
+        waveNumber,
+        appId,
+        mode: 'halted',
+        conflictedAtStoryId: storyId,
+        files: conflictedFiles,
+        mergedStoryIds: [...merged],
+        blobs: conflictBlobs,
+        candidateWorktree: candidateDir,
+      }).catch((e) => log('warn', `[wave-merge] recordConflictEvent failed (non-blocking): ${e.message}`));
+
+      const attn = buildMergeConflictAttention({ planId, storyIds: ordered, conflictedFiles });
       await writeAttention({
         ...attn,
         dedupKey: `wave-merge-conflict:${planId}:${epicId}:${waveNumber}`,
         context: {
           ...(attn.context || {}),
           conflictedAtStoryId: storyId,
-          coordinatorWorktree: coordinatorDir,
+          coordinatorWorktree: candidateDir,
           mergeFlagBodies: flagBodies,
+          conflictBlobs,
         },
       });
+      // KEEP the candidate worktree — under operator-resolve-only the
+      // operator needs a clean tree to resolve in. The reaper reaps it if
+      // the wave is abandoned.
       return {
         outcome: 'merge-conflict',
         mergedStoryIds: merged,
         conflictedAtStoryId: storyId,
         conflictedFiles,
-        coordinatorWorktree: coordinatorDir,
+        coordinatorWorktree: candidateDir,
       };
     }
     merged.push(storyId);
@@ -338,33 +441,32 @@ export async function runWaveMerge({
 
   // 3. Post-merge validation (if the boilerplate declared a command).
   if (postMergeValidationCmd) {
-    // 2026-05-28 — the coordinator worktree is created via `git worktree
-    // add` and (until now) had NO node_modules, so ANY validation command
-    // needing deps (`npm run build`, `npm test`, `tsc`) failed with
-    // exit 1/127 — silently blocking every wave on a Next-16 app. Provide
-    // a REAL node_modules (Turbopack rejects the store symlink) before
-    // running the gate. Lockfile-aware + idempotent across waves.
+    // 2026-05-28 — the candidate worktree is created via `git worktree add`
+    // with NO node_modules, so ANY validation command needing deps
+    // (`npm run build`, `npm test`, `tsc`) would fail with exit 1/127.
+    // Provide a REAL node_modules (Turbopack rejects the store symlink)
+    // before running the gate. Lockfile-aware + idempotent.
     try {
       const mat = await materializeNodeModulesFromStore({
         appId,
-        worktreeDir: coordinatorDir,
+        worktreeDir: candidateDir,
         installFn: coordinatorInstallFn || defaultCoordinatorInstallFn,
         log,
       });
       log(
         'info',
-        `[wave-merge] coordinator node_modules ${mat.materialized ? 'materialized' : `reused (${mat.skipped})`}`,
+        `[wave-merge] candidate node_modules ${mat.materialized ? 'materialized' : `reused (${mat.skipped})`}`,
       );
     } catch (err) {
-      // If we can't provision deps the validation can't run meaningfully.
-      // Surface as setup-failed (not wave-build-failed) so the operator
-      // sees an infra problem, not a fake test failure.
+      // Can't provision deps → validation can't run. Surface as setup-failed
+      // (infra problem, not a fake test failure) and reap the candidate.
       log('error', `[wave-merge] node_modules materialization failed: ${err.message}`);
-      return { outcome: 'setup-failed', error: `node_modules: ${err.message}`, coordinatorWorktree: coordinatorDir };
+      await reapWorktree({ dir: candidateDir, bare, git, bareOpCwd, log });
+      return { outcome: 'setup-failed', error: `node_modules: ${err.message}` };
     }
 
     log('info', `[wave-merge] running post-merge validation: ${postMergeValidationCmd}`);
-    const testRun = await runShell(postMergeValidationCmd, coordinatorDir, 900_000);
+    const testRun = await shell(postMergeValidationCmd, candidateDir, 900_000);
     const combinedOut = testRun.stdout + '\n' + testRun.stderr;
     // 2026-05-28 — a no-op test command (no test script / no test files) is
     // NOT a wave failure. Treat as pass; the build half of the gate already
@@ -391,16 +493,17 @@ export async function runWaveMerge({
         dedupKey: `wave-build-failed:${planId}:${epicId}:${waveNumber}`,
         context: {
           ...(attn.context || {}),
-          coordinatorWorktree: coordinatorDir,
           validationCmd: postMergeValidationCmd,
         },
       });
+      // Build failed against the candidate — `plan/<slug>` was never
+      // advanced (still at green). Reap the throwaway candidate.
+      await reapWorktree({ dir: candidateDir, bare, git, bareOpCwd, log });
       return {
         outcome: 'wave-build-failed',
         mergedStoryIds: merged,
-        testOutput: (testRun.stdout + '\n' + testRun.stderr).slice(-4000),
+        testOutput: combinedOut.slice(-4000),
         failingTests: failing,
-        coordinatorWorktree: coordinatorDir,
       };
     }
     log('info', `[wave-merge] post-merge validation passed`);
@@ -408,47 +511,66 @@ export async function runWaveMerge({
     log('info', `[wave-merge] no postMergeValidationCmd — skipping validation`);
   }
 
-  // 4. Push the merged plan branch.
-  const push = await runGit(['push', 'origin', `plan/${planSlug}`], coordinatorDir);
+  // 4. Advance green ATOMICALLY to the validated candidate SHA. This is the
+  //    only mutation of `plan/<slug>`, and it only ever points the branch at
+  //    a fully-built commit — readers/deploys never see a half-merge.
+  const headSha = await git(['rev-parse', 'HEAD'], candidateDir);
+  const candidateSha = headSha.code === 0 ? headSha.stdout.trim() : '';
+  if (candidateSha.length !== 40) {
+    log('error', `[wave-merge] could not read candidate HEAD; aborting advance`);
+    await reapWorktree({ dir: candidateDir, bare, git, bareOpCwd, log });
+    return { outcome: 'setup-failed', error: 'candidate HEAD unreadable' };
+  }
+  // Compare-and-swap: advance only if green is still where we forked from.
+  // Under the per-app integration lock this always holds; the expected-old
+  // arg is the distributed-ready ref-CAS backstop (see integration-lock.mjs).
+  const updateArgs = planExists
+    ? ['--git-dir', bare, 'update-ref', `refs/heads/${planBranch}`, candidateSha, greenSha]
+    : ['--git-dir', bare, 'update-ref', `refs/heads/${planBranch}`, candidateSha];
+  const upd = await git(updateArgs, bareOpCwd);
+  if (upd.code !== 0) {
+    // Green moved underneath us (should be impossible under the lock). Do
+    // NOT force — leave green untouched; the wave re-runs on the new green.
+    log('error', `[wave-merge] green advance CAS failed (green moved?): ${upd.stderr.trim()}`);
+    await reapWorktree({ dir: candidateDir, bare, git, bareOpCwd, log });
+    return { outcome: 'setup-failed', error: `green-advance-failed: ${upd.stderr.trim()}` };
+  }
+  log('info', `[wave-merge] advanced plan/${planSlug} → ${candidateSha.slice(0, 7)} (was ${greenSha.slice(0, 7)})`);
+
+  // Push the advanced ref (non-blocking — the local ref is the source of
+  // truth today; origin is a mirror).
+  const push = await git(
+    ['--git-dir', bare, 'push', 'origin', `refs/heads/${planBranch}:refs/heads/${planBranch}`],
+    bareOpCwd,
+  );
   if (push.code !== 0) {
     log(
       'warn',
-      `[wave-merge] post-success push to origin/plan/${planSlug} failed (non-blocking): ${push.stderr.trim()}`,
+      `[wave-merge] push to origin/${planBranch} failed (non-blocking): ${push.stderr.trim()}`,
     );
   }
-  const headSha = await runGit(['rev-parse', 'HEAD'], coordinatorDir);
-  const pushSha = headSha.code === 0 ? headSha.stdout.trim() : undefined;
 
-  // 5. Cleanup per-story worktrees + local wip branches. GitHub branches
-  // survive (forensic value during the plan's lifetime; plan-delete
-  // cascade reaps them later).
+  // 5. Reap the throwaway candidate, then tear down per-story worktrees +
+  //    local wip branches. GitHub branches survive (forensic value during
+  //    the plan's lifetime; plan-delete cascade reaps them later).
+  await reapWorktree({ dir: candidateDir, bare, git, bareOpCwd, log });
   for (const storyId of merged) {
     try {
-      await teardownStoryWorktree({
-        appId,
-        planSlug,
-        storyId,
-        deleteBranch: true,
-        log,
-      });
+      await teardownStoryWorktree({ appId, planSlug, storyId, deleteBranch: true, log });
     } catch (err) {
-      log(
-        'warn',
-        `[wave-merge] teardown failed for ${storyId} (non-blocking): ${err.message}`,
-      );
+      log('warn', `[wave-merge] teardown failed for ${storyId} (non-blocking): ${err.message}`);
     }
   }
 
   log(
     'info',
-    `[wave-merge] wave ${waveNumber} merged ${merged.length} stories cleanly; head ${pushSha?.slice(0, 7) ?? '?'}`,
+    `[wave-merge] wave ${waveNumber} merged ${merged.length} stories cleanly; green ${candidateSha.slice(0, 7)}`,
   );
 
   return {
     outcome: 'success',
     mergedStoryIds: merged,
-    coordinatorWorktree: coordinatorDir,
-    pushSha,
+    pushSha: candidateSha,
     cleanupBranches: postMergeCleanupBranches(merged),
   };
 }

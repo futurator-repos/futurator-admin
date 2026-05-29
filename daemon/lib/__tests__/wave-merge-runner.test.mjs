@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   sortStoriesForMerge,
   coordinatorWorktreeDir,
+  candidateWorktreeDir,
   isNoOpTestExit,
 } from '../wave-merge-runner.mjs';
 
@@ -65,6 +66,33 @@ describe('coordinatorWorktreeDir', () => {
     const p = coordinatorWorktreeDir({ appId: 'a', planSlug: 'b' });
     expect(p).toContain('/_merge');
     expect(p.endsWith('_merge')).toBe(true);
+  });
+});
+
+describe('candidateWorktreeDir', () => {
+  it('returns the canonical _cand/<jobId> path', () => {
+    const p = candidateWorktreeDir({
+      appId: 'snake-4',
+      planSlug: 'snake-4-animations',
+      jobId: 'abc123',
+    });
+    expect(p).toBe('/home/ubuntu/worktrees/snake-4/snake-4-animations/_cand/abc123');
+  });
+
+  it('honors a custom root', () => {
+    const p = candidateWorktreeDir({ appId: 'a', planSlug: 'b', jobId: 'j', root: '/tmp/wt' });
+    expect(p).toBe('/tmp/wt/a/b/_cand/j');
+  });
+
+  it('lives under the reserved _cand namespace (never a kebab story slug)', () => {
+    const p = candidateWorktreeDir({ appId: 'a', planSlug: 'b', jobId: 'j' });
+    expect(p).toContain('/_cand/');
+  });
+
+  it('throws on missing fields (appId / planSlug / jobId all required)', () => {
+    expect(() => candidateWorktreeDir({ appId: 'a', planSlug: 'b' })).toThrow();
+    expect(() => candidateWorktreeDir({ appId: 'a', jobId: 'j' })).toThrow();
+    expect(() => candidateWorktreeDir({ planSlug: 'b', jobId: 'j' })).toThrow();
   });
 });
 

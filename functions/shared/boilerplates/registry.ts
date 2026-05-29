@@ -1,4 +1,24 @@
 import type { BoilerplateMetadata } from './types';
+import {
+  FEATURE_WIRING_GENERATOR_MJS,
+  FEATURE_REGISTRY_README,
+  GITATTRIBUTES_GENERATED,
+} from '../codegen/feature-wiring';
+
+// ── Story D (agentic-integration, 2026-05-29) — generated-wiring augments ──
+// Ship the feature-registry primitive into every nextjs-* app: a generator
+// script, the convention README, and a .gitattributes marker. Features
+// register themselves under src/features/<name>.feature.tsx; src/app/page.tsx
+// is GENERATED from them, so no story hand-edits the hot wiring file and the
+// single biggest merge-conflict source is eliminated by construction. The
+// daemon's post-merge gate runs the generator before `next build` (see
+// postMergeValidationCmd below), so the candidate always builds the correctly
+// integrated page from the union of all merged features.
+const FEATURE_WIRING_AUGMENTS: Array<{ path: string; content: string }> = [
+  { path: 'scripts/generate-wiring.mjs', content: FEATURE_WIRING_GENERATOR_MJS },
+  { path: 'src/features/README.md', content: FEATURE_REGISTRY_README },
+  { path: '.gitattributes', content: GITATTRIBUTES_GENERATED },
+];
 
 /**
  * All supported app boilerplate / starter-pack types.
@@ -46,7 +66,10 @@ const NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT = `# Scaffold contract — nextjs-can
 - \`src/game/state-machine.ts\` — typed \`useReducer\` wrapper for game state
 - \`src/game/types.ts\` — \`GameStatus\`, \`Entity\`, \`GameState<T>\` generics
 - \`src/components/GameCanvas.tsx\` — canvas mount + ResizeObserver wiring
-- \`src/app/page.tsx\` — game-canvas mount point (stub)
+- \`src/app/page.tsx\` — **generated** from \`src/features/\` by
+  \`scripts/generate-wiring.mjs\` (DO NOT edit; register a feature instead)
+- \`scripts/generate-wiring.mjs\` + \`src/features/README.md\` — the feature
+  registry (additive wiring; no hot-file conflicts)
 
 ## Forbidden story patterns (PM must NOT emit)
 - "Define core game types" → use the \`GameState<T>\` generic, extend with your domain entities
@@ -56,6 +79,8 @@ const NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT = `# Scaffold contract — nextjs-can
 - "Set up Tailwind / tsconfig / Next config" → done in nextjs-base
 - "Install Next.js / React / TypeScript" → done in nextjs-base
 - "Bootstrap project from scratch" → done in nextjs-base
+- "Wire the game into the home page / edit src/app/page.tsx" → \`page.tsx\` is
+  GENERATED from \`src/features/\`. Register a feature instead (see below).
 
 ## Required story patterns
 - "Implement <entity> rendering on the canvas"
@@ -69,7 +94,12 @@ const NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT = `# Scaffold contract — nextjs-can
 - Place new entities under \`src/game/entities/<name>.ts\`
 - Place render helpers under \`src/components/canvas/<Entity>Render.tsx\`
 - ALL game logic must be reducer-pure — no side effects in tick handlers
-- Mount the game from \`src/app/page.tsx\` via \`<GameCanvas/>\`
+- Mount the game by REGISTERING A FEATURE — create
+  \`src/features/<name>.feature.tsx\` exporting \`{ feature: { slug, order } }\`
+  + a default component (see \`src/features/README.md\`). \`src/app/page.tsx\` is
+  **generated** from that directory by \`scripts/generate-wiring.mjs\`; NEVER
+  hand-edit it. Each feature is its own file on a disjoint path, so parallel
+  stories never collide on the wiring file.
 `;
 
 const NEXTJS_CANVAS_GAME_AUGMENTS: Array<{ path: string; content: string }> = [
@@ -817,7 +847,14 @@ const NEXTJS_BASE_PACK: BoilerplateMetadata = {
   // integration breakage. Tests run too when a future scaffold adds a
   // `test` script (`--if-present` is a no-op otherwise; the runner also
   // treats a no-op/"no tests" exit as pass — defense in depth).
-  postMergeValidationCmd: 'npm run build && npm run test --if-present',
+  // Story D (2026-05-29) — regenerate the wiring file from src/features/
+  // BEFORE the build, so the candidate compiles the correctly-integrated page
+  // from the union of every merged feature. `--if-present`-style guard: the
+  // generator is shipped via FEATURE_WIRING_AUGMENTS, so it exists on every
+  // nextjs-* app; the `[ -f ]` test keeps the gate green on any legacy app
+  // bootstrapped before the augment landed.
+  postMergeValidationCmd:
+    '[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs; npm run build && npm run test --if-present',
   // PR-71 — Project skill manifest + sync script (Story 3-C-2-1).
   // Inherited by all nextjs-* starter packs.
   skillManifest: {
@@ -839,6 +876,7 @@ const NEXTJS_BASE_PACK: BoilerplateMetadata = {
     ...FROZEN_FILE_AUGMENTS,
     ...SKILL_MANIFEST_AUGMENTS,
     ...CLAUDE_MD_AUGMENTS,
+    ...FEATURE_WIRING_AUGMENTS,
   ],
 };
 

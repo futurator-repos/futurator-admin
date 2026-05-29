@@ -421,4 +421,42 @@ describe('PR-41 — frozen-file pre-commit hook (Story 2-A-5-2)', () => {
       expect(paths).toContain('.husky/pre-commit-frozen');
     },
   );
+
+  // Story D (agentic-integration, 2026-05-29) — generated-wiring primitive.
+  it.each([
+    'nextjs-base',
+    'nextjs-canvas-game',
+    'nextjs-form-app',
+    'nextjs-dashboard',
+  ] as BoilerplateType[])('%s — ships the feature-registry generated-wiring augments', (type) => {
+    const meta = BOILERPLATE_REGISTRY[type];
+    const paths = (meta.augmentFiles ?? []).map((f) => f.path);
+    expect(paths).toContain('scripts/generate-wiring.mjs');
+    expect(paths).toContain('src/features/README.md');
+    expect(paths).toContain('.gitattributes');
+  });
+
+  it('the generate-wiring augment is a runnable, dependency-free node script', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-base'];
+    const gen = meta.augmentFiles?.find((f) => f.path === 'scripts/generate-wiring.mjs');
+    expect(gen?.content).toContain('src/features');
+    expect(gen?.content).toContain('page.tsx');
+    expect(gen?.content).toContain("from 'node:fs'"); // node built-ins only
+  });
+
+  it.each(['nextjs-base', 'nextjs-canvas-game'] as BoilerplateType[])(
+    '%s — post-merge gate regenerates wiring before the build',
+    (type) => {
+      const meta = BOILERPLATE_REGISTRY[type];
+      expect(meta.postMergeValidationCmd).toContain('generate-wiring.mjs');
+      expect(meta.postMergeValidationCmd).toContain('npm run build');
+    },
+  );
+
+  it('canvas-game scaffold contract forbids hand-editing the generated page.tsx', () => {
+    const meta = BOILERPLATE_REGISTRY['nextjs-canvas-game'];
+    expect(meta.scaffoldContract).toMatch(/generated/i);
+    expect(meta.scaffoldContract).toContain('src/features/');
+    expect(meta.scaffoldContract).toMatch(/NEVER hand-edit|DO NOT edit|never.*edit/i);
+  });
 });

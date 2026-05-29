@@ -4328,7 +4328,13 @@ async function executeWaveMergeJob(job) {
         // type-checks + compiles); tests run when a scaffold has them
         // (`--if-present` is a no-op otherwise, and the runner treats a
         // no-op test exit as pass). See fix(pipeline) 2026-05-28.
-        postMergeValidationCmd = 'npm run build && npm run test --if-present';
+        // Story D (2026-05-29) — regenerate src/app/page.tsx from
+        // src/features/ before the build so the candidate compiles the
+        // correctly-integrated page from the union of merged features. The
+        // `[ -f ]` guard keeps the gate green on legacy apps that predate the
+        // generate-wiring augment.
+        postMergeValidationCmd =
+          '[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs; npm run build && npm run test --if-present';
       }
     } catch (resolveErr) {
       log(
@@ -4341,22 +4347,29 @@ async function executeWaveMergeJob(job) {
 
   try {
     const { runWaveMerge } = await import('./lib/wave-merge-runner.mjs');
-    const result = await runWaveMerge({
-      appId: p.appId,
-      planId: p.planId,
-      planSlug: p.planSlug,
-      epicId: p.epicId,
-      waveNumber: p.waveNumber,
-      storyIds: p.storyIds,
-      postMergeValidationCmd,
-      writeAttention: (item) =>
-        writeAttentionItem(
-          ddb,
-          { ...item, planId: p.planId },
-          log,
-        ),
-      log,
-    });
+    const { withAppIntegrationLock } = await import('./lib/integration-lock.mjs');
+    const { recordWaveConflictEvent } = await import('./lib/wave-conflict-recorder.mjs');
+    // Story B (2026-05-29) — serialize the integration gate per app so two
+    // epics in one plan-wave never race to advance the same green ref. The
+    // ephemeral-candidate + advance-on-green model in the runner closes the
+    // worktree race; this lock closes the ref race. See integration-lock.mjs.
+    const result = await withAppIntegrationLock(p.appId, () =>
+      runWaveMerge({
+        appId: p.appId,
+        planId: p.planId,
+        planSlug: p.planSlug,
+        epicId: p.epicId,
+        waveNumber: p.waveNumber,
+        storyIds: p.storyIds,
+        postMergeValidationCmd,
+        jobId,
+        writeAttention: (item) =>
+          writeAttentionItem(ddb, { ...item, planId: p.planId }, log),
+        // Story C (2026-05-29) — durable conflict telemetry.
+        recordConflictEvent: (event) => recordWaveConflictEvent(ddb, event, log),
+        log,
+      }),
+    );
 
     if (result.outcome === 'success' || result.outcome === 'no-stories') {
       await updateJobFields(jobId, {

@@ -112,6 +112,11 @@ function* walkPerStoryWorktrees(root) {
       for (const story of readdirSync(planDir, { withFileTypes: true })) {
         if (!story.isDirectory()) continue;
         if (story.name === '_merge') continue;
+        // Story B (2026-05-29) — `_cand/<jobId>` holds ephemeral wave-merge
+        // candidate worktrees; never a per-story worktree. The runner reaps
+        // them inline on success/build-failure; this skip stops the reaper
+        // misclassifying a lingering candidate as a story orphan.
+        if (story.name === '_cand') continue;
         yield {
           appId: app.name,
           planSlug: plan.name,

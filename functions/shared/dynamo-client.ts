@@ -26,6 +26,10 @@ export const TABLE_NAMES = {
   plans: process.env.PLANS_TABLE || 'futurator-plans',
   apps: process.env.APPS_TABLE || 'futurator-apps',
   attentionItems: process.env.ATTENTION_ITEMS_TABLE || 'futurator-attention-items',
+  // Story C (agentic-integration, 2026-05-29) — durable wave-merge conflict
+  // telemetry. PK planId, SK conflictId (epoch-ms-prefixed). GSI
+  // appId-createdAt for the cross-plan conflict-rate view.
+  waveConflicts: process.env.WAVE_CONFLICTS_TABLE || 'futurator-wave-conflicts',
   // Pipeline v1 — Epic 3 (Talk-to-agent) tables.
   agentSessions: process.env.AGENT_SESSIONS_TABLE || 'futurator-agent-sessions',
   agentConversations: process.env.AGENT_CONVERSATIONS_TABLE || 'futurator-agent-conversations',
