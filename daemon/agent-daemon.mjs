@@ -3656,6 +3656,122 @@ async function isAgentPausedCached() {
   return _pausedCache.value;
 }
 
+// Story E Tier 2 (2026-05-30) — global auto-merge toggle. Default OFF: when
+// unset the daemon keeps the Story A operator-resolve-only halt. When
+// `agent.autoMerge` is 'true', the daemon passes the agentic resolver into the
+// wave-merge runner (which is still gated by the build gate + advance-on-green,
+// and per-plan overridable via plan.autoMergeMode). 5s cache like agent.paused.
+const AUTOMERGE_FLAG_CACHE_MS = 5_000;
+let _autoMergeCache = { value: false, fetchedAt: 0 };
+async function isAutoMergeEnabledCached() {
+  if (Date.now() - _autoMergeCache.fetchedAt < AUTOMERGE_FLAG_CACHE_MS) {
+    return _autoMergeCache.value;
+  }
+  try {
+    const result = await ddb.send(
+      new GetCommand({ TableName: AGENT_FLAGS_TABLE, Key: { flagName: 'agent.autoMerge' } }),
+    );
+    _autoMergeCache = { value: result?.Item?.value === 'true', fetchedAt: Date.now() };
+  } catch (err) {
+    // Fail-CLOSED: a DDB blip must never accidentally enable autonomous merges.
+    log('warn', `[automerge-check] DDB read failed, treating as OFF: ${err.message}`);
+    _autoMergeCache = { value: false, fetchedAt: Date.now() };
+  }
+  return _autoMergeCache.value;
+}
+
+/**
+ * Story E Tier 2 (2026-05-30) — agentic conflict resolver. Spawns a pinned,
+ * temperature-0 Claude in the candidate worktree to INTEGRATE BOTH SIDES of
+ * the conflict, edits only the conflicted files, and leaves git to the runner.
+ * Returns `{ resolved, reasoning }`. The runner verifies marker-free + commits
+ * with an audit trailer; the build gate is the final backstop. Unlike the
+ * reverted 3fa8713 resolver this runs in the EPHEMERAL candidate worktree
+ * (never the shared branch), is build-gated before green advances, and is
+ * recorded as `mode:auto-resolved` in the conflict telemetry — so a wrong
+ * resolution is rejected or revertible, never silently shipped.
+ */
+function resolveWaveMergeConflict({ worktreeDir, conflictedFiles, conflictStoryId, mergedStoryIds }, { short } = {}) {
+  return new Promise((resolve) => {
+    const fileList = conflictedFiles.map((f) => `  - ${f}`).join('\n');
+    const mergedList = (mergedStoryIds || []).map((s) => `  - wip/${s}`).join('\n') || '  (none)';
+    const prompt = [
+      'You are resolving git merge conflicts from integrating PARALLEL stories',
+      'into a wave branch. Multiple stories were developed independently and',
+      'have collided on shared files.',
+      '',
+      'Conflicted files (each has `<<<<<<< HEAD`, `=======`, `>>>>>>>` markers):',
+      fileList,
+      '',
+      'Branches already merged into HEAD:',
+      mergedList,
+      `Incoming branch causing the conflict: wip/${conflictStoryId}`,
+      '',
+      'Per-story intent is in `.context/wave-*-story-*.md` — read the relevant',
+      'ones before resolving.',
+      '',
+      'RULES:',
+      '1. INTEGRATE BOTH SIDES. Preserve all functionality, imports, and exports',
+      '   from HEAD *and* the incoming branch. Never delete one side wholesale.',
+      '2. For app entry / mount files where each story wired its own component,',
+      '   combine them so EVERY component is imported and rendered together.',
+      '3. Remove EVERY conflict marker. The result must be valid TypeScript/TSX',
+      '   that compiles with `next build`.',
+      '4. Only edit the conflicted files listed above. Do not touch anything else.',
+      '5. Do NOT run git commands — just edit the files.',
+    ].join('\n');
+    const args = [
+      '-p',
+      prompt,
+      '--model',
+      process.env.WAVE_MERGE_RESOLVER_MODEL || 'claude-sonnet-4-6',
+      '--permission-mode',
+      'bypassPermissions',
+      '--add-dir',
+      worktreeDir,
+    ];
+    log('info', `[${short || 'wave-merge'}] spawning Tier-2 conflict-resolver for ${conflictedFiles.length} file(s)`);
+    let settled = false;
+    const done = (resolved, reason) => {
+      if (settled) return;
+      settled = true;
+      if (!resolved && reason) log('warn', `[${short || 'wave-merge'}] conflict-resolver: ${reason}`);
+      resolve({ resolved, reasoning: reason });
+    };
+    let proc;
+    try {
+      proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
+        cwd: worktreeDir,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
+      });
+    } catch (err) {
+      return done(false, `spawn threw: ${err.message}`);
+    }
+    const timer = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        /* best effort */
+      }
+      done(false, 'timed out after 8m');
+    }, 8 * 60 * 1000);
+    let stderrTail = '';
+    proc.stderr?.on('data', (c) => (stderrTail = (stderrTail + c.toString('utf8')).slice(-1000)));
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      done(false, `process error: ${err.message}`);
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      // Trust the runner's marker-check + build gate for correctness; here we
+      // only gate on the process not erroring out.
+      if (code === 0) return done(true, 'agent integrated both sides');
+      done(false, `claude exited ${code}: ${stderrTail.slice(-200)}`);
+    });
+  });
+}
+
 // 2026-05-27 PR D.b — attention-poller helpers.
 //
 // scanOpenAttentionItems: full-table scan filtered on status='open' AND
@@ -4205,6 +4321,19 @@ async function getAppRow(appId) {
   return result.Item || null;
 }
 
+// Story E Tier 2 (2026-05-30) — read a plan row for its `autoMergeMode`
+// override. Best-effort: a missing row / DDB blip returns null and the caller
+// treats the per-plan override as absent (global flag governs).
+async function getPlanRowForAutoMerge(planId) {
+  if (!planId) return null;
+  try {
+    const result = await ddb.send(new GetCommand({ TableName: PLANS_TABLE, Key: { planId } }));
+    return result.Item || null;
+  } catch {
+    return null;
+  }
+}
+
 async function patchAppRow(appId, patch) {
   const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
   if (entries.length === 0) return;
@@ -4412,6 +4541,27 @@ async function executeWaveMergeJob(job) {
     }
   }
 
+  // Story E Tier 2 (2026-05-30) — decide whether to pass the agentic resolver.
+  // Default OFF (operator-resolve-only / Story A). Enabled only when the global
+  // `agent.autoMerge` flag is on AND the plan hasn't opted out via
+  // `autoMergeMode: 'off'`. When enabled, the runner attempts an in-candidate
+  // resolution that is still build-gated + advance-on-green + audited.
+  let resolveConflictHook;
+  try {
+    if (await isAutoMergeEnabledCached()) {
+      const planRow = await getPlanRowForAutoMerge(p.planId);
+      const planMode = planRow?.autoMergeMode;
+      if (planMode !== 'off') {
+        resolveConflictHook = (args) => resolveWaveMergeConflict(args, { short });
+        log('info', `[${short}] auto-merge ON (global flag${planMode ? `, plan=${planMode}` : ''})`);
+      } else {
+        log('info', `[${short}] auto-merge globally ON but plan opted out (autoMergeMode=off)`);
+      }
+    }
+  } catch (err) {
+    log('warn', `[${short}] auto-merge gate check failed, defaulting to halt: ${err.message}`);
+  }
+
   try {
     const { runWaveMerge } = await import('./lib/wave-merge-runner.mjs');
     const { withAppIntegrationLock } = await import('./lib/integration-lock.mjs');
@@ -4434,6 +4584,8 @@ async function executeWaveMergeJob(job) {
           writeAttentionItem(ddb, { ...item, planId: p.planId }, log),
         // Story C (2026-05-29) — durable conflict telemetry.
         recordConflictEvent: (event) => recordWaveConflictEvent(ddb, event, log),
+        // Story E Tier 2 — undefined (halt) unless the toggle gate enabled it.
+        resolveConflict: resolveConflictHook,
         log,
       }),
     );

@@ -1,5 +1,18 @@
 # Story E — Autonomous Tiered Merger + Story F — Skills Subsystem Repair
 
+> **IMPLEMENTATION STATUS (2026-05-30): ALL SHIPPED.** F.2 skills .gitignore
+> fix + parity test; E Tier 0 CLAUDE.md merge=union; UI wave-indicator fix
+> (commit `0dc479d`). F.3 system/init skills observability + F.4 bootstrap
+> assertion + event-driven advancement (per-plan reduce lock + reactive
+> endpoint + daemon Lambda trigger) (commit `6cf0b4f`). E Tier 2 agentic
+> merger behind the default-OFF `agent.autoMerge` flag + per-plan
+> `autoMergeMode`, riding B's candidate worktree + advance-on-green + Story C
+> audit; F.4 one-time remediation script for already-bootstrapped repos (this
+> commit). 152 tests green across the touched suites. Deploy: `sst deploy` +
+> daemon rsync (with `npm install` for the new @aws-sdk/client-lambda dep) +
+> two out-of-band IAM grants (wave-conflicts table done; lambda:InvokeFunction
+> on WaveCompletionCheck pending).
+
 > **Status:** Spec, ready for implementation. Drafted 2026-05-30 after the
 > `plan_dino1_mpr6f5jm` run, which exercised the freshly-deployed A/B/C/D stack
 > on real infra and surfaced both opportunities below.

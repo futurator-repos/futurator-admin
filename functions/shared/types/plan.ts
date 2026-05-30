@@ -255,6 +255,16 @@ export interface Plan {
   reduceLockToken?: string;
   reduceLockAt?: number;
 
+  /**
+   * Story E Tier 2 (2026-05-30) — per-plan auto-merge override. Absent =
+   * follow the global `agent.autoMerge` flag. `'off'` force-disables the
+   * agentic conflict merger for this plan even when the global flag is on
+   * (operator-resolve-only). `'trivial'` / `'full'` reserved for the
+   * additive-only vs. resolve-everything distinction (both currently attempt
+   * resolution, gated by build + advance-on-green).
+   */
+  autoMergeMode?: 'off' | 'trivial' | 'full';
+
   createdAt: string;
   updatedAt: string;
   createdBy: string;

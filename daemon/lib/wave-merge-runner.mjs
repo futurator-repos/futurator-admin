@@ -262,6 +262,29 @@ async function listConflictedFiles(cwd, git = runGit) {
  * conflict is otherwise unrecoverable after the abort — this is what makes a
  * halted (or future auto-resolved) merge judgeable after the fact.
  */
+/**
+ * Story E Tier 2 (2026-05-30) — after the agentic merger edits the conflicted
+ * files in place, verify it actually removed every conflict marker. Returns
+ * the subset of `files` that STILL contain a `<<<<<<<`, `=======`, or
+ * `>>>>>>>` marker line. Empty array = clean. Reads files directly (no shell);
+ * unreadable files are treated as still-conflicted (conservative — never
+ * commit a tree we can't verify). This is the deterministic backstop on the
+ * resolver's output BEFORE the build gate is the second backstop.
+ */
+const CONFLICT_MARKER_RE = /^(<<<<<<<|=======|>>>>>>>)(\s|$)/m;
+export function filesWithConflictMarkers(files, cwd) {
+  const remaining = [];
+  for (const f of files) {
+    const abs = f.startsWith('/') ? f : `${cwd.replace(/\/$/, '')}/${f}`;
+    try {
+      if (CONFLICT_MARKER_RE.test(readFileSync(abs, 'utf8'))) remaining.push(f);
+    } catch {
+      remaining.push(f);
+    }
+  }
+  return remaining;
+}
+
 const MAX_BLOB_BYTES = 64 * 1024;
 async function captureConflictBlobs(files, cwd, _git) {
   const blobs = [];
@@ -344,6 +367,17 @@ export async function runWaveMerge({
   // Story C (2026-05-29) — durable conflict-event sink. No-op by default;
   // the daemon wires a DDB-backed recorder. Receives the full event shape.
   recordConflictEvent = async () => {},
+  // Story E Tier 2 (2026-05-30) — OPT-IN agentic conflict merger. UNDEFINED by
+  // default → preserves the Story A operator-resolve-only halt. The daemon
+  // passes this ONLY when the autoMerge toggle is on (global agent.autoMerge
+  // flag + per-plan autoMergeMode). Signature:
+  //   resolveConflict({ worktreeDir, conflictedFiles, conflictStoryId,
+  //     mergedStoryIds, blobs, planId, epicId, waveNumber })
+  //     => { resolved: boolean, reasoning?: string }
+  // It edits the conflicted files IN the candidate worktree (markers present);
+  // the runner verifies marker-free, commits with an audit trailer, and the
+  // post-merge build gate is the final backstop. Any failure → halt (Story A).
+  resolveConflict,
   // Story B (2026-05-29) — injectable exec surface for hermetic real-git
   // tests. Production defaults shell out as `sudo -u ubuntu`.
   gitRunner = runGit,
@@ -386,10 +420,79 @@ export async function runWaveMerge({
     const verdict = classifyWaveMergeOutcome({ mergeExit: r.code });
     if (verdict.outcome === 'merge-conflict') {
       // Story C — capture the conflicted blobs (WITH markers) BEFORE we
-      // abort, so the conflict is judgeable after the fact. `git
+      // resolve/abort, so the conflict is judgeable after the fact. `git
       // merge --abort` would otherwise incinerate the evidence.
       const conflictedFiles = await listConflictedFiles(candidateDir, git);
       const conflictBlobs = await captureConflictBlobs(conflictedFiles, candidateDir, git);
+
+      // Story E Tier 2 (2026-05-30) — OPT-IN agentic merge. Only when the
+      // daemon passed a resolver (toggle on). The resolver edits the
+      // conflicted files in place; we verify marker-free, then commit with an
+      // audit trailer and CONTINUE — the post-merge build gate (step 3) is the
+      // final backstop, and advance-on-green (step 4) means a bad resolution
+      // that compiles-but-is-wrong still never corrupts green silently (it's
+      // recorded + revertible). Any failure falls through to the halt below.
+      if (typeof resolveConflict === 'function' && conflictedFiles.length > 0) {
+        log(
+          'info',
+          `[wave-merge] auto-merge ENABLED — resolving ${conflictedFiles.length} conflicted file(s) on wip/${storyId}`,
+        );
+        let res = null;
+        try {
+          res = await resolveConflict({
+            worktreeDir: candidateDir,
+            conflictedFiles,
+            conflictStoryId: storyId,
+            mergedStoryIds: [...merged],
+            blobs: conflictBlobs,
+            planId,
+            epicId,
+            waveNumber,
+          });
+        } catch (err) {
+          log('warn', `[wave-merge] conflict resolver threw: ${err.message}; halting`);
+        }
+        if (res && res.resolved) {
+          const remaining = filesWithConflictMarkers(conflictedFiles, candidateDir);
+          if (remaining.length === 0) {
+            const add = await git(['add', '-A'], candidateDir);
+            // Audit trail (fixes F3): self-describing commit, NOT --no-edit.
+            const subject = `merge story ${storyId} into wave [auto-resolved: ${conflictedFiles.join(', ')}]`;
+            const commit = await git(['commit', '-m', subject], candidateDir);
+            if (add.code === 0 && commit.code === 0) {
+              log('info', `[wave-merge] auto-resolved + committed merge of wip/${storyId}`);
+              await recordConflictEvent({
+                planId,
+                epicId,
+                waveNumber,
+                appId,
+                mode: 'auto-resolved',
+                conflictedAtStoryId: storyId,
+                files: conflictedFiles,
+                mergedStoryIds: [...merged],
+                blobs: conflictBlobs,
+                reasoning: res.reasoning,
+                candidateWorktree: candidateDir,
+              }).catch((e) =>
+                log('warn', `[wave-merge] recordConflictEvent(auto) failed: ${e.message}`),
+              );
+              merged.push(storyId);
+              continue; // proceed to the next wip branch
+            }
+            log('warn', `[wave-merge] post-resolution commit failed (add=${add.code} commit=${commit.code}); halting`);
+          } else {
+            log(
+              'warn',
+              `[wave-merge] resolver left markers in ${remaining.length} file(s) (${remaining.join(', ')}); halting`,
+            );
+          }
+        } else if (res) {
+          log('warn', `[wave-merge] resolver reported unresolved; halting`);
+        }
+        // Fall through to the halt path — must re-capture blobs (the resolver
+        // may have partially edited the tree) before aborting.
+      }
+
       // Abort the half-merge so the candidate is in a clean, re-tryable
       // state (back to green + the prior clean merges) for the operator.
       await git(['merge', '--abort'], candidateDir);

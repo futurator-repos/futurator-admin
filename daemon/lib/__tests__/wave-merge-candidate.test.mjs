@@ -181,4 +181,91 @@ describe('runWaveMerge — candidate worktree + advance-on-green', () => {
     expect(attentions).toHaveLength(1);
     expect(attentions[0].category).toBe('merge-conflict');
   });
+
+  // Story E Tier 2 — auto-merge ON: the resolver integrates both sides, the
+  // wave LANDS, green advances, and the event is recorded as auto-resolved.
+  it('auto-merge ON: resolver lands the conflict, green advances, audited', { timeout: 30000 }, async () => {
+    const appId = 'automerge-app';
+    const planSlug = 'automerge-app-initial';
+    const bare = buildBareRepo(appId, [
+      {
+        branch: 'wip/story-a',
+        files: { 'src-page.tsx': 'export default function Page(){return <A/>;}\n' },
+      },
+      {
+        branch: 'wip/story-b',
+        files: { 'src-page.tsx': 'export default function Page(){return <B/>;}\n' },
+      },
+    ]);
+    const greenBefore = bareRef(bare, 'refs/heads/main');
+
+    const conflictEvents = [];
+    // Fake resolver: integrate both sides by stripping markers + keeping both.
+    const resolveConflict = async ({ worktreeDir, conflictedFiles }) => {
+      const { readFileSync, writeFileSync } = await import('node:fs');
+      for (const f of conflictedFiles) {
+        const abs = `${worktreeDir}/${f}`;
+        const merged = readFileSync(abs, 'utf8')
+          .split('\n')
+          .filter((l) => !/^(<<<<<<<|=======|>>>>>>>)/.test(l))
+          .join('\n');
+        writeFileSync(abs, merged + '\n// integrated both A and B\n');
+      }
+      return { resolved: true, reasoning: 'combined A + B renderers' };
+    };
+
+    const result = await runWaveMerge(
+      baseArgs(appId, planSlug, ['story-a', 'story-b'], {
+        recordConflictEvent: async (e) => conflictEvents.push(e),
+        resolveConflict,
+      }),
+    );
+
+    // The wave LANDED (no halt) and green advanced.
+    expect(result.outcome).toBe('success');
+    expect(result.mergedStoryIds).toEqual(['story-a', 'story-b']);
+    const greenAfter = bareRef(bare, 'refs/heads/plan/automerge-app-initial');
+    expect(greenAfter).toBe(result.pushSha);
+    expect(greenAfter).not.toBe(greenBefore);
+
+    // Audit: the conflict was recorded as auto-resolved with the reasoning.
+    const autoEvent = conflictEvents.find((e) => e.mode === 'auto-resolved');
+    expect(autoEvent).toBeTruthy();
+    expect(autoEvent.files).toContain('src-page.tsx');
+    expect(autoEvent.reasoning).toMatch(/combined/i);
+
+    // Self-describing commit trailer in the merge history (on the plan ref —
+    // the bare's default HEAD is still `main`).
+    const logOut = spawnSync(
+      'git',
+      ['--git-dir', bare, 'log', '--format=%s', '-n', '20', 'refs/heads/plan/automerge-app-initial'],
+      { encoding: 'utf8' },
+    ).stdout;
+    expect(logOut).toMatch(/\[auto-resolved: src-page\.tsx\]/);
+
+    // Candidate reaped on success.
+    expect(existsSync(candidateWorktreeDir({ appId, planSlug, jobId: 'job-1' }))).toBe(false);
+  });
+
+  // Story E Tier 2 — a resolver that LEAVES markers must NOT land: halt + green
+  // untouched (the marker-check backstop rejects a bad resolution).
+  it('auto-merge ON but resolver leaves markers → halts, green untouched', { timeout: 30000 }, async () => {
+    const appId = 'automerge-bad';
+    const planSlug = 'automerge-bad-initial';
+    const bare = buildBareRepo(appId, [
+      { branch: 'wip/story-a', files: { 'src-page.tsx': 'export const x = <A/>;\n' } },
+      { branch: 'wip/story-b', files: { 'src-page.tsx': 'export const x = <B/>;\n' } },
+    ]);
+    const greenBefore = bareRef(bare, 'refs/heads/main');
+    // Resolver claims success but doesn't actually remove markers.
+    const resolveConflict = async () => ({ resolved: true, reasoning: 'lied' });
+
+    const result = await runWaveMerge(
+      baseArgs(appId, planSlug, ['story-a', 'story-b'], { resolveConflict }),
+    );
+
+    expect(result.outcome).toBe('merge-conflict');
+    expect(bareRef(bare, 'refs/heads/plan/automerge-bad-initial')).toBeNull();
+    expect(bareRef(bare, 'refs/heads/main')).toBe(greenBefore);
+  });
 });
