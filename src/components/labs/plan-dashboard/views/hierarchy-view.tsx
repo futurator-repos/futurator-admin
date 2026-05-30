@@ -384,7 +384,13 @@ function WaveRow({
   const agg = aggregateWave(wave);
   const pct = Math.round(agg.progress);
   const isParallel = wave.stories.length > 1;
-  const anyRunning = agg.running > 0;
+  // 2026-05-30 — completion wins over "active". `agg.running` counts
+  // ACTIVE_STATUSES, which includes 'fixing'; a wave whose stories are all
+  // `done` (100%, e.g. 3/3) but which sits under a `fixing` epic was rendering
+  // the purple "in-progress" bar despite being complete. A wave is complete
+  // iff every story is done — show success then, regardless of epic status.
+  const isComplete = agg.total > 0 && agg.done === agg.total;
+  const anyRunning = !isComplete && agg.running > 0;
 
   return (
     <div>

@@ -662,7 +662,16 @@ process.exit(0);
 const SKILLS_DIR_GITIGNORE = `# Skill bodies are vendored via scripts/skills-sync.mjs (Story 3-C-2-1).
 # Skill manifests + meta.json are the source of truth and are committed;
 # the full skill content is fetched on demand from federation sources.
+#
+# 2026-05-30 (Story F) — the leading \`*\` ignores the skill SUBDIRECTORIES,
+# and git never descends into an ignored directory, so \`!*/SKILL.md\` could
+# never re-include anything: SKILL.md/meta.json were NEVER committed, so
+# per-story worktrees had no skills and zero activation fired (dino1 forensic:
+# skills:null). \`!*/\` re-includes the directories first, which is what makes
+# the deeper un-ignore rules reachable. Heavy bodies (examples/, templates/)
+# stay ignored because nothing un-ignores them.
 *
+!*/
 !.gitignore
 !*/SKILL.md
 !*/meta.json

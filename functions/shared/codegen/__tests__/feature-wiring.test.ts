@@ -16,6 +16,7 @@ import {
   generatePageSource,
   sortFeatures,
   FEATURE_WIRING_GENERATOR_MJS,
+  GITATTRIBUTES_GENERATED,
   type FeatureDescriptor,
 } from '../feature-wiring';
 
@@ -102,5 +103,23 @@ describe('FEATURE_WIRING_GENERATOR_MJS (shipped script) — no drift', () => {
       },
     ]);
     expect(out).toBe(generatePageSource([desc('solo', 100)]));
+  });
+});
+
+describe('GITATTRIBUTES_GENERATED — Story E Tier 0 (merge=union)', () => {
+  it('marks the generated wiring file as generated', () => {
+    expect(GITATTRIBUTES_GENERATED).toContain('src/app/page.tsx linguist-generated=true');
+  });
+
+  it('declares merge=union for CLAUDE.md (the dino1 #1 conflict file)', () => {
+    expect(GITATTRIBUTES_GENERATED).toMatch(/^CLAUDE\.md merge=union$/m);
+  });
+
+  it('applies union only to append-only prose logs, never structured/JSON', () => {
+    // Guardrail: union is line-based and would corrupt structured files.
+    expect(GITATTRIBUTES_GENERATED).not.toMatch(/package\.json\s+merge=union/);
+    expect(GITATTRIBUTES_GENERATED).not.toMatch(/\.json\s+merge=union/);
+    // The append-log doc paths are covered.
+    expect(GITATTRIBUTES_GENERATED).toMatch(/docs\/decisions\/\*\.md merge=union/);
   });
 });

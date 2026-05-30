@@ -205,11 +205,30 @@ two features never conflict — the single biggest merge-conflict source
 `;
 
 /**
- * Shipped to `.gitattributes` (appended). Marks the generated wiring file so
- * GitHub collapses its diffs and tooling treats it as generated. (Full
- * conflict elimination — git-ignoring page.tsx so stories never commit it —
- * is the external base-scaffold follow-up; see integration-followups-bcd.md.)
+ * Shipped to `.gitattributes`. Two conflict-reduction roles:
+ *
+ *  1. Story D — mark the generated wiring file as generated (GitHub collapses
+ *     its diffs; tooling treats it as generated). Full conflict elimination
+ *     (git-ignoring page.tsx so stories never commit it) is the external
+ *     base-scaffold follow-up; see integration-followups-bcd.md.
+ *
+ *  2. Story E Tier 0 (2026-05-30) — `merge=union` on APPEND-ONLY documents so
+ *     parallel stories that each append a block (the dino1 villain: every
+ *     story appends a decision note to CLAUDE.md via claude-md-append-decision)
+ *     auto-concatenate BOTH sides at merge instead of conflicting. git's union
+ *     driver is line-based: safe for newline-delimited append logs, NEVER for
+ *     structured/JSON files (it would interleave keys and produce invalid
+ *     content) — so this list is deliberately limited to prose logs.
+ *     dino1 forensic: CLAUDE.md was the #1 conflict file (both E2 and E3).
  */
 export const GITATTRIBUTES_GENERATED = `# Story D (agentic-integration) — generated wiring file.
 src/app/page.tsx linguist-generated=true
+
+# Story E Tier 0 (agentic-integration) — append-only docs auto-merge via union.
+# Parallel stories appending decision notes concatenate both sides instead of
+# conflicting. Line-based union is safe ONLY for newline-delimited prose logs —
+# never add structured/JSON files here.
+CLAUDE.md merge=union
+docs/decisions/*.md merge=union
+docs/thoughts/**/*.md merge=union
 `;
