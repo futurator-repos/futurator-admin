@@ -261,6 +261,44 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), 
   marshallOptions: { removeUndefinedValues: true },
 });
 
+// ── Event-driven advancement (2026-05-30) ──────────────────────────────────
+// After a wave-merge / epic-dev job reaches a terminal state, the daemon
+// asynchronously invokes the WaveCompletionCheck Lambda so the next wave/epic
+// dispatches IMMEDIATELY instead of waiting up to ~2 cron ticks (~120s of dead
+// time observed in the dino1 forensic). The reducer is TS-only (lives in the
+// Lambda), so the daemon triggers the existing cron entrypoint rather than
+// porting reducer logic. Fire-and-forget (InvocationType:'Event'); the
+// scheduled rate(1 minute) tick stays as the backstop, and the per-plan reduce
+// lock (plan-repository.acquirePlanReduceLock) makes the on-demand + scheduled
+// runs safe against each other. IAM: the EC2 role needs lambda:InvokeFunction
+// on this function (granted out-of-band). Disabled cleanly if the SDK/env are
+// absent — the cron still advances, just at cron cadence.
+const WAVE_COMPLETION_FN =
+  process.env.WAVE_COMPLETION_FN ||
+  'futurator-production-WaveCompletionCheckHandlerFunction-cbowzwhk';
+let _lambdaClient = null;
+let _lambdaInvokeCmd = null;
+async function triggerWaveReduce(reason) {
+  try {
+    if (!_lambdaClient) {
+      const mod = await import('@aws-sdk/client-lambda').catch(() => null);
+      if (!mod) {
+        log('warn', `[reduce-trigger] @aws-sdk/client-lambda absent — relying on cron (${reason})`);
+        return;
+      }
+      _lambdaClient = new mod.LambdaClient({ region: REGION });
+      _lambdaInvokeCmd = mod.InvokeCommand;
+    }
+    await _lambdaClient.send(
+      new _lambdaInvokeCmd({ FunctionName: WAVE_COMPLETION_FN, InvocationType: 'Event' }),
+    );
+    log('info', `[reduce-trigger] invoked WaveCompletionCheck (${reason})`);
+  } catch (err) {
+    // Non-fatal: the scheduled cron is the backstop.
+    log('warn', `[reduce-trigger] invoke failed (cron will catch it): ${err.message}`);
+  }
+}
+
 // Module-scope epic-row accessor — shared by the receiver and by the
 // touch-point inference helper (PR-4). Single instance per daemon process.
 const epicRepo = createEpicRepo({ ddb, tableName: EPICS_TABLE });
@@ -1231,6 +1269,35 @@ async function processStreamEvent(jobId, stepId, agentId, event, workingDir) {
           ? event.output.slice(0, 2000)
           : JSON.stringify(event.output).slice(0, 2000);
       await pushEvent(jobId, stepId, agentId, 'tool_result', { toolOutput: output });
+      break;
+    }
+    // Story F.3 (2026-05-30) — capture the CLI's `system`/`init` event, which
+    // carries the `skills[]` + `tools[]` arrays the session actually has.
+    // Previously discarded — which is exactly why the skills-never-committed
+    // defect (dino1: skills:null) took a multi-hour trace instead of a glance:
+    // this event would have shown `skills: []` immediately. Emitting it as a
+    // `skills_available` forensic event makes "did skills load?" a one-glance
+    // check and gives the forensic exporter a ground-truth signal.
+    case 'system': {
+      if (event.subtype === 'init') {
+        const skills = Array.isArray(event.skills) ? event.skills : [];
+        const tools = Array.isArray(event.tools) ? event.tools : [];
+        await pushEvent(jobId, stepId, agentId, 'skills_available', {
+          skills,
+          skillCount: skills.length,
+          // `tools` can be long; record the count + whether Skill is present
+          // rather than the full list, to keep the event row small.
+          toolCount: tools.length,
+          hasSkillTool: tools.includes('Skill'),
+        });
+        if (skills.length === 0) {
+          log(
+            'warn',
+            `[${jobId.slice(0, 8)}] CLI init reports ZERO skills available — ` +
+              `check .claude/skills/ is committed + present in the worktree (Story F)`,
+          );
+        }
+      }
       break;
     }
   }
@@ -4488,6 +4555,13 @@ async function runJobAsync(job) {
       await writeAgentSpendRow(job, jobStartMs);
     } catch (err) {
       log('warn', `[${job.jobId.slice(0, 8)}] spend log write failed: ${err.message}`);
+    }
+    // Event-driven advancement (2026-05-30) — a terminal wave-merge or epic-dev
+    // job is exactly what unblocks the next wave/epic. Poke the reducer NOW so
+    // it dispatches immediately instead of waiting for the next cron tick.
+    // Pipeline jobs only; party/free-agent/bootstrap don't drive wave advance.
+    if (handler === JOB_HANDLER_WAVE_MERGE || handler === JOB_HANDLER_EPIC_DEV) {
+      void triggerWaveReduce(`${handler}:${job.jobId.slice(0, 8)}`);
     }
   }
 }

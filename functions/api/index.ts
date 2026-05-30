@@ -111,6 +111,9 @@ import type { App, AppCardData } from '../shared/types/app';
 import * as attentionRepo from '../shared/repositories/attention-items-repository';
 import type { AttentionStatus } from '../shared/types/attention';
 import * as waveConflictRepo from '../shared/repositories/wave-conflict-repository';
+// Event-driven advancement (2026-05-30) — reactive reduce on job completion.
+import { reducePlan } from '../shared/services/plan-reducer';
+import { buildPlanReducerDeps } from '../shared/services/reduce-deps';
 // PR-76 (Story 3-E-3-1) — Reflection Inbox service + types.
 import * as reflectionsService from '../shared/services/reflections-service';
 import type { ReflectionStatus } from '../shared/types/reflection';
@@ -1402,6 +1405,46 @@ app.get('/api/apps/:appId/conflicts', async (c) => {
   const appId = c.req.param('appId');
   const events = await waveConflictRepo.listConflictsByApp(appId);
   return c.json({ events, summary: waveConflictRepo.summarizeConflicts(events) });
+});
+
+// Event-driven advancement (2026-05-30) — reactive wave/epic/plan reduce.
+//
+// The daemon POSTs here the instant a story-pipeline or wave-merge job reaches
+// a terminal state, so the next wave/epic dispatches immediately instead of
+// waiting up to ~2 WaveCompletionCheck cron ticks (~120s of dead time observed
+// in the dino1 forensic). Runs the SAME `reducePlan` the cron runs, via the
+// shared deps factory, under the per-plan reduce lock so the two never race.
+// The cron remains the backstop: a missed/locked call just advances next tick.
+// Idempotent + safe to call spuriously (returns skipped). Auth: same bearer
+// middleware as every /api route — the daemon already carries a token.
+app.post('/api/plans/:id/check-wave-completion', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  if (plan.status !== 'developing' && plan.status !== 'fixing' && plan.status !== 'review') {
+    return c.json({ skipped: true, reason: `plan-${plan.status}` });
+  }
+
+  const token = await planRepo.acquirePlanReduceLock(planId, Date.now());
+  if (!token) {
+    // Another reducer (cron or a concurrent call) holds the lock — it will
+    // cover this completion. Not an error.
+    return c.json({ skipped: true, reason: 'reduce-locked' });
+  }
+  try {
+    const epicsForPlan: EpicWorkflow[] = [];
+    for (const epicId of plan.epicIds) {
+      const epic = await epicRepo.getEpicById(epicId);
+      if (epic) epicsForPlan.push(epic);
+    }
+    if (epicsForPlan.length === 0) {
+      return c.json({ skipped: true, reason: 'no-epics' });
+    }
+    const result = await reducePlan(plan, epicsForPlan, buildPlanReducerDeps());
+    return c.json({ ok: true, result });
+  } finally {
+    await planRepo.releasePlanReduceLock(planId, token);
+  }
 });
 
 app.get('/api/plans/:id', async (c) => {

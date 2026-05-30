@@ -21,6 +21,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { assertSkillsCommitted } from './assert-skills-committed.mjs';
 
 export const APP_BOOTSTRAP_COMMIT_AND_PUSH_STEP = 'commit-and-push';
 
@@ -55,6 +56,13 @@ export async function runCommitAndPush({
     cwd: worktreeDir,
     onOutput,
   });
+
+  // Story F.4 (2026-05-30) — fail LOUD if a manifest-pinned skill's SKILL.md
+  // didn't make it into the commit. Catches the .gitignore-eats-skills class
+  // of defect at the source (post-commit, pre-push) so a skill-less scaffold
+  // never reaches origin. Throws → bootstrap saga surfaces an attention item.
+  await assertSkillsCommitted({ worktreeDir, execGit, onOutput });
+
   await execGit(['push', 'origin', branch], { cwd: worktreeDir, onOutput });
 
   return { skipped: false };

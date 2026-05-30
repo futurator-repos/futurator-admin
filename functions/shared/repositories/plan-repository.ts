@@ -99,6 +99,69 @@ export async function updatePlanFields(
   );
 }
 
+/**
+ * Event-driven advancement (2026-05-30) — a short-lived per-plan reduce lock.
+ *
+ * Both the WaveCompletionCheck cron AND the reactive
+ * `POST /api/plans/:id/check-wave-completion` (the daemon hits it the instant a
+ * job finishes) run `reducePlan`. Running both concurrently for the same plan
+ * could double-create a wave-merge/next-wave job (the reducer's
+ * read-`waveBuildJobs`-then-write isn't atomic). This lock serializes reduce
+ * passes per plan at the source, without touching the delicate reducer order.
+ *
+ * Conditional acquire: succeeds iff no live lock (`attribute_not_exists`) OR the
+ * existing lock is stale (older than `ttlMs` — a crashed holder can't wedge
+ * advancement forever). The cron is the backstop, so a missed acquire is
+ * harmless: advancement just happens on the next tick.
+ *
+ * @returns the lock token if acquired, else null.
+ */
+export async function acquirePlanReduceLock(
+  planId: string,
+  nowMs: number,
+  ttlMs = 60_000,
+): Promise<string | null> {
+  const token = `${nowMs}-${Math.round((nowMs * 7919) % 1_000_000)}`;
+  const staleBefore = nowMs - ttlMs;
+  try {
+    await docClient.send(
+      new UpdateCommand({
+        TableName: TABLE_NAMES.plans,
+        Key: { planId },
+        UpdateExpression: 'SET reduceLockToken = :tok, reduceLockAt = :now',
+        ConditionExpression:
+          'attribute_not_exists(reduceLockToken) OR attribute_not_exists(reduceLockAt) OR reduceLockAt < :stale',
+        ExpressionAttributeValues: { ':tok': token, ':now': nowMs, ':stale': staleBefore },
+      }),
+    );
+    return token;
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') return null;
+    throw err;
+  }
+}
+
+/**
+ * Release the reduce lock iff we still hold it (token match). Best-effort —
+ * a failed release just lets the TTL reclaim it.
+ */
+export async function releasePlanReduceLock(planId: string, token: string): Promise<void> {
+  try {
+    await docClient.send(
+      new UpdateCommand({
+        TableName: TABLE_NAMES.plans,
+        Key: { planId },
+        UpdateExpression: 'REMOVE reduceLockToken, reduceLockAt',
+        ConditionExpression: 'reduceLockToken = :tok',
+        ExpressionAttributeValues: { ':tok': token },
+      }),
+    );
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') return;
+    throw err;
+  }
+}
+
 export async function deletePlan(planId: string): Promise<void> {
   await docClient.send(new DeleteCommand({ TableName: TABLE_NAMES.plans, Key: { planId } }));
 }
@@ -202,10 +265,7 @@ export async function addEpicToPlan(planId: string, epicId: string): Promise<Pla
  * a separate concern handled by `plan-reducer.ts` in Story 3.3 — this
  * function only handles the Plan row write.
  */
-export async function transitionPlanStatus(
-  planId: string,
-  toStatus: PlanStatus,
-): Promise<Plan> {
+export async function transitionPlanStatus(planId: string, toStatus: PlanStatus): Promise<Plan> {
   const plan = await getPlanById(planId);
   if (!plan) {
     throw new AppError('PLAN_NOT_FOUND', `Plan "${planId}" not found.`, 404);

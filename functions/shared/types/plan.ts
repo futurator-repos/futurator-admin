@@ -245,6 +245,16 @@ export interface Plan {
    */
   personaPinned?: Record<string, string>;
 
+  /**
+   * Event-driven advancement (2026-05-30) — short-lived per-plan reduce lock,
+   * managed by `acquire/releasePlanReduceLock`. Serializes the cron and the
+   * reactive `check-wave-completion` endpoint so they never run `reducePlan`
+   * for the same plan concurrently. Transient; absent when no reduce is
+   * in-flight. `reduceLockAt` is epoch-ms for staleness/TTL reclaim.
+   */
+  reduceLockToken?: string;
+  reduceLockAt?: number;
+
   createdAt: string;
   updatedAt: string;
   createdBy: string;

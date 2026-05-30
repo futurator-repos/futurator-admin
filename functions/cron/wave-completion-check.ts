@@ -2,15 +2,12 @@ import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
 import * as planRepo from '../shared/repositories/plan-repository';
 import * as appRepo from '../shared/repositories/app-repository';
-import * as attentionRepo from '../shared/repositories/attention-items-repository';
 import { resolveQaContext } from '../shared/services/qa-boilerplate-resolver';
 // Story 1.8.7 — 3× escalator: fire-and-forget after plan is marked delivered
 import { evaluateThresholds } from '../shared/timer/escalator';
-import { generateStoryPipeline } from '../shared/pipelines/story-pipeline';
-import { generateWaveBuildPipeline } from '../shared/pipelines/wave-build-pipeline';
-import { generatePlanBuildPipeline } from '../shared/pipelines/plan-build-pipeline';
-import { type WaveReducerDeps } from '../shared/services/wave-reducer';
 import { reducePlan, type PlanReducerDeps } from '../shared/services/plan-reducer';
+// 2026-05-30 — shared reducer-deps factory (cron + reactive endpoint parity).
+import { buildPlanReducerDeps } from '../shared/services/reduce-deps';
 import { launchPlanQaAggregate } from '../shared/services/visual-qa-launcher';
 import {
   parseVisualTests,
@@ -43,16 +40,11 @@ export const handler = async () => {
   let errored = 0;
   const resultCounts: Record<string, number> = {};
 
-  const waveDeps: WaveReducerDeps = {
-    getJobById: agentJobsRepo.getJobById,
-    createJob: agentJobsRepo.createJob,
-    updateEpicFields: epicRepo.updateEpicFields,
-    generatePipeline: generateStoryPipeline,
-    generateWaveBuildPipeline,
-    uuid: () => crypto.randomUUID(),
-    now: () => new Date().toISOString(),
-    writeAttentionItem: attentionRepo.createAttentionItem,
-  };
+  // 2026-05-30 — deps now come from the shared factory (buildPlanReducerDeps)
+  // so the cron and the reactive POST /api/plans/:id/check-wave-completion
+  // endpoint can never drift. (The factory preserves the 2026-05-18 dino1 fix
+  // routing dedupKey writes through the idempotent upsert.)
+  const planDepsShared: PlanReducerDeps = buildPlanReducerDeps();
 
   try {
     // ── 1. Plans pass — the authoritative entrypoint post-Story 17.4. ──
@@ -76,13 +68,23 @@ export const handler = async () => {
           continue;
         }
 
-        const planDeps: PlanReducerDeps = {
-          ...waveDeps,
-          updatePlanFields: planRepo.updatePlanFields,
-          generatePlanBuildPipeline,
-        };
-
-        const result = await reducePlan(plan, epicsForPlan, planDeps);
+        // 2026-05-30 — acquire the per-plan reduce lock so the cron and the
+        // reactive endpoint never run reducePlan concurrently for one plan
+        // (which could double-create a wave-merge/next-wave job). If a reactive
+        // call holds it, skip this plan — it's being handled; we'll catch any
+        // residual next tick. The QA-enqueue below is separately idempotent
+        // (guarded by qaJobId/qaAggregateJobId) so it stays outside the lock.
+        const reduceToken = await planRepo.acquirePlanReduceLock(plan.planId, Date.now());
+        if (!reduceToken) {
+          resultCounts['plan:reduce-locked'] = (resultCounts['plan:reduce-locked'] || 0) + 1;
+          continue;
+        }
+        let result;
+        try {
+          result = await reducePlan(plan, epicsForPlan, planDepsShared);
+        } finally {
+          await planRepo.releasePlanReduceLock(plan.planId, reduceToken);
+        }
         entitiesProcessed++;
         resultCounts[`plan:${result.kind}`] = (resultCounts[`plan:${result.kind}`] || 0) + 1;
         log('info', 'wave-completion-check', 'reduced plan', {
