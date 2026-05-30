@@ -91,6 +91,19 @@ export interface App {
    */
   bootstrappedAt?: string;
 
+  /**
+   * 2026-05-30 — the App's real GitHub repo, for ANY org (not just
+   * `futurator-repos`). Populated for brownfield migrations from
+   * `PartyProject.gitRepoUrl` (e.g. `https://github.com/Get-Really-Real/applicator.git`).
+   * Absent for greenfield apps, which fall back to `futurator-repos/<appId>`.
+   * The UI (RepositoryBadge, git-graph, file/tree views) reads this to link +
+   * query the correct repo/owner instead of assuming `futurator-repos`.
+   */
+  githubRepoUrl?: string;
+
+  /** 2026-05-30 — default branch tracked for `githubRepoUrl` (default 'main'). */
+  githubBranch?: string;
+
   createdAt: string;
   updatedAt: string;
 }

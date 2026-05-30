@@ -1,6 +1,7 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api-client';
+import { resolveRepoRef } from '../../functions/shared/github/parse-repo-url';
 import type { TreeEntry, RateLimit } from '../../functions/shared/github/types';
 
 export interface GithubTreeResponse {
@@ -20,11 +21,16 @@ export interface GithubTreeResponse {
  * omitted, but callers should pass it to avoid an extra round-trip inside the
  * connector.
  */
-export function useGithubTree(appId: string | null | undefined, branch: string | null | undefined) {
+export function useGithubTree(
+  appId: string | null | undefined,
+  branch: string | null | undefined,
+  githubRepoUrl?: string | null,
+) {
   const qs = branch ? `?branch=${encodeURIComponent(branch)}` : '';
+  const { owner, repo } = resolveRepoRef(appId ?? '', githubRepoUrl);
   return useQuery({
-    queryKey: ['github-tree', 'futurator-repos', appId, branch ?? 'default'],
-    queryFn: () => api.get<GithubTreeResponse>(`/github/repos/futurator-repos/${appId}/tree${qs}`),
+    queryKey: ['github-tree', owner, repo, branch ?? 'default'],
+    queryFn: () => api.get<GithubTreeResponse>(`/github/repos/${owner}/${repo}/tree${qs}`),
     enabled: !!appId,
     staleTime: 5 * 60 * 1000,
     retry: (failureCount, error) => {

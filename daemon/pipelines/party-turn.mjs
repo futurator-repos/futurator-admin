@@ -55,6 +55,7 @@ import { startCancelPoller } from './lib/cancel-poller.mjs';
 import { extractMarkers } from './lib/party-marker-extractor.mjs';
 import { composeAgentCommit } from './lib/agent-commit-composer.mjs';
 import { setupPartyWorktree, WorktreeSetupError } from './lib/party-worktree.mjs';
+import { syncMainToOrigin } from '../lib/bare-repo-sync.mjs';
 
 // ── Scoped doc delivery (party-docs session/shared scoping) ──────────────
 // S3 is the source of truth for uploaded docs. At the start of every turn we
@@ -486,10 +487,36 @@ export async function runPartyTurn(job, ctx) {
     let resolvedPartyBranch = session.partyBranch || null;
     const isFreshSession = !session.claudeSessionId;
     if (isFreshSession && (!resolvedWorktreePath || !resolvedPartyBranch)) {
+      // 2026-05-30 — start every fresh debate from the LATEST main. For a
+      // brownfield app (real GitHub repo, any org), sync main to origin/main
+      // BEFORE forking the party worktree off main, so the debate sees the
+      // latest pushed code (laptop / other machines). One-way, best-effort;
+      // main only (plan/<slug> is EC2-owned). Greenfield apps skip (their
+      // main is local-only). See daemon/lib/bare-repo-sync.mjs.
+      try {
+        if (typeof getProject === 'function' && session.projectId) {
+          const proj = await getProject(session.projectId).catch(() => null);
+          if (proj?.kind === 'brownfield') {
+            // Sync 'main' — the party worktree forks off main (party-worktree),
+            // so we align the synced branch with the fork point.
+            await syncMainToOrigin({
+              appId: session.projectId,
+              branch: 'main',
+              log: (level, msg) => logger?.[level]?.(msg),
+            });
+          }
+        }
+      } catch (syncErr) {
+        logger?.warn?.(`[party-turn] pre-debate main sync failed (non-blocking): ${syncErr.message}`);
+      }
       try {
         const setup = await setupPartyWorktree({
           projectId: session.projectId,
           sessionId,
+          // 2026-05-30 — debate against a specific branch when the session
+          // carries one (e.g. a plan/<slug> in execution); defaults to main
+          // (synced above for brownfield). plan branches are used as-is.
+          baseRef: session.baseRef || 'main',
           log: (level, msg) => logger?.[level]?.(msg),
         });
         resolvedWorktreePath = setup.worktreePath;

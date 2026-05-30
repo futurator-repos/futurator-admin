@@ -20,6 +20,7 @@ import { useGithubTree, type GithubTreeResponse } from '@/hooks/use-github-tree'
 import { useGithubFile } from '@/hooks/use-github-file';
 import { SourceTreeNode, buildVirtualTree } from './source-tree-node';
 import type { App } from '@/types/app';
+import { resolveRepoRef } from '../../../../functions/shared/github/parse-repo-url';
 import type { RateLimit } from '../../../../functions/shared/github/types';
 
 // ── Rate-limit footer ───────────────────────────────────────────────────────
@@ -93,19 +94,22 @@ function FileBreadcrumbs({
 
 function FileContentPanel({
   appId,
+  githubRepoUrl,
   selectedPath,
   branch,
   onBreadcrumbNavigate,
 }: {
   appId: string;
+  githubRepoUrl?: string;
   selectedPath: string | null;
   branch: string | undefined;
   onBreadcrumbNavigate: (path: string) => void;
 }) {
-  const { data, isLoading, error } = useGithubFile(appId, selectedPath, branch);
+  const { data, isLoading, error } = useGithubFile(appId, selectedPath, branch, githubRepoUrl);
 
+  const { owner, repo } = resolveRepoRef(appId, githubRepoUrl);
   const githubFileUrl = selectedPath
-    ? `https://github.com/futurator-repos/${appId}/blob/${branch ?? 'main'}/${selectedPath}`
+    ? `https://github.com/${owner}/${repo}/blob/${branch ?? 'main'}/${selectedPath}`
     : undefined;
 
   return (
@@ -251,8 +255,10 @@ interface SourceTabProps {
  * AppDetailView) to avoid a redundant API call.
  */
 export function SourceTabContent({ app, defaultBranch }: SourceTabProps) {
-  // Guard: same as badge — hide for legacy / in-flight apps
-  if (!app.boilerplateType || !app.bootstrappedAt) {
+  // Guard: hide for legacy / in-flight greenfield apps. 2026-05-30 — brownfield
+  // apps with an explicit githubRepoUrl are always sourceable (their repo
+  // exists on GitHub), regardless of bootstrappedAt.
+  if (!app.githubRepoUrl && (!app.boilerplateType || !app.bootstrappedAt)) {
     return (
       <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
         Source view is available once the app bootstrap completes.
@@ -260,14 +266,22 @@ export function SourceTabContent({ app, defaultBranch }: SourceTabProps) {
     );
   }
 
-  return <SourceTabInner appId={app.appId} defaultBranch={defaultBranch} />;
+  return (
+    <SourceTabInner
+      appId={app.appId}
+      githubRepoUrl={app.githubRepoUrl}
+      defaultBranch={defaultBranch ?? app.githubBranch}
+    />
+  );
 }
 
 function SourceTabInner({
   appId,
+  githubRepoUrl,
   defaultBranch,
 }: {
   appId: string;
+  githubRepoUrl?: string;
   defaultBranch: string | undefined;
 }) {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -278,7 +292,7 @@ function SourceTabInner({
     data: treeData,
     isLoading: treeLoading,
     error: treeError,
-  } = useGithubTree(appId, defaultBranch ?? null);
+  } = useGithubTree(appId, defaultBranch ?? null, githubRepoUrl);
 
   const rateLimit = treeData?.rateLimit;
 
@@ -309,6 +323,7 @@ function SourceTabInner({
         <div className="flex min-w-0 flex-1 flex-col p-3 max-h-[60vh] overflow-auto">
           <FileContentPanel
             appId={appId}
+            githubRepoUrl={githubRepoUrl}
             selectedPath={selectedPath}
             branch={defaultBranch}
             onBreadcrumbNavigate={handleBreadcrumbNavigate}

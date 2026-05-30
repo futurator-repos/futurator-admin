@@ -5306,6 +5306,12 @@ app.post('/api/party/projects', async (c) => {
         displayName: input.gitRepoUrl.replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, ''),
         icon: '📨',
         executionMode: 'orchestrator',
+        // 2026-05-30 — auto-link the real GitHub repo (any org) so the Labs UI
+        // shows the repo + git-graph/files query the correct owner, and the
+        // daemon can fetch-latest before debates/plans. Future migrations now
+        // link automatically (no more "No repository yet").
+        githubRepoUrl: input.gitRepoUrl,
+        githubBranch: input.gitBranch || 'main',
       });
     } catch (err) {
       if (err instanceof AppError && err.code === 'APP_ID_TAKEN') {

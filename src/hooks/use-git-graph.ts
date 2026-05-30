@@ -1,6 +1,7 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api-client';
+import { resolveRepoRef } from '../../functions/shared/github/parse-repo-url';
 import type {
   GitHubBranch,
   GitHubCommit,
@@ -24,19 +25,20 @@ export interface GitGraphResponse {
   rateLimit: RateLimit;
 }
 
-const GITHUB_OWNER = 'futurator-repos';
-
 /**
- * Fetch the bundled git-graph payload for a futurator-repos repo. Wraps
- * GET /api/github/repos/futurator-repos/:appId/git-graph.
+ * Fetch the bundled git-graph payload. Resolves the repo from the App's
+ * `githubRepoUrl` (brownfield, any org) when provided, else falls back to
+ * `futurator-repos/<appId>` (greenfield convention).
  *
- * 404 → likely a pre-Apps plan whose working dir was never paired with a
- * GitHub repo. The view should render an empty state, not error UI.
+ * 404 → no GitHub repo paired (greenfield without a repo); the API serves a
+ * bare-repo snapshot fallback, and if that's also absent the view renders an
+ * empty state, not error UI.
  */
-export function useGitGraph(appId: string | null | undefined) {
+export function useGitGraph(appId: string | null | undefined, githubRepoUrl?: string | null) {
+  const { owner, repo } = resolveRepoRef(appId ?? '', githubRepoUrl);
   return useQuery({
-    queryKey: ['git-graph', GITHUB_OWNER, appId],
-    queryFn: () => api.get<GitGraphResponse>(`/github/repos/${GITHUB_OWNER}/${appId}/git-graph`),
+    queryKey: ['git-graph', owner, repo],
+    queryFn: () => api.get<GitGraphResponse>(`/github/repos/${owner}/${repo}/git-graph`),
     enabled: !!appId,
     staleTime: 60_000,
     retry: (failureCount, error) => {

@@ -115,6 +115,12 @@ export async function setupPartyWorktree({
   gitRunner = runGit,
   bareDir, // override for tests; defaults to `bareRepoPath(projectId)`
   worktreeRootOverride, // override for tests; defaults to WORKTREE_ROOT
+  // 2026-05-30 — the ref the debate worktree forks from. Defaults to 'main'
+  // (synced to latest origin/main for brownfield before this call). Pass an
+  // existing `plan/<slug>` to debate against a plan-in-execution — that branch
+  // is EC2-owned (the freshest copy lives here) and is used AS-IS (never reset
+  // to origin). Foundation for "debate on a specific branch".
+  baseRef = 'main',
 }) {
   if (!projectId || !sessionId) {
     throw new WorktreeSetupError('WORKTREE_SETUP_FAILED', 'projectId + sessionId required');
@@ -158,7 +164,7 @@ export async function setupPartyWorktree({
   }
 
   const add = await gitRunner(
-    ['--git-dir', bare, 'worktree', 'add', '-B', branch, worktreePath, 'main'],
+    ['--git-dir', bare, 'worktree', 'add', '-B', branch, worktreePath, baseRef],
     LEGACY_PROJECTS_ROOT,
   );
   if (add.code !== 0) {
@@ -168,7 +174,7 @@ export async function setupPartyWorktree({
     );
   }
 
-  log('info', `[party-worktree] created ${worktreePath} on ${branch} (off main)`);
+  log('info', `[party-worktree] created ${worktreePath} on ${branch} (off ${baseRef})`);
   return { worktreePath, branch, created: true, reused: false };
 }
 

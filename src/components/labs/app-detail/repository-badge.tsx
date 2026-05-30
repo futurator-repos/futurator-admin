@@ -27,6 +27,7 @@
 import { GitBranch, TriangleAlert, Loader2 } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useGithubRepoSummary } from '@/hooks/use-github-repo-summary';
+import { resolveRepoRef } from '../../../../functions/shared/github/parse-repo-url';
 import type { App } from '@/types/app';
 
 function formatPushedAt(iso: string | null | undefined): string {
@@ -47,25 +48,36 @@ interface RepositoryBadgeProps {
 }
 
 export function RepositoryBadge({ app }: RepositoryBadgeProps) {
-  // Guard: only show for Story 1.4+ apps that have a GitHub repo. The repo
-  // URL is valid as soon as the saga's createRepoFromTemplate returns, so
-  // we don't need to wait for daemon-side bootstrap to complete.
-  if (!app.boilerplateType) return null;
+  // Guard: show for Story 1.4+ apps that have a GitHub repo. 2026-05-30 — also
+  // show for brownfield apps that carry an explicit `githubRepoUrl` (any org)
+  // even if boilerplateType is unset, so migrated repos link correctly.
+  if (!app.boilerplateType && !app.githubRepoUrl) return null;
 
-  const scaffoldPending = !app.bootstrappedAt;
-  return <RepositoryBadgeInner appId={app.appId} scaffoldPending={scaffoldPending} />;
+  const scaffoldPending = !app.bootstrappedAt && !app.githubRepoUrl;
+  return (
+    <RepositoryBadgeInner
+      appId={app.appId}
+      githubRepoUrl={app.githubRepoUrl}
+      scaffoldPending={scaffoldPending}
+    />
+  );
 }
 
 function RepositoryBadgeInner({
   appId,
+  githubRepoUrl,
   scaffoldPending,
 }: {
   appId: string;
+  githubRepoUrl?: string;
   scaffoldPending: boolean;
 }) {
-  const { data, isLoading, error } = useGithubRepoSummary(appId);
+  const { data, isLoading, error } = useGithubRepoSummary(appId, githubRepoUrl);
 
-  const githubUrl = `https://github.com/futurator-repos/${appId}`;
+  // Resolve the real owner/repo (brownfield any-org, else futurator-repos).
+  const ref = resolveRepoRef(appId, githubRepoUrl);
+  const repoSlug = `${ref.owner}/${ref.repo}`;
+  const githubUrl = `https://github.com/${ref.owner}/${ref.repo}`;
 
   // Loading state — skeleton chips
   if (isLoading) {
@@ -121,10 +133,10 @@ function RepositoryBadgeInner({
         target="_blank"
         rel="noopener noreferrer"
         className="inline-flex items-center gap-1.5 rounded border border-border bg-muted/50 px-2 py-0.5 font-mono text-[11px] text-foreground hover:bg-muted transition-colors"
-        aria-label={`Open GitHub repository futurator-repos/${appId}`}
+        aria-label={`Open GitHub repository ${repoSlug}`}
       >
         <GitBranch className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-        <span>futurator-repos/{appId}</span>
+        <span>{repoSlug}</span>
       </a>
 
       {/* Default branch chip */}

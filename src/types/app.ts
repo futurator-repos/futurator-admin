@@ -43,6 +43,10 @@ export interface App {
   bmadEnabled?: boolean;
   /** Story 1.4 — ISO timestamp set once the bootstrap saga completes. */
   bootstrappedAt?: string;
+  /** 2026-05-30 — brownfield: the App's real GitHub repo URL (any org). */
+  githubRepoUrl?: string;
+  /** 2026-05-30 — default branch tracked for githubRepoUrl (default 'main'). */
+  githubBranch?: string;
 }
 
 export interface AppCardData extends App {

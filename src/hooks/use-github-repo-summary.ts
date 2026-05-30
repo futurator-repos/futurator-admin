@@ -1,6 +1,7 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api-client';
+import { resolveRepoRef } from '../../functions/shared/github/parse-repo-url';
 import type { GitHubRepo, RateLimit } from '../../functions/shared/github/types';
 
 export interface GithubRepoSummaryResponse {
@@ -17,10 +18,14 @@ export interface GithubRepoSummaryResponse {
  * 404 → `data` is undefined, `is404` is true — caller should hide or show
  * a "no repo yet" note rather than an error state.
  */
-export function useGithubRepoSummary(appId: string | null | undefined) {
+export function useGithubRepoSummary(
+  appId: string | null | undefined,
+  githubRepoUrl?: string | null,
+) {
+  const { owner, repo } = resolveRepoRef(appId ?? '', githubRepoUrl);
   return useQuery({
-    queryKey: ['github-repo', 'futurator-repos', appId],
-    queryFn: () => api.get<GithubRepoSummaryResponse>(`/github/repos/futurator-repos/${appId}`),
+    queryKey: ['github-repo', owner, repo],
+    queryFn: () => api.get<GithubRepoSummaryResponse>(`/github/repos/${owner}/${repo}`),
     enabled: !!appId,
     staleTime: 5 * 60 * 1000,
     retry: (failureCount, error) => {

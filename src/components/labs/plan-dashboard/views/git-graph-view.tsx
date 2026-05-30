@@ -53,6 +53,13 @@ interface GraphCommit {
   sha: string;
   shortSha: string;
   message: string;
+  /**
+   * 2026-05-19 — full commit message body retained so the UI can grep
+   * for v2.5 §23 trailers (`Plan-Id:`, `Story:`, `Wave:`) when scoping
+   * the view to a specific plan. The `message` field stays as the
+   * subject-only summary for row display.
+   */
+  fullMessage: string;
   authorName: string;
   authorLogin: string | null;
   authorAvatar: string | null;
@@ -146,6 +153,7 @@ function buildGraph(data: GitGraphResponse): GraphData {
       sha: c.sha,
       shortSha: c.sha.slice(0, 7),
       message: subject,
+      fullMessage: c.commit.message,
       authorName: c.author?.login || c.commit.author.name,
       authorLogin: c.author?.login ?? null,
       authorAvatar: c.author?.avatar_url ?? null,
@@ -231,14 +239,40 @@ function buildPaths(commits: GraphCommit[], branches: BranchInfo[]): GraphPaths 
 
 export function GitGraphView({
   appId,
+  githubRepoUrl,
   planName,
+  planSlug,
+  planId,
 }: {
   appId: string | null | undefined;
+  /** 2026-05-30 — the App's real repo (any org). Resolves owner/repo so the
+   * graph queries the correct GitHub repo (brownfield) instead of assuming
+   * futurator-repos. Absent → greenfield futurator-repos/<appId>. */
+  githubRepoUrl?: string | null;
   planName: string;
+  /**
+   * 2026-05-19 — kebab-case plan slug. The view computes `plan/<slug>` and
+   * defaults the lane filter to that branch when it exists in the repo's
+   * branch list. Operator can flip to "show all" via the toggle in the
+   * header. Absent → legacy plan (no per-plan branch); show all.
+   */
+  planSlug?: string;
+  /**
+   * 2026-05-19 — Plan DDB id. Used to highlight commits whose
+   * `Plan-Id: <id>` trailer matches the current plan. Highlights are
+   * additive — they appear regardless of which branch filter is active.
+   */
+  planId?: string;
 }) {
-  const { data, isLoading, error } = useGitGraph(appId);
+  const { data, isLoading, error } = useGitGraph(appId, githubRepoUrl);
   const graph = useMemo(() => (data ? buildGraph(data) : null), [data]);
   const [activeIdx, setActiveIdx] = useState<number>(0);
+  const planBranchName = planSlug ? `plan/${planSlug}` : null;
+  const planBranchExists = !!(
+    planBranchName && graph?.branches.some((b) => b.name === planBranchName)
+  );
+  // Default: when the plan-branch exists, scope to it; otherwise show all.
+  const [showAll, setShowAll] = useState(false);
 
   if (!appId) {
     return (
@@ -295,10 +329,30 @@ export function GitGraphView({
     );
   }
 
-  const { commits, branches, prCount } = graph;
+  // 2026-05-19 — scope filter. When the plan-branch exists and `showAll`
+  // is off, hide commits that aren't on the plan's branch lane (i.e. only
+  // show this plan's commits, not the App's full history). When the
+  // plan-branch is absent (legacy or pre-commit) the toggle is hidden and
+  // we show everything.
+  const planBranchLane = planBranchExists
+    ? (graph.branches.find((b) => b.name === planBranchName)?.lane ?? null)
+    : null;
+  const isPlanScoped = planBranchExists && !showAll;
+  const filteredCommits = isPlanScoped
+    ? graph.commits.filter((c) => c.lane === planBranchLane)
+    : graph.commits;
+  const commits = filteredCommits;
+  const { branches, prCount } = graph;
   const { paths, dots } = buildPaths(commits, branches);
   const totalH = commits.length * ROW_H + 6;
-  const active = commits[activeIdx] ?? commits[0];
+  const active = commits[activeIdx] ?? commits[0] ?? graph.commits[0];
+
+  // 2026-05-19 — does the current Plan-Id trailer appear anywhere?
+  // Counts the commits in the loaded page (limit 40 by default). Server-
+  // side countResidualPlanCommits is authoritative; this is a UI hint.
+  const planIdHits = planId
+    ? graph.commits.filter((c) => c.fullMessage.includes(`Plan-Id: ${planId}`)).length
+    : 0;
 
   return (
     <div
@@ -311,6 +365,74 @@ export function GitGraphView({
         color: 'var(--foreground)',
       }}
     >
+      {/* 2026-05-19 — scope banner. Explains what the operator is seeing
+          and why. Only renders when plan-scoping is meaningful (planSlug
+          provided). Legacy plans (no slug) see no banner — the App-scoped
+          view IS their view.
+       */}
+      {planSlug && (
+        <div
+          style={{
+            padding: '8px 14px',
+            background: 'var(--surface)',
+            borderBottom: '1px solid var(--border)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            fontSize: 12,
+            color: 'var(--text-mute)',
+            flexWrap: 'wrap',
+          }}
+        >
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+            {isPlanScoped ? (
+              <>
+                Showing only <code style={{ color: 'var(--accent-blue)' }}>plan/{planSlug}</code> (
+                {commits.length} commit{commits.length === 1 ? '' : 's'}). Other branches are
+                hidden.
+              </>
+            ) : planBranchExists ? (
+              <>
+                Showing all branches. This plan&apos;s commits live on{' '}
+                <code style={{ color: 'var(--accent-blue)' }}>plan/{planSlug}</code>.
+              </>
+            ) : (
+              <>
+                No <code>plan/{planSlug}</code> branch on this repo yet. Commits will appear here
+                once the first story commits + pushes. If commits land directly on <code>main</code>
+                , this is a pre-Plan-branching legacy plan and main&apos;s history is the App&apos;s
+                history.
+              </>
+            )}
+            {planIdHits > 0 && (
+              <>
+                {' '}
+                <span style={{ color: 'var(--success)' }}>
+                  · {planIdHits} commit{planIdHits === 1 ? '' : 's'} carry this plan&apos;s Plan-Id.
+                </span>
+              </>
+            )}
+          </span>
+          {planBranchExists && (
+            <button
+              onClick={() => setShowAll((v) => !v)}
+              style={{
+                marginLeft: 'auto',
+                padding: '4px 10px',
+                fontSize: 11,
+                fontFamily: 'var(--font-mono)',
+                borderRadius: 6,
+                background: 'var(--bg-elev)',
+                border: '1px solid var(--border)',
+                color: 'var(--foreground)',
+                cursor: 'pointer',
+              }}
+            >
+              {showAll ? 'Scope to this plan' : 'Show all branches'}
+            </button>
+          )}
+        </div>
+      )}
       {/* Header */}
       <div
         style={{

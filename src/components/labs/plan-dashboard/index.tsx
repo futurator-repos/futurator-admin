@@ -27,6 +27,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 import Link from 'next/link';
 import { usePlan, useApplyPlanOutput } from '@/hooks/use-plans';
+import { useApp } from '@/hooks/use-apps';
 import type { AgentJob } from '@/types/agent-orchestrator';
 import { useAgentJob, useAgentJobs } from '@/hooks/use-agent-job';
 import { LabsHeader } from './labs-header';
@@ -69,6 +70,9 @@ export function PlanDashboard({ planId }: { planId: string }) {
   const urlPmJobId = params.get('pmJobId');
   const { data: plan, isLoading, error: planError, refetch } = usePlan(planId);
   const apply = useApplyPlanOutput(planId);
+  // 2026-05-30 — the App carries the real GitHub repo (any org) for brownfield;
+  // the git-graph needs it to query the correct repo instead of futurator-repos.
+  const { data: appRow } = useApp(plan?.appId ?? null);
 
   // ── View/stage state ────────────────────────────────────────────────
   const urlStage = params.get('stage');
@@ -372,7 +376,10 @@ export function PlanDashboard({ planId }: { planId: string }) {
             {activeSubtab === 'gitgraph' && (
               <GitGraphView
                 appId={plan.appId ?? plan.workingDir.split('/').filter(Boolean).pop() ?? null}
+                githubRepoUrl={appRow?.app?.githubRepoUrl}
                 planName={plan.displayName ?? plan.name}
+                planSlug={plan.name}
+                planId={plan.planId}
               />
             )}
             {activeSubtab === 'graph' && (

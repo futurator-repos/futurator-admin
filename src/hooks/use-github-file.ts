@@ -1,6 +1,7 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api-client';
+import { resolveRepoRef } from '../../functions/shared/github/parse-repo-url';
 import type { RateLimit } from '../../functions/shared/github/types';
 
 export type GithubFileResponse =
@@ -20,15 +21,17 @@ export function useGithubFile(
   appId: string | null | undefined,
   filePath: string | null | undefined,
   ref?: string,
+  githubRepoUrl?: string | null,
 ) {
   const qs = new URLSearchParams();
   if (filePath) qs.set('path', filePath);
   if (ref) qs.set('ref', ref);
+  const { owner, repo } = resolveRepoRef(appId ?? '', githubRepoUrl);
 
   return useQuery({
-    queryKey: ['github-file', 'futurator-repos', appId, filePath ?? '', ref ?? ''],
+    queryKey: ['github-file', owner, repo, filePath ?? '', ref ?? ''],
     queryFn: () =>
-      api.get<GithubFileResponse>(`/github/repos/futurator-repos/${appId}/files?${qs.toString()}`),
+      api.get<GithubFileResponse>(`/github/repos/${owner}/${repo}/files?${qs.toString()}`),
     enabled: !!appId && !!filePath,
     staleTime: 5 * 60 * 1000,
     retry: (failureCount, error) => {

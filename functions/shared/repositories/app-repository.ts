@@ -24,6 +24,9 @@ export interface CreateAppArgs {
   displayName: string;
   icon?: string;
   executionMode?: AppExecutionMode;
+  /** 2026-05-30 — brownfield: the App's real GitHub repo (any org) + branch. */
+  githubRepoUrl?: string;
+  githubBranch?: string;
 }
 
 /**
@@ -75,6 +78,8 @@ export async function createApp(args: CreateAppArgs): Promise<App> {
     currentlyDeployedPlanId: null,
     deployJobIds: [],
     workingTreeStatus: 'clean',
+    ...(args.githubRepoUrl ? { githubRepoUrl: args.githubRepoUrl } : {}),
+    ...(args.githubBranch ? { githubBranch: args.githubBranch } : {}),
     createdAt: now,
     updatedAt: now,
   };
