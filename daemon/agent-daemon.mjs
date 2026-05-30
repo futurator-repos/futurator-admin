@@ -278,6 +278,48 @@ const WAVE_COMPLETION_FN =
   'futurator-production-WaveCompletionCheckHandlerFunction-cbowzwhk';
 let _lambdaClient = null;
 let _lambdaInvokeCmd = null;
+// ── git-graph snapshot (2026-05-30) ───────────────────────────────────────
+// After a wave-merge the daemon writes a snapshot of the bare repo's full
+// graph (all refs: main + wip/* + plan/<slug>, with merge commits) to S3 so
+// the Labs git-graph view can show the emerging branching for greenfield apps
+// that have no GitHub repo. Best-effort, fire-and-forget.
+let _s3Client = null;
+function daemonGit(args, cwd) {
+  return new Promise((resolve) => {
+    const child = spawn('sudo', ['-n', '-u', 'ubuntu', 'git', ...args], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (b) => (stdout += b.toString('utf8')));
+    child.stderr.on('data', (b) => (stderr += b.toString('utf8')));
+    child.on('error', (e) => resolve({ code: -1, stdout: '', stderr: e.message }));
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+async function snapshotGitGraph(appId, short) {
+  try {
+    const [{ writeGitGraphSnapshot }, { bareRepoPath }, s3mod] = await Promise.all([
+      import('./lib/git-graph-snapshot.mjs'),
+      import('./lib/story-worktree.mjs'),
+      import('@aws-sdk/client-s3'),
+    ]);
+    if (!_s3Client) _s3Client = new s3mod.S3Client({ region: REGION });
+    const bare = bareRepoPath(appId);
+    await writeGitGraphSnapshot({
+      appId,
+      bare,
+      git: daemonGit,
+      bareOpCwd: '/home/ubuntu/projects',
+      s3: _s3Client,
+      log,
+    });
+  } catch (err) {
+    log('warn', `[${short}] git-graph snapshot failed (non-blocking): ${err.message}`);
+  }
+}
+
 async function triggerWaveReduce(reason) {
   try {
     if (!_lambdaClient) {
@@ -4601,6 +4643,8 @@ async function executeWaveMergeJob(job) {
         },
       });
       log('info', `[${short}] wave-merge ${result.outcome} (merged ${result.mergedStoryIds?.length || 0})`);
+      // git-graph snapshot — the plan branch + merge commits just advanced.
+      void snapshotGitGraph(p.appId, short);
       return;
     }
 
@@ -4611,6 +4655,9 @@ async function executeWaveMergeJob(job) {
       waveMergeResult: result,
     });
     log('warn', `[${short}] wave-merge ${result.outcome}`);
+    // Snapshot even on halt — the wip/* branches the operator wants to see
+    // are still present (they're only reaped on success).
+    void snapshotGitGraph(p.appId, short);
     // We do NOT throw — the failure is structured and the wave-reducer
     // will see this terminal status on the next tick and flip the wave
     // to `fixing` (existing wave-reducer behavior for non-success wave

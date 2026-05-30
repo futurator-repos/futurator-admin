@@ -10276,12 +10276,39 @@ app.get('/api/github/repos/:owner/:name/git-graph', authMiddleware, async (c) =>
       rateLimit: pullsRes.rateLimit,
     });
   } catch (err) {
+    // 2026-05-30 — bare-repo fallback. Greenfield Labs apps have NO GitHub repo
+    // (getRepo 404s), and wip/* branches + merges live only in the EC2 bare
+    // repo. The daemon mirrors a snapshot to
+    // knowledge-live/<appId>/_graph/git-graph.json after each wave-merge; serve
+    // it so the view shows the emerging branching instead of an empty state.
     if (err instanceof GitHubError) {
+      const fallback = await readBareRepoGitGraph(name).catch(() => null);
+      if (fallback) return c.json(fallback);
       return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
     }
     throw err;
   }
 });
+
+/**
+ * Read the daemon-written bare-repo git-graph snapshot from S3 for an app.
+ * Returns the parsed GitGraphResponse, or null if absent/unreadable.
+ */
+async function readBareRepoGitGraph(appId: string): Promise<unknown | null> {
+  const s3 = new S3Client({ region: 'us-east-1' });
+  try {
+    const res = await s3.send(
+      new GetObjectCommand({
+        Bucket: 'futurator-ai-website',
+        Key: `knowledge-live/${appId}/_graph/git-graph.json`,
+      }),
+    );
+    const body = await res.Body?.transformToString();
+    return body ? JSON.parse(body) : null;
+  } catch {
+    return null;
+  }
+}
 
 // PUT /api/github/pat — Story 1.7.1. Rotate the GitHub PAT.
 // Auth-required. Validates the token against GitHub before writing to SSM.
