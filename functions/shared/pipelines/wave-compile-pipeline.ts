@@ -5,6 +5,7 @@ import type {
 } from '../types/agent-orchestrator';
 import type { EpicStory } from '../types/epic-workflow';
 import { buildAgentConfig } from './role-policy';
+import { deriveProjectId } from './derive-project-id';
 
 /**
  * Wave-compile pipeline — Epic E.2 / E.3 / E.4 (pipeline-v1 dev correction).
@@ -222,9 +223,8 @@ export function generateWaveCompilePipeline(input: WaveCompilePipelineInput): Pi
  */
 export const WAVE_COMPILE_PROMPT_PLACEHOLDER = '<wave-compile-prompt-pending-substitution>';
 
-function deriveProjectId(workingDir: string): string {
-  return workingDir.replace(/\/+$/, '').split('/').filter(Boolean).pop() || 'unknown';
-}
+// 2026-05-30 — uses the shared worktree-aware deriveProjectId (was a local
+// last-segment derivation that keyed knowledge by storyId under worktrees).
 
 function quoteShell(value: string): string {
   if (!/[\s'"$`\\!]/.test(value)) return value;

@@ -11,6 +11,7 @@ import { buildApiAuthorPrompt } from '../prompts/api-author-prompt';
 // in the daemon and were never imported; now they live here so the
 // Lambda-built compile-commit-on-pass actually emits them under mvp+.
 import { buildCommitShellSnippet } from './commit-metadata';
+import { deriveProjectId } from './derive-project-id';
 
 /**
  * PR-91-followup gate. Stub boilerplates (sst / vite / mobile) don't ship
@@ -123,9 +124,13 @@ export function generateStoryPipeline(
     sourceCommitSha?: string;
   },
 ): PipelineDefinition {
-  // Derive projectId from workingDir: /home/ubuntu/projects/{name}/
-  // Strip trailing slashes before splitting to avoid empty string from pop()
-  const projectId = workingDir.replace(/\/+$/, '').split('/').filter(Boolean).pop() || 'unknown';
+  // 2026-05-30 — worktree-aware. Under the per-story worktree model workingDir
+  // is /home/ubuntu/worktrees/<appId>/<planSlug>/<storyId>, whose last segment
+  // is the STORY id — deriving projectId from it keyed knowledge by storyId
+  // (knowledge-live/<storyId>/ + Memgraph per-story) so the graph-viewer's
+  // knowledge-live/<appSlug>/ fetch 404'd and the graph never grew. This helper
+  // returns the appId for both worktree + legacy /projects/<appId> layouts.
+  const projectId = deriveProjectId(workingDir);
   const rigor: PlanRigor = opts.rigor || 'mvp';
   const boilerplateKind: BoilerplateType = opts.boilerplateKind || 'nextjs-base';
   const testsOn = rigor !== 'prototype';
