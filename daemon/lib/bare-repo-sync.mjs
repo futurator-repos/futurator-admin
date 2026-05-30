@@ -69,8 +69,13 @@ export async function syncMainToOrigin({
     return { synced: false, reason: 'no-working-copy' };
   }
 
+  // Reset to FETCH_HEAD (not origin/<branch>): the working copy is a worktree
+  // of the bare repo, which has an EMPTY fetch refspec — so `git fetch origin
+  // main` sets FETCH_HEAD but never creates `refs/remotes/origin/main`, and
+  // `reset --hard origin/main` would fail "ambiguous argument 'origin/main'".
+  // FETCH_HEAD always points at the just-fetched tip, independent of refspec.
   const res = await runner(
-    `git fetch origin ${branch} && git reset --hard origin/${branch}`,
+    `git fetch origin ${branch} && git reset --hard FETCH_HEAD`,
     repoDir,
   );
   if (res.code !== 0) {

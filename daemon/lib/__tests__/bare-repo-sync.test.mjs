@@ -34,7 +34,9 @@ describe('syncMainToOrigin', () => {
     expect(res.sha).toBe('abc1234');
     // The fetch+reset ran in /home/.../applicator (where main is checked out).
     const fetchReset = calls.find((c) => c.command.includes('reset --hard'));
-    expect(fetchReset.command).toBe('git fetch origin main && git reset --hard origin/main');
+    // Resets to FETCH_HEAD — the bare repo's worktree has an empty fetch
+    // refspec, so origin/main doesn't exist; FETCH_HEAD is the fetched tip.
+    expect(fetchReset.command).toBe('git fetch origin main && git reset --hard FETCH_HEAD');
     expect(fetchReset.cwd).toBe(join(projectsRoot, 'applicator'));
   });
 
