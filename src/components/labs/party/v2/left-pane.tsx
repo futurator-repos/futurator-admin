@@ -58,10 +58,7 @@ export function LeftPane({
 }: Props) {
   const [tab, setTab] = useState<LeftTab>('chat');
   return (
-    <div
-      className="flex h-full flex-col"
-      style={{ background: COLORS.bgSurface }}
-    >
+    <div className="flex h-full flex-col" style={{ background: COLORS.bgSurface }}>
       <Tabs tab={tab} onChange={setTab} />
 
       <div className="flex-1 overflow-y-auto">
@@ -146,13 +143,7 @@ function TabBtn({
 }
 
 /** Chat tab body — round-grouped history of user messages + system summaries. */
-function ChatHistory({
-  rounds,
-  activeRoundId,
-}: {
-  rounds: Round[];
-  activeRoundId: string | null;
-}) {
+function ChatHistory({ rounds, activeRoundId }: { rounds: Round[]; activeRoundId: string | null }) {
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
@@ -164,8 +155,8 @@ function ChatHistory({
         className="m-4 rounded-md border border-dashed px-3 py-6 text-center text-[12px] italic"
         style={{ borderColor: COLORS.bgDeepest, color: COLORS.textMuted }}
       >
-        Start a debate by sending a message below. Each round groups your
-        question + the agents&apos; responses.
+        Start a debate by sending a message below. Each round groups your question + the
+        agents&apos; responses.
       </div>
     );
   }
@@ -175,9 +166,7 @@ function ChatHistory({
         <div key={r.id} className="mb-3">
           <RoundDivider n={r.n} title={r.user.text} />
           {r.speakers.length > 0 && (
-            <SystemBubble
-              text={`Round ${r.n} started → ${r.speakers.join(', ')}`}
-            />
+            <SystemBubble text={`Round ${r.n} started → ${r.speakers.join(', ')}`} />
           )}
           <UserBubble text={r.user.text} timestamp={timeAgo(r.startedAt)} />
           {r.status === 'done' && r.turns > 0 && (
@@ -189,7 +178,9 @@ function ChatHistory({
             <SystemBubble text={`An agent asked you a follow-up — reply below.`} />
           )}
           {r.status === 'error' && (
-            <SystemBubble text={`Round ${r.n} failed${r.errorReason ? ` (${r.errorReason})` : ''}.`} />
+            <SystemBubble
+              text={`Round ${r.n} failed${r.errorReason ? ` (${r.errorReason})` : ''}.`}
+            />
           )}
         </div>
       ))}
@@ -218,7 +209,7 @@ function SystemBubble({ text }: { text: string }) {
     <div
       className="my-1 rounded-md px-2.5 py-1.5 text-[12px] italic"
       style={{
-        background: 'rgba(167,139,250,0.1)',
+        background: 'color-mix(in srgb, var(--accent-purple) 12%, transparent)',
         color: COLORS.accentOrchSoft,
       }}
     >
@@ -236,10 +227,7 @@ function UserBubble({ text, timestamp }: { text: string; timestamp: string }) {
       >
         {text}
       </div>
-      <span
-        className="mt-0.5 text-[10px]"
-        style={{ color: COLORS.textFaint }}
-      >
+      <span className="mt-0.5 text-[10px]" style={{ color: COLORS.textFaint }}>
         {timestamp}
       </span>
     </div>
@@ -338,10 +326,12 @@ function SessionRow({
       onClick={onClick}
       className="w-full rounded-md px-2.5 py-1.5 text-left transition-colors"
       style={{
-        background: active ? '#404249' : 'transparent',
+        background: active ? 'var(--party-bg-elevated)' : 'transparent',
       }}
       onMouseEnter={(e) => {
-        if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+        if (!active)
+          e.currentTarget.style.background =
+            'color-mix(in srgb, var(--foreground) 4%, transparent)';
       }}
       onMouseLeave={(e) => {
         if (!active) e.currentTarget.style.background = 'transparent';
@@ -356,8 +346,13 @@ function SessionRow({
           {session.topic || `session-${session.sessionId.slice(0, 6)}`}
         </span>
       </div>
-      <div className="mt-0.5 flex items-center gap-2 pl-5 text-[10px]" style={{ color: COLORS.textFaint }}>
-        <span>{session.turnCount} turn{session.turnCount === 1 ? '' : 's'}</span>
+      <div
+        className="mt-0.5 flex items-center gap-2 pl-5 text-[10px]"
+        style={{ color: COLORS.textFaint }}
+      >
+        <span>
+          {session.turnCount} turn{session.turnCount === 1 ? '' : 's'}
+        </span>
         <span>·</span>
         <span>{timeAgo(session.lastTurnAt ?? session.createdAt)}</span>
       </div>
@@ -401,7 +396,12 @@ function ComposerBar({
       console.warn('[Party] file picked but onAttach is not wired (no project scope?)');
       return;
     }
-    console.log('[Party] file picker selected', files.length, 'file(s):', files.map((f) => f.name));
+    console.log(
+      '[Party] file picker selected',
+      files.length,
+      'file(s):',
+      files.map((f) => f.name),
+    );
     if (files.length) onAttach(files);
   }
 
@@ -417,14 +417,14 @@ function ComposerBar({
         <div
           className="mb-2 rounded-md px-2.5 py-1.5 text-[11px]"
           style={{
-            background: 'rgba(248,113,113,0.1)',
-            color: '#fca5a5',
-            border: '1px solid rgba(248,113,113,0.3)',
+            background: 'color-mix(in srgb, var(--destructive) 12%, transparent)',
+            color: 'var(--destructive)',
+            border: '1px solid color-mix(in srgb, var(--destructive) 35%, transparent)',
           }}
         >
-          Last turn ended in ERROR (likely a timeout — agents take time on
-          large projects). Send a new message to start a fresh round; the
-          previous round&apos;s partial output is preserved above.
+          Last turn ended in ERROR (likely a timeout — agents take time on large projects). Send a
+          new message to start a fresh round; the previous round&apos;s partial output is preserved
+          above.
         </div>
       )}
       <div
@@ -516,7 +516,7 @@ function IconBtn({
       style={{ color: COLORS.textMuted }}
       onMouseEnter={(e) => {
         if (disabled) return;
-        e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+        e.currentTarget.style.background = 'color-mix(in srgb, var(--foreground) 5%, transparent)';
         e.currentTarget.style.color = COLORS.textPrimary;
       }}
       onMouseLeave={(e) => {

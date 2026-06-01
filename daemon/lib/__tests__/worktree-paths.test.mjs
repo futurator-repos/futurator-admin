@@ -38,6 +38,45 @@ describe('storyWorktreeDir', () => {
       storyWorktreeDir({ project: 'p', plan: 'p', storyId: '..', root: '/wt' }),
     ).toThrow();
   });
+
+  // 2026-05-20 — Phase 1 worktree rollout hotfix. PM emits UUID storyIds
+  // (crypto.randomUUID), which fail the kebab-case SLUG_RE. Accept the
+  // canonical hyphenated lowercase UUID form for storyId specifically.
+  it('accepts UUID storyIds (PM-generated)', () => {
+    expect(
+      storyWorktreeDir({
+        project: 'snake-4',
+        plan: 'snake-4-awsd-surprises',
+        storyId: '8bda01c7-0e64-43e0-be6c-be29f859a3f4',
+        root: '/wt',
+      }),
+    ).toBe('/wt/snake-4/snake-4-awsd-surprises/8bda01c7-0e64-43e0-be6c-be29f859a3f4');
+  });
+
+  it('rejects malformed storyIds (uppercase / wrong length / path-traversal)', () => {
+    expect(() =>
+      storyWorktreeDir({
+        project: 'snake-4',
+        plan: 'p',
+        storyId: '8BDA01C7-0E64-43E0-BE6C-BE29F859A3F4', // uppercase UUID
+        root: '/wt',
+      }),
+    ).toThrow();
+    expect(() =>
+      storyWorktreeDir({
+        project: 'snake-4',
+        plan: 'p',
+        storyId: '8bda01c7..0e64',
+        root: '/wt',
+      }),
+    ).toThrow();
+  });
+
+  it('storyBranchName accepts UUIDs too', () => {
+    expect(storyBranchName('8bda01c7-0e64-43e0-be6c-be29f859a3f4')).toBe(
+      'wip/8bda01c7-0e64-43e0-be6c-be29f859a3f4',
+    );
+  });
 });
 
 describe('exploreWorktreeDir', () => {

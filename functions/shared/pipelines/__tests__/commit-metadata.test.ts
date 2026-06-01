@@ -17,13 +17,17 @@ import {
 } from '../commit-metadata';
 
 describe('buildCommitShellSnippet — rigor gating', () => {
-  it('prototype rigor: only emits subject, no trailers', () => {
+  it('prototype rigor: subject + v2.5 §23 trailers but no Skills lines', () => {
     const snippet = buildCommitShellSnippet({
       storyId: 'STORY-1',
       storyTitle: 'Add hello',
       rigor: 'prototype',
     });
-    expect(snippet).toContain("commit -m 'story: STORY-1 — Add hello'");
+    expect(snippet).toContain('story: STORY-1 — Add hello');
+    // 2026-05-19 — Agent + Story trailers are emitted at every rigor now
+    // (v2.5 §23). Skills-* stays mvp+ only.
+    expect(snippet).toContain('Agent: DEV');
+    expect(snippet).toContain('Story: STORY-1');
     expect(snippet).not.toContain('Skills-Used');
     expect(snippet).not.toContain('Skills-Manifest-Sha');
     expect(snippet).not.toContain('sha256sum');
@@ -41,6 +45,52 @@ describe('buildCommitShellSnippet — rigor gating', () => {
     expect(snippet).toContain('.context/loaded-skills.json');
     expect(snippet).toContain("COMMIT_MSG='story: STORY-2 — Wire feature'");
     expect(snippet).toContain('commit -m "$COMMIT_MSG"');
+    // 2026-05-19 — Agent + Story trailers always present.
+    expect(snippet).toContain('Agent: DEV');
+    expect(snippet).toContain('Story: STORY-2');
+  });
+
+  it('mvp rigor: emits Plan-Id / Plan / Epic-Id / Wave when supplied', () => {
+    const snippet = buildCommitShellSnippet({
+      storyId: 'STORY-A',
+      storyTitle: 'Add x',
+      rigor: 'mvp',
+      planId: 'plan_app_abc123',
+      planSlug: 'app-change-xyz',
+      epicId: 'epic-uuid-1',
+      wave: 2,
+    });
+    expect(snippet).toContain('Plan-Id: plan_app_abc123');
+    expect(snippet).toContain('Plan: app-change-xyz');
+    expect(snippet).toContain('Epic-Id: epic-uuid-1');
+    expect(snippet).toContain('Wave: 2');
+    expect(snippet).toContain('Story: STORY-A');
+    expect(snippet).toContain('Agent: DEV');
+  });
+
+  it('mvp rigor: omits optional trailers when not supplied', () => {
+    const snippet = buildCommitShellSnippet({
+      storyId: 'STORY-B',
+      storyTitle: 'Bare opts',
+      rigor: 'mvp',
+    });
+    expect(snippet).not.toContain('Plan-Id:');
+    expect(snippet).not.toContain('Plan:');
+    expect(snippet).not.toContain('Epic-Id:');
+    expect(snippet).not.toContain('Wave:');
+  });
+
+  it('sanitizes newlines in trailer values (defensive)', () => {
+    const snippet = buildCommitShellSnippet({
+      storyId: 'STORY-C',
+      storyTitle: 'Sanitize',
+      rigor: 'mvp',
+      planId: 'plan_app_abc',
+      planSlug: 'bad\nslug',
+    });
+    // Newlines stripped to spaces; single-line `Plan:` line preserved.
+    expect(snippet).toContain('Plan: bad slug');
+    expect(snippet).not.toContain('Plan: bad\nslug');
   });
 
   it('mvp rigor: wraps trailer logic in a subshell with `;` separators (valid bash)', () => {

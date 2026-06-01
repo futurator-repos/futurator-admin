@@ -50,12 +50,20 @@ export function DeletePlanModal({
           <div>This will delete:</div>
           <ul className="ml-4 list-disc space-y-1 text-xs text-muted-foreground">
             <li>All epics, stories, agent jobs, and events for this plan</li>
+            <li>All attention items raised by this plan</li>
             {isV1 ? (
-              <li>
-                <strong>NOT</strong> the App&apos;s working tree —{' '}
-                <code>/home/ubuntu/projects/{plan.name}</code> stays put because
-                other plans on the App share it
-              </li>
+              <>
+                <li>
+                  The plan branch <code>plan/{plan.name}</code> on the App&apos;s GitHub repo and
+                  locally on EC2 (post-fix plans only — legacy plans that committed straight to{' '}
+                  <code>main</code> leave commits you&apos;ll need to revert manually on GitHub)
+                </li>
+                <li>
+                  <strong>NOT</strong> the App&apos;s working tree —{' '}
+                  <code>/home/ubuntu/projects/</code> stays put because other plans on the App share
+                  it
+                </li>
+              </>
             ) : (
               <li>
                 The EC2 folder at <code>/home/ubuntu/projects/{plan.name}</code>
@@ -68,7 +76,8 @@ export function DeletePlanModal({
               Total agent cost: <strong>${plan.totalCostUsd.toFixed(2)}</strong>
             </div>
             <div>
-              Stories: <strong>{plan.totalStories}</strong> total, <strong>{plan.doneStories}</strong> done
+              Stories: <strong>{plan.totalStories}</strong> total,{' '}
+              <strong>{plan.doneStories}</strong> done
             </div>
           </div>
           <div className="space-y-1 pt-2">

@@ -1,0 +1,206 @@
+<style>
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+.gg-row { transition: background-color .12s ease; cursor: pointer; }
+.gg-row:hover { background: var(--color-background-secondary); }
+.gg-row.active { background: var(--color-background-secondary); box-shadow: inset 2px 0 0 var(--color-text-info); }
+.gg-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 10px; font-family: var(--font-mono); font-size: 11px; font-weight: 500; line-height: 1.5; white-space: nowrap; }
+.gg-bdot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
+.gg-mono { font-family: var(--font-mono); }
+</style>
+
+<h2 class="sr-only">Git graph for the songster repository showing 15 commits across 5 branches with 3 pull requests.</h2>
+
+<div style="font-family: var(--font-sans); color: var(--color-text-primary); margin: 0.5rem 0;">
+
+  <div style="display:flex; align-items:center; gap:10px; padding: 10px 14px; background: var(--color-background-secondary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg) var(--border-radius-lg) 0 0;">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <circle cx="3" cy="3" r="1.6" stroke="currentColor" stroke-width="1.2" fill="none"/>
+      <circle cx="3" cy="11" r="1.6" stroke="currentColor" stroke-width="1.2" fill="none"/>
+      <circle cx="11" cy="3" r="1.6" stroke="currentColor" stroke-width="1.2" fill="none"/>
+      <path d="M3 4.6v4.8M11 4.6v.4a2.4 2.4 0 0 1-2.4 2.4H6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+    </svg>
+    <span class="gg-mono" style="font-weight: 500; font-size: 13px;">richie / songster</span>
+    <span style="font-size: 12px; color: var(--color-text-secondary);">music analysis platform</span>
+    <div style="flex:1;"></div>
+    <span class="gg-mono" style="font-size: 11px; color: var(--color-text-secondary);">5 branches · 15 commits · 3 PRs</span>
+  </div>
+
+  <div id="gg-legend" style="display:flex; gap:6px; flex-wrap: wrap; padding: 8px 14px; background: var(--color-background-secondary); border-left: 0.5px solid var(--color-border-tertiary); border-right: 0.5px solid var(--color-border-tertiary);"></div>
+
+  <div style="display:flex; background: var(--color-background-primary); border-left: 0.5px solid var(--color-border-tertiary); border-right: 0.5px solid var(--color-border-tertiary); border-top: 0.5px solid var(--color-border-tertiary);">
+    <div id="gg-graph" style="flex-shrink:0;"></div>
+    <div id="gg-rows" style="flex:1; min-width:0; border-left: 0.5px solid var(--color-border-tertiary);"></div>
+  </div>
+
+  <div id="gg-detail" style="background: var(--color-background-secondary); border: 0.5px solid var(--color-border-tertiary); border-radius: 0 0 var(--border-radius-lg) var(--border-radius-lg); padding: 14px 16px;"></div>
+
+</div>
+
+<script>
+(() => {
+  const LANE_W = 22, ROW_H = 46, LANE_PAD = 18, GRAPH_W = 132;
+
+  const branches = [
+    { name: 'main',                       lane: 0, color: '#378ADD', tint: 'rgba(55,138,221,0.14)' },
+    { name: 'develop',                    lane: 1, color: '#1D9E75', tint: 'rgba(29,158,117,0.14)' },
+    { name: 'feature/chord-detection',    lane: 2, color: '#7F77DD', tint: 'rgba(127,119,221,0.14)' },
+    { name: 'feature/stem-separation',    lane: 3, color: '#D85A30', tint: 'rgba(216,90,48,0.14)' },
+    { name: 'hotfix/bedrock-region',      lane: 4, color: '#E24B4A', tint: 'rgba(226,75,74,0.14)' },
+  ];
+  const byLane = l => branches.find(b => b.lane === l);
+
+  const commits = [
+    { id: 'a3f2e91', msg: 'Merge pull request #142 from feature/stem-separation',                    author: 'richie', when: '2 hours ago',  lane: 0, parents: ['c8d4f02','7e1a3b5'], tag: 'v0.4.0', pr: { num: 142, title: 'Add Demucs v4 stem-separation pipeline on ECS Fargate GPU', status: 'merged', files: 24, additions: 612, deletions: 38 } },
+    { id: '7e1a3b5', msg: 'Wire Fargate GPU task definition for Demucs worker',                      author: 'richie', when: '4 hours ago',  lane: 3, parents: ['9b2c6d1'] },
+    { id: '9b2c6d1', msg: 'Add Demucs v4 hybrid model loader with eu-central-1 S3 cache',            author: 'richie', when: '8 hours ago',  lane: 3, parents: ['f0e8a23'] },
+    { id: 'c8d4f02', msg: 'Merge pull request #141 from hotfix/bedrock-region',                      author: 'richie', when: '1 day ago',    lane: 0, parents: ['e1f3a8c','b6d9e44'], pr: { num: 141, title: 'Bump Bedrock retry config for eu-central-1 timeouts', status: 'merged', files: 3, additions: 12, deletions: 4 } },
+    { id: 'b6d9e44', msg: 'Bump Bedrock client maxAttempts to 5, add jittered backoff',              author: 'richie', when: '1 day ago',    lane: 4, parents: ['e1f3a8c'] },
+    { id: 'f0e8a23', msg: 'Stub stem-separation worker entrypoint and ECS task IAM',                 author: 'richie', when: '2 days ago',   lane: 3, parents: ['e1f3a8c'] },
+    { id: 'e1f3a8c', msg: 'Release v0.3.1: lead-sheet renderer fixes',                               author: 'richie', when: '3 days ago',   lane: 0, parents: ['5d6f0aa'], tag: 'v0.3.1' },
+    { id: 'd5c2b07', msg: 'Merge pull request #138 from feature/chord-detection',                    author: 'richie', when: '4 days ago',   lane: 1, parents: ['86a7c33','4f9b1e8'], pr: { num: 138, title: 'Chord detection MVP — Klangio + template matcher', status: 'merged', files: 17, additions: 489, deletions: 22 } },
+    { id: '4f9b1e8', msg: 'Add Klangio API fallback path with confidence threshold',                 author: 'richie', when: '5 days ago',   lane: 2, parents: ['2c5a64e'] },
+    { id: '2c5a64e', msg: 'Implement chord template matcher over librosa chromagram',                author: 'richie', when: '6 days ago',   lane: 2, parents: ['9d3f871'] },
+    { id: '9d3f871', msg: 'Init chord-detection module with CAGED-aware voicings',                   author: 'richie', when: '7 days ago',   lane: 2, parents: ['86a7c33'] },
+    { id: '86a7c33', msg: 'Refactor CAGED fretboard renderer spacing for live display',              author: 'richie', when: '8 days ago',   lane: 1, parents: ['1b8e592'] },
+    { id: '1b8e592', msg: 'Set up music-theory engine scaffolding (CAGED, Nashville)',               author: 'richie', when: '11 days ago',  lane: 1, parents: ['5d6f0aa'] },
+    { id: '5d6f0aa', msg: 'Initial Songster project scaffold under Futurator brand',                 author: 'richie', when: '14 days ago',  lane: 0, parents: ['0a1b2c3'], tag: 'v0.1.0' },
+    { id: '0a1b2c3', msg: 'feat: futurator portfolio init',                                          author: 'richie', when: '15 days ago',  lane: 0, parents: [] },
+  ];
+
+  const indexOf = id => commits.findIndex(c => c.id === id);
+  const laneX   = l  => LANE_PAD + l * LANE_W;
+  const rowY    = i  => i * ROW_H + ROW_H / 2;
+
+  const headOfBranch = {};
+  branches.forEach(b => {
+    const idx = commits.findIndex(c => c.lane === b.lane);
+    if (idx >= 0) headOfBranch[commits[idx].id] = b.name;
+  });
+
+  const TOTAL_H = commits.length * ROW_H + 6;
+  const paths = [];
+  const dots  = [];
+
+  commits.forEach((c, i) => {
+    const cx = laneX(c.lane), cy = rowY(i);
+    c.parents.forEach((pid, pIdx) => {
+      const pi = indexOf(pid); if (pi < 0) return;
+      const p = commits[pi];
+      const px = laneX(p.lane), py = rowY(pi);
+      const isMerge = pIdx > 0;
+      const color = (cx === px) ? byLane(c.lane).color
+                  : isMerge      ? byLane(p.lane).color
+                                 : byLane(c.lane).color;
+      let d;
+      if (cx === px) {
+        d = `M${cx} ${cy} L${px} ${py}`;
+      } else if (isMerge) {
+        const midY = cy + ROW_H * 0.5;
+        d = `M${px} ${py} L${px} ${midY} Q${px} ${cy} ${cx} ${cy}`;
+      } else {
+        const midY = py - ROW_H * 0.5;
+        d = `M${px} ${py} Q${px} ${midY} ${cx} ${midY} L${cx} ${cy}`;
+      }
+      paths.push(`<path d="${d}" stroke="${color}" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
+    });
+
+    const col = byLane(c.lane).color;
+    if (c.parents.length > 1) {
+      dots.push(`<circle cx="${cx}" cy="${cy}" r="6.5" fill="var(--color-background-primary)" stroke="${col}" stroke-width="2"/>`);
+      dots.push(`<circle cx="${cx}" cy="${cy}" r="3"   fill="${col}"/>`);
+    } else {
+      dots.push(`<circle cx="${cx}" cy="${cy}" r="5"   fill="${col}" stroke="var(--color-background-primary)" stroke-width="1.5"/>`);
+    }
+  });
+
+  document.getElementById('gg-graph').innerHTML =
+    `<svg width="${GRAPH_W}" height="${TOTAL_H}" aria-hidden="true">${paths.join('')}${dots.join('')}</svg>`;
+
+  const tagChip = t  => `<span class="gg-chip" style="background: rgba(186,117,23,.16); color:#854F0B;">▸ ${t}</span>`;
+  const branchChip = (name, lane, isHead) => {
+    const b = byLane(lane);
+    return `<span class="gg-chip" style="background:${b.tint}; color:${b.color};"><span class="gg-bdot" style="background:${b.color};"></span>${isHead ? 'HEAD ▸ ' : ''}${name}</span>`;
+  };
+  const prChip = pr => {
+    const map = { merged: ['rgba(127,119,221,.16)', '#3C3489', '●'],
+                  open:   ['rgba(99,153,34,.16)',   '#27500A', '○'],
+                  closed: ['rgba(226,75,74,.16)',   '#791F1F', '×'] };
+    const [bg, fg, glyph] = map[pr.status] || map.merged;
+    return `<span class="gg-chip" style="background:${bg}; color:${fg};">${glyph} #${pr.num} ${pr.status}</span>`;
+  };
+
+  document.getElementById('gg-legend').innerHTML = branches.map(b => {
+    const count = commits.filter(c => c.lane === b.lane).length;
+    return `<span class="gg-chip" style="background:${b.tint}; color:${b.color};">
+      <span class="gg-bdot" style="background:${b.color};"></span>${b.name}
+      <span style="opacity:.55; margin-left:2px;">${count}</span>
+    </span>`;
+  }).join('');
+
+  document.getElementById('gg-rows').innerHTML = commits.map((c, i) => {
+    const refs = [];
+    if (headOfBranch[c.id]) refs.push(branchChip(headOfBranch[c.id], c.lane, c.lane === 0));
+    if (c.tag) refs.push(tagChip(c.tag));
+    if (c.pr)  refs.push(prChip(c.pr));
+    const isLast = i === commits.length - 1;
+    return `<div class="gg-row" data-idx="${i}" style="height:${ROW_H}px; display:flex; align-items:center; gap:8px; padding: 0 12px; ${isLast ? '' : 'border-bottom: 0.5px solid var(--color-border-tertiary);'}">
+      ${refs.length ? `<div style="display:flex; gap:4px; flex-shrink:0;">${refs.join('')}</div>` : ''}
+      <span style="flex:1; min-width:0; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${c.msg}</span>
+      <span class="gg-mono" style="font-size:12px; color:var(--color-text-secondary); flex-shrink:0;">${c.id}</span>
+      <span style="font-size:12px; color:var(--color-text-secondary); width:74px; text-align:right; flex-shrink:0;">${c.when}</span>
+    </div>`;
+  }).join('');
+
+  const detail = document.getElementById('gg-detail');
+  function renderDetail(i) {
+    const c = commits[i]; const b = byLane(c.lane);
+    const refs = [];
+    if (headOfBranch[c.id]) refs.push(branchChip(headOfBranch[c.id], c.lane, c.lane === 0));
+    if (c.tag) refs.push(tagChip(c.tag));
+    if (c.pr)  refs.push(prChip(c.pr));
+    const parentsHtml = c.parents.length === 0
+      ? '<em style="color:var(--color-text-tertiary);">(root commit)</em>'
+      : c.parents.map(pid => {
+          const p = commits[indexOf(pid)]; if (!p) return '';
+          const pb = byLane(p.lane);
+          return `<span class="gg-chip" style="background:${pb.tint}; color:${pb.color};"><span class="gg-bdot" style="background:${pb.color};"></span>${pid}</span>`;
+        }).join(' ');
+    const prDetails = c.pr ? `
+      <div style="margin-top:10px; padding: 10px 12px; background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-md);">
+        <div style="font-size:13px; font-weight:500;">${c.pr.title}</div>
+        <div style="display:flex; gap:14px; margin-top:6px; font-size:12px; color: var(--color-text-secondary);" class="gg-mono">
+          <span>${c.pr.files} files changed</span>
+          <span style="color:#3B6D11;">+${c.pr.additions}</span>
+          <span style="color:#A32D2D;">−${c.pr.deletions}</span>
+        </div>
+      </div>` : '';
+    detail.innerHTML = `
+      <div style="display:flex; gap:12px; align-items:flex-start;">
+        <span style="width:9px; height:9px; border-radius:50%; background:${b.color}; margin-top:7px; flex-shrink:0;"></span>
+        <div style="flex:1; min-width:0;">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <span class="gg-mono" style="font-size:13px; font-weight:500;">${c.id}</span>
+            ${refs.join('')}
+          </div>
+          <div style="font-size:14px; margin-top:6px; line-height:1.5;">${c.msg}</div>
+          <div style="font-size:12px; color:var(--color-text-secondary); margin-top:6px;" class="gg-mono">
+            @${c.author} · ${c.when} · on <span style="color:${b.color};">${b.name}</span>
+          </div>
+          <div style="font-size:12px; color:var(--color-text-secondary); margin-top:8px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+            <span style="margin-right:2px;">parents:</span>${parentsHtml}
+          </div>
+          ${prDetails}
+        </div>
+      </div>`;
+  }
+
+  let active = 0;
+  function setActive(i) {
+    active = i;
+    document.querySelectorAll('.gg-row').forEach(el => el.classList.toggle('active', +el.dataset.idx === i));
+    renderDetail(i);
+  }
+  document.querySelectorAll('.gg-row').forEach(el => el.addEventListener('click', () => setActive(+el.dataset.idx)));
+  setActive(0);
+})();
+</script>

@@ -1,31 +1,39 @@
 /**
  * Design tokens for the Party Mode V2 UI.
- * Mirrors `docs/concepts/party-mode/party-mode-ui2.md` §3 so we have one
- * source of truth and can reference these values from styles + JS alike.
+ *
+ * These constants are deliberately CSS-variable references (not hex values).
+ * That way every `style={{ background: COLORS.bgSurface }}` inline style
+ * gets resolved by the theme system — dark mode uses the Discord palette,
+ * light mode uses the brighter palette. Hex literals are defined once in
+ * `src/app/globals.css` under `--party-*` (see :root + .dark blocks).
+ *
+ * Mirrors the spec at `docs/concepts/party-mode/party-mode-ui2.md` §3 —
+ * with the brightness inversion for light mode added as part of the
+ * holistic theme pass.
  */
 
 export const HEADER_H = 56;
 
 export const COLORS = {
-  bgDeepest: '#1e1f22',
-  bgSurface: '#2b2d31',
-  bgContent: '#313338',
-  bgElevated: '#383a40',
-  bgInput: '#1e1f22',
+  bgDeepest: 'var(--party-bg-deepest)',
+  bgSurface: 'var(--party-bg-surface)',
+  bgContent: 'var(--party-bg-content)',
+  bgElevated: 'var(--party-bg-elevated)',
+  bgInput: 'var(--party-bg-input)',
 
-  textPrimary: '#f2f3f5',
-  textBody: '#dbdee1',
-  textMuted: '#949ba4',
-  textFaint: '#80848e',
+  textPrimary: 'var(--party-text-primary)',
+  textBody: 'var(--party-text-body)',
+  textMuted: 'var(--party-text-muted)',
+  textFaint: 'var(--party-text-faint)',
 
-  accentBrand: '#5865f2',
-  accentOrch: '#a78bfa',
-  accentOrchSoft: '#c4b5fd',
-  accentLive: '#4ade80',
-  accentSuccess: '#23a55a',
+  accentBrand: 'var(--party-accent-brand)',
+  accentOrch: 'var(--accent-purple)',
+  accentOrchSoft: 'var(--party-accent-orch-soft)',
+  accentLive: 'var(--success)',
+  accentSuccess: 'var(--success)',
 
-  inlineCode: '#f9a8d4',
-  inlineLink: '#00a8fc',
+  inlineCode: 'var(--party-inline-code)',
+  inlineLink: 'var(--accent-blue)',
 } as const;
 
 export const PANE_DEFAULTS = {
@@ -38,3 +46,11 @@ export const PANE_DEFAULTS = {
 } as const;
 
 export const PANE_SIZES_KEY = 'partyMode.paneSizes';
+
+export const DRAWER_DEFAULTS = {
+  width: 680,
+  min: 360,
+  max: 1200,
+} as const;
+
+export const DRAWER_WIDTH_KEY = 'partyMode.drawerWidth';

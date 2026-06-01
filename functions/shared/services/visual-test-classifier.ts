@@ -284,12 +284,23 @@ export interface AggregateReport {
   estimatedWallclockSec: number;
 }
 
-const DEFAULT_COST_BY_LEVEL: Record<VisualTestLevel, number> = {
+/**
+ * Per-test cost in USD by routing level. L0 is pure bash (free), L1 is
+ * one Haiku call (~$0.005 average), L2 is one Sonnet call (~$0.05 avg).
+ *
+ * Exported so the ContractGate UI can recompute the total live as the
+ * operator changes per-test levels without a backend roundtrip.
+ */
+export const DEFAULT_COST_BY_LEVEL: Record<VisualTestLevel, number> = {
   L0: 0,
   L1: 0.005,
   L2: 0.05,
 };
-const DEFAULT_WALLCLOCK_BY_LEVEL: Record<VisualTestLevel, number> = {
+/**
+ * Per-test wall-clock in seconds by routing level. Same purpose as
+ * `DEFAULT_COST_BY_LEVEL` — feeds the ContractGate's live "~Ns" chip.
+ */
+export const DEFAULT_WALLCLOCK_BY_LEVEL: Record<VisualTestLevel, number> = {
   L0: 1,
   L1: 5,
   L2: 45,

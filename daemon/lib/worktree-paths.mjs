@@ -24,12 +24,38 @@ import { join } from 'path';
 const DEFAULT_WORKTREE_ROOT =
   process.env.FUTURATOR_WORKTREE_ROOT || '/home/ubuntu/worktrees';
 
-// Mirrors App.appId regex from Phase 1 PR-1.
+// Mirrors App.appId regex from Phase 1 PR-1. Used for project/plan/
+// approach slugs which are human-authored kebab-case strings — these
+// must start with a lowercase letter for stricter URL/folder safety.
 const SLUG_RE = /^[a-z][a-z0-9-]{0,38}[a-z0-9]$/;
+
+// 2026-05-20 — Phase 1 worktree rollout hotfix. storyIds are UUIDs
+// (e.g. `8bda01c7-0e64-43e0-be6c-be29f859a3f4`) emitted by the PM
+// agent's crypto.randomUUID(). UUIDs start with hex digits (including
+// `0`-`9`), violate the SLUG_RE leading-letter requirement, and are 36
+// chars long. They are NOT path-traversal vectors (only `[a-f0-9-]`)
+// but they need a dedicated validator that knows UUID shape.
+//
+// Accepts the canonical 8-4-4-4-12 hyphenated lowercase UUID form. We
+// don't relax `SLUG_RE` itself because project/plan slugs benefit from
+// the stricter pattern (operator-typed strings; alphabet-leading
+// surfaces better in CLIs / URLs).
+const UUID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+// Some legacy storyIds in DDB use kebab-case (e.g. `s1`, `e3-s5` in tests).
+// Accept either UUID OR slug shape for storyId arguments.
+const STORY_ID_RE = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|[a-z][a-z0-9-]{0,38}[a-z0-9])$/;
 
 function assertSlug(label, slug) {
   if (typeof slug !== 'string' || !SLUG_RE.test(slug)) {
     throw new Error(`worktree-paths: ${label} must match kebab-case slug regex, got ${JSON.stringify(slug)}`);
+  }
+}
+
+function assertStoryId(slug) {
+  if (typeof slug !== 'string' || !STORY_ID_RE.test(slug)) {
+    throw new Error(
+      `worktree-paths: storyId must match UUID or kebab-case slug regex, got ${JSON.stringify(slug)}`,
+    );
   }
 }
 
@@ -42,7 +68,7 @@ function assertSlug(label, slug) {
 export function storyWorktreeDir({ project, plan, storyId, root }) {
   assertSlug('project', project);
   assertSlug('plan', plan);
-  assertSlug('storyId', storyId);
+  assertStoryId(storyId);
   return join(root || DEFAULT_WORKTREE_ROOT, project, plan, storyId);
 }
 
@@ -61,7 +87,7 @@ export function exploreWorktreeDir({ project, plan, approach, root }) {
 
 /** Per-story wip branch name. */
 export function storyBranchName(storyId) {
-  assertSlug('storyId', storyId);
+  assertStoryId(storyId);
   return `wip/${storyId}`;
 }
 

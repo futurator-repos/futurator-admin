@@ -83,6 +83,57 @@ export function useRevokeAcApproval(planId: string | null) {
 }
 
 /**
+ * PR-8d — operator approves the QA test contract produced by the
+ * aggregate stage. Body may carry per-test overrides:
+ *
+ *   { tests: [{ id, level?, expect?, ... }] }
+ *
+ * Omitting `tests` means "approve everything the aggregator
+ * classified, unchanged." The backend launches qa-execute and flips
+ * `plan.qaContractStatus = 'approved'`.
+ */
+export function useApproveQaContract(planId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body?: {
+      tests?: Array<{ id: string; level?: 'L0' | 'L1' | 'L2'; expect?: string }>;
+    }) =>
+      api.post<{
+        planId: string;
+        jobId: string;
+        stage: 'execute';
+        testCount: number;
+        contractStatus: 'approved';
+      }>(`/plans/${planId}/qa-contract/approve`, body ?? {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['qa-report', planId] });
+      qc.invalidateQueries({ queryKey: ['plans', planId] });
+    },
+  });
+}
+
+/**
+ * PR-8d — operator declines to run QA for this plan. The execute
+ * stage never launches; `plan.qaContractStatus = 'rejected'`. Reversible
+ * — operator can later click Re-classify (which calls `useRunQaReview`)
+ * to re-aggregate and get a fresh contract.
+ */
+export function useRejectQaContract(planId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api.post<{ planId: string; contractStatus: 'rejected' }>(
+        `/plans/${planId}/qa-contract/reject`,
+        {},
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['qa-report', planId] });
+      qc.invalidateQueries({ queryKey: ['plans', planId] });
+    },
+  });
+}
+
+/**
  * Send a story back to Developing with a QA note. Appends the note to the
  * story description, flips status to `fixing`, re-launches the daemon job.
  * Invalidates the QA report + the plan view so both pick up the new state.

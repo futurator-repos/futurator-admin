@@ -7,7 +7,10 @@
  * deleted DDB state.
  *
  * Steps covered:
- *   - SSM `rm -rf /home/ubuntu/projects/<appId>` (worktree folder)
+ *   - SSM `rm -rf /home/ubuntu/projects/<appId>` (legacy shared worktree)
+ *   - SSM `rm -rf /home/ubuntu/worktrees/<appId>` + `repos/<appId>.git`
+ *     (2026-05-28 — all per-story / _merge / _party / _assist worktrees +
+ *     the bare object store; see deleteAppWorktreesAndRepo)
  *   - GitHub `DELETE /repos/futurator-repos/<appId>`
  *   - S3 `apps/<appId>/*` purge   (deployed Vite/Next artifacts)
  *   - S3 `knowledge-live/<appId>/*` purge (Mycelium mirror)
@@ -92,6 +95,75 @@ async function deleteAppFolder(appId: string, deps: PlanFolderDeps): Promise<Cle
   } catch (err) {
     return {
       step: 'folder',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * 2026-05-28 — Delete the App's per-story / coordinator / party / assist
+ * worktrees + the bare object store. App-delete is the nuclear option, so
+ * this is a wholesale `rm -rf` of the entire app subtree under the shared
+ * worktree root + the bare repo — independent of plan/session state.
+ *
+ * Why a wholesale sweep (vs the per-plan `reapPlanStoryWorktrees`):
+ *   - The per-plan reaper is keyed by plan name; orphaned worktrees from
+ *     a deleted/renamed plan, plus `_party/<sid>` and `_assist/<sid>`
+ *     worktrees (keyed by session, not plan), are NOT covered by it.
+ *   - On full app-delete we want everything gone regardless of how it
+ *     got orphaned. `rm -rf <root>/<appId>` catches all four namespaces
+ *     in one shot.
+ *
+ * Removing the bare repo too means any stale `git worktree` admin entries
+ * inside it (from the `rm -rf` skipping `git worktree remove`) are moot —
+ * the whole object store goes with it.
+ *
+ * NOTE: `/home/ubuntu/worktrees/<appId>` is the shared root used by
+ * pipeline-v2 (per-story + `_merge`), party (`_party/<sid>`), and
+ * free-agent (`_assist/<sid>`). The legacy `/home/ubuntu/projects/<appId>`
+ * shared worktree is handled separately by deleteAppFolder.
+ */
+async function deleteAppWorktreesAndRepo(
+  appId: string,
+  deps: PlanFolderDeps,
+): Promise<CleanupStep> {
+  assertSafeFolderName(appId);
+  const worktreesDir = `/home/ubuntu/worktrees/${appId}`;
+  const bareRepo = `/home/ubuntu/repos/${appId}.git`;
+  const cmd = [
+    `WT_STATUS=ABSENT; REPO_STATUS=ABSENT`,
+    `if [ -d "${worktreesDir}" ]; then`,
+    `  rm -rf "${worktreesDir}" && WT_STATUS=DELETED || WT_STATUS=FAILED`,
+    `fi`,
+    `if [ -d "${bareRepo}" ]; then`,
+    `  rm -rf "${bareRepo}" && REPO_STATUS=DELETED || REPO_STATUS=FAILED`,
+    `fi`,
+    `echo "WORKTREES_${'$'}{WT_STATUS} BAREREPO_${'$'}{REPO_STATUS}"`,
+  ].join('\n');
+  try {
+    const commandId = await deps.sendSsmCommand(cmd);
+    const output = await deps.waitForSsmOutput(commandId);
+    const wtMatch = output.match(/WORKTREES_(\w+)/);
+    const repoMatch = output.match(/BAREREPO_(\w+)/);
+    const wt = wtMatch?.[1] ?? 'UNKNOWN';
+    const repo = repoMatch?.[1] ?? 'UNKNOWN';
+    if (wt === 'FAILED' || repo === 'FAILED') {
+      return {
+        step: 'worktrees',
+        status: 'error',
+        detail: `worktrees=${wt} bareRepo=${repo}`,
+      };
+    }
+    const anyDeleted = wt === 'DELETED' || repo === 'DELETED';
+    return {
+      step: 'worktrees',
+      status: anyDeleted ? 'done' : 'skipped',
+      detail: `worktrees=${wt} bareRepo=${repo}`,
+    };
+  } catch (err) {
+    return {
+      step: 'worktrees',
       status: 'error',
       detail: err instanceof Error ? err.message : String(err),
     };
@@ -193,12 +265,14 @@ async function scheduleSecretDelete(
  * destination. Caller persists the array in the response.
  *
  * Order:
- *   1. SSM folder rm (depends on plans being already drained so no daemon
- *      is mid-write).
- *   2. GitHub repo delete (orthogonal — independent network call).
- *   3. S3 apps/<appId>/* purge.
- *   4. S3 knowledge-live/<appId>/* purge.
- *   5. Secrets Manager schedule-delete.
+ *   1. Party-session reap (branches + _party worktrees).
+ *   2. SSM legacy projects-folder rm (depends on plans being already
+ *      drained so no daemon is mid-write).
+ *   3. SSM worktrees-root + bare-repo rm (2026-05-28).
+ *   4. GitHub repo delete (orthogonal — independent network call).
+ *   5. S3 apps/<appId>/* purge.
+ *   6. S3 knowledge-live/<appId>/* purge.
+ *   7. Secrets Manager schedule-delete.
  */
 export async function cleanupAppArtifacts(
   appId: string,
@@ -218,6 +292,10 @@ export async function cleanupAppArtifacts(
   // worktrees live at `/home/ubuntu/worktrees/<app>/_party/<sid>/`).
   results.push(await reapPartySessionsForApp(appId, deps));
   results.push(await deleteAppFolder(appId, deps));
+  // 2026-05-28 — sweep the shared worktree root + bare repo wholesale.
+  // Covers per-story/_merge/_party/_assist worktrees that the legacy
+  // projects-folder rm + per-session party reap leave behind.
+  results.push(await deleteAppWorktreesAndRepo(appId, deps));
   results.push(await deleteGithubRepoStep(appId, deps));
   results.push(await purgeS3Prefix(`apps/${appId}/`, 's3-apps', s3));
   results.push(await purgeS3Prefix(`knowledge-live/${appId}/`, 's3-knowledge', s3));

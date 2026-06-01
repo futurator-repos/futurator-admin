@@ -18,25 +18,30 @@ import type { Plan } from '../types/plan';
 import type {
   AcCriterionResult,
   AcRollup,
+  ContractClassifiedTest,
+  ContractWarning,
   EpicQaBreakdown,
   GateCellStatus,
   GateCheck,
   GateRollup,
   GateWaveRow,
   PlanQaVerdict,
+  QaContractDraft,
   QaPillarVerdict,
   QaReport,
   QaRunSummary,
+  VqaExecuteStatus,
   VqaRollup,
+  VqaTestLevel,
   VqaTestResult,
 } from '../types/qa-report';
+import {
+  DEFAULT_COST_BY_LEVEL,
+  DEFAULT_WALLCLOCK_BY_LEVEL,
+} from '../services/visual-test-classifier';
 
 /** Categories in AttentionItem that belong on the QA page. */
-const QA_ATTENTION_CATEGORIES = new Set([
-  'test-gate-failed',
-  'tamper-reverted',
-  'dev-server-down',
-]);
+const QA_ATTENTION_CATEGORIES = new Set(['test-gate-failed', 'tamper-reverted', 'dev-server-down']);
 
 // ── Pillar verdict math ──────────────────────────────────────────────
 
@@ -53,12 +58,14 @@ function verdictFromCounts(pass: number, fail: number, pending: number): QaPilla
 
 function worstVerdict(...vs: QaPillarVerdict[]): QaPillarVerdict {
   const order: QaPillarVerdict[] = ['fail', 'partial', 'pending', 'pass', 'skipped'];
-  return (
-    order.find((v) => vs.includes(v)) ?? 'pending'
-  );
+  return order.find((v) => vs.includes(v)) ?? 'pending';
 }
 
-function planVerdict(ac: QaPillarVerdict, vqa: QaPillarVerdict, gate: QaPillarVerdict): PlanQaVerdict {
+function planVerdict(
+  ac: QaPillarVerdict,
+  vqa: QaPillarVerdict,
+  gate: QaPillarVerdict,
+): PlanQaVerdict {
   const activePillars = [ac, vqa, gate].filter((v) => v !== 'skipped');
   if (activePillars.length === 0) return 'not-run';
   if (activePillars.every((v) => v === 'pending')) return 'not-run';
@@ -238,6 +245,218 @@ function parseTestResultsBlock(raw: string | undefined): Array<{
   }
 }
 
+// ── PR-8d contract parsing ──────────────────────────────────────────
+//
+// The qa-aggregate step writes a delimited block to stdout (see
+// `functions/shared/pipelines/visual-qa-pipeline.ts:298-310`). The
+// daemon captures it as `AGGREGATE_OUTPUT`. We re-parse it here so the
+// ContractGate UI can render the full classified test list + warnings
+// without a second roundtrip.
+
+interface AggregateClassification {
+  testId: string;
+  level: VqaTestLevel;
+  reason: string;
+}
+
+interface ParsedAggregateOutput {
+  totalTests: number;
+  byLevel: { L0: number; L1: number; L2: number };
+  estimatedCostUsd: number;
+  estimatedWallclockSec: number;
+  classifications: AggregateClassification[];
+  coverageWarnings: ContractWarning[];
+  specificityWarnings: ContractWarning[];
+}
+
+function parseAggregateOutput(raw: string | undefined): ParsedAggregateOutput | null {
+  if (!raw) return null;
+  const num = (key: string, fallback = 0): number => {
+    const m = new RegExp(`${key}:\\s*([\\d.]+)`).exec(raw);
+    return m ? Number(m[1]) : fallback;
+  };
+  const jsonBlock = (key: string): unknown => {
+    // Matches `KEY: [ ... ]` with possibly-multiline JSON. Non-greedy on the
+    // content; anchored on `]` followed by newline or end of string.
+    const m = new RegExp(`${key}:\\s*(\\[[\\s\\S]*?\\])\\s*(?:\\n|$)`).exec(raw);
+    if (!m) return null;
+    try {
+      return JSON.parse(m[1]);
+    } catch {
+      return null;
+    }
+  };
+
+  const totalTests = num('TOTAL_TESTS');
+  if (totalTests === 0 && !/CLASSIFIED_TESTS:/.test(raw)) return null;
+
+  const classRaw = jsonBlock('CLASSIFIED_TESTS');
+  const classifications: AggregateClassification[] = [];
+  if (Array.isArray(classRaw)) {
+    for (const c of classRaw as unknown[]) {
+      const item = c as {
+        testId?: unknown;
+        classification?: { level?: unknown; reason?: unknown };
+      };
+      if (
+        typeof item?.testId === 'string' &&
+        (item.classification?.level === 'L0' ||
+          item.classification?.level === 'L1' ||
+          item.classification?.level === 'L2')
+      ) {
+        classifications.push({
+          testId: item.testId,
+          level: item.classification.level,
+          reason: typeof item.classification.reason === 'string' ? item.classification.reason : '',
+        });
+      }
+    }
+  }
+
+  const coverageRaw = jsonBlock('COVERAGE_WARNINGS');
+  const coverageWarnings: ContractWarning[] = Array.isArray(coverageRaw)
+    ? (coverageRaw as Array<{ acId?: unknown; message?: unknown; reason?: unknown }>).map((w) => ({
+        refId: typeof w.acId === 'string' ? w.acId : undefined,
+        reason: typeof w.reason === 'string' ? w.reason : undefined,
+        message: typeof w.message === 'string' ? w.message : String(w.message ?? ''),
+      }))
+    : [];
+
+  const specRaw = jsonBlock('SPECIFICITY_WARNINGS');
+  const specificityWarnings: ContractWarning[] = Array.isArray(specRaw)
+    ? (specRaw as Array<{ testId?: unknown; message?: unknown; reason?: unknown }>).map((w) => ({
+        refId: typeof w.testId === 'string' ? w.testId : undefined,
+        reason: typeof w.reason === 'string' ? w.reason : undefined,
+        message: typeof w.message === 'string' ? w.message : String(w.message ?? ''),
+      }))
+    : [];
+
+  return {
+    totalTests,
+    byLevel: {
+      L0: num('L0_COUNT'),
+      L1: num('L1_COUNT'),
+      L2: num('L2_COUNT'),
+    },
+    estimatedCostUsd: num('ESTIMATED_COST_USD'),
+    estimatedWallclockSec: num('ESTIMATED_WALLCLOCK_SEC'),
+    classifications,
+    coverageWarnings,
+    specificityWarnings,
+  };
+}
+
+/**
+ * Join parsed aggregate output with `story.visualTests[]` across the
+ * plan's epics so the ContractGate has full test context (description,
+ * expect, criteriaRef, storyTitle, epicLabel) without a second fetch.
+ */
+function enrichClassifiedTests(
+  parsed: ParsedAggregateOutput,
+  epics: EpicWorkflow[],
+): ContractClassifiedTest[] {
+  type Source = {
+    storyId: string;
+    storyTitle: string;
+    epicId: string;
+    epicLabel: string;
+    criteriaRef?: string;
+    description: string;
+    expect: string;
+  };
+  const sourceByTestId = new Map<string, Source>();
+  epics.forEach((epic, idx) => {
+    const epicLabel = `E${idx + 1}`;
+    for (const story of epic.stories) {
+      for (const vt of story.visualTests ?? []) {
+        sourceByTestId.set(vt.id, {
+          storyId: story.storyId,
+          storyTitle: story.title,
+          epicId: epic.epicId,
+          epicLabel,
+          criteriaRef: vt.criteriaRef,
+          description: vt.description ?? '',
+          expect: vt.expect ?? '',
+        });
+      }
+    }
+  });
+
+  const out: ContractClassifiedTest[] = [];
+  for (const c of parsed.classifications) {
+    const src = sourceByTestId.get(c.testId);
+    if (!src) continue; // test was removed since aggregate ran; skip silently
+    out.push({
+      testId: c.testId,
+      storyId: src.storyId,
+      storyTitle: src.storyTitle,
+      epicId: src.epicId,
+      epicLabel: src.epicLabel,
+      criteriaRef: src.criteriaRef,
+      description: src.description,
+      expect: src.expect,
+      level: c.level,
+      classifierReason: c.reason,
+      estimatedCostUsd: DEFAULT_COST_BY_LEVEL[c.level],
+      estimatedWallclockSec: DEFAULT_WALLCLOCK_BY_LEVEL[c.level],
+    });
+  }
+  return out;
+}
+
+/**
+ * Map (aggregate, execute, contractStatus) → UI lifecycle state. Order
+ * of checks matters: `done`/`running` win over contract state because
+ * once execute is in flight or finished, the contract is moot.
+ */
+function computeExecuteStatus(plan: Plan, jobsById: Record<string, AgentJob>): VqaExecuteStatus {
+  const execJob = plan.qaJobId ? jobsById[plan.qaJobId] : undefined;
+  if (execJob) {
+    if (execJob.status === 'COMPLETED') return 'done';
+    if (execJob.status === 'PENDING') return 'queued-execute';
+    if (execJob.status === 'RUNNING') return 'running';
+    // FAILED falls through — surface as 'done' so the operator can see
+    // the failure verdict in the gallery rather than a misleading state.
+    if (execJob.status === 'FAILED') return 'done';
+  }
+  // No execute job (or unresolvable). Branch on contract state.
+  if (plan.qaContractStatus === 'rejected') return 'rejected';
+  if (plan.qaAggregateJobId) {
+    const aggJob = jobsById[plan.qaAggregateJobId];
+    if (aggJob?.status === 'COMPLETED' && plan.qaContractStatus !== 'approved') {
+      return 'queued-contract';
+    }
+    // Aggregate still running or contract approved but execute job missing.
+    if (aggJob && aggJob.status !== 'COMPLETED') return 'queued-contract';
+  }
+  return 'never-run';
+}
+
+function buildContractDraft(
+  plan: Plan,
+  epics: EpicWorkflow[],
+  jobsById: Record<string, AgentJob>,
+): QaContractDraft | undefined {
+  if (!plan.qaAggregateJobId) return undefined;
+  const aggJob = jobsById[plan.qaAggregateJobId];
+  if (!aggJob || aggJob.status !== 'COMPLETED') return undefined;
+  const parsed = parseAggregateOutput(aggJob.variables?.AGGREGATE_OUTPUT);
+  if (!parsed) return undefined;
+  return {
+    aggregateJobId: plan.qaAggregateJobId,
+    status: plan.qaContractStatus ?? 'pending',
+    totalTests: parsed.totalTests || parsed.classifications.length,
+    byLevel: parsed.byLevel,
+    estimatedCostUsd: parsed.estimatedCostUsd,
+    estimatedWallclockSec: parsed.estimatedWallclockSec,
+    coverageWarnings: parsed.coverageWarnings,
+    specificityWarnings: parsed.specificityWarnings,
+    classifiedTests: enrichClassifiedTests(parsed, epics),
+    decidedAt: plan.qaContractDecidedAt,
+    decidedBy: plan.qaContractDecidedBy,
+  };
+}
+
 function buildVqaRollup(
   plan: Plan,
   epics: EpicWorkflow[],
@@ -264,6 +483,7 @@ function buildVqaRollup(
       thumbnails: [],
       failures: [],
       results: [],
+      executeStatus: 'never-run',
     };
   }
 
@@ -309,8 +529,7 @@ function buildVqaRollup(
     const vars = qaJob.variables ?? {};
     if (!overviewUrl && vars.OVERVIEW_URL) overviewUrl = vars.OVERVIEW_URL;
     if (vars.COST_USD) runCostUsd = (runCostUsd ?? 0) + Number(vars.COST_USD);
-    if (vars.WALLCLOCK_SEC)
-      runWallclockSec = (runWallclockSec ?? 0) + Number(vars.WALLCLOCK_SEC);
+    if (vars.WALLCLOCK_SEC) runWallclockSec = (runWallclockSec ?? 0) + Number(vars.WALLCLOCK_SEC);
 
     // PR-8 path: TEST_RESULTS JSON contains everything.
     const testResults = parseTestResultsBlock(vars.TEST_RESULTS);
@@ -414,6 +633,8 @@ function buildVqaRollup(
     results: allResults,
     costUsd: runCostUsd,
     wallclockSec: runWallclockSec,
+    executeStatus: computeExecuteStatus(plan, jobsById),
+    contract: buildContractDraft(plan, epics, jobsById),
   };
 }
 
@@ -655,7 +876,7 @@ export function buildQaReport(inputs: AggregatorInputs): QaReport {
   return {
     planId: plan.planId,
     rigor: plan.rigor ?? 'mvp',
-    autoRunQa: plan.autoRunQa ?? (plan.rigor === 'production'),
+    autoRunQa: plan.autoRunQa ?? plan.rigor === 'production',
     hasBrowserTests: !!plan.testingProfile?.hasBrowserTests,
     verdict: overall,
     blockingReason,

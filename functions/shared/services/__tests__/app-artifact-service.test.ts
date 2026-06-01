@@ -12,10 +12,27 @@
 import { describe, expect, it, vi } from 'vitest';
 import { cleanupAppArtifacts } from '../app-artifact-service';
 
-function makeSsmDeps(folderOutput: string) {
+/**
+ * Command-aware SSM stub. The legacy projects-folder rm and the
+ * worktrees+bare-repo rm both flow through sendSsmCommand/waitForSsmOutput;
+ * route the response by inspecting the command text so each step gets the
+ * sentinel it parses.
+ *
+ * `folderOutput` drives the legacy `/home/ubuntu/projects/<app>` step.
+ * `worktreesOutput` drives the `/home/ubuntu/worktrees/<app>` + bare-repo
+ * step (defaults to both DELETED).
+ */
+function makeSsmDeps(folderOutput: string, worktreesOutput = 'WORKTREES_DELETED BAREREPO_DELETED') {
+  let lastCmd = '';
   return {
-    sendSsmCommand: vi.fn(async () => 'cmd-id'),
-    waitForSsmOutput: vi.fn(async () => folderOutput),
+    sendSsmCommand: vi.fn(async (cmd: string) => {
+      lastCmd = cmd;
+      return 'cmd-id';
+    }),
+    waitForSsmOutput: vi.fn(async () => {
+      if (lastCmd.includes('/home/ubuntu/worktrees/')) return worktreesOutput;
+      return folderOutput;
+    }),
   };
 }
 
@@ -89,6 +106,7 @@ describe('cleanupAppArtifacts (2026-05-19)', () => {
     expect(results.map((r) => r.step)).toEqual([
       'party-cleanup',
       'folder',
+      'worktrees',
       'github-repo',
       's3-apps',
       's3-knowledge',
@@ -163,6 +181,66 @@ describe('cleanupAppArtifacts (2026-05-19)', () => {
     // Story 20.11 — party-cleanup is now index 0; folder is index 1.
     expect(results[0]).toMatchObject({ step: 'party-cleanup' });
     expect(results[1]).toMatchObject({ step: 'folder', status: 'skipped' });
+  });
+
+  it('reports done for the worktrees step when the subtree + bare repo are deleted', async () => {
+    const results = await cleanupAppArtifacts('snake-4', {
+      ...makeSsmDeps('FOLDER_DELETED', 'WORKTREES_DELETED BAREREPO_DELETED'),
+      deleteGithubRepo: vi.fn(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s3Client: makeS3Stub({}) as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      secretsClient: makeSecretsStub() as any,
+    });
+    const wt = results.find((r) => r.step === 'worktrees');
+    expect(wt?.status).toBe('done');
+    expect(wt?.detail).toContain('worktrees=DELETED');
+    expect(wt?.detail).toContain('bareRepo=DELETED');
+  });
+
+  it('reports skipped for the worktrees step when both are already absent', async () => {
+    const results = await cleanupAppArtifacts('snake-4', {
+      ...makeSsmDeps('FOLDER_DELETED', 'WORKTREES_ABSENT BAREREPO_ABSENT'),
+      deleteGithubRepo: vi.fn(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s3Client: makeS3Stub({}) as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      secretsClient: makeSecretsStub() as any,
+    });
+    expect(results.find((r) => r.step === 'worktrees')?.status).toBe('skipped');
+  });
+
+  it('reports error for the worktrees step when rm fails', async () => {
+    const results = await cleanupAppArtifacts('snake-4', {
+      ...makeSsmDeps('FOLDER_DELETED', 'WORKTREES_FAILED BAREREPO_ABSENT'),
+      deleteGithubRepo: vi.fn(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s3Client: makeS3Stub({}) as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      secretsClient: makeSecretsStub() as any,
+    });
+    expect(results.find((r) => r.step === 'worktrees')?.status).toBe('error');
+  });
+
+  it('sweeps the worktrees subtree even when the legacy projects folder is already gone', async () => {
+    // The reported bug: projects/<app> deleted but worktrees/<app> lingered.
+    const ssm = makeSsmDeps('FOLDER_ABSENT', 'WORKTREES_DELETED BAREREPO_DELETED');
+    const results = await cleanupAppArtifacts('applicator', {
+      ...ssm,
+      deleteGithubRepo: vi.fn(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s3Client: makeS3Stub({}) as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      secretsClient: makeSecretsStub() as any,
+    });
+    expect(results.find((r) => r.step === 'folder')?.status).toBe('skipped');
+    expect(results.find((r) => r.step === 'worktrees')?.status).toBe('done');
+    // The worktrees command targeted the shared root + the bare repo.
+    const wtCmdCall = ssm.sendSsmCommand.mock.calls.find((call) =>
+      String(call[0]).includes('/home/ubuntu/worktrees/applicator'),
+    );
+    expect(wtCmdCall).toBeTruthy();
+    expect(String(wtCmdCall![0])).toContain('/home/ubuntu/repos/applicator.git');
   });
 
   it('reports skipped for an S3 step when the prefix has no objects', async () => {

@@ -28,6 +28,8 @@ export interface StoryRerunDeps {
       epicId?: string;
       rigor?: PlanRigor;
       hasBrowserTests?: boolean;
+      planSlug?: string;
+      planId?: string;
     },
   ) => PipelineDefinition;
   createJob: (job: AgentJob) => Promise<unknown>;
@@ -81,6 +83,8 @@ export async function launchStoryRerun(
     epicId: epic.epicId,
     rigor: planOpts?.rigor,
     hasBrowserTests: planOpts?.hasBrowserTests,
+    planSlug: planOpts?.planSlug,
+    planId: planOpts?.planId,
   });
 
   // PR-6 (A): merge prior runtime state into the pipeline definition. The

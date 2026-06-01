@@ -29,10 +29,7 @@ export function AgentCard({
   const time = timestamp || 'just now';
 
   return (
-    <div
-      className="relative mx-6 mb-3 overflow-hidden rounded-xl"
-      style={{ background: COLORS.bgSurface }}
-    >
+    <div className="party-agent-card relative mx-6 mb-3 overflow-hidden rounded-xl">
       {/* Top accent edge — the identity strip */}
       <div style={{ height: 4, background: id.accentHex }} />
 
@@ -51,13 +48,12 @@ export function AgentCard({
               }}
               title={id.title ? `${speaker} · ${id.title}` : speaker}
             >
-              <span style={{ fontSize: 24, lineHeight: 1 }}>
-                {id.icon || id.fallbackInitials}
-              </span>
+              <span style={{ fontSize: 24, lineHeight: 1 }}>{id.icon || id.fallbackInitials}</span>
             </div>
-            {/* Status dot */}
+            {/* Status dot — border uses the bubble surface so it cuts cleanly
+                in both themes. */}
             <span
-              className="absolute"
+              className="party-agent-status absolute"
               style={{
                 bottom: -2,
                 right: -2,
@@ -65,7 +61,6 @@ export function AgentCard({
                 height: 14,
                 borderRadius: 7,
                 background: streaming ? COLORS.accentLive : '#80848e',
-                border: `2px solid ${COLORS.bgSurface}`,
               }}
             />
           </div>
@@ -73,12 +68,7 @@ export function AgentCard({
           {/* Header + body */}
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <span
-                className="text-[16px] font-bold leading-tight"
-                style={{ color: COLORS.textPrimary }}
-              >
-                {speaker}
-              </span>
+              <span className="text-[16px] font-bold leading-tight text-foreground">{speaker}</span>
               {id.title && (
                 <span
                   className="rounded-[10px] px-2 py-[2px] text-[12px] font-semibold leading-none"
@@ -88,9 +78,7 @@ export function AgentCard({
                 </span>
               )}
               <span className="ml-auto flex items-center gap-2">
-                <span className="text-[12px]" style={{ color: COLORS.textMuted }}>
-                  {time}
-                </span>
+                <span className="text-[12px] text-muted-foreground">{time}</span>
                 <CopyButton text={text} label={`${speaker}'s message`} />
               </span>
             </div>

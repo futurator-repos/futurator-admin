@@ -14,11 +14,7 @@
 import { useState } from 'react';
 import { Loader2, Check, Undo2 } from 'lucide-react';
 import { useQaReport, useApproveAc, useRevokeAcApproval } from '@/hooks/use-qa-report';
-import type {
-  AcCriterionResult,
-  QaReport,
-  VqaTestResult,
-} from '@/types/qa-report';
+import type { AcCriterionResult, QaReport, VqaTestResult } from '@/types/qa-report';
 import { VerdictStrip } from './qa/verdict-strip';
 import { PillarCard } from './qa/pillar-card';
 import { FailureDrawer, type FailureDrawerItem } from './qa/failure-drawer';
@@ -26,6 +22,7 @@ import { WaveMatrix } from './qa/wave-matrix';
 import { VqaGallery } from './qa/vqa-gallery';
 import { AuditTimeline } from './qa/audit-timeline';
 import { VqaLogs } from './qa/vqa-logs';
+import { ContractGate } from './qa/contract-gate';
 
 export function QaReviewView({ planId }: { planId: string }) {
   const { data: report, isLoading, error } = useQaReport(planId);
@@ -73,6 +70,7 @@ export function QaReviewView({ planId }: { planId: string }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <VerdictStrip report={report} planId={planId} />
+      <ContractGate report={report} planId={planId} />
       <RunningBanner report={report} />
       <div
         style={{
@@ -111,24 +109,16 @@ export function QaReviewView({ planId }: { planId: string }) {
 
       {/* VQA agent logs — paste-able diagnosis block when VQA misbehaves.
           Only rendered when at least one epic has a qaJob. */}
-      {report.perEpic.some((e) => !!e.qaJobId) && (
-        <VqaLogs perEpic={report.perEpic} />
-      )}
+      {report.perEpic.some((e) => !!e.qaJobId) && <VqaLogs perEpic={report.perEpic} />}
 
       {/* Attention items chip strip — filtered QA-relevant items, linked to
           the existing right-side dock via the bell on the project hero. */}
-      {report.attentionItems.length > 0 && (
-        <AttentionBanner count={report.attentionItems.length} />
-      )}
+      {report.attentionItems.length > 0 && <AttentionBanner count={report.attentionItems.length} />}
 
       {/* Audit trail — always visible once at least one run has completed. */}
       <AuditTimeline report={report} />
 
-      <FailureDrawer
-        planId={planId}
-        item={drawerItem}
-        onClose={() => setDrawerItem(null)}
-      />
+      <FailureDrawer planId={planId} item={drawerItem} onClose={() => setDrawerItem(null)} />
     </div>
   );
 }
@@ -210,11 +200,7 @@ function AcPillar({
             opacity: approve.isPending ? 0.6 : 1,
           }}
         >
-          {approve.isPending ? (
-            <Loader2 size={11} className="animate-spin" />
-          ) : (
-            <Check size={11} />
-          )}
+          {approve.isPending ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
           Mark AC reviewed
         </button>
       )}
@@ -241,11 +227,7 @@ function AcPillar({
             opacity: revoke.isPending ? 0.6 : 1,
           }}
         >
-          {revoke.isPending ? (
-            <Loader2 size={11} className="animate-spin" />
-          ) : (
-            <Undo2 size={11} />
-          )}
+          {revoke.isPending ? <Loader2 size={11} className="animate-spin" /> : <Undo2 size={11} />}
           Undo approval
         </button>
       )}
@@ -327,7 +309,9 @@ function GatePillar({ report }: { report: QaReport }) {
       verdict={gate.verdict}
       pass={passCells}
       total={totalCells}
-      extraValue={failingRows > 0 ? `${failingRows} wave${failingRows === 1 ? '' : 's'} failing` : undefined}
+      extraValue={
+        failingRows > 0 ? `${failingRows} wave${failingRows === 1 ? '' : 's'} failing` : undefined
+      }
       extraColor="var(--destructive)"
       onViewAll={!isSkipped ? () => console.info('[QA] Build matrix TODO') : undefined}
     >
@@ -339,8 +323,7 @@ function GatePillar({ report }: { report: QaReport }) {
       )}
       {!isSkipped && gate.waveRows.length === 0 && (
         <p style={{ color: 'var(--text-mute)', fontSize: 12, margin: 0 }}>
-          No waves yet — the gate surfaces once dev waves produce build-check
-          jobs.
+          No waves yet — the gate surfaces once dev waves produce build-check jobs.
         </p>
       )}
       {!isSkipped && Object.keys(gate.tamperCountsByStory).length > 0 && (
@@ -527,7 +510,8 @@ function AttentionBanner({ count }: { count: number }) {
         letterSpacing: '0.04em',
       }}
     >
-      {count} QA-related attention item{count === 1 ? '' : 's'} · open the bell (top-right of hero) to triage.
+      {count} QA-related attention item{count === 1 ? '' : 's'} · open the bell (top-right of hero)
+      to triage.
     </div>
   );
 }
@@ -536,24 +520,15 @@ function AttentionBanner({ count }: { count: number }) {
 void ({} as AcCriterionResult);
 
 /**
- * Running banner — shown when any epic has a QA job in PENDING or RUNNING
- * state. Gives the operator feedback after clicking Re-run QA so they see
- * the wheels turning instead of wondering if the click did anything.
+ * Running banner — shown when qa-execute is in flight (or queued for the
+ * daemon). PR-8a moved QA to plan-scope, so the old per-epic check
+ * (`e.qaVerdict === 'pending' && !!e.qaJobId`) never fires for current
+ * plans — epic.qaJobId is unused. Re-derive from `vqa.executeStatus`.
  */
 function RunningBanner({ report }: { report: QaReport }) {
-  const running = report.perEpic.filter((e) => e.qaVerdict === 'pending' && !!e.qaJobId);
-  if (running.length === 0) return null;
-  // Elapsed time of the oldest in-flight run (most informative). Derive from
-  // generatedAt on the report (server timestamp) so render stays pure — the
-  // report refetches on a 3s poll, which gives us a live-enough clock.
-  const oldestRanAt = running
-    .map((e) => e.ranAt)
-    .filter((t): t is string => !!t)
-    .sort()[0];
-  const elapsed =
-    oldestRanAt && report.generatedAt
-      ? Math.floor((Date.parse(report.generatedAt) - Date.parse(oldestRanAt)) / 1000)
-      : null;
+  const status = report.vqa.executeStatus;
+  if (status !== 'running' && status !== 'queued-execute') return null;
+  const label = status === 'running' ? 'QA running' : 'QA queued';
   return (
     <div
       style={{
@@ -570,20 +545,13 @@ function RunningBanner({ report }: { report: QaReport }) {
     >
       <Loader2 size={14} className="animate-spin" style={{ color: 'var(--accent-purple)' }} />
       <span style={{ color: 'var(--foreground)', fontWeight: 500, letterSpacing: '0.02em' }}>
-        QA running
+        {label}
       </span>
       <span style={{ color: 'var(--text-mute)', letterSpacing: '0.06em' }}>
-        {running.length} epic{running.length === 1 ? '' : 's'}
-        {elapsed != null ? ` · ${fmtElapsed(elapsed)} elapsed` : ''}
-        {' · '}scroll to <em>Visual QA Logs</em> for live output
+        {status === 'queued-execute'
+          ? 'Daemon will pick up the execute job within ~60s.'
+          : 'Capturing screenshots + judging tests · scroll to Visual QA Logs for live output'}
       </span>
     </div>
   );
-}
-
-function fmtElapsed(s: number): string {
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${m}m ${r}s`;
 }

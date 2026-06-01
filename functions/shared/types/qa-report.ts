@@ -112,6 +112,85 @@ export interface VqaTestResult {
   durationMs?: number;
 }
 
+/**
+ * Pipeline v2.0 PR-8d — execute-stage lifecycle as seen from the UI.
+ *
+ *   never-run        — no aggregate, no execute. Operator hasn't clicked
+ *                      "Run QA Review" yet (or rigor === 'prototype').
+ *   queued-contract  — aggregate COMPLETED, contract waiting for operator
+ *                      approval. ContractGate component renders.
+ *   rejected         — operator clicked Reject; no execute will run unless
+ *                      they Re-classify.
+ *   queued-execute   — operator approved; execute job exists but daemon
+ *                      hasn't picked it up yet (PENDING).
+ *   running          — execute job RUNNING.
+ *   done             — execute job COMPLETED (verdict from TEST_RESULTS).
+ */
+export type VqaExecuteStatus =
+  | 'never-run'
+  | 'queued-contract'
+  | 'rejected'
+  | 'queued-execute'
+  | 'running'
+  | 'done';
+
+/**
+ * One row in the ContractGate's test table. Enriched join of
+ * `CLASSIFIED_TESTS` (from qa-aggregate's AGGREGATE_OUTPUT) with the
+ * source `story.visualTests[]` entry so the UI can render a complete row
+ * without re-fetching epics or re-classifying.
+ */
+export interface ContractClassifiedTest {
+  testId: string;
+  storyId: string;
+  storyTitle: string;
+  epicId: string;
+  epicLabel: string; // "E1" 1-indexed
+  criteriaRef?: string;
+  description: string;
+  expect: string;
+  level: VqaTestLevel;
+  /** classifier `reason` string (e.g. "raised to L1: AC needsBrowser…"). */
+  classifierReason: string;
+  /** Per-test cost estimate at the current level, in USD. */
+  estimatedCostUsd: number;
+  /** Per-test wall-clock estimate at the current level, in seconds. */
+  estimatedWallclockSec: number;
+}
+
+export interface ContractWarning {
+  /** Free-text identifier of the offending entity (testId or AC id). */
+  refId?: string;
+  reason?: string;
+  message: string;
+}
+
+/**
+ * Snapshot of the qa-aggregate step's output, scoped for the operator
+ * contract-review UI. Populated when `executeStatus === 'queued-contract'`
+ * (or `'rejected'` — the operator can still see what they declined).
+ *
+ * Carries enough data that the ContractGate doesn't need a second
+ * roundtrip: the full classified test list, both warning arrays, and
+ * the aggregate totals.
+ */
+export interface QaContractDraft {
+  aggregateJobId: string;
+  /** Mirror of `plan.qaContractStatus` for client convenience. */
+  status: 'pending' | 'approved' | 'rejected';
+  totalTests: number;
+  byLevel: { L0: number; L1: number; L2: number };
+  /** Aggregate-step estimate (sum across classified tests). */
+  estimatedCostUsd: number;
+  estimatedWallclockSec: number;
+  coverageWarnings: ContractWarning[];
+  specificityWarnings: ContractWarning[];
+  classifiedTests: ContractClassifiedTest[];
+  /** Mirrors `plan.qaContractDecidedAt`/`…By` when status !== 'pending'. */
+  decidedAt?: string;
+  decidedBy?: string;
+}
+
 export interface VqaRollup {
   verdict: QaPillarVerdict;
   total: number;
@@ -133,17 +212,17 @@ export interface VqaRollup {
   costUsd?: number;
   /** PR-8 — total wall-clock for this run. */
   wallclockSec?: number;
+  /** PR-8d — execute-stage lifecycle. Drives ContractGate visibility +
+   *  the gallery badge labels + the verdict-strip CTAs. */
+  executeStatus: VqaExecuteStatus;
+  /** PR-8d — populated when an aggregate job has run (i.e. executeStatus
+   *  is anything except `never-run`). The ContractGate consumes this. */
+  contract?: QaContractDraft;
 }
 
 // ── Automated Gate pillar ────────────────────────────────────────────
 
-export type GateCheck =
-  | 'compile'
-  | 'typecheck'
-  | 'lint'
-  | 'unit'
-  | 'browser'
-  | 'tamper';
+export type GateCheck = 'compile' | 'typecheck' | 'lint' | 'unit' | 'browser' | 'tamper';
 
 export type GateCellStatus = 'pass' | 'fail' | 'pending' | 'skipped';
 

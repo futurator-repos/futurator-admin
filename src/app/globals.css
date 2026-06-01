@@ -135,6 +135,26 @@
   --amber: #b45309;
   --cyan: #0e7490;
   --red: #dc2626;
+
+  /* ── Party V2 tokens — light. The brightness hierarchy is *inverted*
+     from dark mode: in dark, lower index = darker; in light, lower index
+     = darker (so dividers stay visible against the lighter surfaces).
+     The "main content" sits on white, side panes drop one step, and
+     elevated cards/buttons sit slightly above the side pane. ── */
+  --party-bg-deepest: #d8dade; /* dividers, hard borders */
+  --party-bg-surface: #eef0f3; /* side panes (left/right) */
+  --party-bg-content: #ffffff; /* main content / drawer */
+  --party-bg-elevated: #ffffff; /* composer + small cards */
+  --party-bg-input: #ffffff;
+
+  --party-text-primary: #0a0b0f;
+  --party-text-body: #1f2127;
+  --party-text-muted: #52555d;
+  --party-text-faint: #6b6f78;
+
+  --party-accent-brand: #4a6b92;
+  --party-accent-orch-soft: #6b4ea8;
+  --party-inline-code: #b45309;
 }
 
 .dark {
@@ -194,6 +214,24 @@
   --amber: #d1a54f;
   --cyan: #8ab4c7;
   --red: #ef4444;
+
+  /* ── Party V2 tokens — dark. Verbatim from the original prototype
+     (`docs/concepts/party-mode/party-mode-ui2.md` §3 + tokens.ts) so the
+     dark-mode look does not regress with the holistic theme pass. ── */
+  --party-bg-deepest: #1e1f22;
+  --party-bg-surface: #2b2d31;
+  --party-bg-content: #313338;
+  --party-bg-elevated: #383a40;
+  --party-bg-input: #1e1f22;
+
+  --party-text-primary: #f2f3f5;
+  --party-text-body: #dbdee1;
+  --party-text-muted: #949ba4;
+  --party-text-faint: #80848e;
+
+  --party-accent-brand: #5865f2;
+  --party-accent-orch-soft: #c4b5fd;
+  --party-inline-code: #f9a8d4;
 }
 
 @layer base {
@@ -404,6 +442,46 @@
   opacity: 0.7;
 }
 
+/* Agent message bubble — theme-aware surface so light mode actually
+   reads. Dark mode keeps the Discord-y elevated grey. */
+.party-agent-card {
+  background: var(--surface);
+  color: var(--card-foreground);
+}
+.dark .party-agent-card {
+  background: #2b2d31;
+  color: #f2f3f5;
+}
+.party-agent-status {
+  border: 2px solid var(--surface);
+}
+.dark .party-agent-status {
+  border-color: #2b2d31;
+}
+
+/* Inline `code` — theme-aware. Beige-on-dark, brown-on-light keeps the
+   semantic "this is code" tint visible in both modes. */
+.party-inline-code {
+  background: color-mix(in srgb, var(--foreground) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--foreground) 10%, transparent);
+  color: var(--amber);
+}
+
+/* Hover tint — adds a subtle 6% foreground overlay on hover. Replaces
+   hardcoded `hover:bg-white/[X]` (dark-only) wherever we want a button
+   to indicate hoverability against either theme. */
+.party-hover-tint {
+  transition: background-color 120ms;
+}
+.party-hover-tint:hover {
+  background: color-mix(in srgb, var(--foreground) 6%, transparent);
+}
+
+/* Inset / "pressed" tint for small quoted snippets inside cards. */
+.party-snippet-tint {
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
 /* Blockquote */
 .party-quote {
   border-left: 2px solid color-mix(in srgb, var(--success) 35%, transparent);
@@ -497,5 +575,5 @@
 }
 .party-resize-handle:hover,
 .party-resize-handle[data-dragging='true'] {
-  background: rgba(88, 101, 242, 0.5);
+  background: color-mix(in srgb, var(--party-accent-brand) 55%, transparent);
 }

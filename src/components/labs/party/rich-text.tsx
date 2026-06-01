@@ -13,7 +13,11 @@ const MENTION_RE = /@([A-Z][a-z]+)/g;
 const FILE_RE =
   /\b([\w./-]+\.(?:md|markdown|txt|ts|tsx|js|jsx|json|css|scss|html|py|go|rs|rb|java|kt|swift|c|cpp|h|sh|bash|zsh|yml|yaml|toml|xml|mjs|cjs|sql|env))\b/g;
 
-function enhanceString(text: string, keyPrefix: string, openFile?: (path: string) => void): ReactNode[] {
+function enhanceString(
+  text: string,
+  keyPrefix: string,
+  openFile?: (path: string) => void,
+): ReactNode[] {
   // Run both regexes, collect tokens with positions, replace non-overlapping hits
   interface Hit {
     kind: 'mention' | 'file';
@@ -83,7 +87,15 @@ function enhanceChildren(
 ): ReactNode {
   if (typeof children === 'string') {
     const parts = enhanceString(children, keyPrefix, openFile);
-    return parts.length === 1 ? parts[0] : <>{parts.map((p, i) => <Fragment key={i}>{p}</Fragment>)}</>;
+    return parts.length === 1 ? (
+      parts[0]
+    ) : (
+      <>
+        {parts.map((p, i) => (
+          <Fragment key={i}>{p}</Fragment>
+        ))}
+      </>
+    );
   }
   if (Array.isArray(children)) {
     return children.map((c, i) =>
@@ -132,7 +144,8 @@ const TS_KEYWORDS = new Set([
 
 function highlightTs(code: string): ReactNode[] {
   const out: ReactNode[] = [];
-  const rx = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(['"`])(?:\\.|(?!\2).)*\2|\b([A-Za-z_$][\w$]*)\b|\b(\d+(?:\.\d+)?)\b/g;
+  const rx =
+    /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(['"`])(?:\\.|(?!\2).)*\2|\b([A-Za-z_$][\w$]*)\b|\b(\d+(?:\.\d+)?)\b/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let i = 0;
@@ -242,12 +255,12 @@ export function RichText({ text }: { text: string }) {
           p: ({ children }) => <p className="my-1.5">{enhanceChildren(children, 'e', open)}</p>,
           li: ({ children }) => <li className="my-0.5">{enhanceChildren(children, 'e', open)}</li>,
           strong: ({ children }) => (
-            <strong style={{ fontWeight: 600, color: '#f4f4f4' }}>
+            <strong className="font-semibold text-foreground">
               {enhanceChildren(children, 'e', open)}
             </strong>
           ),
           em: ({ children }) => (
-            <em style={{ color: '#d4d4d4' }}>{enhanceChildren(children, 'e', open)}</em>
+            <em className="text-foreground/85">{enhanceChildren(children, 'e', open)}</em>
           ),
           del: ({ children }) => (
             <s className="text-muted-foreground/70">{enhanceChildren(children, 'e', open)}</s>
@@ -257,22 +270,34 @@ export function RichText({ text }: { text: string }) {
             <hr className="my-3" style={{ border: 'none', borderTop: '1px solid var(--border)' }} />
           ),
           h1: ({ children }) => (
-            <h1 style={{ fontSize: 20, fontWeight: 600, margin: '14px 0 6px', color: '#f4f4f4' }}>
+            <h1
+              className="text-foreground"
+              style={{ fontSize: 20, fontWeight: 600, margin: '14px 0 6px' }}
+            >
               {enhanceChildren(children, 'e', open)}
             </h1>
           ),
           h2: ({ children }) => (
-            <h2 style={{ fontSize: 17, fontWeight: 600, margin: '14px 0 6px', color: '#f4f4f4' }}>
+            <h2
+              className="text-foreground"
+              style={{ fontSize: 17, fontWeight: 600, margin: '14px 0 6px' }}
+            >
               {enhanceChildren(children, 'e', open)}
             </h2>
           ),
           h3: ({ children }) => (
-            <h3 style={{ fontSize: 15, fontWeight: 600, margin: '12px 0 6px', color: '#f4f4f4' }}>
+            <h3
+              className="text-foreground"
+              style={{ fontSize: 15, fontWeight: 600, margin: '12px 0 6px' }}
+            >
               {enhanceChildren(children, 'e', open)}
             </h3>
           ),
           h4: ({ children }) => (
-            <h4 style={{ fontSize: 13.5, fontWeight: 600, margin: '10px 0 6px', color: '#f4f4f4' }}>
+            <h4
+              className="text-foreground"
+              style={{ fontSize: 13.5, fontWeight: 600, margin: '10px 0 6px' }}
+            >
               {enhanceChildren(children, 'e', open)}
             </h4>
           ),
@@ -291,12 +316,8 @@ export function RichText({ text }: { text: string }) {
               </a>
             );
           },
-          ul: ({ children }) => (
-            <ul className="my-1.5 pl-5 list-disc">{children}</ul>
-          ),
-          ol: ({ children }) => (
-            <ol className="my-1.5 pl-5 list-decimal">{children}</ol>
-          ),
+          ul: ({ children }) => <ul className="my-1.5 pl-5 list-disc">{children}</ul>,
+          ol: ({ children }) => <ol className="my-1.5 pl-5 list-decimal">{children}</ol>,
           table: ({ children }) => (
             <div className="my-2 overflow-x-auto rounded border border-border">
               <table className="w-full text-[12.5px]">{children}</table>
@@ -317,11 +338,32 @@ export function RichText({ text }: { text: string }) {
             const match = /language-([\w-]+)/.exec(className || '');
             const isBlock = Boolean(match) || raw.includes('\n');
             if (!isBlock) {
+              // Inline file path inside backticks → render as the same
+              // clickable .party-link-file the regex enhancer would have
+              // produced for bare text. Falls back to the styled code chip
+              // when the content isn't a recognised file path.
+              const fileMatch = raw.match(
+                /^([\w./-]+\.(?:md|markdown|txt|ts|tsx|js|jsx|json|css|scss|html|py|go|rs|rb|java|kt|swift|c|cpp|h|sh|bash|zsh|yml|yaml|toml|xml|mjs|cjs|sql|env))$/,
+              );
+              if (fileMatch && open) {
+                const path = fileMatch[1];
+                return (
+                  <button
+                    type="button"
+                    className="party-link-file"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      open(path);
+                    }}
+                    title={`Open ${path}`}
+                  >
+                    {path}
+                  </button>
+                );
+              }
               return (
-                <code
-                  className="rounded border border-white/[0.04] bg-white/[0.06] px-1 py-px font-mono text-[0.88em]"
-                  style={{ color: '#e0c6a8' }}
-                >
+                <code className="party-inline-code rounded px-1 py-px font-mono text-[0.88em]">
                   {children}
                 </code>
               );

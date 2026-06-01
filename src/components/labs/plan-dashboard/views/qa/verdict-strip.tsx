@@ -118,8 +118,18 @@ export function VerdictStrip({ report, planId, showLastRun = true }: Props) {
       </div>
 
       {/* Pillar mini-gauges */}
-      <MiniGauge label="AC" verdict={report.ac.verdict} pass={report.ac.pass} total={report.ac.total} />
-      <MiniGauge label="VQA" verdict={report.vqa.verdict} pass={report.vqa.pass} total={report.vqa.total} />
+      <MiniGauge
+        label="AC"
+        verdict={report.ac.verdict}
+        pass={report.ac.pass}
+        total={report.ac.total}
+      />
+      <MiniGauge
+        label="VQA"
+        verdict={report.vqa.verdict}
+        pass={report.vqa.pass}
+        total={report.vqa.total}
+      />
       <MiniGauge
         label="Gate"
         verdict={report.gate.verdict}
@@ -148,42 +158,7 @@ export function VerdictStrip({ report, planId, showLastRun = true }: Props) {
 
       {/* Right-side CTAs */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
-        <button
-          type="button"
-          onClick={onRunQa}
-          disabled={runQa.isPending}
-          style={{
-            fontSize: 10,
-            letterSpacing: '0.14em',
-            textTransform: 'uppercase',
-            padding: '7px 14px',
-            border: '1px solid var(--border-2)',
-            borderRadius: 2,
-            color: 'var(--text-dim)',
-            background: 'transparent',
-            cursor: runQa.isPending ? 'not-allowed' : 'pointer',
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 6,
-            opacity: runQa.isPending ? 0.6 : 1,
-          }}
-          title={
-            report.verdict === 'not-run'
-              ? 'Run QA for the first time'
-              : 'Re-run Visual QA across all epics'
-          }
-        >
-          {runQa.isPending ? (
-            <Loader2 size={10} className="animate-spin" />
-          ) : (
-            <RefreshCw size={10} />
-          )}
-          {runQa.isPending
-            ? 'Enqueueing…'
-            : report.verdict === 'not-run'
-              ? 'Run QA Review'
-              : 'Re-run QA'}
-        </button>
+        <RunQaButton report={report} runQa={runQa} onClick={onRunQa} />
         <button
           type="button"
           onClick={onPromote}
@@ -216,6 +191,83 @@ export function VerdictStrip({ report, planId, showLastRun = true }: Props) {
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * Re-run / Run / Re-classify CTA — labelled based on `vqa.executeStatus`
+ * so the operator always sees what clicking will do *now*:
+ *
+ *   never-run        → "Run QA Review"     (kicks off aggregate)
+ *   queued-contract  → "Re-classify"       (re-runs aggregate; discards
+ *                                            the current pending contract.
+ *                                            Hover hint warns about discard)
+ *   rejected         → "Re-classify"       (same — operator wants a fresh
+ *                                            contract after declining)
+ *   queued-execute   → disabled "QA queued" (daemon hasn't picked up; don't
+ *                                             stomp the in-flight job)
+ *   running          → disabled "QA running"
+ *   done             → "Re-run QA"         (re-aggregates for a fresh pass)
+ */
+function RunQaButton({
+  report,
+  runQa,
+  onClick,
+}: {
+  report: QaReport;
+  runQa: ReturnType<typeof useRunQaReview>;
+  onClick: () => void;
+}) {
+  const status = report.vqa.executeStatus;
+  const blocked = status === 'queued-execute' || status === 'running';
+  const label = runQa.isPending
+    ? 'Enqueueing…'
+    : status === 'never-run'
+      ? 'Run QA Review'
+      : status === 'queued-contract' || status === 'rejected'
+        ? 'Re-classify'
+        : status === 'queued-execute'
+          ? 'QA queued'
+          : status === 'running'
+            ? 'QA running'
+            : 'Re-run QA';
+  const title = blocked
+    ? status === 'queued-execute'
+      ? 'Execute job is queued for the daemon — wait for it to pick up.'
+      : 'Execute job is running — wait for screenshots, then Re-run QA if needed.'
+    : status === 'queued-contract'
+      ? 'Re-runs the aggregate step; the current pending contract will be discarded.'
+      : status === 'rejected'
+        ? 'Run a fresh aggregate so the contract gate re-appears.'
+        : status === 'never-run'
+          ? 'Run QA for the first time'
+          : 'Re-run Visual QA across all epics';
+  const disabled = runQa.isPending || blocked;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        fontSize: 10,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        padding: '7px 14px',
+        border: '1px solid var(--border-2)',
+        borderRadius: 2,
+        color: 'var(--text-dim)',
+        background: 'transparent',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        opacity: disabled ? 0.5 : 1,
+      }}
+      title={title}
+    >
+      {runQa.isPending ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
+      {label}
+    </button>
   );
 }
 
@@ -260,8 +312,7 @@ function MiniGauge({
 }) {
   const color = verdictColor(verdict);
   const pct = total > 0 ? Math.round((pass / total) * 100) : 0;
-  const valueText =
-    verdict === 'skipped' ? '—' : total === 0 ? '—' : `${pass}/${total}`;
+  const valueText = verdict === 'skipped' ? '—' : total === 0 ? '—' : `${pass}/${total}`;
   return (
     <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4 }}>
       <div
@@ -338,7 +389,8 @@ function RigorPill({ rigor, hasBrowser }: { rigor: string; hasBrowser: boolean }
             : 'Production rigor — full red-green-tamper gate'
       }
     >
-      Rigor · {rigor}{hasBrowser ? ' + browser' : ''}
+      Rigor · {rigor}
+      {hasBrowser ? ' + browser' : ''}
     </span>
   );
 }

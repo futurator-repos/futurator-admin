@@ -9,7 +9,7 @@
  */
 
 import { useState } from 'react';
-import type { VqaRollup, VqaTestResult } from '@/types/qa-report';
+import type { VqaExecuteStatus, VqaRollup, VqaTestResult } from '@/types/qa-report';
 
 type Filter = 'all' | 'failures';
 
@@ -22,9 +22,17 @@ export function VqaGallery({ rollup, onSelectFailure }: Props) {
   const [filter, setFilter] = useState<Filter>('all');
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
-  const allThumbs = rollup.thumbnails.length > 0 ? rollup.thumbnails : rollup.failures;
-  const shown =
-    filter === 'failures' ? allThumbs.filter((t) => t.status === 'fail') : allThumbs;
+  // Use the full per-test result list (`results`) — `thumbnails` is the
+  // 6-cap strip surfaced in the pillar card and would silently truncate
+  // the gallery (was the cause of "0/8 pending" header but ALL (6) chip).
+  // Fall back to `thumbnails` for older payloads, then to `failures`.
+  const allThumbs =
+    rollup.results && rollup.results.length > 0
+      ? rollup.results
+      : rollup.thumbnails.length > 0
+        ? rollup.thumbnails
+        : rollup.failures;
+  const shown = filter === 'failures' ? allThumbs.filter((t) => t.status === 'fail') : allThumbs;
 
   if (rollup.total === 0 && !rollup.overviewUrl) return null;
 
@@ -69,7 +77,11 @@ export function VqaGallery({ rollup, onSelectFailure }: Props) {
           {rollup.pass} pass · {rollup.fail} fail · {rollup.pending} pending
         </span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-          <FilterChip label={`All (${allThumbs.length})`} active={filter === 'all'} onClick={() => setFilter('all')} />
+          <FilterChip
+            label={`All (${allThumbs.length})`}
+            active={filter === 'all'}
+            onClick={() => setFilter('all')}
+          />
           <FilterChip
             label={`Failures (${rollup.failures.length})`}
             active={filter === 'failures'}
@@ -137,6 +149,7 @@ export function VqaGallery({ rollup, onSelectFailure }: Props) {
               <Thumb
                 key={`${t.epicId}-${t.testId}`}
                 thumb={t}
+                executeStatus={rollup.executeStatus}
                 onClick={() => {
                   if (t.status === 'fail') onSelectFailure(t);
                   else if (t.screenshotUrl) setLightboxUrl(t.screenshotUrl);
@@ -179,20 +192,48 @@ export function VqaGallery({ rollup, onSelectFailure }: Props) {
 
 function Thumb({
   thumb,
+  executeStatus,
   onClick,
 }: {
   thumb: VqaTestResult;
+  executeStatus: VqaExecuteStatus;
   onClick: () => void;
 }) {
   // Color by status: pending = amber (no screenshot yet), pass = green, fail = red.
+  // 'never-run' pendings are grey instead of amber — nothing is in flight,
+  // there's just no data yet.
   const borderColor =
     thumb.status === 'pending'
-      ? 'var(--warning)'
+      ? executeStatus === 'never-run'
+        ? 'var(--border-2)'
+        : 'var(--warning)'
       : thumb.status === 'pass'
         ? 'var(--success)'
         : 'var(--destructive)';
+  // Pending badge is honest about why a screenshot is missing:
+  //   queued-contract → 'awaiting review' (operator must approve the gate)
+  //   queued-execute  → 'queued'          (daemon hasn't started yet)
+  //   running         → 'running'         (qa-execute in flight)
+  //   never-run       → 'no run'          (no QA initiated)
+  //   rejected        → 'skipped'         (operator declined)
+  //   done            → 'pending'         (rare: per-test pending in a
+  //                                        completed run — judge no-result)
   const badgeLabel =
-    thumb.status === 'pending' ? 'running' : thumb.status === 'pass' ? 'pass' : 'fail';
+    thumb.status === 'pending'
+      ? executeStatus === 'queued-contract'
+        ? 'awaiting review'
+        : executeStatus === 'queued-execute'
+          ? 'queued'
+          : executeStatus === 'running'
+            ? 'running'
+            : executeStatus === 'never-run'
+              ? 'no run'
+              : executeStatus === 'rejected'
+                ? 'skipped'
+                : 'pending'
+      : thumb.status === 'pass'
+        ? 'pass'
+        : 'fail';
   return (
     <button
       type="button"

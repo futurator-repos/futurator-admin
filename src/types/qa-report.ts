@@ -69,6 +69,54 @@ export interface VqaTestResult {
   durationMs?: number;
 }
 
+/** PR-8d — execute-stage lifecycle. Drives ContractGate visibility,
+ *  vqa-gallery badge labels, and verdict-strip CTAs. */
+export type VqaExecuteStatus =
+  | 'never-run'
+  | 'queued-contract'
+  | 'rejected'
+  | 'queued-execute'
+  | 'running'
+  | 'done';
+
+/** PR-8d — one row in the ContractGate's test table. */
+export interface ContractClassifiedTest {
+  testId: string;
+  storyId: string;
+  storyTitle: string;
+  epicId: string;
+  epicLabel: string;
+  criteriaRef?: string;
+  description: string;
+  expect: string;
+  level: VqaTestLevel;
+  classifierReason: string;
+  estimatedCostUsd: number;
+  estimatedWallclockSec: number;
+}
+
+export interface ContractWarning {
+  refId?: string;
+  reason?: string;
+  message: string;
+}
+
+/** PR-8d — snapshot of the qa-aggregate output scoped for the
+ *  ContractGate UI. */
+export interface QaContractDraft {
+  aggregateJobId: string;
+  status: 'pending' | 'approved' | 'rejected';
+  totalTests: number;
+  byLevel: { L0: number; L1: number; L2: number };
+  estimatedCostUsd: number;
+  estimatedWallclockSec: number;
+  coverageWarnings: ContractWarning[];
+  specificityWarnings: ContractWarning[];
+  classifiedTests: ContractClassifiedTest[];
+  decidedAt?: string;
+  decidedBy?: string;
+}
+
 export interface VqaRollup {
   verdict: QaPillarVerdict;
   total: number;
@@ -84,15 +132,11 @@ export interface VqaRollup {
   results?: VqaTestResult[];
   costUsd?: number;
   wallclockSec?: number;
+  executeStatus: VqaExecuteStatus;
+  contract?: QaContractDraft;
 }
 
-export type GateCheck =
-  | 'compile'
-  | 'typecheck'
-  | 'lint'
-  | 'unit'
-  | 'browser'
-  | 'tamper';
+export type GateCheck = 'compile' | 'typecheck' | 'lint' | 'unit' | 'browser' | 'tamper';
 
 export type GateCellStatus = 'pass' | 'fail' | 'pending' | 'skipped';
 

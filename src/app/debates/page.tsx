@@ -11,17 +11,10 @@
  * tickets. It renders the same `<SessionChatV2>` component used inside the
  * App-detail Party tab, so feature parity is automatic.
  */
-import { Suspense, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { formatDistanceToNow } from 'date-fns';
-import {
-  ArrowLeft,
-  ExternalLink,
-  Loader2,
-  MessageSquare,
-  MessagesSquare,
-  Plus,
-} from 'lucide-react';
+import { ArrowLeft, Loader2, MessageSquare, MessagesSquare, Plus } from 'lucide-react';
 import { AppShell } from '@/components/layout/app-shell';
 import { AuthGuard } from '@/components/auth/auth-guard';
 import { Button } from '@/components/ui/button';
@@ -30,6 +23,7 @@ import { useApps } from '@/hooks/use-apps';
 import { useSession } from '@/hooks/use-party-session';
 import { SessionChatV2 } from '@/components/labs/party/v2/session-chat-v2';
 import { NewDebateDialog } from '@/components/debates/new-debate-dialog';
+import { useUIStore } from '@/stores/ui-store';
 import type { PartySession, PartySessionStatus } from '@/types/party';
 
 const STATUS_TONE: Record<PartySessionStatus, string> = {
@@ -51,6 +45,25 @@ interface AppGroup {
 function DebateChatView({ sessionId }: { sessionId: string }) {
   const router = useRouter();
   const { data: session, isLoading, error } = useSession(sessionId);
+  const setHeaderBreadcrumbs = useUIStore((s) => s.setHeaderBreadcrumbs);
+
+  // Publish the breadcrumb (Debates / <project> / <topic>) into the global
+  // top header so the debate chat doesn't waste a second toolbar row.
+  useEffect(() => {
+    if (!session) {
+      setHeaderBreadcrumbs([{ label: 'Debates', href: '/debates' }]);
+      return () => setHeaderBreadcrumbs(null);
+    }
+    setHeaderBreadcrumbs([
+      { label: 'Debates', href: '/debates' },
+      {
+        label: session.projectId,
+        href: `/labs?appId=${encodeURIComponent(session.projectId)}`,
+      },
+      { label: session.topic || 'Untitled debate' },
+    ]);
+    return () => setHeaderBreadcrumbs(null);
+  }, [session, setHeaderBreadcrumbs]);
 
   if (isLoading) {
     return (
@@ -86,56 +99,15 @@ function DebateChatView({ sessionId }: { sessionId: string }) {
   }
 
   return (
-    <div className="flex h-[calc(100vh-120px)] flex-col gap-3">
-      {/* Compact header — App context + back / open-in-App actions. Mobile-friendly. */}
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-card px-3 py-1.5">
-        <div className="flex items-center gap-2 min-w-0">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-[12px]"
-            onClick={() => router.push('/debates')}
-            title="Back to all debates"
-          >
-            <ArrowLeft className="mr-1 h-3 w-3" /> Debates
-          </Button>
-          <span className="text-muted-foreground text-[11px]">/</span>
-          <button
-            type="button"
-            onClick={() => router.push(`/labs?appId=${encodeURIComponent(session.projectId)}`)}
-            className="text-[12px] font-medium hover:underline truncate"
-            title="Open App detail"
-          >
-            {session.projectId}
-          </button>
-          <span className="text-muted-foreground text-[11px]">/</span>
-          <span className="truncate text-[12px]" title={session.topic}>
-            {session.topic || 'Untitled debate'}
-          </span>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 text-[11px]"
-          onClick={() =>
-            router.push(`/labs?appId=${encodeURIComponent(session.projectId)}&tab=party`)
-          }
-          title="Open inside the App's Party tab"
-        >
-          Open in App <ExternalLink className="ml-1 h-3 w-3" />
-        </Button>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border bg-card">
-        <SessionChatV2
-          sessionId={sessionId}
-          onClose={() => router.push('/debates')}
-          onPickSession={(id) => router.push(`/debates?sessionId=${encodeURIComponent(id)}`)}
-          onNewSession={() =>
-            router.push(`/labs?appId=${encodeURIComponent(session.projectId)}&tab=party`)
-          }
-        />
-      </div>
+    <div className="h-[calc(100vh-104px)] min-h-0 overflow-hidden rounded-md border border-border bg-card">
+      <SessionChatV2
+        sessionId={sessionId}
+        onClose={() => router.push('/debates')}
+        onPickSession={(id) => router.push(`/debates?sessionId=${encodeURIComponent(id)}`)}
+        onNewSession={() =>
+          router.push(`/labs?appId=${encodeURIComponent(session.projectId)}&tab=party`)
+        }
+      />
     </div>
   );
 }

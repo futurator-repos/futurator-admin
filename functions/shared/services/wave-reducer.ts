@@ -237,8 +237,71 @@ export async function reduceEpicWaves(
   // safety net.
   // Plan-3 of dino-runner-1 measured 5m 26s dead time per wave boundary
   // — 3 wave boundaries × 5 min = 15 min of idle on a 5-story plan.
+  // 2026-05-19 — Phase 1 worktree rollout. When useStoryWorktree is
+  // active (planSlug present), the wave-merge job REPLACES the
+  // wave-build-check. Wave-merge runs `git merge --no-ff` per story in a
+  // coordinator worktree, then runs the boilerplate's
+  // postMergeValidationCmd (`npm test`) — that subsumes the
+  // build-check's responsibility. Failure modes (merge-conflict,
+  // wave-build-failed) surface as standard attention items via the
+  // wave-merge runner (daemon-side).
+  //
+  // The wave-merge job uses the same `waveBuildJobs[String(waveNumber)]`
+  // slot to track its jobId — the wave-reducer's downstream "build-check
+  // exists; gate on status" logic works identically for either job kind
+  // (both terminate in COMPLETED/FAILED, and both block wave-advance
+  // until terminal).
+  const useStoryWorktree = !!planOpts?.planSlug;
   const skipWaveBuildCheck = planOpts?.rigor === 'prototype';
   const existingBuildCheckId = epic.waveBuildJobs?.[String(currentWave)];
+  if (useStoryWorktree && !existingBuildCheckId) {
+    // Per-story-worktree path: create a wave-merge job instead.
+    const jobId = deps.uuid();
+    const now = deps.now();
+    const appId = epic.workingDir.replace(/\/+$/, '').split('/').filter(Boolean).pop() || '';
+    const successfulStoryIds = currentWaveStories
+      .filter((s) => {
+        const job = jobsByStory.get(s.storyId);
+        return job && isSuccess(job.status);
+      })
+      .map((s) => s.storyId);
+    if (successfulStoryIds.length === 0) {
+      // All stories terminal but none successful — already handled by the
+      // failed-story branch above, but be defensive.
+      return { kind: 'no-op', reason: 'no-current-wave' };
+    }
+    await deps.createJob({
+      jobId,
+      status: 'PENDING',
+      createdAt: now,
+      updatedAt: now,
+      createdBy: epic.createdBy,
+      workingDir: epic.workingDir,
+      // Cast: wave-merge is a daemon-side jobType; the type union for
+      // AgentJob.jobType doesn't enumerate it yet (will widen in a
+      // followup). Empty pipeline keeps schema-validation paths happy.
+      jobType: 'wave-merge' as never,
+      waveMergePayload: {
+        appId,
+        planId: planOpts!.planId || '',
+        planSlug: planOpts!.planSlug!,
+        epicId: epic.epicId,
+        waveNumber: currentWave,
+        storyIds: successfulStoryIds,
+        // postMergeValidationCmd resolved daemon-side from the App's
+        // boilerplate registry — the Lambda doesn't have filesystem
+        // access to confirm the install exists.
+        postMergeValidationCmd: null,
+      },
+      pipeline: { agents: {}, steps: [] },
+    } as never);
+    const waveBuildJobs = { ...(epic.waveBuildJobs || {}), [String(currentWave)]: jobId };
+    await deps.updateEpicFields(epic.epicId, {
+      stories: mutable,
+      waveBuildJobs,
+    });
+    return { kind: 'wave-build-check-created', waveNumber: currentWave, jobId };
+  }
   if (!skipWaveBuildCheck && !existingBuildCheckId) {
     const jobId = deps.uuid();
     const now = deps.now();
@@ -292,6 +355,12 @@ export async function reduceEpicWaves(
   if (skipWaveBuildCheck) {
     await deps.updateEpicFields(epic.epicId, { stories: mutable });
   } else {
+    // Either the wave-merge branch above created this jobId (useStoryWorktree)
+    // or the wave-build-check branch did. Either way it's defined by the time
+    // we reach this branch — the absence path returns early in both branches.
+    if (!existingBuildCheckId) {
+      return { kind: 'no-op', reason: 'wave-running' };
+    }
     const buildCheckJob = await deps.getJobById(existingBuildCheckId);
     if (!buildCheckJob || !isTerminal(buildCheckJob.status)) {
       return { kind: 'wave-build-check-pending', waveNumber: currentWave };

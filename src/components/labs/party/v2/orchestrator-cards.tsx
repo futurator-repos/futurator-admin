@@ -32,15 +32,15 @@ export function OrchestratorOpen({
       className="relative mx-6 mb-3 overflow-hidden rounded-[14px]"
       style={{
         background:
-          'linear-gradient(180deg, rgba(167,139,250,0.18), rgba(167,139,250,0.05))',
-        border: `1px solid rgba(167,139,250,0.4)`,
+          'linear-gradient(180deg, color-mix(in srgb, var(--accent-purple) 18%, transparent), color-mix(in srgb, var(--accent-purple) 5%, transparent))',
+        border: '1px solid color-mix(in srgb, var(--accent-purple) 40%, transparent)',
       }}
     >
       <div
         className="flex items-center gap-3 px-4 py-3"
         style={{
-          background: 'rgba(167,139,250,0.12)',
-          borderBottom: '1px solid rgba(167,139,250,0.25)',
+          background: 'color-mix(in srgb, var(--accent-purple) 12%, transparent)',
+          borderBottom: '1px solid color-mix(in srgb, var(--accent-purple) 25%, transparent)',
         }}
       >
         <div
@@ -48,7 +48,7 @@ export function OrchestratorOpen({
           style={{
             width: 32,
             height: 32,
-            background: 'rgba(167,139,250,0.25)',
+            background: 'color-mix(in srgb, var(--accent-purple) 25%, transparent)',
             border: `2px solid ${COLORS.accentOrch}`,
           }}
         >
@@ -62,23 +62,22 @@ export function OrchestratorOpen({
             Orchestrator · BMad Master sets the round
           </div>
           {typeof agentCount === 'number' && (
-            <div className="text-[12px]" style={{ color: '#a89fc4' }}>
+            <div
+              className="text-[12px]"
+              style={{
+                color: 'color-mix(in srgb, var(--accent-purple) 75%, var(--party-text-muted))',
+              }}
+            >
               {agentCount} agent{agentCount === 1 ? '' : 's'} weighing in
             </div>
           )}
         </div>
         <CopyButton text={text} label="orchestrator opening" />
       </div>
-      <div
-        className="px-5 py-4 text-[14.5px] leading-[1.55]"
-        style={{ color: COLORS.textBody }}
-      >
+      <div className="px-5 py-4 text-[14.5px] leading-[1.55]" style={{ color: COLORS.textBody }}>
         {text && <RichText text={text} />}
         {streaming && (
-          <span
-            className="party-stream-cursor"
-            style={{ background: COLORS.accentOrch }}
-          />
+          <span className="party-stream-cursor" style={{ background: COLORS.accentOrch }} />
         )}
         {tools.length > 0 && <ToolLog tools={tools} defaultOpen={toolsDefaultOpen} />}
       </div>
@@ -95,15 +94,15 @@ export function OrchestratorClose({ text, n }: { text: string; n?: number }) {
     <div
       className="relative mx-6 mb-3 overflow-hidden rounded-[14px]"
       style={{
-        background: 'rgba(167,139,250,0.05)',
-        border: `1px solid rgba(167,139,250,0.25)`,
+        background: 'color-mix(in srgb, var(--accent-purple) 5%, transparent)',
+        border: '1px solid color-mix(in srgb, var(--accent-purple) 25%, transparent)',
       }}
     >
       <div
         className="flex items-center gap-3 px-4 py-2.5"
         style={{
-          background: 'rgba(167,139,250,0.07)',
-          borderBottom: '1px solid rgba(167,139,250,0.18)',
+          background: 'color-mix(in srgb, var(--accent-purple) 7%, transparent)',
+          borderBottom: '1px solid color-mix(in srgb, var(--accent-purple) 18%, transparent)',
         }}
       >
         <div
@@ -111,7 +110,7 @@ export function OrchestratorClose({ text, n }: { text: string; n?: number }) {
           style={{
             width: 28,
             height: 28,
-            background: 'rgba(167,139,250,0.18)',
+            background: 'color-mix(in srgb, var(--accent-purple) 18%, transparent)',
             border: `1px solid ${COLORS.accentOrch}`,
           }}
         >
@@ -127,10 +126,7 @@ export function OrchestratorClose({ text, n }: { text: string; n?: number }) {
           <CopyButton text={text} label="orchestrator closing" />
         </span>
       </div>
-      <div
-        className="px-5 py-3.5 text-[14px] leading-[1.55]"
-        style={{ color: COLORS.textBody }}
-      >
+      <div className="px-5 py-3.5 text-[14px] leading-[1.55]" style={{ color: COLORS.textBody }}>
         <RichText text={text} />
       </div>
     </div>
@@ -141,19 +137,13 @@ export function OrchestratorClose({ text, n }: { text: string; n?: number }) {
  * Mid-round orchestrator note — small interjection between agents.
  * Spec §6.4. Appears with a soft fade-in.
  */
-export function OrchestratorMidNote({
-  text,
-  eyebrow,
-}: {
-  text: string;
-  eyebrow?: string;
-}) {
+export function OrchestratorMidNote({ text, eyebrow }: { text: string; eyebrow?: string }) {
   return (
     <div
       className="party-mid-note ml-[76px] mr-12 mb-3 rounded-[10px] px-3.5 py-2.5"
       style={{
-        background: 'rgba(167,139,250,0.06)',
-        border: '1px solid rgba(167,139,250,0.2)',
+        background: 'color-mix(in srgb, var(--accent-purple) 6%, transparent)',
+        border: '1px solid color-mix(in srgb, var(--accent-purple) 20%, transparent)',
       }}
     >
       <div className="flex items-center gap-2">
@@ -162,7 +152,7 @@ export function OrchestratorMidNote({
           style={{
             width: 22,
             height: 22,
-            background: 'rgba(167,139,250,0.2)',
+            background: 'color-mix(in srgb, var(--accent-purple) 20%, transparent)',
             border: `1px solid ${COLORS.accentOrch}`,
           }}
         >
@@ -177,10 +167,7 @@ export function OrchestratorMidNote({
           </span>
         )}
       </div>
-      <div
-        className="mt-1.5 text-[13px] italic leading-[1.55]"
-        style={{ color: COLORS.textBody }}
-      >
+      <div className="mt-1.5 text-[13px] italic leading-[1.55]" style={{ color: COLORS.textBody }}>
         <RichText text={text} />
       </div>
     </div>
@@ -209,7 +196,7 @@ export function UserQuestionBanner({
   return (
     <div
       className="mx-6 mb-4 mt-2 flex items-start gap-3 rounded-[10px] px-4 py-3"
-      style={{ background: 'rgba(255,255,255,0.03)' }}
+      style={{ background: 'color-mix(in srgb, var(--foreground) 4%, transparent)' }}
     >
       {userPicture ? (
         // eslint-disable-next-line @next/next/no-img-element
@@ -256,12 +243,11 @@ export function AgentCardSkeleton() {
       className="relative mx-6 mb-3 overflow-hidden rounded-xl"
       style={{ background: COLORS.bgSurface }}
     >
-      <div style={{ height: 4, background: 'rgba(255,255,255,0.08)' }} />
+      <div
+        style={{ height: 4, background: 'color-mix(in srgb, var(--foreground) 10%, transparent)' }}
+      />
       <div className="flex items-start gap-3 px-4 pt-3.5 pb-3.5">
-        <div
-          className="party-shimmer shrink-0 rounded-[14px]"
-          style={{ width: 48, height: 48 }}
-        />
+        <div className="party-shimmer shrink-0 rounded-[14px]" style={{ width: 48, height: 48 }} />
         <div className="min-w-0 flex-1 space-y-2">
           <div className="party-shimmer h-4 w-1/3 rounded" />
           <div className="party-shimmer h-3 w-2/3 rounded" />

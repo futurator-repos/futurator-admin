@@ -20,10 +20,7 @@ export function RoundRail({
   // Reverse so most-recent is at the top.
   const ordered = [...rounds].reverse();
   return (
-    <div
-      className="flex h-full flex-col"
-      style={{ background: COLORS.bgSurface }}
-    >
+    <div className="flex h-full flex-col" style={{ background: COLORS.bgSurface }}>
       <div
         className="flex shrink-0 items-center justify-between px-4"
         style={{
@@ -31,16 +28,10 @@ export function RoundRail({
           borderBottom: `1px solid ${COLORS.bgDeepest}`,
         }}
       >
-        <span
-          className="text-[14px] font-semibold"
-          style={{ color: COLORS.textPrimary }}
-        >
+        <span className="text-[14px] font-semibold" style={{ color: COLORS.textPrimary }}>
           Rounds
         </span>
-        <span
-          className="text-[12px]"
-          style={{ color: COLORS.textMuted }}
-        >
+        <span className="text-[12px]" style={{ color: COLORS.textMuted }}>
           {rounds.length} total
         </span>
       </div>
@@ -88,10 +79,12 @@ function RoundCard({
       aria-pressed={active}
       className="block w-full rounded-[10px] border px-3 py-2.5 text-left transition-colors"
       style={{
-        background: active ? 'rgba(88,101,242,0.12)' : 'rgba(255,255,255,0.02)',
+        background: active
+          ? 'color-mix(in srgb, var(--party-accent-brand) 18%, transparent)'
+          : 'color-mix(in srgb, var(--foreground) 3%, transparent)',
         borderColor: active
-          ? 'rgba(88,101,242,0.4)'
-          : 'rgba(255,255,255,0.06)',
+          ? 'color-mix(in srgb, var(--party-accent-brand) 50%, transparent)'
+          : 'color-mix(in srgb, var(--foreground) 8%, transparent)',
         color: COLORS.textBody,
       }}
     >
@@ -100,32 +93,26 @@ function RoundCard({
           <span
             className="inline-flex items-center gap-1 rounded-[10px] px-2 py-[2px] text-[10px] font-bold uppercase tracking-wider"
             style={{
-              background: 'rgba(74,222,128,0.18)',
+              background: 'color-mix(in srgb, var(--success) 22%, transparent)',
               color: COLORS.accentLive,
-              border: '1px solid rgba(74,222,128,0.4)',
+              border: '1px solid color-mix(in srgb, var(--success) 50%, transparent)',
             }}
           >
-            <span
-              className="h-1.5 w-1.5 rounded-full"
-              style={{ background: COLORS.accentLive }}
-            />
+            <span className="h-1.5 w-1.5 rounded-full" style={{ background: COLORS.accentLive }} />
             Round {round.n}
           </span>
         ) : (
           <span
             className="inline-flex items-center rounded-[10px] px-2 py-[2px] text-[10px] font-bold uppercase tracking-wider"
             style={{
-              background: 'rgba(255,255,255,0.06)',
+              background: 'color-mix(in srgb, var(--foreground) 8%, transparent)',
               color: COLORS.textMuted,
             }}
           >
             Round {round.n}
           </span>
         )}
-        <span
-          className="ml-auto text-[11px]"
-          style={{ color: COLORS.textMuted }}
-        >
+        <span className="ml-auto text-[11px]" style={{ color: COLORS.textMuted }}>
           {live ? 'now' : timeAgo(round.startedAt)}
         </span>
       </div>
@@ -156,27 +143,23 @@ function RoundCard({
                 }}
                 title={speaker}
               >
-                <span style={{ fontSize: 10, lineHeight: 1 }}>{id.icon || id.fallbackInitials}</span>
+                <span style={{ fontSize: 10, lineHeight: 1 }}>
+                  {id.icon || id.fallbackInitials}
+                </span>
               </span>
             );
           })}
           {round.speakers.length > 6 && (
-            <span
-              className="ml-1 text-[11px]"
-              style={{ color: COLORS.textMuted }}
-            >
+            <span className="ml-1 text-[11px]" style={{ color: COLORS.textMuted }}>
               +{round.speakers.length - 6}
             </span>
           )}
         </div>
       )}
 
-      <div
-        className="mt-1.5 text-[11px]"
-        style={{ color: COLORS.textMuted }}
-      >
-        {round.speakers.length} agent{round.speakers.length === 1 ? '' : 's'} ·{' '}
-        {round.turns} turn{round.turns === 1 ? '' : 's'}
+      <div className="mt-1.5 text-[11px]" style={{ color: COLORS.textMuted }}>
+        {round.speakers.length} agent{round.speakers.length === 1 ? '' : 's'} · {round.turns} turn
+        {round.turns === 1 ? '' : 's'}
       </div>
     </button>
   );
