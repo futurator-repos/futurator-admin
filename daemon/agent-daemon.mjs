@@ -4379,6 +4379,20 @@ async function postDeployWriteback(job, variables) {
           'info',
           `[${short}] post-deploy: merged to main — main now at plan/${plan.name} tip; next plan forks brownfield`,
         );
+        // Delete the now-redundant plan branch (fully merged into main via the
+        // FF above). `branch -d` is the SAFE delete — it refuses if the branch
+        // isn't merged, so we never lose unmerged work. This keeps the bare
+        // repo clean so the next plan-create's stale-`plan/*`-branch preflight
+        // passes without requiring ?force=1.
+        const del = await daemonGit(['--git-dir', bare, 'branch', '-d', planBranch], proj);
+        if (del.code === 0) {
+          log('info', `[${short}] post-deploy: deleted merged plan branch ${planBranch}`);
+        } else {
+          log(
+            'warn',
+            `[${short}] post-deploy: could not delete ${planBranch} (non-blocking): ${del.stderr.trim()}`,
+          );
+        }
       } else {
         log(
           'warn',
