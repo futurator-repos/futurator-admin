@@ -936,15 +936,22 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
                     .filter((c) => c.needsBrowser)
                     .map((c) => ({ id: c.id, text: c.text })),
                 )}`,
-                `SCREENSHOT_URL="$SCREENSHOT_URL" STORY_BROWSER_ACS="$STORY_BROWSER_ACS" node -e "$(cat <<'NODE_EOF'`,
+                `LOCAL_SHOT="/tmp/review-${story.storyId}/overview.png" SCREENSHOT_URL="$SCREENSHOT_URL" STORY_BROWSER_ACS="$STORY_BROWSER_ACS" node -e "$(cat <<'NODE_EOF'`,
                 `const { spawn } = require('child_process');`,
                 `const acs = JSON.parse(process.env.STORY_BROWSER_ACS || '[]');`,
                 `const screenshotUrl = process.env.SCREENSHOT_URL;`,
+                `const localShot = process.env.LOCAL_SHOT;`,
                 `if (acs.length === 0) { console.log('RUNTIME_REVIEW_SKIPPED: no browser ACs to judge'); process.exit(0); }`,
                 `const acList = acs.map((a, i) => '  ' + a.id + ': ' + a.text).join('\\n');`,
                 `const prompt = [`,
                 `  'You are an automated visual reviewer.',`,
-                `  'Inspect this screenshot of a running app: ' + screenshotUrl,`,
+                // 2026-06-02 — the judge MUST read the LOCAL screenshot file via
+                // the Read tool. The prior 'inspect <S3 URL>' form was unfetchable
+                // from the sandbox, so the judge saw nothing → returned UNCERTAIN
+                // for every AC → the runtime review silently passed broken UIs
+                // (dino floating / no spawn shipped clean). Reading the local PNG
+                // is what makes per-story VQA actually catch visual defects.
+                `  'Use the Read tool to open the screenshot image file at ' + localShot + ' and inspect it.',`,
                 `  '',`,
                 `  'The acceptance criteria below describe what the user should be able to SEE on screen.',`,
                 `  'For each AC, decide if it is satisfied based ONLY on what is visible in the screenshot.',`,
@@ -960,7 +967,7 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
                 `  '  FAIL — the AC is contradicted (e.g., expected button missing, expected chart empty, expected entity not visible).',`,
                 `  '  UNCERTAIN — the AC describes future state, internal behaviour, or anything not visible at this stage of development. Foundation stories that produce no visible UI should return UNCERTAIN for all ACs.',`,
                 `].join('\\n');`,
-                `const child = spawn('claude', ['--print', '--model', 'haiku', '--output-format', 'text'], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 60000 });`,
+                `const child = spawn('claude', ['--print', '--model', 'haiku', '--output-format', 'text', '--allowedTools', 'Read'], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 90000 });`,
                 `let out = '', err = '';`,
                 `child.stdin.write(prompt); child.stdin.end();`,
                 `child.stdout.on('data', d => { out += d.toString(); });`,
