@@ -433,23 +433,22 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
         id: 'qa-prepare',
         stepType: 'shell',
         command: [
-          // ── Pipeline-v2 fix (2026-06-01): advance the source to the plan branch ──
-          // The legacy `projects/<appId>` dir is a worktree of the bare repo,
-          // frozen on `main` (the bootstrap scaffold). All story work merges into
-          // `plan/<slug>` in the bare repo, but this worktree never advanced — so
-          // QA was testing (and deploy was shipping) the SCAFFOLD, not the built
-          // app. Fast-forward `main` here to the plan tip so QA tests the real
-          // code. This also makes `main` track the latest plan, so the NEXT plan's
-          // first story forks brownfield off the delivered state (story-worktree
-          // resolveParentRef falls back to `main`). Belt-and-braces: if the plan
-          // branch is missing we test current HEAD and warn rather than fail.
+          // ── Check out the plan branch for QA (2026-06-01) ──
+          // All story work merges into `plan/<slug>` in the bare repo, which is
+          // deliberately never checked out (wave-merge advances it atomically via
+          // update-ref). `projects/<appId>` is the bare repo's `main` worktree.
+          // QA must exercise the PLAN code, so check out the plan tip here in
+          // DETACHED HEAD — we read the files, we do NOT claim or move the
+          // `main`/`plan` branch refs. `main` advances to this tip only on
+          // successful DELIVERY (daemon postDeployWriteback fast-forwards it),
+          // which is what makes the NEXT plan fork brownfield off the delivered
+          // state. If the plan branch is missing we warn and test current HEAD.
           `cd ${plan.workingDir} || { echo "QA_SYNC_ERROR: cannot cd ${plan.workingDir}"; exit 1; }`,
           `if git rev-parse --verify --quiet refs/heads/plan/${plan.name} >/dev/null 2>&1; then`,
-          `  git checkout -f main >/dev/null 2>&1 || git checkout -f -B main >/dev/null 2>&1 || true`,
-          `  git reset --hard plan/${plan.name} >/dev/null 2>&1 && echo "[qa-sync] advanced ${plan.workingDir} -> plan/${plan.name} @ $(git rev-parse --short HEAD)"`,
+          `  git checkout -f --detach plan/${plan.name} >/dev/null 2>&1 && echo "[qa-sync] checked out plan/${plan.name} @ $(git rev-parse --short HEAD) for QA"`,
           `  npm install --prefer-offline --no-audit --no-fund >/dev/null 2>&1 || true`,
           `else`,
-          `  echo "[qa-sync] WARN: plan/${plan.name} not found in bare repo — QA running against current HEAD $(git rev-parse --short HEAD 2>/dev/null)"`,
+          `  echo "[qa-sync] WARN: plan/${plan.name} not found — QA running against current HEAD $(git rev-parse --short HEAD 2>/dev/null)"`,
           `fi`,
           // PR-59 — runtime framework detection. Sets QA_PORT, QA_DEV_CMD,
           // QA_HEALTH_PATH, QA_FRAMEWORK by inspecting package.json. All

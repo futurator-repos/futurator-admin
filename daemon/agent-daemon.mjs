@@ -4350,6 +4350,46 @@ async function postDeployWriteback(job, variables) {
   } catch (err) {
     log('warn', `[${short}] post-deploy: App update failed: ${err.message}`);
   }
+
+  // ── Merge to main on delivery (2026-06-01) ──
+  // A successful deploy is the delivery event. Fast-forward the app's `main`
+  // to the just-shipped `plan/<slug>` tip so: (1) the trunk reflects the live
+  // state, and (2) the NEXT plan forks brownfield off it — story-worktree's
+  // resolveParentRef falls back to `main` when the new plan branch doesn't
+  // exist yet. `main`'s only worktree is `projects/<appId>` (detached during
+  // QA/deploy), so this is the canonical place for the advance. We use
+  // `merge --ff-only` — never a force/reset — so if `main` ever diverged from
+  // the plan branch we WARN for manual reconcile rather than silently drop
+  // commits. In the sequential single-operator model the plan always
+  // descends from `main`, so the fast-forward is the normal case.
+  try {
+    const { bareRepoPath, LEGACY_PROJECTS_ROOT } = await import('./lib/story-worktree.mjs');
+    const planBranch = `plan/${plan.name}`;
+    const bare = bareRepoPath(plan.appId);
+    const proj = `${LEGACY_PROJECTS_ROOT}/${plan.appId}`;
+    const hasPlanBranch = await daemonGit(
+      ['--git-dir', bare, 'rev-parse', '--verify', '--quiet', `refs/heads/${planBranch}`],
+      proj,
+    );
+    if (hasPlanBranch.code === 0) {
+      await daemonGit(['checkout', '-f', 'main'], proj);
+      const ff = await daemonGit(['merge', '--ff-only', planBranch], proj);
+      if (ff.code === 0) {
+        log(
+          'info',
+          `[${short}] post-deploy: merged to main — main now at plan/${plan.name} tip; next plan forks brownfield`,
+        );
+      } else {
+        log(
+          'warn',
+          `[${short}] post-deploy: main fast-forward to ${planBranch} declined (divergence?) — ` +
+            `manual reconcile may be needed: ${ff.stderr.trim() || ff.stdout.trim()}`,
+        );
+      }
+    }
+  } catch (err) {
+    log('warn', `[${short}] post-deploy: merge-to-main failed (non-blocking): ${err.message}`);
+  }
 }
 
 // Pipeline v2 / Story 1.4.3 — App-bootstrap saga executor.
