@@ -102,6 +102,15 @@ if [[ "$RESTART" -eq 0 ]]; then
   exit 0
 fi
 
+# ── Ensure Playwright's Chromium is installed (idempotent) ──
+# Visual QA (qa-prepare + L2 judges) shells out to `npx playwright screenshot`.
+# Without the browser binary, screenshot capture silently yields 0/N and the
+# VQA gate passes on nothing (dino1 2026-06-01). `playwright install chromium`
+# is a no-op when the matching build is already cached.
+echo ">>> Ensuring Playwright Chromium is installed on the daemon host"
+$SSH "$REMOTE_HOST" "ls ~/.cache/ms-playwright/chromium_headless_shell-* >/dev/null 2>&1 && echo 'chromium present' || (cd /home/ubuntu && npx -y playwright install chromium 2>&1 | tail -2)" || \
+  echo ">>> WARN: playwright install step failed (non-fatal) — visual QA may not capture screenshots"
+
 # ── Restart systemd so the running process picks up new code ──
 echo ">>> Restarting futurator-daemon systemd unit"
 $SSH "$REMOTE_HOST" "sudo systemctl restart futurator-daemon"

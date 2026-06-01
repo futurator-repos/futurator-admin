@@ -52,12 +52,12 @@ export interface DeployAggregatorInputs {
 
 function projectSteps(job: AgentJob | undefined): DeployStepStatus[] {
   if (!job) {
-    return ([
+    return [
       { id: 'build', label: 'Build', status: 'pending' },
       { id: 'sync', label: 'Sync to S3', status: 'pending' },
       { id: 'invalidate', label: 'Invalidate CDN', status: 'pending' },
       { id: 'verify', label: 'Verify URL', status: 'pending' },
-    ] satisfies DeployStepStatus[]);
+    ] satisfies DeployStepStatus[];
   }
 
   // Job-level status projects onto every step:
@@ -70,30 +70,30 @@ function projectSteps(job: AgentJob | undefined): DeployStepStatus[] {
   const detail = vars.DEPLOY_DETAILS;
 
   if (job.status === 'PENDING' || job.status === 'RUNNING') {
-    return ([
+    return [
       { id: 'build', label: 'Build', status: 'running' },
       { id: 'sync', label: 'Sync to S3', status: 'pending' },
       { id: 'invalidate', label: 'Invalidate CDN', status: 'pending' },
       { id: 'verify', label: 'Verify URL', status: 'pending' },
-    ] satisfies DeployStepStatus[]);
+    ] satisfies DeployStepStatus[];
   }
 
   if (job.status === 'COMPLETED') {
-    return ([
+    return [
       { id: 'build', label: 'Build', status: 'pass', detail },
       { id: 'sync', label: 'Sync to S3', status: 'pass' },
       { id: 'invalidate', label: 'Invalidate CDN', status: 'pass' },
       { id: 'verify', label: 'Verify URL', status: 'pass', detail: vars.DEPLOY_URL },
-    ] satisfies DeployStepStatus[]);
+    ] satisfies DeployStepStatus[];
   }
 
   // FAILED
-  return ([
+  return [
     { id: 'build', label: 'Build', status: 'fail', detail: job.errorMessage || detail },
     { id: 'sync', label: 'Sync to S3', status: 'skipped' },
     { id: 'invalidate', label: 'Invalidate CDN', status: 'skipped' },
     { id: 'verify', label: 'Verify URL', status: 'skipped' },
-  ] satisfies DeployStepStatus[]);
+  ] satisfies DeployStepStatus[];
 }
 
 function toDeployRecord(job: AgentJob, epicId: string): DeployRecord {
@@ -148,8 +148,7 @@ export function buildDeployReport(inputs: DeployAggregatorInputs): DeployReport 
 
   // Verdict decision cascade.
   const qaReady = qaReport?.verdict === 'ready' || qaReport?.verdict === 'not-run';
-  const qaBlocking =
-    qaReport?.verdict === 'blocking' || qaReport?.verdict === 'needs-attention';
+  const qaBlocking = qaReport?.verdict === 'blocking' || qaReport?.verdict === 'needs-attention';
 
   let verdict: DeployVerdict;
   let statusReason: string | undefined;
@@ -176,10 +175,17 @@ export function buildDeployReport(inputs: DeployAggregatorInputs): DeployReport 
   // is what actually drives verdict. Keep both for future tightening.
   void qaReady;
 
+  // 2026-06-01 — the deploy publishes to `apps/<appId>/`, where appId is the
+  // working-dir leaf (`/home/ubuntu/projects/<appId>` → `dino1`), NOT the plan
+  // name (`dino1-initial`). The report previously used `plan.name`, producing a
+  // dead "Open live" link to an empty S3 prefix that fell through to the
+  // futurator.ai homepage. Derive the slug the same way the Deploy Agent does
+  // (functions/api/index.ts: `epic.workingDir.split('/').pop()`) so they match.
+  const appSlug = plan.workingDir.split('/').filter(Boolean).pop() || plan.name;
   const target: DeployTarget = {
-    publicUrl: `https://futurator.ai/apps/${plan.name}/`,
+    publicUrl: `https://futurator.ai/apps/${appSlug}/`,
     s3Bucket: PUBLIC_BUCKET,
-    s3Prefix: `apps/${plan.name}/`,
+    s3Prefix: `apps/${appSlug}/`,
     cloudfrontDistributionId: process.env.CLOUDFRONT_DISTRIBUTION_ID || undefined,
   };
 
