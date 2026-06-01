@@ -4393,6 +4393,11 @@ async function postDeployWriteback(job, variables) {
             `[${short}] post-deploy: could not delete ${planBranch} (non-blocking): ${del.stderr.trim()}`,
           );
         }
+        // Leave the trunk worktree pristine: discard transient untracked
+        // artifacts (visual-tests-draft.md, BMAD scratch dirs, build leftovers)
+        // so the NEXT plan-create's dirty-worktree preflight passes. `-fd`
+        // keeps .gitignored paths (node_modules, out, .next); we never use -x.
+        await daemonGit(['clean', '-fd'], proj);
       } else {
         log(
           'warn',
