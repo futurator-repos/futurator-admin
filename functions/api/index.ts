@@ -199,6 +199,9 @@ import {
   listPullRequests,
   GitHubError,
 } from '../shared/github/connector';
+import { runWithPat } from '../shared/github/load-pat';
+import { DEFAULT_GITHUB_OWNER } from '../shared/github/parse-repo-url';
+import { LEGACY_SHARED_BROWNFIELD_PAT_SECRET } from '../shared/types/party';
 import type { GitHubCommit } from '../shared/github/connector';
 import * as githubConnector from '../shared/github/connector';
 import { loadFreeAgentPat } from '../shared/services/free-agent-pat-loader';
@@ -10169,12 +10172,57 @@ app.post('/api/github/repos', authMiddleware, async (c) => {
   }
 });
 
+// 2026-05-30 — resolve the PAT that can read a brownfield repo (any org). The
+// default GithubPat is futurator-repos-scoped and 404s on other orgs (e.g.
+// Get-Really-Real/applicator). Prefer the project's per-project PAT, else the
+// shared brownfield PAT (SST secret), else the legacy shared Secrets Manager
+// secret. Returns null when none is available (caller falls back to default).
+async function resolveBrownfieldPat(projectId: string): Promise<string | null> {
+  try {
+    const proj = await partyProjectsRepo.getProject(projectId).catch(() => null);
+    if (proj?.patSecretName) {
+      const r = await secretsManagerClient
+        .send(new GetSecretValueCommand({ SecretId: proj.patSecretName }))
+        .catch(() => null);
+      if (r?.SecretString) return r.SecretString;
+    }
+    // Shared brownfield PAT (SST secret), then the legacy Secrets Manager one.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { Resource } = require('sst') as { Resource: Record<string, { value: string }> };
+      if (Resource['BrownfieldGithubPat']?.value) return Resource['BrownfieldGithubPat'].value;
+    } catch {
+      /* not in SST runtime */
+    }
+    const legacy = await secretsManagerClient
+      .send(new GetSecretValueCommand({ SecretId: LEGACY_SHARED_BROWNFIELD_PAT_SECRET }))
+      .catch(() => null);
+    return legacy?.SecretString ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Run GitHub connector calls with the correct PAT for (owner, name). For the
+ * default `futurator-repos` org, uses the default GithubPat. For any other org
+ * (brownfield, e.g. Get-Really-Real), resolves the brownfield PAT and runs the
+ * connector calls under it (AsyncLocalStorage override). `name` is the App slug
+ * == projectId for brownfield repos. Falls back to the default PAT if no
+ * brownfield PAT is found (so behavior is never worse than before).
+ */
+async function withRepoPat<T>(owner: string, name: string, fn: () => Promise<T>): Promise<T> {
+  if (owner === DEFAULT_GITHUB_OWNER) return fn();
+  const pat = await resolveBrownfieldPat(name);
+  return pat ? runWithPat(pat, fn) : fn();
+}
+
 // GET /api/github/repos/:owner/:name — single repo metadata.
 app.get('/api/github/repos/:owner/:name', authMiddleware, async (c) => {
   const owner = c.req.param('owner');
   const name = c.req.param('name');
   try {
-    const { data: repo, rateLimit } = await getRepo(owner, name);
+    const { data: repo, rateLimit } = await withRepoPat(owner, name, () => getRepo(owner, name));
     return c.json({ repo, rateLimit });
   } catch (err) {
     if (err instanceof GitHubError) {
@@ -10190,7 +10238,9 @@ app.get('/api/github/repos/:owner/:name/tree', authMiddleware, async (c) => {
   const name = c.req.param('name');
   const branch = c.req.query('branch');
   try {
-    const { data, rateLimit } = await getRepoTree(owner, name, branch);
+    const { data, rateLimit } = await withRepoPat(owner, name, () =>
+      getRepoTree(owner, name, branch),
+    );
     return c.json({ tree: data.tree, truncated: data.truncated, count: data.count, rateLimit });
   } catch (err) {
     if (err instanceof GitHubError) {
@@ -10212,7 +10262,9 @@ app.get('/api/github/repos/:owner/:name/files', authMiddleware, async (c) => {
   }
 
   try {
-    const { data, rateLimit } = await getFileContent(owner, name, filePath, ref);
+    const { data, rateLimit } = await withRepoPat(owner, name, () =>
+      getFileContent(owner, name, filePath, ref),
+    );
     if ('tooLarge' in data && data.tooLarge) {
       return c.json({ tooLarge: true, size: data.size, rateLimit });
     }
@@ -10236,51 +10288,56 @@ app.get('/api/github/repos/:owner/:name/git-graph', authMiddleware, async (c) =>
   const limit = Math.min(Math.max(parseInt(c.req.query('limit') ?? '40', 10) || 40, 5), 100);
 
   try {
-    // Resolve repo first so we know the default branch + can short-circuit
-    // 404s with a typed error before burning extra rate-limit on the rest.
-    const { data: repo } = await getRepo(owner, name);
+    // Brownfield repos (any org) run under their own PAT; futurator-repos uses
+    // the default. All connector calls share the same PAT scope here.
+    const payload = await withRepoPat(owner, name, async () => {
+      // Resolve repo first so we know the default branch + can short-circuit
+      // 404s with a typed error before burning extra rate-limit on the rest.
+      const { data: repo } = await getRepo(owner, name);
 
-    const [commitsRes, branchesRes, pullsRes] = await Promise.all([
-      listCommits(owner, name, { sha: repo.default_branch, perPage: limit }),
-      listBranches(owner, name),
-      listPullRequests(owner, name, { state: 'all', perPage: Math.min(limit, 30) }),
-    ]);
+      const [commitsRes, branchesRes, pullsRes] = await Promise.all([
+        listCommits(owner, name, { sha: repo.default_branch, perPage: limit }),
+        listBranches(owner, name),
+        listPullRequests(owner, name, { state: 'all', perPage: Math.min(limit, 30) }),
+      ]);
 
-    // Top up with commits unique to non-default branches. Cap to a few
-    // branches so a runaway repo doesn't trigger many extra API calls.
-    const otherBranches = branchesRes.data
-      .filter((b) => b.name !== repo.default_branch)
-      .slice(0, 5);
-    const topupResults = await Promise.all(
-      otherBranches.map((b) =>
-        listCommits(owner, name, { sha: b.commit.sha, perPage: 10 }).catch(() => null),
-      ),
-    );
+      // Top up with commits unique to non-default branches. Cap to a few
+      // branches so a runaway repo doesn't trigger many extra API calls.
+      const otherBranches = branchesRes.data
+        .filter((b) => b.name !== repo.default_branch)
+        .slice(0, 5);
+      const topupResults = await Promise.all(
+        otherBranches.map((b) =>
+          listCommits(owner, name, { sha: b.commit.sha, perPage: 10 }).catch(() => null),
+        ),
+      );
 
-    const merged = new Map<string, GitHubCommit>();
-    for (const c of commitsRes.data) merged.set(c.sha, c);
-    for (const r of topupResults) {
-      if (!r) continue;
-      for (const c of r.data) if (!merged.has(c.sha)) merged.set(c.sha, c);
-    }
+      const merged = new Map<string, GitHubCommit>();
+      for (const c of commitsRes.data) merged.set(c.sha, c);
+      for (const r of topupResults) {
+        if (!r) continue;
+        for (const c of r.data) if (!merged.has(c.sha)) merged.set(c.sha, c);
+      }
 
-    const finalCommits = [...merged.values()]
-      .sort((a, b) => b.commit.author.date.localeCompare(a.commit.author.date))
-      .slice(0, limit);
+      const finalCommits = [...merged.values()]
+        .sort((a, b) => b.commit.author.date.localeCompare(a.commit.author.date))
+        .slice(0, limit);
 
-    return c.json({
-      repo: {
-        name: repo.name,
-        full_name: repo.full_name,
-        description: repo.description,
-        default_branch: repo.default_branch,
-        html_url: repo.html_url,
-      },
-      commits: finalCommits,
-      branches: branchesRes.data,
-      pullRequests: pullsRes.data,
-      rateLimit: pullsRes.rateLimit,
+      return {
+        repo: {
+          name: repo.name,
+          full_name: repo.full_name,
+          description: repo.description,
+          default_branch: repo.default_branch,
+          html_url: repo.html_url,
+        },
+        commits: finalCommits,
+        branches: branchesRes.data,
+        pullRequests: pullsRes.data,
+        rateLimit: pullsRes.rateLimit,
+      };
     });
+    return c.json(payload);
   } catch (err) {
     // 2026-05-30 — bare-repo fallback. Greenfield Labs apps have NO GitHub repo
     // (getRepo 404s), and wip/* branches + merges live only in the EC2 bare

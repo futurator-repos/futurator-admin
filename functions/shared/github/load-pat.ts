@@ -15,7 +15,28 @@
  * At runtime the SST connector resolves the value from SSM Parameter Store.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+/**
+ * 2026-05-30 — per-request PAT override. The default `loadPat()` returns the
+ * `futurator-repos`-scoped GithubPat, which cannot read brownfield repos in
+ * OTHER orgs (e.g. Get-Really-Real/applicator → 404). For those, the API
+ * resolves the brownfield PAT and wraps the connector calls in `runWithPat`,
+ * so every `loadPat()` inside that async scope returns the override instead.
+ * AsyncLocalStorage keeps it request-isolated under Lambda concurrency — no
+ * threading a `pat` param through every connector function.
+ */
+const patStore = new AsyncLocalStorage<string>();
+
+/** Run `fn` with `pat` as the active PAT for all `loadPat()` calls inside it. */
+export function runWithPat<T>(pat: string, fn: () => T): T {
+  return patStore.run(pat, fn);
+}
+
 export function loadPat(): string {
+  // Per-request override (brownfield, any org) wins when set.
+  const override = patStore.getStore();
+  if (override) return override;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { Resource } = require('sst') as { Resource: Record<string, { value: string }> };
