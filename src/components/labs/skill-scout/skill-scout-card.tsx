@@ -15,6 +15,7 @@
 'use client';
 
 import { useState } from 'react';
+import { api } from '@/lib/api-client';
 
 export interface SkillProposal {
   kind: 'add' | 'remove' | 'upgrade';
@@ -69,16 +70,14 @@ export function SkillScoutCard({ itemId, planId, context, onResolved }: SkillSco
     setBusy(action);
     setError(null);
     try {
-      const url = `/api/skill-scout/proposals/${encodeURIComponent(itemId)}/${action}?planId=${encodeURIComponent(planId)}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      });
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        throw new Error(`${res.status}: ${body.slice(0, 200)}`);
-      }
+      // Use the shared api client — it targets the API base URL (Lambda)
+      // and attaches auth. A raw fetch('/api/…') resolves against the
+      // static-site origin (S3) in production and 405s. The base already
+      // includes `/api`, so the path here must NOT repeat it.
+      await api.post(
+        `/skill-scout/proposals/${encodeURIComponent(itemId)}/${action}?planId=${encodeURIComponent(planId)}`,
+        {},
+      );
       onResolved?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

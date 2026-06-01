@@ -12,12 +12,18 @@
 
 import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import type { PlanWithEpics } from '@/hooks/use-plans';
 import { usePatchPlan, useRegeneratePlan, useStartPlan } from '@/hooks/use-plans';
+import { useAttentionItems } from '@/hooks/use-attention-items';
 import type { AgentJobStatus } from '@/types/agent-orchestrator';
 import type { EpicWorkflow } from '@/types/epic-workflow';
 import { epicStatusColor } from '../constants';
 import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-output';
+import {
+  SkillScoutCard,
+  type SkillScoutCardContext,
+} from '@/components/labs/skill-scout/skill-scout-card';
 
 interface Props {
   plan: PlanWithEpics;
@@ -46,6 +52,17 @@ export function PlanReviewView({
   const patch = usePatchPlan(plan.planId);
   const regenerate = useRegeneratePlan(plan.planId);
   const start = useStartPlan(plan.planId);
+  const qc = useQueryClient();
+
+  // SKILL-SCOUT gate (Epic 3 Story 3.5): plan /start returns 409 while an
+  // open `manifest-change-proposed` decision card exists. Surface the card
+  // inline here — right beside Start development — so the gate is resolvable
+  // at the point of friction instead of only via the attention bell.
+  const attention = useAttentionItems(plan.planId);
+  const openScoutCard = (attention.data?.items ?? []).find(
+    (it) => it.category === 'manifest-change-proposed' && it.status !== 'resolved',
+  );
+  const [startError, setStartError] = useState<string | null>(null);
 
   // Intent editor — kept in sync with server state. The effect handles
   // external updates (regenerate from another tab, or a polled refetch
@@ -83,11 +100,15 @@ export function PlanReviewView({
   }
 
   async function handleStart() {
+    setStartError(null);
     try {
       await start.mutateAsync();
       onPlanStarted?.();
     } catch (err) {
       console.error('[PlanReview] start', err);
+      // Refetch attention so the gating card appears inline immediately.
+      qc.invalidateQueries({ queryKey: ['attention-items', plan.planId] });
+      setStartError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -128,9 +149,15 @@ export function PlanReviewView({
             )}
             {isConcept && hasEpics && (
               <SolidButton
-                label={start.isPending ? 'Launching…' : 'Start development →'}
+                label={
+                  start.isPending
+                    ? 'Launching…'
+                    : openScoutCard
+                      ? 'Resolve skill card first'
+                      : 'Start development →'
+                }
                 onClick={handleStart}
-                disabled={start.isPending || generating}
+                disabled={start.isPending || generating || !!openScoutCard}
               />
             )}
           </div>
@@ -158,13 +185,45 @@ export function PlanReviewView({
         />
       </section>
 
+      {/* SKILL-SCOUT decision card — the gate that blocks /start. Rendered
+          inline so the operator resolves it (confirm/decline/defer) right
+          here; resolving clears the 409 and re-enables Start development. */}
+      {openScoutCard && (
+        <section>
+          <SectionHeader style={{ marginBottom: 8 }}>
+            Skill manifest — decision required before start
+          </SectionHeader>
+          <SkillScoutCard
+            itemId={openScoutCard.itemId}
+            planId={plan.planId}
+            context={openScoutCard.context as unknown as SkillScoutCardContext}
+            onResolved={() => {
+              setStartError(null);
+              qc.invalidateQueries({ queryKey: ['attention-items', plan.planId] });
+            }}
+          />
+        </section>
+      )}
+
+      {/* Start error (e.g. the SKILL-SCOUT 409) surfaced inline. */}
+      {startError && !openScoutCard && (
+        <div
+          style={{
+            border: '1px solid var(--destructive)',
+            background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+            color: 'var(--destructive)',
+            borderRadius: 8,
+            padding: '14px 18px',
+            fontSize: 13,
+          }}
+        >
+          Couldn’t start the plan: {startError}
+        </div>
+      )}
+
       {/* PM-running / failed banner */}
-      {generating && (
-        <GeneratingBanner pmJobId={pmJobId} />
-      )}
-      {pmFailed && !generating && !hasEpics && (
-        <FailedBanner />
-      )}
+      {generating && <GeneratingBanner pmJobId={pmJobId} />}
+      {pmFailed && !generating && !hasEpics && <FailedBanner />}
 
       {/* PR-9 #2 — PM agent live logs. Reuses StoryLiveOutput so the
           Concept stage gets the same auditable stream the dev/reviewer
@@ -185,11 +244,7 @@ export function PlanReviewView({
           </EmptyCard>
         )}
 
-        {generating && !hasEpics && (
-          <EmptyCard faded>
-            PM is drafting epics…
-          </EmptyCard>
-        )}
+        {generating && !hasEpics && <EmptyCard faded>PM is drafting epics…</EmptyCard>}
 
         {hasEpics && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -347,8 +402,7 @@ function EpicRow({
             <div
               key={w}
               style={{
-                background:
-                  'color-mix(in srgb, var(--foreground) 2%, transparent)',
+                background: 'color-mix(in srgb, var(--foreground) 2%, transparent)',
                 border: '1px solid var(--border)',
                 borderRadius: 4,
                 padding: '8px 12px',
@@ -371,10 +425,8 @@ function EpicRow({
                     letterSpacing: '0.22em',
                     padding: '2px 6px',
                     borderRadius: 2,
-                    background:
-                      'color-mix(in srgb, var(--accent-purple) 10%, transparent)',
-                    border:
-                      '1px solid color-mix(in srgb, var(--accent-purple) 22%, transparent)',
+                    background: 'color-mix(in srgb, var(--accent-purple) 10%, transparent)',
+                    border: '1px solid color-mix(in srgb, var(--accent-purple) 22%, transparent)',
                   }}
                 >
                   Wave {w}
@@ -414,11 +466,7 @@ function EpicRow({
                 }}
               >
                 {items.map((story, sidx) => (
-                  <StoryWithCriteria
-                    key={story.storyId}
-                    story={story}
-                    label={`S${sidx + 1}`}
-                  />
+                  <StoryWithCriteria key={story.storyId} story={story} label={`S${sidx + 1}`} />
                 ))}
               </ul>
             </div>
@@ -624,13 +672,7 @@ function StoryDot({ status }: { status: string }) {
  * daemon (it's a regular agent-job with extractors) but the Concept
  * stage previously rendered just a "drafting…" spinner.
  */
-function PmAgentLogPanel({
-  jobId,
-  defaultOpen,
-}: {
-  jobId: string;
-  defaultOpen?: boolean;
-}) {
+function PmAgentLogPanel({ jobId, defaultOpen }: { jobId: string; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(!!defaultOpen);
   return (
     <section
@@ -694,8 +736,7 @@ function GeneratingBanner({ pmJobId }: { pmJobId?: string | null }) {
     <div
       style={{
         border: '1px dashed var(--border-2)',
-        background:
-          'color-mix(in srgb, var(--accent-purple) 8%, transparent)',
+        background: 'color-mix(in srgb, var(--accent-purple) 8%, transparent)',
         borderRadius: 8,
         padding: '16px 20px',
         display: 'flex',
@@ -752,19 +793,12 @@ function FailedBanner() {
         fontSize: 13,
       }}
     >
-      The PM agent failed to generate this plan. Click <strong>Regenerate</strong>{' '}
-      to retry.
+      The PM agent failed to generate this plan. Click <strong>Regenerate</strong> to retry.
     </div>
   );
 }
 
-function EmptyCard({
-  children,
-  faded,
-}: {
-  children: React.ReactNode;
-  faded?: boolean;
-}) {
+function EmptyCard({ children, faded }: { children: React.ReactNode; faded?: boolean }) {
   return (
     <div
       style={{

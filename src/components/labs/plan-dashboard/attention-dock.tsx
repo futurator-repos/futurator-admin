@@ -9,12 +9,17 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   useAttentionItems,
   useResolveAttentionItem,
   type DedupedAttentionItem,
 } from '@/hooks/use-attention-items';
 import type { AttentionSeverity } from '../../../../functions/shared/types/attention';
+import {
+  SkillScoutCard,
+  type SkillScoutCardContext,
+} from '@/components/labs/skill-scout/skill-scout-card';
 
 type ChipKey = 'all' | AttentionSeverity | 'resolved';
 
@@ -44,6 +49,7 @@ export function AttentionDock({
   onClose: () => void;
 }) {
   const [chip, setChip] = useState<ChipKey>('all');
+  const qc = useQueryClient();
   const { data } = useAttentionItems(planId);
   const resolveMut = useResolveAttentionItem(planId);
   // Track in-flight resolves so the card can show the optimistic "resolving"
@@ -155,19 +161,38 @@ export function AttentionDock({
           {filtered.length === 0 ? (
             <DockEmpty chip={chip} />
           ) : (
-            filtered.map((item) => (
-              <AttentionCard
-                key={item.itemId}
-                item={item}
-                resolving={resolving.has(item.itemId)}
-                onResolve={() => handleResolve(item.itemId)}
-                onOpenStory={() => {
-                  const sid = item.context?.storyId;
-                  if (sid) scrollToStory(sid);
-                  onClose();
-                }}
-              />
-            ))
+            filtered.map((item) =>
+              // SKILL-SCOUT decision card (Epic 3 Story 3.5): a
+              // `manifest-change-proposed` item is not a generic resolve —
+              // it needs the confirm/decline/defer actions that enqueue (or
+              // skip) the skill-install job. This is the gate that blocks
+              // /start until resolved, so it MUST render its action card.
+              item.category === 'manifest-change-proposed' ? (
+                <SkillScoutCard
+                  key={item.itemId}
+                  itemId={item.itemId}
+                  planId={planId}
+                  // The daemon writes a richer context for this category than
+                  // the narrow AttentionContext type declares (trigger /
+                  // projectSlug / proposals / proposalCount / appId). Cast to
+                  // the card's contract; backend re-reads its own copy on action.
+                  context={item.context as unknown as SkillScoutCardContext}
+                  onResolved={() => qc.invalidateQueries({ queryKey: ['attention-items', planId] })}
+                />
+              ) : (
+                <AttentionCard
+                  key={item.itemId}
+                  item={item}
+                  resolving={resolving.has(item.itemId)}
+                  onResolve={() => handleResolve(item.itemId)}
+                  onOpenStory={() => {
+                    const sid = item.context?.storyId;
+                    if (sid) scrollToStory(sid);
+                    onClose();
+                  }}
+                />
+              ),
+            )
           )}
         </div>
       </aside>
