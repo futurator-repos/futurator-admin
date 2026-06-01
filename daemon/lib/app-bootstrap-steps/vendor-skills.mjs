@@ -1,199 +1,193 @@
 /**
  * vendor-skills.mjs — Pipeline v2 Phase 3-C Epic 2 (Story 2.3, 2026-05-19).
  *
- * Materializes the project's skill manifest into vendored SKILL.md files
- * under `.claude/skills/<name>/` by invoking the in-worktree
- * `scripts/skills-sync.mjs` (shipped via PR-71 augment, lives at
- * `<worktreeDir>/scripts/skills-sync.mjs`). The sync script reads
- * `.claude/skills.manifest.yaml`, fetches each declared skill's SKILL.md
- * from the federation source's GitHub raw URL, and writes it to disk.
+ * Materializes the project's skill manifest into vendored SKILL.md files under
+ * `.claude/skills/<name>/`, so the committed scaffold carries the loadout and
+ * every per-story worktree (forked from committed content) sees the skills.
  *
- * This step's job is JUST to spawn the script and translate its exit
- * code + stdout into a structured result the saga can decide on.
+ * 2026-06-01 — REWRITTEN to fetch DAEMON-SIDE instead of spawning the
+ * in-worktree `scripts/skills-sync.mjs`. The in-project script had three
+ * environmental blockers in a fresh app that left it silently soft-failing
+ * (dino2 forensic): (1) it `import`s `yaml`, which the scaffold's node_modules
+ * doesn't include → ERR_MODULE_NOT_FOUND; (2) it reads
+ * `~/.futurator/skill-federation.yaml`, which doesn't exist (only the daemon
+ * has an embedded fallback); (3) it fetched `<repo>/<ref>/<skill>/SKILL.md`
+ * but Anthropic's repo nests skills under `skills/<name>/`. The daemon already
+ * has `yaml`, the embedded federation, the PAT, and `fetch` — so it does the
+ * vendoring directly. Result shape is unchanged (non-blocking, attention on
+ * failure) so the app-bootstrap saga + tests are unaffected.
  *
- * Exit-code contract (per skills-sync.mjs:539-545):
- *   0 — clean sync (every manifest entry materialized + SHA verified)
- *   1 — fatal (manifest missing/malformed, federation missing, network)
- *   2 — drift (one or more local SKILL.md SHAs don't match the pinned version)
- *
- * Mapping to step outcomes (Epic 2 design — non-blocking either way):
- *   0 → success
- *   2 → success-with-attention (severity=low, category=skill-manifest-out-of-sync)
- *   1 → skipped-with-attention (severity=medium, category=skill-sync-failed)
- *
- * Why non-blocking: Epic 2's value comes from the HAPPY path (skills
- * vendored, agents activate them). If vendoring fails on a fresh app, we
- * surface the issue but let bootstrap complete — the operator sees the
- * attention item, fixes the underlying cause (usually a missing
- * `~/.futurator/skill-federation.yaml`), and re-runs vendor-skills via
- * `npx skills sync` or by re-bootstrapping the affected app.
- *
- * The script self-skips when the manifest declares zero skills (see
- * skills-sync.mjs:586-589: "manifest declares no skills — nothing to
- * sync"), so the step is naturally a no-op on starters whose
- * defaultSkillLoadout is null (sst/vite/mobile after PR-71 + Story 2.1).
+ * Non-blocking by design: vendoring failure surfaces an attention item but
+ * lets bootstrap complete (Epic 2). The post-commit `assert-skills-committed`
+ * guard also warns (not throws) so a vendor miss never bricks the app.
  */
 
-import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
+import { EMBEDDED_DEFAULT_FEDERATION, loadFederation } from '../federation-loader.mjs';
 
-const SYNC_SCRIPT_REL = 'scripts/skills-sync.mjs';
-const DEFAULT_TIMEOUT_MS = 120_000; // 2 min — 4 skills × ~5 GitHub raw fetches
+const MANIFEST_REL = '.claude/skills.manifest.yaml';
+const SKILLS_DIR_REL = '.claude/skills';
+const DEFAULT_TIMEOUT_MS = 120_000;
+/** Anthropic + community repos nest skills under `skills/<name>/`. A source
+ *  may override via a `path` field; default to this convention. */
+const DEFAULT_SOURCE_SUBDIR = 'skills';
+
+/** sha:HEAD → the repo default branch; sha:<40hex> → that SHA; else verbatim. */
+function refForVersion(version) {
+  if (!version || version === 'sha:HEAD') return 'main';
+  if (version.startsWith('sha:')) return version.slice(4) || 'main';
+  return version;
+}
+
+function repoPathFromUrl(url) {
+  try {
+    return new URL(url).pathname.replace(/^\/+|\/+$/g, '').replace(/\.git$/, '');
+  } catch {
+    return null;
+  }
+}
 
 /**
- * Default federation path. Overridable via env so tests + alternate
- * deployments can swap it. Matches the path the operator authors per
- * Epic 1.2 (architecture.md §10 operator-side provisioning).
+ * Resolve the federation sources, preferring a real file (operator-authored)
+ * and falling back to the embedded default. Returns a Map id→source.
  */
-const DEFAULT_FEDERATION_PATH = '/home/ubuntu/.futurator/skill-federation.yaml';
+function resolveSources(federationPath) {
+  let sources = EMBEDDED_DEFAULT_FEDERATION.sources;
+  try {
+    const loaded = loadFederation(federationPath);
+    const fed = loaded?.federation ?? loaded;
+    if (fed?.sources?.length) sources = fed.sources;
+  } catch {
+    /* fall back to embedded */
+  }
+  return new Map(sources.map((s) => [s.id, s]));
+}
 
 /**
- * Spawn the in-worktree skills-sync script and resolve to a structured
- * outcome. Pure-async; the only side effect is the subprocess + on-disk
- * writes the script makes.
+ * Vendor the manifest-pinned skills into `<worktreeDir>/.claude/skills/<name>/`.
+ * Daemon-side fetch; same return contract as before.
  *
  * @param {object}   args
- * @param {string}   args.worktreeDir         — absolute path to the worktree
- * @param {boolean}  [args.skip]              — caller-supplied skip (stub types)
- * @param {function} [args.onOutput]          — `(stream, data) => void`,
- *                                              matches makeOutputSink contract
- * @param {function} [args.spawnImpl]         — injectable for tests
- * @param {number}   [args.timeoutMs]
+ * @param {string}   args.worktreeDir
+ * @param {boolean}  [args.skip]
+ * @param {function} [args.onOutput]            — (stream, data) => void
+ * @param {function} [args.fetchImpl]           — injectable for tests
  * @param {string}   [args.federationPath]
- * @returns {Promise<{
- *   skipped: boolean,
- *   reason?: string,
- *   vendoredCount: number,
- *   drift?: number,
- *   attentionCategory?: 'skill-sync-failed' | 'skill-manifest-out-of-sync',
- *   attentionSeverity?: 'low' | 'medium',
- *   exitCode?: number,
- *   stderr?: string,
- * }>}
+ * @param {string}   [args.pat]                 — defaults to env GITHUB_PAT
+ * @param {number}   [args.timeoutMs]
+ * @returns {Promise<{ skipped: boolean, reason?: string, vendoredCount: number,
+ *   failed?: number, attentionCategory?: string, attentionSeverity?: string }>}
  */
 export async function runVendorSkills({
   worktreeDir,
   skip = false,
   onOutput,
-  spawnImpl = spawn,
+  fetchImpl = fetch,
+  federationPath = process.env.FUTURATOR_FEDERATION_PATH,
+  pat = process.env.GITHUB_PAT,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-  federationPath = process.env.FUTURATOR_FEDERATION_PATH || DEFAULT_FEDERATION_PATH,
 } = {}) {
   if (!worktreeDir) throw new Error('runVendorSkills: worktreeDir required');
+  const log = (msg) => onOutput?.('stdout', msg + '\n');
 
-  if (skip) {
-    return { skipped: true, reason: 'stub-boilerplate', vendoredCount: 0 };
+  if (skip) return { skipped: true, reason: 'stub-boilerplate', vendoredCount: 0 };
+
+  const manifestPath = join(worktreeDir, MANIFEST_REL);
+  if (!existsSync(manifestPath)) {
+    return { skipped: true, reason: 'no-manifest', vendoredCount: 0 };
   }
 
-  const scriptPath = join(worktreeDir, SYNC_SCRIPT_REL);
-  if (!existsSync(scriptPath)) {
-    return { skipped: true, reason: 'sync-script-missing', vendoredCount: 0 };
+  let manifest;
+  try {
+    manifest = parseYaml(readFileSync(manifestPath, 'utf-8'));
+  } catch (e) {
+    return {
+      skipped: true,
+      reason: `manifest-parse-failed: ${e.message}`,
+      vendoredCount: 0,
+      attentionCategory: 'skill-sync-failed',
+      attentionSeverity: 'medium',
+    };
   }
 
-  return new Promise((resolve) => {
-    const proc = spawnImpl('node', [SYNC_SCRIPT_REL], {
-      cwd: worktreeDir,
-      env: {
-        ...process.env,
-        FUTURATOR_FEDERATION_PATH: federationPath,
-      },
-    });
+  const entries = [
+    ...(manifest?.core || []),
+    ...(manifest?.stack || []),
+    ...(manifest?.domain || []),
+    ...(manifest?.vendor || []),
+  ].filter((e) => e && e.skill && e.source);
 
-    let stdout = '';
-    let stderr = '';
-    proc.stdout?.on('data', (d) => {
-      const s = d.toString();
-      stdout += s;
-      if (typeof onOutput === 'function') onOutput('stdout', s);
-    });
-    proc.stderr?.on('data', (d) => {
-      const s = d.toString();
-      stderr += s;
-      if (typeof onOutput === 'function') onOutput('stderr', s);
-    });
+  if (entries.length === 0) {
+    log('[vendor-skills] manifest declares no skills — nothing to vendor');
+    return { skipped: true, reason: 'no-skills', vendoredCount: 0 };
+  }
 
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        proc.kill('SIGKILL');
-      } catch {
-        // already exited — fine.
+  const sourceById = resolveSources(federationPath);
+  const deadline = Date.now() + timeoutMs;
+  let vendored = 0;
+  let failed = 0;
+
+  for (const entry of entries) {
+    if (Date.now() > deadline) {
+      log('[vendor-skills] timeout — stopping');
+      failed += 1;
+      break;
+    }
+    const src = sourceById.get(entry.source);
+    if (!src) {
+      log(`[vendor-skills] WARN ${entry.skill}: source '${entry.source}' not in federation`);
+      failed += 1;
+      continue;
+    }
+    const repo = repoPathFromUrl(src.url);
+    if (!repo) {
+      log(`[vendor-skills] WARN ${entry.skill}: bad source url ${src.url}`);
+      failed += 1;
+      continue;
+    }
+    const ref = refForVersion(entry.version);
+    const subdir = src.path || DEFAULT_SOURCE_SUBDIR;
+    const url = `https://raw.githubusercontent.com/${repo}/${ref}/${subdir}/${entry.skill}/SKILL.md`;
+    try {
+      const headers = { Accept: 'text/plain' };
+      if (pat) headers.Authorization = `Bearer ${pat}`;
+      const res = await fetchImpl(url, { headers });
+      if (!res.ok) {
+        log(`[vendor-skills] ERROR ${entry.skill}@${entry.source}: HTTP ${res.status} (${url})`);
+        failed += 1;
+        continue;
       }
-    }, timeoutMs);
+      const skillMd = await res.text();
+      const dir = join(worktreeDir, SKILLS_DIR_REL, entry.skill);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'SKILL.md'), skillMd, 'utf-8');
+      vendored += 1;
+      log(`[vendor-skills] WROTE ${entry.skill}@${entry.source}`);
+    } catch (e) {
+      log(`[vendor-skills] ERROR ${entry.skill}@${entry.source}: ${e.message}`);
+      failed += 1;
+    }
+  }
 
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({
-        skipped: true,
-        reason: `spawn-error: ${err.message}`,
-        vendoredCount: 0,
-        attentionCategory: 'skill-sync-failed',
-        attentionSeverity: 'medium',
-        stderr: err.message,
-      });
-    });
-
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-
-      const vendoredCount = (stdout.match(/^\[skills-sync\] WROTE /gm) || []).length;
-      const driftCount = (stdout.match(/^\[skills-sync\] DRIFT /gm) || []).length;
-
-      if (timedOut) {
-        resolve({
-          skipped: true,
-          reason: 'timeout',
-          vendoredCount,
-          drift: driftCount,
-          attentionCategory: 'skill-sync-failed',
-          attentionSeverity: 'medium',
-          stderr: stderr.slice(-2000),
-        });
-        return;
-      }
-
-      if (code === 0) {
-        resolve({
-          skipped: false,
-          vendoredCount,
-          drift: 0,
-          exitCode: 0,
-        });
-        return;
-      }
-
-      if (code === 2) {
-        // Drift detected — some local SKILL.md doesn't match the pinned
-        // version. Non-blocking; surface low-severity attention so the
-        // operator can decide between `--resync` (overwrite local) or
-        // re-pinning via `/skills audit`.
-        resolve({
-          skipped: false,
-          vendoredCount,
-          drift: driftCount,
-          exitCode: 2,
-          attentionCategory: 'skill-manifest-out-of-sync',
-          attentionSeverity: 'low',
-          stderr: stderr.slice(-2000),
-        });
-        return;
-      }
-
-      // code === 1 OR unknown non-zero: hard sync failure (missing
-      // federation, malformed manifest, network). Skip the step's
-      // success contract but stay non-blocking — bootstrap continues.
-      resolve({
-        skipped: true,
-        reason: `sync-failed-exit-${code}`,
-        vendoredCount,
-        drift: driftCount,
-        exitCode: code,
-        attentionCategory: 'skill-sync-failed',
-        attentionSeverity: 'medium',
-        stderr: stderr.slice(-2000),
-      });
-    });
-  });
+  if (failed > 0 && vendored === 0) {
+    // Total failure — surface medium attention, but stay non-blocking.
+    return {
+      skipped: true,
+      reason: `vendor-failed (${failed} skill(s))`,
+      vendoredCount: 0,
+      failed,
+      attentionCategory: 'skill-sync-failed',
+      attentionSeverity: 'medium',
+    };
+  }
+  return {
+    skipped: false,
+    vendoredCount: vendored,
+    failed,
+    ...(failed > 0
+      ? { attentionCategory: 'skill-manifest-out-of-sync', attentionSeverity: 'low' }
+      : {}),
+  };
 }

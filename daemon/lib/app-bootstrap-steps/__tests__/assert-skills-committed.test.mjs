@@ -73,14 +73,16 @@ describe('assertSkillsCommitted', () => {
   it('passes when the FIXED gitignore committed every pinned SKILL.md', async () => {
     const dir = buildRepo({ skillNames: ['canvas-design', 'frontend-design'], gitignore: FIXED_GI });
     const res = await assertSkillsCommitted({ worktreeDir: dir, execGit });
-    expect(res).toEqual({ checked: 2, tracked: 2 });
+    expect(res).toEqual({ checked: 2, tracked: 2, missing: [] });
   });
 
-  it('THROWS when the BROKEN gitignore kept SKILL.md untracked (the dino1 defect)', async () => {
+  it('WARNS (non-blocking, no throw) when SKILL.md is untracked — returns missing[]', async () => {
+    // 2026-06-01 — softened from a throw: a missing skill must never brick the
+    // bootstrap (it did — dino2 retry loop). Returns the missing list instead.
     const dir = buildRepo({ skillNames: ['canvas-design'], gitignore: BROKEN_GI });
-    await expect(assertSkillsCommitted({ worktreeDir: dir, execGit })).rejects.toThrow(
-      /NOT git-tracked/,
-    );
+    const res = await assertSkillsCommitted({ worktreeDir: dir, execGit });
+    expect(res.missing).toEqual(['.claude/skills/canvas-design/SKILL.md']);
+    expect(res.tracked).toBe(0);
   });
 
   it('skips cleanly when there is no manifest (stub boilerplate)', async () => {

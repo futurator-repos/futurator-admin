@@ -95,13 +95,19 @@ export async function assertSkillsCommitted({ worktreeDir, execGit, onOutput }) 
   }
 
   if (missing.length > 0) {
-    throw new Error(
-      `assert-skills-committed: ${missing.length} pinned skill(s) NOT git-tracked ` +
-        `(the .claude/skills/.gitignore defect — Story F): ${missing.join(', ')}. ` +
-        `Skills written to disk but never committed → worktrees get zero skills.`,
+    // 2026-06-01 — NON-BLOCKING (was a throw). A throw turned a soft
+    // vendor-skills failure into a hard bootstrap failure + retry loop
+    // (dino2). Skills are valuable but their absence must not brick the app.
+    // vendor-skills already raises a `skill-sync-failed` attention item; this
+    // is the secondary guard, so it WARNS and lets commit-and-push continue.
+    log(
+      `assert-skills-committed: WARNING — ${missing.length} pinned skill(s) NOT git-tracked ` +
+        `(${missing.join(', ')}). vendor-skills likely failed to fetch them; skills won't ` +
+        `load in worktrees. Bootstrap continues (non-blocking).`,
     );
+    return { checked: names.length, tracked, missing };
   }
 
   log(`assert-skills-committed: all ${tracked} pinned skill SKILL.md file(s) are git-tracked.`);
-  return { checked: names.length, tracked };
+  return { checked: names.length, tracked, missing: [] };
 }
