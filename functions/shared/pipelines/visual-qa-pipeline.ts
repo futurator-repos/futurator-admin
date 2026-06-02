@@ -786,6 +786,14 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `const overall = fail > 0 ? 'FAIL' : (uncertain > 0 || errored > 0) ? 'PARTIAL' : 'PASS';`,
           `const screenshots = results.map(r => '- ' + r.testId + ': ' + (r.screenshotUrl || '')).join('\\n');`,
           `console.log('---QA_REPORT---');`,
+          // TEST_RESULTS FIRST (2026-06-02): it is the canonical per-test data
+          // the aggregator's PR-8 path needs (verdict + screenshotUrl). It was
+          // emitted LAST, after the verbose SCREENSHOTS block, and the captured
+          // REPORT_OUTPUT is truncated (~2KB) — so TEST_RESULTS got cut, its
+          // extractor found no closing ']', and the gallery fell back to the
+          // legacy no-screenshot path (showing fake PASS). Emitting it first
+          // keeps it well within the capture window.
+          `console.log('TEST_RESULTS: ' + JSON.stringify(results));`,
           `console.log('OVERALL_VERDICT: ' + overall);`,
           `console.log('OVERVIEW_URL: ${cdnPrefix}overview.png');`,
           `console.log('TOTAL_PASS: ' + pass);`,
@@ -797,7 +805,6 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `console.log('FAILED_TESTS: ' + (failedTests || 'none'));`,
           `console.log('SCREENSHOTS:');`,
           `console.log(screenshots);`,
-          `console.log('TEST_RESULTS: ' + JSON.stringify(results));`,
           `console.log('---END_QA_REPORT---');`,
           `NODE_EOF`,
           `)"`,
@@ -836,15 +843,20 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           SCREENSHOTS: {
             type: 'between',
             startDelimiter: 'SCREENSHOTS:',
-            endDelimiter: 'TEST_RESULTS:',
+            // TEST_RESULTS now precedes SCREENSHOTS; the block ends at the report close.
+            endDelimiter: '---END_QA_REPORT---',
           },
           FAILED_TESTS: {
             type: 'regex',
             pattern: 'FAILED_TESTS:\\s*([^\\n]+)',
           },
           TEST_RESULTS: {
+            // Greedy, single-line (`.` excludes newline): TEST_RESULTS is one
+            // JSON.stringify line, so this captures the FULL array to its last
+            // `]` even when a rationale contains `]` — the prior non-greedy
+            // `[\s\S]*?` stopped at the first `]` and could truncate.
             type: 'regex',
-            pattern: 'TEST_RESULTS:\\s*(\\[[\\s\\S]*?\\])',
+            pattern: 'TEST_RESULTS:\\s*(\\[.*\\])',
           },
         },
       },
