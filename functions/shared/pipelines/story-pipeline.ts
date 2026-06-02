@@ -152,6 +152,18 @@ export function generateStoryPipeline(
   // (Epic E.2) consumes from each story.
   const waveCloseEnabled = isWaveCloseCompilerEnabled();
 
+  // 2026-06-02 (#2) — a verification-only story (ALL acceptance criteria are
+  // browser checks, no code deliverable) legitimately produces no committable
+  // source. The commit gate must NOT hard-fail it (that blocked plan-3 on a
+  // PM-generated "Browser smoke test" story). For these, commit --allow-empty
+  // and record the story done. Normal code stories keep the empty-commit guard
+  // (the sibling-sweep / dead-DEV protection). #1 (PM prompt) stops these from
+  // being generated; this is the safety net for any that slip through.
+  const verificationOnly =
+    Array.isArray(story.criteria) &&
+    story.criteria.length > 0 &&
+    story.criteria.every((c) => c.needsBrowser === true);
+
   return {
     initialVariables: {
       STORY_ID: story.storyId,
@@ -1229,11 +1241,13 @@ Fix the issues mentioned. Output only what you changed, then:
           // PR-67 guard preserved.
           `SOURCE_CHANGES=$(git diff --cached --name-only | grep -vE '^(node_modules/|\\.pipeline/|\\.mycelium/|knowledge/|visual-tests(-draft)?\\.md$|\\.context/)' | wc -l) && ` +
           `if [ "$SOURCE_CHANGES" -eq 0 ]; then ` +
-          `  echo "STORY_COMMIT_EMPTY: no source-code changes staged for story ${story.storyId}." >&2; ` +
-          `  echo "Working tree status:" >&2; git status --short >&2; ` +
-          `  echo "Staged for commit:" >&2; git diff --cached --name-only >&2; ` +
-          `  echo "Likely cause: snapshot-diff filtered out DEV's writes (sibling story took them), or DEV produced no source changes." >&2; ` +
-          `  exit 1; ` +
+          (verificationOnly
+            ? `  echo "STORY_COMMIT_EMPTY_TOLERATED: verification-only story ${story.storyId} (all-browser ACs) produced no committable source — recording an empty commit so the epic isn't blocked." >&2; `
+            : `  echo "STORY_COMMIT_EMPTY: no source-code changes staged for story ${story.storyId}." >&2; ` +
+              `  echo "Working tree status:" >&2; git status --short >&2; ` +
+              `  echo "Staged for commit:" >&2; git diff --cached --name-only >&2; ` +
+              `  echo "Likely cause: snapshot-diff filtered out DEV's writes (sibling story took them), or DEV produced no source changes." >&2; ` +
+              `  exit 1; `) +
           `fi && ` +
           // PR-73 + PR-85 + 2026-05-19 — commit-message trailers including
           // Plan-Id/Plan/Epic-Id/Wave (v2.5 §23). The buildCommitShellSnippet
@@ -1246,6 +1260,7 @@ Fix the issues mentioned. Output only what you changed, then:
             planSlug: opts.planSlug,
             epicId: opts.epicId,
             wave: typeof story.wave === 'number' ? story.wave : undefined,
+            allowEmpty: verificationOnly,
           }),
         timeout: 30000,
         captureAs: 'STORY_COMMIT_OUTPUT',

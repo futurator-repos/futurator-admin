@@ -412,7 +412,12 @@ export async function resetAppWorktreeToMain(
     `BEFORE=$(sudo -u ubuntu git status --porcelain 2>/dev/null | wc -l | tr -d " ")`,
     `sudo -u ubuntu git fetch origin --quiet 2>/dev/null || true`,
     `sudo -u ubuntu git checkout -f main >/dev/null 2>&1 || true`,
-    `sudo -u ubuntu git reset --hard origin/main >/dev/null 2>&1 || true`,
+    // Reset to LOCAL main, not origin/main: bare-repo-backed worktrees have an
+    // empty fetch refspec so refs/remotes/origin/main never exists, making
+    // `reset --hard origin/main` a silent no-op. main IS the canonical trunk
+    // (kept in sync with origin by the delivery push), and `checkout -f main`
+    // already discards detached/dirty state — this guarantees HEAD==main.
+    `sudo -u ubuntu git reset --hard main >/dev/null 2>&1 || true`,
     `sudo -u ubuntu git clean -fdx -e node_modules -e .next >/dev/null 2>&1 || true`,
     `AFTER=$(sudo -u ubuntu git status --porcelain 2>/dev/null | wc -l | tr -d " ")`,
     `HEAD_BRANCH=$(sudo -u ubuntu git symbolic-ref --short HEAD 2>/dev/null || echo DETACHED)`,

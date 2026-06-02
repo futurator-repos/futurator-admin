@@ -69,10 +69,20 @@ export function buildCommitShellSnippet(args: {
   epicId?: string;
   /** Story-wave index within the epic. */
   wave?: number;
+  /**
+   * 2026-06-02 — when the story legitimately produces no source (a
+   * verification-only story whose ACs are all browser-checks), commit with
+   * `--allow-empty` so the story is recorded as done instead of the commit
+   * failing on "nothing to commit". The caller (story-pipeline) sets this
+   * only for verification-only stories; normal code stories still hard-fail
+   * on an empty commit (the sibling-sweep / dead-DEV guard).
+   */
+  allowEmpty?: boolean;
 }): string {
   const escapedTitle = args.storyTitle.replace(/'/g, "'\\''");
   const subject = `story: ${args.storyId} — ${escapedTitle}`;
 
+  const COMMIT = args.allowEmpty ? 'commit --allow-empty' : 'commit';
   const GIT_PREFIX = `git -c user.email=daemon@futurator.local -c user.name='Daemon'`;
 
   // Story 20.13 — v2.5 §23 structured trailers are now sourced from the
@@ -96,7 +106,7 @@ export function buildCommitShellSnippet(args: {
     // on its own line (separated by blank line from subject per v2.5 §23).
     const body = [subject, '', structuredBlock].join('\n');
     const escaped = body.replace(/'/g, "'\\''");
-    return `${GIT_PREFIX} commit -m '${escaped}'`;
+    return `${GIT_PREFIX} ${COMMIT} -m '${escaped}'`;
   }
 
   // mvp+: compute trailers in shell and concatenate into a single -m
@@ -144,7 +154,7 @@ export function buildCommitShellSnippet(args: {
     `VQA_FIX=""`,
     `if [ -f .context/vqa-observations.txt ] && [ -s .context/vqa-observations.txt ]; then VQA_FIX=$(tr '\\n' ';' < .context/vqa-observations.txt | cut -c1-400); fi`,
     `if [ -n "$VQA_FIX" ]; then COMMIT_MSG=$(printf '%s\\n\\nVQA-Fixed: %s' "$COMMIT_MSG" "$VQA_FIX"); fi`,
-    `${GIT_PREFIX} commit -m "$COMMIT_MSG"`,
+    `${GIT_PREFIX} ${COMMIT} -m "$COMMIT_MSG"`,
   ];
   return `( ${statements.join('; ')} )`;
 }

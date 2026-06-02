@@ -152,6 +152,16 @@ that can share a wave.**
 ### Story guidelines
 
 - Each story is ~1-3 hours of agent time.
+- **Every story MUST produce a concrete code deliverable** (source files the
+  DEV writes/edits). NEVER create a standalone "browser smoke test",
+  "verify X end-to-end", "QA pass", or "integration test" story whose only
+  output is verification. Browser/visual verification happens **automatically
+  per code-story** — each story with \`needsBrowser: true\` criteria is
+  screenshotted and judged against those ACs inside its own pipeline (the
+  runtime review), and failures are fed back to that story's DEV. A
+  verification-only story has no source to commit, so it cannot pass the
+  commit gate and blocks the whole epic. Fold the verification intent into
+  the \`needsBrowser\` ACs of the code story that builds the feature instead.
 - Each story has the AC count appropriate for the rigor (see "Rigor" above).
   Mark \`needsBrowser: true\` for criteria that need visual/DOM verification.
 - **Browser AC text must be SCREEN-VERIFIABLE.** When \`needsBrowser: true\`,
