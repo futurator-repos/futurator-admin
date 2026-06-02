@@ -829,8 +829,15 @@ export async function assertWorktreeClean(
     `if ! sudo -u ubuntu git rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo "NOT_A_REPO"; exit 0; fi`,
     `echo "HEAD_BRANCH:$(sudo -u ubuntu git symbolic-ref --short HEAD 2>/dev/null || echo DETACHED)"`,
     `echo "HEAD_SHA:$(sudo -u ubuntu git rev-parse HEAD 2>/dev/null || echo NONE)"`,
-    `sudo -u ubuntu git fetch origin --quiet 2>/dev/null || true`,
-    `echo "ORIGIN_MAIN_SHA:$(sudo -u ubuntu git rev-parse origin/main 2>/dev/null || echo NONE)"`,
+    // Resolve the remote main SHA via ls-remote, NOT `rev-parse origin/main`.
+    // The bare repos backing these worktrees have an empty fetch refspec, so
+    // refs/remotes/origin/main never exists; `git rev-parse origin/main`
+    // (no --verify) then prints the literal "origin/main" to stdout instead
+    // of failing cleanly, and the check mis-read that as a SHA → every plan
+    // create false-failed with "ahead-or-behind". ls-remote queries the
+    // remote directly and the `grep -E '^[0-9a-f]{40}$'` guard guarantees we
+    // only ever capture a real SHA (else NONE → the sync check is skipped).
+    `echo "ORIGIN_MAIN_SHA:$(sudo -u ubuntu git ls-remote origin refs/heads/main 2>/dev/null | cut -f1 | grep -E '^[0-9a-f]{40}$' || echo NONE)"`,
     `echo "STATUS_PORCELAIN_BEGIN"`,
     `sudo -u ubuntu git status --porcelain 2>/dev/null | head -50`,
     `echo "STATUS_PORCELAIN_END"`,
