@@ -4720,6 +4720,15 @@ Never end the session without emitting a DEPLOY_STATUS line. Never ask for permi
   await agentJobsRepo.createJob({
     jobId,
     status: 'PENDING',
+    // 2026-06-02 — MUST set epicId: the daemon's postDeployWriteback bails on
+    // `!job.epicId`, so without it the entire post-deploy chain is skipped —
+    // App/Plan writebacks (currentlyDeployedPlanId, deployedAt) AND the
+    // merge-to-main delivery cleanup (FF main → push → delete plan branch →
+    // clean trunk). That skip is exactly why plan-2 left main 6 commits behind,
+    // the plan branch lingering, and the worktree detached — blocking the next
+    // plan create. With epicId set, delivery self-cleans and the next plan
+    // forks brownfield off the delivered tip.
+    epicId: epic.epicId,
     createdAt: now,
     updatedAt: now,
     createdBy: user.userId,
