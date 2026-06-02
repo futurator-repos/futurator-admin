@@ -4379,6 +4379,19 @@ async function postDeployWriteback(job, variables) {
           'info',
           `[${short}] post-deploy: merged to main — main now at plan/${plan.name} tip; next plan forks brownfield`,
         );
+        // Push the advanced main to origin so GitHub mirrors the delivered
+        // state AND the next plan-create's clean-check (which resolves the
+        // remote main via ls-remote) sees local==remote. Without this the
+        // trunk would be perpetually "ahead-of-origin" after every delivery.
+        const push = await daemonGit(['push', 'origin', 'main'], proj);
+        if (push.code === 0) {
+          log('info', `[${short}] post-deploy: pushed main to origin`);
+        } else {
+          log(
+            'warn',
+            `[${short}] post-deploy: push main to origin failed (non-blocking): ${push.stderr.trim()}`,
+          );
+        }
         // Delete the now-redundant plan branch (fully merged into main via the
         // FF above). `branch -d` is the SAFE delete — it refuses if the branch
         // isn't merged, so we never lose unmerged work. This keeps the bare
