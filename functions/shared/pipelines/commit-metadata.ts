@@ -135,6 +135,15 @@ export function buildCommitShellSnippet(args: {
     `COMMIT_MSG=$(printf '%s\\n\\n%s' "$COMMIT_MSG" '${structuredBlock.replace(/'/g, "'\\''")}')`,
     `if [ -n "$SKILLS_CSV" ]; then COMMIT_MSG=$(printf '%s\\n\\nSkills-Used: %s' "$COMMIT_MSG" "$SKILLS_CSV"); else COMMIT_MSG=$(printf '%s\\n\\nSkills-Used:' "$COMMIT_MSG"); fi`,
     `if [ -n "$MANIFEST_SHA" ]; then COMMIT_MSG=$(printf '%s\\n\\nSkills-Manifest-Sha: %s' "$COMMIT_MSG" "$MANIFEST_SHA"); fi`,
+    // S5 (2026-06-02) — when the per-story runtime VQA caught a visual defect
+    // and the DEV fixed it across the retry loop, review-runtime persists the
+    // failing observations to `.context/vqa-observations.txt`. Emit them as a
+    // grep-able `VQA-Fixed:` trailer so the plan-delivery REFLECTOR (which
+    // mines the commit log) turns the failure→fix into a durable skill/CLAUDE.md
+    // lesson. Absent on stories that passed visual review first try.
+    `VQA_FIX=""`,
+    `if [ -f .context/vqa-observations.txt ] && [ -s .context/vqa-observations.txt ]; then VQA_FIX=$(tr '\\n' ';' < .context/vqa-observations.txt | cut -c1-400); fi`,
+    `if [ -n "$VQA_FIX" ]; then COMMIT_MSG=$(printf '%s\\n\\nVQA-Fixed: %s' "$COMMIT_MSG" "$VQA_FIX"); fi`,
     `${GIT_PREFIX} commit -m "$COMMIT_MSG"`,
   ];
   return `( ${statements.join('; ')} )`;

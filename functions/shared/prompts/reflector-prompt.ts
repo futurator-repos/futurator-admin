@@ -79,6 +79,10 @@ This is the **ceremony** scope — the full proposal set is welcome:
 - Project-skill candidates (Tier 1) or org-promotion proposals (Tier 2)
 - Pipeline-config tuning (turn caps, max-turns, etc.)
 - Tool-wrapper opportunities based on observed Bash command repetition
+- **\`VQA-Fixed:\` commit trailers** — these mark visual defects the per-story
+  runtime review caught and the DEV then fixed (e.g. "dino baseline offset; no
+  spawn"). They are HIGH-signal lessons: propose a project-skill or CLAUDE.md
+  rule so the same visual mistake isn't re-made on the next app/plan.
 - Persona evolution proposals (rare; always require operator approval)
 Bias toward high-signal items — operators triage in the Reflection Inbox,
 and noisy proposals get declined and erode trust in the agent.

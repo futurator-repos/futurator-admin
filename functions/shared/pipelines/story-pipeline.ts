@@ -987,6 +987,10 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
                 `  for (const v of verdicts) console.log(v.id + ': ' + v.verdict + ' — ' + v.rationale);`,
                 `  console.log('---END_RUNTIME_REVIEW---');`,
                 `  if (fails.length > 0) {`,
+                // S5 — persist the failing observations so the eventual passing
+                // commit can stamp a VQA-Fixed: trailer the REFLECTOR mines into
+                // a durable lesson. Written to .context (read, not committed).
+                `    try { require('fs').mkdirSync('.context', { recursive: true }); require('fs').writeFileSync('.context/vqa-observations.txt', fails.map(f => f.id + ': ' + f.rationale).join('\\n')); } catch (e) {}`,
                 `    console.error('');`,
                 `    console.error('RUNTIME_REVIEW_FAILED: ' + fails.length + ' AC(s) failed visual review of the running app:');`,
                 `    for (const f of fails) console.error('  - ' + f.id + ': ' + f.rationale);`,
