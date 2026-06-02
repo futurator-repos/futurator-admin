@@ -159,7 +159,19 @@ export function generateStoryPipeline(
   // and record the story done. Normal code stories keep the empty-commit guard
   // (the sibling-sweep / dead-DEV protection). #1 (PM prompt) stops these from
   // being generated; this is the safety net for any that slip through.
+  // Narrow (2026-06-02): require BOTH a verification-y TITLE and all-browser
+  // ACs. Earlier `every(needsBrowser)` alone mis-classified normal UI code
+  // stories (e.g. "Wire W jump and S duck keys…") — whose ACs are naturally
+  // all screen-observable — as verification-only, which would let a genuine
+  // no-source DEV failure commit empty and silently lose code. A real feature
+  // story keeps the hard empty-commit guard; only an explicit smoke/verify/e2e
+  // story (which #1 tells the PM not to create anyway) gets the allow-empty.
+  const verificationTitle =
+    /\b(smoke[\s-]?test|e2e|end[\s-]?to[\s-]?end|integration[\s-]?test|qa[\s-]?pass|verification|verify)\b/i.test(
+      story.title || '',
+    );
   const verificationOnly =
+    verificationTitle &&
     Array.isArray(story.criteria) &&
     story.criteria.length > 0 &&
     story.criteria.every((c) => c.needsBrowser === true);
@@ -929,7 +941,10 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
                 `sleep 1`,
                 `cd ${workingDir} && (nohup $QA_DEV_CMD > /tmp/review-${story.storyId}/devserver.log 2>&1 </dev/null &)`,
                 `STATUS=000`,
-                `for i in $(seq 1 30); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$QA_PORT$QA_HEALTH_PATH 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
+                // 60 tries (was 30): Next 16 + Turbopack cold-start in a fresh
+                // story worktree regularly exceeds 30s, which made review-runtime
+                // RUNTIME_REVIEW_SKIPPED (no screenshot) even when the app boots.
+                `for i in $(seq 1 60); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$QA_PORT$QA_HEALTH_PATH 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
                 `if [ "$STATUS" != "200" ]; then echo "RUNTIME_REVIEW_SKIPPED: dev server did not boot (status=$STATUS framework=$QA_FRAMEWORK port=$QA_PORT). This is normal for foundation stories that don't yet render a UI."; tail -30 /tmp/review-${story.storyId}/devserver.log >&2 || true; kill $(lsof -ti:$QA_PORT) 2>/dev/null; exit 0; fi`,
                 `# Take overview screenshot of the running app.`,
                 `npx playwright screenshot --viewport-size=1280,720 --wait-for-timeout=2000 http://localhost:$QA_PORT$QA_HEALTH_PATH /tmp/review-${story.storyId}/overview.png 2>&1 || { echo "RUNTIME_REVIEW_SKIPPED: playwright screenshot failed — likely a framework that doesn't render at /"; kill $(lsof -ti:$QA_PORT) 2>/dev/null; exit 0; }`,

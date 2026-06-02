@@ -213,19 +213,58 @@ function* walkStoreEntries(storeRoot) {
  * Resolve a per-story worktree against the daemon's job + epic state.
  * Returns `{ shouldReap: boolean, reason: string }`.
  */
+// 2026-06-02 — NEVER reap a per-story worktree that was just touched. A
+// "lookup miss" (findStoryByIds / getJobById returning null) can be transient
+// — a throttled/eventually-consistent DDB Scan, swallowed by `.catch(()=>null)`
+// — NOT proof the story is gone. The hourly reaper was destroying ACTIVE
+// wave-N story worktrees mid-run on such a miss, which killed review-runtime
+// (no dev server / no screenshot), emptied the story commit, and lost the
+// story's code. An in-flight story's worktree is written constantly (fresh
+// mtime); a genuine orphan is stale. Only reap-on-missing when stale.
+const FRESH_WORKTREE_MS = 30 * 60 * 1000; // 30 min
+
+function worktreeMostRecentMtimeMs(fullPath) {
+  let newest = 0;
+  try {
+    newest = statSync(fullPath).mtimeMs;
+    for (const e of readdirSync(fullPath, { withFileTypes: true })) {
+      try {
+        const m = statSync(join(fullPath, e.name)).mtimeMs;
+        if (m > newest) newest = m;
+      } catch {
+        /* ignore unreadable child */
+      }
+    }
+  } catch {
+    /* ignore — treat as ancient (0) so a vanished dir is reapable */
+  }
+  return newest;
+}
+
 async function classifyStoryWorktree({ entry, deps }) {
   // The job that owns this worktree is the one whose storyId matches.
   // Multiple jobs can own the same storyId over time (retries) — we want
   // the LATEST one. The story-row tracks the latest jobId.
   const story = await deps.findStoryByIds(entry).catch(() => null);
-  if (!story) {
-    return { shouldReap: true, reason: 'story-row-missing' };
-  }
-  if (!story.jobId) {
-    return { shouldReap: true, reason: 'story-has-no-jobId' };
+  if (!story || !story.jobId) {
+    const ageMs = Date.now() - worktreeMostRecentMtimeMs(entry.fullPath);
+    if (ageMs < FRESH_WORKTREE_MS) {
+      return {
+        shouldReap: false,
+        reason: `lookup-miss-but-fresh (${Math.round(ageMs / 60_000)}min — likely active, not reaping)`,
+      };
+    }
+    return { shouldReap: true, reason: story ? 'story-has-no-jobId' : 'story-row-missing' };
   }
   const job = await deps.getJobById(story.jobId).catch(() => null);
   if (!job) {
+    const ageMs = Date.now() - worktreeMostRecentMtimeMs(entry.fullPath);
+    if (ageMs < FRESH_WORKTREE_MS) {
+      return {
+        shouldReap: false,
+        reason: `job-lookup-miss-but-fresh (${Math.round(ageMs / 60_000)}min — likely active, not reaping)`,
+      };
+    }
     return { shouldReap: true, reason: 'job-row-missing' };
   }
   if (!TERMINAL_STATUSES.has(job.status)) {

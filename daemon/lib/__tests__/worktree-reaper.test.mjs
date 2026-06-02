@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -52,9 +52,14 @@ function makeStoreEntry({ appId, sha, refcount = 0 }) {
 }
 
 describe('runWorktreeReaper — per-story', () => {
-  it('reaps a worktree when its story row is missing', async () => {
+  it('reaps a STALE worktree when its story row is missing', async () => {
     const { runWorktreeReaper } = await import('../worktree-reaper.mjs');
-    makeWorktreeDir({ appId: 'snake-4', planSlug: 'p', storyId: 'orphan-story' });
+    const dir = makeWorktreeDir({ appId: 'snake-4', planSlug: 'p', storyId: 'orphan-story' });
+    // 2026-06-02 — reap-on-missing only fires for STALE worktrees now. Age the
+    // dir past the 30-min freshness window so the lookup-miss is treated as a
+    // genuine orphan, not an active story whose DDB lookup transiently failed.
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(dir, old, old);
     const summary = await runWorktreeReaper({
       findStoryByIds: async () => null,
       getJobById: async () => null,
@@ -66,6 +71,22 @@ describe('runWorktreeReaper — per-story', () => {
     // git worktree remove. In the test env there's no bare repo, so the
     // teardown logs warnings but still rm -rf's the dir.
     expect(summary.perStory.reaped + summary.perStory.errors).toBe(1);
+  });
+
+  it('does NOT reap a FRESH worktree even when its story row is missing (transient lookup miss)', async () => {
+    const { runWorktreeReaper } = await import('../worktree-reaper.mjs');
+    // Freshly created (mtime = now) — simulates an in-flight story whose
+    // findStoryByIds transiently returned null (throttled/eventually-consistent
+    // DDB Scan). Reaping it would kill an active story mid-run.
+    makeWorktreeDir({ appId: 'snake-4', planSlug: 'p', storyId: 'active-but-unlookupable' });
+    const summary = await runWorktreeReaper({
+      findStoryByIds: async () => null,
+      getJobById: async () => null,
+      findPlanByAppAndSlug: async () => ({ planId: 'p', status: 'developing' }),
+      log: () => {},
+    });
+    expect(summary.perStory.scanned).toBe(1);
+    expect(summary.perStory.reaped).toBe(0);
   });
 
   it('does NOT reap a worktree whose job is still active', async () => {
