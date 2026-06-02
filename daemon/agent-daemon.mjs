@@ -1808,6 +1808,66 @@ async function executeShellStep(jobId, step, workingDir, variables) {
         variables[step.onFail.injectAs] = stderr || stdout;
       }
 
+      // ── S4: per-story VQA (review-runtime) → notification card ──
+      // Surface the runtime visual-review outcome as ONE evolving attention
+      // card (dedupKey collapses every retry; recurrenceCount = attempts) so
+      // the operator watches the fail→fix→pass loop in the bell. The card
+      // carries the screenshot URL + observations; a real PASS auto-resolves
+      // it. Non-blocking — never affects the step verdict.
+      if (step.id === 'review-runtime') {
+        try {
+          const planId = await resolvePlanIdFromEpicId(ddb, variables.EPIC_ID);
+          const storyId = variables.STORY_ID || 'unknown';
+          if (planId) {
+            const dedupKey = `story-vqa:${planId}:${storyId}`;
+            const shot = (stdout.match(/SCREENSHOT_URL:\s*(\S+)/) || [])[1];
+            const combined = `${stderr}\n${stdout}`;
+            const failed = !passed && /RUNTIME_REVIEW_FAILED/.test(combined);
+            const realPass = passed && /---RUNTIME_REVIEW---/.test(stdout);
+            if (failed) {
+              const fails = (stderr.match(/^\s*-\s*\S+:\s*.+$/gm) || [])
+                .map((l) => l.trim())
+                .slice(0, 6);
+              await writeAttentionItem(
+                ddb,
+                {
+                  planId,
+                  severity: 'medium',
+                  category: 'story-vqa-failed',
+                  title: `Visual review failed — story ${storyId.slice(0, 8)} (attempt ${variables.ITERATION || '?'})`,
+                  body:
+                    `The running app does not match this story's browser acceptance ` +
+                    `criteria. The DEV agent is being given this feedback to fix ` +
+                    `(auto-retry, up to ${variables.MAX_ITERATIONS || 3} attempts):\n\n` +
+                    (fails.length ? fails.join('\n') : 'See the story logs for per-AC verdicts.'),
+                  context: {
+                    jobId,
+                    epicId: variables.EPIC_ID,
+                    storyId,
+                    stepId: step.id,
+                    screenshotUrl: shot,
+                    iteration: variables.ITERATION,
+                  },
+                  suggestedActions: [
+                    { label: 'Open story', kind: 'open-story' },
+                    { label: 'Open logs', kind: 'open-logs' },
+                  ],
+                  dedupKey,
+                },
+                log,
+              );
+            } else if (realPass) {
+              await autoResolveAttentionByDedupKey(ddb, planId, dedupKey, log);
+            }
+          }
+        } catch (attnErr) {
+          log(
+            'warn',
+            `[${jobId.slice(0, 8)}] story-vqa attention write failed (non-blocking): ${attnErr.message}`,
+          );
+        }
+      }
+
       settle({ passed, stepResult });
     });
 

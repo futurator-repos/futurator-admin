@@ -83,6 +83,12 @@ export type AttentionCategory =
   // write error, vendor sync hard-fail). Manifest changes were either
   // partial or not committed.
   | 'skill-install-failed'
+  // 2026-06-02 — per-story runtime VQA (review-runtime) judged the running
+  // app against the story's browser ACs and one or more FAILED. One evolving
+  // card per (plan, story); carries the screenshot URL + observations and
+  // auto-resolves when a retry passes. The DEV agent is auto-fed the
+  // observations to fix (story-pipeline retry loop).
+  | 'story-vqa-failed'
   | 'other';
 
 export type AttentionStatus = 'open' | 'resolving' | 'resolved';

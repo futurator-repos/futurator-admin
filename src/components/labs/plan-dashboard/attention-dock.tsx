@@ -460,10 +460,36 @@ function AttentionCard({
             color: 'var(--text-mute)',
             margin: '0 0 10px',
             lineHeight: 1.45,
+            whiteSpace: 'pre-wrap',
           }}
         >
           {item.body}
         </p>
+      )}
+      {/* S3 — per-story VQA: show the actual screenshot the judge read, so the
+          operator can visually confirm a real screenshot was captured + the
+          observations above describe it. Click to open full-size. */}
+      {(item.context as { screenshotUrl?: string } | undefined)?.screenshotUrl && (
+        <a
+          href={(item.context as { screenshotUrl?: string }).screenshotUrl}
+          target="_blank"
+          rel="noreferrer"
+          style={{ display: 'block', margin: '0 0 10px' }}
+        >
+          <img
+            src={(item.context as { screenshotUrl?: string }).screenshotUrl}
+            alt="Runtime visual-review screenshot"
+            style={{
+              width: '100%',
+              maxHeight: 180,
+              objectFit: 'cover',
+              objectPosition: 'top',
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              background: 'var(--bg-elev, #fff)',
+            }}
+          />
+        </a>
       )}
       {!isResolved && (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
