@@ -64,6 +64,11 @@ export async function launchStoryRerun(
   deps: StoryRerunDeps,
   planOpts?: PlanExecutionOpts,
   priorJobState?: PriorJobState,
+  /**
+   * Extra fields merged into the created job row (e.g. `remediationMerge` so
+   * the daemon integrates a QA send-back's fix into `plan/<slug>` on success).
+   */
+  jobAnnotations?: Partial<AgentJob>,
 ): Promise<StoryRerunResult> {
   const story = epic.stories.find((s) => s.storyId === storyId);
   if (!story) {
@@ -128,6 +133,7 @@ export async function launchStoryRerun(
     createdBy: userId,
     workingDir: effectiveWorkingDir,
     pipeline,
+    ...jobAnnotations,
   });
 
   const updatedStories = epic.stories.map((s) =>

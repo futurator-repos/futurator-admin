@@ -2850,6 +2850,23 @@ app.post('/api/epic-workflows/:id/stories/:storyId/send-back', async (c) => {
   // truncation regardless of whether the prior attempt succeeded or failed, so
   // we never carry `dev` forward as complete and skip it.
   const priorJobState = await buildPriorJobStateFromStory(story, { forceTruncateAtStep: 'dev' });
+
+  // Remediation-merge marker: when the rerun succeeds, the daemon integrates
+  // the fix on `wip/<storyId>` into `plan/<slug>` (a clean fast-forward, since
+  // the worktree was forked from the plan tip) so re-running QA sees it.
+  // Requires planSlug (per-story-worktree topology); skipped for legacy plans.
+  const remediationMerge =
+    sendBackPlanOpts?.planSlug && epic.planId
+      ? {
+          appId: epic.workingDir.replace(/\/+$/, '').split('/').filter(Boolean).pop() || '',
+          planId: epic.planId,
+          planSlug: sendBackPlanOpts.planSlug,
+          epicId: epic.epicId,
+          waveNumber: (story as { wave?: number }).wave ?? 0,
+          storyId,
+        }
+      : undefined;
+
   const result = await launchStoryRerun(
     epic,
     storyId,
@@ -2862,6 +2879,7 @@ app.post('/api/epic-workflows/:id/stories/:storyId/send-back', async (c) => {
     },
     sendBackPlanOpts,
     priorJobState,
+    remediationMerge ? { remediationMerge } : undefined,
   );
   if (!result.ok) {
     // Story was updated; re-launch can fail (e.g. deleted mid-request).

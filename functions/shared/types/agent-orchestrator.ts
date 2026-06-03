@@ -244,6 +244,24 @@ export interface AgentJob {
   totalCost?: number;
   errorMessage?: string;
 
+  /**
+   * QA send-back remediation marker (2026-06-03). Set by the send-back
+   * endpoint on a single-story rerun job. When the rerun reaches terminal
+   * SUCCESS, the daemon enqueues a one-shot `wave-merge` job for THIS story so
+   * the fix on `wip/<storyId>` (forked from the current `plan/<slug>` tip, so a
+   * clean fast-forward) is integrated into `plan/<slug>` — which is what QA
+   * reads. Without this, a single-story fix never re-reaches the plan branch
+   * (the forward-only wave-reducer won't re-fire a completed wave's merge).
+   */
+  remediationMerge?: {
+    appId: string;
+    planId: string;
+    planSlug: string;
+    epicId: string;
+    waveNumber: number;
+    storyId: string;
+  };
+
   // Pipeline Enhancement Plan v2, Phase A.3 — retry ladder state.
   // retryAttempt is 0 for the original run and increments on each re-queue.
   // retryAfter is an ISO timestamp; the poll loop skips PENDING jobs whose

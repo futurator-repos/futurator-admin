@@ -4947,6 +4947,15 @@ async function runJobAsync(job) {
     } catch (err) {
       log('warn', `[${job.jobId.slice(0, 8)}] spend log write failed: ${err.message}`);
     }
+    // 2026-06-03 — QA send-back remediation merge. If this was a remediation
+    // rerun (job.remediationMerge set by the send-back endpoint) and it reached
+    // a SUCCESS state, enqueue a one-shot wave-merge so the fix on
+    // `wip/<storyId>` is integrated into `plan/<slug>` (the branch QA reads).
+    try {
+      await enqueueRemediationMergeIfNeeded(job);
+    } catch (err) {
+      log('warn', `[${job.jobId.slice(0, 8)}] remediation-merge enqueue threw: ${err.message}`);
+    }
     // Event-driven advancement (2026-05-30) — a terminal wave-merge or epic-dev
     // job is exactly what unblocks the next wave/epic. Poke the reducer NOW so
     // it dispatches immediately instead of waiting for the next cron tick.
@@ -4955,6 +4964,80 @@ async function runJobAsync(job) {
       void triggerWaveReduce(`${handler}:${job.jobId.slice(0, 8)}`);
     }
   }
+}
+
+// 2026-06-03 — QA send-back remediation merge.
+//
+// A single-story QA send-back re-runs DEV in the story worktree and commits the
+// fix to `wip/<storyId>` (forked from the current `plan/<slug>` tip, so the
+// fix is a strict descendant → clean fast-forward). But the forward-only
+// wave-reducer won't re-fire a completed wave's merge, so the fix never reaches
+// `plan/<slug>` — the branch QA reads. This closes that gap: on terminal
+// SUCCESS of a job tagged `remediationMerge`, enqueue a one-shot `wave-merge`
+// job for just that story. The wave-merge runner forks at the plan tip, merges
+// `wip/<storyId>`, runs the build gate, advance-on-green updates `plan/<slug>`,
+// pushes origin, and reaps the wip branch + worktree. The operator then
+// re-runs QA against the now-fixed plan branch.
+const REMEDIATION_SUCCESS_STATUSES = new Set([
+  'COMPLETED',
+  'COMPLETED_VIA_PREWORK',
+  'COMPLETED_VIA_SALVAGE',
+  'COMPLETE_WITH_BLOCKED_STORIES',
+  'MANUALLY_SKIPPED',
+]);
+async function enqueueRemediationMergeIfNeeded(job) {
+  const rm = job?.remediationMerge;
+  if (!rm) return;
+  const short = job.jobId.slice(0, 8);
+  // Re-read the terminal status — only integrate a fix that actually passed.
+  // A rerun that failed review-runtime (or any gate) must NOT be merged.
+  let fresh = null;
+  try {
+    fresh = await ddb
+      .send(new GetCommand({ TableName: JOBS_TABLE, Key: { jobId: job.jobId } }))
+      .then((r) => r.Item || null);
+  } catch {
+    fresh = null;
+  }
+  const status = fresh?.status || job.status;
+  if (!REMEDIATION_SUCCESS_STATUSES.has(status)) {
+    log(
+      'info',
+      `[${short}] remediation-merge SKIPPED — rerun status=${status} (not success); fix on wip/${rm.storyId.slice(0, 8)} NOT integrated into plan/${rm.planSlug}`,
+    );
+    return;
+  }
+  const mergeJobId = randomUUID();
+  const now = new Date().toISOString();
+  await ddb.send(
+    new PutCommand({
+      TableName: JOBS_TABLE,
+      Item: {
+        jobId: mergeJobId,
+        status: 'PENDING',
+        createdAt: now,
+        updatedAt: now,
+        createdBy: job.createdBy || 'remediation-merge',
+        workingDir: job.workingDir,
+        jobType: 'wave-merge',
+        waveMergePayload: {
+          appId: rm.appId,
+          planId: rm.planId,
+          planSlug: rm.planSlug,
+          epicId: rm.epicId,
+          waveNumber: rm.waveNumber,
+          storyIds: [rm.storyId],
+          // Resolved daemon-side from the boilerplate registry (build gate).
+          postMergeValidationCmd: null,
+        },
+        pipeline: { agents: {}, steps: [] },
+      },
+    }),
+  );
+  log(
+    'info',
+    `[${short}] remediation-merge ENQUEUED wave-merge ${mergeJobId.slice(0, 8)} for story ${rm.storyId.slice(0, 8)} → plan/${rm.planSlug}`,
+  );
 }
 
 /**
