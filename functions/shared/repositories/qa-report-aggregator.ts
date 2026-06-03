@@ -405,11 +405,23 @@ function enrichClassifiedTests(
 }
 
 /**
- * Map (aggregate, execute, contractStatus) → UI lifecycle state. Order
- * of checks matters: `done`/`running` win over contract state because
- * once execute is in flight or finished, the contract is moot.
+ * Map (aggregate, execute, contractStatus) → UI lifecycle state.
+ *
+ * 2026-06-03 — a FRESH re-classify supersedes a stale completed execute.
+ * `qaContractStatus === 'pending'` means the operator clicked Re-run/Re-classify
+ * and a NEW contract is awaiting approval, even if an OLD execute job (qaJobId)
+ * already COMPLETED. We must surface `queued-contract` (the approval gate)
+ * FIRST in that case — otherwise the stale completed execute returns `done`,
+ * the approval panel never re-appears, and Re-run QA looks like a no-op (it
+ * did run the aggregate; the UI just kept showing the old gallery).
  */
 function computeExecuteStatus(plan: Plan, jobsById: Record<string, AgentJob>): VqaExecuteStatus {
+  if (plan.qaContractStatus === 'rejected') return 'rejected';
+  // Pending contract wins over any prior execute — await the new approval.
+  if (plan.qaContractStatus === 'pending' && plan.qaAggregateJobId) {
+    return 'queued-contract';
+  }
+
   const execJob = plan.qaJobId ? jobsById[plan.qaJobId] : undefined;
   if (execJob) {
     if (execJob.status === 'COMPLETED') return 'done';
@@ -420,7 +432,6 @@ function computeExecuteStatus(plan: Plan, jobsById: Record<string, AgentJob>): V
     if (execJob.status === 'FAILED') return 'done';
   }
   // No execute job (or unresolvable). Branch on contract state.
-  if (plan.qaContractStatus === 'rejected') return 'rejected';
   if (plan.qaAggregateJobId) {
     const aggJob = jobsById[plan.qaAggregateJobId];
     if (aggJob?.status === 'COMPLETED' && plan.qaContractStatus !== 'approved') {
