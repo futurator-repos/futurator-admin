@@ -17,11 +17,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { X, ArrowLeft, Send, FileText, ExternalLink, Loader2 } from 'lucide-react';
-import type {
-  AcCriterionResult,
-  GateWaveRow,
-  VqaTestResult,
-} from '@/types/qa-report';
+import type { AcCriterionResult, GateWaveRow, VqaTestResult } from '@/types/qa-report';
 import { useSendStoryBack } from '@/hooks/use-qa-report';
 
 export type FailureDrawerItem =
@@ -54,8 +50,10 @@ export function FailureDrawer({ planId, item, onClose }: Props) {
   // This is a legitimate derived-state sync (external prop → local state),
   // same pattern used in project-selector.tsx.
   useEffect(() => {
+    // B#1 — pre-fill the note with the judge's finding so the operator SEES
+    // (and can edit) the auto-injected failure context, not a blank box.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setNote('');
+    setNote(item ? buildDefaultNote(item) : '');
     setSentMsg(null);
   }, [item]);
 
@@ -201,7 +199,9 @@ export function FailureDrawer({ planId, item, onClose }: Props) {
         <div style={{ padding: 20, overflow: 'auto', flex: 1 }}>
           {item.kind === 'ac' && <AcDetail item={item.item} />}
           {item.kind === 'vqa' && <VqaDetail item={item.item} />}
-          {item.kind === 'gate' && <GateDetail row={item.row} check={item.check} cellStatus={item.cellStatus} />}
+          {item.kind === 'gate' && (
+            <GateDetail row={item.row} check={item.check} cellStatus={item.cellStatus} />
+          )}
 
           {/* Send-back composer (only when we have a story target) */}
           {contextStoryId && (
@@ -274,16 +274,16 @@ export function FailureDrawer({ planId, item, onClose }: Props) {
                 opacity: sendBack.isPending ? 0.6 : 1,
               }}
             >
-              {sendBack.isPending ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+              {sendBack.isPending ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <Send size={12} />
+              )}
               {sendBack.isPending ? 'Sending…' : 'Send back to dev'}
             </button>
           )}
           {contextStoryId && (
-            <button
-              type="button"
-              onClick={onOpenInHierarchy}
-              style={ghostBtn}
-            >
+            <button type="button" onClick={onOpenInHierarchy} style={ghostBtn}>
               <ArrowLeft size={12} />
               Open in Hierarchy
             </button>
@@ -462,7 +462,10 @@ function GateDetail({
           marginBottom: 16,
         }}
       >
-        <strong>{row.epicLabel} · {row.waveLabel}</strong> — <code>{check}</code> is{' '}
+        <strong>
+          {row.epicLabel} · {row.waveLabel}
+        </strong>{' '}
+        — <code>{check}</code> is{' '}
         <code style={{ color: cellStatus === 'fail' ? 'var(--destructive)' : 'var(--text-dim)' }}>
           {cellStatus}
         </code>
@@ -487,8 +490,7 @@ function GateDetail({
           letterSpacing: '0.04em',
         }}
       >
-        Open the associated build-check job in the monitor for the full log
-        output.
+        Open the associated build-check job in the monitor for the full log output.
       </div>
     </>
   );
@@ -512,11 +514,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-function MetaGrid({
-  cells,
-}: {
-  cells: Array<{ label: string; value: string }>;
-}) {
+function MetaGrid({ cells }: { cells: Array<{ label: string; value: string }> }) {
   return (
     <div
       style={{
@@ -640,8 +638,23 @@ function buildDefaultNote(item: FailureDrawerItem): string {
   switch (item.kind) {
     case 'ac':
       return `AC failed: ${item.item.criterionId} — ${item.item.text}`;
-    case 'vqa':
-      return `Visual QA failed: ${item.item.testId}${item.item.expected ? ` (expected: ${item.item.expected})` : ''}`;
+    case 'vqa': {
+      // B#1 (2026-06-03) — auto-inject the judge's ACTUAL finding + the
+      // screenshot it judged, so the DEV agent gets the specific defect on
+      // re-run instead of a generic "fix this". All three fields already exist
+      // on the VqaTestResult; we just surface them into the send-back note.
+      const r = item.item;
+      const lines = [`Visual QA failed: ${r.testId}`];
+      if (r.expected) lines.push(`Expected (the AC): ${r.expected}`);
+      if (r.rationale) lines.push(`What the screenshot showed: ${r.rationale}`);
+      if (r.screenshotUrl) lines.push(`Screenshot the judge inspected: ${r.screenshotUrl}`);
+      lines.push(
+        `Fix the code so the rendered output matches the expectation above. If this AC ` +
+          `can only be observed while the game is RUNNING (motion/keypress), it may be a ` +
+          `static-screenshot limitation rather than a code bug — accept it instead of re-running.`,
+      );
+      return lines.join('\n');
+    }
     case 'gate':
       return `Gate check "${item.check}" is ${item.cellStatus} on ${item.row.epicLabel} ${item.row.waveLabel}. Please investigate and fix.`;
   }
