@@ -74,7 +74,21 @@ export async function launchStoryRerun(
     };
   }
 
-  const pipeline = deps.generatePipeline(story, epic.title, epic.workingDir, {
+  // 2026-06-03 — a re-run (QA send-back / manual retry) MUST target the same
+  // per-story worktree the wave used, not the App's trunk worktree. Mirror
+  // pipeline-launcher.ts: when a planSlug is present, compute
+  // `/home/ubuntu/worktrees/<app>/<plan>/<storyId>` and bake it into both the
+  // generated pipeline's `cd ${workingDir}` AND the job row's `workingDir` so
+  // the daemon materializes/re-uses the story worktree. Without this the rerun
+  // ran in `/home/ubuntu/projects/<app>` (trunk) — review-runtime screenshotted
+  // the trunk and compile-commit produced STORY_COMMIT_EMPTY against main.
+  const appWorktreeSlug = epic.workingDir.replace(/\/+$/, '').split('/').filter(Boolean).pop();
+  const useStoryWorktree = !!(planOpts?.planSlug && appWorktreeSlug);
+  const effectiveWorkingDir = useStoryWorktree
+    ? `/home/ubuntu/worktrees/${appWorktreeSlug}/${planOpts!.planSlug}/${storyId}`
+    : epic.workingDir;
+
+  const pipeline = deps.generatePipeline(story, epic.title, effectiveWorkingDir, {
     devModel: epic.devModel,
     devEffort: epic.devEffort,
     reviewerModel: epic.reviewerModel,
@@ -112,7 +126,7 @@ export async function launchStoryRerun(
     createdAt: now,
     updatedAt: now,
     createdBy: userId,
-    workingDir: epic.workingDir,
+    workingDir: effectiveWorkingDir,
     pipeline,
   });
 

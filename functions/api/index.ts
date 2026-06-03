@@ -2805,11 +2805,37 @@ app.post('/api/epic-workflows/:id/stories/:storyId/send-back', async (c) => {
     status: 'fixing',
   });
 
+  // Resolve plan opts so the rerun (a) matches the wave's rigor/testModel and
+  // (b) carries planSlug — REQUIRED for launchStoryRerun to target the per-story
+  // worktree (`/home/ubuntu/worktrees/<app>/<plan>/<storyId>`) instead of the
+  // trunk. Without planSlug the send-back would run DEV in the App trunk and
+  // commit-on-pass would hit STORY_COMMIT_EMPTY against main.
+  let sendBackPlanOpts:
+    | {
+        rigor?: import('../shared/types/plan').PlanRigor;
+        testModel?: string;
+        hasBrowserTests?: boolean;
+        planSlug?: string;
+        planId?: string;
+      }
+    | undefined;
+  if (epic.planId) {
+    const plan = await planRepo.getPlanById(epic.planId);
+    if (plan) {
+      sendBackPlanOpts = {
+        rigor: plan.rigor,
+        testModel: plan.testModel,
+        hasBrowserTests: plan.testingProfile?.hasBrowserTests,
+        planSlug: plan.name,
+        planId: plan.planId,
+      };
+    }
+  }
+
   // Re-launch the story via the existing launcher so the daemon picks it up.
-  // PR-6 (A): carry forward the prior job's stepResults + sessions + variables
-  // so the daemon's executePipeline can skip already-complete steps and
-  // --resume <prior session> on the failed step. Without this, the QA send-back
-  // would replay every step from zero — wasting cost on already-done work.
+  // buildPriorJobStateFromStory truncates carried state at `dev` for a
+  // succeeded prior job (so dev + downstream actually re-run); for a failed
+  // job it resumes from the failed step.
   const priorJobState = await buildPriorJobStateFromStory(story);
   const result = await launchStoryRerun(
     epic,
@@ -2821,7 +2847,7 @@ app.post('/api/epic-workflows/:id/stories/:storyId/send-back', async (c) => {
       createJob: agentJobsRepo.createJob,
       uuid: () => crypto.randomUUID(),
     },
-    undefined,
+    sendBackPlanOpts,
     priorJobState,
   );
   if (!result.ok) {

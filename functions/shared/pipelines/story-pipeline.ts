@@ -956,16 +956,23 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
                 `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
                 `echo "[review-runtime] screenshot at $SCREENSHOT_URL"`,
                 `# Haiku judges the screenshot against the story's browser ACs.`,
-                `# We pass the ACs as JSON via env var (heredoc + single-quoted`,
-                `# NODE_EOF stays safe against $ chars in AC text).`,
-                `STORY_BROWSER_ACS=${JSON.stringify(
-                  (story.criteria ?? [])
-                    .filter((c) => c.needsBrowser)
-                    .map((c) => ({ id: c.id, text: c.text })),
-                )}`,
-                `LOCAL_SHOT="/tmp/review-${story.storyId}/overview.png" SCREENSHOT_URL="$SCREENSHOT_URL" STORY_BROWSER_ACS="$STORY_BROWSER_ACS" node -e "$(cat <<'NODE_EOF'`,
+                `# We pass the ACs as base64-encoded JSON. base64's charset is
+                # shell-safe (no quotes/spaces/$/braces), so AC text with
+                # apostrophes, quotes, $, or { } can't break the assignment.
+                # The prior raw \`STORY_BROWSER_ACS=[{"id":...}]\` form was
+                # UNQUOTED — bash stripped the quotes + brace-expanded, so node
+                # got \`[{id:...}]\` and JSON.parse threw, crashing every
+                # review-runtime run for stories with browser ACs.`,
+                `STORY_BROWSER_ACS_B64=${Buffer.from(
+                  JSON.stringify(
+                    (story.criteria ?? [])
+                      .filter((c) => c.needsBrowser)
+                      .map((c) => ({ id: c.id, text: c.text })),
+                  ),
+                ).toString('base64')}`,
+                `LOCAL_SHOT="/tmp/review-${story.storyId}/overview.png" SCREENSHOT_URL="$SCREENSHOT_URL" STORY_BROWSER_ACS_B64="$STORY_BROWSER_ACS_B64" node -e "$(cat <<'NODE_EOF'`,
                 `const { spawn } = require('child_process');`,
-                `const acs = JSON.parse(process.env.STORY_BROWSER_ACS || '[]');`,
+                `const acs = JSON.parse(Buffer.from(process.env.STORY_BROWSER_ACS_B64 || '', 'base64').toString('utf8') || '[]');`,
                 `const screenshotUrl = process.env.SCREENSHOT_URL;`,
                 `const localShot = process.env.LOCAL_SHOT;`,
                 `if (acs.length === 0) { console.log('RUNTIME_REVIEW_SKIPPED: no browser ACs to judge'); process.exit(0); }`,
