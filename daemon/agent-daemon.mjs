@@ -1636,8 +1636,25 @@ async function executeShellStep(jobId, step, workingDir, variables) {
       const parts = workingDir.split('/');
       const wtIdx = parts.indexOf('worktrees');
       const appId = variables.PROJECT_ID || (wtIdx >= 0 ? parts[wtIdx + 1] : null);
+      // ensureStoreEntry requires an installFn (guard) even when the store
+      // entry already exists — it only RUNS it on a true miss. Matches the
+      // npm-install helper used by story-worktree + the wave-build candidate.
+      const installFn = (cwd) =>
+        new Promise((resolve, reject) => {
+          const child = spawn(
+            'sudo',
+            ['-n', '-u', 'ubuntu', 'npm', 'install', '--prefer-offline', '--no-audit', '--no-fund'],
+            { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, CI: '1' } },
+          );
+          let stderr = '';
+          child.stderr.on('data', (b) => (stderr += b.toString('utf8').slice(-2000)));
+          child.on('close', (code) =>
+            code === 0 ? resolve() : reject(new Error(`npm install exit ${code}: ${stderr.slice(-300)}`)),
+          );
+          child.on('error', reject);
+        });
       if (appId) {
-        const res = await materializeNodeModulesFromStore({ appId, worktreeDir: workingDir, log });
+        const res = await materializeNodeModulesFromStore({ appId, worktreeDir: workingDir, installFn, log });
         log(
           'info',
           `[review-runtime] node_modules ${res.materialized ? 'materialized (real — Turbopack-safe)' : `reused (${res.skipped})`}`,
