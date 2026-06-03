@@ -1622,6 +1622,32 @@ async function executeShellStep(jobId, step, workingDir, variables) {
     text: `Shell: ${command.slice(0, 120)}`,
   });
 
+  // 2026-06-03 — per-story VQA boot fix. `review-runtime` runs `next dev` to
+  // screenshot the story. Next 16 + Turbopack FATAL-panics on the dedup
+  // node_modules SYMLINK ("Symlink node_modules is invalid, it points out of
+  // the filesystem root"), so the dev server never serves a page and the VQA
+  // always RUNTIME_REVIEW_SKIPPED (empty review-screenshots/). Materialize a
+  // REAL node_modules in the story worktree first — the same primitive the
+  // wave-build candidate uses. Idempotent + non-blocking: on failure
+  // review-runtime degrades to its existing skip, no worse than before.
+  if (step.id === 'review-runtime' && workingDir) {
+    try {
+      const { materializeNodeModulesFromStore } = await import('./lib/node-modules-store.mjs');
+      const parts = workingDir.split('/');
+      const wtIdx = parts.indexOf('worktrees');
+      const appId = variables.PROJECT_ID || (wtIdx >= 0 ? parts[wtIdx + 1] : null);
+      if (appId) {
+        const res = await materializeNodeModulesFromStore({ appId, worktreeDir: workingDir, log });
+        log(
+          'info',
+          `[review-runtime] node_modules ${res.materialized ? 'materialized (real — Turbopack-safe)' : `reused (${res.skipped})`}`,
+        );
+      }
+    } catch (err) {
+      log('warn', `[review-runtime] node_modules materialize failed (non-blocking): ${err.message}`);
+    }
+  }
+
   const startMs = Date.now();
 
   return new Promise((resolve) => {
