@@ -7,6 +7,7 @@ import {
   useRenameSessionMutation,
 } from '@/hooks/use-party-session';
 import { useUploadPartyDoc } from '@/hooks/use-party-docs';
+import { useSessionDraft } from '@/hooks/use-session-draft';
 import { useSessionsForProject } from '@/hooks/use-party-sessions';
 import { usePartyProject, useUpdatePartyProject } from '@/hooks/use-party-projects';
 import { useAuthStore } from '@/stores/auth-store';
@@ -49,7 +50,9 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
   const { data: project } = usePartyProject(session?.projectId ?? null);
   const updateProject = useUpdatePartyProject(session?.projectId ?? null);
   const authUser = useAuthStore((s) => s.user);
-  const [draft, setDraft] = useState('');
+  // Draft persists to localStorage per session so an unexpected logout /
+  // reload never costs the user an in-progress answer (see use-session-draft).
+  const [draft, setDraft] = useSessionDraft(sessionId);
 
   const adapted = useMemo(() => adaptSession(events, session?.status), [events, session?.status]);
   const { rounds, isProcessing } = adapted;
@@ -112,12 +115,14 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
         ? `[Attached: ${unreferenced.map((f) => `./docs/${f}`).join(', ')}]\n\n${content}`
         : content;
     if (new TextEncoder().encode(enriched).length > 8192) return;
-    setDraft('');
+    setDraft(''); // optimistic clear (also clears the persisted localStorage copy)
     setUploadStatus([]); // clear pinned upload chips on send
     try {
       await sendMessage.mutateAsync(enriched);
     } catch {
-      /* surfaced via session.status flipping to ERROR */
+      // Send failed (surfaced via session.status → ERROR). Restore the user's
+      // text so it isn't lost — re-persists to localStorage via setDraft.
+      setDraft(content);
     }
     // Snap back to the just-created round so the user sees their question.
     setPinnedRoundId(null);
