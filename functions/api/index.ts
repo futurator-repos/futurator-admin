@@ -945,19 +945,30 @@ async function buildPriorJobStateFromStory(
   const truncateStep = opts?.forceTruncateAtStep ?? 'dev';
   const shouldTruncate =
     !!opts?.forceTruncateAtStep || PRIOR_JOB_SUCCESS_STATUSES.has(priorJob.status);
+
+  // When truncating to FORCE a re-run, we must also DROP the carried sessions.
+  // The daemon promotes any step with a carried session to `--resume <prior
+  // session>` (agent-daemon.mjs ~L2752). Resuming `dev`'s prior session makes
+  // the agent re-load a conversation where it already "finished" the story →
+  // it concludes there's nothing to do and returns 0 turns / 0 tokens / no
+  // edits (observed: STORY_COMMIT_EMPTY). A forced re-run must run `dev` FRESH
+  // so it actually implements the fix. (Pre-`dev` steps stay complete via
+  // stepResults and are skipped, so their sessions are irrelevant anyway.)
+  let sessions = priorJob.sessions;
   if (shouldTruncate) {
     const devIdx = stepResults.findIndex((sr) => sr?.stepId === truncateStep);
     stepResults = devIdx >= 0 ? stepResults.slice(0, devIdx) : [];
+    sessions = undefined;
   }
 
   // Only carry forward if there's something worth carrying.
   const hasVars = priorJob.variables && Object.keys(priorJob.variables).length > 0;
-  const hasSessions = priorJob.sessions && Object.keys(priorJob.sessions).length > 0;
+  const hasSessions = sessions && Object.keys(sessions).length > 0;
   const hasResults = stepResults.length > 0;
   if (!hasVars && !hasSessions && !hasResults) return undefined;
   return {
     variables: priorJob.variables,
-    sessions: priorJob.sessions,
+    sessions,
     stepResults,
   };
 }
