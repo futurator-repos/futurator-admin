@@ -882,6 +882,31 @@ const parseVisualTests = sharedParseVisualTests;
 // session>` on the failed step. Returns undefined when no prior job exists
 // or it has no useful state — callers pass undefined to launchStoryRerun
 // for a fresh-start retry (legacy v1 behavior).
+//
+// CRITICAL — two distinct re-run semantics, do not conflate:
+//
+//   • Retry of a FAILED job  → resume-from-failed-step. The failed step's
+//     stepResult is NOT 'complete', so carrying ALL complete steps re-runs
+//     exactly from the failure. This is the cost-saving warm path. Keep it.
+//
+//   • Re-run of a SUCCEEDED job (QA send-back, or operator re-running a DONE
+//     story to redo work) → the code is WRONG and must be redone. Here EVERY
+//     step is 'complete', so carrying them all makes the daemon skip the whole
+//     pipeline — `dev` included — and the job no-ops (story stuck at FIXING).
+//     This was the QA send-back bug: prework-gate said "spawn-dev" but the
+//     resume-skip loop skipped `dev` because the prior (successful) job marked
+//     it complete. The fix: when the prior job SUCCEEDED, truncate the carried
+//     stepResults at `dev` so dev + everything downstream actually re-run. We
+//     keep the pre-dev scaffolding steps (api-author/test-author/…) complete
+//     (their files persist in the worktree) and keep sessions so `dev`
+//     --resumes warm with the new QA note in its prompt.
+const PRIOR_JOB_SUCCESS_STATUSES = new Set([
+  'COMPLETED',
+  'COMPLETED_VIA_PREWORK',
+  'COMPLETED_VIA_SALVAGE',
+  'COMPLETE_WITH_BLOCKED_STORIES',
+  'MANUALLY_SKIPPED',
+]);
 async function buildPriorJobStateFromStory(story: { jobId?: string }): Promise<
   | {
       variables?: Record<string, string>;
@@ -898,15 +923,29 @@ async function buildPriorJobStateFromStory(story: { jobId?: string }): Promise<
     return undefined;
   }
   if (!priorJob) return undefined;
+
+  let stepResults = Array.isArray(priorJob.stepResults) ? priorJob.stepResults : [];
+
+  // Re-run of a SUCCEEDED job: redo from `dev`. Truncate the carried
+  // stepResults to the steps strictly BEFORE the first `dev` entry (recorded
+  // execution order), so the daemon's resume-skip loop re-runs dev onward
+  // instead of skipping a fully-complete pipeline into a no-op. If there is no
+  // `dev` step (e.g. a pure verification story), drop all stepResults for a
+  // clean full re-run.
+  if (PRIOR_JOB_SUCCESS_STATUSES.has(priorJob.status)) {
+    const devIdx = stepResults.findIndex((sr) => sr?.stepId === 'dev');
+    stepResults = devIdx >= 0 ? stepResults.slice(0, devIdx) : [];
+  }
+
   // Only carry forward if there's something worth carrying.
   const hasVars = priorJob.variables && Object.keys(priorJob.variables).length > 0;
   const hasSessions = priorJob.sessions && Object.keys(priorJob.sessions).length > 0;
-  const hasResults = Array.isArray(priorJob.stepResults) && priorJob.stepResults.length > 0;
+  const hasResults = stepResults.length > 0;
   if (!hasVars && !hasSessions && !hasResults) return undefined;
   return {
     variables: priorJob.variables,
     sessions: priorJob.sessions,
-    stepResults: priorJob.stepResults,
+    stepResults,
   };
 }
 
