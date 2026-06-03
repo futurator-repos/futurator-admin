@@ -889,17 +889,24 @@ const parseVisualTests = sharedParseVisualTests;
 //     stepResult is NOT 'complete', so carrying ALL complete steps re-runs
 //     exactly from the failure. This is the cost-saving warm path. Keep it.
 //
-//   • Re-run of a SUCCEEDED job (QA send-back, or operator re-running a DONE
-//     story to redo work) → the code is WRONG and must be redone. Here EVERY
-//     step is 'complete', so carrying them all makes the daemon skip the whole
-//     pipeline — `dev` included — and the job no-ops (story stuck at FIXING).
-//     This was the QA send-back bug: prework-gate said "spawn-dev" but the
-//     resume-skip loop skipped `dev` because the prior (successful) job marked
-//     it complete. The fix: when the prior job SUCCEEDED, truncate the carried
-//     stepResults at `dev` so dev + everything downstream actually re-run. We
-//     keep the pre-dev scaffolding steps (api-author/test-author/…) complete
-//     (their files persist in the worktree) and keep sessions so `dev`
-//     --resumes warm with the new QA note in its prompt.
+//   • Re-run of a SUCCEEDED job (operator re-running a DONE story to redo
+//     work) → the code is WRONG and must be redone. Here EVERY step is
+//     'complete', so carrying them all makes the daemon skip the whole pipeline
+//     — `dev` included — and the job no-ops. Fix: when the prior job SUCCEEDED,
+//     truncate the carried stepResults at `dev`.
+//
+//   • QA send-back → ALWAYS redo from `dev`, regardless of whether the prior
+//     attempt succeeded OR failed. A send-back can chain off a FAILED prior
+//     rerun (e.g. one that failed at compile-commit). In that case the failed
+//     job still has `dev` marked complete (it failed LATER), so the
+//     success-only rule above would NOT truncate → `dev` carried complete →
+//     skipped → DEV no-ops. This is exactly what we observed (job 7a4ee9bc:
+//     16 carried steps incl. dev → dev skipped → zero source changes). So
+//     send-back passes `forceTruncateAtStep: 'dev'` to truncate unconditionally.
+//
+// Either way we keep the pre-dev scaffolding steps (api-author/test-author/…)
+// complete (their files persist in the worktree) and keep sessions so `dev`
+// --resumes warm with the new QA note in its prompt.
 const PRIOR_JOB_SUCCESS_STATUSES = new Set([
   'COMPLETED',
   'COMPLETED_VIA_PREWORK',
@@ -907,7 +914,10 @@ const PRIOR_JOB_SUCCESS_STATUSES = new Set([
   'COMPLETE_WITH_BLOCKED_STORIES',
   'MANUALLY_SKIPPED',
 ]);
-async function buildPriorJobStateFromStory(story: { jobId?: string }): Promise<
+async function buildPriorJobStateFromStory(
+  story: { jobId?: string },
+  opts?: { forceTruncateAtStep?: string },
+): Promise<
   | {
       variables?: Record<string, string>;
       sessions?: Record<string, string>;
@@ -926,14 +936,17 @@ async function buildPriorJobStateFromStory(story: { jobId?: string }): Promise<
 
   let stepResults = Array.isArray(priorJob.stepResults) ? priorJob.stepResults : [];
 
-  // Re-run of a SUCCEEDED job: redo from `dev`. Truncate the carried
-  // stepResults to the steps strictly BEFORE the first `dev` entry (recorded
-  // execution order), so the daemon's resume-skip loop re-runs dev onward
-  // instead of skipping a fully-complete pipeline into a no-op. If there is no
-  // `dev` step (e.g. a pure verification story), drop all stepResults for a
-  // clean full re-run.
-  if (PRIOR_JOB_SUCCESS_STATUSES.has(priorJob.status)) {
-    const devIdx = stepResults.findIndex((sr) => sr?.stepId === 'dev');
+  // Re-run of a SUCCEEDED job (or a forced send-back): redo from `dev`.
+  // Truncate the carried stepResults to the steps strictly BEFORE the first
+  // matching entry (recorded execution order), so the daemon's resume-skip loop
+  // re-runs that step onward instead of skipping a complete pipeline into a
+  // no-op. If the step isn't present (e.g. a pure verification story), drop all
+  // stepResults for a clean full re-run.
+  const truncateStep = opts?.forceTruncateAtStep ?? 'dev';
+  const shouldTruncate =
+    !!opts?.forceTruncateAtStep || PRIOR_JOB_SUCCESS_STATUSES.has(priorJob.status);
+  if (shouldTruncate) {
+    const devIdx = stepResults.findIndex((sr) => sr?.stepId === truncateStep);
     stepResults = devIdx >= 0 ? stepResults.slice(0, devIdx) : [];
   }
 
@@ -2833,10 +2846,10 @@ app.post('/api/epic-workflows/:id/stories/:storyId/send-back', async (c) => {
   }
 
   // Re-launch the story via the existing launcher so the daemon picks it up.
-  // buildPriorJobStateFromStory truncates carried state at `dev` for a
-  // succeeded prior job (so dev + downstream actually re-run); for a failed
-  // job it resumes from the failed step.
-  const priorJobState = await buildPriorJobStateFromStory(story);
+  // A QA send-back ALWAYS redoes from `dev` (the code is wrong) — force the
+  // truncation regardless of whether the prior attempt succeeded or failed, so
+  // we never carry `dev` forward as complete and skip it.
+  const priorJobState = await buildPriorJobStateFromStory(story, { forceTruncateAtStep: 'dev' });
   const result = await launchStoryRerun(
     epic,
     storyId,
