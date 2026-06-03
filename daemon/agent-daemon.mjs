@@ -1822,6 +1822,23 @@ async function executeShellStep(jobId, step, workingDir, variables) {
       if (step.captureAs) variables[step.captureAs] = stdout;
       if (step.captureStderrAs) variables[step.captureStderrAs] = stderr;
 
+      // 2026-06-03 — apply step.extractors for SHELL steps too. Previously only
+      // the AGENT-step path ran extractors, so qa-report (a shell step) never
+      // populated OVERALL_VERDICT / TEST_RESULTS / SCREENSHOTS — the QA-report
+      // aggregator then had no per-test data and fell back to a fake
+      // "all-pass / NO SCREENSHOT" gallery, even though the judges returned real
+      // FAIL verdicts with real screenshot URLs. Mirrors the agent-step pass.
+      if (step.extractors && Object.keys(step.extractors).length > 0) {
+        try {
+          const extracted = runExtractors(stdout, step.extractors);
+          for (const [k, v] of Object.entries(extracted)) {
+            if (v !== undefined && v !== null) variables[k] = v;
+          }
+        } catch (err) {
+          log('warn', `[${jobId.slice(0, 8)}] shell extractor pass failed (non-blocking): ${err.message}`);
+        }
+      }
+
       const stepResult = {
         stepId: step.id,
         agentId: '__shell__',
