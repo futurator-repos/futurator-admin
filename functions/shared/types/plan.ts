@@ -211,6 +211,16 @@ export interface Plan {
   /** User who approved/rejected the contract. */
   qaContractDecidedBy?: string;
   /**
+   * B#2 (2026-06-03) — VQA test IDs the operator has Accepted as known
+   * static-screenshot limitations. An accepted FAILing test is treated as
+   * NON-BLOCKING by the aggregator (excluded from the VQA fail tally and the
+   * plan's blocking verdict). Used for interaction-gated ACs the headless
+   * judge physically cannot verify from one idle frame (e.g. "background turns
+   * red after the score exceeds 3000"). The code is correct; QA just can't see
+   * it. Cleared/edited via POST|DELETE /api/plans/:id/qa-tests/:testId/accept.
+   */
+  qaAcceptedTestIds?: string[];
+  /**
    * Pipeline v2.0 PR-8 (Q5.2) — plan-level QA cost ceiling. When the
    * sum of per-test costs in qa-execute would exceed this, remaining
    * tests are marked `skipped-budget` and the operator gets a

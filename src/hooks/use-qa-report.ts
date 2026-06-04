@@ -70,6 +70,31 @@ export function useApproveAc(planId: string | null) {
   });
 }
 
+/**
+ * B#2 — Accept (or un-accept) a VQA test as a known static-screenshot
+ * limitation. An accepted failing test is treated as non-blocking by the
+ * aggregator, so the VQA pillar can go green for interaction-gated ACs the
+ * headless judge can't verify from one idle frame.
+ */
+export function useAcceptQaTest(planId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ testId, accept }: { testId: string; accept: boolean }) =>
+      accept
+        ? api.post<{ planId: string; testId: string; qaAcceptedTestIds: string[] }>(
+            `/plans/${planId}/qa-tests/${testId}/accept`,
+            {},
+          )
+        : api.delete<{ planId: string; testId: string; qaAcceptedTestIds: string[] }>(
+            `/plans/${planId}/qa-tests/${testId}/accept`,
+          ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['qa-report', planId] });
+      qc.invalidateQueries({ queryKey: ['plans', planId] });
+    },
+  });
+}
+
 /** Revoke an earlier AC sign-off (e.g., after sending a story back). */
 export function useRevokeAcApproval(planId: string | null) {
   const qc = useQueryClient();

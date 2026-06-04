@@ -2682,6 +2682,42 @@ app.post('/api/plans/:id/qa-contract/approve', async (c) => {
   );
 });
 
+// ── B#2 (2026-06-03) — Accept a VQA test as a known limitation ──
+//
+// POST   /api/plans/:id/qa-tests/:testId/accept   → mark accepted (non-blocking)
+// DELETE /api/plans/:id/qa-tests/:testId/accept   → un-accept
+//
+// Used for interaction-gated ACs the headless judge can't verify from one
+// static idle frame (e.g. "background turns red after the score exceeds
+// 3000"). The code is correct; QA simply can't see it. The aggregator treats
+// an accepted FAILing test as non-blocking, so the VQA pillar (and the plan's
+// blocking verdict) can go green without re-running a phantom fix.
+app.post('/api/plans/:id/qa-tests/:testId/accept', async (c) => {
+  const planId = c.req.param('id');
+  const testId = c.req.param('testId');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  const existing = plan.qaAcceptedTestIds ?? [];
+  const next = existing.includes(testId) ? existing : [...existing, testId];
+  if (next.length !== existing.length) {
+    await planRepo.updatePlanFields(planId, { qaAcceptedTestIds: next });
+  }
+  return c.json({ planId, testId, accepted: true, qaAcceptedTestIds: next }, 200);
+});
+
+app.delete('/api/plans/:id/qa-tests/:testId/accept', async (c) => {
+  const planId = c.req.param('id');
+  const testId = c.req.param('testId');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  const existing = plan.qaAcceptedTestIds ?? [];
+  const next = existing.filter((t) => t !== testId);
+  if (next.length !== existing.length) {
+    await planRepo.updatePlanFields(planId, { qaAcceptedTestIds: next });
+  }
+  return c.json({ planId, testId, accepted: false, qaAcceptedTestIds: next }, 200);
+});
+
 // POST /api/plans/:id/qa-contract/reject
 //   Operator decides not to run QA. Sets contract status to 'rejected'
 //   without launching an execute job. Reversible — operator can re-run

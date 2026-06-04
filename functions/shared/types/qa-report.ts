@@ -110,6 +110,24 @@ export interface VqaTestResult {
   costUsd?: number;
   /** Wall-clock in milliseconds. */
   durationMs?: number;
+
+  // ── B#2 (2026-06-03) — failure classification + operator accept ─────
+  /**
+   * Heuristic class of a FAILing test, to guide the operator:
+   *   'render'           — observable in a static screenshot; a real fail is
+   *                        likely a genuine code defect → send back to dev.
+   *   'interaction-gated' — the AC depends on time/score/speed/motion/keypress,
+   *                        so a static screenshot CANNOT show it. A fail here is
+   *                        likely a static-screenshot limitation → consider Accept.
+   * Only set for non-pass tests.
+   */
+  failureClass?: 'render' | 'interaction-gated';
+  /**
+   * True when the operator has accepted this test as a known limitation
+   * (testId ∈ plan.qaAcceptedTestIds). Accepted fails are NON-BLOCKING — they
+   * don't count toward the VQA fail tally or the plan's blocking verdict.
+   */
+  accepted?: boolean;
 }
 
 /**
@@ -199,6 +217,9 @@ export interface VqaRollup {
   pending: number;
   /** PR-8 Q5.3 — uncertain count (budget kill or judge couldn't decide). */
   uncertain?: number;
+  /** B#2 — count of failing tests the operator accepted as known limitations
+   *  (non-blocking). These are excluded from `fail`. */
+  accepted?: number;
   /** PR-8 Q5.2 — skipped due to plan budget. */
   skippedBudget?: number;
   /** PR-8 — judge invocation crashes. */

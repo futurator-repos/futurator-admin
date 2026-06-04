@@ -45,15 +45,40 @@ const QA_ATTENTION_CATEGORIES = new Set(['test-gate-failed', 'tamper-reverted', 
 
 // ── Pillar verdict math ──────────────────────────────────────────────
 
-function verdictFromCounts(pass: number, fail: number, pending: number): QaPillarVerdict {
+function verdictFromCounts(
+  pass: number,
+  fail: number,
+  pending: number,
+  accepted = 0,
+): QaPillarVerdict {
   if (fail > 0) return 'fail';
+  // B#2 — operator-accepted (known-limitation) tests count as pass-equivalent
+  // for the verdict so a pillar whose only "failures" were accepted goes green.
+  const effectivePass = pass + accepted;
   // Mixed: some things have passed, others are still waiting → partial.
-  if (pending > 0 && pass > 0) return 'partial';
+  if (pending > 0 && effectivePass > 0) return 'partial';
   // Only pending (no results yet) → still pending. Distinguishes "nothing ran"
   // from "some ran + some didn't."
   if (pending > 0) return 'pending';
-  if (pass > 0) return 'pass';
+  if (effectivePass > 0) return 'pass';
   return 'pending';
+}
+
+// ── B#2 — failure classification heuristic ──────────────────────────────
+//
+// A headless visual judge sees ONE static frame of the app's initial state.
+// ACs whose satisfaction depends on elapsed time, score/progress, speed,
+// motion/animation, or user interaction (keypress/click/scroll) physically
+// cannot be observed in that frame — a "fail" on them is almost always a
+// static-screenshot limitation, not a code defect. We surface that as
+// `interaction-gated` so the operator knows the test is a candidate for
+// Accept rather than send-back. Everything else is `render` (a real fail is a
+// likely code defect → send back to dev).
+const INTERACTION_GATED_RE =
+  /\b(after|once|when|until|eventually|over time|eventually|eventually)\b|\b(score|speed|accelerat\w*|velocity|fps|frame rate)\b|\bexceed\w*\b|\b(playing|gameplay|played|elapsed|seconds?|minutes?|ticks?)\b|\b(press|keypress|keyboard|click\w*|tap\w*|scroll\w*|hover\w*|drag\w*|swipe\w*)\b|\b(motion|moving|moves|animat\w*|transition\w*|spawn\w*)\b/i;
+function classifyVqaFailure(expected?: string, rationale?: string): 'render' | 'interaction-gated' {
+  const hay = `${expected ?? ''} ${rationale ?? ''}`;
+  return INTERACTION_GATED_RE.test(hay) ? 'interaction-gated' : 'render';
 }
 
 function worstVerdict(...vs: QaPillarVerdict[]): QaPillarVerdict {
@@ -501,12 +526,15 @@ function buildVqaRollup(
   const failures: VqaTestResult[] = [];
   const thumbnails: VqaTestResult[] = [];
   const allResults: VqaTestResult[] = [];
+  // B#2 — operator-accepted (known-limitation) test IDs are non-blocking.
+  const acceptedSet = new Set(plan.qaAcceptedTestIds ?? []);
   let pass = 0;
   let fail = 0;
   let pending = 0;
   let uncertain = 0;
   let skippedBudget = 0;
   let errored = 0;
+  let accepted = 0;
   let total = 0;
   let overviewUrl: string | undefined;
   let runCostUsd: number | undefined;
@@ -564,12 +592,14 @@ function buildVqaRollup(
                 : tr.verdict === 'skipped-budget'
                   ? 'skipped-budget'
                   : 'errored';
+        const isAccepted = status === 'fail' && acceptedSet.has(tr.testId);
         switch (status) {
           case 'pass':
             pass += 1;
             break;
           case 'fail':
-            fail += 1;
+            if (isAccepted) accepted += 1;
+            else fail += 1;
             break;
           case 'uncertain':
             uncertain += 1;
@@ -593,8 +623,12 @@ function buildVqaRollup(
           rationale: tr.rationale,
           costUsd: tr.costUsd,
           durationMs: tr.durationMs,
+          failureClass:
+            status === 'pass' ? undefined : classifyVqaFailure(meta?.expect, tr.rationale),
+          accepted: isAccepted || undefined,
         };
-        if (status === 'fail') failures.push(r);
+        // Accepted fails are non-blocking → keep them out of `failures`.
+        if (status === 'fail' && !isAccepted) failures.push(r);
         thumbnails.push(r);
         allResults.push(r);
       }
@@ -608,6 +642,7 @@ function buildVqaRollup(
     for (const { story, vt } of visualTests) {
       total += 1;
       const failed = failedIds.has(vt.id);
+      const isAccepted = failed && acceptedSet.has(vt.id);
       const r: VqaTestResult = {
         testId: vt.id,
         storyId: story.storyId,
@@ -617,10 +652,15 @@ function buildVqaRollup(
         screenshotUrl: shotsByTestId.get(vt.id),
         expected: vt.expect,
         level: vt.level,
+        failureClass: failed ? classifyVqaFailure(vt.expect) : undefined,
+        accepted: isAccepted || undefined,
       };
       if (failed) {
-        fail += 1;
-        failures.push(r);
+        if (isAccepted) accepted += 1;
+        else {
+          fail += 1;
+          failures.push(r);
+        }
       } else {
         pass += 1;
       }
@@ -630,7 +670,7 @@ function buildVqaRollup(
   }
 
   return {
-    verdict: verdictFromCounts(pass, fail, pending),
+    verdict: verdictFromCounts(pass, fail, pending, accepted),
     total,
     pass,
     fail,
@@ -638,6 +678,7 @@ function buildVqaRollup(
     uncertain: uncertain || undefined,
     skippedBudget: skippedBudget || undefined,
     errored: errored || undefined,
+    accepted: accepted || undefined,
     overviewUrl,
     thumbnails: thumbnails.slice(0, 6),
     failures,

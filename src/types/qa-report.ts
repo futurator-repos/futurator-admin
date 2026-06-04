@@ -67,6 +67,10 @@ export interface VqaTestResult {
   rationale?: string;
   costUsd?: number;
   durationMs?: number;
+  /** B#2 — classification of a non-pass test (drives the drawer banner). */
+  failureClass?: 'render' | 'interaction-gated';
+  /** B#2 — operator accepted this failure as a known limitation (non-blocking). */
+  accepted?: boolean;
 }
 
 /** PR-8d — execute-stage lifecycle. Drives ContractGate visibility,
@@ -126,6 +130,8 @@ export interface VqaRollup {
   uncertain?: number;
   skippedBudget?: number;
   errored?: number;
+  /** B#2 — count of failing tests accepted as known limitations (non-blocking). */
+  accepted?: number;
   overviewUrl?: string;
   thumbnails: VqaTestResult[];
   failures: VqaTestResult[];

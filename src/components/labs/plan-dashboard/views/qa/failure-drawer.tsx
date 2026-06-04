@@ -16,9 +16,9 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { X, ArrowLeft, Send, FileText, ExternalLink, Loader2 } from 'lucide-react';
+import { X, ArrowLeft, Send, FileText, ExternalLink, Loader2, ShieldCheck } from 'lucide-react';
 import type { AcCriterionResult, GateWaveRow, VqaTestResult } from '@/types/qa-report';
-import { useSendStoryBack } from '@/hooks/use-qa-report';
+import { useSendStoryBack, useAcceptQaTest } from '@/hooks/use-qa-report';
 
 export type FailureDrawerItem =
   | { kind: 'ac'; item: AcCriterionResult }
@@ -35,6 +35,7 @@ export function FailureDrawer({ planId, item, onClose }: Props) {
   const router = useRouter();
   const params = useSearchParams();
   const sendBack = useSendStoryBack(planId);
+  const acceptTest = useAcceptQaTest(planId);
   const [note, setNote] = useState('');
   const [sentMsg, setSentMsg] = useState<string | null>(null);
 
@@ -63,6 +64,15 @@ export function FailureDrawer({ planId, item, onClose }: Props) {
   const defaultNote = buildDefaultNote(item);
   const contextStoryId = storyIdOf(item);
   const contextEpicId = epicIdOf(item);
+
+  // B#2 — VQA accept (known-limitation) state.
+  const vqaTest = item.kind === 'vqa' ? item.item : null;
+  const isAccepted = !!vqaTest?.accepted;
+
+  function handleAccept() {
+    if (!vqaTest) return;
+    acceptTest.mutate({ testId: vqaTest.testId, accept: !isAccepted });
+  }
 
   async function handleSendBack() {
     if (!contextEpicId || !contextStoryId) return;
@@ -282,6 +292,42 @@ export function FailureDrawer({ planId, item, onClose }: Props) {
               {sendBack.isPending ? 'Sending…' : 'Send back to dev'}
             </button>
           )}
+          {item.kind === 'vqa' && (
+            <button
+              type="button"
+              onClick={handleAccept}
+              disabled={acceptTest.isPending}
+              title={
+                isAccepted
+                  ? 'Un-accept — this test will block again'
+                  : 'Accept this failure as a known static-screenshot limitation (non-blocking)'
+              }
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                fontSize: 11,
+                padding: '8px 14px',
+                borderRadius: 3,
+                background: isAccepted
+                  ? 'color-mix(in srgb, var(--success) 14%, transparent)'
+                  : 'color-mix(in srgb, var(--accent-blue) 12%, transparent)',
+                border: `1px solid ${isAccepted ? 'var(--success)' : 'var(--accent-blue)'}`,
+                color: isAccepted ? 'var(--success)' : 'var(--accent-blue)',
+                fontWeight: 500,
+                cursor: acceptTest.isPending ? 'not-allowed' : 'pointer',
+                letterSpacing: '0.05em',
+                opacity: acceptTest.isPending ? 0.6 : 1,
+              }}
+            >
+              {acceptTest.isPending ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <ShieldCheck size={12} />
+              )}
+              {isAccepted ? 'Accepted — un-accept' : 'Accept (known limitation)'}
+            </button>
+          )}
           {contextStoryId && (
             <button type="button" onClick={onOpenInHierarchy} style={ghostBtn}>
               <ArrowLeft size={12} />
@@ -373,8 +419,53 @@ function AcDetail({ item }: { item: AcCriterionResult }) {
 }
 
 function VqaDetail({ item }: { item: VqaTestResult }) {
+  const gated = item.failureClass === 'interaction-gated';
   return (
     <>
+      {/* B#2 — classification banner. Interaction-gated fails are likely a
+          static-screenshot limitation (Accept), not a code defect (Send back). */}
+      {!item.passed && item.failureClass && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 8,
+            padding: '9px 11px',
+            borderRadius: 4,
+            marginBottom: 14,
+            fontSize: 12,
+            lineHeight: 1.45,
+            background: gated
+              ? 'color-mix(in srgb, var(--accent-blue) 10%, transparent)'
+              : 'color-mix(in srgb, var(--warning) 10%, transparent)',
+            border: `1px solid ${gated ? 'var(--accent-blue)' : 'var(--warning)'}`,
+            color: gated ? 'var(--accent-blue)' : 'var(--warning)',
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>{gated ? 'Interaction-gated' : 'Render'}</span>
+          <span style={{ color: 'var(--text-dim)' }}>
+            {gated
+              ? '— depends on time / score / speed / motion / input, so a static idle screenshot cannot show it. If the code is correct this is a screenshot limitation → Accept it. Send back only if you believe the code is wrong.'
+              : '— observable in a static screenshot, so a fail here is likely a genuine code defect → Send back to dev.'}
+          </span>
+        </div>
+      )}
+      {item.accepted && (
+        <div
+          style={{
+            padding: '8px 11px',
+            borderRadius: 4,
+            marginBottom: 14,
+            fontSize: 12,
+            background: 'color-mix(in srgb, var(--success) 12%, transparent)',
+            border: '1px solid var(--success)',
+            color: 'var(--success)',
+            fontWeight: 500,
+          }}
+        >
+          ✓ Accepted as a known limitation — this test no longer blocks the plan.
+        </div>
+      )}
       {item.screenshotUrl && (
         <div
           style={{
