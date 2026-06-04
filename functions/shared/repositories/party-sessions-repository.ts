@@ -139,10 +139,17 @@ export type SessionLockResult =
   | { ok: false; reason: 'SESSION_BUSY' | 'NOT_FOUND' | 'NOT_ACTIVE' };
 
 /**
- * Atomically transition a session from ACTIVE|IDLE to PROCESSING. Fails with
- * SESSION_BUSY if already PROCESSING.
+ * Atomically transition a session from ACTIVE|IDLE|ERROR to PROCESSING.
+ * Fails with SESSION_BUSY when already PROCESSING, NOT_ACTIVE only for the
+ * tombstoned ARCHIVED state, NOT_FOUND when the row is absent.
  *
- * Full implementation in Story 15.2.
+ * ERROR is accepted as an auto-recovery path: a turn that ended in ERROR
+ * (timeout, non-zero exit, daemon-side 401, etc.) leaves the row at status
+ * ERROR with its claudeSessionId + worktreePath intact. The next user message
+ * then transitions ERROR → PROCESSING and the daemon retries the round —
+ * matching the UI's "Send a new message below to continue" affordance.
+ * (See docs/concepts/party-push/ — this closes the gap where the UI invited
+ * a retry but the API refused with 409 SESSION_NOT_ACTIVE.)
  */
 export async function tryAcquireSessionLock(sessionId: string): Promise<SessionLockResult> {
   try {
@@ -152,12 +159,13 @@ export async function tryAcquireSessionLock(sessionId: string): Promise<SessionL
         Key: { sessionId },
         UpdateExpression: 'SET #status = :processing',
         ConditionExpression:
-          'attribute_exists(sessionId) AND (#status = :active OR #status = :idle)',
+          'attribute_exists(sessionId) AND (#status = :active OR #status = :idle OR #status = :error)',
         ExpressionAttributeNames: { '#status': 'status' },
         ExpressionAttributeValues: {
           ':processing': 'PROCESSING' as PartySessionStatus,
           ':active': 'ACTIVE' as PartySessionStatus,
           ':idle': 'IDLE' as PartySessionStatus,
+          ':error': 'ERROR' as PartySessionStatus,
         },
       }),
     );

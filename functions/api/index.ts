@@ -7408,9 +7408,11 @@ app.post('/api/party/sessions/:id/messages', async (c) => {
       throw new AppError('SESSION_BUSY', 'Session is already processing a turn', 409);
     }
     if (lock.reason === 'NOT_ACTIVE') {
+      // ERROR is auto-recoverable (tryAcquireSessionLock accepts it). The only
+      // state that lands here now is the tombstoned ARCHIVED.
       throw new AppError(
         'SESSION_NOT_ACTIVE',
-        'Session is not ACTIVE or IDLE and cannot accept a message',
+        'Session is archived and cannot accept new messages',
         409,
       );
     }

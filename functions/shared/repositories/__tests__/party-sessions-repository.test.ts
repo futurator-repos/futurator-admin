@@ -102,10 +102,12 @@ describe('tryAcquireSessionLock', () => {
     sendMock.mockResolvedValue({});
     expect(await tryAcquireSessionLock('sid')).toEqual({ ok: true });
     const input = extract(sendMock.mock.calls[0][0]);
-    expect(input.ConditionExpression).toContain('#status = :active OR #status = :idle');
-    expect((input.ExpressionAttributeValues as Record<string, unknown>)[':processing']).toBe(
-      'PROCESSING',
+    expect(input.ConditionExpression).toContain(
+      '#status = :active OR #status = :idle OR #status = :error',
     );
+    const vals = input.ExpressionAttributeValues as Record<string, unknown>;
+    expect(vals[':processing']).toBe('PROCESSING');
+    expect(vals[':error']).toBe('ERROR');
   });
 
   it('returns SESSION_BUSY when the row already has status PROCESSING', async () => {
@@ -117,12 +119,20 @@ describe('tryAcquireSessionLock', () => {
     expect(await tryAcquireSessionLock('sid')).toEqual({ ok: false, reason: 'SESSION_BUSY' });
   });
 
-  it('returns NOT_ACTIVE when status is ERROR / ARCHIVED', async () => {
+  // Auto-recovery: ERROR is now an accepted prior state, so the conditional
+  // update succeeds without a fallback read — a new message resumes the round.
+  it('returns ok for an ERROR session (auto-recovery on next message)', async () => {
+    sendMock.mockResolvedValue({});
+    expect(await tryAcquireSessionLock('sid')).toEqual({ ok: true });
+    expect(sendMock).toHaveBeenCalledTimes(1); // no fallback getSession read
+  });
+
+  it('returns NOT_ACTIVE when status is ARCHIVED (terminal tombstone)', async () => {
     const err = new Error('conditional failed') as Error & { name: string };
     err.name = 'ConditionalCheckFailedException';
     sendMock
       .mockRejectedValueOnce(err)
-      .mockResolvedValueOnce({ Item: { sessionId: 'sid', status: 'ERROR' } });
+      .mockResolvedValueOnce({ Item: { sessionId: 'sid', status: 'ARCHIVED' } });
     expect(await tryAcquireSessionLock('sid')).toEqual({ ok: false, reason: 'NOT_ACTIVE' });
   });
 
