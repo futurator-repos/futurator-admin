@@ -11,10 +11,10 @@
  * once the plan flips to `ready`.
  */
 
-import { Loader2, RefreshCw, ArrowRight } from 'lucide-react';
+import { Loader2, RefreshCw, ArrowRight, Send } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import type { QaReport, PlanQaVerdict, QaPillarVerdict } from '@/types/qa-report';
-import { useRunQaReview } from '@/hooks/use-qa-report';
+import { useRunQaReview, useSendBackFailing } from '@/hooks/use-qa-report';
 
 interface Props {
   report: QaReport;
@@ -50,7 +50,9 @@ export function VerdictStrip({ report, planId, showLastRun = true }: Props) {
   const router = useRouter();
   const params = useSearchParams();
   const runQa = useRunQaReview(planId);
+  const sendBackFailing = useSendBackFailing(planId);
   const verdict = VERDICT_META[report.verdict];
+  const failingCount = report.vqa.failures?.length ?? 0;
   const ready = report.verdict === 'ready';
 
   function onRunQa() {
@@ -158,6 +160,54 @@ export function VerdictStrip({ report, planId, showLastRun = true }: Props) {
 
       {/* Right-side CTAs */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+        {sendBackFailing.data && (
+          <span
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10,
+              letterSpacing: '0.04em',
+              color: 'var(--text-dim)',
+            }}
+          >
+            ↩ {sendBackFailing.data.sentBack.length} sent
+            {sendBackFailing.data.capped.length > 0
+              ? ` · ${sendBackFailing.data.capped.length} capped`
+              : ''}
+          </span>
+        )}
+        {failingCount > 0 && (
+          <button
+            type="button"
+            onClick={() => {
+              if (!sendBackFailing.isPending) sendBackFailing.mutate();
+            }}
+            disabled={sendBackFailing.isPending}
+            title={`Send all ${failingCount} failing visual-QA story(ies) back to dev, grouped by story with a combined note. A wave already bounced 3× is refused (raises an attention item).`}
+            style={{
+              fontSize: 10,
+              letterSpacing: '0.14em',
+              textTransform: 'uppercase',
+              padding: '7px 14px',
+              border: '1px solid var(--destructive)',
+              borderRadius: 2,
+              color: 'var(--destructive)',
+              background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+              fontWeight: 500,
+              cursor: sendBackFailing.isPending ? 'not-allowed' : 'pointer',
+              opacity: sendBackFailing.isPending ? 0.6 : 1,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            {sendBackFailing.isPending ? (
+              <Loader2 size={10} className="animate-spin" />
+            ) : (
+              <Send size={10} />
+            )}
+            Send all failing back ({failingCount})
+          </button>
+        )}
         <RunQaButton report={report} runQa={runQa} onClick={onRunQa} />
         <button
           type="button"

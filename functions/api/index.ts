@@ -2943,6 +2943,240 @@ app.post('/api/epic-workflows/:id/stories/:storyId/send-back', async (c) => {
   return c.json({ storyId, status: 'fixing', jobId: result.jobId }, 201);
 });
 
+// ── B#3 (2026-06-03) — batch send-back-failing + fix-cycle cap ──
+//
+// Shared launcher: builds the same per-story rerun the single-story send-back
+// uses (plan opts → worktree targeting, force-truncate at `dev`, drop sessions,
+// remediation-merge marker) WITHOUT writing the epic — the caller assembles
+// + persists the epic stories. Returns the launchStoryRerun result.
+async function launchSendBackRerun(
+  epic: EpicWorkflow,
+  story: EpicStory,
+  plan: import('../shared/types/plan').Plan | undefined,
+  userId: string,
+  now: string,
+) {
+  const sendBackPlanOpts = plan
+    ? {
+        rigor: plan.rigor,
+        testModel: plan.testModel,
+        hasBrowserTests: plan.testingProfile?.hasBrowserTests,
+        planSlug: plan.name,
+        planId: plan.planId,
+      }
+    : undefined;
+  const priorJobState = await buildPriorJobStateFromStory(story, { forceTruncateAtStep: 'dev' });
+  const remediationMerge =
+    sendBackPlanOpts?.planSlug && epic.planId
+      ? {
+          appId: epic.workingDir.replace(/\/+$/, '').split('/').filter(Boolean).pop() || '',
+          planId: epic.planId,
+          planSlug: sendBackPlanOpts.planSlug,
+          epicId: epic.epicId,
+          waveNumber: (story as { wave?: number }).wave ?? 0,
+          storyId: story.storyId,
+        }
+      : undefined;
+  return launchStoryRerun(
+    epic,
+    story.storyId,
+    userId,
+    now,
+    {
+      generatePipeline: generateStoryPipeline,
+      createJob: agentJobsRepo.createJob,
+      uuid: () => crypto.randomUUID(),
+    },
+    sendBackPlanOpts,
+    priorJobState,
+    remediationMerge ? { remediationMerge } : undefined,
+  );
+}
+
+// Combined remediation note for one story, listing all its failing VQA checks
+// with the judge's expected/rationale + an interaction-gated hint.
+function buildBatchSendBackNote(
+  tests: Array<{
+    testId: string;
+    expected?: string;
+    rationale?: string;
+    screenshotUrl?: string;
+    failureClass?: 'render' | 'interaction-gated';
+  }>,
+  now: string,
+): string {
+  const lines = tests
+    .map((t) => {
+      const cls = t.failureClass === 'interaction-gated' ? ' [interaction-gated]' : '';
+      const shot = t.screenshotUrl ? ` (screenshot: ${t.screenshotUrl})` : '';
+      return `- ${t.testId}${cls}: expected "${t.expected ?? '—'}" — judge saw: ${
+        t.rationale ?? 'see screenshot'
+      }${shot}`;
+    })
+    .join('\n');
+  return (
+    `\n\n---\n**QA Review · batch send-back · ${now}**\n` +
+    `This story has ${tests.length} failing visual-QA check(s):\n${lines}\n\n` +
+    `Fix the code so the rendered output matches each expectation. NOTE: checks marked ` +
+    `[interaction-gated] depend on motion/score/speed/time/input and a static screenshot ` +
+    `cannot show them — if the code is already correct these are a screenshot limitation ` +
+    `to Accept, not a code bug.\n`
+  );
+}
+
+// POST /api/plans/:id/qa/send-back-failing
+//   Sends EVERY non-accepted failing VQA story back to dev in one action,
+//   grouped by owning story (one combined note each). A per-(plan, wave)
+//   fix-cycle hard cap (FIX_CYCLE_HARD_CAP) refuses waves already bounced N×,
+//   raising an attention item instead of looping forever.
+app.post('/api/plans/:id/qa/send-back-failing', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  const now = new Date().toISOString();
+
+  // Hydrate epics + jobs exactly like GET /qa-report, then build the report so
+  // we operate on the SAME failing set the operator sees. report.vqa.failures
+  // already EXCLUDES accepted tests (B#2).
+  const epics: EpicWorkflow[] = [];
+  for (const epicId of plan.epicIds ?? []) {
+    const e = await epicRepo.getEpicById(epicId);
+    if (e) epics.push(e);
+  }
+  const jobIdSet = new Set<string>();
+  if (plan.qaJobId) jobIdSet.add(plan.qaJobId);
+  if (plan.qaAggregateJobId) jobIdSet.add(plan.qaAggregateJobId);
+  for (const epic of epics) {
+    if (epic.qaJobId) jobIdSet.add(epic.qaJobId);
+    if (epic.poJobId) jobIdSet.add(epic.poJobId);
+    if (epic.waveBuildJobs) for (const id of Object.values(epic.waveBuildJobs)) jobIdSet.add(id);
+  }
+  const jobsById: Record<string, import('../shared/types/agent-orchestrator').AgentJob> = {};
+  for (const jobId of jobIdSet) {
+    const job = await agentJobsRepo.getJobById(jobId);
+    if (job) jobsById[jobId] = job;
+  }
+  const attentionItems = await attentionRepo.listAttentionItems(planId);
+  const report = buildQaReport({ plan, epics, jobsById, attentionItems });
+  const failures = report.vqa.failures ?? [];
+  if (failures.length === 0) {
+    return c.json(
+      {
+        planId,
+        sentBack: [],
+        capped: [],
+        failed: [],
+        message: 'No non-accepted failing VQA tests.',
+      },
+      200,
+    );
+  }
+
+  // Index stories + group failing tests by owning story.
+  const epicByStoryId = new Map<string, EpicWorkflow>();
+  const storyById = new Map<string, EpicStory>();
+  for (const epic of epics)
+    for (const s of epic.stories) {
+      epicByStoryId.set(s.storyId, epic);
+      storyById.set(s.storyId, s);
+    }
+  const failsByStory = new Map<string, typeof failures>();
+  for (const f of failures) {
+    if (!f.storyId || !storyById.has(f.storyId)) continue;
+    const arr = failsByStory.get(f.storyId) ?? [];
+    arr.push(f);
+    failsByStory.set(f.storyId, arr);
+  }
+
+  // Group stories by wave so the fix-cycle cap is checked ONCE per wave.
+  const waveOf = (s: EpicStory) => (s as { wave?: number }).wave ?? 0;
+  const storiesByWave = new Map<number, string[]>();
+  for (const storyId of failsByStory.keys()) {
+    const w = waveOf(storyById.get(storyId)!);
+    const arr = storiesByWave.get(w) ?? [];
+    arr.push(storyId);
+    storiesByWave.set(w, arr);
+  }
+
+  const sentBack: Array<{ storyId: string; jobId: string; failingTests: number }> = [];
+  const capped: Array<{ waveNumber: number; storyIds: string[]; attempts: number }> = [];
+  const failed: Array<{ storyId: string; reason: string }> = [];
+  // Per-epic working story arrays — each touched epic is written exactly once.
+  const epicPatches = new Map<string, EpicStory[]>();
+  const ensureWorking = (epic: EpicWorkflow) => {
+    if (!epicPatches.has(epic.epicId))
+      epicPatches.set(
+        epic.epicId,
+        epic.stories.map((s) => ({ ...s })),
+      );
+    return epicPatches.get(epic.epicId)!;
+  };
+
+  for (const [waveNumber, storyIds] of storiesByWave) {
+    const cycle = await fixCyclesRepo.getCycle(planId, waveNumber);
+    const attempts = cycle?.attempts ?? 0;
+    if (attempts >= FIX_CYCLE_HARD_CAP) {
+      capped.push({ waveNumber, storyIds, attempts });
+      await fixCyclesRepo.markExhausted(planId, waveNumber).catch(() => {});
+      await attentionRepo
+        .upsertOpenAttentionItem({
+          planId,
+          dedupKey: `qa-fix-cap:${planId}:${waveNumber}`,
+          severity: 'high',
+          category: 'retry-exhausted',
+          title: `QA fix-cycle cap reached on wave ${waveNumber}`,
+          body:
+            `Wave ${waveNumber} has been sent back to dev ${attempts} time(s) ` +
+            `(cap ${FIX_CYCLE_HARD_CAP}). ${storyIds.length} story(ies) still have failing ` +
+            `visual-QA checks. Review manually — Accept genuine static-screenshot limitations, ` +
+            `or investigate why the fix isn't landing.`,
+          context: { storyId: storyIds[0] },
+          suggestedActions: [{ label: 'Review in QA', kind: 'open-story' }],
+        })
+        .catch(() => {});
+      continue;
+    }
+    // One fix-cycle attempt per wave per batch.
+    await fixCyclesRepo.recordAttempt(planId, waveNumber, `batch-${now}`).catch(() => {});
+    for (const storyId of storyIds) {
+      const epic = epicByStoryId.get(storyId)!;
+      const working = ensureWorking(epic);
+      const idx = working.findIndex((s) => s.storyId === storyId);
+      if (idx < 0) {
+        failed.push({ storyId, reason: 'story-not-found' });
+        continue;
+      }
+      const tests = failsByStory.get(storyId)!;
+      const note = buildBatchSendBackNote(tests, now);
+      // Append the note + flip to fixing on the working copy BEFORE launching, so
+      // the dev prompt (read from epic.stories by launchStoryRerun) includes it.
+      working[idx] = {
+        ...working[idx],
+        description: working[idx].description.replace(/\s+$/, '') + note,
+        status: 'fixing',
+      };
+      const epicView = { ...epic, stories: working };
+      const result = await launchSendBackRerun(epicView, working[idx], plan, user.userId, now);
+      if (!result.ok) {
+        failed.push({ storyId, reason: 'rerun-failed' });
+        continue;
+      }
+      working[idx] = { ...working[idx], status: 'fixing' as const, jobId: result.jobId };
+      sentBack.push({ storyId, jobId: result.jobId, failingTests: tests.length });
+    }
+  }
+
+  for (const [epicId, stories] of epicPatches) {
+    await epicRepo.updateEpicFields(epicId, { stories, status: 'fixing' });
+  }
+
+  return c.json(
+    { planId, sentBack, capped, failed, cap: FIX_CYCLE_HARD_CAP },
+    sentBack.length > 0 ? 201 : 200,
+  );
+});
+
 // ── Attention Inbox (Pipeline Enhancement Plan v2 — Phase A) ──
 //
 // GET /api/plans/:id/attention-items?status=open|resolving|resolved

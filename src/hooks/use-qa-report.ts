@@ -95,6 +95,31 @@ export function useAcceptQaTest(planId: string | null) {
   });
 }
 
+/**
+ * B#3 — batch "Send all failing back to dev". Sends every non-accepted failing
+ * VQA story back at once (grouped by owning story). Enforces a per-(plan, wave)
+ * fix-cycle hard cap server-side; capped waves come back in `capped[]` instead
+ * of being re-sent.
+ */
+export function useSendBackFailing(planId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api.post<{
+        planId: string;
+        sentBack: Array<{ storyId: string; jobId: string; failingTests: number }>;
+        capped: Array<{ waveNumber: number; storyIds: string[]; attempts: number }>;
+        failed: Array<{ storyId: string; reason: string }>;
+        cap: number;
+      }>(`/plans/${planId}/qa/send-back-failing`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['qa-report', planId] });
+      qc.invalidateQueries({ queryKey: ['plans', planId] });
+      qc.invalidateQueries({ queryKey: ['epic-workflow'] });
+    },
+  });
+}
+
 /** Revoke an earlier AC sign-off (e.g., after sending a story back). */
 export function useRevokeAcApproval(planId: string | null) {
   const qc = useQueryClient();
