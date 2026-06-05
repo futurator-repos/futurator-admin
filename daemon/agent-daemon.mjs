@@ -2469,6 +2469,31 @@ async function runPreworkGateForJob(job, variables, workingDir) {
   };
 }
 
+// 2026-06-05 — false-DONE guard. A story-pipeline job must not reach COMPLETED
+// unless a real commit for this story landed on the worktree's HEAD. The
+// compile-commit-on-pass step already exits 1 + the daemon fails the job on a
+// FRESH run (STORY_COMMIT_EMPTY, ~L2929). But a RESUME could re-enter the
+// compile phase PAST the errored commit step and run compile-sync/compile-push
+// to COMPLETED with no commit (observed: a story flipped DONE with an empty
+// commit, then deployed without the code). This is a resume-proof backstop that
+// checks git ground truth instead of trusting step bookkeeping. Every story
+// commit — real or verification-only (--allow-empty) — has subject
+// `story: <storyId> — …` and a `Story: <storyId>` trailer, so a grep finds it.
+// Fail-OPEN on any git/infra error so a healthy pipeline is never broken by the
+// guard itself.
+function storyCommitExistsSync(workingDir, storyId) {
+  if (!workingDir || !storyId) return true; // not enough info → don't block
+  try {
+    const out = execSync(
+      `git -C ${JSON.stringify(workingDir)} log --grep ${JSON.stringify(storyId)} --format=%H -1`,
+      { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+    return out.length > 0;
+  } catch {
+    return true; // git unavailable / not a repo / transient → fail-open
+  }
+}
+
 async function executePipeline(job) {
   const { jobId, pipeline } = job;
 
@@ -3115,6 +3140,59 @@ async function executePipeline(job) {
 
   // All steps complete
   const totalCost = stepResults.reduce((sum, sr) => sum + (sr.cost || 0), 0);
+
+  // 2026-06-05 — false-DONE guard (resume-proof). Before declaring a story
+  // job COMPLETED, verify a real commit for this story exists on the worktree.
+  // Catches the resume-past-empty-commit path where compile-sync/compile-push
+  // ran to green with no source committed → story falsely DONE → deployed
+  // without the code. Only applies to story pipelines that had a dev step.
+  if (isStoryPipeline && hasDevStep && !storyCommitExistsSync(workingDir, variables.STORY_ID)) {
+    log(
+      'error',
+      `[${jobId.slice(0, 8)}] false-DONE guard TRIPPED — no commit for story ${variables.STORY_ID} on ${workingDir}; marking FAILED instead of COMPLETED`,
+    );
+    await pushEvent(jobId, '__commit_guard__', 'orchestrator', 'status', {
+      text: `[SYSTEM] false-DONE guard: no story commit found on HEAD — job FAILED (story not delivered).`,
+    });
+    try {
+      const planId = await resolvePlanIdFromEpicId(ddb, variables.EPIC_ID);
+      if (planId) {
+        await writeAttentionItem(
+          ddb,
+          {
+            planId,
+            severity: 'high',
+            category: 'story-commit-empty',
+            title: `Story ${variables.STORY_ID || 'unknown'} reached end with no commit`,
+            body:
+              `The pipeline ran to the end but no commit for this story exists on ` +
+              `the worktree HEAD. Most likely a resume re-entered the compile phase ` +
+              `past a failed compile-commit-on-pass (STORY_COMMIT_EMPTY). The story ` +
+              `was NOT delivered; the job is marked FAILED. Re-run from QA "Send back ` +
+              `to dev" (fresh DEV) rather than resuming this job.`,
+            context: { jobId, epicId: variables.EPIC_ID, storyId: variables.STORY_ID },
+            suggestedActions: [
+              { label: 'Open logs', kind: 'open-logs' },
+              { label: 'Open story', kind: 'open-story' },
+            ],
+            dedupKey: `story-commit-empty:${planId}:${variables.STORY_ID || 'unknown'}`,
+          },
+          log,
+        );
+      }
+    } catch (attnErr) {
+      log('warn', `[${jobId.slice(0, 8)}] false-DONE guard attention write failed: ${attnErr.message}`);
+    }
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      failedStepId: 'compile-commit-on-pass',
+      failureReason: `false-DONE guard: no commit for story ${variables.STORY_ID} on worktree HEAD`,
+      stepResults,
+      variables,
+      sessions,
+    });
+    return;
+  }
 
   // Parse article counts if compilation succeeded
   const compilationArticleCounts =
