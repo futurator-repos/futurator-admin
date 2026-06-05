@@ -26,6 +26,11 @@ export type AttentionCategory =
   // failed, S3 mirror was empty after sync, or Memgraph upsert reported zero
   // nodes. Operator gets to decide whether to retrigger the story or move on.
   | 'compile-sync-failed'
+  // compile-commit-on-pass refused an empty commit (STORY_COMMIT_EMPTY), OR
+  // the 2026-06-05 false-DONE guard found a story-pipeline job reaching the
+  // end with no commit on the worktree HEAD (resume-past-empty-commit). The
+  // story was NOT delivered; the job is FAILED. High severity.
+  | 'story-commit-empty'
   // Pipeline v1 — Story 1.2 (universal escalation extractors).
   // 'agent-escalated' = agent emitted ---ESCALATE--- with structured payload.
   // 'agent-needs-human' = agent emitted ---NEED-HUMAN--- shortcut with a question.
