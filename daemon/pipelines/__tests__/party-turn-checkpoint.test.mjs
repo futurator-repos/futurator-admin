@@ -360,3 +360,116 @@ describe('Story 21.4 — checkpoint runner integration', () => {
     expect(ctx.spawnSync).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Salvage-on-TIMEOUT (2026-06-05) — when the idle/absolute watchdog fires,
+ * the daemon should still try to commit whatever the agent wrote before
+ * SIGTERM landed, so partial work isn't lost.
+ */
+describe('salvage-on-TIMEOUT', () => {
+  function buildHungChild() {
+    const child = new EventEmitter();
+    child.stdout = new Readable({ read() {} });
+    child.stderr = new Readable({ read() {} });
+    child.stdin = new Writable({
+      write(_chunk, _e, cb) {
+        cb();
+      },
+    });
+    child.kill = vi.fn((signal) => {
+      if (signal === 'SIGTERM') setTimeout(() => child.emit('close', 143), 5);
+    });
+    return child;
+  }
+
+  it('runs party-checkpoint.sh on timeout and emits party.checkpoint.salvaged with the SHA', async () => {
+    const ctx = makeCtx({ idleTimeoutMs: 20, absoluteTimeoutMs: 10_000 });
+    ctx.spawnSync.mockReturnValue({
+      status: 0,
+      stdout: 'PUSH_SKIPPED: project pushEnabled=false\ndeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n',
+      stderr: '',
+    });
+    ctx.spawn.mockReturnValue(buildHungChild());
+
+    await expect(runPartyTurn(turnJob(), ctx)).rejects.toThrow(/timeout/);
+
+    // Salvage ran the checkpoint script.
+    expect(ctx.spawnSync).toHaveBeenCalledTimes(1);
+    const args = ctx.spawnSync.mock.calls[0][1];
+    expect(args[1]).toBe(PARTY_BRANCH);
+    expect(args[2]).toBe(worktreePath);
+    expect(args).not.toContain('--push'); // pushEnabled=false by default
+
+    // Emitted the salvage event with the commit SHA.
+    const salvaged = ctx.pushEvent.mock.calls.find((c) => c[3] === 'party.checkpoint.salvaged');
+    expect(salvaged).toBeTruthy();
+    expect(salvaged[4].commitSha).toBe('deadbeefdeadbeefdeadbeefdeadbeefdeadbeef');
+    expect(salvaged[4].pushed).toBe(false);
+    expect(salvaged[4].branch).toBe(PARTY_BRANCH);
+    expect(salvaged[4].timeoutReason).toBe('IDLE');
+
+    // Error event carries the salvage SHA alongside the timeout details.
+    const errEvt = ctx.pushEvent.mock.calls.find((c) => c[3] === 'party.turn.error');
+    expect(errEvt[4].reason).toBe('TIMEOUT');
+    expect(errEvt[4].salvageSha).toBe('deadbeefdeadbeefdeadbeefdeadbeefdeadbeef');
+  });
+
+  it('honors pushEnabled — passes --push to checkpoint script during salvage', async () => {
+    const ctx = makeCtx({
+      idleTimeoutMs: 20,
+      absoluteTimeoutMs: 10_000,
+      getProject: vi.fn(async () => ({ projectId: 'applicator', pushEnabled: true })),
+    });
+    ctx.spawnSync.mockReturnValue({
+      status: 0,
+      stdout: `PUSHED: origin ${PARTY_BRANCH} @ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n`,
+      stderr: '',
+    });
+    ctx.spawn.mockReturnValue(buildHungChild());
+
+    await expect(runPartyTurn(turnJob(), ctx)).rejects.toThrow(/timeout/);
+    const args = ctx.spawnSync.mock.calls[0][1];
+    expect(args).toContain('--push');
+
+    const salvaged = ctx.pushEvent.mock.calls.find((c) => c[3] === 'party.checkpoint.salvaged');
+    expect(salvaged[4].pushed).toBe(true);
+  });
+
+  it('does NOT auto-open a PR on salvage (timed-out turn is not a deliverable)', async () => {
+    const openPr = vi.fn();
+    const ctx = makeCtx({
+      idleTimeoutMs: 20,
+      absoluteTimeoutMs: 10_000,
+      getProject: vi.fn(async () => ({
+        projectId: 'applicator',
+        pushEnabled: true,
+        autoOpenPr: true,
+        gitRepoUrl: 'https://github.com/o/r',
+        gitBranch: 'main',
+        patSecretName: 'futurator/brownfield-pat/applicator',
+      })),
+      openPr,
+      loadPat: vi.fn(async () => 'github_pat_test'),
+    });
+    ctx.spawnSync.mockReturnValue({
+      status: 0,
+      stdout: `PUSHED: origin ${PARTY_BRANCH} @ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n`,
+      stderr: '',
+    });
+    ctx.spawn.mockReturnValue(buildHungChild());
+
+    await expect(runPartyTurn(turnJob(), ctx)).rejects.toThrow(/timeout/);
+    expect(openPr).not.toHaveBeenCalled();
+  });
+
+  it('does NOT call salvage when V1 is disabled', async () => {
+    delete process.env.PARTY_PUSH_V1_ENABLED;
+    const ctx = makeCtx({ idleTimeoutMs: 20, absoluteTimeoutMs: 10_000 });
+    ctx.spawn.mockReturnValue(buildHungChild());
+
+    await expect(runPartyTurn(turnJob(), ctx)).rejects.toThrow(/timeout/);
+    expect(ctx.spawnSync).not.toHaveBeenCalled();
+    const salvaged = ctx.pushEvent.mock.calls.find((c) => c[3] === 'party.checkpoint.salvaged');
+    expect(salvaged).toBeUndefined();
+  });
+});

@@ -244,28 +244,32 @@ describe('runPartyTurn — non-zero exit', () => {
 });
 
 describe('runPartyTurn — timeout', () => {
-  it('SIGTERMs the child, releases lock ERROR, and throws', async () => {
-    const ctx = makeCtx({ timeoutMs: 20 });
-    // Build a child that never emits 'close' on its own — the watchdog must fire.
+  // Helper: a child that never emits 'close' on its own so the watchdog has
+  // to fire. SIGTERM triggers a delayed close so the post-kill code path
+  // still resolves cleanly.
+  function buildHungChild() {
     const child = new EventEmitter();
     child.stdout = new Readable({ read() {} });
     child.stderr = new Readable({ read() {} });
-    const stdinWrites = [];
     child.stdin = new Writable({
-      write(chunk, _e, cb) {
-        stdinWrites.push(chunk.toString('utf8'));
+      write(_chunk, _e, cb) {
         cb();
       },
     });
     child.kill = vi.fn((signal) => {
-      // Simulate the child eventually exiting after SIGTERM.
       if (signal === 'SIGTERM') {
         setTimeout(() => child.emit('close', 143), 5);
       }
     });
+    return child;
+  }
+
+  it('fires the IDLE watchdog when the child emits no stream activity', async () => {
+    const ctx = makeCtx({ idleTimeoutMs: 20, absoluteTimeoutMs: 10_000 });
+    const child = buildHungChild();
     ctx.spawn.mockReturnValue(child);
 
-    await expect(runPartyTurn(turnJob(), { ...ctx, timeoutMs: 20 })).rejects.toThrow(/timeout/);
+    await expect(runPartyTurn(turnJob(), ctx)).rejects.toThrow(/timeout \(IDLE\)/);
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(ctx.releaseSessionLock).toHaveBeenCalledWith(
       '123e4567-e89b-12d3-a456-426614174000',
@@ -273,6 +277,36 @@ describe('runPartyTurn — timeout', () => {
     );
     const errorEvents = ctx.pushEvent.mock.calls.filter((c) => c[3] === 'party.turn.error');
     expect(errorEvents[0][4].reason).toBe('TIMEOUT');
+    expect(errorEvents[0][4].timeoutReason).toBe('IDLE');
+  });
+
+  it('rearms the idle timer on stdout activity, then fires the ABSOLUTE ceiling', async () => {
+    // idle=50ms keeps resetting because we drip a line every 15ms; absolute=80ms wins.
+    const ctx = makeCtx({ idleTimeoutMs: 50, absoluteTimeoutMs: 80 });
+    const child = buildHungChild();
+    ctx.spawn.mockReturnValue(child);
+
+    // Drip "activity" so the idle watchdog never wins.
+    const drip = setInterval(() => {
+      child.stdout.push('keep-alive\n');
+    }, 15);
+
+    await expect(runPartyTurn(turnJob(), ctx)).rejects.toThrow(/timeout \(ABSOLUTE\)/);
+    clearInterval(drip);
+    const errorEvents = ctx.pushEvent.mock.calls.filter((c) => c[3] === 'party.turn.error');
+    expect(errorEvents[0][4].timeoutReason).toBe('ABSOLUTE');
+    expect(errorEvents[0][4].absoluteTimeoutMs).toBe(80);
+  });
+
+  it('honors the legacy timeoutMs alias as idleTimeoutMs', async () => {
+    const ctx = makeCtx({ timeoutMs: 20 });
+    const child = buildHungChild();
+    ctx.spawn.mockReturnValue(child);
+
+    await expect(runPartyTurn(turnJob(), ctx)).rejects.toThrow(/timeout/);
+    const errorEvents = ctx.pushEvent.mock.calls.filter((c) => c[3] === 'party.turn.error');
+    expect(errorEvents[0][4].timeoutReason).toBe('IDLE');
+    expect(errorEvents[0][4].idleTimeoutMs).toBe(20);
   });
 });
 

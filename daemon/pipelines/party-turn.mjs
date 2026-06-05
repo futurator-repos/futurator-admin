@@ -11,7 +11,9 @@
  *   - Turn N (N≥2): prompt is just <user content>, and we pass
  *     `--resume <claudeSessionId>` so Claude restores prior context.
  *   - On normal exit: release lock to ACTIVE, increment turnCount.
- *   - On timeout (180s): SIGTERM then SIGKILL, release lock to ERROR.
+ *   - On idle-watchdog fire (10 min of stream silence) OR absolute ceiling
+ *     (40 min total): SIGTERM then SIGKILL, attempt salvage commit of any
+ *     work the agent landed in the worktree, then release lock to ERROR.
  *   - On non-zero exit: release lock to ERROR.
  *   - All events are keyed by sessionId (not the turn job's jobId) so the UI
  *     gets one continuous event stream per session across N turns.
@@ -20,14 +22,28 @@
 import { spawn as realSpawn, spawnSync as realSpawnSync } from 'node:child_process';
 import { registerChild, unregisterChild } from './lib/child-tracker.mjs';
 
-// 10 min. The party-mode skill spawns BMad Master who explores the project
-// (Glob/Read/Bash) before any agent speaks. On large codebases (e.g. BMAD
-// itself, our admin app), the exploration alone can run 60-90s before a
-// single token of agent text is emitted. 180s was killing turns mid-flight,
-// leaving sessions in ERROR with only the orchestrator preamble visible.
-// 600s is generous but still bounded — Claude will rarely use the full
-// budget; if it does, the request was always going to fail.
-const DEFAULT_TIMEOUT_MS = 600_000;
+// Idle-watchdog timeout — how long the daemon will tolerate ZERO stream
+// activity from the Claude CLI before declaring the child hung. Reset on
+// every stdout chunk. 10 min of silence is generous; in practice a healthy
+// turn emits a stream-json line every few seconds (assistant tokens, tool
+// invocations, even the orchestrator's `system.init`).
+//
+// Why activity-based: 2026-06-05 — a PRD-writing turn was actively writing
+// 11 markdown files in parallel Write batches when a fixed total-elapsed
+// 10-min timer killed it at the cap. The work was healthy and progressing;
+// the timer just didn't know. An activity watchdog distinguishes "hung CLI"
+// from "task is genuinely big" — exactly what we want.
+const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
+// Absolute ceiling — last-resort safety net. Even with the activity
+// watchdog, a pathological loop (agent stuck in a tight tool-call cycle
+// emitting tokens forever) needs a hard wall. 40 min is well past any
+// legitimate single-turn budget; if a turn is still running at 40 min, the
+// task should be decomposed across turns rather than waited out further.
+const DEFAULT_ABSOLUTE_TIMEOUT_MS = 2_400_000;
+// Kept as a back-compat alias for callers / tests that still pass
+// `timeoutMs`. New code should use `idleTimeoutMs` / `absoluteTimeoutMs`
+// explicitly.
+const DEFAULT_TIMEOUT_MS = DEFAULT_IDLE_TIMEOUT_MS;
 const KILL_GRACE_MS = 5_000;
 // Mirrors functions/shared/types/party.ts DEFAULT_ALLOWED_TOOLS. Kept inline
 // because the daemon is a separate node module with its own deps and can't
@@ -424,7 +440,9 @@ const PARTY_FORMAT_CONTRACT = [
  * @param {Function} ctx.releaseSessionLock — async (sessionId, finalStatus)
  * @param {string} ctx.claudeBin          — path to the `claude` binary
  * @param {typeof realSpawn} [ctx.spawn]  — injected for tests
- * @param {number} [ctx.timeoutMs]        — override default 180s
+ * @param {number} [ctx.timeoutMs]        — legacy alias for idleTimeoutMs (back-compat)
+ * @param {number} [ctx.idleTimeoutMs]    — stream-silence budget (default 10 min)
+ * @param {number} [ctx.absoluteTimeoutMs] — hard ceiling regardless of activity (default 40 min)
  * @param {() => number} [ctx.now]        — time source for tests
  */
 export async function runPartyTurn(job, ctx) {
@@ -444,6 +462,12 @@ export async function runPartyTurn(job, ctx) {
     claudeBin = 'claude',
     spawn = realSpawn,
     timeoutMs = DEFAULT_TIMEOUT_MS,
+    // Activity-based watchdog (2026-06-05): idle = stream silence; absolute
+    // = total elapsed. Both default to constants above; `timeoutMs` is
+    // accepted as a back-compat alias for `idleTimeoutMs` so existing tests
+    // / callers keep working without changes.
+    idleTimeoutMs = timeoutMs,
+    absoluteTimeoutMs = DEFAULT_ABSOLUTE_TIMEOUT_MS,
     env = {},
     logger = console,
     // Injectable for tests — defaults to the real S3→worktree mirror, which
@@ -747,14 +771,23 @@ export async function runPartyTurn(job, ctx) {
   let stderrBuf = '';
   let capturedClaudeSessionId = null;
   let timedOut = false;
+  // Which watchdog fired — 'IDLE' (stream silence) or 'ABSOLUTE' (hard cap).
+  // First-fire wins so the other can't overwrite once we're in shutdown.
+  let timeoutReason = null;
+  let idleTimer = null;
+  let absoluteTimer = null;
   let killTimer = null;
   // Story 20.7 — accumulate assistant text across the turn so we can run
   // extractMarkers() once at close. Markers are emitted at the end of the
   // orchestrator's final round; mid-turn fragments don't matter.
   let assistantTextAccum = '';
 
-  const watchdog = setTimeout(() => {
+  const fireTimeout = (reason) => {
+    if (timedOut) return; // first watchdog wins
     timedOut = true;
+    timeoutReason = reason;
+    if (idleTimer) clearTimeout(idleTimer);
+    if (absoluteTimer) clearTimeout(absoluteTimer);
     try {
       child.kill('SIGTERM');
       killTimer = setTimeout(() => {
@@ -767,9 +800,25 @@ export async function runPartyTurn(job, ctx) {
     } catch {
       // best effort
     }
-  }, timeoutMs);
+  };
+
+  const resetIdle = () => {
+    if (timedOut) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => fireTimeout('IDLE'), idleTimeoutMs);
+  };
+
+  // Arm both timers immediately. The idle timer is rearmed on every stdout
+  // chunk (see below); the absolute timer is set once and never reset, so
+  // it acts as a true hard ceiling.
+  resetIdle();
+  absoluteTimer = setTimeout(() => fireTimeout('ABSOLUTE'), absoluteTimeoutMs);
 
   child.stdout?.on('data', (chunk) => {
+    // Any byte from the CLI counts as activity — keep the idle watchdog
+    // alive. Doing this on the chunk boundary (not per parsed JSON line)
+    // means even a partial line keeps the turn breathing.
+    resetIdle();
     stdoutBuf += chunk.toString('utf8');
     let idx;
     while ((idx = stdoutBuf.indexOf('\n')) !== -1) {
@@ -881,7 +930,8 @@ export async function runPartyTurn(job, ctx) {
     });
   });
 
-  clearTimeout(watchdog);
+  if (idleTimer) clearTimeout(idleTimer);
+  if (absoluteTimer) clearTimeout(absoluteTimer);
   if (killTimer) clearTimeout(killTimer);
 
   // Story 20.7 — stop the cancel-poller. `stop()` is async and always
@@ -910,14 +960,89 @@ export async function runPartyTurn(job, ctx) {
   }
 
   if (timedOut) {
+    // Salvage-on-TIMEOUT (2026-06-05) — run party-checkpoint.sh over the
+    // worktree to commit anything the agent wrote before SIGTERM landed.
+    // Without this, partial PRD-style work sits as untracked files until an
+    // operator manually rescues them (which is exactly what happened with
+    // session 7e524eea's round 10 — the bug that motivated this fix).
+    //
+    // Push opt-in is preserved: salvage commits respect project.pushEnabled
+    // exactly like a normal round-end checkpoint. Auto-PR is NOT triggered
+    // for salvage commits — a timed-out turn is by definition incomplete
+    // and shouldn't trip the "ready for review" workflow.
+    //
+    // Non-fatal: if salvage fails, log + continue to the throw. Better to
+    // surface the original TIMEOUT than mask it with a salvage error.
+    let salvageSha = null;
+    let salvagePushed = false;
+    let salvageReason = null;
+    if (
+      partyPushV1 &&
+      session.partyBranch &&
+      (session.worktreePath || session.projectPath)
+    ) {
+      try {
+        let resolvedProject = null;
+        if (typeof getProject === 'function' && session.projectId) {
+          try {
+            resolvedProject = await getProject(session.projectId);
+          } catch (err) {
+            logger.warn?.(`[party-turn] getProject for salvage failed: ${err.message}`);
+          }
+        }
+        const pushOptIn = resolvedProject?.pushEnabled === true;
+        const salvageResult = await runCheckpointScript({
+          sessionId,
+          projectId: session.projectId,
+          branch: session.partyBranch,
+          worktreePath: session.worktreePath || session.projectPath,
+          turnCount: session.turnCount,
+          title: `salvage: round ${session.turnCount + 1} timed out (${timeoutReason})`,
+          summary:
+            `Watchdog fired (${timeoutReason}). Committing whatever the agent ` +
+            `wrote before SIGTERM so the partial work is preserved on this branch.`,
+          push: pushOptIn,
+          spawnSync: ctx.spawnSync || realSpawnSync,
+          logger,
+        });
+        salvageSha = salvageResult.sha || null;
+        salvagePushed = salvageResult.pushed === true;
+        salvageReason = salvageResult.reason;
+        if (salvageSha) {
+          logger.info?.(
+            `[party-turn] salvage committed ${salvageSha.slice(0, 8)} ` +
+              `(reason=${salvageReason}, pushed=${salvagePushed})`,
+          );
+          await pushEvent(sessionId, 'turn', '__party__', 'party.checkpoint.salvaged', {
+            sessionId,
+            projectId: session.projectId,
+            branch: session.partyBranch,
+            round: session.turnCount,
+            commitSha: salvageSha,
+            pushed: salvagePushed,
+            reason: salvageReason,
+            timeoutReason,
+          });
+        } else if (salvageReason === 'EMPTY') {
+          logger.info?.(`[party-turn] salvage no-op (worktree porcelain empty)`);
+        }
+      } catch (err) {
+        logger.warn?.(`[party-turn] salvage failed (non-fatal): ${err.message}`);
+      }
+    }
     await pushEvent(sessionId, 'turn', '__party__', 'party.turn.error', {
       sessionId,
       reason: 'TIMEOUT',
-      timeoutMs,
+      timeoutReason,
+      idleTimeoutMs,
+      absoluteTimeoutMs,
       stderr: stderrBuf.slice(0, 4000),
+      ...(salvageSha ? { salvageSha, salvagePushed, salvageReason } : {}),
     });
     await releaseSessionLock(sessionId, 'ERROR');
-    throw new Error(`party-turn timeout after ${timeoutMs}ms`);
+    throw new Error(
+      `party-turn timeout (${timeoutReason}) — idle=${idleTimeoutMs}ms abs=${absoluteTimeoutMs}ms`,
+    );
   }
 
   if (exitCode !== 0) {
@@ -1187,6 +1312,8 @@ function truncateToolInput(input) {
 
 export const PARTY_TURN_CONSTANTS = {
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_IDLE_TIMEOUT_MS,
+  DEFAULT_ABSOLUTE_TIMEOUT_MS,
   KILL_GRACE_MS,
   PARTY_MODE_PREFIX,
   PARTY_FORMAT_CONTRACT,
