@@ -169,6 +169,31 @@ export interface AgentJob {
   retryOf?: string;
   epicId?: string;
   projectId?: string;
+
+  /**
+   * v2.6 M5 — wave-merge gate job summary (jobType 'wave-merge'), written by
+   * the daemon on terminal status. `vqa` is the wave-gate visual-QA summary
+   * (null when the VQA hook wasn't armed for this wave).
+   */
+  waveMergeResult?: {
+    outcome?: string;
+    mergedStoryIds?: string[];
+    pushSha?: string;
+    vqa?: {
+      outcome: 'pass' | 'fixed' | 'fix-forward' | 'skipped' | 'env-blocked';
+      reason?: string;
+      pass?: number;
+      fixed?: number;
+      fixForward?: Array<{
+        storyId: string;
+        acId: string;
+        observed?: string;
+        screenshotUrl?: string | null;
+      }>;
+      unverifiable?: number;
+      reportPath?: string | null;
+    } | null;
+  };
 }
 
 // ── Events ──

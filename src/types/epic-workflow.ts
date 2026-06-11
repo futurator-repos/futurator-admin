@@ -174,6 +174,10 @@ export interface EpicStory {
   workSummary?: string;
   workSummaryAt?: string;
 
+  /** v2.6 M5 — 'wave-vqa-fix' for stories auto-minted by the wave gate's
+   *  fix-forward path; absent for PM-authored stories. */
+  origin?: 'wave-vqa-fix';
+
   // ── Touch-point inference (Epic 3) ──
   touchPoints?: string[];
   /** Story D.1 — file paths / globs the story MUST NOT modify. */

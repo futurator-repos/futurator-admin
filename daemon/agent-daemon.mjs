@@ -5493,6 +5493,78 @@ async function executeWaveMergeJob(job) {
             reportPath: result.vqa.reportPath || null,
           }
         : null;
+      // ORDERING MATTERS: mint BEFORE flipping the job COMPLETED — the
+      // wave-reducer advances (or completes) the epic on the first tick that
+      // sees a terminal gate; stories appended after that tick's read would
+      // never launch.
+      // ── v2.6 M5 — auto-mint fix stories from fix-forward handoffs ───────
+      // Each surviving judged failure becomes a NORMAL story in the epic's
+      // next wave, dependsOn the owning story, description = the handoff
+      // packet — so self-correction flows through the standard story
+      // pipeline (test-author → dev → gate → wave VQA re-verifies) with
+      // zero new launch machinery (the wave-reducer launches wave N+1 when
+      // wave N completes). Cap: ONE auto-fix story per owning story per
+      // plan; recurrence escalates to the operator (HIGH card) — the end of
+      // the escalation ladder. Best-effort: a mint failure never un-merges.
+      if ((result.vqa?.fixForward || []).length > 0) {
+        try {
+          const epicRes = await ddb.send(
+            new GetCommand({ TableName: EPICS_TABLE, Key: { epicId: p.epicId } }),
+          );
+          const epic = epicRes.Item;
+          if (epic && Array.isArray(epic.stories)) {
+            const { buildVqaFixStories } = await import('./lib/wave-vqa-fix-story.mjs');
+            const { minted, escalations } = buildVqaFixStories({
+              existingStories: epic.stories,
+              fixForward: result.vqa.fixForward,
+              waveNumber: p.waveNumber,
+              uuid: randomUUID,
+            });
+            for (const esc of escalations) {
+              await writeAttentionItem(
+                ddb,
+                {
+                  planId: p.planId,
+                  severity: 'high',
+                  category: 'wave-vqa-failed',
+                  title: `VQA fix story already attempted for ${esc.ownerId.slice(0, 8)} — operator decision needed`,
+                  body:
+                    `Wave ${p.waveNumber} VQA confirmed ${esc.handoffs.map((h) => h.acId).join(', ')} ` +
+                    `failing AGAIN after an auto-minted fix story already ran for this story. ` +
+                    `Not minting another (one per owning story). Decide: reword the AC, fix manually, or accept.`,
+                  context: { epicId: p.epicId, storyId: esc.ownerId, waveNumber: p.waveNumber, handoffs: esc.handoffs },
+                  dedupKey: `wave-vqa-escalated:${p.planId}:${esc.ownerId}`,
+                },
+                log,
+              );
+            }
+            if (minted.length > 0) {
+              // list_append (not full-array write) — the wave-reducer
+              // read-modify-writes epic.stories on its own tick; appending
+              // narrows the lost-update window to reducer-reads in flight.
+              await ddb.send(
+                new UpdateCommand({
+                  TableName: EPICS_TABLE,
+                  Key: { epicId: p.epicId },
+                  UpdateExpression: 'SET stories = list_append(stories, :new)',
+                  ExpressionAttributeValues: { ':new': minted },
+                  ConditionExpression: 'attribute_exists(epicId)',
+                }),
+              );
+              log(
+                'info',
+                `[${short}] minted ${minted.length} wave-vqa-fix stor${minted.length === 1 ? 'y' : 'ies'} at wave ${minted[0].wave}`,
+              );
+              await pushEvent(jobId, 'wave-merge', 'MERGE', 'status', {
+                text: `vqa fix-forward → minted ${minted.length} fix stor${minted.length === 1 ? 'y' : 'ies'} at wave ${minted[0].wave}: ${minted.map((st) => st.title).join(' | ').slice(0, 400)}`,
+              });
+            }
+          }
+        } catch (mintErr) {
+          log('warn', `[${short}] vqa fix-story mint failed (non-blocking): ${mintErr.message}`);
+        }
+      }
+
       await updateJobFields(jobId, {
         status: 'COMPLETED',
         waveMergeResult: {

@@ -123,6 +123,19 @@ export type AttentionCategory =
   // Declaring them lets the UI wire category-specific actions (Retry gate).
   | 'wave-build-failed'
   | 'merge-conflict'
+  // ── v2.6 wave-gate VQA (M5, 2026-06-11) ────────────────────────────
+  // 'wave-vqa-failed' — a judge panel confirmed a visual failure on the
+  // MERGED candidate and the capped in-gate fixer couldn't clear it. The
+  // wave advanced anyway (fix-forward: judged failures never block green);
+  // context carries the full handoff packet + screenshot URL, and a fix
+  // story is auto-minted into the epic's next wave (one per owning story —
+  // recurrence escalates HIGH instead). MEDIUM severity.
+  | 'wave-vqa-failed'
+  // 'wave-vqa-unverifiable' — evidence capture concluded none/some of a
+  // story's browser ACs can be shown by an idle frame (or evidence was
+  // unparseable). Non-blocking, LOW severity, deduped per (plan, epic,
+  // wave[, story]).
+  | 'wave-vqa-unverifiable'
   | 'other';
 
 export type AttentionStatus = 'open' | 'resolving' | 'resolved';

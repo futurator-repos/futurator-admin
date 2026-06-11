@@ -359,7 +359,9 @@ function DockEmpty({ chip }: { chip: ChipKey }) {
  * that re-mints the wave-merge job (the `retry-step` suggestedAction the
  * backend always advertised but the dock never rendered).
  */
-const WAVE_GATE_CATEGORIES = new Set(['test-gate-failed', 'wave-build-failed']);
+// v2.6 M5 — wave-vqa-failed carries epicId+waveNumber too; Retry gate re-runs
+// the merge + VQA against a fresh candidate.
+const WAVE_GATE_CATEGORIES = new Set(['test-gate-failed', 'wave-build-failed', 'wave-vqa-failed']);
 
 function AttentionCard({
   item,

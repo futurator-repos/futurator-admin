@@ -356,6 +356,37 @@ describe('reduceEpicWaves — next-wave advancement', () => {
     );
   });
 
+  // v2.6 M5 (2026-06-11) — the wave gate's fix-forward path APPENDS an
+  // auto-minted story at wave max+1 (origin: 'wave-vqa-fix') after the gate
+  // job completes. This pins the zero-new-machinery property the design
+  // relies on: the reducer launches an appended story exactly like any
+  // PM-authored next-wave story.
+  it('launches an auto-minted wave-vqa-fix story appended at wave N+1 (M5)', async () => {
+    const epic = makeEpic(
+      [
+        makeStory('S-1', 0, { jobId: 'j-1', status: 'done' }),
+        makeStory('FIX-1', 1, {
+          origin: 'wave-vqa-fix',
+          dependsOn: ['S-1'],
+          hasBrowserTests: true,
+          criteria: [{ id: 'AC-1', text: 'the surface is visible at load', needsBrowser: true }],
+        }),
+      ],
+      { waveBuildJobs: { '0': 'gate-1' } },
+    );
+    const { deps, createJob, generatePipeline } = makeDeps(
+      { 'j-1': 'COMPLETED', 'gate-1': 'COMPLETED' },
+      { uuidSeed: 'fix' },
+    );
+
+    const result = await reduceEpicWaves(epic, deps);
+
+    expect(result).toMatchObject({ kind: 'next-wave-launched', waveNumber: 1 });
+    expect(createJob).toHaveBeenCalledTimes(1);
+    expect((generatePipeline.mock.calls[0][0] as EpicStory).storyId).toBe('FIX-1');
+    expect((generatePipeline.mock.calls[0][0] as EpicStory).origin).toBe('wave-vqa-fix');
+  });
+
   it('marks epic.status = "completed" when build-check COMPLETED and no next wave exists', async () => {
     const epic = makeEpic(
       [

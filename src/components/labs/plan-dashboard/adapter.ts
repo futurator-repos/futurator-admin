@@ -57,6 +57,9 @@ export interface DashboardStory {
   wave: number; // wave number within the epic
   waveId: string; // synthetic id — `${epicId}-W${wave}`
   waveLabel: string; // "Wave 0" / "Wave 1"
+  /** v2.6 M5 — 'wave-vqa-fix' for stories auto-minted by the wave gate's
+   *  fix-forward path; undefined for PM-authored stories. Renders a chip. */
+  origin?: 'wave-vqa-fix';
 }
 
 export interface DashboardWave {
@@ -228,6 +231,7 @@ export function buildDashboardPlan(
           wave: wn,
           waveId,
           waveLabel,
+          origin: s.origin,
         };
       });
 

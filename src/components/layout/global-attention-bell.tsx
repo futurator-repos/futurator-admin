@@ -261,7 +261,9 @@ function relativeTime(iso: string): string {
  * primary action calls POST /plans/:id/waves/retry-gate — the action the
  * `retry-step` suggestedAction always promised but the UI never rendered.
  */
-const WAVE_GATE_CATEGORIES = new Set(['test-gate-failed', 'wave-build-failed']);
+// v2.6 M5 — wave-vqa-failed carries epicId+waveNumber too; Retry gate re-runs
+// the merge + VQA against a fresh candidate.
+const WAVE_GATE_CATEGORIES = new Set(['test-gate-failed', 'wave-build-failed', 'wave-vqa-failed']);
 
 function AttentionRow({
   item,

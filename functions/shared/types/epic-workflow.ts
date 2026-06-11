@@ -245,6 +245,17 @@ export interface EpicStory {
   /** ISO timestamp of the last `workSummary` write — for debugging only. */
   workSummaryAt?: string;
 
+  /**
+   * v2.6 M5 (2026-06-11) — how this story came to exist. Absent = authored
+   * by the PM plan. 'wave-vqa-fix' = auto-minted by the wave gate's
+   * fix-forward path: a judge panel confirmed a visual failure on the
+   * merged candidate, the capped in-gate fixer couldn't clear it, green
+   * advanced anyway, and this story carries the handoff packet through the
+   * normal story pipeline. Cap: ONE per owning story per plan (recurrence
+   * escalates to the operator instead).
+   */
+  origin?: 'wave-vqa-fix';
+
   // ── Touch-point inference (Epic 3) ──
   touchPoints?: string[];
   /**

@@ -470,7 +470,9 @@ function WaveRow({
               </span>
             )}
           </span>
-          {wave.gateJobId && <WaveGateBadge status={gateJob?.status} />}
+          {wave.gateJobId && (
+            <WaveGateBadge status={gateJob?.status} vqa={gateJob?.waveMergeResult?.vqa} />
+          )}
         </div>
         <div style={{ width: 120, display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{ flex: 1, height: 2, background: 'var(--border)', overflow: 'hidden' }}>
@@ -547,17 +549,29 @@ function WaveRow({
 // table under the gate jobId) and carries the Retry action that re-mints
 // the wave-merge job via POST /plans/:id/waves/retry-gate.
 
-function gateBadgeMeta(status?: AgentJobStatus): { label: string; color: string } | null {
+type GateVqa = NonNullable<import('@/types/agent-orchestrator').AgentJob['waveMergeResult']>['vqa'];
+
+function gateBadgeMeta(
+  status?: AgentJobStatus,
+  vqa?: GateVqa,
+): { label: string; color: string } | null {
   if (!status) return null;
   if (status === 'PENDING') return { label: '⧖ gate queued', color: 'var(--text-mute)' };
   if (status === 'RUNNING') return { label: '⟳ merging…', color: 'var(--accent-purple)' };
   if (status === 'FAILED') return { label: '✕ gate failed', color: 'var(--destructive)' };
-  // COMPLETED and salvage variants — the wave landed.
+  // COMPLETED and salvage variants — the wave landed. v2.6 M5: surface the
+  // wave-gate VQA verdict next to the merge state.
+  if (vqa?.outcome === 'fix-forward') {
+    const n = vqa.fixForward?.length ?? 0;
+    return { label: `✓ merged · vqa →${n} fix-forward`, color: 'var(--warning)' };
+  }
+  if (vqa?.outcome === 'fixed') return { label: '✓ merged · vqa fixed', color: 'var(--success)' };
+  if (vqa?.outcome === 'pass') return { label: '✓ merged · vqa ✓', color: 'var(--success)' };
   return { label: '✓ merged', color: 'var(--success)' };
 }
 
-function WaveGateBadge({ status }: { status?: AgentJobStatus }) {
-  const meta = gateBadgeMeta(status);
+function WaveGateBadge({ status, vqa }: { status?: AgentJobStatus; vqa?: GateVqa }) {
+  const meta = gateBadgeMeta(status, vqa);
   if (!meta) return null;
   return (
     <span
@@ -792,6 +806,27 @@ function StoryRow({
             }}
           >
             {story.label}
+            {story.origin === 'wave-vqa-fix' && (
+              <span
+                title="Auto-minted by the wave gate's VQA fix-forward path"
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 9,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.16em',
+                  color: 'var(--warning)',
+                  border: '1px solid color-mix(in srgb, var(--warning) 45%, transparent)',
+                  background: 'color-mix(in srgb, var(--warning) 7%, transparent)',
+                  borderRadius: 3,
+                  padding: '1px 6px',
+                  marginLeft: 8,
+                  verticalAlign: 'middle',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                vqa fix
+              </span>
+            )}
           </div>
           <div
             style={{
