@@ -392,6 +392,20 @@ describe('validateTouchPointHygiene', () => {
     }
   });
 
+  // v2.6 wave-gate quality — the quality toolchain is template-owned too.
+  it('rejects template-owned quality-infra paths', () => {
+    for (const bad of [
+      '.prettierrc',
+      '.prettierignore',
+      'knip.json',
+      'lint-staged.config.mjs',
+      '.husky/pre-commit',
+    ]) {
+      const errors = validateTouchPointHygiene(planOutputSchema.parse(mk([bad])));
+      expect(errors.length, bad).toBeGreaterThan(0);
+    }
+  });
+
   it('rejects absolute and escaping paths', () => {
     expect(validateTouchPointHygiene(planOutputSchema.parse(mk(['/etc/passwd'])))).not.toHaveLength(
       0,

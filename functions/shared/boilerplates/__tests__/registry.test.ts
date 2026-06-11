@@ -460,3 +460,83 @@ describe('PR-41 — frozen-file pre-commit hook (Story 2-A-5-2)', () => {
     expect(meta.scaffoldContract).toMatch(/NEVER hand-edit|DO NOT edit|never.*edit/i);
   });
 });
+
+// ── v2.6 — wave-gate quality plumbing (2026-06-11) ─────────────────────────
+describe('v2.6 — wave-gate quality plumbing', () => {
+  const base = BOILERPLATE_REGISTRY['nextjs-base'];
+
+  it.each([
+    'nextjs-base',
+    'nextjs-canvas-game',
+    'nextjs-form-app',
+    'nextjs-dashboard',
+  ] as BoilerplateType[])('%s — ships the quality-infra augments', (type) => {
+    const paths = (BOILERPLATE_REGISTRY[type].augmentFiles ?? []).map((f) => f.path);
+    for (const p of [
+      '.prettierrc',
+      '.prettierignore',
+      'knip.json',
+      'lint-staged.config.mjs',
+      '.husky/pre-commit',
+    ]) {
+      expect(paths, p).toContain(p);
+    }
+  });
+
+  it('pins the quality toolchain in template-owned devDependencies', () => {
+    const deps = base.packageJsonDevDependencies ?? {};
+    for (const d of ['prettier', 'knip', 'husky', 'lint-staged']) {
+      expect(deps[d], d).toBeTruthy();
+    }
+  });
+
+  it('ships quality npm scripts including husky prepare', () => {
+    const scripts = base.packageJsonScripts ?? {};
+    expect(scripts.format).toContain('prettier --write');
+    expect(scripts['format:check']).toContain('prettier --check');
+    expect(scripts.knip).toBe('knip');
+    expect(scripts.prepare).toBe('husky');
+  });
+
+  it('pre-commit hook chains the frozen-file guard, then mechanical-only fixes', () => {
+    const hook = base.augmentFiles?.find((f) => f.path === '.husky/pre-commit');
+    expect(hook?.content).toContain('.husky/pre-commit-frozen');
+    // Frozen guard is blocking; mechanical part never fails a commit.
+    expect(hook?.content).toContain('bash .husky/pre-commit-frozen || exit 1');
+    expect(hook?.content).toContain('npx lint-staged --quiet || true');
+    // Fast no-op below production rigor.
+    expect(hook?.content).toMatch(/"\$RIGOR" = "production"/);
+  });
+
+  it('declares rigor-composed qualityGate stages (tiers compose up)', () => {
+    const gate = base.qualityGate;
+    expect(gate).toBeTruthy();
+    // Mechanical stage is self-guarding and includes the wiring generator.
+    expect(gate?.mechanical.join(' ')).toContain('generate-wiring.mjs');
+    expect(gate?.mechanical.join(' ')).toContain('eslint . --fix');
+    // Every blocking tier builds; mvp adds tests + lint budget; production
+    // tightens to zero warnings and adds knip + format:check.
+    for (const tier of ['prototype', 'mvp', 'production'] as const) {
+      expect(gate?.blocking[tier].join(' '), tier).toContain('npm run build');
+    }
+    expect(gate?.blocking.mvp.join(' ')).toContain('--max-warnings 200');
+    expect(gate?.blocking.production.join(' ')).toContain('--max-warnings 0');
+    expect(gate?.blocking.production.join(' ')).toContain('knip');
+    expect(gate?.blocking.production.join(' ')).toContain('format:check');
+  });
+
+  it('keeps the legacy postMergeValidationCmd as the runner fallback', () => {
+    expect(base.postMergeValidationCmd).toContain('npm run build');
+  });
+
+  it('knip.json treats feature-registry modules as entries (never "unused")', () => {
+    const knip = base.augmentFiles?.find((f) => f.path === 'knip.json');
+    expect(knip?.content).toContain('src/features/*.feature.tsx');
+  });
+
+  it('.prettierignore excludes the generated page and pipeline dirs', () => {
+    const ignore = base.augmentFiles?.find((f) => f.path === '.prettierignore');
+    expect(ignore?.content).toContain('src/app/page.tsx');
+    expect(ignore?.content).toContain('.pipeline');
+  });
+});

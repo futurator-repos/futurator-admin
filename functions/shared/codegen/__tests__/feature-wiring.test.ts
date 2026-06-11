@@ -50,8 +50,28 @@ describe('generatePageSource', () => {
     // pacman (order 10) before ghost (order 20)
     expect(src.indexOf('PacmanFeature')).toBeLessThan(src.indexOf('GhostFeature'));
     expect(src).toContain("import PacmanFeature from '../features/pacman.feature';");
-    expect(src).toContain('<PacmanFeature key="pacman" />');
-    expect(src).toContain('<GhostFeature key="ghost" />');
+    expect(src).toContain('<PacmanFeature />');
+    expect(src).toContain('<GhostFeature />');
+  });
+
+  // v2.6 wave-gate VQA — the page is the verification surface: anchored
+  // sections + ?feature=<slug> isolation (pacman2: scroll-0 screenshot
+  // captured a sibling's stacked preview; the judge graded the wrong pixels).
+  it('wraps each feature in an anchored, data-tagged section', () => {
+    const src = generatePageSource([desc('ghost', 20), desc('pacman', 10)]);
+    expect(src).toContain('<section id="feature-pacman" data-feature="pacman">');
+    expect(src).toContain('<section id="feature-ghost" data-feature="ghost">');
+  });
+
+  it('honors ?feature=<slug> via a client-side filter that stays static-export safe', () => {
+    const src = generatePageSource([desc('pacman', 10)]);
+    // Client read under Suspense — a server-component `searchParams` read
+    // would force the route dynamic and break `output: 'export'` builds.
+    expect(src).toContain("'use client';");
+    expect(src).toContain("const only = useSearchParams().get('feature');");
+    expect(src).toContain("{(!only || only === 'pacman') && (");
+    expect(src).toContain('<Suspense fallback={null}>');
+    expect(src).toContain("<main data-feature-filter={only ?? 'all'}>");
   });
 
   it('is a pure function of the feature set (byte-stable across calls)', () => {

@@ -272,9 +272,13 @@ modify (relative to the project root, using the conventional paths above).
   voice into the story's visualTests \`judge:\` block, which is the actual
   contract the QA judge applies.
 
-  **The runtime-review screenshot captures the app's IDLE INITIAL state**
+  **Browser ACs are verified at the WAVE gate, against the story's own
+  registered feature surface.** After the wave's stories merge, visual QA
+  captures each story's feature in ISOLATION (the generated page renders
+  one feature at a time via its registration) at its IDLE INITIAL state
   (no clicks, no keypresses, no elapsed time). A \`needsBrowser\` AC must
-  describe what is visible AT THAT MOMENT. If the behaviour only manifests
+  therefore describe what the story's OWN feature shows at that moment —
+  never what a sibling story renders. If the behaviour only manifests
   after interaction or time (spawning, motion, score changes, "during
   play"), phrase the browser AC about the initial state's observable
   precondition and put the dynamic behaviour in a non-browser AC the test
@@ -299,9 +303,11 @@ modify (relative to the project root, using the conventional paths above).
     suite instead.
 
   **Make visibility structural — PROGRESSIVE FEATURE REGISTRATION.** A
-  browser AC can only be judged if the story's output is actually ON the
-  page at idle. So every story that delivers something visible must ALSO
-  mount it within the SAME story: register (or extend) a feature entry —
+  browser AC can only be judged if the story's output is actually
+  REGISTERED as a feature — the registered feature IS the isolation
+  surface visual QA captures. So every story that delivers something
+  visible must ALSO mount it within the SAME story: register (or extend) a
+  feature entry —
   \`src/features/<slug>.feature.tsx\` listed in its touchPoints — that
   renders the story's deliverable in a meaningful idle state (e.g. the
   maze renderer story registers a feature drawing level 1; the player-

@@ -49,6 +49,19 @@ export function sortFeatures(features: FeatureDescriptor[]): FeatureDescriptor[]
  * descriptors. Pure + deterministic — the same feature set always produces
  * byte-identical output, which is what makes the generated file safe to
  * regenerate in any worktree without divergence.
+ *
+ * v2.6 wave-gate VQA (2026-06-11) — the page is the VERIFICATION SURFACE:
+ *  - every feature mounts inside `<section id="feature-<slug>"
+ *    data-feature="<slug>">`, so evidence tooling can anchor-scroll or crop
+ *    to one story's output;
+ *  - `?feature=<slug>` renders ONLY that feature — per-story isolation
+ *    without a worktree. Read client-side via `useSearchParams()` under
+ *    `<Suspense>` so the route stays statically renderable under any
+ *    next.config (a server-component `searchParams` read would force the
+ *    route dynamic and break `output: 'export'` builds).
+ * This closes the pacman2 failure where a scroll-0 viewport screenshot
+ * captured a SIBLING story's stacked preview and the judge graded the
+ * wrong pixels.
  */
 export function generatePageSource(features: FeatureDescriptor[]): string {
   const sorted = sortFeatures(features);
@@ -67,17 +80,40 @@ export default function Page() {
   }
 
   const imports = sorted.map((f) => `import ${f.componentName} from '${f.importPath}';`).join('\n');
-  const mounts = sorted.map((f) => `      <${f.componentName} key="${f.slug}" />`).join('\n');
+  const sections = sorted
+    .map((f) =>
+      [
+        `      {(!only || only === '${f.slug}') && (`,
+        `        <section id="feature-${f.slug}" data-feature="${f.slug}">`,
+        `          <${f.componentName} />`,
+        `        </section>`,
+        `      )}`,
+      ].join('\n'),
+    )
+    .join('\n');
 
   return `${GENERATED_HEADER}
 
+'use client';
+
+import { Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 ${imports}
+
+function Features() {
+  const only = useSearchParams().get('feature');
+  return (
+    <main data-feature-filter={only ?? 'all'}>
+${sections}
+    </main>
+  );
+}
 
 export default function Page() {
   return (
-    <main>
-${mounts}
-    </main>
+    <Suspense fallback={null}>
+      <Features />
+    </Suspense>
   );
 }
 `;
@@ -159,14 +195,32 @@ function render(features) {
     );
   }
   const imports = sorted.map((f) => 'import ' + f.componentName + " from '" + f.importPath + "';").join('\\n');
-  const mounts = sorted.map((f) => '      <' + f.componentName + ' key="' + f.slug + '" />').join('\\n');
+  // v2.6 — anchored sections + ?feature=<slug> isolation (client-side read so
+  // the route stays statically renderable under any next.config). Mirrors
+  // generatePageSource in feature-wiring.ts — keep byte-identical.
+  const sections = sorted
+    .map((f) =>
+      [
+        "      {(!only || only === '" + f.slug + "') && (",
+        '        <section id="feature-' + f.slug + '" data-feature="' + f.slug + '">',
+        '          <' + f.componentName + ' />',
+        '        </section>',
+        '      )}',
+      ].join('\\n'),
+    )
+    .join('\\n');
   return (
     header +
-    '\\n\\n' +
+    "\\n\\n'use client';\\n\\n" +
+    "import { Suspense } from 'react';\\n" +
+    "import { useSearchParams } from 'next/navigation';\\n" +
     imports +
-    '\\n\\nexport default function Page() {\\n  return (\\n    <main>\\n' +
-    mounts +
-    '\\n    </main>\\n  );\\n}\\n'
+    '\\n\\nfunction Features() {\\n' +
+    "  const only = useSearchParams().get('feature');\\n" +
+    "  return (\\n    <main data-feature-filter={only ?? 'all'}>\\n" +
+    sections +
+    '\\n    </main>\\n  );\\n}\\n\\n' +
+    'export default function Page() {\\n  return (\\n    <Suspense fallback={null}>\\n      <Features />\\n    </Suspense>\\n  );\\n}\\n'
   );
 }
 
@@ -202,6 +256,18 @@ export default function PacmanFeature() {
 Because each feature is its own file on a disjoint path, two stories adding
 two features never conflict — the single biggest merge-conflict source
 (every story editing \`page.tsx\`) is eliminated by construction.
+
+## Verification surface (do not rely on layout between features)
+
+The generated page wraps every feature in
+\`<section id="feature-<slug>" data-feature="<slug>">\`, and visiting
+\`/?feature=<slug>\` renders ONLY that feature. Visual QA captures each
+feature through this isolation, so:
+
+- your feature must render its meaningful idle state on its own (no
+  dependence on a sibling feature being above/below it on the page);
+- never hand-roll a query-param filter inside a feature — the page already
+  provides it.
 `;
 
 /**

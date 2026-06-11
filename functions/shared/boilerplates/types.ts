@@ -123,6 +123,33 @@ export interface BoilerplateMetadata {
   postMergeValidationCmd?: string | null;
 
   /**
+   * v2.6 wave-gate quality stages (2026-06-11) — rigor-aware replacement for
+   * the single `postMergeValidationCmd` string, consumed by the wave-merge
+   * runner. Two stage kinds:
+   *
+   *  - `mechanical`: run ALWAYS at mvp+ rigor, NEVER fail the gate (each
+   *    command is `|| true`-guarded by the runner); their file output rides
+   *    the existing "regenerated files from post-merge validation" commit.
+   *    Formatting/auto-fix is never a gate failure — enforcement is a
+   *    blocking concern.
+   *  - `blocking`: ordered commands per rigor tier; non-zero exit fails the
+   *    gate and flows into the agentic build-fix path. Tiers compose UP:
+   *    prototype = build only (and PR-30 skips the gate entirely at
+   *    prototype today); production adds zero-warning lint, knip and
+   *    format:check on top of mvp.
+   *
+   * `null`/undefined ⇒ the runner falls back to `postMergeValidationCmd`
+   * unchanged (legacy apps + stub boilerplates keep today's behavior).
+   * Commands that reference scripts/configs the app may not have MUST be
+   * self-guarding (`--if-present` / `if [ -f … ]`) so apps bootstrapped
+   * before this field landed keep merging.
+   */
+  qualityGate?: {
+    mechanical: string[];
+    blocking: { prototype: string[]; mvp: string[]; production: string[] };
+  } | null;
+
+  /**
    * Pipeline v2 Phase 3-C Story 3-C-2-1 (PR-71) — project skill manifest
    * paths. `null` for stub boilerplates that don't ship the skill
    * scaffold yet (SST / Vite / Mobile in Phase 1 stubs); the daemon

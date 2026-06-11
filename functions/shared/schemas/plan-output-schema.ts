@@ -90,7 +90,7 @@ export type StoryOutput = z.infer<typeof storyOutputSchema>;
  * rejects it with this message so the operator regenerates.
  */
 const INFRA_TOUCH_POINT_RE =
-  /(^|\/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|vitest\.config\.[cm]?[jt]s|jest\.config\.[cm]?[jt]s|next\.config\.[cm]?[jt]s|tsconfig(\..+)?\.json|eslint\.config\.[cm]?[jt]s|\.eslintrc(\..+)?|postcss\.config\.[cm]?[jt]s)$|(^|\/)node_modules(\/|$)/;
+  /(^|\/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|vitest\.config\.[cm]?[jt]s|jest\.config\.[cm]?[jt]s|next\.config\.[cm]?[jt]s|tsconfig(\..+)?\.json|eslint\.config\.[cm]?[jt]s|\.eslintrc(\..+)?|postcss\.config\.[cm]?[jt]s|\.prettierrc(\..+)?|\.prettierignore|knip\.json|lint-staged\.config\.[cm]?js)$|(^|\/)(node_modules|\.husky)(\/|$)/;
 
 export function validateTouchPointHygiene(output: PlanOutput): string[] {
   const errors: string[] = [];
