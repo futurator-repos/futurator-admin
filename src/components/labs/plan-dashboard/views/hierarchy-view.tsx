@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useRunStory } from '@/hooks/use-epic-workflow';
 import { useAgentJob } from '@/hooks/use-agent-job';
@@ -22,6 +22,26 @@ import { MetricChip } from '../shared/metric-chip';
 import { StatusPill } from '../shared/status-pill';
 import { LogEntry } from '../shared/log-entry';
 import { CopyLogButton } from '../shared/copy-log-button';
+
+// pong1 (2026-06-12) — live logs scrolled to the TOP hid the failure tail
+// below the fold (the operator saw the first five boot events on a FAILED
+// story and nothing about WHY). Pin live logs to the bottom like a terminal;
+// respect the operator scrolling up to read history (only stick when they
+// were already near the bottom).
+function useStickToBottom(dep: unknown) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const stickRef = useRef(true);
+  useEffect(() => {
+    const el = ref.current;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+  }, [dep]);
+  const onScroll = () => {
+    const el = ref.current;
+    if (!el) return;
+    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
+  return { ref, onScroll };
+}
 
 // ── Top-level view ───────────────────────────────────────────────────
 
@@ -607,6 +627,7 @@ function WaveGatePanel({
 }) {
   const { data: job } = useAgentJob(gateJobId);
   const { events } = useAgentEvents(gateJobId, job?.status);
+  const { ref: gateLogRef, onScroll: gateLogOnScroll } = useStickToBottom(events.length);
   const retryGate = useRetryWaveGate();
   const meta = gateBadgeMeta(job?.status);
   const failed = job?.status === 'FAILED';
@@ -709,6 +730,8 @@ function WaveGatePanel({
       )}
       {events.length > 0 && (
         <div
+          ref={gateLogRef}
+          onScroll={gateLogOnScroll}
           style={{
             maxHeight: 260,
             overflowY: 'auto',
@@ -901,6 +924,7 @@ function StoryDetailPanel({ story, epicId }: { story: DashboardStory; epicId: st
   const isActive = ACTIVE_STORY_STATUSES.includes(story.status);
   const { data: job } = useAgentJob(story.jobId);
   const { events } = useAgentEvents(story.jobId, job?.status);
+  const { ref: liveLogRef, onScroll: liveLogOnScroll } = useStickToBottom(events.length);
   const runStory = useRunStory();
   // Phase C.5: Overview | Logs tab. Logs is a full-text, copy-friendly
   // pane (per-step) for pasting into chat when debugging.
@@ -1063,6 +1087,8 @@ function StoryDetailPanel({ story, epicId }: { story: DashboardStory; epicId: st
               </div>
             </div>
             <div
+              ref={liveLogRef}
+              onScroll={liveLogOnScroll}
               style={{
                 background: 'var(--background)',
                 border: '1px solid var(--border)',

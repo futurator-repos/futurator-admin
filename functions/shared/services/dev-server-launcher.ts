@@ -22,10 +22,7 @@ export interface DevServerDeps {
   uuid: () => string;
 }
 
-export function buildDevServerPipeline(
-  workingDir: string,
-  publicIp: string,
-): PipelineDefinition {
+export function buildDevServerPipeline(workingDir: string, publicIp: string): PipelineDefinition {
   return {
     maxIterations: 1,
     agents: {
@@ -46,7 +43,7 @@ Goal: start a Vite dev server for ${workingDir} so it is reachable at http://${p
 Commands (run in order):
 
 1. Kill anything already on port 5173:
-   kill $(lsof -ti:5173) 2>/dev/null; sleep 1
+   fuser -k -KILL 5173/tcp 2>/dev/null; sleep 1
 
 2. cd to the working dir and ensure deps are installed:
    cd ${workingDir} && [ -d node_modules ] || npm install

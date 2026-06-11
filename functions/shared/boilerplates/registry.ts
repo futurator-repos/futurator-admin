@@ -410,8 +410,18 @@ export function useKeyboard() {
  * GameCanvas — PR-13 nextjs-canvas-game starter.
  *
  * Mounts a <canvas> element with ResizeObserver wiring + a 2D context.
- * Calls \`render(ctx, w, h)\` whenever \`redrawTrigger\` changes. The
- * consumer drives redraws by passing a tick counter from \`useGameLoop\`.
+ * Calls \`render(ctx, w, h)\` whenever \`redrawTrigger\` changes AND after
+ * every resize — including the FIRST one. A game passes a tick counter
+ * from \`useGameLoop\` as \`redrawTrigger\`; a static scene (an idle
+ * preview feature) may omit it entirely and still draws.
+ *
+ * pong1 (2026-06-12): the previous version only drew on redrawTrigger
+ * changes, and the mount-time draw ran BEFORE the ResizeObserver
+ * delivered the first size (sizeRef was 0×0 → early return). Anything
+ * without a running game loop rendered a permanently blank canvas — every
+ * idle preview feature shipped invisible. Drawing from the resize
+ * callback (via a ref to the latest render) closes the race for both
+ * static scenes and loop-driven games.
  *
  * Sized to fill its parent. DPR-aware. Non-prescriptive about gameplay.
  */
@@ -420,15 +430,33 @@ import { useEffect, useRef } from 'react';
 
 export interface GameCanvasProps {
   render: (ctx: CanvasRenderingContext2D, width: number, height: number) => void;
-  /** Increment to force a redraw. Driven by the game loop. */
-  redrawTrigger: number;
+  /** Increment to force a redraw (tick from useGameLoop). Optional —
+   *  static scenes draw on mount/resize without it. */
+  redrawTrigger?: number;
   className?: string;
 }
 
-export function GameCanvas({ render, redrawTrigger, className }: GameCanvasProps) {
+export function GameCanvas({ render, redrawTrigger = 0, className }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const sizeRef = useRef({ width: 0, height: 0 });
+  // Latest render callback — lets the ResizeObserver draw without
+  // re-subscribing (and without stale closures).
+  const renderRef = useRef(render);
+  renderRef.current = render;
+
+  const drawRef = useRef(() => {});
+  drawRef.current = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const { width, height } = sizeRef.current;
+    if (width === 0 || height === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    renderRef.current(ctx, width, height);
+  };
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -445,6 +473,9 @@ export function GameCanvas({ render, redrawTrigger, className }: GameCanvasProps
           canvas.style.width = width + 'px';
           canvas.style.height = height + 'px';
         }
+        // Resizing clears the canvas — redraw immediately (this is also
+        // the FIRST draw: the observer fires once on observe()).
+        drawRef.current();
       }
     });
     ro.observe(wrapper);
@@ -452,15 +483,7 @@ export function GameCanvas({ render, redrawTrigger, className }: GameCanvasProps
   }, []);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const { width, height } = sizeRef.current;
-    if (width === 0 || height === 0) return;
-    const dpr = window.devicePixelRatio || 1;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    render(ctx, width, height);
+    drawRef.current();
   }, [redrawTrigger, render]);
 
   return (

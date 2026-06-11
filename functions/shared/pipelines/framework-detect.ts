@@ -173,8 +173,42 @@ export function buildPortReclaimSnippet(): string {
     // pkill pattern that survives the framework-detect script body (likely
     // a path-anchored pattern matching `node_modules/.*expo`).
     `# Kill by port as a backstop for anything still listening.`,
-    `kill -9 $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
+    ...buildPortDrainLines('$QA_PORT'),
     `# Wait for port + lockfile teardown.`,
     `sleep 2`,
   ].join('\n');
+}
+
+/**
+ * pong1 (2026-06-12) — THE PORT-DRAIN DISEASE, finally diagnosed.
+ *
+ * Every drain in the pipeline was `kill $(lsof -ti:$PORT)`. On the EC2
+ * daemon host, `lsof -ti:3000` returns NOTHING (rc=1, run as root OR
+ * ubuntu) while `ss -ltnp` shows `next-server (v16)` LISTENING on
+ * 0.0.0.0:3000 — lsof is blind to Next 16's listening socket there. So
+ * every "kill + wait-until-free + kill -9" sequence was a silent no-op:
+ * the wait loop saw an "empty" port instantly and proceeded, the fresh
+ * boot died with EADDRINUSE, the healthcheck curl got HTTP 200 from the
+ * SQUATTER, and the screenshot judged a different server's page. This is
+ * the root under dino-7's "kill alone is insufficient" (patched with
+ * pkill by name) and pong1's blank-smoke loop (the curl 200s in the
+ * feedback even convinced the retry DEV nothing was wrong).
+ *
+ * `fuser`/`ss` are the ground truth (verified against the live squatter:
+ * `fuser 3000/tcp` → pid; `ss -ltn "sport = :3000"` → LISTEN). The
+ * canonical drain: graceful TERM by port → wait until ss shows the port
+ * actually free → KILL by port → settle. `portExpr` may be a shell var
+ * (`$QA_PORT`) or a literal — bash substitutes either.
+ */
+export function buildPortDrainLines(portExpr: string): string[] {
+  return [
+    `fuser -k -TERM ${portExpr}/tcp 2>/dev/null || true`,
+    `for i in $(seq 1 10); do ss -ltn "sport = :${portExpr}" 2>/dev/null | grep -q LISTEN || break; sleep 1; done`,
+    `fuser -k -KILL ${portExpr}/tcp 2>/dev/null || true`,
+  ];
+}
+
+/** One-shot, non-waiting port kill (post-screenshot teardown paths). */
+export function buildPortKillLine(portExpr: string): string {
+  return `fuser -k -KILL ${portExpr}/tcp 2>/dev/null || true`;
 }

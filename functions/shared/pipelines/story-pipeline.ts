@@ -3,7 +3,7 @@ import type { PipelineDefinition, PipelineStep } from '../types/agent-orchestrat
 import type { PlanRigor } from '../types/plan';
 import type { BoilerplateType } from '../boilerplates/registry';
 import { buildAgentConfig } from './role-policy';
-import { buildFrameworkDetectSnippet } from './framework-detect';
+import { buildFrameworkDetectSnippet, buildPortDrainLines } from './framework-detect';
 // PR-91-followup (Story 2-A-3-1) — API-AUTHOR step before test-author.
 import { buildApiAuthorPrompt } from '../prompts/api-author-prompt';
 // PR-73 + PR-85 wired in: shell-time trailer emission for the per-story
@@ -1000,9 +1000,12 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
                 // panic → blank page on every subsequent review). Wait until the
                 // port actually frees (up to 10s) before booting, then escalate
                 // to SIGKILL only if the old process ignored TERM.
-                `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
-                `for i in $(seq 1 10); do [ -z "$(lsof -ti:$QA_PORT 2>/dev/null)" ] && break; sleep 1; done`,
-                `kill -9 $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
+                // pong1 (2026-06-12) — lsof is BLIND to Next 16's listening
+                // socket on the EC2 host (ss sees it; lsof -ti returns rc=1),
+                // so this drain was a silent no-op: the fresh boot died with
+                // EADDRINUSE and the screenshot judged a SQUATTER's page.
+                // fuser/ss are the ground truth (see buildPortDrainLines).
+                ...buildPortDrainLines('$QA_PORT'),
                 `sleep 1`,
                 // dino1 root-cause (2026-06-10): if the boilerplate generates
                 // its wiring (src/app/page.tsx from src/features/*), a story
@@ -1018,9 +1021,14 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
                 // story worktree regularly exceeds 30s, which made review-runtime
                 // RUNTIME_REVIEW_SKIPPED (no screenshot) even when the app boots.
                 `for i in $(seq 1 60); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$QA_PORT$QA_HEALTH_PATH 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
-                `if [ "$STATUS" != "200" ]; then echo "RUNTIME_REVIEW_SKIPPED: cause=dev-server-no-boot status=$STATUS framework=$QA_FRAMEWORK port=$QA_PORT. This is normal for foundation stories that don't yet render a UI."; tail -30 /tmp/review-${story.storyId}/devserver.log >&2 || true; kill $(lsof -ti:$QA_PORT) 2>/dev/null; exit 0; fi`,
+                `if [ "$STATUS" != "200" ]; then echo "RUNTIME_REVIEW_SKIPPED: cause=dev-server-no-boot status=$STATUS framework=$QA_FRAMEWORK port=$QA_PORT. This is normal for foundation stories that don't yet render a UI."; tail -30 /tmp/review-${story.storyId}/devserver.log >&2 || true; fuser -k -KILL $QA_PORT/tcp 2>/dev/null; exit 0; fi`,
+                // pong1 tripwire (2026-06-12) — if OUR boot died with EADDRINUSE,
+                // the 200 above came from a SQUATTER: screenshotting it judges a
+                // DIFFERENT server's page (that loop convinced a retry DEV that
+                // "GET / 200" meant the app was fine). Loud skip, never judge it.
+                `if grep -q "EADDRINUSE" /tmp/review-${story.storyId}/devserver.log 2>/dev/null; then echo "RUNTIME_REVIEW_SKIPPED: cause=port-squatter — our dev server died with EADDRINUSE; the HTTP 200 came from another process on $QA_PORT. Refusing to screenshot the wrong server."; fuser -k -KILL $QA_PORT/tcp 2>/dev/null; exit 0; fi`,
                 `# Take overview screenshot of the running app.`,
-                `npx playwright screenshot --viewport-size=1280,720 --wait-for-timeout=2000 http://localhost:$QA_PORT$QA_HEALTH_PATH /tmp/review-${story.storyId}/overview.png 2>&1 || { echo "RUNTIME_REVIEW_SKIPPED: cause=screenshot-failed — likely a framework that doesn't render at /"; kill $(lsof -ti:$QA_PORT) 2>/dev/null; exit 0; }`,
+                `npx playwright screenshot --viewport-size=1280,720 --wait-for-timeout=2000 http://localhost:$QA_PORT$QA_HEALTH_PATH /tmp/review-${story.storyId}/overview.png 2>&1 || { echo "RUNTIME_REVIEW_SKIPPED: cause=screenshot-failed — likely a framework that doesn't render at /"; fuser -k -KILL $QA_PORT/tcp 2>/dev/null; exit 0; }`,
                 `# Upload to S3 so the operator can see it post-mortem AND so Haiku can fetch it.`,
                 `SCREENSHOT_KEY="review-screenshots/${story.storyId}/$(date -u +%s).png"`,
                 // snake3 forensic (2026-06-10): this upload had failed SILENTLY on
@@ -1031,7 +1039,7 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
                 `if ! timeout 30 aws s3 cp /tmp/review-${story.storyId}/overview.png "s3://futurator-ai-website/$SCREENSHOT_KEY" --content-type image/png 2>/tmp/review-${story.storyId}/s3err.txt > /dev/null; then echo "SCREENSHOT_UPLOAD_FAILED: $(head -c 200 /tmp/review-${story.storyId}/s3err.txt)"; fi`,
                 `SCREENSHOT_URL="https://futurator.ai/$SCREENSHOT_KEY"`,
                 `# Kill dev server BEFORE the Haiku call so we don't hold the port for ~30s of inference.`,
-                `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
+                `fuser -k -KILL $QA_PORT/tcp 2>/dev/null || true`,
                 `echo "[review-runtime] screenshot at $SCREENSHOT_URL"`,
                 `# v2.6 M3 — story-smoke PAGE_STATE classifier. ONE tiny Haiku
                 # call classifies the frame (rendered|blank|error-overlay).

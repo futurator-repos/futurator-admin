@@ -21,11 +21,16 @@ const DEFAULT_TRIES = 60;
 
 /** Kill whatever holds `port`, wait for it to actually free, escalate to -9. */
 export async function drainPort({ port, shell, cwd }) {
+  // pong1 (2026-06-12) — lsof is BLIND to Next 16's listening socket on the
+  // EC2 host (`lsof -ti:3000` rc=1 while `ss -ltnp` shows next-server
+  // LISTENING), so the old kill/wait/kill-9 chain was a silent no-op and the
+  // fresh boot died with EADDRINUSE against a squatter. fuser/ss are ground
+  // truth: graceful TERM by port → wait until ss shows it free → KILL.
   await shell(
     [
-      `kill $(lsof -ti:${port}) 2>/dev/null || true`,
-      `for i in $(seq 1 10); do [ -z "$(lsof -ti:${port} 2>/dev/null)" ] && break; sleep 1; done`,
-      `kill -9 $(lsof -ti:${port}) 2>/dev/null || true`,
+      `fuser -k -TERM ${port}/tcp 2>/dev/null || true`,
+      `for i in $(seq 1 10); do ss -ltn "sport = :${port}" 2>/dev/null | grep -q LISTEN || break; sleep 1; done`,
+      `fuser -k -KILL ${port}/tcp 2>/dev/null || true`,
       `sleep 1`,
     ].join('\n'),
     cwd,
@@ -83,6 +88,22 @@ export async function bootDevServer({
 
   const tail = await shell(`tail -c 2500 ${serverLog} 2>/dev/null || true`, cwd, 15_000);
   const logTail = tail.stdout || '';
+
+  // pong1 tripwire — if OUR boot died with EADDRINUSE, any HTTP 200 above
+  // came from a SQUATTER on the port: judging its page is judging the wrong
+  // server. Treat as no-boot (env-blocked upstream), never screenshot it.
+  if (status === '200' && /EADDRINUSE|Failed to start server/.test(logTail)) {
+    log('warn', `[dev-server-boot] port ${p} answered 200 but OUR server died (EADDRINUSE) — squatter detected, refusing to verify the wrong server`);
+    await drainPort({ port: p, shell, cwd });
+    return {
+      ok: false,
+      status: 'squatter',
+      port: p,
+      logTail,
+      serverLog,
+      stop: () => drainPort({ port: p, shell, cwd }),
+    };
+  }
 
   if (status === '200' && (qaContext?.warmupMs ?? 0) > 0) {
     // SSR shells 200 immediately but render asynchronously — wait it out.

@@ -459,7 +459,7 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `# without re-detecting. Cheap belt-and-braces — re-detect would also work.`,
           `echo "$QA_PORT" > ${tmpResultsDir}/qa-port.txt`,
           `# Kill any process holding our port (defense in depth — Q1 dropped fan-out so this is rarely needed)`,
-          `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
+          `fuser -k -KILL $QA_PORT/tcp 2>/dev/null || true`,
           `sleep 1`,
           `cd ${plan.workingDir}`,
           // dino1 root-cause (2026-06-10): boilerplates with generated wiring
@@ -949,7 +949,7 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           // pipeline default if the file is missing (qa-prepare crashed
           // before writing it).
           `QA_PORT=$(cat ${tmpResultsDir}/qa-port.txt 2>/dev/null || echo ${port})`,
-          `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
+          `fuser -k -KILL $QA_PORT/tcp 2>/dev/null || true`,
           `# Archive logs to S3 for post-mortem`,
           `aws s3 cp ${tmpResultsDir}/devserver.log s3://futurator-ai-website/${snapshotPrefix}devserver.log --content-type text/plain > /dev/null 2>&1 || true`,
           `aws s3 cp ${tmpResultsDir}/console-errors.log s3://futurator-ai-website/${snapshotPrefix}console-errors.log --content-type text/plain > /dev/null 2>&1 || true`,
@@ -1007,7 +1007,7 @@ export function buildQaPipeline(
       {
         id: 'qa-start-server',
         stepType: 'shell',
-        command: `kill $(lsof -ti:${port}) 2>/dev/null; sleep 1; cd ${workingDir} && (nohup npm run dev -- --host 0.0.0.0 --port ${port} > /tmp/qa-devserver-${port}.log 2>&1 </dev/null &); STATUS=000; for i in $(seq 1 20); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${port} 2>/dev/null); [ "$STATUS" = "200" ] && break; done; [ "$STATUS" = "200" ]`,
+        command: `fuser -k -KILL ${port}/tcp 2>/dev/null; sleep 1; cd ${workingDir} && (nohup npm run dev -- --host 0.0.0.0 --port ${port} > /tmp/qa-devserver-${port}.log 2>&1 </dev/null &); STATUS=000; for i in $(seq 1 20); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${port} 2>/dev/null); [ "$STATUS" = "200" ] && break; done; [ "$STATUS" = "200" ]`,
         timeout: 45000,
         captureAs: 'SERVER_STATUS',
         onFail: { action: 'fail', injectAs: 'SERVER_ERROR' },
@@ -1061,7 +1061,7 @@ FAILED_TESTS:
       {
         id: 'qa-stop-server',
         stepType: 'shell',
-        command: `kill $(lsof -ti:${port}) 2>/dev/null; echo "Server on ${port} stopped"`,
+        command: `fuser -k -KILL ${port}/tcp 2>/dev/null; echo "Server on ${port} stopped"`,
         timeout: 5000,
       },
     ],

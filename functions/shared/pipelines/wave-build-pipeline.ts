@@ -204,7 +204,7 @@ Working directory: ${workingDir}
           // 2026-05-17 — use [c] bracket-class regex on pkill patterns so this
           // cleanup line doesn't self-match the bash interpreter running it
           // (see framework-detect buildPortReclaimSnippet for the full incident).
-          `kill $(lsof -ti:$QA_PORT) 2>/dev/null; pkill -TERM -f '[n]ext dev' 2>/dev/null; pkill -TERM -f '[n]ext-server' 2>/dev/null; true`,
+          `fuser -k -KILL $QA_PORT/tcp 2>/dev/null; pkill -TERM -f '[n]ext dev' 2>/dev/null; pkill -TERM -f '[n]ext-server' 2>/dev/null; true`,
           `[ "$STATUS" = "200" ] || { echo "SERVER_CHECK_FAILED: framework=$QA_FRAMEWORK port=$QA_PORT"; tail -40 /tmp/wave-build-devserver-$QA_PORT.log >&2 || true; exit 1; }`,
         ].join('\n'),
         timeout: 60000,
