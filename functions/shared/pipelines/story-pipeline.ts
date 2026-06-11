@@ -951,38 +951,41 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
         loopTo: 'retry',
       },
 
-      // 2.5. PR-65 (2026-05-15) — review-runtime.
+      // 2.5. PR-65 (2026-05-15), reshaped by v2.6 M3 (2026-06-11) —
+      // review-runtime is now a STORY SMOKE, not a judge.
       //
-      // For stories with browser-tagged ACs at mvp+ rigor, boot the actual
-      // dev server, take one screenshot, and ask Haiku whether each AC is
-      // satisfied looking at the pixels. This is the gate that catches
-      // "all unit tests pass, build is green, code review passed, but the
-      // page in a browser doesn't match the AC text" — i.e. the
-      // spyhunter-1 failure mode where every static gate green-lit a
-      // bundle that didn't actually wire the integration.
+      // Three generations of per-story judged VQA failed for one structural
+      // reason: a story worktree contains a PARTIAL world (dino1 judged the
+      // starter page; pacman1's DEV invented demo harnesses to satisfy the
+      // camera; pacman2's scroll-0 viewport showed a SIBLING's stacked
+      // preview). Judged AC verification therefore moved to the WAVE GATE,
+      // where the merged candidate — the first real integrated product —
+      // is captured per-feature via `/?feature=<slug>` isolation (see
+      // daemon/lib/wave-vqa-runner.mjs). What remains here is the cheap,
+      // high-signal part:
       //
-      // Framework-agnostic: uses buildFrameworkDetectSnippet so it works
-      // for Vite, Next, Remix, Expo, SvelteKit, Nuxt, or any project
-      // whose package.json has a `dev` script.
+      //   • boot the dev server (framework-agnostic via
+      //     buildFrameworkDetectSnippet), regenerate generated wiring first;
+      //   • one screenshot, uploaded to S3 (operator evidence + DEV sanity);
+      //   • ONE tiny Haiku call classifying PAGE_STATE
+      //     (rendered|blank|error-overlay) — NO AC judging, NO verdict
+      //     block, NO story-vqa-failed/unverifiable/ac-coverage-gap cards.
       //
-      // Failure modes (Step-0 hardening, 2026-06-05):
-      //   • Dev server no-boot / screenshot fail / judge crash / unparseable
-      //     output — exit 0 BUT with a machine-grepable
-      //     `RUNTIME_REVIEW_SKIPPED: cause=…` marker; the daemon writes a
-      //     low-severity story-vqa-skipped attention item (no more silent
-      //     passes that look identical to healthy runs).
-      //   • PAGE_STATE blank/error-overlay with zero PASS — exit 1 (the dino
-      //     blank-page class is a real defect, not "all UNCERTAIN").
-      //   • CONFIDENT FAIL on an idle-reachable AC — exit 1, loopTo 'retry'.
-      //   • UNREACHABLE (state needs interaction/time/another route — judged
-      //     SEMANTICALLY, not by keywords) or low-confidence FAIL — exit 0 +
-      //     `RUNTIME_REVIEW_UNVERIFIABLE` marker → attention item; never
-      //     drives a code-mutating retry (the false-FAIL→corruption path).
-      //   • ACs bound to the test suite via {{AC_TEST_MAP}} resolve as
-      //     suite-asserted PASS without judging (test-verify gated earlier).
+      // Failure modes:
+      //   • Dev server no-boot / screenshot fail / classifier crash —
+      //     exit 0 + machine-grepable `RUNTIME_REVIEW_SKIPPED: cause=…`
+      //     marker (daemon writes the low-severity story-vqa-skipped card;
+      //     never a silent pass).
+      //   • PAGE_STATE blank/error-overlay — exit 1 into the retry loop
+      //     WITH the dev-server log tail (the dino1 corrupted-Turbopack-
+      //     cache class: the fix is usually environmental — this recovery
+      //     path has caught real infra bugs and is kept verbatim).
+      //   • PAGE_STATE rendered — exit 0; judged verification happens at
+      //     the wave gate.
       //
-      // Cost: ~$0.005 per story-with-browser-ACs (one Haiku call) +
-      //       ~5-10s dev server boot + screenshot.
+      // Token/time effect vs the old judge: ~1-2 min less per story and
+      // zero judged false-negatives in-story (the false-FAIL→code-mutation
+      // path is structurally gone).
       ...(testsOn && story.hasBrowserTests && story.criteria
         ? ([
             {
@@ -1030,180 +1033,58 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
                 `# Kill dev server BEFORE the Haiku call so we don't hold the port for ~30s of inference.`,
                 `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
                 `echo "[review-runtime] screenshot at $SCREENSHOT_URL"`,
-                `# Haiku judges the screenshot against the story's browser ACs.`,
-                `# We pass the ACs as base64-encoded JSON. base64's charset is
-                # shell-safe (no quotes/spaces/$/braces), so AC text with
-                # apostrophes, quotes, $, or { } can't break the assignment.
-                # The prior raw \`STORY_BROWSER_ACS=[{"id":...}]\` form was
-                # UNQUOTED — bash stripped the quotes + brace-expanded, so node
-                # got \`[{id:...}]\` and JSON.parse threw, crashing every
-                # review-runtime run for stories with browser ACs.`,
-                `STORY_BROWSER_ACS_B64=${Buffer.from(
-                  JSON.stringify(
-                    (story.criteria ?? [])
-                      .filter((c) => c.needsBrowser)
-                      .map((c) => ({ id: c.id, text: c.text })),
-                  ),
-                ).toString('base64')}`,
-                // Step-0.1 (2026-06-05) — the judge reads the authored visual-test
-                // spec. visual-tests.md is ALREADY on disk in the worktree at this
-                // point (the daemon merges DEV's VISUAL_TESTS block before this
-                // step) — the prior judge simply never opened it, grading raw AC
-                // prose instead of the setup/expect/judge contract.
-                `VISUAL_TESTS_MD_B64=""`,
-                `[ -f visual-tests.md ] && VISUAL_TESTS_MD_B64=$(head -c 24000 visual-tests.md | base64 -w0 2>/dev/null || true)`,
-                // Step-0.5 (2026-06-05) — AC→test binding from the TEST agent.
-                // {{AC_TEST_MAP}} is substituted by the daemon when the TEST step
-                // emitted the block; when absent the literal placeholder survives
-                // and the parser below ignores it. Quoted heredoc = content-safe.
-                `cat > /tmp/review-${story.storyId}/ac-test-map.txt << 'AC_MAP_EOF'`,
-                `{{AC_TEST_MAP}}`,
-                `AC_MAP_EOF`,
-                `AC_TEST_MAP_B64=$(base64 -w0 < /tmp/review-${story.storyId}/ac-test-map.txt 2>/dev/null || true)`,
-                `LOCAL_SHOT="/tmp/review-${story.storyId}/overview.png" SCREENSHOT_URL="$SCREENSHOT_URL" STORY_BROWSER_ACS_B64="$STORY_BROWSER_ACS_B64" VISUAL_TESTS_MD_B64="$VISUAL_TESTS_MD_B64" AC_TEST_MAP_B64="$AC_TEST_MAP_B64" node -e "$(cat <<'NODE_EOF'`,
+                `# v2.6 M3 — story-smoke PAGE_STATE classifier. ONE tiny Haiku
+                # call classifies the frame (rendered|blank|error-overlay).
+                # NO AC judging — judged verification happens at the wave gate
+                # against the merged candidate (daemon/lib/wave-vqa-runner.mjs).`,
+                `LOCAL_SHOT="/tmp/review-${story.storyId}/overview.png" SCREENSHOT_URL="$SCREENSHOT_URL" DEVSERVER_LOG="/tmp/review-${story.storyId}/devserver.log" node -e "$(cat <<'NODE_EOF'`,
                 `const { spawn } = require('child_process');`,
                 `const fs = require('fs');`,
-                `const acs = JSON.parse(Buffer.from(process.env.STORY_BROWSER_ACS_B64 || '', 'base64').toString('utf8') || '[]');`,
-                `const screenshotUrl = process.env.SCREENSHOT_URL;`,
                 `const localShot = process.env.LOCAL_SHOT;`,
-                `if (acs.length === 0) { console.log('RUNTIME_REVIEW_SKIPPED: cause=no-browser-acs'); process.exit(0); }`,
-                `const vtMd = Buffer.from(process.env.VISUAL_TESTS_MD_B64 || '', 'base64').toString('utf8');`,
-                `const mapRaw = Buffer.from(process.env.AC_TEST_MAP_B64 || '', 'base64').toString('utf8');`,
-                `const acTestMap = {};`,
-                `for (const rawLine of mapRaw.split('\\n')) {`,
-                `  const t = rawLine.trim();`,
-                `  if (!t || t.includes('{{')) continue;`,
-                `  const mm = t.match(/^([A-Za-z0-9_-]+)\\s*:\\s*(.+)$/);`,
-                `  if (mm) acTestMap[mm[1]] = mm[2].slice(0, 160);`,
-                `}`,
-                // Step-0.5 — ACs the test suite already asserts resolve
-                // deterministically (test-verify gated green earlier in this
-                // pipeline); the screenshot judge's jurisdiction narrows to the
-                // perceptual residue. Coverage-gap only fires when TEST emitted a
-                // map that misses browser ACs — a missing map entirely is legacy.
-                `const suiteAsserted = acs.filter(a => acTestMap[a.id]);`,
-                `const toJudge = acs.filter(a => !acTestMap[a.id]);`,
-                `const coverageGap = Object.keys(acTestMap).length > 0 ? toJudge.map(a => a.id) : [];`,
-                `const printBlock = (verdicts) => {`,
-                `  console.log('---RUNTIME_REVIEW---');`,
-                `  console.log('SCREENSHOT_URL: ' + screenshotUrl);`,
-                `  for (const s of suiteAsserted) console.log(s.id + ': PASS — suite-asserted: ' + acTestMap[s.id]);`,
-                `  for (const v of verdicts) console.log(v.id + ': ' + v.verdict + (v.conf ? ' [conf=' + v.conf + ']' : '') + ' — ' + v.rationale);`,
-                `  console.log('---END_RUNTIME_REVIEW---');`,
-                `  if (coverageGap.length > 0) console.log('AC_COVERAGE_GAP: ' + coverageGap.join(', '));`,
-                `};`,
-                `if (toJudge.length === 0) { printBlock([]); console.log('[review-runtime] all ' + suiteAsserted.length + ' browser ACs suite-asserted — no screenshot judging needed'); process.exit(0); }`,
-                `const acList = toJudge.map((a) => '  ' + a.id + ': ' + a.text).join('\\n');`,
+                `const screenshotUrl = process.env.SCREENSHOT_URL;`,
                 `const prompt = [`,
-                `  'You are an automated visual reviewer.',`,
-                // 2026-06-02 — the judge MUST read the LOCAL screenshot file via
-                // the Read tool. The prior 'inspect <S3 URL>' form was unfetchable
-                // from the sandbox, so the judge saw nothing → returned UNCERTAIN
-                // for every AC → the runtime review silently passed broken UIs
-                // (dino floating / no spawn shipped clean). Reading the local PNG
-                // is what makes per-story VQA actually catch visual defects.
+                // 2026-06-02 lesson kept: the classifier MUST read the LOCAL
+                // screenshot via the Read tool (S3 URLs are unfetchable from
+                // the sandbox — the judge "saw nothing" and silently passed).
+                `  'You are a smoke-level page-state classifier for a dev server screenshot.',`,
                 `  'Use the Read tool to open the screenshot image file at ' + localShot + ' and inspect it.',`,
                 `  '',`,
-                `  'The acceptance criteria below describe what the user should be able to SEE on screen.',`,
-                `  '',`,
-                `  'CRITICAL — this screenshot is a SINGLE STATIC FRAME of the app in its INITIAL state, captured ~2s after load with NO user interaction: no keypresses, no clicks, no elapsed gameplay, zero score/progress, nothing animated or in motion. You are seeing the starting state only.',`,
-                `  '',`,
-                `  'Acceptance criteria to judge:',`,
-                `  acList,`,
-                `  '',`,
-                `  vtMd ? 'The authored visual-test spec for this story follows. Entries match ACs by criteriaRef. When an entry exists for an AC, its setup: field tells you what state the test NEEDS to exist before judging, and its judge:/expect: text is the grading contract — use them.' : '',`,
-                `  vtMd ? '--- VISUAL TEST SPEC ---' : '',`,
-                `  vtMd ? vtMd.slice(0, 12000) : '',`,
-                `  vtMd ? '--- END VISUAL TEST SPEC ---' : '',`,
-                `  '',`,
-                `  'FIRST output line — overall page state:',`,
+                `  'Output EXACTLY one line:',`,
                 `  'PAGE_STATE: rendered|blank|error-overlay — <one-line description of what the frame shows>',`,
-                `  '  (blank = empty/near-empty canvas or page; error-overlay = a framework error or stack-trace overlay is visible)',`,
-                `  '',`,
-                `  'Then output EXACTLY one line per AC in this format (no other text):',`,
-                `  '<AC-id>: PASS|FAIL|UNREACHABLE|UNCERTAIN [conf=high|low] — <one-line rationale ≤140 chars>',`,
-                `  '',`,
-                `  'Verdict rules — decide SEMANTICALLY per AC, in this order:',`,
-                `  '1. REACHABILITY first: can this idle initial frame physically show the state the AC (and its visual-test setup:, if present) describes? If the state requires user interaction, elapsed time, motion, a score/progress threshold, navigation to another route, or a composite/side-by-side/sandbox arrangement the app does not render at start — the verdict is UNREACHABLE. This is a property of WHAT THE AC NEEDS, not of any keyword in its wording. Never FAIL an AC whose state this frame cannot show.',`,
-                `  '2. PASS — the state is reachable in this frame and the frame observably satisfies it.',`,
-                `  '3. FAIL — the state is reachable in this frame and the frame CONTRADICTS it. A FAIL must cite the concrete contradicting observation you can SEE (what is there instead, or what is missing that should be visible NOW). Use conf=high only when the contradiction is unambiguous; conf=low when you suspect a defect but the evidence is partial.',`,
-                `  '4. UNCERTAIN — the image is unreadable or the call is genuinely too close to make.',`,
-                `  '',`,
-                `  'Example: AC \"at game start the background is white\" → reachable, judge PASS/FAIL from this frame. AC \"all four obstacle types are visible side-by-side\" → the game only spawns obstacles over time, so the idle frame cannot show that arrangement → UNREACHABLE (not FAIL).',`,
-                `].filter(Boolean).join('\\n');`,
-                `const child = spawn('claude', ['--print', '--model', 'haiku', '--output-format', 'text', '--allowedTools', 'Read'], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 90000 });`,
+                `  '  (rendered = the app drew meaningful UI; blank = empty/near-empty canvas or page;',`,
+                `  '   error-overlay = a framework error or stack-trace overlay is visible)',`,
+                `].join('\\n');`,
+                `const child = spawn('claude', ['--print', '--model', 'haiku', '--output-format', 'text', '--allowedTools', 'Read'], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 60000 });`,
                 `let out = '', err = '';`,
                 `child.stdin.write(prompt); child.stdin.end();`,
                 `child.stdout.on('data', d => { out += d.toString(); });`,
                 `child.stderr.on('data', d => { err += d.toString(); });`,
                 `child.on('close', (code) => {`,
-                // Step-0.4 — every failure-to-observe is a LOUD machine-grepable
-                // marker (the daemon writes a story-vqa-skipped attention item),
+                // Step-0.4 lesson kept — every failure-to-observe is a LOUD
+                // machine-grepable marker (daemon writes story-vqa-skipped),
                 // never a silent pass that looks identical to a healthy run.
-                `  if (code !== 0) { console.log('RUNTIME_REVIEW_SKIPPED: cause=judge-crash exit=' + code + ' ' + err.slice(0, 200)); process.exit(0); }`,
-                `  const lines = out.split('\\n').map(l => l.trim()).filter(Boolean);`,
+                `  if (code !== 0) { console.log('RUNTIME_REVIEW_SKIPPED: cause=page-state-crash exit=' + code + ' ' + err.slice(0, 200)); process.exit(0); }`,
                 `  const psMatch = out.match(/PAGE_STATE:\\s*(rendered|blank|error-overlay)/i);`,
-                `  const pageState = (psMatch ? psMatch[1] : 'rendered').toLowerCase();`,
-                `  const verdicts = [];`,
-                `  for (const line of lines) {`,
-                `    const m = line.match(/^([A-Za-z0-9_-]+):\\s*(PASS|FAIL|UNREACHABLE|UNCERTAIN)\\s*(?:\\[conf=(high|low)\\])?\\s*[—-]?\\s*(.*)$/i);`,
-                `    if (m) verdicts.push({ id: m[1], verdict: m[2].toUpperCase(), conf: (m[3] || '').toLowerCase() || undefined, rationale: (m[4] || '').slice(0, 200) });`,
-                `  }`,
-                `  if (verdicts.length === 0) { console.log('RUNTIME_REVIEW_SKIPPED: cause=judge-unparseable ' + out.slice(0, 300)); process.exit(0); }`,
-                `  const fails = verdicts.filter(v => v.verdict === 'FAIL');`,
-                // Step-0.3a — only CONFIDENT, observable FAILs may open the DEV
-                // retry loop. Low-confidence fails and idle-unreachable ACs are
-                // surfaced (attention item via the daemon) but never drive a
-                // code-mutating fix cycle — that loop is how a false negative
-                // grafted an obstacle-preview gallery into a correct game.
-                `  const confidentFails = fails.filter(v => v.conf !== 'low');`,
-                `  const softFails = fails.filter(v => v.conf === 'low');`,
-                `  const unreachable = verdicts.filter(v => v.verdict === 'UNREACHABLE');`,
-                `  const passCount = verdicts.filter(v => v.verdict === 'PASS').length + suiteAsserted.length;`,
-                `  printBlock(verdicts);`,
+                `  if (!psMatch) { console.log('RUNTIME_REVIEW_SKIPPED: cause=page-state-unparseable ' + out.slice(0, 300)); process.exit(0); }`,
+                `  const pageState = psMatch[1].toLowerCase();`,
                 `  console.log('PAGE_STATE_PARSED: ' + pageState);`,
-                // Step-0.4 — a blank/error page with nothing provably right is a
-                // real defect, never a silent pass (the dino blank-page class).
-                `  if ((pageState === 'blank' || pageState === 'error-overlay') && passCount === 0) {`,
-                // dino1 forensic (2026-06-10): a blank page is often the DEV
-                // SERVER failing (e.g., a corrupted gitignored build cache made
-                // Turbopack panic on every boot), not the product code. Attach
-                // the server's own log so the fix-cycle DEV can diagnose the
-                // ENVIRONMENT instead of mutating correct code — and so a pure
-                // infra crash never burns 3 blind retries again.
-                `    let serverLog = '';`,
-                `    try { const sl = fs.readFileSync('/tmp/review-${story.storyId}/devserver.log', 'utf8'); serverLog = sl.slice(-2500); } catch (e) {}`,
-                `    const obs = 'PAGE_STATE: ' + pageState + ' — the app rendered nothing judgeable; likely entry-point wiring, a runtime error, a build failure, OR the dev server itself crashing.' + (serverLog ? '\\n\\n--- dev server log (tail) ---\\n' + serverLog : '');`,
-                `    try { fs.mkdirSync('.context', { recursive: true }); fs.writeFileSync('.context/vqa-observations.txt', obs); } catch (e) {}`,
-                `    console.error('RUNTIME_REVIEW_FAILED: page state is ' + pageState + ' — the app did not render a judgeable UI.');`,
-                `    if (serverLog) { console.error(''); console.error('Dev server log (tail) — read this FIRST. If it shows the SERVER crashing (panic, corrupted cache, port clash), the fix is environmental (e.g., delete the stale gitignored build-cache directory it names and let the server rebuild) — do NOT change product code for an infra crash:'); console.error(serverLog); }`,
-                `    console.error('Screenshot: ' + screenshotUrl);`,
-                `    process.exit(1);`,
+                `  if (pageState === 'rendered') {`,
+                `    console.log('STORY_SMOKE_OK: page rendered — judged AC verification happens at the wave gate against the merged candidate.');`,
+                `    process.exit(0);`,
                 `  }`,
-                `  if (confidentFails.length > 0) {`,
-                // S5 — persist the failing observations so the eventual passing
-                // commit can stamp a VQA-Fixed: trailer (now gated on no-contest,
-                // Step-0.7). Only CONFIDENT fails are recorded as observations.
-                `    try { fs.mkdirSync('.context', { recursive: true }); fs.writeFileSync('.context/vqa-observations.txt', confidentFails.map(f => f.id + ': ' + f.rationale).join('\\n')); } catch (e) {}`,
-                `    console.error('');`,
-                `    console.error('RUNTIME_REVIEW_FAILED: ' + confidentFails.length + ' AC(s) failed visual review of the running app:');`,
-                `    for (const f of confidentFails) console.error('  - ' + f.id + ': ' + f.rationale);`,
-                `    console.error('');`,
-                `    console.error('Screenshot: ' + screenshotUrl);`,
-                `    console.error('The dev server booted and rendered, but the result does not match the AC text. Common causes:');`,
-                `    console.error('  • A module was written but is not imported from the entry point.');`,
-                `    console.error('  • A render loop / state-machine update is wired but not driving the visual change.');`,
-                `    console.error('  • An asset is referenced but the path is wrong / asset never loaded.');`,
-                `    console.error('If you (DEV) believe a listed AC describes a state this idle screenshot cannot show, emit an AC_CONTEST block instead of changing code (see your retry instructions). NEVER add new routes, pages, demo galleries, or UI surfaces the story did not ask for just to make the screenshot match.');`,
-                `    process.exit(1);`,
-                `  }`,
-                `  if (unreachable.length > 0 || softFails.length > 0) {`,
-                `    const items = unreachable.concat(softFails);`,
-                `    console.log('RUNTIME_REVIEW_UNVERIFIABLE: ' + items.length + ' AC(s) not verifiable from the idle frame (no confident contradiction):');`,
-                `    for (const u of items) console.log('  - ' + u.id + ' [' + u.verdict + (u.conf ? ' conf=' + u.conf : '') + ']: ' + u.rationale);`,
-                `  }`,
-                `  console.log('[review-runtime] verdicts: ' + passCount + ' PASS, ' + unreachable.length + ' UNREACHABLE, ' + softFails.length + ' low-conf FAIL (not retried), ' + verdicts.filter(v => v.verdict === 'UNCERTAIN').length + ' UNCERTAIN');`,
-                `  process.exit(0);`,
+                // dino1 forensic (2026-06-10), kept verbatim in spirit: a blank
+                // page is often the DEV SERVER failing (corrupted gitignored
+                // build cache → Turbopack panic on every boot), not the product
+                // code. Attach the server's own log so the fix-cycle DEV
+                // diagnoses the ENVIRONMENT instead of mutating correct code.
+                `  let serverLog = '';`,
+                `  try { serverLog = fs.readFileSync(process.env.DEVSERVER_LOG, 'utf8').slice(-2500); } catch (e) {}`,
+                `  const obs = 'PAGE_STATE: ' + pageState + ' — the app rendered nothing judgeable; likely entry-point wiring, a runtime error, a build failure, OR the dev server itself crashing.' + (serverLog ? '\\n\\n--- dev server log (tail) ---\\n' + serverLog : '');`,
+                `  try { fs.mkdirSync('.context', { recursive: true }); fs.writeFileSync('.context/vqa-observations.txt', obs); } catch (e) {}`,
+                `  console.error('STORY_SMOKE_FAILED: page state is ' + pageState + ' — the app did not render a judgeable UI.');`,
+                `  if (serverLog) { console.error(''); console.error('Dev server log (tail) — read this FIRST. If it shows the SERVER crashing (panic, corrupted cache, port clash), the fix is environmental (e.g., delete the stale gitignored build-cache directory it names and let the server rebuild) — do NOT change product code for an infra crash:'); console.error(serverLog); }`,
+                `  console.error('Screenshot: ' + screenshotUrl);`,
+                `  process.exit(1);`,
                 `});`,
                 `NODE_EOF`,
                 `)"`,

@@ -676,14 +676,16 @@ describe('PR-64 — test-author integration test contract', () => {
 });
 
 /**
- * PR-65 (2026-05-15) — review-runtime step.
- *
- * For browser-AC stories at mvp+ rigor, boot the dev server, take one
- * screenshot, ask Haiku per-AC. UNCERTAIN passes (foundation stories
- * don't yet render). FAIL loops to retry. SKIPPED on dev-server boot
- * failure. Framework-agnostic via buildFrameworkDetectSnippet.
+ * PR-65 (2026-05-15), reshaped by v2.6 M3 (2026-06-11) — review-runtime is
+ * now a STORY SMOKE: boot the dev server, one screenshot, ONE Haiku call
+ * classifying PAGE_STATE only. NO per-AC judging in the story worktree —
+ * judged verification moved to the wave gate (the story tree is a partial
+ * world; three generations of per-story judging graded the wrong pixels).
+ * blank/error-overlay exits 1 into the retry loop WITH the dev-server log
+ * (the dino1 environmental-recovery path, kept). Framework-agnostic via
+ * buildFrameworkDetectSnippet.
  */
-describe('PR-65 — review-runtime step', () => {
+describe('PR-65 / v2.6 M3 — review-runtime (story smoke) step', () => {
   const browserStory = {
     ...story,
     hasBrowserTests: true,
@@ -731,12 +733,11 @@ describe('PR-65 — review-runtime step', () => {
     // Every skip path carries a cause= token so the daemon can write a
     // story-vqa-skipped attention item instead of a silent pass.
     expect(cmd).toContain('cause=screenshot-failed');
-    expect(cmd).toContain('cause=judge-crash');
-    expect(cmd).toContain('cause=judge-unparseable');
-    expect(cmd).toContain('cause=no-browser-acs');
+    expect(cmd).toContain('cause=page-state-crash');
+    expect(cmd).toContain('cause=page-state-unparseable');
   });
 
-  it('inlines only browser ACs (base64-encoded JSON; filters out internal ACs)', () => {
+  it('v2.6 M3 — NO AC judging in the story worktree (moved to the wave gate)', () => {
     const mixed = {
       ...story,
       hasBrowserTests: true,
@@ -751,16 +752,17 @@ describe('PR-65 — review-runtime step', () => {
     const cmd = String(
       (pipeline.steps.find((s) => s.id === 'review-runtime') as { command: string }).command,
     );
-    // The ACs travel base64-encoded (shell-safe — the raw JSON form crashed
-    // every run via bash brace expansion). Decode and verify the filter.
-    const b64 = cmd.match(/STORY_BROWSER_ACS_B64=([A-Za-z0-9+/=]+)/)?.[1];
-    expect(b64).toBeTruthy();
-    const acs = JSON.parse(Buffer.from(b64 as string, 'base64').toString('utf8')) as Array<{
-      id: string;
-      text: string;
-    }>;
-    expect(acs.map((a) => a.id)).toEqual(['AC-1']);
-    expect(acs[0].text).toBe('Browser visible thing');
+    // The judge half is GONE: no AC payload, no verdict block, no
+    // suite-asserted bypass, no coverage-gap marker, no per-AC verdicts.
+    expect(cmd).not.toContain('STORY_BROWSER_ACS_B64');
+    expect(cmd).not.toContain('---RUNTIME_REVIEW---');
+    expect(cmd).not.toContain('AC_COVERAGE_GAP');
+    expect(cmd).not.toContain('AC_TEST_MAP');
+    expect(cmd).not.toContain('RUNTIME_REVIEW_UNVERIFIABLE');
+    // The old judged-FAIL marker is gone too — a smoke failure uses its own
+    // marker so the daemon's story-vqa-failed card never fires for env loops.
+    expect(cmd).not.toContain('RUNTIME_REVIEW_FAILED');
+    expect(cmd).toContain('STORY_SMOKE_FAILED');
   });
 
   it('spawns claude haiku with --print + reads prompt from stdin', () => {
@@ -777,37 +779,28 @@ describe('PR-65 — review-runtime step', () => {
     expect(cmd).toContain('child.stdin.end()');
   });
 
-  it('Step-0: only CONFIDENT FAILs exit 1; UNREACHABLE/low-conf never retry; blank page fails', () => {
+  it('v2.6 M3 — smoke fails ONLY on blank/error-overlay, with the dev-server log attached', () => {
     const pipeline = generateStoryPipeline(browserStory, 'Test Epic', workingDir, {
       rigor: 'mvp',
     });
     const cmd = String(
       (pipeline.steps.find((s) => s.id === 'review-runtime') as { command: string }).command,
     );
-    expect(cmd).toContain("v.verdict === 'FAIL'");
-    expect(cmd).toContain('RUNTIME_REVIEW_FAILED');
-    expect(cmd).toContain('Screenshot: ');
-    expect(cmd).toContain('process.exit(1)');
-    // Step-0.3a — confidence gating: only confident, observable FAILs open
-    // the DEV retry loop; the rest surface as UNVERIFIABLE (attention item).
-    expect(cmd).toContain("v.conf !== 'low'");
-    expect(cmd).toContain('RUNTIME_REVIEW_UNVERIFIABLE');
-    // Step-0.1 — semantic reachability classification, never keyword-based.
-    expect(cmd).toContain('UNREACHABLE');
-    expect(cmd).toContain('Never FAIL an AC whose state this frame cannot show');
-    // Step-0.1 — the judge reads the authored visual-test spec from disk.
-    expect(cmd).toContain('VISUAL_TESTS_MD_B64');
-    expect(cmd).toContain('visual-tests.md');
-    // Step-0.4 — blank/error page with zero PASS is a real failure (exit 1),
-    // not an all-UNCERTAIN silent pass.
+    // PAGE_STATE classification kept (the dino blank-page class is a real
+    // defect); rendered exits 0 pointing at the wave gate.
     expect(cmd).toContain('PAGE_STATE');
     expect(cmd).toMatch(/blank.*error-overlay|error-overlay.*blank/);
-    // Step-0.3b — DEV is told about the contest path instead of corrupting
-    // the product to satisfy the screenshot.
-    expect(cmd).toContain('AC_CONTEST');
-    // Step-0.5 — suite-asserted ACs bypass the screenshot judge.
-    expect(cmd).toContain('AC_TEST_MAP_B64');
-    expect(cmd).toContain('suite-asserted');
+    expect(cmd).toContain('STORY_SMOKE_OK');
+    expect(cmd).toContain('wave gate');
+    // Environmental recovery path kept verbatim in spirit: server log tail
+    // travels with the failure so the fix-cycle DEV diagnoses the
+    // ENVIRONMENT instead of mutating correct product code.
+    expect(cmd).toContain('STORY_SMOKE_FAILED');
+    expect(cmd).toContain('devserver.log');
+    expect(cmd).toContain('do NOT change product code for an infra crash');
+    expect(cmd).toContain('vqa-observations.txt');
+    expect(cmd).toContain('Screenshot: ');
+    expect(cmd).toContain('process.exit(1)');
   });
 
   it('uses framework-detect so any web stack works (no hard-coded port 5173)', () => {
