@@ -362,13 +362,10 @@ string[], mvp: string[], production: string[] } }`, defaults preserving
      never a failure): `node scripts/generate-wiring.mjs` (existing),
      `npm run format --if-present`, `npx eslint . --fix` (guarded
      `--if-present`-style: `[ -f eslint.config.mjs ] && ... || true`).
-  2. `blocking` by rigor:
-     - prototype: `npm run build` only (and the whole gate stays skipped
-       per PR-30 unless that changes — keep skipped; quality applies from
-       mvp up).
-     - mvp: `npm run build && npm run test --if-present && npx eslint .
---max-warnings 200` (errors block; warning budget generous).
-     - production: `npm run build && npm run test --if-present && npx
+  2. `blocking` by rigor: - prototype: `npm run build` only (and the whole gate stays skipped
+     per PR-30 unless that changes — keep skipped; quality applies from
+     mvp up). - mvp: `npm run build && npm run test --if-present && npx eslint .
+--max-warnings 200` (errors block; warning budget generous). - production: `npm run build && npm run test --if-present && npx
 eslint . --max-warnings 0 && npm run knip --if-present && npm run
 format:check --if-present`.
   3. Failures of blocking stages flow into the EXISTING build-fix agent
@@ -477,3 +474,63 @@ npx sst deploy --stage production
 
 EC2 inspection: `ssh -i ~/.ssh/debatator-memgraph.pem ubuntu@ec2-54-86-226-233.compute-1.amazonaws.com`,
 daemon log `/var/log/futurator-daemon.log` (rotates daily; check `.1`).
+
+---
+
+## 6. Implementation status log (2026-06-11, post-compact session)
+
+| Milestone                         | Status                                                      | Commit    |
+| --------------------------------- | ----------------------------------------------------------- | --------- |
+| M1 isolation + quality plumbing   | DONE, deployed (sst)                                        | `1ba1a84` |
+| M2 wave VQA runner (daemon)       | DONE, code on branch — EC2 rsync PENDING                    | `a644a46` |
+| M3 story smoke (Lambda)           | DONE, deployed (sst)                                        | `6579820` |
+| M4 rigor quality gates (daemon)   | DONE, code on branch — EC2 rsync PENDING                    | `2bb5fbf` |
+| M5 fix-forward + fix stories + UI | DONE, Lambda/UI deployed — daemon half rides the same rsync | `674a961` |
+| M6 E2E on fresh mvp plan          | PENDING (needs the daemon rsync first)                      |           |
+
+**Daemon deploy note:** M2+M4+M5 daemon changes are batched into ONE
+`scripts/rsync-daemon.sh` run to minimize restart windows on the shared
+host. Restart ONLY at `active=0/2` (a restart kills running agents — pacman2
+may still be developing).
+
+### Deviations from §2 (all intent-preserving, recorded once)
+
+1. **Generated page filter is client-side** (`useSearchParams` under
+   `<Suspense>`), not a server-component `searchParams` read — a server read
+   forces the route dynamic and would break `output: 'export'` builds; the
+   template repo's next.config could not be inspected (daemon-only deploy
+   key). Behavior identical for the dev-server VQA path.
+2. **Handoff packets live at `.context/vqa-handoffs/<acId>.json`**, not
+   `.pipeline/` — the template ships `.pipeline/.gitignore` (`*`), so
+   nothing there can "ship in green". `.context/` is the committed location
+   (same place as story context packs); invariant I4 intent preserved.
+3. **Gate-registry snapshot** — the planned "VERIFY at impl" found the
+   `sst-env-shared/boilerplate-registry-snapshot.mjs` import was NEVER
+   generated (hardcoded fallback ran since 2026-05-19). Fixed properly:
+   `scripts/generate-gate-registry-snapshot.mjs` writes
+   `daemon/lib/boilerplate-gate-registry.json` (committed, ships with every
+   rsync) and `gate-registry-snapshot.test.ts` is the drift alarm. ONE
+   source of truth = the TS registry.
+4. **Husky pre-commit chains the PR-41 frozen-file guard** — discovered
+   dormant (`.husky/pre-commit-frozen` is not a hook name git invokes, and
+   nothing ever ran `husky install`). The new template `prepare: "husky"` +
+   `.husky/pre-commit` activates it; mechanical lint-staged half no-ops
+   below production rigor and can never fail a commit. Agent worktrees skip
+   hooks entirely (no npm prepare there → no `.husky/_`).
+5. **Wave VQA boots on `qaContext.defaultPort + 700`** — story review
+   servers use the default port on the same host; draining a shared port
+   would kill a sibling story's server mid-screenshot.
+6. **Fix-story mint happens BEFORE the gate job flips COMPLETED** — the
+   reducer advances/completes the epic on the first tick that sees a
+   terminal gate; stories appended after that read would never launch.
+   Append via `list_append`, never a full-array write.
+7. **Story smoke kept step id `review-runtime`** — the daemon's marker
+   consumers (story-vqa-skipped etc.) need zero changes: the smoke emits
+   only the SKIPPED markers + its own `STORY_SMOKE_FAILED`, so the judged
+   card paths simply never fire while in-flight old-style jobs stay fully
+   supported.
+8. **Fixer commits before re-judge, reverts on zero improvement** — the
+   evidence agent's read-only enforcement hard-resets ANY dirt, so a fix
+   must be committed (it is validation-green by then) before re-capture;
+   if the re-judge shows no AC improved, the commit is reverted
+   (horse-runner1 rule: no unjustified mutations survive).
