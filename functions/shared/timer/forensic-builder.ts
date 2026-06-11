@@ -58,6 +58,20 @@ export interface ForensicSkillsBlock {
   }>;
   /** Total `Skill` tool_use events observed. Useful for cohort baselines. */
   totalSkillToolUseEvents: number;
+  // ── Step-0.9 (2026-06-05) — availability ground truth ──────────────
+  // Sourced from the daemon's `skills_available` events (Story F.3, the CLI
+  // `system/init` probe). Before this, the block derived ONLY from
+  // activations and returned null otherwise — so "66 skills loaded, 0
+  // activated" rendered as "no skills" (the horse-runner1 'skills: null'
+  // reporting artifact). Discovered-vs-activated is the actual signal.
+  /** Max skill count any session's CLI init reported. */
+  availableSkillCount?: number;
+  /** True when any session's init reported the Skill tool present. */
+  hasSkillTool?: boolean;
+  /** Number of sessions that emitted a skills_available event. */
+  sessionsReportingAvailability?: number;
+  /** Number of those sessions reporting ZERO skills (loading defect signature). */
+  sessionsReportingZeroSkills?: number;
   /**
    * SKILL-SCOUT activity rollup (Epic 3): how many SCOUT runs fired, what
    * triggers, what dispositions. Sourced from `step.skill-scout.*` events.
@@ -262,6 +276,13 @@ async function collectRawEvents(plan: Plan): Promise<AgentEvent[]> {
     for (const story of epic.stories ?? []) {
       if (story.jobId) jobIds.add(story.jobId);
     }
+    // snake3 (2026-06-10) — wave-merge / build-check jobs were invisible to
+    // the forensic export (only orchestrator + story jobs were discovered),
+    // so merge halts and resolver attempts left no trace in the JSON the
+    // operator audits. Include them.
+    for (const buildJobId of Object.values(epic.waveBuildJobs ?? {})) {
+      if (buildJobId) jobIds.add(buildJobId);
+    }
   }
 
   const PAGE_SIZE = 200;
@@ -340,9 +361,14 @@ export function buildSkillsBlock(events: AgentEvent[]): ForensicSkillsBlock | nu
     const isActivation = (ev.eventType as string) === 'skill_activated';
     if (!isActivation) continue;
 
+    // dragon1 forensic (2026-06-10): the daemon's pushEvent spreads the data
+    // object at the TOP LEVEL of the event item (`...data`), so skill/source
+    // live beside eventType, not under `payload`. Read top-level first;
+    // keep the payload fallback for any synthetic/test events shaped that way.
+    const top = ev as unknown as { skill?: string; source?: string };
     const payload = ev.payload as { skill?: string; source?: string } | undefined;
-    const skill = payload?.skill;
-    const source = payload?.source ?? 'unknown';
+    const skill = top.skill ?? payload?.skill;
+    const source = top.source ?? payload?.source ?? 'unknown';
     if (typeof skill !== 'string' || skill.length === 0) continue;
 
     const key = `${skill}@${source}`;
@@ -379,7 +405,47 @@ export function buildSkillsBlock(events: AgentEvent[]): ForensicSkillsBlock | nu
     }
   }
 
-  if (perSkill.size === 0 && scoutRuns.length === 0 && totalSkillToolUseEvents === 0) {
+  // 2b. Step-0.9 (2026-06-05) — availability ground truth from the daemon's
+  // `skills_available` events (CLI init probe). Counted BEFORE the null
+  // short-circuit so a plan with skills loaded but never activated reports
+  // "N available / 0 activated" instead of `skills: null`.
+  let availableSkillCount = 0;
+  let hasSkillTool = false;
+  let sessionsReportingAvailability = 0;
+  let sessionsReportingZeroSkills = 0;
+  for (const ev of events) {
+    if ((ev.eventType as string) !== 'skills_available') continue;
+    // pushEvent spreads data at the TOP LEVEL (dragon1 forensic 2026-06-10:
+    // payload-only reads rendered "66 skills loaded" as 0/0 — the exact
+    // reporting artifact this block exists to kill). Top-level first.
+    const top = ev as unknown as {
+      skillCount?: number;
+      hasSkillTool?: boolean;
+      skills?: unknown[];
+    };
+    const payload = ev.payload as
+      | { skillCount?: number; hasSkillTool?: boolean; skills?: unknown[] }
+      | undefined;
+    const count =
+      typeof top.skillCount === 'number'
+        ? top.skillCount
+        : typeof payload?.skillCount === 'number'
+          ? payload.skillCount
+          : Array.isArray(top.skills ?? payload?.skills)
+            ? (top.skills ?? payload?.skills ?? []).length
+            : 0;
+    sessionsReportingAvailability += 1;
+    if (count === 0) sessionsReportingZeroSkills += 1;
+    if (count > availableSkillCount) availableSkillCount = count;
+    if (top.hasSkillTool ?? payload?.hasSkillTool) hasSkillTool = true;
+  }
+
+  if (
+    perSkill.size === 0 &&
+    scoutRuns.length === 0 &&
+    totalSkillToolUseEvents === 0 &&
+    sessionsReportingAvailability === 0
+  ) {
     return null;
   }
 
@@ -402,6 +468,10 @@ export function buildSkillsBlock(events: AgentEvent[]): ForensicSkillsBlock | nu
     })),
     totalSkillToolUseEvents,
     skillScoutRuns: scoutRuns,
+    availableSkillCount,
+    hasSkillTool,
+    sessionsReportingAvailability,
+    sessionsReportingZeroSkills,
   };
 }
 

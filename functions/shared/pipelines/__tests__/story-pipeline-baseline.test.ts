@@ -202,15 +202,20 @@ describe('2026-05-19 — tamper-check baseline is the index (snake-4 fix)', () =
 });
 
 describe('2026-05-19 — Phase 0.2a — capture-dev-baseline step', () => {
-  it('mvp rigor — capture-dev-baseline exists and runs right before dev', () => {
+  it('mvp rigor — capture-dev-baseline is the FIRST step (before any agent)', () => {
     const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
       rigor: 'mvp',
     });
     const ids = pipeline.steps.map((s) => s.id);
     expect(ids).toContain('capture-dev-baseline');
     expect(ids.indexOf('capture-dev-baseline')).toBeLessThan(ids.indexOf('dev'));
-    // The whole post-test-author chain comes first.
-    expect(ids.indexOf('capture-dev-baseline')).toBeGreaterThan(ids.indexOf('test-author'));
+    // pacman1 root-cause (2026-06-11): the baseline must precede api-author
+    // and test-author so the contract `.d.ts`, vitest config, and
+    // package.json edits they write are INSIDE the story's commit delta.
+    // (The old post-test-author placement silently excluded them — the
+    // story validated against files it never shipped.)
+    expect(ids.indexOf('capture-dev-baseline')).toBe(0);
+    expect(ids.indexOf('capture-dev-baseline')).toBeLessThan(ids.indexOf('test-author'));
   });
 
   it('writes baseline files under .pipeline/ keyed by storyId', () => {
@@ -716,16 +721,22 @@ describe('PR-65 — review-runtime step', () => {
     expect((step as { onFail?: { targetStep: string } }).onFail?.targetStep).toBe('retry');
   });
 
-  it('SKIPPED on dev-server boot failure (foundation stories pass cleanly)', () => {
+  it('SKIPPED on dev-server boot failure with a machine-grepable cause marker (Step-0.4)', () => {
     const pipeline = generateStoryPipeline(browserStory, 'Test Epic', workingDir, {
       rigor: 'mvp',
     });
     const step = pipeline.steps.find((s) => s.id === 'review-runtime');
     const cmd = String((step as { command: string }).command);
-    expect(cmd).toContain('RUNTIME_REVIEW_SKIPPED: dev server did not boot');
+    expect(cmd).toContain('RUNTIME_REVIEW_SKIPPED: cause=dev-server-no-boot');
+    // Every skip path carries a cause= token so the daemon can write a
+    // story-vqa-skipped attention item instead of a silent pass.
+    expect(cmd).toContain('cause=screenshot-failed');
+    expect(cmd).toContain('cause=judge-crash');
+    expect(cmd).toContain('cause=judge-unparseable');
+    expect(cmd).toContain('cause=no-browser-acs');
   });
 
-  it('inlines only browser ACs as JSON (filters out internal ACs)', () => {
+  it('inlines only browser ACs (base64-encoded JSON; filters out internal ACs)', () => {
     const mixed = {
       ...story,
       hasBrowserTests: true,
@@ -740,10 +751,16 @@ describe('PR-65 — review-runtime step', () => {
     const cmd = String(
       (pipeline.steps.find((s) => s.id === 'review-runtime') as { command: string }).command,
     );
-    expect(cmd).toContain('"AC-1"');
-    expect(cmd).toContain('Browser visible thing');
-    expect(cmd).not.toContain('AC-2');
-    expect(cmd).not.toContain('Internal contract');
+    // The ACs travel base64-encoded (shell-safe — the raw JSON form crashed
+    // every run via bash brace expansion). Decode and verify the filter.
+    const b64 = cmd.match(/STORY_BROWSER_ACS_B64=([A-Za-z0-9+/=]+)/)?.[1];
+    expect(b64).toBeTruthy();
+    const acs = JSON.parse(Buffer.from(b64 as string, 'base64').toString('utf8')) as Array<{
+      id: string;
+      text: string;
+    }>;
+    expect(acs.map((a) => a.id)).toEqual(['AC-1']);
+    expect(acs[0].text).toBe('Browser visible thing');
   });
 
   it('spawns claude haiku with --print + reads prompt from stdin', () => {
@@ -760,7 +777,7 @@ describe('PR-65 — review-runtime step', () => {
     expect(cmd).toContain('child.stdin.end()');
   });
 
-  it('UNCERTAIN passes; FAIL exits 1 with the screenshot URL surfaced', () => {
+  it('Step-0: only CONFIDENT FAILs exit 1; UNREACHABLE/low-conf never retry; blank page fails', () => {
     const pipeline = generateStoryPipeline(browserStory, 'Test Epic', workingDir, {
       rigor: 'mvp',
     });
@@ -771,8 +788,26 @@ describe('PR-65 — review-runtime step', () => {
     expect(cmd).toContain('RUNTIME_REVIEW_FAILED');
     expect(cmd).toContain('Screenshot: ');
     expect(cmd).toContain('process.exit(1)');
-    // UNCERTAIN is mentioned in the verdict rules but is NOT used to fail.
-    expect(cmd).toMatch(/UNCERTAIN[\s\S]*future state|UNCERTAIN[\s\S]*foundation/);
+    // Step-0.3a — confidence gating: only confident, observable FAILs open
+    // the DEV retry loop; the rest surface as UNVERIFIABLE (attention item).
+    expect(cmd).toContain("v.conf !== 'low'");
+    expect(cmd).toContain('RUNTIME_REVIEW_UNVERIFIABLE');
+    // Step-0.1 — semantic reachability classification, never keyword-based.
+    expect(cmd).toContain('UNREACHABLE');
+    expect(cmd).toContain('Never FAIL an AC whose state this frame cannot show');
+    // Step-0.1 — the judge reads the authored visual-test spec from disk.
+    expect(cmd).toContain('VISUAL_TESTS_MD_B64');
+    expect(cmd).toContain('visual-tests.md');
+    // Step-0.4 — blank/error page with zero PASS is a real failure (exit 1),
+    // not an all-UNCERTAIN silent pass.
+    expect(cmd).toContain('PAGE_STATE');
+    expect(cmd).toMatch(/blank.*error-overlay|error-overlay.*blank/);
+    // Step-0.3b — DEV is told about the contest path instead of corrupting
+    // the product to satisfy the screenshot.
+    expect(cmd).toContain('AC_CONTEST');
+    // Step-0.5 — suite-asserted ACs bypass the screenshot judge.
+    expect(cmd).toContain('AC_TEST_MAP_B64');
+    expect(cmd).toContain('suite-asserted');
   });
 
   it('uses framework-detect so any web stack works (no hard-coded port 5173)', () => {

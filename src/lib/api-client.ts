@@ -60,11 +60,18 @@ class ApiClient {
       const parsed = await response
         .json()
         .catch(() => ({ error: { code: 'UNKNOWN', message: 'Request failed' } }));
-      const err = new Error(parsed.error?.message || 'Request failed') as Error & {
+      // Some routes return `{ error: { code, message } }`, others a plain
+      // `{ error: "message" }` string (e.g. qa-review's no-visual-tests 400).
+      // Accept both so callers can render the real reason instead of the
+      // generic 'Request failed' (dragon1 2026-06-10: Re-run QA looked like
+      // a silent no-op because the string form fell through to the generic).
+      const message =
+        typeof parsed.error === 'string' ? parsed.error : parsed.error?.message || 'Request failed';
+      const err = new Error(message) as Error & {
         code?: string;
         status?: number;
       };
-      err.code = parsed.error?.code;
+      err.code = typeof parsed.error === 'string' ? undefined : parsed.error?.code;
       err.status = response.status;
       throw err;
     }

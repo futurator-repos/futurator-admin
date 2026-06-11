@@ -37,16 +37,25 @@ export function useAgentEvents(
     // If terminal and we already did the final fetch, don't start a new interval
     if (isTerminal && didFinalFetch.current) return;
 
+    // dino1 (2026-06-10): a COMPLETED/FAILED job gets exactly ONE catch-up
+    // fetch, and the API used to return at most 50 events for it — so any
+    // story whose log exceeded 50 events appeared "cut" mid-DEV forever.
+    // Drain pages (500/page, bounded) until a short page says we're caught up.
+    const PAGE_LIMIT = 500;
     const interval = setInterval(
       async () => {
         try {
-          const data = await api.get<{ events: AgentEvent[]; lastSeq: string }>(
-            `/agent-jobs/${jobId}/events?after=${lastSeq.current}`,
-          );
+          for (let page = 0; page < 20; page++) {
+            const data = await api.get<{ events: AgentEvent[]; lastSeq: string }>(
+              `/agent-jobs/${jobId}/events?after=${lastSeq.current}&limit=${PAGE_LIMIT}`,
+            );
 
-          if (data.events.length > 0) {
-            setEvents((prev) => [...prev, ...data.events]);
-            lastSeq.current = String(data.lastSeq).padStart(6, '0');
+            if (data.events.length > 0) {
+              setEvents((prev) => [...prev, ...data.events]);
+              lastSeq.current = String(data.lastSeq).padStart(6, '0');
+            }
+
+            if (data.events.length < PAGE_LIMIT) break;
           }
 
           if (isTerminal) {

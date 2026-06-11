@@ -5,6 +5,7 @@ import { Loader2 } from 'lucide-react';
 import { useRunStory } from '@/hooks/use-epic-workflow';
 import { useAgentJob } from '@/hooks/use-agent-job';
 import { useAgentEvents } from '@/hooks/use-agent-events';
+import { useRetryWaveGate } from '@/hooks/use-wave-gate';
 import { useAttentionItems } from '@/hooks/use-attention-items';
 import type { PlanWithEpics } from '@/hooks/use-plans';
 import type { AgentJobStatus } from '@/types/agent-orchestrator';
@@ -88,6 +89,7 @@ export function HierarchyView({
         <EpicCard
           key={e.id}
           epic={e}
+          planId={plan.id}
           exp={exp}
           setExp={setExp}
           storyExp={storyExp}
@@ -169,6 +171,8 @@ function PlanRollup({ agg, epicCount }: { agg: Aggregate; epicCount: number }) {
 
 interface EpicCardProps {
   epic: DashboardEpic;
+  /** pacman1 (2026-06-11): needed by the wave gate retry action. */
+  planId: string;
   exp: Record<string, boolean>;
   setExp: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   storyExp: Record<string, boolean>;
@@ -177,7 +181,15 @@ interface EpicCardProps {
   attentionCount?: number;
 }
 
-function EpicCard({ epic, exp, setExp, storyExp, setStoryExp, attentionCount = 0 }: EpicCardProps) {
+function EpicCard({
+  epic,
+  planId,
+  exp,
+  setExp,
+  storyExp,
+  setStoryExp,
+  attentionCount = 0,
+}: EpicCardProps) {
   const open = exp[epic.id];
   const agg = aggregateEpic(epic);
   const pct = Math.round(agg.progress);
@@ -350,6 +362,7 @@ function EpicCard({ epic, exp, setExp, storyExp, setStoryExp, attentionCount = 0
             <WaveRow
               key={w.id}
               epic={epic}
+              planId={planId}
               wave={w}
               exp={exp}
               setExp={setExp}
@@ -367,6 +380,7 @@ function EpicCard({ epic, exp, setExp, storyExp, setStoryExp, attentionCount = 0
 
 function WaveRow({
   epic,
+  planId,
   wave,
   exp,
   setExp,
@@ -374,6 +388,7 @@ function WaveRow({
   setStoryExp,
 }: {
   epic: DashboardEpic;
+  planId: string;
   wave: DashboardWave;
   exp: Record<string, boolean>;
   setExp: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
@@ -384,6 +399,9 @@ function WaveRow({
   const agg = aggregateWave(wave);
   const pct = Math.round(agg.progress);
   const isParallel = wave.stories.length > 1;
+  // pacman1 (2026-06-11) — wave gate (merge + build-check) job status for
+  // the badge + expandable panel. Hook is unconditional (null disables it).
+  const { data: gateJob } = useAgentJob(wave.gateJobId);
   // 2026-05-30 — completion wins over "active". `agg.running` counts
   // ACTIVE_STATUSES, which includes 'fixing'; a wave whose stories are all
   // `done` (100%, e.g. 3/3) but which sits under a `fixing` epic was rendering
@@ -452,6 +470,7 @@ function WaveRow({
               </span>
             )}
           </span>
+          {wave.gateJobId && <WaveGateBadge status={gateJob?.status} />}
         </div>
         <div style={{ width: 120, display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{ flex: 1, height: 2, background: 'var(--border)', overflow: 'hidden' }}>
@@ -506,6 +525,189 @@ function WaveRow({
             onToggle={() => setStoryExp((p) => ({ ...p, [s.id]: !p[s.id] }))}
           />
         ))}
+      {open && wave.gateJobId && (
+        <WaveGatePanel
+          planId={planId}
+          epicId={epic.epicIdRaw}
+          waveNumber={wave.waveIndex}
+          gateJobId={wave.gateJobId}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Wave gate (merge + build-check) badge + panel ────────────────────
+//
+// pacman1 (2026-06-11) — the integration gate between "all stories green"
+// and "wave merged onto plan/<slug>" was invisible: when it failed, the
+// epic just sat at FIXING with no narrative and no action. The badge makes
+// the gate a first-class row element; the panel streams the wave-merge
+// runner's live log (the daemon tees runner log lines into the events
+// table under the gate jobId) and carries the Retry action that re-mints
+// the wave-merge job via POST /plans/:id/waves/retry-gate.
+
+function gateBadgeMeta(status?: AgentJobStatus): { label: string; color: string } | null {
+  if (!status) return null;
+  if (status === 'PENDING') return { label: '⧖ gate queued', color: 'var(--text-mute)' };
+  if (status === 'RUNNING') return { label: '⟳ merging…', color: 'var(--accent-purple)' };
+  if (status === 'FAILED') return { label: '✕ gate failed', color: 'var(--destructive)' };
+  // COMPLETED and salvage variants — the wave landed.
+  return { label: '✓ merged', color: 'var(--success)' };
+}
+
+function WaveGateBadge({ status }: { status?: AgentJobStatus }) {
+  const meta = gateBadgeMeta(status);
+  if (!meta) return null;
+  return (
+    <span
+      style={{
+        fontFamily: 'var(--font-mono)',
+        fontSize: 9,
+        textTransform: 'uppercase',
+        letterSpacing: '0.16em',
+        color: meta.color,
+        border: `1px solid color-mix(in srgb, ${meta.color} 45%, transparent)`,
+        background: `color-mix(in srgb, ${meta.color} 7%, transparent)`,
+        borderRadius: 3,
+        padding: '2px 8px',
+        marginLeft: 12,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
+function WaveGatePanel({
+  planId,
+  epicId,
+  waveNumber,
+  gateJobId,
+}: {
+  planId: string;
+  epicId: string;
+  waveNumber: number;
+  gateJobId: string;
+}) {
+  const { data: job } = useAgentJob(gateJobId);
+  const { events } = useAgentEvents(gateJobId, job?.status);
+  const retryGate = useRetryWaveGate();
+  const meta = gateBadgeMeta(job?.status);
+  const failed = job?.status === 'FAILED';
+  const active = job?.status === 'PENDING' || job?.status === 'RUNNING';
+
+  return (
+    <div
+      style={{
+        margin: '0 18px 12px 54px',
+        border: `1px solid ${failed ? 'color-mix(in srgb, var(--destructive) 40%, transparent)' : 'var(--border)'}`,
+        background: 'color-mix(in srgb, var(--foreground) 1.5%, transparent)',
+        borderRadius: 4,
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          padding: '8px 14px',
+          borderBottom: events.length > 0 || job?.errorMessage ? '1px solid var(--border)' : 'none',
+        }}
+      >
+        <span
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 9,
+            textTransform: 'uppercase',
+            letterSpacing: '0.2em',
+            color: 'var(--text-faint)',
+          }}
+        >
+          wave gate · merge + build check
+        </span>
+        {meta && (
+          <span
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 9,
+              textTransform: 'uppercase',
+              letterSpacing: '0.12em',
+              color: meta.color,
+            }}
+          >
+            {meta.label}
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        {failed && (
+          <button
+            type="button"
+            disabled={retryGate.isPending}
+            onClick={(e) => {
+              e.stopPropagation();
+              retryGate.mutate({ planId, epicId, waveNumber });
+            }}
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10,
+              letterSpacing: '0.1em',
+              textTransform: 'uppercase',
+              padding: '4px 12px',
+              borderRadius: 2,
+              border: '1px solid var(--destructive)',
+              background: 'color-mix(in srgb, var(--destructive) 8%, transparent)',
+              color: 'var(--destructive)',
+              cursor: retryGate.isPending ? 'wait' : 'pointer',
+            }}
+          >
+            {retryGate.isPending ? 'Re-running…' : '↻ Retry gate'}
+          </button>
+        )}
+        {retryGate.isSuccess && !active && (
+          <span
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 9,
+              color: 'var(--success)',
+              letterSpacing: '0.08em',
+            }}
+          >
+            re-queued ✓
+          </span>
+        )}
+      </div>
+      {job?.errorMessage && (
+        <div
+          style={{
+            padding: '8px 14px',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            color: 'var(--destructive)',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            borderBottom: events.length > 0 ? '1px solid var(--border)' : 'none',
+          }}
+        >
+          {job.errorMessage}
+        </div>
+      )}
+      {events.length > 0 && (
+        <div
+          style={{
+            maxHeight: 260,
+            overflowY: 'auto',
+            padding: '6px 14px',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          {events.map((ev) => (
+            <LogEntry key={`${ev.jobId}-${ev.eventSeq}`} event={ev} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

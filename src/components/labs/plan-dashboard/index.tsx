@@ -198,15 +198,24 @@ export function PlanDashboard({ planId }: { planId: string }) {
       for (const s of e.stories) {
         if (s.jobId) ids.push(s.jobId);
       }
+      // pacman1 (2026-06-11) — hydrate wave gate (wave-merge) jobs too so
+      // the hierarchy view can show per-wave gate status + retry actions.
+      for (const gateId of Object.values(e.waveBuildJobs ?? {})) {
+        if (gateId) ids.push(gateId);
+      }
     }
     return ids;
   }, [plan]);
   const hasRunningJobs = useMemo(
     () =>
-      !!plan?.epics?.some((e) =>
-        e.stories.some(
-          (s) => s.status === 'running' || s.status === 'in_review' || s.status === 'fixing',
-        ),
+      !!plan?.epics?.some(
+        (e) =>
+          // 'fixing' epics have an active/retried wave gate — keep polling
+          // so the gate badge and live log advance without a manual refresh.
+          e.status === 'fixing' ||
+          e.stories.some(
+            (s) => s.status === 'running' || s.status === 'in_review' || s.status === 'fixing',
+          ),
       ),
     [plan],
   );

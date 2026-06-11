@@ -97,10 +97,15 @@ describe('applyConfirmedProposals', () => {
 
     const m = readManifest();
     expect(m.core).toHaveLength(1);
+    // Step-0.9c — the scout's rationale is persisted into the manifest
+    // entry (skills-prompt.mjs surfaces it to agents as the task-shaped
+    // description; the upstream SKILL.md description never matched
+    // machine prompts → 0 activations ever).
     expect(m.core[0]).toEqual({
       source: 'anthropic-official',
       skill: 'frontend-design',
       version: 'tag:v1.0.0',
+      rationale: 'r',
     });
     expect(m['last-modified-by']).toMatch(/skill-scout-auto-confirm@/);
     expect(vendorCalls).toHaveLength(1);

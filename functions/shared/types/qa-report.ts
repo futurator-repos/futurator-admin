@@ -123,6 +123,13 @@ export interface VqaTestResult {
    */
   failureClass?: 'render' | 'interaction-gated';
   /**
+   * Step-0.6 (2026-06-05) — the judge's SEMANTIC self-classification of
+   * whether the expected state is physically observable in the idle frame.
+   * When present it is authoritative for `failureClass` (the keyword regex
+   * is only the legacy fallback for rows predating the tag).
+   */
+  observability?: 'observable' | 'not-idle-observable';
+  /**
    * True when the operator has accepted this test as a known limitation
    * (testId ∈ plan.qaAcceptedTestIds). Accepted fails are NON-BLOCKING — they
    * don't count toward the VQA fail tally or the plan's blocking verdict.

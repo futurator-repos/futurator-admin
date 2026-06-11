@@ -286,6 +286,12 @@ export interface EpicWorkflow {
   testingProfile?: TestingProfile; // overall testing config
   reviewSteps?: ReviewStep[]; // dynamic review checklist
   waveBuildJobs?: Record<string, string>; // wave number → build-check job ID
+  // snake3 (2026-06-10) — per-wave transient-retry counter. The reducer
+  // re-mints a wave-merge job when it failed for an INFRA reason
+  // (waveMergeResult.transient: resolver auth death, ENOSPC, non-content
+  // git errors), bounded by this counter so a persistently-failing wave
+  // still escalates to the operator after 2 automatic retries.
+  waveBuildRetries?: Record<string, number>; // wave number → transient retries used
   devModel?: string;
   devEffort?: string;
   reviewerModel?: string;

@@ -293,31 +293,57 @@ function RunQaButton({
           ? 'Run QA for the first time'
           : 'Re-run Visual QA across all epics';
   const disabled = runQa.isPending || blocked;
+  // dragon1 (2026-06-10) — the launch endpoint 400s with a real reason
+  // (e.g. 'No visual tests defined in any story across the plan') but the
+  // mutation error was never rendered: clicking the button looked like a
+  // no-op. Surface the message inline so the operator knows WHY.
+  const errMsg = runQa.isError
+    ? runQa.error instanceof Error
+      ? runQa.error.message
+      : String(runQa.error)
+    : null;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        fontSize: 10,
-        letterSpacing: '0.14em',
-        textTransform: 'uppercase',
-        padding: '7px 14px',
-        border: '1px solid var(--border-2)',
-        borderRadius: 2,
-        color: 'var(--text-dim)',
-        background: 'transparent',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-        opacity: disabled ? 0.5 : 1,
-      }}
-      title={title}
+    <span
+      style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}
     >
-      {runQa.isPending ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
-      {label}
-    </button>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        style={{
+          fontSize: 10,
+          letterSpacing: '0.14em',
+          textTransform: 'uppercase',
+          padding: '7px 14px',
+          border: '1px solid var(--border-2)',
+          borderRadius: 2,
+          color: 'var(--text-dim)',
+          background: 'transparent',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          opacity: disabled ? 0.5 : 1,
+        }}
+        title={title}
+      >
+        {runQa.isPending ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
+        {label}
+      </button>
+      {errMsg && (
+        <span
+          style={{
+            fontSize: 10,
+            color: 'var(--warning)',
+            maxWidth: 280,
+            textAlign: 'right',
+            lineHeight: 1.4,
+          }}
+        >
+          {errMsg}
+        </span>
+      )}
+    </span>
   );
 }
 

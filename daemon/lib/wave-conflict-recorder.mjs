@@ -80,6 +80,11 @@ export async function recordWaveConflictEvent(ddb, event, log = () => {}) {
         }))
       : [],
     candidateWorktree: event.candidateWorktree ?? null,
+    // snake3 (2026-06-10) — the resolver's own account of HOW it resolved
+    // (or why it couldn't): transcript tail / infra cause. This is the
+    // merge-forensics record the operator audits — previously the runner
+    // passed `reasoning` and the recorder dropped it on the floor.
+    reasoning: typeof event.reasoning === 'string' ? event.reasoning.slice(0, 4000) : null,
   };
 
   await ddb.send(new PutCommand({ TableName: WAVE_CONFLICTS_TABLE, Item: item }));

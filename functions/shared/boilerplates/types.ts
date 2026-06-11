@@ -267,6 +267,34 @@ export interface BoilerplateMetadata {
   augmentFiles?: Array<{ path: string; content: string }>;
 
   /**
+   * dino1 root-cause (2026-06-10) — npm scripts to merge into the
+   * scaffolded package.json at bootstrap (only keys not already present).
+   * Needed because `package.json` ships from the TEMPLATE repo, so plain
+   * augmentFiles can't add lifecycle hooks without clobbering the file.
+   * First use: `predev`/`prebuild` → the wiring generator, so every dev
+   * server and build self-wires `src/features/*` into the page. Without
+   * this the generator only ran at the wave-merge gate, its output was
+   * discarded, and apps served the boilerplate starter at `/` while every
+   * build gate stayed green.
+   */
+  packageJsonScripts?: Record<string, string>;
+
+  /**
+   * pacman1 disease (2026-06-11) — devDependencies to merge into the
+   * scaffolded package.json at bootstrap (only keys not already present;
+   * template wins). Root cause this closes: the template shipped NO test
+   * runner, so every story bolted its own onto package.json — parallel
+   * stories collided textually on the file, different waves pinned
+   * different vitest majors (^2 vs ^4), the lockfile churned per wave
+   * (full re-install + new node_modules store entry), and test files
+   * written under one runner era hard-errored under the next. Shared
+   * infrastructure must be template-owned and story-immutable; stories
+   * only own their feature modules. Runs before npm-install so the
+   * bootstrap lockfile pins these from day one.
+   */
+  packageJsonDevDependencies?: Record<string, string>;
+
+  /**
    * Mirror of the SCAFFOLD.md augment file, embedded as a string so the
    * API Lambda can include it in the PM prompt without depending on the
    * cloned working tree being readable from Lambda. Stays in sync with

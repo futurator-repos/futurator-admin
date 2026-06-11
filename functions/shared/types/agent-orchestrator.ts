@@ -402,6 +402,19 @@ export interface AgentJob {
      */
     augmentFiles?: Array<{ path: string; content: string }>;
     /**
+     * dino1 root-cause (2026-06-10) — npm scripts the daemon merges into the
+     * scaffolded package.json (missing keys only). Carries the registry's
+     * `packageJsonScripts` (e.g. predev/prebuild → wiring generator).
+     */
+    packageJsonScripts?: Record<string, string> | null;
+    /**
+     * pacman1 disease (2026-06-11) — devDependencies the daemon merges into
+     * the scaffolded package.json before npm-install (missing keys only).
+     * Carries the registry's `packageJsonDevDependencies` (the test runner
+     * pin) so test infra is template-owned and story-immutable.
+     */
+    packageJsonDevDependencies?: Record<string, string> | null;
+    /**
      * Epic 2 Story 2.2 (2026-05-19) — starter's default skill loadout.
      * Each entry is a `<skill>@<source>` token. The daemon's
      * `prepin-default-skills` step pins these into

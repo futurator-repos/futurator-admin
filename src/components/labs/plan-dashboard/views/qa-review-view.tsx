@@ -267,11 +267,33 @@ function VqaPillar({
       extraColor="var(--text-mute)"
       onViewAll={topFails.length > 0 ? () => onSelect(topFails[0]) : undefined}
     >
-      {vqa.total === 0 && (
-        <p style={{ color: 'var(--text-mute)', fontSize: 12, margin: 0 }}>
-          No visual tests captured. Dev agent emits them during story work.
-        </p>
-      )}
+      {vqa.total === 0 &&
+        // dragon1 (2026-06-10) — at mvp+ rigor, zero visual tests on a UI
+        // app is a PLANNING DEFECT (the PM emitted no needsBrowser ACs, so
+        // DEV never authored VISUAL_TESTS), not a benign skip. New plans
+        // are gated at apply time (VISUAL_COVERAGE_MISSING); this copy
+        // covers plans authored before the gate. Prototype rigor keeps the
+        // neutral copy — visual QA is skipped by design there.
+        (report.rigor === 'prototype' ? (
+          <p style={{ color: 'var(--text-mute)', fontSize: 12, margin: 0 }}>
+            No visual tests captured. Dev agent emits them during story work.
+          </p>
+        ) : report.hasBrowserTests ? (
+          // dino1 (2026-06-10) — total===0 with browser tests authored just
+          // means QA hasn't executed yet; the old copy wrongly diagnosed
+          // "zero needsBrowser ACs" on plans that had them.
+          <p style={{ color: 'var(--text-mute)', fontSize: 12, margin: 0, lineHeight: 1.5 }}>
+            Visual QA has not executed yet. It runs automatically when development completes
+            (aggregate → auto-approved → screenshots). Use Run QA Review to trigger it manually.
+          </p>
+        ) : (
+          <p style={{ color: 'var(--warning)', fontSize: 12, margin: 0, lineHeight: 1.5 }}>
+            Coverage gap: this plan was authored with zero needsBrowser ACs, so no story ever
+            produced visual tests and there is nothing for visual QA to run. New plans are now
+            rejected at apply time for this. To visually verify this app, create a follow-up plan —
+            its stories will carry browser ACs and full visual QA will run.
+          </p>
+        ))}
       {vqa.thumbnails.length > 0 && <ThumbnailStrip thumbs={vqa.thumbnails.slice(0, 4)} />}
       {topFails.length > 0 && (
         <FailureList

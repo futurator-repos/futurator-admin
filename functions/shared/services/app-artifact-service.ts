@@ -131,35 +131,49 @@ async function deleteAppWorktreesAndRepo(
   assertSafeFolderName(appId);
   const worktreesDir = `/home/ubuntu/worktrees/${appId}`;
   const bareRepo = `/home/ubuntu/repos/${appId}.git`;
+  // 2026-06-10 (dragon1 disk-full incident) — also reap the app's shared
+  // node_modules store. The daemon's worktree-reaper protects store entries
+  // behind `.refcount.json`, but this wholesale `rm -rf` of the worktrees
+  // bypasses the refcount-decrement teardown — so a deleted app's store
+  // entries kept stale positive counts and were immortal (dino1 left 1.2 GB
+  // for a week; the disk hit 98% and wave-merge node_modules
+  // materialization failed with ENOSPC, stalling the plan). On app-delete
+  // the refcounts are moot: the whole `<storeRoot>/<appId>` subtree goes.
+  const storeDir = `/home/ubuntu/.node_modules_store/${appId}`;
   const cmd = [
-    `WT_STATUS=ABSENT; REPO_STATUS=ABSENT`,
+    `WT_STATUS=ABSENT; REPO_STATUS=ABSENT; STORE_STATUS=ABSENT`,
     `if [ -d "${worktreesDir}" ]; then`,
     `  rm -rf "${worktreesDir}" && WT_STATUS=DELETED || WT_STATUS=FAILED`,
     `fi`,
     `if [ -d "${bareRepo}" ]; then`,
     `  rm -rf "${bareRepo}" && REPO_STATUS=DELETED || REPO_STATUS=FAILED`,
     `fi`,
-    `echo "WORKTREES_${'$'}{WT_STATUS} BAREREPO_${'$'}{REPO_STATUS}"`,
+    `if [ -d "${storeDir}" ]; then`,
+    `  rm -rf "${storeDir}" && STORE_STATUS=DELETED || STORE_STATUS=FAILED`,
+    `fi`,
+    `echo "WORKTREES_${'$'}{WT_STATUS} BAREREPO_${'$'}{REPO_STATUS} NMSTORE_${'$'}{STORE_STATUS}"`,
   ].join('\n');
   try {
     const commandId = await deps.sendSsmCommand(cmd);
     const output = await deps.waitForSsmOutput(commandId);
     const wtMatch = output.match(/WORKTREES_(\w+)/);
     const repoMatch = output.match(/BAREREPO_(\w+)/);
+    const storeMatch = output.match(/NMSTORE_(\w+)/);
     const wt = wtMatch?.[1] ?? 'UNKNOWN';
     const repo = repoMatch?.[1] ?? 'UNKNOWN';
-    if (wt === 'FAILED' || repo === 'FAILED') {
+    const store = storeMatch?.[1] ?? 'UNKNOWN';
+    if (wt === 'FAILED' || repo === 'FAILED' || store === 'FAILED') {
       return {
         step: 'worktrees',
         status: 'error',
-        detail: `worktrees=${wt} bareRepo=${repo}`,
+        detail: `worktrees=${wt} bareRepo=${repo} nmStore=${store}`,
       };
     }
-    const anyDeleted = wt === 'DELETED' || repo === 'DELETED';
+    const anyDeleted = wt === 'DELETED' || repo === 'DELETED' || store === 'DELETED';
     return {
       step: 'worktrees',
       status: anyDeleted ? 'done' : 'skipped',
-      detail: `worktrees=${wt} bareRepo=${repo}`,
+      detail: `worktrees=${wt} bareRepo=${repo} nmStore=${store}`,
     };
   } catch (err) {
     return {

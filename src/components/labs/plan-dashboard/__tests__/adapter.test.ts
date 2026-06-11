@@ -190,10 +190,7 @@ describe('aggregation', () => {
         story({ storyId: 'S2', status: 'pending' }),
       ],
     });
-    const d = buildDashboardPlan(
-      plan({ epics: [e] }),
-      { 'J-1': job({ totalCost: 1.0 }) },
-    );
+    const d = buildDashboardPlan(plan({ epics: [e] }), { 'J-1': job({ totalCost: 1.0 }) });
     const wave = d.epics[0].waves[0];
     const agg = aggregateWave(wave);
     expect(agg.total).toBe(2);
@@ -205,10 +202,7 @@ describe('aggregation', () => {
 
   it('epic time = sum(wave planned) (sequential waves)', () => {
     const e = epic({
-      stories: [
-        story({ storyId: 'S1', wave: 0 }),
-        story({ storyId: 'S2', wave: 1 }),
-      ],
+      stories: [story({ storyId: 'S1', wave: 0 }), story({ storyId: 'S2', wave: 1 })],
     });
     const d = buildDashboardPlan(plan({ epics: [e] }), {});
     const agg = aggregateEpic(d.epics[0]);
@@ -234,7 +228,7 @@ describe('aggregation', () => {
   });
 
   it('empty wave aggregates safely', () => {
-    const w = { id: 'W', label: 'W', waveIndex: 0, stories: [] };
+    const w = { id: 'W', label: 'W', waveIndex: 0, stories: [], gateJobId: null };
     const agg = aggregateWave(w);
     expect(agg.progress).toBe(0);
     expect(agg.planned).toBe(0);
@@ -250,10 +244,7 @@ describe('flattenStories', () => {
         epics: [
           epic({
             epicId: 'E1',
-            stories: [
-              story({ storyId: 'A', wave: 0 }),
-              story({ storyId: 'B', wave: 1 }),
-            ],
+            stories: [story({ storyId: 'A', wave: 0 }), story({ storyId: 'B', wave: 1 })],
           }),
           epic({ epicId: 'E2', stories: [story({ storyId: 'C' })] }),
         ],

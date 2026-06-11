@@ -8,7 +8,7 @@ import { evaluateThresholds } from '../shared/timer/escalator';
 import { reducePlan, type PlanReducerDeps } from '../shared/services/plan-reducer';
 // 2026-05-30 — shared reducer-deps factory (cron + reactive endpoint parity).
 import { buildPlanReducerDeps } from '../shared/services/reduce-deps';
-import { launchPlanQaAggregate } from '../shared/services/visual-qa-launcher';
+import { launchPlanQaAggregate, launchPlanQaExecute } from '../shared/services/visual-qa-launcher';
 import {
   parseVisualTests,
   buildQaAggregatePipeline,
@@ -103,9 +103,13 @@ export const handler = async () => {
         // never per-epic. PR-8a's `launchPlanVisualQa` (single-stage) is
         // still exported for callers that don't want the contract gate;
         // the cron now uses `launchPlanQaAggregate` instead.
+        // dino1 (2026-06-10) — auto-QA is now DEFAULT-ON for every rigor
+        // (`!== false` instead of truthy). Pre-fix `plan.autoRunQa` was
+        // undefined below production rigor, so QA never ran without the
+        // operator clicking "Run QA Review" on every single plan.
         if (
           result.kind === 'plan-completed' &&
-          plan.autoRunQa &&
+          plan.autoRunQa !== false &&
           !plan.qaJobId &&
           !plan.qaAggregateJobId
         ) {
@@ -152,6 +156,89 @@ export const handler = async () => {
             }
           } catch (err) {
             log('error', 'wave-completion-check', 'auto-QA aggregate enqueue failed', {
+              planId: plan.planId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
+        // dino1 (2026-06-10) — close the second manual gap: auto-approve the
+        // QA contract. Pre-fix, even with the aggregate auto-enqueued the
+        // EXECUTE stage waited for the operator to click "Approve N tests" on
+        // every plan. With auto-QA on (default), once the aggregate job
+        // completes we launch execute with the classified tests as-is;
+        // classification warnings stay visible in the QA view for post-hoc
+        // review, and the operator can still edit+approve manually before the
+        // next tick wins the race (both paths are guarded by qaJobId).
+        if (
+          plan.autoRunQa !== false &&
+          plan.qaContractStatus === 'pending' &&
+          plan.qaAggregateJobId &&
+          !plan.qaJobId
+        ) {
+          try {
+            const aggJob = await agentJobsRepo.getJobById(plan.qaAggregateJobId);
+            if (aggJob?.status === 'COMPLETED') {
+              type FlatTest = import('../shared/types/epic-workflow').VisualTestDef & {
+                storyId: string;
+                storyTitle: string;
+                epicId?: string;
+                epicTitle?: string;
+              };
+              const flatTests: FlatTest[] = [];
+              for (const epic of epicsForPlan) {
+                for (const story of epic.stories) {
+                  for (const vt of story.visualTests ?? []) {
+                    flatTests.push({
+                      ...vt,
+                      storyId: story.storyId,
+                      storyTitle: story.title,
+                      epicId: epic.epicId,
+                      epicTitle: epic.title,
+                    });
+                  }
+                }
+              }
+              if (flatTests.length > 0) {
+                const now = new Date().toISOString();
+                const boilerplate = await resolveQaContext(plan, { getApp: appRepo.getApp });
+                const execResult = await launchPlanQaExecute(
+                  plan,
+                  flatTests,
+                  plan.createdBy,
+                  now,
+                  {
+                    getJobById: agentJobsRepo.getJobById,
+                    createJob: agentJobsRepo.createJob,
+                    parseVisualTests,
+                    buildQaAggregatePipeline,
+                    buildQaExecutePipeline,
+                    uuid: () => crypto.randomUUID(),
+                  },
+                  { boilerplate },
+                );
+                if (execResult.ok) {
+                  await planRepo.updatePlanFields(plan.planId, {
+                    qaJobId: execResult.jobId,
+                    qaContractStatus: 'approved',
+                    qaContractDecidedAt: now,
+                    qaContractDecidedBy: 'auto:wave-completion-check',
+                  });
+                  log('info', 'wave-completion-check', 'auto-approved QA contract', {
+                    planId: plan.planId,
+                    jobId: execResult.jobId,
+                    testCount: execResult.testCount,
+                  });
+                } else {
+                  log('warn', 'wave-completion-check', 'auto-approve QA execute launch failed', {
+                    planId: plan.planId,
+                    reason: execResult.message,
+                  });
+                }
+              }
+            }
+          } catch (err) {
+            log('error', 'wave-completion-check', 'auto-approve QA contract failed', {
               planId: plan.planId,
               error: err instanceof Error ? err.message : String(err),
             });

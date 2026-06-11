@@ -100,28 +100,32 @@ const TURN_CAPS_BY_RIGOR = {
 
 const ROLE_BASE = {
   // ── Shared roles (mirror the TS resolver exactly) ─────────────────────
+  // Step-0.9b (2026-06-05) — 'Skill' allowlisted for per-story pipeline
+  // roles: skills loaded in every session but no role permitted the Skill
+  // tool, so activation was structurally impossible (skill_activated = 0
+  // table-wide). Read-only context injection; safe for read-only judges.
   API_AUTHOR: {
-    allowed: ['Read', 'Write', 'Glob', 'Grep'],
+    allowed: ['Read', 'Write', 'Glob', 'Grep', 'Skill'],
     deniedExtras: ['Bash', 'Edit'],
   },
   TEST: {
-    allowed: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'],
+    allowed: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Skill'],
     deniedExtras: [],
   },
   DEV: {
-    allowed: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep'],
+    allowed: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Skill'],
     deniedExtras: [],
   },
   REVIEWER: {
-    allowed: ['Read', 'Grep', 'Glob'],
+    allowed: ['Read', 'Grep', 'Glob', 'Skill'],
     deniedExtras: ['Write', 'Edit', 'Bash'],
   },
   COMPILER: {
-    allowed: ['Read', 'Write', 'Edit', 'Glob', 'Grep'],
+    allowed: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Skill'],
     deniedExtras: ['Bash'],
   },
   QA: {
-    allowed: ['Bash', 'Read', 'Write', 'Glob'],
+    allowed: ['Bash', 'Read', 'Write', 'Glob', 'Skill'],
     deniedExtras: [],
   },
   PM: {

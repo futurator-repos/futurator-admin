@@ -64,6 +64,13 @@ export interface DashboardWave {
   label: string;
   waveIndex: number;
   stories: DashboardStory[];
+  /**
+   * pacman1 (2026-06-11) — the wave's integration gate (wave-merge /
+   * build-check) job id from EpicWorkflow.waveBuildJobs. Null until the
+   * reducer mints one. The hierarchy view renders a gate badge + live log
+   * + Retry action from this.
+   */
+  gateJobId: string | null;
 }
 
 export interface DashboardEpic {
@@ -224,7 +231,13 @@ export function buildDashboardPlan(
         };
       });
 
-      return { id: waveId, label: waveLabel, waveIndex: wn, stories };
+      return {
+        id: waveId,
+        label: waveLabel,
+        waveIndex: wn,
+        stories,
+        gateJobId: epic.waveBuildJobs?.[String(wn)] ?? null,
+      };
     });
 
     return {

@@ -34,8 +34,25 @@ export interface PlanTestingProfile {
   interactionModel?: string;
 }
 
+import type { PlanKind } from '../schemas/plan-schema';
+export type { PlanKind };
+
 export interface Plan {
   planId: string;
+  /**
+   * App/Plan v1 — FK to the parent App. Optional during migration. These
+   * three fields existed on the FRONTEND Plan type (src/types/plan.ts) and
+   * in every persisted row, but were never declared here — dozens of
+   * API-route reads of plan.appId/kind type-errored against runtime-real
+   * data. Declared 2026-06-11 while wiring the concept-stage import/export.
+   */
+  appId?: string;
+  /** App/Plan v1 — Plan kind ('initial' | 'change' | 'experiment'). */
+  kind?: PlanKind;
+  /** App/Plan v1 — short label like "v1.1 — mobile pass". */
+  iterationLabel?: string;
+  /** App/Plan v1 — file paths/globs the iteration must NOT modify. */
+  noTouchPaths?: string[];
   /** kebab-case, `[a-z][a-z0-9-]{2,40}`, locked after creation. Also the folder slug + deploy URL segment. */
   name: string;
   /**

@@ -121,6 +121,11 @@ export function buildWaveBuildFailedAttention({
   storyIds,
   testExit,
   failingTests = [],
+  // pacman1 (2026-06-11) — tail of the validation command's output. When
+  // the failure is a compile/typecheck error (no failing TESTS at all),
+  // "No failing test list captured." told the operator nothing; the actual
+  // error was only in the daemon log. Surface it in the card body.
+  outputTail = '',
 }) {
   const failHead = failingTests.slice(0, 5);
   const moreCount = Math.max(0, failingTests.length - 5);
@@ -133,7 +138,8 @@ export function buildWaveBuildFailedAttention({
       (failingTests.length > 0
         ? `Top failing tests:\n${failHead.map((t) => `  • ${t}`).join('\n')}` +
           (moreCount > 0 ? `\n  …and ${moreCount} more` : '')
-        : 'No failing test list captured.'),
+        : 'No failing tests — the BUILD itself failed (compile/typecheck).') +
+      (outputTail ? `\n\nValidation output (tail):\n${outputTail}` : ''),
     actions: ['mark-wave-fixing', 'reset-wave', 'inspect-logs'],
     context: { planId, storyIds, testExit, failingTests },
   };

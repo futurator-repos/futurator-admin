@@ -254,6 +254,8 @@ export async function runAppBootstrap(job, ctx) {
     const augmentResult = await stepFns.applyStarterAugments({
       workingDir: worktreeDir,
       augmentFiles: payload.augmentFiles,
+      packageJsonScripts: payload.packageJsonScripts,
+      packageJsonDevDependencies: payload.packageJsonDevDependencies,
       appId,
       displayName: appRow.displayName ?? appId,
       initDate: new Date().toISOString(),

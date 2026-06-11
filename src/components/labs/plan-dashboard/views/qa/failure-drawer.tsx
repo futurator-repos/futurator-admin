@@ -447,6 +447,14 @@ function VqaDetail({ item }: { item: VqaTestResult }) {
             {gated
               ? '— depends on time / score / speed / motion / input, so a static idle screenshot cannot show it. If the code is correct this is a screenshot limitation → Accept it. Send back only if you believe the code is wrong.'
               : '— observable in a static screenshot, so a fail here is likely a genuine code defect → Send back to dev.'}
+            {item.observability && (
+              <>
+                {' '}
+                {item.observability === 'not-idle-observable'
+                  ? '(The judge itself classified this state as NOT observable from the idle frame — semantic, not keyword-based.)'
+                  : '(The judge itself confirmed this state IS observable from the idle frame.)'}
+              </>
+            )}
           </span>
         </div>
       )}

@@ -97,6 +97,8 @@ function substitutePlaceholders(content, { appId, displayName, initDate }) {
 export async function runApplyStarterAugments({
   workingDir,
   augmentFiles,
+  packageJsonScripts,
+  packageJsonDevDependencies,
   appId,
   displayName,
   initDate,
@@ -106,9 +108,63 @@ export async function runApplyStarterAugments({
     if (typeof onOutput === 'function') onOutput(msg + '\n');
   };
 
+  // dino1 root-cause (2026-06-10) — merge registry-declared npm scripts
+  // into the template's package.json (template-owned file, so augmentFiles
+  // can't carry it without clobbering). Only fills MISSING keys: a template
+  // that later ships its own predev/prebuild wins. Runs even when there are
+  // no augment files, so base starters get lifecycle hooks too.
+  // pacman1 disease (2026-06-11) — same mechanism for devDependencies (the
+  // test runner). Runs BEFORE npm-install, so the bootstrap lockfile pins
+  // the runner from day one and stories never touch test plumbing.
+  let scriptsMerged = 0;
+  let devDepsMerged = 0;
+  if (
+    (packageJsonScripts && typeof packageJsonScripts === 'object') ||
+    (packageJsonDevDependencies && typeof packageJsonDevDependencies === 'object')
+  ) {
+    const pkgPath = resolveSafePath(workingDir, 'package.json');
+    try {
+      const { readFile } = await import('node:fs/promises');
+      const pkg = JSON.parse(await readFile(pkgPath, 'utf8'));
+      if (packageJsonScripts && typeof packageJsonScripts === 'object') {
+        pkg.scripts = pkg.scripts || {};
+        for (const [key, cmd] of Object.entries(packageJsonScripts)) {
+          if (typeof cmd === 'string' && !(key in pkg.scripts)) {
+            pkg.scripts[key] = cmd;
+            scriptsMerged += 1;
+          }
+        }
+      }
+      if (packageJsonDevDependencies && typeof packageJsonDevDependencies === 'object') {
+        pkg.devDependencies = pkg.devDependencies || {};
+        for (const [name, version] of Object.entries(packageJsonDevDependencies)) {
+          if (
+            typeof version === 'string' &&
+            !(name in pkg.devDependencies) &&
+            !(name in (pkg.dependencies || {}))
+          ) {
+            pkg.devDependencies[name] = version;
+            devDepsMerged += 1;
+          }
+        }
+      }
+      if (scriptsMerged > 0 || devDepsMerged > 0) {
+        await writeFile(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
+        if (scriptsMerged > 0) {
+          log(`merged ${scriptsMerged} npm script(s) into package.json: ${Object.keys(packageJsonScripts).join(', ')}`);
+        }
+        if (devDepsMerged > 0) {
+          log(`merged ${devDepsMerged} devDependency(ies) into package.json: ${Object.keys(packageJsonDevDependencies).join(', ')}`);
+        }
+      }
+    } catch (err) {
+      throw new Error(`packageJson scripts/devDependencies merge failed: ${err.message}`);
+    }
+  }
+
   if (!Array.isArray(augmentFiles) || augmentFiles.length === 0) {
     log('No starter pack augment files to apply (base starter or stub).');
-    return { written: 0, skipped: true };
+    return { written: 0, skipped: true, scriptsMerged, devDepsMerged };
   }
 
   let written = 0;
@@ -131,5 +187,5 @@ export async function runApplyStarterAugments({
   }
 
   log(`apply-starter-augments: ${written} file(s) written.`);
-  return { written, skipped: false };
+  return { written, skipped: false, scriptsMerged, devDepsMerged };
 }

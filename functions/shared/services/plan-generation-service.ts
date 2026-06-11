@@ -1,8 +1,13 @@
 import type { Plan } from '../types/plan';
 import type { EpicWorkflow, EpicStory } from '../types/epic-workflow';
 import type { AgentJob } from '../types/agent-orchestrator';
-import { planOutputSchema, validatePlanReferences, type PlanOutput } from '../schemas/plan-output-schema';
-import { computeStoryWaves } from './story-waves';
+import {
+  planOutputSchema,
+  validatePlanReferences,
+  validateTouchPointHygiene,
+  type PlanOutput,
+} from '../schemas/plan-output-schema';
+import { computeStoryWavesWithTouchPoints } from './story-waves';
 import { computePlanWaves } from './plan-waves';
 
 /**
@@ -36,7 +41,9 @@ export interface ApplyPlanOutputResult {
 export function parsePlanOutput(job: AgentJob): PlanOutput {
   const raw = job.variables?.PLAN_JSON;
   if (!raw) {
-    throw new Error('Job has no PLAN_JSON variable — PM agent did not emit the expected fenced output.');
+    throw new Error(
+      'Job has no PLAN_JSON variable — PM agent did not emit the expected fenced output.',
+    );
   }
 
   // Robustness: strip fence markers if the daemon's extractor retained them,
@@ -77,6 +84,17 @@ export function parsePlanOutput(job: AgentJob): PlanOutput {
     }
   }
 
+  return validatePlanOutputJson(parsed);
+}
+
+/**
+ * pacman1 disease (2026-06-11) — single validation funnel for a parsed plan
+ * JSON value, shared by the PM-job path (parsePlanOutput) and the operator
+ * import path (POST /plans/:id/import-plan, including externally-LLM-
+ * generated plans pasted into the Concept UI). Schema → cross-references →
+ * touch-point hygiene (story-immutable shared infrastructure).
+ */
+export function validatePlanOutputJson(parsed: unknown): PlanOutput {
   const result = planOutputSchema.safeParse(parsed);
   if (!result.success) {
     const issues = result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
@@ -88,7 +106,112 @@ export function parsePlanOutput(job: AgentJob): PlanOutput {
     throw new Error(`PLAN_JSON reference errors: ${refErrors.join('; ')}`);
   }
 
+  const hygieneErrors = validateTouchPointHygiene(result.data);
+  if (hygieneErrors.length > 0) {
+    throw new Error(`PLAN_JSON touch-point errors: ${hygieneErrors.join('; ')}`);
+  }
+
   return result.data;
+}
+
+/**
+ * dragon1 (2026-06-10) — structural visual-coverage gate.
+ *
+ * The PM emitted a canvas-game plan (sprites, obstacles, HUD) with ZERO
+ * `needsBrowser: true` criteria — every AC was unit-testable. Downstream
+ * that silently disabled the ENTIRE visual-QA surface: no DEV ever emits
+ * VISUAL_TESTS, per-story runtime review never runs, and the plan-level
+ * QA Review stage has nothing to execute. For a UI-bearing app that is a
+ * planning DEFECT, not a valid decomposition — and a prompt instruction
+ * alone cannot guarantee it never recurs.
+ *
+ * `uiBearing` is data-driven: a boilerplate that declares `qaContext`
+ * (dev-server port + healthcheck for screenshots) IS a screenshotable UI
+ * app by definition — no keyword matching on the intent. Prototype rigor
+ * is exempt (visual QA is explicitly skipped at that rigor).
+ *
+ * Returns an operator-facing error string (regenerate the plan; the PM
+ * prompt demands idle-visible browser ACs on UI-bearing stories), or
+ * null when coverage is fine.
+ */
+export function validateVisualCoverage(
+  output: PlanOutput,
+  opts: { uiBearing: boolean; rigor?: string },
+): string | null {
+  if (!opts.uiBearing || opts.rigor === 'prototype') return null;
+  const browserAcCount = output.plan.epics
+    .flatMap((e) => e.stories)
+    .flatMap((s) => s.criteria)
+    .filter((c) => c.needsBrowser).length;
+  if (browserAcCount > 0) return null;
+  return (
+    'Plan has ZERO needsBrowser acceptance criteria, but this app is UI-bearing ' +
+    '(its boilerplate boots a dev server that gets screenshotted). This would ' +
+    'disable visual QA for the whole plan: no VISUAL_TESTS, no per-story runtime ' +
+    'review, nothing for the QA Review stage to run. Regenerate the plan — every ' +
+    'story that renders something must carry at least one idle-visible ' +
+    'needsBrowser AC (e.g. "at load the canvas shows the player sprite on the ' +
+    'ground band", "the HUD reads Score: 0").'
+  );
+}
+
+/**
+ * pacman1 disease (2026-06-11) — inverse of applyPlanOutput: map persisted
+ * EpicWorkflow rows back to the PM-output JSON shape (local E1/Sn ids).
+ * Powers the Concept UI's Export-JSON and Edit-plan round-trip: export →
+ * (operator or external LLM edits) → import re-validates through the same
+ * funnel and re-applies. UUIDs are intentionally dropped; import allocates
+ * fresh ones, exactly like a regenerate.
+ *
+ * Story local IDs are GLOBALLY sequential across epics (S1..Sn in epic
+ * order) to match how the PM numbers them; dependsOn references resolve
+ * within the same epic per the schema contract.
+ */
+export function epicsToPlanOutput(plan: Plan, epics: EpicWorkflow[]): PlanOutput {
+  const orderedEpics = [...epics].sort(
+    (a, b) => plan.epicIds.indexOf(a.epicId) - plan.epicIds.indexOf(b.epicId),
+  );
+  const epicLocalById = new Map<string, string>();
+  orderedEpics.forEach((e, i) => epicLocalById.set(e.epicId, `E${i + 1}`));
+
+  let storyCounter = 0;
+  return {
+    plan: {
+      name: plan.name,
+      description: plan.description || plan.intent || '',
+      epics: orderedEpics.map((epic) => {
+        const storyLocalById = new Map<string, string>();
+        const orderedStories = [...epic.stories].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+        for (const s of orderedStories) {
+          storyCounter += 1;
+          storyLocalById.set(s.storyId, `S${storyCounter}`);
+        }
+        return {
+          id: epicLocalById.get(epic.epicId)!,
+          title: epic.title,
+          goal: epic.description || '',
+          acceptanceCriteria: epic.acceptanceCriteria || '',
+          dependsOn: (epic.dependsOnEpics ?? [])
+            .map((id) => epicLocalById.get(id))
+            .filter((id): id is string => !!id),
+          stories: orderedStories.map((s) => ({
+            id: storyLocalById.get(s.storyId)!,
+            title: s.title,
+            description: s.description,
+            dependsOn: (s.dependsOn ?? [])
+              .map((id) => storyLocalById.get(id))
+              .filter((id): id is string => !!id),
+            touchPoints: s.touchPoints ?? [],
+            criteria: (s.criteria ?? []).map((c) => ({
+              id: c.id,
+              text: c.text,
+              needsBrowser: !!c.needsBrowser,
+            })),
+          })),
+        };
+      }),
+    },
+  };
 }
 
 /**
@@ -134,11 +257,18 @@ export async function applyPlanOutput(
       return { storyId, order, storyOut, storyDeps };
     });
 
-    // Topologically assign wave numbers based on dependsOn.
-    // Stories with empty dependsOn → wave 0 (can run in parallel).
-    // Stories that depend on others → wave = max(dep waves) + 1.
-    const waves = computeStoryWaves(
-      preStories.map(({ storyId, storyDeps }) => ({ storyId, dependsOn: storyDeps })),
+    // pacman1 disease (2026-06-11) — waves now honor BOTH constraints:
+    // dependsOn order AND touch-point disjointness. Two siblings that
+    // declared the same file are serialized into different waves here, at
+    // plan time, instead of colliding at the merge gate. `<EPIC_WIDE>`
+    // stories get a wave to themselves.
+    const waves = computeStoryWavesWithTouchPoints(
+      preStories.map(({ storyId, storyDeps, storyOut, order }) => ({
+        storyId,
+        dependsOn: storyDeps,
+        touchPoints: storyOut.touchPoints,
+        order,
+      })),
     );
 
     const stories: EpicStory[] = preStories.map(({ storyId, order, storyOut, storyDeps }) => ({
@@ -148,7 +278,10 @@ export async function applyPlanOutput(
       description: storyOut.description,
       status: 'pending',
       wave: waves.get(storyId) ?? 0,
-      touchPoints: [],
+      // PM-declared file scope (was hardcoded [] — the declared touch
+      // points never reached the story row, so the DEV prompt's
+      // TOUCH_POINTS and the reviewer scope check ran blind).
+      touchPoints: storyOut.touchPoints ?? [],
       complexity: 'standard',
       reviewRigor: 'standard',
       criteria: storyOut.criteria.map((c) => ({

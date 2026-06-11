@@ -301,6 +301,12 @@ export async function sliceForPlan(planId: string): Promise<TimerSlice[]> {
         jobIds.add(story.jobId);
       }
     }
+
+    // snake3 (2026-06-10) — wave-merge / build-check jobs (merge halts,
+    // conflict-resolver attempts) were invisible to timing + forensics.
+    for (const buildJobId of Object.values(epic.waveBuildJobs ?? {})) {
+      if (buildJobId) jobIds.add(buildJobId);
+    }
   }
 
   // Fetch slices for each job and merge

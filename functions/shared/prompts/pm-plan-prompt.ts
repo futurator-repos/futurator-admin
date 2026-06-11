@@ -1,6 +1,6 @@
 import type { BoilerplateType } from '../boilerplates/registry';
 import { BOILERPLATE_REGISTRY } from '../boilerplates/registry';
-import type { PlanRigor } from '../types/plan';
+import type { PlanRigor, PlanKind } from '../types/plan';
 
 /**
  * PM agent prompt for generating a Plan from a free-text intent.
@@ -32,9 +32,11 @@ export function buildPmPlanPrompt(args: {
    * PM must read existing files via the project tree + knowledge index
    * and propose ADDITIVE stories only — never recreate types, primitives,
    * or files that already exist on disk. Defaults to 'initial' for legacy
-   * plans without a kind field.
+   * plans without a kind field. Phase-2 kinds (feature/bugfix/…) are
+   * accepted; only 'change' currently switches prompt content (the
+   * brownfield clause) — others use the default voice.
    */
-  kind?: 'initial' | 'change' | 'experiment';
+  kind?: PlanKind;
 }): string {
   const meta = BOILERPLATE_REGISTRY[args.boilerplateType];
   if (!meta) {
@@ -120,27 +122,54 @@ execute simultaneously across multiple agent instances. Concretely:
 - Epics follow the same model at their layer: all wave-0 epics start together.
 
 **A plan with more parallelism ships faster.** When in doubt about whether two
-stories actually depend on each other, prefer empty \`dependsOn\` — if they
-conflict at integration time, the final build-check catches it.
+stories actually depend on each other, prefer empty \`dependsOn\` — BUT only
+when they are behaviorally independent (see "Anti-pattern: behaviorally
+coupled siblings" below). File-level independence is not enough; siblings
+whose behaviors interact WILL fail the merge gate and burn repair time.
 
 ### Decomposition guidelines
 
 - **Simple intents** (one game, one page, one CRUD screen): one epic with
-  3-8 stories. Aim for a "scaffold in wave 0, features in wave 1 (parallel),
-  assembly in wave 2" shape.
+  3-8 stories. Aim for a "contract in wave 0, vertical features in wave 1
+  (parallel), assembly in wave 2" shape.
 - **Medium intents** (app with auth + UI + API): 2-4 epics. Foundation usually
   has no deps; feature epics depend on foundation; integration epic depends
   on the feature epics.
 - **Large intents**: 4-6 epics max. Keep cross-epic deps minimal so epics
   themselves can run in parallel waves.
+- **Name epics by VALUE, not by technical layer.** "Player Movement",
+  "Scoring & Progression", "Content Discovery" — not "Rendering Layer",
+  "State Management", "Components". Layer-named epics are a symptom of
+  horizontal slicing (see below).
+
+### Slice VERTICALLY — the single most important structural rule
+
+Each parallel story must be a **self-contained vertical slice**: one
+capability delivered end-to-end (its logic + its rendering + its tests),
+living in its OWN modules, integrated through the contracts of earlier
+waves. A vertical slice is independently developable, independently
+verifiable on screen, and merges without touching its siblings.
+
+The anti-shape is **horizontal slicing**: one story does "all the
+renderers", a sibling does "all the mechanics", a third does "the HUD" —
+every behavior then SPANS stories, their tests encode assumptions about
+each other, and the merged union fails even though each passed alone.
+
+Test for each parallel wave you emit: *"could each of these stories ship
+alone on top of the previous wave and demonstrably work?"* If a story only
+makes sense once its sibling lands, it is not a vertical slice — merge them
+into one story or sequence them.
 
 ### What usually depends on what
 
-- **Types/interfaces** are wave 0 (nothing depends on them yet, they define
-  the contract). Types stories should ALWAYS have \`dependsOn: []\`.
-- **Pure functions / hooks / services** can often be wave 1, depending on the
-  types story — but **independent of each other**.
-- **Components** usually depend on the hooks/services they consume.
+- **Types/interfaces/constants** are wave 0 (nothing depends on them yet,
+  they define the contract). Types stories should ALWAYS have
+  \`dependsOn: []\`. The contract story must define EVERY name two later
+  stories will both reference — siblings must never co-invent a shared type.
+- **Vertical feature slices** are wave 1+, depending on the contract story —
+  but **independent of each other** (disjoint files, disjoint behaviors).
+- **Interaction behaviors** (entity A reacts to entity B) depend on BOTH
+  feature stories — a later wave by construction.
 - **App-level assembly / integration** depends on most of the above — wave N.
 
 ### Anti-pattern: sequential chains
@@ -149,9 +178,64 @@ If you produce \`S1 -> S2 -> S3 -> S4 -> S5\` (each depends only on the prior),
 every story runs alone. That's the worst case. **Look for sibling stories
 that can share a wave.**
 
+### Anti-pattern: behaviorally coupled siblings
+
+Stories in the same wave are developed **in parallel, blind to each other's
+code** — they only meet at the merge gate. So two siblings must never
+implement or test ONE behavior that spans both. The classic failure: story A
+implements ghost movement/state, sibling story B implements "Pacman eats a
+frightened ghost" — B's tests encode assumptions about A's entities that A
+never saw, both pass alone, and the merged union fails the wave gate.
+
+Rules:
+- An **interaction behavior** between two entities/modules (collision,
+  eating, scoring triggered by another entity's state, A-reacts-to-B) belongs
+  in ONE story that \`dependsOn\` the stories owning both sides — a later
+  wave, never split across siblings.
+- A story's tests may only assert code that story itself delivers (plus
+  already-merged contracts from earlier waves) — never a sibling's behavior.
+- Siblings must have **disjoint touch points**. Shared types/contracts come
+  from an earlier wave's contract story; a sibling never edits another
+  sibling's module.
+- Stories never touch **shared infrastructure**: \`package.json\` (deps,
+  scripts), lockfiles, test-runner/build config, or \`@generated\` files. The
+  scaffold ships the test runner and lifecycle scripts; a story that thinks
+  it needs a new dependency is mis-scoped — restructure it to use what the
+  scaffold provides.
+
+### Touch points — REQUIRED on every story
+
+Each story declares \`touchPoints\`: the file paths it will create or
+modify (relative to the project root, using the conventional paths above).
+
+- **Be precise and honest.** List every file. The wave scheduler uses this
+  to serialize stories that would collide: two siblings declaring the same
+  file are automatically pushed into sequential waves. Honest touch points
+  cost a little parallelism; dishonest ones cost a failed merge gate and an
+  agent repair cycle (far slower).
+- If a story has no clear file set, the story is mis-scoped — restate it
+  until it does. For genuinely cross-cutting stories (integration,
+  refactors spanning many files) declare \`"touchPoints": ["<EPIC_WIDE>"]\`
+  — that story is excluded from parallel waves entirely and runs alone.
+- Stories in the same wave must have **disjoint** touch points.
+- NEVER list shared infrastructure (\`package.json\`, lockfiles, build/test
+  config, \`@generated\` files) — plans claiming them are REJECTED at the
+  API layer. The scaffold owns those.
+
 ### Story guidelines
 
-- Each story is ~1-3 hours of agent time.
+- Each story is ~1-3 hours of agent time — sized so a single dev agent
+  completes it in one focused session. If you can't describe the
+  deliverable in two sentences, split it.
+- **Acceptance criteria are behavior contracts, not task lists.** Prefer
+  the Given/When/Then shape where it fits ("Given the game is idle, when
+  the page loads, then the canvas shows…"); always state an observable
+  outcome, never an implementation step ("uses a reducer" is not an AC).
+  Every AC must be verifiable by exactly one of: the test suite, the
+  typechecker/build, or the idle screenshot.
+- A story's ACs (and therefore its tests) may only assert THIS story's
+  deliverable plus contracts from earlier waves — never a sibling's
+  behavior.
 - **Every story MUST produce a concrete code deliverable** (source files the
   DEV writes/edits). NEVER create a standalone "browser smoke test",
   "verify X end-to-end", "QA pass", or "integration test" story whose only
@@ -179,13 +263,64 @@ that can share a wave.**
       'Password' stacked vertically, and a 'Sign in' button below them."
     - "A bar chart with at least three vertical bars of distinct heights
       is visible in the dashboard panel labeled 'Monthly revenue'."
-    - "The game canvas shows the player sprite AND at least one enemy
-      sprite simultaneously at any time during the playing state."
+    - "At game start (before any input) the canvas shows the player sprite
+      standing on the ground band, with the score HUD reading '0' in the
+      top-left corner."
 
   Rule of thumb: include count + color/style + position + a FAIL clause
   whenever it's not obvious. The dev agent will mirror this concrete
   voice into the story's visualTests \`judge:\` block, which is the actual
   contract the QA judge applies.
+
+  **The runtime-review screenshot captures the app's IDLE INITIAL state**
+  (no clicks, no keypresses, no elapsed time). A \`needsBrowser\` AC must
+  describe what is visible AT THAT MOMENT. If the behaviour only manifests
+  after interaction or time (spawning, motion, score changes, "during
+  play"), phrase the browser AC about the initial state's observable
+  precondition and put the dynamic behaviour in a non-browser AC the test
+  suite asserts — never write a browser AC whose truth the initial frame
+  physically cannot show.
+
+  **HARD REQUIREMENT — visual coverage (your plan is REJECTED without it).**
+  This app renders a user interface, so your plan MUST contain
+  \`needsBrowser: true\` criteria. A submitted plan with zero browser ACs
+  fails validation and is regenerated — it would disable visual QA
+  entirely (no screenshots ever taken, the QA Review stage has nothing to
+  run). Apply this split per story:
+
+  - Story renders something on screen (canvas drawing, sprite, component,
+    page, HUD, overlay, background)? → It MUST carry at least ONE
+    \`needsBrowser: true\` AC describing its idle-visible signal: "at load
+    the canvas shows the dragon sprite standing on the ground band", "the
+    HUD reads 'Score: 0' top-left", "the background shows a light-blue sky
+    band over a brown ground band with a visible horizon".
+  - Pure-logic story (types, reducers, physics/collision math, spawn
+    timing)? → Correctly has NONE; its dynamics are asserted by the test
+    suite instead.
+
+  **Make visibility structural — PROGRESSIVE FEATURE REGISTRATION.** A
+  browser AC can only be judged if the story's output is actually ON the
+  page at idle. So every story that delivers something visible must ALSO
+  mount it within the SAME story: register (or extend) a feature entry —
+  \`src/features/<slug>.feature.tsx\` listed in its touchPoints — that
+  renders the story's deliverable in a meaningful idle state (e.g. the
+  maze renderer story registers a feature drawing level 1; the player-
+  sprite story registers a feature drawing the sprite on that scene). Two
+  consequences you must respect:
+
+  - Do NOT write "unit-test-only" rendering stories that assert mocked
+    canvas-context calls instead of pixels (a ctx-stub test proves a call
+    happened, not that anything correct is visible). Mount it, then write
+    the browser AC about what the idle frame shows.
+  - The final assembly story composes everything into the real app
+    feature and RETIRES interim preview features — list the preview
+    feature files it removes in its touchPoints (it runs in a later wave,
+    so editing earlier-wave files is safe). The app ships only the real
+    composition, and every wave of the build was visually verifiable.
+
+  The assembled app's final story should additionally carry browser ACs
+  for the composed initial frame — what a user sees the moment the page
+  loads.
 - Titles are action-oriented ("Implement useGameLoop hook", not "The
   useGameLoop hook").
 - **Stories must respect the existing boilerplate** — if the AC says
@@ -217,6 +352,7 @@ JSON in a code block.
             "title": "Define core domain types",
             "description": "${exampleStoryDescription}",
             "dependsOn": [],
+            "touchPoints": ["${ctx.conventions.typesPath}index.ts"],
             "criteria": ${JSON.stringify(exampleStoryCriteria)}
           }
         ]
@@ -233,12 +369,29 @@ JSON in a code block.
 - Epic \`dependsOn\` can only reference epics defined earlier in the array.
 - Story \`dependsOn\` can only reference stories earlier in the same epic.
 - At least one epic. Each epic has at least one story. Each story has at
-  least one acceptance criterion.
+  least one acceptance criterion AND a non-empty \`touchPoints\` array.
 - **Maximize parallelism**: when two stories don't genuinely depend on each
-  other's output, give both \`dependsOn: []\`.
+  other's output, give both \`dependsOn: []\` — provided they are vertical
+  slices with disjoint touch points and independent behaviors.
 - **Respect the boilerplate**: never propose "create a new <framework> project"
   or "scaffold from scratch" — the scaffold exists. Add to it.
 - Output the JSON between the fences. Nothing else.
+
+## Final self-check (run mentally BEFORE emitting)
+
+1. **Coverage** — every requirement in the user intent maps to at least one
+   story. Nothing the user asked for is missing; nothing they didn't ask
+   for was invented.
+2. **Vertical slices** — every parallel wave passes the "could each story
+   ship alone on top of the previous wave?" test.
+3. **No coupled siblings** — no behavior spans two stories in one wave; no
+   story's ACs mention a sibling's deliverable.
+4. **Touch points** — present on every story, precise, disjoint within each
+   wave, no shared infrastructure.
+5. **Contract-first** — every name two stories reference is defined by an
+   earlier-wave story both depend on.
+6. **Visual coverage** — every story that renders something has an
+   idle-visible \`needsBrowser\` AC; pure-logic stories have none.
 
 Output the JSON now.`;
 }

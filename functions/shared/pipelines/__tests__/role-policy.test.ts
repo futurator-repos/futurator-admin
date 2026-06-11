@@ -213,7 +213,7 @@ describe('resolveRolePolicy — preserves Phase-1 PR-3 string surface', () => {
       role: 'DEV',
       name: 'Developer',
     });
-    expect(cfg.allowedTools).toBe('Bash,Edit,Glob,Grep,Read,Write');
+    expect(cfg.allowedTools).toBe('Bash,Edit,Glob,Grep,Read,Skill,Write');
     expect(cfg.disallowedTools).toBe('Agent,Task,WebFetch,WebSearch');
   });
 
@@ -224,7 +224,7 @@ describe('resolveRolePolicy — preserves Phase-1 PR-3 string surface', () => {
       role: 'REVIEWER',
       name: 'Code Reviewer',
     });
-    expect(cfg.allowedTools).toBe('Glob,Grep,Read');
+    expect(cfg.allowedTools).toBe('Glob,Grep,Read,Skill');
     expect(cfg.disallowedTools).toBe('Agent,Bash,Edit,Task,WebFetch,WebSearch,Write');
   });
 
@@ -235,7 +235,7 @@ describe('resolveRolePolicy — preserves Phase-1 PR-3 string surface', () => {
       role: 'TEST',
       name: 'Test Author',
     });
-    expect(cfg.allowedTools).toBe('Bash,Edit,Glob,Grep,Read,Write');
+    expect(cfg.allowedTools).toBe('Bash,Edit,Glob,Grep,Read,Skill,Write');
     expect(cfg.disallowedTools).toBe('Agent,Task,WebFetch,WebSearch');
   });
 
@@ -246,7 +246,7 @@ describe('resolveRolePolicy — preserves Phase-1 PR-3 string surface', () => {
       role: 'COMPILER',
       name: 'Knowledge Compiler',
     });
-    expect(cfg.allowedTools).toBe('Edit,Glob,Grep,Read,Write');
+    expect(cfg.allowedTools).toBe('Edit,Glob,Grep,Read,Skill,Write');
     expect(cfg.disallowedTools).toBe('Agent,Bash,Task,WebFetch,WebSearch');
   });
 
@@ -270,7 +270,7 @@ describe('resolveRolePolicy — preserves Phase-1 PR-3 string surface', () => {
       name: 'Visual QA Tester',
     });
     // Pre-PR-32 visual-qa-pipeline.ts had no disallowedTools at all.
-    expect(cfg.allowedTools).toBe('Bash,Glob,Read,Write');
+    expect(cfg.allowedTools).toBe('Bash,Glob,Read,Skill,Write');
     expect(cfg.disallowedTools).toBe('Agent,Task,WebFetch,WebSearch');
   });
 });

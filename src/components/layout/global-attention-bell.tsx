@@ -24,8 +24,10 @@ import { useRouter } from 'next/navigation';
 import {
   useGlobalAttention,
   useResolveGlobalAttention,
+  useReopenGlobalAttention,
   useResolveAllForPlan,
 } from '@/hooks/use-global-attention';
+import { useRetryWaveGate } from '@/hooks/use-wave-gate';
 import type { AttentionSeverity, AttentionItem } from '../../../functions/shared/types/attention';
 import type { GlobalAttentionItem } from '@/hooks/use-global-attention';
 
@@ -88,15 +90,28 @@ function GlobalAttentionDrawer({
 }) {
   const router = useRouter();
   const resolve = useResolveGlobalAttention();
+  const reopen = useReopenGlobalAttention();
   const resolveAll = useResolveAllForPlan();
+  // pacman1 (2026-06-11) — resolve is no longer fire-and-vanish. The
+  // resolved row is stashed locally and kept visible (struck through, with
+  // Undo) for the rest of the drawer session, so a mis-click is recoverable
+  // in place instead of silently burying the only pointer to a halted wave.
+  const [recentlyResolved, setRecentlyResolved] = useState<Map<string, GlobalAttentionItem>>(
+    () => new Map(),
+  );
+
+  const openIds = new Set(items.map((it) => it.itemId));
+  const stashedRows = Array.from(recentlyResolved.values()).filter((it) => !openIds.has(it.itemId));
 
   // Group by plan, sort plans alphabetically, sort items within plan by
-  // severity desc then createdAt desc.
-  const grouped = new Map<
-    string,
-    { planId: string; planName: string; items: GlobalAttentionItem[] }
-  >();
-  for (const item of items) {
+  // severity desc then createdAt desc. Locally-resolved rows are appended
+  // to their plan group, flagged via `resolvedLocal`.
+  type DrawerRow = GlobalAttentionItem & { resolvedLocal?: boolean };
+  const grouped = new Map<string, { planId: string; planName: string; items: DrawerRow[] }>();
+  for (const item of [
+    ...items,
+    ...stashedRows.map((it) => ({ ...it, resolvedLocal: true }) as DrawerRow),
+  ]) {
     const key = item.planId;
     if (!grouped.has(key)) {
       grouped.set(key, {
@@ -188,6 +203,7 @@ function GlobalAttentionDrawer({
                   <AttentionRow
                     key={item.itemId}
                     item={item}
+                    resolvedLocal={!!item.resolvedLocal}
                     onOpen={() => {
                       const params = new URLSearchParams({ planId: item.planId });
                       if (item.context?.storyId) {
@@ -196,7 +212,18 @@ function GlobalAttentionDrawer({
                       router.push(`/labs?${params.toString()}`);
                       onClose();
                     }}
-                    onResolve={() => resolve.mutate({ planId: item.planId, itemId: item.itemId })}
+                    onResolve={() => {
+                      setRecentlyResolved((prev) => new Map(prev).set(item.itemId, item));
+                      resolve.mutate({ planId: item.planId, itemId: item.itemId });
+                    }}
+                    onUndo={() => {
+                      reopen.mutate({ planId: item.planId, itemId: item.itemId });
+                      setRecentlyResolved((prev) => {
+                        const next = new Map(prev);
+                        next.delete(item.itemId);
+                        return next;
+                      });
+                    }}
                     isResolving={resolve.isPending}
                   />
                 ))}
@@ -228,15 +255,27 @@ function relativeTime(iso: string): string {
   return new Date(then).toISOString().slice(0, 10);
 }
 
+/**
+ * pacman1 (2026-06-11) — categories whose context carries (epicId,
+ * waveNumber) and whose remediation is "re-run the wave gate". The card's
+ * primary action calls POST /plans/:id/waves/retry-gate — the action the
+ * `retry-step` suggestedAction always promised but the UI never rendered.
+ */
+const WAVE_GATE_CATEGORIES = new Set(['test-gate-failed', 'wave-build-failed']);
+
 function AttentionRow({
   item,
+  resolvedLocal,
   onOpen,
   onResolve,
+  onUndo,
   isResolving,
 }: {
   item: AttentionItem;
+  resolvedLocal: boolean;
   onOpen: () => void;
   onResolve: () => void;
+  onUndo: () => void;
   isResolving: boolean;
 }) {
   const recurrence = item.recurrenceCount ?? 1;
@@ -244,6 +283,41 @@ function AttentionRow({
   // (pre-PR-7, the 224 noise the user is seeing) don't have it, so fall back
   // to `createdAt`. ISO timestamp on hover for precise inspection.
   const seenAt = item.lastSeenAt ?? item.createdAt;
+
+  // pacman1 (2026-06-11) — full readability. Bodies were hard-clamped to two
+  // lines, which cut exactly the part the operator needed (job ids, failing
+  // file, validation output). Long bodies start collapsed but expand in
+  // place; short bodies render whole.
+  const [expanded, setExpanded] = useState(false);
+  const isLongBody = (item.body?.length ?? 0) > 160 || (item.body?.split('\n').length ?? 0) > 2;
+
+  const retryGate = useRetryWaveGate();
+  const waveCtx = item.context as { epicId?: string; waveNumber?: number } | undefined;
+  const canRetryGate =
+    WAVE_GATE_CATEGORIES.has(item.category) &&
+    !!waveCtx?.epicId &&
+    typeof waveCtx?.waveNumber === 'number';
+
+  if (resolvedLocal) {
+    return (
+      <li className="px-4 py-3 opacity-60">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground line-through truncate flex-1">
+            {item.title}
+          </span>
+          <span className="text-[10px] font-mono text-muted-foreground">resolved</span>
+          <button
+            type="button"
+            onClick={onUndo}
+            className="text-[11px] text-foreground border border-border rounded px-2 py-0.5 hover:bg-muted/40"
+          >
+            Undo
+          </button>
+        </div>
+      </li>
+    );
+  }
+
   return (
     <li className="px-4 py-3">
       <div className="flex items-baseline gap-2 flex-wrap">
@@ -270,9 +344,47 @@ function AttentionRow({
       </div>
       <h4 className="mt-1.5 text-sm leading-tight text-foreground">{item.title}</h4>
       {item.body && (
-        <p className="mt-1 text-xs leading-snug text-muted-foreground line-clamp-2">{item.body}</p>
+        <>
+          <p
+            className={`mt-1 text-xs leading-snug text-muted-foreground whitespace-pre-wrap break-words ${
+              expanded ? 'max-h-64 overflow-y-auto' : isLongBody ? 'line-clamp-2' : ''
+            }`}
+          >
+            {item.body}
+          </p>
+          {isLongBody && (
+            <button
+              type="button"
+              onClick={() => setExpanded((e) => !e)}
+              className="mt-0.5 text-[10px] font-mono uppercase tracking-wide text-muted-foreground hover:text-foreground"
+            >
+              {expanded ? '− show less' : '+ show full message'}
+            </button>
+          )}
+        </>
       )}
-      <div className="mt-2 flex gap-2">
+      <div className="mt-2 flex gap-2 flex-wrap">
+        {canRetryGate && (
+          <button
+            type="button"
+            disabled={retryGate.isPending || retryGate.isSuccess}
+            onClick={() =>
+              retryGate.mutate({
+                planId: item.planId,
+                epicId: waveCtx!.epicId!,
+                waveNumber: waveCtx!.waveNumber!,
+              })
+            }
+            className="text-[11px] text-amber-600 dark:text-amber-400 border border-amber-500 rounded px-2 py-1 hover:bg-amber-500/10 disabled:opacity-60"
+            title="Re-run the wave merge + build check for this wave"
+          >
+            {retryGate.isPending
+              ? 'Re-running…'
+              : retryGate.isSuccess
+                ? 'Gate re-queued ✓'
+                : '↻ Retry wave gate'}
+          </button>
+        )}
         <button
           type="button"
           onClick={onOpen}
@@ -289,6 +401,11 @@ function AttentionRow({
           Resolve
         </button>
       </div>
+      {retryGate.isError && (
+        <p className="mt-1 text-[10px] text-red-500 break-words">
+          Retry failed: {(retryGate.error as Error)?.message ?? 'unknown error'}
+        </p>
+      )}
     </li>
   );
 }

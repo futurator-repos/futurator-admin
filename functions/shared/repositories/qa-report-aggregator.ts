@@ -76,7 +76,19 @@ function verdictFromCounts(
 // likely code defect → send back to dev).
 const INTERACTION_GATED_RE =
   /\b(after|once|when|until|eventually|over time|eventually|eventually)\b|\b(score|speed|accelerat\w*|velocity|fps|frame rate)\b|\bexceed\w*\b|\b(playing|gameplay|played|elapsed|seconds?|minutes?|ticks?)\b|\b(press|keypress|keyboard|click\w*|tap\w*|scroll\w*|hover\w*|drag\w*|swipe\w*)\b|\b(motion|moving|moves|animat\w*|transition\w*|spawn\w*)\b/i;
-function classifyVqaFailure(expected?: string, rationale?: string): 'render' | 'interaction-gated' {
+// Step-0.6 (2026-06-05) — the judge now self-classifies observability
+// SEMANTICALLY (can this idle frame physically show the expected state?)
+// and the result rows carry it. When present it is authoritative; the
+// keyword regex above survives only as the legacy fallback for rows from
+// runs predating the tag. A static-worded dynamic AC ("all four obstacles
+// side-by-side") dodges the regex but not the semantic classification.
+function classifyVqaFailure(
+  expected?: string,
+  rationale?: string,
+  observability?: 'observable' | 'not-idle-observable',
+): 'render' | 'interaction-gated' {
+  if (observability === 'not-idle-observable') return 'interaction-gated';
+  if (observability === 'observable') return 'render';
   const hay = `${expected ?? ''} ${rationale ?? ''}`;
   return INTERACTION_GATED_RE.test(hay) ? 'interaction-gated' : 'render';
 }
@@ -260,6 +272,8 @@ function parseTestResultsBlock(raw: string | undefined): Array<{
   screenshotUrl?: string;
   costUsd?: number;
   durationMs?: number;
+  /** Step-0.6 — judge's semantic observability self-classification. */
+  observability?: 'observable' | 'not-idle-observable';
 }> | null {
   if (!raw) return null;
   try {
@@ -623,8 +637,11 @@ function buildVqaRollup(
           rationale: tr.rationale,
           costUsd: tr.costUsd,
           durationMs: tr.durationMs,
+          observability: tr.observability,
           failureClass:
-            status === 'pass' ? undefined : classifyVqaFailure(meta?.expect, tr.rationale),
+            status === 'pass'
+              ? undefined
+              : classifyVqaFailure(meta?.expect, tr.rationale, tr.observability),
           accepted: isAccepted || undefined,
         };
         // Accepted fails are non-blocking → keep them out of `failures`.
@@ -669,6 +686,30 @@ function buildVqaRollup(
     }
   }
 
+  // dragon1 (2026-06-10) — a plan whose stories declare ZERO visualTests
+  // (every AC unit-testable, no needsBrowser ACs) previously resolved this
+  // pillar to 'pending' forever: total=0 → verdictFromCounts falls through
+  // to 'pending' → planVerdict 'needs-attention' → Promote greyed with no
+  // path forward, and "Run QA Review" 400s ('no-visual-tests') with the
+  // error swallowed by the UI. Nothing-to-verify is a SKIP, not a pending:
+  // mirror the prototype-rigor guard above so AC + gate pillars decide.
+  // Scope: only when no execute job is queued/running either — an in-flight
+  // QA run with results not yet landed must keep its real executeStatus.
+  const executeStatus = computeExecuteStatus(plan, jobsById);
+  if (total === 0 && (executeStatus === 'never-run' || executeStatus === 'done')) {
+    return {
+      verdict: 'skipped',
+      total: 0,
+      pass: 0,
+      fail: 0,
+      pending: 0,
+      thumbnails: [],
+      failures: [],
+      results: [],
+      executeStatus,
+    };
+  }
+
   return {
     verdict: verdictFromCounts(pass, fail, pending, accepted),
     total,
@@ -685,7 +726,7 @@ function buildVqaRollup(
     results: allResults,
     costUsd: runCostUsd,
     wallclockSec: runWallclockSec,
-    executeStatus: computeExecuteStatus(plan, jobsById),
+    executeStatus,
     contract: buildContractDraft(plan, epics, jobsById),
   };
 }
@@ -928,7 +969,9 @@ export function buildQaReport(inputs: AggregatorInputs): QaReport {
   return {
     planId: plan.planId,
     rigor: plan.rigor ?? 'mvp',
-    autoRunQa: plan.autoRunQa ?? plan.rigor === 'production',
+    // dino1 (2026-06-10) — auto-QA is default-on for every rigor (was
+    // production-only, which made every mvp plan wait for a manual click).
+    autoRunQa: plan.autoRunQa ?? true,
     hasBrowserTests: !!plan.testingProfile?.hasBrowserTests,
     verdict: overall,
     blockingReason,

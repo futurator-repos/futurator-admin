@@ -65,6 +65,15 @@ export interface WaveReducerDeps extends PipelineLauncherDeps {
    * items (Phase A.5); UI dedupes duplicates.
    */
   writeAttentionItem?: (item: AttentionItem) => Promise<void>;
+  /**
+   * dragon1 (2026-06-10) — optional resolver for dedup-keyed attention
+   * items. When a wave-build-check/wave-merge FAILS, the reducer writes a
+   * 'test-gate-failed' card; when a fresh check for the SAME (epic, wave)
+   * later SUCCEEDS, the card must auto-resolve — otherwise the operator
+   * keeps seeing "Wave N build-check failed" hours after the rerun went
+   * green. No-op when undefined (tests can omit).
+   */
+  resolveAttentionByDedupKey?: (planId: string, dedupKey: string) => Promise<unknown>;
   uuid: () => string;
 }
 
@@ -366,14 +375,90 @@ export async function reduceEpicWaves(
       return { kind: 'wave-build-check-pending', waveNumber: currentWave };
     }
     if (!isSuccess(buildCheckJob.status)) {
+      // ── snake3 (2026-06-10) — TRANSIENT self-heal. ─────────────────────
+      // The wave-merge runner tags infrastructure failures (expired OAuth
+      // killing the conflict-resolver, ENOSPC during node_modules
+      // materialization, non-content git merge errors) with
+      // `waveMergeResult.transient`. Those are not verdicts on the code —
+      // before this, the failed jobId sat in waveBuildJobs[wave] forever
+      // and the cron re-upserted a "build-check failed" card every tick
+      // (38×/95× recurrence) with no path forward except operator surgery.
+      // Re-mint the job automatically (bounded; per-wave counter on the
+      // epic) so transient causes heal themselves. Real failures (tests
+      // red, genuinely unresolvable conflict) are NOT transient and still
+      // halt for the operator below.
+      const mergeResult = (
+        buildCheckJob as AgentJob & {
+          waveMergeResult?: { outcome?: string; transient?: boolean };
+        }
+      ).waveMergeResult;
+      const retriesByWave = epic.waveBuildRetries ?? {};
+      const priorRetries = retriesByWave[String(currentWave)] ?? 0;
+      const MAX_TRANSIENT_RETRIES = 2;
+      if (useStoryWorktree && mergeResult?.transient && priorRetries < MAX_TRANSIENT_RETRIES) {
+        const retryJobId = deps.uuid();
+        const now = deps.now();
+        const appId = epic.workingDir.replace(/\/+$/, '').split('/').filter(Boolean).pop() || '';
+        const retryStoryIds = currentWaveStories
+          .filter((s) => {
+            const job = jobsByStory.get(s.storyId);
+            return job && isSuccess(job.status);
+          })
+          .map((s) => s.storyId);
+        await deps.createJob({
+          jobId: retryJobId,
+          status: 'PENDING',
+          createdAt: now,
+          updatedAt: now,
+          createdBy: epic.createdBy,
+          workingDir: epic.workingDir,
+          jobType: 'wave-merge' as never,
+          retryOf: existingBuildCheckId,
+          waveMergePayload: {
+            appId,
+            planId: planOpts!.planId || '',
+            planSlug: planOpts!.planSlug!,
+            epicId: epic.epicId,
+            waveNumber: currentWave,
+            storyIds: retryStoryIds,
+            postMergeValidationCmd: null,
+          },
+          pipeline: { agents: {}, steps: [] },
+        } as never);
+        await deps.updateEpicFields(epic.epicId, {
+          stories: mutable,
+          waveBuildJobs: {
+            ...(epic.waveBuildJobs || {}),
+            [String(currentWave)]: retryJobId,
+          },
+          waveBuildRetries: {
+            ...retriesByWave,
+            [String(currentWave)]: priorRetries + 1,
+          },
+        });
+        return {
+          kind: 'wave-build-check-created',
+          waveNumber: currentWave,
+          jobId: retryJobId,
+        };
+      }
+
       // Build failed — halt the epic for operator intervention.
+      //
+      // snake3 (2026-06-10) — write-once per failure state. The cron
+      // re-reduces 'fixing' epics every tick; before this guard each tick
+      // re-upserted the same card (recurrenceCount climbed 38×/95× on one
+      // unchanged failure) and re-wrote the epic row. First observation
+      // writes the card + flips status; subsequent ticks no-op until the
+      // state actually changes (retry minted a new jobId / wave advanced).
+      const alreadyHalted = epic.status === 'fixing';
       await deps.updateEpicFields(epic.epicId, {
         stories: mutable,
         status: 'fixing',
       });
 
       // Pipeline v2.0 PR-7 (G+H): one upsert per (epic, wave) build-check.
-      if (deps.writeAttentionItem && epic.planId) {
+      if (!alreadyHalted && deps.writeAttentionItem && epic.planId) {
         await deps
           .writeAttentionItem({
             planId: epic.planId,
@@ -390,6 +475,9 @@ export async function reduceEpicWaves(
             context: {
               epicId: epic.epicId,
               jobId: existingBuildCheckId,
+              // pacman1 (2026-06-11) — lets the attention card's Retry
+              // button target POST /plans/:id/waves/retry-gate directly.
+              waveNumber: currentWave,
             },
             suggestedActions: [
               { label: 'Open logs', kind: 'open-logs' },
@@ -404,6 +492,21 @@ export async function reduceEpicWaves(
       }
 
       return { kind: 'wave-build-check-failed', waveNumber: currentWave };
+    }
+
+    // Build-check SUCCEEDED — auto-resolve any open failure card from a
+    // prior failed attempt on this same (epic, wave). dragon1 2026-06-10:
+    // the ENOSPC wave-merge failure card stayed "1 unresolved" for hours
+    // after the rerun merged cleanly, because nothing ever closed it.
+    if (deps.resolveAttentionByDedupKey && epic.planId) {
+      await deps
+        .resolveAttentionByDedupKey(
+          epic.planId,
+          `wave-reducer:wave-build-check-failed:${epic.epicId}:${currentWave}`,
+        )
+        .catch(() => {
+          // swallow — attention resolution must never break the reducer
+        });
     }
   }
 

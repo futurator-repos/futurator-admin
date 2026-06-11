@@ -56,7 +56,7 @@ describe('daemon role-policy mirror', () => {
 
   it('returns sorted comma-joined strings (matches TS resolver shape)', () => {
     const cfg = buildAgentConfig({ role: 'DEV', name: 'Developer', model: 'sonnet' });
-    expect(cfg.allowedTools).toBe('Bash,Edit,Glob,Grep,Read,Write');
+    expect(cfg.allowedTools).toBe('Bash,Edit,Glob,Grep,Read,Skill,Write');
     expect(cfg.disallowedTools).toBe('Agent,Task,WebFetch,WebSearch');
     expect(cfg.name).toBe('Developer');
     expect(cfg.model).toBe('sonnet');
@@ -70,11 +70,14 @@ describe('daemon role-policy mirror', () => {
   });
 
   it.each([
-    ['DEV', 'Bash,Edit,Glob,Grep,Read,Write', 'Agent,Task,WebFetch,WebSearch'],
-    ['TEST', 'Bash,Edit,Glob,Grep,Read,Write', 'Agent,Task,WebFetch,WebSearch'],
-    ['REVIEWER', 'Glob,Grep,Read', 'Agent,Bash,Edit,Task,WebFetch,WebSearch,Write'],
-    ['COMPILER', 'Edit,Glob,Grep,Read,Write', 'Agent,Bash,Task,WebFetch,WebSearch'],
-    ['QA', 'Bash,Glob,Read,Write', 'Agent,Task,WebFetch,WebSearch'],
+    // Step-0.9b (2026-06-05) — per-story pipeline roles allowlist 'Skill'
+    // (skills loaded every session but no role permitted the tool →
+    // skill_activated was 0 table-wide).
+    ['DEV', 'Bash,Edit,Glob,Grep,Read,Skill,Write', 'Agent,Task,WebFetch,WebSearch'],
+    ['TEST', 'Bash,Edit,Glob,Grep,Read,Skill,Write', 'Agent,Task,WebFetch,WebSearch'],
+    ['REVIEWER', 'Glob,Grep,Read,Skill', 'Agent,Bash,Edit,Task,WebFetch,WebSearch,Write'],
+    ['COMPILER', 'Edit,Glob,Grep,Read,Skill,Write', 'Agent,Bash,Task,WebFetch,WebSearch'],
+    ['QA', 'Bash,Glob,Read,Skill,Write', 'Agent,Task,WebFetch,WebSearch'],
     ['PM', 'Read', 'Agent,Bash,Edit,Task,WebFetch,WebSearch,Write'],
     // Daemon-only roles
     ['CONVERSATION', 'Bash,Glob,Grep,Read', 'Agent,Edit,Task,WebFetch,WebSearch,Write'],
@@ -109,7 +112,7 @@ describe('daemon role-policy mirror', () => {
 
 describe('step-level helpers', () => {
   it('buildAllowedToolsString returns just the comma-joined string', () => {
-    expect(buildAllowedToolsString('COMPILER')).toBe('Edit,Glob,Grep,Read,Write');
+    expect(buildAllowedToolsString('COMPILER')).toBe('Edit,Glob,Grep,Read,Skill,Write');
   });
 
   it('buildDisallowedToolsString returns just the comma-joined string', () => {

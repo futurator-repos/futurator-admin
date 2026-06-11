@@ -140,34 +140,41 @@ export type RolePolicy = z.infer<typeof RolePolicySchema>;
 const BASELINE_DENY = ['Task', 'Agent', 'WebFetch', 'WebSearch'] as const;
 
 const ROLE_BASE: Record<Role, { allowed: readonly string[]; deniedExtras: readonly string[] }> = {
+  // Step-0.9b (2026-06-05) — 'Skill' is allowlisted for the per-story
+  // pipeline roles. The CLI loads project skills into every session
+  // (skills_available: 66) but `--allowedTools` gates USE: with no role
+  // permitting the Skill tool, zero activations were possible — table-wide
+  // skill_activated count was 0. Skill is a read-only context injection
+  // (loads a vendored SKILL.md), safe even for read-only judges.
+  //
   // API-AUTHOR is reserved for Story 2-A-3-1. Until that story lands the
   // resolver returns a conservative default — no Edit, narrow Write — so
   // accidentally invoking the role in advance fails closed.
   API_AUTHOR: {
-    allowed: ['Read', 'Write', 'Glob', 'Grep'],
+    allowed: ['Read', 'Write', 'Glob', 'Grep', 'Skill'],
     deniedExtras: ['Bash', 'Edit'],
   },
   TEST: {
-    allowed: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'],
+    allowed: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Skill'],
     deniedExtras: [],
   },
   DEV: {
-    allowed: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep'],
+    allowed: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Skill'],
     deniedExtras: [],
   },
   REVIEWER: {
-    allowed: ['Read', 'Grep', 'Glob'],
+    allowed: ['Read', 'Grep', 'Glob', 'Skill'],
     // Read-only: deny Bash + writes per v2.5 §10 ("Bash is the most
     // important deny — a Reviewer that can shell out can do anything").
     deniedExtras: ['Write', 'Edit', 'Bash'],
   },
   COMPILER: {
-    allowed: ['Read', 'Write', 'Edit', 'Glob', 'Grep'],
+    allowed: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Skill'],
     // Knowledge-graph ops are pure file IO; compiler never shells out.
     deniedExtras: ['Bash'],
   },
   QA: {
-    allowed: ['Bash', 'Read', 'Write', 'Glob'],
+    allowed: ['Bash', 'Read', 'Write', 'Glob', 'Skill'],
     deniedExtras: [],
   },
   PM: {

@@ -69,6 +69,8 @@ export interface VqaTestResult {
   durationMs?: number;
   /** B#2 — classification of a non-pass test (drives the drawer banner). */
   failureClass?: 'render' | 'interaction-gated';
+  /** Step-0.6 — judge's semantic observability self-classification (authoritative for failureClass when present). */
+  observability?: 'observable' | 'not-idle-observable';
   /** B#2 — operator accepted this failure as a known limitation (non-blocking). */
   accepted?: boolean;
 }

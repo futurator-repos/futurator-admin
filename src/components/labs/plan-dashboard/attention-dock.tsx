@@ -15,6 +15,7 @@ import {
   useResolveAttentionItem,
   type DedupedAttentionItem,
 } from '@/hooks/use-attention-items';
+import { useRetryWaveGate } from '@/hooks/use-wave-gate';
 import type { AttentionSeverity } from '../../../../functions/shared/types/attention';
 import {
   SkillScoutCard,
@@ -183,6 +184,7 @@ export function AttentionDock({
                 <AttentionCard
                   key={item.itemId}
                   item={item}
+                  planId={planId}
                   resolving={resolving.has(item.itemId)}
                   onResolve={() => handleResolve(item.itemId)}
                   onOpenStory={() => {
@@ -351,13 +353,23 @@ function DockEmpty({ chip }: { chip: ChipKey }) {
   );
 }
 
+/**
+ * pacman1 (2026-06-11) — wave gate failure categories. Their context carries
+ * (epicId, waveNumber), so the card can render the "Retry wave gate" action
+ * that re-mints the wave-merge job (the `retry-step` suggestedAction the
+ * backend always advertised but the dock never rendered).
+ */
+const WAVE_GATE_CATEGORIES = new Set(['test-gate-failed', 'wave-build-failed']);
+
 function AttentionCard({
   item,
+  planId,
   resolving,
   onResolve,
   onOpenStory,
 }: {
   item: DedupedAttentionItem;
+  planId: string;
   resolving: boolean;
   onResolve: () => void;
   onOpenStory: () => void;
@@ -366,6 +378,20 @@ function AttentionCard({
   const isResolved = item.status === 'resolved';
   const isResolving = resolving || item.status === 'resolving';
   const hasStory = !!item.context?.storyId;
+
+  // pacman1 (2026-06-11) — full readability: long bodies expand in place
+  // instead of relying on a fixed-height clamp that hid the actionable tail
+  // (validation output, job ids).
+  const [expanded, setExpanded] = useState(false);
+  const isLongBody = (item.body?.length ?? 0) > 220 || (item.body?.split('\n').length ?? 0) > 4;
+
+  const retryGate = useRetryWaveGate();
+  const waveCtx = item.context as { epicId?: string; waveNumber?: number } | undefined;
+  const canRetryGate =
+    !isResolved &&
+    WAVE_GATE_CATEGORIES.has(item.category) &&
+    !!waveCtx?.epicId &&
+    typeof waveCtx?.waveNumber === 'number';
   return (
     <article
       style={{
@@ -454,17 +480,48 @@ function AttentionCard({
         )}
       </h3>
       {item.body && (
-        <p
-          style={{
-            fontSize: 12,
-            color: 'var(--text-mute)',
-            margin: '0 0 10px',
-            lineHeight: 1.45,
-            whiteSpace: 'pre-wrap',
-          }}
-        >
-          {item.body}
-        </p>
+        <>
+          <p
+            style={{
+              fontSize: 12,
+              color: 'var(--text-mute)',
+              margin: '0 0 4px',
+              lineHeight: 1.45,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              ...(isLongBody && !expanded
+                ? {
+                    display: '-webkit-box',
+                    WebkitLineClamp: 4,
+                    WebkitBoxOrient: 'vertical' as const,
+                    overflow: 'hidden',
+                  }
+                : { maxHeight: 320, overflowY: 'auto' as const }),
+            }}
+          >
+            {item.body}
+          </p>
+          {isLongBody && (
+            <button
+              type="button"
+              onClick={() => setExpanded((e) => !e)}
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 9,
+                letterSpacing: '0.1em',
+                textTransform: 'uppercase',
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-faint)',
+                cursor: 'pointer',
+                padding: 0,
+                margin: '0 0 10px',
+              }}
+            >
+              {expanded ? '− show less' : '+ show full message'}
+            </button>
+          )}
+        </>
       )}
       {/* S3 — per-story VQA: show the actual screenshot the judge read, so the
           operator can visually confirm a real screenshot was captured + the
@@ -476,6 +533,7 @@ function AttentionCard({
           rel="noreferrer"
           style={{ display: 'block', margin: '0 0 10px' }}
         >
+          {/* eslint-disable-next-line @next/next/no-img-element -- S3 pre-signed URL; next/image optimization would proxy/cache the ephemeral screenshot */}
           <img
             src={(item.context as { screenshotUrl?: string }).screenshotUrl}
             alt="Runtime visual-review screenshot"
@@ -493,6 +551,39 @@ function AttentionCard({
       )}
       {!isResolved && (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {canRetryGate && (
+            <button
+              type="button"
+              disabled={retryGate.isPending || retryGate.isSuccess}
+              onClick={() =>
+                retryGate.mutate({
+                  planId,
+                  epicId: waveCtx!.epicId!,
+                  waveNumber: waveCtx!.waveNumber!,
+                })
+              }
+              title="Re-run the wave merge + build check for this wave"
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 10,
+                letterSpacing: '0.1em',
+                textTransform: 'uppercase',
+                padding: '5px 10px',
+                borderRadius: 2,
+                border: '1px solid var(--amber, #f59e0b)',
+                background: 'color-mix(in srgb, var(--amber, #f59e0b) 8%, transparent)',
+                color: 'var(--amber, #f59e0b)',
+                cursor: retryGate.isPending ? 'wait' : 'pointer',
+                opacity: retryGate.isSuccess ? 0.7 : 1,
+              }}
+            >
+              {retryGate.isPending
+                ? 'Re-running…'
+                : retryGate.isSuccess
+                  ? 'Gate re-queued ✓'
+                  : '↻ Retry wave gate'}
+            </button>
+          )}
           <button
             type="button"
             onClick={onResolve}
@@ -534,6 +625,18 @@ function AttentionCard({
             </button>
           )}
         </div>
+      )}
+      {retryGate.isError && (
+        <p
+          style={{
+            fontSize: 11,
+            color: 'var(--destructive)',
+            margin: '8px 0 0',
+            wordBreak: 'break-word',
+          }}
+        >
+          Retry failed: {(retryGate.error as Error)?.message ?? 'unknown error'}
+        </p>
       )}
     </article>
   );

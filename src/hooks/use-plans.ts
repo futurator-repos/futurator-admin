@@ -124,6 +124,53 @@ export function useStartPlan(planId: string | null) {
   });
 }
 
+// ── Concept-stage plan portability (2026-06-11) ──
+// Export the epic tree as PM-output JSON, import an edited/externally-
+// generated plan JSON, and fetch the PM prompt for external-LLM handoff.
+
+export interface PlanExport {
+  schema: string;
+  exportedAt: string;
+  planId: string;
+  intent: string;
+  rigor: string | null;
+  status: string;
+  plan: {
+    name: string;
+    description: string;
+    epics: unknown[];
+  };
+}
+
+export function useExportPlan(planId: string | null) {
+  return useMutation({
+    mutationFn: () => api.get<PlanExport>(`/plans/${planId}/export`),
+  });
+}
+
+export function usePmPrompt(planId: string | null) {
+  return useMutation({
+    mutationFn: () =>
+      api.get<{ planId: string; boilerplateType: string; prompt: string; note: string }>(
+        `/plans/${planId}/pm-prompt`,
+      ),
+  });
+}
+
+export function useImportPlan(planId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (planJson: string) =>
+      api.post<{ plan: Plan; epics: EpicWorkflow[] }>(`/plans/${planId}/import-plan`, {
+        planJson,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['plans', planId] });
+      queryClient.invalidateQueries({ queryKey: ['plans'] });
+    },
+  });
+}
+
 export function usePatchPlan(planId: string | null) {
   const queryClient = useQueryClient();
   return useMutation({

@@ -26,7 +26,10 @@ const POLL_MS = 10_000;
 export function useAgentFlags() {
   return useQuery({
     queryKey: QK_FLAGS,
-    queryFn: () => api.get<{ flags: AgentFlag[] }>('/api/admin/flags').then((r) => r.flags),
+    // NOTE: api-client's base URL already ends in `/api` — passing
+    // '/api/admin/flags' here produced `/api/api/admin/flags` → 404 on
+    // every 10s poll (dragon1 console, 2026-06-10).
+    queryFn: () => api.get<{ flags: AgentFlag[] }>('/admin/flags').then((r) => r.flags),
     refetchInterval: POLL_MS,
     staleTime: POLL_MS,
   });
@@ -46,7 +49,7 @@ export function usePauseAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () =>
-      api.post<{ paused: true; updatedBy: string; updatedAt: string }>('/api/admin/pause', {}),
+      api.post<{ paused: true; updatedBy: string; updatedAt: string }>('/admin/pause', {}),
     onSuccess: () => qc.invalidateQueries({ queryKey: QK_FLAGS }),
   });
 }
@@ -55,7 +58,7 @@ export function useResumeAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () =>
-      api.post<{ paused: false; updatedBy: string; updatedAt: string }>('/api/admin/resume', {}),
+      api.post<{ paused: false; updatedBy: string; updatedAt: string }>('/admin/resume', {}),
     onSuccess: () => qc.invalidateQueries({ queryKey: QK_FLAGS }),
   });
 }

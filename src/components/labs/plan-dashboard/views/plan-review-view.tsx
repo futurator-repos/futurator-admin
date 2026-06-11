@@ -14,7 +14,14 @@ import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { PlanWithEpics } from '@/hooks/use-plans';
-import { usePatchPlan, useRegeneratePlan, useStartPlan } from '@/hooks/use-plans';
+import {
+  usePatchPlan,
+  useRegeneratePlan,
+  useStartPlan,
+  useExportPlan,
+  useImportPlan,
+  usePmPrompt,
+} from '@/hooks/use-plans';
 import { useAttentionItems } from '@/hooks/use-attention-items';
 import type { AgentJobStatus } from '@/types/agent-orchestrator';
 import type { EpicWorkflow } from '@/types/epic-workflow';
@@ -24,6 +31,7 @@ import {
   SkillScoutCard,
   type SkillScoutCardContext,
 } from '@/components/labs/skill-scout/skill-scout-card';
+import { PlanEditorModal, planOutputToDraft, type PlanDraft } from './plan-editor-modal';
 
 interface Props {
   plan: PlanWithEpics;
@@ -109,6 +117,54 @@ export function PlanReviewView({
       // Refetch attention so the gating card appears inline immediately.
       qc.invalidateQueries({ queryKey: ['attention-items', plan.planId] });
       setStartError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // ── Plan portability (2026-06-11): export / edit / import / external LLM ──
+  const exportPlan = useExportPlan(plan.planId);
+  const importPlan = useImportPlan(plan.planId);
+  const pmPrompt = usePmPrompt(plan.planId);
+  const [jsonModal, setJsonModal] = useState<{ mode: 'edit' | 'import'; initial: string } | null>(
+    null,
+  );
+  const [editorDraft, setEditorDraft] = useState<PlanDraft | null>(null);
+  const [promptCopied, setPromptCopied] = useState(false);
+  const canMutatePlan = isConcept && !generating;
+
+  async function handleExportDownload() {
+    try {
+      const data = await exportPlan.mutateAsync();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${plan.name}-plan.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('[PlanReview] export', err);
+    }
+  }
+
+  async function handleEditPlan() {
+    try {
+      const data = await exportPlan.mutateAsync();
+      setEditorDraft(
+        planOutputToDraft({ plan: data.plan as Parameters<typeof planOutputToDraft>[0]['plan'] }),
+      );
+    } catch (err) {
+      console.error('[PlanReview] edit-plan', err);
+    }
+  }
+
+  async function handleCopyPmPrompt() {
+    try {
+      const data = await pmPrompt.mutateAsync();
+      await navigator.clipboard.writeText(data.prompt);
+      setPromptCopied(true);
+      setTimeout(() => setPromptCopied(false), 2500);
+    } catch (err) {
+      console.error('[PlanReview] copy-prompt', err);
     }
   }
 
@@ -231,6 +287,72 @@ export function PlanReviewView({
           completed, or failed); collapsed by default once epics land so
           the operator sees the structure first, the trace on demand. */}
       {pmJobId && <PmAgentLogPanel jobId={pmJobId} defaultOpen={!hasEpics || generating} />}
+
+      {/* Plan portability toolbar — export / edit / import / external LLM. */}
+      {isConcept && (
+        <section
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            flexWrap: 'wrap',
+          }}
+        >
+          <SectionHeader>Plan JSON</SectionHeader>
+          {hasEpics && (
+            <GhostButton
+              label={exportPlan.isPending ? 'Exporting…' : 'Export'}
+              onClick={handleExportDownload}
+              disabled={exportPlan.isPending}
+            />
+          )}
+          {hasEpics && (
+            <GhostButton
+              label="Edit plan"
+              onClick={handleEditPlan}
+              disabled={!canMutatePlan || exportPlan.isPending}
+            />
+          )}
+          <GhostButton
+            label="Import"
+            onClick={() => setJsonModal({ mode: 'import', initial: '' })}
+            disabled={!canMutatePlan}
+          />
+          <GhostButton
+            label={promptCopied ? 'Copied ✓' : 'Copy LLM prompt'}
+            onClick={handleCopyPmPrompt}
+            disabled={pmPrompt.isPending}
+          />
+          <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
+            Generate the plan with any external LLM: copy the prompt, paste its JSON via Import.
+          </span>
+        </section>
+      )}
+
+      {jsonModal && (
+        <PlanJsonModal
+          mode={jsonModal.mode}
+          initial={jsonModal.initial}
+          pending={importPlan.isPending}
+          onCancel={() => setJsonModal(null)}
+          onSubmit={async (text) => {
+            await importPlan.mutateAsync(text);
+            setJsonModal(null);
+          }}
+        />
+      )}
+
+      {editorDraft && (
+        <PlanEditorModal
+          initial={editorDraft}
+          pending={importPlan.isPending}
+          onCancel={() => setEditorDraft(null)}
+          onSubmit={async (planJson) => {
+            await importPlan.mutateAsync(planJson);
+            setEditorDraft(null);
+          }}
+        />
+      )}
 
       {/* Epics list */}
       <section>
@@ -465,8 +587,15 @@ function EpicRow({
                   gap: 6,
                 }}
               >
-                {items.map((story, sidx) => (
-                  <StoryWithCriteria key={story.storyId} story={story} label={`S${sidx + 1}`} />
+                {items.map((story) => (
+                  <StoryWithCriteria
+                    key={story.storyId}
+                    story={story}
+                    // Epic-local sequential number (was per-wave index — every
+                    // wave's first story rendered as "S1").
+                    label={`S${(story.order ?? 0) + 1}`}
+                    allStories={epic.stories}
+                  />
                 ))}
               </ul>
             </div>
@@ -490,13 +619,22 @@ function EpicRow({
 function StoryWithCriteria({
   story,
   label,
+  allStories,
 }: {
   story: EpicWorkflow['stories'][number];
   label: string;
+  /** Sibling stories in the same epic — resolves dependsOn UUIDs to labels. */
+  allStories: EpicWorkflow['stories'];
 }) {
   const [expanded, setExpanded] = useState(false);
   const criteria = story.criteria ?? [];
   const hasCriteria = criteria.length > 0;
+  const depLabels = (story.dependsOn ?? [])
+    .map((id) => {
+      const dep = allStories.find((s) => s.storyId === id);
+      return dep ? `S${(dep.order ?? 0) + 1} — ${dep.title}` : null;
+    })
+    .filter((s): s is string => !!s);
   return (
     <li
       style={{
@@ -508,8 +646,7 @@ function StoryWithCriteria({
     >
       <button
         type="button"
-        onClick={() => hasCriteria && setExpanded((v) => !v)}
-        disabled={!hasCriteria}
+        onClick={() => setExpanded((v) => !v)}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -519,7 +656,7 @@ function StoryWithCriteria({
           border: 'none',
           textAlign: 'left',
           color: 'inherit',
-          cursor: hasCriteria ? 'pointer' : 'default',
+          cursor: 'pointer',
           width: '100%',
           fontSize: 13,
         }}
@@ -577,11 +714,80 @@ function StoryWithCriteria({
           </span>
         )}
       </button>
+      {expanded && (
+        <div
+          style={{ padding: '6px 0 8px 24px', display: 'flex', flexDirection: 'column', gap: 8 }}
+        >
+          {/* Full story description — human-readable prose, never truncated. */}
+          {story.description && (
+            <p
+              style={{
+                margin: 0,
+                fontSize: 12.5,
+                lineHeight: 1.6,
+                color: 'var(--text-dim)',
+                whiteSpace: 'pre-wrap',
+                textWrap: 'pretty',
+                maxWidth: 860,
+              }}
+            >
+              {story.description}
+            </p>
+          )}
+          {(story.touchPoints?.length ?? 0) > 0 && (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'baseline' }}>
+              <span
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 9,
+                  color: 'var(--text-faint)',
+                  letterSpacing: '0.16em',
+                  textTransform: 'uppercase',
+                }}
+              >
+                touches
+              </span>
+              {story.touchPoints!.map((tp) => (
+                <code
+                  key={tp}
+                  style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 10.5,
+                    color: 'var(--cyan, var(--text-dim))',
+                    border: '1px solid var(--border)',
+                    borderRadius: 3,
+                    padding: '1px 6px',
+                  }}
+                >
+                  {tp}
+                </code>
+              ))}
+            </div>
+          )}
+          {depLabels.length > 0 && (
+            <div style={{ fontSize: 11, color: 'var(--text-mute)' }}>
+              <span
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 9,
+                  letterSpacing: '0.16em',
+                  textTransform: 'uppercase',
+                  color: 'var(--text-faint)',
+                  marginRight: 8,
+                }}
+              >
+                after
+              </span>
+              {depLabels.join(' · ')}
+            </div>
+          )}
+        </div>
+      )}
       {expanded && hasCriteria && (
         <ul
           style={{
             listStyle: 'none',
-            padding: '4px 0 4px 24px',
+            padding: '0 0 4px 24px',
             margin: 0,
             display: 'flex',
             flexDirection: 'column',
@@ -795,6 +1001,155 @@ function FailedBanner() {
     >
       The PM agent failed to generate this plan. Click <strong>Regenerate</strong> to retry.
     </div>
+  );
+}
+
+/**
+ * Plan portability (2026-06-11) — JSON edit/import modal.
+ *
+ * One surface serves three flows: edit the current plan (prefilled from
+ * export), import a saved export, or paste an external LLM's output (the
+ * server strips ---PLAN_JSON--- fences and markdown code blocks, so raw
+ * paste works). Validation is server-side — the same funnel the PM agent's
+ * own output goes through (schema, references, touch-point hygiene, visual
+ * coverage) — and errors render verbatim so the operator can fix the JSON
+ * in place.
+ */
+function PlanJsonModal({
+  mode,
+  initial,
+  pending,
+  onCancel,
+  onSubmit,
+}: {
+  mode: 'edit' | 'import';
+  initial: string;
+  pending: boolean;
+  onCancel: () => void;
+  onSubmit: (text: string) => Promise<void>;
+}) {
+  const [text, setText] = useState(initial);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    setError(null);
+    try {
+      await onSubmit(text);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function loadFile(file: File | null) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setText(String(reader.result ?? ''));
+    reader.readAsText(file);
+  }
+
+  return (
+    <>
+      <div
+        onClick={onCancel}
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 80 }}
+      />
+      <div
+        role="dialog"
+        aria-label={mode === 'edit' ? 'Edit plan JSON' : 'Import plan JSON'}
+        style={{
+          position: 'fixed',
+          top: '6vh',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          width: 'min(860px, 94vw)',
+          maxHeight: '88vh',
+          display: 'flex',
+          flexDirection: 'column',
+          background: 'var(--bg-elev, var(--background))',
+          border: '1px solid var(--border)',
+          borderRadius: 8,
+          zIndex: 81,
+          padding: 18,
+          gap: 12,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <SectionHeader>{mode === 'edit' ? 'Edit plan JSON' : 'Import plan JSON'}</SectionHeader>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <label
+              style={{
+                fontSize: 10,
+                letterSpacing: '0.14em',
+                textTransform: 'uppercase',
+                padding: '6px 14px',
+                border: '1px solid var(--border-2)',
+                borderRadius: 2,
+                color: 'var(--text-dim)',
+                cursor: 'pointer',
+              }}
+            >
+              Load file…
+              <input
+                type="file"
+                accept=".json,application/json"
+                style={{ display: 'none' }}
+                onChange={(e) => loadFile(e.target.files?.[0] ?? null)}
+              />
+            </label>
+            <GhostButton label="Cancel" onClick={onCancel} disabled={pending} />
+            <SolidButton
+              label={pending ? 'Applying…' : 'Validate & apply'}
+              onClick={submit}
+              disabled={pending || text.trim().length === 0}
+            />
+          </div>
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-mute)', lineHeight: 1.5 }}>
+          Paste a plan JSON (an export, a hand-edited plan, or an external LLM&apos;s output —
+          fences and code blocks are tolerated). Applying <strong>replaces</strong> the current epic
+          tree; waves are recomputed from <code>dependsOn</code> + <code>touchPoints</code>.
+        </div>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          spellCheck={false}
+          style={{
+            flex: 1,
+            minHeight: 320,
+            width: '100%',
+            background: 'transparent',
+            border: '1px solid var(--border)',
+            borderRadius: 4,
+            padding: '10px 12px',
+            fontSize: 12,
+            lineHeight: 1.5,
+            color: 'var(--foreground)',
+            fontFamily: 'var(--font-mono)',
+            resize: 'vertical',
+            outline: 'none',
+          }}
+          placeholder='{ "plan": { "name": "…", "description": "…", "epics": [ … ] } }'
+        />
+        {error && (
+          <div
+            style={{
+              border: '1px solid var(--destructive)',
+              background: 'color-mix(in srgb, var(--destructive) 8%, transparent)',
+              color: 'var(--destructive)',
+              borderRadius: 6,
+              padding: '10px 12px',
+              fontSize: 12,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              maxHeight: 160,
+              overflowY: 'auto',
+            }}
+          >
+            {error}
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 

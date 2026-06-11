@@ -125,12 +125,28 @@ export async function applyConfirmedProposals({
     }
     const bucket = manifest[p.manifestBucket];
 
+    // Step-0.9c (2026-06-05) — persist the scout's RATIONALE into the
+    // manifest entry. The proposal validator requires it, the operator
+    // confirms based on it, and it is the project-specific, task-shaped
+    // description of WHY this skill fits ("directly applies to pixel-art
+    // dragon animations…") — exactly what the agent prompt needs for
+    // skill-relevance matching. Dropping it here left only the upstream
+    // SKILL.md's generic utterance-shaped description ("use when the user
+    // says…"), which never matches daemon machine prompts → 0 activations
+    // ever recorded. skills-prompt.mjs prefers this rationale when present.
     if (p.kind === 'add') {
       const exists = bucket.some(
         (e) => e?.skill === p.skill && e?.source === p.source,
       );
       if (!exists) {
-        bucket.push({ source: p.source, skill: p.skill, version: p.version });
+        bucket.push({
+          source: p.source,
+          skill: p.skill,
+          version: p.version,
+          ...(typeof p.rationale === 'string' && p.rationale.length > 0
+            ? { rationale: p.rationale }
+            : {}),
+        });
         added += 1;
       }
       continue;
@@ -145,10 +161,20 @@ export async function applyConfirmedProposals({
           entry.version = p.version;
           upgraded += 1;
         }
+        if (typeof p.rationale === 'string' && p.rationale.length > 0) {
+          entry.rationale = p.rationale;
+        }
       } else {
         // Degraded path: nothing to upgrade. Treat as add so the
         // intended end-state is reached.
-        bucket.push({ source: p.source, skill: p.skill, version: p.version });
+        bucket.push({
+          source: p.source,
+          skill: p.skill,
+          version: p.version,
+          ...(typeof p.rationale === 'string' && p.rationale.length > 0
+            ? { rationale: p.rationale }
+            : {}),
+        });
         added += 1;
       }
       continue;

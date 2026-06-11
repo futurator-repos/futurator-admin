@@ -42,6 +42,25 @@ export function useResolveGlobalAttention() {
 }
 
 /**
+ * pacman1 (2026-06-11) — undo for an accidental Resolve. The backend has
+ * had POST .../reopen since PR-9; the bell never exposed it, so a
+ * mis-click silently buried the card (and with it the only pointer to a
+ * halted wave). The drawer keeps just-resolved rows visible with an Undo
+ * affordance backed by this mutation.
+ */
+export function useReopenGlobalAttention() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ planId, itemId }: { planId: string; itemId: string }) =>
+      api.post<{ item: AttentionItem }>(`/plans/${planId}/attention-items/${itemId}/reopen`, {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['attention'] });
+      queryClient.invalidateQueries({ queryKey: ['attention-items'] });
+    },
+  });
+}
+
+/**
  * PR-9 #4 — bulk-resolve every open attention item for a plan. Bell drawer
  * uses this to let the operator clear pre-PR-7 noise (or any plan whose
  * failures are no longer actionable) without per-row clicks.

@@ -12,12 +12,32 @@ import { PLAN_NAME_REGEX } from './plan-schema';
 const localEpicIdSchema = z.string().regex(/^E\d+$/, 'Epic local IDs must be like "E1"');
 const localStoryIdSchema = z.string().regex(/^S\d+$/, 'Story local IDs must be like "S1"');
 
+/**
+ * pacman1 disease (2026-06-11) — sentinel for cross-cutting stories that
+ * cannot declare a precise file set (integration/refactor stories). A story
+ * carrying it is excluded from parallel waves entirely: the touch-point
+ * serializer gives it a wave of its own. Mirrors the BMAD
+ * create-epics-and-stories contract ("touchPoints: ['<EPIC_WIDE>']").
+ */
+export const EPIC_WIDE_TOUCH_POINT = '<EPIC_WIDE>';
+
 export const storyOutputSchema = z.object({
   id: localStoryIdSchema,
   title: z.string().min(3),
   description: z.string().min(10),
   /** Local story IDs within THIS epic that must finish first. */
   dependsOn: z.array(localStoryIdSchema).default([]),
+  /**
+   * pacman1 disease (2026-06-11) — the file paths this story will create or
+   * modify. The BMAD workflow contract always REQUIRED this ("the
+   * wave-conflict resolver uses this to serialize stories that would collide
+   * on the same file") but the schema never carried it and apply hardcoded
+   * `[]` — so the promised serialization never existed and parallel siblings
+   * collided at every merge gate. The PM prompt requires it; `.default([])`
+   * keeps old PM outputs and hand-written imports parseable (empty = no
+   * serialization information, waves fall back to dependsOn only).
+   */
+  touchPoints: z.array(z.string().min(1)).default([]),
   criteria: z
     .array(
       z.object({
@@ -58,6 +78,43 @@ export type StoryOutput = z.infer<typeof storyOutputSchema>;
  * - Story dependsOn references must point at stories earlier in the same epic.
  * - No duplicate epic IDs; no duplicate story IDs within an epic.
  */
+/**
+ * pacman1 disease (2026-06-11) — story-immutable shared infrastructure.
+ *
+ * Stories run in parallel worktrees; any story that edits a project-global
+ * file (dependency manifest, lockfile, build/test/runtime config) collides
+ * with siblings and drifts the shared world-view between waves. These are
+ * pipeline-platform invariants (every boilerplate ships and owns them — the
+ * project CLAUDE.md states the same rule to the agents), not app-domain
+ * knowledge. A plan whose touchPoints claim them is mis-scoped: the route
+ * rejects it with this message so the operator regenerates.
+ */
+const INFRA_TOUCH_POINT_RE =
+  /(^|\/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|vitest\.config\.[cm]?[jt]s|jest\.config\.[cm]?[jt]s|next\.config\.[cm]?[jt]s|tsconfig(\..+)?\.json|eslint\.config\.[cm]?[jt]s|\.eslintrc(\..+)?|postcss\.config\.[cm]?[jt]s)$|(^|\/)node_modules(\/|$)/;
+
+export function validateTouchPointHygiene(output: PlanOutput): string[] {
+  const errors: string[] = [];
+  for (const epic of output.plan.epics) {
+    for (const story of epic.stories) {
+      for (const tp of story.touchPoints) {
+        if (tp === EPIC_WIDE_TOUCH_POINT) continue;
+        if (tp.startsWith('/') || tp.includes('..')) {
+          errors.push(
+            `Story ${story.id} (epic ${epic.id}) touch point "${tp}" must be a relative path inside the project`,
+          );
+          continue;
+        }
+        if (INFRA_TOUCH_POINT_RE.test(tp)) {
+          errors.push(
+            `Story ${story.id} (epic ${epic.id}) touch point "${tp}" is template-owned shared infrastructure — stories must never modify dependency manifests, lockfiles, or build/test config. Re-scope the story to use what the scaffold provides.`,
+          );
+        }
+      }
+    }
+  }
+  return errors;
+}
+
 export function validatePlanReferences(output: PlanOutput): string[] {
   const errors: string[] = [];
 

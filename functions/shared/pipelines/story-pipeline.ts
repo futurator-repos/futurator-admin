@@ -248,6 +248,38 @@ export function generateStoryPipeline(
       }),
     },
     steps: [
+      // pacman1 root-cause (2026-06-11) — capture the commit baseline as the
+      // FIRST pipeline step, before ANY agent runs. It used to sit just
+      // before DEV, which silently excluded everything api-author and
+      // test-author wrote (the frozen `index.d.ts` interface surface,
+      // vitest.config.ts, package.json test script + deps) from the story
+      // commit: the story validated green against files it never shipped,
+      // and the wave-merge candidate — built from committed branches only —
+      // failed typecheck on imports of the uncommitted contract file.
+      // Invariant restored: in a per-story worktree, every file any agent
+      // writes after this snapshot is this story's work and ships with it.
+      // (The original post-test-author placement guarded the legacy SHARED
+      // worktree subsumption race; per-story worktrees made that obsolete.)
+      {
+        id: 'capture-dev-baseline',
+        stepType: 'shell' as const,
+        command:
+          `cd ${workingDir} && ` +
+          `mkdir -p .pipeline && ` +
+          `if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then ` +
+          `  git diff --name-only > .pipeline/${story.storyId}-baseline-dirty.txt 2>/dev/null || true; ` +
+          `  git ls-files --others --exclude-standard > .pipeline/${story.storyId}-baseline-untracked.txt 2>/dev/null || true; ` +
+          `  DIRTY_COUNT=$(wc -l < .pipeline/${story.storyId}-baseline-dirty.txt); ` +
+          `  UNTRACKED_COUNT=$(wc -l < .pipeline/${story.storyId}-baseline-untracked.txt); ` +
+          `  echo "BASELINE_CAPTURED story=${story.storyId} baseline_dirty=$DIRTY_COUNT baseline_untracked=$UNTRACKED_COUNT"; ` +
+          `else ` +
+          `  echo "BASELINE_SKIPPED_NOT_A_REPO story=${story.storyId}"; ` +
+          `fi`,
+        timeout: 10000,
+        captureAs: 'CAPTURE_DEV_BASELINE_OUTPUT',
+        onFail: { action: 'continue' as const },
+      } as unknown as PipelineStep,
+
       // PR-91-followup (Story 2-A-3-1) — API-AUTHOR step runs BEFORE
       // test-author so TEST and DEV both `import type { ... } from
       // './index'` against the same frozen surface. Skipped under
@@ -314,6 +346,10 @@ If the story's acceptance criteria are ALREADY covered by existing test files in
 ---TEST_FILES---
 [paths of existing files that cover this story's ACs]
 ---END_TEST_FILES---
+
+---AC_TEST_MAP---
+AC-1: <test file> :: "<case name that asserts AC-1>"
+---END_AC_TEST_MAP---
 
 ---WORK_SUMMARY---
 No changes required — tests for story ${story.storyId} already authored: <list paths>. Each AC is mapped: AC-1 → <test file:line range>, etc.
@@ -395,14 +431,35 @@ src/foo.test.ts
 e2e/home.spec.ts
 ---END_TEST_FILES---
 
+---AC_TEST_MAP---
+AC-1: src/foo.test.ts :: "renders the score HUD at 0"
+AC-2: src/__tests__/integration/game-loop.test.ts :: "obstacle x decreases over 240 ticks"
+---END_AC_TEST_MAP---
+
 ---WORK_SUMMARY---
 [What tests you wrote and why — OR "No changes required" per EARLY-EXIT above]
----END_WORK_SUMMARY---`,
+---END_WORK_SUMMARY---
+
+The AC_TEST_MAP block (Step-0.5) is REQUIRED: one line per AC id this
+story's tests ASSERT, in the exact form \`<AC-id>: <test file> :: "<case
+name>"\`. Only list an AC when a test case genuinely asserts that AC's
+condition — the runtime visual review treats mapped ACs as verified by the
+suite and skips screenshot-judging them, so a dishonest mapping ships an
+unverified AC. Leave an AC out when no test asserts it (the screenshot
+judge keeps jurisdiction). Browser ACs about dynamic behaviour (motion,
+spawning, score over time) SHOULD be mapped — drive the game loop N ticks
+in an integration test and assert observable state; a static screenshot
+can never verify them.`,
               extractors: {
                 TEST_FILES: {
                   type: 'between' as const,
                   startDelimiter: '---TEST_FILES---',
                   endDelimiter: '---END_TEST_FILES---',
+                },
+                AC_TEST_MAP: {
+                  type: 'between' as const,
+                  startDelimiter: '---AC_TEST_MAP---',
+                  endDelimiter: '---END_AC_TEST_MAP---',
                 },
                 WORK_SUMMARY: {
                   type: 'between' as const,
@@ -476,33 +533,10 @@ e2e/home.spec.ts
           ] as PipelineStep[])
         : []),
 
-      // 2026-05-19 — Phase 0.2a: capture working-tree state right before
-      // DEV runs so compile-commit-on-pass can compute a per-story delta
-      // and stage only files DEV actually touched. Closes the snake-4
-      // subsumption race where Story B's `git add -A` swept Story A's
-      // just-written audio.ts. Best-effort; onFail: continue (commit-step
-      // falls back to legacy `git add -A` if baseline files are missing).
-      {
-        id: 'capture-dev-baseline',
-        stepType: 'shell' as const,
-        command:
-          `cd ${workingDir} && ` +
-          `mkdir -p .pipeline && ` +
-          `if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then ` +
-          `  git diff --name-only > .pipeline/${story.storyId}-baseline-dirty.txt 2>/dev/null || true; ` +
-          `  git ls-files --others --exclude-standard > .pipeline/${story.storyId}-baseline-untracked.txt 2>/dev/null || true; ` +
-          `  DIRTY_COUNT=$(wc -l < .pipeline/${story.storyId}-baseline-dirty.txt); ` +
-          `  UNTRACKED_COUNT=$(wc -l < .pipeline/${story.storyId}-baseline-untracked.txt); ` +
-          `  echo "BASELINE_CAPTURED story=${story.storyId} baseline_dirty=$DIRTY_COUNT baseline_untracked=$UNTRACKED_COUNT"; ` +
-          `else ` +
-          `  echo "BASELINE_SKIPPED_NOT_A_REPO story=${story.storyId}"; ` +
-          `fi`,
-        timeout: 10000,
-        captureAs: 'CAPTURE_DEV_BASELINE_OUTPUT',
-        onFail: { action: 'continue' as const },
-      } as unknown as PipelineStep,
-
       // 1. Dev implements story
+      // (capture-dev-baseline moved to the TOP of steps[] — see the
+      // pacman1 root-cause note there. The commit step's snapshot-diff now
+      // includes api-author's and test-author's writes in the story delta.)
       {
         id: 'dev',
         agentId: 'DEV',
@@ -529,6 +563,19 @@ ${story.description}
 - Working directory: ${workingDir}
 - If this is the first story, set up the project structure.
 - Output a brief summary of what you did (not full file contents, show diffs or summaries).
+- BEFORE implementing: your system prompt lists this project's vendored
+  skills with the reason each was pinned. If one covers this story's domain
+  (visual/canvas work, UI components, testing, domain workflows), invoke it
+  via the Skill tool FIRST — it loads project-pinned conventions your
+  implementation must follow. One Skill call; skip only if genuinely none apply.
+- REQUIRED: the FIRST line of your final summary must be
+  \`SKILL_DECISION: <skill-name> — <one-line why>\` or
+  \`SKILL_DECISION: none — <one-line why no pinned skill applies>\`.
+  If you name a skill you must have actually invoked it via the Skill tool
+  before writing code — invocations are recorded in the commit trailer and
+  audited against this line. A story touching UI, canvas, layout, or visual
+  behavior on a project that pins a design/frontend skill should almost
+  never be \`none\`.
 
 ## DISCOVERY (Stories A.6 + B.2):
 - Your \`<project_context>\` block above already contains the project tree, plan, story spec, acceptance criteria, touch points, adjacent file heads, knowledge index, recent diffs, and prior story work summaries. Read it before doing anything else.
@@ -918,14 +965,21 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
       // for Vite, Next, Remix, Expo, SvelteKit, Nuxt, or any project
       // whose package.json has a `dev` script.
       //
-      // Failure modes:
-      //   • Dev server fails to boot in 60s — emits RUNTIME_REVIEW_SKIPPED
-      //     (some foundation stories don't produce a renderable app yet);
-      //     the step passes so foundation work isn't blocked.
-      //   • Screenshot capture fails — same SKIPPED behaviour.
-      //   • Haiku judges any AC as FAIL — exit 1, loopTo 'retry' for dev fix.
-      //   • Haiku judges all ACs UNCERTAIN — passes (e.g., a "types story"
-      //     where browser ACs describe future behaviour not yet visible).
+      // Failure modes (Step-0 hardening, 2026-06-05):
+      //   • Dev server no-boot / screenshot fail / judge crash / unparseable
+      //     output — exit 0 BUT with a machine-grepable
+      //     `RUNTIME_REVIEW_SKIPPED: cause=…` marker; the daemon writes a
+      //     low-severity story-vqa-skipped attention item (no more silent
+      //     passes that look identical to healthy runs).
+      //   • PAGE_STATE blank/error-overlay with zero PASS — exit 1 (the dino
+      //     blank-page class is a real defect, not "all UNCERTAIN").
+      //   • CONFIDENT FAIL on an idle-reachable AC — exit 1, loopTo 'retry'.
+      //   • UNREACHABLE (state needs interaction/time/another route — judged
+      //     SEMANTICALLY, not by keywords) or low-confidence FAIL — exit 0 +
+      //     `RUNTIME_REVIEW_UNVERIFIABLE` marker → attention item; never
+      //     drives a code-mutating retry (the false-FAIL→corruption path).
+      //   • ACs bound to the test suite via {{AC_TEST_MAP}} resolve as
+      //     suite-asserted PASS without judging (test-verify gated earlier).
       //
       // Cost: ~$0.005 per story-with-browser-ACs (one Haiku call) +
       //       ~5-10s dev server boot + screenshot.
@@ -937,20 +991,41 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
               command: [
                 buildFrameworkDetectSnippet({ cwd: workingDir }),
                 `mkdir -p /tmp/review-${story.storyId}`,
+                // dino1 (2026-06-10): SIGTERM + fixed 1s was not enough — a
+                // previous review's server still flushing its build cache when
+                // the next boot started left the cache corrupted (Turbopack SST
+                // panic → blank page on every subsequent review). Wait until the
+                // port actually frees (up to 10s) before booting, then escalate
+                // to SIGKILL only if the old process ignored TERM.
                 `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
+                `for i in $(seq 1 10); do [ -z "$(lsof -ti:$QA_PORT 2>/dev/null)" ] && break; sleep 1; done`,
+                `kill -9 $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
                 `sleep 1`,
+                // dino1 root-cause (2026-06-10): if the boilerplate generates
+                // its wiring (src/app/page.tsx from src/features/*), a story
+                // worktree that only ADDED a feature file still serves the
+                // starter page — the generator only ran at the wave-merge
+                // gate. Run it before boot so VQA judges the integrated app,
+                // not the scaffold. File-existence guard = no-op for apps
+                // without a generator.
+                `cd ${workingDir} && { [ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs || true; }`,
                 `cd ${workingDir} && (nohup $QA_DEV_CMD > /tmp/review-${story.storyId}/devserver.log 2>&1 </dev/null &)`,
                 `STATUS=000`,
                 // 60 tries (was 30): Next 16 + Turbopack cold-start in a fresh
                 // story worktree regularly exceeds 30s, which made review-runtime
                 // RUNTIME_REVIEW_SKIPPED (no screenshot) even when the app boots.
                 `for i in $(seq 1 60); do sleep 1; STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$QA_PORT$QA_HEALTH_PATH 2>/dev/null); [ "$STATUS" = "200" ] && break; done`,
-                `if [ "$STATUS" != "200" ]; then echo "RUNTIME_REVIEW_SKIPPED: dev server did not boot (status=$STATUS framework=$QA_FRAMEWORK port=$QA_PORT). This is normal for foundation stories that don't yet render a UI."; tail -30 /tmp/review-${story.storyId}/devserver.log >&2 || true; kill $(lsof -ti:$QA_PORT) 2>/dev/null; exit 0; fi`,
+                `if [ "$STATUS" != "200" ]; then echo "RUNTIME_REVIEW_SKIPPED: cause=dev-server-no-boot status=$STATUS framework=$QA_FRAMEWORK port=$QA_PORT. This is normal for foundation stories that don't yet render a UI."; tail -30 /tmp/review-${story.storyId}/devserver.log >&2 || true; kill $(lsof -ti:$QA_PORT) 2>/dev/null; exit 0; fi`,
                 `# Take overview screenshot of the running app.`,
-                `npx playwright screenshot --viewport-size=1280,720 --wait-for-timeout=2000 http://localhost:$QA_PORT$QA_HEALTH_PATH /tmp/review-${story.storyId}/overview.png 2>&1 || { echo "RUNTIME_REVIEW_SKIPPED: playwright screenshot failed — likely a framework that doesn't render at /"; kill $(lsof -ti:$QA_PORT) 2>/dev/null; exit 0; }`,
+                `npx playwright screenshot --viewport-size=1280,720 --wait-for-timeout=2000 http://localhost:$QA_PORT$QA_HEALTH_PATH /tmp/review-${story.storyId}/overview.png 2>&1 || { echo "RUNTIME_REVIEW_SKIPPED: cause=screenshot-failed — likely a framework that doesn't render at /"; kill $(lsof -ti:$QA_PORT) 2>/dev/null; exit 0; }`,
                 `# Upload to S3 so the operator can see it post-mortem AND so Haiku can fetch it.`,
                 `SCREENSHOT_KEY="review-screenshots/${story.storyId}/$(date -u +%s).png"`,
-                `timeout 30 aws s3 cp /tmp/review-${story.storyId}/overview.png "s3://futurator-ai-website/$SCREENSHOT_KEY" --content-type image/png > /dev/null 2>&1 || true`,
+                // snake3 forensic (2026-06-10): this upload had failed SILENTLY on
+                // every run since PR-65 — the EC2 role lacked PutObject on the
+                // review-screenshots/* prefix and '|| true' swallowed the
+                // AccessDenied. The prefix had ZERO objects ever; operator links
+                // 404'd through to the homepage. Keep non-blocking but LOUD.
+                `if ! timeout 30 aws s3 cp /tmp/review-${story.storyId}/overview.png "s3://futurator-ai-website/$SCREENSHOT_KEY" --content-type image/png 2>/tmp/review-${story.storyId}/s3err.txt > /dev/null; then echo "SCREENSHOT_UPLOAD_FAILED: $(head -c 200 /tmp/review-${story.storyId}/s3err.txt)"; fi`,
                 `SCREENSHOT_URL="https://futurator.ai/$SCREENSHOT_KEY"`,
                 `# Kill dev server BEFORE the Haiku call so we don't hold the port for ~30s of inference.`,
                 `kill $(lsof -ti:$QA_PORT) 2>/dev/null || true`,
@@ -970,13 +1045,55 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
                       .map((c) => ({ id: c.id, text: c.text })),
                   ),
                 ).toString('base64')}`,
-                `LOCAL_SHOT="/tmp/review-${story.storyId}/overview.png" SCREENSHOT_URL="$SCREENSHOT_URL" STORY_BROWSER_ACS_B64="$STORY_BROWSER_ACS_B64" node -e "$(cat <<'NODE_EOF'`,
+                // Step-0.1 (2026-06-05) — the judge reads the authored visual-test
+                // spec. visual-tests.md is ALREADY on disk in the worktree at this
+                // point (the daemon merges DEV's VISUAL_TESTS block before this
+                // step) — the prior judge simply never opened it, grading raw AC
+                // prose instead of the setup/expect/judge contract.
+                `VISUAL_TESTS_MD_B64=""`,
+                `[ -f visual-tests.md ] && VISUAL_TESTS_MD_B64=$(head -c 24000 visual-tests.md | base64 -w0 2>/dev/null || true)`,
+                // Step-0.5 (2026-06-05) — AC→test binding from the TEST agent.
+                // {{AC_TEST_MAP}} is substituted by the daemon when the TEST step
+                // emitted the block; when absent the literal placeholder survives
+                // and the parser below ignores it. Quoted heredoc = content-safe.
+                `cat > /tmp/review-${story.storyId}/ac-test-map.txt << 'AC_MAP_EOF'`,
+                `{{AC_TEST_MAP}}`,
+                `AC_MAP_EOF`,
+                `AC_TEST_MAP_B64=$(base64 -w0 < /tmp/review-${story.storyId}/ac-test-map.txt 2>/dev/null || true)`,
+                `LOCAL_SHOT="/tmp/review-${story.storyId}/overview.png" SCREENSHOT_URL="$SCREENSHOT_URL" STORY_BROWSER_ACS_B64="$STORY_BROWSER_ACS_B64" VISUAL_TESTS_MD_B64="$VISUAL_TESTS_MD_B64" AC_TEST_MAP_B64="$AC_TEST_MAP_B64" node -e "$(cat <<'NODE_EOF'`,
                 `const { spawn } = require('child_process');`,
+                `const fs = require('fs');`,
                 `const acs = JSON.parse(Buffer.from(process.env.STORY_BROWSER_ACS_B64 || '', 'base64').toString('utf8') || '[]');`,
                 `const screenshotUrl = process.env.SCREENSHOT_URL;`,
                 `const localShot = process.env.LOCAL_SHOT;`,
-                `if (acs.length === 0) { console.log('RUNTIME_REVIEW_SKIPPED: no browser ACs to judge'); process.exit(0); }`,
-                `const acList = acs.map((a, i) => '  ' + a.id + ': ' + a.text).join('\\n');`,
+                `if (acs.length === 0) { console.log('RUNTIME_REVIEW_SKIPPED: cause=no-browser-acs'); process.exit(0); }`,
+                `const vtMd = Buffer.from(process.env.VISUAL_TESTS_MD_B64 || '', 'base64').toString('utf8');`,
+                `const mapRaw = Buffer.from(process.env.AC_TEST_MAP_B64 || '', 'base64').toString('utf8');`,
+                `const acTestMap = {};`,
+                `for (const rawLine of mapRaw.split('\\n')) {`,
+                `  const t = rawLine.trim();`,
+                `  if (!t || t.includes('{{')) continue;`,
+                `  const mm = t.match(/^([A-Za-z0-9_-]+)\\s*:\\s*(.+)$/);`,
+                `  if (mm) acTestMap[mm[1]] = mm[2].slice(0, 160);`,
+                `}`,
+                // Step-0.5 — ACs the test suite already asserts resolve
+                // deterministically (test-verify gated green earlier in this
+                // pipeline); the screenshot judge's jurisdiction narrows to the
+                // perceptual residue. Coverage-gap only fires when TEST emitted a
+                // map that misses browser ACs — a missing map entirely is legacy.
+                `const suiteAsserted = acs.filter(a => acTestMap[a.id]);`,
+                `const toJudge = acs.filter(a => !acTestMap[a.id]);`,
+                `const coverageGap = Object.keys(acTestMap).length > 0 ? toJudge.map(a => a.id) : [];`,
+                `const printBlock = (verdicts) => {`,
+                `  console.log('---RUNTIME_REVIEW---');`,
+                `  console.log('SCREENSHOT_URL: ' + screenshotUrl);`,
+                `  for (const s of suiteAsserted) console.log(s.id + ': PASS — suite-asserted: ' + acTestMap[s.id]);`,
+                `  for (const v of verdicts) console.log(v.id + ': ' + v.verdict + (v.conf ? ' [conf=' + v.conf + ']' : '') + ' — ' + v.rationale);`,
+                `  console.log('---END_RUNTIME_REVIEW---');`,
+                `  if (coverageGap.length > 0) console.log('AC_COVERAGE_GAP: ' + coverageGap.join(', '));`,
+                `};`,
+                `if (toJudge.length === 0) { printBlock([]); console.log('[review-runtime] all ' + suiteAsserted.length + ' browser ACs suite-asserted — no screenshot judging needed'); process.exit(0); }`,
+                `const acList = toJudge.map((a) => '  ' + a.id + ': ' + a.text).join('\\n');`,
                 `const prompt = [`,
                 `  'You are an automated visual reviewer.',`,
                 // 2026-06-02 — the judge MUST read the LOCAL screenshot file via
@@ -988,59 +1105,104 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
                 `  'Use the Read tool to open the screenshot image file at ' + localShot + ' and inspect it.',`,
                 `  '',`,
                 `  'The acceptance criteria below describe what the user should be able to SEE on screen.',`,
-                `  'For each AC, decide if it is satisfied based ONLY on what is visible in the screenshot.',`,
                 `  '',`,
                 `  'CRITICAL — this screenshot is a SINGLE STATIC FRAME of the app in its INITIAL state, captured ~2s after load with NO user interaction: no keypresses, no clicks, no elapsed gameplay, zero score/progress, nothing animated or in motion. You are seeing the starting state only.',`,
                 `  '',`,
-                `  'Acceptance criteria:',`,
+                `  'Acceptance criteria to judge:',`,
                 `  acList,`,
                 `  '',`,
-                `  'Output EXACTLY one line per AC in this format (no other text):',`,
-                `  '<AC-id>: PASS|FAIL|UNCERTAIN — <one-line rationale ≤140 chars>',`,
+                `  vtMd ? 'The authored visual-test spec for this story follows. Entries match ACs by criteriaRef. When an entry exists for an AC, its setup: field tells you what state the test NEEDS to exist before judging, and its judge:/expect: text is the grading contract — use them.' : '',`,
+                `  vtMd ? '--- VISUAL TEST SPEC ---' : '',`,
+                `  vtMd ? vtMd.slice(0, 12000) : '',`,
+                `  vtMd ? '--- END VISUAL TEST SPEC ---' : '',`,
                 `  '',`,
-                `  'Verdict rules:',`,
-                `  '  PASS — the AC describes the INITIAL state and the screenshot observably satisfies it.',`,
-                `  '  FAIL — the AC describes the INITIAL state and the screenshot CONTRADICTS it (e.g., expected button missing, expected entity not visible at start, wrong starting layout/colour).',`,
-                `  '  UNCERTAIN — use this whenever the AC cannot be judged from a single initial static frame. This INCLUDES any AC whose condition depends on TIME elapsed, SCORE/PROGRESS thresholds, SPEED, motion/animation, or USER INTERACTION (keypress/click/scroll). Phrases like \"after playing\", \"once the score exceeds\", \"at speed\", \"after N seconds\", \"when the player...\", \"as it accelerates\" are interaction-gated — you CANNOT observe that state here, so return UNCERTAIN, NEVER FAIL. Do not penalise correct code for a state the screenshot physically cannot show.',`,
+                `  'FIRST output line — overall page state:',`,
+                `  'PAGE_STATE: rendered|blank|error-overlay — <one-line description of what the frame shows>',`,
+                `  '  (blank = empty/near-empty canvas or page; error-overlay = a framework error or stack-trace overlay is visible)',`,
                 `  '',`,
-                `  'Example: AC \"at game start the background is white\" → judge from this frame (PASS/FAIL). AC \"after the score exceeds 3000 the background turns red\" → UNCERTAIN (the run just started; you cannot see a high-score state).',`,
-                `].join('\\n');`,
+                `  'Then output EXACTLY one line per AC in this format (no other text):',`,
+                `  '<AC-id>: PASS|FAIL|UNREACHABLE|UNCERTAIN [conf=high|low] — <one-line rationale ≤140 chars>',`,
+                `  '',`,
+                `  'Verdict rules — decide SEMANTICALLY per AC, in this order:',`,
+                `  '1. REACHABILITY first: can this idle initial frame physically show the state the AC (and its visual-test setup:, if present) describes? If the state requires user interaction, elapsed time, motion, a score/progress threshold, navigation to another route, or a composite/side-by-side/sandbox arrangement the app does not render at start — the verdict is UNREACHABLE. This is a property of WHAT THE AC NEEDS, not of any keyword in its wording. Never FAIL an AC whose state this frame cannot show.',`,
+                `  '2. PASS — the state is reachable in this frame and the frame observably satisfies it.',`,
+                `  '3. FAIL — the state is reachable in this frame and the frame CONTRADICTS it. A FAIL must cite the concrete contradicting observation you can SEE (what is there instead, or what is missing that should be visible NOW). Use conf=high only when the contradiction is unambiguous; conf=low when you suspect a defect but the evidence is partial.',`,
+                `  '4. UNCERTAIN — the image is unreadable or the call is genuinely too close to make.',`,
+                `  '',`,
+                `  'Example: AC \"at game start the background is white\" → reachable, judge PASS/FAIL from this frame. AC \"all four obstacle types are visible side-by-side\" → the game only spawns obstacles over time, so the idle frame cannot show that arrangement → UNREACHABLE (not FAIL).',`,
+                `].filter(Boolean).join('\\n');`,
                 `const child = spawn('claude', ['--print', '--model', 'haiku', '--output-format', 'text', '--allowedTools', 'Read'], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 90000 });`,
                 `let out = '', err = '';`,
                 `child.stdin.write(prompt); child.stdin.end();`,
                 `child.stdout.on('data', d => { out += d.toString(); });`,
                 `child.stderr.on('data', d => { err += d.toString(); });`,
                 `child.on('close', (code) => {`,
-                `  if (code !== 0) { console.error('RUNTIME_REVIEW_SKIPPED: haiku exit ' + code + ': ' + err.slice(0, 200)); process.exit(0); }`,
+                // Step-0.4 — every failure-to-observe is a LOUD machine-grepable
+                // marker (the daemon writes a story-vqa-skipped attention item),
+                // never a silent pass that looks identical to a healthy run.
+                `  if (code !== 0) { console.log('RUNTIME_REVIEW_SKIPPED: cause=judge-crash exit=' + code + ' ' + err.slice(0, 200)); process.exit(0); }`,
                 `  const lines = out.split('\\n').map(l => l.trim()).filter(Boolean);`,
+                `  const psMatch = out.match(/PAGE_STATE:\\s*(rendered|blank|error-overlay)/i);`,
+                `  const pageState = (psMatch ? psMatch[1] : 'rendered').toLowerCase();`,
                 `  const verdicts = [];`,
                 `  for (const line of lines) {`,
-                `    const m = line.match(/^([A-Za-z0-9_-]+):\\s*(PASS|FAIL|UNCERTAIN)\\s*[—-]?\\s*(.*)$/i);`,
-                `    if (m) verdicts.push({ id: m[1], verdict: m[2].toUpperCase(), rationale: (m[3] || '').slice(0, 200) });`,
+                `    const m = line.match(/^([A-Za-z0-9_-]+):\\s*(PASS|FAIL|UNREACHABLE|UNCERTAIN)\\s*(?:\\[conf=(high|low)\\])?\\s*[—-]?\\s*(.*)$/i);`,
+                `    if (m) verdicts.push({ id: m[1], verdict: m[2].toUpperCase(), conf: (m[3] || '').toLowerCase() || undefined, rationale: (m[4] || '').slice(0, 200) });`,
                 `  }`,
-                `  if (verdicts.length === 0) { console.error('RUNTIME_REVIEW_SKIPPED: could not parse Haiku output: ' + out.slice(0, 400)); process.exit(0); }`,
+                `  if (verdicts.length === 0) { console.log('RUNTIME_REVIEW_SKIPPED: cause=judge-unparseable ' + out.slice(0, 300)); process.exit(0); }`,
                 `  const fails = verdicts.filter(v => v.verdict === 'FAIL');`,
-                `  console.log('---RUNTIME_REVIEW---');`,
-                `  console.log('SCREENSHOT_URL: ' + screenshotUrl);`,
-                `  for (const v of verdicts) console.log(v.id + ': ' + v.verdict + ' — ' + v.rationale);`,
-                `  console.log('---END_RUNTIME_REVIEW---');`,
-                `  if (fails.length > 0) {`,
+                // Step-0.3a — only CONFIDENT, observable FAILs may open the DEV
+                // retry loop. Low-confidence fails and idle-unreachable ACs are
+                // surfaced (attention item via the daemon) but never drive a
+                // code-mutating fix cycle — that loop is how a false negative
+                // grafted an obstacle-preview gallery into a correct game.
+                `  const confidentFails = fails.filter(v => v.conf !== 'low');`,
+                `  const softFails = fails.filter(v => v.conf === 'low');`,
+                `  const unreachable = verdicts.filter(v => v.verdict === 'UNREACHABLE');`,
+                `  const passCount = verdicts.filter(v => v.verdict === 'PASS').length + suiteAsserted.length;`,
+                `  printBlock(verdicts);`,
+                `  console.log('PAGE_STATE_PARSED: ' + pageState);`,
+                // Step-0.4 — a blank/error page with nothing provably right is a
+                // real defect, never a silent pass (the dino blank-page class).
+                `  if ((pageState === 'blank' || pageState === 'error-overlay') && passCount === 0) {`,
+                // dino1 forensic (2026-06-10): a blank page is often the DEV
+                // SERVER failing (e.g., a corrupted gitignored build cache made
+                // Turbopack panic on every boot), not the product code. Attach
+                // the server's own log so the fix-cycle DEV can diagnose the
+                // ENVIRONMENT instead of mutating correct code — and so a pure
+                // infra crash never burns 3 blind retries again.
+                `    let serverLog = '';`,
+                `    try { const sl = fs.readFileSync('/tmp/review-${story.storyId}/devserver.log', 'utf8'); serverLog = sl.slice(-2500); } catch (e) {}`,
+                `    const obs = 'PAGE_STATE: ' + pageState + ' — the app rendered nothing judgeable; likely entry-point wiring, a runtime error, a build failure, OR the dev server itself crashing.' + (serverLog ? '\\n\\n--- dev server log (tail) ---\\n' + serverLog : '');`,
+                `    try { fs.mkdirSync('.context', { recursive: true }); fs.writeFileSync('.context/vqa-observations.txt', obs); } catch (e) {}`,
+                `    console.error('RUNTIME_REVIEW_FAILED: page state is ' + pageState + ' — the app did not render a judgeable UI.');`,
+                `    if (serverLog) { console.error(''); console.error('Dev server log (tail) — read this FIRST. If it shows the SERVER crashing (panic, corrupted cache, port clash), the fix is environmental (e.g., delete the stale gitignored build-cache directory it names and let the server rebuild) — do NOT change product code for an infra crash:'); console.error(serverLog); }`,
+                `    console.error('Screenshot: ' + screenshotUrl);`,
+                `    process.exit(1);`,
+                `  }`,
+                `  if (confidentFails.length > 0) {`,
                 // S5 — persist the failing observations so the eventual passing
-                // commit can stamp a VQA-Fixed: trailer the REFLECTOR mines into
-                // a durable lesson. Written to .context (read, not committed).
-                `    try { require('fs').mkdirSync('.context', { recursive: true }); require('fs').writeFileSync('.context/vqa-observations.txt', fails.map(f => f.id + ': ' + f.rationale).join('\\n')); } catch (e) {}`,
+                // commit can stamp a VQA-Fixed: trailer (now gated on no-contest,
+                // Step-0.7). Only CONFIDENT fails are recorded as observations.
+                `    try { fs.mkdirSync('.context', { recursive: true }); fs.writeFileSync('.context/vqa-observations.txt', confidentFails.map(f => f.id + ': ' + f.rationale).join('\\n')); } catch (e) {}`,
                 `    console.error('');`,
-                `    console.error('RUNTIME_REVIEW_FAILED: ' + fails.length + ' AC(s) failed visual review of the running app:');`,
-                `    for (const f of fails) console.error('  - ' + f.id + ': ' + f.rationale);`,
+                `    console.error('RUNTIME_REVIEW_FAILED: ' + confidentFails.length + ' AC(s) failed visual review of the running app:');`,
+                `    for (const f of confidentFails) console.error('  - ' + f.id + ': ' + f.rationale);`,
                 `    console.error('');`,
                 `    console.error('Screenshot: ' + screenshotUrl);`,
                 `    console.error('The dev server booted and rendered, but the result does not match the AC text. Common causes:');`,
                 `    console.error('  • A module was written but is not imported from the entry point.');`,
                 `    console.error('  • A render loop / state-machine update is wired but not driving the visual change.');`,
                 `    console.error('  • An asset is referenced but the path is wrong / asset never loaded.');`,
+                `    console.error('If you (DEV) believe a listed AC describes a state this idle screenshot cannot show, emit an AC_CONTEST block instead of changing code (see your retry instructions). NEVER add new routes, pages, demo galleries, or UI surfaces the story did not ask for just to make the screenshot match.');`,
                 `    process.exit(1);`,
                 `  }`,
-                `  console.log('[review-runtime] all ' + verdicts.length + ' browser ACs PASS or UNCERTAIN');`,
+                `  if (unreachable.length > 0 || softFails.length > 0) {`,
+                `    const items = unreachable.concat(softFails);`,
+                `    console.log('RUNTIME_REVIEW_UNVERIFIABLE: ' + items.length + ' AC(s) not verifiable from the idle frame (no confident contradiction):');`,
+                `    for (const u of items) console.log('  - ' + u.id + ' [' + u.verdict + (u.conf ? ' conf=' + u.conf : '') + ']: ' + u.rationale);`,
+                `  }`,
+                `  console.log('[review-runtime] verdicts: ' + passCount + ' PASS, ' + unreachable.length + ' UNREACHABLE, ' + softFails.length + ' low-conf FAIL (not retried), ' + verdicts.filter(v => v.verdict === 'UNCERTAIN').length + ' UNCERTAIN');`,
                 `  process.exit(0);`,
                 `});`,
                 `NODE_EOF`,
@@ -1060,6 +1222,15 @@ Be constructive. If the code is close but has minor issues, mark the affected AC
         : []),
 
       // 3. Dev retry on review failure
+      //
+      // Step-0.3b (2026-06-05) — AC_CONTEST path. A reviewer/VQA FAIL no
+      // longer has absolute authority over DEV: when the failing AC describes
+      // a state the verification instrument cannot observe, DEV contests it
+      // (structured block → operator attention, loop stops) instead of
+      // mutating the product to appease the screenshot. The horse-runner1
+      // forensic (correct obstacles.ts + false VQA FAIL → DEV grafted an
+      // obstacle-preview gallery into the game page) is the incident class
+      // this closes. Scope ban is explicit: no new surfaces to satisfy VQA.
       {
         id: 'retry',
         agentId: 'DEV',
@@ -1072,12 +1243,51 @@ Verdict: {{VERDICT}}
 Fix the issues mentioned. Output only what you changed, then:
 ---WORK_SUMMARY---
 [Updated summary of changes]
----END_WORK_SUMMARY---`,
+---END_WORK_SUMMARY---
+
+## If the feedback is a VISUAL-review FAIL you believe is wrong
+
+The visual reviewer judges ONE static screenshot of the app's idle initial
+state. If a failing AC describes a state that screenshot physically cannot
+show (requires interaction, elapsed time, motion, another route, or a
+composite arrangement the app never renders at start), do NOT change code
+to appease it. Instead emit, INSTEAD of a fix:
+
+---AC_CONTEST---
+<AC-id>: <one-line reason the idle screenshot cannot show this state>
+---END_AC_CONTEST---
+
+The contest is routed to the operator for adjudication and the retry loop
+stops — an unverifiable verdict must never drive code changes. Contest an
+AC at most once; if the same AC was already contested, fix what IS fixable
+or restate the contest reason in WORK_SUMMARY without the block.
+
+## If the feedback shows the DEV SERVER itself crashed (blank page)
+
+When the feedback includes a dev-server log showing the server crashing or
+panicking (e.g., a corrupted gitignored build cache it names by path), the
+product code is probably fine — fix the ENVIRONMENT: delete the stale
+cache/artifact directory the log points at (only gitignored build output,
+never source or node_modules) so the next boot rebuilds clean. State what
+you removed and why in WORK_SUMMARY. Do not change product code for an
+infra crash.
+
+## Hard scope rules (always)
+
+- NEVER add new routes, pages, demo galleries, preview surfaces, or UI the
+  story did not ask for in order to make a screenshot match an AC.
+- Stay within this story's declared touch points; if a real fix requires
+  files outside them, say so in WORK_SUMMARY instead of editing them.`,
         extractors: {
           WORK_SUMMARY: {
             type: 'between',
             startDelimiter: '---WORK_SUMMARY---',
             endDelimiter: '---END_WORK_SUMMARY---',
+          },
+          AC_CONTEST: {
+            type: 'between',
+            startDelimiter: '---AC_CONTEST---',
+            endDelimiter: '---END_AC_CONTEST---',
           },
         },
         validations: [],
@@ -1269,7 +1479,19 @@ Fix the issues mentioned. Output only what you changed, then:
           `if [ "$SOURCE_CHANGES" -eq 0 ]; then ` +
           (verificationOnly
             ? `  echo "STORY_COMMIT_EMPTY_TOLERATED: verification-only story ${story.storyId} (all-browser ACs) produced no committable source — recording an empty commit so the epic isn't blocked." >&2; `
-            : `  echo "STORY_COMMIT_EMPTY: no source-code changes staged for story ${story.storyId}." >&2; ` +
+            : // dino1 forensic (2026-06-10): the commit step can run MORE THAN
+              // ONCE per story (it sits inside the VQA fix-cycle loop). When an
+              // earlier iteration already committed the story's work and the
+              // final fix-cycle iteration rightly changed nothing (e.g., the
+              // VQA failure was environmental), hard-failing here burned a full
+              // job retry + a HIGH attention card for work that HAD landed.
+              // If this story's commit is already in branch history, a second
+              // empty pass is a no-op success, not a failure.
+              `  if git log --format=%s -50 2>/dev/null | grep -qF "story: ${story.storyId}"; then ` +
+              `    echo "STORY_COMMIT_ALREADY_LANDED: no new changes staged, but story ${story.storyId} already has a commit on this branch from an earlier iteration — no-op success."; ` +
+              `    exit 0; ` +
+              `  fi; ` +
+              `  echo "STORY_COMMIT_EMPTY: no source-code changes staged for story ${story.storyId}." >&2; ` +
               `  echo "Working tree status:" >&2; git status --short >&2; ` +
               `  echo "Staged for commit:" >&2; git diff --cached --name-only >&2; ` +
               `  echo "Likely cause: snapshot-diff filtered out DEV's writes (sibling story took them), or DEV produced no source changes." >&2; ` +

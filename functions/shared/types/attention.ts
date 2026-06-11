@@ -94,6 +94,35 @@ export type AttentionCategory =
   // auto-resolves when a retry passes. The DEV agent is auto-fed the
   // observations to fix (story-pipeline retry loop).
   | 'story-vqa-failed'
+  // ── Step-0 hardening (2026-06-05) — honest-verdict categories ──────
+  // 'story-vqa-unverifiable' — the judge classified one or more browser
+  // ACs as UNREACHABLE from the idle frame (or only low-confidence FAILs).
+  // No retry was triggered; the operator should rebind/reword the AC or
+  // map it to a suite test. Low severity, deduped per (plan, story).
+  | 'story-vqa-unverifiable'
+  // 'story-vqa-skipped' — review-runtime exited without judging (dev
+  // server no-boot, screenshot failure, judge crash, unparseable output).
+  // The story proceeded UNVERIFIED; previously this was indistinguishable
+  // from a healthy pass (the H12 silent-pass surface).
+  | 'story-vqa-skipped'
+  // 'ac-contested' — DEV emitted ---AC_CONTEST--- instead of a code change:
+  // it disputes that the failing AC's state is observable by the idle
+  // screenshot. The fix loop stopped without burning iterations; operator
+  // adjudicates (fix the AC / Accept in QA / send back to dev).
+  | 'ac-contested'
+  // 'ac-coverage-gap' — TEST emitted an AC→test map but some browser ACs
+  // have no asserting test case; the screenshot judge keeps jurisdiction
+  // over them (Step-0.5 deterministic-first binding).
+  | 'ac-coverage-gap'
+  // pacman1 (2026-06-11) — wave gate categories, written daemon-side by the
+  // wave-merge runner (untyped JS) since Story B but never declared here:
+  // 'wave-build-failed'  — clean merge, but the merged union failed the
+  //                        post-merge validation gate (build/typecheck/tests).
+  // 'merge-conflict'     — a story's merge conflicted and (if auto-merge is
+  //                        on) the resolver couldn't integrate it.
+  // Declaring them lets the UI wire category-specific actions (Retry gate).
+  | 'wave-build-failed'
+  | 'merge-conflict'
   | 'other';
 
 export type AttentionStatus = 'open' | 'resolving' | 'resolved';
@@ -110,6 +139,12 @@ export interface AttentionContext {
   storyId?: string;
   jobId?: string;
   stepId?: string;
+  /**
+   * pacman1 (2026-06-11) — wave gate failures carry the wave index so the
+   * UI can wire the "Retry step" suggested action to
+   * POST /api/plans/:id/waves/retry-gate without parsing the title.
+   */
+  waveNumber?: number;
 }
 
 /**

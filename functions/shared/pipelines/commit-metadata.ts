@@ -151,8 +151,14 @@ export function buildCommitShellSnippet(args: {
     // grep-able `VQA-Fixed:` trailer so the plan-delivery REFLECTOR (which
     // mines the commit log) turns the failure→fix into a durable skill/CLAUDE.md
     // lesson. Absent on stories that passed visual review first try.
+    //
+    // Step-0.7 (2026-06-05) — trailer gate. When DEV CONTESTED the failing AC
+    // (`.context/ac-contest.txt` written by the daemon's AC_CONTEST routing),
+    // the "fix" is disputed and must NOT be canonized: an unconditional
+    // trailer would have mined horse-runner1's obstacle-preview corruption
+    // commit (89afa97) into CLAUDE.md as a HIGH-signal visual lesson.
     `VQA_FIX=""`,
-    `if [ -f .context/vqa-observations.txt ] && [ -s .context/vqa-observations.txt ]; then VQA_FIX=$(tr '\\n' ';' < .context/vqa-observations.txt | cut -c1-400); fi`,
+    `if [ -f .context/vqa-observations.txt ] && [ -s .context/vqa-observations.txt ] && [ ! -f .context/ac-contest.txt ]; then VQA_FIX=$(tr '\\n' ';' < .context/vqa-observations.txt | cut -c1-400); fi`,
     `if [ -n "$VQA_FIX" ]; then COMMIT_MSG=$(printf '%s\\n\\nVQA-Fixed: %s' "$COMMIT_MSG" "$VQA_FIX"); fi`,
     `${GIT_PREFIX} ${COMMIT} -m "$COMMIT_MSG"`,
   ];

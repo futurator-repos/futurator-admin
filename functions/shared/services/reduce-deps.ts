@@ -51,6 +51,10 @@ export function buildWaveReducerDeps(): WaveReducerDeps {
       }
       await attentionRepo.createAttentionItem(item);
     },
+    // dragon1 (2026-06-10) — a re-run build-check that goes green resolves
+    // the failure card its predecessor opened (same (epic, wave) dedupKey).
+    resolveAttentionByDedupKey: (planId, dedupKey) =>
+      attentionRepo.autoResolveByDedupKey(planId, dedupKey),
   };
 }
 

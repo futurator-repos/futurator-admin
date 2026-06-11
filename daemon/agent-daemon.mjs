@@ -21,7 +21,8 @@ import {
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { spawn, execSync } from 'child_process';
-import { mkdirSync, existsSync, readFileSync, statSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, statSync, appendFileSync } from 'fs';
+import { join as pathJoin } from 'path';
 import { createHash } from 'node:crypto';
 import { totalmem, freemem, loadavg } from 'os';
 import {
@@ -179,6 +180,7 @@ import { runReflectorJob } from './pipelines/reflector-job-runner.mjs';
 // .context/loaded-skills.json so the per-story commit's Skills-Used
 // trailer populates with real content.
 import { recordSkillActivation } from './lib/loaded-skills-tracker.mjs';
+import { buildSkillsPromptLine } from './lib/skills-prompt.mjs';
 import { startFederationBackupSchedule } from './lib/federation-backup.mjs';
 import { createFederationResolver } from './lib/federation-resolver.mjs';
 import { createMemoryStore, provisionMemoryRoot } from './lib/memory-store.mjs';
@@ -1266,6 +1268,9 @@ async function processStreamEvent(jobId, stepId, agentId, event, workingDir) {
               });
               if (result.written) {
                 await pushEvent(jobId, stepId, agentId, 'skill_activated', {
+                  // snake3 (2026-06-10) — `text` is what the UI live-log
+                  // renders; without it the row shows an empty line.
+                  text: `Skill activated: ${block.input.skill} (${result.source})`,
                   skill: block.input.skill,
                   source: result.source,
                   totalLoaded: result.total,
@@ -1325,6 +1330,9 @@ async function processStreamEvent(jobId, stepId, agentId, event, workingDir) {
         const skills = Array.isArray(event.skills) ? event.skills : [];
         const tools = Array.isArray(event.tools) ? event.tools : [];
         await pushEvent(jobId, stepId, agentId, 'skills_available', {
+          // snake3 (2026-06-10) — `text` is what the UI live-log renders;
+          // the count was invisible before (blank row next to the label).
+          text: `${skills.length} skills available (Skill tool ${tools.includes('Skill') ? 'ON' : 'OFF'})`,
           skills,
           skillCount: skills.length,
           // `tools` can be long; record the count + whether Skill is present
@@ -1883,7 +1891,16 @@ async function executeShellStep(jobId, step, workingDir, variables) {
             const shot = (stdout.match(/SCREENSHOT_URL:\s*(\S+)/) || [])[1];
             const combined = `${stderr}\n${stdout}`;
             const failed = !passed && /RUNTIME_REVIEW_FAILED/.test(combined);
-            const realPass = passed && /---RUNTIME_REVIEW---/.test(stdout);
+            // Step-0.4b (2026-06-05) — a "real pass" requires at least ONE
+            // per-AC PASS verdict, not merely the envelope marker. Before
+            // this, an all-UNCERTAIN blank page counted as a pass AND
+            // auto-resolved the operator's open story-vqa-failed card —
+            // actively clearing the failure signal for a broken UI.
+            const realPass =
+              passed && /---RUNTIME_REVIEW---/.test(stdout) && /^\S+: PASS\b/m.test(stdout);
+            const unverifiable = passed && /RUNTIME_REVIEW_UNVERIFIABLE/.test(stdout);
+            const skipped = passed && /RUNTIME_REVIEW_SKIPPED/.test(combined);
+            const coverageGap = (stdout.match(/AC_COVERAGE_GAP:\s*(.+)/) || [])[1];
             if (failed) {
               const fails = (stderr.match(/^\s*-\s*\S+:\s*.+$/gm) || [])
                 .map((l) => l.trim())
@@ -1918,6 +1935,73 @@ async function executeShellStep(jobId, step, workingDir, variables) {
               );
             } else if (realPass) {
               await autoResolveAttentionByDedupKey(ddb, planId, dedupKey, log);
+            }
+            // Step-0.4b — surface non-FAIL anomalies LOUDLY (low severity,
+            // deduped per story) instead of letting them masquerade as
+            // healthy passes. None of these blocks the pipeline.
+            if (unverifiable) {
+              const detail = (stdout.match(/RUNTIME_REVIEW_UNVERIFIABLE:[\s\S]{0,500}/) || [''])[0];
+              await writeAttentionItem(
+                ddb,
+                {
+                  planId,
+                  severity: 'low',
+                  category: 'story-vqa-unverifiable',
+                  title: `VQA could not verify some ACs — story ${storyId.slice(0, 8)}`,
+                  body:
+                    `One or more browser ACs describe a state the idle screenshot ` +
+                    `cannot show (or only a low-confidence contradiction was seen). ` +
+                    `No retry was triggered — an unverifiable verdict must not drive ` +
+                    `code changes. Consider mapping these ACs to suite tests ` +
+                    `(AC_TEST_MAP) or rewording them to the initial state.\n\n` +
+                    detail.slice(0, 600),
+                  context: { jobId, epicId: variables.EPIC_ID, storyId, stepId: step.id, screenshotUrl: shot },
+                  suggestedActions: [
+                    { label: 'Open story', kind: 'open-story' },
+                    { label: 'Open logs', kind: 'open-logs' },
+                  ],
+                  dedupKey: `story-vqa-unverifiable:${planId}:${storyId}`,
+                },
+                log,
+              );
+            }
+            if (skipped && !realPass && !failed) {
+              const cause = (combined.match(/RUNTIME_REVIEW_SKIPPED:\s*(.+)/) || [, 'unknown'])[1];
+              await writeAttentionItem(
+                ddb,
+                {
+                  planId,
+                  severity: 'low',
+                  category: 'story-vqa-skipped',
+                  title: `VQA did not run — story ${storyId.slice(0, 8)}`,
+                  body:
+                    `review-runtime exited without judging this story's browser ACs. ` +
+                    `The story proceeds UNVERIFIED — this is not a pass.\n\nCause: ${String(cause).slice(0, 300)}`,
+                  context: { jobId, epicId: variables.EPIC_ID, storyId, stepId: step.id },
+                  suggestedActions: [{ label: 'Open logs', kind: 'open-logs' }],
+                  dedupKey: `story-vqa-skipped:${planId}:${storyId}`,
+                },
+                log,
+              );
+            }
+            if (coverageGap) {
+              await writeAttentionItem(
+                ddb,
+                {
+                  planId,
+                  severity: 'low',
+                  category: 'ac-coverage-gap',
+                  title: `Browser ACs without suite tests — story ${storyId.slice(0, 8)}`,
+                  body:
+                    `TEST emitted an AC→test map but these browser ACs have no ` +
+                    `asserting test case (screenshot judge keeps jurisdiction): ` +
+                    `${coverageGap.slice(0, 300)}`,
+                  context: { jobId, epicId: variables.EPIC_ID, storyId, stepId: step.id },
+                  suggestedActions: [{ label: 'Open story', kind: 'open-story' }],
+                  dedupKey: `ac-coverage-gap:${planId}:${storyId}`,
+                },
+                log,
+              );
             }
           }
         } catch (attnErr) {
@@ -2020,8 +2104,16 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   // in the forensic via `step.append_system_prompt_sha`.
   const effectiveCwd = workingDir || process.env.HOME;
   const claudeMd = readClaudeMd(effectiveCwd);
-  const appendSystemPrompt =
-    claudeMd && !claudeMd.truncated ? `# Project CLAUDE.md\n\n${claudeMd.content}` : undefined;
+  // Step-0.9 (2026-06-05) — append the project's skill loadout (name +
+  // description per vendored skill) so the model actually invokes the Skill
+  // tool. Skills LOAD in every session (CLI init reports them) but were
+  // never ACTIVATED: their descriptions are user-utterance-shaped and never
+  // match the daemon's machine prompts. See daemon/lib/skills-prompt.mjs.
+  const skillsSection = buildSkillsPromptLine(effectiveCwd);
+  const promptParts = [];
+  if (claudeMd && !claudeMd.truncated) promptParts.push(`# Project CLAUDE.md\n\n${claudeMd.content}`);
+  if (skillsSection) promptParts.push(skillsSection);
+  const appendSystemPrompt = promptParts.length > 0 ? promptParts.join('\n\n') : undefined;
   if (claudeMd) {
     pushEvent(jobId, step.id, step.agentId, 'claude_md_loaded', {
       text: `CLAUDE.md ${claudeMd.truncated ? 'truncated' : 'loaded'} from ${effectiveCwd}`,
@@ -3113,7 +3205,64 @@ async function executePipeline(job) {
         });
 
         // Run the retry/fix step
+        const contestBefore = variables.AC_CONTEST || '';
         await executeStep(jobId, retryStep, agents, workingDir, variables, sessions, stepResults);
+
+        // ── Step-0.3b (2026-06-05) — AC_CONTEST routing ──
+        // DEV disputed the failing AC (the verification instrument cannot
+        // observe the state it describes) INSTEAD of changing code. Stop the
+        // fix loop without burning the remaining iterations, mark the contest
+        // for the operator to adjudicate, and leave a marker file so the
+        // commit step suppresses the VQA-Fixed trailer (Step-0.7) — a
+        // contested verdict must never be mined as a visual lesson.
+        const contestNow = variables.AC_CONTEST || '';
+        if (contestNow.trim() && contestNow !== contestBefore) {
+          log(
+            'warn',
+            `[${jobId.slice(0, 8)}] AC_CONTEST raised by ${retryStep.id} — stopping fix loop, routing to operator: ${contestNow.trim().slice(0, 200)}`,
+          );
+          try {
+            const ctxDir = pathJoin(workingDir || '.', '.context');
+            mkdirSync(ctxDir, { recursive: true });
+            appendFileSync(pathJoin(ctxDir, 'ac-contest.txt'), contestNow.trim() + '\n');
+          } catch (markerErr) {
+            log('warn', `ac-contest marker write failed (non-blocking): ${markerErr.message}`);
+          }
+          await pushEvent(jobId, step.id, 'orchestrator', 'status', {
+            text: `[SYSTEM] AC contested by DEV — fix loop stopped without consuming iterations: ${contestNow.trim().slice(0, 300)}`,
+          });
+          try {
+            const planId = await resolvePlanIdFromEpicId(ddb, variables.EPIC_ID);
+            if (planId) {
+              await writeAttentionItem(
+                ddb,
+                {
+                  planId,
+                  severity: 'medium',
+                  category: 'ac-contested',
+                  title: `DEV contests a failing AC — story ${(variables.STORY_ID || 'unknown').slice(0, 8)}`,
+                  body:
+                    `The DEV agent disputes that the verification instrument can ` +
+                    `observe the failing AC's state (idle screenshot limitation), ` +
+                    `and made no code change. The fix loop stopped. Adjudicate: ` +
+                    `if the contest is right, fix/rebind the AC (or Accept it in ` +
+                    `QA Review); if wrong, send the story back to dev.\n\n` +
+                    contestNow.trim().slice(0, 600),
+                  context: { jobId, epicId: variables.EPIC_ID, storyId: variables.STORY_ID, stepId: step.id },
+                  suggestedActions: [
+                    { label: 'Open story', kind: 'open-story' },
+                    { label: 'Open logs', kind: 'open-logs' },
+                  ],
+                  dedupKey: `ac-contested:${planId}:${variables.STORY_ID || 'unknown'}`,
+                },
+                log,
+              );
+            }
+          } catch (attnErr) {
+            log('warn', `ac-contested attention write failed (non-blocking): ${attnErr.message}`);
+          }
+          break;
+        }
 
         // Re-run the gate step (the one with loopTo)
         const recheck = await executeStep(
@@ -3931,7 +4080,44 @@ async function isAutoMergeEnabledCached() {
  * recorded as `mode:auto-resolved` in the conflict telemetry — so a wrong
  * resolution is rejected or revertible, never silently shipped.
  */
-function resolveWaveMergeConflict({ worktreeDir, conflictedFiles, conflictStoryId, mergedStoryIds }, { short } = {}) {
+async function resolveWaveMergeConflict(args, opts = {}) {
+  // snake3 (2026-06-10) — the resolver died with `claude exited 1` (empty
+  // output) inside the OAuth-expired window, and that INFRASTRUCTURE failure
+  // was reported as "conflict unresolved" → permanent wave halt → operator
+  // escalation for a conflict the agent never even attempted. Wrap the spawn
+  // in one reload-and-retry (mirrors runAgentWithAuthRecovery's pattern) and
+  // tag infra failures so the runner marks the job TRANSIENT (the reducer
+  // re-mints it later) instead of burning the conflict as "unresolvable".
+  // Pre-spawn expiry gate (mirrors runAgentWithAuthRecovery): don't burn the
+  // first attempt on a token we already KNOW is near-dead.
+  if (authState.expiresAt && authState.expiresAt - Date.now() < PRESPAWN_EXPIRY_THRESHOLD_MS) {
+    try {
+      loadOAuth('conflict-resolver-prespawn');
+      await probeAuth();
+    } catch {
+      /* spawn anyway — Keychain push may be in flight (see runAgent 833-837) */
+    }
+  }
+  const first = await resolveWaveMergeConflictOnce(args, opts);
+  if (first.resolved || !first.infra) return first;
+  log(
+    'warn',
+    `[${opts.short || 'wave-merge'}] conflict-resolver infra failure (${first.reasoning}); reloading OAuth + retrying once`,
+  );
+  loadOAuth('conflict-resolver-recovery');
+  try {
+    await probeAuth();
+  } catch {
+    /* spawn anyway */
+  }
+  const second = await resolveWaveMergeConflictOnce(args, opts);
+  if (!second.resolved && second.infra) {
+    return { ...second, reasoning: `infra (2 attempts): ${second.reasoning}` };
+  }
+  return second;
+}
+
+function resolveWaveMergeConflictOnce({ worktreeDir, conflictedFiles, conflictStoryId, mergedStoryIds }, { short } = {}) {
   return new Promise((resolve) => {
     const fileList = conflictedFiles.map((f) => `  - ${f}`).join('\n');
     const mergedList = (mergedStoryIds || []).map((s) => `  - wip/${s}`).join('\n') || '  (none)';
@@ -3972,11 +4158,11 @@ function resolveWaveMergeConflict({ worktreeDir, conflictedFiles, conflictStoryI
     ];
     log('info', `[${short || 'wave-merge'}] spawning Tier-2 conflict-resolver for ${conflictedFiles.length} file(s)`);
     let settled = false;
-    const done = (resolved, reason) => {
+    const done = (resolved, reason, infra = false) => {
       if (settled) return;
       settled = true;
       if (!resolved && reason) log('warn', `[${short || 'wave-merge'}] conflict-resolver: ${reason}`);
-      resolve({ resolved, reasoning: reason });
+      resolve({ resolved, infra, reasoning: reason });
     };
     let proc;
     try {
@@ -3986,7 +4172,7 @@ function resolveWaveMergeConflict({ worktreeDir, conflictedFiles, conflictStoryI
         env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
       });
     } catch (err) {
-      return done(false, `spawn threw: ${err.message}`);
+      return done(false, `spawn threw: ${err.message}`, true);
     }
     const timer = setTimeout(() => {
       try {
@@ -3994,20 +4180,172 @@ function resolveWaveMergeConflict({ worktreeDir, conflictedFiles, conflictStoryI
       } catch {
         /* best effort */
       }
-      done(false, 'timed out after 8m');
+      // A hang is environment trouble, not a verdict on the conflict — retryable.
+      done(false, 'timed out after 8m', true);
     }, 8 * 60 * 1000);
     let stderrTail = '';
-    proc.stderr?.on('data', (c) => (stderrTail = (stderrTail + c.toString('utf8')).slice(-1000)));
+    let stdoutTail = '';
+    proc.stderr?.on('data', (c) => (stderrTail = (stderrTail + c.toString('utf8')).slice(-1500)));
+    proc.stdout?.on('data', (c) => (stdoutTail = (stdoutTail + c.toString('utf8')).slice(-2000)));
     proc.on('error', (err) => {
       clearTimeout(timer);
-      done(false, `process error: ${err.message}`);
+      done(false, `process error: ${err.message}`, true);
     });
     proc.on('close', (code) => {
       clearTimeout(timer);
       // Trust the runner's marker-check + build gate for correctness; here we
       // only gate on the process not erroring out.
-      if (code === 0) return done(true, 'agent integrated both sides');
-      done(false, `claude exited ${code}: ${stderrTail.slice(-200)}`);
+      if (code === 0) {
+        // Forensics (snake3 2026-06-10): carry the agent's own explanation of
+        // HOW it integrated the sides into the conflict-event record —
+        // recordConflictEvent stores `reasoning` durably in
+        // futurator-wave-conflicts, making every auto-resolution auditable.
+        return done(true, `agent integrated both sides. Transcript tail: ${stdoutTail.slice(-1200)}`);
+      }
+      // Non-zero exit with no agent output = the CLI died BEFORE doing any
+      // work (expired OAuth, spawn problem, rate limit). That is an
+      // infrastructure failure, not an unresolvable conflict — tag it so the
+      // caller retries instead of halting the wave on a conflict no agent
+      // ever attempted. (snake3 18:08: `claude exited 1:` with empty output
+      // during the expired-OAuth window.)
+      const infra =
+        stdoutTail.trim().length === 0 ||
+        /401|authentication|OAuth|credentials|overloaded|rate.?limit/i.test(stderrTail);
+      done(false, `claude exited ${code}${infra ? ' (infra)' : ''}: ${(stderrTail || stdoutTail).slice(-300)}`, infra);
+    });
+  });
+}
+
+// pacman1 (2026-06-11) — agentic wave build-fix. Mirrors the conflict
+// resolver's spawn/auth-recovery shape but targets a DIFFERENT failure:
+// the merge applied cleanly, yet the union of parallel stories doesn't
+// build (e.g. a story imported an interface-contract file its sibling
+// owns, a type drifted between stories, a dep is missing). The agent
+// repairs the MERGED tree in the candidate worktree; the runner re-runs
+// the full validation gate and only advances green if it passes.
+async function fixWaveMergeBuild(args, opts = {}) {
+  if (authState.expiresAt && authState.expiresAt - Date.now() < PRESPAWN_EXPIRY_THRESHOLD_MS) {
+    try {
+      loadOAuth('build-fix-prespawn');
+      await probeAuth();
+    } catch {
+      /* spawn anyway — Keychain push may be in flight */
+    }
+  }
+  const first = await fixWaveMergeBuildOnce(args, opts);
+  if (first.attempted || !first.infra) return first;
+  log(
+    'warn',
+    `[${opts.short || 'wave-merge'}] build-fix infra failure (${first.reasoning}); reloading OAuth + retrying once`,
+  );
+  loadOAuth('build-fix-recovery');
+  try {
+    await probeAuth();
+  } catch {
+    /* spawn anyway */
+  }
+  return fixWaveMergeBuildOnce(args, opts);
+}
+
+function fixWaveMergeBuildOnce(
+  { worktreeDir, validationCmd, validationOutput, mergedStoryIds },
+  { short } = {},
+) {
+  return new Promise((resolve) => {
+    const mergedList = (mergedStoryIds || []).map((s) => `  - wip/${s}`).join('\n') || '  (none)';
+    const prompt = [
+      'You are repairing a BUILD/TEST failure on a wave-merge candidate: several',
+      'stories developed in PARALLEL worktrees merged cleanly at the git level,',
+      'but the merged union fails the validation gate below. Each story passed',
+      'this gate in isolation — the break is in the INTEGRATION (e.g. a story',
+      'imports a type-contract file that only existed locally in a sibling',
+      "worktree, two stories' types drifted apart, or package.json lost a",
+      'dependency/script a story relied on).',
+      '',
+      'Branches merged into HEAD:',
+      mergedList,
+      '',
+      `Validation command: ${validationCmd}`,
+      '',
+      'Validation output (tail):',
+      '```',
+      validationOutput || '(none captured)',
+      '```',
+      '',
+      'Per-story intent is in `.context/wave-*-story-*.md` — read the relevant',
+      'ones before changing anything.',
+      '',
+      'RULES:',
+      '1. Make the SMALLEST change that makes the validation command pass while',
+      '   preserving every story’s intended functionality. Prefer fixing an',
+      '   import path to the real merged location of a symbol over creating',
+      '   duplicate declaration files.',
+      '2. If a type/interface is genuinely missing from the merged tree, define',
+      '   it ONCE in the most natural module and point consumers at it.',
+      '3. You may run the validation command yourself to iterate.',
+      '4. Never weaken ASSERTIONS: do not delete or loosen what a test checks,',
+      '   do not add ts-ignore/any-casts, do not change the validation command.',
+      '   You MAY repair test INFRASTRUCTURE while preserving intent — e.g. a',
+      '   legacy compile-time-only test file the runner rejects ("No test suite',
+      '   found") may be wrapped in a real suite keeping every type-level',
+      '   assertion; a test asserting a sibling story’s behavior may be updated',
+      '   to the MERGED behavior when the merged code is correct per both',
+      '   stories’ intents (confirm against the .context story notes).',
+      '5. Do NOT run git commit/push — just fix the files; the runner commits.',
+    ].join('\n');
+    const args = [
+      '-p',
+      prompt,
+      '--model',
+      process.env.WAVE_BUILD_FIX_MODEL || 'claude-sonnet-4-6',
+      '--permission-mode',
+      'bypassPermissions',
+      '--add-dir',
+      worktreeDir,
+    ];
+    log('info', `[${short || 'wave-merge'}] spawning build-fix agent on candidate`);
+    let settled = false;
+    const done = (attempted, reason, infra = false) => {
+      if (settled) return;
+      settled = true;
+      if (!attempted && reason) log('warn', `[${short || 'wave-merge'}] build-fix: ${reason}`);
+      resolve({ attempted, infra, reasoning: reason });
+    };
+    let proc;
+    try {
+      proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
+        cwd: worktreeDir,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
+      });
+    } catch (err) {
+      return done(false, `spawn threw: ${err.message}`, true);
+    }
+    const timer = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        /* best effort */
+      }
+      done(false, 'timed out after 12m', true);
+    }, 12 * 60 * 1000);
+    let stderrTail = '';
+    let stdoutTail = '';
+    proc.stderr?.on('data', (c) => (stderrTail = (stderrTail + c.toString('utf8')).slice(-1500)));
+    proc.stdout?.on('data', (c) => (stdoutTail = (stdoutTail + c.toString('utf8')).slice(-2000)));
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      done(false, `process error: ${err.message}`, true);
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        return done(true, `agent repaired merged tree. Transcript tail: ${stdoutTail.slice(-1200)}`);
+      }
+      const infra =
+        stdoutTail.trim().length === 0 ||
+        /401|authentication|OAuth|credentials|overloaded|rate.?limit/i.test(stderrTail);
+      done(false, `claude exited ${code}${infra ? ' (infra)' : ''}: ${(stderrTail || stdoutTail).slice(-300)}`, infra);
     });
   });
 }
@@ -4859,12 +5197,16 @@ async function executeWaveMergeJob(job) {
   // `autoMergeMode: 'off'`. When enabled, the runner attempts an in-candidate
   // resolution that is still build-gated + advance-on-green + audited.
   let resolveConflictHook;
+  let fixBuildHook;
   try {
     if (await isAutoMergeEnabledCached()) {
       const planRow = await getPlanRowForAutoMerge(p.planId);
       const planMode = planRow?.autoMergeMode;
       if (planMode !== 'off') {
         resolveConflictHook = (args) => resolveWaveMergeConflict(args, { short });
+        // pacman1 (2026-06-11) — same opt-in also enables the agentic
+        // build-fix on post-merge validation failures (see wave-merge-runner).
+        fixBuildHook = (args) => fixWaveMergeBuild(args, { short });
         log('info', `[${short}] auto-merge ON (global flag${planMode ? `, plan=${planMode}` : ''})`);
       } else {
         log('info', `[${short}] auto-merge globally ON but plan opted out (autoMergeMode=off)`);
@@ -4873,6 +5215,25 @@ async function executeWaveMergeJob(job) {
   } catch (err) {
     log('warn', `[${short}] auto-merge gate check failed, defaulting to halt: ${err.message}`);
   }
+
+  // pacman1 (2026-06-11) — wave-level live streaming. Story jobs stream
+  // their pipeline into the events table; wave-merge jobs were a black box
+  // (the operator saw FIXING with no narrative). Tee every runner log line
+  // into the events table under this jobId so the hierarchy view's wave
+  // gate panel can render the same live log stories get. pushEvent never
+  // throws (it catches internally), so the tee cannot break the merge.
+  const waveLog = (level, msg) => {
+    log(level, `[${short}] ${msg}`);
+    if (typeof msg === 'string') {
+      void pushEvent(
+        jobId,
+        'wave-merge',
+        'MERGE',
+        level === 'warn' || level === 'error' ? 'step_error' : 'status',
+        { text: msg },
+      );
+    }
+  };
 
   try {
     const { runWaveMerge } = await import('./lib/wave-merge-runner.mjs');
@@ -4894,11 +5255,16 @@ async function executeWaveMergeJob(job) {
         jobId,
         writeAttention: (item) =>
           writeAttentionItem(ddb, { ...item, planId: p.planId }, log),
+        // snake3 (2026-06-10) — success closes prior failure cards for this wave.
+        resolveAttention: (dedupKey) =>
+          autoResolveAttentionByDedupKey(ddb, p.planId, dedupKey, log),
         // Story C (2026-05-29) — durable conflict telemetry.
         recordConflictEvent: (event) => recordWaveConflictEvent(ddb, event, log),
         // Story E Tier 2 — undefined (halt) unless the toggle gate enabled it.
         resolveConflict: resolveConflictHook,
-        log,
+        // pacman1 (2026-06-11) — undefined (halt) unless autoMerge enabled it.
+        fixBuild: fixBuildHook,
+        log: waveLog,
       }),
     );
 
@@ -4912,6 +5278,9 @@ async function executeWaveMergeJob(job) {
           pushSha: result.pushSha,
         },
       });
+      await pushEvent(jobId, 'wave-merge', 'MERGE', 'step_complete', {
+        text: `wave-merge ${result.outcome} — merged ${result.mergedStoryIds?.length || 0} stories, green advanced to ${result.pushSha || '?'}`,
+      });
       log('info', `[${short}] wave-merge ${result.outcome} (merged ${result.mergedStoryIds?.length || 0})`);
       // git-graph snapshot — the plan branch + merge commits just advanced.
       void snapshotGitGraph(p.appId, short);
@@ -4923,6 +5292,11 @@ async function executeWaveMergeJob(job) {
       status: 'FAILED',
       errorMessage: `wave-merge ${result.outcome}: ${result.conflictedAtStoryId || result.failingTests?.length || result.error || 'see attention items'}`,
       waveMergeResult: result,
+    });
+    await pushEvent(jobId, 'wave-merge', 'MERGE', 'step_error', {
+      text:
+        `wave-merge ${result.outcome}` +
+        (result.testOutput ? ` — validation output (tail):\n${result.testOutput.slice(-1800)}` : ''),
     });
     log('warn', `[${short}] wave-merge ${result.outcome}`);
     // Snapshot even on halt — the wip/* branches the operator wants to see
@@ -5813,6 +6187,30 @@ async function poll() {
       if (paused) {
         await new Promise((r) => setTimeout(r, POLL_INTERVAL));
         continue;
+      }
+
+      // snake3 (2026-06-10) — auth circuit breaker. During the 17:50–18:48
+      // OAuth outage the daemon kept claiming PENDING jobs and feeding them
+      // to a CLI that exits 1 instantly: compile steps FAILED, the conflict
+      // resolver "failed", waves halted — all burned on a token everyone
+      // knew was dead. When the access token is expired AND a re-read of
+      // the credentials file doesn't produce a fresh one, stop claiming NEW
+      // work until it does (in-flight jobs finish; auth-recovery handles
+      // them). Recovery is automatic: the interval probe + SIGUSR1 + this
+      // pre-claim reload all refresh authState.
+      if (authState.expiresAt && authState.expiresAt <= Date.now()) {
+        loadOAuth('poll-gate-expired');
+        if (authState.expiresAt && authState.expiresAt <= Date.now()) {
+          if (Date.now() - (global.__lastAuthGateLogAt || 0) > 60_000) {
+            global.__lastAuthGateLogAt = Date.now();
+            log(
+              'warn',
+              `[poll-gate] access token expired (${new Date(authState.expiresAt).toISOString()}) and no fresh credentials on disk — pausing NEW job claims until re-auth`,
+            );
+          }
+          await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+          continue;
+        }
       }
 
       // Story 20.16 — gate the DDB query on capacity. When the

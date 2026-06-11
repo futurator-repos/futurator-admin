@@ -111,6 +111,13 @@ echo ">>> Ensuring Playwright Chromium is installed on the daemon host"
 $SSH "$REMOTE_HOST" "ls ~/.cache/ms-playwright/chromium_headless_shell-* >/dev/null 2>&1 && echo 'chromium present' || (cd /home/ubuntu && npx -y playwright install chromium 2>&1 | tail -2)" || \
   echo ">>> WARN: playwright install step failed (non-fatal) — visual QA may not capture screenshots"
 
+# snake3 (2026-06-10) — the L2 flow executor imports the playwright LIBRARY
+# (not just the CLI); keep daemon node_modules current so
+# /opt/futurator-daemon/node_modules/playwright is importable from QA steps.
+echo ">>> Ensuring daemon node_modules are current (playwright lib for L2 flow executor)"
+$SSH "$REMOTE_HOST" "cd /opt/futurator-daemon && sudo npm install --omit=dev --no-audit --no-fund 2>&1 | tail -2" || \
+  echo ">>> WARN: daemon npm install failed (non-fatal) — L2 flow tests fall back to idle screenshots"
+
 # ── Restart systemd so the running process picks up new code ──
 echo ">>> Restarting futurator-daemon systemd unit"
 $SSH "$REMOTE_HOST" "sudo systemctl restart futurator-daemon"

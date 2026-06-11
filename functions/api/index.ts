@@ -20,6 +20,7 @@ import * as scheduleRepo from '../shared/repositories/schedule-repository';
 import * as userRepo from '../shared/repositories/user-repository';
 import * as alertRepo from '../shared/repositories/alert-repository';
 import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
+import { isTerminal as jobIsTerminal } from '../shared/types/agent-job-state-machine';
 import * as agentEventsRepo from '../shared/repositories/agent-events-repository';
 import * as partyProjectsRepo from '../shared/repositories/party-projects-repository';
 import * as partySessionsRepo from '../shared/repositories/party-sessions-repository';
@@ -151,7 +152,14 @@ import {
 } from '../shared/services/brownfield-topology-converter';
 import { generatePmPlanPipeline } from '../shared/pipelines/pm-plan-pipeline';
 import { generateSkillScoutPipeline } from '../shared/pipelines/skill-scout-pipeline';
-import { parsePlanOutput, applyPlanOutput } from '../shared/services/plan-generation-service';
+import {
+  parsePlanOutput,
+  applyPlanOutput,
+  validateVisualCoverage,
+  validatePlanOutputJson,
+  epicsToPlanOutput,
+} from '../shared/services/plan-generation-service';
+import { buildPmPlanPrompt } from '../shared/prompts/pm-plan-prompt';
 import { computePlanWaves, epicsInPlanWave } from '../shared/services/plan-waves';
 import type { PipelineDefinition } from '../shared/types/agent-orchestrator';
 import { exportPublicProjects } from '../shared/export-public-projects';
@@ -804,7 +812,15 @@ app.get('/api/agent-jobs/:id', async (c) => {
 
 app.get('/api/agent-jobs/:id/events', async (c) => {
   const afterSeq = c.req.query('after') || '000000';
-  const { events, lastSeq } = await agentEventsRepo.getEventsAfter(c.req.param('id'), afterSeq);
+  // dino1 (2026-06-10): the repo default of 50 events/page meant a COMPLETED
+  // job's single catch-up fetch showed only the first 50 events — live logs
+  // looked "cut" mid-DEV. Callers may now ask for up to 500 per page.
+  const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '50', 10) || 50, 1), 500);
+  const { events, lastSeq } = await agentEventsRepo.getEventsAfter(
+    c.req.param('id'),
+    afterSeq,
+    limit,
+  );
   return c.json({ events, lastSeq });
 });
 
@@ -1513,6 +1529,79 @@ app.post('/api/plans/:id/check-wave-completion', async (c) => {
   }
 });
 
+// pacman1 (2026-06-11) — operator retry for a failed wave gate (merge +
+// build-check). The wave-reducer only auto-re-mints TRANSIENT failures;
+// real build failures halt the epic in 'fixing' and, before this route,
+// the only path forward was hand-editing DynamoDB. The attention card's
+// "Retry step" suggested action and the hierarchy wave row both call this.
+// It mirrors the reducer's re-mint exactly: a fresh PENDING wave-merge job
+// over the wave's successful stories, with the epic's waveBuildJobs pointer
+// swapped so the reducer tracks the new attempt.
+app.post('/api/plans/:id/waves/retry-gate', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  const body = await c.req.json().catch(() => ({}));
+  const epicId = typeof body.epicId === 'string' ? body.epicId : '';
+  const waveNumber = Number.isInteger(body.waveNumber) ? (body.waveNumber as number) : NaN;
+  if (!epicId || Number.isNaN(waveNumber)) {
+    return c.json({ error: 'epicId (string) and waveNumber (integer) are required' }, 400);
+  }
+  if (!plan.epicIds.includes(epicId)) {
+    return c.json({ error: 'Epic does not belong to this plan' }, 400);
+  }
+  const epic = await epicRepo.getEpicById(epicId);
+  if (!epic) throw new NotFoundError('Epic', epicId);
+
+  const waveKey = String(waveNumber);
+  const existingId = epic.waveBuildJobs?.[waveKey];
+  if (existingId) {
+    const existing = await agentJobsRepo.getJobById(existingId);
+    if (existing && !jobIsTerminal(existing.status)) {
+      return c.json({ error: 'Wave gate is already running', jobId: existingId }, 409);
+    }
+  }
+
+  // Stories in this wave that delivered (mirror of the reducer's
+  // isSuccess(job.status) filter, using the synced story status).
+  const storyIds = epic.stories
+    .filter((s) => (s.wave ?? 0) === waveNumber && s.status === 'done')
+    .map((s) => s.storyId);
+  if (storyIds.length === 0) {
+    return c.json({ error: `No completed stories found in wave ${waveNumber}` }, 400);
+  }
+
+  const appId = epic.workingDir.replace(/\/+$/, '').split('/').filter(Boolean).pop() || '';
+  const retryJobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId: retryJobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: plan.createdBy,
+    workingDir: epic.workingDir,
+    jobType: 'wave-merge',
+    retryOf: existingId,
+    waveMergePayload: {
+      appId,
+      planId,
+      planSlug: plan.name,
+      epicId,
+      waveNumber,
+      storyIds,
+      postMergeValidationCmd: null,
+    },
+    pipeline: { agents: {}, steps: [] },
+  } as never);
+  await epicRepo.updateEpicFields(epicId, {
+    waveBuildJobs: { ...(epic.waveBuildJobs || {}), [waveKey]: retryJobId },
+  });
+
+  return c.json({ jobId: retryJobId, waveNumber, storyIds });
+});
+
 app.get('/api/plans/:id', async (c) => {
   const planId = c.req.param('id');
   const plan = await planRepo.getPlanById(planId);
@@ -1842,6 +1931,26 @@ app.post('/api/plans/:id/apply-plan', async (c) => {
     return c.json({ error: { code: 'PARSE_FAILED', message } }, 400);
   }
 
+  // dragon1 (2026-06-10) — visual-coverage gate. A UI-bearing plan (the
+  // App's boilerplate declares qaContext → it boots a screenshotable dev
+  // server) with zero needsBrowser ACs silently disables the entire visual
+  // QA surface. Reject at apply time so the operator regenerates instead
+  // of discovering it at QA Review with nothing to run.
+  {
+    let uiBearing = false;
+    try {
+      const appRow = plan.appId ? await appRepo.getApp(plan.appId) : null;
+      const bpType = normalizeBoilerplateType(appRow?.boilerplateType || 'nextjs-base');
+      uiBearing = !!BOILERPLATE_REGISTRY[bpType]?.qaContext;
+    } catch {
+      // Unknown boilerplate → don't block on a lookup failure.
+    }
+    const coverageError = validateVisualCoverage(output, { uiBearing, rigor: plan.rigor });
+    if (coverageError) {
+      return c.json({ error: { code: 'VISUAL_COVERAGE_MISSING', message: coverageError } }, 400);
+    }
+  }
+
   const result = await applyPlanOutput(plan, output, {
     createEpic: epicRepo.createEpic,
     updatePlanFields: planRepo.updatePlanFields,
@@ -1978,6 +2087,172 @@ app.post('/api/plans/:id/regenerate', async (c) => {
   });
 
   return c.json({ planId, pmJobId }, 202);
+});
+
+// ── Concept-stage plan portability (pacman1 disease follow-up, 2026-06-11) ──
+//
+// GET  /api/plans/:id/export     — current epic tree as PM-output JSON
+//                                  (local E1/Sn ids; round-trips into import).
+// GET  /api/plans/:id/pm-prompt  — the exact PM instructions + schema for
+//                                  this plan, so an operator can hand them to
+//                                  an EXTERNAL LLM and import its output.
+// POST /api/plans/:id/import-plan — validate + apply an operator-provided
+//                                  plan JSON (replaces existing epics, same
+//                                  wipe semantics as regenerate; concept only).
+
+app.get('/api/plans/:id/export', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  const epics: EpicWorkflow[] = [];
+  for (const epicId of plan.epicIds) {
+    const epic = await epicRepo.getEpicById(epicId);
+    if (epic) epics.push(epic);
+  }
+  return c.json({
+    schema: 'plan-output-v1',
+    exportedAt: new Date().toISOString(),
+    planId: plan.planId,
+    intent: plan.intent,
+    rigor: plan.rigor ?? null,
+    status: plan.status,
+    ...epicsToPlanOutput(plan, epics),
+  });
+});
+
+app.get('/api/plans/:id/pm-prompt', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  let bpType: BoilerplateType = 'nextjs-base';
+  if (plan.appId) {
+    try {
+      const appRow = await appRepo.getApp(plan.appId);
+      if (appRow?.boilerplateType) bpType = normalizeBoilerplateType(appRow.boilerplateType);
+    } catch {
+      // best-effort — default boilerplate
+    }
+  }
+  const prompt = buildPmPlanPrompt({
+    planName: plan.name,
+    intent: plan.intent,
+    executionMode: plan.executionMode,
+    boilerplateType: bpType,
+    rigor: plan.rigor ?? 'mvp',
+    kind: plan.kind,
+  });
+  return c.json({
+    planId,
+    boilerplateType: bpType,
+    prompt,
+    note:
+      'Paste this prompt into any LLM. Import the JSON it emits (with or ' +
+      'without the ---PLAN_JSON--- fences) via the Concept stage Import ' +
+      'button or POST /api/plans/:id/import-plan.',
+  });
+});
+
+app.post('/api/plans/:id/import-plan', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  if (plan.status !== 'concept') {
+    throw new ValidationError(
+      `Cannot import a plan in status "${plan.status}" — only concept (the epic tree is immutable once development starts)`,
+    );
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  let raw: unknown = body?.planJson;
+  if (typeof raw === 'string') {
+    // Accept the fenced/stringified forms an external LLM produces.
+    const cleaned = raw
+      .replace(/---PLAN_JSON---/g, '')
+      .replace(/---END_PLAN_JSON---/g, '')
+      .replace(/^```(?:json)?\s*/im, '')
+      .replace(/\s*```\s*$/im, '')
+      .trim();
+    try {
+      raw = JSON.parse(cleaned);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json(
+        { error: { code: 'PARSE_FAILED', message: `Not valid JSON: ${message}` } },
+        400,
+      );
+    }
+  }
+  if (!raw || typeof raw !== 'object') {
+    return c.json(
+      {
+        error: {
+          code: 'PARSE_FAILED',
+          message: 'Body must include planJson (object or JSON string)',
+        },
+      },
+      400,
+    );
+  }
+  // The export wrapper carries metadata next to `plan` — tolerate it.
+  const candidate = { plan: (raw as { plan?: unknown }).plan ?? raw };
+
+  let output;
+  try {
+    output = validatePlanOutputJson(candidate);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: { code: 'VALIDATION_FAILED', message } }, 400);
+  }
+  // The slug is locked at creation; external LLMs often invent their own.
+  // Force it rather than reject — name mismatches carry no information.
+  output.plan.name = plan.name;
+
+  {
+    let uiBearing = false;
+    try {
+      const appRow = plan.appId ? await appRepo.getApp(plan.appId) : null;
+      const bpType = normalizeBoilerplateType(appRow?.boilerplateType || 'nextjs-base');
+      uiBearing = !!BOILERPLATE_REGISTRY[bpType]?.qaContext;
+    } catch {
+      // Unknown boilerplate → don't block on a lookup failure.
+    }
+    const coverageError = validateVisualCoverage(output, { uiBearing, rigor: plan.rigor });
+    if (coverageError) {
+      return c.json({ error: { code: 'VISUAL_COVERAGE_MISSING', message: coverageError } }, 400);
+    }
+  }
+
+  // Replace semantics — wipe the existing tree exactly like regenerate.
+  if (plan.epicIds && plan.epicIds.length > 0) {
+    for (const epicId of plan.epicIds) {
+      try {
+        await epicRepo.deleteEpic(epicId);
+      } catch (err) {
+        console.warn(
+          `[import-plan] failed to delete epic ${epicId}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+    await planRepo.updatePlanFields(planId, { epicIds: [], totalStories: 0, doneStories: 0 });
+  }
+
+  const result = await applyPlanOutput({ ...plan, epicIds: [] }, output, {
+    createEpic: epicRepo.createEpic,
+    updatePlanFields: planRepo.updatePlanFields,
+    uuid: () => crypto.randomUUID(),
+    now: () => new Date().toISOString(),
+  });
+
+  // Same best-effort syncs as apply-plan.
+  try {
+    await writePlanMarkdown(result.plan, result.epics, { sendSsmCommand, waitForSsmOutput });
+  } catch (err) {
+    console.warn(
+      `[Plans] plan.md sync after import failed: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+
+  return c.json({ plan: result.plan, epics: result.epics });
 });
 
 // POST /api/plans/:id/start — kick the plan from concept into developing.
@@ -9410,6 +9685,16 @@ app.post('/api/apps', authMiddleware, async (c) => {
       // can write them on top of the base after inject-values. Empty for
       // base starters and for stub types.
       augmentFiles: BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType].augmentFiles,
+      // dino1 root-cause (2026-06-10) — registry-declared npm scripts the
+      // daemon merges into the template's package.json (e.g. predev/prebuild
+      // → wiring generator) so the scaffolded app is self-wiring.
+      packageJsonScripts:
+        BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType].packageJsonScripts ?? null,
+      // pacman1 disease (2026-06-11) — template-owned test runner pin; the
+      // daemon merges it before npm-install so the bootstrap lockfile
+      // carries it and stories never edit test plumbing.
+      packageJsonDevDependencies:
+        BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType].packageJsonDevDependencies ?? null,
       // Epic 2 Story 2.2 (2026-05-19) — thread the starter's default skill
       // loadout to the daemon's prepin-default-skills step. The daemon
       // can't import the TS registry, so the API Lambda is the canonical

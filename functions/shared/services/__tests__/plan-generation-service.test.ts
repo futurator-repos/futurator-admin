@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parsePlanOutput, applyPlanOutput } from '../plan-generation-service';
+import {
+  parsePlanOutput,
+  applyPlanOutput,
+  validateVisualCoverage,
+} from '../plan-generation-service';
 import { planOutputSchema, validatePlanReferences } from '../../schemas/plan-output-schema';
 import type { Plan } from '../../types/plan';
 import type { AgentJob, PipelineDefinition } from '../../types/agent-orchestrator';
@@ -101,7 +105,9 @@ describe('planOutputSchema', () => {
       plan: {
         name: 'app',
         description: 'a long description here',
-        epics: [{ id: 'E1', title: 'Foo', goal: 'a reasonable goal text', dependsOn: [], stories: [] }],
+        epics: [
+          { id: 'E1', title: 'Foo', goal: 'a reasonable goal text', dependsOn: [], stories: [] },
+        ],
       },
     };
     expect(planOutputSchema.safeParse(bad).success).toBe(false);
@@ -164,7 +170,9 @@ describe('parsePlanOutput', () => {
   });
 
   it('throws on schema violation', () => {
-    const job = baseJob({ PLAN_JSON: JSON.stringify({ plan: { name: 'ok', description: 'd', epics: [] } }) });
+    const job = baseJob({
+      PLAN_JSON: JSON.stringify({ plan: { name: 'ok', description: 'd', epics: [] } }),
+    });
     expect(() => parsePlanOutput(job)).toThrow(/fails schema/);
   });
 
@@ -221,5 +229,205 @@ describe('applyPlanOutput', () => {
     // Verify the plan-level updatePlanFields was called with the rollup
     expect(planPatches).toHaveLength(1);
     expect(planPatches[0][1]).toMatchObject({ totalStories: 3, doneStories: 0 });
+  });
+});
+
+// ── dragon1 (2026-06-10) — visual-coverage gate ─────────────────────────
+describe('validateVisualCoverage', () => {
+  const planWith = (needsBrowserFlags: boolean[]) => ({
+    plan: {
+      name: 'p',
+      description: 'd',
+      epics: [
+        {
+          id: 'E1',
+          title: 'Epic',
+          description: 'desc-long-enough',
+          dependsOn: [],
+          stories: [
+            {
+              id: 'S1',
+              title: 'Story',
+              description: 'desc-long-enough',
+              dependsOn: [],
+              criteria: needsBrowserFlags.map((nb, i) => ({
+                id: `AC-${i}`,
+                text: 'criterion text',
+                needsBrowser: nb,
+              })),
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  it('rejects a UI-bearing mvp plan with zero browser ACs (the dragon1 defect)', () => {
+    const err = validateVisualCoverage(planWith([false, false]) as never, {
+      uiBearing: true,
+      rigor: 'mvp',
+    });
+    expect(err).toMatch(/ZERO needsBrowser/);
+  });
+
+  it('passes when at least one browser AC exists', () => {
+    expect(
+      validateVisualCoverage(planWith([false, true]) as never, { uiBearing: true, rigor: 'mvp' }),
+    ).toBeNull();
+  });
+
+  it('exempts non-UI boilerplates and prototype rigor', () => {
+    expect(
+      validateVisualCoverage(planWith([false]) as never, { uiBearing: false, rigor: 'mvp' }),
+    ).toBeNull();
+    expect(
+      validateVisualCoverage(planWith([false]) as never, { uiBearing: true, rigor: 'prototype' }),
+    ).toBeNull();
+  });
+});
+
+// ── pacman1 disease (2026-06-11) — touch points + portability ─────────────
+import { validatePlanOutputJson, epicsToPlanOutput } from '../plan-generation-service';
+import { validateTouchPointHygiene } from '../../schemas/plan-output-schema';
+
+const touchPointJson = JSON.stringify({
+  plan: {
+    name: 'pong-classic',
+    description: 'Browser-based Atari Pong — two paddles, ball, score.',
+    epics: [
+      {
+        id: 'E1',
+        title: 'Core',
+        goal: 'Vertical slices over a shared contract.',
+        acceptanceCriteria: '',
+        dependsOn: [],
+        stories: [
+          {
+            id: 'S1',
+            title: 'Contract types',
+            description: 'Define shared domain types for all slices.',
+            dependsOn: [],
+            touchPoints: ['src/game/types.ts'],
+            criteria: [{ id: 'AC-1', text: 'Types compile cleanly', needsBrowser: false }],
+          },
+          {
+            id: 'S2',
+            title: 'Paddle slice',
+            description: 'Paddle module + render, self-contained.',
+            dependsOn: ['S1'],
+            touchPoints: ['src/game/paddle.ts', 'src/features/paddle.feature.tsx'],
+            criteria: [{ id: 'AC-1', text: 'Paddle visible at load', needsBrowser: true }],
+          },
+          {
+            id: 'S3',
+            title: 'Ball slice',
+            description: 'Ball module + render, self-contained.',
+            dependsOn: ['S1'],
+            // COLLIDES with S2 on the feature file — must be serialized.
+            touchPoints: ['src/game/ball.ts', 'src/features/paddle.feature.tsx'],
+            criteria: [{ id: 'AC-1', text: 'Ball visible at load', needsBrowser: true }],
+          },
+        ],
+      },
+    ],
+  },
+});
+
+describe('applyPlanOutput — touch points (pacman1 disease)', () => {
+  it('persists PM-declared touchPoints and serializes colliding siblings', async () => {
+    const output = validatePlanOutputJson(JSON.parse(touchPointJson));
+    const created: unknown[] = [];
+    let n = 0;
+    const result = await applyPlanOutput(basePlan(), output, {
+      createEpic: vi.fn(async (e) => {
+        created.push(e);
+        return e;
+      }),
+      updatePlanFields: vi.fn(async () => {}),
+      uuid: () => `uuid-${++n}`,
+      now: () => '2026-06-11T00:00:00.000Z',
+    });
+    const stories = result.epics[0].stories;
+    const byTitle = new Map(stories.map((s) => [s.title, s]));
+    expect(byTitle.get('Contract types')!.touchPoints).toEqual(['src/game/types.ts']);
+    expect(byTitle.get('Contract types')!.wave).toBe(0);
+    // Both depend on S1 → base wave 1; collision on the feature file bumps
+    // the later sibling to wave 2.
+    expect(byTitle.get('Paddle slice')!.wave).toBe(1);
+    expect(byTitle.get('Ball slice')!.wave).toBe(2);
+  });
+});
+
+describe('validateTouchPointHygiene', () => {
+  const mk = (touchPoints: string[]) => ({
+    plan: {
+      name: 'pong-classic',
+      description: 'Browser-based Atari Pong — two paddles, ball, score.',
+      epics: [
+        {
+          id: 'E1',
+          title: 'Core',
+          goal: 'Touch point hygiene test epic.',
+          acceptanceCriteria: '',
+          dependsOn: [],
+          stories: [
+            {
+              id: 'S1',
+              title: 'Story',
+              description: 'A story for hygiene tests.',
+              dependsOn: [],
+              touchPoints,
+              criteria: [{ id: 'AC-1', text: 'Does the thing', needsBrowser: false }],
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  it('rejects template-owned infrastructure paths', () => {
+    for (const bad of ['package.json', 'package-lock.json', 'vitest.config.ts', 'tsconfig.json']) {
+      const errors = validateTouchPointHygiene(planOutputSchema.parse(mk([bad])));
+      expect(errors.length, bad).toBeGreaterThan(0);
+    }
+  });
+
+  it('rejects absolute and escaping paths', () => {
+    expect(validateTouchPointHygiene(planOutputSchema.parse(mk(['/etc/passwd'])))).not.toHaveLength(
+      0,
+    );
+    expect(
+      validateTouchPointHygiene(planOutputSchema.parse(mk(['../outside.ts']))),
+    ).not.toHaveLength(0);
+  });
+
+  it('accepts normal source paths and the <EPIC_WIDE> sentinel', () => {
+    expect(
+      validateTouchPointHygiene(planOutputSchema.parse(mk(['src/game/types.ts']))),
+    ).toHaveLength(0);
+    expect(validateTouchPointHygiene(planOutputSchema.parse(mk(['<EPIC_WIDE>'])))).toHaveLength(0);
+  });
+});
+
+describe('epicsToPlanOutput — export round-trip', () => {
+  it('export of an applied plan re-validates through the import funnel', async () => {
+    const output = validatePlanOutputJson(JSON.parse(touchPointJson));
+    let n = 0;
+    const result = await applyPlanOutput(basePlan(), output, {
+      createEpic: vi.fn(async (e) => e),
+      updatePlanFields: vi.fn(async () => {}),
+      uuid: () => `uuid-${++n}`,
+      now: () => '2026-06-11T00:00:00.000Z',
+    });
+
+    const exported = epicsToPlanOutput(result.plan, result.epics);
+    // Round-trip: the exported shape passes the same validation funnel.
+    const reimported = validatePlanOutputJson(exported);
+    expect(reimported.plan.name).toBe('pong-classic');
+    const stories = reimported.plan.epics[0].stories;
+    expect(stories.map((s) => s.title)).toEqual(['Contract types', 'Paddle slice', 'Ball slice']);
+    expect(stories[1].touchPoints).toContain('src/features/paddle.feature.tsx');
+    // dependsOn survived as local ids referencing the contract story.
+    expect(stories[1].dependsOn).toEqual([stories[0].id]);
   });
 });

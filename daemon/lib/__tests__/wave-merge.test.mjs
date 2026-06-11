@@ -111,7 +111,22 @@ describe('buildWaveBuildFailedAttention', () => {
       storyIds: ['s1'],
       testExit: 1,
     });
-    expect(item.body).toContain('No failing test list');
+    // pacman1 (2026-06-11) — empty list now names the real situation (the
+    // BUILD failed, not tests) instead of the unhelpful "no list captured".
+    expect(item.body).toContain('the BUILD itself failed');
+  });
+
+  // pacman1 (2026-06-11) — the card body carries the validation output tail
+  // so a compile/typecheck failure is readable in the notification itself.
+  it('includes the validation output tail when provided', () => {
+    const item = buildWaveBuildFailedAttention({
+      planId: 'pln-1',
+      storyIds: ['s1'],
+      testExit: 1,
+      outputTail: "Type error: Cannot find module '@/index'",
+    });
+    expect(item.body).toContain('Validation output (tail):');
+    expect(item.body).toContain("Cannot find module '@/index'");
   });
 });
 
