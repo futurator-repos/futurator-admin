@@ -7454,6 +7454,21 @@ app.post('/api/party/sessions/:id/checkpoints/:sha/pr', async (c) => {
   const name = m[2];
   const base = project.gitBranch || 'main';
 
+  // Load the project's write PAT once — used for BOTH the branch push AND
+  // the GitHub PR calls below. The default `GithubPat` (loadPat fallback) is
+  // scoped to `futurator-repos` and cannot see a brownfield repo in another
+  // org (e.g. Get-Really-Real/applicator), so every GitHub call here must run
+  // under the per-project PAT via runWithPat.
+  const patSecretName = project.patSecretName ?? brownfieldPatSecretNameFor(session.projectId);
+  const writePat = await readBrownfieldPatSecret(patSecretName);
+  if (!writePat) {
+    throw new AppError(
+      'NO_PAT',
+      'No write PAT is stored for this project. Re-enable push in /migrate with a contents:write token.',
+      409,
+    );
+  }
+
   // Push-first (2026-06-11): a composed-only checkpoint committed locally and
   // never pushed — GitHub can't open a PR from a head branch it doesn't have.
   // Push the party branch from EC2 using the project's write PAT before we
@@ -7461,16 +7476,7 @@ app.post('/api/party/sessions/:id/checkpoints/:sha/pr', async (c) => {
   // We always run this — it's a no-op when the branch is already on GitHub,
   // and it's the load-bearing step when it isn't.
   {
-    const patSecretName = project.patSecretName ?? brownfieldPatSecretNameFor(session.projectId);
-    const pat = await readBrownfieldPatSecret(patSecretName);
-    if (!pat) {
-      throw new AppError(
-        'NO_PAT',
-        'No write PAT is stored for this project. Re-enable push in /migrate with a contents:write token.',
-        409,
-      );
-    }
-    const authedRemoteUrl = `https://x-access-token:${pat}@github.com/${owner}/${name}.git`;
+    const authedRemoteUrl = `https://x-access-token:${writePat}@github.com/${owner}/${name}.git`;
     const { pushPartyBranchToRemote } = await import('../shared/services/plan-folder-service');
     const pushResult = await pushPartyBranchToRemote(
       {
@@ -7495,78 +7501,84 @@ app.post('/api/party/sessions/:id/checkpoints/:sha/pr', async (c) => {
     }
   }
 
-  // Idempotency: if an open PR already exists with head=<owner>:<branch>, reuse.
-  // GitHub's listPRs head filter uses `owner:branch` form.
+  // All GitHub REST calls run under the per-project write PAT. The PAT
+  // therefore needs Pull requests: write (to create) on top of Contents:
+  // write (used by the push above).
   const { listPullRequests, createPullRequest } = await import('../shared/github/connector');
-  const existing = await listPullRequests(owner, name, {
-    state: 'open',
-    head: `${owner}:${session.partyBranch}`,
-    perPage: 5,
-  }).catch(() => ({
-    data: [] as Array<{ number: number; html_url: string; title: string; state: string }>,
-  }));
-  if (existing.data && existing.data.length > 0) {
-    const pr = existing.data[0];
-    return c.json({
-      prNumber: pr.number,
-      prUrl: pr.html_url,
-      title: pr.title,
-      state: pr.state,
-      reused: true,
-    });
-  }
-
-  // No existing PR — try to create one. Optional body comes from the
-  // request, falling back to a stable derived title + summary.
-  const body = await c.req.json().catch(() => ({}));
-  const title =
-    typeof body?.title === 'string' && body.title.length > 0
-      ? String(body.title).slice(0, 200)
-      : `Party debate ${session.sessionId.slice(0, 8)} on ${session.projectId}`;
-  const description =
-    typeof body?.body === 'string'
-      ? String(body.body).slice(0, 4000)
-      : `Opened from Futurator Party Mode session \`${session.sessionId}\`. Includes ${session.turnCount} rounds. Source commit: \`${sha}\`.`;
-
-  try {
-    const created = await createPullRequest(owner, name, {
-      title,
-      head: session.partyBranch,
-      base,
-      body: description,
-      draft: body?.draft !== false,
-    });
-    return c.json({
-      prNumber: created.data.number,
-      prUrl: created.data.html_url,
-      title: created.data.title,
-      state: created.data.state,
-      reused: false,
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // Common 422: "A pull request already exists for ..." — fall back to lookup.
-    if (/already exists/i.test(msg)) {
-      const refetch = await listPullRequests(owner, name, {
-        state: 'all',
-        head: `${owner}:${session.partyBranch}`,
-        perPage: 5,
-      }).catch(() => ({
-        data: [] as Array<{ number: number; html_url: string; title: string; state: string }>,
-      }));
-      if (refetch.data?.length > 0) {
-        const pr = refetch.data[0];
-        return c.json({
-          prNumber: pr.number,
-          prUrl: pr.html_url,
-          title: pr.title,
-          state: pr.state,
-          reused: true,
-        });
-      }
+  const { runWithPat } = await import('../shared/github/load-pat');
+  return runWithPat(writePat, async () => {
+    // Idempotency: if an open PR already exists with head=<owner>:<branch>, reuse.
+    // GitHub's listPRs head filter uses `owner:branch` form.
+    const existing = await listPullRequests(owner, name, {
+      state: 'open',
+      head: `${owner}:${session.partyBranch}`,
+      perPage: 5,
+    }).catch(() => ({
+      data: [] as Array<{ number: number; html_url: string; title: string; state: string }>,
+    }));
+    if (existing.data && existing.data.length > 0) {
+      const pr = existing.data[0];
+      return c.json({
+        prNumber: pr.number,
+        prUrl: pr.html_url,
+        title: pr.title,
+        state: pr.state,
+        reused: true,
+      });
     }
-    throw new AppError('PR_CREATE_FAILED', msg, 502);
-  }
+
+    // No existing PR — try to create one. Optional body comes from the
+    // request, falling back to a stable derived title + summary.
+    const body = await c.req.json().catch(() => ({}));
+    const title =
+      typeof body?.title === 'string' && body.title.length > 0
+        ? String(body.title).slice(0, 200)
+        : `Party debate ${session.sessionId.slice(0, 8)} on ${session.projectId}`;
+    const description =
+      typeof body?.body === 'string'
+        ? String(body.body).slice(0, 4000)
+        : `Opened from Futurator Party Mode session \`${session.sessionId}\`. Includes ${session.turnCount} rounds. Source commit: \`${sha}\`.`;
+
+    try {
+      const created = await createPullRequest(owner, name, {
+        title,
+        head: session.partyBranch!,
+        base,
+        body: description,
+        draft: body?.draft !== false,
+      });
+      return c.json({
+        prNumber: created.data.number,
+        prUrl: created.data.html_url,
+        title: created.data.title,
+        state: created.data.state,
+        reused: false,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Common 422: "A pull request already exists for ..." — fall back to lookup.
+      if (/already exists/i.test(msg)) {
+        const refetch = await listPullRequests(owner, name, {
+          state: 'all',
+          head: `${owner}:${session.partyBranch}`,
+          perPage: 5,
+        }).catch(() => ({
+          data: [] as Array<{ number: number; html_url: string; title: string; state: string }>,
+        }));
+        if (refetch.data?.length > 0) {
+          const pr = refetch.data[0];
+          return c.json({
+            prNumber: pr.number,
+            prUrl: pr.html_url,
+            title: pr.title,
+            state: pr.state,
+            reused: true,
+          });
+        }
+      }
+      throw new AppError('PR_CREATE_FAILED', msg, 502);
+    }
+  });
 });
 
 // ════════════════════════════════════════════════════════════════
