@@ -1,0 +1,183 @@
+{
+  "nextjs-base": {
+    "postMergeValidationCmd": "[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs; npm run build && npm run test --if-present",
+    "qaContext": {
+      "defaultPort": 3000,
+      "healthcheckPath": "/",
+      "devCommand": "npm run dev -- --hostname 0.0.0.0 --port",
+      "warmupMs": 2000,
+      "consoleErrorAllowList": [
+        "webpack-dev-server.*HMR",
+        "next-route-announcer",
+        "Download the React DevTools"
+      ],
+      "buildCacheDir": ".next"
+    },
+    "qualityGate": {
+      "mechanical": [
+        "[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs || true",
+        "npm run format --if-present",
+        "if [ -f eslint.config.mjs ]; then npx eslint . --fix || true; fi"
+      ],
+      "blocking": {
+        "prototype": ["npm run build"],
+        "mvp": [
+          "npm run build",
+          "npm run test --if-present",
+          "if [ -f eslint.config.mjs ]; then npx eslint . --max-warnings 200; fi"
+        ],
+        "production": [
+          "npm run build",
+          "npm run test --if-present",
+          "if [ -f eslint.config.mjs ]; then npx eslint . --max-warnings 0; fi",
+          "npm run knip --if-present",
+          "npm run format:check --if-present"
+        ]
+      }
+    }
+  },
+  "sst": {
+    "postMergeValidationCmd": null,
+    "qaContext": {
+      "defaultPort": 13557,
+      "healthcheckPath": "/health",
+      "devCommand": "npm run dev -- --port",
+      "warmupMs": 4000,
+      "consoleErrorAllowList": ["DEBUG\\sSDK", "Pulumi\\sup"]
+    },
+    "qualityGate": null
+  },
+  "vite": {
+    "postMergeValidationCmd": null,
+    "qaContext": {
+      "defaultPort": 5173,
+      "healthcheckPath": "/",
+      "devCommand": "npm run dev -- --host 0.0.0.0 --port",
+      "warmupMs": 0,
+      "consoleErrorAllowList": ["vite\\b.*HMR"]
+    },
+    "qualityGate": null
+  },
+  "mobile": {
+    "postMergeValidationCmd": null,
+    "qaContext": {
+      "defaultPort": 19006,
+      "healthcheckPath": "/",
+      "devCommand": "npx expo start --web --port",
+      "warmupMs": 5000,
+      "consoleErrorAllowList": ["expo-cli", "react-native-web.*deprecated"]
+    },
+    "qualityGate": null
+  },
+  "nextjs-canvas-game": {
+    "postMergeValidationCmd": "[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs; npm run build && npm run test --if-present",
+    "qaContext": {
+      "defaultPort": 3000,
+      "healthcheckPath": "/",
+      "devCommand": "npm run dev -- --hostname 0.0.0.0 --port",
+      "warmupMs": 2000,
+      "consoleErrorAllowList": [
+        "webpack-dev-server.*HMR",
+        "next-route-announcer",
+        "Download the React DevTools"
+      ],
+      "buildCacheDir": ".next"
+    },
+    "qualityGate": {
+      "mechanical": [
+        "[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs || true",
+        "npm run format --if-present",
+        "if [ -f eslint.config.mjs ]; then npx eslint . --fix || true; fi"
+      ],
+      "blocking": {
+        "prototype": ["npm run build"],
+        "mvp": [
+          "npm run build",
+          "npm run test --if-present",
+          "if [ -f eslint.config.mjs ]; then npx eslint . --max-warnings 200; fi"
+        ],
+        "production": [
+          "npm run build",
+          "npm run test --if-present",
+          "if [ -f eslint.config.mjs ]; then npx eslint . --max-warnings 0; fi",
+          "npm run knip --if-present",
+          "npm run format:check --if-present"
+        ]
+      }
+    }
+  },
+  "nextjs-form-app": {
+    "postMergeValidationCmd": "[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs; npm run build && npm run test --if-present",
+    "qaContext": {
+      "defaultPort": 3000,
+      "healthcheckPath": "/",
+      "devCommand": "npm run dev -- --hostname 0.0.0.0 --port",
+      "warmupMs": 2000,
+      "consoleErrorAllowList": [
+        "webpack-dev-server.*HMR",
+        "next-route-announcer",
+        "Download the React DevTools"
+      ],
+      "buildCacheDir": ".next"
+    },
+    "qualityGate": {
+      "mechanical": [
+        "[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs || true",
+        "npm run format --if-present",
+        "if [ -f eslint.config.mjs ]; then npx eslint . --fix || true; fi"
+      ],
+      "blocking": {
+        "prototype": ["npm run build"],
+        "mvp": [
+          "npm run build",
+          "npm run test --if-present",
+          "if [ -f eslint.config.mjs ]; then npx eslint . --max-warnings 200; fi"
+        ],
+        "production": [
+          "npm run build",
+          "npm run test --if-present",
+          "if [ -f eslint.config.mjs ]; then npx eslint . --max-warnings 0; fi",
+          "npm run knip --if-present",
+          "npm run format:check --if-present"
+        ]
+      }
+    }
+  },
+  "nextjs-dashboard": {
+    "postMergeValidationCmd": "[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs; npm run build && npm run test --if-present",
+    "qaContext": {
+      "defaultPort": 3000,
+      "healthcheckPath": "/",
+      "devCommand": "npm run dev -- --hostname 0.0.0.0 --port",
+      "warmupMs": 2000,
+      "consoleErrorAllowList": [
+        "webpack-dev-server.*HMR",
+        "next-route-announcer",
+        "Download the React DevTools"
+      ],
+      "buildCacheDir": ".next"
+    },
+    "qualityGate": {
+      "mechanical": [
+        "[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs || true",
+        "npm run format --if-present",
+        "if [ -f eslint.config.mjs ]; then npx eslint . --fix || true; fi"
+      ],
+      "blocking": {
+        "prototype": ["npm run build"],
+        "mvp": [
+          "npm run build",
+          "npm run test --if-present",
+          "if [ -f eslint.config.mjs ]; then npx eslint . --max-warnings 200; fi"
+        ],
+        "production": [
+          "npm run build",
+          "npm run test --if-present",
+          "if [ -f eslint.config.mjs ]; then npx eslint . --max-warnings 0; fi",
+          "npm run knip --if-present",
+          "npm run format:check --if-present"
+        ]
+      }
+    }
+  }
+}

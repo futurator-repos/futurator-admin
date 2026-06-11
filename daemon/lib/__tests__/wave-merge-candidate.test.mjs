@@ -390,3 +390,85 @@ describe('runWaveMerge — candidate worktree + advance-on-green', () => {
     expect(attentions.some((a) => a.category === 'wave-build-failed')).toBe(true);
   });
 });
+
+// ── v2.6 M2 — wave-gate VQA hook (runVqa) ───────────────────────────────────
+describe('runWaveMerge — wave VQA hook', () => {
+  it('vqa env-blocked behaves EXACTLY like a build failure (green untouched)', { timeout: 30000 }, async () => {
+    const appId = 'vqa-envblocked';
+    const planSlug = 'vqa-envblocked-initial';
+    const bare = buildBareRepo(appId, [
+      { branch: 'wip/story-a', files: { 'feature-a.ts': 'export const a = 1;\n' } },
+    ]);
+    const greenBefore = bareRef(bare, 'refs/heads/main');
+    const attentions = [];
+
+    const result = await runWaveMerge(
+      baseArgs(appId, planSlug, ['story-a'], {
+        runVqa: async () => ({ outcome: 'env-blocked', bootLogTail: 'Turbopack panic: cache corrupt' }),
+        writeAttention: async (a) => attentions.push(a),
+      }),
+    );
+
+    expect(result.outcome).toBe('wave-build-failed');
+    expect(result.vqa.outcome).toBe('env-blocked');
+    expect(bareRef(bare, 'refs/heads/plan/vqa-envblocked-initial')).toBeNull();
+    expect(bareRef(bare, 'refs/heads/main')).toBe(greenBefore);
+    const card = attentions.find((a) => a.category === 'wave-build-failed');
+    expect(card).toBeTruthy();
+    expect(JSON.stringify(card)).toContain('Turbopack panic');
+    // The candidate was reaped — a retry mints a fresh one.
+    expect(existsSync(candidateWorktreeDir({ appId, planSlug, jobId: 'job-1' }))).toBe(false);
+  });
+
+  it('vqa fix-forward NEVER blocks: green advances, vqa rides the result', { timeout: 30000 }, async () => {
+    const appId = 'vqa-ff';
+    const planSlug = 'vqa-ff-initial';
+    const bare = buildBareRepo(appId, [
+      { branch: 'wip/story-a', files: { 'feature-a.ts': 'export const a = 1;\n' } },
+    ]);
+    let sawCandidate = null;
+
+    const result = await runWaveMerge(
+      baseArgs(appId, planSlug, ['story-a'], {
+        runVqa: async ({ candidateDir, mergedStoryIds }) => {
+          sawCandidate = { candidateDir, mergedStoryIds };
+          return {
+            outcome: 'fix-forward',
+            verdicts: [{ storyId: 'story-a', acId: 'AC-1', result: 'FAIL' }],
+            fixesApplied: [],
+            fixForward: [{ storyId: 'story-a', acId: 'AC-1', expected: 'x', observed: 'y' }],
+            unverifiable: [],
+            reportPath: '.context/wave-0-vqa-report.md',
+          };
+        },
+      }),
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(result.vqa.outcome).toBe('fix-forward');
+    expect(result.vqa.fixForward).toHaveLength(1);
+    expect(sawCandidate.mergedStoryIds).toEqual(['story-a']);
+    expect(bareRef(bare, 'refs/heads/plan/vqa-ff-initial')).toBe(result.pushSha);
+  });
+
+  it('a CRASHING vqa hook is non-blocking: logged, green still advances', { timeout: 30000 }, async () => {
+    const appId = 'vqa-crash';
+    const planSlug = 'vqa-crash-initial';
+    const bare = buildBareRepo(appId, [
+      { branch: 'wip/story-a', files: { 'feature-a.ts': 'export const a = 1;\n' } },
+    ]);
+
+    const result = await runWaveMerge(
+      baseArgs(appId, planSlug, ['story-a'], {
+        runVqa: async () => {
+          throw new Error('judge stack melted');
+        },
+      }),
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(result.vqa.outcome).toBe('skipped');
+    expect(result.vqa.reason).toContain('vqa-crashed');
+    expect(bareRef(bare, 'refs/heads/plan/vqa-crash-initial')).toBe(result.pushSha);
+  });
+});

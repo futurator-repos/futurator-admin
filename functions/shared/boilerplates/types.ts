@@ -242,6 +242,12 @@ export interface BoilerplateMetadata {
      *  matches a substring of a console.error line; matched lines do not
      *  count toward an L0 console-error failure. */
     consoleErrorAllowList: string[];
+    /** v2.6 wave-gate VQA — gitignored dev-server build-cache directory
+     *  (e.g. `.next`). The wave VQA env-fix path deletes it and reboots
+     *  when triage classifies a failure as environmental (the dino1
+     *  corrupted-Turbopack-cache class). Optional; absent = no cache
+     *  clean available. */
+    buildCacheDir?: string;
   };
 
   // ── PR-13 — Starter pack architecture (Option A) ────────────────────────

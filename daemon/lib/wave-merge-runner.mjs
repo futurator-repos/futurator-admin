@@ -115,6 +115,11 @@ export function sortStoriesForMerge(storyIds) {
  * Run git as ubuntu and capture output. Returns { code, stdout, stderr }.
  * Does NOT throw — caller branches on code.
  */
+// v2.6 M2 — exported so the wave-VQA runner (and the daemon handler wiring
+// it) reuse the SAME sudo-as-ubuntu exec surface instead of growing a third
+// privilege path.
+export { runGit as defaultGitRunner, runShell as defaultShellRunner };
+
 function runGit(args, cwd, env = {}) {
   return new Promise((resolve) => {
     const child = spawn('sudo', ['-n', '-u', 'ubuntu', 'git', ...args], {
@@ -408,6 +413,13 @@ export async function runWaveMerge({
   // It edits files IN the candidate worktree; the runner re-runs the full
   // validation gate, commits with an audit trailer, and only then advances.
   fixBuild,
+  // v2.6 M2 (2026-06-11) — OPT-IN wave-gate VQA hook. UNDEFINED by default.
+  // The daemon passes it when rigor !== 'prototype' && the boilerplate has a
+  // qaContext && the wave's stories carry browser ACs. Signature:
+  //   runVqa({ candidateDir, mergedStoryIds })
+  //     => { outcome: 'pass'|'fixed'|'fix-forward'|'skipped'|'env-blocked', ... }
+  // See lib/wave-vqa-runner.mjs for the stage machinery + fix-forward rules.
+  runVqa,
   // Story B (2026-05-29) — injectable exec surface for hermetic real-git
   // tests. Production defaults shell out as `sudo -u ubuntu`.
   gitRunner = runGit,
@@ -913,6 +925,55 @@ export async function runWaveMerge({
     log('info', `[wave-merge] no postMergeValidationCmd — skipping validation`);
   }
 
+  // 3.5. v2.6 wave-gate VQA (M2, 2026-06-11) — judged visual QA runs against
+  // the MERGED candidate (the first place the real integrated product
+  // exists), between validation and the green advance. The hook is OPT-IN:
+  // undefined ⇒ skip (the daemon passes it only when rigor !== 'prototype',
+  // the boilerplate has a qaContext, and the wave has browser ACs).
+  //
+  // Outcome contract (fix-forward semantics — judged failures NEVER block):
+  //   pass / fixed / fix-forward / skipped → proceed to advance; the vqa
+  //     result is surfaced on the runner result for the handler/UI. A 'fixed'
+  //     outcome means the VQA fixer committed audited changes to the
+  //     candidate — the advance below ships them.
+  //   env-blocked (dev server would not boot — DETERMINISTIC) → behaves
+  //     exactly like a build failure: attention card, candidate reaped,
+  //     'wave-build-failed' outcome (reuses ALL existing retry machinery).
+  let vqa = null;
+  if (typeof runVqa === 'function') {
+    try {
+      vqa = await runVqa({ candidateDir, mergedStoryIds: merged });
+    } catch (err) {
+      // The VQA stage is judged-path machinery — a crash in it must never
+      // hold the wave hostage. Loud, non-blocking.
+      log('warn', `[wave-merge] wave VQA threw (non-blocking, advancing): ${err.message}`);
+      vqa = { outcome: 'skipped', reason: `vqa-crashed: ${err.message}` };
+    }
+    if (vqa?.outcome === 'env-blocked') {
+      log('error', `[wave-merge] wave VQA env-blocked — dev server no-boot on the merged candidate`);
+      const attn = buildWaveBuildFailedAttention({
+        planId,
+        storyIds: merged,
+        testExit: 1,
+        failingTests: [],
+        outputTail: `wave VQA: dev server failed to boot on the merged candidate.\n\n--- dev server log (tail) ---\n${(vqa.bootLogTail || '').slice(-1500)}`,
+      });
+      await writeAttention({
+        ...attn,
+        dedupKey: `wave-build-failed:${planId}:${epicId}:${waveNumber}`,
+        context: { ...(attn.context || {}), validationCmd: 'wave-vqa dev-server boot', epicId, waveNumber },
+      });
+      await reapWorktree({ dir: candidateDir, bare, git, bareOpCwd, log });
+      return {
+        outcome: 'wave-build-failed',
+        mergedStoryIds: merged,
+        testOutput: (vqa.bootLogTail || '').slice(-4000),
+        failingTests: [],
+        vqa,
+      };
+    }
+  }
+
   // 4. Advance green ATOMICALLY to the validated candidate SHA. This is the
   //    only mutation of `plan/<slug>`, and it only ever points the branch at
   //    a fully-built commit — readers/deploys never see a half-merge.
@@ -990,5 +1051,9 @@ export async function runWaveMerge({
     mergedStoryIds: merged,
     pushSha: candidateSha,
     cleanupBranches: postMergeCleanupBranches(merged),
+    // v2.6 M2 — judged VQA result (null when the hook wasn't passed). The
+    // handler persists it on waveMergeResult; M5 surfaces it in the UI and
+    // mints fix stories from `vqa.fixForward`.
+    vqa,
   };
 }

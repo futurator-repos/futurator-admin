@@ -974,6 +974,9 @@ const NEXTJS_BASE_PACK: BoilerplateMetadata = {
       'next-route-announcer',
       'Download the React DevTools',
     ],
+    // v2.6 — wave VQA env-fix path: delete + reboot on environment-classed
+    // failures (dino1 corrupted-Turbopack-cache class).
+    buildCacheDir: '.next',
   },
   // PR-35 — baseline-diff regression gate config + scripts. Inherited by
   // all nextjs-* starter packs via createStarterPack's augment merge.

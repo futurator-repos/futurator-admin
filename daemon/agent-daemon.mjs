@@ -4350,6 +4350,133 @@ function fixWaveMergeBuildOnce(
   });
 }
 
+// ── v2.6 M2 (2026-06-11) — generic wave-gate agent spawner ────────────────
+//
+// Third copy of the spawn/timeout/OAuth-recovery/infra-tagging block was
+// about to appear (conflict-resolver, build-fix, now four VQA roles), so the
+// pattern is extracted ONCE. Role params:
+//
+//   evidence — haiku, 12m, bypassPermissions (needs Bash for playwright);
+//              the VQA runner enforces read-only post-hoc via git status.
+//   judge    — haiku, 3m, Read-only tools (mirrors review-runtime's judge).
+//   triage   — sonnet, 5m, read tools (Read/Grep/Glob) — propose-only.
+//   fixer    — sonnet, 12m, bypassPermissions; round 2 escalates the model
+//              tier (invariant I6's escalation ladder).
+//
+// Returns { ok, output, infra, reason }. `infra` mirrors the build-fix
+// heuristic (empty stdout / auth / rate-limit) so the reducer's transient
+// re-mint logic applies to gate-agent deaths.
+const GATE_AGENT_ROLES = {
+  evidence: () => ({
+    model: process.env.WAVE_VQA_EVIDENCE_MODEL || 'haiku',
+    timeoutMs: 12 * 60 * 1000,
+    bypass: true,
+  }),
+  judge: () => ({
+    model: process.env.WAVE_VQA_JUDGE_MODEL || 'haiku',
+    timeoutMs: 3 * 60 * 1000,
+    allowedTools: 'Read',
+  }),
+  triage: () => ({
+    model: process.env.WAVE_VQA_TRIAGE_MODEL || 'claude-sonnet-4-6',
+    timeoutMs: 5 * 60 * 1000,
+    allowedTools: 'Read,Grep,Glob',
+  }),
+  fixer: (round = 1) => ({
+    model:
+      round > 1
+        ? process.env.WAVE_VQA_FIXER_ESCALATION_MODEL || 'claude-opus-4-8'
+        : process.env.WAVE_VQA_FIXER_MODEL || 'claude-sonnet-4-6',
+    timeoutMs: 12 * 60 * 1000,
+    bypass: true,
+  }),
+};
+
+async function spawnGateAgent({ role, prompt, cwd, round }, { short } = {}) {
+  if (authState.expiresAt && authState.expiresAt - Date.now() < PRESPAWN_EXPIRY_THRESHOLD_MS) {
+    try {
+      loadOAuth(`gate-${role}-prespawn`);
+      await probeAuth();
+    } catch {
+      /* spawn anyway — Keychain push may be in flight */
+    }
+  }
+  const first = await spawnGateAgentOnce({ role, prompt, cwd, round }, { short });
+  if (first.ok || !first.infra) return first;
+  log(
+    'warn',
+    `[${short || 'wave-vqa'}] gate ${role} infra failure (${first.reason}); reloading OAuth + retrying once`,
+  );
+  loadOAuth(`gate-${role}-recovery`);
+  try {
+    await probeAuth();
+  } catch {
+    /* spawn anyway */
+  }
+  return spawnGateAgentOnce({ role, prompt, cwd, round }, { short });
+}
+
+function spawnGateAgentOnce({ role, prompt, cwd, round }, { short } = {}) {
+  return new Promise((resolve) => {
+    const cfg = (GATE_AGENT_ROLES[role] || GATE_AGENT_ROLES.judge)(round);
+    const args = ['-p', prompt, '--model', cfg.model];
+    if (cfg.bypass) args.push('--permission-mode', 'bypassPermissions', '--add-dir', cwd);
+    else args.push('--allowedTools', cfg.allowedTools);
+    let settled = false;
+    const done = (ok, output, reason, infra = false) => {
+      if (settled) return;
+      settled = true;
+      if (!ok && reason) log('warn', `[${short || 'wave-vqa'}] gate ${role}: ${reason}`);
+      resolve({ ok, output, infra, reason });
+    };
+    let proc;
+    try {
+      proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
+      });
+    } catch (err) {
+      return done(false, '', `spawn threw: ${err.message}`, true);
+    }
+    const timer = setTimeout(
+      () => {
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+          /* best effort */
+        }
+        done(false, '', `timed out after ${Math.round(cfg.timeoutMs / 60000)}m`, true);
+      },
+      cfg.timeoutMs,
+    );
+    let stdoutBuf = '';
+    let stderrTail = '';
+    proc.stdout?.on('data', (c) => {
+      // Full stdout (fenced JSON lives here) — capped at 400KB.
+      stdoutBuf = (stdoutBuf + c.toString('utf8')).slice(-400_000);
+    });
+    proc.stderr?.on('data', (c) => (stderrTail = (stderrTail + c.toString('utf8')).slice(-1500)));
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      done(false, '', `process error: ${err.message}`, true);
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) return done(true, stdoutBuf);
+      const infra =
+        stdoutBuf.trim().length === 0 ||
+        /401|authentication|OAuth|credentials|overloaded|rate.?limit/i.test(stderrTail);
+      done(
+        false,
+        stdoutBuf,
+        `claude exited ${code}${infra ? ' (infra)' : ''}: ${(stderrTail || stdoutBuf).slice(-300)}`,
+        infra,
+      );
+    });
+  });
+}
+
 // 2026-05-27 PR D.b — attention-poller helpers.
 //
 // scanOpenAttentionItems: full-table scan filtered on status='open' AND
@@ -5150,44 +5277,33 @@ async function executeWaveMergeJob(job) {
     lastHeartbeatAt: new Date().toISOString(),
   });
 
-  // Resolve the boilerplate-defined post-merge validation command. Lookup
-  // the App row + boilerplate metadata; null when stub (skips validation).
+  // Resolve the boilerplate's gate config (validation command + qaContext +
+  // qualityGate) from the committed gate-registry snapshot
+  // (lib/boilerplate-gate-registry.json, generated from the TS registry and
+  // drift-guarded by a parity test). v2.6 M2 — this closes the
+  // "validated ≠ shipped" seam where agent-daemon imported
+  // `../sst-env-shared/boilerplate-registry-snapshot.mjs`, a file NEVER
+  // generated, so a hardcoded fallback ran for every wave since 2026-05-19.
   let postMergeValidationCmd = p.postMergeValidationCmd ?? null;
+  let gateEntry = null;
+  try {
+    const appRow = await getAppRow(p.appId);
+    const boilerplateType = appRow?.boilerplateType || 'nextjs-base';
+    const { getGateEntry } = await import('./lib/gate-registry.mjs');
+    gateEntry = getGateEntry(boilerplateType);
+  } catch (resolveErr) {
+    log('warn', `[${short}] gate-registry resolve failed (legacy fallback): ${resolveErr.message}`);
+  }
   if (postMergeValidationCmd === null) {
-    try {
-      const appRow = await getAppRow(p.appId);
-      const boilerplateType = appRow?.boilerplateType || 'nextjs-base';
-      // Resolve via the Lambda-built daemon-bundle (registry is TS; dynamic
-      // import keeps the daemon flexible if the bundle isn't present).
-      const { BOILERPLATE_REGISTRY } = await import(
-        '../sst-env-shared/boilerplate-registry-snapshot.mjs'
-      ).catch(() => ({ BOILERPLATE_REGISTRY: null }));
-      if (BOILERPLATE_REGISTRY && BOILERPLATE_REGISTRY[boilerplateType]) {
-        postMergeValidationCmd =
-          BOILERPLATE_REGISTRY[boilerplateType].postMergeValidationCmd ?? null;
-      } else {
-        // 2026-05-28 — the registry snapshot (../sst-env-shared/
-        // boilerplate-registry-snapshot.mjs) is never generated, so this
-        // fallback is what ACTUALLY runs for every Next app. Was 'npm test',
-        // but the scaffold ships no `test` script → exit 1 → every wave
-        // falsely blocked. `next build` is the real gate that exists (it
-        // type-checks + compiles); tests run when a scaffold has them
-        // (`--if-present` is a no-op otherwise, and the runner treats a
-        // no-op test exit as pass). See fix(pipeline) 2026-05-28.
-        // Story D (2026-05-29) — regenerate src/app/page.tsx from
-        // src/features/ before the build so the candidate compiles the
-        // correctly-integrated page from the union of merged features. The
-        // `[ -f ]` guard keeps the gate green on legacy apps that predate the
-        // generate-wiring augment.
-        postMergeValidationCmd =
-          '[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs; npm run build && npm run test --if-present';
-      }
-    } catch (resolveErr) {
-      log(
-        'warn',
-        `[${short}] postMergeValidationCmd resolve failed (falling back to build gate): ${resolveErr.message}`,
-      );
-      postMergeValidationCmd = 'npm run build && npm run test --if-present';
+    if (gateEntry) {
+      // Registry semantics preserved: null = stub boilerplate = skip validation.
+      postMergeValidationCmd = gateEntry.postMergeValidationCmd ?? null;
+    } else {
+      // 2026-05-28 legacy fallback (snapshot missing/unreadable): `next
+      // build` is the real gate that exists; tests run when a scaffold has
+      // them. Story D — regenerate generated wiring before the build.
+      postMergeValidationCmd =
+        '[ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs; npm run build && npm run test --if-present';
     }
   }
 
@@ -5196,11 +5312,14 @@ async function executeWaveMergeJob(job) {
   // `agent.autoMerge` flag is on AND the plan hasn't opted out via
   // `autoMergeMode: 'off'`. When enabled, the runner attempts an in-candidate
   // resolution that is still build-gated + advance-on-green + audited.
+  // Plan row read once: autoMergeMode gates the agentic hooks below, rigor
+  // gates + scales the v2.6 wave VQA stage.
+  const planRow = await getPlanRowForAutoMerge(p.planId);
+
   let resolveConflictHook;
   let fixBuildHook;
   try {
     if (await isAutoMergeEnabledCached()) {
-      const planRow = await getPlanRowForAutoMerge(p.planId);
       const planMode = planRow?.autoMergeMode;
       if (planMode !== 'off') {
         resolveConflictHook = (args) => resolveWaveMergeConflict(args, { short });
@@ -5214,6 +5333,71 @@ async function executeWaveMergeJob(job) {
     }
   } catch (err) {
     log('warn', `[${short}] auto-merge gate check failed, defaulting to halt: ${err.message}`);
+  }
+
+  // ── v2.6 M2 (2026-06-11) — wave-gate VQA hook ─────────────────────────────
+  // Judged visual QA runs against the MERGED candidate, between validation
+  // and the green advance (see lib/wave-vqa-runner.mjs). Hook passed only
+  // when it applies: rigor !== 'prototype', boilerplate is UI-bearing
+  // (qaContext), and the wave's stories carry browser ACs. Judged failures
+  // fix-forward (never block green); a no-boot env failure blocks like a
+  // build failure.
+  let runVqaHook;
+  let waveStoriesForVqa = [];
+  try {
+    const rigor = planRow?.rigor || 'mvp';
+    const qaContext = gateEntry?.qaContext || null;
+    if (rigor !== 'prototype' && qaContext) {
+      const epicRes = await ddb.send(
+        new GetCommand({ TableName: EPICS_TABLE, Key: { epicId: p.epicId } }),
+      );
+      waveStoriesForVqa = (epicRes.Item?.stories || []).filter((s) =>
+        p.storyIds.includes(s.storyId),
+      );
+      const hasBrowserAcs = waveStoriesForVqa.some((s) =>
+        (s.criteria || []).some((c) => c.needsBrowser),
+      );
+      if (hasBrowserAcs) {
+        const { runWaveVqa } = await import('./lib/wave-vqa-runner.mjs');
+        const { bootDevServer, cleanCacheAndReboot } = await import('./lib/dev-server-boot.mjs');
+        const { defaultGitRunner, defaultShellRunner } = await import('./lib/wave-merge-runner.mjs');
+        const vqaLog = (level, msg) => waveLog(level, msg);
+        runVqaHook = ({ candidateDir }) =>
+          runWaveVqa({
+            candidateDir,
+            stories: waveStoriesForVqa,
+            rigor,
+            qaContext,
+            planId: p.planId,
+            epicId: p.epicId,
+            waveNumber: p.waveNumber,
+            appId: p.appId,
+            validationCmd: postMergeValidationCmd,
+            spawnEvidence: (a) => spawnGateAgent({ ...a, role: 'evidence' }, { short }),
+            spawnJudge: (a) => spawnGateAgent({ ...a, role: 'judge' }, { short }),
+            spawnTriage: (a) => spawnGateAgent({ ...a, role: 'triage' }, { short }),
+            spawnFixer: async (a) => {
+              const r = await spawnGateAgent({ ...a, role: 'fixer' }, { short });
+              return {
+                attempted: r.ok,
+                infra: r.infra,
+                reasoning: r.ok ? (r.output || '').slice(-1200) : r.reason,
+              };
+            },
+            shell: defaultShellRunner,
+            git: defaultGitRunner,
+            writeAttention: (item) => writeAttentionItem(ddb, { ...item, planId: p.planId }, log),
+            log: vqaLog,
+            bootServer: bootDevServer,
+            cleanReboot: cleanCacheAndReboot,
+          });
+        log('info', `[${short}] wave VQA armed (rigor=${rigor}, stories=${waveStoriesForVqa.length})`);
+      } else {
+        log('info', `[${short}] wave VQA skipped — no browser ACs in this wave`);
+      }
+    }
+  } catch (err) {
+    log('warn', `[${short}] wave VQA arm failed (non-blocking, gate proceeds without VQA): ${err.message}`);
   }
 
   // pacman1 (2026-06-11) — wave-level live streaming. Story jobs stream
@@ -5264,11 +5448,32 @@ async function executeWaveMergeJob(job) {
         resolveConflict: resolveConflictHook,
         // pacman1 (2026-06-11) — undefined (halt) unless autoMerge enabled it.
         fixBuild: fixBuildHook,
+        // v2.6 M2 — undefined (skip) unless rigor/qaContext/browser-ACs armed it.
+        runVqa: runVqaHook,
         log: waveLog,
       }),
     );
 
     if (result.outcome === 'success' || result.outcome === 'no-stories') {
+      // v2.6 M2 — persist a compact VQA summary (the full handoff packets
+      // live in attention-card context + the committed .context/ files; DDB
+      // job rows stay small).
+      const vqaSummary = result.vqa
+        ? {
+            outcome: result.vqa.outcome,
+            reason: result.vqa.reason,
+            pass: (result.vqa.verdicts || []).filter((v) => v.result === 'PASS').length,
+            fixed: (result.vqa.fixesApplied || []).length,
+            fixForward: (result.vqa.fixForward || []).map((h) => ({
+              storyId: h.storyId,
+              acId: h.acId,
+              observed: (h.observed || '').slice(0, 300),
+              screenshotUrl: h.evidence?.screenshotUrl || null,
+            })),
+            unverifiable: (result.vqa.unverifiable || []).length,
+            reportPath: result.vqa.reportPath || null,
+          }
+        : null;
       await updateJobFields(jobId, {
         status: 'COMPLETED',
         waveMergeResult: {
@@ -5276,10 +5481,44 @@ async function executeWaveMergeJob(job) {
           mergedStoryIds: result.mergedStoryIds || [],
           coordinatorWorktree: result.coordinatorWorktree,
           pushSha: result.pushSha,
+          vqa: vqaSummary,
         },
       });
+      // v2.6 §2.6 — every in-gate VQA fix becomes a pending REFLECTOR row
+      // ("VQA caught X; pattern to avoid") in the existing inbox. Best-effort.
+      for (const f of result.vqa?.fixesApplied || []) {
+        try {
+          await ddb.send(
+            new PutCommand({
+              TableName: process.env.REFLECTIONS_TABLE || 'futurator-reflections',
+              Item: {
+                projectSlug: p.appId,
+                id: randomUUID(),
+                createdAt: new Date().toISOString(),
+                planId: p.planId,
+                scope: 'wave',
+                target: 'project-claude-md',
+                action: 'append-line',
+                section: 'Patterns to avoid',
+                content: `Wave ${p.waveNumber} VQA caught and fixed ${f.acIds.join(', ')}: ${f.summary}`,
+                rationale:
+                  'A judge panel confirmed a visual contradiction on the merged candidate that every per-story gate missed; the in-gate fixer repaired it. Recurring shapes of this failure belong in Patterns to avoid.',
+                evidence: f.acIds,
+                confidence: 0.6,
+                status: 'pending',
+              },
+            }),
+          );
+        } catch (reflErr) {
+          log('warn', `[${short}] vqa reflection write failed (non-blocking): ${reflErr.message}`);
+        }
+      }
       await pushEvent(jobId, 'wave-merge', 'MERGE', 'step_complete', {
-        text: `wave-merge ${result.outcome} — merged ${result.mergedStoryIds?.length || 0} stories, green advanced to ${result.pushSha || '?'}`,
+        text:
+          `wave-merge ${result.outcome} — merged ${result.mergedStoryIds?.length || 0} stories, green advanced to ${result.pushSha || '?'}` +
+          (vqaSummary
+            ? ` · vqa ${vqaSummary.outcome} (${vqaSummary.pass} pass, ${vqaSummary.fixed} fixed, ${vqaSummary.fixForward.length} fix-forward)`
+            : ''),
       });
       log('info', `[${short}] wave-merge ${result.outcome} (merged ${result.mergedStoryIds?.length || 0})`);
       // git-graph snapshot — the plan branch + merge commits just advanced.
