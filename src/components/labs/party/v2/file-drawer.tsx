@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { Loader2, X, FileText, Copy, Check } from 'lucide-react';
+import { Loader2, X, FileText, Copy, Check, Folder } from 'lucide-react';
 import { usePartyFile } from '@/hooks/use-party-file';
 import { RichText } from '../rich-text';
 import { COLORS, DRAWER_DEFAULTS, DRAWER_WIDTH_KEY } from './tokens';
@@ -122,7 +122,9 @@ export function useFileDrawer(): FileDrawerCtx {
  */
 function FileDrawer({ state, onClose }: { state: FileDrawerState; onClose: () => void }) {
   const { data, isLoading, error } = usePartyFile(state.projectId, state.path, state.sessionId);
+  const { openPath } = useFileDrawer();
   const [copied, setCopied] = useState(false);
+  const isDir = data?.kind === 'dir';
 
   // Resizable width — persisted to localStorage. Same drag model as the
   // three-column pane handles, but lives next to the drawer so it doesn't
@@ -215,7 +217,11 @@ function FileDrawer({ state, onClose }: { state: FileDrawerState; onClose: () =>
             borderBottom: `1px solid ${COLORS.bgDeepest}`,
           }}
         >
-          <FileText className="h-4 w-4 shrink-0" style={{ color: COLORS.accentBrand }} />
+          {isDir ? (
+            <Folder className="h-4 w-4 shrink-0" style={{ color: COLORS.accentBrand }} />
+          ) : (
+            <FileText className="h-4 w-4 shrink-0" style={{ color: COLORS.accentBrand }} />
+          )}
           <div className="min-w-0 flex-1">
             <div
               className="truncate text-[14px] font-semibold"
@@ -226,10 +232,16 @@ function FileDrawer({ state, onClose }: { state: FileDrawerState; onClose: () =>
             </div>
             <div className="truncate font-mono text-[10.5px]" style={{ color: COLORS.textMuted }}>
               {state.path}
-              {data && (
+              {data && typeof data.size === 'number' && (
                 <>
                   {' · '}
                   {formatBytes(data.size)}
+                </>
+              )}
+              {isDir && data?.entries && (
+                <>
+                  {' · '}
+                  {data.entries.length} item{data.entries.length === 1 ? '' : 's'}
                 </>
               )}
             </div>
@@ -301,8 +313,20 @@ function FileDrawer({ state, onClose }: { state: FileDrawerState; onClose: () =>
             </div>
           )}
 
-          {data && !isLoading && (
-            <FileBody contentType={data.contentType} content={data.content} path={state.path} />
+          {data && !isLoading && isDir && (
+            <DirListing
+              basePath={data.path}
+              entries={data.entries ?? []}
+              onOpen={(p) => openPath(p)}
+            />
+          )}
+
+          {data && !isLoading && !isDir && (
+            <FileBody
+              contentType={data.contentType ?? 'text/plain'}
+              content={data.content ?? ''}
+              path={state.path}
+            />
           )}
         </div>
       </div>
@@ -332,6 +356,84 @@ function FileBody({
   const ext = path.split('.').pop()?.toLowerCase() || '';
   const fenced = '```' + ext + '\n' + content + '\n```';
   return <RichText text={fenced} />;
+}
+
+/**
+ * Mini file explorer for directory paths (e.g. the orchestrator references
+ * `docs/prd/<feature>/`). Each row re-opens the drawer at the child path —
+ * files preview, directories drill deeper. A `..` row walks back up while
+ * there's still a parent inside the project root.
+ */
+function DirListing({
+  basePath,
+  entries,
+  onOpen,
+}: {
+  basePath: string;
+  entries: Array<{ name: string; type: 'dir' | 'file'; size: number }>;
+  onOpen: (path: string) => void;
+}) {
+  const parent = basePath.includes('/') ? basePath.slice(0, basePath.lastIndexOf('/')) : null;
+  return (
+    <div className="space-y-0.5">
+      {parent !== null && <DirRow name=".." type="dir" onClick={() => onOpen(parent)} />}
+      {entries.length === 0 && (
+        <div className="px-2 py-4 text-[12px] italic" style={{ color: COLORS.textMuted }}>
+          Empty directory.
+        </div>
+      )}
+      {entries.map((e) => (
+        <DirRow
+          key={e.name}
+          name={e.name}
+          type={e.type}
+          size={e.size}
+          onClick={() => onOpen(`${basePath}/${e.name}`)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function DirRow({
+  name,
+  type,
+  size,
+  onClick,
+}: {
+  name: string;
+  type: 'dir' | 'file';
+  size?: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-colors"
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = 'color-mix(in srgb, var(--foreground) 5%, transparent)';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = 'transparent';
+      }}
+    >
+      {type === 'dir' ? (
+        <Folder className="h-4 w-4 shrink-0" style={{ color: COLORS.accentBrand }} />
+      ) : (
+        <FileText className="h-4 w-4 shrink-0" style={{ color: COLORS.textMuted }} />
+      )}
+      <span className="min-w-0 flex-1 truncate text-[13px]" style={{ color: COLORS.textPrimary }}>
+        {name}
+        {type === 'dir' ? '/' : ''}
+      </span>
+      {type === 'file' && typeof size === 'number' && (
+        <span className="shrink-0 font-mono text-[10.5px]" style={{ color: COLORS.textMuted }}>
+          {formatBytes(size)}
+        </span>
+      )}
+    </button>
+  );
 }
 
 function formatBytes(n: number): string {

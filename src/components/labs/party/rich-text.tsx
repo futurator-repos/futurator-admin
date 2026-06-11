@@ -303,6 +303,28 @@ export function RichText({ text }: { text: string }) {
           ),
           a: ({ href, children }) => {
             const isExternal = href && /^https?:\/\//.test(href);
+            // Internal hrefs are project file/dir references the agent wrote
+            // as markdown links (e.g. [docs/prd/x.md](docs/prd/x.md)). A raw
+            // <a> would NAVIGATE the SPA to a dead route — open the drawer
+            // instead. 2026-06-11: this was why generated-doc links appeared
+            // broken ("File not found" page) mid-debate.
+            if (!isExternal && href && open) {
+              const path = href.replace(/^\.\//, '').replace(/^\/+/, '');
+              return (
+                <button
+                  type="button"
+                  className="party-link-file"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    open(path);
+                  }}
+                  title={`Open ${path}`}
+                >
+                  {children}
+                </button>
+              );
+            }
             return (
               <a
                 href={href}
@@ -345,6 +367,27 @@ export function RichText({ text }: { text: string }) {
               const fileMatch = raw.match(
                 /^([\w./-]+\.(?:md|markdown|txt|ts|tsx|js|jsx|json|css|scss|html|py|go|rs|rb|java|kt|swift|c|cpp|h|sh|bash|zsh|yml|yaml|toml|xml|mjs|cjs|sql|env))$/,
               );
+              // Directory references (`docs/prd/feature/`) open the drawer's
+              // mini explorer — the trailing slash + at least one inner `/`
+              // distinguishes them from prose in backticks.
+              const dirMatch = !fileMatch ? raw.match(/^((?:[\w.-]+\/){2,})$/) : null;
+              if (dirMatch && open) {
+                const path = dirMatch[1].replace(/\/+$/, '');
+                return (
+                  <button
+                    type="button"
+                    className="party-link-file"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      open(path);
+                    }}
+                    title={`Browse ${path}/`}
+                  >
+                    {raw}
+                  </button>
+                );
+              }
               if (fileMatch && open) {
                 const path = fileMatch[1];
                 return (

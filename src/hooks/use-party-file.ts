@@ -3,16 +3,20 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api-client';
 
 export interface PartyFileResponse {
+  /** 'file' (default for older deployments) or 'dir' (directory listing). */
+  kind?: 'file' | 'dir';
   /** Path relative to projectPath. */
   path: string;
   /** Absolute path on EC2 (`/home/ubuntu/projects/<id>/<path>`). */
   fullPath: string;
-  /** File size in bytes. */
-  size: number;
-  /** Sniffed by extension. */
-  contentType: 'text/markdown' | 'application/json' | 'text/html' | 'text/plain';
-  /** UTF-8 file content. Capped at 1 MiB by the API. */
-  content: string;
+  /** File size in bytes (files only). */
+  size?: number;
+  /** Sniffed by extension (files only). */
+  contentType?: 'text/markdown' | 'application/json' | 'text/html' | 'text/plain';
+  /** UTF-8 file content. Capped at 1 MiB by the API (files only). */
+  content?: string;
+  /** Directory entries (dirs only) — directories first, alpha-sorted. */
+  entries?: Array<{ name: string; type: 'dir' | 'file'; size: number }>;
 }
 
 /**

@@ -7513,6 +7513,14 @@ app.get('/api/party/projects/:projectId/files', async (c) => {
     // realpath -m resolves missing components without erroring; we still
     // need to check the file actually exists.
     `case "$RESOLVED" in "$ROOT"|"$ROOT"/*) ;; *) echo "__OUT_OF_ROOT__" && exit 0;; esac`,
+    // Directory → emit a bounded listing (one entry per line: type<TAB>size
+    // <TAB>name) so doc links like docs/prd/<feature>/ are explorable from
+    // the file drawer. 200-entry cap keeps us far under SSM's 24K stdout cap.
+    `if [ -d "$RESOLVED" ]; then`,
+    `  echo "__DIR__:$RESOLVED"`,
+    `  find "$RESOLVED" -mindepth 1 -maxdepth 1 \\( -name '.git' -o -name 'node_modules' -o -name '.party-uploads' \\) -prune -o -printf '%y\\t%s\\t%f\\n' 2>/dev/null | sort -k3 | head -200`,
+    `  exit 0`,
+    `fi`,
     `if [ ! -f "$RESOLVED" ]; then echo "__NOT_FOUND__" && exit 0; fi`,
     `SIZE=$(stat -c%s "$RESOLVED")`,
     `if [ "$SIZE" -gt 1048576 ]; then echo "__TOO_LARGE__:$SIZE" && exit 0; fi`,
@@ -7527,6 +7535,30 @@ app.get('/api/party/projects/:projectId/files', async (c) => {
   }
   if (output.includes('__NOT_FOUND__')) {
     throw new NotFoundError('File', cleanRel);
+  }
+  if (output.includes('__DIR__:')) {
+    const entries = output
+      .split('\n')
+      .map((l) => l.trimEnd())
+      .filter((l) => /^[df]\t\d+\t.+$/.test(l))
+      .map((l) => {
+        const [type, sizeStr, ...nameParts] = l.split('\t');
+        return {
+          name: nameParts.join('\t'),
+          type: type === 'd' ? ('dir' as const) : ('file' as const),
+          size: parseInt(sizeStr, 10) || 0,
+        };
+      })
+      // Directories first, then files, alpha within each group.
+      .sort((a, b) =>
+        a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1,
+      );
+    return c.json({
+      kind: 'dir',
+      path: cleanRel.replace(/\/+$/, ''),
+      fullPath,
+      entries,
+    });
   }
   const tooLarge = output.match(/__TOO_LARGE__:(\d+)/);
   if (tooLarge) {
@@ -7560,6 +7592,7 @@ app.get('/api/party/projects/:projectId/files', async (c) => {
           : 'text/plain';
 
   return c.json({
+    kind: 'file',
     path: cleanRel,
     fullPath,
     size,

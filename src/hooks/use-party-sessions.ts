@@ -22,6 +22,27 @@ export function useAllPartySessions() {
   });
 }
 
+/**
+ * Delete a debate. The API runs the full Story 20.10 cascade: archive the
+ * party branch (push to archive/party/<app>/<sid>), drop it, remove the
+ * per-session worktree, delete inline questions + the session row.
+ * Best-effort per step — the response carries `results[]` with per-step
+ * status so callers can surface partial failures.
+ */
+export function useDeleteSessionMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sessionId: string) =>
+      api.delete<{ sessionId: string; results: Array<{ step: string; status: string }> }>(
+        `/party/sessions/${sessionId}`,
+      ),
+    onSuccess: () => {
+      // Drop every sessions listing (all + every by-project key) in one go.
+      qc.invalidateQueries({ queryKey: ['party', 'sessions'] });
+    },
+  });
+}
+
 export function useCreateSessionMutation() {
   const qc = useQueryClient();
   return useMutation({

@@ -14,17 +14,40 @@
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { formatDistanceToNow } from 'date-fns';
-import { ArrowLeft, Loader2, MessageSquare, MessagesSquare, Plus } from 'lucide-react';
+import {
+  ArrowLeft,
+  ChevronRight,
+  Loader2,
+  MessageSquare,
+  MessagesSquare,
+  Plus,
+  Search,
+  Trash2,
+} from 'lucide-react';
 import { AppShell } from '@/components/layout/app-shell';
 import { AuthGuard } from '@/components/auth/auth-guard';
 import { Button } from '@/components/ui/button';
-import { useAllPartySessions } from '@/hooks/use-party-sessions';
+import { useAllPartySessions, useDeleteSessionMutation } from '@/hooks/use-party-sessions';
 import { useApps } from '@/hooks/use-apps';
 import { useSession } from '@/hooks/use-party-session';
 import { SessionChatV2 } from '@/components/labs/party/v2/session-chat-v2';
 import { NewDebateDialog } from '@/components/debates/new-debate-dialog';
 import { useUIStore } from '@/stores/ui-store';
 import type { PartySession, PartySessionStatus } from '@/types/party';
+
+/** localStorage key — which app groups the user has expanded. */
+const EXPANDED_GROUPS_KEY = 'debates.expandedGroups';
+
+function loadExpandedGroups(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const raw = window.localStorage.getItem(EXPANDED_GROUPS_KEY);
+    if (raw) return new Set(JSON.parse(raw) as string[]);
+  } catch {
+    /* fall through */
+  }
+  return new Set();
+}
 
 const STATUS_TONE: Record<PartySessionStatus, string> = {
   ACTIVE: 'bg-emerald-500/15 text-emerald-300 border-emerald-400/30',
@@ -114,9 +137,19 @@ function DebatesListView() {
   const { data, isLoading, error } = useAllPartySessions();
   const { data: apps } = useApps();
   const [isNewDebateOpen, setIsNewDebateOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [expanded, setExpanded] = useState<Set<string>>(() => loadExpandedGroups());
 
   const groups: AppGroup[] = useMemo(() => {
-    const sessions = data?.sessions ?? [];
+    const q = query.trim().toLowerCase();
+    const sessions = (data?.sessions ?? []).filter((s) => {
+      if (!q) return true;
+      return (
+        (s.topic ?? '').toLowerCase().includes(q) ||
+        s.projectId.toLowerCase().includes(q) ||
+        s.sessionId.startsWith(q)
+      );
+    });
     const byApp = new Map<string, PartySession[]>();
     for (const s of sessions) {
       const arr = byApp.get(s.projectId) ?? [];
@@ -142,11 +175,29 @@ function DebatesListView() {
     }
     out.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
     return out;
-  }, [data, apps]);
+  }, [data, apps, query]);
+
+  function toggleGroup(appId: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(appId)) next.delete(appId);
+      else next.add(appId);
+      try {
+        window.localStorage.setItem(EXPANDED_GROUPS_KEY, JSON.stringify(Array.from(next)));
+      } catch {
+        /* best effort */
+      }
+      return next;
+    });
+  }
 
   function openDebate(sessionId: string) {
     router.push(`/debates?sessionId=${encodeURIComponent(sessionId)}`);
   }
+
+  // While searching every (matching) group is force-expanded — a collapsed
+  // hit would read as "no results".
+  const searching = query.trim().length > 0;
 
   return (
     <div className="space-y-6">
@@ -178,6 +229,19 @@ function DebatesListView() {
       </div>
 
       <NewDebateDialog open={isNewDebateOpen} onOpenChange={setIsNewDebateOpen} />
+
+      {/* Search — filters by topic, app id, or session id prefix. */}
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search debates — topic, app, or session id…"
+          className="w-full rounded-md border border-border bg-card py-2 pl-9 pr-3 text-[13px] placeholder:text-muted-foreground/70 focus:outline-none focus:ring-1 focus:ring-ring"
+          data-testid="debates-search"
+        />
+      </div>
 
       {isLoading && (
         <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-6 text-sm text-muted-foreground">
@@ -212,73 +276,155 @@ function DebatesListView() {
         </div>
       )}
 
-      <div className="space-y-6">
-        {groups.map((g) => (
-          <section
-            key={g.appId}
-            className="overflow-hidden rounded-lg border border-border bg-card"
-          >
-            <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/20 px-4 py-2.5">
-              <div className="flex min-w-0 items-center gap-2">
-                <span className="shrink-0 text-base" aria-hidden>
-                  {g.icon || '📦'}
-                </span>
+      {!isLoading && !error && searching && groups.length === 0 && (
+        <div className="rounded-lg border border-dashed border-border bg-card/40 p-6 text-center text-sm text-muted-foreground">
+          No debates match &ldquo;{query.trim()}&rdquo;.
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {groups.map((g) => {
+          const isOpen = searching || expanded.has(g.appId);
+          return (
+            <section
+              key={g.appId}
+              className="overflow-hidden rounded-lg border border-border bg-card"
+            >
+              <header className="flex flex-wrap items-center justify-between gap-3 bg-muted/20 px-3 py-2.5">
                 <button
                   type="button"
-                  onClick={() => router.push(`/labs?appId=${encodeURIComponent(g.appId)}`)}
-                  className="truncate text-sm font-semibold hover:underline"
-                  title="Open App detail"
+                  onClick={() => toggleGroup(g.appId)}
+                  className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  aria-expanded={isOpen}
+                  data-testid={`debates-group-${g.appId}`}
                 >
-                  {g.displayName}
+                  <ChevronRight
+                    className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
+                      isOpen ? 'rotate-90' : ''
+                    }`}
+                  />
+                  <span className="shrink-0 text-base" aria-hidden>
+                    {g.icon || '📦'}
+                  </span>
+                  <span className="truncate text-sm font-semibold">{g.displayName}</span>
+                  <span className="truncate font-mono text-[10.5px] text-muted-foreground">
+                    {g.appId}
+                  </span>
                 </button>
-                <span className="truncate font-mono text-[10.5px] text-muted-foreground">
-                  {g.appId}
-                </span>
-              </div>
-              <div className="shrink-0 text-[10.5px] text-muted-foreground">
-                {g.sessions.length} debate{g.sessions.length === 1 ? '' : 's'} · last{' '}
-                {g.lastActivity ? formatDistanceToNow(new Date(g.lastActivity)) + ' ago' : '—'}
-              </div>
-            </header>
-            <ul className="divide-y divide-border/60">
-              {g.sessions.map((s) => {
-                const tone = STATUS_TONE[s.status] ?? STATUS_TONE.IDLE;
-                const when = s.lastTurnAt ?? s.createdAt;
-                return (
-                  <li key={s.sessionId}>
-                    <button
-                      type="button"
-                      onClick={() => openDebate(s.sessionId)}
-                      className="group flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-muted/20"
-                    >
-                      <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground/70 group-hover:text-accent-purple" />
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13px] font-medium">
-                          {s.topic || `Untitled session`}
-                        </div>
-                        <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[10.5px] text-muted-foreground">
-                          <span className="font-mono">
-                            {s.turnCount} round{s.turnCount === 1 ? '' : 's'}
-                          </span>
-                          <span>·</span>
-                          <span>{formatDistanceToNow(new Date(when))} ago</span>
-                          <span className="font-mono opacity-60">{s.sessionId.slice(0, 8)}</span>
-                        </div>
-                      </div>
-                      <span
-                        className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9.5px] font-bold tracking-wider ${tone}`}
-                      >
-                        {s.status}
-                      </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          </section>
-        ))}
+                <div className="flex shrink-0 items-center gap-3">
+                  <span className="text-[10.5px] text-muted-foreground">
+                    {g.sessions.length} debate{g.sessions.length === 1 ? '' : 's'} · last{' '}
+                    {g.lastActivity ? formatDistanceToNow(new Date(g.lastActivity)) + ' ago' : '—'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => router.push(`/labs?appId=${encodeURIComponent(g.appId)}`)}
+                    className="text-[10.5px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                    title="Open App detail"
+                  >
+                    open app
+                  </button>
+                </div>
+              </header>
+              {isOpen && (
+                <ul className="divide-y divide-border/60 border-t border-border">
+                  {g.sessions.map((s) => (
+                    <SessionRow key={s.sessionId} session={s} onOpen={openDebate} />
+                  ))}
+                </ul>
+              )}
+            </section>
+          );
+        })}
       </div>
     </div>
+  );
+}
+
+function SessionRow({
+  session: s,
+  onOpen,
+}: {
+  session: PartySession;
+  onOpen: (sessionId: string) => void;
+}) {
+  const del = useDeleteSessionMutation();
+  const [confirming, setConfirming] = useState(false);
+  const tone = STATUS_TONE[s.status] ?? STATUS_TONE.IDLE;
+  const when = s.lastTurnAt ?? s.createdAt;
+  const deleting = del.isPending;
+
+  return (
+    <li
+      className="group flex w-full cursor-pointer items-center gap-3 px-4 py-2.5 transition-colors hover:bg-muted/20"
+      onClick={() => !deleting && onOpen(s.sessionId)}
+    >
+      <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground/70 group-hover:text-accent-purple" />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] font-medium">{s.topic || `Untitled session`}</div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[10.5px] text-muted-foreground">
+          <span className="font-mono">
+            {s.turnCount} round{s.turnCount === 1 ? '' : 's'}
+          </span>
+          <span>·</span>
+          <span>{formatDistanceToNow(new Date(when))} ago</span>
+          <span className="font-mono opacity-60">{s.sessionId.slice(0, 8)}</span>
+          {del.isError && (
+            <span className="text-destructive">delete failed: {(del.error as Error).message}</span>
+          )}
+        </div>
+      </div>
+      <span
+        className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9.5px] font-bold tracking-wider ${tone}`}
+      >
+        {s.status}
+      </span>
+      {/* Remove — two-step inline confirm. Archives the party branch, reaps
+          the worktree, then deletes the session row (API cascade). */}
+      {confirming ? (
+        <span
+          className="flex shrink-0 items-center gap-1"
+          onClick={(e) => e.stopPropagation()}
+          role="presentation"
+        >
+          <button
+            type="button"
+            disabled={deleting}
+            onClick={() => del.mutate(s.sessionId, { onSettled: () => setConfirming(false) })}
+            className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[10.5px] font-semibold text-destructive transition-colors hover:bg-destructive/20 disabled:opacity-60"
+            data-testid={`confirm-delete-${s.sessionId.slice(0, 8)}`}
+          >
+            {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Delete debate + worktree'}
+          </button>
+          <button
+            type="button"
+            disabled={deleting}
+            onClick={() => setConfirming(false)}
+            className="rounded border border-border px-2 py-1 text-[10.5px] text-muted-foreground hover:text-foreground"
+          >
+            Cancel
+          </button>
+        </span>
+      ) : (
+        <button
+          type="button"
+          title={
+            s.status === 'PROCESSING'
+              ? 'Debate is processing — wait or cancel it before deleting'
+              : 'Remove debate (archives the branch, removes the worktree)'
+          }
+          disabled={s.status === 'PROCESSING'}
+          onClick={(e) => {
+            e.stopPropagation();
+            setConfirming(true);
+          }}
+          className="shrink-0 rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-30"
+          data-testid={`delete-debate-${s.sessionId.slice(0, 8)}`}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </li>
   );
 }
 
