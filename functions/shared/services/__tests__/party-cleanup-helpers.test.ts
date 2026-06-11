@@ -5,6 +5,7 @@ import {
   archivePartyBranch,
   reapPartyWorktree,
   countResidualPartyCommits,
+  pushPartyBranchToRemote,
 } from '../plan-folder-service';
 
 /**
@@ -75,6 +76,88 @@ describe('cleanupPartyBranch', () => {
     const deps = makeDeps('');
     await expect(
       cleanupPartyBranch({ workingDirSlug: APP, sessionIdShort: 'A1B2C3D4' }, deps),
+    ).rejects.toThrow(/sessionIdShort/);
+    expect(deps.sendSsmCommand).not.toHaveBeenCalled();
+  });
+});
+
+describe('pushPartyBranchToRemote', () => {
+  const AUTHED = 'https://x-access-token:ghp_testtoken@github.com/Get-Really-Real/applicator.git';
+
+  it('happy path — pushes the branch', async () => {
+    const deps = makeDeps('PUSH_OK');
+    const r = await pushPartyBranchToRemote(
+      { workingDirSlug: APP, sessionIdShort: SESSION_SHORT, authedRemoteUrl: AUTHED },
+      deps,
+    );
+    expect(r).toEqual({ pushed: true, reason: 'PUSHED' });
+    // The authed URL must be passed to the bare repo, not `origin`.
+    const cmd = deps.sendSsmCommand.mock.calls[0][0] as string;
+    expect(cmd).toContain('/home/ubuntu/repos/applicator.git');
+    expect(cmd).toContain(AUTHED);
+    expect(cmd).toContain('refs/heads/party/applicator/a1b2c3d4');
+  });
+
+  it('idempotent — already pushed returns up-to-date', async () => {
+    const deps = makeDeps('PUSH_UP_TO_DATE');
+    const r = await pushPartyBranchToRemote(
+      { workingDirSlug: APP, sessionIdShort: SESSION_SHORT, authedRemoteUrl: AUTHED },
+      deps,
+    );
+    expect(r).toEqual({ pushed: true, reason: 'UP_TO_DATE' });
+  });
+
+  it('auth-denied surfaces a typed reason', async () => {
+    const deps = makeDeps('PUSH_AUTH_DENIED');
+    const r = await pushPartyBranchToRemote(
+      { workingDirSlug: APP, sessionIdShort: SESSION_SHORT, authedRemoteUrl: AUTHED },
+      deps,
+    );
+    expect(r).toEqual({ pushed: false, reason: 'AUTH_DENIED' });
+  });
+
+  it('branch-missing is not a push', async () => {
+    const deps = makeDeps('BRANCH_MISSING');
+    const r = await pushPartyBranchToRemote(
+      { workingDirSlug: APP, sessionIdShort: SESSION_SHORT, authedRemoteUrl: AUTHED },
+      deps,
+    );
+    expect(r).toEqual({ pushed: false, reason: 'BRANCH_MISSING' });
+  });
+
+  it('redacts any leaked token from output', async () => {
+    const deps = makeDeps(`remote: pushing\nUNKNOWN_LINE x-access-token:ghp_leaked@github.com\n`);
+    const r = await pushPartyBranchToRemote(
+      { workingDirSlug: APP, sessionIdShort: SESSION_SHORT, authedRemoteUrl: AUTHED },
+      deps,
+    );
+    expect(r.pushed).toBe(false);
+    expect(r.reason).not.toContain('ghp_leaked');
+    expect(r.reason).toContain('x-access-token:***@');
+  });
+
+  it('rejects a non-authed remote url (no token bypass)', async () => {
+    const deps = makeDeps('PUSH_OK');
+    await expect(
+      pushPartyBranchToRemote(
+        {
+          workingDirSlug: APP,
+          sessionIdShort: SESSION_SHORT,
+          authedRemoteUrl: 'https://github.com/Get-Really-Real/applicator.git',
+        },
+        deps,
+      ),
+    ).rejects.toThrow(/x-access-token/);
+    expect(deps.sendSsmCommand).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed sessionIdShort', async () => {
+    const deps = makeDeps('PUSH_OK');
+    await expect(
+      pushPartyBranchToRemote(
+        { workingDirSlug: APP, sessionIdShort: 'NOPE', authedRemoteUrl: AUTHED },
+        deps,
+      ),
     ).rejects.toThrow(/sessionIdShort/);
     expect(deps.sendSsmCommand).not.toHaveBeenCalled();
   });

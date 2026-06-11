@@ -691,6 +691,80 @@ export async function archivePartyBranch(
 }
 
 /**
+ * Push a party branch to its GitHub remote on demand.
+ *
+ * Motivation (2026-06-11): when a project hasn't opted into push, every
+ * checkpoint commits LOCALLY only — the branch never reaches GitHub. The
+ * "Open PR" endpoint then can't create a PR (no remote head). This helper
+ * lets the endpoint push the already-committed branch when the operator
+ * later enables push + clicks "Push & open PR".
+ *
+ * Uses an explicit token-authenticated URL rather than the bare repo's
+ * baked-in `origin` (which may still carry the read-only clone PAT until the
+ * next debate turn re-bakes it). The branch ref lives in the bare repo
+ * (`/home/ubuntu/repos/<slug>.git`) — that's what the worktrees fork from.
+ *
+ * `authedRemoteUrl` MUST be the `https://x-access-token:<PAT>@github.com/...`
+ * form. The token is redacted from all returned output. Idempotent — a
+ * second call returns `up-to-date`.
+ */
+export async function pushPartyBranchToRemote(
+  args: { workingDirSlug: string; sessionIdShort: string; authedRemoteUrl: string },
+  deps: PlanFolderDeps,
+): Promise<{ pushed: boolean; reason: string }> {
+  assertSafeFolderName(args.workingDirSlug);
+  assertSafeSessionIdShort(args.sessionIdShort);
+  const bare = `/home/ubuntu/repos/${args.workingDirSlug}.git`;
+  const branch = `party/${args.workingDirSlug}/${args.sessionIdShort}`;
+  // Single-quote the authed URL so the shell never word-splits it; the URL
+  // contains no single quotes (it's a PAT + github host).
+  if (
+    args.authedRemoteUrl.includes("'") ||
+    !/^https:\/\/x-access-token:/.test(args.authedRemoteUrl)
+  ) {
+    throw new Error('Refused: authedRemoteUrl must be a clean x-access-token https URL');
+  }
+
+  const cmd = [
+    `set -e`,
+    `if [ ! -d "${bare}" ]; then echo "BARE_MISSING"; exit 0; fi`,
+    // Branch must exist locally in the bare repo (it's where checkpoints land).
+    `if ! sudo -u ubuntu git --git-dir="${bare}" show-ref --verify --quiet "refs/heads/${branch}"; then echo "BRANCH_MISSING"; exit 0; fi`,
+    // Push the local ref to the same-named remote head. Explicit authed URL
+    // (not `origin`) so a stale read-only clone token can't block the push.
+    `OUT=$(sudo -u ubuntu git --git-dir="${bare}" push '${args.authedRemoteUrl}' "refs/heads/${branch}:refs/heads/${branch}" 2>&1)`,
+    `RC=$?`,
+    `if [ $RC -ne 0 ]; then`,
+    `  if printf '%s' "$OUT" | grep -qiE "(403|denied|not granted|Permission to)"; then echo "PUSH_AUTH_DENIED"; `,
+    `  elif printf '%s' "$OUT" | grep -qiE "(protected branch|protected_branch)"; then echo "PUSH_PROTECTED"; `,
+    `  elif printf '%s' "$OUT" | grep -qiE "(could not resolve|no route|network|timed out)"; then echo "PUSH_NETWORK"; `,
+    `  else echo "PUSH_OTHER"; fi`,
+    `  exit 0`,
+    `fi`,
+    `if printf '%s' "$OUT" | grep -qi "up-to-date"; then echo "PUSH_UP_TO_DATE"; else echo "PUSH_OK"; fi`,
+  ].join('\n');
+
+  try {
+    const commandId = await deps.sendSsmCommand(cmd);
+    const raw = await deps.waitForSsmOutput(commandId);
+    // Defence-in-depth: strip any token that leaked into output before we
+    // ever return/log it.
+    const output = raw.replace(/x-access-token:[^@\s]+@/g, 'x-access-token:***@');
+    if (output.includes('BARE_MISSING')) return { pushed: false, reason: 'BARE_MISSING' };
+    if (output.includes('BRANCH_MISSING')) return { pushed: false, reason: 'BRANCH_MISSING' };
+    if (output.includes('PUSH_AUTH_DENIED')) return { pushed: false, reason: 'AUTH_DENIED' };
+    if (output.includes('PUSH_PROTECTED')) return { pushed: false, reason: 'BRANCH_PROTECTED' };
+    if (output.includes('PUSH_NETWORK')) return { pushed: false, reason: 'NETWORK' };
+    if (output.includes('PUSH_OTHER')) return { pushed: false, reason: 'PUSH_FAILED' };
+    if (output.includes('PUSH_UP_TO_DATE')) return { pushed: true, reason: 'UP_TO_DATE' };
+    if (output.includes('PUSH_OK')) return { pushed: true, reason: 'PUSHED' };
+    return { pushed: false, reason: `UNKNOWN: ${output.slice(0, 200)}` };
+  } catch (err) {
+    return { pushed: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
  * Story 20.9 — reap a per-session party worktree.
  *
  * `git worktree remove --force` against the bare repo (so the bare repo's

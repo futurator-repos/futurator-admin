@@ -6164,6 +6164,23 @@ async function ensureBrownfieldPatSecret(secretName: string, pat: string): Promi
 }
 
 /**
+ * Read a brownfield project's PAT secret (raw string — see
+ * ensureBrownfieldPatSecret). Returns null when the secret doesn't exist
+ * yet. Used by the Open-PR endpoint to push a composed-only branch.
+ */
+async function readBrownfieldPatSecret(secretName: string): Promise<string | null> {
+  try {
+    const res = await secretsManagerClient.send(
+      new GetSecretValueCommand({ SecretId: secretName }),
+    );
+    return res.SecretString ?? null;
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'ResourceNotFoundException') return null;
+    throw err;
+  }
+}
+
+/**
  * GET /api/migrations — list every brownfield Party project, enriched
  * with the App-row icon + displayName and a session count. The Migrate
  * page's MigrationsList renders this.
@@ -7436,6 +7453,47 @@ app.post('/api/party/sessions/:id/checkpoints/:sha/pr', async (c) => {
   const owner = m[1];
   const name = m[2];
   const base = project.gitBranch || 'main';
+
+  // Push-first (2026-06-11): a composed-only checkpoint committed locally and
+  // never pushed — GitHub can't open a PR from a head branch it doesn't have.
+  // Push the party branch from EC2 using the project's write PAT before we
+  // try to create the PR. Idempotent (a pushed branch returns up-to-date).
+  // We always run this — it's a no-op when the branch is already on GitHub,
+  // and it's the load-bearing step when it isn't.
+  {
+    const patSecretName = project.patSecretName ?? brownfieldPatSecretNameFor(session.projectId);
+    const pat = await readBrownfieldPatSecret(patSecretName);
+    if (!pat) {
+      throw new AppError(
+        'NO_PAT',
+        'No write PAT is stored for this project. Re-enable push in /migrate with a contents:write token.',
+        409,
+      );
+    }
+    const authedRemoteUrl = `https://x-access-token:${pat}@github.com/${owner}/${name}.git`;
+    const { pushPartyBranchToRemote } = await import('../shared/services/plan-folder-service');
+    const pushResult = await pushPartyBranchToRemote(
+      {
+        workingDirSlug: session.projectId,
+        sessionIdShort: session.sessionId.slice(0, 8),
+        authedRemoteUrl,
+      },
+      { sendSsmCommand, waitForSsmOutput },
+    );
+    if (!pushResult.pushed) {
+      const msg =
+        pushResult.reason === 'AUTH_DENIED'
+          ? 'Push was denied — the stored PAT lacks contents:write or has expired. Re-enable push in /migrate with a fresh token.'
+          : pushResult.reason === 'BRANCH_PROTECTED'
+            ? `The base branch is protected. Open the PR manually or adjust branch protection.`
+            : pushResult.reason === 'BRANCH_MISSING'
+              ? 'The party branch no longer exists on EC2 — it may have been reaped. Nothing to open a PR from.'
+              : pushResult.reason === 'NETWORK'
+                ? 'Network error reaching GitHub from EC2. Retry shortly.'
+                : `Could not push the party branch (${pushResult.reason}).`;
+      throw new AppError('PUSH_FAILED', msg, 502);
+    }
+  }
 
   // Idempotency: if an open PR already exists with head=<owner>:<branch>, reuse.
   // GitHub's listPRs head filter uses `owner:branch` form.

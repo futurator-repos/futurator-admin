@@ -10,7 +10,11 @@
  *
  * Three operator actions (the "downstream automation surface" from plan.md §1):
  *   1. Open PR    — calls POST /api/party/sessions/:id/checkpoints/:sha/pr
- *                    (Story 22.3 endpoint). Visible only when pushed=true.
+ *                    (Story 22.3 endpoint). Shown on `pushed` cards AND on
+ *                    `composed` cards once the project has opted into push
+ *                    (2026-06-11): the endpoint pushes the branch first, so a
+ *                    locally-committed checkpoint can still become a PR. The
+ *                    `composed` variant is labelled "Push & open PR".
  *   2. Continue   — closes the card; the operator drives more turns in the
  *      locally       same session. Always visible.
  *   3. Start      — deep-links to /labs?createPlanForApp=<projectId>&sourceCommitSha=<sha>&sourceBranch=<branch>
@@ -49,7 +53,7 @@ export function CheckpointCard({ sessionId, projectId, pushEnabled, checkpoint }
   const [prError, setPrError] = useState<string | null>(null);
   const openPr = useOpenCheckpointPr();
 
-  const { kind, title, summary, branch, commitSha, pushed, reason } = checkpoint;
+  const { kind, title, summary, branch, commitSha, reason } = checkpoint;
   const sha = commitSha?.slice(0, 7) ?? '';
   const isErrorVariant = kind === 'blocked' || kind === 'failed';
 
@@ -168,7 +172,10 @@ export function CheckpointCard({ sessionId, projectId, pushEnabled, checkpoint }
           className="mt-3 flex flex-wrap gap-2 border-t pt-2"
           style={{ borderColor: COLORS.bgDeepest }}
         >
-          {kind === 'pushed' && pushEnabled && (
+          {/* Open-PR is available on pushed cards always, and on composed
+              cards once push is enabled — the endpoint pushes the local
+              branch first. The label tells the operator which will happen. */}
+          {(kind === 'pushed' || (kind === 'composed' && pushEnabled)) && (
             <Button
               type="button"
               size="sm"
@@ -180,8 +187,26 @@ export function CheckpointCard({ sessionId, projectId, pushEnabled, checkpoint }
             >
               {openPr.isPending && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
               {!openPr.isPending && <GitPullRequest className="mr-1 h-3 w-3" />}
-              {prUrl ? 'PR opened' : 'Open PR'}
+              {prUrl ? 'PR opened' : kind === 'composed' ? 'Push & open PR' : 'Open PR'}
             </Button>
+          )}
+          {/* composed + push NOT enabled → point the operator at the consent
+              gate instead of silently hiding the path (the gate is correct;
+              the missing affordance was the bug). */}
+          {kind === 'composed' && !pushEnabled && (
+            <Link
+              href="/migrate"
+              className="inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[11px]"
+              style={{
+                borderColor: 'color-mix(in srgb, var(--accent-purple) 35%, transparent)',
+                color: COLORS.accentOrch,
+              }}
+              data-testid="checkpoint-enable-push"
+              title="This commit is local-only. Enable push for the project to open a PR from it."
+            >
+              <GitPullRequest className="h-3 w-3" />
+              Enable push to open PR →
+            </Link>
           )}
           {prUrl && (
             <Link
