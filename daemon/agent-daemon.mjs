@@ -4292,6 +4292,11 @@ function fixWaveMergeBuildOnce(
       '   to the MERGED behavior when the merged code is correct per both',
       '   stories’ intents (confirm against the .context story notes).',
       '5. Do NOT run git commit/push — just fix the files; the runner commits.',
+      '6. If the failure comes from an unused-code check (e.g. knip reporting',
+      '   unused exports/files/dependencies), that means DEAD CODE: prefer',
+      '   DELETING the unused export or file over wiring it somewhere',
+      '   artificial just to silence the tool. Lint failures: fix the cited',
+      '   code; never disable rules or edit lint/format configs.',
     ].join('\n');
     const args = [
       '-p',
@@ -5360,7 +5365,17 @@ async function executeWaveMergeJob(job) {
       if (hasBrowserAcs) {
         const { runWaveVqa } = await import('./lib/wave-vqa-runner.mjs');
         const { bootDevServer, cleanCacheAndReboot } = await import('./lib/dev-server-boot.mjs');
-        const { defaultGitRunner, defaultShellRunner } = await import('./lib/wave-merge-runner.mjs');
+        const { defaultGitRunner, defaultShellRunner, composeQualityGate } = await import(
+          './lib/wave-merge-runner.mjs'
+        );
+        // v2.6 M4 — the VQA fixer re-runs the SAME blocking gate the merge
+        // validated with (rigor-composed when the registry declares stages).
+        const vqaValidationCmd =
+          composeQualityGate({
+            qualityGate: gateEntry?.qualityGate ?? null,
+            rigor,
+            postMergeValidationCmd,
+          }).blockingCmd || postMergeValidationCmd;
         const vqaLog = (level, msg) => waveLog(level, msg);
         runVqaHook = ({ candidateDir }) =>
           runWaveVqa({
@@ -5372,7 +5387,7 @@ async function executeWaveMergeJob(job) {
             epicId: p.epicId,
             waveNumber: p.waveNumber,
             appId: p.appId,
-            validationCmd: postMergeValidationCmd,
+            validationCmd: vqaValidationCmd,
             spawnEvidence: (a) => spawnGateAgent({ ...a, role: 'evidence' }, { short }),
             spawnJudge: (a) => spawnGateAgent({ ...a, role: 'judge' }, { short }),
             spawnTriage: (a) => spawnGateAgent({ ...a, role: 'triage' }, { short }),
@@ -5436,6 +5451,10 @@ async function executeWaveMergeJob(job) {
         waveNumber: p.waveNumber,
         storyIds: p.storyIds,
         postMergeValidationCmd,
+        // v2.6 M4 — rigor-composed quality stages from the gate registry;
+        // the runner falls back to postMergeValidationCmd when absent.
+        qualityGate: gateEntry?.qualityGate ?? null,
+        rigor: planRow?.rigor || null,
         jobId,
         writeAttention: (item) =>
           writeAttentionItem(ddb, { ...item, planId: p.planId }, log),

@@ -28,7 +28,9 @@ process.env.FUTURATOR_BARE_REPOS_ROOT = join(TMP, 'repos');
 process.env.FUTURATOR_LEGACY_PROJECTS_ROOT = join(TMP, 'projects');
 mkdirSync(process.env.FUTURATOR_LEGACY_PROJECTS_ROOT, { recursive: true });
 
-const { runWaveMerge, candidateWorktreeDir } = await import('../wave-merge-runner.mjs');
+const { runWaveMerge, candidateWorktreeDir, composeQualityGate } = await import(
+  '../wave-merge-runner.mjs'
+);
 
 afterAll(() => {
   if (existsSync(TMP)) rmSync(TMP, { recursive: true, force: true });
@@ -470,5 +472,112 @@ describe('runWaveMerge — wave VQA hook', () => {
     expect(result.vqa.outcome).toBe('skipped');
     expect(result.vqa.reason).toContain('vqa-crashed');
     expect(bareRef(bare, 'refs/heads/plan/vqa-crash-initial')).toBe(result.pushSha);
+  });
+});
+
+// ── v2.6 M4 — rigor-composed quality gates ──────────────────────────────────
+describe('composeQualityGate', () => {
+  const qualityGate = {
+    mechanical: ['node scripts/generate-wiring.mjs', 'npm run format --if-present'],
+    blocking: {
+      prototype: ['npm run build'],
+      mvp: ['npm run build', 'npm run test --if-present'],
+      production: ['npm run build', 'npm run knip --if-present'],
+    },
+  };
+
+  it('composes the tier for the given rigor as ONE &&-chain (existing machinery applies)', () => {
+    const g = composeQualityGate({ qualityGate, rigor: 'mvp', postMergeValidationCmd: 'legacy' });
+    expect(g.source).toBe('quality-gate');
+    expect(g.blockingCmd).toBe('npm run build && npm run test --if-present');
+    expect(g.mechanical).toEqual(qualityGate.mechanical);
+  });
+
+  it('tiers compose up: production adds enforcement on top of build', () => {
+    const g = composeQualityGate({ qualityGate, rigor: 'production', postMergeValidationCmd: null });
+    expect(g.blockingCmd).toContain('knip');
+    const p = composeQualityGate({ qualityGate, rigor: 'prototype', postMergeValidationCmd: null });
+    expect(p.blockingCmd).toBe('npm run build');
+  });
+
+  it('falls back to the legacy single command without qualityGate or rigor', () => {
+    expect(
+      composeQualityGate({ qualityGate: null, rigor: 'mvp', postMergeValidationCmd: 'npm test' }),
+    ).toEqual({ mechanical: [], blockingCmd: 'npm test', source: 'legacy' });
+    expect(
+      composeQualityGate({ qualityGate, rigor: null, postMergeValidationCmd: 'npm test' }).source,
+    ).toBe('legacy');
+    expect(
+      composeQualityGate({ qualityGate, rigor: 'unknown-tier', postMergeValidationCmd: null })
+        .blockingCmd,
+    ).toBeNull();
+  });
+});
+
+describe('runWaveMerge — quality stages', () => {
+  it('mechanical output rides the regenerated-files commit; never fails the gate', { timeout: 30000 }, async () => {
+    const appId = 'mech-stage-app';
+    const planSlug = 'mech-stage-app-initial';
+    const bare = buildBareRepo(appId, [
+      { branch: 'wip/story-a', files: { 'feature-a.ts': 'export const a = 1;\n' } },
+    ]);
+
+    const result = await runWaveMerge(
+      baseArgs(appId, planSlug, ['story-a'], {
+        rigor: 'mvp',
+        qualityGate: {
+          // First mechanical step auto-fixes a tracked file (stands in for
+          // prettier --write); second one FAILS — and must be ignored.
+          mechanical: ['echo "// formatted" >> feature-a.ts', 'exit 1'],
+          blocking: { prototype: ['true'], mvp: ['true'], production: ['true'] },
+        },
+        coordinatorInstallFn: async () => {},
+      }),
+    );
+
+    expect(result.outcome).toBe('success');
+    const show = spawnSync(
+      'git',
+      ['--git-dir', bare, 'log', '--format=%s', '-n', '3', 'refs/heads/plan/mech-stage-app-initial'],
+      { encoding: 'utf8' },
+    ).stdout;
+    expect(show).toContain('regenerated files from post-merge validation');
+    const content = spawnSync(
+      'git',
+      ['--git-dir', bare, 'show', 'refs/heads/plan/mech-stage-app-initial:feature-a.ts'],
+      { encoding: 'utf8' },
+    ).stdout;
+    expect(content).toContain('// formatted');
+  });
+
+  it('blocking tier is selected by rigor (production enforcement fails, mvp passes)', { timeout: 60000 }, async () => {
+    const appId = 'rigor-app';
+    const planSlug = 'rigor-app-initial';
+    buildBareRepo(appId, [
+      { branch: 'wip/story-a', files: { 'feature-a.ts': 'export const a = 1;\n' } },
+    ]);
+    const gateDef = {
+      mechanical: [],
+      blocking: { prototype: ['true'], mvp: ['true'], production: ['true', 'false'] },
+    };
+
+    const prod = await runWaveMerge(
+      baseArgs(appId, planSlug, ['story-a'], {
+        rigor: 'production',
+        qualityGate: gateDef,
+        coordinatorInstallFn: async () => {},
+      }),
+    );
+    expect(prod.outcome).toBe('wave-build-failed');
+
+    const mvp = await runWaveMerge(
+      baseArgs(appId, planSlug, ['story-a'], {
+        rigor: 'mvp',
+        qualityGate: gateDef,
+        coordinatorInstallFn: async () => {},
+        jobId: 'job-2',
+      }),
+    );
+    expect(mvp.outcome).toBe('success');
   });
 });

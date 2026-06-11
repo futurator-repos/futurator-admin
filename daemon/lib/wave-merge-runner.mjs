@@ -370,6 +370,37 @@ function parseFailingTests(output) {
  *   pushSha?: string,
  * }>}
  */
+/**
+ * v2.6 M4 (2026-06-11) — compose the gate's quality stages by plan rigor.
+ *
+ * `qualityGate` (from the boilerplate registry via the gate-registry
+ * snapshot) declares two stage kinds:
+ *  - `mechanical`: auto-fix commands (wiring regen, prettier --write,
+ *    eslint --fix). Run ALWAYS when a gate runs, each `|| true`-wrapped by
+ *    the runner — formatting is NEVER a gate failure. Their file output
+ *    rides the existing "commit what we validated" commit.
+ *  - `blocking[rigor]`: ordered enforcement commands joined into ONE
+ *    `&&`-chain so the ENTIRE existing validation machinery (agentic
+ *    build-fix, no-op-test tolerance, wave-build-failed attention, retry)
+ *    applies unchanged. prototype = build only; mvp adds tests + a generous
+ *    lint budget; production adds zero-warning lint, knip and format:check.
+ *
+ * No qualityGate / unknown rigor ⇒ legacy: the single
+ * `postMergeValidationCmd` exactly as before (apps + boilerplates that
+ * predate the field keep today's behavior).
+ */
+export function composeQualityGate({ qualityGate, rigor, postMergeValidationCmd }) {
+  const tier = rigor ? qualityGate?.blocking?.[rigor] : null;
+  if (qualityGate && Array.isArray(tier) && tier.length > 0) {
+    return {
+      mechanical: Array.isArray(qualityGate.mechanical) ? qualityGate.mechanical : [],
+      blockingCmd: tier.join(' && '),
+      source: 'quality-gate',
+    };
+  }
+  return { mechanical: [], blockingCmd: postMergeValidationCmd ?? null, source: 'legacy' };
+}
+
 export async function runWaveMerge({
   appId,
   planId,
@@ -378,6 +409,10 @@ export async function runWaveMerge({
   waveNumber,
   storyIds,
   postMergeValidationCmd,
+  // v2.6 M4 — rigor-composed quality stages (see composeQualityGate above).
+  // Both optional; absent ⇒ legacy single-command behavior.
+  qualityGate = null,
+  rigor = null,
   writeAttention,
   // snake3 (2026-06-10) — optional dedupKey resolver; on merge success the
   // runner closes the failure cards a prior attempt on this wave opened.
@@ -756,8 +791,10 @@ export async function runWaveMerge({
     merged.push(storyId);
   }
 
-  // 3. Post-merge validation (if the boilerplate declared a command).
-  if (postMergeValidationCmd) {
+  // 3. Post-merge validation — rigor-composed quality stages (v2.6 M4) or
+  //    the legacy single command (see composeQualityGate).
+  const gate = composeQualityGate({ qualityGate, rigor, postMergeValidationCmd });
+  if (gate.blockingCmd || gate.mechanical.length > 0) {
     // 2026-05-28 — the candidate worktree is created via `git worktree add`
     // with NO node_modules, so ANY validation command needing deps
     // (`npm run build`, `npm test`, `tsc`) would fail with exit 1/127.
@@ -782,9 +819,26 @@ export async function runWaveMerge({
       return { outcome: 'setup-failed', transient: true, error: `node_modules: ${err.message}` };
     }
 
-    log('info', `[wave-merge] running post-merge validation: ${postMergeValidationCmd}`);
-    let testRun = await shell(postMergeValidationCmd, candidateDir, 900_000);
-    let combinedOut = testRun.stdout + '\n' + testRun.stderr;
+    // v2.6 M4 — mechanical stage first: auto-fixes that can NEVER fail the
+    // gate (each `|| true`-wrapped here, regardless of how the registry
+    // wrote them). Tracked-file output lands via the "commit what we
+    // validated" block below, exactly like regenerated wiring.
+    for (const m of gate.mechanical) {
+      log('info', `[wave-merge] mechanical (${gate.source}): ${m}`);
+      const mr = await shell(`{ ${m} ; } || true`, candidateDir, 600_000);
+      if (mr.code !== 0) {
+        // Only reachable on shell-runner-level death (timeout/spawn error).
+        log('warn', `[wave-merge] mechanical step exited ${mr.code} (ignored): ${(mr.stderr || '').slice(-300)}`);
+      }
+    }
+
+    let testRun = { code: 0, stdout: '', stderr: '' };
+    let combinedOut = '';
+    if (gate.blockingCmd) {
+      log('info', `[wave-merge] running post-merge validation (${gate.source}): ${gate.blockingCmd}`);
+      testRun = await shell(gate.blockingCmd, candidateDir, 900_000);
+      combinedOut = testRun.stdout + '\n' + testRun.stderr;
+    }
 
     // pacman1 (2026-06-11) — agentic build-fix, one bounded attempt.
     // A non-transient validation failure used to halt the epic in 'fixing'
@@ -800,7 +854,7 @@ export async function runWaveMerge({
       try {
         const fix = await fixBuild({
           worktreeDir: candidateDir,
-          validationCmd: postMergeValidationCmd,
+          validationCmd: gate.blockingCmd,
           validationOutput: combinedOut.slice(-6000),
           mergedStoryIds: merged,
           planId,
@@ -808,7 +862,7 @@ export async function runWaveMerge({
           waveNumber,
         });
         if (fix?.attempted) {
-          const rerun = await shell(postMergeValidationCmd, candidateDir, 900_000);
+          const rerun = await shell(gate.blockingCmd, candidateDir, 900_000);
           if (rerun.code === 0 || isNoOpTestExit(rerun.stdout + '\n' + rerun.stderr)) {
             // Commit EVERYTHING the fix produced (add -A: it may create
             // files, e.g. a missing contract module) with an audit trailer.
@@ -818,7 +872,7 @@ export async function runWaveMerge({
                 '-c', 'user.email=daemon@futurator.local',
                 '-c', 'user.name=Daemon',
                 'commit', '-m',
-                `wave ${waveNumber}: agentic build-fix after merge\n\nValidation: ${postMergeValidationCmd}\nReasoning: ${(fix.reasoning || '').slice(0, 800)}`,
+                `wave ${waveNumber}: agentic build-fix after merge\n\nValidation: ${gate.blockingCmd}\nReasoning: ${(fix.reasoning || '').slice(0, 800)}`,
               ],
               candidateDir,
             );
@@ -866,7 +920,7 @@ export async function runWaveMerge({
         dedupKey: `wave-build-failed:${planId}:${epicId}:${waveNumber}`,
         context: {
           ...(attn.context || {}),
-          validationCmd: postMergeValidationCmd,
+          validationCmd: gate.blockingCmd,
           // pacman1 (2026-06-11) — epicId + waveNumber wire the card's
           // Retry button to POST /plans/:id/waves/retry-gate.
           epicId,
@@ -922,7 +976,7 @@ export async function runWaveMerge({
       }
     }
   } else {
-    log('info', `[wave-merge] no postMergeValidationCmd — skipping validation`);
+    log('info', `[wave-merge] no validation command (no qualityGate tier, no postMergeValidationCmd) — skipping validation`);
   }
 
   // 3.5. v2.6 wave-gate VQA (M2, 2026-06-11) — judged visual QA runs against
