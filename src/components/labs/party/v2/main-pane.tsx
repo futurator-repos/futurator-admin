@@ -1,8 +1,8 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { Globe, Hash, Pencil, X } from 'lucide-react';
+import { Clock, Globe, Hash, Pencil, X } from 'lucide-react';
 import { DEFAULT_ALLOWED_TOOLS } from '@/types/party';
-import { COLORS } from './tokens';
+import { COLORS, HEADER_H } from './tokens';
 import { AgentCard } from './agent-card';
 import {
   OrchestratorOpen,
@@ -102,6 +102,7 @@ export function MainPane({
         title={title}
         channel={channel}
         roundCount={rounds.length}
+        live={rounds[rounds.length - 1]?.isInflight === true}
         allowedTools={allowedTools}
         onToggleTool={onToggleTool}
         onClose={onClose}
@@ -153,6 +154,7 @@ function Header({
   title,
   channel,
   roundCount,
+  live,
   allowedTools,
   onToggleTool,
   onClose,
@@ -161,6 +163,8 @@ function Header({
   title: string;
   channel: string;
   roundCount: number;
+  /** True while the latest round is in flight — tints the Round chip. */
+  live: boolean;
   allowedTools?: string[];
   onToggleTool?: (tool: string, next: boolean) => void;
   onClose?: () => void;
@@ -199,9 +203,8 @@ function Header({
     <header
       className="flex shrink-0 items-center gap-2 px-5"
       style={{
-        height: 56,
+        height: HEADER_H,
         borderBottom: `1px solid ${COLORS.bgDeepest}`,
-        boxShadow: '0 1px 0 color-mix(in srgb, var(--foreground) 22%, transparent)',
       }}
     >
       <Hash className="h-4 w-4 shrink-0" style={{ color: COLORS.textMuted }} />
@@ -267,6 +270,25 @@ function Header({
       </span>
 
       <span className="ml-auto" />
+
+      {roundCount > 0 && (
+        <span
+          className="mr-1 inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-[3px] text-[11px] font-medium"
+          style={{
+            background: live
+              ? 'color-mix(in srgb, var(--success) 16%, transparent)'
+              : 'color-mix(in srgb, var(--party-accent-brand) 14%, transparent)',
+            borderColor: live
+              ? 'color-mix(in srgb, var(--success) 40%, transparent)'
+              : 'color-mix(in srgb, var(--party-accent-brand) 35%, transparent)',
+            color: live ? COLORS.accentLive : COLORS.accentBrand,
+          }}
+          title={live ? `Round ${roundCount} is running` : `${roundCount} rounds so far`}
+        >
+          <Clock className="h-3 w-3" />
+          Round {roundCount}
+        </span>
+      )}
 
       {onToggleTool && <WebSearchToggle allowedTools={allowedTools} onToggle={onToggleTool} />}
       {onClose && (

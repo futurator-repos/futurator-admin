@@ -98,16 +98,13 @@ function DebateChatView({ sessionId }: { sessionId: string }) {
     );
   }
 
+  // Full-bleed: cancel AppShell's p-6 inset so the debate owns every pixel
+  // below the 56px global header (EC2 monitoring bar stays visible). The
+  // -m-6 / h-[calc(100vh-3.5rem)] pair must move together if AppShell's
+  // padding ever changes.
   return (
-    <div className="h-[calc(100vh-104px)] min-h-0 overflow-hidden rounded-md border border-border bg-card">
-      <SessionChatV2
-        sessionId={sessionId}
-        onClose={() => router.push('/debates')}
-        onPickSession={(id) => router.push(`/debates?sessionId=${encodeURIComponent(id)}`)}
-        onNewSession={() =>
-          router.push(`/labs?appId=${encodeURIComponent(session.projectId)}&tab=party`)
-        }
-      />
+    <div className="-m-6 h-[calc(100vh-3.5rem)] min-h-0 overflow-hidden">
+      <SessionChatV2 sessionId={sessionId} onClose={() => router.push('/debates')} />
     </div>
   );
 }

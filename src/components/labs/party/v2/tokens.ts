@@ -12,7 +12,15 @@
  * holistic theme pass.
  */
 
-export const HEADER_H = 56;
+// Slimmed from 56 → 48 in the 2026-06 "full vertical space" pass — every
+// pane header row shares this so the top edge stays aligned across columns.
+export const HEADER_H = 48;
+
+/** Width of the far-right icon strip (Rounds / Docs / Questions / Audit). */
+export const RAIL_STRIP_W = 44;
+
+/** localStorage key for the active right-rail tab ('rounds' | 'uploads' | …). */
+export const RAIL_TAB_KEY = 'partyMode.railTab';
 
 export const COLORS = {
   bgDeepest: 'var(--party-bg-deepest)',

@@ -1,6 +1,6 @@
 'use client';
 import { agentIdentity } from '../agent-identity';
-import { COLORS } from './tokens';
+import { COLORS, HEADER_H } from './tokens';
 import type { Round } from '../turn-adapter';
 import { timeAgo } from '../turn-adapter';
 
@@ -24,11 +24,11 @@ export function RoundRail({
       <div
         className="flex shrink-0 items-center justify-between px-4"
         style={{
-          height: 56,
+          height: HEADER_H,
           borderBottom: `1px solid ${COLORS.bgDeepest}`,
         }}
       >
-        <span className="text-[14px] font-semibold" style={{ color: COLORS.textPrimary }}>
+        <span className="text-[13.5px] font-semibold" style={{ color: COLORS.textPrimary }}>
           Rounds
         </span>
         <span className="text-[12px]" style={{ color: COLORS.textMuted }}>

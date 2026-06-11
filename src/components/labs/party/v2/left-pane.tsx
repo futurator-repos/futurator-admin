@@ -1,19 +1,14 @@
 'use client';
-import { useId, useState, useRef, useEffect, type KeyboardEvent } from 'react';
-import { ArrowRight, Paperclip, AtSign, Hash, Loader2, MessageSquare } from 'lucide-react';
-import { COLORS } from './tokens';
+import { useId, useRef, useEffect, type KeyboardEvent } from 'react';
+import { ArrowRight, Paperclip, AtSign, Loader2, Sparkles } from 'lucide-react';
+import { COLORS, HEADER_H } from './tokens';
 import type { Round } from '../turn-adapter';
 import { timeAgo } from '../turn-adapter';
 
-type LeftTab = 'chat' | 'sessions';
-
-export interface LeftPaneSession {
-  sessionId: string;
-  topic?: string;
-  status: string;
-  turnCount: number;
-  lastTurnAt?: string;
-  createdAt: string;
+export interface UploadStatusItem {
+  filename: string;
+  state: 'uploading' | 'done' | 'error';
+  reason?: string;
 }
 
 interface Props {
@@ -28,17 +23,19 @@ interface Props {
   onAttach?: (files: File[]) => void;
   isUploading?: boolean;
   acceptedTypes?: string;
-  /** Optional sessions list for the Sessions tab. */
-  sessions?: LeftPaneSession[];
-  activeSessionId?: string | null;
-  onPickSession?: (sessionId: string) => void;
-  onNewSession?: () => void;
+  /** Per-file upload progress pills, rendered above the composer. */
+  uploadStatus?: UploadStatusItem[];
 }
 
 /**
- * Left pane — tabs (Chat / Sessions) + composer pinned to the bottom.
- * Spec §5. The Chat tab is a per-round-grouped feed of user messages and
- * the orchestrator system bubbles. The Sessions tab lists prior sessions.
+ * Left pane — the "Curator" panel: a round-grouped feed of your messages and
+ * the orchestrator's system notes, with the composer pinned to the bottom.
+ *
+ * 2026-06 redesign (claude.ai/design reference): the Chat/Sessions tabs are
+ * gone — session navigation lives at /debates. The header is a slim Curator
+ * identity row, round boundaries render as small-caps status markers
+ * (`● ROUND 8 · CLOSED · 5 CONTRIBUTIONS`), and the composer textarea is
+ * vertically resizable with a round-context eyebrow.
  */
 export function LeftPane({
   rounds,
@@ -51,102 +48,66 @@ export function LeftPane({
   onAttach,
   isUploading = false,
   acceptedTypes,
-  sessions,
-  activeSessionId,
-  onPickSession,
-  onNewSession,
+  uploadStatus = [],
 }: Props) {
-  const [tab, setTab] = useState<LeftTab>('chat');
   return (
     <div className="flex h-full flex-col" style={{ background: COLORS.bgSurface }}>
-      <Tabs tab={tab} onChange={setTab} />
+      <CuratorHeader />
 
       <div className="flex-1 overflow-y-auto">
-        {tab === 'chat' && <ChatHistory rounds={rounds} activeRoundId={activeRoundId} />}
-        {tab === 'sessions' && (
-          <SessionsList
-            sessions={sessions ?? []}
-            activeSessionId={activeSessionId ?? null}
-            onPick={onPickSession}
-            onNew={onNewSession}
-          />
-        )}
+        <ChatHistory rounds={rounds} activeRoundId={activeRoundId} />
       </div>
 
-      {tab === 'chat' && (
-        <ComposerBar
-          draft={draft}
-          onChange={onDraftChange}
-          onSend={onSend}
-          isProcessing={isProcessing}
-          isErrored={isErrored}
-          onAttach={onAttach}
-          isUploading={isUploading}
-          acceptedTypes={acceptedTypes}
-        />
-      )}
+      <ComposerBar
+        currentRound={rounds[rounds.length - 1] ?? null}
+        draft={draft}
+        onChange={onDraftChange}
+        onSend={onSend}
+        isProcessing={isProcessing}
+        isErrored={isErrored}
+        onAttach={onAttach}
+        isUploading={isUploading}
+        acceptedTypes={acceptedTypes}
+        uploadStatus={uploadStatus}
+      />
     </div>
   );
 }
 
-function Tabs({ tab, onChange }: { tab: LeftTab; onChange: (t: LeftTab) => void }) {
+function CuratorHeader() {
   return (
     <div
-      className="flex shrink-0 items-end gap-4 px-4"
-      style={{
-        height: 56,
-        borderBottom: `1px solid ${COLORS.bgDeepest}`,
-      }}
+      className="flex shrink-0 items-center gap-2.5 px-4"
+      style={{ height: HEADER_H, borderBottom: `1px solid ${COLORS.bgDeepest}` }}
     >
-      <TabBtn
-        active={tab === 'chat'}
-        onClick={() => onChange('chat')}
-        icon={<MessageSquare className="h-3.5 w-3.5" />}
-        label="Chat"
-      />
-      <TabBtn
-        active={tab === 'sessions'}
-        onClick={() => onChange('sessions')}
-        icon={<Hash className="h-3.5 w-3.5" />}
-        label="Sessions"
-      />
+      <span
+        className="flex h-6 w-6 items-center justify-center rounded-md"
+        style={{
+          background: 'color-mix(in srgb, var(--accent-purple) 18%, transparent)',
+          color: COLORS.accentOrch,
+        }}
+        aria-hidden
+      >
+        <Sparkles className="h-3.5 w-3.5" />
+      </span>
+      <span className="text-[14px] font-semibold" style={{ color: COLORS.textPrimary }}>
+        Curator
+      </span>
+      <span className="ml-auto text-[11px]" style={{ color: COLORS.textFaint }}>
+        guiding the debate
+      </span>
     </div>
   );
 }
 
-function TabBtn({
-  active,
-  onClick,
-  icon,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="-mb-[1px] flex items-center gap-1.5 border-b-2 pb-2.5 text-[13px] transition-colors"
-      style={{
-        borderColor: active ? COLORS.accentBrand : 'transparent',
-        color: active ? COLORS.textPrimary : COLORS.textMuted,
-        fontWeight: active ? 600 : 500,
-      }}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
-/** Chat tab body — round-grouped history of user messages + system summaries. */
+/** Chat body — round-status-marked history of user messages + system notes. */
 function ChatHistory({ rounds, activeRoundId }: { rounds: Round[]; activeRoundId: string | null }) {
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+    if (ref.current) {
+      const scroller = ref.current.parentElement;
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    }
   }, [rounds.length, activeRoundId]);
 
   if (rounds.length === 0) {
@@ -163,22 +124,22 @@ function ChatHistory({ rounds, activeRoundId }: { rounds: Round[]; activeRoundId
   return (
     <div ref={ref} className="px-3 py-3">
       {rounds.map((r) => (
-        <div key={r.id} className="mb-3">
-          <RoundDivider n={r.n} title={r.user.text} />
+        <div key={r.id} className="mb-4">
+          <RoundMarker round={r} />
           {r.speakers.length > 0 && (
-            <SystemBubble text={`Round ${r.n} started → ${r.speakers.join(', ')}`} />
+            <SystemNote text={`Round ${r.n} started → ${r.speakers.join(', ')}`} accent />
           )}
           <UserBubble text={r.user.text} timestamp={timeAgo(r.startedAt)} />
           {r.status === 'done' && r.turns > 0 && (
-            <SystemBubble
+            <SystemNote
               text={`Round ${r.n} closed · ${r.turns} contribution${r.turns === 1 ? '' : 's'} captured.`}
             />
           )}
           {r.status === 'awaiting' && (
-            <SystemBubble text={`An agent asked you a follow-up — reply below.`} />
+            <SystemNote text="An agent asked you a follow-up — reply below." accent />
           )}
           {r.status === 'error' && (
-            <SystemBubble
+            <SystemNote
               text={`Round ${r.n} failed${r.errorReason ? ` (${r.errorReason})` : ''}.`}
             />
           )}
@@ -188,41 +149,80 @@ function ChatHistory({ rounds, activeRoundId }: { rounds: Round[]; activeRoundId
   );
 }
 
-function RoundDivider({ n, title }: { n: number; title: string }) {
-  const short = title.length > 60 ? `${title.slice(0, 60)}…` : title;
+/**
+ * Reference-style round status marker: `● ROUND 8 · CLOSED · 5 CONTRIBUTIONS`.
+ * Left-aligned small-caps row (not a centered divider) so the eye can scan
+ * the timeline down the left edge.
+ */
+function RoundMarker({ round }: { round: Round }) {
+  const live = round.isInflight;
+  const statusLabel =
+    round.status === 'done'
+      ? 'CLOSED'
+      : round.status === 'error'
+        ? 'ERROR'
+        : round.status === 'awaiting'
+          ? 'AWAITING YOU'
+          : 'STARTED';
   return (
-    <div className="my-3 flex items-center gap-2">
-      <div className="h-px flex-1" style={{ background: COLORS.bgDeepest }} />
+    <div
+      className="mb-1.5 mt-2 flex items-center gap-1.5 px-1 font-mono text-[10px] font-semibold uppercase tracking-wider"
+      style={{ color: live ? COLORS.accentLive : COLORS.textFaint }}
+    >
       <span
-        className="text-[10px] font-mono font-semibold uppercase tracking-wider"
-        style={{ color: COLORS.textFaint }}
-      >
-        Round {n} · {short || 'untitled'}
+        className="h-1.5 w-1.5 shrink-0 rounded-full"
+        style={{
+          background: live
+            ? COLORS.accentLive
+            : round.status === 'error'
+              ? 'var(--destructive)'
+              : COLORS.textFaint,
+        }}
+      />
+      <span>Round {round.n}</span>
+      <span style={{ color: COLORS.textFaint }}>·</span>
+      <span style={{ color: round.status === 'error' ? 'var(--destructive)' : undefined }}>
+        {statusLabel}
       </span>
-      <div className="h-px flex-1" style={{ background: COLORS.bgDeepest }} />
+      {round.status === 'done' && round.turns > 0 && (
+        <>
+          <span style={{ color: COLORS.textFaint }}>·</span>
+          <span>
+            {round.turns} contribution{round.turns === 1 ? '' : 's'}
+          </span>
+        </>
+      )}
     </div>
   );
 }
 
-function SystemBubble({ text }: { text: string }) {
+/**
+ * Curator/system note — plain elevated card (reference design), no emoji.
+ * `accent` adds a soft purple left border for "something is happening" notes.
+ */
+function SystemNote({ text, accent = false }: { text: string; accent?: boolean }) {
   return (
     <div
-      className="my-1 rounded-md px-2.5 py-1.5 text-[12px] italic"
+      className="my-1 rounded-lg border px-3 py-2 text-[12.5px] leading-snug"
       style={{
-        background: 'color-mix(in srgb, var(--accent-purple) 12%, transparent)',
-        color: COLORS.accentOrchSoft,
+        background: COLORS.bgElevated,
+        borderColor: accent
+          ? 'color-mix(in srgb, var(--accent-purple) 35%, transparent)'
+          : COLORS.bgDeepest,
+        borderLeftWidth: accent ? 2 : 1,
+        color: COLORS.textBody,
       }}
     >
-      🧙 {text}
+      {text}
     </div>
   );
 }
 
 function UserBubble({ text, timestamp }: { text: string; timestamp: string }) {
   return (
-    <div className="my-1 flex flex-col items-end">
+    <div className="my-1.5 flex flex-col items-end">
       <div
-        className="max-w-[85%] whitespace-pre-wrap rounded-[14px] rounded-br-[4px] px-3 py-2 text-[13px] leading-snug text-white"
+        className="max-w-[88%] whitespace-pre-wrap rounded-[14px] rounded-br-[4px] px-3 py-2 text-[13px] leading-snug text-white"
         style={{ background: COLORS.accentBrand }}
       >
         {text}
@@ -234,133 +234,8 @@ function UserBubble({ text, timestamp }: { text: string; timestamp: string }) {
   );
 }
 
-function SessionsList({
-  sessions,
-  activeSessionId,
-  onPick,
-  onNew,
-}: {
-  sessions: LeftPaneSession[];
-  activeSessionId: string | null;
-  onPick?: (id: string) => void;
-  onNew?: () => void;
-}) {
-  return (
-    <div className="px-3 py-3 space-y-3">
-      {onNew && (
-        <button
-          type="button"
-          onClick={onNew}
-          className="w-full rounded-md border px-3 py-2 text-left text-[12px] transition-colors"
-          style={{
-            borderColor: COLORS.bgDeepest,
-            color: COLORS.textPrimary,
-            background: COLORS.bgElevated,
-          }}
-        >
-          + New session
-        </button>
-      )}
-
-      <SessionGroupHeader label="Active" />
-      {sessions
-        .filter((s) => s.status !== 'ARCHIVED')
-        .map((s) => (
-          <SessionRow
-            key={s.sessionId}
-            session={s}
-            active={s.sessionId === activeSessionId}
-            onClick={onPick ? () => onPick(s.sessionId) : undefined}
-          />
-        ))}
-      {sessions.filter((s) => s.status === 'ARCHIVED').length > 0 && (
-        <>
-          <SessionGroupHeader label="Archived" />
-          {sessions
-            .filter((s) => s.status === 'ARCHIVED')
-            .map((s) => (
-              <SessionRow
-                key={s.sessionId}
-                session={s}
-                active={s.sessionId === activeSessionId}
-                onClick={onPick ? () => onPick(s.sessionId) : undefined}
-              />
-            ))}
-        </>
-      )}
-      {sessions.length === 0 && (
-        <div
-          className="rounded-md border border-dashed px-3 py-4 text-center text-[12px] italic"
-          style={{ borderColor: COLORS.bgDeepest, color: COLORS.textMuted }}
-        >
-          No prior sessions for this project.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SessionGroupHeader({ label }: { label: string }) {
-  return (
-    <div
-      className="px-2 text-[10px] font-mono font-semibold uppercase tracking-wider"
-      style={{ color: COLORS.textFaint }}
-    >
-      {label}
-    </div>
-  );
-}
-
-function SessionRow({
-  session,
-  active,
-  onClick,
-}: {
-  session: LeftPaneSession;
-  active: boolean;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="w-full rounded-md px-2.5 py-1.5 text-left transition-colors"
-      style={{
-        background: active ? 'var(--party-bg-elevated)' : 'transparent',
-      }}
-      onMouseEnter={(e) => {
-        if (!active)
-          e.currentTarget.style.background =
-            'color-mix(in srgb, var(--foreground) 4%, transparent)';
-      }}
-      onMouseLeave={(e) => {
-        if (!active) e.currentTarget.style.background = 'transparent';
-      }}
-    >
-      <div className="flex items-center gap-2">
-        <Hash className="h-3 w-3 shrink-0" style={{ color: COLORS.textMuted }} />
-        <span
-          className="truncate text-[12.5px]"
-          style={{ color: active ? COLORS.textPrimary : COLORS.textBody }}
-        >
-          {session.topic || `session-${session.sessionId.slice(0, 6)}`}
-        </span>
-      </div>
-      <div
-        className="mt-0.5 flex items-center gap-2 pl-5 text-[10px]"
-        style={{ color: COLORS.textFaint }}
-      >
-        <span>
-          {session.turnCount} turn{session.turnCount === 1 ? '' : 's'}
-        </span>
-        <span>·</span>
-        <span>{timeAgo(session.lastTurnAt ?? session.createdAt)}</span>
-      </div>
-    </button>
-  );
-}
-
 function ComposerBar({
+  currentRound,
   draft,
   onChange,
   onSend,
@@ -369,7 +244,9 @@ function ComposerBar({
   onAttach,
   isUploading,
   acceptedTypes,
+  uploadStatus,
 }: {
+  currentRound: Round | null;
   draft: string;
   onChange: (v: string) => void;
   onSend: () => void;
@@ -378,6 +255,7 @@ function ComposerBar({
   onAttach?: (files: File[]) => void;
   isUploading?: boolean;
   acceptedTypes?: string;
+  uploadStatus: UploadStatusItem[];
 }) {
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputId = useId();
@@ -392,16 +270,7 @@ function ComposerBar({
   function onPicked(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []);
     e.target.value = '';
-    if (!onAttach) {
-      console.warn('[Party] file picked but onAttach is not wired (no project scope?)');
-      return;
-    }
-    console.log(
-      '[Party] file picker selected',
-      files.length,
-      'file(s):',
-      files.map((f) => f.name),
-    );
+    if (!onAttach) return;
     if (files.length) onAttach(files);
   }
 
@@ -411,8 +280,25 @@ function ComposerBar({
       ? 'Session errored. Type a new message to start a fresh round…'
       : 'Type a message — agents will respond';
 
+  const roundTitle = (currentRound?.user.text ?? '').slice(0, 48);
+
   return (
-    <div className="shrink-0 px-3 py-3">
+    <div className="shrink-0 px-3 pb-3 pt-1.5">
+      {/* Round-context eyebrow — which round the next message lands in. */}
+      <div className="flex items-center gap-1.5 px-1 pb-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider">
+        <span style={{ color: COLORS.textFaint }}>
+          Round {(currentRound?.n ?? 0) + (currentRound?.isInflight ? 0 : 1)}
+        </span>
+        {roundTitle && (
+          <>
+            <span style={{ color: COLORS.textFaint }}>·</span>
+            <span className="truncate" style={{ color: COLORS.accentBrand }}>
+              {roundTitle}
+            </span>
+          </>
+        )}
+      </div>
+
       {isErrored && (
         <div
           className="mb-2 rounded-md px-2.5 py-1.5 text-[11px]"
@@ -422,11 +308,43 @@ function ComposerBar({
             border: '1px solid color-mix(in srgb, var(--destructive) 35%, transparent)',
           }}
         >
-          Last turn ended in ERROR (likely a timeout — agents take time on large projects). Send a
-          new message to start a fresh round; the previous round&apos;s partial output is preserved
-          above.
+          Last round ended in ERROR. Send a new message to continue — the previous round&apos;s
+          partial output is preserved above.
         </div>
       )}
+
+      {uploadStatus.length > 0 && (
+        <div className="mb-2 space-y-1">
+          <div className="flex flex-wrap gap-1.5">
+            {uploadStatus.map((s) => {
+              const tone =
+                s.state === 'uploading'
+                  ? 'border-blue-400/30 bg-blue-500/15 text-blue-400'
+                  : s.state === 'done'
+                    ? 'border-emerald-400/30 bg-emerald-500/15 text-emerald-500'
+                    : 'border-red-400/30 bg-red-500/15 text-red-400';
+              return (
+                <span
+                  key={s.filename}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-mono text-[10.5px] ${tone}`}
+                  title={s.reason}
+                >
+                  {s.state === 'uploading' && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
+                  {s.state === 'done' && '✓'}
+                  {s.state === 'error' && '✕'}
+                  <span className="max-w-[200px] truncate">{s.filename}</span>
+                </span>
+              );
+            })}
+          </div>
+          {uploadStatus.some((s) => s.state === 'done') && (
+            <div className="px-1 text-[10.5px]" style={{ color: COLORS.textMuted }}>
+              Uploaded — agents read these on your next Send.
+            </div>
+          )}
+        </div>
+      )}
+
       <div
         className="rounded-[10px] p-2.5"
         style={{
@@ -434,6 +352,9 @@ function ComposerBar({
           border: `1px solid ${COLORS.bgDeepest}`,
         }}
       >
+        {/* resize-y: native vertical grab handle (bottom-right). min/max keep
+            it usable — tall enough for multi-paragraph prompts, never taller
+            than half the viewport. */}
         <textarea
           ref={taRef}
           value={draft}
@@ -441,12 +362,10 @@ function ComposerBar({
           onKeyDown={handleKey}
           placeholder={placeholder}
           rows={2}
-          className="min-h-[60px] w-full resize-none bg-transparent text-[13px] leading-snug focus:outline-none"
+          className="max-h-[50vh] min-h-[60px] w-full resize-y bg-transparent text-[13px] leading-snug focus:outline-none"
           style={{ color: COLORS.textPrimary }}
         />
         <div className="mt-1.5 flex items-center gap-1.5">
-          {/* sr-only file input + matching <label> — most reliable cross-browser
-              file-picker trigger (no JS ref.click() quirks). */}
           <input
             id={fileInputId}
             type="file"
@@ -464,7 +383,7 @@ function ComposerBar({
                 ? 'Attach unavailable — open a session to upload docs'
                 : isUploading
                   ? 'Uploading…'
-                  : 'Attach a file (.md, .pdf, .txt, .json, .csv, .yaml — 10 MiB max)'
+                  : 'Attach a file for this debate (.md, .pdf, .txt, .json, .csv, .yaml — 10 MiB max)'
             }
             aria-disabled={!onAttach || isUploading}
             className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md transition-colors aria-disabled:cursor-not-allowed aria-disabled:opacity-60 hover:bg-white/5"

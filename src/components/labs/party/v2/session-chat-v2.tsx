@@ -8,27 +8,25 @@ import {
 } from '@/hooks/use-party-session';
 import { useUploadPartyDoc } from '@/hooks/use-party-docs';
 import { useSessionDraft } from '@/hooks/use-session-draft';
-import { useSessionsForProject } from '@/hooks/use-party-sessions';
 import { usePartyProject, useUpdatePartyProject } from '@/hooks/use-party-projects';
 import { useAuthStore } from '@/stores/auth-store';
 import { DEFAULT_ALLOWED_TOOLS } from '@/types/party';
 import { adaptSession } from '../turn-adapter';
 import { COLORS, PANE_DEFAULTS } from './tokens';
-import { LeftPane, type LeftPaneSession } from './left-pane';
+import { LeftPane } from './left-pane';
 import { MainPane } from './main-pane';
-import { RoundRail } from './round-rail';
+import { RightRail } from './right-rail';
 import { usePaneResize } from './use-pane-resize';
-import { DocTray } from '../doc-tray';
 import { FileDrawerProvider } from './file-drawer';
 import { SelectionPopover } from './selection-popover';
-import { InlineQuestionsList } from './inline-questions-list';
-import { AgentQuestionsCard } from './agent-questions-card';
 import { AuditDrawer } from './audit-drawer';
 
 interface Props {
   sessionId: string;
   onClose: () => void;
+  /** @deprecated Session navigation now lives at /debates — kept for API compat. */
   onPickSession?: (sessionId: string) => void;
+  /** @deprecated Session navigation now lives at /debates — kept for API compat. */
   onNewSession?: () => void;
 }
 
@@ -40,13 +38,12 @@ interface Props {
  * stream parser (turn-parser.ts) understands both the new ⟪AGENT:Name⟫
  * marker format AND the legacy `📋 **John:**` format for backwards compat.
  */
-export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession }: Props) {
+export function SessionChatV2({ sessionId, onClose }: Props) {
   const { data: session } = useSession(sessionId);
   const { events } = useSessionEvents(sessionId, session?.status);
   const sendMessage = useSendMessageMutation(sessionId);
   const renameSession = useRenameSessionMutation(sessionId);
   const uploadDoc = useUploadPartyDoc(session?.projectId ?? null, sessionId);
-  const { data: sessionsList } = useSessionsForProject(session?.projectId ?? null);
   const { data: project } = usePartyProject(session?.projectId ?? null);
   const updateProject = useUpdatePartyProject(session?.projectId ?? null);
   const authUser = useAuthStore((s) => s.user);
@@ -179,16 +176,16 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
     // handleSend). This keeps the "what to do next" hint visible.
   }
 
-  const sessionsForLeft: LeftPaneSession[] = (sessionsList?.sessions ?? []).map((s) => ({
-    sessionId: s.sessionId,
-    topic: s.topic,
-    status: s.status,
-    turnCount: s.turnCount,
-    lastTurnAt: s.lastTurnAt,
-    createdAt: s.createdAt,
-  }));
-
   const { leftWidth, rightWidth, dragging, startLeftDrag, startRightDrag } = usePaneResize();
+
+  // Insert a `./.party-uploads/<file>` reference into the draft (used by the
+  // right rail's uploaded-docs panel rows).
+  function pickDocIntoDraft(filename: string) {
+    const ref = `./.party-uploads/${filename}`;
+    setDraft((d) =>
+      d.includes(ref) ? d : d.length > 0 ? `${d.replace(/\s+$/, '')} ${ref} ` : `Read ${ref} and `,
+    );
+  }
 
   // Scope for the SelectionPopover — only selections inside this element
   // get the "Ask a question" affordance.
@@ -248,10 +245,7 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
             onAttach={handleAttach}
             isUploading={uploadDoc.isPending}
             acceptedTypes=".md,.markdown,.txt,.pdf,.json,.csv,.yml,.yaml,application/pdf,text/plain,text/markdown,application/json,text/csv,text/yaml"
-            sessions={sessionsForLeft}
-            activeSessionId={sessionId}
-            onPickSession={onPickSession}
-            onNewSession={onNewSession}
+            uploadStatus={uploadStatus}
           />
         </aside>
 
@@ -264,90 +258,6 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
         />
 
         <main className="flex flex-1 flex-col" style={{ minWidth: 0 }}>
-          {/* Doc tray + upload-status surface — kept above the main scroller so
-            users see what they just attached, what's in flight, and any
-            error reasons without opening DevTools. */}
-          {session.projectId && (
-            <div
-              className="px-5 py-2 space-y-1.5"
-              style={{
-                background: COLORS.bgContent,
-                borderBottom: `1px solid ${COLORS.bgDeepest}`,
-              }}
-            >
-              {uploadStatus.length > 0 && (
-                <div className="space-y-1.5">
-                  <div className="flex flex-wrap gap-1.5">
-                    {uploadStatus.map((s) => {
-                      const tone =
-                        s.state === 'uploading'
-                          ? 'border-blue-400/30 bg-blue-500/15 text-blue-300'
-                          : s.state === 'done'
-                            ? 'border-emerald-400/30 bg-emerald-500/15 text-emerald-300'
-                            : 'border-red-400/30 bg-red-500/15 text-red-300';
-                      return (
-                        <span
-                          key={s.filename}
-                          className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10.5px] font-mono ${tone}`}
-                          title={s.reason}
-                        >
-                          {s.state === 'uploading' && '⏳'}
-                          {s.state === 'done' && '✓'}
-                          {s.state === 'error' && '✕'}
-                          <span className="max-w-[220px] truncate">{s.filename}</span>
-                          {s.state === 'error' && s.reason && (
-                            <span className="opacity-80 truncate max-w-[220px]">— {s.reason}</span>
-                          )}
-                        </span>
-                      );
-                    })}
-                  </div>
-                  {uploadStatus.some((s) => s.state === 'done') && (
-                    <div className="flex items-start gap-2 rounded-md border border-emerald-400/20 bg-emerald-500/5 px-2.5 py-1.5 text-[11px] text-emerald-200/90">
-                      <span aria-hidden>📄</span>
-                      <span>
-                        Uploaded. Type a follow-up message and click <strong>Send</strong> — the
-                        agents will read{' '}
-                        {uploadStatus
-                          .filter((s) => s.state === 'done')
-                          .map((s) => (
-                            <code
-                              key={s.filename}
-                              className="rounded bg-emerald-500/10 px-1 py-0.5 text-[10.5px] font-mono"
-                            >
-                              ./docs/{s.filename}
-                            </code>
-                          ))
-                          .reduce<React.ReactNode[]>(
-                            (acc, el, i) => (i === 0 ? [el] : [...acc, ', ', el]),
-                            [],
-                          )}{' '}
-                        on the next turn. (We&rsquo;ll auto-add an{' '}
-                        <code className="rounded bg-emerald-500/10 px-1 py-0.5 text-[10.5px] font-mono">
-                          [Attached: …]
-                        </code>{' '}
-                        header to your message if you don&rsquo;t mention the file by name.)
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )}
-              <DocTray
-                projectId={session.projectId}
-                sessionId={sessionId}
-                onPickDoc={(filename) => {
-                  const ref = `./.party-uploads/${filename}`;
-                  setDraft((d) =>
-                    d.includes(ref)
-                      ? d
-                      : d.length > 0
-                        ? `${d.replace(/\s+$/, '')} ${ref} `
-                        : `Read ${ref} and `,
-                  );
-                }}
-              />
-            </div>
-          )}
           <div
             ref={chatScopeRef}
             data-party-chat-content
@@ -380,31 +290,23 @@ export function SessionChatV2({ sessionId, onClose, onPickSession, onNewSession 
           aria-orientation="vertical"
         />
 
-        <aside
-          className="flex flex-col overflow-y-auto"
-          style={{ width: rightWidth, minWidth: PANE_DEFAULTS.rightMin }}
-        >
-          <div className="shrink-0">
-            <RoundRail
-              rounds={rounds}
-              activeRoundId={pinnedRoundId ?? adapted.activeRoundId}
-              onSelect={(id) => setPinnedRoundId(id)}
-            />
-          </div>
-          <AgentQuestionsCard events={events} onJumpToRound={(n) => jumpToAnchor(`r-${n + 1}`)} />
-          <InlineQuestionsList sessionId={sessionId} onJumpTo={jumpToAnchor} />
-          <div className="mt-auto shrink-0 px-3 py-2">
-            <button
-              type="button"
-              onClick={() => setAuditOpen(true)}
-              className="party-hover-tint w-full rounded-md border px-2 py-1.5 text-[11px]"
-              style={{ borderColor: 'var(--party-bg-deepest)', color: 'var(--party-text-muted)' }}
-              data-testid="open-audit-drawer"
-              title="Show all checkpoint, ASK_HUMAN, and tool default-allow events for this session"
-            >
-              Audit log
-            </button>
-          </div>
+        {/* No minWidth here — the rail collapses to just its icon strip when
+            the user toggles the active panel off. */}
+        <aside className="flex shrink-0">
+          <RightRail
+            rounds={rounds}
+            activeRoundId={pinnedRoundId ?? adapted.activeRoundId}
+            onSelectRound={(id) => setPinnedRoundId(id)}
+            events={events}
+            onJumpToRound={(n) => jumpToAnchor(`r-${n + 1}`)}
+            onJumpToAnchor={jumpToAnchor}
+            sessionId={sessionId}
+            projectId={session.projectId ?? null}
+            onPickDoc={pickDocIntoDraft}
+            onAttach={handleAttach}
+            onOpenAudit={() => setAuditOpen(true)}
+            panelWidth={rightWidth}
+          />
         </aside>
 
         <AuditDrawer sessionId={sessionId} open={auditOpen} onClose={() => setAuditOpen(false)} />
