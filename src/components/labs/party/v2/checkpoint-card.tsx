@@ -30,13 +30,14 @@ import {
   Cloud,
   CloudOff,
   GitBranch,
+  GitMerge,
   GitPullRequest,
   Loader2,
   ShieldAlert,
   XCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useOpenCheckpointPr } from '@/hooks/use-party-audit';
+import { useOpenCheckpointPr, usePublishCheckpoint } from '@/hooks/use-party-audit';
 import type { RoundCheckpoint } from '../turn-adapter';
 import { COLORS } from './tokens';
 
@@ -51,7 +52,9 @@ interface Props {
 export function CheckpointCard({ sessionId, projectId, pushEnabled, checkpoint }: Props) {
   const [prUrl, setPrUrl] = useState<string | null>(null);
   const [prError, setPrError] = useState<string | null>(null);
+  const [published, setPublished] = useState<{ prUrl: string | null; base: string } | null>(null);
   const openPr = useOpenCheckpointPr();
+  const publish = usePublishCheckpoint();
 
   const { kind, title, summary, branch, commitSha, reason } = checkpoint;
   const sha = commitSha?.slice(0, 7) ?? '';
@@ -67,6 +70,21 @@ export function CheckpointCard({ sessionId, projectId, pushEnabled, checkpoint }
         title: title ? `party(${projectId}): ${title}` : undefined,
       });
       setPrUrl(result.prUrl);
+    } catch (err) {
+      setPrError((err as Error).message);
+    }
+  }
+
+  async function handlePublish() {
+    if (!commitSha) return;
+    setPrError(null);
+    try {
+      const result = await publish.mutateAsync({
+        sessionId,
+        sha: commitSha,
+        title: title ? `party(${projectId}): ${title}` : undefined,
+      });
+      setPublished({ prUrl: result.prUrl, base: result.base });
     } catch (err) {
       setPrError((err as Error).message);
     }
@@ -166,22 +184,65 @@ export function CheckpointCard({ sessionId, projectId, pushEnabled, checkpoint }
           )}
       </div>
 
+      {/* Published confirmation — replaces the action buttons once merged. */}
+      {published && (
+        <div
+          className="mt-3 flex flex-wrap items-center gap-2 border-t pt-2 text-[11px]"
+          style={{ borderColor: COLORS.bgDeepest, color: 'var(--success)' }}
+          data-testid="checkpoint-published"
+        >
+          <GitMerge className="h-3.5 w-3.5" />
+          <span className="font-semibold">Merged to {published.base}</span>
+          {published.prUrl && (
+            <Link
+              href={published.prUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center underline-offset-2 hover:underline"
+              style={{ color: COLORS.inlineLink }}
+            >
+              View merged PR ↗
+            </Link>
+          )}
+        </div>
+      )}
+
       {/* Actions */}
-      {(kind === 'pushed' || kind === 'composed') && commitSha && (
+      {!published && (kind === 'pushed' || kind === 'composed') && commitSha && (
         <div
           className="mt-3 flex flex-wrap gap-2 border-t pt-2"
           style={{ borderColor: COLORS.bgDeepest }}
         >
-          {/* Open-PR is available on pushed cards always, and on composed
-              cards once push is enabled — the endpoint pushes the local
-              branch first. The label tells the operator which will happen. */}
+          {/* One-click Publish to main — push + PR + squash-merge, all
+              server-side. Primary action for non-technical operators. Shown
+              whenever push is available for this card. */}
+          {(kind === 'pushed' || (kind === 'composed' && pushEnabled)) && (
+            <Button
+              type="button"
+              size="sm"
+              onClick={handlePublish}
+              disabled={publish.isPending || openPr.isPending}
+              className="h-7 text-[11px]"
+              data-testid="checkpoint-publish"
+              title="Push, open a PR, and merge these docs into the project's main branch — no GitHub needed."
+            >
+              {publish.isPending ? (
+                <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+              ) : (
+                <GitMerge className="mr-1 h-3 w-3" />
+              )}
+              {publish.isPending ? 'Publishing…' : 'Publish to main'}
+            </Button>
+          )}
+          {/* Open-PR (without merge) — secondary, for when a review is wanted.
+              On composed cards it pushes the local branch first. */}
           {(kind === 'pushed' || (kind === 'composed' && pushEnabled)) && (
             <Button
               type="button"
               size="sm"
               variant="outline"
               onClick={handleOpenPr}
-              disabled={openPr.isPending || !!prUrl}
+              disabled={openPr.isPending || publish.isPending || !!prUrl}
               className="h-7 text-[11px]"
               data-testid="checkpoint-open-pr"
             >

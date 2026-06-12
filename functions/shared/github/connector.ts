@@ -633,6 +633,39 @@ export async function mergePullRequest(
 }
 
 /**
+ * 2026-06-12 — markPullRequestReadyForReview (GraphQL).
+ *
+ * A draft PR cannot be merged via the REST merge API (405). GitHub only
+ * exposes "clear draft" through the GraphQL `markPullRequestReadyForReview`
+ * mutation, which takes the PR's global node id (REST PR object → `node_id`).
+ *
+ * Best-effort + idempotent: if the PR is already ready, GitHub returns a
+ * GraphQL error ("not a draft") which we swallow — the caller proceeds to
+ * merge regardless. Returns true when the PR ends up non-draft.
+ */
+export async function markPullRequestReadyForReview(nodeId: string): Promise<boolean> {
+  const query =
+    'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}';
+  try {
+    const res = await githubFetch<{
+      data?: { markPullRequestReadyForReview?: { pullRequest?: { isDraft?: boolean } } };
+      errors?: Array<{ message: string }>;
+    }>('/graphql', {
+      method: 'POST',
+      body: JSON.stringify({ query, variables: { id: nodeId } }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const isDraft = res.data?.data?.markPullRequestReadyForReview?.pullRequest?.isDraft;
+    // isDraft === false → cleared. errors (e.g. already-ready) → treat as ready.
+    return isDraft === false || !!res.data?.errors;
+  } catch {
+    // Network/permission hiccup — let the caller attempt the merge anyway;
+    // the merge call surfaces a clear error if the PR is still a draft.
+    return false;
+  }
+}
+
+/**
  * 2026-05-27 PR B.d — compareCommits — GET /repos/{owner}/{name}/compare/{base}...{head}
  *
  * Returns the file list + line counts between two refs. Used by the open-pr

@@ -82,3 +82,31 @@ export function useOpenCheckpointPr() {
     },
   });
 }
+
+/** 2026-06-12 — Publish-to-main response shape. */
+export interface PublishResponse {
+  merged: boolean;
+  mergeSha: string;
+  prNumber: number;
+  prUrl: string | null;
+  base: string;
+}
+
+/**
+ * One-click "Publish to main": push the party branch → open/reuse a PR →
+ * mark ready → squash-merge into the project base branch. Server-side under
+ * the per-project PAT; the operator never touches GitHub.
+ */
+export function usePublishCheckpoint() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sessionId, sha, title }: { sessionId: string; sha: string; title?: string }) =>
+      api.post<PublishResponse>(
+        `/party/sessions/${encodeURIComponent(sessionId)}/checkpoints/${sha}/publish`,
+        { ...(title ? { title } : {}) },
+      ),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ['party-audit', vars.sessionId] });
+    },
+  });
+}

@@ -30,6 +30,7 @@ import {
   createRepoFromTemplate,
   deleteRepo,
   is422NameTaken,
+  markPullRequestReadyForReview,
   GitHubError,
 } from '../connector';
 
@@ -496,5 +497,38 @@ describe('deleteRepo', () => {
   it('35. throws GitHubError(404) when repo does not exist', async () => {
     vi.stubGlobal('fetch', mockFetch(mockResponse({ message: 'Not Found' }, 404)));
     await expect(deleteRepo('futurator-repos', 'ghost')).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+// ===========================================================================
+// markPullRequestReadyForReview (GraphQL)
+// ===========================================================================
+
+describe('markPullRequestReadyForReview', () => {
+  it('36. returns true when the mutation clears draft (isDraft=false)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockFetch(
+        mockResponse({
+          data: { markPullRequestReadyForReview: { pullRequest: { isDraft: false } } },
+        }),
+      ),
+    );
+    expect(await markPullRequestReadyForReview('PR_node_1')).toBe(true);
+    const call = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(call[0])).toContain('/graphql');
+  });
+
+  it('37. treats "already ready" GraphQL errors as success (idempotent)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockFetch(mockResponse({ errors: [{ message: 'Pull request is not a draft' }] })),
+    );
+    expect(await markPullRequestReadyForReview('PR_node_1')).toBe(true);
+  });
+
+  it('38. returns false (non-fatal) on a network/HTTP failure', async () => {
+    vi.stubGlobal('fetch', mockFetch(mockResponse({ message: 'Bad credentials' }, 401)));
+    expect(await markPullRequestReadyForReview('PR_node_1')).toBe(false);
   });
 });

@@ -118,6 +118,10 @@ export interface GitHubBranch {
 
 export interface GitHubPullRequest {
   number: number;
+  /** GraphQL global node id — needed to mark a draft PR ready for review. */
+  node_id?: string;
+  /** True while the PR is a draft (REST includes this on the PR object). */
+  draft?: boolean;
   title: string;
   state: 'open' | 'closed';
   /** Convenience flag GitHub adds on `closed` PRs that were merged. */

@@ -7581,6 +7581,192 @@ app.post('/api/party/sessions/:id/checkpoints/:sha/pr', async (c) => {
   });
 });
 
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-12 — POST /api/party/sessions/:id/checkpoints/:sha/publish
+//
+// One-click "Publish to main" for non-technical operators: push the party
+// branch → open (or reuse) a PR → mark it ready → squash-merge into the
+// project's base branch. Everything happens server-side under the
+// per-project write PAT; the operator never touches GitHub.
+//
+// This is the autonomous sibling of the Open-PR endpoint above. It shares
+// the same gates (brownfield + pushEnabled + partyBranch + write PAT) and
+// the same push-first behaviour, then adds the merge.
+// ──────────────────────────────────────────────────────────────────────
+app.post('/api/party/sessions/:id/checkpoints/:sha/publish', async (c) => {
+  const sessionId = c.req.param('id');
+  const sha = c.req.param('sha');
+  const parsedId = sessionIdSchema.safeParse(sessionId);
+  if (!parsedId.success) {
+    throw new ValidationError(parsedId.error.errors[0]?.message || 'invalid sessionId');
+  }
+  if (!/^[a-f0-9]{40}$/.test(sha)) {
+    throw new ValidationError(`commit sha must be 40 lowercase hex chars; got "${sha}"`);
+  }
+
+  const session = await partySessionsRepo.getSession(parsedId.data);
+  if (!session) throw new NotFoundError('PartySession', parsedId.data);
+  const project = await partyProjectsRepo.getProject(session.projectId);
+  if (!project) throw new NotFoundError('PartyProject', session.projectId);
+  if (project.kind !== 'brownfield' || !project.gitRepoUrl) {
+    throw new AppError(
+      'NOT_BROWNFIELD',
+      'Publish-to-main is only available on brownfield projects with a configured GitHub repo.',
+      400,
+    );
+  }
+  if (!project.pushEnabled) {
+    throw new AppError(
+      'PUSH_DISABLED',
+      'Project has not opted into push. Enable push in /migrate before publishing.',
+      409,
+    );
+  }
+  if (!session.partyBranch) {
+    throw new AppError(
+      'NO_PARTY_BRANCH',
+      'Session has no party branch — start a debate with party-push V1 enabled first.',
+      409,
+    );
+  }
+
+  const m = project.gitRepoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
+  if (!m) {
+    throw new AppError(
+      'BAD_GITREPO_URL',
+      `Could not parse owner/repo from ${project.gitRepoUrl}`,
+      400,
+    );
+  }
+  const owner = m[1];
+  const name = m[2];
+  const base = project.gitBranch || 'main';
+
+  const patSecretName = project.patSecretName ?? brownfieldPatSecretNameFor(session.projectId);
+  const writePat = await readBrownfieldPatSecret(patSecretName);
+  if (!writePat) {
+    throw new AppError(
+      'NO_PAT',
+      'No write PAT is stored for this project. Re-enable push in /migrate with a contents:write token.',
+      409,
+    );
+  }
+
+  // 1. Push the party branch (idempotent — no-op if already on GitHub).
+  {
+    const authedRemoteUrl = `https://x-access-token:${writePat}@github.com/${owner}/${name}.git`;
+    const { pushPartyBranchToRemote } = await import('../shared/services/plan-folder-service');
+    const pushResult = await pushPartyBranchToRemote(
+      {
+        workingDirSlug: session.projectId,
+        sessionIdShort: session.sessionId.slice(0, 8),
+        authedRemoteUrl,
+      },
+      { sendSsmCommand, waitForSsmOutput },
+    );
+    if (!pushResult.pushed) {
+      const msg =
+        pushResult.reason === 'AUTH_DENIED'
+          ? 'Push was denied — the stored PAT lacks contents:write or has expired. Re-enable push in /migrate with a fresh token.'
+          : pushResult.reason === 'BRANCH_MISSING'
+            ? 'The party branch no longer exists on EC2 — it may have been reaped. Nothing to publish.'
+            : pushResult.reason === 'NETWORK'
+              ? 'Network error reaching GitHub from EC2. Retry shortly.'
+              : `Could not push the party branch (${pushResult.reason}).`;
+      throw new AppError('PUSH_FAILED', msg, 502);
+    }
+  }
+
+  // 2. Open (or reuse) the PR, mark it ready, squash-merge — all under the
+  //    per-project PAT (the default GithubPat can't see other-org repos).
+  const { listPullRequests, createPullRequest, markPullRequestReadyForReview, mergePullRequest } =
+    await import('../shared/github/connector');
+  const { runWithPat } = await import('../shared/github/load-pat');
+  const partyBranch = session.partyBranch;
+  return runWithPat(writePat, async () => {
+    // Resolve the PR: reuse an open one for this head, else create non-draft.
+    let prNumber: number | null = null;
+    let prUrl: string | null = null;
+    let prNodeId: string | undefined;
+    const open = await listPullRequests(owner, name, {
+      state: 'open',
+      head: `${owner}:${partyBranch}`,
+      perPage: 5,
+    }).catch(() => ({
+      data: [] as Array<{
+        number: number;
+        html_url: string;
+        node_id?: string;
+      }>,
+    }));
+    if (open.data && open.data.length > 0) {
+      prNumber = open.data[0].number;
+      prUrl = open.data[0].html_url;
+      prNodeId = open.data[0].node_id;
+    } else {
+      const body = await c.req.json().catch(() => ({}));
+      const title =
+        typeof body?.title === 'string' && body.title.length > 0
+          ? String(body.title).slice(0, 200)
+          : `Party debate ${session.sessionId.slice(0, 8)} on ${session.projectId}`;
+      const description = `Published from Futurator Party Mode session \`${session.sessionId}\` (${session.turnCount} rounds). Source commit \`${sha}\`.`;
+      try {
+        const created = await createPullRequest(owner, name, {
+          title,
+          head: partyBranch,
+          base,
+          body: description,
+          draft: false,
+        });
+        prNumber = created.data.number;
+        prUrl = created.data.html_url;
+        prNodeId = created.data.node_id;
+      } catch (err) {
+        const emsg = err instanceof Error ? err.message : String(err);
+        // 422 "No commits between base and head" → branch already merged.
+        if (/no commits between/i.test(emsg)) {
+          throw new AppError(
+            'ALREADY_MERGED',
+            'Nothing to publish — these commits are already on the base branch.',
+            409,
+          );
+        }
+        throw new AppError('PR_CREATE_FAILED', emsg, 502);
+      }
+    }
+
+    if (prNumber === null) {
+      throw new AppError('PR_RESOLVE_FAILED', 'Could not resolve a PR to publish.', 502);
+    }
+
+    // Clear draft (best-effort) so the merge isn't rejected with 405.
+    if (prNodeId) await markPullRequestReadyForReview(prNodeId);
+
+    // Squash-merge into base.
+    try {
+      const merged = await mergePullRequest(owner, name, prNumber, {
+        method: 'squash',
+        commit_title: `docs(${session.projectId}): publish party debate ${session.sessionId.slice(0, 8)}`,
+      });
+      return c.json({
+        merged: merged.data.merged === true,
+        mergeSha: merged.data.sha,
+        prNumber,
+        prUrl,
+        base,
+      });
+    } catch (err) {
+      const emsg = err instanceof Error ? err.message : String(err);
+      const hint = /not mergeable|failed|conflict/i.test(emsg)
+        ? `${emsg} — the PR may have merge conflicts or required checks. Open it on GitHub to resolve: ${prUrl ?? ''}`
+        : /draft/i.test(emsg)
+          ? `The PR is still a draft and could not be auto-readied. Mark it ready on GitHub: ${prUrl ?? ''}`
+          : emsg;
+      throw new AppError('MERGE_FAILED', hint, 502);
+    }
+  });
+});
+
 // ════════════════════════════════════════════════════════════════
 // Party Mode — Inline Q&A on text selections
 // ════════════════════════════════════════════════════════════════
