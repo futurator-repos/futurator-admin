@@ -1092,7 +1092,11 @@ describe('pacman1 F1 — lint-verify at construction time (mvp+)', () => {
   });
 
   it('behavioral: passes on clean code, fails listing the error on lint-red code', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'f1-lint-'));
+    // Host the fixture INSIDE the repo (node_modules/.cache) so `npx eslint`
+    // resolves the repo's local eslint instantly — a tmpdir outside the repo
+    // makes npx cold-download eslint, which is slow and flaky in CI.
+    mkdirSync(join(process.cwd(), 'node_modules', '.cache'), { recursive: true });
+    const dir = mkdtempSync(join(process.cwd(), 'node_modules', '.cache', 'f1-lint-'));
     try {
       // Minimal flat eslint config with one rule that errors on `var`.
       writeFileSync(
@@ -1126,6 +1130,80 @@ describe('pacman1 F1 — lint-verify at construction time (mvp+)', () => {
       } else {
         expect(String(execSync('cat index.js', { cwd: dir }))).toContain('let bad');
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * C1 (pacman1 audit, 2026-06-12) — the compiler's output must SHIP. The
+ * COMPILER writes knowledge/ + .mycelium AFTER the story commit; per-story
+ * worktrees are reaped post-merge, so without this step every article was
+ * lost (pacman1 plan branch had zero knowledge files while
+ * compile-knowledge completed on every story).
+ */
+describe('C1 — compile-knowledge-commit (compiler output ships)', () => {
+  function steps(rigor: 'prototype' | 'mvp' = 'mvp') {
+    return generateStoryPipeline(story, 'Test Epic', workingDir, { rigor }).steps;
+  }
+
+  it('sits AFTER compile-sync and BEFORE compile-push', () => {
+    const ids = steps().map((s) => s.id);
+    expect(ids).toContain('compile-knowledge-commit');
+    expect(ids.indexOf('compile-knowledge-commit')).toBeGreaterThan(ids.indexOf('compile-sync'));
+    expect(ids.indexOf('compile-knowledge-commit')).toBeLessThan(ids.indexOf('compile-push'));
+  });
+
+  it('stages knowledge + .mycelium + .context, commits only when staged, never blocks', () => {
+    const step = steps().find((s) => s.id === 'compile-knowledge-commit') as {
+      command: string;
+      onFail?: { action: string };
+    };
+    expect(step.command).toContain('knowledge .mycelium .context');
+    expect(step.command).toContain('KNOWLEDGE_COMMIT_SKIPPED');
+    expect(step.command).toContain('KNOWLEDGE_COMMITTED');
+    // Ship-tripwire: wiki on disk but not in HEAD is loud.
+    expect(step.command).toContain('KNOWLEDGE_COMMIT_WARN');
+    expect(step.onFail?.action).toBe('continue');
+  });
+
+  it('shell is valid bash', () => {
+    const step = steps().find((s) => s.id === 'compile-knowledge-commit') as { command: string };
+    expect(() => {
+      execSync(`bash -n -c ${JSON.stringify(step.command)}`, { stdio: 'pipe' });
+    }).not.toThrow();
+  });
+
+  it('behavioral: commits compiler artifacts written AFTER the story commit (the pacman1 loss)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'c1-knowledge-'));
+    try {
+      execSync(
+        'git init -q && git -c user.email=t@t.local -c user.name=T commit --allow-empty -q -m "story: S-1 done"',
+        { cwd: dir, shell: '/bin/bash' },
+      );
+      // The COMPILER writes the wiki post-commit (the lost state).
+      mkdirSync(join(dir, 'knowledge', 'code'), { recursive: true });
+      writeFileSync(join(dir, 'knowledge', 'code', 'src--main.js.md'), '# main\nPurpose: entry\n');
+      mkdirSync(join(dir, '.mycelium'), { recursive: true });
+      writeFileSync(join(dir, '.mycelium', 'ast-facts.json'), '{"fileCount":1}');
+
+      const pipeline = generateStoryPipeline(story, 'Test Epic', dir, { rigor: 'mvp' });
+      const cmd = (
+        pipeline.steps.find((s) => s.id === 'compile-knowledge-commit') as { command: string }
+      ).command;
+      const out = execSync(cmd, { cwd: dir, shell: '/bin/bash', encoding: 'utf8' });
+      expect(out).toContain('KNOWLEDGE_COMMITTED story=S-1');
+
+      const inHead = execSync('git ls-tree -r --name-only HEAD -- knowledge', {
+        cwd: dir,
+        encoding: 'utf8',
+      });
+      expect(inHead).toContain('knowledge/code/src--main.js.md');
+
+      // Idempotent: nothing new → skip, no error.
+      const out2 = execSync(cmd, { cwd: dir, shell: '/bin/bash', encoding: 'utf8' });
+      expect(out2).toContain('KNOWLEDGE_COMMIT_SKIPPED');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

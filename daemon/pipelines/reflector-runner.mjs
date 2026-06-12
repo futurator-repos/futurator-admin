@@ -201,3 +201,138 @@ export function buildForensicEvent({ scope, output, durationMs, tokensConsumed, 
     },
   };
 }
+
+// ── R1 (pacman1 audit, 2026-06-12) — the real REFLECTOR brain ──────────────
+//
+// Until this commit, executeReflectorJob's agent step was a v1 SCAFFOLD
+// returning empty proposals: 9 reflector jobs COMPLETED with zero rows in
+// futurator-reflections, ever — the inbox→approve→CLAUDE.md/skill loop was
+// fully wired and starved. These two helpers are the missing organ: the
+// prompt the daemon spawns, and the parser that turns the agent's output
+// into ReflectionRow-shaped proposals.
+
+/**
+ * Build the REFLECTOR agent prompt. All evidence arrives as pre-gathered
+ * text blocks (the daemon reads DDB; the agent reads the repo) — the agent
+ * proposes, never applies.
+ *
+ * NO domain examples are baked in (no game/app specifics): categories are
+ * described generically so the same prompt serves every project.
+ */
+export function buildReflectorAgentPrompt({ scope, projectSlug, planSummary, evidenceBlocks }) {
+  const blocks = (evidenceBlocks || [])
+    .filter((b) => b && b.title && b.body)
+    .map((b) => `## ${b.title}\n${String(b.body).slice(0, 6000)}`)
+    .join('\n\n');
+  return `You are the REFLECTOR for the "${projectSlug}" project. A ${scope} just completed. Your job: distill what this run TAUGHT US into a small number of durable, reusable proposals so future agent runs do not repeat the same mistakes or rediscover the same techniques.
+
+You are in the project working directory. You may Read/Grep/Glob the repo (e.g. CLAUDE.md to avoid duplicate rules, source files referenced by the evidence) but you must NOT modify anything — you only PROPOSE.
+
+<plan_summary>
+${String(planSummary || '').slice(0, 4000)}
+</plan_summary>
+
+<evidence>
+${blocks || '(no structured evidence was collected for this run)'}
+</evidence>
+
+What makes a GOOD proposal (quality bar — fewer, better):
+- It generalizes: a rule/technique that will apply to FUTURE stories or plans, not a description of a one-off event.
+- It is grounded: cite the specific evidence items (failure ids, stage names, AC ids) that taught it.
+- It is non-duplicative: if CLAUDE.md already says it, do not re-propose it.
+- Skip it if unsure: an empty list is a valid, honest answer.
+
+Targets you may propose (choose per proposal):
+- target "project-claude-md", action "append-line": one concise imperative rule line for this project's CLAUDE.md (conventions, pitfalls to avoid, environment quirks proven by this run).
+- target "project-skill", action "propose": a reusable technique worth packaging as a skill for this project's agents (set "skillName" in kebab-case).
+- target "org-skill", action "propose": only if the technique is clearly project-agnostic.
+
+Emit AT MOST 5 proposals. End your reply with EXACTLY this block:
+
+---REFLECTIONS---
+[
+  {
+    "target": "project-claude-md",
+    "action": "append-line",
+    "content": "<the exact line or content to add>",
+    "rationale": "<why, in one or two sentences>",
+    "evidence": ["<evidence ref 1>", "<evidence ref 2>"],
+    "confidence": 0.0
+  }
+]
+---END_REFLECTIONS---
+
+The JSON array may be empty ([]). "confidence" is 0..1. Include "skillName" for skill targets and optionally "section" for claude-md targets.`;
+}
+
+const REFLECTION_TARGETS = new Set([
+  'project-claude-md',
+  'project-skill',
+  'agent-persona',
+  'org-skill',
+  'pipeline-config',
+  'tool-wrapper',
+]);
+const REFLECTION_ACTIONS = new Set([
+  'append-section',
+  'replace-section',
+  'append-line',
+  'create',
+  'promote-from-project',
+  'tune',
+  'propose',
+]);
+
+/**
+ * Parse the agent's output into validated proposal objects (the body of a
+ * ReflectionRow — provenance/lifecycle fields are added by the job runner).
+ * Tolerant: finds the ---REFLECTIONS--- block, else the first JSON array in
+ * the text. Invalid entries are dropped, the list is capped at 5.
+ */
+export function parseReflectorOutput(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return [];
+  let jsonText = null;
+  const fenced = raw.match(/---REFLECTIONS---\s*([\s\S]*?)\s*---END_REFLECTIONS---/);
+  if (fenced) {
+    jsonText = fenced[1];
+  } else {
+    const arr = raw.match(/\[[\s\S]*\]/);
+    if (arr) jsonText = arr[0];
+  }
+  if (!jsonText) return [];
+  // Strip a stray markdown code fence the model may have added.
+  jsonText = jsonText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out = [];
+  for (const p of parsed) {
+    if (!p || typeof p !== 'object') continue;
+    if (!REFLECTION_TARGETS.has(p.target)) continue;
+    if (!REFLECTION_ACTIONS.has(p.action)) continue;
+    if (typeof p.content !== 'string' || p.content.trim().length === 0) continue;
+    if (typeof p.rationale !== 'string' || p.rationale.trim().length === 0) continue;
+    const confidence =
+      typeof p.confidence === 'number' && Number.isFinite(p.confidence)
+        ? Math.min(1, Math.max(0, p.confidence))
+        : 0.5;
+    out.push({
+      target: p.target,
+      action: p.action,
+      section: typeof p.section === 'string' ? p.section : undefined,
+      skillName: typeof p.skillName === 'string' ? p.skillName : undefined,
+      content: p.content.trim().slice(0, 2000),
+      rationale: p.rationale.trim().slice(0, 1000),
+      evidence: Array.isArray(p.evidence)
+        ? p.evidence.filter((e) => typeof e === 'string').slice(0, 10)
+        : [],
+      confidence,
+    });
+    if (out.length >= 5) break;
+  }
+  return out;
+}

@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { createDriver } from './lib/memgraph-driver.mjs';
 import { embedBatch, getUsageStats, resetUsageStats } from './lib/voyage-embed.mjs';
 import { backupToS3 } from './lib/s3-backup.mjs';
+import { loadAliasMap, resolveImportSource } from './lib/import-resolver.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -611,44 +612,11 @@ function subNodeId(fileNodeId, kind, name) {
 }
 
 /**
- * Resolve a relative import like `./types` or `../physics` to a known file
- * nodeId. Returns null if the source is external (e.g. `lodash`, `@/lib/x`)
- * or if the path doesn't match any file in the AST facts.
- *
- * For prototype scope: only relative paths (`./` / `../`). Path-alias
- * resolution (tsconfig `paths`, `@/`) is a follow-up.
+ * Import resolution lives in ./lib/import-resolver.mjs (G1, 2026-06-12):
+ * tsconfig path-alias support (`@/` etc.) + on-disk candidate fallback so
+ * imports of UNCHANGED files resolve too. Extracted to a lib because this
+ * module's import runs the CLI (untestable directly).
  */
-function resolveImportSource(fromFile, importSource, knownFiles) {
-  if (!importSource.startsWith('.')) return null;
-
-  // Compute the target path relative to the project root.
-  const fromDir = fromFile.split('/').slice(0, -1).join('/');
-  const parts = (fromDir ? fromDir + '/' : '') + importSource;
-  const segs = [];
-  for (const p of parts.split('/')) {
-    if (p === '' || p === '.') continue;
-    if (p === '..') segs.pop();
-    else segs.push(p);
-  }
-  const target = segs.join('/');
-
-  // Try each common extension + index.* convention.
-  const candidates = [
-    target + '.ts',
-    target + '.tsx',
-    target + '.js',
-    target + '.jsx',
-    target + '.mjs',
-    target + '/index.ts',
-    target + '/index.tsx',
-    target + '/index.js',
-    target + '/index.jsx',
-  ];
-  for (const c of candidates) {
-    if (knownFiles.has(c)) return c;
-  }
-  return null;
-}
 
 /**
  * Read .mycelium/ast-facts.json and MERGE :Function / :Class nodes and
@@ -685,6 +653,9 @@ async function processAstFacts(config) {
 
   // Build a set of file paths we have facts for, so we can resolve imports.
   const knownFiles = new Set(facts.files.map((f) => f.path));
+  // G1 — alias map + project root for on-disk candidate resolution.
+  const rootDir = join(config.knowledgeDir, '..');
+  const aliasMap = loadAliasMap(rootDir);
 
   const driver = createDriver();
   const session = driver.session();
@@ -784,7 +755,7 @@ async function processAstFacts(config) {
 
     // Imports — file → file edges for relative imports we can resolve.
     for (const imp of file.imports || []) {
-      const resolved = resolveImportSource(file.path, imp.source, knownFiles);
+      const resolved = resolveImportSource(file.path, imp.source, knownFiles, { aliasMap, rootDir });
       if (!resolved) continue; // external or unresolvable — skip silently
       const targetNodeId = fileToCodeNodeId(resolved);
       // Only create the edge if both endpoints exist as :Node already.

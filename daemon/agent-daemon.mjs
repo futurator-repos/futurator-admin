@@ -4413,6 +4413,14 @@ const GATE_AGENT_ROLES = {
     timeoutMs: 12 * 60 * 1000,
     bypass: true,
   }),
+  // R1 (2026-06-12) — the REFLECTOR brain. Read-only by design: it may
+  // inspect the repo (CLAUDE.md, sources named in the evidence) but only
+  // PROPOSES — application happens through the operator's inbox confirm.
+  reflector: () => ({
+    model: process.env.REFLECTOR_MODEL || 'claude-sonnet-4-6',
+    timeoutMs: 8 * 60 * 1000,
+    allowedTools: 'Read,Grep,Glob',
+  }),
 };
 
 async function spawnGateAgent({ role, prompt, cwd, round }, { short } = {}) {
@@ -6141,13 +6149,120 @@ async function executeReflectorJob(job) {
   });
 
   // v1 SCAFFOLD: stub agent step. Next iteration replaces this with
-  // a real spawn via the daemon's executeStep + reflector-runner's
-  // prompt builder. The job-runner returns {ok: true, status: 'completed',
-  // proposalCount: 0} when proposals[] is empty — that's the v1
-  // honest signal.
-  async function runAgentStep() {
-    log('info', `[${short}] reflector agent-step stub returning empty proposals`);
-    return { proposals: [], tokensConsumed: 0 };
+  // R1 (pacman1 audit, 2026-06-12) — the REAL agent step. The v1 scaffold
+  // returned empty proposals; 9 reflector jobs COMPLETED with zero rows in
+  // futurator-reflections, ever, while the whole inbox→approve→CLAUDE.md/
+  // skill loop sat wired and starved. Now: gather the run's evidence from
+  // DDB (plan/epics summary, attention history, gate stage outcomes incl.
+  // agent-fixed, gate-VQA claims), build the generic REFLECTOR prompt, and
+  // spawn a read-only sonnet via the shared gate-agent spawn surface.
+  async function runAgentStep(j) {
+    const p = j.reflectorPayload;
+    const evidenceBlocks = [];
+    let planSummary = '';
+    try {
+      const planRes = await ddb.send(
+        new GetCommand({ TableName: PLANS_TABLE, Key: { planId: p.planId } }),
+      );
+      const plan = planRes.Item || {};
+      planSummary =
+        `Plan ${plan.name || p.planId} · rigor ${plan.rigor || p.rigor} · status ${plan.status || '?'} · ` +
+        `${plan.doneStories ?? '?'}/${plan.totalStories ?? '?'} stories done · cost $${plan.totalCostUsd ?? '?'}\n` +
+        `Intent: ${(plan.intent || '').slice(0, 500)}`;
+
+      // Epics: story outcomes + auto-minted fix stories + gate jobs.
+      const gateJobIds = [];
+      for (const epicId of plan.epicIds || []) {
+        const epicRes = await ddb.send(
+          new GetCommand({ TableName: EPICS_TABLE, Key: { epicId } }),
+        );
+        const epic = epicRes.Item;
+        if (!epic) continue;
+        const stories = Array.isArray(epic.stories) ? epic.stories : [];
+        const failedOrRetried = stories.filter(
+          (s) => s.status === 'failed' || s.origin === 'wave-vqa-fix',
+        );
+        if (failedOrRetried.length > 0) {
+          evidenceBlocks.push({
+            title: `Epic "${(epic.title || epicId).slice(0, 80)}" — stories that struggled`,
+            body: failedOrRetried
+              .map(
+                (s) =>
+                  `- [${s.origin === 'wave-vqa-fix' ? 'auto-minted fix story' : s.status}] ${s.title}`,
+              )
+              .join('\n'),
+          });
+        }
+        for (const id of Object.values(epic.waveBuildJobs || {})) gateJobIds.push(id);
+      }
+
+      // Gate outcomes: real per-stage results + VQA claims (QA-D / QA-B data).
+      const stageLines = [];
+      const vqaLines = [];
+      for (const gid of gateJobIds.slice(0, 20)) {
+        const jr = await ddb.send(
+          new GetCommand({ TableName: JOBS_TABLE, Key: { jobId: gid } }),
+        );
+        const wmr = jr.Item?.waveMergeResult;
+        if (!wmr) continue;
+        for (const s of wmr.stages || []) {
+          if (s.status === 'fail' || s.fixedByAgent) {
+            stageLines.push(
+              `- gate stage "${s.key}" ${s.fixedByAgent ? 'failed then was repaired by the build-fix agent' : 'FAILED'} (cmd: ${s.cmd})`,
+            );
+          }
+        }
+        const vqa = wmr.vqa;
+        if (vqa) {
+          for (const v of vqa.verdicts || []) {
+            if (v.result && v.result !== 'PASS') {
+              vqaLines.push(`- visual claim ${v.acId} → ${v.result}: ${(v.observation || '').slice(0, 160)}`);
+            }
+          }
+          for (const h of vqa.fixForward || []) {
+            vqaLines.push(`- visual claim ${h.acId} fix-forwarded: ${(h.observed || '').slice(0, 160)}`);
+          }
+        }
+      }
+      if (stageLines.length > 0)
+        evidenceBlocks.push({ title: 'Quality-gate failures and agent repairs', body: stageLines.join('\n') });
+      if (vqaLines.length > 0)
+        evidenceBlocks.push({ title: 'Visual verification findings (judged on merged code)', body: vqaLines.join('\n') });
+
+      // Attention history — every card is a lesson candidate.
+      const attn = await ddb.send(
+        new QueryCommand({
+          TableName: ATTENTION_ITEMS_TABLE,
+          KeyConditionExpression: 'planId = :p',
+          ExpressionAttributeValues: { ':p': p.planId },
+          Limit: 50,
+        }),
+      );
+      const cards = (attn.Items || []).map(
+        (a) => `- [${a.category}/${a.severity}${a.status === 'resolved' ? '/resolved' : ''}] ${(a.title || '').slice(0, 140)}`,
+      );
+      if (cards.length > 0)
+        evidenceBlocks.push({ title: 'Operator attention items raised during the run', body: cards.join('\n') });
+    } catch (gatherErr) {
+      log('warn', `[${short}] reflector evidence gathering partial: ${gatherErr.message}`);
+    }
+
+    const { buildReflectorAgentPrompt, parseReflectorOutput } = await import(
+      './pipelines/reflector-runner.mjs'
+    );
+    const prompt = buildReflectorAgentPrompt({
+      scope: p.scope,
+      projectSlug: p.projectSlug,
+      planSummary,
+      evidenceBlocks,
+    });
+    const res = await spawnGateAgent({ role: 'reflector', prompt, cwd: job.workingDir }, { short });
+    if (res?.ok === false) {
+      throw new Error(`reflector agent spawn failed: ${(res.output || '').slice(-300)}`);
+    }
+    const proposals = parseReflectorOutput(res?.output || '');
+    log('info', `[${short}] reflector produced ${proposals.length} proposal(s)`);
+    return { proposals, tokensConsumed: 0 };
   }
 
   async function writeReflectionRow(row) {
@@ -6160,8 +6275,12 @@ async function executeReflectorJob(job) {
           TableName: process.env.REFLECTIONS_TABLE || 'futurator-reflections',
           Item: {
             ...row,
-            // Synthesize an id if the agent didn't provide one.
-            reflectionId: row.reflectionId || row.id || randomUUID(),
+            // R1 fix: the scaffold synthesized `reflectionId`, but the
+            // table's SORT KEY is `id` — every write would have failed with
+            // a key ValidationException the moment proposals stopped being
+            // empty. Time-prefixed (ULID-shape per types/reflection.ts) so
+            // the inbox's chronological ordering works.
+            id: row.id || `${new Date().toISOString()}_${randomUUID().slice(0, 8)}`,
           },
         }),
       );

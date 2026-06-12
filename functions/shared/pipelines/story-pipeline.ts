@@ -1767,6 +1767,50 @@ Working directory: ${workingDir}`,
               timeout: 60000,
               onFail: { action: 'fail' as const, injectAs: 'COMPILE_SYNC_ERROR' },
             },
+            // C1 (pacman1 audit, 2026-06-12) — COMMIT THE COMPILER'S OUTPUT.
+            // The COMPILER writes knowledge/ + .mycelium AFTER the story
+            // commit (compile-commit-on-pass runs first so HEAD~1..HEAD is
+            // story-scoped). In the shared-worktree era the NEXT story's
+            // commit swept these files in; per-story worktrees (Slice C)
+            // are REAPED after the wave merges, so every article ever
+            // written was silently lost — the pacman1 plan branch had ZERO
+            // knowledge files while compile-knowledge completed on every
+            // story. The compiler was write-only: Memgraph/S3 got a
+            // transient copy, git got nothing, and the knowledgeIndex
+            // context injection stayed permanently empty.
+            //
+            // This step commits the compile artifacts as their own commit
+            // (kept separate from the story commit so HEAD~1..HEAD diff
+            // semantics for the NEXT story remain code-scoped is NOT a
+            // concern — compile-diff resolves BASE_REF before this runs,
+            // and the next story diffs its own commit). compile-push right
+            // after carries it to origin; wave-merge carries it to the
+            // plan branch.
+            {
+              id: 'compile-knowledge-commit',
+              stepType: 'shell' as const,
+              command:
+                `cd ${workingDir} && ` +
+                `for d in knowledge .mycelium .context; do ` +
+                `  [ -e "$d" ] && git add -- "$d" 2>/dev/null; ` +
+                `done; ` +
+                `if git diff --cached --quiet 2>/dev/null; then ` +
+                `  echo "KNOWLEDGE_COMMIT_SKIPPED: no new compile artifacts"; ` +
+                `else ` +
+                `  git -c user.email=daemon@futurator.local -c user.name='Daemon' ` +
+                `    commit -q -m 'knowledge: story ${story.storyId} compile artifacts' && ` +
+                `  echo "KNOWLEDGE_COMMITTED story=${story.storyId}" || ` +
+                `  echo 'KNOWLEDGE_COMMIT_WARN: commit failed — compiler output will be lost with the worktree' >&2; ` +
+                `fi; ` +
+                // Ship-tripwire (same validated≠shipped class as P1): the
+                // wiki exists on disk but not in HEAD ⇒ loud warning.
+                `if [ -d knowledge ] && ! git ls-tree --name-only HEAD -- knowledge 2>/dev/null | grep -q .; then ` +
+                `  echo 'KNOWLEDGE_COMMIT_WARN: knowledge/ exists on disk but is NOT in HEAD' >&2; ` +
+                `fi; true`,
+              timeout: 30000,
+              captureAs: 'KNOWLEDGE_COMMIT_OUTPUT',
+              onFail: { action: 'continue' as const },
+            },
             // PR-19 — push the per-story commit to GitHub.
             //
             // 2026-05-04 dino-runner-1 forensic: the daemon's
