@@ -5509,6 +5509,18 @@ async function executeWaveMergeJob(job) {
             })),
             unverifiable: (result.vqa.unverifiable || []).length,
             reportPath: result.vqa.reportPath || null,
+            // QA-B (pong1 2026-06-12) — per-AC verdicts, compact. The QA
+            // Review claims table joins gate history by acId; without these
+            // only failures (fixForward) were reconstructable and every
+            // PASS at the gate was invisible at the shipping decision.
+            verdicts: (result.vqa.verdicts || []).map((v) => ({
+              acId: v.acId,
+              storyId: v.storyId,
+              result: v.result,
+              observation: (v.observation || '').slice(0, 200),
+              screenshotUrl: v.screenshotUrl || null,
+            })),
+            fixedAcIds: (result.vqa.fixesApplied || []).flatMap((f) => f.acIds || []),
           }
         : null;
       // ORDERING MATTERS: mint BEFORE flipping the job COMPLETED — the
@@ -5637,6 +5649,10 @@ async function executeWaveMergeJob(job) {
           coordinatorWorktree: result.coordinatorWorktree,
           pushSha: result.pushSha,
           vqa: vqaSummary,
+          // QA-D (pong1 2026-06-12) — real per-stage gate outcomes; the QA
+          // Review matrix renders these instead of inferring N green cells
+          // from this job's single COMPLETED bit.
+          stages: result.stages || [],
         },
       });
       // v2.6 §2.6 — every in-gate VQA fix becomes a pending REFLECTOR row

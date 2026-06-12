@@ -1,7 +1,39 @@
 # QA Review — honest critique + redesign plan (v2.6 follow-up)
 
-> Status: PROPOSED 2026-06-12, from the pong1 M6 E2E forensics.
+> Status: IMPLEMENTED 2026-06-12 (same day as proposed).
 > Companion: wave-gate-vqa-implementation-plan.md (§6 status log).
+>
+> Implementation log:
+>
+> - P1 — compile-commit-on-pass stages declared touchPoints unconditionally
+>   after snapshot-diff + STORY_COMMIT_INCOMPLETE post-commit tripwire
+>   (daemon maps it to a HIGH 'story-commit-incomplete' card). End-to-end
+>   temp-repo test reproduces the pong1 retry disease.
+> - P2 — TimerCategory 'merge-gate' + 'vqa-gate'; stepId 'wave-merge' maps
+>   to merge-gate, '[wave-vqa]' event text promotes to vqa-gate.
+> - P3 — story-failure cards write ONLY on the →failed state transition;
+>   wave-vqa-failed cards auto-resolve when the minted fix story's criteria
+>   pass a later gate (new `fixesWave` provenance on minted stories).
+> - QA-A — buildVqaRollup ingests each UNIQUE qa job once (plan-wide
+>   visualTests join for attribution); results expose storyTitle/epicLabel/
+>   criteriaRef/description/level; `qaRuns` (one panel per unique job)
+>   replaces the duplicated per-epic log panels; missing tests = pending.
+> - QA-B — daemon persists per-AC `verdicts` + `fixedAcIds` in the vqa
+>   summary; aggregator builds `gateVqa` claims with full gate history
+>   (verified / fixed-in-gate / fixed-by-story / fix-forwarded /
+>   unverifiable); fix-forward arc joined to claims by acId.
+> - QA-C — ClaimsTable (Epic → Story → AC rows, level chips, gate arc
+>   `W2 ✗ → W3 ✓`, final verdict, thumbnail; replaces the gallery);
+>   FailureDrawer is now the UNIVERSAL evidence drawer (pass rows too:
+>   judge rationale, level meaning, wave-gate history, cost/duration);
+>   verdict strip gains the gate-VQA chip + `auto-pass (mvp)` honesty
+>   label on AC; single plan-scoped run panel.
+> - QA-D — wave-merge runner executes blocking stages ONE AT A TIME and
+>   returns `stages[]` (no-op-test tolerance now per-stage instead of
+>   aborting the chain); daemon persists them on waveMergeResult; matrix
+>   renders real stage columns + gate-VQA column, `n/a`/`skipped` cells,
+>   and labels legacy one-bit rows "inferred" instead of fabricating
+>   N green checks.
 
 ## 0. What pong1 proved and what it exposed
 

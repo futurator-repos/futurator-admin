@@ -145,6 +145,7 @@ function report(
       tamperCountsByStory: {},
     },
     perEpic: [],
+    qaRuns: [],
     attentionItems: [],
     runHistory: [],
     generatedAt: '2026-05-18T17:00:00Z',

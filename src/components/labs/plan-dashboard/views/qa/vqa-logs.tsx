@@ -18,18 +18,23 @@ import { useAgentJob } from '@/hooks/use-agent-job';
 import { useAgentEvents } from '@/hooks/use-agent-events';
 import { useEc2Status } from '@/hooks/use-ec2-daemon';
 import type { AgentEvent, AgentJob, AgentJobStatus } from '@/types/agent-orchestrator';
-import type { EpicQaBreakdown } from '@/types/qa-report';
+import type { QaRunPanel } from '@/types/qa-report';
 import { CopyLogButton } from '../../shared/copy-log-button';
 
 interface Props {
-  perEpic: EpicQaBreakdown[];
+  /**
+   * QA-A (pong1 2026-06-12) — UNIQUE runs, not per-epic rows. Plan-scoped QA
+   * resolves every epic to the SAME job; the old per-epic mapping rendered N
+   * byte-identical log panels for one run (the operator's "why are there 2
+   * epic QA logs?"). One panel per distinct qaJobId, scope spelled out.
+   */
+  runs: QaRunPanel[];
 }
 
-export function VqaLogs({ perEpic }: Props) {
-  const withJob = perEpic.filter((e) => !!e.qaJobId);
+export function VqaLogs({ runs }: Props) {
   const { data: ec2Status } = useEc2Status(true);
 
-  if (withJob.length === 0) {
+  if (runs.length === 0) {
     return (
       <div
         style={{
@@ -43,8 +48,8 @@ export function VqaLogs({ perEpic }: Props) {
           letterSpacing: '0.04em',
         }}
       >
-        No Visual QA jobs have run for this plan yet. Click <strong>Re-run QA</strong> at the top
-        to kick one off.
+        No Visual QA jobs have run for this plan yet. Click <strong>Re-run QA</strong> at the top to
+        kick one off.
       </div>
     );
   }
@@ -52,8 +57,13 @@ export function VqaLogs({ perEpic }: Props) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <DaemonDiagnostics ec2Status={ec2Status} />
-      {withJob.map((epic) => (
-        <VqaEpicLog key={epic.epicId} epic={epic} />
+      {runs.map((run) => (
+        <VqaRunLog
+          key={run.qaJobId}
+          label={run.scope === 'plan' ? 'PLAN' : run.epicLabels.join(' ')}
+          title={run.title}
+          qaJobId={run.qaJobId}
+        />
       ))}
     </div>
   );
@@ -61,11 +71,7 @@ export function VqaLogs({ perEpic }: Props) {
 
 // ── Daemon diagnostics ──────────────────────────────────────────────
 
-function DaemonDiagnostics({
-  ec2Status,
-}: {
-  ec2Status: ReturnType<typeof useEc2Status>['data'];
-}) {
+function DaemonDiagnostics({ ec2Status }: { ec2Status: ReturnType<typeof useEc2Status>['data'] }) {
   // Live-ticking clock so "last heartbeat · 42s ago" actually counts up
   // instead of freezing between 3s status polls.
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
@@ -130,13 +136,7 @@ function DaemonDiagnostics({
           value={hbMs == null ? 'never' : fmtDuration(hbMs / 1000) + ' ago'}
           warn={hbStale}
         />
-        {auth && (
-          <Pill
-            label="auth"
-            value={auth.valid ? 'valid' : 'expired'}
-            warn={!auth.valid}
-          />
-        )}
+        {auth && <Pill label="auth" value={auth.valid ? 'valid' : 'expired'} warn={!auth.valid} />}
         {publicIp && <Pill label="ip" value={publicIp} />}
 
         {/* Specific diagnosis line — most-common-first. */}
@@ -154,9 +154,7 @@ function DaemonDiagnostics({
       {/* Surface what the daemon is actually executing — when slots are full
           but our QA jobs are pending, this tells the operator *what* is
           hogging the slots so they can restart or wait. */}
-      {processes && processes.length > 0 && (
-        <HoldingSlots processes={processes} nowMs={nowMs} />
-      )}
+      {processes && processes.length > 0 && <HoldingSlots processes={processes} nowMs={nowMs} />}
     </div>
   );
 }
@@ -264,9 +262,7 @@ function ProcessRow({
       <code style={{ color: 'var(--accent-blue)' }}>{jobId}</code>
       <span style={{ color }}>
         {stepLabel}
-        {agent && step ? (
-          <span style={{ color: 'var(--text-faint)' }}> · {agent}</span>
-        ) : null}
+        {agent && step ? <span style={{ color: 'var(--text-faint)' }}> · {agent}</span> : null}
         {pid ? <span style={{ color: 'var(--text-faint)' }}> · pid {pid}</span> : null}
       </span>
       <span style={{ color: 'var(--text-mute)' }}>{model || '—'}</span>
@@ -390,11 +386,11 @@ function stripBaseStyle(borderColor: string): React.CSSProperties {
 // (Legacy DaemonOfflineBanner + AuthExpiredBanner merged into DaemonDiagnostics
 // above — keeps all daemon signal in one compact always-visible strip.)
 
-// ── Per-epic card ───────────────────────────────────────────────────
+// ── Per-run card (QA-A: one per unique qaJobId) ─────────────────────
 
-function VqaEpicLog({ epic }: { epic: EpicQaBreakdown }) {
-  const { data: job } = useAgentJob(epic.qaJobId ?? null);
-  const { events } = useAgentEvents(epic.qaJobId ?? null, job?.status);
+function VqaRunLog({ label, title, qaJobId }: { label: string; title: string; qaJobId: string }) {
+  const { data: job } = useAgentJob(qaJobId ?? null);
+  const { events } = useAgentEvents(qaJobId ?? null, job?.status);
   const { data: ec2Status } = useEc2Status(true);
   const [expanded, setExpanded] = useState(true);
 
@@ -468,7 +464,7 @@ function VqaEpicLog({ epic }: { epic: EpicQaBreakdown }) {
             flexShrink: 0,
           }}
         >
-          {epic.epicLabel}
+          {label}
         </span>
         <span
           style={{
@@ -477,7 +473,7 @@ function VqaEpicLog({ epic }: { epic: EpicQaBreakdown }) {
             letterSpacing: '-0.005em',
           }}
         >
-          {epic.title}
+          {title}
         </span>
 
         <StatusPill status={statusLabel} color={statusColor} />
@@ -495,9 +491,7 @@ function VqaEpicLog({ epic }: { epic: EpicQaBreakdown }) {
           </span>
         )}
 
-        {currentStep && (
-          <StepBadge label={currentStep.label} running={currentStep.running} />
-        )}
+        {currentStep && <StepBadge label={currentStep.label} running={currentStep.running} />}
 
         <span
           style={{
@@ -507,7 +501,7 @@ function VqaEpicLog({ epic }: { epic: EpicQaBreakdown }) {
             letterSpacing: '0.04em',
           }}
         >
-          job {epic.qaJobId?.slice(0, 8)}
+          job {qaJobId.slice(0, 8)}
         </span>
 
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -806,8 +800,7 @@ function ExtractedVariables({ vars }: { vars: Record<string, string> }) {
       onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
       style={{
         borderTop: '1px solid var(--border)',
-        background:
-          'color-mix(in srgb, var(--foreground) 1%, transparent)',
+        background: 'color-mix(in srgb, var(--foreground) 1%, transparent)',
       }}
     >
       <summary

@@ -787,3 +787,359 @@ describe('buildQaReport — VQA executeStatus + contract draft', () => {
     expect(r.vqa.contract!.classifiedTests[0].testId).toBe('VT-1');
   });
 });
+
+// ── QA-A (pong1 2026-06-12) — single-count plan-scoped rollup ───────
+//
+// pong1 forensic: with plan-scoped QA (plan.qaJobId), the old per-epic loop
+// resolved the SAME job for every epic and ingested its app-wide
+// TEST_RESULTS once per epic — 2 epics × 4 tests rendered as "VQA 8/8",
+// 8 thumbnails, doubled runCostUsd, and results stamped with the wrong
+// epicId. These tests pin: N unique tests → N results regardless of epic
+// count, cost counted once, attribution from the plan-wide join.
+
+function vt(id: string, over: Partial<VisualTestDef> = {}): VisualTestDef {
+  return {
+    id,
+    criteriaRef: `AC-${id}`,
+    description: `desc ${id}`,
+    setup: '',
+    expect: `expect ${id}`,
+    ...over,
+  } as VisualTestDef;
+}
+
+function planScopedFixture() {
+  const testResults = JSON.stringify([
+    {
+      testId: 'VT-1',
+      level: 'L1',
+      verdict: 'pass',
+      screenshotUrl: 'https://s/1.png',
+      costUsd: 0.01,
+    },
+    { testId: 'VT-2', level: 'L1', verdict: 'pass', costUsd: 0.01 },
+    { testId: 'VT-3', level: 'L1', verdict: 'fail', rationale: 'paddle missing', costUsd: 0.01 },
+    { testId: 'VT-4', level: 'L0', verdict: 'pass', costUsd: 0 },
+  ]);
+  const qaJob = job({
+    jobId: 'qa-plan-1',
+    variables: { TEST_RESULTS: testResults, COST_USD: '0.04', WALLCLOCK_SEC: '120' },
+  });
+  const e1 = epic({
+    epicId: 'E-A',
+    stories: [
+      story({ storyId: 'S1', title: 'Court story', visualTests: [vt('VT-1'), vt('VT-2')] }),
+    ],
+  });
+  const e2 = epic({
+    epicId: 'E-B',
+    stories: [
+      story({
+        storyId: 'S2',
+        title: 'Paddle story',
+        visualTests: [vt('VT-3', { level: 'L1' }), vt('VT-4')],
+      }),
+    ],
+  });
+  return { qaJob, e1, e2 };
+}
+
+describe('QA-A — plan-scoped VQA rollup is single-counted', () => {
+  it('4 unique tests across 2 epics → total 4 (NOT 8), cost counted once', () => {
+    const { qaJob, e1, e2 } = planScopedFixture();
+    const r = buildQaReport({
+      plan: plan({ qaJobId: 'qa-plan-1' }),
+      epics: [e1, e2],
+      jobsById: { 'qa-plan-1': qaJob },
+      attentionItems: [],
+    });
+    expect(r.vqa.total).toBe(4);
+    expect(r.vqa.pass).toBe(3);
+    expect(r.vqa.fail).toBe(1);
+    expect(r.vqa.results).toHaveLength(4);
+    expect(r.vqa.costUsd).toBeCloseTo(0.04);
+    expect(r.vqa.wallclockSec).toBe(120);
+  });
+
+  it('results are attributed to the OWNING epic/story via the plan-wide join', () => {
+    const { qaJob, e1, e2 } = planScopedFixture();
+    const r = buildQaReport({
+      plan: plan({ qaJobId: 'qa-plan-1' }),
+      epics: [e1, e2],
+      jobsById: { 'qa-plan-1': qaJob },
+      attentionItems: [],
+    });
+    const byId = new Map(r.vqa.results!.map((t) => [t.testId, t]));
+    expect(byId.get('VT-1')!.epicId).toBe('E-A');
+    expect(byId.get('VT-1')!.storyId).toBe('S1');
+    expect(byId.get('VT-1')!.storyTitle).toBe('Court story');
+    expect(byId.get('VT-1')!.epicLabel).toBe('E1');
+    expect(byId.get('VT-3')!.epicId).toBe('E-B');
+    expect(byId.get('VT-3')!.epicLabel).toBe('E2');
+  });
+
+  it('exposes level + criteriaRef + description on every result', () => {
+    const { qaJob, e1, e2 } = planScopedFixture();
+    const r = buildQaReport({
+      plan: plan({ qaJobId: 'qa-plan-1' }),
+      epics: [e1, e2],
+      jobsById: { 'qa-plan-1': qaJob },
+      attentionItems: [],
+    });
+    for (const t of r.vqa.results!) {
+      expect(t.criteriaRef).toBe(`AC-${t.testId}`);
+      expect(t.description).toBe(`desc ${t.testId}`);
+    }
+    expect(r.vqa.results!.find((t) => t.testId === 'VT-4')!.level).toBe('L0');
+  });
+
+  it('an authored test missing from the run results is PENDING (not silently dropped)', () => {
+    const { qaJob, e1, e2 } = planScopedFixture();
+    const e3 = epic({
+      epicId: 'E-C',
+      stories: [story({ storyId: 'S3', title: 'Late story', visualTests: [vt('VT-9')] })],
+    });
+    const r = buildQaReport({
+      plan: plan({ qaJobId: 'qa-plan-1' }),
+      epics: [e1, e2, e3],
+      jobsById: { 'qa-plan-1': qaJob },
+      attentionItems: [],
+    });
+    expect(r.vqa.total).toBe(5);
+    const late = r.vqa.results!.find((t) => t.testId === 'VT-9')!;
+    expect(late.status).toBe('pending');
+    expect(late.epicLabel).toBe('E3');
+  });
+});
+
+describe('QA-A — qaRuns panels deduplicate plan-scoped runs', () => {
+  it('plan-scoped: ONE panel covering both epics (was: one identical panel per epic)', () => {
+    const { qaJob, e1, e2 } = planScopedFixture();
+    const r = buildQaReport({
+      plan: plan({ qaJobId: 'qa-plan-1' }),
+      epics: [e1, e2],
+      jobsById: { 'qa-plan-1': qaJob },
+      attentionItems: [],
+    });
+    expect(r.qaRuns).toHaveLength(1);
+    expect(r.qaRuns[0].scope).toBe('plan');
+    expect(r.qaRuns[0].epicLabels).toEqual(['E1', 'E2']);
+    expect(r.qaRuns[0].title).toContain('plan-scoped');
+  });
+
+  it('legacy per-epic jobs: one panel each', () => {
+    const { e1, e2 } = planScopedFixture();
+    const r = buildQaReport({
+      plan: plan(),
+      epics: [
+        { ...e1, qaJobId: 'qa-e1' },
+        { ...e2, qaJobId: 'qa-e2' },
+      ],
+      jobsById: {},
+      attentionItems: [],
+    });
+    expect(r.qaRuns).toHaveLength(2);
+    expect(r.qaRuns.map((p) => p.scope)).toEqual(['epic', 'epic']);
+  });
+});
+
+// ── QA-B (pong1 2026-06-12) — wave-gate VQA ingestion ───────────────
+
+describe('QA-B — gateVqa claims from waveMergeResult.vqa', () => {
+  function gateJob(jobId: string, vqa: Record<string, unknown>) {
+    return {
+      ...job({ jobId }),
+      waveMergeResult: { outcome: 'success', vqa },
+    } as AgentJob;
+  }
+
+  it('builds the full fix-forward arc: wave-2 FAIL → fix story → wave-3 PASS = fixed-by-story', () => {
+    const owner = story({
+      storyId: 'S5',
+      title: 'Ball physics',
+      wave: 2,
+      criteria: [{ id: 'AC-S5-1', text: 'Ball bounces off paddle', needsBrowser: true }],
+    });
+    const fixStory = {
+      ...story({
+        storyId: 'S6',
+        title: 'Fix visual regression: AC-S5-1',
+        wave: 3,
+        criteria: [{ id: 'AC-S5-1', text: 'Ball bounces off paddle', needsBrowser: true }],
+      }),
+      origin: 'wave-vqa-fix',
+      dependsOn: ['S5'],
+    } as EpicStory;
+    const ep = epic({
+      epicId: 'E-A',
+      stories: [owner, fixStory],
+      waveBuildJobs: { '2': 'gate-w2', '3': 'gate-w3' },
+    });
+    const w2 = gateJob('gate-w2', {
+      outcome: 'fix-forward',
+      pass: 0,
+      fixed: 0,
+      unverifiable: 0,
+      verdicts: [
+        {
+          acId: 'AC-S5-1',
+          storyId: 'S5',
+          result: 'FAIL',
+          observation: 'ball passes through paddle',
+          screenshotUrl: 'https://s/w2.png',
+        },
+      ],
+      fixForward: [
+        {
+          storyId: 'S5',
+          acId: 'AC-S5-1',
+          observed: 'ball passes through',
+          screenshotUrl: 'https://s/w2.png',
+        },
+      ],
+    });
+    const w3 = gateJob('gate-w3', {
+      outcome: 'pass',
+      pass: 1,
+      fixed: 0,
+      unverifiable: 0,
+      verdicts: [
+        { acId: 'AC-S5-1', storyId: 'S5', result: 'PASS', screenshotUrl: 'https://s/w3.png' },
+      ],
+      fixForward: [],
+    });
+    const r = buildQaReport({
+      plan: plan(),
+      epics: [ep],
+      jobsById: { 'gate-w2': w2, 'gate-w3': w3 },
+      attentionItems: [],
+    });
+    expect(r.gateVqa).toBeDefined();
+    const claim = r.gateVqa!.claims.find((c) => c.acId === 'AC-S5-1')!;
+    expect(claim.attempts.map((a) => [a.waveNumber, a.result])).toEqual([
+      [2, 'FAIL'],
+      [3, 'PASS'],
+    ]);
+    expect(claim.final).toBe('fixed-by-story');
+    expect(claim.fixStoryId).toBe('S6');
+    expect(claim.acText).toBe('Ball bounces off paddle');
+    expect(r.gateVqa!.fixedByStory).toBe(1);
+    expect(r.gateVqa!.fixForwarded).toBe(0);
+  });
+
+  it('first-gate PASS = verified; FIXED_IN_GATE from fixedAcIds; UNVERIFIABLE honest', () => {
+    const ep = epic({
+      epicId: 'E-A',
+      stories: [
+        story({
+          storyId: 'S1',
+          criteria: [
+            { id: 'AC-1', text: 'a', needsBrowser: true },
+            { id: 'AC-2', text: 'b', needsBrowser: true },
+            { id: 'AC-3', text: 'c', needsBrowser: true },
+          ],
+        }),
+      ],
+      waveBuildJobs: { '0': 'gate-w0' },
+    });
+    const w0 = gateJob('gate-w0', {
+      outcome: 'fixed',
+      verdicts: [
+        { acId: 'AC-1', storyId: 'S1', result: 'PASS' },
+        { acId: 'AC-2', storyId: 'S1', result: 'FAIL' },
+        { acId: 'AC-3', storyId: 'S1', result: 'UNVERIFIABLE' },
+      ],
+      fixedAcIds: ['AC-2'],
+      fixForward: [],
+    });
+    const r = buildQaReport({
+      plan: plan(),
+      epics: [ep],
+      jobsById: { 'gate-w0': w0 },
+      attentionItems: [],
+    });
+    const finals = Object.fromEntries(r.gateVqa!.claims.map((c) => [c.acId, c.final]));
+    expect(finals['AC-1']).toBe('verified');
+    expect(finals['AC-2']).toBe('fixed-in-gate');
+    expect(finals['AC-3']).toBe('unverifiable');
+    expect(r.gateVqa!.verified).toBe(1);
+    expect(r.gateVqa!.fixedInGate).toBe(1);
+    expect(r.gateVqa!.unverifiable).toBe(1);
+  });
+
+  it('undefined when no wave-merge job carries vqa (pre-v2.6 plans)', () => {
+    const r = buildQaReport({
+      plan: plan(),
+      epics: [epic({ waveBuildJobs: { '0': 'b-1' } })],
+      jobsById: { 'b-1': job({ jobId: 'b-1' }) },
+      attentionItems: [],
+    });
+    expect(r.gateVqa).toBeUndefined();
+  });
+});
+
+// ── QA-D (pong1 2026-06-12) — truthful gate matrix ──────────────────
+
+describe('QA-D — gate rows prefer real stage outcomes over inferred cells', () => {
+  it('stages from waveMergeResult render truthfully; legacy rows are flagged inferred', () => {
+    const stagedJob = {
+      ...job({ jobId: 'gate-staged' }),
+      waveMergeResult: {
+        outcome: 'success',
+        stages: [
+          { key: 'build', cmd: 'npm run build', status: 'pass', durationMs: 40000 },
+          { key: 'test', cmd: 'npm run test --if-present', status: 'pass', durationMs: 9000 },
+          { key: 'lint', cmd: 'npx eslint . --max-warnings 200', status: 'pass' },
+        ],
+        vqa: { outcome: 'pass', pass: 3, fixed: 0, fixForward: [], unverifiable: 0 },
+      },
+    } as AgentJob;
+    const legacyJob = job({ jobId: 'gate-legacy' }); // COMPLETED, no stage data
+    const ep = epic({
+      stories: [story({ storyId: 'S1', wave: 0 }), story({ storyId: 'S2', wave: 1 })],
+      waveBuildJobs: { '0': 'gate-staged', '1': 'gate-legacy' },
+    });
+    const r = buildQaReport({
+      plan: plan(),
+      epics: [ep],
+      jobsById: { 'gate-staged': stagedJob, 'gate-legacy': legacyJob },
+      attentionItems: [],
+    });
+    expect(r.gate.hasStageData).toBe(true);
+    const w0 = r.gate.waveRows.find((row) => row.waveIndex === 0)!;
+    expect(w0.stages).toHaveLength(3);
+    expect(w0.stages![0]).toMatchObject({ key: 'build', status: 'pass' });
+    expect(w0.vqa).toMatchObject({ outcome: 'pass', pass: 3 });
+    expect(w0.inferred).toBeUndefined();
+    const w1 = r.gate.waveRows.find((row) => row.waveIndex === 1)!;
+    expect(w1.stages).toBeUndefined();
+    expect(w1.inferred).toBe(true); // one COMPLETED bit, honestly labeled
+  });
+
+  it('a failing stage marks later stages skipped and fails the pillar', () => {
+    const failedJob = {
+      ...job({ jobId: 'gate-fail', status: 'FAILED' }),
+      waveMergeResult: {
+        outcome: 'wave-build-failed',
+        stages: [
+          { key: 'build', cmd: 'npm run build', status: 'pass' },
+          { key: 'test', cmd: 'npm run test --if-present', status: 'fail' },
+          { key: 'lint', cmd: 'npx eslint .', status: 'skipped' },
+        ],
+      },
+    } as AgentJob;
+    const ep = epic({
+      stories: [story({ storyId: 'S1', wave: 0 })],
+      waveBuildJobs: { '0': 'gate-fail' },
+    });
+    const r = buildQaReport({
+      plan: plan(),
+      epics: [ep],
+      jobsById: { 'gate-fail': failedJob },
+      attentionItems: [],
+    });
+    const row = r.gate.waveRows[0];
+    expect(row.stages!.map((s) => s.status)).toEqual(['pass', 'fail', 'skipped']);
+    expect(r.gate.verdict).toBe('fail');
+  });
+});

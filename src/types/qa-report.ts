@@ -57,6 +57,11 @@ export interface VqaTestResult {
   testId: string;
   storyId: string;
   epicId: string;
+  // ── QA-A (pong1 2026-06-12) — claim attribution for the claims table ──
+  storyTitle?: string;
+  epicLabel?: string;
+  criteriaRef?: string;
+  description?: string;
   /** True iff status === 'pass'. Kept for back-compat. */
   passed: boolean;
   status: VqaTestStatus;
@@ -148,6 +153,24 @@ export type GateCheck = 'compile' | 'typecheck' | 'lint' | 'unit' | 'browser' | 
 
 export type GateCellStatus = 'pass' | 'fail' | 'pending' | 'skipped';
 
+/** QA-D (pong1) — one ACTUAL stage outcome from the wave-merge gate. */
+export interface GateStageResult {
+  key: string;
+  cmd: string;
+  status: GateCellStatus;
+  durationMs?: number;
+  fixedByAgent?: boolean;
+}
+
+/** v2.6 gate-VQA outcome for a wave (the matrix's `gate VQA` column). */
+export interface GateWaveVqaCell {
+  outcome: 'pass' | 'fixed' | 'fix-forward' | 'skipped' | 'env-blocked' | 'unverifiable';
+  pass?: number;
+  fixed?: number;
+  fixForward?: number;
+  unverifiable?: number;
+}
+
 export interface GateWaveRow {
   epicId: string;
   epicLabel: string;
@@ -155,6 +178,11 @@ export interface GateWaveRow {
   waveLabel: string;
   cells: Partial<Record<GateCheck, GateCellStatus>>;
   jobIds: Partial<Record<GateCheck, string>>;
+  /** QA-D — actual stage outcomes; render these over `cells` when present. */
+  stages?: GateStageResult[];
+  vqa?: GateWaveVqaCell;
+  /** True when `cells` were inferred from one job-status bit (legacy). */
+  inferred?: boolean;
 }
 
 export interface GateRollup {
@@ -162,6 +190,46 @@ export interface GateRollup {
   activeChecks: GateCheck[];
   waveRows: GateWaveRow[];
   tamperCountsByStory: Record<string, number>;
+  hasStageData?: boolean;
+}
+
+// ── QA-B (pong1) — wave-gate VQA ingestion ───────────────────────────
+
+export interface GateVqaAttempt {
+  waveNumber: number;
+  result: 'PASS' | 'FAIL' | 'UNVERIFIABLE' | 'FIXED_IN_GATE';
+  observation?: string;
+  screenshotUrl?: string;
+  jobId?: string;
+}
+
+export interface GateVqaClaim {
+  acId: string;
+  storyId: string;
+  epicId: string;
+  acText?: string;
+  attempts: GateVqaAttempt[];
+  final: 'verified' | 'fixed-in-gate' | 'fixed-by-story' | 'fix-forwarded' | 'unverifiable';
+  fixStoryId?: string;
+}
+
+export interface GateVqaRollup {
+  verified: number;
+  fixedInGate: number;
+  fixedByStory: number;
+  fixForwarded: number;
+  unverifiable: number;
+  claims: GateVqaClaim[];
+}
+
+// ── QA-A (pong1) — unique QA run panels ──────────────────────────────
+
+export interface QaRunPanel {
+  qaJobId: string;
+  scope: 'plan' | 'epic';
+  epicIds: string[];
+  epicLabels: string[];
+  title: string;
 }
 
 export interface EpicQaBreakdown {
@@ -196,7 +264,11 @@ export interface QaReport {
   ac: AcRollup;
   vqa: VqaRollup;
   gate: GateRollup;
+  /** QA-B (pong1) — wave-gate VQA evidence, keyed by AC. */
+  gateVqa?: GateVqaRollup;
   perEpic: EpicQaBreakdown[];
+  /** QA-A (pong1) — one entry per UNIQUE QA job (drives run-log panels). */
+  qaRuns: QaRunPanel[];
   attentionItems: AttentionItemRef[];
   runHistory: QaRunSummary[];
   generatedAt: string;

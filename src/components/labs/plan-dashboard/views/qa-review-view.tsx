@@ -19,7 +19,7 @@ import { VerdictStrip } from './qa/verdict-strip';
 import { PillarCard } from './qa/pillar-card';
 import { FailureDrawer, type FailureDrawerItem } from './qa/failure-drawer';
 import { WaveMatrix } from './qa/wave-matrix';
-import { VqaGallery } from './qa/vqa-gallery';
+import { ClaimsTable } from './qa/claims-table';
 import { AuditTimeline } from './qa/audit-timeline';
 import { VqaLogs } from './qa/vqa-logs';
 import { ContractGate } from './qa/contract-gate';
@@ -98,18 +98,21 @@ export function QaReviewView({ planId }: { planId: string }) {
         />
       )}
 
-      {/* Visual QA gallery — surfaces every screenshot with failure-first
-          filtering. Sits below the matrix since it's the deepest drill-down. */}
-      {(report.vqa.thumbnails.length > 0 || report.vqa.overviewUrl) && (
-        <VqaGallery
-          rollup={report.vqa}
-          onSelectFailure={(t) => setDrawerItem({ kind: 'vqa', item: t })}
+      {/* QA-C (pong1 2026-06-12) — the claim-centric table replaces the old
+          thumbnail gallery: one row per claim (Epic → Story → AC) with level
+          chip, wave-gate verdict arc, final QA verdict, thumbnail. EVERY row
+          — pass or fail — opens the universal evidence drawer. */}
+      {(report.vqa.results?.length ?? 0) > 0 && (
+        <ClaimsTable
+          report={report}
+          onSelect={({ test, claim }) => setDrawerItem({ kind: 'vqa', item: test, claim })}
         />
       )}
 
       {/* VQA agent logs — paste-able diagnosis block when VQA misbehaves.
-          Only rendered when at least one epic has a qaJob. */}
-      {report.perEpic.some((e) => !!e.qaJobId) && <VqaLogs perEpic={report.perEpic} />}
+          QA-A: ONE panel per unique QA run (plan-scoped runs no longer
+          duplicate per epic). */}
+      {(report.qaRuns?.length ?? 0) > 0 && <VqaLogs runs={report.qaRuns} />}
 
       {/* Attention items chip strip — filtered QA-relevant items, linked to
           the existing right-side dock via the bell on the project hero. */}
@@ -312,18 +315,29 @@ function VqaPillar({
 function GatePillar({ report }: { report: QaReport }) {
   const { gate } = report;
   const isSkipped = gate.verdict === 'skipped';
-  // Count wave rows with any failing cell for a quick summary.
+  // QA-D — rows with real stage data count stages; legacy rows count cells.
   const failingRows = gate.waveRows.filter((r) =>
-    Object.values(r.cells).some((c) => c === 'fail'),
+    r.stages && r.stages.length > 0
+      ? r.stages.some((s) => s.status === 'fail')
+      : Object.values(r.cells).some((c) => c === 'fail'),
   ).length;
-  const totalCells = gate.waveRows.length * gate.activeChecks.length;
+  const totalCells = gate.waveRows.reduce(
+    (n, r) => n + (r.stages && r.stages.length > 0 ? r.stages.length : gate.activeChecks.length),
+    0,
+  );
   const passCells = gate.waveRows.reduce(
-    (n, r) => n + Object.values(r.cells).filter((c) => c === 'pass').length,
+    (n, r) =>
+      n +
+      (r.stages && r.stages.length > 0
+        ? r.stages.filter((s) => s.status === 'pass').length
+        : Object.values(r.cells).filter((c) => c === 'pass').length),
     0,
   );
   const subtitle = isSkipped
     ? 'Rigor=prototype — no automated gate runs.'
-    : `Per-wave ${gate.activeChecks.length} checks: ${gate.activeChecks.join(' · ')}`;
+    : gate.hasStageData
+      ? 'Per-wave real stage outcomes (wave-merge gate)'
+      : `Per-wave ${gate.activeChecks.length} checks: ${gate.activeChecks.join(' · ')}`;
   return (
     <PillarCard
       title="Automated Gate"

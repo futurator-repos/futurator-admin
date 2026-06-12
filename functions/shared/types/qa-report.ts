@@ -92,6 +92,15 @@ export interface VqaTestResult {
   testId: string; // e.g. "VT-S5-1"
   storyId: string;
   epicId: string;
+  // ── QA-A (pong1 2026-06-12) — claim attribution for the claims table ──
+  /** Title of the owning story (from the plan-wide visualTests join). */
+  storyTitle?: string;
+  /** 1-indexed epic display label ("E1"). */
+  epicLabel?: string;
+  /** The AC this test verifies (story.visualTests[].criteriaRef). */
+  criteriaRef?: string;
+  /** Test description from the authored visual test. */
+  description?: string;
   /** True iff `status === 'pass'`. Kept for back-compat with older clients. */
   passed: boolean;
   /** Authoritative per-test status — derive rendering from this. */
@@ -254,6 +263,38 @@ export type GateCheck = 'compile' | 'typecheck' | 'lint' | 'unit' | 'browser' | 
 
 export type GateCellStatus = 'pass' | 'fail' | 'pending' | 'skipped';
 
+/**
+ * QA-D (pong1 2026-06-12) — one ACTUAL stage outcome from the wave-merge
+ * gate, persisted by the runner in `waveMergeResult.stages[]`. Unlike the
+ * legacy `cells` (which inferred per-check status from a single job-status
+ * bit — the "24 green cells from one bit" façade), these are real: one row
+ * per blocking command that RAN, with its own exit outcome.
+ */
+export interface GateStageResult {
+  /** Mechanical label derived from the command ("build", "test", "lint"…). */
+  key: string;
+  /** The command that ran (or would have run, for skipped stages). */
+  cmd: string;
+  /**
+   * pass    — exited 0 (or no-op-tests tolerance)
+   * fail    — exited non-zero (gate halted here)
+   * skipped — a prior stage failed; this one never ran
+   */
+  status: GateCellStatus;
+  durationMs?: number;
+  /** True when the agentic build-fix repaired this stage and revalidation passed. */
+  fixedByAgent?: boolean;
+}
+
+/** v2.6 gate-VQA outcome for a wave (the matrix's `gate VQA` column). */
+export interface GateWaveVqaCell {
+  outcome: 'pass' | 'fixed' | 'fix-forward' | 'skipped' | 'env-blocked' | 'unverifiable';
+  pass?: number;
+  fixed?: number;
+  fixForward?: number;
+  unverifiable?: number;
+}
+
 /** One row in the wave × check matrix. */
 export interface GateWaveRow {
   epicId: string;
@@ -264,6 +305,16 @@ export interface GateWaveRow {
   cells: Partial<Record<GateCheck, GateCellStatus>>;
   /** Related jobIds for log drill-down. */
   jobIds: Partial<Record<GateCheck, string>>;
+  // ── QA-D (pong1) — truthful per-stage outcomes ──────────────────────
+  /** Actual stage outcomes from waveMergeResult.stages. When present the UI
+   *  MUST render these instead of `cells` (which are inferred). */
+  stages?: GateStageResult[];
+  /** v2.6 gate-VQA outcome for this wave, when the VQA stage ran. */
+  vqa?: GateWaveVqaCell;
+  /** True when `cells` were inferred from the job's single COMPLETED bit
+   *  (legacy jobs with no per-stage data). The UI labels these honestly
+   *  instead of painting N independent green checks. */
+  inferred?: boolean;
 }
 
 export interface GateRollup {
@@ -272,6 +323,73 @@ export interface GateRollup {
   activeChecks: GateCheck[];
   waveRows: GateWaveRow[];
   tamperCountsByStory: Record<string, number>; // storyId → count
+  /** QA-D — true when at least one wave row carries real stage data. */
+  hasStageData?: boolean;
+}
+
+// ── QA-B (pong1 2026-06-12) — wave-gate VQA ingestion ────────────────
+//
+// The v2.6 wave gate produces the strongest evidence in the system: per-AC
+// judged verdicts on the MERGED candidate, in-gate fix history, fix-forward
+// → auto-minted fix story → re-verification at a later gate. Pre-QA-B none
+// of it reached the QA Review surface. These types carry that evidence,
+// keyed by AC (the claim), aggregated from every wave-merge job's
+// `waveMergeResult.vqa` summary.
+
+export interface GateVqaAttempt {
+  waveNumber: number;
+  /** Judge-panel consensus at this gate. FIXED_IN_GATE = the capped
+   *  in-candidate fixer cleared it and re-judge passed. */
+  result: 'PASS' | 'FAIL' | 'UNVERIFIABLE' | 'FIXED_IN_GATE';
+  observation?: string;
+  screenshotUrl?: string;
+  /** wave-merge jobId — log drill-down. */
+  jobId?: string;
+}
+
+export interface GateVqaClaim {
+  acId: string;
+  storyId: string;
+  epicId: string;
+  acText?: string;
+  /** Chronological gate history (the fix-forward arc renders from this). */
+  attempts: GateVqaAttempt[];
+  /**
+   * verified       — passed at its first gate
+   * fixed-in-gate  — failed, in-gate fixer cleared it (committed + re-judged)
+   * fixed-by-story — fix-forwarded, the auto-minted fix story passed a later gate
+   * fix-forwarded  — failed and NOT yet re-verified (open loop)
+   * unverifiable   — evidence agent concluded no idle frame can show it
+   */
+  final: 'verified' | 'fixed-in-gate' | 'fixed-by-story' | 'fix-forwarded' | 'unverifiable';
+  /** The auto-minted wave-vqa-fix story, when one exists for this AC. */
+  fixStoryId?: string;
+}
+
+export interface GateVqaRollup {
+  verified: number;
+  fixedInGate: number;
+  fixedByStory: number;
+  /** Still-open fix-forwards (no later gate has verified them yet). */
+  fixForwarded: number;
+  unverifiable: number;
+  claims: GateVqaClaim[];
+}
+
+// ── QA-A (pong1 2026-06-12) — unique QA run panels ───────────────────
+//
+// Plan-scoped QA means every epic resolves to the SAME execute job; the UI
+// rendered one log panel per epic → N byte-identical panels for one run
+// (the operator's "why are there 2 epic QA logs?"). The aggregator now
+// emits one entry per UNIQUE job with its scope spelled out.
+
+export interface QaRunPanel {
+  qaJobId: string;
+  scope: 'plan' | 'epic';
+  epicIds: string[];
+  /** Display labels of the epics this run covers (["E1","E2"]). */
+  epicLabels: string[];
+  title: string; // e.g. "QA run · plan-scoped · covers E1, E2"
 }
 
 // ── Per-epic breakdown (for "stacked drill-down" layout) ─────────────
@@ -304,7 +422,15 @@ export interface QaReport {
   vqa: VqaRollup;
   gate: GateRollup;
 
+  /** QA-B (pong1) — wave-gate VQA evidence, keyed by AC. Undefined when no
+   *  wave-merge job carries a vqa summary (pre-v2.6 plans). */
+  gateVqa?: GateVqaRollup;
+
   perEpic: EpicQaBreakdown[];
+
+  /** QA-A (pong1) — one entry per UNIQUE QA job; drives the run-log panels
+   *  (replaces the per-epic panels that duplicated plan-scoped runs). */
+  qaRuns: QaRunPanel[];
 
   /** Attention items filtered to QA-relevant categories. */
   attentionItems: AttentionItemSummary[];

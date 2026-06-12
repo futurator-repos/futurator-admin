@@ -395,10 +395,37 @@ export function composeQualityGate({ qualityGate, rigor, postMergeValidationCmd 
     return {
       mechanical: Array.isArray(qualityGate.mechanical) ? qualityGate.mechanical : [],
       blockingCmd: tier.join(' && '),
+      // QA-D (pong1 2026-06-12) — the individual stage commands. The runner
+      // executes these one at a time (same stop-at-first-failure semantics
+      // as the && chain) so each stage's REAL outcome can be persisted in
+      // waveMergeResult.stages[] — the QA Review matrix renders truth
+      // instead of inferring N green cells from one COMPLETED bit.
+      blockingStages: tier,
       source: 'quality-gate',
     };
   }
-  return { mechanical: [], blockingCmd: postMergeValidationCmd ?? null, source: 'legacy' };
+  return {
+    mechanical: [],
+    blockingCmd: postMergeValidationCmd ?? null,
+    blockingStages: postMergeValidationCmd ? [postMergeValidationCmd] : [],
+    source: 'legacy',
+  };
+}
+
+/**
+ * QA-D — mechanical label for a stage command ("npm run build" → "build",
+ * "npx eslint . --max-warnings 200" → "eslint"). Purely lexical; used only
+ * for matrix column headers, never for behavior.
+ */
+export function stageLabel(cmd) {
+  const core = String(cmd)
+    .replace(/^\[[^\]]*\]\s*&&\s*/, '') // strip `[ -f x ] && ` file guards
+    .trim();
+  let m = core.match(/npm run ([\w:-]+)/);
+  if (m) return m[1];
+  m = core.match(/npx\s+(?:--[\w-]+\s+)*([\w@/.-]+)/);
+  if (m) return m[1].replace(/^.*\//, '');
+  return core.split(/\s+/)[0] || 'stage';
 }
 
 export async function runWaveMerge({
@@ -794,6 +821,9 @@ export async function runWaveMerge({
   // 3. Post-merge validation — rigor-composed quality stages (v2.6 M4) or
   //    the legacy single command (see composeQualityGate).
   const gate = composeQualityGate({ qualityGate, rigor, postMergeValidationCmd });
+  // QA-D (pong1 2026-06-12) — per-stage outcomes; persisted by the daemon
+  // as waveMergeResult.stages[] on success AND failure results.
+  const stages = [];
   if (gate.blockingCmd || gate.mechanical.length > 0) {
     // 2026-05-28 — the candidate worktree is created via `git worktree add`
     // with NO node_modules, so ANY validation command needing deps
@@ -836,8 +866,37 @@ export async function runWaveMerge({
     let combinedOut = '';
     if (gate.blockingCmd) {
       log('info', `[wave-merge] running post-merge validation (${gate.source}): ${gate.blockingCmd}`);
-      testRun = await shell(gate.blockingCmd, candidateDir, 900_000);
-      combinedOut = testRun.stdout + '\n' + testRun.stderr;
+      // QA-D (pong1 2026-06-12) — run the blocking tier ONE STAGE AT A TIME
+      // (same stop-at-first-failure semantics as the old && chain) and
+      // record each stage's real outcome. waveMergeResult.stages[] is what
+      // makes the QA Review matrix truthful. Bonus correctness: the no-op
+      // test tolerance ("no test files" exit≠0) now SKIPS only that stage
+      // and continues — under the old single chain it aborted the whole
+      // chain and silently treated the never-run lint/knip as pass.
+      let gateHalted = false;
+      for (const cmd of gate.blockingStages) {
+        const key = stageLabel(cmd);
+        if (gateHalted) {
+          stages.push({ key, cmd, status: 'skipped' });
+          continue;
+        }
+        const t0 = Date.now();
+        const r = await shell(cmd, candidateDir, 900_000);
+        const out = r.stdout + '\n' + r.stderr;
+        const durationMs = Date.now() - t0;
+        combinedOut += (combinedOut ? '\n' : '') + out;
+        if (r.code === 0) {
+          stages.push({ key, cmd, status: 'pass', durationMs });
+        } else if (isNoOpTestExit(out)) {
+          log('info', `[wave-merge] stage "${key}" exited ${r.code} with no runnable tests — tolerated as pass`);
+          stages.push({ key, cmd, status: 'pass', durationMs });
+        } else {
+          log('warn', `[wave-merge] stage "${key}" FAILED (exit ${r.code})`);
+          stages.push({ key, cmd, status: 'fail', durationMs });
+          testRun = r;
+          gateHalted = true;
+        }
+      }
     }
 
     // pacman1 (2026-06-11) — agentic build-fix, one bounded attempt.
@@ -849,7 +908,12 @@ export async function runWaveMerge({
     // resolver), let an agent repair the MERGED tree in the candidate,
     // then re-run the SAME validation. Green stays green-gated: the fix
     // only ships if the full gate passes, and the commit is audited.
-    if (testRun.code !== 0 && !isNoOpTestExit(combinedOut) && fixBuild) {
+    // QA-D — no-op test exits are tolerated INLINE per stage now, so
+    // testRun.code !== 0 here always means a REAL stage failure. (The old
+    // isNoOpTestExit(combinedOut) check would mask a later lint failure
+    // whenever an earlier tolerated stage's "no test files" output was in
+    // the combined log.)
+    if (testRun.code !== 0 && fixBuild) {
       log('warn', `[wave-merge] post-merge validation failed (exit ${testRun.code}); attempting agentic build-fix`);
       try {
         const fix = await fixBuild({
@@ -882,6 +946,17 @@ export async function runWaveMerge({
               log('info', `[wave-merge] agentic build-fix PASSED revalidation — proceeding to green advance`);
               testRun = rerun;
               combinedOut = rerun.stdout + '\n' + rerun.stderr;
+              // QA-D — the rerun validated the FULL chain: the failed stage
+              // is now pass (audited as agent-fixed); stages after it that
+              // never ran individually were covered by the chain rerun.
+              for (const s of stages) {
+                if (s.status === 'fail') {
+                  s.status = 'pass';
+                  s.fixedByAgent = true;
+                } else if (s.status === 'skipped') {
+                  s.status = 'pass';
+                }
+              }
             }
           } else {
             log('warn', `[wave-merge] build-fix attempted but revalidation still failing (exit ${rerun.code}) — halting`);
@@ -894,15 +969,10 @@ export async function runWaveMerge({
       }
     }
 
-    // 2026-05-28 — a no-op test command (no test script / no test files) is
-    // NOT a wave failure. Treat as pass; the build half of the gate already
-    // validated compile + type-check.
-    if (testRun.code !== 0 && isNoOpTestExit(combinedOut)) {
-      log(
-        'info',
-        `[wave-merge] post-merge validation exited ${testRun.code} but output indicates no runnable tests — treating as pass`,
-      );
-    } else if (testRun.code !== 0) {
+    // 2026-05-28 no-op-test tolerance moved INLINE into the per-stage loop
+    // (QA-D): a "no runnable tests" exit marks only that stage pass and
+    // continues, so reaching here with code !== 0 is always a real failure.
+    if (testRun.code !== 0) {
       const failing = parseFailingTests(combinedOut);
       log(
         'warn',
@@ -935,6 +1005,7 @@ export async function runWaveMerge({
         mergedStoryIds: merged,
         testOutput: combinedOut.slice(-4000),
         failingTests: failing,
+        stages,
       };
     }
     log('info', `[wave-merge] post-merge validation passed`);
@@ -1024,6 +1095,7 @@ export async function runWaveMerge({
         testOutput: (vqa.bootLogTail || '').slice(-4000),
         failingTests: [],
         vqa,
+        stages,
       };
     }
   }
@@ -1109,5 +1181,7 @@ export async function runWaveMerge({
     // handler persists it on waveMergeResult; M5 surfaces it in the UI and
     // mints fix stories from `vqa.fixForward`.
     vqa,
+    // QA-D (pong1) — real per-stage gate outcomes for the truthful matrix.
+    stages,
   };
 }

@@ -503,7 +503,13 @@ describe('composeQualityGate', () => {
   it('falls back to the legacy single command without qualityGate or rigor', () => {
     expect(
       composeQualityGate({ qualityGate: null, rigor: 'mvp', postMergeValidationCmd: 'npm test' }),
-    ).toEqual({ mechanical: [], blockingCmd: 'npm test', source: 'legacy' });
+    ).toEqual({
+      mechanical: [],
+      blockingCmd: 'npm test',
+      // QA-D — legacy command runs as a single recorded stage.
+      blockingStages: ['npm test'],
+      source: 'legacy',
+    });
     expect(
       composeQualityGate({ qualityGate, rigor: null, postMergeValidationCmd: 'npm test' }).source,
     ).toBe('legacy');
@@ -511,6 +517,19 @@ describe('composeQualityGate', () => {
       composeQualityGate({ qualityGate, rigor: 'unknown-tier', postMergeValidationCmd: null })
         .blockingCmd,
     ).toBeNull();
+  });
+
+  // QA-D (pong1 2026-06-12) — the tier is also exposed stage-by-stage so the
+  // runner can record one real outcome per command (truthful matrix).
+  it('exposes blockingStages alongside the &&-chain for per-stage outcomes', () => {
+    const g = composeQualityGate({ qualityGate, rigor: 'mvp', postMergeValidationCmd: null });
+    expect(g.blockingStages).toEqual(['npm run build', 'npm run test --if-present']);
+    const legacy = composeQualityGate({
+      qualityGate: null,
+      rigor: null,
+      postMergeValidationCmd: null,
+    });
+    expect(legacy.blockingStages).toEqual([]);
   });
 });
 
@@ -569,6 +588,9 @@ describe('runWaveMerge — quality stages', () => {
       }),
     );
     expect(prod.outcome).toBe('wave-build-failed');
+    // QA-D (pong1) — per-stage truth on the failure result: first stage
+    // passed, second failed; nothing after it (stop-at-first-failure).
+    expect(prod.stages.map((s) => s.status)).toEqual(['pass', 'fail']);
 
     const mvp = await runWaveMerge(
       baseArgs(appId, planSlug, ['story-a'], {
@@ -579,5 +601,23 @@ describe('runWaveMerge — quality stages', () => {
       }),
     );
     expect(mvp.outcome).toBe('success');
+    // QA-D — success result carries the real outcomes too.
+    expect(mvp.stages).toEqual([
+      expect.objectContaining({ cmd: 'true', status: 'pass' }),
+    ]);
+  });
+});
+
+// QA-D (pong1 2026-06-12) — stage labels are lexical, used only as matrix
+// column headers.
+describe('stageLabel', () => {
+  it('derives mechanical labels from common command shapes', async () => {
+    const { stageLabel } = await import('../wave-merge-runner.mjs');
+    expect(stageLabel('npm run build')).toBe('build');
+    expect(stageLabel('npm run test --if-present')).toBe('test');
+    expect(stageLabel('npx eslint . --max-warnings 200')).toBe('eslint');
+    expect(stageLabel('npx tsc --noEmit')).toBe('tsc');
+    expect(stageLabel('[ -f .eslintrc ] && npx eslint .')).toBe('eslint');
+    expect(stageLabel('true')).toBe('true');
   });
 });

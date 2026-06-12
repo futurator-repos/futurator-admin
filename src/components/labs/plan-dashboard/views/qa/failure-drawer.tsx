@@ -17,12 +17,22 @@
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { X, ArrowLeft, Send, FileText, ExternalLink, Loader2, ShieldCheck } from 'lucide-react';
-import type { AcCriterionResult, GateWaveRow, VqaTestResult } from '@/types/qa-report';
+import type {
+  AcCriterionResult,
+  GateVqaClaim,
+  GateWaveRow,
+  VqaTestResult,
+} from '@/types/qa-report';
 import { useSendStoryBack, useAcceptQaTest } from '@/hooks/use-qa-report';
+import { LevelChip } from './claims-table';
 
+// QA-C (pong1 2026-06-12) — this is now the UNIVERSAL evidence drawer: every
+// claim row (pass or fail) opens here. The vqa kind optionally carries the
+// wave-gate VQA claim so the full gate history renders alongside the final
+// QA evidence.
 export type FailureDrawerItem =
   | { kind: 'ac'; item: AcCriterionResult }
-  | { kind: 'vqa'; item: VqaTestResult }
+  | { kind: 'vqa'; item: VqaTestResult; claim?: GateVqaClaim }
   | { kind: 'gate'; row: GateWaveRow; check: string; cellStatus: string };
 
 interface Props {
@@ -68,6 +78,9 @@ export function FailureDrawer({ planId, item, onClose }: Props) {
   // B#2 — VQA accept (known-limitation) state.
   const vqaTest = item.kind === 'vqa' ? item.item : null;
   const isAccepted = !!vqaTest?.accepted;
+  // QA-C — the drawer is universal: a passing claim shows its evidence but
+  // not the failure actions (send-back / accept).
+  const isPassingVqa = vqaTest?.status === 'pass';
 
   function handleAccept() {
     if (!vqaTest) return;
@@ -143,12 +156,12 @@ export function FailureDrawer({ planId, item, onClose }: Props) {
         >
           <span
             style={{
-              background: 'var(--destructive)',
+              background: isPassingVqa ? 'var(--success)' : 'var(--destructive)',
               width: 8,
               height: 8,
               borderRadius: '50%',
               marginTop: 7,
-              boxShadow: '0 0 10px color-mix(in srgb, var(--destructive) 40%, transparent)',
+              boxShadow: `0 0 10px color-mix(in srgb, ${isPassingVqa ? 'var(--success)' : 'var(--destructive)'} 40%, transparent)`,
               display: 'inline-block',
               flexShrink: 0,
             }}
@@ -208,13 +221,13 @@ export function FailureDrawer({ planId, item, onClose }: Props) {
         {/* Body */}
         <div style={{ padding: 20, overflow: 'auto', flex: 1 }}>
           {item.kind === 'ac' && <AcDetail item={item.item} />}
-          {item.kind === 'vqa' && <VqaDetail item={item.item} />}
+          {item.kind === 'vqa' && <VqaDetail item={item.item} claim={item.claim} />}
           {item.kind === 'gate' && (
             <GateDetail row={item.row} check={item.check} cellStatus={item.cellStatus} />
           )}
 
-          {/* Send-back composer (only when we have a story target) */}
-          {contextStoryId && (
+          {/* Send-back composer (only for failures with a story target) */}
+          {contextStoryId && !isPassingVqa && (
             <div style={{ marginTop: 22 }}>
               <SectionLabel>Send back to dev — note (optional)</SectionLabel>
               <textarea
@@ -263,7 +276,7 @@ export function FailureDrawer({ planId, item, onClose }: Props) {
             alignItems: 'center',
           }}
         >
-          {contextStoryId && (
+          {contextStoryId && !isPassingVqa && (
             <button
               type="button"
               onClick={handleSendBack}
@@ -292,7 +305,7 @@ export function FailureDrawer({ planId, item, onClose }: Props) {
               {sendBack.isPending ? 'Sending…' : 'Send back to dev'}
             </button>
           )}
-          {item.kind === 'vqa' && (
+          {item.kind === 'vqa' && !isPassingVqa && (
             <button
               type="button"
               onClick={handleAccept}
@@ -418,7 +431,13 @@ function AcDetail({ item }: { item: AcCriterionResult }) {
   );
 }
 
-function VqaDetail({ item }: { item: VqaTestResult }) {
+const LEVEL_MEANING: Record<string, string> = {
+  L0: 'deterministic console-error scan — no AI judge involved; failures are real console errors',
+  L1: 'static screenshot judged by an AI panel against the expected text below',
+  L2: 'interaction flow — scripted actions performed, then the resulting screens judged',
+};
+
+function VqaDetail({ item, claim }: { item: VqaTestResult; claim?: GateVqaClaim }) {
   const gated = item.failureClass === 'interaction-gated';
   return (
     <>
@@ -528,12 +547,152 @@ function VqaDetail({ item }: { item: VqaTestResult }) {
         </>
       )}
 
+      {/* QA-C — the judge's rationale, for PASSING tests too (the operator's
+          "I can't see or experience each pass" complaint). */}
+      {item.rationale && (
+        <>
+          <SectionLabel>Judge rationale</SectionLabel>
+          <p
+            style={{
+              fontSize: 12.5,
+              color: 'var(--text-dim)',
+              lineHeight: 1.55,
+              marginTop: 6,
+              marginBottom: 14,
+              padding: '10px 14px',
+              border: '1px solid var(--border)',
+              borderLeft: `3px solid ${item.passed ? 'var(--success)' : 'var(--warning)'}`,
+              background: 'var(--surface)',
+              borderRadius: 3,
+            }}
+          >
+            {item.rationale}
+          </p>
+        </>
+      )}
+
+      {/* QA-C — what the routing level means, spelled out. */}
+      {item.level && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            marginBottom: 14,
+            fontSize: 12,
+            color: 'var(--text-mute)',
+            lineHeight: 1.45,
+          }}
+        >
+          <LevelChip level={item.level} />
+          <span>{LEVEL_MEANING[item.level]}</span>
+        </div>
+      )}
+
+      {/* QA-B — wave-gate VQA history: the claim's verification arc on the
+          MERGED candidate, before final QA ever ran. */}
+      {claim && claim.attempts.length > 0 && (
+        <>
+          <SectionLabel>Wave-gate history (merged candidate)</SectionLabel>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+              marginTop: 6,
+              marginBottom: 14,
+            }}
+          >
+            {claim.attempts.map((a, i) => (
+              <div
+                key={`${a.waveNumber}-${i}`}
+                style={{
+                  display: 'flex',
+                  alignItems: 'baseline',
+                  gap: 8,
+                  padding: '7px 10px',
+                  border: '1px solid var(--border)',
+                  borderRadius: 3,
+                  background: 'var(--surface)',
+                  fontSize: 12,
+                }}
+              >
+                <code
+                  style={{
+                    fontSize: 10,
+                    color: 'var(--text-faint)',
+                    flexShrink: 0,
+                    letterSpacing: '0.06em',
+                  }}
+                >
+                  wave {a.waveNumber}
+                </code>
+                <span
+                  style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 10,
+                    fontWeight: 600,
+                    flexShrink: 0,
+                    color:
+                      a.result === 'PASS' || a.result === 'FIXED_IN_GATE'
+                        ? 'var(--success)'
+                        : a.result === 'FAIL'
+                          ? 'var(--destructive)'
+                          : 'var(--text-mute)',
+                  }}
+                >
+                  {a.result === 'FIXED_IN_GATE' ? 'FIXED IN GATE' : a.result}
+                </span>
+                <span style={{ color: 'var(--text-dim)', flex: 1, lineHeight: 1.4 }}>
+                  {a.observation || ''}
+                </span>
+                {a.screenshotUrl && (
+                  <a
+                    href={a.screenshotUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 9,
+                      color: 'var(--accent-blue)',
+                      flexShrink: 0,
+                      letterSpacing: '0.06em',
+                    }}
+                  >
+                    shot ↗
+                  </a>
+                )}
+              </div>
+            ))}
+            {claim.fixStoryId && (
+              <div
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 10,
+                  color: 'var(--text-mute)',
+                  letterSpacing: '0.04em',
+                }}
+              >
+                auto-minted fix story · {claim.fixStoryId.slice(0, 8)} ({claim.final})
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
       <MetaGrid
         cells={[
           { label: 'Test', value: item.testId },
-          { label: 'Story', value: item.storyId },
-          { label: 'Epic', value: item.epicId.slice(0, 10) },
-          { label: 'Verdict', value: item.passed ? 'PASS' : 'FAIL' },
+          { label: 'Criterion', value: item.criteriaRef ?? '—' },
+          { label: 'Story', value: item.storyTitle ?? item.storyId },
+          { label: 'Epic', value: item.epicLabel ?? item.epicId.slice(0, 10) },
+          { label: 'Verdict', value: item.status.toUpperCase() },
+          {
+            label: 'Cost · time',
+            value: `${item.costUsd != null ? `$${item.costUsd.toFixed(3)}` : '—'} · ${
+              item.durationMs != null ? `${(item.durationMs / 1000).toFixed(1)}s` : '—'
+            }`,
+          },
         ]}
       />
     </>

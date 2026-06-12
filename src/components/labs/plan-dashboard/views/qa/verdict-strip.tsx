@@ -125,6 +125,14 @@ export function VerdictStrip({ report, planId, showLastRun = true }: Props) {
         verdict={report.ac.verdict}
         pass={report.ac.pass}
         total={report.ac.total}
+        // QA-C honesty: below production rigor, done stories auto-pass their
+        // ACs without explicit PO/operator sign-off. Label the rubber stamp
+        // as what it is instead of presenting it like real verification.
+        note={
+          report.rigor !== 'production' && !report.ac.manualApproval && report.ac.pass > 0
+            ? `auto-pass (${report.rigor})`
+            : undefined
+        }
       />
       <MiniGauge
         label="VQA"
@@ -132,13 +140,16 @@ export function VerdictStrip({ report, planId, showLastRun = true }: Props) {
         pass={report.vqa.pass}
         total={report.vqa.total}
       />
+      {/* QA-B — the wave-gate VQA arc: judged verdicts on the MERGED
+          candidate, the strongest evidence the pipeline produces. */}
+      {report.gateVqa && <GateVqaChip rollup={report.gateVqa} />}
       <MiniGauge
         label="Gate"
         verdict={report.gate.verdict}
-        // For the Gate pillar we don't have a simple "pass/total" but we can
-        // surface total rows × active checks. Skipped pillars render `—`.
+        // QA-D — when waves carry real per-stage outcomes, count those; the
+        // legacy rows×checks product painted N cells from one bit.
         pass={countGatePass(report)}
-        total={report.gate.waveRows.length * report.gate.activeChecks.length}
+        total={countGateTotal(report)}
       />
 
       {/* Rigor + auto-QA pills */}
@@ -349,12 +360,25 @@ function RunQaButton({
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
+// QA-D — rows with real stage data count stages; legacy rows count cells.
 function countGatePass(report: QaReport): number {
   let n = 0;
   for (const row of report.gate.waveRows) {
-    for (const cell of Object.values(row.cells)) {
-      if (cell === 'pass') n += 1;
+    if (row.stages && row.stages.length > 0) {
+      n += row.stages.filter((s) => s.status === 'pass').length;
+    } else {
+      for (const cell of Object.values(row.cells)) {
+        if (cell === 'pass') n += 1;
+      }
     }
+  }
+  return n;
+}
+
+function countGateTotal(report: QaReport): number {
+  let n = 0;
+  for (const row of report.gate.waveRows) {
+    n += row.stages && row.stages.length > 0 ? row.stages.length : report.gate.activeChecks.length;
   }
   return n;
 }
@@ -380,11 +404,14 @@ function MiniGauge({
   verdict,
   pass,
   total,
+  note,
 }: {
   label: string;
   verdict: QaPillarVerdict;
   pass: number;
   total: number;
+  /** QA-C — honesty annotation rendered after the value (e.g. "auto-pass (mvp)"). */
+  note?: string;
 }) {
   const color = verdictColor(verdict);
   const pct = total > 0 ? Math.round((pass / total) * 100) : 0;
@@ -420,6 +447,20 @@ function MiniGauge({
         >
           {valueText}
         </span>
+        {note && (
+          <span
+            title="Below production rigor the AC audit auto-passes when a story completes — this is a recorded assumption, not an explicit verification."
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 8,
+              color: 'var(--warning)',
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+            }}
+          >
+            {note}
+          </span>
+        )}
       </div>
       <div
         style={{
@@ -435,6 +476,64 @@ function MiniGauge({
             height: '100%',
             background: color,
             opacity: verdict === 'skipped' ? 0.2 : 0.9,
+            transition: 'width 300ms',
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * QA-B — the wave-gate VQA summary chip: `gate-VQA 5✓ · 1 fixed` (verified +
+ * fixed counts), warning-colored while any fix-forward is still open.
+ */
+function GateVqaChip({ rollup }: { rollup: NonNullable<QaReport['gateVqa']> }) {
+  const good = rollup.verified + rollup.fixedInGate + rollup.fixedByStory;
+  const open = rollup.fixForwarded;
+  const color = open > 0 ? 'var(--warning)' : good > 0 ? 'var(--success)' : 'var(--text-mute)';
+  const fixed = rollup.fixedInGate + rollup.fixedByStory;
+  const parts = [
+    `${good}✓`,
+    fixed > 0 ? `${fixed} fixed` : null,
+    open > 0 ? `${open} open` : null,
+    rollup.unverifiable > 0 ? `${rollup.unverifiable} unverifiable` : null,
+  ].filter(Boolean);
+  return (
+    <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+        <span
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 8,
+            color: 'var(--text-faint)',
+            textTransform: 'uppercase',
+            letterSpacing: '0.22em',
+          }}
+        >
+          Gate-VQA
+        </span>
+        <span
+          title="Judged visual verdicts on each wave's MERGED candidate (v2.6 wave gate) — verified / fixed in gate / fixed by auto-minted story / still-open fix-forwards"
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 13,
+            color,
+            fontWeight: 500,
+            letterSpacing: '0.01em',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {parts.join(' · ')}
+        </span>
+      </div>
+      <div style={{ width: 80, height: 2, background: 'var(--border)', overflow: 'hidden' }}>
+        <div
+          style={{
+            width: `${rollup.claims.length > 0 ? Math.round((good / rollup.claims.length) * 100) : 0}%`,
+            height: '100%',
+            background: color,
+            opacity: 0.9,
             transition: 'width 300ms',
           }}
         />

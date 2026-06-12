@@ -1,21 +1,30 @@
 'use client';
 
 /**
- * Wave-level build matrix — rows = waves, cols = active checks for the
- * plan's rigor (`compile / typecheck / lint / unit / browser / tamper`).
+ * Wave-level gate matrix — rows = epic·wave, columns:
  *
- * Each cell renders as a colored square:
- *   pass     → green
- *   fail     → red    (clickable → drawer)
- *   pending  → muted
- *   skipped  → blank
+ *   QA-D (pong1 2026-06-12) — TRUTHFUL MODE. When the wave-merge runner
+ *   persisted per-stage outcomes (`waveMergeResult.stages[]`), the columns
+ *   are the rigor's ACTUAL blocking stages (build / test / eslint / knip…)
+ *   plus a `gate VQA` column, and every cell is a real exit outcome.
+ *   `skipped` cells mean the stage genuinely didn't run — never inferred
+ *   green. Legacy rows (jobs predating stage persistence) render ONE
+ *   honest "inferred from job status" cell instead of N fabricated checks
+ *   (the pong1 "24 green cells from one COMPLETED bit" façade).
  *
- * This is Wave 3 of the QA page. Matrix is per-wave (not per-story) because
- * the daemon emits build-check signals at wave granularity. Per-story is
- * Phase 2 (deferred).
+ *   Fallback (no stage data anywhere): the legacy fixed-column matrix, with
+ *   an honesty footnote.
  */
 
-import type { GateCellStatus, GateCheck, GateRollup, GateWaveRow } from '@/types/qa-report';
+import { Fragment } from 'react';
+import type {
+  GateCellStatus,
+  GateCheck,
+  GateRollup,
+  GateStageResult,
+  GateWaveRow,
+  GateWaveVqaCell,
+} from '@/types/qa-report';
 
 interface Props {
   rollup: GateRollup;
@@ -55,12 +64,17 @@ export function WaveMatrix({ rollup, onSelectCell }: Props) {
           textAlign: 'center',
         }}
       >
-        No waves have emitted build-check signals yet. The matrix populates as
-        each wave completes.
+        No waves have emitted build-check signals yet. The matrix populates as each wave completes.
       </div>
     );
   }
 
+  // QA-D — truthful mode when ANY row carries real stage outcomes.
+  if (rollup.hasStageData) {
+    return <StageMatrix rollup={rollup} />;
+  }
+
+  const anyInferred = waveRows.some((r) => r.inferred);
   return (
     <div
       style={{
@@ -96,8 +110,7 @@ export function WaveMatrix({ rollup, onSelectCell }: Props) {
             <tr
               style={{
                 borderBottom: '1px solid var(--border)',
-                background:
-                  'color-mix(in srgb, var(--foreground) 1.5%, transparent)',
+                background: 'color-mix(in srgb, var(--foreground) 1.5%, transparent)',
               }}
             >
               <th
@@ -189,20 +202,234 @@ export function WaveMatrix({ rollup, onSelectCell }: Props) {
         </table>
       </div>
 
+      {/* QA-D honesty footnote — these cells are NOT independent checks. */}
+      {anyInferred && (
+        <div
+          style={{
+            padding: '8px 16px',
+            borderTop: '1px solid var(--border)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 9.5,
+            color: 'var(--warning)',
+            letterSpacing: '0.04em',
+            lineHeight: 1.5,
+          }}
+        >
+          ⚠ inferred — these waves predate per-stage gate recording: every cell in a row reflects
+          the wave-merge job&apos;s single pass/fail bit, not {activeChecks.length} independent
+          checks. New waves record real per-stage outcomes.
+        </div>
+      )}
       <Legend />
     </div>
   );
 }
 
+// ── QA-D — truthful per-stage matrix ────────────────────────────────
+
+function StageMatrix({ rollup }: { rollup: GateRollup }) {
+  const { waveRows } = rollup;
+  // Column set = union of stage keys across rows, in first-seen order. One
+  // plan = one rigor, so rows agree; the union covers mixed legacy rows.
+  const stageKeys: string[] = [];
+  for (const row of waveRows) {
+    for (const s of row.stages ?? []) {
+      if (!stageKeys.includes(s.key)) stageKeys.push(s.key);
+    }
+  }
+  const anyVqa = waveRows.some((r) => r.vqa);
+
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border)',
+        background: 'var(--bg-elev)',
+        borderRadius: 8,
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          padding: '12px 16px',
+          borderBottom: '1px solid var(--border)',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 9,
+          color: 'var(--text-faint)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.22em',
+        }}
+      >
+        Gate matrix · wave × stage (real outcomes)
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 560 }}>
+          <thead>
+            <tr
+              style={{
+                borderBottom: '1px solid var(--border)',
+                background: 'color-mix(in srgb, var(--foreground) 1.5%, transparent)',
+              }}
+            >
+              <th style={stageHeadStyle({ textAlign: 'left', minWidth: 160 })}>Wave</th>
+              {stageKeys.map((k) => (
+                <th key={k} style={stageHeadStyle({ textAlign: 'center' })}>
+                  {k}
+                </th>
+              ))}
+              {anyVqa && <th style={stageHeadStyle({ textAlign: 'center' })}>gate VQA</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {waveRows.map((row, idx) => {
+              const byKey = new Map<string, GateStageResult>();
+              for (const s of row.stages ?? []) byKey.set(s.key, s);
+              return (
+                <tr
+                  key={`${row.epicId}-${row.waveIndex}`}
+                  style={{ borderTop: idx === 0 ? 'none' : '1px solid var(--border)' }}
+                >
+                  <td
+                    style={{
+                      padding: '10px 16px',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 11,
+                      color: 'var(--text-dim)',
+                      letterSpacing: '0.04em',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    <span style={{ color: 'var(--text-faint)' }}>{row.epicLabel}</span>
+                    {' · '}
+                    {row.waveLabel}
+                  </td>
+                  {row.stages && row.stages.length > 0 ? (
+                    <Fragment>
+                      {stageKeys.map((k) => {
+                        const s = byKey.get(k);
+                        return (
+                          <td key={k} style={{ padding: '8px 10px', textAlign: 'center' }}>
+                            {s ? (
+                              <span
+                                title={`${s.cmd}${s.durationMs != null ? ` · ${(s.durationMs / 1000).toFixed(1)}s` : ''}${s.fixedByAgent ? ' · fixed by build-fix agent' : ''}`}
+                              >
+                                <Cell status={s.status} />
+                                {s.fixedByAgent && (
+                                  <span
+                                    style={{
+                                      fontFamily: 'var(--font-mono)',
+                                      fontSize: 8,
+                                      color: 'var(--warning)',
+                                      display: 'block',
+                                      letterSpacing: '0.06em',
+                                    }}
+                                  >
+                                    agent-fixed
+                                  </span>
+                                )}
+                              </span>
+                            ) : (
+                              <span
+                                title="This stage is not part of this wave's gate"
+                                style={{
+                                  fontFamily: 'var(--font-mono)',
+                                  fontSize: 10,
+                                  color: 'var(--text-faint)',
+                                }}
+                              >
+                                n/a
+                              </span>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </Fragment>
+                  ) : (
+                    <td
+                      colSpan={stageKeys.length}
+                      style={{
+                        padding: '8px 10px',
+                        textAlign: 'center',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 9.5,
+                        color: 'var(--text-mute)',
+                        letterSpacing: '0.04em',
+                      }}
+                      title="This wave's gate job predates per-stage recording — only its single pass/fail bit is known."
+                    >
+                      {row.inferred ? 'inferred from job status (no per-stage data)' : 'pending'}
+                    </td>
+                  )}
+                  {anyVqa && (
+                    <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                      <VqaOutcomeCell vqa={row.vqa} />
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <Legend />
+    </div>
+  );
+}
+
+function stageHeadStyle(extra: React.CSSProperties): React.CSSProperties {
+  return {
+    padding: '10px 14px',
+    fontFamily: 'var(--font-mono)',
+    fontSize: 8,
+    color: 'var(--text-faint)',
+    textTransform: 'uppercase',
+    letterSpacing: '0.18em',
+    fontWeight: 500,
+    ...extra,
+  };
+}
+
+/** v2.6 gate-VQA outcome cell: ✓ pass · ⚒ fixed · → fix-forward · — skipped. */
+function VqaOutcomeCell({ vqa }: { vqa?: GateWaveVqaCell }) {
+  if (!vqa) {
+    return (
+      <span
+        title="No VQA stage ran at this gate"
+        style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}
+      >
+        —
+      </span>
+    );
+  }
+  const meta =
+    vqa.outcome === 'pass'
+      ? { glyph: '✓', color: 'var(--success)', label: `pass (${vqa.pass ?? 0} ACs)` }
+      : vqa.outcome === 'fixed'
+        ? { glyph: '⚒', color: 'var(--success)', label: `fixed in gate (${vqa.fixed ?? 0})` }
+        : vqa.outcome === 'fix-forward'
+          ? { glyph: '→', color: 'var(--warning)', label: `${vqa.fixForward ?? 0} fix-forwarded` }
+          : vqa.outcome === 'env-blocked'
+            ? { glyph: '✗', color: 'var(--destructive)', label: 'env-blocked (dev server no-boot)' }
+            : vqa.outcome === 'unverifiable'
+              ? { glyph: '?', color: 'var(--text-mute)', label: 'unverifiable' }
+              : { glyph: '—', color: 'var(--text-faint)', label: 'skipped' };
+  return (
+    <span
+      title={`gate VQA: ${meta.label}${vqa.unverifiable ? ` · ${vqa.unverifiable} unverifiable` : ''}`}
+      style={{
+        fontFamily: 'var(--font-mono)',
+        fontSize: 12,
+        fontWeight: 600,
+        color: meta.color,
+      }}
+    >
+      {meta.glyph}
+    </span>
+  );
+}
+
 // ── Cell ────────────────────────────────────────────────────────────
 
-function Cell({
-  status,
-  onClick,
-}: {
-  status: GateCellStatus;
-  onClick?: () => void;
-}) {
+function Cell({ status, onClick }: { status: GateCellStatus; onClick?: () => void }) {
   const meta = cellMeta(status);
   const clickable = !!onClick;
   return (

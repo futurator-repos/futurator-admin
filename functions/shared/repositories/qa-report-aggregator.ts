@@ -24,11 +24,15 @@ import type {
   GateCellStatus,
   GateCheck,
   GateRollup,
+  GateStageResult,
+  GateVqaClaim,
+  GateVqaRollup,
   GateWaveRow,
   PlanQaVerdict,
   QaContractDraft,
   QaPillarVerdict,
   QaReport,
+  QaRunPanel,
   QaRunSummary,
   VqaExecuteStatus,
   VqaRollup,
@@ -507,6 +511,61 @@ function buildContractDraft(
   };
 }
 
+/**
+ * QA-A (pong1 2026-06-12) — plan-wide visual-test join with full claim
+ * attribution. One entry per authored visual test, regardless of which QA
+ * run covers it.
+ */
+interface VtJoinEntry {
+  storyId: string;
+  storyTitle: string;
+  epicId: string;
+  epicLabel: string;
+  criteriaRef?: string;
+  description?: string;
+  expect: string;
+  level?: VqaTestLevel;
+}
+
+function buildVtJoin(epics: EpicWorkflow[]): Map<string, VtJoinEntry> {
+  const byId = new Map<string, VtJoinEntry>();
+  epics.forEach((epic, idx) => {
+    const epicLabel = `E${idx + 1}`;
+    for (const story of epic.stories) {
+      for (const vt of story.visualTests ?? []) {
+        byId.set(vt.id, {
+          storyId: story.storyId,
+          storyTitle: story.title,
+          epicId: epic.epicId,
+          epicLabel,
+          criteriaRef: vt.criteriaRef,
+          description: vt.description,
+          expect: vt.expect,
+          level: vt.level,
+        });
+      }
+    }
+  });
+  return byId;
+}
+
+/**
+ * QA-A — unique QA runs with their epic scope. Plan-scoped QA (PR-8a)
+ * resolves every epic to the SAME plan.qaJobId; legacy per-epic runs have
+ * distinct epic.qaJobId values.
+ */
+function buildEpicsByQaJob(plan: Plan, epics: EpicWorkflow[]): Map<string, EpicWorkflow[]> {
+  const byJob = new Map<string, EpicWorkflow[]>();
+  for (const epic of epics) {
+    const id = resolveEpicQaJobId(plan, epic);
+    if (!id) continue;
+    const arr = byJob.get(id) ?? [];
+    arr.push(epic);
+    byJob.set(id, arr);
+  }
+  return byJob;
+}
+
 function buildVqaRollup(
   plan: Plan,
   epics: EpicWorkflow[],
@@ -554,30 +613,51 @@ function buildVqaRollup(
   let runCostUsd: number | undefined;
   let runWallclockSec: number | undefined;
 
-  for (const epic of epics) {
-    const qaJobId = resolveEpicQaJobId(plan, epic);
-    const qaJob = qaJobId ? jobsById[qaJobId] : undefined;
-    const visualTests = epic.stories.flatMap((s) =>
-      (s.visualTests ?? []).map((v) => ({ story: s, vt: v })),
-    );
-    if (!qaJob || qaJob.status !== 'COMPLETED') {
-      for (const { story, vt } of visualTests) {
-        total += 1;
+  // ── QA-A (pong1 2026-06-12) — single-count rework ───────────────────
+  // The old loop iterated PER EPIC and resolved the qa job inside it. With
+  // plan-scoped QA every epic resolves to the SAME job, so the job's
+  // app-wide TEST_RESULTS were ingested once per epic: pong1 showed
+  // "VQA 8/8" for 4 authored tests, 8 thumbnails, doubled runCostUsd, and
+  // results stamped with the wrong epicId. Now: ingest each UNIQUE job
+  // exactly once; attribute story/epic via the plan-wide visualTests join;
+  // anything not covered by a completed run is pending.
+  const vtJoin = buildVtJoin(epics);
+  const epicsByJob = buildEpicsByQaJob(plan, epics);
+  const counted = new Set<string>();
+
+  const pushResult = (r: VqaTestResult, isAccepted: boolean) => {
+    switch (r.status) {
+      case 'pass':
+        pass += 1;
+        break;
+      case 'fail':
+        if (isAccepted) accepted += 1;
+        else {
+          fail += 1;
+          failures.push(r);
+        }
+        break;
+      case 'uncertain':
+        uncertain += 1;
+        break;
+      case 'skipped-budget':
+        skippedBudget += 1;
+        break;
+      case 'errored':
+        errored += 1;
+        break;
+      case 'pending':
         pending += 1;
-        const r: VqaTestResult = {
-          testId: vt.id,
-          storyId: story.storyId,
-          epicId: epic.epicId,
-          passed: false,
-          status: 'pending',
-          level: vt.level,
-          expected: vt.expect,
-        };
-        thumbnails.push(r);
-        allResults.push(r);
-      }
-      continue;
+        break;
     }
+    total += 1;
+    thumbnails.push(r);
+    allResults.push(r);
+  };
+
+  for (const [qaJobId, scopeEpics] of epicsByJob) {
+    const qaJob = jobsById[qaJobId];
+    if (!qaJob || qaJob.status !== 'COMPLETED') continue;
 
     const vars = qaJob.variables ?? {};
     if (!overviewUrl && vars.OVERVIEW_URL) overviewUrl = vars.OVERVIEW_URL;
@@ -587,15 +667,10 @@ function buildVqaRollup(
     // PR-8 path: TEST_RESULTS JSON contains everything.
     const testResults = parseTestResultsBlock(vars.TEST_RESULTS);
     if (testResults && testResults.length > 0) {
-      // Map each TEST_RESULTS entry to a VqaTestResult, joining the
-      // story/epic ids by walking the visualTests list.
-      const storyByTestId = new Map<string, { storyId: string; expect: string }>();
-      for (const { story, vt } of visualTests) {
-        storyByTestId.set(vt.id, { storyId: story.storyId, expect: vt.expect });
-      }
       for (const tr of testResults) {
-        total += 1;
-        const meta = storyByTestId.get(tr.testId);
+        if (counted.has(tr.testId)) continue;
+        counted.add(tr.testId);
+        const meta = vtJoin.get(tr.testId);
         const status: VqaTestResult['status'] =
           tr.verdict === 'pass'
             ? 'pass'
@@ -607,83 +682,93 @@ function buildVqaRollup(
                   ? 'skipped-budget'
                   : 'errored';
         const isAccepted = status === 'fail' && acceptedSet.has(tr.testId);
-        switch (status) {
-          case 'pass':
-            pass += 1;
-            break;
-          case 'fail':
-            if (isAccepted) accepted += 1;
-            else fail += 1;
-            break;
-          case 'uncertain':
-            uncertain += 1;
-            break;
-          case 'skipped-budget':
-            skippedBudget += 1;
-            break;
-          case 'errored':
-            errored += 1;
-            break;
-        }
-        const r: VqaTestResult = {
-          testId: tr.testId,
-          storyId: meta?.storyId ?? '',
-          epicId: epic.epicId,
-          passed: status === 'pass',
-          status,
-          screenshotUrl: tr.screenshotUrl,
-          expected: meta?.expect,
-          level: tr.level,
-          rationale: tr.rationale,
-          costUsd: tr.costUsd,
-          durationMs: tr.durationMs,
-          observability: tr.observability,
-          failureClass:
-            status === 'pass'
-              ? undefined
-              : classifyVqaFailure(meta?.expect, tr.rationale, tr.observability),
-          accepted: isAccepted || undefined,
-        };
-        // Accepted fails are non-blocking → keep them out of `failures`.
-        if (status === 'fail' && !isAccepted) failures.push(r);
-        thumbnails.push(r);
-        allResults.push(r);
+        pushResult(
+          {
+            testId: tr.testId,
+            storyId: meta?.storyId ?? '',
+            epicId: meta?.epicId ?? '',
+            storyTitle: meta?.storyTitle,
+            epicLabel: meta?.epicLabel,
+            criteriaRef: meta?.criteriaRef,
+            description: meta?.description,
+            passed: status === 'pass',
+            status,
+            screenshotUrl: tr.screenshotUrl,
+            expected: meta?.expect,
+            level: tr.level ?? meta?.level,
+            rationale: tr.rationale,
+            costUsd: tr.costUsd,
+            durationMs: tr.durationMs,
+            observability: tr.observability,
+            failureClass:
+              status === 'pass'
+                ? undefined
+                : classifyVqaFailure(meta?.expect, tr.rationale, tr.observability),
+            accepted: isAccepted || undefined,
+          },
+          isAccepted,
+        );
       }
       continue;
     }
 
-    // Legacy path (pre-PR-8 jobs) — read FAILED_TESTS + SCREENSHOTS.
+    // Legacy path (pre-PR-8 jobs) — read FAILED_TESTS + SCREENSHOTS over
+    // the run's epic scope.
     const shots = parseScreenshotsBlock(vars.SCREENSHOTS);
     const shotsByTestId = new Map(shots.map((s) => [s.id, s.url]));
     const failedIds = new Set(parseFailedTestsBlock(vars.FAILED_TESTS));
-    for (const { story, vt } of visualTests) {
-      total += 1;
-      const failed = failedIds.has(vt.id);
-      const isAccepted = failed && acceptedSet.has(vt.id);
-      const r: VqaTestResult = {
-        testId: vt.id,
-        storyId: story.storyId,
-        epicId: epic.epicId,
-        passed: !failed,
-        status: failed ? 'fail' : 'pass',
-        screenshotUrl: shotsByTestId.get(vt.id),
-        expected: vt.expect,
-        level: vt.level,
-        failureClass: failed ? classifyVqaFailure(vt.expect) : undefined,
-        accepted: isAccepted || undefined,
-      };
-      if (failed) {
-        if (isAccepted) accepted += 1;
-        else {
-          fail += 1;
-          failures.push(r);
+    for (const epic of scopeEpics) {
+      for (const story of epic.stories) {
+        for (const vt of story.visualTests ?? []) {
+          if (counted.has(vt.id)) continue;
+          counted.add(vt.id);
+          const meta = vtJoin.get(vt.id);
+          const failed = failedIds.has(vt.id);
+          const isAccepted = failed && acceptedSet.has(vt.id);
+          pushResult(
+            {
+              testId: vt.id,
+              storyId: story.storyId,
+              epicId: epic.epicId,
+              storyTitle: meta?.storyTitle,
+              epicLabel: meta?.epicLabel,
+              criteriaRef: meta?.criteriaRef,
+              description: meta?.description,
+              passed: !failed,
+              status: failed ? 'fail' : 'pass',
+              screenshotUrl: shotsByTestId.get(vt.id),
+              expected: vt.expect,
+              level: vt.level,
+              failureClass: failed ? classifyVqaFailure(vt.expect) : undefined,
+              accepted: isAccepted || undefined,
+            },
+            isAccepted,
+          );
         }
-      } else {
-        pass += 1;
       }
-      thumbnails.push(r);
-      allResults.push(r);
     }
+  }
+
+  // Every authored visual test with no result row from a completed run is
+  // PENDING (its run hasn't completed, hasn't started, or omitted it).
+  for (const [testId, meta] of vtJoin) {
+    if (counted.has(testId)) continue;
+    pushResult(
+      {
+        testId,
+        storyId: meta.storyId,
+        epicId: meta.epicId,
+        storyTitle: meta.storyTitle,
+        epicLabel: meta.epicLabel,
+        criteriaRef: meta.criteriaRef,
+        description: meta.description,
+        passed: false,
+        status: 'pending',
+        level: meta.level,
+        expected: meta.expect,
+      },
+      false,
+    );
   }
 
   // dragon1 (2026-06-10) — a plan whose stories declare ZERO visualTests
@@ -759,6 +844,80 @@ function jobVerdictToCell(job: AgentJob | undefined, key: string): GateCellStatu
   return 'pending';
 }
 
+/**
+ * QA-D (pong1 2026-06-12) — shape of the per-stage outcomes the wave-merge
+ * runner persists on the job row (`waveMergeResult.stages[]`) and of the
+ * compact VQA summary (`waveMergeResult.vqa`). Daemon-written (untyped JS);
+ * parsed defensively here.
+ */
+interface PersistedWaveMergeResult {
+  outcome?: string;
+  stages?: Array<{
+    key?: unknown;
+    cmd?: unknown;
+    status?: unknown;
+    durationMs?: unknown;
+    fixedByAgent?: unknown;
+  }>;
+  vqa?: {
+    outcome?: unknown;
+    pass?: unknown;
+    fixed?: unknown;
+    fixForward?: Array<{
+      storyId?: unknown;
+      acId?: unknown;
+      observed?: unknown;
+      screenshotUrl?: unknown;
+    }>;
+    unverifiable?: unknown;
+    verdicts?: Array<{
+      acId?: unknown;
+      storyId?: unknown;
+      result?: unknown;
+      observation?: unknown;
+      screenshotUrl?: unknown;
+    }>;
+    fixedAcIds?: unknown;
+  };
+}
+
+function readWaveMergeResult(job: AgentJob | undefined): PersistedWaveMergeResult | undefined {
+  const wmr = (job as (AgentJob & { waveMergeResult?: PersistedWaveMergeResult }) | undefined)
+    ?.waveMergeResult;
+  return wmr && typeof wmr === 'object' ? wmr : undefined;
+}
+
+function parseStageResults(wmr: PersistedWaveMergeResult | undefined): GateStageResult[] | null {
+  if (!wmr || !Array.isArray(wmr.stages) || wmr.stages.length === 0) return null;
+  const out: GateStageResult[] = [];
+  for (const s of wmr.stages) {
+    if (typeof s?.cmd !== 'string') continue;
+    const status =
+      s.status === 'pass' || s.status === 'fail' || s.status === 'skipped' ? s.status : 'pending';
+    out.push({
+      key: typeof s.key === 'string' && s.key ? s.key : s.cmd.split(/\s+/)[0],
+      cmd: s.cmd,
+      status,
+      durationMs: typeof s.durationMs === 'number' ? s.durationMs : undefined,
+      fixedByAgent: s.fixedByAgent === true || undefined,
+    });
+  }
+  return out.length > 0 ? out : null;
+}
+
+function parseVqaCell(wmr: PersistedWaveMergeResult | undefined): GateWaveRow['vqa'] {
+  const v = wmr?.vqa;
+  if (!v || typeof v.outcome !== 'string') return undefined;
+  const outcome = v.outcome as NonNullable<GateWaveRow['vqa']>['outcome'];
+  return {
+    outcome,
+    pass: typeof v.pass === 'number' ? v.pass : undefined,
+    fixed: typeof v.fixed === 'number' ? v.fixed : undefined,
+    fixForward: Array.isArray(v.fixForward) ? v.fixForward.length : undefined,
+    unverifiable: typeof v.unverifiable === 'number' ? v.unverifiable : undefined,
+  };
+}
+
 function buildGateRollup(
   plan: Plan,
   epics: EpicWorkflow[],
@@ -790,6 +949,7 @@ function buildGateRollup(
   let cellsPass = 0;
   let cellsFail = 0;
   let cellsPending = 0;
+  let hasStageData = false;
 
   epics.forEach((epic, epicIdx) => {
     const epicLabel = `E${epicIdx + 1}`;
@@ -807,25 +967,45 @@ function buildGateRollup(
       const cells: Partial<Record<GateCheck, GateCellStatus>> = {};
       const jobIds: Partial<Record<GateCheck, string>> = {};
 
-      for (const check of activeChecks) {
-        // Each gate check maps to a variable in the build-check job's output.
-        // Mapping chosen to be forward-compatible with new keys the daemon
-        // may emit; absent keys default to pass/fail by job status.
-        const varKey = {
-          compile: 'COMPILE_VERDICT',
-          typecheck: 'TYPECHECK_VERDICT',
-          lint: 'LINT_VERDICT',
-          unit: 'UNIT_TESTS_VERDICT',
-          browser: 'BROWSER_TESTS_VERDICT',
-          tamper: 'TAMPER_VERDICT',
-        }[check];
-        const status = jobVerdictToCell(buildJob, varKey);
-        cells[check] = status;
-        if (buildJobId) jobIds[check] = buildJobId;
+      // ── QA-D (pong1 2026-06-12) — truthful per-stage outcomes ────────
+      // When the wave-merge runner persisted `waveMergeResult.stages[]`,
+      // those are the ACTUAL commands that ran with their real outcomes.
+      // The legacy `cells` below infer N independent checks from the job's
+      // single COMPLETED bit (the "24 green cells from one bit" façade) —
+      // rows carrying real stages mark `inferred: false`, legacy rows mark
+      // `inferred: true` so the UI can label them honestly.
+      const wmr = readWaveMergeResult(buildJob);
+      const stages = parseStageResults(wmr);
+      const vqaCell = parseVqaCell(wmr);
+      if (stages) {
+        hasStageData = true;
+        for (const s of stages) {
+          if (s.status === 'pass') cellsPass += 1;
+          else if (s.status === 'fail') cellsFail += 1;
+          else if (s.status === 'pending') cellsPending += 1;
+          // 'skipped' stages don't count toward the verdict.
+        }
+      } else {
+        for (const check of activeChecks) {
+          // Each gate check maps to a variable in the build-check job's output.
+          // Mapping chosen to be forward-compatible with new keys the daemon
+          // may emit; absent keys default to pass/fail by job status.
+          const varKey = {
+            compile: 'COMPILE_VERDICT',
+            typecheck: 'TYPECHECK_VERDICT',
+            lint: 'LINT_VERDICT',
+            unit: 'UNIT_TESTS_VERDICT',
+            browser: 'BROWSER_TESTS_VERDICT',
+            tamper: 'TAMPER_VERDICT',
+          }[check];
+          const status = jobVerdictToCell(buildJob, varKey);
+          cells[check] = status;
+          if (buildJobId) jobIds[check] = buildJobId;
 
-        if (status === 'pass') cellsPass += 1;
-        else if (status === 'fail') cellsFail += 1;
-        else if (status === 'pending') cellsPending += 1;
+          if (status === 'pass') cellsPass += 1;
+          else if (status === 'fail') cellsFail += 1;
+          else if (status === 'pending') cellsPending += 1;
+        }
       }
 
       waveRows.push({
@@ -835,6 +1015,10 @@ function buildGateRollup(
         waveLabel: `Wave ${wIdx}`,
         cells,
         jobIds,
+        stages: stages ?? undefined,
+        vqa: vqaCell,
+        // Legacy rows with a job but no stage data are inferred-from-one-bit.
+        inferred: stages ? undefined : buildJob ? true : undefined,
       });
     }
   });
@@ -844,7 +1028,170 @@ function buildGateRollup(
     activeChecks,
     waveRows,
     tamperCountsByStory,
+    hasStageData: hasStageData || undefined,
   };
+}
+
+// ── QA-B (pong1 2026-06-12) — wave-gate VQA ingestion ────────────────
+//
+// Aggregates every wave-merge job's `waveMergeResult.vqa` summary into
+// per-AC claims with their full gate history. This is the system's
+// strongest evidence (judged verdicts on the MERGED candidate) and was
+// previously invisible at the shipping decision.
+
+function buildGateVqa(
+  epics: EpicWorkflow[],
+  jobsById: Record<string, AgentJob>,
+): GateVqaRollup | undefined {
+  const claims = new Map<string, GateVqaClaim>();
+
+  // Plan-wide lookups: AC text by (storyId, acId); fix story by acId.
+  const acTextByKey = new Map<string, string>();
+  const fixStoryByAcId = new Map<string, string>();
+  for (const epic of epics) {
+    for (const s of epic.stories) {
+      for (const c of s.criteria ?? []) {
+        acTextByKey.set(`${s.storyId}:${c.id}`, c.text);
+        if ((s as { origin?: string }).origin === 'wave-vqa-fix') {
+          fixStoryByAcId.set(c.id, s.storyId);
+        }
+      }
+    }
+  }
+
+  for (const epic of epics) {
+    const entries = Object.entries(epic.waveBuildJobs ?? {}).sort(
+      (a, b) => Number(a[0]) - Number(b[0]),
+    );
+    for (const [waveKey, jobId] of entries) {
+      const wmr = readWaveMergeResult(jobsById[jobId]);
+      const vqa = wmr?.vqa;
+      if (!vqa) continue;
+      const waveNumber = Number(waveKey);
+      const fixedSet = new Set(Array.isArray(vqa.fixedAcIds) ? (vqa.fixedAcIds as string[]) : []);
+
+      const ensureClaim = (acId: string, storyId: string): GateVqaClaim => {
+        let claim = claims.get(acId);
+        if (!claim) {
+          claim = {
+            acId,
+            storyId,
+            epicId: epic.epicId,
+            acText: acTextByKey.get(`${storyId}:${acId}`),
+            attempts: [],
+            final: 'verified',
+            fixStoryId: fixStoryByAcId.get(acId),
+          };
+          claims.set(acId, claim);
+        }
+        return claim;
+      };
+
+      for (const v of vqa.verdicts ?? []) {
+        if (typeof v?.acId !== 'string' || typeof v?.storyId !== 'string') continue;
+        const claim = ensureClaim(v.acId, v.storyId);
+        const raw = typeof v.result === 'string' ? v.result : 'FAIL';
+        claim.attempts.push({
+          waveNumber,
+          result: fixedSet.has(v.acId)
+            ? 'FIXED_IN_GATE'
+            : raw === 'PASS' || raw === 'UNVERIFIABLE'
+              ? raw
+              : 'FAIL',
+          observation: typeof v.observation === 'string' ? v.observation : undefined,
+          screenshotUrl: typeof v.screenshotUrl === 'string' ? v.screenshotUrl : undefined,
+          jobId,
+        });
+      }
+      // Older summaries (pre per-AC verdict persistence) still carry the
+      // fix-forward handoffs — synthesize the FAIL attempts from them.
+      for (const h of vqa.fixForward ?? []) {
+        if (typeof h?.acId !== 'string' || typeof h?.storyId !== 'string') continue;
+        const claim = ensureClaim(h.acId, h.storyId);
+        if (!claim.attempts.some((a) => a.waveNumber === waveNumber)) {
+          claim.attempts.push({
+            waveNumber,
+            result: 'FAIL',
+            observation: typeof h.observed === 'string' ? h.observed : undefined,
+            screenshotUrl: typeof h.screenshotUrl === 'string' ? h.screenshotUrl : undefined,
+            jobId,
+          });
+        }
+      }
+    }
+  }
+
+  if (claims.size === 0) return undefined;
+
+  let verified = 0;
+  let fixedInGate = 0;
+  let fixedByStory = 0;
+  let fixForwarded = 0;
+  let unverifiable = 0;
+  for (const claim of claims.values()) {
+    claim.attempts.sort((a, b) => a.waveNumber - b.waveNumber);
+    const last = claim.attempts[claim.attempts.length - 1];
+    const everFailed = claim.attempts.some((a) => a.result === 'FAIL');
+    claim.final =
+      last.result === 'PASS'
+        ? everFailed
+          ? 'fixed-by-story'
+          : 'verified'
+        : last.result === 'FIXED_IN_GATE'
+          ? 'fixed-in-gate'
+          : last.result === 'UNVERIFIABLE'
+            ? 'unverifiable'
+            : 'fix-forwarded';
+    switch (claim.final) {
+      case 'verified':
+        verified += 1;
+        break;
+      case 'fixed-in-gate':
+        fixedInGate += 1;
+        break;
+      case 'fixed-by-story':
+        fixedByStory += 1;
+        break;
+      case 'fix-forwarded':
+        fixForwarded += 1;
+        break;
+      case 'unverifiable':
+        unverifiable += 1;
+        break;
+    }
+  }
+
+  const sorted = [...claims.values()].sort(
+    (a, b) => a.epicId.localeCompare(b.epicId) || a.acId.localeCompare(b.acId),
+  );
+  return { verified, fixedInGate, fixedByStory, fixForwarded, unverifiable, claims: sorted };
+}
+
+// ── QA-A (pong1 2026-06-12) — unique QA run panels ───────────────────
+
+function buildQaRuns(plan: Plan, epics: EpicWorkflow[]): QaRunPanel[] {
+  const byJob = new Map<string, { epicIds: string[]; epicLabels: string[] }>();
+  epics.forEach((epic, idx) => {
+    const id = resolveEpicQaJobId(plan, epic);
+    if (!id) return;
+    const entry = byJob.get(id) ?? { epicIds: [], epicLabels: [] };
+    entry.epicIds.push(epic.epicId);
+    entry.epicLabels.push(`E${idx + 1}`);
+    byJob.set(id, entry);
+  });
+  return [...byJob.entries()].map(([qaJobId, e]) => {
+    const scope: QaRunPanel['scope'] = qaJobId === plan.qaJobId ? 'plan' : 'epic';
+    return {
+      qaJobId,
+      scope,
+      epicIds: e.epicIds,
+      epicLabels: e.epicLabels,
+      title:
+        scope === 'plan'
+          ? `QA run · plan-scoped · covers ${e.epicLabels.join(', ')}`
+          : `QA run · ${e.epicLabels.join(', ')}`,
+    };
+  });
 }
 
 // ── Per-epic breakdown ───────────────────────────────────────────────
@@ -934,6 +1281,7 @@ export function buildQaReport(inputs: AggregatorInputs): QaReport {
   const ac = buildAcRollup(plan, epics, jobsById);
   const vqa = buildVqaRollup(plan, epics, jobsById);
   const gate = buildGateRollup(plan, epics, jobsById, attentionItems);
+  const gateVqa = buildGateVqa(epics, jobsById);
 
   const attentionSummaries = attentionItems
     .filter((i) => QA_ATTENTION_CATEGORIES.has(i.category) && i.status !== 'resolved')
@@ -978,7 +1326,9 @@ export function buildQaReport(inputs: AggregatorInputs): QaReport {
     ac,
     vqa,
     gate,
+    gateVqa,
     perEpic: buildPerEpic(plan, epics, jobsById),
+    qaRuns: buildQaRuns(plan, epics),
     attentionItems: attentionSummaries,
     runHistory: buildRunHistory(plan, epics, jobsById),
     generatedAt: inputs.nowIso ?? new Date().toISOString(),

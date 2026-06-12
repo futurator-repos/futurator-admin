@@ -320,7 +320,7 @@ describe('pong1 P3 — story-failure cards write-once per failure state', () => 
     const writeAttentionItem = vi.fn(async () => undefined);
 
     // Tick 1: persisted story status is 'developing'; its job FAILED.
-    const epic1 = makeEpic([makeStory('S-1', 0, { jobId: 'j-1', status: 'developing' })], {
+    const epic1 = makeEpic([makeStory('S-1', 0, { jobId: 'j-1', status: 'running' })], {
       planId: 'plan-1',
     } as Partial<EpicWorkflow>);
     const { deps: deps1 } = makeDeps({ 'j-1': 'FAILED' });
@@ -351,7 +351,7 @@ describe('pong1 P3 — story-failure cards write-once per failure state', () => 
     const writeAttentionItem = vi.fn(async () => undefined);
     // After an operator retry the story is re-launched: persisted status is
     // 'developing' again with a fresh job that failed → transition fires.
-    const epic = makeEpic([makeStory('S-1', 0, { jobId: 'j-retry', status: 'developing' })], {
+    const epic = makeEpic([makeStory('S-1', 0, { jobId: 'j-retry', status: 'running' })], {
       planId: 'plan-1',
       status: 'fixing',
     } as Partial<EpicWorkflow>);
