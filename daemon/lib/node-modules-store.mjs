@@ -25,6 +25,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   rmSync,
@@ -65,6 +66,51 @@ export function storeNodeModulesPath(appId, lockfileSha) {
   assertSafeAppId(appId);
   assertSafeSha(lockfileSha);
   return join(STORE_ROOT, appId, lockfileSha, 'node_modules');
+}
+
+/**
+ * dino1 ENOSPC (2026-06-12) — volatile per-build cache dirs that must NEVER
+ * be shared between worktrees. `node_modules/.vite` (vite/vitest dep cache)
+ * and `node_modules/.cache` (misc tools) get REWRITTEN IN PLACE by builds;
+ * with hardlink materialization an in-place write would corrupt the shared
+ * store copy for every sibling worktree. They are also the reason store
+ * entries carried stale caches (ensureStoreEntry renames the source
+ * worktree's node_modules AFTER dev/test may have populated them). Stripped
+ * at store creation and from every materialized copy — each worktree's
+ * first build recreates its own.
+ */
+const VOLATILE_CACHE_DIRS = ['.vite', '.cache'];
+
+function stripVolatileCaches(nodeModulesDir) {
+  for (const d of VOLATILE_CACHE_DIRS) {
+    rmSync(join(nodeModulesDir, d), { recursive: true, force: true });
+  }
+}
+
+/**
+ * dino1 ENOSPC (2026-06-12) — cross-app store seeding. Two apps scaffolded
+ * from the same boilerplate have byte-identical lockfiles; pre-fix each got
+ * its own full `npm install` (~minutes) and its own ~700M physical store
+ * entry. On a store miss, scan SIBLING apps for the same lockfileSha and
+ * hardlink-clone it (`cp -al`: directories recreated, files hardlinked —
+ * megabytes + seconds, and blocks are freed only when the last app's links
+ * go, so per-app `rm -rf <store>/<appId>` delete semantics are preserved).
+ * Returns the sibling's node_modules path or null.
+ */
+function findSiblingStoreEntry(appId, lockfileSha) {
+  assertSafeSha(lockfileSha);
+  let apps;
+  try {
+    apps = readdirSync(STORE_ROOT);
+  } catch {
+    return null;
+  }
+  for (const sibling of apps) {
+    if (sibling === appId) continue;
+    const candidate = join(STORE_ROOT, sibling, lockfileSha, 'node_modules');
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 function storeRefcountPath(appId, lockfileSha) {
@@ -158,11 +204,27 @@ export async function ensureStoreEntry({
     return storeNm;
   }
 
+  mkdirSync(storeDir, { recursive: true });
+
+  // dino1 ENOSPC (2026-06-12) — before paying for a full npm install, check
+  // whether a SIBLING app already has this exact lockfile in the store
+  // (same boilerplate ⇒ identical lockfile). Hardlink-clone it: megabytes
+  // and seconds instead of ~700M and minutes.
+  const sibling = findSiblingStoreEntry(appId, lockfileSha);
+  if (sibling) {
+    const r = spawnSync('cp', ['-al', sibling, storeNm], { stdio: 'pipe' });
+    if (r.status === 0) {
+      stripVolatileCaches(storeNm);
+      return storeNm;
+    }
+    // Clone failed (cross-device store roots?) — fall through to install.
+    rmSync(storeNm, { recursive: true, force: true });
+  }
+
   // Bootstrap the store entry by installing into the SOURCE worktree first,
   // then moving its node_modules into the store. This keeps install-time
   // resolution against a real package.json + lockfile (the install needs to
   // see them) before we share the result.
-  mkdirSync(storeDir, { recursive: true });
   await installFn(sourceWorktree);
 
   const sourceNm = join(sourceWorktree, 'node_modules');
@@ -186,6 +248,10 @@ export async function ensureStoreEntry({
       throw err;
     }
   }
+
+  // The source worktree may have run dev/test before this move — its
+  // node_modules can carry volatile build caches that must not be shared.
+  stripVolatileCaches(storeNm);
 
   return storeNm;
 }
@@ -286,10 +352,10 @@ export async function setupNodeModulesSymlink({
 const STORE_SHA_MARKER = '.futurator-store-sha';
 
 /**
- * 2026-05-28 — Materialize a REAL node_modules directory in `destWorktree`
- * (a `cp -a` copy of the store entry), NOT a symlink.
+ * 2026-05-28 — Materialize a REAL node_modules directory in `destWorktree`,
+ * NOT a symlink.
  *
- * Why a real copy instead of `setupNodeModulesSymlink`: Next.js 16's
+ * Why a real directory instead of `setupNodeModulesSymlink`: Next.js 16's
  * Turbopack rejects a `node_modules` symlink that points outside the
  * project's filesystem root ("Symlink [project]/node_modules is invalid,
  * it points out of the filesystem root") — and the store lives at
@@ -297,11 +363,28 @@ const STORE_SHA_MARKER = '.futurator-store-sha';
  * worktree that must run `next build` (the wave-merge coordinator, where
  * the post-merge validation gate runs) needs a real directory.
  *
- * `cp -a` preserves the store's INTERNAL relative symlinks (`.bin/*` →
- * `../<pkg>/...`), which stay valid inside the copy, while the top-level
- * `node_modules` is a real directory Turbopack accepts. (`cp -RL` would
- * deref the `.bin` shims and break `require('../server/...')` resolution —
- * verified on EC2 2026-05-28.)
+ * dino1 ENOSPC (2026-06-12) — THE COPY IS NOW A HARDLINK FARM (`cp -al`),
+ * not a physical copy (`cp -a`). The physical copy cost ~700M of disk and
+ * ~30-60s PER WORKTREE; with N parallel stories + the gate candidate the
+ * footprint scaled linearly with parallelism (dino1 wave 1: store 679M +
+ * 2×679M story copies + candidate copy = ENOSPC on a 19G disk, setup-failed
+ * gate). `cp -al` recreates the directory tree but hardlinks every file:
+ * megabytes + ~2s per worktree, and Turbopack accepts it — hardlinked files
+ * are indistinguishable from regular files (it objected to the symlinked
+ * top-level dir, not to shared inodes). This is pnpm's proven model.
+ *
+ * In-place-mutation safety: npm replaces package files via
+ * extract-to-temp + rename (breaks the link, store untouched); the known
+ * in-place writers are the volatile cache dirs (`.vite`, `.cache`), which
+ * are stripped from store entries and never shared (VOLATILE_CACHE_DIRS).
+ * CAVEAT for future boilerplates: a tool that GENERATES into node_modules
+ * in place (e.g. `prisma generate` → @prisma/client) would corrupt the
+ * shared store — add such paths to VOLATILE_CACHE_DIRS or regenerate
+ * post-materialize.
+ *
+ * Both internal relative symlinks (`.bin/*` → `../<pkg>/...`) and file
+ * hardlinks stay valid inside the copy. Falls back to `cp -a` if the
+ * hardlink copy fails (e.g. store and worktree on different filesystems).
  *
  * Idempotent + lockfile-aware: writes a `.futurator-store-sha` marker; on
  * re-invocation (e.g. wave N+1 after a story changed deps) it re-copies
@@ -341,23 +424,41 @@ export async function materializeNodeModulesFromStore({
   const storeNm = storeNodeModulesPath(appId, lockfileSha);
 
   // Replace whatever is at destNm (symlink, stale dir, or nothing) with a
-  // fresh real copy.
+  // fresh hardlink-farm copy (removing a prior hardlinked copy only drops
+  // link counts — the store entry is untouched).
   if (existsSync(destNm) || isSymlink(destNm)) {
     rmSync(destNm, { recursive: true, force: true });
   }
-  const cp = spawnSync('cp', ['-a', storeNm, destNm], { stdio: 'pipe' });
+  let mode = 'hardlink';
+  let cp = spawnSync('cp', ['-al', storeNm, destNm], { stdio: 'pipe' });
+  if (cp.status !== 0) {
+    // Hardlinks need the same filesystem; fall back to a physical copy.
+    rmSync(destNm, { recursive: true, force: true });
+    mode = 'copy';
+    cp = spawnSync('cp', ['-a', storeNm, destNm], { stdio: 'pipe' });
+  }
   if (cp.status !== 0) {
     throw new Error(
       `materializeNodeModulesFromStore: cp -a failed (${cp.status}): ${cp.stderr?.toString().slice(-300)}`,
     );
   }
+  // Belt-and-suspenders: never share volatile caches even if an old store
+  // entry (pre-strip) still carries them.
+  stripVolatileCaches(destNm);
   try {
+    // Unlink first: writeFileSync truncates IN PLACE, and if a stale marker
+    // rode along as a hardlink from the store, truncating would mutate the
+    // shared inode. Unlink breaks the link; the write creates a fresh file.
+    rmSync(markerPath, { force: true });
     writeFileSync(markerPath, `${lockfileSha}\n`);
   } catch {
     // Marker is an optimization; a missing marker just forces a re-copy
     // next wave. Non-fatal.
   }
-  log('info', `[node-modules] materialized real node_modules in ${worktreeDir} (sha ${lockfileSha})`);
+  log(
+    'info',
+    `[node-modules] materialized real node_modules in ${worktreeDir} (sha ${lockfileSha}, ${mode})`,
+  );
   return { lockfileSha, materialized: true };
 }
 

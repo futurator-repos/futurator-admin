@@ -243,4 +243,114 @@ describe('materializeNodeModulesFromStore', () => {
     });
     expect(r.materialized).toBe(true);
   });
+
+  // ── dino1 ENOSPC (2026-06-12) — hardlink-farm materialization ─────────
+  // cp -a cost ~700M + 30-60s PER WORKTREE; N parallel stories + the gate
+  // candidate exhausted the 19G disk. cp -al hardlinks files (megabytes,
+  // seconds) and Turbopack accepts it (real top-level dir, shared inodes).
+
+  it('HARDLINKS files from the store instead of copying (same inode)', async () => {
+    const { materializeNodeModulesFromStore, storeNodeModulesPath, computeLockfileSha } =
+      await import('../node-modules-store.mjs');
+    const { statSync } = await import('node:fs');
+    writeFileSync(join(workDir, 'package-lock.json'), '{"app":"pacman-hard","v":1}');
+    const installFn = async (cwd) => {
+      mkdirSync(join(cwd, 'node_modules', 'react'), { recursive: true });
+      writeFileSync(join(cwd, 'node_modules', 'react', 'index.js'), 'module.exports = {};\n');
+    };
+    await materializeNodeModulesFromStore({ appId: 'pacman-hard', worktreeDir: workDir, installFn });
+    const sha = computeLockfileSha(workDir);
+    const storeFile = join(storeNodeModulesPath('pacman-hard', sha), 'react', 'index.js');
+    const destFile = join(workDir, 'node_modules', 'react', 'index.js');
+    // Same inode = hardlink farm, not a physical copy.
+    expect(statSync(destFile).ino).toBe(statSync(storeFile).ino);
+    expect(statSync(storeFile).nlink).toBeGreaterThanOrEqual(2);
+    // The top-level dir is REAL (Turbopack contract preserved).
+    expect(lstatSync(join(workDir, 'node_modules')).isSymbolicLink()).toBe(false);
+  });
+
+  it('strips volatile cache dirs (.vite/.cache) from store AND materialized copy', async () => {
+    const { materializeNodeModulesFromStore, storeNodeModulesPath, computeLockfileSha } =
+      await import('../node-modules-store.mjs');
+    writeFileSync(join(workDir, 'package-lock.json'), '{"app":"pacman-vol","v":1}');
+    // The source worktree ran dev/test before the store move: its
+    // node_modules carries vitest's .vite cache (the in-place-write class
+    // that must never be shared between hardlinked worktrees).
+    const installFn = async (cwd) => {
+      mkdirSync(join(cwd, 'node_modules', '.vite', 'deps'), { recursive: true });
+      writeFileSync(join(cwd, 'node_modules', '.vite', 'deps', '_metadata.json'), '{}');
+      mkdirSync(join(cwd, 'node_modules', '.cache'), { recursive: true });
+      writeFileSync(join(cwd, 'node_modules', 'real-dep.txt'), 'keep');
+    };
+    await materializeNodeModulesFromStore({ appId: 'pacman-vol', worktreeDir: workDir, installFn });
+    const sha = computeLockfileSha(workDir);
+    const storeNm = storeNodeModulesPath('pacman-vol', sha);
+    expect(existsSync(join(storeNm, '.vite'))).toBe(false);
+    expect(existsSync(join(storeNm, '.cache'))).toBe(false);
+    expect(existsSync(join(workDir, 'node_modules', '.vite'))).toBe(false);
+    expect(existsSync(join(workDir, 'node_modules', 'real-dep.txt'))).toBe(true);
+  });
+
+  it('marker write breaks any hardlink first (never truncates a shared inode)', async () => {
+    const { materializeNodeModulesFromStore, storeNodeModulesPath, computeLockfileSha } =
+      await import('../node-modules-store.mjs');
+    const { statSync, readFileSync: read } = await import('node:fs');
+    writeFileSync(join(workDir, 'package-lock.json'), '{"app":"pacman-mark","v":1}');
+    // Pathological store: a stale marker is already INSIDE the store entry
+    // (e.g. a pre-fix source worktree was renamed in after materialize).
+    const installFn = async (cwd) => {
+      mkdirSync(join(cwd, 'node_modules'), { recursive: true });
+      writeFileSync(join(cwd, 'node_modules', '.futurator-store-sha'), 'stale-sha\n');
+    };
+    await materializeNodeModulesFromStore({ appId: 'pacman-mark', worktreeDir: workDir, installFn });
+    const sha = computeLockfileSha(workDir);
+    const storeMarker = join(storeNodeModulesPath('pacman-mark', sha), '.futurator-store-sha');
+    const destMarker = join(workDir, 'node_modules', '.futurator-store-sha');
+    // The dest marker carries the CURRENT sha; the store's stale marker is
+    // untouched (different inode — the unlink-before-write broke the link).
+    expect(read(destMarker, 'utf8').trim()).toBe(sha);
+    expect(read(storeMarker, 'utf8').trim()).toBe('stale-sha');
+    expect(statSync(destMarker).ino).not.toBe(statSync(storeMarker).ino);
+  });
+});
+
+// ── dino1 ENOSPC (2026-06-12) — cross-app store seeding ────────────────
+// Two apps from the same boilerplate have identical lockfiles; the second
+// app's store entry hardlink-clones the first instead of re-installing.
+describe('ensureStoreEntry — cross-app sibling seeding', () => {
+  it('clones a sibling app store entry with the same lockfileSha (no install)', async () => {
+    const { ensureStoreEntry, computeLockfileSha, storeNodeModulesPath } = await import(
+      '../node-modules-store.mjs'
+    );
+    const { statSync } = await import('node:fs');
+    const LOCK = '{"boilerplate":"nextjs-base","lockfileVersion":3}';
+    // App 1 (pong-x) installs for real.
+    const wt1 = mkdtempSync(join(tmpdir(), 'nms-app1-'));
+    writeFileSync(join(wt1, 'package-lock.json'), LOCK);
+    const sha = computeLockfileSha(wt1);
+    let installs = 0;
+    const installFn = async (cwd) => {
+      installs += 1;
+      mkdirSync(join(cwd, 'node_modules', 'next'), { recursive: true });
+      writeFileSync(join(cwd, 'node_modules', 'next', 'package.json'), '{"name":"next"}');
+    };
+    await ensureStoreEntry({ appId: 'pong-x', lockfileSha: sha, sourceWorktree: wt1, installFn });
+    expect(installs).toBe(1);
+
+    // App 2 (dino-x), same boilerplate ⇒ same lockfile sha: NO install.
+    const wt2 = mkdtempSync(join(tmpdir(), 'nms-app2-'));
+    writeFileSync(join(wt2, 'package-lock.json'), LOCK);
+    await ensureStoreEntry({ appId: 'dino-x', lockfileSha: sha, sourceWorktree: wt2, installFn });
+    expect(installs).toBe(1); // still 1 — seeded from the sibling
+
+    // And the seed is a hardlink clone (same inode), so it costs ~nothing
+    // and per-app `rm -rf store/<app>` semantics hold (blocks freed when
+    // the last app's links go).
+    const f1 = join(storeNodeModulesPath('pong-x', sha), 'next', 'package.json');
+    const f2 = join(storeNodeModulesPath('dino-x', sha), 'next', 'package.json');
+    expect(statSync(f1).ino).toBe(statSync(f2).ino);
+
+    rmSync(wt1, { recursive: true, force: true });
+    rmSync(wt2, { recursive: true, force: true });
+  });
 });

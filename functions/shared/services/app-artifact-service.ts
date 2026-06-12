@@ -185,6 +185,76 @@ async function deleteAppWorktreesAndRepo(
 }
 
 /**
+ * dino1 hygiene (2026-06-12) — sweep the per-app residue the folder/worktree
+ * deletes leave behind. Found auditing the host after a full app-delete
+ * pass:
+ *
+ *   1. Claude session transcripts: every agent the daemon spawns in a
+ *      worktree writes `~/.claude/projects/<cwd-slug>/...` — 138 MB of
+ *      transcripts for long-deleted apps had accumulated. The slug encodes
+ *      the cwd with `/`→`-` (e.g. `-home-ubuntu-projects-dino1`,
+ *      `-home-ubuntu-worktrees-dino1-...`), so the app's dirs are
+ *      `-home-ubuntu-projects-<appId>` exactly plus either prefix followed
+ *      by `-` (path separator) — an app named `dino` can never match
+ *      `dino1`'s dirs.
+ *   2. Dangling symlinks at the projects root pointing INTO the deleted
+ *      folder (a stray `projects/vite.config.ts` → spyhunter-1 survived
+ *      that app's delete; `rm -rf projects/<app>` can't see siblings).
+ *   3. /tmp QA artifacts (`qa-<jobId>/` screenshot dirs,
+ *      `wave-vqa-devserver-*.log`): keyed by jobId, unattributable to an
+ *      app after the job rows cascade — swept by age (>2 days) instead.
+ *
+ * NOT swept here, by design: `~/.npm/_cacache` and any package-manager
+ * store are content-addressed (shared across apps, unattributable) and
+ * make the next bootstrap's install fast — they are hygiene-by-cap, not
+ * per-app cascade material.
+ */
+async function deleteAppResidue(appId: string, deps: PlanFolderDeps): Promise<CleanupStep> {
+  assertSafeFolderName(appId);
+  const claudeProjects = '/home/ubuntu/.claude/projects';
+  const cmd = [
+    `TRANSCRIPTS=0`,
+    // Exact projects dir + prefixed (path-separator '-') worktree/session dirs.
+    `for d in "${claudeProjects}/-home-ubuntu-projects-${appId}" \\`,
+    `         "${claudeProjects}/-home-ubuntu-projects-${appId}-"* \\`,
+    `         "${claudeProjects}/-home-ubuntu-worktrees-${appId}-"*; do`,
+    `  if [ -d "$d" ]; then rm -rf "$d" && TRANSCRIPTS=$((TRANSCRIPTS+1)); fi`,
+    `done`,
+    // Dangling symlinks at the projects root (target deleted with the app).
+    `DANGLING=$(find /home/ubuntu/projects -maxdepth 1 -xtype l -print -delete 2>/dev/null | wc -l)`,
+    // Stale /tmp QA artifacts (age-based; jobIds are gone with the plans).
+    `find /tmp -maxdepth 1 -name "qa-*" -mtime +2 -exec rm -rf {} + 2>/dev/null || true`,
+    `find /tmp -maxdepth 1 -name "wave-vqa-devserver-*.log" -mtime +2 -delete 2>/dev/null || true`,
+    `echo "RESIDUE transcripts=$TRANSCRIPTS dangling=$DANGLING"`,
+  ].join('\n');
+  try {
+    const commandId = await deps.sendSsmCommand(cmd);
+    const output = await deps.waitForSsmOutput(commandId);
+    const m = output.match(/RESIDUE transcripts=(\d+) dangling=(\d+)/);
+    if (!m) {
+      return {
+        step: 'residue',
+        status: 'error',
+        detail: `unexpected ssm output: ${output.slice(0, 200)}`,
+      };
+    }
+    const transcripts = Number(m[1]);
+    const dangling = Number(m[2]);
+    return {
+      step: 'residue',
+      status: transcripts > 0 || dangling > 0 ? 'done' : 'skipped',
+      detail: `claude-transcript dirs=${transcripts} dangling-symlinks=${dangling} (+tmp qa sweep)`,
+    };
+  } catch (err) {
+    return {
+      step: 'residue',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
  * Delete `futurator-repos/<appId>` on GitHub. 404 is treated as already-
  * gone (success); any other failure surfaces as error so the operator can
  * clean up manually + a follow-up attention item can be raised.
@@ -310,6 +380,10 @@ export async function cleanupAppArtifacts(
   // Covers per-story/_merge/_party/_assist worktrees that the legacy
   // projects-folder rm + per-session party reap leave behind.
   results.push(await deleteAppWorktreesAndRepo(appId, deps));
+  // dino1 hygiene (2026-06-12) — claude transcripts, dangling symlinks at
+  // the projects root, stale /tmp QA artifacts. Runs AFTER the folder rm so
+  // symlinks into the deleted folder are already dangling.
+  results.push(await deleteAppResidue(appId, deps));
   results.push(await deleteGithubRepoStep(appId, deps));
   results.push(await purgeS3Prefix(`apps/${appId}/`, 's3-apps', s3));
   results.push(await purgeS3Prefix(`knowledge-live/${appId}/`, 's3-knowledge', s3));

@@ -22,7 +22,11 @@ import { cleanupAppArtifacts } from '../app-artifact-service';
  * `worktreesOutput` drives the `/home/ubuntu/worktrees/<app>` + bare-repo
  * step (defaults to both DELETED).
  */
-function makeSsmDeps(folderOutput: string, worktreesOutput = 'WORKTREES_DELETED BAREREPO_DELETED') {
+function makeSsmDeps(
+  folderOutput: string,
+  worktreesOutput = 'WORKTREES_DELETED BAREREPO_DELETED',
+  residueOutput = 'RESIDUE transcripts=2 dangling=1',
+) {
   let lastCmd = '';
   return {
     sendSsmCommand: vi.fn(async (cmd: string) => {
@@ -30,6 +34,8 @@ function makeSsmDeps(folderOutput: string, worktreesOutput = 'WORKTREES_DELETED 
       return 'cmd-id';
     }),
     waitForSsmOutput: vi.fn(async () => {
+      // dino1 hygiene (2026-06-12) — the residue sweep step.
+      if (lastCmd.includes('RESIDUE transcripts=')) return residueOutput;
       if (lastCmd.includes('/home/ubuntu/worktrees/')) return worktreesOutput;
       return folderOutput;
     }),
@@ -107,6 +113,7 @@ describe('cleanupAppArtifacts (2026-05-19)', () => {
       'party-cleanup',
       'folder',
       'worktrees',
+      'residue',
       'github-repo',
       's3-apps',
       's3-knowledge',
@@ -254,5 +261,65 @@ describe('cleanupAppArtifacts (2026-05-19)', () => {
     });
     expect(results.find((r) => r.step === 's3-apps')?.status).toBe('skipped');
     expect(results.find((r) => r.step === 's3-knowledge')?.status).toBe('skipped');
+  });
+});
+
+// ── dino1 hygiene (2026-06-12) — per-app residue sweep ──────────────
+describe('residue step', () => {
+  it('removes claude transcripts + dangling symlinks, AFTER the folder rm', async () => {
+    const ssm = makeSsmDeps('FOLDER_DELETED');
+    const results = await cleanupAppArtifacts('dino1', {
+      ...ssm,
+      deleteGithubRepo: vi.fn(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s3Client: makeS3Stub({}) as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      secretsClient: makeSecretsStub() as any,
+    });
+    const residue = results.find((r) => r.step === 'residue');
+    expect(residue?.status).toBe('done');
+    expect(residue?.detail).toContain('claude-transcript dirs=2');
+    expect(residue?.detail).toContain('dangling-symlinks=1');
+    // Ordering: residue runs after worktrees (symlinks must already dangle).
+    const steps = results.map((r) => r.step);
+    expect(steps.indexOf('residue')).toBeGreaterThan(steps.indexOf('worktrees'));
+    expect(steps.indexOf('residue')).toBeLessThan(steps.indexOf('github-repo'));
+    // The SSM command targets the app's transcript slugs with the
+    // path-separator suffix (an app "dino" must never match "dino1" dirs).
+    const residueCmd = ssm.sendSsmCommand.mock.calls
+      .map((c) => c[0])
+      .find((c: string) => c.includes('RESIDUE transcripts='))!;
+    expect(residueCmd).toContain('-home-ubuntu-projects-dino1"');
+    expect(residueCmd).toContain('-home-ubuntu-projects-dino1-"*');
+    expect(residueCmd).toContain('-home-ubuntu-worktrees-dino1-"*');
+    expect(residueCmd).toContain('-xtype l');
+    expect(residueCmd).toContain('qa-*');
+  });
+
+  it('reports skipped when nothing was found', async () => {
+    const results = await cleanupAppArtifacts('dino1', {
+      ...makeSsmDeps('FOLDER_DELETED', undefined, 'RESIDUE transcripts=0 dangling=0'),
+      deleteGithubRepo: vi.fn(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s3Client: makeS3Stub({}) as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      secretsClient: makeSecretsStub() as any,
+    });
+    expect(results.find((r) => r.step === 'residue')?.status).toBe('skipped');
+  });
+
+  it('reports error (not throw) on unexpected ssm output — cascade continues', async () => {
+    const results = await cleanupAppArtifacts('dino1', {
+      ...makeSsmDeps('FOLDER_DELETED', undefined, 'ssm exploded'),
+      deleteGithubRepo: vi.fn(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s3Client: makeS3Stub({}) as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      secretsClient: makeSecretsStub() as any,
+    });
+    expect(results.find((r) => r.step === 'residue')?.status).toBe('error');
+    // Steps after residue still ran.
+    expect(results.find((r) => r.step === 'github-repo')).toBeDefined();
+    expect(results.find((r) => r.step === 'brownfield-pat')).toBeDefined();
   });
 });
