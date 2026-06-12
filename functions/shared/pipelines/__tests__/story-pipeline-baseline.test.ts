@@ -1029,3 +1029,105 @@ describe('Epic 5 — claude-md-append-decision shell-quoting (Bug 3)', () => {
     expect(cmd).toContain('import("file:///opt/futurator-daemon/lib/claude-md-writer.mjs")');
   });
 });
+
+/**
+ * pacman1 F1 (2026-06-12) — lint at construction time. The pacman1
+ * final-assembly story shipped a react-hooks/refs ERROR no story-level step
+ * could see (lint lived only at the wave gate), stranding the fix on the
+ * gate's bounded fixer. lint-verify runs eslint --fix in the story worktree
+ * right after test-verify; failures inject LINT_ERROR into the DEV retry.
+ */
+describe('pacman1 F1 — lint-verify at construction time (mvp+)', () => {
+  function lintStep(rigor: 'prototype' | 'mvp' | 'production') {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, { rigor });
+    return pipeline.steps.find((s) => s.id === 'lint-verify') as
+      | { command: string; onFail?: { action: string; injectAs?: string } }
+      | undefined;
+  }
+
+  it('absent at prototype (rigor philosophy: loose), present at mvp + production', () => {
+    expect(lintStep('prototype')).toBeUndefined();
+    expect(lintStep('mvp')).toBeDefined();
+    expect(lintStep('production')).toBeDefined();
+  });
+
+  it('runs right after test-verify, before tamper-check', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, { rigor: 'mvp' });
+    const ids = pipeline.steps.map((s) => s.id);
+    expect(ids.indexOf('lint-verify')).toBe(ids.indexOf('test-verify') + 1);
+    expect(ids.indexOf('lint-verify')).toBeLessThan(ids.indexOf('tamper-check'));
+  });
+
+  it('mvp: --fix + errors block, warnings tolerated (no --max-warnings flag)', () => {
+    const cmd = lintStep('mvp')!.command;
+    expect(cmd).toContain('npx eslint . --fix');
+    expect(cmd).not.toContain('--max-warnings');
+    expect(cmd).toContain('LINT_VERIFY_FAILED');
+    expect(cmd).toContain('do NOT disable rules');
+  });
+
+  it('production: zero warnings (--max-warnings 0), matching the gate tier', () => {
+    expect(lintStep('production')!.command).toContain('--max-warnings 0');
+  });
+
+  it('file-guarded for brownfield apps without eslint.config.mjs', () => {
+    const cmd = lintStep('mvp')!.command;
+    expect(cmd).toContain('[ -f eslint.config.mjs ]');
+    expect(cmd).toContain('LINT_VERIFY_SKIPPED');
+  });
+
+  it('failure injects LINT_ERROR for the DEV retry (same mechanics as test-verify)', () => {
+    const step = lintStep('mvp')!;
+    expect(step.onFail?.action).toBe('fail');
+    expect(step.onFail?.injectAs).toBe('LINT_ERROR');
+  });
+
+  it('shell is valid bash at both rigors', () => {
+    for (const rigor of ['mvp', 'production'] as const) {
+      const cmd = lintStep(rigor)!.command;
+      expect(() => {
+        execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' });
+      }).not.toThrow();
+    }
+  });
+
+  it('behavioral: passes on clean code, fails listing the error on lint-red code', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'f1-lint-'));
+    try {
+      // Minimal flat eslint config with one rule that errors on `var`.
+      writeFileSync(
+        join(dir, 'eslint.config.mjs'),
+        'export default [{ files: ["**/*.js"], rules: { "no-var": "error" } }];\n',
+      );
+      const pipeline = generateStoryPipeline(story, 'Test Epic', dir, { rigor: 'mvp' });
+      const cmd = (pipeline.steps.find((s) => s.id === 'lint-verify') as { command: string })
+        .command;
+
+      writeFileSync(join(dir, 'index.js'), 'let ok = 1;\nconsole.log(ok);\n');
+      execSync(cmd, { cwd: dir, shell: '/bin/bash', stdio: 'pipe' }); // green
+
+      writeFileSync(join(dir, 'index.js'), 'var bad = 1;\nconsole.log(bad);\n');
+      let failed = false;
+      let out = '';
+      try {
+        execSync(cmd, { cwd: dir, shell: '/bin/bash', stdio: 'pipe' });
+      } catch (e) {
+        failed = true;
+        out = String((e as { stdout?: Buffer }).stdout ?? '');
+      }
+      // `var` is auto-fixable by --fix, so eslint repairs it silently — the
+      // step must then PASS (auto-fixables ride the commit, like the gate's
+      // mechanical tier). Verify the file was fixed in place.
+      if (failed) {
+        // If eslint version doesn't autofix here, the failure must at least
+        // carry the marker + the rule output for the DEV retry.
+        expect(out).toContain('LINT_VERIFY_FAILED');
+        expect(out).toContain('no-var');
+      } else {
+        expect(String(execSync('cat index.js', { cwd: dir }))).toContain('let bad');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

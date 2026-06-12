@@ -753,6 +753,44 @@ Write ONE visual test per needs_browser=true criterion. The text in
               expectExitCode: 0,
               onFail: { action: 'fail' as const, injectAs: 'TEST_VERIFY_ERROR' },
             },
+            // pacman1 F1 (2026-06-12) — lint at CONSTRUCTION time, not just at
+            // the wave gate. The pacman1 final-assembly story shipped a
+            // react-hooks/refs ERROR that no story-level step could see (lint
+            // lived only in the gate's blocking tier), so the burden landed on
+            // the gate's one-shot fixer — which had already spent its attempt
+            // on a test failure. Operator decision: mvp code is reused
+            // (prototype-on-top, refactors), so eslint runs at mvp+ in the
+            // story worktree where the DEV that wrote the code fixes its own
+            // findings via the standard retry injection (LINT_ERROR).
+            //   - `--fix` first: auto-fixables land silently and ride the
+            //     story commit (same philosophy as the gate's mechanical tier).
+            //   - mvp: ERRORS block, warnings tolerated (eslint's default
+            //     exit semantics — no --max-warnings flag).
+            //   - production: zero warnings (--max-warnings 0), matching the
+            //     gate's production tier.
+            //   - file-guarded: brownfield apps without eslint.config.mjs
+            //     skip cleanly (same guard the wave gate uses).
+            {
+              id: 'lint-verify',
+              stepType: 'shell' as const,
+              command:
+                `cd ${workingDir} && ` +
+                `if [ -f eslint.config.mjs ]; then ` +
+                `  if npx eslint . --fix${rigor === 'production' ? ' --max-warnings 0' : ''} > /tmp/lint-verify.log 2>&1; then ` +
+                `    echo "LINT_VERIFY_OK"; ` +
+                `  else ` +
+                `    echo "LINT_VERIFY_FAILED — fix the eslint problems below (errors block at ${rigor}; do NOT disable rules):"; ` +
+                `    tail -80 /tmp/lint-verify.log; ` +
+                `    exit 1; ` +
+                `  fi; ` +
+                `else ` +
+                `  echo "LINT_VERIFY_SKIPPED: no eslint.config.mjs"; ` +
+                `fi`,
+              timeout: 120000,
+              captureAs: 'LINT_VERIFY_OUTPUT',
+              expectExitCode: 0,
+              onFail: { action: 'fail' as const, injectAs: 'LINT_ERROR' },
+            },
           ] as PipelineStep[])
         : []),
 

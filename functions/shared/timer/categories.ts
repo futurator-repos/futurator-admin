@@ -257,6 +257,24 @@ export const CLASSIFICATION_TABLE: Record<AgentEventType, EventClassification> =
   inference_complete: {
     default: 'compile',
   },
+
+  // ── Skills substrate (pacman1 timer fix, 2026-06-12) ────────────────────
+  // Prompt-assembly bookkeeping emitted around agent spawn: the manifest
+  // resolution (skills_available), an explicit activation (skill_activated),
+  // and the CLAUDE.md load marker. No deliverable tokens — orchestration
+  // overhead, same bucket as extraction/validation. Pre-fix these were
+  // 'unattributed' (347s on pacman1).
+  skills_available: {
+    default: 'compile',
+  },
+
+  skill_activated: {
+    default: 'compile',
+  },
+
+  claude_md_loaded: {
+    default: 'compile',
+  },
 };
 
 /**

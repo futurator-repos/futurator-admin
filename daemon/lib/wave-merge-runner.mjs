@@ -899,7 +899,7 @@ export async function runWaveMerge({
       }
     }
 
-    // pacman1 (2026-06-11) — agentic build-fix, one bounded attempt.
+    // pacman1 (2026-06-11) — agentic build-fix.
     // A non-transient validation failure used to halt the epic in 'fixing'
     // until an operator intervened — even for the classic cross-story
     // integration break no single story could see (parallel stories agree
@@ -913,59 +913,85 @@ export async function runWaveMerge({
     // isNoOpTestExit(combinedOut) check would mask a later lint failure
     // whenever an earlier tolerated stage's "no test files" output was in
     // the combined log.)
+    //
+    // pacman1 F2 (2026-06-12) — bounded fix LOOP (cap 2), not one shot.
+    // The pacman1 final-assembly gate failed TWO independent ways: the test
+    // stage, then (post-fix) an eslint error the fixer never saw — its
+    // prompt carried only failure #1's output, the single attempt was
+    // spent, and the halt REAPED the candidate with the partial fix in it,
+    // making "Retry gate" deterministically reproduce the same loop
+    // forever. Now: up to MAX_BUILD_FIX_ATTEMPTS attempts, each fed the
+    // LATEST validation output, fixes accumulating in ONE candidate before
+    // green-or-halt.
+    const MAX_BUILD_FIX_ATTEMPTS = 2;
     if (testRun.code !== 0 && fixBuild) {
-      log('warn', `[wave-merge] post-merge validation failed (exit ${testRun.code}); attempting agentic build-fix`);
-      try {
-        const fix = await fixBuild({
-          worktreeDir: candidateDir,
-          validationCmd: gate.blockingCmd,
-          validationOutput: combinedOut.slice(-6000),
-          mergedStoryIds: merged,
-          planId,
-          epicId,
-          waveNumber,
-        });
-        if (fix?.attempted) {
+      for (let attempt = 1; attempt <= MAX_BUILD_FIX_ATTEMPTS && testRun.code !== 0; attempt++) {
+        log(
+          'warn',
+          `[wave-merge] post-merge validation failed (exit ${testRun.code}); agentic build-fix attempt ${attempt}/${MAX_BUILD_FIX_ATTEMPTS}`,
+        );
+        try {
+          const fix = await fixBuild({
+            worktreeDir: candidateDir,
+            validationCmd: gate.blockingCmd,
+            validationOutput: combinedOut.slice(-6000),
+            mergedStoryIds: merged,
+            planId,
+            epicId,
+            waveNumber,
+          });
+          if (!fix?.attempted) break; // hook declined (auth/infra) — halt path
           const rerun = await shell(gate.blockingCmd, candidateDir, 900_000);
-          if (rerun.code === 0 || isNoOpTestExit(rerun.stdout + '\n' + rerun.stderr)) {
-            // Commit EVERYTHING the fix produced (add -A: it may create
-            // files, e.g. a missing contract module) with an audit trailer.
-            await git(['add', '-A'], candidateDir);
-            const fixCommit = await git(
-              [
-                '-c', 'user.email=daemon@futurator.local',
-                '-c', 'user.name=Daemon',
-                'commit', '-m',
-                `wave ${waveNumber}: agentic build-fix after merge\n\nValidation: ${gate.blockingCmd}\nReasoning: ${(fix.reasoning || '').slice(0, 800)}`,
-              ],
-              candidateDir,
+          const rerunOut = rerun.stdout + '\n' + rerun.stderr;
+          // Commit THIS attempt's work regardless of the rerun verdict —
+          // an attempt-2 prompt must build on attempt-1's committed state,
+          // and a final halt must not throw verified progress away with
+          // the candidate (the pacman1 retry trap).
+          await git(['add', '-A'], candidateDir);
+          const fixCommit = await git(
+            [
+              '-c', 'user.email=daemon@futurator.local',
+              '-c', 'user.name=Daemon',
+              'commit', '-m',
+              `wave ${waveNumber}: agentic build-fix (attempt ${attempt})\n\nValidation: ${gate.blockingCmd}\nReasoning: ${(fix.reasoning || '').slice(0, 800)}`,
+            ],
+            candidateDir,
+          );
+          if (fixCommit.code !== 0 && !/nothing to commit/.test(fixCommit.stdout + fixCommit.stderr)) {
+            log('warn', `[wave-merge] build-fix commit failed: ${(fixCommit.stderr || '').trim().slice(0, 300)}`);
+          }
+          if (rerun.code === 0 || isNoOpTestExit(rerunOut)) {
+            log(
+              'info',
+              `[wave-merge] agentic build-fix PASSED revalidation (attempt ${attempt}) — proceeding to green advance`,
             );
-            if (fixCommit.code !== 0 && !/nothing to commit/.test(fixCommit.stdout + fixCommit.stderr)) {
-              log('warn', `[wave-merge] build-fix commit failed: ${(fixCommit.stderr || '').trim().slice(0, 300)}`);
-            } else {
-              log('info', `[wave-merge] agentic build-fix PASSED revalidation — proceeding to green advance`);
-              testRun = rerun;
-              combinedOut = rerun.stdout + '\n' + rerun.stderr;
-              // QA-D — the rerun validated the FULL chain: the failed stage
-              // is now pass (audited as agent-fixed); stages after it that
-              // never ran individually were covered by the chain rerun.
-              for (const s of stages) {
-                if (s.status === 'fail') {
-                  s.status = 'pass';
-                  s.fixedByAgent = true;
-                } else if (s.status === 'skipped') {
-                  s.status = 'pass';
-                }
+            testRun = { ...rerun, code: 0 };
+            combinedOut = rerunOut;
+            // QA-D — the rerun validated the FULL chain: the failed stage
+            // is now pass (audited as agent-fixed); stages after it that
+            // never ran individually were covered by the chain rerun.
+            for (const s of stages) {
+              if (s.status === 'fail') {
+                s.status = 'pass';
+                s.fixedByAgent = true;
+              } else if (s.status === 'skipped') {
+                s.status = 'pass';
               }
             }
           } else {
-            log('warn', `[wave-merge] build-fix attempted but revalidation still failing (exit ${rerun.code}) — halting`);
+            log(
+              'warn',
+              `[wave-merge] build-fix attempt ${attempt} — revalidation still failing (exit ${rerun.code})${attempt < MAX_BUILD_FIX_ATTEMPTS ? '; feeding the NEW failure to the next attempt' : ' — halting'}`,
+            );
+            // The next attempt (or the halt card) sees the LATEST failure,
+            // not the original one.
             testRun = rerun;
-            combinedOut = rerun.stdout + '\n' + rerun.stderr;
+            combinedOut = rerunOut;
           }
+        } catch (err) {
+          log('warn', `[wave-merge] build-fix hook threw (non-blocking, falling through to halt): ${err.message}`);
+          break;
         }
-      } catch (err) {
-        log('warn', `[wave-merge] build-fix hook threw (non-blocking, falling through to halt): ${err.message}`);
       }
     }
 

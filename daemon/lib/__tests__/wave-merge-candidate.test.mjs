@@ -358,7 +358,7 @@ describe('runWaveMerge — candidate worktree + advance-on-green', () => {
       ['--git-dir', bare, 'log', '--format=%s', '-n', '5', 'refs/heads/plan/buildfix-app-initial'],
       { encoding: 'utf8' },
     ).stdout;
-    expect(logOut).toMatch(/agentic build-fix after merge/);
+    expect(logOut).toMatch(/agentic build-fix \(attempt 1\)/);
     const show = spawnSync(
       'git',
       ['--git-dir', bare, 'show', '--stat', 'refs/heads/plan/buildfix-app-initial'],
@@ -377,19 +377,92 @@ describe('runWaveMerge — candidate worktree + advance-on-green', () => {
     ]);
     const greenBefore = bareRef(bare, 'refs/heads/main');
     const attentions = [];
+    let fixCalls = 0;
 
     const result = await runWaveMerge(
       baseArgs(appId, planSlug, ['story-a'], {
         postMergeValidationCmd: 'false',
-        fixBuild: async () => ({ attempted: true, reasoning: 'tried, changed nothing useful' }),
+        fixBuild: async () => {
+          fixCalls += 1;
+          return { attempted: true, reasoning: 'tried, changed nothing useful' };
+        },
         writeAttention: async (a) => attentions.push(a),
       }),
     );
 
     expect(result.outcome).toBe('wave-build-failed');
+    // pacman1 F2 — bounded LOOP: exactly 2 attempts, then halt.
+    expect(fixCalls).toBe(2);
     expect(bareRef(bare, 'refs/heads/plan/buildfix-bad-initial')).toBeNull();
     expect(bareRef(bare, 'refs/heads/main')).toBe(greenBefore);
     expect(attentions.some((a) => a.category === 'wave-build-failed')).toBe(true);
+  });
+
+  // pacman1 F2 (2026-06-12) — the EXACT pacman1 failure shape: the gate
+  // fails TWO independent ways (test stage, then a lint error the original
+  // one-shot fixer never saw). The bounded loop fixes failure #1, the
+  // revalidation surfaces failure #2, attempt 2 receives THAT output and
+  // fixes it → green. Pre-fix this halted with the partial fix reaped, and
+  // Retry gate reproduced the loop forever.
+  it('TWO-error sequence: attempt 1 fixes the first, attempt 2 sees + fixes the second → green', { timeout: 30000 }, async () => {
+    const appId = 'buildfix-two';
+    const planSlug = 'buildfix-two-initial';
+    const bare = buildBareRepo(appId, [
+      { branch: 'wip/story-a', files: { 'feature-a.ts': 'export const a = 1;\n' } },
+    ]);
+
+    const fixInputs = [];
+    const fixBuild = async ({ worktreeDir, validationOutput }) => {
+      fixInputs.push(validationOutput);
+      const { writeFileSync } = await import('node:fs');
+      if (validationOutput.includes('TEST-STAGE-RED')) {
+        writeFileSync(`${worktreeDir}/fix1.ok`, '1\n');
+        return { attempted: true, reasoning: 'fixed the failing unit test' };
+      }
+      writeFileSync(`${worktreeDir}/fix2.ok`, '1\n');
+      return { attempted: true, reasoning: 'fixed the eslint error' };
+    };
+
+    const result = await runWaveMerge(
+      baseArgs(appId, planSlug, ['story-a'], {
+        // Two failure classes with distinct signatures, like pacman1's
+        // test-then-eslint: stage 1 red until fix1.ok, stage 2 red until
+        // fix2.ok.
+        qualityGate: {
+          mechanical: [],
+          blocking: {
+            prototype: ['true'],
+            mvp: [
+              'test -f fix1.ok || { echo TEST-STAGE-RED; exit 1; }',
+              'test -f fix2.ok || { echo LINT-STAGE-RED; exit 1; }',
+            ],
+            production: ['true'],
+          },
+        },
+        rigor: 'mvp',
+        coordinatorInstallFn: async () => {},
+        fixBuild,
+      }),
+    );
+
+    expect(result.outcome).toBe('success');
+    expect(fixInputs).toHaveLength(2);
+    // Attempt 1 saw the FIRST failure; attempt 2 saw the SECOND (the
+    // original one-shot fixer never saw failure #2 at all).
+    expect(fixInputs[0]).toContain('TEST-STAGE-RED');
+    expect(fixInputs[1]).toContain('LINT-STAGE-RED');
+    expect(fixInputs[1]).not.toContain('TEST-STAGE-RED');
+    // Both fixes landed as audited commits on the advanced branch.
+    const logOut = spawnSync(
+      'git',
+      ['--git-dir', bare, 'log', '--format=%s', '-n', '6', `refs/heads/plan/${planSlug}`],
+      { encoding: 'utf8' },
+    ).stdout;
+    expect(logOut).toMatch(/agentic build-fix \(attempt 1\)/);
+    expect(logOut).toMatch(/agentic build-fix \(attempt 2\)/);
+    // QA-D stage truth on the success result: everything pass, fix audited.
+    expect(result.stages.every((s) => s.status === 'pass')).toBe(true);
+    expect(result.stages.some((s) => s.fixedByAgent)).toBe(true);
   });
 });
 

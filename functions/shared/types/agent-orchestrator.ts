@@ -672,7 +672,15 @@ export type AgentEventType =
   | 'story_inferred'
   | 'wave_conflict_autosplit'
   | 'inference_failed'
-  | 'inference_complete';
+  | 'inference_complete'
+  // pacman1 timer fix (2026-06-12) — skills-substrate bookkeeping events the
+  // daemon has emitted since the Epic 2/3 skill rollout but that were never
+  // declared here, so every one fell into the classifier's 'unattributed'
+  // honesty bucket (6.8% of the pacman1 forensic). They mark prompt-assembly
+  // work (skill manifests resolved, a skill activated, CLAUDE.md loaded).
+  | 'skills_available'
+  | 'skill_activated'
+  | 'claude_md_loaded';
 
 export type AgentRole = 'orchestrator' | 'dev' | 'reviewer';
 

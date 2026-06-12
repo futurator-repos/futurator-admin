@@ -67,6 +67,9 @@ function lookupTable(eventType: AgentEventType): TimerCategory {
     case 'wave_conflict_autosplit':
     case 'inference_failed':
     case 'inference_complete':
+    case 'skills_available':
+    case 'skill_activated':
+    case 'claude_md_loaded':
       return row.default; // role override applied in classify() below
     default:
       // Pipeline v2.0 PR-6 (F) — runtime resilience.

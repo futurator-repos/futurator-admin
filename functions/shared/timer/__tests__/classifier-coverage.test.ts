@@ -387,8 +387,10 @@ describe('classify — exhaustiveness: every AgentEventType in the table', () =>
   it('every key in CLASSIFICATION_TABLE is a valid AgentEventType and returns a non-unattributed category', () => {
     const allEventTypes = Object.keys(CLASSIFICATION_TABLE) as AgentEventType[];
 
-    // Verify we have all 35 values from the enum (sanity count)
-    expect(allEventTypes.length).toBe(35);
+    // Verify we have all 38 values from the enum (sanity count —
+    // pacman1 2026-06-12 added skills_available/skill_activated/
+    // claude_md_loaded).
+    expect(allEventTypes.length).toBe(38);
 
     for (const eventType of allEventTypes) {
       const event = makeEvent(eventType);
