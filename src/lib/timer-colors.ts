@@ -40,8 +40,21 @@ export const TIMER_COLORS: Record<TimerCategory, string> = {
   // Architect pass — deep blue-purple (Okabe & Ito extension)
   architect: '#4B0082',
 
+  // Baseline regression gate — muted teal-gray
+  'baseline-check': '#5E8076',
+
+  // Tamper check — muted plum
+  'tamper-check': '#8E6B8E',
+
   // Compile / orchestrator machinery — medium olive-gray
   compile: '#6B7A5E',
+
+  // Wave merge gate (merge + rigor-composed quality stages) — deep slate-blue
+  'merge-gate': '#3E5C76',
+
+  // Wave VQA gate (evidence/judges/triage/fixer on the merged candidate) —
+  // vivid purple: judged verification is primary signal, not machinery.
+  'vqa-gate': '#7D3FBF',
 
   // Human-wait — muted slate (neutral, not alarming)
   'human-wait': '#7B8FA8',
@@ -74,7 +87,11 @@ export const TIMER_CATEGORY_LABELS: Record<TimerCategory, string> = {
   qa: 'QA',
   po: 'PO',
   architect: 'Architect',
+  'baseline-check': 'Baseline Check',
+  'tamper-check': 'Tamper Check',
   compile: 'Compile',
+  'merge-gate': 'Merge Gate',
+  'vqa-gate': 'VQA Gate',
   'human-wait': 'Human Wait',
   'machine-wait': 'Machine Wait',
   git: 'Git',
@@ -93,7 +110,11 @@ export const TIMER_CATEGORY_ORDER: TimerCategory[] = [
   'qa',
   'po',
   'architect',
+  'baseline-check',
+  'tamper-check',
   'compile',
+  'merge-gate',
+  'vqa-gate',
   'human-wait',
   'machine-wait',
   'git',

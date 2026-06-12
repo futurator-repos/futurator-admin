@@ -35,6 +35,8 @@ const ALL_CATEGORIES: TimerCategory[] = [
   'baseline-check',
   'tamper-check',
   'compile',
+  'merge-gate',
+  'vqa-gate',
   'human-wait',
   'machine-wait',
   'git',

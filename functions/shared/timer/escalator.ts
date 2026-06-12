@@ -27,6 +27,8 @@ const CATEGORY_HINTS: Partial<Record<TimerCategory, string>> = {
   review: 'Review may be looping; check reviewer prompt or iteration cap',
   fix: 'DEV is iterating heavily; check for recurring test failures',
   'machine-wait': 'AWS step is slow; check Lambda cold starts or queue starvation',
+  'merge-gate': 'Wave gate (merge + quality stages) is slow; check post-merge validation cost',
+  'vqa-gate': 'Wave VQA (evidence/judges/fixer) is slow; check judge pool size and fix-cycle caps',
   'human-wait': 'Long human-wait; consider pre-resolving common attention triggers',
   dev: 'Dev exceeded cohort baseline; consider task decomposition',
 };

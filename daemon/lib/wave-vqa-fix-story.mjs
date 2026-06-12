@@ -58,6 +58,13 @@ export function buildVqaFixStories({ existingStories, fixForward, waveNumber, uu
       criteria: handoffs.map((h) => ({ id: h.acId, text: h.acText, needsBrowser: true })),
       hasBrowserTests: true,
       origin: 'wave-vqa-fix',
+      // P3 (pong1 2026-06-12) — machine-readable provenance: the wave whose
+      // VQA gate confirmed the failure. The daemon uses this to rebuild the
+      // originating card's dedupKey (wave-vqa:<plan>:<epic>:<fixesWave>:
+      // <ownerId>) and AUTO-RESOLVE it when this story's criteria pass a
+      // later gate — closing the fix-forward loop end-to-end. (minted wave
+      // is maxWave+1, NOT fixesWave+1, so this cannot be derived later.)
+      fixesWave: waveNumber,
       complexity: 'standard',
       reviewRigor: 'standard',
     });

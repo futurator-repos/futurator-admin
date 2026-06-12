@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { execSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { generateStoryPipeline } from '../story-pipeline';
 import type { EpicStory } from '../../types/epic-workflow';
 
@@ -813,6 +816,142 @@ describe('PR-65 / v2.6 M3 — review-runtime (story smoke) step', () => {
     expect(cmd).toContain('$QA_PORT');
     expect(cmd).toContain('$QA_DEV_CMD');
     expect(cmd).toContain('$QA_HEALTH_PATH');
+  });
+});
+
+/**
+ * P1 (pong1 2026-06-12) — commit-staging contract.
+ *
+ * pong1 wave-0 forensic: a RETRY job reused the first attempt's worktree, so
+ * capture-dev-baseline recorded the first attempt's untracked output AS the
+ * baseline. comm -23 then subtracted it forever: the smoke validated
+ * src/features/court-preview.feature.tsx on disk while the commit shipped
+ * without it (validated ≠ shipped). The fix: declared touchPoints are the
+ * story's ship contract — staged unconditionally AFTER the snapshot-diff —
+ * and a post-commit tripwire (STORY_COMMIT_INCOMPLETE) hard-fails if any
+ * touchPoint on disk is still absent from HEAD.
+ */
+describe('P1 — commit-staging contract (touchPoints always ship)', () => {
+  function commitCmd(s: EpicStory = story) {
+    const pipeline = generateStoryPipeline(s, 'Test Epic', workingDir, { rigor: 'mvp' });
+    return (pipeline.steps.find((st) => st.id === 'compile-commit-on-pass') as { command: string })
+      .command;
+  }
+
+  it('stages declared touchPoints unconditionally, AFTER snapshot-diff, BEFORE the empty guard', () => {
+    const cmd = commitCmd();
+    expect(cmd).toContain(`TOUCHPOINTS_STAGED story=${story.storyId} declared=1`);
+    expect(cmd).toContain(`'src/main.js'`);
+    // Ordering: snapshot-diff fallback → touchPoint staging → SOURCE_CHANGES guard.
+    const snapshotIdx = cmd.indexOf('SNAPSHOT_DIFF_FALLBACK');
+    const stageIdx = cmd.indexOf('TOUCHPOINTS_STAGED');
+    const guardIdx = cmd.indexOf('SOURCE_CHANGES=');
+    expect(snapshotIdx).toBeGreaterThan(-1);
+    expect(stageIdx).toBeGreaterThan(snapshotIdx);
+    expect(guardIdx).toBeGreaterThan(stageIdx);
+    // gitignored touchPoints are skipped on purpose (not force-added).
+    expect(cmd).toContain('git check-ignore -q "$TP"');
+  });
+
+  it('post-commit tripwire: touchPoint on disk but missing from HEAD → STORY_COMMIT_INCOMPLETE + exit 1', () => {
+    const cmd = commitCmd();
+    const commitIdx = cmd.indexOf('commit -m "$COMMIT_MSG"');
+    const tripIdx = cmd.indexOf('STORY_COMMIT_INCOMPLETE');
+    expect(commitIdx).toBeGreaterThan(-1);
+    expect(tripIdx).toBeGreaterThan(commitIdx);
+    expect(cmd).toContain('git ls-tree --name-only HEAD --');
+    expect(cmd).toContain('missing_touchpoints:');
+  });
+
+  it('sentinel touchPoints (<EPIC_WIDE>) emit no staging loop and no tripwire', () => {
+    const cmd = commitCmd({ ...story, touchPoints: ['<EPIC_WIDE>'] } as EpicStory);
+    expect(cmd).not.toContain('TOUCHPOINTS_STAGED');
+    expect(cmd).not.toContain('STORY_COMMIT_INCOMPLETE');
+  });
+
+  it('touchPoints with apostrophes survive shell quoting (bash -n clean)', () => {
+    const cmd = commitCmd({ ...story, touchPoints: ["src/it's-a-file.ts"] } as EpicStory);
+    expect(() => {
+      execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' });
+    }).not.toThrow();
+  });
+
+  it('compile-commit-on-pass remains valid bash with the P1 additions', () => {
+    for (const planSlug of [undefined, 'pong-2']) {
+      const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {
+        rigor: 'mvp',
+        planSlug,
+      });
+      const cmd = (
+        pipeline.steps.find((s) => s.id === 'compile-commit-on-pass') as { command: string }
+      ).command;
+      expect(() => {
+        execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' });
+      }).not.toThrow();
+    }
+  });
+
+  // Behavioural repro of the pong1 retry disease: the touchPoint sits
+  // untracked on disk AND is listed in the captured baseline (first
+  // attempt's output). Pre-P1 the snapshot-diff subtracted it and the
+  // commit shipped without it; post-P1 it must land in HEAD.
+  it('retry scenario: baseline-subtracted touchPoint still ships (end-to-end in a temp repo)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p1-commit-'));
+    try {
+      execSync(
+        'git init -q && git -c user.email=t@t.local -c user.name=T commit --allow-empty -q -m base',
+        { cwd: dir, shell: '/bin/bash' },
+      );
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      writeFileSync(join(dir, 'src/main.js'), 'export const x = 1;\n');
+      mkdirSync(join(dir, '.pipeline'), { recursive: true });
+      writeFileSync(join(dir, `.pipeline/${story.storyId}-baseline-dirty.txt`), '');
+      writeFileSync(
+        join(dir, `.pipeline/${story.storyId}-baseline-untracked.txt`),
+        'src/main.js\n',
+      );
+      const pipeline = generateStoryPipeline(story, 'Test Epic', dir, { rigor: 'mvp' });
+      const cmd = (
+        pipeline.steps.find((s) => s.id === 'compile-commit-on-pass') as { command: string }
+      ).command;
+      execSync(cmd, { cwd: dir, shell: '/bin/bash', stdio: 'pipe' });
+      const inHead = execSync('git ls-tree --name-only HEAD -- src/main.js', {
+        cwd: dir,
+        encoding: 'utf8',
+      }).trim();
+      expect(inHead).toBe('src/main.js');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('tripwire fragment flags an on-disk file absent from HEAD (simulated)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p1-trip-'));
+    try {
+      execSync(
+        'git init -q && git -c user.email=t@t.local -c user.name=T commit --allow-empty -q -m base',
+        { cwd: dir, shell: '/bin/bash' },
+      );
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      writeFileSync(join(dir, 'src/ghost.js'), 'never committed\n');
+      const frag =
+        `cd ${dir} && MISSING_TP=""; for TP in 'src/ghost.js'; do ` +
+        `if [ -e "$TP" ] && ! git check-ignore -q "$TP" 2>/dev/null && ! git ls-tree --name-only HEAD -- "$TP" 2>/dev/null | grep -q .; then MISSING_TP="$MISSING_TP $TP"; fi; ` +
+        `done; if [ -n "$MISSING_TP" ]; then echo "STORY_COMMIT_INCOMPLETE missing_touchpoints:$MISSING_TP" >&2; exit 1; fi`;
+      let failed = false;
+      let stderr = '';
+      try {
+        execSync(frag, { cwd: dir, shell: '/bin/bash', stdio: 'pipe' });
+      } catch (e) {
+        failed = true;
+        stderr = String((e as { stderr?: Buffer }).stderr ?? '');
+      }
+      expect(failed).toBe(true);
+      expect(stderr).toContain('STORY_COMMIT_INCOMPLETE');
+      expect(stderr).toContain('src/ghost.js');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

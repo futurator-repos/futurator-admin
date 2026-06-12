@@ -176,6 +176,22 @@ export function generateStoryPipeline(
     story.criteria.length > 0 &&
     story.criteria.every((c) => c.needsBrowser === true);
 
+  // P1 (pong1 2026-06-12): the declared touchPoints ARE the story's ship
+  // contract. The commit step's snapshot-diff staging (comm -23 vs
+  // capture-dev-baseline) subtracts everything already present at baseline —
+  // and on a RETRY job reusing the same worktree, the FIRST attempt's
+  // untracked output IS the baseline, so it was permanently un-stageable:
+  // pong1 wave-0 shipped without court-preview.feature.tsx while the smoke
+  // validated it sitting on disk (validated ≠ shipped, story edition).
+  // Fix: stage every declared touchPoint that exists on disk UNCONDITIONALLY
+  // after the snapshot-diff (covers the retry case without retry detection),
+  // and trip STORY_COMMIT_INCOMPLETE post-commit if any touchPoint on disk is
+  // still absent from HEAD. Sentinels like '<EPIC_WIDE>' are not paths.
+  const shipTouchPoints = (story.touchPoints || []).filter(
+    (tp): tp is string => typeof tp === 'string' && tp.length > 0 && !tp.startsWith('<'),
+  );
+  const quotedTouchPoints = shipTouchPoints.map((tp) => `'${tp.replace(/'/g, "'\\''")}'`).join(' ');
+
   return {
     initialVariables: {
       STORY_ID: story.storyId,
@@ -1363,6 +1379,17 @@ infra crash.
           `  echo "SNAPSHOT_DIFF_FALLBACK story=${story.storyId} reason=baseline_missing"; ` +
           `  git add -A; ` +
           `fi && ` +
+          // P1 (pong1 2026-06-12): touchPoints are the ship contract — stage
+          // them unconditionally AFTER the snapshot-diff so a retry's
+          // baseline-subtracted (first-attempt) files still land. A no-op for
+          // files already committed and unchanged; check-ignore skips paths
+          // gitignore excludes on purpose.
+          (quotedTouchPoints
+            ? `for TP in ${quotedTouchPoints}; do ` +
+              `if [ -e "$TP" ] && ! git check-ignore -q "$TP" 2>/dev/null; then git add -- "$TP" 2>/dev/null || true; fi; ` +
+              `done && ` +
+              `echo "TOUCHPOINTS_STAGED story=${story.storyId} declared=${shipTouchPoints.length}" && `
+            : '') +
           // PR-67 guard preserved.
           `SOURCE_CHANGES=$(git diff --cached --name-only | grep -vE '^(node_modules/|\\.pipeline/|\\.mycelium/|knowledge/|visual-tests(-draft)?\\.md$|\\.context/)' | wc -l) && ` +
           `if [ "$SOURCE_CHANGES" -eq 0 ]; then ` +
@@ -1398,7 +1425,25 @@ infra crash.
             epicId: opts.epicId,
             wave: typeof story.wave === 'number' ? story.wave : undefined,
             allowEmpty: verificationOnly,
-          }),
+          }) +
+          // P1 tripwire: every declared touchPoint present on disk (and not
+          // gitignored) must exist in HEAD after the commit. With the
+          // unconditional staging above this should never fire — if it does,
+          // validated-on-disk work failed to ship and the story must NOT
+          // pass green. The daemon maps STORY_COMMIT_INCOMPLETE to a HIGH
+          // 'story-commit-incomplete' attention card via the
+          // compile-commit-on-pass onFail='fail' path.
+          (quotedTouchPoints
+            ? ` && MISSING_TP=""; for TP in ${quotedTouchPoints}; do ` +
+              `if [ -e "$TP" ] && ! git check-ignore -q "$TP" 2>/dev/null && ! git ls-tree --name-only HEAD -- "$TP" 2>/dev/null | grep -q .; then MISSING_TP="$MISSING_TP $TP"; fi; ` +
+              `done; ` +
+              `if [ -n "$MISSING_TP" ]; then ` +
+              `echo "STORY_COMMIT_INCOMPLETE story=${story.storyId} missing_touchpoints:$MISSING_TP" >&2; ` +
+              `echo "These files exist in the worktree (the smoke validated them) but are NOT in HEAD — validated != shipped." >&2; ` +
+              `git status --short >&2; ` +
+              `exit 1; ` +
+              `fi`
+            : ''),
         timeout: 30000,
         captureAs: 'STORY_COMMIT_OUTPUT',
         onFail: { action: 'fail' as const, injectAs: 'STORY_COMMIT_ERROR' },

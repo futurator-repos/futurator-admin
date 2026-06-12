@@ -310,6 +310,57 @@ describe('reduceEpicWaves — failure paths', () => {
   });
 });
 
+// pong1 P3 (2026-06-12) — story-failure cards are write-once per failure
+// STATE. The dedupKey already capped rows at 1, but every cron tick over a
+// 'fixing' epic re-upserted the same card and bumped recurrenceCount (rec=36
+// on one unchanged failure). The card now writes only when the persisted
+// story status TRANSITIONS to 'failed'.
+describe('pong1 P3 — story-failure cards write-once per failure state', () => {
+  it('writes the card on the →failed transition, then stays silent on repeat ticks', async () => {
+    const writeAttentionItem = vi.fn(async () => undefined);
+
+    // Tick 1: persisted story status is 'developing'; its job FAILED.
+    const epic1 = makeEpic([makeStory('S-1', 0, { jobId: 'j-1', status: 'developing' })], {
+      planId: 'plan-1',
+    } as Partial<EpicWorkflow>);
+    const { deps: deps1 } = makeDeps({ 'j-1': 'FAILED' });
+    const r1 = await reduceEpicWaves(epic1, { ...deps1, writeAttentionItem });
+    expect(r1.kind).toBe('wave-failed');
+    expect(writeAttentionItem).toHaveBeenCalledTimes(1);
+    expect(writeAttentionItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: 'test-gate-failed',
+        dedupKey: 'wave-reducer:test-gate-failed:S-1',
+      }),
+    );
+
+    // Tick 2 (cron re-reduce): the epic row now persists status 'failed' for
+    // the same story — same failure state, NO new upsert.
+    writeAttentionItem.mockClear();
+    const epic2 = makeEpic([makeStory('S-1', 0, { jobId: 'j-1', status: 'failed' })], {
+      planId: 'plan-1',
+      status: 'fixing',
+    } as Partial<EpicWorkflow>);
+    const { deps: deps2 } = makeDeps({ 'j-1': 'FAILED' });
+    const r2 = await reduceEpicWaves(epic2, { ...deps2, writeAttentionItem });
+    expect(r2.kind).toBe('wave-failed');
+    expect(writeAttentionItem).not.toHaveBeenCalled();
+  });
+
+  it('a retried story that fails AGAIN re-writes the card (state transitioned twice)', async () => {
+    const writeAttentionItem = vi.fn(async () => undefined);
+    // After an operator retry the story is re-launched: persisted status is
+    // 'developing' again with a fresh job that failed → transition fires.
+    const epic = makeEpic([makeStory('S-1', 0, { jobId: 'j-retry', status: 'developing' })], {
+      planId: 'plan-1',
+      status: 'fixing',
+    } as Partial<EpicWorkflow>);
+    const { deps } = makeDeps({ 'j-retry': 'FAILED' });
+    await reduceEpicWaves(epic, { ...deps, writeAttentionItem });
+    expect(writeAttentionItem).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('reduceEpicWaves — next-wave advancement', () => {
   it('launches wave N+1 when build-check COMPLETED and nextWaveStories exist', async () => {
     const epic = makeEpic(

@@ -3048,6 +3048,16 @@ async function executePipeline(job) {
             'error',
             `compile-commit-on-pass failed AND has onFail.action='fail' — blocking job. ${compileErr.message}`,
           );
+          // P1 (pong1 2026-06-12): the commit step now has TWO loud failure
+          // modes. STORY_COMMIT_EMPTY = nothing staged, no commit happened.
+          // STORY_COMMIT_INCOMPLETE = a commit happened but a declared
+          // touchPoint sitting on disk never made it into HEAD (validated ≠
+          // shipped). The step's stderr was injected as STORY_COMMIT_ERROR
+          // (onFail.injectAs), so discriminate there — compileErr.message is
+          // just the generic "did not pass".
+          const commitStderr = String(variables.STORY_COMMIT_ERROR || '');
+          const commitIncomplete = commitStderr.includes('STORY_COMMIT_INCOMPLETE');
+          const commitCategory = commitIncomplete ? 'story-commit-incomplete' : 'story-commit-empty';
           // Emit a high-severity attention item (vs the medium-severity
           // compile-failed) so the operator sees this as a real story failure.
           try {
@@ -3058,16 +3068,24 @@ async function executePipeline(job) {
                 {
                   planId,
                   severity: 'high',
-                  category: 'story-commit-empty',
-                  title: `Story ${variables.STORY_ID || 'unknown'} produced no commit`,
-                  body:
-                    `compile-commit-on-pass refused to commit because no source-` +
-                    `code changes were staged. Likely cause: DEV agent wrote the ` +
-                    `file but a sibling story's commit step swept it via git add ` +
-                    `-A first (the snake-4_mpcdwkto subsumption race), OR DEV ` +
-                    `legitimately produced no source. Inspect the working tree ` +
-                    `and the dev session before retrying.\n\n` +
-                    `Step error: ${compileErr.message.slice(0, 400)}`,
+                  category: commitCategory,
+                  title: commitIncomplete
+                    ? `Story ${variables.STORY_ID || 'unknown'} commit is missing declared touchPoints`
+                    : `Story ${variables.STORY_ID || 'unknown'} produced no commit`,
+                  body: commitIncomplete
+                    ? `compile-commit-on-pass committed, but one or more of the ` +
+                      `story's declared touchPoints exist in the worktree without ` +
+                      `being in HEAD — the smoke validated files that did NOT ship. ` +
+                      `This should be impossible after the P1 unconditional ` +
+                      `touchPoint staging; inspect the worktree's git state.\n\n` +
+                      `Marker output: ${commitStderr.slice(0, 400)}`
+                    : `compile-commit-on-pass refused to commit because no source-` +
+                      `code changes were staged. Likely cause: DEV agent wrote the ` +
+                      `file but a sibling story's commit step swept it via git add ` +
+                      `-A first (the snake-4_mpcdwkto subsumption race), OR DEV ` +
+                      `legitimately produced no source. Inspect the working tree ` +
+                      `and the dev session before retrying.\n\n` +
+                      `Step error: ${compileErr.message.slice(0, 400)}`,
                   context: {
                     jobId,
                     epicId: variables.EPIC_ID,
@@ -3078,13 +3096,13 @@ async function executePipeline(job) {
                     { label: 'Open logs', kind: 'open-logs' },
                     { label: 'Open story', kind: 'open-story' },
                   ],
-                  dedupKey: `story-commit-empty:${planId}:${variables.STORY_ID || 'unknown'}`,
+                  dedupKey: `${commitCategory}:${planId}:${variables.STORY_ID || 'unknown'}`,
                 },
                 log,
               );
             }
           } catch (attnErr) {
-            log('error', `Failed to write story-commit-empty attention: ${attnErr.message}`);
+            log('error', `Failed to write ${commitCategory} attention: ${attnErr.message}`);
           }
           // Mark the job FAILED with the step id + error for forensic clarity,
           // then re-throw so the outer try/catch in the job runner records
@@ -5562,6 +5580,52 @@ async function executeWaveMergeJob(job) {
           }
         } catch (mintErr) {
           log('warn', `[${short}] vqa fix-story mint failed (non-blocking): ${mintErr.message}`);
+        }
+      }
+
+      // ── P3 (pong1 2026-06-12) — close the fix-forward loop ──────────────
+      // When a previously auto-minted wave-vqa-fix story is IN this wave and
+      // every one of its criteria passed this gate's VQA (judged PASS, or
+      // cleared by the in-gate fixer), auto-resolve the originating
+      // wave-vqa-failed card. pong1 left the AC-S5-1 card OPEN although its
+      // fix story verified at the wave-3 gate — the loop should close
+      // itself end-to-end. dedupKey rebuilt from the story's fixesWave
+      // provenance (wave-vqa:<plan>:<epic>:<fixesWave>:<ownerStoryId>).
+      if (result.vqa) {
+        try {
+          const epicRes = await ddb.send(
+            new GetCommand({ TableName: EPICS_TABLE, Key: { epicId: p.epicId } }),
+          );
+          const epicStories = Array.isArray(epicRes.Item?.stories) ? epicRes.Item.stories : [];
+          const inWave = new Set(p.storyIds || []);
+          const fixStories = epicStories.filter(
+            (s) => s.origin === 'wave-vqa-fix' && inWave.has(s.storyId),
+          );
+          if (fixStories.length > 0) {
+            const passed = new Set(
+              (result.vqa.verdicts || []).filter((v) => v.result === 'PASS').map((v) => v.acId),
+            );
+            for (const f of result.vqa.fixesApplied || []) {
+              for (const id of f.acIds || []) passed.add(id);
+            }
+            for (const fs of fixStories) {
+              const acIds = (fs.criteria || []).map((c) => c.id);
+              const allPass = acIds.length > 0 && acIds.every((id) => passed.has(id));
+              const ownerId = (fs.dependsOn || [])[0];
+              if (!allPass || !ownerId || typeof fs.fixesWave !== 'number') continue;
+              const dedupKey = `wave-vqa:${p.planId}:${p.epicId}:${fs.fixesWave}:${ownerId}`;
+              await autoResolveAttentionByDedupKey(ddb, p.planId, dedupKey, log);
+              log(
+                'info',
+                `[${short}] fix story ${fs.storyId.slice(0, 8)} verified (${acIds.join(', ')}) — auto-resolved ${dedupKey}`,
+              );
+            }
+          }
+        } catch (resolveErr) {
+          log(
+            'warn',
+            `[${short}] wave-vqa-failed auto-resolve failed (non-blocking): ${resolveErr.message}`,
+          );
         }
       }
 

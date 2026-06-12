@@ -139,6 +139,26 @@ function buildJobContext(
 }
 
 /**
+ * pong1 P2 (2026-06-12) — resolve a slice's category with the wave-gate
+ * split. All wave-merge runner lines stream under stepId 'wave-merge'
+ * (→ 'merge-gate' via the step map); lines from the v2.6 VQA stage carry a
+ * '[wave-vqa]' text prefix and book as 'vqa-gate' instead, so the gate's
+ * judged-verification minutes are distinguishable from merge/build time.
+ * Falls back to the role/event classifier when the stepId isn't mapped.
+ */
+function resolveSliceCategory(event: AgentEvent, ctx: JobContext): TimerCategory {
+  const stepOverride = resolveStepCategory(event.stepId);
+  if (
+    stepOverride === 'merge-gate' &&
+    typeof event.text === 'string' &&
+    event.text.includes('[wave-vqa]')
+  ) {
+    return 'vqa-gate';
+  }
+  return stepOverride ?? classify(event, ctx);
+}
+
+/**
  * Apply the compile→idle downgrade heuristic:
  * if the slice's category is 'compile' AND durationMs < 500 AND the eventType
  * is one of the lifecycle bookmarks, downgrade category to 'idle'.
@@ -198,9 +218,8 @@ export async function sliceForJob(jobId: string): Promise<TimerSlice[]> {
     // PR-49 — stepId override takes precedence over classifier's role+
     // event-type chain for shell steps (test-verify, tamper-check,
     // baseline-regression, compile-commit-on-pass, compile-push, etc.).
-    // Falls back to the classifier when the stepId isn't mapped.
-    const stepOverride = resolveStepCategory(eventA.stepId);
-    const category = stepOverride ?? classify(eventA, ctx);
+    // pong1 P2 — includes the wave-gate split (merge-gate / vqa-gate).
+    const category = resolveSliceCategory(eventA, ctx);
 
     const slice: TimerSlice = applyIdleDowngrade({
       jobId,
@@ -219,9 +238,8 @@ export async function sliceForJob(jobId: string): Promise<TimerSlice[]> {
   // Emit the trailing slice for the last event
   const lastEvent = events[events.length - 1];
   const lastCtx = buildJobContext(job, lastEvent, activeStatus);
-  // PR-49 — same stepId override as inter-event slices.
-  const lastStepOverride = resolveStepCategory(lastEvent.stepId);
-  const lastCategory = lastStepOverride ?? classify(lastEvent, lastCtx);
+  // PR-49 — same stepId override as inter-event slices (incl. gate split).
+  const lastCategory = resolveSliceCategory(lastEvent, lastCtx);
 
   if (terminal) {
     // Terminal job: span last event → job.updatedAt (proxy for endedAt)

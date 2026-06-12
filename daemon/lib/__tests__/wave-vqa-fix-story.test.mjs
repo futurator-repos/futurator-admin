@@ -58,6 +58,11 @@ describe('buildVqaFixStories', () => {
     expect(s.description).toContain('- Observed: absent');
     expect(s.description).toContain('.context/vqa-handoffs');
     expect(s.description).toContain('round 1 → still-failing');
+    // P3 (pong1) — provenance of the FAILING wave (≠ minted wave − 1 here:
+    // minted at max+1=4 while the failure was confirmed at wave 2). The
+    // daemon rebuilds the originating card's dedupKey from this to
+    // auto-resolve wave-vqa-failed when the fix story verifies.
+    expect(s.fixesWave).toBe(2);
   });
 
   it('falls back to the owner touchPoints when triage named no files', () => {

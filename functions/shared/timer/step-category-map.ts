@@ -49,6 +49,15 @@ export const STEP_ID_TO_CATEGORY: Readonly<Record<string, TimerCategory>> = Obje
   'dev-server-fix': 'fix',
   'plan-build-fix': 'fix',
 
+  // ── Wave gate (pong1 P2, 2026-06-12) ───────────────────────────────────
+  // Every wave-merge runner log line is teed into the events table with
+  // stepId 'wave-merge' (agent-daemon waveLog). Pre-fix these classified as
+  // machine-wait ('status' events) / fix ('step_error'), hiding the v2.6
+  // gate's real work — pong1 booked 41% of wall-clock as machine-wait.
+  // The slicer further promotes 'merge-gate' → 'vqa-gate' when the event
+  // text carries the '[wave-vqa]' prefix (see slicer.ts).
+  'wave-merge': 'merge-gate',
+
   // ── App bootstrap (Phase 1) ────────────────────────────────────────────
   // App-bootstrap saga steps don't usually surface in story-pipeline
   // forensic, but listing here closes the gap if they ever do.

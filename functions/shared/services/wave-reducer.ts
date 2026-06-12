@@ -166,6 +166,13 @@ export async function reduceEpicWaves(
   const mutable = epic.stories.map((s) => ({ ...s }));
   const mutableById = new Map(mutable.map((s) => [s.storyId, s] as const));
   const failedStoryIds: string[] = [];
+  // pong1 P3 (2026-06-12) — write-once per failure STATE. The cron re-reduces
+  // 'fixing' epics every tick; each tick re-observed the same failed stories
+  // and re-upserted their cards (recurrenceCount hit 36 on one unchanged
+  // failure). Only stories whose persisted status JUST transitioned to
+  // 'failed' get a card write — a retry that fails again transitions
+  // (pending/developing → failed) and correctly writes again.
+  const newlyFailedStoryIds: string[] = [];
   for (const story of currentWaveStories) {
     const job = jobsByStory.get(story.storyId);
     if (!job) continue;
@@ -174,6 +181,7 @@ export async function reduceEpicWaves(
     if (isSuccess(job.status)) {
       mstory.status = 'done';
     } else if (isTerminal(job.status)) {
+      if (mstory.status !== 'failed') newlyFailedStoryIds.push(story.storyId);
       mstory.status = 'failed';
       failedStoryIds.push(story.storyId);
     }
@@ -190,8 +198,12 @@ export async function reduceEpicWaves(
     // on `wave-reducer:test-gate-failed:<storyId>`. Reducer ticks (cron, every
     // status flip) that observe the same failure now bump `recurrenceCount`
     // instead of writing duplicate rows. dino1 forensic: 224 dupes → 1 row.
+    // pong1 P3 (2026-06-12): upsert only on the failed-state TRANSITION
+    // (newlyFailedStoryIds) — the dedupKey capped rows at 1, but every cron
+    // tick still bumped recurrenceCount (rec=36 on one unchanged failure),
+    // which reads as "failing 36 times" to the operator.
     if (deps.writeAttentionItem && epic.planId) {
-      for (const storyId of failedStoryIds) {
+      for (const storyId of newlyFailedStoryIds) {
         const story = mutableById.get(storyId);
         const job = jobsByStory.get(storyId);
         if (!story) continue;

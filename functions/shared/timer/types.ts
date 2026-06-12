@@ -23,6 +23,15 @@ import type { AgentJobStatus, AgentRole } from '../types/agent-orchestrator';
  *                 retry on detection.
  * - compile       Orchestrator machinery: wave/step lifecycle, extraction, validation,
  *                 inference, context-expansion. Does not advance deliverable directly.
+ * - merge-gate    pong1 P2 (2026-06-12) — wave-merge gate work on the merged
+ *                 candidate: merge/ff of wip branches, rigor-composed quality
+ *                 stages (build/tests/lint), advance-on-green. Events carry
+ *                 stepId 'wave-merge'. Pre-fix this booked as machine-wait
+ *                 (41% of pong1's wall-clock was unattributed gate work).
+ * - vqa-gate      pong1 P2 (2026-06-12) — v2.6 wave-gate VQA minutes inside
+ *                 the wave-merge job: evidence capture, judge panel, triage,
+ *                 in-candidate fixer. Same stepId 'wave-merge', distinguished
+ *                 by the '[wave-vqa]' prefix on the streamed event text.
  * - human-wait    Time the job is paused waiting for operator action (NEEDS_ATTENTION
  *                 or explicit human-wait events like dev_blocker_reported / story_blocked).
  * - machine-wait  Time waiting for a subprocess/subagent to respond or be dispatched
@@ -52,6 +61,8 @@ export type TimerCategory =
   | 'baseline-check'
   | 'tamper-check'
   | 'compile'
+  | 'merge-gate'
+  | 'vqa-gate'
   | 'human-wait'
   | 'machine-wait'
   | 'git'

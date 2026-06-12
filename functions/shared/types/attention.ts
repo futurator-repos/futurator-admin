@@ -31,6 +31,12 @@ export type AttentionCategory =
   // end with no commit on the worktree HEAD (resume-past-empty-commit). The
   // story was NOT delivered; the job is FAILED. High severity.
   | 'story-commit-empty'
+  // P1 (pong1 2026-06-12): compile-commit-on-pass COMMITTED, but a declared
+  // touchPoint that exists on disk is absent from HEAD afterwards
+  // (STORY_COMMIT_INCOMPLETE tripwire) — the smoke validated files that did
+  // not ship. Should be unreachable after the unconditional touchPoint
+  // staging; firing means the staging contract regressed. High severity.
+  | 'story-commit-incomplete'
   // Pipeline v1 — Story 1.2 (universal escalation extractors).
   // 'agent-escalated' = agent emitted ---ESCALATE--- with structured payload.
   // 'agent-needs-human' = agent emitted ---NEED-HUMAN--- shortcut with a question.
