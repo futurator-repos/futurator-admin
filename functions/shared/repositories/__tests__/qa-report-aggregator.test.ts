@@ -1004,7 +1004,11 @@ describe('QA-B — gateVqa claims from waveMergeResult.vqa', () => {
       fixed: 0,
       unverifiable: 0,
       verdicts: [
-        { acId: 'AC-S5-1', storyId: 'S5', result: 'PASS', screenshotUrl: 'https://s/w3.png' },
+        // pacman1 keying fix — the wave-3 gate judges the FIX story's
+        // criteria, so its verdicts carry the FIX story id (S6). The
+        // aggregator remaps fix-story verdicts to the OWNER (S5) so the
+        // whole arc is ONE claim.
+        { acId: 'AC-S5-1', storyId: 'S6', result: 'PASS', screenshotUrl: 'https://s/w3.png' },
       ],
       fixForward: [],
     });
@@ -1141,5 +1145,66 @@ describe('QA-D — gate rows prefer real stage outcomes over inferred cells', ()
     const row = r.gate.waveRows[0];
     expect(row.stages!.map((s) => s.status)).toEqual(['pass', 'fail', 'skipped']);
     expect(r.gate.verdict).toBe('fail');
+  });
+});
+
+// pacman1 keying fix (2026-06-12) — the PM numbers criteria PER STORY, so
+// "AC-S1-1" exists in many epics. Claims must key by (storyId, acId);
+// acId-only keying merged unrelated claims (pacman1: E4/E5/E7 all wore one
+// polluted four-attempt arc).
+describe('QA-B — acId collision across stories stays separate claims', () => {
+  function gateJob(jobId: string, vqa: Record<string, unknown>) {
+    return { ...job({ jobId }), waveMergeResult: { outcome: 'success', vqa } } as AgentJob;
+  }
+
+  it('same acId in two epics → two claims with independent histories', () => {
+    const epA = epic({
+      epicId: 'E-GHOSTS',
+      stories: [
+        story({
+          storyId: 'S-ghosts',
+          criteria: [{ id: 'AC-S1-1', text: 'Four ghosts in a row', needsBrowser: true }],
+        }),
+      ],
+      waveBuildJobs: { '0': 'gate-a' },
+    });
+    const epB = epic({
+      epicId: 'E-OVERLAY',
+      stories: [
+        story({
+          storyId: 'S-overlay',
+          criteria: [{ id: 'AC-S1-1', text: 'Dark overlay covers canvas', needsBrowser: true }],
+        }),
+      ],
+      waveBuildJobs: { '0': 'gate-b' },
+    });
+    const gateA = gateJob('gate-a', {
+      outcome: 'pass',
+      verdicts: [{ acId: 'AC-S1-1', storyId: 'S-ghosts', result: 'PASS' }],
+      fixForward: [],
+    });
+    const gateB = gateJob('gate-b', {
+      outcome: 'pass',
+      verdicts: [{ acId: 'AC-S1-1', storyId: 'S-overlay', result: 'UNVERIFIABLE' }],
+      fixForward: [],
+    });
+    const r = buildQaReport({
+      plan: plan(),
+      epics: [epA, epB],
+      jobsById: { 'gate-a': gateA, 'gate-b': gateB },
+      attentionItems: [],
+    });
+    expect(r.gateVqa!.claims).toHaveLength(2);
+    const ghosts = r.gateVqa!.claims.find((c) => c.storyId === 'S-ghosts')!;
+    const overlay = r.gateVqa!.claims.find((c) => c.storyId === 'S-overlay')!;
+    // Independent histories — no cross-pollution.
+    expect(ghosts.attempts).toHaveLength(1);
+    expect(ghosts.final).toBe('verified');
+    expect(ghosts.acText).toBe('Four ghosts in a row');
+    expect(overlay.attempts).toHaveLength(1);
+    expect(overlay.final).toBe('unverifiable');
+    expect(overlay.acText).toBe('Dark overlay covers canvas');
+    expect(r.gateVqa!.verified).toBe(1);
+    expect(r.gateVqa!.unverifiable).toBe(1);
   });
 });

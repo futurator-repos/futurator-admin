@@ -441,6 +441,40 @@ function VqaDetail({ item, claim }: { item: VqaTestResult; claim?: GateVqaClaim 
   const gated = item.failureClass === 'interaction-gated';
   return (
     <>
+      {/* pacman1 (2026-06-12) — stale-AC hint. When the wave gate VERIFIED
+          this claim on the isolated `?feature=` surface but final QA fails it
+          on the composed app, the most common cause is an AC written for a
+          retired preview surface ("on a black background", "in a horizontal
+          row") rather than a code regression — the pacman1 ghost-row case.
+          Surface that context so the operator reaches for Accept/reword
+          instead of bouncing a healthy story back to dev. */}
+      {!item.passed &&
+        item.status === 'fail' &&
+        claim &&
+        (claim.final === 'verified' ||
+          claim.final === 'fixed-in-gate' ||
+          claim.final === 'fixed-by-story') && (
+          <div
+            style={{
+              padding: '9px 11px',
+              borderRadius: 4,
+              marginBottom: 14,
+              fontSize: 12,
+              lineHeight: 1.45,
+              background: 'color-mix(in srgb, var(--accent-purple) 10%, transparent)',
+              border: '1px solid var(--accent-purple)',
+              color: 'var(--text-dim)',
+            }}
+          >
+            <span style={{ fontWeight: 600, color: 'var(--accent-purple)' }}>
+              Passed at the wave gate
+            </span>{' '}
+            — this claim was judged PASS on its isolated <code>?feature=</code> surface when it
+            merged. If the final assembly retired that preview, the AC&apos;s wording (background,
+            layout) may describe the retired surface rather than the composed app — consider Accept
+            (known limitation) or rewording, before sending back to dev.
+          </div>
+        )}
       {/* B#2 — classification banner. Interaction-gated fails are likely a
           static-screenshot limitation (Accept), not a code defect (Send back). */}
       {!item.passed && item.failureClass && (

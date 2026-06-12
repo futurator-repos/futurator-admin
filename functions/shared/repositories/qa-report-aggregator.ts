@@ -1043,18 +1043,32 @@ function buildGateVqa(
   epics: EpicWorkflow[],
   jobsById: Record<string, AgentJob>,
 ): GateVqaRollup | undefined {
+  // pacman1 QA fix (2026-06-12) — claims are keyed by (storyId, acId), NOT
+  // acId alone. The PM numbers criteria PER STORY ("AC-S1-1" exists in
+  // every epic whose first story has one criterion), so an acId-only key
+  // merged unrelated claims across epics: pacman1 showed E4, E5, and E7 all
+  // wearing one polluted four-attempt gate arc, and the gate-VQA chip
+  // undercounted.
+  const claimKey = (storyId: string, acId: string) => `${storyId}:${acId}`;
   const claims = new Map<string, GateVqaClaim>();
 
-  // Plan-wide lookups: AC text by (storyId, acId); fix story by acId.
+  // Plan-wide lookups, all (storyId, acId)-scoped. A fix story's criteria
+  // copy the OWNER story's acIds, so the fix-story join goes through the
+  // owner (dependsOn[0]) — that's the storyId the gate verdicts carry.
   const acTextByKey = new Map<string, string>();
-  const fixStoryByAcId = new Map<string, string>();
+  const fixStoryByOwnerAc = new Map<string, string>();
+  // A wave-vqa-fix story re-verifies the OWNER's criteria at a later gate,
+  // and that gate's verdicts carry the FIX story's id. Remap them to the
+  // owner so the whole arc (owner FAIL → fix story PASS) is ONE claim.
+  const ownerByFixStory = new Map<string, string>();
   for (const epic of epics) {
     for (const s of epic.stories) {
+      const owner = (s as { origin?: string; dependsOn?: string[] }).dependsOn?.[0];
+      const isFix = (s as { origin?: string }).origin === 'wave-vqa-fix' && owner;
+      if (isFix) ownerByFixStory.set(s.storyId, owner!);
       for (const c of s.criteria ?? []) {
-        acTextByKey.set(`${s.storyId}:${c.id}`, c.text);
-        if ((s as { origin?: string }).origin === 'wave-vqa-fix') {
-          fixStoryByAcId.set(c.id, s.storyId);
-        }
+        acTextByKey.set(claimKey(s.storyId, c.id), c.text);
+        if (isFix) fixStoryByOwnerAc.set(claimKey(owner!, c.id), s.storyId);
       }
     }
   }
@@ -1070,19 +1084,22 @@ function buildGateVqa(
       const waveNumber = Number(waveKey);
       const fixedSet = new Set(Array.isArray(vqa.fixedAcIds) ? (vqa.fixedAcIds as string[]) : []);
 
-      const ensureClaim = (acId: string, storyId: string): GateVqaClaim => {
-        let claim = claims.get(acId);
+      const ensureClaim = (acId: string, rawStoryId: string): GateVqaClaim => {
+        // Fix-story verdicts join the owner's claim (one arc per criterion).
+        const storyId = ownerByFixStory.get(rawStoryId) ?? rawStoryId;
+        const key = claimKey(storyId, acId);
+        let claim = claims.get(key);
         if (!claim) {
           claim = {
             acId,
             storyId,
             epicId: epic.epicId,
-            acText: acTextByKey.get(`${storyId}:${acId}`),
+            acText: acTextByKey.get(key),
             attempts: [],
             final: 'verified',
-            fixStoryId: fixStoryByAcId.get(acId),
+            fixStoryId: fixStoryByOwnerAc.get(key),
           };
-          claims.set(acId, claim);
+          claims.set(key, claim);
         }
         return claim;
       };

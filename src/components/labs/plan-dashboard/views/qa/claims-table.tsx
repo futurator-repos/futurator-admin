@@ -43,9 +43,11 @@ const LEVEL_HELP: Record<VqaTestLevel, string> = {
 
 export function ClaimsTable({ report, onSelect }: Props) {
   const results = useMemo(() => report.vqa.results ?? [], [report.vqa.results]);
-  const claimsByAcId = useMemo(() => {
+  // pacman1 QA fix (2026-06-12) — (storyId, acId) join, never acId alone:
+  // the PM numbers criteria per story, so "AC-S1-1" exists in many epics.
+  const claimsByStoryAc = useMemo(() => {
     const m = new Map<string, GateVqaClaim>();
-    for (const c of report.gateVqa?.claims ?? []) m.set(c.acId, c);
+    for (const c of report.gateVqa?.claims ?? []) m.set(`${c.storyId}:${c.acId}`, c);
     return m;
   }, [report.gateVqa]);
 
@@ -56,7 +58,9 @@ export function ClaimsTable({ report, onSelect }: Props) {
     for (const test of results) {
       const epicKey = test.epicLabel ?? test.epicId ?? '—';
       const storyKey = test.storyTitle ?? test.storyId ?? '—';
-      const claim = test.criteriaRef ? claimsByAcId.get(test.criteriaRef) : undefined;
+      const claim = test.criteriaRef
+        ? claimsByStoryAc.get(`${test.storyId}:${test.criteriaRef}`)
+        : undefined;
       const epicMap = byEpic.get(epicKey) ?? new Map<string, ClaimRow[]>();
       const rows = epicMap.get(storyKey) ?? [];
       rows.push({ test, claim });
@@ -64,7 +68,7 @@ export function ClaimsTable({ report, onSelect }: Props) {
       byEpic.set(epicKey, epicMap);
     }
     return byEpic;
-  }, [results, claimsByAcId]);
+  }, [results, claimsByStoryAc]);
 
   if (results.length === 0) return null;
 
