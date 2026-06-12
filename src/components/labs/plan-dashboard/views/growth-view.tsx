@@ -71,11 +71,10 @@ function SkillsPanel({ planId }: { planId: string }) {
   const [openSkill, setOpenSkill] = useState<string | null>(null);
 
   const skills = data?.skills?.activatedSkills ?? [];
-  const perJob = data?.skills?.perJob ?? [];
 
   const jobsForSkill = useMemo(() => {
     const m = new Map<string, string[]>();
-    for (const j of perJob) {
+    for (const j of data?.skills?.perJob ?? []) {
       for (const s of j.skills ?? []) {
         const arr = m.get(s.skill) ?? [];
         arr.push(j.jobId);
@@ -83,7 +82,7 @@ function SkillsPanel({ planId }: { planId: string }) {
       }
     }
     return m;
-  }, [perJob]);
+  }, [data?.skills?.perJob]);
 
   return (
     <Panel
