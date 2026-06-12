@@ -13,7 +13,14 @@
  * longer surfaces as a tab.
  */
 
-export type DevelopingSubtab = 'hierarchy' | 'kanban' | 'gantt' | 'gitgraph' | 'graph' | 'deploy';
+export type DevelopingSubtab =
+  | 'hierarchy'
+  | 'kanban'
+  | 'gantt'
+  | 'gitgraph'
+  | 'graph'
+  | 'growth'
+  | 'deploy';
 
 const SUBTABS: { id: DevelopingSubtab; label: string }[] = [
   { id: 'hierarchy', label: 'Hierarchy' },
@@ -21,6 +28,9 @@ const SUBTABS: { id: DevelopingSubtab; label: string }[] = [
   { id: 'gantt', label: 'Gantt' },
   { id: 'gitgraph', label: 'GitGraph' },
   { id: 'graph', label: 'Graph' },
+  // pacman1 UX (2026-06-12) — the learning-loop lens: skills used, lessons
+  // learned (Reflector), and the compiler's knowledge summary.
+  { id: 'growth', label: 'Skills & Growth' },
 ];
 
 export function DevelopingSubtabs({

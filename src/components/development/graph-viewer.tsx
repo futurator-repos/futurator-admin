@@ -2,6 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
+import {
+  articleUrl,
+  computeCoverage,
+  computeIsolated,
+  ISOLATION_COPY,
+  type IsolatedNode,
+} from '@/lib/graph-insights';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
   ssr: false,
@@ -230,6 +237,41 @@ export function GraphViewer({
     return out;
   }, [snapshot]);
 
+  // ── pacman1 UX — knowledge layer derived insights ──────────────────
+  const coverage = useMemo(() => computeCoverage(snapshot?.nodes ?? []), [snapshot]);
+  const isolated = useMemo(
+    () => computeIsolated(snapshot?.nodes ?? [], snapshot?.edges ?? []),
+    [snapshot],
+  );
+  const [isolatedOpen, setIsolatedOpen] = useState(false);
+
+  // Compiler activity feed — the wiki's log.md from the live S3 mirror.
+  const [logTail, setLogTail] = useState<string | null>(null);
+  const [logOpen, setLogOpen] = useState(false);
+  useEffect(() => {
+    if (!projectId || !logOpen || logTail !== null) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `${S3_BASE}/${encodeURIComponent(projectId)}/log.md?t=${Date.now()}`,
+          { cache: 'no-store' },
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        if (!cancelled) setLogTail(text.split('\n').slice(-60).join('\n'));
+      } catch {
+        if (!cancelled)
+          setLogTail(
+            'No compilation log mirrored yet — log.md appears after the first story compiles (and ships after the knowledge-commit fix).',
+          );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, logOpen, logTail]);
+
   // Apply filters to graphData
   const filteredGraphData = useMemo(() => {
     const allNodes = graphData.nodes as GraphNode[];
@@ -353,6 +395,19 @@ export function GraphViewer({
           </div>
           <div>
             <span className="font-semibold">{snapshot.edgeCount}</span> edges
+          </div>
+          {/* pacman1 UX — knowledge coverage at a glance. */}
+          <div
+            title="Files whose knowledge article the compiler has written (purpose, decisions, signals)"
+            className="text-muted-foreground"
+          >
+            knowledge:{' '}
+            <span
+              className="font-semibold"
+              style={{ color: coverage.coveragePct >= 70 ? 'var(--success)' : 'var(--warning)' }}
+            >
+              {coverage.filesWithArticle}/{coverage.files} files ({coverage.coveragePct}%)
+            </span>
           </div>
           <div className="text-muted-foreground">
             Snapshot: {new Date(snapshot.generatedAt).toLocaleString()}
@@ -524,6 +579,17 @@ export function GraphViewer({
                   <div className="text-xs whitespace-pre-wrap">{selectedNode.summary}</div>
                 </div>
               )}
+              {/* pacman1 UX — open the compiler's full article for this node. */}
+              {projectId && articleUrl(S3_BASE, projectId, selectedNode) && (
+                <a
+                  href={articleUrl(S3_BASE, projectId, selectedNode)!}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
+                >
+                  View knowledge article ↗
+                </a>
+              )}
               {(selectedNode.createdByStory || selectedNode.lastMutatedByStory) && (
                 <div className="border-t border-border pt-2 text-xs text-muted-foreground">
                   {selectedNode.createdByStory && (
@@ -574,6 +640,72 @@ export function GraphViewer({
           )}
         </div>
       </div>
+
+      {/* ── pacman1 UX — unconnected nodes (the operator's cleanup radar) ── */}
+      {snapshot && isolated.length > 0 && (
+        <div className="rounded-md border border-border bg-card">
+          <button
+            type="button"
+            onClick={() => setIsolatedOpen((v) => !v)}
+            className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm hover:bg-muted/40"
+            aria-expanded={isolatedOpen}
+          >
+            <span className="font-semibold">
+              {isolatedOpen ? '▾' : '▸'} Unconnected nodes ({isolated.length})
+            </span>
+            <span className="text-xs text-muted-foreground">
+              nodes with no relationships — most reconnect after the next compile; persistent ones
+              are removal candidates
+            </span>
+          </button>
+          {isolatedOpen && (
+            <div className="max-h-64 overflow-auto border-t border-border">
+              {isolated.map(({ node, reason }: IsolatedNode) => (
+                <button
+                  key={node.id}
+                  type="button"
+                  onClick={() => setSelectedNode(node as unknown as GraphNode)}
+                  className="flex w-full items-baseline gap-3 border-t border-border px-4 py-2 text-left text-xs first:border-t-0 hover:bg-muted/40"
+                  title="Click to inspect this node"
+                >
+                  <span
+                    className="inline-block h-2 w-2 flex-shrink-0 rounded-full"
+                    style={{
+                      background:
+                        NODE_COLORS_BY_KIND[node.kind ?? node.type ?? 'unknown'] ??
+                        NODE_COLORS_BY_KIND.unknown,
+                    }}
+                  />
+                  <code className="flex-shrink-0 break-all">{node.id}</code>
+                  <span className="text-muted-foreground">{ISOLATION_COPY[reason]}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── pacman1 UX — compiler activity (knowledge/log.md tail) ───────── */}
+      {snapshot && (
+        <div className="rounded-md border border-border bg-card">
+          <button
+            type="button"
+            onClick={() => setLogOpen((v) => !v)}
+            className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm hover:bg-muted/40"
+            aria-expanded={logOpen}
+          >
+            <span className="font-semibold">{logOpen ? '▾' : '▸'} Compiler activity</span>
+            <span className="text-xs text-muted-foreground">
+              the knowledge compiler&apos;s per-story log (what it cataloged, when)
+            </span>
+          </button>
+          {logOpen && (
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap border-t border-border px-4 py-3 font-mono text-xs text-muted-foreground">
+              {logTail ?? 'Loading…'}
+            </pre>
+          )}
+        </div>
+      )}
     </div>
   );
 }

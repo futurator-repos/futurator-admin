@@ -42,6 +42,7 @@ import { KanbanView } from './views/kanban-view';
 import { GanttView } from './views/gantt-view';
 import { GitGraphView } from './views/git-graph-view';
 import { GraphView } from './views/graph-view';
+import { GrowthView } from './views/growth-view';
 import { PlanReviewView } from './views/plan-review-view';
 import { QaReviewView } from './views/qa-review-view';
 import { DeployStageView } from './views/deploy-stage-view';
@@ -55,7 +56,14 @@ type ViewId = StageId | 'party';
 const STAGE_KEY = 'labs.plan-dashboard.stage';
 const SUBTAB_KEY = 'labs.plan-dashboard.subtab';
 const VALID_STAGES: StageId[] = PIPELINE_STAGES.map((s) => s.id);
-const VALID_SUBTABS: DevelopingSubtab[] = ['hierarchy', 'kanban', 'gantt', 'gitgraph', 'graph'];
+const VALID_SUBTABS: DevelopingSubtab[] = [
+  'hierarchy',
+  'kanban',
+  'gantt',
+  'gitgraph',
+  'graph',
+  'growth',
+];
 
 function isStage(v: string | null): v is StageId {
   return v !== null && (VALID_STAGES as string[]).includes(v);
@@ -394,6 +402,13 @@ export function PlanDashboard({ planId }: { planId: string }) {
             {activeSubtab === 'graph' && (
               <GraphView
                 projectId={plan.appId ?? plan.workingDir.split('/').filter(Boolean).pop() ?? null}
+              />
+            )}
+            {activeSubtab === 'growth' && (
+              <GrowthView
+                planId={plan.planId}
+                projectSlug={plan.appId ?? plan.workingDir.split('/').filter(Boolean).pop() ?? null}
+                onOpenGraph={() => goToSubtab('graph')}
               />
             )}
           </>
