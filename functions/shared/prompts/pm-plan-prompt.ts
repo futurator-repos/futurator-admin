@@ -120,6 +120,13 @@ execute simultaneously across multiple agent instances. Concretely:
 - A story with \`dependsOn: ["S1"]\` runs in **wave 1** (only after S1).
 - A story with \`dependsOn: ["S2", "S3"]\` runs after BOTH, so wave = max(S2, S3) + 1.
 - Epics follow the same model at their layer: all wave-0 epics start together.
+- **HARD RULE — a story's \`dependsOn\` may ONLY reference EARLIER stories in
+  the SAME epic.** Cross-epic ordering is expressed exclusively through the
+  EPIC's own \`dependsOn\` (the epic layer). If a story needs work from
+  another epic (e.g. a final assembly that composes everything), put that
+  story in an epic that \`dependsOn\` those other epics — never point the
+  story's \`dependsOn\` across epics. Plans violating this are REJECTED at
+  apply time.
 
 **A plan with more parallelism ships faster.** When in doubt about whether two
 stories actually depend on each other, prefer empty \`dependsOn\` — BUT only

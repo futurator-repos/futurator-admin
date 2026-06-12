@@ -142,6 +142,10 @@ export function PlanDashboard({ planId }: { planId: string }) {
   const { data: pmJob } = useAgentJob(pmJobId);
 
   const [applied, setApplied] = useState<Set<string>>(new Set());
+  // dino1/snake (2026-06-12) — apply failures were console-only: the PM
+  // completed, validation rejected the PLAN_JSON (e.g. cross-epic story
+  // dependsOn), and the operator saw a blank "No epics yet" with no reason.
+  const [applyError, setApplyError] = useState<string | null>(null);
   // PR-25 — track auto-discover attempts so we don't loop. Keyed by planId
   // because the discover path doesn't know the pmJobId until the API
   // responds.
@@ -159,13 +163,17 @@ export function PlanDashboard({ planId }: { planId: string }) {
     apply
       .mutateAsync({ jobId: pmJobId })
       .then(() => {
+        setApplyError(null);
         // Strip pmJobId from URL once consumed; preserve stage/subtab.
         const sp = new URLSearchParams(params.toString());
         sp.delete('pmJobId');
         router.replace(`/labs/?${sp.toString()}`);
         refetch();
       })
-      .catch((err) => console.error('[PlanDashboard] apply failed', err));
+      .catch((err) => {
+        setApplyError(err instanceof Error ? err.message : String(err));
+        console.error('[PlanDashboard] apply failed', err);
+      });
   }, [pmJob, pmJobId, plan, applied, apply, refetch, router, params]);
 
   // PR-25 — auto-discover fallback for the regenerate-without-pmJobId-in-URL
@@ -193,6 +201,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
         // brand-new plans (the modal's initial PM hasn't completed yet).
         // Quiet the noise — let the existing pmJobId path handle that case.
         if (!/No completed pm-plan job/i.test(String(err?.message || ''))) {
+          setApplyError(err instanceof Error ? err.message : String(err));
           console.error('[PlanDashboard] auto-discover apply failed', err);
         }
       });
@@ -364,6 +373,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
             pmJobStatus={pmJob?.status}
             pmJobId={pmJobId}
             applyPending={apply.isPending}
+            applyError={applyError}
             onPmJobStarted={(jobId) => {
               setLocalPmJobId(jobId);
               setApplied(new Set());

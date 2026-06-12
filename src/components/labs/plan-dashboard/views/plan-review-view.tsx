@@ -38,6 +38,10 @@ interface Props {
   pmJobStatus?: AgentJobStatus;
   pmJobId?: string | null;
   applyPending?: boolean;
+  /** dino1/snake (2026-06-12) — the apply/validation rejection message, so
+   *  a PM plan that fails validation is explained instead of silently
+   *  rendering the empty "No epics yet" state. */
+  applyError?: string | null;
   onPmJobStarted?: (jobId: string) => void;
   onPlanStarted?: () => void;
 }
@@ -47,6 +51,7 @@ export function PlanReviewView({
   pmJobStatus,
   pmJobId,
   applyPending,
+  applyError,
   onPmJobStarted,
   onPlanStarted,
 }: Props) {
@@ -360,7 +365,37 @@ export function PlanReviewView({
           Epics{hasEpics && <span style={{ opacity: 0.5 }}> · {epics.length}</span>}
         </SectionHeader>
 
-        {!hasEpics && !generating && !pmFailed && (
+        {/* dino1/snake (2026-06-12) — a completed PM whose plan failed
+            validation used to land here as a bare "No epics yet" with the
+            real reason buried in the console. Show the rejection loudly:
+            the operator regenerates (a fresh PM roll) or fixes + Imports. */}
+        {!hasEpics && applyError && !generating && (
+          <div
+            style={{
+              padding: '14px 16px',
+              border: '1px solid var(--destructive)',
+              background: 'color-mix(in srgb, var(--destructive) 7%, transparent)',
+              borderRadius: 8,
+              fontSize: 12.5,
+              lineHeight: 1.55,
+              color: 'var(--text-dim)',
+              marginBottom: 10,
+            }}
+          >
+            <div style={{ color: 'var(--destructive)', fontWeight: 600, marginBottom: 4 }}>
+              The PM finished, but its plan was rejected by validation
+            </div>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5, whiteSpace: 'pre-wrap' }}>
+              {applyError}
+            </div>
+            <div style={{ marginTop: 8, color: 'var(--text-mute)' }}>
+              Click <strong>Regenerate</strong> for a fresh decomposition, or fix the JSON and use{' '}
+              <strong>Import</strong>.
+            </div>
+          </div>
+        )}
+
+        {!hasEpics && !generating && !pmFailed && !applyError && (
           <EmptyCard>
             No epics yet. Click <strong>Regenerate</strong> to kick off the PM agent.
           </EmptyCard>
