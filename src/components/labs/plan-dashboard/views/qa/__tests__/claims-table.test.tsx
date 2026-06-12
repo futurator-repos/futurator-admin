@@ -1,15 +1,20 @@
 /**
- * claims-table.test.tsx — QA-C (pong1 2026-06-12) claim-centric table.
+ * claims-table.test.tsx — QA-C claim-centric table, accordion edition
+ * (pacman1 UX pass 2026-06-12).
  *
  * Pins the redesign's honesty contract:
  * - One row per unique test (single-counted), grouped epic → story.
  * - Level chips (L0/L1/L2) are VISIBLE on rows.
- * - The wave-gate VQA fix-forward arc renders inline (W2 ✗ → W3 ✓).
- * - EVERY row — pass or fail — is clickable into the evidence drawer.
+ * - The wave-gate fix-forward arc renders inline (W2 ✗ → W3 ✓).
+ * - Rows expand IN PLACE: the expander carries the judge rationale, the
+ *   level meaning, the gate history, and a clickable full-size screenshot.
+ * - Failure rows expose Send back / Accept actions inline.
  */
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactElement } from 'react';
 
 vi.mock('next/navigation', () => ({
   usePathname: vi.fn(() => '/labs'),
@@ -17,8 +22,15 @@ vi.mock('next/navigation', () => ({
   useRouter: vi.fn(() => ({ replace: vi.fn(), push: vi.fn() })),
 }));
 
-import { ClaimsTable, type ClaimRow } from '../claims-table';
+import { ClaimsTable } from '../claims-table';
 import type { QaReport, VqaTestResult } from '@/types/qa-report';
+
+function renderWithQuery(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+  });
+  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+}
 
 function vqaResult(over: Partial<VqaTestResult>): VqaTestResult {
   return {
@@ -32,6 +44,8 @@ function vqaResult(over: Partial<VqaTestResult>): VqaTestResult {
     status: 'pass',
     level: 'L1',
     expected: 'The court renders with two paddles',
+    rationale: 'Two paddles visible at both edges of the court',
+    screenshotUrl: 'https://shots/vt-1.png',
     ...over,
   };
 }
@@ -106,40 +120,75 @@ function makeReport(over: Partial<QaReport> = {}): QaReport {
   };
 }
 
-describe('ClaimsTable — claim-centric QA surface', () => {
-  it('renders one row per unique test with level chips visible', () => {
-    render(<ClaimsTable report={makeReport()} onSelect={() => {}} />);
+describe('ClaimsTable — claim-centric accordion', () => {
+  it('renders one row per unique test with level chips visible, grouped epic → story', () => {
+    renderWithQuery(<ClaimsTable report={makeReport()} planId="P-1" />);
     expect(screen.getByText('AC-1')).toBeInTheDocument();
     expect(screen.getByText('AC-S5-1')).toBeInTheDocument();
-    // The operator's #1 complaint: L0/L1/L2 were invisible. Now chips.
-    expect(screen.getByText('L1')).toBeInTheDocument();
-    expect(screen.getByText('L2')).toBeInTheDocument();
-    // Grouped by epic → story.
+    expect(screen.getAllByText('L1').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('L2').length).toBeGreaterThan(0);
     expect(screen.getByText('Court story')).toBeInTheDocument();
     expect(screen.getByText('Ball physics')).toBeInTheDocument();
   });
 
-  it('renders the wave-gate fix-forward arc inline (W2 fail → W3 pass)', () => {
-    render(<ClaimsTable report={makeReport()} onSelect={() => {}} />);
-    // The arc lives in one mono span: "W2 ✗ → W3 ✓".
-    const arc = screen.getByTitle(/Gate VQA: fixed-by-story/);
+  it('renders the wave-gate fix-forward arc inline (W2 fail → W3 pass), joined by (storyId, acId)', () => {
+    renderWithQuery(<ClaimsTable report={makeReport()} planId="P-1" />);
+    const arc = screen.getByTitle(/Gate verification: fixed-by-story/);
     expect(arc.textContent).toContain('W2 ✗');
     expect(arc.textContent).toContain('W3 ✓');
   });
 
-  it('EVERY row opens the drawer — passing rows included, with the gate claim joined', () => {
-    const selected: ClaimRow[] = [];
-    render(<ClaimsTable report={makeReport()} onSelect={(row) => selected.push(row)} />);
+  it('clicking a row expands it IN PLACE with rationale, level meaning, gate history, screenshot link', () => {
+    renderWithQuery(<ClaimsTable report={makeReport()} planId="P-1" />);
+    // Nothing expanded initially.
+    expect(screen.queryByText(/What the judge saw/i)).not.toBeInTheDocument();
+
     fireEvent.click(screen.getByText('AC-S5-1'));
-    expect(selected).toHaveLength(1);
-    expect(selected[0].test.testId).toBe('VT-2');
-    expect(selected[0].test.status).toBe('pass');
-    expect(selected[0].claim?.final).toBe('fixed-by-story');
-    expect(selected[0].claim?.fixStoryId).toBe('S6');
+    // Judge rationale section + level explainer + gate history rendered inline.
+    expect(screen.getByText(/How it was checked/i)).toBeInTheDocument();
+    // The level explainer (the footer legend also mentions "interaction
+    // flow", so assert on the full explainer sentence).
+    expect(screen.getByText(/scripted clicks\/keys are performed/i)).toBeInTheDocument();
+    expect(screen.getByText(/History at the wave gates/i)).toBeInTheDocument();
+    expect(screen.getByText('FAIL')).toBeInTheDocument();
+    // Screenshot links out to the full-size capture.
+    const shotLink = screen.getByTitle(/Open the full-size screenshot/i);
+    expect(shotLink).toHaveAttribute('href', 'https://shots/vt-1.png');
+    expect(shotLink).toHaveAttribute('target', '_blank');
+
+    // Clicking again collapses.
+    fireEvent.click(screen.getByText('AC-S5-1'));
+    expect(screen.queryByText(/History at the wave gates/i)).not.toBeInTheDocument();
+  });
+
+  it('failing rows expose Send back + Accept actions inline; passing rows do not', () => {
+    const report = makeReport();
+    report.vqa.results![1] = vqaResult({
+      testId: 'VT-2',
+      storyId: 'S5',
+      storyTitle: 'Ball physics',
+      epicLabel: 'E2',
+      epicId: 'E-B',
+      criteriaRef: 'AC-S5-1',
+      passed: false,
+      status: 'fail',
+      failureClass: 'render',
+    });
+    renderWithQuery(<ClaimsTable report={report} planId="P-1" />);
+
+    fireEvent.click(screen.getByText('AC-S5-1'));
+    expect(screen.getByText('Send back to dev')).toBeInTheDocument();
+    expect(screen.getByText(/Accept \(known limitation\)/)).toBeInTheDocument();
+    // The stale-AC honesty banner: this claim passed at the gate.
+    expect(screen.getByText(/Passed at the wave gate/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('AC-S5-1'));
+
+    fireEvent.click(screen.getByText('AC-1'));
+    expect(screen.queryByText('Send back to dev')).not.toBeInTheDocument();
   });
 
   it('claims without gate history render an em-dash, never a fabricated verdict', () => {
-    render(<ClaimsTable report={makeReport()} onSelect={() => {}} />);
-    expect(screen.getByTitle(/No wave-gate VQA history for this claim/)).toBeInTheDocument();
+    renderWithQuery(<ClaimsTable report={makeReport()} planId="P-1" />);
+    expect(screen.getByTitle(/No wave-gate verification history/)).toBeInTheDocument();
   });
 });

@@ -327,12 +327,16 @@ export async function sliceForPlan(planId: string): Promise<TimerSlice[]> {
     }
   }
 
-  // Fetch slices for each job and merge
+  // Fetch slices for each job and merge. Keep each job's terminal status —
+  // the inter-job gap pass below needs it to tell machine-wait (cron
+  // cadence) from human-wait (operator decision).
   const allSlices: TimerSlice[] = [];
+  const statusByJob = new Map<string, AgentJobStatus>();
 
   await Promise.all(
     Array.from(jobIds).map(async (jobId) => {
-      const slices = await sliceForJob(jobId);
+      const [slices, job] = await Promise.all([sliceForJob(jobId), getJobById(jobId)]);
+      if (job) statusByJob.set(jobId, job.status);
       allSlices.push(...slices);
     }),
   );
@@ -372,10 +376,17 @@ export async function sliceForPlan(planId: string): Promise<TimerSlice[]> {
     if (cur.jobId === next.jobId) continue;
     const gapMs = new Date(next.startedAt).getTime() - new Date(cur.endedAt).getTime();
     if (gapMs < INTER_JOB_GAP_MIN_MS) continue;
+    // pacman1 (2026-06-12) — a gap after a FAILED / NEEDS_ATTENTION job is
+    // the OPERATOR deciding (inspect the failure, click Retry/send-back),
+    // not the machine. pacman1 booked ~1h of "Machine Wait 49.6%" that was
+    // really the plan halted awaiting the Retry click. Gaps after healthy
+    // jobs stay machine-wait (cron cadence + launch latency).
+    const prevStatus = statusByJob.get(cur.jobId);
+    const isOperatorGap = prevStatus === 'FAILED' || prevStatus === 'NEEDS_ATTENTION';
     filledSlices.push({
       jobId: '__inter_job__',
       eventSeq: `${cur.eventSeq}->${next.eventSeq}`,
-      category: 'machine-wait' as TimerCategory,
+      category: (isOperatorGap ? 'human-wait' : 'machine-wait') as TimerCategory,
       startedAt: cur.endedAt,
       endedAt: next.startedAt,
       durationMs: gapMs,

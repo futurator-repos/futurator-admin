@@ -55,10 +55,7 @@ function buildShares(
   // The chart now reads as "of all work time, X % was dev, Y % was
   // review, …". Wall-clock is still rendered separately as the panel
   // header value (`formatDuration(planTotalMs)`).
-  const sumMs = Object.values(byCategory).reduce(
-    (a, c) => a + (c?.totalMs ?? 0),
-    0,
-  );
+  const sumMs = Object.values(byCategory).reduce((a, c) => a + (c?.totalMs ?? 0), 0);
   const denom = sumMs > 0 ? sumMs : 1;
   return TIMER_CATEGORY_ORDER.flatMap((cat) => {
     const entry = byCategory[cat];
@@ -170,9 +167,7 @@ function Legend({ shares }: { shares: CategoryShare[] }) {
 // ── Per-story expansion ─────────────────────────────────────────────────────
 
 /** Group slices by jobId and compute per-job category totals. */
-function groupByJob(
-  slices: TimerSlice[],
-): {
+function groupByJob(slices: TimerSlice[]): {
   jobId: string;
   totalMs: number;
   byCategory: Partial<Record<TimerCategory, { totalMs: number; count: number }>>;
@@ -286,12 +281,25 @@ function useForensicDownload(planId: string) {
 export function TimingPanel({ planId }: { planId: string }) {
   const { data, isLoading, error } = usePlanTiming(planId);
   const [expanded, setExpanded] = useState(false);
+  // pacman1 (2026-06-12) — human-wait (operator decision time: a halted gate
+  // waiting for Retry, NEEDS_ATTENTION pauses) is EXCLUDED by default so the
+  // panel reads as true pipeline timing. The toggle brings it back.
+  const [includeHumanWait, setIncludeHumanWait] = useState(false);
   const { download, downloading, downloadError } = useForensicDownload(planId);
 
-  const shares = useMemo(() => {
-    if (!data) return [];
-    return buildShares(data.aggregate.byCategory, data.planTotalMs);
-  }, [data]);
+  const filteredByCategory = useMemo(() => {
+    if (!data) return {};
+    if (includeHumanWait) return data.aggregate.byCategory;
+    const { 'human-wait': _excluded, ...rest } = data.aggregate.byCategory;
+    return rest;
+  }, [data, includeHumanWait]);
+
+  const humanWaitMs = data?.aggregate.byCategory['human-wait']?.totalMs ?? 0;
+
+  const shares = useMemo(
+    () => buildShares(filteredByCategory, data?.planTotalMs ?? 0),
+    [filteredByCategory, data?.planTotalMs],
+  );
 
   const ariaLabel = useMemo(() => {
     if (shares.length === 0) return 'Timing breakdown: no data';
@@ -404,7 +412,49 @@ export function TimingPanel({ planId }: { planId: string }) {
             </span>
           )}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          {/* Human-wait toggle — default OFF (true pipeline timing only). */}
+          {humanWaitMs > 0 && (
+            <button
+              type="button"
+              onClick={() => setIncludeHumanWait((v) => !v)}
+              aria-pressed={includeHumanWait}
+              title={
+                includeHumanWait
+                  ? 'Hiding operator time shows true pipeline timing only'
+                  : `Operator decision time (halted gates waiting for you, attention pauses) is hidden — ${formatMs(humanWaitMs)} excluded`
+              }
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
+                fontSize: 11,
+                padding: '3px 9px',
+                borderRadius: 5,
+                border: `1px solid ${includeHumanWait ? TIMER_COLORS['human-wait'] : 'var(--border)'}`,
+                background: includeHumanWait
+                  ? `color-mix(in srgb, ${TIMER_COLORS['human-wait']} 14%, transparent)`
+                  : 'transparent',
+                color: includeHumanWait ? 'var(--foreground)' : 'var(--text-dim, #888)',
+                cursor: 'pointer',
+              }}
+            >
+              <span
+                aria-hidden
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: 2,
+                  background: TIMER_COLORS['human-wait'],
+                  opacity: includeHumanWait ? 1 : 0.35,
+                  display: 'inline-block',
+                }}
+              />
+              {includeHumanWait
+                ? `Operator wait shown (${formatMs(humanWaitMs)})`
+                : `Operator wait hidden (${formatMs(humanWaitMs)})`}
+            </button>
+          )}
           {/* Export button */}
           <button
             type="button"
