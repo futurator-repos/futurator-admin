@@ -19,6 +19,8 @@ interface Props {
   onSend: () => void;
   isProcessing: boolean;
   isErrored?: boolean;
+  /** Terminal published-to-main state — composer is disabled. */
+  isDone?: boolean;
   /** Optional file attach handler (party-docs upload). */
   onAttach?: (files: File[]) => void;
   isUploading?: boolean;
@@ -45,6 +47,7 @@ export function LeftPane({
   onSend,
   isProcessing,
   isErrored = false,
+  isDone = false,
   onAttach,
   isUploading = false,
   acceptedTypes,
@@ -58,18 +61,45 @@ export function LeftPane({
         <ChatHistory rounds={rounds} activeRoundId={activeRoundId} />
       </div>
 
-      <ComposerBar
-        currentRound={rounds[rounds.length - 1] ?? null}
-        draft={draft}
-        onChange={onDraftChange}
-        onSend={onSend}
-        isProcessing={isProcessing}
-        isErrored={isErrored}
-        onAttach={onAttach}
-        isUploading={isUploading}
-        acceptedTypes={acceptedTypes}
-        uploadStatus={uploadStatus}
-      />
+      {isDone ? (
+        <DonePanel />
+      ) : (
+        <ComposerBar
+          currentRound={rounds[rounds.length - 1] ?? null}
+          draft={draft}
+          onChange={onDraftChange}
+          onSend={onSend}
+          isProcessing={isProcessing}
+          isErrored={isErrored}
+          onAttach={onAttach}
+          isUploading={isUploading}
+          acceptedTypes={acceptedTypes}
+          uploadStatus={uploadStatus}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Terminal state — debate was published to main and its worktree reaped. */
+function DonePanel() {
+  return (
+    <div className="shrink-0 px-3 pb-3 pt-1.5">
+      <div
+        className="rounded-[10px] border px-3 py-3 text-[12px] leading-relaxed"
+        style={{
+          background: 'color-mix(in srgb, var(--success) 8%, transparent)',
+          borderColor: 'color-mix(in srgb, var(--success) 35%, transparent)',
+          color: COLORS.textBody,
+        }}
+        data-testid="debate-done-panel"
+      >
+        <div className="mb-1 font-semibold" style={{ color: 'var(--success)' }}>
+          ✓ Published to main — this debate is Done
+        </div>
+        The worktree was deleted to free space, so this debate can&apos;t continue. Start a new
+        debate to keep going — it forks from the now-updated main.
+      </div>
     </div>
   );
 }

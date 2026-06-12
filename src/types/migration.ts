@@ -36,6 +36,8 @@ export interface Migration {
   pushEnabled: boolean;
   /** Opt-in: auto-open a draft PR after a successful checkpoint push. */
   autoOpenPr: boolean;
+  /** Opt-in: auto-merge to main + reap worktree + mark DONE after a push. */
+  autoMerge: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -81,6 +83,12 @@ export interface UpdateMigrationInput {
    * to flip it), but only has effect server-side when pushEnabled is also on.
    */
   autoOpenPr?: boolean;
+  /**
+   * Opt-in auto-merge. No PAT needed to flip; only effective server-side when
+   * pushEnabled + autoOpenPr are also on. When on, the daemon merges to main +
+   * reaps the worktree + marks the debate DONE after a pushed checkpoint.
+   */
+  autoMerge?: boolean;
 }
 
 export interface UpdateMigrationResponse {
@@ -92,6 +100,8 @@ export interface UpdateMigrationResponse {
   pushEnabled: boolean;
   /** Current state of the per-project auto-open-PR toggle. */
   autoOpenPr: boolean;
+  /** Current state of the per-project auto-merge toggle. */
+  autoMerge: boolean;
 }
 
 export interface DeleteMigrationResponse {

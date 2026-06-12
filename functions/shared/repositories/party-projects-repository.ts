@@ -200,6 +200,26 @@ export async function updateProjectAutoOpenPr(
 }
 
 /**
+ * 2026-06-12 — flip the per-project auto-merge toggle. Independent write
+ * (no PAT); only effective server-side when pushEnabled + autoOpenPr are
+ * also on (the daemon checks all three before merging).
+ */
+export async function updateProjectAutoMerge(projectId: string, autoMerge: boolean): Promise<void> {
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.partyProjects,
+      Key: { projectId },
+      UpdateExpression: 'SET autoMerge = :am, updatedAt = :now',
+      ConditionExpression: 'attribute_exists(projectId)',
+      ExpressionAttributeValues: {
+        ':am': autoMerge,
+        ':now': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+/**
  * Migrate-module — record the Secrets Manager secret name holding this
  * project's PAT. Called by the API after `CreateSecretCommand` succeeds.
  */

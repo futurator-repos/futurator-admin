@@ -75,6 +75,9 @@ export function SessionChatV2({ sessionId, onClose }: Props) {
     (!!inflightRound && inflightRound.blocks.length === 0 && isProcessing);
 
   const isErrored = session?.status === 'ERROR';
+  // DONE = published to main; the worktree is reaped and the lock can't be
+  // re-acquired, so block sending and tell the user to start a new debate.
+  const isDone = session?.status === 'DONE';
   const projectChannel = session?.projectId ?? 'session';
   const sessionTitle = session?.topic ?? '';
 
@@ -242,6 +245,7 @@ export function SessionChatV2({ sessionId, onClose }: Props) {
             onSend={() => void handleSend()}
             isProcessing={isProcessing || sendMessage.isPending}
             isErrored={isErrored}
+            isDone={isDone}
             onAttach={handleAttach}
             isUploading={uploadDoc.isPending}
             acceptedTypes=".md,.markdown,.txt,.pdf,.json,.csv,.yml,.yaml,application/pdf,text/plain,text/markdown,application/json,text/csv,text/yaml"

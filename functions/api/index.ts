@@ -6215,6 +6215,8 @@ app.get('/api/migrations', async (c) => {
         pushEnabled: p.pushEnabled === true,
         // Opt-in auto-PR toggle (defaults false for legacy rows).
         autoOpenPr: p.autoOpenPr === true,
+        // Opt-in auto-merge toggle (defaults false for legacy rows).
+        autoMerge: p.autoMerge === true,
         createdAt: p.createdAt,
         updatedAt: p.updatedAt,
       };
@@ -6281,6 +6283,11 @@ app.patch('/api/migrations/:id', async (c) => {
       parsed.data.autoOpenPr,
     );
   }
+  if (parsed.data.autoMerge !== undefined) {
+    // Independent opt-in — no PAT required. Only effective when pushEnabled
+    // + autoOpenPr are also on (daemon checks all three before merging).
+    await partyProjectsRepo.updateProjectAutoMerge(parsedId.data.projectId, parsed.data.autoMerge);
+  }
 
   const updated = await partyProjectsRepo.getProject(parsedId.data.projectId);
   return c.json({
@@ -6290,6 +6297,7 @@ app.patch('/api/migrations/:id', async (c) => {
     envVarCount: Object.keys(updated?.envVars ?? {}).length,
     pushEnabled: updated?.pushEnabled === true,
     autoOpenPr: updated?.autoOpenPr === true,
+    autoMerge: updated?.autoMerge === true,
   });
 });
 
@@ -7748,12 +7756,41 @@ app.post('/api/party/sessions/:id/checkpoints/:sha/publish', async (c) => {
         method: 'squash',
         commit_title: `docs(${session.projectId}): publish party debate ${session.sessionId.slice(0, 8)}`,
       });
+
+      // "Publish = finish": the work is on main (reversible via GitHub), so
+      // reap the per-session worktree to free disk and mark the session DONE
+      // (terminal — tryAcquireSessionLock excludes DONE so it can't resume).
+      // Both steps are best-effort: a merged PR is the success signal; a reap
+      // or status hiccup shouldn't fail the request.
+      let worktreeReaped = false;
+      try {
+        const { reapPartyWorktree } = await import('../shared/services/plan-folder-service');
+        const r = await reapPartyWorktree(
+          { workingDirSlug: session.projectId, sessionIdShort: session.sessionId.slice(0, 8) },
+          { sendSsmCommand, waitForSsmOutput },
+        );
+        worktreeReaped = r.status === 'done';
+      } catch (reapErr) {
+        console.warn(
+          `[publish] worktree reap failed (non-fatal): ${reapErr instanceof Error ? reapErr.message : String(reapErr)}`,
+        );
+      }
+      try {
+        await partySessionsRepo.releaseSessionLock(session.sessionId, 'DONE');
+      } catch (statusErr) {
+        console.warn(
+          `[publish] set DONE failed (non-fatal): ${statusErr instanceof Error ? statusErr.message : String(statusErr)}`,
+        );
+      }
+
       return c.json({
         merged: merged.data.merged === true,
         mergeSha: merged.data.sha,
         prNumber,
         prUrl,
         base,
+        worktreeReaped,
+        status: 'DONE',
       });
     } catch (err) {
       const emsg = err instanceof Error ? err.message : String(err);

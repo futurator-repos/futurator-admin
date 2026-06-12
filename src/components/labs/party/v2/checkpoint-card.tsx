@@ -52,7 +52,11 @@ interface Props {
 export function CheckpointCard({ sessionId, projectId, pushEnabled, checkpoint }: Props) {
   const [prUrl, setPrUrl] = useState<string | null>(null);
   const [prError, setPrError] = useState<string | null>(null);
-  const [published, setPublished] = useState<{ prUrl: string | null; base: string } | null>(null);
+  const [published, setPublished] = useState<{
+    prUrl: string | null;
+    base: string;
+    worktreeReaped: boolean;
+  } | null>(null);
   const openPr = useOpenCheckpointPr();
   const publish = usePublishCheckpoint();
 
@@ -84,7 +88,11 @@ export function CheckpointCard({ sessionId, projectId, pushEnabled, checkpoint }
         sha: commitSha,
         title: title ? `party(${projectId}): ${title}` : undefined,
       });
-      setPublished({ prUrl: result.prUrl, base: result.base });
+      setPublished({
+        prUrl: result.prUrl,
+        base: result.base,
+        worktreeReaped: result.worktreeReaped === true,
+      });
     } catch (err) {
       setPrError((err as Error).message);
     }
@@ -187,23 +195,30 @@ export function CheckpointCard({ sessionId, projectId, pushEnabled, checkpoint }
       {/* Published confirmation — replaces the action buttons once merged. */}
       {published && (
         <div
-          className="mt-3 flex flex-wrap items-center gap-2 border-t pt-2 text-[11px]"
-          style={{ borderColor: COLORS.bgDeepest, color: 'var(--success)' }}
+          className="mt-3 flex flex-col gap-1 border-t pt-2 text-[11px]"
+          style={{ borderColor: COLORS.bgDeepest }}
           data-testid="checkpoint-published"
         >
-          <GitMerge className="h-3.5 w-3.5" />
-          <span className="font-semibold">Merged to {published.base}</span>
-          {published.prUrl && (
-            <Link
-              href={published.prUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center underline-offset-2 hover:underline"
-              style={{ color: COLORS.inlineLink }}
-            >
-              View merged PR ↗
-            </Link>
-          )}
+          <div className="flex flex-wrap items-center gap-2" style={{ color: 'var(--success)' }}>
+            <GitMerge className="h-3.5 w-3.5" />
+            <span className="font-semibold">Merged to {published.base} · debate Done</span>
+            {published.prUrl && (
+              <Link
+                href={published.prUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center underline-offset-2 hover:underline"
+                style={{ color: COLORS.inlineLink }}
+              >
+                View merged PR ↗
+              </Link>
+            )}
+          </div>
+          <span style={{ color: COLORS.textMuted }}>
+            {published.worktreeReaped
+              ? 'Worktree deleted to free space. This debate is finished — start a new one to continue (it forks from the updated main).'
+              : 'This debate is finished. (Worktree cleanup will be retried in the background.)'}
+          </span>
         </div>
       )}
 

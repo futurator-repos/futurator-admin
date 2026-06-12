@@ -90,6 +90,10 @@ export interface PublishResponse {
   prNumber: number;
   prUrl: string | null;
   base: string;
+  /** True when the per-session worktree was reaped after the merge. */
+  worktreeReaped?: boolean;
+  /** Terminal session status after a successful publish. */
+  status?: 'DONE';
 }
 
 /**

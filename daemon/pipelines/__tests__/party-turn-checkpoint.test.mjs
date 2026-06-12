@@ -245,10 +245,126 @@ describe('Story 21.4 — checkpoint runner integration', () => {
 
     expect(openPr).toHaveBeenCalledTimes(1);
     expect(openPr.mock.calls[0][0].branch).toBe(PARTY_BRANCH);
+    // autoMerge off → PR opened as draft (review-first).
+    expect(openPr.mock.calls[0][0].draft).toBe(true);
     const prEvt = ctx.pushEvent.mock.calls.find((c) => c[3] === 'party.checkpoint.pr.opened');
     expect(prEvt).toBeTruthy();
     expect(prEvt[4].prNumber).toBe(7);
     expect(prEvt[4].prUrl).toBe('https://github.com/o/r/pull/7');
+  });
+
+  it('autoMerge=true → opens non-draft, merges, reaps worktree, marks DONE', async () => {
+    const openPr = vi.fn(async () => ({
+      ok: true,
+      prNumber: 9,
+      prUrl: 'https://github.com/o/r/pull/9',
+      prNodeId: 'PR_node_9',
+      isDraft: false,
+      reused: false,
+    }));
+    const mergePr = vi.fn(async () => ({ ok: true, mergeSha: 'deadbeef' }));
+    const reapWorktree = vi.fn(async () => ({ removed: true, warnings: [] }));
+    const ctx = makeCtx({
+      getProject: vi.fn(async () => ({
+        projectId: 'applicator',
+        pushEnabled: true,
+        autoOpenPr: true,
+        autoMerge: true,
+        gitRepoUrl: 'https://github.com/o/r',
+        gitBranch: 'main',
+        patSecretName: 'futurator/brownfield-pat/applicator',
+      })),
+      openPr,
+      mergePr,
+      reapWorktree,
+      loadPat: vi.fn(async () => 'github_pat_test'),
+    });
+    ctx.spawnSync.mockReturnValue({
+      status: 0,
+      stdout: `PUSHED: origin ${PARTY_BRANCH} @ abcdef0123456789abcdef0123456789abcdef01\nabcdef0123456789abcdef0123456789abcdef01\n`,
+      stderr: '',
+    });
+    ctx.spawn.mockReturnValue(
+      fakeChild({
+        stdoutLines: [
+          JSON.stringify({
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: CHECKPOINT_ASSISTANT_TEXT }] },
+          }),
+          JSON.stringify({ type: 'result' }),
+        ],
+        exitCode: 0,
+      }),
+    );
+
+    await runPartyTurn(turnJob(), ctx);
+
+    // Opened non-draft (ready to merge).
+    expect(openPr.mock.calls[0][0].draft).toBe(false);
+    // Merged.
+    expect(mergePr).toHaveBeenCalledTimes(1);
+    expect(mergePr.mock.calls[0][0].prNumber).toBe(9);
+    const mergedEvt = ctx.pushEvent.mock.calls.find((c) => c[3] === 'party.checkpoint.merged');
+    expect(mergedEvt).toBeTruthy();
+    expect(mergedEvt[4].mergeSha).toBe('deadbeef');
+    // Worktree reaped.
+    expect(reapWorktree).toHaveBeenCalledTimes(1);
+    // Session marked DONE.
+    expect(ctx.releaseSessionLock).toHaveBeenCalledWith(SESSION_ID, 'DONE');
+    const doneEvt = ctx.pushEvent.mock.calls.find((c) => c[3] === 'party.session.done');
+    expect(doneEvt).toBeTruthy();
+    expect(doneEvt[4].worktreeReaped).toBe(true);
+  });
+
+  it('autoMerge but merge fails → PR left open, no reap, not DONE', async () => {
+    const openPr = vi.fn(async () => ({
+      ok: true,
+      prNumber: 9,
+      prUrl: 'https://github.com/o/r/pull/9',
+      isDraft: false,
+      reused: false,
+    }));
+    const mergePr = vi.fn(async () => ({ ok: false, reason: 'GH_405: not mergeable' }));
+    const reapWorktree = vi.fn();
+    const ctx = makeCtx({
+      getProject: vi.fn(async () => ({
+        projectId: 'applicator',
+        pushEnabled: true,
+        autoOpenPr: true,
+        autoMerge: true,
+        gitRepoUrl: 'https://github.com/o/r',
+        gitBranch: 'main',
+        patSecretName: 'futurator/brownfield-pat/applicator',
+      })),
+      openPr,
+      mergePr,
+      reapWorktree,
+      loadPat: vi.fn(async () => 'github_pat_test'),
+    });
+    ctx.spawnSync.mockReturnValue({
+      status: 0,
+      stdout: `PUSHED: origin ${PARTY_BRANCH} @ abcdef0123456789abcdef0123456789abcdef01\nabcdef0123456789abcdef0123456789abcdef01\n`,
+      stderr: '',
+    });
+    ctx.spawn.mockReturnValue(
+      fakeChild({
+        stdoutLines: [
+          JSON.stringify({
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: CHECKPOINT_ASSISTANT_TEXT }] },
+          }),
+          JSON.stringify({ type: 'result' }),
+        ],
+        exitCode: 0,
+      }),
+    );
+
+    await runPartyTurn(turnJob(), ctx);
+
+    const failEvt = ctx.pushEvent.mock.calls.find((c) => c[3] === 'party.checkpoint.merge.failed');
+    expect(failEvt).toBeTruthy();
+    expect(reapWorktree).not.toHaveBeenCalled();
+    expect(ctx.releaseSessionLock).not.toHaveBeenCalledWith(SESSION_ID, 'DONE');
   });
 
   it('does NOT auto-open a PR when push was gated off (commit-only)', async () => {

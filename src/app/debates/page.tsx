@@ -54,6 +54,7 @@ const STATUS_TONE: Record<PartySessionStatus, string> = {
   PROCESSING: 'bg-amber-500/15 text-amber-300 border-amber-400/30',
   IDLE: 'bg-slate-500/15 text-slate-300 border-slate-400/30',
   ERROR: 'bg-red-500/15 text-red-300 border-red-400/30',
+  DONE: 'bg-teal-500/15 text-teal-300 border-teal-400/30',
   ARCHIVED: 'bg-zinc-500/15 text-zinc-400 border-zinc-400/30',
 };
 

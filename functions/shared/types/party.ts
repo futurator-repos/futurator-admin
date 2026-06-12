@@ -7,7 +7,20 @@ export type BmadStatus =
   | 'FAILED'
   | 'REFRESHING';
 
-export type PartySessionStatus = 'ACTIVE' | 'PROCESSING' | 'IDLE' | 'ERROR' | 'ARCHIVED';
+export type PartySessionStatus =
+  | 'ACTIVE'
+  | 'PROCESSING'
+  | 'IDLE'
+  | 'ERROR'
+  // 2026-06-12 — terminal "published to main" state. Set after a debate's
+  // output is squash-merged to the project's base branch (via the
+  // checkpoint card's "Publish to main" button or per-project autoMerge).
+  // The per-session worktree is reaped on entry, so a DONE session is not
+  // resumable — start a new debate (which forks from the now-updated main).
+  // Reversibility lives in GitHub history. tryAcquireSessionLock excludes
+  // DONE (and ARCHIVED), so a DONE session can't be re-locked.
+  | 'DONE'
+  | 'ARCHIVED';
 
 /**
  * Brownfield projects (Story 15.4) clone an existing GitHub repo into the
@@ -79,6 +92,15 @@ export interface PartyProject {
    * "Open PR" button on the checkpoint card works regardless of this flag.
    */
   autoOpenPr?: boolean;
+  /**
+   * 2026-06-12 — when true (and pushEnabled + autoOpenPr are true), the
+   * daemon goes fully hands-off after a pushed checkpoint: it opens a
+   * non-draft PR, squash-merges it into the canonical branch, reaps the
+   * per-session worktree, and marks the session DONE. "Publish = finish."
+   * Opt-in per project; the explicit "Publish to main" button does the
+   * same on demand regardless of this flag.
+   */
+  autoMerge?: boolean;
   createdAt: string;
   updatedAt: string;
 }

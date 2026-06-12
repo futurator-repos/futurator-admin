@@ -140,14 +140,19 @@ export const updateMigrationInputSchema = z
     // Opt-in auto-PR. Independent toggle — no PAT required to flip it (push
     // must already be enabled for it to have any server-side effect).
     autoOpenPr: z.boolean().optional(),
+    // Opt-in auto-merge (2026-06-12). When on, the daemon merges to main +
+    // reaps the worktree + marks the debate DONE after a pushed checkpoint.
+    // No PAT required to flip; only effective when pushEnabled + autoOpenPr.
+    autoMerge: z.boolean().optional(),
   })
   .refine(
     (v) =>
       v.pat !== undefined ||
       v.envVars !== undefined ||
       v.pushEnabled !== undefined ||
-      v.autoOpenPr !== undefined,
-    { message: 'must include at least one of: pat, envVars, pushEnabled, autoOpenPr' },
+      v.autoOpenPr !== undefined ||
+      v.autoMerge !== undefined,
+    { message: 'must include at least one of: pat, envVars, pushEnabled, autoOpenPr, autoMerge' },
   )
   .refine(
     // Story 21.2 — flipping pushEnabled ON requires a fresh PAT in the same

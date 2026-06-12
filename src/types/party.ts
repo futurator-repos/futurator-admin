@@ -7,7 +7,14 @@ export type BmadStatus =
   | 'FAILED'
   | 'REFRESHING';
 
-export type PartySessionStatus = 'ACTIVE' | 'PROCESSING' | 'IDLE' | 'ERROR' | 'ARCHIVED';
+export type PartySessionStatus =
+  | 'ACTIVE'
+  | 'PROCESSING'
+  | 'IDLE'
+  | 'ERROR'
+  /** Terminal — debate published to main; worktree reaped, not resumable. */
+  | 'DONE'
+  | 'ARCHIVED';
 
 /** Story 15.4 — discriminator for greenfield vs brownfield Party projects. */
 export type PartyProjectKind = 'greenfield' | 'brownfield';
@@ -43,6 +50,8 @@ export interface PartyProject {
   pushEnabled?: boolean;
   /** Opt-in: auto-open a draft PR after a successful checkpoint push. */
   autoOpenPr?: boolean;
+  /** Opt-in: after a pushed checkpoint, auto-merge to main + reap + DONE. */
+  autoMerge?: boolean;
   createdAt: string;
   updatedAt: string;
 }

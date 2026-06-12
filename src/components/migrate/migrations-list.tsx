@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import {
   GitBranch,
+  GitMerge,
   GitPullRequest,
   Loader2,
   RefreshCw,
@@ -121,6 +122,11 @@ function MigrationCard(p: CardProps) {
   const updateAutoPr = useUpdateMigration();
   const toggleAutoPr = () =>
     updateAutoPr.mutate({ projectId: m.projectId, autoOpenPr: !m.autoOpenPr });
+  // Auto-merge toggle — "publish = finish". No PAT needed; only effective
+  // when push + Auto-PR are both on (daemon gates on all three).
+  const updateAutoMerge = useUpdateMigration();
+  const toggleAutoMerge = () =>
+    updateAutoMerge.mutate({ projectId: m.projectId, autoMerge: !m.autoMerge });
   return (
     <div
       className={`rounded-md border bg-card p-4 ${
@@ -212,6 +218,34 @@ function MigrationCard(p: CardProps) {
                 <GitPullRequest className="mr-1 h-3 w-3" />
               )}
               Auto-PR: {m.autoOpenPr ? 'on' : 'off'}
+            </Button>
+          )}
+          {/* Auto-merge opt-in — "publish = finish". Only meaningful once
+              push + Auto-PR are on (the daemon requires all three). */}
+          {m.pushEnabled && m.autoOpenPr && (
+            <Button
+              size="sm"
+              variant={m.autoMerge ? 'default' : 'outline'}
+              className={`h-7 text-[11px] ${
+                m.autoMerge
+                  ? 'bg-teal-500/20 text-teal-600 hover:bg-teal-500/30 dark:text-teal-300'
+                  : 'text-muted-foreground'
+              }`}
+              disabled={isBusy || updateAutoMerge.isPending}
+              onClick={toggleAutoMerge}
+              data-testid={`migration-automerge-toggle-${m.projectId}`}
+              title={
+                m.autoMerge
+                  ? 'Auto-merge is on — after each checkpoint the debate is merged to main, its worktree deleted, and it is marked Done. Click to disable.'
+                  : 'Auto-merge is off — PRs are opened but not merged. Click to auto-merge each checkpoint to main, delete the worktree, and mark the debate Done (publish = finish).'
+              }
+            >
+              {updateAutoMerge.isPending ? (
+                <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+              ) : (
+                <GitMerge className="mr-1 h-3 w-3" />
+              )}
+              Auto-merge: {m.autoMerge ? 'on' : 'off'}
             </Button>
           )}
           <Button

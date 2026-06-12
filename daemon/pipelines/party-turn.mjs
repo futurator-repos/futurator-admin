@@ -70,7 +70,11 @@ import { dirname as pathDirname, join as pathJoin } from 'node:path';
 import { startCancelPoller } from './lib/cancel-poller.mjs';
 import { extractMarkers } from './lib/party-marker-extractor.mjs';
 import { composeAgentCommit } from './lib/agent-commit-composer.mjs';
-import { setupPartyWorktree, WorktreeSetupError } from './lib/party-worktree.mjs';
+import {
+  setupPartyWorktree,
+  teardownPartyWorktree,
+  WorktreeSetupError,
+} from './lib/party-worktree.mjs';
 import { syncMainToOrigin } from '../lib/bare-repo-sync.mjs';
 
 // ── Scoped doc delivery (party-docs session/shared scoping) ──────────────
@@ -186,7 +190,20 @@ async function ghFetch(path, pat, init = {}) {
   return { status: res.status, ok: res.ok, json };
 }
 
-async function openOrReuseDraftPr({ project, branch, sha, title, summary, sessionId, loadPat, logger }) {
+async function openOrReuseDraftPr({
+  project,
+  branch,
+  sha,
+  title,
+  summary,
+  sessionId,
+  loadPat,
+  logger,
+  // 2026-06-12 — open a ready (non-draft) PR when the caller intends to
+  // immediately merge it (autoMerge). Defaults to draft for the
+  // review-first autoOpenPr path.
+  draft = true,
+}) {
   if (typeof loadPat !== 'function') return { ok: false, reason: 'NO_PAT_LOADER' };
   const or = parseOwnerRepo(project?.gitRepoUrl);
   if (!or) return { ok: false, reason: 'BAD_GITREPO_URL' };
@@ -209,7 +226,14 @@ async function openOrReuseDraftPr({ project, branch, sha, title, summary, sessio
   );
   if (existing.ok && Array.isArray(existing.json) && existing.json.length > 0) {
     const pr = existing.json[0];
-    return { ok: true, prNumber: pr.number, prUrl: pr.html_url, reused: true };
+    return {
+      ok: true,
+      prNumber: pr.number,
+      prUrl: pr.html_url,
+      prNodeId: pr.node_id,
+      isDraft: pr.draft === true,
+      reused: true,
+    };
   }
 
   const prTitle = (title && title.trim()) || `Party debate ${String(sessionId).slice(0, 8)}`;
@@ -219,7 +243,7 @@ async function openOrReuseDraftPr({ project, branch, sha, title, summary, sessio
     `Source commit: \`${sha || 'unknown'}\``,
     `Session: \`${sessionId}\``,
     '',
-    '🤖 Auto-opened by party-push (autoOpenPr).',
+    '🤖 Auto-opened by party-push.',
   ].join('\n');
 
   const created = await ghFetch(`/repos/${owner}/${repo}/pulls`, pat, {
@@ -229,11 +253,18 @@ async function openOrReuseDraftPr({ project, branch, sha, title, summary, sessio
       head: branch,
       base,
       body: body.slice(0, 65000),
-      draft: true,
+      draft,
     }),
   });
   if (created.ok && created.json) {
-    return { ok: true, prNumber: created.json.number, prUrl: created.json.html_url, reused: false };
+    return {
+      ok: true,
+      prNumber: created.json.number,
+      prUrl: created.json.html_url,
+      prNodeId: created.json.node_id,
+      isDraft: created.json.draft === true,
+      reused: false,
+    };
   }
   // 422 "already exists" race → refetch and reuse.
   if (created.status === 422) {
@@ -243,12 +274,62 @@ async function openOrReuseDraftPr({ project, branch, sha, title, summary, sessio
     );
     if (refetch.ok && Array.isArray(refetch.json) && refetch.json.length > 0) {
       const pr = refetch.json[0];
-      return { ok: true, prNumber: pr.number, prUrl: pr.html_url, reused: true };
+      return {
+        ok: true,
+        prNumber: pr.number,
+        prUrl: pr.html_url,
+        prNodeId: pr.node_id,
+        isDraft: pr.draft === true,
+        reused: true,
+      };
     }
   }
   return {
     ok: false,
     reason: created.json?.message ? `GH_${created.status}: ${created.json.message}` : `GH_${created.status}`,
+  };
+}
+
+/**
+ * 2026-06-12 — auto-merge a party PR (mark ready if needed, then squash-merge).
+ * Used by the autoMerge path after the PR is opened non-draft. Best-effort
+ * mark-ready covers the reuse-of-an-old-draft case.
+ */
+async function squashMergePartyPr({ project, prNumber, prNodeId, isDraft, loadPat, logger }) {
+  if (typeof loadPat !== 'function') return { ok: false, reason: 'NO_PAT_LOADER' };
+  const or = parseOwnerRepo(project?.gitRepoUrl);
+  if (!or) return { ok: false, reason: 'BAD_GITREPO_URL' };
+  const { owner, repo } = or;
+  let pat = null;
+  try {
+    pat = await loadPat(project?.patSecretName);
+  } catch (err) {
+    logger?.warn?.(`[party-turn] auto-merge loadPat failed: ${err.message}`);
+  }
+  if (!pat) return { ok: false, reason: 'NO_PAT' };
+
+  // Clear draft (best-effort) so the REST merge isn't 405'd.
+  if (isDraft && prNodeId) {
+    await ghFetch('/graphql', pat, {
+      method: 'POST',
+      body: JSON.stringify({
+        query:
+          'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}',
+        variables: { id: prNodeId },
+      }),
+    }).catch(() => {});
+  }
+
+  const merged = await ghFetch(`/repos/${owner}/${repo}/pulls/${prNumber}/merge`, pat, {
+    method: 'PUT',
+    body: JSON.stringify({ merge_method: 'squash' }),
+  });
+  if (merged.ok && merged.json?.merged) {
+    return { ok: true, mergeSha: merged.json.sha };
+  }
+  return {
+    ok: false,
+    reason: merged.json?.message ? `GH_${merged.status}: ${merged.json.message}` : `GH_${merged.status}`,
   };
 }
 
@@ -476,6 +557,16 @@ export async function runPartyTurn(job, ctx) {
     // Opt-in auto-PR opener. Defaults to the real GitHub-REST impl; tests
     // stub it. Resolves the per-project PAT via ctx.loadPat.
     openPr = openOrReuseDraftPr,
+    // Opt-in auto-merge (2026-06-12). Squash-merges the opened PR; tests stub.
+    mergePr = squashMergePartyPr,
+    // Reaps the per-session worktree after a successful auto-merge (DONE).
+    // Defaults to the real teardown; tests stub.
+    reapWorktree = ({ projectId, sessionIdShort, logger: lg }) =>
+      teardownPartyWorktree({
+        projectId,
+        sessionIdShort,
+        log: (level, msg) => lg?.[level]?.(msg),
+      }),
     loadPat,
   } = ctx;
 
@@ -1146,9 +1237,17 @@ export async function runPartyTurn(job, ctx) {
         reason: checkpointResult.reason,
       });
 
-      // Opt-in auto-PR: after a successful PUSH, open (or reuse) a draft PR
-      // into the canonical branch. Gated on project.autoOpenPr; the explicit
-      // Open-PR button works independently of this. Non-fatal on failure.
+      // Opt-in auto-PR: after a successful PUSH, open (or reuse) a PR into the
+      // canonical branch. Gated on project.autoOpenPr; the explicit Open-PR
+      // button works independently of this. Non-fatal on failure.
+      //
+      // 2026-06-12 — when project.autoMerge is also on, "publish = finish":
+      // open the PR non-draft, squash-merge it, reap the per-session worktree,
+      // and mark the session DONE. The Claude subprocess has already exited by
+      // this point, so reaping the worktree here is safe for this turn; the
+      // DONE status makes the debate terminal (tryAcquireSessionLock excludes
+      // it). Reversibility lives in GitHub history.
+      const autoMergeOn = resolvedProject?.autoMerge === true;
       if (checkpointPushed && resolvedProject?.autoOpenPr === true) {
         try {
           const prResult = await openPr({
@@ -1160,6 +1259,7 @@ export async function runPartyTurn(job, ctx) {
             sessionId,
             loadPat,
             logger,
+            draft: !autoMergeOn,
           });
           await pushEvent(
             sessionId,
@@ -1186,8 +1286,70 @@ export async function runPartyTurn(job, ctx) {
           } else {
             logger.warn?.(`[party-turn] auto-PR not opened: ${prResult?.reason || 'unknown'}`);
           }
+
+          // Auto-merge → finish.
+          if (autoMergeOn && prResult?.ok && prResult.prNumber) {
+            const mergeRes = await mergePr({
+              project: resolvedProject,
+              prNumber: prResult.prNumber,
+              prNodeId: prResult.prNodeId,
+              isDraft: prResult.isDraft === true,
+              loadPat,
+              logger,
+            });
+            if (mergeRes?.ok) {
+              await pushEvent(sessionId, 'turn', '__party__', 'party.checkpoint.merged', {
+                sessionId,
+                projectId: session.projectId,
+                branch: session.partyBranch,
+                round: session.turnCount,
+                prNumber: prResult.prNumber,
+                prUrl: prResult.prUrl ?? null,
+                mergeSha: mergeRes.mergeSha ?? null,
+              });
+              let worktreeReaped = false;
+              try {
+                const reap = await reapWorktree({
+                  projectId: session.projectId,
+                  sessionIdShort: sessionId.slice(0, 8),
+                  logger,
+                });
+                worktreeReaped = reap?.removed === true;
+              } catch (err) {
+                logger.warn?.(`[party-turn] auto-merge worktree reap failed: ${err.message}`);
+              }
+              try {
+                await releaseSessionLock(sessionId, 'DONE');
+              } catch (err) {
+                logger.warn?.(`[party-turn] set DONE failed: ${err.message}`);
+              }
+              await pushEvent(sessionId, 'turn', '__party__', 'party.session.done', {
+                sessionId,
+                projectId: session.projectId,
+                prNumber: prResult.prNumber,
+                prUrl: prResult.prUrl ?? null,
+                mergeSha: mergeRes.mergeSha ?? null,
+                worktreeReaped,
+              });
+              logger.info?.(
+                `[party-turn] auto-merged + finished session=${sessionId.slice(0, 8)} ` +
+                  `(reaped=${worktreeReaped})`,
+              );
+            } else {
+              await pushEvent(sessionId, 'turn', '__party__', 'party.checkpoint.merge.failed', {
+                sessionId,
+                projectId: session.projectId,
+                prNumber: prResult.prNumber,
+                prUrl: prResult.prUrl ?? null,
+                reason: mergeRes?.reason ?? 'unknown',
+              });
+              logger.warn?.(
+                `[party-turn] auto-merge failed (PR left open): ${mergeRes?.reason || 'unknown'}`,
+              );
+            }
+          }
         } catch (err) {
-          logger.warn?.(`[party-turn] auto-PR failed (non-fatal): ${err.message}`);
+          logger.warn?.(`[party-turn] auto-PR/merge failed (non-fatal): ${err.message}`);
         }
       }
     } catch (err) {
