@@ -2060,7 +2060,16 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
       stepResults,
     });
 
-    if (!passed && step.onFail?.action === 'fail') {
+    // A hard gate (action:'fail') that ALSO declares a loopTo engages the
+    // caller's in-pipeline fix loop instead of failing immediately — the
+    // fixer step needs the captured {{...ERROR}} variable (set just above)
+    // to know what to repair. dino1 (2026-06-13): lint-verify/test-verify
+    // hard-failed here, the daemon-level retry spawned a fresh job with an
+    // empty variable store, and the retry DEV never saw the error → "already
+    // implemented, no changes" → reaped. With loopTo, the loop re-runs the
+    // DEV (resumed session) WITH the error in-prompt; exhaustion still throws
+    // (see the loop's post-exhaustion guard) so the gate stays blocking.
+    if (!passed && step.onFail?.action === 'fail' && !step.loopTo) {
       throw new Error(`Shell step ${step.id} failed`);
     }
 
@@ -3208,6 +3217,12 @@ async function executePipeline(job) {
         continue;
       }
 
+      // dino1 (2026-06-13) — track loop outcome so a HARD gate (action:'fail',
+      // e.g. lint-verify/test-verify) that never recovers fails the job rather
+      // than silently continuing past a blocking gate with known-bad code.
+      let loopResolved = false;
+      let loopContested = false;
+
       for (let iteration = 1; iteration < maxIterations; iteration++) {
         // Inject iteration count into variable store so prompts can use {{ITERATION}}
         variables.ITERATION = String(iteration + 1); // 1st attempt was iteration 1, this is 2+
@@ -3246,6 +3261,7 @@ async function executePipeline(job) {
           } catch (markerErr) {
             log('warn', `ac-contest marker write failed (non-blocking): ${markerErr.message}`);
           }
+          loopContested = true;
           await pushEvent(jobId, step.id, 'orchestrator', 'status', {
             text: `[SYSTEM] AC contested by DEV — fix loop stopped without consuming iterations: ${contestNow.trim().slice(0, 300)}`,
           });
@@ -3294,6 +3310,7 @@ async function executePipeline(job) {
         );
 
         if (recheck.allPassed) {
+          loopResolved = true;
           log('info', `Loop resolved after ${iteration} iteration(s)`);
           break;
         }
@@ -3301,6 +3318,17 @@ async function executePipeline(job) {
         if (iteration === maxIterations - 1) {
           log('warn', `Max iterations (${maxIterations}) reached, continuing pipeline`);
         }
+      }
+
+      // dino1 (2026-06-13) — a hard gate that the fix loop could not resolve
+      // must fail the job (the daemon-level story retry is the next backstop).
+      // Soft gates (review = validation-driven, review-runtime = 'retry_step')
+      // have no onFail.action==='fail' and intentionally continue here, as
+      // before. A DEV contest also continues (already routed to the operator).
+      if (!loopResolved && !loopContested && step.onFail?.action === 'fail') {
+        throw new Error(
+          `Gate "${step.id}" still failing after ${maxIterations} in-pipeline fix attempts`,
+        );
       }
     }
   }

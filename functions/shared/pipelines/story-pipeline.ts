@@ -752,6 +752,11 @@ Write ONE visual test per needs_browser=true criterion. The text in
               captureAs: 'TEST_VERIFY_OUTPUT',
               expectExitCode: 0,
               onFail: { action: 'fail' as const, injectAs: 'TEST_VERIFY_ERROR' },
+              // dino1 (2026-06-13) — loop the DEV back in-pipeline (carrying
+              // TEST_VERIFY_ERROR) instead of hard-failing into a fresh
+              // daemon-retry job that loses the error context. Exhaustion
+              // still fails the job (daemon retry is the backstop).
+              loopTo: 'test-fix',
             },
             // pacman1 F1 (2026-06-12) — lint at CONSTRUCTION time, not just at
             // the wave gate. The pacman1 final-assembly story shipped a
@@ -831,6 +836,73 @@ Write ONE visual test per needs_browser=true criterion. The text in
               captureAs: 'LINT_VERIFY_OUTPUT',
               expectExitCode: 0,
               onFail: { action: 'fail' as const, injectAs: 'LINT_ERROR' },
+              // dino1 (2026-06-13) — loop the DEV back in-pipeline carrying
+              // LINT_ERROR so it fixes the SPECIFIC eslint findings (the
+              // react-hooks/refs error it just wrote), instead of a fresh
+              // retry job that loses the error and concludes "no changes".
+              loopTo: 'lint-fix',
+            },
+            // dino1 (2026-06-13) — loop-only fix steps for the two construction
+            // gates. They run ONLY as loopTo targets (skipped in linear flow),
+            // resume the DEV session, and surface the exact captured error.
+            // The DEV is scoped to this story's files (same as the gate), so it
+            // fixes its OWN findings — closing the "why can't it fix itself"
+            // gap from the pacman1/dino1 forensics.
+            {
+              id: 'test-fix',
+              agentId: 'DEV',
+              resumeFromStep: 'dev',
+              prompt: `Your implementation (attempt {{ITERATION}} of {{MAX_ITERATIONS}}) FAILED the test suite.
+
+This is the authoritative \`test-verify\` output (the single-pass runner — do NOT run tests yourself):
+
+{{TEST_VERIFY_ERROR}}
+
+Fix the IMPLEMENTATION so these tests pass.
+- Do NOT edit or delete the test files — they are the contract (tamper-check reverts edits and fails the step).
+- If the story wording contradicts a test, follow the test.
+- Stay within this story's declared touch points; if a real fix needs a file outside them, say so in WORK_SUMMARY rather than editing it.
+
+Output only what you changed, then:
+---WORK_SUMMARY---
+[Updated summary of changes]
+---END_WORK_SUMMARY---`,
+              extractors: {
+                WORK_SUMMARY: {
+                  type: 'between' as const,
+                  startDelimiter: '---WORK_SUMMARY---',
+                  endDelimiter: '---END_WORK_SUMMARY---',
+                },
+              },
+              validations: [],
+            },
+            {
+              id: 'lint-fix',
+              agentId: 'DEV',
+              resumeFromStep: 'dev',
+              prompt: `Your implementation (attempt {{ITERATION}} of {{MAX_ITERATIONS}}) FAILED eslint on THIS story's files.
+
+This is the \`lint-verify\` output. Auto-fixable problems were already repaired by \`--fix\`, so everything below needs a real code change:
+
+{{LINT_ERROR}}
+
+Fix every error.
+- Do NOT add \`eslint-disable\` comments and do NOT edit \`eslint.config.*\` — suppressing a rule is not a fix.
+- react-hooks errors require restructuring, not silencing. In particular, "Cannot access refs during render" means a \`someRef.current\` is being READ in the component body / JSX (e.g. passed as a prop or used to compute markup). Refs are only safe to read inside event handlers or effects. Fix it by deriving that value from state/props, or move the read into a \`useEffect\`/handler — never read \`.current\` during render.
+- Stay within this story's declared touch points; if a real fix needs a file outside them, say so in WORK_SUMMARY rather than editing it.
+
+Output only what you changed, then:
+---WORK_SUMMARY---
+[Updated summary of changes]
+---END_WORK_SUMMARY---`,
+              extractors: {
+                WORK_SUMMARY: {
+                  type: 'between' as const,
+                  startDelimiter: '---WORK_SUMMARY---',
+                  endDelimiter: '---END_WORK_SUMMARY---',
+                },
+              },
+              validations: [],
             },
           ] as PipelineStep[])
         : []),

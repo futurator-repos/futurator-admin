@@ -1154,6 +1154,57 @@ describe('pacman1 F1 — lint-verify at construction time (mvp+)', () => {
 });
 
 /**
+ * dino1 (2026-06-13) — the construction gates (test-verify, lint-verify) must
+ * loop the DEV back IN-PIPELINE carrying the captured error, not hard-fail into
+ * a fresh daemon-retry job that loses the error context (the retry DEV then
+ * sees the buggy file already on disk and concludes "no changes needed").
+ */
+describe('dino1 — construction gates loop to a DEV fixer that sees the error', () => {
+  function steps(rigor: 'mvp' | 'production' = 'mvp') {
+    return generateStoryPipeline(story, 'Test Epic', workingDir, { rigor }).steps as Array<{
+      id: string;
+      agentId?: string;
+      resumeFromStep?: string;
+      loopTo?: string;
+      prompt?: string;
+    }>;
+  }
+
+  it('lint-verify loops to lint-fix; test-verify loops to test-fix', () => {
+    const s = steps();
+    expect(s.find((x) => x.id === 'lint-verify')?.loopTo).toBe('lint-fix');
+    expect(s.find((x) => x.id === 'test-verify')?.loopTo).toBe('test-fix');
+  });
+
+  it('lint-fix resumes the DEV session and surfaces LINT_ERROR + the react-hooks hint', () => {
+    const fix = steps().find((x) => x.id === 'lint-fix')!;
+    expect(fix.agentId).toBe('DEV');
+    expect(fix.resumeFromStep).toBe('dev'); // reuse DEV context, don't re-implement cold
+    expect(fix.prompt).toContain('{{LINT_ERROR}}');
+    expect(fix.prompt).toContain('Cannot access refs during render'); // the dino1 failure class
+    expect(fix.prompt).toContain('eslint-disable'); // explicitly forbids suppression
+  });
+
+  it('test-fix resumes the DEV session and surfaces TEST_VERIFY_ERROR', () => {
+    const fix = steps().find((x) => x.id === 'test-fix')!;
+    expect(fix.agentId).toBe('DEV');
+    expect(fix.resumeFromStep).toBe('dev');
+    expect(fix.prompt).toContain('{{TEST_VERIFY_ERROR}}');
+  });
+
+  it('fixer steps are loop-only (every loopTo target resolves to a real step)', () => {
+    const s = steps();
+    const ids = new Set(s.map((x) => x.id));
+    for (const target of s.map((x) => x.loopTo).filter(Boolean)) {
+      expect(ids.has(target as string)).toBe(true);
+    }
+    // the two new fixers exist as targets
+    expect(ids.has('lint-fix')).toBe(true);
+    expect(ids.has('test-fix')).toBe(true);
+  });
+});
+
+/**
  * C1 (pacman1 audit, 2026-06-12) — the compiler's output must SHIP. The
  * COMPILER writes knowledge/ + .mycelium AFTER the story commit; per-story
  * worktrees are reaped post-merge, so without this step every article was
