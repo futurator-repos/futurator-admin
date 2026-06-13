@@ -128,12 +128,22 @@ export async function runVendorSkills({
   const deadline = Date.now() + timeoutMs;
   let vendored = 0;
   let failed = 0;
+  let skippedOnDisk = 0;
 
   for (const entry of entries) {
     if (Date.now() > deadline) {
       log('[vendor-skills] timeout — stopping');
       failed += 1;
       break;
+    }
+    // Skills Mgmt 0.3 — idempotency / re-vendor guard: if the skill body is
+    // already materialized on disk, don't re-fetch. This makes vendor-skills
+    // safe to run over a reconciled manifest, where entries (e.g. the ~56 bmad
+    // skills installed by bmad-bootstrap) are pinned to the index-only
+    // `futurator-skills` source that carries no bodies — fetching would 404.
+    if (existsSync(join(worktreeDir, SKILLS_DIR_REL, entry.skill, 'SKILL.md'))) {
+      skippedOnDisk += 1;
+      continue;
     }
     const src = sourceById.get(entry.source);
     if (!src) {
@@ -182,10 +192,14 @@ export async function runVendorSkills({
       attentionSeverity: 'medium',
     };
   }
+  if (skippedOnDisk > 0) {
+    log(`[vendor-skills] skipped ${skippedOnDisk} skill(s) already present on disk`);
+  }
   return {
     skipped: false,
     vendoredCount: vendored,
     failed,
+    skippedOnDisk,
     ...(failed > 0
       ? { attentionCategory: 'skill-manifest-out-of-sync', attentionSeverity: 'low' }
       : {}),

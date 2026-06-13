@@ -173,9 +173,20 @@ write-back to S3 + daemon SIGUSR1 reload (the resolver already supports cache in
   - **Exit criterion met:** the daemon's real `federation-resolver` resolves all 59 skills against the
     live source (`bmad-create-prd`, `frontend-design`, `bmad-dev-story` → `futurator-skills`, trust=true);
     bogus names return not-found. The previously-dormant federation is now functional.
-- **Next:** Story 0.3 (`reconcile-skills-manifest.mjs`) — pin all 59 on-disk skills into each project's
-  `skills.manifest.yaml` so on-disk == manifest == federation. Must NOT re-trigger vendoring for skills
-  already on disk (bmad installed via bmad-method).
+- **2026-06-13 — Story 0.3 + 0.4 code DONE (not yet deployed).**
+  - New step `daemon/lib/app-bootstrap-steps/reconcile-skills-manifest.mjs`: reads `.claude/skills/`,
+    pins every unmanaged on-disk skill into `core[]` sourced to `futurator-skills`; idempotent; preserves
+    existing entries; stamps `+reconcile-skills-manifest@v1`. Wired into `app-bootstrap.mjs` as a new step
+    **after `bmad-bootstrap`, before `commit-and-push`** (so all ~59 skills are on disk and the reconciled
+    manifest is committed).
+  - `vendor-skills.mjs` hardened with an **on-disk skip guard**: skips any skill whose `.claude/skills/<n>/SKILL.md`
+    already exists, so a reconciled manifest (bmad pinned to the index-only `futurator-skills`) never causes
+    404 re-fetches. Returns `skippedOnDisk`.
+  - Tests: `reconcile-skills-manifest.test.mjs` (6, incl. **Story 0.4 parity**: manifest count == on-disk
+    count post-reconcile). Full suite green: step tests 33/33, idempotency 7/7, lint clean.
+  - **Remaining (OUTWARD, needs go-ahead):** (a) deploy the daemon bundle (`scripts/rsync-daemon.sh`) so
+    future bootstraps run the step; (b) backfill existing projects (e.g. pacman1) by running reconcile +
+    committing their manifest.
 
 ## 8. Open question for Phase 0
 

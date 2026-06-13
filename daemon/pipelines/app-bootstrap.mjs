@@ -38,6 +38,7 @@ import { runPrepinDefaultSkills } from '../lib/app-bootstrap-steps/prepin-defaul
 import { runNpmInstall } from '../lib/app-bootstrap-steps/npm-install.mjs';
 import { runVendorSkills } from '../lib/app-bootstrap-steps/vendor-skills.mjs';
 import { runBmadBootstrap } from '../lib/app-bootstrap-steps/bmad-bootstrap.mjs';
+import { runReconcileSkillsManifest } from '../lib/app-bootstrap-steps/reconcile-skills-manifest.mjs';
 import { runCommitAndPush } from '../lib/app-bootstrap-steps/commit-and-push.mjs';
 
 export const APP_BOOTSTRAP_STEPS = [
@@ -49,6 +50,7 @@ export const APP_BOOTSTRAP_STEPS = [
   'npm-install',
   'vendor-skills',          // Epic 2 Story 2.3 — fetch SKILL.md bodies via skills-sync.mjs
   'bmad-bootstrap',
+  'reconcile-skills-manifest', // Skills Mgmt 0.3 — pin all on-disk skills (incl. bmad) before commit
   'commit-and-push',
 ];
 
@@ -179,6 +181,7 @@ export async function runAppBootstrap(job, ctx) {
     npmInstall: steps.npmInstall ?? runNpmInstall,
     vendorSkills: steps.vendorSkills ?? runVendorSkills,
     bmadBootstrap: steps.bmadBootstrap ?? runBmadBootstrap,
+    reconcileSkillsManifest: steps.reconcileSkillsManifest ?? runReconcileSkillsManifest,
     commitAndPush: steps.commitAndPush ?? runCommitAndPush,
   };
 
@@ -363,6 +366,25 @@ export async function runAppBootstrap(job, ctx) {
     await emitCompleted('bmad-bootstrap', {
       skipped: !!bmadResult.skipped,
       reason: bmadResult.reason,
+    });
+
+    // 5b. RECONCILE-SKILLS-MANIFEST (Skills Mgmt 0.3) — runs after bmad-bootstrap
+    // so every materialized skill (3 prepin/vendor + ~56 bmad) is on disk, and
+    // before commit-and-push so the reconciled manifest is committed with the
+    // app. Pins any unmanaged on-disk skill to the canonical federation source,
+    // closing the on-disk↔manifest gap (skills_available/SKILL-SCOUT/Skills-Used
+    // all read the manifest). Non-blocking, idempotent.
+    await emitStarted('reconcile-skills-manifest');
+    const reconcileResult = await stepFns.reconcileSkillsManifest({
+      worktreeDir,
+      onOutput: makeOutputSink('reconcile-skills-manifest'),
+    });
+    await emitCompleted('reconcile-skills-manifest', {
+      skipped: !!reconcileResult.skipped,
+      reason: reconcileResult.reason,
+      reconciledCount: reconcileResult.reconciledCount,
+      onDiskCount: reconcileResult.onDiskCount,
+      manifestCount: reconcileResult.manifestCount,
     });
 
     // 6. COMMIT-AND-PUSH
