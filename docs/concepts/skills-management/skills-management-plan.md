@@ -154,6 +154,29 @@ write-back to S3 + daemon SIGUSR1 reload (the resolver already supports cache in
 - **Module job:** reconcile, then catalog.
 - **Federation dormancy:** treated as in-scope (Phase 0 wires a live source), not just flagged.
 
+## 7b. Implementation log
+
+- **2026-06-13 — Story 0.1 + 0.1b DONE** (`scripts/gen-skill-index.mjs`, 9 tests, lint clean). Validated
+  against daemon ground truth: 59-skill index (56 bmad + 3 anthropic).
+- **2026-06-13 — Story 0.2 DONE (Option A).** Corrections discovered during execution:
+  - The `futurator` org **does not exist** — that is why the embedded default 404'd. Real org is
+    **`Futurator-ai`**. Canonical source repo is **`Futurator-ai/futurator-skills`**.
+  - Repo made **public** (not private as first floated): the daemon has **no GitHub credential**
+    (`GITHUB_PAT` unset, no `gh`, no git creds), so a private source could not be resolved — which would
+    defeat the purpose. Content is non-sensitive (bmad = MIT, anthropic = public). Reversible to
+    private-with-PAT later.
+  - Scope: **index-only registry** (`index.json` + README + MIT LICENSE). No body mirroring — bmad bodies
+    stay sourced from `bmad-method` (npm), anthropic from upstream; `index.json` entries carry a
+    `provenance` field. Framework (bmad-*) entries normalized to `license: MIT`.
+  - Daemon wired: `~/.futurator/skill-federation.yaml` → single source `futurator-skills` (priority 1,
+    auto-trust), replacing the embedded default. SIGUSR1 reload + restart confirmed `source: file`.
+  - **Exit criterion met:** the daemon's real `federation-resolver` resolves all 59 skills against the
+    live source (`bmad-create-prd`, `frontend-design`, `bmad-dev-story` → `futurator-skills`, trust=true);
+    bogus names return not-found. The previously-dormant federation is now functional.
+- **Next:** Story 0.3 (`reconcile-skills-manifest.mjs`) — pin all 59 on-disk skills into each project's
+  `skills.manifest.yaml` so on-disk == manifest == federation. Must NOT re-trigger vendoring for skills
+  already on disk (bmad installed via bmad-method).
+
 ## 8. Open question for Phase 0
 
 Option A (stand up `futurator-skills` repo) vs Option B (npm-source adapter). Recommendation: **A** — it is
