@@ -33,6 +33,7 @@ import {
 } from './wave-merge.mjs';
 import { teardownStoryWorktree, bareRepoPath, LEGACY_PROJECTS_ROOT } from './story-worktree.mjs';
 import { materializeNodeModulesFromStore } from './node-modules-store.mjs';
+import { buildCommitMetadataFlags } from '../pipelines/lib/commit-metadata.mjs';
 
 /**
  * 2026-05-28 — default npm install used to seed the store when the
@@ -642,8 +643,19 @@ export async function runWaveMerge({
       if (agentFiles.length === 0) {
         // Every conflict was mechanical — commit the merge without spawning
         // the agent resolver at all.
-        const subject = `merge story ${storyId} into wave [mechanical: ${conflictedFiles.join(', ')}]`;
-        const commit = await git(['commit', '-m', subject], candidateDir);
+        // dino1 (2026-06-13) — keep the SUBJECT short + readable; the verbose
+        // conflict list moves to the body. Trailers (Epic-Id/Wave/Story) let
+        // the GitGraph Story view group this merge under the right epic/wave.
+        const subject = `merge story ${storyId} into wave`;
+        const body = `Resolved mechanically (scratch/@generated paths): ${conflictedFiles.join(', ')}`;
+        const trailers = buildCommitMetadataFlags({
+          agent: 'WAVE-MERGE',
+          planId,
+          epicId,
+          wave: waveNumber,
+          story: storyId,
+        }).join('\n');
+        const commit = await git(['commit', '-m', subject, '-m', body, '-m', trailers], candidateDir);
         if (commit.code === 0) {
           log('info', `[wave-merge] mechanical-only resolution committed for wip/${storyId}`);
           await recordConflictEvent({
@@ -699,11 +711,20 @@ export async function runWaveMerge({
           if (remaining.length === 0) {
             const add = await git(['add', '-A'], candidateDir);
             // Audit trail (fixes F3): self-describing commit, NOT --no-edit.
-            const subject =
-              `merge story ${storyId} into wave [auto-resolved: ${agentFiles.join(', ')}` +
-              (mechanicalFiles.length > 0 ? `; mechanical: ${mechanicalFiles.join(', ')}` : '') +
-              `]`;
-            const commit = await git(['commit', '-m', subject], candidateDir);
+            // dino1 (2026-06-13) — short subject; the resolved-file list moves
+            // to the body; trailers drive GitGraph Story-view grouping.
+            const subject = `merge story ${storyId} into wave`;
+            const body =
+              `Auto-resolved: ${agentFiles.join(', ')}` +
+              (mechanicalFiles.length > 0 ? `\nResolved mechanically: ${mechanicalFiles.join(', ')}` : '');
+            const trailers = buildCommitMetadataFlags({
+              agent: 'WAVE-MERGE',
+              planId,
+              epicId,
+              wave: waveNumber,
+              story: storyId,
+            }).join('\n');
+            const commit = await git(['commit', '-m', subject, '-m', body, '-m', trailers], candidateDir);
             if (add.code === 0 && commit.code === 0) {
               log('info', `[wave-merge] auto-resolved + committed merge of wip/${storyId}`);
               await recordConflictEvent({
@@ -954,6 +975,10 @@ export async function runWaveMerge({
               '-c', 'user.name=Daemon',
               'commit', '-m',
               `wave ${waveNumber}: agentic build-fix (attempt ${attempt})\n\nValidation: ${gate.blockingCmd}\nReasoning: ${(fix.reasoning || '').slice(0, 800)}`,
+              // dino1 (2026-06-13) — Epic-Id/Wave trailers so the GitGraph Story
+              // view groups this wave-level commit under the right epic.
+              '-m',
+              buildCommitMetadataFlags({ agent: 'WAVE-MERGE', planId, epicId, wave: waveNumber }).join('\n'),
             ],
             candidateDir,
           );
@@ -1060,6 +1085,9 @@ export async function runWaveMerge({
           'commit',
           '-m',
           `wave ${waveNumber}: regenerated files from post-merge validation\n\n${changed.slice(0, 20).join('\n')}`,
+          // dino1 (2026-06-13) — Epic-Id/Wave trailers for Story-view grouping.
+          '-m',
+          buildCommitMetadataFlags({ agent: 'WAVE-MERGE', planId, epicId, wave: waveNumber }).join('\n'),
         ],
         candidateDir,
       );

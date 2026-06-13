@@ -237,14 +237,23 @@ describe('runWaveMerge — candidate worktree + advance-on-green', () => {
     expect(autoEvent.files).toContain('src-page.tsx');
     expect(autoEvent.reasoning).toMatch(/combined/i);
 
-    // Self-describing commit trailer in the merge history (on the plan ref —
-    // the bare's default HEAD is still `main`).
+    // Self-describing merge history (on the plan ref — the bare's default HEAD
+    // is still `main`). dino1 (2026-06-13): the subject stays short and the
+    // auto-resolved file list moved to the commit BODY, so read %B (full msg).
     const logOut = spawnSync(
+      'git',
+      ['--git-dir', bare, 'log', '--format=%B', '-n', '20', 'refs/heads/plan/automerge-app-initial'],
+      { encoding: 'utf8' },
+    ).stdout;
+    expect(logOut).toMatch(/Auto-resolved: src-page\.tsx/);
+    // Subject itself is now clean (no inline bracket dump).
+    const subjOut = spawnSync(
       'git',
       ['--git-dir', bare, 'log', '--format=%s', '-n', '20', 'refs/heads/plan/automerge-app-initial'],
       { encoding: 'utf8' },
     ).stdout;
-    expect(logOut).toMatch(/\[auto-resolved: src-page\.tsx\]/);
+    expect(subjOut).toMatch(/merge story .* into wave$/m);
+    expect(subjOut).not.toMatch(/\[auto-resolved/);
 
     // Candidate reaped on success.
     expect(existsSync(candidateWorktreeDir({ appId, planSlug, jobId: 'job-1' }))).toBe(false);

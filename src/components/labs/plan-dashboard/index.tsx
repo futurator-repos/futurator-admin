@@ -41,6 +41,7 @@ import { HierarchyView } from './views/hierarchy-view';
 import { KanbanView } from './views/kanban-view';
 import { GanttView } from './views/gantt-view';
 import { GitGraphView } from './views/git-graph-view';
+import { buildStoryMap } from '@/lib/git-graph-insights';
 import { GraphView } from './views/graph-view';
 import { GrowthView } from './views/growth-view';
 import { PlanReviewView } from './views/plan-review-view';
@@ -206,6 +207,26 @@ export function PlanDashboard({ planId }: { planId: string }) {
         }
       });
   }, [plan, planId, pmJobId, autoDiscovered, apply, refetch]);
+
+  // 2026-06-13 — storyId → { title, epic } map for the GitGraph Story view
+  // (substitutes raw UUIDs with titles; groups commits Epic → Wave).
+  const gitStoryMap = useMemo(
+    () =>
+      buildStoryMap(
+        (plan?.epics ?? []).map((e) => ({
+          epicId: e.epicId,
+          title: e.title,
+          // no explicit epic order field — buildStoryMap falls back to the
+          // plan's authored array order, which is what we want to display.
+          stories: e.stories.map((s) => ({
+            storyId: s.storyId,
+            title: s.title,
+            order: s.order,
+          })),
+        })),
+      ),
+    [plan],
+  );
 
   // ── Job metric hydration (for Hierarchy/Kanban/Gantt views) ────────
   const jobIds = useMemo<string[]>(() => {
@@ -407,6 +428,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
                 planName={plan.displayName ?? plan.name}
                 planSlug={plan.name}
                 planId={plan.planId}
+                storyMap={gitStoryMap}
               />
             )}
             {activeSubtab === 'graph' && (

@@ -29,6 +29,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { buildCommitMetadataFlags } from '../pipelines/lib/commit-metadata.mjs';
 
 const EVIDENCE_FENCE = /---EVIDENCE_JSON---([\s\S]*?)---END_EVIDENCE_JSON---/;
 const TRIAGE_FENCE = /---TRIAGE_JSON---([\s\S]*?)---END_TRIAGE_JSON---/;
@@ -715,6 +716,9 @@ export async function runWaveVqa({
           '-c', 'user.name=Daemon',
           'commit', '-m',
           `wave ${waveNumber}: vqa-fix — ${attemptedAcIds.join(', ')}\n\nRound ${round}. ${(fix.reasoning || '').slice(0, 700)}`,
+          // dino1 (2026-06-13) — Epic-Id/Wave trailers for Story-view grouping.
+          '-m',
+          buildCommitMetadataFlags({ agent: 'WAVE-VQA', planId, epicId, wave: waveNumber }).join('\n'),
         ],
         candidateDir,
       );
@@ -825,6 +829,9 @@ export async function runWaveVqa({
         '-c', 'user.name=Daemon',
         'commit', '-m',
         `wave ${waveNumber}: vqa report — ${verdicts.length} verdict(s), ${fixesApplied.length} fix(es), ${fixForward.length} fix-forward`,
+        // dino1 (2026-06-13) — Epic-Id/Wave trailers for Story-view grouping.
+        '-m',
+        buildCommitMetadataFlags({ agent: 'WAVE-VQA', planId, epicId, wave: waveNumber }).join('\n'),
       ],
       candidateDir,
     );

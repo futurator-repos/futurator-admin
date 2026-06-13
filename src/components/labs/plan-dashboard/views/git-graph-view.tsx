@@ -20,8 +20,15 @@
  */
 
 import { useMemo, useState } from 'react';
-import { Loader2, GitBranch } from 'lucide-react';
+import { Loader2, GitBranch, ChevronRight, ChevronDown } from 'lucide-react';
 import { useGitGraph, type GitGraphResponse } from '@/hooks/use-git-graph';
+import {
+  classifyCommit,
+  groupByEpicWave,
+  type CommitMeta,
+  type EpicGroup,
+  type StoryMap,
+} from '@/lib/git-graph-insights';
 import type { GitHubCommit, GitHubPullRequest } from '../../../../../functions/shared/github/types';
 
 const LANE_W = 22;
@@ -243,6 +250,7 @@ export function GitGraphView({
   planName,
   planSlug,
   planId,
+  storyMap = {},
 }: {
   appId: string | null | undefined;
   /** 2026-05-30 — the App's real repo (any org). Resolves owner/repo so the
@@ -263,10 +271,29 @@ export function GitGraphView({
    * additive — they appear regardless of which branch filter is active.
    */
   planId?: string;
+  /**
+   * 2026-06-13 — storyId → { title, epic } map built from the plan's epic
+   * structure. Powers the Story view: substitutes raw UUIDs with story
+   * titles and groups commits Epic → Wave. Absent → Story view still works
+   * but falls back to short-hash handles and Epic-Id-trailer grouping.
+   */
+  storyMap?: StoryMap;
 }) {
   const { data, isLoading, error } = useGitGraph(appId, githubRepoUrl);
   const graph = useMemo(() => (data ? buildGraph(data) : null), [data]);
   const [activeIdx, setActiveIdx] = useState<number>(0);
+  // 2026-06-13 — Story view (grouped, plain-language) is the default for
+  // non-technical operators; Developer view is the SourceTree-style lane graph.
+  const [viewMode, setViewMode] = useState<'story' | 'developer'>('story');
+  const [showMachine, setShowMachine] = useState(false);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const toggleCollapse = (key: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   const planBranchName = planSlug ? `plan/${planSlug}` : null;
   const planBranchExists = !!(
     planBranchName && graph?.branches.some((b) => b.name === planBranchName)
@@ -351,6 +378,15 @@ export function GitGraphView({
   // operator scroll horizontally to see the full branching extent.
   const maxLane = commits.reduce((m, c) => Math.max(m, c.lane), 0);
   const graphW = Math.max(GRAPH_W, LANE_PAD * 2 + maxLane * LANE_W + 8);
+
+  // 2026-06-13 — Story view data: classify every commit into a plain-language
+  // step, hide machine bookkeeping unless opted-in, and group Epic → Wave.
+  const metas = commits.map((c) => classifyCommit(c.fullMessage, storyMap));
+  const visible = commits
+    .map((commit, origIndex) => ({ commit, meta: metas[origIndex], origIndex }))
+    .filter((v) => showMachine || !v.meta.isMachine);
+  const storyGroups = groupByEpicWave(visible.map((v) => v.meta));
+  const machineCount = metas.filter((m) => m.isMachine).length;
   const active = commits[activeIdx] ?? commits[0] ?? graph.commits[0];
 
   // 2026-05-19 — does the current Plan-Id trailer appear anywhere?
@@ -481,53 +517,392 @@ export function GitGraphView({
         </span>
       </div>
 
-      {/* Branch legend */}
+      {/* 2026-06-13 — view toolbar: Story (grouped, friendly) vs Developer
+          (lane graph), plus the machine-commit reveal in Story view. */}
       <div
         style={{
           display: 'flex',
-          gap: 6,
-          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: 12,
           padding: '8px 14px',
           background: 'var(--surface)',
           borderBottom: '1px solid var(--border)',
+          flexWrap: 'wrap',
         }}
       >
-        {branches.map((b) => (
-          <Chip key={b.name} bg={b.tint} fg={b.color}>
-            <Dot color={b.color} />
-            {b.name}
-            <span style={{ opacity: 0.55, marginLeft: 2 }}>{b.count}</span>
-          </Chip>
-        ))}
-      </div>
-
-      {/* Graph + rows */}
-      <div style={{ display: 'flex', overflowX: 'auto' }}>
-        <div style={{ flexShrink: 0 }}>
-          <svg
-            width={graphW}
-            height={totalH}
-            aria-hidden="true"
-            dangerouslySetInnerHTML={{ __html: paths.join('') + dots.join('') }}
-          />
-        </div>
-        <div style={{ flex: 1, minWidth: 0, borderLeft: '1px solid var(--border)' }}>
-          {commits.map((c, i) => (
-            <CommitRow
-              key={c.sha}
-              commit={c}
-              branches={branches}
-              isLast={i === commits.length - 1}
-              isActive={i === activeIdx}
-              isHead={branches.find((b) => b.name === c.branchHead)?.isDefault ?? false}
-              onClick={() => setActiveIdx(i)}
-            />
+        <div
+          style={{
+            display: 'flex',
+            gap: 2,
+            background: 'var(--bg-elev)',
+            borderRadius: 8,
+            padding: 2,
+          }}
+        >
+          {(['story', 'developer'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setViewMode(m)}
+              style={{
+                padding: '5px 12px',
+                fontSize: 12,
+                fontWeight: 500,
+                border: 'none',
+                borderRadius: 6,
+                cursor: 'pointer',
+                background: viewMode === m ? 'var(--accent-blue)' : 'transparent',
+                color: viewMode === m ? '#fff' : 'var(--text-mute)',
+                transition: 'background 120ms',
+              }}
+            >
+              {m === 'story' ? 'Story view' : 'Developer view'}
+            </button>
           ))}
         </div>
+        {viewMode === 'story' ? (
+          <>
+            <span style={{ fontSize: 12, color: 'var(--text-mute)', flex: 1, minWidth: 0 }}>
+              How this app was built, step by step — grouped by epic and wave.
+            </span>
+            {machineCount > 0 && (
+              <label
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontSize: 12,
+                  color: 'var(--text-mute)',
+                  cursor: 'pointer',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={showMachine}
+                  onChange={(e) => setShowMachine(e.target.checked)}
+                />
+                Show machine commits ({machineCount})
+              </label>
+            )}
+          </>
+        ) : (
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1, minWidth: 0 }}>
+            {branches.map((b) => (
+              <Chip key={b.name} bg={b.tint} fg={b.color}>
+                <Dot color={b.color} />
+                {b.name}
+                <span style={{ opacity: 0.55, marginLeft: 2 }}>{b.count}</span>
+              </Chip>
+            ))}
+          </div>
+        )}
       </div>
+
+      {viewMode === 'developer' ? (
+        /* Graph + rows (SourceTree-style lane view) */
+        <div style={{ display: 'flex', overflowX: 'auto' }}>
+          <div style={{ flexShrink: 0 }}>
+            <svg
+              width={graphW}
+              height={totalH}
+              aria-hidden="true"
+              dangerouslySetInnerHTML={{ __html: paths.join('') + dots.join('') }}
+            />
+          </div>
+          <div style={{ flex: 1, minWidth: 0, borderLeft: '1px solid var(--border)' }}>
+            {commits.map((c, i) => (
+              <CommitRow
+                key={c.sha}
+                commit={c}
+                branches={branches}
+                isLast={i === commits.length - 1}
+                isActive={i === activeIdx}
+                isHead={branches.find((b) => b.name === c.branchHead)?.isDefault ?? false}
+                onClick={() => setActiveIdx(i)}
+              />
+            ))}
+          </div>
+        </div>
+      ) : (
+        <StoryView
+          groups={storyGroups}
+          visible={visible}
+          activeOrigIdx={activeIdx}
+          collapsed={collapsed}
+          onToggle={toggleCollapse}
+          onPick={setActiveIdx}
+        />
+      )}
 
       {/* Detail panel */}
       <CommitDetail commit={active} branches={branches} />
+    </div>
+  );
+}
+
+// ── Story view (grouped, plain-language) ───────────────────────────
+
+type VisibleCommit = { commit: GraphCommit; meta: CommitMeta; origIndex: number };
+
+function waveBadges(metas: CommitMeta[]) {
+  const stories = metas.filter((m) => m.kind === 'story').length;
+  return {
+    stories,
+    merged: metas.some((m) => m.kind === 'merge'),
+    buildFixed: metas.some((m) => m.kind === 'build-fix'),
+    vqaChecked: metas.some((m) => m.kind === 'vqa'),
+    vqaFixed: metas.some((m) => m.kind === 'vqa-fix'),
+  };
+}
+
+function StoryView({
+  groups,
+  visible,
+  activeOrigIdx,
+  collapsed,
+  onToggle,
+  onPick,
+}: {
+  groups: EpicGroup[];
+  visible: VisibleCommit[];
+  activeOrigIdx: number;
+  collapsed: Set<string>;
+  onToggle: (key: string) => void;
+  onPick: (origIndex: number) => void;
+}) {
+  if (visible.length === 0) {
+    return (
+      <div style={{ padding: 28, textAlign: 'center', fontSize: 13, color: 'var(--text-mute)' }}>
+        No commits to show.
+      </div>
+    );
+  }
+  return (
+    <div>
+      {groups.map((g) => {
+        const epicKey = `e:${g.epicId ?? 'setup'}`;
+        const epicCollapsed = collapsed.has(epicKey);
+        const storyTotal = g.waves
+          .flatMap((w) => w.indices.map((i) => visible[i].meta))
+          .filter((m) => m.kind === 'story').length;
+        return (
+          <div key={epicKey} style={{ borderBottom: '1px solid var(--border)' }}>
+            {/* Epic header */}
+            <button
+              type="button"
+              onClick={() => onToggle(epicKey)}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '11px 14px',
+                background: 'var(--surface)',
+                border: 'none',
+                borderBottom: epicCollapsed ? 'none' : '1px solid var(--border)',
+                cursor: 'pointer',
+                textAlign: 'left',
+              }}
+            >
+              {epicCollapsed ? (
+                <ChevronRight size={15} style={{ color: 'var(--text-mute)', flexShrink: 0 }} />
+              ) : (
+                <ChevronDown size={15} style={{ color: 'var(--text-mute)', flexShrink: 0 }} />
+              )}
+              <span style={{ fontSize: 15, flexShrink: 0 }}>{g.epicId ? '🏛' : '⚙️'}</span>
+              <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--foreground)' }}>
+                {g.epicTitle}
+              </span>
+              <span style={{ flex: 1 }} />
+              <span
+                style={{
+                  fontSize: 11.5,
+                  color: 'var(--text-mute)',
+                  fontFamily: 'var(--font-mono)',
+                }}
+              >
+                {storyTotal > 0
+                  ? `${storyTotal} ${storyTotal === 1 ? 'story' : 'stories'}`
+                  : `${g.commitCount} ${g.commitCount === 1 ? 'step' : 'steps'}`}
+              </span>
+            </button>
+
+            {!epicCollapsed &&
+              g.waves.map((w) => {
+                const waveKey = `w:${g.epicId ?? 'setup'}:${w.wave ?? 'none'}`;
+                const waveCollapsed = collapsed.has(waveKey);
+                const metas = w.indices.map((i) => visible[i].meta);
+                const b = waveBadges(metas);
+                const isSetup = g.epicId === null;
+                return (
+                  <div key={waveKey}>
+                    {/* Wave subheader — hidden for the Setup group (no waves) */}
+                    {!isSetup && w.wave !== null && (
+                      <button
+                        type="button"
+                        onClick={() => onToggle(waveKey)}
+                        style={{
+                          width: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          padding: '7px 14px 7px 30px',
+                          background: 'transparent',
+                          border: 'none',
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                        }}
+                      >
+                        {waveCollapsed ? (
+                          <ChevronRight
+                            size={13}
+                            style={{ color: 'var(--text-mute)', flexShrink: 0 }}
+                          />
+                        ) : (
+                          <ChevronDown
+                            size={13}
+                            style={{ color: 'var(--text-mute)', flexShrink: 0 }}
+                          />
+                        )}
+                        <span
+                          style={{
+                            fontSize: 11,
+                            fontWeight: 600,
+                            letterSpacing: '0.08em',
+                            textTransform: 'uppercase',
+                            color: 'var(--text-dim)',
+                          }}
+                        >
+                          Wave {w.wave}
+                        </span>
+                        {b.stories > 0 && <WaveTag>{b.stories} built</WaveTag>}
+                        {b.merged && <WaveTag>🔀 merged</WaveTag>}
+                        {b.buildFixed && <WaveTag tone="warn">🔧 auto-fixed</WaveTag>}
+                        {b.vqaFixed && <WaveTag tone="warn">🎨 visual fix</WaveTag>}
+                        {b.vqaChecked && <WaveTag tone="ok">👁️ checked</WaveTag>}
+                      </button>
+                    )}
+                    {!waveCollapsed &&
+                      w.indices.map((vi) => {
+                        const v = visible[vi];
+                        return (
+                          <StoryStepRow
+                            key={v.commit.sha}
+                            v={v}
+                            indent={isSetup ? 30 : 50}
+                            active={v.origIndex === activeOrigIdx}
+                            onClick={() => onPick(v.origIndex)}
+                          />
+                        );
+                      })}
+                  </div>
+                );
+              })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function WaveTag({ children, tone }: { children: React.ReactNode; tone?: 'ok' | 'warn' }) {
+  const c =
+    tone === 'ok'
+      ? { bg: 'rgba(34,197,94,0.14)', fg: '#22c55e' }
+      : tone === 'warn'
+        ? { bg: 'rgba(209,165,79,0.16)', fg: '#d1a54f' }
+        : { bg: 'var(--bg-elev)', fg: 'var(--text-mute)' };
+  return (
+    <span
+      style={{
+        fontSize: 10.5,
+        fontFamily: 'var(--font-mono)',
+        padding: '1px 6px',
+        borderRadius: 9,
+        background: c.bg,
+        color: c.fg,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function StoryStepRow({
+  v,
+  indent,
+  active,
+  onClick,
+}: {
+  v: VisibleCommit;
+  indent: number;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const { commit, meta } = v;
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={(e) => {
+        if (!active) e.currentTarget.style.background = 'var(--surface)';
+      }}
+      onMouseLeave={(e) => {
+        if (!active) e.currentTarget.style.background = 'transparent';
+      }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 9,
+        padding: `8px 14px 8px ${indent}px`,
+        cursor: 'pointer',
+        background: active ? 'var(--surface)' : 'transparent',
+        boxShadow: active ? 'inset 2px 0 0 var(--accent-blue)' : 'none',
+        transition: 'background 120ms',
+      }}
+    >
+      <span style={{ fontSize: 14, flexShrink: 0, width: 18, textAlign: 'center' }}>
+        {meta.icon}
+      </span>
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: 13,
+          color: meta.isMachine ? 'var(--text-mute)' : 'var(--foreground)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {meta.label}
+      </span>
+      <a
+        href={commit.htmlUrl}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11.5,
+          color: 'var(--text-mute)',
+          textDecoration: 'none',
+          flexShrink: 0,
+        }}
+      >
+        {commit.shortSha}
+      </a>
+      <span
+        style={{
+          fontSize: 11.5,
+          color: 'var(--text-mute)',
+          width: 92,
+          textAlign: 'right',
+          flexShrink: 0,
+        }}
+      >
+        {commit.whenLabel}
+      </span>
     </div>
   );
 }
