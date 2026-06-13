@@ -1060,10 +1060,22 @@ describe('pacman1 F1 — lint-verify at construction time (mvp+)', () => {
 
   it('mvp: --fix + errors block, warnings tolerated (no --max-warnings flag)', () => {
     const cmd = lintStep('mvp')!.command;
-    expect(cmd).toContain('npx eslint . --fix');
+    expect(cmd).toContain('npx eslint --fix');
     expect(cmd).not.toContain('--max-warnings');
     expect(cmd).toContain('LINT_VERIFY_FAILED');
     expect(cmd).toContain('do NOT disable rules');
+  });
+
+  // dino1 (2026-06-13) — lint is SCOPED to the story's own files, never the
+  // whole repo. `npx eslint .` would fail a types-only story on pre-existing
+  // errors in scaffold files it never touched (and can't fix).
+  it('scopes lint to the per-story delta + touch points (never whole-repo)', () => {
+    const cmd = lintStep('mvp')!.command;
+    expect(cmd).not.toContain('eslint . --fix'); // no whole-repo lint
+    expect(cmd).toContain('-baseline-dirty.txt'); // baseline-subtraction (same as commit step)
+    expect(cmd).toContain("for TP in 'src/main.js'"); // touch points are candidates
+    expect(cmd).toContain('xargs -0 npx eslint'); // lints an explicit file list
+    expect(cmd).toContain('no changed source files for this story'); // empty-delta skip
   });
 
   it('production: zero warnings (--max-warnings 0), matching the gate tier', () => {
@@ -1107,10 +1119,15 @@ describe('pacman1 F1 — lint-verify at construction time (mvp+)', () => {
       const cmd = (pipeline.steps.find((s) => s.id === 'lint-verify') as { command: string })
         .command;
 
-      writeFileSync(join(dir, 'index.js'), 'let ok = 1;\nconsole.log(ok);\n');
+      // dino1 (2026-06-13) — lint is scoped to the story's files, so the
+      // fixture must live at a declared touch point (story.touchPoints =
+      // ['src/main.js']). Writing index.js would be (correctly) skipped.
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      const target = join(dir, 'src', 'main.js');
+      writeFileSync(target, 'let ok = 1;\nconsole.log(ok);\n');
       execSync(cmd, { cwd: dir, shell: '/bin/bash', stdio: 'pipe' }); // green
 
-      writeFileSync(join(dir, 'index.js'), 'var bad = 1;\nconsole.log(bad);\n');
+      writeFileSync(target, 'var bad = 1;\nconsole.log(bad);\n');
       let failed = false;
       let out = '';
       try {
@@ -1128,7 +1145,7 @@ describe('pacman1 F1 — lint-verify at construction time (mvp+)', () => {
         expect(out).toContain('LINT_VERIFY_FAILED');
         expect(out).toContain('no-var');
       } else {
-        expect(String(execSync('cat index.js', { cwd: dir }))).toContain('let bad');
+        expect(String(execSync('cat src/main.js', { cwd: dir }))).toContain('let bad');
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });

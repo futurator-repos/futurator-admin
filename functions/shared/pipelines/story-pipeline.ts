@@ -773,15 +773,56 @@ Write ONE visual test per needs_browser=true criterion. The text in
             {
               id: 'lint-verify',
               stepType: 'shell' as const,
+              // dino1 root-cause (2026-06-13) — SCOPE lint to the story's own
+              // files. The prior `npx eslint .` linted the WHOLE repo, so a
+              // types-only story (S1: src/game/types.ts) was failed by
+              // pre-existing react-hooks errors in scaffold files it never
+              // touched (useGameLoop.ts) and is not scoped to fix — the fixer
+              // loop then burned its attempts on files outside its touch
+              // points and the candidate was reaped. F1's intent is "the DEV
+              // that wrote the code fixes ITS findings", so we lint only the
+              // per-story delta (same baseline-subtraction the commit step
+              // uses) plus the declared touch points. Whole-repo lint stays
+              // at the wave gate, where cross-file assembly is the contract.
               command:
                 `cd ${workingDir} && ` +
                 `if [ -f eslint.config.mjs ]; then ` +
-                `  if npx eslint . --fix${rigor === 'production' ? ' --max-warnings 0' : ''} > /tmp/lint-verify.log 2>&1; then ` +
-                `    echo "LINT_VERIFY_OK"; ` +
+                `  BASELINE_DIRTY=".pipeline/${story.storyId}-baseline-dirty.txt"; ` +
+                `  BASELINE_UNTRACKED=".pipeline/${story.storyId}-baseline-untracked.txt"; ` +
+                `  LINT_LIST=$(mktemp); ` +
+                `  if [ -f "$BASELINE_DIRTY" ] && [ -f "$BASELINE_UNTRACKED" ]; then ` +
+                `    POST_DIRTY=$(mktemp); POST_UNTRACKED=$(mktemp); DELTA=$(mktemp); ` +
+                `    git diff --name-only > "$POST_DIRTY" 2>/dev/null || true; ` +
+                `    git ls-files --others --exclude-standard > "$POST_UNTRACKED" 2>/dev/null || true; ` +
+                `    sort -o "$BASELINE_DIRTY" "$BASELINE_DIRTY" 2>/dev/null || true; ` +
+                `    sort -o "$BASELINE_UNTRACKED" "$BASELINE_UNTRACKED" 2>/dev/null || true; ` +
+                `    sort -o "$POST_DIRTY" "$POST_DIRTY" 2>/dev/null || true; ` +
+                `    sort -o "$POST_UNTRACKED" "$POST_UNTRACKED" 2>/dev/null || true; ` +
+                `    comm -23 "$POST_DIRTY" "$BASELINE_DIRTY" > "$DELTA" 2>/dev/null || true; ` +
+                `    comm -23 "$POST_UNTRACKED" "$BASELINE_UNTRACKED" >> "$DELTA" 2>/dev/null || true; ` +
+                `    cat "$DELTA" >> "$LINT_LIST" 2>/dev/null || true; ` +
+                `  fi; ` +
+                // touch points are the ship contract — always candidate to lint.
+                (quotedTouchPoints
+                  ? `  for TP in ${quotedTouchPoints}; do echo "$TP" >> "$LINT_LIST"; done; `
+                  : '') +
+                // keep only lintable, on-disk source files; drop infra paths.
+                `  FINAL=$(mktemp); ` +
+                `  grep -E '\\.(ts|tsx|js|jsx|mjs|cjs)$' "$LINT_LIST" 2>/dev/null ` +
+                `    | grep -vE '^(node_modules/|\\.pipeline/|\\.mycelium/|knowledge/|\\.context/)' ` +
+                `    | sort -u | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done > "$FINAL" 2>/dev/null || true; ` +
+                `  if [ -s "$FINAL" ]; then ` +
+                // null-delimited xargs: portable across GNU + BSD (`xargs -a -d`
+                // are GNU-only and broke on macOS hosts).
+                `    if tr '\\n' '\\0' < "$FINAL" | xargs -0 npx eslint --fix${rigor === 'production' ? ' --max-warnings 0' : ''} > /tmp/lint-verify.log 2>&1; then ` +
+                `      echo "LINT_VERIFY_OK files=$(wc -l < "$FINAL")"; ` +
+                `    else ` +
+                `      echo "LINT_VERIFY_FAILED — fix the eslint problems below in THIS story's files (errors block at ${rigor}; do NOT disable rules):"; ` +
+                `      tail -80 /tmp/lint-verify.log; ` +
+                `      exit 1; ` +
+                `    fi; ` +
                 `  else ` +
-                `    echo "LINT_VERIFY_FAILED — fix the eslint problems below (errors block at ${rigor}; do NOT disable rules):"; ` +
-                `    tail -80 /tmp/lint-verify.log; ` +
-                `    exit 1; ` +
+                `    echo "LINT_VERIFY_SKIPPED: no changed source files for this story"; ` +
                 `  fi; ` +
                 `else ` +
                 `  echo "LINT_VERIFY_SKIPPED: no eslint.config.mjs"; ` +
