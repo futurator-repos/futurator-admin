@@ -182,7 +182,12 @@ export const QA_LEVEL_DEFAULTS: Record<
   { wallclockSec: number; costUsd: number; model: string }
 > = {
   L0: { wallclockSec: 5, costUsd: 0, model: '' /* no LLM */ },
-  L1: { wallclockSec: 30, costUsd: 0.02, model: 'claude-haiku-4-5-20251001' },
+  // dino1 (2026-06-13) — 30s was too tight: under 5-way parallel batch
+  // contention on the EC2 host, the slowest Haiku judge (Read tool + reasoning)
+  // got SIGTERM'd at the budget and returned a non-verdict ("wallclock budget
+  // exceeded" → uncertain, $0). 45s gives headroom; a contention-free serial
+  // retry pass (see qa-judge-l1) rescues any that still time out.
+  L1: { wallclockSec: 45, costUsd: 0.02, model: 'claude-haiku-4-5-20251001' },
   L2: { wallclockSec: 90, costUsd: 0.1, model: 'claude-sonnet-4-6' },
 };
 
@@ -745,14 +750,32 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `    for (const r of batchResults) runningCost += (r.costUsd || 0);`,
           `    results.push(...batchResults);`,
           `  }`,
+          // dino1 (2026-06-13) — contention rescue. A judge killed at the
+          // wallclock budget is almost always the victim of 5-way parallel host
+          // contention, NOT a genuine "can't decide". Re-judge those ONCE,
+          // serially (zero contention), with a 1.5x budget before accepting the
+          // non-verdict. Preserves batch parallelism; only the rare timeout pays
+          // the serial cost. Cost is per-judgment (not per-second) so unchanged.
+          `  for (let i = 0; i < results.length; i++) {`,
+          `    const r = results[i];`,
+          `    if (r.verdict === 'uncertain' && r.rationale === 'wallclock budget exceeded') {`,
+          `      const t = tests.find(x => x.id === r.testId);`,
+          `      if (!t) continue;`,
+          `      const baseSec = t.budgetWallclockSec || (defaultWallclockMs / 1000);`,
+          `      const retry = await judgeOne(Object.assign({}, t, { budgetWallclockSec: Math.ceil(baseSec * 1.5) }));`,
+          `      if (retry.rationale !== 'wallclock budget exceeded') { runningCost += (retry.costUsd || 0); results[i] = retry; }`,
+          `    }`,
+          `  }`,
           `  fs.writeFileSync('${tmpResultsDir}/l1-results.json', JSON.stringify(results));`,
           `  console.log('L1_RESULTS: ' + JSON.stringify(results));`,
           `})();`,
           `NODE_EOF`,
           `)"`,
         ].join('\n'),
-        // Generous total budget: 90s per test × parallelism factor 5.
-        timeout: Math.max(60000, l1Tests.length * 30000),
+        // Generous total budget: parallel batches (~45s each) plus the rare
+        // serial contention-retry pass (≤1.5x budget per timed-out test).
+        // dino1 (2026-06-13): bumped from 30000 to 90000 per test to cover it.
+        timeout: Math.max(120000, l1Tests.length * 90000),
         captureAs: 'L1_OUTPUT',
         extractors: {
           L1_RESULTS: {
