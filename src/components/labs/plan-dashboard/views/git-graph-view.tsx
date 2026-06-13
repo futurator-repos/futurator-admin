@@ -345,6 +345,12 @@ export function GitGraphView({
   const { branches, prCount } = graph;
   const { paths, dots } = buildPaths(commits, branches);
   const totalH = commits.length * ROW_H + 6;
+  // 2026-06-13 — graph width grows with the deepest lane in view so wide
+  // fan-outs (one wip/ lane per parallel story) aren't clipped by a fixed
+  // 132px SVG box. The flex container's overflowX:auto then lets the
+  // operator scroll horizontally to see the full branching extent.
+  const maxLane = commits.reduce((m, c) => Math.max(m, c.lane), 0);
+  const graphW = Math.max(GRAPH_W, LANE_PAD * 2 + maxLane * LANE_W + 8);
   const active = commits[activeIdx] ?? commits[0] ?? graph.commits[0];
 
   // 2026-05-19 — does the current Plan-Id trailer appear anywhere?
@@ -499,7 +505,7 @@ export function GitGraphView({
       <div style={{ display: 'flex', overflowX: 'auto' }}>
         <div style={{ flexShrink: 0 }}>
           <svg
-            width={GRAPH_W}
+            width={graphW}
             height={totalH}
             aria-hidden="true"
             dangerouslySetInnerHTML={{ __html: paths.join('') + dots.join('') }}
