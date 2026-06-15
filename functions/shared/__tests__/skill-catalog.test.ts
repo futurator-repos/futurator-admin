@@ -11,6 +11,7 @@ import {
   indexUrlForSource,
   resolveSources,
   fetchSkillCatalog,
+  diffSkillReconciliation,
   DEFAULT_FEDERATION_SOURCES,
 } from '../skill-catalog';
 
@@ -124,5 +125,33 @@ describe('fetchSkillCatalog', () => {
     });
     expect(cat.skills).toEqual([]);
     expect(cat.sources[0]).toMatchObject({ ok: false, error: 'unsupported source URL' });
+  });
+});
+
+describe('diffSkillReconciliation', () => {
+  const catalog = [{ name: 'a' }, { name: 'b' }, { name: 'c' }, { name: 'extra' }];
+
+  it('classifies managed / unmanaged / availableNotLoaded', () => {
+    // on disk: a, b (managed), zzz (unmanaged — not in catalog)
+    const r = diffSkillReconciliation(['b', 'a', 'zzz'], catalog);
+    expect(r.managed).toEqual(['a', 'b']); // sorted
+    expect(r.unmanaged).toEqual(['zzz']);
+    expect(r.availableNotLoaded).toEqual(['c', 'extra']); // catalog minus on-disk, sorted
+    expect(r.onDiskCount).toBe(3);
+    expect(r.catalogCount).toBe(4);
+    expect(r.inSync).toBe(false); // has unmanaged drift
+  });
+
+  it('inSync when every on-disk skill is in the catalog (post-reconcile state)', () => {
+    const r = diffSkillReconciliation(['a', 'b', 'c', 'extra'], catalog);
+    expect(r.unmanaged).toEqual([]);
+    expect(r.availableNotLoaded).toEqual([]);
+    expect(r.inSync).toBe(true);
+  });
+
+  it('dedupes on-disk names', () => {
+    const r = diffSkillReconciliation(['a', 'a', 'b'], catalog);
+    expect(r.onDiskCount).toBe(2);
+    expect(r.managed).toEqual(['a', 'b']);
   });
 });

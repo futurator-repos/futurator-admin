@@ -1,6 +1,17 @@
 # Multi-Host Dispatch — the Pipeline v3 dispatcher
 
-Status: **DESIGN / FORWARD-LOOKING (2026-06-03)**
+Status: **DESIGN / FORWARD-LOOKING (2026-06-03, revised 2026-06-15)**
+
+> **Revision 2026-06-15** — added **§3.6 Provenance** (stamp machine + model +
+> provider on every commit — the operator's explicit ask) and a v3 build item
+> (#12) for it. Updated §6.6 (the June-15 billing checkpoint is now due — verify
+> today). Folded in dino1-run evidence that validates the design: the
+> SSH-allowlist pain recurred _again_ (operator IP rotated, blocked the daemon
+> rsync — see §1, validates the outbound-claim model §3.5); 5-way parallel VQA
+> judges contended on one EC2 host and starved a judge to a false timeout
+> (validates weight-classed capacity §3.2/§6.3); and the first provenance brick
+> shipped (Epic-Id/Wave commit trailers, `commit-metadata.mjs`).
+
 Goal: a **dispatcher** that sends agent jobs to a queue and runs them across a
 **fleet of heterogeneous, capped hosts** — many EC2 instances _and_ connected
 local machines (laptop, mac mini) — so multiple plans across multiple apps (plus
@@ -74,6 +85,15 @@ early warnings.
 | `main` fast-forward + push assumes **one canonical local main**                          | concurrent hosts racing `main` = lost updates                                                                    |
 | daemon = **one** poller of the jobs table                                                | N hosts polling the same table double-claim jobs                                                                 |
 | OAuth token synced Mac→**this** EC2; SSH allowlist = **one** IP                          | every host needs its own auth + reachability                                                                     |
+
+> **Recurrence (2026-06-15):** the SSH-allowlist assumption bit again — the
+> operator's home IP rotated and the daemon `rsync` from the laptop was blocked
+> at the security group (instance was _running_; the firewall was stale). This is
+> the third+ time this cycle. It's direct field evidence for §3.5: a fleet host
+> that **claims jobs outbound against DDB needs no inbound SSH and no allowlist**,
+> which removes this entire failure class. The operator-push deploy path (manual
+> `rsync-daemon.sh`) is the _only_ thing that still needs inbound SSH — and it
+> should be retired in favor of "hosts pull their own code from `origin`" (§2.1).
 
 ---
 
@@ -187,7 +207,73 @@ dispatcher only decides _where_:
 A local machine runs the **identical daemon**. The only deltas: its own auth
 token (§6) and reachability — it claims jobs **outbound** against DDB, so **no
 inbound SSH** and no IP allowlist (sidesteps the allowlist pain we hit repeatedly
-this cycle).
+this cycle — most recently 2026-06-15, see §1).
+
+### 3.6 Provenance — stamp who / what / where on every commit
+
+In a fleet, the same plan's commits are produced by **different machines** running
+**different agent models**. Once that's true, "which host and which model made
+this" stops being trivia and becomes load-bearing: cost-per-host/model, quality
+regression (did Opus or Sonnet write the better code?), debugging a flaky box,
+data-residency audits for local runners, and reproducibility. Stamp it at the
+source — the dispatcher is the component that knows both facts (it picked the
+host; it knows the model per step).
+
+**Channel: commit trailers, not git author/committer.** Extend the existing
+`daemon/pipelines/lib/commit-metadata.mjs` `buildCommitMetadataFlags` (already the
+home of `Agent:` / `Plan-Id:` / `Epic-Id:` / `Wave:` / `Story:` / `Skills-Used:`).
+Git's author/committer slots are single-value and GitHub tries to resolve emails
+to users — wrong tool. Proposed additions:
+
+```
+Agent: DEV
+Provider: anthropic              # vs bedrock / vertex — drives cost + the Max-vs-metered question (§6.6)
+Model: claude-opus-4-8           # the EXACT served id, not the alias requested (aliases re-point)
+Runner: aws/ec2/i-0826d68c/us-east-1     # or  local/mac-mini-2
+Runner-Kind: server | local
+Dispatch-Id: <queue-entry-id>    # ties commit → the lease/claim that placed it here (§3.3)
+CLI-Version: claude-code/x.y.z   # same model behaves differently across CLI releases
+Models: DEV=opus-4-8 TEST=sonnet-4-6     # optional: the multi-model truth, one line
+Cost-Usd: 0.31   Tokens: 2048    # optional: at-a-glance economics per commit
+```
+
+**Four correctness rules (these are the easy things to get wrong):**
+
+1. **A commit is multi-model — stamp a _primary_, keep the per-step truth in
+   forensic JSON.** One story commit is the product of API_AUTHOR (opus) → TEST
+   (sonnet) → DEV (opus) → REVIEWER → COMPILER, plus haiku/sonnet VQA judges. A
+   flat per-commit `Model:` is a convenient lie; the honest unit is the **step**,
+   which the forensic payload already records (`step_complete.model`). The commit
+   trailer carries the authoring agent's model as the headline; `Models:` carries
+   the rest when it matters.
+2. **The dispatch ledger is the source of truth; the trailer is a _verifiable
+   copy_.** Trailers are plaintext — a misbehaving runner can write anything. The
+   queue/lease row in DDB _knows_ it sent job X to mac-mini-2. **Reconcile** the
+   trailer against the ledger (or sign commits with a per-host SSH key). Attribution
+   you can't verify is decoration, not audit. This composes with invariant §2.1:
+   origin holds the commit, DDB holds the provenance-of-record.
+3. **Order the GitGraph by topology (parents), never by wall-clock.** Once N hosts
+   commit, clock skew is guaranteed; a fast-clocked laptop would float its commits
+   to the top. The current GitGraph already follows first-parent chains — keep it
+   that way and never sort rows by `author.date`.
+4. **The merge commit stamps the _merger's_ runner.** Wave-merge runs on whichever
+   host won the merge lease — usually **not** the hosts that authored the stories.
+   Because wave-merge is `--no-ff`, each story commit keeps its own author-host;
+   the merge adds its own `Runner:` on top. Both layers stamped ⇒ "which machine
+   did what" survives merging for free.
+
+**First brick already shipped (2026-06-15):** wave-level commits (build-fix,
+regenerated, vqa-fix, vqa report) now carry `Epic-Id:`/`Wave:` trailers, and the
+GitGraph "Story view" reads trailers to group Epic → Wave with plain-language,
+model-agnostic labels. That's the same incremental pattern as the delivery
+`push main` being the first brick of "origin is truth" (§2.1) — the schema is in
+place; the fleet just adds `Provider`/`Model`/`Runner`/`Dispatch-Id` to it.
+
+**Open gaps** (tracked in §6): exact-model-vs-alias + CLI-version capture for
+reproducibility; data-residency policy for local runners (a client's private-repo
+job materializes their code on your laptop); capability tags on the host registry
+(a `t4g.small` can't run heavy L2 VQA like your laptop can — see the 2026-06-15
+contention incident, §6.8).
 
 ---
 
@@ -207,27 +293,36 @@ this cycle).
    terminal; demote the hourly scan to a daily backstop.
 5. **Keep origin + S3 as the only cross-host truth** — the delivery `push main`
    we added is the first brick; never assume a sibling host's disk.
+6. **Provenance schema groundwork (§3.6)** — the `Epic-Id:`/`Wave:` trailers on
+   wave commits already shipped (2026-06-15). Cheap next step even on one host:
+   start stamping `Runner:`/`Provider:`/`Model:` from data the daemon already has
+   (host id; per-step model in the forensic payload). Recording provenance from
+   day one means no backfill when the fleet arrives — same logic as `hostId` (#2).
 
 **v3 (the fleet scheduler on top):**
 
-6. **Host registry + self-registration + heartbeat** (§3.1).
-7. **Flat per-host capacity caps**, unified across pipeline + interactive (§3.2).
-8. **Host-selection policy: prefer-local / affinity / burst-EC2** (§3.4).
-9. **Local-machine onboarding** — daemon packaging + **per-host official-CLI
-   login** (no token copying — §3.5, §6.1).
-10. **Fencing-on-resume** for intermittent hosts (§2.5).
-11. **Global Max-budget guard** — fleet-wide awareness of the shared usage pool so
+7. **Host registry + self-registration + heartbeat** (§3.1).
+8. **Flat per-host capacity caps**, unified across pipeline + interactive (§3.2).
+9. **Host-selection policy: prefer-local / affinity / burst-EC2** (§3.4).
+10. **Local-machine onboarding** — daemon packaging + **per-host official-CLI
+    login** (no token copying — §3.5, §6.1).
+11. **Fencing-on-resume** for intermittent hosts (§2.5).
+12. **Global Max-budget guard** — fleet-wide awareness of the shared usage pool so
     the dispatcher throttles _total_ in-flight agents against the rolling-5hr /
     weekly caps, not just per-host (§3.2, §6.1). Without this, more hosts hit the
     rate-limit wall sooner instead of going faster.
+13. **Full provenance + verification (§3.6)** — `Provider`/`Model`/`Runner`/
+    `Dispatch-Id`/`CLI-Version` on every commit; reconcile trailers against the
+    dispatch ledger (or sign per-host); surface `🤖 model · 🖥 host` badges +
+    per-host/per-model filters in the GitGraph Story view.
 
 ---
 
 ## 5. Honest assessment
 
 We are **closer than it looks**. The painful single-host hardening this cycle
-(atomic plan-branch advance via `update-ref`, content-addressed node_modules
-store, integration lock, delivery push, appId-keyed deploy) are _all also_ the
+(atomic plan-branch advance via `update-ref`, content-addressed node*modules
+store, integration lock, delivery push, appId-keyed deploy) are \_all also* the
 multi-host primitives. The missing pieces are: **(a) the boilerplate contract**
 (so a job is self-describing), **(b) claim-lease dispatch + heartbeat** (so hosts
 don't collide and dead work is recoverable), and **(c) owner/lease-scoped
@@ -267,8 +362,24 @@ not a rewrite.**
    long-running step has a checkpoint cadence that makes this true.
 5. **Elastic-EC2 trigger tuning.** What queue-depth threshold + cooldown starts a
    burst EC2 host, and when does it auto-stop? (Hand off to `develope-it-ec2-plan.md`.)
-6. **June 15, 2026 billing change (12 days out — WATCH).** The cost doc flagged
+6. **June 15, 2026 billing change — NOW DUE (date reached).** The cost doc flagged
    that subscription `claude -p` / Agent-SDK usage may start drawing from a
-   _separate metered_ pool. The entire daemon is `claude -p` on Max, so if true it
-   changes the global-budget math (§3.2) for the whole fleet. Couldn't confirm/
-   refute on 2026-06-03 — check `claude.ai/settings/usage` after the date.
+   _separate metered_ pool as of today. The entire daemon is `claude -p` on Max, so
+   if true it **changes the global-budget math (§3.2) for the whole fleet** and the
+   `Provider:`/`Model:` provenance (§3.6) becomes cost-attribution-critical, not
+   just audit. **Action: verify `claude.ai/settings/usage` today** and record the
+   outcome here. If metered, the global-budget guard (#12) moves from "v3 nice-to-
+   have" to "needed before adding any host."
+7. **Provenance verification (§3.6).** Is reconciling trailers against the dispatch
+   ledger enough, or do commits need cryptographic signing (per-host SSH key)? Lean
+   reconcile-first (cheaper, and the ledger is already authoritative); add signing
+   only if commits ever cross a trust boundary (e.g. a contributor's machine).
+8. **Capability-aware dispatch.** A flat cap (§3.2) ignores that a `t4g.small` can't
+   run heavy L2 VQA the way the laptop can — the 2026-06-15 contention incident
+   (5 parallel judges starved one to a false timeout) is the small-scale preview.
+   Host registry should carry capability tags (has-store / can-browser / ram-class)
+   and heavy steps should only dispatch to hosts that advertise the capability.
+9. **Data residency for local runners.** A client's private-repo pipeline
+   dispatched to your laptop materializes their code + uses your local creds on a
+   personal machine. Need an explicit policy (e.g. `dispatchAffinity: server-only`
+   per app) before onboarding local hosts for non-internal work.

@@ -2,7 +2,11 @@ import { Hono } from 'hono';
 import { handle } from 'hono/aws-lambda';
 import { authMiddleware } from '../shared/auth-middleware';
 import { AppError, NotFoundError, ValidationError } from '../shared/errors';
-import { fetchSkillCatalog, type SkillCatalog } from '../shared/skill-catalog';
+import {
+  fetchSkillCatalog,
+  diffSkillReconciliation,
+  type SkillCatalog,
+} from '../shared/skill-catalog';
 import type { Project } from '../shared/types';
 import {
   projectUpdateSchema,
@@ -10230,15 +10234,111 @@ app.get('/api/apps/:appId/skills/digest', authMiddleware, async (c) => {
  */
 let _skillCatalogCache: { at: number; data: SkillCatalog } | null = null;
 const SKILL_CATALOG_TTL_MS = 5 * 60 * 1000;
-app.get('/api/skills/catalog', authMiddleware, async (c) => {
-  const refresh = c.req.query('refresh') === '1';
+async function getCachedSkillCatalog(refresh = false): Promise<SkillCatalog> {
   const now = Date.now();
   if (!refresh && _skillCatalogCache && now - _skillCatalogCache.at < SKILL_CATALOG_TTL_MS) {
-    return c.json({ ...(_skillCatalogCache.data as object), cached: true });
+    return _skillCatalogCache.data;
   }
   const data = await fetchSkillCatalog();
   _skillCatalogCache = { at: now, data };
-  return c.json({ ...(data as object), cached: false });
+  return data;
+}
+app.get('/api/skills/catalog', authMiddleware, async (c) => {
+  const refresh = c.req.query('refresh') === '1';
+  const cached = !refresh && !!_skillCatalogCache;
+  const data = await getCachedSkillCatalog(refresh);
+  return c.json({ ...(data as object), cached });
+});
+
+/**
+ * Skills Management Phase 1, Story 1.2 (2026-06-15).
+ *
+ * GET /api/skills/reconciliation?appId=<slug> — the on-disk ↔ federation drift
+ * view. Reads the most recent `skills_available` daemon event for the app (the
+ * ground-truth list the CLI actually loaded) and diffs it against the catalog:
+ * managed / unmanaged (drift) / available-but-not-loaded. Surfaces the
+ * three-way disconnect the operator needs to see post-Phase-0.
+ */
+app.get('/api/skills/reconciliation', authMiddleware, async (c) => {
+  const appId = c.req.query('appId');
+  if (!appId) throw new ValidationError('appId query param is required');
+
+  const catalog = await getCachedSkillCatalog();
+
+  // Walk the app's recent plans → epics → stories → jobs, scanning for the most
+  // recent `skills_available` event (mirrors the digest traversal at
+  // /api/apps/:appId/skills/digest). Capped to keep the request bounded.
+  const plans = await planRepo.listPlansByApp(appId).catch(() => []);
+  const recentPlanIds = plans
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+    .slice(0, 5)
+    .map((p) => p.planId);
+
+  let latest: { skills: string[]; skillCount: number; jobId: string; ts: string } | null = null;
+  for (const planId of recentPlanIds) {
+    const plan = plans.find((p) => p.planId === planId);
+    if (!plan) continue;
+    const jobIds = new Set<string>();
+    for (const epicId of plan.epicIds ?? []) {
+      const epic = await epicRepo.getEpicById(epicId).catch(() => null);
+      for (const story of epic?.stories ?? []) {
+        if (story.jobId) jobIds.add(story.jobId);
+      }
+    }
+    for (const jobId of jobIds) {
+      try {
+        let cursor = '000000';
+        for (let i = 0; i < 50; i += 1) {
+          const { events: batch, lastSeq } = await agentEventsRepo.getEventsAfter(
+            jobId,
+            cursor,
+            200,
+          );
+          if (batch.length === 0) break;
+          for (const ev of batch) {
+            if ((ev.eventType as string) !== 'skills_available') continue;
+            // `pushEvent` spreads its data at the TOP LEVEL of the event (see
+            // forensic-builder.ts + daemon pushEvent `...data`), so read top-
+            // level first; `payload` is only a fallback for other sources.
+            const top = ev as unknown as { skills?: unknown[]; skillCount?: number };
+            const pl = ev.payload as { skills?: unknown[]; skillCount?: number } | undefined;
+            const rawSkills = Array.isArray(top.skills)
+              ? top.skills
+              : Array.isArray(pl?.skills)
+                ? pl!.skills
+                : [];
+            const skills = rawSkills.filter((s): s is string => typeof s === 'string');
+            const skillCount =
+              typeof top.skillCount === 'number'
+                ? top.skillCount
+                : typeof pl?.skillCount === 'number'
+                  ? pl.skillCount
+                  : skills.length;
+            const ts = String(ev.timestamp ?? '');
+            if (!latest || ts > latest.ts) latest = { skills, skillCount, jobId, ts };
+          }
+          if (lastSeq === cursor) break;
+          cursor = lastSeq;
+        }
+      } catch {
+        // Per-job scan failures are non-fatal — degrade gracefully.
+      }
+    }
+  }
+
+  const onDiskNames = latest?.skills ?? [];
+  const reconciliation = diffSkillReconciliation(onDiskNames, catalog.skills);
+
+  return c.json({
+    appId,
+    onDisk: {
+      count: latest?.skillCount ?? 0,
+      sourceJobId: latest?.jobId ?? null,
+      captured: latest !== null,
+    },
+    catalog: { count: catalog.skills.length, fetchedAt: catalog.fetchedAt },
+    ...reconciliation,
+  });
 });
 
 /** GET /api/apps/:appId — App detail (App + plans[] + activePlan + recentDeploys). */

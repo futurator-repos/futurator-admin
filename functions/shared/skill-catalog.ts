@@ -186,3 +186,48 @@ export async function fetchSkillCatalog(
   const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
   return { skills, sources: sourceReports, fetchedAt: new Date(nowMs()).toISOString() };
 }
+
+/**
+ * Reconciliation diff between what an app actually loaded on disk (from the
+ * daemon's `skills_available` event) and the federation catalog. Surfaces the
+ * three-way-disconnect drift the operator needs to see (Phase 1, Story 1.2):
+ *
+ *  - managed:            on-disk skills the catalog knows about (healthy)
+ *  - unmanaged:          on-disk skills NOT in the catalog (drift — the agent
+ *                        loaded something the federation can't resolve)
+ *  - availableNotLoaded: catalog skills this app hasn't loaded
+ *
+ * Pure set math over names — no I/O — so it unit-tests trivially.
+ */
+export interface SkillReconciliation {
+  onDiskCount: number;
+  catalogCount: number;
+  managed: string[];
+  unmanaged: string[];
+  availableNotLoaded: string[];
+  inSync: boolean; // no unmanaged drift
+}
+
+export function diffSkillReconciliation(
+  onDiskNames: string[],
+  catalog: Pick<CatalogSkill, 'name'>[],
+): SkillReconciliation {
+  const onDisk = [...new Set(onDiskNames)].sort((a, b) => a.localeCompare(b));
+  const catalogNames = new Set(catalog.map((s) => s.name));
+  const onDiskSet = new Set(onDisk);
+
+  const managed = onDisk.filter((n) => catalogNames.has(n));
+  const unmanaged = onDisk.filter((n) => !catalogNames.has(n));
+  const availableNotLoaded = [...catalogNames]
+    .filter((n) => !onDiskSet.has(n))
+    .sort((a, b) => a.localeCompare(b));
+
+  return {
+    onDiskCount: onDisk.length,
+    catalogCount: catalogNames.size,
+    managed,
+    unmanaged,
+    availableNotLoaded,
+    inSync: unmanaged.length === 0,
+  };
+}
