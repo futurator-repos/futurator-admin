@@ -55,12 +55,23 @@ export interface DeployHandoff {
   thumbnailUrls: string[];
 }
 
+/** Deployment v2.5 — one rung of the dev → staging → production ladder. */
+export type DeployEnvironmentName = 'dev' | 'staging' | 'production';
+export interface DeployEnvironmentStatus {
+  environment: DeployEnvironmentName;
+  url?: string;
+  status: 'none' | 'deploying' | 'live' | 'failed';
+  canPromote: boolean;
+}
+
 export interface DeployReport {
   planId: string;
   verdict: DeployVerdict;
   statusReason?: string;
   target: DeployTarget;
   handoff: DeployHandoff;
+  /** Deployment v2.5 — the dev → staging → production promotion ladder. */
+  environments: DeployEnvironmentStatus[];
   current: DeployRecord | null;
   history: DeployRecord[];
   generatedAt: string;

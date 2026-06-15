@@ -13,6 +13,7 @@
 import type { PlanRigor } from './plan';
 import type { AgentJobStatus } from './agent-orchestrator';
 import type { PlanQaVerdict } from './qa-report';
+import type { DeployEnvironment } from '../deploy/deploy-targets';
 
 /** Top-level Deploy verdict — drives the status pill + CTA. */
 export type DeployVerdict =
@@ -63,6 +64,23 @@ export interface DeployTarget {
   cloudfrontDistributionId?: string;
 }
 
+/**
+ * Deployment v2.5 — one rung of the dev → staging → production ladder. Drives
+ * the environment-ladder UI on the Deploy stage: each rung shows its live URL,
+ * status, and whether it can be promoted to right now.
+ */
+export interface DeployEnvironmentStatus {
+  environment: DeployEnvironment;
+  /** Live URL once this rung has a successful publish. */
+  url?: string;
+  status: 'none' | 'deploying' | 'live' | 'failed';
+  /**
+   * True when the rung below has a live artifact, so a promote INTO this rung
+   * is allowed now. `dev` is reached by deploy (not promote) so it's false.
+   */
+  canPromote: boolean;
+}
+
 export interface DeployHandoff {
   planName: string;
   displayName?: string;
@@ -84,6 +102,9 @@ export interface DeployReport {
 
   target: DeployTarget;
   handoff: DeployHandoff;
+
+  /** Deployment v2.5 — the dev → staging → production promotion ladder. */
+  environments: DeployEnvironmentStatus[];
 
   /** Current or most recent deploy. Null if never deployed. */
   current: DeployRecord | null;

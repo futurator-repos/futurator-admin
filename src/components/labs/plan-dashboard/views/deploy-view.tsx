@@ -47,16 +47,14 @@ export function DeployView({ plan }: { plan: PlanWithEpics }) {
 
   const devServerUrl = devServerJob?.variables?.DEV_SERVER_URL;
   const qaVerdict = qaJob?.variables?.OVERALL_VERDICT;
-  const deployUrl =
-    deployJob?.variables?.DEPLOY_URL || plan.deployUrl || epicLive?.deployUrl;
+  const deployUrl = deployJob?.variables?.DEPLOY_URL || plan.deployUrl || epicLive?.deployUrl;
 
   // Publish gate:
   //   1. Plan must be in a deployable status (review/delivered).
   //   2. QA verdict must be 'ready' (all pillars green) OR there's no QA
   //      report yet (prototype rigor with no gate runs — soft allow).
   const deployable = plan.status === 'review' || plan.status === 'delivered';
-  const qaBlocking =
-    qaReport?.verdict === 'blocking' || qaReport?.verdict === 'needs-attention';
+  const qaBlocking = qaReport?.verdict === 'blocking' || qaReport?.verdict === 'needs-attention';
   const publishGateReason = !deployable
     ? `Plan must reach review status before publishing. Current: ${plan.status}.`
     : qaBlocking
@@ -76,26 +74,22 @@ export function DeployView({ plan }: { plan: PlanWithEpics }) {
   }
   async function onDeploy() {
     if (!targetEpic) return;
-    const result = await deploy.mutateAsync(targetEpic.epicId);
+    const result = await deploy.mutateAsync({
+      epicId: targetEpic.epicId,
+      environment: 'production',
+    });
     setLocalDeployJobId(result.jobId);
   }
 
   if (!targetEpic) {
-    return (
-      <EmptyCard>No epics in this plan yet — nothing to deploy.</EmptyCard>
-    );
+    return <EmptyCard>No epics in this plan yet — nothing to deploy.</EmptyCard>;
   }
 
   const isDevBusy =
-    startDev.isPending ||
-    devServerJob?.status === 'PENDING' ||
-    devServerJob?.status === 'RUNNING';
-  const isQaBusy =
-    runQa.isPending || qaJob?.status === 'PENDING' || qaJob?.status === 'RUNNING';
+    startDev.isPending || devServerJob?.status === 'PENDING' || devServerJob?.status === 'RUNNING';
+  const isQaBusy = runQa.isPending || qaJob?.status === 'PENDING' || qaJob?.status === 'RUNNING';
   const isDeployBusy =
-    deploy.isPending ||
-    deployJob?.status === 'PENDING' ||
-    deployJob?.status === 'RUNNING';
+    deploy.isPending || deployJob?.status === 'PENDING' || deployJob?.status === 'RUNNING';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -147,12 +141,11 @@ export function DeployView({ plan }: { plan: PlanWithEpics }) {
               }}
             >
               Verdict: {qaVerdict}
-              {qaJob.variables?.FAILED_TESTS &&
-                qaJob.variables.FAILED_TESTS.trim() !== 'none' && (
-                  <div style={{ color: 'var(--text-dim)', marginTop: 6 }}>
-                    Failed: {qaJob.variables.FAILED_TESTS}
-                  </div>
-                )}
+              {qaJob.variables?.FAILED_TESTS && qaJob.variables.FAILED_TESTS.trim() !== 'none' && (
+                <div style={{ color: 'var(--text-dim)', marginTop: 6 }}>
+                  Failed: {qaJob.variables.FAILED_TESTS}
+                </div>
+              )}
             </div>
             <QaScreenshots
               overviewUrl={qaJob.variables?.OVERVIEW_URL}
@@ -161,15 +154,12 @@ export function DeployView({ plan }: { plan: PlanWithEpics }) {
           </>
         )}
         {qaJob?.status === 'FAILED' && (
-          <ErrorBlock>
-            QA job failed: {qaJob.errorMessage || 'unknown error'}
-          </ErrorBlock>
+          <ErrorBlock>QA job failed: {qaJob.errorMessage || 'unknown error'}</ErrorBlock>
         )}
         {!qaJob && (
           <HelpText>
-            Screenshots the app at each visual test definition and scores against
-            expected behaviors. Runs Playwright + Claude QA agent against a freshly
-            started dev server.
+            Screenshots the app at each visual test definition and scores against expected
+            behaviors. Runs Playwright + Claude QA agent against a freshly started dev server.
           </HelpText>
         )}
       </DeploySection>
@@ -194,8 +184,8 @@ export function DeployView({ plan }: { plan: PlanWithEpics }) {
               publishGateReason
             ) : (
               <>
-                Builds with <code>vite base=/apps/{plan.name}/</code>, syncs to S3,
-                invalidates CloudFront. Takes ~30–60s.
+                Builds with <code>vite base=/apps/{plan.name}/</code>, syncs to S3, invalidates
+                CloudFront. Takes ~30–60s.
               </>
             )}
           </HelpText>
@@ -207,9 +197,7 @@ export function DeployView({ plan }: { plan: PlanWithEpics }) {
         {deployJob?.status === 'FAILED' && (
           <ErrorBlock>
             Deploy failed:{' '}
-            {deployJob.variables?.DEPLOY_DETAILS ||
-              deployJob.errorMessage ||
-              'unknown'}
+            {deployJob.variables?.DEPLOY_DETAILS || deployJob.errorMessage || 'unknown'}
           </ErrorBlock>
         )}
         {deployJob?.status === 'COMPLETED' && deployJob.variables?.DEPLOY_DETAILS && (
@@ -263,9 +251,7 @@ function DeploySection({
           borderBottom: '1px solid var(--border)',
         }}
       >
-        <span style={{ color: 'var(--text-dim)', display: 'inline-flex' }}>
-          {icon}
-        </span>
+        <span style={{ color: 'var(--text-dim)', display: 'inline-flex' }}>{icon}</span>
         <span
           style={{
             fontSize: 13,
@@ -493,8 +479,7 @@ function QaScreenshots({
                   insetInline: 0,
                   bottom: 0,
                   padding: '4px 8px',
-                  background:
-                    'color-mix(in srgb, var(--background) 80%, transparent)',
+                  background: 'color-mix(in srgb, var(--background) 80%, transparent)',
                   fontFamily: 'var(--font-mono)',
                   fontSize: 9,
                   color: 'var(--text-dim)',
@@ -548,11 +533,7 @@ function QaScreenshots({
  * story count + a couple of thumbnails so the operator has visual confidence
  * before hitting Publish.
  */
-function HandoffCard({
-  qaReport,
-}: {
-  qaReport: import('@/types/qa-report').QaReport;
-}) {
+function HandoffCard({ qaReport }: { qaReport: import('@/types/qa-report').QaReport }) {
   const stories = countStories(qaReport);
   const previewThumbs = qaReport.vqa.thumbnails
     .filter((t) => t.status === 'pass' && t.screenshotUrl)
@@ -590,7 +571,8 @@ function HandoffCard({
             lineHeight: 1.4,
           }}
         >
-          {stories} stor{stories === 1 ? 'y' : 'ies'} · {qaReport.vqa.pass} visual test{qaReport.vqa.pass === 1 ? '' : 's'} passing · rigor <code>{qaReport.rigor}</code>
+          {stories} stor{stories === 1 ? 'y' : 'ies'} · {qaReport.vqa.pass} visual test
+          {qaReport.vqa.pass === 1 ? '' : 's'} passing · rigor <code>{qaReport.rigor}</code>
         </div>
       </div>
       {previewThumbs.length > 0 && (

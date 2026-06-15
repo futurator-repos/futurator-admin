@@ -71,8 +71,26 @@ export interface Plan {
   epicIds: string[];
   /** `/home/ubuntu/projects/<name>` — derived from `name` at creation. */
   workingDir: string;
-  /** Set once deployed via Deploy tab. */
+  /** Set once deployed to PRODUCTION via the Deploy tab. */
   deployUrl?: string;
+
+  /**
+   * Deployment v2.5 — preview environment URLs. Written by the daemon's
+   * post-deploy writeback when a dev/staging deploy succeeds (NOT the
+   * production `deployUrl`, which stays the live link). The QA stage surfaces
+   * `devUrl` as the clickable "Open in dev" link so the operator can exercise
+   * the merged build the same way headless QA does. See deployment-v2.5.md.
+   */
+  devUrl?: string;
+  stagingUrl?: string;
+  /**
+   * FK to the most recent DEV deploy job (preview). Set by the auto-trigger
+   * (wave-completion cron) when the plan reaches `review`, so the dev deploy
+   * fires at most once per plan and the QA report can render its live status.
+   */
+  devDeployJobId?: string;
+  /** FK to the most recent STAGING promote job — drives the ladder's staging status. */
+  stagingDeployJobId?: string;
 
   // ── Execution defaults applied to all epics under this plan ──
   devModel?: string;

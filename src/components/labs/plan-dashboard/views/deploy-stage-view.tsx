@@ -20,6 +20,7 @@ import { Loader2 } from 'lucide-react';
 import type { PlanWithEpics } from '@/hooks/use-plans';
 import { useDeployReport } from '@/hooks/use-deploy-report';
 import { ReleaseStrip } from './deploy/release-strip';
+import { EnvironmentLadder } from './deploy/environment-ladder';
 import { WhatsShipping } from './deploy/whats-shipping';
 import { DeploySteps } from './deploy/deploy-steps';
 import { DeployLogs } from './deploy/deploy-logs';
@@ -100,10 +101,11 @@ export function DeployStageView({ plan }: { plan: PlanWithEpics }) {
         canDeploy={canDeploy}
         blockedReason={blockedReason}
       />
+      <EnvironmentLadder environments={report.environments} planId={plan.planId} />
       <WhatsShipping handoff={report.handoff} />
       <DeploySteps current={report.current} />
       <DeployLogs deployJobId={report.current?.jobId ?? null} />
-      <DeployHistory history={report.history} />
+      <DeployHistory history={report.history} planId={plan.planId} />
       <EnvironmentFooter target={report.target} />
       <DeferredFeatures />
     </div>

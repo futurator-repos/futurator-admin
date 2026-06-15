@@ -11,10 +11,12 @@
  * once the plan flips to `ready`.
  */
 
-import { Loader2, RefreshCw, ArrowRight, Send } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
+import { Loader2, RefreshCw, ArrowRight, Send, Rocket, ExternalLink } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import type { QaReport, PlanQaVerdict, QaPillarVerdict } from '@/types/qa-report';
+import type { QaReport, PlanQaVerdict, QaPillarVerdict, DevPreview } from '@/types/qa-report';
 import { useRunQaReview, useSendBackFailing } from '@/hooks/use-qa-report';
+import { useDeployApp } from '@/hooks/use-epic-workflow';
 
 interface Props {
   report: QaReport;
@@ -219,6 +221,7 @@ export function VerdictStrip({ report, planId, showLastRun = true }: Props) {
             Send all failing back ({failingCount})
           </button>
         )}
+        <DevPreviewControls preview={report.devPreview} planId={planId} />
         <RunQaButton report={report} runQa={runQa} onClick={onRunQa} />
         <button
           type="button"
@@ -353,6 +356,102 @@ function RunQaButton({
         >
           {errMsg}
         </span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * Deployment v2.5 — dev-preview controls.
+ *
+ * The whole point of this cluster: let the operator click and exercise the
+ * EXACT merged build that headless QA is testing against. The dev deploy is
+ * auto-triggered when the plan reaches `review`, so the common case is the
+ * "Open in dev" link simply being present. The button lets the operator
+ * (re-)publish on demand. Dev deploys never advance `main`.
+ */
+function DevPreviewControls({ preview, planId }: { preview: DevPreview; planId: string }) {
+  const deploy = useDeployApp();
+  const qc = useQueryClient();
+  const { epicId, url, status } = preview;
+
+  function onDeployDev() {
+    if (!epicId || deploy.isPending) return;
+    deploy.mutate(
+      { epicId, environment: 'dev' },
+      { onSuccess: () => qc.invalidateQueries({ queryKey: ['qa-report', planId] }) },
+    );
+  }
+
+  const deploying = status === 'deploying' || deploy.isPending;
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+      {url && status === 'live' && (
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Open the dev preview — the same merged build QA is testing, clickable by you"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            fontSize: 10,
+            letterSpacing: '0.14em',
+            textTransform: 'uppercase',
+            padding: '7px 14px',
+            border: '1px solid var(--accent-blue)',
+            borderRadius: 2,
+            color: 'var(--accent-blue)',
+            background: 'color-mix(in srgb, var(--accent-blue) 10%, transparent)',
+            fontWeight: 500,
+            textDecoration: 'none',
+          }}
+        >
+          Open in dev
+          <ExternalLink size={10} />
+        </a>
+      )}
+      {(epicId || status === 'failed') && (
+        <button
+          type="button"
+          onClick={onDeployDev}
+          disabled={!epicId || deploying}
+          title={
+            !epicId
+              ? 'No epics to deploy yet'
+              : status === 'failed'
+                ? 'The last dev deploy failed — retry'
+                : status === 'live'
+                  ? 'Re-publish the current build to the dev preview'
+                  : 'Publish the current build to the dev preview'
+          }
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            fontSize: 10,
+            letterSpacing: '0.14em',
+            textTransform: 'uppercase',
+            padding: '7px 14px',
+            border: `1px solid ${status === 'failed' ? 'var(--destructive)' : 'var(--border-2)'}`,
+            borderRadius: 2,
+            color: status === 'failed' ? 'var(--destructive)' : 'var(--text-dim)',
+            background: 'transparent',
+            cursor: !epicId || deploying ? 'not-allowed' : 'pointer',
+            opacity: !epicId || deploying ? 0.5 : 1,
+          }}
+        >
+          {deploying ? <Loader2 size={10} className="animate-spin" /> : <Rocket size={10} />}
+          {deploying
+            ? 'Dev deploying…'
+            : status === 'failed'
+              ? 'Retry dev'
+              : status === 'live'
+                ? 'Re-deploy dev'
+                : 'Deploy to dev'}
+        </button>
       )}
     </span>
   );

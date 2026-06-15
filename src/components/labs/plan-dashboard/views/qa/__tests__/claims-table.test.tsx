@@ -115,6 +115,7 @@ function makeReport(over: Partial<QaReport> = {}): QaReport {
     qaRuns: [],
     attentionItems: [],
     runHistory: [],
+    devPreview: { epicId: 'E-1', status: 'none' },
     generatedAt: '2026-06-12T00:00:00Z',
     ...over,
   };

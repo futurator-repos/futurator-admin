@@ -438,5 +438,31 @@ export interface QaReport {
   /** Prior runs for the timeline at the bottom of the page. */
   runHistory: QaRunSummary[];
 
+  /**
+   * Deployment v2.5 — the clickable dev-preview the operator can open to
+   * exercise the merged build by hand (what headless QA tests against, but
+   * visible). Auto-deployed when the plan reaches `review`.
+   */
+  devPreview: DevPreview;
+
   generatedAt: string;
+}
+
+/** Deployment v2.5 — dev-preview status surfaced on the QA stage. */
+export interface DevPreview {
+  /**
+   * Highest-wave epic id — the deploy primitive is epic-keyed, so this is the
+   * target for a manual "Deploy to dev" click. `null` when the plan has no
+   * epics yet.
+   */
+  epicId: string | null;
+  /** Live dev URL once a dev deploy has succeeded (`plan.devUrl`). */
+  url?: string;
+  /**
+   * `none`      — never dev-deployed (or the deploy job can't be resolved)
+   * `deploying` — a dev deploy job is PENDING/RUNNING
+   * `live`      — last dev deploy COMPLETED and a URL is recorded
+   * `failed`    — last dev deploy FAILED/NEEDS_ATTENTION
+   */
+  status: 'none' | 'deploying' | 'live' | 'failed';
 }

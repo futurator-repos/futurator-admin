@@ -43,7 +43,7 @@ export function ReleaseStrip({ report, epicId, canDeploy, blockedReason }: Props
 
   function onDeploy() {
     if (!canAct || !epicId) return;
-    deploy.mutate(epicId);
+    deploy.mutate({ epicId, environment: 'production' });
   }
 
   const ctaLabel = deploying
@@ -184,12 +184,7 @@ export function ReleaseStrip({ report, epicId, canDeploy, blockedReason }: Props
       {/* CTAs */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
         {report.verdict === 'failed' && report.current && (
-          <button
-            type="button"
-            onClick={onDeploy}
-            disabled={!canAct}
-            style={ghostCta(!canAct)}
-          >
+          <button type="button" onClick={onDeploy} disabled={!canAct} style={ghostCta(!canAct)}>
             <RefreshCw size={11} />
             Retry deploy
           </button>

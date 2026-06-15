@@ -23,7 +23,10 @@ export function useQaReport(planId: string | null) {
       const pending =
         report.ac.verdict === 'pending' ||
         report.vqa.verdict === 'pending' ||
-        report.gate.verdict === 'pending';
+        report.gate.verdict === 'pending' ||
+        // Deployment v2.5 — keep polling while the dev preview is building so
+        // the "Open in dev" link appears as soon as it goes live.
+        report.devPreview?.status === 'deploying';
       if (report.verdict === 'not-run' || pending) return 3_000;
       return 20_000;
     },

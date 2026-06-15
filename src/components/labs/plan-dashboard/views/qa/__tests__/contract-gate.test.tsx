@@ -148,6 +148,7 @@ function report(
     qaRuns: [],
     attentionItems: [],
     runHistory: [],
+    devPreview: { epicId: 'E-1', status: 'none' },
     generatedAt: '2026-05-18T17:00:00Z',
   };
 }

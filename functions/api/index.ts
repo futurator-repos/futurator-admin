@@ -168,6 +168,14 @@ import {
 import { buildPmPlanPrompt } from '../shared/prompts/pm-plan-prompt';
 import { computePlanWaves, epicsInPlanWave } from '../shared/services/plan-waves';
 import type { PipelineDefinition } from '../shared/types/agent-orchestrator';
+import {
+  resolveDeployTarget,
+  isDeployEnvironment,
+  sourceEnvironmentFor,
+  type DeployEnvironment,
+} from '../shared/deploy/deploy-targets';
+import { buildDeployJob } from '../shared/deploy/build-deploy-pipeline';
+import { buildPromoteJob, buildRollbackJob } from '../shared/deploy/build-promote-pipeline';
 import { exportPublicProjects } from '../shared/export-public-projects';
 import { renderFlatLog, filterEvents } from '../shared/rendering/flat-log';
 import type { AgentEvent } from '../shared/types/agent-orchestrator';
@@ -2702,6 +2710,9 @@ app.get('/api/plans/:id/qa-report', async (c) => {
   const jobIdSet = new Set<string>();
   if (plan.qaJobId) jobIdSet.add(plan.qaJobId);
   if (plan.qaAggregateJobId) jobIdSet.add(plan.qaAggregateJobId);
+  // Deployment v2.5 — include the dev-preview deploy job so the report can
+  // render its live/deploying/failed status next to the QA verdict.
+  if (plan.devDeployJobId) jobIdSet.add(plan.devDeployJobId);
   for (const epic of epics) {
     if (epic.qaJobId) jobIdSet.add(epic.qaJobId);
     if (epic.poJobId) jobIdSet.add(epic.poJobId);
@@ -2743,6 +2754,10 @@ app.get('/api/plans/:id/deploy-report', async (c) => {
   for (const epic of epics) {
     if (epic.deployJobId) jobIdSet.add(epic.deployJobId);
   }
+  // Deployment v2.5 — include the dev/staging preview jobs so the environment
+  // ladder can render each rung's deploying/live/failed status.
+  if (plan.devDeployJobId) jobIdSet.add(plan.devDeployJobId);
+  if (plan.stagingDeployJobId) jobIdSet.add(plan.stagingDeployJobId);
   const jobsById: Record<string, import('../shared/types/agent-orchestrator').AgentJob> = {};
   for (const jobId of jobIdSet) {
     const job = await agentJobsRepo.getJobById(jobId);
@@ -5290,7 +5305,17 @@ app.get('/api/ec2/snapshot', async (c) => {
   });
 });
 
-// ── Deploy Agent: Build and publish app to S3 → futurator.ai/apps/{appName} ──
+// ── Deploy Agent: build + publish an app to one environment ──────────────
+//
+// Deployment v2.5 — the deploy is environment-aware. Body `{ environment }`
+// selects the target (default `production` for back-compat with the existing
+// "Deploy to production" CTA):
+//   production → apps/<slug>/          → futurator.ai/apps/<slug>/   (live; advances main)
+//   dev        → apps/_dev/<slug>/     → preview the operator can click
+//   staging    → apps/_staging/<slug>/ → pre-prod
+// Only a PRODUCTION deploy advances `main` + flips the registry to published
+// (gated in the daemon by `job.deployEnvironment`). dev/staging just record a
+// preview URL. See docs/concepts/deployment-v2.5.md.
 app.post('/api/epic-workflows/:id/deploy', async (c) => {
   const epicId = c.req.param('id');
   const user = c.get('user');
@@ -5298,141 +5323,238 @@ app.post('/api/epic-workflows/:id/deploy', async (c) => {
   const epic = await epicRepo.getEpicById(epicId);
   if (!epic) throw new NotFoundError('EpicWorkflow', epicId);
 
-  // Derive app name from working directory (last segment)
+  const body = (await c.req.json().catch(() => ({}))) as { environment?: string };
+  const environment: DeployEnvironment = isDeployEnvironment(body.environment)
+    ? body.environment
+    : 'production';
+
+  // Derive app name from working directory (last segment) — the slug that
+  // doubles as the URL segment and the S3 folder.
   const appName = epic.workingDir.split('/').filter(Boolean).pop() || 'app';
-  const publicUrl = `https://futurator.ai/apps/${appName}/`;
-  const s3Path = `apps/${appName}`;
-
-  const deployPipeline: PipelineDefinition = {
-    maxIterations: 1,
-    agents: {
-      DEPLOY: {
-        name: 'DevOps Deploy',
-        // Edit + Write are required because vite.config.ts usually needs a
-        // base path patch before `npm run build` can produce a correctly-
-        // prefixed bundle. Without these the agent halts asking for approval.
-        allowedTools: 'Bash,Read,Edit,Write,Glob',
-        model: 'haiku',
-      },
-    },
-    steps: [
-      {
-        id: 'deploy',
-        agentId: 'DEPLOY',
-        prompt: `You are a headless DevOps automation. You run non-interactively — there is NO human to grant permission. Do not ask for confirmation. Do not suggest commands for a human to run. Use the tools directly.
-
-Goal: build and publish the React/Vite app at ${epic.workingDir} to s3://futurator-ai-website/${s3Path}/ so it is reachable at ${publicUrl}.
-
-Steps (execute in order, each step must succeed before the next):
-
-1. Read ${epic.workingDir}/vite.config.ts (or .js). If it does not contain \`base: '/apps/${appName}/'\`, Edit the file to add that entry inside defineConfig({ ... }). Do this BEFORE building.
-
-2. Run the build: \`cd ${epic.workingDir} && npm run build\`. If build fails because of missing deps, run \`npm install\` and retry the build once. Do not proceed past this step unless the build succeeds.
-
-3. Identify the build output directory (Vite defaults to \`dist\`, but check the build log). Confirm it exists with \`ls\`.
-
-4. Sync to S3: \`aws s3 sync <outputDir>/ s3://futurator-ai-website/${s3Path}/ --delete\`
-
-5. Invalidate CloudFront: \`aws cloudfront create-invalidation --distribution-id E1BI1YWMTLSDTE --paths "/apps/${appName}/*"\`
-
-When finished, output these three lines EXACTLY — they are machine-parsed:
-
-DEPLOY_URL: ${publicUrl}
-DEPLOY_STATUS: success
-DEPLOY_DETAILS: <one-sentence summary of what you did>
-
-If ANY step above failed and you cannot recover, instead output:
-
-DEPLOY_URL: ${publicUrl}
-DEPLOY_STATUS: failed
-DEPLOY_DETAILS: <which step failed and why>
-
-Never end the session without emitting a DEPLOY_STATUS line. Never ask for permission.`,
-        extractors: {
-          // Tolerant to markdown decoration the agent sometimes applies
-          // despite the "plain text" instruction (the dev-server agent did
-          // exactly this on 2026-04-21 with `**DEV_SERVER_URL:**`).
-          DEPLOY_URL: {
-            type: 'regex',
-            pattern: '[*_`]*DEPLOY_URL[*_`]*:\\s*[*_`]*\\s*(https?://[^\\s*_`]+)',
-          },
-          DEPLOY_STATUS: {
-            type: 'regex',
-            pattern: '[*_`]*DEPLOY_STATUS[*_`]*:\\s*[*_`]*\\s*(\\w+)',
-          },
-          DEPLOY_DETAILS: {
-            type: 'regex',
-            pattern: '[*_`]*DEPLOY_DETAILS[*_`]*:\\s*[*_`]*\\s*(.+)',
-          },
-        },
-        validations: [
-          { type: 'equals', left: 'DEPLOY_STATUS', right: 'success', label: 'Deploy succeeded' },
-        ],
-      },
-    ],
-  };
+  const target = resolveDeployTarget(appName, environment);
+  const publicUrl = target.publicUrl;
 
   const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
 
-  await agentJobsRepo.createJob({
-    jobId,
-    status: 'PENDING',
-    // 2026-06-02 — MUST set epicId: the daemon's postDeployWriteback bails on
-    // `!job.epicId`, so without it the entire post-deploy chain is skipped —
-    // App/Plan writebacks (currentlyDeployedPlanId, deployedAt) AND the
-    // merge-to-main delivery cleanup (FF main → push → delete plan branch →
-    // clean trunk). That skip is exactly why plan-2 left main 6 commits behind,
-    // the plan branch lingering, and the worktree detached — blocking the next
-    // plan create. With epicId set, delivery self-cleans and the next plan
-    // forks brownfield off the delivered tip.
-    epicId: epic.epicId,
-    createdAt: now,
-    updatedAt: now,
-    createdBy: user.userId,
-    workingDir: epic.workingDir,
-    pipeline: deployPipeline,
-  });
+  // 2026-06-02 — buildDeployJob ALWAYS sets epicId: the daemon's
+  // postDeployWriteback bails on `!job.epicId`, so without it the entire
+  // post-deploy chain is skipped — Plan/App writebacks AND (for production)
+  // the merge-to-main delivery cleanup. That skip is exactly why plan-2 left
+  // main 6 commits behind. With epicId set, production delivery self-cleans
+  // and the next plan forks brownfield off the delivered tip.
+  await agentJobsRepo.createJob(
+    buildDeployJob({
+      jobId,
+      epicId: epic.epicId,
+      workingDir: epic.workingDir,
+      createdBy: user.userId,
+      nowIso: now,
+      target,
+      // Production publishes snapshot the release so it can be rolled back.
+      archiveReleaseId: environment === 'production' ? jobId : undefined,
+    }),
+  );
 
-  // Persist on the epic (latest deploy) AND append to plan.deployJobIds so
-  // the Deploy report can render history. Legacy plans without the field
-  // are seeded with the current job as their first history entry.
-  await epicRepo.updateEpicFields(epicId, { deployJobId: jobId });
-  if (epic.planId) {
-    const plan = await planRepo.getPlanById(epic.planId);
-    if (plan) {
-      const history = plan.deployJobIds ?? [];
-      if (!history.includes(jobId)) {
-        await planRepo.updatePlanFields(plan.planId, {
-          deployJobIds: [...history, jobId],
-        });
+  if (environment === 'production') {
+    // Persist on the epic (latest deploy) AND append to plan.deployJobIds so
+    // the Deploy report can render history. Legacy plans without the field
+    // are seeded with the current job as their first history entry.
+    await epicRepo.updateEpicFields(epicId, { deployJobId: jobId });
+    if (epic.planId) {
+      const plan = await planRepo.getPlanById(epic.planId);
+      if (plan) {
+        const history = plan.deployJobIds ?? [];
+        if (!history.includes(jobId)) {
+          await planRepo.updatePlanFields(plan.planId, {
+            deployJobIds: [...history, jobId],
+          });
+        }
       }
     }
+
+    // Ensure project registry exists with the live deploy URL.
+    const existing = await registryRepo.getProject(appName);
+    if (existing) {
+      await registryRepo.updateProjectFields(appName, {
+        deployUrl: publicUrl,
+        currentStatus: 'published',
+      });
+    } else {
+      await registryRepo.createProject({
+        projectId: appName,
+        name: epic.title,
+        ec2Path: epic.workingDir,
+        epics: [epic.epicId],
+        currentStatus: 'published',
+        deployUrl: publicUrl,
+        sessions: {},
+        fileManifest: {},
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+  } else if (environment === 'dev' && epic.planId) {
+    // Preview deploy — record the dev deploy job on the plan so the QA stage
+    // can render its live status. We do NOT touch deployJobIds (that history
+    // is the production release log) or the registry (not published).
+    await planRepo.updatePlanFields(epic.planId, { devDeployJobId: jobId });
   }
 
-  // Ensure project registry exists with deploy URL
-  const existing = await registryRepo.getProject(appName);
-  if (existing) {
-    await registryRepo.updateProjectFields(appName, {
-      deployUrl: publicUrl,
-      currentStatus: 'published',
-    });
+  return c.json({ jobId, appName, environment, publicUrl }, 201);
+});
+
+// ── Promote: move the built artifact UP the ladder (dev→staging→production) ──
+//
+// Deployment v2.5 §5 — build-once-promote-many. `{ to: 'staging' }` promotes
+// the dev build to staging; `{ to: 'production' }` promotes staging to prod.
+// When the per-env subdomain buckets are provisioned this is a pure S3 copy of
+// the SAME bytes; otherwise it rebuilds at the destination (see
+// build-promote-pipeline.ts). A production promote is a delivery event — the
+// daemon's writeback advances `main` (same as a production build deploy).
+app.post('/api/plans/:id/promote', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  const body = (await c.req.json().catch(() => ({}))) as { to?: string };
+  if (body.to !== 'staging' && body.to !== 'production') {
+    throw new ValidationError("Body { to } must be 'staging' or 'production'.");
+  }
+  const to: DeployEnvironment = body.to;
+  const src = sourceEnvironmentFor(to)!; // 'dev' for staging, 'staging' for production
+
+  // Ladder gate — the source-environment artifact must exist first.
+  if (to === 'staging' && !plan.devUrl) {
+    throw new ValidationError('Deploy to dev before promoting to staging.');
+  }
+  if (to === 'production' && !plan.stagingUrl) {
+    throw new ValidationError('Promote to staging before promoting to production.');
+  }
+
+  // Resolve the deploy epic (highest wave) — same rule as the deploy stage.
+  const epics: EpicWorkflow[] = [];
+  for (const epicId of plan.epicIds ?? []) {
+    const e = await epicRepo.getEpicById(epicId);
+    if (e) epics.push(e);
+  }
+  const deployEpic = [...epics].sort((a, b) => (b.epicWave ?? 0) - (a.epicWave ?? 0))[0];
+  if (!deployEpic) throw new ValidationError('No epics to promote.');
+
+  const appName = deployEpic.workingDir.split('/').filter(Boolean).pop() || plan.name;
+  const srcTarget = resolveDeployTarget(appName, src);
+  const dstTarget = resolveDeployTarget(appName, to);
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  await agentJobsRepo.createJob(
+    buildPromoteJob({
+      jobId,
+      epicId: deployEpic.epicId,
+      workingDir: deployEpic.workingDir,
+      createdBy: user.userId,
+      nowIso: now,
+      src: srcTarget,
+      dst: dstTarget,
+      smoke: true,
+      archiveReleaseId: to === 'production' ? jobId : undefined,
+    }),
+  );
+
+  if (to === 'production') {
+    // Production bookkeeping mirrors the production build-deploy path.
+    await epicRepo.updateEpicFields(deployEpic.epicId, { deployJobId: jobId });
+    const history = plan.deployJobIds ?? [];
+    if (!history.includes(jobId)) {
+      await planRepo.updatePlanFields(plan.planId, { deployJobIds: [...history, jobId] });
+    }
+    const existing = await registryRepo.getProject(appName);
+    if (existing) {
+      await registryRepo.updateProjectFields(appName, {
+        deployUrl: dstTarget.publicUrl,
+        currentStatus: 'published',
+      });
+    } else {
+      await registryRepo.createProject({
+        projectId: appName,
+        name: deployEpic.title,
+        ec2Path: deployEpic.workingDir,
+        epics: [deployEpic.epicId],
+        currentStatus: 'published',
+        deployUrl: dstTarget.publicUrl,
+        sessions: {},
+        fileManifest: {},
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
   } else {
-    await registryRepo.createProject({
-      projectId: appName,
-      name: epic.title,
-      ec2Path: epic.workingDir,
-      epics: [epic.epicId],
-      currentStatus: 'published',
-      deployUrl: publicUrl,
-      sessions: {},
-      fileManifest: {},
-      createdAt: now,
-      updatedAt: now,
-    });
+    await planRepo.updatePlanFields(plan.planId, { stagingDeployJobId: jobId });
   }
 
-  return c.json({ jobId, appName, publicUrl }, 201);
+  return c.json({ jobId, to, publicUrl: dstTarget.publicUrl }, 201);
+});
+
+// ── Rollback: restore a previously-archived production release ──
+//
+// Deployment v2.5 §5 — every production publish snapshots its bundle to
+// `apps/_releases/<slug>/<jobId>/`. Rollback re-syncs a chosen snapshot over
+// the live prefix + invalidates. It does NOT advance `main` (skipTrunkAdvance).
+app.post('/api/plans/:id/rollback', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  const body = (await c.req.json().catch(() => ({}))) as { jobId?: string };
+  const releaseId = body.jobId;
+  if (!releaseId) {
+    throw new ValidationError('Body { jobId } (a prior production release) is required.');
+  }
+  const history = plan.deployJobIds ?? [];
+  if (!history.includes(releaseId)) {
+    throw new ValidationError('jobId is not a known production release for this plan.');
+  }
+  if (releaseId === history[history.length - 1]) {
+    throw new ValidationError('That release is already live — nothing to roll back to.');
+  }
+
+  const epics: EpicWorkflow[] = [];
+  for (const epicId of plan.epicIds ?? []) {
+    const e = await epicRepo.getEpicById(epicId);
+    if (e) epics.push(e);
+  }
+  const deployEpic = [...epics].sort((a, b) => (b.epicWave ?? 0) - (a.epicWave ?? 0))[0];
+  if (!deployEpic) throw new ValidationError('No epics to roll back.');
+
+  const appName = deployEpic.workingDir.split('/').filter(Boolean).pop() || plan.name;
+  const prodTarget = resolveDeployTarget(appName, 'production');
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  await agentJobsRepo.createJob(
+    buildRollbackJob({
+      jobId,
+      epicId: deployEpic.epicId,
+      workingDir: deployEpic.workingDir,
+      createdBy: user.userId,
+      nowIso: now,
+      prod: prodTarget,
+      releaseId,
+    }),
+  );
+
+  // Record the rollback as the latest deploy so the report's `current` + the
+  // ladder reflect it once it completes.
+  await epicRepo.updateEpicFields(deployEpic.epicId, { deployJobId: jobId });
+  await planRepo.updatePlanFields(plan.planId, { deployJobIds: [...history, jobId] });
+
+  return c.json({ jobId, rolledBackTo: releaseId, publicUrl: prodTarget.publicUrl }, 201);
 });
 
 // ── Project Registry: get project details ──

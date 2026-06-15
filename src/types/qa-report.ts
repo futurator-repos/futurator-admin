@@ -271,5 +271,14 @@ export interface QaReport {
   qaRuns: QaRunPanel[];
   attentionItems: AttentionItemRef[];
   runHistory: QaRunSummary[];
+  /** Deployment v2.5 — clickable dev-preview surfaced on the QA stage. */
+  devPreview: DevPreview;
   generatedAt: string;
+}
+
+/** Deployment v2.5 — dev-preview status surfaced on the QA stage. */
+export interface DevPreview {
+  epicId: string | null;
+  url?: string;
+  status: 'none' | 'deploying' | 'live' | 'failed';
 }

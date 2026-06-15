@@ -310,6 +310,21 @@ export interface AgentJob {
   // routes to `epic-dev-pipeline.mjs` and consumes the fields below.
   phase?: AgentJobPhase;
   epicId?: string;
+  /**
+   * Deployment v2.5 — which environment a DEPLOY job publishes to. Set by the
+   * deploy endpoint + the cron auto-trigger. The daemon's `postDeployWriteback`
+   * advances `main` ONLY when this is `production`; `dev`/`staging` deploys
+   * record a preview URL and never touch the trunk. Absent on legacy deploy
+   * jobs (treated as `production` for back-compat).
+   */
+  deployEnvironment?: 'dev' | 'staging' | 'production';
+  /**
+   * Deployment v2.5 — set on ROLLBACK jobs. A rollback restores prior
+   * production hosting from an archived release; it must NOT fast-forward
+   * `main` (the trunk already has that release or later). The daemon gates the
+   * merge-to-main on `deployEnvironment === 'production' && !skipTrunkAdvance`.
+   */
+  skipTrunkAdvance?: boolean;
   projectId?: string;
   epicDevPayload?: EpicDevJobPayload;
   waveResults?: Record<string, WaveResult>;

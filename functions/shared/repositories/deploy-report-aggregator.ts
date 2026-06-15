@@ -20,6 +20,7 @@ import type { AgentJob } from '../types/agent-orchestrator';
 import type { EpicWorkflow } from '../types/epic-workflow';
 import type { Plan } from '../types/plan';
 import type {
+  DeployEnvironmentStatus,
   DeployHandoff,
   DeployRecord,
   DeployReport,
@@ -28,9 +29,7 @@ import type {
   DeployVerdict,
 } from '../types/deploy-report';
 import type { QaReport } from '../types/qa-report';
-
-/** FUTURATOR_PUBLIC_BUCKET — must match the env var in sst.config.ts. */
-const PUBLIC_BUCKET = 'futurator-ai-website';
+import { resolveDeployTarget } from '../deploy/deploy-targets';
 
 export interface DeployAggregatorInputs {
   plan: Plan;
@@ -117,6 +116,54 @@ function toDeployRecord(job: AgentJob, epicId: string): DeployRecord {
   };
 }
 
+// ── Environment ladder (Deployment v2.5) ───────────────────────────
+//
+// Derive each rung's live status from the recorded URL + the rung's latest
+// job. Same status rules as the QA dev-preview, applied per environment.
+
+function envPublishStatus(
+  url: string | undefined,
+  job: AgentJob | undefined,
+): DeployEnvironmentStatus['status'] {
+  let status: DeployEnvironmentStatus['status'] = url ? 'live' : 'none';
+  if (job) {
+    if (job.status === 'PENDING' || job.status === 'RUNNING') status = 'deploying';
+    else if (job.status === 'FAILED' || job.status === 'NEEDS_ATTENTION') status = 'failed';
+    else if (job.status === 'COMPLETED') status = url ? 'live' : 'none';
+  }
+  return status;
+}
+
+function buildEnvironments(
+  plan: Plan,
+  jobsById: Record<string, AgentJob>,
+  latestProdJobId: string | undefined,
+): DeployEnvironmentStatus[] {
+  const devJob = plan.devDeployJobId ? jobsById[plan.devDeployJobId] : undefined;
+  const stagingJob = plan.stagingDeployJobId ? jobsById[plan.stagingDeployJobId] : undefined;
+  const prodJob = latestProdJobId ? jobsById[latestProdJobId] : undefined;
+  return [
+    {
+      environment: 'dev',
+      url: plan.devUrl,
+      status: envPublishStatus(plan.devUrl, devJob),
+      canPromote: false, // dev is reached by deploy, not promote
+    },
+    {
+      environment: 'staging',
+      url: plan.stagingUrl,
+      status: envPublishStatus(plan.stagingUrl, stagingJob),
+      canPromote: !!plan.devUrl, // promote dev → staging once dev is live
+    },
+    {
+      environment: 'production',
+      url: plan.deployUrl,
+      status: envPublishStatus(plan.deployUrl, prodJob),
+      canPromote: !!plan.stagingUrl, // promote staging → production once staging is live
+    },
+  ];
+}
+
 // ── Top-level aggregator ────────────────────────────────────────────
 
 export function buildDeployReport(inputs: DeployAggregatorInputs): DeployReport {
@@ -182,11 +229,15 @@ export function buildDeployReport(inputs: DeployAggregatorInputs): DeployReport 
   // futurator.ai homepage. Derive the slug the same way the Deploy Agent does
   // (functions/api/index.ts: `epic.workingDir.split('/').pop()`) so they match.
   const appSlug = plan.workingDir.split('/').filter(Boolean).pop() || plan.name;
+  // Deployment v2.5 — derive from the shared resolver so the CloudFront id is
+  // always populated (fixes the previously-blank Environment footer) and the
+  // production target stays in lockstep with what the deploy agent publishes.
+  const prodResolved = resolveDeployTarget(appSlug, 'production');
   const target: DeployTarget = {
-    publicUrl: `https://futurator.ai/apps/${appSlug}/`,
-    s3Bucket: PUBLIC_BUCKET,
-    s3Prefix: `apps/${appSlug}/`,
-    cloudfrontDistributionId: process.env.CLOUDFRONT_DISTRIBUTION_ID || undefined,
+    publicUrl: prodResolved.publicUrl,
+    s3Bucket: prodResolved.s3Bucket,
+    s3Prefix: prodResolved.s3Prefix,
+    cloudfrontDistributionId: prodResolved.cloudfrontDistributionId,
   };
 
   const handoff: DeployHandoff = {
@@ -208,6 +259,7 @@ export function buildDeployReport(inputs: DeployAggregatorInputs): DeployReport 
     statusReason,
     target,
     handoff,
+    environments: buildEnvironments(plan, jobsById, current?.jobId),
     current,
     history,
     generatedAt: inputs.nowIso ?? new Date().toISOString(),

@@ -159,15 +159,22 @@ export function useStartDevServer() {
   });
 }
 
+/** Deployment v2.5 — `environment` selects dev/staging/production (default production). */
 export function useDeployApp() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (epicId: string) =>
-      api.post<{ jobId: string; appName: string; publicUrl: string }>(
+    mutationFn: ({
+      epicId,
+      environment,
+    }: {
+      epicId: string;
+      environment?: 'dev' | 'staging' | 'production';
+    }) =>
+      api.post<{ jobId: string; appName: string; environment: string; publicUrl: string }>(
         `/epic-workflows/${epicId}/deploy`,
-        {},
+        environment ? { environment } : {},
       ),
-    onSuccess: (_, epicId) =>
+    onSuccess: (_, { epicId }) =>
       queryClient.invalidateQueries({ queryKey: ['epic-workflow', epicId] }),
   });
 }
@@ -260,4 +267,3 @@ export function useCreateEpicFromXml() {
     },
   });
 }
-

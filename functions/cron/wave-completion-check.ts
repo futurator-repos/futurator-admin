@@ -15,6 +15,9 @@ import {
   buildQaExecutePipeline,
 } from '../shared/pipelines/visual-qa-pipeline';
 import { log } from '../shared/logger';
+// Deployment v2.5 — auto-publish the green build to the dev preview on review.
+import { resolveDeployTarget } from '../shared/deploy/deploy-targets';
+import { buildDeployJob } from '../shared/deploy/build-deploy-pipeline';
 
 /**
  * Wave-completion cron — Story 16.2 + Story 17.4.
@@ -251,6 +254,44 @@ export const handler = async () => {
         // FAILED, the plan stays in `review` (operator can retry from the
         // Deploy stage's release strip).
         if (plan.status === 'review') {
+          // Deployment v2.5 — auto-publish the green build to the DEV preview
+          // so the operator can click exactly what headless QA tests against.
+          // Fires AT MOST ONCE per plan (guarded by plan.devDeployJobId);
+          // re-deploys are manual from the QA stage. Non-production, so the
+          // daemon's writeback records a preview URL and never advances main.
+          // Never blocks delivery — wrapped in its own try/catch.
+          if (!plan.devDeployJobId) {
+            try {
+              const deployEpic = epicsForPlan
+                .slice()
+                .sort((a, b) => (b.epicWave ?? 0) - (a.epicWave ?? 0))[0];
+              const appName = deployEpic.workingDir.split('/').filter(Boolean).pop() || plan.name;
+              const target = resolveDeployTarget(appName, 'dev');
+              const devJobId = planDepsShared.uuid();
+              await planDepsShared.createJob(
+                buildDeployJob({
+                  jobId: devJobId,
+                  epicId: deployEpic.epicId,
+                  workingDir: deployEpic.workingDir,
+                  createdBy: plan.createdBy,
+                  nowIso: planDepsShared.now(),
+                  target,
+                }),
+              );
+              await planRepo.updatePlanFields(plan.planId, { devDeployJobId: devJobId });
+              log('info', 'wave-completion-check', 'auto dev-deploy enqueued', {
+                planId: plan.planId,
+                jobId: devJobId,
+                url: target.publicUrl,
+              });
+            } catch (err) {
+              log('error', 'wave-completion-check', 'auto dev-deploy failed (non-fatal)', {
+                planId: plan.planId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+
           const latestDeployJobId =
             plan.deployJobIds?.[plan.deployJobIds.length - 1] ??
             epicsForPlan.slice().sort((a, b) => (b.epicWave ?? 0) - (a.epicWave ?? 0))[0]

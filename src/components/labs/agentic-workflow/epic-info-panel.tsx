@@ -249,12 +249,15 @@ export function EpicInfoPanel({ epic }: EpicInfoPanelProps) {
           epic={epic}
           deployJobId={deployJobId}
           onDeploy={() => {
-            deployApp.mutate(epic.epicId, {
-              onSuccess: (data) => {
-                setDeployJobId(data.jobId);
-                console.log('[Deploy] Job:', data.jobId, 'URL:', data.publicUrl);
+            deployApp.mutate(
+              { epicId: epic.epicId, environment: 'production' },
+              {
+                onSuccess: (data) => {
+                  setDeployJobId(data.jobId);
+                  console.log('[Deploy] Job:', data.jobId, 'URL:', data.publicUrl);
+                },
               },
-            });
+            );
           }}
           isDeploying={deployApp.isPending}
         />

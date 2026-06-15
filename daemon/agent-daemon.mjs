@@ -5007,6 +5007,33 @@ async function postDeployWriteback(job, variables) {
 
   const now = new Date().toISOString();
   const deployUrl = variables.DEPLOY_URL || undefined;
+  // Deployment v2.5 — environment discriminator. Absent on legacy deploy jobs
+  // (treated as `production` for back-compat). Only a production deploy is a
+  // delivery event that advances `main`.
+  const deployEnv = job.deployEnvironment || 'production';
+
+  // Preview deploys (dev/staging) NEVER advance main and never mark the plan
+  // delivered. They only record a clickable preview URL on the plan so the QA
+  // stage can surface "Open in dev". Skip the App writeback + merge-to-main.
+  if (deployEnv !== 'production') {
+    if (!deployUrl) return;
+    const field = deployEnv === 'staging' ? 'stagingUrl' : 'devUrl';
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: PLANS_TABLE,
+          Key: { planId: plan.planId },
+          UpdateExpression: `SET ${field} = :url, updatedAt = :now`,
+          ExpressionAttributeValues: { ':url': deployUrl, ':now': now },
+          ConditionExpression: 'attribute_exists(planId)',
+        }),
+      );
+      log('info', `[${short}] post-deploy: ${deployEnv} preview recorded — ${deployUrl}`);
+    } catch (err) {
+      log('warn', `[${short}] post-deploy: ${deployEnv} preview write failed: ${err.message}`);
+    }
+    return;
+  }
 
   // Update Plan row: deployedAt + deployUrl. Always issue this; legacy plans
   // without appId still benefit from the timestamp.
@@ -5071,6 +5098,15 @@ async function postDeployWriteback(job, variables) {
     );
   } catch (err) {
     log('warn', `[${short}] post-deploy: App update failed: ${err.message}`);
+  }
+
+  // Deployment v2.5 — ROLLBACK jobs restore prior production hosting and must
+  // NOT advance the trunk (main already has that release or later code). Skip
+  // the merge-to-main entirely for them; the Plan/App deployUrl writeback above
+  // still runs so the UI reflects the rolled-back live state.
+  if (job.skipTrunkAdvance) {
+    log('info', `[${short}] post-deploy: rollback — skipping main advance`);
+    return;
   }
 
   // ── Merge to main on delivery (2026-06-01) ──

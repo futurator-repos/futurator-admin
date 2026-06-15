@@ -20,6 +20,7 @@ import type {
   AcRollup,
   ContractClassifiedTest,
   ContractWarning,
+  DevPreview,
   EpicQaBreakdown,
   GateCellStatus,
   GateCheck,
@@ -1292,6 +1293,30 @@ function buildRunHistory(
 
 // ── Top-level aggregator ─────────────────────────────────────────────
 
+/**
+ * Deployment v2.5 — derive the dev-preview the QA stage renders. The deploy
+ * primitive is epic-keyed, so the manual "Deploy to dev" target is the
+ * highest-wave epic (same rule the Deploy stage uses). Status is read from the
+ * dev deploy job (when present in `jobsById`) + the recorded `plan.devUrl`.
+ */
+function buildDevPreview(
+  plan: Plan,
+  epics: EpicWorkflow[],
+  jobsById: Record<string, AgentJob>,
+): DevPreview {
+  const epicId =
+    [...epics].sort((a, b) => (b.epicWave ?? 0) - (a.epicWave ?? 0))[0]?.epicId ?? null;
+  const job = plan.devDeployJobId ? jobsById[plan.devDeployJobId] : undefined;
+
+  let status: DevPreview['status'] = plan.devUrl ? 'live' : 'none';
+  if (job) {
+    if (job.status === 'PENDING' || job.status === 'RUNNING') status = 'deploying';
+    else if (job.status === 'FAILED' || job.status === 'NEEDS_ATTENTION') status = 'failed';
+    else if (job.status === 'COMPLETED') status = plan.devUrl ? 'live' : 'none';
+  }
+  return { epicId, url: plan.devUrl, status };
+}
+
 export function buildQaReport(inputs: AggregatorInputs): QaReport {
   const { plan, epics, jobsById, attentionItems } = inputs;
 
@@ -1348,6 +1373,7 @@ export function buildQaReport(inputs: AggregatorInputs): QaReport {
     qaRuns: buildQaRuns(plan, epics),
     attentionItems: attentionSummaries,
     runHistory: buildRunHistory(plan, epics, jobsById),
+    devPreview: buildDevPreview(plan, epics, jobsById),
     generatedAt: inputs.nowIso ?? new Date().toISOString(),
   };
 }
