@@ -61,6 +61,15 @@ rule = f"url.https://x-access-token:{pat}@github.com/.insteadOf"
 cmds = []
 for home, user in (("/home/ubuntu", "ubuntu"), ("/root", "root")):
     runas = f"sudo -u {user} -H HOME={home} " if user == "ubuntu" else "sudo "
+    # The token is embedded in the config KEY, so a new value would ADD a
+    # second rule and leave the old (now-revoked) one in place — git then
+    # picks the stale rule and auth fails. Remove EVERY existing
+    # url.*.insteadof rule first, then set exactly one with the new token.
+    cmds.append(
+        f"{runas}git config --global --get-regexp '^url\\..*\\.insteadof' 2>/dev/null "
+        f"| awk '{{print $1}}' | sort -u | while read -r k; do "
+        f'{runas}git config --global --unset-all "$k" 2>/dev/null || true; done'
+    )
     cmds.append(f'{runas}git config --global "{rule}" "https://github.com/"')
 cmds.append("echo '>>> gitconfig insteadOf updated (ubuntu + root)'")
 # Verify the daemon can still authenticate (push dry-run on pacman1).
