@@ -15,6 +15,7 @@ import { AppShell } from '@/components/layout/app-shell';
 import { AuthGuard } from '@/components/auth/auth-guard';
 import { useSkillCatalog, type CatalogSkill } from '@/hooks/use-skill-catalog';
 import { useSkillReconciliation } from '@/hooks/use-skill-reconciliation';
+import { useCreateSkill, useUpdateSkill, useDeleteSkill } from '@/hooks/use-skill-mutations';
 
 const mono = 'var(--font-mono)';
 const muted = { fontSize: 12, color: 'var(--text-mute)' };
@@ -72,7 +73,17 @@ function FrameworkBadge({ framework }: { framework: boolean }) {
   );
 }
 
-function SkillDetail({ skill, onClose }: { skill: CatalogSkill; onClose: () => void }) {
+function SkillDetail({
+  skill,
+  onClose,
+  onEdit,
+  onDelete,
+}: {
+  skill: CatalogSkill;
+  onClose: () => void;
+  onEdit: (s: CatalogSkill) => void;
+  onDelete: (s: CatalogSkill) => void;
+}) {
   return (
     <aside
       style={{
@@ -131,9 +142,153 @@ function SkillDetail({ skill, onClose }: { skill: CatalogSkill; onClose: () => v
         <dt style={{ color: 'var(--text-faint)' }}>version</dt>
         <dd style={{ margin: 0 }}>{skill.version}</dd>
       </dl>
+      {skill.framework ? (
+        <p style={{ ...muted, fontSize: 11 }}>
+          bmad framework skill — sourced from bmad-method, not editable here.
+        </p>
+      ) : (
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => onEdit(skill)} style={btnStyle()}>
+            Edit
+          </button>
+          <button onClick={() => onDelete(skill)} style={btnStyle('var(--warning, #f59e0b)')}>
+            Delete
+          </button>
+        </div>
+      )}
     </aside>
   );
 }
+
+function btnStyle(color?: string): React.CSSProperties {
+  return {
+    fontSize: 12,
+    padding: '4px 12px',
+    borderRadius: 6,
+    border: `1px solid ${color ?? 'var(--border)'}`,
+    background: 'transparent',
+    color: color ?? 'var(--text)',
+    cursor: 'pointer',
+  };
+}
+
+/** Create/edit form. `editing` null = create mode; otherwise prefill + lock name. */
+function SkillForm({ editing, onClose }: { editing: CatalogSkill | null; onClose: () => void }) {
+  const create = useCreateSkill();
+  const update = useUpdateSkill();
+  const [name, setName] = useState(editing?.name ?? '');
+  const [description, setDescription] = useState(editing?.description ?? '');
+  const [kind, setKind] = useState(editing?.kind ?? 'core');
+  const [license, setLicense] = useState(editing?.license ?? 'MIT');
+  const [body, setBody] = useState('');
+  const isEdit = editing !== null;
+  const busy = create.isPending || update.isPending;
+  const err = (create.error || update.error) as Error | null;
+
+  const submit = () => {
+    const input = { name: name.trim(), description: description.trim(), kind, license, body };
+    const onDone = () => onClose();
+    if (isEdit) update.mutate(input, { onSuccess: onDone });
+    else create.mutate(input, { onSuccess: onDone });
+  };
+
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        padding: 16,
+        marginBottom: 16,
+        display: 'grid',
+        gap: 10,
+        background: 'var(--surface, #0f1115)',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <strong style={{ fontSize: 14 }}>{isEdit ? `Edit ${editing!.name}` : 'New skill'}</strong>
+        <button
+          onClick={onClose}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-mute)',
+            cursor: 'pointer',
+            fontSize: 16,
+          }}
+        >
+          ×
+        </button>
+      </div>
+      {!isEdit && (
+        <label style={formLabel}>
+          name (slug)
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="my-skill"
+            style={formInput}
+          />
+        </label>
+      )}
+      <label style={formLabel}>
+        description
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          style={formInput}
+        />
+      </label>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <label style={{ ...formLabel, flex: 1 }}>
+          kind
+          <input value={kind} onChange={(e) => setKind(e.target.value)} style={formInput} />
+        </label>
+        <label style={{ ...formLabel, flex: 1 }}>
+          license
+          <input value={license} onChange={(e) => setLicense(e.target.value)} style={formInput} />
+        </label>
+      </div>
+      <label style={formLabel}>
+        SKILL.md body {isEdit && <span style={muted}>(replaces the current body)</span>}
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          rows={8}
+          placeholder="# My Skill&#10;&#10;Instructions for the agent…"
+          style={{ ...formInput, fontFamily: mono, resize: 'vertical' }}
+        />
+      </label>
+      {err && <p style={{ fontSize: 11, color: 'var(--warning, #f59e0b)' }}>{err.message}</p>}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          onClick={submit}
+          disabled={busy || !description.trim() || !body.trim() || (!isEdit && !name.trim())}
+          style={{ ...btnStyle('var(--accent-blue, #3b82f6)'), opacity: busy ? 0.6 : 1 }}
+        >
+          {busy ? 'Saving…' : isEdit ? 'Save changes' : 'Create skill'}
+        </button>
+        <span style={{ ...muted, fontSize: 11, alignSelf: 'center' }}>
+          commits to futurator-repos/futurator-skills
+        </span>
+      </div>
+    </div>
+  );
+}
+
+const formLabel: React.CSSProperties = {
+  display: 'grid',
+  gap: 4,
+  fontSize: 11,
+  color: 'var(--text-mute)',
+};
+const formInput: React.CSSProperties = {
+  fontSize: 13,
+  padding: '6px 10px',
+  borderRadius: 6,
+  border: '1px solid var(--border)',
+  background: 'var(--bg, #0a0c10)',
+  color: 'var(--text)',
+};
 
 function DriftPanel({ appId }: { appId: string }) {
   const { data, isLoading, error } = useSkillReconciliation(appId);
@@ -189,6 +344,18 @@ function RegistryContent() {
   const [sourceFilter, setSourceFilter] = useState('all');
   const [frameworkFilter, setFrameworkFilter] = useState<'all' | 'bmad' | 'skill'>('all');
   const [selected, setSelected] = useState<CatalogSkill | null>(null);
+  const [form, setForm] = useState<null | 'new' | CatalogSkill>(null);
+  const del = useDeleteSkill();
+
+  const handleDelete = (s: CatalogSkill) => {
+    if (
+      typeof window !== 'undefined' &&
+      !window.confirm(`Delete skill "${s.name}"? This commits a removal to the source repo.`)
+    ) {
+      return;
+    }
+    del.mutate(s.name, { onSuccess: () => setSelected(null) });
+  };
 
   const sources = useMemo(() => [...new Set((data?.skills ?? []).map((s) => s.source))], [data]);
 
@@ -212,7 +379,12 @@ function RegistryContent() {
     <div style={{ padding: '16px 0' }}>
       <Tabs appId={appId} />
       <header style={{ marginBottom: 12 }}>
-        <h1 style={{ fontSize: 18, fontWeight: 500, margin: 0 }}>Skill Registry</h1>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h1 style={{ fontSize: 18, fontWeight: 500, margin: 0 }}>Skill Registry</h1>
+          <button onClick={() => setForm('new')} style={btnStyle('var(--accent-blue, #3b82f6)')}>
+            + New skill
+          </button>
+        </div>
         <p style={{ ...muted, margin: '4px 0 0' }}>
           {isLoading
             ? 'Loading catalog…'
@@ -229,6 +401,10 @@ function RegistryContent() {
       </header>
 
       {appId && <DriftPanel appId={appId} />}
+
+      {form !== null && (
+        <SkillForm editing={form === 'new' ? null : form} onClose={() => setForm(null)} />
+      )}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
         <input
@@ -339,7 +515,17 @@ function RegistryContent() {
             )}
           </tbody>
         </table>
-        {selected && <SkillDetail skill={selected} onClose={() => setSelected(null)} />}
+        {selected && (
+          <SkillDetail
+            skill={selected}
+            onClose={() => setSelected(null)}
+            onEdit={(s) => {
+              setForm(s);
+              setSelected(null);
+            }}
+            onDelete={handleDelete}
+          />
+        )}
       </div>
     </div>
   );

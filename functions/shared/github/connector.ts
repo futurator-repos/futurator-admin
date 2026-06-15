@@ -506,6 +506,87 @@ export async function deleteRepo(
 }
 
 // ---------------------------------------------------------------------------
+// Contents write surface — Skills Management Phase 2 (2026-06-15)
+// ---------------------------------------------------------------------------
+
+/**
+ * getFileSha — the blob sha of a file via the Contents API, or `null` when the
+ * file does not exist (404). Needed because the Contents API requires the
+ * current `sha` to update or delete an existing file (create omits it).
+ */
+export async function getFileSha(
+  owner: string,
+  name: string,
+  filePath: string,
+  branch?: string,
+): Promise<string | null> {
+  const qs = branch ? `?ref=${encodeURIComponent(branch)}` : '';
+  try {
+    const { data } = await githubFetch<{ sha: string }>(
+      `/repos/${owner}/${name}/contents/${filePath}${qs}`,
+    );
+    return data.sha;
+  } catch (err) {
+    if (err instanceof GitHubError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+/**
+ * putFile — create or update a file via PUT /repos/{owner}/{name}/contents/{path}.
+ * Looks up the existing sha first so the call is create-or-update without the
+ * caller tracking it. Returns the new commit + content sha.
+ */
+export async function putFile(
+  owner: string,
+  name: string,
+  filePath: string,
+  content: string,
+  message: string,
+  branch?: string,
+): Promise<{ commitSha: string; contentSha: string }> {
+  const existingSha = await getFileSha(owner, name, filePath, branch);
+  const body: Record<string, unknown> = {
+    message,
+    content: Buffer.from(content, 'utf-8').toString('base64'),
+  };
+  if (existingSha) body.sha = existingSha;
+  if (branch) body.branch = branch;
+
+  const { data } = await githubFetch<{
+    commit: { sha: string };
+    content: { sha: string };
+  }>(`/repos/${owner}/${name}/contents/${filePath}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+  return { commitSha: data.commit.sha, contentSha: data.content.sha };
+}
+
+/**
+ * deleteFile — remove a file via DELETE /repos/{owner}/{name}/contents/{path}.
+ * No-op (returns `{ deleted: false }`) when the file is already absent so the
+ * caller can treat delete as idempotent.
+ */
+export async function deleteFile(
+  owner: string,
+  name: string,
+  filePath: string,
+  message: string,
+  branch?: string,
+): Promise<{ deleted: boolean }> {
+  const sha = await getFileSha(owner, name, filePath, branch);
+  if (!sha) return { deleted: false };
+  const body: Record<string, unknown> = { message, sha };
+  if (branch) body.branch = branch;
+  await githubFetch<unknown>(`/repos/${owner}/${name}/contents/${filePath}`, {
+    method: 'DELETE',
+    body: JSON.stringify(body),
+  });
+  return { deleted: true };
+}
+
+// ---------------------------------------------------------------------------
 // Git graph surface — commits / branches / pull requests
 // ---------------------------------------------------------------------------
 

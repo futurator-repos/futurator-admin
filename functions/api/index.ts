@@ -7,6 +7,7 @@ import {
   diffSkillReconciliation,
   type SkillCatalog,
 } from '../shared/skill-catalog';
+import { putSkill, deleteSkill, SKILL_NAME_RE } from '../shared/skill-authoring';
 import type { Project } from '../shared/types';
 import {
   projectUpdateSchema,
@@ -10339,6 +10340,78 @@ app.get('/api/skills/reconciliation', authMiddleware, async (c) => {
     catalog: { count: catalog.skills.length, fetchedAt: catalog.fetchedAt },
     ...reconciliation,
   });
+});
+
+/**
+ * Skills Management Phase 2 (2026-06-15) — authoring.
+ *
+ * POST /api/skills          — create a new operator-authored skill
+ * PUT  /api/skills/:name     — edit an existing operator-authored skill
+ * DELETE /api/skills/:name   — remove an operator-authored skill
+ *
+ * Each writes the canonical source repo (`futurator-repos/futurator-skills`)
+ * via the Contents API: `skills/<name>/SKILL.md` + the `index.json` entry. bmad
+ * (framework) skills are catalogued from the bmad-method package and are NOT
+ * editable here — guarded with 403. After any write the catalog cache is busted
+ * so the next browse reflects the change.
+ */
+const skillBodySchema = z.object({
+  description: z.string().min(1).max(500),
+  body: z.string().min(1).max(50_000),
+  kind: z.string().min(1).max(40).optional(),
+  license: z.string().min(1).max(120).optional(),
+});
+const skillCreateSchema = skillBodySchema.extend({
+  name: z.string().regex(SKILL_NAME_RE, 'name must be a lowercase slug (2-64 chars)'),
+});
+
+/** Reject editing/deleting a bmad (framework) skill; 404 if unknown on edit. */
+async function assertEditableSkill(name: string, mustExist: boolean): Promise<void> {
+  const catalog = await getCachedSkillCatalog();
+  const entry = catalog.skills.find((s) => s.name === name);
+  if (!entry) {
+    if (mustExist) throw new NotFoundError('Skill', name);
+    return; // create path — absence is fine
+  }
+  if (entry.framework) {
+    throw new AppError(
+      'SKILL_NOT_EDITABLE',
+      `"${name}" is a bmad framework skill (sourced from bmad-method) and cannot be edited here.`,
+      403,
+    );
+  }
+}
+
+app.post('/api/skills', authMiddleware, async (c) => {
+  const parsed = skillCreateSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success)
+    throw new ValidationError(parsed.error.issues[0]?.message ?? 'invalid skill');
+  const catalog = await getCachedSkillCatalog();
+  if (catalog.skills.some((s) => s.name === parsed.data.name)) {
+    throw new AppError('SKILL_EXISTS', `A skill named "${parsed.data.name}" already exists.`, 409);
+  }
+  const result = await putSkill(parsed.data);
+  _skillCatalogCache = null; // bust so the next browse shows it
+  return c.json(result, 201);
+});
+
+app.put('/api/skills/:name', authMiddleware, async (c) => {
+  const name = c.req.param('name');
+  await assertEditableSkill(name, true);
+  const parsed = skillBodySchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success)
+    throw new ValidationError(parsed.error.issues[0]?.message ?? 'invalid skill');
+  const result = await putSkill({ name, ...parsed.data });
+  _skillCatalogCache = null;
+  return c.json(result);
+});
+
+app.delete('/api/skills/:name', authMiddleware, async (c) => {
+  const name = c.req.param('name');
+  await assertEditableSkill(name, true);
+  const result = await deleteSkill(name);
+  _skillCatalogCache = null;
+  return c.json(result);
 });
 
 /** GET /api/apps/:appId — App detail (App + plans[] + activePlan + recentDeploys). */

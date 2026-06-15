@@ -46,14 +46,19 @@ export interface SkillCatalog {
 }
 
 /**
- * The live default — the canonical source stood up in Phase 0.2. Kept here (not
- * imported from EMBEDDED_DEFAULT_FEDERATION) because that embedded default still
- * points at the dead `futurator/futurator-skills` placeholder.
+ * The live default — the canonical source. Hosted under the `futurator-repos`
+ * account (same owner as every app repo) so the pipeline's existing GitHub PAT
+ * can WRITE to it for operator authoring (Phase 2); the `Futurator-ai` org the
+ * Phase-0 cut used was read-only to that PAT. Kept here (not imported from
+ * EMBEDDED_DEFAULT_FEDERATION) because that embedded default still points at the
+ * dead `futurator/futurator-skills` placeholder.
  */
+export const SKILL_SOURCE_OWNER = 'futurator-repos';
+export const SKILL_SOURCE_REPO = 'futurator-skills';
 export const DEFAULT_FEDERATION_SOURCES: FederationSourceLite[] = [
   {
     id: 'futurator-skills',
-    url: 'https://github.com/Futurator-ai/futurator-skills',
+    url: `https://github.com/${SKILL_SOURCE_OWNER}/${SKILL_SOURCE_REPO}`,
     priority: 1,
     autoTrust: true,
   },

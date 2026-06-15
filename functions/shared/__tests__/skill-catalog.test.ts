@@ -21,8 +21,8 @@ function jsonResponse(body: unknown, ok = true, status = 200) {
 
 describe('indexUrlForSource', () => {
   it('maps a github repo url to its raw index.json', () => {
-    expect(indexUrlForSource('https://github.com/Futurator-ai/futurator-skills')).toBe(
-      'https://raw.githubusercontent.com/Futurator-ai/futurator-skills/main/index.json',
+    expect(indexUrlForSource('https://github.com/futurator-repos/futurator-skills')).toBe(
+      'https://raw.githubusercontent.com/futurator-repos/futurator-skills/main/index.json',
     );
   });
   it('returns null for non-github or malformed urls', () => {
