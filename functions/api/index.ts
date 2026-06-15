@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { handle } from 'hono/aws-lambda';
 import { authMiddleware } from '../shared/auth-middleware';
 import { AppError, NotFoundError, ValidationError } from '../shared/errors';
+import { fetchSkillCatalog, type SkillCatalog } from '../shared/skill-catalog';
 import type { Project } from '../shared/types';
 import {
   projectUpdateSchema,
@@ -10216,6 +10217,28 @@ app.get('/api/apps/:appId/skills/digest', authMiddleware, async (c) => {
     skillsUsedAggregate,
     plansAnalyzed: recentPlanIds.length,
   });
+});
+
+/**
+ * Skills Management Phase 1, Story 1.1 (2026-06-15).
+ *
+ * GET /api/skills/catalog — the flattened federation catalog for the Skills
+ * Registry UI. Fetches each federation source's `index.json` (default: the
+ * canonical `Futurator-ai/futurator-skills` source wired in Phase 0.2) and
+ * returns every skill with its source + metadata. Module-level 5-min cache so
+ * a warm Lambda doesn't re-fetch GitHub on every browse; `?refresh=1` busts it.
+ */
+let _skillCatalogCache: { at: number; data: SkillCatalog } | null = null;
+const SKILL_CATALOG_TTL_MS = 5 * 60 * 1000;
+app.get('/api/skills/catalog', authMiddleware, async (c) => {
+  const refresh = c.req.query('refresh') === '1';
+  const now = Date.now();
+  if (!refresh && _skillCatalogCache && now - _skillCatalogCache.at < SKILL_CATALOG_TTL_MS) {
+    return c.json({ ...(_skillCatalogCache.data as object), cached: true });
+  }
+  const data = await fetchSkillCatalog();
+  _skillCatalogCache = { at: now, data };
+  return c.json({ ...(data as object), cached: false });
 });
 
 /** GET /api/apps/:appId — App detail (App + plans[] + activePlan + recentDeploys). */
