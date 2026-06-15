@@ -11,7 +11,7 @@
  * Lambda. Rather than couple the Lambda to S3/IAM, the catalog fetches each
  * source's `index.json` directly over HTTPS (the same `raw.githubusercontent`
  * URL the resolver uses). The source list defaults to the live canonical
- * source (`Futurator-ai/futurator-skills`, wired in Phase 0.2) and can be
+ * source (`futurator-repos/futurator-skills`) and can be
  * overridden via the `SKILL_FEDERATION_SOURCES` env (JSON) without a redeploy
  * of this logic — Phase 3 (federation CRUD) will replace the default with the
  * S3-backed manifest.
@@ -48,8 +48,8 @@ export interface SkillCatalog {
 /**
  * The live default — the canonical source. Hosted under the `futurator-repos`
  * account (same owner as every app repo) so the pipeline's existing GitHub PAT
- * can WRITE to it for operator authoring (Phase 2); the `Futurator-ai` org the
- * Phase-0 cut used was read-only to that PAT. Kept here (not imported from
+ * can WRITE to it for operator authoring (Phase 2); the org the Phase-0 cut
+ * first used (Futurator-ai) was read-only to that PAT. Kept here (not imported from
  * EMBEDDED_DEFAULT_FEDERATION) because that embedded default still points at the
  * dead `futurator/futurator-skills` placeholder.
  */

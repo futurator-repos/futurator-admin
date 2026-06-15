@@ -10229,7 +10229,7 @@ app.get('/api/apps/:appId/skills/digest', authMiddleware, async (c) => {
  *
  * GET /api/skills/catalog — the flattened federation catalog for the Skills
  * Registry UI. Fetches each federation source's `index.json` (default: the
- * canonical `Futurator-ai/futurator-skills` source wired in Phase 0.2) and
+ * canonical `futurator-repos/futurator-skills` source) and
  * returns every skill with its source + metadata. Module-level 5-min cache so
  * a warm Lambda doesn't re-fetch GitHub on every browse; `?refresh=1` busts it.
  */
