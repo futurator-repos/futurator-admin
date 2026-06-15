@@ -221,6 +221,25 @@ write-back to S3 + daemon SIGUSR1 reload (the resolver already supports cache in
 - **Remaining:** Phase 2 (authoring — add/edit/remove via PR to `futurator-skills`) and Phase 3
   (federation source CRUD). These cover the "edit / add / remove" half of the original ask.
 
+## 7d. Phase 2 implementation log
+
+- **2026-06-15 — Phase 2 (authoring) COMPLETE in code; daemon-side deployed.**
+  - **Source relocated** `Futurator-ai/futurator-skills` → **`futurator-repos/futurator-skills`**: the pipeline
+    PAT authenticates as the `futurator-repos` user and is scoped to that account only (cannot write
+    `Futurator-ai`). Moving the source there lets authoring reuse the existing proven write path with no new
+    secrets. Daemon federation manifest re-pointed + verified resolving from the new source.
+  - **Backend:** `getFileSha`/`putFile`/`deleteFile` (github/connector.ts, Contents API); `skill-authoring.ts`
+    (`buildSkillMd`, `upsertIndexEntry`/`removeIndexEntry`, `putSkill`/`deleteSkill` writing SKILL.md +
+    index.json); `POST/PUT/DELETE /api/skills` with zod validation + a guard that 403s edits to bmad
+    framework skills; catalog cache busted on every write. Commit `13a8c36`.
+  - **Frontend:** New-skill form + edit/delete on the detail drawer + `use-skill-mutations` hooks.
+  - Tests: 35 skills tests green (gen-index 9, catalog/diff 11, contents 7, authoring 8); my files typecheck +
+    lint clean.
+  - **DEPLOY STATUS:** daemon-side live (reconcile step + federation source). The API endpoints + Registry UI
+    need an `sst deploy` + static export — **deferred to a single coordinated deploy** because
+    `functions/api/index.ts` shares the working tree with another agent's _uncommitted_ deploy-v2.5 work and
+    `sst deploy` bundles the working tree (can't isolate). See the handoff note.
+
 ## 8. Open question for Phase 0
 
 Option A (stand up `futurator-skills` repo) vs Option B (npm-source adapter). Recommendation: **A** — it is
