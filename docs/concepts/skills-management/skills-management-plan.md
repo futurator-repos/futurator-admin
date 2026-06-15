@@ -201,6 +201,26 @@ write-back to S3 + daemon SIGUSR1 reload (the resolver already supports cache in
   - Gotcha for future SSM work: SSM runs as **root**, so `homedir()`→`/root`; always run daemon-user
     checks with `sudo -u ubuntu -H HOME=/home/ubuntu` or you get a false `source=fallback`.
 
+## 7c. Phase 1 implementation log
+
+- **2026-06-15 — Phase 1 (read-only catalog) COMPLETE.**
+  - **1.1** `GET /api/skills/catalog` + `functions/shared/skill-catalog.ts` (`fetchSkillCatalog`,
+    fetch-injectable, HTTPS index.json fetch, priority-dedupe, graceful per-source degradation, 5-min
+    Lambda cache). Commit `03e8f9b`.
+  - **1.2** `GET /api/skills/reconciliation?appId=` + pure `diffSkillReconciliation` (managed / unmanaged /
+    available-not-loaded). Reads latest `skills_available` event **top-level** (not `payload`) per the
+    pushEvent spread, ordered by `timestamp`. Committed in `2200589` (bundled with another agent's commit
+    due to a concurrent-`git commit` race — code intact on-branch).
+  - **1.3** `/labs/skills/registry` UI: searchable/filterable catalog, skill-detail drawer, per-app drift
+    panel; Usage↔Registry tabs on both pages. Hooks `use-skill-catalog`, `use-skill-reconciliation`.
+    Commit `17faed2`.
+  - Tests: 11 catalog/diff unit tests green; my files typecheck + lint clean (full build deferred — a
+    concurrent agent has unrelated broken types in the tree).
+  - **NOT YET DEPLOYED:** the API endpoints take effect on the next `sst deploy`; the UI on the next admin
+    static-export deploy. Both outward — awaiting go-ahead.
+- **Remaining:** Phase 2 (authoring — add/edit/remove via PR to `futurator-skills`) and Phase 3
+  (federation source CRUD). These cover the "edit / add / remove" half of the original ask.
+
 ## 8. Open question for Phase 0
 
 Option A (stand up `futurator-skills` repo) vs Option B (npm-source adapter). Recommendation: **A** — it is
