@@ -165,11 +165,53 @@ function SkillsDigest({ appId }: { appId: string }) {
   );
 }
 
+function SkillsTabs({ appId }: { appId?: string }) {
+  const registryHref = appId
+    ? `/labs/skills/registry?appId=${encodeURIComponent(appId)}`
+    : '/labs/skills/registry';
+  return (
+    <nav
+      style={{
+        display: 'flex',
+        gap: 16,
+        borderBottom: '1px solid var(--border)',
+        marginBottom: 16,
+      }}
+    >
+      <span
+        style={{
+          fontSize: 13,
+          padding: '8px 0',
+          borderBottom: '2px solid var(--accent-blue, #3b82f6)',
+          color: 'var(--text)',
+        }}
+      >
+        Usage
+      </span>
+      <a
+        href={registryHref}
+        style={{
+          fontSize: 13,
+          padding: '8px 0',
+          color: 'var(--text-mute)',
+          textDecoration: 'none',
+        }}
+      >
+        Registry
+      </a>
+    </nav>
+  );
+}
+
 function SkillsPageContent() {
   const params = useSearchParams();
   const appId = params.get('appId') || undefined;
-  if (!appId) return <SkillsAppList />;
-  return <SkillsDigest appId={appId} />;
+  return (
+    <>
+      <SkillsTabs appId={appId} />
+      {!appId ? <SkillsAppList /> : <SkillsDigest appId={appId} />}
+    </>
+  );
 }
 
 export default function SkillsPage() {
