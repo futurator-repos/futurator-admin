@@ -58,7 +58,7 @@ export function useOpenPr(sessionId: string | null) {
   return useMutation({
     mutationFn: (input: OpenPrInput) => {
       if (!sessionId) throw new Error('no session');
-      return api.post<OpenPrResponse>(`/api/free-agent/sessions/${sessionId}/open-pr`, input);
+      return api.post<OpenPrResponse>(`/free-agent/sessions/${sessionId}/open-pr`, input);
     },
     onSuccess: () => {
       if (sessionId) {

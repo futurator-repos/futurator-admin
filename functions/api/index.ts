@@ -10038,8 +10038,12 @@ app.post('/api/apps', authMiddleware, async (c) => {
     if (err instanceof GitHubError && err.status === 404) {
       // Available — continue saga.
     } else if (err instanceof GitHubError) {
-      // Auth, rate-limit, etc. — surface as the connector status.
-      return c.json({ error: { code: 'GITHUB_ERROR', message: err.message } }, err.status as 400);
+      // Auth, rate-limit, etc. — surface as the connector status (401 remapped
+      // to 502: a backend-PAT failure is not the operator's session expiring).
+      return c.json(
+        { error: { code: 'GITHUB_ERROR', message: err.message } },
+        githubRelayStatus(err) as 400,
+      );
     } else {
       throw err;
     }
@@ -10064,7 +10068,10 @@ app.post('/api/apps', authMiddleware, async (c) => {
   } catch (err) {
     if (err instanceof AppError) throw err;
     if (err instanceof GitHubError) {
-      return c.json({ error: { code: 'GITHUB_ERROR', message: err.message } }, err.status as 400);
+      return c.json(
+        { error: { code: 'GITHUB_ERROR', message: err.message } },
+        githubRelayStatus(err) as 400,
+      );
     }
     throw err;
   }
@@ -11448,6 +11455,16 @@ app.get('/api/github/status', async (c) => {
   return c.json({ connected: true, login: result.login, rateLimit: result.rateLimit });
 });
 
+// A GitHub upstream 401 means the *backend* PAT can't authenticate (e.g. right
+// after a PAT rotation) — NOT that the operator's session is dead. Relaying it
+// verbatim made the frontend's 401-handler log the user out and bounce them to
+// Google sign-in (2026-06-16). Remap it to 502 (Bad Gateway) so a server-side
+// credential failure never wears a user-session status. Other statuses
+// (403 rate-limit, 404 not-found) pass through unchanged.
+function githubRelayStatus(err: GitHubError): number {
+  return err.status === 401 ? 502 : err.status;
+}
+
 // GET /api/github/repos — list all repos in futurator-repos org.
 app.get('/api/github/repos', authMiddleware, async (c) => {
   try {
@@ -11455,7 +11472,10 @@ app.get('/api/github/repos', authMiddleware, async (c) => {
     return c.json({ repos, rateLimit });
   } catch (err) {
     if (err instanceof GitHubError) {
-      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+      return c.json(
+        { error: err.message, rateLimit: err.rateLimit },
+        githubRelayStatus(err) as 400,
+      );
     }
     throw err;
   }
@@ -11483,7 +11503,10 @@ app.post('/api/github/repos', authMiddleware, async (c) => {
     return c.json({ repo: data, rateLimit }, 201);
   } catch (err) {
     if (err instanceof GitHubError) {
-      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+      return c.json(
+        { error: err.message, rateLimit: err.rateLimit },
+        githubRelayStatus(err) as 400,
+      );
     }
     throw err;
   }
@@ -11543,7 +11566,10 @@ app.get('/api/github/repos/:owner/:name', authMiddleware, async (c) => {
     return c.json({ repo, rateLimit });
   } catch (err) {
     if (err instanceof GitHubError) {
-      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+      return c.json(
+        { error: err.message, rateLimit: err.rateLimit },
+        githubRelayStatus(err) as 400,
+      );
     }
     throw err;
   }
@@ -11561,7 +11587,10 @@ app.get('/api/github/repos/:owner/:name/tree', authMiddleware, async (c) => {
     return c.json({ tree: data.tree, truncated: data.truncated, count: data.count, rateLimit });
   } catch (err) {
     if (err instanceof GitHubError) {
-      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+      return c.json(
+        { error: err.message, rateLimit: err.rateLimit },
+        githubRelayStatus(err) as 400,
+      );
     }
     throw err;
   }
@@ -11588,7 +11617,10 @@ app.get('/api/github/repos/:owner/:name/files', authMiddleware, async (c) => {
     return c.json({ ...data, rateLimit });
   } catch (err) {
     if (err instanceof GitHubError) {
-      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+      return c.json(
+        { error: err.message, rateLimit: err.rateLimit },
+        githubRelayStatus(err) as 400,
+      );
     }
     throw err;
   }
@@ -11664,7 +11696,10 @@ app.get('/api/github/repos/:owner/:name/git-graph', authMiddleware, async (c) =>
     if (err instanceof GitHubError) {
       const fallback = await readBareRepoGitGraph(name).catch(() => null);
       if (fallback) return c.json(fallback);
-      return c.json({ error: err.message, rateLimit: err.rateLimit }, err.status as 400);
+      return c.json(
+        { error: err.message, rateLimit: err.rateLimit },
+        githubRelayStatus(err) as 400,
+      );
     }
     throw err;
   }

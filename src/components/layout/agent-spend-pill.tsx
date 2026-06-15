@@ -45,7 +45,8 @@ export function AgentSpendPill() {
 
   const override = useMutation({
     mutationFn: () =>
-      api.post<{ overridden: true; date: string }>('/api/admin/spend-cap/override-today', {}),
+      // base URL already ends in /api — no second /api prefix (else 404)
+      api.post<{ overridden: true; date: string }>('/admin/spend-cap/override-today', {}),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['agent', 'spend', 'today'] });
       setShowOverride(false);

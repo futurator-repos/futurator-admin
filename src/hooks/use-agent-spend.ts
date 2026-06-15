@@ -23,7 +23,9 @@ const POLL_MS = 30_000;
 export function useTodaysAgentSpend() {
   return useQuery({
     queryKey: ['agent', 'spend', 'today'],
-    queryFn: () => api.get<DailySpend>('/api/admin/spend'),
+    // base URL already ends in /api — pass the path WITHOUT a second /api prefix
+    // (a leading /api here produced /api/api/admin/spend → 404, 2026-06-16)
+    queryFn: () => api.get<DailySpend>('/admin/spend'),
     refetchInterval: POLL_MS,
     staleTime: POLL_MS,
   });

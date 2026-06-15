@@ -95,7 +95,7 @@ export async function subscribeToPush(): Promise<{
   if (permission !== 'granted') return null;
 
   // 2. Fetch the VAPID public key from the server.
-  const { publicKey } = await api.get<{ publicKey: string }>('/api/admin/push/vapid-public-key');
+  const { publicKey } = await api.get<{ publicKey: string }>('/admin/push/vapid-public-key');
 
   // 3. pushManager.subscribe with the application server key.
   // BufferSource accepts ArrayBuffer-backed views; we copy into a fresh
@@ -116,10 +116,11 @@ export async function subscribeToPush(): Promise<{
   if (!endpoint || !keys) {
     throw new Error('Browser returned an incomplete PushSubscription');
   }
-  const { subscriptionId } = await api.post<{ subscriptionId: string }>(
-    '/api/admin/push/subscribe',
-    { endpoint, keys, userAgent: navigator.userAgent },
-  );
+  const { subscriptionId } = await api.post<{ subscriptionId: string }>('/admin/push/subscribe', {
+    endpoint,
+    keys,
+    userAgent: navigator.userAgent,
+  });
   window.localStorage.setItem(STORAGE_KEY, subscriptionId);
   return { subscriptionId };
 }
@@ -135,7 +136,7 @@ export async function unsubscribeFromPush(): Promise<void> {
   }
   const subscriptionId = window.localStorage.getItem(STORAGE_KEY);
   if (subscriptionId) {
-    await api.delete(`/api/admin/push/subscribe/${subscriptionId}`).catch(() => {});
+    await api.delete(`/admin/push/subscribe/${subscriptionId}`).catch(() => {});
     window.localStorage.removeItem(STORAGE_KEY);
   }
 }
@@ -143,7 +144,7 @@ export async function unsubscribeFromPush(): Promise<void> {
 /** Server-driven test fire-off. Returns true if accepted by the API. */
 export async function sendTestPush(): Promise<boolean> {
   try {
-    await api.post('/api/admin/push/test', {});
+    await api.post('/admin/push/test', {});
     return true;
   } catch {
     return false;

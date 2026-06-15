@@ -38,22 +38,43 @@ class ApiClient {
     });
 
     if (response.status === 401) {
-      // Try refresh before giving up
-      const refreshed = await refreshTokens();
-      if (refreshed) {
-        const retry = await fetch(`${this.baseUrl}${path}`, {
-          ...options,
-          headers: {
-            'Content-Type': 'application/json',
-            ...this.getAuthHeaders(),
-            ...options?.headers,
-          },
-        });
-        if (retry.ok) return retry.json();
+      // Distinguish a genuine session 401 (authMiddleware: AUTH_REQUIRED /
+      // AUTH_EXPIRED) from a 401 a route RELAYED from an upstream — e.g. the
+      // GitHub connector when the *backend* PAT can't read a repo. Only the
+      // former means "this user's session is dead". Blanket-logging-out on the
+      // latter turfed the operator to Google sign-in whenever the server-side
+      // GitHub PAT hiccuped (e.g. right after a PAT rotation, 2026-06-16).
+      // Session 401s carry `error.code`; relayed ones return a plain string
+      // `error`. Unreadable body → assume session (preserves prior behavior).
+      const isSessionError = await response
+        .clone()
+        .json()
+        .then((b) => {
+          const code = b?.error?.code;
+          return code === 'AUTH_REQUIRED' || code === 'AUTH_EXPIRED';
+        })
+        .catch(() => true);
+
+      if (isSessionError) {
+        // Try refresh before giving up
+        const refreshed = await refreshTokens();
+        if (refreshed) {
+          const retry = await fetch(`${this.baseUrl}${path}`, {
+            ...options,
+            headers: {
+              'Content-Type': 'application/json',
+              ...this.getAuthHeaders(),
+              ...options?.headers,
+            },
+          });
+          if (retry.ok) return retry.json();
+        }
+        useAuthStore.getState().logout();
+        window.location.href = '/login';
+        throw new Error('Unauthorized');
       }
-      useAuthStore.getState().logout();
-      window.location.href = '/login';
-      throw new Error('Unauthorized');
+      // Non-session 401: fall through to the generic error path below so the
+      // caller can render the real reason without nuking the session.
     }
 
     if (!response.ok) {
