@@ -26,3 +26,18 @@ export function defaultConceptInteractionForRigor(
 ): ConceptInteraction {
   return rigor === 'prototype' ? 'autopilot' : 'interactive';
 }
+
+/**
+ * Concept v2 (E1.1) — the durable "the spec chain has begun" predicate. True iff
+ * any generator FK is stamped OR any artifact row has advanced past genesis
+ * (`rev > 0`). This is the single source of truth for the `conceptInteraction`
+ * mode-lock: once the chain has started, the interactivity axis is immutable
+ * (Stories 4.5d, 7.2). It is DERIVED from fields Story 1.1 already introduces —
+ * no new persisted "first-artifact-started" fact is needed.
+ */
+export function conceptChainStarted(
+  plan: Pick<Plan, 'prdGenJobId' | 'uxGenJobId' | 'archGenJobId' | 'conceptArtifacts'>,
+): boolean {
+  if (plan.prdGenJobId || plan.uxGenJobId || plan.archGenJobId) return true;
+  return (plan.conceptArtifacts ?? []).some((a) => a.rev > 0);
+}

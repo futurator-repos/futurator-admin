@@ -45,7 +45,8 @@ export interface PlanTestingProfile {
 }
 
 import type { PlanKind } from '../schemas/plan-schema';
-import type { ConceptPlan } from '../concept/concept-plan';
+import type { ConceptPlan, ConceptArtifactKind } from '../concept/concept-plan';
+import type { ConceptArtifact } from '../concept/artifact-version';
 export type { PlanKind };
 
 export interface Plan {
@@ -138,6 +139,30 @@ export interface Plan {
    * and persists `conceptPlan`.
    */
   conceptRouteJobId?: string;
+  /**
+   * Concept v2 (E1.1, doc-engine W1): the per-artifact version registry. ONE
+   * durable source of truth for which upstream docs exist and their
+   * draft/approved/stale status — read by the Concept Reducer (E3), the rail
+   * (E4), the stale cascade (W1), and the readiness gate (E9). Seeded from
+   * `conceptPlan.artifacts` at `apply-concept-plan` time (one row per planned
+   * artifact, `status:'draft', rev:0`, `dependsOn` copied). ABSENT for
+   * prototype/legacy plans (no conceptPlan) — round-trip byte-identical.
+   */
+  conceptArtifacts?: ConceptArtifact[];
+  /**
+   * Concept v2 (E1.1): FK map from artifact kind → the most recent generator
+   * AgentJob enqueued for it (prd-gen / ux-gen / arch-gen). Stamped by the
+   * Concept driver (E3) when it enqueues the next artifact; cleared on
+   * regenerate. Distinct from the typed single FKs below (those mirror the
+   * canonical job for quick reads); this map is the per-kind ledger.
+   */
+  conceptArtifactJobIds?: Partial<Record<ConceptArtifactKind, string>>;
+  /** Concept v2 (E1.1): FK to the most recent prd-gen job (absent until enqueued). */
+  prdGenJobId?: string;
+  /** Concept v2 (E1.1): FK to the most recent ux-gen job (absent for non-UI / until enqueued). */
+  uxGenJobId?: string;
+  /** Concept v2 (E1.1): FK to the most recent arch-gen job (absent until enqueued). */
+  archGenJobId?: string;
   /** Phase C.2: plan-wide testing config (Playwright toggle lives here). */
   testingProfile?: PlanTestingProfile;
 

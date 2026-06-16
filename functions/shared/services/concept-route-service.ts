@@ -1,6 +1,7 @@
 import type { Plan } from '../types/plan';
 import type { AgentJob } from '../types/agent-orchestrator';
 import { conceptPlanSchema, type ConceptPlanOutput } from '../schemas/concept-plan-schema';
+import { seedConceptArtifacts } from '../concept/artifact-version';
 
 /**
  * Concept v2 (integration) — apply a Concept Router job's `CONCEPT_PLAN_JSON`
@@ -52,11 +53,25 @@ export function validateConceptPlanJson(parsed: unknown): ConceptPlanOutput {
   return result.data;
 }
 
-/** Persist the validated conceptPlan on the Plan row. */
+/**
+ * Persist the validated conceptPlan on the Plan row AND seed the per-artifact
+ * version registry (E1.1) from its applicability DAG — one `draft/rev:0` row per
+ * planned artifact, `dependsOn` copied. Idempotent: re-applying the same router
+ * output re-seeds the same genesis rows (apply runs before any generator bumps a
+ * rev), so cron replay is a no-op. Generators later advance each row via the
+ * apply-service (E1.3); we never clobber a row that already carries `rev>0`.
+ */
 export async function applyConceptRouteOutput(
   plan: Plan,
   conceptPlan: ConceptPlanOutput,
   deps: ConceptRouteDeps,
 ): Promise<void> {
-  await deps.updatePlanFields(plan.planId, { conceptPlan });
+  const alreadyStarted = (plan.conceptArtifacts ?? []).some((a) => a.rev > 0);
+  const patch: Partial<Plan> = { conceptPlan };
+  // Only seed when no generator has advanced a row yet — preserves real
+  // rev/contentHash/status if the router output is (re-)applied post-generation.
+  if (!alreadyStarted) {
+    patch.conceptArtifacts = seedConceptArtifacts(conceptPlan.artifacts);
+  }
+  await deps.updatePlanFields(plan.planId, patch);
 }

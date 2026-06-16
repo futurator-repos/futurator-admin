@@ -1,4 +1,5 @@
 import type { ArtifactKind } from './section-manifest';
+import type { ConceptPlanArtifact } from './concept-plan';
 
 /**
  * Concept v2 (E4.4 / W1) — artifact versioning + the approved→stale cascade.
@@ -31,6 +32,28 @@ export interface ConceptArtifact {
 
 function byKind(artifacts: ConceptArtifact[], kind: ArtifactKind): ConceptArtifact | undefined {
   return artifacts.find((a) => a.kind === kind);
+}
+
+/**
+ * Concept v2 (E1.1 / W1) — seed the Plan-row version registry from the Concept
+ * Router's applicability DAG. One `ConceptArtifact` row per planned artifact, at
+ * the genesis state: `rev:0`, empty `contentHash` (no document on disk yet),
+ * `status:'draft'`, `dependsOn` copied verbatim from the `ConceptPlanArtifact`.
+ *
+ * Called once at `apply-concept-plan` time. The rows then drive the Concept
+ * Reducer (E3), the rail (E4), and the stale cascade (W1); generators bump each
+ * row to `rev≥1` with a real `contentHash` via the apply-service (E1.3). For a
+ * prototype/legacy plan there is no `conceptPlan`, so this is never called and
+ * `conceptArtifacts` stays absent (W8 byte-identical).
+ */
+export function seedConceptArtifacts(planned: ConceptPlanArtifact[]): ConceptArtifact[] {
+  return planned.map((a) => ({
+    kind: a.kind,
+    rev: 0,
+    contentHash: '',
+    status: 'draft' as ArtifactStatus,
+    dependsOn: a.dependsOn ? [...a.dependsOn] : [],
+  }));
 }
 
 /**

@@ -55,11 +55,62 @@ describe('concept-route-service (Concept v2 integration)', () => {
   });
 
   it('applies the validated conceptPlan via updatePlanFields', async () => {
-    const updatePlanFields = vi.fn(async () => {});
+    const updatePlanFields = vi.fn(async (_id: string, _patch: Partial<Plan>) => {});
     const plan = { planId: 'plan-1' } as Plan;
     await applyConceptRouteOutput(plan, validateConceptPlanJson(VALID), { updatePlanFields });
     expect(updatePlanFields).toHaveBeenCalledWith('plan-1', {
       conceptPlan: expect.objectContaining({ uiBearing: true, gate: 'strict' }),
+      conceptArtifacts: expect.any(Array),
     });
+  });
+
+  // ── Story 1.1 — seed the version registry from the applicability DAG ──
+  it('seeds one draft/rev:0 conceptArtifact per planned artifact, dependsOn copied', async () => {
+    const updatePlanFields = vi.fn(async (_id: string, _patch: Partial<Plan>) => {});
+    const plan = { planId: 'plan-1' } as Plan;
+    await applyConceptRouteOutput(plan, validateConceptPlanJson(VALID), { updatePlanFields });
+    const patch = updatePlanFields.mock.calls[0][1] as Partial<Plan>;
+    expect(patch.conceptArtifacts).toEqual([
+      { kind: 'prd', rev: 0, contentHash: '', status: 'draft', dependsOn: [] },
+      { kind: 'ux', rev: 0, contentHash: '', status: 'draft', dependsOn: ['prd'] },
+      {
+        kind: 'architecture',
+        rev: 0,
+        contentHash: '',
+        status: 'draft',
+        dependsOn: ['prd', 'ux'],
+      },
+    ]);
+  });
+
+  it('seeds NO ux row for a non-UI plan (prd + arch only)', async () => {
+    const updatePlanFields = vi.fn(async (_id: string, _patch: Partial<Plan>) => {});
+    const nonUi = {
+      ...VALID,
+      uiBearing: false,
+      artifacts: [
+        { kind: 'prd', depth: 'full' },
+        { kind: 'architecture', depth: 'full', dependsOn: ['prd'] },
+      ],
+    };
+    await applyConceptRouteOutput({ planId: 'p' } as Plan, validateConceptPlanJson(nonUi), {
+      updatePlanFields,
+    });
+    const patch = updatePlanFields.mock.calls[0][1] as Partial<Plan>;
+    expect(patch.conceptArtifacts?.map((a) => a.kind)).toEqual(['prd', 'architecture']);
+  });
+
+  it('does NOT re-seed (clobber) a registry whose generators already advanced (rev>0)', async () => {
+    const updatePlanFields = vi.fn(async (_id: string, _patch: Partial<Plan>) => {});
+    const plan = {
+      planId: 'plan-1',
+      conceptArtifacts: [
+        { kind: 'prd', rev: 2, contentHash: 'sha256:abc', status: 'approved', dependsOn: [] },
+      ],
+    } as unknown as Plan;
+    await applyConceptRouteOutput(plan, validateConceptPlanJson(VALID), { updatePlanFields });
+    const patch = updatePlanFields.mock.calls[0][1] as Partial<Plan>;
+    expect(patch.conceptArtifacts).toBeUndefined();
+    expect(patch.conceptPlan).toBeDefined();
   });
 });
