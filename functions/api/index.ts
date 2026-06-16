@@ -179,6 +179,9 @@ import {
   artifactSourceFromJob,
   artifactJobVars,
 } from '../shared/services/concept-artifact-service';
+import { driveConcept, type ConceptDriverDeps } from '../shared/services/concept-driver';
+import { resolveConceptInteraction } from '../shared/services/resolve-concept-interaction';
+import { markForRegen } from '../shared/concept/artifact-version';
 import type { ArtifactKind } from '../shared/concept/section-manifest';
 import { runSolutioningGate } from '../shared/services/solutioning-gate';
 import {
@@ -2114,6 +2117,19 @@ const CONCEPT_FK_FIELD: Record<ArtifactKind, 'prdGenJobId' | 'uxGenJobId' | 'arc
   architecture: 'archGenJobId',
 };
 
+/** Shared Concept-driver deps (reactive apply endpoints + cron parity). */
+function buildConceptDriverDeps(): ConceptDriverDeps {
+  return {
+    getPlanById: planRepo.getPlanById,
+    getJobById: agentJobsRepo.getJobById,
+    createJob: agentJobsRepo.createJob,
+    updatePlanFields: planRepo.updatePlanFields,
+    getApp: appRepo.getApp,
+    uuid: () => crypto.randomUUID(),
+    now: () => new Date().toISOString(),
+  };
+}
+
 async function handleApplyArtifact(c: Context, kind: ArtifactKind) {
   const planId = c.req.param('id');
   if (!planId) throw new ValidationError('Missing plan id');
@@ -2149,11 +2165,16 @@ async function handleApplyArtifact(c: Context, kind: ArtifactKind) {
     throw new ValidationError(`Job ${jobId} is ${job.status}, not COMPLETED`);
   }
 
+  // Autopilot auto-approves on apply so the chain advances with no human click;
+  // interactive leaves the row `draft` until the operator Approves (E4.4).
+  const autoApprove = resolveConceptInteraction(plan) === 'autopilot';
+
   let result;
   try {
     const source = artifactSourceFromJob(job, kind);
     result = await applyConceptArtifactOutput(plan, kind, source, {
       updatePlanFields: planRepo.updatePlanFields,
+      autoApprove,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -2166,12 +2187,79 @@ async function handleApplyArtifact(c: Context, kind: ArtifactKind) {
     conceptArtifactJobIds: { ...(plan.conceptArtifactJobIds ?? {}), [kind]: jobId },
   });
 
-  return c.json({ planId, jobId, ...result });
+  // Drive the next step under the per-plan reduce lock (reactive path; the cron
+  // is the idempotent backstop). A closed browser never wedges the DAG.
+  let drive;
+  const token = await planRepo.acquirePlanReduceLock(planId, Date.now());
+  if (token) {
+    try {
+      const fresh = await planRepo.getPlanById(planId);
+      if (fresh) drive = await driveConcept(fresh, buildConceptDriverDeps());
+    } finally {
+      await planRepo.releasePlanReduceLock(planId, token);
+    }
+  }
+
+  return c.json({ planId, jobId, ...result, drive });
 }
 
 app.post('/api/plans/:id/apply-prd', (c) => handleApplyArtifact(c, 'prd'));
 app.post('/api/plans/:id/apply-ux', (c) => handleApplyArtifact(c, 'ux'));
 app.post('/api/plans/:id/apply-arch', (c) => handleApplyArtifact(c, 'architecture'));
+
+// ── Concept v2 (E3.3) — regenerate an artifact (operator-triggered refresh) ──
+//
+// POST /api/plans/:id/concept/:kind/regenerate
+//
+// Marks the artifact `stale` (cascading its transitive dependents stale), then
+// drives a fresh generator under the reduce lock. The old `concept/<kind>.md`
+// is retained on disk until the new one lands (two-phase). Double-submit safe:
+// if a non-terminal generator FK already exists for the kind, this is a no-op
+// (already regenerating) — no duplicate job.
+const CONCEPT_KINDS: ArtifactKind[] = ['prd', 'ux', 'architecture'];
+
+app.post('/api/plans/:id/concept/:kind/regenerate', async (c) => {
+  const planId = c.req.param('id');
+  const kindParam = c.req.param('kind');
+  const kind = (kindParam === 'arch' ? 'architecture' : kindParam) as ArtifactKind;
+  if (!CONCEPT_KINDS.includes(kind)) {
+    throw new ValidationError(
+      `kind must be one of prd | ux | arch | architecture (got "${kindParam}")`,
+    );
+  }
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  if (!plan.conceptPlan) {
+    throw new ValidationError(
+      'Plan has no concept chain (prototype/legacy) — nothing to regenerate.',
+    );
+  }
+
+  // Double-submit guard: a non-terminal generator FK ⇒ already regenerating.
+  const fk = plan.conceptArtifactJobIds?.[kind] ?? plan[CONCEPT_FK_FIELD[kind]];
+  if (fk) {
+    const existing = await agentJobsRepo.getJobById(fk);
+    if (existing && (existing.status === 'PENDING' || existing.status === 'RUNNING')) {
+      return c.json({ planId, kind, regenerated: false, reason: 'already in flight', jobId: fk });
+    }
+  }
+
+  // Flip stale + cascade, then drive a fresh generator under the reduce lock.
+  const next = markForRegen(plan.conceptArtifacts ?? [], kind);
+  await planRepo.updatePlanFields(planId, { conceptArtifacts: next });
+
+  let drive;
+  const token = await planRepo.acquirePlanReduceLock(planId, Date.now());
+  if (token) {
+    try {
+      const fresh = await planRepo.getPlanById(planId);
+      if (fresh) drive = await driveConcept(fresh, buildConceptDriverDeps());
+    } finally {
+      await planRepo.releasePlanReduceLock(planId, token);
+    }
+  }
+  return c.json({ planId, kind, regenerated: true, drive });
+});
 
 // POST /api/plans/:id/regenerate — start a fresh PM-plan job on the same intent.
 //
@@ -11196,13 +11284,18 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
   // manually on their first Plan.
   let pmJobId: string | undefined;
   // PR-23d — auto-launch PM for ALL plan kinds, not just `initial`. Change
-  // plans get the brownfield clause; experiment plans skip it. Without
-  // this, kind='change' plans landed in `concept` with no PM job and the
-  // operator had to click Regenerate to kick the PM off.
+  // plans get the brownfield clause; experiment plans skip it.
+  //
+  // Concept v2 (E3.2) — SUPPRESS this eager pm-plan when a concept chain will
+  // exist (`shouldRunConceptRoute` = non-prototype). For mvp/production the
+  // Concept Reducer owns the single `enqueue-pm-plan` transition AFTER all
+  // artifacts are approved, so the PM cites real sections instead of guessing.
+  // Prototype keeps the creation-time eager enqueue, byte-identical (W8).
   if (
-    parsed.data.kind === 'initial' ||
-    parsed.data.kind === 'change' ||
-    parsed.data.kind === 'experiment'
+    !shouldRunConceptRoute(plan) &&
+    (parsed.data.kind === 'initial' ||
+      parsed.data.kind === 'change' ||
+      parsed.data.kind === 'experiment')
   ) {
     pmJobId = crypto.randomUUID();
     // PR-5: thread the App's boilerplateType + Plan's rigor into the PM

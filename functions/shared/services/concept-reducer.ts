@@ -64,10 +64,11 @@ export function reduceConcept(plan: ReducerPlan): ConceptReduceAction {
       return { type: 'noop', reason: `waiting on upstream deps of ${p.kind}` };
     }
 
-    // Interactive convergence that has already produced a draft (rev>0) is
-    // BLOCKED on the operator's Approve — never auto-advance past a human gate.
-    // (status is already narrowed to draft|stale by the `continue` above.)
-    if (interaction === 'interactive' && row.rev > 0) {
+    // Interactive convergence that has already produced a DRAFT (rev>0, status
+    // 'draft') is BLOCKED on the operator's Approve — never auto-advance past a
+    // human gate. A `stale` row (upstream edited / regenerate requested) is NOT
+    // blocked: it re-generates in both modes (Story 3.3).
+    if (interaction === 'interactive' && row.status === 'draft' && row.rev > 0) {
       return { type: 'awaiting-approval', kind: p.kind };
     }
 

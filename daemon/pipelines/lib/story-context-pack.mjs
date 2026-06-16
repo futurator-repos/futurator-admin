@@ -585,6 +585,52 @@ function resolveCitedSections(projectDir, references) {
   return out;
 }
 
+/**
+ * Concept v2 (E3 / Story 3.2a) — assemble the inlined upstream artifact bodies
+ * for a generator's `{{PRIOR_ARTIFACTS}}` placeholder. The Lambda CANNOT read
+ * EC2 disk, so it enqueues ux-gen/arch-gen with the placeholder and the daemon
+ * fills it here from the APPROVED on-disk docs (the same `.mjs/.ts` boundary as
+ * `resolveCitedSections`).
+ *
+ * The chain is prd → ux → architecture. The upstreams for a generator are every
+ * artifact earlier in the chain that exists on disk:
+ *   - ux-gen  → prd
+ *   - arch-gen → prd (+ ux when uiBearing, i.e. ux-spec.md exists)
+ *
+ * Returns inlined markdown (section bodies), never paths. Missing upstreams
+ * degrade to a short skeleton instruction so the generator still produces a
+ * valid doc (defensive — shouldn't happen post-gate).
+ *
+ * @param {string} projectDir
+ * @param {'prd'|'ux'|'architecture'} currentKind
+ * @returns {string}
+ */
+const CONCEPT_CHAIN_ORDER = ['prd', 'ux', 'architecture'];
+
+export function loadPriorArtifacts(projectDir, currentKind) {
+  const idx = CONCEPT_CHAIN_ORDER.indexOf(currentKind);
+  const upstreamKinds = idx > 0 ? CONCEPT_CHAIN_ORDER.slice(0, idx) : [];
+  const blocks = [];
+  for (const kind of upstreamKinds) {
+    const md = readFileIfExists(join(projectDir, CONCEPT_DIR_REL, `${kind}.md`));
+    if (!md || !md.trim()) continue;
+    const label = kind === 'prd' ? 'PRD' : kind === 'ux' ? 'UX Specification' : 'Architecture';
+    blocks.push(`### ${label} (approved upstream — stay consistent; cite, do not contradict)\n\n${md.trim()}`);
+  }
+  if (blocks.length === 0) {
+    return 'No approved upstream artifacts are available on disk; produce a valid document from the intent and stay within a reasonable MVP scope.';
+  }
+  return blocks.join('\n\n---\n\n');
+}
+
+/** Map a concept generator step id → the artifact kind it produces. */
+export function conceptKindForStepId(stepId) {
+  if (stepId === 'prd-gen') return 'prd';
+  if (stepId === 'ux-gen') return 'ux';
+  if (stepId === 'arch-gen') return 'architecture';
+  return null;
+}
+
 function buildProjectTree(projectDir, maxDepth) {
   const lines = [];
   const root = projectDir.replace(/\/+$/, '');

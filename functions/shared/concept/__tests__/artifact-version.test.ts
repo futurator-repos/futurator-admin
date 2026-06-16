@@ -3,6 +3,7 @@ import {
   recordApproval,
   applyEdit,
   staleCascade,
+  markForRegen,
   railIsConsistent,
   staleArtifacts,
   type ConceptArtifact,
@@ -80,5 +81,28 @@ describe('artifact-version — approved→stale cascade (Concept v2 — E4.4/W1)
   it('staleCascade is idempotent on an already-consistent rail', () => {
     const approved = approveAll(chain());
     expect(staleCascade(approved)).toEqual(approved);
+  });
+
+  // ── Story 3.3 — markForRegen ──
+  it('markForRegen flips the target stale and cascades its dependents stale', () => {
+    const approved = approveAll(chain());
+    const regen = markForRegen(approved, 'prd');
+    const m = Object.fromEntries(regen.map((x) => [x.kind, x]));
+    expect(m.prd.status).toBe('stale');
+    expect(m.ux.status).toBe('stale'); // transitive
+    expect(m.architecture.status).toBe('stale');
+    // rev/contentHash preserved as history (regen is not an edit yet).
+    expect(m.prd.rev).toBe(1);
+    expect(m.prd.contentHash).toBe('sha256:prd-1');
+    expect(railIsConsistent(regen)).toBe(false);
+  });
+
+  it('markForRegen on a leaf (architecture) leaves upstreams approved', () => {
+    const approved = approveAll(chain());
+    const regen = markForRegen(approved, 'architecture');
+    const m = Object.fromEntries(regen.map((x) => [x.kind, x]));
+    expect(m.prd.status).toBe('approved');
+    expect(m.ux.status).toBe('approved');
+    expect(m.architecture.status).toBe('stale');
   });
 });

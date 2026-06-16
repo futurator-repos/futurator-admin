@@ -5,6 +5,7 @@ import { generateSectionManifest, sectionIds } from '../concept/section-manifest
 import {
   applyEdit,
   staleCascade,
+  recordApproval,
   type ConceptArtifact,
   type ArtifactStatus,
 } from '../concept/artifact-version';
@@ -35,6 +36,13 @@ import {
 
 export interface ConceptArtifactApplyDeps {
   updatePlanFields: (planId: string, patch: Partial<Plan>) => Promise<void>;
+  /**
+   * Concept v2 (E3.2) — autopilot auto-approval. When true, the registered
+   * artifact is immediately `recordApproval`'d (status→approved, dependsOnHashes
+   * snapshotted) so the reducer advances with no human click. Interactive mode
+   * leaves this false: the row stays `draft` until the operator Approves (E4.4).
+   */
+  autoApprove?: boolean;
 }
 
 /** What the caller hands the service: a prebuilt manifest (preferred) or raw markdown. */
@@ -130,23 +138,33 @@ export async function applyConceptArtifactOutput(
 ): Promise<ApplyArtifactResult> {
   const manifest = resolveManifest(kind, source);
   const newHash = manifest.contentHash;
+  const wantApproved = deps.autoApprove === true;
 
   const registry: ConceptArtifact[] = (plan.conceptArtifacts ?? []).map((a) => ({ ...a }));
   const existing = registry.find((a) => a.kind === kind);
 
-  // Idempotent: identical content already registered → no write, no rev bump.
-  if (existing && existing.rev > 0 && existing.contentHash === newHash) {
+  // Identical content already registered? Then the only thing that can still be
+  // owed is an autopilot approval of a row left `draft`. Crucially, re-applying
+  // identical content must NEVER resurrect a `stale` row (a deliberate
+  // regenerate request) — only genuinely new content (a different hash) advances
+  // it. So: no-op unless we still owe a draft→approved flip.
+  const sameContent = !!existing && existing.rev > 0 && existing.contentHash === newHash;
+  const owesApproveFlip = wantApproved && existing?.status === 'draft';
+  if (sameContent && !owesApproveFlip) {
     return {
       kind,
-      rev: existing.rev,
-      contentHash: existing.contentHash,
-      status: existing.status,
+      rev: existing!.rev,
+      contentHash: existing!.contentHash,
+      status: existing!.status,
       changed: false,
     };
   }
 
   let next: ConceptArtifact[];
-  if (existing) {
+  if (existing && existing.contentHash === newHash && existing.rev > 0) {
+    // Same content, but a state transition is still owed (autopilot approve).
+    next = registry;
+  } else if (existing) {
     // applyEdit bumps rev, sets the new hash, resets status→draft, runs cascade.
     next = applyEdit(registry, kind, newHash);
   } else {
@@ -160,6 +178,9 @@ export async function applyConceptArtifactOutput(
     };
     next = staleCascade([...registry, appended]);
   }
+
+  // Autopilot: promote to approved immediately (snapshots dependsOnHashes).
+  if (wantApproved) next = recordApproval(next, kind);
 
   await deps.updatePlanFields(plan.planId, { conceptArtifacts: next });
 

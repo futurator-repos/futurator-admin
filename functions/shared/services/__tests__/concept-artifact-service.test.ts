@@ -79,6 +79,45 @@ describe('concept-artifact-service (E1.3 — generic apply funnel)', () => {
     expect(updatePlanFields).not.toHaveBeenCalled();
   });
 
+  it('autopilot re-apply of IDENTICAL content never resurrects a stale row (Story 3.3)', async () => {
+    const updatePlanFields = vi.fn(async (_id: string, _patch: Partial<Plan>) => {});
+    const hash = generateSectionManifest(ARCH_MD, { artifact: 'architecture', rev: 0 }).manifest
+      .contentHash;
+    // A row marked stale (regenerate requested), whose old content hash matches
+    // the OLD completed generator job we re-apply.
+    const plan = {
+      planId: 'p1',
+      conceptArtifacts: [
+        { kind: 'architecture', rev: 1, contentHash: hash, status: 'stale', dependsOn: [] },
+      ],
+    } as unknown as Plan;
+    const res = await applyConceptArtifactOutput(
+      plan,
+      'architecture',
+      { rawMarkdown: ARCH_MD },
+      { updatePlanFields, autoApprove: true },
+    );
+    expect(res).toMatchObject({ status: 'stale', changed: false });
+    expect(updatePlanFields).not.toHaveBeenCalled();
+  });
+
+  it('autopilot apply of NEW content to a stale row advances + approves it (Story 3.3)', async () => {
+    const updatePlanFields = vi.fn(async (_id: string, _patch: Partial<Plan>) => {});
+    const plan = {
+      planId: 'p1',
+      conceptArtifacts: [
+        { kind: 'architecture', rev: 1, contentHash: 'sha256:old', status: 'stale', dependsOn: [] },
+      ],
+    } as unknown as Plan;
+    const res = await applyConceptArtifactOutput(
+      plan,
+      'architecture',
+      { rawMarkdown: ARCH_MD },
+      { updatePlanFields, autoApprove: true },
+    );
+    expect(res).toMatchObject({ rev: 2, status: 'approved', changed: true });
+  });
+
   it('re-apply with NEW content (regenerate) bumps the rev again', async () => {
     const updatePlanFields = vi.fn(async (_id: string, _patch: Partial<Plan>) => {});
     const plan = {

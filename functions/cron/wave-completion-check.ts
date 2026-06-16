@@ -6,6 +6,7 @@ import { resolveQaContext } from '../shared/services/qa-boilerplate-resolver';
 // Story 1.8.7 — 3× escalator: fire-and-forget after plan is marked delivered
 import { evaluateThresholds } from '../shared/timer/escalator';
 import { reducePlan, type PlanReducerDeps } from '../shared/services/plan-reducer';
+import { driveConcept, type ConceptDriverDeps } from '../shared/services/concept-driver';
 // 2026-05-30 — shared reducer-deps factory (cron + reactive endpoint parity).
 import { buildPlanReducerDeps } from '../shared/services/reduce-deps';
 import { launchPlanQaAggregate, launchPlanQaExecute } from '../shared/services/visual-qa-launcher';
@@ -326,6 +327,52 @@ export const handler = async () => {
           planId: plan.planId,
           error: err instanceof Error ? err.message : String(err),
         });
+      }
+    }
+
+    // ── 1b. Concept pass (E3.2) — advance the spec-development DAG. ──
+    // The active-plans filter above is intentionally scoped to {developing,
+    // fixing, review}; concept-stage plans need their own pass or the chain
+    // never advances unattended. Gate on `conceptPlan` presence so the hot loop
+    // stays off prototype/legacy plans (no chain). Each plan is driven under the
+    // same per-plan reduce lock the reactive apply endpoint uses — exactly one
+    // next job is created.
+    const conceptPlans = plans.filter((p) => p.status === 'concept' && p.conceptPlan);
+    if (conceptPlans.length > 0) {
+      const conceptDeps: ConceptDriverDeps = {
+        getPlanById: planRepo.getPlanById,
+        getJobById: agentJobsRepo.getJobById,
+        createJob: agentJobsRepo.createJob,
+        updatePlanFields: planRepo.updatePlanFields,
+        getApp: appRepo.getApp,
+        uuid: () => crypto.randomUUID(),
+        now: () => new Date().toISOString(),
+      };
+      for (const plan of conceptPlans) {
+        const token = await planRepo.acquirePlanReduceLock(plan.planId, Date.now());
+        if (!token) {
+          resultCounts['concept:reduce-locked'] = (resultCounts['concept:reduce-locked'] || 0) + 1;
+          continue;
+        }
+        try {
+          const driveResult = await driveConcept(plan, conceptDeps);
+          resultCounts[`concept:${driveResult.kind}`] =
+            (resultCounts[`concept:${driveResult.kind}`] || 0) + 1;
+          if (driveResult.kind !== 'noop') {
+            log('info', 'wave-completion-check', 'drove concept plan', {
+              planId: plan.planId,
+              result: driveResult,
+            });
+          }
+        } catch (err) {
+          errored++;
+          log('error', 'wave-completion-check', 'per-plan concept-drive failure', {
+            planId: plan.planId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          await planRepo.releasePlanReduceLock(plan.planId, token);
+        }
       }
     }
 

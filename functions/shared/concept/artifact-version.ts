@@ -122,6 +122,21 @@ export function staleCascade(artifacts: ConceptArtifact[]): ConceptArtifact[] {
   return cur;
 }
 
+/**
+ * Concept v2 (E3.3) — mark an artifact for regeneration: flip it to `stale`
+ * (keeping its rev/contentHash as history) and cascade so every transitive
+ * dependent goes `stale` too. The reducer then re-activates the chain in
+ * dependency order. When the fresh content lands via `applyEdit`, the rev bumps
+ * and the cascade re-settles. `stale` is the "needs regeneration" state — the
+ * reducer never treats it as a human-approval gate (Story 3.3).
+ */
+export function markForRegen(artifacts: ConceptArtifact[], kind: ArtifactKind): ConceptArtifact[] {
+  const marked = artifacts.map((a) =>
+    a.kind === kind ? { ...a, status: 'stale' as ArtifactStatus } : a,
+  );
+  return staleCascade(marked);
+}
+
 /** True iff the whole rail is consistent — nothing stale, everything that should be approved is. */
 export function railIsConsistent(artifacts: ConceptArtifact[]): boolean {
   return artifacts.every((a) => a.status !== 'stale');

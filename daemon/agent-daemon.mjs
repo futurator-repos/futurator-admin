@@ -110,6 +110,11 @@ import {
 import { setupStoryWorktree, teardownStoryWorktree } from './lib/story-worktree.mjs';
 // Concept v2 (E1.2/E2.4) — land generated concept docs on disk + their manifests.
 import { writeConceptArtifact } from './pipelines/lib/concept-artifact-writeback.mjs';
+// Concept v2 (E3.2a) — fill {{PRIOR_ARTIFACTS}} from approved upstream docs.
+import {
+  loadPriorArtifacts,
+  conceptKindForStepId,
+} from './pipelines/lib/story-context-pack.mjs';
 import { startReaperTicker } from './lib/worktree-reaper.mjs';
 // 2026-05-21 — auth-probe classifier (extracted so the false-FAIL fix
 // is unit-testable without bringing the daemon entry into the test).
@@ -127,6 +132,7 @@ import {
   findStaleJobs,
   buildResumeJob,
   isStaleAnyPhase,
+  isRequeueableOrphan,
   DEFAULT_STALE_MS,
   REQUEUE_ON_ORPHAN_JOB_TYPES,
 } from './pipelines/stale-heartbeat.mjs';
@@ -1393,6 +1399,9 @@ const TRANSIENT_VARS = new Set([
   'PRD_MD',
   'UX_MD',
   'ARCHITECTURE_MD',
+  // E3.2a — inlined upstream doc bodies for {{PRIOR_ARTIFACTS}}; prompt-only,
+  // never persisted (can be large — dodges the ~400KB DDB item cap).
+  'PRIOR_ARTIFACTS',
 ]);
 
 // Concept v2 (E2.4) — map a captured generator variable → its ArtifactKind.
@@ -1583,19 +1592,22 @@ async function scanStaleEpicDevJobs() {
     // "Scaffold pending" forever. Safe: these jobs are idempotent, and a
     // genuinely-failing run lands FAILED via its own catch (not RUNNING), so
     // this never loops. See REQUEUE_ON_ORPHAN_JOB_TYPES. (brick1 root-cause.)
+    // 2026-06-17 (Story 3.4) — `isRequeueableOrphan` now also matches autopilot
+    // concept-gen jobs (stamped `conceptAutopilotGen: true` by the driver), not
+    // just app-bootstrap. Interactive convergence turns are never stamped, so
+    // they fall through to mark-STALE.
     const requeueOrphans = (Items || []).filter(
       (j) =>
-        j.status === 'RUNNING' &&
         !activeJobs.has(j.jobId) &&
-        REQUEUE_ON_ORPHAN_JOB_TYPES.includes(j.jobType) &&
-        isStaleAnyPhase(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }),
+        isRequeueableOrphan(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }),
     );
     for (const job of requeueOrphans) {
       try {
         await updateJobFields(job.jobId, { status: 'PENDING' });
+        const label = job.jobType || (job.conceptAutopilotGen ? 'concept-gen' : 'job');
         log(
           'warn',
-          `[${job.jobId.slice(0, 8)}] orphaned ${job.jobType} requeued → PENDING (idempotent infra job; daemon restarted mid-run)`,
+          `[${job.jobId.slice(0, 8)}] orphaned ${label} requeued → PENDING (idempotent; daemon restarted mid-run)`,
         );
       } catch (err) {
         log('error', `Failed to requeue orphaned ${job.jobType} ${job.jobId.slice(0, 8)}: ${err.message}`);
@@ -1606,8 +1618,9 @@ async function scanStaleEpicDevJobs() {
       (j) =>
         j.status === 'RUNNING' &&
         j.phase !== 'epic-dev' &&
-        // Idempotent infra jobs are requeued above — don't also mark them STALE.
-        !REQUEUE_ON_ORPHAN_JOB_TYPES.includes(j.jobType) &&
+        // Requeueable orphans (idempotent infra + autopilot concept-gen) are
+        // handled above — don't also mark them STALE.
+        !isRequeueableOrphan(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }) &&
         !activeJobs.has(j.jobId) &&
         isStaleAnyPhase(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }),
     );
@@ -2141,6 +2154,18 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   log('info', `\n${'='.repeat(60)}`);
   log('info', `STEP: ${step.id} (Agent ${step.agentId} — ${agent.name})`);
   log('info', `${'='.repeat(60)}`);
+
+  // Concept v2 (E3.2a) — fill the {{PRIOR_ARTIFACTS}} placeholder for ux-gen /
+  // arch-gen from the APPROVED upstream docs on disk (prd for ux; prd+ux for
+  // arch). The Lambda can't read EC2 disk, so it enqueues the placeholder and we
+  // inline the real section bodies here, just before substitution. Never carried
+  // as a persisted job variable (avoids the 400KB cap).
+  if (typeof step.prompt === 'string' && step.prompt.includes('{{PRIOR_ARTIFACTS}}')) {
+    const conceptKind = conceptKindForStepId(step.id);
+    if (conceptKind) {
+      variables.PRIOR_ARTIFACTS = loadPriorArtifacts(workingDir, conceptKind);
+    }
+  }
 
   // 1. Template substitution
   const prompt = substituteTemplate(step.prompt, variables);

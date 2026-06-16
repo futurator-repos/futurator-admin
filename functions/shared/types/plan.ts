@@ -163,6 +163,13 @@ export interface Plan {
   uxGenJobId?: string;
   /** Concept v2 (E1.1): FK to the most recent arch-gen job (absent until enqueued). */
   archGenJobId?: string;
+  /**
+   * Concept v2 (E3.2): FK to the chain-driven pm-plan job the Concept Reducer
+   * enqueues once every artifact is approved. Distinct from the eager
+   * creation-time pm-plan (suppressed for non-prototype plans). Its presence is
+   * the dedup guard so the reducer never double-enqueues the PM plan.
+   */
+  conceptPmPlanJobId?: string;
   /** Phase C.2: plan-wide testing config (Playwright toggle lives here). */
   testingProfile?: PlanTestingProfile;
 

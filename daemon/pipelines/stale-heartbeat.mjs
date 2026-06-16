@@ -85,16 +85,25 @@ export function findStaleJobs(jobs, opts) {
 export const REQUEUE_ON_ORPHAN_JOB_TYPES = ['app-bootstrap'];
 
 /**
- * True iff a job is a stale, orphaned RUNNING instance of an idempotent infra
- * job type that is safe to auto-requeue. Pure — the daemon adds the
- * `!activeJobs.has(jobId)` guard (its own in-flight jobs) at the call site.
+ * True iff a job is a stale, orphaned RUNNING instance that is SAFE to
+ * auto-requeue. Two classes qualify:
+ *   • idempotent infra job types in `requeueJobTypes` (e.g. app-bootstrap), and
+ *   • autopilot concept-gen jobs (Story 3.4) — generic pipeline jobs the Concept
+ *     driver stamps with `conceptAutopilotGen: true`. A one-shot generator
+ *     (prd/ux/arch) is safe to re-run: the daemon write-back is idempotent and
+ *     the apply-service no-ops identical content. INTERACTIVE convergence turns
+ *     are NEVER stamped this way (mid-conversation state) — they stay mark-STALE.
+ *
+ * Pure — the daemon adds the `!activeJobs.has(jobId)` guard (its own in-flight
+ * jobs) at the call site.
  */
 export function isRequeueableOrphan(
   job,
   { now = Date.now(), staleMs = DEFAULT_STALE_MS, requeueJobTypes = REQUEUE_ON_ORPHAN_JOB_TYPES } = {},
 ) {
   if (!isStaleAnyPhase(job, { now, staleMs })) return false;
-  return requeueJobTypes.includes(job?.jobType);
+  if (requeueJobTypes.includes(job?.jobType)) return true;
+  return job?.conceptAutopilotGen === true;
 }
 
 /**

@@ -187,4 +187,32 @@ describe('isRequeueableOrphan', () => {
       isRequeueableOrphan(bootstrapJob({ lastHeartbeatAt: fresh }), { now: NOW }),
     ).toBe(false);
   });
+
+  // ── Story 3.4 — autopilot concept-gen jobs (no jobType) requeue via marker ──
+  it('requeues a stale, orphaned autopilot concept-gen job (conceptAutopilotGen marker)', () => {
+    const job = {
+      jobId: 'g1',
+      status: 'RUNNING',
+      conceptAutopilotGen: true,
+      conceptArtifactKind: 'architecture',
+      updatedAt: stale,
+    };
+    expect(isRequeueableOrphan(job, { now: NOW })).toBe(true);
+  });
+
+  it('does NOT requeue an interactive convergence turn (no marker — mid-conversation)', () => {
+    const job = {
+      jobId: 'fa1',
+      status: 'RUNNING',
+      jobType: 'free-agent-session',
+      conceptArtifactKind: 'prd', // scoped to a kind, but NOT marked autopilot
+      updatedAt: stale,
+    };
+    expect(isRequeueableOrphan(job, { now: NOW })).toBe(false);
+  });
+
+  it('does NOT requeue a fresh (heartbeating) autopilot concept-gen job', () => {
+    const job = { jobId: 'g2', status: 'RUNNING', conceptAutopilotGen: true, updatedAt: fresh };
+    expect(isRequeueableOrphan(job, { now: NOW })).toBe(false);
+  });
 });
