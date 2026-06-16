@@ -14,6 +14,7 @@ import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { PlanWithEpics } from '@/hooks/use-plans';
+import { ConceptRail } from './concept-rail';
 import {
   usePatchPlan,
   useRegeneratePlan,
@@ -394,6 +395,8 @@ export function PlanReviewView({
             </div>
           </div>
         )}
+
+        {isConcept && plan.conceptPlan && <ConceptRail conceptPlan={plan.conceptPlan} />}
 
         {!hasEpics && !generating && !pmFailed && !applyError && (
           <EmptyCard>
