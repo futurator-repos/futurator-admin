@@ -227,3 +227,46 @@ describe('buildPmPlanPrompt — references[] are gated on citableSections (E7.8)
     expect(p).not.toContain('cite the upstream artifacts');
   });
 });
+
+describe('buildPmPlanPrompt — {{CITABLE_SECTIONS}} placeholder (E5.1)', () => {
+  it('mvp + expectsCitations, no inline sections → emits the daemon placeholder', () => {
+    const p = buildPmPlanPrompt({
+      ...baseArgs,
+      boilerplateType: 'nextjs-base',
+      rigor: 'mvp',
+      expectsCitations: true,
+    });
+    expect(p).toContain('{{CITABLE_SECTIONS}}');
+    expect(p).toContain('cite the upstream artifacts');
+    expect(p).not.toContain('Do NOT emit `references[]` yet');
+  });
+
+  it('inline citableSections win over the placeholder', () => {
+    const p = buildPmPlanPrompt({
+      ...baseArgs,
+      boilerplateType: 'nextjs-base',
+      rigor: 'mvp',
+      expectsCitations: true,
+      citableSections: { prd: ['fr-1'] },
+    });
+    expect(p).toContain('prd: fr-1');
+    expect(p).not.toContain('{{CITABLE_SECTIONS}}');
+  });
+
+  it('enriched WITHOUT expectsCitations → defers references (no placeholder)', () => {
+    const p = buildPmPlanPrompt({ ...baseArgs, boilerplateType: 'nextjs-base', rigor: 'mvp' });
+    expect(p).not.toContain('{{CITABLE_SECTIONS}}');
+    expect(p).toContain('Do NOT emit `references[]` yet');
+  });
+
+  it('prototype + expectsCitations → byte-identical lean output (no placeholder)', () => {
+    const p = buildPmPlanPrompt({
+      ...baseArgs,
+      boilerplateType: 'nextjs-base',
+      rigor: 'prototype',
+      expectsCitations: true,
+    });
+    expect(p).not.toContain('{{CITABLE_SECTIONS}}');
+    expect(p).toContain('keep stories lean');
+  });
+});

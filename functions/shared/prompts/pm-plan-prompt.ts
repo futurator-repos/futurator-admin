@@ -44,6 +44,15 @@ export function buildPmPlanPrompt(args: {
    * decompose, E4.2). Absent → no references emitted (prototype / pre-artifact).
    */
   citableSections?: Partial<Record<'prd' | 'architecture' | 'ux', string[]>>;
+  /**
+   * Concept v2 (E5.1) — set when the plan IS concept-chain-bearing (mvp/
+   * production with a conceptPlan) but `citableSections` was not resolved at
+   * build time (the Lambda can't read the EC2 manifests). The prompt then emits
+   * a daemon-fillable `{{CITABLE_SECTIONS}}` placeholder, which the daemon
+   * substitutes with the real ids at run time (Story 5.2). Ignored on the
+   * inline-supplied path and for prototype plans (byte-identical lean output).
+   */
+  expectsCitations?: boolean;
 }): string {
   const meta = BOILERPLATE_REGISTRY[args.boilerplateType];
   if (!meta) {
@@ -76,6 +85,9 @@ export function buildPmPlanPrompt(args: {
     .filter((k) => Array.isArray(citable[k]) && citable[k]!.length > 0)
     .map((k) => `${k}: ${citable[k]!.join(', ')}`);
   const hasCitable = enriched && citableEntries.length > 0;
+  // E5.1 — emit the daemon-fillable placeholder when the chain WILL produce
+  // citable sections but they aren't inlined at build time.
+  const usePlaceholder = enriched && !hasCitable && args.expectsCitations === true;
   const exampleStoryEnrichment = enriched
     ? `,
             "userStory": { "role": "developer", "action": "import the domain types", "benefit": "every later story shares one contract" },
@@ -316,7 +328,13 @@ modify (relative to the project root, using the conventional paths above).
       { source, section } where \`section\` is one of the available ids (cite
       ONLY these; never invent an id):
       ${citableEntries.join('\n      ')}`
-      : `
+      : usePlaceholder
+        ? `
+    • \`references\`: cite the upstream artifacts a story depends on — each
+      { source, section } where \`section\` is one of the available ids (cite
+      ONLY these; never invent an id):
+      {{CITABLE_SECTIONS}}`
+        : `
     • Do NOT emit \`references[]\` yet — citations are added once the PRD/UX/
       architecture artifacts exist.`
   }`

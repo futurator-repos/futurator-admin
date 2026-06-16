@@ -113,6 +113,7 @@ import { writeConceptArtifact } from './pipelines/lib/concept-artifact-writeback
 // Concept v2 (E3.2a) — fill {{PRIOR_ARTIFACTS}} from approved upstream docs.
 import {
   loadPriorArtifacts,
+  loadCitableSections,
   conceptKindForStepId,
 } from './pipelines/lib/story-context-pack.mjs';
 import { startReaperTicker } from './lib/worktree-reaper.mjs';
@@ -1402,6 +1403,9 @@ const TRANSIENT_VARS = new Set([
   // E3.2a — inlined upstream doc bodies for {{PRIOR_ARTIFACTS}}; prompt-only,
   // never persisted (can be large — dodges the ~400KB DDB item cap).
   'PRIOR_ARTIFACTS',
+  // E5.2 — citable section ids for the pm-plan {{CITABLE_SECTIONS}} placeholder;
+  // prompt-only, filled from the on-disk manifests at run time.
+  'CITABLE_SECTIONS',
 ]);
 
 // Concept v2 (E2.4) — map a captured generator variable → its ArtifactKind.
@@ -2165,6 +2169,12 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
     if (conceptKind) {
       variables.PRIOR_ARTIFACTS = loadPriorArtifacts(workingDir, conceptKind);
     }
+  }
+  // Concept v2 (E5.2) — fill the pm-plan {{CITABLE_SECTIONS}} placeholder with
+  // the real, current-rev section ids from the approved on-disk manifests
+  // (closes the E7.8 gap: the PM cites the contract instead of deferring).
+  if (typeof step.prompt === 'string' && step.prompt.includes('{{CITABLE_SECTIONS}}')) {
+    variables.CITABLE_SECTIONS = loadCitableSections(workingDir);
   }
 
   // 1. Template substitution

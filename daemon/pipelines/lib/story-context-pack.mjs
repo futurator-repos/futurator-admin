@@ -555,7 +555,7 @@ function readFileIfExists(absPath) {
  * artifact missing from disk is skipped gracefully — the §8 gate (E9.3) is what
  * blocks a dangling reference; the pack degrades rather than throws.
  */
-function resolveCitedSections(projectDir, references) {
+export function resolveCitedSections(projectDir, references) {
   const out = [];
   const cache = new Map(); // source -> { md, manifest } | null
   for (const ref of references || []) {
@@ -621,6 +621,39 @@ export function loadPriorArtifacts(projectDir, currentKind) {
     return 'No approved upstream artifacts are available on disk; produce a valid document from the intent and stay within a reasonable MVP scope.';
   }
   return blocks.join('\n\n---\n\n');
+}
+
+/**
+ * Concept v2 (E5.2) — read the closed-set citable section ids from the approved
+ * concept manifests on disk and format them for the pm-plan `{{CITABLE_SECTIONS}}`
+ * placeholder. The Lambda can't read EC2 disk, so it enqueues the placeholder and
+ * the daemon fills the REAL, current-rev ids here (closing the E7.8 gap).
+ *
+ * Returns lines like `prd: fr-3, fr-4` for each present source (sorted source
+ * keys, manifest-order ids). When no manifests exist (prototype/legacy) it
+ * returns the defer-references instruction so the PM emits no citations.
+ *
+ * @param {string} projectDir
+ * @returns {string}
+ */
+export function loadCitableSections(projectDir) {
+  const lines = [];
+  for (const source of CITED_DOC_SOURCES.slice().sort()) {
+    const raw = readFileIfExists(join(projectDir, CONCEPT_DIR_REL, `${source}.sections.json`));
+    if (!raw) continue;
+    let manifest;
+    try {
+      manifest = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const ids = (manifest.sections || []).map((s) => s && s.id).filter(Boolean);
+    if (ids.length > 0) lines.push(`${source}: ${ids.join(', ')}`);
+  }
+  if (lines.length === 0) {
+    return 'No upstream artifact manifests are available — do NOT emit references[] for this plan.';
+  }
+  return lines.join('\n      ');
 }
 
 /** Map a concept generator step id → the artifact kind it produces. */

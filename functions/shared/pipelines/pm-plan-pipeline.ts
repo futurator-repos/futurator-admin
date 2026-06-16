@@ -37,6 +37,12 @@ export function generatePmPlanPipeline(args: {
    * acting on an existing App).
    */
   kind?: PlanKind;
+  /**
+   * Concept v2 (E5.1) — true when the plan is concept-chain-bearing and the PM
+   * should cite real sections. Emits the daemon-fillable `{{CITABLE_SECTIONS}}`
+   * placeholder (the daemon substitutes real ids at run time, Story 5.2).
+   */
+  expectsCitations?: boolean;
 }): PipelineDefinition {
   const prompt = buildPmPlanPrompt(args);
   return {

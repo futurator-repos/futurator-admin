@@ -222,6 +222,9 @@ export async function driveConcept(
     boilerplateType,
     rigor: plan.rigor ?? 'mvp',
     kind: plan.kind,
+    // E5.1 — the chain-driven pm-plan always cites real sections; the daemon
+    // fills {{CITABLE_SECTIONS}} from the approved manifests on disk (Story 5.2).
+    expectsCitations: true,
   });
   const jobId = deps.uuid();
   const ts = deps.now();

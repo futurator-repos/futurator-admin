@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   loadPriorArtifacts,
+  loadCitableSections,
   conceptKindForStepId,
 } from '../lib/story-context-pack.mjs';
 
@@ -14,6 +15,10 @@ function project() {
 }
 function writeDoc(dir, kind, body) {
   writeFileSync(join(dir, 'concept', `${kind}.md`), body, 'utf8');
+}
+function writeSidecar(dir, kind, ids) {
+  const manifest = { artifact: kind, rev: 1, contentHash: `sha256:${kind}`, sections: ids.map((id) => ({ id, title: id, lineStart: 1, lineEnd: 2 })) };
+  writeFileSync(join(dir, 'concept', `${kind}.sections.json`), JSON.stringify(manifest), 'utf8');
 }
 
 describe('conceptKindForStepId (Story 3.2a)', () => {
@@ -78,6 +83,34 @@ describe('loadPriorArtifacts (Story 3.2a — daemon fills {{PRIOR_ARTIFACTS}})',
     const dir = project();
     try {
       expect(loadPriorArtifacts(dir, 'architecture')).toMatch(/No approved upstream/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('loadCitableSections (Story 5.2 — fills {{CITABLE_SECTIONS}})', () => {
+  it('returns only present sources with their closed-set ids (sorted source keys)', () => {
+    const dir = project();
+    try {
+      writeSidecar(dir, 'prd', ['fr-3', 'fr-4']);
+      writeSidecar(dir, 'architecture', ['state-model']);
+      // ux absent
+      const out = loadCitableSections(dir);
+      expect(out).toContain('prd: fr-3, fr-4');
+      expect(out).toContain('architecture: state-model');
+      expect(out).not.toContain('ux:');
+      // sorted source keys → architecture before prd
+      expect(out.indexOf('architecture:')).toBeLessThan(out.indexOf('prd:'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('no manifests (prototype/legacy) → defer-references instruction', () => {
+    const dir = project();
+    try {
+      expect(loadCitableSections(dir)).toMatch(/do NOT emit references/i);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
