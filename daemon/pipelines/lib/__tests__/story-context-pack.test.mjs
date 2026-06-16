@@ -375,4 +375,18 @@ describe('Story Context Pack — BMAD-grade enrichment (Concept v2 E3.2–E3.4)'
     expect(md).not.toContain('### Tasks');
     expect(md).not.toContain('_As a ');
   });
+
+  it('E4.3 — a story-spec floor that busts the budget emits references-over-budget (not silent truncation)', async () => {
+    const seen = [];
+    // A huge technical-notes block makes the non-trimmable story-spec floor
+    // alone exceed a tiny budget — there are no digests left to drop.
+    const huge = 'x'.repeat(80_000);
+    await buildStoryContextPack({
+      story: enrichedStory({ technicalNotes: huge, touchPoints: [] }),
+      projectDir: dir,
+      tokenBudget: 500,
+      onWarning: (e) => seen.push(e),
+    });
+    expect(seen.some((e) => e.type === 'references-over-budget')).toBe(true);
+  });
 });

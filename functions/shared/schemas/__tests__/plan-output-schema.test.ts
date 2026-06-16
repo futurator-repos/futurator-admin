@@ -5,7 +5,10 @@ import {
   epicOutputSchema,
   verifyIntentSchema,
   manualReasonSchema,
+  validateReferenceSections,
+  type PlanOutput,
 } from '../plan-output-schema';
+import { generateSectionManifest } from '../../concept/section-manifest';
 
 /**
  * Concept v2 — Story E1.1: AcceptanceCriterion gains optional BDD structure +
@@ -190,5 +193,68 @@ describe('verify/manualReason enums (Concept v2 — E1.1)', () => {
     ];
     for (const r of reasons) expect(manualReasonSchema.safeParse(r).success).toBe(true);
     expect(manualReasonSchema.options).toHaveLength(8);
+  });
+});
+
+/**
+ * Concept v2 — Story E4.2 (W2): references[].section is validated against the
+ * artifact's section manifest (set-membership), not as a free string.
+ */
+describe('validateReferenceSections (Concept v2 — E4.2)', () => {
+  const { manifest: archManifest } = generateSectionManifest(
+    `# Architecture\n\nIntro.\n\n## State Model\n\nReducer.`,
+    { artifact: 'architecture', rev: 1 },
+  );
+
+  function planWith(refSection: string, source = 'architecture'): PlanOutput {
+    return {
+      plan: {
+        name: 'x',
+        description: 'x',
+        epics: [
+          {
+            id: 'E1',
+            title: 'E',
+            goal: 'goal goal goal',
+            acceptanceCriteria: '',
+            dependsOn: [],
+            stories: [
+              {
+                id: 'S1',
+                title: 'S',
+                description: 'desc desc desc',
+                dependsOn: [],
+                touchPoints: [],
+                references: [{ source, section: refSection }],
+                criteria: [{ id: 'AC-1', text: 'ok ok', needsBrowser: false }],
+              },
+            ],
+          },
+        ],
+      },
+    } as unknown as PlanOutput;
+  }
+
+  it('AC1 — passes when the cited section is in the manifest', () => {
+    const errs = validateReferenceSections(planWith('state-model'), { architecture: archManifest });
+    expect(errs).toEqual([]);
+  });
+
+  it('AC2 — fails when the cited section does not exist', () => {
+    const errs = validateReferenceSections(planWith('made-up-section'), {
+      architecture: archManifest,
+    });
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toContain('made-up-section');
+  });
+
+  it('fails when the cited artifact/manifest is absent entirely', () => {
+    const errs = validateReferenceSections(planWith('state-model'), {});
+    expect(errs[0]).toContain('no architecture artifact/manifest exists');
+  });
+
+  it("skips 'harness' references (resolved at the gate, not here)", () => {
+    const errs = validateReferenceSections(planWith('snapshot.gameState', 'harness'), {});
+    expect(errs).toEqual([]);
   });
 });

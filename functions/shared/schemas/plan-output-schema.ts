@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { PLAN_NAME_REGEX } from './plan-schema';
+import { hasSection, type SectionManifest } from '../concept/section-manifest';
 
 /**
  * JSON the PM agent produces when given an intent.
@@ -217,5 +218,44 @@ export function validatePlanReferences(output: PlanOutput): string[] {
     void idx;
   });
 
+  return errors;
+}
+
+/**
+ * Concept v2 (E4.2 / W2) — validate that every story `references[]` into a doc
+ * artifact (prd / architecture / ux) cites a section that EXISTS in that
+ * artifact's section manifest. This is the mechanizable form of "every
+ * reference resolves" — set-membership against the locked manifest (§6.2),
+ * reused verbatim by the §8 readiness gate (E9.3).
+ *
+ * `source: 'harness'` references are NOT checked here — they resolve against
+ * `__harness.schema.json` (shipped in Epic E5) and are cross-checked at the gate
+ * (E9). A missing manifest for a cited doc source is itself an error (the PM
+ * cited an artifact that wasn't generated).
+ */
+export function validateReferenceSections(
+  output: PlanOutput,
+  manifests: Partial<Record<'prd' | 'architecture' | 'ux', SectionManifest>>,
+): string[] {
+  const errors: string[] = [];
+  for (const epic of output.plan.epics) {
+    for (const story of epic.stories) {
+      for (const ref of story.references ?? []) {
+        if (ref.source === 'harness') continue; // checked against the harness schema at the gate
+        const manifest = manifests[ref.source];
+        if (!manifest) {
+          errors.push(
+            `Story ${story.id} (epic ${epic.id}) references ${ref.source}#${ref.section}, but no ${ref.source} artifact/manifest exists`,
+          );
+          continue;
+        }
+        if (!hasSection(manifest, ref.section)) {
+          errors.push(
+            `Story ${story.id} (epic ${epic.id}) references ${ref.source}#${ref.section}, which is not a section in ${ref.source}.md`,
+          );
+        }
+      }
+    }
+  }
   return errors;
 }

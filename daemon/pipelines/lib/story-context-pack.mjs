@@ -244,6 +244,21 @@ export async function buildStoryContextPack(input) {
     }
   }
 
+  // Concept v2 (E4.3 / W3) — priority waterfall: the story spec + any inlined
+  // cited artifact sections (references[], wired in E7.7) are a NON-TRIMMABLE
+  // FLOOR; file digests are the trimmable remainder above. If, after dropping
+  // every digest, the floor ALONE still exceeds the budget, we do NOT silently
+  // ship an over-budget pack (which would truncate the contract the DEV agent
+  // relies on) — we emit a distinct, blocking-grade `references-over-budget`
+  // signal so the caller surfaces it instead of dropping the contract.
+  if (serialized.length > budgetBytes) {
+    const overByTokens = Math.ceil((serialized.length - budgetBytes) / APPROX_BYTES_PER_TOKEN);
+    warn(
+      'references-over-budget',
+      `story-spec + cited-section floor exceeds ${tokenBudget} tokens by ~${overByTokens}; not silently truncating the contract`,
+    );
+  }
+
   draftPack.meta.truncated = truncated.slice();
   return draftPack;
 }
