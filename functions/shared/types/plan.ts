@@ -45,6 +45,7 @@ export interface PlanTestingProfile {
 }
 
 import type { PlanKind } from '../schemas/plan-schema';
+import type { ConceptPlan } from '../concept/concept-plan';
 export type { PlanKind };
 
 export interface Plan {
@@ -124,6 +125,12 @@ export interface Plan {
    * immutable once the first concept artifact job starts (enforced in Epic E12).
    */
   conceptInteraction?: ConceptInteraction;
+  /**
+   * Concept v2 (E7.1, §3.2): the Concept Router's applicability DAG (which
+   * artifacts apply + ordering + gate). ABSENT for `prototype` (Router bypassed,
+   * W8) and legacy plans — every v2 branch guards on its presence.
+   */
+  conceptPlan?: ConceptPlan;
   /** Phase C.2: plan-wide testing config (Playwright toggle lives here). */
   testingProfile?: PlanTestingProfile;
 

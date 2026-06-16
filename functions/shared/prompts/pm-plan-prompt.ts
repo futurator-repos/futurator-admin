@@ -37,6 +37,13 @@ export function buildPmPlanPrompt(args: {
    * brownfield clause) — others use the default voice.
    */
   kind?: PlanKind;
+  /**
+   * Concept v2 (E7.8) — section ids the upstream artifacts expose, by source.
+   * Present only for mvp/production AFTER prd/ux/architecture generation. When
+   * given, the PM may cite them via `references[]` (validated set-membership at
+   * decompose, E4.2). Absent → no references emitted (prototype / pre-artifact).
+   */
+  citableSections?: Partial<Record<'prd' | 'architecture' | 'ux', string[]>>;
 }): string {
   const meta = BOILERPLATE_REGISTRY[args.boilerplateType];
   if (!meta) {
@@ -63,6 +70,12 @@ export function buildPmPlanPrompt(args: {
   // `prototype` stays lean (byte-identical to the v1 shape). `references[]` are
   // grafted later (Epic E7, once the artifact manifests exist).
   const enriched = args.rigor !== 'prototype';
+  // Concept v2 (E7.8) — which artifact sections the PM may cite via references[].
+  const citable = args.citableSections || {};
+  const citableEntries = (['prd', 'architecture', 'ux'] as const)
+    .filter((k) => Array.isArray(citable[k]) && citable[k]!.length > 0)
+    .map((k) => `${k}: ${citable[k]!.join(', ')}`);
+  const hasCitable = enriched && citableEntries.length > 0;
   const exampleStoryEnrichment = enriched
     ? `,
             "userStory": { "role": "developer", "action": "import the domain types", "benefit": "every later story shares one contract" },
@@ -296,8 +309,17 @@ modify (relative to the project root, using the conventional paths above).
       what to reuse from the scaffold. Keep it concrete, not a restatement of the title.
     • \`tasks\`: an ordered checklist, each \`{ id, text, acRefs }\`, where \`acRefs\`
       lists the AC ids that task satisfies. Every AC should be covered by ≥1 task.
-  (These make the story self-sufficient for the DEV agent. Do NOT emit \`references[]\`
-  yet — citations into PRD/architecture are added once those artifacts exist.)`
+  (These make the story self-sufficient for the DEV agent.)${
+    hasCitable
+      ? `
+    • \`references\`: cite the upstream artifacts a story depends on — each
+      { source, section } where \`section\` is one of the available ids (cite
+      ONLY these; never invent an id):
+      ${citableEntries.join('\n      ')}`
+      : `
+    • Do NOT emit \`references[]\` yet — citations are added once the PRD/UX/
+      architecture artifacts exist.`
+  }`
       : `
 - This is a \`prototype\` plan: keep stories lean — ACs + touchPoints only. Do NOT
   emit userStory/technicalNotes/tasks/references (that depth is for mvp/production).`

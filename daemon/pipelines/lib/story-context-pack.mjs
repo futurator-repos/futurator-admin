@@ -69,6 +69,11 @@ const HEAD_LINES_FULL = 300;
 const HEAD_LINES_TRUNCATED = 100;
 const PLAN_MD_REL = 'plan.md';
 const KNOWLEDGE_INDEX_REL = 'knowledge/index.md';
+// Concept v2 (E7.7) — upstream artifacts live here, written by the artifact-gen
+// jobs (E7.4/E12). Each `<source>.md` ships a `<source>.sections.json` sidecar
+// (E4.1 locked manifest) that lets us inline the EXACT cited section.
+const CONCEPT_DIR_REL = 'concept';
+const CITED_DOC_SOURCES = ['prd', 'architecture', 'ux'];
 const RECENT_DIFFS_LIMIT = 20;
 const PREV_SUMMARIES_LIMIT = 5;
 const PREV_SUMMARY_MAX_CHARS = 4000;
@@ -197,10 +202,15 @@ export async function buildStoryContextPack(input) {
 
   // Cache-stable size guard: serialize, measure, retry with shorter heads
   // if over budget. Cheap (one extra serialize on overrun).
+  // Concept v2 (E7.7) — inline the artifact sections this story cites. Part of
+  // the non-trimmable floor (E4.3): the contract is never dropped to fit budget.
+  const citedSections = resolveCitedSections(projectDir, storySpec.references);
+
   const draftPack = {
     version: STORY_CONTEXT_PACK_VERSION,
     planMd,
     storySpec,
+    citedSections,
     projectTree,
     fileDigests,
     existingTests,
@@ -333,6 +343,19 @@ export function serializeStoryContextPack(pack) {
     for (const t of story.tasks) {
       const refs = Array.isArray(t.acRefs) && t.acRefs.length > 0 ? ` (${t.acRefs.join(', ')})` : '';
       out.push(`- [${t.done ? 'x' : ' '}] ${t.id}: ${t.text}${refs}`);
+    }
+  }
+  // Concept v2 (E7.7) — inlined cited artifact sections (the consistency
+  // contract the DEV agent is held to). Rendered verbatim from the artifact's
+  // manifest slice; part of the non-trimmable floor.
+  if (Array.isArray(pack.citedSections) && pack.citedSections.length > 0) {
+    out.push('');
+    out.push('### Cited contract sections');
+    for (const c of pack.citedSections) {
+      out.push(`#### ${c.source} › ${c.title}`);
+      out.push('```markdown');
+      out.push(String(c.text || '').trimEnd());
+      out.push('```');
     }
   }
   // Concept v2 (E3.5) — RESERVED probe/seam slot. Epic E8 (VQA H9) inserts the
@@ -519,6 +542,47 @@ function readFileIfExists(absPath) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Concept v2 (E7.7) — resolve a story's `references[]` into inlined artifact
+ * sections so the DEV agent reads the CONTRACT, not a path. For each doc-source
+ * reference, read `concept/<source>.md` + `<source>.sections.json` and slice the
+ * cited section by its manifest line range (the E4.1 resolve, reimplemented here
+ * because this `.mjs` can't import the `.ts` at runtime — the format is locked).
+ *
+ * `harness` refs are skipped (resolved by VQA's probe compiler, E8). A cited
+ * artifact missing from disk is skipped gracefully — the §8 gate (E9.3) is what
+ * blocks a dangling reference; the pack degrades rather than throws.
+ */
+function resolveCitedSections(projectDir, references) {
+  const out = [];
+  const cache = new Map(); // source -> { md, manifest } | null
+  for (const ref of references || []) {
+    if (!ref || ref.source === 'harness') continue;
+    if (!CITED_DOC_SOURCES.includes(ref.source)) continue;
+    if (!cache.has(ref.source)) {
+      const md = readFileIfExists(join(projectDir, CONCEPT_DIR_REL, `${ref.source}.md`));
+      const raw = readFileIfExists(join(projectDir, CONCEPT_DIR_REL, `${ref.source}.sections.json`));
+      let manifest = null;
+      if (raw) {
+        try {
+          manifest = JSON.parse(raw);
+        } catch {
+          manifest = null;
+        }
+      }
+      cache.set(ref.source, md && manifest ? { md, manifest } : null);
+    }
+    const art = cache.get(ref.source);
+    if (!art) continue;
+    const entry = (art.manifest.sections || []).find((s) => s && s.id === ref.section);
+    if (!entry) continue;
+    const lines = art.md.split('\n');
+    const text = lines.slice(entry.lineStart - 1, entry.lineEnd).join('\n');
+    out.push({ source: ref.source, section: ref.section, title: entry.title || ref.section, text });
+  }
+  return out;
 }
 
 function buildProjectTree(projectDir, maxDepth) {

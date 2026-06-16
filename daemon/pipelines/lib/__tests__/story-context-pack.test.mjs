@@ -376,6 +376,61 @@ describe('Story Context Pack — BMAD-grade enrichment (Concept v2 E3.2–E3.4)'
     expect(md).not.toContain('_As a ');
   });
 
+  it('E7.7 — inlines a cited artifact section from concept/<source>.md via its manifest', async () => {
+    // Write an architecture artifact + its locked section manifest into the project.
+    const conceptDir = join(dir, 'concept');
+    mkdirSync(conceptDir, { recursive: true });
+    const archMd = [
+      '<!--§overview-->',
+      '# Architecture',
+      '',
+      'Intro.',
+      '',
+      '<!--§state-model-->',
+      '## State Model',
+      '',
+      'The store is a single reducer keyed by gameState.',
+    ].join('\n');
+    writeFileSync(join(conceptDir, 'architecture.md'), archMd, 'utf8');
+    writeFileSync(
+      join(conceptDir, 'architecture.sections.json'),
+      JSON.stringify({
+        artifact: 'architecture',
+        rev: 1,
+        contentHash: 'sha256:x',
+        sections: [
+          { id: 'overview', title: 'Architecture', lineStart: 1, lineEnd: 5 },
+          { id: 'state-model', title: 'State Model', lineStart: 6, lineEnd: 9 },
+        ],
+      }),
+      'utf8',
+    );
+
+    const pack = await buildStoryContextPack({
+      story: enrichedStory({
+        references: [{ source: 'architecture', section: 'state-model', note: 'state shape' }],
+      }),
+      projectDir: dir,
+    });
+    const md = serializeStoryContextPack(pack);
+    expect(md).toContain('### Cited contract sections');
+    expect(md).toContain('#### architecture › State Model');
+    expect(md).toContain('The store is a single reducer keyed by gameState.');
+    // Only the cited section is inlined, not the whole doc.
+    expect(md).not.toContain('Intro.');
+  });
+
+  it('E7.7 — a reference to a missing artifact is skipped gracefully (gate enforces existence)', async () => {
+    const pack = await buildStoryContextPack({
+      story: enrichedStory({
+        references: [{ source: 'architecture', section: 'state-model' }],
+      }),
+      projectDir: dir, // no concept/ dir written
+    });
+    expect(pack.citedSections).toEqual([]);
+    expect(serializeStoryContextPack(pack)).not.toContain('### Cited contract sections');
+  });
+
   it('E4.3 — a story-spec floor that busts the budget emits references-over-budget (not silent truncation)', async () => {
     const seen = [];
     // A huge technical-notes block makes the non-trimmable story-spec floor

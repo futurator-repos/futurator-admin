@@ -192,3 +192,38 @@ describe('buildPmPlanPrompt — BMAD-grade story fields are rigor-gated (E3.1)',
     expect(proto).not.toContain('BMAD-grade definition');
   });
 });
+
+/**
+ * Concept v2 — Story E7.8: the PM cites artifact sections via references[] ONLY
+ * when citableSections are supplied (i.e. after prd/ux/architecture exist).
+ */
+describe('buildPmPlanPrompt — references[] are gated on citableSections (E7.8)', () => {
+  it('mvp WITHOUT citableSections defers references', () => {
+    const p = buildPmPlanPrompt({ ...baseArgs, boilerplateType: 'nextjs-base', rigor: 'mvp' });
+    expect(p).toContain('Do NOT emit `references[]` yet');
+  });
+
+  it('mvp WITH citableSections instructs citing those exact ids', () => {
+    const p = buildPmPlanPrompt({
+      ...baseArgs,
+      boilerplateType: 'nextjs-base',
+      rigor: 'mvp',
+      citableSections: { architecture: ['state-model', 'error-handling'], prd: ['fr-3'] },
+    });
+    expect(p).toContain('cite the upstream artifacts');
+    expect(p).toContain('architecture: state-model, error-handling');
+    expect(p).toContain('prd: fr-3');
+    expect(p).not.toContain('Do NOT emit `references[]` yet');
+  });
+
+  it('prototype ignores citableSections (stays lean)', () => {
+    const p = buildPmPlanPrompt({
+      ...baseArgs,
+      boilerplateType: 'nextjs-base',
+      rigor: 'prototype',
+      citableSections: { architecture: ['state-model'] },
+    });
+    expect(p).toContain('keep stories lean');
+    expect(p).not.toContain('cite the upstream artifacts');
+  });
+});
