@@ -159,3 +159,36 @@ describe('buildPmPlanPrompt — Concept v2 verify intent + idle-visible relaxati
     expect(prompt).toContain('PROSE-OBSERVABLE');
   });
 });
+
+/**
+ * Concept v2 — Story E3.1: the PM emits BMAD-grade story fields
+ * (userStory/technicalNotes/tasks) for mvp/production; prototype stays lean.
+ * references[] are NOT emitted yet (Epic E7).
+ */
+describe('buildPmPlanPrompt — BMAD-grade story fields are rigor-gated (E3.1)', () => {
+  const mvp = buildPmPlanPrompt({ ...baseArgs, boilerplateType: 'nextjs-base', rigor: 'mvp' });
+  const proto = buildPmPlanPrompt({
+    ...baseArgs,
+    boilerplateType: 'nextjs-base',
+    rigor: 'prototype',
+  });
+
+  it('mvp instructs userStory + technicalNotes + tasks with acRefs', () => {
+    expect(mvp).toContain('BMAD-grade definition');
+    expect(mvp).toContain('userStory');
+    expect(mvp).toContain('technicalNotes');
+    expect(mvp).toContain('acRefs');
+    // The example JSON shows the enriched shape.
+    expect(mvp).toContain('"tasks"');
+  });
+
+  it('mvp does NOT yet ask for references[] (deferred to E7)', () => {
+    expect(mvp).toContain('Do NOT emit `references[]`');
+  });
+
+  it('prototype stays lean — no BMAD-grade fields in the example or instructions', () => {
+    expect(proto).toContain('keep stories lean');
+    expect(proto).not.toContain('"userStory"');
+    expect(proto).not.toContain('BMAD-grade definition');
+  });
+});

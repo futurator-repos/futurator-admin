@@ -26,8 +26,14 @@ import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join, relative, extname, sep } from 'node:path';
 import { execSync } from 'node:child_process';
 
-/** Pack format version. Bump when the serializer's output shape changes. */
-export const STORY_CONTEXT_PACK_VERSION = 1;
+/**
+ * Pack format version. Bump when the serializer's output shape changes.
+ * v2 (Concept v2 E3.4): story spec now renders the user-story triple, BDD
+ * Given/When/Then ACs with a `verify` tag, an AC-mapped Tasks checklist, and a
+ * Technical notes block. The reserved probe/seam section (E8) slots in without a
+ * further bump. The real invariant is intra-story cross-role identity.
+ */
+export const STORY_CONTEXT_PACK_VERSION = 2;
 
 /**
  * Default `<run_command>` when neither plan.runCommand nor opts.runCommand
@@ -265,18 +271,59 @@ export function serializeStoryContextPack(pack) {
 
   out.push('## Story spec');
   out.push(`**${story.title || '(untitled)'}**`);
+  // Concept v2 (E3.3) — user-story triple as a one-liner header.
+  if (
+    story.userStory &&
+    (story.userStory.role || story.userStory.action || story.userStory.benefit)
+  ) {
+    out.push('');
+    out.push(
+      `_As a ${story.userStory.role}, I want ${story.userStory.action}, so that ${story.userStory.benefit}._`,
+    );
+  }
   if (story.description) {
     out.push('');
     out.push(story.description.trim());
+  }
+  // Concept v2 (E3.3) — technical notes block.
+  if (story.technicalNotes) {
+    out.push('');
+    out.push('### Technical notes');
+    out.push(story.technicalNotes.trim());
   }
   if (Array.isArray(story.acceptanceCriteria) && story.acceptanceCriteria.length > 0) {
     out.push('');
     out.push('### Acceptance criteria');
     for (const ac of story.acceptanceCriteria) {
       const flag = ac.needsBrowser ? ' [needs_browser=true]' : '';
-      out.push(`- ${ac.id || '?'}: ${ac.text}${flag}`);
+      // Concept v2 (E3.3) — verify tag; manual carries its reason.
+      const verifyTag = ac.verify
+        ? ` [verify=${ac.verify}${ac.verify === 'manual' && ac.manualReason ? `:${ac.manualReason}` : ''}]`
+        : '';
+      if (ac.given || ac.when || ac.then) {
+        // BDD form — fall back to `text` only when no triple is present.
+        out.push(`- ${ac.id || '?'}${verifyTag}${flag}`);
+        if (ac.given) out.push(`  - Given ${ac.given}`);
+        if (ac.when) out.push(`  - When ${ac.when}`);
+        if (ac.then) out.push(`  - Then ${ac.then}`);
+      } else {
+        out.push(`- ${ac.id || '?'}: ${ac.text}${verifyTag}${flag}`);
+      }
     }
   }
+  // Concept v2 (E3.3) — AC-mapped task checklist.
+  if (Array.isArray(story.tasks) && story.tasks.length > 0) {
+    out.push('');
+    out.push('### Tasks');
+    for (const t of story.tasks) {
+      const refs = Array.isArray(t.acRefs) && t.acRefs.length > 0 ? ` (${t.acRefs.join(', ')})` : '';
+      out.push(`- [${t.done ? 'x' : ' '}] ${t.id}: ${t.text}${refs}`);
+    }
+  }
+  // Concept v2 (E3.5) — RESERVED probe/seam slot. Epic E8 (VQA H9) inserts the
+  // dedicated, sorted probe/seam section HERE, inside the serializer and before
+  // the appended <ground_truth> block (context-pack-resolver), so the locked
+  // section order holds without a further version bump.
   if (Array.isArray(story.touchPoints) && story.touchPoints.length > 0) {
     out.push('');
     out.push('### Touch points');
@@ -627,13 +674,24 @@ function normalizeIsoOrNull(value) {
 
 function normalizeStorySpec(story) {
   const ac = Array.isArray(story.criteria)
-    ? story.criteria.map((c, i) => ({
-        id: c.id || `AC-${i + 1}`,
-        text: String(c.text || '').trim(),
-        needsBrowser: !!c.needsBrowser,
-      }))
+    ? story.criteria.map((c, i) => {
+        const out = {
+          id: c.id || `AC-${i + 1}`,
+          text: String(c.text || '').trim(),
+          needsBrowser: !!c.needsBrowser,
+        };
+        // Concept v2 (E3.2) — carry BDD + verify intent when present (fixed key
+        // order; present-only so the serialization stays byte-stable).
+        if (c.given != null) out.given = String(c.given);
+        if (c.when != null) out.when = String(c.when);
+        if (c.then != null) out.then = String(c.then);
+        if (c.thenObservable != null) out.thenObservable = String(c.thenObservable);
+        if (c.verify != null) out.verify = c.verify;
+        if (c.manualReason != null) out.manualReason = c.manualReason;
+        return out;
+      })
     : [];
-  return {
+  const spec = {
     id: story.storyId,
     title: story.title || '',
     description: story.description || '',
@@ -642,4 +700,33 @@ function normalizeStorySpec(story) {
     hasBrowserTests: !!story.hasBrowserTests,
     wave: typeof story.wave === 'number' ? story.wave : null,
   };
+  // Concept v2 (E3.2) — BMAD-grade story fields, carried only when present so
+  // legacy/prototype stories serialize byte-identically to before.
+  if (story.userStory && typeof story.userStory === 'object') {
+    spec.userStory = {
+      role: String(story.userStory.role || ''),
+      action: String(story.userStory.action || ''),
+      benefit: String(story.userStory.benefit || ''),
+    };
+  }
+  if (story.technicalNotes != null) spec.technicalNotes = String(story.technicalNotes);
+  if (Array.isArray(story.tasks)) {
+    spec.tasks = story.tasks.map((t, i) => {
+      const task = {
+        id: t.id || `T${i + 1}`,
+        text: String(t.text || ''),
+        acRefs: Array.isArray(t.acRefs) ? t.acRefs.slice() : [],
+      };
+      if (t.done != null) task.done = !!t.done;
+      return task;
+    });
+  }
+  if (Array.isArray(story.references)) {
+    spec.references = story.references.map((r) => {
+      const ref = { source: r.source, section: String(r.section || '') };
+      if (r.note != null) ref.note = String(r.note);
+      return ref;
+    });
+  }
+  return spec;
 }

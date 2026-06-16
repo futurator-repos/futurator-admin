@@ -20,6 +20,7 @@ import {
   buildStoryContextPack,
   serializeStoryContextPack,
   DEFAULT_RUN_COMMAND,
+  STORY_CONTEXT_PACK_VERSION,
 } from './story-context-pack.mjs';
 import { appendGroundTruth } from './ground-truth-context.mjs';
 import {
@@ -210,9 +211,15 @@ async function runAssembler({
       return { ...stub, validationErrors: validation.errors };
     }
 
-    // Story 4.4 — additively inject blast_radius as <ground_truth> alongside the
-    // AST facts already in the body. Non-blocking: on a cold/absent Memgraph this
-    // returns the body unchanged (the AST facts remain the fallback).
+    // Concept v2 (E3.5) — DEV-context section order is now LOCKED across three
+    // writers so none clobbers another and the prompt stays cache-stable:
+    //   1. serializeStoryContextPack(pack) — story spec incl. the BMAD-grade
+    //      fields (E3.3: user-story, BDD ACs, tasks, technical notes) and the
+    //      reserved probe/seam slot (E8 inserts there, inside the serializer);
+    //   2. appendGroundTruth(...) — system-graph blast-radius <ground_truth>,
+    //      appended AFTER the pack body (Story 4.4), additive + non-blocking.
+    // Both halves are deterministic; on a cold/absent Memgraph the append is a
+    // no-op and the AST facts already in the body remain the fallback.
     const body = await appendGroundTruth(serializeStoryContextPack(pack), {
       touchPoints: story.touchPoints,
       projectId,
@@ -231,7 +238,7 @@ function stubFailure(reason) {
   // output. Carries the reason in a comment so the operator can see why
   // the pack was empty when reading the prompt logs.
   const body = [
-    '<!-- story-context-pack v1 -->',
+    `<!-- story-context-pack v${STORY_CONTEXT_PACK_VERSION} -->`,
     '<!-- assembly skipped: ' + reason + ' -->',
     '',
     '## Run command',

@@ -59,6 +59,19 @@ export function buildPmPlanPrompt(args: {
     verify: 'build' as const,
   }));
 
+  // Concept v2 (E3.1) — BMAD-grade story fields are emitted only for mvp/production;
+  // `prototype` stays lean (byte-identical to the v1 shape). `references[]` are
+  // grafted later (Epic E7, once the artifact manifests exist).
+  const enriched = args.rigor !== 'prototype';
+  const exampleStoryEnrichment = enriched
+    ? `,
+            "userStory": { "role": "developer", "action": "import the domain types", "benefit": "every later story shares one contract" },
+            "technicalNotes": "Add to the existing scaffold; export from the barrel file. No new build config.",
+            "tasks": [
+              { "id": "T1", "text": "Define and export the core domain types", "acRefs": ["AC-S1-1"] }
+            ]`
+    : '';
+
   return `You are the Product Manager. Transform the user's intent into a Plan
 with 1..N Epics organized by concern, maximizing parallel execution via a
 careful dependency graph.
@@ -274,7 +287,21 @@ modify (relative to the project root, using the conventional paths above).
                      that a test harness could stub — that is rejected at the gate.
   Write \`given\`/\`when\`/\`then\` (BDD) alongside \`text\` whenever the AC is more
   than a one-line build check; keep \`then\` a PROSE-OBSERVABLE human claim
-  (never a code/selector expression — the QA author writes the assertion).
+  (never a code/selector expression — the QA author writes the assertion).${
+    enriched
+      ? `
+- **Give each story a BMAD-grade definition (Concept v2).** Beyond the ACs, emit:
+    • \`userStory\`: { role, action, benefit } — the "As a / I want / So that" triple.
+    • \`technicalNotes\`: implementation guidance — affected components, constraints,
+      what to reuse from the scaffold. Keep it concrete, not a restatement of the title.
+    • \`tasks\`: an ordered checklist, each \`{ id, text, acRefs }\`, where \`acRefs\`
+      lists the AC ids that task satisfies. Every AC should be covered by ≥1 task.
+  (These make the story self-sufficient for the DEV agent. Do NOT emit \`references[]\`
+  yet — citations into PRD/architecture are added once those artifacts exist.)`
+      : `
+- This is a \`prototype\` plan: keep stories lean — ACs + touchPoints only. Do NOT
+  emit userStory/technicalNotes/tasks/references (that depth is for mvp/production).`
+  }
 - **Browser AC text must be SCREEN-VERIFIABLE.** When \`needsBrowser: true\`,
   phrase the criterion so a person looking at a screenshot can apply it
   without reading the source code. Concrete observable signal beats
@@ -392,7 +419,7 @@ JSON in a code block.
             "description": "${exampleStoryDescription}",
             "dependsOn": [],
             "touchPoints": ["${ctx.conventions.typesPath}index.ts"],
-            "criteria": ${JSON.stringify(exampleStoryCriteria)}
+            "criteria": ${JSON.stringify(exampleStoryCriteria)}${exampleStoryEnrichment}
           }
         ]
       }

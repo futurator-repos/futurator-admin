@@ -212,7 +212,7 @@ describe('buildStoryContextPack', () => {
       projectDir: dir,
     });
     const out = serializeStoryContextPack(pack);
-    expect(out).toContain('<!-- story-context-pack v1 -->');
+    expect(out).toContain('<!-- story-context-pack v2 -->');
     expect(out).toContain('# Project context — story S-CTX-1');
     expect(out).toContain('## Run command');
     expect(out).toContain('## Story spec');
@@ -291,5 +291,88 @@ describe('parseKnowledgeIndex', () => {
     expect(parseKnowledgeIndex('')).toEqual([]);
     expect(parseKnowledgeIndex(null)).toEqual([]);
     expect(parseKnowledgeIndex(undefined)).toEqual([]);
+  });
+});
+
+/**
+ * Concept v2 — Stories E3.2/E3.3/E3.4: the pack carries + renders the BMAD-grade
+ * story fields, bumps the version, and stays byte-deterministic + back-compat.
+ */
+describe('Story Context Pack — BMAD-grade enrichment (Concept v2 E3.2–E3.4)', () => {
+  let dir;
+  beforeEach(() => {
+    dir = makeTmpProject();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function enrichedStory(overrides = {}) {
+    return sampleStory({
+      userStory: { role: 'player', action: 'see the score rise', benefit: 'feel progress' },
+      technicalNotes: 'Reuse the existing canvas; do not add build config.',
+      tasks: [
+        { id: 'T1', text: 'Draw the score HUD', acRefs: ['AC-1'] },
+        { id: 'T2', text: 'Increment on collision', acRefs: ['AC-1', 'AC-2'], done: true },
+      ],
+      criteria: [
+        {
+          id: 'AC-1',
+          text: 'Score increments on collision.',
+          needsBrowser: true,
+          given: 'a game in playing state',
+          when: 'the ball hits a paddle',
+          then: 'the score increments by 1',
+          verify: 'behavior',
+        },
+        {
+          id: 'AC-2',
+          text: 'Operator confirms the real payment.',
+          verify: 'manual',
+          manualReason: 'real-payment',
+        },
+      ],
+      ...overrides,
+    });
+  }
+
+  it('E3.4 — pack version is 2', async () => {
+    expect(STORY_CONTEXT_PACK_VERSION).toBe(2);
+    const pack = await buildStoryContextPack({ story: enrichedStory(), projectDir: dir });
+    expect(pack.version).toBe(2);
+  });
+
+  it('E3.2/E3.3 — renders user-story, technical notes, BDD ACs (with verify tag) and tasks', async () => {
+    const pack = await buildStoryContextPack({ story: enrichedStory(), projectDir: dir });
+    const md = serializeStoryContextPack(pack);
+    expect(md).toContain('_As a player, I want see the score rise, so that feel progress._');
+    expect(md).toContain('### Technical notes');
+    expect(md).toContain('Reuse the existing canvas');
+    // BDD form + verify tag
+    expect(md).toContain('[verify=behavior]');
+    expect(md).toContain('- Given a game in playing state');
+    expect(md).toContain('- When the ball hits a paddle');
+    expect(md).toContain('- Then the score increments by 1');
+    // manual carries its reason
+    expect(md).toContain('[verify=manual:real-payment]');
+    // tasks with acRefs + done box
+    expect(md).toContain('### Tasks');
+    expect(md).toContain('- [ ] T1: Draw the score HUD (AC-1)');
+    expect(md).toContain('- [x] T2: Increment on collision (AC-1, AC-2)');
+  });
+
+  it('byte-deterministic across two runs with the enriched story', async () => {
+    const a = await buildStoryContextPack({ story: enrichedStory(), projectDir: dir });
+    const b = await buildStoryContextPack({ story: enrichedStory(), projectDir: dir });
+    expect(serializeStoryContextPack(a)).toBe(serializeStoryContextPack(b));
+  });
+
+  it('back-compat — a legacy flat-text story still renders the `- AC: text` form, no BDD', async () => {
+    const pack = await buildStoryContextPack({ story: sampleStory(), projectDir: dir });
+    const md = serializeStoryContextPack(pack);
+    expect(md).toContain('- AC-1: Ground is visible at the bottom of the canvas. [needs_browser=true]');
+    expect(md).not.toContain('- Given ');
+    expect(md).not.toContain('### Tasks');
+    expect(md).not.toContain('_As a ');
   });
 });
