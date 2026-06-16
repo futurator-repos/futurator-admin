@@ -131,6 +131,13 @@ export interface Plan {
    * W8) and legacy plans — every v2 branch guards on its presence.
    */
   conceptPlan?: ConceptPlan;
+  /**
+   * Concept v2 (integration): FK to the `concept-route` AgentJob enqueued at
+   * plan creation for mvp/production (absent for prototype — Router bypassed).
+   * `POST /api/plans/:id/apply-concept-plan` reads this job's CONCEPT_PLAN_JSON
+   * and persists `conceptPlan`.
+   */
+  conceptRouteJobId?: string;
   /** Phase C.2: plan-wide testing config (Playwright toggle lives here). */
   testingProfile?: PlanTestingProfile;
 

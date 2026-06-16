@@ -165,6 +165,12 @@ import {
 } from '../shared/services/brownfield-topology-converter';
 import { generatePmPlanPipeline } from '../shared/pipelines/pm-plan-pipeline';
 import { generateSkillScoutPipeline } from '../shared/pipelines/skill-scout-pipeline';
+import { generateConceptRoutePipeline } from '../shared/pipelines/concept-route-pipeline';
+import { shouldRunConceptRoute } from '../shared/concept/concept-plan';
+import {
+  parseConceptRouteOutput,
+  applyConceptRouteOutput,
+} from '../shared/services/concept-route-service';
 import {
   parsePlanOutput,
   applyPlanOutput,
@@ -2026,6 +2032,59 @@ app.post('/api/plans/:id/apply-plan', async (c) => {
   }
 
   return c.json({ plan: result.plan, epics: result.epics });
+});
+
+// POST /api/plans/:id/apply-concept-plan — persist the Concept Router's output.
+//
+// Concept v2 (integration) — mirror of apply-plan, for the conceptPlan DAG.
+// Reads the plan's `conceptRouteJobId` (FK stamped at creation), or auto-
+// discovers the most recent COMPLETED concept-route job for this workingDir,
+// then validates + persists `plan.conceptPlan`. Idempotent: re-applying the
+// same job re-writes the same conceptPlan.
+app.post('/api/plans/:id/apply-concept-plan', async (c) => {
+  const planId = c.req.param('id');
+  let jobId = c.req.query('jobId') || undefined;
+
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  if (!jobId) jobId = plan.conceptRouteJobId;
+  if (!jobId) {
+    // Auto-discover: most recent COMPLETED concept-route job for this plan dir.
+    const allJobs = await agentJobsRepo.scanAllJobs();
+    const candidates = allJobs
+      .filter(
+        (j) =>
+          j.workingDir === plan.workingDir &&
+          j.status === 'COMPLETED' &&
+          j.variables?.CONCEPT_PLAN_JSON,
+      )
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    if (candidates.length === 0) {
+      throw new ValidationError('No completed concept-route job found for this plan.');
+    }
+    jobId = candidates[0].jobId;
+  }
+
+  const job = await agentJobsRepo.getJobById(jobId);
+  if (!job) throw new NotFoundError('Job', jobId);
+  if (job.status !== 'COMPLETED') {
+    throw new ValidationError(`Job ${jobId} is ${job.status}, not COMPLETED`);
+  }
+
+  let conceptPlan;
+  try {
+    conceptPlan = parseConceptRouteOutput(job);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: { code: 'PARSE_FAILED', message } }, 400);
+  }
+
+  await applyConceptRouteOutput(plan, conceptPlan, {
+    updatePlanFields: planRepo.updatePlanFields,
+  });
+
+  return c.json({ planId, conceptPlan });
 });
 
 // POST /api/plans/:id/regenerate — start a fresh PM-plan job on the same intent.
@@ -11037,12 +11096,44 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
     }
   }
 
+  // Concept v2 (integration) — enqueue the Concept Router for mvp/production
+  // (prototype is BYPASSED, W8). Runs in parallel like SKILL-SCOUT; its
+  // conceptPlan is applied via POST /api/plans/:id/apply-concept-plan once the
+  // job completes. Non-fatal on enqueue failure (legacy path still works).
+  let conceptRouteJobId: string | undefined;
+  if (shouldRunConceptRoute(plan)) {
+    try {
+      conceptRouteJobId = crypto.randomUUID();
+      const routePipeline = generateConceptRoutePipeline({
+        intent: plan.intent,
+        boilerplateType: (appRow.boilerplateType ?? 'nextjs-base') as BoilerplateType,
+        rigor: plan.rigor ?? 'mvp',
+        kind: parsed.data.kind,
+      });
+      await agentJobsRepo.createJob({
+        jobId: conceptRouteJobId,
+        status: 'PENDING',
+        createdAt: now,
+        updatedAt: now,
+        createdBy: user.email,
+        workingDir: plan.workingDir,
+        // Generic pipeline job (single ROUTER step) — run by the daemon's
+        // standard pipeline executor, like pm-plan. No jobType discriminator.
+        pipeline: routePipeline,
+      });
+      await planRepo.updatePlanFields(plan.planId, { conceptRouteJobId });
+    } catch (routeErr) {
+      console.warn(`[POST /api/apps/${appId}/plans] concept-route enqueue failed:`, routeErr);
+      conceptRouteJobId = undefined;
+    }
+  }
+
   // For kind=change|experiment Plans, the PM-augmentation runtime (AP-D1)
   // is deferred — the Plan stays in `concept` with empty epicIds until the
   // daemon-side handler is wired. Operator can click Regenerate to fall back
   // to the legacy PM flow in the meantime.
 
-  return c.json({ plan, pmJobId, skillScoutJobId }, 201);
+  return c.json({ plan, pmJobId, skillScoutJobId, conceptRouteJobId }, 201);
 });
 
 /**
