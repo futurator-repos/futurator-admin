@@ -29,7 +29,10 @@ interface AppRow {
 function SkillsAppList() {
   const { data, isLoading, error } = useQuery({
     queryKey: ['apps', 'for-skills-page'],
-    queryFn: () => api.get<AppRow[]>('/apps'),
+    // /api/apps returns { apps: [...] } — unwrap to the array (matching
+    // use-apps.ts). Treating the envelope as a bare array crashed the page:
+    // `(data ?? []).map is not a function` (2026-06-16).
+    queryFn: () => api.get<{ apps: AppRow[] }>('/apps').then((r) => r.apps),
   });
   if (isLoading) return <p style={{ fontSize: 12, color: 'var(--text-mute)' }}>Loading apps…</p>;
   if (error)
