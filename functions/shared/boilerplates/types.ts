@@ -250,6 +250,25 @@ export interface BoilerplateMetadata {
     buildCacheDir?: string;
   };
 
+  /**
+   * Concept/VQA v3 (E5.1 / H6) — the verifiability seam contract. A UI-bearing
+   * boilerplate declares a test-only `window.__harness` so probes can read app
+   * state deterministically (L2-state oracle) instead of guessing from pixels.
+   * The *shape* is generator-owned (the `__harness.schema.json` of §6.2); DEV
+   * only conforms the running app to it + populates values (tamper-guarded, H1).
+   * Absent for non-UI / not-yet-wired boilerplates (v1 = canvas-game only, H8).
+   */
+  testHarness?: {
+    /** Global the probe reads, e.g. `window.__harness`. */
+    globalKey: string;
+    /** Property that flips true once the app is ready to inspect, e.g. `ready`. */
+    readySignal: string;
+    /** Domain snapshot shape: jsonPath → { type, enum? }. The locked manifest (§6.2). */
+    snapshotShape: Record<string, { type: string; enum?: string[] }>;
+    /** Test-mode boundary stubs (OAuth/payment/chat-partner) the seam can install (E11). */
+    stubs?: string[];
+  };
+
   // ── PR-13 — Starter pack architecture (Option A) ────────────────────────
   //
   // Each registry entry can optionally be a "starter pack" — a curated

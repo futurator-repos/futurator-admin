@@ -79,6 +79,16 @@ describe('probe interpreter dispatch (VQA v3 — E2.2/E2.3)', () => {
     expect(cmd).toContain('setViewportSize');
     expect(cmd).toContain('setOffline');
   });
+
+  it('E5.3 — L2-state assert oracle reads window.__harness and compares deterministically', () => {
+    expect(cmd).toContain("step.action === 'assert'");
+    expect(cmd).toContain('window.__harness');
+    expect(cmd).toContain('h.snapshot()');
+    expect(cmd).toContain('ASSERT_FAILED');
+    // the operator helper covers the full op set, no LLM call
+    expect(cmd).toContain('function assertOp');
+    expect(cmd).toContain("case 'contains'");
+  });
 });
 
 describe('L2 judge prompt is un-staled (VQA v3 — E2.4)', () => {

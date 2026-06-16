@@ -13,7 +13,7 @@
  * The qa-aggregate shell step shells out to `node` which calls into this.
  */
 
-import type { VisualTestDef, VisualTestLevel } from '../types/epic-workflow';
+import type { VisualTestDef, VisualTestLevel, VerifyIntent } from '../types/epic-workflow';
 import type { PlanRigor } from '../types/plan';
 
 // ── Viewport parser (Q2.2) ────────────────────────────────────────────
@@ -251,6 +251,74 @@ export function classifyVisualTest(
     reason,
     ...(rigorFloored ? { rigorFloored: true } : {}),
   };
+}
+
+// ── VQA v3 (E5.4 / FR-11..13) — verify-based level + vision-only rigor cap ──
+
+/**
+ * The resolved oracle tier. L2 splits into:
+ *   • L2-state  — deterministic seam read (window.__harness). FREE, flake-free.
+ *   • L2-vision — LLM judges a post-interaction frame.
+ * Plus the human lane for `manual`. This is the QA-AUTHOR's working vocabulary
+ * (E8); it does NOT replace the wire-level `VisualTestLevel` (L0/L1/L2) that the
+ * existing classifier + reports use — keeping the blast radius contained.
+ */
+export type ResolvedLevel = 'L0' | 'L1' | 'L2-state' | 'L2-vision' | 'operator';
+
+/** Deterministic tiers run flake-free for ~$0 — and are therefore rigor-EXEMPT. */
+export function isDeterministicLevel(level: ResolvedLevel): level is 'L0' | 'L2-state' {
+  return level === 'L0' || level === 'L2-state';
+}
+
+/**
+ * FR-13 — derive the oracle tier from the PM's `verify` intent + whether a
+ * test-harness seam exists for the app:
+ *   build→L0 · appearance→L1 · state→(seam? L2-state : L1) ·
+ *   behavior→(seam? L2-state : L2-vision) · manual→operator lane.
+ */
+export function deriveLevelFromVerify(
+  verify: VerifyIntent | undefined,
+  hasSeam: boolean,
+): ResolvedLevel {
+  switch (verify) {
+    case 'build':
+      return 'L0';
+    case 'appearance':
+      return 'L1';
+    case 'state':
+      return hasSeam ? 'L2-state' : 'L1';
+    case 'behavior':
+      return hasSeam ? 'L2-state' : 'L2-vision';
+    case 'manual':
+      return 'operator';
+    default:
+      // No verify intent → fall back to the shape classifier's world (L1 vision).
+      return 'L1';
+  }
+}
+
+const VISION_ORDINAL: Record<'L0' | 'L1' | 'L2-vision', number> = {
+  L0: 0,
+  L1: 1,
+  'L2-vision': 2,
+};
+const RIGOR_VISION_CEILING: Record<PlanRigor, 'L0' | 'L1' | 'L2-vision'> = {
+  prototype: 'L0', // no paid vision on a throwaway
+  mvp: 'L1',
+  production: 'L2-vision',
+};
+
+/**
+ * R1 — the split rigor cap. Rigor is a COST ceiling on **vision tiers only**
+ * (L1 / L2-vision). Deterministic tiers (L0, L2-state) and the operator lane are
+ * EXEMPT — a `prototype` plan still runs an L2-state assert (it's free), which is
+ * exactly the disease the old "prototype→L0 for everything" cap re-introduced.
+ * This is the single highest-risk, easiest-to-miss requirement — keep it tested.
+ */
+export function capVisionLevelByRigor(level: ResolvedLevel, rigor: PlanRigor): ResolvedLevel {
+  if (isDeterministicLevel(level) || level === 'operator') return level; // exempt
+  const ceiling = RIGOR_VISION_CEILING[rigor];
+  return VISION_ORDINAL[level] <= VISION_ORDINAL[ceiling] ? level : ceiling;
 }
 
 // ── Coverage + specificity rollups (Q4.1) ────────────────────────────

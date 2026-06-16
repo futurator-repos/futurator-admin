@@ -5,6 +5,9 @@ import {
   parseVisualTestViewport,
   formatViewport,
   isVagueExpect,
+  deriveLevelFromVerify,
+  capVisionLevelByRigor,
+  isDeterministicLevel,
 } from '../visual-test-classifier';
 import type { VisualTestDef } from '../../types/epic-workflow';
 
@@ -491,5 +494,59 @@ describe('classifyVisualTest — needsBrowser floor (PR-62)', () => {
     // The non-browser test stays at L0.
     const nonBrowserClass = report.classifications.find((c) => c.testId === 'vt-8');
     expect(nonBrowserClass?.classification.level).toBe('L0');
+  });
+});
+
+/**
+ * VQA v3 — Story E5.4 (R1): verify-based level derivation + the SPLIT rigor cap
+ * (vision tiers only; deterministic L0/L2-state are rigor-exempt). This is the
+ * highest-risk, easiest-to-miss requirement — guard it hard.
+ */
+describe('deriveLevelFromVerify (VQA v3 — E5.4/FR-13)', () => {
+  it('build→L0, appearance→L1, manual→operator', () => {
+    expect(deriveLevelFromVerify('build', false)).toBe('L0');
+    expect(deriveLevelFromVerify('appearance', true)).toBe('L1');
+    expect(deriveLevelFromVerify('manual', true)).toBe('operator');
+  });
+
+  it('state→L2-state with a seam, else L1-vision', () => {
+    expect(deriveLevelFromVerify('state', true)).toBe('L2-state');
+    expect(deriveLevelFromVerify('state', false)).toBe('L1');
+  });
+
+  it('behavior→L2-state with a seam, else L2-vision', () => {
+    expect(deriveLevelFromVerify('behavior', true)).toBe('L2-state');
+    expect(deriveLevelFromVerify('behavior', false)).toBe('L2-vision');
+  });
+});
+
+describe('capVisionLevelByRigor — R1 split cap (VQA v3 — E5.4)', () => {
+  it('AC1 — a state AC with a seam at prototype routes to L2-state, NOT capped to L0', () => {
+    const level = deriveLevelFromVerify('state', true); // L2-state
+    expect(capVisionLevelByRigor(level, 'prototype')).toBe('L2-state'); // deterministic = exempt
+  });
+
+  it('AC2 — an appearance (vision) AC at prototype IS still rigor-capped', () => {
+    const level = deriveLevelFromVerify('appearance', true); // L1 (vision)
+    expect(capVisionLevelByRigor(level, 'prototype')).toBe('L0'); // vision capped at prototype
+  });
+
+  it('caps L2-vision → L1 at mvp, leaves it at production', () => {
+    expect(capVisionLevelByRigor('L2-vision', 'mvp')).toBe('L1');
+    expect(capVisionLevelByRigor('L2-vision', 'production')).toBe('L2-vision');
+  });
+
+  it('L2-state and operator are exempt at every rigor', () => {
+    for (const r of ['prototype', 'mvp', 'production'] as const) {
+      expect(capVisionLevelByRigor('L2-state', r)).toBe('L2-state');
+      expect(capVisionLevelByRigor('operator', r)).toBe('operator');
+    }
+  });
+
+  it('isDeterministicLevel marks L0 + L2-state', () => {
+    expect(isDeterministicLevel('L0')).toBe(true);
+    expect(isDeterministicLevel('L2-state')).toBe(true);
+    expect(isDeterministicLevel('L1')).toBe(false);
+    expect(isDeterministicLevel('L2-vision')).toBe(false);
   });
 });
