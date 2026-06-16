@@ -32,6 +32,7 @@ import {
   rejectPropagatorProposalSchema,
 } from '../shared/schemas/propagator-schema';
 import type { PropagatorProposal, PropagatorProposalStatus } from '../shared/types/propagator';
+import { parseSiblingPipelines, buildSiblingJob } from '../shared/services/propagator-service';
 import { isTerminal as jobIsTerminal } from '../shared/types/agent-job-state-machine';
 import * as agentEventsRepo from '../shared/repositories/agent-events-repository';
 import * as partyProjectsRepo from '../shared/repositories/party-projects-repository';
@@ -3658,12 +3659,32 @@ app.post('/api/propagator/proposals/:id/approve', async (c) => {
   if (existing.status !== 'proposed')
     throw new ValidationError(`Proposal is already ${existing.status}`);
 
+  // Seam B — enqueue a real PENDING port-story job for the sibling, but ONLY
+  // when that sibling is registered (workingDir + pipeline). Unregistered →
+  // approve-only; the job is filed once the operator wires the sibling.
+  const registry = parseSiblingPipelines(process.env.PROPAGATOR_SIBLING_PIPELINES);
+  const decision = buildSiblingJob(existing, registry, {
+    jobId: crypto.randomUUID(),
+    now: new Date().toISOString(),
+    createdBy: user.userId,
+  });
+  let siblingJobId: string | undefined;
+  if (decision.enqueue) {
+    await agentJobsRepo.createJob(decision.job);
+    siblingJobId = decision.job.jobId;
+  }
+
   const updated = await propagatorRepo.updateProposalStatus(proposalId, {
     status: 'approved',
     decidedBy: user.userId,
     decidedAt: new Date().toISOString(),
+    ...(siblingJobId ? { siblingJobId } : {}),
   });
-  return c.json({ item: updated });
+  return c.json({
+    item: updated,
+    enqueued: decision.enqueue,
+    ...(decision.enqueue ? { siblingJobId } : { reason: decision.reason }),
+  });
 });
 
 app.post('/api/propagator/proposals/:id/reject', async (c) => {
@@ -3684,6 +3705,24 @@ app.post('/api/propagator/proposals/:id/reject', async (c) => {
     decidedBy: user.userId,
     decidedAt: new Date().toISOString(),
     rejectionReason: parsed.data.reason,
+  });
+  return c.json({ item: updated });
+});
+
+// Seam C — the sibling's port story reached Done. Marks the proposal `done`;
+// the daemon's marker pass then advances `lastPropagatedTo` on the source
+// contract nodes (preventing the same change from re-briefing). Only an APPROVED
+// proposal can complete.
+app.post('/api/propagator/proposals/:id/done', async (c) => {
+  const proposalId = c.req.param('id');
+  const existing = await propagatorRepo.getProposal(proposalId);
+  if (!existing) return c.json({ error: 'Proposal not found' }, 404);
+  if (existing.status !== 'approved')
+    throw new ValidationError(`Only an approved proposal can complete (is ${existing.status})`);
+
+  const updated = await propagatorRepo.updateProposalStatus(proposalId, {
+    status: 'done',
+    decidedAt: new Date().toISOString(),
   });
   return c.json({ item: updated });
 });

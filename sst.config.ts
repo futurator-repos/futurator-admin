@@ -897,6 +897,9 @@ export default $config({
         AGENT_JOBS_TABLE: agentJobsTable.name,
         // Epic 6 — Story 6.5: consent-gated PROPAGATOR proposals queue.
         PROPAGATOR_PROPOSALS_TABLE: propagatorProposalsTable.name,
+        // Seam B — sibling pipeline registry (JSON map sibling→{workingDir,pipeline}).
+        // Empty by default: approval is consent-only until a sibling is wired.
+        PROPAGATOR_SIBLING_PIPELINES: process.env.PROPAGATOR_SIBLING_PIPELINES ?? '{}',
         AGENT_EVENTS_TABLE: agentEventsTable.name,
         EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
         PROJECT_REGISTRY_TABLE: projectRegistryTable.name,

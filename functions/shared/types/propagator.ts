@@ -59,4 +59,8 @@ export interface PropagatorProposal {
   rejectionReason?: string;
   /** Set when an approved proposal is enqueued as a sibling agent-job. */
   siblingJobId?: string;
+  /** True once the daemon has advanced `lastPropagatedTo` for a `done` proposal. */
+  markerApplied?: boolean;
+  /** ISO timestamp the marker was advanced. */
+  markerAppliedAt?: string;
 }

@@ -54,7 +54,15 @@ import {
   buildBriefs,
   buildProposals,
   shouldPropagate,
+  applyMarkerUpdate,
+  markerUpdateFor,
 } from './propagator.mjs';
+import {
+  ingestToDynamo,
+  defaultDocClient,
+  readDoneProposals,
+  markProposalApplied,
+} from './propagator-ingest.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1346,6 +1354,30 @@ async function processPropagator(config) {
     driver = createDriver();
     const session = driver.session();
     try {
+      // Seam C — advance `lastPropagatedTo` for sibling stories that reached Done
+      // (runs every wave, independent of any new drift, so a completed port
+      // always stops re-briefing). Best-effort.
+      const proposalsTable = process.env.PROPAGATOR_PROPOSALS_TABLE;
+      if (proposalsTable) {
+        try {
+          const docClient = await defaultDocClient();
+          const done = await readDoneProposals({ tableName: proposalsTable, docClient });
+          for (const prop of done) {
+            await applyMarkerUpdate(session, markerUpdateFor(prop));
+            await markProposalApplied(prop.proposalId, {
+              tableName: proposalsTable,
+              docClient,
+              ts: new Date().toISOString(),
+            });
+          }
+          if (done.length) {
+            log(`PROPAGATOR markers: advanced lastPropagatedTo for ${done.length} completed port-stor${done.length === 1 ? 'y' : 'ies'}`);
+          }
+        } catch (err) {
+          logError(`propagator marker pass failed (non-blocking): ${err.message}`);
+        }
+      }
+
       const changes = await readRecentChanges(session);
       const report = await perSiblingDrift(session, { sourceProject: config.project, changes });
       const driftCounts = Object.fromEntries(report.map((r) => [r.sibling, r.pendingCount]));
@@ -1385,6 +1417,20 @@ async function processPropagator(config) {
       await writeFile(tmp, JSON.stringify(doc, null, 2), 'utf-8');
       await rename(tmp, p);
       log(`PROPAGATOR [${trigger}]: ${proposals.length} consent-gated proposal(s) drafted (none auto-applied)`);
+
+      // Seam A — file the proposals into the consent queue (DynamoDB) so the API
+      // + UI surface them. Idempotent; best-effort (a missing table env or AWS
+      // error is logged and skipped — the artifact above is still authoritative).
+      const tableName = process.env.PROPAGATOR_PROPOSALS_TABLE;
+      if (proposals.length > 0 && tableName) {
+        try {
+          const docClient = await defaultDocClient();
+          const res = await ingestToDynamo(doc, { tableName, docClient });
+          log(`PROPAGATOR ingest: ${res.filed} filed, ${res.skipped} already-decided (skipped)`);
+        } catch (err) {
+          logError(`propagator ingest failed (non-blocking): ${err.message}`);
+        }
+      }
     } finally {
       await session.close();
       await driver.close();
