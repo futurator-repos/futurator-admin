@@ -26,6 +26,11 @@ const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
 });
 
 const S3_BASE = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
+// Article links open in a browser tab — use the CloudFront domain, NOT the raw
+// `futurator-ai-website.s3…` hostname (Chrome's safe-browsing flags it as a
+// "did you mean futurator.ai?" lookalike). Same content, no warning. Snapshot
+// JSON keeps fetching from S3_BASE (CORS already allows the admin origin there).
+const ARTICLE_BASE = 'https://futurator.ai/knowledge-live';
 
 // Color palette keyed by node *kind* (Slice B). `kind` distinguishes the
 // AST-derived sub-file nodes from the file-level wiki nodes; falls back to
@@ -116,8 +121,6 @@ const RECENT_PROJECTS = [
   '8eff885b-2d96-4a3a-8e11-163f0b545fb7',
 ];
 
-const AUTO_REFRESH_MS = 5000;
-
 export function GraphViewer({
   projectId: lockedProjectId,
 }: {
@@ -129,7 +132,6 @@ export function GraphViewer({
   const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -194,14 +196,13 @@ export function GraphViewer({
     }
   }, []);
 
-  // Fetch when projectId changes, and on auto-refresh interval
+  // Fetch once when the project loads / changes. Refresh is manual (button) —
+  // no polling, so an in-progress compile doesn't yank the canvas out from
+  // under you mid-inspection.
   useEffect(() => {
     if (!projectId) return;
     fetchSnapshot(projectId);
-    if (!autoRefresh) return;
-    const id = setInterval(() => fetchSnapshot(projectId), AUTO_REFRESH_MS);
-    return () => clearInterval(id);
-  }, [projectId, autoRefresh, fetchSnapshot]);
+  }, [projectId, fetchSnapshot]);
 
   const graphData = useMemo(() => {
     if (!snapshot) return { nodes: [], links: [] };
@@ -228,6 +229,14 @@ export function GraphViewer({
   // can be hidden via the "function" toggle when the graph is too busy.
   const [hiddenKinds, setHiddenKinds] = useState<Set<string>>(new Set());
   const [hiddenEdges, setHiddenEdges] = useState<Set<string>>(new Set());
+
+  // ── Searcher — highlight matches + their 1-hop neighbors so you can probe the
+  // graph's quality by hand. Client-side over the loaded snapshot (Memgraph is
+  // VPC-internal, so live Cypher would need a daemon-proxied endpoint — a future
+  // step). Supports free-text (matches title/id/name) and `field:value` filters:
+  //   kind:file  type:function  status:active  phase:implementation  tag:foo
+  // Space-separated terms are AND-ed.
+  const [search, setSearch] = useState('');
 
   const nodeKindBreakdown = useMemo(() => {
     if (!snapshot) return {};
@@ -344,6 +353,49 @@ export function GraphViewer({
     return { nodes: visibleNodes, links: visibleLinks };
   }, [graphData, hiddenKinds, hiddenEdges]);
 
+  // Resolve a force-graph link endpoint, which react-force-graph mutates from a
+  // string id into the node object after the first simulation tick.
+  const endpointId = (e: unknown): string =>
+    typeof e === 'object' && e !== null ? (e as { id: string }).id : (e as string);
+
+  const searchMatch = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return null;
+    const filters: { field: string; value: string }[] = [];
+    const terms: string[] = [];
+    for (const tok of q.split(/\s+/)) {
+      const m = tok.match(/^(kind|type|status|phase|tag|id|title):(.+)$/);
+      if (m) filters.push({ field: m[1], value: m[2] });
+      else terms.push(tok);
+    }
+    const matchIds = new Set<string>();
+    for (const n of filteredGraphData.nodes as GraphNode[]) {
+      const kind = (n.kind ?? n.type ?? '').toLowerCase();
+      const hay = `${n.title ?? ''} ${n.id ?? ''} ${n.name ?? ''}`.toLowerCase();
+      const okFilters = filters.every((f) => {
+        if (f.field === 'kind' || f.field === 'type') return kind.includes(f.value);
+        if (f.field === 'status') return (n.status ?? '').toLowerCase().includes(f.value);
+        if (f.field === 'phase') return (n.phase ?? '').toLowerCase().includes(f.value);
+        if (f.field === 'id') return (n.id ?? '').toLowerCase().includes(f.value);
+        if (f.field === 'title') return (n.title ?? '').toLowerCase().includes(f.value);
+        if (f.field === 'tag') return (n.tags ?? []).some((t) => t.toLowerCase().includes(f.value));
+        return true;
+      });
+      const okText = terms.length === 0 || terms.every((t) => hay.includes(t));
+      if (okFilters && okText) matchIds.add(n.id);
+    }
+    const neighborIds = new Set<string>();
+    for (const e of filteredGraphData.links as GraphEdge[]) {
+      const s = endpointId(e.source);
+      const t = endpointId(e.target);
+      if (matchIds.has(s)) neighborIds.add(t);
+      if (matchIds.has(t)) neighborIds.add(s);
+    }
+    return { matchIds, neighborIds, count: matchIds.size };
+  }, [search, filteredGraphData]);
+
+  const DIM = 'rgba(100,116,139,0.12)';
+
   function toggleKind(k: string) {
     setHiddenKinds((prev) => {
       const next = new Set(prev);
@@ -391,23 +443,39 @@ export function GraphViewer({
         </div>
       )}
 
-      {/* Auto-refresh + manual refresh — shown in both modes */}
+      {/* Search + manual refresh — no polling (refreshes on load + this button) */}
       <div className="flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-1.5 text-sm">
-          <input
-            type="checkbox"
-            checked={autoRefresh}
-            onChange={(e) => setAutoRefresh(e.target.checked)}
-          />
-          Auto-refresh (5s)
-        </label>
         <button
           onClick={() => projectId && fetchSnapshot(projectId)}
           disabled={!projectId || loading}
           className="rounded-md border border-input bg-background px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
         >
-          {loading ? 'Loading…' : 'Refresh now'}
+          {loading ? 'Loading…' : 'Refresh'}
         </button>
+        <div className="flex flex-1 items-center gap-2 min-w-[280px]">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search — free text, or kind:file status:active tag:foo"
+            className="flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+            title="Highlights matching nodes + their neighbours. Filters: kind: type: status: phase: tag: id: title:"
+          />
+          {search && (
+            <>
+              <span className="whitespace-nowrap text-xs text-muted-foreground">
+                {searchMatch?.count ?? 0} match{(searchMatch?.count ?? 0) === 1 ? '' : 'es'}
+              </span>
+              <button
+                onClick={() => setSearch('')}
+                className="rounded-md border border-input bg-background px-2 py-1.5 text-xs hover:bg-muted"
+                title="Clear search"
+              >
+                ✕
+              </button>
+            </>
+          )}
+        </div>
         {locked && projectId && (
           <span className="text-xs text-muted-foreground font-mono">project: {projectId}</span>
         )}
@@ -532,6 +600,14 @@ export function GraphViewer({
               }}
               nodeColor={(n: object) => {
                 const g = n as unknown as GraphNode;
+                // Search dimming: matches + neighbors keep colour, the rest fade.
+                if (
+                  searchMatch &&
+                  !searchMatch.matchIds.has(g.id) &&
+                  !searchMatch.neighborIds.has(g.id)
+                ) {
+                  return DIM;
+                }
                 if (overlayActive) {
                   const m = archInsights?.nodeMetrics[g.id];
                   if (m && m.community != null) return communityColor(m.community);
@@ -540,17 +616,32 @@ export function GraphViewer({
               }}
               nodeVal={(n: object) => {
                 const g = n as unknown as GraphNode;
+                let r: number;
                 if (overlayActive) {
                   const m = archInsights?.nodeMetrics[g.id];
-                  if (m && typeof m.centrality === 'number') {
-                    return centralityRadius(m.centrality, maxC, radiusForNode(g));
-                  }
+                  r =
+                    m && typeof m.centrality === 'number'
+                      ? centralityRadius(m.centrality, maxC, radiusForNode(g))
+                      : radiusForNode(g);
+                } else {
+                  r = radiusForNode(g);
                 }
-                return radiusForNode(g);
+                // Direct search matches pop larger.
+                if (searchMatch?.matchIds.has(g.id)) return r * 2.2;
+                return r;
               }}
               nodeRelSize={3}
               linkColor={(l: object) => {
                 const e = l as unknown as GraphEdge;
+                // When searching, only edges touching a match/neighbor stay lit.
+                if (searchMatch) {
+                  const s = endpointId(e.source);
+                  const t = endpointId(e.target);
+                  const lit =
+                    (searchMatch.matchIds.has(s) || searchMatch.neighborIds.has(s)) &&
+                    (searchMatch.matchIds.has(t) || searchMatch.neighborIds.has(t));
+                  if (!lit) return DIM;
+                }
                 return EDGE_COLORS[e.type] ?? EDGE_COLORS.DEPENDS_ON;
               }}
               linkLabel={(l: object) => {
@@ -654,9 +745,9 @@ export function GraphViewer({
                 </div>
               )}
               {/* pacman1 UX — open the compiler's full article for this node. */}
-              {projectId && articleUrl(S3_BASE, projectId, selectedNode) && (
+              {projectId && articleUrl(ARTICLE_BASE, projectId, selectedNode) && (
                 <a
-                  href={articleUrl(S3_BASE, projectId, selectedNode)!}
+                  href={articleUrl(ARTICLE_BASE, projectId, selectedNode)!}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
