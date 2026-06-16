@@ -26,7 +26,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 import Link from 'next/link';
-import { usePlan, useApplyPlanOutput } from '@/hooks/use-plans';
+import { usePlan, useApplyPlanOutput, useApplyConceptPlan } from '@/hooks/use-plans';
 import { useApp } from '@/hooks/use-apps';
 import type { AgentJob } from '@/types/agent-orchestrator';
 import { useAgentJob, useAgentJobs } from '@/hooks/use-agent-job';
@@ -79,6 +79,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
   const urlPmJobId = params.get('pmJobId');
   const { data: plan, isLoading, error: planError, refetch } = usePlan(planId);
   const apply = useApplyPlanOutput(planId);
+  const applyConcept = useApplyConceptPlan(planId);
   // 2026-05-30 — the App carries the real GitHub repo (any org) for brownfield;
   // the git-graph needs it to query the correct repo instead of futurator-repos.
   const { data: appRow } = useApp(plan?.appId ?? null);
@@ -151,6 +152,8 @@ export function PlanDashboard({ planId }: { planId: string }) {
   // because the discover path doesn't know the pmJobId until the API
   // responds.
   const [autoDiscovered, setAutoDiscovered] = useState<Set<string>>(new Set());
+  // Concept v2 — track plans whose conceptPlan we've already auto-applied.
+  const [conceptApplied, setConceptApplied] = useState<Set<string>>(new Set());
   useEffect(() => {
     if (!pmJob || !pmJobId || !plan) return;
     if (pmJob.status !== 'COMPLETED') return;
@@ -207,6 +210,39 @@ export function PlanDashboard({ planId }: { planId: string }) {
         }
       });
   }, [plan, planId, pmJobId, autoDiscovered, apply, refetch]);
+
+  // Concept v2 — auto-apply the Concept Router output. When the plan has a
+  // concept-route job (mvp/production; prototype is bypassed) but no persisted
+  // `conceptPlan` yet, POST /apply-concept-plan once. The endpoint reads the
+  // COMPLETED route job's CONCEPT_PLAN_JSON, validates it, and persists
+  // `plan.conceptPlan` — which the Concept rail renders. Idempotent + one-shot
+  // per planId; the "no completed concept-route job" error is expected while
+  // the route job is still RUNNING (the next poll/refetch retries).
+  useEffect(() => {
+    if (!plan) return;
+    if (plan.status !== 'concept') return;
+    if (!plan.conceptRouteJobId) return; // prototype / legacy → no Router
+    if (plan.conceptPlan) return; // already applied
+    if (conceptApplied.has(planId)) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setConceptApplied((s) => new Set(s).add(planId));
+    applyConcept
+      .mutateAsync()
+      .then(() => refetch())
+      .catch((err) => {
+        // Expected while the route job is still RUNNING — let a later refetch
+        // retry. Clear the one-shot guard so the retry can fire.
+        if (/No completed concept-route job|not COMPLETED/i.test(String(err?.message || ''))) {
+          setConceptApplied((s) => {
+            const next = new Set(s);
+            next.delete(planId);
+            return next;
+          });
+        } else {
+          console.error('[PlanDashboard] auto-apply conceptPlan failed', err);
+        }
+      });
+  }, [plan, planId, conceptApplied, applyConcept, refetch]);
 
   // 2026-06-13 — storyId → { title, epic } map for the GitGraph Story view
   // (substitutes raw UUIDs with titles; groups commits Epic → Wave).
