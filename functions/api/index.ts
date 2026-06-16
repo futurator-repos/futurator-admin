@@ -180,8 +180,11 @@ import {
   artifactJobVars,
 } from '../shared/services/concept-artifact-service';
 import { driveConcept, type ConceptDriverDeps } from '../shared/services/concept-driver';
-import { resolveConceptInteraction } from '../shared/services/resolve-concept-interaction';
-import { markForRegen } from '../shared/concept/artifact-version';
+import {
+  resolveConceptInteraction,
+  conceptChainStarted,
+} from '../shared/services/resolve-concept-interaction';
+import { markForRegen, recordApproval } from '../shared/concept/artifact-version';
 import type { ArtifactKind } from '../shared/concept/section-manifest';
 import { runSolutioningGate } from '../shared/services/solutioning-gate';
 import {
@@ -2261,6 +2264,87 @@ app.post('/api/plans/:id/concept/:kind/regenerate', async (c) => {
   return c.json({ planId, kind, regenerated: true, drive });
 });
 
+// ── Concept v2 (E4.4) — Approve / Reject a converged interactive artifact ──
+//
+// POST /api/plans/:id/concept/:kind/approve
+//   Promotes the converged draft: version-binds it (recordApproval snapshots
+//   dependsOnHashes) and drives the next sub-stage. The doc is already on disk
+//   (write-back, E1.2); the daemon free-agent runner commits concept/ so it
+//   survives `git clean` (Story 4.2/4.4 worktree wiring). Approve is rejected
+//   before the artifact has converged to a draft (rev>0) — the checkpoint gate.
+//
+// POST /api/plans/:id/concept/:kind/reject  { reason }
+//   Marks the artifact for re-draft (stale + cascade) and re-drives; the reason
+//   is returned for the session to incorporate.
+function findConceptKindParam(c: Context): ArtifactKind {
+  const kindParam = c.req.param('kind');
+  const kind = (kindParam === 'arch' ? 'architecture' : kindParam) as ArtifactKind;
+  if (!CONCEPT_KINDS.includes(kind)) {
+    throw new ValidationError(
+      `kind must be one of prd | ux | arch | architecture (got "${kindParam}")`,
+    );
+  }
+  return kind;
+}
+
+app.post('/api/plans/:id/concept/:kind/approve', async (c) => {
+  const planId = c.req.param('id');
+  const kind = findConceptKindParam(c);
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  const row = (plan.conceptArtifacts ?? []).find((a) => a.kind === kind);
+  if (!row) throw new ValidationError(`No ${kind} artifact on this plan to approve.`);
+  // The checkpoint gate: Approve is only valid once the artifact has converged
+  // to a registered draft (rev>0). A rev:0 / unbuilt artifact cannot be approved.
+  if (row.rev < 1) {
+    throw new ValidationError(`${kind} has not converged yet — Approve is not available.`);
+  }
+  if (row.status === 'approved') {
+    return c.json({ planId, kind, approved: true, noop: true });
+  }
+
+  const next = recordApproval(plan.conceptArtifacts ?? [], kind);
+  await planRepo.updatePlanFields(planId, { conceptArtifacts: next });
+
+  // Advance the DAG under the reduce lock.
+  let drive;
+  const token = await planRepo.acquirePlanReduceLock(planId, Date.now());
+  if (token) {
+    try {
+      const fresh = await planRepo.getPlanById(planId);
+      if (fresh) drive = await driveConcept(fresh, buildConceptDriverDeps());
+    } finally {
+      await planRepo.releasePlanReduceLock(planId, token);
+    }
+  }
+  return c.json({ planId, kind, approved: true, drive });
+});
+
+app.post('/api/plans/:id/concept/:kind/reject', async (c) => {
+  const planId = c.req.param('id');
+  const kind = findConceptKindParam(c);
+  const body = await c.req.json().catch(() => ({}));
+  const reason = typeof body?.reason === 'string' ? body.reason : '';
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  // Re-draft: mark stale (+ cascade dependents) and re-drive a fresh generation.
+  const next = markForRegen(plan.conceptArtifacts ?? [], kind);
+  await planRepo.updatePlanFields(planId, { conceptArtifacts: next });
+  let drive;
+  const token = await planRepo.acquirePlanReduceLock(planId, Date.now());
+  if (token) {
+    try {
+      const fresh = await planRepo.getPlanById(planId);
+      if (fresh) drive = await driveConcept(fresh, buildConceptDriverDeps());
+    } finally {
+      await planRepo.releasePlanReduceLock(planId, token);
+    }
+  }
+  return c.json({ planId, kind, rejected: true, reason, drive });
+});
+
 // POST /api/plans/:id/regenerate — start a fresh PM-plan job on the same intent.
 //
 // PR-24 (2026-05-04) — regenerate is now atomic: existing epic tree is
@@ -2673,6 +2757,22 @@ app.patch('/api/plans/:id', async (c) => {
   }
   const plan = await planRepo.getPlanById(planId);
   if (!plan) throw new NotFoundError('Plan', planId);
+
+  // Concept v2 (E4.5d) — `conceptInteraction` mode-lock: once the concept chain
+  // has started (any generator FK set OR any artifact rev>0), the turn-loop
+  // shape is immutable (changing it mid-flight would destabilize the DAG). The
+  // Story 1.1 predicate distinguishes "never set / using default" from
+  // "explicitly changed after start" — no separate flag needed.
+  if (
+    'conceptInteraction' in parsed.data &&
+    parsed.data.conceptInteraction !== undefined &&
+    parsed.data.conceptInteraction !== plan.conceptInteraction &&
+    conceptChainStarted(plan)
+  ) {
+    throw new ValidationError(
+      'conceptInteraction is locked once the concept chain has started — it cannot be changed mid-flight.',
+    );
+  }
 
   await planRepo.updatePlanFields(planId, parsed.data);
   const updated = await planRepo.getPlanById(planId);

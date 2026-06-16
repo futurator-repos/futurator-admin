@@ -235,6 +235,9 @@ export const planPatchSchema = z.object({
   yoloMode: z.boolean().optional(),
   executionMode: planExecutionModeSchema.optional(),
   rigor: planRigorSchema.optional(),
+  // Concept v2 (E4.5d) — editable pre-start; the PATCH handler mode-locks it
+  // once the concept chain has begun (conceptChainStarted predicate).
+  conceptInteraction: conceptInteractionSchema.optional(),
   testingProfile: planTestingProfileSchema.optional(),
   autoRunQa: z.boolean().optional(),
   bmadEnabled: z.boolean().optional(),

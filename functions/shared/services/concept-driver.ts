@@ -9,6 +9,7 @@ import { generatePrdGenPipeline } from '../pipelines/prd-gen-pipeline';
 import { generateUxGenPipeline } from '../pipelines/ux-gen-pipeline';
 import { generateArchGenPipeline } from '../pipelines/arch-gen-pipeline';
 import { generatePmPlanPipeline } from '../pipelines/pm-plan-pipeline';
+import { buildConvergencePrompt } from '../prompts/convergence-prompt';
 
 /**
  * Concept v2 (E3 / Story 3.2) — the Concept driver.
@@ -57,6 +58,7 @@ export type ConceptDriveResult =
   | { kind: 'awaiting-approval'; artifact: ConceptArtifactKind }
   | { kind: 'skip-inflight'; artifact: ConceptArtifactKind; jobId: string }
   | { kind: 'enqueued-artifact'; artifact: ConceptArtifactKind; jobId: string }
+  | { kind: 'enqueued-convergence'; artifact: ConceptArtifactKind; jobId: string }
   | { kind: 'enqueued-pm-plan'; jobId: string };
 
 function depthFor(plan: Plan, kind: ConceptArtifactKind): ConceptArtifactDepth {
@@ -147,10 +149,41 @@ export async function driveConcept(
         return { kind: 'skip-inflight', artifact: kind, jobId: fk };
       }
     }
-    const boilerplateType = await boilerplateOf(plan, deps);
-    const pipeline = buildArtifactPipeline(plan, kind, boilerplateType);
     const jobId = deps.uuid();
     const ts = deps.now();
+
+    if (action.interaction === 'interactive') {
+      // Story 4.1 — interactive mode enqueues a free-agent CONVERGENCE session
+      // (multi-turn elicit→converge, seeded with the convergence prompt, scoped
+      // to concept/). It does NOT auto-approve and is NOT orphan-requeued
+      // (mid-conversation state, Story 3.4) — the daemon free-agent runner
+      // (Story 4.2) consumes `conceptConvergence`, and the operator Approves
+      // (Story 4.4) to promote + advance.
+      const prompt = buildConvergencePrompt(kind, {
+        intent: plan.intent,
+        rigor: plan.rigor ?? 'mvp',
+        depth: depthFor(plan, kind),
+        uiBearing: plan.conceptPlan?.uiBearing ?? false,
+        priorArtifacts: PRIOR_ARTIFACTS_PLACEHOLDER,
+      });
+      await deps.createJob({
+        jobId,
+        status: 'PENDING',
+        createdAt: ts,
+        updatedAt: ts,
+        createdBy: plan.createdBy,
+        workingDir: plan.workingDir,
+        conceptConvergence: { kind, prompt },
+      } as unknown as AgentJob);
+      await deps.updatePlanFields(plan.planId, {
+        [FK_FIELD[kind]]: jobId,
+        conceptArtifactJobIds: { ...(plan.conceptArtifactJobIds ?? {}), [kind]: jobId },
+      });
+      return { kind: 'enqueued-convergence', artifact: kind, jobId };
+    }
+
+    const boilerplateType = await boilerplateOf(plan, deps);
+    const pipeline = buildArtifactPipeline(plan, kind, boilerplateType);
     await deps.createJob({
       jobId,
       status: 'PENDING',
@@ -161,7 +194,7 @@ export async function driveConcept(
       pipeline,
       // Story 3.4 — markers so an orphaned RUNNING generator (daemon restart)
       // auto-requeues to PENDING instead of dead-ending at STALE. Autopilot
-      // one-shots only; interactive convergence (E4) never sets these.
+      // one-shots only; interactive convergence never sets these.
       conceptArtifactKind: kind,
       conceptAutopilotGen: true,
     } as unknown as AgentJob);

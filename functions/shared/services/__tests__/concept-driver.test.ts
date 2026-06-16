@@ -174,6 +174,27 @@ describe('driveConcept (Story 3.2 — driver)', () => {
     expect(h.created.length).toBe(before);
   });
 
+  it('interactive: a FRESH plan enqueues a convergence session (not a one-shot, no autopilot marker)', async () => {
+    const plan = basePlan({
+      conceptInteraction: 'interactive',
+      conceptArtifacts: [
+        art('prd', 'draft', 0),
+        art('ux', 'draft', 0, ['prd']),
+        art('architecture', 'draft', 0, ['prd', 'ux']),
+      ],
+    });
+    const h = harness(plan);
+    const res = await driveConcept(plan, h.deps);
+    expect(res).toMatchObject({ kind: 'enqueued-convergence', artifact: 'prd' });
+    expect(h.created).toHaveLength(1);
+    const job = h.created[0] as unknown as {
+      conceptConvergence?: unknown;
+      conceptAutopilotGen?: boolean;
+    };
+    expect(job.conceptConvergence).toBeDefined();
+    expect(job.conceptAutopilotGen).toBeUndefined(); // never orphan-requeued (3.4)
+  });
+
   it('interactive: a drafted-but-not-approved prd → awaiting-approval, nothing enqueued', async () => {
     const plan = basePlan({
       conceptInteraction: 'interactive',
