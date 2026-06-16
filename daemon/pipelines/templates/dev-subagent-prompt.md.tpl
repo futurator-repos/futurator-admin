@@ -26,6 +26,22 @@ VERIFICATION (Story A.6):
 - Do NOT run `npm run dev` / `node --check` / `node --input-type=module` for ad-hoc syntax checks. The project's runtime command is in <run_command> below; downstream test/build gates catch real regressions.
 - Visual tests at `<projectDir>/visual-tests.md` are the contract — your code must make each entry pass at runtime.
 
+<probe_grammar>
+A visual test may carry a `flow:` — an ordered probe that reaches → acts → observes
+before the frame is captured. Available step actions:
+  navigate · click · fill · select · wait · screenshot   (basic)
+  press(key) · hold(key,ms) · tap/pointer(x,y) · drag · clock(clockMode,ms)   (interaction + deterministic time)
+  assert(expr,op,expected) — read window.__harness.snapshot() for a deterministic verdict
+Worked example (drive, advance time deterministically, then assert state):
+  flow:
+    - { action: press, key: "Space" }            # start the game
+    - { action: clock, clockMode: runFor, ms: 5000 }   # advance 5s WITHOUT a real wait
+    - { action: screenshot, label: "mid-play" }
+    - { action: assert, expr: "snapshot.gameState", op: eq, expected: "playing" }
+Use `clock` for time-dependent UI — never a real `wait` for synchronization.
+Your code must expose the state the `assert` reads via the test-only `window.__harness` seam.
+</probe_grammar>
+
 <run_command>
 {{runCommand}}
 </run_command>

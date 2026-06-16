@@ -142,22 +142,86 @@ export interface AcceptanceCriterion {
 export type VisualTestLevel = 'L0' | 'L1' | 'L2';
 
 /**
- * One step of an L2 Playwright flow. Deliberately small surface — the bash
- * orchestrator drives a real `npx playwright` subshell, not a JS DOM stub.
+ * Comparison operator for the L2-state `assert` oracle (VQA v3 FR-4). The
+ * assert step reads `window.__harness.snapshot()`/`events` and compares with one
+ * of these — a deterministic verdict, no LLM call.
+ */
+export type AssertOp = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'truthy' | 'falsy';
+
+/**
+ * The probe action grammar (VQA v3 E2.1). Driver-agnostic on purpose — these are
+ * intent verbs, not Playwright calls, so a future native driver can interpret the
+ * same grammar (FR-29). The first five are the legacy set (back-compat).
+ */
+export type ProbeStepAction =
+  // ── legacy (pre-v3) ──
+  | 'navigate'
+  | 'click'
+  | 'wait'
+  | 'screenshot'
+  | 'fill'
+  // ── VQA v3 interaction grammar (FR-2) ──
+  | 'press'
+  | 'hold'
+  | 'tap'
+  | 'pointer'
+  | 'clock'
+  | 'select'
+  | 'drag'
+  | 'assert'
+  | 'seed'
+  // ── H10 coverage-class grammar gaps ──
+  | 'viewport'
+  | 'upload'
+  | 'download'
+  | 'network'
+  | 'stroke';
+
+/**
+ * One step of a probe (`reach → act → observe`). Deliberately small, optional
+ * surface — the bash orchestrator drives a real `npx playwright` subshell, not a
+ * JS DOM stub. Concept/VQA v3 extends it from "L2 flow step" into the full probe
+ * grammar; legacy `{action, url, selector, value, ms, label}` steps still validate.
  */
 export interface VisualTestFlowStep {
-  /** What this step does in the headless browser. */
-  action: 'navigate' | 'click' | 'wait' | 'screenshot' | 'fill';
+  /** What this step does. See `ProbeStepAction`. */
+  action: ProbeStepAction;
   /** For `navigate` — relative URL ("/", "/foo"); absolute URLs rejected. */
   url?: string;
-  /** For `click`/`fill` — DOM selector. */
+  /** For `click`/`fill`/`select`/`drag`/`upload`/`download` — DOM selector. */
   selector?: string;
-  /** For `fill` — value to type. */
+  /** For `fill`/`select` — value to type/choose; for `upload`/`download` — file path. */
   value?: string;
-  /** For `wait` — milliseconds. */
+  /** For `wait`/`clock` — milliseconds. */
   ms?: number;
   /** For `screenshot` — short label that becomes part of the PNG filename. */
   label?: string;
+
+  // ── VQA v3 interaction grammar (E2.1) ──
+  /** For `press`/`hold` — key name, e.g. 'Space', 'ArrowLeft', 'Enter'. */
+  key?: string;
+  /** For `pointer`/`tap`/`drag` — viewport coordinates. */
+  x?: number;
+  y?: number;
+  /** For `clock` — install (freeze), fastForward (jump), or runFor (advance). */
+  clockMode?: 'install' | 'fastForward' | 'runFor';
+
+  // ── L2-state `assert` oracle (FR-4) ──
+  /** For `assert`/`seed` — JSON-path into the harness snapshot, e.g. 'snapshot.gameState'. */
+  expr?: string;
+  /** For `assert` — comparison operator. */
+  op?: AssertOp;
+  /** For `assert` — expected value (compared per `op`). */
+  expected?: string | number | boolean;
+
+  // ── H10 coverage-class grammar gaps ──
+  /** For `viewport` — width/height. */
+  w?: number;
+  h?: number;
+  /** For `network` — connectivity mode. */
+  network?: 'offline' | 'online';
+  /** For `stroke` — continuous-gesture path (touch/pen). */
+  points?: Array<{ x: number; y: number }>;
 }
 
 export interface VisualTestDef {
