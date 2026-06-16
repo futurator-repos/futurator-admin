@@ -10,11 +10,54 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildSkillMd,
+  parseSkillMd,
   upsertIndexEntry,
   removeIndexEntry,
   SKILL_NAME_RE,
   type SkillIndex,
 } from '../skill-authoring';
+
+describe('parseSkillMd', () => {
+  it('is the inverse of buildSkillMd (round-trips name/description/body)', () => {
+    const input = {
+      name: 'my-skill',
+      description: 'Does a thing: well',
+      body: '# Body\n\nLine two.',
+    };
+    const md = buildSkillMd(input);
+    const parsed = parseSkillMd(md);
+    expect(parsed.name).toBe('my-skill');
+    expect(parsed.description).toBe('Does a thing: well');
+    expect(parsed.body).toBe('# Body\n\nLine two.');
+  });
+
+  it('round-trips descriptions with quotes and backslashes without accumulating escapes', () => {
+    const description = 'He said "hi" and used a back\\slash';
+    const md = buildSkillMd({ name: 'q', description, body: 'b' });
+    expect(parseSkillMd(md).description).toBe(description);
+    // edit→save→re-read must be stable (no escape accumulation)
+    const rebuilt = buildSkillMd({
+      name: 'q',
+      description: parseSkillMd(md).description!,
+      body: 'b',
+    });
+    expect(rebuilt).toBe(md);
+  });
+
+  it('treats a body-only string (no frontmatter) as all body', () => {
+    const parsed = parseSkillMd('just prose, no fence');
+    expect(parsed.name).toBeNull();
+    expect(parsed.description).toBeNull();
+    expect(parsed.body).toBe('just prose, no fence');
+  });
+
+  it('tolerates an unquoted description (skills not authored here)', () => {
+    const md = '---\nname: x\ndescription: plain text\n---\n\nbody';
+    const parsed = parseSkillMd(md);
+    expect(parsed.description).toBe('plain text');
+    expect(parsed.body).toBe('body');
+  });
+});
 
 describe('buildSkillMd', () => {
   it('emits frontmatter with quoted description + trimmed body', () => {

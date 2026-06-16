@@ -1,4 +1,5 @@
 import {
+  BatchWriteCommand,
   DeleteCommand,
   GetCommand,
   PutCommand,
@@ -58,6 +59,108 @@ export async function scanAllJobs(): Promise<AgentJob[]> {
 
 export async function deleteJob(jobId: string): Promise<void> {
   await docClient.send(new DeleteCommand({ TableName: TABLE_NAMES.agentJobs, Key: { jobId } }));
+}
+
+/** Subset of an AgentJob projected by the by-app scan (cuts read cost). */
+type AppJobMatchRow = {
+  jobId: string;
+  workingDir?: string;
+  appBootstrapPayload?: { appId?: string };
+  skillScoutPayload?: { projectSlug?: string; appId?: string };
+  skillInstallPayload?: { projectSlug?: string; appId?: string };
+  reflectorPayload?: { projectSlug?: string };
+  remediationMerge?: { appId?: string };
+};
+
+/**
+ * Does a workingDir belong to this app? Anchored to the segment AFTER a known
+ * root (`projects/<appId>[/...]` or `free-agent-worktrees/<appId>/<session>`)
+ * rather than a bare basename — so it matches the app dir AND its worktrees AND
+ * free-agent sessions, while NOT over-matching a different tree that merely ends
+ * in the same slug (e.g. admin-self-edit `projects/futurator-admin`, or a
+ * sibling `pacman10`). Exact segment compare, never substring.
+ */
+function workingDirMatchesApp(workingDir: string | undefined, appId: string): boolean {
+  if (!workingDir) return false;
+  const segs = workingDir.split('/').filter(Boolean);
+  for (const root of ['projects', 'free-agent-worktrees']) {
+    const i = segs.indexOf(root);
+    if (i >= 0 && segs[i + 1] === appId) return true;
+  }
+  return false;
+}
+
+function jobBelongsToApp(row: AppJobMatchRow, appId: string): boolean {
+  // workingDir (anchored) is the job-type-agnostic linkage; payload fields are
+  // belt-and-braces for standalone skill-scout / skill-install / reflector jobs.
+  return (
+    workingDirMatchesApp(row.workingDir, appId) ||
+    row.appBootstrapPayload?.appId === appId ||
+    row.skillScoutPayload?.projectSlug === appId ||
+    row.skillScoutPayload?.appId === appId ||
+    row.skillInstallPayload?.projectSlug === appId ||
+    row.skillInstallPayload?.appId === appId ||
+    row.reflectorPayload?.projectSlug === appId ||
+    row.remediationMerge?.appId === appId
+  );
+}
+
+/**
+ * Find every job belonging to an app — by anchored workingDir OR any payload
+ * projectSlug/appId — so a delete cascade can purge ALL of them, including the
+ * standalone skill-scout / skill-install / reflector / deploy / free-agent jobs
+ * that no plan/epic row references (those were the orphans keeping a deleted app
+ * alive in the Skills Usage page). There is NO appId GSI on this table, so a
+ * full paginated Scan is the only access path. (A ProjectionExpression trims the
+ * returned payload, NOT the items DynamoDB evaluates — it does not lower scan
+ * RCU or latency. The jobs table has no TTL and grows unbounded, so at large
+ * scale this should become an async cleanup job; for the current single-operator
+ * factory the inline scan is acceptable.)
+ */
+export async function listAppJobIds(appId: string): Promise<string[]> {
+  const ids: string[] = [];
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const result = await docClient.send(
+      new ScanCommand({
+        TableName: TABLE_NAMES.agentJobs,
+        ProjectionExpression:
+          'jobId, workingDir, appBootstrapPayload, skillScoutPayload, skillInstallPayload, reflectorPayload, remediationMerge',
+        ExclusiveStartKey,
+      }),
+    );
+    for (const row of (result.Items ?? []) as AppJobMatchRow[]) {
+      if (jobBelongsToApp(row, appId)) ids.push(row.jobId);
+    }
+    ExclusiveStartKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (ExclusiveStartKey);
+  return ids;
+}
+
+/**
+ * BatchWrite-delete jobs by id (25/request), retrying UnprocessedItems with
+ * linear backoff. Unlike agent-events (7-day TTL), the jobs table has NO TTL —
+ * an unprocessed delete is a permanent leak — so we count ONLY rows that
+ * actually landed. Returns the true deleted count; a caller seeing
+ * `deleted < jobIds.length` knows some rows survived throttling and can report
+ * a partial/error status instead of a false 'done'.
+ */
+export async function batchDeleteJobs(jobIds: string[]): Promise<number> {
+  let deleted = 0;
+  for (let i = 0; i < jobIds.length; i += 25) {
+    const chunk = jobIds.slice(i, i + 25);
+    let pending = chunk.map((jobId) => ({ DeleteRequest: { Key: { jobId } } }));
+    for (let attempt = 0; attempt < 5 && pending.length > 0; attempt += 1) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 100 * attempt));
+      const res = await docClient.send(
+        new BatchWriteCommand({ RequestItems: { [TABLE_NAMES.agentJobs]: pending } }),
+      );
+      const unprocessed = res.UnprocessedItems?.[TABLE_NAMES.agentJobs];
+      pending = (unprocessed as typeof pending | undefined) ?? [];
+    }
+    deleted += chunk.length - pending.length; // count only what actually landed
+  }
+  return deleted;
 }
 
 export async function updateJobFields(

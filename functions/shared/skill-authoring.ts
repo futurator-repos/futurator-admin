@@ -57,6 +57,64 @@ export function buildSkillMd(input: { name: string; description: string; body: s
   return `${fm}\n${body}\n`;
 }
 
+/** Reverse `yamlQuote`: strip surrounding quotes + unescape `\"` and `\\`. */
+function yamlUnquote(v: string): string {
+  const t = v.trim();
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    return t.slice(1, -1).replace(/\\(["\\])/g, '$1');
+  }
+  return t;
+}
+
+/**
+ * Inverse of `buildSkillMd`: split a SKILL.md into its frontmatter `name` /
+ * `description` and the prose `body`. Tolerant of skills NOT authored here
+ * (unquoted descriptions, extra frontmatter keys, no frontmatter at all) — for
+ * those it returns what it can and treats the rest as body. `buildSkillMd` of a
+ * parsed result round-trips to the canonical shape (re-quotes the description,
+ * re-emits the fence), so edit→save→re-read is idempotent.
+ */
+export function parseSkillMd(md: string): {
+  name: string | null;
+  description: string | null;
+  body: string;
+} {
+  const fence = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(md);
+  if (!fence) {
+    return { name: null, description: null, body: md.trim() };
+  }
+  const frontmatter = fence[1];
+  const body = md.slice(fence[0].length).trim();
+  const nameLine = /^name:[ \t]*(.*)$/m.exec(frontmatter);
+  const descLine = /^description:[ \t]*(.*)$/m.exec(frontmatter);
+  return {
+    name: nameLine ? nameLine[1].trim() : null,
+    description: descLine ? yamlUnquote(descLine[1]) : null,
+    body,
+  };
+}
+
+/**
+ * Read a skill's SKILL.md from the canonical repo and return its parsed body.
+ * Returns `body: null` when the file is absent (framework/bmad skills live in
+ * the bmad-method package, not here) or too large — callers degrade gracefully
+ * instead of erroring.
+ */
+export async function getSkillBody(
+  name: string,
+  opts: { owner?: string; repo?: string } = {},
+): Promise<{ body: string | null; sha: string | null }> {
+  const owner = opts.owner ?? SKILL_SOURCE_OWNER;
+  const repo = opts.repo ?? SKILL_SOURCE_REPO;
+  try {
+    const { data } = await getFileContent(owner, repo, skillMdPath(name), BRANCH);
+    if ('tooLarge' in data) return { body: null, sha: null };
+    return { body: parseSkillMd(data.content).body, sha: data.sha };
+  } catch {
+    return { body: null, sha: null };
+  }
+}
+
 /** Insert or replace an index entry by name; keep the list name-sorted. */
 export function upsertIndexEntry(index: SkillIndex, entry: SkillIndexEntry): SkillIndex {
   const skills = (index.skills ?? []).filter((s) => s.name !== entry.name);

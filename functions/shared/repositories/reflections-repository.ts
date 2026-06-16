@@ -9,6 +9,7 @@
  */
 
 import {
+  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -59,6 +60,25 @@ export async function listReflections(
   // Newest first.
   filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   return filtered;
+}
+
+/**
+ * Delete every REFLECTOR proposal for a project (PK=projectSlug). Used by the
+ * app-delete cascade so a deleted app leaves no reflection rows behind. Volume
+ * is single-digit per plan-close (see header), so per-item deletes are fine.
+ * Returns the number deleted.
+ */
+export async function deleteReflectionsByProject(projectSlug: string): Promise<number> {
+  const rows = await listReflections({ projectSlug });
+  for (const row of rows) {
+    await docClient.send(
+      new DeleteCommand({
+        TableName: TABLE_NAMES.reflections,
+        Key: { projectSlug, id: row.id },
+      }),
+    );
+  }
+  return rows.length;
 }
 
 export async function getReflection(

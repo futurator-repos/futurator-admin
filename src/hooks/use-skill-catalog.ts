@@ -37,3 +37,26 @@ export function useSkillCatalog() {
     staleTime: 5 * 60 * 1000,
   });
 }
+
+/**
+ * Single-skill detail, including the full SKILL.md prose body. Backed by the
+ * read-only GET /api/skills/:name endpoint (Skills Management — body CRUD,
+ * 2026-06-16). `body` is null for framework/bmad skills or a missing file;
+ * `frameworkReadonly` is true for bmad skills (not editable here).
+ *
+ * Fetched lazily — only when a skill is selected/expanded — so the registry
+ * table never fetches a body per row.
+ */
+export type SkillDetailResponse = CatalogSkill & {
+  body: string | null;
+  frameworkReadonly: boolean;
+};
+
+export function useSkill(name: string | null) {
+  return useQuery({
+    queryKey: ['skills', 'detail', name],
+    queryFn: () => api.get<SkillDetailResponse>(`/skills/${encodeURIComponent(name!)}`),
+    enabled: !!name,
+    staleTime: 5 * 60 * 1000,
+  });
+}

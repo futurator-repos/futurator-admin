@@ -7,7 +7,7 @@ import {
   diffSkillReconciliation,
   type SkillCatalog,
 } from '../shared/skill-catalog';
-import { putSkill, deleteSkill, SKILL_NAME_RE } from '../shared/skill-authoring';
+import { putSkill, deleteSkill, getSkillBody, SKILL_NAME_RE } from '../shared/skill-authoring';
 import type { Project } from '../shared/types';
 import {
   projectUpdateSchema,
@@ -35,6 +35,8 @@ import type { PropagatorProposal, PropagatorProposalStatus } from '../shared/typ
 import { parseSiblingPipelines, buildSiblingJob } from '../shared/services/propagator-service';
 import { isTerminal as jobIsTerminal } from '../shared/types/agent-job-state-machine';
 import * as agentEventsRepo from '../shared/repositories/agent-events-repository';
+import * as reflectionsRepo from '../shared/repositories/reflections-repository';
+import * as mergeLockRepo from '../shared/repositories/merge-lock-repository';
 import * as partyProjectsRepo from '../shared/repositories/party-projects-repository';
 import * as partySessionsRepo from '../shared/repositories/party-sessions-repository';
 // Epic 18 / Story 18.3 — Free Claude Code Agent audit endpoint.
@@ -2620,13 +2622,24 @@ app.delete('/api/plans/:id', async (c) => {
     }
     if (epic.qaJobId) jobIdsToDelete.push(epic.qaJobId);
     if (epic.poJobId) jobIdsToDelete.push(epic.poJobId);
+    if (epic.deployJobId) jobIdsToDelete.push(epic.deployJobId);
+    if (epic.orchestratorJobId) jobIdsToDelete.push(epic.orchestratorJobId);
   }
   if (plan.planBuildJobId) jobIdsToDelete.push(plan.planBuildJobId);
+  // Plan-level jobs the epic/story graph never references — including the
+  // SKILL-SCOUT run surfaced in the Skills Usage page, so deleting a plan now
+  // also clears its skill-scout history (events + job rows).
+  if (plan.pendingSkillScoutJobId) jobIdsToDelete.push(plan.pendingSkillScoutJobId);
+  if (plan.qaAggregateJobId) jobIdsToDelete.push(plan.qaAggregateJobId);
+  if (plan.devDeployJobId) jobIdsToDelete.push(plan.devDeployJobId);
+  if (plan.stagingDeployJobId) jobIdsToDelete.push(plan.stagingDeployJobId);
+  if (plan.conceptRouteJobId) jobIdsToDelete.push(plan.conceptRouteJobId);
+  for (const id of plan.deployJobIds ?? []) jobIdsToDelete.push(id);
 
-  // 2. Delete events + jobs.
+  // 2. Delete events + jobs (dedupe — a job can be referenced twice).
   let eventsDeleted = 0;
   let jobsDeleted = 0;
-  for (const jobId of jobIdsToDelete) {
+  for (const jobId of new Set(jobIdsToDelete)) {
     try {
       eventsDeleted += await agentEventsRepo.deleteEventsForJob(jobId);
       await agentJobsRepo.deleteJob(jobId);
@@ -10680,6 +10693,23 @@ app.get('/api/skills/reconciliation', authMiddleware, async (c) => {
 });
 
 /**
+ * GET /api/skills/:name — single skill: catalog metadata + the full SKILL.md
+ * body. The catalog (index.json) carries metadata only, so the body is fetched
+ * on demand from the canonical repo via the Contents API. Framework (bmad)
+ * skills have no SKILL.md here (they live in bmad-method) → body null +
+ * frameworkReadonly true so the UI shows a read-only view. Registered AFTER the
+ * static /catalog + /reconciliation routes so it never shadows them.
+ */
+app.get('/api/skills/:name', authMiddleware, async (c) => {
+  const name = c.req.param('name');
+  const catalog = await getCachedSkillCatalog();
+  const entry = catalog.skills.find((s) => s.name === name);
+  if (!entry) throw new NotFoundError('Skill', name);
+  const { body } = entry.framework ? { body: null } : await getSkillBody(name);
+  return c.json({ ...entry, body, frameworkReadonly: entry.framework });
+});
+
+/**
  * Skills Management Phase 2 (2026-06-15) — authoring.
  *
  * POST /api/skills          — create a new operator-authored skill
@@ -10844,6 +10874,58 @@ app.delete('/api/apps/:appId', authMiddleware, async (c) => {
     status: 'done',
     detail: `${plans.length} plans (${planBranchesCleaned} branches cleaned)`,
   });
+
+  // 1b. Purge ALL agent-jobs + agent-events for this app — including the
+  // standalone skill-scout / skill-install / reflector / deploy jobs that no
+  // plan/epic row references (the per-plan loop above calls deletePlan directly
+  // and never touched jobs/events). One paginated scan of the jobs table finds
+  // every job by workingDir/projectSlug; events are deleted per-job via the
+  // efficient jobId-keyed batch delete (never a full events scan). This is what
+  // makes a deleted app vanish from the Skills Usage page.
+  try {
+    const appJobIds = await agentJobsRepo.listAppJobIds(appId);
+    // Delete each job's events FIRST, and only queue the job row for deletion
+    // once its events are gone — events are keyed solely by jobId (no appId, no
+    // PITR), so deleting the job before its events would orphan them until the
+    // 7-day TTL. Mirrors the plan-delete ordering guarantee.
+    let eventsDeleted = 0;
+    const jobsToDelete: string[] = [];
+    let eventFailures = 0;
+    for (const jobId of appJobIds) {
+      try {
+        eventsDeleted += await agentEventsRepo.deleteEventsForJob(jobId);
+        jobsToDelete.push(jobId);
+      } catch {
+        eventFailures += 1; // keep the job row so its events stay reachable for re-run
+      }
+    }
+    const jobsDeleted = await agentJobsRepo.batchDeleteJobs(jobsToDelete);
+    const jobResidual = jobsToDelete.length - jobsDeleted;
+    results.push({
+      step: 'jobs+events',
+      status: eventFailures > 0 || jobResidual > 0 ? 'error' : 'done',
+      detail:
+        `${jobsDeleted} jobs, ${eventsDeleted} events` +
+        (eventFailures > 0 ? `, ${eventFailures} job(s) kept (event-delete failed)` : '') +
+        (jobResidual > 0 ? `, ${jobResidual} job(s) survived throttling — re-run delete` : ''),
+    });
+  } catch (err) {
+    results.push({ step: 'jobs+events', status: 'error', detail: String(err) });
+  }
+
+  // 1c. REFLECTOR proposals (PK=projectSlug) + the merge lock (LOCK#<slug> row
+  // in the attention table, which deleteAttentionItemsByPlan never matches).
+  try {
+    const reflectionsDeleted = await reflectionsRepo.deleteReflectionsByProject(appId);
+    await mergeLockRepo.deleteMergeLock(appId);
+    results.push({
+      step: 'reflections+lock',
+      status: 'done',
+      detail: `${reflectionsDeleted} reflections`,
+    });
+  } catch (err) {
+    results.push({ step: 'reflections+lock', status: 'error', detail: String(err) });
+  }
 
   // 2. Memgraph wipe — best-effort. Nodes carry projectId={appId}.
   // Runs daemon-side via SSM because Memgraph listens on EC2 localhost

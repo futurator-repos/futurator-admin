@@ -139,4 +139,20 @@ export async function releaseMergeLock(args: {
   }
 }
 
+/**
+ * Unconditionally drop a project's merge lock (the LOCK#<slug> row in the
+ * attention-items table). Unlike `releaseMergeLock`, this is NOT holder-gated —
+ * used by the nuclear app-delete cascade where the app (and any holder) is going
+ * away regardless. `deleteAttentionItemsByPlan` keys on real planIds and won't
+ * match the LOCK# pseudo-planId, so this must be called explicitly.
+ */
+export async function deleteMergeLock(projectSlug: string): Promise<void> {
+  await docClient.send(
+    new DeleteCommand({
+      TableName: TABLE_NAMES.attentionItems,
+      Key: lockKey(projectSlug),
+    }),
+  );
+}
+
 export const MERGE_LOCK_TTL_MS = TTL_MS;
