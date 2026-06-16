@@ -29,6 +29,12 @@ export const SYSTEM_GRAPH_EDGE_TYPES = new Set([
   'EMITS', // file/lambda → topic/bus
   'READS', // file → table (env-join, SG-1.6)
   'CALLS_ENDPOINT', // component → endpoint (SG-1.6)
+  // ── Concept v2 doc-engine (E6 / Story 6.2) ─────────────────────────────
+  'DERIVED_FROM', // document → upstream document (spec-chain lineage, 6.3)
+  'REFERENCES', // story → docSection (citation, 6.3)
+  'GOVERNS', // docSection → code node (doc→code, 6.4)
+  'DESCRIBES', // docSection → blast-reachable infra (doc→code, 6.4)
+  'SPECIFIES', // document/docSection → plan/epic/story (6.4)
 ]);
 
 // Scalar / string-array node props the ingest is allowed to persist. Memgraph
@@ -47,6 +53,13 @@ export const SYSTEM_GRAPH_NODE_PROPS = [
   'billable', // externalService is paid? (W10)
   'costUnit', // externalService cost unit, e.g. 'token' (W10)
   'handler', // lambda/cron handler file hint
+  // ── Concept v2 doc-engine (E6 / Story 6.2) ─────────────────────────────
+  'docType', // document/docSection kind: prd | ux | architecture
+  'sectionId', // docSection stable slug (manifest id — the join key)
+  'contentHash', // document/docSection content hash (stale-cascade key)
+  'rev', // document revision
+  'sectionCount', // document section count
+  'provenance', // EXTRACTED | INFERRED | derived (edge/node provenance)
 ];
 
 /**
