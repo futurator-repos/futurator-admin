@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { handle } from 'hono/aws-lambda';
 import { authMiddleware } from '../shared/auth-middleware';
 import { AppError, NotFoundError, ValidationError } from '../shared/errors';
@@ -173,6 +174,12 @@ import {
   parseConceptRouteOutput,
   applyConceptRouteOutput,
 } from '../shared/services/concept-route-service';
+import {
+  applyConceptArtifactOutput,
+  artifactSourceFromJob,
+  artifactJobVars,
+} from '../shared/services/concept-artifact-service';
+import type { ArtifactKind } from '../shared/concept/section-manifest';
 import { runSolutioningGate } from '../shared/services/solutioning-gate';
 import {
   parsePlanOutput,
@@ -2089,6 +2096,82 @@ app.post('/api/plans/:id/apply-concept-plan', async (c) => {
 
   return c.json({ planId, conceptPlan });
 });
+
+// ── Concept v2 (E2.4) — autopilot one-shot apply for a generated artifact ──
+//
+// POST /api/plans/:id/apply-prd | apply-ux | apply-arch
+//
+// Routes a COMPLETED generator job through register-on-Plan-row. The daemon
+// already wrote `concept/<kind>.md` + `<kind>.sections.json` at extraction
+// (E1.2 write-back) and captured the small `<KIND>_SECTIONS_JSON` manifest into
+// the job — this endpoint reads that (NOT the raw prose, which TRANSIENT_VARS
+// strips), registers `{rev,contentHash,status}` via the apply-service (E1.3),
+// and stamps the generator FK. Idempotent: re-apply with identical content is a
+// no-op. Does NOT auto-advance the DAG — the Concept Reducer (E3) owns chaining.
+const CONCEPT_FK_FIELD: Record<ArtifactKind, 'prdGenJobId' | 'uxGenJobId' | 'archGenJobId'> = {
+  prd: 'prdGenJobId',
+  ux: 'uxGenJobId',
+  architecture: 'archGenJobId',
+};
+
+async function handleApplyArtifact(c: Context, kind: ArtifactKind) {
+  const planId = c.req.param('id');
+  if (!planId) throw new ValidationError('Missing plan id');
+  let jobId = c.req.query('jobId') || undefined;
+
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  // FK first, then auto-discover the most recent COMPLETED generator job for
+  // this plan dir that carries the artifact's output variable.
+  if (!jobId) jobId = plan[CONCEPT_FK_FIELD[kind]] || plan.conceptArtifactJobIds?.[kind];
+  if (!jobId) {
+    const { mdVar, sectionsVar } = artifactJobVars(kind);
+    const allJobs = await agentJobsRepo.scanAllJobs();
+    const candidates = allJobs
+      .filter(
+        (j) =>
+          j.workingDir === plan.workingDir &&
+          j.status === 'COMPLETED' &&
+          (j.variables?.[sectionsVar] || j.variables?.[mdVar]),
+      )
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    if (candidates.length === 0) {
+      throw new ValidationError(`No completed ${kind}-gen job found for this plan.`);
+    }
+    jobId = candidates[0].jobId;
+  }
+  if (!jobId) throw new ValidationError(`No ${kind}-gen job to apply for this plan.`);
+
+  const job = await agentJobsRepo.getJobById(jobId);
+  if (!job) throw new NotFoundError('Job', jobId);
+  if (job.status !== 'COMPLETED') {
+    throw new ValidationError(`Job ${jobId} is ${job.status}, not COMPLETED`);
+  }
+
+  let result;
+  try {
+    const source = artifactSourceFromJob(job, kind);
+    result = await applyConceptArtifactOutput(plan, kind, source, {
+      updatePlanFields: planRepo.updatePlanFields,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: { code: 'APPLY_FAILED', message } }, 400);
+  }
+
+  // Stamp the generator FK + per-kind job ledger (idempotent — same jobId).
+  await planRepo.updatePlanFields(planId, {
+    [CONCEPT_FK_FIELD[kind]]: jobId,
+    conceptArtifactJobIds: { ...(plan.conceptArtifactJobIds ?? {}), [kind]: jobId },
+  });
+
+  return c.json({ planId, jobId, ...result });
+}
+
+app.post('/api/plans/:id/apply-prd', (c) => handleApplyArtifact(c, 'prd'));
+app.post('/api/plans/:id/apply-ux', (c) => handleApplyArtifact(c, 'ux'));
+app.post('/api/plans/:id/apply-arch', (c) => handleApplyArtifact(c, 'architecture'));
 
 // POST /api/plans/:id/regenerate — start a fresh PM-plan job on the same intent.
 //

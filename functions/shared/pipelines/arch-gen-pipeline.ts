@@ -33,7 +33,10 @@ export function generateArchGenPipeline(args: {
       ARCHITECT: buildAgentConfig({
         boilerplateKind: args.boilerplateType,
         rigor: args.rigor,
-        role: 'PM',
+        // E2/Story 2.3 — the doc-author bucket (Read + WebSearch). The arch
+        // prompt's no-hardcoded-versions rule requires WebSearch, which the
+        // read-only PM bucket denies; DOC_GEN is the sanctioned grant.
+        role: 'DOC_GEN',
         name: 'Architect (Winston)',
         model: args.model || 'sonnet',
       }),

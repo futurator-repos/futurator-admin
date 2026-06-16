@@ -28,6 +28,8 @@ const ALL_ROLES: Role[] = [
   'TRIAGE',
   // PR-90 — Phase 2-D ARCHITECT (Story 2-D-6-1)
   'ARCHITECT',
+  // E2 — Concept doc-engine doc-generator bucket (Story 2.3)
+  'DOC_GEN',
   // PR-32b — daemon-only roles
   'CONVERSATION',
   'REFLECTION',
@@ -99,13 +101,33 @@ describe('resolveRolePolicy — cartesian coverage', () => {
     }
   });
 
-  it('every role denies the PR-3 baseline (Task / Agent / WebFetch / WebSearch)', () => {
+  it('every role denies Task / Agent / WebFetch; WebSearch too, except the DOC_GEN doc-author bucket', () => {
     for (const role of ALL_ROLES) {
       const policy = resolveRolePolicy('nextjs-base', 'mvp', role);
-      for (const t of ['Task', 'Agent', 'WebFetch', 'WebSearch']) {
+      for (const t of ['Task', 'Agent', 'WebFetch']) {
         expect(policy.disallowedTools, `${role} denies ${t}`).toContain(t);
       }
+      if (role === 'DOC_GEN') {
+        // E2 — the ONE pipeline role that opts back into WebSearch (the
+        // no-hardcoded-versions rule). `allowed` wins over the baseline deny.
+        expect(policy.allowedTools, 'DOC_GEN allows WebSearch').toContain('WebSearch');
+        expect(policy.disallowedTools, 'DOC_GEN does NOT deny WebSearch').not.toContain(
+          'WebSearch',
+        );
+      } else {
+        expect(policy.disallowedTools, `${role} denies WebSearch`).toContain('WebSearch');
+      }
     }
+  });
+
+  it('DOC_GEN (Story 2.3) — arch/prd/ux author can actually WebSearch; Bash/Write/Edit denied', () => {
+    const policy = resolveRolePolicy('nextjs-base', 'production', 'DOC_GEN');
+    expect(policy.allowedTools).toContain('Read');
+    expect(policy.allowedTools).toContain('WebSearch');
+    expect(policy.disallowedTools).toContain('Bash');
+    expect(policy.disallowedTools).toContain('Write');
+    expect(policy.disallowedTools).toContain('Edit');
+    expect(policy.disallowedTools).not.toContain('WebSearch');
   });
 
   it('REVIEWER is read-only (no Write, no Edit, no Bash)', () => {

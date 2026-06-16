@@ -1,4 +1,5 @@
 import type { Plan } from '../types/plan';
+import type { AgentJob } from '../types/agent-orchestrator';
 import type { ArtifactKind, SectionManifest } from '../concept/section-manifest';
 import { generateSectionManifest, sectionIds } from '../concept/section-manifest';
 import {
@@ -48,6 +49,39 @@ export interface ApplyArtifactResult {
   status: ArtifactStatus;
   /** false when the apply was a no-op (replay / identical content) — cron-safe. */
   changed: boolean;
+}
+
+/** The generator job variable names for an artifact kind (daemon contract). */
+export function artifactJobVars(kind: ArtifactKind): { mdVar: string; sectionsVar: string } {
+  const upper = kind.toUpperCase(); // prd→PRD, ux→UX, architecture→ARCHITECTURE
+  return { mdVar: `${upper}_MD`, sectionsVar: `${upper}_SECTIONS_JSON` };
+}
+
+/**
+ * Concept v2 (E2.4) — derive the apply source from a completed generator job.
+ * Prefers the daemon-captured `<KIND>_SECTIONS_JSON` manifest sidecar (small,
+ * survives persistence, byte-matches the on-disk artifact of record). Falls back
+ * to raw `<KIND>_MD` only if present (usually stripped at persist by
+ * TRANSIENT_VARS). Throws when neither is available.
+ */
+export function artifactSourceFromJob(job: AgentJob, kind: ArtifactKind): ArtifactSource {
+  const { mdVar, sectionsVar } = artifactJobVars(kind);
+  const sectionsRaw = job.variables?.[sectionsVar];
+  if (sectionsRaw) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(sectionsRaw);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`${sectionsVar} is not valid JSON: ${message}`);
+    }
+    return { manifest: parsed as SectionManifest };
+  }
+  const md = job.variables?.[mdVar];
+  if (md && md.trim()) return { rawMarkdown: md };
+  throw new Error(
+    `Job ${job.jobId} has neither ${sectionsVar} nor ${mdVar} — the ${kind} generator produced no output to apply.`,
+  );
 }
 
 /**

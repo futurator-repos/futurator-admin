@@ -1,8 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
-import { applyConceptArtifactOutput } from '../concept-artifact-service';
+import {
+  applyConceptArtifactOutput,
+  artifactJobVars,
+  artifactSourceFromJob,
+} from '../concept-artifact-service';
 import { generateSectionManifest } from '../../concept/section-manifest';
 import { recordApproval, applyEdit, type ConceptArtifact } from '../../concept/artifact-version';
 import type { Plan } from '../../types/plan';
+import type { AgentJob } from '../../types/agent-orchestrator';
 
 const ARCH_MD = ['# Architecture', '', 'body', '', '## Tech Stack', '', 'stack'].join('\n');
 const PRD_MD = ['# PRD', '', 'scope', '', '## Functional Requirements', '', 'FR1'].join('\n');
@@ -125,7 +130,61 @@ describe('concept-artifact-service (E1.3 — generic apply funnel)', () => {
     );
     expect(direct.find((a) => a.kind === 'architecture')!.status).toBe('stale');
   });
+});
 
+describe('artifactJobVars + artifactSourceFromJob (E2.4 — job → apply source)', () => {
+  function job(vars: Record<string, string>): AgentJob {
+    return { jobId: 'j1', status: 'COMPLETED', variables: vars } as unknown as AgentJob;
+  }
+
+  it('maps each kind to its MD + SECTIONS_JSON variable names', () => {
+    expect(artifactJobVars('prd')).toEqual({ mdVar: 'PRD_MD', sectionsVar: 'PRD_SECTIONS_JSON' });
+    expect(artifactJobVars('ux')).toEqual({ mdVar: 'UX_MD', sectionsVar: 'UX_SECTIONS_JSON' });
+    expect(artifactJobVars('architecture')).toEqual({
+      mdVar: 'ARCHITECTURE_MD',
+      sectionsVar: 'ARCHITECTURE_SECTIONS_JSON',
+    });
+  });
+
+  it('prefers the daemon-captured manifest sidecar variable', () => {
+    const { manifest } = generateSectionManifest(ARCH_MD, { artifact: 'architecture', rev: 0 });
+    const src = artifactSourceFromJob(
+      job({ ARCHITECTURE_SECTIONS_JSON: JSON.stringify(manifest), ARCHITECTURE_MD: ARCH_MD }),
+      'architecture',
+    );
+    expect('manifest' in src ? src.manifest?.contentHash : undefined).toBe(manifest.contentHash);
+  });
+
+  it('falls back to raw MD when no manifest var is present', () => {
+    const src = artifactSourceFromJob(job({ PRD_MD: PRD_MD }), 'prd');
+    expect('rawMarkdown' in src ? src.rawMarkdown : undefined).toBe(PRD_MD);
+  });
+
+  it('throws when the job carries neither variable', () => {
+    expect(() => artifactSourceFromJob(job({}), 'prd')).toThrow(/neither/);
+  });
+
+  it('throws on a corrupt manifest JSON var', () => {
+    expect(() => artifactSourceFromJob(job({ PRD_SECTIONS_JSON: '{bad' }), 'prd')).toThrow(
+      /not valid JSON/,
+    );
+  });
+
+  it('end-to-end: job → source → apply registers the row', async () => {
+    const updatePlanFields = vi.fn(async (_id: string, _patch: Partial<Plan>) => {});
+    const { manifest } = generateSectionManifest(PRD_MD, { artifact: 'prd', rev: 0 });
+    const plan = {
+      planId: 'p1',
+      conceptArtifacts: [{ kind: 'prd', rev: 0, contentHash: '', status: 'draft', dependsOn: [] }],
+    } as unknown as Plan;
+    const src = artifactSourceFromJob(job({ PRD_SECTIONS_JSON: JSON.stringify(manifest) }), 'prd');
+    const res = await applyConceptArtifactOutput(plan, 'prd', src, { updatePlanFields });
+    expect(res).toMatchObject({ kind: 'prd', rev: 1, changed: true });
+    expect(res.contentHash).toBe(manifest.contentHash);
+  });
+});
+
+describe('concept-artifact-service — validation guards', () => {
   it('throws on empty markdown and on a sectionless document', async () => {
     const updatePlanFields = vi.fn(async (_id: string, _patch: Partial<Plan>) => {});
     const plan = { planId: 'p1', conceptArtifacts: seeded() } as Plan;
