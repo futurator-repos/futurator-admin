@@ -563,7 +563,7 @@ Instructions:
     {
       id: `${compilePrefix}-sync`,
       stepType: 'shell',
-      command: `node /home/ubuntu/scripts/graph-sync.mjs --project ${projectId} --knowledge-dir "$(dirname "${documentPath}")/../knowledge"`,
+      command: `node /opt/futurator-daemon/scripts/graph-sync.mjs --project ${projectId} --knowledge-dir "$(dirname "${documentPath}")/../knowledge"`,
       timeout: 60000,
       captureAs: 'PREDEV_SYNC_RESULT',
     },

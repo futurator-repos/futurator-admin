@@ -238,7 +238,7 @@ Read the file at ${workingDir}/knowledge/index.md to understand the current cata
       stepType: 'shell',
       command: [
         // Run graph-sync to embed articles and upsert to Memgraph
-        `node /home/ubuntu/scripts/graph-sync.mjs`,
+        `node /opt/futurator-daemon/scripts/graph-sync.mjs`,
         `--project ${projectId}`,
         `--knowledge-dir ${workingDir}/knowledge`,
         `--state-file ${workingDir}/.mycelium/compile-state.json`,

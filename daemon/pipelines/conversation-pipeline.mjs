@@ -179,7 +179,7 @@ export function getConversationPipeline(projectId, userQuery, workingDir, opts =
   // Determine the scripts directory (relative to this file's expected EC2 location)
   const scriptsDir = resolve(import.meta.url.replace('file://', ''), '../../scripts');
   // Fallback: the known EC2 path
-  const graphSearchScript = '/home/ubuntu/scripts/graph-search.mjs';
+  const graphSearchScript = '/opt/futurator-daemon/scripts/graph-search.mjs';
 
   return {
     id: 'conversation',

@@ -188,8 +188,8 @@ export function generateWaveCompilePipeline(input: WaveCompilePipelineInput): Pi
           // Skip cleanly when missing rather than fail the step.
           `set -e; ` +
           `cd ${workingDir} && ` +
-          `if [ -f /home/ubuntu/scripts/graph-sync.mjs ]; then ` +
-          `  node /home/ubuntu/scripts/graph-sync.mjs ` +
+          `if [ -f /opt/futurator-daemon/scripts/graph-sync.mjs ]; then ` +
+          `  node /opt/futurator-daemon/scripts/graph-sync.mjs ` +
           `    --project ${projectId} ` +
           `    --knowledge-dir ${workingDir}/knowledge ` +
           `    --state-file ${workingDir}/.mycelium/compile-state.json; ` +

@@ -141,7 +141,7 @@ export function getEpicCompileSteps(projectId, epicId) {
         id: 'graph-resync',
         stepType: 'shell',
         command: [
-          'node /home/ubuntu/scripts/graph-sync.mjs',
+          'node /opt/futurator-daemon/scripts/graph-sync.mjs',
           '--project {{projectId}}',
           '--full-resync',
           '--knowledge-dir {{workingDir}}/knowledge',

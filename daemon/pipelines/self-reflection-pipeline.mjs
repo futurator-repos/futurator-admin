@@ -332,7 +332,7 @@ export function getSelfReflectionPipeline(projectId, workingDir, opts = {}) {
 
   const resolvedDir = resolve(workingDir);
   const knowledgeDir = join(resolvedDir, 'knowledge');
-  const graphSearchScript = '/home/ubuntu/scripts/graph-search.mjs';
+  const graphSearchScript = '/opt/futurator-daemon/scripts/graph-search.mjs';
 
   // Build a Cypher query runner script for the shell step.
   // We use inline node -e to run Cypher queries via neo4j-driver.
@@ -507,7 +507,7 @@ if (block) {
       {
         id: 'sync',
         stepType: 'shell',
-        command: `node /home/ubuntu/scripts/graph-sync.mjs --project "${projectId}" --knowledge-dir "${knowledgeDir}"`,
+        command: `node /opt/futurator-daemon/scripts/graph-sync.mjs --project "${projectId}" --knowledge-dir "${knowledgeDir}"`,
         condition: 'NEW_KNOWLEDGE',
       },
     ],
