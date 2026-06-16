@@ -4,6 +4,8 @@ import {
   findStaleJobs,
   buildResumeJob,
   DEFAULT_STALE_MS,
+  isRequeueableOrphan,
+  REQUEUE_ON_ORPHAN_JOB_TYPES,
 } from '../stale-heartbeat.mjs';
 
 function makeJob(overrides = {}) {
@@ -131,5 +133,58 @@ describe('buildResumeJob', () => {
     expect(() => buildResumeJob(null, { newJobId: 'x', now: NOW_ISO })).toThrow();
     expect(() => buildResumeJob(makeJob(), { now: NOW_ISO })).toThrow();
     expect(() => buildResumeJob(makeJob(), { newJobId: 'x' })).toThrow();
+  });
+});
+
+/**
+ * 2026-06-16 — orphaned idempotent infra jobs (app-bootstrap) are auto-requeued
+ * to PENDING after a daemon restart, instead of marked STALE forever (brick1).
+ */
+describe('isRequeueableOrphan', () => {
+  const NOW = Date.parse('2026-06-16T13:00:00.000Z');
+  const stale = '2026-06-16T12:00:00.000Z'; // 1h old → stale
+  const fresh = '2026-06-16T12:59:30.000Z'; // 30s old → not stale
+
+  function bootstrapJob(over = {}) {
+    return {
+      jobId: 'b1',
+      status: 'RUNNING',
+      jobType: 'app-bootstrap',
+      updatedAt: stale,
+      ...over,
+    };
+  }
+
+  it('app-bootstrap is in the requeue allowlist', () => {
+    expect(REQUEUE_ON_ORPHAN_JOB_TYPES).toContain('app-bootstrap');
+  });
+
+  it('requeues a stale, orphaned RUNNING app-bootstrap job', () => {
+    expect(isRequeueableOrphan(bootstrapJob(), { now: NOW })).toBe(true);
+  });
+
+  it('does NOT requeue a fresh (still-heartbeating) app-bootstrap job', () => {
+    expect(isRequeueableOrphan(bootstrapJob({ updatedAt: fresh }), { now: NOW })).toBe(false);
+  });
+
+  it('does NOT requeue a non-RUNNING app-bootstrap job', () => {
+    expect(isRequeueableOrphan(bootstrapJob({ status: 'FAILED' }), { now: NOW })).toBe(false);
+    expect(isRequeueableOrphan(bootstrapJob({ status: 'COMPLETED' }), { now: NOW })).toBe(false);
+  });
+
+  it('does NOT requeue a stale story/dev job (fragile state — stays mark-STALE)', () => {
+    expect(
+      isRequeueableOrphan({ status: 'RUNNING', phase: 'story-dev', updatedAt: stale }, { now: NOW }),
+    ).toBe(false);
+    expect(
+      isRequeueableOrphan({ status: 'RUNNING', jobType: 'skill-scout', updatedAt: stale }, { now: NOW }),
+    ).toBe(false);
+  });
+
+  it('honors lastHeartbeatAt over updatedAt when present', () => {
+    // updatedAt stale, but a recent heartbeat → not orphaned.
+    expect(
+      isRequeueableOrphan(bootstrapJob({ lastHeartbeatAt: fresh }), { now: NOW }),
+    ).toBe(false);
   });
 });

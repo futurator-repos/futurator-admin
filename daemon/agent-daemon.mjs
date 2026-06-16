@@ -126,6 +126,7 @@ import {
   buildResumeJob,
   isStaleAnyPhase,
   DEFAULT_STALE_MS,
+  REQUEUE_ON_ORPHAN_JOB_TYPES,
 } from './pipelines/stale-heartbeat.mjs';
 import {
   registerChild,
@@ -1548,10 +1549,37 @@ async function scanStaleEpicDevJobs() {
     // Without this pass they would have stayed RUNNING forever after EC2
     // restart (the new daemon's activeJobs Map is empty so nothing claims
     // them, and the orchestrator-only `findStaleJobs` filtered them out).
+    // 2026-06-16 — idempotent infra jobs (app-bootstrap) orphaned RUNNING by a
+    // daemon restart are AUTO-REQUEUED to PENDING so they finish themselves,
+    // instead of being marked STALE (terminal) and leaving the App stuck on
+    // "Scaffold pending" forever. Safe: these jobs are idempotent, and a
+    // genuinely-failing run lands FAILED via its own catch (not RUNNING), so
+    // this never loops. See REQUEUE_ON_ORPHAN_JOB_TYPES. (brick1 root-cause.)
+    const requeueOrphans = (Items || []).filter(
+      (j) =>
+        j.status === 'RUNNING' &&
+        !activeJobs.has(j.jobId) &&
+        REQUEUE_ON_ORPHAN_JOB_TYPES.includes(j.jobType) &&
+        isStaleAnyPhase(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }),
+    );
+    for (const job of requeueOrphans) {
+      try {
+        await updateJobFields(job.jobId, { status: 'PENDING' });
+        log(
+          'warn',
+          `[${job.jobId.slice(0, 8)}] orphaned ${job.jobType} requeued → PENDING (idempotent infra job; daemon restarted mid-run)`,
+        );
+      } catch (err) {
+        log('error', `Failed to requeue orphaned ${job.jobType} ${job.jobId.slice(0, 8)}: ${err.message}`);
+      }
+    }
+
     const otherStale = (Items || []).filter(
       (j) =>
         j.status === 'RUNNING' &&
         j.phase !== 'epic-dev' &&
+        // Idempotent infra jobs are requeued above — don't also mark them STALE.
+        !REQUEUE_ON_ORPHAN_JOB_TYPES.includes(j.jobType) &&
         !activeJobs.has(j.jobId) &&
         isStaleAnyPhase(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }),
     );
