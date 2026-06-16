@@ -21,12 +21,82 @@ const localStoryIdSchema = z.string().regex(/^S\d+$/, 'Story local IDs must be l
  */
 export const EPIC_WIDE_TOUCH_POINT = '<EPIC_WIDE>';
 
+/**
+ * Concept v2 — PM-set verify intent + closed manual-reason enum. Mirrors the
+ * `VerifyIntent` / `ManualReason` unions in `functions/shared/types/epic-workflow.ts`.
+ * Keep the two in sync (the type is the source of truth; this is the wire validator).
+ */
+export const verifyIntentSchema = z.enum(['build', 'appearance', 'state', 'behavior', 'manual']);
+export const manualReasonSchema = z.enum([
+  'real-payment',
+  'oauth-consent',
+  'captcha',
+  'native-device',
+  'email-sms-loop',
+  'subjective-quality',
+  'video-audio-perception',
+  'no-stub-possible',
+]);
+
+/**
+ * One acceptance criterion. The legacy `{id, text, needsBrowser}` shape stays
+ * the required core; Concept v2 adds optional BDD structure + verify intent so
+ * old PM outputs and hand-written imports still parse. The `manual` ⇒ require
+ * `manualReason` rule is enforced via `.superRefine` (Concept §8 anti-escape-hatch).
+ */
+export const acceptanceCriterionSchema = z
+  .object({
+    id: z.string(),
+    text: z.string().min(5),
+    needsBrowser: z.boolean().default(false),
+    // ── Concept v2 (BMAD BDD) — all optional ──
+    given: z.string().optional(),
+    when: z.string().optional(),
+    then: z.string().optional(),
+    thenObservable: z.string().optional(),
+    verify: verifyIntentSchema.optional(),
+    manualReason: manualReasonSchema.optional(),
+  })
+  .superRefine((ac, ctx) => {
+    if (ac.verify === 'manual' && !ac.manualReason) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['manualReason'],
+        message: "A 'manual' acceptance criterion requires a manualReason from the closed enum.",
+      });
+    }
+  });
+
+/** Concept v2 — AC-mapped task in the DEV checklist. */
+export const storyTaskSchema = z.object({
+  id: z.string(),
+  text: z.string().min(1),
+  acRefs: z.array(z.string()).default([]),
+  done: z.boolean().optional(),
+});
+
+/**
+ * Concept v2 — citation into an upstream artifact section or the harness seam.
+ * `section` membership against the artifact manifest is enforced in Epic E4
+ * (here it's a free string so prototype/legacy imports still parse).
+ */
+export const storyReferenceSchema = z.object({
+  source: z.enum(['prd', 'architecture', 'ux', 'harness']),
+  section: z.string().min(1),
+  note: z.string().optional(),
+});
+
 export const storyOutputSchema = z.object({
   id: localStoryIdSchema,
   title: z.string().min(3),
   description: z.string().min(10),
   /** Local story IDs within THIS epic that must finish first. */
   dependsOn: z.array(localStoryIdSchema).default([]),
+  // ── Concept v2 (BMAD-grade definition) — all optional ──
+  userStory: z.object({ role: z.string(), action: z.string(), benefit: z.string() }).optional(),
+  technicalNotes: z.string().optional(),
+  tasks: z.array(storyTaskSchema).optional(),
+  references: z.array(storyReferenceSchema).optional(),
   /**
    * pacman1 disease (2026-06-11) — the file paths this story will create or
    * modify. The BMAD workflow contract always REQUIRED this ("the
@@ -39,13 +109,7 @@ export const storyOutputSchema = z.object({
    */
   touchPoints: z.array(z.string().min(1)).default([]),
   criteria: z
-    .array(
-      z.object({
-        id: z.string(),
-        text: z.string().min(5),
-        needsBrowser: z.boolean().default(false),
-      }),
-    )
+    .array(acceptanceCriterionSchema)
     .min(1, 'Each story must have at least one acceptance criterion'),
 });
 
@@ -54,6 +118,8 @@ export const epicOutputSchema = z.object({
   title: z.string().min(3),
   goal: z.string().min(10),
   acceptanceCriteria: z.string().default(''),
+  /** Concept v2 — PRD functional-requirement ids this epic covers (traceability spine). */
+  requirementRefs: z.array(z.string()).optional(),
   /** Local epic IDs that must complete first. */
   dependsOn: z.array(localEpicIdSchema).default([]),
   stories: z.array(storyOutputSchema).min(1, 'Each epic must have at least one story'),

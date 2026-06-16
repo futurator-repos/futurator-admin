@@ -55,6 +55,8 @@ export function buildPmPlanPrompt(args: {
     id: `AC-S1-${i + 1}`,
     text,
     needsBrowser: false,
+    // Concept v2 — foundation/types ACs are build-verifiable (typecheck/unit).
+    verify: 'build' as const,
   }));
 
   return `You are the Product Manager. Transform the user's intent into a Plan
@@ -255,6 +257,24 @@ modify (relative to the project root, using the conventional paths above).
   the \`needsBrowser\` ACs of the code story that builds the feature instead.
 - Each story has the AC count appropriate for the rigor (see "Rigor" above).
   Mark \`needsBrowser: true\` for criteria that need visual/DOM verification.
+- **Set a \`verify\` intent on every AC (Concept v2).** This is YOUR planning-time
+  signal of HOW the claim is checked; the QA author later compiles it into the
+  concrete test. Choose one:
+    • \`build\`      — typecheck / unit / pure-logic (no browser). \`needsBrowser:false\`.
+    • \`appearance\` — a single idle-load frame is judged (it must be visible at
+                     load, no interaction). \`needsBrowser:true\`.
+    • \`state\`      — a deterministic app-state read after an interaction.
+    • \`behavior\`   — reach → act → observe over time (the richest check).
+    • \`manual\`     — only the *knowably* unautomatable (real payment, OAuth
+                     consent, captcha, native device, subjective quality). You
+                     MUST add a \`manualReason\` from the closed set
+                     (real-payment | oauth-consent | captcha | native-device |
+                     email-sms-loop | subjective-quality | video-audio-perception
+                     | no-stub-possible). Do NOT use \`manual\` to dodge a check
+                     that a test harness could stub — that is rejected at the gate.
+  Write \`given\`/\`when\`/\`then\` (BDD) alongside \`text\` whenever the AC is more
+  than a one-line build check; keep \`then\` a PROSE-OBSERVABLE human claim
+  (never a code/selector expression — the QA author writes the assertion).
 - **Browser AC text must be SCREEN-VERIFIABLE.** When \`needsBrowser: true\`,
   phrase the criterion so a person looking at a screenshot can apply it
   without reading the source code. Concrete observable signal beats
@@ -279,18 +299,24 @@ modify (relative to the project root, using the conventional paths above).
   voice into the story's visualTests \`judge:\` block, which is the actual
   contract the QA judge applies.
 
-  **Browser ACs are verified at the WAVE gate, against the story's own
-  registered feature surface.** After the wave's stories merge, visual QA
-  captures each story's feature in ISOLATION (the generated page renders
-  one feature at a time via its registration) at its IDLE INITIAL state
-  (no clicks, no keypresses, no elapsed time). A \`needsBrowser\` AC must
-  therefore describe what the story's OWN feature shows at that moment —
-  never what a sibling story renders. If the behaviour only manifests
-  after interaction or time (spawning, motion, score changes, "during
-  play"), phrase the browser AC about the initial state's observable
-  precondition and put the dynamic behaviour in a non-browser AC the test
-  suite asserts — never write a browser AC whose truth the initial frame
-  physically cannot show.
+  **Browser ACs are verified against the story's own registered feature
+  surface — and HOW depends on the AC's \`verify\` intent (Concept v2).**
+  Visual QA captures each story's feature in ISOLATION (the generated page
+  renders one feature at a time via its registration). A \`needsBrowser\` AC
+  must always describe the story's OWN feature — never what a sibling
+  renders. Then, by intent:
+    • \`verify:'appearance'\` → MUST be idle-visible: true at the INITIAL load
+      frame (no clicks, no keypresses, no elapsed time). Never write a
+      \`click to see\` appearance AC — phrase it about what the load frame
+      physically shows.
+    • \`verify:'behavior'|'state'\` (with \`when\`/\`then\`) → MAY describe a
+      POST-INTERACTION state. The QA probe REACHES it (\`given\`→reach,
+      \`when\`→act, \`then\`→observe), so you do NOT have to contort dynamic
+      behaviour (spawning, motion, score changes, "during play") into a
+      load-frame description — state the real observable outcome directly.
+  Every UI-bearing story should still carry at least one
+  \`verify:'appearance'\` AC for its idle signal (the appearance floor), so a
+  blank load screen can never pass.
 
   **HARD REQUIREMENT — visual coverage (your plan is REJECTED without it).**
   This app renders a user interface, so your plan MUST contain

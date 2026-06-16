@@ -26,6 +26,16 @@ export type PlanExecutionMode = 'pipeline' | 'orchestrator';
  */
 export type PlanRigor = 'prototype' | 'mvp' | 'production';
 
+/**
+ * Concept v2 (W11) — the interactivity axis, orthogonal to `rigor` (depth) and
+ * the Concept Router (applicability). Decides whether each upstream artifact job
+ * (prd/ux/arch) runs as a free-agent convergence chat with an explicit Approve
+ * gate (`interactive`) or a daemon one-shot that auto-advances (`autopilot`).
+ * Default is resolved by `resolveConceptInteraction()`: autopilot for prototype,
+ * interactive for mvp/production. See concept-stage-v2-bmad.md §3.3.
+ */
+export type ConceptInteraction = 'interactive' | 'autopilot';
+
 /** Per-plan testing config. Mirrors epic-level TestingProfile but applied plan-wide. */
 export interface PlanTestingProfile {
   /** Include Playwright browser tests in the pipeline. */
@@ -108,6 +118,12 @@ export interface Plan {
    * once the first wave launches.
    */
   rigor?: PlanRigor;
+  /**
+   * Concept v2 (W11): interactivity axis (orthogonal to rigor). Absent → use
+   * `resolveConceptInteraction()` default. Editable while `status === 'concept'`;
+   * immutable once the first concept artifact job starts (enforced in Epic E12).
+   */
+  conceptInteraction?: ConceptInteraction;
   /** Phase C.2: plan-wide testing config (Playwright toggle lives here). */
   testingProfile?: PlanTestingProfile;
 

@@ -77,10 +77,32 @@ export interface CompilationArticleCounts {
 
 // ── Acceptance criteria & visual test definitions ──
 
+/** Concept v2 — PM-set verify intent. Mirror of functions/shared/types/epic-workflow.ts. */
+export type VerifyIntent = 'build' | 'appearance' | 'state' | 'behavior' | 'manual';
+
+/** Concept v2 / VQA v3 — closed reason enum for `verify: 'manual'` ACs. */
+export type ManualReason =
+  | 'real-payment'
+  | 'oauth-consent'
+  | 'captcha'
+  | 'native-device'
+  | 'email-sms-loop'
+  | 'subjective-quality'
+  | 'video-audio-perception'
+  | 'no-stub-possible';
+
 export interface AcceptanceCriterion {
   id: string;
   text: string;
   needsBrowser: boolean;
+
+  // ── Concept v2 (BMAD BDD structure) — all optional ──
+  given?: string;
+  when?: string;
+  then?: string;
+  thenObservable?: string;
+  verify?: VerifyIntent;
+  manualReason?: ManualReason;
 }
 
 /**
@@ -148,6 +170,21 @@ export interface ReviewStep {
 
 // ── Story ──
 
+/** Concept v2 — AC-mapped task. Mirror of functions/shared/types/epic-workflow.ts. */
+export interface StoryTask {
+  id: string;
+  text: string;
+  acRefs: string[];
+  done?: boolean;
+}
+
+/** Concept v2 — citation into an upstream artifact section or the harness seam. */
+export interface StoryReference {
+  source: 'prd' | 'architecture' | 'ux' | 'harness';
+  section: string;
+  note?: string;
+}
+
 export interface EpicStory {
   storyId: string;
   order: number;
@@ -160,6 +197,12 @@ export interface EpicStory {
   hasBrowserTests?: boolean;
   criteria?: AcceptanceCriterion[];
   visualTests?: VisualTestDef[];
+
+  // ── Concept v2 (BMAD-grade definition) — all optional ──
+  userStory?: { role: string; action: string; benefit: string };
+  technicalNotes?: string;
+  tasks?: StoryTask[];
+  references?: StoryReference[];
 
   // ── Compilation metadata (MY-2 Story Compilation Pipeline) ──
   compilationStatus?: CompilationStatus;
@@ -204,6 +247,10 @@ export interface EpicWorkflow {
   title: string;
   description: string;
   acceptanceCriteria: string;
+  /** Concept v2 — value statement; BMAD names epics by value. Optional. */
+  goal?: string;
+  /** Concept v2 — PRD functional-requirement ids this epic covers (traceability spine). */
+  requirementRefs?: string[];
   workingDir: string;
   status: EpicStatus;
   stories: EpicStory[];

@@ -125,3 +125,37 @@ describe('buildPmPlanPrompt — boilerplate-aware contract', () => {
     });
   });
 });
+
+/**
+ * Concept v2 — Story E1.5: the PM prompt must teach the `verify` intent and
+ * apply the relaxed idle-visible rule (appearance MUST be idle-visible;
+ * behavior/state MAY describe a post-interaction state).
+ */
+describe('buildPmPlanPrompt — Concept v2 verify intent + idle-visible relaxation (E1.5)', () => {
+  const prompt = buildPmPlanPrompt({ ...baseArgs, boilerplateType: 'nextjs-base', rigor: 'mvp' });
+
+  it('instructs the PM to set a verify intent on every AC, listing all five', () => {
+    expect(prompt).toContain('`verify` intent on every AC');
+    for (const v of ['build', 'appearance', 'state', 'behavior', 'manual']) {
+      expect(prompt).toContain(v);
+    }
+  });
+
+  it('requires manualReason from the closed enum for manual ACs', () => {
+    expect(prompt).toContain('manualReason');
+    expect(prompt).toContain('no-stub-possible');
+    expect(prompt.toLowerCase()).toContain('dodge');
+  });
+
+  it('relaxes idle-visible: appearance MUST be idle-visible, behavior/state MAY be post-interaction', () => {
+    expect(prompt).toContain("verify:'appearance'");
+    expect(prompt).toContain('idle-visible');
+    expect(prompt).toContain('POST-INTERACTION');
+    // The probe reaches post-interaction state — the old "contort into a load frame" rule is gone.
+    expect(prompt).toContain('appearance floor');
+  });
+
+  it('keeps `then` prose-observable (PM authors no assertions)', () => {
+    expect(prompt).toContain('PROSE-OBSERVABLE');
+  });
+});

@@ -189,8 +189,11 @@ export function epicsToPlanOutput(plan: Plan, epics: EpicWorkflow[]): PlanOutput
         return {
           id: epicLocalById.get(epic.epicId)!,
           title: epic.title,
-          goal: epic.description || '',
+          // Concept v2 (E1.3/W4) — prefer the explicit goal field; fall back to
+          // description for legacy epics that predate it.
+          goal: epic.goal || epic.description || '',
           acceptanceCriteria: epic.acceptanceCriteria || '',
+          requirementRefs: epic.requirementRefs,
           dependsOn: (epic.dependsOnEpics ?? [])
             .map((id) => epicLocalById.get(id))
             .filter((id): id is string => !!id),
@@ -202,10 +205,22 @@ export function epicsToPlanOutput(plan: Plan, epics: EpicWorkflow[]): PlanOutput
               .map((id) => storyLocalById.get(id))
               .filter((id): id is string => !!id),
             touchPoints: s.touchPoints ?? [],
+            // Concept v2 (E1.3/W4) — carry the BMAD-grade story fields on the
+            // round-trip so re-plan / export is lossless.
+            userStory: s.userStory,
+            technicalNotes: s.technicalNotes,
+            tasks: s.tasks,
+            references: s.references,
             criteria: (s.criteria ?? []).map((c) => ({
               id: c.id,
               text: c.text,
               needsBrowser: !!c.needsBrowser,
+              given: c.given,
+              when: c.when,
+              then: c.then,
+              thenObservable: c.thenObservable,
+              verify: c.verify,
+              manualReason: c.manualReason,
             })),
           })),
         };
@@ -284,10 +299,23 @@ export async function applyPlanOutput(
       touchPoints: storyOut.touchPoints ?? [],
       complexity: 'standard',
       reviewRigor: 'standard',
+      // Concept v2 (E1.3/W4) — the BMAD-grade fields must land on the persisted
+      // row or the enrichment is inert (undefined is stripped by the doc client's
+      // removeUndefinedValues, so legacy/prototype rows stay unchanged).
+      userStory: storyOut.userStory,
+      technicalNotes: storyOut.technicalNotes,
+      tasks: storyOut.tasks,
+      references: storyOut.references,
       criteria: storyOut.criteria.map((c) => ({
         id: c.id,
         text: c.text,
         needsBrowser: c.needsBrowser,
+        given: c.given,
+        when: c.when,
+        then: c.then,
+        thenObservable: c.thenObservable,
+        verify: c.verify,
+        manualReason: c.manualReason,
       })),
       hasBrowserTests: storyOut.criteria.some((c) => c.needsBrowser),
       dependsOn: storyDeps,
@@ -299,6 +327,10 @@ export async function applyPlanOutput(
       dependsOnEpics: resolvedDeps,
       title: epicOut.title,
       description: epicOut.goal,
+      // Concept v2 (E1.3/W4) — keep `description` = goal for back-compat, AND
+      // persist the explicit goal + requirementRefs (the traceability spine).
+      goal: epicOut.goal,
+      requirementRefs: epicOut.requirementRefs,
       acceptanceCriteria: epicOut.acceptanceCriteria,
       workingDir: plan.workingDir,
       status: 'draft',
