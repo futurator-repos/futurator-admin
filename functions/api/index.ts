@@ -171,6 +171,7 @@ import {
   parseConceptRouteOutput,
   applyConceptRouteOutput,
 } from '../shared/services/concept-route-service';
+import { runSolutioningGate } from '../shared/services/solutioning-gate';
 import {
   parsePlanOutput,
   applyPlanOutput,
@@ -2418,6 +2419,20 @@ app.post('/api/plans/:id/start', async (c) => {
     throw new ValidationError('Plan-wave 0 is empty — check epic dependencies for cycles');
   }
 
+  // Concept v2 (E9, §8) — semantic readiness gate, on top of the structural
+  // checks above. prototype auto-passes; production blocks on errors. Reference
+  // resolution is deferred (Lambda can't read the EC2 artifact manifests — it's
+  // enforced at decompose-time, E4.2); coverage/structural/manual/appearance/
+  // route checks run from DDB. Conditions are surfaced, never hard-block.
+  const gate = runSolutioningGate({ plan, epics });
+  if (gate.blocks) {
+    throw new ValidationError(
+      `Plan is not ready for development (${gate.verdict}):\n${gate.errors
+        .map((e) => `- ${e}`)
+        .join('\n')}`,
+    );
+  }
+
   const now = new Date().toISOString();
   const jobsByEpic: Record<string, string[]> = {};
 
@@ -2464,7 +2479,16 @@ app.post('/api/plans/:id/start', async (c) => {
 
   await planRepo.updatePlanFields(planId, { status: 'developing', startedAt: now });
 
-  return c.json({ planId, jobsByEpic, waveNumber: 0 }, 201);
+  // Surface the readiness verdict + any non-blocking conditions (E9, §8).
+  return c.json(
+    {
+      planId,
+      jobsByEpic,
+      waveNumber: 0,
+      gate: { verdict: gate.verdict, conditions: gate.conditions },
+    },
+    201,
+  );
 });
 
 app.patch('/api/plans/:id', async (c) => {
