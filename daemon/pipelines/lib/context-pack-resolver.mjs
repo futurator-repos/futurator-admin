@@ -14,12 +14,14 @@
  * block this one time.
  */
 
+import { basename } from 'path';
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import {
   buildStoryContextPack,
   serializeStoryContextPack,
   DEFAULT_RUN_COMMAND,
 } from './story-context-pack.mjs';
+import { appendGroundTruth } from './ground-truth-context.mjs';
 import {
   validateProjectContextPack,
   formatValidationErrors,
@@ -168,11 +170,22 @@ export async function resolveAndSerializeContextPack(input) {
     prevStoriesInWave,
     projectDir,
     waveStartTime,
+    projectId: basename(projectDir),
+    storyId,
     log,
   });
 }
 
-async function runAssembler({ plan, story, prevStoriesInWave, projectDir, waveStartTime, log }) {
+async function runAssembler({
+  plan,
+  story,
+  prevStoriesInWave,
+  projectDir,
+  waveStartTime,
+  projectId,
+  storyId,
+  log,
+}) {
   try {
     const pack = await buildStoryContextPack({
       plan,
@@ -197,7 +210,16 @@ async function runAssembler({ plan, story, prevStoriesInWave, projectDir, waveSt
       return { ...stub, validationErrors: validation.errors };
     }
 
-    return { body: serializeStoryContextPack(pack), pack };
+    // Story 4.4 — additively inject blast_radius as <ground_truth> alongside the
+    // AST facts already in the body. Non-blocking: on a cold/absent Memgraph this
+    // returns the body unchanged (the AST facts remain the fallback).
+    const body = await appendGroundTruth(serializeStoryContextPack(pack), {
+      touchPoints: story.touchPoints,
+      projectId,
+      storyId,
+      log,
+    });
+    return { body, pack };
   } catch (err) {
     log.warn?.(`context-pack-resolver: assembler threw: ${err.message}`);
     return stubFailure(`assembler error: ${err.message}`);

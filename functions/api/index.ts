@@ -26,6 +26,12 @@ import * as scheduleRepo from '../shared/repositories/schedule-repository';
 import * as userRepo from '../shared/repositories/user-repository';
 import * as alertRepo from '../shared/repositories/alert-repository';
 import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
+import * as propagatorRepo from '../shared/repositories/propagator-proposals-repository';
+import {
+  ingestPropagatorProposalsSchema,
+  rejectPropagatorProposalSchema,
+} from '../shared/schemas/propagator-schema';
+import type { PropagatorProposal, PropagatorProposalStatus } from '../shared/types/propagator';
 import { isTerminal as jobIsTerminal } from '../shared/types/agent-job-state-machine';
 import * as agentEventsRepo from '../shared/repositories/agent-events-repository';
 import * as partyProjectsRepo from '../shared/repositories/party-projects-repository';
@@ -3599,6 +3605,86 @@ app.post('/api/reflections/:projectSlug/:id/defer', async (c) => {
     decision: 'defer',
   });
   if (!updated) return c.json({ error: 'Reflection not found' }, 404);
+  return c.json({ item: updated });
+});
+
+// ── Epic 6 — Story 6.5: PROPAGATOR proposals (consent-gated port-briefs) ──
+//   GET  /api/propagator/proposals?status=&sibling=&sourceProject=   — list
+//   POST /api/propagator/proposals                                   — ingest (daemon)
+//   POST /api/propagator/proposals/:id/approve                       — consent: approve
+//   POST /api/propagator/proposals/:id/reject                        — consent: reject
+//
+// Nothing is ever auto-merged: a proposal is APPROVED or REJECTED by a human.
+// The source contract's `lastPropagatedTo` marker is advanced by the daemon only
+// when the sibling's port story reaches Done — not here.
+app.get('/api/propagator/proposals', async (c) => {
+  const status = c.req.query('status') as PropagatorProposalStatus | undefined;
+  const sibling = c.req.query('sibling') || undefined;
+  const sourceProject = c.req.query('sourceProject') || undefined;
+  const items = await propagatorRepo.listProposals({ status, sibling, sourceProject });
+  const pendingCount = items.filter((p) => p.status === 'proposed').length;
+  return c.json({ items, pendingCount, total: items.length });
+});
+
+app.post('/api/propagator/proposals', async (c) => {
+  const body = await c.req.json();
+  const parsed = ingestPropagatorProposalsSchema.safeParse(body);
+  if (!parsed.success)
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
+
+  const now = new Date().toISOString();
+  const created: PropagatorProposal[] = [];
+  for (const p of parsed.data.proposals) {
+    // Idempotent: re-filing an already-decided proposal never resurrects it.
+    const existing = await propagatorRepo.getProposal(p.proposalId);
+    if (existing && existing.status !== 'proposed') continue;
+    const row: PropagatorProposal = {
+      ...p,
+      atCommit: p.atCommit ?? null,
+      status: 'proposed',
+      requiresApproval: true,
+      createdAt: existing?.createdAt ?? now,
+    };
+    created.push(await propagatorRepo.createProposal(row));
+  }
+  return c.json({ created: created.length, items: created }, 201);
+});
+
+app.post('/api/propagator/proposals/:id/approve', async (c) => {
+  const proposalId = c.req.param('id');
+  const user = c.get('user');
+  const existing = await propagatorRepo.getProposal(proposalId);
+  if (!existing) return c.json({ error: 'Proposal not found' }, 404);
+  if (existing.status !== 'proposed')
+    throw new ValidationError(`Proposal is already ${existing.status}`);
+
+  const updated = await propagatorRepo.updateProposalStatus(proposalId, {
+    status: 'approved',
+    decidedBy: user.userId,
+    decidedAt: new Date().toISOString(),
+  });
+  return c.json({ item: updated });
+});
+
+app.post('/api/propagator/proposals/:id/reject', async (c) => {
+  const proposalId = c.req.param('id');
+  const user = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = rejectPropagatorProposalSchema.safeParse(body);
+  if (!parsed.success)
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
+
+  const existing = await propagatorRepo.getProposal(proposalId);
+  if (!existing) return c.json({ error: 'Proposal not found' }, 404);
+  if (existing.status !== 'proposed')
+    throw new ValidationError(`Proposal is already ${existing.status}`);
+
+  const updated = await propagatorRepo.updateProposalStatus(proposalId, {
+    status: 'rejected',
+    decidedBy: user.userId,
+    decidedAt: new Date().toISOString(),
+    rejectionReason: parsed.data.reason,
+  });
   return c.json({ item: updated });
 });
 

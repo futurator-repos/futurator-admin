@@ -28,6 +28,7 @@
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, extname, relative } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // Slice C — directories the brownfield scan should never descend into.
 // Kept narrow: deps, build output, test fixtures, wiki, AST cache.
@@ -251,13 +252,54 @@ function enclosingFunctionName(node) {
 
 // ── Per-file extraction ─────────────────────────────────────────────────
 
-function extractFromTree(tree) {
+export function extractFromTree(tree) {
   const imports = [];
   const functions = [];
   const classes = [];
   const calls = [];
+  // SG-1.6 — environment / linked-resource references, used by graph-sync to
+  // build File ─READS→ Table edges (W4) and to resolve Resource.X.value to the
+  // same infra node as process.env.X (W7). Additive: does not alter any
+  // existing per-file output field.
+  const envRefs = { env: new Set(), resource: new Set() };
 
   walk(tree.rootNode, (node) => {
+    // process.env.X  and  Resource.X[.value]  member-expression scan (SG-1.6).
+    if (node.type === 'member_expression') {
+      const obj = node.childForFieldName('object');
+      const prop = node.childForFieldName('property');
+      const propName = prop?.type === 'property_identifier' ? prop.text : null;
+      if (obj?.type === 'member_expression' && propName) {
+        const oo = obj.childForFieldName('object');
+        const op = obj.childForFieldName('property');
+        // process.env.X → env var X
+        if (oo?.text === 'process' && op?.text === 'env') envRefs.env.add(propName);
+        // Resource.X.value → linked resource logical id X
+        if (oo?.text === 'Resource' && op?.type === 'property_identifier') {
+          envRefs.resource.add(op.text);
+        }
+      }
+      // Resource.X (no trailing .value)
+      if (obj?.type === 'identifier' && obj.text === 'Resource' && propName) {
+        envRefs.resource.add(propName);
+      }
+    }
+    // Bracket form: Resource['X'] and process.env['X'] (subscript_expression).
+    // The real code uses `Resource['GithubPat'].value`, not the dotted form.
+    if (node.type === 'subscript_expression') {
+      const obj = node.childForFieldName('object');
+      const index = node.childForFieldName('index');
+      const key = index?.type === 'string' ? index.text.slice(1, -1) : null;
+      if (key) {
+        if (obj?.type === 'identifier' && obj.text === 'Resource') envRefs.resource.add(key);
+        if (obj?.type === 'member_expression') {
+          const oo = obj.childForFieldName('object');
+          const op = obj.childForFieldName('property');
+          if (oo?.text === 'process' && op?.text === 'env') envRefs.env.add(key);
+        }
+      }
+    }
+
     switch (node.type) {
       // Imports — `import { X } from 'source'` and `import 'side-effect'`
       case 'import_statement': {
@@ -392,7 +434,13 @@ function extractFromTree(tree) {
     }
   });
 
-  return { imports, functions, classes, calls };
+  return {
+    imports,
+    functions,
+    classes,
+    calls,
+    envRefs: { env: [...envRefs.env], resource: [...envRefs.resource] },
+  };
 }
 
 // ── Arg parsing ─────────────────────────────────────────────────────────
@@ -666,33 +714,49 @@ async function main() {
     });
   }
 
+  // SG-1.6 — aggregate per-file env/resource refs into a top-level map keyed by
+  // the file's relative path. graph-sync converts the path to its `code/` nodeId
+  // and joins against infra-extract's envJoin to build READS edges. Additive.
+  const envRefsByFile = {};
+  for (const f of out) {
+    const er = f.envRefs;
+    if (er && (er.env.length > 0 || er.resource.length > 0)) {
+      envRefsByFile[f.path] = er;
+    }
+  }
+
   const doc = {
     generatedAt: new Date().toISOString(),
     root: args.root,
     fileCount: out.length,
     skipped,
     files: out,
+    envRefsByFile,
   };
   process.stdout.write(JSON.stringify(doc, null, 2) + '\n');
 }
 
-main().catch((err) => {
-  console.error('[ast-extract] fatal:', err.message);
-  if (err.stack) console.error(err.stack);
-  // Non-zero exit so the shell step records the failure, but still write a
-  // minimal JSON so downstream parsing doesn't blow up.
-  try {
-    process.stdout.write(
-      JSON.stringify({
-        generatedAt: new Date().toISOString(),
-        fileCount: 0,
-        skipped: [],
-        files: [],
-        error: err.message,
-      }) + '\n',
-    );
-  } catch {
-    // ignore
-  }
-  process.exit(1);
-});
+// Only auto-run the CLI when invoked directly (keeps extractFromTree and the
+// process.env/Resource scan importable in tests without triggering main()).
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch((err) => {
+    console.error('[ast-extract] fatal:', err.message);
+    if (err.stack) console.error(err.stack);
+    // Non-zero exit so the shell step records the failure, but still write a
+    // minimal JSON so downstream parsing doesn't blow up.
+    try {
+      process.stdout.write(
+        JSON.stringify({
+          generatedAt: new Date().toISOString(),
+          fileCount: 0,
+          skipped: [],
+          files: [],
+          error: err.message,
+        }) + '\n',
+      );
+    } catch {
+      // ignore
+    }
+    process.exit(1);
+  });
+}

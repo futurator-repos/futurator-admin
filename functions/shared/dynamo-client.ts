@@ -15,6 +15,9 @@ export const TABLE_NAMES = {
   users: process.env.USERS_TABLE || 'futurator-admin-users',
   alerts: process.env.ALERTS_TABLE || 'futurator-admin-alerts',
   agentJobs: process.env.AGENT_JOBS_TABLE || 'futurator-agent-jobs',
+  // Epic 6 — Story 6.5: consent-gated PROPAGATOR proposals (substrate-targeted
+  // port-briefs awaiting operator approve/reject). PK proposalId; low volume.
+  propagatorProposals: process.env.PROPAGATOR_PROPOSALS_TABLE || 'futurator-propagator-proposals',
   agentEvents: process.env.AGENT_EVENTS_TABLE || 'futurator-agent-events',
   partyEvents: process.env.PARTY_EVENTS_TABLE || 'futurator-party-events',
   epicWorkflows: process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflows',

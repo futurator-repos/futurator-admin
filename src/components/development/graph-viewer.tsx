@@ -4,11 +4,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import {
   articleUrl,
+  centralityRadius,
+  communityColor,
   computeCoverage,
   computeIsolated,
+  integrityHeadline,
   ISOLATION_COPY,
+  maxCentrality,
   type IsolatedNode,
+  type DeadCodeReport,
+  type OrphanReport,
+  type ArchInsights,
+  type CapabilityGapReport,
 } from '@/lib/graph-insights';
+import { DeadCodePanel } from './dead-code-panel';
+import { ArchXrayPanel } from './arch-xray-panel';
+import { CapabilityGapPanel } from './capability-gap-panel';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
   ssr: false,
@@ -245,6 +256,53 @@ export function GraphViewer({
   );
   const [isolatedOpen, setIsolatedOpen] = useState(false);
 
+  // ── Epic 2: "Dead code / unreferenced" — graph-integrity reports ─────────
+  // Read knowledge/_graph/{dead-code,orphans}.json from the same live S3 mirror
+  // the snapshot comes from. Refreshed in lockstep with the snapshot. Additive,
+  // non-blocking — a missing report just shows the empty/unknown state.
+  const [deadCode, setDeadCode] = useState<DeadCodeReport | null>(null);
+  const [orphanReport, setOrphanReport] = useState<OrphanReport | null>(null);
+  // ── Epic 3: Architectural X-ray — insights.json (centrality/communities) ──
+  const [archInsights, setArchInsights] = useState<ArchInsights | null>(null);
+  const [overlayEnabled, setOverlayEnabled] = useState(true);
+  // ── Epic 5: capability coverage gaps — capability-gaps.json (--global only) ─
+  const [capabilityGaps, setCapabilityGaps] = useState<CapabilityGapReport | null>(null);
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    const base = `${S3_BASE}/${encodeURIComponent(projectId)}/_graph`;
+    const pull = async <T,>(file: string): Promise<T | null> => {
+      try {
+        const res = await fetch(`${base}/${file}?t=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) return null;
+        return (await res.json()) as T;
+      } catch {
+        return null;
+      }
+    };
+    (async () => {
+      const [dc, orph, ins, gaps] = await Promise.all([
+        pull<DeadCodeReport>('dead-code.json'),
+        pull<OrphanReport>('orphans.json'),
+        pull<ArchInsights>('insights.json'),
+        pull<CapabilityGapReport>('capability-gaps.json'),
+      ]);
+      if (!cancelled) {
+        setDeadCode(dc);
+        setOrphanReport(orph);
+        setArchInsights(ins);
+        setCapabilityGaps(gaps);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, lastFetchedAt]);
+  const integrity = useMemo(() => integrityHeadline(orphanReport), [orphanReport]);
+  const maxC = useMemo(() => maxCentrality(archInsights), [archInsights]);
+  // Overlay is live only when enabled AND the analytics pass produced metrics.
+  const overlayActive = overlayEnabled && !!archInsights?.mageAvailable;
+
   // Compiler activity feed — the wiki's log.md from the live S3 mirror.
   const [logTail, setLogTail] = useState<string | null>(null);
   const [logOpen, setLogOpen] = useState(false);
@@ -472,8 +530,24 @@ export function GraphViewer({
                 const kind = g.kind ?? g.type;
                 return `${g.title} (${kind})`;
               }}
-              nodeColor={(n: object) => colorForNode(n as unknown as GraphNode)}
-              nodeVal={(n: object) => radiusForNode(n as unknown as GraphNode)}
+              nodeColor={(n: object) => {
+                const g = n as unknown as GraphNode;
+                if (overlayActive) {
+                  const m = archInsights?.nodeMetrics[g.id];
+                  if (m && m.community != null) return communityColor(m.community);
+                }
+                return colorForNode(g);
+              }}
+              nodeVal={(n: object) => {
+                const g = n as unknown as GraphNode;
+                if (overlayActive) {
+                  const m = archInsights?.nodeMetrics[g.id];
+                  if (m && typeof m.centrality === 'number') {
+                    return centralityRadius(m.centrality, maxC, radiusForNode(g));
+                  }
+                }
+                return radiusForNode(g);
+              }}
               nodeRelSize={3}
               linkColor={(l: object) => {
                 const e = l as unknown as GraphEdge;
@@ -683,6 +757,43 @@ export function GraphViewer({
             </div>
           )}
         </div>
+      )}
+
+      {/* ── Epic 2 — "Dead code / unreferenced" + orphan-invariant status ── */}
+      {snapshot && (
+        <DeadCodePanel
+          deadCode={deadCode}
+          integrity={integrity}
+          fileColor={NODE_COLORS_BY_KIND.file ?? NODE_COLORS_BY_KIND.unknown}
+          onSelect={(nodeId) => {
+            const node = snapshot.nodes.find((n) => n.id === nodeId);
+            if (node) setSelectedNode(node);
+          }}
+        />
+      )}
+
+      {/* ── Epic 3 — Architectural X-ray: god-nodes, communities, bridges ── */}
+      {snapshot && (
+        <ArchXrayPanel
+          insights={archInsights}
+          overlayEnabled={overlayEnabled}
+          onToggleOverlay={setOverlayEnabled}
+          onSelect={(nodeId) => {
+            const node = snapshot.nodes.find((n) => n.id === nodeId);
+            if (node) setSelectedNode(node);
+          }}
+        />
+      )}
+
+      {/* ── Epic 5 — Capability coverage gaps (W8, --global federation) ──── */}
+      {snapshot && (
+        <CapabilityGapPanel
+          report={capabilityGaps}
+          onSelect={(nodeId) => {
+            const node = snapshot.nodes.find((n) => n.id === nodeId);
+            if (node) setSelectedNode(node);
+          }}
+        />
       )}
 
       {/* ── pacman1 UX — compiler activity (knowledge/log.md tail) ───────── */}

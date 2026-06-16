@@ -387,6 +387,24 @@ export default $config({
       },
     });
 
+    // ── Epic 6 — Story 6.5: consent-gated PROPAGATOR proposals ──
+    // Substrate-targeted port-briefs filed as PROPOSED sibling stories awaiting
+    // operator approve/reject. PK = proposalId. Low volume (a handful per wave
+    // gate). PITR enabled — losing an approved propagation decision would
+    // silently re-brief the same change.
+    const propagatorProposalsTable = new sst.aws.Dynamo('PropagatorProposalsTable', {
+      fields: { proposalId: 'string' },
+      primaryIndex: { hashKey: 'proposalId' },
+      transform: {
+        table: {
+          name: 'futurator-propagator-proposals',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── Pipeline v2 Phase 3 — Story 3-E-3-1 (PR-76): Reflection Inbox ──
     // REFLECTOR proposals stored per-project. PK = projectSlug (Query for
     // labs UI per-project view); SK = id (ULID-shape, sort-friendly).
@@ -842,6 +860,7 @@ export default $config({
         usersTable,
         alertsTable,
         agentJobsTable,
+        propagatorProposalsTable,
         agentEventsTable,
         epicWorkflowsTable,
         projectRegistryTable,
@@ -876,6 +895,8 @@ export default $config({
         USERS_TABLE: usersTable.name,
         ALERTS_TABLE: alertsTable.name,
         AGENT_JOBS_TABLE: agentJobsTable.name,
+        // Epic 6 — Story 6.5: consent-gated PROPAGATOR proposals queue.
+        PROPAGATOR_PROPOSALS_TABLE: propagatorProposalsTable.name,
         AGENT_EVENTS_TABLE: agentEventsTable.name,
         EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
         PROJECT_REGISTRY_TABLE: projectRegistryTable.name,

@@ -19,9 +19,9 @@
  *   VOYAGE_API_KEY     — Required for embedding
  */
 
-import { readdir, readFile, writeFile, rename, stat, mkdir } from 'node:fs/promises';
+import { readdir, readFile, writeFile, rename, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { join, relative, dirname, basename } from 'node:path';
+import { join, relative, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +29,32 @@ import { createDriver } from './lib/memgraph-driver.mjs';
 import { embedBatch, getUsageStats, resetUsageStats } from './lib/voyage-embed.mjs';
 import { backupToS3 } from './lib/s3-backup.mjs';
 import { loadAliasMap, resolveImportSource } from './lib/import-resolver.mjs';
+import {
+  upsertExtractedFacts,
+  upsertEnvReads,
+  upsertCallsEndpoint,
+} from './lib/system-graph-ingest.mjs';
+import {
+  emitContainmentBackbone,
+  reportOrphans,
+  reportDeadCode,
+} from './lib/graph-integrity.mjs';
+import { runAnalytics, buildInsightsDoc } from './graph-analytics.mjs';
+import { readContracts, federateContracts, writeFederation } from './lib/federation.mjs';
+import {
+  buildCapabilityIngest,
+  writeCapabilities,
+  findCapabilityGaps,
+} from './lib/capability.mjs';
+import { diffContracts, CONTRACT_NODE_KINDS } from './contract-diff.mjs';
+import { buildRevisions, appendRevisions } from './lib/contract-revision.mjs';
+import {
+  readRecentChanges,
+  perSiblingDrift,
+  buildBriefs,
+  buildProposals,
+  shouldPropagate,
+} from './propagator.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -45,6 +71,11 @@ function parseArgs() {
     skipBackup: false,
     skipEmbed: false,
     dryRun: false,
+    centralityThreshold: 0,
+    global: false,
+    federationConfig: join(__dirname, '..', 'config', 'federation.json'),
+    waveGate: null,
+    atCommit: null,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -69,6 +100,21 @@ function parseArgs() {
         break;
       case '--dry-run':
         parsed.dryRun = true;
+        break;
+      case '--centrality-threshold':
+        parsed.centralityThreshold = Number(args[++i]) || 0;
+        break;
+      case '--global':
+        parsed.global = true;
+        break;
+      case '--federation-config':
+        parsed.federationConfig = args[++i];
+        break;
+      case '--wave-gate':
+        parsed.waveGate = args[++i];
+        break;
+      case '--at-commit':
+        parsed.atCommit = args[++i];
         break;
       case '--help':
         printUsage();
@@ -109,6 +155,12 @@ Optional:
   --skip-backup           Skip S3 backup step
   --skip-embed            Skip Voyage AI embedding (use existing embeddings)
   --dry-run               Show what would change without making changes
+  --centrality-threshold <n>  Surprising-connections centrality floor (Epic 3, default 0)
+  --global                Federate the cross-project contract spine (Epic 5):
+                          CONSUMES_CONTRACT + capability ingest + coverage gaps
+  --federation-config <path>  Join-strategy config (default: daemon/config/federation.json)
+  --wave-gate <id>        Wave-gate id stamped onto appended :ContractRevision nodes (Epic 6.2)
+  --at-commit <sha>       Commit stamped onto appended revisions (default: git HEAD of the repo)
   --help                  Show this help message
 `);
 }
@@ -376,7 +428,13 @@ async function main() {
   if (articlesToProcess.length === 0 && deletedNodeIds.length === 0) {
     log('Nothing to sync — all articles up to date');
     await processAstFacts(config);
+    await processSystemGraphFacts(config);
+    await processGraphIntegrity(config);
     await writeGraphSnapshot(config);
+    await processGraphAnalytics(config);
+    await processContractRevisions(config);
+    await processFederation(config);
+    await processPropagator(config);
     if (!config.skipBackup) {
       await runS3Backup(config);
     }
@@ -582,8 +640,20 @@ async function main() {
   // ── Step 8.4: AST grounding (Slice B) ────────────────────────────
   await processAstFacts(config);
 
+  // ── Step 8.45: System graph grounding (Pipeline v3 / Epic 1) ─────
+  await processSystemGraphFacts(config);
+
+  // ── Step 8.47: Graph integrity — orphans + dead code (Epic 2) ────
+  await processGraphIntegrity(config);
+
   // ── Step 8.5: Graph snapshot for in-app visualization ────────────
   await writeGraphSnapshot(config);
+
+  // ── Step 8.6: Architectural X-Ray analytics — insights.json (Epic 3) ─
+  await processGraphAnalytics(config);
+
+  // ── Step 8.7: Cross-project contract spine — federation (Epic 5, --global) ─
+  await processFederation(config);
 
   // ── Step 9: S3 Backup (non-blocking) ─────────────────────────────
   if (!config.skipBackup) {
@@ -659,16 +729,19 @@ async function processAstFacts(config) {
 
   const driver = createDriver();
   const session = driver.session();
+  const today = new Date().toISOString().split('T')[0];
   let funcUpserts = 0;
   let classUpserts = 0;
   let definesEdges = 0;
   let importsEdges = 0;
   let callsEdges = 0;
+  const backboneFiles = [];
 
   try {
   for (const file of facts.files) {
     if (file.parseError) continue;
     const fileNodeId = fileToCodeNodeId(file.path);
+    backboneFiles.push(file.path);
 
     // Mark the parent file node as kind="file" — idempotent SET.
     // The file's :Node may not exist yet if Compiler hasn't written a wiki
@@ -794,9 +867,537 @@ async function processAstFacts(config) {
   log(
     `AST grounding: ${funcUpserts} functions, ${classUpserts} classes, ${definesEdges} DEFINES, ${importsEdges} IMPORTS, ${callsEdges} CALLS`
   );
+
+  // ── Story 2.1: containment backbone (dir ─CONTAINS→ file) ──────────────
+  // Emitted unconditionally so no file node is ever degree-0 for purely
+  // structural reasons — and so the dead-code detector (2.3) can use a
+  // different query than the orphan invariant (2.2).
+  const { dirNodes, containsEdges } = await emitContainmentBackbone(
+    session,
+    config.project,
+    backboneFiles,
+    today,
+  );
+  log(`Containment backbone: ${dirNodes} dir nodes, ${containsEdges} CONTAINS edges`);
   } finally {
     await session.close();
     await driver.close();
+  }
+}
+
+// ── Pipeline v3: System graph (infra / route / service) ingest ─────────────
+
+/**
+ * System-graph extractor envelopes are written to `<root>/.mycelium/` by the
+ * wave-gate slot (see bootstrap-ast.mjs / the extractor scripts), one JSON file
+ * per extractor. This reads whichever are present and feeds each through the
+ * single ingest entrypoint `upsertExtractedFacts`. Co-exists with the AST
+ * grounding above — same `:Node {nodeId}` model, additive `MERGE`, no schema
+ * change. Non-blocking: a missing/malformed envelope is logged and skipped.
+ *
+ * Story SG-1.1 (ingest); SG-1.2/1.4/1.5 produce the envelopes; SG-1.6 adds the
+ * env-join + CALLS_ENDPOINT passes.
+ */
+async function processSystemGraphFacts(config) {
+  const myceliumDir = join(config.knowledgeDir, '..', '.mycelium');
+  const readJson = async (file) => {
+    const p = join(myceliumDir, file);
+    if (!existsSync(p)) return null;
+    try {
+      return JSON.parse(await readFile(p, 'utf-8'));
+    } catch (err) {
+      logError(`system-graph ${file} malformed: ${err.message}`);
+      return null;
+    }
+  };
+
+  const infraDoc = await readJson('infra-facts.json');
+  const routeDoc = await readJson('route-facts.json');
+  const serviceDoc = await readJson('service-facts.json');
+  const astDoc = await readJson('ast-facts.json');
+  const apiCallsDoc = await readJson('api-calls.json');
+
+  const factDocs = [
+    ['infra', infraDoc],
+    ['route', routeDoc],
+    ['service', serviceDoc],
+  ].filter(([, d]) => d);
+
+  if (factDocs.length === 0) {
+    log('No system-graph extractor facts found, skipping system-graph grounding');
+    return;
+  }
+
+  const today = new Date().toISOString().split('T')[0];
+  const driver = createDriver();
+  const session = driver.session();
+  let totalNodes = 0;
+  let totalEdges = 0;
+
+  try {
+    // 1) Ingest infra / route / service nodes + edges (idempotent).
+    for (const [name, doc] of factDocs) {
+      const { nodeUpserts, edgeUpserts, skippedEdges } = await upsertExtractedFacts(
+        session,
+        config.project,
+        doc,
+        today,
+      );
+      totalNodes += nodeUpserts;
+      totalEdges += edgeUpserts;
+      if (skippedEdges.length > 0) {
+        log(`system-graph ${name}: ${skippedEdges.length} edges/nodes skipped (unresolved or not allowlisted)`);
+      }
+    }
+    log(`System graph grounding: ${totalNodes} nodes, ${totalEdges} edges from ${factDocs.length} extractor(s)`);
+
+    // 2) Env-join — File ─READS→ Table/Secret (W4 accessor-aware, W7 Resource.*).
+    if (infraDoc && astDoc?.envRefsByFile) {
+      const { directReads, transitiveReads } = await upsertEnvReads(
+        session,
+        config.project,
+        infraDoc,
+        astDoc.envRefsByFile,
+        today,
+      );
+      log(`System graph env-join: ${directReads} direct + ${transitiveReads} transitive READS`);
+    }
+
+    // 3) CALLS_ENDPOINT — component → endpoint (W1), api-client paths under /api.
+    if (routeDoc?.nodes && apiCallsDoc?.calls) {
+      const endpoints = routeDoc.nodes.filter((n) => n.kind === 'endpoint');
+      const { edgeUpserts } = await upsertCallsEndpoint(
+        session,
+        config.project,
+        apiCallsDoc.calls,
+        endpoints,
+        today,
+        { basePath: '/api' },
+      );
+      log(`System graph CALLS_ENDPOINT: ${edgeUpserts} edges`);
+    }
+  } finally {
+    await session.close();
+    await driver.close();
+  }
+}
+
+// ── Epic 2: "No Alone Dots" — graph integrity (orphans + dead code) ────────
+
+/**
+ * Run the two distinct post-sync integrity queries (PRD §4.2) and write their
+ * reports to `knowledge/_graph/`:
+ *
+ *   - orphans.json   — the extractor-bug tripwire (Story 2.2). Degree-0 nodes
+ *                      grouped by kind. A non-`file` orphan means an extractor
+ *                      dropped an edge; it is a HARD FAILURE that blocks the
+ *                      wave gate (graph-sync exits non-zero).
+ *   - dead-code.json — genuine dead code (Story 2.3). Files whose only edge is
+ *                      CONTAINS. A non-blocking, advisory finding.
+ *
+ * These are deliberately different queries (W2): a dead file carries its
+ * CONTAINS edge so it appears in dead-code.json and NOT in orphans.json.
+ *
+ * Non-blocking on infrastructure errors (missing Memgraph, etc.) — those are
+ * logged and skipped. The ONLY thing that fails the step is a real non-`file`
+ * orphan, which is a genuine extractor regression.
+ */
+async function processGraphIntegrity(config) {
+  const graphDir = join(config.knowledgeDir, '_graph');
+  const writeReport = async (name, doc) => {
+    await mkdir(graphDir, { recursive: true });
+    const p = join(graphDir, name);
+    const tmp = p + '.tmp';
+    await writeFile(tmp, JSON.stringify(doc, null, 2), 'utf-8');
+    await rename(tmp, p);
+  };
+
+  let driver;
+  try {
+    driver = createDriver();
+    const session = driver.session();
+    try {
+      const generatedAt = new Date().toISOString();
+
+      // ── Story 2.2: orphan invariant ──────────────────────────────────
+      const { orphans, byKind, hardFail } = await reportOrphans(session, config.project);
+      const blocked = hardFail.length > 0;
+      await writeReport('orphans.json', {
+        projectId: config.project,
+        generatedAt,
+        status: blocked ? 'fail' : 'pass',
+        orphanCount: orphans.length,
+        hardFailCount: hardFail.length,
+        byKind,
+        orphans,
+        hardFail,
+      });
+
+      // ── Story 2.3: dead-code detector ────────────────────────────────
+      const deadCode = await reportDeadCode(session, config.project);
+      await writeReport('dead-code.json', {
+        projectId: config.project,
+        generatedAt,
+        count: deadCode.length,
+        candidates: deadCode,
+      });
+
+      if (blocked) {
+        // Wave-gate gating hook: a non-`file` orphan is an extractor bug, not a
+        // finding. Surface it loudly and fail the step (the compile-sync shell
+        // step maps a non-zero exit → pipeline failure → blocked wave gate).
+        const summary = hardFail
+          .map((o) => `${o.kind}:${o.id}`)
+          .slice(0, 20)
+          .join(', ');
+        logError(
+          `Orphan invariant FAILED — ${hardFail.length} non-file orphan(s) (extractor dropped an edge): ${summary}`,
+        );
+        process.exitCode = 3;
+      } else {
+        log(
+          `Graph integrity OK: ${orphans.length} orphan(s) (all soft), ${deadCode.length} dead-code candidate(s)`,
+        );
+      }
+    } finally {
+      await session.close();
+      await driver.close();
+    }
+  } catch (err) {
+    // Infrastructure failure (no Memgraph, etc.) — non-blocking, like the
+    // snapshot/backup steps. A real extractor bug surfaces via the orphan query
+    // above, not here.
+    logError(`graph-integrity check failed (non-blocking): ${err.message}`);
+    if (driver) {
+      try {
+        await driver.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+// ── Epic 3: Architectural X-Ray — centrality, communities, surprising links ─
+
+/**
+ * Run the MAGE analytics pass (PRD §5.4 / Appendix D) and write
+ * `knowledge/_graph/insights.json` for the Graph tab:
+ *
+ *   - Story 3.1: god-nodes via betweenness centrality (`n.centrality`)
+ *   - Story 3.2: communities via Louvain (`n.community`)
+ *   - Story 3.3: surprising connections (cross-community high-centrality edges)
+ *
+ * A DISTINCT, post-sync read+annotate pass — it never touches the ingest
+ * write-path. Fully non-blocking: a missing MAGE install (or no Memgraph at all)
+ * degrades to a well-formed insights.json with the dimension's `*Available` flag
+ * false, and never fails the sync.
+ */
+async function processGraphAnalytics(config) {
+  const graphDir = join(config.knowledgeDir, '_graph');
+  const threshold = config.centralityThreshold ?? 0;
+
+  let driver;
+  try {
+    driver = createDriver();
+    const session = driver.session();
+    try {
+      const generatedAt = new Date().toISOString();
+      const analytics = await runAnalytics(session, config.project, { threshold, logger: log });
+      const doc = buildInsightsDoc({ projectId: config.project, generatedAt, analytics, threshold });
+
+      await mkdir(graphDir, { recursive: true });
+      const p = join(graphDir, 'insights.json');
+      const tmp = p + '.tmp';
+      await writeFile(tmp, JSON.stringify(doc, null, 2), 'utf-8');
+      await rename(tmp, p);
+
+      if (analytics.mageAvailable) {
+        log(
+          `Graph analytics: ${analytics.godNodes.length} god-node(s), ` +
+            `${analytics.communities.length} communit${analytics.communities.length === 1 ? 'y' : 'ies'}, ` +
+            `${analytics.surprising.length} surprising connection(s)`,
+        );
+      } else {
+        log('Graph analytics: MAGE unavailable — wrote empty insights.json (overlay disabled in UI)');
+      }
+    } finally {
+      await session.close();
+      await driver.close();
+    }
+  } catch (err) {
+    logError(`graph-analytics pass failed (non-blocking): ${err.message}`);
+    if (driver) {
+      try {
+        await driver.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+/** Best-effort current commit of the project repo (for revision provenance). */
+function headCommit(cwd) {
+  return new Promise((resolve) => {
+    execFile('git', ['rev-parse', 'HEAD'], { cwd }, (err, stdout) => {
+      resolve(err ? null : stdout.trim() || null);
+    });
+  });
+}
+
+/** Read this project's contract-bearing nodes with their shape props. */
+async function readProjectContracts(session, projectId) {
+  const r = await session.run(
+    `MATCH (n:Node {projectId: $projectId}) WHERE n.kind IN $kinds
+     RETURN n.nodeId AS nodeId, n.kind AS kind, n.name AS name,
+            coalesce(n.title, n.label, n.nodeId) AS label,
+            n.fields AS fields, n.primaryIndex AS primaryIndex,
+            n.method AS method, n.path AS path, n.host AS host`,
+    { projectId, kinds: CONTRACT_NODE_KINDS },
+  );
+  return r.records.map((rec) => ({
+    nodeId: rec.get('nodeId'),
+    kind: rec.get('kind'),
+    name: rec.get('name') ?? null,
+    label: rec.get('label'),
+    fields: rec.get('fields') ?? null,
+    primaryIndex: rec.get('primaryIndex') ?? null,
+    method: rec.get('method') ?? null,
+    path: rec.get('path') ?? null,
+    host: rec.get('host') ?? null,
+  }));
+}
+
+/**
+ * Epic 6 — Story 6.2 (W6). The :ContractRevision append-log. A DISTINCT,
+ * post-sync per-project pass: diff this sync's contract shapes against the
+ * previous snapshot (`knowledge/_graph/contract-snapshot.json`), append one
+ * `:ContractRevision` per shape change linked `(:Node)-[:REVISED]->(rev)`, and
+ * persist the new snapshot as the next "before". The snapshot file IS the
+ * temporal source the stateless graph lacks.
+ *
+ * First run (no prior snapshot) only records the baseline — it never floods the
+ * log with "everything is new". Fully non-blocking; never mutates contract-node
+ * `status` (forbidden area).
+ */
+async function processContractRevisions(config) {
+  const graphDir = join(config.knowledgeDir, '_graph');
+  const snapPath = join(graphDir, 'contract-snapshot.json');
+
+  let driver;
+  try {
+    driver = createDriver();
+    const session = driver.session();
+    try {
+      const after = await readProjectContracts(session, config.project);
+
+      // Load the previous snapshot ("before"); first run → baseline only.
+      let before = null;
+      try {
+        before = JSON.parse(await readFile(snapPath, 'utf-8')).contracts ?? [];
+      } catch {
+        before = null;
+      }
+
+      await mkdir(graphDir, { recursive: true });
+      const snapDoc = { projectId: config.project, generatedAt: new Date().toISOString(), contracts: after };
+      const stmp = snapPath + '.tmp';
+      await writeFile(stmp, JSON.stringify(snapDoc, null, 2), 'utf-8');
+      await rename(stmp, snapPath);
+
+      if (before === null) {
+        log(`Contract revisions: baseline recorded (${after.length} contract node(s)); no revisions on first run`);
+        return;
+      }
+
+      const diff = diffContracts(before, after);
+      if (diff.changes.length === 0) {
+        log('Contract revisions: no contract-shape changes this wave');
+        return;
+      }
+
+      const atCommit =
+        config.atCommit ?? (await headCommit(join(config.knowledgeDir, '..')));
+      const ts = new Date().toISOString();
+      const revisions = buildRevisions(diff, { atCommit, atWave: config.waveGate ?? null, ts }).map(
+        (rev) => ({ ...rev, projectId: config.project }),
+      );
+      const appended = await appendRevisions(session, revisions);
+      log(
+        `Contract revisions: appended ${appended.revisions} (${diff.added} new, ` +
+          `${diff.removed} removed, ${diff.modified} modified)` +
+          (config.waveGate ? ` at ${config.waveGate}` : ''),
+      );
+    } finally {
+      await session.close();
+      await driver.close();
+    }
+  } catch (err) {
+    logError(`contract-revision pass failed (non-blocking): ${err.message}`);
+    if (driver) {
+      try {
+        await driver.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+/**
+ * Epic 5 — Cross-project contract spine (`--global` only). A DISTINCT,
+ * post-sync federation pass over the SHARED federated graph; the single-project
+ * write-path above is untouched (forbidden area). Three additive steps:
+ *
+ *   5.1  CONSUMES_CONTRACT — join each sibling `service` subgraph to shared
+ *        contract nodes (resource-identity or schema-shape, per config).
+ *   5.2  Capability ingest — MERGE the curated `capabilities.json` seed into
+ *        `capability` nodes + IMPLEMENTS edges (DECLARED provenance).
+ *   5.3  Capability coverage gaps — flag components touching a shared contract
+ *        with no capability tag → `knowledge/_graph/capability-gaps.json` (W8).
+ *
+ * Fully non-blocking: any infra/Memgraph error is logged and skipped.
+ */
+async function processFederation(config) {
+  if (!config.global) return;
+  const graphDir = join(config.knowledgeDir, '_graph');
+
+  // Load the join strategy (5.4) — default resource-identity on any read error.
+  let strategy = 'resource-identity';
+  try {
+    const cfg = JSON.parse(await readFile(config.federationConfig, 'utf-8'));
+    if (cfg.strategy) strategy = cfg.strategy;
+  } catch (err) {
+    log(`Federation: using default strategy 'resource-identity' (${err.message})`);
+  }
+
+  let driver;
+  try {
+    driver = createDriver();
+    const session = driver.session();
+    try {
+      // 5.1 — federate contract spine
+      const projects = await readContracts(session);
+      const result = federateContracts(projects, { strategy });
+      const fed = await writeFederation(session, result);
+      log(
+        `Federation [${strategy}]: ${fed.contractNodes} shared contract node(s), ` +
+          `${fed.consumes} CONSUMES_CONTRACT edge(s) across ${projects.length} project(s)` +
+          (result.unjoinable.length ? `; ${result.unjoinable.length} unjoinable` : ''),
+      );
+
+      // 5.2 — capability ingest (curated seed)
+      try {
+        const seedRaw = await readFile(join(graphDir, 'capabilities.json'), 'utf-8');
+        const seed = JSON.parse(seedRaw).capabilities ?? [];
+        const cap = await writeCapabilities(session, buildCapabilityIngest(seed));
+        log(`Capabilities: ${cap.capabilityNodes} node(s), ${cap.implementsEdges} IMPLEMENTS edge(s)`);
+      } catch (err) {
+        log(`Capabilities: no seed ingested (${err.message})`);
+      }
+
+      // 5.3 — capability coverage gaps (W8)
+      const gaps = await findCapabilityGaps(session, config.project);
+      await mkdir(graphDir, { recursive: true });
+      const gapsDoc = {
+        projectId: config.project,
+        generatedAt: new Date().toISOString(),
+        gapCount: gaps.length,
+        gaps,
+      };
+      const gp = join(graphDir, 'capability-gaps.json');
+      const gtmp = gp + '.tmp';
+      await writeFile(gtmp, JSON.stringify(gapsDoc, null, 2), 'utf-8');
+      await rename(gtmp, gp);
+      log(`Capability coverage gaps: ${gaps.length} untagged contract-touching component(s)`);
+    } finally {
+      await session.close();
+      await driver.close();
+    }
+  } catch (err) {
+    logError(`federation pass failed (non-blocking): ${err.message}`);
+    if (driver) {
+      try {
+        await driver.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+/**
+ * Epic 6 — Story 6.5. The PROPAGATOR pass (`--global` only). Turns this wave's
+ * contract drift into CONSENT-GATED, substrate-targeted port-briefs and writes
+ * them to `knowledge/_graph/propagator-proposals.json`. An ingest step files
+ * them into the proposals queue (DynamoDB) where a human approves/rejects —
+ * NOTHING here is auto-applied (forbidden area: any auto-merge path).
+ *
+ * Trigger: wave-gate (default, when `--wave-gate` is set) or drift-threshold.
+ * Fully non-blocking; needs ≥2 federated subgraphs + capability seed to emit.
+ */
+async function processPropagator(config) {
+  if (!config.global) return;
+  const graphDir = join(config.knowledgeDir, '_graph');
+
+  let driver;
+  try {
+    driver = createDriver();
+    const session = driver.session();
+    try {
+      const changes = await readRecentChanges(session);
+      const report = await perSiblingDrift(session, { sourceProject: config.project, changes });
+      const driftCounts = Object.fromEntries(report.map((r) => [r.sibling, r.pendingCount]));
+      const trigger = config.waveGate ? 'wave-gate' : 'drift-threshold';
+
+      if (!shouldPropagate({ trigger, driftCounts, threshold: 1 })) {
+        log('PROPAGATOR: no trigger (no sibling drift past threshold)');
+        return;
+      }
+
+      // Capability seed → substrate-targeted briefs.
+      let capabilities = [];
+      try {
+        capabilities = JSON.parse(await readFile(join(graphDir, 'capabilities.json'), 'utf-8')).capabilities ?? [];
+      } catch {
+        capabilities = [];
+      }
+
+      const reportWithTrigger = report.map((r) => ({ ...r, changes: r.changes }));
+      const briefs = buildBriefs(reportWithTrigger, {
+        sourceProject: config.project,
+        trigger,
+        capabilities,
+      }).map((b) => ({ ...b, trigger }));
+
+      const ts = new Date().toISOString();
+      const proposals = buildProposals(briefs, {
+        sourceProject: config.project,
+        atCommit: config.atCommit ?? null,
+        ts,
+      });
+
+      await mkdir(graphDir, { recursive: true });
+      const doc = { sourceProject: config.project, generatedAt: ts, trigger, proposalCount: proposals.length, proposals };
+      const p = join(graphDir, 'propagator-proposals.json');
+      const tmp = p + '.tmp';
+      await writeFile(tmp, JSON.stringify(doc, null, 2), 'utf-8');
+      await rename(tmp, p);
+      log(`PROPAGATOR [${trigger}]: ${proposals.length} consent-gated proposal(s) drafted (none auto-applied)`);
+    } finally {
+      await session.close();
+      await driver.close();
+    }
+  } catch (err) {
+    logError(`propagator pass failed (non-blocking): ${err.message}`);
+    if (driver) {
+      try {
+        await driver.close();
+      } catch {
+        /* already closed */
+      }
+    }
   }
 }
 

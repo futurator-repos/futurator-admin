@@ -3,7 +3,19 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { articleUrl, computeCoverage, computeIsolated, hasArticle } from '../graph-insights';
+import {
+  articleUrl,
+  centralityRadius,
+  communityColor,
+  COMMUNITY_PALETTE,
+  computeCoverage,
+  computeIsolated,
+  hasArticle,
+  integrityHeadline,
+  maxCentrality,
+  type ArchInsights,
+  type OrphanReport,
+} from '../graph-insights';
 
 const fileWithArticle = {
   id: 'code/src--game--maze.ts',
@@ -55,5 +67,73 @@ describe('articleUrl', () => {
     );
     expect(articleUrl('https://x/knowledge-live', 'pacman1', fileNoArticle)).toBeNull();
     expect(articleUrl('https://x/knowledge-live', 'pacman1', { ...fn, summary: 'doc' })).toBeNull();
+  });
+});
+
+describe('integrityHeadline (Epic 2 — orphan-invariant status)', () => {
+  const base: OrphanReport = {
+    projectId: 'futurator-admin',
+    generatedAt: '2026-06-16T00:00:00Z',
+    status: 'pass',
+    orphanCount: 0,
+    hardFailCount: 0,
+    byKind: {},
+    orphans: [],
+    hardFail: [],
+  };
+
+  it('reports unknown when no report exists', () => {
+    expect(integrityHeadline(null).tone).toBe('unknown');
+  });
+
+  it('reports pass when status is pass', () => {
+    const h = integrityHeadline({ ...base, status: 'pass' });
+    expect(h.tone).toBe('pass');
+    expect(h.label).toMatch(/pass/i);
+  });
+
+  it('reports fail with the hard-fail count when an extractor dropped an edge', () => {
+    const h = integrityHeadline({
+      ...base,
+      status: 'fail',
+      hardFailCount: 2,
+      hardFail: [
+        { id: 'infra/lambda/Api', kind: 'lambda' },
+        { id: 'endpoint/GET /x', kind: 'endpoint' },
+      ],
+    });
+    expect(h.tone).toBe('fail');
+    expect(h.label).toContain('2');
+    expect(h.detail).toMatch(/wave gate/i);
+  });
+});
+
+describe('Epic 3 — architectural X-ray helpers', () => {
+  it('communityColor cycles the color-blind-safe palette and is neutral when unassigned', () => {
+    expect(communityColor(0)).toBe(COMMUNITY_PALETTE[0]);
+    expect(communityColor(COMMUNITY_PALETTE.length)).toBe(COMMUNITY_PALETTE[0]); // wraps
+    expect(communityColor(null)).toBe('#64748b');
+    // stable: same community → same color across calls
+    expect(communityColor(3)).toBe(communityColor(3));
+  });
+
+  it('centralityRadius scales with centrality and floors at base', () => {
+    expect(centralityRadius(0, 1, 4)).toBe(4); // no centrality → base
+    expect(centralityRadius(null, 1, 4)).toBe(4);
+    expect(centralityRadius(1, 0, 4)).toBe(4); // no max → base (avoid /0)
+    expect(centralityRadius(1, 1, 4)).toBeGreaterThan(4); // max-centrality node is biggest
+    expect(centralityRadius(0.5, 1, 4)).toBeLessThan(centralityRadius(1, 1, 4));
+  });
+
+  it('maxCentrality finds the run maximum (0 when none / null insights)', () => {
+    expect(maxCentrality(null)).toBe(0);
+    const insights = {
+      nodeMetrics: {
+        a: { centrality: 0.2, community: 0 },
+        b: { centrality: 0.9, community: 1 },
+        c: { centrality: null, community: 1 },
+      },
+    } as unknown as ArchInsights;
+    expect(maxCentrality(insights)).toBe(0.9);
   });
 });

@@ -116,3 +116,180 @@ export function articleUrl(s3Base: string, projectId: string, node: InsightNode)
   if (!hasArticle(node) || node.id.includes('#')) return null;
   return `${s3Base}/${encodeURIComponent(projectId)}/${node.id}.md`;
 }
+
+// ── Epic 2: "No Alone Dots" integrity reports ──────────────────────────────
+// These mirror the JSON graph-sync writes to knowledge/_graph/ (PRD §4.2):
+//   - dead-code.json — files whose only edge is CONTAINS (advisory finding)
+//   - orphans.json   — degree-0 nodes; non-`file` orphans are extractor bugs
+
+export interface DeadCodeCandidate {
+  id: string;
+  updated?: string | null;
+  title?: string | null;
+}
+
+export interface DeadCodeReport {
+  projectId: string;
+  generatedAt: string;
+  count: number;
+  candidates: DeadCodeCandidate[];
+}
+
+export interface OrphanReport {
+  projectId: string;
+  generatedAt: string;
+  status: 'pass' | 'fail';
+  orphanCount: number;
+  hardFailCount: number;
+  byKind: Record<string, string[]>;
+  orphans: Array<{ id: string; kind: string }>;
+  hardFail: Array<{ id: string; kind: string }>;
+}
+
+export type IntegrityTone = 'pass' | 'fail' | 'unknown';
+
+export interface IntegrityHeadline {
+  tone: IntegrityTone;
+  label: string;
+  detail: string;
+}
+
+// ── Epic 3: Architectural X-Ray — centrality, communities, surprising links ─
+// Mirrors knowledge/_graph/insights.json written by the post-sync analytics
+// pass (PRD §5.4 / Appendix D). The Graph tab reads it to size nodes by
+// centrality, color them by community, and list surprising connections.
+
+export interface GodNode {
+  id: string;
+  kind: string;
+  title: string;
+  centrality: number;
+}
+
+export interface CommunityCount {
+  community: number;
+  count: number;
+}
+
+export interface SurprisingConnection {
+  source: string;
+  sourceTitle: string;
+  type: string;
+  target: string;
+  targetTitle: string;
+  sourceCommunity: number | null;
+  targetCommunity: number | null;
+  score: number | null;
+}
+
+export interface NodeMetric {
+  centrality: number | null;
+  community: number | null;
+}
+
+export interface ArchInsights {
+  projectId: string;
+  generatedAt: string;
+  mageAvailable: boolean;
+  centralityAvailable: boolean;
+  communityAvailable: boolean;
+  threshold: number;
+  godNodes: GodNode[];
+  communities: CommunityCount[];
+  surprisingConnections: SurprisingConnection[];
+  nodeMetrics: Record<string, NodeMetric>;
+}
+
+/**
+ * Color-blind-safe community palette (Okabe–Ito) — eight hues distinguishable
+ * across the common color-vision deficiencies. Communities cycle through it.
+ */
+export const COMMUNITY_PALETTE = [
+  '#0072B2', // blue
+  '#E69F00', // orange
+  '#009E73', // bluish green
+  '#CC79A7', // reddish purple
+  '#56B4E9', // sky blue
+  '#D55E00', // vermillion
+  '#F0E442', // yellow
+  '#999999', // gray
+];
+
+/** Stable color for a community id (or neutral slate when unassigned). */
+export function communityColor(community: number | null | undefined): string {
+  if (community == null) return '#64748b';
+  const L = COMMUNITY_PALETTE.length;
+  return COMMUNITY_PALETTE[((community % L) + L) % L];
+}
+
+/**
+ * Node radius scaled by betweenness centrality, normalized against the run's
+ * max so god-nodes dominate. Falls back to `base` when there's no centrality
+ * (e.g. MAGE unavailable, or a node on no shortest path).
+ */
+export function centralityRadius(
+  centrality: number | null | undefined,
+  max: number,
+  base = 4,
+): number {
+  if (!centrality || centrality <= 0 || max <= 0) return base;
+  return base + (centrality / max) * 16;
+}
+
+/** Largest centrality in the run (0 when none) — the normalization denominator. */
+export function maxCentrality(insights: ArchInsights | null): number {
+  if (!insights) return 0;
+  let m = 0;
+  for (const id in insights.nodeMetrics) {
+    const c = insights.nodeMetrics[id].centrality;
+    if (typeof c === 'number' && c > m) m = c;
+  }
+  return m;
+}
+
+/**
+ * The orphan-invariant status line for the Dead-code panel. `fail` means a
+ * non-`file` orphan survived (an extractor dropped an edge) — a real
+ * wave-gate-blocking bug, not a finding. `unknown` when no report exists yet
+ * (older sync, or the project never ran the integrity step).
+ */
+export function integrityHeadline(orphan: OrphanReport | null): IntegrityHeadline {
+  if (!orphan) {
+    return {
+      tone: 'unknown',
+      label: 'Orphan invariant: not reported',
+      detail: 'no orphans.json in the latest sync',
+    };
+  }
+  if (orphan.status === 'fail') {
+    return {
+      tone: 'fail',
+      label: `Orphan invariant: FAIL (${orphan.hardFailCount})`,
+      detail: 'non-file orphan(s) — an extractor dropped an edge; this blocks the wave gate',
+    };
+  }
+  return {
+    tone: 'pass',
+    label: 'Orphan invariant: pass',
+    detail: 'no structural orphans — every node has at least one edge by construction',
+  };
+}
+
+// ── Epic 5: Cross-project contract spine — capability coverage gaps (W8) ─────
+// Mirrors knowledge/_graph/capability-gaps.json written by the `--global`
+// federation pass. A gap = a component that touches a shared contract
+// (table/endpoint/event) yet has no IMPLEMENTS→capability tag — a
+// suspected-but-untagged capability, surfaced so the manual seam is audited.
+
+export interface CapabilityGap {
+  nodeId: string;
+  title: string;
+  contractTouches: number;
+}
+
+export interface CapabilityGapReport {
+  projectId: string;
+  generatedAt: string;
+  gapCount: number;
+  gaps: CapabilityGap[];
+}

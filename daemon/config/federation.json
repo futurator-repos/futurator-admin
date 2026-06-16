@@ -1,0 +1,10 @@
+{
+  "_comment": "Federation join-strategy config (Epic 5 / PRD §12, W9). Sets how `graph-sync --global` joins sibling subgraphs onto shared contract nodes. See docs/concepts/pipeline-v3/adr-federation-identity.md for the rationale.",
+  "strategy": "resource-identity",
+  "rationale": "Twindle (the test-bench rubric app) and the first sibling set are built as ONE deployed SST backend — siblings share table ARNs and the API origin — so the cheap resource-identity join is correct and exercised first. Switch to 'schema-shape' only when a sibling is confirmed to be a SEPARATE deployment of the same schema.",
+  "strategies": {
+    "resource-identity": "Join on shared AWS resource identity (table/bucket/queue ARN). Use when siblings share ONE deployed backend.",
+    "schema-shape": "Join on shape: table fields + primaryIndex, endpoint method+path, event name. Use when siblings are separate deployments of the same schema."
+  },
+  "projects": ["futurator-admin"]
+}
