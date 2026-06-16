@@ -24,7 +24,15 @@
  *
  * Pure algorithms are exported for unit testing; graph-sync wires
  * `processGraphAnalytics` into the flow.
+ *
+ * 2026-06-17: communities now use the **Leiden** algorithm (ngraph.leiden, pure
+ * JS) — it guarantees well-connected communities and beats Louvain/label
+ * propagation on quality (Traag et al. 2019). Label propagation is kept as a
+ * dependency-free fallback if the Leiden lib ever throws.
  */
+
+import createGraph from 'ngraph.graph';
+import { detectClusters } from 'ngraph.leiden';
 
 // ── Read the project subgraph (ids + edges) ─────────────────────────────────
 
@@ -105,7 +113,34 @@ export function betweennessCentrality(ids, adj) {
   return CB;
 }
 
-// ── Communities via label propagation (deterministic) ───────────────────────
+// ── Communities via Leiden (preferred) ─────────────────────────────────────
+
+/**
+ * Community detection via the Leiden algorithm — guarantees connected
+ * communities, modularity-optimising, deterministic (fixed seed). Throws if the
+ * library can't run, so the caller can fall back to label propagation.
+ *
+ * @returns {Map<string, number>} id → small-int community.
+ */
+export function detectCommunitiesLeiden(ids, edges) {
+  const g = createGraph();
+  for (const id of ids) g.addNode(id);
+  for (const e of edges) {
+    if (e.s !== e.t) g.addLink(e.s, e.t); // undirected — adapter symmetrizes
+  }
+  const result = detectClusters(g, { randomSeed: 42 });
+  // Remap raw community ids → 0,1,2… by first appearance (stable for coloring).
+  const remap = new Map();
+  const out = new Map();
+  for (const id of [...ids].sort()) {
+    const raw = result.getClass(id);
+    if (!remap.has(raw)) remap.set(raw, remap.size);
+    out.set(id, remap.get(raw));
+  }
+  return out;
+}
+
+// ── Communities via label propagation (deterministic fallback) ──────────────
 
 /** @returns {Map<string, number>} id → small-int community. Pure. */
 export function detectCommunities(ids, adj, maxIter = 20) {
@@ -258,7 +293,17 @@ export async function runAnalytics(session, projectId, opts = {}) {
     const ids = nodes.map((n) => n.id);
     const adj = buildAdjacency(ids, edges);
     const cb = betweennessCentrality(ids, adj);
-    const comm = detectCommunities(ids, adj);
+
+    // Communities: Leiden (best quality), with a dependency-free fallback.
+    let comm;
+    let communityEngine = 'leiden';
+    try {
+      comm = detectCommunitiesLeiden(ids, edges);
+    } catch (err) {
+      logger?.(`Leiden unavailable — falling back to label propagation (${err.message})`);
+      comm = detectCommunities(ids, adj);
+      communityEngine = 'label-propagation';
+    }
 
     const metrics = nodes.map((n) => ({
       id: n.id,
@@ -279,7 +324,7 @@ export async function runAnalytics(session, projectId, opts = {}) {
       mageAvailable: true,
       centralityAvailable: true,
       communityAvailable: true,
-      engine: 'node',
+      engine: `brandes+${communityEngine}`,
       metrics,
       godNodes: topGodNodes(metrics, topN),
       communities: communityCounts(metrics),

@@ -137,6 +137,8 @@ export function GraphViewer({
   const [error, setError] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [articleNode, setArticleNode] = useState<GraphNode | null>(null);
+  // Focus / local view — isolate the selected node + its neighbourhood.
+  const [focusMode, setFocusMode] = useState(false);
   const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 800, height: 600 });
@@ -401,6 +403,27 @@ export function GraphViewer({
   const DIM = 'rgba(100,116,139,0.12)';
   const SIMILAR = '#e879f9'; // magenta — semantic neighbours of the selected node
 
+  // Focus view: when on + a node is selected, isolate it + its 1-hop neighbours
+  // (structural edges AND semantic similarity), hiding the rest of the graph.
+  const focusGraphData = useMemo(() => {
+    if (!focusMode || !selectedNode) return filteredGraphData;
+    const center = selectedNode.id;
+    const keep = new Set<string>([center]);
+    for (const e of filteredGraphData.links as GraphEdge[]) {
+      const s = endpointId(e.source);
+      const t = endpointId(e.target);
+      if (s === center) keep.add(t);
+      if (t === center) keep.add(s);
+    }
+    for (const s of selectedNode.similarTo ?? []) keep.add(s.id);
+    return {
+      nodes: (filteredGraphData.nodes as GraphNode[]).filter((n) => keep.has(n.id)),
+      links: (filteredGraphData.links as GraphEdge[]).filter(
+        (e) => keep.has(endpointId(e.source)) && keep.has(endpointId(e.target)),
+      ),
+    };
+  }, [focusMode, selectedNode, filteredGraphData]);
+
   // Semantic neighbours of the selected node (from the embedding kNN). Used to
   // ring them on the canvas + list them in the detail panel.
   const similarSet = useMemo(
@@ -488,6 +511,22 @@ export function GraphViewer({
             </>
           )}
         </div>
+        <button
+          onClick={() => setFocusMode((v) => !v)}
+          disabled={!selectedNode}
+          className={`rounded-md border px-3 py-1.5 text-sm disabled:opacity-50 ${
+            focusMode
+              ? 'border-accent-blue bg-accent-blue/15 text-accent-blue'
+              : 'border-input bg-background hover:bg-muted'
+          }`}
+          title={
+            selectedNode
+              ? 'Isolate the selected node + its neighbours'
+              : 'Select a node first, then focus on its neighbourhood'
+          }
+        >
+          {focusMode ? 'Focus: on' : 'Focus neighbours'}
+        </button>
         {locked && projectId && (
           <span className="text-xs text-muted-foreground font-mono">project: {projectId}</span>
         )}
@@ -602,7 +641,7 @@ export function GraphViewer({
           )}
           {snapshot && (
             <ForceGraph2D
-              graphData={filteredGraphData}
+              graphData={focusGraphData}
               width={size.width}
               height={size.height}
               nodeLabel={(n: object) => {

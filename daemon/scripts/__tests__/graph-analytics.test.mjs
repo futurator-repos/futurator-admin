@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import {
   betweennessCentrality,
   detectCommunities,
+  detectCommunitiesLeiden,
   topGodNodes,
   communityCounts,
   surprisingFromMetrics,
@@ -44,17 +45,38 @@ describe('betweennessCentrality (Brandes)', () => {
   });
 });
 
-describe('detectCommunities (label propagation)', () => {
+const TWO_TRIANGLES = {
+  ids: ['a', 'b', 'c', 'd', 'e', 'f'],
+  edges: [
+    { from: 'a', to: 'b' }, { from: 'b', to: 'c' }, { from: 'c', to: 'a' },
+    { from: 'd', to: 'e' }, { from: 'e', to: 'f' }, { from: 'f', to: 'd' },
+  ],
+};
+
+describe('detectCommunitiesLeiden (preferred)', () => {
   it('separates two disconnected triangles into two communities', () => {
-    const ids = ['a', 'b', 'c', 'd', 'e', 'f'];
-    const edges = [
-      { from: 'a', to: 'b' }, { from: 'b', to: 'c' }, { from: 'c', to: 'a' },
-      { from: 'd', to: 'e' }, { from: 'e', to: 'f' }, { from: 'f', to: 'd' },
-    ];
-    const comm = detectCommunities(ids, adjacency(ids, edges));
+    const comm = detectCommunitiesLeiden(
+      TWO_TRIANGLES.ids,
+      TWO_TRIANGLES.edges.map((e) => ({ s: e.from, t: e.to })),
+    );
     expect(comm.get('a')).toBe(comm.get('b'));
     expect(comm.get('a')).toBe(comm.get('c'));
     expect(comm.get('d')).toBe(comm.get('e'));
+    expect(comm.get('a')).not.toBe(comm.get('d'));
+  });
+
+  it('is deterministic across runs (fixed seed)', () => {
+    const edges = TWO_TRIANGLES.edges.map((e) => ({ s: e.from, t: e.to }));
+    const a = detectCommunitiesLeiden(TWO_TRIANGLES.ids, edges);
+    const b = detectCommunitiesLeiden(TWO_TRIANGLES.ids, edges);
+    expect([...a.entries()]).toEqual([...b.entries()]);
+  });
+});
+
+describe('detectCommunities (label-propagation fallback)', () => {
+  it('separates two disconnected triangles into two communities', () => {
+    const comm = detectCommunities(TWO_TRIANGLES.ids, adjacency(TWO_TRIANGLES.ids, TWO_TRIANGLES.edges));
+    expect(comm.get('a')).toBe(comm.get('b'));
     expect(comm.get('a')).not.toBe(comm.get('d'));
   });
 });
@@ -125,7 +147,7 @@ describe('runAnalytics (in-process, against a fake read session)', () => {
     });
     const a = await runAnalytics(session, 'p');
     expect(a.mageAvailable).toBe(true);
-    expect(a.engine).toBe('node');
+    expect(a.engine).toMatch(/leiden/); // Leiden communities + Brandes centrality
     expect(a.godNodes[0].id).toBe('hub');
     expect(session.writes[0]).toHaveLength(4); // metrics written back
   });
