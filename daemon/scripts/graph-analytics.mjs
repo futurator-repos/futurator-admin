@@ -2,112 +2,161 @@
  * Graph Analytics — Architectural X-Ray (Epic 3, PRD §5.4 / Appendix D).
  *
  * A DISTINCT post-sync, read+annotate pass — it never touches the ingest
- * write-path. It computes, via Memgraph + MAGE:
+ * write-path. It computes:
  *
  *   - Story 3.1: god-nodes via betweenness centrality (`n.centrality`)
- *   - Story 3.2: communities via Louvain (`n.community`)
+ *   - Story 3.2: communities via label propagation (`n.community`)
  *   - Story 3.3: "surprising connections" — cross-community edges whose two
  *     endpoints are both high-centrality (the non-obvious architectural bridges)
  *
- * Results are written as node properties (per the ACs) AND shaped into
- * `knowledge/_graph/insights.json`, which the admin Graph tab reads to size
- * nodes by centrality, color them by community, and list surprising connections.
+ * 2026-06-16: computed in NODE rather than via MAGE. MAGE (betweenness/Louvain)
+ * isn't installed on the shared Memgraph and installing it would mean a C++
+ * source build on a production box that also serves another tenant. Per-project
+ * graphs are small (hundreds of nodes), so Brandes' betweenness + label
+ * propagation run instantly in JS — and this removes the "MAGE unavailable"
+ * failure mode entirely (it now works on ANY Memgraph). The computed metrics are
+ * written back to `n.centrality`/`n.community` so the MCP `god_nodes` tool and
+ * ad-hoc Cypher see them too.
  *
- * GRACEFUL DEGRADATION (3.1 AC): MAGE may not be installed on a given Memgraph.
- * Each procedure call is guarded; if a CALL throws, the pass logs + skips that
- * dimension and still writes a well-formed insights.json (with the relevant
- * `*Available` flag false). It must NEVER crash the sync.
+ * Results are shaped into `knowledge/_graph/insights.json`, which the Graph tab
+ * reads to size nodes by centrality, color them by community, and list
+ * surprising connections.
  *
- * Because Epic 1/2 graphs are partitioned by `projectId` with no cross-project
- * edges, the global MAGE procedures compute per-component (≈ per-project) values;
- * we read them back scoped to the project.
- *
- * Pure logic lives here so it can be unit-tested against a fake session (no live
- * Memgraph/MAGE). graph-sync.mjs wires `processGraphAnalytics` into the flow.
+ * Pure algorithms are exported for unit testing; graph-sync wires
+ * `processGraphAnalytics` into the flow.
  */
 
-// ── MAGE procedure calls (Appendix D) ──────────────────────────────────────
+// ── Read the project subgraph (ids + edges) ─────────────────────────────────
 
-/** Betweenness centrality → `node.centrality`. Throws if MAGE is absent. */
-const CENTRALITY_CYPHER = `
-  CALL betweenness_centrality.get()
-  YIELD node, betweenness_centrality
-  SET node.centrality = betweenness_centrality`;
-
-/** Louvain community detection → `node.community`. Throws if MAGE is absent. */
-const COMMUNITY_CYPHER = `
-  CALL community_detection.get()
-  YIELD node, community_id
-  SET node.community = community_id`;
-
-/**
- * Run a MAGE procedure, returning true on success and false if it is
- * unavailable (or otherwise fails). Never throws — graceful degradation.
- */
-async function tryCall(session, cypher, label, logger) {
-  try {
-    await session.run(cypher);
-    return true;
-  } catch (err) {
-    logger?.(`MAGE ${label} unavailable — skipping (${err.message})`);
-    return false;
-  }
-}
-
-/**
- * Read back per-node centrality + community for one project after the MAGE
- * passes have annotated the graph.
- *
- * @returns {Promise<Array<{id,kind,title,centrality,community}>>}
- */
-async function readMetrics(session, projectId) {
-  const r = await session.run(
+async function readProjectGraph(session, projectId) {
+  const nres = await session.run(
     `MATCH (n:Node {projectId: $projectId})
-     WHERE n.centrality IS NOT NULL OR n.community IS NOT NULL
-     RETURN n.nodeId AS id, coalesce(n.kind, 'file') AS kind, n.title AS title,
-            n.centrality AS centrality, n.community AS community`,
+     RETURN n.nodeId AS id, coalesce(n.kind, 'file') AS kind,
+            coalesce(n.title, n.nodeId) AS title`,
     { projectId },
   );
-  return r.records.map((rec) => ({
+  const nodes = nres.records.map((rec) => ({
     id: rec.get('id'),
     kind: rec.get('kind') || 'file',
-    title: rec.get('title') ?? rec.get('id'),
-    centrality: numOrNull(rec.get('centrality')),
-    community: intOrNull(rec.get('community')),
+    title: rec.get('title'),
   }));
+  const eres = await session.run(
+    `MATCH (a:Node {projectId: $projectId})-[r]->(b:Node {projectId: $projectId})
+     RETURN a.nodeId AS s, b.nodeId AS t, type(r) AS type`,
+    { projectId },
+  );
+  const edges = eres.records.map((rec) => ({
+    s: rec.get('s'),
+    t: rec.get('t'),
+    type: rec.get('type'),
+  }));
+  return { nodes, edges };
 }
 
-/**
- * Surprising-connections query (Appendix D / Story 3.3): directed edges whose
- * endpoints are in DIFFERENT communities and BOTH have centrality above the
- * threshold `$c`, ranked by summed endpoint centrality. Top 25.
- *
- * @returns {Promise<Array<object>>}
- */
-export async function surprisingConnections(session, projectId, threshold = 0) {
-  const r = await session.run(
-    `MATCH (a:Node {projectId: $projectId})-[rel]->(b:Node {projectId: $projectId})
-     WHERE a.community IS NOT NULL AND b.community IS NOT NULL
-       AND a.community <> b.community
-       AND a.centrality > $c AND b.centrality > $c
-     RETURN a.nodeId AS source, coalesce(a.title, a.nodeId) AS sourceTitle,
-            type(rel) AS type,
-            b.nodeId AS target, coalesce(b.title, b.nodeId) AS targetTitle,
-            a.community AS sourceCommunity, b.community AS targetCommunity,
-            a.centrality + b.centrality AS score
-     ORDER BY score DESC LIMIT 25`,
-    { projectId, c: threshold },
+/** Undirected adjacency map id → Set(neighborId). */
+function buildAdjacency(ids, edges) {
+  const adj = new Map(ids.map((id) => [id, new Set()]));
+  for (const e of edges) {
+    if (!adj.has(e.s) || !adj.has(e.t) || e.s === e.t) continue;
+    adj.get(e.s).add(e.t);
+    adj.get(e.t).add(e.s);
+  }
+  return adj;
+}
+
+// ── Betweenness centrality (Brandes, undirected, unweighted) ────────────────
+
+/** @returns {Map<string, number>} id → betweenness centrality. Pure. */
+export function betweennessCentrality(ids, adj) {
+  const CB = new Map(ids.map((id) => [id, 0]));
+  for (const s of ids) {
+    const S = [];
+    const P = new Map(ids.map((id) => [id, []]));
+    const sigma = new Map(ids.map((id) => [id, 0]));
+    const dist = new Map(ids.map((id) => [id, -1]));
+    sigma.set(s, 1);
+    dist.set(s, 0);
+    const Q = [s];
+    while (Q.length) {
+      const v = Q.shift();
+      S.push(v);
+      for (const w of adj.get(v) ?? []) {
+        if (dist.get(w) < 0) {
+          Q.push(w);
+          dist.set(w, dist.get(v) + 1);
+        }
+        if (dist.get(w) === dist.get(v) + 1) {
+          sigma.set(w, sigma.get(w) + sigma.get(v));
+          P.get(w).push(v);
+        }
+      }
+    }
+    const delta = new Map(ids.map((id) => [id, 0]));
+    while (S.length) {
+      const w = S.pop();
+      for (const v of P.get(w)) {
+        delta.set(v, delta.get(v) + (sigma.get(v) / sigma.get(w)) * (1 + delta.get(w)));
+      }
+      if (w !== s) CB.set(w, CB.get(w) + delta.get(w));
+    }
+  }
+  // Undirected → each shortest path counted twice.
+  for (const id of ids) CB.set(id, CB.get(id) / 2);
+  return CB;
+}
+
+// ── Communities via label propagation (deterministic) ───────────────────────
+
+/** @returns {Map<string, number>} id → small-int community. Pure. */
+export function detectCommunities(ids, adj, maxIter = 20) {
+  const sorted = [...ids].sort();
+  const label = new Map(sorted.map((id) => [id, id]));
+  for (let iter = 0; iter < maxIter; iter++) {
+    let changed = false;
+    for (const id of sorted) {
+      const nbrs = adj.get(id);
+      if (!nbrs || nbrs.size === 0) continue;
+      const counts = new Map();
+      for (const n of nbrs) {
+        const l = label.get(n);
+        counts.set(l, (counts.get(l) ?? 0) + 1);
+      }
+      // Most frequent neighbour label; ties broken by smallest label string.
+      let best = label.get(id);
+      let bestCount = -1;
+      for (const [l, c] of counts) {
+        if (c > bestCount || (c === bestCount && l < best)) {
+          best = l;
+          bestCount = c;
+        }
+      }
+      if (best !== label.get(id)) {
+        label.set(id, best);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  // Remap raw labels → 0,1,2… by first appearance (stable for coloring).
+  const remap = new Map();
+  const out = new Map();
+  for (const id of sorted) {
+    const raw = label.get(id);
+    if (!remap.has(raw)) remap.set(raw, remap.size);
+    out.set(id, remap.get(raw));
+  }
+  return out;
+}
+
+/** Persist computed metrics back to the graph (best-effort, batched). */
+async function writeBackMetrics(session, metrics) {
+  if (metrics.length === 0) return;
+  await session.run(
+    `UNWIND $rows AS row
+     MATCH (n:Node {nodeId: row.id})
+     SET n.centrality = row.centrality, n.community = row.community`,
+    { rows: metrics.map((m) => ({ id: m.id, centrality: m.centrality, community: m.community })) },
   );
-  return r.records.map((rec) => ({
-    source: rec.get('source'),
-    sourceTitle: rec.get('sourceTitle'),
-    type: rec.get('type'),
-    target: rec.get('target'),
-    targetTitle: rec.get('targetTitle'),
-    sourceCommunity: intOrNull(rec.get('sourceCommunity')),
-    targetCommunity: intOrNull(rec.get('targetCommunity')),
-    score: numOrNull(rec.get('score')),
-  }));
 }
 
 // ── Pure shaping helpers (testable without a session) ───────────────────────
@@ -133,6 +182,37 @@ export function communityCounts(metrics) {
     .sort((a, b) => b.count - a.count || a.community - b.community);
 }
 
+/**
+ * Surprising connections (Story 3.3): edges whose endpoints are in DIFFERENT
+ * communities and BOTH above the centrality threshold, ranked by summed
+ * endpoint centrality. Top 25. Pure (computed from metrics + edges).
+ */
+export function surprisingFromMetrics(edges, metricsById, threshold = 0) {
+  const out = [];
+  const seen = new Set();
+  for (const e of edges) {
+    const a = metricsById.get(e.s);
+    const b = metricsById.get(e.t);
+    if (!a || !b) continue;
+    if (a.community == null || b.community == null || a.community === b.community) continue;
+    if (!(a.centrality > threshold && b.centrality > threshold)) continue;
+    const key = `${e.s}|${e.t}|${e.type}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      source: e.s,
+      sourceTitle: a.title ?? e.s,
+      type: e.type,
+      target: e.t,
+      targetTitle: b.title ?? e.t,
+      sourceCommunity: a.community,
+      targetCommunity: b.community,
+      score: a.centrality + b.centrality,
+    });
+  }
+  return out.sort((x, y) => y.score - x.score).slice(0, 25);
+}
+
 /** Build the `insights.json` document from a finished analytics run. Pure. */
 export function buildInsightsDoc({ projectId, generatedAt, analytics, threshold }) {
   const nodeMetrics = {};
@@ -145,9 +225,12 @@ export function buildInsightsDoc({ projectId, generatedAt, analytics, threshold 
   return {
     projectId,
     generatedAt,
+    // Kept for the UI's overlay gate; analytics now run in-process, so this is
+    // true whenever the pass computed metrics.
     mageAvailable: analytics.mageAvailable,
     centralityAvailable: analytics.centralityAvailable,
     communityAvailable: analytics.communityAvailable,
+    engine: analytics.engine ?? 'node',
     threshold,
     godNodes: analytics.godNodes,
     communities: analytics.communities,
@@ -157,49 +240,66 @@ export function buildInsightsDoc({ projectId, generatedAt, analytics, threshold 
 }
 
 /**
- * Orchestrate the three analytics dimensions against a session. Each MAGE call
- * degrades gracefully; surprising connections only run when BOTH centrality and
- * community succeeded (they depend on both properties).
- *
- * @returns {Promise<{mageAvailable,centralityAvailable,communityAvailable,metrics,godNodes,communities,surprising}>}
+ * Compute the three analytics dimensions in-process. Reads the project subgraph,
+ * runs betweenness + label propagation, writes metrics back, and shapes the
+ * god-node / community / surprising lists. Never throws — on any failure it
+ * returns an empty, well-formed result (graceful degradation).
  */
 export async function runAnalytics(session, projectId, opts = {}) {
   const threshold = opts.threshold ?? 0;
   const topN = opts.topN ?? 15;
   const logger = opts.logger;
 
-  const centralityAvailable = await tryCall(session, CENTRALITY_CYPHER, 'betweenness_centrality', logger);
-  const communityAvailable = await tryCall(session, COMMUNITY_CYPHER, 'community_detection', logger);
+  try {
+    const { nodes, edges } = await readProjectGraph(session, projectId);
+    if (nodes.length === 0) {
+      return emptyAnalytics();
+    }
+    const ids = nodes.map((n) => n.id);
+    const adj = buildAdjacency(ids, edges);
+    const cb = betweennessCentrality(ids, adj);
+    const comm = detectCommunities(ids, adj);
 
-  const metrics = centralityAvailable || communityAvailable ? await readMetrics(session, projectId) : [];
-  const godNodes = centralityAvailable ? topGodNodes(metrics, topN) : [];
-  const communities = communityAvailable ? communityCounts(metrics) : [];
-  const surprising =
-    centralityAvailable && communityAvailable
-      ? await surprisingConnections(session, projectId, threshold)
-      : [];
+    const metrics = nodes.map((n) => ({
+      id: n.id,
+      kind: n.kind,
+      title: n.title,
+      centrality: cb.get(n.id) ?? 0,
+      community: comm.get(n.id) ?? null,
+    }));
+    const metricsById = new Map(metrics.map((m) => [m.id, m]));
 
+    try {
+      await writeBackMetrics(session, metrics);
+    } catch (err) {
+      logger?.(`analytics write-back skipped (${err.message})`);
+    }
+
+    return {
+      mageAvailable: true,
+      centralityAvailable: true,
+      communityAvailable: true,
+      engine: 'node',
+      metrics,
+      godNodes: topGodNodes(metrics, topN),
+      communities: communityCounts(metrics),
+      surprising: surprisingFromMetrics(edges, metricsById, threshold),
+    };
+  } catch (err) {
+    logger?.(`graph analytics failed — empty insights (${err.message})`);
+    return emptyAnalytics();
+  }
+}
+
+function emptyAnalytics() {
   return {
-    mageAvailable: centralityAvailable || communityAvailable,
-    centralityAvailable,
-    communityAvailable,
-    metrics,
-    godNodes,
-    communities,
-    surprising,
+    mageAvailable: false,
+    centralityAvailable: false,
+    communityAvailable: false,
+    engine: 'node',
+    metrics: [],
+    godNodes: [],
+    communities: [],
+    surprising: [],
   };
-}
-
-function numOrNull(v) {
-  if (v == null) return null;
-  const n = typeof v === 'number' ? v : Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-function intOrNull(v) {
-  if (v == null) return null;
-  // Memgraph integers may arrive as {low, high} (neo4j Integer) or numbers.
-  if (typeof v === 'object' && 'low' in v) return v.low;
-  const n = Number(v);
-  return Number.isFinite(n) ? Math.trunc(n) : null;
 }

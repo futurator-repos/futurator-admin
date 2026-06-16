@@ -108,6 +108,8 @@ import {
 // 2026-05-19 — Phase 1 worktree rollout. Materialize per-story worktrees
 // + node_modules symlinks before any pipeline step runs.
 import { setupStoryWorktree, teardownStoryWorktree } from './lib/story-worktree.mjs';
+// Concept v2 (E1.2/E2.4) — land generated concept docs on disk + their manifests.
+import { writeConceptArtifact } from './pipelines/lib/concept-artifact-writeback.mjs';
 import { startReaperTicker } from './lib/worktree-reaper.mjs';
 // 2026-05-21 — auth-probe classifier (extracted so the false-FAIL fix
 // is unit-testable without bringing the daemon entry into the test).
@@ -141,6 +143,7 @@ import {
 // for Bash tool_use events. Replaces prompt prose ("Do NOT run npm create
 // vite") with SIGTERM-on-match. See daemon/lib/bash-deny-patterns.mjs.
 import { matchesDenyPattern } from './lib/bash-deny-patterns.mjs';
+import { myceliumMcpSpawn } from './lib/mcp-config.mjs';
 import {
   writeAttentionItem,
   autoResolveAttentionByDedupKey,
@@ -851,8 +854,14 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
   return new Promise((resolve, reject) => {
     const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
 
+    // Mycelium graph MCP tools (gated by MYCELIUM_MCP=on). Co-located with
+    // Memgraph on the box — no VPC barrier. Extends the agent's allowlist with
+    // the read-only graph tools; no-op when the flag is off.
+    const mcp = myceliumMcpSpawn(opts.allowedTools);
+    args.push(...mcp.args);
+
     if (opts.resume) args.push('--resume', opts.resume);
-    if (opts.allowedTools) args.push('--allowedTools', opts.allowedTools);
+    if (mcp.allowedTools) args.push('--allowedTools', mcp.allowedTools);
     if (opts.disallowedTools) args.push('--disallowedTools', opts.disallowedTools);
     if (opts.model) args.push('--model', opts.model);
     // PR-38 — per-rigor turn cap from the agent's RolePolicy. Resolved at
@@ -1373,7 +1382,26 @@ async function processStreamEvent(jobId, stepId, agentId, event, workingDir) {
  * Add other vars here if their persisted state is genuinely transient
  * (i.e., reconstructible from job metadata + working tree).
  */
-const TRANSIENT_VARS = new Set(['PROJECT_CONTEXT']);
+// Concept v2 (E2.4) — the raw generated markdown is the artifact OF RECORD on
+// disk (write-back lands `concept/<kind>.md` + sidecar). It must NOT be
+// persisted as a job variable — full PRD/UX/Arch prose can blow the ~400KB DDB
+// item cap. Write-back + manifest capture run at extraction time (in-memory),
+// then these vars are stripped before persist; the small `<KIND>_SECTIONS_JSON`
+// manifest var (ids/ranges/hash, no prose) survives for the apply endpoint.
+const TRANSIENT_VARS = new Set([
+  'PROJECT_CONTEXT',
+  'PRD_MD',
+  'UX_MD',
+  'ARCHITECTURE_MD',
+]);
+
+// Concept v2 (E2.4) — map a captured generator variable → its ArtifactKind.
+// The daemon runs write-back for any of these present after extraction.
+const CONCEPT_GEN_VARS = {
+  PRD_MD: 'prd',
+  UX_MD: 'ux',
+  ARCHITECTURE_MD: 'architecture',
+};
 
 function stripTransientVars(variables) {
   if (!variables || typeof variables !== 'object') return variables;
@@ -2208,6 +2236,30 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
         variableValue: varValue.slice(0, 500),
         extractorType: step.extractors[varName].type,
       });
+    }
+
+    // Concept v2 (E2.4) — when a generator step emits PRD_MD / UX_MD /
+    // ARCHITECTURE_MD, land it on disk as the artifact of record (write-back:
+    // concept/<kind>.md + <kind>.sections.json, atomic, with anchors) and
+    // capture the SMALL manifest sidecar into `<KIND>_SECTIONS_JSON` so the
+    // Lambda apply endpoint can register {rev,contentHash} without reading EC2
+    // disk and without the raw prose (which TRANSIENT_VARS strips at persist).
+    for (const [genVar, kind] of Object.entries(CONCEPT_GEN_VARS)) {
+      const md = extracted[genVar];
+      if (typeof md !== 'string' || !md.trim()) continue;
+      try {
+        const { manifest } = writeConceptArtifact(workingDir, kind, md, { rev: 0 });
+        const sectionsVar = `${genVar.replace(/_MD$/, '')}_SECTIONS_JSON`;
+        variables[sectionsVar] = JSON.stringify(manifest);
+        await pushEvent(jobId, step.id, step.agentId, 'extraction', {
+          variableName: sectionsVar,
+          variableValue: `${manifest.sections.length} sections, ${manifest.contentHash}`,
+          extractorType: 'concept-writeback',
+        });
+        log('info', `[${jobId.slice(0, 8)}] wrote concept/${kind}.md (${manifest.sections.length} sections)`);
+      } catch (err) {
+        log('error', `[${jobId.slice(0, 8)}] concept write-back failed for ${kind}: ${err.message}`);
+      }
     }
 
     // PR-11 #1 — derive VERDICT + FEEDBACK from REVIEW_CRITERIA.

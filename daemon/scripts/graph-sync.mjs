@@ -46,6 +46,7 @@ import {
   writeCapabilities,
   findCapabilityGaps,
 } from './lib/capability.mjs';
+import { computeSimilarTo } from './lib/embedding-knn.mjs';
 import { diffContracts, CONTRACT_NODE_KINDS } from './contract-diff.mjs';
 import { buildRevisions, appendRevisions } from './lib/contract-revision.mjs';
 import {
@@ -1471,8 +1472,15 @@ async function writeGraphSnapshot(config) {
                 n.name AS astName, n.parentFile AS parentFile,
                 n.line AS line, n.endLine AS endLine, n.exported AS exported,
                 n.params AS params, n.className AS className,
-                n.fnKind AS fnKind, n.extends AS extendsName`,
+                n.fnKind AS fnKind, n.extends AS extendsName,
+                n.embedding AS embedding`,
         { projectId: config.project }
+      );
+
+      // Semantic neighbours from the Voyage embeddings (raw vectors stay out of
+      // the snapshot). Bounded cost; empty for large graphs / no-embedding nodes.
+      const similarTo = computeSimilarTo(
+        nodeResult.records.map((rec) => ({ id: rec.get('id'), embedding: rec.get('embedding') })),
       );
       const edgeResult = await session.run(
         `MATCH (a:Node {projectId: $projectId})-[r]->(b:Node {projectId: $projectId})
@@ -1498,6 +1506,7 @@ async function writeGraphSnapshot(config) {
           createdByStory: rec.get('createdByStory') ?? null,
           lastMutatedByStory: rec.get('lastMutatedByStory') ?? null,
           updated: rec.get('updated') ?? null,
+          similarTo: similarTo.get(rec.get('id')) ?? [],
         };
         // Surface AST-specific fields only when present, so wiki-only nodes
         // don't carry empty/null clutter that bloats the snapshot.

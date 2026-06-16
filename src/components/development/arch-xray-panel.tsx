@@ -53,8 +53,8 @@ export function ArchXrayPanel({
         <div className="space-y-4 border-t border-border px-4 py-3 text-xs">
           {!mageAvailable ? (
             <p className="text-muted-foreground">
-              No analytics for this project yet — the MAGE centrality/community pass hasn&apos;t run
-              (or MAGE isn&apos;t installed on this graph). The graph falls back to its plain
+              No analytics for this project yet — the centrality/community pass runs on the next
+              compile (it needs at least a few connected nodes). Until then the graph uses its plain
               kind-colored view.
             </p>
           ) : (

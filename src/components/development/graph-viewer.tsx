@@ -20,6 +20,7 @@ import {
 import { DeadCodePanel } from './dead-code-panel';
 import { ArchXrayPanel } from './arch-xray-panel';
 import { CapabilityGapPanel } from './capability-gap-panel';
+import { ArticleViewer } from './article-viewer';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
   ssr: false,
@@ -85,6 +86,8 @@ type GraphNode = {
   className?: string | null;
   fnKind?: string;
   extends?: string | null;
+  // Semantic neighbours from the Voyage embeddings (graph-sync kNN).
+  similarTo?: { id: string; score: number }[];
 };
 
 /** Resolve color for a node — prefer kind, fall back to type. */
@@ -133,6 +136,7 @@ export function GraphViewer({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
+  const [articleNode, setArticleNode] = useState<GraphNode | null>(null);
   const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 800, height: 600 });
@@ -395,6 +399,14 @@ export function GraphViewer({
   }, [search, filteredGraphData]);
 
   const DIM = 'rgba(100,116,139,0.12)';
+  const SIMILAR = '#e879f9'; // magenta — semantic neighbours of the selected node
+
+  // Semantic neighbours of the selected node (from the embedding kNN). Used to
+  // ring them on the canvas + list them in the detail panel.
+  const similarSet = useMemo(
+    () => new Set((selectedNode?.similarTo ?? []).map((s) => s.id)),
+    [selectedNode],
+  );
 
   function toggleKind(k: string) {
     setHiddenKinds((prev) => {
@@ -608,6 +620,8 @@ export function GraphViewer({
                 ) {
                   return DIM;
                 }
+                // Semantic-similarity highlight (only when not searching).
+                if (!searchMatch && similarSet.has(g.id)) return SIMILAR;
                 if (overlayActive) {
                   const m = archInsights?.nodeMetrics[g.id];
                   if (m && m.community != null) return communityColor(m.community);
@@ -744,16 +758,46 @@ export function GraphViewer({
                   <div className="text-xs whitespace-pre-wrap">{selectedNode.summary}</div>
                 </div>
               )}
-              {/* pacman1 UX — open the compiler's full article for this node. */}
+              {/* Semantic neighbours from the embeddings (graph-sync kNN). */}
+              {selectedNode.similarTo && selectedNode.similarTo.length > 0 && (
+                <div>
+                  <div className="mb-1 text-xs uppercase text-muted-foreground">
+                    Semantically similar
+                  </div>
+                  <div className="space-y-1">
+                    {selectedNode.similarTo.map((s) => {
+                      const target = snapshot?.nodes.find((n) => n.id === s.id);
+                      return (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => target && setSelectedNode(target)}
+                          className="flex w-full items-baseline gap-2 rounded px-1 py-0.5 text-left text-xs hover:bg-muted/40"
+                          title="Select this semantically-similar node"
+                        >
+                          <span
+                            className="inline-block h-2 w-2 flex-shrink-0 rounded-full"
+                            style={{ background: SIMILAR }}
+                          />
+                          <code className="flex-1 break-all">{target?.title || s.id}</code>
+                          <span className="flex-shrink-0 text-muted-foreground">
+                            {s.score.toFixed(2)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {/* Open the compiler's full article rendered inline. */}
               {projectId && articleUrl(ARTICLE_BASE, projectId, selectedNode) && (
-                <a
-                  href={articleUrl(ARTICLE_BASE, projectId, selectedNode)!}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  type="button"
+                  onClick={() => setArticleNode(selectedNode)}
                   className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
                 >
-                  View knowledge article ↗
-                </a>
+                  View knowledge article
+                </button>
               )}
               {(selectedNode.createdByStory || selectedNode.lastMutatedByStory) && (
                 <div className="border-t border-border pt-2 text-xs text-muted-foreground">
@@ -907,6 +951,16 @@ export function GraphViewer({
             </pre>
           )}
         </div>
+      )}
+
+      {/* Inline knowledge-article viewer (rendered markdown). */}
+      {articleNode && projectId && articleUrl(ARTICLE_BASE, projectId, articleNode) && (
+        <ArticleViewer
+          url={articleUrl(ARTICLE_BASE, projectId, articleNode)!}
+          rawUrl={articleUrl(ARTICLE_BASE, projectId, articleNode)!}
+          title={articleNode.title || articleNode.id}
+          onClose={() => setArticleNode(null)}
+        />
       )}
     </div>
   );
