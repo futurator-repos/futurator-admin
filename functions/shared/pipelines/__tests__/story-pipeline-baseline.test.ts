@@ -146,6 +146,53 @@ describe('PR-41 — tamper-check promoted to mvp+ rigor (Story 2-A-5-1)', () => 
   });
 });
 
+describe('VQA v3 E8.1 — QA-AUTHOR probe model in the DEV VISUAL_TESTS prompt', () => {
+  const browserStory: EpicStory = {
+    storyId: 'S-9',
+    order: 0,
+    title: 'Ball bounces',
+    description: 'AC: the ball moves.',
+    status: 'pending',
+    touchPoints: ['src/features/ball.feature.tsx'],
+    hasBrowserTests: true,
+    criteria: [
+      {
+        id: 'AC-S9-1',
+        text: 'the ball changes direction at the wall',
+        needsBrowser: true,
+        verify: 'behavior',
+      },
+    ],
+  } as unknown as EpicStory;
+
+  function devPrompt(boilerplateKind?: string) {
+    const pipeline = generateStoryPipeline(browserStory, 'Game', workingDir, {
+      rigor: 'mvp',
+      hasBrowserTests: true,
+      ...(boilerplateKind ? { boilerplateKind: boilerplateKind as never } : {}),
+    });
+    const dev = pipeline.steps.find((s) => s.id === 'dev');
+    return (dev as { prompt: string }).prompt;
+  }
+
+  it('canvas-game (has seam) — DEV prompt teaches the reach→act→assert probe model + seam keys', () => {
+    const p = devPrompt('nextjs-canvas-game');
+    expect(p).toContain('probe model');
+    expect(p).toContain('window.__harness');
+    expect(p).toContain('assert');
+    expect(p).toContain('clock');
+    // It routes by verify intent and lists the seam snapshot keys.
+    expect(p).toMatch(/\[verify=behavior\]/);
+    expect(p).toContain('snapshot.status');
+  });
+
+  it('seam-less boilerplate (nextjs-base) — no probe section injected (back-compat)', () => {
+    const p = devPrompt('nextjs-base');
+    expect(p).not.toContain('reach→act→assert');
+    expect(p).not.toContain('VQA v3 probe model');
+  });
+});
+
 describe('VQA v3 E5.5 — seam-tamper-check (generator-owned __harness.schema.json)', () => {
   it('prototype rigor — seam-tamper-check absent (tamper tier off)', () => {
     const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, { rigor: 'prototype' });

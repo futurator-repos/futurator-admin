@@ -2,6 +2,7 @@ import type { EpicStory } from '../types/epic-workflow';
 import type { PipelineDefinition, PipelineStep } from '../types/agent-orchestrator';
 import type { PlanRigor } from '../types/plan';
 import type { BoilerplateType } from '../boilerplates/registry';
+import { BOILERPLATE_REGISTRY } from '../boilerplates/registry';
 import { buildAgentConfig } from './role-policy';
 import { buildFrameworkDetectSnippet, buildPortDrainLines } from './framework-detect';
 // PR-91-followup (Story 2-A-3-1) — API-AUTHOR step before test-author.
@@ -133,6 +134,13 @@ export function generateStoryPipeline(
   const projectId = deriveProjectId(workingDir);
   const rigor: PlanRigor = opts.rigor || 'mvp';
   const boilerplateKind: BoilerplateType = opts.boilerplateKind || 'nextjs-base';
+  // VQA v3 E8.1 — the verifiability seam for this app (if any). When present,
+  // the VISUAL_TESTS prompt teaches the probe model (reach→act→assert against
+  // window.__harness) for behavior/state ACs instead of idle-screenshot judging.
+  const seam = BOILERPLATE_REGISTRY[boilerplateKind]?.testHarness;
+  const seamSnapshotKeys = seam
+    ? Object.keys(seam.snapshotShape).map((k) => k.replace(/^snapshot\./, ''))
+    : [];
   const testsOn = rigor !== 'prototype';
   // PR-41 (Story 2-A-5-1): tamper-check promoted from production-only to
   // mvp+. The Phase 1 implementation gated this to production rigor because
@@ -632,7 +640,49 @@ Rules:
 
 This story has browser-testable criteria (marked [needs_browser=true]). Each
 such criterion MUST have a corresponding visual-test entry emitted between
-the fences below. The QA pipeline routes every entry to an LLM judge that
+the fences below.${
+                seam
+                  ? `
+
+### Route each criterion by its [verify=…] tag (VQA v3 probe model)
+
+A static idle screenshot cannot observe interaction, elapsed time, or
+post-action state. This app ships a test-only verifiability seam at
+\`${seam.globalKey}\` — author each criterion as a PROBE, not an idle frame:
+
+  - **[verify=appearance]** → ONE screenshot + \`judge:\` (the L1 form below).
+  - **[verify=state] / [verify=behavior]** → an **L2** entry with a \`flow:\`
+    that REACHES the state, ACTS, then OBSERVES deterministically:
+      • drive with \`press\`/\`hold\`/\`click\`/\`pointer\`; advance time with
+        \`clock\` (NEVER a real \`wait\` for synchronization);
+      • take a \`screenshot\` (paired vision — REQUIRED for UI-bearing ACs so a
+        right-state/broken-UI defect can't pass on state alone); and
+      • \`assert\` against the seam for a deterministic verdict.
+  - **[verify=build]** → no visual test (a unit/typecheck covers it).
+
+The seam's \`snapshot()\` exposes: ${seamSnapshotKeys.map((k) => `\`${k}\``).join(', ')}
+(+ any field you add to the app's state — conform to the shape; do NOT author
+the seam, it is pre-baked). Cite snapshot keys as \`snapshot.<key>\` in \`expr\`.
+
+Worked behavior probe (start → advance time → observe + assert):
+\`\`\`
+- id: VT-${story.storyId}-1
+  criteriaRef: AC-S<storyNum>-<n>
+  description: <one sentence>
+  setup: load the app
+  expect: <concrete post-action result>
+  level: L2
+  flow:
+    - { action: press, key: "Space" }
+    - { action: clock, clockMode: runFor, ms: 5000 }
+    - { action: screenshot, label: "mid-play" }
+    - { action: assert, expr: "snapshot.${seamSnapshotKeys[0] ?? 'status'}", op: eq, expected: <value> }
+  judge: |
+    <what the mid-play screenshot must show; explicit FAIL conditions>
+\`\`\`
+`
+                  : ''
+              } The QA pipeline routes every entry to an LLM judge that
 will look at a screenshot of your built code and decide pass/fail from the
 PIXELS — not from your tests, not from your diff. So **the test's \`judge:\`
 block is what your code is actually graded against.**

@@ -13,7 +13,12 @@
  * The qa-aggregate shell step shells out to `node` which calls into this.
  */
 
-import type { VisualTestDef, VisualTestLevel, VerifyIntent } from '../types/epic-workflow';
+import type {
+  VisualTestDef,
+  VisualTestLevel,
+  VerifyIntent,
+  ManualReason,
+} from '../types/epic-workflow';
 import type { PlanRigor } from '../types/plan';
 
 // ── Viewport parser (Q2.2) ────────────────────────────────────────────
@@ -326,6 +331,65 @@ export function deriveNeedsBrowser(verify: VerifyIntent | undefined): boolean | 
     default:
       return undefined; // no intent → leave the existing flag alone
   }
+}
+
+/**
+ * E8.3 (W5/H12) — the `manual→behavior` downgrade decision, owned by the
+ * QA-AUTHOR (Concept's gate only FLAGS `manual`; it must not reclassify — the
+ * W5 altitude rule). Stub-availability is a mechanism fact known only at
+ * story-dev start: if a test-mode boundary seam exists for this AC's boundary
+ * (`stubAvailable`), a `verify:'manual'` AC is NOT genuinely unautomatable —
+ * downgrade it to `behavior`, FORCE `needsBrowser:true`, and emit a logged
+ * reclassification event so `manual` can't become the new UNVERIFIABLE escape
+ * hatch. A genuinely unautomatable AC (no stub) stays `manual` → operator lane.
+ *
+ * Pure decision only; the daemon emits the returned `event` into the reflection
+ * sink. Non-manual ACs pass through unchanged.
+ */
+export interface ManualDowngradeDecision {
+  verify: VerifyIntent;
+  /** Forced true on downgrade; undefined when unchanged (caller keeps explicit). */
+  needsBrowser?: boolean;
+  reclassified: boolean;
+  /** Logged reclassification event payload (null when no change). */
+  event: {
+    kind: 'manual-downgrade';
+    acId: string;
+    from: 'manual';
+    to: 'behavior';
+    manualReason?: ManualReason;
+    reason: string;
+  } | null;
+}
+
+export function downgradeManualToBehavior(args: {
+  acId: string;
+  verify: VerifyIntent | undefined;
+  manualReason?: ManualReason;
+  /** Does a test-mode boundary seam exist for this AC's boundary (E11.3/E11.4)? */
+  stubAvailable: boolean;
+}): ManualDowngradeDecision {
+  if (args.verify !== 'manual') {
+    return { verify: args.verify ?? 'behavior', reclassified: false, event: null };
+  }
+  if (!args.stubAvailable) {
+    // Genuinely unautomatable → stays manual, routes to the operator lane (E11).
+    return { verify: 'manual', reclassified: false, event: null };
+  }
+  // Stubbable boundary → automate it deterministically.
+  return {
+    verify: 'behavior',
+    needsBrowser: true,
+    reclassified: true,
+    event: {
+      kind: 'manual-downgrade',
+      acId: args.acId,
+      from: 'manual',
+      to: 'behavior',
+      manualReason: args.manualReason,
+      reason: `boundary is stubbable (test-mode seam available) — automated as behavior; manual would be a false escape hatch`,
+    },
+  };
 }
 
 const VISION_ORDINAL: Record<'L0' | 'L1' | 'L2-vision', number> = {

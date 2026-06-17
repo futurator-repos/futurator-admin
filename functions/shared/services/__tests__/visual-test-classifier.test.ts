@@ -7,6 +7,7 @@ import {
   isVagueExpect,
   deriveLevelFromVerify,
   deriveNeedsBrowser,
+  downgradeManualToBehavior,
   capVisionLevelByRigor,
   isDeterministicLevel,
 } from '../visual-test-classifier';
@@ -654,6 +655,39 @@ describe('aggregateVisualTests — verify-aware oracle tier + strength (E4-S2/S3
       true,
     );
     expect(report.coverageWarnings.some((w) => w.kind === 'unpaired-l2-state')).toBe(false);
+  });
+
+  it('downgradeManualToBehavior — stubbable manual AC downgrades to behavior + forces needsBrowser + logs event (E8.3)', () => {
+    const d = downgradeManualToBehavior({
+      acId: 'AC-1',
+      verify: 'manual',
+      manualReason: 'oauth-consent',
+      stubAvailable: true,
+    });
+    expect(d.verify).toBe('behavior');
+    expect(d.needsBrowser).toBe(true);
+    expect(d.reclassified).toBe(true);
+    expect(d.event?.kind).toBe('manual-downgrade');
+    expect(d.event?.acId).toBe('AC-1');
+  });
+
+  it('downgradeManualToBehavior — genuinely unautomatable manual AC stays manual (no stub)', () => {
+    const d = downgradeManualToBehavior({
+      acId: 'AC-2',
+      verify: 'manual',
+      manualReason: 'real-payment',
+      stubAvailable: false,
+    });
+    expect(d.verify).toBe('manual');
+    expect(d.reclassified).toBe(false);
+    expect(d.event).toBeNull();
+  });
+
+  it('downgradeManualToBehavior — non-manual AC passes through unchanged', () => {
+    const d = downgradeManualToBehavior({ acId: 'AC-3', verify: 'behavior', stubAvailable: true });
+    expect(d.verify).toBe('behavior');
+    expect(d.reclassified).toBe(false);
+    expect(d.event).toBeNull();
   });
 
   it('deriveNeedsBrowser — one rule: build→false, appearance/state/behavior→true, manual→undefined', () => {
