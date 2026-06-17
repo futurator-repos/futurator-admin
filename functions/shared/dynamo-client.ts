@@ -66,4 +66,8 @@ export const TABLE_NAMES = {
   // 2026-05-27 PR D.f — PWA push subscriptions. PK: subscriptionId. GSI1
   // operator-index for "all devices for this operator" lookups.
   pushSubscriptions: process.env.PUSH_SUBSCRIPTIONS_TABLE || 'futurator-push-subscriptions',
+  // Skills Institution — Story 3.1: curation Inbox proposals (candidate skills
+  // through the gate awaiting ratify/reject). PK proposalId (ULID); GSI
+  // status-createdAt-index for the "pending, newest first" inbox query.
+  skillProposals: process.env.SKILL_PROPOSALS_TABLE || 'futurator-skill-proposals',
 } as const;

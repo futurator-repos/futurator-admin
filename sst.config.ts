@@ -405,6 +405,29 @@ export default $config({
       },
     });
 
+    // ── Skills Institution — Story 3.1: curation Inbox ──
+    // Candidate skills that passed through the gate (merge→scan→label→version)
+    // awaiting operator ratify/reject. PK = proposalId (ULID). GSI
+    // status-createdAt-index so the inbox's "pending, newest first" view is a
+    // Query (a bulk-acquisition batch can fan to hundreds of rows without making
+    // the inbox load O(table)). PITR enabled — losing a ratified decision would
+    // silently regress the curated registry.
+    const skillProposalsTable = new sst.aws.Dynamo('SkillProposalsTable', {
+      fields: { proposalId: 'string', status: 'string', createdAt: 'string' },
+      primaryIndex: { hashKey: 'proposalId' },
+      globalIndexes: {
+        'status-createdAt-index': { hashKey: 'status', rangeKey: 'createdAt' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-skill-proposals',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── Pipeline v2 Phase 3 — Story 3-E-3-1 (PR-76): Reflection Inbox ──
     // REFLECTOR proposals stored per-project. PK = projectSlug (Query for
     // labs UI per-project view); SK = id (ULID-shape, sort-friendly).
@@ -882,6 +905,7 @@ export default $config({
         fixCyclesTable,
         remediationPoliciesTable,
         pushSubscriptionsTable,
+        skillProposalsTable,
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
@@ -936,6 +960,8 @@ export default $config({
         REMEDIATION_POLICIES_TABLE: remediationPoliciesTable.name,
         // 2026-05-27 PR D.f — PWA push subscriptions.
         PUSH_SUBSCRIPTIONS_TABLE: pushSubscriptionsTable.name,
+        // Skills Institution — Story 3.1: curation Inbox proposals.
+        SKILL_PROPOSALS_TABLE: skillProposalsTable.name,
         PROJECTS_ROOT: '/home/ubuntu/projects',
         BMAD_VERSION: '6.3.0',
         BMAD_AGENTS_SOURCE: '/home/ubuntu/bmad-agents-source/bmad/agents',
