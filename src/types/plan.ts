@@ -89,6 +89,8 @@ export interface Plan {
   conceptRouteJobId?: string;
   /** Concept v2 — per-artifact generator job FKs (for live streaming the active agent). */
   conceptArtifactJobIds?: Partial<Record<ConceptArtifactKind, string>>;
+  /** Concept v2 — the grounded pm-plan job the chain enqueues once all specs approve. */
+  conceptPmPlanJobId?: string;
   testingProfile?: PlanTestingProfile;
   /** QA auto-enqueue toggle. Default derived from rigor at creation. */
   autoRunQa?: boolean;

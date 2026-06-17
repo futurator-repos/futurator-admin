@@ -241,6 +241,32 @@ export function PlanDashboard({ planId }: { planId: string }) {
       });
   }, [plan, planId, conceptApplied, applyConcept, refetch, conceptRouteJob?.status]);
 
+  // Concept v2 — apply the GROUNDED pm-plan output (the chain enqueues the PM
+  // plan once all specs are approved and stamps `conceptPmPlanJobId`, but nothing
+  // materialized its PLAN_JSON into epics — the chain "got nowhere"). Watch that
+  // job and apply it on COMPLETED, replacing any stale/monolithic epics with the
+  // spec-grounded plan. One-shot per job id.
+  const conceptPmPlanJobId = plan?.conceptPmPlanJobId ?? null;
+  const { data: conceptPmJob } = useAgentJob(conceptPmPlanJobId);
+  const [conceptPmApplied, setConceptPmApplied] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (!plan || !conceptPmPlanJobId) return;
+    if (conceptPmJob?.status !== 'COMPLETED') return;
+    if (conceptPmApplied.has(conceptPmPlanJobId)) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setConceptPmApplied((s) => new Set(s).add(conceptPmPlanJobId));
+    apply
+      .mutateAsync({ jobId: conceptPmPlanJobId })
+      .then(() => {
+        setApplyError(null);
+        refetch();
+      })
+      .catch((err) => {
+        setApplyError(err instanceof Error ? err.message : String(err));
+        console.error('[PlanDashboard] apply grounded pm-plan failed', err);
+      });
+  }, [plan, conceptPmPlanJobId, conceptPmJob?.status, conceptPmApplied, apply, refetch]);
+
   // 2026-06-13 — storyId → { title, epic } map for the GitGraph Story view
   // (substitutes raw UUIDs with titles; groups commits Epic → Wave).
   const gitStoryMap = useMemo(

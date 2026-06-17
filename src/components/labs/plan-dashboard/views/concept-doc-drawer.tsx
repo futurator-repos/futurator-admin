@@ -1,8 +1,9 @@
 'use client';
 
+import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Loader2, X } from 'lucide-react';
+import { Loader2, X, Copy, Check } from 'lucide-react';
 import { useConceptDocument } from '@/hooks/use-concept-artifacts';
 import type { ConceptArtifactKind } from '@/types/plan';
 
@@ -46,6 +47,17 @@ export function ConceptDocDrawer({
   const md = data?.markdown ?? null;
   const status = data?.status ?? null;
   const canApprove = (data?.rev ?? 0) >= 1 && status !== 'approved';
+  const [copied, setCopied] = useState(false);
+  async function copyDoc() {
+    if (!md) return;
+    try {
+      await navigator.clipboard.writeText(md);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard blocked — no-op */
+    }
+  }
 
   return (
     <>
@@ -105,6 +117,30 @@ export function ConceptDocDrawer({
               by {persona.name} · {persona.role}
             </div>
           </div>
+          <button
+            type="button"
+            onClick={copyDoc}
+            disabled={!md}
+            aria-label="Copy document"
+            title="Copy the full markdown to your clipboard"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              fontSize: 12,
+              fontWeight: 600,
+              color: copied ? 'var(--success)' : 'var(--text-mute)',
+              background: 'transparent',
+              border: '1px solid var(--border)',
+              borderRadius: 6,
+              padding: '4px 10px',
+              cursor: md ? 'pointer' : 'default',
+              opacity: md ? 1 : 0.5,
+            }}
+          >
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? 'Copied' : 'Copy'}
+          </button>
           <button
             type="button"
             onClick={onClose}
