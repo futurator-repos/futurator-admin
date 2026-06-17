@@ -32,6 +32,12 @@ every developer story) will be held to. Write it in ONE pass: a complete,
 self-consistent document. Do not ask questions; make the best decisions you can
 from the intent and state your assumptions explicitly.
 
+## Execution discipline (READ FIRST — it keeps you fast)
+- ONE-SHOT document generation. Do NOT use TodoWrite and do NOT call ToolSearch —
+  they are not available here; each attempt wastes a full model round-trip.
+- You have everything you need below. Do NOT broadly Glob/Read the project. Do not
+  greet or narrate — your FIRST action is emitting the document between the fences.
+
 ## Intent
 ${args.intent}
 

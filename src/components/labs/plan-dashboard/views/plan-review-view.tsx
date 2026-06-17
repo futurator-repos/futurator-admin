@@ -31,7 +31,8 @@ import {
   useRegenerateConceptArtifact,
   useConceptDrive,
 } from '@/hooks/use-concept-artifacts';
-import type { AgentJobStatus } from '@/types/agent-orchestrator';
+import type { AgentJobStatus, AgentEvent } from '@/types/agent-orchestrator';
+import { api } from '@/lib/api-client';
 import type { EpicWorkflow } from '@/types/epic-workflow';
 import { epicStatusColor } from '../constants';
 import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-output';
@@ -93,14 +94,20 @@ export function PlanReviewView({
     !!activeConceptArtifact &&
     activeConceptArtifact.status === 'draft' &&
     activeConceptArtifact.rev === 0;
-  const activeGenJobId =
-    conceptGenerating && activeConceptKind
-      ? plan.conceptArtifactJobIds?.[activeConceptKind]
-      : undefined;
   const generating = (pmRunning || !!applyPending) && !conceptChainActive;
+  // The epic plan is the LAST step — it's only valid once every spec is approved.
+  // Until then we hide the epics list (any epics present on a chain plan are
+  // stale/premature, e.g. from a legacy monolithic-PM run) and keep the rail +
+  // "drafting your specs" state as the surface. Non-concept plans are unaffected.
+  const specsComplete =
+    !conceptChainActive ||
+    ((plan.conceptPlan?.artifacts ?? []).length > 0 &&
+      (plan.conceptPlan?.artifacts ?? []).every(
+        (p) => conceptArtifactsList.find((a) => a.kind === p.kind)?.status === 'approved',
+      ));
   // Reactive drive: advance the spec chain while the operator watches (the cron
-  // is the backstop). Active only while the chain is live + no epics yet.
-  useConceptDrive(plan.planId, conceptChainActive && !hasEpics);
+  // is the backstop). Active until every spec is approved + the plan is drafted.
+  useConceptDrive(plan.planId, conceptChainActive && !specsComplete);
 
   const patch = usePatchPlan(plan.planId);
   const regenerate = useRegeneratePlan(plan.planId);
@@ -257,7 +264,7 @@ export function PlanReviewView({
                 disabled={regenerate.isPending || generating}
               />
             )}
-            {isConcept && hasEpics && (
+            {isConcept && hasEpics && specsComplete && (
               <SolidButton
                 label={
                   start.isPending
@@ -495,19 +502,24 @@ export function PlanReviewView({
           />
         )}
 
-        {/* Live stream of the ACTIVE specialized agent (John/Sally/Winston),
-            not the monolithic PM — so you can watch the actual doc being
-            written, by name. */}
-        {activeGenJobId && activeConceptKind && (
-          <ConceptAgentStream jobId={activeGenJobId} kind={activeConceptKind} />
+        {/* Persistent, collapsible per-agent traces (Mary/John/Sally/Winston) —
+            the active one streams live + auto-expands; completed ones are
+            retained (collapsed) so nothing is lost between docs. Plus a
+            forensic log download for the whole concept stage. */}
+        {conceptChainActive && (
+          <ConceptAgentLogs
+            plan={plan}
+            activeKind={conceptGenerating ? activeConceptKind : undefined}
+          />
         )}
 
         {/* Concept chain owns generation — the rail above is the live status.
             Show a chain-aware caption instead of the legacy PM empty-state. */}
-        {conceptChainActive && !hasEpics && (
+        {conceptChainActive && !specsComplete && (
           <EmptyCard faded>
             Drafting your specs — approve PRD, UX &amp; Architecture above, then the epic plan is
-            generated from the approved docs.
+            generated from the approved docs. (The plan appears here only after every spec is
+            approved.)
           </EmptyCard>
         )}
 
@@ -521,7 +533,7 @@ export function PlanReviewView({
           <EmptyCard faded>PM is drafting epics…</EmptyCard>
         )}
 
-        {hasEpics && (
+        {hasEpics && specsComplete && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {epics.map((e, idx) => (
               <EpicRow key={e.epicId} epic={e} label={`E${idx + 1}`} allEpics={epics} />
@@ -1090,63 +1102,205 @@ function PmAgentLogPanel({ jobId, defaultOpen }: { jobId: string; defaultOpen?: 
   );
 }
 
-/** The specialized BMAD persona that authors each concept artifact. */
-const CONCEPT_PERSONA: Record<string, { name: string; role: string; icon: string }> = {
-  prd: { name: 'John', role: 'Product Manager', icon: '📋' },
-  ux: { name: 'Sally', role: 'UX Expert', icon: '🎨' },
-  architecture: { name: 'Winston', role: 'Architect', icon: '🏗️' },
+/** The specialized BMAD persona behind each concept-stage agent job. */
+const CONCEPT_PERSONA: Record<string, { name: string; role: string; icon: string; doc: string }> = {
+  route: { name: 'Mary', role: 'Analyst', icon: '📊', doc: 'routing' },
+  prd: { name: 'John', role: 'Product Manager', icon: '📋', doc: 'prd.md' },
+  ux: { name: 'Sally', role: 'UX Expert', icon: '🎨', doc: 'ux-spec.md' },
+  architecture: { name: 'Winston', role: 'Architect', icon: '🏗️', doc: 'architecture.md' },
 };
 
+interface ConceptAgentEntry {
+  kind: string;
+  jobId: string;
+  status?: string;
+}
+
 /**
- * Live stream of the ACTIVE concept-stage agent (John/Sally/Winston) — the
- * specialized persona drafting the current spec, NOT the monolithic PM. Reuses
- * the same stream-json trace the dev/reviewer stages expose, headed by the
- * persona so the operator sees exactly who is writing what, in real time.
+ * Persistent, collapsible per-agent trace panel for the whole concept stage.
+ * Every agent that has run (Mary→John→Sally→Winston) keeps its own panel — the
+ * active one auto-expands + streams live, finished ones stay collapsed so their
+ * logs are never lost between docs. A "Download forensic log" button exports the
+ * full multi-agent trace for later inspection.
  */
-function ConceptAgentStream({ jobId, kind }: { jobId: string; kind: string }) {
-  const persona = CONCEPT_PERSONA[kind] ?? { name: 'Agent', role: 'Specialist', icon: '✦' };
-  const docLabel = kind === 'architecture' ? 'architecture.md' : `${kind}.md`;
+function ConceptAgentLogs({ plan, activeKind }: { plan: PlanWithEpics; activeKind?: string }) {
+  const entries: ConceptAgentEntry[] = (
+    [
+      { kind: 'route', jobId: plan.conceptRouteJobId },
+      { kind: 'prd', jobId: plan.conceptArtifactJobIds?.prd },
+      { kind: 'ux', jobId: plan.conceptArtifactJobIds?.ux },
+      { kind: 'architecture', jobId: plan.conceptArtifactJobIds?.architecture },
+    ] as Array<{ kind: string; jobId?: string }>
+  )
+    .filter((e): e is ConceptAgentEntry => !!e.jobId)
+    .map((e) => ({
+      ...e,
+      status: (plan.conceptArtifacts ?? []).find((a) => a.kind === e.kind)?.status,
+    }));
+
+  if (entries.length === 0) return null;
+
+  async function downloadForensicLog() {
+    const lines: string[] = [
+      `# Concept-stage forensic log — ${plan.name}`,
+      `# plan ${plan.planId}`,
+      `# exported ${new Date().toISOString()}`,
+      '',
+    ];
+    for (const e of entries) {
+      const p = CONCEPT_PERSONA[e.kind] ?? { name: 'Agent', role: 'Specialist', doc: e.kind };
+      lines.push(
+        '',
+        '================================================================',
+        `## ${p.name} · ${p.role} — ${p.doc}  (job ${e.jobId.slice(0, 8)}, status ${e.status ?? 'n/a'})`,
+        '================================================================',
+        '',
+      );
+      try {
+        const res = await api.get<{ events: AgentEvent[] }>(
+          `/agent-jobs/${e.jobId}/events?limit=5000`,
+        );
+        for (const ev of res.events ?? []) {
+          const ts = (ev as { timestamp?: string }).timestamp ?? '';
+          if (ev.eventType === 'tool_use') {
+            lines.push(
+              `[${ts}] tool: ${ev.toolName ?? ''} ${ev.toolInput ? JSON.stringify(ev.toolInput) : ''}`,
+            );
+          } else if (ev.text) {
+            lines.push(`[${ts}] ${ev.text}`);
+          } else {
+            lines.push(`[${ts}] (${ev.eventType})`);
+          }
+        }
+      } catch {
+        lines.push('  (failed to load events for this agent)');
+      }
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${plan.name}-concept-forensic-log.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <SectionHeader>Agent traces</SectionHeader>
+        <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
+          {entries.length} agent{entries.length === 1 ? '' : 's'} · persistent
+        </span>
+        <button
+          type="button"
+          onClick={downloadForensicLog}
+          style={{
+            marginLeft: 'auto',
+            fontSize: 11,
+            fontWeight: 600,
+            color: 'var(--text-mute)',
+            background: 'transparent',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            cursor: 'pointer',
+          }}
+        >
+          ⬇ Download forensic log
+        </button>
+      </div>
+      {entries.map((e) => (
+        <CollapsibleAgentLog key={e.kind} entry={e} defaultOpen={e.kind === activeKind} />
+      ))}
+    </section>
+  );
+}
+
+/** One collapsible agent trace, headed by its persona; live-streams via StoryLiveOutput. */
+function CollapsibleAgentLog({
+  entry,
+  defaultOpen,
+}: {
+  entry: ConceptAgentEntry;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(!!defaultOpen);
+  const p = CONCEPT_PERSONA[entry.kind] ?? {
+    name: 'Agent',
+    role: 'Specialist',
+    icon: '✦',
+    doc: entry.kind,
+  };
+  const live = !!defaultOpen; // the active (auto-opened) agent is the live one
+  const statusLabel =
+    entry.status === 'approved'
+      ? '✓ approved'
+      : entry.status === 'stale'
+        ? '↻ stale'
+        : live
+          ? 'drafting…'
+          : 'draft';
   return (
     <section
-      data-testid="concept-agent-stream"
       style={{
         border: '1px solid var(--border)',
         background: 'var(--bg-elev)',
         borderRadius: 8,
         overflow: 'hidden',
-        marginBottom: 16,
       }}
     >
-      <div
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
         style={{
+          width: '100%',
+          background: 'transparent',
+          border: 'none',
+          color: 'inherit',
+          padding: '10px 16px',
           display: 'flex',
           alignItems: 'center',
           gap: 10,
-          padding: '12px 18px',
-          borderBottom: '1px solid var(--border)',
+          cursor: 'pointer',
         }}
       >
-        <Loader2 size={14} className="animate-spin" style={{ color: 'var(--accent-purple)' }} />
-        <span style={{ fontSize: 16 }}>{persona.icon}</span>
+        {live ? (
+          <Loader2 size={14} className="animate-spin" style={{ color: 'var(--accent-purple)' }} />
+        ) : (
+          <span style={{ fontSize: 15 }}>{p.icon}</span>
+        )}
         <span style={{ fontWeight: 600, fontSize: 13 }}>
-          {persona.name}
-          <span style={{ color: 'var(--text-mute)', fontWeight: 400 }}> · {persona.role}</span>
+          {p.name}
+          <span style={{ color: 'var(--text-mute)', fontWeight: 400 }}> · {p.role}</span>
         </span>
-        <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>is drafting {docLabel}…</span>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{p.doc}</span>
+        <span
+          style={{
+            fontSize: 10,
+            fontFamily: 'var(--font-mono)',
+            fontWeight: 600,
+            color: entry.status === 'approved' ? 'var(--success)' : 'var(--accent-blue)',
+          }}
+        >
+          {statusLabel}
+        </span>
         <span
           style={{
             marginLeft: 'auto',
             fontFamily: 'var(--font-mono)',
             fontSize: 10,
-            color: 'var(--text-faint)',
+            color: 'var(--text-mute)',
           }}
         >
-          job {jobId.slice(0, 8)}
+          {open ? '▾ HIDE' : '▸ SHOW'} · job {entry.jobId.slice(0, 8)}
         </span>
-      </div>
-      <div style={{ padding: '8px 0' }}>
-        <StoryLiveOutput jobId={jobId} />
-      </div>
+      </button>
+      {open && (
+        <div style={{ borderTop: '1px solid var(--border)', padding: '8px 0' }}>
+          <StoryLiveOutput jobId={entry.jobId} />
+        </div>
+      )}
     </section>
   );
 }

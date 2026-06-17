@@ -43,6 +43,16 @@ every developer story will be held to. It must be consistent with the PRD${
   } provided below; cite their decisions, never contradict them. Write it in ONE
 pass — a complete, internally consistent document. State assumptions explicitly.
 
+## Execution discipline (READ FIRST — it keeps you fast)
+- ONE-SHOT document generation, not an interactive task. Do NOT use TodoWrite and
+  do NOT call ToolSearch — they are not available here; each attempt wastes a full
+  model round-trip (and is the #1 cause of slow runs).
+- You already have the intent, prior artifacts, and (when present) the real
+  codebase ground truth below. Do NOT broadly Glob/Read the project — read at most
+  2–3 specific files only if a decision truly depends on them.
+- Do not greet or narrate. Your FIRST action is emitting the document between the
+  fences.
+
 ## Intent
 ${args.intent}
 
