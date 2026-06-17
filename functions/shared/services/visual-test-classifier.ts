@@ -305,6 +305,29 @@ export function deriveLevelFromVerify(
   }
 }
 
+/**
+ * E8.2 (W5/H12 / MQ1-followup) — the ONE `needsBrowser` rule all three docs
+ * share: DERIVED for `build|appearance|state|behavior` (`build→false`, the rest
+ * `true` — they need a running surface), and INDEPENDENT/EXPLICIT for `manual`
+ * (returns `undefined` → the caller keeps the operator-set flag; a manual AC's
+ * browser-need is a human-lane fact, not derivable from intent). Centralizes
+ * the rule so the classifier, the QA-AUTHOR, and the gate never diverge.
+ */
+export function deriveNeedsBrowser(verify: VerifyIntent | undefined): boolean | undefined {
+  switch (verify) {
+    case 'build':
+      return false;
+    case 'appearance':
+    case 'state':
+    case 'behavior':
+      return true;
+    case 'manual':
+      return undefined; // independent — caller keeps the explicit value
+    default:
+      return undefined; // no intent → leave the existing flag alone
+  }
+}
+
 const VISION_ORDINAL: Record<'L0' | 'L1' | 'L2-vision', number> = {
   L0: 0,
   L1: 1,
@@ -332,7 +355,12 @@ export function capVisionLevelByRigor(level: ResolvedLevel, rigor: PlanRigor): R
 // ── Coverage + specificity rollups (Q4.1) ────────────────────────────
 
 export interface CoverageWarning {
-  kind: 'no-tests-for-needs-browser' | 'over-tested' | 'tests-without-criteria-ref' | 'weak-oracle';
+  kind:
+    | 'no-tests-for-needs-browser'
+    | 'over-tested'
+    | 'tests-without-criteria-ref'
+    | 'weak-oracle'
+    | 'unpaired-l2-state';
   criterionId?: string;
   testIds?: string[];
   message: string;
@@ -516,6 +544,26 @@ export function aggregateVisualTests(
           criterionId: ac.id,
           testIds: list,
           message: `${ac.id} is verify:${ac.verify} and a seam exists, but no test asserts window.__harness — add an 'assert' probe (vision-only is non-deterministic here)`,
+        });
+        continue; // no assert → the weak-oracle warning already covers it
+      }
+      // E5.6 / E8.4-AC2 (H3/FR-32/FR-35) — L2-state is NEVER the sole witness
+      // for a UI-bearing AC. The seam reports state the user never SAW; a
+      // "right state, broken/invisible UI" defect ships green if state is the
+      // only oracle. Require a paired vision frame (a `screenshot` step) in at
+      // least one of the AC's probes so render-class defects are still caught.
+      const needsBrowser = needsBrowserByAcId.get(ac.id) ?? false;
+      if (!needsBrowser) continue; // non-UI state AC: deterministic-only is fine
+      const hasPairedVision = list.some((id) => {
+        const t = tests.find((x) => x.id === id);
+        return t?.flow?.some((s) => s.action === 'screenshot');
+      });
+      if (!hasPairedVision) {
+        coverageWarnings.push({
+          kind: 'unpaired-l2-state',
+          criterionId: ac.id,
+          testIds: list,
+          message: `${ac.id} is a UI-bearing ${ac.verify} AC verified by L2-state alone — add a paired vision frame (a 'screenshot' step) so a right-state/broken-UI defect can't ship green (H3: L2-state cannot block-green for render-class)`,
         });
       }
     }

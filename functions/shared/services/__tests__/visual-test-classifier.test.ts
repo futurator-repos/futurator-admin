@@ -6,6 +6,7 @@ import {
   formatViewport,
   isVagueExpect,
   deriveLevelFromVerify,
+  deriveNeedsBrowser,
   capVisionLevelByRigor,
   isDeterministicLevel,
 } from '../visual-test-classifier';
@@ -594,6 +595,74 @@ describe('aggregateVisualTests — verify-aware oracle tier + strength (E4-S2/S3
     );
     expect(report.classifications[0].classification.resolvedLevel).toBe('L2-vision');
     expect(report.coverageWarnings.some((w) => w.kind === 'weak-oracle')).toBe(false);
+  });
+
+  it('flags unpaired-l2-state when a UI-bearing behavior AC asserts state but has no paired screenshot (E5.6/H3)', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-1', {
+        criteriaRef: 'AC-1',
+        flow: [
+          { action: 'press', key: 'Space' },
+          { action: 'assert', expr: 'snapshot.status', op: 'eq', expected: 'running' },
+        ],
+      }),
+    ];
+    const report = aggregateVisualTests(
+      tests,
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      true,
+    );
+    expect(report.coverageWarnings.find((w) => w.kind === 'unpaired-l2-state')?.criterionId).toBe(
+      'AC-1',
+    );
+    // It has an assert, so it is NOT also weak-oracle.
+    expect(report.coverageWarnings.some((w) => w.kind === 'weak-oracle')).toBe(false);
+  });
+
+  it('does NOT flag unpaired-l2-state when the L2-state probe also has a screenshot', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-1', {
+        criteriaRef: 'AC-1',
+        flow: [
+          { action: 'press', key: 'Space' },
+          { action: 'screenshot', label: 'after' },
+          { action: 'assert', expr: 'snapshot.status', op: 'eq', expected: 'running' },
+        ],
+      }),
+    ];
+    const report = aggregateVisualTests(
+      tests,
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      true,
+    );
+    expect(report.coverageWarnings.some((w) => w.kind === 'unpaired-l2-state')).toBe(false);
+  });
+
+  it('does NOT flag unpaired-l2-state for a non-UI (needsBrowser:false) state AC', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-1', {
+        criteriaRef: 'AC-1',
+        flow: [{ action: 'assert', expr: 'snapshot.score', op: 'gt', expected: 0 }],
+      }),
+    ];
+    const report = aggregateVisualTests(
+      tests,
+      [{ id: 'AC-1', needsBrowser: false, verify: 'state' }],
+      'production',
+      true,
+    );
+    expect(report.coverageWarnings.some((w) => w.kind === 'unpaired-l2-state')).toBe(false);
+  });
+
+  it('deriveNeedsBrowser — one rule: build→false, appearance/state/behavior→true, manual→undefined', () => {
+    expect(deriveNeedsBrowser('build')).toBe(false);
+    expect(deriveNeedsBrowser('appearance')).toBe(true);
+    expect(deriveNeedsBrowser('state')).toBe(true);
+    expect(deriveNeedsBrowser('behavior')).toBe(true);
+    expect(deriveNeedsBrowser('manual')).toBeUndefined();
+    expect(deriveNeedsBrowser(undefined)).toBeUndefined();
   });
 
   it('a prototype-rigor state AC with a seam still resolves to L2-state (rigor-exempt, R1)', () => {
