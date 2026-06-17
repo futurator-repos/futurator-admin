@@ -22,22 +22,29 @@
 
 import { getFileContent, putFile, deleteFile } from './github/connector';
 import { SKILL_SOURCE_OWNER, SKILL_SOURCE_REPO } from './skill-catalog';
+import type {
+  SkillIndexEntry,
+  SkillIndex,
+  ProvenanceClass,
+  SecurityStatus,
+  TrustTier,
+  QualityGrade,
+  SkillLineage,
+} from './schemas/skill-index-entry-schema';
 
-export interface SkillIndexEntry {
-  name: string;
-  kind: string;
-  framework: boolean;
-  version: string;
-  license: string;
-  description: string;
-  provenance?: string;
-}
-
-export interface SkillIndex {
-  skills: SkillIndexEntry[];
-  'index-version'?: number;
-  'generated-by'?: string;
-}
+// The entry/index shapes are now defined as zod contracts in
+// `schemas/skill-index-entry-schema.ts` (Story 2.1) so the curation facets have
+// a single source of truth. Re-export them here so existing importers keep
+// working unchanged.
+export type {
+  SkillIndexEntry,
+  SkillIndex,
+  ProvenanceClass,
+  SecurityStatus,
+  TrustTier,
+  QualityGrade,
+  SkillLineage,
+};
 
 /** A slug usable as a directory name + skill id. */
 export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
@@ -147,6 +154,33 @@ export interface PutSkillInput {
   body: string;
   kind?: string;
   license?: string;
+  /**
+   * Curation facets (Story 2.1). Optional and additive: when omitted, an
+   * existing entry's facets are preserved on update, and a brand-new entry is
+   * left facet-free (the catalog/migration applies safe defaults on read). The
+   * gate (Story 3.5 ratify) supplies real facets — notably `trustTier` — when
+   * publishing a vetted skill.
+   */
+  facets?: Partial<
+    Pick<
+      SkillIndexEntry,
+      'provenanceClass' | 'securityStatus' | 'qualityGrade' | 'trustTier' | 'maturity' | 'lineage'
+    >
+  >;
+}
+
+/** Pick only the facet keys from an entry (drops the seven base fields). */
+function pickFacets(entry: SkillIndexEntry | undefined): Partial<SkillIndexEntry> {
+  if (!entry) return {};
+  const { provenanceClass, securityStatus, qualityGrade, trustTier, maturity, lineage } = entry;
+  const facets: Partial<SkillIndexEntry> = {};
+  if (provenanceClass !== undefined) facets.provenanceClass = provenanceClass;
+  if (securityStatus !== undefined) facets.securityStatus = securityStatus;
+  if (qualityGrade !== undefined) facets.qualityGrade = qualityGrade;
+  if (trustTier !== undefined) facets.trustTier = trustTier;
+  if (maturity !== undefined) facets.maturity = maturity;
+  if (lineage !== undefined) facets.lineage = lineage;
+  return facets;
 }
 
 /**
@@ -178,7 +212,10 @@ export async function putSkill(
     BRANCH,
   );
 
-  // 2. index entry last (so a half-write never advertises a bodyless skill)
+  // 2. index entry last (so a half-write never advertises a bodyless skill).
+  // Facets carry over from the prior entry on update, then any explicit input
+  // facets win — so ratify (Story 3.5) can stamp trustTier without clobbering
+  // an existing securityStatus, and a plain edit never silently downgrades trust.
   const entry: SkillIndexEntry = {
     name: input.name,
     kind: input.kind ?? 'core',
@@ -187,6 +224,8 @@ export async function putSkill(
     license: input.license ?? 'UNKNOWN',
     description: input.description,
     provenance: 'operator-authored',
+    ...pickFacets(existing),
+    ...(input.facets ?? {}),
   };
   const nextIndex = upsertIndexEntry(index, entry);
   const { commitSha: indexCommit } = await putFile(
