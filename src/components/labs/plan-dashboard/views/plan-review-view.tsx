@@ -16,6 +16,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import type { PlanWithEpics } from '@/hooks/use-plans';
 import { ConceptRail } from './concept-rail';
 import { ConceptDocDrawer } from './concept-doc-drawer';
+import { ConceptTimingPanel } from './concept-timing-panel';
 import type { ConceptArtifactKind } from '@/types/plan';
 import {
   usePatchPlan,
@@ -501,6 +502,8 @@ export function PlanReviewView({
             regenerating={regenerateArtifact.isPending}
           />
         )}
+
+        {conceptChainActive && <ConceptTimingPanel plan={plan} />}
 
         {/* Persistent, collapsible per-agent traces (Mary/John/Sally/Winston) —
             the active one streams live + auto-expands; completed ones are

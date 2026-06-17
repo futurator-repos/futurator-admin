@@ -2120,6 +2120,58 @@ const CONCEPT_FK_FIELD: Record<ArtifactKind, 'prdGenJobId' | 'uxGenJobId' | 'arc
   architecture: 'archGenJobId',
 };
 
+/**
+ * Enqueue the T2 SKILL-SCOUT job for a plan. Extracted so it can fire either at
+ * creation (legacy / prototype) OR — for a Concept-chain plan — only AFTER the
+ * specs are drafted (post-architecture), when we have the full perspective of
+ * the build's depth and concrete tech choices, yielding a far better skill
+ * loadout than the bare one-line intent. Idempotent at the call site via the
+ * `pendingSkillScoutJobId` guard. Non-fatal on failure.
+ */
+async function enqueueSkillScout(args: {
+  plan: Plan;
+  appId: string;
+  boilerplateKind: BoilerplateType;
+  createdBy: string;
+  now: string;
+}): Promise<string | undefined> {
+  try {
+    const jobId = crypto.randomUUID();
+    const scoutPipeline = generateSkillScoutPipeline({
+      trigger: 'T2',
+      projectSlug: args.appId,
+      planIntent: args.plan.intent,
+      boilerplateKind: args.boilerplateKind,
+      rigor: args.plan.rigor ?? 'mvp',
+      currentManifestYaml: '',
+      federationYaml: '',
+    });
+    await agentJobsRepo.createJob({
+      jobId,
+      status: 'PENDING',
+      createdAt: args.now,
+      updatedAt: args.now,
+      createdBy: args.createdBy,
+      workingDir: args.plan.workingDir,
+      jobType: 'skill-scout',
+      skillScoutPayload: {
+        trigger: 'T2',
+        projectSlug: args.appId,
+        appId: args.appId,
+        planId: args.plan.planId,
+        planIntent: args.plan.intent,
+        rigor: args.plan.rigor ?? 'mvp',
+      },
+      pipeline: scoutPipeline,
+    });
+    await planRepo.updatePlanFields(args.plan.planId, { pendingSkillScoutJobId: jobId });
+    return jobId;
+  } catch (scoutErr) {
+    console.warn(`[enqueueSkillScout] failed for plan ${args.plan.planId}:`, scoutErr);
+    return undefined;
+  }
+}
+
 /** Shared Concept-driver deps (reactive apply endpoints + cron parity). */
 function buildConceptDriverDeps(): ConceptDriverDeps {
   return {
@@ -2397,6 +2449,29 @@ app.post('/api/plans/:id/concept/:kind/approve', async (c) => {
       if (fresh) drive = await driveConcept(fresh, buildConceptDriverDeps());
     } finally {
       await planRepo.releasePlanReduceLock(planId, token);
+    }
+  }
+
+  // Skill-scout, deferred to post-spec: when this approval completes the chain
+  // (the driver just enqueued the grounded pm-plan), we now have the full
+  // perspective — PRD + UX + the architecture's concrete tech choices. Enqueue
+  // SKILL-SCOUT here for a far better loadout than the bare intent could give.
+  // Idempotent: skip if one is already pending. Non-fatal.
+  if (drive?.kind === 'enqueued-pm-plan') {
+    const afterApproval = await planRepo.getPlanById(planId);
+    if (
+      afterApproval &&
+      !afterApproval.pendingSkillScoutJobId &&
+      (afterApproval.kind === 'initial' || afterApproval.kind === 'change')
+    ) {
+      const app = afterApproval.appId ? await appRepo.getApp(afterApproval.appId) : null;
+      await enqueueSkillScout({
+        plan: afterApproval,
+        appId: afterApproval.appId ?? afterApproval.name,
+        boilerplateKind: (app?.boilerplateType ?? 'nextjs-base') as BoilerplateType,
+        createdBy: afterApproval.createdBy,
+        now: new Date().toISOString(),
+      });
     }
   }
   return c.json({ planId, kind, approved: true, drive });
@@ -11548,40 +11623,21 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
   // canonical TS builder is reused here since the API Lambda has the
   // type system available.
   let skillScoutJobId: string | undefined;
-  if (parsed.data.kind === 'initial' || parsed.data.kind === 'change') {
+  // Concept v2 — for a Concept-chain plan, DEFER skill-scout until the specs are
+  // drafted (the approve flow enqueues it post-architecture, when we know the
+  // real depth + tech choices). Only the legacy/prototype path enqueues at
+  // creation. shouldRunConceptRoute mirrors the eager-pm-plan suppression.
+  if (
+    !shouldRunConceptRoute(plan) &&
+    (parsed.data.kind === 'initial' || parsed.data.kind === 'change')
+  ) {
     try {
-      skillScoutJobId = crypto.randomUUID();
-      const scoutPipeline = generateSkillScoutPipeline({
-        trigger: 'T2',
-        projectSlug: appId,
-        planIntent: plan.intent,
+      skillScoutJobId = await enqueueSkillScout({
+        plan,
+        appId,
         boilerplateKind: (appRow.boilerplateType ?? 'nextjs-base') as BoilerplateType,
-        rigor: plan.rigor ?? 'mvp',
-        // Empty YAML — daemon refreshes at run time via buildPromptContext.
-        currentManifestYaml: '',
-        federationYaml: '',
-      });
-      await agentJobsRepo.createJob({
-        jobId: skillScoutJobId,
-        status: 'PENDING',
-        createdAt: now,
-        updatedAt: now,
         createdBy: user.email,
-        workingDir: plan.workingDir,
-        jobType: 'skill-scout',
-        skillScoutPayload: {
-          trigger: 'T2',
-          projectSlug: appId,
-          appId,
-          planId: plan.planId,
-          planIntent: plan.intent,
-          rigor: plan.rigor ?? 'mvp',
-        },
-        pipeline: scoutPipeline,
-      });
-      // Stamp the FK on the plan so /api/plans/:id/start can check it.
-      await planRepo.updatePlanFields(plan.planId, {
-        pendingSkillScoutJobId: skillScoutJobId,
+        now,
       });
     } catch (scoutErr) {
       // Non-fatal — plan creation succeeded; the operator can retry
