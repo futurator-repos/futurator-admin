@@ -56,6 +56,7 @@ const EDGE_COLORS: Record<string, string> = {
   CONFLICTS_WITH: '#f43f5e',
   ENABLES: '#facc15',
   INFORMS: '#a3a3a3',
+  REFERENCES: '#2dd4bf', // teal — living doc (decision/architecture/index) → code it describes
   // AST-derived (Slice B)
   DEFINES: '#0ea5e9',
   IMPORTS: '#ec4899',

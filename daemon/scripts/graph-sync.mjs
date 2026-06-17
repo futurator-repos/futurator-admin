@@ -29,6 +29,7 @@ import { createDriver } from './lib/memgraph-driver.mjs';
 import { embedBatch, getUsageStats, resetUsageStats } from './lib/voyage-embed.mjs';
 import { backupToS3 } from './lib/s3-backup.mjs';
 import { loadAliasMap, resolveImportSource } from './lib/import-resolver.mjs';
+import { extractWikilinks, isLivingDoc } from './lib/doc-references.mjs';
 import {
   upsertExtractedFacts,
   upsertEnvReads,
@@ -174,20 +175,9 @@ Optional:
 `);
 }
 
-// ── Edge Type Configuration ──────────────────────────────────────────
-
-/** Maps wiki section headers to edge types, directions, and weights */
-const SECTION_EDGE_MAP = {
-  'dependencies': { type: 'DEPENDS_ON', direction: 'outgoing', weight: 1.0 },
-  'dependents': { type: 'DEPENDS_ON', direction: 'incoming', weight: 1.0 },
-  'derived from': { type: 'DERIVED_FROM', direction: 'outgoing', weight: 0.7 },
-  'informs': { type: 'INFORMS', direction: 'outgoing', weight: 0.3 },
-  'refines': { type: 'REFINES', direction: 'outgoing', weight: 0.5 },
-  'validates': { type: 'VALIDATES', direction: 'outgoing', weight: 0.6 },
-  'supersedes': { type: 'SUPERSEDES', direction: 'outgoing', weight: 0.8 },
-  'conflicts with': { type: 'CONFLICTS_WITH', direction: 'bidirectional', weight: 0.9 },
-  'enables': { type: 'ENABLES', direction: 'outgoing', weight: 0.5 },
-};
+// SECTION_EDGE_MAP + extractWikilinks now live in ./lib/doc-references.mjs so
+// the wikilink → edge logic (and the living-doc REFERENCES layer) is unit-tested
+// independently of this script's top-level main().
 
 // ── Helper Functions ─────────────────────────────────────────────────
 
@@ -282,35 +272,6 @@ function parseFrontmatter(content) {
  * Extract [[wikilinks]] from article body, grouped by section.
  * Returns array of { edgeType, direction, weight, target } objects.
  */
-function extractWikilinks(body) {
-  const edges = [];
-  let currentSection = null;
-
-  for (const line of body.split('\n')) {
-    // Check for section headers
-    const headerMatch = line.match(/^##\s+(.+)$/);
-    if (headerMatch) {
-      currentSection = headerMatch[1].trim().toLowerCase();
-      continue;
-    }
-
-    // Find [[wikilinks]] in this line
-    const linkRegex = /\[\[([^\]]+)\]\]/g;
-    let linkMatch;
-    while ((linkMatch = linkRegex.exec(line)) !== null) {
-      const target = linkMatch[1].trim();
-
-      // Look up edge type from section
-      if (currentSection && SECTION_EDGE_MAP[currentSection]) {
-        const { type, direction, weight } = SECTION_EDGE_MAP[currentSection];
-        edges.push({ type, direction, weight, target });
-      }
-    }
-  }
-
-  return edges;
-}
-
 /**
  * Prepare embeddable text from an article.
  * Concatenates title + purpose + key exports for a representative summary.
@@ -462,7 +423,13 @@ async function main() {
   // ── Step 4: Parse frontmatter and wikilinks ──────────────────────
   const parsedArticles = articlesToProcess.map((article) => {
     const { frontmatter, body } = parseFrontmatter(article.content);
-    const wikilinks = extractWikilinks(body);
+    // Living docs (architecture, components, decisions, index, system) get inline
+    // [[links]] resolved to REFERENCES edges so they connect to the code they
+    // describe. Plan-run docs (a plan's PRD/epics/stories) are left out — wired
+    // deliberately later. See lib/doc-references.mjs.
+    const wikilinks = extractWikilinks(body, {
+      inlineRefs: isLivingDoc(frontmatter, article.nodeId),
+    });
     const embeddingText = prepareEmbeddingText(frontmatter, body);
     const summary = extractSummary(body);
     return { ...article, frontmatter, body, wikilinks, embeddingText, summary };
