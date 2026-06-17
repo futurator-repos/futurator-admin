@@ -91,6 +91,50 @@ async function validateCandidatePat(candidateToken: string): Promise<string> {
 }
 
 /**
+ * 2026-06-17 — repo-capability probe. `/user` only proves the token
+ * AUTHENTICATES; a fine-grained PAT can authenticate yet lack the per-repo
+ * permissions the app actually needs (brick1: rotation "succeeded" but the token
+ * had no Pull requests permission, so GitGraph 403'd with "Resource not
+ * accessible by personal access token"). This probes the two reads the
+ * git-graph + pipeline depend on — Contents (commits) and Pull requests — and
+ * rejects the rotation LOUDLY if either is denied, naming the missing
+ * permission, so the operator fixes it before the token goes live.
+ *
+ * Soft on enumeration: if the token can't list any repo (fresh account / odd
+ * scope) we don't block — we only hard-fail on an explicit 403 from a probe,
+ * which is the precise failure mode we're guarding against.
+ */
+async function validateRepoCapabilities(candidateToken: string): Promise<void> {
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${candidateToken}`,
+    'User-Agent': USER_AGENT,
+  };
+  const reposRes = await fetch(`${GITHUB_API}/user/repos?per_page=1&sort=created&direction=desc`, {
+    headers,
+  });
+  if (!reposRes.ok) return; // can't enumerate — don't false-reject
+  const repos = (await reposRes.json().catch(() => [])) as Array<{ full_name?: string }>;
+  const full = repos[0]?.full_name;
+  if (!full) return; // no repo visible to probe — soft pass
+
+  const probes: Array<{ perm: string; path: string }> = [
+    { perm: 'Contents: Read-only', path: 'commits' },
+    { perm: 'Pull requests: Read-only', path: 'pulls' },
+  ];
+  for (const { perm, path } of probes) {
+    const r = await fetch(`${GITHUB_API}/repos/${full}/${path}?per_page=1`, { headers });
+    if (r.status === 403) {
+      throw new InvalidPatError(
+        `Token authenticates but cannot read ${path} on ${full} — grant "${perm}" on the ` +
+          `fine-grained token (Settings → the token → Permissions → Add permissions), or use a ` +
+          `classic PAT with the "repo" scope, then retry. GitGraph and PR features need this.`,
+      );
+    }
+  }
+}
+
+/**
  * rotatePat — validate + write a new GitHub PAT to SSM.
  *
  * @param candidateToken  The new PAT. MUST NOT be logged or echoed.
@@ -101,8 +145,12 @@ export async function rotatePat(
   candidateToken: string,
   ssmClient: SSMClient,
 ): Promise<RotatePATResult> {
-  // Step 1: validate the PAT against GitHub.
+  // Step 1: validate the PAT against GitHub (authenticates?).
   const login = await validateCandidatePat(candidateToken);
+
+  // Step 1b: validate it actually has the repo reads the app needs (catches the
+  // brick1 failure mode — authenticates but missing Pull requests permission).
+  await validateRepoCapabilities(candidateToken);
 
   const rotatedAt = new Date().toISOString();
 

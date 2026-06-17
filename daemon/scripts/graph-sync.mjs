@@ -440,6 +440,7 @@ async function main() {
     await processSystemGraphFacts(config);
     await processGraphIntegrity(config);
     await writeGraphSnapshot(config);
+    await writeGitGraphSnapshotLocal(config);
     await processGraphAnalytics(config);
     await processContractRevisions(config);
     await processFederation(config);
@@ -658,6 +659,9 @@ async function main() {
   // ── Step 8.5: Graph snapshot for in-app visualization ────────────
   await writeGraphSnapshot(config);
 
+  // ── Step 8.55: git-graph snapshot (GitGraph fallback — always fresh) ─
+  await writeGitGraphSnapshotLocal(config);
+
   // ── Step 8.6: Architectural X-Ray analytics — insights.json (Epic 3) ─
   await processGraphAnalytics(config);
 
@@ -752,16 +756,20 @@ async function processAstFacts(config) {
     const fileNodeId = fileToCodeNodeId(file.path);
     backboneFiles.push(file.path);
 
-    // Mark the parent file node as kind="file" — idempotent SET.
-    // The file's :Node may not exist yet if Compiler hasn't written a wiki
-    // article for it (e.g. AST_FACTS covers more files than article diff).
-    // MERGE-without-SET-on-create would create incomplete nodes; we only
-    // SET kind on existing ones.
+    // Ensure the parent file node EXISTS (kind="file"). It may not yet if the
+    // Compiler hasn't written a wiki article for it — AST_FACTS covers more
+    // files than the article diff (test files, .feature.tsx, bare components).
+    // Previously we only SET kind on an existing node, which left every
+    // function in an article-less file with NO file→function DEFINES edge —
+    // i.e. orphaned. MERGE the file node so DEFINES always links; the Compiler
+    // enriches title/summary later. Matches the function-node MERGE pattern.
     await session.run(
-      `MATCH (n:Node {nodeId: $nodeId, projectId: $projectId})
-       WHERE n.kind IS NULL OR n.kind = ''
-       SET n.kind = 'file'`,
-      { nodeId: fileNodeId, projectId: config.project }
+      `MERGE (n:Node {nodeId: $nodeId})
+       ON CREATE SET n.projectId = $projectId, n.kind = 'file', n.type = 'code',
+                     n.status = 'active', n.phase = 'implementation', n.title = $title
+       ON MATCH SET n.kind = CASE WHEN n.kind IS NULL OR n.kind = '' THEN 'file' ELSE n.kind END,
+                    n.projectId = coalesce(n.projectId, $projectId)`,
+      { nodeId: fileNodeId, projectId: config.project, title: file.path }
     );
 
     // Functions
@@ -1571,6 +1579,55 @@ async function writeGraphSnapshot(config) {
     }
   } catch (err) {
     logError(`graph-snapshot write failed (non-blocking): ${err.message}`);
+  }
+}
+
+/**
+ * Concept v2 (2026-06-17) — write the bare-repo git-graph snapshot into the
+ * LOCAL `knowledge/_graph/git-graph.json` so the existing S3 backup carries it
+ * to `knowledge-live/<appId>/_graph/git-graph.json` on EVERY graph-sync. The
+ * Labs GitGraph tab falls back to this when the GitHub API is unavailable (e.g.
+ * a PAT that lost repo permissions — brick1 2026-06-16). Previously the snapshot
+ * was written DIRECTLY to S3 only after a wave-merge, so a missed/failed
+ * wave-merge hook left no fallback at all. Folding it into graph-sync (which
+ * reliably runs + backs up) guarantees the fallback is always fresh. Non-blocking.
+ */
+async function writeGitGraphSnapshotLocal(config) {
+  try {
+    const { execFile } = await import('node:child_process');
+    const [{ buildGitGraphSnapshot }, { bareRepoPath }] = await Promise.all([
+      import('../lib/git-graph-snapshot.mjs'),
+      import('../lib/story-worktree.mjs'),
+    ]);
+    const git = (args, cwd) =>
+      new Promise((res) => {
+        execFile('git', args, { cwd, maxBuffer: 20 * 1024 * 1024 }, (e, o, s) =>
+          res({ code: e ? e.code || 1 : 0, stdout: o || '', stderr: s || '' }),
+        );
+      });
+    const bare = bareRepoPath(config.project);
+    const snapshot = await buildGitGraphSnapshot({
+      appId: config.project,
+      bare,
+      git,
+      bareOpCwd: config.knowledgeDir,
+    });
+    if (!snapshot) {
+      log('git-graph snapshot skipped (no bare repo or empty git log)');
+      return;
+    }
+    snapshot.generatedAt = new Date().toISOString();
+    const snapshotDir = join(config.knowledgeDir, '_graph');
+    await mkdir(snapshotDir, { recursive: true });
+    const p = join(snapshotDir, 'git-graph.json');
+    const tmp = p + '.tmp';
+    await writeFile(tmp, JSON.stringify(snapshot), 'utf-8');
+    await rename(tmp, p);
+    log(
+      `Wrote git-graph snapshot: ${snapshot.commits.length} commits, ${snapshot.branches.length} branches → _graph/git-graph.json`,
+    );
+  } catch (err) {
+    logError(`git-graph snapshot write failed (non-blocking): ${err.message}`);
   }
 }
 
