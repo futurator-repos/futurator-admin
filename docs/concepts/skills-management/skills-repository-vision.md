@@ -195,7 +195,7 @@ already approves. A skill's "growth" _is_ its commit history; we only surface it
 
 ---
 
-## 7. The four resolved design questions
+## 7. The resolved design questions
 
 ### 7.1 Retrieval — timing & mechanism
 
@@ -266,6 +266,54 @@ only**; unknown license → can never reach `trusted`. Source trust accelerates 
 - **(A) per-skill** is the exception lane: anything Gate-1 flags, any bundled executable script, any
   unknown-license skill — individual review, always, regardless of source trust.
 
+### 7.5 The agentic Skill Builder — creation as a conversation, not a form
+
+**One Builder, three input adapters.** The spine is `interview → draft → test(eval) → inbox`; the only
+thing that changes is where intent comes from. It **is** the §4 gate's create/ingest entry adapter —
+not a separate feature.
+
+- **From-chat** (the BMAD path): mine the _current plan/session first_ ("I watched you fight flaky
+  tests for three stories — capture that?"), then interview only the gaps. Never a blank form when the
+  conversation holds the answer.
+- **From-URL** (§7.4 ingest mode): scrape (Firecrawl) → reformat into rubric shape → interview _only_
+  about what the source left ambiguous ("this post never says _when_ to trigger").
+- **From-reflection** (autonomous): the REFLECTOR's `project-skill` proposal _is_ a pre-filled draft;
+  the Builder runs the ratify half.
+
+Discipline lifted from BMAD + skill-creator:
+
+- **The trigger clause is the center of gravity** — spend ~60% of the conversation on "when should this
+  fire, and when must it NOT." Hardest, highest-value, most-skipped. _The description is the product._
+- **Save-after-each-step** — every elicitation step checkpoints; `#yolo` past the obvious; the draft
+  grows visibly as you answer.
+- **Finishes at "tested," not "drafted."** Before it reaches the Growth inbox, the Builder auto-generates
+  should/should-not cases and runs the daemon eval job — you ratify a skill with a **green triggering
+  score attached**, not a claim. (skill-creator's eval loop, folded into the last step.)
+
+**Build once.** From-URL is the from-chat Builder with a scraper bolted on the front — three diverging
+interview engines is a maintenance trap.
+
+### 7.6 Mycelium-as-product — the curated set as an external offering
+
+Everyone ships **flat skill lists**. Futurator's moat (§7.2): **code-knowledge and skill-knowledge are
+one graph.** That lets Mycelium answer what no flat registry can — _"for an app that looks like THIS
+(its code subgraph), here are the `trusted` skills that worked on apps like it, and the skills that
+co-fire with them."_ That is **procedural-knowledge retrieval conditioned on a codebase** — the product.
+
+- **Consumes only at the `trusted` boundary.** Lineage + co-activation edges cross over; `draft`/
+  `reviewed` noise never does. **The trust ladder IS the export filter** — no separate publishing step.
+- **Returns skills with evidence** — usage count, grade, lineage ("used in 6 plans, graded A, co-fires
+  with OAuth-setup"). A flat list can't show its work; the graph can. The evidence trail is what makes
+  it trustworthy to an outsider.
+- **Strip app-private internals at the product edge** — `graduatedFrom: <appId>@<plan>` is _internal_
+  signal; anonymize or drop it at the boundary. Curate what crosses.
+- **No new build** — it's §7.1 retrieval + §7.2 graph pointed _outward_, behind the `trusted` filter.
+  Strictly downstream of build-step 8. Don't design it now; design _toward_ it by keeping the trust
+  boundary clean.
+
+**The bookends meet:** the Builder (§7.5) makes skills _worth trusting_; Mycelium (§7.6) only ever
+ships what _earned_ trust. Same boundary, both directions — the institution is closed.
+
 ---
 
 ## 8. The Phase-1 / Phase-2 boundary (the scaling principle)
@@ -302,6 +350,10 @@ an agent that reads multiple journals and writes the synthesis.
 13. **Lazy grading**: don't run 245 evals upfront; a skill earns a grade on first real use/proposal.
 14. **Security**: scan-before-inbox, two independent gates (deterministic blocking + LLM advisory);
     provenance class is the access-control boundary.
+15. **Skill Builder = one engine, three adapters** (chat / URL / reflection); centers on the trigger
+    clause; finishes at "tested," not "drafted." It is the §4 gate's create/ingest adapter.
+16. **Mycelium-as-product** consumes only at the `trusted` boundary; returns skills with evidence;
+    strips app-private lineage at the edge; no new build (§7.1 + §7.2 pointed outward).
 
 ---
 
@@ -332,14 +384,12 @@ warehouse. The registry doesn't just hold skills — **it compounds them.**
 
 ## 12. Remaining open questions
 
-1. **Agentic Skill Builder UX** — the interview/extract engine (BMAD elicitation ⊕ skill-creator eval
-   loop). Same engine for create-from-chat and create-from-URL. Not yet designed.
-2. **Mycelium-as-product** — how the `trusted` set + co-activation graph becomes an external Futurator
-   offering.
-3. **Ratify-on-diff** — the Growth inbox should show a one-line gist for triage and a unified diff for
+> Resolved this session: the agentic Skill Builder UX (§7.5) and Mycelium-as-product (§7.6).
+
+1. **Ratify-on-diff** — the Growth inbox should show a one-line gist for triage and a unified diff for
    the decision (you ratify a delta, not a document). Currently ratify-on-content.
-4. **Source Registry trust model** — how third-party-license skills and operator-authored skills
-   coexist in one trust ladder.
+2. **Source Registry trust model** — how third-party-license skills and operator-authored skills
+   coexist in one trust ladder, and how a source's trust rating is set and decays.
 
 ---
 
