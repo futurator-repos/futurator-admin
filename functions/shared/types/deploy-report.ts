@@ -79,6 +79,10 @@ export interface DeployEnvironmentStatus {
    * is allowed now. `dev` is reached by deploy (not promote) so it's false.
    */
   canPromote: boolean;
+  /** FK to the latest deploy/promote job driving this rung (for log streaming + step tracking). */
+  activeJobId?: string;
+  /** Smoke-test outcome read from that job's variables.SMOKE_STATUS. undefined = none/unknown. */
+  smokeStatus?: 'pass' | 'fail';
 }
 
 export interface DeployHandoff {

@@ -14,7 +14,30 @@ export type DeployVerdict =
   | 'not-ready'
   | 'never-deployed';
 
-export type AgentJobStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+// Mirrors the backend AgentJobStatus terminal set so a deploy that finished via
+// salvage/prework still reads as a successful, rollback-eligible release.
+export type AgentJobStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'COMPLETE_WITH_BLOCKED_STORIES'
+  | 'STALE'
+  | 'NEEDS_ATTENTION'
+  | 'COMPLETED_VIA_SALVAGE'
+  | 'COMPLETED_VIA_PREWORK'
+  | 'MANUALLY_SKIPPED'
+  | 'ORPHANED';
+
+/** A deploy job that finished successfully (eligible to be a rollback target). */
+export const TERMINAL_DEPLOY_SUCCESS: readonly AgentJobStatus[] = [
+  'COMPLETED',
+  'COMPLETED_VIA_SALVAGE',
+  'COMPLETED_VIA_PREWORK',
+];
+export function isTerminalDeploySuccess(s: AgentJobStatus): boolean {
+  return (TERMINAL_DEPLOY_SUCCESS as readonly string[]).includes(s);
+}
 
 export interface DeployStepStatus {
   id: 'build' | 'sync' | 'invalidate' | 'verify';
@@ -62,6 +85,10 @@ export interface DeployEnvironmentStatus {
   url?: string;
   status: 'none' | 'deploying' | 'live' | 'failed';
   canPromote: boolean;
+  /** FK to the latest deploy/promote job driving this rung (for log streaming + step tracking). */
+  activeJobId?: string;
+  /** Smoke-test outcome read from that job's variables.SMOKE_STATUS. undefined = none/unknown. */
+  smokeStatus?: 'pass' | 'fail';
 }
 
 export interface DeployReport {

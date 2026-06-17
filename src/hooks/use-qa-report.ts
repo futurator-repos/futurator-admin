@@ -24,8 +24,11 @@ export function useQaReport(planId: string | null) {
         report.ac.verdict === 'pending' ||
         report.vqa.verdict === 'pending' ||
         report.gate.verdict === 'pending' ||
-        // Deployment v2.5 — keep polling while the dev preview is building so
-        // the "Open in dev" link appears as soon as it goes live.
+        // Deployment v2.5 (A3/A4) — keep polling fast while the dev preview is
+        // building so the QA-stage dev stream (DeployLogs keyed off
+        // devPreview.jobId) stays responsive and the "Open in dev" link appears
+        // as soon as it goes live. The `jobId` FK rides along in the existing
+        // QaReport response (BE-2) — no new field or signature change needed.
         report.devPreview?.status === 'deploying';
       if (report.verdict === 'not-run' || pending) return 3_000;
       return 20_000;

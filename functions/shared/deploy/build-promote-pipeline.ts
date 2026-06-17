@@ -35,7 +35,10 @@ const DEPLOY_EXTRACTORS = {
   // Tolerant to markdown decoration the agent sometimes applies.
   DEPLOY_URL: {
     type: 'regex' as const,
-    pattern: '[*_`]*DEPLOY_URL[*_`]*:\\s*[*_`]*\\s*(https?://[^\\s*_`]+)',
+    // `_` removed from the excluded class so fallback URLs like
+    // `https://futurator.ai/apps/_dev/brick1/` extract fully (A1).
+    // Trailing markdown `*`/backtick stay excluded.
+    pattern: '[*_`]*DEPLOY_URL[*_`]*:[\\s*_`]*(https?://[^\\s*`]+)',
   },
   DEPLOY_STATUS: {
     type: 'regex' as const,
@@ -85,6 +88,9 @@ export function buildPromotePipeline(
   opts: { smoke: boolean; archiveReleaseId?: string },
 ): PipelineDefinition {
   const copyMode = src.basePath === dst.basePath;
+  // Next.js `basePath` form (no trailing slash, never '/') for the rebuild
+  // branch; Vite keeps `dst.basePath` as-is (A2).
+  const dstBasePathNoSlash = dst.basePath.replace(/\/$/, '');
   const archivePrefix = opts.archiveReleaseId
     ? releaseArchivePrefix(dst.appName, opts.archiveReleaseId)
     : undefined;
@@ -98,10 +104,10 @@ export function buildPromotePipeline(
     );
   } else {
     lines.push(
-      `${n++}. Read ${workingDir}/vite.config.ts (or .js). Ensure it contains \`base: '${dst.basePath}'\` (replace any existing base). The source and destination use different base paths, so this promotion REBUILDS at the destination base.`,
+      `${n++}. Detect the framework and patch its config to the DESTINATION base path (source and destination differ, so this promotion REBUILDS at the destination base):\n   - If \`${workingDir}/next.config.ts\`, \`.js\`, or \`.mjs\` exists -> NEXT.JS. Ensure next.config has \`output: 'export'\`, \`basePath: '${dstBasePathNoSlash}'\` (NO trailing slash; empty string \`''\` if that value is empty — never \`'/'\`), and \`images: { unoptimized: true }\` (required for static export). Replace any existing \`basePath\`. Build output dir is \`out/\`.\n   - Else if \`${workingDir}/vite.config.ts\` or \`.js\` exists -> VITE. Set \`base: '${dst.basePath}'\` (WITH trailing slash), replacing any existing base. Build output dir is \`dist/\`.\n   - Else inspect package.json build script and infer the output dir (\`out\`, \`dist\`, or \`build\`).`,
     );
     lines.push(
-      `${n++}. Build: \`cd ${workingDir} && npm run build\`. If it fails on missing deps, run \`npm install\` and retry once. Find the output dir (Vite default \`dist\`).`,
+      `${n++}. Build: \`cd ${workingDir} && npm run build\`. If it fails on missing deps, run \`npm install\` and retry once. Identify the output dir (\`out/\` for Next.js, \`dist/\` for Vite, else per the build log). Call it <outputDir>.`,
     );
     lines.push(
       `${n++}. Sync to the destination: \`aws s3 sync <outputDir>/ s3://${dst.s3Bucket}/${dst.s3Prefix} --delete\``,

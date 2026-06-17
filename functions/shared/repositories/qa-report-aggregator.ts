@@ -1314,7 +1314,7 @@ function buildDevPreview(
     else if (job.status === 'FAILED' || job.status === 'NEEDS_ATTENTION') status = 'failed';
     else if (job.status === 'COMPLETED') status = plan.devUrl ? 'live' : 'none';
   }
-  return { epicId, url: plan.devUrl, status };
+  return { epicId, url: plan.devUrl, status, jobId: plan.devDeployJobId };
 }
 
 export function buildQaReport(inputs: AggregatorInputs): QaReport {

@@ -159,7 +159,16 @@ export function useStartDevServer() {
   });
 }
 
-/** Deployment v2.5 — `environment` selects dev/staging/production (default production). */
+/**
+ * Deployment v2.5 — `environment` selects dev/staging/production (default production).
+ *
+ * A4: this mutation's `isPending` / `isError` / `error` ARE the dev re-deploy
+ * feedback surface consumed by FE-3 (QA verdict-strip DevPreviewControls).
+ * Only `onSuccess` is defined here — errors are intentionally NOT swallowed, so
+ * `isError` flips and `error.message` is renderable in an inline alert. Do not
+ * add an `onError` that absorbs the rejection, and do not change the return
+ * shape ({ jobId; appName; environment; publicUrl }).
+ */
 export function useDeployApp() {
   const queryClient = useQueryClient();
   return useMutation({

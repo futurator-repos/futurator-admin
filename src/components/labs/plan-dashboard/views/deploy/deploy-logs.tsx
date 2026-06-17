@@ -259,8 +259,8 @@ function EmptyStream({
     >
       {stuck ? (
         <>
-          Deploy has been PENDING for {fmtDuration(duration)} with no events. Check the EC2
-          chip in the header.
+          Deploy has been PENDING for {fmtDuration(duration)} with no events. Check the EC2 chip in
+          the header.
         </>
       ) : jobStatus === 'PENDING' ? (
         <>Waiting for the daemon to pick up this deploy…</>
@@ -307,7 +307,7 @@ function EventRow({ event }: { event: AgentEvent }) {
           paddingTop: 1,
         }}
       >
-        {event.eventType.replace('_', ' ')}
+        {event.eventType.replaceAll('_', ' ')}
       </span>
       <span
         style={{

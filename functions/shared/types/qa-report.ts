@@ -465,4 +465,6 @@ export interface DevPreview {
    * `failed`    — last dev deploy FAILED/NEEDS_ATTENTION
    */
   status: 'none' | 'deploying' | 'live' | 'failed';
+  /** FK to the dev deploy job, for QA-stage log streaming. = plan.devDeployJobId. */
+  jobId?: string;
 }

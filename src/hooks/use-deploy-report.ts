@@ -18,7 +18,9 @@ export function useDeployReport(planId: string | null) {
       const r = query.state.data;
       if (!r) return 5_000;
       if (r.verdict === 'deploying') return 3_000;
-      // Deployment v2.5 — keep polling while any rung is mid-promotion.
+      // Deployment v2.5 (A3/B3) — keep polling fast while ANY env rung is
+      // mid-promotion (dev/staging/production), so the per-rung step tracker,
+      // streamed logs, and active-rung emphasis stay live. Do not slow this.
       if (r.environments?.some((e) => e.status === 'deploying')) return 3_000;
       return 20_000;
     },
@@ -29,6 +31,12 @@ export function useDeployReport(planId: string | null) {
  * Deployment v2.5 — promote the built artifact up the ladder.
  *   to: 'staging'    → dev build → staging
  *   to: 'production' → staging   → production (delivery; advances main)
+ *
+ * B1: this is the ONE coherent production path. The release-strip primary CTA
+ * (FE-2) reuses this hook to advance the ladder (build-once-promote-many),
+ * instead of issuing a staging-bypassing fresh build via useDeployApp. The
+ * mutation accepts 'staging' | 'production' and invalidates both the
+ * deploy-report and qa-report so every consumer repaints on success.
  */
 export function usePromoteApp(planId: string | null) {
   const qc = useQueryClient();
