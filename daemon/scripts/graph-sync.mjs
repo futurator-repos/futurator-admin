@@ -763,12 +763,20 @@ async function processAstFacts(config) {
     // function in an article-less file with NO file→function DEFINES edge —
     // i.e. orphaned. MERGE the file node so DEFINES always links; the Compiler
     // enriches title/summary later. Matches the function-node MERGE pattern.
+    //
+    // projectId is OVERWRITTEN (not coalesced) to the canonical slug: early
+    // ingestion sometimes stamped a job/plan UUID as projectId, stranding the
+    // file node in a phantom partition so the DEFINES MATCH (which filters on
+    // projectId) silently missed and the function stayed orphaned forever.
+    // code/* nodeIds are project-unique (no cross-project collisions), and we
+    // are iterating THIS project's own scanned files, so normalizing to
+    // $projectId here is safe and self-heals stale UUID stamps on every sync.
     await session.run(
       `MERGE (n:Node {nodeId: $nodeId})
        ON CREATE SET n.projectId = $projectId, n.kind = 'file', n.type = 'code',
                      n.status = 'active', n.phase = 'implementation', n.title = $title
        ON MATCH SET n.kind = CASE WHEN n.kind IS NULL OR n.kind = '' THEN 'file' ELSE n.kind END,
-                    n.projectId = coalesce(n.projectId, $projectId)`,
+                    n.projectId = $projectId`,
       { nodeId: fileNodeId, projectId: config.project, title: file.path }
     );
 
