@@ -62,6 +62,17 @@ The four things that matter most:
 - **The reflector ran, produced 3 proposals, and wrote 0** — silently blocked by an EC2
   IAM permission gap. The learning loop is firing into a void.
 
+> **[QAreview-agentic · 2026-06-18] New P0 failure class — QA false-blocks correct apps.**
+> A second forensic on the _same_ `pacman3` run found the **QA stage** (job `3c99fd51`,
+> which the original forensic didn't walk — F2/F3) returned **VQA 0/10, FAIL, BLOCKING on a
+> correct app** (`overview.png` is a complete, playable Pac-Man). Origin: the deploy stage
+> rewrote QA's `next.config.ts` mid-run, relocating the app off root so every per-test
+> capture 404'd; QA then scored the missing/404 frames as blocking defects. Three new
+> findings: **F11** (deploy×QA same-worktree race), **F12** (broken evidence scored as
+> defects), **F13** (state ACs with no executable probe) → new **Track F**. F11 is the
+> origin and is P0 (the UI's "Send all failing back (6)" would re-run 6 dev stories on
+> working code = cost runaway).
+
 ---
 
 ## 2. Evidence base & provenance
@@ -287,17 +298,143 @@ root (see `feedback_preserve_parallelism`).
 
 **Effort:** M (planner heuristics). **Track:** D (planning). **Status:** proposed.
 
+### F11 — Deploy mutates QA's worktree mid-run → evidence destroyed (P0, false-blocks correct apps)
+
+> Contributed by **QAreview-agentic** (2026-06-18). The origin of the whole pacman3 QA failure.
+
+**Evidence.** The QA stage returned VQA **0/10, OVERALL FAIL, BLOCKING** on a **correct**
+app (`overview.png` from QA job `3c99fd51` is a fully-assembled, playable Pac-Man). In a
+**single per-plan loop iteration**, `functions/cron/wave-completion-check.ts` both
+(a) auto-approves QA and launches qa-execute (`launchPlanQaExecute`,
+`wave-completion-check.ts:210`; sets `qaJobId`/`qaContractStatus:'approved'` at `:226-231`)
+**and** (b) enqueues the dev-deploy (`buildDeployJob`, `wave-completion-check.ts:273-283`).
+Forensic confirms both jobs started **18:57:49** against the **same**
+`workingDir /home/ubuntu/projects/pacman3` (QA `3c99fd51`, deploy `d777f835`). The deploy
+step is a freeform agent with Edit/Write (`functions/shared/deploy/build-deploy-pipeline.ts:47`)
+that **rewrites `next.config.ts`** to inject `basePath:'/apps/_dev/pacman3/'`,
+`output:'export'`, `images.unoptimized` (`build-deploy-pipeline.ts:66`). The QA dev-server
+log (S3 `qa-snapshots/pacman3-initial/3c99fd51…/devserver.log`) shows the consequence:
+
+```
+GET / 200 in 5.6s            ← overview.png captured (real game) ✓
+⚠ Found a change in next.config.ts. Restarting the server…
+○ Compiling /_not-found/page …
+GET / 404 in 27.4s  (×5)     ← app relocated to /apps/_dev/pacman3/; root now 404s
+⚠ Found a change in next.config.ts. Restarting the server…
+```
+
+QA's `framework-detect` read `basePath=""` _before_ the rewrite (`PREPARE_OUTPUT`), so every
+per-test navigation targeted `/` — which 404'd once the deploy moved the app off root.
+
+**Root cause.** QA and deploy run **concurrently on the same git worktree + the same live
+dev server**, with no mutual exclusion. The deploy's stated purpose is to give QA a stable
+target — the cron comment says the dev-deploy exists "so the operator can click exactly
+what headless QA tests against" (`wave-completion-check.ts:259-260`) — yet **QA ignores the
+deployed URL and boots its own `next dev` in the dir the deploy is rewriting**
+(`functions/shared/pipelines/visual-qa-pipeline.ts` qa-prepare, `:454-505`). Two stages
+designed to cooperate instead collide.
+
+**Proposed fix.**
+
+- **Point QA at the dev-deploy URL** (the published, immutable preview the deploy already
+  produces) instead of booting a dev server in the shared worktree — this is the stated
+  intent, removes the race entirely, and makes QA test "exactly what the operator clicks."
+- If a local dev server is still wanted, **serialize**: gate qa-execute on the dev-deploy
+  job being COMPLETED (or run QA against a **per-run isolated checkout**, never
+  `projects/<appId>`).
+- Replace the freeform Edit/Write config-rewrite with the declarative
+  `BoilerplateRuntimeContract.build.requiredConfig` (see `boilerplate-runtime-contract.md`)
+  so deploy never improvises edits on a watched tree.
+
+**Effort:** M. **Track:** F. **Status:** proposed. **Severity note:** P0 — a false BLOCKING
+verdict on correct code; the UI "Send all failing back (6)" would re-run 6 dev stories on
+working code → cost runaway.
+
+### F12 — QA scores broken/missing evidence as blocking defects (P1)
+
+> Contributed by **QAreview-agentic** (2026-06-18).
+
+**Evidence.** Three coupled defects on `pacman3` (QA job `3c99fd51`):
+
+- **(a) Capture failure isn't a gate.** `PREPARE_OUTPUT: SCREENSHOTS_CAPTURED 0/10` — zero
+  per-test screenshots (only `overview.png` survived). The pipeline judged anyway. The 5
+  per-test PNGs that did upload are **byte-identical** (`md5 1d931e7f…` = the same 404
+  page); the rest are absent (plain capture `npx playwright screenshot` has a 20 s spawn
+  timeout < the 25 s restarting server → SIGKILL → no file). Capture:
+  `visual-qa-pipeline.ts` (per-test loop `:518-662`, `SCREENSHOTS_CAPTURED` `:656`, upload
+  `:669-676`).
+- **(b) Missing/404 frames become blocking FAILs.** `qa-report` computes
+  `overall = fail>0 ? 'FAIL'` (`visual-qa-pipeline.ts:955`). All 6 FAILs have rationales
+  like "Screenshot file not found" or "404 error page displayed instead of game canvas" —
+  **infra artifacts scored as product defects** → BLOCKING. A missing/404/blank/sub-2KB
+  frame can never be a product verdict.
+- **(c) Judge hallucination on absent frames.** Under the identical "no usable frame"
+  condition, judges split — 3 honest `UNCERTAIN` ("Screenshot file not found"); ≥1 `FAIL`
+  with **fabricated** detail ("cannot verify direction value… VERDICT: FAIL") about a frame
+  it never read. Prompts ask for UNCERTAIN on missing images (`visual-qa-pipeline.ts:786`,
+  `:886`) but the model doesn't reliably comply. UI compounds it: `claims-table.tsx:296`
+  hides any 404/broken thumbnail via `<img onError>` → operator sees empty "·" cells, no
+  evidence.
+
+**Root cause.** No **evidence-integrity precondition** and no **error/infra verdict lane**
+distinct from `fail`. The verdict math treats "harness failed to produce evidence"
+identically to "the app is wrong," and the judge is trusted to self-report missing
+evidence.
+
+**Proposed fix.**
+
+- **Evidence gate before judging:** after qa-prepare, abort+retry when
+  `SCREENSHOTS_CAPTURED < threshold` (~90%) or frames are blank/identical (size+hash) —
+  _before_ any judge spends a token (§7 Q6).
+- **Honest verdict lane:** missing/404/blank/sub-2KB frame → `errored` (retry/operator
+  card), never `fail`; `overall=FAIL` only on genuine `fail`.
+- **Don't trust the judge for existence:** check file existence + min size in code before
+  invoking the judge; only judge real frames.
+
+**Effort:** S–M. **Track:** F. **Status:** proposed.
+
+### F13 — `state`/`behavior` ACs authored with no executable probe (P1, decoupled authoring)
+
+> Contributed by **QAreview-agentic** (2026-06-18). Authoring-side root; complements F8 (execution-side).
+
+**Evidence.** The two L2 tests on `pacman3` describe **internal entity state** —
+`AC-S2-2 "position.col has increased from spawn column"`, `AC-S2-3 "direction changes to
+UP"` — yet were authored with `url=null, flow=null` and **no `assert`** (verified on the
+epic-workflow rows; `CLASSIFIED_TESTS` shows level set, mechanism empty). No screenshot can
+show these, and no `window.__harness` assert was emitted to read them → unverifiable even
+with perfect capture. The seam/assert executor **already exists** (`visual-qa-pipeline.ts`
+runFlow `assert` → `page.evaluate(window.__harness)`, `:616-626`); the tests don't use it.
+Separately the classifier **overrode its own better call**: `AC-S1-1` has
+`resolvedLevel:"L0"` but kept `level:"L1"` ("level set in source — preserved");
+`L0_RESULTS:[]` — a deterministic check ran as a probabilistic vision judge.
+
+**Root cause.** Authoring sets the _level_ (and prose) but does **not author the executable
+mechanism** (flow/assert/seam read) for state/behavior ACs — the "decoupled authoring" the
+VQA v3 redesign targets. Shared root of the §3.7 wave-gate `unverifiable` rate (~43%) and
+the final-QA uncertain/false-FAIL.
+
+**Proposed fix.**
+
+- **No `verify:state|behavior` AC may merge without an executable flow/assert** (gate in
+  test-authoring). Land the QA-AUTHOR + `__harness` seam from the VQA v3 PRD
+  (`docs/concepts/pipeline-v3/`).
+- **Honor the classifier's `resolvedLevel`** (cheapest-correct oracle); stop preserving a
+  worse source level.
+
+**Effort:** M–L. **Track:** F (ties to F8 + VQA v3). **Status:** proposed.
+
 ---
 
 ## 4. Workstreams
 
-| Track | Theme                       | Findings                 | Owner       | Status   |
-| ----- | --------------------------- | ------------------------ | ----------- | -------- |
-| **A** | Perf / token reduction      | F1, F6, F7, F8(part), F9 | _unclaimed_ | proposed |
-| **B** | Correctness / observability | F2, F3, F4               | _unclaimed_ | proposed |
-| **C** | Learning loop               | F5, F8(part)             | _unclaimed_ | proposed |
-| **D** | Planning / parallelism      | F10                      | _unclaimed_ | proposed |
-| **E** | Context management (design) | see §5                   | _unclaimed_ | proposed |
+| Track | Theme                                   | Findings                 | Owner       | Status   |
+| ----- | --------------------------------------- | ------------------------ | ----------- | -------- |
+| **A** | Perf / token reduction                  | F1, F6, F7, F8(part), F9 | _unclaimed_ | proposed |
+| **B** | Correctness / observability             | F2, F3, F4               | _unclaimed_ | proposed |
+| **C** | Learning loop                           | F5, F8(part)             | _unclaimed_ | proposed |
+| **D** | Planning / parallelism                  | F10                      | _unclaimed_ | proposed |
+| **E** | Context management (design)             | see §5                   | _unclaimed_ | proposed |
+| **F** | QA evidence integrity & stage isolation | F11, F12, F13            | _unclaimed_ | proposed |
 
 ---
 
@@ -338,10 +475,14 @@ How a story's context is built today (`daemon/pipelines/lib/story-context-pack.m
 1. **F5 IAM** — grant reflections write. Unblocks the learning loop (currently 100% lost).
 2. **F6 hard cost gate** — stop $20→$21 overruns.
 3. **F1 compile cache** — biggest single perf win; helper already exists.
+4. **F11 stop the deploy×QA race** — QA against the dev-deploy URL (or serialize). Stops
+   QA false-blocking correct apps; biggest correctness leak in the QA stage. _(QAreview-agentic)_
+5. **F12 evidence gate + honest verdict lane** — never block on missing/404 frames; small
+   guard, prevents the false-FAIL cascade. _(QAreview-agentic)_
 
 **Phase 2 — Restore observability & correctness:** 4. **F2 priorJobIds history** → **F3 forensic union + cost reconciliation**. 5. **F4 totalStories count + fix-story lineage badge.**
 
-**Phase 3 — Deeper efficiency:** 6. **F7 mvp test-authoring trim**, **F8 fixer gating + prior-diff**, **F9 catalog trim**. 7. **F10 planner parallelism**, **§5 context-management redesign.**
+**Phase 3 — Deeper efficiency:** 6. **F7 mvp test-authoring trim**, **F8 fixer gating + prior-diff**, **F9 catalog trim**, **F13 probe-authoring gate (with F8 + VQA v3)**. 7. **F10 planner parallelism**, **§5 context-management redesign.**
 
 > Rationale for Phase 1 ordering: F5 is cheap and re-enables the feedback loop that will
 > tell the operator which later fixes matter most; F6 is a safety stop; F1 is the largest
@@ -360,6 +501,15 @@ How a story's context is built today (`daemon/pipelines/lib/story-context-pack.m
 - **Q4 (F5):** Should the reflector remain advisory, or graduate to auto-proposing PRs
   (REFLECTOR-APPLY, per `project_skills_institution_planning`)?
 - **Q5 (§5):** Adopt treesitter slices now (branch is set up for it) or after Phase 2?
+- **Q6 (F12) [QAreview-agentic]:** Should the evidence-integrity check be a hard
+  **precondition gate** that aborts + retries the QA run on degraded capture (0/N,
+  identical/blank frames) _before_ any judge spends a token — vs. a post-hoc score? (A 0/10
+  capture should never reach the judges.)
+- **Q7 (F11) [QAreview-agentic]:** Where to enforce **stage isolation**? Strongest:
+  QA against the already-published **dev-deploy URL** (immutable) — which is the deploy's
+  stated purpose. Alternatives: serialize qa-execute after deploy COMPLETED, per-run
+  isolated checkout, or a `workingDir` mutex. (Overlaps `boilerplate-runtime-contract.md`
+  and `multi-host-dispatch-readiness.md`.)
 
 ---
 
@@ -398,26 +548,33 @@ merge 269s · `8c39c9f7` vqa 369s · `805cdb92` vqa 339s.
 
 ## Appendix B — Key file references
 
-| Concern                               | File:line                                                                                     |
-| ------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Per-story pipeline                    | `functions/shared/pipelines/story-pipeline.ts`                                                |
-| Story context pack                    | `daemon/pipelines/lib/story-context-pack.mjs`                                                 |
-| Cached tsc (exists, prework-only)     | `daemon/lib/cached-tsc.mjs`                                                                   |
-| Prework gate                          | `daemon/lib/prework-gate.mjs`                                                                 |
-| Wave VQA runner                       | `daemon/lib/wave-vqa-runner.mjs`                                                              |
-| Wave merge                            | `daemon/lib/wave-merge.mjs`                                                                   |
-| VQA fix-story mint (title)            | `daemon/lib/wave-vqa-fix-story.mjs:53`                                                        |
-| Retry / story rerun (jobId overwrite) | `functions/shared/services/story-rerun-launcher.ts:140`                                       |
-| Forensic builder (event collection)   | `functions/shared/timer/forensic-builder.ts:277`                                              |
-| Forensic endpoint                     | `functions/api/index.ts:12125` (`GET /plans/:id/timing/forensic`)                             |
-| Agent events repo (7-day TTL)         | `functions/shared/repositories/agent-events-repository.ts`                                    |
-| Reflector runner                      | `daemon/pipelines/reflector-runner.mjs`                                                       |
-| UI live output / events               | `src/components/labs/agentic-workflow/story-live-output.tsx`, `src/hooks/use-agent-events.ts` |
+| Concern                                      | File:line                                                                                                                                                           |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Per-story pipeline                           | `functions/shared/pipelines/story-pipeline.ts`                                                                                                                      |
+| Story context pack                           | `daemon/pipelines/lib/story-context-pack.mjs`                                                                                                                       |
+| Cached tsc (exists, prework-only)            | `daemon/lib/cached-tsc.mjs`                                                                                                                                         |
+| Prework gate                                 | `daemon/lib/prework-gate.mjs`                                                                                                                                       |
+| Wave VQA runner                              | `daemon/lib/wave-vqa-runner.mjs`                                                                                                                                    |
+| Wave merge                                   | `daemon/lib/wave-merge.mjs`                                                                                                                                         |
+| VQA fix-story mint (title)                   | `daemon/lib/wave-vqa-fix-story.mjs:53`                                                                                                                              |
+| Retry / story rerun (jobId overwrite)        | `functions/shared/services/story-rerun-launcher.ts:140`                                                                                                             |
+| Forensic builder (event collection)          | `functions/shared/timer/forensic-builder.ts:277`                                                                                                                    |
+| Forensic endpoint                            | `functions/api/index.ts:12125` (`GET /plans/:id/timing/forensic`)                                                                                                   |
+| Agent events repo (7-day TTL)                | `functions/shared/repositories/agent-events-repository.ts`                                                                                                          |
+| Reflector runner                             | `daemon/pipelines/reflector-runner.mjs`                                                                                                                             |
+| UI live output / events                      | `src/components/labs/agentic-workflow/story-live-output.tsx`, `src/hooks/use-agent-events.ts`                                                                       |
+| QA auto-approve + dev-deploy co-launch (F11) | `functions/cron/wave-completion-check.ts:210` (qa-execute), `:273-283` (dev-deploy), `:259-260` (intent comment)                                                    |
+| Deploy config rewrite (F11)                  | `functions/shared/deploy/build-deploy-pipeline.ts:47` (Edit/Write tools), `:66` (next.config basePath/output rewrite)                                               |
+| QA execute pipeline / capture / report (F12) | `functions/shared/pipelines/visual-qa-pipeline.ts:454` (qa-prepare boot), `:518-662` (per-test capture), `:656` (SCREENSHOTS_CAPTURED), `:955` (`overall = fail>0`) |
+| QA judge prompts (F12c)                      | `functions/shared/pipelines/visual-qa-pipeline.ts:786` (L1), `:886` (L2)                                                                                            |
+| Seam/assert executor (F13, exists)           | `functions/shared/pipelines/visual-qa-pipeline.ts:616-626` (`assert` → `page.evaluate(window.__harness)`)                                                           |
+| Claims-table thumbnail (F12 UI)              | `src/components/labs/plan-dashboard/views/qa/claims-table.tsx:296` (`<img onError>` hides broken/404)                                                               |
 
 ---
 
 ## Changelog
 
-| Date       | Agent                 | Change                                                                                                               |
-| ---------- | --------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| 2026-06-17 | Claude (forensics #1) | Initial draft: findings F1–F10, workstreams A–E, roadmap, appendices from pacman3 forensic + daemon-log cross-check. |
+| Date       | Agent                 | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-06-17 | Claude (forensics #1) | Initial draft: findings F1–F10, workstreams A–E, roadmap, appendices from pacman3 forensic + daemon-log cross-check.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 2026-06-18 | QAreview-agentic      | QA-stage forensic on the same pacman3 run (QA job `3c99fd51`, not walked by the original forensic — F2/F3). Added F11 (deploy×QA same-worktree race → `next.config.ts` rewrite relocates app off root → per-test 404s), F12 (broken/missing evidence scored as blocking defects; capture gate + honest verdict lane + judge hallucination), F13 (state/behavior ACs authored with no executable probe). New Track F; F11/F12 → Phase 1, F13 → Phase 3; open Q6/Q7; Appendix B refs. Verdict: QA false-blocked a correct app — every FAIL was an infra artifact. |
