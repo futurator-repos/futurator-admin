@@ -73,6 +73,18 @@ The four things that matter most:
 > origin and is P0 (the UI's "Send all failing back (6)" would re-run 6 dev stories on
 > working code = cost runaway).
 
+> **[graphify · 2026-06-18] Same shape, third stage — the knowledge graph.** A third
+> forensic on `pacman3` found the **knowledge-compile** output (the system graph the next
+> run grounds on) was **broken on correct code**: 177 nodes / 290 edges, 29 unconnected,
+> `Orphan invariant: FAIL (20)`. Same lesson as F11/F12 — _clean agents, leaky harness_. Four
+> root causes, new **Track G**: **F14** (persisted ast-facts = last story's 3-file worktree,
+> not the 51-file project), **F15** (additive ingest never prunes deleted-source nodes),
+> **F16** (the invariant is computed but swallowed at `exit 3`), **F17** (file nodes stamped
+> with a job-UUID `projectId` → silently dropped DEFINES). **F17 + F18** (living-doc
+> `REFERENCES` linking) are **fixed this session**; after the fixes pacman3's graph is 212
+> nodes / 526 edges, **0 orphans**. F16 is the cheapest unfixed win — the FAIL signal already
+> exists, nothing consumes it.
+
 ---
 
 ## 2. Evidence base & provenance
@@ -423,18 +435,148 @@ the final-QA uncertain/false-FAIL.
 
 **Effort:** M–L. **Track:** F (ties to F8 + VQA v3). **Status:** proposed.
 
+### F14 — Truncated AST facts: the persisted graph is the last story's worktree, not the project (P1, knowledge-graph completeness)
+
+> Contributed by **graphify** (2026-06-18). Root cause of the broken pacman3 knowledge graph.
+
+**Evidence.** On pacman3 the persisted `/home/ubuntu/projects/pacman3/.mycelium/ast-facts.json`
+held **`fileCount: 3`** with `root` = the **last** story's detached worktree
+(`…/pacman3-initial/a085aa07…`, the HUD/Overlay visual-fix story) — while the integrated
+project has **51** source files. The published snapshot was **177 nodes / 290 edges with 29
+unconnected nodes and `Orphan invariant: FAIL (20)`**: every function in a file finalized in
+an _earlier_ story had no `file→function DEFINES` edge because the partial facts never
+re-asserted it. A full-project rebuild —
+`bootstrap-ast --project pacman3 --root /home/ubuntu/projects/pacman3` — re-scanned **51
+files / 120 functions** and the orphan count dropped from 20 → 6 immediately.
+
+**Root cause.** Per-story DEV compiles incrementally against a **detached worktree**;
+`bootstrap-ast.mjs` runs `ast-extract --scan` over `args.root`
+(`daemon/scripts/bootstrap-ast.mjs:301-305`) and persists _that_ scan as the project's
+ast-facts (`:297`, `:328`), so whichever worktree compiled last wins. `processAstFacts`
+(`daemon/scripts/graph-sync.mjs:686`) is additive, so a later **full** resync against the
+partial facts can only re-assert the 3 files it sees — it can't recover the other 48, and a
+naive `--full-resync` against a partial file would _prune_ them.
+
+**Proposed fix.** At **wave-close / plan-close**, regenerate ast-facts from the **integrated
+project tree** (`projects/<id>`), not the per-story worktree — i.e. one authoritative
+full-repo `bootstrap-ast` after merges land, before the snapshot is published. Alternatively
+gate `graph-sync` to refuse to _narrow_ a project's file set from a scan whose `root` is a
+worktree. (Manual full rebuilds fixed pacman3 + brick1 this session; the **pipeline mechanism
+is unchanged**.)
+
+**Effort:** M. **Track:** G. **Status:** proposed.
+
+### F15 — Additive ingest never prunes deleted-source nodes → zombie orphans (P2)
+
+> Contributed by **graphify** (2026-06-18).
+
+**Evidence.** pacman3's last story consolidated three `src/features/pacman-*.feature.tsx`
+files into one and **deleted them from disk** (AC-S4-5), and a decision article was renamed.
+Their graph nodes survived: **5 degree-0 function zombies** + 1 dead decision node, all
+flagged as orphans/"removal candidates". The MERGE ingest never removes a node whose source
+file no longer exists.
+
+**Root cause.** `processAstFacts` (`graph-sync.mjs:686`) and the wiki upsert are purely
+**additive** — articles get `status:'pruned'` on delete, but **code function/file nodes for
+deleted sources are never pruned**.
+
+**Proposed fix.** A **delete-aware prune** pass, gated to a _known-complete_ scan (so it
+never fires on a partial worktree scan — see F14): delete code `function`/`file` nodes whose
+defining path is absent from the full scan and which carry no live article. Distinguish from
+legitimately-edgeless nodes (test files) before flagging.
+
+**Effort:** S–M. **Track:** G. **Status:** proposed. **Depends on:** F14 (needs a trustworthy full scan).
+
+### F16 — Orphan invariant is computed but swallowed (`exit 3`, non-blocking) (P2, observability)
+
+> Contributed by **graphify** (2026-06-18). The cheapest win in this track.
+
+**Evidence.** `graph-sync` **already computes and logs** the failure:
+`ERROR: Orphan invariant FAILED — N non-file orphan(s) (extractor dropped an edge)`
+(`daemon/scripts/graph-sync.mjs:1049`; logic in
+`daemon/scripts/lib/graph-integrity.mjs:112`) and exits non-zero — but every caller treats
+it as advisory: `bootstrap-ast.mjs:371` logs `graph-sync exited 3 (non-blocking)` and moves
+on, and the per-story daemon sync does the same. So a 20-orphan FAIL was **invisible** to the
+operator until someone inspected the graph by hand.
+
+**Root cause.** The integrity gate is wired as a log line, not a signal anything consumes.
+
+**Proposed fix.** Surface the invariant result: a wave-gate/UI badge (orphan count +
+delta-vs-last-wave) and, behind a threshold, an operator attention card. Optionally fail the
+knowledge-compile step when genuine code-orphans exceed a cut — **after** subtracting
+legitimate floaters (test files, deleted-source zombies per F15) so it doesn't false-alarm.
+
+**Effort:** S. **Track:** G. **Status:** proposed.
+
+### F17 — `projectId` partition drift: nodes stamped with a job/plan UUID → silent edge loss (P1) — SHIPPED
+
+> Contributed by **graphify** (2026-06-18). **Fixed this session — commit `0d5dd6a`.**
+
+**Evidence.** The file node `code/src--types--index.test.ts` carried
+`projectId = "353ab84c-8660-…"` (a **job/plan UUID**) while its function node carried
+`projectId = "pacman3"`. The `DEFINES` MATCH filters the file node on `projectId`
+(`graph-sync.mjs` processAstFacts), so the file was stranded in a phantom partition, the
+MATCH missed, and the function orphaned **permanently** — and the file node wasn't even in
+the project's snapshot (the snapshot query requires both endpoints in the same `projectId`).
+A Memgraph scan showed a **long UUID tail across many projects** (dino, snake, …), not just
+pacman3.
+
+**Root cause.** Early ingestion stamped the job/plan UUID as `projectId`; the old
+`ON MATCH SET n.projectId = coalesce(n.projectId, $projectId)` MERGE **preserved** the bad
+stamp on every resync.
+
+**Fix (shipped).** `code/*` nodeIds are project-unique (verified: **zero cross-project
+collisions**), and `processAstFacts` iterates _this_ project's own scanned files, so the
+file-node MERGE now **overwrites** `projectId` to the canonical slug
+(`daemon/scripts/graph-sync.mjs:745`) — self-healing on every project's next sync. Verified:
+pacman3 orphans 6 → 0, `chain`'s file node `353ab84c…` → `pacman3`.
+
+**Effort:** S. **Track:** G. **Status:** **shipped** (`0d5dd6a`); → `verified` once other
+projects re-sync.
+
+### F18 — Living docs float: no doc→code edge for inline references (P2, grounding/handoff) — SHIPPED
+
+> Contributed by **graphify** (2026-06-18). **Fixed this session — commit `0445e6a`.**
+
+**Evidence.** pacman3 had **9 unconnected knowledge docs** (`decisions/*`, `index`, `log`,
+`system/dependency-map`) **even though they contained `[[wikilinks]]` to real code nodes**
+(e.g. `ghost-pathfinding-greedy.md` → `[[code/src--game--ai--ghostAI.ts]]`). The wikilink→edge
+extractor only emitted an edge when the link sat under a _mapped_ section header (`##
+Dependencies` …); links in prose (`## Implementation`) or under an H1 (`# Code Articles`) were
+silently dropped.
+
+**Root cause.** Section-gated wikilink extraction with no generic reference edge for
+"living" documents that _describe_ code without a structured dependency section.
+
+**Fix (shipped).** New `REFERENCES` edge layer (`daemon/scripts/lib/doc-references.mjs`, wired
+in `graph-sync.mjs`): for **living docs only**, any `[[link]]` not claimed by a structured
+section becomes a `REFERENCES` edge — **controlled by construction** (the MERGE binds only
+when _both_ nodes exist, so a doc connects only when it actually references a real node; no
+phantom/`(suggested)` edges). **Plan-run docs** (a plan's PRD/epics/stories) are **excluded**
+via `isLivingDoc` (type denylist + plan markers + path) — their linking is owner-defined
+later (bears on §2 concept→plan authoring). Verified: 9 floaters → 0, +82 `REFERENCES`,
+`index` became a 29-edge hub. 10 unit tests.
+
+> **Grounding bonus:** these doc→code edges make the rubric's §2 grounding criteria
+> (`C-D3` handoff, `C-P1` "plans from the specs") **machine-checkable** — a PRD/arch doc that
+> grounds real code now leaves `REFERENCES`/`DEPENDS_ON` edges to it (once plan-doc linking
+> is designed, per the exclusion above).
+
+**Effort:** M. **Track:** G. **Status:** **shipped** (`0445e6a`).
+
 ---
 
 ## 4. Workstreams
 
-| Track | Theme                                   | Findings                 | Owner       | Status   |
-| ----- | --------------------------------------- | ------------------------ | ----------- | -------- |
-| **A** | Perf / token reduction                  | F1, F6, F7, F8(part), F9 | _unclaimed_ | proposed |
-| **B** | Correctness / observability             | F2, F3, F4               | _unclaimed_ | proposed |
-| **C** | Learning loop                           | F5, F8(part)             | _unclaimed_ | proposed |
-| **D** | Planning / parallelism                  | F10                      | _unclaimed_ | proposed |
-| **E** | Context management (design)             | see §5                   | _unclaimed_ | proposed |
-| **F** | QA evidence integrity & stage isolation | F11, F12, F13            | _unclaimed_ | proposed |
+| Track | Theme                                           | Findings                 | Owner        | Status                            |
+| ----- | ----------------------------------------------- | ------------------------ | ------------ | --------------------------------- |
+| **A** | Perf / token reduction                          | F1, F6, F7, F8(part), F9 | _unclaimed_  | proposed                          |
+| **B** | Correctness / observability                     | F2, F3, F4               | _unclaimed_  | proposed                          |
+| **C** | Learning loop                                   | F5, F8(part)             | _unclaimed_  | proposed                          |
+| **D** | Planning / parallelism                          | F10                      | _unclaimed_  | proposed                          |
+| **E** | Context management (design)                     | see §5                   | _unclaimed_  | proposed                          |
+| **F** | QA evidence integrity & stage isolation         | F11, F12, F13            | _unclaimed_  | proposed                          |
+| **G** | Knowledge-graph integrity & grounding substrate | F14, F15, F16, F17, F18  | **graphify** | F17/F18 shipped; F14–F16 proposed |
 
 ---
 
@@ -479,10 +621,16 @@ How a story's context is built today (`daemon/pipelines/lib/story-context-pack.m
    QA false-blocking correct apps; biggest correctness leak in the QA stage. _(QAreview-agentic)_
 5. **F12 evidence gate + honest verdict lane** — never block on missing/404 frames; small
    guard, prevents the false-FAIL cascade. _(QAreview-agentic)_
+6. **F16 surface the orphan invariant** — the FAIL signal already exists and is swallowed
+   (`exit 3`); wiring it to a badge/gate is the cheapest knowledge-graph win. _(graphify)_
 
-**Phase 2 — Restore observability & correctness:** 4. **F2 priorJobIds history** → **F3 forensic union + cost reconciliation**. 5. **F4 totalStories count + fix-story lineage badge.**
+> **Already shipped this session (graphify):** **F17** (`projectId` normalization — heals
+> UUID-stranded orphans across all projects, `0d5dd6a`) and **F18** (`REFERENCES` living-doc
+> linking, `0445e6a`). They need no roadmap slot — just `verified` once projects re-sync.
 
-**Phase 3 — Deeper efficiency:** 6. **F7 mvp test-authoring trim**, **F8 fixer gating + prior-diff**, **F9 catalog trim**, **F13 probe-authoring gate (with F8 + VQA v3)**. 7. **F10 planner parallelism**, **§5 context-management redesign.**
+**Phase 2 — Restore observability & correctness:** 4. **F2 priorJobIds history** → **F3 forensic union + cost reconciliation**. 5. **F4 totalStories count + fix-story lineage badge.** 6. **F14 full-project ast-facts at wave-close** — the root of the broken-graph class; without it orphans recur every multi-story run. _(graphify)_
+
+**Phase 3 — Deeper efficiency:** 6. **F7 mvp test-authoring trim**, **F8 fixer gating + prior-diff**, **F9 catalog trim**, **F13 probe-authoring gate (with F8 + VQA v3)**, **F15 delete-aware graph prune (needs F14)** _(graphify)_. 7. **F10 planner parallelism**, **§5 context-management redesign.**
 
 > Rationale for Phase 1 ordering: F5 is cheap and re-enables the feedback loop that will
 > tell the operator which later fixes matter most; F6 is a safety stop; F1 is the largest
@@ -510,6 +658,21 @@ How a story's context is built today (`daemon/pipelines/lib/story-context-pack.m
   stated purpose. Alternatives: serialize qa-execute after deploy COMPLETED, per-run
   isolated checkout, or a `workingDir` mutex. (Overlaps `boilerplate-runtime-contract.md`
   and `multi-host-dispatch-readiness.md`.)
+- **Q8 (F14) [graphify]:** Where should the **authoritative full-project ast-facts** be
+  built — a dedicated wave-close/plan-close `bootstrap-ast` over the integrated `projects/<id>`
+  tree, or should `graph-sync` simply **refuse to narrow** a project's file set from a scan
+  whose `root` is a per-story worktree (treat a worktree scan as additive-only, never
+  authoritative)? The second is cheaper but leaves the snapshot stale until a full run.
+- **Q9 (F16) [graphify]:** Should the orphan invariant **gate** the wave or just **surface**?
+  Genuine code-orphans (a real dropped DEFINES) should block; legitimate floaters (test
+  files with no inbound edge, deleted-source zombies pending F15, decision docs awaiting
+  plan-doc linking) must not. Needs an agreed "genuine orphan" definition before it can gate
+  — otherwise it false-alarms. (The graph snapshot already distinguishes these in the UI's
+  "Unconnected / Dead code" split — reuse that classification.)
+- **Q10 (F18) [graphify]:** When plan-run docs (PRD/epics/stories) eventually enter the
+  graph, what is their linking scheme? They're **deliberately excluded** from auto-`REFERENCES`
+  now (`isLivingDoc`). Owner-defined — overlaps the §2 concept→plan authoring contract and the
+  VQA v3 PRD; resolving it makes `C-D3`/`C-P1` grounding machine-checkable (see F18 note).
 
 ---
 
@@ -548,33 +711,39 @@ merge 269s · `8c39c9f7` vqa 369s · `805cdb92` vqa 339s.
 
 ## Appendix B — Key file references
 
-| Concern                                      | File:line                                                                                                                                                           |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Per-story pipeline                           | `functions/shared/pipelines/story-pipeline.ts`                                                                                                                      |
-| Story context pack                           | `daemon/pipelines/lib/story-context-pack.mjs`                                                                                                                       |
-| Cached tsc (exists, prework-only)            | `daemon/lib/cached-tsc.mjs`                                                                                                                                         |
-| Prework gate                                 | `daemon/lib/prework-gate.mjs`                                                                                                                                       |
-| Wave VQA runner                              | `daemon/lib/wave-vqa-runner.mjs`                                                                                                                                    |
-| Wave merge                                   | `daemon/lib/wave-merge.mjs`                                                                                                                                         |
-| VQA fix-story mint (title)                   | `daemon/lib/wave-vqa-fix-story.mjs:53`                                                                                                                              |
-| Retry / story rerun (jobId overwrite)        | `functions/shared/services/story-rerun-launcher.ts:140`                                                                                                             |
-| Forensic builder (event collection)          | `functions/shared/timer/forensic-builder.ts:277`                                                                                                                    |
-| Forensic endpoint                            | `functions/api/index.ts:12125` (`GET /plans/:id/timing/forensic`)                                                                                                   |
-| Agent events repo (7-day TTL)                | `functions/shared/repositories/agent-events-repository.ts`                                                                                                          |
-| Reflector runner                             | `daemon/pipelines/reflector-runner.mjs`                                                                                                                             |
-| UI live output / events                      | `src/components/labs/agentic-workflow/story-live-output.tsx`, `src/hooks/use-agent-events.ts`                                                                       |
-| QA auto-approve + dev-deploy co-launch (F11) | `functions/cron/wave-completion-check.ts:210` (qa-execute), `:273-283` (dev-deploy), `:259-260` (intent comment)                                                    |
-| Deploy config rewrite (F11)                  | `functions/shared/deploy/build-deploy-pipeline.ts:47` (Edit/Write tools), `:66` (next.config basePath/output rewrite)                                               |
-| QA execute pipeline / capture / report (F12) | `functions/shared/pipelines/visual-qa-pipeline.ts:454` (qa-prepare boot), `:518-662` (per-test capture), `:656` (SCREENSHOTS_CAPTURED), `:955` (`overall = fail>0`) |
-| QA judge prompts (F12c)                      | `functions/shared/pipelines/visual-qa-pipeline.ts:786` (L1), `:886` (L2)                                                                                            |
-| Seam/assert executor (F13, exists)           | `functions/shared/pipelines/visual-qa-pipeline.ts:616-626` (`assert` → `page.evaluate(window.__harness)`)                                                           |
-| Claims-table thumbnail (F12 UI)              | `src/components/labs/plan-dashboard/views/qa/claims-table.tsx:296` (`<img onError>` hides broken/404)                                                               |
+| Concern                                      | File:line                                                                                                                                                                                               |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Per-story pipeline                           | `functions/shared/pipelines/story-pipeline.ts`                                                                                                                                                          |
+| Story context pack                           | `daemon/pipelines/lib/story-context-pack.mjs`                                                                                                                                                           |
+| Cached tsc (exists, prework-only)            | `daemon/lib/cached-tsc.mjs`                                                                                                                                                                             |
+| Prework gate                                 | `daemon/lib/prework-gate.mjs`                                                                                                                                                                           |
+| Wave VQA runner                              | `daemon/lib/wave-vqa-runner.mjs`                                                                                                                                                                        |
+| Wave merge                                   | `daemon/lib/wave-merge.mjs`                                                                                                                                                                             |
+| VQA fix-story mint (title)                   | `daemon/lib/wave-vqa-fix-story.mjs:53`                                                                                                                                                                  |
+| Retry / story rerun (jobId overwrite)        | `functions/shared/services/story-rerun-launcher.ts:140`                                                                                                                                                 |
+| Forensic builder (event collection)          | `functions/shared/timer/forensic-builder.ts:277`                                                                                                                                                        |
+| Forensic endpoint                            | `functions/api/index.ts:12125` (`GET /plans/:id/timing/forensic`)                                                                                                                                       |
+| Agent events repo (7-day TTL)                | `functions/shared/repositories/agent-events-repository.ts`                                                                                                                                              |
+| Reflector runner                             | `daemon/pipelines/reflector-runner.mjs`                                                                                                                                                                 |
+| UI live output / events                      | `src/components/labs/agentic-workflow/story-live-output.tsx`, `src/hooks/use-agent-events.ts`                                                                                                           |
+| QA auto-approve + dev-deploy co-launch (F11) | `functions/cron/wave-completion-check.ts:210` (qa-execute), `:273-283` (dev-deploy), `:259-260` (intent comment)                                                                                        |
+| Deploy config rewrite (F11)                  | `functions/shared/deploy/build-deploy-pipeline.ts:47` (Edit/Write tools), `:66` (next.config basePath/output rewrite)                                                                                   |
+| QA execute pipeline / capture / report (F12) | `functions/shared/pipelines/visual-qa-pipeline.ts:454` (qa-prepare boot), `:518-662` (per-test capture), `:656` (SCREENSHOTS_CAPTURED), `:955` (`overall = fail>0`)                                     |
+| QA judge prompts (F12c)                      | `functions/shared/pipelines/visual-qa-pipeline.ts:786` (L1), `:886` (L2)                                                                                                                                |
+| Seam/assert executor (F13, exists)           | `functions/shared/pipelines/visual-qa-pipeline.ts:616-626` (`assert` → `page.evaluate(window.__harness)`)                                                                                               |
+| Claims-table thumbnail (F12 UI)              | `src/components/labs/plan-dashboard/views/qa/claims-table.tsx:296` (`<img onError>` hides broken/404)                                                                                                   |
+| AST scan + ast-facts persist (F14)           | `daemon/scripts/bootstrap-ast.mjs:301-305` (`ast-extract --scan` over `args.root`), `:297`/`:328` (writes `<root>/.mycelium/ast-facts.json`)                                                            |
+| AST → graph translation, additive (F14/F15)  | `daemon/scripts/graph-sync.mjs:686` (`processAstFacts`)                                                                                                                                                 |
+| Orphan invariant emit + swallow (F16)        | `daemon/scripts/graph-sync.mjs:1049` (`Orphan invariant FAILED`), `daemon/scripts/lib/graph-integrity.mjs:112` (logic); swallowed at `daemon/scripts/bootstrap-ast.mjs:371` (`exited 3 (non-blocking)`) |
+| projectId normalization (F17, shipped)       | `daemon/scripts/graph-sync.mjs:745` (file-node MERGE `ON MATCH SET n.projectId = $projectId` — commit `0d5dd6a`)                                                                                        |
+| Living-doc REFERENCES layer (F18, shipped)   | `daemon/scripts/lib/doc-references.mjs` (`isLivingDoc`, `extractWikilinks({inlineRefs})`), wired in `daemon/scripts/graph-sync.mjs` — commit `0445e6a`                                                  |
 
 ---
 
 ## Changelog
 
-| Date       | Agent                 | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ---------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-06-17 | Claude (forensics #1) | Initial draft: findings F1–F10, workstreams A–E, roadmap, appendices from pacman3 forensic + daemon-log cross-check.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| 2026-06-18 | QAreview-agentic      | QA-stage forensic on the same pacman3 run (QA job `3c99fd51`, not walked by the original forensic — F2/F3). Added F11 (deploy×QA same-worktree race → `next.config.ts` rewrite relocates app off root → per-test 404s), F12 (broken/missing evidence scored as blocking defects; capture gate + honest verdict lane + judge hallucination), F13 (state/behavior ACs authored with no executable probe). New Track F; F11/F12 → Phase 1, F13 → Phase 3; open Q6/Q7; Appendix B refs. Verdict: QA false-blocked a correct app — every FAIL was an infra artifact. |
+| Date       | Agent                 | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-06-17 | Claude (forensics #1) | Initial draft: findings F1–F10, workstreams A–E, roadmap, appendices from pacman3 forensic + daemon-log cross-check.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 2026-06-18 | QAreview-agentic      | QA-stage forensic on the same pacman3 run (QA job `3c99fd51`, not walked by the original forensic — F2/F3). Added F11 (deploy×QA same-worktree race → `next.config.ts` rewrite relocates app off root → per-test 404s), F12 (broken/missing evidence scored as blocking defects; capture gate + honest verdict lane + judge hallucination), F13 (state/behavior ACs authored with no executable probe). New Track F; F11/F12 → Phase 1, F13 → Phase 3; open Q6/Q7; Appendix B refs. Verdict: QA false-blocked a correct app — every FAIL was an infra artifact.                                                                                                                                                                                                                                    |
+| 2026-06-18 | graphify              | Knowledge-graph (knowledge-compile output) forensic on the same pacman3 run — broken graph on correct code (177/290, 29 unconnected, Orphan invariant FAIL 20). Added new **Track G** + F14 (truncated ast-facts = last story's worktree scope, not the project), F15 (additive ingest never prunes deleted-source zombies), F16 (orphan invariant computed but swallowed at `exit 3`), F17 (job-UUID `projectId` strands file nodes → silent DEFINES loss — **shipped `0d5dd6a`**), F18 (living docs float; new `REFERENCES` doc→code edge layer for living docs, plan-docs excluded — **shipped `0445e6a`**). F16 → Phase 1, F14 → Phase 2, F15 → Phase 3; open Q8/Q9/Q10; Appendix B refs. After fixes: pacman3 graph 212/526, 0 orphans. Same lesson as F11/F12 — clean agents, leaky harness. |
