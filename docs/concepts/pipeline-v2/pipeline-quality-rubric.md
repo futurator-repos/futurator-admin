@@ -266,6 +266,31 @@ broken graph poisons D3 grounding downstream. See §3.8, §13.)_
 | D-WS1 | **Parallelism factor** (cumulative attributed ÷ wall)                        | D2   | forensic `aggregate.totalMs` ÷ wall | 🟢 ≥1.5×; 🟡 1.2–1.5×; 🔴 <1.2× (pacman3: **1.03× = 🔴**)             | 2   |
 | D-WS2 | Parallelism not throttled to mask host saturation (root-cause fixed instead) | D2   | concurrency config vs host metrics  | 4=full concurrency, host healthy; 0=concurrency lowered as a band-aid | 2   |
 
+### 3.10 Skill grounding, discovery & trust — `[MECH][AGENT][OUTPUT]` `[skills-module]`
+
+**Substage weight: medium.** The rubric (v0) scored skills only as _cost overhead_ (OV7/IE10) and
+the _learning loop_ (OV8). That's incomplete and subtly mis-framed: the pacman3 lesson is **not**
+"the catalog is too big, prune it" — it's that skills are **loaded but unused, not ranked by
+relevance, and never discovered for the plan's actual domain.** This substage scores the skill
+subsystem as a first-class quality axis. **Don't let a healthy `[MECH]` loader (SK1) hide a dead
+`[AGENT]` activation (SK2).** All anchors calibrated to the pacman3 baseline.
+
+| ID  | Criterion                                                                                   | Axis  | Evidence                                                                                    | Anchor / metric                                                                                                                                            | W   |
+| --- | ------------------------------------------------------------------------------------------- | ----- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
+| SK1 | **Skill availability** (loadout present, tool exposed, no zero-skill sessions)              | D6    | `skills.hasSkillTool`, `availableSkillCount`, `sessionsReportingZeroSkills`                 | 🟢 tool present & 0 zero-skill sessions; 🔴 sessions with no skills (pacman3: 66 avail / 0 zero / tool=true → **🟢** — loading is healthy)                 | 2   |
+| SK2 | **Activation when relevant** (agents actually invoke skills they're given)                  | D3    | `skills.totalSkillToolUseEvents` ÷ `sessionsReportingAvailability`; distinct used ÷ avail   | 🟢 ≥30% sessions activate; 🟡 10–30%; 🔴 <10% (pacman3: **5.2% / 1.5% distinct = 🔴** — the dominant skill defect, F24)                                    | 3   |
+| SK3 | **Loadout relevance / ranking** (offered skills ranked to the task, not flat readdir order) | D3    | `skills-prompt.mjs` ordering; is `index.embeddings.json` read at load time?                 | 4=relevance-ranked (vector/keyword); 0=flat pins-then-readdir, embeddings write-only (pacman3: **0**, F27)                                                 | 2   |
+| SK4 | **Discovery (scout) fired for the plan's need** (domain skills surfaced for this intent)    | D1/D6 | `skills.skillScoutRuns`; scout disposition; was a domain skill proposed for the plan intent | 🟢 scout ran & surfaced ≥1 relevant skill; 🔴 dormant or no domain match (pacman3: `skillScoutRuns:[]` for a game plan → **🔴**, F25)                      | 2   |
+| SK5 | **Trust integrity of what loads** (every installed/loaded skill is vetted; none unvetted)   | D4    | index `trustTier` / source `auto-trust`; vendor "BLOCKED" log; no community-source bypass   | 🟢 all loaded skills `trusted` or from a trusted source; 🔴 an unvetted skill reached the app (pacman3: pre-institution, **unlabeled = N/A→build target**) | 3   |
+| SK6 | **Registry self-improvement** (the plan left the registry better than it found it)          | D5/D4 | reflector `project-skill` proposals written; app-evolved SKILL.md authored & loadable next  | 🟢 ≥1 app-evolved/registry skill authored & consumable next run; 🔴 none / write-lost (pacman3: reflector `written=0` → **🔴**, OV8/F5)                    | 2   |
+
+> **[skills-module] How SK\* relates to the existing OV7/IE10/OV8.** SK1 = the _healthy_ half OV7
+> conflates with cost (loading works — credit it). SK2/SK3 are the _new_ axis OV7 misses: low
+> activation is an **activation+relevance** problem, not a "shrink the catalog to save tokens"
+> problem — the fix is push the _right_ skill bodies (SK3→SK2), not inject fewer. SK6 is OV8
+> from the registry's side (does the loop _produce_ a reusable skill, not just write a note).
+> SK5 is net-new — the rubric had no "is what loads actually vetted?" criterion.
+
 ---
 
 ## 4. STAGE — QA (contract gate)
@@ -426,6 +451,11 @@ Quantitative tripwires a scorer runs every plan. Each maps to a fix in
 | IE22 | **Rebuild-on-promote** (build-once violated) `[deployment]` | promotion rebuilds instead of byte-copying the tested artifact                 | copy   | —        | rebuild      | **rebuild/rung (fallback)**                     | F22 (new)               |
 | IE23 | **Agent-spawn precondition missing** `[deployment]`         | agent jobs fail at spawn for a missing injected prereq (MCP config / env)      | 0      | —        | ≥1           | **MCP config absent → all spawns blocked**      | F23 (new)               |
 | IE24 | **Non-prod deploy unobservable** `[deployment]`             | dev/staging deploys with no streamed logs/step tracker                         | 0      | —        | ≥1           | **dev+staging dark (pre-fix)**                  | done (`1755365`)        |
+| IE25 | **Skill activation collapse** `[skills-module]`             | skill tool-uses ÷ sessions (and distinct skills used ÷ available)              | ≥30%   | 10–30%   | <10%         | **5.2% / 1.5% distinct**                        | F24                     |
+| IE26 | **Scout dormancy** `[skills-module]`                        | `skillScoutRuns` count for a plan whose intent has a clear domain              | ≥1     | —        | 0            | **0 (game plan, no search)**                    | F25                     |
+| IE27 | **Loadout unranked / retrieval dark** `[skills-module]`     | `index.embeddings.json` read at load time? loadout ordered by relevance?       | ranked | —        | flat         | **flat; sidecar write-only**                    | F27                     |
+| IE28 | **Unvetted skill reaches app** `[skills-module]`            | loaded skills not `trusted`/not from a trusted source (post-institution)       | 0      | —        | ≥1           | **N/A pre-institution (build target)**          | 4.2 (SK5)               |
+| IE29 | **Dead-skill accumulation** `[skills-module]`               | skills with 0 activations across N plans still in the loadout, never pruned    | pruned | —        | accumulating | **65/66 unused, no prune path**                 | F28                     |
 
 > **[QAreview-agentic]** IE13–IE15 are a single causal chain: a concurrent `next.config.ts`
 > rewrite (deploy) restarted Turbopack mid-QA → 404/missing frames (IE14) → the
@@ -453,6 +483,20 @@ Quantitative tripwires a scorer runs every plan. Each maps to a fix in
 > Note IE23 is **not** a deployment-only failure: it blocks _every_ agent spawn (QA, dev,
 > fix) while `MYCELIUM_MCP=on` and the generated file is absent — it merely surfaced first on
 > a deploy job. Immediate unblock: daemon **Restart** (resets the latch) or `MYCELIUM_MCP=off`.
+
+> **[skills-module]** IE25–IE29 are one causal chain, and it **re-frames the v0 IE10/OV7** read
+> of pacman3. IE10 logged "66 avail / 1 used × 77 sessions" as _catalog overhead_ → "prune."
+> That's the wrong lever. The chain is: the **scout never ran** for a game plan (IE26) → no
+> domain skill was discovered → the loadout stayed generic and **unranked** (IE27, embeddings
+> are written but never read) → so agents **didn't activate** what little was relevant (IE25,
+> the dominant defect) → and nothing **prunes** the 65 dead skills (IE29). Pruning (IE29/IE10)
+> is real but secondary; the primary fixes are **discover the right skills** (F25), **rank +
+> push them per-story** (F27→F24), and only then prune the rest. IE28 is net-new and
+> **forward-looking**: the Skills-Institution branch makes "is what loads vetted?" answerable
+> (trusted-only install, Story 4.2) — but it must ship **with** the scout→inbox bridge (F26),
+> or it silently blocks the scout's community installs. The learning side (OV8/IE5/SK6) is the
+> multiplier: once F5's IAM write-loss is fixed, the now-built reflector-apply loop authors
+> **app-evolved** skills that close exactly this relevance gap, per plan.
 
 ---
 
@@ -806,6 +850,70 @@ automates platform deploys: treat a provider crash as retry-and-reconcile, and v
 
 ---
 
+## 15. Contributor findings — skills-module (2026-06-18): the skill subsystem through a plan run
+
+**Session:** `skills-module` · **Method:** hands-on, not read-only — built the **Skills-Institution**
+branch (the one-gate scanner + curation inbox + trust-tier model + the reflector-apply
+author-from-experience loop + retro-scan), then analyzed the **pacman3** `skills` forensic block
+against it. Cross-checked `daemon/lib/skills-prompt.mjs`, `skill-scout-triggers.mjs`,
+`skill-scout-job-runner.mjs`, `app-bootstrap-steps/vendor-skills.mjs`, `scripts/ingest-skills.mjs`,
+and the new branch code. Full findings + fixes: **Track I (F24–F28)** in
+[`pipeline-v2.5-fixes-plan.md`](./pipeline-v2.5-fixes-plan.md).
+
+**Headline (same shape as §12/§13/§14): clean agents, leaky harness — but here the leak is one of
+_omission_.** The skill **loading infra is healthy** (SK1 🟢: 66 available, tool exposed, 0
+zero-skill sessions, CLAUDE.md loaded in all 77). What's broken is everything _downstream_ of
+loading, and none of it is an agent-intelligence defect:
+
+1. **Activation collapsed (SK2 / IE25 / F24) — the dominant defect.** `totalSkillToolUseEvents: 4`
+   across 77 sessions = **5.2%**; `activatedSkills` = **one** skill (`frontend-design`, ×2) of 66 =
+   **1.5%**. A Canvas2D game activated **zero** game-domain skills. The loadout is offered as a flat
+   name+description list (`skills-prompt.mjs:140-155`); a skill is never _pushed_ as a body for the
+   story at hand. **This is the single highest-leverage skill fix and nothing in our branch touches
+   it** — curation/security/authoring don't move activation.
+2. **Scout was dormant (SK4 / IE26 / F25).** `skillScoutRuns: []` — for a plan whose intent literally
+   says "pacman … ghost types … eat the dots," **no skill search fired.** The scout's in-plan triggers
+   are mechanical only (new-dep T4/T5, reviewer-cluster T6 — `skill-scout-triggers.mjs:38/71/110`); a
+   canvas scaffold trips none. There is **no intent-aware trigger**, so plan _meaning_ never drives
+   discovery.
+3. **Retrieval is dark (SK3 / IE27 / F27).** `index.embeddings.json` is generated (voyage-3, 1024-dim,
+   `ingest-skills.mjs:226`) and its own header calls it "the retrieval sidecar SKILL-SCOUT queries" —
+   but **no reader exists**. The loadout is ranked pins-then-readdir, never by task relevance.
+   (Truncation was _not_ the issue — 66 < the 80-skill cap — every skill was visible and still ignored.)
+4. **Self-improvement didn't close (SK6 / OV8 / F5).** The reflector fired at plan-close but
+   `written=0` (IAM). Our branch **built the missing consumer** — `reflector-apply.mjs:209-213` authors
+   an app-evolved SKILL.md from a confirmed reflection, and `reflection-apply-poller.mjs` consumes
+   `confirmed` rows — so the loop is now code-complete, **but still dead until F5's IAM write is granted**
+   (and, at mvp rigor, story-scope reflection is allowed to fire). Fix F5 first.
+5. **⚠️ One pre-deploy regression (SK5 / IE28 / F26).** The branch's trusted-only vendor gate (Story
+   4.2, `vendor-skills.mjs:195-200`) sits in the scout's install path — it would **silently block the
+   scout's community-source installs even after the operator approves the scout card**, because the
+   scout-card "approve" and the inbox "ratify" are two disconnected trust authorities. Security-correct,
+   but the scout→inbox bridge is missing. **Ship 4.2 _with_ that bridge, not before.**
+
+**What the branch _does_ fix (so the scorecard credits it):** SK5's _mechanism_ (trusted-only install,
+retro-scan labels the 245 incumbents), the curation inbox (a vetting path that didn't exist), and SK6's
+_machinery_ (the author-from-experience loop). These are necessary foundations — they're just not the
+live bottleneck pacman3 exposed.
+
+> **Hand-off notes to other sessions:**
+>
+> - **The scoring-agent author:** §3.10 (SK1–SK6) is fully machine-readable from the forensic `skills`
+>   block — no log-parsing. SK2 = `totalSkillToolUseEvents ÷ sessionsReportingAvailability`; SK4 =
+>   `skillScoutRuns.length`; SK6 = reflector `written>0`. **Reclassify the v0 read of pacman3:** OV7/IE10
+>   ("prune the catalog") should be scored as SK2+SK3 (activation+relevance), not just D2 cost — see the
+>   `[skills-module]` note under §8.
+> - **concept-develop / pipeline owner:** F24–F28 are filed under **Track I** in the fixes plan; **F26 is
+>   marked a pre-deploy gate for the Skills-Institution branch.** The highest-leverage pair is F25
+>   (intent-aware scout trigger) → F27/F24 (read the embeddings, push top-K bodies per story) — that's
+>   what would have made pacman3 pull and use a game skill.
+> - **qa-review / graphify:** skills don't bear on your stages directly, but **F5 (the IAM write-loss
+>   you both also depend on for the learning loop)** is now the single unblock that makes the reflector
+>   → app-evolved-skill loop real. Same lesson as F11/F14/F23: the agents are fine; the harness drops the
+>   output.
+
+---
+
 ## Changelog
 
 | Date       | Agent                 | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -814,3 +922,4 @@ automates platform deploys: treat a provider crash as retry-and-reconcile, and v
 | 2026-06-17 | QAreview-agentic      | QA-evidence forensic on pacman3. Corrected §4 (the QA job ran and FAILED on corrupted evidence — not 0ms/N-A). Added Q-C6–Q-C9 (evidence-capture integrity, honest-verdict-under-broken-evidence, oracle-hallucination guard, stage isolation), D-TA4/D-TA5 (visual-probe authoring completeness + level-assignment honesty), IE13–IE15 (stage-isolation breach, capture failure, infra-scored-as-defect), open Q6/Q7, §12 root-cause narrative (deploy×QA same-tick/same-worktree race → `next.config.ts` restart → 404/missing frames → false-blocking a correct app). Flagged F11/F12 as missing from the fixes plan.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | 2026-06-18 | graphify              | System-graph forensic on pacman3 (correct code → broken graph). Added system-graph snapshot as an evidence source (§0.4); expanded §3.8 into knowledge-compile/system-graph with D-KC2–D-KC6 (AST-facts completeness, orphan rate, orphan-invariant enforcement, projectId partition integrity, living-doc connectivity) and bumped the substage weight 1→2; added IE16–IE19 (ast-facts truncation, orphan accumulation, projectId drift, graph zombies); open Q8/Q9 (gate the orphan invariant; use the snapshot as deterministic scoring evidence); §13 root-cause narrative. Fixes landed this session: projectId normalization (`0d5dd6a`, IE18/D-KC5/F17) and the `REFERENCES` living-doc layer (`0445e6a`, D-KC6/F18); the rest filed as **F14–F16** (Track G) in `pipeline-v2.5-fixes-plan.md`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | 2026-06-18 | deployment            | Hands-on deployment-stage pass (built + shipped the v2.5 control panel; brick1 promoted dev→staging→prod live). Reframed §5 from "push to S3" to a build-once promotion ladder; added DP-B2/DP-U1/DP-L2/DP-S2/DP-I1/DP-E1/DP-O1 (framework-detect, published-URL integrity, build-once promotion, smoke verification + soft-gate, deploy stage-isolation, env-provisioning isolation, per-env observability) and bumped substage weights (stage-isolation 3). Added cross-cutting OV11 (agent-spawn precondition integrity — the MCP-config class that blocks ALL spawns); IE20–IE24 (URL truncation, config improvisation, rebuild-on-promote, spawn-precondition missing, non-prod unobservable); open Q10–Q12 (don't mutate shared config / hard-gate build-once / OV11 cap placement); §14 root-cause narrative. **Fixed this session** (`1755365`, live `c937de7`): DP-U1/IE20 (URL-truncation regex), DP-B2/IE21 (framework-aware prompts), DP-O1/IE24 (dev/staging streaming), DP-S2 (smoke surfacing + prod soft-gate), DP-L2 dual-prod-path reconcile. Filed **F22** (provision dev/staging subdomains → true build-once; deployment-v2.5.md §14) and **F23** (MCP-config self-heal in `daemon/lib/mcp-config.mjs`) in the fixes plan (Track H). Confirmed DP-I1 = the deploy side of §12's Q-C9/IE13 (still open → Q10). |
+| 2026-06-18 | skills-module         | Skill-subsystem pass on pacman3, hands-on (built the Skills-Institution branch). Added **§3.10 Skill grounding, discovery & trust** (SK1–SK6: availability, activation-when-relevant, loadout ranking, scout discovery, trust integrity, registry self-improvement) — the dev-stage skill-quality lens the v0 rubric lacked. Added IE25–IE29 (activation collapse, scout dormancy, retrieval-dark, unvetted-skill-loaded, dead-skill accumulation) + a `[skills-module]` note **re-framing the v0 IE10/OV7 read** ("66/1×77 → prune" is the wrong lever; the chain is dormant-scout → unranked-loadout → no-activation → no-prune; fix discovery+ranking first). §15 contributor findings: loading is healthy (SK1 🟢) but activation (5.2%), discovery (`skillScoutRuns:[]`), and retrieval (embeddings write-only) are the live bottlenecks — none touched by the curation/security/authoring branch; one ⚠️ pre-deploy regression (F26: trusted-only gate blocks scout community installs, scout↔inbox unbridged). Cross-refs Track I (F24–F28) in the fixes plan; flagged F5's IAM write-loss as the single unblock for the now-built reflector→app-evolved-skill loop.                                                                                                                                                        |
