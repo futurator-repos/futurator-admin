@@ -36,46 +36,57 @@ while guaranteeing no unvetted skill reaches an app.
 
 _Gives the existing reflector loop a landing zone. Closes success criterion #1._
 
-### Story 1.1 — Write an app-evolved skill from a ratified reflection
+### Story 1.1 — Author a NEW app-evolved skill from a ratified reflection
 
-**As a** curator, **I want** a ratified `project-skill` reflection to materialize as a real skill in the
-app, **so that** the agents' next run can use it.
+> **Sanity-check correction (2026-06-17):** `daemon/pipelines/reflector-apply.mjs` **already exists**
+> (Epic 6, 2026-05-20) and is NOT a stub. Its `applyProjectSkillProposal()` currently **installs an
+> existing federation skill by `skillName`** (manifest add + `vendor-skills` fetch from GitHub) — it
+> **cannot author a new skill from the reflection's `content`.** That authoring path is the real gap,
+> so this story EXTENDS the existing module rather than creating it.
 
-**Acceptance Criteria**
-
-1. A new module `daemon/lib/reflector-apply.mjs` exposes `applyReflection(reflectionRow)`.
-2. `action: create` writes `<app>/.claude/skills/<skillName>/SKILL.md` (frontmatter `name` +
-   `description` from the proposal; body from `content`), and commits to the app repo with trailers
-   (`Skills-Changed:`, `Agent: REFLECTOR-APPLY`, ratifier).
-3. `action: tune` updates the existing skill's targeted section; if absent, degrades to `create`.
-4. `action: promote-from-project` does **not** write the app — it stages a **global** `skill-proposals`
-   row (E3) instead.
-5. Write is atomic: a failed commit leaves no partial file and surfaces an error.
-
-**Tasks**
-
-- [ ] Create `daemon/lib/reflector-apply.mjs`; reuse the GitHub connector for app-repo `putFile`/commit.
-- [ ] Map `reflection.target/action/skillName/content` → file path + body.
-- [ ] Implement `promote-from-project` → `skill-proposals` insert (depends on 3.1).
-- [ ] Unit tests: create / tune / promote / atomic-failure.
-
-### Story 1.2 — Trigger apply on ratify (replace the stub)
-
-**As a** curator, **I want** approving a lesson in the Growth tab to actually apply it, **so that** the
-existing approve button stops being a no-op.
+**As a** curator, **I want** a ratified `project-skill` reflection with `action: create` to author a
+**new** app-evolved skill from its `content`, **so that** a lesson becomes a brand-new skill the next
+run can use (not just an install of a pre-existing one).
 
 **Acceptance Criteria**
 
-1. The `reflections-service` apply stub (`reflections-service.ts:76–81`) is replaced: confirming a
-   `target: project-skill` reflection enqueues/invokes `reflector-apply`.
-2. Reflection status transitions `pending → confirmed` only after a successful apply (else stays
-   `pending` with an error surfaced).
-3. Existing `POST /api/reflections/:projectSlug/:id/confirm` is the trigger; no new endpoint needed.
+1. Extend `reflector-apply.mjs::applyProjectSkillProposal()`: when `action: create` and `skillName` is
+   not an existing federation skill, write `<app>/.claude/skills/<skillName>/SKILL.md` (frontmatter
+   `name` + `description`; body from `content`), add the manifest entry, and commit with the existing
+   trailers (`Skills-Changed:`, `Agent: REFLECTOR-APPLY`).
+2. `action: tune` updates the existing skill's targeted section; `action: promote-from-project` stages a
+   **global** `skill-proposals` row (E3) instead of writing the app.
+3. The existing install-by-name path (federation skill) is preserved unchanged.
+4. Write is atomic: a failed commit leaves no partial file and surfaces an error.
 
 **Tasks**
 
-- [ ] Wire confirm → daemon apply (job row or direct, per existing reflector-runner pattern).
-- [ ] Status/rollback handling. [ ] Integration test confirm→file-on-disk.
+- [ ] Extend `applyProjectSkillProposal()` with the author-from-content branch (reuse the app-repo
+      commit path already in the module).
+- [ ] Route `action: tune` / `promote-from-project` (promote → depends on 3.1).
+- [ ] Unit tests: create-new / tune / promote / install-existing-still-works / atomic-failure.
+
+### Story 1.2 — Verify confirm→apply wiring + fix the stale stub comment
+
+> **Sanity-check correction (2026-06-17):** the confirm→apply wiring **already exists** —
+> `POST /api/reflections/:projectSlug/:id/confirm` flips status; the daemon picks up `status: confirmed`
+> out-of-band and runs `reflector-apply`. This story is now mostly **verification**, not new wiring.
+
+**As a** curator, **I want** confirming a `create` reflection to reach the new authoring path, **so
+that** the loop closes for newly-authored skills.
+
+**Acceptance Criteria**
+
+1. A confirmed `target: project-skill, action: create` reflection is routed by the daemon poll to Story
+   1.1's authoring branch (verified end-to-end).
+2. The stale comment in `functions/shared/services/reflections-service.ts:76–81` (claims "stub today")
+   is corrected — apply was implemented in Epic 6.
+3. Status transitions only after a successful apply; failure leaves it `pending` with an error surfaced.
+
+**Tasks**
+
+- [ ] E2E test: confirm a `create` reflection → new SKILL.md on disk in the app repo.
+- [ ] Fix the stale `reflections-service.ts` comment. [ ] Failure/rollback handling.
 
 ### Story 1.3 — Gate-1 scan before commit
 

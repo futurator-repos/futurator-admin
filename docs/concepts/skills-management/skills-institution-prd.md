@@ -12,8 +12,9 @@
 
 Futurator Labs turns plans into shipped apps via an agentic pipeline. Its agents already _use_
 skills (procedural SKILL.md knowledge) and already _notice lessons_ (the REFLECTOR) — but those
-lessons fall on the floor: the apply path is a stub, the registry is an unvetted dump of 245
-internet-sourced skills, and nothing makes a skill **improve from one plan run to the next.**
+lessons fall on the floor: the apply path can only **install an existing skill by name** (it can't
+author a new skill from a lesson), the registry is an unvetted dump of 245 internet-sourced skills, and
+nothing makes a skill **improve from one plan run to the next.**
 
 The Skills Institution closes that loop. Skills become a **compounding asset**: born from real work,
 adapted per-app during plan runs, graded and security-scanned through one gate, curated by cluster,
@@ -58,8 +59,9 @@ the phase in which it first becomes measurable.
    ratified skill change that is loaded by the agents of a **later** plan on the same app — with the
    operator only **ratifying a diff, never authoring**. _Proof:_ a REFLECTOR `project-skill` proposal,
    once approved, lands in the app's `.claude/skills/` and appears in a subsequent plan's `Skills-Used:`
-   commit trailer. Today this is 0% (apply is a stub); success = it happens end-to-end at least once,
-   then routinely.
+   commit trailer. Today this is 0% for **newly-authored** skills (apply can only install existing
+   federation skills by name; it can't author from a lesson); success = it happens end-to-end at least
+   once, then routinely.
 
 2. **No unvetted skill ever reaches an agent** _(Phase 1)._ Nothing is installed into any app unless it
    passed Gate-1 security scan and is `trusted`. _Proof:_ 100% of scout-installed skills are `trusted`;

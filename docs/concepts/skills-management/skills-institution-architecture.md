@@ -27,6 +27,25 @@ Mycelium handoff — all reusing the same gate.
 
 ---
 
+## Sanity-Check Findings (2026-06-17, verified vs live code)
+
+The doc was validated against the codebase. ~90% held; the corrections below are folded in:
+
+- **🔴 `reflector-apply.mjs` already exists and is NOT a stub** (`daemon/pipelines/reflector-apply.mjs`,
+  Epic 6, 2026-05-20). Confirm→apply wiring works (daemon polls `status: confirmed`). **But** its
+  `project-skill` path only **installs an existing federation skill by name** (manifest + vendor-fetch);
+  it **cannot author a new skill from a reflection's `content`.** → Epic E1 EXTENDS this function and
+  fixes the stale stub comment in `reflections-service.ts:76–81`; it does not build from scratch. The
+  "apply is a stub" framing (vision §1, PRD) means specifically the **author-from-lesson** capability.
+- **🟡 Facets must be added to BOTH types** — `CatalogSkill` (`skill-catalog.ts`) lacks `provenance`
+  today; only `SkillIndexEntry` (`skill-authoring.ts`) has it. Story 2.1 extends both; the 5-min catalog
+  TTL lives in `functions/api/index.ts:11067` (not the shared module).
+- **🟢 `skill-proposals` table template found** — `sst.config.ts` already declares
+  `propagatorProposalsTable` (PK `proposalId`, PAY_PER_REQUEST). Clone its shape and add the
+  `status-createdAt-index` GSI (pattern: `agentJobsTable`).
+- **🟢 Confirmed net-new** — no `skill-gate`, no security scanner, no `/api/skill-proposals`, no
+  `growth-inbox` UI; `index.embeddings.json` is write-only; `SkillIndexEntry` is exactly 7 fields.
+
 ## Decision Summary
 
 | Category             | Decision                                                                             | Version                   | Affects         | Rationale                                                      |

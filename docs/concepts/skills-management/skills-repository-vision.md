@@ -44,8 +44,10 @@ The Hermes (`nousresearch/hermes-agent`) lifecycle has four moving parts. Futura
 
 **The five open seams (close in build order):**
 
-1. **`REFLECTOR-APPLY` is a STUB** (`reflections-service.ts:76–81`). Approving a `project-skill`
-   proposal writes _nothing_. The loop has no landing zone. **This is the highest-value fix.**
+1. **`REFLECTOR-APPLY` can install-by-name but can't author-from-lesson.** _(Corrected 2026-06-17:
+   `daemon/pipelines/reflector-apply.mjs` exists since Epic 6 and installs an existing federation skill
+   by name; the gap is authoring a **new** app-evolved skill from a reflection's `content`. The
+   `reflections-service.ts:76–81` "stub" comment is stale.)_ **Still the highest-value fix.**
 2. **Retrieval is unwired.** `index.embeddings.json` (voyage-3, 1024-dim) is **write-only**; the
    scout linearly scans all ~245 descriptions. (`federation-resolver.mjs` reads only `index.json`.)
 3. **No app sub-registry tier.** The manifest's `plans:` overlay + `graduate-policy` exist in schema
