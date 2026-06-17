@@ -54,6 +54,28 @@ function FrameworkBadge({ framework }: { framework: boolean }) {
   );
 }
 
+// Curation-facet badges (Story 4.3). Facets may be absent on an old cached
+// response → migrated defaults are applied server-side, but guard here too.
+function TrustBadge({ tier }: { tier?: CatalogSkill['trustTier'] }) {
+  const t = tier ?? 'draft';
+  const variant =
+    t === 'trusted'
+      ? 'default'
+      : t === 'reviewed'
+        ? 'secondary'
+        : t === 'deprecated'
+          ? 'destructive'
+          : 'outline';
+  return <Badge variant={variant}>{t}</Badge>;
+}
+
+function SecurityBadge({ status }: { status?: CatalogSkill['securityStatus'] }) {
+  const s = status ?? 'unverified';
+  if (s === 'clean') return null; // clean is the unremarkable default — don't clutter rows
+  const variant = s === 'quarantined' ? 'destructive' : 'outline';
+  return <Badge variant={variant}>{s}</Badge>;
+}
+
 function SkillDetail({
   skill,
   onClose,
@@ -95,6 +117,22 @@ function SkillDetail({
           </dd>
           <dt className="text-muted-foreground">version</dt>
           <dd>{skill.version}</dd>
+          <dt className="text-muted-foreground">trust</dt>
+          <dd>{skill.trustTier ?? 'draft'}</dd>
+          <dt className="text-muted-foreground">security</dt>
+          <dd
+            className={
+              skill.securityStatus === 'quarantined'
+                ? 'text-destructive'
+                : skill.securityStatus === 'flagged'
+                  ? 'text-warning'
+                  : undefined
+            }
+          >
+            {skill.securityStatus ?? 'unverified'}
+          </dd>
+          <dt className="text-muted-foreground">provenance</dt>
+          <dd>{skill.provenanceClass ?? '—'}</dd>
         </dl>
 
         <div className="space-y-1.5">
@@ -297,6 +335,7 @@ export default function SkillsRegistryPage() {
   const [q, setQ] = useState('');
   const [sourceFilter, setSourceFilter] = useState('all');
   const [frameworkFilter, setFrameworkFilter] = useState<'all' | 'bmad' | 'skill'>('all');
+  const [trustFilter, setTrustFilter] = useState('all');
   const [selected, setSelected] = useState<CatalogSkill | null>(null);
   const [editing, setEditing] = useState<CatalogSkill | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -334,6 +373,7 @@ export default function SkillsRegistryPage() {
       if (sourceFilter !== 'all' && s.source !== sourceFilter) return false;
       if (frameworkFilter === 'bmad' && !s.framework) return false;
       if (frameworkFilter === 'skill' && s.framework) return false;
+      if (trustFilter !== 'all' && (s.trustTier ?? 'draft') !== trustFilter) return false;
       if (
         needle &&
         !s.name.toLowerCase().includes(needle) &&
@@ -342,7 +382,7 @@ export default function SkillsRegistryPage() {
         return false;
       return true;
     });
-  }, [data, q, sourceFilter, frameworkFilter]);
+  }, [data, q, sourceFilter, frameworkFilter, trustFilter]);
 
   const failedSources = data?.sources?.filter((s) => !s.ok).length ?? 0;
 
@@ -406,6 +446,18 @@ export default function SkillsRegistryPage() {
             <SelectItem value="skill">non-bmad only</SelectItem>
           </SelectContent>
         </Select>
+        <Select value={trustFilter} onValueChange={(v) => v && setTrustFilter(v)}>
+          <SelectTrigger className="w-40">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">all trust</SelectItem>
+            <SelectItem value="trusted">trusted (installable)</SelectItem>
+            <SelectItem value="reviewed">reviewed</SelectItem>
+            <SelectItem value="draft">draft</SelectItem>
+            <SelectItem value="deprecated">deprecated</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       <div
@@ -429,6 +481,7 @@ export default function SkillsRegistryPage() {
                 <TableRow>
                   <TableHead>Skill</TableHead>
                   <TableHead>Kind</TableHead>
+                  <TableHead>Trust</TableHead>
                   <TableHead>Source</TableHead>
                   <TableHead>License</TableHead>
                 </TableRow>
@@ -448,6 +501,12 @@ export default function SkillsRegistryPage() {
                     </TableCell>
                     <TableCell>
                       <FrameworkBadge framework={s.framework} />
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <TrustBadge tier={s.trustTier} />
+                        <SecurityBadge status={s.securityStatus} />
+                      </div>
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {s.source}
