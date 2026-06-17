@@ -30,6 +30,7 @@ export const SYSTEM_GRAPH_EDGE_TYPES = new Set([
   'READS', // file → table (env-join, SG-1.6)
   'CALLS_ENDPOINT', // component → endpoint (SG-1.6)
   'CALLS', // function → function (cross-file, ts-morph semantic-extract)
+  'RENDERS', // component → component (JSX usage, ts-morph semantic-extract)
   // ── Concept v2 doc-engine (E6 / Story 6.2) ─────────────────────────────
   'DERIVED_FROM', // document → upstream document (spec-chain lineage, 6.3)
   'REFERENCES', // story → docSection (citation, 6.3)

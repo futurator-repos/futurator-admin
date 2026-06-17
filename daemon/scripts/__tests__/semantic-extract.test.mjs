@@ -3,8 +3,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { Project, SyntaxKind } from 'ts-morph';
-import { extractSemanticCalls, funcNodeIdFor, fileNodeIdFor } from '../semantic-extract.mjs';
+import { Project, SyntaxKind, ts } from 'ts-morph';
+import { extractSemanticEdges, extractSemanticCalls, funcNodeIdFor, fileNodeIdFor } from '../semantic-extract.mjs';
 
 function projectWith(files) {
   const p = new Project({ useInMemoryFileSystem: true });
@@ -64,5 +64,27 @@ describe('extractSemanticCalls', () => {
     });
     const edges = extractSemanticCalls(project, '/', SyntaxKind);
     expect(edges).toEqual([]);
+  });
+});
+
+describe('extractSemanticEdges — RENDERS (JSX)', () => {
+  it('resolves a cross-file JSX component render to a RENDERS edge', () => {
+    const project = new Project({
+      useInMemoryFileSystem: true,
+      compilerOptions: { jsx: ts.JsxEmit.React },
+    });
+    project.createSourceFile('/src/Child.tsx', 'export function Child() { return null as any; }');
+    project.createSourceFile(
+      '/src/Parent.tsx',
+      'import { Child } from "./Child";\nexport function Parent() { return <Child /> as any; }',
+    );
+    const edges = extractSemanticEdges(project, '/', SyntaxKind);
+    expect(edges).toContainEqual({
+      type: 'RENDERS',
+      source: 'code/src--Parent.tsx#function:Parent',
+      target: 'code/src--Child.tsx#function:Child',
+    });
+    // lowercase HTML tags do not produce RENDERS edges
+    expect(edges.filter((e) => e.type === 'RENDERS')).toHaveLength(1);
   });
 });

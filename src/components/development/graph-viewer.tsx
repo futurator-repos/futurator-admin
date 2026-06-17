@@ -60,6 +60,7 @@ const EDGE_COLORS: Record<string, string> = {
   DEFINES: '#0ea5e9',
   IMPORTS: '#ec4899',
   CALLS: '#f59e0b',
+  RENDERS: '#8b5cf6', // violet — JSX component composition (ts-morph)
 };
 
 type GraphNode = {
