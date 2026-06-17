@@ -1,0 +1,531 @@
+# Pipeline Quality Rubric (v0 draft)
+
+> **Status:** DRAFT (open for multi-agent contribution)
+> **Owner of this draft:** Claude (forensic analysis pass #1)
+> **Created:** 2026-06-17
+> **Companion to:** [`pipeline-v2.5-fixes-plan.md`](./pipeline-v2.5-fixes-plan.md)
+> **Calibration baseline:** `plan_pacman3_mqi8x64w` (mvp) — the "v0" reference run.
+
+A standing scoring instrument applied to **every future plan run** to grade the quality
+of the pipeline, its agents, and its outputs — and to surface inefficiencies for
+continuous improvement. It is designed to be **machine-applied**: each criterion names
+its evidence source and a measurement, so a scoring agent can emit a comparable scorecard
+without subjective drift.
+
+---
+
+## 0. How to use this rubric (read first)
+
+### 0.1 Three things we score (don't conflate them)
+
+Every criterion is tagged with one of:
+
+- **`[AGENT]`** — quality of an LLM agent's work (the PRD John wrote, the code DEV wrote,
+  the verdict a JUDGE returned). _Is the intelligence good?_
+- **`[MECH]`** — quality of the orchestration/harness around the agent (gating, merging,
+  retry, budget, event capture). _Is the machine good?_
+- **`[OUTPUT]`** — quality of the artifact delivered to the next stage or the user (the
+  built app, the deploy, the published site). _Is the product good?_
+
+A stage can score well on `[AGENT]` and badly on `[MECH]` (smart agents, leaky harness) —
+that distinction is the whole point. Keep them separate.
+
+### 0.2 Scoring scale (every criterion uses this)
+
+| Score | Band              | Meaning                                                                   |
+| ----- | ----------------- | ------------------------------------------------------------------------- |
+| **4** | Exemplary         | Best-in-class; sets the baseline others should match.                     |
+| **3** | **Good (TARGET)** | Meets intent reliably; minor nits only.                                   |
+| **2** | Acceptable        | Works, but with notable inefficiency/gaps; improvement clearly warranted. |
+| **1** | Poor              | Frequently misses intent or wastes significant resources; needs rework.   |
+| **0** | Broken/Absent     | Does not function, produces wrong/lost output, or is missing entirely.    |
+
+For **quantitative** criteria, the numeric thresholds map: 🟢 green = 3–4, 🟡 yellow = 2,
+🔴 red = 0–1. Each quantitative criterion states its own cut points, calibrated to the
+pacman3 baseline (§8). The question a scorer answers is always: **"better, equal, or
+worse than the v0 baseline?"**
+
+### 0.3 Weights & aggregation
+
+Each criterion carries a weight **W ∈ {1 (minor), 2 (normal), 3 (critical)}**.
+
+- **Substage score** = Σ(score × W) / Σ(W × 4) → normalized 0–1.
+- **Stage score** = weighted mean of its substage scores (substage weights in the stage
+  header).
+- **Pipeline health** = weighted mean of the 5 stage scores + the Overview score (§7),
+  per §9 weights.
+- **Any `[MECH]` criterion scoring 0 caps its stage at "Acceptable" (≤2 equivalent)** —
+  a broken harness can't be hidden by good agents.
+
+### 0.4 Evidence sources (where a scorer looks)
+
+| Source                             | What it gives                                                                                                                                    | Access                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------- |
+| **Forensic JSON**                  | `GET /plans/:id/timing/forensic` → `slices[]`, `aggregate.byCategory`, `narrative`, `skills`, `plan`                                             | API                        |
+| **Daemon log**                     | `/var/log/futurator-daemon.log` on EC2 — gate verdicts, fix rounds, reflector result, IAM/errors                                                 | SSH/SSM                    |
+| **DDB: plan**                      | `totalCostUsd`, `costCeilingUsd`, `totalStories`, `doneStories`, `status` + stage timestamps (`startedAt`, `reviewAt`, `qaContractDecidedAt`, …) | repo                       |
+| **DDB: epic.stories[]**            | per-story `jobId`, `status`, `origin`, `wave`, `fixesWave`                                                                                       | repo                       |
+| **DDB: agent-jobs / agent-events** | per-step `cost`, `inputTokens`, `outputTokens`, `durationMs`, event stream                                                                       | repo (7-day TTL on events) |
+| **Stage reports**                  | QA report (`qa-report-aggregator`), deploy report (`deploy-report-aggregator`), `inbox/reflections.md`                                           | repo / disk                |
+| **Git graph**                      | merge commits, `--no-ff` topology, commit-metadata trailers (`Agent:`, `Plan-Id:`, `Wave:`, `Story:`)                                            | worktree                   |
+
+> ⚠️ **Known evidence gap (track in §7-OV4):** the forensic only walks the _current_
+> `story.jobId`, so retried/superseded jobs are invisible. Until fix `F2/F3` lands, a
+> scorer must treat forensic cost/time as a **lower bound** and cross-check against
+> `plan.totalCostUsd` for the truth.
+
+### 0.5 Output format (every scorer emits this)
+
+```jsonc
+{
+  "planId": "plan_xxx",
+  "rigor": "mvp|production|prototype",
+  "scoredBy": "<agent-name>",
+  "scoredAt": "<iso>",
+  "baseline": "plan_pacman3_mqi8x64w",
+  "stages": {
+    "concept":     { "score": 0.0-1.0, "substages": { "...": {"score": 0-4, "evidence": "...", "note": "..."} } },
+    "development": { ... }, "qa": { ... }, "deployment": { ... }, "publish": { ... }
+  },
+  "overview": { "timing": {...}, "cost": {...}, "integrity": {...}, "learning": {...} },
+  "inefficiencies": [ { "id": "IE1", "verdict": "🟢|🟡|🔴", "value": <n>, "evidence": "..." } ],
+  "pipelineHealth": 0.0-1.0,
+  "topRegressions": ["..."],
+  "topWins": ["..."]
+}
+```
+
+---
+
+## 1. Cross-cutting dimensions (the axes)
+
+Every per-stage criterion belongs to one of these axes. Specialized agents may report
+per-axis rollups across the whole pipeline.
+
+| Axis                                  | What it asks                                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **D1 — Output quality / correctness** | Did the stage produce a correct, complete artifact for its intent?                          |
+| **D2 — Efficiency**                   | Token + wall-time cost relative to value delivered. No thrash, no wasted loops.             |
+| **D3 — Grounding / context**          | Did agents actually _use_ the inputs available to them (prior specs, AC, prior diffs)?      |
+| **D4 — Integrity / observability**    | Are counts correct, logs complete start-to-finish, costs reconciled, nothing silently lost? |
+| **D5 — Autonomy / resilience**        | Does it recover from failure without a human, without burning tokens in loops?              |
+| **D6 — Handoff**                      | Does stage/substage N's output cleanly feed N+1 (no re-derivation, no dropped context)?     |
+
+---
+
+## 2. STAGE — CONCEPT
+
+**Intent:** turn operator intent into approved, grounded specs and a plan ready to build.
+**Substage weights:** route 1 · prd 2 · ux 2 · arch 2 · plan/decompose 3 · gate 2.
+**Agents:** Mary (Analyst/route), John (PM/PRD), Sally (UX), Winston (Architect),
+pm-plan (decompose), Murat (gate).
+
+### 2.1 Route (`conceptRouteJobId`) — `[AGENT][MECH]`
+
+| ID   | Criterion                                                | Axis | Evidence                               | Anchor / metric                                               | W   |
+| ---- | -------------------------------------------------------- | ---- | -------------------------------------- | ------------------------------------------------------------- | --- |
+| C-R1 | Route classification correct (UI vs non-UI, kind, rigor) | D1   | conceptPlan DAG vs intent              | 4=DAG matches intent exactly; 0=wrong kind/missing docs       | 2   |
+| C-R2 | Routing latency & discipline                             | D2   | forensic route job dur; tool_use count | 🟢 ≤60s & no broad ToolSearch; 🔴 >180s or exploratory thrash | 1   |
+
+### 2.2 PRD / UX / Architecture generation — `[AGENT]`
+
+| ID   | Criterion                                                                               | Axis | Evidence                            | Anchor / metric                                                | W   |
+| ---- | --------------------------------------------------------------------------------------- | ---- | ----------------------------------- | -------------------------------------------------------------- | --- |
+| C-D1 | Doc completeness (covers all required sections for its kind)                            | D1   | `concept/<kind>.md` + sections.json | 4=all sections substantive; 2=present but thin; 0=missing/stub | 3   |
+| C-D2 | Persona adherence (John/Sally/Winston voice & scope)                                    | D1   | doc content                         | 4=on-role, no scope bleed; 0=generic/off-role                  | 1   |
+| C-D3 | **Handoff grounding** — each doc demonstrably builds on upstream (`loadPriorArtifacts`) | D6   | doc cross-refs to prior kind        | 4=explicit refs to PRD/UX in arch; 0=independently re-derived  | 3   |
+| C-D4 | Citable structure (stable section IDs for downstream citation)                          | D4   | `<kind>.sections.json`              | 4=clean IDs; 0=missing                                         | 1   |
+| C-D5 | Generation efficiency                                                                   | D2   | forensic per-gen-job dur/cost       | 🟢 within rigor budget; 🔴 architect-style exploratory blowup  | 2   |
+
+### 2.3 Plan / decompose (`conceptPmPlanJobId`) — `[AGENT][MECH]` ⭐ highest-leverage
+
+| ID   | Criterion                                                                                      | Axis  | Evidence                               | Anchor / metric                                             | W   |
+| ---- | ---------------------------------------------------------------------------------------------- | ----- | -------------------------------------- | ----------------------------------------------------------- | --- |
+| C-P1 | **PLANS FROM the approved specs** (receives `{{PRIOR_ARTIFACTS}}` content, not just citations) | D3    | pm-plan prompt vars; plan vs PRD scope | 4=epics trace to PRD/UX/arch; 0=re-derived from bare intent | 3   |
+| C-P2 | Spec coverage (every major PRD requirement maps to ≥1 story)                                   | D1    | plan stories vs PRD reqs               | 🟢 ≥90% covered; 🔴 <60%                                    | 3   |
+| C-P3 | Decomposition sanity (epics→waves→stories; parallelizable waves where independent)             | D1/D2 | epic/story tree                        | 4=balanced, wide waves; 1=all single-story serial waves     | 2   |
+| C-P4 | No dangling references (cited sections resolve)                                                | D4    | `validateReferenceSections`            | 4=all resolve; 0=dangling                                   | 1   |
+| C-P5 | Plan not presented instantly after arch (grounding actually happened)                          | D3    | timing gap arch→plan; prompt size      | 🔴 if plan emitted with no PRIOR_ARTIFACTS payload          | 2   |
+
+### 2.4 Gate (Murat) + approval flow — `[MECH]`
+
+| ID   | Criterion                                                                           | Axis | Evidence                                 | Anchor / metric                                           | W   |
+| ---- | ----------------------------------------------------------------------------------- | ---- | ---------------------------------------- | --------------------------------------------------------- | --- |
+| C-G1 | Gate decision quality (level/epic/story counts correct; specs complete before pass) | D1   | gate card vs plan; `specsComplete`       | 4=accurate; 0=passes incomplete specs                     | 2   |
+| C-G2 | Approval-mode correctness (YOLO→autopilot auto-approve; interactive pauses)         | D5   | `conceptInteraction`, status transitions | 4=mode honored; 0=stalls on dead job (legacy convergence) | 2   |
+| C-G3 | Chain visible & read-only after dev starts                                          | D4   | UI / plan rows                           | 4=full chain preserved; 0=disappears                      | 1   |
+
+---
+
+## 3. STAGE — DEVELOPMENT
+
+**Intent:** implement every story correctly, merge cleanly, gate visually — minimal waste.
+**Substage weights:** prework 1 · test-authoring 2 · dev 3 · review 2 · compile-loop 3 ·
+merges/git-graph 2 · wave-vqa 3 · knowledge-compile 1 · wave-scheduling 2.
+
+### 3.1 Prework-gate (`daemon/lib/prework-gate.mjs`) — `[MECH]`
+
+| ID    | Criterion                                                                  | Axis  | Evidence                              | Anchor / metric                                                                          | W   |
+| ----- | -------------------------------------------------------------------------- | ----- | ------------------------------------- | ---------------------------------------------------------------------------------------- | --- |
+| D-PW1 | Skip-vs-spawn decision correct (3 signals: commits, AC exports, typecheck) | D2/D5 | daemon log gate verdict + actual need | 4=correctly skips already-done work; 0=spawns redundant DEV or wrongly skips needed work | 2   |
+| D-PW2 | Gate evidence written for DEV context (no re-discovery)                    | D6    | `.context/wave-N-story.md`            | 4=present; 0=absent                                                                      | 1   |
+
+### 3.2 Test authoring (api-author + TEST) — `[AGENT][MECH]`
+
+| ID    | Criterion                                                                                                                                                            | Axis  | Evidence                                                  | Anchor / metric                                                                                                                                                                   | W   |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
+| D-TA1 | Tests map to ACs (one failing test per verifiable AC)                                                                                                                | D1    | test files vs AC list                                     | 4=full AC coverage; 2=partial; 0=token-burning irrelevant tests                                                                                                                   | 2   |
+| D-TA2 | **Authoring cost ratio** (test-author time ÷ dev time)                                                                                                               | D2    | forensic per-job test-author vs dev ms                    | 🟢 ≤0.6; 🟡 0.6–1.0; 🔴 >1.0 (authoring costs more than building)                                                                                                                 | 3   |
+| D-TA3 | Red-gate honored (tests fail before DEV; production rigor)                                                                                                           | D1    | `test-gate-red` step                                      | 4=red enforced; 0=skipped where required                                                                                                                                          | 2   |
+| D-TA4 | **Visual-probe authoring completeness** — every `state`/`behavior` (L2) AC ships an executable probe (flow/assert/seam read), not a prose expectation + a bare level | D1/D6 | visualTest `flow`/`assert` vs `level`; AC verb            | 4=mechanism authored for every non-appearance AC; 0=L2 set with `flow=null, assert=∅` (pacman3: **AC-S2-2 "position.col increased" / AC-S2-3 "direction UP" → L2, no probe = 0**) | 3   |
+| D-TA5 | **Level-assignment honesty** — chosen level matches the classifier's own `resolvedLevel` / the cheapest oracle that can answer                                       | D1/D2 | `CLASSIFIED_TESTS[].classification.{level,resolvedLevel}` | 4=cheapest-correct & consistent; 1=preserves a worse source level over its better resolve (pacman3: AC-S1-1 `resolvedLevel:L0` kept as `L1`; `L0_RESULTS:[]` = **1**)             | 1   |
+
+> **[QAreview-agentic]** D-TA4/D-TA5 extend test-authoring scoring to **visual/probe
+> tests** (authored during dev, executed at §3.7 wave-VQA and §4 QA). The pacman3
+> wave-gate "unverifiable" disease (§3.7 D-VQ1, ~43%) and the final-QA uncertain/false-FAIL
+> share the **same root**: state ACs with no executable probe (D-TA4) + a static-frame
+> oracle + capture failure (Q-C6). Fix D-TA4 + Q-C6/Q-C7 and both move together.
+
+### 3.3 Dev implementation — `[AGENT]`
+
+| ID    | Criterion                                                                   | Axis | Evidence                            | Anchor / metric                        | W   |
+| ----- | --------------------------------------------------------------------------- | ---- | ----------------------------------- | -------------------------------------- | --- |
+| D-DV1 | AC satisfied (tests green, story intent met)                                | D1   | test-verify result; story status    | 4=all AC met; 0=merged red             | 3   |
+| D-DV2 | Stays within declared touch-points (no scope creep)                         | D1   | ship-contract / diff vs touchPoints | 4=scoped; 1=broad unrelated edits      | 2   |
+| D-DV3 | Context-pack actually used (edits land in cited files / use public exports) | D3   | diff vs context pack                | 4=grounded; 1=ignored provided context | 2   |
+
+### 3.4 Review (REVIEWER) + retry loop — `[AGENT][MECH]`
+
+| ID    | Criterion                                                           | Axis  | Evidence                                  | Anchor / metric                                  | W   |
+| ----- | ------------------------------------------------------------------- | ----- | ----------------------------------------- | ------------------------------------------------ | --- |
+| D-RV1 | Review catches real defects (not rubber-stamp, not nitpick-only)    | D1    | review events vs subsequent fixes         | 4=substantive; 0=noise or pass-through           | 2   |
+| D-RV2 | Retry **resumes** prior session (warm cache) rather than restarting | D2/D5 | daemon `retry-resume: --resume` lines     | 4=resumes & skips complete steps; 0=cold restart | 2   |
+| D-RV3 | Review-runtime loop bounded (no runaway iterations)                 | D5    | daemon `LOOP iteration n/2 … attempt n/3` | 🟢 ≤2 iters to green; 🔴 hits cap repeatedly     | 2   |
+
+### 3.5 Compile / typecheck loop — `[MECH]` ⭐ biggest known sink
+
+| ID    | Criterion                                                                       | Axis | Evidence                                    | Anchor / metric                                     | W   |
+| ----- | ------------------------------------------------------------------------------- | ---- | ------------------------------------------- | --------------------------------------------------- | --- |
+| D-CC1 | **Compiles per story** (in-loop tsc/test invocations)                           | D2   | forensic `compile` slices ÷ dev jobs        | 🟢 ≤15; 🟡 15–40; 🔴 >40 (pacman3: **65–102 = 🔴**) | 3   |
+| D-CC2 | Compile caching active (cached-tsc / incremental in the loop, not just prework) | D2   | repeated identical tsc with no input change | 4=cache hits; 0=full recompile every iteration      | 3   |
+| D-CC3 | Compile share of stage time                                                     | D2   | `aggregate.byCategory.compile` %            | 🟢 ≤15%; 🔴 >25% (pacman3: **29% = 🔴**)            | 2   |
+
+### 3.6 Merges / git-graph (wave-merge) — `[MECH][OUTPUT]`
+
+| ID    | Criterion                                                                 | Axis | Evidence                           | Anchor / metric                                                       | W   |
+| ----- | ------------------------------------------------------------------------- | ---- | ---------------------------------- | --------------------------------------------------------------------- | --- |
+| D-MG1 | Clean merges (no conflicts; post-merge tests green)                       | D1   | `classifyWaveMergeOutcome` outcome | 4=all `success`; 2=≥1 fix-forward; 0=conflict/build-failed unresolved | 3   |
+| D-MG2 | Git-graph integrity (`--no-ff` per story; correct wave base ref chaining) | D4   | git topology; `waveBaseRef`        | 4=clean wave→wave SHA chain; 0=tangled/lost lineage                   | 2   |
+| D-MG3 | Commit-metadata trailers complete (`Agent/Plan-Id/Epic/Wave/Story`)       | D4   | merge commit messages              | 4=all trailers; 0=missing provenance                                  | 1   |
+| D-MG4 | Merge-gate latency                                                        | D2   | forensic `merge-gate` ms per wave  | 🟢 ≤60s; 🔴 >120s sustained                                           | 1   |
+
+### 3.7 Wave-VQA gate — `[AGENT][MECH]`
+
+| ID    | Criterion                                                                               | Axis  | Evidence                              | Anchor / metric                                            | W   |
+| ----- | --------------------------------------------------------------------------------------- | ----- | ------------------------------------- | ---------------------------------------------------------- | --- |
+| D-VQ1 | Verdict reliability — **unverifiable rate**                                             | D1    | daemon `unverifiable=n` tally         | 🟢 ≤15%; 🟡 15–30%; 🔴 >30% (pacman3: 6/14 ≈ **43% = 🔴**) | 3   |
+| D-VQ2 | Judge consensus calibration (few false PASS / false FAIL)                               | D1    | judge verdicts vs ground truth        | 4=calibrated; 0=systematic mis-grade                       | 2   |
+| D-VQ3 | **No wasted fix rounds** (FIXER not run on non-code-bugs; no "improved nothing→revert") | D2/D5 | daemon `improved nothing — reverting` | 🟢 0 wasted; 🔴 ≥1 (pacman3: **1 = 🔴**)                   | 3   |
+| D-VQ4 | Fix-forward handoff preserved (evidence committed, prior diff available)                | D4/D6 | `.context/vqa-handoffs/*.json`        | 4=evidence + prior diff; 2=evidence only; 0=lost           | 2   |
+| D-VQ5 | VQA share of stage time                                                                 | D2    | `aggregate.byCategory.vqa-gate` %     | 🟢 ≤15%; 🔴 >25% (pacman3: **23% = 🟡/🔴**)                | 2   |
+
+### 3.8 Knowledge-compile — `[MECH]`
+
+| ID    | Criterion                                                    | Axis | Evidence                       | Anchor / metric           | W   |
+| ----- | ------------------------------------------------------------ | ---- | ------------------------------ | ------------------------- | --- |
+| D-KC1 | Knowledge written per story/wave-close (index stays current) | D4   | `knowledge/index.md` freshness | 4=current; 0=stale/absent | 1   |
+
+### 3.9 Wave scheduling / parallelism — `[MECH]`
+
+| ID    | Criterion                                                                    | Axis | Evidence                            | Anchor / metric                                                       | W   |
+| ----- | ---------------------------------------------------------------------------- | ---- | ----------------------------------- | --------------------------------------------------------------------- | --- |
+| D-WS1 | **Parallelism factor** (cumulative attributed ÷ wall)                        | D2   | forensic `aggregate.totalMs` ÷ wall | 🟢 ≥1.5×; 🟡 1.2–1.5×; 🔴 <1.2× (pacman3: **1.03× = 🔴**)             | 2   |
+| D-WS2 | Parallelism not throttled to mask host saturation (root-cause fixed instead) | D2   | concurrency config vs host metrics  | 4=full concurrency, host healthy; 0=concurrency lowered as a band-aid | 2   |
+
+---
+
+## 4. STAGE — QA (contract gate)
+
+**Intent:** independently verify the delivered build against claims/ACs and route
+remediation correctly. **Substage weights:** claims 2 · contract-gate 3 · verdict 2 ·
+remediation 2. _(Note: in pacman3 the standalone `qa` category logged 0ms — QA ran via
+wave-VQA inside development. This stage scores the dedicated QA/contract layer:
+`qaJobId`, `qaContractStatus`, `qaAggregateJobId`.)_
+
+> **[QAreview-agentic · 2026-06-17] Correction — the QA job DID run, and it FAILED.**
+> The dedicated qa-execute job ran on pacman3 (`qaJobId 3c99fd51…`, COMPLETED): 10 tests
+> → **6 fail / 4 uncertain / 0 pass, OVERALL FAIL, BLOCKING**. The forensic logged
+> `qa`=0ms only because that job runs _after_ `review` and the forensic doesn't walk it
+> (an OV4/IE2 instance — not an absence of QA). So the pacman3 QA stage is a **measured
+> 🔴**, not "N/A". Critically, **every blocking FAIL is an infra artifact, not an app
+> defect** — `overview.png` shows a correct, fully-assembled Pac-Man. Full root cause in
+> §12; the new criteria Q-C6–Q-C9 below score the failure class that produced it.
+
+| ID   | Criterion                                                                                                         | Axis  | Tag     | Evidence                                                                                    | Anchor / metric                                                                                                                                                           | W   |
+| ---- | ----------------------------------------------------------------------------------------------------------------- | ----- | ------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
+| Q-C1 | Claims/ACs extracted completely                                                                                   | D1    | [AGENT] | qa-report claims-table                                                                      | 4=full; 0=missing claims                                                                                                                                                  | 2   |
+| Q-C2 | Contract-gate decision correct (`qaContractStatus` matches evidence)                                              | D1    | [MECH]  | qa report + `qaContractDecidedBy/At`                                                        | 4=correct; 0=passes failing contract                                                                                                                                      | 3   |
+| Q-C3 | Verdict calibration (false-positive / false-negative rate)                                                        | D1    | [AGENT] | verdict-strip vs reality                                                                    | 🟢 ≤10% error; 🔴 >25%                                                                                                                                                    | 2   |
+| Q-C4 | **Remediation routing** — send-back for render bugs, Accept for interaction-gated VQA false-negatives             | D1/D5 | [MECH]  | remediation decisions                                                                       | 4=routes per model; 0=mis-routes (auto-bypass instead of building UI fix)                                                                                                 | 2   |
+| Q-C5 | QA latency/cost proportional to risk                                                                              | D2    | [MECH]  | forensic qa job cost                                                                        | 🟢 within rigor budget; 🔴 disproportionate                                                                                                                               | 1   |
+| Q-C6 | **Evidence-capture integrity** — per-test screenshots actually captured & uploaded (not 0/N), visually distinct   | D4    | [MECH]  | `PREPARE_OUTPUT: SCREENSHOTS_CAPTURED n/m`; S3 file count; image byte-diversity             | 🟢 ≥95% captured & distinct; 🔴 <50% or all-identical (pacman3: **0/10; only `overview.png` usable = 🔴**)                                                                | 3   |
+| Q-C7 | **Honest verdict under broken evidence** — missing/404/blank frames scored `errored`→retry, NEVER blocking `fail` | D1/D5 | [MECH]  | `qa-report` overall logic (`overall = fail>0 ? FAIL`); per-test rationale vs file existence | 4=infra failure never blocks; 0=missing frame → blocking FAIL (pacman3: **6 broken frames scored FAIL = 0**)                                                              | 3   |
+| Q-C8 | **Oracle hallucination guard** — judge never fabricates observations of a frame it could not read                 | D1    | [AGENT] | judge rationale vs file md5/existence                                                       | 4=missing→"file not found"; 0=fabricated detail + FAIL on absent/identical frame (pacman3: judges split — 3 honest UNCERTAIN, ≥1 fabricated "404 page" FAIL = **0**)      | 2   |
+| Q-C9 | **Stage isolation** — QA's dev server/worktree not mutated by a concurrent stage (deploy/build) mid-run           | D4/D5 | [MECH]  | devserver.log "Found a change…/Restarting"; overlapping job windows on same `workingDir`    | 4=isolated checkout/URL; 0=concurrent writer restarts the server mid-capture (pacman3: deploy `d777f835` + QA `3c99fd51` same dir, same tick → 2 restarts → 404s = **0**) | 3   |
+
+> **[QAreview-agentic]** Q-C6/Q-C7/Q-C9 are `[MECH]` and, on pacman3, all 0 → by §0.3 the
+> QA stage caps at "Acceptable" and pipeline health takes the hit. The lesson: **a clean
+> agent (correct app) was buried by a leaky harness (deploy raced QA, broke the evidence,
+> and the verdict math blocked on the breakage).** Q-C6 should arguably be a _precondition
+> gate_ that aborts+retries before any judge spends tokens (see §11 Q6).
+
+---
+
+## 5. STAGE — DEPLOYMENT
+
+**Intent:** build the export and promote it safely through environments to production.
+**Substage weights:** build 2 · environment-ladder 2 · release 2 · deploy-report 1 ·
+**deploy-safety 3**. Evidence: `devDeployJobId`, `deploy-report-aggregator`,
+`deploy-stage-view`, `release-strip`, `environment-ladder`, `deploy-history`.
+
+| ID    | Criterion                                                                                                                  | Axis  | Tag      | Evidence                               | Anchor / metric                                                          | W   |
+| ----- | -------------------------------------------------------------------------------------------------------------------------- | ----- | -------- | -------------------------------------- | ------------------------------------------------------------------------ | --- |
+| DP-B1 | Build reproducible & green (static export succeeds)                                                                        | D1    | [MECH]   | deploy report build step               | 4=clean; 0=fails/non-reproducible                                        | 2   |
+| DP-L1 | Environment-ladder progression honored (preview → … → prod, no skips)                                                      | D5    | [MECH]   | environment-ladder state               | 4=ordered promotion; 0=jumps straight to prod                            | 2   |
+| DP-R1 | Release recorded with rollback handle                                                                                      | D4/D5 | [MECH]   | release-strip / deploy-history         | 4=versioned + rollbackable; 0=no record                                  | 2   |
+| DP-S1 | **Deploy safety** — admin `out/` NEVER synced to `futurator-ai-website`; only scoped paths written; `sst deploy` path used | D4    | [MECH]   | deploy target vs scoped-path allowlist | 4=scoped & SST-only; **0=any root sync to public bucket (catastrophic)** | 3   |
+| DP-D1 | Deploy report complete (artifacts, URLs, timings)                                                                          | D4    | [OUTPUT] | deploy-report-aggregator               | 4=full; 0=opaque                                                         | 1   |
+| DP-T1 | Deploy latency                                                                                                             | D2    | [MECH]   | forensic deploy job dur                | 🟢 within budget; 🔴 stalls                                              | 1   |
+
+---
+
+## 6. STAGE — PUBLISH
+
+**Intent:** publish the user app + update public surfaces, without corrupting the
+homepage. **Substage weights:** artifact-publish 2 · public-index 2 · media 1 ·
+**scoped-path-safety 3**. Evidence: `apps/<appName>/`, `data/projects.json`,
+`media/<projectId>/`, `devUrl`.
+
+| ID   | Criterion                                                                                        | Axis | Tag      | Evidence                        | Anchor / metric                                                         | W   |
+| ---- | ------------------------------------------------------------------------------------------------ | ---- | -------- | ------------------------------- | ----------------------------------------------------------------------- | --- |
+| P-A1 | App artifact published to `apps/<appName>/` correctly; `devUrl` resolves                         | D1   | [OUTPUT] | published URL 200 + correct app | 4=live & correct; 0=404/wrong app                                       | 2   |
+| P-X1 | `data/projects.json` updated atomically & valid (no homepage corruption)                         | D4   | [MECH]   | projects.json integrity         | 4=valid & scoped; 0=overwrites/corrupts                                 | 2   |
+| P-S1 | **Scoped-path safety** (writes confined to the 4 allowed paths; homepage `index.html` untouched) | D4   | [MECH]   | S3 write paths vs allowlist     | 4=confined; **0=touches homepage root (the 2026-04-15 incident class)** | 3   |
+| P-M1 | Media uploads land under `media/<projectId>/` only                                               | D4   | [MECH]   | upload paths                    | 4=scoped; 0=stray writes                                                | 1   |
+| P-I1 | Publish idempotent & re-runnable                                                                 | D5   | [MECH]   | re-publish behavior             | 4=idempotent; 0=duplicates/breaks                                       | 1   |
+
+---
+
+## 7. OVERVIEW — cross-cutting (timing, forensic, integrity, learning)
+
+**Stage weight in pipeline health: high (see §9).** This is where "forensic →
+inefficiencies" lives.
+
+| ID   | Criterion                                                                                           | Axis  | Evidence                                                                    | Anchor / metric                                                                                               | W   |
+| ---- | --------------------------------------------------------------------------------------------------- | ----- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | --- |
+| OV1  | **Wall-clock vs value** (total wall per story)                                                      | D2    | wall ÷ doneStories                                                          | 🟢 ≤8 min/story; 🟡 8–15; 🔴 >15 (pacman3: 177/15 ≈ **11.8 = 🟡**)                                            | 2   |
+| OV2  | **Cost vs ceiling** (overrun)                                                                       | D2    | `totalCostUsd` ÷ `costCeilingUsd`                                           | 🟢 ≤1.0; 🟡 1.0–1.1; 🔴 >1.1 (pacman3: **1.05 = 🟡**)                                                         | 3   |
+| OV3  | **Cost per story**                                                                                  | D2    | `totalCostUsd` ÷ doneStories                                                | 🟢 ≤$1.0; 🟡 $1–$1.5; 🔴 >$1.5 (pacman3: **$1.40 = 🟡**)                                                      | 2   |
+| OV4  | **Forensic completeness** (captures ALL jobs incl. retries; cost reconciles to `plan.totalCostUsd`) | D4    | forensic event-cost sum vs plan cost                                        | 🟢 reconciles ±5%; 🔴 gap = invisible retry spend (pacman3: **🔴**, F3)                                       | 3   |
+| OV5  | **Count integrity** (`doneStories ≤ totalStories`; fix-forward stories accounted)                   | D4    | plan counters vs story tree                                                 | 🟢 consistent; 🔴 `done>total` (pacman3: **15>14 = 🔴**, F4)                                                  | 2   |
+| OV6  | **Log retention across retries** (no orphaned, unreachable job logs)                                | D4    | jobs in agent-events vs referenced by stories                               | 🟢 all reachable; 🔴 orphans exist (pacman3: **🔴**, F2)                                                      | 2   |
+| OV7  | **Per-session boilerplate overhead** (skills catalog injected vs used)                              | D2    | skills `availableSkillCount` vs `activatedSkills`; `claude_md_loaded` count | 🟢 catalog scoped to need; 🔴 large unused catalog × every session (pacman3: 66 avail / 1 used × 77 = **🔴**) | 1   |
+| OV8  | **Learning loop closed** — reflector fired AND written AND surfaced                                 | D4/D5 | daemon `reflector … written=n`; `inbox/reflections.md`                      | 🟢 proposals written & visible; 🔴 `written=0` / IAM-blocked (pacman3: **proposals=3, written=0 = 🔴**, F5)   | 3   |
+| OV9  | **Reflector signal quality** (proposals are specific & actionable, not generic)                     | D1    | reflections content                                                         | 4=actionable; 0=platitudes (N/A if OV8 red — couldn't read them)                                              | 1   |
+| OV10 | **Stage-time attribution correctness** (categories map to real work; no mis-attribution)            | D4    | `aggregate.byCategory` sanity                                               | 🔴 if a real category logs ~0 (pacman3: `fix`=0.2s while fixes happened = mis-attributed)                     | 1   |
+
+---
+
+## 8. Inefficiency / anti-pattern detector catalog
+
+Quantitative tripwires a scorer runs every plan. Each maps to a fix in
+`pipeline-v2.5-fixes-plan.md`. **Calibrated to pacman3 (v0).**
+
+| ID   | Anti-pattern                                              | Signal / metric                                                              | 🟢     | 🟡       | 🔴           | pacman3                                         | Fix       |
+| ---- | --------------------------------------------------------- | ---------------------------------------------------------------------------- | ------ | -------- | ------------ | ----------------------------------------------- | --------- |
+| IE1  | Compile thrash                                            | tsc/test invocations per dev story                                           | ≤15    | 15–40    | >40          | **65–102**                                      | F1        |
+| IE2  | Retry log orphaning                                       | jobs in agent-events not referenced by any story.jobId                       | 0      | 1–2      | >2           | **>0**                                          | F2        |
+| IE3  | Forensic cost gap                                         | \|plan.totalCostUsd − Σforensic event cost\| / plan cost                     | ≤5%    | 5–15%    | >15%         | **🔴**                                          | F3        |
+| IE4  | Count drift                                               | doneStories − totalStories                                                   | 0      | —        | >0           | **+1**                                          | F4        |
+| IE5  | Reflector write-loss                                      | reflector proposals produced but `written=0`                                 | never  | —        | any          | **3→0**                                         | F5        |
+| IE6  | Cost-ceiling overrun                                      | totalCostUsd / costCeilingUsd                                                | ≤1.0   | 1.0–1.1  | >1.1         | **1.05**                                        | F6        |
+| IE7  | Test-author cost inversion                                | Σ test-author ms / Σ dev ms                                                  | ≤0.6   | 0.6–1.0  | >1.0         | **~1.0**                                        | F7        |
+| IE8  | Wasted fix rounds                                         | count of `improved nothing → revert`                                         | 0      | —        | ≥1           | **1**                                           | F8        |
+| IE9  | VQA unverifiable rate                                     | unverifiable verdicts / total VQA verdicts                                   | ≤15%   | 15–30%   | >30%         | **~43%**                                        | F8        |
+| IE10 | Skills catalog overhead                                   | availableSkillCount with ≤1 activation × sessions                            | scoped | —        | large&unused | **66/1×77**                                     | F9        |
+| IE11 | Low parallelism                                           | cumulative attributed ÷ wall (multi-story plans)                             | ≥1.5×  | 1.2–1.5× | <1.2×        | **1.03×**                                       | F10       |
+| IE12 | Context rebuild waste                                     | per-story context rebuilt with no cross-story/wave cache                     | cached | —        | full rebuild | **rebuild**                                     | §5(fixes) |
+| IE13 | **Stage-isolation breach** (concurrent worktree mutation) | dev-server restarts during QA / overlapping job windows on same `workingDir` | 0      | —        | ≥1           | **2 restarts (deploy×QA, same tick, same dir)** | F11 (new) |
+| IE14 | **QA evidence-capture failure**                           | per-test screenshots captured ÷ authored                                     | ≥95%   | 50–95%   | <50%         | **0/10**                                        | F12 (new) |
+| IE15 | **Infra failure scored as defect**                        | blocking FAILs whose rationale is a missing/404/blank frame                  | 0      | —        | ≥1           | **6**                                           | F12 (new) |
+
+> **[QAreview-agentic]** IE13–IE15 are a single causal chain: a concurrent `next.config.ts`
+> rewrite (deploy) restarted Turbopack mid-QA → 404/missing frames (IE14) → the
+> `overall = fail>0` math blocked a correct app (IE15). F11/F12 are **not yet in
+> `pipeline-v2.5-fixes-plan.md`** — they need entries (see §12 fix list).
+
+---
+
+## 9. Pipeline health aggregation
+
+| Component   | Weight | Notes                                              |
+| ----------- | ------ | -------------------------------------------------- |
+| Concept     | 15%    | front-loaded quality multiplies downstream         |
+| Development | 35%    | the bulk of cost & risk                            |
+| QA          | 15%    | independent verification                           |
+| Deployment  | 10%    | + hard cap: DP-S1=0 → pipeline health capped at 🔴 |
+| Publish     | 10%    | + hard cap: P-S1=0 → pipeline health capped at 🔴  |
+| Overview    | 15%    | timing/cost/integrity/learning                     |
+
+**Grade bands (pipeline health 0–1):** `≥0.85 A` · `0.70–0.84 B` · `0.55–0.69 C` ·
+`0.40–0.54 D` · `<0.40 F`. **Hard caps:** any `[MECH]` criterion at 0 caps its stage at
+0.5; any deploy/publish safety criterion (DP-S1, P-S1) at 0 forces overall **F**
+(safety incidents are non-negotiable).
+
+**pacman3 (v0) indicative score:** _not computed here_ — left for the first scoring pass
+to establish the reference. Expected band ≈ **C** (functional, but 🔴 on IE1/IE2/IE3/
+IE4/IE5/IE8/IE9/IE11 + OV8 learning loop dark). Use it as the floor every future run must
+beat.
+
+> **[QAreview-agentic] QA-stage addendum to the baseline:** the QA stage is now a measured
+> **🔴** — Q-C6/Q-C7/Q-C9 all 0 (IE13/IE14/IE15 all red). By the §0.3 cap, that holds the
+> QA substage at ≤0.5. The pacman3 run is the calibration anchor for **"false-blocking a
+> correct app on broken evidence"**; a future run that captures clean per-test frames and
+> never blocks on infra failure is the 🟢 target.
+
+---
+
+## 10. For the specialized agents (division of labor)
+
+This rubric is deliberately broad. Specialized agents should **deep-dive one stage/axis
+and return a scorecard slice** in the §0.5 format, plus:
+
+- **Refine thresholds** — the green/yellow/red cuts are first-guess, calibrated to one
+  run (pacman3). Propose better cuts with evidence; record in §11.
+- **Add criteria** — append new rows with stable IDs (continue the per-stage prefix:
+  `C-`, `D-`, `Q-`, `DP-`, `P-`, `OV`, `IE`). Don't renumber existing rows.
+- **Flag un-measurable criteria** — if a criterion can't be computed from available
+  evidence, mark it `[needs-instrumentation]` and note what telemetry is missing (this
+  feeds the observability backlog).
+- **Keep AGENT/MECH/OUTPUT tags honest** — the most useful output is separating "the
+  model did badly" from "the harness wasted the model's good work."
+
+Suggested specialization split: **(1) Concept grounding & handoff**, **(2) Development
+efficiency (compile/test/parallelism)**, **(3) VQA/QA verdict reliability**,
+**(4) Integrity & observability (counts/logs/cost/forensic)**, **(5) Deploy/publish
+safety**, **(6) Learning loop (reflector)**.
+
+---
+
+## 11. Open calibration questions
+
+- **Q1:** Are the per-story budgets (OV1 ≤8min, OV3 ≤$1) right for `mvp` vs `production`?
+  Thresholds should likely be **rigor-scaled** (separate green/red per rigor).
+- **Q2:** Should parallelism (D-WS1/IE11) be scored only when the plan _had_ parallel
+  opportunity? (A genuinely serial dependency chain shouldn't be penalized.) → propose
+  a "parallelizable-waves" denominator.
+- **Q3:** What is the ground-truth source for verdict calibration (D-VQ2/Q-C3)? Needs an
+  answer key — possibly the operator's send-back/accept decisions become labels over time.
+- **Q4:** Should the rubric emit a **trend** (this run vs last N runs) once ≥5 plans
+  exist, mirroring the forensic `cohort` baseline (currently null — "need 5+ similar
+  plans")?
+- **Q5:** Do deploy/publish safety hard-caps belong in the _quality_ score, or as a
+  separate **gate** (pass/fail) reported alongside? (Leaning: separate gate.)
+- **Q6 [QAreview-agentic]:** Should evidence-integrity (Q-C6) be a **precondition gate**
+  that aborts + retries the QA run when capture is degraded (`SCREENSHOTS_CAPTURED <
+threshold`, or all frames identical/blank) — _before_ any judge spends a token — rather
+  than a criterion scored after the fact? A 0/10 capture should never reach the judges.
+- **Q7 [QAreview-agentic]:** Where should **stage isolation** (Q-C9) be enforced? Strongest
+  option: QA against the already-published **dev-deploy URL** (immutable) instead of the
+  live `projects/<appId>` worktree — removes the deploy×QA race at the root. Alternatives:
+  a per-run isolated checkout, or a `workingDir` mutex. Needs an owner decision (overlaps
+  `boilerplate-runtime-contract.md` and `multi-host-dispatch-readiness.md`).
+
+---
+
+## 12. Contributor findings — QAreview-agentic (2026-06-17): QA-evidence forensic on pacman3
+
+**Session:** `QAreview-agentic` · **Method:** read-only forensic on `plan_pacman3_mqi8x64w`
+(QA job `3c99fd51`, aggregate `309ba59a`, dev-deploy `d777f835`) cross-checked against the
+S3 snapshot prefix, the captured dev-server log, and the epics' authored `visualTests`.
+
+**Headline (reframes the baseline).** pacman3's app is **correct** — `overview.png` is a
+fully-assembled, playable Pac-Man (blue maze, 4 ghosts in the house, dots + 4 power
+pellets, HUD `0` / `STAGE 1`, three lives). QA still returned **VQA 0/10, OVERALL FAIL,
+BLOCKING**. **Every blocking verdict is an infrastructure artifact, not a product defect.**
+This makes pacman3 the calibration anchor for _false-blocking_.
+
+**Root cause — deploy×QA same-worktree race (new failure class → Q-C9 / IE13).**
+
+- `wave-completion-check` auto-approved the QA contract **and** launched dev-deploy
+  (`d777f835`) on the **same tick** (18:57:49) — both against `workingDir
+/home/ubuntu/projects/pacman3`, the _same_ git worktree QA had checked out detached.
+- The deploy step rewrites `next.config.ts` (basePath + `output:'export'`, exactly the
+  "deploy improvises config" behaviour in `boilerplate-runtime-contract.md §1`). Each
+  rewrite tripped Turbopack: _"Found a change in next.config.ts. Restarting the server…"_ —
+  **twice**, mid-QA.
+- During each restart `/` served the Next 404 page for ~25 s/request
+  (`GET / 404 in 27.4s …`, ×5).
+
+**Evidence-capture collapse (→ Q-C6 / IE14).**
+
+- `PREPARE_OUTPUT: SCREENSHOTS_CAPTURED 0/10`. Only `overview.png` (caught in the one
+  healthy `GET / 200` window before the first restart) is usable.
+- The 5 per-test PNGs that landed are **byte-identical** (`md5 1d931e7f…`) — all the same
+  404 page. Plain L1 captures (`npx playwright screenshot`, 20 s spawn timeout) lost the
+  race against the 25 s server → SIGKILL → **no file written**.
+- UI effect: `claims-table.tsx` `<img onError>` hides 404/missing thumbnails → the empty
+  "·" cells the operator reported as "no screenshots."
+
+**Verdict math converts broken evidence into blocks (→ Q-C7 / IE15).** `qa-report` uses
+`overall = fail>0 ? 'FAIL'`. All 6 FAILs trace to missing/404 frames. A missing / 404 /
+blank / sub-2KB frame must be `errored`→retry, never a blocking `fail`.
+
+**Oracle hallucination (→ Q-C8).** Under the identical "no usable frame" condition the
+judges split — 3 honestly returned UNCERTAIN ("Screenshot file not found"), but others
+returned **FAIL with fabricated observations** ("404 error page displayed instead of game
+canvas; no ghosts or maze visible"; "cannot verify direction value… VERDICT: FAIL"). The
+oracle does not reliably distinguish "evidence broken" from "app wrong."
+
+**Decoupled authoring, caught live (→ D-TA4).** The two L2 tests — `AC-S2-2 "position.col
+has increased"` and `AC-S2-3 "direction changes to UP"` — describe **internal entity
+state**, yet were authored with `url=null, flow=null, assert=∅`. No screenshot can show
+them and no `window.__harness` assert was emitted to read them. The classifier set the
+_level_ but nothing authored the _mechanism_. (The seam/assert executor already exists in
+`visual-qa-pipeline.ts`; the tests simply don't use it.) Same root as the §3.7 wave-gate
+"unverifiable" disease.
+
+**Classifier self-override (→ D-TA5).** `CLASSIFIED_TESTS` shows `AC-S1-1` with
+`resolvedLevel:"L0"` but kept `level:"L1"` ("level set in source — preserved");
+`L0_RESULTS:[]`. A deterministic check ran as a probabilistic vision judge — costlier and
+less reliable.
+
+**Secondary.** `plan.devUrl = "https://futurator.ai/apps/"` — appId (`pacman3`) not
+interpolated (same deploy job; bears on **P-A1**). And the §4 "qa=0ms" note is itself a
+forensic-completeness artifact (**OV4 / IE2**): the QA job ran; the forensic doesn't walk
+post-`review` jobs.
+
+**Cheapest high-leverage fixes (not yet in `pipeline-v2.5-fixes-plan.md` — need F11/F12).**
+
+1. **Stage isolation (the origin):** point QA at the already-published **dev-deploy URL**
+   (immutable) instead of the live worktree — or use a per-run isolated checkout + a
+   `workingDir` mutex. Removes the race entirely. _(Q-C9 / IE13 → F11)_
+2. **Pre-judge evidence gate:** abort + retry the QA run when `SCREENSHOTS_CAPTURED <
+threshold` or frames are identical/blank — _before_ any judge spends a token; and make
+   missing/404 frames `errored`, never blocking `fail`. _(Q-C6 / Q-C7 / IE14 / IE15 → F12)_
+3. **Probe-author requirement:** no `verify:state|behavior` AC may merge without an
+   executable flow/assert. _(D-TA4)_
+
+> **Hand-off note to other sessions:** the **concept-develop** owner may want to thread
+> Q-C9 (stage isolation) into the deploy/QA orchestration design, and D-TA4 into the
+> concept→plan authoring contract (it overlaps the VQA v3 redesign PRD under
+> `docs/concepts/pipeline-v3/`). F11/F12 need homes in `pipeline-v2.5-fixes-plan.md`.
+
+---
+
+## Changelog
+
+| Date       | Agent                 | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2026-06-17 | Claude (forensics #1) | Initial v0 rubric: 5 stages + substages, 6 axes, AGENT/MECH/OUTPUT tags, 12 inefficiency detectors, pacman3 calibration, scorecard schema, aggregation + safety hard-caps.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 2026-06-17 | QAreview-agentic      | QA-evidence forensic on pacman3. Corrected §4 (the QA job ran and FAILED on corrupted evidence — not 0ms/N-A). Added Q-C6–Q-C9 (evidence-capture integrity, honest-verdict-under-broken-evidence, oracle-hallucination guard, stage isolation), D-TA4/D-TA5 (visual-probe authoring completeness + level-assignment honesty), IE13–IE15 (stage-isolation breach, capture failure, infra-scored-as-defect), open Q6/Q7, §12 root-cause narrative (deploy×QA same-tick/same-worktree race → `next.config.ts` restart → 404/missing frames → false-blocking a correct app). Flagged F11/F12 as missing from the fixes plan. |
