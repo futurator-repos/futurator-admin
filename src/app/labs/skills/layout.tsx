@@ -24,16 +24,23 @@ function SkillsTabBar() {
   const appId = params.get('appId') || undefined;
   const query = appId ? `?appId=${encodeURIComponent(appId)}` : '';
 
-  // Registry is the index route; Usage is the /usage sub-route. Match exactly
-  // (allowing a trailing slash from `trailingSlash: true` static export).
+  // Registry is the index route; Usage + Growth Inbox are sub-routes. Match
+  // exactly (allowing a trailing slash from `trailingSlash: true` static export).
   const isUsage = pathname.startsWith('/labs/skills/usage');
-  const active = isUsage ? 'usage' : 'registry';
+  const isInbox = pathname.startsWith('/labs/skills/growth-inbox');
+  const active = isUsage ? 'usage' : isInbox ? 'growth-inbox' : 'registry';
 
   return (
     <Tabs value={active} className="w-full">
       <TabsList variant="line">
         <TabsTrigger value="registry" render={<Link href={`/labs/skills${query}`} />}>
           Registry
+        </TabsTrigger>
+        <TabsTrigger
+          value="growth-inbox"
+          render={<Link href={`/labs/skills/growth-inbox${query}`} />}
+        >
+          Growth Inbox
         </TabsTrigger>
         <TabsTrigger value="usage" render={<Link href={`/labs/skills/usage${query}`} />}>
           Usage
