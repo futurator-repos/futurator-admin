@@ -85,6 +85,23 @@ The four things that matter most:
 > nodes / 526 edges, **0 orphans**. F16 is the cheapest unfixed win — the FAIL signal already
 > exists, nothing consumes it.
 
+> **[deployment · 2026-06-18] Fourth stage, same shape — the deployment control panel.**
+> Designing + shipping the v2.5 promotion ladder (dev → staging → production,
+> build-once-promote-many) surfaced the _clean-agent / leaky-harness_ pattern in the **deploy
+> stage**: the agent built correct apps (brick1 went live, playable), but the harness
+> (a) **truncated the published dev/staging URLs** at the `_` in `_dev`/`_staging` so "Open in
+> dev" was a dead link (F19); (b) ran **Vite-only deploy prompts against Next.js apps** so the
+> agent had to improvise the config (F20); (c) left **dev/staging deploys unobservable** — no
+> streamed logs (F21); and (d) **blocked every agent spawn** when the Mycelium MCP config file
+> went missing (F23). New **Track H** (F19–F23). **Fixed this session** (`1755365`, live
+> `c937de7`): F19/F20/F21 + the dual-prod-path reconcile. **Open:** **F22** (provision the
+> dev/staging subdomains — today fallback prefixes force a _rebuild_ per rung, so "build-once"
+> isn't real) and **F23** (MCP-config self-heal — cross-cutting; it halts the _whole_ pipeline,
+> cheapest high-leverage fix). Also confirmed the **deploy side of F11** (deploy still rewrites
+> QA's `next.config.ts` even after the F20 fix) — see F11 agent notes. (NB: the deployment
+> rubric forward-referenced F22/F23 as "F14/F15" before cross-checking this registry; the
+> canonical IDs here are **F22/F23**.)
+
 ---
 
 ## 2. Evidence base & provenance
@@ -362,6 +379,20 @@ designed to cooperate instead collide.
 verdict on correct code; the UI "Send all failing back (6)" would re-run 6 dev stories on
 working code → cost runaway.
 
+### Agent notes — deployment (2026-06-18)
+
+**Confirmed the deploy side from building the v2.5 ladder, and `F20` does NOT close this.**
+My framework-aware deploy prompt (F20) made the `next.config.ts` patch _correct_, but the
+DEPLOY agent **still `Edit`s a tracked config in the shared `projects/<appId>` worktree** —
+so the mid-run rewrite that 404'd QA is unchanged. The clean fix is F11 bullet #3 generalized:
+**inject the base path via env (`NEXT_BASE_PATH` / Vite `--base`) or build in an isolated dir
+— never edit a tracked config in the shared tree** (this also retires F20's improvisation).
+F11 fix #1 (point QA at the dev-deploy URL) is now _easier_: the v2.5 deploy makes the dev
+deploy a first-class, observable, immutable artifact with its own `deployEnvironment` routing
+(F21), so QA can target the published preview instead of booting `next dev` in the worktree.
+**Recommend Q7 resolve to "QA against the dev-deploy URL."** (Bears on F22 — once the
+dev/staging subdomains exist, that URL is per-env and stable.)
+
 ### F12 — QA scores broken/missing evidence as blocking defects (P1)
 
 > Contributed by **QAreview-agentic** (2026-06-18).
@@ -564,19 +595,150 @@ later (bears on §2 concept→plan authoring). Verified: 9 floaters → 0, +82 `
 
 **Effort:** M. **Track:** G. **Status:** **shipped** (`0445e6a`).
 
+### F19 — DEPLOY*URL extractor truncates dev/staging URLs at `*` (P1) — SHIPPED
+
+> Contributed by **deployment** (2026-06-18). **Fixed this session — commit `1755365`** (live `c937de7`).
+
+**Evidence.** The DEPLOY/PROMOTE agent emits a machine-parsed `DEPLOY_URL: <url>` line that
+the daemon extracts via regex. The URL capture class **excluded `_`**, so the v2.5 fallback
+targets `…/apps/_dev/<slug>/` and `…/apps/_staging/<slug>/` were captured only up to the
+underscore → `plan.devUrl` / `stagingUrl` stored as **`"https://futurator.ai/apps/"`** — a
+dead link (the operator's "Open in dev" landed on the bare apps index). Production
+(`apps/<slug>/`, no `_`) was unaffected, which masked the bug until the ladder added
+underscore-prefixed environments. (Root of rubric **DP-U1 / IE20**; this is §12's "secondary"
+`devUrl = …/apps/` observation, now root-caused.)
+
+**Root cause.** The extractor's URL character class excluded `_` (a leftover from
+trailing-markdown stripping), in **both** `build-deploy-pipeline.ts` and
+`build-promote-pipeline.ts`.
+
+**Fix (shipped).** Allow `_` in the capture class (drop `_` from the excluded set; keep
+stripping trailing `*`/backtick). Added a regex unit test asserting `_dev`/`_staging`/prod
+and markdown-decorated URLs all extract fully.
+
+**Effort:** S. **Track:** H. **Status:** **shipped** (`1755365`); → `verified` on the next
+dev/staging deploy of a real plan.
+
+### F20 — Deploy/promote prompts are framework-blind (Vite-only) → agent improvises Next config (P2) — SHIPPED
+
+> Contributed by **deployment** (2026-06-18). **Fixed this session — commit `1755365`.**
+
+**Evidence.** The deploy/promote prompts hard-coded Vite (`vite.config.ts`, `base`, `dist/`),
+but the apps are Next.js static exports (`next.config.ts`, `basePath`, `output:'export'`,
+`out/`). On brick1/pacman3 the agent **improvised** the correct Next config (a smart agent
+compensating for a blind prompt) — fragile, and a source of the deploy-side config churn that
+feeds **F11** (the `next.config.ts` rewrite that 404'd QA).
+
+**Root cause.** Prompt assumed one framework's config shape and output dir.
+
+**Fix (shipped).** Framework-aware prompt: detect `next.config.*` → Next (`basePath` _no_
+trailing slash + `output:'export'` + `images.unoptimized` + `out/`) vs `vite.config.*` → Vite
+(`base` _with_ slash + `dist/`), else inspect `package.json`. Applied to the deploy builder and
+the promote-rebuild branch.
+
+**Important limitation.** This makes the patch _correct_ but it **still `Edit`s a tracked
+config in the shared worktree** — it does **not** close the F11 race (see F11 agent notes).
+The root fix is to inject the base via env / isolated build dir (Q11).
+
+**Effort:** S. **Track:** H. **Status:** **shipped** (`1755365`).
+
+### F21 — Non-prod deploys unobservable + smoke result unsurfaced (P2) — SHIPPED
+
+> Contributed by **deployment** (2026-06-18). **Fixed this session — commit `1755365`.**
+
+**Evidence.** dev/staging deploys streamed **no logs and showed no step tracker** — the Deploy
+stage's `deploy-logs`/`deploy-steps` bound only to `report.current` (production `deployJobIds`),
+so a dev/staging deploy was a black box (the operator couldn't watch or share the very thing
+they were debugging). Separately, the promote pipeline's smoke check (`curl`+parse →
+`SMOKE_STATUS`) was computed but **never displayed** anywhere.
+
+**Root cause.** The deploy report exposed only the production job as "current"; per-environment
+job status + smoke result weren't carried in the report.
+
+**Fix (shipped).** `deploy-report.environments[]` now carries per-rung `activeJobId` +
+`smokeStatus`; the Deploy stage **and** the QA stage stream the active environment's job; the
+ladder renders a smoke badge and the prod-promote confirm **soft-warns** on a failed staging
+smoke. (This is the streaming the operator used to capture the F23 MCP error live.) Covers
+rubric **DP-O1 / DP-S2 / IE24**.
+
+**Effort:** M. **Track:** H. **Status:** **shipped** (`1755365`).
+
+### F22 — Build-once is not real: dev/staging unprovisioned → promotion rebuilds per rung (P2)
+
+> Contributed by **deployment** (2026-06-18). Rubric **DP-L2 / DP-E1 / IE22**. (The rubric
+> forward-referenced this as "F14" before cross-checking this registry — **canonical ID F22**.)
+
+**Evidence.** `deploy-targets.ts` resolves dev/staging to **reserved prefixes on the shared
+public bucket** (`apps/_dev/<slug>/`, `apps/_staging/<slug>/`) because the
+`dev.`/`staging.futurator.ai` subdomains aren't provisioned. Each environment therefore has a
+**different base path**, so a promotion **rebuilds** at the destination instead of copying the
+tested bytes. "Build-once-promote-many" exists in code (copy mode when `src.basePath ===
+dst.basePath`) but **never activates** in fallback mode → the artifact the operator approved on
+dev is _not_ the artifact that reaches prod (the exact failure class the ladder was meant to
+prevent). Separately, the release-strip used to offer a **second** production path — a fresh
+build that bypassed staging entirely (a build-once violation).
+
+**Root cause.** No per-environment bucket+domain; in fallback the base path differs per env, so
+byte-copy promotion is impossible. The subdomains are deferred infra (SST recipe + EC2-IAM
+prereq already written in [`deployment-v2.5.md §14`](../deployment-v2.5.md)).
+
+**Proposed fix.**
+
+- **[shipped `1755365`]** Collapse the dual production path: the release-strip primary CTA
+  **advances the ladder** (byte-copy when provisioned); the staging-bypassing fresh build is
+  demoted to a warning-gated "Force rebuild to prod" escape hatch — never the primary action.
+- **[open]** Provision `dev.`/`staging.futurator.ai` (own Bucket + CloudFront + ACM + Route53,
+  per `deployment-v2.5.md §14`) **and** grant the EC2 instance role write to the two new
+  buckets. Then every env shares base `apps/<slug>/`, `deploy-targets` flips `provisioned:true`,
+  and promotion becomes a true `s3 sync` **byte-copy** (no rebuild) — closing IE22/DP-L2/DP-E1.
+
+**Effort:** M (infra, mostly SST + IAM; code seam already in place). **Track:** H.
+**Status:** partial — dual-path reconcile **shipped**; subdomain provisioning **proposed**.
+
+### F23 — Agent-spawn precondition fragility: a missing MCP config halts every spawn (P1, cross-cutting)
+
+> Contributed by **deployment** (2026-06-18). Rubric **OV11 / IE23**. Surfaced on a deploy job
+> but **not deploy-specific** — it's the graph agent's Mycelium feature. (Rubric forward-ref
+> "F15" — **canonical ID F23**.)
+
+**Evidence.** pacman3 re-deploy-dev died _before the agent ran_:
+`step_error … Invalid MCP configuration: MCP config file not found:
+/opt/futurator-daemon/mcp/mcp-config.generated.json` (exit 1, retry 1/3). The Mycelium MCP
+integration injects `--mcp-config <path>` into **every** Claude CLI spawn when `MYCELIUM_MCP=on`
+(`daemon/agent-daemon.mjs:872`). `ensureConfig()` writes the file once behind a module-level
+`configWritten` latch (`daemon/lib/mcp-config.mjs:37-52`, path at `:23`) with **no `existsSync`
+re-check and no `mkdirSync`**. A daemon redeploy (DeployerLambda `git clean`/sync) deletes the
+untracked generated file; if the latched process keeps running it passes `--mcp-config` to a
+file that no longer exists → the CLI aborts. **This blocks all agent jobs (QA, dev, fix,
+deploy), not just deploy** — it merely surfaced first on a deploy.
+
+**Root cause.** A generated, untracked spawn prerequisite cached behind a write-once latch with
+no existence guard, deleted out from under the process by a redeploy.
+
+**Proposed fix.** Self-heal `ensureConfig()`:
+`if (configWritten && existsSync(CONFIG_PATH)) return; mkdirSync(dirname(CONFIG_PATH), {recursive:true}); writeFileSync(...)`.
+**Immediate unblock (no deploy):** daemon **Restart** (resets the latch → next spawn
+regenerates the file) or set `MYCELIUM_MCP=off`. **Owner:** the graph/`graphify` agent (it's
+their `mcp-config.mjs`, commit `ceea33e`).
+
+**Effort:** S (two lines). **Track:** H (cross-cuts every stage). **Status:** proposed.
+**Severity:** P1 — presents as a **full pipeline stall** until daemon restart (fails fast, no
+corruption / no cost runaway, self-heals on restart — hence P1 not P0).
+
 ---
 
 ## 4. Workstreams
 
-| Track | Theme                                           | Findings                 | Owner        | Status                            |
-| ----- | ----------------------------------------------- | ------------------------ | ------------ | --------------------------------- |
-| **A** | Perf / token reduction                          | F1, F6, F7, F8(part), F9 | _unclaimed_  | proposed                          |
-| **B** | Correctness / observability                     | F2, F3, F4               | _unclaimed_  | proposed                          |
-| **C** | Learning loop                                   | F5, F8(part)             | _unclaimed_  | proposed                          |
-| **D** | Planning / parallelism                          | F10                      | _unclaimed_  | proposed                          |
-| **E** | Context management (design)                     | see §5                   | _unclaimed_  | proposed                          |
-| **F** | QA evidence integrity & stage isolation         | F11, F12, F13            | _unclaimed_  | proposed                          |
-| **G** | Knowledge-graph integrity & grounding substrate | F14, F15, F16, F17, F18  | **graphify** | F17/F18 shipped; F14–F16 proposed |
+| Track | Theme                                           | Findings                                    | Owner          | Status                                                                         |
+| ----- | ----------------------------------------------- | ------------------------------------------- | -------------- | ------------------------------------------------------------------------------ |
+| **A** | Perf / token reduction                          | F1, F6, F7, F8(part), F9                    | _unclaimed_    | proposed                                                                       |
+| **B** | Correctness / observability                     | F2, F3, F4                                  | _unclaimed_    | proposed                                                                       |
+| **C** | Learning loop                                   | F5, F8(part)                                | _unclaimed_    | proposed                                                                       |
+| **D** | Planning / parallelism                          | F10                                         | _unclaimed_    | proposed                                                                       |
+| **E** | Context management (design)                     | see §5                                      | _unclaimed_    | proposed                                                                       |
+| **F** | QA evidence integrity & stage isolation         | F11, F12, F13                               | _unclaimed_    | proposed                                                                       |
+| **G** | Knowledge-graph integrity & grounding substrate | F14, F15, F16, F17, F18                     | **graphify**   | F17/F18 shipped; F14–F16 proposed                                              |
+| **H** | Deployment control panel & promotion ladder     | F19, F20, F21, F22, F23 (+ F11 deploy side) | **deployment** | F19/F20/F21 + F22-reconcile shipped (`1755365`); F22-subdomains + F23 proposed |
 
 ---
 
@@ -623,14 +785,22 @@ How a story's context is built today (`daemon/pipelines/lib/story-context-pack.m
    guard, prevents the false-FAIL cascade. _(QAreview-agentic)_
 6. **F16 surface the orphan invariant** — the FAIL signal already exists and is swallowed
    (`exit 3`); wiring it to a badge/gate is the cheapest knowledge-graph win. _(graphify)_
+7. **F23 MCP-config self-heal** — two lines (`existsSync` + `mkdirSync`); a missing generated
+   file currently **halts every agent spawn** (pipeline-wide stall). Immediate unblock is a
+   daemon Restart, but the self-heal is the permanent fix. _(deployment)_
 
 > **Already shipped this session (graphify):** **F17** (`projectId` normalization — heals
 > UUID-stranded orphans across all projects, `0d5dd6a`) and **F18** (`REFERENCES` living-doc
 > linking, `0445e6a`). They need no roadmap slot — just `verified` once projects re-sync.
+>
+> **Already shipped this session (deployment):** **F19** (URL-truncation regex), **F20**
+> (framework-aware deploy prompts), **F21** (dev/staging log streaming + smoke surfacing), and
+> the **F22 dual-prod-path reconcile** — all in `1755365`, live on prod (`c937de7`). No roadmap
+> slot — `verified` on the next real plan's dev→staging→prod run.
 
 **Phase 2 — Restore observability & correctness:** 4. **F2 priorJobIds history** → **F3 forensic union + cost reconciliation**. 5. **F4 totalStories count + fix-story lineage badge.** 6. **F14 full-project ast-facts at wave-close** — the root of the broken-graph class; without it orphans recur every multi-story run. _(graphify)_
 
-**Phase 3 — Deeper efficiency:** 6. **F7 mvp test-authoring trim**, **F8 fixer gating + prior-diff**, **F9 catalog trim**, **F13 probe-authoring gate (with F8 + VQA v3)**, **F15 delete-aware graph prune (needs F14)** _(graphify)_. 7. **F10 planner parallelism**, **§5 context-management redesign.**
+**Phase 3 — Deeper efficiency:** 6. **F7 mvp test-authoring trim**, **F8 fixer gating + prior-diff**, **F9 catalog trim**, **F13 probe-authoring gate (with F8 + VQA v3)**, **F15 delete-aware graph prune (needs F14)** _(graphify)_. 7. **F10 planner parallelism**, **§5 context-management redesign.** 8. **F22 provision dev/staging subdomains** — turns "build-once-promote-many" from code-only into reality (today fallback rebuilds per rung); infra-gated (SST + EC2-IAM, recipe in `deployment-v2.5.md §14`); also unblocks pointing QA at a stable per-env dev-deploy URL (F11 #1 / Q7). _(deployment)_
 
 > Rationale for Phase 1 ordering: F5 is cheap and re-enables the feedback loop that will
 > tell the operator which later fixes matter most; F6 is a safety stop; F1 is the largest
@@ -673,6 +843,17 @@ How a story's context is built today (`daemon/pipelines/lib/story-context-pack.m
   graph, what is their linking scheme? They're **deliberately excluded** from auto-`REFERENCES`
   now (`isLivingDoc`). Owner-defined — overlaps the §2 concept→plan authoring contract and the
   VQA v3 PRD; resolving it makes `C-D3`/`C-P1` grounding machine-checkable (see F18 note).
+- **Q11 (F11/F20) [deployment]:** Where should the **deploy base path be injected**? Editing
+  `next.config.ts` in the shared worktree is the root of the deploy×QA race (F11) _and_ the
+  improvisation (F20) — one change closes both. Options: an env var the build reads
+  (`NEXT_BASE_PATH` / Vite `--base`), a declarative
+  `BoilerplateRuntimeContract.build.requiredConfig` (overlaps `boilerplate-runtime-contract.md`),
+  or an isolated per-deploy build dir. Recommend coupling this with Q7 (QA against the
+  dev-deploy URL) since both want the build to stop mutating the live tree. Needs an owner.
+- **Q12 (F22) [deployment]:** Once the dev/staging subdomains exist, should **build-once be a
+  hard gate** — a promotion that would _rebuild_ (base paths differ) is blocked, forcing a
+  byte-copy — or stay advisory while any fallback-prefix mode remains? The deterministic
+  answer-key is whether the promoted bytes' hash equals the source environment's (rubric DP-L2).
 
 ---
 
@@ -711,39 +892,45 @@ merge 269s · `8c39c9f7` vqa 369s · `805cdb92` vqa 339s.
 
 ## Appendix B — Key file references
 
-| Concern                                      | File:line                                                                                                                                                                                               |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Per-story pipeline                           | `functions/shared/pipelines/story-pipeline.ts`                                                                                                                                                          |
-| Story context pack                           | `daemon/pipelines/lib/story-context-pack.mjs`                                                                                                                                                           |
-| Cached tsc (exists, prework-only)            | `daemon/lib/cached-tsc.mjs`                                                                                                                                                                             |
-| Prework gate                                 | `daemon/lib/prework-gate.mjs`                                                                                                                                                                           |
-| Wave VQA runner                              | `daemon/lib/wave-vqa-runner.mjs`                                                                                                                                                                        |
-| Wave merge                                   | `daemon/lib/wave-merge.mjs`                                                                                                                                                                             |
-| VQA fix-story mint (title)                   | `daemon/lib/wave-vqa-fix-story.mjs:53`                                                                                                                                                                  |
-| Retry / story rerun (jobId overwrite)        | `functions/shared/services/story-rerun-launcher.ts:140`                                                                                                                                                 |
-| Forensic builder (event collection)          | `functions/shared/timer/forensic-builder.ts:277`                                                                                                                                                        |
-| Forensic endpoint                            | `functions/api/index.ts:12125` (`GET /plans/:id/timing/forensic`)                                                                                                                                       |
-| Agent events repo (7-day TTL)                | `functions/shared/repositories/agent-events-repository.ts`                                                                                                                                              |
-| Reflector runner                             | `daemon/pipelines/reflector-runner.mjs`                                                                                                                                                                 |
-| UI live output / events                      | `src/components/labs/agentic-workflow/story-live-output.tsx`, `src/hooks/use-agent-events.ts`                                                                                                           |
-| QA auto-approve + dev-deploy co-launch (F11) | `functions/cron/wave-completion-check.ts:210` (qa-execute), `:273-283` (dev-deploy), `:259-260` (intent comment)                                                                                        |
-| Deploy config rewrite (F11)                  | `functions/shared/deploy/build-deploy-pipeline.ts:47` (Edit/Write tools), `:66` (next.config basePath/output rewrite)                                                                                   |
-| QA execute pipeline / capture / report (F12) | `functions/shared/pipelines/visual-qa-pipeline.ts:454` (qa-prepare boot), `:518-662` (per-test capture), `:656` (SCREENSHOTS_CAPTURED), `:955` (`overall = fail>0`)                                     |
-| QA judge prompts (F12c)                      | `functions/shared/pipelines/visual-qa-pipeline.ts:786` (L1), `:886` (L2)                                                                                                                                |
-| Seam/assert executor (F13, exists)           | `functions/shared/pipelines/visual-qa-pipeline.ts:616-626` (`assert` → `page.evaluate(window.__harness)`)                                                                                               |
-| Claims-table thumbnail (F12 UI)              | `src/components/labs/plan-dashboard/views/qa/claims-table.tsx:296` (`<img onError>` hides broken/404)                                                                                                   |
-| AST scan + ast-facts persist (F14)           | `daemon/scripts/bootstrap-ast.mjs:301-305` (`ast-extract --scan` over `args.root`), `:297`/`:328` (writes `<root>/.mycelium/ast-facts.json`)                                                            |
-| AST → graph translation, additive (F14/F15)  | `daemon/scripts/graph-sync.mjs:686` (`processAstFacts`)                                                                                                                                                 |
-| Orphan invariant emit + swallow (F16)        | `daemon/scripts/graph-sync.mjs:1049` (`Orphan invariant FAILED`), `daemon/scripts/lib/graph-integrity.mjs:112` (logic); swallowed at `daemon/scripts/bootstrap-ast.mjs:371` (`exited 3 (non-blocking)`) |
-| projectId normalization (F17, shipped)       | `daemon/scripts/graph-sync.mjs:745` (file-node MERGE `ON MATCH SET n.projectId = $projectId` — commit `0d5dd6a`)                                                                                        |
-| Living-doc REFERENCES layer (F18, shipped)   | `daemon/scripts/lib/doc-references.mjs` (`isLivingDoc`, `extractWikilinks({inlineRefs})`), wired in `daemon/scripts/graph-sync.mjs` — commit `0445e6a`                                                  |
+| Concern                                      | File:line                                                                                                                                                                                                                    |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Per-story pipeline                           | `functions/shared/pipelines/story-pipeline.ts`                                                                                                                                                                               |
+| Story context pack                           | `daemon/pipelines/lib/story-context-pack.mjs`                                                                                                                                                                                |
+| Cached tsc (exists, prework-only)            | `daemon/lib/cached-tsc.mjs`                                                                                                                                                                                                  |
+| Prework gate                                 | `daemon/lib/prework-gate.mjs`                                                                                                                                                                                                |
+| Wave VQA runner                              | `daemon/lib/wave-vqa-runner.mjs`                                                                                                                                                                                             |
+| Wave merge                                   | `daemon/lib/wave-merge.mjs`                                                                                                                                                                                                  |
+| VQA fix-story mint (title)                   | `daemon/lib/wave-vqa-fix-story.mjs:53`                                                                                                                                                                                       |
+| Retry / story rerun (jobId overwrite)        | `functions/shared/services/story-rerun-launcher.ts:140`                                                                                                                                                                      |
+| Forensic builder (event collection)          | `functions/shared/timer/forensic-builder.ts:277`                                                                                                                                                                             |
+| Forensic endpoint                            | `functions/api/index.ts:12125` (`GET /plans/:id/timing/forensic`)                                                                                                                                                            |
+| Agent events repo (7-day TTL)                | `functions/shared/repositories/agent-events-repository.ts`                                                                                                                                                                   |
+| Reflector runner                             | `daemon/pipelines/reflector-runner.mjs`                                                                                                                                                                                      |
+| UI live output / events                      | `src/components/labs/agentic-workflow/story-live-output.tsx`, `src/hooks/use-agent-events.ts`                                                                                                                                |
+| QA auto-approve + dev-deploy co-launch (F11) | `functions/cron/wave-completion-check.ts:210` (qa-execute), `:273-283` (dev-deploy), `:259-260` (intent comment)                                                                                                             |
+| Deploy config rewrite (F11)                  | `functions/shared/deploy/build-deploy-pipeline.ts:47` (Edit/Write tools), `:66` (next.config basePath/output rewrite)                                                                                                        |
+| QA execute pipeline / capture / report (F12) | `functions/shared/pipelines/visual-qa-pipeline.ts:454` (qa-prepare boot), `:518-662` (per-test capture), `:656` (SCREENSHOTS_CAPTURED), `:955` (`overall = fail>0`)                                                          |
+| QA judge prompts (F12c)                      | `functions/shared/pipelines/visual-qa-pipeline.ts:786` (L1), `:886` (L2)                                                                                                                                                     |
+| Seam/assert executor (F13, exists)           | `functions/shared/pipelines/visual-qa-pipeline.ts:616-626` (`assert` → `page.evaluate(window.__harness)`)                                                                                                                    |
+| Claims-table thumbnail (F12 UI)              | `src/components/labs/plan-dashboard/views/qa/claims-table.tsx:296` (`<img onError>` hides broken/404)                                                                                                                        |
+| AST scan + ast-facts persist (F14)           | `daemon/scripts/bootstrap-ast.mjs:301-305` (`ast-extract --scan` over `args.root`), `:297`/`:328` (writes `<root>/.mycelium/ast-facts.json`)                                                                                 |
+| AST → graph translation, additive (F14/F15)  | `daemon/scripts/graph-sync.mjs:686` (`processAstFacts`)                                                                                                                                                                      |
+| Orphan invariant emit + swallow (F16)        | `daemon/scripts/graph-sync.mjs:1049` (`Orphan invariant FAILED`), `daemon/scripts/lib/graph-integrity.mjs:112` (logic); swallowed at `daemon/scripts/bootstrap-ast.mjs:371` (`exited 3 (non-blocking)`)                      |
+| projectId normalization (F17, shipped)       | `daemon/scripts/graph-sync.mjs:745` (file-node MERGE `ON MATCH SET n.projectId = $projectId` — commit `0d5dd6a`)                                                                                                             |
+| Living-doc REFERENCES layer (F18, shipped)   | `daemon/scripts/lib/doc-references.mjs` (`isLivingDoc`, `extractWikilinks({inlineRefs})`), wired in `daemon/scripts/graph-sync.mjs` — commit `0445e6a`                                                                       |
+| DEPLOY_URL extractor regex (F19)             | `functions/shared/deploy/build-deploy-pipeline.ts`, `functions/shared/deploy/build-promote-pipeline.ts` (`DEPLOY_URL` pattern — `_` now allowed) — commit `1755365`                                                          |
+| Framework-aware deploy prompt (F20)          | `functions/shared/deploy/build-deploy-pipeline.ts` (step-1 next/vite detect), `build-promote-pipeline.ts` (rebuild branch) — commit `1755365`                                                                                |
+| Per-env streaming + smoke (F21)              | `functions/shared/repositories/deploy-report-aggregator.ts` (`environments[].activeJobId`/`smokeStatus`), `views/deploy-stage-view.tsx`, `views/deploy/{environment-ladder,deploy-logs,deploy-steps}.tsx` — commit `1755365` |
+| Env-target resolution / build-once (F22)     | `functions/shared/deploy/deploy-targets.ts` (`provisioned` flag, prefix vs subdomain), `build-promote-pipeline.ts` (`copyMode`), `views/deploy/release-strip.tsx` (ladder CTA); subdomain recipe `deployment-v2.5.md §14`    |
+| MCP-config spawn injection (F23)             | `daemon/lib/mcp-config.mjs:23` (`CONFIG_PATH`), `:37-52` (`ensureConfig` write-once latch, no `existsSync`/`mkdirSync`), `:60` (`myceliumMcpSpawn`); injected at `daemon/agent-daemon.mjs:872`; introduced commit `ceea33e`  |
 
 ---
 
 ## Changelog
 
-| Date       | Agent                 | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ---------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-06-17 | Claude (forensics #1) | Initial draft: findings F1–F10, workstreams A–E, roadmap, appendices from pacman3 forensic + daemon-log cross-check.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| 2026-06-18 | QAreview-agentic      | QA-stage forensic on the same pacman3 run (QA job `3c99fd51`, not walked by the original forensic — F2/F3). Added F11 (deploy×QA same-worktree race → `next.config.ts` rewrite relocates app off root → per-test 404s), F12 (broken/missing evidence scored as blocking defects; capture gate + honest verdict lane + judge hallucination), F13 (state/behavior ACs authored with no executable probe). New Track F; F11/F12 → Phase 1, F13 → Phase 3; open Q6/Q7; Appendix B refs. Verdict: QA false-blocked a correct app — every FAIL was an infra artifact.                                                                                                                                                                                                                                    |
-| 2026-06-18 | graphify              | Knowledge-graph (knowledge-compile output) forensic on the same pacman3 run — broken graph on correct code (177/290, 29 unconnected, Orphan invariant FAIL 20). Added new **Track G** + F14 (truncated ast-facts = last story's worktree scope, not the project), F15 (additive ingest never prunes deleted-source zombies), F16 (orphan invariant computed but swallowed at `exit 3`), F17 (job-UUID `projectId` strands file nodes → silent DEFINES loss — **shipped `0d5dd6a`**), F18 (living docs float; new `REFERENCES` doc→code edge layer for living docs, plan-docs excluded — **shipped `0445e6a`**). F16 → Phase 1, F14 → Phase 2, F15 → Phase 3; open Q8/Q9/Q10; Appendix B refs. After fixes: pacman3 graph 212/526, 0 orphans. Same lesson as F11/F12 — clean agents, leaky harness. |
+| Date       | Agent                 | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2026-06-17 | Claude (forensics #1) | Initial draft: findings F1–F10, workstreams A–E, roadmap, appendices from pacman3 forensic + daemon-log cross-check.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| 2026-06-18 | QAreview-agentic      | QA-stage forensic on the same pacman3 run (QA job `3c99fd51`, not walked by the original forensic — F2/F3). Added F11 (deploy×QA same-worktree race → `next.config.ts` rewrite relocates app off root → per-test 404s), F12 (broken/missing evidence scored as blocking defects; capture gate + honest verdict lane + judge hallucination), F13 (state/behavior ACs authored with no executable probe). New Track F; F11/F12 → Phase 1, F13 → Phase 3; open Q6/Q7; Appendix B refs. Verdict: QA false-blocked a correct app — every FAIL was an infra artifact.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 2026-06-18 | deployment            | Deployment-stage findings from building + shipping the v2.5 promotion-ladder control panel (brick1 went live dev→staging→prod). New **Track H**: F19 (DEPLOY*URL extractor truncated dev/staging URLs at `*`→ dead "Open in dev" link — **shipped`1755365`**), F20 (Vite-only deploy prompts vs Next.js apps → agent improvised; framework-aware now — **shipped `1755365`**; does NOT close F11), F21 (dev/staging deploys unobservable + smoke unsurfaced → per-env streaming + smoke badge/soft-gate — **shipped `1755365`**), F22 (build-once not real — fallback prefixes force rebuild-per-rung; dual-prod-path reconcile **shipped**, subdomain provisioning **open**, recipe in `deployment-v2.5.md §14`), F23 (MCP-config missing → halts **every** agent spawn; 2-line `existsSync`+`mkdirSync`self-heal — **open**, owner graphify). Added F11 agent-notes (deploy still rewrites QA's`next.config.ts` post-F20 → Q7/Q11), Q11/Q12, roadmap slots (F23→Phase 1, F22→Phase 3), Appendix B refs. Reconciled the deployment rubric's forward-refs "F14/F15" → canonical **F22/F23**. Same lesson as F11/F12/F14 — clean agents, leaky harness. |
+| 2026-06-18 | graphify              | Knowledge-graph (knowledge-compile output) forensic on the same pacman3 run — broken graph on correct code (177/290, 29 unconnected, Orphan invariant FAIL 20). Added new **Track G** + F14 (truncated ast-facts = last story's worktree scope, not the project), F15 (additive ingest never prunes deleted-source zombies), F16 (orphan invariant computed but swallowed at `exit 3`), F17 (job-UUID `projectId` strands file nodes → silent DEFINES loss — **shipped `0d5dd6a`**), F18 (living docs float; new `REFERENCES` doc→code edge layer for living docs, plan-docs excluded — **shipped `0445e6a`**). F16 → Phase 1, F14 → Phase 2, F15 → Phase 3; open Q8/Q9/Q10; Appendix B refs. After fixes: pacman3 graph 212/526, 0 orphans. Same lesson as F11/F12 — clean agents, leaky harness.                                                                                                                                                                                                                                                                                                                                                     |
