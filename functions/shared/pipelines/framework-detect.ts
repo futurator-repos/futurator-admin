@@ -106,8 +106,28 @@ export function buildFrameworkDetectSnippet(opts: DetectionOpts): string {
     );
   }
 
+  // ── Base-path detection (2026-06-17) ────────────────────────────────────
+  // A dev-deploy bakes a sub-path into the build so the app can be served under
+  // `/apps/_dev/<name>` on CloudFront — Next `basePath:` or Vite `base:`. That
+  // path is committed to the config the QA branch checks out, so `next dev` /
+  // the dev server serve the app UNDER that prefix and a request to `/` renders
+  // the framework's not-found page (the styled 404 the visual judge then
+  // screenshots — "everything failed", brick1 2026-06-16). Detect the prefix and
+  // route QA's health-check + every screenshot through it, so QA exercises the
+  // app exactly where it is actually served.
   lines.push(
-    `echo "[framework-detect] framework=$QA_FRAMEWORK port=$QA_PORT cmd=\\"$QA_DEV_CMD\\""`,
+    `QA_BASE_PATH=''`,
+    `if ls next.config.* >/dev/null 2>&1; then`,
+    `  QA_BASE_PATH=$(grep -hoE "basePath:[[:space:]]*['\\"][^'\\"]+['\\"]" next.config.* 2>/dev/null | head -1 | grep -oE "['\\"][^'\\"]+['\\"]" | tr -d "\\"'");`,
+    `fi`,
+    `if [ -z "$QA_BASE_PATH" ] && ls vite.config.* >/dev/null 2>&1; then`,
+    `  QA_BASE_PATH=$(grep -hoE "base:[[:space:]]*['\\"][^'\\"]+['\\"]" vite.config.* 2>/dev/null | head -1 | grep -oE "['\\"][^'\\"]+['\\"]" | tr -d "\\"'");`,
+    `fi`,
+    `# Normalize: drop a trailing slash; "/" alone means no real prefix.`,
+    `QA_BASE_PATH=$(printf '%s' "$QA_BASE_PATH" | sed 's:/*$::')`,
+    `if [ "$QA_BASE_PATH" = "" ]; then :; else QA_HEALTH_PATH="$QA_BASE_PATH/"; fi`,
+    `export QA_BASE_PATH`,
+    `echo "[framework-detect] framework=$QA_FRAMEWORK port=$QA_PORT basePath=\\"$QA_BASE_PATH\\" cmd=\\"$QA_DEV_CMD\\""`,
   );
 
   return lines.join('\n');

@@ -99,3 +99,62 @@ describe('PR-59 — framework-detect snippet', () => {
     expect(s).toContain('exit 1');
   });
 });
+
+/**
+ * 2026-06-17 — base-path detection. A dev-deploy bakes Next `basePath` / Vite
+ * `base` into the config the QA branch checks out; QA must navigate THERE, not
+ * root (root renders the framework 404 — brick1 "everything failed"). These
+ * tests EXECUTE the snippet against fixture configs to validate the bash regex.
+ */
+import { execSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+function runDetect(files: Record<string, string>): { basePath: string; healthPath: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'fw-detect-'));
+  try {
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body, 'utf8');
+    const snippet = buildFrameworkDetectSnippet({ cwd: dir });
+    const out = execSync(
+      `bash -c '${snippet.replace(/'/g, `'\\''`)}\necho "RESULT:$QA_BASE_PATH|$QA_HEALTH_PATH"'`,
+      {
+        encoding: 'utf8',
+      },
+    );
+    const line = out.split('\n').find((l) => l.startsWith('RESULT:')) || 'RESULT:|';
+    const [basePath, healthPath] = line.slice('RESULT:'.length).split('|');
+    return { basePath, healthPath };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe('framework-detect — base-path detection (the brick1 404 fix)', () => {
+  it('extracts Next basePath and routes the health path through it', () => {
+    const r = runDetect({
+      'package.json': JSON.stringify({ dependencies: { next: '15.0.0' } }),
+      'next.config.ts': `const c = { basePath: '/apps/_dev/brick1', output: 'export' };\nexport default c;`,
+    });
+    expect(r.basePath).toBe('/apps/_dev/brick1');
+    expect(r.healthPath).toBe('/apps/_dev/brick1/');
+  });
+
+  it('extracts Vite base when no Next config', () => {
+    const r = runDetect({
+      'package.json': JSON.stringify({ devDependencies: { vite: '5.0.0' } }),
+      'vite.config.ts': `export default { base: "/apps/_dev/game/" };`,
+    });
+    expect(r.basePath).toBe('/apps/_dev/game'); // trailing slash normalized off
+    expect(r.healthPath).toBe('/apps/_dev/game/');
+  });
+
+  it('no base path → empty QA_BASE_PATH, health stays at root', () => {
+    const r = runDetect({
+      'package.json': JSON.stringify({ dependencies: { next: '15.0.0' } }),
+      'next.config.ts': `export default { output: 'export' };`,
+    });
+    expect(r.basePath).toBe('');
+    expect(r.healthPath).toBe('/');
+  });
+});
