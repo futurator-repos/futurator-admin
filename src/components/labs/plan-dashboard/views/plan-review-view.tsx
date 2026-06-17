@@ -24,7 +24,11 @@ import {
   usePmPrompt,
 } from '@/hooks/use-plans';
 import { useAttentionItems } from '@/hooks/use-attention-items';
-import { useApproveConceptArtifact } from '@/hooks/use-concept-artifacts';
+import {
+  useApproveConceptArtifact,
+  useRegenerateConceptArtifact,
+  useConceptDrive,
+} from '@/hooks/use-concept-artifacts';
 import type { AgentJobStatus } from '@/types/agent-orchestrator';
 import type { EpicWorkflow } from '@/types/epic-workflow';
 import { epicStatusColor } from '../constants';
@@ -62,12 +66,21 @@ export function PlanReviewView({
   const isConcept = plan.status === 'concept';
   const pmRunning = pmJobStatus === 'PENDING' || pmJobStatus === 'RUNNING';
   const pmFailed = pmJobStatus === 'FAILED';
-  const generating = pmRunning || !!applyPending;
+  // Concept v2 — when the Concept chain owns this plan, the PM does NOT run
+  // until every spec is approved. The rail is the source of truth for "what's
+  // running"; the legacy PM banner/empty-state must NOT show (it falsely read
+  // the concept-apply mutation's transient isPending as "PM drafting").
+  const conceptChainActive = isConcept && !!plan.conceptPlan;
+  const generating = (pmRunning || !!applyPending) && !conceptChainActive;
+  // Reactive drive: advance the spec chain while the operator watches (the cron
+  // is the backstop). Active only while the chain is live + no epics yet.
+  useConceptDrive(plan.planId, conceptChainActive && !hasEpics);
 
   const patch = usePatchPlan(plan.planId);
   const regenerate = useRegeneratePlan(plan.planId);
   const start = useStartPlan(plan.planId);
   const approveArtifact = useApproveConceptArtifact(plan.planId);
+  const regenerateArtifact = useRegenerateConceptArtifact(plan.planId);
   const qc = useQueryClient();
 
   // SKILL-SCOUT gate (Epic 3 Story 3.5): plan /start returns 409 while an
@@ -404,16 +417,29 @@ export function PlanReviewView({
             conceptArtifacts={plan.conceptArtifacts}
             onApprove={(kind) => approveArtifact.mutate(kind)}
             approvingKind={approveArtifact.isPending ? approveArtifact.variables : null}
+            onRegenerate={(kind) => regenerateArtifact.mutate(kind)}
+            regeneratingKind={regenerateArtifact.isPending ? regenerateArtifact.variables : null}
           />
         )}
 
-        {!hasEpics && !generating && !pmFailed && !applyError && (
+        {/* Concept chain owns generation — the rail above is the live status.
+            Show a chain-aware caption instead of the legacy PM empty-state. */}
+        {conceptChainActive && !hasEpics && (
+          <EmptyCard faded>
+            Drafting your specs — approve PRD, UX &amp; Architecture above, then the epic plan is
+            generated from the approved docs.
+          </EmptyCard>
+        )}
+
+        {!conceptChainActive && !hasEpics && !generating && !pmFailed && !applyError && (
           <EmptyCard>
             No epics yet. Click <strong>Regenerate</strong> to kick off the PM agent.
           </EmptyCard>
         )}
 
-        {generating && !hasEpics && <EmptyCard faded>PM is drafting epics…</EmptyCard>}
+        {!conceptChainActive && generating && !hasEpics && (
+          <EmptyCard faded>PM is drafting epics…</EmptyCard>
+        )}
 
         {hasEpics && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

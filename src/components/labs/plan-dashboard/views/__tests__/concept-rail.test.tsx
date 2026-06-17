@@ -77,9 +77,10 @@ describe('ConceptRail — live status + Approve (Round 1)', () => {
     expect(screen.getByTestId('concept-status-prd').textContent).toMatch(/awaiting approval/);
     fireEvent.click(btn);
     expect(onApprove).toHaveBeenCalledWith('prd');
-    // UX is rev0 → "generating", NO approve button yet.
+    // UX is rev0 but sits BEHIND the awaiting PRD → queued (serial chain), not
+    // generating, and no approve button yet.
     expect(screen.queryByTestId('concept-approve-ux')).toBeNull();
-    expect(screen.getByTestId('concept-status-ux').textContent).toMatch(/generating/);
+    expect(screen.getByTestId('concept-status-ux').textContent).toMatch(/queued/);
   });
 
   it('an approved artifact shows the approved caption and no Approve button', () => {
@@ -100,5 +101,42 @@ describe('ConceptRail — live status + Approve (Round 1)', () => {
     render(<ConceptRail conceptPlan={UI_BEARING} conceptArtifacts={artifacts()} />);
     expect(screen.getByTestId('concept-status-prd')).toBeInTheDocument();
     expect(screen.queryByTestId('concept-approve-prd')).toBeNull();
+  });
+
+  it('shows a live headline + spinner while a doc is generating', () => {
+    // prd rev0 = generating.
+    render(
+      <ConceptRail
+        conceptPlan={UI_BEARING}
+        conceptArtifacts={artifacts({
+          prd: { kind: 'prd', rev: 0, contentHash: '', status: 'draft' },
+        })}
+      />,
+    );
+    expect(screen.getByTestId('concept-headline').textContent).toMatch(/Drafting PRD/);
+    // The working spinner is present (aria-label="working").
+    expect(screen.getAllByLabelText('working').length).toBeGreaterThan(0);
+  });
+
+  it('headline reflects awaiting-review when a draft is ready', () => {
+    render(
+      <ConceptRail conceptPlan={UI_BEARING} conceptArtifacts={artifacts()} onApprove={vi.fn()} />,
+    );
+    // prd rev1 draft → ready for review.
+    expect(screen.getByTestId('concept-headline').textContent).toMatch(/PRD ready for your review/);
+  });
+
+  it('offers Regenerate alongside Approve on a drafted doc and calls onRegenerate', () => {
+    const onRegenerate = vi.fn();
+    render(
+      <ConceptRail
+        conceptPlan={UI_BEARING}
+        conceptArtifacts={artifacts()}
+        onApprove={vi.fn()}
+        onRegenerate={onRegenerate}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('concept-regen-prd'));
+    expect(onRegenerate).toHaveBeenCalledWith('prd');
   });
 });

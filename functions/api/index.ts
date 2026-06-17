@@ -2210,6 +2210,48 @@ app.post('/api/plans/:id/apply-prd', (c) => handleApplyArtifact(c, 'prd'));
 app.post('/api/plans/:id/apply-ux', (c) => handleApplyArtifact(c, 'ux'));
 app.post('/api/plans/:id/apply-arch', (c) => handleApplyArtifact(c, 'architecture'));
 
+// ── Concept v2 — reactive drive tick (advance the chain while the operator watches) ──
+//
+// POST /api/plans/:id/concept/drive
+//
+// One idempotent `driveConcept` pass under the per-plan reduce lock: applies any
+// COMPLETED generators (→ draft in interactive, approved in autopilot), then
+// enqueues the next artifact / awaits approval / enqueues pm-plan. The cron is
+// the backstop; this lets the UI advance the DAG within seconds of a generator
+// finishing instead of waiting for the next cron sweep (the "nothing happens"
+// gap). No-op for non-concept / prototype plans. Returns the drive verdict +
+// the fresh per-artifact status registry so the rail re-renders immediately.
+app.post('/api/plans/:id/concept/drive', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  if (!plan.conceptPlan) {
+    return c.json({
+      planId,
+      drive: { kind: 'noop', reason: 'no conceptPlan' },
+      conceptArtifacts: [],
+    });
+  }
+
+  let drive: Awaited<ReturnType<typeof driveConcept>> | undefined;
+  const token = await planRepo.acquirePlanReduceLock(planId, Date.now());
+  if (token) {
+    try {
+      drive = await driveConcept(plan, buildConceptDriverDeps());
+    } finally {
+      await planRepo.releasePlanReduceLock(planId, token);
+    }
+  }
+  const fresh = await planRepo.getPlanById(planId);
+  return c.json({
+    planId,
+    drive: drive ?? { kind: 'reduce-locked' },
+    conceptArtifacts: fresh?.conceptArtifacts ?? [],
+    status: fresh?.status,
+    epicCount: (fresh?.epicIds ?? []).length,
+  });
+});
+
 // ── Concept v2 (E3.3) — regenerate an artifact (operator-triggered refresh) ──
 //
 // POST /api/plans/:id/concept/:kind/regenerate
@@ -5179,16 +5221,18 @@ app.delete('/api/ec2/files', async (c) => {
   const path = c.req.query('path') || '';
   const PROJECT_FOLDER_RE = /^\/home\/ubuntu\/projects\/([\w.\-]+)$/;
   const CLAUDE_SESSION_RE = /^\/home\/ubuntu\/\.claude\/projects\/([\w.\-]+)$/;
+  const CACHE_ENTRY_RE = /^\/home\/ubuntu\/\.cache\/claude-cli-nodejs\/([\w.\-]+)$/;
 
   const projectMatch = PROJECT_FOLDER_RE.exec(path);
   const claudeMatch = CLAUDE_SESSION_RE.exec(path);
+  const cacheEntryMatch = CACHE_ENTRY_RE.exec(path);
 
-  if (!projectMatch && !claudeMatch) {
+  if (!projectMatch && !claudeMatch && !cacheEntryMatch) {
     throw new ValidationError(
-      'Path must be /home/ubuntu/projects/<name> or /home/ubuntu/.claude/projects/<name> with safe characters only',
+      'Path must be /home/ubuntu/projects/<name>, /home/ubuntu/.cache/claude-cli-nodejs/<name>, or /home/ubuntu/.claude/projects/<name> with safe characters only',
     );
   }
-  const name = (projectMatch?.[1] ?? claudeMatch?.[1]) || '';
+  const name = (projectMatch?.[1] ?? claudeMatch?.[1] ?? cacheEntryMatch?.[1]) || '';
   if (name === '.' || name === '..' || name === '') {
     throw new ValidationError('Invalid folder name');
   }
@@ -5214,6 +5258,32 @@ app.delete('/api/ec2/files', async (c) => {
       ok: true,
       path,
       kind: 'claude-session' as const,
+      output: output.trim(),
+      results: [{ step: 'ec2-filesystem', status: 'done', detail: path }],
+    });
+  }
+
+  // ── Path C: Claude CLI npm cache entry — simple rm, no cascade.
+  if (cacheEntryMatch) {
+    const cmd = [
+      `target=$(realpath "${path}" 2>/dev/null)`,
+      `case "$target" in /home/ubuntu/.cache/claude-cli-nodejs/*) ;; *) echo "REFUSED: realpath outside .cache/claude-cli-nodejs/"; exit 1;; esac`,
+      `case "$target" in /home/ubuntu/.cache/claude-cli-nodejs) echo "REFUSED: would delete cache root"; exit 1;; esac`,
+      `rm -rf "$target"`,
+      `echo "DELETED $target"`,
+    ].join('\n');
+
+    const commandId = await sendSsmCommand(cmd);
+    const output = await waitForSsmOutput(commandId);
+
+    if (!output.includes(`DELETED ${path}`)) {
+      throw new AppError('DELETE_FAILED', `Delete refused: ${output.slice(0, 300)}`, 400);
+    }
+
+    return c.json({
+      ok: true,
+      path,
+      kind: 'cache-entry' as const,
       output: output.trim(),
       results: [{ step: 'ec2-filesystem', status: 'done', detail: path }],
     });
@@ -5329,6 +5399,8 @@ app.delete('/api/ec2/files', async (c) => {
     `else`,
     `  echo "SKIP no transcript at ${transcriptDir}"`,
     `fi`,
+    `[ -d "/home/ubuntu/.cache/claude-cli-nodejs/-home-ubuntu-projects-${name}" ] && rm -rf "/home/ubuntu/.cache/claude-cli-nodejs/-home-ubuntu-projects-${name}" && echo "DELETED cache -home-ubuntu-projects-${name}" || true`,
+    `find "/home/ubuntu/.cache/claude-cli-nodejs" -maxdepth 1 -type d -name "-home-ubuntu-worktrees-${name}-*" -print0 2>/dev/null | xargs -0 -r rm -rf`,
   ].join('\n');
 
   let transcriptDeleted = false;
