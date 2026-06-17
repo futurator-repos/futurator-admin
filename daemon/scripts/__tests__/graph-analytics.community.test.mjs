@@ -3,7 +3,6 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { makeAnalyticsSession } from './helpers/fake-analytics-graph.mjs';
 import { runAnalytics, communityCounts } from '../graph-analytics.mjs';
 
 describe('communityCounts (Story 3.2)', () => {
@@ -29,34 +28,28 @@ describe('communityCounts (Story 3.2)', () => {
   });
 });
 
-describe('runAnalytics — communities (Story 3.2)', () => {
-  it('populates community membership counts when Louvain is available', async () => {
-    const session = makeAnalyticsSession({
-      nodes: [
-        { id: 'a', centrality: 0.5, community: 0 },
-        { id: 'b', centrality: 0.4, community: 0 },
-        { id: 'c', centrality: 0.3, community: 1 },
+describe('runAnalytics — communities (in-process Leiden)', () => {
+  function makeSession({ nodes, edges }) {
+    return {
+      async run(q) {
+        if (/RETURN n\.nodeId AS id/.test(q)) return { records: nodes.map((n) => ({ get: (k) => n[k] })) };
+        if (/RETURN a\.nodeId AS s/.test(q)) return { records: edges.map((e) => ({ get: (k) => e[k] })) };
+        return { records: [] };
+      },
+      async close() {},
+    };
+  }
+
+  it('detects communities from the graph (two clusters → ≥2 communities)', async () => {
+    const session = makeSession({
+      nodes: ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => ({ id, kind: 'file', title: id })),
+      edges: [
+        { s: 'a', t: 'b', type: 'IMPORTS' }, { s: 'b', t: 'c', type: 'IMPORTS' }, { s: 'c', t: 'a', type: 'IMPORTS' },
+        { s: 'd', t: 'e', type: 'IMPORTS' }, { s: 'e', t: 'f', type: 'IMPORTS' }, { s: 'f', t: 'd', type: 'IMPORTS' },
       ],
     });
     const a = await runAnalytics(session, 'p');
     expect(a.communityAvailable).toBe(true);
-    expect(a.communities).toEqual([
-      { community: 0, count: 2 },
-      { community: 1, count: 1 },
-    ]);
-  });
-
-  it('still computes centrality god-nodes when only Louvain is missing', async () => {
-    const session = makeAnalyticsSession({
-      nodes: [{ id: 'hub', centrality: 1.0, community: 0 }],
-      mage: { community: false },
-    });
-    const a = await runAnalytics(session, 'p');
-    expect(a.centralityAvailable).toBe(true);
-    expect(a.communityAvailable).toBe(false);
-    expect(a.godNodes[0].id).toBe('hub');
-    expect(a.communities).toEqual([]);
-    // surprising connections need BOTH dimensions — skipped here
-    expect(a.surprising).toEqual([]);
+    expect(a.communities.length).toBeGreaterThanOrEqual(2);
   });
 });

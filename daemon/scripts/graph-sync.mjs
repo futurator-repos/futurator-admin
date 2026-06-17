@@ -925,11 +925,14 @@ async function processSystemGraphFacts(config) {
   const serviceDoc = await readJson('service-facts.json');
   const astDoc = await readJson('ast-facts.json');
   const apiCallsDoc = await readJson('api-calls.json');
+  // Cross-file CALLS edges from the ts-morph semantic pass (edges-only).
+  const semanticDoc = await readJson('semantic-facts.json');
 
   const factDocs = [
     ['infra', infraDoc],
     ['route', routeDoc],
     ['service', serviceDoc],
+    ['semantic', semanticDoc],
   ].filter(([, d]) => d);
 
   if (factDocs.length === 0) {

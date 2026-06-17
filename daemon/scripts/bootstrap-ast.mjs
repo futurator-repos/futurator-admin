@@ -233,6 +233,32 @@ async function runSystemGraphExtractors(args, myceliumDir, scanFiles) {
       log(`Wrote .mycelium/api-calls.json (${calls.length} calls)`);
     }
   }
+
+  // semantic-extract → cross-file CALLS via the TS compiler (ts-morph). Heavier
+  // than the syntactic passes, so it runs last; non-blocking.
+  const semanticScript = join(__dirname, 'semantic-extract.mjs');
+  if (existsSync(semanticScript)) {
+    log('Running semantic-extract (ts-morph cross-file CALLS)…');
+    try {
+      const { stdout } = await spawnCapture(
+        process.execPath,
+        [semanticScript, '--root', args.root],
+        { env: process.env },
+      );
+      if (stdout.trim()) {
+        await writeFile(join(myceliumDir, 'semantic-facts.json'), stdout, 'utf-8');
+        let n = '?';
+        try {
+          n = JSON.parse(stdout).edgeCount ?? '?';
+        } catch {
+          /* still wrote whatever it produced */
+        }
+        log(`Wrote .mycelium/semantic-facts.json (${n} cross-file CALLS edges)`);
+      }
+    } catch (err) {
+      log(`semantic-extract skipped (non-blocking): ${err.message}`);
+    }
+  }
 }
 
 async function main() {
