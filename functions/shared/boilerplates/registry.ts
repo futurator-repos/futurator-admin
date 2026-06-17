@@ -237,9 +237,36 @@ you add to \`GameState\` (e.g. \`lives\`). Assert against those keys.
   stories never collide on the wiring file.
 `;
 
+// VQA v3 E5.1/E5.2 — the canvas-game seam snapshot shape, defined ONCE so the
+// registry `testHarness.snapshotShape`, the generator-emitted
+// `__harness.schema.json` (E5.5 tamper-guarded), and any read path stay in
+// sync. Domain games ADD keys to GameState (e.g. `lives`); those ride the
+// snapshot additively and need no change here.
+const CANVAS_GAME_SNAPSHOT_SHAPE: Record<string, { type: string; enum?: string[] }> = {
+  status: { type: 'string', enum: ['idle', 'running', 'paused', 'over'] },
+  score: { type: 'number' },
+  tick: { type: 'number' },
+  entities: { type: 'array' },
+  gameOver: { type: 'boolean' },
+};
+
+// E5.5 (H1/§6.2) — the LOCKED `__harness.schema.json` manifest format:
+// `{ globalKey, snapshot:{<jsonPath>:{type,enum?}}, events:[] }`. Shipped as a
+// committed scaffold file so the seam's SHAPE is generator-owned; the
+// story-pipeline tamper-check reverts any DEV/fixer edit to it (DEV may only
+// conform the running app + populate values — FR-30).
+const CANVAS_GAME_HARNESS_SCHEMA_JSON = `${JSON.stringify(
+  { globalKey: 'window.__harness', snapshot: CANVAS_GAME_SNAPSHOT_SHAPE, events: [] },
+  null,
+  2,
+)}\n`;
+
 const NEXTJS_CANVAS_GAME_AUGMENTS: Array<{ path: string; content: string }> = [
   // SCAFFOLD.md FIRST — convention. Mirror of NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT.
   { path: 'SCAFFOLD.md', content: NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT },
+
+  // VQA v3 E5.5 — generator-owned seam shape contract (tamper-guarded).
+  { path: '__harness.schema.json', content: CANVAS_GAME_HARNESS_SCHEMA_JSON },
 
   {
     path: 'src/game/types.ts',
@@ -1468,13 +1495,12 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     testHarness: {
       globalKey: 'window.__harness',
       readySignal: 'ready',
-      snapshotShape: {
-        'snapshot.status': { type: 'string', enum: ['idle', 'running', 'paused', 'over'] },
-        'snapshot.score': { type: 'number' },
-        'snapshot.tick': { type: 'number' },
-        'snapshot.entities': { type: 'array' },
-        'snapshot.gameOver': { type: 'boolean' },
-      },
+      // jsonPath form (`snapshot.<key>`) derived from the shared shape const so
+      // the registry, the `__harness.schema.json` file, and the probe `assert`
+      // citations never diverge.
+      snapshotShape: Object.fromEntries(
+        Object.entries(CANVAS_GAME_SNAPSHOT_SHAPE).map(([k, v]) => [`snapshot.${k}`, v]),
+      ),
     },
   }),
 

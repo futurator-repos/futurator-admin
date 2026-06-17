@@ -978,6 +978,33 @@ Output only what you changed, then:
               expectExitCode: 0,
               onFail: { action: 'fail' as const, injectAs: 'TAMPER_ERROR' },
             },
+            // VQA v3 E5.5 (H1/FR-30) — SEAM-shape tamper-check. The verifiability
+            // seam's shape is generator-owned (`__harness.schema.json`, shipped as
+            // a committed scaffold file). DEV/fixer may conform the running app to
+            // the shape + populate values, but MUST NOT edit the schema — else DEV
+            // authors the oracle that grades DEV. Unlike test files (staged
+            // mid-pipeline), the schema is a static scaffold file, so the baseline
+            // is HEAD. No-op for apps without a seam (file absent). This guards the
+            // SHAPE only; the assertion expressions are QA-AUTHOR-owned (E8).
+            {
+              id: 'seam-tamper-check',
+              stepType: 'shell' as const,
+              command:
+                `cd ${workingDir} && ` +
+                `if [ ! -f __harness.schema.json ]; then echo __SEAM_TAMPER_SKIP__ '(no seam in this app)'; exit 0; fi; ` +
+                `if ! git ls-files --error-unmatch __harness.schema.json >/dev/null 2>&1; then echo __SEAM_TAMPER_SKIP__ '(seam schema untracked)'; exit 0; fi; ` +
+                `git --no-pager diff --name-only HEAD -- __harness.schema.json 2>/dev/null > /tmp/seam-dirty.txt || true; ` +
+                `if [ -s /tmp/seam-dirty.txt ]; then ` +
+                `  echo __SEAM_TAMPER_DETECTED__; cat /tmp/seam-dirty.txt; ` +
+                // Revert the generator-owned shape from HEAD, undoing the edit.
+                `  git checkout HEAD -- __harness.schema.json 2>/dev/null || true; ` +
+                `  exit 1; ` +
+                `else echo __SEAM_TAMPER_CLEAN__; fi`,
+              timeout: 15000,
+              captureAs: 'SEAM_TAMPER_OUTPUT',
+              expectExitCode: 0,
+              onFail: { action: 'fail' as const, injectAs: 'SEAM_TAMPER_ERROR' },
+            },
           ] as PipelineStep[])
         : []),
 

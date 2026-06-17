@@ -577,4 +577,25 @@ describe('nextjs-canvas-game — VQA v3 verifiability seam (E2)', () => {
     expect(game.scaffoldContract).toMatch(/__harness/);
     expect(game.scaffoldContract).toMatch(/PRE-BAKED|do NOT author/i);
   });
+
+  it('ships a committed __harness.schema.json that matches testHarness.snapshotShape (E5.5)', () => {
+    const file = game.augmentFiles?.find((f) => f.path === '__harness.schema.json');
+    expect(file).toBeDefined();
+    const schema = JSON.parse(file!.content) as {
+      globalKey: string;
+      snapshot: Record<string, { type: string; enum?: string[] }>;
+      events: unknown[];
+    };
+    expect(schema.globalKey).toBe('window.__harness');
+    expect(Array.isArray(schema.events)).toBe(true);
+    // The schema's snapshot map must be exactly the testHarness shape, minus
+    // the `snapshot.` jsonPath prefix — single source of truth (no drift).
+    const fromContract = Object.fromEntries(
+      Object.entries(game.testHarness!.snapshotShape).map(([k, v]) => [
+        k.replace(/^snapshot\./, ''),
+        v,
+      ]),
+    );
+    expect(schema.snapshot).toEqual(fromContract);
+  });
 });
