@@ -17,6 +17,7 @@ import {
   useSkillProposalDetail,
   useProposalDecision,
   useSubmitToGate,
+  useLlmReview,
   type SkillProposal,
   type ProposalStatus,
   type SecurityStatus,
@@ -225,6 +226,7 @@ function ProposalDrawer({
   const { data, isLoading } = useSkillProposalDetail(id);
   const p = data?.proposal;
   const quarantined = p?.status === 'quarantined';
+  const llmReview = useLlmReview();
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -241,6 +243,24 @@ function ProposalDrawer({
         {p && (
           <div className="space-y-3 text-sm">
             <p className="text-muted-foreground">{p.gist}</p>
+
+            {p.dedup && (
+              <div className="rounded border border-warning/40 bg-warning/5 p-2 text-xs">
+                Possible duplicate of <code>{p.dedup.canonicalName}</code> (
+                {Math.round(p.dedup.similarity * 100)}% similar) — consider merging instead of
+                adding.
+              </div>
+            )}
+
+            {p.llmReview && (
+              <div className="rounded border bg-muted/30 p-2 text-xs">
+                <p className="font-medium mb-0.5">
+                  Gate-2 LLM review (advisory):{' '}
+                  <span className="uppercase">{p.llmReview.verdict}</span>
+                </p>
+                <p className="text-muted-foreground">{p.llmReview.summary}</p>
+              </div>
+            )}
 
             {p.scanReport && p.scanReport.patternsHit.length > 0 && (
               <div className="rounded border border-destructive/40 bg-destructive/5 p-2">
@@ -292,6 +312,15 @@ function ProposalDrawer({
             onClick={() => p && onAct(p.proposalId, 'reject')}
           >
             Reject
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={llmReview.isPending || !p}
+            onClick={() => p && llmReview.mutate(p.proposalId)}
+            title="Run a deeper LLM security/quality review (advisory — never blocks)"
+          >
+            {llmReview.isPending ? 'Reviewing…' : 'LLM review'}
           </Button>
         </DialogFooter>
       </DialogContent>

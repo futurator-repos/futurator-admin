@@ -53,6 +53,13 @@ export interface SkillProposal {
   createdAt: string;
   ratifiedBy?: string;
   ratifiedAt?: string;
+  dedup?: { canonicalName: string; similarity: number };
+  llmReview?: {
+    verdict: 'approve' | 'concerns' | 'reject';
+    summary: string;
+    reviewedAt: string;
+    model?: string;
+  };
 }
 
 export interface DiffLine {
@@ -115,5 +122,21 @@ export function useSubmitToGate() {
   return useMutation({
     mutationFn: (input: GateSubmit) => api.post<{ proposal: SkillProposal }>('/skills/gate', input),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['skill-proposals'] }),
+  });
+}
+
+/** Story 2.5 — on-demand Gate-2 LLM review (advisory). */
+export function useLlmReview() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.post<{ proposal: SkillProposal }>(
+        `/skill-proposals/${encodeURIComponent(id)}/llm-review`,
+        {},
+      ),
+    onSuccess: (_d, id) => {
+      qc.invalidateQueries({ queryKey: ['skill-proposal', id] });
+      qc.invalidateQueries({ queryKey: ['skill-proposals'] });
+    },
   });
 }

@@ -25,6 +25,7 @@ const repoMocks = vi.hoisted(() => ({
   listByStatus: vi.fn(),
   listAllProposals: vi.fn(),
   updateStatus: vi.fn(),
+  patchProposalFields: vi.fn(),
 }));
 vi.mock('../../shared/repositories/skill-proposals-repository', () => repoMocks);
 
@@ -54,6 +55,19 @@ vi.mock('../../shared/dynamo-client', () => ({
   docClient: { send: sendMock },
   TABLE_NAMES: new Proxy({}, { get: (_t, k) => `test-${String(k)}` }),
 }));
+
+// Mock the Anthropic SDK for the on-demand LLM review (Story 2.5).
+const { messagesCreate } = vi.hoisted(() => ({ messagesCreate: vi.fn() }));
+vi.mock('@anthropic-ai/sdk', () => {
+  class APIError extends Error {
+    status = 502;
+  }
+  class Anthropic {
+    messages = { create: messagesCreate };
+    static APIError = APIError;
+  }
+  return { default: Anthropic };
+});
 
 import { app } from '../index';
 
@@ -89,6 +103,7 @@ function proposal(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  process.env.ANTHROPIC_API_KEY = 'test-key';
   authoringMocks.getSkillBody.mockResolvedValue({ body: null, sha: null });
   authoringMocks.putSkill.mockResolvedValue({ name: 'x', created: true });
   authoringMocks.appendReport.mockResolvedValue({ ok: true });
@@ -197,6 +212,30 @@ describe('POST /api/skill-proposals/:id/{reject,defer}', () => {
     repoMocks.updateStatus.mockResolvedValue(proposal({ status: 'deferred' }));
     const res = await app.request('/api/skill-proposals/PROP-1/defer', { method: 'POST' });
     expect(res.status).toBe(200);
+  });
+});
+
+describe('POST /api/skill-proposals/:id/llm-review', () => {
+  it('attaches an advisory verdict (never blocks)', async () => {
+    repoMocks.getProposal.mockResolvedValue(proposal());
+    repoMocks.patchProposalFields.mockResolvedValue(proposal());
+    messagesCreate.mockResolvedValue({
+      content: [
+        { type: 'text', text: '{"verdict":"concerns","summary":"broad trigger language"}' },
+      ],
+    });
+    const res = await app.request('/api/skill-proposals/PROP-1/llm-review', { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(messagesCreate).toHaveBeenCalledTimes(1);
+    const arg = repoMocks.patchProposalFields.mock.calls[0][1];
+    expect(arg.llmReview.verdict).toBe('concerns');
+    expect(arg.llmReview.summary).toContain('broad trigger');
+  });
+
+  it('404s for an unknown proposal', async () => {
+    repoMocks.getProposal.mockResolvedValue(null);
+    const res = await app.request('/api/skill-proposals/none/llm-review', { method: 'POST' });
+    expect(res.status).toBe(404);
   });
 });
 
