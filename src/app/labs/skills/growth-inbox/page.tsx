@@ -69,7 +69,7 @@ function TrustBadge({ tier }: { tier?: TrustTier }) {
 
 export default function GrowthInboxPage() {
   const [status, setStatus] = useState<ProposalStatus>('pending');
-  const { data, isLoading, refetch } = useSkillProposals(status);
+  const { data, isLoading, error, refetch } = useSkillProposals(status);
   const proposals = useMemo(() => data?.proposals ?? [], [data]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cursor, setCursor] = useState(0);
@@ -149,7 +149,12 @@ export default function GrowthInboxPage() {
       </p>
 
       {isLoading && <p className="text-sm text-muted-foreground">Loading proposals…</p>}
-      {!isLoading && proposals.length === 0 && (
+      {error && (
+        <p className="text-sm text-destructive">
+          Couldn&apos;t load proposals — is the API deployed? ({(error as Error)?.message})
+        </p>
+      )}
+      {!isLoading && !error && proposals.length === 0 && (
         <p className="text-sm text-muted-foreground">
           No <strong>{status}</strong> proposals. The reflector loop, manual adds, and bulk
           acquisition all land here.
