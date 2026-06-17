@@ -239,6 +239,22 @@ run.
 
 **Effort:** S (IAM) + M (surface UI). **Track:** C (learning loop). **Status:** proposed.
 
+#### Agent notes — skills (2026-06-18, Claude)
+
+**Extends F5, and partly de-risks it.** The "advisory-only, nothing auto-acts" half of this
+finding is now **closed in code** by the Skills-Institution branch (unshipped): the apply
+consumer that was missing has been built — `daemon/pipelines/reflector-apply.mjs:209-213`
+authors a **new app-evolved skill** from a confirmed `project-skill/create` reflection's
+`content` (Gate-1-scanned before commit), and `daemon/lib/reflection-apply-poller.mjs:41`
+(`runReflectionApplyTick`) is the daemon poller that actually consumes `confirmed`
+reflections (wired in `agent-daemon.mjs`, gated by `agent.paused`). **However the loop is
+still blocked upstream by F5's two root causes:** (1) the **IAM write failure** means
+`written=0` — no reflection row is ever stored, so the new poller has nothing to consume;
+(2) at **`mvp` rigor story-scope reflection doesn't fire** (production-only), so pacman3
+only got plan/wave-scope proposals. **Net: fix F5's IAM grant first — only then does the
+now-built E1 loop close end-to-end.** See Track I (F24) for using a "relevant-skill-
+available but zero-activation" event as an additional reflector trigger.
+
 ### F6 — Cost ceiling is a soft post-hoc check (P0 for cost safety)
 
 **Evidence.** `totalCostUsd` = **$21.01** with `costCeilingUsd` = **$20** → overran 105%.
@@ -725,6 +741,152 @@ their `mcp-config.mjs`, commit `ceea33e`).
 **Severity:** P1 — presents as a **full pipeline stall** until daemon restart (fails fast, no
 corruption / no cost runaway, self-heals on restart — hence P1 not P0).
 
+### F24 — Skill activation collapse: agents ignore the loadout (P1, dominant under-utilization)
+
+**Evidence (pacman3 forensic `skills` block).** `hasSkillTool: true`,
+`sessionsReportingZeroSkills: 0`, `availableSkillCount: 66` — loading works. But
+`totalSkillToolUseEvents: 4` across `sessionsReportingAvailability: 77` = **5.2% of
+sessions ever invoke a skill**, and `activatedSkills` = **one** distinct skill
+(`frontend-design @ anthropic-official`, ×2, both `dev`/`compile` early in the run) =
+**1.5% of the 66 available skills used**. For a Canvas2D game (ghost AI, collision,
+game-loop, scoring), no game-domain skill activated. The skill **infrastructure** is
+healthy; **utilization** has collapsed.
+
+**Root cause.** This is a behavioral/prompting problem, not a loading or curation one. The
+loadout is offered as a flat name+description block
+(`daemon/lib/skills-prompt.mjs:140-155`) with generic, utterance-shaped descriptions; the
+agent is never _pushed_ a relevant skill body for the story it's on. The earlier
+manifest-rationale fix (task-shaped descriptions) helped surface intent but activation is
+still ~nil. **None of the Skills-Institution work (gate / trust / inbox / authoring)
+touches activation** — a perfectly-curated, `trusted`, game-relevant skill still dies here.
+
+**Proposed fix (best decision: make skill use _push_, not _pull_).**
+
+- **Per-story relevance injection.** At dev/test/api-author spawn, rank the trusted
+  loadout by cosine of the **story text** vs `index.embeddings.json` (see F27 — the
+  sidecar is written but never read) and inject the **top-3 skill _bodies_** (not just
+  names) into that agent's system prompt for that story. A body in-context is invoked far
+  more than a name in a list.
+- **Activation as a learning signal.** Emit a reflector signal when a story had a
+  high-relevance trusted skill available but `skill_activated == 0` — this is exactly the
+  "non-obvious happened" trigger the reflector wants, and it feeds the E1 loop (F5).
+- **Measure it.** Promote `activationRate` (tool-uses / sessions) to a first-class forensic
+  KPI with a cohort baseline, so this regression is visible per plan.
+
+**Effort:** M (prompt injection + ranking) + S (forensic KPI). **Track:** I. **Status:** proposed.
+
+### F25 — Scout dormancy: zero plan-tailored skill discovery (P1)
+
+**Evidence.** `skills.skillScoutRuns: []` — the scout **never fired during the entire
+14-story plan**. The loadout was frozen at whatever app-bootstrap installed; it was never
+refreshed for the game's actual needs. The plan `intent` literally reads _"Create a pacman
+game, with different ghost types … eat all the dots …"_ — a strong domain signal that
+produced **no** skill search.
+
+**Root cause.** The scout is wired (`daemon/agent-daemon.mjs:187` `runSkillScoutJob`;
+spawned at `daemon/pipelines/app-bootstrap.mjs:419,459`), but its in-plan triggers are
+**mechanical only** — T4/T5 new-dependency (`daemon/lib/skill-scout-triggers.mjs:38`
+`detectNewDependencies`, `:71` debouncer) and T6 reviewer-clusters (`:110`
+`detectReviewerClusters`). A Canvas2D scaffold adds **no new deps** (kills T4/T5) and
+reviewer rejections didn't cluster (kills T6), so nothing fired. **There is no
+intent-aware trigger** — plan _meaning_ never drives discovery.
+
+**Proposed fix.** Add a **T-intent trigger** at plan-build: derive a domain query from the
+plan `intent` + concept artifacts (PRD/UX/architecture) and run one scout resolve at plan
+start (rigor-gated, mvp+). Route its discoveries through the gate/inbox (F26), not
+straight to install. This is the trigger that would have surfaced "canvas-game / sprite /
+collision" skills for pacman3.
+
+**Effort:** M. **Track:** I. **Status:** proposed.
+
+### F26 — ⚠️ Trusted-only gate now blocks the scout's community installs; two disconnected trust authorities (P1, pre-deploy reconcile)
+
+**Evidence / regression introduced by Skills-Institution Story 4.2 (not yet deployed).**
+The scout's install dispositions both terminate at `applyConfirmedProposals`
+(`daemon/pipelines/skill-scout-job-runner.mjs:243` auto-confirm; surface-card → operator
+approve → same installer), which calls `runVendorSkills`. Story 4.2 inserted a trusted-only
+gate _inside_ vendor (`daemon/lib/app-bootstrap-steps/vendor-skills.mjs:195-200`
+`isInstallable`). Effect:
+
+- ✅ Existing on-disk skills + future installs from **auto-trust** sources
+  (`anthropic-official`, `futurator-internal`) — unaffected (legacy entries grandfathered,
+  gate runs _after_ the on-disk skip).
+- ❌ Scout-discovered **community-source** skills — now **blocked at vendor even after the
+  operator approves the scout card**. We don't own the community index, and retro-scan
+  (`scripts/retro-scan-skills.mjs`) only stamps our canonical repo, so a community entry
+  can never become `trustTier: trusted` on that path. The scout-card "approve" and the
+  inbox "ratify" are **two disconnected trust gates** — the operator approves and _nothing
+  installs_.
+
+Moot for pacman3 (scout was dormant), but a **latent behavior change** that ships the
+moment 4.2 deploys.
+
+**Root cause.** The Skills-Institution gate/inbox (`functions/api/index.ts` →
+`/api/skills/gate`, `/api/skill-proposals/*`) was built as a parallel path; the **scout was
+never wired into it.** Two trust mechanisms (scout autoTrust/operator-card vs the index
+`trustTier` facet) coexist without a bridge.
+
+**Proposed fix (best decision: make the gate the single trust authority).**
+
+- The scout's non-auto-trust (`surface-card`) disposition should **emit a skill-proposal
+  (`source: bulk`) into the inbox** rather than `applyConfirmedProposals` → vendor.
+  Operator ratifies → it publishes into our `trusted` registry → installs from there. This
+  is the design the inbox was built for; only the scout→inbox edge is missing.
+- Auto-trust internal/anthropic discoveries keep auto-installing (grandfathered) — no
+  change to the common case.
+- **Sequencing:** do NOT deploy 4.2's vendor gate alone. Either ship the scout→inbox
+  bridge in the same release, or ship 4.2 and explicitly document the community path as
+  intentionally disabled-pending-bridge. Recommended: ship together — the security win is
+  real and the dead window is avoidable.
+
+**Effort:** M (scout→inbox adapter + daemon-side proposal write). **Track:** I.
+**Status:** proposed. **Pre-deploy gate for the Skills-Institution branch.**
+
+### F27 — Loadout relevance is unranked; the embeddings sidecar is write-only (P2)
+
+**Evidence.** `index.embeddings.json` is generated (`scripts/ingest-skills.mjs:226`,
+Voyage `voyage-3`, 1024-dim) and its header even calls itself _"the retrieval sidecar
+SKILL-SCOUT queries"_ (`scripts/ingest-skills.mjs:16`) — but **no reader exists**: grep
+finds zero cosine/vector reads in `skills-prompt.mjs`, `federation-resolver.mjs`, or
+`skill-scout-runner.mjs`. The loadout is ordered **pins-first, then readdir**
+(`daemon/lib/skills-prompt.mjs:140-145`), never by relevance to the current story. (Note:
+truncation was _not_ the bottleneck for pacman3 — 66 skills < `MAX_SKILLS = 80`
+(`daemon/lib/skills-prompt.mjs:26`) — so every skill was visible and still ignored.)
+
+**Root cause.** The two-stage retrieval from the vision (trust-filter → keyword⊕vector →
+rerank) is unbuilt; the embeddings are write-only. Skills-Institution added the
+**trust-filter** half (`daemon/lib/skill-trust.mjs` `isInstallable`) and uses cosine in
+dedup (`functions/shared/skill-gate/dedup.ts`), but never wired retrieval into _load-time_
+ordering.
+
+**Proposed fix.** Implement load-time two-stage retrieval: trust-filter (reuse
+`isInstallable`) → cosine over `index.embeddings.json` vs the story/plan text → top-K
+rank. Cheapest first step: just **read** the already-written sidecar in `skills-prompt.mjs`
+and re-rank. Direct enabler of F24's per-story injection.
+
+**Effort:** M. **Track:** I. **Status:** proposed.
+
+### F28 — No usage telemetry → dead skills never pruned; loadout only grows (P2)
+
+**Evidence.** 66 skills available, 1 used (F24). The other 65 ride in **every** future
+loadout, diluting relevance, with nothing to retire them. The forensic already computes
+`skills.activatedSkills` / `skills.perJob` per plan, but that signal is never persisted
+back to the registry. The `maturity` facet added in Story 2.1
+(`functions/shared/schemas/skill-index-entry-schema.ts`) is **never populated** —
+`index.usage.json` is a Phase-2 deferral.
+
+**Root cause.** No feedback edge from activation telemetry → registry facets → loadout
+composition. Curation is currently input-only (what enters), never output-pruned (what's
+dead).
+
+**Proposed fix.** Persist per-plan `skill_activated` counts into `index.usage.json` (and
+the `maturity` facet); a periodic curator pass (extend `retro-scan-skills.mjs`) marks
+skills with **0 activations across N plans** as `deprecated` — which 4.2 already makes
+non-installable — shrinking the loadout to what's actually used. Surface "stale/dead" in
+the Registry browse (Story 4.3 already has the trust column to hang it on).
+
+**Effort:** M. **Track:** I. **Status:** proposed.
+
 ---
 
 ## 4. Workstreams
@@ -739,6 +901,7 @@ corruption / no cost runaway, self-heals on restart — hence P1 not P0).
 | **F** | QA evidence integrity & stage isolation         | F11, F12, F13                               | _unclaimed_    | proposed                                                                       |
 | **G** | Knowledge-graph integrity & grounding substrate | F14, F15, F16, F17, F18                     | **graphify**   | F17/F18 shipped; F14–F16 proposed                                              |
 | **H** | Deployment control panel & promotion ladder     | F19, F20, F21, F22, F23 (+ F11 deploy side) | **deployment** | F19/F20/F21 + F22-reconcile shipped (`1755365`); F22-subdomains + F23 proposed |
+| **I** | Skill activation, discovery & trust integration | F24, F25, F26, F27, F28 (+ F5 loop side)    | _unclaimed_    | proposed; **F26 is a pre-deploy gate for the Skills-Institution branch**       |
 
 ---
 
@@ -892,45 +1055,53 @@ merge 269s · `8c39c9f7` vqa 369s · `805cdb92` vqa 339s.
 
 ## Appendix B — Key file references
 
-| Concern                                      | File:line                                                                                                                                                                                                                    |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Per-story pipeline                           | `functions/shared/pipelines/story-pipeline.ts`                                                                                                                                                                               |
-| Story context pack                           | `daemon/pipelines/lib/story-context-pack.mjs`                                                                                                                                                                                |
-| Cached tsc (exists, prework-only)            | `daemon/lib/cached-tsc.mjs`                                                                                                                                                                                                  |
-| Prework gate                                 | `daemon/lib/prework-gate.mjs`                                                                                                                                                                                                |
-| Wave VQA runner                              | `daemon/lib/wave-vqa-runner.mjs`                                                                                                                                                                                             |
-| Wave merge                                   | `daemon/lib/wave-merge.mjs`                                                                                                                                                                                                  |
-| VQA fix-story mint (title)                   | `daemon/lib/wave-vqa-fix-story.mjs:53`                                                                                                                                                                                       |
-| Retry / story rerun (jobId overwrite)        | `functions/shared/services/story-rerun-launcher.ts:140`                                                                                                                                                                      |
-| Forensic builder (event collection)          | `functions/shared/timer/forensic-builder.ts:277`                                                                                                                                                                             |
-| Forensic endpoint                            | `functions/api/index.ts:12125` (`GET /plans/:id/timing/forensic`)                                                                                                                                                            |
-| Agent events repo (7-day TTL)                | `functions/shared/repositories/agent-events-repository.ts`                                                                                                                                                                   |
-| Reflector runner                             | `daemon/pipelines/reflector-runner.mjs`                                                                                                                                                                                      |
-| UI live output / events                      | `src/components/labs/agentic-workflow/story-live-output.tsx`, `src/hooks/use-agent-events.ts`                                                                                                                                |
-| QA auto-approve + dev-deploy co-launch (F11) | `functions/cron/wave-completion-check.ts:210` (qa-execute), `:273-283` (dev-deploy), `:259-260` (intent comment)                                                                                                             |
-| Deploy config rewrite (F11)                  | `functions/shared/deploy/build-deploy-pipeline.ts:47` (Edit/Write tools), `:66` (next.config basePath/output rewrite)                                                                                                        |
-| QA execute pipeline / capture / report (F12) | `functions/shared/pipelines/visual-qa-pipeline.ts:454` (qa-prepare boot), `:518-662` (per-test capture), `:656` (SCREENSHOTS_CAPTURED), `:955` (`overall = fail>0`)                                                          |
-| QA judge prompts (F12c)                      | `functions/shared/pipelines/visual-qa-pipeline.ts:786` (L1), `:886` (L2)                                                                                                                                                     |
-| Seam/assert executor (F13, exists)           | `functions/shared/pipelines/visual-qa-pipeline.ts:616-626` (`assert` → `page.evaluate(window.__harness)`)                                                                                                                    |
-| Claims-table thumbnail (F12 UI)              | `src/components/labs/plan-dashboard/views/qa/claims-table.tsx:296` (`<img onError>` hides broken/404)                                                                                                                        |
-| AST scan + ast-facts persist (F14)           | `daemon/scripts/bootstrap-ast.mjs:301-305` (`ast-extract --scan` over `args.root`), `:297`/`:328` (writes `<root>/.mycelium/ast-facts.json`)                                                                                 |
-| AST → graph translation, additive (F14/F15)  | `daemon/scripts/graph-sync.mjs:686` (`processAstFacts`)                                                                                                                                                                      |
-| Orphan invariant emit + swallow (F16)        | `daemon/scripts/graph-sync.mjs:1049` (`Orphan invariant FAILED`), `daemon/scripts/lib/graph-integrity.mjs:112` (logic); swallowed at `daemon/scripts/bootstrap-ast.mjs:371` (`exited 3 (non-blocking)`)                      |
-| projectId normalization (F17, shipped)       | `daemon/scripts/graph-sync.mjs:745` (file-node MERGE `ON MATCH SET n.projectId = $projectId` — commit `0d5dd6a`)                                                                                                             |
-| Living-doc REFERENCES layer (F18, shipped)   | `daemon/scripts/lib/doc-references.mjs` (`isLivingDoc`, `extractWikilinks({inlineRefs})`), wired in `daemon/scripts/graph-sync.mjs` — commit `0445e6a`                                                                       |
-| DEPLOY_URL extractor regex (F19)             | `functions/shared/deploy/build-deploy-pipeline.ts`, `functions/shared/deploy/build-promote-pipeline.ts` (`DEPLOY_URL` pattern — `_` now allowed) — commit `1755365`                                                          |
-| Framework-aware deploy prompt (F20)          | `functions/shared/deploy/build-deploy-pipeline.ts` (step-1 next/vite detect), `build-promote-pipeline.ts` (rebuild branch) — commit `1755365`                                                                                |
-| Per-env streaming + smoke (F21)              | `functions/shared/repositories/deploy-report-aggregator.ts` (`environments[].activeJobId`/`smokeStatus`), `views/deploy-stage-view.tsx`, `views/deploy/{environment-ladder,deploy-logs,deploy-steps}.tsx` — commit `1755365` |
-| Env-target resolution / build-once (F22)     | `functions/shared/deploy/deploy-targets.ts` (`provisioned` flag, prefix vs subdomain), `build-promote-pipeline.ts` (`copyMode`), `views/deploy/release-strip.tsx` (ladder CTA); subdomain recipe `deployment-v2.5.md §14`    |
-| MCP-config spawn injection (F23)             | `daemon/lib/mcp-config.mjs:23` (`CONFIG_PATH`), `:37-52` (`ensureConfig` write-once latch, no `existsSync`/`mkdirSync`), `:60` (`myceliumMcpSpawn`); injected at `daemon/agent-daemon.mjs:872`; introduced commit `ceea33e`  |
+| Concern                                      | File:line                                                                                                                                                                                                                                                                           |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Per-story pipeline                           | `functions/shared/pipelines/story-pipeline.ts`                                                                                                                                                                                                                                      |
+| Story context pack                           | `daemon/pipelines/lib/story-context-pack.mjs`                                                                                                                                                                                                                                       |
+| Cached tsc (exists, prework-only)            | `daemon/lib/cached-tsc.mjs`                                                                                                                                                                                                                                                         |
+| Prework gate                                 | `daemon/lib/prework-gate.mjs`                                                                                                                                                                                                                                                       |
+| Wave VQA runner                              | `daemon/lib/wave-vqa-runner.mjs`                                                                                                                                                                                                                                                    |
+| Wave merge                                   | `daemon/lib/wave-merge.mjs`                                                                                                                                                                                                                                                         |
+| VQA fix-story mint (title)                   | `daemon/lib/wave-vqa-fix-story.mjs:53`                                                                                                                                                                                                                                              |
+| Retry / story rerun (jobId overwrite)        | `functions/shared/services/story-rerun-launcher.ts:140`                                                                                                                                                                                                                             |
+| Forensic builder (event collection)          | `functions/shared/timer/forensic-builder.ts:277`                                                                                                                                                                                                                                    |
+| Forensic endpoint                            | `functions/api/index.ts:12125` (`GET /plans/:id/timing/forensic`)                                                                                                                                                                                                                   |
+| Agent events repo (7-day TTL)                | `functions/shared/repositories/agent-events-repository.ts`                                                                                                                                                                                                                          |
+| Reflector runner                             | `daemon/pipelines/reflector-runner.mjs`                                                                                                                                                                                                                                             |
+| UI live output / events                      | `src/components/labs/agentic-workflow/story-live-output.tsx`, `src/hooks/use-agent-events.ts`                                                                                                                                                                                       |
+| QA auto-approve + dev-deploy co-launch (F11) | `functions/cron/wave-completion-check.ts:210` (qa-execute), `:273-283` (dev-deploy), `:259-260` (intent comment)                                                                                                                                                                    |
+| Deploy config rewrite (F11)                  | `functions/shared/deploy/build-deploy-pipeline.ts:47` (Edit/Write tools), `:66` (next.config basePath/output rewrite)                                                                                                                                                               |
+| QA execute pipeline / capture / report (F12) | `functions/shared/pipelines/visual-qa-pipeline.ts:454` (qa-prepare boot), `:518-662` (per-test capture), `:656` (SCREENSHOTS_CAPTURED), `:955` (`overall = fail>0`)                                                                                                                 |
+| QA judge prompts (F12c)                      | `functions/shared/pipelines/visual-qa-pipeline.ts:786` (L1), `:886` (L2)                                                                                                                                                                                                            |
+| Seam/assert executor (F13, exists)           | `functions/shared/pipelines/visual-qa-pipeline.ts:616-626` (`assert` → `page.evaluate(window.__harness)`)                                                                                                                                                                           |
+| Claims-table thumbnail (F12 UI)              | `src/components/labs/plan-dashboard/views/qa/claims-table.tsx:296` (`<img onError>` hides broken/404)                                                                                                                                                                               |
+| AST scan + ast-facts persist (F14)           | `daemon/scripts/bootstrap-ast.mjs:301-305` (`ast-extract --scan` over `args.root`), `:297`/`:328` (writes `<root>/.mycelium/ast-facts.json`)                                                                                                                                        |
+| AST → graph translation, additive (F14/F15)  | `daemon/scripts/graph-sync.mjs:686` (`processAstFacts`)                                                                                                                                                                                                                             |
+| Orphan invariant emit + swallow (F16)        | `daemon/scripts/graph-sync.mjs:1049` (`Orphan invariant FAILED`), `daemon/scripts/lib/graph-integrity.mjs:112` (logic); swallowed at `daemon/scripts/bootstrap-ast.mjs:371` (`exited 3 (non-blocking)`)                                                                             |
+| projectId normalization (F17, shipped)       | `daemon/scripts/graph-sync.mjs:745` (file-node MERGE `ON MATCH SET n.projectId = $projectId` — commit `0d5dd6a`)                                                                                                                                                                    |
+| Living-doc REFERENCES layer (F18, shipped)   | `daemon/scripts/lib/doc-references.mjs` (`isLivingDoc`, `extractWikilinks({inlineRefs})`), wired in `daemon/scripts/graph-sync.mjs` — commit `0445e6a`                                                                                                                              |
+| DEPLOY_URL extractor regex (F19)             | `functions/shared/deploy/build-deploy-pipeline.ts`, `functions/shared/deploy/build-promote-pipeline.ts` (`DEPLOY_URL` pattern — `_` now allowed) — commit `1755365`                                                                                                                 |
+| Framework-aware deploy prompt (F20)          | `functions/shared/deploy/build-deploy-pipeline.ts` (step-1 next/vite detect), `build-promote-pipeline.ts` (rebuild branch) — commit `1755365`                                                                                                                                       |
+| Per-env streaming + smoke (F21)              | `functions/shared/repositories/deploy-report-aggregator.ts` (`environments[].activeJobId`/`smokeStatus`), `views/deploy-stage-view.tsx`, `views/deploy/{environment-ladder,deploy-logs,deploy-steps}.tsx` — commit `1755365`                                                        |
+| Env-target resolution / build-once (F22)     | `functions/shared/deploy/deploy-targets.ts` (`provisioned` flag, prefix vs subdomain), `build-promote-pipeline.ts` (`copyMode`), `views/deploy/release-strip.tsx` (ladder CTA); subdomain recipe `deployment-v2.5.md §14`                                                           |
+| MCP-config spawn injection (F23)             | `daemon/lib/mcp-config.mjs:23` (`CONFIG_PATH`), `:37-52` (`ensureConfig` write-once latch, no `existsSync`/`mkdirSync`), `:60` (`myceliumMcpSpawn`); injected at `daemon/agent-daemon.mjs:872`; introduced commit `ceea33e`                                                         |
+| Skill prompt-line build + ordering (F24/F27) | `daemon/lib/skills-prompt.mjs:140-155` (pins-first then readdir, `buildSkillsPromptLine`), `:26` (`MAX_SKILLS=80`), `:28` (`MAX_SECTION_CHARS=8000`)                                                                                                                                |
+| Scout triggers + spawn (F25)                 | `daemon/lib/skill-scout-triggers.mjs:38/71/110` (T4/T5/T6 helpers — no intent trigger); `daemon/agent-daemon.mjs:187` (`runSkillScoutJob`); `daemon/pipelines/app-bootstrap.mjs:419,459` (bootstrap spawn)                                                                          |
+| Scout install dispositions (F26)             | `daemon/pipelines/skill-scout-job-runner.mjs:238-269` (`auto-confirm`→`applyConfirmedProposals`; `surface-card`); installs via `skill-installer.mjs`→`runVendorSkills`                                                                                                              |
+| Trusted-only vendor gate (F26, Story 4.2)    | `daemon/lib/app-bootstrap-steps/vendor-skills.mjs:140-160` (`getSourceIndexEntry`), `:195-200` (`isInstallable` gate, after on-disk skip), `:242` (`blocked` count); predicate `daemon/lib/skill-trust.mjs`                                                                         |
+| Gate / inbox (F26 target path)               | `functions/api/index.ts` (`/api/skills/gate`, `/api/skill-proposals/*`); `functions/shared/skill-gate/{index,labeling,security-scan,dedup}.ts`; store `functions/shared/repositories/skill-proposals-repository.ts`                                                                 |
+| Embeddings sidecar write-only (F27)          | `scripts/ingest-skills.mjs:226` (writes `index.embeddings.json`, voyage-3 1024-dim), `:16` (header _claims_ SCOUT queries it — no reader exists in prompt/resolver/scout)                                                                                                           |
+| E1 apply loop (F5 extension)                 | `daemon/pipelines/reflector-apply.mjs:209-213` (`authorAppSkill` from reflection `content`), `daemon/lib/reflection-apply-poller.mjs:41` (`runReflectionApplyTick` consumes `confirmed`); `maturity` facet unpopulated (F28) `functions/shared/schemas/skill-index-entry-schema.ts` |
 
 ---
 
 ## Changelog
 
-| Date       | Agent                 | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ---------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 2026-06-17 | Claude (forensics #1) | Initial draft: findings F1–F10, workstreams A–E, roadmap, appendices from pacman3 forensic + daemon-log cross-check.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| 2026-06-18 | QAreview-agentic      | QA-stage forensic on the same pacman3 run (QA job `3c99fd51`, not walked by the original forensic — F2/F3). Added F11 (deploy×QA same-worktree race → `next.config.ts` rewrite relocates app off root → per-test 404s), F12 (broken/missing evidence scored as blocking defects; capture gate + honest verdict lane + judge hallucination), F13 (state/behavior ACs authored with no executable probe). New Track F; F11/F12 → Phase 1, F13 → Phase 3; open Q6/Q7; Appendix B refs. Verdict: QA false-blocked a correct app — every FAIL was an infra artifact.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| 2026-06-18 | deployment            | Deployment-stage findings from building + shipping the v2.5 promotion-ladder control panel (brick1 went live dev→staging→prod). New **Track H**: F19 (DEPLOY*URL extractor truncated dev/staging URLs at `*`→ dead "Open in dev" link — **shipped`1755365`**), F20 (Vite-only deploy prompts vs Next.js apps → agent improvised; framework-aware now — **shipped `1755365`**; does NOT close F11), F21 (dev/staging deploys unobservable + smoke unsurfaced → per-env streaming + smoke badge/soft-gate — **shipped `1755365`**), F22 (build-once not real — fallback prefixes force rebuild-per-rung; dual-prod-path reconcile **shipped**, subdomain provisioning **open**, recipe in `deployment-v2.5.md §14`), F23 (MCP-config missing → halts **every** agent spawn; 2-line `existsSync`+`mkdirSync`self-heal — **open**, owner graphify). Added F11 agent-notes (deploy still rewrites QA's`next.config.ts` post-F20 → Q7/Q11), Q11/Q12, roadmap slots (F23→Phase 1, F22→Phase 3), Appendix B refs. Reconciled the deployment rubric's forward-refs "F14/F15" → canonical **F22/F23**. Same lesson as F11/F12/F14 — clean agents, leaky harness. |
-| 2026-06-18 | graphify              | Knowledge-graph (knowledge-compile output) forensic on the same pacman3 run — broken graph on correct code (177/290, 29 unconnected, Orphan invariant FAIL 20). Added new **Track G** + F14 (truncated ast-facts = last story's worktree scope, not the project), F15 (additive ingest never prunes deleted-source zombies), F16 (orphan invariant computed but swallowed at `exit 3`), F17 (job-UUID `projectId` strands file nodes → silent DEFINES loss — **shipped `0d5dd6a`**), F18 (living docs float; new `REFERENCES` doc→code edge layer for living docs, plan-docs excluded — **shipped `0445e6a`**). F16 → Phase 1, F14 → Phase 2, F15 → Phase 3; open Q8/Q9/Q10; Appendix B refs. After fixes: pacman3 graph 212/526, 0 orphans. Same lesson as F11/F12 — clean agents, leaky harness.                                                                                                                                                                                                                                                                                                                                                     |
+| Date       | Agent                 | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-06-17 | Claude (forensics #1) | Initial draft: findings F1–F10, workstreams A–E, roadmap, appendices from pacman3 forensic + daemon-log cross-check.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 2026-06-18 | QAreview-agentic      | QA-stage forensic on the same pacman3 run (QA job `3c99fd51`, not walked by the original forensic — F2/F3). Added F11 (deploy×QA same-worktree race → `next.config.ts` rewrite relocates app off root → per-test 404s), F12 (broken/missing evidence scored as blocking defects; capture gate + honest verdict lane + judge hallucination), F13 (state/behavior ACs authored with no executable probe). New Track F; F11/F12 → Phase 1, F13 → Phase 3; open Q6/Q7; Appendix B refs. Verdict: QA false-blocked a correct app — every FAIL was an infra artifact.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 2026-06-18 | deployment            | Deployment-stage findings from building + shipping the v2.5 promotion-ladder control panel (brick1 went live dev→staging→prod). New **Track H**: F19 (DEPLOY*URL extractor truncated dev/staging URLs at `*`→ dead "Open in dev" link — **shipped`1755365`**), F20 (Vite-only deploy prompts vs Next.js apps → agent improvised; framework-aware now — **shipped `1755365`**; does NOT close F11), F21 (dev/staging deploys unobservable + smoke unsurfaced → per-env streaming + smoke badge/soft-gate — **shipped `1755365`**), F22 (build-once not real — fallback prefixes force rebuild-per-rung; dual-prod-path reconcile **shipped**, subdomain provisioning **open**, recipe in `deployment-v2.5.md §14`), F23 (MCP-config missing → halts **every** agent spawn; 2-line `existsSync`+`mkdirSync`self-heal — **open**, owner graphify). Added F11 agent-notes (deploy still rewrites QA's`next.config.ts` post-F20 → Q7/Q11), Q11/Q12, roadmap slots (F23→Phase 1, F22→Phase 3), Appendix B refs. Reconciled the deployment rubric's forward-refs "F14/F15" → canonical **F22/F23**. Same lesson as F11/F12/F14 — clean agents, leaky harness.                                                                                    |
+| 2026-06-18 | graphify              | Knowledge-graph (knowledge-compile output) forensic on the same pacman3 run — broken graph on correct code (177/290, 29 unconnected, Orphan invariant FAIL 20). Added new **Track G** + F14 (truncated ast-facts = last story's worktree scope, not the project), F15 (additive ingest never prunes deleted-source zombies), F16 (orphan invariant computed but swallowed at `exit 3`), F17 (job-UUID `projectId` strands file nodes → silent DEFINES loss — **shipped `0d5dd6a`**), F18 (living docs float; new `REFERENCES` doc→code edge layer for living docs, plan-docs excluded — **shipped `0445e6a`**). F16 → Phase 1, F14 → Phase 2, F15 → Phase 3; open Q8/Q9/Q10; Appendix B refs. After fixes: pacman3 graph 212/526, 0 orphans. Same lesson as F11/F12 — clean agents, leaky harness.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 2026-06-18 | Claude (skills)       | Skill-management forensic on the same pacman3 run, through the lens of the (built, unshipped) Skills-Institution branch. New **Track I** + F24 (activation collapse — 5.2% of sessions, 1.5% of 66 skills used; push relevant bodies per-story + activation-as-reflector-signal), F25 (scout dormancy — `skillScoutRuns:[]`; no intent-aware trigger; add T-intent at plan-build), **F26 ⚠️ pre-deploy gate** (Story 4.2's trusted-only vendor gate silently blocks scout community installs; scout↔inbox are two disconnected trust authorities — wire scout `surface-card`→inbox proposal, ship with 4.2), F27 (embeddings sidecar write-only → no load-time relevance ranking; read it in skills-prompt), F28 (no usage telemetry → dead skills never pruned; populate `index.usage.json`/`maturity`, auto-deprecate 0-activation skills). Added F5 agent-note (E1 apply loop + poller now built — but still blocked by F5's IAM write-fail + mvp-no-story-reflection; fix IAM first). Appendix B refs. Lesson: Skills-Institution fixed **curation/security/authoring**; the forensic shows the live bottlenecks are **activation, discovery, and retrieval** — and our security gate needs the scout→inbox bridge before it deploys. |
