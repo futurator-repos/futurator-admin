@@ -2,7 +2,7 @@ import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
 import * as planRepo from '../shared/repositories/plan-repository';
 import * as appRepo from '../shared/repositories/app-repository';
-import { resolveQaContext } from '../shared/services/qa-boilerplate-resolver';
+import { resolveQaContext, resolveHasSeam } from '../shared/services/qa-boilerplate-resolver';
 // Story 1.8.7 — 3× escalator: fire-and-forget after plan is marked delivered
 import { evaluateThresholds } from '../shared/timer/escalator';
 import { reducePlan, type PlanReducerDeps } from '../shared/services/plan-reducer';
@@ -121,6 +121,7 @@ export const handler = async () => {
             const now = new Date().toISOString();
             // PR-8g — auto-enqueue uses the App's boilerplate qaContext too.
             const boilerplate = await resolveQaContext(plan, { getApp: appRepo.getApp });
+            const hasSeam = await resolveHasSeam(plan, { getApp: appRepo.getApp });
             const qaResult = await launchPlanQaAggregate(
               plan,
               epicsForPlan,
@@ -134,7 +135,7 @@ export const handler = async () => {
                 buildQaExecutePipeline,
                 uuid: () => crypto.randomUUID(),
               },
-              { boilerplate },
+              { boilerplate, hasSeam },
             );
             if (qaResult.ok) {
               // Persist aggregate job + transition contract status to

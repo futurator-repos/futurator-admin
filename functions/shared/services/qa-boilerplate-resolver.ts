@@ -59,3 +59,22 @@ export async function resolveQaContext(
   const normalized = normalizeBoilerplateType(boilerplate);
   return BOILERPLATE_REGISTRY[normalized]?.qaContext;
 }
+
+/**
+ * VQA v3 (E2/E4) — does the App's boilerplate ship a `window.__harness`
+ * verifiability seam? Same App→boilerplateType lookup as `resolveQaContext`.
+ * Drives qa-aggregate to route `state`/`behavior` ACs to the deterministic
+ * L2-state oracle and to run the oracle-strength coverage check. Returns
+ * `false` for legacy plans / seam-less boilerplates (the safe default).
+ */
+export async function resolveHasSeam(
+  plan: Plan,
+  deps: QaBoilerplateResolverDeps,
+): Promise<boolean> {
+  const appId = (plan as Plan & { appId?: string }).appId;
+  if (!appId) return false;
+  const app = await deps.getApp(appId);
+  if (!app?.boilerplateType) return false;
+  const normalized = normalizeBoilerplateType(app.boilerplateType);
+  return !!BOILERPLATE_REGISTRY[normalized]?.testHarness;
+}

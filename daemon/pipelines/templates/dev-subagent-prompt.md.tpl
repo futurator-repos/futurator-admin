@@ -32,14 +32,30 @@ before the frame is captured. Available step actions:
   navigate · click · fill · select · wait · screenshot   (basic)
   press(key) · hold(key,ms) · tap/pointer(x,y) · drag · clock(clockMode,ms)   (interaction + deterministic time)
   assert(expr,op,expected) — read window.__harness.snapshot() for a deterministic verdict
-Worked example (drive, advance time deterministically, then assert state):
+
+AUTHOR EACH AC BY ITS [verify=…] TAG (shown next to the AC above):
+  - verify=build      → no visual test (a unit/typecheck covers it).
+  - verify=appearance → ONE screenshot of the relevant surface; no flow needed.
+  - verify=state      → a `flow` that reaches the state, then `assert`s it against
+                        window.__harness.snapshot(). Deterministic — no idle frame.
+  - verify=behavior   → a `flow` that drives the interaction (press/click/clock),
+                        then `assert`s the resulting state AND takes a screenshot.
+  - verify=manual     → no auto test; the operator verifies it.
+NEVER author a single idle screenshot for a state/behavior AC — it cannot observe
+post-interaction state and will fail or come back UNVERIFIABLE.
+
+The `window.__harness` seam is PRE-BAKED by the scaffold (see SCAFFOLD.md) — do NOT
+author or edit it. For canvas games it exposes `snapshot()` →
+`{ status, score, tick, entities, gameOver }` plus any fields you add to
+`GameState` (e.g. `lives`). Conform your running game to that shape; that's all.
+
+Worked example (start, advance time deterministically, then assert + observe):
   flow:
-    - { action: press, key: "Space" }            # start the game
+    - { action: press, key: "Space" }                  # start the game
     - { action: clock, clockMode: runFor, ms: 5000 }   # advance 5s WITHOUT a real wait
     - { action: screenshot, label: "mid-play" }
-    - { action: assert, expr: "snapshot.gameState", op: eq, expected: "playing" }
+    - { action: assert, expr: "snapshot.status", op: eq, expected: "running" }
 Use `clock` for time-dependent UI — never a real `wait` for synchronization.
-Your code must expose the state the `assert` reads via the test-only `window.__harness` seam.
 </probe_grammar>
 
 <run_command>

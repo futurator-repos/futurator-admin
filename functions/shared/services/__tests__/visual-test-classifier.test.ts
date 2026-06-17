@@ -550,3 +550,64 @@ describe('capVisionLevelByRigor — R1 split cap (VQA v3 — E5.4)', () => {
     expect(isDeterministicLevel('L2-vision')).toBe(false);
   });
 });
+
+describe('aggregateVisualTests — verify-aware oracle tier + strength (E4-S2/S3)', () => {
+  it('resolves a behavior AC to L2-state with a seam + assert probe; no weak-oracle warning', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-1', {
+        criteriaRef: 'AC-1',
+        flow: [
+          { action: 'press', key: 'Space' },
+          { action: 'assert', expr: 'snapshot.status', op: 'eq', expected: 'running' },
+        ],
+      }),
+    ];
+    const report = aggregateVisualTests(
+      tests,
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      true,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('L2-state');
+    expect(report.coverageWarnings.some((w) => w.kind === 'weak-oracle')).toBe(false);
+  });
+
+  it('flags weak-oracle when a behavior AC has a seam but only a screenshot (vision-only)', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-1', { criteriaRef: 'AC-1', flow: [{ action: 'screenshot', label: 'idle' }] }),
+    ];
+    const report = aggregateVisualTests(
+      tests,
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      true,
+    );
+    expect(report.coverageWarnings.find((w) => w.kind === 'weak-oracle')?.criterionId).toBe('AC-1');
+  });
+
+  it('without a seam, a behavior AC resolves to L2-vision and is NOT weak-oracle-flagged', () => {
+    const report = aggregateVisualTests(
+      [vt('VT-1', { criteriaRef: 'AC-1' })],
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      false,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('L2-vision');
+    expect(report.coverageWarnings.some((w) => w.kind === 'weak-oracle')).toBe(false);
+  });
+
+  it('a prototype-rigor state AC with a seam still resolves to L2-state (rigor-exempt, R1)', () => {
+    const report = aggregateVisualTests(
+      [
+        vt('VT-1', {
+          criteriaRef: 'AC-1',
+          flow: [{ action: 'assert', expr: 'snapshot.score', op: 'gt', expected: 0 }],
+        }),
+      ],
+      [{ id: 'AC-1', needsBrowser: true, verify: 'state' }],
+      'prototype',
+      true,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('L2-state');
+  });
+});

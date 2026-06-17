@@ -108,6 +108,14 @@ export interface ClassificationResult {
    *  test classifies as L2 by shape but rigor='prototype' forces L0;
    *  the operator-facing card shows "(forced L0 by prototype rigor)". */
   rigorFloored?: boolean;
+  /** VQA v3 (E4-S2 / FR-13) — the resolved oracle tier derived from the
+   *  linked AC's `verify` intent + whether the app ships a test-harness
+   *  seam, then capped by the vision-only rigor rule. Distinct from the
+   *  wire-level `level` (L0/L1/L2) the runtime uses to pick a judge step;
+   *  this is the operator-facing "how is this actually verified" tier
+   *  (e.g. `L2-state` = deterministic seam read, rigor-exempt). Only set
+   *  when the AC carried a `verify` intent. */
+  resolvedLevel?: ResolvedLevel;
 }
 
 /**
@@ -324,7 +332,7 @@ export function capVisionLevelByRigor(level: ResolvedLevel, rigor: PlanRigor): R
 // ── Coverage + specificity rollups (Q4.1) ────────────────────────────
 
 export interface CoverageWarning {
-  kind: 'no-tests-for-needs-browser' | 'over-tested' | 'tests-without-criteria-ref';
+  kind: 'no-tests-for-needs-browser' | 'over-tested' | 'tests-without-criteria-ref' | 'weak-oracle';
   criterionId?: string;
   testIds?: string[];
   message: string;
@@ -386,24 +394,36 @@ export const DEFAULT_WALLCLOCK_BY_LEVEL: Record<VisualTestLevel, number> = {
  */
 export function aggregateVisualTests(
   tests: ReadonlyArray<VisualTestDef>,
-  acceptanceCriteria: ReadonlyArray<{ id: string; needsBrowser: boolean }>,
+  acceptanceCriteria: ReadonlyArray<{ id: string; needsBrowser: boolean; verify?: VerifyIntent }>,
   planRigor?: PlanRigor,
+  hasSeam = false,
 ): AggregateReport {
   // PR-62 — index needsBrowser by AC id so per-test classification can
   // raise the floor for browser-tagged criteria. Tests whose criteriaRef
   // doesn't match any AC default to acNeedsBrowser=false (safest — they
   // get the shape-based level + rigor cap only).
   const needsBrowserByAcId = new Map<string, boolean>();
+  // VQA v3 (E4-S2) — index verify intent by AC id so each test can resolve
+  // its oracle tier (L2-state vs L2-vision vs …) from the PM's intent.
+  const verifyByAcId = new Map<string, VerifyIntent | undefined>();
   for (const ac of acceptanceCriteria) {
     needsBrowserByAcId.set(ac.id, ac.needsBrowser);
+    verifyByAcId.set(ac.id, ac.verify);
   }
 
   const classifications = tests.map((t) => {
     const acNeedsBrowser = t.criteriaRef ? (needsBrowserByAcId.get(t.criteriaRef) ?? false) : false;
-    return {
-      testId: t.id,
-      classification: classifyVisualTest(t, planRigor, acNeedsBrowser),
-    };
+    const classification = classifyVisualTest(t, planRigor, acNeedsBrowser);
+    // Resolve the verify-derived oracle tier (FR-13), capped by the
+    // vision-only rigor rule (FR-12 / R1: L2-state stays free + exempt).
+    const verify = t.criteriaRef ? verifyByAcId.get(t.criteriaRef) : undefined;
+    if (verify) {
+      const resolved = deriveLevelFromVerify(verify, hasSeam);
+      classification.resolvedLevel = planRigor
+        ? capVisionLevelByRigor(resolved, planRigor)
+        : resolved;
+    }
+    return { testId: t.id, classification };
   });
 
   const byLevel: Record<VisualTestLevel, number> = { L0: 0, L1: 0, L2: 0 };
@@ -473,6 +493,31 @@ export function aggregateVisualTests(
         testIds: list,
         message: `${ac.id} has ${list.length} tests — possible over-testing`,
       });
+    }
+  }
+
+  // VQA v3 (E4-S3 / FR-16) — oracle-STRENGTH check, not just presence. When a
+  // seam exists and an AC is `state`/`behavior`, at least one of its tests must
+  // carry an `assert` step (the deterministic L2-state oracle). A state/behavior
+  // AC backed only by a vision screenshot is the exact disease the seam cures —
+  // flag it so the QA-AUTHOR adds the assert before the gate.
+  if (hasSeam) {
+    for (const ac of acceptanceCriteria) {
+      if (ac.verify !== 'state' && ac.verify !== 'behavior') continue;
+      const list = testsByCriterion.get(ac.id) ?? [];
+      if (list.length === 0) continue; // already flagged by the presence check
+      const hasAssert = list.some((id) => {
+        const t = tests.find((x) => x.id === id);
+        return t?.flow?.some((s) => s.action === 'assert');
+      });
+      if (!hasAssert) {
+        coverageWarnings.push({
+          kind: 'weak-oracle',
+          criterionId: ac.id,
+          testIds: list,
+          message: `${ac.id} is verify:${ac.verify} and a seam exists, but no test asserts window.__harness — add an 'assert' probe (vision-only is non-deterministic here)`,
+        });
+      }
     }
   }
 

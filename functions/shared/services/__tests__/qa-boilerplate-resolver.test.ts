@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveQaContext } from '../qa-boilerplate-resolver';
+import { resolveQaContext, resolveHasSeam } from '../qa-boilerplate-resolver';
 import type { Plan } from '../../types/plan';
 import type { App } from '../../types/app';
 
@@ -76,5 +76,23 @@ describe('resolveQaContext', () => {
     const getApp = vi.fn(async () => app(undefined));
     const ctx = await resolveQaContext(plan({ appId: 'app-1' }), { getApp });
     expect(ctx).toBeUndefined();
+  });
+});
+
+describe('resolveHasSeam (VQA v3 — E2/E4)', () => {
+  it('true for the canvas-game boilerplate (ships __harness)', async () => {
+    const getApp = vi.fn(async () => app('nextjs-canvas-game' as App['boilerplateType']));
+    expect(await resolveHasSeam(plan({ appId: 'app-1' }), { getApp })).toBe(true);
+  });
+
+  it('false for a seam-less boilerplate (nextjs-base)', async () => {
+    const getApp = vi.fn(async () => app('nextjs' as App['boilerplateType']));
+    expect(await resolveHasSeam(plan({ appId: 'app-1' }), { getApp })).toBe(false);
+  });
+
+  it('false for a legacy plan with no appId (no lookup)', async () => {
+    const getApp = vi.fn();
+    expect(await resolveHasSeam(plan(), { getApp })).toBe(false);
+    expect(getApp).not.toHaveBeenCalled();
   });
 });

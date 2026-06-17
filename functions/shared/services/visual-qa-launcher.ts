@@ -1,5 +1,5 @@
 import type { AgentJob, PipelineDefinition } from '../types/agent-orchestrator';
-import type { EpicStory, EpicWorkflow, VisualTestDef } from '../types/epic-workflow';
+import type { EpicStory, EpicWorkflow, VisualTestDef, VerifyIntent } from '../types/epic-workflow';
 import type { Plan } from '../types/plan';
 import type { BoilerplateMetadata } from '../boilerplates/types';
 import { classifyVisualTest } from './visual-test-classifier';
@@ -328,7 +328,12 @@ export interface PlanQaDeps extends Omit<VisualQaDeps, 'buildQaPipeline'> {
     jobId: string;
     boilerplate?: BoilerplateMetadata['qaContext'];
     port?: number;
-    acceptanceCriteria?: ReadonlyArray<{ id: string; needsBrowser: boolean }>;
+    acceptanceCriteria?: ReadonlyArray<{
+      id: string;
+      needsBrowser: boolean;
+      verify?: VerifyIntent;
+    }>;
+    hasSeam?: boolean;
   }) => PipelineDefinition;
   buildQaExecutePipeline: (inputs: {
     plan: Plan;
@@ -366,7 +371,7 @@ export async function launchPlanQaAggregate(
   userId: string,
   now: string,
   deps: PlanQaDeps,
-  options: { boilerplate?: BoilerplateMetadata['qaContext'] } = {},
+  options: { boilerplate?: BoilerplateMetadata['qaContext']; hasSeam?: boolean } = {},
 ): Promise<PlanQaAggregateResult> {
   if (epics.length === 0) {
     return { ok: false, code: 'no-visual-tests', message: 'Plan has no epics.' };
@@ -391,12 +396,15 @@ export async function launchPlanQaAggregate(
   // so qa-aggregate's coverage check can flag needsBrowser ACs without
   // tests. PR-62 — same map is reused to drive the per-test needsBrowser
   // floor in classifyVisualTest below.
-  const acceptanceCriteria: Array<{ id: string; needsBrowser: boolean }> = [];
+  // VQA v3 (E4-S2) — carry the PM `verify` intent alongside needsBrowser so
+  // qa-aggregate can resolve each test's oracle tier (L2-state vs L2-vision).
+  const acceptanceCriteria: Array<{ id: string; needsBrowser: boolean; verify?: VerifyIntent }> =
+    [];
   const needsBrowserByAcId = new Map<string, boolean>();
   for (const epic of enrichedEpics) {
     for (const story of epic.stories) {
       for (const c of story.criteria ?? []) {
-        acceptanceCriteria.push({ id: c.id, needsBrowser: c.needsBrowser });
+        acceptanceCriteria.push({ id: c.id, needsBrowser: c.needsBrowser, verify: c.verify });
         needsBrowserByAcId.set(c.id, c.needsBrowser);
       }
     }
@@ -449,6 +457,7 @@ export async function launchPlanQaAggregate(
     jobId,
     boilerplate: options.boilerplate,
     acceptanceCriteria,
+    hasSeam: options.hasSeam,
   });
 
   await deps.createJob({

@@ -113,7 +113,7 @@ import {
   launchPlanQaAggregate,
   launchPlanQaExecute,
 } from '../shared/services/visual-qa-launcher';
-import { resolveQaContext } from '../shared/services/qa-boilerplate-resolver';
+import { resolveQaContext, resolveHasSeam } from '../shared/services/qa-boilerplate-resolver';
 import { defaultCostCeiling } from '../shared/services/cost-ceiling-defaults';
 import { launchDevServer } from '../shared/services/dev-server-launcher';
 import { generateStoryPipeline } from '../shared/pipelines/story-pipeline';
@@ -3194,6 +3194,9 @@ app.post('/api/plans/:id/qa-review', async (c) => {
   // allowlist). Without this, Next.js Apps fall back to Vite defaults
   // and qa-prepare fails at the healthcheck loop.
   const boilerplate = await resolveQaContext(plan, { getApp: appRepo.getApp });
+  // VQA v3 (E2/E4) — does this app ship the __harness seam? Routes
+  // state/behavior ACs to the deterministic L2-state oracle at aggregate.
+  const hasSeam = await resolveHasSeam(plan, { getApp: appRepo.getApp });
   const result = await launchPlanQaAggregate(
     plan,
     epics,
@@ -3207,7 +3210,7 @@ app.post('/api/plans/:id/qa-review', async (c) => {
       buildQaExecutePipeline,
       uuid: () => crypto.randomUUID(),
     },
-    { boilerplate },
+    { boilerplate, hasSeam },
   );
 
   if (!result.ok) {

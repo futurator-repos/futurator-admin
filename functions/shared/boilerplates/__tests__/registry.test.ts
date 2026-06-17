@@ -540,3 +540,41 @@ describe('v2.6 — wave-gate quality plumbing', () => {
     expect(ignore?.content).toContain('.pipeline');
   });
 });
+
+describe('nextjs-canvas-game — VQA v3 verifiability seam (E2)', () => {
+  const game = BOILERPLATE_REGISTRY['nextjs-canvas-game'];
+
+  it('declares a testHarness contract with the generator-owned snapshot shape', () => {
+    expect(game.testHarness?.globalKey).toBe('window.__harness');
+    expect(game.testHarness?.readySignal).toBe('ready');
+    const shape = game.testHarness?.snapshotShape ?? {};
+    // The keys probes assert against must be declared.
+    for (const key of [
+      'snapshot.status',
+      'snapshot.score',
+      'snapshot.entities',
+      'snapshot.gameOver',
+    ]) {
+      expect(shape[key]).toBeDefined();
+    }
+    expect(shape['snapshot.status'].enum).toContain('running');
+  });
+
+  it('ships the seam in the state-machine scaffold, PRODUCTION-ABSENT (env-guarded)', () => {
+    const sm = game.augmentFiles?.find((f) => f.path === 'src/game/state-machine.ts');
+    expect(sm?.content).toContain('window.__harness');
+    // The guard is what keeps the seam out of production builds — assert it
+    // exists and is the canonical NEXT_PUBLIC_TEST_HARNESS check.
+    expect(sm?.content).toContain("process.env.NEXT_PUBLIC_TEST_HARNESS !== '1'");
+    // The publish must happen INSIDE the guard (early-return before it).
+    const guardIdx = sm!.content.indexOf('NEXT_PUBLIC_TEST_HARNESS');
+    const publishIdx = sm!.content.indexOf('.__harness =');
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(publishIdx).toBeGreaterThan(guardIdx);
+  });
+
+  it('SCAFFOLD.md tells DEV the seam is pre-baked (do not author it)', () => {
+    expect(game.scaffoldContract).toMatch(/__harness/);
+    expect(game.scaffoldContract).toMatch(/PRE-BAKED|do NOT author/i);
+  });
+});
