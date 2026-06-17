@@ -80,6 +80,14 @@ export function PlanReviewView({
   // during the routing window. `conceptRouting` = chain owns it but no plan yet.
   const conceptChainActive = isConcept && (!!plan.conceptPlan || !!plan.conceptRouteJobId);
   const conceptRouting = conceptChainActive && !plan.conceptPlan;
+  // Whether this plan EVER ran the concept chain — independent of status. Once a
+  // plan moves to `developing`, the Concept-stage tab must still show the chain
+  // it produced (rail, docs, agent traces, timing) as a READ-ONLY record, not
+  // fall back to a bare epics list. (Bug: clicking back to Concept after dev
+  // started showed nothing — "like the process never happened".) Live affordances
+  // (drive polling, Approve/Regenerate, the gate card) stay gated on `isConcept`.
+  const hasConceptChain = !!plan.conceptPlan || !!plan.conceptRouteJobId;
+  const conceptReadOnly = hasConceptChain && !isConcept;
   // Which specialized BMAD persona is actively drafting right now (for the live
   // stream header). The active artifact = first non-approved in topo order; it's
   // generating when rev0. We stream THAT generator job's stream-json trace.
@@ -467,13 +475,32 @@ export function PlanReviewView({
           </div>
         )}
 
-        {isConcept && plan.conceptPlan && (
+        {conceptReadOnly && (
+          <div
+            style={{
+              fontSize: 11,
+              color: 'var(--text-mute)',
+              marginBottom: 8,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            <span>📜</span> Concept chain (read-only) — this plan has moved on to{' '}
+            <strong style={{ color: 'var(--text-dim)' }}>{plan.status}</strong>. The approved specs
+            and agent traces are kept here for the record; click any doc to read it.
+          </div>
+        )}
+
+        {plan.conceptPlan && (
           <ConceptRail
             conceptPlan={plan.conceptPlan}
             conceptArtifacts={plan.conceptArtifacts}
-            onApprove={(kind) => approveArtifact.mutate(kind)}
+            // Live affordances only while still in concept; read-only afterwards
+            // (the chain is already approved — just View the docs).
+            onApprove={isConcept ? (kind) => approveArtifact.mutate(kind) : undefined}
             approvingKind={approveArtifact.isPending ? approveArtifact.variables : null}
-            onRegenerate={(kind) => regenerateArtifact.mutate(kind)}
+            onRegenerate={isConcept ? (kind) => regenerateArtifact.mutate(kind) : undefined}
             regeneratingKind={regenerateArtifact.isPending ? regenerateArtifact.variables : null}
             onView={(kind) => setDocDrawerKind(kind)}
           />
@@ -484,22 +511,27 @@ export function PlanReviewView({
             planId={plan.planId}
             kind={docDrawerKind}
             onClose={() => setDocDrawerKind(null)}
-            onApprove={(kind) => {
-              approveArtifact.mutate(kind, { onSuccess: () => setDocDrawerKind(null) });
-            }}
-            onRegenerate={(kind) => regenerateArtifact.mutate(kind)}
+            onApprove={
+              isConcept
+                ? (kind) => {
+                    approveArtifact.mutate(kind, { onSuccess: () => setDocDrawerKind(null) });
+                  }
+                : undefined
+            }
+            onRegenerate={isConcept ? (kind) => regenerateArtifact.mutate(kind) : undefined}
             approving={approveArtifact.isPending}
             regenerating={regenerateArtifact.isPending}
           />
         )}
 
-        {conceptChainActive && <ConceptTimingPanel plan={plan} />}
+        {hasConceptChain && <ConceptTimingPanel plan={plan} />}
 
         {/* Persistent, collapsible per-agent traces (Mary/John/Sally/Winston) —
             the active one streams live + auto-expands; completed ones are
             retained (collapsed) so nothing is lost between docs. Plus a
-            forensic log download for the whole concept stage. */}
-        {conceptChainActive && (
+            forensic log download for the whole concept stage. Kept after the
+            plan moves to developing so the trace record survives (read-only). */}
+        {hasConceptChain && (
           <ConceptAgentLogs
             plan={plan}
             activeKind={conceptGenerating ? activeConceptKind : undefined}

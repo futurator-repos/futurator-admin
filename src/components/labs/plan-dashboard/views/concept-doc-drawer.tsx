@@ -35,8 +35,9 @@ export function ConceptDocDrawer({
   planId: string;
   kind: ConceptArtifactKind;
   onClose: () => void;
-  onApprove: (kind: ConceptArtifactKind) => void;
-  onRegenerate: (kind: ConceptArtifactKind) => void;
+  /** Absent → read-only drawer (e.g. viewing the chain after dev started). */
+  onApprove?: (kind: ConceptArtifactKind) => void;
+  onRegenerate?: (kind: ConceptArtifactKind) => void;
   approving?: boolean;
   regenerating?: boolean;
 }) {
@@ -207,46 +208,50 @@ export function ConceptDocDrawer({
             background: 'var(--bg-elev)',
           }}
         >
-          <button
-            type="button"
-            data-testid="drawer-approve"
-            disabled={!canApprove || approving}
-            onClick={() => onApprove(kind)}
-            style={{
-              fontSize: 13,
-              fontWeight: 600,
-              color: canApprove ? 'var(--success)' : 'var(--text-faint)',
-              background: canApprove
-                ? 'color-mix(in srgb, var(--success) 12%, transparent)'
-                : 'transparent',
-              border: `1px solid ${canApprove ? 'color-mix(in srgb, var(--success) 45%, transparent)' : 'var(--border)'}`,
-              borderRadius: 6,
-              padding: '6px 16px',
-              cursor: canApprove && !approving ? 'pointer' : 'default',
-              opacity: approving ? 0.5 : 1,
-            }}
-          >
-            {approving ? 'Approving…' : status === 'approved' ? '✓ Approved' : 'Approve'}
-          </button>
-          <button
-            type="button"
-            data-testid="drawer-regenerate"
-            disabled={regenerating}
-            onClick={() => onRegenerate(kind)}
-            style={{
-              fontSize: 13,
-              fontWeight: 600,
-              color: 'var(--text-mute)',
-              background: 'transparent',
-              border: '1px solid var(--border)',
-              borderRadius: 6,
-              padding: '6px 16px',
-              cursor: regenerating ? 'default' : 'pointer',
-              opacity: regenerating ? 0.5 : 1,
-            }}
-          >
-            {regenerating ? 'Regenerating…' : '↻ Regenerate'}
-          </button>
+          {onApprove && (
+            <button
+              type="button"
+              data-testid="drawer-approve"
+              disabled={!canApprove || approving}
+              onClick={() => onApprove(kind)}
+              style={{
+                fontSize: 13,
+                fontWeight: 600,
+                color: canApprove ? 'var(--success)' : 'var(--text-faint)',
+                background: canApprove
+                  ? 'color-mix(in srgb, var(--success) 12%, transparent)'
+                  : 'transparent',
+                border: `1px solid ${canApprove ? 'color-mix(in srgb, var(--success) 45%, transparent)' : 'var(--border)'}`,
+                borderRadius: 6,
+                padding: '6px 16px',
+                cursor: canApprove && !approving ? 'pointer' : 'default',
+                opacity: approving ? 0.5 : 1,
+              }}
+            >
+              {approving ? 'Approving…' : status === 'approved' ? '✓ Approved' : 'Approve'}
+            </button>
+          )}
+          {onRegenerate && (
+            <button
+              type="button"
+              data-testid="drawer-regenerate"
+              disabled={regenerating}
+              onClick={() => onRegenerate(kind)}
+              style={{
+                fontSize: 13,
+                fontWeight: 600,
+                color: 'var(--text-mute)',
+                background: 'transparent',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                padding: '6px 16px',
+                cursor: regenerating ? 'default' : 'pointer',
+                opacity: regenerating ? 0.5 : 1,
+              }}
+            >
+              {regenerating ? 'Regenerating…' : '↻ Regenerate'}
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
