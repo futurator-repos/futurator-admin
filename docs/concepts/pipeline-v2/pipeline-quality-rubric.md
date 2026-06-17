@@ -59,15 +59,16 @@ Each criterion carries a weight **W ∈ {1 (minor), 2 (normal), 3 (critical)}**.
 
 ### 0.4 Evidence sources (where a scorer looks)
 
-| Source                             | What it gives                                                                                                                                    | Access                     |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------- |
-| **Forensic JSON**                  | `GET /plans/:id/timing/forensic` → `slices[]`, `aggregate.byCategory`, `narrative`, `skills`, `plan`                                             | API                        |
-| **Daemon log**                     | `/var/log/futurator-daemon.log` on EC2 — gate verdicts, fix rounds, reflector result, IAM/errors                                                 | SSH/SSM                    |
-| **DDB: plan**                      | `totalCostUsd`, `costCeilingUsd`, `totalStories`, `doneStories`, `status` + stage timestamps (`startedAt`, `reviewAt`, `qaContractDecidedAt`, …) | repo                       |
-| **DDB: epic.stories[]**            | per-story `jobId`, `status`, `origin`, `wave`, `fixesWave`                                                                                       | repo                       |
-| **DDB: agent-jobs / agent-events** | per-step `cost`, `inputTokens`, `outputTokens`, `durationMs`, event stream                                                                       | repo (7-day TTL on events) |
-| **Stage reports**                  | QA report (`qa-report-aggregator`), deploy report (`deploy-report-aggregator`), `inbox/reflections.md`                                           | repo / disk                |
-| **Git graph**                      | merge commits, `--no-ff` topology, commit-metadata trailers (`Agent:`, `Plan-Id:`, `Wave:`, `Story:`)                                            | worktree                   |
+| Source                                 | What it gives                                                                                                                                                                                                                                                                        | Access                                   |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
+| **Forensic JSON**                      | `GET /plans/:id/timing/forensic` → `slices[]`, `aggregate.byCategory`, `narrative`, `skills`, `plan`                                                                                                                                                                                 | API                                      |
+| **Daemon log**                         | `/var/log/futurator-daemon.log` on EC2 — gate verdicts, fix rounds, reflector result, IAM/errors                                                                                                                                                                                     | SSH/SSM                                  |
+| **DDB: plan**                          | `totalCostUsd`, `costCeilingUsd`, `totalStories`, `doneStories`, `status` + stage timestamps (`startedAt`, `reviewAt`, `qaContractDecidedAt`, …)                                                                                                                                     | repo                                     |
+| **DDB: epic.stories[]**                | per-story `jobId`, `status`, `origin`, `wave`, `fixesWave`                                                                                                                                                                                                                           | repo                                     |
+| **DDB: agent-jobs / agent-events**     | per-step `cost`, `inputTokens`, `outputTokens`, `durationMs`, event stream                                                                                                                                                                                                           | repo (7-day TTL on events)               |
+| **Stage reports**                      | QA report (`qa-report-aggregator`), deploy report (`deploy-report-aggregator`), `inbox/reflections.md`                                                                                                                                                                               | repo / disk                              |
+| **Git graph**                          | merge commits, `--no-ff` topology, commit-metadata trailers (`Agent:`, `Plan-Id:`, `Wave:`, `Story:`)                                                                                                                                                                                | worktree                                 |
+| **System-graph snapshot** `[graphify]` | `_graph/graph-snapshot.json` (per project) + daemon `AST grounding` / `Orphan invariant` / `Graph analytics` log lines — node/edge counts by type, orphan list, knowledge coverage %, god-nodes, Leiden communities. A **deterministic, drift-free integrity signal** (see §13, Q9). | S3 (`knowledge-live/<id>/_graph/`) / SSH |
 
 > ⚠️ **Known evidence gap (track in §7-OV4):** the forensic only walks the _current_
 > `story.jobId`, so retried/superseded jobs are invisible. Until fix `F2/F3` lands, a
@@ -161,7 +162,10 @@ pm-plan (decompose), Murat (gate).
 
 **Intent:** implement every story correctly, merge cleanly, gate visually — minimal waste.
 **Substage weights:** prework 1 · test-authoring 2 · dev 3 · review 2 · compile-loop 3 ·
-merges/git-graph 2 · wave-vqa 3 · knowledge-compile 1 · wave-scheduling 2.
+merges/git-graph 2 · wave-vqa 3 · knowledge-compile 2 · wave-scheduling 2.
+_(knowledge-compile bumped 1→2 by `graphify` — the system graph is the grounding
+substrate for every later run AND this rubric's cheapest integrity signal; a silently
+broken graph poisons D3 grounding downstream. See §3.8, §13.)_
 
 ### 3.1 Prework-gate (`daemon/lib/prework-gate.mjs`) — `[MECH]`
 
@@ -229,11 +233,31 @@ merges/git-graph 2 · wave-vqa 3 · knowledge-compile 1 · wave-scheduling 2.
 | D-VQ4 | Fix-forward handoff preserved (evidence committed, prior diff available)                | D4/D6 | `.context/vqa-handoffs/*.json`        | 4=evidence + prior diff; 2=evidence only; 0=lost           | 2   |
 | D-VQ5 | VQA share of stage time                                                                 | D2    | `aggregate.byCategory.vqa-gate` %     | 🟢 ≤15%; 🔴 >25% (pacman3: **23% = 🟡/🔴**)                | 2   |
 
-### 3.8 Knowledge-compile — `[MECH]`
+### 3.8 Knowledge-compile / system-graph — `[MECH][OUTPUT]`
 
-| ID    | Criterion                                                    | Axis | Evidence                       | Anchor / metric           | W   |
-| ----- | ------------------------------------------------------------ | ---- | ------------------------------ | ------------------------- | --- |
-| D-KC1 | Knowledge written per story/wave-close (index stays current) | D4   | `knowledge/index.md` freshness | 4=current; 0=stale/absent | 1   |
+| ID    | Criterion                                                                                                                     | Axis | Tag             | Evidence                                                                               | Anchor / metric                                                                                                                                  | W   |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------- | ---- | --------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | --- |
+| D-KC1 | Knowledge written per story/wave-close (index stays current)                                                                  | D4   | [MECH]          | `knowledge/index.md` freshness                                                         | 4=current; 0=stale/absent                                                                                                                        | 1   |
+| D-KC2 | **AST-facts completeness** — persisted `.mycelium/ast-facts.json` covers the FULL project, not just the last story's worktree | D4   | [MECH]          | ast-facts `fileCount` ÷ source-file count; daemon `Scanned n files`                    | 🟢 ≥0.95; 🟡 0.5–0.95; 🔴 <0.5 (pacman3: persisted **3/51 ≈ 6% = 🔴** — last story's worktree scope shadowed the whole project)                  | 3   |
+| D-KC3 | **Graph orphan rate** — code nodes (file/function) with zero edges at snapshot                                                | D4   | [MECH] [OUTPUT] | snapshot "Unconnected nodes"; `Orphan invariant`; `_graph/orphans`                     | 🟢 0; 🟡 1–5; 🔴 >5 (pacman3 at original snapshot: **20 code-function orphans = 🔴**; root = D-KC2 + D-KC5)                                      | 2   |
+| D-KC4 | **Orphan-invariant enforced/surfaced** — a FAILED invariant gates or alarms, not exit-3-ignored                               | D5   | [MECH]          | graph-sync exit code handling; wave-gate hook                                          | 4=surfaced/gated; 0=non-blocking & invisible (pacman3: graph-sync `exited 3 (non-blocking)` — the FAIL was invisible until inspected = **0**)    | 2   |
+| D-KC5 | **projectId partition integrity** — every node carries the canonical project slug; none stranded in job/plan-UUID partitions  | D4   | [MECH]          | snapshot projectId distribution; nodes whose projectId is a UUID                       | 4=all-slug; 0=UUID-stranded nodes silently drop edges (pacman3: file nodes in partition `353ab84c…`; systemic UUID tail across projects = **0**) | 2   |
+| D-KC6 | **Living-doc connectivity** — architecture/decision/index/system docs link to the code they describe (not floating)           | D6   | [OUTPUT]        | snapshot floaters with `type∈{decision,system,index,architecture}`; `REFERENCES` edges | 4=living docs connected; 0=float unconnected (pacman3: **9 floaters = 🔴 → 0** after REFERENCES layer)                                           | 1   |
+
+> **[graphify · 2026-06-18]** D-KC2→D-KC6 are one causal chain, and the chain mirrors
+> §4's QA story: **a correct app produced a broken graph because the harness leaked, not
+> the agents.** Per-story DEV runs against a detached worktree, so the persisted
+> `ast-facts.json` ends up being the **last** story's 3-file scope, not the 51-file project
+> (D-KC2); functions in files finalized in earlier stories never get their file→function
+> `DEFINES` edge and orphan (D-KC3); the `Orphan invariant` graph-sync computes this and
+> **FAILS — but exits 3, non-blocking, so nobody saw it** (D-KC4); compounding it, early
+> ingestion stamped some file nodes with the **job/plan UUID as `projectId`**, stranding
+> them outside the project partition so their edges silently dropped (D-KC5). **Status:**
+> D-KC5 and D-KC6 are **fixed in code this session** (projectId now normalized to the slug
+> on every sync, self-healing across all projects; `REFERENCES` edges connect living docs).
+> D-KC2's pipeline mechanism (persist a **full-project** ast-facts at wave-close, not the
+> worktree scope) and D-KC4 (enforce/surface the invariant) are **not yet fixed → F13**.
+> Net effect on pacman3 after this session: orphans **20 → 0**, snapshot **177/290 → 212/526**.
 
 ### 3.9 Wave scheduling / parallelism — `[MECH]`
 
@@ -341,28 +365,42 @@ inefficiencies" lives.
 Quantitative tripwires a scorer runs every plan. Each maps to a fix in
 `pipeline-v2.5-fixes-plan.md`. **Calibrated to pacman3 (v0).**
 
-| ID   | Anti-pattern                                              | Signal / metric                                                              | 🟢     | 🟡       | 🔴           | pacman3                                         | Fix       |
-| ---- | --------------------------------------------------------- | ---------------------------------------------------------------------------- | ------ | -------- | ------------ | ----------------------------------------------- | --------- |
-| IE1  | Compile thrash                                            | tsc/test invocations per dev story                                           | ≤15    | 15–40    | >40          | **65–102**                                      | F1        |
-| IE2  | Retry log orphaning                                       | jobs in agent-events not referenced by any story.jobId                       | 0      | 1–2      | >2           | **>0**                                          | F2        |
-| IE3  | Forensic cost gap                                         | \|plan.totalCostUsd − Σforensic event cost\| / plan cost                     | ≤5%    | 5–15%    | >15%         | **🔴**                                          | F3        |
-| IE4  | Count drift                                               | doneStories − totalStories                                                   | 0      | —        | >0           | **+1**                                          | F4        |
-| IE5  | Reflector write-loss                                      | reflector proposals produced but `written=0`                                 | never  | —        | any          | **3→0**                                         | F5        |
-| IE6  | Cost-ceiling overrun                                      | totalCostUsd / costCeilingUsd                                                | ≤1.0   | 1.0–1.1  | >1.1         | **1.05**                                        | F6        |
-| IE7  | Test-author cost inversion                                | Σ test-author ms / Σ dev ms                                                  | ≤0.6   | 0.6–1.0  | >1.0         | **~1.0**                                        | F7        |
-| IE8  | Wasted fix rounds                                         | count of `improved nothing → revert`                                         | 0      | —        | ≥1           | **1**                                           | F8        |
-| IE9  | VQA unverifiable rate                                     | unverifiable verdicts / total VQA verdicts                                   | ≤15%   | 15–30%   | >30%         | **~43%**                                        | F8        |
-| IE10 | Skills catalog overhead                                   | availableSkillCount with ≤1 activation × sessions                            | scoped | —        | large&unused | **66/1×77**                                     | F9        |
-| IE11 | Low parallelism                                           | cumulative attributed ÷ wall (multi-story plans)                             | ≥1.5×  | 1.2–1.5× | <1.2×        | **1.03×**                                       | F10       |
-| IE12 | Context rebuild waste                                     | per-story context rebuilt with no cross-story/wave cache                     | cached | —        | full rebuild | **rebuild**                                     | §5(fixes) |
-| IE13 | **Stage-isolation breach** (concurrent worktree mutation) | dev-server restarts during QA / overlapping job windows on same `workingDir` | 0      | —        | ≥1           | **2 restarts (deploy×QA, same tick, same dir)** | F11 (new) |
-| IE14 | **QA evidence-capture failure**                           | per-test screenshots captured ÷ authored                                     | ≥95%   | 50–95%   | <50%         | **0/10**                                        | F12 (new) |
-| IE15 | **Infra failure scored as defect**                        | blocking FAILs whose rationale is a missing/404/blank frame                  | 0      | —        | ≥1           | **6**                                           | F12 (new) |
+| ID   | Anti-pattern                                              | Signal / metric                                                              | 🟢     | 🟡       | 🔴           | pacman3                                         | Fix            |
+| ---- | --------------------------------------------------------- | ---------------------------------------------------------------------------- | ------ | -------- | ------------ | ----------------------------------------------- | -------------- |
+| IE1  | Compile thrash                                            | tsc/test invocations per dev story                                           | ≤15    | 15–40    | >40          | **65–102**                                      | F1             |
+| IE2  | Retry log orphaning                                       | jobs in agent-events not referenced by any story.jobId                       | 0      | 1–2      | >2           | **>0**                                          | F2             |
+| IE3  | Forensic cost gap                                         | \|plan.totalCostUsd − Σforensic event cost\| / plan cost                     | ≤5%    | 5–15%    | >15%         | **🔴**                                          | F3             |
+| IE4  | Count drift                                               | doneStories − totalStories                                                   | 0      | —        | >0           | **+1**                                          | F4             |
+| IE5  | Reflector write-loss                                      | reflector proposals produced but `written=0`                                 | never  | —        | any          | **3→0**                                         | F5             |
+| IE6  | Cost-ceiling overrun                                      | totalCostUsd / costCeilingUsd                                                | ≤1.0   | 1.0–1.1  | >1.1         | **1.05**                                        | F6             |
+| IE7  | Test-author cost inversion                                | Σ test-author ms / Σ dev ms                                                  | ≤0.6   | 0.6–1.0  | >1.0         | **~1.0**                                        | F7             |
+| IE8  | Wasted fix rounds                                         | count of `improved nothing → revert`                                         | 0      | —        | ≥1           | **1**                                           | F8             |
+| IE9  | VQA unverifiable rate                                     | unverifiable verdicts / total VQA verdicts                                   | ≤15%   | 15–30%   | >30%         | **~43%**                                        | F8             |
+| IE10 | Skills catalog overhead                                   | availableSkillCount with ≤1 activation × sessions                            | scoped | —        | large&unused | **66/1×77**                                     | F9             |
+| IE11 | Low parallelism                                           | cumulative attributed ÷ wall (multi-story plans)                             | ≥1.5×  | 1.2–1.5× | <1.2×        | **1.03×**                                       | F10            |
+| IE12 | Context rebuild waste                                     | per-story context rebuilt with no cross-story/wave cache                     | cached | —        | full rebuild | **rebuild**                                     | §5(fixes)      |
+| IE13 | **Stage-isolation breach** (concurrent worktree mutation) | dev-server restarts during QA / overlapping job windows on same `workingDir` | 0      | —        | ≥1           | **2 restarts (deploy×QA, same tick, same dir)** | F11 (new)      |
+| IE14 | **QA evidence-capture failure**                           | per-test screenshots captured ÷ authored                                     | ≥95%   | 50–95%   | <50%         | **0/10**                                        | F12 (new)      |
+| IE15 | **Infra failure scored as defect**                        | blocking FAILs whose rationale is a missing/404/blank frame                  | 0      | —        | ≥1           | **6**                                           | F12 (new)      |
+| IE16 | **AST-facts truncation** `[graphify]`                     | persisted `ast-facts.json` fileCount ÷ project source files                  | ≥0.95  | 0.5–0.95 | <0.5         | **3/51 ≈ 6%**                                   | F13 (new)      |
+| IE17 | **Graph orphan accumulation** `[graphify]`                | code nodes (file/function) with zero edges at snapshot                       | 0      | 1–5      | >5           | **20 → 0 (fixed)**                              | F13 (new)      |
+| IE18 | **projectId partition drift** `[graphify]`                | nodes stamped with a job/plan UUID instead of the project slug               | 0      | —        | ≥1           | **UUID tail, many projects (now self-healing)** | done (0d5dd6a) |
+| IE19 | **Knowledge-graph zombies** `[graphify]`                  | nodes whose source file/article was deleted, never pruned                    | 0      | 1–3      | >3           | **6 (5 deleted-feature fns + 1 decision)**      | F13 (new)      |
 
 > **[QAreview-agentic]** IE13–IE15 are a single causal chain: a concurrent `next.config.ts`
 > rewrite (deploy) restarted Turbopack mid-QA → 404/missing frames (IE14) → the
 > `overall = fail>0` math blocked a correct app (IE15). F11/F12 are **not yet in
 > `pipeline-v2.5-fixes-plan.md`** — they need entries (see §12 fix list).
+
+> **[graphify]** IE16–IE19 are also one chain: a truncated `ast-facts.json` (IE16) →
+> orphaned functions (IE17), made permanent by additive-only ingest that never prunes
+> deleted-source nodes (IE19) and by UUID-stranded `projectId` partitions (IE18). IE18 is
+> **fixed** (`graph-sync` normalizes projectId to the slug on every sync — commit
+> `0d5dd6a`). IE16/IE17/IE19 need **F13** in `pipeline-v2.5-fixes-plan.md`: persist a
+> **full-project** ast-facts at wave-close, prune nodes whose source is gone, and make the
+> `Orphan invariant` FAIL **surface** instead of `exit 3`. Note: IE17 is also a cheap,
+> deterministic health metric the scorer can read straight from `_graph/graph-snapshot.json`
+> — no log-parsing (see §13, Q9).
 
 ---
 
@@ -440,6 +478,19 @@ threshold`, or all frames identical/blank) — _before_ any judge spends a token
   live `projects/<appId>` worktree — removes the deploy×QA race at the root. Alternatives:
   a per-run isolated checkout, or a `workingDir` mutex. Needs an owner decision (overlaps
   `boilerplate-runtime-contract.md` and `multi-host-dispatch-readiness.md`).
+- **Q8 [graphify]:** Should knowledge-graph integrity (D-KC3/D-KC4/D-KC5) be a **wave-gate**?
+  The `Orphan invariant` is **already computed** by `graph-sync` but exits non-blocking
+  (`exited 3`), so a broken graph is invisible to the pipeline and the operator. Cheapest
+  enforcement: fail (or loudly surface) the wave-close knowledge-compile step when the
+  invariant FAILs above a threshold — distinguishing genuine orphans from legitimate
+  floaters (test files, deleted-source zombies) so it doesn't false-alarm.
+- **Q9 [graphify]:** Should the **system-graph snapshot be a first-class scoring evidence
+  source** (§0.4)? `_graph/graph-snapshot.json` already encodes knowledge-coverage %, orphan
+  rate, edge density by type, god-nodes and Leiden communities — a **deterministic,
+  drift-free** integrity signal that's cheaper and more reliable than log-parsing for many
+  D4 criteria across stages (D-KC\*, OV4/OV5 count-integrity, even C-D3/C-P1 grounding could
+  be checked via doc→code `REFERENCES`/`DEPENDS_ON` edges). Proposal: have the scorer fetch
+  the snapshot once per run and derive the graph criteria directly from it.
 
 ---
 
@@ -523,9 +574,87 @@ threshold` or frames are identical/blank — _before_ any judge spends a token; 
 
 ---
 
+## 13. Contributor findings — graphify (2026-06-18): system-graph forensic on pacman3
+
+**Session:** `graphify` · **Method:** live forensic on `plan_pacman3_mqi8x64w` — read the
+persisted `.mycelium/ast-facts.json`, queried Memgraph directly (orphans, projectId
+distribution, edge degrees), cross-checked the `_graph/graph-snapshot.json` on S3, and
+inspected the daemon `graph-sync` log lines. Several root causes were fixed in code this
+session; the rest are flagged **F13**.
+
+**Headline (same shape as §12).** pacman3's code is **correct and fully merged** (51
+files, 120 functions, all reducers/entities/components present on disk), yet the knowledge
+graph the operator saw was **broken: 177 nodes / 290 edges with 29 unconnected nodes and
+`Orphan invariant: FAIL (20)`.** Every disconnection was a **harness/ingest artifact, not
+missing code.** This makes pacman3 the calibration anchor for **knowledge-graph integrity**
+the way §12 anchors QA false-blocking.
+
+**Root cause 1 — truncated AST facts (→ D-KC2 / IE16).** The persisted
+`.mycelium/ast-facts.json` held **3 files**, not 51 — it was the _last_ story's detached
+worktree scope (the HUD/Overlay visual-fix story `a085aa07`). Per-story DEV compiles
+incrementally and the partial scan is what survives between stories. A
+`--full-resync` against that partial file would have **pruned the rest of the project**.
+Fix for the snapshot: a full-project `bootstrap-ast --project pacman3 --root
+/home/ubuntu/projects/pacman3` (re-scanned 51 files / 120 functions). The **pipeline
+mechanism still persists the worktree-scoped facts** → F13 (persist full-project ast-facts
+at wave-close).
+
+**Root cause 2 — `projectId` partition drift (→ D-KC5 / IE18) [FIXED].** The `DEFINES`
+edge `MATCH`es the file node on `projectId`. Early ingestion stamped some file nodes with
+the **job/plan UUID** (`353ab84c-…`) instead of the slug `pacman3`, stranding them in a
+phantom partition where the `MATCH` silently missed and the function orphaned **forever**
+(the old `coalesce()` MERGE preserved the bad stamp on every resync). Verified the UUID tail
+spans many projects (dino, snake, etc.). **Fixed** (`graph-sync.mjs`, commit `0d5dd6a`):
+`code/*` nodeIds are project-unique (zero cross-project collisions, verified), so the
+file-node MERGE now **overwrites** `projectId` to the canonical slug — self-healing on every
+project's next sync.
+
+**Root cause 3 — additive ingest never prunes deleted-source nodes (→ D-KC3 / IE19).** The
+last story consolidated three `*.feature.tsx` files into one and **deleted them from disk**;
+their function nodes lingered as degree-0 zombies (MERGE is additive). Same for a renamed
+decision article. Pruned manually here; the pipeline needs a **delete-aware prune** → F13.
+
+**Root cause 4 — the invariant is computed but ignored (→ D-KC4 / Q8).** `graph-sync`
+**already emits** `ERROR: Orphan invariant FAILED — N non-file orphan(s)` and exits 3 — but
+the caller treats it as **non-blocking** (`graph-sync exited 3 (non-blocking)`). The single
+highest-leverage cheap fix: **surface or gate on this existing signal.**
+
+**New feature shipped — living-doc connectivity (→ D-KC6) [FIXED].** Architecture / decision
+/ index / system docs carry `[[wikilinks]]` to the code they describe, but those links sat
+in prose sections (`## Implementation`) or under H1s the section→edge map ignored, so the
+docs floated (9 floaters). Added a **`REFERENCES`** edge layer (`lib/doc-references.mjs`,
+commit `0445e6a`): for **living docs only**, any `[[link]]` not claimed by a structured
+section becomes a `REFERENCES` edge — **controlled by construction** (the MERGE binds only
+when both nodes exist, so a doc connects only when it _actually_ references a real node).
+**Plan-run docs** (a plan's PRD/epics/stories) are **deliberately excluded** (`isLivingDoc`)
+— their linking is owner-defined later, which bears on the §2 concept→plan authoring
+contract.
+
+**Net effect on pacman3 after this session:** unconnected nodes **29 → 0**; orphan invariant
+**FAIL(20) → PASS**; snapshot **177/290 → 212/526** (+82 `REFERENCES`, +cross-file CALLS,
+Leiden communities 21→11, `index` became a 29-edge hub). The graph is now a faithful map of
+the build — which is the precondition for using it as evidence (Q9).
+
+> **Hand-off note to other sessions:**
+>
+> - **concept-develop / pipeline owner:** F13 needs a home in `pipeline-v2.5-fixes-plan.md`
+>   (full-project ast-facts at wave-close · delete-aware prune · surface the orphan
+>   invariant). D-KC4/Q8 is the cheapest win — the FAIL signal already exists, it's just
+>   swallowed.
+> - **The plan→authoring contract (§2):** living-vs-plan-run doc classification
+>   (`isLivingDoc`) is now a real seam — when plan PRDs/epics get ingested they must NOT be
+>   auto-linked; decide their linking scheme deliberately. Overlaps the VQA v3 PRD under
+>   `docs/concepts/pipeline-v3/`.
+> - **The scoring-agent author (Q9):** consider deriving the §13 graph criteria (and
+>   OV4/OV5 count-integrity) directly from `_graph/graph-snapshot.json` — a free,
+>   deterministic alternative to log-parsing.
+
+---
+
 ## Changelog
 
-| Date       | Agent                 | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ---------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 2026-06-17 | Claude (forensics #1) | Initial v0 rubric: 5 stages + substages, 6 axes, AGENT/MECH/OUTPUT tags, 12 inefficiency detectors, pacman3 calibration, scorecard schema, aggregation + safety hard-caps.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| 2026-06-17 | QAreview-agentic      | QA-evidence forensic on pacman3. Corrected §4 (the QA job ran and FAILED on corrupted evidence — not 0ms/N-A). Added Q-C6–Q-C9 (evidence-capture integrity, honest-verdict-under-broken-evidence, oracle-hallucination guard, stage isolation), D-TA4/D-TA5 (visual-probe authoring completeness + level-assignment honesty), IE13–IE15 (stage-isolation breach, capture failure, infra-scored-as-defect), open Q6/Q7, §12 root-cause narrative (deploy×QA same-tick/same-worktree race → `next.config.ts` restart → 404/missing frames → false-blocking a correct app). Flagged F11/F12 as missing from the fixes plan. |
+| Date       | Agent                 | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-06-17 | Claude (forensics #1) | Initial v0 rubric: 5 stages + substages, 6 axes, AGENT/MECH/OUTPUT tags, 12 inefficiency detectors, pacman3 calibration, scorecard schema, aggregation + safety hard-caps.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 2026-06-17 | QAreview-agentic      | QA-evidence forensic on pacman3. Corrected §4 (the QA job ran and FAILED on corrupted evidence — not 0ms/N-A). Added Q-C6–Q-C9 (evidence-capture integrity, honest-verdict-under-broken-evidence, oracle-hallucination guard, stage isolation), D-TA4/D-TA5 (visual-probe authoring completeness + level-assignment honesty), IE13–IE15 (stage-isolation breach, capture failure, infra-scored-as-defect), open Q6/Q7, §12 root-cause narrative (deploy×QA same-tick/same-worktree race → `next.config.ts` restart → 404/missing frames → false-blocking a correct app). Flagged F11/F12 as missing from the fixes plan.                                                                                                                                                                                                                                        |
+| 2026-06-18 | graphify              | System-graph forensic on pacman3 (correct code → broken graph). Added system-graph snapshot as an evidence source (§0.4); expanded §3.8 into knowledge-compile/system-graph with D-KC2–D-KC6 (AST-facts completeness, orphan rate, orphan-invariant enforcement, projectId partition integrity, living-doc connectivity) and bumped the substage weight 1→2; added IE16–IE19 (ast-facts truncation, orphan accumulation, projectId drift, graph zombies); open Q8/Q9 (gate the orphan invariant; use the snapshot as deterministic scoring evidence); §13 root-cause narrative. Fixes landed this session: projectId normalization (`0d5dd6a`, IE18/D-KC5) and the `REFERENCES` living-doc layer (`0445e6a`, D-KC6); flagged **F13** (full-project ast-facts at wave-close · delete-aware prune · surface the orphan invariant) as missing from the fixes plan. |
