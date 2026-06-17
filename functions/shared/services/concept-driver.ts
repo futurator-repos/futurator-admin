@@ -207,6 +207,11 @@ export async function driveConcept(
     // E5.1 — the chain-driven pm-plan always cites real sections; the daemon
     // fills {{CITABLE_SECTIONS}} from the approved manifests on disk (Story 5.2).
     expectsCitations: true,
+    // Round 1.1 — and it PLANS FROM the approved docs: the daemon inlines the
+    // full PRD/UX/Architecture bodies into {{PRIOR_ARTIFACTS}} at run time, so
+    // the PM shards the specs into epics/stories instead of re-deriving scope
+    // from the bare intent (the "planner ignored the docs" fix).
+    priorArtifacts: PRIOR_ARTIFACTS_PLACEHOLDER,
   });
   const jobId = deps.uuid();
   const ts = deps.now();

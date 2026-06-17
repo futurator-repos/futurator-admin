@@ -656,6 +656,31 @@ export function loadCitableSections(projectDir) {
   return lines.join('\n      ');
 }
 
+/**
+ * Concept v2 (Round 1.1) — inline ALL approved concept docs (PRD + UX +
+ * Architecture, in chain order) for the pm-plan's `{{PRIOR_ARTIFACTS}}`
+ * placeholder. Unlike loadPriorArtifacts (which returns the UPSTREAMS of a given
+ * generator), the planner consumes the WHOLE approved spec set — it shards them
+ * into epics/stories. Missing docs are skipped; empty set degrades to a short
+ * instruction so the PM still produces a valid plan from the intent.
+ *
+ * @param {string} projectDir
+ * @returns {string}
+ */
+export function loadAllConceptArtifacts(projectDir) {
+  const blocks = [];
+  for (const kind of CONCEPT_CHAIN_ORDER) {
+    const md = readFileIfExists(join(projectDir, CONCEPT_DIR_REL, `${kind}.md`));
+    if (!md || !md.trim()) continue;
+    const label = kind === 'prd' ? 'PRD' : kind === 'ux' ? 'UX Specification' : 'Architecture';
+    blocks.push(`### ${label} (approved — shard this into epics/stories; cite, do not contradict)\n\n${md.trim()}`);
+  }
+  if (blocks.length === 0) {
+    return 'No approved concept documents are available on disk; plan from the intent within a reasonable MVP scope.';
+  }
+  return blocks.join('\n\n---\n\n');
+}
+
 /** Map a concept generator step id → the artifact kind it produces. */
 export function conceptKindForStepId(stepId) {
   if (stepId === 'prd-gen') return 'prd';

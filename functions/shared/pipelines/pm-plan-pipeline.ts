@@ -43,6 +43,12 @@ export function generatePmPlanPipeline(args: {
    * placeholder (the daemon substitutes real ids at run time, Story 5.2).
    */
   expectsCitations?: boolean;
+  /**
+   * Concept v2 (Round 1.1) — daemon-fillable `{{PRIOR_ARTIFACTS}}` token so the
+   * PM plans grounded in the approved PRD/UX/Architecture bodies. The chain-
+   * driven path sets this; the daemon inlines the real docs from disk.
+   */
+  priorArtifacts?: string;
 }): PipelineDefinition {
   const prompt = buildPmPlanPrompt(args);
   return {

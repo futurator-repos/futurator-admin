@@ -53,6 +53,16 @@ export function buildPmPlanPrompt(args: {
    * inline-supplied path and for prototype plans (byte-identical lean output).
    */
   expectsCitations?: boolean;
+  /**
+   * Concept v2 (Round 1.1, 2026-06-17) — the approved upstream specs (PRD / UX /
+   * Architecture) inlined as markdown, so the PM plans GROUNDED in them (the
+   * BMAD "shard the PRD into epics/stories" model) instead of re-deriving scope
+   * from the bare intent. The Lambda passes the daemon-fillable
+   * `{{PRIOR_ARTIFACTS}}` placeholder; the daemon substitutes the real on-disk
+   * section bodies at run time (mirrors ux/arch gen). Absent on the legacy
+   * eager-PM path (no approved docs exist) → the prompt stays intent-only.
+   */
+  priorArtifacts?: string;
 }): string {
   const meta = BOILERPLATE_REGISTRY[args.boilerplateType];
   if (!meta) {
@@ -97,7 +107,36 @@ export function buildPmPlanPrompt(args: {
             ]`
     : '';
 
-  return `You are the Product Manager. Transform the user's intent into a Plan
+  // Concept v2 (Round 1.1) — when the spec chain produced approved PRD/UX/
+  // Architecture docs, lead with them: the PM SHARDS those docs into epics +
+  // stories instead of re-deriving scope from the one-line intent. This is the
+  // fix for "the planner ignored the docs the agents just wrote".
+  const groundingBlock = args.priorArtifacts
+    ? `## Approved specs — PLAN FROM THESE (the source of truth)
+
+Specialized agents already produced, and the operator APPROVED, the documents
+below: **John (PRD)**, **Sally (UX)**, **Winston (Architecture)**. They are the
+contract for this build — your epics and stories are a DECOMPOSITION of them,
+not a fresh interpretation of the intent. Hard rules:
+
+  - **Cover the specs.** Every functional requirement (PRD), screen/flow (UX),
+    and module/decision (Architecture) must map to at least one story. Walk the
+    docs section by section and make sure nothing approved is dropped.
+  - **Honor the architecture.** Use its concrete tech choices, data model,
+    module boundaries, and file layout when you write \`touchPoints\` and
+    \`technicalNotes\` — do not invent a different structure.
+  - **Do not invent scope** these docs don't cover, and **never contradict**
+    them. If the intent and a spec disagree, the approved spec wins.
+  - Prefer the docs' own wording for behaviors and acceptance criteria.
+
+${args.priorArtifacts}
+
+---
+
+`
+    : '';
+
+  return `You are the Product Manager. Transform the ${args.priorArtifacts ? 'approved specs below' : "user's intent"} into a Plan
 with 1..N Epics organized by concern, maximizing parallel execution via a
 careful dependency graph.
 
@@ -109,6 +148,7 @@ ${args.planName}
 
 ${args.intent}
 
+${groundingBlock}
 ## Boilerplate context (CRITICAL — read first)
 
 The App was scaffolded from the **${meta.displayName}** boilerplate.
@@ -497,7 +537,14 @@ JSON in a code block.
 5. **Contract-first** — every name two stories reference is defined by an
    earlier-wave story both depend on.
 6. **Visual coverage** — every story that renders something has an
-   idle-visible \`needsBrowser\` AC; pure-logic stories have none.
+   idle-visible \`needsBrowser\` AC; pure-logic stories have none.${
+     args.priorArtifacts
+       ? `
+7. **Spec grounding** — every approved-doc requirement (PRD), screen/flow (UX),
+   and module/decision (Architecture) maps to a story; nothing approved was
+   dropped; nothing contradicts the docs.`
+       : ''
+   }
 
 Output the JSON now.`;
 }

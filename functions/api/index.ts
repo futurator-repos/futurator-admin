@@ -11561,6 +11561,20 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
         existingPlans.filter((p) => p.status === 'delivered').at(-1)?.rigor ??
         'mvp',
     ),
+    // YOLO — auto-advance between phases (Developing waves etc.). Default ON.
+    yoloMode: parsed.data.yoloMode,
+    // Concept v2 — interactivity axis. Explicit value wins; otherwise YOLO seeds
+    // it: YOLO on → `autopilot` (the whole concept chain auto-approves and runs
+    // hands-off); YOLO off → `interactive` (Approve gate per spec). Falls back to
+    // the rigor-derived default (resolveConceptInteraction) only when YOLO is
+    // also unspecified.
+    conceptInteraction:
+      parsed.data.conceptInteraction ??
+      (parsed.data.yoloMode === true
+        ? 'autopilot'
+        : parsed.data.yoloMode === false
+          ? 'interactive'
+          : undefined),
     createdAt: now,
     updatedAt: now,
     createdBy: user.email,

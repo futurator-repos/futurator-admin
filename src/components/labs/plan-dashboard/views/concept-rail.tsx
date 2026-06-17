@@ -112,6 +112,11 @@ export function ConceptRail({
       : approvedCount >= total && total > 0
         ? 'All specs approved — drafting the epic plan…'
         : 'Routing…';
+  // Which node is "now" — the first non-approved artifact, or the Plan once
+  // every spec is approved. Drives the ring/marker so the operator always sees
+  // where the chain is.
+  const currentNodeId: string | undefined =
+    firstPendingKind ?? (total > 0 && approvedCount >= total ? 'plan' : undefined);
 
   return (
     <div
@@ -168,6 +173,7 @@ export function ConceptRail({
               node={n}
               artifact={n.artifactKind ? statusOf(n.artifactKind) : undefined}
               activeGen={!!n.artifactKind && n.artifactKind === generatingKind}
+              current={n.id === currentNodeId}
               onApprove={onApprove}
               approving={!!n.artifactKind && approvingKind === n.artifactKind}
               onRegenerate={onRegenerate}
@@ -246,6 +252,7 @@ function ConceptNode({
   node,
   artifact,
   activeGen,
+  current,
   onApprove,
   approving,
   onRegenerate,
@@ -255,6 +262,8 @@ function ConceptNode({
   node: ConceptNodeDef;
   artifact?: ConceptArtifact;
   activeGen?: boolean;
+  /** This node is where the chain is "now" — gets the active ring + marker. */
+  current?: boolean;
   onApprove?: (kind: ConceptArtifactKind) => void;
   approving?: boolean;
   onRegenerate?: (kind: ConceptArtifactKind) => void;
@@ -263,12 +272,67 @@ function ConceptNode({
 }) {
   const color = node.active ? 'var(--accent-purple)' : 'var(--border-2)';
   const phase = artifactPhase(artifact, !!activeGen);
-  // A doc with rev>=1 has real content on disk → it can be READ.
+  const approved = artifact?.status === 'approved';
+  // A doc with rev>=1 has real content on disk → its icon opens the drawer.
   const hasContent = !!artifact && artifact.rev >= 1;
+  const clickable = hasContent && !!onView && !!node.artifactKind;
+
+  const iconInner = (
+    <span style={{ position: 'relative', display: 'inline-flex' }}>
+      {activeGen ? <Spinner size={15} /> : node.icon}
+      {/* Minimal corner check the moment a doc is approved (replaces the
+          verbose "✓ approved" caption the operator asked to drop). */}
+      {approved && (
+        <span
+          aria-label="approved"
+          style={{
+            position: 'absolute',
+            right: -7,
+            bottom: -7,
+            width: 14,
+            height: 14,
+            borderRadius: '50%',
+            background: 'var(--success)',
+            color: 'var(--background)',
+            fontSize: 9,
+            fontWeight: 700,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            border: '1.5px solid var(--bg-elev)',
+          }}
+        >
+          ✓
+        </span>
+      )}
+    </span>
+  );
+
+  const circleStyle: CSSProperties = {
+    width: 32,
+    height: 32,
+    borderRadius: '50%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 15,
+    padding: 0,
+    background: node.active ? `color-mix(in srgb, ${color} 12%, transparent)` : 'transparent',
+    border: `1px solid ${current ? 'var(--accent-purple)' : node.active ? color : 'var(--border)'}`,
+    // Active-step ring so the operator always sees where the chain is.
+    boxShadow: current
+      ? '0 0 0 3px color-mix(in srgb, var(--accent-purple) 22%, transparent)'
+      : 'none',
+    color: 'inherit',
+    cursor: clickable ? 'pointer' : 'default',
+    transition: 'box-shadow 0.2s ease',
+  };
+
   return (
     <div
       data-testid={`concept-node-${node.id}`}
       data-active={node.active}
+      data-current={current || undefined}
       data-artifact-status={artifact?.status}
       style={{
         flex: 1,
@@ -280,28 +344,29 @@ function ConceptNode({
         padding: '0 4px',
       }}
     >
-      <div
-        style={{
-          width: 30,
-          height: 30,
-          borderRadius: '50%',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontSize: 15,
-          background: node.active ? `color-mix(in srgb, ${color} 12%, transparent)` : 'transparent',
-          border: `1px solid ${node.active ? color : 'var(--border)'}`,
-        }}
-      >
-        {node.icon}
-      </div>
+      {clickable ? (
+        <button
+          type="button"
+          data-testid={`concept-view-${node.id}`}
+          onClick={() => onView!(node.artifactKind!)}
+          title={`View ${node.label} document`}
+          style={circleStyle}
+        >
+          {iconInner}
+        </button>
+      ) : (
+        <div style={circleStyle}>{iconInner}</div>
+      )}
       <div
         style={{
           fontSize: 12,
-          fontWeight: 500,
+          fontWeight: current ? 700 : 500,
           color: node.active ? 'var(--foreground)' : 'var(--text-faint)',
-          marginTop: 8,
+          marginTop: 10,
           textAlign: 'center',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
         }}
       >
         {node.label}
@@ -318,7 +383,9 @@ function ConceptNode({
       >
         {node.active ? node.persona : 'skipped'}
       </div>
-      {phase && (
+      {/* Status caption — only for IN-FLIGHT states. Approved nodes carry the
+          corner ✓ instead (no caption), so finished steps read calm. */}
+      {phase && !approved && (
         <div
           data-testid={`concept-status-${node.id}`}
           style={{
@@ -336,19 +403,22 @@ function ConceptNode({
           {phase.generating && <Spinner size={9} />}
           {phase.awaiting && '⏸ '}
           {phase.stale && '↻ '}
-          {!phase.generating && phase.tone === 'success' && '✓ '}
           {phase.caption}
         </div>
       )}
-      {hasContent && onView && node.artifactKind && (
-        <button
-          type="button"
-          data-testid={`concept-view-${node.id}`}
-          onClick={() => onView(node.artifactKind!)}
-          style={{ ...pillStyle('accent-blue'), marginTop: 6 }}
+      {current && (
+        <div
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 8,
+            fontWeight: 700,
+            letterSpacing: '0.18em',
+            color: 'var(--accent-purple)',
+            marginTop: 3,
+          }}
         >
-          👁 View
-        </button>
+          ● NOW
+        </div>
       )}
       {phase?.awaiting && onApprove && node.artifactKind && (
         <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>

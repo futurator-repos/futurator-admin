@@ -176,6 +176,12 @@ export const createPlanForAppInputSchema = z.object({
   /** Concept v2 (W11) — interactivity axis; default resolved when omitted. */
   conceptInteraction: conceptInteractionSchema.optional(),
   /**
+   * YOLO — auto-advance between phases. At creation it also seeds
+   * `conceptInteraction` (YOLO on → autopilot, auto-approving the whole concept
+   * chain) when the client doesn't send `conceptInteraction` explicitly.
+   */
+  yoloMode: z.boolean().optional(),
+  /**
    * PR-10 #1 — optional plan slug (kebab-case). When omitted the API
    * auto-generates `${appId}-${kind}-${shortHash}` so multi-plan-per-app
    * stops colliding on the legacy `name` uniqueness constraint. When

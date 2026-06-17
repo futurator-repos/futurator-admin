@@ -113,6 +113,7 @@ import { writeConceptArtifact } from './pipelines/lib/concept-artifact-writeback
 // Concept v2 (E3.2a) — fill {{PRIOR_ARTIFACTS}} from approved upstream docs.
 import {
   loadPriorArtifacts,
+  loadAllConceptArtifacts,
   loadCitableSections,
   conceptKindForStepId,
 } from './pipelines/lib/story-context-pack.mjs';
@@ -2168,6 +2169,11 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
     const conceptKind = conceptKindForStepId(step.id);
     if (conceptKind) {
       variables.PRIOR_ARTIFACTS = loadPriorArtifacts(workingDir, conceptKind);
+    } else if (step.id === 'pm-plan') {
+      // Round 1.1 — the chain-driven planner shards ALL approved docs (PRD + UX
+      // + Architecture), not just upstreams of one generator. This is what makes
+      // the epic plan grounded in the specs the agents just wrote.
+      variables.PRIOR_ARTIFACTS = loadAllConceptArtifacts(workingDir);
     }
   }
   // Concept v2 (E5.2) — fill the pm-plan {{CITABLE_SECTIONS}} placeholder with

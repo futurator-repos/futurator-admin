@@ -83,7 +83,7 @@ describe('ConceptRail — live status + Approve (Round 1)', () => {
     expect(screen.getByTestId('concept-status-ux').textContent).toMatch(/queued/);
   });
 
-  it('an approved artifact shows the approved caption and no Approve button', () => {
+  it('an approved artifact shows a minimal check (no caption) and no Approve button', () => {
     render(
       <ConceptRail
         conceptPlan={UI_BEARING}
@@ -93,7 +93,12 @@ describe('ConceptRail — live status + Approve (Round 1)', () => {
         onApprove={vi.fn()}
       />,
     );
-    expect(screen.getByTestId('concept-status-prd').textContent).toMatch(/approved/);
+    // Redesign (2026-06-17): approved nodes drop the verbose caption — the node
+    // carries data-artifact-status + a corner ✓ check instead — and offer no
+    // Approve button.
+    expect(screen.getByTestId('concept-node-prd').dataset.artifactStatus).toBe('approved');
+    expect(screen.queryByTestId('concept-status-prd')).toBeNull();
+    expect(screen.getByLabelText('approved')).toBeInTheDocument();
     expect(screen.queryByTestId('concept-approve-prd')).toBeNull();
   });
 

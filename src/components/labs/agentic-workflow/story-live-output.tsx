@@ -6,6 +6,14 @@ import type { AgentEvent } from '@/types/agent-orchestrator';
 
 interface StoryLiveOutputProps {
   jobId: string;
+  /**
+   * Concept stage (2026-06-17) — hide the raw "Response" dump. The concept
+   * agents' response IS the generated document (a wall of markdown / structured
+   * markers), which the operator reads in the doc drawer instead. With this on,
+   * the stream shows only the live thinking + the action log — the same surface
+   * the dev stage exposes, minus the JSON.
+   */
+  hideResponse?: boolean;
 }
 
 const TOOL_ICONS: Record<string, string> = {
@@ -92,14 +100,13 @@ function formatActionForCopy(a: Action, idx: number): string {
   if (a.type === 'step_complete') return `${header}\n  Step ${a.stepId} complete`;
   if (a.type === 'error') return `${header}\n  ERROR: ${a.text || ''}`;
   if (a.type === 'status') return `${header}\n  ${a.text || ''}`;
-  if (a.type === 'extraction')
-    return `${header}\n  ${a.variableName} = ${a.variableValue || ''}`;
+  if (a.type === 'extraction') return `${header}\n  ${a.variableName} = ${a.variableValue || ''}`;
   if (a.type === 'validation')
     return `${header}\n  ${a.validationPassed ? 'PASS' : 'FAIL'}: ${a.validationLabel || ''}`;
   return header;
 }
 
-export function StoryLiveOutput({ jobId }: StoryLiveOutputProps) {
+export function StoryLiveOutput({ jobId, hideResponse }: StoryLiveOutputProps) {
   const { data: job } = useAgentJob(jobId);
   const { events } = useAgentEvents(jobId, job?.status);
   const [actionsExpanded, setActionsExpanded] = useState(true);
@@ -341,7 +348,7 @@ export function StoryLiveOutput({ jobId }: StoryLiveOutputProps) {
       )}
 
       {/* Response (agent's streamed text output) */}
-      {responseText && (
+      {!hideResponse && responseText && (
         <div className="rounded border border-input">
           <div className="px-3 py-1.5 border-b border-input bg-muted/20">
             <span className="text-xs font-semibold">Response</span>

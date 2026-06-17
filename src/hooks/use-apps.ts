@@ -102,6 +102,10 @@ export interface CreatePlanForAppInput {
   rigor?: 'prototype' | 'mvp' | 'production';
   /** PR-10 #1 — optional plan slug. Auto-generated server-side if omitted. */
   name?: string;
+  /** YOLO — auto-advance phases; also seeds conceptInteraction server-side. */
+  yoloMode?: boolean;
+  /** Concept v2 — interactivity axis (autopilot auto-approves the whole chain). */
+  conceptInteraction?: 'interactive' | 'autopilot';
 }
 
 export function useCreatePlanForApp(appId: string | null | undefined) {

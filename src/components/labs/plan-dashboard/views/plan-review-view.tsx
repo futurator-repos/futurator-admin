@@ -265,19 +265,9 @@ export function PlanReviewView({
                 disabled={regenerate.isPending || generating}
               />
             )}
-            {isConcept && hasEpics && specsComplete && (
-              <SolidButton
-                label={
-                  start.isPending
-                    ? 'Launching…'
-                    : openScoutCard
-                      ? 'Resolve skill card first'
-                      : 'Start development →'
-                }
-                onClick={handleStart}
-                disabled={start.isPending || generating || !!openScoutCard}
-              />
-            )}
+            {/* Start development moved OUT of this header into the dedicated
+                Concept Gate card at the foot of the page (Murat's gate), shown
+                once the epic plan is drafted. */}
           </div>
         </div>
         <textarea
@@ -544,7 +534,136 @@ export function PlanReviewView({
           </div>
         )}
       </section>
+
+      {/* Concept gate (Murat) — the single forward door out of Concept. It
+          appears once the epic plan is drafted (all specs approved + epics
+          landed) and is where the operator approves the plan to begin the
+          Developing stage. Relocated here from the Intent header + redesigned
+          as a deliberate gate, so "Start development" is an explicit decision
+          at the end of the chain, not a stray button at the top. */}
+      {isConcept && hasEpics && specsComplete && (
+        <ConceptGateCard
+          gate={plan.conceptPlan?.gate ?? 'light'}
+          epicCount={epics.length}
+          storyCount={epics.reduce((n, e) => n + e.stories.length, 0)}
+          blocked={!!openScoutCard}
+          pending={start.isPending}
+          disabled={generating}
+          onStart={handleStart}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Concept gate — Murat's review door. A summary of the drafted plan plus the
+ * one button that promotes it into Developing. When a SKILL-SCOUT decision card
+ * is open it's blocked (resolve it above first); the actual /start call still
+ * runs the server-side gate (skill manifest 409 etc.).
+ */
+function ConceptGateCard({
+  gate,
+  epicCount,
+  storyCount,
+  blocked,
+  pending,
+  disabled,
+  onStart,
+}: {
+  gate: 'noop' | 'light' | 'strict';
+  epicCount: number;
+  storyCount: number;
+  blocked: boolean;
+  pending: boolean;
+  disabled: boolean;
+  onStart: () => void;
+}) {
+  return (
+    <section
+      data-testid="concept-gate"
+      style={{
+        border: '1px solid color-mix(in srgb, var(--accent-purple) 35%, var(--border))',
+        background:
+          'linear-gradient(180deg, color-mix(in srgb, var(--accent-purple) 7%, transparent), transparent)',
+        borderRadius: 12,
+        padding: '20px 22px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 18,
+        flexWrap: 'wrap',
+      }}
+    >
+      <div
+        style={{
+          width: 40,
+          height: 40,
+          borderRadius: '50%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 20,
+          flexShrink: 0,
+          background: 'color-mix(in srgb, var(--accent-purple) 14%, transparent)',
+          border: '1px solid color-mix(in srgb, var(--accent-purple) 45%, transparent)',
+        }}
+      >
+        🧪
+      </div>
+      <div style={{ flex: 1, minWidth: 240 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--foreground)' }}>
+            Concept gate
+          </span>
+          <span
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 9,
+              color: 'var(--text-faint)',
+              letterSpacing: '0.1em',
+            }}
+          >
+            Murat · gate: {gate}
+          </span>
+        </div>
+        <div style={{ fontSize: 12.5, color: 'var(--text-dim)', marginTop: 3, lineHeight: 1.5 }}>
+          The plan is drafted from the approved specs — <strong>{epicCount}</strong> epic
+          {epicCount === 1 ? '' : 's'}, <strong>{storyCount}</strong> stor
+          {storyCount === 1 ? 'y' : 'ies'}. Approving promotes this plan into the Developing stage.
+          {blocked && (
+            <span style={{ color: 'var(--warning)' }}>
+              {' '}
+              Resolve the skill-manifest card above before starting.
+            </span>
+          )}
+        </div>
+      </div>
+      <button
+        type="button"
+        data-testid="concept-gate-start"
+        onClick={onStart}
+        disabled={pending || disabled || blocked}
+        style={{
+          fontSize: 12,
+          fontWeight: 600,
+          letterSpacing: '0.04em',
+          padding: '10px 20px',
+          border: '1px solid var(--foreground)',
+          borderRadius: 6,
+          color: 'var(--background)',
+          background: 'var(--foreground)',
+          cursor: pending || disabled || blocked ? 'not-allowed' : 'pointer',
+          opacity: pending || disabled || blocked ? 0.55 : 1,
+          flexShrink: 0,
+        }}
+      >
+        {pending
+          ? 'Launching…'
+          : blocked
+            ? 'Resolve skill card first'
+            : 'Approve & start development →'}
+      </button>
+    </section>
   );
 }
 
@@ -1229,6 +1348,14 @@ function CollapsibleAgentLog({
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(!!defaultOpen);
+  // Auto-collapse on handoff: when this agent stops being the active one (the
+  // chain moved to the next persona) collapse it; when it becomes active, expand.
+  // Syncs only when `defaultOpen` actually flips, so a manual toggle in between
+  // is preserved until the next handoff.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setOpen(!!defaultOpen);
+  }, [defaultOpen]);
   const p = CONCEPT_PERSONA[entry.kind] ?? {
     name: 'Agent',
     role: 'Specialist',
@@ -1301,7 +1428,9 @@ function CollapsibleAgentLog({
       </button>
       {open && (
         <div style={{ borderTop: '1px solid var(--border)', padding: '8px 0' }}>
-          <StoryLiveOutput jobId={entry.jobId} />
+          {/* Concept agents: logs + live thinking only — the document itself is
+              read in the drawer (View), so the raw JSON Response dump is hidden. */}
+          <StoryLiveOutput jobId={entry.jobId} hideResponse />
         </div>
       )}
     </section>
