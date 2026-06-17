@@ -70,7 +70,12 @@ export function PlanReviewView({
   // until every spec is approved. The rail is the source of truth for "what's
   // running"; the legacy PM banner/empty-state must NOT show (it falsely read
   // the concept-apply mutation's transient isPending as "PM drafting").
-  const conceptChainActive = isConcept && !!plan.conceptPlan;
+  // A `conceptRouteJobId` is stamped at CREATION, so we treat the chain as
+  // active from the very first render — even before the Router finishes and
+  // `conceptPlan` is applied — to suppress the false "PM drafting" banner
+  // during the routing window. `conceptRouting` = chain owns it but no plan yet.
+  const conceptChainActive = isConcept && (!!plan.conceptPlan || !!plan.conceptRouteJobId);
+  const conceptRouting = conceptChainActive && !plan.conceptPlan;
   const generating = (pmRunning || !!applyPending) && !conceptChainActive;
   // Reactive drive: advance the spec chain while the operator watches (the cron
   // is the backstop). Active only while the chain is live + no epics yet.
@@ -407,6 +412,31 @@ export function PlanReviewView({
             <div style={{ marginTop: 8, color: 'var(--text-mute)' }}>
               Click <strong>Regenerate</strong> for a fresh decomposition, or fix the JSON and use{' '}
               <strong>Import</strong>.
+            </div>
+          </div>
+        )}
+
+        {conceptRouting && (
+          <div
+            data-testid="concept-routing"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              padding: '16px 20px',
+              border: '1px solid var(--border)',
+              borderRadius: 12,
+              background: 'var(--bg-elev)',
+              marginBottom: 16,
+            }}
+          >
+            <Loader2 size={16} className="animate-spin" style={{ color: 'var(--accent-purple)' }} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Routing your concept…</div>
+              <div style={{ fontSize: 12, color: 'var(--text-mute)', marginTop: 2 }}>
+                Mary is deciding which specs this build needs (PRD · UX · Architecture). The chain
+                appears here as soon as routing finishes.
+              </div>
             </div>
           </div>
         )}

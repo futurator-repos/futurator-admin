@@ -211,38 +211,35 @@ export function PlanDashboard({ planId }: { planId: string }) {
       });
   }, [plan, planId, pmJobId, autoDiscovered, apply, refetch]);
 
-  // Concept v2 — auto-apply the Concept Router output. When the plan has a
-  // concept-route job (mvp/production; prototype is bypassed) but no persisted
-  // `conceptPlan` yet, POST /apply-concept-plan once. The endpoint reads the
-  // COMPLETED route job's CONCEPT_PLAN_JSON, validates it, and persists
-  // `plan.conceptPlan` — which the Concept rail renders. Idempotent + one-shot
-  // per planId; the "no completed concept-route job" error is expected while
-  // the route job is still RUNNING (the next poll/refetch retries).
+  // Concept v2 — auto-apply the Concept Router output.
+  //
+  // 2026-06-17 FIX: previously this POSTed /apply-concept-plan on EVERY render
+  // while the route job was still RUNNING and DELETED its one-shot guard on the
+  // expected "not COMPLETED" 400 — a tight retry loop that flooded the console
+  // with 400s (and hammered the API) for the whole ~30s routing window. We now
+  // POLL the route JOB STATUS and apply EXACTLY ONCE, only after it reaches
+  // COMPLETED. Zero premature 400s; the cron is the server-side backstop.
+  const conceptRouteJobId = plan?.conceptRouteJobId ?? null;
+  const watchRouteJob = plan?.status === 'concept' && !plan?.conceptPlan ? conceptRouteJobId : null;
+  const { data: conceptRouteJob } = useAgentJob(watchRouteJob);
   useEffect(() => {
-    if (!plan) return;
-    if (plan.status !== 'concept') return;
+    if (!plan || plan.status !== 'concept') return;
     if (!plan.conceptRouteJobId) return; // prototype / legacy → no Router
     if (plan.conceptPlan) return; // already applied
+    if (conceptRouteJob?.status !== 'COMPLETED') return; // WAIT for the router — no premature POSTs
     if (conceptApplied.has(planId)) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setConceptApplied((s) => new Set(s).add(planId));
+    setConceptApplied((s) => new Set(s).add(planId)); // strictly one-shot per plan
     applyConcept
       .mutateAsync()
       .then(() => refetch())
       .catch((err) => {
-        // Expected while the route job is still RUNNING — let a later refetch
-        // retry. Clear the one-shot guard so the retry can fire.
-        if (/No completed concept-route job|not COMPLETED/i.test(String(err?.message || ''))) {
-          setConceptApplied((s) => {
-            const next = new Set(s);
-            next.delete(planId);
-            return next;
-          });
-        } else {
-          console.error('[PlanDashboard] auto-apply conceptPlan failed', err);
-        }
+        // Genuine parse/validation failure (the route IS complete here). Surface
+        // it; do NOT clear the guard — the cron retries server-side, and a manual
+        // Regenerate is the operator's lever. No render-loop.
+        console.error('[PlanDashboard] auto-apply conceptPlan failed', err);
       });
-  }, [plan, planId, conceptApplied, applyConcept, refetch]);
+  }, [plan, planId, conceptApplied, applyConcept, refetch, conceptRouteJob?.status]);
 
   // 2026-06-13 — storyId → { title, epic } map for the GitGraph Story view
   // (substitutes raw UUIDs with titles; groups commits Epic → Wave).
