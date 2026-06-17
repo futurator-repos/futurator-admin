@@ -76,6 +76,25 @@ export function PlanReviewView({
   // during the routing window. `conceptRouting` = chain owns it but no plan yet.
   const conceptChainActive = isConcept && (!!plan.conceptPlan || !!plan.conceptRouteJobId);
   const conceptRouting = conceptChainActive && !plan.conceptPlan;
+  // Which specialized BMAD persona is actively drafting right now (for the live
+  // stream header). The active artifact = first non-approved in topo order; it's
+  // generating when rev0. We stream THAT generator job's stream-json trace.
+  const conceptArtifactsList = plan.conceptArtifacts ?? [];
+  const activeConceptKind = plan.conceptPlan?.artifacts.find((p) => {
+    const r = conceptArtifactsList.find((a) => a.kind === p.kind);
+    return !r || r.status !== 'approved';
+  })?.kind;
+  const activeConceptArtifact = activeConceptKind
+    ? conceptArtifactsList.find((a) => a.kind === activeConceptKind)
+    : undefined;
+  const conceptGenerating =
+    !!activeConceptArtifact &&
+    activeConceptArtifact.status === 'draft' &&
+    activeConceptArtifact.rev === 0;
+  const activeGenJobId =
+    conceptGenerating && activeConceptKind
+      ? plan.conceptArtifactJobIds?.[activeConceptKind]
+      : undefined;
   const generating = (pmRunning || !!applyPending) && !conceptChainActive;
   // Reactive drive: advance the spec chain while the operator watches (the cron
   // is the backstop). Active only while the chain is live + no epics yet.
@@ -222,7 +241,13 @@ export function PlanReviewView({
                 disabled={patch.isPending}
               />
             )}
-            {isConcept && (
+            {/* The monolithic PM `Regenerate` is the LEGACY one-shot — it makes a
+                single "PM" agent author the PRD, UX, architecture AND the plan
+                all at once. For a Concept-chain plan that's wrong: the chain
+                runs specialized BMAD personas (John→PRD, Sally→UX, Winston→Arch)
+                each owning their artifact, with per-doc Regenerate in the rail.
+                So hide the monolithic button whenever the chain owns the plan. */}
+            {isConcept && !conceptChainActive && (
               <GhostButton
                 label={regenerate.isPending ? 'Starting…' : 'Regenerate'}
                 onClick={handleRegenerate}
@@ -450,6 +475,13 @@ export function PlanReviewView({
             onRegenerate={(kind) => regenerateArtifact.mutate(kind)}
             regeneratingKind={regenerateArtifact.isPending ? regenerateArtifact.variables : null}
           />
+        )}
+
+        {/* Live stream of the ACTIVE specialized agent (John/Sally/Winston),
+            not the monolithic PM — so you can watch the actual doc being
+            written, by name. */}
+        {activeGenJobId && activeConceptKind && (
+          <ConceptAgentStream jobId={activeGenJobId} kind={activeConceptKind} />
         )}
 
         {/* Concept chain owns generation — the rail above is the live status.
@@ -1036,6 +1068,67 @@ function PmAgentLogPanel({ jobId, defaultOpen }: { jobId: string; defaultOpen?: 
           <StoryLiveOutput jobId={jobId} />
         </div>
       )}
+    </section>
+  );
+}
+
+/** The specialized BMAD persona that authors each concept artifact. */
+const CONCEPT_PERSONA: Record<string, { name: string; role: string; icon: string }> = {
+  prd: { name: 'John', role: 'Product Manager', icon: '📋' },
+  ux: { name: 'Sally', role: 'UX Expert', icon: '🎨' },
+  architecture: { name: 'Winston', role: 'Architect', icon: '🏗️' },
+};
+
+/**
+ * Live stream of the ACTIVE concept-stage agent (John/Sally/Winston) — the
+ * specialized persona drafting the current spec, NOT the monolithic PM. Reuses
+ * the same stream-json trace the dev/reviewer stages expose, headed by the
+ * persona so the operator sees exactly who is writing what, in real time.
+ */
+function ConceptAgentStream({ jobId, kind }: { jobId: string; kind: string }) {
+  const persona = CONCEPT_PERSONA[kind] ?? { name: 'Agent', role: 'Specialist', icon: '✦' };
+  const docLabel = kind === 'architecture' ? 'architecture.md' : `${kind}.md`;
+  return (
+    <section
+      data-testid="concept-agent-stream"
+      style={{
+        border: '1px solid var(--border)',
+        background: 'var(--bg-elev)',
+        borderRadius: 8,
+        overflow: 'hidden',
+        marginBottom: 16,
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '12px 18px',
+          borderBottom: '1px solid var(--border)',
+        }}
+      >
+        <Loader2 size={14} className="animate-spin" style={{ color: 'var(--accent-purple)' }} />
+        <span style={{ fontSize: 16 }}>{persona.icon}</span>
+        <span style={{ fontWeight: 600, fontSize: 13 }}>
+          {persona.name}
+          <span style={{ color: 'var(--text-mute)', fontWeight: 400 }}> · {persona.role}</span>
+        </span>
+        <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>is drafting {docLabel}…</span>
+        <span
+          style={{
+            marginLeft: 'auto',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            color: 'var(--text-faint)',
+          }}
+        >
+          job {jobId.slice(0, 8)}
+        </span>
+      </div>
+      <div style={{ padding: '8px 0' }}>
+        <StoryLiveOutput jobId={jobId} />
+      </div>
     </section>
   );
 }

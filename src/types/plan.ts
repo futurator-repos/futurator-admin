@@ -87,6 +87,8 @@ export interface Plan {
   conceptArtifacts?: ConceptArtifact[];
   /** Concept v2 — FK to the concept-route job (mvp/production). */
   conceptRouteJobId?: string;
+  /** Concept v2 — per-artifact generator job FKs (for live streaming the active agent). */
+  conceptArtifactJobIds?: Partial<Record<ConceptArtifactKind, string>>;
   testingProfile?: PlanTestingProfile;
   /** QA auto-enqueue toggle. Default derived from rigor at creation. */
   autoRunQa?: boolean;
