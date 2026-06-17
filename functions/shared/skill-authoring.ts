@@ -137,7 +137,45 @@ export function removeIndexEntry(index: SkillIndex, name: string): SkillIndex {
 
 const BRANCH = 'main';
 const INDEX_PATH = 'index.json';
+const REPORT_PATH = 'REPORT.md';
 const skillMdPath = (name: string) => `skills/${name}/SKILL.md`;
+
+/**
+ * Append a timestamped line to the registry's `REPORT.md` audit artifact
+ * (Skills Institution — vision §Data). Ratify + retro-scan append here so
+ * `REPORT.md` is the human-readable ledger of every curation decision. Creates
+ * the file if absent. Best-effort by contract: callers treat a failure as
+ * non-fatal (the skill was already published; the audit line is secondary).
+ */
+export async function appendReport(
+  line: string,
+  opts: { owner?: string; repo?: string; now?: () => Date } = {},
+): Promise<{ ok: boolean; commitSha?: string }> {
+  const owner = opts.owner ?? SKILL_SOURCE_OWNER;
+  const repo = opts.repo ?? SKILL_SOURCE_REPO;
+  const stamp = (opts.now ? opts.now() : new Date()).toISOString();
+  const entry = `- ${stamp} — ${line}\n`;
+  try {
+    let existing = '# Skills Registry — Curation Report\n\n';
+    try {
+      const { data } = await getFileContent(owner, repo, REPORT_PATH, BRANCH);
+      if (!('tooLarge' in data)) existing = data.content;
+    } catch {
+      // absent → create with a header
+    }
+    const { commitSha } = await putFile(
+      owner,
+      repo,
+      REPORT_PATH,
+      `${existing.replace(/\s*$/, '')}\n${entry}`,
+      `report: ${line}`.slice(0, 72),
+      BRANCH,
+    );
+    return { ok: true, commitSha };
+  } catch {
+    return { ok: false };
+  }
+}
 
 /** Fetch + parse the source's index.json (throws if unreadable/malformed). */
 async function readIndex(owner: string, repo: string): Promise<SkillIndex> {

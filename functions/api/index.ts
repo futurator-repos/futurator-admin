@@ -8,7 +8,23 @@ import {
   diffSkillReconciliation,
   type SkillCatalog,
 } from '../shared/skill-catalog';
-import { putSkill, deleteSkill, getSkillBody, SKILL_NAME_RE } from '../shared/skill-authoring';
+import {
+  putSkill,
+  deleteSkill,
+  getSkillBody,
+  appendReport,
+  SKILL_NAME_RE,
+} from '../shared/skill-authoring';
+import {
+  putProposal,
+  getProposal,
+  listByStatus as listProposalsByStatus,
+  listAllProposals,
+  updateStatus as updateProposalStatus,
+} from '../shared/repositories/skill-proposals-repository';
+import { fromCreate, fromPasteUrl } from '../shared/skill-gate';
+import { lineDiff } from '../shared/lib/text-diff';
+import { ProposalStatusSchema, type SkillProposal } from '../shared/schemas/skill-proposal-schema';
 import type { Project } from '../shared/types';
 import {
   projectUpdateSchema,
@@ -11259,6 +11275,177 @@ app.delete('/api/skills/:name', authMiddleware, async (c) => {
   const result = await deleteSkill(name);
   _skillCatalogCache = null;
   return c.json(result);
+});
+
+/**
+ * Skills Institution — Story 3.2/3.4/3.5: the curation Inbox API.
+ *
+ *   GET  /api/skill-proposals?status=        — list (GSI by status, else all)
+ *   GET  /api/skill-proposals/:id            — proposal + current body + diff
+ *   POST /api/skill-proposals/:id/ratify     — publish (trusted) → putSkill
+ *   POST /api/skill-proposals/:id/reject
+ *   POST /api/skill-proposals/:id/defer
+ *   POST /api/skills/gate                     — submit a create / paste-url candidate
+ *
+ * Ratify is the human Phase-2 synthesis step (Hermes governance line): it is the
+ * ONLY way a skill reaches `trustTier: trusted`. A quarantined proposal requires
+ * an explicit `override:true` to ratify.
+ */
+
+app.get('/api/skill-proposals', authMiddleware, async (c) => {
+  const statusParam = c.req.query('status');
+  let proposals: SkillProposal[];
+  if (statusParam) {
+    const parsed = ProposalStatusSchema.safeParse(statusParam);
+    if (!parsed.success) throw new ValidationError(`invalid status "${statusParam}"`);
+    proposals = await listProposalsByStatus(parsed.data);
+  } else {
+    proposals = await listAllProposals();
+  }
+  return c.json({ proposals, total: proposals.length });
+});
+
+app.get('/api/skill-proposals/:id', authMiddleware, async (c) => {
+  const id = c.req.param('id');
+  const proposal = await getProposal(id);
+  if (!proposal) throw new NotFoundError('SkillProposal', id);
+  // Compute the diff vs the current registry body (empty when it's a new skill).
+  let currentBody = '';
+  try {
+    const existing = await getSkillBody(proposal.skillName);
+    currentBody = existing.body ?? '';
+  } catch {
+    currentBody = '';
+  }
+  const diff = lineDiff(currentBody, proposal.proposedBody);
+  return c.json({ proposal, currentBody, diff });
+});
+
+/** Shared decision metadata extractor. */
+function operatorOf(c: Context): string {
+  return (c.get('user') as { email?: string } | undefined)?.email ?? 'operator';
+}
+
+app.post('/api/skill-proposals/:id/ratify', authMiddleware, async (c) => {
+  const id = c.req.param('id');
+  const body = (await c.req.json().catch(() => ({}))) as { override?: boolean };
+  const proposal = await getProposal(id);
+  if (!proposal) throw new NotFoundError('SkillProposal', id);
+  if (proposal.status === 'ratified') return c.json({ proposal });
+  if (proposal.status === 'quarantined' && body.override !== true) {
+    throw new AppError(
+      'PROPOSAL_QUARANTINED',
+      `"${proposal.skillName}" is quarantined by Gate-1; pass override:true to ratify anyway.`,
+      409,
+    );
+  }
+
+  // Publish: stamp trustTier:trusted, write the body + index entry to the
+  // canonical registry. trustTier is minted HERE and only here.
+  const ratifiedBy = operatorOf(c);
+  const ratifiedAt = new Date().toISOString();
+  await putSkill({
+    name: proposal.skillName,
+    description: proposal.proposedEntry.description,
+    body: proposal.proposedBody,
+    kind: proposal.kind,
+    license: proposal.proposedEntry.license,
+    facets: {
+      provenanceClass: proposal.proposedEntry.provenanceClass,
+      qualityGrade: proposal.proposedEntry.qualityGrade,
+      maturity: proposal.proposedEntry.maturity,
+      lineage: proposal.proposedEntry.lineage,
+      trustTier: 'trusted',
+      // an overridden quarantine publishes as 'flagged' (visible caution), never 'clean'
+      securityStatus:
+        proposal.securityStatus === 'quarantined' ? 'flagged' : proposal.securityStatus,
+    },
+  });
+  const updated = await updateProposalStatus(id, { status: 'ratified', ratifiedBy, ratifiedAt });
+  _skillCatalogCache = null; // bust so the next browse shows the trusted skill
+  await appendReport(
+    `RATIFIED ${proposal.skillName} (${proposal.source}) by ${ratifiedBy}${
+      proposal.status === 'quarantined' ? ' [override]' : ''
+    }`,
+  );
+  return c.json({ proposal: updated });
+});
+
+app.post('/api/skill-proposals/:id/reject', authMiddleware, async (c) => {
+  const id = c.req.param('id');
+  const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+  const updated = await updateProposalStatus(id, {
+    status: 'rejected',
+    rejectedReason: body.reason,
+  });
+  if (!updated) throw new NotFoundError('SkillProposal', id);
+  return c.json({ proposal: updated });
+});
+
+app.post('/api/skill-proposals/:id/defer', authMiddleware, async (c) => {
+  const id = c.req.param('id');
+  const updated = await updateProposalStatus(id, { status: 'deferred' });
+  if (!updated) throw new NotFoundError('SkillProposal', id);
+  return c.json({ proposal: updated });
+});
+
+const gateSubmitSchema = z.object({
+  mode: z.enum(['create', 'paste-url']),
+  name: z.string().regex(SKILL_NAME_RE, 'name must be a lowercase slug (2-64 chars)'),
+  description: z.string().min(1).max(500),
+  // create: body required. paste-url: sourceUrl required (body extracted).
+  body: z.string().max(50_000).optional(),
+  sourceUrl: z.string().url().optional(),
+  kind: z.string().min(1).max(40).optional(),
+  license: z.string().min(1).max(120).optional(),
+});
+
+app.post('/api/skills/gate', authMiddleware, async (c) => {
+  const parsed = gateSubmitSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success)
+    throw new ValidationError(parsed.error.issues[0]?.message ?? 'invalid submit');
+  const d = parsed.data;
+
+  // framework/bmad skills are not authorable here (mirrors the CRUD guard).
+  const catalog = await getCachedSkillCatalog();
+  if (catalog.skills.find((s) => s.name === d.name)?.framework) {
+    throw new AppError('SKILL_NOT_EDITABLE', `"${d.name}" is a read-only framework skill.`, 403);
+  }
+
+  let proposal: SkillProposal;
+  if (d.mode === 'create') {
+    if (!d.body) throw new ValidationError('create mode requires a body');
+    proposal = fromCreate({
+      skillName: d.name,
+      description: d.description,
+      body: d.body,
+      kind: d.kind,
+      license: d.license,
+    });
+  } else {
+    if (!d.sourceUrl) throw new ValidationError('paste-url mode requires a sourceUrl');
+    // Minimal extraction in P1: fetch the URL, strip frontmatter if it's a
+    // SKILL.md, use the text as the body. Agentic extraction is Phase 3.
+    let fetched = '';
+    try {
+      const res = await fetch(d.sourceUrl, { headers: { Accept: 'text/plain' } });
+      if (res.ok) fetched = await res.text();
+    } catch {
+      fetched = '';
+    }
+    if (!fetched.trim()) throw new ValidationError('could not fetch a body from sourceUrl');
+    proposal = fromPasteUrl({
+      skillName: d.name,
+      description: d.description,
+      body: fetched.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim(),
+      sourceUrl: d.sourceUrl,
+      kind: d.kind,
+      license: d.license,
+    });
+  }
+
+  await putProposal(proposal);
+  return c.json({ proposal }, 201);
 });
 
 /** GET /api/apps/:appId — App detail (App + plans[] + activePlan + recentDeploys). */
