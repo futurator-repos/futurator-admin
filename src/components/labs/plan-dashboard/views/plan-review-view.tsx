@@ -15,6 +15,8 @@ import { Loader2 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { PlanWithEpics } from '@/hooks/use-plans';
 import { ConceptRail } from './concept-rail';
+import { ConceptDocDrawer } from './concept-doc-drawer';
+import type { ConceptArtifactKind } from '@/types/plan';
 import {
   usePatchPlan,
   useRegeneratePlan,
@@ -105,6 +107,7 @@ export function PlanReviewView({
   const start = useStartPlan(plan.planId);
   const approveArtifact = useApproveConceptArtifact(plan.planId);
   const regenerateArtifact = useRegenerateConceptArtifact(plan.planId);
+  const [docDrawerKind, setDocDrawerKind] = useState<ConceptArtifactKind | null>(null);
   const qc = useQueryClient();
 
   // SKILL-SCOUT gate (Epic 3 Story 3.5): plan /start returns 409 while an
@@ -474,6 +477,21 @@ export function PlanReviewView({
             approvingKind={approveArtifact.isPending ? approveArtifact.variables : null}
             onRegenerate={(kind) => regenerateArtifact.mutate(kind)}
             regeneratingKind={regenerateArtifact.isPending ? regenerateArtifact.variables : null}
+            onView={(kind) => setDocDrawerKind(kind)}
+          />
+        )}
+
+        {docDrawerKind && (
+          <ConceptDocDrawer
+            planId={plan.planId}
+            kind={docDrawerKind}
+            onClose={() => setDocDrawerKind(null)}
+            onApprove={(kind) => {
+              approveArtifact.mutate(kind, { onSuccess: () => setDocDrawerKind(null) });
+            }}
+            onRegenerate={(kind) => regenerateArtifact.mutate(kind)}
+            approving={approveArtifact.isPending}
+            regenerating={regenerateArtifact.isPending}
           />
         )}
 

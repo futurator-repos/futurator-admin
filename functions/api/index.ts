@@ -2329,6 +2329,45 @@ function findConceptKindParam(c: Context): ArtifactKind {
   return kind;
 }
 
+// ── Concept v2 — read a generated artifact's MARKDOWN (so the operator can
+// READ the PRD/UX/Architecture before approving it) ──
+//
+// GET /api/plans/:id/concept/:kind/document
+//
+// The generator captured the full doc into the gen job's `<KIND>_MD` variable
+// (the daemon also wrote concept/<kind>.md to disk, but the Lambda can't read
+// EC2 disk — the job variable is the Lambda-accessible source of truth). Returns
+// the markdown + the live status/rev so the drawer can render + offer Approve.
+app.get('/api/plans/:id/concept/:kind/document', async (c) => {
+  const planId = c.req.param('id');
+  const kind = findConceptKindParam(c);
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  const row = (plan.conceptArtifacts ?? []).find((a) => a.kind === kind);
+  // Resolve the generator job: FK first, then auto-discover the latest COMPLETED
+  // gen job for this plan dir carrying the artifact's MD variable.
+  const { mdVar } = artifactJobVars(kind);
+  let jobId = plan.conceptArtifactJobIds?.[kind] ?? plan[CONCEPT_FK_FIELD[kind]];
+  if (!jobId) {
+    const allJobs = await agentJobsRepo.scanAllJobs();
+    const cand = allJobs
+      .filter((j) => j.workingDir === plan.workingDir && j.variables?.[mdVar])
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    jobId = cand[0]?.jobId;
+  }
+  const job = jobId ? await agentJobsRepo.getJobById(jobId) : null;
+  const markdown = (job?.variables?.[mdVar] as string | undefined) ?? null;
+  return c.json({
+    planId,
+    kind,
+    markdown,
+    status: row?.status ?? null,
+    rev: row?.rev ?? 0,
+    persona: { prd: 'John', ux: 'Sally', architecture: 'Winston' }[kind],
+  });
+});
+
 app.post('/api/plans/:id/concept/:kind/approve', async (c) => {
   const planId = c.req.param('id');
   const kind = findConceptKindParam(c);

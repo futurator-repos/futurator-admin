@@ -126,6 +126,15 @@ describe('ConceptRail — live status + Approve (Round 1)', () => {
     expect(screen.getByTestId('concept-headline').textContent).toMatch(/PRD ready for your review/);
   });
 
+  it('offers a View button on a doc with content (rev>=1) and calls onView', () => {
+    const onView = vi.fn();
+    render(<ConceptRail conceptPlan={UI_BEARING} conceptArtifacts={artifacts()} onView={onView} />);
+    // PRD has rev1 → has content → View available; UX is rev0 → no View.
+    fireEvent.click(screen.getByTestId('concept-view-prd'));
+    expect(onView).toHaveBeenCalledWith('prd');
+    expect(screen.queryByTestId('concept-view-ux')).toBeNull();
+  });
+
   it('offers Regenerate alongside Approve on a drafted doc and calls onRegenerate', () => {
     const onRegenerate = vi.fn();
     render(

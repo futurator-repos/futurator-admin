@@ -33,6 +33,7 @@ export function ConceptRail({
   approvingKind,
   onRegenerate,
   regeneratingKind,
+  onView,
 }: {
   conceptPlan: ConceptPlan;
   /** Live per-artifact status; absent → static planned-chain view (back-compat). */
@@ -45,6 +46,8 @@ export function ConceptRail({
   onRegenerate?: (kind: ConceptArtifactKind) => void;
   /** The kind whose Regenerate is in flight. */
   regeneratingKind?: ConceptArtifactKind | null;
+  /** Open the document drawer to READ a generated artifact. Absent → no View. */
+  onView?: (kind: ConceptArtifactKind) => void;
 }) {
   const has = (k: ConceptArtifactKind) => conceptPlan.artifacts.some((a) => a.kind === k);
   const statusOf = (k: ConceptArtifactKind): ConceptArtifact | undefined =>
@@ -169,6 +172,7 @@ export function ConceptRail({
               approving={!!n.artifactKind && approvingKind === n.artifactKind}
               onRegenerate={onRegenerate}
               regenerating={!!n.artifactKind && regeneratingKind === n.artifactKind}
+              onView={onView}
             />
             {i < nodes.length - 1 && <ConceptConnector lit={nodes[i + 1].active} />}
           </Fragment>
@@ -246,6 +250,7 @@ function ConceptNode({
   approving,
   onRegenerate,
   regenerating,
+  onView,
 }: {
   node: ConceptNodeDef;
   artifact?: ConceptArtifact;
@@ -254,9 +259,12 @@ function ConceptNode({
   approving?: boolean;
   onRegenerate?: (kind: ConceptArtifactKind) => void;
   regenerating?: boolean;
+  onView?: (kind: ConceptArtifactKind) => void;
 }) {
   const color = node.active ? 'var(--accent-purple)' : 'var(--border-2)';
   const phase = artifactPhase(artifact, !!activeGen);
+  // A doc with rev>=1 has real content on disk → it can be READ.
+  const hasContent = !!artifact && artifact.rev >= 1;
   return (
     <div
       data-testid={`concept-node-${node.id}`}
@@ -331,6 +339,16 @@ function ConceptNode({
           {!phase.generating && phase.tone === 'success' && '✓ '}
           {phase.caption}
         </div>
+      )}
+      {hasContent && onView && node.artifactKind && (
+        <button
+          type="button"
+          data-testid={`concept-view-${node.id}`}
+          onClick={() => onView(node.artifactKind!)}
+          style={{ ...pillStyle('accent-blue'), marginTop: 6 }}
+        >
+          👁 View
+        </button>
       )}
       {phase?.awaiting && onApprove && node.artifactKind && (
         <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>

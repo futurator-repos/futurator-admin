@@ -36,6 +36,34 @@ export function useConceptDrive(planId: string, enabled: boolean) {
   });
 }
 
+export interface ConceptDocumentResponse {
+  planId: string;
+  kind: ConceptArtifactKind;
+  markdown: string | null;
+  status: string | null;
+  rev: number;
+  persona?: string;
+}
+
+/**
+ * Concept v2 — fetch a generated artifact's full markdown so the operator can
+ * READ the PRD/UX/Architecture in a drawer before approving it. Enabled only
+ * when a drawer is open for a kind. Re-fetches on demand (a regenerate bumps the
+ * content); polls lightly while the doc is still being drafted.
+ */
+export function useConceptDocument(
+  planId: string,
+  kind: ConceptArtifactKind | null,
+  opts?: { stillGenerating?: boolean },
+) {
+  return useQuery({
+    queryKey: ['concept-document', planId, kind],
+    enabled: !!kind,
+    refetchInterval: opts?.stillGenerating ? 3000 : false,
+    queryFn: () => api.get<ConceptDocumentResponse>(`/plans/${planId}/concept/${kind}/document`),
+  });
+}
+
 /** Concept v2 — regenerate a drafted/stale artifact (operator-triggered refresh). */
 export function useRegenerateConceptArtifact(planId: string) {
   const qc = useQueryClient();
