@@ -1,26 +1,63 @@
-# Skills Repository — Vision & Concept
+# Skills Repository — Vision & Converged Design
 
-**Status:** Brainstorming input · **Date:** 2026-06-17 · **Type:** Concept (not a committed plan)
-**Purpose:** Capture everything built, investigated, and proposed for the Futurator skill
-registry so we can brainstorm the next phase (quality, agentic creation, merge-at-scale).
+**Status:** Brainstorming **output** (converged design) · **Date:** 2026-06-17 · **Type:** Concept (not yet a committed implementation plan)
+**Purpose:** Capture the converged design from the party-mode brainstorm on making the Futurator
+skill registry — and its consumption by the pipeline — the best skills mechanism in existence.
 **Companion:** `skills-management-plan.md` (the executed Phase 0–4 build log).
+
+> This doc supersedes the earlier "brainstorming input" version. It records **decisions locked**
+> during the 2026-06-17 design session, the **ground truth** the codebase scouts surfaced, and a
+> **final build order**. Sections 7–10 are the actionable core.
 
 ---
 
 ## 0. TL;DR
 
-We turned a metadata-only catalog into a **245-skill content store with an embeddings index**.
-That solved _volume_ and _body CRUD_. The next frontier is turning volume into **quality**:
-measure every skill, retrieve intelligently, merge duplicates into a rubric-gated canonical set,
-and create new skills **agentically** (a conversation + an eval loop, not a form).
+We are not building a skill _list_. We are building a **compounding skill institution**: skills are
+**born from work**, **adapt per-app**, **graduate by cluster**, **retrieve by relevance**, and are
+**curated source-then-cluster-then-exception** — all flowing through **one gate** and landing on
+**one state machine**.
 
-The mental model: **the registry is a warehouse, an app's `.claude/skills/` is the carry-on,
-and SKILL-SCOUT is the retrieval bridge.** Skills can scale to thousands _only_ if a retrieval
-layer gates what ever reaches a model's context.
+The key realization: **Futurator already built ~70% of this and disconnected it.** The REFLECTOR is
+the "author from experience" loop; the Growth tab is the propose→ratify inbox; `Skills-Used` +
+`activationCount` are Phase-1 telemetry; the knowledge compiler → Mycelium is the graph substrate.
+Five seams are open. Close them in order and the loop runs.
+
+Guiding law (Rick's, and it governs everything): **storage is free, trust is earned.** The warehouse
+may hold thousands of `reviewed` skills (retrieval-gated, harmless); `trusted` grows _only_ through
+use + human ratify. Blur those two and you've built a landfill with a search bar.
 
 ---
 
-## 1. Where we are today (built & shipped)
+## 1. The reframe — you already built ~70% of Hermes
+
+The Hermes (`nousresearch/hermes-agent`) lifecycle has four moving parts. Futurator already has each
+— just disconnected:
+
+| Hermes part                                          | Futurator equivalent (exists today)                                                                                                                             | Status                                         |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| Foreground "author from experience"                  | REFLECTOR proposals: `target: 'project-skill'\|'org-skill'`, `action: create\|tune\|promote-from-project`, `confidence`, `evidence[]` (`reflector-pipeline.ts`) | ✅ proposes, ❌ **apply is a stub**            |
+| Background curator — **Phase 1** (telemetry, no LLM) | `loaded-skills-tracker.mjs` → `Skills-Used:` trailer; forensic `activationCount`                                                                                | ✅ counts, ❌ no state machine                 |
+| Background curator — **Phase 2** (synthesis)         | **Deliberately the human** = the Growth inbox (`growth-view.tsx`)                                                                                               | ✅ by design                                   |
+| Propose-to-inbox / ratify-to-deploy                  | Growth tab approve/decline reflections                                                                                                                          | ✅ exists (ratify-on-content, not yet on-diff) |
+| Graph substrate                                      | Knowledge compiler → Memgraph/Mycelium (`graph-sync.mjs`, `knowledge-live/<projectId>/`)                                                                        | ✅ for code knowledge                          |
+
+**The five open seams (close in build order):**
+
+1. **`REFLECTOR-APPLY` is a STUB** (`reflections-service.ts:76–81`). Approving a `project-skill`
+   proposal writes _nothing_. The loop has no landing zone. **This is the highest-value fix.**
+2. **Retrieval is unwired.** `index.embeddings.json` (voyage-3, 1024-dim) is **write-only**; the
+   scout linearly scans all ~245 descriptions. (`federation-resolver.mjs` reads only `index.json`.)
+3. **No app sub-registry tier.** The manifest's `plans:` overlay + `graduate-policy` exist in schema
+   but are never populated. App-adapted skills have no defined home or lifecycle.
+4. **Provenance is binary** — `framework: true` (bmad, read-only) vs everything else. The Hermes
+   "binary provenance is too dumb" trap.
+5. **No Phase-1 state machine** — counts exist, but nothing transitions a skill to stale/archive; no
+   snapshot-before-write, no `REPORT.md`.
+
+---
+
+## 2. Where we are today (built & shipped)
 
 | Phase | What                                                            | State    |
 | ----- | --------------------------------------------------------------- | -------- |
@@ -28,160 +65,302 @@ layer gates what ever reaches a model's context.
 | 1     | Read-only catalog + search + drift view (`/labs/skills`)        | ✅ live  |
 | 2     | Authoring CRUD (add/edit/remove → commit to `futurator-skills`) | ✅ live  |
 | 3     | Federation source CRUD                                          | ⏸ parked |
-| 4     | **Scale the registry** (this thread)                            | ✅ live  |
+| 4     | Scale the registry (245 skills + embeddings sidecar)            | ✅ live  |
 
-**Phase 4 detail (2026-06-17):**
-
-- The registry repo `futurator-repos/futurator-skills` was a **card catalog with no stacks** —
-  `index.json` metadata only, zero bodies → every skill showed "No body on file."
-- `scripts/ingest-skills.mjs` vendors bodies from curated sources
-  (anthropics/skills, vercel-labs, obra/superpowers, trailofbits, remotion, mattpocock, coreyhaines).
-- Result: **59 → 245 skills, 189 with full bodies**, each stamped with license + provenance.
-- **`index.embeddings.json`** committed — Voyage `voyage-3` (1024-dim) vectors over
-  name+description+body. The retrieval Tier-3 artifact.
-- Registry UI is Registry-first, shares Labs UI primitives, body view + CRUD work.
-
-**The 245 are unmeasured and uncurated** — ingested from external repos with no triggering evals,
-no quality grade, and probable redundancy (e.g. 74 security + 45 marketing skills likely overlap).
+**The 245 are unverified.** `scripts/ingest-skills.mjs` `git clone`s 7 curated repos and **dumps
+bodies straight into the registry with zero scanning or grading.** index.json carries 7 fields
+(`name, kind, framework, version, license, description, provenance?`) — **no quality / trust / security
+fields.** So "245 curated skills" is really "245 _unverified_ skills wearing a curated badge." The
+retro-scan (build step 2) fixes this.
 
 ---
 
-## 2. What we investigated (primary sources)
-
-- **Anthropic — _The Complete Guide to Building Skills for Claude_** (PDF). Quality canon:
-  description structure, progressive disclosure, success criteria, the three test types.
-- **`anthropics/skills` → `skill-creator`** (485-line SKILL.md + an eval framework:
-  `run_eval.py`, `run_loop.py`, `improve_description.py`, benchmark aggregation, blind A/B).
-  This is Anthropic's _agentic_ skill-creation + measurement loop.
-- **BMAD `bmb` (BMad Builder) module** — vendored in-repo at `bmad/bmb/`. The elicitation engine:
-  `create-agent` / `create-workflow` / `create-module`, plus `edit-*`, `audit-workflow`,
-  `convert-legacy`. Each workflow = `workflow.yaml` + `instructions.md` (`<step>` interview) +
-  `template.md` + `checklist.md` (rubric).
-- Reddit "building skills for a month" — blocked by fetch; lessons subsumed by the above.
-
-### Converging principles (all three sources agree)
-
-- **The description is the product.** `[what] + [when/triggers] + [capabilities]`, <1024 chars.
-  Triggering is a _measurable, optimizable_ quantity. Under-trigger → make it "pushy", add keywords.
-  Over-trigger → add **negative triggers**, be specific.
-- **Progressive disclosure** — 3 levels (metadata / SKILL.md body <500 lines / bundled resources).
-- **Explain _why_, don't command** — ALL-CAPS MUSTs are a yellow flag; reframe with reasoning.
-- **Don't overfit** — skills are used a million times; generalize from feedback.
-- **Bundle deterministic work** — if every run rewrites the same helper, ship it as a script.
-- **Skills are living documents** — iterate from real failures.
-
----
-
-## 3. Core architecture insight
+## 3. Core architecture — the two-tier registry
 
 **Why retrieval is mandatory at scale:** Claude loads every available skill's name+description at
 startup (~100 tokens each).
 
-| Skills loaded | Startup token cost | Selection quality                      |
-| ------------- | ------------------ | -------------------------------------- |
-| 59            | ~6k                | fine                                   |
-| 300           | ~30k               | degrading                              |
-| 1,000         | ~100k              | broken (window is mostly a skill menu) |
+| Skills loaded | Startup token cost | Selection quality                                           |
+| ------------- | ------------------ | ----------------------------------------------------------- |
+| 59            | ~6k                | fine                                                        |
+| 300           | ~30k               | degrading (model _satisfices_, grabs first plausible match) |
+| 1,000         | ~100k              | broken (window is mostly a skill menu)                      |
 
-So you must **never** load the warehouse into an app session. Correct shape:
+So you **never** load the warehouse into a session. Two tiers + a bridge:
 
-- **Registry = warehouse** — hundreds/thousands of skills, never all loaded.
-- **App `.claude/skills/` = carry-on** — only the handful relevant to that app.
-- **SKILL-SCOUT = retrieval bridge** — given a plan's intent, queries the embeddings index
-  (vector top-k → rerank → shortlist) and installs only the winners.
+- **Tier 0 — global warehouse** (`futurator-repos/futurator-skills`): hundreds/thousands of skills,
+  never fully loaded. The scout proposes **only `trusted`**; the browsable shelf includes `reviewed`.
+- **Tier 1 — app sub-registry** (**DECISION: lives in the app's own repo** `.claude/skills/` + a
+  per-app embeddings sidecar): skills adapted to _that app's_ specifics. When a plan adapts a global
+  skill, it **forks into an app-local variant** whose origin-hash diverges from upstream — and that
+  divergence means it is now **owned by the app and never stomped by an upstream pull** (Hermes
+  origin-hash pattern). The scout resolves **app sub-registry first** (app-optimized beats generic),
+  **global warehouse second** via retrieval.
+- **SKILL-SCOUT — retrieval bridge** (T1 init / T2 pre-PM / T3 brownfield): given plan intent,
+  queries embeddings (filter → top-k → rerank → shortlist) and proposes from the shortlist.
 
-Substrate already present: Voyage embeddings + Memgraph (Mycelium) are in the stack
-(`daemon/mcp/mycelium-mcp.mjs`, voyage key in SSM). The JSON sidecar is the first cut;
-the Memgraph graph (co-activation edges from `skill_activated` events) is the upgrade path.
-
----
-
-## 4. Proposals (open directions for brainstorming)
-
-### A. Wire retrieval into SKILL-SCOUT _(the immediate quality lever)_
-
-Embed plan intent → cosine top-k over `index.embeddings.json` → small-LLM rerank → shortlist.
-The scout proposes from the shortlist instead of scanning all 245 descriptions.
-Daemon change + deploy. **Without this, tripling the catalog makes the scout noisier.**
-
-### B. A quality rubric + trust tiers _(measure the corpus)_
-
-Every skill gets a **grade** and a **trust tier** (`draft → reviewed → trusted → deprecated`).
-Rubric dimensions (BMAD checklist ⊕ PDF success criteria ⊕ skill-creator evals):
-
-- **Triggering score** — from real should/should-not eval runs (train/held-out, 3× per query).
-- **Body quality** — progressive disclosure, explains-why, examples, <500 lines, no ALL-CAPS.
-- **Single-purpose**, **has-tests**, **license/provenance clean**, **security** (least-surprise).
-
-SKILL-SCOUT only proposes `trusted`; the UI filters by grade. Stored as a per-skill quality
-record (sidecar `quality.json` or fields on `index.json`).
-
-### C. Dedup → canonical merge _(turn volume into a curated set)_
-
-Use the embeddings to **cosine-cluster near-duplicates** (graphify/Mycelium community detection).
-For each cluster, an agent **synthesizes the best of each into one rubric-winning canonical skill**
-and deprecates the rest with `supersededBy` redirects. `skill_activated` usage breaks ties.
-
-### D. Agentic Skill Builder _(creation as a conversation, not a form)_
-
-Synthesis of **BMAD's elicitation engine** + **skill-creator's eval loop**:
-
-1. **Capture intent** — mine the current chat/plan first, then interview.
-2. **Interview (stepwise)** — what it does; _when it should trigger_ (hardest/highest value);
-   I/O; edge cases; examples; dependencies. Rephrase, propose, offer to brainstorm.
-3. **Draft** frontmatter + body + bundle a script if repeated work is detected.
-4. **Test** — generate should/should-not + functional assertions; run via daemon eval jobs.
-5. **Optimize the description** (train/held-out triggering loop).
-6. **Gate on the rubric**, then save + embed.
-
-**Editing = same engine in edit mode** (load → re-elicit weak sections → re-validate → re-embed).
-Take BMAD's _rigor_ (stepwise interview, checklist, save-after-each-step), leave its theatrical
-persona. The `+ New skill` button becomes a conversation.
-
-### E. Continuous audit _(self-curation)_
-
-A periodic agent (BMAD `audit-workflow` analog) re-scores skills, flags drift / dead / low-trigger
-skills, proposes merges and deprecations. The registry curates itself.
+Mental model unchanged: **registry = warehouse, app `.claude/skills/` = carry-on, scout = the bridge.**
 
 ---
 
-## 5. The flywheel
+## 4. The one gate (ingestion / promotion pipeline)
+
+Every skill that enters or is promoted into the curated registry runs the **same** pipeline. Four
+entry adapters, one orchestration, one exit. _Build it once; everything reuses it._
 
 ```
-ingest → normalize → measure → curate/merge → retrieve → use → learn (usage) → re-curate
+ENTER:  paste-URL │ create-in-UI │ reflector-propose │ app-graduate │ bulk-crawl
+   ↓
+[1] MERGE   — cosine near-dup check vs registry; offer "merge into canonical" not a new entry
+[2] SCAN    — Gate 1 deterministic (BLOCKING, auto-quarantine) → Gate 2 LLM security (ADVISORY)
+[3] GRADE   — structure (deterministic) + triggering eval (daemon job) + tune-frequency anti-signal
+[4] LABEL   — provenanceClass / securityStatus / qualityGrade / trustTier=draft / capabilityTags
+[5] VERSION — semver bump + changelog (git-derived from ratified diff) + lineage stamp
+   ↓
+REGISTRY GROWTH INBOX  →  human ratify (on diff, not document)  →  trustTier:trusted  →  registry
 ```
 
-A small, high-quality, well-retrieved **canonical** set, backed by a large raw corpus.
-Volume becomes an asset instead of a liability.
+**Two Growth surfaces — do not conflate:**
+
+- **Plan Growth tab** (exists, `growth-view.tsx`) — _per-app, observational_: skills used, reflector
+  lessons, knowledge coverage. The **telescope**.
+- **Registry Growth section** (new, in `/labs/skills`) — _global, curative_: every proposal to change
+  the curated registry queues here (reflector, gate, deterministic job, manual URL paste). The
+  **inbox** — the human synthesis seat.
+
+**Division of authority (the principle that keeps it honest):**
+the **system owns** the facets that must not lie (`provenanceClass`, `securityStatus`, `qualityGrade`,
+`maturity`); the **human owns** the one that confers authority (`trustTier`). Auto-grade, human-trust.
 
 ---
 
-## 6. Decisions already locked
+## 5. The skill lifecycle — one state machine
 
-- **Vendor** bodies into `futurator-skills` (not pure federation) — owns bodies for CRUD + embedding.
-- **JSON embeddings sidecar now**, Mycelium/Memgraph graph later.
-- Sources curated to permissive, quality repos (skipped the unfiltered aggregator).
+Every mechanism in this doc is a transition on this machine:
 
-## 7. Open questions for the brainstorm
+```
+        ingest / crawl / create / reflect
+                  │
+                  ▼
+   unverified ──[Gate-1 scan]──► quarantined ──► Growth inbox (flagged)
+        │
+   [clean + struct + source-trust (C)]
+        │
+        ▼
+     reviewed ──[cluster-ratify (B)]──► trusted ──[scout proposes]──► installed (app)
+        │                                  │                              │
+   [lazy eval on first use]           [supersededBy]                [adapt in plan]
+        │                                  ▼                              ▼
+      graded                          deprecated                   app-evolved (Tier 1)
+                                                                         │
+                                                          [reflector: non-obvious signal]
+                                                                         │
+                                                          [graduate across ≥2 plans → the gate]
+                                                                         ▼
+                                                                back to inbox → trusted
+```
 
-1. **Order:** wire retrieval first, or define the rubric first? (They reinforce each other.)
-2. **Rubric authority:** auto-graded only, or operator sign-off to reach `trusted`?
-3. **Merge autonomy:** agent proposes + operator approves each merge, or auto-merge above a
-   confidence threshold?
-4. **Builder surface:** in-app chat panel, a SKILL-SCOUT capability ("author the missing skill"),
-   or both?
-5. **Eval harness:** reuse the daemon's Claude-job runner for with/without-skill benchmarking?
-6. **Graph vs sidecar:** when do co-activation edges (usage signal) justify moving to Memgraph?
-7. **Governance:** how do third-party-license skills and operator-authored skills coexist in one
-   trust model?
-8. **Scale target:** what's the real ceiling — curated hundreds, or thousands with aggressive merge?
+`reviewed` buys **visibility, not authority** — `reviewed` skills are browsable/searchable but **the
+scout still only proposes `trusted`.** They're on the shelf, not in the cart.
 
-## 8. Pointers
+---
 
-- Registry repo: `github.com/futurator-repos/futurator-skills` (`index.json`, `index.embeddings.json`, `skills/<name>/SKILL.md`).
-- Ingestion tool: `scripts/ingest-skills.mjs`.
+## 6. Provenance, labeling, versioning
+
+**Provenance classes = the security boundary** (not metadata — the access-control model):
+
+| Class            | Writable by agents?                | Sync behavior                                               |
+| ---------------- | ---------------------------------- | ----------------------------------------------------------- |
+| `constitutional` | **No** (read-only / pin-protected) | hand-authored, origin-hashed                                |
+| `vendored`       | No                                 | origin-hashed; auto-pull upstream **unless adapted**        |
+| `app-evolved`    | **Yes — the only writable class**  | app-owned; the reflector's output; **scanned before inbox** |
+| `third-party`    | No                                 | ingested/crawled; quarantine-by-default until gated         |
+
+**Labeling schema (controlled facets, not freeform tags):**
+
+| Facet              | Values                                                | Who sets it               |
+| ------------------ | ----------------------------------------------------- | ------------------------- |
+| `kind`             | core/frontend/security/workflow/media/marketing…      | author / ingest           |
+| `capabilityTags[]` | searchable controlled vocab                           | author + reflector        |
+| `provenanceClass`  | constitutional / vendored / app-evolved / third-party | **system** (origin-hash)  |
+| `securityStatus`   | clean / flagged / quarantined                         | **scanner**               |
+| `qualityGrade`     | A–F (or 0–100), or `ungraded`                         | **eval, computed (lazy)** |
+| `trustTier`        | draft → reviewed → trusted → deprecated               | **human ratify**          |
+| `maturity`         | usage-derived                                         | **telemetry (Phase 1)**   |
+
+**Versioning = lineage + git-derived ratified-diff history.** No parallel semver bureaucracy. Surface
+a thin per-skill record: `version`, `lineage` (`adaptedFrom: global/<skill>@v1`,
+`graduatedFrom: <appId>@<plan>`), and a **changelog generated from the ratified diffs** the inbox
+already approves. A skill's "growth" _is_ its commit history; we only surface it.
+
+---
+
+## 7. The four resolved design questions
+
+### 7.1 Retrieval — timing & mechanism
+
+Bulk acquisition (§7.4) promotes retrieval from "someday" to **prerequisite**. Mechanism:
+**two-stage**: (1) cheap **metadata filter** (`trustTier=trusted`, provenance, app-sub-registry
+first) cuts thousands → hundreds; (2) **hybrid top-k** (keyword/BM25 ⊕ vector — skill triggers are
+keyword-dense) → rerank → shortlist. **JSON sidecar now** (~40 MB at 3k vectors fits Lambda memory;
+the Voyage helper `daemon/scripts/lib/voyage-embed.mjs` already exists); **Memgraph when edges exist**
+(§7.2). The trust ladder _is_ the first retrieval gate — never vector-search the raw pile.
+
+### 7.2 The Mycelium handoff
+
+**Code-knowledge and skill-knowledge are the same graph** — the moat. Skills become first-class
+Mycelium nodes beside code articles; edges write themselves: `ADAPTED_FROM` (lineage),
+`CO_ACTIVATED_WITH` (from `skill_activated`), `USED_IN`, `SUPERSEDES` (merge), `TRIGGERED_BY`
+(capability). Then retrieval upgrades from "nearest vector" to "nearest vector → expand to
+co-activated neighbors," and **community detection** clusters near-dupes (the curation engine §7.4
+needs). **Telemetry-gated:** sidecar until co-activation edges are dense enough to traverse — don't
+build an empty graph.
+
+### 7.3 The reflector trigger — "task done _and_ something non-obvious happened"
+
+Don't add intelligence — add a **Phase-1 filter** that gates _whether the reflector's skill-proposal
+pass even runs_. Every signal it needs is already emitted:
+
+- **Error-recovery** → `fix-cycles` / retries (failed-then-passed).
+- **Correction** → QA **send-back** (the existing send-back-vs-accept remediation model).
+- **Novelty** → a manifest `gap`, or a skill used that wasn't pinned (Skills-Used vs manifest drift).
+- **Verbatim success** → passed first try following existing skills → **suppress. No proposal.**
+
+Trigger = `(existing time/rigor gate) AND (Phase-1 non-obvious signal)`. Murat's escalation:
+high **tune-frequency** on one skill = "something non-obvious keeps happening _here_" → escalate that
+skill to the human inbox as a structural problem, not another patch.
+
+### 7.4 Bulk acquisition from the open web (the keystone)
+
+**Curate sources, not skills.** Stand up a **Source Registry** — every site/repo with a **per-source
+trust rating + license**. Source trust pre-weights everything downstream. Pipeline:
+
+```
+Source Registry (per-source trust + license)
+   → CRAWL (Firecrawl → LLM-ready markdown)
+   → EXTRACT/NORMALIZE (agentic): reformat blog posts / gists / prompts INTO rubric-shaped SKILL.md
+        (this is the agentic Skill Builder in "ingest mode" — create-from-URL == create-from-chat)
+   → THE ONE GATE (merge → scan → grade → label → version)
+   → TIERED AUTO-DISPOSITION (the scout's rigor matrix, applied to ingestion):
+        low-trust + dup + security-flag      → auto-REJECT (never reaches inbox)
+        high-trust + unique + clean + struct → auto-REVIEWED (shelf, not scout-reachable)
+        ambiguous middle                     → Growth INBOX (human)
+```
+
+**Curate by cluster, not by item.** Embed all candidates → community-detect → human reviews the
+**cluster**, ratifies the **canonical representative**, deprecates the rest (`supersededBy`).
+~3,000 candidates → ~200 decisions → a deduped canonical `trusted` set as a byproduct.
+
+**Security at scale (non-negotiable):** thousands of untrusted URLs = the largest injection surface
+you'll open. Source-trust gating; **Gate-1 deterministic scan on every candidate before the inbox**;
+quarantine-by-default for unknown sources; **never auto-execute a bundled script — sandbox-inspect
+only**; unknown license → can never reach `trusted`. Source trust accelerates the _clean_ path; it
+**never launders a flag**.
+
+**Curation unit (DECISION): B primary, C accelerator, A exception.**
+
+- **(C) per-source** fills the shelf: approve a high-trust source once → its clean/unique/struct-pass
+  skills auto-admit as `reviewed`.
+- **(B) per-cluster** promotes to trusted: ratify the canonical per cluster → `trusted`, rest
+  `deprecated`. The only `reviewed → trusted` path; produces the canonical set as a byproduct.
+- **(A) per-skill** is the exception lane: anything Gate-1 flags, any bundled executable script, any
+  unknown-license skill — individual review, always, regardless of source trust.
+
+---
+
+## 8. The Phase-1 / Phase-2 boundary (the scaling principle)
+
+This resolves "how do I scale past hand-reading every journal":
+
+- **Phase 1 — mechanical, no model.** `activationCount`, `Skills-Used` tallies, staleness thresholds,
+  non-obvious-signal counters, near-dup clustering. Counting across every journal — "this skill fired
+  14× across dev and QA this month" — is **telemetry, not cognition. Principle-safe. This is what
+  scales.**
+- **Phase 2 — cognition.** Reasoning over the aggregate to synthesize a merge or promotion. Futurator
+  **routes this to the human** (the Growth inbox). That is the one deliberate divergence from Hermes:
+  _adopt their mechanical substrate wholesale; replace their meta-agent's brain with your inbox._
+
+Rule: **counting is automated; synthesis is ratified.** Never cross the line by feeding the tallies to
+an agent that reads multiple journals and writes the synthesis.
+
+---
+
+## 9. Decisions locked (2026-06-17 session)
+
+1. App-evolved skills **live in the app's own repo** (`.claude/skills/` + per-app sidecar).
+2. **Two Growth surfaces**: plan telescope (exists) + registry curation inbox (new).
+3. **One ingestion/promotion gate**, 4 entry adapters: merge → scan → grade → label → version → inbox.
+4. **System owns** provenance/security/grade/maturity; **human owns** trust. Auto-grade, human-trust.
+5. **Versioning = lineage + git-derived ratified-diff history.** No parallel semver system.
+6. **Curated registry = `trusted`-only**; `reviewed` is browsable but not scout-reachable.
+7. **Incumbent 245**: retro-scan Gate-1 → auto-`reviewed` (pass) / `quarantined` (fail) + `REPORT.md`.
+8. **Curation unit at scale: B (per-cluster) primary, C (per-source) accelerator, A (per-skill) exception.**
+9. **Retrieval**: two-stage (metadata filter → hybrid top-k → rerank); sidecar now, graph later.
+10. **Reflector trigger**: gate skill-proposals on a Phase-1 non-obvious signal; verbatim success → silence.
+11. **Mycelium**: skills become graph nodes once co-activation edges are dense; code+skill = one graph.
+12. **Phase-1 mechanical / Phase-2 human** boundary is the scaling + principle line.
+13. **Lazy grading**: don't run 245 evals upfront; a skill earns a grade on first real use/proposal.
+14. **Security**: scan-before-inbox, two independent gates (deterministic blocking + LLM advisory);
+    provenance class is the access-control boundary.
+
+---
+
+## 10. Final build order
+
+1. **`REFLECTOR-APPLY`** (`target: project-skill`) → write app-evolved skill into the app repo. _Closes the dead loop._
+2. **Retro-scan Gate-1 over the 245** → `reviewed`/`quarantined` + `REPORT.md`.
+3. **Registry Growth inbox + the one gate** (merge→scan→grade→label→version), 4 entry adapters.
+4. **Phase-1 telemetry state machine** (usage → stale/archive; snapshot-before-write). Also powers the reflector non-obvious trigger.
+5. **Provenance classes + origin-hash** → app sub-registry as a real tier.
+6. **Retrieval wiring** (trust-filter → hybrid top-k → rerank). _Now mandatory — bulk depends on it._
+7. **Bulk acquisition** — Source Registry + Firecrawl crawl + agentic extract-to-rubric → the gate → tiered auto-disposition → curate-by-cluster (B/C/A).
+8. **Mycelium handoff** — skills as graph nodes once co-activation edges are dense → graph retrieval + community-driven dedup.
+
+---
+
+## 11. The flywheel
+
+```
+ingest/crawl → normalize → scan → grade → label → curate(cluster) → retrieve → use
+     → reflect (non-obvious) → adapt per-app → graduate(≥2 plans) → ratify → re-enter as trusted
+```
+
+A small, high-quality, well-retrieved **canonical** `trusted` set, backed by a large `reviewed`
+warehouse. The registry doesn't just hold skills — **it compounds them.**
+
+---
+
+## 12. Remaining open questions
+
+1. **Agentic Skill Builder UX** — the interview/extract engine (BMAD elicitation ⊕ skill-creator eval
+   loop). Same engine for create-from-chat and create-from-URL. Not yet designed.
+2. **Mycelium-as-product** — how the `trusted` set + co-activation graph becomes an external Futurator
+   offering.
+3. **Ratify-on-diff** — the Growth inbox should show a one-line gist for triage and a unified diff for
+   the decision (you ratify a delta, not a document). Currently ratify-on-content.
+4. **Source Registry trust model** — how third-party-license skills and operator-authored skills
+   coexist in one trust ladder.
+
+---
+
+## 13. Pointers
+
+**Ground truth (code, 2026-06-17 scout pass):**
+
+- Scout: `daemon/pipelines/skill-scout-runner.mjs` (rigor disposition), `functions/shared/prompts/skill-scout-prompt.ts`, accept route `functions/api/index.ts` (`/api/skill-scout/proposals/:itemId/:action`).
+- Federation resolver: `daemon/lib/federation-resolver.mjs` (reads `index.json` only — **no embeddings**).
+- Manifest: `functions/shared/schemas/project-skill-manifest-schema.ts` (has unused `plans:` overlay + `graduate-policy`), `daemon/lib/app-bootstrap-steps/reconcile-skills-manifest.mjs`, `daemon/pipelines/skill-installer.mjs`.
+- Usage: `daemon/lib/loaded-skills-tracker.mjs` → `Skills-Used:` trailer (`functions/shared/pipelines/commit-metadata.ts`); forensic `activationCount` (`functions/shared/timer/forensic-builder.ts`).
+- Reflector: `functions/shared/pipelines/reflector-pipeline.ts` (`target: project-skill`, `confidence`, `evidence[]`), `daemon/pipelines/reflector-runner.mjs`, `daemon/lib/reflector-scheduler.mjs`, `functions/shared/types/reflection.ts`; **apply stub** `reflections-service.ts:76–81`.
+- Growth UI: `src/components/labs/plan-dashboard/views/growth-view.tsx`.
+- Knowledge compiler → Mycelium: `functions/shared/pipelines/wave-compile-pipeline.ts`, `daemon/.../graph-sync.mjs`, S3 `knowledge-live/<projectId>/`.
+- Registry: `functions/shared/skill-catalog.ts`, `functions/shared/skill-authoring.ts`, `scripts/ingest-skills.mjs`, repo `github.com/futurator-repos/futurator-skills` (`index.json`, `index.embeddings.json`, `skills/<name>/SKILL.md`).
+
+**External:**
+
+- Hermes: `github.com/nousresearch/hermes-agent` (lifecycle, curator phase boundary, origin-hash provenance, propose/ratify inbox).
 - BMAD builder (in-repo): `bmad/bmb/agents/bmad-builder.md`, `bmad/bmb/workflows/{create,edit,audit}-*`.
 - skill-creator: `github.com/anthropics/skills/tree/main/skills/skill-creator`.
-- Anthropic guide: `resources.anthropic.com/.../The-Complete-Guide-to-Building-Skill-for-Claude.pdf`.
+- Anthropic guide: _The Complete Guide to Building Skills for Claude_ (PDF).
 - Blog: `firecrawl.dev/blog/best-claude-code-skills`.
 - Build log: `docs/concepts/skills-management/skills-management-plan.md`.
