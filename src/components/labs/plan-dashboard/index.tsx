@@ -253,7 +253,18 @@ export function PlanDashboard({ planId }: { planId: string }) {
     if (!plan || !conceptPmPlanJobId) return;
     if (conceptPmJob?.status !== 'COMPLETED') return;
     if (conceptPmApplied.has(conceptPmPlanJobId)) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // SAFETY (2026-06-17 incident) — only MATERIALIZE the grounded plan while
+    // still in `concept` with NO epics yet. The dedup set is in-memory, so it
+    // empties on every page reload; without this guard a refresh re-applies the
+    // (forever-COMPLETED) pm-plan, replacing the epic tree with fresh UUIDs —
+    // wiping done-story progress ("2 → 0/14"), orphaning the running DEV story,
+    // and re-spawning the reset stories in a costly loop. Mark-and-skip once
+    // epics exist or dev has started; the server now refuses too.
+    if (plan.status !== 'concept' || (plan.epicIds?.length ?? 0) > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setConceptPmApplied((s) => new Set(s).add(conceptPmPlanJobId));
+      return;
+    }
     setConceptPmApplied((s) => new Set(s).add(conceptPmPlanJobId));
     apply
       .mutateAsync({ jobId: conceptPmPlanJobId })

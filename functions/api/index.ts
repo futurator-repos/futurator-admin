@@ -1944,6 +1944,26 @@ app.post('/api/plans/:id/apply-plan', async (c) => {
   const plan = await planRepo.getPlanById(planId);
   if (!plan) throw new NotFoundError('Plan', planId);
 
+  // SAFETY (2026-06-17 incident) — apply-plan REPLACES the entire epic tree
+  // with fresh UUIDs. Doing that on a plan that has already left `concept`
+  // wipes in-flight/done story progress (the operator saw "2 done → 0/14"),
+  // orphans the running DEV story, and re-spawns the reset stories — a costly
+  // loop. A completed pm-plan job stays COMPLETED forever, and the frontend
+  // re-applies it on every page reload (its dedup was in-memory only), so the
+  // ONLY robust fix is to refuse here once development has started. Plan
+  // (re)materialization is a `concept`-stage action; afterwards it's a no-op.
+  if (plan.status !== 'concept') {
+    return c.json(
+      {
+        applied: false,
+        skipped: 'plan-already-started',
+        message: `Plan is '${plan.status}', not 'concept' — refusing to replace the epic tree (would wipe story progress).`,
+        epicIds: plan.epicIds ?? [],
+      },
+      200,
+    );
+  }
+
   if (!jobId) {
     // Auto-discover: scan jobs for the most recent COMPLETED pm-plan job
     // whose workingDir matches this plan's.
