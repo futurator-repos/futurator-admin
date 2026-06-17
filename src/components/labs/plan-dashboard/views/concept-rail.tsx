@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment } from 'react';
-import type { ConceptPlan, ConceptArtifactKind } from '@/types/plan';
+import type { ConceptPlan, ConceptArtifactKind, ConceptArtifact } from '@/types/plan';
 
 /**
  * Concept v2 (E12.4, §12) — the Concept pipeline rail.
@@ -22,20 +22,45 @@ interface ConceptNodeDef {
   persona: string;
   icon: string;
   active: boolean;
+  /** Concept artifact kind this node maps to (prd/ux/architecture), if any. */
+  artifactKind?: ConceptArtifactKind;
 }
 
-export function ConceptRail({ conceptPlan }: { conceptPlan: ConceptPlan }) {
+export function ConceptRail({
+  conceptPlan,
+  conceptArtifacts = [],
+  onApprove,
+  approvingKind,
+}: {
+  conceptPlan: ConceptPlan;
+  /** Live per-artifact status; absent → static planned-chain view (back-compat). */
+  conceptArtifacts?: ConceptArtifact[];
+  /** Approve a draft artifact (advances the chain). Absent → no Approve buttons. */
+  onApprove?: (kind: ConceptArtifactKind) => void;
+  /** The kind whose Approve is in flight (disables the button). */
+  approvingKind?: ConceptArtifactKind | null;
+}) {
   const has = (k: ConceptArtifactKind) => conceptPlan.artifacts.some((a) => a.kind === k);
+  const statusOf = (k: ConceptArtifactKind): ConceptArtifact | undefined =>
+    conceptArtifacts.find((a) => a.kind === k);
   const nodes: ConceptNodeDef[] = [
     { id: 'route', label: 'Route', persona: 'Mary', icon: '📊', active: true },
-    { id: 'prd', label: 'PRD', persona: 'John', icon: '📋', active: has('prd') },
-    { id: 'ux', label: 'UX', persona: 'Sally', icon: '🎨', active: has('ux') },
+    {
+      id: 'prd',
+      label: 'PRD',
+      persona: 'John',
+      icon: '📋',
+      active: has('prd'),
+      artifactKind: 'prd',
+    },
+    { id: 'ux', label: 'UX', persona: 'Sally', icon: '🎨', active: has('ux'), artifactKind: 'ux' },
     {
       id: 'architecture',
       label: 'Architecture',
       persona: 'Winston',
       icon: '🏗️',
       active: has('architecture'),
+      artifactKind: 'architecture',
     },
     { id: 'plan', label: 'Plan', persona: 'epics → waves', icon: '📐', active: true },
     {
@@ -79,7 +104,12 @@ export function ConceptRail({ conceptPlan }: { conceptPlan: ConceptPlan }) {
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0 }}>
         {nodes.map((n, i) => (
           <Fragment key={n.id}>
-            <ConceptNode node={n} />
+            <ConceptNode
+              node={n}
+              artifact={n.artifactKind ? statusOf(n.artifactKind) : undefined}
+              onApprove={onApprove}
+              approving={!!n.artifactKind && approvingKind === n.artifactKind}
+            />
             {i < nodes.length - 1 && <ConceptConnector lit={nodes[i + 1].active} />}
           </Fragment>
         ))}
@@ -101,12 +131,38 @@ export function ConceptRail({ conceptPlan }: { conceptPlan: ConceptPlan }) {
   );
 }
 
-function ConceptNode({ node }: { node: ConceptNodeDef }) {
+/** Map an artifact's (status, rev) to a human caption + tone for the node. */
+function artifactPhase(a: ConceptArtifact | undefined): {
+  caption: string;
+  tone: string;
+  awaiting: boolean;
+} | null {
+  if (!a) return null;
+  if (a.status === 'approved') return { caption: '✓ approved', tone: 'success', awaiting: false };
+  if (a.status === 'stale') return { caption: '↻ stale', tone: 'warning', awaiting: false };
+  // draft
+  if (a.rev > 0) return { caption: '⏸ awaiting approval', tone: 'accent-blue', awaiting: true };
+  return { caption: '⋯ generating', tone: 'text-mute', awaiting: false };
+}
+
+function ConceptNode({
+  node,
+  artifact,
+  onApprove,
+  approving,
+}: {
+  node: ConceptNodeDef;
+  artifact?: ConceptArtifact;
+  onApprove?: (kind: ConceptArtifactKind) => void;
+  approving?: boolean;
+}) {
   const color = node.active ? 'var(--accent-purple)' : 'var(--border-2)';
+  const phase = artifactPhase(artifact);
   return (
     <div
       data-testid={`concept-node-${node.id}`}
       data-active={node.active}
+      data-artifact-status={artifact?.status}
       style={{
         flex: 1,
         display: 'flex',
@@ -155,6 +211,43 @@ function ConceptNode({ node }: { node: ConceptNodeDef }) {
       >
         {node.active ? node.persona : 'skipped'}
       </div>
+      {phase && (
+        <div
+          data-testid={`concept-status-${node.id}`}
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 9,
+            fontWeight: 600,
+            color: `var(--${phase.tone})`,
+            marginTop: 4,
+            textAlign: 'center',
+          }}
+        >
+          {phase.caption}
+        </div>
+      )}
+      {phase?.awaiting && onApprove && node.artifactKind && (
+        <button
+          type="button"
+          data-testid={`concept-approve-${node.id}`}
+          disabled={approving}
+          onClick={() => onApprove(node.artifactKind!)}
+          style={{
+            marginTop: 6,
+            fontSize: 10,
+            fontWeight: 600,
+            color: 'var(--success)',
+            background: 'color-mix(in srgb, var(--success) 10%, transparent)',
+            border: '1px solid color-mix(in srgb, var(--success) 45%, transparent)',
+            borderRadius: 4,
+            padding: '2px 8px',
+            cursor: approving ? 'default' : 'pointer',
+            opacity: approving ? 0.5 : 1,
+          }}
+        >
+          {approving ? 'Approving…' : 'Approve'}
+        </button>
+      )}
     </div>
   );
 }

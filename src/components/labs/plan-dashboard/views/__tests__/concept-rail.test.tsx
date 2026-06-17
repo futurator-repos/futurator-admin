@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { ConceptRail } from '../concept-rail';
-import type { ConceptPlan } from '@/types/plan';
+import type { ConceptPlan, ConceptArtifact } from '@/types/plan';
 
 const UI_BEARING: ConceptPlan = {
   uiBearing: true,
@@ -50,5 +50,55 @@ describe('ConceptRail (Concept v2 — E12.4)', () => {
     expect(screen.getByText('non-UI')).toBeInTheDocument();
     // Skipped nodes carry the "skipped" caption.
     expect(screen.getAllByText('skipped').length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('ConceptRail — live status + Approve (Round 1)', () => {
+  const artifacts = (over: Partial<Record<string, ConceptArtifact>> = {}): ConceptArtifact[] => [
+    { kind: 'prd', rev: 1, contentHash: 'h1', status: 'draft', ...(over.prd ?? {}) },
+    { kind: 'ux', rev: 0, contentHash: '', status: 'draft', ...(over.ux ?? {}) },
+    {
+      kind: 'architecture',
+      rev: 0,
+      contentHash: '',
+      status: 'draft',
+      ...(over.architecture ?? {}),
+    },
+  ];
+
+  it('shows an Approve button on a drafted (rev>0) artifact and calls onApprove with its kind', () => {
+    const onApprove = vi.fn();
+    render(
+      <ConceptRail conceptPlan={UI_BEARING} conceptArtifacts={artifacts()} onApprove={onApprove} />,
+    );
+    // PRD is draft rev1 → awaiting approval → Approve button present.
+    const btn = screen.getByTestId('concept-approve-prd');
+    expect(btn).toBeInTheDocument();
+    expect(screen.getByTestId('concept-status-prd').textContent).toMatch(/awaiting approval/);
+    fireEvent.click(btn);
+    expect(onApprove).toHaveBeenCalledWith('prd');
+    // UX is rev0 → "generating", NO approve button yet.
+    expect(screen.queryByTestId('concept-approve-ux')).toBeNull();
+    expect(screen.getByTestId('concept-status-ux').textContent).toMatch(/generating/);
+  });
+
+  it('an approved artifact shows the approved caption and no Approve button', () => {
+    render(
+      <ConceptRail
+        conceptPlan={UI_BEARING}
+        conceptArtifacts={artifacts({
+          prd: { kind: 'prd', rev: 2, contentHash: 'h2', status: 'approved' },
+        })}
+        onApprove={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('concept-status-prd').textContent).toMatch(/approved/);
+    expect(screen.queryByTestId('concept-approve-prd')).toBeNull();
+  });
+
+  it('without onApprove (back-compat) renders status captions but no buttons', () => {
+    render(<ConceptRail conceptPlan={UI_BEARING} conceptArtifacts={artifacts()} />);
+    expect(screen.getByTestId('concept-status-prd')).toBeInTheDocument();
+    expect(screen.queryByTestId('concept-approve-prd')).toBeNull();
   });
 });

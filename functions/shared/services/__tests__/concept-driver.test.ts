@@ -174,7 +174,7 @@ describe('driveConcept (Story 3.2 — driver)', () => {
     expect(h.created.length).toBe(before);
   });
 
-  it('interactive: a FRESH plan enqueues a convergence session (not a one-shot, no autopilot marker)', async () => {
+  it('interactive (Round 1): a FRESH plan enqueues a one-shot DRAFT generator in the plan worktree (no dead convergence job)', async () => {
     const plan = basePlan({
       conceptInteraction: 'interactive',
       conceptArtifacts: [
@@ -185,14 +185,20 @@ describe('driveConcept (Story 3.2 — driver)', () => {
     });
     const h = harness(plan);
     const res = await driveConcept(plan, h.deps);
-    expect(res).toMatchObject({ kind: 'enqueued-convergence', artifact: 'prd' });
+    // Round 1: interactive uses the SAME runnable gen pipeline as autopilot; the
+    // only difference is it is applied as a DRAFT (awaiting-approval), not
+    // auto-approved. The prior `conceptConvergence` job (nothing consumed it) is
+    // gone — that was the stall.
+    expect(res).toMatchObject({ kind: 'enqueued-artifact', artifact: 'prd' });
     expect(h.created).toHaveLength(1);
     const job = h.created[0] as unknown as {
       conceptConvergence?: unknown;
-      conceptAutopilotGen?: boolean;
+      conceptArtifactKind?: string;
+      pipeline?: unknown;
     };
-    expect(job.conceptConvergence).toBeDefined();
-    expect(job.conceptAutopilotGen).toBeUndefined(); // never orphan-requeued (3.4)
+    expect(job.conceptConvergence).toBeUndefined(); // no dead-end convergence job
+    expect(job.pipeline).toBeDefined(); // a real runnable gen pipeline
+    expect(job.conceptArtifactKind).toBe('prd');
   });
 
   it('interactive: a drafted-but-not-approved prd → awaiting-approval, nothing enqueued', async () => {

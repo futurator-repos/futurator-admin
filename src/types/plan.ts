@@ -36,6 +36,16 @@ export interface ConceptPlan {
   rationale: string;
 }
 
+/** Concept v2 — live per-artifact status. Mirror of functions/shared/concept/artifact-version.ts. */
+export type ConceptArtifactStatus = 'draft' | 'approved' | 'stale';
+export interface ConceptArtifact {
+  kind: ConceptArtifactKind;
+  rev: number;
+  contentHash: string;
+  status: ConceptArtifactStatus;
+  dependsOn?: ConceptArtifactKind[];
+}
+
 export interface PlanTestingProfile {
   hasBrowserTests?: boolean;
   viewport?: string;
@@ -73,6 +83,8 @@ export interface Plan {
   conceptInteraction?: ConceptInteraction;
   /** Concept v2 (§3.2) — Router applicability DAG; absent for prototype/legacy. */
   conceptPlan?: ConceptPlan;
+  /** Concept v2 — live per-artifact status registry (draft/approved/stale). */
+  conceptArtifacts?: ConceptArtifact[];
   /** Concept v2 — FK to the concept-route job (mvp/production). */
   conceptRouteJobId?: string;
   testingProfile?: PlanTestingProfile;

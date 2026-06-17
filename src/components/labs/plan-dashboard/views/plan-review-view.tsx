@@ -24,6 +24,7 @@ import {
   usePmPrompt,
 } from '@/hooks/use-plans';
 import { useAttentionItems } from '@/hooks/use-attention-items';
+import { useApproveConceptArtifact } from '@/hooks/use-concept-artifacts';
 import type { AgentJobStatus } from '@/types/agent-orchestrator';
 import type { EpicWorkflow } from '@/types/epic-workflow';
 import { epicStatusColor } from '../constants';
@@ -66,6 +67,7 @@ export function PlanReviewView({
   const patch = usePatchPlan(plan.planId);
   const regenerate = useRegeneratePlan(plan.planId);
   const start = useStartPlan(plan.planId);
+  const approveArtifact = useApproveConceptArtifact(plan.planId);
   const qc = useQueryClient();
 
   // SKILL-SCOUT gate (Epic 3 Story 3.5): plan /start returns 409 while an
@@ -396,7 +398,14 @@ export function PlanReviewView({
           </div>
         )}
 
-        {isConcept && plan.conceptPlan && <ConceptRail conceptPlan={plan.conceptPlan} />}
+        {isConcept && plan.conceptPlan && (
+          <ConceptRail
+            conceptPlan={plan.conceptPlan}
+            conceptArtifacts={plan.conceptArtifacts}
+            onApprove={(kind) => approveArtifact.mutate(kind)}
+            approvingKind={approveArtifact.isPending ? approveArtifact.variables : null}
+          />
+        )}
 
         {!hasEpics && !generating && !pmFailed && !applyError && (
           <EmptyCard>

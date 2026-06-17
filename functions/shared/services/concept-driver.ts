@@ -9,7 +9,6 @@ import { generatePrdGenPipeline } from '../pipelines/prd-gen-pipeline';
 import { generateUxGenPipeline } from '../pipelines/ux-gen-pipeline';
 import { generateArchGenPipeline } from '../pipelines/arch-gen-pipeline';
 import { generatePmPlanPipeline } from '../pipelines/pm-plan-pipeline';
-import { buildConvergencePrompt } from '../prompts/convergence-prompt';
 
 /**
  * Concept v2 (E3 / Story 3.2) — the Concept driver.
@@ -152,36 +151,18 @@ export async function driveConcept(
     const jobId = deps.uuid();
     const ts = deps.now();
 
-    if (action.interaction === 'interactive') {
-      // Story 4.1 — interactive mode enqueues a free-agent CONVERGENCE session
-      // (multi-turn elicit→converge, seeded with the convergence prompt, scoped
-      // to concept/). It does NOT auto-approve and is NOT orphan-requeued
-      // (mid-conversation state, Story 3.4) — the daemon free-agent runner
-      // (Story 4.2) consumes `conceptConvergence`, and the operator Approves
-      // (Story 4.4) to promote + advance.
-      const prompt = buildConvergencePrompt(kind, {
-        intent: plan.intent,
-        rigor: plan.rigor ?? 'mvp',
-        depth: depthFor(plan, kind),
-        uiBearing: plan.conceptPlan?.uiBearing ?? false,
-        priorArtifacts: PRIOR_ARTIFACTS_PLACEHOLDER,
-      });
-      await deps.createJob({
-        jobId,
-        status: 'PENDING',
-        createdAt: ts,
-        updatedAt: ts,
-        createdBy: plan.createdBy,
-        workingDir: plan.workingDir,
-        conceptConvergence: { kind, prompt },
-      } as unknown as AgentJob);
-      await deps.updatePlanFields(plan.planId, {
-        [FK_FIELD[kind]]: jobId,
-        conceptArtifactJobIds: { ...(plan.conceptArtifactJobIds ?? {}), [kind]: jobId },
-      });
-      return { kind: 'enqueued-convergence', artifact: kind, jobId };
-    }
-
+    // Round 1 (2026-06-17) — BOTH autopilot and interactive enqueue the SAME
+    // one-shot generator pipeline, which runs in the PLAN worktree and writes
+    // `concept/<kind>.md` (the writeback the autopilot path already uses). The
+    // ONLY difference is approval, owned downstream by `applyCompletedGenerators`:
+    //   • autopilot   → auto-approves the artifact, chain auto-advances;
+    //   • interactive → applies it as a DRAFT, so `reduceConcept` returns
+    //     `awaiting-approval` and pauses for the operator's Approve
+    //     (POST /api/plans/:id/concept/:kind/approve) before advancing.
+    // This replaces the prior dead-end `conceptConvergence` job (nothing in the
+    // daemon consumed it → the chain stalled at PRD, docs never generated). The
+    // multi-turn convergence CHAT (Round 2) will refine this draft in-place
+    // before approval; the draft + plan-worktree model is its foundation.
     const boilerplateType = await boilerplateOf(plan, deps);
     const pipeline = buildArtifactPipeline(plan, kind, boilerplateType);
     await deps.createJob({
@@ -193,8 +174,9 @@ export async function driveConcept(
       workingDir: plan.workingDir,
       pipeline,
       // Story 3.4 — markers so an orphaned RUNNING generator (daemon restart)
-      // auto-requeues to PENDING instead of dead-ending at STALE. Autopilot
-      // one-shots only; interactive convergence never sets these.
+      // auto-requeues to PENDING instead of dead-ending at STALE. Set for BOTH
+      // modes now (Round 1): a one-shot draft-gen is just as safe to requeue as
+      // an autopilot gen — both re-derive the same `concept/<kind>.md`.
       conceptArtifactKind: kind,
       conceptAutopilotGen: true,
     } as unknown as AgentJob);
