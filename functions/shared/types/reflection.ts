@@ -79,6 +79,18 @@ export interface ReflectionRow {
   /** Story 3-E-10-1 (defer-after-baseline) — REFLECTOR-REVIEWER Haiku verdict. */
   reviewerVerdict?: ReflectorReviewerVerdict;
   reviewerReasoning?: string;
+
+  /**
+   * Skills Institution Story 1.2 — REFLECTOR-APPLY landing record. Stamped by
+   * the daemon's reflection-apply poller AFTER it runs `applyReflection` on a
+   * `confirmed` row. Presence of `appliedAt` is the idempotency guard: the
+   * poller skips any confirmed row already stamped, so a row is applied once.
+   */
+  appliedAt?: string;
+  appliedCommitSha?: string;
+  /** Outcome of the apply step (mirrors applyReflection's status). */
+  applyOutcome?: 'applied' | 'failed' | 'deferred' | 'noop';
+  applyError?: string;
 }
 
 /**

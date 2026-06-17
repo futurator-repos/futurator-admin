@@ -105,6 +105,10 @@ import {
   startAttentionPoller,
   composeAttentionPromptBody,
 } from './lib/attention-poller.mjs';
+// Skills Institution Story 1.2 — reflection-apply poller (closes the loop:
+// confirmed reflections → REFLECTOR-APPLY authors the app-evolved skill).
+import { startReflectionApplyPoller } from './lib/reflection-apply-poller.mjs';
+import { applyReflection } from './pipelines/reflector-apply.mjs';
 // 2026-05-19 — Phase 1 worktree rollout. Materialize per-story worktrees
 // + node_modules symlinks before any pipeline step runs.
 import { setupStoryWorktree, teardownStoryWorktree } from './lib/story-worktree.mjs';
@@ -6875,6 +6879,72 @@ async function poll() {
       log: (level, msg, ctx) => log(level, msg, ctx),
     },
     { intervalMs: 30_000, initialDelayMs: 60_000 },
+  );
+
+  // Skills Institution Story 1.2 — reflection-apply poller. Confirmed
+  // reflections are landed on disk by REFLECTOR-APPLY (authors the app-evolved
+  // SKILL.md, Gate-1-scanned, commits). 60s cadence, gated by `agent.paused`.
+  // All I/O lives in these closures (raw DDB + fs) so the poller module stays
+  // pure + unit-tested. The working dir is the project's trunk checkout under
+  // PROJECTS_ROOT; a row whose repo isn't checked out is skipped (retried next
+  // tick), never stamped.
+  const REFLECTIONS_TABLE = process.env.REFLECTIONS_TABLE || 'futurator-reflections';
+  startReflectionApplyPoller(
+    {
+      isPaused: isAgentPausedCached,
+      listConfirmed: async () => {
+        const out = [];
+        let ExclusiveStartKey;
+        do {
+          const res = await ddb.send(
+            new ScanCommand({
+              TableName: REFLECTIONS_TABLE,
+              FilterExpression: '#status = :confirmed AND attribute_not_exists(appliedAt)',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: { ':confirmed': 'confirmed' },
+              ExclusiveStartKey,
+            }),
+          );
+          if (res.Items) out.push(...res.Items);
+          ExclusiveStartKey = res.LastEvaluatedKey;
+        } while (ExclusiveStartKey);
+        return out;
+      },
+      resolveWorkingDir: (projectSlug) => {
+        const dir = pathJoin(PARTY_PROJECTS_ROOT, projectSlug);
+        return existsSync(dir) ? dir : null;
+      },
+      applyReflection,
+      markApplied: async ({ projectSlug, id, outcome, commitSha, error }) => {
+        const sets = ['appliedAt = :now', 'applyOutcome = :outcome'];
+        const values = { ':now': new Date().toISOString(), ':outcome': outcome };
+        if (commitSha) {
+          sets.push('appliedCommitSha = :sha');
+          values[':sha'] = commitSha;
+        }
+        if (error) {
+          sets.push('applyError = :err');
+          values[':err'] = String(error).slice(0, 500);
+        }
+        try {
+          await ddb.send(
+            new UpdateCommand({
+              TableName: REFLECTIONS_TABLE,
+              Key: { projectSlug, id },
+              UpdateExpression: `SET ${sets.join(', ')}`,
+              ConditionExpression: 'attribute_exists(id) AND attribute_not_exists(appliedAt)',
+              ExpressionAttributeValues: values,
+            }),
+          );
+        } catch (err) {
+          // ConditionalCheckFailed = a racing tick already stamped it; benign.
+          if (err?.name !== 'ConditionalCheckFailedException') throw err;
+        }
+        return null;
+      },
+      log: (level, msg, ctx) => log(level, msg, ctx),
+    },
+    { intervalMs: 60_000, initialDelayMs: 90_000 },
   );
 
   log('info', 'Polling for PENDING jobs...\n');
