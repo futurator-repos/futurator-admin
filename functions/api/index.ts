@@ -144,7 +144,7 @@ import { scoreDeterministic } from '../shared/scorecard';
 import { composeRealityCheck } from '../shared/scorecard/compose';
 import { CRITERIA_META } from '../shared/scorecard/criteria-meta';
 import * as scorecardRepo from '../shared/repositories/scorecard-repository';
-import type { StageId, ScorecardSlice } from '../shared/scorecard/types';
+import type { StageId, ScorecardSlice, GraphReports } from '../shared/scorecard/types';
 import * as appRepo from '../shared/repositories/app-repository';
 import { updateAppInputSchema, RESERVED_APP_IDS } from '../shared/schemas/app-schema';
 import { createPlanForAppInputSchema } from '../shared/schemas/plan-schema';
@@ -12604,6 +12604,39 @@ const STAGES_WITH_LLM = new Set<StageId>(
 function isRetrospectStage(s: string): s is StageId {
   return (RETROSPECT_STAGES as string[]).includes(s);
 }
+/**
+ * Read the daemon-mirrored `_graph` integrity reports for a plan's app from S3
+ * (same `knowledge-live/<appId>/_graph/` prefix the Graph tab serves). Feeds
+ * D-KC3/IE17 (orphans), D-KC5 (snapshot projectId), D-KC6 (degree-0 floaters),
+ * D-KC3 zombies (dead-code). `ast-facts.json` is a project-root disk artifact
+ * (not mirrored), so D-KC2 stays ⚪. Every miss degrades to undefined → ⚪.
+ */
+async function fetchPlanGraphReports(plan: { appId?: string }): Promise<GraphReports | undefined> {
+  const appId = plan.appId;
+  if (!appId) return undefined;
+  const s3 = new S3Client({ region: 'us-east-1' });
+  const read = async (file: string): Promise<unknown> => {
+    try {
+      const res = await s3.send(
+        new GetObjectCommand({
+          Bucket: FORENSIC_S3_BUCKET,
+          Key: `knowledge-live/${appId}/_graph/${file}`,
+        }),
+      );
+      const body = await res.Body?.transformToString();
+      return body ? JSON.parse(body) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const [snapshot, orphans, deadCode] = await Promise.all([
+    read('graph-snapshot.json'),
+    read('orphans.json'),
+    read('dead-code.json'),
+  ]);
+  if (!snapshot && !orphans && !deadCode) return undefined;
+  return { snapshot, orphans, deadCode } as unknown as GraphReports;
+}
 /** Compact the per-stage slices into the stored §0.5 maps + the OV4 honesty flag. */
 function retrospectStageMaps(slices: ScorecardSlice[]) {
   const scores: Record<string, 0 | 1 | 2 | 3 | 4> = {};
@@ -12645,6 +12678,7 @@ app.post('/api/plans/:planId/scorecard/:stage/run', async (c) => {
   // returns [] → ⚪, never a wrong score.
   const det = await scoreDeterministic(planId, {
     fetchReflections: (pl) => reflectionsRepo.listReflections({ projectSlug: pl.name }),
+    fetchGraphReports: (pl) => fetchPlanGraphReports(pl),
   });
   const rc = composeRealityCheck(det.slices, det.ctx);
   const now = new Date().toISOString();
