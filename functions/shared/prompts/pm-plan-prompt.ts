@@ -459,14 +459,31 @@ modify (relative to the project root, using the conventional paths above).
     happened, not that anything correct is visible). Mount it, then write
     the browser AC about what the idle frame shows.
   - The final assembly story composes everything into the real app
-    feature and RETIRES interim preview features — list the preview
-    feature files it removes in its touchPoints (it runs in a later wave,
-    so editing earlier-wave files is safe). The app ships only the real
-    composition, and every wave of the build was visually verifiable.
+    feature, marks that feature PRIMARY
+    (\`export const feature = { slug: '<app>', order: 0, primary: true }\`),
+    and RETIRES interim preview features — list the preview feature files
+    it removes in its touchPoints (it runs in a later wave, so editing
+    earlier-wave files is safe). Marking the assembled feature
+    \`primary: true\` makes the bare route \`/\` render ONLY the real app
+    (previews stay reachable at \`?feature=<slug>\` for wave isolation), so
+    the SHIPPED app AND final QA both see the real app at \`/\` — never the
+    preview gallery — even if a preview file is accidentally left behind.
 
   The assembled app's final story should additionally carry browser ACs
   for the composed initial frame — what a user sees the moment the page
   loads.
+
+  **Interaction- and time-gated ACs need a PROBE, not a static frame.** If
+  an AC can only be seen AFTER an action or elapsed time — a start/title
+  screen that needs Space/Enter to begin, a HUD that appears once play
+  starts, a GAME OVER / level-complete / score-changed screen — a single
+  idle screenshot CANNOT verify it and a vision judge will false-FAIL it.
+  For these the visual test MUST carry a \`flow\` that performs the gating
+  interaction then captures the result, e.g.
+  \`flow: [{ "action": "press", "key": "Enter" }, { "action": "wait", "ms": 500 }, { "action": "screenshot" }]\`,
+  or a deterministic \`{ "action": "assert", "expr": "snapshot.phase", "op": "eq", "expected": "gameover" }\`
+  reading \`window.__harness\` when a state is hard to reach by input alone.
+  Plain "what the idle frame shows" ACs stay probe-free.
 - Titles are action-oriented ("Implement useGameLoop hook", not "The
   useGameLoop hook").
 - **Stories must respect the existing boilerplate** — if the AC says

@@ -633,7 +633,17 @@ function buildVqaRollup(
         break;
       case 'fail':
         if (isAccepted) accepted += 1;
-        else {
+        else if (r.failureClass === 'interaction-gated') {
+          // FIX2 (2026-06-18) — an interaction-gated "fail" is a static-frame
+          // limitation, not a code defect (the judge tagged it not-observable,
+          // or the expect is motion/time/input-gated). It must NOT block a
+          // working app. Re-bucket as uncertain so it surfaces for an operator
+          // probe/Accept instead of forcing the pillar red. Flip the row status
+          // too so the UI shows amber 'uncertain', consistent with the count.
+          r.status = 'uncertain';
+          r.passed = false;
+          uncertain += 1;
+        } else {
           fail += 1;
           failures.push(r);
         }

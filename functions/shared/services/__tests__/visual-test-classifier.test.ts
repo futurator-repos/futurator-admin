@@ -10,6 +10,7 @@ import {
   downgradeManualToBehavior,
   capVisionLevelByRigor,
   isDeterministicLevel,
+  isInteractionGated,
 } from '../visual-test-classifier';
 import type { VisualTestDef } from '../../types/epic-workflow';
 
@@ -763,5 +764,86 @@ describe('aggregateVisualTests — verify-aware oracle tier + strength (E4-S2/S3
       true,
     );
     expect(report.classifications[0].classification.resolvedLevel).toBe('L2-state');
+  });
+});
+
+// pacman2/pacman3 (2026-06-18) — interaction/temporal gating must be detected
+// even when the Concept stage emitted NO `verify` intent (the common case), so
+// a static-frame vision judge never blind-FAILs a GAME OVER / HUD-after-start /
+// "press Space" claim on a working app.
+describe('isInteractionGated (2026-06-18 fallback detector)', () => {
+  it('flags press/click/wait, motion/time, and transient-screen language', () => {
+    expect(isInteractionGated('GAME OVER in red 48px text centered, PLAY AGAIN rectangle')).toBe(
+      true,
+    );
+    expect(isInteractionGated("'Press ENTER or SPACE' call-to-action below the title")).toBe(true);
+    expect(isInteractionGated('The HUD updates after the player starts moving')).toBe(true);
+    expect(isInteractionGated('Score increases as dots are eaten')).toBe(true);
+    expect(isInteractionGated('Ghosts animate between frightened and normal states')).toBe(true);
+  });
+
+  it('does NOT flag a plain static idle-frame appearance claim', () => {
+    expect(isInteractionGated('A yellow filled circle-wedge Pac-Man on a black background')).toBe(
+      false,
+    );
+    expect(isInteractionGated('Four ghost shapes in a row — red, pink, cyan, and orange')).toBe(
+      false,
+    );
+    expect(isInteractionGated(undefined)).toBe(false);
+  });
+});
+
+describe('aggregateVisualTests — interaction-gated needs-probe fallback (no verify intent)', () => {
+  it('routes an L1 interaction-gated test with no probe to needs-probe + warns', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-go', {
+        criteriaRef: 'AC-go',
+        level: 'L1',
+        expect: 'GAME OVER in red text centered with a yellow-bordered PLAY AGAIN rectangle',
+      }),
+    ];
+    // No `verify` on the AC → the v3 oracle path is dormant; the fallback fires.
+    const report = aggregateVisualTests(tests, [{ id: 'AC-go', needsBrowser: true }], 'mvp');
+    expect(report.classifications[0].classification.resolvedLevel).toBe('needs-probe');
+    expect(
+      report.coverageWarnings.some(
+        (w) => w.kind === 'interaction-gated-no-probe' && w.criterionId === 'AC-go',
+      ),
+    ).toBe(true);
+  });
+
+  it('does NOT route a plain static appearance L1 test to needs-probe', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-sprite', {
+        criteriaRef: 'AC-sprite',
+        level: 'L1',
+        expect: 'A yellow filled circle-wedge Pac-Man on a black background',
+      }),
+    ];
+    const report = aggregateVisualTests(tests, [{ id: 'AC-sprite', needsBrowser: true }], 'mvp');
+    expect(report.classifications[0].classification.resolvedLevel).toBeUndefined();
+    expect(report.coverageWarnings.some((w) => w.kind === 'interaction-gated-no-probe')).toBe(
+      false,
+    );
+  });
+
+  it('an interaction-gated test WITH an assert probe is not flagged needs-probe', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-go2', {
+        criteriaRef: 'AC-go2',
+        level: 'L2',
+        expect: 'GAME OVER screen appears after the player loses',
+        flow: [{ action: 'assert', expr: 'snapshot.phase', op: 'eq', expected: 'gameover' }],
+      }),
+    ];
+    const report = aggregateVisualTests(
+      tests,
+      [{ id: 'AC-go2', needsBrowser: true }],
+      'production',
+    );
+    expect(report.classifications[0].classification.resolvedLevel).not.toBe('needs-probe');
+    expect(report.coverageWarnings.some((w) => w.kind === 'interaction-gated-no-probe')).toBe(
+      false,
+    );
   });
 });

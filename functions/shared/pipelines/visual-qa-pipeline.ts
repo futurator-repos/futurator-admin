@@ -710,9 +710,24 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `  }`,
           `  const authored = tests.length || 1;`,
           `  const ratio = captured / authored;`,
+          // FIX1 (2026-06-18) — STUCK-CAPTURE signal. When most captured per-test
+          // frames share ONE content hash, the capture never advanced past a
+          // single surface (pacman2: every test screenshotted the bare '/'
+          // preview gallery). This is a WARNING, not a hard gate — a legitimate
+          // single-screen app also yields identical frames, so the real cure is
+          // the primary-feature surface + retiring previews (feature-wiring),
+          // not aborting QA here.
+          `  const hashValues = Object.keys(hashCounts).map(function (k) { return hashCounts[k]; });`,
+          `  const dominant = hashValues.length ? Math.max.apply(null, hashValues) : 0;`,
+          `  const dominantRatio = captured > 0 ? dominant / captured : 0;`,
+          `  const stuckCapture = captured >= 3 && dominantRatio >= 0.8;`,
+          // Hard gate ONLY on missing/blank frames (unambiguous infra failure) —
+          // a degraded capture must error+retry, never become a wall of product
+          // FAILs the judges invent (pacman3). Enforced by the bash check below.
           `  const integrityFailed = ratio < 0.9;`,
-          `  fs.writeFileSync('${tmpResultsDir}/evidence-integrity.json', JSON.stringify({ captured, authored, ratio, integrityFailed, tests: integrity }));`,
+          `  fs.writeFileSync('${tmpResultsDir}/evidence-integrity.json', JSON.stringify({ captured, authored, ratio, integrityFailed, stuckCapture, dominantRatio: Number(dominantRatio.toFixed(3)), distinctHashes: Object.keys(hashCounts).length, tests: integrity }));`,
           `  console.log('EVIDENCE_INTEGRITY: ' + (integrityFailed ? 'FAILED' : 'OK') + ' (' + captured + '/' + authored + ' usable frames, ratio=' + ratio.toFixed(2) + ')');`,
+          `  if (stuckCapture) console.log('STUCK_CAPTURE: WARN (' + Math.round(dominantRatio * 100) + '% of frames identical — capture may be the wrong/idle surface; check the primary feature is mounted at / and preview features are retired)');`,
           `  console.log('SCREENSHOTS_CAPTURED: ' + (tests.length - failures.length) + '/' + tests.length);`,
           `  // PR-60 — force exit. Belt-and-braces in case any stdio handle`,
           `  // remains ref'd despite the drain handlers above.`,
@@ -737,6 +752,14 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `echo "[qa-prepare] $(date -u +%H:%M:%S) S3 uploads done ($UPLOAD_FAILS failed)"`,
           `# Capture console errors from the dev-server log for L0 console-error checks`,
           `grep -iE 'error|warn' ${tmpResultsDir}/devserver.log > ${tmpResultsDir}/console-errors.log 2>/dev/null || true`,
+          // FIX1 (2026-06-18) — EVIDENCE-INTEGRITY HARD GATE. Uploads ran first
+          // (frames are on S3 for forensics), but if too few usable frames were
+          // captured we abort BEFORE the judges run. A degraded capture is an
+          // infra failure → error+retry, never a wall of product FAILs the
+          // judges hallucinate against missing images (pacman3). The node script
+          // above exits 0 even on integrityFailed (so uploads happen); this bash
+          // check is what fails the STEP → onFail injects PREPARE_ERROR.
+          `if [ -f ${tmpResultsDir}/evidence-integrity.json ] && grep -q '"integrityFailed":true' ${tmpResultsDir}/evidence-integrity.json; then echo "QA_PREPARE_ERROR: evidence-integrity gate failed — too few usable screenshots (see EVIDENCE_INTEGRITY above). Aborting before judges to avoid false verdicts; re-run QA."; exit 1; fi`,
           `echo "QA_PREPARE_OK"`,
           `echo "OVERVIEW_URL: ${cdnPrefix}overview.png"`,
         ].join('\n'),
@@ -866,8 +889,13 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `    const m = out.match(/VERDICT:\\s*(PASS|FAIL|UNCERTAIN)\\s*(?:\\[(observable|not-idle-observable)\\])?\\s*[—-]?\\s*(.*)/i);`,
           `    if (!m) { resolve({ testId: t.id, level: 'L1', verdict: 'errored', rationale: 'judge output unparseable', screenshotUrl, costUsd: 0, durationMs: Date.now() - start }); return; }`,
           `    const verdictRaw = m[1].toLowerCase();`,
-          `    const verdict = verdictRaw === 'pass' ? 'pass' : verdictRaw === 'fail' ? 'fail' : 'uncertain';`,
+          `    let verdict = verdictRaw === 'pass' ? 'pass' : verdictRaw === 'fail' ? 'fail' : 'uncertain';`,
           `    const observability = (m[2] || '').toLowerCase() || undefined;`,
+          // FIX2 (2026-06-18) — a not-idle-observable claim cannot be FAILed from
+          // a static idle frame; the judge sometimes ignores its own rule and
+          // returns FAIL anyway. Coerce to uncertain so an interaction-gated
+          // claim never blocks a working app (it surfaces for a probe / Accept).
+          `    if (verdict === 'fail' && (observability === 'not-idle-observable' || observability === 'not-observable')) verdict = 'uncertain';`,
           `    resolve({ testId: t.id, level: 'L1', verdict, observability, rationale: (m[3] || '').slice(0, 200), screenshotUrl, costUsd: (t.budgetCostUsd ?? defaultCostUsd), durationMs: Date.now() - start });`,
           `  });`,
           `  child.on('error', () => { clearTimeout(killer); resolve({ testId: t.id, level: 'L1', verdict: 'errored', rationale: 'spawn error', screenshotUrl, costUsd: 0, durationMs: Date.now() - start }); });`,
@@ -975,8 +1003,11 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `    const m = out.match(/VERDICT:\\s*(PASS|FAIL|UNCERTAIN)\\s*(?:\\[(observable|not-idle-observable|not-observable)\\])?\\s*[—-]?\\s*(.*)/i);`,
           `    if (!m) { resolve({ testId: t.id, level: 'L2', verdict: 'errored', rationale: 'judge output unparseable', screenshotUrl, costUsd: 0, durationMs: Date.now() - start }); return; }`,
           `    const verdictRaw = m[1].toLowerCase();`,
-          `    const verdict = verdictRaw === 'pass' ? 'pass' : verdictRaw === 'fail' ? 'fail' : 'uncertain';`,
+          `    let verdict = verdictRaw === 'pass' ? 'pass' : verdictRaw === 'fail' ? 'fail' : 'uncertain';`,
           `    const observability = (m[2] || '').toLowerCase() || undefined;`,
+          // FIX2 (2026-06-18) — not-observable claim → uncertain, never a blocking
+          // FAIL (matches the L1 guard above; the L2 judge tag adds 'not-observable').
+          `    if (verdict === 'fail' && (observability === 'not-idle-observable' || observability === 'not-observable')) verdict = 'uncertain';`,
           `    resolve({ testId: t.id, level: 'L2', verdict, observability, rationale: (m[3] || '').slice(0, 200), screenshotUrl, costUsd: (t.budgetCostUsd ?? defaultCostUsd), durationMs: Date.now() - start });`,
           `  });`,
           `  child.on('error', () => { clearTimeout(killer); resolve({ testId: t.id, level: 'L2', verdict: 'errored', rationale: 'spawn error', screenshotUrl, costUsd: 0, durationMs: Date.now() - start }); });`,

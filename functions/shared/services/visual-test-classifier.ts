@@ -100,6 +100,40 @@ export function isVagueExpect(expect: string): boolean {
   return false;
 }
 
+/**
+ * Interaction / temporal gating detector (2026-06-18, pacman2/pacman3).
+ *
+ * An AC whose satisfaction depends on a key press, click, elapsed time,
+ * motion, score change, or a transient screen (GAME OVER, level-complete)
+ * CANNOT be verified by a single static idle screenshot — judging it with an
+ * L1 vision step produces a false FAIL on a working app. This detector is the
+ * deterministic fallback for the common case where the Concept stage emitted
+ * NO `verify` intent (so the verify-based oracle routing is dormant): it lets
+ * the classifier still recognise "this needs a probe" and route the test to
+ * the honest `needs-probe` lane instead of a blind vision judge.
+ *
+ * Mirrors the runtime's INTERACTION_GATED_RE in qa-report-aggregator so the
+ * authoring-time signal and the verdict-time signal agree.
+ */
+export const INTERACTION_GATED_PATTERNS: ReadonlyArray<RegExp> = [
+  /\b(after|once|when|until|eventually|over time|during|while)\b/i,
+  /\b(score|speed|accelerat\w*|velocity|fps|frame rate|points?)\b/i,
+  /\b(press|presses|pressing|keypress|keyboard|key|click\w*|tap\w*|scroll\w*|hover\w*|drag\w*|swipe\w*|enter|space\b|spacebar)\b/i,
+  /\b(playing|gameplay|played|elapsed|seconds?|minutes?|ticks?|countdown|timer)\b/i,
+  /\b(motion|moving|moves?|animat\w*|transition\w*|spawn\w*|collide\w*|collision)\b/i,
+  /\bgame[\s-]?over\b|\blevel[\s-]?complete\b|\bvictory\b|\bdefeat\b|\bgame[\s-]?start\b|\bstart screen\b|\brestart\b|\bplay again\b/i,
+];
+
+/**
+ * True when the expect text describes a state that a single idle/static frame
+ * cannot physically show (needs interaction, elapsed time, or a transient
+ * screen). Used to route un-probed dynamic ACs to `needs-probe`.
+ */
+export function isInteractionGated(expect: string | undefined): boolean {
+  if (!expect) return false;
+  return INTERACTION_GATED_PATTERNS.some((p) => p.test(expect));
+}
+
 export interface ClassificationResult {
   level: VisualTestLevel;
   /** Human-readable reason — surfaced in the contract review UI so the
@@ -467,7 +501,8 @@ export interface CoverageWarning {
     | 'over-tested'
     | 'tests-without-criteria-ref'
     | 'weak-oracle'
-    | 'unpaired-l2-state';
+    | 'unpaired-l2-state'
+    | 'interaction-gated-no-probe';
   criterionId?: string;
   testIds?: string[];
   message: string;
@@ -576,6 +611,18 @@ export function aggregateVisualTests(
         classification.reason = `${classification.reason} (re-routed to ${wire} by resolved oracle ${tier} — cheapest-correct)`;
         classification.alreadyLeveled = false;
       }
+    } else if (
+      (classification.level === 'L1' || classification.level === 'L2') &&
+      isInteractionGated(t.expect) &&
+      !hasExecutableProbe(t)
+    ) {
+      // No `verify` intent (oracle routing dormant) but the expect is
+      // interaction/temporal-gated and the test ships no executable probe — a
+      // static-frame vision judge would false-FAIL it (pacman2/pacman3: GAME
+      // OVER, HUD-after-start). Route to the honest `needs-probe` lane so it is
+      // surfaced, not blind-judged.
+      classification.resolvedLevel = 'needs-probe';
+      classification.reason = `${classification.reason} (interaction/temporal-gated with no executable probe — author a press/wait/assert flow; a static-frame vision judge cannot verify this)`;
     }
     return { testId: t.id, classification };
   });
@@ -693,6 +740,20 @@ export function aggregateVisualTests(
         });
       }
     }
+  }
+
+  // Interaction-gated-without-probe coverage warnings (2026-06-18). A test
+  // routed to `needs-probe` above is honestly unverifiable by a static frame —
+  // tell the author to add the gating interaction as a flow.
+  for (const { testId, classification } of classifications) {
+    if (classification.resolvedLevel !== 'needs-probe') continue;
+    const t = tests.find((x) => x.id === testId);
+    coverageWarnings.push({
+      kind: 'interaction-gated-no-probe',
+      criterionId: t?.criteriaRef,
+      testIds: [testId],
+      message: `${t?.criteriaRef ?? testId} is interaction/temporal-gated but has no executable probe — add a flow that performs the gating interaction (e.g. press Space/Enter, wait, then screenshot/assert the resulting state). A static-frame vision judge will false-FAIL it.`,
+    });
   }
 
   // Cost + wall-clock projections from per-test budgets falling back to

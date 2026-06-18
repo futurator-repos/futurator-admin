@@ -124,6 +124,72 @@ describe('FEATURE_WIRING_GENERATOR_MJS (shipped script) — no drift', () => {
     ]);
     expect(out).toBe(generatePageSource([desc('solo', 100)]));
   });
+
+  it('parses `primary: true` and matches generatePageSource (primary surface)', () => {
+    const out = runShippedGenerator([
+      {
+        file: 'pacman.feature.tsx',
+        body: 'export const feature = { slug: "pacman", order: 0, primary: true };\nexport default function P(){return null;}',
+      },
+      {
+        file: 'pacman-chars.feature.tsx',
+        body: 'export const feature = { slug: "pacman-chars", order: 10 };\nexport default function C(){return null;}',
+      },
+    ]);
+    // Build expected with the SAME PascalCase the shipped generator uses for
+    // multi-word slugs (pacman-chars → PacmanCharsFeature); the naive `desc`
+    // helper only upper-cases the first char, so spell it out here.
+    const expected = generatePageSource([
+      {
+        slug: 'pacman',
+        order: 0,
+        primary: true,
+        importPath: '../features/pacman.feature',
+        componentName: 'PacmanFeature',
+      },
+      {
+        slug: 'pacman-chars',
+        order: 10,
+        importPath: '../features/pacman-chars.feature',
+        componentName: 'PacmanCharsFeature',
+      },
+    ]);
+    expect(out).toBe(expected);
+    // Sanity: previews are isolated, primary is at bare /.
+    expect(out).toContain("{(!only || only === 'pacman') && (");
+    expect(out).toContain("{(only === 'pacman-chars') && (");
+  });
+});
+
+// pacman2 (2026-06-18) — final QA shot the bare `/` PREVIEW GALLERY (all
+// features stacked) instead of the assembled game, so every test saw the same
+// character-sheet frame. A `primary` feature makes `/` the real app.
+describe('generatePageSource — primary feature surface (pacman2 fix)', () => {
+  const primaryDesc = (slug: string, order: number): FeatureDescriptor => ({
+    ...desc(slug, order),
+    primary: true,
+  });
+
+  it('renders only the primary feature at bare / and isolates previews under ?feature=', () => {
+    const src = generatePageSource([
+      primaryDesc('pacman', 0),
+      desc('pacman-chars', 10),
+      desc('pacman-hud', 20),
+    ]);
+    // primary keeps the bare-/ branch
+    expect(src).toContain("{(!only || only === 'pacman') && (");
+    // previews reachable ONLY via ?feature=<slug> (no bare-/ branch)
+    expect(src).toContain("{(only === 'pacman-chars') && (");
+    expect(src).toContain("{(only === 'pacman-hud') && (");
+    expect(src).not.toContain("{(!only || only === 'pacman-chars') && (");
+    expect(src).not.toContain("{(!only || only === 'pacman-hud') && (");
+  });
+
+  it('falls back to stacking all features at / when none is primary', () => {
+    const src = generatePageSource([desc('pacman-chars', 10), desc('pacman-hud', 20)]);
+    expect(src).toContain("{(!only || only === 'pacman-chars') && (");
+    expect(src).toContain("{(!only || only === 'pacman-hud') && (");
+  });
 });
 
 describe('GITATTRIBUTES_GENERATED — Story E Tier 0 (merge=union)', () => {
