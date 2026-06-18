@@ -469,15 +469,22 @@ export default $config({
     // Two static-hosting shells the deploy/promote agents `aws s3 sync` INTO
     // (NOT StaticSite — that would purge synced apps every deploy). Each fronted
     // by its own CloudFront + ACM cert + Route53 record (shared zone, matched by
-    // name) via Router. `access:'cloudfront'` grants the distribution OAC to the
-    // bucket. Setting the env vars below flips `deploy-targets.ts` from fallback
-    // prefix mode to true build-once byte-copy promotion across dev→staging→prod.
+    // name) via Router. Setting the env vars below flips `deploy-targets.ts` from
+    // fallback prefix mode to true build-once byte-copy promotion across
+    // dev→staging→prod.
+    //
+    // `access:'public'` — public-read objects (no OAC), mirroring the production
+    // `futurator-ai-website` bucket. The earlier `access:'cloudfront'` (OAC) left
+    // the Router's distribution unauthorized on the bucket policy, so dev/staging
+    // served `403 AccessDenied` (the bundle was in S3 but CloudFront couldn't read
+    // it — 2026-06-18 deployment-session field test). These host public web apps,
+    // so public-read is the right, proven posture.
     const devEnvBucket = new sst.aws.Bucket('DevEnvBucket', {
-      access: 'cloudfront',
+      access: 'public',
       transform: { bucket: { bucketName: 'futurator-admin-dev-env' } },
     });
     const stagingEnvBucket = new sst.aws.Bucket('StagingEnvBucket', {
-      access: 'cloudfront',
+      access: 'public',
       transform: { bucket: { bucketName: 'futurator-admin-staging-env' } },
     });
     const devRouter = new sst.aws.Router('DevRouter', {
