@@ -68,6 +68,7 @@ describe('framework-aware prompts (A2)', () => {
   });
 
   it('copy-mode prompt still says do NOT rebuild and has a single sync', () => {
+    process.env.DEPLOY_ENV_SUBDOMAINS = 'on';
     process.env.DEV_ENV_BUCKET = 'futurator-admin-dev-env';
     process.env.DEV_ENV_CF_ID = 'DEVCF';
     process.env.STAGING_ENV_BUCKET = 'futurator-admin-staging-env';
@@ -79,6 +80,7 @@ describe('framework-aware prompts (A2)', () => {
     expect(prompt).toContain('NO rebuild');
     const syncCount = (prompt.match(/aws s3 sync/g) ?? []).length;
     expect(syncCount).toBe(1);
+    delete process.env.DEPLOY_ENV_SUBDOMAINS;
     delete process.env.DEV_ENV_BUCKET;
     delete process.env.DEV_ENV_CF_ID;
     delete process.env.STAGING_ENV_BUCKET;
@@ -105,6 +107,7 @@ describe('buildPromotePipeline mode selection', () => {
   });
 
   it('COPIES (build-once) when base paths match — provisioned subdomain buckets', () => {
+    process.env.DEPLOY_ENV_SUBDOMAINS = 'on';
     process.env.DEV_ENV_BUCKET = 'futurator-admin-dev-env';
     process.env.DEV_ENV_CF_ID = 'DEVCF';
     process.env.STAGING_ENV_BUCKET = 'futurator-admin-staging-env';
@@ -129,6 +132,7 @@ describe('buildPromotePipeline mode selection', () => {
   });
 
   afterEach(() => {
+    delete process.env.DEPLOY_ENV_SUBDOMAINS;
     delete process.env.DEV_ENV_BUCKET;
     delete process.env.DEV_ENV_CF_ID;
     delete process.env.STAGING_ENV_BUCKET;
