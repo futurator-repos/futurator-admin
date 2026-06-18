@@ -27,7 +27,7 @@
  * is dependency-injected (spawners/shell/git/boot) and tested hermetically.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildCommitMetadataFlags } from '../pipelines/lib/commit-metadata.mjs';
 
@@ -421,6 +421,12 @@ export async function runWaveVqa({
   let boot = await bootServer({ cwd: candidateDir, qaContext, port, shell, log });
   if (!boot.ok) {
     vlog('error', `dev server failed to boot (status=${boot.status}) — env-blocked`);
+    // Boot failed before the try/finally — clean this run's scratch here.
+    try {
+      rmSync(shotDir, { recursive: true, force: true });
+    } catch {
+      /* best effort — never fail the run on cleanup */
+    }
     return { outcome: 'env-blocked', bootLogTail: boot.logTail, ...empty };
   }
 
@@ -849,6 +855,13 @@ export async function runWaveVqa({
   } finally {
     try {
       await boot.stop();
+    } catch {
+      /* best effort */
+    }
+    // Scoped to THIS run's scratch only (screenshots already uploaded to S3
+    // above). Never a blanket /tmp wipe; never fail the run on a cleanup error.
+    try {
+      rmSync(shotDir, { recursive: true, force: true });
     } catch {
       /* best effort */
     }

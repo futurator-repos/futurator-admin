@@ -1,0 +1,17 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# futurator-disk-gc.timer — fire futurator-disk-gc.service weekly
+#
+# Persistent=true → if the host was off at the scheduled time, the run is
+# triggered on next boot. See futurator-disk-gc.service header for install steps.
+# ──────────────────────────────────────────────────────────────────────────────
+[Unit]
+Description=Weekly timer for Futurator daemon disk garbage-collection
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=15min
+Unit=futurator-disk-gc.service
+
+[Install]
+WantedBy=timers.target
