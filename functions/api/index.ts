@@ -140,7 +140,7 @@ import { enqueueResumeJob } from '../shared/services/resume-job';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
 import * as planRepo from '../shared/repositories/plan-repository';
 // Plan Retrospect — Reality Check scorer (plan-retrospect-spec §4a/§7.1).
-import { scoreDeterministic } from '../shared/scorecard';
+import { scoreDeterministic, resolveEpics, resolvePlanJobIds } from '../shared/scorecard';
 import { composeRealityCheck } from '../shared/scorecard/compose';
 import { CRITERIA_META } from '../shared/scorecard/criteria-meta';
 import * as scorecardRepo from '../shared/repositories/scorecard-repository';
@@ -12670,15 +12670,33 @@ app.post('/api/plans/:planId/scorecard/:stage/run', async (c) => {
   const plan = await planRepo.getPlanById(planId);
   if (!plan) throw new NotFoundError('Plan', planId);
 
-  // Deterministic half — inline, no LLM (spec §4a). The reflections fetcher is
-  // wired (OV8 learning-loop closure); graph/qa/deploy/agent-spend fetchers stay
-  // omitted in v1 (graph needs the S3 _graph read; agent-spend has no per-plan
-  // query yet), so those criteria degrade honestly to ⚪ rather than fabricate.
-  // Reflections are project-scoped (PK = the plan's folder slug); a slug miss
-  // returns [] → ⚪, never a wrong score.
+  // Deterministic half — inline, no LLM (spec §4a). Reflections (OV8), graph
+  // (D-KC*), and agent-spend (OV4 cost) fetchers are wired; qa/deploy report
+  // fetchers stay omitted in v1, so those criteria degrade honestly to ⚪ rather
+  // than fabricate. Reflections are project-scoped (PK = the plan's folder slug);
+  // a slug miss returns [] → ⚪, never a wrong score.
   const det = await scoreDeterministic(planId, {
     fetchReflections: (pl) => reflectionsRepo.listReflections({ projectSlug: pl.name }),
     fetchGraphReports: (pl) => fetchPlanGraphReports(pl),
+    // OV4 cost reconciliation: join agent-spend rows to the plan's FULL job set
+    // (concept + epics + retry-union) across the plan's active UTC days. The
+    // spend table has no jobId index, so we read its date partitions and filter
+    // in memory. This surfaces orphaned/superseded spend instead of hiding it
+    // behind ⚪ (A1, 2026-06-18).
+    fetchAgentSpendRows: async (pl) => {
+      const epics = await resolveEpics(pl);
+      const jobIds = await resolvePlanJobIds(pl, epics);
+      const startIso = pl.startedAt ?? pl.createdAt;
+      const endIso = pl.reviewAt ?? pl.updatedAt ?? pl.createdAt;
+      const dates = agentSpendRepo.utcDateRange(startIso, endIso);
+      const rows = await agentSpendRepo.listSpendByJobIds(jobIds, dates);
+      return rows.map((r) => ({
+        planId,
+        jobId: r.jobId,
+        costUsd: r.costUsd,
+        walltimeSec: r.walltimeSec,
+      }));
+    },
   });
   const rc = composeRealityCheck(det.slices, det.ctx);
   const now = new Date().toISOString();

@@ -92,13 +92,24 @@ export interface DeterministicResult {
 }
 
 /**
- * Re-derive the plan's raw events across every job (orchestrator + story +
- * wave-build + retry-union), mirroring `collectRawEvents` in forensic-builder.
- * We re-implement it here (rather than calling `buildForensicPayload`) so the
- * scorer avoids the cohort fetch on this path (spec §4a reuse note).
+ * Resolve EVERY jobId belonging to a plan: the concept route + artifact jobs,
+ * each epic's orchestrator + story + wave-build jobs, and the retry-union chain
+ * (superseded attempts). Exported so the agent-spend fetcher (OV4) joins spend
+ * against the SAME job set the scorer reads events from — otherwise the two
+ * disagree (orphaned/superseded spend is exactly the gap OV4 must catch).
+ *
+ * The concept jobs are seeded here (A3, 2026-06-18): they exist in DDB but were
+ * previously omitted, leaving C-R2/C-D5 blind for no reason.
  */
-async function collectPlanEvents(plan: Plan, epics: EpicWorkflow[]): Promise<AgentEvent[]> {
+export async function resolvePlanJobIds(plan: Plan, epics: EpicWorkflow[]): Promise<Set<string>> {
   const jobIds = new Set<string>();
+
+  // Concept stage jobs live on the plan row (route + per-artifact generators).
+  if (plan.conceptRouteJobId) jobIds.add(plan.conceptRouteJobId);
+  for (const jid of Object.values(plan.conceptArtifactJobIds ?? {})) {
+    if (jid) jobIds.add(jid);
+  }
+
   for (const epic of epics) {
     if (epic.orchestratorJobId) jobIds.add(epic.orchestratorJobId);
     for (const story of epic.stories ?? []) {
@@ -125,6 +136,18 @@ async function collectPlanEvents(plan: Plan, epics: EpicWorkflow[]): Promise<Age
     }
   }
 
+  return jobIds;
+}
+
+/**
+ * Re-derive the plan's raw events across every job (concept + orchestrator +
+ * story + wave-build + retry-union), mirroring `collectRawEvents` in
+ * forensic-builder. We re-implement it here (rather than calling
+ * `buildForensicPayload`) so the scorer avoids the cohort fetch (spec §4a).
+ */
+async function collectPlanEvents(plan: Plan, epics: EpicWorkflow[]): Promise<AgentEvent[]> {
+  const jobIds = await resolvePlanJobIds(plan, epics);
+
   const PAGE_SIZE = 200;
   const SEQ_START = '000000'; // DDB rejects '' for key comparisons; see slicer.ts
   const allEvents: AgentEvent[] = [];
@@ -148,7 +171,7 @@ async function collectPlanEvents(plan: Plan, epics: EpicWorkflow[]): Promise<Age
 }
 
 /** Resolve every epic row for a plan (skipping any that no longer exist). */
-async function resolveEpics(plan: Plan): Promise<EpicWorkflow[]> {
+export async function resolveEpics(plan: Plan): Promise<EpicWorkflow[]> {
   const epics: EpicWorkflow[] = [];
   for (const epicId of plan.epicIds ?? []) {
     const epic = await getEpicById(epicId);
