@@ -1,11 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import dynamic from 'next/dynamic';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   articleUrl,
-  centralityRadius,
-  communityColor,
   computeCoverage,
   computeIsolated,
   integrityHeadline,
@@ -21,10 +18,8 @@ import { DeadCodePanel } from './dead-code-panel';
 import { ArchXrayPanel } from './arch-xray-panel';
 import { CapabilityGapPanel } from './capability-gap-panel';
 import { ArticleViewer } from './article-viewer';
-
-const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
-  ssr: false,
-});
+import { GraphCanvas, type CanvasNode, type CanvasLink } from './graph-canvas';
+import type { LayoutMode } from '@/lib/graph/catalog';
 
 const S3_BASE = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
 // Article links open in a browser tab — use the CloudFront domain, NOT the raw
@@ -92,18 +87,6 @@ type GraphNode = {
   similarTo?: { id: string; score: number }[];
 };
 
-/** Resolve color for a node — prefer kind, fall back to type. */
-function colorForNode(n: GraphNode): string {
-  const key = n.kind ?? n.type;
-  return NODE_COLORS_BY_KIND[key] ?? NODE_COLORS_BY_KIND.unknown;
-}
-
-/** Smaller radius for AST-derived sub-file nodes so files dominate visually. */
-function radiusForNode(n: GraphNode): number {
-  if (n.kind === 'function' || n.kind === 'class') return 3;
-  return 6;
-}
-
 type GraphEdge = {
   source: string;
   target: string;
@@ -141,9 +124,11 @@ export function GraphViewer({
   const [articleNode, setArticleNode] = useState<GraphNode | null>(null);
   // Focus / local view — isolate the selected node + its neighbourhood.
   const [focusMode, setFocusMode] = useState(false);
+  // Graph Viz v2 — layout mode + overlay controls (the new canvas).
+  const [layout, setLayout] = useState<LayoutMode>('force');
+  const [showZones, setShowZones] = useState(true);
+  const [fitToken, setFitToken] = useState(0);
   const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const [size, setSize] = useState({ width: 800, height: 600 });
   const locked = !!lockedProjectId;
 
   // Initialize from ?projectId= query string (standalone page only).
@@ -163,20 +148,6 @@ export function GraphViewer({
       setInputValue(qp);
     }
   }, [locked, lockedProjectId]);
-
-  // Track container size for the graph canvas
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const el = containerRef.current;
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        setSize({ width, height: Math.max(height, 400) });
-      }
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
 
   const fetchSnapshot = useCallback(async (pid: string) => {
     if (!pid) return;
@@ -319,6 +290,8 @@ export function GraphViewer({
   const maxC = useMemo(() => maxCentrality(archInsights), [archInsights]);
   // Overlay is live only when enabled AND the analytics pass produced metrics.
   const overlayActive = overlayEnabled && !!archInsights?.mageAvailable;
+  // Per-node centrality/community for the canvas (X-ray sizing, community colour + zones).
+  const metrics = useMemo(() => archInsights?.nodeMetrics ?? {}, [archInsights]);
 
   // Compiler activity feed — the wiki's log.md from the live S3 mirror.
   const [logTail, setLogTail] = useState<string | null>(null);
@@ -402,7 +375,6 @@ export function GraphViewer({
     return { matchIds, neighborIds, count: matchIds.size };
   }, [search, filteredGraphData]);
 
-  const DIM = 'rgba(100,116,139,0.12)';
   const SIMILAR = '#e879f9'; // magenta — semantic neighbours of the selected node
 
   // Focus view: when on + a node is selected, isolate it + its 1-hop neighbours
@@ -625,12 +597,64 @@ export function GraphViewer({
         </div>
       )}
 
+      {/* Graph Viz v2 — layout modes + overlay controls */}
+      {snapshot && (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex rounded-md border border-border bg-card p-0.5 text-xs">
+            {(
+              [
+                ['force', 'Force Atlas'],
+                ['lanes', 'Layered Lanes'],
+                ['community', 'Community Orbit'],
+              ] as [LayoutMode, string][]
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setLayout(key)}
+                className={`rounded px-2.5 py-1 transition-colors ${
+                  layout === key ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => setOverlayEnabled((v) => !v)}
+            className={`rounded-md border px-2.5 py-1 text-xs ${
+              overlayActive
+                ? 'border-accent-blue bg-accent-blue/15 text-accent-blue'
+                : 'border-input bg-background hover:bg-muted'
+            }`}
+            title="X-ray — colour by community, size by centrality"
+          >
+            X-ray
+          </button>
+          <button
+            onClick={() => setShowZones((v) => !v)}
+            disabled={!overlayActive}
+            className={`rounded-md border px-2.5 py-1 text-xs disabled:opacity-50 ${
+              showZones && overlayActive
+                ? 'border-accent-blue bg-accent-blue/15 text-accent-blue'
+                : 'border-input bg-background hover:bg-muted'
+            }`}
+            title="Translucent community zones behind the graph"
+          >
+            Zones
+          </button>
+          <button
+            onClick={() => setFitToken((t) => t + 1)}
+            className="rounded-md border border-input bg-background px-2.5 py-1 text-xs hover:bg-muted"
+            title="Fit graph to view"
+          >
+            Fit
+          </button>
+        </div>
+      )}
+
       {/* Graph + details */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
-        <div
-          ref={containerRef}
-          className="relative h-[600px] overflow-hidden rounded-md border border-border bg-card"
-        >
+        <div className="relative h-[720px] overflow-hidden rounded-md border border-border bg-card">
           {!projectId && (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               Enter a project / plan ID above to load its graph.
@@ -642,71 +666,18 @@ export function GraphViewer({
             </div>
           )}
           {snapshot && (
-            <ForceGraph2D
-              graphData={focusGraphData}
-              width={size.width}
-              height={size.height}
-              nodeLabel={(n: object) => {
-                const g = n as unknown as GraphNode;
-                const kind = g.kind ?? g.type;
-                return `${g.title} (${kind})`;
-              }}
-              nodeColor={(n: object) => {
-                const g = n as unknown as GraphNode;
-                // Search dimming: matches + neighbors keep colour, the rest fade.
-                if (
-                  searchMatch &&
-                  !searchMatch.matchIds.has(g.id) &&
-                  !searchMatch.neighborIds.has(g.id)
-                ) {
-                  return DIM;
-                }
-                // Semantic-similarity highlight (only when not searching).
-                if (!searchMatch && similarSet.has(g.id)) return SIMILAR;
-                if (overlayActive) {
-                  const m = archInsights?.nodeMetrics[g.id];
-                  if (m && m.community != null) return communityColor(m.community);
-                }
-                return colorForNode(g);
-              }}
-              nodeVal={(n: object) => {
-                const g = n as unknown as GraphNode;
-                let r: number;
-                if (overlayActive) {
-                  const m = archInsights?.nodeMetrics[g.id];
-                  r =
-                    m && typeof m.centrality === 'number'
-                      ? centralityRadius(m.centrality, maxC, radiusForNode(g))
-                      : radiusForNode(g);
-                } else {
-                  r = radiusForNode(g);
-                }
-                // Direct search matches pop larger.
-                if (searchMatch?.matchIds.has(g.id)) return r * 2.2;
-                return r;
-              }}
-              nodeRelSize={3}
-              linkColor={(l: object) => {
-                const e = l as unknown as GraphEdge;
-                // When searching, only edges touching a match/neighbor stay lit.
-                if (searchMatch) {
-                  const s = endpointId(e.source);
-                  const t = endpointId(e.target);
-                  const lit =
-                    (searchMatch.matchIds.has(s) || searchMatch.neighborIds.has(s)) &&
-                    (searchMatch.matchIds.has(t) || searchMatch.neighborIds.has(t));
-                  if (!lit) return DIM;
-                }
-                return EDGE_COLORS[e.type] ?? EDGE_COLORS.DEPENDS_ON;
-              }}
-              linkLabel={(l: object) => {
-                const e = l as unknown as GraphEdge;
-                return e.type;
-              }}
-              linkDirectionalArrowLength={4}
-              linkDirectionalArrowRelPos={0.95}
-              onNodeClick={(n) => setSelectedNode(n as unknown as GraphNode)}
-              cooldownTicks={120}
+            <GraphCanvas
+              data={focusGraphData as { nodes: CanvasNode[]; links: CanvasLink[] }}
+              layout={layout}
+              fitToken={fitToken}
+              metrics={metrics}
+              maxCentrality={maxC}
+              xray={overlayActive}
+              zones={showZones && overlayActive}
+              searchMatch={searchMatch}
+              similarSet={similarSet}
+              selectedId={selectedNode?.id ?? null}
+              onSelect={(n) => setSelectedNode((n as unknown as GraphNode) ?? null)}
             />
           )}
         </div>
