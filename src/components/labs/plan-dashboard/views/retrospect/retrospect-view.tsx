@@ -22,15 +22,24 @@
 import { useMemo, useState } from 'react';
 import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-output';
 import { useScorecard, useRunScorecardStage } from '@/hooks/use-scorecard';
+import { api } from '@/lib/api-client';
 import type {
   StageId,
   ScorecardSlice,
   ImprovementAction,
   FixRef,
   GradeBand,
+  RealityCheck,
 } from '@/types/scorecard';
 import { RetrospectRail, RETROSPECT_STAGES } from './retrospect-rail';
 import { RealityCheckCard } from './reality-check-card';
+import {
+  buildReportMarkdown,
+  buildReconciliationMarkdown,
+  buildAuditBundle,
+  reconcile,
+  type ForensicLike,
+} from './retrospect-export';
 
 const STAGE_LABEL: Record<StageId, string> = {
   concept: 'Concept',
@@ -193,8 +202,167 @@ export function RetrospectView({ planId }: { planId: string }) {
       )}
 
       <ImprovementActions actions={data?.actions ?? []} pushed={pushed} onPush={pushAction} />
+
+      {data && <ExportBar planId={planId} data={data} />}
     </div>
   );
+}
+
+// ── Export & audit ──────────────────────────────────────────────────────────
+
+function downloadText(filename: string, text: string, type: string) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Operator export row. Four artefacts off the in-memory Reality Check:
+ *   • Report (.md)         — the readable retrospect.
+ *   • Forensic (.json)     — the raw timing payload the scores were derived from.
+ *   • Reconciliation (.md) — re-derives every forensic-backed criterion from
+ *                            that payload and flags MATCH/MISMATCH — the
+ *                            "are the forensics + rubric actually right" check.
+ *   • Audit bundle (.json) — report + forensic + reconciliation in one file.
+ * The forensic payload is fetched once on demand and cached.
+ */
+function ExportBar({ planId, data }: { planId: string; data: RealityCheck }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [forensic, setForensic] = useState<ForensicLike | null>(null);
+
+  async function getForensic(): Promise<ForensicLike> {
+    if (forensic) return forensic;
+    // include=events so wall-clock-derived criteria (D-WS1) can be reconciled
+    // and the exported bundle is self-contained (the API strips events[] by
+    // default on read).
+    const f = await api.get<ForensicLike>(`/plans/${planId}/timing/forensic?include=events`);
+    setForensic(f);
+    return f;
+  }
+
+  async function run(kind: string, fn: () => Promise<void> | void) {
+    setBusy(kind);
+    setErr(null);
+    try {
+      await fn();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div
+      data-testid="retrospect-export"
+      style={{
+        marginTop: 18,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        flexWrap: 'wrap',
+        padding: '12px 16px',
+        border: '1px solid var(--border)',
+        borderRadius: 12,
+        background: 'var(--bg-elev)',
+      }}
+    >
+      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>Export</span>
+      <span style={{ fontSize: 11, color: 'var(--text-dim)', marginRight: 4 }}>
+        full report · raw forensics · cross-check that they agree
+      </span>
+      <div style={{ flex: 1 }} />
+      <button
+        type="button"
+        disabled={!!busy}
+        onClick={() =>
+          run('report', () =>
+            downloadText(`${planId}-retrospect.md`, buildReportMarkdown(data), 'text/markdown'),
+          )
+        }
+        style={exportBtn('accent-blue')}
+      >
+        {busy === 'report' ? '…' : 'Report (.md)'}
+      </button>
+      <button
+        type="button"
+        disabled={!!busy}
+        onClick={() =>
+          run('forensic', async () => {
+            const f = await getForensic();
+            downloadText(`${planId}-forensic.json`, JSON.stringify(f, null, 2), 'application/json');
+          })
+        }
+        style={exportBtn('text-mute')}
+      >
+        {busy === 'forensic' ? '…' : 'Forensic (.json)'}
+      </button>
+      <button
+        type="button"
+        disabled={!!busy}
+        onClick={() =>
+          run('recon', async () => {
+            const f = await getForensic();
+            downloadText(
+              `${planId}-reconciliation.md`,
+              buildReconciliationMarkdown(reconcile(data, f), planId),
+              'text/markdown',
+            );
+          })
+        }
+        style={exportBtn('accent-blue')}
+      >
+        {busy === 'recon' ? '…' : 'Reconciliation (.md)'}
+      </button>
+      <button
+        type="button"
+        disabled={!!busy}
+        onClick={() =>
+          run('bundle', async () => {
+            let f: ForensicLike | null = null;
+            try {
+              f = await getForensic();
+            } catch {
+              f = null; // bundle records the absence rather than failing
+            }
+            downloadText(
+              `${planId}-retrospect-audit.json`,
+              JSON.stringify(buildAuditBundle(data, f), null, 2),
+              'application/json',
+            );
+          })
+        }
+        style={exportBtn('text-mute')}
+      >
+        {busy === 'bundle' ? '…' : 'Audit bundle (.json)'}
+      </button>
+      {err && (
+        <span style={{ flexBasis: '100%', fontSize: 11, color: 'var(--destructive)' }}>
+          Export failed: {err}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function exportBtn(tone: string) {
+  return {
+    fontSize: 11,
+    fontWeight: 600,
+    color: `var(--${tone})`,
+    background: `color-mix(in srgb, var(--${tone}) 10%, transparent)`,
+    border: `1px solid color-mix(in srgb, var(--${tone}) 45%, transparent)`,
+    borderRadius: 6,
+    padding: '5px 11px',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap' as const,
+  };
 }
 
 /** Overview band: pipeline-health + grade + the stubbed Phase-3 trend. */

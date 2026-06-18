@@ -7,8 +7,8 @@
  * with type/stepId/text columns, auto-scrolling container, duration clock,
  * current-step badge.
  *
- * Hidden entirely when there's no deploy job — the DeploySteps component
- * already handles the empty state.
+ * Hidden entirely (returns null) when there's no deploy job, so callers can
+ * mount it unconditionally (e.g. per-environment in the Deploy-activity panel).
  */
 
 import { useEffect, useMemo, useState } from 'react';

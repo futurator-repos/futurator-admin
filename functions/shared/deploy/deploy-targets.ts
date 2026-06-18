@@ -100,10 +100,21 @@ const PUBLIC_ORIGIN = 'https://futurator.ai';
  * uses them; without, it falls back to shared-bucket prefixes.
  */
 function envHosting(): Record<DeployEnvironment, EnvHosting> {
-  const devBucket = process.env.DEV_ENV_BUCKET;
-  const devCf = process.env.DEV_ENV_CF_ID;
-  const stagingBucket = process.env.STAGING_ENV_BUCKET;
-  const stagingCf = process.env.STAGING_ENV_CF_ID;
+  // Subdomain mode (dev./staging.futurator.ai) is gated behind an EXPLICIT
+  // opt-in flag, not just the presence of the bucket coords. The F22 subdomain
+  // Routers front their S3 buckets via an OAC + S3 REST origin with NO
+  // directory-index rewrite, so a bare `…/apps/<slug>/` request 403s (the key
+  // `apps/<slug>/` isn't an object). Until a CloudFront index-rewrite Function
+  // is added to those Routers (deployment-v2.5.md §14), we run dev/staging in
+  // FALLBACK mode on the production website bucket (futurator-ai-website), whose
+  // CloudFront serves directory-index correctly — the same path prod uses. Flip
+  // `DEPLOY_ENV_SUBDOMAINS=on` (Api + WaveCompletionCheck) to re-enable once the
+  // index-rewrite ships. 2026-06-18, deployment session.
+  const subdomainsEnabled = process.env.DEPLOY_ENV_SUBDOMAINS === 'on';
+  const devBucket = subdomainsEnabled ? process.env.DEV_ENV_BUCKET : undefined;
+  const devCf = subdomainsEnabled ? process.env.DEV_ENV_CF_ID : undefined;
+  const stagingBucket = subdomainsEnabled ? process.env.STAGING_ENV_BUCKET : undefined;
+  const stagingCf = subdomainsEnabled ? process.env.STAGING_ENV_CF_ID : undefined;
 
   return {
     production: {

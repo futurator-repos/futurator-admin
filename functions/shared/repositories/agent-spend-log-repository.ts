@@ -118,3 +118,59 @@ export async function getDailySpend(date: string): Promise<DailySpend> {
 export function todayUtc(now: Date = new Date()): string {
   return now.toISOString().slice(0, 10);
 }
+
+/**
+ * The inclusive list of UTC `YYYY-MM-DD` dates spanning `[startIso, endIso]`,
+ * capped at `maxDays` (default 31) so a bad timestamp can't fan out unboundedly.
+ * Used to scope an agent-spend lookup to a plan's active days (the table has no
+ * jobId index, but it IS partitioned by UTC date — so we read only the plan's
+ * days and filter to its jobIds in memory).
+ */
+export function utcDateRange(startIso: string, endIso: string, maxDays = 31): string[] {
+  const start = Date.parse(startIso);
+  const end = Date.parse(endIso);
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) {
+    return Number.isNaN(start) ? [] : [startIso.slice(0, 10)];
+  }
+  const dates: string[] = [];
+  // Pad the end by one day: a job can start before reviewAt yet write its spend
+  // row (createdAt = completion) slightly after.
+  const last = end + 24 * 60 * 60 * 1000;
+  for (let t = start; t <= last && dates.length < maxDays; t += 24 * 60 * 60 * 1000) {
+    dates.push(new Date(t).toISOString().slice(0, 10));
+  }
+  return dates;
+}
+
+/**
+ * Every spend row whose `jobId` is in `jobIds`, found by querying the
+ * date-partitioned GSI for each of `dates` and filtering in memory. Returns
+ * `[]` for empty inputs. This is the plan-scoped read OV4 reconciles against
+ * `plan.totalCostUsd` (no per-plan/per-job index exists; rows carry `jobId`).
+ */
+export async function listSpendByJobIds(
+  jobIds: Set<string>,
+  dates: string[],
+): Promise<AgentSpendRow[]> {
+  if (jobIds.size === 0 || dates.length === 0) return [];
+  const out: AgentSpendRow[] = [];
+  for (const date of dates) {
+    let ExclusiveStartKey: Record<string, unknown> | undefined;
+    do {
+      const result = await docClient.send(
+        new QueryCommand({
+          TableName: TABLE_NAMES.agentSpendLog,
+          IndexName: 'date-createdAt-index',
+          KeyConditionExpression: 'GSI1PK = :d',
+          ExpressionAttributeValues: { ':d': date },
+          ExclusiveStartKey,
+        }),
+      );
+      for (const item of (result.Items as AgentSpendRow[] | undefined) ?? []) {
+        if (item.jobId && jobIds.has(item.jobId)) out.push(item);
+      }
+      ExclusiveStartKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (ExclusiveStartKey);
+  }
+  return out;
+}

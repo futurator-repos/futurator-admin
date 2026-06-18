@@ -7,7 +7,13 @@ vi.mock('../../dynamo-client', () => ({
   TABLE_NAMES: { agentSpendLog: 'test-agent-spend-log' },
 }));
 
-import { writeSpendRow, getDailySpend, todayUtc } from '../agent-spend-log-repository';
+import {
+  writeSpendRow,
+  getDailySpend,
+  todayUtc,
+  utcDateRange,
+  listSpendByJobIds,
+} from '../agent-spend-log-repository';
 
 function extract(command: unknown) {
   return (command as { input: Record<string, unknown> }).input;
@@ -127,5 +133,70 @@ describe('todayUtc', () => {
     expect(todayUtc(new Date('2026-05-27T23:30:00Z'))).toBe('2026-05-27');
     // 00:30 UTC the next day, regardless of local tz, is the next date
     expect(todayUtc(new Date('2026-05-28T00:30:00Z'))).toBe('2026-05-28');
+  });
+});
+
+describe('utcDateRange', () => {
+  it('returns a single date for a same-day window (plus the +1d completion pad)', () => {
+    expect(utcDateRange('2026-06-18T07:14:54Z', '2026-06-18T10:15:49Z')).toEqual([
+      '2026-06-18',
+      '2026-06-19',
+    ]);
+  });
+
+  it('spans multiple days inclusively', () => {
+    expect(utcDateRange('2026-06-18T23:00:00Z', '2026-06-20T01:00:00Z')).toEqual([
+      '2026-06-18',
+      '2026-06-19',
+      '2026-06-20',
+    ]);
+  });
+
+  it('caps the fan-out at maxDays', () => {
+    const out = utcDateRange('2026-01-01T00:00:00Z', '2027-01-01T00:00:00Z', 5);
+    expect(out).toHaveLength(5);
+  });
+
+  it('handles a reversed/invalid window gracefully', () => {
+    expect(utcDateRange('2026-06-20T00:00:00Z', '2026-06-18T00:00:00Z')).toEqual(['2026-06-20']);
+    expect(utcDateRange('not-a-date', 'also-bad')).toEqual([]);
+  });
+});
+
+describe('listSpendByJobIds', () => {
+  it('returns [] without querying for empty inputs', async () => {
+    expect(await listSpendByJobIds(new Set(), ['2026-06-18'])).toEqual([]);
+    expect(await listSpendByJobIds(new Set(['j1']), [])).toEqual([]);
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  it('queries each date partition and keeps only rows whose jobId is in the set', async () => {
+    sendMock
+      .mockResolvedValueOnce({
+        Items: [
+          { jobId: 'j1', costUsd: 5 },
+          { jobId: 'orphan', costUsd: 99 }, // present in partition but not in the plan
+        ],
+        LastEvaluatedKey: undefined,
+      })
+      .mockResolvedValueOnce({
+        Items: [{ jobId: 'j2', costUsd: 7 }],
+        LastEvaluatedKey: undefined,
+      });
+    const rows = await listSpendByJobIds(new Set(['j1', 'j2']), ['2026-06-18', '2026-06-19']);
+    expect(rows.map((r) => r.jobId)).toEqual(['j1', 'j2']);
+    expect(rows.reduce((s, r) => s + (r.costUsd ?? 0), 0)).toBe(12);
+    const first = extract(sendMock.mock.calls[0][0]);
+    expect(first.IndexName).toBe('date-createdAt-index');
+    expect(first.ExpressionAttributeValues).toEqual({ ':d': '2026-06-18' });
+  });
+
+  it('paginates within a date partition', async () => {
+    sendMock
+      .mockResolvedValueOnce({ Items: [{ jobId: 'j1', costUsd: 1 }], LastEvaluatedKey: { k: 1 } })
+      .mockResolvedValueOnce({ Items: [{ jobId: 'j1', costUsd: 2 }], LastEvaluatedKey: undefined });
+    const rows = await listSpendByJobIds(new Set(['j1']), ['2026-06-18']);
+    expect(rows).toHaveLength(2);
+    expect(sendMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -147,6 +147,40 @@ function deriveSmokeStatus(job: AgentJob | undefined): DeployEnvironmentStatus['
   return undefined;
 }
 
+/** Origin/CDN-permission markers — a failed smoke matching these is an ENVIRONMENT
+ *  problem (the bundle is in S3; the CDN can't read it), not a build defect. */
+const SMOKE_INFRA_RE =
+  /403|access[\s-]?denied|forbidden|origin|permission|cloudfront|cdn|oac|bucket policy/i;
+
+/**
+ * Per-rung deploy metadata for the activity panel + honest smoke messaging.
+ * `deployedAt`/`durationSec` come from the job timestamps; `smokeDetail` prefers
+ * the dedicated SMOKE_DETAIL line, falling back to DEPLOY_DETAILS; `smokeInfra`
+ * flags an origin/permission failure so the UI doesn't blame a fine build.
+ */
+function envMeta(job: AgentJob | undefined): {
+  deployedAt?: string;
+  durationSec?: number;
+  smokeDetail?: string;
+  smokeInfra?: boolean;
+} {
+  if (!job) return {};
+  const durationSec =
+    job.createdAt && job.updatedAt
+      ? Math.max(0, (Date.parse(job.updatedAt) - Date.parse(job.createdAt)) / 1000)
+      : undefined;
+  const smokeFailed = deriveSmokeStatus(job) === 'fail';
+  const smokeDetail = smokeFailed
+    ? job.variables?.SMOKE_DETAIL || job.variables?.DEPLOY_DETAILS || undefined
+    : undefined;
+  return {
+    deployedAt: job.updatedAt || job.createdAt,
+    durationSec,
+    smokeDetail,
+    smokeInfra: smokeFailed && !!smokeDetail && SMOKE_INFRA_RE.test(smokeDetail),
+  };
+}
+
 function buildEnvironments(
   plan: Plan,
   jobsById: Record<string, AgentJob>,
@@ -163,6 +197,7 @@ function buildEnvironments(
       canPromote: false, // dev is reached by deploy, not promote
       activeJobId: devJob?.jobId,
       smokeStatus: deriveSmokeStatus(devJob),
+      ...envMeta(devJob),
     },
     {
       environment: 'staging',
@@ -171,6 +206,7 @@ function buildEnvironments(
       canPromote: !!plan.devUrl, // promote dev → staging once dev is live
       activeJobId: stagingJob?.jobId,
       smokeStatus: deriveSmokeStatus(stagingJob),
+      ...envMeta(stagingJob),
     },
     {
       environment: 'production',
@@ -179,6 +215,7 @@ function buildEnvironments(
       canPromote: !!plan.stagingUrl, // promote staging → production once staging is live
       activeJobId: prodJob?.jobId,
       smokeStatus: deriveSmokeStatus(prodJob),
+      ...envMeta(prodJob),
     },
   ];
 }

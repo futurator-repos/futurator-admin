@@ -30,5 +30,11 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules", "sst.config.ts", "docs/concepts/agentic-office"]
+  "exclude": [
+    "node_modules",
+    "sst.config.ts",
+    "docs/concepts/agentic-office",
+    "docs/concepts/v0-graph",
+    "docs/concepts/claude-graph"
+  ]
 }

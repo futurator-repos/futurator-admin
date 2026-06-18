@@ -83,6 +83,22 @@ export interface DeployEnvironmentStatus {
   activeJobId?: string;
   /** Smoke-test outcome read from that job's variables.SMOKE_STATUS. undefined = none/unknown. */
   smokeStatus?: 'pass' | 'fail';
+  /**
+   * One-line smoke explanation (job `SMOKE_DETAIL`, else the deploy `DEPLOY_DETAILS`).
+   * Surfaced verbatim so the operator sees WHY a smoke check failed.
+   */
+  smokeDetail?: string;
+  /**
+   * Heuristic flag: a FAILED smoke that looks like an ENVIRONMENT/origin problem
+   * (403 / AccessDenied / CloudFront / origin permission) while the bundle is in
+   * S3 — i.e. NOT a build defect. Drives honest messaging (don't call a fine
+   * build "broken" when the CDN can't read its bucket).
+   */
+  smokeInfra?: boolean;
+  /** ISO timestamp this rung's latest deploy job finished (or started, if running). */
+  deployedAt?: string;
+  /** Wall-clock seconds for this rung's latest deploy job. */
+  durationSec?: number;
 }
 
 export interface DeployHandoff {
