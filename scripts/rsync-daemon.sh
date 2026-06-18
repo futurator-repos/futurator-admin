@@ -107,6 +107,9 @@ fi
 # Without the browser binary, screenshot capture silently yields 0/N and the
 # VQA gate passes on nothing (dino1 2026-06-01). `playwright install chromium`
 # is a no-op when the matching build is already cached.
+# CHROMIUM ONLY: the pipeline is Chromium-only (see CLAUDE.md "Playwright:
+# Chromium only"). Never run bare `playwright install` — it pulls firefox +
+# webkit too (~0.8G of unused browsers that filled the 19G root fs).
 echo ">>> Ensuring Playwright Chromium is installed on the daemon host"
 $SSH "$REMOTE_HOST" "ls ~/.cache/ms-playwright/chromium_headless_shell-* >/dev/null 2>&1 && echo 'chromium present' || (cd /home/ubuntu && npx -y playwright install chromium 2>&1 | tail -2)" || \
   echo ">>> WARN: playwright install step failed (non-fatal) — visual QA may not capture screenshots"
@@ -114,8 +117,11 @@ $SSH "$REMOTE_HOST" "ls ~/.cache/ms-playwright/chromium_headless_shell-* >/dev/n
 # snake3 (2026-06-10) — the L2 flow executor imports the playwright LIBRARY
 # (not just the CLI); keep daemon node_modules current so
 # /opt/futurator-daemon/node_modules/playwright is importable from QA steps.
+# CHROMIUM ONLY: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD stops playwright's npm
+# postinstall from auto-fetching ALL browsers (firefox + webkit). The
+# explicit `playwright install chromium` step above is the sole browser source.
 echo ">>> Ensuring daemon node_modules are current (playwright lib for L2 flow executor)"
-$SSH "$REMOTE_HOST" "cd /opt/futurator-daemon && sudo npm install --omit=dev --no-audit --no-fund 2>&1 | tail -2" || \
+$SSH "$REMOTE_HOST" "cd /opt/futurator-daemon && sudo env PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev --no-audit --no-fund 2>&1 | tail -2" || \
   echo ">>> WARN: daemon npm install failed (non-fatal) — L2 flow tests fall back to idle screenshots"
 
 # ── Restart systemd so the running process picks up new code ──
