@@ -18,7 +18,6 @@ import {
   Rocket,
   CheckCircle,
   AlertTriangle,
-  ScrollText,
 } from 'lucide-react';
 import type { DeployEnvironmentStatus } from '@/types/deploy-report';
 import { usePromoteApp } from '@/hooks/use-deploy-report';
@@ -54,11 +53,9 @@ function findActionableEnv(
 export function EnvironmentLadder({
   environments,
   planId,
-  onViewLogs,
 }: {
   environments: DeployEnvironmentStatus[];
   planId: string;
-  onViewLogs?: (jobId: string) => void;
 }) {
   const promote = usePromoteApp(planId);
   // Which rung the in-flight promote targets — so only THAT rung shows the
@@ -66,7 +63,7 @@ export function EnvironmentLadder({
   // rung to "Promoting…", misrepresenting the state machine).
   const [pendingTarget, setPendingTarget] = useState<PromoteTarget | null>(null);
   const actionable = findActionableEnv(environments);
-  const stagingSmoke = environments.find((e) => e.environment === 'staging')?.smokeStatus;
+  const stagingEnv = environments.find((e) => e.environment === 'staging');
 
   function handlePromote(target: PromoteTarget) {
     setPendingTarget(target);
@@ -105,8 +102,12 @@ export function EnvironmentLadder({
               promoting={promote.isPending}
               pendingTarget={pendingTarget}
               actionable={env.environment === actionable}
-              onViewLogs={onViewLogs}
-              stagingSmokeWarn={env.environment === 'production' ? stagingSmoke : undefined}
+              stagingSmokeWarn={
+                env.environment === 'production' ? stagingEnv?.smokeStatus : undefined
+              }
+              stagingSmokeInfra={
+                env.environment === 'production' ? stagingEnv?.smokeInfra : undefined
+              }
             />
             {i < environments.length - 1 && (
               <ArrowRight
@@ -134,17 +135,18 @@ function Rung({
   promoting,
   pendingTarget,
   actionable,
-  onViewLogs,
   stagingSmokeWarn,
+  stagingSmokeInfra,
 }: {
   env: DeployEnvironmentStatus;
   onPromote: (target: PromoteTarget) => void;
   promoting: boolean;
   pendingTarget: PromoteTarget | null;
   actionable: boolean;
-  onViewLogs?: (jobId: string) => void;
   /** Staging's smoke result, threaded to the production rung for the A5 soft gate. */
   stagingSmokeWarn?: 'pass' | 'fail';
+  /** Whether staging's smoke failure looks like an environment/origin issue (not a build defect). */
+  stagingSmokeInfra?: boolean;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [typed, setTyped] = useState('');
@@ -211,7 +213,9 @@ function Rung({
 
       {/* A5 — smoke badge on staging/production. Reserve a fixed-height row so
           the rung never jumps when the badge appears/disappears between polls. */}
-      {env.environment !== 'dev' && <SmokeBadge status={env.smokeStatus} />}
+      {env.environment !== 'dev' && (
+        <SmokeBadge status={env.smokeStatus} detail={env.smokeDetail} infra={env.smokeInfra} />
+      )}
 
       {/* B3 — inline progress on the deploying rung (indeterminate bar +
           "Promoting…" text), in addition to the pulse dot above. */}
@@ -242,35 +246,8 @@ function Rung({
         </span>
       )}
 
-      {/* B3 — per-rung "View logs": surfaces this env's deploy stream in the
-          shared DeployLogs panel below the ladder. */}
-      {env.activeJobId && onViewLogs && (
-        <button
-          type="button"
-          onClick={() => onViewLogs(env.activeJobId as string)}
-          aria-label={`View ${meta.label} deploy logs`}
-          title={`View ${meta.label} deploy logs`}
-          style={{
-            alignSelf: 'flex-start',
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 5,
-            fontFamily: 'var(--font-mono)',
-            fontSize: 9,
-            letterSpacing: '0.12em',
-            textTransform: 'uppercase',
-            padding: '3px 7px',
-            border: '1px solid var(--border-2)',
-            borderRadius: 2,
-            color: 'var(--text-dim)',
-            background: 'transparent',
-            cursor: 'pointer',
-          }}
-        >
-          <ScrollText size={10} aria-hidden="true" />
-          View logs
-        </button>
-      )}
+      {/* Logs live in the always-present "Deploy activity" panel below the
+          ladder (per-environment, persistent, collapsible) — no per-rung button. */}
 
       {env.environment !== 'dev' &&
         (confirming ? (
@@ -279,6 +256,7 @@ function Rung({
             setTyped={setTyped}
             busy={deploying}
             stagingSmokeWarn={stagingSmokeWarn}
+            stagingSmokeInfra={stagingSmokeInfra}
             onConfirm={() => {
               if (typed.trim().toUpperCase() === 'PROMOTE') {
                 onPromote('production');
@@ -345,13 +323,28 @@ function Rung({
  * safety). Always renders a fixed-height row (even when undefined) to prevent
  * layout shift between polls.
  */
-function SmokeBadge({ status }: { status?: 'pass' | 'fail' }) {
+function SmokeBadge({
+  status,
+  detail,
+  infra,
+}: {
+  status?: 'pass' | 'fail';
+  detail?: string;
+  infra?: boolean;
+}) {
   const passed = status === 'pass';
   const failed = status === 'fail';
-  const label = passed ? 'Smoke test passed' : failed ? 'Smoke test failed' : undefined;
+  const label = passed
+    ? 'Smoke test passed'
+    : failed
+      ? infra
+        ? 'Smoke failed — environment/origin issue (not a build defect)'
+        : 'Smoke test did not pass'
+      : undefined;
   return (
     <span
       {...(label ? { 'aria-label': label } : {})}
+      title={detail || label}
       style={{
         minHeight: 14,
         display: 'inline-flex',
@@ -414,6 +407,7 @@ function ProdConfirm({
   setTyped,
   busy,
   stagingSmokeWarn,
+  stagingSmokeInfra,
   onConfirm,
   onCancel,
 }: {
@@ -421,13 +415,15 @@ function ProdConfirm({
   setTyped: (v: string) => void;
   busy: boolean;
   stagingSmokeWarn?: 'pass' | 'fail';
+  stagingSmokeInfra?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   const armed = typed.trim().toUpperCase() === 'PROMOTE';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 2 }}>
-      {/* A5 soft gate — warn (do not block) when staging smoke failed. */}
+      {/* A5 soft gate — warn (do not block) when staging smoke failed. Honest:
+          an origin/CDN failure is an environment issue, not a bad build. */}
       {stagingSmokeWarn === 'fail' && (
         <span
           role="alert"
@@ -436,12 +432,14 @@ function ProdConfirm({
             alignItems: 'flex-start',
             gap: 5,
             fontSize: 10,
-            color: 'var(--destructive)',
+            color: stagingSmokeInfra ? 'var(--warning)' : 'var(--destructive)',
             lineHeight: 1.4,
           }}
         >
           <AlertTriangle size={11} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
-          Staging smoke test FAILED — you are promoting a build with known issues.
+          {stagingSmokeInfra
+            ? "Staging smoke couldn't reach the URL (environment/origin issue) — the build itself wasn't validated end-to-end. Review staging logs first."
+            : 'Staging smoke test did NOT pass — review the staging logs before shipping.'}
         </span>
       )}
       <span style={{ fontSize: 10, color: 'var(--warning)', lineHeight: 1.4 }}>

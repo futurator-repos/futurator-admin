@@ -53,6 +53,12 @@ const DEPLOY_EXTRACTORS = {
     type: 'regex' as const,
     pattern: '[*_`]*SMOKE_STATUS[*_`]*:\\s*[*_`]*\\s*(\\w+)',
   },
+  // One-line reason for the smoke outcome — surfaced verbatim in the UI so the
+  // operator can tell an ENVIRONMENT/origin failure (403/CDN) from a build defect.
+  SMOKE_DETAIL: {
+    type: 'regex' as const,
+    pattern: '[*_`]*SMOKE_DETAIL[*_`]*:\\s*[*_`]*\\s*(.+)',
+  },
 };
 
 const DEPLOY_AGENT = {
@@ -63,7 +69,7 @@ const DEPLOY_AGENT = {
 
 /** Smoke-test instruction fragment — curl the live URL, assert it's a real page. */
 function smokeFragment(stepNo: number, publicUrl: string): string {
-  return `${stepNo}. Smoke test the live URL: \`curl -sS -m 30 -o /tmp/smoke.html -w "%{http_code}" ${publicUrl}\`. The HTTP code MUST be 200 and /tmp/smoke.html MUST contain \`<div id="root"\` or a \`<script\` tag (a real SPA shell, not an S3/CloudFront error or the homepage fallthrough). If both hold, the smoke passed; otherwise it failed.`;
+  return `${stepNo}. Smoke test the live URL: \`curl -sS -m 30 -o /tmp/smoke.html -w "%{http_code}" ${publicUrl}\`. The HTTP code MUST be 200 and /tmp/smoke.html MUST contain \`<div id="root"\` or a \`<script\` tag (a real SPA shell, not an S3/CloudFront error or the homepage fallthrough). If both hold, the smoke passed; otherwise it failed. When it fails, set SMOKE_DETAIL to a precise one-line reason — and IMPORTANTLY, if the bundle synced to S3 fine but the URL returns 403/AccessDenied/an S3 or CloudFront error, say so explicitly (this is an ENVIRONMENT/origin-permission problem, NOT a bad build).`;
 }
 
 /** Archive instruction fragment — snapshot the now-live bundle for rollback. */
@@ -119,7 +125,9 @@ export function buildPromotePipeline(
   );
   if (opts.smoke) lines.push(smokeFragment(n++, dst.publicUrl));
 
-  const smokeLine = opts.smoke ? `\nSMOKE_STATUS: <pass|fail>` : '';
+  const smokeLine = opts.smoke
+    ? `\nSMOKE_STATUS: <pass|fail>\nSMOKE_DETAIL: <one line; on fail, name the cause — and flag 403/AccessDenied/origin/CDN as an environment issue, not a build defect>`
+    : '';
 
   return {
     maxIterations: 1,

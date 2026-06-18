@@ -89,6 +89,14 @@ export interface DeployEnvironmentStatus {
   activeJobId?: string;
   /** Smoke-test outcome read from that job's variables.SMOKE_STATUS. undefined = none/unknown. */
   smokeStatus?: 'pass' | 'fail';
+  /** One-line smoke explanation (SMOKE_DETAIL / DEPLOY_DETAILS), surfaced verbatim. */
+  smokeDetail?: string;
+  /** A failed smoke that looks like an ENVIRONMENT/origin issue (403/CDN), not a build defect. */
+  smokeInfra?: boolean;
+  /** ISO timestamp this rung's latest deploy finished (or started, if running). */
+  deployedAt?: string;
+  /** Wall-clock seconds for this rung's latest deploy job. */
+  durationSec?: number;
 }
 
 export interface DeployReport {
