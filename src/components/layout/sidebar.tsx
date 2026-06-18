@@ -42,6 +42,7 @@ const sections: NavSection[] = [
       { href: '/debates', label: 'Debates', icon: '💬' },
       { href: '/migrate', label: 'Migrate', icon: '🚚' },
       { href: '/labs', label: 'Labs', icon: '🧪' },
+      { href: '/labs/skills', label: 'Skills', icon: '🧩' },
     ],
   },
 ];

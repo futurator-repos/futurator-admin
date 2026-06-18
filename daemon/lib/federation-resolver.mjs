@@ -20,6 +20,8 @@
  * caller (SKILL-SCOUT) knows to require operator confirmation.
  */
 
+import { isInstallable, installBlockReason } from './skill-trust.mjs';
+
 const INDEX_TTL_MS = 60 * 60 * 1000; // 1 hour
 const FETCH_TIMEOUT_MS = 15_000;
 
@@ -154,12 +156,19 @@ export function createFederationResolver(federationCache, options = {}) {
       const entry = index.skills.get(query.skillName);
       if (!entry) continue;
       if (query.kind && entry.kind && entry.kind !== query.kind) continue;
+      const autoTrust = source['auto-trust'] === true;
+      // Skills Institution Story 4.2 — ADVISORY trust annotation. Resolve is the
+      // discovery API (it still surfaces non-trusted matches so the scout can
+      // ask for operator confirmation); the HARD install gate lives in
+      // vendor-skills. `installable`/`blockReason` let callers prefer trusted.
       return {
         source: source.id,
         skillName: query.skillName,
         entry,
         priority: source.priority,
-        autoTrust: source['auto-trust'] === true,
+        autoTrust,
+        installable: isInstallable(entry, { autoTrust }),
+        blockReason: installBlockReason(entry, { autoTrust }),
       };
     }
     return null;

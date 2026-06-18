@@ -26,8 +26,14 @@ import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join, relative, extname, sep } from 'node:path';
 import { execSync } from 'node:child_process';
 
-/** Pack format version. Bump when the serializer's output shape changes. */
-export const STORY_CONTEXT_PACK_VERSION = 1;
+/**
+ * Pack format version. Bump when the serializer's output shape changes.
+ * v2 (Concept v2 E3.4): story spec now renders the user-story triple, BDD
+ * Given/When/Then ACs with a `verify` tag, an AC-mapped Tasks checklist, and a
+ * Technical notes block. The reserved probe/seam section (E8) slots in without a
+ * further bump. The real invariant is intra-story cross-role identity.
+ */
+export const STORY_CONTEXT_PACK_VERSION = 2;
 
 /**
  * Default `<run_command>` when neither plan.runCommand nor opts.runCommand
@@ -63,6 +69,11 @@ const HEAD_LINES_FULL = 300;
 const HEAD_LINES_TRUNCATED = 100;
 const PLAN_MD_REL = 'plan.md';
 const KNOWLEDGE_INDEX_REL = 'knowledge/index.md';
+// Concept v2 (E7.7) — upstream artifacts live here, written by the artifact-gen
+// jobs (E7.4/E12). Each `<source>.md` ships a `<source>.sections.json` sidecar
+// (E4.1 locked manifest) that lets us inline the EXACT cited section.
+const CONCEPT_DIR_REL = 'concept';
+const CITED_DOC_SOURCES = ['prd', 'architecture', 'ux'];
 const RECENT_DIFFS_LIMIT = 20;
 const PREV_SUMMARIES_LIMIT = 5;
 const PREV_SUMMARY_MAX_CHARS = 4000;
@@ -191,10 +202,15 @@ export async function buildStoryContextPack(input) {
 
   // Cache-stable size guard: serialize, measure, retry with shorter heads
   // if over budget. Cheap (one extra serialize on overrun).
+  // Concept v2 (E7.7) — inline the artifact sections this story cites. Part of
+  // the non-trimmable floor (E4.3): the contract is never dropped to fit budget.
+  const citedSections = resolveCitedSections(projectDir, storySpec.references);
+
   const draftPack = {
     version: STORY_CONTEXT_PACK_VERSION,
     planMd,
     storySpec,
+    citedSections,
     projectTree,
     fileDigests,
     existingTests,
@@ -238,6 +254,21 @@ export async function buildStoryContextPack(input) {
     }
   }
 
+  // Concept v2 (E4.3 / W3) — priority waterfall: the story spec + any inlined
+  // cited artifact sections (references[], wired in E7.7) are a NON-TRIMMABLE
+  // FLOOR; file digests are the trimmable remainder above. If, after dropping
+  // every digest, the floor ALONE still exceeds the budget, we do NOT silently
+  // ship an over-budget pack (which would truncate the contract the DEV agent
+  // relies on) — we emit a distinct, blocking-grade `references-over-budget`
+  // signal so the caller surfaces it instead of dropping the contract.
+  if (serialized.length > budgetBytes) {
+    const overByTokens = Math.ceil((serialized.length - budgetBytes) / APPROX_BYTES_PER_TOKEN);
+    warn(
+      'references-over-budget',
+      `story-spec + cited-section floor exceeds ${tokenBudget} tokens by ~${overByTokens}; not silently truncating the contract`,
+    );
+  }
+
   draftPack.meta.truncated = truncated.slice();
   return draftPack;
 }
@@ -265,18 +296,72 @@ export function serializeStoryContextPack(pack) {
 
   out.push('## Story spec');
   out.push(`**${story.title || '(untitled)'}**`);
+  // Concept v2 (E3.3) — user-story triple as a one-liner header.
+  if (
+    story.userStory &&
+    (story.userStory.role || story.userStory.action || story.userStory.benefit)
+  ) {
+    out.push('');
+    out.push(
+      `_As a ${story.userStory.role}, I want ${story.userStory.action}, so that ${story.userStory.benefit}._`,
+    );
+  }
   if (story.description) {
     out.push('');
     out.push(story.description.trim());
+  }
+  // Concept v2 (E3.3) — technical notes block.
+  if (story.technicalNotes) {
+    out.push('');
+    out.push('### Technical notes');
+    out.push(story.technicalNotes.trim());
   }
   if (Array.isArray(story.acceptanceCriteria) && story.acceptanceCriteria.length > 0) {
     out.push('');
     out.push('### Acceptance criteria');
     for (const ac of story.acceptanceCriteria) {
       const flag = ac.needsBrowser ? ' [needs_browser=true]' : '';
-      out.push(`- ${ac.id || '?'}: ${ac.text}${flag}`);
+      // Concept v2 (E3.3) — verify tag; manual carries its reason.
+      const verifyTag = ac.verify
+        ? ` [verify=${ac.verify}${ac.verify === 'manual' && ac.manualReason ? `:${ac.manualReason}` : ''}]`
+        : '';
+      if (ac.given || ac.when || ac.then) {
+        // BDD form — fall back to `text` only when no triple is present.
+        out.push(`- ${ac.id || '?'}${verifyTag}${flag}`);
+        if (ac.given) out.push(`  - Given ${ac.given}`);
+        if (ac.when) out.push(`  - When ${ac.when}`);
+        if (ac.then) out.push(`  - Then ${ac.then}`);
+      } else {
+        out.push(`- ${ac.id || '?'}: ${ac.text}${verifyTag}${flag}`);
+      }
     }
   }
+  // Concept v2 (E3.3) — AC-mapped task checklist.
+  if (Array.isArray(story.tasks) && story.tasks.length > 0) {
+    out.push('');
+    out.push('### Tasks');
+    for (const t of story.tasks) {
+      const refs = Array.isArray(t.acRefs) && t.acRefs.length > 0 ? ` (${t.acRefs.join(', ')})` : '';
+      out.push(`- [${t.done ? 'x' : ' '}] ${t.id}: ${t.text}${refs}`);
+    }
+  }
+  // Concept v2 (E7.7) — inlined cited artifact sections (the consistency
+  // contract the DEV agent is held to). Rendered verbatim from the artifact's
+  // manifest slice; part of the non-trimmable floor.
+  if (Array.isArray(pack.citedSections) && pack.citedSections.length > 0) {
+    out.push('');
+    out.push('### Cited contract sections');
+    for (const c of pack.citedSections) {
+      out.push(`#### ${c.source} › ${c.title}`);
+      out.push('```markdown');
+      out.push(String(c.text || '').trimEnd());
+      out.push('```');
+    }
+  }
+  // Concept v2 (E3.5) — RESERVED probe/seam slot. Epic E8 (VQA H9) inserts the
+  // dedicated, sorted probe/seam section HERE, inside the serializer and before
+  // the appended <ground_truth> block (context-pack-resolver), so the locked
+  // section order holds without a further version bump.
   if (Array.isArray(story.touchPoints) && story.touchPoints.length > 0) {
     out.push('');
     out.push('### Touch points');
@@ -459,6 +544,151 @@ function readFileIfExists(absPath) {
   }
 }
 
+/**
+ * Concept v2 (E7.7) — resolve a story's `references[]` into inlined artifact
+ * sections so the DEV agent reads the CONTRACT, not a path. For each doc-source
+ * reference, read `concept/<source>.md` + `<source>.sections.json` and slice the
+ * cited section by its manifest line range (the E4.1 resolve, reimplemented here
+ * because this `.mjs` can't import the `.ts` at runtime — the format is locked).
+ *
+ * `harness` refs are skipped (resolved by VQA's probe compiler, E8). A cited
+ * artifact missing from disk is skipped gracefully — the §8 gate (E9.3) is what
+ * blocks a dangling reference; the pack degrades rather than throws.
+ */
+export function resolveCitedSections(projectDir, references) {
+  const out = [];
+  const cache = new Map(); // source -> { md, manifest } | null
+  for (const ref of references || []) {
+    if (!ref || ref.source === 'harness') continue;
+    if (!CITED_DOC_SOURCES.includes(ref.source)) continue;
+    if (!cache.has(ref.source)) {
+      const md = readFileIfExists(join(projectDir, CONCEPT_DIR_REL, `${ref.source}.md`));
+      const raw = readFileIfExists(join(projectDir, CONCEPT_DIR_REL, `${ref.source}.sections.json`));
+      let manifest = null;
+      if (raw) {
+        try {
+          manifest = JSON.parse(raw);
+        } catch {
+          manifest = null;
+        }
+      }
+      cache.set(ref.source, md && manifest ? { md, manifest } : null);
+    }
+    const art = cache.get(ref.source);
+    if (!art) continue;
+    const entry = (art.manifest.sections || []).find((s) => s && s.id === ref.section);
+    if (!entry) continue;
+    const lines = art.md.split('\n');
+    const text = lines.slice(entry.lineStart - 1, entry.lineEnd).join('\n');
+    out.push({ source: ref.source, section: ref.section, title: entry.title || ref.section, text });
+  }
+  return out;
+}
+
+/**
+ * Concept v2 (E3 / Story 3.2a) — assemble the inlined upstream artifact bodies
+ * for a generator's `{{PRIOR_ARTIFACTS}}` placeholder. The Lambda CANNOT read
+ * EC2 disk, so it enqueues ux-gen/arch-gen with the placeholder and the daemon
+ * fills it here from the APPROVED on-disk docs (the same `.mjs/.ts` boundary as
+ * `resolveCitedSections`).
+ *
+ * The chain is prd → ux → architecture. The upstreams for a generator are every
+ * artifact earlier in the chain that exists on disk:
+ *   - ux-gen  → prd
+ *   - arch-gen → prd (+ ux when uiBearing, i.e. ux-spec.md exists)
+ *
+ * Returns inlined markdown (section bodies), never paths. Missing upstreams
+ * degrade to a short skeleton instruction so the generator still produces a
+ * valid doc (defensive — shouldn't happen post-gate).
+ *
+ * @param {string} projectDir
+ * @param {'prd'|'ux'|'architecture'} currentKind
+ * @returns {string}
+ */
+const CONCEPT_CHAIN_ORDER = ['prd', 'ux', 'architecture'];
+
+export function loadPriorArtifacts(projectDir, currentKind) {
+  const idx = CONCEPT_CHAIN_ORDER.indexOf(currentKind);
+  const upstreamKinds = idx > 0 ? CONCEPT_CHAIN_ORDER.slice(0, idx) : [];
+  const blocks = [];
+  for (const kind of upstreamKinds) {
+    const md = readFileIfExists(join(projectDir, CONCEPT_DIR_REL, `${kind}.md`));
+    if (!md || !md.trim()) continue;
+    const label = kind === 'prd' ? 'PRD' : kind === 'ux' ? 'UX Specification' : 'Architecture';
+    blocks.push(`### ${label} (approved upstream — stay consistent; cite, do not contradict)\n\n${md.trim()}`);
+  }
+  if (blocks.length === 0) {
+    return 'No approved upstream artifacts are available on disk; produce a valid document from the intent and stay within a reasonable MVP scope.';
+  }
+  return blocks.join('\n\n---\n\n');
+}
+
+/**
+ * Concept v2 (E5.2) — read the closed-set citable section ids from the approved
+ * concept manifests on disk and format them for the pm-plan `{{CITABLE_SECTIONS}}`
+ * placeholder. The Lambda can't read EC2 disk, so it enqueues the placeholder and
+ * the daemon fills the REAL, current-rev ids here (closing the E7.8 gap).
+ *
+ * Returns lines like `prd: fr-3, fr-4` for each present source (sorted source
+ * keys, manifest-order ids). When no manifests exist (prototype/legacy) it
+ * returns the defer-references instruction so the PM emits no citations.
+ *
+ * @param {string} projectDir
+ * @returns {string}
+ */
+export function loadCitableSections(projectDir) {
+  const lines = [];
+  for (const source of CITED_DOC_SOURCES.slice().sort()) {
+    const raw = readFileIfExists(join(projectDir, CONCEPT_DIR_REL, `${source}.sections.json`));
+    if (!raw) continue;
+    let manifest;
+    try {
+      manifest = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const ids = (manifest.sections || []).map((s) => s && s.id).filter(Boolean);
+    if (ids.length > 0) lines.push(`${source}: ${ids.join(', ')}`);
+  }
+  if (lines.length === 0) {
+    return 'No upstream artifact manifests are available — do NOT emit references[] for this plan.';
+  }
+  return lines.join('\n      ');
+}
+
+/**
+ * Concept v2 (Round 1.1) — inline ALL approved concept docs (PRD + UX +
+ * Architecture, in chain order) for the pm-plan's `{{PRIOR_ARTIFACTS}}`
+ * placeholder. Unlike loadPriorArtifacts (which returns the UPSTREAMS of a given
+ * generator), the planner consumes the WHOLE approved spec set — it shards them
+ * into epics/stories. Missing docs are skipped; empty set degrades to a short
+ * instruction so the PM still produces a valid plan from the intent.
+ *
+ * @param {string} projectDir
+ * @returns {string}
+ */
+export function loadAllConceptArtifacts(projectDir) {
+  const blocks = [];
+  for (const kind of CONCEPT_CHAIN_ORDER) {
+    const md = readFileIfExists(join(projectDir, CONCEPT_DIR_REL, `${kind}.md`));
+    if (!md || !md.trim()) continue;
+    const label = kind === 'prd' ? 'PRD' : kind === 'ux' ? 'UX Specification' : 'Architecture';
+    blocks.push(`### ${label} (approved — shard this into epics/stories; cite, do not contradict)\n\n${md.trim()}`);
+  }
+  if (blocks.length === 0) {
+    return 'No approved concept documents are available on disk; plan from the intent within a reasonable MVP scope.';
+  }
+  return blocks.join('\n\n---\n\n');
+}
+
+/** Map a concept generator step id → the artifact kind it produces. */
+export function conceptKindForStepId(stepId) {
+  if (stepId === 'prd-gen') return 'prd';
+  if (stepId === 'ux-gen') return 'ux';
+  if (stepId === 'arch-gen') return 'architecture';
+  return null;
+}
+
 function buildProjectTree(projectDir, maxDepth) {
   const lines = [];
   const root = projectDir.replace(/\/+$/, '');
@@ -627,13 +857,24 @@ function normalizeIsoOrNull(value) {
 
 function normalizeStorySpec(story) {
   const ac = Array.isArray(story.criteria)
-    ? story.criteria.map((c, i) => ({
-        id: c.id || `AC-${i + 1}`,
-        text: String(c.text || '').trim(),
-        needsBrowser: !!c.needsBrowser,
-      }))
+    ? story.criteria.map((c, i) => {
+        const out = {
+          id: c.id || `AC-${i + 1}`,
+          text: String(c.text || '').trim(),
+          needsBrowser: !!c.needsBrowser,
+        };
+        // Concept v2 (E3.2) — carry BDD + verify intent when present (fixed key
+        // order; present-only so the serialization stays byte-stable).
+        if (c.given != null) out.given = String(c.given);
+        if (c.when != null) out.when = String(c.when);
+        if (c.then != null) out.then = String(c.then);
+        if (c.thenObservable != null) out.thenObservable = String(c.thenObservable);
+        if (c.verify != null) out.verify = c.verify;
+        if (c.manualReason != null) out.manualReason = c.manualReason;
+        return out;
+      })
     : [];
-  return {
+  const spec = {
     id: story.storyId,
     title: story.title || '',
     description: story.description || '',
@@ -642,4 +883,33 @@ function normalizeStorySpec(story) {
     hasBrowserTests: !!story.hasBrowserTests,
     wave: typeof story.wave === 'number' ? story.wave : null,
   };
+  // Concept v2 (E3.2) — BMAD-grade story fields, carried only when present so
+  // legacy/prototype stories serialize byte-identically to before.
+  if (story.userStory && typeof story.userStory === 'object') {
+    spec.userStory = {
+      role: String(story.userStory.role || ''),
+      action: String(story.userStory.action || ''),
+      benefit: String(story.userStory.benefit || ''),
+    };
+  }
+  if (story.technicalNotes != null) spec.technicalNotes = String(story.technicalNotes);
+  if (Array.isArray(story.tasks)) {
+    spec.tasks = story.tasks.map((t, i) => {
+      const task = {
+        id: t.id || `T${i + 1}`,
+        text: String(t.text || ''),
+        acRefs: Array.isArray(t.acRefs) ? t.acRefs.slice() : [],
+      };
+      if (t.done != null) task.done = !!t.done;
+      return task;
+    });
+  }
+  if (Array.isArray(story.references)) {
+    spec.references = story.references.map((r) => {
+      const ref = { source: r.source, section: String(r.section || '') };
+      if (r.note != null) ref.note = String(r.note);
+      return ref;
+    });
+  }
+  return spec;
 }

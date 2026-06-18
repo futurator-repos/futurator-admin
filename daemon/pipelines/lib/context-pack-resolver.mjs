@@ -14,12 +14,15 @@
  * block this one time.
  */
 
+import { basename } from 'path';
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import {
   buildStoryContextPack,
   serializeStoryContextPack,
   DEFAULT_RUN_COMMAND,
+  STORY_CONTEXT_PACK_VERSION,
 } from './story-context-pack.mjs';
+import { appendGroundTruth } from './ground-truth-context.mjs';
 import {
   validateProjectContextPack,
   formatValidationErrors,
@@ -168,11 +171,22 @@ export async function resolveAndSerializeContextPack(input) {
     prevStoriesInWave,
     projectDir,
     waveStartTime,
+    projectId: basename(projectDir),
+    storyId,
     log,
   });
 }
 
-async function runAssembler({ plan, story, prevStoriesInWave, projectDir, waveStartTime, log }) {
+async function runAssembler({
+  plan,
+  story,
+  prevStoriesInWave,
+  projectDir,
+  waveStartTime,
+  projectId,
+  storyId,
+  log,
+}) {
   try {
     const pack = await buildStoryContextPack({
       plan,
@@ -197,7 +211,22 @@ async function runAssembler({ plan, story, prevStoriesInWave, projectDir, waveSt
       return { ...stub, validationErrors: validation.errors };
     }
 
-    return { body: serializeStoryContextPack(pack), pack };
+    // Concept v2 (E3.5) — DEV-context section order is now LOCKED across three
+    // writers so none clobbers another and the prompt stays cache-stable:
+    //   1. serializeStoryContextPack(pack) — story spec incl. the BMAD-grade
+    //      fields (E3.3: user-story, BDD ACs, tasks, technical notes) and the
+    //      reserved probe/seam slot (E8 inserts there, inside the serializer);
+    //   2. appendGroundTruth(...) — system-graph blast-radius <ground_truth>,
+    //      appended AFTER the pack body (Story 4.4), additive + non-blocking.
+    // Both halves are deterministic; on a cold/absent Memgraph the append is a
+    // no-op and the AST facts already in the body remain the fallback.
+    const body = await appendGroundTruth(serializeStoryContextPack(pack), {
+      touchPoints: story.touchPoints,
+      projectId,
+      storyId,
+      log,
+    });
+    return { body, pack };
   } catch (err) {
     log.warn?.(`context-pack-resolver: assembler threw: ${err.message}`);
     return stubFailure(`assembler error: ${err.message}`);
@@ -209,7 +238,7 @@ function stubFailure(reason) {
   // output. Carries the reason in a comment so the operator can see why
   // the pack was empty when reading the prompt logs.
   const body = [
-    '<!-- story-context-pack v1 -->',
+    `<!-- story-context-pack v${STORY_CONTEXT_PACK_VERSION} -->`,
     '<!-- assembly skipped: ' + reason + ' -->',
     '',
     '## Run command',

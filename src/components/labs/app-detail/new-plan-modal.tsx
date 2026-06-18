@@ -31,6 +31,10 @@ export function NewPlanModal({
   const [intent, setIntent] = useState('');
   const [rigor, setRigor] = useState<'prototype' | 'mvp' | 'production'>('mvp');
   const [slug, setSlug] = useState('');
+  // YOLO — default ON. On → the whole Concept chain auto-approves (autopilot):
+  // Router → PRD → UX → Architecture → Plan run hands-off, no per-doc Approve.
+  // Off → interactive, the operator approves each spec before the chain advances.
+  const [yolo, setYolo] = useState(true);
 
   // PR-10 #1 — slug is optional. When empty, server generates a unique
   // `${appId}-${kind}-${shortHash}` so multi-plan-per-app stops colliding.
@@ -38,8 +42,7 @@ export function NewPlanModal({
   const slugPattern = /^[a-z][a-z0-9-]{2,40}$/;
   const slugValid = slug.length === 0 || slugPattern.test(slug);
 
-  const canSubmit =
-    intent.length >= 10 && intent.length <= 2000 && slugValid && !create.isPending;
+  const canSubmit = intent.length >= 10 && intent.length <= 2000 && slugValid && !create.isPending;
 
   const submit = () => {
     if (!canSubmit) return;
@@ -48,6 +51,8 @@ export function NewPlanModal({
         kind: hasExistingPlans ? 'change' : 'initial',
         intent,
         rigor,
+        yoloMode: yolo,
+        conceptInteraction: yolo ? 'autopilot' : 'interactive',
         ...(slug ? { name: slug } : {}),
       },
       {
@@ -55,6 +60,7 @@ export function NewPlanModal({
           setIntent('');
           setRigor('mvp');
           setSlug('');
+          setYolo(true);
           onOpenChange(false);
           // PR-9: forward pmJobId to the dashboard so it auto-polls + applies
           // the PM output as soon as the agent finishes — operator no longer
@@ -78,7 +84,7 @@ export function NewPlanModal({
           </DialogTitle>
           <DialogDescription>
             {hasExistingPlans
-              ? "What do you want to change in this iteration?"
+              ? 'What do you want to change in this iteration?'
               : 'Describe what you want to build.'}
           </DialogDescription>
         </DialogHeader>
@@ -104,11 +110,7 @@ export function NewPlanModal({
             type="text"
             value={slug}
             onChange={(e) => setSlug(e.target.value.toLowerCase())}
-            placeholder={
-              hasExistingPlans
-                ? `e.g., ${appId}-mobile-pass`
-                : `e.g., ${appId}-initial`
-            }
+            placeholder={hasExistingPlans ? `e.g., ${appId}-mobile-pass` : `e.g., ${appId}-initial`}
             className="w-full rounded border border-input bg-transparent px-3 py-2 text-sm font-mono focus:border-foreground focus:outline-none disabled:opacity-50"
             disabled={create.isPending}
           />
@@ -173,6 +175,28 @@ export function NewPlanModal({
             </label>
           </div>
         </div>
+
+        {/* YOLO — auto-pilot the Concept chain. Default ON: the spec agents
+            (PRD → UX → Architecture) run and auto-approve end-to-end, then the
+            plan is drafted. Off pauses for your Approve on each document. */}
+        <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-md border p-3 hover:bg-accent has-[:checked]:border-foreground">
+          <input
+            type="checkbox"
+            checked={yolo}
+            onChange={(e) => setYolo(e.target.checked)}
+            className="mt-1"
+            disabled={create.isPending}
+          />
+          <div className="text-sm">
+            <div className="font-medium">YOLO — auto-approve the concept</div>
+            <div className="text-xs text-muted-foreground">
+              {yolo
+                ? 'On — the spec agents (PRD → UX → Architecture → Plan) run hands-off and auto-approve. Fastest path to a plan.'
+                : 'Off — interactive. You review and Approve each document before the chain advances.'}
+            </div>
+          </div>
+        </label>
+
         {create.error && (
           <p className="text-sm text-destructive">{(create.error as Error).message}</p>
         )}

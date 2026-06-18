@@ -387,6 +387,47 @@ export default $config({
       },
     });
 
+    // ── Epic 6 — Story 6.5: consent-gated PROPAGATOR proposals ──
+    // Substrate-targeted port-briefs filed as PROPOSED sibling stories awaiting
+    // operator approve/reject. PK = proposalId. Low volume (a handful per wave
+    // gate). PITR enabled — losing an approved propagation decision would
+    // silently re-brief the same change.
+    const propagatorProposalsTable = new sst.aws.Dynamo('PropagatorProposalsTable', {
+      fields: { proposalId: 'string' },
+      primaryIndex: { hashKey: 'proposalId' },
+      transform: {
+        table: {
+          name: 'futurator-propagator-proposals',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ── Skills Institution — Story 3.1: curation Inbox ──
+    // Candidate skills that passed through the gate (merge→scan→label→version)
+    // awaiting operator ratify/reject. PK = proposalId (ULID). GSI
+    // status-createdAt-index so the inbox's "pending, newest first" view is a
+    // Query (a bulk-acquisition batch can fan to hundreds of rows without making
+    // the inbox load O(table)). PITR enabled — losing a ratified decision would
+    // silently regress the curated registry.
+    const skillProposalsTable = new sst.aws.Dynamo('SkillProposalsTable', {
+      fields: { proposalId: 'string', status: 'string', createdAt: 'string' },
+      primaryIndex: { hashKey: 'proposalId' },
+      globalIndexes: {
+        'status-createdAt-index': { hashKey: 'status', rangeKey: 'createdAt' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-skill-proposals',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── Pipeline v2 Phase 3 — Story 3-E-3-1 (PR-76): Reflection Inbox ──
     // REFLECTOR proposals stored per-project. PK = projectSlug (Query for
     // labs UI per-project view); SK = id (ULID-shape, sort-friendly).
@@ -405,6 +446,47 @@ export default $config({
           tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
         },
       },
+    });
+
+    // ── Plan Retrospect — per-plan Reality Check scorecards (plan-retrospect-spec §5) ──
+    // One row per (planId, <stage>#<rubricVersion>). Re-scoring under a newer
+    // rubric writes a NEW row (different SK), preserving the prior verdict — never
+    // overwrite a verdict under a changed ruler. PITR on: verdicts are durable history.
+    const scorecardsTable = new sst.aws.Dynamo('ScorecardsTable', {
+      fields: { planId: 'string', scorecardKey: 'string' },
+      primaryIndex: { hashKey: 'planId', rangeKey: 'scorecardKey' },
+      transform: {
+        table: {
+          name: 'futurator-scorecards',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ── F22 — dev/staging promotion-ladder subdomains (deployment-v2.5.md §14) ──
+    // Two static-hosting shells the deploy/promote agents `aws s3 sync` INTO
+    // (NOT StaticSite — that would purge synced apps every deploy). Each fronted
+    // by its own CloudFront + ACM cert + Route53 record (shared zone, matched by
+    // name) via Router. `access:'cloudfront'` grants the distribution OAC to the
+    // bucket. Setting the env vars below flips `deploy-targets.ts` from fallback
+    // prefix mode to true build-once byte-copy promotion across dev→staging→prod.
+    const devEnvBucket = new sst.aws.Bucket('DevEnvBucket', {
+      access: 'cloudfront',
+      transform: { bucket: { bucketName: 'futurator-admin-dev-env' } },
+    });
+    const stagingEnvBucket = new sst.aws.Bucket('StagingEnvBucket', {
+      access: 'cloudfront',
+      transform: { bucket: { bucketName: 'futurator-admin-staging-env' } },
+    });
+    const devRouter = new sst.aws.Router('DevRouter', {
+      domain: 'dev.futurator.ai',
+      routes: { '/*': { bucket: devEnvBucket } },
+    });
+    const stagingRouter = new sst.aws.Router('StagingRouter', {
+      domain: 'staging.futurator.ai',
+      routes: { '/*': { bucket: stagingEnvBucket } },
     });
 
     // ── Pipeline v2 — Phase 1 (Story 1.1.2) — GitHub PAT secret ──
@@ -842,6 +924,7 @@ export default $config({
         usersTable,
         alertsTable,
         agentJobsTable,
+        propagatorProposalsTable,
         agentEventsTable,
         epicWorkflowsTable,
         projectRegistryTable,
@@ -863,6 +946,8 @@ export default $config({
         fixCyclesTable,
         remediationPoliciesTable,
         pushSubscriptionsTable,
+        skillProposalsTable,
+        scorecardsTable,
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
@@ -876,6 +961,11 @@ export default $config({
         USERS_TABLE: usersTable.name,
         ALERTS_TABLE: alertsTable.name,
         AGENT_JOBS_TABLE: agentJobsTable.name,
+        // Epic 6 — Story 6.5: consent-gated PROPAGATOR proposals queue.
+        PROPAGATOR_PROPOSALS_TABLE: propagatorProposalsTable.name,
+        // Seam B — sibling pipeline registry (JSON map sibling→{workingDir,pipeline}).
+        // Empty by default: approval is consent-only until a sibling is wired.
+        PROPAGATOR_SIBLING_PIPELINES: process.env.PROPAGATOR_SIBLING_PIPELINES ?? '{}',
         AGENT_EVENTS_TABLE: agentEventsTable.name,
         EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
         PROJECT_REGISTRY_TABLE: projectRegistryTable.name,
@@ -890,6 +980,14 @@ export default $config({
         ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
         WAVE_CONFLICTS_TABLE: waveConflictsTable.name,
         REFLECTIONS_TABLE: reflectionsTable.name,
+        // Plan Retrospect — Reality Check scorecards (plan-retrospect-spec §5).
+        SCORECARDS_TABLE: scorecardsTable.name,
+        // F22 — dev/staging subdomain hosting (deployment-v2.5.md §14). Presence
+        // flips deploy-targets.ts to byte-copy promotion; absence = fallback.
+        DEV_ENV_BUCKET: devEnvBucket.name,
+        DEV_ENV_CF_ID: devRouter.distributionID,
+        STAGING_ENV_BUCKET: stagingEnvBucket.name,
+        STAGING_ENV_CF_ID: stagingRouter.distributionID,
         AGENT_SESSIONS_TABLE: agentSessionsTable.name,
         AGENT_CONVERSATIONS_TABLE: agentConversationsTable.name,
         TIMING_SUMMARY_TABLE: timingSummaryTable.name,
@@ -912,6 +1010,8 @@ export default $config({
         REMEDIATION_POLICIES_TABLE: remediationPoliciesTable.name,
         // 2026-05-27 PR D.f — PWA push subscriptions.
         PUSH_SUBSCRIPTIONS_TABLE: pushSubscriptionsTable.name,
+        // Skills Institution — Story 3.1: curation Inbox proposals.
+        SKILL_PROPOSALS_TABLE: skillProposalsTable.name,
         PROJECTS_ROOT: '/home/ubuntu/projects',
         BMAD_VERSION: '6.3.0',
         BMAD_AGENTS_SOURCE: '/home/ubuntu/bmad-agents-source/bmad/agents',
@@ -1250,6 +1350,12 @@ export default $config({
           APPS_TABLE: appsTable.name,
           ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
           TIMING_SUMMARY_TABLE: timingSummaryTable.name,
+          // F22 — wave-completion-check calls resolveDeployTarget too (it
+          // enqueues the dev-deploy), so it needs the same subdomain coords.
+          DEV_ENV_BUCKET: devEnvBucket.name,
+          DEV_ENV_CF_ID: devRouter.distributionID,
+          STAGING_ENV_BUCKET: stagingEnvBucket.name,
+          STAGING_ENV_CF_ID: stagingRouter.distributionID,
         },
       },
     });

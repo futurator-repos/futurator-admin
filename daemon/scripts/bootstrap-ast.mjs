@@ -132,6 +132,135 @@ function spawnCapture(cmd, args, opts = {}) {
   });
 }
 
+/**
+ * Same as spawnCapture, but pipes `input` to the child's stdin (used to hand a
+ * newline-delimited file list to service-extract via --stdin without hitting
+ * argv length limits).
+ */
+function spawnCaptureStdin(cmd, args, input, opts = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      ...opts,
+    });
+    const stdoutChunks = [];
+    child.stdout.on('data', (b) => stdoutChunks.push(b));
+    child.stderr.on('data', (b) => process.stderr.write(b));
+    child.on('close', (code) => {
+      resolve({ code: code ?? 0, stdout: Buffer.concat(stdoutChunks).toString('utf-8') });
+    });
+    child.stdin.write(input);
+    child.stdin.end();
+  });
+}
+
+/**
+ * Wave-gate slot (Pipeline v3 / Epic 1): run the system-graph extractors
+ * alongside the AST scan, writing one `.mycelium/<name>-facts.json` per
+ * extractor for graph-sync's `processSystemGraphFacts` to ingest. Each extractor
+ * is best-effort and guarded by existence of its script + input, so partial
+ * Epic-1 rollouts (an extractor not yet present) degrade gracefully rather than
+ * aborting the bootstrap. `scanFiles` is the file list from the AST scan, reused
+ * so service-extract scans the same set.
+ */
+async function runSystemGraphExtractors(args, myceliumDir, scanFiles) {
+  const writeFile = (await import('node:fs/promises')).writeFile;
+
+  // infra-extract → sst.config.ts
+  const infraScript = join(__dirname, 'infra-extract.mjs');
+  if (existsSync(infraScript) && existsSync(join(args.root, 'sst.config.ts'))) {
+    log('Running infra-extract over sst.config.ts…');
+    const { stdout } = await spawnCapture(
+      process.execPath,
+      [infraScript, '--root', args.root, '--config', 'sst.config.ts'],
+      { env: process.env },
+    );
+    if (stdout.trim()) {
+      await writeFile(join(myceliumDir, 'infra-facts.json'), stdout, 'utf-8');
+      log('Wrote .mycelium/infra-facts.json');
+    }
+  }
+
+  // route-extract → functions/api/index.ts (the Hono app)
+  const routeScript = join(__dirname, 'route-extract.mjs');
+  const appFile = 'functions/api/index.ts';
+  if (existsSync(routeScript) && existsSync(join(args.root, appFile))) {
+    log('Running route-extract over the Hono app…');
+    const { stdout } = await spawnCapture(
+      process.execPath,
+      [routeScript, '--root', args.root, '--app', appFile, '--lambda', 'infra/lambda/Api'],
+      { env: process.env },
+    );
+    if (stdout.trim()) {
+      await writeFile(join(myceliumDir, 'route-facts.json'), stdout, 'utf-8');
+      log('Wrote .mycelium/route-facts.json');
+    }
+  }
+
+  // service-extract → same file set as the AST scan (piped via stdin)
+  const serviceScript = join(__dirname, 'service-extract.mjs');
+  if (existsSync(serviceScript) && scanFiles.length > 0) {
+    log('Running service-extract over scanned files…');
+    const { stdout } = await spawnCaptureStdin(
+      process.execPath,
+      [serviceScript, '--root', args.root, '--stdin'],
+      scanFiles.join('\n'),
+      { env: process.env },
+    );
+    if (stdout.trim()) {
+      await writeFile(join(myceliumDir, 'service-facts.json'), stdout, 'utf-8');
+      log('Wrote .mycelium/service-facts.json');
+    }
+  }
+
+  // api-calls scan → frontend api-client request paths (CALLS_ENDPOINT, W1).
+  // In-process (pure lib) rather than a subprocess — it's a regex scan.
+  if (scanFiles.length > 0) {
+    const { readFile } = await import('node:fs/promises');
+    const { extractApiCalls } = await import('./lib/system-graph-ingest.mjs');
+    const calls = [];
+    for (const rel of scanFiles) {
+      if (!/\.(ts|tsx|js|jsx|mjs)$/.test(rel)) continue;
+      try {
+        const src = await readFile(join(args.root, rel), 'utf-8');
+        calls.push(...extractApiCalls(rel, src));
+      } catch {
+        /* unreadable — skip */
+      }
+    }
+    if (calls.length > 0) {
+      await writeFile(join(myceliumDir, 'api-calls.json'), JSON.stringify({ calls }, null, 2), 'utf-8');
+      log(`Wrote .mycelium/api-calls.json (${calls.length} calls)`);
+    }
+  }
+
+  // semantic-extract → cross-file CALLS via the TS compiler (ts-morph). Heavier
+  // than the syntactic passes, so it runs last; non-blocking.
+  const semanticScript = join(__dirname, 'semantic-extract.mjs');
+  if (existsSync(semanticScript)) {
+    log('Running semantic-extract (ts-morph cross-file CALLS)…');
+    try {
+      const { stdout } = await spawnCapture(
+        process.execPath,
+        [semanticScript, '--root', args.root],
+        { env: process.env },
+      );
+      if (stdout.trim()) {
+        await writeFile(join(myceliumDir, 'semantic-facts.json'), stdout, 'utf-8');
+        let n = '?';
+        try {
+          n = JSON.parse(stdout).edgeCount ?? '?';
+        } catch {
+          /* still wrote whatever it produced */
+        }
+        log(`Wrote .mycelium/semantic-facts.json (${n} cross-file CALLS edges)`);
+      }
+    } catch (err) {
+      log(`semantic-extract skipped (non-blocking): ${err.message}`);
+    }
+  }
+}
+
 async function main() {
   const args = parseArgs();
   if (args.help) {
@@ -203,6 +332,10 @@ async function main() {
   );
   log(`Wrote ${astFactsPath}`);
 
+  // ── Step 1b: System-graph extractors (Pipeline v3 / Epic 1 slot) ────
+  const scanFiles = (factsDoc.files || []).map((f) => f.path).filter(Boolean);
+  await runSystemGraphExtractors(args, myceliumDir, scanFiles);
+
   if (args.skipGraphSync) {
     log('Skipping graph-sync (--skip-graph-sync). Bootstrap stopping here.');
     return;
@@ -234,7 +367,15 @@ async function main() {
   const code = await spawnPiped(process.execPath, graphSyncArgs, {
     env: process.env,
   });
-  if (code !== 0) {
+  if (code === 3) {
+    // F16: exit 3 = genuine-orphan / orphan-invariant failure (an extractor
+    // dropped an edge). Bootstrap stays non-fatal, but surface it as an operator
+    // attention signal rather than swallowing it as generic noise — the count +
+    // delta live in _graph/orphan-signal.json.
+    logError(
+      '[operator-attention] graph-sync reported genuine orphan(s) (exit 3) — see _graph/orphan-signal.json',
+    );
+  } else if (code !== 0) {
     log(`graph-sync exited ${code} (non-blocking)`);
   }
 

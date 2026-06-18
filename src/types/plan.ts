@@ -18,6 +18,34 @@ export type PlanExecutionMode = 'pipeline' | 'orchestrator';
 
 export type PlanRigor = 'prototype' | 'mvp' | 'production';
 
+/** Concept v2 (W11) — interactivity axis. Mirror of functions/shared/types/plan.ts. */
+export type ConceptInteraction = 'interactive' | 'autopilot';
+
+/** Concept v2 (§3.2) — the Concept Router's applicability DAG. Mirror of functions/shared/concept/concept-plan.ts. */
+export type ConceptArtifactKind = 'prd' | 'ux' | 'architecture';
+export interface ConceptPlanArtifact {
+  kind: ConceptArtifactKind;
+  depth: 'lite' | 'light' | 'full';
+  dependsOn?: ConceptArtifactKind[];
+}
+export interface ConceptPlan {
+  uiBearing: boolean;
+  complexity: 'low' | 'medium' | 'high';
+  artifacts: ConceptPlanArtifact[];
+  gate: 'noop' | 'light' | 'strict';
+  rationale: string;
+}
+
+/** Concept v2 — live per-artifact status. Mirror of functions/shared/concept/artifact-version.ts. */
+export type ConceptArtifactStatus = 'draft' | 'approved' | 'stale';
+export interface ConceptArtifact {
+  kind: ConceptArtifactKind;
+  rev: number;
+  contentHash: string;
+  status: ConceptArtifactStatus;
+  dependsOn?: ConceptArtifactKind[];
+}
+
 export interface PlanTestingProfile {
   hasBrowserTests?: boolean;
   viewport?: string;
@@ -51,6 +79,18 @@ export interface Plan {
   yoloMode?: boolean;
   executionMode: PlanExecutionMode;
   rigor?: PlanRigor;
+  /** Concept v2 (W11) — interactivity axis (interactive | autopilot). */
+  conceptInteraction?: ConceptInteraction;
+  /** Concept v2 (§3.2) — Router applicability DAG; absent for prototype/legacy. */
+  conceptPlan?: ConceptPlan;
+  /** Concept v2 — live per-artifact status registry (draft/approved/stale). */
+  conceptArtifacts?: ConceptArtifact[];
+  /** Concept v2 — FK to the concept-route job (mvp/production). */
+  conceptRouteJobId?: string;
+  /** Concept v2 — per-artifact generator job FKs (for live streaming the active agent). */
+  conceptArtifactJobIds?: Partial<Record<ConceptArtifactKind, string>>;
+  /** Concept v2 — the grounded pm-plan job the chain enqueues once all specs approve. */
+  conceptPmPlanJobId?: string;
   testingProfile?: PlanTestingProfile;
   /** QA auto-enqueue toggle. Default derived from rigor at creation. */
   autoRunQa?: boolean;

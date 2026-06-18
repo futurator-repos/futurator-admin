@@ -359,7 +359,11 @@ export interface AgentJob {
     // plan-reducer enqueues these; daemon's executeReflectorJob picks
     // them up (Epic 6 follow-on — daemon dispatch wire is held back
     // alongside the Slice C work).
-    | 'reflector';
+    | 'reflector'
+    // Plan Retrospect / The Assessor (plan-retrospect-spec §4b). The API
+    // enqueues these after storing the deterministic slice; the daemon's
+    // executeScorecardAssessJob grades the stage's [LLM] criteria.
+    | 'scorecard-assess';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -492,6 +496,21 @@ export interface AgentJob {
     rigor: 'prototype' | 'mvp' | 'production';
     epicId?: string | null;
     waveNumber?: number | null;
+  };
+
+  /**
+   * Plan Retrospect / The Assessor (plan-retrospect-spec §4b). Set when
+   * `jobType === 'scorecard-assess'`. The API computes + stores the
+   * deterministic slice first, then enqueues this; the daemon's
+   * `executeScorecardAssessJob` reads the stored slice, grades the stage's
+   * `[LLM]` criteria, and writes the Assessor slices back to
+   * `futurator-scorecards`.
+   */
+  scorecardAssessPayload?: {
+    planId: string;
+    stage: 'concept' | 'development' | 'qa' | 'deployment' | 'publish' | 'overview';
+    rubricVersion: string;
+    pipelineVersion?: string;
   };
 
   /**

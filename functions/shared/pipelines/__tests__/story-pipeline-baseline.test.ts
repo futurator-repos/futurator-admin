@@ -146,6 +146,91 @@ describe('PR-41 — tamper-check promoted to mvp+ rigor (Story 2-A-5-1)', () => 
   });
 });
 
+describe('VQA v3 E8.1 — QA-AUTHOR probe model in the DEV VISUAL_TESTS prompt', () => {
+  const browserStory: EpicStory = {
+    storyId: 'S-9',
+    order: 0,
+    title: 'Ball bounces',
+    description: 'AC: the ball moves.',
+    status: 'pending',
+    touchPoints: ['src/features/ball.feature.tsx'],
+    hasBrowserTests: true,
+    criteria: [
+      {
+        id: 'AC-S9-1',
+        text: 'the ball changes direction at the wall',
+        needsBrowser: true,
+        verify: 'behavior',
+      },
+    ],
+  } as unknown as EpicStory;
+
+  function devPrompt(boilerplateKind?: string) {
+    const pipeline = generateStoryPipeline(browserStory, 'Game', workingDir, {
+      rigor: 'mvp',
+      hasBrowserTests: true,
+      ...(boilerplateKind ? { boilerplateKind: boilerplateKind as never } : {}),
+    });
+    const dev = pipeline.steps.find((s) => s.id === 'dev');
+    return (dev as { prompt: string }).prompt;
+  }
+
+  it('canvas-game (has seam) — DEV prompt teaches the reach→act→assert probe model + seam keys', () => {
+    const p = devPrompt('nextjs-canvas-game');
+    expect(p).toContain('probe model');
+    expect(p).toContain('window.__harness');
+    expect(p).toContain('assert');
+    expect(p).toContain('clock');
+    // It routes by verify intent and lists the seam snapshot keys.
+    expect(p).toMatch(/\[verify=behavior\]/);
+    expect(p).toContain('snapshot.status');
+  });
+
+  it('seam-less boilerplate (nextjs-base) — no probe section injected (back-compat)', () => {
+    const p = devPrompt('nextjs-base');
+    expect(p).not.toContain('reach→act→assert');
+    expect(p).not.toContain('VQA v3 probe model');
+  });
+});
+
+describe('VQA v3 E5.5 — seam-tamper-check (generator-owned __harness.schema.json)', () => {
+  it('prototype rigor — seam-tamper-check absent (tamper tier off)', () => {
+    const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, { rigor: 'prototype' });
+    expect(pipeline.steps.map((s) => s.id)).not.toContain('seam-tamper-check');
+  });
+
+  it('mvp+ — seam-tamper-check present, right after the test tamper-check', () => {
+    for (const rigor of ['mvp', 'production'] as const) {
+      const ids = generateStoryPipeline(story, 'Test Epic', workingDir, { rigor }).steps.map(
+        (s) => s.id,
+      );
+      expect(ids).toContain('seam-tamper-check');
+      expect(ids.indexOf('seam-tamper-check')).toBe(ids.indexOf('tamper-check') + 1);
+    }
+  });
+
+  it('reverts edits to __harness.schema.json from HEAD and fails the step', () => {
+    const step = generateStoryPipeline(story, 'Test Epic', workingDir, { rigor: 'mvp' }).steps.find(
+      (s) => s.id === 'seam-tamper-check',
+    );
+    const cmd = (step as { command: string }).command;
+    expect(cmd).toContain('__harness.schema.json');
+    expect(cmd).toContain('git checkout HEAD -- __harness.schema.json');
+    expect(cmd).toContain('__SEAM_TAMPER_DETECTED__');
+    // No-op when the app has no seam (file absent / untracked).
+    expect(cmd).toContain('__SEAM_TAMPER_SKIP__');
+    expect((step as { onFail?: { action: string } }).onFail?.action).toBe('fail');
+  });
+
+  it('seam-tamper-check shell is syntactically valid bash (`bash -n`)', () => {
+    const step = generateStoryPipeline(story, 'Test Epic', workingDir, { rigor: 'mvp' }).steps.find(
+      (s) => s.id === 'seam-tamper-check',
+    );
+    const cmd = (step as { command: string }).command;
+    expect(() => execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' })).not.toThrow();
+  });
+});
+
 describe('2026-05-19 — tamper-check baseline is the index (snake-4 fix)', () => {
   it('stage-test-files step is present at mvp+ and runs right after test-author', () => {
     const pipeline = generateStoryPipeline(story, 'Test Epic', workingDir, {

@@ -1,0 +1,215 @@
+/**
+ * semantic-extract.mjs — cross-file semantic edges via the TypeScript compiler
+ * (ts-morph). Tree-sitter gives a fast SYNTACTIC graph but only resolves a call
+ * to a same-file target, so cross-file edges were deferred — leaving functions
+ * that call/are-called (or render/are-rendered) across modules orphaned.
+ *
+ * This pass loads the project's real TS program and resolves, across files:
+ *   - CALLS:   each call expression's callee → its declaration
+ *   - RENDERS: each JSX component tag → its component declaration
+ * emitting precise edges between the existing AST function nodes. Node ids match
+ * graph-sync's scheme exactly:
+ *   file:     code/<relPath with '/' -> '--'>
+ *   function: <fileId>#function:<name>
+ *
+ * Output is the standard extractor envelope (edges only — the function nodes
+ * already exist from ast-extract), written to `.mycelium/semantic-facts.json`
+ * and ingested by graph-sync (CALLS + RENDERS allowlisted). Deterministic.
+ */
+
+import { existsSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export function fileNodeIdFor(relPath) {
+  return `code/${relPath.replace(/\\/g, '/').replace(/\//g, '--')}`;
+}
+export function funcNodeIdFor(relPath, name) {
+  return `${fileNodeIdFor(relPath)}#function:${name}`;
+}
+
+/** Name of the nearest enclosing named function/method/arrow of `node`. */
+function enclosingFunctionName(node, SyntaxKind) {
+  let cur = node.getParent();
+  while (cur) {
+    const k = cur.getKind();
+    if (k === SyntaxKind.FunctionDeclaration || k === SyntaxKind.MethodDeclaration) {
+      const n = cur.getName?.();
+      if (n) return n;
+    }
+    if (k === SyntaxKind.ArrowFunction || k === SyntaxKind.FunctionExpression) {
+      const vd = cur.getFirstAncestorByKind?.(SyntaxKind.VariableDeclaration);
+      if (vd && vd.getInitializer?.() === cur) return vd.getName();
+    }
+    cur = cur.getParent();
+  }
+  return null;
+}
+
+/** A declaration -> { sf, name } as ast-extract would name the function node. */
+function declToFunc(decl, SyntaxKind) {
+  const k = decl.getKind();
+  if (k === SyntaxKind.FunctionDeclaration || k === SyntaxKind.MethodDeclaration) {
+    const name = decl.getName?.();
+    if (name) return { sf: decl.getSourceFile(), name };
+  }
+  if (k === SyntaxKind.VariableDeclaration) {
+    const init = decl.getInitializer?.();
+    const ik = init?.getKind?.();
+    if (ik === SyntaxKind.ArrowFunction || ik === SyntaxKind.FunctionExpression) {
+      return { sf: decl.getSourceFile(), name: decl.getName() };
+    }
+  }
+  return null;
+}
+
+/** Resolve a symbol-bearing node to its declared function node id, or null. */
+function resolveToFuncNode(symBearer, root, SyntaxKind) {
+  let sym;
+  try {
+    sym = symBearer.getSymbol();
+  } catch {
+    sym = undefined;
+  }
+  if (!sym) return null;
+  const target = sym.getAliasedSymbol?.() || sym;
+  for (const decl of target.getDeclarations?.() || []) {
+    const fn = declToFunc(decl, SyntaxKind);
+    if (!fn || fn.sf.isDeclarationFile()) continue;
+    const rel = relative(root, fn.sf.getFilePath());
+    if (rel.startsWith('..') || rel.includes('node_modules')) continue;
+    return funcNodeIdFor(rel, fn.name);
+  }
+  return null;
+}
+
+/**
+ * Resolve semantic edges (CALLS + RENDERS) for a ts-morph Project. Pure over the
+ * project — unit-tested with an in-memory project.
+ *
+ * @returns {Array<{type:'CALLS'|'RENDERS', source:string, target:string}>}
+ */
+export function extractSemanticEdges(project, root, SyntaxKind) {
+  const calls = new Set();
+  const renders = new Set();
+  for (const sf of project.getSourceFiles()) {
+    if (sf.isDeclarationFile()) continue;
+    const relCaller = relative(root, sf.getFilePath());
+    if (relCaller.startsWith('..') || relCaller.includes('node_modules')) continue;
+
+    // CALLS — resolve each call expression's callee across files.
+    for (const call of sf.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      const callerName = enclosingFunctionName(call, SyntaxKind);
+      if (!callerName) continue;
+      const targetId = resolveToFuncNode(call.getExpression(), root, SyntaxKind);
+      if (!targetId) continue;
+      const source = funcNodeIdFor(relCaller, callerName);
+      if (source !== targetId) calls.add(`${source} ${targetId}`);
+    }
+
+    // RENDERS — resolve each JSX component tag to its declaration. Lowercase
+    // HTML tags (<div>) carry no symbol and are skipped automatically.
+    const jsxTags = [
+      ...sf.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
+      ...sf.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
+    ];
+    for (const jsx of jsxTags) {
+      const callerName = enclosingFunctionName(jsx, SyntaxKind);
+      if (!callerName) continue;
+      const tagName = jsx.getTagNameNode?.();
+      if (!tagName) continue;
+      const targetId = resolveToFuncNode(tagName, root, SyntaxKind);
+      if (!targetId) continue;
+      const source = funcNodeIdFor(relCaller, callerName);
+      if (source !== targetId) renders.add(`${source} ${targetId}`);
+    }
+  }
+  const toEdges = (set, type) =>
+    [...set].map((e) => {
+      const [source, target] = e.split(' ');
+      return { type, source, target };
+    });
+  return [...toEdges(calls, 'CALLS'), ...toEdges(renders, 'RENDERS')];
+}
+
+/** Back-compat: CALLS-only view. */
+export function extractSemanticCalls(project, root, SyntaxKind) {
+  return extractSemanticEdges(project, root, SyntaxKind).filter((e) => e.type === 'CALLS');
+}
+
+// ── CLI ──────────────────────────────────────────────────────────────────────
+
+async function loadTsMorph() {
+  try {
+    return await import('ts-morph');
+  } catch (err) {
+    console.error(`[semantic-extract] ts-morph unavailable: ${err.message}`);
+    return null;
+  }
+}
+
+function loadProject(tsmorph, root) {
+  const { Project, ts } = tsmorph;
+  const tsconfig = join(root, 'tsconfig.json');
+  if (existsSync(tsconfig)) {
+    return new Project({ tsConfigFilePath: tsconfig });
+  }
+  const project = new Project({
+    compilerOptions: { allowJs: true, jsx: ts.JsxEmit.ReactJSX, skipLibCheck: true },
+  });
+  project.addSourceFilesAtPaths(join(root, 'src/**/*.{ts,tsx,js,jsx}'));
+  return project;
+}
+
+function envelope(root, edges) {
+  return {
+    generatedAt: new Date().toISOString(),
+    root,
+    nodeCount: 0,
+    edgeCount: edges.length,
+    nodes: [],
+    edges,
+    ambiguous: [],
+  };
+}
+
+function parseArgs() {
+  const a = process.argv.slice(2);
+  let root = null;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] === '--root') root = a[++i];
+    else if (a[i] === '--help' || a[i] === '-h') {
+      console.log('node semantic-extract.mjs --root <dir>');
+      process.exit(0);
+    }
+  }
+  return { root };
+}
+
+async function main() {
+  const { root } = parseArgs();
+  if (!root) {
+    console.error('[semantic-extract] --root required');
+    process.exit(2);
+  }
+  const tsmorph = await loadTsMorph();
+  if (!tsmorph) {
+    process.stdout.write(JSON.stringify(envelope(root, []), null, 2) + '\n');
+    return;
+  }
+  try {
+    const project = loadProject(tsmorph, root);
+    const edges = extractSemanticEdges(project, root, tsmorph.SyntaxKind);
+    process.stdout.write(JSON.stringify(envelope(root, edges), null, 2) + '\n');
+  } catch (err) {
+    console.error(`[semantic-extract] failed: ${err.message}`);
+    process.stdout.write(JSON.stringify(envelope(root, []), null, 2) + '\n');
+  }
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch((err) => {
+    console.error('[semantic-extract] fatal:', err.message);
+    process.exit(1);
+  });
+}

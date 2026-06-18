@@ -14,6 +14,10 @@ import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { PlanWithEpics } from '@/hooks/use-plans';
+import { ConceptRail } from './concept-rail';
+import { ConceptDocDrawer } from './concept-doc-drawer';
+import { ConceptTimingPanel } from './concept-timing-panel';
+import type { ConceptArtifactKind } from '@/types/plan';
 import {
   usePatchPlan,
   useRegeneratePlan,
@@ -23,7 +27,13 @@ import {
   usePmPrompt,
 } from '@/hooks/use-plans';
 import { useAttentionItems } from '@/hooks/use-attention-items';
-import type { AgentJobStatus } from '@/types/agent-orchestrator';
+import {
+  useApproveConceptArtifact,
+  useRegenerateConceptArtifact,
+  useConceptDrive,
+} from '@/hooks/use-concept-artifacts';
+import type { AgentJobStatus, AgentEvent } from '@/types/agent-orchestrator';
+import { api } from '@/lib/api-client';
 import type { EpicWorkflow } from '@/types/epic-workflow';
 import { epicStatusColor } from '../constants';
 import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-output';
@@ -60,11 +70,60 @@ export function PlanReviewView({
   const isConcept = plan.status === 'concept';
   const pmRunning = pmJobStatus === 'PENDING' || pmJobStatus === 'RUNNING';
   const pmFailed = pmJobStatus === 'FAILED';
-  const generating = pmRunning || !!applyPending;
+  // Concept v2 — when the Concept chain owns this plan, the PM does NOT run
+  // until every spec is approved. The rail is the source of truth for "what's
+  // running"; the legacy PM banner/empty-state must NOT show (it falsely read
+  // the concept-apply mutation's transient isPending as "PM drafting").
+  // A `conceptRouteJobId` is stamped at CREATION, so we treat the chain as
+  // active from the very first render — even before the Router finishes and
+  // `conceptPlan` is applied — to suppress the false "PM drafting" banner
+  // during the routing window. `conceptRouting` = chain owns it but no plan yet.
+  const conceptChainActive = isConcept && (!!plan.conceptPlan || !!plan.conceptRouteJobId);
+  const conceptRouting = conceptChainActive && !plan.conceptPlan;
+  // Whether this plan EVER ran the concept chain — independent of status. Once a
+  // plan moves to `developing`, the Concept-stage tab must still show the chain
+  // it produced (rail, docs, agent traces, timing) as a READ-ONLY record, not
+  // fall back to a bare epics list. (Bug: clicking back to Concept after dev
+  // started showed nothing — "like the process never happened".) Live affordances
+  // (drive polling, Approve/Regenerate, the gate card) stay gated on `isConcept`.
+  const hasConceptChain = !!plan.conceptPlan || !!plan.conceptRouteJobId;
+  const conceptReadOnly = hasConceptChain && !isConcept;
+  // Which specialized BMAD persona is actively drafting right now (for the live
+  // stream header). The active artifact = first non-approved in topo order; it's
+  // generating when rev0. We stream THAT generator job's stream-json trace.
+  const conceptArtifactsList = plan.conceptArtifacts ?? [];
+  const activeConceptKind = plan.conceptPlan?.artifacts.find((p) => {
+    const r = conceptArtifactsList.find((a) => a.kind === p.kind);
+    return !r || r.status !== 'approved';
+  })?.kind;
+  const activeConceptArtifact = activeConceptKind
+    ? conceptArtifactsList.find((a) => a.kind === activeConceptKind)
+    : undefined;
+  const conceptGenerating =
+    !!activeConceptArtifact &&
+    activeConceptArtifact.status === 'draft' &&
+    activeConceptArtifact.rev === 0;
+  const generating = (pmRunning || !!applyPending) && !conceptChainActive;
+  // The epic plan is the LAST step — it's only valid once every spec is approved.
+  // Until then we hide the epics list (any epics present on a chain plan are
+  // stale/premature, e.g. from a legacy monolithic-PM run) and keep the rail +
+  // "drafting your specs" state as the surface. Non-concept plans are unaffected.
+  const specsComplete =
+    !conceptChainActive ||
+    ((plan.conceptPlan?.artifacts ?? []).length > 0 &&
+      (plan.conceptPlan?.artifacts ?? []).every(
+        (p) => conceptArtifactsList.find((a) => a.kind === p.kind)?.status === 'approved',
+      ));
+  // Reactive drive: advance the spec chain while the operator watches (the cron
+  // is the backstop). Active until every spec is approved + the plan is drafted.
+  useConceptDrive(plan.planId, conceptChainActive && !specsComplete);
 
   const patch = usePatchPlan(plan.planId);
   const regenerate = useRegeneratePlan(plan.planId);
   const start = useStartPlan(plan.planId);
+  const approveArtifact = useApproveConceptArtifact(plan.planId);
+  const regenerateArtifact = useRegenerateConceptArtifact(plan.planId);
+  const [docDrawerKind, setDocDrawerKind] = useState<ConceptArtifactKind | null>(null);
   const qc = useQueryClient();
 
   // SKILL-SCOUT gate (Epic 3 Story 3.5): plan /start returns 409 while an
@@ -201,26 +260,22 @@ export function PlanReviewView({
                 disabled={patch.isPending}
               />
             )}
-            {isConcept && (
+            {/* The monolithic PM `Regenerate` is the LEGACY one-shot — it makes a
+                single "PM" agent author the PRD, UX, architecture AND the plan
+                all at once. For a Concept-chain plan that's wrong: the chain
+                runs specialized BMAD personas (John→PRD, Sally→UX, Winston→Arch)
+                each owning their artifact, with per-doc Regenerate in the rail.
+                So hide the monolithic button whenever the chain owns the plan. */}
+            {isConcept && !conceptChainActive && (
               <GhostButton
                 label={regenerate.isPending ? 'Starting…' : 'Regenerate'}
                 onClick={handleRegenerate}
                 disabled={regenerate.isPending || generating}
               />
             )}
-            {isConcept && hasEpics && (
-              <SolidButton
-                label={
-                  start.isPending
-                    ? 'Launching…'
-                    : openScoutCard
-                      ? 'Resolve skill card first'
-                      : 'Start development →'
-                }
-                onClick={handleStart}
-                disabled={start.isPending || generating || !!openScoutCard}
-              />
-            )}
+            {/* Start development moved OUT of this header into the dedicated
+                Concept Gate card at the foot of the page (Murat's gate), shown
+                once the epic plan is drafted. */}
           </div>
         </div>
         <textarea
@@ -395,15 +450,115 @@ export function PlanReviewView({
           </div>
         )}
 
-        {!hasEpics && !generating && !pmFailed && !applyError && (
+        {conceptRouting && (
+          <div
+            data-testid="concept-routing"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              padding: '16px 20px',
+              border: '1px solid var(--border)',
+              borderRadius: 12,
+              background: 'var(--bg-elev)',
+              marginBottom: 16,
+            }}
+          >
+            <Loader2 size={16} className="animate-spin" style={{ color: 'var(--accent-purple)' }} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>Routing your concept…</div>
+              <div style={{ fontSize: 12, color: 'var(--text-mute)', marginTop: 2 }}>
+                Mary is deciding which specs this build needs (PRD · UX · Architecture). The chain
+                appears here as soon as routing finishes.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {conceptReadOnly && (
+          <div
+            style={{
+              fontSize: 11,
+              color: 'var(--text-mute)',
+              marginBottom: 8,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            <span>📜</span> Concept chain (read-only) — this plan has moved on to{' '}
+            <strong style={{ color: 'var(--text-dim)' }}>{plan.status}</strong>. The approved specs
+            and agent traces are kept here for the record; click any doc to read it.
+          </div>
+        )}
+
+        {plan.conceptPlan && (
+          <ConceptRail
+            conceptPlan={plan.conceptPlan}
+            conceptArtifacts={plan.conceptArtifacts}
+            // Live affordances only while still in concept; read-only afterwards
+            // (the chain is already approved — just View the docs).
+            onApprove={isConcept ? (kind) => approveArtifact.mutate(kind) : undefined}
+            approvingKind={approveArtifact.isPending ? approveArtifact.variables : null}
+            onRegenerate={isConcept ? (kind) => regenerateArtifact.mutate(kind) : undefined}
+            regeneratingKind={regenerateArtifact.isPending ? regenerateArtifact.variables : null}
+            onView={(kind) => setDocDrawerKind(kind)}
+          />
+        )}
+
+        {docDrawerKind && (
+          <ConceptDocDrawer
+            planId={plan.planId}
+            kind={docDrawerKind}
+            onClose={() => setDocDrawerKind(null)}
+            onApprove={
+              isConcept
+                ? (kind) => {
+                    approveArtifact.mutate(kind, { onSuccess: () => setDocDrawerKind(null) });
+                  }
+                : undefined
+            }
+            onRegenerate={isConcept ? (kind) => regenerateArtifact.mutate(kind) : undefined}
+            approving={approveArtifact.isPending}
+            regenerating={regenerateArtifact.isPending}
+          />
+        )}
+
+        {hasConceptChain && <ConceptTimingPanel plan={plan} />}
+
+        {/* Persistent, collapsible per-agent traces (Mary/John/Sally/Winston) —
+            the active one streams live + auto-expands; completed ones are
+            retained (collapsed) so nothing is lost between docs. Plus a
+            forensic log download for the whole concept stage. Kept after the
+            plan moves to developing so the trace record survives (read-only). */}
+        {hasConceptChain && (
+          <ConceptAgentLogs
+            plan={plan}
+            activeKind={conceptGenerating ? activeConceptKind : undefined}
+          />
+        )}
+
+        {/* Concept chain owns generation — the rail above is the live status.
+            Show a chain-aware caption instead of the legacy PM empty-state. */}
+        {conceptChainActive && !specsComplete && (
+          <EmptyCard faded>
+            Drafting your specs — approve PRD, UX &amp; Architecture above, then the epic plan is
+            generated from the approved docs. (The plan appears here only after every spec is
+            approved.)
+          </EmptyCard>
+        )}
+
+        {!conceptChainActive && !hasEpics && !generating && !pmFailed && !applyError && (
           <EmptyCard>
             No epics yet. Click <strong>Regenerate</strong> to kick off the PM agent.
           </EmptyCard>
         )}
 
-        {generating && !hasEpics && <EmptyCard faded>PM is drafting epics…</EmptyCard>}
+        {!conceptChainActive && generating && !hasEpics && (
+          <EmptyCard faded>PM is drafting epics…</EmptyCard>
+        )}
 
-        {hasEpics && (
+        {hasEpics && specsComplete && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {epics.map((e, idx) => (
               <EpicRow key={e.epicId} epic={e} label={`E${idx + 1}`} allEpics={epics} />
@@ -411,7 +566,136 @@ export function PlanReviewView({
           </div>
         )}
       </section>
+
+      {/* Concept gate (Murat) — the single forward door out of Concept. It
+          appears once the epic plan is drafted (all specs approved + epics
+          landed) and is where the operator approves the plan to begin the
+          Developing stage. Relocated here from the Intent header + redesigned
+          as a deliberate gate, so "Start development" is an explicit decision
+          at the end of the chain, not a stray button at the top. */}
+      {isConcept && hasEpics && specsComplete && (
+        <ConceptGateCard
+          gate={plan.conceptPlan?.gate ?? 'light'}
+          epicCount={epics.length}
+          storyCount={epics.reduce((n, e) => n + e.stories.length, 0)}
+          blocked={!!openScoutCard}
+          pending={start.isPending}
+          disabled={generating}
+          onStart={handleStart}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Concept gate — Murat's review door. A summary of the drafted plan plus the
+ * one button that promotes it into Developing. When a SKILL-SCOUT decision card
+ * is open it's blocked (resolve it above first); the actual /start call still
+ * runs the server-side gate (skill manifest 409 etc.).
+ */
+function ConceptGateCard({
+  gate,
+  epicCount,
+  storyCount,
+  blocked,
+  pending,
+  disabled,
+  onStart,
+}: {
+  gate: 'noop' | 'light' | 'strict';
+  epicCount: number;
+  storyCount: number;
+  blocked: boolean;
+  pending: boolean;
+  disabled: boolean;
+  onStart: () => void;
+}) {
+  return (
+    <section
+      data-testid="concept-gate"
+      style={{
+        border: '1px solid color-mix(in srgb, var(--accent-purple) 35%, var(--border))',
+        background:
+          'linear-gradient(180deg, color-mix(in srgb, var(--accent-purple) 7%, transparent), transparent)',
+        borderRadius: 12,
+        padding: '20px 22px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 18,
+        flexWrap: 'wrap',
+      }}
+    >
+      <div
+        style={{
+          width: 40,
+          height: 40,
+          borderRadius: '50%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 20,
+          flexShrink: 0,
+          background: 'color-mix(in srgb, var(--accent-purple) 14%, transparent)',
+          border: '1px solid color-mix(in srgb, var(--accent-purple) 45%, transparent)',
+        }}
+      >
+        🧪
+      </div>
+      <div style={{ flex: 1, minWidth: 240 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--foreground)' }}>
+            Concept gate
+          </span>
+          <span
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 9,
+              color: 'var(--text-faint)',
+              letterSpacing: '0.1em',
+            }}
+          >
+            Murat · gate: {gate}
+          </span>
+        </div>
+        <div style={{ fontSize: 12.5, color: 'var(--text-dim)', marginTop: 3, lineHeight: 1.5 }}>
+          The plan is drafted from the approved specs — <strong>{epicCount}</strong> epic
+          {epicCount === 1 ? '' : 's'}, <strong>{storyCount}</strong> stor
+          {storyCount === 1 ? 'y' : 'ies'}. Approving promotes this plan into the Developing stage.
+          {blocked && (
+            <span style={{ color: 'var(--warning)' }}>
+              {' '}
+              Resolve the skill-manifest card above before starting.
+            </span>
+          )}
+        </div>
+      </div>
+      <button
+        type="button"
+        data-testid="concept-gate-start"
+        onClick={onStart}
+        disabled={pending || disabled || blocked}
+        style={{
+          fontSize: 12,
+          fontWeight: 600,
+          letterSpacing: '0.04em',
+          padding: '10px 20px',
+          border: '1px solid var(--foreground)',
+          borderRadius: 6,
+          color: 'var(--background)',
+          background: 'var(--foreground)',
+          cursor: pending || disabled || blocked ? 'not-allowed' : 'pointer',
+          opacity: pending || disabled || blocked ? 0.55 : 1,
+          flexShrink: 0,
+        }}
+      >
+        {pending
+          ? 'Launching…'
+          : blocked
+            ? 'Resolve skill card first'
+            : 'Approve & start development →'}
+      </button>
+    </section>
   );
 }
 
@@ -966,6 +1250,219 @@ function PmAgentLogPanel({ jobId, defaultOpen }: { jobId: string; defaultOpen?: 
       {open && (
         <div style={{ borderTop: '1px solid var(--border)', padding: '8px 0' }}>
           <StoryLiveOutput jobId={jobId} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** The specialized BMAD persona behind each concept-stage agent job. */
+const CONCEPT_PERSONA: Record<string, { name: string; role: string; icon: string; doc: string }> = {
+  route: { name: 'Mary', role: 'Analyst', icon: '📊', doc: 'routing' },
+  prd: { name: 'John', role: 'Product Manager', icon: '📋', doc: 'prd.md' },
+  ux: { name: 'Sally', role: 'UX Expert', icon: '🎨', doc: 'ux-spec.md' },
+  architecture: { name: 'Winston', role: 'Architect', icon: '🏗️', doc: 'architecture.md' },
+};
+
+interface ConceptAgentEntry {
+  kind: string;
+  jobId: string;
+  status?: string;
+}
+
+/**
+ * Persistent, collapsible per-agent trace panel for the whole concept stage.
+ * Every agent that has run (Mary→John→Sally→Winston) keeps its own panel — the
+ * active one auto-expands + streams live, finished ones stay collapsed so their
+ * logs are never lost between docs. A "Download forensic log" button exports the
+ * full multi-agent trace for later inspection.
+ */
+function ConceptAgentLogs({ plan, activeKind }: { plan: PlanWithEpics; activeKind?: string }) {
+  const entries: ConceptAgentEntry[] = (
+    [
+      { kind: 'route', jobId: plan.conceptRouteJobId },
+      { kind: 'prd', jobId: plan.conceptArtifactJobIds?.prd },
+      { kind: 'ux', jobId: plan.conceptArtifactJobIds?.ux },
+      { kind: 'architecture', jobId: plan.conceptArtifactJobIds?.architecture },
+    ] as Array<{ kind: string; jobId?: string }>
+  )
+    .filter((e): e is ConceptAgentEntry => !!e.jobId)
+    .map((e) => ({
+      ...e,
+      status: (plan.conceptArtifacts ?? []).find((a) => a.kind === e.kind)?.status,
+    }));
+
+  if (entries.length === 0) return null;
+
+  async function downloadForensicLog() {
+    const lines: string[] = [
+      `# Concept-stage forensic log — ${plan.name}`,
+      `# plan ${plan.planId}`,
+      `# exported ${new Date().toISOString()}`,
+      '',
+    ];
+    for (const e of entries) {
+      const p = CONCEPT_PERSONA[e.kind] ?? { name: 'Agent', role: 'Specialist', doc: e.kind };
+      lines.push(
+        '',
+        '================================================================',
+        `## ${p.name} · ${p.role} — ${p.doc}  (job ${e.jobId.slice(0, 8)}, status ${e.status ?? 'n/a'})`,
+        '================================================================',
+        '',
+      );
+      try {
+        const res = await api.get<{ events: AgentEvent[] }>(
+          `/agent-jobs/${e.jobId}/events?limit=5000`,
+        );
+        for (const ev of res.events ?? []) {
+          const ts = (ev as { timestamp?: string }).timestamp ?? '';
+          if (ev.eventType === 'tool_use') {
+            lines.push(
+              `[${ts}] tool: ${ev.toolName ?? ''} ${ev.toolInput ? JSON.stringify(ev.toolInput) : ''}`,
+            );
+          } else if (ev.text) {
+            lines.push(`[${ts}] ${ev.text}`);
+          } else {
+            lines.push(`[${ts}] (${ev.eventType})`);
+          }
+        }
+      } catch {
+        lines.push('  (failed to load events for this agent)');
+      }
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${plan.name}-concept-forensic-log.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <SectionHeader>Agent traces</SectionHeader>
+        <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
+          {entries.length} agent{entries.length === 1 ? '' : 's'} · persistent
+        </span>
+        <button
+          type="button"
+          onClick={downloadForensicLog}
+          style={{
+            marginLeft: 'auto',
+            fontSize: 11,
+            fontWeight: 600,
+            color: 'var(--text-mute)',
+            background: 'transparent',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            cursor: 'pointer',
+          }}
+        >
+          ⬇ Download forensic log
+        </button>
+      </div>
+      {entries.map((e) => (
+        <CollapsibleAgentLog key={e.kind} entry={e} defaultOpen={e.kind === activeKind} />
+      ))}
+    </section>
+  );
+}
+
+/** One collapsible agent trace, headed by its persona; live-streams via StoryLiveOutput. */
+function CollapsibleAgentLog({
+  entry,
+  defaultOpen,
+}: {
+  entry: ConceptAgentEntry;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(!!defaultOpen);
+  // Auto-collapse on handoff: when this agent stops being the active one (the
+  // chain moved to the next persona) collapse it; when it becomes active, expand.
+  // Syncs only when `defaultOpen` actually flips, so a manual toggle in between
+  // is preserved until the next handoff.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setOpen(!!defaultOpen);
+  }, [defaultOpen]);
+  const p = CONCEPT_PERSONA[entry.kind] ?? {
+    name: 'Agent',
+    role: 'Specialist',
+    icon: '✦',
+    doc: entry.kind,
+  };
+  const live = !!defaultOpen; // the active (auto-opened) agent is the live one
+  const statusLabel =
+    entry.status === 'approved'
+      ? '✓ approved'
+      : entry.status === 'stale'
+        ? '↻ stale'
+        : live
+          ? 'drafting…'
+          : 'draft';
+  return (
+    <section
+      style={{
+        border: '1px solid var(--border)',
+        background: 'var(--bg-elev)',
+        borderRadius: 8,
+        overflow: 'hidden',
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: '100%',
+          background: 'transparent',
+          border: 'none',
+          color: 'inherit',
+          padding: '10px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          cursor: 'pointer',
+        }}
+      >
+        {live ? (
+          <Loader2 size={14} className="animate-spin" style={{ color: 'var(--accent-purple)' }} />
+        ) : (
+          <span style={{ fontSize: 15 }}>{p.icon}</span>
+        )}
+        <span style={{ fontWeight: 600, fontSize: 13 }}>
+          {p.name}
+          <span style={{ color: 'var(--text-mute)', fontWeight: 400 }}> · {p.role}</span>
+        </span>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{p.doc}</span>
+        <span
+          style={{
+            fontSize: 10,
+            fontFamily: 'var(--font-mono)',
+            fontWeight: 600,
+            color: entry.status === 'approved' ? 'var(--success)' : 'var(--accent-blue)',
+          }}
+        >
+          {statusLabel}
+        </span>
+        <span
+          style={{
+            marginLeft: 'auto',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            color: 'var(--text-mute)',
+          }}
+        >
+          {open ? '▾ HIDE' : '▸ SHOW'} · job {entry.jobId.slice(0, 8)}
+        </span>
+      </button>
+      {open && (
+        <div style={{ borderTop: '1px solid var(--border)', padding: '8px 0' }}>
+          {/* Concept agents: logs + live thinking only — the document itself is
+              read in the drawer (View), so the raw JSON Response dump is hidden. */}
+          <StoryLiveOutput jobId={entry.jobId} hideResponse />
         </div>
       )}
     </section>

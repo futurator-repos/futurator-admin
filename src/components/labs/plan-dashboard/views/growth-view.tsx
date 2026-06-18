@@ -170,14 +170,20 @@ function SkillsPanel({ planId }: { planId: string }) {
 }
 
 function SourceChip({ source }: { source: string }) {
-  const color =
-    source === 'anthropic-official'
+  // `app-evolved` skills were AUTHORED by the reflector loop (Skills Institution
+  // Story 1.1) — seeing one here, activated by a later plan, is the visible proof
+  // that success criterion #1 closed: a lesson became a skill a future run used.
+  const isAppEvolved = source === 'app-evolved';
+  const color = isAppEvolved
+    ? 'var(--accent-purple, #a855f7)'
+    : source === 'anthropic-official'
       ? 'var(--accent-blue)'
       : source === 'org'
         ? 'var(--warning)'
         : 'var(--success)';
   return (
     <span
+      title={isAppEvolved ? 'Authored by the reflector loop from a ratified lesson' : undefined}
       style={{
         fontFamily: 'var(--font-mono)',
         fontSize: 9,
@@ -190,7 +196,7 @@ function SourceChip({ source }: { source: string }) {
         padding: '2px 7px',
       }}
     >
-      {source}
+      {isAppEvolved ? '✦ app-evolved' : source}
     </span>
   );
 }
@@ -254,7 +260,7 @@ function LessonsPanel({ projectSlug, planId }: { projectSlug: string | null; pla
                 {r.content}
               </span>
               <TargetChip target={r.target} />
-              <StatusChip status={r.status} />
+              <StatusChip status={r.status} applyOutcome={r.applyOutcome} />
             </button>
             {open && (
               <div
@@ -381,17 +387,28 @@ function TargetChip({ target }: { target: string }) {
   );
 }
 
-function StatusChip({ status }: { status: string }) {
+function StatusChip({ status, applyOutcome }: { status: string; applyOutcome?: string }) {
+  // A confirmed lesson's TRUE end-state is the daemon's apply outcome (Story
+  // 1.2): 'applied' landed it, 'failed' means Gate-1 quarantined or a write
+  // error, 'deferred' means it can't land yet (e.g. promote-from-project). Fall
+  // back to the lifecycle status until the poller stamps an outcome.
+  const effective = status === 'confirmed' && applyOutcome ? applyOutcome : status;
   const color =
-    status === 'confirmed'
+    effective === 'applied' || (effective === 'confirmed' && !applyOutcome)
       ? 'var(--success)'
-      : status === 'declined'
+      : effective === 'failed' || effective === 'declined'
         ? 'var(--destructive)'
-        : status === 'deferred'
+        : effective === 'deferred' || effective === 'noop'
           ? 'var(--text-mute)'
           : 'var(--warning)';
+  const label = status === 'confirmed' && !applyOutcome ? 'applying…' : effective;
   return (
     <span
+      title={
+        status === 'confirmed' && !applyOutcome
+          ? 'Confirmed — waiting for the daemon to land it (REFLECTOR-APPLY)'
+          : undefined
+      }
       style={{
         fontFamily: 'var(--font-mono)',
         fontSize: 9,
@@ -405,7 +422,7 @@ function StatusChip({ status }: { status: string }) {
         flexShrink: 0,
       }}
     >
-      {status === 'confirmed' ? 'applied' : status}
+      {label}
     </span>
   );
 }

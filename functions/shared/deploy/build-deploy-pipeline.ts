@@ -32,6 +32,9 @@ export function buildDeployPipeline(
 ): PipelineDefinition {
   const { s3Bucket, s3Prefix, basePath, publicUrl, cloudfrontDistributionId, invalidationPath } =
     target;
+  // Next.js `basePath` must NOT have a trailing slash (and never be '/'); Vite
+  // `base` keeps the trailing slash. Compute the Next.js form once (A2).
+  const basePathNoSlash = basePath.replace(/\/$/, '');
   const archiveStep = opts.archiveReleaseId
     ? `\n\n4b. Archive this release for rollback: \`aws s3 sync s3://${s3Bucket}/${s3Prefix} s3://${s3Bucket}/${releaseArchivePrefix(target.appName, opts.archiveReleaseId)}\` (copy, no --delete).`
     : '';
@@ -41,9 +44,10 @@ export function buildDeployPipeline(
     agents: {
       DEPLOY: {
         name: 'DevOps Deploy',
-        // Edit + Write are required because vite.config.ts usually needs a
-        // base path patch before `npm run build` can produce a correctly-
-        // prefixed bundle. Without these the agent halts asking for approval.
+        // Edit + Write are required because the framework config (next.config
+        // or vite.config) usually needs a base-path patch before the build can
+        // produce a correctly-prefixed bundle. Without these the agent halts
+        // asking for approval.
         allowedTools: 'Bash,Read,Edit,Write,Glob',
         model: 'haiku',
       },
@@ -54,15 +58,18 @@ export function buildDeployPipeline(
         agentId: 'DEPLOY',
         prompt: `You are a headless DevOps automation. You run non-interactively — there is NO human to grant permission. Do not ask for confirmation. Do not suggest commands for a human to run. Use the tools directly.
 
-Goal: build and publish the React/Vite app at ${workingDir} to s3://${s3Bucket}/${s3Prefix} so it is reachable at ${publicUrl}.
+Goal: build and publish the web app at ${workingDir} to s3://${s3Bucket}/${s3Prefix} so it is reachable at ${publicUrl}.
 
 Steps (execute in order, each step must succeed before the next):
 
-1. Read ${workingDir}/vite.config.ts (or .js). If it does not contain \`base: '${basePath}'\`, Edit the file to set that exact base inside defineConfig({ ... }) (replace any existing \`base\` entry). Do this BEFORE building — the bundle's asset URLs must be prefixed with ${basePath} or the page will 404 its own JS/CSS.
+1. Detect the framework and patch its config so the bundle is served correctly under its base path. Do this BEFORE building — the bundle's asset URLs must be prefixed correctly or the page will 404 its own JS/CSS.
+   - If \`${workingDir}/next.config.ts\`, \`.js\`, or \`.mjs\` exists -> NEXT.JS. Edit next.config to ensure: \`output: 'export'\`, \`basePath: '${basePathNoSlash}'\` (NO trailing slash; use an empty string \`''\` if that value is empty — never \`'/'\`), and \`images: { unoptimized: true }\` (required, or \`output: 'export'\` fails the build). Add any of these that are missing; replace any existing \`basePath\`. The build output dir is \`out/\`.
+   - Else if \`${workingDir}/vite.config.ts\` or \`.js\` exists -> VITE. Edit vite.config to set \`base: '${basePath}'\` (WITH trailing slash) inside defineConfig({ ... }), replacing any existing \`base\`. The build output dir is \`dist/\`.
+   - Else inspect ${workingDir}/package.json: read the \`build\` script to infer the framework and its output dir (commonly \`out\`, \`dist\`, or \`build\`). Patch the relevant config so assets are prefixed with ${basePathNoSlash} (path-style frameworks) or ${basePath} (slash-style).
 
 2. Run the build: \`cd ${workingDir} && npm run build\`. If build fails because of missing deps, run \`npm install\` and retry the build once. Do not proceed past this step unless the build succeeds.
 
-3. Identify the build output directory (Vite defaults to \`dist\`, but check the build log). Confirm it exists with \`ls\`.
+3. Identify the build output directory (\`out/\` for Next.js, \`dist/\` for Vite, otherwise per the package.json build log). Confirm it exists with \`ls\`. Call it <outputDir>.
 
 4. Sync to S3: \`aws s3 sync <outputDir>/ s3://${s3Bucket}/${s3Prefix} --delete\`${archiveStep}
 
@@ -87,7 +94,10 @@ Never end the session without emitting a DEPLOY_STATUS line. Never ask for permi
           // exactly this on 2026-04-21 with `**DEV_SERVER_URL:**`).
           DEPLOY_URL: {
             type: 'regex',
-            pattern: '[*_`]*DEPLOY_URL[*_`]*:\\s*[*_`]*\\s*(https?://[^\\s*_`]+)',
+            // `_` removed from the excluded class so fallback URLs like
+            // `https://futurator.ai/apps/_dev/brick1/` extract fully (A1).
+            // Trailing markdown `*`/backtick stay excluded.
+            pattern: '[*_`]*DEPLOY_URL[*_`]*:[\\s*_`]*(https?://[^\\s*`]+)',
           },
           DEPLOY_STATUS: {
             type: 'regex',

@@ -10,6 +10,7 @@
 import { useState } from 'react';
 import { ExternalLink, Loader2, Undo2 } from 'lucide-react';
 import type { DeployRecord } from '@/types/deploy-report';
+import { isTerminalDeploySuccess } from '@/types/deploy-report';
 import { useRollback } from '@/hooks/use-deploy-report';
 
 export function DeployHistory({ history, planId }: { history: DeployRecord[]; planId: string }) {
@@ -134,7 +135,7 @@ function RollbackButton({
   rollback: ReturnType<typeof useRollback>;
 }) {
   const [armed, setArmed] = useState(false);
-  const eligible = record.status === 'COMPLETED';
+  const eligible = isTerminalDeploySuccess(record.status);
   const busy = rollback.isPending;
 
   if (!eligible) {
@@ -193,12 +194,12 @@ function RollbackButton({
 }
 
 function StatusBadge({ status }: { status: DeployRecord['status'] }) {
-  const color =
-    status === 'COMPLETED'
-      ? 'var(--success)'
-      : status === 'FAILED'
-        ? 'var(--destructive)'
-        : 'var(--accent-purple)';
+  const succeeded = isTerminalDeploySuccess(status);
+  const color = succeeded
+    ? 'var(--success)'
+    : status === 'FAILED'
+      ? 'var(--destructive)'
+      : 'var(--accent-purple)';
   return (
     <span
       style={{
@@ -226,7 +227,7 @@ function StatusBadge({ status }: { status: DeployRecord['status'] }) {
           display: 'inline-block',
         }}
       />
-      {status === 'COMPLETED' ? 'live' : status.toLowerCase()}
+      {succeeded ? 'live' : status.toLowerCase().replaceAll('_', ' ')}
     </span>
   );
 }

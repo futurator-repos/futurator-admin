@@ -24,6 +24,7 @@ import { aggregateByCategory } from './aggregator';
 import { getPlanById } from '../repositories/plan-repository';
 import { getEpicById } from '../repositories/epic-workflow-repository';
 import { getEventsAfter } from '../repositories/agent-events-repository';
+import { getJobById } from '../repositories/agent-jobs-repository';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -84,6 +85,30 @@ export interface ForensicSkillsBlock {
   }>;
 }
 
+/**
+ * F3 (2026-06-18) — cost reconciliation between the events actually collected
+ * for the forensic export and the plan's denormalized `totalCostUsd` rollup.
+ *
+ * `eventCostSum` sums AgentEvent.cost across EVERY collected event — including
+ * retried/superseded attempts walked via the retryOf chain (see
+ * collectRawEvents). A positive `deltaUsd` (eventCostSum > planTotalCostUsd)
+ * is the signal we want to surface, not hide: it is orphaned/superseded spend
+ * from failed attempts whose cost the plan rollup never counted. A negative
+ * delta points at un-attributed events or a stale rollup.
+ */
+export interface ForensicCostReconciliation {
+  /** Sum of AgentEvent.cost across all collected events (incl. retried jobs). */
+  eventCostSum: number;
+  /** The plan's denormalized totalCostUsd rollup. */
+  planTotalCostUsd: number;
+  /** eventCostSum − planTotalCostUsd. Positive = orphaned/superseded spend. */
+  deltaUsd: number;
+  /** deltaUsd as a fraction of planTotalCostUsd (null when rollup is 0). */
+  deltaPct: number | null;
+  /** Human-readable note interpreting the delta sign. */
+  note: string;
+}
+
 export interface ForensicPayload {
   schemaVersion: 'timer-intel-v1.0';
   plan: Plan;
@@ -94,6 +119,12 @@ export interface ForensicPayload {
   narrative: string;
   /** Epic 7 — null only when zero skill events observed (e.g. pre-Epic-4 plans). */
   skills: ForensicSkillsBlock | null;
+  /**
+   * F3 (2026-06-18) — additive: event-cost vs plan-rollup reconciliation.
+   * Optional so pre-F3 payload literals (and tests) stay assignable; the real
+   * `buildForensicPayload` always populates it.
+   */
+  costReconciliation?: ForensicCostReconciliation;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -282,6 +313,28 @@ async function collectRawEvents(plan: Plan): Promise<AgentEvent[]> {
     // operator audits. Include them.
     for (const buildJobId of Object.values(epic.waveBuildJobs ?? {})) {
       if (buildJobId) jobIds.add(buildJobId);
+    }
+  }
+
+  // F3 (2026-06-18) — retried attempts were invisible to the forensic export.
+  // A retry creates a NEW job with retryOf=originalJobId; the original stays
+  // NEEDS_ATTENTION (see agent-orchestrator.ts:14) and its events — including
+  // the spend that produced the failed/superseded attempt — were dropped
+  // because only the CURRENT story.jobId was discovered above. Walk each
+  // discovered job's retryOf chain backward and union every prior jobId so
+  // their events (and cost) are included. Reconciliation below surfaces this
+  // as orphaned/superseded spend rather than hiding it.
+  for (const jobId of Array.from(jobIds)) {
+    let cursor = jobId;
+    // Guard against cycles / self-references with a visited set.
+    const seen = new Set<string>([jobId]);
+    for (;;) {
+      const job = await getJobById(cursor);
+      const prior = job?.retryOf;
+      if (!prior || seen.has(prior)) break;
+      seen.add(prior);
+      jobIds.add(prior);
+      cursor = prior;
     }
   }
 
@@ -475,6 +528,37 @@ export function buildSkillsBlock(events: AgentEvent[]): ForensicSkillsBlock | nu
   };
 }
 
+/**
+ * F3 (2026-06-18) — pure cost reconciliation. Sums AgentEvent.cost across the
+ * collected events (which now include retried/superseded attempts) and
+ * compares to the plan's denormalized totalCostUsd. Surfaces the delta with a
+ * note rather than hiding orphaned spend.
+ */
+export function buildCostReconciliation(
+  events: AgentEvent[],
+  planTotalCostUsd: number,
+): ForensicCostReconciliation {
+  const eventCostSum = events.reduce((sum, ev) => sum + (ev.cost ?? 0), 0);
+  const deltaUsd = eventCostSum - planTotalCostUsd;
+  const deltaPct = planTotalCostUsd > 0 ? deltaUsd / planTotalCostUsd : null;
+
+  let note: string;
+  // Tolerance: sub-cent deltas are rounding noise, not a finding.
+  if (Math.abs(deltaUsd) < 0.005) {
+    note = 'Event-cost sum reconciles with the plan rollup.';
+  } else if (deltaUsd > 0) {
+    note =
+      'Event-cost sum exceeds the plan rollup — the excess is orphaned/superseded ' +
+      'spend from retried or failed attempts that the plan totalCostUsd never counted.';
+  } else {
+    note =
+      'Event-cost sum is below the plan rollup — some attributed cost has no backing ' +
+      'events (un-collected jobs) or the plan rollup is stale.';
+  }
+
+  return { eventCostSum, planTotalCostUsd, deltaUsd, deltaPct, note };
+}
+
 export async function buildForensicPayload(
   planId: string,
   cohortFetcher: (
@@ -513,6 +597,10 @@ export async function buildForensicPayload(
   // null when the plan ran before Epic 3/4 hooks shipped.
   const skills = buildSkillsBlock(events);
 
+  // F3 (2026-06-18) — reconcile collected event spend (incl. retried jobs)
+  // against the plan rollup; surface orphaned/superseded spend.
+  const costReconciliation = buildCostReconciliation(events, plan.totalCostUsd);
+
   return {
     schemaVersion: 'timer-intel-v1.0',
     plan,
@@ -522,5 +610,6 @@ export async function buildForensicPayload(
     cohort,
     narrative,
     skills,
+    costReconciliation,
   };
 }

@@ -445,3 +445,140 @@ describe('epicsToPlanOutput — export round-trip', () => {
     expect(stories[1].dependsOn).toEqual([stories[0].id]);
   });
 });
+
+/**
+ * Concept v2 — Story E1.3 (W4): the apply + round-trip mappers must carry the
+ * BMAD-grade fields, or the schema enrichment (E1.1/E1.2) is inert at write time.
+ */
+describe('applyPlanOutput — BMAD-grade enrichment persists (Concept v2 E1.3/W4)', () => {
+  const enrichedJson = JSON.stringify({
+    plan: {
+      name: 'pong-classic',
+      description: 'Browser-based Atari Pong — enriched plan for the W4 persist test.',
+      epics: [
+        {
+          id: 'E1',
+          title: 'Foundation',
+          goal: 'Scaffold the project and define core types.',
+          acceptanceCriteria: 'Builds cleanly',
+          requirementRefs: ['FR-1', 'FR-3'],
+          dependsOn: [],
+          stories: [
+            {
+              id: 'S1',
+              title: 'Scaffold project',
+              description: 'Create the app and define the score contract.',
+              dependsOn: [],
+              touchPoints: ['src/main.tsx'],
+              userStory: { role: 'player', action: 'see a score', benefit: 'track progress' },
+              technicalNotes: 'Use the canvas-game boilerplate; wire __harness.',
+              tasks: [{ id: 'T1', text: 'Scaffold', acRefs: ['AC-S1-1'] }],
+              references: [{ source: 'architecture', section: 'state-model', note: 'score shape' }],
+              criteria: [
+                {
+                  id: 'AC-S1-1',
+                  text: 'Score increments on collision.',
+                  needsBrowser: true,
+                  given: 'a game in playing state',
+                  when: 'the ball hits a paddle',
+                  then: 'the score increments by 1',
+                  thenObservable: 'score increments',
+                  verify: 'behavior',
+                },
+                {
+                  id: 'AC-S1-2',
+                  text: 'Operator confirms the real payment flow.',
+                  needsBrowser: false,
+                  verify: 'manual',
+                  manualReason: 'real-payment',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  it('AC1 — persists BDD/verify on ACs + userStory/tasks/references + epic requirementRefs/goal', async () => {
+    const output = validatePlanOutputJson(JSON.parse(enrichedJson));
+    const createdEpics: import('../../types/epic-workflow').EpicWorkflow[] = [];
+    let n = 0;
+    await applyPlanOutput(basePlan(), output, {
+      createEpic: vi.fn(async (e) => {
+        createdEpics.push(e);
+        return e;
+      }),
+      updatePlanFields: vi.fn(async () => {}),
+      uuid: () => `uuid-${++n}`,
+      now: () => '2026-06-16T00:00:00.000Z',
+    });
+
+    expect(createdEpics).toHaveLength(1);
+    const epic = createdEpics[0];
+    expect(epic.goal).toBe('Scaffold the project and define core types.');
+    expect(epic.requirementRefs).toEqual(['FR-1', 'FR-3']);
+
+    const story = epic.stories[0];
+    expect(story.userStory).toEqual({
+      role: 'player',
+      action: 'see a score',
+      benefit: 'track progress',
+    });
+    expect(story.technicalNotes).toContain('__harness');
+    expect(story.tasks).toEqual([{ id: 'T1', text: 'Scaffold', acRefs: ['AC-S1-1'] }]);
+    expect(story.references).toEqual([
+      { source: 'architecture', section: 'state-model', note: 'score shape' },
+    ]);
+
+    const ac1 = story.criteria!.find((c) => c.id === 'AC-S1-1')!;
+    expect(ac1.verify).toBe('behavior');
+    expect(ac1.given).toBe('a game in playing state');
+    expect(ac1.then).toBe('the score increments by 1');
+    const ac2 = story.criteria!.find((c) => c.id === 'AC-S1-2')!;
+    expect(ac2.verify).toBe('manual');
+    expect(ac2.manualReason).toBe('real-payment');
+  });
+
+  it('AC2 — round-trip via epicsToPlanOutput is lossless for the new fields', async () => {
+    const output = validatePlanOutputJson(JSON.parse(enrichedJson));
+    let n = 0;
+    const result = await applyPlanOutput(basePlan(), output, {
+      createEpic: vi.fn(async (e) => e),
+      updatePlanFields: vi.fn(async () => {}),
+      uuid: () => `uuid-${++n}`,
+      now: () => '2026-06-16T00:00:00.000Z',
+    });
+
+    const exported = epicsToPlanOutput(result.plan, result.epics);
+    const reimported = validatePlanOutputJson(exported);
+    const epic = reimported.plan.epics[0];
+    expect(epic.requirementRefs).toEqual(['FR-1', 'FR-3']);
+    const story = epic.stories[0];
+    expect(story.userStory?.role).toBe('player');
+    expect(story.tasks?.[0].id).toBe('T1');
+    expect(story.references?.[0].section).toBe('state-model');
+    const ac1 = story.criteria.find((c) => c.id === 'AC-S1-1')!;
+    expect(ac1.verify).toBe('behavior');
+    expect(ac1.when).toBe('the ball hits a paddle');
+  });
+
+  it('AC3 — a legacy plan with no new fields persists unchanged', async () => {
+    const output = validatePlanOutputJson(JSON.parse(validJson));
+    const createdEpics: import('../../types/epic-workflow').EpicWorkflow[] = [];
+    let n = 0;
+    await applyPlanOutput(basePlan(), output, {
+      createEpic: vi.fn(async (e) => {
+        createdEpics.push(e);
+        return e;
+      }),
+      updatePlanFields: vi.fn(async () => {}),
+      uuid: () => `uuid-${++n}`,
+      now: () => '2026-06-16T00:00:00.000Z',
+    });
+    const ac = createdEpics[0].stories[0].criteria![0];
+    expect(ac.verify).toBeUndefined();
+    expect(ac.given).toBeUndefined();
+    expect(createdEpics[0].stories[0].userStory).toBeUndefined();
+  });
+});

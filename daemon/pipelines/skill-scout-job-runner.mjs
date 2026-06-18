@@ -272,6 +272,51 @@ export async function runSkillScoutJob(job, ctx) {
   }
 
   // disposition === 'surface-card'
+  //
+  // F26 / Story 4.2 — the gate is the SINGLE trust authority. A non-auto-trust
+  // (community / surface-card) discovery does NOT install straight through the
+  // vendor step (that would make the scout a second trust authority and bypass
+  // the inbox). Instead each `add` proposal is routed THROUGH the gate as a
+  // `bulk` skill-proposal: the gate scans + labels it `draft`/`vendored` and the
+  // operator ratifies it into the trusted registry, from which the vendor step
+  // installs. `remove`/`upgrade` proposals stay on the decision card only.
+  //
+  // `emitBulkProposal` is injected (daemon wires it to POST /api/skills/gate/bulk);
+  // when absent (older daemon wiring / tests that only assert the card) we keep
+  // the prior behavior and just surface the card.
+  let bulkEmitted = 0;
+  if (typeof ctx.emitBulkProposal === 'function') {
+    for (const p of output.proposals) {
+      if (p.kind !== 'add') continue;
+      try {
+        await ctx.emitBulkProposal({
+          name: p.skill,
+          description: p.rationale,
+          // The scout references a federation skill by source@version; the gate
+          // needs a prose body to scan. Until lazy body-fetch lands, the
+          // rationale + verify notes stand in as the candidate body — the
+          // operator sees the full upstream SKILL.md in the inbox diff at ratify.
+          body: `# ${p.skill}\n\n${p.rationale}\n\n## Verify\n\n${p.verifyNotes}`,
+          originRef: `${p.source}@${p.version}`,
+          kind: p.manifestBucket,
+          appId,
+          planId: planId ?? null,
+        });
+        bulkEmitted += 1;
+      } catch (err) {
+        await ctx.writeAttentionItem({
+          appId,
+          planId: planId ?? null,
+          severity: 'medium',
+          category: 'skill-scout-failed',
+          title: `SKILL-SCOUT ${trigger} could not emit bulk proposal for ${p.skill}`,
+          body: String(err?.message || err).slice(0, 1500),
+          dedupKey: `skill-scout-bulk-emit:${trigger}:${projectSlug}:${p.skill}`,
+        });
+      }
+    }
+  }
+
   const card = buildDecisionCard({ output, projectSlug, appId, planId });
   await ctx.writeAttentionItem({
     ...card,
@@ -286,5 +331,6 @@ export async function runSkillScoutJob(job, ctx) {
     disposition: 'surface-card',
     reason: disposition.reason,
     proposalCount: output.proposals.length,
+    bulkEmitted,
   };
 }

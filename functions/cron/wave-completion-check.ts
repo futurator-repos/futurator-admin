@@ -2,10 +2,11 @@ import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
 import * as planRepo from '../shared/repositories/plan-repository';
 import * as appRepo from '../shared/repositories/app-repository';
-import { resolveQaContext } from '../shared/services/qa-boilerplate-resolver';
+import { resolveQaContext, resolveHasSeam } from '../shared/services/qa-boilerplate-resolver';
 // Story 1.8.7 — 3× escalator: fire-and-forget after plan is marked delivered
 import { evaluateThresholds } from '../shared/timer/escalator';
 import { reducePlan, type PlanReducerDeps } from '../shared/services/plan-reducer';
+import { driveConcept, type ConceptDriverDeps } from '../shared/services/concept-driver';
 // 2026-05-30 — shared reducer-deps factory (cron + reactive endpoint parity).
 import { buildPlanReducerDeps } from '../shared/services/reduce-deps';
 import { launchPlanQaAggregate, launchPlanQaExecute } from '../shared/services/visual-qa-launcher';
@@ -120,6 +121,7 @@ export const handler = async () => {
             const now = new Date().toISOString();
             // PR-8g — auto-enqueue uses the App's boilerplate qaContext too.
             const boilerplate = await resolveQaContext(plan, { getApp: appRepo.getApp });
+            const hasSeam = await resolveHasSeam(plan, { getApp: appRepo.getApp });
             const qaResult = await launchPlanQaAggregate(
               plan,
               epicsForPlan,
@@ -133,7 +135,7 @@ export const handler = async () => {
                 buildQaExecutePipeline,
                 uuid: () => crypto.randomUUID(),
               },
-              { boilerplate },
+              { boilerplate, hasSeam },
             );
             if (qaResult.ok) {
               // Persist aggregate job + transition contract status to
@@ -173,11 +175,37 @@ export const handler = async () => {
         // classification warnings stay visible in the QA view for post-hoc
         // review, and the operator can still edit+approve manually before the
         // next tick wins the race (both paths are guarded by qaJobId).
+        //
+        // F11 (2026-06-18) — RACE FIX (mutual exclusion). The dev-deploy job
+        // (enqueued in the `review` block below) runs `npm run build` and
+        // EDITS next.config.ts/vite.config.ts inside `projects/<appId>`, the
+        // SAME tree qa-prepare boots `next dev` against and qa-execute reads.
+        // Co-launching both jobs in one tick let the daemon run them
+        // concurrently: deploy mutated the worktree mid-QA, destroying
+        // evidence and false-blocking correct apps. Serialize by gating
+        // qa-execute on the dev-deploy having COMPLETED — once deploy is done
+        // the tree is immutable, so QA reads a stable worktree. (The deploy
+        // block below still enqueues at-most-once and is itself guarded.)
+        // DEFER: the deeper root fix — point QA at the immutable dev-deploy
+        // URL instead of booting its own `next dev`, and inject basePath via
+        // env NEXT_BASE_PATH instead of editing next.config.ts in
+        // build-deploy-pipeline.ts — needs the operator's Q7/Q11 decision.
+        const devDeployJob = plan.devDeployJobId
+          ? await agentJobsRepo.getJobById(plan.devDeployJobId)
+          : null;
+        const devDeploySettled = devDeployJob
+          ? devDeployJob.status === 'COMPLETED' || devDeployJob.status === 'FAILED'
+          : false;
         if (
           plan.autoRunQa !== false &&
           plan.qaContractStatus === 'pending' &&
           plan.qaAggregateJobId &&
-          !plan.qaJobId
+          !plan.qaJobId &&
+          // Mutual exclusion: only start qa-execute once the dev-deploy that
+          // mutates the same worktree has settled (COMPLETED/FAILED). If the
+          // deploy hasn't been enqueued yet OR is still in flight, hold off —
+          // the deploy enqueues below this tick and we resume next tick.
+          devDeploySettled
         ) {
           try {
             const aggJob = await agentJobsRepo.getJobById(plan.qaAggregateJobId);
@@ -326,6 +354,52 @@ export const handler = async () => {
           planId: plan.planId,
           error: err instanceof Error ? err.message : String(err),
         });
+      }
+    }
+
+    // ── 1b. Concept pass (E3.2) — advance the spec-development DAG. ──
+    // The active-plans filter above is intentionally scoped to {developing,
+    // fixing, review}; concept-stage plans need their own pass or the chain
+    // never advances unattended. Gate on `conceptPlan` presence so the hot loop
+    // stays off prototype/legacy plans (no chain). Each plan is driven under the
+    // same per-plan reduce lock the reactive apply endpoint uses — exactly one
+    // next job is created.
+    const conceptPlans = plans.filter((p) => p.status === 'concept' && p.conceptPlan);
+    if (conceptPlans.length > 0) {
+      const conceptDeps: ConceptDriverDeps = {
+        getPlanById: planRepo.getPlanById,
+        getJobById: agentJobsRepo.getJobById,
+        createJob: agentJobsRepo.createJob,
+        updatePlanFields: planRepo.updatePlanFields,
+        getApp: appRepo.getApp,
+        uuid: () => crypto.randomUUID(),
+        now: () => new Date().toISOString(),
+      };
+      for (const plan of conceptPlans) {
+        const token = await planRepo.acquirePlanReduceLock(plan.planId, Date.now());
+        if (!token) {
+          resultCounts['concept:reduce-locked'] = (resultCounts['concept:reduce-locked'] || 0) + 1;
+          continue;
+        }
+        try {
+          const driveResult = await driveConcept(plan, conceptDeps);
+          resultCounts[`concept:${driveResult.kind}`] =
+            (resultCounts[`concept:${driveResult.kind}`] || 0) + 1;
+          if (driveResult.kind !== 'noop') {
+            log('info', 'wave-completion-check', 'drove concept plan', {
+              planId: plan.planId,
+              result: driveResult,
+            });
+          }
+        } catch (err) {
+          errored++;
+          log('error', 'wave-completion-check', 'per-plan concept-drive failure', {
+            planId: plan.planId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          await planRepo.releasePlanReduceLock(plan.planId, token);
+        }
       }
     }
 

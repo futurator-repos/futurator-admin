@@ -102,6 +102,25 @@ export function useApplyPlanOutput(planId: string | null) {
   });
 }
 
+/**
+ * Concept v2 — apply the Concept Router's completed output to the plan row.
+ * The endpoint auto-discovers the plan's `conceptRouteJobId` (or the most
+ * recent COMPLETED concept-route job), validates CONCEPT_PLAN_JSON, and
+ * persists `plan.conceptPlan`. Driven from the dashboard once the route job
+ * COMPLETEs (mirrors the apply-plan auto-trigger).
+ */
+export function useApplyConceptPlan(planId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api.post<{ planId: string; conceptPlan: unknown }>(`/plans/${planId}/apply-concept-plan`, {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['plans', planId] });
+      queryClient.invalidateQueries({ queryKey: ['plans'] });
+    },
+  });
+}
+
 export function useRegeneratePlan(planId: string | null) {
   return useMutation({
     mutationFn: () =>

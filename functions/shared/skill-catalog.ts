@@ -19,6 +19,16 @@
  * Pure + fetch-injectable so it unit-tests without network.
  */
 
+import {
+  parseIndexEntry,
+  migrateIndexEntry,
+  type ProvenanceClass,
+  type SecurityStatus,
+  type QualityGrade,
+  type TrustTier,
+  type SkillLineage,
+} from './schemas/skill-index-entry-schema';
+
 /** A federation source the catalog fetches an index from. */
 export interface FederationSourceLite {
   id: string;
@@ -37,6 +47,15 @@ export interface CatalogSkill {
   description: string;
   source: string; // federation source id that carries it
   autoTrust: boolean;
+  // Curation facets (Story 2.1). Always present on a catalog row — a legacy
+  // entry lacking them on the wire is migrated to safe defaults on read
+  // (`unverified`/`draft`/`third-party`), so the UI + scout never see undefined.
+  provenanceClass: ProvenanceClass;
+  securityStatus: SecurityStatus;
+  qualityGrade: QualityGrade;
+  trustTier: TrustTier;
+  maturity: number;
+  lineage: SkillLineage;
 }
 
 export interface SkillCatalog {
@@ -164,15 +183,35 @@ export async function fetchSkillCatalog(
         const e = raw as Record<string, unknown>;
         if (typeof e.name !== 'string' || !e.name) continue;
         if (byName.has(e.name)) continue; // higher-priority source already claimed it
+        // Validate + migrate the entry so the row always carries facets. A
+        // fundamentally malformed entry still surfaces (with safe defaults)
+        // rather than vanishing — name is the only hard requirement above.
+        const parsed = parseIndexEntry(raw);
+        const facets = migrateIndexEntry(
+          parsed ?? {
+            name: e.name,
+            kind: typeof e.kind === 'string' ? e.kind : 'core',
+            framework: e.framework === true,
+            version: typeof e.version === 'string' ? e.version : 'sha:HEAD',
+            license: typeof e.license === 'string' ? e.license : 'UNKNOWN',
+            description: typeof e.description === 'string' ? e.description : '',
+          },
+        );
         byName.set(e.name, {
-          name: e.name,
-          kind: typeof e.kind === 'string' ? e.kind : 'core',
-          framework: e.framework === true,
-          version: typeof e.version === 'string' ? e.version : 'sha:HEAD',
-          license: typeof e.license === 'string' ? e.license : 'UNKNOWN',
-          description: typeof e.description === 'string' ? e.description : '',
+          name: facets.name,
+          kind: facets.kind,
+          framework: facets.framework,
+          version: facets.version,
+          license: facets.license,
+          description: facets.description,
           source: source.id,
           autoTrust: source.autoTrust,
+          provenanceClass: facets.provenanceClass,
+          securityStatus: facets.securityStatus,
+          qualityGrade: facets.qualityGrade,
+          trustTier: facets.trustTier,
+          maturity: facets.maturity,
+          lineage: facets.lineage,
         });
         count += 1;
       }

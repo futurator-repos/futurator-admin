@@ -17,6 +17,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import type { QaReport, PlanQaVerdict, QaPillarVerdict, DevPreview } from '@/types/qa-report';
 import { useRunQaReview, useSendBackFailing } from '@/hooks/use-qa-report';
 import { useDeployApp } from '@/hooks/use-epic-workflow';
+import { DeployLogs } from '../deploy/deploy-logs';
 
 interface Props {
   report: QaReport;
@@ -227,10 +228,9 @@ export function VerdictStrip({ report, planId, showLastRun = true }: Props) {
           type="button"
           onClick={onPromote}
           disabled={!ready}
+          aria-label={ready ? 'Go to the Deploy stage' : 'Deploy stage not yet available'}
           title={
-            ready
-              ? 'Proceed to Developing → Deploy to publish'
-              : (report.blockingReason ?? 'Waiting for QA verdict')
+            ready ? 'Open the Deploy stage' : (report.blockingReason ?? 'Waiting for QA verdict')
           }
           style={{
             fontSize: 10,
@@ -250,8 +250,8 @@ export function VerdictStrip({ report, planId, showLastRun = true }: Props) {
             gap: 6,
           }}
         >
-          Promote to Deploy
-          <ArrowRight size={10} />
+          Go to Deploy
+          <ArrowRight size={10} aria-hidden="true" />
         </button>
       </div>
     </div>
@@ -373,7 +373,7 @@ function RunQaButton({
 function DevPreviewControls({ preview, planId }: { preview: DevPreview; planId: string }) {
   const deploy = useDeployApp();
   const qc = useQueryClient();
-  const { epicId, url, status } = preview;
+  const { epicId, url, status, jobId } = preview;
 
   function onDeployDev() {
     if (!epicId || deploy.isPending) return;
@@ -383,75 +383,149 @@ function DevPreviewControls({ preview, planId }: { preview: DevPreview; planId: 
     );
   }
 
+  // A4 — optimistic pending: deploy.isPending flips immediately on click,
+  // before the qa-report poll flips status to 'deploying'. Either signal
+  // means a dev deploy is in flight.
   const deploying = status === 'deploying' || deploy.isPending;
 
+  // A4 — surface a failed enqueue/deploy mutation inline. Currently there is
+  // NO error surface on this control, so a 400 looked like a no-op click.
+  const deployErr = deploy.isError
+    ? deploy.error instanceof Error
+      ? deploy.error.message
+      : String(deploy.error)
+    : null;
+
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-      {url && status === 'live' && (
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          title="Open the dev preview — the same merged build QA is testing, clickable by you"
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 6,
-            fontSize: 10,
-            letterSpacing: '0.14em',
-            textTransform: 'uppercase',
-            padding: '7px 14px',
-            border: '1px solid var(--accent-blue)',
-            borderRadius: 2,
-            color: 'var(--accent-blue)',
-            background: 'color-mix(in srgb, var(--accent-blue) 10%, transparent)',
-            fontWeight: 500,
-            textDecoration: 'none',
-          }}
-        >
-          Open in dev
-          <ExternalLink size={10} />
-        </a>
-      )}
-      {(epicId || status === 'failed') && (
-        <button
-          type="button"
-          onClick={onDeployDev}
-          disabled={!epicId || deploying}
-          title={
-            !epicId
-              ? 'No epics to deploy yet'
+    <span
+      style={{
+        display: 'inline-flex',
+        flexDirection: 'column',
+        alignItems: 'flex-end',
+        gap: 6,
+      }}
+    >
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+        {/* A1 reliance — `url` is `preview.url` verbatim. With the
+            build-deploy-pipeline DEPLOY_URL regex fix (underscore no longer
+            truncates), plan.devUrl is now the FULL `…/apps/_dev/<app>/` URL,
+            so this link finally points at the real dev build. */}
+        {url && status === 'live' && (
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Open the dev preview in a new tab"
+            title="Open the dev preview — the same merged build QA is testing, clickable by you"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 10,
+              letterSpacing: '0.14em',
+              textTransform: 'uppercase',
+              padding: '7px 14px',
+              border: '1px solid var(--accent-blue)',
+              borderRadius: 2,
+              color: 'var(--accent-blue)',
+              background: 'color-mix(in srgb, var(--accent-blue) 10%, transparent)',
+              fontWeight: 500,
+              textDecoration: 'none',
+            }}
+          >
+            Open in dev
+            <ExternalLink size={10} aria-hidden="true" />
+          </a>
+        )}
+        {(epicId || status === 'failed') && (
+          <button
+            type="button"
+            onClick={onDeployDev}
+            disabled={!epicId || deploying}
+            aria-label={
+              deploying
+                ? 'Dev deploy in progress'
+                : status === 'failed'
+                  ? 'Retry dev deploy'
+                  : status === 'live'
+                    ? 'Re-deploy to dev preview'
+                    : 'Deploy to dev preview'
+            }
+            title={
+              !epicId
+                ? 'No epics to deploy yet'
+                : status === 'failed'
+                  ? 'The last dev deploy failed — retry'
+                  : status === 'live'
+                    ? 'Re-publish the current build to the dev preview'
+                    : 'Publish the current build to the dev preview'
+            }
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 10,
+              letterSpacing: '0.14em',
+              textTransform: 'uppercase',
+              padding: '7px 14px',
+              border: `1px solid ${status === 'failed' ? 'var(--destructive)' : 'var(--border-2)'}`,
+              borderRadius: 2,
+              color: status === 'failed' ? 'var(--destructive)' : 'var(--text-dim)',
+              background: 'transparent',
+              cursor: !epicId || deploying ? 'not-allowed' : 'pointer',
+              opacity: !epicId || deploying ? 0.5 : 1,
+            }}
+          >
+            {deploying ? (
+              <Loader2 size={10} className="animate-spin" aria-hidden="true" />
+            ) : (
+              <Rocket size={10} aria-hidden="true" />
+            )}
+            {deploying
+              ? 'Dev deploying…'
               : status === 'failed'
-                ? 'The last dev deploy failed — retry'
+                ? 'Retry dev'
                 : status === 'live'
-                  ? 'Re-publish the current build to the dev preview'
-                  : 'Publish the current build to the dev preview'
-          }
+                  ? 'Re-deploy dev'
+                  : 'Deploy to dev'}
+          </button>
+        )}
+      </span>
+
+      {/* A4 — inline deploy-error banner. role="alert" so a screen reader
+          announces the failure reason that was previously silent. */}
+      {deployErr && (
+        <span
+          role="alert"
           style={{
             display: 'inline-flex',
-            alignItems: 'center',
+            alignItems: 'flex-start',
             gap: 6,
+            fontFamily: 'var(--font-mono)',
             fontSize: 10,
-            letterSpacing: '0.14em',
-            textTransform: 'uppercase',
-            padding: '7px 14px',
-            border: `1px solid ${status === 'failed' ? 'var(--destructive)' : 'var(--border-2)'}`,
+            color: 'var(--destructive)',
+            background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+            border: '1px solid var(--destructive)',
             borderRadius: 2,
-            color: status === 'failed' ? 'var(--destructive)' : 'var(--text-dim)',
-            background: 'transparent',
-            cursor: !epicId || deploying ? 'not-allowed' : 'pointer',
-            opacity: !epicId || deploying ? 0.5 : 1,
+            padding: '6px 8px',
+            maxWidth: 280,
+            textAlign: 'left',
+            lineHeight: 1.4,
+            overflowWrap: 'anywhere',
           }}
         >
-          {deploying ? <Loader2 size={10} className="animate-spin" /> : <Rocket size={10} />}
-          {deploying
-            ? 'Dev deploying…'
-            : status === 'failed'
-              ? 'Retry dev'
-              : status === 'live'
-                ? 'Re-deploy dev'
-                : 'Deploy to dev'}
-        </button>
+          {deployErr}
+        </span>
+      )}
+
+      {/* A3 — compact streaming progress/logs for the in-flight dev deploy.
+          Reuse DeployLogs with the dev job FK (BE-2 populates
+          devPreview.jobId = plan.devDeployJobId). Guard on `deploying` so a
+          stale jobId from a finished deploy doesn't keep streaming. */}
+      {deploying && jobId && (
+        <div style={{ width: 360, maxWidth: '100%' }}>
+          <DeployLogs deployJobId={jobId} />
+        </div>
       )}
     </span>
   );

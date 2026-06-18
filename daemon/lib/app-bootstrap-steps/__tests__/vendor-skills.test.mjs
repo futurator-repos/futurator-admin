@@ -90,3 +90,73 @@ describe('runVendorSkills (daemon-side fetch)', () => {
     expect(res.attentionCategory).toBe('skill-sync-failed');
   });
 });
+
+// ── Story 4.2 — trusted-only install gate ──────────────────────────────────
+
+const COMMUNITY_MANIFEST = `project: dino2
+core: []
+stack:
+  - source: community
+    skill: untrusted-skill
+    version: sha:HEAD
+domain: []
+vendor: []
+`;
+
+/** fetchImpl that serves index.json (with trust facets) + SKILL.md bodies. */
+function trustAwareFetch(indexByRepo) {
+  return async (url) => {
+    if (url.endsWith('/index.json')) {
+      const repo = url.replace('https://raw.githubusercontent.com/', '').replace('/main/index.json', '');
+      return { ok: true, status: 200, json: async () => ({ skills: indexByRepo[repo] ?? [] }) };
+    }
+    return { ok: true, status: 200, text: async () => `# body ${url}\n` };
+  };
+}
+
+describe('runVendorSkills — trusted-only install gate (Story 4.2)', () => {
+  it('BLOCKS a non-trusted skill from a community (non-auto-trust) source', async () => {
+    const dir = makeWorktree(COMMUNITY_MANIFEST);
+    const fetchImpl = trustAwareFetch({
+      // legacy entry (no trustTier) on a non-auto-trust source → blocked
+      'anthropics/skills-community': [{ name: 'untrusted-skill', kind: 'stack' }],
+    });
+    const res = await runVendorSkills({ worktreeDir: dir, fetchImpl });
+    expect(res.blocked).toBe(1);
+    expect(res.vendoredCount).toBe(0);
+    expect(existsSync(join(dir, '.claude/skills/untrusted-skill/SKILL.md'))).toBe(false);
+  });
+
+  it('ALLOWS a trusted skill even from a community source', async () => {
+    const dir = makeWorktree(COMMUNITY_MANIFEST);
+    const fetchImpl = trustAwareFetch({
+      'anthropics/skills-community': [{ name: 'untrusted-skill', trustTier: 'trusted' }],
+    });
+    const res = await runVendorSkills({ worktreeDir: dir, fetchImpl });
+    expect(res.blocked).toBe(0);
+    expect(res.vendoredCount).toBe(1);
+    expect(existsSync(join(dir, '.claude/skills/untrusted-skill/SKILL.md'))).toBe(true);
+  });
+
+  it('BLOCKS a reviewed skill even on an auto-trust source', async () => {
+    const dir = makeWorktree(CANVAS_MANIFEST);
+    const fetchImpl = trustAwareFetch({
+      'anthropics/skills': [
+        { name: 'canvas-design', trustTier: 'reviewed' },
+        { name: 'frontend-design', trustTier: 'trusted' },
+      ],
+    });
+    const res = await runVendorSkills({ worktreeDir: dir, fetchImpl });
+    expect(res.blocked).toBe(1); // canvas-design (reviewed) blocked
+    expect(res.vendoredCount).toBe(1); // frontend-design (trusted) vendored
+  });
+
+  it('GRANDFATHERS legacy entries on an auto-trust source (prod-safe)', async () => {
+    const dir = makeWorktree(CANVAS_MANIFEST);
+    // index has no trust facets at all → legacy; anthropic-official is auto-trust.
+    const fetchImpl = trustAwareFetch({ 'anthropics/skills': [] });
+    const res = await runVendorSkills({ worktreeDir: dir, fetchImpl });
+    expect(res.blocked).toBe(0);
+    expect(res.vendoredCount).toBe(2);
+  });
+});

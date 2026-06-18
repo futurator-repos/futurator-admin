@@ -15,7 +15,7 @@
  * release dashboard.
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import type { PlanWithEpics } from '@/hooks/use-plans';
 import { useDeployReport } from '@/hooks/use-deploy-report';
@@ -30,6 +30,11 @@ import { DeferredFeatures } from './deploy/deferred-features';
 
 export function DeployStageView({ plan }: { plan: PlanWithEpics }) {
   const { data: report, isLoading, error } = useDeployReport(plan.planId);
+
+  // Per-rung "view logs" affordance (B3): a rung can lift its env's deploy job
+  // id here so the single shared DeployLogs streams it. null = follow the
+  // active/current job automatically.
+  const [selectedLogJobId, setSelectedLogJobId] = useState<string | null>(null);
 
   // The backend fans deploys out through the final epic (highest plan-wave),
   // matching Developing → Deploy sub-tab semantics.
@@ -93,6 +98,13 @@ export function DeployStageView({ plan }: { plan: PlanWithEpics }) {
           ? 'No epics in this plan yet.'
           : undefined;
 
+  // A3 — drive the step tracker + log stream from the CURRENTLY-ACTIVE env
+  // deploy job (dev/staging/production), not just the production `current`.
+  // An explicit per-rung "view logs" selection wins; otherwise follow the rung
+  // that's deploying; otherwise fall back to the production current job.
+  const activeEnv = report.environments.find((e) => e.status === 'deploying');
+  const activeJobId = selectedLogJobId ?? activeEnv?.activeJobId ?? report.current?.jobId ?? null;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <ReleaseStrip
@@ -100,11 +112,16 @@ export function DeployStageView({ plan }: { plan: PlanWithEpics }) {
         epicId={targetEpicId}
         canDeploy={canDeploy}
         blockedReason={blockedReason}
+        planId={plan.planId}
       />
-      <EnvironmentLadder environments={report.environments} planId={plan.planId} />
+      <EnvironmentLadder
+        environments={report.environments}
+        planId={plan.planId}
+        onViewLogs={setSelectedLogJobId}
+      />
       <WhatsShipping handoff={report.handoff} />
-      <DeploySteps current={report.current} />
-      <DeployLogs deployJobId={report.current?.jobId ?? null} />
+      <DeploySteps current={report.current} activeJobId={activeJobId} />
+      <DeployLogs deployJobId={activeJobId} />
       <DeployHistory history={report.history} planId={plan.planId} />
       <EnvironmentFooter target={report.target} />
       <DeferredFeatures />

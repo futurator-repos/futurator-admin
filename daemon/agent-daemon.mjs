@@ -81,6 +81,7 @@ import {
   JOB_HANDLER_SKILL_SCOUT,
   JOB_HANDLER_SKILL_INSTALL,
   JOB_HANDLER_REFLECTOR,
+  JOB_HANDLER_SCORECARD_ASSESS,
 } from './pipelines/job-router.mjs';
 import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
 import { runPartyBootstrap } from './pipelines/party-bootstrap.mjs';
@@ -105,9 +106,22 @@ import {
   startAttentionPoller,
   composeAttentionPromptBody,
 } from './lib/attention-poller.mjs';
+// Skills Institution Story 1.2 — reflection-apply poller (closes the loop:
+// confirmed reflections → REFLECTOR-APPLY authors the app-evolved skill).
+import { startReflectionApplyPoller } from './lib/reflection-apply-poller.mjs';
+import { applyReflection } from './pipelines/reflector-apply.mjs';
 // 2026-05-19 — Phase 1 worktree rollout. Materialize per-story worktrees
 // + node_modules symlinks before any pipeline step runs.
 import { setupStoryWorktree, teardownStoryWorktree } from './lib/story-worktree.mjs';
+// Concept v2 (E1.2/E2.4) — land generated concept docs on disk + their manifests.
+import { writeConceptArtifact } from './pipelines/lib/concept-artifact-writeback.mjs';
+// Concept v2 (E3.2a) — fill {{PRIOR_ARTIFACTS}} from approved upstream docs.
+import {
+  loadPriorArtifacts,
+  loadAllConceptArtifacts,
+  loadCitableSections,
+  conceptKindForStepId,
+} from './pipelines/lib/story-context-pack.mjs';
 import { startReaperTicker } from './lib/worktree-reaper.mjs';
 // 2026-05-21 — auth-probe classifier (extracted so the false-FAIL fix
 // is unit-testable without bringing the daemon entry into the test).
@@ -125,7 +139,9 @@ import {
   findStaleJobs,
   buildResumeJob,
   isStaleAnyPhase,
+  isRequeueableOrphan,
   DEFAULT_STALE_MS,
+  REQUEUE_ON_ORPHAN_JOB_TYPES,
 } from './pipelines/stale-heartbeat.mjs';
 import {
   registerChild,
@@ -140,6 +156,7 @@ import {
 // for Bash tool_use events. Replaces prompt prose ("Do NOT run npm create
 // vite") with SIGTERM-on-match. See daemon/lib/bash-deny-patterns.mjs.
 import { matchesDenyPattern } from './lib/bash-deny-patterns.mjs';
+import { myceliumMcpSpawn } from './lib/mcp-config.mjs';
 import {
   writeAttentionItem,
   autoResolveAttentionByDedupKey,
@@ -176,11 +193,14 @@ import { applyConfirmedProposals } from './pipelines/skill-installer.mjs';
 import { runSkillInstallJob } from './pipelines/skill-install-job-runner.mjs';
 // Epic 6 wire-in (2026-05-20) — REFLECTOR job runner.
 import { runReflectorJob } from './pipelines/reflector-job-runner.mjs';
+// Plan Retrospect — The Assessor job runner + daemon-side scorecard store.
+import { runScorecardAssessJob } from './pipelines/scorecard-assess-job-runner.mjs';
+import { getStoredStageRow, putAssessorSlices } from './lib/scorecard-store.mjs';
 // Epic 4 (2026-05-20) — track Skill tool_use activations into
 // .context/loaded-skills.json so the per-story commit's Skills-Used
 // trailer populates with real content.
 import { recordSkillActivation } from './lib/loaded-skills-tracker.mjs';
-import { buildSkillsPromptLine } from './lib/skills-prompt.mjs';
+import { buildSkillsPromptLine, buildSkillsPushPrompt } from './lib/skills-prompt.mjs';
 import { startFederationBackupSchedule } from './lib/federation-backup.mjs';
 import { createFederationResolver } from './lib/federation-resolver.mjs';
 import { createMemoryStore, provisionMemoryRoot } from './lib/memory-store.mjs';
@@ -850,8 +870,14 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
   return new Promise((resolve, reject) => {
     const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
 
+    // Mycelium graph MCP tools (gated by MYCELIUM_MCP=on). Co-located with
+    // Memgraph on the box — no VPC barrier. Extends the agent's allowlist with
+    // the read-only graph tools; no-op when the flag is off.
+    const mcp = myceliumMcpSpawn(opts.allowedTools);
+    args.push(...mcp.args);
+
     if (opts.resume) args.push('--resume', opts.resume);
-    if (opts.allowedTools) args.push('--allowedTools', opts.allowedTools);
+    if (mcp.allowedTools) args.push('--allowedTools', mcp.allowedTools);
     if (opts.disallowedTools) args.push('--disallowedTools', opts.disallowedTools);
     if (opts.model) args.push('--model', opts.model);
     // PR-38 — per-rigor turn cap from the agent's RolePolicy. Resolved at
@@ -1372,7 +1398,32 @@ async function processStreamEvent(jobId, stepId, agentId, event, workingDir) {
  * Add other vars here if their persisted state is genuinely transient
  * (i.e., reconstructible from job metadata + working tree).
  */
-const TRANSIENT_VARS = new Set(['PROJECT_CONTEXT']);
+// Concept v2 (E2.4) — the raw generated markdown is the artifact OF RECORD on
+// disk (write-back lands `concept/<kind>.md` + sidecar). It must NOT be
+// persisted as a job variable — full PRD/UX/Arch prose can blow the ~400KB DDB
+// item cap. Write-back + manifest capture run at extraction time (in-memory),
+// then these vars are stripped before persist; the small `<KIND>_SECTIONS_JSON`
+// manifest var (ids/ranges/hash, no prose) survives for the apply endpoint.
+const TRANSIENT_VARS = new Set([
+  'PROJECT_CONTEXT',
+  'PRD_MD',
+  'UX_MD',
+  'ARCHITECTURE_MD',
+  // E3.2a — inlined upstream doc bodies for {{PRIOR_ARTIFACTS}}; prompt-only,
+  // never persisted (can be large — dodges the ~400KB DDB item cap).
+  'PRIOR_ARTIFACTS',
+  // E5.2 — citable section ids for the pm-plan {{CITABLE_SECTIONS}} placeholder;
+  // prompt-only, filled from the on-disk manifests at run time.
+  'CITABLE_SECTIONS',
+]);
+
+// Concept v2 (E2.4) — map a captured generator variable → its ArtifactKind.
+// The daemon runs write-back for any of these present after extraction.
+const CONCEPT_GEN_VARS = {
+  PRD_MD: 'prd',
+  UX_MD: 'ux',
+  ARCHITECTURE_MD: 'architecture',
+};
 
 function stripTransientVars(variables) {
   if (!variables || typeof variables !== 'object') return variables;
@@ -1548,10 +1599,41 @@ async function scanStaleEpicDevJobs() {
     // Without this pass they would have stayed RUNNING forever after EC2
     // restart (the new daemon's activeJobs Map is empty so nothing claims
     // them, and the orchestrator-only `findStaleJobs` filtered them out).
+    // 2026-06-16 — idempotent infra jobs (app-bootstrap) orphaned RUNNING by a
+    // daemon restart are AUTO-REQUEUED to PENDING so they finish themselves,
+    // instead of being marked STALE (terminal) and leaving the App stuck on
+    // "Scaffold pending" forever. Safe: these jobs are idempotent, and a
+    // genuinely-failing run lands FAILED via its own catch (not RUNNING), so
+    // this never loops. See REQUEUE_ON_ORPHAN_JOB_TYPES. (brick1 root-cause.)
+    // 2026-06-17 (Story 3.4) — `isRequeueableOrphan` now also matches autopilot
+    // concept-gen jobs (stamped `conceptAutopilotGen: true` by the driver), not
+    // just app-bootstrap. Interactive convergence turns are never stamped, so
+    // they fall through to mark-STALE.
+    const requeueOrphans = (Items || []).filter(
+      (j) =>
+        !activeJobs.has(j.jobId) &&
+        isRequeueableOrphan(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }),
+    );
+    for (const job of requeueOrphans) {
+      try {
+        await updateJobFields(job.jobId, { status: 'PENDING' });
+        const label = job.jobType || (job.conceptAutopilotGen ? 'concept-gen' : 'job');
+        log(
+          'warn',
+          `[${job.jobId.slice(0, 8)}] orphaned ${label} requeued → PENDING (idempotent; daemon restarted mid-run)`,
+        );
+      } catch (err) {
+        log('error', `Failed to requeue orphaned ${job.jobType} ${job.jobId.slice(0, 8)}: ${err.message}`);
+      }
+    }
+
     const otherStale = (Items || []).filter(
       (j) =>
         j.status === 'RUNNING' &&
         j.phase !== 'epic-dev' &&
+        // Requeueable orphans (idempotent infra + autopilot concept-gen) are
+        // handled above — don't also mark them STALE.
+        !isRequeueableOrphan(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }) &&
         !activeJobs.has(j.jobId) &&
         isStaleAnyPhase(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }),
     );
@@ -2086,6 +2168,29 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   log('info', `STEP: ${step.id} (Agent ${step.agentId} — ${agent.name})`);
   log('info', `${'='.repeat(60)}`);
 
+  // Concept v2 (E3.2a) — fill the {{PRIOR_ARTIFACTS}} placeholder for ux-gen /
+  // arch-gen from the APPROVED upstream docs on disk (prd for ux; prd+ux for
+  // arch). The Lambda can't read EC2 disk, so it enqueues the placeholder and we
+  // inline the real section bodies here, just before substitution. Never carried
+  // as a persisted job variable (avoids the 400KB cap).
+  if (typeof step.prompt === 'string' && step.prompt.includes('{{PRIOR_ARTIFACTS}}')) {
+    const conceptKind = conceptKindForStepId(step.id);
+    if (conceptKind) {
+      variables.PRIOR_ARTIFACTS = loadPriorArtifacts(workingDir, conceptKind);
+    } else if (step.id === 'pm-plan') {
+      // Round 1.1 — the chain-driven planner shards ALL approved docs (PRD + UX
+      // + Architecture), not just upstreams of one generator. This is what makes
+      // the epic plan grounded in the specs the agents just wrote.
+      variables.PRIOR_ARTIFACTS = loadAllConceptArtifacts(workingDir);
+    }
+  }
+  // Concept v2 (E5.2) — fill the pm-plan {{CITABLE_SECTIONS}} placeholder with
+  // the real, current-rev section ids from the approved on-disk manifests
+  // (closes the E7.8 gap: the PM cites the contract instead of deferring).
+  if (typeof step.prompt === 'string' && step.prompt.includes('{{CITABLE_SECTIONS}}')) {
+    variables.CITABLE_SECTIONS = loadCitableSections(workingDir);
+  }
+
   // 1. Template substitution
   const prompt = substituteTemplate(step.prompt, variables);
   log('debug', `Prompt after substitution: ${prompt.length} chars`);
@@ -2118,7 +2223,17 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   // tool. Skills LOAD in every session (CLI init reports them) but were
   // never ACTIVATED: their descriptions are user-utterance-shaped and never
   // match the daemon's machine prompts. See daemon/lib/skills-prompt.mjs.
-  const skillsSection = buildSkillsPromptLine(effectiveCwd);
+  //
+  // F24 (2026-06-18) — name+description PULL only fired on 5.2% of sessions.
+  // For the code-producing roles (DEV/TEST/API_AUTHOR) switch to PUSH: inject
+  // the BODIES of the top-3 skills ranked (F27 cosine) against THIS story's
+  // substituted prompt, so the conventions are in-context, not waiting on a
+  // Skill-tool call. The flat name+description list stays as the fallback for
+  // the remaining skills (and for all other roles).
+  const SKILLS_PUSH_ROLES = new Set(['DEV', 'TEST', 'API_AUTHOR']);
+  const skillsSection = SKILLS_PUSH_ROLES.has(step.agentId)
+    ? await buildSkillsPushPrompt(effectiveCwd, prompt)
+    : buildSkillsPromptLine(effectiveCwd);
   const promptParts = [];
   if (claudeMd && !claudeMd.truncated) promptParts.push(`# Project CLAUDE.md\n\n${claudeMd.content}`);
   if (skillsSection) promptParts.push(skillsSection);
@@ -2180,6 +2295,30 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
         variableValue: varValue.slice(0, 500),
         extractorType: step.extractors[varName].type,
       });
+    }
+
+    // Concept v2 (E2.4) — when a generator step emits PRD_MD / UX_MD /
+    // ARCHITECTURE_MD, land it on disk as the artifact of record (write-back:
+    // concept/<kind>.md + <kind>.sections.json, atomic, with anchors) and
+    // capture the SMALL manifest sidecar into `<KIND>_SECTIONS_JSON` so the
+    // Lambda apply endpoint can register {rev,contentHash} without reading EC2
+    // disk and without the raw prose (which TRANSIENT_VARS strips at persist).
+    for (const [genVar, kind] of Object.entries(CONCEPT_GEN_VARS)) {
+      const md = extracted[genVar];
+      if (typeof md !== 'string' || !md.trim()) continue;
+      try {
+        const { manifest } = writeConceptArtifact(workingDir, kind, md, { rev: 0 });
+        const sectionsVar = `${genVar.replace(/_MD$/, '')}_SECTIONS_JSON`;
+        variables[sectionsVar] = JSON.stringify(manifest);
+        await pushEvent(jobId, step.id, step.agentId, 'extraction', {
+          variableName: sectionsVar,
+          variableValue: `${manifest.sections.length} sections, ${manifest.contentHash}`,
+          extractorType: 'concept-writeback',
+        });
+        log('info', `[${jobId.slice(0, 8)}] wrote concept/${kind}.md (${manifest.sections.length} sections)`);
+      } catch (err) {
+        log('error', `[${jobId.slice(0, 8)}] concept write-back failed for ${kind}: ${err.message}`);
+      }
     }
 
     // PR-11 #1 — derive VERDICT + FEEDBACK from REVIEW_CRITERIA.
@@ -4449,6 +4588,12 @@ const GATE_AGENT_ROLES = {
     timeoutMs: 8 * 60 * 1000,
     allowedTools: 'Read,Grep,Glob',
   }),
+  // Plan Retrospect — The Assessor: read-only, grades [LLM] criteria.
+  assessor: () => ({
+    model: process.env.ASSESSOR_MODEL || 'claude-sonnet-4-6',
+    timeoutMs: 8 * 60 * 1000,
+    allowedTools: 'Read,Grep,Glob',
+  }),
 };
 
 async function spawnGateAgent({ role, prompt, cwd, round }, { short } = {}) {
@@ -5206,6 +5351,113 @@ async function getPlanRowForAutoMerge(planId) {
   }
 }
 
+// F6 (P0 cost safety) — HARD cost ceiling at the wave boundary.
+//
+// The cost ceiling was soft/post-hoc: cost-meter.decideAction /
+// cost-engine.checkCostEnvelope existed but nothing consulted them between
+// waves, so a runaway plan kept spawning wave work past its budget. This
+// turns the ceiling into a HARD gate: before a wave-merge dispatches its
+// stories, compare plan.totalCostUsd against plan.costCeilingUsd (with a
+// small overrun tolerance) using the EXISTING cost-meter math. When the
+// budget is blown we stop spawning new work, mark this wave's stories
+// 'skipped' (skippedReason: 'skipped-budget'), and raise an operator card.
+//
+// Returns true when the wave was blocked (caller should short-circuit the
+// merge), false when the wave may proceed. Fail-open on any unexpected
+// error (a budget-check blip must never wedge a plan).
+const WAVE_BUDGET_OVERRUN_TOLERANCE = 0.05; // allow 5% overrun before a hard stop
+
+async function enforceWaveBudgetGate(planRow, p, short) {
+  try {
+    const ceiling = Number(planRow?.costCeilingUsd);
+    if (!Number.isFinite(ceiling) || ceiling <= 0) return false; // no ceiling set → back-compat: no enforcement
+    const total = Number(planRow?.totalCostUsd) || 0;
+
+    // Reuse the existing cost-meter decision math. We inflate the ceiling by
+    // the overrun tolerance so `terminate` fires only once spend is past the
+    // ceiling + tolerance (decideAction terminates at cost >= ceiling).
+    const { CostMeter } = await import('./lib/cost-meter.mjs');
+    const decision = new CostMeter(ddb).decideAction(
+      total,
+      ceiling * (1 + WAVE_BUDGET_OVERRUN_TOLERANCE),
+    );
+    if (decision.action !== 'terminate') return false;
+
+    log(
+      'warn',
+      `[${short}] cost ceiling exceeded — blocking wave ${p.waveNumber} ` +
+        `(spend $${total.toFixed(2)} ≥ ceiling $${ceiling.toFixed(2)} +${Math.round(WAVE_BUDGET_OVERRUN_TOLERANCE * 100)}%)`,
+    );
+
+    // Mark this wave's stories 'skipped' with reason 'skipped-budget'. Best-
+    // effort, read-modify-write on the epic row (same shape the wave-reducer
+    // mutates). A write failure does NOT un-block the gate.
+    try {
+      const epicRes = await ddb.send(
+        new GetCommand({ TableName: EPICS_TABLE, Key: { epicId: p.epicId } }),
+      );
+      const stories = epicRes.Item?.stories;
+      if (Array.isArray(stories)) {
+        const ids = new Set(p.storyIds || []);
+        let changed = 0;
+        for (const s of stories) {
+          if (ids.has(s.storyId) && s.status !== 'done') {
+            s.status = 'skipped';
+            s.skippedReason = 'skipped-budget';
+            changed += 1;
+          }
+        }
+        if (changed > 0) {
+          await ddb.send(
+            new UpdateCommand({
+              TableName: EPICS_TABLE,
+              Key: { epicId: p.epicId },
+              UpdateExpression: 'SET stories = :s, updatedAt = :n',
+              ExpressionAttributeValues: { ':s': stories, ':n': new Date().toISOString() },
+              ConditionExpression: 'attribute_exists(epicId)',
+            }),
+          );
+          log('info', `[${short}] marked ${changed} story(ies) skipped-budget`);
+        }
+      }
+    } catch (markErr) {
+      log('warn', `[${short}] skipped-budget story mark failed (non-blocking): ${markErr.message}`);
+    }
+
+    // Raise an operator attention card (dedup per-plan — one open card per
+    // plan budget breach; recurrence increments rather than spamming).
+    await writeAttentionItem(
+      ddb,
+      {
+        planId: p.planId,
+        severity: 'high',
+        category: 'cost-ceiling-block',
+        title: `Cost ceiling exceeded — plan halted at wave ${p.waveNumber}`,
+        body:
+          `Plan spend $${total.toFixed(2)} reached the cost ceiling $${ceiling.toFixed(2)} ` +
+          `(+${Math.round(WAVE_BUDGET_OVERRUN_TOLERANCE * 100)}% overrun tolerance). ` +
+          `Wave ${p.waveNumber} was NOT merged and its remaining stories were marked ` +
+          `'skipped' (skipped-budget). Raise the ceiling via ` +
+          `POST /api/plans/${p.planId}/raise-cost-ceiling to resume, or accept the plan as-is.`,
+        context: {
+          epicId: p.epicId,
+          waveNumber: p.waveNumber,
+          totalCostUsd: total,
+          costCeilingUsd: ceiling,
+          skippedStoryIds: p.storyIds || [],
+        },
+        dedupKey: `cost-ceiling-block:${p.planId}`,
+      },
+      log,
+    );
+    return true;
+  } catch (err) {
+    // Fail-open: a budget-check error must never wedge the pipeline.
+    log('warn', `[${short}] wave budget gate check failed (fail-open): ${err.message}`);
+    return false;
+  }
+}
+
 async function patchAppRow(appId, patch) {
   const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
   if (entries.length === 0) return;
@@ -5411,6 +5663,24 @@ async function executeWaveMergeJob(job) {
   // gates + scales the v2.6 wave VQA stage.
   const planRow = await getPlanRowForAutoMerge(p.planId);
 
+  // F6 (P0 cost safety) — HARD cost ceiling at the wave boundary. Before this
+  // wave spawns ANY merge/validation work, stop if the plan has blown its
+  // budget. enforceWaveBudgetGate marks this wave's stories skipped-budget and
+  // raises an operator card; we terminate the job cleanly (COMPLETED, like the
+  // no-stories path) so the wave-reducer sees a terminal wave and never
+  // dispatches further work for this plan.
+  if (await enforceWaveBudgetGate(planRow, p, short)) {
+    await updateJobFields(jobId, {
+      status: 'COMPLETED',
+      phase: 'skipped-budget',
+      errorMessage: 'wave skipped — plan cost ceiling exceeded (skipped-budget)',
+    });
+    await pushEvent(jobId, 'wave-merge', 'MERGE', 'step_error', {
+      text: `wave ${p.waveNumber} skipped — plan cost ceiling exceeded (skipped-budget)`,
+    });
+    return;
+  }
+
   let resolveConflictHook;
   let fixBuildHook;
   try {
@@ -5559,6 +5829,118 @@ async function executeWaveMergeJob(job) {
         fixBuild: fixBuildHook,
         // v2.6 M2 — undefined (skip) unless rigor/qaContext/browser-ACs armed it.
         runVqa: runVqaHook,
+        // F14 (2026-06-18) — authoritative FULL-PROJECT ast-facts regen at
+        // wave-close. The per-story pipeline persists ast-facts from a
+        // `--diff-manifest` scan (last writer wins → snapshot collapses to one
+        // story's slice). Once the candidate worktree IS the integrated product,
+        // re-run bootstrap-ast over the WHOLE integrated tree (candidateDir),
+        // NOT a per-story worktree, so the persisted scan reflects every source
+        // file. Spawned as ubuntu (the worktree's owner) on the model of the
+        // boilerplate wave-gate bootstrap: `node bootstrap-ast.mjs --project
+        // <appId> --root <candidateDir>`. Best-effort: a regen failure logs and
+        // resolves — it must NEVER fail the wave merge.
+        regenAstFacts: ({ candidateDir, appId: regenAppId }) =>
+          new Promise((resolve) => {
+            try {
+              const scriptPath = new URL('./scripts/bootstrap-ast.mjs', import.meta.url).pathname;
+              const child = spawn(
+                'sudo',
+                [
+                  '-n',
+                  '-u',
+                  'ubuntu',
+                  process.execPath,
+                  scriptPath,
+                  '--project',
+                  regenAppId,
+                  '--root',
+                  candidateDir,
+                ],
+                { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } },
+              );
+              let stderr = '';
+              child.stderr.on('data', (b) => (stderr += b.toString('utf8').slice(-2000)));
+              child.on('close', (code) => {
+                if (code !== 0) {
+                  waveLog(
+                    'warn',
+                    `[wave-merge] full-project AST regen exit ${code} (non-blocking): ${stderr.slice(-300)}`,
+                  );
+                }
+                // F16 (2026-06-18) — consume the structured orphan signal the
+                // regen's graph-sync wrote. bootstrap-ast scans candidateDir,
+                // and graph-sync emits knowledge/_graph/orphan-signal.json with
+                // { genuineOrphanCount, legitimateFloaterCount, delta,
+                // needsAttention }. A genuine-orphan regression means an
+                // extractor dropped an edge — raise a deduped OPERATOR ATTENTION
+                // CARD. Best-effort: a parse/read failure must never fail the
+                // wave.
+                try {
+                  const signalPath = pathJoin(
+                    candidateDir,
+                    'knowledge',
+                    '_graph',
+                    'orphan-signal.json',
+                  );
+                  if (existsSync(signalPath)) {
+                    const signal = JSON.parse(readFileSync(signalPath, 'utf8'));
+                    if (signal && signal.needsAttention) {
+                      const n = signal.genuineOrphanCount ?? 0;
+                      const floaters = signal.legitimateFloaterCount ?? 0;
+                      const delta = signal.delta;
+                      const deltaStr =
+                        delta == null
+                          ? 'no prior baseline'
+                          : `${delta >= 0 ? '+' : ''}${delta} vs prior`;
+                      writeAttentionItem(
+                        ddb,
+                        {
+                          planId: p.planId,
+                          severity: 'medium',
+                          category: 'other',
+                          title: `Knowledge-graph: ${n} genuine orphan(s) (extractor dropped an edge)`,
+                          body:
+                            `The wave-close graph-sync over the integrated tree found ${n} ` +
+                            `genuine orphan node(s) (${deltaStr}; ${floaters} legitimate floater(s) ` +
+                            `excluded). A genuine orphan is a non-file node with no containing edge — ` +
+                            `an extractor dropped an edge rather than a real finding. See ` +
+                            `knowledge/_graph/orphan-signal.json for the breakdown.`,
+                          context: {
+                            appId: regenAppId,
+                            epicId: p.epicId,
+                            waveNumber: p.waveNumber,
+                            genuineOrphanCount: n,
+                            legitimateFloaterCount: floaters,
+                            delta: delta ?? null,
+                          },
+                          dedupKey: `graph-orphans:${regenAppId}:${p.waveNumber}`,
+                        },
+                        waveLog,
+                      ).catch((err) =>
+                        waveLog(
+                          'warn',
+                          `[wave-merge] orphan-signal attention write failed (non-blocking): ${err.message}`,
+                        ),
+                      );
+                    }
+                  }
+                } catch (err) {
+                  waveLog(
+                    'warn',
+                    `[wave-merge] orphan-signal consume failed (non-blocking): ${err.message}`,
+                  );
+                }
+                resolve();
+              });
+              child.on('error', (err) => {
+                waveLog('warn', `[wave-merge] full-project AST regen spawn failed (non-blocking): ${err.message}`);
+                resolve();
+              });
+            } catch (err) {
+              waveLog('warn', `[wave-merge] full-project AST regen threw (non-blocking): ${err.message}`);
+              resolve();
+            }
+          }),
         log: waveLog,
       }),
     );
@@ -5857,6 +6239,8 @@ async function runJobAsync(job) {
       await executeSkillInstallJob(job);
     } else if (handler === JOB_HANDLER_REFLECTOR) {
       await executeReflectorJob(job);
+    } else if (handler === JOB_HANDLER_SCORECARD_ASSESS) {
+      await executeScorecardAssessJob(job);
     } else {
       await executePipeline(job);
     }
@@ -5997,7 +6381,7 @@ function classifyAgentForSpend(job) {
   if (t.startsWith('party-')) return 'party';
   if (t === 'free-agent-session') return 'free-agent';
   if (t === 'app-bootstrap') return 'app-bootstrap';
-  if (t === 'wave-merge' || t === 'epic-dev' || t === 'skill-scout' || t === 'skill-install' || t === 'reflector') {
+  if (t === 'wave-merge' || t === 'epic-dev' || t === 'skill-scout' || t === 'skill-install' || t === 'reflector' || t === 'scorecard-assess') {
     return 'pipeline-v2';
   }
   return 'other';
@@ -6088,6 +6472,67 @@ async function executeSkillScoutJob(job) {
     };
   }
 
+  // F26 — provide emitBulkProposal so a surface-card `add` discovery is routed
+  // THROUGH the gate as a `bulk` skill-proposal (single trust authority) instead
+  // of installing straight through the vendor step. The daemon role now has DDB
+  // access to futurator-skill-proposals, so we write the row directly here,
+  // mirroring functions/shared/skill-gate/index.ts fromBulk + putProposal's
+  // SkillProposal shape. Best-effort: log + count, never fail the job.
+  async function emitBulkProposal(args) {
+    try {
+      const now = new Date().toISOString();
+      const proposalId = `${now.replace(/[-:T.]/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`;
+      const description = args.description || '';
+      const body = args.body || '';
+      const kind = args.kind || 'core';
+      const gist = description.trim().slice(0, 140);
+      const row = {
+        proposalId,
+        source: 'bulk',
+        skillName: args.name,
+        kind,
+        proposedBody: body,
+        // Gate would scan + label; the daemon writes the draft/vendored facets
+        // directly (mirrors fromBulk → labelProposal output). The operator
+        // ratifies it into the trusted registry from the inbox.
+        proposedEntry: {
+          name: args.name,
+          kind,
+          framework: false,
+          version: 'sha:HEAD',
+          license: 'UNKNOWN',
+          description,
+          provenanceClass: 'vendored',
+          securityStatus: 'unverified',
+          qualityGrade: 'ungraded',
+          trustTier: 'draft',
+          maturity: 0,
+          lineage: { adaptedFrom: args.originRef ?? null },
+        },
+        gist,
+        securityStatus: 'unverified',
+        qualityGrade: 'ungraded',
+        status: 'pending',
+        createdAt: now,
+        lineage: { adaptedFrom: args.originRef ?? null },
+        // Provenance back-refs from the job for the inbox.
+        planId: args.planId ?? null,
+        projectSlug: job.skillScoutPayload?.projectSlug ?? args.appId ?? null,
+      };
+      await ddb.send(
+        new PutCommand({
+          TableName: process.env.SKILL_PROPOSALS_TABLE || 'futurator-skill-proposals',
+          Item: row,
+        }),
+      );
+      log('info', `[${short}] emitted bulk skill-proposal ${proposalId} (${args.name})`);
+      return 1;
+    } catch (err) {
+      log('warn', `[${short}] emitBulkProposal failed for ${args?.name}: ${err?.message || err}`);
+      return 0;
+    }
+  }
+
   try {
     const result = await runSkillScoutJob(job, {
       federationCache,
@@ -6095,6 +6540,7 @@ async function executeSkillScoutJob(job) {
       executeAgentStep,
       applyConfirmedProposals,
       writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
+      emitBulkProposal,
       pushEvent,
       validateSkillProposalsBlock,
     });
@@ -6386,6 +6832,114 @@ async function executeReflectorJob(job) {
       errorMessage: err?.message || String(err),
     });
     log('error', `[${short}] reflector threw: ${err?.message || err}`);
+    throw err;
+  }
+}
+
+/**
+ * Plan Retrospect — The Assessor (plan-retrospect-spec §4b). Wraps
+ * `runScorecardAssessJob` with the daemon's surfaces: reads the API-written
+ * deterministic stage row (ground-truth context), spawns a read-only sonnet via
+ * the shared gate-agent surface to grade the stage's `[LLM]` criteria, and
+ * merges the Assessor slices back onto the scorecard row. The composer runs
+ * API-side on read, so this only persists; it never re-derives the numbers.
+ */
+async function executeScorecardAssessJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+  const p = job.scorecardAssessPayload || {};
+
+  log('info', `[${short}] Routing to scorecard-assess (Assessor)`, {
+    planId: p.planId,
+    stage: p.stage,
+    rubricVersion: p.rubricVersion,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'scorecard-assess',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  // Load the API-stored deterministic row → the ground-truth context block the
+  // Assessor must treat as authoritative (it never re-derives numbers).
+  async function loadDeterministicSlice({ planId, stage, rubricVersion }) {
+    const row = await getStoredStageRow(ddb, { planId, stage, rubricVersion });
+    if (!row) return null;
+    const detLines = (row.slices || [])
+      .filter((s) => s && s.verdict && s.verdict !== '⚪')
+      .map((s) => {
+        const v = typeof s.value === 'object' ? JSON.stringify(s.value) : s.value;
+        return `- ${s.criterionId}: ${s.verdict} score=${s.score} value=${v}${s.note ? ` — ${s.note}` : ''}`;
+      });
+    let planSummary = `Plan ${planId} · stage ${stage}`;
+    try {
+      const planRes = await ddb.send(
+        new GetCommand({ TableName: PLANS_TABLE, Key: { planId } }),
+      );
+      const plan = planRes.Item;
+      if (plan) {
+        planSummary =
+          `Plan ${plan.name || planId} · rigor ${plan.rigor || '?'} · status ${plan.status || '?'} · ` +
+          `${plan.doneStories ?? '?'}/${plan.totalStories ?? '?'} stories · cost $${plan.totalCostUsd ?? '?'}\n` +
+          `Intent: ${(plan.intent || '').slice(0, 400)}`;
+      }
+    } catch (e) {
+      log('warn', `[${short}] assessor plan-summary read partial: ${e?.message || e}`);
+    }
+    return {
+      // criterionIds omitted → the runner falls back to its LLM_CRITERIA_BY_STAGE.
+      rubricSlice: undefined,
+      deterministicContext: detLines.length
+        ? detLines.join('\n')
+        : '(no deterministic verdicts stored for this stage)',
+      planSummary,
+    };
+  }
+
+  async function runAgentStep(j, prompt) {
+    const res = await spawnGateAgent({ role: 'assessor', prompt, cwd: j.workingDir }, { short });
+    if (res?.ok === false) {
+      throw new Error(`assessor agent spawn failed: ${(res.output || '').slice(-300)}`);
+    }
+    return { output: res?.output || '', tokensConsumed: 0 };
+  }
+
+  try {
+    const paused = await isAgentPausedCached();
+    const result = await runScorecardAssessJob(job, {
+      paused,
+      loadDeterministicSlice,
+      runAgentStep,
+      writeAssessorSlices: (payload) => putAssessorSlices(ddb, payload),
+      pushEvent,
+      writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
+    });
+
+    if (result.ok) {
+      await updateJobFields(jobId, {
+        status: 'COMPLETED',
+        scorecardAssessStatus: result.status ?? 'completed',
+        scorecardAssessSliceCount: result.sliceCount ?? 0,
+        scorecardAssessGradedCount: result.gradedCount ?? 0,
+      });
+      log(
+        'info',
+        `[${short}] assessor completed (stage=${p.stage}, graded=${result.gradedCount ?? 0}/${result.sliceCount ?? 0})`,
+      );
+    } else {
+      await updateJobFields(jobId, {
+        status: 'FAILED',
+        errorMessage: result.error || result.reason || 'unknown',
+      });
+      log('warn', `[${short}] assessor failed: ${result.reason}`);
+    }
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] assessor threw: ${err?.message || err}`);
     throw err;
   }
 }
@@ -6754,6 +7308,72 @@ async function poll() {
       log: (level, msg, ctx) => log(level, msg, ctx),
     },
     { intervalMs: 30_000, initialDelayMs: 60_000 },
+  );
+
+  // Skills Institution Story 1.2 — reflection-apply poller. Confirmed
+  // reflections are landed on disk by REFLECTOR-APPLY (authors the app-evolved
+  // SKILL.md, Gate-1-scanned, commits). 60s cadence, gated by `agent.paused`.
+  // All I/O lives in these closures (raw DDB + fs) so the poller module stays
+  // pure + unit-tested. The working dir is the project's trunk checkout under
+  // PROJECTS_ROOT; a row whose repo isn't checked out is skipped (retried next
+  // tick), never stamped.
+  const REFLECTIONS_TABLE = process.env.REFLECTIONS_TABLE || 'futurator-reflections';
+  startReflectionApplyPoller(
+    {
+      isPaused: isAgentPausedCached,
+      listConfirmed: async () => {
+        const out = [];
+        let ExclusiveStartKey;
+        do {
+          const res = await ddb.send(
+            new ScanCommand({
+              TableName: REFLECTIONS_TABLE,
+              FilterExpression: '#status = :confirmed AND attribute_not_exists(appliedAt)',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: { ':confirmed': 'confirmed' },
+              ExclusiveStartKey,
+            }),
+          );
+          if (res.Items) out.push(...res.Items);
+          ExclusiveStartKey = res.LastEvaluatedKey;
+        } while (ExclusiveStartKey);
+        return out;
+      },
+      resolveWorkingDir: (projectSlug) => {
+        const dir = pathJoin(PARTY_PROJECTS_ROOT, projectSlug);
+        return existsSync(dir) ? dir : null;
+      },
+      applyReflection,
+      markApplied: async ({ projectSlug, id, outcome, commitSha, error }) => {
+        const sets = ['appliedAt = :now', 'applyOutcome = :outcome'];
+        const values = { ':now': new Date().toISOString(), ':outcome': outcome };
+        if (commitSha) {
+          sets.push('appliedCommitSha = :sha');
+          values[':sha'] = commitSha;
+        }
+        if (error) {
+          sets.push('applyError = :err');
+          values[':err'] = String(error).slice(0, 500);
+        }
+        try {
+          await ddb.send(
+            new UpdateCommand({
+              TableName: REFLECTIONS_TABLE,
+              Key: { projectSlug, id },
+              UpdateExpression: `SET ${sets.join(', ')}`,
+              ConditionExpression: 'attribute_exists(id) AND attribute_not_exists(appliedAt)',
+              ExpressionAttributeValues: values,
+            }),
+          );
+        } catch (err) {
+          // ConditionalCheckFailed = a racing tick already stamped it; benign.
+          if (err?.name !== 'ConditionalCheckFailedException') throw err;
+        }
+        return null;
+      },
+      log: (level, msg, ctx) => log(level, msg, ctx),
+    },
+    { intervalMs: 60_000, initialDelayMs: 90_000 },
   );
 
   log('info', 'Polling for PENDING jobs...\n');

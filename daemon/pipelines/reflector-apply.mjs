@@ -9,8 +9,20 @@
  *   project-claude-md → claude-md-writer.appendArchitectureDecision
  *                       (sections beyond "Architecture decisions" use a
  *                       small section-append shim below)
- *   project-skill     → skill-installer.applyConfirmedProposals
- *                       (one-skill manifest add + vendor)
+ *   project-skill     → two paths, discriminated by `content` shape (Skills
+ *                       Institution Story 1.1):
+ *                         • content is an OBJECT {skill,source,manifestBucket,
+ *                           version} → install an EXISTING federation skill by
+ *                           name (skill-installer.applyConfirmedProposals).
+ *                         • content is a STRING (the real reflection shape) →
+ *                           AUTHOR a NEW app-evolved skill from that content:
+ *                           write `.claude/skills/<skillName>/SKILL.md`, add a
+ *                           manifest pin (vendor skips it — body on disk), and
+ *                           commit. `action: create` authors, `tune` rewrites an
+ *                           existing app skill, `promote-from-project` is
+ *                           deferred (needs the daemon→skill-proposals write).
+ *                       Every authored body is Gate-1 scanned BEFORE commit
+ *                       (Story 1.3); a blocked body is never written.
  *   org-skill         → DEFERRED — needs `gh pr create` against
  *                       futurator-skills (Epic 1 follow-on)
  *   agent-persona     → DEFERRED — needs futurator-personas repo
@@ -28,9 +40,21 @@
  */
 
 import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { parse as parseYaml, stringify as yamlStringify } from 'yaml';
 
 import { appendArchitectureDecision } from '../lib/claude-md-writer.mjs';
 import { applyConfirmedProposals } from './skill-installer.mjs';
+import { scanSkill } from '../lib/security-scan.mjs';
+
+/** A slug usable as a directory name + skill id (mirrors skill-authoring.ts). */
+const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
+const MANIFEST_REL = '.claude/skills.manifest.yaml';
+const SKILLS_DIR_REL = '.claude/skills';
+/** Sentinel source for locally-authored skills — vendor-skills skips on-disk bodies. */
+const APP_EVOLVED_SOURCE = 'app-evolved';
 
 /**
  * Apply a confirmed reflection proposal. The public entry point — the
@@ -102,6 +126,25 @@ export async function applyReflection({
     }
   }
 
+  // A target writer may DEFER (e.g. promote-from-project needs the daemon→
+  // skill-proposals write that isn't wired yet) — surface it distinctly so the
+  // reflection stays pending rather than being marked failed/applied.
+  if (outcome.deferred) {
+    return { status: 'deferred', target, reason: outcome.reason };
+  }
+
+  // A Gate-1 block is a security quarantine, not a transient failure — surface
+  // the scan report so the operator can see exactly what tripped.
+  if (outcome.quarantined) {
+    return {
+      status: 'failed',
+      target,
+      reason: 'gate1-quarantined',
+      error: outcome.reason,
+      scanReport: outcome.scanReport,
+    };
+  }
+
   if (!outcome.ok) {
     return {
       status: 'failed',
@@ -161,21 +204,35 @@ async function applyClaudeMdProposal({ workingDir, proposal, log }) {
 // ── target=project-skill ──────────────────────────────────────────────
 
 async function applyProjectSkillProposal({ workingDir, projectSlug, proposal, log }) {
-  // The proposal's `content` is expected to carry `{ skill, source,
-  // version, manifestBucket, rationale }` shaped like a SkillScoutProposal.
-  const c = proposal.content ?? {};
+  const c = proposal.content;
+
+  // Path A — AUTHOR a NEW app-evolved skill from string content (the real
+  // reflection shape: `content` is the lesson/body text). This is the spine of
+  // success criterion #1 — a lesson becomes a brand-new skill the next run uses.
+  if (typeof c === 'string' && c.trim().length > 0) {
+    return authorAppSkill({ workingDir, proposal, content: c, log });
+  }
+
+  // Path B — install an EXISTING federation skill by name. The legacy
+  // (Epic 6 / scout-promotion) shape: `content` is an OBJECT carrying federation
+  // coordinates. Preserved unchanged.
+  const obj = c ?? {};
   if (
-    typeof c.skill !== 'string' ||
-    typeof c.source !== 'string' ||
-    typeof c.manifestBucket !== 'string' ||
-    typeof c.version !== 'string'
+    typeof obj.skill !== 'string' ||
+    typeof obj.source !== 'string' ||
+    typeof obj.manifestBucket !== 'string' ||
+    typeof obj.version !== 'string'
   ) {
     return {
       ok: false,
       reason: 'project-skill-payload-malformed',
-      error: 'proposal.content missing required {skill,source,manifestBucket,version}',
+      error: 'proposal.content must be a non-empty string (author) or {skill,source,manifestBucket,version} (install)',
     };
   }
+  return installFederationSkill({ workingDir, projectSlug, proposal, c: obj, log });
+}
+
+async function installFederationSkill({ workingDir, projectSlug, proposal, c, log }) {
   try {
     const output = {
       trigger: 'T0', // REFLECTOR-originated; T0 is a sentinel for "non-SCOUT-trigger"
@@ -206,6 +263,122 @@ async function applyProjectSkillProposal({ workingDir, projectSlug, proposal, lo
   } catch (err) {
     return { ok: false, reason: 'project-skill-apply-failed', error: String(err?.message || err) };
   }
+}
+
+// ── author a NEW app-evolved skill from a reflection's content (Story 1.1) ──
+
+/** Assemble a SKILL.md (frontmatter name+description + body). Mirror of skill-authoring.ts. */
+function buildSkillMd({ name, description, body }) {
+  const safeDesc = `"${String(description).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  return `---\nname: ${name}\ndescription: ${safeDesc}\n---\n\n${String(body).trim()}\n`;
+}
+
+/** First non-empty prose line, heading-stripped, as a short description. */
+function deriveDescription(proposal, content) {
+  const fromRationale = (proposal.rationale ?? '').trim();
+  if (fromRationale) return fromRationale.slice(0, 200);
+  const firstLine = String(content)
+    .split('\n')
+    .map((l) => l.replace(/^#+\s*/, '').trim())
+    .find((l) => l.length > 0);
+  return (firstLine ?? `app-evolved skill ${proposal.skillName}`).slice(0, 200);
+}
+
+/**
+ * Add (or refresh) an app-evolved manifest pin so the skill is tracked +
+ * prompt-prioritized. vendor-skills skips it because the body is on disk, so the
+ * sentinel `app-evolved` source never triggers a (failing) federation fetch.
+ * Idempotent. Best-effort: a manifest read/write failure does NOT block the
+ * authored skill (it's loadable from disk regardless).
+ */
+function addAppEvolvedManifestPin({ workingDir, skillName, rationale, log }) {
+  const manifestPath = join(workingDir, MANIFEST_REL);
+  if (!existsSync(manifestPath)) return; // no manifest → skill still loads from disk
+  try {
+    const manifest = parseYaml(readFileSync(manifestPath, 'utf-8')) || {};
+    if (!Array.isArray(manifest.domain)) manifest.domain = [];
+    const exists = manifest.domain.some(
+      (e) => e?.skill === skillName && e?.source === APP_EVOLVED_SOURCE,
+    );
+    if (!exists) {
+      manifest.domain.push({
+        source: APP_EVOLVED_SOURCE,
+        skill: skillName,
+        version: 'local',
+        ...(rationale ? { rationale: String(rationale).slice(0, 300) } : {}),
+      });
+      manifest['last-modified-by'] = `reflector-apply@${new Date().toISOString()}`;
+      writeFileSync(manifestPath, yamlStringify(manifest), 'utf-8');
+    }
+  } catch (err) {
+    log('warn', `reflector-apply author: manifest pin failed (non-fatal): ${err?.message || err}`);
+  }
+}
+
+async function authorAppSkill({ workingDir, proposal, content, log }) {
+  const skillName = proposal.skillName;
+  const action = proposal.action ?? 'create';
+
+  // promote-from-project graduates an app skill to the GLOBAL registry as a
+  // skill-proposals row — that daemon→DDB write is an E3 follow-on, not wired.
+  if (action === 'promote-from-project') {
+    return {
+      deferred: true,
+      reason:
+        'promote-from-project stages a global skill-proposals row (E3) — daemon→skill-proposals write not yet wired',
+    };
+  }
+
+  if (!skillName || !SKILL_NAME_RE.test(skillName)) {
+    return {
+      ok: false,
+      reason: 'app-skill-name-invalid',
+      error: `proposal.skillName "${skillName}" must match ${SKILL_NAME_RE}`,
+    };
+  }
+
+  // Gate-1 BEFORE any write — a malicious reflection must not author executable
+  // instructions into the app (Story 1.3).
+  const scan = scanSkill({ body: content });
+  if (scan.securityStatus === 'quarantined') {
+    log(
+      'warn',
+      `reflector-apply author: ${skillName} QUARANTINED by Gate-1 (${scan.patternsHit
+        .filter((h) => h.severity === 'blocking')
+        .map((h) => h.id)
+        .join(', ')}) — not written`,
+    );
+    return {
+      quarantined: true,
+      reason: `Gate-1 blocked: ${scan.patternsHit
+        .filter((h) => h.severity === 'blocking')
+        .map((h) => h.id)
+        .join(', ')}`,
+      scanReport: scan,
+    };
+  }
+
+  const skillDir = join(workingDir, SKILLS_DIR_REL, skillName);
+  const skillMdPath = join(skillDir, 'SKILL.md');
+  const isTune = action === 'tune';
+  if (isTune && !existsSync(skillMdPath)) {
+    log('info', `reflector-apply author: tune target ${skillName} absent — authoring as new`);
+  }
+
+  const description = deriveDescription(proposal, content);
+  try {
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(skillMdPath, buildSkillMd({ name: skillName, description, body: content }), 'utf-8');
+  } catch (err) {
+    return { ok: false, reason: 'app-skill-write-failed', error: String(err?.message || err) };
+  }
+
+  addAppEvolvedManifestPin({ workingDir, skillName, rationale: proposal.rationale, log });
+  log(
+    'info',
+    `reflector-apply author: ${isTune ? 'tuned' : 'created'} app-evolved skill ${skillName} (security=${scan.securityStatus})`,
+  );
+  return { ok: true, authored: skillName, securityStatus: scan.securityStatus };
 }
 
 // ── commit + push helper ──────────────────────────────────────────────

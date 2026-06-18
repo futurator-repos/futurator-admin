@@ -9,6 +9,7 @@
  */
 
 import {
+  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -59,6 +60,25 @@ export async function listReflections(
   // Newest first.
   filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   return filtered;
+}
+
+/**
+ * Delete every REFLECTOR proposal for a project (PK=projectSlug). Used by the
+ * app-delete cascade so a deleted app leaves no reflection rows behind. Volume
+ * is single-digit per plan-close (see header), so per-item deletes are fine.
+ * Returns the number deleted.
+ */
+export async function deleteReflectionsByProject(projectSlug: string): Promise<number> {
+  const rows = await listReflections({ projectSlug });
+  for (const row of rows) {
+    await docClient.send(
+      new DeleteCommand({
+        TableName: TABLE_NAMES.reflections,
+        Key: { projectSlug, id: row.id },
+      }),
+    );
+  }
+  return rows.length;
 }
 
 export async function getReflection(
@@ -115,6 +135,54 @@ export async function applyDecision(args: {
   } catch (err) {
     // Already confirmed — return the current row instead of throwing.
     if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      return getReflection(args.projectSlug, args.id);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Skills Institution Story 1.2 — stamp the REFLECTOR-APPLY landing record on a
+ * confirmed reflection AFTER the daemon's poller ran `applyReflection`. The
+ * conditional `attribute_not_exists(appliedAt)` is the idempotency guard: only
+ * the first poller tick to win records the outcome; a racing tick gets the
+ * ConditionalCheckFailed and returns the already-stamped row (so it won't
+ * re-apply). Stores only defined fields (a failed/deferred apply has no commit).
+ */
+export async function markReflectionApplied(args: {
+  projectSlug: string;
+  id: string;
+  outcome: NonNullable<ReflectionRow['applyOutcome']>;
+  commitSha?: string;
+  error?: string;
+  appliedAt?: string;
+}): Promise<ReflectionRow | null> {
+  const now = args.appliedAt || new Date().toISOString();
+  const sets = ['appliedAt = :now', 'applyOutcome = :outcome'];
+  const values: Record<string, unknown> = { ':now': now, ':outcome': args.outcome };
+  if (args.commitSha) {
+    sets.push('appliedCommitSha = :sha');
+    values[':sha'] = args.commitSha;
+  }
+  if (args.error) {
+    sets.push('applyError = :err');
+    values[':err'] = args.error;
+  }
+  try {
+    const result = await docClient.send(
+      new UpdateCommand({
+        TableName: TABLE_NAMES.reflections,
+        Key: { projectSlug: args.projectSlug, id: args.id },
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: 'attribute_exists(id) AND attribute_not_exists(appliedAt)',
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return (result.Attributes as ReflectionRow) || null;
+  } catch (err) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      // Already stamped (or row gone) — return current so the poller skips it.
       return getReflection(args.projectSlug, args.id);
     }
     throw err;

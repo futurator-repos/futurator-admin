@@ -77,10 +77,52 @@ export interface CompilationArticleCounts {
 
 // ── Acceptance criteria & visual test definitions ──
 
+/**
+ * Concept v2 — the PM-set *verify intent* (planning altitude). It is the source
+ * the downstream QA-AUTHOR derives the concrete VQA L-level from at story-dev
+ * start; the PM never sets L0/L1/L2 directly (a mechanism fact unknown until the
+ * test seam exists). See `docs/concepts/pipeline-v3/concept-stage-v2-bmad.md` §4.
+ *   build      → typecheck/unit (no browser)
+ *   appearance → idle-visible vision check (L1)
+ *   state      → deterministic seam read (L2-state if a seam exists, else L1)
+ *   behavior   → reach→act→observe probe (L2)
+ *   manual     → human-in-the-loop operator lane (blocks ship); needs manualReason
+ */
+export type VerifyIntent = 'build' | 'appearance' | 'state' | 'behavior' | 'manual';
+
+/**
+ * Concept v2 / VQA v3 — closed reason enum for `verify: 'manual'` ACs (§8 gate,
+ * VQA §11 H12). Seven named classes each map to a known "stub possible?" verdict
+ * against the boilerplate contract; `no-stub-possible` is the QA-AUTHOR routing
+ * catch-all. Required iff `verify === 'manual'`. Reserved for the *knowably*
+ * unautomatable so `manual` cannot become the new UNVERIFIABLE escape hatch.
+ */
+export type ManualReason =
+  | 'real-payment'
+  | 'oauth-consent'
+  | 'captcha'
+  | 'native-device'
+  | 'email-sms-loop'
+  | 'subjective-quality'
+  | 'video-audio-perception'
+  | 'no-stub-possible';
+
 export interface AcceptanceCriterion {
   id: string; // e.g., "AC-1"
-  text: string; // plain English description
+  text: string; // plain English description (remains the legacy / fallback form)
   needsBrowser: boolean; // does verification require a running browser?
+
+  // ── Concept v2 (BMAD BDD structure) — all optional; legacy flat-`text` ACs
+  //    and `prototype` runs are unaffected. ──
+  given?: string; // precondition / initial state
+  when?: string; // action or trigger
+  then?: string; // expected outcome — PROSE-OBSERVABLE (a human claim), never a raw seam expr
+  thenObservable?: string; // optional hint for the QA-AUTHOR's prose→assert compilation
+
+  /** PM-set verify intent (sibling of `needsBrowser`). Source for the QA-AUTHOR's L-level. */
+  verify?: VerifyIntent;
+  /** Required iff `verify === 'manual'`; validated against the closed enum at the gate. */
+  manualReason?: ManualReason;
 }
 
 /**
@@ -100,22 +142,86 @@ export interface AcceptanceCriterion {
 export type VisualTestLevel = 'L0' | 'L1' | 'L2';
 
 /**
- * One step of an L2 Playwright flow. Deliberately small surface — the bash
- * orchestrator drives a real `npx playwright` subshell, not a JS DOM stub.
+ * Comparison operator for the L2-state `assert` oracle (VQA v3 FR-4). The
+ * assert step reads `window.__harness.snapshot()`/`events` and compares with one
+ * of these — a deterministic verdict, no LLM call.
+ */
+export type AssertOp = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'truthy' | 'falsy';
+
+/**
+ * The probe action grammar (VQA v3 E2.1). Driver-agnostic on purpose — these are
+ * intent verbs, not Playwright calls, so a future native driver can interpret the
+ * same grammar (FR-29). The first five are the legacy set (back-compat).
+ */
+export type ProbeStepAction =
+  // ── legacy (pre-v3) ──
+  | 'navigate'
+  | 'click'
+  | 'wait'
+  | 'screenshot'
+  | 'fill'
+  // ── VQA v3 interaction grammar (FR-2) ──
+  | 'press'
+  | 'hold'
+  | 'tap'
+  | 'pointer'
+  | 'clock'
+  | 'select'
+  | 'drag'
+  | 'assert'
+  | 'seed'
+  // ── H10 coverage-class grammar gaps ──
+  | 'viewport'
+  | 'upload'
+  | 'download'
+  | 'network'
+  | 'stroke';
+
+/**
+ * One step of a probe (`reach → act → observe`). Deliberately small, optional
+ * surface — the bash orchestrator drives a real `npx playwright` subshell, not a
+ * JS DOM stub. Concept/VQA v3 extends it from "L2 flow step" into the full probe
+ * grammar; legacy `{action, url, selector, value, ms, label}` steps still validate.
  */
 export interface VisualTestFlowStep {
-  /** What this step does in the headless browser. */
-  action: 'navigate' | 'click' | 'wait' | 'screenshot' | 'fill';
+  /** What this step does. See `ProbeStepAction`. */
+  action: ProbeStepAction;
   /** For `navigate` — relative URL ("/", "/foo"); absolute URLs rejected. */
   url?: string;
-  /** For `click`/`fill` — DOM selector. */
+  /** For `click`/`fill`/`select`/`drag`/`upload`/`download` — DOM selector. */
   selector?: string;
-  /** For `fill` — value to type. */
+  /** For `fill`/`select` — value to type/choose; for `upload`/`download` — file path. */
   value?: string;
-  /** For `wait` — milliseconds. */
+  /** For `wait`/`clock` — milliseconds. */
   ms?: number;
   /** For `screenshot` — short label that becomes part of the PNG filename. */
   label?: string;
+
+  // ── VQA v3 interaction grammar (E2.1) ──
+  /** For `press`/`hold` — key name, e.g. 'Space', 'ArrowLeft', 'Enter'. */
+  key?: string;
+  /** For `pointer`/`tap`/`drag` — viewport coordinates. */
+  x?: number;
+  y?: number;
+  /** For `clock` — install (freeze), fastForward (jump), or runFor (advance). */
+  clockMode?: 'install' | 'fastForward' | 'runFor';
+
+  // ── L2-state `assert` oracle (FR-4) ──
+  /** For `assert`/`seed` — JSON-path into the harness snapshot, e.g. 'snapshot.gameState'. */
+  expr?: string;
+  /** For `assert` — comparison operator. */
+  op?: AssertOp;
+  /** For `assert` — expected value (compared per `op`). */
+  expected?: string | number | boolean;
+
+  // ── H10 coverage-class grammar gaps ──
+  /** For `viewport` — width/height. */
+  w?: number;
+  h?: number;
+  /** For `network` — connectivity mode. */
+  network?: 'offline' | 'online';
+  /** For `stroke` — continuous-gesture path (touch/pen). */
+  points?: Array<{ x: number; y: number }>;
 }
 
 export interface VisualTestDef {
@@ -216,18 +322,57 @@ export interface ReviewStep {
 
 // ── Story ──
 
+/**
+ * Concept v2 — an AC-mapped task in the DEV checklist. `acRefs` ties each task
+ * to the acceptance criteria it satisfies (BMAD `create-story` grade).
+ */
+export interface StoryTask {
+  id: string; // "T1"
+  text: string;
+  acRefs: string[]; // e.g. ["AC-S1-1"] — which ACs this task satisfies
+  done?: boolean; // DEV flips during execution
+}
+
+/**
+ * Concept v2 — a citation from a story into an upstream artifact section or the
+ * boilerplate test-harness seam. `section` is validated against the artifact's
+ * section manifest (Concept §6.2 — wired in Epic E4), or, for `source: 'harness'`,
+ * a JSON-path into `__harness.schema.json` (e.g. "snapshot.gameState").
+ */
+export interface StoryReference {
+  source: 'prd' | 'architecture' | 'ux' | 'harness';
+  section: string;
+  note?: string; // why this story cites it
+}
+
 export interface EpicStory {
   storyId: string;
   order: number;
   title: string;
   description: string; // full story text including AC
   status: StoryStatus;
+  /**
+   * F6 — why a story landed in `status === 'skipped'`. 'skipped-budget' is
+   * written by the daemon's wave budget gate (`enforceWaveBudgetGate`) when a
+   * wave is blocked because the plan's cost ceiling was reached. The
+   * wave-reducer treats any 'skipped' story as terminal (does not block the
+   * wave, never relaunches it). Absent for non-skipped stories.
+   */
+  skippedReason?: 'skipped-budget';
   jobId?: string; // linked pipeline job ID
   dependsOn?: string[]; // story IDs this depends on
   wave?: number; // computed wave for parallel execution (0-indexed)
   hasBrowserTests?: boolean; // derived from criteria
   criteria?: AcceptanceCriterion[]; // structured criteria
   visualTests?: VisualTestDef[]; // populated by Dev agent
+
+  // ── Concept v2 (BMAD-grade definition) — all optional; legacy stories and
+  //    `prototype` runs are unaffected. Carried through the Story Context Pack
+  //    (Epic E3) and consumed by the DEV/REVIEWER agents at Start development. ──
+  userStory?: { role: string; action: string; benefit: string }; // As a / I want / So that
+  technicalNotes?: string; // impl guidance, affected components, constraints
+  tasks?: StoryTask[]; // AC-mapped checklist for the DEV agent
+  references?: StoryReference[]; // citations into prd.md / architecture.md / ux-spec.md / harness
 
   // ── Compilation metadata (MY-2 Story Compilation Pipeline) ──
   compilationStatus?: CompilationStatus;
@@ -291,6 +436,10 @@ export interface EpicWorkflow {
   title: string;
   description: string;
   acceptanceCriteria: string;
+  /** Concept v2 — value statement ("why this epic exists"; BMAD names epics by value). Optional. */
+  goal?: string;
+  /** Concept v2 — PRD functional-requirement ids this epic covers (e.g. ["FR-3","FR-7"]); traceability spine for the §8 gate + §12 overlay. */
+  requirementRefs?: string[];
   workingDir: string;
   status: EpicStatus;
   stories: EpicStory[];

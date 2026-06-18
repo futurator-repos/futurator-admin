@@ -1,0 +1,31 @@
+{
+  "_comment": "Curated, append-only Capability seed (Epic 5 / PRD §7.3, Appendix E). The ONLY manual seam in the contract spine — GARDENER-maintained (M4). Each capability links equivalent implementations across substrates (labs/mobile/office) so pure-UI parity is trackable with no shared backend. Keep it small (~dozens). Provenance is DECLARED; never silently promoted.",
+  "capabilities": [
+    {
+      "nodeId": "capability/wave-gate-approval",
+      "label": "Wave Gate Approval",
+      "implementedBy": {
+        "labs": ["code/src--components--epics--wave-gate-modal.tsx"],
+        "mobile": [],
+        "office": []
+      },
+      "contract": {
+        "endpoints": ["POST /api/epic-workflows/:id/waves/:waveId/approve"],
+        "tables": ["WaveConflictsTable"]
+      }
+    },
+    {
+      "nodeId": "capability/project-portfolio",
+      "label": "Project Portfolio View",
+      "implementedBy": {
+        "labs": ["code/src--components--projects--projects-view.tsx"],
+        "mobile": [],
+        "office": []
+      },
+      "contract": {
+        "endpoints": ["GET /api/public/projects"],
+        "tables": ["ProjectsTable"]
+      }
+    }
+  ]
+}

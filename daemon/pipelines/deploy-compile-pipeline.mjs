@@ -89,7 +89,7 @@ function buildSnapshotCommand(projectId, date) {
 
 function buildPruneSyncCommand() {
   return [
-    'node /home/ubuntu/scripts/graph-sync.mjs',
+    'node /opt/futurator-daemon/scripts/graph-sync.mjs',
     '--project {{projectId}}',
     '--full-resync',
     '--prune',

@@ -4,17 +4,34 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import {
   articleUrl,
+  centralityRadius,
+  communityColor,
   computeCoverage,
   computeIsolated,
+  integrityHeadline,
   ISOLATION_COPY,
+  maxCentrality,
   type IsolatedNode,
+  type DeadCodeReport,
+  type OrphanReport,
+  type ArchInsights,
+  type CapabilityGapReport,
 } from '@/lib/graph-insights';
+import { DeadCodePanel } from './dead-code-panel';
+import { ArchXrayPanel } from './arch-xray-panel';
+import { CapabilityGapPanel } from './capability-gap-panel';
+import { ArticleViewer } from './article-viewer';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
   ssr: false,
 });
 
 const S3_BASE = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
+// Article links open in a browser tab — use the CloudFront domain, NOT the raw
+// `futurator-ai-website.s3…` hostname (Chrome's safe-browsing flags it as a
+// "did you mean futurator.ai?" lookalike). Same content, no warning. Snapshot
+// JSON keeps fetching from S3_BASE (CORS already allows the admin origin there).
+const ARTICLE_BASE = 'https://futurator.ai/knowledge-live';
 
 // Color palette keyed by node *kind* (Slice B). `kind` distinguishes the
 // AST-derived sub-file nodes from the file-level wiki nodes; falls back to
@@ -39,10 +56,12 @@ const EDGE_COLORS: Record<string, string> = {
   CONFLICTS_WITH: '#f43f5e',
   ENABLES: '#facc15',
   INFORMS: '#a3a3a3',
+  REFERENCES: '#2dd4bf', // teal — living doc (decision/architecture/index) → code it describes
   // AST-derived (Slice B)
   DEFINES: '#0ea5e9',
   IMPORTS: '#ec4899',
   CALLS: '#f59e0b',
+  RENDERS: '#8b5cf6', // violet — JSX component composition (ts-morph)
 };
 
 type GraphNode = {
@@ -69,6 +88,8 @@ type GraphNode = {
   className?: string | null;
   fnKind?: string;
   extends?: string | null;
+  // Semantic neighbours from the Voyage embeddings (graph-sync kNN).
+  similarTo?: { id: string; score: number }[];
 };
 
 /** Resolve color for a node — prefer kind, fall back to type. */
@@ -105,8 +126,6 @@ const RECENT_PROJECTS = [
   '8eff885b-2d96-4a3a-8e11-163f0b545fb7',
 ];
 
-const AUTO_REFRESH_MS = 5000;
-
 export function GraphViewer({
   projectId: lockedProjectId,
 }: {
@@ -118,8 +137,10 @@ export function GraphViewer({
   const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
+  const [articleNode, setArticleNode] = useState<GraphNode | null>(null);
+  // Focus / local view — isolate the selected node + its neighbourhood.
+  const [focusMode, setFocusMode] = useState(false);
   const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 800, height: 600 });
@@ -183,14 +204,13 @@ export function GraphViewer({
     }
   }, []);
 
-  // Fetch when projectId changes, and on auto-refresh interval
+  // Fetch once when the project loads / changes. Refresh is manual (button) —
+  // no polling, so an in-progress compile doesn't yank the canvas out from
+  // under you mid-inspection.
   useEffect(() => {
     if (!projectId) return;
     fetchSnapshot(projectId);
-    if (!autoRefresh) return;
-    const id = setInterval(() => fetchSnapshot(projectId), AUTO_REFRESH_MS);
-    return () => clearInterval(id);
-  }, [projectId, autoRefresh, fetchSnapshot]);
+  }, [projectId, fetchSnapshot]);
 
   const graphData = useMemo(() => {
     if (!snapshot) return { nodes: [], links: [] };
@@ -218,6 +238,14 @@ export function GraphViewer({
   const [hiddenKinds, setHiddenKinds] = useState<Set<string>>(new Set());
   const [hiddenEdges, setHiddenEdges] = useState<Set<string>>(new Set());
 
+  // ── Searcher — highlight matches + their 1-hop neighbors so you can probe the
+  // graph's quality by hand. Client-side over the loaded snapshot (Memgraph is
+  // VPC-internal, so live Cypher would need a daemon-proxied endpoint — a future
+  // step). Supports free-text (matches title/id/name) and `field:value` filters:
+  //   kind:file  type:function  status:active  phase:implementation  tag:foo
+  // Space-separated terms are AND-ed.
+  const [search, setSearch] = useState('');
+
   const nodeKindBreakdown = useMemo(() => {
     if (!snapshot) return {};
     const out: Record<string, number> = {};
@@ -244,6 +272,53 @@ export function GraphViewer({
     [snapshot],
   );
   const [isolatedOpen, setIsolatedOpen] = useState(false);
+
+  // ── Epic 2: "Dead code / unreferenced" — graph-integrity reports ─────────
+  // Read knowledge/_graph/{dead-code,orphans}.json from the same live S3 mirror
+  // the snapshot comes from. Refreshed in lockstep with the snapshot. Additive,
+  // non-blocking — a missing report just shows the empty/unknown state.
+  const [deadCode, setDeadCode] = useState<DeadCodeReport | null>(null);
+  const [orphanReport, setOrphanReport] = useState<OrphanReport | null>(null);
+  // ── Epic 3: Architectural X-ray — insights.json (centrality/communities) ──
+  const [archInsights, setArchInsights] = useState<ArchInsights | null>(null);
+  const [overlayEnabled, setOverlayEnabled] = useState(true);
+  // ── Epic 5: capability coverage gaps — capability-gaps.json (--global only) ─
+  const [capabilityGaps, setCapabilityGaps] = useState<CapabilityGapReport | null>(null);
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    const base = `${S3_BASE}/${encodeURIComponent(projectId)}/_graph`;
+    const pull = async <T,>(file: string): Promise<T | null> => {
+      try {
+        const res = await fetch(`${base}/${file}?t=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) return null;
+        return (await res.json()) as T;
+      } catch {
+        return null;
+      }
+    };
+    (async () => {
+      const [dc, orph, ins, gaps] = await Promise.all([
+        pull<DeadCodeReport>('dead-code.json'),
+        pull<OrphanReport>('orphans.json'),
+        pull<ArchInsights>('insights.json'),
+        pull<CapabilityGapReport>('capability-gaps.json'),
+      ]);
+      if (!cancelled) {
+        setDeadCode(dc);
+        setOrphanReport(orph);
+        setArchInsights(ins);
+        setCapabilityGaps(gaps);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, lastFetchedAt]);
+  const integrity = useMemo(() => integrityHeadline(orphanReport), [orphanReport]);
+  const maxC = useMemo(() => maxCentrality(archInsights), [archInsights]);
+  // Overlay is live only when enabled AND the analytics pass produced metrics.
+  const overlayActive = overlayEnabled && !!archInsights?.mageAvailable;
 
   // Compiler activity feed — the wiki's log.md from the live S3 mirror.
   const [logTail, setLogTail] = useState<string | null>(null);
@@ -285,6 +360,78 @@ export function GraphViewer({
     );
     return { nodes: visibleNodes, links: visibleLinks };
   }, [graphData, hiddenKinds, hiddenEdges]);
+
+  // Resolve a force-graph link endpoint, which react-force-graph mutates from a
+  // string id into the node object after the first simulation tick.
+  const endpointId = (e: unknown): string =>
+    typeof e === 'object' && e !== null ? (e as { id: string }).id : (e as string);
+
+  const searchMatch = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return null;
+    const filters: { field: string; value: string }[] = [];
+    const terms: string[] = [];
+    for (const tok of q.split(/\s+/)) {
+      const m = tok.match(/^(kind|type|status|phase|tag|id|title):(.+)$/);
+      if (m) filters.push({ field: m[1], value: m[2] });
+      else terms.push(tok);
+    }
+    const matchIds = new Set<string>();
+    for (const n of filteredGraphData.nodes as GraphNode[]) {
+      const kind = (n.kind ?? n.type ?? '').toLowerCase();
+      const hay = `${n.title ?? ''} ${n.id ?? ''} ${n.name ?? ''}`.toLowerCase();
+      const okFilters = filters.every((f) => {
+        if (f.field === 'kind' || f.field === 'type') return kind.includes(f.value);
+        if (f.field === 'status') return (n.status ?? '').toLowerCase().includes(f.value);
+        if (f.field === 'phase') return (n.phase ?? '').toLowerCase().includes(f.value);
+        if (f.field === 'id') return (n.id ?? '').toLowerCase().includes(f.value);
+        if (f.field === 'title') return (n.title ?? '').toLowerCase().includes(f.value);
+        if (f.field === 'tag') return (n.tags ?? []).some((t) => t.toLowerCase().includes(f.value));
+        return true;
+      });
+      const okText = terms.length === 0 || terms.every((t) => hay.includes(t));
+      if (okFilters && okText) matchIds.add(n.id);
+    }
+    const neighborIds = new Set<string>();
+    for (const e of filteredGraphData.links as GraphEdge[]) {
+      const s = endpointId(e.source);
+      const t = endpointId(e.target);
+      if (matchIds.has(s)) neighborIds.add(t);
+      if (matchIds.has(t)) neighborIds.add(s);
+    }
+    return { matchIds, neighborIds, count: matchIds.size };
+  }, [search, filteredGraphData]);
+
+  const DIM = 'rgba(100,116,139,0.12)';
+  const SIMILAR = '#e879f9'; // magenta — semantic neighbours of the selected node
+
+  // Focus view: when on + a node is selected, isolate it + its 1-hop neighbours
+  // (structural edges AND semantic similarity), hiding the rest of the graph.
+  const focusGraphData = useMemo(() => {
+    if (!focusMode || !selectedNode) return filteredGraphData;
+    const center = selectedNode.id;
+    const keep = new Set<string>([center]);
+    for (const e of filteredGraphData.links as GraphEdge[]) {
+      const s = endpointId(e.source);
+      const t = endpointId(e.target);
+      if (s === center) keep.add(t);
+      if (t === center) keep.add(s);
+    }
+    for (const s of selectedNode.similarTo ?? []) keep.add(s.id);
+    return {
+      nodes: (filteredGraphData.nodes as GraphNode[]).filter((n) => keep.has(n.id)),
+      links: (filteredGraphData.links as GraphEdge[]).filter(
+        (e) => keep.has(endpointId(e.source)) && keep.has(endpointId(e.target)),
+      ),
+    };
+  }, [focusMode, selectedNode, filteredGraphData]);
+
+  // Semantic neighbours of the selected node (from the embedding kNN). Used to
+  // ring them on the canvas + list them in the detail panel.
+  const similarSet = useMemo(
+    () => new Set((selectedNode?.similarTo ?? []).map((s) => s.id)),
+    [selectedNode],
+  );
 
   function toggleKind(k: string) {
     setHiddenKinds((prev) => {
@@ -333,22 +480,54 @@ export function GraphViewer({
         </div>
       )}
 
-      {/* Auto-refresh + manual refresh — shown in both modes */}
+      {/* Search + manual refresh — no polling (refreshes on load + this button) */}
       <div className="flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-1.5 text-sm">
-          <input
-            type="checkbox"
-            checked={autoRefresh}
-            onChange={(e) => setAutoRefresh(e.target.checked)}
-          />
-          Auto-refresh (5s)
-        </label>
         <button
           onClick={() => projectId && fetchSnapshot(projectId)}
           disabled={!projectId || loading}
           className="rounded-md border border-input bg-background px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
         >
-          {loading ? 'Loading…' : 'Refresh now'}
+          {loading ? 'Loading…' : 'Refresh'}
+        </button>
+        <div className="flex flex-1 items-center gap-2 min-w-[280px]">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search — free text, or kind:file status:active tag:foo"
+            className="flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+            title="Highlights matching nodes + their neighbours. Filters: kind: type: status: phase: tag: id: title:"
+          />
+          {search && (
+            <>
+              <span className="whitespace-nowrap text-xs text-muted-foreground">
+                {searchMatch?.count ?? 0} match{(searchMatch?.count ?? 0) === 1 ? '' : 'es'}
+              </span>
+              <button
+                onClick={() => setSearch('')}
+                className="rounded-md border border-input bg-background px-2 py-1.5 text-xs hover:bg-muted"
+                title="Clear search"
+              >
+                ✕
+              </button>
+            </>
+          )}
+        </div>
+        <button
+          onClick={() => setFocusMode((v) => !v)}
+          disabled={!selectedNode}
+          className={`rounded-md border px-3 py-1.5 text-sm disabled:opacity-50 ${
+            focusMode
+              ? 'border-accent-blue bg-accent-blue/15 text-accent-blue'
+              : 'border-input bg-background hover:bg-muted'
+          }`}
+          title={
+            selectedNode
+              ? 'Isolate the selected node + its neighbours'
+              : 'Select a node first, then focus on its neighbourhood'
+          }
+        >
+          {focusMode ? 'Focus: on' : 'Focus neighbours'}
         </button>
         {locked && projectId && (
           <span className="text-xs text-muted-foreground font-mono">project: {projectId}</span>
@@ -464,7 +643,7 @@ export function GraphViewer({
           )}
           {snapshot && (
             <ForceGraph2D
-              graphData={filteredGraphData}
+              graphData={focusGraphData}
               width={size.width}
               height={size.height}
               nodeLabel={(n: object) => {
@@ -472,11 +651,52 @@ export function GraphViewer({
                 const kind = g.kind ?? g.type;
                 return `${g.title} (${kind})`;
               }}
-              nodeColor={(n: object) => colorForNode(n as unknown as GraphNode)}
-              nodeVal={(n: object) => radiusForNode(n as unknown as GraphNode)}
+              nodeColor={(n: object) => {
+                const g = n as unknown as GraphNode;
+                // Search dimming: matches + neighbors keep colour, the rest fade.
+                if (
+                  searchMatch &&
+                  !searchMatch.matchIds.has(g.id) &&
+                  !searchMatch.neighborIds.has(g.id)
+                ) {
+                  return DIM;
+                }
+                // Semantic-similarity highlight (only when not searching).
+                if (!searchMatch && similarSet.has(g.id)) return SIMILAR;
+                if (overlayActive) {
+                  const m = archInsights?.nodeMetrics[g.id];
+                  if (m && m.community != null) return communityColor(m.community);
+                }
+                return colorForNode(g);
+              }}
+              nodeVal={(n: object) => {
+                const g = n as unknown as GraphNode;
+                let r: number;
+                if (overlayActive) {
+                  const m = archInsights?.nodeMetrics[g.id];
+                  r =
+                    m && typeof m.centrality === 'number'
+                      ? centralityRadius(m.centrality, maxC, radiusForNode(g))
+                      : radiusForNode(g);
+                } else {
+                  r = radiusForNode(g);
+                }
+                // Direct search matches pop larger.
+                if (searchMatch?.matchIds.has(g.id)) return r * 2.2;
+                return r;
+              }}
               nodeRelSize={3}
               linkColor={(l: object) => {
                 const e = l as unknown as GraphEdge;
+                // When searching, only edges touching a match/neighbor stay lit.
+                if (searchMatch) {
+                  const s = endpointId(e.source);
+                  const t = endpointId(e.target);
+                  const lit =
+                    (searchMatch.matchIds.has(s) || searchMatch.neighborIds.has(s)) &&
+                    (searchMatch.matchIds.has(t) || searchMatch.neighborIds.has(t));
+                  if (!lit) return DIM;
+                }
                 return EDGE_COLORS[e.type] ?? EDGE_COLORS.DEPENDS_ON;
               }}
               linkLabel={(l: object) => {
@@ -579,16 +799,46 @@ export function GraphViewer({
                   <div className="text-xs whitespace-pre-wrap">{selectedNode.summary}</div>
                 </div>
               )}
-              {/* pacman1 UX — open the compiler's full article for this node. */}
-              {projectId && articleUrl(S3_BASE, projectId, selectedNode) && (
-                <a
-                  href={articleUrl(S3_BASE, projectId, selectedNode)!}
-                  target="_blank"
-                  rel="noopener noreferrer"
+              {/* Semantic neighbours from the embeddings (graph-sync kNN). */}
+              {selectedNode.similarTo && selectedNode.similarTo.length > 0 && (
+                <div>
+                  <div className="mb-1 text-xs uppercase text-muted-foreground">
+                    Semantically similar
+                  </div>
+                  <div className="space-y-1">
+                    {selectedNode.similarTo.map((s) => {
+                      const target = snapshot?.nodes.find((n) => n.id === s.id);
+                      return (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => target && setSelectedNode(target)}
+                          className="flex w-full items-baseline gap-2 rounded px-1 py-0.5 text-left text-xs hover:bg-muted/40"
+                          title="Select this semantically-similar node"
+                        >
+                          <span
+                            className="inline-block h-2 w-2 flex-shrink-0 rounded-full"
+                            style={{ background: SIMILAR }}
+                          />
+                          <code className="flex-1 break-all">{target?.title || s.id}</code>
+                          <span className="flex-shrink-0 text-muted-foreground">
+                            {s.score.toFixed(2)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {/* Open the compiler's full article rendered inline. */}
+              {projectId && articleUrl(ARTICLE_BASE, projectId, selectedNode) && (
+                <button
+                  type="button"
+                  onClick={() => setArticleNode(selectedNode)}
                   className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
                 >
-                  View knowledge article ↗
-                </a>
+                  View knowledge article
+                </button>
               )}
               {(selectedNode.createdByStory || selectedNode.lastMutatedByStory) && (
                 <div className="border-t border-border pt-2 text-xs text-muted-foreground">
@@ -685,6 +935,43 @@ export function GraphViewer({
         </div>
       )}
 
+      {/* ── Epic 2 — "Dead code / unreferenced" + orphan-invariant status ── */}
+      {snapshot && (
+        <DeadCodePanel
+          deadCode={deadCode}
+          integrity={integrity}
+          fileColor={NODE_COLORS_BY_KIND.file ?? NODE_COLORS_BY_KIND.unknown}
+          onSelect={(nodeId) => {
+            const node = snapshot.nodes.find((n) => n.id === nodeId);
+            if (node) setSelectedNode(node);
+          }}
+        />
+      )}
+
+      {/* ── Epic 3 — Architectural X-ray: god-nodes, communities, bridges ── */}
+      {snapshot && (
+        <ArchXrayPanel
+          insights={archInsights}
+          overlayEnabled={overlayEnabled}
+          onToggleOverlay={setOverlayEnabled}
+          onSelect={(nodeId) => {
+            const node = snapshot.nodes.find((n) => n.id === nodeId);
+            if (node) setSelectedNode(node);
+          }}
+        />
+      )}
+
+      {/* ── Epic 5 — Capability coverage gaps (W8, --global federation) ──── */}
+      {snapshot && (
+        <CapabilityGapPanel
+          report={capabilityGaps}
+          onSelect={(nodeId) => {
+            const node = snapshot.nodes.find((n) => n.id === nodeId);
+            if (node) setSelectedNode(node);
+          }}
+        />
+      )}
+
       {/* ── pacman1 UX — compiler activity (knowledge/log.md tail) ───────── */}
       {snapshot && (
         <div className="rounded-md border border-border bg-card">
@@ -705,6 +992,16 @@ export function GraphViewer({
             </pre>
           )}
         </div>
+      )}
+
+      {/* Inline knowledge-article viewer (rendered markdown). */}
+      {articleNode && projectId && articleUrl(ARTICLE_BASE, projectId, articleNode) && (
+        <ArticleViewer
+          url={articleUrl(ARTICLE_BASE, projectId, articleNode)!}
+          rawUrl={articleUrl(ARTICLE_BASE, projectId, articleNode)!}
+          title={articleNode.title || articleNode.id}
+          onClose={() => setArticleNode(null)}
+        />
       )}
     </div>
   );

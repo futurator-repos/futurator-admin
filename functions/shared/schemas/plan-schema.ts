@@ -20,6 +20,9 @@ export const planExecutionModeSchema = z.enum(['pipeline', 'orchestrator']);
 /** Phase C.1: Rigor dial. */
 export const planRigorSchema = z.enum(['prototype', 'mvp', 'production']);
 
+/** Concept v2 (W11) — interactivity axis. Mirrors `ConceptInteraction` in types/plan.ts. */
+export const conceptInteractionSchema = z.enum(['interactive', 'autopilot']);
+
 /** Phase C.2: Plan-wide testing config. */
 export const planTestingProfileSchema = z.object({
   hasBrowserTests: z.boolean().optional(),
@@ -170,6 +173,14 @@ export const createPlanForAppInputSchema = z.object({
   executionMode: planExecutionModeSchema.optional(),
   displayName: z.string().trim().min(1).max(80).optional(),
   rigor: planRigorSchema.optional(),
+  /** Concept v2 (W11) — interactivity axis; default resolved when omitted. */
+  conceptInteraction: conceptInteractionSchema.optional(),
+  /**
+   * YOLO — auto-advance between phases. At creation it also seeds
+   * `conceptInteraction` (YOLO on → autopilot, auto-approving the whole concept
+   * chain) when the client doesn't send `conceptInteraction` explicitly.
+   */
+  yoloMode: z.boolean().optional(),
   /**
    * PR-10 #1 — optional plan slug (kebab-case). When omitted the API
    * auto-generates `${appId}-${kind}-${shortHash}` so multi-plan-per-app
@@ -188,6 +199,8 @@ export const updatePlanV1Schema = z
     iterationLabel: z.string().trim().min(1).max(80).optional(),
     noTouchPaths: z.array(z.string()).optional(),
     intent: z.string().min(10).max(2000).optional(),
+    /** Concept v2 (W11) — editable during `concept` review (immutable after first artifact job). */
+    conceptInteraction: conceptInteractionSchema.optional(),
   })
   .strict();
 export type UpdatePlanV1Input = z.infer<typeof updatePlanV1Schema>;
@@ -205,6 +218,8 @@ export const planCreateInputSchema = z.object({
   yoloMode: z.boolean().optional(),
   executionMode: planExecutionModeSchema.optional(),
   rigor: planRigorSchema.optional(),
+  /** Concept v2 (W11) — interactivity axis; default resolved when omitted. */
+  conceptInteraction: conceptInteractionSchema.optional(),
   testingProfile: planTestingProfileSchema.optional(),
   /** QA auto-enqueue toggle. Default derived from rigor when omitted. */
   autoRunQa: z.boolean().optional(),
@@ -226,6 +241,9 @@ export const planPatchSchema = z.object({
   yoloMode: z.boolean().optional(),
   executionMode: planExecutionModeSchema.optional(),
   rigor: planRigorSchema.optional(),
+  // Concept v2 (E4.5d) — editable pre-start; the PATCH handler mode-locks it
+  // once the concept chain has begun (conceptChainStarted predicate).
+  conceptInteraction: conceptInteractionSchema.optional(),
   testingProfile: planTestingProfileSchema.optional(),
   autoRunQa: z.boolean().optional(),
   bmadEnabled: z.boolean().optional(),

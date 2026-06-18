@@ -134,6 +134,19 @@ function envPublishStatus(
   return status;
 }
 
+/**
+ * Deployment v2.5 — read the smoke-test outcome from a deploy/promote job's
+ * SMOKE_STATUS variable (emitted by the promote pipeline). Normalizes casing
+ * and synonyms; anything unrecognized or absent is `undefined` (UI shows
+ * nothing). Contract: exactly `'pass' | 'fail' | undefined`.
+ */
+function deriveSmokeStatus(job: AgentJob | undefined): DeployEnvironmentStatus['smokeStatus'] {
+  const v = job?.variables?.SMOKE_STATUS?.toLowerCase();
+  if (v === 'pass' || v === 'green' || v === 'ok' || v === '200') return 'pass';
+  if (v === 'fail' || v === 'red') return 'fail';
+  return undefined;
+}
+
 function buildEnvironments(
   plan: Plan,
   jobsById: Record<string, AgentJob>,
@@ -148,18 +161,24 @@ function buildEnvironments(
       url: plan.devUrl,
       status: envPublishStatus(plan.devUrl, devJob),
       canPromote: false, // dev is reached by deploy, not promote
+      activeJobId: devJob?.jobId,
+      smokeStatus: deriveSmokeStatus(devJob),
     },
     {
       environment: 'staging',
       url: plan.stagingUrl,
       status: envPublishStatus(plan.stagingUrl, stagingJob),
       canPromote: !!plan.devUrl, // promote dev → staging once dev is live
+      activeJobId: stagingJob?.jobId,
+      smokeStatus: deriveSmokeStatus(stagingJob),
     },
     {
       environment: 'production',
       url: plan.deployUrl,
       status: envPublishStatus(plan.deployUrl, prodJob),
       canPromote: !!plan.stagingUrl, // promote staging → production once staging is live
+      activeJobId: prodJob?.jobId,
+      smokeStatus: deriveSmokeStatus(prodJob),
     },
   ];
 }

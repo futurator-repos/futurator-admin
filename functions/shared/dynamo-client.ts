@@ -15,6 +15,9 @@ export const TABLE_NAMES = {
   users: process.env.USERS_TABLE || 'futurator-admin-users',
   alerts: process.env.ALERTS_TABLE || 'futurator-admin-alerts',
   agentJobs: process.env.AGENT_JOBS_TABLE || 'futurator-agent-jobs',
+  // Epic 6 — Story 6.5: consent-gated PROPAGATOR proposals (substrate-targeted
+  // port-briefs awaiting operator approve/reject). PK proposalId; low volume.
+  propagatorProposals: process.env.PROPAGATOR_PROPOSALS_TABLE || 'futurator-propagator-proposals',
   agentEvents: process.env.AGENT_EVENTS_TABLE || 'futurator-agent-events',
   partyEvents: process.env.PARTY_EVENTS_TABLE || 'futurator-party-events',
   epicWorkflows: process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflows',
@@ -63,4 +66,16 @@ export const TABLE_NAMES = {
   // 2026-05-27 PR D.f — PWA push subscriptions. PK: subscriptionId. GSI1
   // operator-index for "all devices for this operator" lookups.
   pushSubscriptions: process.env.PUSH_SUBSCRIPTIONS_TABLE || 'futurator-push-subscriptions',
+  // Skills Institution — Story 3.1: curation Inbox proposals (candidate skills
+  // through the gate awaiting ratify/reject). PK proposalId (ULID); GSI
+  // status-createdAt-index for the "pending, newest first" inbox query.
+  skillProposals: process.env.SKILL_PROPOSALS_TABLE || 'futurator-skill-proposals',
+  // Plan Retrospect (plan-retrospect-spec §5) — durable per-stage Reality Check
+  // verdicts. PK planId, SK `<stage>#<rubricVersion>`. PITR on (verdicts are
+  // history). Re-scoring under a newer rubric writes a NEW row (different SK),
+  // preserving the prior verdict — never silently overwrite under a changed
+  // ruler (§9 trend integrity). SST links it as `Scorecards` →
+  // SCORECARDS_TABLE; FUTURATOR_SCORECARDS kept as a documented alias.
+  scorecards:
+    process.env.SCORECARDS_TABLE || process.env.FUTURATOR_SCORECARDS || 'futurator-scorecards',
 } as const;

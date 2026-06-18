@@ -22,22 +22,29 @@
 
 import { getFileContent, putFile, deleteFile } from './github/connector';
 import { SKILL_SOURCE_OWNER, SKILL_SOURCE_REPO } from './skill-catalog';
+import type {
+  SkillIndexEntry,
+  SkillIndex,
+  ProvenanceClass,
+  SecurityStatus,
+  TrustTier,
+  QualityGrade,
+  SkillLineage,
+} from './schemas/skill-index-entry-schema';
 
-export interface SkillIndexEntry {
-  name: string;
-  kind: string;
-  framework: boolean;
-  version: string;
-  license: string;
-  description: string;
-  provenance?: string;
-}
-
-export interface SkillIndex {
-  skills: SkillIndexEntry[];
-  'index-version'?: number;
-  'generated-by'?: string;
-}
+// The entry/index shapes are now defined as zod contracts in
+// `schemas/skill-index-entry-schema.ts` (Story 2.1) so the curation facets have
+// a single source of truth. Re-export them here so existing importers keep
+// working unchanged.
+export type {
+  SkillIndexEntry,
+  SkillIndex,
+  ProvenanceClass,
+  SecurityStatus,
+  TrustTier,
+  QualityGrade,
+  SkillLineage,
+};
 
 /** A slug usable as a directory name + skill id. */
 export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
@@ -57,6 +64,64 @@ export function buildSkillMd(input: { name: string; description: string; body: s
   return `${fm}\n${body}\n`;
 }
 
+/** Reverse `yamlQuote`: strip surrounding quotes + unescape `\"` and `\\`. */
+function yamlUnquote(v: string): string {
+  const t = v.trim();
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    return t.slice(1, -1).replace(/\\(["\\])/g, '$1');
+  }
+  return t;
+}
+
+/**
+ * Inverse of `buildSkillMd`: split a SKILL.md into its frontmatter `name` /
+ * `description` and the prose `body`. Tolerant of skills NOT authored here
+ * (unquoted descriptions, extra frontmatter keys, no frontmatter at all) — for
+ * those it returns what it can and treats the rest as body. `buildSkillMd` of a
+ * parsed result round-trips to the canonical shape (re-quotes the description,
+ * re-emits the fence), so edit→save→re-read is idempotent.
+ */
+export function parseSkillMd(md: string): {
+  name: string | null;
+  description: string | null;
+  body: string;
+} {
+  const fence = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(md);
+  if (!fence) {
+    return { name: null, description: null, body: md.trim() };
+  }
+  const frontmatter = fence[1];
+  const body = md.slice(fence[0].length).trim();
+  const nameLine = /^name:[ \t]*(.*)$/m.exec(frontmatter);
+  const descLine = /^description:[ \t]*(.*)$/m.exec(frontmatter);
+  return {
+    name: nameLine ? nameLine[1].trim() : null,
+    description: descLine ? yamlUnquote(descLine[1]) : null,
+    body,
+  };
+}
+
+/**
+ * Read a skill's SKILL.md from the canonical repo and return its parsed body.
+ * Returns `body: null` when the file is absent (framework/bmad skills live in
+ * the bmad-method package, not here) or too large — callers degrade gracefully
+ * instead of erroring.
+ */
+export async function getSkillBody(
+  name: string,
+  opts: { owner?: string; repo?: string } = {},
+): Promise<{ body: string | null; sha: string | null }> {
+  const owner = opts.owner ?? SKILL_SOURCE_OWNER;
+  const repo = opts.repo ?? SKILL_SOURCE_REPO;
+  try {
+    const { data } = await getFileContent(owner, repo, skillMdPath(name), BRANCH);
+    if ('tooLarge' in data) return { body: null, sha: null };
+    return { body: parseSkillMd(data.content).body, sha: data.sha };
+  } catch {
+    return { body: null, sha: null };
+  }
+}
+
 /** Insert or replace an index entry by name; keep the list name-sorted. */
 export function upsertIndexEntry(index: SkillIndex, entry: SkillIndexEntry): SkillIndex {
   const skills = (index.skills ?? []).filter((s) => s.name !== entry.name);
@@ -72,7 +137,45 @@ export function removeIndexEntry(index: SkillIndex, name: string): SkillIndex {
 
 const BRANCH = 'main';
 const INDEX_PATH = 'index.json';
+const REPORT_PATH = 'REPORT.md';
 const skillMdPath = (name: string) => `skills/${name}/SKILL.md`;
+
+/**
+ * Append a timestamped line to the registry's `REPORT.md` audit artifact
+ * (Skills Institution — vision §Data). Ratify + retro-scan append here so
+ * `REPORT.md` is the human-readable ledger of every curation decision. Creates
+ * the file if absent. Best-effort by contract: callers treat a failure as
+ * non-fatal (the skill was already published; the audit line is secondary).
+ */
+export async function appendReport(
+  line: string,
+  opts: { owner?: string; repo?: string; now?: () => Date } = {},
+): Promise<{ ok: boolean; commitSha?: string }> {
+  const owner = opts.owner ?? SKILL_SOURCE_OWNER;
+  const repo = opts.repo ?? SKILL_SOURCE_REPO;
+  const stamp = (opts.now ? opts.now() : new Date()).toISOString();
+  const entry = `- ${stamp} — ${line}\n`;
+  try {
+    let existing = '# Skills Registry — Curation Report\n\n';
+    try {
+      const { data } = await getFileContent(owner, repo, REPORT_PATH, BRANCH);
+      if (!('tooLarge' in data)) existing = data.content;
+    } catch {
+      // absent → create with a header
+    }
+    const { commitSha } = await putFile(
+      owner,
+      repo,
+      REPORT_PATH,
+      `${existing.replace(/\s*$/, '')}\n${entry}`,
+      `report: ${line}`.slice(0, 72),
+      BRANCH,
+    );
+    return { ok: true, commitSha };
+  } catch {
+    return { ok: false };
+  }
+}
 
 /** Fetch + parse the source's index.json (throws if unreadable/malformed). */
 async function readIndex(owner: string, repo: string): Promise<SkillIndex> {
@@ -89,6 +192,33 @@ export interface PutSkillInput {
   body: string;
   kind?: string;
   license?: string;
+  /**
+   * Curation facets (Story 2.1). Optional and additive: when omitted, an
+   * existing entry's facets are preserved on update, and a brand-new entry is
+   * left facet-free (the catalog/migration applies safe defaults on read). The
+   * gate (Story 3.5 ratify) supplies real facets — notably `trustTier` — when
+   * publishing a vetted skill.
+   */
+  facets?: Partial<
+    Pick<
+      SkillIndexEntry,
+      'provenanceClass' | 'securityStatus' | 'qualityGrade' | 'trustTier' | 'maturity' | 'lineage'
+    >
+  >;
+}
+
+/** Pick only the facet keys from an entry (drops the seven base fields). */
+function pickFacets(entry: SkillIndexEntry | undefined): Partial<SkillIndexEntry> {
+  if (!entry) return {};
+  const { provenanceClass, securityStatus, qualityGrade, trustTier, maturity, lineage } = entry;
+  const facets: Partial<SkillIndexEntry> = {};
+  if (provenanceClass !== undefined) facets.provenanceClass = provenanceClass;
+  if (securityStatus !== undefined) facets.securityStatus = securityStatus;
+  if (qualityGrade !== undefined) facets.qualityGrade = qualityGrade;
+  if (trustTier !== undefined) facets.trustTier = trustTier;
+  if (maturity !== undefined) facets.maturity = maturity;
+  if (lineage !== undefined) facets.lineage = lineage;
+  return facets;
 }
 
 /**
@@ -120,7 +250,10 @@ export async function putSkill(
     BRANCH,
   );
 
-  // 2. index entry last (so a half-write never advertises a bodyless skill)
+  // 2. index entry last (so a half-write never advertises a bodyless skill).
+  // Facets carry over from the prior entry on update, then any explicit input
+  // facets win — so ratify (Story 3.5) can stamp trustTier without clobbering
+  // an existing securityStatus, and a plain edit never silently downgrades trust.
   const entry: SkillIndexEntry = {
     name: input.name,
     kind: input.kind ?? 'core',
@@ -129,6 +262,8 @@ export async function putSkill(
     license: input.license ?? 'UNKNOWN',
     description: input.description,
     provenance: 'operator-authored',
+    ...pickFacets(existing),
+    ...(input.facets ?? {}),
   };
   const nextIndex = upsertIndexEntry(index, entry);
   const { commitSha: indexCommit } = await putFile(

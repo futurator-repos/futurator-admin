@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { resolveAndSerializeContextPack } from '../context-pack-resolver.mjs';
+import { appendGroundTruth } from '../ground-truth-context.mjs';
 import { validateProjectContextPack } from '../project-context-schema.mjs';
 
 function makeTmpProject() {
@@ -47,7 +48,8 @@ describe('resolveAndSerializeContextPack', () => {
       variables: {},
     });
     expect(out.failure).toMatch(/STORY_ID/);
-    expect(out.body).toContain('story-context-pack v1');
+    // Concept v2 (E3.5) — stub mirrors the live serializer version (no v1 drift).
+    expect(out.body).toContain('story-context-pack v2');
     expect(out.pack).toBeNull();
   });
 
@@ -164,5 +166,88 @@ describe('resolveAndSerializeContextPack', () => {
     expect(out.pack).not.toBeNull();
     const validation = validateProjectContextPack(out.pack);
     expect(validation).toEqual({ ok: true });
+  });
+});
+
+/**
+ * Concept v2 — Story E3.5: reconcile the DEV context across three writers
+ * (pack BMAD fields + appended ground_truth + reserved probe slot). The
+ * collision is real (system-graph Story 4.4 ships appendGroundTruth); these
+ * assert no clobber + cold-Memgraph degradation.
+ */
+describe('DEV-context reconciliation (Concept v2 — E3.5)', () => {
+  let dir;
+  beforeEach(() => {
+    dir = makeTmpProject();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('AC2 — appendGroundTruth is a no-op when MYCELIUM_GROUND_TRUTH is not "on" (cold degrade)', async () => {
+    const prev = process.env.MYCELIUM_GROUND_TRUTH;
+    delete process.env.MYCELIUM_GROUND_TRUTH;
+    try {
+      const body = '## Story spec\n**enriched body**\n';
+      const out = await appendGroundTruth(body, {
+        touchPoints: ['src/main.js'],
+        projectId: 'proj',
+        storyId: 'S-1',
+      });
+      expect(out).toBe(body); // unchanged — AST facts in body remain the fallback
+    } finally {
+      if (prev !== undefined) process.env.MYCELIUM_GROUND_TRUTH = prev;
+    }
+  });
+
+  it('AC1/AC2 — assembled body carries the BMAD fields and is not clobbered by the (off) ground-truth pass', async () => {
+    const epic = {
+      epicId: 'E-1',
+      planId: 'P-1',
+      createdAt: '2026-06-16T00:00:00.000Z',
+      stories: [
+        {
+          storyId: 'S-1',
+          title: 'Enriched story',
+          description: 'Body.',
+          wave: 0,
+          touchPoints: ['src/main.js'],
+          userStory: { role: 'player', action: 'win', benefit: 'fun' },
+          technicalNotes: 'Reuse the canvas.',
+          tasks: [{ id: 'T1', text: 'Do it', acRefs: ['AC-1'] }],
+          criteria: [
+            {
+              id: 'AC-1',
+              text: 'Score rises.',
+              needsBrowser: true,
+              given: 'playing',
+              when: 'collide',
+              then: 'score++',
+              verify: 'behavior',
+            },
+          ],
+        },
+      ],
+    };
+    const prev = process.env.MYCELIUM_GROUND_TRUTH;
+    delete process.env.MYCELIUM_GROUND_TRUTH;
+    try {
+      const out = await resolveAndSerializeContextPack({
+        ddb: fakeDdb(epic, { planId: 'P-1', name: 'p' }),
+        job: { jobId: 'j1', workingDir: dir },
+        variables: { STORY_ID: 'S-1', EPIC_ID: 'E-1' },
+      });
+      expect(out.failure).toBeUndefined();
+      // BMAD fields rendered (E3.3) inside the assembled body…
+      expect(out.body).toContain('_As a player, I want win, so that fun._');
+      expect(out.body).toContain('### Technical notes');
+      expect(out.body).toContain('### Tasks');
+      expect(out.body).toContain('[verify=behavior]');
+      // …and the off ground-truth pass appended nothing (no clobber, no block).
+      expect(out.body).not.toContain('<ground_truth>');
+      expect(out.body).toContain('story-context-pack v2');
+    } finally {
+      if (prev !== undefined) process.env.MYCELIUM_GROUND_TRUTH = prev;
+    }
   });
 });

@@ -74,11 +74,14 @@ export async function createReflection(args: {
 }
 
 /**
- * Apply operator decision. Returns the updated row. On `confirm`, the
- * daemon's REFLECTOR-APPLY pipeline is the consumer that actually lands
- * the change on disk (`Agent: REFLECTOR-APPLY` commit). That step is a
- * stub today (Story 3-E-3-1 follow-on); the service just records the
- * decision so the UI reflects it.
+ * Apply operator decision. Returns the updated row. On `confirm`, the daemon's
+ * REFLECTOR-APPLY pipeline (`daemon/pipelines/reflector-apply.mjs`) is the
+ * consumer that actually lands the change on disk with an `Agent: REFLECTOR-APPLY`
+ * commit. That apply path is implemented (Epic 6 + Skills Institution Story 1.1:
+ * it authors a NEW app-evolved skill from a `project-skill`/`create` reflection's
+ * `content`, Gate-1-scanned before commit). This service only records the
+ * operator decision (flips status to `confirmed`); the daemon picks confirmed
+ * rows up out-of-band.
  */
 export async function applyDecision(args: {
   projectSlug: string;

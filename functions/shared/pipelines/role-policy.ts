@@ -77,6 +77,17 @@ export const RoleSchema = z.enum([
   // future MCP wrappers from Phase 3-C-9). Manifest writes flow through
   // the daemon's manifest-applier — never the agent's own Edit/Write.
   'ARCHITECT',
+  // ── Concept v2 doc-engine (E2 / Story 2.3) ────────────────────────────
+  // DOC_GEN is the capability bucket for the upstream document AUTHORS —
+  // the prd-gen / ux-gen / arch-gen one-shot generators (PM John / UX Sally
+  // / Architect Winston). Distinct from the read-only PM bucket (which the
+  // Concept Router classifier and the pm-plan author use): a doc author is
+  // the ONE pipeline role granted WebSearch, because the BMAD architecture
+  // contract forbids hardcoding stale tech versions — the architect must be
+  // able to verify "latest stable X" rather than pin a number that rots.
+  // Output is the markdown in the response (captured by the step extractor);
+  // the daemon write-back (E1.2) persists it, so Write/Edit/Bash stay denied.
+  'DOC_GEN',
   // ── Daemon-only roles (PR-32b) ────────────────────────────────────────
   // The API Lambda never spawns these — they're created by daemon-
   // orchestrated background jobs (knowledge compile, deploy compile,
@@ -225,6 +236,17 @@ const ROLE_BASE: Record<Role, { allowed: readonly string[]; deniedExtras: readon
     deniedExtras: ['Write', 'Edit', 'NotebookEdit'],
   },
 
+  // ── Concept v2 doc-engine (E2 / Story 2.3) ──────────────────────────────
+  DOC_GEN: {
+    // Read + WebSearch only. WebSearch is the one baseline-denied tool a
+    // pipeline role opts back into (the `allowed`-wins rule in
+    // resolveRolePolicy lifts it out of BASELINE_DENY). Bash/Write/Edit are
+    // explicitly denied — the generator authors prose into its response, not
+    // the filesystem (the daemon write-back owns disk).
+    allowed: ['Read', 'WebSearch'],
+    deniedExtras: ['Bash', 'Write', 'Edit'],
+  },
+
   // ── Daemon-only roles (PR-32b — see RoleSchema comment) ─────────────────
   CONVERSATION: {
     // Read-mostly + Bash for context-gathering shells. No Write/Edit.
@@ -266,6 +288,8 @@ const TURN_CAPS: Record<PlanRigor, Partial<Record<Role, number | null>>> = {
     TRIAGE: 4,
     // PR-90 (Story 2-D-6-1) — ARCHITECT bounded by manifest size; tight cap.
     ARCHITECT: 4,
+    // E2 — single-shot doc generators; pipeline maxIterations already bounds them.
+    DOC_GEN: null,
     // Daemon-only roles — no caps (background jobs, single-pass agents)
     CONVERSATION: null,
     REFLECTION: null,
@@ -283,6 +307,7 @@ const TURN_CAPS: Record<PlanRigor, Partial<Record<Role, number | null>>> = {
     REFLECTOR: 6,
     TRIAGE: 6,
     ARCHITECT: 6,
+    DOC_GEN: null,
     CONVERSATION: null,
     REFLECTION: null,
     DEPLOY: null,
@@ -301,6 +326,8 @@ const TURN_CAPS: Record<PlanRigor, Partial<Record<Role, number | null>>> = {
     REFLECTOR: 8,
     TRIAGE: 8,
     ARCHITECT: 8,
+    // Production arch-gen may need a couple WebSearch turns for version checks.
+    DOC_GEN: 6,
     CONVERSATION: null,
     REFLECTION: null,
     DEPLOY: null,
@@ -327,7 +354,15 @@ export function resolveRolePolicy(
   // Dedupe + stable order. Set preserves insertion order; we sort for
   // snapshot stability (the daemon doesn't care about order, but tests do).
   const allowed = Array.from(new Set(base.allowed)).sort();
-  const disallowed = Array.from(new Set([...base.deniedExtras, ...BASELINE_DENY])).sort();
+  // `allowed` wins over the baseline deny: a role may opt back into a
+  // baseline-denied tool by listing it in `allowed` (E2 — DOC_GEN does this
+  // for WebSearch). A tool can never be both allowed and disallowed. For every
+  // pre-E2 role this subtraction is a no-op (none list a baseline-denied tool),
+  // so all existing snapshots are byte-identical.
+  const allowedSet = new Set(allowed);
+  const disallowed = Array.from(new Set([...base.deniedExtras, ...BASELINE_DENY]))
+    .filter((t) => !allowedSet.has(t))
+    .sort();
 
   const cap = TURN_CAPS[rigor][role];
   const maxTurns = typeof cap === 'number' ? cap : undefined;

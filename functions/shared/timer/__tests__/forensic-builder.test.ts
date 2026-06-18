@@ -8,10 +8,11 @@
 //   - plan with null cohort (insufficient samples)
 
 import { describe, it, expect } from 'vitest';
-import { buildNarrative } from '../forensic-builder';
+import { buildNarrative, buildCostReconciliation } from '../forensic-builder';
 import type { AggregationResult } from '../aggregator';
 import type { CohortBaseline } from '../forensic-builder';
 import type { Plan } from '../../types/plan';
+import type { AgentEvent } from '../../types/agent-orchestrator';
 import type { TimerSlice } from '../types';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -247,5 +248,66 @@ describe('buildNarrative', () => {
     const narrative = buildNarrative(STUB_PLAN, EMPTY_SLICES, agg, cohort);
     expect(narrative).toContain('Outlier vs cohort: fix');
     expect(narrative).toContain('Remediation time is elevated');
+  });
+});
+
+// ── F3 (2026-06-18) — cost reconciliation ──────────────────────────────────────
+
+function makeEvent(jobId: string, eventSeq: string, cost?: number): AgentEvent {
+  return {
+    jobId,
+    eventSeq,
+    seq: Number(eventSeq),
+    timestamp: '2026-06-18T00:00:00.000Z',
+    stepId: 'step-1',
+    agentId: 'agent-1',
+    eventType: 'result',
+    ...(cost === undefined ? {} : { cost }),
+  } as AgentEvent;
+}
+
+describe('buildCostReconciliation', () => {
+  it('reports orphaned/superseded spend when event sum exceeds the plan rollup', () => {
+    // Two jobs: the current attempt ($1.00) and a retried/superseded one ($0.50)
+    // the plan rollup never counted (rollup only has the $1.00).
+    const events = [
+      makeEvent('job-current', '000001', 1.0),
+      makeEvent('job-retried', '000001', 0.5),
+    ];
+    const recon = buildCostReconciliation(events, 1.0);
+    expect(recon.eventCostSum).toBeCloseTo(1.5);
+    expect(recon.planTotalCostUsd).toBe(1.0);
+    expect(recon.deltaUsd).toBeCloseTo(0.5);
+    expect(recon.deltaPct).toBeCloseTo(0.5);
+    expect(recon.note).toContain('orphaned/superseded');
+  });
+
+  it('reconciles cleanly (no finding) when sums match within tolerance', () => {
+    const events = [makeEvent('job-1', '000001', 0.75), makeEvent('job-1', '000002', 0.25)];
+    const recon = buildCostReconciliation(events, 1.0);
+    expect(recon.deltaUsd).toBeCloseTo(0);
+    expect(recon.deltaPct).toBeCloseTo(0);
+    expect(recon.note).toContain('reconciles');
+  });
+
+  it('flags below-rollup delta as stale rollup / un-collected events', () => {
+    const events = [makeEvent('job-1', '000001', 0.4)];
+    const recon = buildCostReconciliation(events, 1.0);
+    expect(recon.deltaUsd).toBeCloseTo(-0.6);
+    expect(recon.note).toContain('below the plan rollup');
+  });
+
+  it('returns null deltaPct when the plan rollup is zero', () => {
+    const events = [makeEvent('job-1', '000001', 0.3)];
+    const recon = buildCostReconciliation(events, 0);
+    expect(recon.deltaPct).toBeNull();
+    expect(recon.eventCostSum).toBeCloseTo(0.3);
+  });
+
+  it('treats events with no cost field as zero spend', () => {
+    const events = [makeEvent('job-1', '000001'), makeEvent('job-1', '000002', 0.2)];
+    const recon = buildCostReconciliation(events, 0.2);
+    expect(recon.eventCostSum).toBeCloseTo(0.2);
+    expect(recon.note).toContain('reconciles');
   });
 });

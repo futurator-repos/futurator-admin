@@ -26,6 +26,38 @@ VERIFICATION (Story A.6):
 - Do NOT run `npm run dev` / `node --check` / `node --input-type=module` for ad-hoc syntax checks. The project's runtime command is in <run_command> below; downstream test/build gates catch real regressions.
 - Visual tests at `<projectDir>/visual-tests.md` are the contract — your code must make each entry pass at runtime.
 
+<probe_grammar>
+A visual test may carry a `flow:` — an ordered probe that reaches → acts → observes
+before the frame is captured. Available step actions:
+  navigate · click · fill · select · wait · screenshot   (basic)
+  press(key) · hold(key,ms) · tap/pointer(x,y) · drag · clock(clockMode,ms)   (interaction + deterministic time)
+  assert(expr,op,expected) — read window.__harness.snapshot() for a deterministic verdict
+
+AUTHOR EACH AC BY ITS [verify=…] TAG (shown next to the AC above):
+  - verify=build      → no visual test (a unit/typecheck covers it).
+  - verify=appearance → ONE screenshot of the relevant surface; no flow needed.
+  - verify=state      → a `flow` that reaches the state, then `assert`s it against
+                        window.__harness.snapshot(). Deterministic — no idle frame.
+  - verify=behavior   → a `flow` that drives the interaction (press/click/clock),
+                        then `assert`s the resulting state AND takes a screenshot.
+  - verify=manual     → no auto test; the operator verifies it.
+NEVER author a single idle screenshot for a state/behavior AC — it cannot observe
+post-interaction state and will fail or come back UNVERIFIABLE.
+
+The `window.__harness` seam is PRE-BAKED by the scaffold (see SCAFFOLD.md) — do NOT
+author or edit it. For canvas games it exposes `snapshot()` →
+`{ status, score, tick, entities, gameOver }` plus any fields you add to
+`GameState` (e.g. `lives`). Conform your running game to that shape; that's all.
+
+Worked example (start, advance time deterministically, then assert + observe):
+  flow:
+    - { action: press, key: "Space" }                  # start the game
+    - { action: clock, clockMode: runFor, ms: 5000 }   # advance 5s WITHOUT a real wait
+    - { action: screenshot, label: "mid-play" }
+    - { action: assert, expr: "snapshot.status", op: eq, expected: "running" }
+Use `clock` for time-dependent UI — never a real `wait` for synchronization.
+</probe_grammar>
+
 <run_command>
 {{runCommand}}
 </run_command>

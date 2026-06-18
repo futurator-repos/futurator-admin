@@ -40,6 +40,10 @@ export const JOB_HANDLER_SKILL_INSTALL = 'skill-install';
 // and writes proposals into futurator-reflections for the operator's
 // Reflection Inbox.
 export const JOB_HANDLER_REFLECTOR = 'reflector';
+// Plan Retrospect / The Assessor (plan-retrospect-spec §4b). The API enqueues
+// these after storing the deterministic slice; the runner grades the stage's
+// [LLM] criteria and writes Assessor slices into futurator-scorecards.
+export const JOB_HANDLER_SCORECARD_ASSESS = 'scorecard-assess';
 
 /**
  * Decide which handler should run a given job.
@@ -71,6 +75,7 @@ export function selectHandler(job) {
   if (job.jobType === 'skill-scout') return JOB_HANDLER_SKILL_SCOUT;
   if (job.jobType === 'skill-install') return JOB_HANDLER_SKILL_INSTALL;
   if (job.jobType === 'reflector') return JOB_HANDLER_REFLECTOR;
+  if (job.jobType === 'scorecard-assess') return JOB_HANDLER_SCORECARD_ASSESS;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
 }

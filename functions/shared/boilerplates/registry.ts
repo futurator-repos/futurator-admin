@@ -175,8 +175,14 @@ const NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT = `# Scaffold contract — nextjs-can
 - \`src/hooks/useGameLoop.ts\` — RAF-based, typed, auto-cancel on unmount
 - \`src/hooks/useKeyboard.ts\` — typed keydown/keyup with auto-cleanup
 - \`src/game/physics.ts\` — \`applyGravity()\`, \`collide(a, b)\`, \`tween()\`
-- \`src/game/state-machine.ts\` — typed \`useReducer\` wrapper for game state
-- \`src/game/types.ts\` — \`GameStatus\`, \`Entity\`, \`GameState<T>\` generics
+- \`src/game/state-machine.ts\` — typed \`useReducer\` wrapper for game state.
+  ALSO publishes the test-only \`window.__harness\` verifiability seam
+  (QA probes read it). It is PRE-BAKED — do NOT author or edit the seam;
+  just use \`useGameStateMachine\` and your state is exposed automatically.
+- \`src/game/types.ts\` — \`GameStatus\`, \`Entity\`, \`GameState<T>\` generics.
+  QA \`assert\` probes read \`window.__harness.snapshot()\` →
+  \`{ status, score, tick, entities, gameOver }\` + any domain fields you add
+  to \`GameState\` (e.g. \`lives\`). Conform your game to this shape.
 - \`src/components/GameCanvas.tsx\` — canvas mount + ResizeObserver wiring
 - \`src/app/page.tsx\` — **generated** from \`src/features/\` by
   \`scripts/generate-wiring.mjs\` (DO NOT edit; register a feature instead)
@@ -201,6 +207,23 @@ const NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT = `# Scaffold contract — nextjs-can
 - "Implement collision rules between <entity-a> and <entity-b>"
 - "Add scoring / lives / game-over UI overlay"
 
+## Authoring visual tests (QA probes)
+Author each AC's \`visual-tests.md\` entry by its \`verify\` intent:
+- \`appearance\` → ONE screenshot of the relevant surface (no flow).
+- \`state\` / \`behavior\` → a \`flow:\` probe that DRIVES the game, then
+  \`assert\`s \`window.__harness.snapshot()\` (the PRE-BAKED seam) — do NOT
+  author a single idle-frame screenshot for these; an idle frame cannot
+  observe post-interaction state and will fail / come back UNVERIFIABLE.
+- \`build\` → no visual test (a unit/typecheck covers it).
+Worked behavior probe:
+  flow:
+    - { action: press, key: "Space" }                  # start
+    - { action: clock, clockMode: runFor, ms: 5000 }   # advance time, no real wait
+    - { action: screenshot, label: "mid-play" }
+    - { action: assert, expr: "snapshot.status", op: eq, expected: "running" }
+The seam exposes \`{ status, score, tick, entities, gameOver }\` + any field
+you add to \`GameState\` (e.g. \`lives\`). Assert against those keys.
+
 ## Conventions
 - Add domain entity types to \`src/game/types.ts\` (extend, don't replace)
 - Place new entities under \`src/game/entities/<name>.ts\`
@@ -214,9 +237,36 @@ const NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT = `# Scaffold contract — nextjs-can
   stories never collide on the wiring file.
 `;
 
+// VQA v3 E5.1/E5.2 — the canvas-game seam snapshot shape, defined ONCE so the
+// registry `testHarness.snapshotShape`, the generator-emitted
+// `__harness.schema.json` (E5.5 tamper-guarded), and any read path stay in
+// sync. Domain games ADD keys to GameState (e.g. `lives`); those ride the
+// snapshot additively and need no change here.
+const CANVAS_GAME_SNAPSHOT_SHAPE: Record<string, { type: string; enum?: string[] }> = {
+  status: { type: 'string', enum: ['idle', 'running', 'paused', 'over'] },
+  score: { type: 'number' },
+  tick: { type: 'number' },
+  entities: { type: 'array' },
+  gameOver: { type: 'boolean' },
+};
+
+// E5.5 (H1/§6.2) — the LOCKED `__harness.schema.json` manifest format:
+// `{ globalKey, snapshot:{<jsonPath>:{type,enum?}}, events:[] }`. Shipped as a
+// committed scaffold file so the seam's SHAPE is generator-owned; the
+// story-pipeline tamper-check reverts any DEV/fixer edit to it (DEV may only
+// conform the running app + populate values — FR-30).
+const CANVAS_GAME_HARNESS_SCHEMA_JSON = `${JSON.stringify(
+  { globalKey: 'window.__harness', snapshot: CANVAS_GAME_SNAPSHOT_SHAPE, events: [] },
+  null,
+  2,
+)}\n`;
+
 const NEXTJS_CANVAS_GAME_AUGMENTS: Array<{ path: string; content: string }> = [
   // SCAFFOLD.md FIRST — convention. Mirror of NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT.
   { path: 'SCAFFOLD.md', content: NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT },
+
+  // VQA v3 E5.5 — generator-owned seam shape contract (tamper-guarded).
+  { path: '__harness.schema.json', content: CANVAS_GAME_HARNESS_SCHEMA_JSON },
 
   {
     path: 'src/game/types.ts',
@@ -295,7 +345,7 @@ export function tween(from: number, to: number, t: number): number {
  * (keyboard / touch). Reducer must be pure.
  */
 
-import { useReducer, useCallback, useRef } from 'react';
+import { useReducer, useCallback, useRef, useEffect } from 'react';
 import type { GameState, Entity } from './types';
 
 export type GameAction<TEntity extends Entity = Entity> =
@@ -331,6 +381,31 @@ export function useGameStateMachine<TEntity extends Entity = Entity>(
   const ref = useRef(state);
   ref.current = state;
   const safeDispatch = useCallback(dispatch, []);
+
+  // ── VQA v3 verifiability seam (test-only) ──────────────────────────────
+  // Publishes the live game state to \`window.__harness\` so QA probes can
+  // read it deterministically (the L2-state \`assert\` oracle) instead of
+  // guessing from a screenshot. The snapshot reads the \`ref\` (always the
+  // latest state — no stale closure), so this mounts ONCE.
+  //
+  // PRODUCTION-ABSENT: gated on \`NEXT_PUBLIC_TEST_HARNESS === '1'\`, which
+  // Next.js inlines at build time. In a normal build the env is unset, the
+  // branch is statically false, and the seam is tree-shaken out —
+  // \`window.__harness\` never exists in production. The QA dev server boots
+  // with the flag set; nothing else does. DO NOT remove the guard.
+  useEffect(() => {
+    if (process.env.NEXT_PUBLIC_TEST_HARNESS !== '1') return;
+    if (typeof window === 'undefined') return;
+    (window as unknown as { __harness?: unknown }).__harness = {
+      ready: true,
+      // Generator-owned shape (boilerplate registry testHarness): the raw
+      // GameState plus a derived \`gameOver\`. Domain fields added to
+      // GameState (e.g. \`lives\`) ride along automatically.
+      snapshot: () => ({ ...ref.current, gameOver: ref.current.status === 'over' }),
+      events: [] as unknown[],
+    };
+  }, []);
+
   return [state, safeDispatch, ref] as const;
 }
 `,
@@ -1408,6 +1483,25 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     ],
     augmentFiles: NEXTJS_CANVAS_GAME_AUGMENTS,
     scaffoldContract: NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT,
+    // VQA v3 E2 (H6/H8) — the verifiability seam. v1 ships for canvas-game
+    // ONLY (the only wired UI starter). The shape is generator-owned: it
+    // mirrors `GameState<T>` from src/game/types.ts, which the scaffold's
+    // `useGameStateMachine` publishes to `window.__harness` under the
+    // NEXT_PUBLIC_TEST_HARNESS guard (see src/game/types.ts seam block). DEV
+    // only conforms the running game to this shape + populates values
+    // (FR-30); the probe `assert` step reads these keys deterministically.
+    // Domain games may ADD keys to GameState (e.g. `lives`) — they appear in
+    // the snapshot additively and are assertable without registry changes.
+    testHarness: {
+      globalKey: 'window.__harness',
+      readySignal: 'ready',
+      // jsonPath form (`snapshot.<key>`) derived from the shared shape const so
+      // the registry, the `__harness.schema.json` file, and the probe `assert`
+      // citations never diverge.
+      snapshotShape: Object.fromEntries(
+        Object.entries(CANVAS_GAME_SNAPSHOT_SHAPE).map(([k, v]) => [`snapshot.${k}`, v]),
+      ),
+    },
   }),
 
   'nextjs-form-app': createStarterPack('nextjs-form-app', {

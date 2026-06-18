@@ -26,6 +26,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { EMBEDDED_DEFAULT_FEDERATION, loadFederation } from '../federation-loader.mjs';
+import { isInstallable, installBlockReason } from '../skill-trust.mjs';
 
 const MANIFEST_REL = '.claude/skills.manifest.yaml';
 const SKILLS_DIR_REL = '.claude/skills';
@@ -129,6 +130,35 @@ export async function runVendorSkills({
   let vendored = 0;
   let failed = 0;
   let skippedOnDisk = 0;
+  let blocked = 0; // Story 4.2 — entries refused by the trust gate.
+
+  // Story 4.2 — per-source index.json cache (name→entry) so the trust gate can
+  // read each candidate's trustTier. Fetched lazily, once per source. A failed
+  // fetch yields an empty map → isInstallable falls back to the source's
+  // auto-trust (auto-trust sources stay working; community sources fail closed).
+  const sourceIndexCache = new Map();
+  async function getSourceIndexEntry(src, repo, skillName) {
+    if (!sourceIndexCache.has(src.id)) {
+      const map = new Map();
+      try {
+        const headers = { Accept: 'application/json' };
+        if (pat) headers.Authorization = `Bearer ${pat}`;
+        const res = await fetchImpl(`https://raw.githubusercontent.com/${repo}/main/index.json`, {
+          headers,
+        });
+        if (res.ok) {
+          const body = await res.json();
+          for (const e of Array.isArray(body?.skills) ? body.skills : []) {
+            if (e && typeof e.name === 'string') map.set(e.name, e);
+          }
+        }
+      } catch {
+        // leave map empty → fail-safe per source auto-trust
+      }
+      sourceIndexCache.set(src.id, map);
+    }
+    return sourceIndexCache.get(src.id).get(skillName);
+  }
 
   for (const entry of entries) {
     if (Date.now() > deadline) {
@@ -155,6 +185,19 @@ export async function runVendorSkills({
     if (!repo) {
       log(`[vendor-skills] WARN ${entry.skill}: bad source url ${src.url}`);
       failed += 1;
+      continue;
+    }
+    // Story 4.2 — TRUSTED-ONLY install gate. A skill only reaches the app if it
+    // is trusted (or a legacy entry on an auto-trust source). Checked here, at
+    // the disk-write point, AFTER the on-disk skip above — so the 245 incumbents
+    // already vendored are untouched; only NEW installs are gated.
+    const autoTrust = src['auto-trust'] === true;
+    const idxEntry = await getSourceIndexEntry(src, repo, entry.skill);
+    if (!isInstallable(idxEntry, { autoTrust })) {
+      log(
+        `[vendor-skills] BLOCKED ${entry.skill}@${entry.source}: ${installBlockReason(idxEntry, { autoTrust })} (not trusted — install refused)`,
+      );
+      blocked += 1;
       continue;
     }
     const ref = refForVersion(entry.version);
@@ -195,11 +238,15 @@ export async function runVendorSkills({
   if (skippedOnDisk > 0) {
     log(`[vendor-skills] skipped ${skippedOnDisk} skill(s) already present on disk`);
   }
+  if (blocked > 0) {
+    log(`[vendor-skills] BLOCKED ${blocked} non-trusted skill(s) from install (Story 4.2)`);
+  }
   return {
     skipped: false,
     vendoredCount: vendored,
     failed,
     skippedOnDisk,
+    blocked,
     ...(failed > 0
       ? { attentionCategory: 'skill-manifest-out-of-sync', attentionSeverity: 'low' }
       : {}),

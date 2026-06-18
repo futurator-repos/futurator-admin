@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildQaReport } from '../qa-report-aggregator';
+import { buildDeployReport } from '../deploy-report-aggregator';
 import type { AgentJob } from '../../types/agent-orchestrator';
 import type { AttentionItem } from '../../types/attention';
 import type { EpicStory, EpicWorkflow, VisualTestDef } from '../../types/epic-workflow';
@@ -1206,5 +1207,101 @@ describe('QA-B — acId collision across stories stays separate claims', () => {
     expect(overlay.acText).toBe('Dark overlay covers canvas');
     expect(r.gateVqa!.verified).toBe(1);
     expect(r.gateVqa!.unverifiable).toBe(1);
+  });
+});
+
+// ── BE-2 (Deployment v2.5) — devPreview.jobId FK ────────────────────
+
+describe('buildQaReport — devPreview carries the dev deploy job FK', () => {
+  it('jobId === plan.devDeployJobId when set', () => {
+    const r = buildQaReport({
+      plan: plan({ devDeployJobId: 'dev-job-1', devUrl: 'https://futurator.ai/apps/_dev/x/' }),
+      epics: [epic()],
+      jobsById: {},
+      attentionItems: [],
+    });
+    expect(r.devPreview.jobId).toBe('dev-job-1');
+  });
+
+  it('jobId is undefined when plan.devDeployJobId is unset', () => {
+    const r = buildQaReport({
+      plan: plan(),
+      epics: [epic()],
+      jobsById: {},
+      attentionItems: [],
+    });
+    expect(r.devPreview.jobId).toBeUndefined();
+  });
+});
+
+// ── BE-2 (Deployment v2.5) — deploy-report environment ladder ───────
+//
+// activeJobId + smokeStatus per rung, derived from jobsById. SMOKE_STATUS is
+// normalized (pass/green/ok/200 → 'pass'; fail/red → 'fail'; else undefined).
+
+describe('buildDeployReport — environment ladder activeJobId + smokeStatus', () => {
+  it("staging rung carries activeJobId + smokeStatus 'pass' from SMOKE_STATUS", () => {
+    const stagingJob = job({
+      jobId: 'stg-1',
+      variables: { SMOKE_STATUS: 'pass', DEPLOY_URL: 'https://futurator.ai/apps/_staging/x/' },
+    });
+    const r = buildDeployReport({
+      plan: plan({
+        stagingDeployJobId: 'stg-1',
+        stagingUrl: 'https://futurator.ai/apps/_staging/x/',
+        devUrl: 'https://futurator.ai/apps/_dev/x/',
+      }),
+      epics: [epic()],
+      jobsById: { 'stg-1': stagingJob },
+      qaReport: null,
+    });
+    const staging = r.environments.find((e) => e.environment === 'staging')!;
+    expect(staging.activeJobId).toBe('stg-1');
+    expect(staging.smokeStatus).toBe('pass');
+  });
+
+  it("smokeStatus 'fail' when SMOKE_STATUS is fail/red", () => {
+    const stagingJob = job({ jobId: 'stg-1', variables: { SMOKE_STATUS: 'RED' } });
+    const r = buildDeployReport({
+      plan: plan({ stagingDeployJobId: 'stg-1' }),
+      epics: [epic()],
+      jobsById: { 'stg-1': stagingJob },
+      qaReport: null,
+    });
+    const staging = r.environments.find((e) => e.environment === 'staging')!;
+    expect(staging.smokeStatus).toBe('fail');
+  });
+
+  it('smokeStatus undefined when SMOKE_STATUS is absent or unrecognized', () => {
+    const stagingJob = job({ jobId: 'stg-1', variables: { SMOKE_STATUS: 'maybe' } });
+    const r = buildDeployReport({
+      plan: plan({ stagingDeployJobId: 'stg-1' }),
+      epics: [epic()],
+      jobsById: { 'stg-1': stagingJob },
+      qaReport: null,
+    });
+    const staging = r.environments.find((e) => e.environment === 'staging')!;
+    expect(staging.smokeStatus).toBeUndefined();
+
+    const noVarJob = job({ jobId: 'dev-1' });
+    const r2 = buildDeployReport({
+      plan: plan({ devDeployJobId: 'dev-1' }),
+      epics: [epic()],
+      jobsById: { 'dev-1': noVarJob },
+      qaReport: null,
+    });
+    expect(r2.environments.find((e) => e.environment === 'dev')!.smokeStatus).toBeUndefined();
+  });
+
+  it('activeJobId is undefined for a rung whose plan FK is unset', () => {
+    const r = buildDeployReport({
+      plan: plan(), // no devDeployJobId / stagingDeployJobId / deploy jobs
+      epics: [epic()],
+      jobsById: {},
+      qaReport: null,
+    });
+    expect(r.environments.find((e) => e.environment === 'dev')!.activeJobId).toBeUndefined();
+    expect(r.environments.find((e) => e.environment === 'staging')!.activeJobId).toBeUndefined();
+    expect(r.environments.find((e) => e.environment === 'production')!.activeJobId).toBeUndefined();
   });
 });

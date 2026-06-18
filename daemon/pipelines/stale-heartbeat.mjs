@@ -68,6 +68,45 @@ export function findStaleJobs(jobs, opts) {
 }
 
 /**
+ * 2026-06-16 — job types whose orphaned-RUNNING rows are SAFE to AUTO-REQUEUE
+ * (reset to PENDING) when a daemon restart kills them mid-run, rather than just
+ * marked STALE (terminal). These are IDEMPOTENT infra jobs:
+ *   • app-bootstrap — bare-clone is idempotent, commit-and-push no-ops on
+ *     re-run, and `bootstrappedAt` is written only on success. A genuinely
+ *     failing run lands FAILED via its own catch (not RUNNING), so requeue
+ *     never loops.
+ * Story/dev/orchestrator jobs are deliberately NOT here — their state is too
+ * fragile to rebuild from outside, so they stay on the mark-STALE path.
+ *
+ * Root cause this fixes: a deploy restarting the daemon mid-`app-bootstrap`
+ * left the job stuck RUNNING; the old path only marked it STALE, so the App
+ * sat on "Scaffold pending" forever (brick1, 2026-06-16).
+ */
+export const REQUEUE_ON_ORPHAN_JOB_TYPES = ['app-bootstrap'];
+
+/**
+ * True iff a job is a stale, orphaned RUNNING instance that is SAFE to
+ * auto-requeue. Two classes qualify:
+ *   • idempotent infra job types in `requeueJobTypes` (e.g. app-bootstrap), and
+ *   • autopilot concept-gen jobs (Story 3.4) — generic pipeline jobs the Concept
+ *     driver stamps with `conceptAutopilotGen: true`. A one-shot generator
+ *     (prd/ux/arch) is safe to re-run: the daemon write-back is idempotent and
+ *     the apply-service no-ops identical content. INTERACTIVE convergence turns
+ *     are NEVER stamped this way (mid-conversation state) — they stay mark-STALE.
+ *
+ * Pure — the daemon adds the `!activeJobs.has(jobId)` guard (its own in-flight
+ * jobs) at the call site.
+ */
+export function isRequeueableOrphan(
+  job,
+  { now = Date.now(), staleMs = DEFAULT_STALE_MS, requeueJobTypes = REQUEUE_ON_ORPHAN_JOB_TYPES } = {},
+) {
+  if (!isStaleAnyPhase(job, { now, staleMs })) return false;
+  if (requeueJobTypes.includes(job?.jobType)) return true;
+  return job?.conceptAutopilotGen === true;
+}
+
+/**
  * Build the replacement PENDING job that resumes from the stale job's
  * accumulated `waveResults`. The new job inherits the epic-dev payload
  * and every correlation field (epicId, projectId, workingDir) from the

@@ -5,6 +5,11 @@ import {
   parseVisualTestViewport,
   formatViewport,
   isVagueExpect,
+  deriveLevelFromVerify,
+  deriveNeedsBrowser,
+  downgradeManualToBehavior,
+  capVisionLevelByRigor,
+  isDeterministicLevel,
 } from '../visual-test-classifier';
 import type { VisualTestDef } from '../../types/epic-workflow';
 
@@ -491,5 +496,272 @@ describe('classifyVisualTest — needsBrowser floor (PR-62)', () => {
     // The non-browser test stays at L0.
     const nonBrowserClass = report.classifications.find((c) => c.testId === 'vt-8');
     expect(nonBrowserClass?.classification.level).toBe('L0');
+  });
+});
+
+/**
+ * VQA v3 — Story E5.4 (R1): verify-based level derivation + the SPLIT rigor cap
+ * (vision tiers only; deterministic L0/L2-state are rigor-exempt). This is the
+ * highest-risk, easiest-to-miss requirement — guard it hard.
+ */
+describe('deriveLevelFromVerify (VQA v3 — E5.4/FR-13)', () => {
+  it('build→L0, appearance→L1, manual→operator', () => {
+    expect(deriveLevelFromVerify('build', false)).toBe('L0');
+    expect(deriveLevelFromVerify('appearance', true)).toBe('L1');
+    expect(deriveLevelFromVerify('manual', true)).toBe('operator');
+  });
+
+  it('state→L2-state with a seam, else L1-vision', () => {
+    expect(deriveLevelFromVerify('state', true)).toBe('L2-state');
+    expect(deriveLevelFromVerify('state', false)).toBe('L1');
+  });
+
+  it('behavior→L2-state with a seam, else L2-vision', () => {
+    expect(deriveLevelFromVerify('behavior', true)).toBe('L2-state');
+    expect(deriveLevelFromVerify('behavior', false)).toBe('L2-vision');
+  });
+});
+
+describe('capVisionLevelByRigor — R1 split cap (VQA v3 — E5.4)', () => {
+  it('AC1 — a state AC with a seam at prototype routes to L2-state, NOT capped to L0', () => {
+    const level = deriveLevelFromVerify('state', true); // L2-state
+    expect(capVisionLevelByRigor(level, 'prototype')).toBe('L2-state'); // deterministic = exempt
+  });
+
+  it('AC2 — an appearance (vision) AC at prototype IS still rigor-capped', () => {
+    const level = deriveLevelFromVerify('appearance', true); // L1 (vision)
+    expect(capVisionLevelByRigor(level, 'prototype')).toBe('L0'); // vision capped at prototype
+  });
+
+  it('caps L2-vision → L1 at mvp, leaves it at production', () => {
+    expect(capVisionLevelByRigor('L2-vision', 'mvp')).toBe('L1');
+    expect(capVisionLevelByRigor('L2-vision', 'production')).toBe('L2-vision');
+  });
+
+  it('L2-state and operator are exempt at every rigor', () => {
+    for (const r of ['prototype', 'mvp', 'production'] as const) {
+      expect(capVisionLevelByRigor('L2-state', r)).toBe('L2-state');
+      expect(capVisionLevelByRigor('operator', r)).toBe('operator');
+    }
+  });
+
+  it('isDeterministicLevel marks L0 + L2-state', () => {
+    expect(isDeterministicLevel('L0')).toBe(true);
+    expect(isDeterministicLevel('L2-state')).toBe(true);
+    expect(isDeterministicLevel('L1')).toBe(false);
+    expect(isDeterministicLevel('L2-vision')).toBe(false);
+  });
+});
+
+describe('aggregateVisualTests — verify-aware oracle tier + strength (E4-S2/S3)', () => {
+  it('resolves a behavior AC to L2-state with a seam + assert probe; no weak-oracle warning', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-1', {
+        criteriaRef: 'AC-1',
+        flow: [
+          { action: 'press', key: 'Space' },
+          { action: 'assert', expr: 'snapshot.status', op: 'eq', expected: 'running' },
+        ],
+      }),
+    ];
+    const report = aggregateVisualTests(
+      tests,
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      true,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('L2-state');
+    expect(report.coverageWarnings.some((w) => w.kind === 'weak-oracle')).toBe(false);
+  });
+
+  it('flags weak-oracle when a behavior AC has a seam but only a screenshot (vision-only)', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-1', { criteriaRef: 'AC-1', flow: [{ action: 'screenshot', label: 'idle' }] }),
+    ];
+    const report = aggregateVisualTests(
+      tests,
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      true,
+    );
+    expect(report.coverageWarnings.find((w) => w.kind === 'weak-oracle')?.criterionId).toBe('AC-1');
+  });
+
+  it('F13 — a behavior AC with a seam but NO executable probe resolves to needs-probe, not L2-state', () => {
+    // Flow-less test: it would derive L2-state (seam exists) but it has no
+    // `assert` step, so the runtime would never read window.__harness for it.
+    const report = aggregateVisualTests(
+      [vt('VT-1', { criteriaRef: 'AC-1' })],
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      true,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('needs-probe');
+  });
+
+  it('F13 — a state AC whose flow has steps but NO assert is needs-probe (screenshot is not a probe)', () => {
+    const report = aggregateVisualTests(
+      [vt('VT-1', { criteriaRef: 'AC-1', flow: [{ action: 'screenshot', label: 'idle' }] })],
+      [{ id: 'AC-1', needsBrowser: true, verify: 'state' }],
+      'production',
+      true,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('needs-probe');
+  });
+
+  it('F13 — an assert flow keeps L2-state (executable probe present)', () => {
+    const report = aggregateVisualTests(
+      [
+        vt('VT-1', {
+          criteriaRef: 'AC-1',
+          flow: [{ action: 'assert', expr: 'snapshot.status', op: 'eq', expected: 'running' }],
+        }),
+      ],
+      [{ id: 'AC-1', needsBrowser: false, verify: 'state' }],
+      'production',
+      true,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('L2-state');
+  });
+
+  it('F13 — honors the cheaper resolved oracle over a worse source-set level', () => {
+    // Dev-author hard-coded L2 (expensive vision wire level), but the AC is an
+    // `appearance` AC → resolved tier L1. The cheapest-correct oracle wins.
+    const report = aggregateVisualTests(
+      [vt('VT-1', { criteriaRef: 'AC-1', level: 'L2' })],
+      [{ id: 'AC-1', needsBrowser: true, verify: 'appearance' }],
+      'production',
+      true,
+    );
+    const c = report.classifications[0].classification;
+    expect(c.resolvedLevel).toBe('L1');
+    expect(c.level).toBe('L1'); // re-routed down from the stale source L2
+  });
+
+  it('without a seam, a behavior AC resolves to L2-vision and is NOT weak-oracle-flagged', () => {
+    const report = aggregateVisualTests(
+      [vt('VT-1', { criteriaRef: 'AC-1' })],
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      false,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('L2-vision');
+    expect(report.coverageWarnings.some((w) => w.kind === 'weak-oracle')).toBe(false);
+  });
+
+  it('flags unpaired-l2-state when a UI-bearing behavior AC asserts state but has no paired screenshot (E5.6/H3)', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-1', {
+        criteriaRef: 'AC-1',
+        flow: [
+          { action: 'press', key: 'Space' },
+          { action: 'assert', expr: 'snapshot.status', op: 'eq', expected: 'running' },
+        ],
+      }),
+    ];
+    const report = aggregateVisualTests(
+      tests,
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      true,
+    );
+    expect(report.coverageWarnings.find((w) => w.kind === 'unpaired-l2-state')?.criterionId).toBe(
+      'AC-1',
+    );
+    // It has an assert, so it is NOT also weak-oracle.
+    expect(report.coverageWarnings.some((w) => w.kind === 'weak-oracle')).toBe(false);
+  });
+
+  it('does NOT flag unpaired-l2-state when the L2-state probe also has a screenshot', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-1', {
+        criteriaRef: 'AC-1',
+        flow: [
+          { action: 'press', key: 'Space' },
+          { action: 'screenshot', label: 'after' },
+          { action: 'assert', expr: 'snapshot.status', op: 'eq', expected: 'running' },
+        ],
+      }),
+    ];
+    const report = aggregateVisualTests(
+      tests,
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      true,
+    );
+    expect(report.coverageWarnings.some((w) => w.kind === 'unpaired-l2-state')).toBe(false);
+  });
+
+  it('does NOT flag unpaired-l2-state for a non-UI (needsBrowser:false) state AC', () => {
+    const tests: VisualTestDef[] = [
+      vt('VT-1', {
+        criteriaRef: 'AC-1',
+        flow: [{ action: 'assert', expr: 'snapshot.score', op: 'gt', expected: 0 }],
+      }),
+    ];
+    const report = aggregateVisualTests(
+      tests,
+      [{ id: 'AC-1', needsBrowser: false, verify: 'state' }],
+      'production',
+      true,
+    );
+    expect(report.coverageWarnings.some((w) => w.kind === 'unpaired-l2-state')).toBe(false);
+  });
+
+  it('downgradeManualToBehavior — stubbable manual AC downgrades to behavior + forces needsBrowser + logs event (E8.3)', () => {
+    const d = downgradeManualToBehavior({
+      acId: 'AC-1',
+      verify: 'manual',
+      manualReason: 'oauth-consent',
+      stubAvailable: true,
+    });
+    expect(d.verify).toBe('behavior');
+    expect(d.needsBrowser).toBe(true);
+    expect(d.reclassified).toBe(true);
+    expect(d.event?.kind).toBe('manual-downgrade');
+    expect(d.event?.acId).toBe('AC-1');
+  });
+
+  it('downgradeManualToBehavior — genuinely unautomatable manual AC stays manual (no stub)', () => {
+    const d = downgradeManualToBehavior({
+      acId: 'AC-2',
+      verify: 'manual',
+      manualReason: 'real-payment',
+      stubAvailable: false,
+    });
+    expect(d.verify).toBe('manual');
+    expect(d.reclassified).toBe(false);
+    expect(d.event).toBeNull();
+  });
+
+  it('downgradeManualToBehavior — non-manual AC passes through unchanged', () => {
+    const d = downgradeManualToBehavior({ acId: 'AC-3', verify: 'behavior', stubAvailable: true });
+    expect(d.verify).toBe('behavior');
+    expect(d.reclassified).toBe(false);
+    expect(d.event).toBeNull();
+  });
+
+  it('deriveNeedsBrowser — one rule: build→false, appearance/state/behavior→true, manual→undefined', () => {
+    expect(deriveNeedsBrowser('build')).toBe(false);
+    expect(deriveNeedsBrowser('appearance')).toBe(true);
+    expect(deriveNeedsBrowser('state')).toBe(true);
+    expect(deriveNeedsBrowser('behavior')).toBe(true);
+    expect(deriveNeedsBrowser('manual')).toBeUndefined();
+    expect(deriveNeedsBrowser(undefined)).toBeUndefined();
+  });
+
+  it('a prototype-rigor state AC with a seam still resolves to L2-state (rigor-exempt, R1)', () => {
+    const report = aggregateVisualTests(
+      [
+        vt('VT-1', {
+          criteriaRef: 'AC-1',
+          flow: [{ action: 'assert', expr: 'snapshot.score', op: 'gt', expected: 0 }],
+        }),
+      ],
+      [{ id: 'AC-1', needsBrowser: true, verify: 'state' }],
+      'prototype',
+      true,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('L2-state');
   });
 });

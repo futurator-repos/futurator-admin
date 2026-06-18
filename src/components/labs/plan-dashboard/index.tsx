@@ -26,7 +26,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 import Link from 'next/link';
-import { usePlan, useApplyPlanOutput } from '@/hooks/use-plans';
+import { usePlan, useApplyPlanOutput, useApplyConceptPlan } from '@/hooks/use-plans';
 import { useApp } from '@/hooks/use-apps';
 import type { AgentJob } from '@/types/agent-orchestrator';
 import { useAgentJob, useAgentJobs } from '@/hooks/use-agent-job';
@@ -49,10 +49,11 @@ import { QaReviewView } from './views/qa-review-view';
 import { DeployStageView } from './views/deploy-stage-view';
 import { StagePlaceholder } from './views/stage-placeholder';
 import { PlanPartyView } from './views/plan-party-view';
+import { RetrospectView } from './views/retrospect/retrospect-view';
 import { TimingPanel } from './timing-panel';
 
 type StageId = PipelineStage['id'];
-type ViewId = StageId | 'party';
+type ViewId = StageId | 'party' | 'retrospect';
 
 const STAGE_KEY = 'labs.plan-dashboard.stage';
 const SUBTAB_KEY = 'labs.plan-dashboard.subtab';
@@ -79,6 +80,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
   const urlPmJobId = params.get('pmJobId');
   const { data: plan, isLoading, error: planError, refetch } = usePlan(planId);
   const apply = useApplyPlanOutput(planId);
+  const applyConcept = useApplyConceptPlan(planId);
   // 2026-05-30 — the App carries the real GitHub repo (any org) for brownfield;
   // the git-graph needs it to query the correct repo instead of futurator-repos.
   const { data: appRow } = useApp(plan?.appId ?? null);
@@ -106,6 +108,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
   // an active plan dashboard session, not across plans.
   const activeView: ViewId = useMemo(() => {
     if (urlStage === 'party') return 'party';
+    if (urlStage === 'retrospect') return 'retrospect';
     if (isStage(urlStage)) return urlStage;
     return defaultStage;
   }, [urlStage, defaultStage]);
@@ -135,6 +138,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
 
   const goToStage = (s: StageId) => navigate(s);
   const goToParty = () => navigate('party');
+  const goToRetrospect = () => navigate('retrospect');
   const goToSubtab = (t: DevelopingSubtab) => navigate('developing', t);
 
   // ── PM job polling + auto-apply ────────────────────────────────────
@@ -151,6 +155,8 @@ export function PlanDashboard({ planId }: { planId: string }) {
   // because the discover path doesn't know the pmJobId until the API
   // responds.
   const [autoDiscovered, setAutoDiscovered] = useState<Set<string>>(new Set());
+  // Concept v2 — track plans whose conceptPlan we've already auto-applied.
+  const [conceptApplied, setConceptApplied] = useState<Set<string>>(new Set());
   useEffect(() => {
     if (!pmJob || !pmJobId || !plan) return;
     if (pmJob.status !== 'COMPLETED') return;
@@ -207,6 +213,73 @@ export function PlanDashboard({ planId }: { planId: string }) {
         }
       });
   }, [plan, planId, pmJobId, autoDiscovered, apply, refetch]);
+
+  // Concept v2 — auto-apply the Concept Router output.
+  //
+  // 2026-06-17 FIX: previously this POSTed /apply-concept-plan on EVERY render
+  // while the route job was still RUNNING and DELETED its one-shot guard on the
+  // expected "not COMPLETED" 400 — a tight retry loop that flooded the console
+  // with 400s (and hammered the API) for the whole ~30s routing window. We now
+  // POLL the route JOB STATUS and apply EXACTLY ONCE, only after it reaches
+  // COMPLETED. Zero premature 400s; the cron is the server-side backstop.
+  const conceptRouteJobId = plan?.conceptRouteJobId ?? null;
+  const watchRouteJob = plan?.status === 'concept' && !plan?.conceptPlan ? conceptRouteJobId : null;
+  const { data: conceptRouteJob } = useAgentJob(watchRouteJob);
+  useEffect(() => {
+    if (!plan || plan.status !== 'concept') return;
+    if (!plan.conceptRouteJobId) return; // prototype / legacy → no Router
+    if (plan.conceptPlan) return; // already applied
+    if (conceptRouteJob?.status !== 'COMPLETED') return; // WAIT for the router — no premature POSTs
+    if (conceptApplied.has(planId)) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setConceptApplied((s) => new Set(s).add(planId)); // strictly one-shot per plan
+    applyConcept
+      .mutateAsync()
+      .then(() => refetch())
+      .catch((err) => {
+        // Genuine parse/validation failure (the route IS complete here). Surface
+        // it; do NOT clear the guard — the cron retries server-side, and a manual
+        // Regenerate is the operator's lever. No render-loop.
+        console.error('[PlanDashboard] auto-apply conceptPlan failed', err);
+      });
+  }, [plan, planId, conceptApplied, applyConcept, refetch, conceptRouteJob?.status]);
+
+  // Concept v2 — apply the GROUNDED pm-plan output (the chain enqueues the PM
+  // plan once all specs are approved and stamps `conceptPmPlanJobId`, but nothing
+  // materialized its PLAN_JSON into epics — the chain "got nowhere"). Watch that
+  // job and apply it on COMPLETED, replacing any stale/monolithic epics with the
+  // spec-grounded plan. One-shot per job id.
+  const conceptPmPlanJobId = plan?.conceptPmPlanJobId ?? null;
+  const { data: conceptPmJob } = useAgentJob(conceptPmPlanJobId);
+  const [conceptPmApplied, setConceptPmApplied] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (!plan || !conceptPmPlanJobId) return;
+    if (conceptPmJob?.status !== 'COMPLETED') return;
+    if (conceptPmApplied.has(conceptPmPlanJobId)) return;
+    // SAFETY (2026-06-17 incident) — only MATERIALIZE the grounded plan while
+    // still in `concept` with NO epics yet. The dedup set is in-memory, so it
+    // empties on every page reload; without this guard a refresh re-applies the
+    // (forever-COMPLETED) pm-plan, replacing the epic tree with fresh UUIDs —
+    // wiping done-story progress ("2 → 0/14"), orphaning the running DEV story,
+    // and re-spawning the reset stories in a costly loop. Mark-and-skip once
+    // epics exist or dev has started; the server now refuses too.
+    if (plan.status !== 'concept' || (plan.epicIds?.length ?? 0) > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setConceptPmApplied((s) => new Set(s).add(conceptPmPlanJobId));
+      return;
+    }
+    setConceptPmApplied((s) => new Set(s).add(conceptPmPlanJobId));
+    apply
+      .mutateAsync({ jobId: conceptPmPlanJobId })
+      .then(() => {
+        setApplyError(null);
+        refetch();
+      })
+      .catch((err) => {
+        setApplyError(err instanceof Error ? err.message : String(err));
+        console.error('[PlanDashboard] apply grounded pm-plan failed', err);
+      });
+  }, [plan, conceptPmPlanJobId, conceptPmJob?.status, conceptPmApplied, apply, refetch]);
 
   // 2026-06-13 — storyId → { title, epic } map for the GitGraph Story view
   // (substitutes raw UUIDs with titles; groups commits Epic → Wave).
@@ -376,11 +449,33 @@ export function PlanDashboard({ planId }: { planId: string }) {
       <BudgetBanner planId={plan.planId} rigor={plan.rigor} totalCostUsd={plan.totalCostUsd || 0} />
       <Pipeline
         status={plan.status}
-        activeStageId={activeView === 'party' ? defaultStage : activeView}
+        activeStageId={
+          activeView === 'party' || activeView === 'retrospect' ? defaultStage : activeView
+        }
         onStageChange={goToStage}
         onPartyClick={goToParty}
         isPartyActive={activeView === 'party'}
       />
+
+      {/* Plan Retrospect entry — grade this run against the living rubric. */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '8px 16px 0' }}>
+        <button
+          type="button"
+          onClick={goToRetrospect}
+          style={{
+            fontSize: 13,
+            padding: '4px 12px',
+            borderRadius: 6,
+            border: '1px solid var(--border)',
+            background: activeView === 'retrospect' ? 'var(--accent-blue)' : 'transparent',
+            color: activeView === 'retrospect' ? 'var(--background)' : 'var(--text-mute)',
+            cursor: 'pointer',
+          }}
+          aria-pressed={activeView === 'retrospect'}
+        >
+          ⟳ Plan Retrospect
+        </button>
+      </div>
 
       {/* Developing-specific sub-tabs render only when viewing Developing. */}
       {activeView === 'developing' && (
@@ -463,6 +558,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
         )}
 
         {activeView === 'party' && <PlanPartyView plan={plan} />}
+        {activeView === 'retrospect' && <RetrospectView planId={planId} />}
       </div>
     </div>
   );

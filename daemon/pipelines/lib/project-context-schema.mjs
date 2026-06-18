@@ -152,6 +152,25 @@ export function validateProjectContextPack(pack) {
     }
   }
 
+  // Concept v2 (E7.7) — citedSections: optional array of { source, section,
+  // title, text } (back-compat: absent on packs that cite nothing / legacy).
+  if ('citedSections' in pack && pack.citedSections !== undefined) {
+    if (!Array.isArray(pack.citedSections)) {
+      errors.push('citedSections: expected array');
+    } else {
+      for (let i = 0; i < pack.citedSections.length; i++) {
+        const c = pack.citedSections[i];
+        if (c === null || typeof c !== OBJECT) {
+          errors.push(`citedSections[${i}]: expected object`);
+          continue;
+        }
+        if (typeof c.source !== STRING) errors.push(`citedSections[${i}].source: expected string`);
+        if (typeof c.section !== STRING) errors.push(`citedSections[${i}].section: expected string`);
+        if (typeof c.text !== STRING) errors.push(`citedSections[${i}].text: expected string`);
+      }
+    }
+  }
+
   // prevWorkSummaries: array of { storyId, title, summary }
   if (!Array.isArray(pack.prevWorkSummaries)) {
     errors.push('prevWorkSummaries: expected array');

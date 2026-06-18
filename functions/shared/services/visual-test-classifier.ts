@@ -13,7 +13,12 @@
  * The qa-aggregate shell step shells out to `node` which calls into this.
  */
 
-import type { VisualTestDef, VisualTestLevel } from '../types/epic-workflow';
+import type {
+  VisualTestDef,
+  VisualTestLevel,
+  VerifyIntent,
+  ManualReason,
+} from '../types/epic-workflow';
 import type { PlanRigor } from '../types/plan';
 
 // ── Viewport parser (Q2.2) ────────────────────────────────────────────
@@ -108,6 +113,14 @@ export interface ClassificationResult {
    *  test classifies as L2 by shape but rigor='prototype' forces L0;
    *  the operator-facing card shows "(forced L0 by prototype rigor)". */
   rigorFloored?: boolean;
+  /** VQA v3 (E4-S2 / FR-13) — the resolved oracle tier derived from the
+   *  linked AC's `verify` intent + whether the app ships a test-harness
+   *  seam, then capped by the vision-only rigor rule. Distinct from the
+   *  wire-level `level` (L0/L1/L2) the runtime uses to pick a judge step;
+   *  this is the operator-facing "how is this actually verified" tier
+   *  (e.g. `L2-state` = deterministic seam read, rigor-exempt). Only set
+   *  when the AC carried a `verify` intent. */
+  resolvedLevel?: ResolvedLevel;
 }
 
 /**
@@ -253,10 +266,208 @@ export function classifyVisualTest(
   };
 }
 
+// ── VQA v3 (E5.4 / FR-11..13) — verify-based level + vision-only rigor cap ──
+
+/**
+ * The resolved oracle tier. L2 splits into:
+ *   • L2-state  — deterministic seam read (window.__harness). FREE, flake-free.
+ *   • L2-vision — LLM judges a post-interaction frame.
+ * Plus the human lane for `manual`. This is the QA-AUTHOR's working vocabulary
+ * (E8); it does NOT replace the wire-level `VisualTestLevel` (L0/L1/L2) that the
+ * existing classifier + reports use — keeping the blast radius contained.
+ *
+ *   • needs-probe — a `state`/`behavior` AC that would earn the deterministic
+ *     `L2-state` tier but carries NO executable probe (no `assert` flow step /
+ *     `window.__harness` read). It is honestly unverifiable: surfaced as such
+ *     instead of being handed to a vision judge it can't satisfy (F13).
+ */
+export type ResolvedLevel = 'L0' | 'L1' | 'L2-state' | 'L2-vision' | 'operator' | 'needs-probe';
+
+/**
+ * F13 — does this test carry an EXECUTABLE deterministic probe? A `state`/
+ * `behavior` AC only earns the `L2-state` oracle tier if at least one of its
+ * flow steps is an `assert` (the `window.__harness` read the runtime executes
+ * in `runFlow`). A flow-less test, or a flow with no `assert`, is partitioned
+ * to the plain-test lane and never runs an assert — so it cannot honestly claim
+ * the deterministic tier.
+ */
+export function hasExecutableProbe(test: Pick<VisualTestDef, 'flow'>): boolean {
+  return Array.isArray(test.flow) && test.flow.some((s) => s.action === 'assert');
+}
+
+/** Deterministic tiers run flake-free for ~$0 — and are therefore rigor-EXEMPT. */
+export function isDeterministicLevel(level: ResolvedLevel): level is 'L0' | 'L2-state' {
+  return level === 'L0' || level === 'L2-state';
+}
+
+/**
+ * F13 — map a resolved oracle tier back to the wire-level `VisualTestLevel`
+ * the runtime uses to pick a judge step. Returns `undefined` for tiers that
+ * don't pin a wire level (`L2-state` runs a flow but deterministically; the
+ * human `operator` lane and the honest `needs-probe` state aren't wire-routed),
+ * so callers leave the existing `level` untouched for those.
+ */
+export function wireLevelForResolved(tier: ResolvedLevel): VisualTestLevel | undefined {
+  switch (tier) {
+    case 'L0':
+      return 'L0';
+    case 'L1':
+      return 'L1';
+    case 'L2-vision':
+      return 'L2';
+    default:
+      return undefined; // L2-state / operator / needs-probe — not a vision wire tier
+  }
+}
+
+/** F13 — wire-level cost order L0 < L1 < L2, used to compare two wire levels. */
+const WIRE_COST: Record<VisualTestLevel, number> = { L0: 0, L1: 1, L2: 2 };
+export function isCheaperWire(candidate: VisualTestLevel, current: VisualTestLevel): boolean {
+  return WIRE_COST[candidate] < WIRE_COST[current];
+}
+
+/**
+ * FR-13 — derive the oracle tier from the PM's `verify` intent + whether a
+ * test-harness seam exists for the app:
+ *   build→L0 · appearance→L1 · state→(seam? L2-state : L1) ·
+ *   behavior→(seam? L2-state : L2-vision) · manual→operator lane.
+ */
+export function deriveLevelFromVerify(
+  verify: VerifyIntent | undefined,
+  hasSeam: boolean,
+): ResolvedLevel {
+  switch (verify) {
+    case 'build':
+      return 'L0';
+    case 'appearance':
+      return 'L1';
+    case 'state':
+      return hasSeam ? 'L2-state' : 'L1';
+    case 'behavior':
+      return hasSeam ? 'L2-state' : 'L2-vision';
+    case 'manual':
+      return 'operator';
+    default:
+      // No verify intent → fall back to the shape classifier's world (L1 vision).
+      return 'L1';
+  }
+}
+
+/**
+ * E8.2 (W5/H12 / MQ1-followup) — the ONE `needsBrowser` rule all three docs
+ * share: DERIVED for `build|appearance|state|behavior` (`build→false`, the rest
+ * `true` — they need a running surface), and INDEPENDENT/EXPLICIT for `manual`
+ * (returns `undefined` → the caller keeps the operator-set flag; a manual AC's
+ * browser-need is a human-lane fact, not derivable from intent). Centralizes
+ * the rule so the classifier, the QA-AUTHOR, and the gate never diverge.
+ */
+export function deriveNeedsBrowser(verify: VerifyIntent | undefined): boolean | undefined {
+  switch (verify) {
+    case 'build':
+      return false;
+    case 'appearance':
+    case 'state':
+    case 'behavior':
+      return true;
+    case 'manual':
+      return undefined; // independent — caller keeps the explicit value
+    default:
+      return undefined; // no intent → leave the existing flag alone
+  }
+}
+
+/**
+ * E8.3 (W5/H12) — the `manual→behavior` downgrade decision, owned by the
+ * QA-AUTHOR (Concept's gate only FLAGS `manual`; it must not reclassify — the
+ * W5 altitude rule). Stub-availability is a mechanism fact known only at
+ * story-dev start: if a test-mode boundary seam exists for this AC's boundary
+ * (`stubAvailable`), a `verify:'manual'` AC is NOT genuinely unautomatable —
+ * downgrade it to `behavior`, FORCE `needsBrowser:true`, and emit a logged
+ * reclassification event so `manual` can't become the new UNVERIFIABLE escape
+ * hatch. A genuinely unautomatable AC (no stub) stays `manual` → operator lane.
+ *
+ * Pure decision only; the daemon emits the returned `event` into the reflection
+ * sink. Non-manual ACs pass through unchanged.
+ */
+export interface ManualDowngradeDecision {
+  verify: VerifyIntent;
+  /** Forced true on downgrade; undefined when unchanged (caller keeps explicit). */
+  needsBrowser?: boolean;
+  reclassified: boolean;
+  /** Logged reclassification event payload (null when no change). */
+  event: {
+    kind: 'manual-downgrade';
+    acId: string;
+    from: 'manual';
+    to: 'behavior';
+    manualReason?: ManualReason;
+    reason: string;
+  } | null;
+}
+
+export function downgradeManualToBehavior(args: {
+  acId: string;
+  verify: VerifyIntent | undefined;
+  manualReason?: ManualReason;
+  /** Does a test-mode boundary seam exist for this AC's boundary (E11.3/E11.4)? */
+  stubAvailable: boolean;
+}): ManualDowngradeDecision {
+  if (args.verify !== 'manual') {
+    return { verify: args.verify ?? 'behavior', reclassified: false, event: null };
+  }
+  if (!args.stubAvailable) {
+    // Genuinely unautomatable → stays manual, routes to the operator lane (E11).
+    return { verify: 'manual', reclassified: false, event: null };
+  }
+  // Stubbable boundary → automate it deterministically.
+  return {
+    verify: 'behavior',
+    needsBrowser: true,
+    reclassified: true,
+    event: {
+      kind: 'manual-downgrade',
+      acId: args.acId,
+      from: 'manual',
+      to: 'behavior',
+      manualReason: args.manualReason,
+      reason: `boundary is stubbable (test-mode seam available) — automated as behavior; manual would be a false escape hatch`,
+    },
+  };
+}
+
+const VISION_ORDINAL: Record<'L0' | 'L1' | 'L2-vision', number> = {
+  L0: 0,
+  L1: 1,
+  'L2-vision': 2,
+};
+const RIGOR_VISION_CEILING: Record<PlanRigor, 'L0' | 'L1' | 'L2-vision'> = {
+  prototype: 'L0', // no paid vision on a throwaway
+  mvp: 'L1',
+  production: 'L2-vision',
+};
+
+/**
+ * R1 — the split rigor cap. Rigor is a COST ceiling on **vision tiers only**
+ * (L1 / L2-vision). Deterministic tiers (L0, L2-state) and the operator lane are
+ * EXEMPT — a `prototype` plan still runs an L2-state assert (it's free), which is
+ * exactly the disease the old "prototype→L0 for everything" cap re-introduced.
+ * This is the single highest-risk, easiest-to-miss requirement — keep it tested.
+ */
+export function capVisionLevelByRigor(level: ResolvedLevel, rigor: PlanRigor): ResolvedLevel {
+  if (isDeterministicLevel(level) || level === 'operator' || level === 'needs-probe') return level; // exempt — needs-probe is the unverifiable lane, never a vision tier
+  const ceiling = RIGOR_VISION_CEILING[rigor];
+  return VISION_ORDINAL[level] <= VISION_ORDINAL[ceiling] ? level : ceiling;
+}
+
 // ── Coverage + specificity rollups (Q4.1) ────────────────────────────
 
 export interface CoverageWarning {
-  kind: 'no-tests-for-needs-browser' | 'over-tested' | 'tests-without-criteria-ref';
+  kind:
+    | 'no-tests-for-needs-browser'
+    | 'over-tested'
+    | 'tests-without-criteria-ref'
+    | 'weak-oracle'
+    | 'unpaired-l2-state';
   criterionId?: string;
   testIds?: string[];
   message: string;
@@ -318,24 +529,55 @@ export const DEFAULT_WALLCLOCK_BY_LEVEL: Record<VisualTestLevel, number> = {
  */
 export function aggregateVisualTests(
   tests: ReadonlyArray<VisualTestDef>,
-  acceptanceCriteria: ReadonlyArray<{ id: string; needsBrowser: boolean }>,
+  acceptanceCriteria: ReadonlyArray<{ id: string; needsBrowser: boolean; verify?: VerifyIntent }>,
   planRigor?: PlanRigor,
+  hasSeam = false,
 ): AggregateReport {
   // PR-62 — index needsBrowser by AC id so per-test classification can
   // raise the floor for browser-tagged criteria. Tests whose criteriaRef
   // doesn't match any AC default to acNeedsBrowser=false (safest — they
   // get the shape-based level + rigor cap only).
   const needsBrowserByAcId = new Map<string, boolean>();
+  // VQA v3 (E4-S2) — index verify intent by AC id so each test can resolve
+  // its oracle tier (L2-state vs L2-vision vs …) from the PM's intent.
+  const verifyByAcId = new Map<string, VerifyIntent | undefined>();
   for (const ac of acceptanceCriteria) {
     needsBrowserByAcId.set(ac.id, ac.needsBrowser);
+    verifyByAcId.set(ac.id, ac.verify);
   }
 
   const classifications = tests.map((t) => {
     const acNeedsBrowser = t.criteriaRef ? (needsBrowserByAcId.get(t.criteriaRef) ?? false) : false;
-    return {
-      testId: t.id,
-      classification: classifyVisualTest(t, planRigor, acNeedsBrowser),
-    };
+    const classification = classifyVisualTest(t, planRigor, acNeedsBrowser);
+    // Resolve the verify-derived oracle tier (FR-13), capped by the
+    // vision-only rigor rule (FR-12 / R1: L2-state stays free + exempt).
+    const verify = t.criteriaRef ? verifyByAcId.get(t.criteriaRef) : undefined;
+    if (verify) {
+      const resolved = deriveLevelFromVerify(verify, hasSeam);
+      let tier = planRigor ? capVisionLevelByRigor(resolved, planRigor) : resolved;
+      // F13 — a `state`/`behavior` AC only earns the deterministic `L2-state`
+      // tier if the test actually ships an executable probe (an `assert` flow
+      // step the runtime reads from `window.__harness`). A flow-less test is
+      // partitioned to the plain-test lane and NEVER runs an assert, so it
+      // cannot satisfy L2-state. Don't hand it to a vision judge it can't
+      // satisfy either — mark it `needs-probe` so it surfaces honestly.
+      if (tier === 'L2-state' && !hasExecutableProbe(t)) {
+        tier = 'needs-probe';
+      }
+      classification.resolvedLevel = tier;
+      // F13 — honor the resolvedLevel as the cheapest-correct oracle: stop
+      // preserving a worse source-set wire `level` over a better resolved tier.
+      // A deterministic `L2-state` read is free + flake-free, so a test the
+      // dev-author hard-coded to an expensive vision tier should route by the
+      // resolved oracle, not the stale source level.
+      const wire = wireLevelForResolved(tier);
+      if (wire && classification.alreadyLeveled && isCheaperWire(wire, classification.level)) {
+        classification.level = wire;
+        classification.reason = `${classification.reason} (re-routed to ${wire} by resolved oracle ${tier} — cheapest-correct)`;
+        classification.alreadyLeveled = false;
+      }
+    }
+    return { testId: t.id, classification };
   });
 
   const byLevel: Record<VisualTestLevel, number> = { L0: 0, L1: 0, L2: 0 };
@@ -405,6 +647,51 @@ export function aggregateVisualTests(
         testIds: list,
         message: `${ac.id} has ${list.length} tests — possible over-testing`,
       });
+    }
+  }
+
+  // VQA v3 (E4-S3 / FR-16) — oracle-STRENGTH check, not just presence. When a
+  // seam exists and an AC is `state`/`behavior`, at least one of its tests must
+  // carry an `assert` step (the deterministic L2-state oracle). A state/behavior
+  // AC backed only by a vision screenshot is the exact disease the seam cures —
+  // flag it so the QA-AUTHOR adds the assert before the gate.
+  if (hasSeam) {
+    for (const ac of acceptanceCriteria) {
+      if (ac.verify !== 'state' && ac.verify !== 'behavior') continue;
+      const list = testsByCriterion.get(ac.id) ?? [];
+      if (list.length === 0) continue; // already flagged by the presence check
+      const hasAssert = list.some((id) => {
+        const t = tests.find((x) => x.id === id);
+        return t?.flow?.some((s) => s.action === 'assert');
+      });
+      if (!hasAssert) {
+        coverageWarnings.push({
+          kind: 'weak-oracle',
+          criterionId: ac.id,
+          testIds: list,
+          message: `${ac.id} is verify:${ac.verify} and a seam exists, but no test asserts window.__harness — add an 'assert' probe (vision-only is non-deterministic here)`,
+        });
+        continue; // no assert → the weak-oracle warning already covers it
+      }
+      // E5.6 / E8.4-AC2 (H3/FR-32/FR-35) — L2-state is NEVER the sole witness
+      // for a UI-bearing AC. The seam reports state the user never SAW; a
+      // "right state, broken/invisible UI" defect ships green if state is the
+      // only oracle. Require a paired vision frame (a `screenshot` step) in at
+      // least one of the AC's probes so render-class defects are still caught.
+      const needsBrowser = needsBrowserByAcId.get(ac.id) ?? false;
+      if (!needsBrowser) continue; // non-UI state AC: deterministic-only is fine
+      const hasPairedVision = list.some((id) => {
+        const t = tests.find((x) => x.id === id);
+        return t?.flow?.some((s) => s.action === 'screenshot');
+      });
+      if (!hasPairedVision) {
+        coverageWarnings.push({
+          kind: 'unpaired-l2-state',
+          criterionId: ac.id,
+          testIds: list,
+          message: `${ac.id} is a UI-bearing ${ac.verify} AC verified by L2-state alone — add a paired vision frame (a 'screenshot' step) so a right-state/broken-UI defect can't ship green (H3: L2-state cannot block-green for render-class)`,
+        });
+      }
     }
   }
 

@@ -120,6 +120,10 @@ declare module 'sst' {
       name: string;
       type: 'sst.aws.Dynamo';
     };
+    PropagatorProposalsTable: {
+      name: string;
+      type: 'sst.aws.Dynamo';
+    };
     PushSubscriptionsTable: {
       name: string;
       type: 'sst.aws.Dynamo';

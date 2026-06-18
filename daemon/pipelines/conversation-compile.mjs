@@ -245,7 +245,7 @@ export async function compileConversationKnowledge(newKnowledgeBlock, projectId,
   if (syncToGraph && createdArticles.length > 0) {
     dbg('Triggering graph-sync...');
     try {
-      const syncCmd = `node /home/ubuntu/scripts/graph-sync.mjs --project "${projectId}" --knowledge-dir "${knowledgeDir}"`;
+      const syncCmd = `node /opt/futurator-daemon/scripts/graph-sync.mjs --project "${projectId}" --knowledge-dir "${knowledgeDir}"`;
       execSync(syncCmd, {
         encoding: 'utf-8',
         timeout: 30000,
@@ -358,7 +358,7 @@ export function getSyncStep(projectId, knowledgeDir) {
   return {
     id: 'sync',
     stepType: 'shell',
-    command: `node /home/ubuntu/scripts/graph-sync.mjs --project "${projectId}" --knowledge-dir "${knowledgeDir}"`,
+    command: `node /opt/futurator-daemon/scripts/graph-sync.mjs --project "${projectId}" --knowledge-dir "${knowledgeDir}"`,
     condition: 'NEW_KNOWLEDGE', // Only runs if compilation happened
   };
 }

@@ -540,3 +540,62 @@ describe('v2.6 — wave-gate quality plumbing', () => {
     expect(ignore?.content).toContain('.pipeline');
   });
 });
+
+describe('nextjs-canvas-game — VQA v3 verifiability seam (E2)', () => {
+  const game = BOILERPLATE_REGISTRY['nextjs-canvas-game'];
+
+  it('declares a testHarness contract with the generator-owned snapshot shape', () => {
+    expect(game.testHarness?.globalKey).toBe('window.__harness');
+    expect(game.testHarness?.readySignal).toBe('ready');
+    const shape = game.testHarness?.snapshotShape ?? {};
+    // The keys probes assert against must be declared.
+    for (const key of [
+      'snapshot.status',
+      'snapshot.score',
+      'snapshot.entities',
+      'snapshot.gameOver',
+    ]) {
+      expect(shape[key]).toBeDefined();
+    }
+    expect(shape['snapshot.status'].enum).toContain('running');
+  });
+
+  it('ships the seam in the state-machine scaffold, PRODUCTION-ABSENT (env-guarded)', () => {
+    const sm = game.augmentFiles?.find((f) => f.path === 'src/game/state-machine.ts');
+    expect(sm?.content).toContain('window.__harness');
+    // The guard is what keeps the seam out of production builds — assert it
+    // exists and is the canonical NEXT_PUBLIC_TEST_HARNESS check.
+    expect(sm?.content).toContain("process.env.NEXT_PUBLIC_TEST_HARNESS !== '1'");
+    // The publish must happen INSIDE the guard (early-return before it).
+    const guardIdx = sm!.content.indexOf('NEXT_PUBLIC_TEST_HARNESS');
+    const publishIdx = sm!.content.indexOf('.__harness =');
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(publishIdx).toBeGreaterThan(guardIdx);
+  });
+
+  it('SCAFFOLD.md tells DEV the seam is pre-baked (do not author it)', () => {
+    expect(game.scaffoldContract).toMatch(/__harness/);
+    expect(game.scaffoldContract).toMatch(/PRE-BAKED|do NOT author/i);
+  });
+
+  it('ships a committed __harness.schema.json that matches testHarness.snapshotShape (E5.5)', () => {
+    const file = game.augmentFiles?.find((f) => f.path === '__harness.schema.json');
+    expect(file).toBeDefined();
+    const schema = JSON.parse(file!.content) as {
+      globalKey: string;
+      snapshot: Record<string, { type: string; enum?: string[] }>;
+      events: unknown[];
+    };
+    expect(schema.globalKey).toBe('window.__harness');
+    expect(Array.isArray(schema.events)).toBe(true);
+    // The schema's snapshot map must be exactly the testHarness shape, minus
+    // the `snapshot.` jsonPath prefix — single source of truth (no drift).
+    const fromContract = Object.fromEntries(
+      Object.entries(game.testHarness!.snapshotShape).map(([k, v]) => [
+        k.replace(/^snapshot\./, ''),
+        v,
+      ]),
+    );
+    expect(schema.snapshot).toEqual(fromContract);
+  });
+});
