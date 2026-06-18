@@ -316,6 +316,26 @@ function deriveNodeId(articlePath, knowledgeDir) {
   return rel.replace(/\.md$/, '');
 }
 
+const CODE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+
+/**
+ * F19 — normalize an extension-less `code/` article nodeId to the canonical
+ * code-file nodeId (WITH the real source extension), so an article the compiler
+ * named `<path>.md` (instead of `<path>.tsx.md`) unifies with its AST file node
+ * instead of forking a separate null-kind duplicate. Deterministic: only
+ * rewrites when a sibling source file actually exists on disk.
+ *   code/src--game--types   →  code/src--game--types.ts   (if src/game/types.ts exists)
+ */
+function normalizeCodeNodeId(nodeId, rootDir) {
+  if (!nodeId.startsWith('code/')) return nodeId;
+  if (CODE_EXTS.some((e) => nodeId.endsWith(e))) return nodeId; // already canonical
+  const relPath = nodeId.slice('code/'.length).replace(/--/g, '/');
+  for (const ext of CODE_EXTS) {
+    if (existsSync(join(rootDir, relPath + ext))) return nodeId + ext;
+  }
+  return nodeId;
+}
+
 /**
  * Extract first 200 chars of Purpose section as summary.
  */
@@ -373,8 +393,12 @@ async function main() {
   const unchangedArticles = [];
   const currentHashes = {};
 
+  const articleRootDir = join(config.knowledgeDir, '..');
   for (const articlePath of articlePaths) {
-    const nodeId = deriveNodeId(articlePath, config.knowledgeDir);
+    const nodeId = normalizeCodeNodeId(
+      deriveNodeId(articlePath, config.knowledgeDir),
+      articleRootDir,
+    );
     const content = await readFile(articlePath, 'utf-8');
     const hash = computeContentHash(content);
     currentHashes[nodeId] = hash;
