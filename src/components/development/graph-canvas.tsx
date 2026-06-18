@@ -172,7 +172,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
             icon: '#ffffff',
             label: 'rgba(226,232,240,0.92)',
             labelBg: 'rgba(8,12,20,0.78)',
-            zoneAlpha: '24',
+            zoneCore: '33',
             contain: 'rgba(148,163,184,0.18)',
           }
         : {
@@ -181,7 +181,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
             icon: '#1e293b',
             label: 'rgba(15,23,42,0.92)',
             labelBg: 'rgba(255,255,255,0.82)',
-            zoneAlpha: '2e',
+            zoneCore: '3a',
             contain: 'rgba(100,116,139,0.22)',
           },
     [dark],
@@ -320,10 +320,10 @@ export function GraphCanvas(props: GraphCanvasProps) {
     ctx.strokeStyle = theme.stroke;
     ctx.stroke();
     // icon when on-screen radius is big enough
-    if (r * globalScale > 6) {
+    if (r * globalScale > 3.5) {
       const img = getIconImage(meta.icon, theme.icon);
       if (img && img.complete && img.naturalWidth) {
-        const s = r * 1.2;
+        const s = r * 1.35;
         ctx.globalAlpha = 0.92;
         try {
           ctx.drawImage(img, x - s / 2, y - s / 2, s, s);
@@ -335,7 +335,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
     }
     // label
     const matched = !!searchMatch?.matchIds.has(n.id);
-    if (matched || selectedId === n.id || globalScale > 1.7 || (xray && r > 9)) {
+    if (matched || selectedId === n.id || globalScale > 1.7 || (xray && r > 14)) {
       const fontSize = Math.max(2.6, 10 / globalScale);
       ctx.font = `${fontSize}px ui-sans-serif, system-ui`;
       ctx.textAlign = 'center';
@@ -373,9 +373,13 @@ export function GraphCanvas(props: GraphCanvasProps) {
     if (zones) {
       const hulls = computeCommunityHulls(data.nodes, communityOf);
       for (const h of hulls) {
+        const col = communityColor(h.community);
+        const grad = ctx.createRadialGradient(h.cx, h.cy, h.r * 0.15, h.cx, h.cy, h.r);
+        grad.addColorStop(0, col + theme.zoneCore);
+        grad.addColorStop(1, col + '00');
         ctx.beginPath();
         ctx.arc(h.cx, h.cy, h.r, 0, 2 * Math.PI);
-        ctx.fillStyle = communityColor(h.community) + theme.zoneAlpha;
+        ctx.fillStyle = grad;
         ctx.fill();
       }
     }

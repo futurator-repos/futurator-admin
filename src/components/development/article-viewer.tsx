@@ -18,7 +18,12 @@ export interface ArticleViewerProps {
   onClose: () => void;
 }
 
-export function ArticleViewer({ url, title, rawUrl, onClose }: ArticleViewerProps) {
+/**
+ * ArticleBody — fetches + renders a knowledge article's markdown with no modal
+ * chrome, so it can be embedded inline (e.g. in the graph inspector panel) or
+ * wrapped by the modal below.
+ */
+export function ArticleBody({ url }: { url: string }) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,6 +46,55 @@ export function ArticleViewer({ url, title, rawUrl, onClose }: ArticleViewerProp
     };
   }, [url]);
 
+  if (error) {
+    return (
+      <div className="text-sm text-warning-foreground">
+        Couldn&apos;t load the article ({error}). It may not be mirrored yet.
+      </div>
+    );
+  }
+  if (content === null) {
+    return <div className="text-sm text-muted-foreground">Loading…</div>;
+  }
+  return (
+    <div className="space-y-3 text-sm leading-relaxed">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h1: (p) => <h1 className="mt-4 text-lg font-semibold" {...p} />,
+          h2: (p) => <h2 className="mt-4 text-base font-semibold" {...p} />,
+          h3: (p) => <h3 className="mt-3 text-sm font-semibold" {...p} />,
+          p: (p) => <p className="my-2" {...p} />,
+          ul: (p) => <ul className="my-2 list-disc pl-5" {...p} />,
+          ol: (p) => <ol className="my-2 list-decimal pl-5" {...p} />,
+          li: (p) => <li className="my-0.5" {...p} />,
+          a: (p) => (
+            <a
+              className="text-accent-blue underline"
+              target="_blank"
+              rel="noopener noreferrer"
+              {...p}
+            />
+          ),
+          code: (p) => (
+            <code className="rounded bg-muted px-1 py-0.5 text-xs text-accent-blue" {...p} />
+          ),
+          pre: (p) => <pre className="my-2 overflow-auto rounded-md bg-muted p-3 text-xs" {...p} />,
+          table: (p) => <table className="my-2 w-full border-collapse text-xs" {...p} />,
+          th: (p) => <th className="border border-border px-2 py-1 text-left" {...p} />,
+          td: (p) => <td className="border border-border px-2 py-1" {...p} />,
+          blockquote: (p) => (
+            <blockquote className="border-l-2 border-border pl-3 text-muted-foreground" {...p} />
+          ),
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+export function ArticleViewer({ url, title, rawUrl, onClose }: ArticleViewerProps) {
   // Close on Escape.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
@@ -80,58 +134,7 @@ export function ArticleViewer({ url, title, rawUrl, onClose }: ArticleViewerProp
           </button>
         </div>
         <div className="overflow-auto px-6 py-5">
-          {error && (
-            <div className="text-sm text-warning-foreground">
-              Couldn&apos;t load the article ({error}). It may not be mirrored yet.
-            </div>
-          )}
-          {!error && content === null && (
-            <div className="text-sm text-muted-foreground">Loading…</div>
-          )}
-          {content !== null && (
-            <div className="space-y-3 text-sm leading-relaxed">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  h1: (p) => <h1 className="mt-4 text-lg font-semibold" {...p} />,
-                  h2: (p) => <h2 className="mt-4 text-base font-semibold" {...p} />,
-                  h3: (p) => <h3 className="mt-3 text-sm font-semibold" {...p} />,
-                  p: (p) => <p className="my-2" {...p} />,
-                  ul: (p) => <ul className="my-2 list-disc pl-5" {...p} />,
-                  ol: (p) => <ol className="my-2 list-decimal pl-5" {...p} />,
-                  li: (p) => <li className="my-0.5" {...p} />,
-                  a: (p) => (
-                    <a
-                      className="text-accent-blue underline"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      {...p}
-                    />
-                  ),
-                  code: (p) => (
-                    <code
-                      className="rounded bg-muted px-1 py-0.5 text-xs text-accent-blue"
-                      {...p}
-                    />
-                  ),
-                  pre: (p) => (
-                    <pre className="my-2 overflow-auto rounded-md bg-muted p-3 text-xs" {...p} />
-                  ),
-                  table: (p) => <table className="my-2 w-full border-collapse text-xs" {...p} />,
-                  th: (p) => <th className="border border-border px-2 py-1 text-left" {...p} />,
-                  td: (p) => <td className="border border-border px-2 py-1" {...p} />,
-                  blockquote: (p) => (
-                    <blockquote
-                      className="border-l-2 border-border pl-3 text-muted-foreground"
-                      {...p}
-                    />
-                  ),
-                }}
-              >
-                {content}
-              </ReactMarkdown>
-            </div>
-          )}
+          <ArticleBody url={url} />
         </div>
       </div>
     </div>

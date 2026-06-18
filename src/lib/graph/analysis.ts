@@ -42,11 +42,11 @@ export function computeCommunityHulls<T extends XY>(
     }
     cx /= members.length;
     cy /= members.length;
-    let r = 0;
-    for (const m of members) {
-      r = Math.max(r, Math.hypot(m.x! - cx, m.y! - cy));
-    }
-    hulls.push({ community, cx, cy, r: r + 26, count: members.length });
+    // 80th-percentile distance (NOT max) so one far-flung member doesn't balloon
+    // the blob into a giant flat circle that forces the fit-zoom way out.
+    const dists = members.map((m) => Math.hypot(m.x! - cx, m.y! - cy)).sort((a, b) => a - b);
+    const p80 = dists[Math.min(dists.length - 1, Math.floor(dists.length * 0.8))];
+    hulls.push({ community, cx, cy, r: p80 + 16, count: members.length });
   }
   return hulls;
 }

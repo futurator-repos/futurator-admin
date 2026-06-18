@@ -23,47 +23,47 @@ export interface KindMeta {
 
 /** Keyed by node.kind, falling back to node.type for null-kind doc nodes. */
 export const KIND_META: Record<string, KindMeta> = {
-  // Layer 1 — code (AST + file)
-  file: { color: '#3b82f6', base: 6, shape: 'circle', icon: 'file', label: 'File', layer: 1 },
+  // Layer 1 — code (AST + file). Bigger bases so icons read at overview zoom.
+  file: { color: '#3b82f6', base: 8, shape: 'circle', icon: 'file', label: 'File', layer: 1 },
   function: {
     color: '#22d3ee',
-    base: 3,
+    base: 5,
     shape: 'circle',
     icon: 'function',
     label: 'Function',
     layer: 1,
   },
-  class: { color: '#a855f7', base: 4, shape: 'circle', icon: 'class', label: 'Class', layer: 1 },
-  dir: { color: '#64748b', base: 5, shape: 'roundRect', icon: 'dir', label: 'Directory', layer: 1 },
+  class: { color: '#a855f7', base: 7, shape: 'circle', icon: 'class', label: 'Class', layer: 1 },
+  dir: { color: '#64748b', base: 7, shape: 'roundRect', icon: 'dir', label: 'Directory', layer: 1 },
   // Layer 2 — knowledge / docs (null-kind nodes, keyed by type)
   decision: {
     color: '#f0abfc',
-    base: 6,
+    base: 8,
     shape: 'hex',
     icon: 'decision',
     label: 'Decision',
     layer: 2,
   },
-  system: { color: '#f97316', base: 6, shape: 'hex', icon: 'system', label: 'System', layer: 2 },
+  system: { color: '#f97316', base: 8, shape: 'hex', icon: 'system', label: 'System', layer: 2 },
   requirement: {
     color: '#22c55e',
-    base: 6,
+    base: 8,
     shape: 'hex',
     icon: 'requirement',
     label: 'Requirement',
     layer: 2,
   },
-  index: { color: '#34d399', base: 6, shape: 'doc', icon: 'document', label: 'Index', layer: 2 },
-  log: { color: '#eab308', base: 5, shape: 'doc', icon: 'document', label: 'Log', layer: 2 },
+  index: { color: '#34d399', base: 8, shape: 'doc', icon: 'document', label: 'Index', layer: 2 },
+  log: { color: '#eab308', base: 7, shape: 'doc', icon: 'document', label: 'Log', layer: 2 },
   document: {
     color: '#eab308',
-    base: 6,
+    base: 8,
     shape: 'doc',
     icon: 'document',
     label: 'Document',
     layer: 2,
   },
-  unknown: { color: '#64748b', base: 5, shape: 'circle', icon: 'file', label: 'Node', layer: 1 },
+  unknown: { color: '#64748b', base: 6, shape: 'circle', icon: 'file', label: 'Node', layer: 1 },
 };
 
 /** Resolve a node's kind meta (prefer kind, fall back to type, then unknown). */

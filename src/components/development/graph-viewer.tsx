@@ -17,9 +17,10 @@ import {
 import { DeadCodePanel } from './dead-code-panel';
 import { ArchXrayPanel } from './arch-xray-panel';
 import { CapabilityGapPanel } from './capability-gap-panel';
-import { ArticleViewer } from './article-viewer';
+import { ArticleViewer, ArticleBody } from './article-viewer';
 import { GraphCanvas, type CanvasNode, type CanvasLink } from './graph-canvas';
-import type { LayoutMode } from '@/lib/graph/catalog';
+import { communityColor, type LayoutMode } from '@/lib/graph/catalog';
+import { buildAdjacency } from '@/lib/graph/analysis';
 
 const S3_BASE = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
 // Article links open in a browser tab — use the CloudFront domain, NOT the raw
@@ -128,6 +129,8 @@ export function GraphViewer({
   const [layout, setLayout] = useState<LayoutMode>('force');
   const [showZones, setShowZones] = useState(true);
   const [fitToken, setFitToken] = useState(0);
+  const [blastEnabled, setBlastEnabled] = useState(false);
+  const [showArticleInline, setShowArticleInline] = useState(false);
   const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
   const locked = !!lockedProjectId;
 
@@ -405,6 +408,45 @@ export function GraphViewer({
     [selectedNode],
   );
 
+  // Adjacency over the full snapshot — powers relationships-by-edge-type in the
+  // inspector + the Blast-radius highlight.
+  const adjacency = useMemo(() => buildAdjacency(snapshot?.edges ?? [], endpointId), [snapshot]);
+  const relsByType = useMemo(() => {
+    if (!selectedNode)
+      return [] as { type: string; entries: { to: string; dir: 'out' | 'in' }[] }[];
+    const groups = new Map<string, { to: string; dir: 'out' | 'in' }[]>();
+    for (const a of adjacency.get(selectedNode.id) ?? []) {
+      const g = groups.get(a.type) ?? [];
+      g.push({ to: a.to, dir: a.dir });
+      groups.set(a.type, g);
+    }
+    return [...groups.entries()]
+      .map(([type, entries]) => ({ type, entries }))
+      .sort((x, y) => y.entries.length - x.entries.length);
+  }, [selectedNode, adjacency]);
+  // Blast radius — 2-hop reachable set from the selected node (Pass 3). Reuses
+  // the canvas's match/dim machinery: light the node + its blast, dim the rest.
+  const blastHighlight = useMemo(() => {
+    if (!blastEnabled || !selectedNode) return null;
+    const reached = new Set<string>([selectedNode.id]);
+    let frontier = [selectedNode.id];
+    for (let hop = 0; hop < 2; hop++) {
+      const next: string[] = [];
+      for (const id of frontier)
+        for (const a of adjacency.get(id) ?? [])
+          if (!reached.has(a.to)) {
+            reached.add(a.to);
+            next.push(a.to);
+          }
+      frontier = next;
+    }
+    const neighborIds = new Set(reached);
+    neighborIds.delete(selectedNode.id);
+    return { matchIds: new Set([selectedNode.id]), neighborIds, count: reached.size };
+  }, [blastEnabled, selectedNode, adjacency]);
+  const effectiveMatch = blastHighlight ?? searchMatch;
+  useEffect(() => setShowArticleInline(false), [selectedNode?.id]);
+
   function toggleKind(k: string) {
     setHiddenKinds((prev) => {
       const next = new Set(prev);
@@ -568,32 +610,6 @@ export function GraphViewer({
               Last fetched: {lastFetchedAt.toLocaleTimeString()}
             </div>
           )}
-          <div className="ml-auto flex flex-wrap gap-2 text-xs">
-            {Object.entries(nodeKindBreakdown).map(([k, n]) => {
-              const hidden = hiddenKinds.has(k);
-              return (
-                <button
-                  key={k}
-                  onClick={() => toggleKind(k)}
-                  className={`flex items-center gap-1 rounded-md border px-2 py-0.5 transition-opacity ${
-                    hidden ? 'opacity-40 line-through' : ''
-                  }`}
-                  style={{
-                    borderColor: NODE_COLORS_BY_KIND[k] ?? NODE_COLORS_BY_KIND.unknown,
-                  }}
-                  title={hidden ? `Show ${k}` : `Hide ${k}`}
-                >
-                  <span
-                    className="inline-block h-2.5 w-2.5 rounded-full"
-                    style={{
-                      background: NODE_COLORS_BY_KIND[k] ?? NODE_COLORS_BY_KIND.unknown,
-                    }}
-                  />
-                  {k}: {n}
-                </button>
-              );
-            })}
-          </div>
         </div>
       )}
 
@@ -643,6 +659,18 @@ export function GraphViewer({
             Zones
           </button>
           <button
+            onClick={() => setBlastEnabled((v) => !v)}
+            disabled={!selectedNode}
+            className={`rounded-md border px-2.5 py-1 text-xs disabled:opacity-50 ${
+              blastEnabled && selectedNode
+                ? 'border-accent-blue bg-accent-blue/15 text-accent-blue'
+                : 'border-input bg-background hover:bg-muted'
+            }`}
+            title="Blast radius — light the selected node's 2-hop neighbourhood, dim the rest"
+          >
+            Blast
+          </button>
+          <button
             onClick={() => setFitToken((t) => t + 1)}
             className="rounded-md border border-input bg-background px-2.5 py-1 text-xs hover:bg-muted"
             title="Fit graph to view"
@@ -652,9 +680,65 @@ export function GraphViewer({
         </div>
       )}
 
-      {/* Graph + details */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
-        <div className="relative h-[720px] overflow-hidden rounded-md border border-border bg-card">
+      {/* Graph Viz v2 — left rail · graph hero · right rail */}
+      <div className="flex flex-col gap-3 lg:h-[760px] lg:flex-row">
+        {/* LEFT RAIL — filters */}
+        <aside className="flex shrink-0 flex-col gap-3 overflow-auto rounded-md border border-border bg-card p-3 text-xs lg:w-[210px]">
+          <div>
+            <div className="mb-1.5 font-semibold uppercase tracking-wide text-muted-foreground">
+              Layers &amp; kinds
+            </div>
+            <div className="flex flex-col gap-1">
+              {Object.entries(nodeKindBreakdown).map(([k, n]) => {
+                const hidden = hiddenKinds.has(k);
+                return (
+                  <button
+                    key={k}
+                    onClick={() => toggleKind(k)}
+                    className={`flex items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-muted/50 ${hidden ? 'opacity-40 line-through' : ''}`}
+                    title={hidden ? `Show ${k}` : `Hide ${k}`}
+                  >
+                    <span
+                      className="inline-block h-2.5 w-2.5 flex-shrink-0 rounded-full"
+                      style={{ background: NODE_COLORS_BY_KIND[k] ?? NODE_COLORS_BY_KIND.unknown }}
+                    />
+                    <span className="flex-1 capitalize">{k}</span>
+                    <span className="text-muted-foreground">{n}</span>
+                  </button>
+                );
+              })}
+              {!snapshot && <div className="px-1 text-muted-foreground">—</div>}
+            </div>
+          </div>
+          <div>
+            <div className="mb-1.5 font-semibold uppercase tracking-wide text-muted-foreground">
+              Edge types
+            </div>
+            <div className="flex flex-col gap-1">
+              {Object.entries(edgeTypeBreakdown).map(([t, n]) => {
+                const hidden = hiddenEdges.has(t);
+                return (
+                  <button
+                    key={t}
+                    onClick={() => toggleEdge(t)}
+                    className={`flex items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-muted/50 ${hidden ? 'opacity-40 line-through' : ''}`}
+                    title={hidden ? `Show ${t}` : `Hide ${t}`}
+                  >
+                    <span
+                      className="inline-block h-2 w-5 flex-shrink-0 rounded"
+                      style={{ background: EDGE_COLORS[t] ?? EDGE_COLORS.DEPENDS_ON }}
+                    />
+                    <span className="flex-1">{t}</span>
+                    <span className="text-muted-foreground">{n}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </aside>
+
+        {/* GRAPH — hero */}
+        <div className="relative min-h-[520px] min-w-0 flex-1 overflow-hidden rounded-md border border-border bg-card">
           {!projectId && (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               Enter a project / plan ID above to load its graph.
@@ -674,7 +758,7 @@ export function GraphViewer({
               maxCentrality={maxC}
               xray={overlayActive}
               zones={showZones && overlayActive}
-              searchMatch={searchMatch}
+              searchMatch={effectiveMatch}
               similarSet={similarSet}
               selectedId={selectedNode?.id ?? null}
               onSelect={(n) => setSelectedNode((n as unknown as GraphNode) ?? null)}
@@ -682,8 +766,8 @@ export function GraphViewer({
           )}
         </div>
 
-        {/* Details side panel */}
-        <div className="rounded-md border border-border bg-card p-4 text-sm">
+        {/* RIGHT RAIL — inspector / insights */}
+        <aside className="shrink-0 overflow-auto rounded-md border border-border bg-card p-4 text-sm lg:w-[340px]">
           {selectedNode ? (
             <div className="space-y-3">
               <div>
@@ -770,6 +854,65 @@ export function GraphViewer({
                   <div className="text-xs whitespace-pre-wrap">{selectedNode.summary}</div>
                 </div>
               )}
+              {/* Centrality / community from the analytics pass. */}
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                <div>
+                  <span className="text-muted-foreground">Centrality: </span>
+                  {metrics[selectedNode.id]?.centrality != null
+                    ? metrics[selectedNode.id]!.centrality!.toFixed(0)
+                    : '—'}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Community: </span>
+                  {metrics[selectedNode.id]?.community ?? '—'}
+                </div>
+              </div>
+              {/* Relationships grouped by edge type (click a target to walk the graph). */}
+              {relsByType.length > 0 && (
+                <div>
+                  <div className="mb-1 text-xs uppercase text-muted-foreground">
+                    Relationships ({relsByType.reduce((s, r) => s + r.entries.length, 0)})
+                  </div>
+                  <div className="space-y-1.5">
+                    {relsByType.map(({ type, entries }) => (
+                      <div key={type}>
+                        <div className="flex items-center gap-2 text-xs">
+                          <span
+                            className="inline-block h-2 w-5 flex-shrink-0 rounded"
+                            style={{ background: EDGE_COLORS[type] ?? EDGE_COLORS.DEPENDS_ON }}
+                          />
+                          <span className="font-medium">{type}</span>
+                          <span className="text-muted-foreground">{entries.length}</span>
+                        </div>
+                        <div className="mt-0.5 space-y-0.5 pl-7">
+                          {entries.slice(0, 10).map(({ to, dir }, i) => {
+                            const tgt = snapshot?.nodes.find((n) => n.id === to);
+                            return (
+                              <button
+                                key={`${to}-${i}`}
+                                type="button"
+                                onClick={() => tgt && setSelectedNode(tgt)}
+                                className="flex w-full items-baseline gap-1 rounded px-1 text-left text-xs hover:bg-muted/40"
+                                title={to}
+                              >
+                                <span className="flex-shrink-0 text-muted-foreground">
+                                  {dir === 'out' ? '→' : '←'}
+                                </span>
+                                <code className="flex-1 break-all">{tgt?.title || to}</code>
+                              </button>
+                            );
+                          })}
+                          {entries.length > 10 && (
+                            <div className="pl-1 text-[10px] text-muted-foreground">
+                              +{entries.length - 10} more
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {/* Semantic neighbours from the embeddings (graph-sync kNN). */}
               {selectedNode.similarTo && selectedNode.similarTo.length > 0 && (
                 <div>
@@ -801,15 +944,31 @@ export function GraphViewer({
                   </div>
                 </div>
               )}
-              {/* Open the compiler's full article rendered inline. */}
+              {/* Knowledge article — rendered inline (expand) or in a large modal. */}
               {projectId && articleUrl(ARTICLE_BASE, projectId, selectedNode) && (
-                <button
-                  type="button"
-                  onClick={() => setArticleNode(selectedNode)}
-                  className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
-                >
-                  View knowledge article
-                </button>
+                <div className="border-t border-border pt-2">
+                  <div className="mb-1 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowArticleInline((v) => !v)}
+                      className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
+                    >
+                      {showArticleInline ? '▾ Knowledge article' : '▸ Knowledge article'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setArticleNode(selectedNode)}
+                      className="text-xs text-muted-foreground underline hover:text-foreground"
+                    >
+                      expand ↗
+                    </button>
+                  </div>
+                  {showArticleInline && (
+                    <div className="max-h-[340px] overflow-auto rounded-md border border-border bg-muted/20 px-3 py-2">
+                      <ArticleBody url={articleUrl(ARTICLE_BASE, projectId, selectedNode)!} />
+                    </div>
+                  )}
+                </div>
               )}
               {(selectedNode.createdByStory || selectedNode.lastMutatedByStory) && (
                 <div className="border-t border-border pt-2 text-xs text-muted-foreground">
@@ -824,42 +983,92 @@ export function GraphViewer({
                 </div>
               )}
             </div>
-          ) : snapshot ? (
-            <div className="space-y-3 text-xs text-muted-foreground">
-              <div>Click a node to inspect.</div>
-              <div className="border-t border-border pt-2">
-                <div className="font-semibold text-foreground mb-1">
-                  Edge types (click to filter)
-                </div>
-                {Object.entries(edgeTypeBreakdown).map(([t, n]) => {
-                  const hidden = hiddenEdges.has(t);
-                  return (
-                    <button
-                      key={t}
-                      onClick={() => toggleEdge(t)}
-                      className={`flex w-full items-center gap-2 rounded px-1 py-0.5 text-left transition-opacity hover:bg-muted ${
-                        hidden ? 'opacity-40 line-through' : ''
-                      }`}
-                      title={hidden ? `Show ${t}` : `Hide ${t}`}
-                    >
-                      <span
-                        className="inline-block h-2 w-6 rounded"
-                        style={{
-                          background: EDGE_COLORS[t] ?? EDGE_COLORS.DEPENDS_ON,
-                        }}
-                      />
-                      <span>
-                        {t}: {n}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
           ) : (
-            <div className="text-xs text-muted-foreground">No graph loaded.</div>
+            <div className="space-y-3 text-xs">
+              <div className="text-muted-foreground">
+                Click a node to inspect — or scan the insights below.
+              </div>
+              {integrity && (
+                <div
+                  className={`rounded-md border p-2 ${
+                    integrity.tone === 'fail'
+                      ? 'border-warning/50 bg-warning/10'
+                      : integrity.tone === 'pass'
+                        ? 'border-success/40 bg-success/10'
+                        : 'border-border bg-muted/30'
+                  }`}
+                >
+                  <div className="font-semibold text-foreground">{integrity.label}</div>
+                  <div className="text-muted-foreground">{integrity.detail}</div>
+                </div>
+              )}
+              <div>
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="font-semibold uppercase tracking-wide text-muted-foreground">
+                    Knowledge coverage
+                  </span>
+                  <span>{coverage.coveragePct}%</span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded bg-muted">
+                  <div
+                    className="h-full bg-accent-blue"
+                    style={{ width: `${coverage.coveragePct}%` }}
+                  />
+                </div>
+                <div className="mt-0.5 text-muted-foreground">
+                  {coverage.filesWithArticle}/{coverage.files} files documented
+                </div>
+              </div>
+              {archInsights?.godNodes?.length ? (
+                <div>
+                  <div className="mb-1 font-semibold uppercase tracking-wide text-muted-foreground">
+                    God-nodes (centrality)
+                  </div>
+                  <div className="space-y-0.5">
+                    {archInsights.godNodes.slice(0, 8).map((g) => (
+                      <button
+                        key={g.id}
+                        type="button"
+                        onClick={() => {
+                          const n = snapshot?.nodes.find((x) => x.id === g.id);
+                          if (n) setSelectedNode(n);
+                        }}
+                        className="flex w-full items-baseline gap-2 rounded px-1 py-0.5 text-left hover:bg-muted/40"
+                      >
+                        <code className="flex-1 break-all">{g.title}</code>
+                        <span className="flex-shrink-0 text-muted-foreground">
+                          {g.centrality.toFixed(0)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {archInsights?.communities?.length ? (
+                <div>
+                  <div className="mb-1 font-semibold uppercase tracking-wide text-muted-foreground">
+                    Communities ({archInsights.communities.length})
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {archInsights.communities.map((c) => (
+                      <span
+                        key={c.community}
+                        className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5"
+                        title={`community ${c.community}`}
+                      >
+                        <span
+                          className="inline-block h-2 w-2 rounded-full"
+                          style={{ background: communityColor(c.community) }}
+                        />
+                        {c.count}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
           )}
-        </div>
+        </aside>
       </div>
 
       {/* ── pacman1 UX — unconnected nodes (the operator's cleanup radar) ── */}
