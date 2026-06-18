@@ -12678,6 +12678,24 @@ app.post('/api/plans/:planId/scorecard/:stage/run', async (c) => {
   const det = await scoreDeterministic(planId, {
     fetchReflections: (pl) => reflectionsRepo.listReflections({ projectSlug: pl.name }),
     fetchGraphReports: (pl) => fetchPlanGraphReports(pl),
+    // QA grading (2026-06-18) — wire the qa-report so Q-C5/6/7 score from real
+    // verdicts instead of degrading to ⚪ (the v1 deferral that left the
+    // retrospect blind to every QA fix). Builds jobsById over the plan's full
+    // job set (concept + epics + retry-union + wave-build) so vqa results +
+    // gate-vqa history resolve; tryFetch wraps it, so any miss still degrades
+    // honestly to ⚪ rather than fabricating a score.
+    fetchQaReport: async (pl, ep) => {
+      const jobIds = await resolvePlanJobIds(pl, ep);
+      const jobsById: Record<string, import('../shared/types/agent-orchestrator').AgentJob> = {};
+      await Promise.all(
+        [...jobIds].map(async (id) => {
+          const job = await agentJobsRepo.getJobById(id);
+          if (job) jobsById[id] = job;
+        }),
+      );
+      const attentionItems = await attentionRepo.listAttentionItems(pl.planId);
+      return buildQaReport({ plan: pl, epics: ep, jobsById, attentionItems });
+    },
     // OV4 cost reconciliation: join agent-spend rows to the plan's FULL job set
     // (concept + epics + retry-union) across the plan's active UTC days. The
     // spend table has no jobId index, so we read its date partitions and filter

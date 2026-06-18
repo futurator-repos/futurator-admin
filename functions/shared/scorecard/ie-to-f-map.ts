@@ -34,6 +34,10 @@ const SHA = {
   F18: '0445e6a',
   // F19/F20/F21 all shipped together.
   DEPLOY: '1755365',
+  // F12 (QA evidence honesty) shipped 2026-06-18 in the QA-fix commit. F11
+  // (deploy×QA stage isolation) is NOT in it — stays open (FIX4's primary-feature
+  // surface mitigates the symptom, not the race).
+  QA_FIX: '3444320',
 } as const;
 
 /**
@@ -83,8 +87,8 @@ export const IE_TO_FIX: Record<string, FixRef[]> = {
   IE13: [F('F11', 'open')], // stage-isolation breach (deploy×QA race)
 
   // ── QA evidence integrity (Track F) ──
-  IE14: [F('F12', 'open')], // QA evidence-capture failure
-  IE15: [F('F12', 'open')], // infra failure scored as defect
+  IE14: [F('F12', 'shipped', SHA.QA_FIX)], // QA evidence-capture failure — SHIPPED
+  IE15: [F('F12', 'shipped', SHA.QA_FIX)], // infra failure scored as defect — SHIPPED
 
   // ── Knowledge-graph integrity (Track G) — reconciled chains ──
   IE16: [F('F14', 'open')], // AST-facts truncation
