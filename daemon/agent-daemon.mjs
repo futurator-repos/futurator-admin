@@ -5829,6 +5829,118 @@ async function executeWaveMergeJob(job) {
         fixBuild: fixBuildHook,
         // v2.6 M2 — undefined (skip) unless rigor/qaContext/browser-ACs armed it.
         runVqa: runVqaHook,
+        // F14 (2026-06-18) — authoritative FULL-PROJECT ast-facts regen at
+        // wave-close. The per-story pipeline persists ast-facts from a
+        // `--diff-manifest` scan (last writer wins → snapshot collapses to one
+        // story's slice). Once the candidate worktree IS the integrated product,
+        // re-run bootstrap-ast over the WHOLE integrated tree (candidateDir),
+        // NOT a per-story worktree, so the persisted scan reflects every source
+        // file. Spawned as ubuntu (the worktree's owner) on the model of the
+        // boilerplate wave-gate bootstrap: `node bootstrap-ast.mjs --project
+        // <appId> --root <candidateDir>`. Best-effort: a regen failure logs and
+        // resolves — it must NEVER fail the wave merge.
+        regenAstFacts: ({ candidateDir, appId: regenAppId }) =>
+          new Promise((resolve) => {
+            try {
+              const scriptPath = new URL('./scripts/bootstrap-ast.mjs', import.meta.url).pathname;
+              const child = spawn(
+                'sudo',
+                [
+                  '-n',
+                  '-u',
+                  'ubuntu',
+                  process.execPath,
+                  scriptPath,
+                  '--project',
+                  regenAppId,
+                  '--root',
+                  candidateDir,
+                ],
+                { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } },
+              );
+              let stderr = '';
+              child.stderr.on('data', (b) => (stderr += b.toString('utf8').slice(-2000)));
+              child.on('close', (code) => {
+                if (code !== 0) {
+                  waveLog(
+                    'warn',
+                    `[wave-merge] full-project AST regen exit ${code} (non-blocking): ${stderr.slice(-300)}`,
+                  );
+                }
+                // F16 (2026-06-18) — consume the structured orphan signal the
+                // regen's graph-sync wrote. bootstrap-ast scans candidateDir,
+                // and graph-sync emits knowledge/_graph/orphan-signal.json with
+                // { genuineOrphanCount, legitimateFloaterCount, delta,
+                // needsAttention }. A genuine-orphan regression means an
+                // extractor dropped an edge — raise a deduped OPERATOR ATTENTION
+                // CARD. Best-effort: a parse/read failure must never fail the
+                // wave.
+                try {
+                  const signalPath = pathJoin(
+                    candidateDir,
+                    'knowledge',
+                    '_graph',
+                    'orphan-signal.json',
+                  );
+                  if (existsSync(signalPath)) {
+                    const signal = JSON.parse(readFileSync(signalPath, 'utf8'));
+                    if (signal && signal.needsAttention) {
+                      const n = signal.genuineOrphanCount ?? 0;
+                      const floaters = signal.legitimateFloaterCount ?? 0;
+                      const delta = signal.delta;
+                      const deltaStr =
+                        delta == null
+                          ? 'no prior baseline'
+                          : `${delta >= 0 ? '+' : ''}${delta} vs prior`;
+                      writeAttentionItem(
+                        ddb,
+                        {
+                          planId: p.planId,
+                          severity: 'medium',
+                          category: 'other',
+                          title: `Knowledge-graph: ${n} genuine orphan(s) (extractor dropped an edge)`,
+                          body:
+                            `The wave-close graph-sync over the integrated tree found ${n} ` +
+                            `genuine orphan node(s) (${deltaStr}; ${floaters} legitimate floater(s) ` +
+                            `excluded). A genuine orphan is a non-file node with no containing edge — ` +
+                            `an extractor dropped an edge rather than a real finding. See ` +
+                            `knowledge/_graph/orphan-signal.json for the breakdown.`,
+                          context: {
+                            appId: regenAppId,
+                            epicId: p.epicId,
+                            waveNumber: p.waveNumber,
+                            genuineOrphanCount: n,
+                            legitimateFloaterCount: floaters,
+                            delta: delta ?? null,
+                          },
+                          dedupKey: `graph-orphans:${regenAppId}:${p.waveNumber}`,
+                        },
+                        waveLog,
+                      ).catch((err) =>
+                        waveLog(
+                          'warn',
+                          `[wave-merge] orphan-signal attention write failed (non-blocking): ${err.message}`,
+                        ),
+                      );
+                    }
+                  }
+                } catch (err) {
+                  waveLog(
+                    'warn',
+                    `[wave-merge] orphan-signal consume failed (non-blocking): ${err.message}`,
+                  );
+                }
+                resolve();
+              });
+              child.on('error', (err) => {
+                waveLog('warn', `[wave-merge] full-project AST regen spawn failed (non-blocking): ${err.message}`);
+                resolve();
+              });
+            } catch (err) {
+              waveLog('warn', `[wave-merge] full-project AST regen threw (non-blocking): ${err.message}`);
+              resolve();
+            }
+          }),
         log: waveLog,
       }),
     );
@@ -6360,6 +6472,67 @@ async function executeSkillScoutJob(job) {
     };
   }
 
+  // F26 — provide emitBulkProposal so a surface-card `add` discovery is routed
+  // THROUGH the gate as a `bulk` skill-proposal (single trust authority) instead
+  // of installing straight through the vendor step. The daemon role now has DDB
+  // access to futurator-skill-proposals, so we write the row directly here,
+  // mirroring functions/shared/skill-gate/index.ts fromBulk + putProposal's
+  // SkillProposal shape. Best-effort: log + count, never fail the job.
+  async function emitBulkProposal(args) {
+    try {
+      const now = new Date().toISOString();
+      const proposalId = `${now.replace(/[-:T.]/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`;
+      const description = args.description || '';
+      const body = args.body || '';
+      const kind = args.kind || 'core';
+      const gist = description.trim().slice(0, 140);
+      const row = {
+        proposalId,
+        source: 'bulk',
+        skillName: args.name,
+        kind,
+        proposedBody: body,
+        // Gate would scan + label; the daemon writes the draft/vendored facets
+        // directly (mirrors fromBulk → labelProposal output). The operator
+        // ratifies it into the trusted registry from the inbox.
+        proposedEntry: {
+          name: args.name,
+          kind,
+          framework: false,
+          version: 'sha:HEAD',
+          license: 'UNKNOWN',
+          description,
+          provenanceClass: 'vendored',
+          securityStatus: 'unverified',
+          qualityGrade: 'ungraded',
+          trustTier: 'draft',
+          maturity: 0,
+          lineage: { adaptedFrom: args.originRef ?? null },
+        },
+        gist,
+        securityStatus: 'unverified',
+        qualityGrade: 'ungraded',
+        status: 'pending',
+        createdAt: now,
+        lineage: { adaptedFrom: args.originRef ?? null },
+        // Provenance back-refs from the job for the inbox.
+        planId: args.planId ?? null,
+        projectSlug: job.skillScoutPayload?.projectSlug ?? args.appId ?? null,
+      };
+      await ddb.send(
+        new PutCommand({
+          TableName: process.env.SKILL_PROPOSALS_TABLE || 'futurator-skill-proposals',
+          Item: row,
+        }),
+      );
+      log('info', `[${short}] emitted bulk skill-proposal ${proposalId} (${args.name})`);
+      return 1;
+    } catch (err) {
+      log('warn', `[${short}] emitBulkProposal failed for ${args?.name}: ${err?.message || err}`);
+      return 0;
+    }
+  }
+
   try {
     const result = await runSkillScoutJob(job, {
       federationCache,
@@ -6367,6 +6540,7 @@ async function executeSkillScoutJob(job) {
       executeAgentStep,
       applyConfirmedProposals,
       writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
+      emitBulkProposal,
       pushEvent,
       validateSkillProposalsBlock,
     });

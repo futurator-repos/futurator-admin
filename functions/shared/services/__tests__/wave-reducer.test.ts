@@ -310,6 +310,97 @@ describe('reduceEpicWaves — failure paths', () => {
   });
 });
 
+// F6 — the daemon's wave budget gate marks over-budget stories
+// story.status='skipped' (skippedReason='skipped-budget') BEFORE the
+// wave-merge runs. The reducer must treat 'skipped' as a TERMINAL story state:
+// it must NOT block the wave (advancing/completing the epic) and must NEVER be
+// relaunched or re-classified as 'failed'. Skipped != failed → no 'fixing'.
+describe('reduceEpicWaves — budget-skipped stories are terminal (F6)', () => {
+  it('partially-skipped wave: succeeded sibling advances to build-check, skipped story is not blocked or relaunched', async () => {
+    const epic = makeEpic([
+      makeStory('S-1', 0, { jobId: 'j-1', status: 'done' }),
+      makeStory('S-2', 0, {
+        jobId: 'j-2',
+        status: 'skipped',
+        skippedReason: 'skipped-budget',
+      }),
+      makeStory('S-3', 1), // wave 2, not yet launched
+    ]);
+    // S-2's job is irrelevant (budget gate fired story-side); leave it unknown.
+    const { deps, createJob } = makeDeps({ 'j-1': 'COMPLETED' }, { uuidSeed: 'build' });
+
+    const result = await reduceEpicWaves(epic, deps);
+
+    expect(result.kind).toBe('wave-build-check-created');
+    // build-check is created over the successful story only — and exactly once.
+    expect(createJob).toHaveBeenCalledOnce();
+  });
+
+  it('does NOT flip epic to "fixing" for a budget-skipped story', async () => {
+    const epic = makeEpic([
+      makeStory('S-1', 0, { jobId: 'j-1', status: 'done' }),
+      makeStory('S-2', 0, {
+        jobId: 'j-2',
+        status: 'skipped',
+        skippedReason: 'skipped-budget',
+      }),
+    ]);
+    const { deps, updateEpicFields } = makeDeps({ 'j-1': 'COMPLETED' }, { uuidSeed: 'build' });
+
+    await reduceEpicWaves(epic, deps);
+
+    expect(updateEpicFields).not.toHaveBeenCalledWith(
+      'EPIC-1',
+      expect.objectContaining({ status: 'fixing' }),
+    );
+  });
+
+  it('fully-skipped final wave completes the epic without a build-check', async () => {
+    const epic = makeEpic([
+      makeStory('S-1', 0, {
+        jobId: 'j-1',
+        status: 'skipped',
+        skippedReason: 'skipped-budget',
+      }),
+      makeStory('S-2', 0, {
+        jobId: 'j-2',
+        status: 'skipped',
+        skippedReason: 'skipped-budget',
+      }),
+    ]);
+    const { deps, createJob, updateEpicFields } = makeDeps({}, { uuidSeed: 'build' });
+
+    const result = await reduceEpicWaves(epic, deps);
+
+    expect(result).toEqual({ kind: 'epic-completed' });
+    // No merge / build-check job minted over an empty story set.
+    expect(createJob).not.toHaveBeenCalled();
+    expect(updateEpicFields).toHaveBeenCalledWith(
+      'EPIC-1',
+      expect.objectContaining({ status: 'completed' }),
+    );
+  });
+
+  it('fully-skipped non-final wave launches the next wave (epic keeps going)', async () => {
+    const epic = makeEpic([
+      makeStory('S-1', 0, {
+        jobId: 'j-1',
+        status: 'skipped',
+        skippedReason: 'skipped-budget',
+      }),
+      makeStory('S-2', 1), // wave 2, not yet launched
+    ]);
+    const { deps } = makeDeps({}, { uuidSeed: 'build' });
+
+    const result = await reduceEpicWaves(epic, deps);
+
+    expect(result.kind).toBe('next-wave-launched');
+    if (result.kind === 'next-wave-launched') {
+      expect(result.waveNumber).toBe(1);
+    }
+  });
+});
+
 // pong1 P3 (2026-06-12) — story-failure cards are write-once per failure
 // STATE. The dedupKey already capped rows at 1, but every cron tick over a
 // 'fixing' epic re-upserted the same card and bumped recurrenceCount (rec=36

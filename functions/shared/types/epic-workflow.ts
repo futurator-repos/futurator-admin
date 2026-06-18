@@ -351,6 +351,14 @@ export interface EpicStory {
   title: string;
   description: string; // full story text including AC
   status: StoryStatus;
+  /**
+   * F6 — why a story landed in `status === 'skipped'`. 'skipped-budget' is
+   * written by the daemon's wave budget gate (`enforceWaveBudgetGate`) when a
+   * wave is blocked because the plan's cost ceiling was reached. The
+   * wave-reducer treats any 'skipped' story as terminal (does not block the
+   * wave, never relaunches it). Absent for non-skipped stories.
+   */
+  skippedReason?: 'skipped-budget';
   jobId?: string; // linked pipeline job ID
   dependsOn?: string[]; // story IDs this depends on
   wave?: number; // computed wave for parallel execution (0-indexed)

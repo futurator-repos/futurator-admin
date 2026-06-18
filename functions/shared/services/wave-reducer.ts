@@ -150,7 +150,16 @@ export async function reduceEpicWaves(
     };
   }
 
+  // F6 — a budget-skipped story (daemon's wave budget gate sets
+  // story.status='skipped' / skippedReason='skipped-budget' BEFORE the
+  // wave-merge runs) is a TERMINAL story state, independent of its job.
+  // Treat it as terminal so a fully-skipped or partially-skipped wave can
+  // still advance, and never relaunch it. Skipped != failed: it must NOT
+  // halt the epic into 'fixing'.
+  const isStorySkipped = (s: EpicStory) => s.status === 'skipped';
+
   const allTerminal = currentWaveStories.every((s) => {
+    if (isStorySkipped(s)) return true;
     const job = jobsByStory.get(s.storyId);
     return job !== null && job !== undefined && isTerminal(job.status);
   });
@@ -174,6 +183,10 @@ export async function reduceEpicWaves(
   // (pending/developing → failed) and correctly writes again.
   const newlyFailedStoryIds: string[] = [];
   for (const story of currentWaveStories) {
+    // F6 — leave budget-skipped stories as-is. They are terminal (handled by
+    // the wave-build-check / advance branches below) and must never be
+    // re-classified as 'failed' or relaunched.
+    if (isStorySkipped(story)) continue;
     const job = jobsByStory.get(story.storyId);
     if (!job) continue;
     const mstory = mutableById.get(story.storyId);
@@ -275,6 +288,45 @@ export async function reduceEpicWaves(
   const useStoryWorktree = !!planOpts?.planSlug;
   const skipWaveBuildCheck = planOpts?.rigor === 'prototype';
   const existingBuildCheckId = epic.waveBuildJobs?.[String(currentWave)];
+
+  // F6 — fully budget-skipped wave: no story succeeded (all 'skipped') and
+  // none failed, so there is nothing to merge or build-check. Skip straight
+  // to wave-advance / epic-completion below instead of minting a wave-merge /
+  // wave-build job over an empty story set (which would otherwise wedge on the
+  // `successfulStoryIds.length === 0` defensive no-op). Only short-circuit when
+  // a build-check hasn't already been created for this wave.
+  const anyWaveStorySucceeded = currentWaveStories.some((s) => {
+    if (isStorySkipped(s)) return false;
+    const job = jobsByStory.get(s.storyId);
+    return !!job && isSuccess(job.status);
+  });
+  const fullySkippedWave =
+    !existingBuildCheckId && currentWaveStories.some(isStorySkipped) && !anyWaveStorySucceeded;
+  if (fullySkippedWave) {
+    await deps.updateEpicFields(epic.epicId, { stories: mutable });
+    const nextWave = currentWave + 1;
+    const nextWaveStories = epic.stories.filter((s) => (s.wave ?? 0) === nextWave);
+    if (nextWaveStories.length === 0) {
+      await deps.updateEpicFields(epic.epicId, { stories: mutable, status: 'completed' });
+      return { kind: 'epic-completed' };
+    }
+    const launch = await launchPipelineWave(
+      { ...epic, stories: mutable },
+      nextWave,
+      epic.createdBy,
+      deps.now(),
+      deps,
+      planOpts,
+    );
+    if (!launch.ok) {
+      return { kind: 'no-op', reason: 'wave-running' };
+    }
+    await deps.updateEpicFields(epic.epicId, {
+      stories: launch.updatedStories,
+      status: 'in_progress',
+    });
+    return { kind: 'next-wave-launched', waveNumber: nextWave, jobIds: launch.jobIds };
+  }
   if (useStoryWorktree && !existingBuildCheckId) {
     // Per-story-worktree path: create a wave-merge job instead.
     const jobId = deps.uuid();
