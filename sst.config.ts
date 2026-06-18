@@ -448,6 +448,23 @@ export default $config({
       },
     });
 
+    // ── Plan Retrospect — per-plan Reality Check scorecards (plan-retrospect-spec §5) ──
+    // One row per (planId, <stage>#<rubricVersion>). Re-scoring under a newer
+    // rubric writes a NEW row (different SK), preserving the prior verdict — never
+    // overwrite a verdict under a changed ruler. PITR on: verdicts are durable history.
+    const scorecardsTable = new sst.aws.Dynamo('ScorecardsTable', {
+      fields: { planId: 'string', scorecardKey: 'string' },
+      primaryIndex: { hashKey: 'planId', rangeKey: 'scorecardKey' },
+      transform: {
+        table: {
+          name: 'futurator-scorecards',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── Pipeline v2 — Phase 1 (Story 1.1.2) — GitHub PAT secret ──
     // Used by the daemon and API to authenticate GitHub API calls (create repo,
     // push commits, read PR status). Value is set out-of-band by the operator:
@@ -906,6 +923,7 @@ export default $config({
         remediationPoliciesTable,
         pushSubscriptionsTable,
         skillProposalsTable,
+        scorecardsTable,
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
@@ -938,6 +956,8 @@ export default $config({
         ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
         WAVE_CONFLICTS_TABLE: waveConflictsTable.name,
         REFLECTIONS_TABLE: reflectionsTable.name,
+        // Plan Retrospect — Reality Check scorecards (plan-retrospect-spec §5).
+        SCORECARDS_TABLE: scorecardsTable.name,
         AGENT_SESSIONS_TABLE: agentSessionsTable.name,
         AGENT_CONVERSATIONS_TABLE: agentConversationsTable.name,
         TIMING_SUMMARY_TABLE: timingSummaryTable.name,

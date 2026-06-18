@@ -49,10 +49,11 @@ import { QaReviewView } from './views/qa-review-view';
 import { DeployStageView } from './views/deploy-stage-view';
 import { StagePlaceholder } from './views/stage-placeholder';
 import { PlanPartyView } from './views/plan-party-view';
+import { RetrospectView } from './views/retrospect/retrospect-view';
 import { TimingPanel } from './timing-panel';
 
 type StageId = PipelineStage['id'];
-type ViewId = StageId | 'party';
+type ViewId = StageId | 'party' | 'retrospect';
 
 const STAGE_KEY = 'labs.plan-dashboard.stage';
 const SUBTAB_KEY = 'labs.plan-dashboard.subtab';
@@ -107,6 +108,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
   // an active plan dashboard session, not across plans.
   const activeView: ViewId = useMemo(() => {
     if (urlStage === 'party') return 'party';
+    if (urlStage === 'retrospect') return 'retrospect';
     if (isStage(urlStage)) return urlStage;
     return defaultStage;
   }, [urlStage, defaultStage]);
@@ -136,6 +138,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
 
   const goToStage = (s: StageId) => navigate(s);
   const goToParty = () => navigate('party');
+  const goToRetrospect = () => navigate('retrospect');
   const goToSubtab = (t: DevelopingSubtab) => navigate('developing', t);
 
   // ── PM job polling + auto-apply ────────────────────────────────────
@@ -446,11 +449,33 @@ export function PlanDashboard({ planId }: { planId: string }) {
       <BudgetBanner planId={plan.planId} rigor={plan.rigor} totalCostUsd={plan.totalCostUsd || 0} />
       <Pipeline
         status={plan.status}
-        activeStageId={activeView === 'party' ? defaultStage : activeView}
+        activeStageId={
+          activeView === 'party' || activeView === 'retrospect' ? defaultStage : activeView
+        }
         onStageChange={goToStage}
         onPartyClick={goToParty}
         isPartyActive={activeView === 'party'}
       />
+
+      {/* Plan Retrospect entry — grade this run against the living rubric. */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '8px 16px 0' }}>
+        <button
+          type="button"
+          onClick={goToRetrospect}
+          style={{
+            fontSize: 13,
+            padding: '4px 12px',
+            borderRadius: 6,
+            border: '1px solid var(--border)',
+            background: activeView === 'retrospect' ? 'var(--accent-blue)' : 'transparent',
+            color: activeView === 'retrospect' ? 'var(--background)' : 'var(--text-mute)',
+            cursor: 'pointer',
+          }}
+          aria-pressed={activeView === 'retrospect'}
+        >
+          ⟳ Plan Retrospect
+        </button>
+      </div>
 
       {/* Developing-specific sub-tabs render only when viewing Developing. */}
       {activeView === 'developing' && (
@@ -533,6 +558,7 @@ export function PlanDashboard({ planId }: { planId: string }) {
         )}
 
         {activeView === 'party' && <PlanPartyView plan={plan} />}
+        {activeView === 'retrospect' && <RetrospectView planId={planId} />}
       </div>
     </div>
   );

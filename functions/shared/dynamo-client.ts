@@ -70,4 +70,12 @@ export const TABLE_NAMES = {
   // through the gate awaiting ratify/reject). PK proposalId (ULID); GSI
   // status-createdAt-index for the "pending, newest first" inbox query.
   skillProposals: process.env.SKILL_PROPOSALS_TABLE || 'futurator-skill-proposals',
+  // Plan Retrospect (plan-retrospect-spec §5) — durable per-stage Reality Check
+  // verdicts. PK planId, SK `<stage>#<rubricVersion>`. PITR on (verdicts are
+  // history). Re-scoring under a newer rubric writes a NEW row (different SK),
+  // preserving the prior verdict — never silently overwrite under a changed
+  // ruler (§9 trend integrity). SST links it as `Scorecards` →
+  // SCORECARDS_TABLE; FUTURATOR_SCORECARDS kept as a documented alias.
+  scorecards:
+    process.env.SCORECARDS_TABLE || process.env.FUTURATOR_SCORECARDS || 'futurator-scorecards',
 } as const;

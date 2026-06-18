@@ -81,6 +81,7 @@ import {
   JOB_HANDLER_SKILL_SCOUT,
   JOB_HANDLER_SKILL_INSTALL,
   JOB_HANDLER_REFLECTOR,
+  JOB_HANDLER_SCORECARD_ASSESS,
 } from './pipelines/job-router.mjs';
 import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
 import { runPartyBootstrap } from './pipelines/party-bootstrap.mjs';
@@ -192,11 +193,14 @@ import { applyConfirmedProposals } from './pipelines/skill-installer.mjs';
 import { runSkillInstallJob } from './pipelines/skill-install-job-runner.mjs';
 // Epic 6 wire-in (2026-05-20) — REFLECTOR job runner.
 import { runReflectorJob } from './pipelines/reflector-job-runner.mjs';
+// Plan Retrospect — The Assessor job runner + daemon-side scorecard store.
+import { runScorecardAssessJob } from './pipelines/scorecard-assess-job-runner.mjs';
+import { getStoredStageRow, putAssessorSlices } from './lib/scorecard-store.mjs';
 // Epic 4 (2026-05-20) — track Skill tool_use activations into
 // .context/loaded-skills.json so the per-story commit's Skills-Used
 // trailer populates with real content.
 import { recordSkillActivation } from './lib/loaded-skills-tracker.mjs';
-import { buildSkillsPromptLine } from './lib/skills-prompt.mjs';
+import { buildSkillsPromptLine, buildSkillsPushPrompt } from './lib/skills-prompt.mjs';
 import { startFederationBackupSchedule } from './lib/federation-backup.mjs';
 import { createFederationResolver } from './lib/federation-resolver.mjs';
 import { createMemoryStore, provisionMemoryRoot } from './lib/memory-store.mjs';
@@ -2219,7 +2223,17 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   // tool. Skills LOAD in every session (CLI init reports them) but were
   // never ACTIVATED: their descriptions are user-utterance-shaped and never
   // match the daemon's machine prompts. See daemon/lib/skills-prompt.mjs.
-  const skillsSection = buildSkillsPromptLine(effectiveCwd);
+  //
+  // F24 (2026-06-18) — name+description PULL only fired on 5.2% of sessions.
+  // For the code-producing roles (DEV/TEST/API_AUTHOR) switch to PUSH: inject
+  // the BODIES of the top-3 skills ranked (F27 cosine) against THIS story's
+  // substituted prompt, so the conventions are in-context, not waiting on a
+  // Skill-tool call. The flat name+description list stays as the fallback for
+  // the remaining skills (and for all other roles).
+  const SKILLS_PUSH_ROLES = new Set(['DEV', 'TEST', 'API_AUTHOR']);
+  const skillsSection = SKILLS_PUSH_ROLES.has(step.agentId)
+    ? await buildSkillsPushPrompt(effectiveCwd, prompt)
+    : buildSkillsPromptLine(effectiveCwd);
   const promptParts = [];
   if (claudeMd && !claudeMd.truncated) promptParts.push(`# Project CLAUDE.md\n\n${claudeMd.content}`);
   if (skillsSection) promptParts.push(skillsSection);
@@ -4574,6 +4588,12 @@ const GATE_AGENT_ROLES = {
     timeoutMs: 8 * 60 * 1000,
     allowedTools: 'Read,Grep,Glob',
   }),
+  // Plan Retrospect — The Assessor: read-only, grades [LLM] criteria.
+  assessor: () => ({
+    model: process.env.ASSESSOR_MODEL || 'claude-sonnet-4-6',
+    timeoutMs: 8 * 60 * 1000,
+    allowedTools: 'Read,Grep,Glob',
+  }),
 };
 
 async function spawnGateAgent({ role, prompt, cwd, round }, { short } = {}) {
@@ -5331,6 +5351,113 @@ async function getPlanRowForAutoMerge(planId) {
   }
 }
 
+// F6 (P0 cost safety) — HARD cost ceiling at the wave boundary.
+//
+// The cost ceiling was soft/post-hoc: cost-meter.decideAction /
+// cost-engine.checkCostEnvelope existed but nothing consulted them between
+// waves, so a runaway plan kept spawning wave work past its budget. This
+// turns the ceiling into a HARD gate: before a wave-merge dispatches its
+// stories, compare plan.totalCostUsd against plan.costCeilingUsd (with a
+// small overrun tolerance) using the EXISTING cost-meter math. When the
+// budget is blown we stop spawning new work, mark this wave's stories
+// 'skipped' (skippedReason: 'skipped-budget'), and raise an operator card.
+//
+// Returns true when the wave was blocked (caller should short-circuit the
+// merge), false when the wave may proceed. Fail-open on any unexpected
+// error (a budget-check blip must never wedge a plan).
+const WAVE_BUDGET_OVERRUN_TOLERANCE = 0.05; // allow 5% overrun before a hard stop
+
+async function enforceWaveBudgetGate(planRow, p, short) {
+  try {
+    const ceiling = Number(planRow?.costCeilingUsd);
+    if (!Number.isFinite(ceiling) || ceiling <= 0) return false; // no ceiling set → back-compat: no enforcement
+    const total = Number(planRow?.totalCostUsd) || 0;
+
+    // Reuse the existing cost-meter decision math. We inflate the ceiling by
+    // the overrun tolerance so `terminate` fires only once spend is past the
+    // ceiling + tolerance (decideAction terminates at cost >= ceiling).
+    const { CostMeter } = await import('./lib/cost-meter.mjs');
+    const decision = new CostMeter(ddb).decideAction(
+      total,
+      ceiling * (1 + WAVE_BUDGET_OVERRUN_TOLERANCE),
+    );
+    if (decision.action !== 'terminate') return false;
+
+    log(
+      'warn',
+      `[${short}] cost ceiling exceeded — blocking wave ${p.waveNumber} ` +
+        `(spend $${total.toFixed(2)} ≥ ceiling $${ceiling.toFixed(2)} +${Math.round(WAVE_BUDGET_OVERRUN_TOLERANCE * 100)}%)`,
+    );
+
+    // Mark this wave's stories 'skipped' with reason 'skipped-budget'. Best-
+    // effort, read-modify-write on the epic row (same shape the wave-reducer
+    // mutates). A write failure does NOT un-block the gate.
+    try {
+      const epicRes = await ddb.send(
+        new GetCommand({ TableName: EPICS_TABLE, Key: { epicId: p.epicId } }),
+      );
+      const stories = epicRes.Item?.stories;
+      if (Array.isArray(stories)) {
+        const ids = new Set(p.storyIds || []);
+        let changed = 0;
+        for (const s of stories) {
+          if (ids.has(s.storyId) && s.status !== 'done') {
+            s.status = 'skipped';
+            s.skippedReason = 'skipped-budget';
+            changed += 1;
+          }
+        }
+        if (changed > 0) {
+          await ddb.send(
+            new UpdateCommand({
+              TableName: EPICS_TABLE,
+              Key: { epicId: p.epicId },
+              UpdateExpression: 'SET stories = :s, updatedAt = :n',
+              ExpressionAttributeValues: { ':s': stories, ':n': new Date().toISOString() },
+              ConditionExpression: 'attribute_exists(epicId)',
+            }),
+          );
+          log('info', `[${short}] marked ${changed} story(ies) skipped-budget`);
+        }
+      }
+    } catch (markErr) {
+      log('warn', `[${short}] skipped-budget story mark failed (non-blocking): ${markErr.message}`);
+    }
+
+    // Raise an operator attention card (dedup per-plan — one open card per
+    // plan budget breach; recurrence increments rather than spamming).
+    await writeAttentionItem(
+      ddb,
+      {
+        planId: p.planId,
+        severity: 'high',
+        category: 'cost-ceiling-block',
+        title: `Cost ceiling exceeded — plan halted at wave ${p.waveNumber}`,
+        body:
+          `Plan spend $${total.toFixed(2)} reached the cost ceiling $${ceiling.toFixed(2)} ` +
+          `(+${Math.round(WAVE_BUDGET_OVERRUN_TOLERANCE * 100)}% overrun tolerance). ` +
+          `Wave ${p.waveNumber} was NOT merged and its remaining stories were marked ` +
+          `'skipped' (skipped-budget). Raise the ceiling via ` +
+          `POST /api/plans/${p.planId}/raise-cost-ceiling to resume, or accept the plan as-is.`,
+        context: {
+          epicId: p.epicId,
+          waveNumber: p.waveNumber,
+          totalCostUsd: total,
+          costCeilingUsd: ceiling,
+          skippedStoryIds: p.storyIds || [],
+        },
+        dedupKey: `cost-ceiling-block:${p.planId}`,
+      },
+      log,
+    );
+    return true;
+  } catch (err) {
+    // Fail-open: a budget-check error must never wedge the pipeline.
+    log('warn', `[${short}] wave budget gate check failed (fail-open): ${err.message}`);
+    return false;
+  }
+}
+
 async function patchAppRow(appId, patch) {
   const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
   if (entries.length === 0) return;
@@ -5535,6 +5662,24 @@ async function executeWaveMergeJob(job) {
   // Plan row read once: autoMergeMode gates the agentic hooks below, rigor
   // gates + scales the v2.6 wave VQA stage.
   const planRow = await getPlanRowForAutoMerge(p.planId);
+
+  // F6 (P0 cost safety) — HARD cost ceiling at the wave boundary. Before this
+  // wave spawns ANY merge/validation work, stop if the plan has blown its
+  // budget. enforceWaveBudgetGate marks this wave's stories skipped-budget and
+  // raises an operator card; we terminate the job cleanly (COMPLETED, like the
+  // no-stories path) so the wave-reducer sees a terminal wave and never
+  // dispatches further work for this plan.
+  if (await enforceWaveBudgetGate(planRow, p, short)) {
+    await updateJobFields(jobId, {
+      status: 'COMPLETED',
+      phase: 'skipped-budget',
+      errorMessage: 'wave skipped — plan cost ceiling exceeded (skipped-budget)',
+    });
+    await pushEvent(jobId, 'wave-merge', 'MERGE', 'step_error', {
+      text: `wave ${p.waveNumber} skipped — plan cost ceiling exceeded (skipped-budget)`,
+    });
+    return;
+  }
 
   let resolveConflictHook;
   let fixBuildHook;
@@ -5982,6 +6127,8 @@ async function runJobAsync(job) {
       await executeSkillInstallJob(job);
     } else if (handler === JOB_HANDLER_REFLECTOR) {
       await executeReflectorJob(job);
+    } else if (handler === JOB_HANDLER_SCORECARD_ASSESS) {
+      await executeScorecardAssessJob(job);
     } else {
       await executePipeline(job);
     }
@@ -6122,7 +6269,7 @@ function classifyAgentForSpend(job) {
   if (t.startsWith('party-')) return 'party';
   if (t === 'free-agent-session') return 'free-agent';
   if (t === 'app-bootstrap') return 'app-bootstrap';
-  if (t === 'wave-merge' || t === 'epic-dev' || t === 'skill-scout' || t === 'skill-install' || t === 'reflector') {
+  if (t === 'wave-merge' || t === 'epic-dev' || t === 'skill-scout' || t === 'skill-install' || t === 'reflector' || t === 'scorecard-assess') {
     return 'pipeline-v2';
   }
   return 'other';
@@ -6511,6 +6658,114 @@ async function executeReflectorJob(job) {
       errorMessage: err?.message || String(err),
     });
     log('error', `[${short}] reflector threw: ${err?.message || err}`);
+    throw err;
+  }
+}
+
+/**
+ * Plan Retrospect — The Assessor (plan-retrospect-spec §4b). Wraps
+ * `runScorecardAssessJob` with the daemon's surfaces: reads the API-written
+ * deterministic stage row (ground-truth context), spawns a read-only sonnet via
+ * the shared gate-agent surface to grade the stage's `[LLM]` criteria, and
+ * merges the Assessor slices back onto the scorecard row. The composer runs
+ * API-side on read, so this only persists; it never re-derives the numbers.
+ */
+async function executeScorecardAssessJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+  const p = job.scorecardAssessPayload || {};
+
+  log('info', `[${short}] Routing to scorecard-assess (Assessor)`, {
+    planId: p.planId,
+    stage: p.stage,
+    rubricVersion: p.rubricVersion,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'scorecard-assess',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  // Load the API-stored deterministic row → the ground-truth context block the
+  // Assessor must treat as authoritative (it never re-derives numbers).
+  async function loadDeterministicSlice({ planId, stage, rubricVersion }) {
+    const row = await getStoredStageRow(ddb, { planId, stage, rubricVersion });
+    if (!row) return null;
+    const detLines = (row.slices || [])
+      .filter((s) => s && s.verdict && s.verdict !== '⚪')
+      .map((s) => {
+        const v = typeof s.value === 'object' ? JSON.stringify(s.value) : s.value;
+        return `- ${s.criterionId}: ${s.verdict} score=${s.score} value=${v}${s.note ? ` — ${s.note}` : ''}`;
+      });
+    let planSummary = `Plan ${planId} · stage ${stage}`;
+    try {
+      const planRes = await ddb.send(
+        new GetCommand({ TableName: PLANS_TABLE, Key: { planId } }),
+      );
+      const plan = planRes.Item;
+      if (plan) {
+        planSummary =
+          `Plan ${plan.name || planId} · rigor ${plan.rigor || '?'} · status ${plan.status || '?'} · ` +
+          `${plan.doneStories ?? '?'}/${plan.totalStories ?? '?'} stories · cost $${plan.totalCostUsd ?? '?'}\n` +
+          `Intent: ${(plan.intent || '').slice(0, 400)}`;
+      }
+    } catch (e) {
+      log('warn', `[${short}] assessor plan-summary read partial: ${e?.message || e}`);
+    }
+    return {
+      // criterionIds omitted → the runner falls back to its LLM_CRITERIA_BY_STAGE.
+      rubricSlice: undefined,
+      deterministicContext: detLines.length
+        ? detLines.join('\n')
+        : '(no deterministic verdicts stored for this stage)',
+      planSummary,
+    };
+  }
+
+  async function runAgentStep(j, prompt) {
+    const res = await spawnGateAgent({ role: 'assessor', prompt, cwd: j.workingDir }, { short });
+    if (res?.ok === false) {
+      throw new Error(`assessor agent spawn failed: ${(res.output || '').slice(-300)}`);
+    }
+    return { output: res?.output || '', tokensConsumed: 0 };
+  }
+
+  try {
+    const paused = await isAgentPausedCached();
+    const result = await runScorecardAssessJob(job, {
+      paused,
+      loadDeterministicSlice,
+      runAgentStep,
+      writeAssessorSlices: (payload) => putAssessorSlices(ddb, payload),
+      pushEvent,
+      writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
+    });
+
+    if (result.ok) {
+      await updateJobFields(jobId, {
+        status: 'COMPLETED',
+        scorecardAssessStatus: result.status ?? 'completed',
+        scorecardAssessSliceCount: result.sliceCount ?? 0,
+        scorecardAssessGradedCount: result.gradedCount ?? 0,
+      });
+      log(
+        'info',
+        `[${short}] assessor completed (stage=${p.stage}, graded=${result.gradedCount ?? 0}/${result.sliceCount ?? 0})`,
+      );
+    } else {
+      await updateJobFields(jobId, {
+        status: 'FAILED',
+        errorMessage: result.error || result.reason || 'unknown',
+      });
+      log('warn', `[${short}] assessor failed: ${result.reason}`);
+    }
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] assessor threw: ${err?.message || err}`);
     throw err;
   }
 }

@@ -23,7 +23,7 @@ import {
   updateStatus as updateProposalStatus,
   patchProposalFields,
 } from '../shared/repositories/skill-proposals-repository';
-import { fromCreate, fromPasteUrl } from '../shared/skill-gate';
+import { fromCreate, fromPasteUrl, fromBulk } from '../shared/skill-gate';
 import { findNearDuplicate } from '../shared/skill-gate/dedup';
 import { lineDiff } from '../shared/lib/text-diff';
 import { ProposalStatusSchema, type SkillProposal } from '../shared/schemas/skill-proposal-schema';
@@ -139,6 +139,12 @@ import { aggregateOrchestratorMetrics } from '../shared/services/epic-orchestrat
 import { enqueueResumeJob } from '../shared/services/resume-job';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
 import * as planRepo from '../shared/repositories/plan-repository';
+// Plan Retrospect — Reality Check scorer (plan-retrospect-spec §4a/§7.1).
+import { scoreDeterministic } from '../shared/scorecard';
+import { composeRealityCheck } from '../shared/scorecard/compose';
+import { CRITERIA_META } from '../shared/scorecard/criteria-meta';
+import * as scorecardRepo from '../shared/repositories/scorecard-repository';
+import type { StageId, ScorecardSlice } from '../shared/scorecard/types';
 import * as appRepo from '../shared/repositories/app-repository';
 import { updateAppInputSchema, RESERVED_APP_IDS } from '../shared/schemas/app-schema';
 import { createPlanForAppInputSchema } from '../shared/schemas/plan-schema';
@@ -11533,6 +11539,64 @@ app.post('/api/skills/gate', authMiddleware, async (c) => {
   return c.json({ proposal }, 201);
 });
 
+/**
+ * Story 4.2 / F26 — bulk-acquisition gate intake.
+ *
+ * POST /api/skills/gate/bulk
+ *
+ * A SKILL-SCOUT community discovery (a non-auto-trust federation source) routes
+ * its candidate THROUGH the one gate instead of installing straight from the
+ * vendor step. This makes the gate the single trust authority: the scout no
+ * longer publishes trust on its own. The proposal lands in the curation inbox as
+ * `draft`/`vendored`; the operator ratifies it into the trusted registry, and
+ * only then does the vendor step install it.
+ *
+ * The daemon calls this with a service token after the scout's surface-card
+ * disposition. It is additive and intentionally disjoint from the existing
+ * /api/skills/gate (create | paste-url) route.
+ */
+const gateBulkSchema = z.object({
+  name: z.string().regex(SKILL_NAME_RE, 'name must be a lowercase slug (2-64 chars)'),
+  description: z.string().min(1).max(500),
+  body: z.string().min(1).max(50_000),
+  /** Federation source identifier the candidate was discovered from (source@version). */
+  originRef: z.string().min(1).max(500),
+  kind: z.string().min(1).max(40).optional(),
+  license: z.string().min(1).max(120).optional(),
+});
+
+app.post('/api/skills/gate/bulk', authMiddleware, async (c) => {
+  const parsed = gateBulkSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success)
+    throw new ValidationError(parsed.error.issues[0]?.message ?? 'invalid bulk submit');
+  const d = parsed.data;
+
+  // framework/bmad skills are not authorable here (mirrors the CRUD guard).
+  const catalog = await getCachedSkillCatalog();
+  if (catalog.skills.find((s) => s.name === d.name)?.framework) {
+    throw new AppError('SKILL_NOT_EDITABLE', `"${d.name}" is a read-only framework skill.`, 403);
+  }
+
+  const proposal = fromBulk({
+    skillName: d.name,
+    description: d.description,
+    body: d.body,
+    originRef: d.originRef,
+    kind: d.kind,
+    license: d.license,
+  });
+
+  // Story 2.4 — dedup annotation (no auto-merge; the operator decides at ratify).
+  const dup = findNearDuplicate(
+    { name: proposal.skillName, description: proposal.proposedEntry.description },
+    catalog.skills.map((s) => ({ name: s.name, description: s.description })),
+  );
+  if (dup) proposal.dedup = dup;
+
+  await putProposal(proposal);
+  return c.json({ proposal }, 201);
+});
+
 /** GET /api/apps/:appId — App detail (App + plans[] + activePlan + recentDeploys). */
 app.get('/api/apps/:appId', authMiddleware, async (c) => {
   const appId = c.req.param('appId');
@@ -12516,6 +12580,166 @@ app.get('/api/plans/:planId/timing/forensic', async (c) => {
     'Content-Type': 'application/json',
     'Content-Disposition': `attachment; filename="${filename}"`,
   });
+});
+
+// ── Plan Retrospect — Reality Check scorecards (plan-retrospect-spec §7.1) ──
+// POST …/scorecard/:stage/run computes the deterministic half inline (no LLM),
+// stores one row per stage, and — for stages carrying [LLM] criteria — enqueues
+// a `scorecard-assess` daemon job (The Assessor) the UI streams. NEVER hardcodes
+// a planId; the scorer reads named evidence fields only.
+const RETROSPECT_RUBRIC_VERSION = 'v1.0-draft';
+const RETROSPECT_STAGES: StageId[] = [
+  'concept',
+  'development',
+  'qa',
+  'deployment',
+  'publish',
+  'overview',
+];
+const STAGES_WITH_LLM = new Set<StageId>(
+  Object.values(CRITERIA_META)
+    .filter((m) => m.engine === 'LLM')
+    .map((m) => m.stage),
+);
+function isRetrospectStage(s: string): s is StageId {
+  return (RETROSPECT_STAGES as string[]).includes(s);
+}
+/** Compact the per-stage slices into the stored §0.5 maps + the OV4 honesty flag. */
+function retrospectStageMaps(slices: ScorecardSlice[]) {
+  const scores: Record<string, 0 | 1 | 2 | 3 | 4> = {};
+  const verdicts: Record<string, ScorecardSlice['verdict']> = {};
+  const evidenceRefs: Record<string, ScorecardSlice['evidence']> = {};
+  let unreconciled = false;
+  for (const s of slices) {
+    evidenceRefs[s.criterionId] = s.evidence;
+    if (s.score !== null && s.verdict !== '⚪') {
+      scores[s.criterionId] = s.score;
+      verdicts[s.criterionId] = s.verdict;
+    }
+    if (s.confidence === 'unreconciled') unreconciled = true;
+  }
+  return {
+    scores,
+    verdicts,
+    evidenceRefs,
+    confidence: (unreconciled ? 'unreconciled' : 'reconciled') as 'unreconciled' | 'reconciled',
+  };
+}
+
+// POST /api/plans/:planId/scorecard/:stage/run
+app.post('/api/plans/:planId/scorecard/:stage/run', async (c) => {
+  const planId = c.req.param('planId');
+  const stageParam = c.req.param('stage');
+  if (stageParam !== 'all' && !isRetrospectStage(stageParam)) {
+    throw new ValidationError(`Unknown retrospect stage: ${stageParam}`);
+  }
+
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  // Deterministic half — inline, no LLM (spec §4a). Optional graph/qa/deploy/
+  // reflection/agent-spend fetchers are omitted in v1, so those criteria degrade
+  // honestly to ⚪ needs-instrumentation rather than fabricate (spec §4a guard).
+  const det = await scoreDeterministic(planId);
+  const rc = composeRealityCheck(det.slices, det.ctx);
+  const now = new Date().toISOString();
+  // Versioning V1 (spec §9): pipelineVersion is stamped on the plan at run start.
+  // Read it defensively until that field is materialized on the Plan type.
+  const pipelineVersion = (plan as { pipelineVersion?: string }).pipelineVersion;
+  const createdBy = (c.get('user') as { userId?: string } | undefined)?.userId ?? 'operator';
+
+  const stagesToStore: StageId[] =
+    stageParam === 'all' ? RETROSPECT_STAGES : [stageParam as StageId];
+
+  for (const st of stagesToStore) {
+    const sl = det.byStage[st] ?? [];
+    const { scores, verdicts, evidenceRefs, confidence } = retrospectStageMaps(sl);
+    await scorecardRepo.putScorecardSlice(planId, st, RETROSPECT_RUBRIC_VERSION, {
+      scores,
+      verdicts,
+      evidenceRefs,
+      slices: sl,
+      rubricVersion: RETROSPECT_RUBRIC_VERSION,
+      pipelineVersion,
+      forensicSchemaVersion: 'timer-intel-v1.0',
+      confidence,
+      scoredBy: 'deterministic',
+      scoredAt: now,
+      ...(st === 'overview'
+        ? {
+            pipelineHealth: rc.pipelineHealth,
+            gradeBand: rc.gradeBand,
+            topRegressions: rc.topRegressions,
+            topWins: rc.topWins,
+            actions: rc.actions,
+          }
+        : {}),
+    });
+  }
+
+  // Phase 2 — enqueue The Assessor for stages with [LLM] criteria. Takes effect
+  // once the daemon is rsynced+restarted on EC2 (jobType dispatch added there).
+  let firstJobId: string | undefined;
+  for (const st of stagesToStore.filter((s) => STAGES_WITH_LLM.has(s))) {
+    const jobId = crypto.randomUUID();
+    if (!firstJobId) firstJobId = jobId;
+    await agentJobsRepo.createJob({
+      jobId,
+      status: 'PENDING',
+      createdAt: now,
+      updatedAt: now,
+      createdBy,
+      workingDir: plan.workingDir ?? '',
+      jobType: 'scorecard-assess',
+      scorecardAssessPayload: {
+        planId,
+        stage: st,
+        rubricVersion: RETROSPECT_RUBRIC_VERSION,
+        pipelineVersion,
+      },
+    });
+  }
+
+  if (stageParam === 'all') {
+    return c.json({ status: 'scored', stage: 'overview', slices: det.slices });
+  }
+  const single = stageParam as StageId;
+  const slices = det.byStage[single] ?? [];
+  if (STAGES_WITH_LLM.has(single) && firstJobId) {
+    return c.json({ status: 'assessing', stage: single, jobId: firstJobId, slices });
+  }
+  return c.json({ status: 'scored', stage: single, slices });
+});
+
+// GET /api/plans/:planId/scorecard — the full Reality Check (latest rubric/stage)
+app.get('/api/plans/:planId/scorecard', async (c) => {
+  const planId = c.req.param('planId');
+  const rows = await scorecardRepo.getScorecard(planId);
+  const overview = rows.find((r) => r.stage === 'overview');
+  return c.json({
+    planId,
+    slices: rows.flatMap((r) => r.slices ?? []),
+    pipelineHealth: overview?.pipelineHealth ?? null,
+    gradeBand: overview?.gradeBand ?? null,
+    topRegressions: overview?.topRegressions ?? [],
+    topWins: overview?.topWins ?? [],
+    actions: overview?.actions ?? [],
+    rubricVersion: rows[0]?.rubricVersion ?? RETROSPECT_RUBRIC_VERSION,
+    confidence: overview?.confidence,
+    analyzedStages: rows.map((r) => r.stage),
+  });
+});
+
+// GET /api/plans/:planId/scorecard/:stage — one stage's latest slice
+app.get('/api/plans/:planId/scorecard/:stage', async (c) => {
+  const planId = c.req.param('planId');
+  const stageParam = c.req.param('stage');
+  if (!isRetrospectStage(stageParam)) {
+    throw new ValidationError(`Unknown retrospect stage: ${stageParam}`);
+  }
+  const row = await scorecardRepo.getScorecardStage(planId, stageParam);
+  if (!row) return c.json({ planId, stage: stageParam, slices: [], analyzed: false });
+  return c.json(row);
 });
 
 // ── GitHub connector routes (Story 1.2.4) ──
