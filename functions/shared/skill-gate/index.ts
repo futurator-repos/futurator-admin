@@ -208,3 +208,40 @@ export function fromPasteUrl(
     opts,
   );
 }
+
+/**
+ * Bulk: a SKILL-SCOUT community discovery (non-auto-trust source) — Story 4.2 /
+ * F26. The scout proposes a manifest add from an upstream federation `source`;
+ * instead of installing straight through the vendor step (which would bypass the
+ * inbox and make the scout a second trust authority), the proposal converges
+ * HERE. The gate labels it `vendored` + `draft`, scans the body, and emits a
+ * `bulk` proposal the operator ratifies — exactly like every other source.
+ *
+ * `originRef` (the federation `source@version`) is recorded as `adaptedFrom` so
+ * the inbox shows where the candidate came from and the origin can be re-hashed.
+ */
+export function fromBulk(
+  args: {
+    skillName: string;
+    description: string;
+    body: string;
+    /** The federation source identifier the skill was discovered from. */
+    originRef: string;
+    kind?: string;
+    license?: string;
+  },
+  opts?: GateOptions,
+): SkillProposal {
+  return runGate(
+    {
+      source: 'bulk',
+      skillName: args.skillName,
+      description: args.description,
+      body: args.body,
+      kind: args.kind,
+      license: args.license,
+      lineage: { adaptedFrom: args.originRef },
+    },
+    opts,
+  );
+}

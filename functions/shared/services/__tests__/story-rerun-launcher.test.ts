@@ -56,17 +56,11 @@ describe('launchStoryRerun', () => {
       }),
     );
 
-    const result = await launchStoryRerun(
-      epic,
-      'S-2',
-      'tester',
-      '2026-04-20T00:00:00.000Z',
-      {
-        generatePipeline,
-        createJob,
-        uuid: () => 'new-job',
-      },
-    );
+    const result = await launchStoryRerun(epic, 'S-2', 'tester', '2026-04-20T00:00:00.000Z', {
+      generatePipeline,
+      createJob,
+      uuid: () => 'new-job',
+    });
 
     expect(result).toMatchObject({ ok: true, jobId: 'new-job' });
     expect(generatePipeline).toHaveBeenCalledWith(
@@ -88,6 +82,36 @@ describe('launchStoryRerun', () => {
       expect(s2.jobId).toBe('new-job');
       expect(s2.status).toBe('queued');
     }
+  });
+
+  it('sets retryOf to the prior attempt jobId so its events stay reachable (F2)', async () => {
+    const epic = makeEpic([makeStory('S-2', { status: 'failed', jobId: 'fail-2' })]);
+    const createJob = vi.fn(async () => undefined);
+
+    const result = await launchStoryRerun(epic, 'S-2', 'tester', '2026-04-20T00:00:00.000Z', {
+      generatePipeline: () => stubPipeline(),
+      createJob,
+      uuid: () => 'new-job',
+    });
+
+    expect(result).toMatchObject({ ok: true, jobId: 'new-job' });
+    // New job chains back to the prior attempt's job (captured before story.jobId
+    // is overwritten with 'new-job' in updatedStories).
+    expect(createJob).toHaveBeenCalledWith(expect.objectContaining({ retryOf: 'fail-2' }));
+  });
+
+  it('omits retryOf when the story has no prior jobId (first launch)', async () => {
+    const epic = makeEpic([makeStory('S-2', { status: 'pending', jobId: undefined })]);
+    const createJob = vi.fn(async () => undefined);
+
+    await launchStoryRerun(epic, 'S-2', 'tester', '2026-04-20T00:00:00.000Z', {
+      generatePipeline: () => stubPipeline(),
+      createJob,
+      uuid: () => 'new-job',
+    });
+
+    const jobArg = (createJob.mock.calls[0] as unknown[])[0] as Record<string, unknown>;
+    expect('retryOf' in jobArg).toBe(false);
   });
 
   it('returns story-not-found when storyId does not match any story', async () => {

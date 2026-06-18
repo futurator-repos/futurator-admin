@@ -109,6 +109,40 @@ export function classifyOrphans(orphans) {
 }
 
 /**
+ * Genuine-orphan count (F16) — the signal the pipeline actually cares about.
+ *
+ * `orphans` is every degree-0 node. The `hardFail` subset (non-`file`/`dir`
+ * kinds) is a dropped-edge extractor bug. The remainder are *legitimate
+ * floaters* the operator should NOT be paged about: a brand-new `file` with no
+ * article yet, a test file with no inbound edge, a deleted-source zombie pending
+ * pruning (F15), or a decision doc awaiting plan-doc linking — all of which
+ * carry/await a soft edge rather than signalling a regression.
+ *
+ * Returns the genuine count, the legitimate-floater count, and (given the prior
+ * count) the delta — so a single new genuine orphan stands out even when a noisy
+ * floater backlog exists. Pure; testable with no session.
+ *
+ * @param {Array<{id:string,kind:string}>} orphans
+ * @param {{previousGenuine?:number, attentionThreshold?:number}} [opts]
+ */
+export function classifyGenuineOrphans(orphans, opts = {}) {
+  const { previousGenuine = null, attentionThreshold = 1 } = opts;
+  const { byKind, hardFail } = classifyOrphans(orphans);
+  const legitimate = orphans.filter((o) => !ORPHAN_HARD_FAIL_KINDS.has(o.kind));
+  const genuineOrphanCount = hardFail.length;
+  const delta = previousGenuine == null ? null : genuineOrphanCount - previousGenuine;
+  return {
+    byKind,
+    genuine: hardFail,
+    legitimate,
+    genuineOrphanCount,
+    legitimateFloaterCount: legitimate.length,
+    delta,
+    needsAttention: genuineOrphanCount >= attentionThreshold,
+  };
+}
+
+/**
  * Orphan invariant (PRD §4.2.3a) — the extractor-bug tripwire. Any node with
  * literally zero incident edges (and not pruned). Because of the containment
  * backbone, a code node here should be impossible; a non-`file` survivor means

@@ -124,6 +124,12 @@ export async function launchStoryRerun(
     }
   }
 
+  // F2: chain this retry to the prior attempt's job BEFORE we overwrite
+  // story.jobId below, so the prior attempt's events stay reachable (and the
+  // per-step retry cap can walk the chain). Captured here because `story` is the
+  // pre-rerun row; once we patch `updatedStories` its jobId points at the new job.
+  const priorJobId = story.jobId;
+
   const jobId = deps.uuid();
   await deps.createJob({
     jobId,
@@ -133,6 +139,7 @@ export async function launchStoryRerun(
     createdBy: userId,
     workingDir: effectiveWorkingDir,
     pipeline,
+    ...(priorJobId ? { retryOf: priorJobId } : {}),
     ...jobAnnotations,
   });
 

@@ -175,11 +175,37 @@ export const handler = async () => {
         // classification warnings stay visible in the QA view for post-hoc
         // review, and the operator can still edit+approve manually before the
         // next tick wins the race (both paths are guarded by qaJobId).
+        //
+        // F11 (2026-06-18) — RACE FIX (mutual exclusion). The dev-deploy job
+        // (enqueued in the `review` block below) runs `npm run build` and
+        // EDITS next.config.ts/vite.config.ts inside `projects/<appId>`, the
+        // SAME tree qa-prepare boots `next dev` against and qa-execute reads.
+        // Co-launching both jobs in one tick let the daemon run them
+        // concurrently: deploy mutated the worktree mid-QA, destroying
+        // evidence and false-blocking correct apps. Serialize by gating
+        // qa-execute on the dev-deploy having COMPLETED — once deploy is done
+        // the tree is immutable, so QA reads a stable worktree. (The deploy
+        // block below still enqueues at-most-once and is itself guarded.)
+        // DEFER: the deeper root fix — point QA at the immutable dev-deploy
+        // URL instead of booting its own `next dev`, and inject basePath via
+        // env NEXT_BASE_PATH instead of editing next.config.ts in
+        // build-deploy-pipeline.ts — needs the operator's Q7/Q11 decision.
+        const devDeployJob = plan.devDeployJobId
+          ? await agentJobsRepo.getJobById(plan.devDeployJobId)
+          : null;
+        const devDeploySettled = devDeployJob
+          ? devDeployJob.status === 'COMPLETED' || devDeployJob.status === 'FAILED'
+          : false;
         if (
           plan.autoRunQa !== false &&
           plan.qaContractStatus === 'pending' &&
           plan.qaAggregateJobId &&
-          !plan.qaJobId
+          !plan.qaJobId &&
+          // Mutual exclusion: only start qa-execute once the dev-deploy that
+          // mutates the same worktree has settled (COMPLETED/FAILED). If the
+          // deploy hasn't been enqueued yet OR is still in flight, hold off —
+          // the deploy enqueues below this tick and we resume next tick.
+          devDeploySettled
         ) {
           try {
             const aggJob = await agentJobsRepo.getJobById(plan.qaAggregateJobId);

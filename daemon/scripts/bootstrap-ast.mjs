@@ -367,7 +367,15 @@ async function main() {
   const code = await spawnPiped(process.execPath, graphSyncArgs, {
     env: process.env,
   });
-  if (code !== 0) {
+  if (code === 3) {
+    // F16: exit 3 = genuine-orphan / orphan-invariant failure (an extractor
+    // dropped an edge). Bootstrap stays non-fatal, but surface it as an operator
+    // attention signal rather than swallowing it as generic noise — the count +
+    // delta live in _graph/orphan-signal.json.
+    logError(
+      '[operator-attention] graph-sync reported genuine orphan(s) (exit 3) — see _graph/orphan-signal.json',
+    );
+  } else if (code !== 0) {
     log(`graph-sync exited ${code} (non-blocking)`);
   }
 

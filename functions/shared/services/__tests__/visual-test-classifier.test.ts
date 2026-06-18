@@ -587,6 +587,57 @@ describe('aggregateVisualTests — verify-aware oracle tier + strength (E4-S2/S3
     expect(report.coverageWarnings.find((w) => w.kind === 'weak-oracle')?.criterionId).toBe('AC-1');
   });
 
+  it('F13 — a behavior AC with a seam but NO executable probe resolves to needs-probe, not L2-state', () => {
+    // Flow-less test: it would derive L2-state (seam exists) but it has no
+    // `assert` step, so the runtime would never read window.__harness for it.
+    const report = aggregateVisualTests(
+      [vt('VT-1', { criteriaRef: 'AC-1' })],
+      [{ id: 'AC-1', needsBrowser: true, verify: 'behavior' }],
+      'production',
+      true,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('needs-probe');
+  });
+
+  it('F13 — a state AC whose flow has steps but NO assert is needs-probe (screenshot is not a probe)', () => {
+    const report = aggregateVisualTests(
+      [vt('VT-1', { criteriaRef: 'AC-1', flow: [{ action: 'screenshot', label: 'idle' }] })],
+      [{ id: 'AC-1', needsBrowser: true, verify: 'state' }],
+      'production',
+      true,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('needs-probe');
+  });
+
+  it('F13 — an assert flow keeps L2-state (executable probe present)', () => {
+    const report = aggregateVisualTests(
+      [
+        vt('VT-1', {
+          criteriaRef: 'AC-1',
+          flow: [{ action: 'assert', expr: 'snapshot.status', op: 'eq', expected: 'running' }],
+        }),
+      ],
+      [{ id: 'AC-1', needsBrowser: false, verify: 'state' }],
+      'production',
+      true,
+    );
+    expect(report.classifications[0].classification.resolvedLevel).toBe('L2-state');
+  });
+
+  it('F13 — honors the cheaper resolved oracle over a worse source-set level', () => {
+    // Dev-author hard-coded L2 (expensive vision wire level), but the AC is an
+    // `appearance` AC → resolved tier L1. The cheapest-correct oracle wins.
+    const report = aggregateVisualTests(
+      [vt('VT-1', { criteriaRef: 'AC-1', level: 'L2' })],
+      [{ id: 'AC-1', needsBrowser: true, verify: 'appearance' }],
+      'production',
+      true,
+    );
+    const c = report.classifications[0].classification;
+    expect(c.resolvedLevel).toBe('L1');
+    expect(c.level).toBe('L1'); // re-routed down from the stale source L2
+  });
+
   it('without a seam, a behavior AC resolves to L2-vision and is NOT weak-oracle-flagged', () => {
     const report = aggregateVisualTests(
       [vt('VT-1', { criteriaRef: 'AC-1' })],

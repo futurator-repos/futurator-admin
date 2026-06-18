@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest';
 import {
   reportOrphans,
   classifyOrphans,
+  classifyGenuineOrphans,
   ORPHAN_HARD_FAIL_KINDS,
 } from '../lib/graph-integrity.mjs';
 import { makeGraphSession } from './helpers/fake-graph.mjs';
@@ -29,6 +30,44 @@ describe('classifyOrphans (pure)', () => {
     expect([...ORPHAN_HARD_FAIL_KINDS]).not.toContain('file');
     expect([...ORPHAN_HARD_FAIL_KINDS]).not.toContain('dir');
     expect(ORPHAN_HARD_FAIL_KINDS.has('endpoint')).toBe(true);
+  });
+});
+
+describe('classifyGenuineOrphans (F16 — genuine-orphan signal)', () => {
+  const orphans = [
+    { id: 'infra/lambda/Api', kind: 'lambda' }, // genuine (extractor bug)
+    { id: 'code/b.ts#function:foo', kind: 'function' }, // genuine
+    { id: 'code/new.ts', kind: 'file' }, // legitimate floater
+    { id: 'code/x.test.ts', kind: 'file' }, // legitimate floater
+    { id: 'dir/src', kind: 'dir' }, // legitimate floater
+  ];
+
+  it('counts genuine orphans as orphans MINUS legitimate floaters', () => {
+    const r = classifyGenuineOrphans(orphans);
+    expect(r.genuineOrphanCount).toBe(2);
+    expect(r.legitimateFloaterCount).toBe(3);
+    expect(r.genuine.map((o) => o.kind).sort()).toEqual(['function', 'lambda']);
+    expect(r.legitimate.map((o) => o.id)).toContain('code/x.test.ts');
+  });
+
+  it('computes a +delta against the prior genuine count', () => {
+    expect(classifyGenuineOrphans(orphans, { previousGenuine: 1 }).delta).toBe(1);
+    expect(classifyGenuineOrphans(orphans, { previousGenuine: 5 }).delta).toBe(-3);
+    expect(classifyGenuineOrphans(orphans).delta).toBeNull(); // no baseline
+  });
+
+  it('raises needsAttention when genuine count meets the threshold', () => {
+    expect(classifyGenuineOrphans(orphans, { attentionThreshold: 1 }).needsAttention).toBe(true);
+    expect(classifyGenuineOrphans(orphans, { attentionThreshold: 3 }).needsAttention).toBe(false);
+  });
+
+  it('an all-floater orphan set is genuine-clean (no attention)', () => {
+    const r = classifyGenuineOrphans([
+      { id: 'code/new.ts', kind: 'file' },
+      { id: 'dir/src', kind: 'dir' },
+    ]);
+    expect(r.genuineOrphanCount).toBe(0);
+    expect(r.needsAttention).toBe(false);
   });
 });
 

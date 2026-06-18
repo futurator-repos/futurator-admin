@@ -196,6 +196,28 @@ export const QA_LEVEL_DEFAULTS: Record<
   L2: { wallclockSec: 90, costUsd: 0.1, model: 'claude-sonnet-4-6' },
 };
 
+/**
+ * F12 — HONEST VERDICT LANE. Compute the run-level verdict from per-lane
+ * counts. `errored` (broken/missing evidence — an infra failure) and
+ * `uncertain` are NON-BLOCKING: they route to retry/operator attention.
+ * `FAIL` (a genuine product defect) is returned ONLY when there is at least
+ * one real `fail`. A 0/N capture therefore yields `errored` results and a
+ * `PARTIAL` run, never a blocking `FAIL`.
+ *
+ * Exported so the verdict lane is unit-testable in isolation, and reused
+ * inside the stringified qa-report node script below to keep one source of
+ * truth.
+ */
+export function computeOverallVqaVerdict(counts: {
+  fail: number;
+  uncertain: number;
+  errored: number;
+}): 'PASS' | 'FAIL' | 'PARTIAL' {
+  if (counts.fail > 0) return 'FAIL';
+  if (counts.uncertain > 0 || counts.errored > 0) return 'PARTIAL';
+  return 'PASS';
+}
+
 export interface QaPipelineInputs {
   plan: Plan;
   /** Tests collected across every story across every epic (PR-8a flat shape). */
@@ -653,6 +675,44 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `  }`,
           `  if (flowTests.length > 0) console.log('FLOW_TESTS_EXECUTED: ' + flowTests.length);`,
           `  fs.writeFileSync('${tmpResultsDir}/screenshot-failures.json', JSON.stringify(failures));`,
+          // F12 (a) EVIDENCE-INTEGRITY GATE — before any judge sees a frame.
+          // A 0/N or mostly-empty capture is an INFRA failure, not a product
+          // defect. Compute, per authored test, whether a usable frame landed:
+          // file must exist and be >= 2KB (sub-2KB png == blank/placeholder).
+          // Also flag identical frames (same size+content hash) which signal a
+          // capture that never advanced past the idle scaffold. Persist a
+          // per-test integrity map the judges consult (errored, never fail) and
+          // surface an aggregate ratio so a broken run routes to retry/operator.
+          `  const MIN_FRAME_BYTES = 2048;`,
+          `  const crypto = require('crypto');`,
+          `  const integrity = {};`,
+          `  const hashCounts = {};`,
+          `  let captured = 0;`,
+          `  for (const t of tests) {`,
+          `    const shot = dir + '/' + t.id + '.png';`,
+          `    let ok = false, size = 0, hash = null, reason = 'missing';`,
+          `    try {`,
+          `      if (fs.existsSync(shot)) {`,
+          `        const buf = fs.readFileSync(shot);`,
+          `        size = buf.length;`,
+          `        if (size >= MIN_FRAME_BYTES) { ok = true; reason = 'ok'; hash = crypto.createHash('sha1').update(buf).digest('hex'); hashCounts[hash] = (hashCounts[hash] || 0) + 1; }`,
+          `        else { reason = 'blank'; }`,
+          `      }`,
+          `    } catch (e) { reason = 'read-error'; }`,
+          `    if (ok) captured++;`,
+          `    integrity[t.id] = { ok, size, hash, reason };`,
+          `  }`,
+          // Mark frames that are byte-identical to >=2 others as suspect-identical
+          // (a stuck capture) — still judgeable but flagged for the operator.
+          `  for (const id of Object.keys(integrity)) {`,
+          `    const h = integrity[id].hash;`,
+          `    if (h && hashCounts[h] > 1) { integrity[id].identical = true; }`,
+          `  }`,
+          `  const authored = tests.length || 1;`,
+          `  const ratio = captured / authored;`,
+          `  const integrityFailed = ratio < 0.9;`,
+          `  fs.writeFileSync('${tmpResultsDir}/evidence-integrity.json', JSON.stringify({ captured, authored, ratio, integrityFailed, tests: integrity }));`,
+          `  console.log('EVIDENCE_INTEGRITY: ' + (integrityFailed ? 'FAILED' : 'OK') + ' (' + captured + '/' + authored + ' usable frames, ratio=' + ratio.toFixed(2) + ')');`,
           `  console.log('SCREENSHOTS_CAPTURED: ' + (tests.length - failures.length) + '/' + tests.length);`,
           `  // PR-60 — force exit. Belt-and-braces in case any stdio handle`,
           `  // remains ref'd despite the drain handlers above.`,
@@ -728,11 +788,14 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `      if (!matched) { verdict = 'fail'; rationale = 'page does not contain any of: ' + t.expectText.join(', '); }`,
           `    } catch (e) { verdict = 'errored'; rationale = 'page fetch error'; }`,
           `  }`,
-          `  // Check 4: screenshot file size (non-blank check)`,
+          `  // Check 4: screenshot evidence integrity (non-blank / present).`,
+          // F12 (b)(c) — a missing/blank frame is an INFRA failure, not a
+          // product defect: route to 'errored' (operator/retry), never 'fail'.
+          // Only run this check on a frame the test actually expected to render.
           `  const shot = '${tmpResultsDir}/screenshots/' + t.id + '.png';`,
-          `  if (verdict === 'pass' && fs.existsSync(shot)) {`,
-          `    const size = fs.statSync(shot).size;`,
-          `    if (size < 2048) { verdict = 'fail'; rationale = 'screenshot is < 2KB (likely blank)'; }`,
+          `  if (verdict === 'pass') {`,
+          `    if (!fs.existsSync(shot)) { verdict = 'errored'; rationale = 'evidence missing — screenshot file not captured'; }`,
+          `    else if (fs.statSync(shot).size < 2048) { verdict = 'errored'; rationale = 'evidence broken — screenshot is < 2KB (blank/placeholder)'; }`,
           `  }`,
           `  results.push({ testId: t.id, level: 'L0', verdict, rationale, screenshotUrl: '${cdnPrefix}' + t.id + '.png', costUsd: 0, durationMs: Date.now() - start });`,
           `}`,
@@ -783,6 +846,14 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           // (the L2 "Unable to fetch the screenshot URL" failure). screenshotUrl
           // is still recorded for the UI gallery link.
           `  const localShot = '${tmpResultsDir}/screenshots/' + t.id + '.png';`,
+          // F12 (c) PRE-JUDGE FILE VALIDATION — don't trust the judge to
+          // self-report a missing image. A missing/sub-2KB frame is broken
+          // evidence (infra), so resolve 'errored' (operator/retry), never
+          // letting a blank frame reach the model where it could become 'fail'.
+          `  if (!fs.existsSync(localShot) || fs.statSync(localShot).size < 2048) {`,
+          `    resolve({ testId: t.id, level: 'L1', verdict: 'errored', rationale: 'evidence missing/broken — frame absent or < 2KB (not judged)', screenshotUrl, costUsd: 0, durationMs: Date.now() - start });`,
+          `    return;`,
+          `  }`,
           `  const prompt = ['You are a Visual QA judge. Use the Read tool to open the screenshot image file at ' + localShot + ' and inspect it.', 'Test expectation: ' + (t.expect || ''), '', 'The screenshot is a SINGLE STATIC FRAME of the page as loaded (no interaction, no elapsed time).', 'Reply on ONE line in this exact format:', 'VERDICT: PASS|FAIL|UNCERTAIN [observable|not-idle-observable] — <one-line rationale>', '', 'The bracket tag states whether the expectation describes a state this idle frame can physically show. Decide SEMANTICALLY from what the expectation needs (interaction? elapsed time? motion? another route?), not from keywords. If the state is not-idle-observable, the verdict must be UNCERTAIN, never FAIL.', 'Use UNCERTAIN also when the image file is missing or genuinely ambiguous.'].join('\\n');`,
           `  const child = spawn('claude', ['-p', prompt, '--model', model, '--output-format', 'text', '--allowedTools', 'Read'], { stdio: ['ignore', 'pipe', 'pipe'], timeout: wallclockMs });`,
           `  let out = '';`,
@@ -882,8 +953,17 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `  const shotDir = '${tmpResultsDir}/screenshots/';`,
           `  const flowShots = (t.flow || []).filter(s => s.action === 'screenshot').map(s => shotDir + t.id + '-' + (s.label || 'shot') + '.png');`,
           `  const allShots = flowShots.length > 0 ? flowShots : [shotDir + t.id + '.png'];`,
+          // F12 (c) PRE-JUDGE FILE VALIDATION — only judge real frames. Keep the
+          // frames that exist and are >= 2KB; if NONE survive, the evidence is
+          // broken (infra) — resolve 'errored' rather than handing the judge a
+          // set of missing images that it could mistakenly score 'fail'.
+          `  const realShots = allShots.filter(p => { try { return fs.existsSync(p) && fs.statSync(p).size >= 2048; } catch (e) { return false; } });`,
+          `  if (realShots.length === 0) {`,
+          `    resolve({ testId: t.id, level: 'L2', verdict: 'errored', rationale: 'evidence missing/broken — no usable frame >= 2KB (not judged)', screenshotUrl, costUsd: 0, durationMs: Date.now() - start });`,
+          `    return;`,
+          `  }`,
           `  const judgeText = t.judge || ('Test expectation: ' + (t.expect || ''));`,
-          `  const prompt = ['You are a Visual QA judge for a multi-screenshot behavioral test.', 'Use the Read tool to open each of these screenshot image files in order:', allShots.map((u, i) => '  ' + (i + 1) + '. ' + u).join('\\n'), '', judgeText, '', 'NOTE: these screenshots are captured AFTER the declared probe interactions (clicks, key presses, elapsed/clock time) — they show POST-INTERACTION state, not the idle load frame.', 'Reply on ONE line in this exact format:', 'VERDICT: PASS|FAIL|UNCERTAIN [observable|not-observable] — <one-line rationale>', '', 'The bracket tag states whether the expectation is observable in these post-interaction frames. Decide SEMANTICALLY what the expectation needs. Because the interactions WERE executed, you MAY FAIL a frame that contradicts the expected post-action state. Reserve UNCERTAIN for a genuinely ambiguous or missing image, not for "the idle frame cannot show it".'].join('\\n');`,
+          `  const prompt = ['You are a Visual QA judge for a multi-screenshot behavioral test.', 'Use the Read tool to open each of these screenshot image files in order:', realShots.map((u, i) => '  ' + (i + 1) + '. ' + u).join('\\n'), '', judgeText, '', 'NOTE: these screenshots are captured AFTER the declared probe interactions (clicks, key presses, elapsed/clock time) — they show POST-INTERACTION state, not the idle load frame.', 'Reply on ONE line in this exact format:', 'VERDICT: PASS|FAIL|UNCERTAIN [observable|not-observable] — <one-line rationale>', '', 'The bracket tag states whether the expectation is observable in these post-interaction frames. Decide SEMANTICALLY what the expectation needs. Because the interactions WERE executed, you MAY FAIL a frame that contradicts the expected post-action state. Reserve UNCERTAIN for a genuinely ambiguous or missing image, not for "the idle frame cannot show it".'].join('\\n');`,
           `  const child = spawn('claude', ['-p', prompt, '--model', model, '--output-format', 'text', '--allowedTools', 'Read'], { stdio: ['ignore', 'pipe', 'pipe'], timeout: wallclockMs });`,
           `  let out = '';`,
           `  child.stdout.on('data', d => { out += d.toString(); });`,
@@ -952,6 +1032,11 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `const cost = results.reduce((s, r) => s + (r.costUsd || 0), 0);`,
           `const wallclock = results.reduce((s, r) => s + (r.durationMs || 0), 0) / 1000;`,
           `const failedTests = results.filter(r => r.verdict === 'fail').map(r => r.testId).join(',');`,
+          // F12 honest verdict lane — kept in lockstep with the exported
+          // computeOverallVqaVerdict() helper (this runs in the daemon's
+          // separate node process and can't import the TS module). 'errored'
+          // (broken/missing evidence — infra) and 'uncertain' are non-blocking
+          // → PARTIAL; FAIL only on a genuine product 'fail'.
           `const overall = fail > 0 ? 'FAIL' : (uncertain > 0 || errored > 0) ? 'PARTIAL' : 'PASS';`,
           `const screenshots = results.map(r => '- ' + r.testId + ': ' + (r.screenshotUrl || '')).join('\\n');`,
           `console.log('---QA_REPORT---');`,

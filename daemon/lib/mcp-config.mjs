@@ -14,7 +14,7 @@
  * non-fatal to the Claude CLI.
  */
 
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -36,7 +36,9 @@ export const isMyceliumMcpEnabled = () => process.env.MYCELIUM_MCP === 'on';
 
 let configWritten = false;
 function ensureConfig() {
-  if (configWritten) return CONFIG_PATH;
+  // Re-check existence, not just the in-process latch: a redeploy can delete the
+  // untracked generated file, so regenerate it on the next spawn instead of crashing.
+  if (configWritten && existsSync(CONFIG_PATH)) return CONFIG_PATH;
   const cfg = {
     mcpServers: {
       mycelium: {
@@ -46,6 +48,7 @@ function ensureConfig() {
       },
     },
   };
+  mkdirSync(dirname(CONFIG_PATH), { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
   configWritten = true;
   return CONFIG_PATH;

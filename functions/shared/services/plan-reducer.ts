@@ -169,12 +169,21 @@ export async function reducePlan(
     (sum, e) => sum + (e.stories ?? []).filter((s) => s.status === 'done').length,
     0,
   );
-  if (doneStories !== plan.doneStories) {
+  // F4 — also roll up `totalStories` from the same live story tree. VQA mints
+  // fix-forward stories onto an epic mid-run (wave-vqa-fix-story.mjs), growing
+  // the denominator, but plan.totalStories was frozen at plan-creation. That
+  // let doneStories exceed totalStories once any minted story completed. Count
+  // the same story set as doneStories so done <= total always holds.
+  const totalStories = epics.reduce((sum, e) => sum + (e.stories ?? []).length, 0);
+  const rollupFields: { doneStories?: number; totalStories?: number } = {};
+  if (doneStories !== plan.doneStories) rollupFields.doneStories = doneStories;
+  if (totalStories !== plan.totalStories) rollupFields.totalStories = totalStories;
+  if (Object.keys(rollupFields).length > 0) {
     try {
-      await deps.updatePlanFields(plan.planId, { doneStories });
+      await deps.updatePlanFields(plan.planId, rollupFields);
     } catch (err) {
-      // Cosmetic field; never block the reducer on a write failure.
-      console.warn(`[PlanReducer] doneStories rollup failed: ${err}`);
+      // Cosmetic fields; never block the reducer on a write failure.
+      console.warn(`[PlanReducer] story-count rollup failed: ${err}`);
     }
   }
 

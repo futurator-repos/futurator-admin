@@ -114,6 +114,48 @@ describe('reducePlan — gating', () => {
   });
 });
 
+describe('reducePlan — story-count rollup (F4)', () => {
+  it('rolls up totalStories from the live tree so minted fix stories are counted', async () => {
+    // Plan was created with totalStories: 1, but a VQA fix-forward story was
+    // minted onto the epic, so the live tree now has 2 stories (1 done). The
+    // rollup must lift totalStories to 2 so doneStories never exceeds it.
+    const epics = [
+      epic('E1', {
+        status: 'in_progress',
+        stories: [
+          { ...runningStory('s1', 'j1'), status: 'done' },
+          { ...runningStory('s2', 'j2'), status: 'pending' },
+        ],
+      }),
+    ];
+    const { deps, updatePlanFields } = makeDeps();
+    await reducePlan(basePlan({ totalStories: 1, doneStories: 0 }), epics, deps);
+    expect(updatePlanFields).toHaveBeenCalledWith('plan-1', {
+      doneStories: 1,
+      totalStories: 2,
+    });
+  });
+
+  it('does not write the rollup when counts already match the live tree', async () => {
+    const epics = [
+      epic('E1', {
+        status: 'in_progress',
+        stories: [
+          { ...runningStory('s1', 'j1'), status: 'done' },
+          { ...runningStory('s2', 'j2'), status: 'running' },
+        ],
+      }),
+    ];
+    const { deps, updatePlanFields } = makeDeps();
+    await reducePlan(basePlan({ totalStories: 2, doneStories: 1 }), epics, deps);
+    // No call carrying doneStories/totalStories should be made.
+    const rollupCalls = updatePlanFields.mock.calls.filter(
+      (c) => 'doneStories' in c[1] || 'totalStories' in c[1],
+    );
+    expect(rollupCalls).toHaveLength(0);
+  });
+});
+
 describe('reducePlan — plan-wave advancement', () => {
   it('flips plan to fixing when any epic is fixing', async () => {
     const epics = [

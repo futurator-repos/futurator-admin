@@ -29,6 +29,8 @@ import { createDriver } from './lib/memgraph-driver.mjs';
 import { embedBatch, getUsageStats, resetUsageStats } from './lib/voyage-embed.mjs';
 import { backupToS3 } from './lib/s3-backup.mjs';
 import { loadAliasMap, resolveImportSource } from './lib/import-resolver.mjs';
+import { isEphemeralScanRoot, unionAstFiles } from './lib/ast-facts-reconcile.mjs';
+import { pruneDeletedCodeNodes } from './lib/graph-prune.mjs';
 import { extractWikilinks, isLivingDoc } from './lib/doc-references.mjs';
 import {
   upsertExtractedFacts,
@@ -39,6 +41,7 @@ import {
   emitContainmentBackbone,
   reportOrphans,
   reportDeadCode,
+  classifyGenuineOrphans,
 } from './lib/graph-integrity.mjs';
 import { runAnalytics, buildInsightsDoc } from './graph-analytics.mjs';
 import { readContracts, federateContracts, writeFederation } from './lib/federation.mjs';
@@ -684,7 +687,9 @@ function subNodeId(fileNodeId, kind, name) {
  * so the graph snapshot can distinguish them.
  */
 async function processAstFacts(config) {
-  const factsPath = join(config.knowledgeDir, '..', '.mycelium', 'ast-facts.json');
+  const myceliumDir = join(config.knowledgeDir, '..', '.mycelium');
+  const factsPath = join(myceliumDir, 'ast-facts.json');
+  const fullFactsPath = join(myceliumDir, 'ast-facts.full.json');
   if (!existsSync(factsPath)) {
     log('AST facts not found, skipping AST → graph translation');
     return;
@@ -699,6 +704,37 @@ async function processAstFacts(config) {
   }
   if (!facts || !Array.isArray(facts.files) || facts.files.length === 0) {
     return;
+  }
+
+  // F14 refuse-to-narrow: reconcile partial worktree scans against the last
+  // preserved full-project scan so the known file set can only grow.
+  // F15 gate: only an authoritative (non-ephemeral) full-project scan is
+  // trustworthy enough to PRUNE deleted-source nodes. A partial worktree scan
+  // (even after the F14 union) must never drive deletions.
+  const isAuthoritativeFullScan = !isEphemeralScanRoot(facts.root);
+  if (isEphemeralScanRoot(facts.root) && existsSync(fullFactsPath)) {
+    try {
+      const fullDoc = JSON.parse(await readFile(fullFactsPath, 'utf-8'));
+      if (fullDoc && Array.isArray(fullDoc.files)) {
+        const merged = unionAstFiles(facts, fullDoc);
+        const grew = merged.length - fullDoc.files.length;
+        log(
+          `AST facts: partial worktree scan (root=${facts.root}) — refusing to narrow; ` +
+            `unioned ${facts.files.length} scanned + ${fullDoc.files.length} preserved → ${merged.length} files (+${grew} new)`,
+        );
+        facts = { ...facts, files: merged };
+      }
+    } catch (err) {
+      logError(`AST facts full-scan union failed (using partial as-is): ${err.message}`);
+    }
+  } else if (!isEphemeralScanRoot(facts.root)) {
+    // Authoritative full-project scan — preserve it as the union baseline for
+    // any later partial worktree scans. Best-effort; never blocks grounding.
+    try {
+      await writeFile(fullFactsPath, JSON.stringify(facts), 'utf-8');
+    } catch (err) {
+      logError(`AST facts full-scan snapshot failed (non-blocking): ${err.message}`);
+    }
   }
 
   // Build a set of file paths we have facts for, so we can resolve imports.
@@ -871,6 +907,29 @@ async function processAstFacts(config) {
     today,
   );
   log(`Containment backbone: ${dirNodes} dir nodes, ${containsEdges} CONTAINS edges`);
+
+  // ── F15: delete-aware prune (gated to the authoritative full-project scan) ─
+  // Additive ingest leaves zombie code nodes for files deleted on disk. Only an
+  // authoritative full scan (NOT a partial worktree scan) has a trustworthy
+  // complete file set, so the prune is gated on isAuthoritativeFullScan. We
+  // prune by absence-from-scan (never by edge count), so legitimately edgeless
+  // nodes that still exist on disk (e.g. test files) are preserved.
+  if (isAuthoritativeFullScan) {
+    const { prunedFiles, prunedSubNodes, prunedIds } = await pruneDeletedCodeNodes(
+      session,
+      config.project,
+      backboneFiles,
+      today,
+    );
+    if (prunedFiles > 0 || prunedSubNodes > 0) {
+      log(
+        `AST prune (deleted source): ${prunedFiles} file node(s), ${prunedSubNodes} sub-node(s) marked pruned`,
+      );
+      for (const id of prunedIds.slice(0, 20)) log(`  PRUNED: ${id}`);
+    }
+  } else {
+    log('AST prune skipped — partial worktree scan is not authoritative for deletions');
+  }
   } finally {
     await session.close();
     await driver.close();
@@ -997,6 +1056,21 @@ async function processSystemGraphFacts(config) {
  * logged and skipped. The ONLY thing that fails the step is a real non-`file`
  * orphan, which is a genuine extractor regression.
  */
+/**
+ * F16: read the genuine-orphan count from the previously-written orphans.json so
+ * the next run can report a delta. Best-effort — a missing/old/corrupt report
+ * (first run, pre-F16 format) yields `null` ("no prior baseline").
+ */
+async function readPreviousGenuineOrphans(graphDir) {
+  try {
+    const raw = await readFile(join(graphDir, 'orphans.json'), 'utf-8');
+    const prev = JSON.parse(raw);
+    return typeof prev.genuineOrphanCount === 'number' ? prev.genuineOrphanCount : null;
+  } catch {
+    return null;
+  }
+}
+
 async function processGraphIntegrity(config) {
   const graphDir = join(config.knowledgeDir, '_graph');
   const writeReport = async (name, doc) => {
@@ -1015,17 +1089,55 @@ async function processGraphIntegrity(config) {
       const generatedAt = new Date().toISOString();
 
       // ── Story 2.2: orphan invariant ──────────────────────────────────
-      const { orphans, byKind, hardFail } = await reportOrphans(session, config.project);
-      const blocked = hardFail.length > 0;
+      const { orphans } = await reportOrphans(session, config.project);
+
+      // F16: the genuine-orphan signal — orphans MINUS legitimate floaters
+      // (new/test/zombie files + decision docs awaiting linking). Read the prior
+      // genuine count so a single NEW genuine orphan is visible as a +delta even
+      // when a noisy floater backlog exists.
+      const previousGenuine = await readPreviousGenuineOrphans(graphDir);
+      const attentionThreshold = Number(process.env.GRAPH_ORPHAN_ATTENTION_THRESHOLD ?? 1);
+      const {
+        byKind,
+        genuine: hardFail,
+        legitimate,
+        genuineOrphanCount,
+        legitimateFloaterCount,
+        delta,
+        needsAttention,
+      } = classifyGenuineOrphans(orphans, { previousGenuine, attentionThreshold });
+      const blocked = genuineOrphanCount > 0;
       await writeReport('orphans.json', {
         projectId: config.project,
         generatedAt,
         status: blocked ? 'fail' : 'pass',
         orphanCount: orphans.length,
+        // F16: genuine vs legitimate split, surfaced for the wave gate.
+        genuineOrphanCount,
+        legitimateFloaterCount,
+        previousGenuineOrphanCount: previousGenuine,
+        genuineOrphanDelta: delta,
+        attentionThreshold,
+        needsAttention,
         hardFailCount: hardFail.length,
         byKind,
         orphans,
+        legitimateFloaters: legitimate,
         hardFail,
+      });
+
+      // F16: a compact wave-gate field the pipeline can consume without parsing
+      // the full orphan list. The compile-sync step / wave gate reads this.
+      await writeReport('orphan-signal.json', {
+        projectId: config.project,
+        generatedAt,
+        genuineOrphanCount,
+        legitimateFloaterCount,
+        previousGenuineOrphanCount: previousGenuine,
+        delta,
+        attentionThreshold,
+        needsAttention,
+        status: blocked ? 'fail' : 'pass',
       });
 
       // ── Story 2.3: dead-code detector ────────────────────────────────
@@ -1037,6 +1149,8 @@ async function processGraphIntegrity(config) {
         candidates: deadCode,
       });
 
+      const deltaStr =
+        delta == null ? 'no prior baseline' : `${delta >= 0 ? '+' : ''}${delta} vs prior`;
       if (blocked) {
         // Wave-gate gating hook: a non-`file` orphan is an extractor bug, not a
         // finding. Surface it loudly and fail the step (the compile-sync shell
@@ -1046,12 +1160,23 @@ async function processGraphIntegrity(config) {
           .slice(0, 20)
           .join(', ');
         logError(
-          `Orphan invariant FAILED — ${hardFail.length} non-file orphan(s) (extractor dropped an edge): ${summary}`,
+          `Orphan invariant FAILED — ${genuineOrphanCount} genuine orphan(s) (${deltaStr}; ` +
+            `${legitimateFloaterCount} legitimate floater(s) excluded; extractor dropped an edge): ${summary}`,
         );
+        // F16: above-threshold genuine orphans warrant an operator attention
+        // signal, distinct from the generic non-zero exit, so the wave gate /
+        // operator dashboard can route it.
+        if (needsAttention) {
+          logError(
+            `[operator-attention] graph knowledge-compile: ${genuineOrphanCount} genuine orphan(s) ` +
+              `≥ threshold ${attentionThreshold} (${deltaStr}) — see _graph/orphan-signal.json`,
+          );
+        }
         process.exitCode = 3;
       } else {
         log(
-          `Graph integrity OK: ${orphans.length} orphan(s) (all soft), ${deadCode.length} dead-code candidate(s)`,
+          `Graph integrity OK: ${genuineOrphanCount} genuine orphan(s), ` +
+            `${legitimateFloaterCount} legitimate floater(s), ${deadCode.length} dead-code candidate(s)`,
         );
       }
     } finally {

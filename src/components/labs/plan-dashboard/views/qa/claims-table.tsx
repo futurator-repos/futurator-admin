@@ -17,6 +17,7 @@ import {
   ChevronDown,
   ChevronRight,
   ExternalLink,
+  ImageOff,
   Loader2,
   Send,
   ShieldCheck,
@@ -226,6 +227,10 @@ function ClaimAccordionRow({
   onToggle: () => void;
 }) {
   const { test, claim } = row;
+  // F12 (d) — a thumbnail that 404s/fails to decode is broken EVIDENCE (an
+  // infra capture/upload failure), not "no screenshot". Surface it instead of
+  // silently hiding it, so the operator sees the integrity gap.
+  const [brokenImg, setBrokenImg] = useState(false);
   return (
     <>
       <tr
@@ -279,7 +284,7 @@ function ClaimAccordionRow({
           <StatusChip status={test.status} accepted={test.accepted} />
         </td>
         <td style={{ padding: '8px 18px 8px 8px', textAlign: 'right', width: 76 }}>
-          {test.screenshotUrl ? (
+          {test.screenshotUrl && !brokenImg ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
               src={test.screenshotUrl}
@@ -293,8 +298,29 @@ function ClaimAccordionRow({
                 display: 'inline-block',
                 verticalAlign: 'middle',
               }}
-              onError={(e) => ((e.currentTarget as HTMLImageElement).style.display = 'none')}
+              onError={() => setBrokenImg(true)}
             />
+          ) : test.screenshotUrl && brokenImg ? (
+            // Evidence was supposed to exist but the thumbnail failed to load
+            // (404 / broken upload) — flag the infra failure, don't hide it.
+            <span
+              title="Screenshot evidence missing or broken (capture/upload failure)"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                fontFamily: 'var(--font-mono)',
+                fontSize: 9,
+                color: 'var(--warning, #b45309)',
+                border: '1px dashed var(--warning, #b45309)',
+                borderRadius: 4,
+                padding: '4px 6px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <ImageOff size={11} aria-hidden />
+              evidence broken
+            </span>
           ) : (
             <span
               style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-faint)' }}

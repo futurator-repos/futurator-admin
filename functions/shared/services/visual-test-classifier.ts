@@ -275,12 +275,55 @@ export function classifyVisualTest(
  * Plus the human lane for `manual`. This is the QA-AUTHOR's working vocabulary
  * (E8); it does NOT replace the wire-level `VisualTestLevel` (L0/L1/L2) that the
  * existing classifier + reports use — keeping the blast radius contained.
+ *
+ *   • needs-probe — a `state`/`behavior` AC that would earn the deterministic
+ *     `L2-state` tier but carries NO executable probe (no `assert` flow step /
+ *     `window.__harness` read). It is honestly unverifiable: surfaced as such
+ *     instead of being handed to a vision judge it can't satisfy (F13).
  */
-export type ResolvedLevel = 'L0' | 'L1' | 'L2-state' | 'L2-vision' | 'operator';
+export type ResolvedLevel = 'L0' | 'L1' | 'L2-state' | 'L2-vision' | 'operator' | 'needs-probe';
+
+/**
+ * F13 — does this test carry an EXECUTABLE deterministic probe? A `state`/
+ * `behavior` AC only earns the `L2-state` oracle tier if at least one of its
+ * flow steps is an `assert` (the `window.__harness` read the runtime executes
+ * in `runFlow`). A flow-less test, or a flow with no `assert`, is partitioned
+ * to the plain-test lane and never runs an assert — so it cannot honestly claim
+ * the deterministic tier.
+ */
+export function hasExecutableProbe(test: Pick<VisualTestDef, 'flow'>): boolean {
+  return Array.isArray(test.flow) && test.flow.some((s) => s.action === 'assert');
+}
 
 /** Deterministic tiers run flake-free for ~$0 — and are therefore rigor-EXEMPT. */
 export function isDeterministicLevel(level: ResolvedLevel): level is 'L0' | 'L2-state' {
   return level === 'L0' || level === 'L2-state';
+}
+
+/**
+ * F13 — map a resolved oracle tier back to the wire-level `VisualTestLevel`
+ * the runtime uses to pick a judge step. Returns `undefined` for tiers that
+ * don't pin a wire level (`L2-state` runs a flow but deterministically; the
+ * human `operator` lane and the honest `needs-probe` state aren't wire-routed),
+ * so callers leave the existing `level` untouched for those.
+ */
+export function wireLevelForResolved(tier: ResolvedLevel): VisualTestLevel | undefined {
+  switch (tier) {
+    case 'L0':
+      return 'L0';
+    case 'L1':
+      return 'L1';
+    case 'L2-vision':
+      return 'L2';
+    default:
+      return undefined; // L2-state / operator / needs-probe — not a vision wire tier
+  }
+}
+
+/** F13 — wire-level cost order L0 < L1 < L2, used to compare two wire levels. */
+const WIRE_COST: Record<VisualTestLevel, number> = { L0: 0, L1: 1, L2: 2 };
+export function isCheaperWire(candidate: VisualTestLevel, current: VisualTestLevel): boolean {
+  return WIRE_COST[candidate] < WIRE_COST[current];
 }
 
 /**
@@ -411,7 +454,7 @@ const RIGOR_VISION_CEILING: Record<PlanRigor, 'L0' | 'L1' | 'L2-vision'> = {
  * This is the single highest-risk, easiest-to-miss requirement — keep it tested.
  */
 export function capVisionLevelByRigor(level: ResolvedLevel, rigor: PlanRigor): ResolvedLevel {
-  if (isDeterministicLevel(level) || level === 'operator') return level; // exempt
+  if (isDeterministicLevel(level) || level === 'operator' || level === 'needs-probe') return level; // exempt — needs-probe is the unverifiable lane, never a vision tier
   const ceiling = RIGOR_VISION_CEILING[rigor];
   return VISION_ORDINAL[level] <= VISION_ORDINAL[ceiling] ? level : ceiling;
 }
@@ -511,9 +554,28 @@ export function aggregateVisualTests(
     const verify = t.criteriaRef ? verifyByAcId.get(t.criteriaRef) : undefined;
     if (verify) {
       const resolved = deriveLevelFromVerify(verify, hasSeam);
-      classification.resolvedLevel = planRigor
-        ? capVisionLevelByRigor(resolved, planRigor)
-        : resolved;
+      let tier = planRigor ? capVisionLevelByRigor(resolved, planRigor) : resolved;
+      // F13 — a `state`/`behavior` AC only earns the deterministic `L2-state`
+      // tier if the test actually ships an executable probe (an `assert` flow
+      // step the runtime reads from `window.__harness`). A flow-less test is
+      // partitioned to the plain-test lane and NEVER runs an assert, so it
+      // cannot satisfy L2-state. Don't hand it to a vision judge it can't
+      // satisfy either — mark it `needs-probe` so it surfaces honestly.
+      if (tier === 'L2-state' && !hasExecutableProbe(t)) {
+        tier = 'needs-probe';
+      }
+      classification.resolvedLevel = tier;
+      // F13 — honor the resolvedLevel as the cheapest-correct oracle: stop
+      // preserving a worse source-set wire `level` over a better resolved tier.
+      // A deterministic `L2-state` read is free + flake-free, so a test the
+      // dev-author hard-coded to an expensive vision tier should route by the
+      // resolved oracle, not the stale source level.
+      const wire = wireLevelForResolved(tier);
+      if (wire && classification.alreadyLeveled && isCheaperWire(wire, classification.level)) {
+        classification.level = wire;
+        classification.reason = `${classification.reason} (re-routed to ${wire} by resolved oracle ${tier} — cheapest-correct)`;
+        classification.alreadyLeveled = false;
+      }
     }
     return { testId: t.id, classification };
   });

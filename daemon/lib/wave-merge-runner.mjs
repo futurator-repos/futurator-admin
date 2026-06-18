@@ -483,6 +483,16 @@ export async function runWaveMerge({
   //     => { outcome: 'pass'|'fixed'|'fix-forward'|'skipped'|'env-blocked', ... }
   // See lib/wave-vqa-runner.mjs for the stage machinery + fix-forward rules.
   runVqa,
+  // F14 (2026-06-18) — OPT-IN authoritative full-project AST regeneration at
+  // wave-close. UNDEFINED by default → no behavior change. The daemon passes it
+  // so that, once the wave's stories are integrated and green has advanced, ONE
+  // full-project ast-facts scan runs over the integrated tree (the candidate
+  // worktree) instead of leaving the persisted ast-facts as the last story's
+  // partial diff-manifest scan. Fired AFTER green advance + push and BEFORE the
+  // candidate is reaped, while the fully-integrated tree is still on disk.
+  // Signature: regenAstFacts({ candidateDir, appId, planId, planSlug,
+  //   epicId, waveNumber, mergedStoryIds }) => void (best-effort; never throws).
+  regenAstFacts,
   // Story B (2026-05-29) — injectable exec surface for hermetic real-git
   // tests. Production defaults shell out as `sudo -u ubuntu`.
   gitRunner = runGit,
@@ -1191,6 +1201,30 @@ export async function runWaveMerge({
       'warn',
       `[wave-merge] push to origin/${planBranch} failed (non-blocking): ${push.stderr.trim()}`,
     );
+  }
+
+  // F14 — authoritative full-project AST regeneration over the INTEGRATED tree.
+  // The per-story pipeline persists ast-facts from a `--diff-manifest` scan
+  // (just that story's touched files), so the last writer wins and the snapshot
+  // collapses to one story's slice. Now that every wave story is merged and
+  // green has advanced, the candidate worktree IS the integrated product —
+  // regenerate ast-facts over it so the persisted scan reflects ALL source
+  // files. Best-effort and OPT-IN (undefined ⇒ no-op); must run BEFORE the
+  // candidate is reaped, while the integrated tree is still on disk.
+  if (typeof regenAstFacts === 'function') {
+    try {
+      await regenAstFacts({
+        candidateDir,
+        appId,
+        planId,
+        planSlug,
+        epicId,
+        waveNumber,
+        mergedStoryIds: merged,
+      });
+    } catch (err) {
+      log('warn', `[wave-merge] full-project AST regen failed (non-blocking): ${err.message}`);
+    }
   }
 
   // 5. Reap the throwaway candidate, then tear down per-story worktrees +
