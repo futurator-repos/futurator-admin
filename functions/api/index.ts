@@ -12637,10 +12637,15 @@ app.post('/api/plans/:planId/scorecard/:stage/run', async (c) => {
   const plan = await planRepo.getPlanById(planId);
   if (!plan) throw new NotFoundError('Plan', planId);
 
-  // Deterministic half — inline, no LLM (spec §4a). Optional graph/qa/deploy/
-  // reflection/agent-spend fetchers are omitted in v1, so those criteria degrade
-  // honestly to ⚪ needs-instrumentation rather than fabricate (spec §4a guard).
-  const det = await scoreDeterministic(planId);
+  // Deterministic half — inline, no LLM (spec §4a). The reflections fetcher is
+  // wired (OV8 learning-loop closure); graph/qa/deploy/agent-spend fetchers stay
+  // omitted in v1 (graph needs the S3 _graph read; agent-spend has no per-plan
+  // query yet), so those criteria degrade honestly to ⚪ rather than fabricate.
+  // Reflections are project-scoped (PK = the plan's folder slug); a slug miss
+  // returns [] → ⚪, never a wrong score.
+  const det = await scoreDeterministic(planId, {
+    fetchReflections: (pl) => reflectionsRepo.listReflections({ projectSlug: pl.name }),
+  });
   const rc = composeRealityCheck(det.slices, det.ctx);
   const now = new Date().toISOString();
   // Versioning V1 (spec §9): pipelineVersion is stamped on the plan at run start.
