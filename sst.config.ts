@@ -465,6 +465,30 @@ export default $config({
       },
     });
 
+    // ── F22 — dev/staging promotion-ladder subdomains (deployment-v2.5.md §14) ──
+    // Two static-hosting shells the deploy/promote agents `aws s3 sync` INTO
+    // (NOT StaticSite — that would purge synced apps every deploy). Each fronted
+    // by its own CloudFront + ACM cert + Route53 record (shared zone, matched by
+    // name) via Router. `access:'cloudfront'` grants the distribution OAC to the
+    // bucket. Setting the env vars below flips `deploy-targets.ts` from fallback
+    // prefix mode to true build-once byte-copy promotion across dev→staging→prod.
+    const devEnvBucket = new sst.aws.Bucket('DevEnvBucket', {
+      access: 'cloudfront',
+      transform: { bucket: { bucketName: 'futurator-admin-dev-env' } },
+    });
+    const stagingEnvBucket = new sst.aws.Bucket('StagingEnvBucket', {
+      access: 'cloudfront',
+      transform: { bucket: { bucketName: 'futurator-admin-staging-env' } },
+    });
+    const devRouter = new sst.aws.Router('DevRouter', {
+      domain: 'dev.futurator.ai',
+      routes: { '/*': { bucket: devEnvBucket } },
+    });
+    const stagingRouter = new sst.aws.Router('StagingRouter', {
+      domain: 'staging.futurator.ai',
+      routes: { '/*': { bucket: stagingEnvBucket } },
+    });
+
     // ── Pipeline v2 — Phase 1 (Story 1.1.2) — GitHub PAT secret ──
     // Used by the daemon and API to authenticate GitHub API calls (create repo,
     // push commits, read PR status). Value is set out-of-band by the operator:
@@ -958,6 +982,12 @@ export default $config({
         REFLECTIONS_TABLE: reflectionsTable.name,
         // Plan Retrospect — Reality Check scorecards (plan-retrospect-spec §5).
         SCORECARDS_TABLE: scorecardsTable.name,
+        // F22 — dev/staging subdomain hosting (deployment-v2.5.md §14). Presence
+        // flips deploy-targets.ts to byte-copy promotion; absence = fallback.
+        DEV_ENV_BUCKET: devEnvBucket.name,
+        DEV_ENV_CF_ID: devRouter.distributionID,
+        STAGING_ENV_BUCKET: stagingEnvBucket.name,
+        STAGING_ENV_CF_ID: stagingRouter.distributionID,
         AGENT_SESSIONS_TABLE: agentSessionsTable.name,
         AGENT_CONVERSATIONS_TABLE: agentConversationsTable.name,
         TIMING_SUMMARY_TABLE: timingSummaryTable.name,
@@ -1320,6 +1350,12 @@ export default $config({
           APPS_TABLE: appsTable.name,
           ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
           TIMING_SUMMARY_TABLE: timingSummaryTable.name,
+          // F22 — wave-completion-check calls resolveDeployTarget too (it
+          // enqueues the dev-deploy), so it needs the same subdomain coords.
+          DEV_ENV_BUCKET: devEnvBucket.name,
+          DEV_ENV_CF_ID: devRouter.distributionID,
+          STAGING_ENV_BUCKET: stagingEnvBucket.name,
+          STAGING_ENV_CF_ID: stagingRouter.distributionID,
         },
       },
     });
