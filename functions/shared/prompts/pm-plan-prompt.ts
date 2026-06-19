@@ -111,6 +111,13 @@ export function buildPmPlanPrompt(args: {
   // Architecture docs, lead with them: the PM SHARDS those docs into epics +
   // stories instead of re-deriving scope from the one-line intent. This is the
   // fix for "the planner ignored the docs the agents just wrote".
+  // E1-S1 (v3) — the FR-coverage traceability field is meaningful only for a
+  // spec-grounded plan (the PRD defines the FR ids). Intent-only / prototype
+  // plans have no PRD, so the example omits it (schema-optional → byte-identical
+  // legacy output). When grounded, the example shows the field so the PM emits it.
+  const exampleRequirementRefs = args.priorArtifacts
+    ? `\n        "requirementRefs": ["FR1", "FR2"],`
+    : '';
   const groundingBlock = args.priorArtifacts
     ? `## Approved specs — PLAN FROM THESE (the source of truth)
 
@@ -122,6 +129,12 @@ not a fresh interpretation of the intent. Hard rules:
   - **Cover the specs.** Every functional requirement (PRD), screen/flow (UX),
     and module/decision (Architecture) must map to at least one story. Walk the
     docs section by section and make sure nothing approved is dropped.
+  - **Trace coverage explicitly.** Each epic MUST declare \`requirementRefs\`: the
+    list of PRD requirement ids (\`FR1\`, \`FR2\`, …, exactly as numbered under the
+    PRD's \`## Functional Requirements\`) that the epic's stories deliver. Every FR
+    in the PRD must appear in at least one epic's \`requirementRefs\` — this is the
+    traceability spine the readiness gate checks, and an uncovered FR blocks the
+    start of development. Cite only ids that exist in the PRD; never invent one.
   - **Honor the architecture.** Use its concrete tech choices, data model,
     module boundaries, and file layout when you write \`touchPoints\` and
     \`technicalNotes\` — do not invent a different structure.
@@ -267,12 +280,12 @@ that can share a wave.**
 
 ### Anti-pattern: behaviorally coupled siblings
 
-Stories in the same wave are developed **in parallel, blind to each other's
-code** — they only meet at the merge gate. So two siblings must never
-implement or test ONE behavior that spans both. The classic failure: story A
-implements ghost movement/state, sibling story B implements "Pacman eats a
-frightened ghost" — B's tests encode assumptions about A's entities that A
-never saw, both pass alone, and the merged union fails the wave gate.
+Same-wave stories are developed **in parallel, blind to each other's code** —
+they meet only at the merge gate, so two siblings must never implement or test
+ONE behavior that spans both. Classic failure: story A implements ghost
+movement/state, sibling B implements "Pacman eats a frightened ghost" — B's
+tests assume A's entities A never saw, both pass alone, and the merged union
+fails the wave gate.
 
 Rules:
 - An **interaction behavior** between two entities/modules (collision,
@@ -383,28 +396,17 @@ modify (relative to the project root, using the conventional paths above).
   emit userStory/technicalNotes/tasks/references (that depth is for mvp/production).`
   }
 - **Browser AC text must be SCREEN-VERIFIABLE.** When \`needsBrowser: true\`,
-  phrase the criterion so a person looking at a screenshot can apply it
-  without reading the source code. Concrete observable signal beats
-  general adjectives. (PR-63)
+  phrase the criterion so a person looking at a screenshot can apply it without
+  reading the source code — concrete observable signal (count + color/style +
+  position + a FAIL clause when it's not obvious) beats general adjectives. (PR-63)
 
-  ❌ Vague (FAIL the classifier's specificity check):
-    - "The login form renders correctly."
-    - "The chart displays the data."
-    - "Game canvas works."
+  ❌ Vague (FAIL the classifier's specificity check): "The login form renders correctly."
+  ✅ Concrete (supports the QA judge): "At game start (before any input) the canvas
+     shows the player sprite standing on the ground band, with the score HUD reading
+     '0' in the top-left corner."
 
-  ✅ Concrete (passes specificity, supports the QA judge):
-    - "The login form is visible with two inputs labeled 'Email' and
-      'Password' stacked vertically, and a 'Sign in' button below them."
-    - "A bar chart with at least three vertical bars of distinct heights
-      is visible in the dashboard panel labeled 'Monthly revenue'."
-    - "At game start (before any input) the canvas shows the player sprite
-      standing on the ground band, with the score HUD reading '0' in the
-      top-left corner."
-
-  Rule of thumb: include count + color/style + position + a FAIL clause
-  whenever it's not obvious. The dev agent will mirror this concrete
-  voice into the story's visualTests \`judge:\` block, which is the actual
-  contract the QA judge applies.
+  The dev agent mirrors this concrete voice into the story's visualTests \`judge:\`
+  block, which is the actual contract the QA judge applies.
 
   **Browser ACs are verified against the story's own registered feature
   surface — and HOW depends on the AC's \`verify\` intent (Concept v2).**
@@ -426,64 +428,38 @@ modify (relative to the project root, using the conventional paths above).
   blank load screen can never pass.
 
   **HARD REQUIREMENT — visual coverage (your plan is REJECTED without it).**
-  This app renders a user interface, so your plan MUST contain
-  \`needsBrowser: true\` criteria. A submitted plan with zero browser ACs
-  fails validation and is regenerated — it would disable visual QA
-  entirely (no screenshots ever taken, the QA Review stage has nothing to
-  run). Apply this split per story:
+  This app renders a UI, so the plan MUST contain \`needsBrowser: true\` criteria;
+  a plan with zero browser ACs fails validation and is regenerated (it would
+  disable visual QA entirely). Per story: renders something on screen (canvas,
+  sprite, component, page, HUD, overlay, background) → ≥1 \`needsBrowser: true\` AC
+  for its idle-visible signal (e.g. "at load the canvas shows the dragon sprite on
+  the ground band", "the HUD reads 'Score: 0' top-left"); pure-logic story (types,
+  reducers, physics/collision math, spawn timing) → NONE (the test suite asserts
+  its dynamics).
 
-  - Story renders something on screen (canvas drawing, sprite, component,
-    page, HUD, overlay, background)? → It MUST carry at least ONE
-    \`needsBrowser: true\` AC describing its idle-visible signal: "at load
-    the canvas shows the dragon sprite standing on the ground band", "the
-    HUD reads 'Score: 0' top-left", "the background shows a light-blue sky
-    band over a brown ground band with a visible horizon".
-  - Pure-logic story (types, reducers, physics/collision math, spawn
-    timing)? → Correctly has NONE; its dynamics are asserted by the test
-    suite instead.
+  **Make visibility structural — PROGRESSIVE FEATURE REGISTRATION.** A browser AC
+  is only judgeable if the story's output is REGISTERED as a feature (the
+  registered feature IS the isolation surface visual QA captures). So a story that
+  delivers something visible MUST also mount it in the SAME story: register/extend
+  \`src/features/<slug>.feature.tsx\` (listed in its touchPoints), rendering the
+  deliverable in a meaningful idle state. Therefore:
+  - Do NOT write "unit-test-only" rendering stories asserting mocked canvas-context
+    calls instead of pixels — mount it, then write the browser AC about the idle frame.
+  - The final assembly story composes everything into the real app feature, marks it
+    PRIMARY (\`export const feature = { slug: '<app>', order: 0, primary: true }\`), and
+    RETIRES interim preview features (list the removed files in its touchPoints; it
+    runs in a later wave, so editing earlier-wave files is safe). \`primary: true\`
+    makes the bare route \`/\` render ONLY the real app (previews stay at
+    \`?feature=<slug>\`). It should also carry browser ACs for the composed initial frame.
 
-  **Make visibility structural — PROGRESSIVE FEATURE REGISTRATION.** A
-  browser AC can only be judged if the story's output is actually
-  REGISTERED as a feature — the registered feature IS the isolation
-  surface visual QA captures. So every story that delivers something
-  visible must ALSO mount it within the SAME story: register (or extend) a
-  feature entry —
-  \`src/features/<slug>.feature.tsx\` listed in its touchPoints — that
-  renders the story's deliverable in a meaningful idle state (e.g. the
-  maze renderer story registers a feature drawing level 1; the player-
-  sprite story registers a feature drawing the sprite on that scene). Two
-  consequences you must respect:
-
-  - Do NOT write "unit-test-only" rendering stories that assert mocked
-    canvas-context calls instead of pixels (a ctx-stub test proves a call
-    happened, not that anything correct is visible). Mount it, then write
-    the browser AC about what the idle frame shows.
-  - The final assembly story composes everything into the real app
-    feature, marks that feature PRIMARY
-    (\`export const feature = { slug: '<app>', order: 0, primary: true }\`),
-    and RETIRES interim preview features — list the preview feature files
-    it removes in its touchPoints (it runs in a later wave, so editing
-    earlier-wave files is safe). Marking the assembled feature
-    \`primary: true\` makes the bare route \`/\` render ONLY the real app
-    (previews stay reachable at \`?feature=<slug>\` for wave isolation), so
-    the SHIPPED app AND final QA both see the real app at \`/\` — never the
-    preview gallery — even if a preview file is accidentally left behind.
-
-  The assembled app's final story should additionally carry browser ACs
-  for the composed initial frame — what a user sees the moment the page
-  loads.
-
-  **Interaction- and time-gated ACs need a PROBE, not a static frame.** If
-  an AC can only be seen AFTER an action or elapsed time — a start/title
-  screen that needs Space/Enter to begin, a HUD that appears once play
-  starts, a GAME OVER / level-complete / score-changed screen — a single
-  idle screenshot CANNOT verify it and a vision judge will false-FAIL it.
-  For these the visual test MUST carry a \`flow\` that performs the gating
-  interaction then captures the result, e.g.
+  **Interaction- and time-gated ACs need a PROBE, not a static frame.** If an AC is
+  only visible AFTER an action or elapsed time (a title screen needing Space/Enter, a
+  HUD that appears once play starts, a GAME OVER / score-changed screen), one idle
+  screenshot CANNOT verify it and a vision judge will false-FAIL it. The visual test
+  MUST carry a \`flow\` that performs the gating interaction then captures, e.g.
   \`flow: [{ "action": "press", "key": "Enter" }, { "action": "wait", "ms": 500 }, { "action": "screenshot" }]\`,
   or a deterministic \`{ "action": "assert", "expr": "snapshot.phase", "op": "eq", "expected": "gameover" }\`
-  reading \`window.__harness\` when a state is hard to reach by input alone.
-  Plain "what the idle frame shows" ACs stay probe-free.
+  reading \`window.__harness\`. Plain "what the idle frame shows" ACs stay probe-free.
 - Titles are action-oriented ("Implement useGameLoop hook", not "The
   useGameLoop hook").
 - **Stories must respect the existing boilerplate** — if the AC says
@@ -507,7 +483,7 @@ JSON in a code block.
         "id": "E1",
         "title": "Foundation",
         "goal": "Define shared types and constants in the existing scaffold",
-        "acceptanceCriteria": "${ctx.exampleAcceptanceCriteria[0]}\\nAll shared types exported from \`${ctx.conventions.typesPath}index.ts\`",
+        "acceptanceCriteria": "${ctx.exampleAcceptanceCriteria[0]}\\nAll shared types exported from \`${ctx.conventions.typesPath}index.ts\`",${exampleRequirementRefs}
         "dependsOn": [],
         "stories": [
           {
@@ -559,7 +535,9 @@ JSON in a code block.
        ? `
 7. **Spec grounding** — every approved-doc requirement (PRD), screen/flow (UX),
    and module/decision (Architecture) maps to a story; nothing approved was
-   dropped; nothing contradicts the docs.`
+   dropped; nothing contradicts the docs.
+8. **Coverage trace** — every PRD \`FR\` id appears in at least one epic's
+   \`requirementRefs\`; no \`requirementRefs\` entry cites an id absent from the PRD.`
        : ''
    }
 

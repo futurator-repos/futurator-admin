@@ -3,7 +3,11 @@ import type { AgentJob } from '../types/agent-orchestrator';
 import type { BoilerplateType } from '../boilerplates/registry';
 import type { ConceptArtifactKind, ConceptArtifactDepth } from '../concept/concept-plan';
 import { reduceConcept } from './concept-reducer';
-import { applyConceptArtifactOutput, artifactSourceFromJob } from './concept-artifact-service';
+import {
+  applyConceptArtifactOutput,
+  artifactSourceFromJob,
+  requirementIdsFromJob,
+} from './concept-artifact-service';
 import { resolveConceptInteraction } from './resolve-concept-interaction';
 import { generatePrdGenPipeline } from '../pipelines/prd-gen-pipeline';
 import { generateUxGenPipeline } from '../pipelines/ux-gen-pipeline';
@@ -84,6 +88,12 @@ async function applyCompletedGenerators(plan: Plan, deps: ConceptDriverDeps): Pr
         updatePlanFields: deps.updatePlanFields,
         autoApprove,
       });
+      // v3 E1-S2 — stamp the PRD's FR-id coverage ground truth (captured by the
+      // daemon write-back) so the readiness gate can enforce epic coverage.
+      if (a.kind === 'prd') {
+        const reqIds = requirementIdsFromJob(job);
+        if (reqIds) await deps.updatePlanFields(plan.planId, { prdRequirementIds: reqIds });
+      }
     } catch {
       // Defensive: a generator job with no usable output — leave it; the next
       // tick (or a regenerate) recovers. Never throw out of the driver.

@@ -202,6 +202,7 @@ import {
   applyConceptArtifactOutput,
   artifactSourceFromJob,
   artifactJobVars,
+  requirementIdsFromJob,
 } from '../shared/services/concept-artifact-service';
 import { driveConcept, type ConceptDriverDeps } from '../shared/services/concept-driver';
 import {
@@ -2281,9 +2282,13 @@ async function handleApplyArtifact(c: Context, kind: ArtifactKind) {
   }
 
   // Stamp the generator FK + per-kind job ledger (idempotent — same jobId).
+  // v3 E1-S2 — for the PRD, also persist the FR-id coverage ground truth the
+  // daemon captured (PRD_REQUIREMENT_IDS) so the readiness gate can enforce it.
+  const prdRequirementIds = kind === 'prd' ? requirementIdsFromJob(job) : undefined;
   await planRepo.updatePlanFields(planId, {
     [CONCEPT_FK_FIELD[kind]]: jobId,
     conceptArtifactJobIds: { ...(plan.conceptArtifactJobIds ?? {}), [kind]: jobId },
+    ...(prdRequirementIds ? { prdRequirementIds } : {}),
   });
 
   // Drive the next step under the per-plan reduce lock (reactive path; the cron
@@ -2876,13 +2881,28 @@ app.post('/api/plans/:id/start', async (c) => {
     throw new ValidationError('Plan-wave 0 is empty — check epic dependencies for cycles');
   }
 
+  const now = new Date().toISOString();
+
   // Concept v2 (E9, §8) — semantic readiness gate, on top of the structural
   // checks above. prototype auto-passes; production blocks on errors. Reference
   // resolution is deferred (Lambda can't read the EC2 artifact manifests — it's
   // enforced at decompose-time, E4.2); coverage/structural/manual/appearance/
   // route checks run from DDB. Conditions are surfaced, never hard-block.
-  const gate = runSolutioningGate({ plan, epics });
-  if (gate.blocks) {
+  // v3 E1-S2 — feed the PRD's FR ids (captured at PRD-apply time) so the gate's
+  // dormant coverage branch fires: an epic graph that drops a PRD requirement is
+  // flagged (error at production, condition at mvp). Absent for prototype/legacy.
+  const gate = runSolutioningGate({ plan, epics, prdRequirementIds: plan.prdRequirementIds });
+  // v3 E7-S1 — a YOLO (autopilot) run is unattended, so a blocking gate would
+  // wedge it forever with no operator to clear the violation. YOLO bypasses the
+  // BLOCK (the verdict + reasons are still recorded below, E1-S4 / E7-S2), the
+  // same way autopilot auto-approves the concept artifacts upstream.
+  const yolo = resolveConceptInteraction(plan) === 'autopilot';
+  if (gate.blocks && !yolo) {
+    // v3 E1-S4 — record the blocking verdict on the plan row before throwing,
+    // so a blocked start is auditable (not just a transient 4xx).
+    await planRepo.updatePlanFields(planId, {
+      checkoutGates: { ...gate, bypassedByYolo: false, evaluatedAt: now },
+    });
     throw new ValidationError(
       `Plan is not ready for development (${gate.verdict}):\n${gate.errors
         .map((e) => `- ${e}`)
@@ -2890,7 +2910,6 @@ app.post('/api/plans/:id/start', async (c) => {
     );
   }
 
-  const now = new Date().toISOString();
   const jobsByEpic: Record<string, string[]> = {};
 
   // Phase C.3 + 2026-05-19: cascade plan-level rigor + test config + plan
@@ -2934,7 +2953,15 @@ app.post('/api/plans/:id/start', async (c) => {
     }
   }
 
-  await planRepo.updatePlanFields(planId, { status: 'developing', startedAt: now });
+  // v3 E1-S4 — record the readiness verdict on the plan row (not just the
+  // response body) so the Plan Retrospect bundle / scoreCheckouts detector can
+  // read it later. `bypassedByYolo` is true when a YOLO run started despite a
+  // blocking verdict (E7-S1) — the audit trail for an unattended override.
+  await planRepo.updatePlanFields(planId, {
+    status: 'developing',
+    startedAt: now,
+    checkoutGates: { ...gate, bypassedByYolo: gate.blocks && yolo, evaluatedAt: now },
+  });
 
   // Surface the readiness verdict + any non-blocking conditions (E9, §8).
   return c.json(
@@ -2942,7 +2969,11 @@ app.post('/api/plans/:id/start', async (c) => {
       planId,
       jobsByEpic,
       waveNumber: 0,
-      gate: { verdict: gate.verdict, conditions: gate.conditions },
+      gate: {
+        verdict: gate.verdict,
+        conditions: gate.conditions,
+        bypassedByYolo: gate.blocks && yolo,
+      },
     },
     201,
   );

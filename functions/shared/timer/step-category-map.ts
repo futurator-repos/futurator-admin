@@ -49,6 +49,21 @@ export const STEP_ID_TO_CATEGORY: Readonly<Record<string, TimerCategory>> = Obje
   'dev-server-fix': 'fix',
   'plan-build-fix': 'fix',
 
+  // ── Lint gate + fixer (pacman1 F1; v3 E3-S1, 2026-06-19) ───────────────
+  // `lint-verify` (story-pipeline.ts) runs `eslint --fix` on the per-story
+  // delta — static-analysis work, classified with the other build/static
+  // gates as `compile`. Previously it had no entry and only "happened" to
+  // land in `compile` via the shell-step default; the explicit entry pins it
+  // so a default change can't silently re-bucket lint time.
+  //
+  // `lint-fix` is the bounded fixer agent (agentId:'DEV'). Without an entry it
+  // was classified by role → `dev`, so eslint-repair time leaked into raw dev
+  // time (the same misattribution PR-49 fixed for test-execute). The map
+  // override wins over byRole (slicer `stepOverride ?? classify`), so this
+  // books it as `fix` alongside dev-build-fix / dev-server-fix.
+  'lint-verify': 'compile',
+  'lint-fix': 'fix',
+
   // ── Wave gate (pong1 P2, 2026-06-12) ───────────────────────────────────
   // Every wave-merge runner log line is teed into the events table with
   // stepId 'wave-merge' (agent-daemon waveLog). Pre-fix these classified as

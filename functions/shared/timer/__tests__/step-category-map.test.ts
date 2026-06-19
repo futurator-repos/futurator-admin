@@ -35,6 +35,14 @@ describe('PR-49 — resolveStepCategory', () => {
     expect(resolveStepCategory('plan-build-fix')).toBe('fix');
   });
 
+  it('lint gate → compile, lint fixer → fix (v3 E3-S1)', () => {
+    // The eslint gate is static-analysis work, bucketed with the build gates.
+    expect(resolveStepCategory('lint-verify')).toBe('compile');
+    // The bounded eslint fixer is an agent step but the map override wins over
+    // its DEV role, so its repair time books as `fix` (not raw `dev`).
+    expect(resolveStepCategory('lint-fix')).toBe('fix');
+  });
+
   it('app-bootstrap saga steps map to bootstrap', () => {
     expect(resolveStepCategory('inject-app-values')).toBe('bootstrap');
     expect(resolveStepCategory('npm-install')).toBe('bootstrap');

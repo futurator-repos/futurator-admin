@@ -3,6 +3,7 @@ import {
   applyConceptArtifactOutput,
   artifactJobVars,
   artifactSourceFromJob,
+  requirementIdsFromJob,
 } from '../concept-artifact-service';
 import { generateSectionManifest } from '../../concept/section-manifest';
 import { recordApproval, applyEdit, type ConceptArtifact } from '../../concept/artifact-version';
@@ -207,6 +208,19 @@ describe('artifactJobVars + artifactSourceFromJob (E2.4 — job → apply source
     expect(() => artifactSourceFromJob(job({ PRD_SECTIONS_JSON: '{bad' }), 'prd')).toThrow(
       /not valid JSON/,
     );
+  });
+
+  it('E1-S2 — requirementIdsFromJob reads the daemon-captured PRD FR ids', () => {
+    expect(requirementIdsFromJob(job({ PRD_REQUIREMENT_IDS: '["FR1","FR2","FR10"]' }))).toEqual([
+      'FR1',
+      'FR2',
+      'FR10',
+    ]);
+    // Absent carrier (legacy job / non-PRD) → undefined → coverage not enforced.
+    expect(requirementIdsFromJob(job({}))).toBeUndefined();
+    // Malformed carrier is treated as absent, never throws.
+    expect(requirementIdsFromJob(job({ PRD_REQUIREMENT_IDS: '{not-an-array' }))).toBeUndefined();
+    expect(requirementIdsFromJob(job({ PRD_REQUIREMENT_IDS: '[1,2]' }))).toBeUndefined();
   });
 
   it('end-to-end: job → source → apply registers the row', async () => {

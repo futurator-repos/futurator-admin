@@ -114,7 +114,10 @@ import { applyReflection } from './pipelines/reflector-apply.mjs';
 // + node_modules symlinks before any pipeline step runs.
 import { setupStoryWorktree, teardownStoryWorktree } from './lib/story-worktree.mjs';
 // Concept v2 (E1.2/E2.4) — land generated concept docs on disk + their manifests.
-import { writeConceptArtifact } from './pipelines/lib/concept-artifact-writeback.mjs';
+import {
+  writeConceptArtifact,
+  extractRequirementIds,
+} from './pipelines/lib/concept-artifact-writeback.mjs';
 // Concept v2 (E3.2a) — fill {{PRIOR_ARTIFACTS}} from approved upstream docs.
 import {
   loadPriorArtifacts,
@@ -2316,6 +2319,21 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
           extractorType: 'concept-writeback',
         });
         log('info', `[${jobId.slice(0, 8)}] wrote concept/${kind}.md (${manifest.sections.length} sections)`);
+
+        // v3 E1-S2 — capture the PRD's FR ids as a SMALL, persisted job var
+        // (the raw PRD_MD is transient-stripped). The apply path reads this off
+        // the COMPLETED job and stamps `plan.prdRequirementIds`, the ground
+        // truth the readiness gate checks epic `requirementRefs` coverage
+        // against. Sibling of the `_SECTIONS_JSON` capture above.
+        if (kind === 'prd') {
+          const reqIds = extractRequirementIds(md);
+          variables.PRD_REQUIREMENT_IDS = JSON.stringify(reqIds);
+          await pushEvent(jobId, step.id, step.agentId, 'extraction', {
+            variableName: 'PRD_REQUIREMENT_IDS',
+            variableValue: `${reqIds.length} FR ids: ${reqIds.join(', ')}`.slice(0, 500),
+            extractorType: 'concept-writeback',
+          });
+        }
       } catch (err) {
         log('error', `[${jobId.slice(0, 8)}] concept write-back failed for ${kind}: ${err.message}`);
       }

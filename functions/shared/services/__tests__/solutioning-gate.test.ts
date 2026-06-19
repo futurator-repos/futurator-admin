@@ -201,6 +201,40 @@ describe('runSolutioningGate (Concept v2 — E9)', () => {
     expect(r.errors).toEqual([]);
   });
 
+  it('E1-S2 — PRD requirement coverage: an uncovered FR is a condition at mvp, error at production', () => {
+    // cleanEpics() covers FR-1 via requirementRefs; FR-99 is dropped.
+    const prdRequirementIds = ['FR-1', 'FR-99'];
+    const mvp = runSolutioningGate(input({ prdRequirementIds }));
+    expect(mvp.verdict).toBe('ready-with-conditions');
+    expect(mvp.blocks).toBe(false);
+    expect(mvp.conditions.join(' ')).toMatch(/FR-99 is not covered/);
+
+    const prod = runSolutioningGate(
+      input({
+        prdRequirementIds,
+        plan: {
+          rigor: 'production',
+          conceptPlan: {
+            uiBearing: true,
+            complexity: 'low',
+            artifacts: [],
+            gate: 'strict',
+            rationale: 'r',
+          },
+        },
+      }),
+    );
+    expect(prod.verdict).toBe('not-ready');
+    expect(prod.blocks).toBe(true);
+    expect(prod.errors.join(' ')).toMatch(/FR-99 is not covered/);
+  });
+
+  it('E1-S2 — fully-covered PRD requirements pass; absent prdRequirementIds skips the check', () => {
+    expect(runSolutioningGate(input({ prdRequirementIds: ['FR-1'] })).verdict).toBe('ready');
+    // Legacy/prototype: no PRD ids supplied → coverage branch is inert.
+    expect(runSolutioningGate(input()).verdict).toBe('ready');
+  });
+
   it('the readiness report renders the verdict + issues', () => {
     const epics = cleanEpics({ references: [{ source: 'architecture', section: 'nope' }] });
     const r = runSolutioningGate(input({ epics, manifests: { architecture: archManifest } }));

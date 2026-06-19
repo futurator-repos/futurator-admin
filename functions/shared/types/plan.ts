@@ -47,7 +47,23 @@ export interface PlanTestingProfile {
 import type { PlanKind } from '../schemas/plan-schema';
 import type { ConceptPlan, ConceptArtifactKind } from '../concept/concept-plan';
 import type { ConceptArtifact } from '../concept/artifact-version';
+import type { GateResult } from '../services/solutioning-gate';
 export type { PlanKind };
+
+/**
+ * Pipeline v3 (E1-S4) — the persisted record of the most recent readiness-gate
+ * (`runSolutioningGate`) evaluation at `POST /api/plans/:id/start`. Mirrors the
+ * `qaContractStatus` pattern: the verdict lived only in the response body
+ * before, so a blocked start (or a YOLO override) left no audit trail. The
+ * `scoreCheckouts` detector (E3-S3) reads this. ABSENT until the first start
+ * attempt.
+ */
+export interface PlanCheckoutGates extends GateResult {
+  /** True iff a YOLO/autopilot run started despite a BLOCKING verdict (E7-S1). */
+  bypassedByYolo: boolean;
+  /** ISO timestamp of the evaluation. */
+  evaluatedAt: string;
+}
 
 export interface Plan {
   planId: string;
@@ -149,6 +165,21 @@ export interface Plan {
    * prototype/legacy plans (no conceptPlan) — round-trip byte-identical.
    */
   conceptArtifacts?: ConceptArtifact[];
+  /**
+   * Pipeline v3 (E1-S2) — the PRD's functional-requirement ids (`FR1`, `FR2`, …)
+   * extracted deterministically from `concept/prd.md` when the PRD generator's
+   * output is applied (the daemon has the prose; the Lambda does not). This is
+   * the ground-truth coverage set the readiness gate checks each epic's
+   * `requirementRefs` against (`runSolutioningGate`, E9.2). ABSENT for
+   * prototype/legacy plans (no PRD) → the coverage branch is skipped, byte-
+   * identical to before. Refreshed on every PRD (re)generation.
+   */
+  prdRequirementIds?: string[];
+  /**
+   * Pipeline v3 (E1-S4) — the persisted readiness-gate verdict from the most
+   * recent Start-development attempt. See {@link PlanCheckoutGates}.
+   */
+  checkoutGates?: PlanCheckoutGates;
   /**
    * Concept v2 (E1.1): FK map from artifact kind → the most recent generator
    * AgentJob enqueued for it (prd-gen / ux-gen / arch-gen). Stamped by the

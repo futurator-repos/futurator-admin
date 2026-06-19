@@ -228,6 +228,66 @@ describe('buildPmPlanPrompt — references[] are gated on citableSections (E7.8)
   });
 });
 
+/**
+ * Pipeline v3 — E1-S1: the PM emits `requirementRefs` on each epic (the FR-
+ * coverage traceability spine) ONLY when planning from approved specs.
+ */
+describe('buildPmPlanPrompt — requirementRefs FR coverage (v3 E1-S1)', () => {
+  it('grounded plan instructs + shows requirementRefs in the example', () => {
+    const p = buildPmPlanPrompt({
+      ...baseArgs,
+      boilerplateType: 'nextjs-base',
+      rigor: 'production',
+      priorArtifacts: '## Functional Requirements\nFR1. A\nFR2. B',
+    });
+    expect(p).toContain('requirementRefs');
+    expect(p).toContain('traceability spine');
+    expect(p).toContain('"requirementRefs": ["FR1", "FR2"]');
+    expect(p).toContain('every PRD `FR` id appears in at least one epic');
+  });
+
+  it('intent-only plan (no PRD) omits requirementRefs from the example', () => {
+    const p = buildPmPlanPrompt({ ...baseArgs, boilerplateType: 'nextjs-base', rigor: 'mvp' });
+    expect(p).not.toContain('"requirementRefs": ["FR1", "FR2"]');
+  });
+});
+
+/**
+ * Pipeline v3 — E2-S1: the verbose planning essays were condensed to cut
+ * instruction tokens WITHOUT dropping any directive or validator-keyed phrase.
+ */
+describe('buildPmPlanPrompt — prose slimming preserves keyed text (v3 E2-S1)', () => {
+  const p = buildPmPlanPrompt({ ...baseArgs, boilerplateType: 'nextjs-base', rigor: 'mvp' });
+
+  it('keeps every validator-keyed / behavior-contract phrase', () => {
+    for (const keyed of [
+      'REJECTED at the', // touch-points hard rule (kept verbatim)
+      'your plan is REJECTED without it', // visual-coverage hard requirement
+      'needsBrowser: true',
+      'PROGRESSIVE FEATURE REGISTRATION',
+      'src/features/',
+      'primary: true',
+      'window.__harness',
+      "verify:'appearance'",
+      'idle-visible',
+      'POST-INTERACTION',
+      'appearance floor',
+      'never propose',
+      'scaffold from scratch',
+    ]) {
+      expect(p).toContain(keyed);
+    }
+  });
+
+  it('shorter than the pre-slim prompt (regression ceiling)', () => {
+    // The pre-E2-S1 mvp prompt for this fixture measured 21,958 chars; the slim
+    // version is 20,409 (~1.5k cut, ≈40% off the three condensed essays). This
+    // ceiling guards against the verbose essays creeping back. (Update only with
+    // a deliberate, measured change.)
+    expect(p.length).toBeLessThan(20800);
+  });
+});
+
 describe('buildPmPlanPrompt — {{CITABLE_SECTIONS}} placeholder (E5.1)', () => {
   it('mvp + expectsCitations, no inline sections → emits the daemon placeholder', () => {
     const p = buildPmPlanPrompt({

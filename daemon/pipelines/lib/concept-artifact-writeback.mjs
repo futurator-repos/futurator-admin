@@ -46,6 +46,25 @@ function sha256(text) {
 }
 
 /**
+ * Pipeline v3 (E1-S2) — deterministically extract the PRD's functional-
+ * requirement ids from its markdown. The PRD prompt numbers them `FR1.`,
+ * `FR2.`, … under `## Functional Requirements` (prd-gen-prompt.ts), so a plain
+ * `\bFR\d+\b` scan over the whole document is sufficient and order/dup-stable.
+ * Returns a unique, NUMERICALLY-sorted list (FR2 before FR10) — the gate only
+ * uses it for set membership, but a stable order keeps the persisted plan row
+ * diff-friendly. Mirror of the TS `extractRequirementIds`; the shared-fixture
+ * parity test guards against divergence.
+ *
+ * @param {string} markdown  the raw PRD markdown
+ * @returns {string[]}
+ */
+export function extractRequirementIds(markdown) {
+  const matches = String(markdown ?? '').match(/\bFR\d+\b/g) ?? [];
+  const unique = [...new Set(matches)];
+  return unique.sort((a, b) => Number(a.slice(2)) - Number(b.slice(2)));
+}
+
+/**
  * Mirror of TS `generateSectionManifest`: inject a `<!--§id-->` anchor above
  * every ATX heading (deduping collided slugs), compute 1-based inclusive line
  * ranges, and hash the ANNOTATED markdown. Returns `{ markdown, manifest }`.

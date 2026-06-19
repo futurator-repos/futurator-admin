@@ -52,17 +52,27 @@ this: **the swarm already exists** (E5 substrate is live), **E1 is small wiring 
 the one genuinely-new swarm is **E4's contract/test bench**. Inert stories cluster behind E4 and E1's
 `checkoutGates` field, not behind a planning swarm.
 
-| Wave  | Build now / order                                               | Gate to enter                                      |
-| ----- | --------------------------------------------------------------- | -------------------------------------------------- |
-| **0** | E1-S1, E1-S2, E1-S4, E2-S1, E3-S1, E3-S4, E7-S1                 | none — all real net-new/wiring on deployed code    |
-| **1** | E3-S3, E7-S2, E2-S2                                             | E1-S4 lands `plan.checkoutGates`                   |
-| **2** | E4-S1 → E4-S2 → E4-S3 → E4-S4 → E4-S5 (the contract/test bench) | wave 0; mind the pacman1 commit-staging invariant  |
-| **3** | E3-S2, E5-S1, E5-S2, E6-S1, E6-S2                               | E4 bench/swarm exists to harvest + scope           |
-| spike | E8-S1, E1-S3 (conformance)                                      | E4/E8 introduce a contractSurface + planning swarm |
-| —     | ~~E5-S3~~ **DROPPED** (already shipped)                         | —                                                  |
+| Wave  | Build now / order                                                           | Gate to enter                                      |
+| ----- | --------------------------------------------------------------------------- | -------------------------------------------------- |
+| **0** | ✅ **BUILT (2026-06-19)** — E1-S1, E1-S2, E1-S4, E2-S1, E3-S1, E3-S4, E7-S1 | none — all real net-new/wiring on deployed code    |
+| **1** | E3-S3, E7-S2, E2-S2                                                         | E1-S4 lands `plan.checkoutGates`                   |
+| **2** | E4-S1 → E4-S2 → E4-S3 → E4-S4 → E4-S5 (the contract/test bench)             | wave 0; mind the pacman1 commit-staging invariant  |
+| **3** | E3-S2, E5-S1, E5-S2, E6-S1, E6-S2                                           | E4 bench/swarm exists to harvest + scope           |
+| spike | E8-S1, E1-S3 (conformance)                                                  | E4/E8 introduce a contractSurface + planning swarm |
+| —     | ~~E5-S3~~ **DROPPED** (already shipped)                                     | —                                                  |
 
 **Recommended first PR = Wave 0.** It is entirely additive on shipped code, unblocks waves 1–3, and
 needs no new infrastructure.
+
+> **Wave 0 shipped (2026-06-19).** All seven stories built additively on the deployed code, +365/−100
+> across 8 source files + 4 test files, 88 tests green, no new type errors or regressions (the 5 failing
+> tests in `epic-dev-pipeline`/`concept-chain-e2e` pre-date this work on `feat/pipeline-v3`). Highlights:
+> E1-S1 PM emits `requirementRefs` (grounded plans only); E1-S2 daemon extracts PRD `FR` ids →
+> `plan.prdRequirementIds` → live `runSolutioningGate` coverage; E1-S4 persists the verdict as
+> `plan.checkoutGates`; E7-S1 YOLO bypasses the block at the call site (verdict still recorded,
+> `bypassedByYolo`); E2-S1 condensed the three prose essays (~1.5k chars, ≈40% off the essays);
+> E3-S1 `lint-verify→compile`/`lint-fix→fix`; E3-S4 `@workflow-kind: planning` linter profile.
+> **Wave 1 next** (E3-S3 `scoreCheckouts`, E7-S2 bypass-stamping) now that `plan.checkoutGates` exists.
 
 ---
 

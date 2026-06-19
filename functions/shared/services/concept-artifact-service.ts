@@ -93,6 +93,29 @@ export function artifactSourceFromJob(job: AgentJob, kind: ArtifactKind): Artifa
 }
 
 /**
+ * Pipeline v3 (E1-S2) — read the PRD's functional-requirement ids off a
+ * COMPLETED prd-gen job. The daemon write-back stamps `PRD_REQUIREMENT_IDS`
+ * (a JSON string array) as a small, persisted job variable when it lands
+ * `prd.md` (the raw prose is transient-stripped, so this is the only surviving
+ * carrier). The apply callers persist the result onto `plan.prdRequirementIds`
+ * so the Lambda readiness gate has ground truth without reading EC2 disk.
+ * Returns undefined when the variable is absent (legacy job / non-PRD).
+ */
+export function requirementIdsFromJob(job: AgentJob): string[] | undefined {
+  const raw = job.variables?.PRD_REQUIREMENT_IDS;
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
+      return parsed as string[];
+    }
+  } catch {
+    // Malformed carrier — treat as absent; coverage just won't be enforced.
+  }
+  return undefined;
+}
+
+/**
  * Resolve the source into a validated manifest. Throws on empty / no-sections.
  * - `manifest` path: trust the on-disk sidecar's contentHash verbatim.
  * - `rawMarkdown` path: build the manifest once (annotate raw), matching the

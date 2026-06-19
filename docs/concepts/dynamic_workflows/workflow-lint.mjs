@@ -25,6 +25,12 @@ import { readFileSync } from "node:fs";
 
 // ———————————————————————————————————————————— config
 const VERIFICATION_ROLES = ["test-author", "qa", "property-tests", "compile-gate"];
+// v3 E3-S4 — a PLANNING workflow (epic-breakdown → per-epic swarm → assembly)
+// has no code to compile or test; its "verification" is the deterministic
+// checkout gate (spec-coverage / collision / acyclicity) and its durable
+// checkpoint is persisting the plan to DynamoDB, not a git commit. A planning
+// script opts into this profile with a `// @workflow-kind: planning` header.
+const PLANNING_VERIFICATION_ROLES = ["checkout-gate", "assembly-gate", "coverage-gate"];
 const ADVERSARIAL_ROLES = ["refuter"];
 const GATE_ROLES = ["refuter", "compile-gate", "merge-gate"];
 const VISUAL_TOUCHPOINT_RE =
@@ -60,6 +66,18 @@ if (files[1]) {
 
 // strip comments/strings copies for some checks, keep raw for others
 const noComments = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+// v3 E3-S4 — workflow kind selects the invariant profile. Default 'dev'
+// (code-bearing: needs a compile/test verification + a git checkpoint).
+// 'planning' swaps in the checkout-gate-as-verification + DDB-persist-as-
+// checkpoint rules below.
+const isPlanning = /^\s*\/\/\s*@workflow-kind:\s*planning\b/m.test(src);
+const workflowKind = isPlanning ? "planning" : "dev";
+// The roles that satisfy the "chain must end in verification" invariant (C1),
+// widened for planning workflows.
+const ACCEPTED_VERIFICATION_ROLES = isPlanning
+  ? [...VERIFICATION_ROLES, ...PLANNING_VERIFICATION_ROLES]
+  : VERIFICATION_ROLES;
 
 // ———————————————————————————————————————————— helpers
 const findings = [];
@@ -98,11 +116,12 @@ if (/^\s*\/\/\s*@workflow-invariants:\s*v1/m.test(src)) {
   fail("C0", "missing '// @workflow-invariants: v1' header — SKILL.md was not applied");
 }
 
-// C1 · I1 verification phase exists at all
-if (VERIFICATION_ROLES.some(has)) {
-  pass("C1", `verification phase present (${VERIFICATION_ROLES.filter(has).join(", ")})`);
+// C1 · I1 verification phase exists at all (kind-aware — planning workflows
+// verify via the deterministic checkout gate, not a compile/test role).
+if (ACCEPTED_VERIFICATION_ROLES.some(has)) {
+  pass("C1", `verification phase present (${ACCEPTED_VERIFICATION_ROLES.filter(has).join(", ")})`);
 } else {
-  fail("C1", `no verification role found — every chain must end in one of: ${VERIFICATION_ROLES.join(", ")}`);
+  fail("C1", `no verification role found — every ${workflowKind} chain must end in one of: ${ACCEPTED_VERIFICATION_ROLES.join(", ")}`);
 }
 
 // C2 · I2 visual touch-points → vqa role (plan-aware; degrades to script-only hint)
@@ -187,9 +206,19 @@ const hits = FORBIDDEN.filter(([re]) => re.test(noComments)).map(([, label]) => 
 if (hits.length) fail("C7", `forbidden operations: ${hits.join("; ")} (I9)`);
 else pass("C7", "no forbidden git/fs operations detected");
 
-// C8 · I8 durable checkpoints
-if (/\bcheckpoint\s*\(/.test(noComments) || /git\s+commit/.test(noComments)) {
+// C8 · I8 durable checkpoints (kind-aware). A planning workflow produces no
+// git artifact — its durable output is the plan persisted to DynamoDB, so
+// `updatePlanFields`/`applyPlanOutput`/`putPlan`/`persistPlan` (or a raw
+// PutItem) counts as the checkpoint.
+const PLAN_PERSIST_RE = /\b(updatePlanFields|applyPlanOutput|persistPlan|putPlan|savePlan|PutItemCommand|putItem)\s*\(/;
+const hasCheckpoint = /\bcheckpoint\s*\(/.test(noComments) || /git\s+commit/.test(noComments);
+const hasPlanPersist = isPlanning && PLAN_PERSIST_RE.test(noComments);
+if (hasCheckpoint) {
   pass("C8", "checkpointing present (checkpoint() or git commit)");
+} else if (hasPlanPersist) {
+  pass("C8", "planning workflow persists the plan to DynamoDB (durable checkpoint)");
+} else if (isPlanning) {
+  fail("C8", "planning workflow has no plan-persistence call (updatePlanFields/applyPlanOutput/putPlan) — the assembled plan must survive instance death (I8)");
 } else {
   fail("C8", "no checkpoint()/git commit found — completed work must survive instance death (I8)");
 }
@@ -209,6 +238,7 @@ if (hasFixer || /resolv/i.test(noComments)) {
 const result = {
   script: files[0],
   plan: files[1] || null,
+  workflowKind,
   rolesDeclared: [...declaredRoles].sort(),
   passed: ok,
   violations: findings,
@@ -219,7 +249,7 @@ if (jsonMode) {
   console.log(JSON.stringify(result, null, 2));
 } else {
   const W = (s) => s.padEnd(4);
-  console.log(`\nworkflow-lint · ${result.script}`);
+  console.log(`\nworkflow-lint · ${result.script}  [kind: ${workflowKind}]`);
   console.log(`roles: ${result.rolesDeclared.join(", ") || "(none found — check structural conventions)"}\n`);
   for (const p of ok) console.log(`  ✓ ${W(p.id)} ${p.msg}`);
   for (const f of findings) console.log(`  ✗ ${W(f.id)} ${f.msg}`);
