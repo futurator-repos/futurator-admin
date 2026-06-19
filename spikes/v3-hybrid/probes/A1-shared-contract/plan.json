@@ -1,0 +1,35 @@
+{
+  "feature": "a cart total calculator split across a producer and a consumer module that SHARE a contract",
+  "_note": "Deliberately ambiguous shared contract, mirroring the destroyedIds/destroyedBrickIds incident. The producer returns an object; the consumer reads a field on it. The prose never fixes the exact field name, so blind dev must GUESS — the drift surface.",
+  "sharedType": "LineItemResult",
+  "ambiguousField": "the per-item subtotal (could plausibly be named subtotal | lineTotal | amount | total)",
+  "_ambiguity_note": "The field name is described BEHAVIOURALLY only — the prose deliberately never states the identifier, mirroring the incident's 'list of destroyed brick ids'. Each agent must INVENT a name; drift occurs when producer and consumer invent different ones.",
+  "stories": [
+    {
+      "id": "producer-lineitem",
+      "title": "Line-item pricer (producer)",
+      "file": "src/lineItem.ts",
+      "contract": "Exports `priceLineItem(unitPrice: number, qty: number): LineItemResult` where LineItemResult is an object carrying, in numeric fields, the money charged for the whole line (unit price times quantity) and the quantity ordered. Also export the `LineItemResult` type. Throw RangeError on negative inputs.",
+      "acs": [
+        "priceLineItem(2.5, 4) returns an object holding the line's total money charged as 10 and the quantity as 4",
+        "priceLineItem(-1, 2) throws a RangeError",
+        "the LineItemResult type is exported so other modules can import it"
+      ]
+    },
+    {
+      "id": "consumer-cart",
+      "title": "Cart summer (consumer)",
+      "file": "src/cart.ts",
+      "contract": "Exports `cartTotal(items: LineItemResult[]): number` which adds up, across all items, the money charged for each line and returns the cart total. Import the `LineItemResult` type from the producer module ./lineItem and read the per-line money-charged field off each item.",
+      "acs": [
+        "cartTotal([priceLineItem(2.5,4), priceLineItem(3,2)]) returns 16",
+        "cartTotal([]) returns 0",
+        "cart.ts imports LineItemResult from ./lineItem and reads each item's per-line money-charged field"
+      ]
+    }
+  ],
+  "stub": {
+    "file": "src/lineItem.d.ts",
+    "content": "export interface LineItemResult { subtotal: number; qty: number }\nexport function priceLineItem(unitPrice: number, qty: number): LineItemResult;\n"
+  }
+}
