@@ -1,8 +1,17 @@
 # Pipeline v3 — Concept→Dev Bridge: Implementation Plan (Option A)
 
-Status: **IMPLEMENTATION PLAN (2026-06-19)** · evidence: `spike-test-results.md` §2b/§2c.
-Branch base: `feat/v3-spike-test-plan` (rebase on `main` first — main has the pacman4
-lint↔tamper deadlock fix `5f497c0`).
+Status: **SUPERSEDED on scope by `concept-dev-bridge-epics.md` (RECONCILED 2026-06-19)** · evidence:
+`spike-test-results.md` §2b/§2c.
+Branch base: `feat/pipeline-v3` (already off `main`, which has the pacman4 deadlock fix `5f497c0`).
+
+> ⚠ **Read the reconciliation first.** A 16-agent audit (`v3-epic-reconcile-audit`) matched this plan
+> against the **deployed** codebase and found it over-scopes: the proposed standalone `checkout-gates.ts`
+> is **not built** — acyclicity already throws (`computePlanWaves`), collision is already resolved
+> (`computeStoryWavesWithTouchPoints`), and coverage already lives (dormant) in `runSolutioningGate`. E1
+> is therefore **wiring + persistence on the existing gate**, not a new gate file. The build spec of
+> record is now `concept-dev-bridge-epics.md`'s per-story verdict map; this doc's _evidence basis_ and
+> _rationale_ (below) still stand — its _file-level "create X" instructions_ are superseded where they
+> conflict with the reconciled epics.
 
 > **Why Option A.** The heavy-output A/B (`spike-test-results.md` §2c) showed the planning
 > swarm is **not a proven speed win** (290.9s vs 135.1s single-shot; identical AC-throughput
