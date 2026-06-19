@@ -1362,3 +1362,187 @@ describe('C1 — compile-knowledge-commit (compiler output ships)', () => {
     }
   });
 });
+
+/**
+ * pacman4 deadlock fix (2026-06-19) — a lint/parse error INSIDE a test file
+ * is an unbreakable loop: lint-verify catches it → routes to lint-fix (DEV) →
+ * DEV edits the test file → tamper-check reverts the edit and fails →
+ * lint-verify catches it again … until retries exhaust. The collision story
+ * `it('returns X when pac-man's tile …')` (apostrophe closing a single-quoted
+ * string) hit exactly this. Three coordinated changes break it:
+ *   A. stage-test-files lint-validates the authored test files and loops any
+ *      failure back to test-fix-author (the contract owner), never DEV.
+ *   A'. lint-verify drops tamper-frozen test files from its per-story set.
+ *   B. test-verify propagates the runner's real exit code (was always 0).
+ */
+describe('pacman4 — test-file lint deadlock fix', () => {
+  function steps(rigor: 'prototype' | 'mvp' | 'production' = 'mvp') {
+    return generateStoryPipeline(story, 'Test Epic', workingDir, { rigor }).steps as Array<{
+      id: string;
+      agentId?: string;
+      resumeFromStep?: string;
+      loopTo?: string;
+      prompt?: string;
+      command?: string;
+      expectExitCode?: number;
+      onFail?: { action: string; injectAs?: string };
+      extractors?: Record<string, unknown>;
+    }>;
+  }
+  const stage = (rigor: 'mvp' | 'production' = 'mvp') =>
+    steps(rigor).find((s) => s.id === 'stage-test-files')!;
+
+  // ── A: stage-test-files lint-validates the contract before freezing it ──
+  it('stage-test-files runs eslint --fix on the authored test files (flat-config guarded)', () => {
+    const cmd = stage().command!;
+    expect(cmd).toContain('[ -f eslint.config.mjs ]');
+    expect(cmd).toContain('xargs -0 npx eslint --fix');
+    expect(cmd).toContain('TEST_AUTHOR_LINT_FAILED');
+  });
+
+  it('stage-test-files is now a hard gate that loops to test-fix-author', () => {
+    const s = stage();
+    expect(s.expectExitCode).toBe(0);
+    expect(s.onFail?.action).toBe('fail');
+    expect(s.onFail?.injectAs).toBe('TEST_LINT_ERROR');
+    expect(s.loopTo).toBe('test-fix-author');
+  });
+
+  it('preserves the no-test-files skip (exit 0) so non-test stories never loop', () => {
+    expect(stage().command!).toContain('STAGE_TEST_FILES_SKIPPED');
+  });
+
+  it('stage-test-files shell is valid bash at mvp + production', () => {
+    for (const rigor of ['mvp', 'production'] as const) {
+      const cmd = stage(rigor).command!;
+      expect(() => execSync(`bash -n -c ${JSON.stringify(cmd)}`, { stdio: 'pipe' })).not.toThrow();
+    }
+  });
+
+  // ── A: the fixer is the TEST agent, not DEV (DEV may never touch tests) ──
+  it('test-fix-author resumes the TEST session and carries the eslint error', () => {
+    const fix = steps().find((s) => s.id === 'test-fix-author');
+    expect(fix).toBeDefined();
+    expect(fix!.agentId).toBe('TEST');
+    expect(fix!.resumeFromStep).toBe('test-author');
+    expect(fix!.prompt).toContain('{{TEST_LINT_ERROR}}');
+    // Teaches the exact pacman4 failure + re-emits the contract for re-staging.
+    expect(fix!.prompt).toMatch(/apostrophe[\s\S]*single-quoted/i);
+    expect(fix!.prompt).toContain('---TEST_FILES---');
+    expect(fix!.extractors).toHaveProperty('TEST_FILES');
+  });
+
+  it('test-fix-author is loop-only and present only at mvp+ (with stage-test-files)', () => {
+    expect(steps('prototype').find((s) => s.id === 'test-fix-author')).toBeUndefined();
+    const ids = new Set(steps().map((s) => s.id));
+    // every loopTo target resolves to a real step (incl. the new one)
+    for (const t of steps()
+      .map((s) => s.loopTo)
+      .filter(Boolean)) {
+      expect(ids.has(t as string)).toBe(true);
+    }
+    expect(ids.has('test-fix-author')).toBe(true);
+  });
+
+  // ── A': lint-verify no longer lints tamper-frozen test files ──
+  it('lint-verify excludes test/spec/__tests__/e2e/tests from its per-story set', () => {
+    const cmd = steps().find((s) => s.id === 'lint-verify')!.command!;
+    expect(cmd).toContain("grep -vE '\\.(test|spec)\\.[jt]sx?$|(^|/)__tests__/|^e2e/|^tests/'");
+  });
+
+  // ── B: test-verify propagates the runner exit code ──
+  it('test-verify captures the runner status and exits with it (no `|| true` swallow)', () => {
+    const cmd = steps().find((s) => s.id === 'test-verify')!.command!;
+    expect(cmd).toContain('RC=0');
+    expect(cmd).toContain('|| RC=$?');
+    expect(cmd).toMatch(/exit \$RC$/);
+    // PR-40 contract preserved: vitest --changed with npm test fallback.
+    expect(cmd).toContain('npx vitest run --changed HEAD~1');
+    expect(cmd).toContain('|| npm test');
+    // The exact bug shape — a trailing `tail … || true` — must be gone.
+    expect(cmd).not.toMatch(/tail -80 \/tmp\/test-verify\.log \|\| true/);
+  });
+
+  it('behavioral: the RC-propagation pattern returns non-zero when the runner fails', () => {
+    // Mirror the test-verify shape with `false` standing in for a failing run.
+    const fail = `RC=0; ( false > /tmp/tv.log 2>&1 || false > /tmp/tv.log 2>&1 ) || RC=$?; : ; exit $RC`;
+    let code = 0;
+    try {
+      execSync(fail, { shell: '/bin/bash', stdio: 'pipe' });
+    } catch (e) {
+      code = (e as { status?: number }).status ?? 0;
+    }
+    expect(code).not.toBe(0);
+    // …and zero when either path passes.
+    expect(() =>
+      execSync(`RC=0; ( false || true ) || RC=$?; exit $RC`, { shell: '/bin/bash', stdio: 'pipe' }),
+    ).not.toThrow();
+  });
+
+  // ── End-to-end: the exact pacman4 trigger now fails at the contract author,
+  //    not in a tamper loop; the corrected file lints clean and gets staged. ──
+  it('behavioral: apostrophe-in-single-quote test file fails stage-test-files, double-quote passes + stages', () => {
+    // Host inside node_modules/.cache so `npx eslint` resolves the repo's local
+    // eslint instantly (same trick as the lint-verify behavioral test).
+    mkdirSync(join(process.cwd(), 'node_modules', '.cache'), { recursive: true });
+    const dir = mkdtempSync(join(process.cwd(), 'node_modules', '.cache', 'pacman4-stage-'));
+    try {
+      execSync(
+        'git init -q && git -c user.email=t@t.local -c user.name=T commit --allow-empty -q -m base',
+        { cwd: dir, shell: '/bin/bash' },
+      );
+      writeFileSync(
+        join(dir, 'eslint.config.mjs'),
+        'export default [{ files: ["**/*.js"], languageOptions: { ecmaVersion: 2022, sourceType: "module" } }];\n',
+      );
+      mkdirSync(join(dir, 'src', '__tests__'), { recursive: true });
+      const testPath = 'src/__tests__/collision.test.js';
+
+      const rawCmd = (
+        generateStoryPipeline(story, 'Test Epic', dir, { rigor: 'mvp' }).steps.find(
+          (s) => s.id === 'stage-test-files',
+        ) as { command: string }
+      ).command;
+      // Substitute the {{TEST_FILES}} placeholder the daemon fills at runtime.
+      const cmd = rawCmd.replace(
+        '{{TEST_FILES}}',
+        `---TEST_FILES---\n${testPath}\n---END_TEST_FILES---`,
+      );
+
+      // (1) The pacman4 defect: the apostrophe in pac-man's closes the string.
+      writeFileSync(
+        join(dir, testPath),
+        `it('returns dot when pac-man's tile has a dot', () => {});\n`,
+      );
+      let failed = false;
+      let out = '';
+      try {
+        execSync(cmd, { cwd: dir, shell: '/bin/bash', stdio: 'pipe' });
+      } catch (e) {
+        failed = true;
+        out =
+          String((e as { stdout?: Buffer }).stdout ?? '') +
+          String((e as { stderr?: Buffer }).stderr ?? '');
+      }
+      expect(failed).toBe(true);
+      expect(out).toContain('TEST_AUTHOR_LINT_FAILED');
+      // The broken file was NOT staged (never became a baseline).
+      expect(
+        execSync('git diff --cached --name-only', { cwd: dir, encoding: 'utf8' }),
+      ).not.toContain(testPath);
+
+      // (2) test-author's fix (double quotes) lints clean → stages → exit 0.
+      writeFileSync(
+        join(dir, testPath),
+        `it("returns dot when pac-man's tile has a dot", () => {});\n`,
+      );
+      const ok = execSync(cmd, { cwd: dir, shell: '/bin/bash', encoding: 'utf8' });
+      expect(ok).toContain('STAGE_TEST_FILES_OK');
+      expect(execSync('git diff --cached --name-only', { cwd: dir, encoding: 'utf8' })).toContain(
+        testPath,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
