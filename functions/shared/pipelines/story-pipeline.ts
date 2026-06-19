@@ -522,6 +522,30 @@ can never verify them.`,
                 `  echo 'STAGE_TEST_FILES_SKIPPED: no test files extracted (test-author EARLY-EXIT or empty TEST_FILES)'; ` +
                 `  exit 0; ` +
                 `fi; ` +
+                // pacman4 deadlock fix (2026-06-19) — VALIDATE the authored test
+                // files BEFORE they become the tamper baseline. They are the
+                // contract, owned by test-author; a lint/parse error inside one
+                // cannot be repaired by DEV (tamper-check reverts any DEV edit to
+                // a test file), so lint-verify→lint-fix would deadlock forever
+                // (the pacman4 collision story: `it('pac-man's …')` — apostrophe
+                // in a single-quoted string — looped lint-fix→tamper-revert until
+                // retries exhausted). `eslint --fix` folds auto-fixables into the
+                // staged blob; any REMAINING error exits 1 and loops back to
+                // `test-fix-author` (resumeFromStep: test-author) so the contract
+                // owner — never DEV — repairs its own files. Lint only the test
+                // files that exist on disk; brownfield apps without a flat config
+                // skip the check and just stage (legacy behaviour).
+                `EXIST=$(mktemp); ` +
+                `while IFS= read -r f; do [ -n "$f" ] && [ -f "$f" ] && echo "$f"; done < /tmp/tamper-expected.txt > "$EXIST"; ` +
+                `if [ -s "$EXIST" ] && [ -f eslint.config.mjs ]; then ` +
+                `  LINT_RC=0; ` +
+                `  tr '\\n' '\\0' < "$EXIST" | xargs -0 npx eslint --fix > /tmp/stage-test-lint.log 2>&1 || LINT_RC=$?; ` +
+                `  if [ "$LINT_RC" -ne 0 ]; then ` +
+                `    echo 'TEST_AUTHOR_LINT_FAILED — authored test files do not lint/parse. They are the contract; DEV may not edit test files (tamper-check reverts them), so test-author must fix its own files:'; ` +
+                `    tail -80 /tmp/stage-test-lint.log; ` +
+                `    exit 1; ` +
+                `  fi; ` +
+                `fi; ` +
                 `STAGED=0; SKIPPED=0; ` +
                 `while IFS= read -r f; do ` +
                 `  if [ -n "$f" ] && [ -f "$f" ]; then ` +
@@ -530,9 +554,60 @@ can never verify them.`,
                 `  fi; ` +
                 `done < /tmp/tamper-expected.txt; ` +
                 `echo "STAGE_TEST_FILES_OK staged=$STAGED skipped=$SKIPPED"`,
-              timeout: 15000,
+              timeout: 60000,
               captureAs: 'STAGE_TEST_FILES_OUTPUT',
-              onFail: { action: 'continue' as const },
+              expectExitCode: 0,
+              // Hard gate WITH a loop: a lint failure routes to test-fix-author
+              // (the contract owner) and re-checks; if still failing after the
+              // fix loop the daemon fails the job (story retry is the backstop).
+              onFail: { action: 'fail' as const, injectAs: 'TEST_LINT_ERROR' },
+              loopTo: 'test-fix-author',
+            },
+            // pacman4 deadlock fix (2026-06-19) — loop-only fixer for the
+            // stage-test-files lint gate. Runs ONLY as the loopTo target
+            // (skipped in linear flow, daemon collects loopTargetIds). Resumes
+            // the TEST session so it fixes the SAME files it authored, carrying
+            // the captured eslint error. Mirrors the lint-fix/test-fix pattern
+            // but stays on the TEST agent — DEV must never touch test files.
+            {
+              id: 'test-fix-author',
+              agentId: 'TEST',
+              resumeFromStep: 'test-author',
+              prompt: `The test files you authored for story ${story.storyId} FAILED lint/parse validation (attempt {{ITERATION}} of {{MAX_ITERATIONS}}) — so they cannot become the test contract.
+
+This is the \`eslint --fix\` output for YOUR test files. Auto-fixable problems were already repaired; everything below is a real error you must fix:
+
+{{TEST_LINT_ERROR}}
+
+Fix every error in the test files you authored, then re-emit the file list so the contract is re-staged.
+- These are usually parse/syntax errors. The most common: an apostrophe inside a SINGLE-quoted string, e.g. \`it('returns X when pac-man's tile …')\` — the \`'\` closes the string early. Switch that \`it(...)\` description to DOUBLE quotes (\`it("…pac-man's…")\`) or escape the apostrophe.
+- Other common causes: an unused import/variable, or a type-only import not using \`import type\`.
+- Do NOT add \`eslint-disable\` comments and do NOT edit \`eslint.config.*\` — suppressing a rule is not a fix.
+- Do NOT weaken or delete assertions; only fix what makes the file fail to lint/parse.
+- Edit ONLY the test files. Do not write implementation code.
+
+Re-emit the authored test file list (REQUIRED — the pipeline re-stages exactly these):
+
+---TEST_FILES---
+[the test file paths you fixed]
+---END_TEST_FILES---
+
+---WORK_SUMMARY---
+[what you fixed]
+---END_WORK_SUMMARY---`,
+              extractors: {
+                TEST_FILES: {
+                  type: 'between' as const,
+                  startDelimiter: '---TEST_FILES---',
+                  endDelimiter: '---END_TEST_FILES---',
+                },
+                WORK_SUMMARY: {
+                  type: 'between' as const,
+                  startDelimiter: '---WORK_SUMMARY---',
+                  endDelimiter: '---END_WORK_SUMMARY---',
+                },
+              },
+              validations: [],
             },
           ] as unknown as PipelineStep[])
         : ([] as PipelineStep[])),
@@ -793,11 +868,22 @@ Write ONE visual test per needs_browser=true criterion. The text in
             {
               id: 'test-verify',
               stepType: 'shell' as const,
+              // pacman4 fix (2026-06-19) — propagate the runner's exit code.
+              // The previous form ended `; tail -80 … || true`, so the step's
+              // exit code was always `tail`'s 0: the daemon decides pass/fail
+              // purely on exit code (agent-daemon.mjs `passed = code ===
+              // expectCode`), so the gate could NEVER fail and `loopTo:
+              // test-fix` never fired — a non-parsing / failing suite shipped
+              // green. Capture the real status in RC and `exit $RC` after the
+              // tail. The `( vitest --changed || npm test )` fallback is
+              // preserved: RC reflects the subshell (0 if either path passes).
               command:
                 `cd ${workingDir} && ` +
-                `(npx vitest run --changed HEAD~1 --silent > /tmp/test-verify.log 2>&1 || ` +
-                `npm test --silent > /tmp/test-verify.log 2>&1); ` +
-                `tail -80 /tmp/test-verify.log || true`,
+                `RC=0; ` +
+                `( npx vitest run --changed HEAD~1 --silent > /tmp/test-verify.log 2>&1 || ` +
+                `npm test --silent > /tmp/test-verify.log 2>&1 ) || RC=$?; ` +
+                `tail -80 /tmp/test-verify.log; ` +
+                `exit $RC`,
               timeout: 180000,
               captureAs: 'TEST_VERIFY_OUTPUT',
               expectExitCode: 0,
@@ -865,6 +951,17 @@ Write ONE visual test per needs_browser=true criterion. The text in
                 `  FINAL=$(mktemp); ` +
                 `  grep -E '\\.(ts|tsx|js|jsx|mjs|cjs)$' "$LINT_LIST" 2>/dev/null ` +
                 `    | grep -vE '^(node_modules/|\\.pipeline/|\\.mycelium/|knowledge/|\\.context/)' ` +
+                // pacman4 deadlock fix (2026-06-19) — DROP tamper-frozen test
+                // files from the per-story lint set. They are the contract,
+                // authored by test-author and frozen by stage-test-files; DEV/
+                // lint-fix is forbidden from editing them (tamper-check reverts
+                // any edit). Linting them HERE meant a lint error inside a test
+                // file routed to lint-fix → DEV edited it → tamper-check reverted
+                // it and failed → unbreakable loop (the pacman4 collision story).
+                // Test files are lint-validated at stage-test-files instead, where
+                // the failure loops back to their author. Same path-shape as the
+                // tamper regex (+ __tests__/).
+                `    | grep -vE '\\.(test|spec)\\.[jt]sx?$|(^|/)__tests__/|^e2e/|^tests/' ` +
                 `    | sort -u | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done > "$FINAL" 2>/dev/null || true; ` +
                 `  if [ -s "$FINAL" ]; then ` +
                 // null-delimited xargs: portable across GNU + BSD (`xargs -a -d`
