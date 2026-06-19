@@ -227,6 +227,41 @@ function scoreQc6(ctx: DetectorContext, report: QaReport | null): ScorecardSlice
   const id = 'Q-C6';
   const ieIds = CRITERIA_META[id].ieLink; // ['IE14']
   const fixIds = mapIeToFixes('IE14'); // F12 (open)
+  // STUCK_CAPTURE wiring (2026-06-19) — authoritative path: the qa-prepare
+  // evidence-integrity summary (sidecar → qa-report.vqa.evidenceIntegrity) now
+  // carries the byte-diversity signal. This closes the [needs-instrumentation]
+  // gap: we can red an all-identical / wrong-surface capture (pacman2), not just
+  // a missing one. Full red = the capture gate failed, OR <50% usable, OR frames
+  // are stuck (most share one content hash).
+  const ei = report?.vqa.evidenceIntegrity;
+  if (ei) {
+    const eiEvidence: EvidenceRef = { kind: 'report', ref: 'qa-report.vqa.evidenceIntegrity' };
+    let score: ScorecardSlice['score'];
+    let verdict: Verdict;
+    if (ei.integrityFailed || ei.ratio < 0.5 || ei.stuckCapture) {
+      score = 0;
+      verdict = '🔴';
+    } else if (ei.ratio >= 0.95) {
+      score = 4;
+      verdict = '🟢';
+    } else {
+      score = 2;
+      verdict = '🟡';
+    }
+    const diversity = ei.stuckCapture
+      ? `STUCK: ${Math.round((ei.dominantRatio ?? 0) * 100)}% of frames identical (wrong/idle surface — not a real capture)`
+      : `distinct frames=${ei.distinctHashes ?? '?'}`;
+    return qaSlice(id, {
+      score,
+      verdict,
+      value: Number(ei.ratio.toFixed(3)),
+      evidence: eiEvidence,
+      ieIds,
+      fixIds,
+      note: `${ei.captured}/${ei.authored} usable frames (ratio=${ei.ratio.toFixed(2)}); ${diversity}`,
+    });
+  }
+
   const evidence: EvidenceRef = { kind: 'report', ref: 'qa-report.vqa.results[].status' };
 
   const results: VqaTestResult[] = report?.vqa.results ?? [];

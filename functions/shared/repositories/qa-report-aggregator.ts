@@ -36,6 +36,7 @@ import type {
   QaRunPanel,
   QaRunSummary,
   VqaExecuteStatus,
+  VqaEvidenceIntegrity,
   VqaRollup,
   VqaTestLevel,
   VqaTestResult,
@@ -252,6 +253,31 @@ function parseScreenshotsBlock(raw: string | undefined): Array<{ id: string; url
     if (m) out.push({ id: m[1], url: m[2] });
   }
   return out;
+}
+
+/**
+ * STUCK_CAPTURE wiring (2026-06-19) — parse the qa-report's
+ * `EVIDENCE_INTEGRITY_JSON` variable (the compact evidence-integrity summary)
+ * into the typed rollup field. Returns undefined on absent/malformed input so a
+ * missing signal degrades to "no evidence-integrity data", never a fabricated one.
+ */
+function parseEvidenceIntegrity(raw: string | undefined): VqaEvidenceIntegrity | undefined {
+  if (!raw) return undefined;
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof o.captured !== 'number' || typeof o.authored !== 'number') return undefined;
+    return {
+      captured: o.captured,
+      authored: o.authored,
+      ratio: typeof o.ratio === 'number' ? o.ratio : o.captured / Math.max(1, o.authored),
+      integrityFailed: !!o.integrityFailed,
+      stuckCapture: !!o.stuckCapture,
+      dominantRatio: typeof o.dominantRatio === 'number' ? o.dominantRatio : undefined,
+      distinctHashes: typeof o.distinctHashes === 'number' ? o.distinctHashes : undefined,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function parseFailedTestsBlock(raw: string | undefined): string[] {
@@ -613,6 +639,11 @@ function buildVqaRollup(
   let overviewUrl: string | undefined;
   let runCostUsd: number | undefined;
   let runWallclockSec: number | undefined;
+  // STUCK_CAPTURE wiring (2026-06-19) — the qa-prepare evidence-integrity
+  // summary, surfaced by qa-report as EVIDENCE_INTEGRITY_JSON. Lets the UI and
+  // the Plan Retrospect Q-C6 detector grade byte-diversity (all-identical / wrong
+  // surface), not just the missing-frame ratio.
+  let evidenceIntegrity: VqaEvidenceIntegrity | undefined;
 
   // ── QA-A (pong1 2026-06-12) — single-count rework ───────────────────
   // The old loop iterated PER EPIC and resolved the qa job inside it. With
@@ -674,6 +705,9 @@ function buildVqaRollup(
     if (!overviewUrl && vars.OVERVIEW_URL) overviewUrl = vars.OVERVIEW_URL;
     if (vars.COST_USD) runCostUsd = (runCostUsd ?? 0) + Number(vars.COST_USD);
     if (vars.WALLCLOCK_SEC) runWallclockSec = (runWallclockSec ?? 0) + Number(vars.WALLCLOCK_SEC);
+    if (!evidenceIntegrity && vars.EVIDENCE_INTEGRITY_JSON) {
+      evidenceIntegrity = parseEvidenceIntegrity(vars.EVIDENCE_INTEGRITY_JSON);
+    }
 
     // PR-8 path: TEST_RESULTS JSON contains everything.
     const testResults = parseTestResultsBlock(vars.TEST_RESULTS);
@@ -817,6 +851,7 @@ function buildVqaRollup(
     errored: errored || undefined,
     accepted: accepted || undefined,
     overviewUrl,
+    evidenceIntegrity,
     thumbnails: thumbnails.slice(0, 6),
     failures,
     results: allResults,

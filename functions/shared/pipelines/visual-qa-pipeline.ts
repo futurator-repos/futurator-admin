@@ -1048,6 +1048,13 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `node -e "$(cat <<'NODE_EOF'`,
           `const fs = require('fs');`,
           `function load(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return []; } }`,
+          // STUCK_CAPTURE wiring (2026-06-19) — surface the evidence-integrity
+          // sidecar (written by qa-prepare: captured/ratio/stuckCapture/
+          // dominantRatio/distinctHashes) into a job variable so the qa-report
+          // aggregator + the Plan Retrospect Q-C6 detector can grade byte-
+          // diversity (the "all-identical / wrong-surface" red), not just the
+          // missing-frame ratio. The full per-test hash map stays in the sidecar.
+          `let ei = null; try { ei = JSON.parse(fs.readFileSync('${tmpResultsDir}/evidence-integrity.json', 'utf8')); } catch (e) {}`,
           `const results = [`,
           `  ...load('${tmpResultsDir}/l0-results.json'),`,
           `  ...load('${tmpResultsDir}/l1-results.json'),`,
@@ -1079,6 +1086,8 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           // legacy no-screenshot path (showing fake PASS). Emitting it first
           // keeps it well within the capture window.
           `console.log('TEST_RESULTS: ' + JSON.stringify(results));`,
+          // Compact summary only (small, stays inside the capture window).
+          `if (ei) console.log('EVIDENCE_INTEGRITY_JSON: ' + JSON.stringify({ captured: ei.captured, authored: ei.authored, ratio: ei.ratio, integrityFailed: !!ei.integrityFailed, stuckCapture: !!ei.stuckCapture, dominantRatio: ei.dominantRatio, distinctHashes: ei.distinctHashes }));`,
           `console.log('OVERALL_VERDICT: ' + overall);`,
           `console.log('OVERVIEW_URL: ${cdnPrefix}overview.png');`,
           `console.log('TOTAL_PASS: ' + pass);`,
@@ -1101,6 +1110,10 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
             type: 'between',
             startDelimiter: '---QA_REPORT---',
             endDelimiter: '---END_QA_REPORT---',
+          },
+          EVIDENCE_INTEGRITY_JSON: {
+            type: 'regex',
+            pattern: 'EVIDENCE_INTEGRITY_JSON:\\s*(\\{[\\s\\S]*?\\})',
           },
           OVERALL_VERDICT: {
             type: 'regex',

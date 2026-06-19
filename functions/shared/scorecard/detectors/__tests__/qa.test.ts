@@ -166,6 +166,68 @@ describe('Q-C6 — evidence-capture integrity', () => {
     const qc6 = byId(scoreQa(ctx), 'Q-C6');
     expect(qc6.verdict).toBe('⚪');
   });
+
+  // STUCK_CAPTURE wiring (2026-06-19) — the evidence-integrity sidecar path now
+  // grades byte-diversity, closing the old [needs-instrumentation] gap.
+  it('🔴 when stuckCapture (all-identical / wrong surface — the pacman2 class)', () => {
+    const ctx = makeCtx({
+      qaReport: makeQaReport({
+        results: [vqaResult({ testId: 't1', status: 'pass' })],
+        evidenceIntegrity: {
+          captured: 6,
+          authored: 6,
+          ratio: 1.0,
+          integrityFailed: false,
+          stuckCapture: true,
+          dominantRatio: 0.83,
+          distinctHashes: 2,
+        },
+      }),
+    });
+    const qc6 = byId(scoreQa(ctx), 'Q-C6');
+    expect(qc6.verdict).toBe('🔴');
+    expect(qc6.score).toBe(0);
+    expect(qc6.note).toContain('STUCK');
+    expect(qc6.note).not.toContain('needs-instrumentation');
+  });
+
+  it('🟢 when frames are captured AND distinct (evidence-integrity path)', () => {
+    const ctx = makeCtx({
+      qaReport: makeQaReport({
+        results: [vqaResult({ testId: 't1', status: 'pass' })],
+        evidenceIntegrity: {
+          captured: 6,
+          authored: 6,
+          ratio: 1.0,
+          integrityFailed: false,
+          stuckCapture: false,
+          dominantRatio: 0.17,
+          distinctHashes: 6,
+        },
+      }),
+    });
+    const qc6 = byId(scoreQa(ctx), 'Q-C6');
+    expect(qc6.verdict).toBe('🟢');
+    expect(qc6.score).toBe(4);
+  });
+
+  it('🔴 when the capture gate failed (missing frames)', () => {
+    const ctx = makeCtx({
+      qaReport: makeQaReport({
+        results: [vqaResult({ testId: 't1', status: 'errored' })],
+        evidenceIntegrity: {
+          captured: 0,
+          authored: 6,
+          ratio: 0,
+          integrityFailed: true,
+          stuckCapture: false,
+        },
+      }),
+    });
+    const qc6 = byId(scoreQa(ctx), 'Q-C6');
+    expect(qc6.verdict).toBe('🔴');
+    expect(qc6.score).toBe(0);
+  });
 });
 
 // ── Q-C7 ─────────────────────────────────────────────────────────────────────

@@ -225,6 +225,31 @@ export interface QaContractDraft {
   decidedBy?: string;
 }
 
+/**
+ * STUCK_CAPTURE wiring (2026-06-19) — the qa-prepare evidence-integrity summary
+ * (sidecar `evidence-integrity.json`), surfaced via the qa-report's
+ * `EVIDENCE_INTEGRITY_JSON` variable. Carries the byte-diversity signal so the
+ * UI and the Plan Retrospect Q-C6 detector can distinguish a real capture from
+ * a stuck/wrong-surface one (all per-test frames identical), not just a missing
+ * one. `stuckCapture` is true when most captured frames share one content hash.
+ */
+export interface VqaEvidenceIntegrity {
+  /** Per-test frames present and ≥2KB (non-blank). */
+  captured: number;
+  /** Authored test count. */
+  authored: number;
+  /** captured / authored. <0.9 hard-fails the qa-prepare gate (missing frames). */
+  ratio: number;
+  /** True when the qa-prepare gate aborted the run (missing/blank capture). */
+  integrityFailed: boolean;
+  /** True when most captured frames are byte-identical (stuck / wrong surface). */
+  stuckCapture: boolean;
+  /** Share of captured frames sharing the single most-common content hash. */
+  dominantRatio?: number;
+  /** Distinct content hashes across captured frames (1 = all identical). */
+  distinctHashes?: number;
+}
+
 export interface VqaRollup {
   verdict: QaPillarVerdict;
   total: number;
@@ -241,6 +266,8 @@ export interface VqaRollup {
   /** PR-8 — judge invocation crashes. */
   errored?: number;
   overviewUrl?: string;
+  /** STUCK_CAPTURE wiring (2026-06-19) — evidence-integrity summary for Q-C6. */
+  evidenceIntegrity?: VqaEvidenceIntegrity;
   thumbnails: VqaTestResult[]; // first ~6 for the card strip
   failures: VqaTestResult[];
   /** PR-8 Q5.3 — full per-test result list for the operator drawer. */
