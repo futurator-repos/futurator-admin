@@ -146,6 +146,60 @@ describe('PR-41 — tamper-check promoted to mvp+ rigor (Story 2-A-5-1)', () => 
   });
 });
 
+describe('v3 E4-S2 — enforced contract freeze (tsc gate)', () => {
+  it('mvp/production insert api-contract-freeze between api-author and dev, looping to api-author', () => {
+    for (const rigor of ['mvp', 'production'] as const) {
+      const ids = generateStoryPipeline(story, 'Test Epic', workingDir, { rigor }).steps.map(
+        (s) => s.id,
+      );
+      expect(ids).toContain('api-contract-freeze');
+      expect(ids.indexOf('api-contract-freeze')).toBeGreaterThan(ids.indexOf('api-author'));
+      expect(ids.indexOf('api-contract-freeze')).toBeLessThan(ids.indexOf('dev'));
+    }
+    const freeze = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    }).steps.find((s) => s.id === 'api-contract-freeze') as unknown as {
+      loopTo: string;
+      command: string;
+    };
+    expect(freeze.loopTo).toBe('api-author');
+    expect(freeze.command).toMatch(/tsc --noEmit/);
+  });
+
+  it('prototype has neither api-author nor the freeze gate', () => {
+    const ids = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'prototype',
+    }).steps.map((s) => s.id);
+    expect(ids).not.toContain('api-author');
+    expect(ids).not.toContain('api-contract-freeze');
+  });
+});
+
+describe('v3 E4-S3 — AC-coverage gate consumes AC_TEST_MAP', () => {
+  it('mvp/production insert ac-coverage-gate after stage-test-files and before dev', () => {
+    for (const rigor of ['mvp', 'production'] as const) {
+      const ids = generateStoryPipeline(story, 'Test Epic', workingDir, { rigor }).steps.map(
+        (s) => s.id,
+      );
+      expect(ids).toContain('ac-coverage-gate');
+      expect(ids.indexOf('ac-coverage-gate')).toBeGreaterThan(ids.indexOf('stage-test-files'));
+      expect(ids.indexOf('ac-coverage-gate')).toBeLessThan(ids.indexOf('dev'));
+    }
+    const gate = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    }).steps.find((s) => s.id === 'ac-coverage-gate') as unknown as { command: string };
+    expect(gate.command).toMatch(/AC_TEST_MAP/);
+    expect(gate.command).toMatch(/AC_COVERAGE_FAILED/);
+  });
+
+  it('prototype omits the ac-coverage gate', () => {
+    const ids = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'prototype',
+    }).steps.map((s) => s.id);
+    expect(ids).not.toContain('ac-coverage-gate');
+  });
+});
+
 describe('VQA v3 E8.1 — QA-AUTHOR probe model in the DEV VISUAL_TESTS prompt', () => {
   const browserStory: EpicStory = {
     storyId: 'S-9',

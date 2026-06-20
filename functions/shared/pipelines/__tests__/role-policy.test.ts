@@ -130,6 +130,18 @@ describe('resolveRolePolicy — cartesian coverage', () => {
     expect(policy.disallowedTools).not.toContain('WebSearch');
   });
 
+  it('v3 E4-S5 — API_AUTHOR (contract bench surface) can Write the .d.ts but cannot Bash or Edit', () => {
+    // The contract author must not run impl, peek via shell, or mutate files in
+    // place — it only emits the frozen surface. Capability scoping is enforced
+    // at the CLI layer (--disallowedTools), stronger than frontmatter.
+    const policy = resolveRolePolicy('nextjs-base', 'production', 'API_AUTHOR');
+    expect(policy.allowedTools).toContain('Write');
+    expect(policy.allowedTools).toContain('Read');
+    expect(policy.allowedTools).not.toContain('Bash');
+    expect(policy.disallowedTools).toContain('Bash');
+    expect(policy.disallowedTools).toContain('Edit');
+  });
+
   it('REVIEWER is read-only (no Write, no Edit, no Bash)', () => {
     const policy = resolveRolePolicy('nextjs-canvas-game', 'production', 'REVIEWER');
     expect(policy.allowedTools).not.toContain('Write');

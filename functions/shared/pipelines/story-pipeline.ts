@@ -331,7 +331,39 @@ export function generateStoryPipeline(
               extractors: {},
               validations: [],
             },
-          ] as PipelineStep[])
+            // v3 E4-S2 — ENFORCED contract freeze. The deployed freeze was
+            // existence/non-empty only; a stub that does not typecheck would be
+            // "frozen" and then backfire on every importer (the A1-stub
+            // regression). This gate runs `tsc` on the authored contract in
+            // ISOLATION (declarations need no implementation, so an isolated
+            // .d.ts that is itself well-formed passes even though DEV/TEST
+            // haven't run). A malformed contract fails here and loops back to
+            // API_AUTHOR — the contract owner — never DEV. Pacman1-safe: the
+            // contract file is in this story's worktree and ships in its delta.
+            {
+              id: 'api-contract-freeze',
+              stepType: 'shell' as const,
+              command:
+                `cd ${workingDir} && ` +
+                `CONTRACT="src/index.d.ts"; ` +
+                `if [ ! -s "$CONTRACT" ]; then ` +
+                `  echo "API_CONTRACT_MISSING: $CONTRACT is absent or empty after api-author"; exit 1; ` +
+                `fi; ` +
+                `if [ -f tsconfig.json ]; then ` +
+                `  if npx tsc --noEmit --skipLibCheck "$CONTRACT" > /tmp/contract-tsc.log 2>&1; then ` +
+                `    echo "API_CONTRACT_FROZEN_OK sha=$(sha256sum "$CONTRACT" 2>/dev/null | cut -d' ' -f1)"; ` +
+                `  else ` +
+                `    echo "API_CONTRACT_TSC_FAILED — the frozen contract does not typecheck; a malformed stub would backfire on every importer (E4-S2). Fix the .d.ts:"; ` +
+                `    tail -40 /tmp/contract-tsc.log; exit 1; ` +
+                `  fi; ` +
+                `else echo "API_CONTRACT_FROZEN_OK (no tsconfig — tsc gate skipped)"; fi`,
+              timeout: 120000,
+              captureAs: 'API_CONTRACT_FREEZE_OUTPUT',
+              expectExitCode: 0,
+              onFail: { action: 'fail' as const, injectAs: 'API_CONTRACT_ERROR' },
+              loopTo: 'api-author',
+            },
+          ] as unknown as PipelineStep[])
         : ([] as PipelineStep[])),
       // Phase C.3: TEST agent authors failing tests BEFORE dev runs (mvp +
       // production). Skipped for prototype.
@@ -608,6 +640,44 @@ Re-emit the authored test file list (REQUIRED — the pipeline re-stages exactly
                 },
               },
               validations: [],
+            },
+          ] as unknown as PipelineStep[])
+        : ([] as PipelineStep[])),
+
+      // v3 E4-S3 — AC-coverage gate. test-author emits an AC_TEST_MAP (one line
+      // per AC a test asserts) but NO deterministic step consumed it, so a
+      // mapping that named a test file the author never wrote shipped an
+      // unverified AC (the runtime visual review trusts mapped ACs and skips
+      // screenshot-judging them). This gate parses the map and fails when any
+      // MAPPED AC points at a test file that does not exist on disk — an
+      // unambiguous dishonest mapping, so it never false-positives on an honest
+      // plan (unmapped ACs are fine; the screenshot judge keeps jurisdiction).
+      ...(testsOn
+        ? ([
+            {
+              id: 'ac-coverage-gate',
+              stepType: 'shell' as const,
+              command:
+                `cd ${workingDir} && mkdir -p .pipeline && ` +
+                `cat > .pipeline/${story.storyId}-ac-test-map.txt << 'EOF_ACMAP'\n` +
+                `{{AC_TEST_MAP}}\n` +
+                `EOF_ACMAP\n` +
+                `MAPPED=0; MISSING=0; MISSING_LIST=""; ` +
+                `while IFS= read -r line; do ` +
+                `  case "$line" in *"::"*) ;; *) continue;; esac; ` +
+                `  f=$(printf '%s' "$line" | awk -F'::' '{print $1}' | sed -E 's/^[[:space:]]*[A-Za-z0-9_-]+:[[:space:]]*//' | tr -d '[:space:]'); ` +
+                `  [ -z "$f" ] && continue; ` +
+                `  MAPPED=$((MAPPED+1)); ` +
+                `  if [ ! -f "$f" ]; then MISSING=$((MISSING+1)); MISSING_LIST="$MISSING_LIST $f"; fi; ` +
+                `done < .pipeline/${story.storyId}-ac-test-map.txt; ` +
+                `if [ "$MISSING" -gt 0 ]; then ` +
+                `  echo "AC_COVERAGE_FAILED — $MISSING AC→test mapping(s) name a test file that does not exist:$MISSING_LIST. A mapped AC is treated as verified-by-suite, so a missing file ships an unverified AC (E4-S3)."; exit 1; ` +
+                `fi; ` +
+                `echo "AC_COVERAGE_OK mapped=$MAPPED"`,
+              timeout: 30000,
+              captureAs: 'AC_COVERAGE_OUTPUT',
+              expectExitCode: 0,
+              onFail: { action: 'fail' as const, injectAs: 'AC_COVERAGE_ERROR' },
             },
           ] as unknown as PipelineStep[])
         : ([] as PipelineStep[])),
