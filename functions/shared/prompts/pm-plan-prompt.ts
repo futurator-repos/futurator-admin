@@ -129,12 +129,13 @@ not a fresh interpretation of the intent. Hard rules:
   - **Cover the specs.** Every functional requirement (PRD), screen/flow (UX),
     and module/decision (Architecture) must map to at least one story. Walk the
     docs section by section and make sure nothing approved is dropped.
-  - **Trace coverage explicitly.** Each epic MUST declare \`requirementRefs\`: the
-    list of PRD requirement ids (\`FR1\`, \`FR2\`, …, exactly as numbered under the
-    PRD's \`## Functional Requirements\`) that the epic's stories deliver. Every FR
-    in the PRD must appear in at least one epic's \`requirementRefs\` — this is the
-    traceability spine the readiness gate checks, and an uncovered FR blocks the
-    start of development. Cite only ids that exist in the PRD; never invent one.
+  - **Tag coverage (do NOT expand for it).** Each epic declares \`requirementRefs\`:
+    the PRD requirement ids (\`FR1\`, \`FR2\`, … as numbered under \`## Functional
+    Requirements\`) its stories deliver. Collectively the epics must cover every
+    FR — but this is a TRACEABILITY TAG, not a sizing rule: one epic/story can
+    (and should) cover several related FRs. NEVER add epics or stories just to
+    raise the count; group FRs into vertical slices and tag them. Cite only ids
+    that exist in the PRD; never invent one.
   - **Honor the architecture.** Use its concrete tech choices, data model,
     module boundaries, and file layout when you write \`touchPoints\` and
     \`technicalNotes\` — do not invent a different structure.
@@ -466,6 +467,27 @@ modify (relative to the project root, using the conventional paths above).
   "Bootstrap the project with X" or "Create a new Y project", you have written
   the wrong AC. The project IS already scaffolded. Your stories should ADD
   files to it or MODIFY existing ones in the conventional paths above.
+
+### Output budget — CRITICAL (a truncated plan is REJECTED, costs a full retry)
+
+Your ENTIRE response is the single \`---PLAN_JSON--- … ---END_PLAN_JSON---\`
+block and it MUST be fully closed. The platform caps output tokens — an
+over-long plan is cut off **mid-JSON**, the closing fence is never written,
+NOTHING is captured, and the whole plan is rejected. Stay well within budget:
+
+- ${args.rigor === 'production' ? 'production: aim for ≤ ~18 stories total across all epics.' : 'mvp: 6–12 stories TOTAL across all epics. prototype: ~5.'}
+  Do NOT emit one story (or one epic) per requirement — **group related FRs
+  into a single vertical slice**. Coverage is proven by \`requirementRefs\`,
+  NOT by story count.
+- \`requirementRefs\` REPLACES restating requirements in prose — list the FR
+  ids; never paraphrase the requirement text into the plan.
+- Keep each field tight: \`description\` 1–2 sentences; \`technicalNotes\` ≤ 2
+  sentences; \`tasks\` ≤ 4 per story; ACs at the rigor's count, no more.
+- Do NOT echo, quote, or summarize the specs back — the reader already has
+  them. Emit ONLY the plan JSON.
+- If full coverage would blow the budget, prefer FEWER, broader stories over
+  many tiny ones. A complete, closed, compact plan beats an exhaustive one
+  that gets truncated.
 
 ### Output format — strict
 

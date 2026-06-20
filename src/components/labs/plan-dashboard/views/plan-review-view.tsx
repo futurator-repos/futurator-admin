@@ -1262,6 +1262,10 @@ const CONCEPT_PERSONA: Record<string, { name: string; role: string; icon: string
   prd: { name: 'John', role: 'Product Manager', icon: '📋', doc: 'prd.md' },
   ux: { name: 'Sally', role: 'UX Expert', icon: '🎨', doc: 'ux-spec.md' },
   architecture: { name: 'Winston', role: 'Architect', icon: '🏗️', doc: 'architecture.md' },
+  // v3 — the pm-plan (epics→waves) agent. Previously OMITTED from the forensic
+  // export, which made the single most expensive concept step (and the one that
+  // fails on output-cap overflow) impossible to audit from the log alone.
+  plan: { name: 'Murat', role: 'Planner', icon: '📐', doc: 'plan (epics→waves)' },
 };
 
 interface ConceptAgentEntry {
@@ -1284,6 +1288,8 @@ function ConceptAgentLogs({ plan, activeKind }: { plan: PlanWithEpics; activeKin
       { kind: 'prd', jobId: plan.conceptArtifactJobIds?.prd },
       { kind: 'ux', jobId: plan.conceptArtifactJobIds?.ux },
       { kind: 'architecture', jobId: plan.conceptArtifactJobIds?.architecture },
+      // v3 — include the pm-plan agent so the failing/most-expensive step is auditable.
+      { kind: 'plan', jobId: plan.conceptPmPlanJobId },
     ] as Array<{ kind: string; jobId?: string }>
   )
     .filter((e): e is ConceptAgentEntry => !!e.jobId)

@@ -62,6 +62,14 @@ ${args.rigor} — write a ${args.depth} architecture (${
       ? 'full = every section below, fully specified'
       : 'lite = Decision Summary Table + the key Implementation Patterns only; trim aggressively, omit exhaustive data/API detail'
   }).
+
+## Length budget — HARD (a bloated architecture starves the planner downstream)
+This document is INLINED verbatim into the planner's context, so length here is
+not free — an over-long architecture pushes the plan generator past its output
+cap and breaks plan generation. Keep the WHOLE document under **${full ? '~3500 words' : '~1800 words'}**.
+It is a citable CONTRACT of concrete rules, not a textbook: prefer tables and
+terse one-line rules over paragraphs. Do NOT restate the PRD/UX; reference their
+decisions. No code samples longer than ~5 lines; no exhaustive enumerations.
 ${args.priorArtifacts ? `\n## Prior artifacts (stay consistent with these — cite, never contradict)\n${args.priorArtifacts}\n` : ''}${
     args.groundTruth
       ? `\n## Ground truth — real structure from the system graph (do NOT contradict; build on what exists)\n${args.groundTruth}\n`

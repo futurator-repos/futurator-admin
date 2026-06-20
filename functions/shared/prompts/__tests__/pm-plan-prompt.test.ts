@@ -241,7 +241,7 @@ describe('buildPmPlanPrompt — requirementRefs FR coverage (v3 E1-S1)', () => {
       priorArtifacts: '## Functional Requirements\nFR1. A\nFR2. B',
     });
     expect(p).toContain('requirementRefs');
-    expect(p).toContain('traceability spine');
+    expect(p).toContain('TRACEABILITY TAG'); // softened wording: a tag, not an expansion driver
     expect(p).toContain('"requirementRefs": ["FR1", "FR2"]');
     expect(p).toContain('every PRD `FR` id appears in at least one epic');
   });
@@ -279,12 +279,29 @@ describe('buildPmPlanPrompt — prose slimming preserves keyed text (v3 E2-S1)',
     }
   });
 
-  it('shorter than the pre-slim prompt (regression ceiling)', () => {
-    // The pre-E2-S1 mvp prompt for this fixture measured 21,958 chars; the slim
-    // version is 20,409 (~1.5k cut, ≈40% off the three condensed essays). This
-    // ceiling guards against the verbose essays creeping back. (Update only with
-    // a deliberate, measured change.)
-    expect(p.length).toBeLessThan(20800);
+  it('carries the output-budget contract (the 32K-cap truncation fix)', () => {
+    // The pm-plan must be told to stay within the output cap and close the fence,
+    // or a large plan overflows the CLI's CLAUDE_CODE_MAX_OUTPUT_TOKENS and is
+    // never captured (the pacmanv3 32:32 / no-PLAN_JSON failure, 2026-06-20).
+    expect(p).toContain('Output budget');
+    expect(p).toContain('truncated');
+    expect(p).toMatch(/6–12 stories/);
+    expect(p).toContain('---END_PLAN_JSON---');
+    const prod = buildPmPlanPrompt({
+      ...baseArgs,
+      boilerplateType: 'nextjs-base',
+      rigor: 'production',
+    });
+    expect(prod).toMatch(/≤ ~18 stories/);
+  });
+
+  it('still no larger than the pre-slim prompt (regression ceiling)', () => {
+    // Pre-E2-S1 mvp prompt: 21,958 chars. After the essay slimming it was
+    // 20,409; the v3 output-budget contract (the fix for the 32K-token pm-plan
+    // truncation, 2026-06-20) deliberately adds back ~1.2k → 21,650, still under
+    // the original. The budget block is load-bearing (it prevents truncated,
+    // un-parseable plans), so the ceiling tracks the original, not the trough.
+    expect(p.length).toBeLessThan(21958);
   });
 });
 
