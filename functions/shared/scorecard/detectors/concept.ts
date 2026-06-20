@@ -7,6 +7,7 @@
 //   C-P3  decomposition sanity           (epic/story tree wave widths)
 //   C-P4  no dangling references          (validateReferenceSections danglingCount)
 //   C-P5  plan not emitted ungrounded     (pm-plan PRIOR_ARTIFACTS payload bytes)
+//   C-G1  gate decision quality            (plan.checkoutGates readiness verdict — v3 E3-S3)
 //   C-G2  approval-mode correctness        (conceptInteraction + status transitions)
 //   C-G3  chain visible & read-only        (plan rows visible post-dev-start)
 //
@@ -333,6 +334,57 @@ function scoreC_P5(ctx: DetectorContext): ScorecardSlice {
   );
 }
 
+// ── C-G1 — gate decision quality (v3 E3-S3) ───────────────────────────────────
+// §0.6: gate card vs plan; `specsComplete` flag — 4=level/epic/story counts
+// accurate & specs complete; 0=passes incomplete specs. Now computable
+// deterministically: E1-S4 persists the readiness-gate verdict on the plan row
+// (`plan.checkoutGates`), so we read the stored `runSolutioningGate` result
+// instead of re-judging it with the LLM. Maps the verdict onto the rubric anchor:
+//   • clean pass (ready / auto-pass)               → 🟢 / 4  (specs complete)
+//   • passed with surfaced conditions (mvp)        → 🟡 / 2  (non-blocking gaps)
+//   • a BLOCKING verdict that started anyway via a YOLO bypass, OR a recorded
+//     not-ready                                    → 🔴 / 0  (passes incomplete specs)
+// No gate verdict persisted (prototype/legacy plan, or a run from before E1-S4)
+// → ⚪ (excluded from the rollup), never a fabricated score.
+function scoreC_G1(ctx: DetectorContext): ScorecardSlice {
+  const gate = ctx.plan.checkoutGates;
+  const evidence: EvidenceRef = {
+    kind: 'ddb',
+    ref: 'plan.checkoutGates (runSolutioningGate verdict)',
+  };
+  if (!gate) {
+    return needsInstrumentation(
+      'C-G1',
+      evidence,
+      'no checkout-gate verdict persisted (prototype/legacy plan, or a run before E1-S4 landed plan.checkoutGates)',
+    );
+  }
+  // A blocking verdict that nonetheless started development is the rubric's
+  // "0 = passes incomplete specs" — the YOLO bypass let an unready plan through.
+  if (gate.bypassedByYolo || gate.verdict === 'not-ready') {
+    return scored(
+      'C-G1',
+      0,
+      '🔴',
+      gate.bypassedByYolo ? `not-ready (YOLO-bypassed)` : gate.verdict,
+      evidence,
+      gate.errors.length ? `blocking: ${gate.errors.slice(0, 3).join('; ')}` : undefined,
+    );
+  }
+  if (gate.verdict === 'ready-with-conditions') {
+    return scored(
+      'C-G1',
+      2,
+      '🟡',
+      gate.verdict,
+      evidence,
+      gate.conditions.length ? `conditions: ${gate.conditions.slice(0, 3).join('; ')}` : undefined,
+    );
+  }
+  // ready / auto-pass → clean pass.
+  return scored('C-G1', 4, '🟢', gate.verdict, evidence);
+}
+
 // ── C-G2 — approval-mode correctness ──────────────────────────────────────────
 // §0.6: `conceptInteraction`; status transitions — 4=mode honored (YOLO
 // auto-approve / interactive pause); 0=stalls on dead job.
@@ -379,6 +431,7 @@ export function scoreConcept(ctx: DetectorContext): ScorecardSlice[] {
     scoreC_P3(ctx),
     scoreC_P4(ctx),
     scoreC_P5(ctx),
+    scoreC_G1(ctx),
     scoreC_G2(ctx),
     scoreC_G3(ctx),
   ];

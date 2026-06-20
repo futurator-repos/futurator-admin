@@ -2897,6 +2897,15 @@ app.post('/api/plans/:id/start', async (c) => {
   // BLOCK (the verdict + reasons are still recorded below, E1-S4 / E7-S2), the
   // same way autopilot auto-approves the concept artifacts upstream.
   const yolo = resolveConceptInteraction(plan) === 'autopilot';
+  if (gate.blocks && yolo) {
+    // v3 E7-S2 — stamp the bypass in the daemon/API log so an unattended
+    // override is greppable in the run history, not only on the plan row. The
+    // retrospect surfaces the same fact deterministically (C-G1 → 🔴
+    // "not-ready (YOLO-bypassed)") via the persisted `checkoutGates`.
+    console.warn(
+      `[POST /api/plans/${planId}/start] YOLO bypass of a BLOCKING readiness gate (${gate.verdict}): ${gate.errors.join('; ')}`,
+    );
+  }
   if (gate.blocks && !yolo) {
     // v3 E1-S4 — record the blocking verdict on the plan row before throwing,
     // so a blocked start is auditable (not just a transient 4xx).

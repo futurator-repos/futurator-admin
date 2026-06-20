@@ -152,10 +152,13 @@ export const CRITERIA_META: Record<string, CriterionMeta> = {
     ieLink: [],
     fixLink: [],
   },
+  // v3 E3-S3 — flipped LLM→DET: the readiness-gate verdict is now a persisted
+  // deterministic fact (`plan.checkoutGates`, E1-S4), scored by scoreConcept's
+  // scoreC_G1 rather than re-judged by The Assessor.
   'C-G1': {
     stage: 'concept',
     tag: ['MECH'],
-    engine: 'LLM',
+    engine: 'DET',
     axis: ['D1'],
     weight: 2,
     ieLink: [],

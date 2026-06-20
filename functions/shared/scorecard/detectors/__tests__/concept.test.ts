@@ -84,11 +84,81 @@ describe('concept honesty guard', () => {
 
   it('every slice carries the right stage + a non-data evidence ref', () => {
     const slices = scoreConcept(makeCtx());
-    expect(slices).toHaveLength(8);
+    expect(slices).toHaveLength(9);
     for (const s of slices) {
       expect(s.stage).toBe('concept');
       expect(typeof s.evidence.ref).toBe('string');
     }
+  });
+});
+
+// ── C-G1 — gate decision quality (v3 E3-S3, reads plan.checkoutGates) ─────────
+
+describe('C-G1 gate decision quality', () => {
+  const gate = (over: Partial<NonNullable<Plan['checkoutGates']>>): Plan['checkoutGates'] => ({
+    verdict: 'ready',
+    errors: [],
+    conditions: [],
+    blocks: false,
+    report: '',
+    bypassedByYolo: false,
+    evaluatedAt: '2026-06-19T00:00:00Z',
+    ...over,
+  });
+
+  it('⚪ when no checkout-gate verdict was persisted (prototype/legacy)', () => {
+    const s = byId(scoreConcept(makeCtx({ plan: makePlan({ checkoutGates: undefined }) })))['C-G1'];
+    expect(s.verdict).toBe('⚪');
+    expect(s.score).toBeNull();
+    expect(s.note).toMatch(/needs-instrumentation/);
+  });
+
+  it('🟢 / 4 on a clean ready (or auto-pass) verdict', () => {
+    const ready = byId(
+      scoreConcept(makeCtx({ plan: makePlan({ checkoutGates: gate({ verdict: 'ready' }) }) })),
+    )['C-G1'];
+    expect(ready.verdict).toBe('🟢');
+    expect(ready.score).toBe(4);
+    const auto = byId(
+      scoreConcept(makeCtx({ plan: makePlan({ checkoutGates: gate({ verdict: 'auto-pass' }) }) })),
+    )['C-G1'];
+    expect(auto.score).toBe(4);
+  });
+
+  it('🟡 / 2 on ready-with-conditions, surfacing the conditions', () => {
+    const s = byId(
+      scoreConcept(
+        makeCtx({
+          plan: makePlan({
+            checkoutGates: gate({ verdict: 'ready-with-conditions', conditions: ['2 manual ACs'] }),
+          }),
+        }),
+      ),
+    )['C-G1'];
+    expect(s.verdict).toBe('🟡');
+    expect(s.score).toBe(2);
+    expect(s.note).toMatch(/2 manual ACs/);
+  });
+
+  it('🔴 / 0 when a BLOCKING verdict started anyway via a YOLO bypass', () => {
+    const s = byId(
+      scoreConcept(
+        makeCtx({
+          plan: makePlan({
+            checkoutGates: gate({
+              verdict: 'not-ready',
+              blocks: true,
+              bypassedByYolo: true,
+              errors: ['PRD requirement FR-9 is not covered by any epic.'],
+            }),
+          }),
+        }),
+      ),
+    )['C-G1'];
+    expect(s.verdict).toBe('🔴');
+    expect(s.score).toBe(0);
+    expect(String(s.value)).toMatch(/YOLO-bypassed/);
+    expect(s.note).toMatch(/FR-9/);
   });
 });
 
