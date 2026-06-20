@@ -174,6 +174,42 @@ describe('driveConcept (Story 3.2 — driver)', () => {
     expect(h.created.length).toBe(before);
   });
 
+  it('re-enqueues when the prior pm-plan COMPLETED but produced no epics (overflow/reject — not stranded)', async () => {
+    // The pacmanv3 stranding: the pm-plan overflowed the CLI output cap, the job
+    // is COMPLETED (not FAILED) but no PLAN_JSON was captured → zero epics. The
+    // driver must re-fire (the cron's backstop), not noop forever.
+    const plan = basePlan({
+      conceptPmPlanJobId: 'pm-empty',
+      epicIds: [],
+      conceptArtifacts: [
+        art('prd', 'approved', 1),
+        art('ux', 'approved', 1, ['prd']),
+        art('architecture', 'approved', 1, ['prd', 'ux']),
+      ],
+    });
+    const jobs = {
+      'pm-empty': { jobId: 'pm-empty', status: 'COMPLETED', variables: {} } as unknown as AgentJob,
+    };
+    const h = harness(plan, jobs);
+    const res = await driveConcept(plan, h.deps);
+    expect(res).toMatchObject({ kind: 'enqueued-pm-plan' });
+  });
+
+  it('does NOT re-enqueue a COMPLETED pm-plan that DID produce epics', async () => {
+    const plan = basePlan({
+      conceptPmPlanJobId: 'pm-ok',
+      epicIds: ['E-1'],
+      conceptArtifacts: [
+        art('prd', 'approved', 1),
+        art('ux', 'approved', 1, ['prd']),
+        art('architecture', 'approved', 1, ['prd', 'ux']),
+      ],
+    });
+    const jobs = { 'pm-ok': { jobId: 'pm-ok', status: 'COMPLETED' } as unknown as AgentJob };
+    const h = harness(plan, jobs);
+    expect(await driveConcept(plan, h.deps)).toMatchObject({ kind: 'noop' });
+  });
+
   it('interactive (Round 1): a FRESH plan enqueues a one-shot DRAFT generator in the plan worktree (no dead convergence job)', async () => {
     const plan = basePlan({
       conceptInteraction: 'interactive',

@@ -198,10 +198,23 @@ export async function driveConcept(
   }
 
   // action.type === 'enqueue-pm-plan' — all artifacts approved.
-  // Dedup: a chain-driven pm-plan already enqueued short-circuits.
+  // Dedup: a chain-driven pm-plan already enqueued short-circuits — but ONLY
+  // when its output is still usable. A pm-plan can COMPLETE (status COMPLETED,
+  // not FAILED) yet emit no parseable PLAN_JSON — e.g. the model overflows the
+  // CLI output cap (CLAUDE_CODE_MAX_OUTPUT_TOKENS) before closing the fence, so
+  // apply rejects it and the plan keeps zero epics. The old guard treated that
+  // COMPLETED-but-empty job as "done" and the plan was stranded forever (no UI
+  // re-run path for a concept-chain plan). So: short-circuit only while the job
+  // is in-flight, OR it is terminal AND actually produced epics. Otherwise fall
+  // through and re-enqueue a fresh grounded pm-plan (the cron re-fires this).
   if (plan.conceptPmPlanJobId) {
     const j = await deps.getJobById(plan.conceptPmPlanJobId);
-    if (j && j.status !== 'FAILED') {
+    const planHasEpics = (plan.epicIds ?? []).length > 0;
+    // In-flight = the prior pm-plan is still PENDING/RUNNING (don't double-enqueue).
+    const inFlight = !!j && (j.status === 'PENDING' || j.status === 'RUNNING');
+    // Noop only if the plan already has epics, or a pm-plan is currently running.
+    // A terminal pm-plan that yielded NO epics (overflow/reject) falls through.
+    if (j && (planHasEpics || inFlight)) {
       return { kind: 'noop', reason: 'pm-plan already enqueued' };
     }
   }
