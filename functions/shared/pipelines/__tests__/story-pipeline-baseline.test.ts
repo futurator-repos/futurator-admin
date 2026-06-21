@@ -146,8 +146,8 @@ describe('PR-41 — tamper-check promoted to mvp+ rigor (Story 2-A-5-1)', () => 
   });
 });
 
-describe('v3 E4-S2 — enforced contract freeze (tsc gate)', () => {
-  it('mvp/production insert api-contract-freeze between api-author and dev, looping to api-author', () => {
+describe('v3 E4-S2 — contract freeze (report-only after pacmanv3 fix)', () => {
+  it('mvp/production insert api-contract-freeze between api-author and dev', () => {
     for (const rigor of ['mvp', 'production'] as const) {
       const ids = generateStoryPipeline(story, 'Test Epic', workingDir, { rigor }).steps.map(
         (s) => s.id,
@@ -156,14 +156,32 @@ describe('v3 E4-S2 — enforced contract freeze (tsc gate)', () => {
       expect(ids.indexOf('api-contract-freeze')).toBeGreaterThan(ids.indexOf('api-author'));
       expect(ids.indexOf('api-contract-freeze')).toBeLessThan(ids.indexOf('dev'));
     }
+  });
+
+  it('is REPORT-ONLY: skip-if-absent, local tsc, warns (never blocks/loops)', () => {
+    // Regression guard (pacmanv3, 2026-06-20): api-author legitimately writes no
+    // contract when types are pre-baked, and isolated-`.d.ts` tsc is fragile —
+    // so this gate must never fail the story.
     const freeze = generateStoryPipeline(story, 'Test Epic', workingDir, {
       rigor: 'mvp',
     }).steps.find((s) => s.id === 'api-contract-freeze') as unknown as {
-      loopTo: string;
       command: string;
+      loopTo?: string;
+      onFail?: unknown;
+      expectExitCode?: number;
     };
-    expect(freeze.loopTo).toBe('api-author');
-    expect(freeze.command).toMatch(/tsc --noEmit/);
+    // Absent → exit 0 (continue to dev); the old hard-fail markers are gone.
+    expect(freeze.command).toMatch(/API_CONTRACT_ABSENT[\s\S]*exit 0/);
+    expect(freeze.command).not.toMatch(/API_CONTRACT_MISSING/);
+    expect(freeze.command).not.toMatch(/API_CONTRACT_TSC_FAILED/);
+    // tsc failure only WARNS — no `exit 1`, no loop, no onFail.
+    expect(freeze.command).toMatch(/API_CONTRACT_TSC_WARN/);
+    expect(freeze.command).not.toMatch(/exit 1/);
+    expect(freeze.loopTo).toBeUndefined();
+    expect(freeze.onFail).toBeUndefined();
+    // Uses the project's LOCAL tsc, never the decoy-prone `npx tsc`.
+    expect(freeze.command).toMatch(/node_modules\/\.bin\/tsc/);
+    expect(freeze.command).not.toMatch(/npx tsc/);
   });
 
   it('prototype has neither api-author nor the freeze gate', () => {

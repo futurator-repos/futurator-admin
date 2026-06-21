@@ -331,15 +331,28 @@ export function generateStoryPipeline(
               extractors: {},
               validations: [],
             },
-            // v3 E4-S2 — ENFORCED contract freeze. The deployed freeze was
-            // existence/non-empty only; a stub that does not typecheck would be
-            // "frozen" and then backfire on every importer (the A1-stub
-            // regression). This gate runs `tsc` on the authored contract in
-            // ISOLATION (declarations need no implementation, so an isolated
-            // .d.ts that is itself well-formed passes even though DEV/TEST
-            // haven't run). A malformed contract fails here and loops back to
-            // API_AUTHOR — the contract owner — never DEV. Pacman1-safe: the
-            // contract file is in this story's worktree and ships in its delta.
+            // v3 E4-S2 — ENFORCED contract freeze, scoped to "validate IF a
+            // contract exists" (fixed 2026-06-20 after pacmanv3 wedged on it).
+            //
+            // api-author is BEST-EFFORT: it legitimately writes NO contract when
+            // the types already exist — e.g. the nextjs-canvas-game boilerplate
+            // pre-bakes `src/game/types.ts`, so a redundant top-level
+            // `src/index.d.ts` is correctly skipped (it only Read/Glob'd, never
+            // Wrote). The first cut FAILED hard on an absent contract and looped
+            // api-author forever (it re-made the same read-only decision), so the
+            // foundation story — and the whole plan — was blocked.
+            //
+            // Correct scope (REPORT-ONLY — always exits 0, never blocks the
+            // story). An ABSENT/empty contract is the tolerated no-frozen-surface
+            // case (the pre-E4-S2 behavior) → pass, dev uses the existing types.
+            // When api-author DID write a contract, run the project's LOCAL tsc
+            // (never `npx` — that fetches the decoy `tsc` npm package when
+            // typescript isn't resolvable) and merely WARN in the log if it does
+            // not typecheck. The first cut hard-failed on both absence AND
+            // isolated-`.d.ts` tsc fragility (relative-import resolution), wedging
+            // the foundation story and the whole plan. Re-hardening to enforcement
+            // needs a proven isolated typecheck (or a wave-level check); until
+            // then, surfacing beats wedging. Pacman1-safe either way.
             {
               id: 'api-contract-freeze',
               stepType: 'shell' as const,
@@ -347,21 +360,19 @@ export function generateStoryPipeline(
                 `cd ${workingDir} && ` +
                 `CONTRACT="src/index.d.ts"; ` +
                 `if [ ! -s "$CONTRACT" ]; then ` +
-                `  echo "API_CONTRACT_MISSING: $CONTRACT is absent or empty after api-author"; exit 1; ` +
+                `  echo "API_CONTRACT_ABSENT: no $CONTRACT — story has no frozen contract surface (pre-baked/existing types); nothing to freeze, continuing to dev"; exit 0; ` +
                 `fi; ` +
-                `if [ -f tsconfig.json ]; then ` +
-                `  if npx tsc --noEmit --skipLibCheck "$CONTRACT" > /tmp/contract-tsc.log 2>&1; then ` +
+                `TSC="./node_modules/.bin/tsc"; ` +
+                `if [ -x "$TSC" ] && [ -f tsconfig.json ]; then ` +
+                `  if "$TSC" --noEmit --skipLibCheck "$CONTRACT" > /tmp/contract-tsc.log 2>&1; then ` +
                 `    echo "API_CONTRACT_FROZEN_OK sha=$(sha256sum "$CONTRACT" 2>/dev/null | cut -d' ' -f1)"; ` +
                 `  else ` +
-                `    echo "API_CONTRACT_TSC_FAILED — the frozen contract does not typecheck; a malformed stub would backfire on every importer (E4-S2). Fix the .d.ts:"; ` +
-                `    tail -40 /tmp/contract-tsc.log; exit 1; ` +
+                `    echo "API_CONTRACT_TSC_WARN — the contract did not typecheck in isolation (may be import resolution, not a real defect) — surfaced, NOT blocking (E4-S2):"; ` +
+                `    tail -20 /tmp/contract-tsc.log; ` +
                 `  fi; ` +
-                `else echo "API_CONTRACT_FROZEN_OK (no tsconfig — tsc gate skipped)"; fi`,
+                `else echo "API_CONTRACT_FROZEN_OK (local tsc/tsconfig unavailable — typecheck skipped)"; fi`,
               timeout: 120000,
               captureAs: 'API_CONTRACT_FREEZE_OUTPUT',
-              expectExitCode: 0,
-              onFail: { action: 'fail' as const, injectAs: 'API_CONTRACT_ERROR' },
-              loopTo: 'api-author',
             },
           ] as unknown as PipelineStep[])
         : ([] as PipelineStep[])),
