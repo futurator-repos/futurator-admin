@@ -80,6 +80,14 @@ function verdictFromCounts(
 // `interaction-gated` so the operator knows the test is a candidate for
 // Accept rather than send-back. Everything else is `render` (a real fail is a
 // likely code defect → send back to dev).
+// Phase0 (2026-06-23) — structural QA-contract failure rationales (emitted by
+// the qa-judge steps). These are not product defects to triage as render vs
+// interaction-gated — they are "the test could not honestly run". They ALWAYS
+// block and are never softened to uncertain. Keep in sync with the rationale
+// prefixes emitted in visual-qa-pipeline.ts (CONTRACT_INCOMPLETE / FLOW_NOOP /
+// SEAM_ABSENT / SEAM_NEVER_PUBLISHED).
+const STRUCTURAL_BLOCK_RE = /^(CONTRACT_INCOMPLETE|FLOW_NOOP|SEAM_ABSENT|SEAM_NEVER_PUBLISHED)\b/;
+
 const INTERACTION_GATED_RE =
   /\b(after|once|when|until|eventually|over time|eventually|eventually)\b|\b(score|speed|accelerat\w*|velocity|fps|frame rate)\b|\bexceed\w*\b|\b(playing|gameplay|played|elapsed|seconds?|minutes?|ticks?)\b|\b(press|keypress|keyboard|click\w*|tap\w*|scroll\w*|hover\w*|drag\w*|swipe\w*)\b|\b(motion|moving|moves|animat\w*|transition\w*|spawn\w*)\b/i;
 // Step-0.6 (2026-06-05) — the judge now self-classifies observability
@@ -664,7 +672,16 @@ function buildVqaRollup(
         break;
       case 'fail':
         if (isAccepted) accepted += 1;
-        else if (r.failureClass === 'interaction-gated') {
+        else if (STRUCTURAL_BLOCK_RE.test(r.rationale ?? '')) {
+          // Phase0 (2026-06-23) — structural QA-contract failures ALWAYS block.
+          // CONTRACT_INCOMPLETE (L2 with no flow), FLOW_NOOP (flow had no visible
+          // effect), SEAM_ABSENT/SEAM_NEVER_PUBLISHED (verifiability seam never
+          // ran) must NOT be re-bucketed to non-blocking 'uncertain' even when the
+          // AC wording looks interaction-gated — a fake/no-op L2 must never slip
+          // through as a soft pass (the pamcan6 false-positive class).
+          fail += 1;
+          failures.push(r);
+        } else if (r.failureClass === 'interaction-gated') {
           // FIX2 (2026-06-18) — an interaction-gated "fail" is a static-frame
           // limitation, not a code defect (the judge tagged it not-observable,
           // or the expect is motion/time/input-gated). It must NOT block a
