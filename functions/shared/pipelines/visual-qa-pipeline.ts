@@ -971,10 +971,34 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `// L1 results' cost contributes to the running plan budget — load it.`,
           `let runningCost = 0;`,
           `try { const l1 = JSON.parse(fs.readFileSync('${tmpResultsDir}/l1-results.json', 'utf8')); runningCost = l1.reduce((s, r) => s + (r.costUsd || 0), 0); } catch {}`,
+          // Phase0 (2026-06-23) — load the evidence-integrity sidecar so the L2
+          // judge can detect no-op flows (frame byte-identical to the idle
+          // baseline) before spending a Sonnet call. ei.tests[id].identical is
+          // already computed by qa-prepare.
+          `let ei = null; try { ei = JSON.parse(fs.readFileSync('${tmpResultsDir}/evidence-integrity.json', 'utf8')); } catch (e) {}`,
           `function judgeOne(t) { return new Promise((resolve) => {`,
           `  const start = Date.now();`,
           `  const wallclockMs = (t.budgetWallclockSec ? t.budgetWallclockSec * 1000 : defaultWallclockMs);`,
           `  const screenshotUrl = cdnPrefix + t.id + '.png';`,
+          // Phase0 RULE-1 (CONTRACT_INCOMPLETE) — an L2 ("interaction flow") test
+          // that arrives with NO flow ran ZERO interactions; the capture loop
+          // screenshotted the idle frame (runOne), identical to an L1. Judging it
+          // as "post-interaction" is how pamcan6 AC-S7-4 false-PASSed. Block it as
+          // a structural contract failure; never hand the idle frame to the judge.
+          // observability:'observable' keeps it OUT of the interaction-gated
+          // non-blocking re-bucket (this MUST block — author a probe / build it).
+          `  if (!Array.isArray(t.flow) || t.flow.length === 0) {`,
+          `    resolve({ testId: t.id, level: 'L2', verdict: 'fail', observability: 'observable', rationale: 'CONTRACT_INCOMPLETE: L2 test has no executable flow (no interaction ran) — author a press/wait/assert probe, or the interactive feature is not built', screenshotUrl, costUsd: 0, durationMs: Date.now() - start });`,
+          `    return;`,
+          `  }`,
+          // Phase0 FLOW_NOOP — the flow ran but produced a frame byte-identical to
+          // the shared idle baseline (bad selector / ignored key / unmounted
+          // window.__harness). No visible effect ⇒ not a real post-interaction
+          // frame. Block; do not let the judge score the idle frame as a pass.
+          `  if (ei && ei.tests && ei.tests[t.id] && ei.tests[t.id].identical) {`,
+          `    resolve({ testId: t.id, level: 'L2', verdict: 'fail', observability: 'observable', rationale: 'FLOW_NOOP: post-interaction frame is byte-identical to the idle baseline (flow had no visible effect — check selectors/keys and that window.__harness is mounted)', screenshotUrl, costUsd: 0, durationMs: Date.now() - start });`,
+          `    return;`,
+          `  }`,
           // 2026-06-01 — judge reads LOCAL screenshot files via the Read tool
           // (sandbox can't fetch the CDN URL). Flow shots + the base shot map to
           // their on-disk paths; screenshotUrl stays for the gallery link.
@@ -991,7 +1015,14 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `    return;`,
           `  }`,
           `  const judgeText = t.judge || ('Test expectation: ' + (t.expect || ''));`,
-          `  const prompt = ['You are a Visual QA judge for a multi-screenshot behavioral test.', 'Use the Read tool to open each of these screenshot image files in order:', realShots.map((u, i) => '  ' + (i + 1) + '. ' + u).join('\\n'), '', judgeText, '', 'NOTE: these screenshots are captured AFTER the declared probe interactions (clicks, key presses, elapsed/clock time) — they show POST-INTERACTION state, not the idle load frame.', 'Reply on ONE line in this exact format:', 'VERDICT: PASS|FAIL|UNCERTAIN [observable|not-observable] — <one-line rationale>', '', 'The bracket tag states whether the expectation is observable in these post-interaction frames. Decide SEMANTICALLY what the expectation needs. Because the interactions WERE executed, you MAY FAIL a frame that contradicts the expected post-action state. Reserve UNCERTAIN for a genuinely ambiguous or missing image, not for "the idle frame cannot show it".'].join('\\n');`,
+          // Phase0 (2026-06-23) — feed the ACTUAL probe step log into the prompt so
+          // the judge knows WHICH interactions executed (and which failed), instead
+          // of being told unconditionally that the frame is post-interaction. A
+          // flow where the key step failed (bad selector / ignored key) must NOT
+          // read as fully-interacted — that is the false-pos/neg source.
+          `  let stepSummary = 'Probe step log unavailable.';`,
+          `  try { const sl = JSON.parse(fs.readFileSync(shotDir + t.id + '-flow.json', 'utf8')); const oks = sl.filter(s => s.ok).map(s => s.action); const bad = sl.filter(s => !s.ok); stepSummary = 'Probe steps that EXECUTED: ' + (oks.join(', ') || '(none)') + (bad.length ? '. Steps that FAILED (did NOT take effect): ' + JSON.stringify(bad).slice(0, 240) : '. All declared steps succeeded.'); } catch (e) {}`,
+          `  const prompt = ['You are a Visual QA judge for a multi-screenshot behavioral test.', 'Use the Read tool to open each of these screenshot image files in order:', realShots.map((u, i) => '  ' + (i + 1) + '. ' + u).join('\\n'), '', judgeText, '', stepSummary, 'These screenshots were captured AFTER the steps listed above ran.', 'Reply on ONE line in this exact format:', 'VERDICT: PASS|FAIL|UNCERTAIN [observable|not-observable] — <one-line rationale>', '', 'Decide SEMANTICALLY what the expectation needs. If the steps required to REACH the expected state did NOT execute (see failed steps above), the expectation is UNVERIFIED — return UNCERTAIN, not FAIL. If the necessary steps DID execute, you MAY FAIL a frame that contradicts the expected post-action state. Reserve UNCERTAIN for a genuinely ambiguous or missing image.'].join('\\n');`,
           `  const child = spawn('claude', ['-p', prompt, '--model', model, '--output-format', 'text', '--allowedTools', 'Read'], { stdio: ['ignore', 'pipe', 'pipe'], timeout: wallclockMs });`,
           `  let out = '';`,
           `  child.stdout.on('data', d => { out += d.toString(); });`,
