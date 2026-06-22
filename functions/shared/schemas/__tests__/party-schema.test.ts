@@ -10,6 +10,8 @@ import {
   brownfieldProjectInputSchema,
   createPartyProjectInputSchema,
   refreshProjectParamsSchema,
+  assessProjectParamsSchema,
+  assessProjectBodySchema,
   updateMigrationInputSchema,
   docUploadUrlInputSchema,
   docSyncInputSchema,
@@ -336,6 +338,41 @@ describe('refreshProjectParamsSchema', () => {
 
   it('rejects an invalid projectId', () => {
     expect(refreshProjectParamsSchema.safeParse({ projectId: 'UPPER' }).success).toBe(false);
+  });
+});
+
+describe('assessProjectParamsSchema (Refactoring Assessment Module — Epic B1)', () => {
+  it('accepts a valid projectId', () => {
+    expect(assessProjectParamsSchema.safeParse({ projectId: 'applicator' }).success).toBe(true);
+  });
+
+  it('rejects an invalid projectId', () => {
+    expect(assessProjectParamsSchema.safeParse({ projectId: 'UPPER' }).success).toBe(false);
+  });
+});
+
+describe('assessProjectBodySchema', () => {
+  it('accepts an empty body (bare assess runs a default recon)', () => {
+    expect(assessProjectBodySchema.safeParse({}).success).toBe(true);
+  });
+
+  it('accepts the full opt set', () => {
+    const r = assessProjectBodySchema.safeParse({
+      src: 'app',
+      skipGraphify: true,
+      runL3: true,
+      topN: 40,
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('rejects topN out of range', () => {
+    expect(assessProjectBodySchema.safeParse({ topN: 9999 }).success).toBe(false);
+    expect(assessProjectBodySchema.safeParse({ topN: 0 }).success).toBe(false);
+  });
+
+  it('rejects a non-string src', () => {
+    expect(assessProjectBodySchema.safeParse({ src: 123 }).success).toBe(false);
   });
 });
 

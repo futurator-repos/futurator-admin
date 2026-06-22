@@ -181,6 +181,26 @@ export const refreshProjectParamsSchema = z.object({
 });
 
 /**
+ * Refactoring Assessment Module (Epic B1) — path param for
+ * `POST /api/party/projects/:id/assess`. Mirrors the refresh-param shape.
+ */
+export const assessProjectParamsSchema = z.object({
+  projectId: projectIdSchema,
+});
+
+/**
+ * Optional request body for the assess endpoint. Every field is optional so a
+ * bare `POST` runs a default recon. `runL3`/`topN` gate the Epic C adjudication
+ * (ignored by the Epic B recon stage, kept for forward-compat).
+ */
+export const assessProjectBodySchema = z.object({
+  src: z.string().min(1).max(128).optional(),
+  skipGraphify: z.boolean().optional(),
+  runL3: z.boolean().optional(),
+  topN: z.number().int().min(1).max(500).optional(),
+});
+
+/**
  * Party docs are scoped. `session` docs belong to a single debate (S3 key
  * `party-docs/<projectId>/_session/<sessionId>/<file>`); `shared` docs are
  * project-level knowledge visible in every debate of the project

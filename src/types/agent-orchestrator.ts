@@ -194,6 +194,20 @@ export interface AgentJob {
       reportPath?: string | null;
     } | null;
   };
+
+  /**
+   * Refactoring Assessment Module (Epic B) — denormalized headline summary
+   * written by the daemon's `executeRefactorAuditJob` on terminal status, so
+   * the hotspot dashboard can render counts straight from the polled job.
+   * Mirror of `AgentJob.refactorAuditSummary` in
+   * `functions/shared/types/agent-orchestrator.ts`.
+   */
+  refactorAuditSummary?: {
+    hotspotCount: number;
+    counts: Record<string, number>;
+    auditId?: string;
+    reportPath: string;
+  };
 }
 
 // ── Events ──

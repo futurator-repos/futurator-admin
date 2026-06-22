@@ -70,6 +70,7 @@ type AppJobMatchRow = {
   skillInstallPayload?: { projectSlug?: string; appId?: string };
   reflectorPayload?: { projectSlug?: string };
   remediationMerge?: { appId?: string };
+  refactorAuditPayload?: { projectId?: string };
 };
 
 /**
@@ -101,7 +102,8 @@ function jobBelongsToApp(row: AppJobMatchRow, appId: string): boolean {
     row.skillInstallPayload?.projectSlug === appId ||
     row.skillInstallPayload?.appId === appId ||
     row.reflectorPayload?.projectSlug === appId ||
-    row.remediationMerge?.appId === appId
+    row.remediationMerge?.appId === appId ||
+    row.refactorAuditPayload?.projectId === appId
   );
 }
 
@@ -125,7 +127,7 @@ export async function listAppJobIds(appId: string): Promise<string[]> {
       new ScanCommand({
         TableName: TABLE_NAMES.agentJobs,
         ProjectionExpression:
-          'jobId, workingDir, appBootstrapPayload, skillScoutPayload, skillInstallPayload, reflectorPayload, remediationMerge',
+          'jobId, workingDir, appBootstrapPayload, skillScoutPayload, skillInstallPayload, reflectorPayload, remediationMerge, refactorAuditPayload',
         ExclusiveStartKey,
       }),
     );

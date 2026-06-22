@@ -108,6 +108,8 @@ import {
   docScopeQuerySchema,
   type DocScope,
   refreshProjectParamsSchema,
+  assessProjectParamsSchema,
+  assessProjectBodySchema,
   updateMigrationInputSchema,
 } from '../shared/schemas/party-schema';
 import {
@@ -7008,6 +7010,83 @@ app.post('/api/party/projects/:id/refresh', async (c) => {
       ...(project.envVars && Object.keys(project.envVars).length > 0
         ? { envVars: project.envVars }
         : {}),
+    },
+  });
+
+  return c.json({ jobId, projectId: parsed.data.projectId }, 202);
+});
+
+/**
+ * Refactoring Assessment Module (Epic B1) — enqueue a `refactor-audit` job for
+ * a migrated brownfield project. The daemon runs the deterministic recon chain
+ * (`recon.mjs`, ~0 LLM tokens) on the EC2 clone and streams `assess.*` events.
+ * Report-only → Create plan: this NEVER mutates the assessed code.
+ *
+ * Mirrors the refresh route but takes NO refresh lock — an audit is read-only,
+ * so it rides only the PROJECT_BUSY session guard.
+ *
+ * Errors:
+ *   400 VALIDATION_ERROR       — bad projectId / body
+ *   404 NotFound               — projectId missing
+ *   400 INVALID_FOR_GREENFIELD — project.kind === 'greenfield'
+ *   409 INVALID_STATE          — brownfield clone has no path on disk
+ *   409 PROJECT_BUSY           — a session for this project is PROCESSING
+ */
+app.post('/api/party/projects/:id/assess', async (c) => {
+  const projectId = c.req.param('id');
+  const parsed = assessProjectParamsSchema.safeParse({ projectId });
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid projectId');
+  }
+
+  const rawBody = (await c.req.json().catch(() => ({}))) as unknown;
+  const parsedBody = assessProjectBodySchema.safeParse(rawBody ?? {});
+  if (!parsedBody.success) {
+    throw new ValidationError(parsedBody.error.errors[0]?.message || 'invalid assess body');
+  }
+
+  const project = await partyProjectsRepo.getProject(parsed.data.projectId);
+  if (!project) throw new NotFoundError('PartyProject', parsed.data.projectId);
+  if (project.kind !== 'brownfield') {
+    throw new AppError(
+      'INVALID_FOR_GREENFIELD',
+      'Assess is only valid for migrated brownfield Party projects',
+      400,
+    );
+  }
+  if (!project.path) {
+    throw new AppError('INVALID_STATE', 'Brownfield project has no clone path on disk', 409);
+  }
+
+  const sessionBusy = await partySessionsRepo.hasProcessingSession(parsed.data.projectId);
+  if (sessionBusy) {
+    throw new AppError(
+      'PROJECT_BUSY',
+      'A session for this project is currently processing a turn',
+      409,
+    );
+  }
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: c.get('user').userId,
+    workingDir: project.path,
+    jobType: 'refactor-audit',
+    projectId: parsed.data.projectId,
+    refactorAuditPayload: {
+      projectId: parsed.data.projectId,
+      projectPath: project.path,
+      ...(parsedBody.data.src ? { src: parsedBody.data.src } : {}),
+      ...(parsedBody.data.skipGraphify !== undefined
+        ? { skipGraphify: parsedBody.data.skipGraphify }
+        : {}),
+      ...(parsedBody.data.runL3 !== undefined ? { runL3: parsedBody.data.runL3 } : {}),
+      ...(parsedBody.data.topN !== undefined ? { topN: parsedBody.data.topN } : {}),
     },
   });
 

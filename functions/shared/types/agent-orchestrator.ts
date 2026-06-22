@@ -363,7 +363,11 @@ export interface AgentJob {
     // Plan Retrospect / The Assessor (plan-retrospect-spec §4b). The API
     // enqueues these after storing the deterministic slice; the daemon's
     // executeScorecardAssessJob grades the stage's [LLM] criteria.
-    | 'scorecard-assess';
+    | 'scorecard-assess'
+    // Refactoring Assessment Module (Epic B). Deterministic recon (~0 LLM)
+    // over a migrated brownfield clone + optional L3 adjudication (Epic C).
+    // Daemon's executeRefactorAuditJob runs recon.mjs as a plain Node child.
+    | 'refactor-audit';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -511,6 +515,44 @@ export interface AgentJob {
     stage: 'concept' | 'development' | 'qa' | 'deployment' | 'publish' | 'overview';
     rubricVersion: string;
     pipelineVersion?: string;
+  };
+
+  /**
+   * Refactoring Assessment Module (Epic B). Set when `jobType === 'refactor-audit'`.
+   * The API enqueues this after the operator clicks "Assess" on a migrated
+   * brownfield project; the daemon's `executeRefactorAuditJob` runs `recon.mjs`
+   * as a plain Node child (deterministic, ~0 LLM tokens), then — when `runL3`
+   * is set — the optional Epic C `/assess-codebase` adjudication. `projectPath`
+   * is the EC2 clone (== `workingDir`) and the `<repo>` arg to recon.
+   *
+   * The full superset (incl. `runL3`/`topN`) is declared here even though
+   * Epic B ignores the L3 gates — keeping the type stable for Epic C.
+   */
+  refactorAuditPayload?: {
+    projectId: string;
+    projectPath: string;
+    /** Source subdir passed to recon (`--src`). Default 'src'. */
+    src?: string;
+    /** Resume: reuse an existing fresh `graph.json` (`--skip-graphify`). */
+    skipGraphify?: boolean;
+    /** Epic C gate — run `/assess-codebase` adjudication after recon. */
+    runL3?: boolean;
+    /** Hotspots passed to L3 (default 40, matches `hotspot-detect --top`). */
+    topN?: number;
+  };
+
+  /**
+   * Small denormalized summary written back onto the job row by
+   * `executeRefactorAuditJob` (like `reflectorProposalCount`), so the UI can
+   * render headline counts from the job without re-reading `hotspots.json`.
+   */
+  refactorAuditSummary?: {
+    hotspotCount: number;
+    counts: Record<string, number>;
+    /** FK into futurator-refactor-audits (Epic C durable persistence). */
+    auditId?: string;
+    /** `<projectPath>/graphify-out/REPORT.md`. */
+    reportPath: string;
   };
 
   /**
