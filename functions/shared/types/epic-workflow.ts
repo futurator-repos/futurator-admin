@@ -404,6 +404,17 @@ export interface EpicStory {
   // ── Touch-point inference (Epic 3) ──
   touchPoints?: string[];
   /**
+   * D3-2 (2026-06-22) — the source files this story's DEV agent ACTUALLY edited,
+   * as measured post-DEV by the dev-scope gate (`dev-scope-check`, story-pipeline).
+   * Distinct from `touchPoints` (what the PM *declared*): the gate enforces
+   * against the declared set, and this records the *measured* set so a future
+   * wave computation serializes stories that genuinely collide on a file neither
+   * declared. NEVER fed back into the gate's declared set (that would rubber-stamp
+   * an out-of-scope edit); it only widens collision detection in
+   * `computeStoryWavesWithTouchPoints`. Persisted via `updateStoryActualTouchPoints`.
+   */
+  actualTouchPoints?: string[];
+  /**
    * Story D.1 — file paths or glob patterns the story MUST NOT modify. The
    * REVIEWER pre-fills `scope-forbidden: fail — modified <file> in
    * forbiddenAreas` ACs in the structured `---REVIEW_CRITERIA---` block when

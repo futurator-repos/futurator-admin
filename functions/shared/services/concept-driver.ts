@@ -218,6 +218,14 @@ export async function driveConcept(
       return { kind: 'noop', reason: 'pm-plan already enqueued' };
     }
   }
+  // D4 (2026-06-22) — COMPACT RETRY. Reaching here with a prior pm-plan job set
+  // means that attempt was TERMINAL-but-empty (it produced no epics — the
+  // CLAUDE_CODE_MAX_OUTPUT_TOKENS overflow / mid-JSON truncation, or a reject).
+  // Re-firing the identical prompt would just overflow identically, so we run
+  // the re-generation in COMPACT mode (tighter ceilings + brevity directive)
+  // to deterministically aim for a smaller, closeable plan. Cures the
+  // re-overflow the cap-raise alone only mitigated.
+  const isCompactRetry = !!plan.conceptPmPlanJobId;
   const boilerplateType = await boilerplateOf(plan, deps);
   const pmPipeline = generatePmPlanPipeline({
     planName: plan.name,
@@ -235,6 +243,8 @@ export async function driveConcept(
     // the PM shards the specs into epics/stories instead of re-deriving scope
     // from the bare intent (the "planner ignored the docs" fix).
     priorArtifacts: PRIOR_ARTIFACTS_PLACEHOLDER,
+    // D4 — re-fire smaller after a terminal-empty (overflow) prior attempt.
+    compact: isCompactRetry,
   });
   const jobId = deps.uuid();
   const ts = deps.now();

@@ -22,7 +22,9 @@ function makeStory(id: string, wave: number, overrides: Partial<EpicStory> = {})
   };
 }
 
-function makeEpic(stories: EpicStory[]): Pick<
+function makeEpic(
+  stories: EpicStory[],
+): Pick<
   EpicWorkflow,
   | 'epicId'
   | 'title'
@@ -56,10 +58,7 @@ describe('findFirstWave', () => {
   });
 
   it('treats undefined wave as 0', () => {
-    const epic = makeEpic([
-      makeStory('S-1', 2),
-      { ...makeStory('S-2', 0), wave: undefined },
-    ]);
+    const epic = makeEpic([makeStory('S-1', 2), { ...makeStory('S-2', 0), wave: undefined }]);
     expect(findFirstWave(epic)).toBe(0);
   });
 
@@ -221,5 +220,60 @@ describe('launchPipelineWave', () => {
     expect(input).toEqual(frozen);
     expect(input[0].jobId).toBeUndefined();
     expect(input[0].status).toBe('pending');
+  });
+
+  // D3-2 (2026-06-22) — mid-plan re-serialize. Two pending wave-0 siblings with
+  // DISJOINT declared touch points but the SAME measured actualTouchPoints (a
+  // file neither declared — the pacmanv3 pacman.ts collision). The launcher must
+  // defer one out of wave 0 so they no longer collide at the merge gate, and the
+  // deferral must persist on updatedStories.
+  it('defers a pending sibling that collides only on measured actualTouchPoints', async () => {
+    const epic = makeEpic([
+      makeStory('S-1', 0, {
+        touchPoints: ['src/feature-a.ts'],
+        actualTouchPoints: ['src/game/pacman.ts'],
+      }),
+      makeStory('S-2', 0, {
+        touchPoints: ['src/feature-b.ts'],
+        actualTouchPoints: ['src/game/pacman.ts'],
+      }),
+    ]);
+
+    const result = await launchPipelineWave(epic, 0, 'alice', '2026-04-20T00:00:00Z', {
+      generatePipeline,
+      createJob,
+      uuid,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Only ONE story launches in wave 0 now (the other was bumped to wave 1).
+    expect(result.jobIds).toHaveLength(1);
+    expect(createJob).toHaveBeenCalledOnce();
+    // The bumped sibling persists at its new wave and is NOT queued this launch.
+    const byId = Object.fromEntries(result.updatedStories.map((s) => [s.storyId, s]));
+    const launched = byId['S-1'].status === 'queued' ? byId['S-1'] : byId['S-2'];
+    const deferred = byId['S-1'].status === 'queued' ? byId['S-2'] : byId['S-1'];
+    expect(launched.wave).toBe(0);
+    expect(launched.jobId).toBeDefined();
+    expect(deferred.wave).toBe(1);
+    expect(deferred.status).toBe('pending');
+    expect(deferred.jobId).toBeUndefined();
+  });
+
+  it('first launch is byte-identical with no actualTouchPoints (D3-2 no-op)', async () => {
+    // Same two disjoint-declared siblings, but NO measurements yet → both launch.
+    const epic = makeEpic([
+      makeStory('S-1', 0, { touchPoints: ['src/feature-a.ts'] }),
+      makeStory('S-2', 0, { touchPoints: ['src/feature-b.ts'] }),
+    ]);
+    const result = await launchPipelineWave(epic, 0, 'alice', '2026-04-20T00:00:00Z', {
+      generatePipeline,
+      createJob,
+      uuid,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.jobIds).toHaveLength(2); // both run — no measured collision
   });
 });

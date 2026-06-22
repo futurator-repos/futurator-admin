@@ -193,6 +193,14 @@ describe('driveConcept (Story 3.2 — driver)', () => {
     const h = harness(plan, jobs);
     const res = await driveConcept(plan, h.deps);
     expect(res).toMatchObject({ kind: 'enqueued-pm-plan' });
+
+    // D4 (2026-06-22) — the re-fire runs in COMPACT mode so it aims smaller
+    // than the attempt that overflowed (instead of re-overflowing identically).
+    const refired = h.created[h.created.length - 1] as unknown as {
+      pipeline?: { steps?: Array<{ prompt?: string }> };
+    };
+    const pmPrompt = refired.pipeline?.steps?.map((s) => s.prompt || '').join('\n') ?? '';
+    expect(pmPrompt).toContain('COMPACT RETRY');
   });
 
   it('does NOT re-enqueue a COMPLETED pm-plan that DID produce epics', async () => {

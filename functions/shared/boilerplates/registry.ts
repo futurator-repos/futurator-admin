@@ -994,6 +994,203 @@ const CLAUDE_MD_AUGMENTS: Array<{ path: string; content: string }> = [
   { path: 'CLAUDE.md', content: CLAUDE_MD_TEMPLATE },
 ];
 
+// ── D1-A6/A7 (2026-06-22) — generic app-state verifiability seam + non-game
+// scaffold contract for the nextjs-dashboard starter ───────────────────────
+//
+// The canvas-game seam (above) exposes GAME state ({status,score,tick,…}).
+// Real multi-route apps (dashboards, SaaS, admin panels) have no game loop —
+// their deterministic, QA-readable state is "where am I / am I signed in / did
+// my last action succeed". This generic seam exposes exactly that, so a
+// route-based app gets an L2-state oracle (not screenshot-only judging). Shape
+// is generator-owned (tamper-guarded) and additive: a story may add fields to
+// the snapshot, but must not author the seam itself.
+
+const DASHBOARD_SNAPSHOT_SHAPE: Record<string, { type: string; enum?: string[] }> = {
+  route: { type: 'string' },
+  authStatus: { type: 'string', enum: ['loading', 'anonymous', 'authenticated'] },
+  // `lastMutation` is an object|null ({ name, ok, at }) — declared as object so
+  // probes can `assert snapshot.lastMutation.ok eq true` after a create/update.
+  lastMutation: { type: 'object' },
+  ready: { type: 'boolean' },
+};
+
+const DASHBOARD_HARNESS_SCHEMA_JSON = `${JSON.stringify(
+  { globalKey: 'window.__harness', snapshot: DASHBOARD_SNAPSHOT_SHAPE, events: [] },
+  null,
+  2,
+)}\n`;
+
+// The REAL seam module (additive on nextjs-base, which already compiles). A
+// component calls `useAppHarness().setRoute(...)` / `.setAuthStatus(...)` /
+// `.recordMutation(...)`; the provider publishes `window.__harness` under the
+// NEXT_PUBLIC_TEST_HARNESS guard (QA sets it; production never does → the seam
+// is tree-shaken out). snapshot() reads a ref so it's always the latest state.
+const APP_HARNESS_SEAM_TSX = `'use client';
+/**
+ * Generic app-state verifiability seam — nextjs-dashboard starter (D1-A6).
+ *
+ * PRE-BAKED — do NOT author or edit this seam (the story-pipeline tamper-check
+ * reverts edits to __harness.schema.json). Wrap your app in <AppHarnessProvider>
+ * (already wired in the root layout) and call the imperative API from your
+ * routes/components to expose deterministic state to QA probes:
+ *   - setRoute(pathname)          on navigation
+ *   - setAuthStatus(status)       when auth resolves
+ *   - recordMutation(name, ok)    after a create/update/delete settles
+ *
+ * QA reads window.__harness.snapshot() → { route, authStatus, lastMutation, ready }.
+ * PRODUCTION-ABSENT: gated on NEXT_PUBLIC_TEST_HARNESS === '1' (QA dev server
+ * only); a normal build tree-shakes the publish out. DO NOT remove the guard.
+ */
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+
+export type AuthStatus = 'loading' | 'anonymous' | 'authenticated';
+
+export interface LastMutation {
+  name: string;
+  ok: boolean;
+  at: number;
+}
+
+export interface AppSnapshot {
+  route: string;
+  authStatus: AuthStatus;
+  lastMutation: LastMutation | null;
+  ready: boolean;
+}
+
+export interface AppHarnessApi {
+  setRoute(route: string): void;
+  setAuthStatus(status: AuthStatus): void;
+  recordMutation(name: string, ok: boolean): void;
+  snapshot(): AppSnapshot;
+}
+
+const AppHarnessContext = createContext<AppHarnessApi | null>(null);
+
+export function AppHarnessProvider({
+  children,
+  initialRoute = '/',
+}: {
+  children: ReactNode;
+  initialRoute?: string;
+}) {
+  const snap = useRef<AppSnapshot>({
+    route: initialRoute,
+    authStatus: 'loading',
+    lastMutation: null,
+    ready: false,
+  });
+  const [, setTick] = useState(0);
+  const bump = useCallback(() => setTick((t) => t + 1), []);
+
+  const apiRef = useRef<AppHarnessApi | null>(null);
+  if (apiRef.current === null) {
+    apiRef.current = {
+      setRoute: (route) => {
+        snap.current = { ...snap.current, route };
+        bump();
+      },
+      setAuthStatus: (authStatus) => {
+        snap.current = { ...snap.current, authStatus };
+        bump();
+      },
+      recordMutation: (name, ok) => {
+        snap.current = { ...snap.current, lastMutation: { name, ok, at: Date.now() } };
+        bump();
+      },
+      snapshot: () => snap.current,
+    };
+  }
+  const api = apiRef.current;
+
+  useEffect(() => {
+    snap.current = { ...snap.current, ready: true };
+    if (typeof window === 'undefined') return;
+    if (process.env.NEXT_PUBLIC_TEST_HARNESS !== '1') return;
+    (window as unknown as { __harness?: unknown }).__harness = {
+      ready: true,
+      snapshot: () => api.snapshot(),
+      events: [] as unknown[],
+    };
+  }, [api]);
+
+  return <AppHarnessContext.Provider value={api}>{children}</AppHarnessContext.Provider>;
+}
+
+export function useAppHarness(): AppHarnessApi {
+  const ctx = useContext(AppHarnessContext);
+  if (ctx === null) {
+    throw new Error('useAppHarness must be used within <AppHarnessProvider>');
+  }
+  return ctx;
+}
+`;
+
+const NEXTJS_DASHBOARD_SCAFFOLD_CONTRACT = `# Scaffold contract — nextjs-dashboard
+
+## Pre-baked (DO NOT generate stories that recreate)
+- Next.js 16 + TS strict + Tailwind v4 + shadcn primitives (from nextjs-base)
+- \`src/lib/app-harness.tsx\` — the test-only \`window.__harness\` app-state seam
+  (\`AppHarnessProvider\` + \`useAppHarness\`). PRE-BAKED — do NOT author or edit it.
+  Wrap is already in the root layout; call \`setRoute\` / \`setAuthStatus\` /
+  \`recordMutation\` from your routes so QA \`assert\` probes can read state.
+- \`scripts/generate-wiring.mjs\` + \`src/features/\` — the feature registry
+  (additive wiring; parallel stories never collide on a hot file)
+
+## This is a MULTI-ROUTE app — slice by ROUTE, not by single-page feature
+- \`/\` is the dashboard shell / landing; real features live on their OWN routes
+  (\`/billing\`, \`/users\`, \`/reports/<id>\`). A feature story MUST add a page under
+  \`src/app/<route>/page.tsx\` and a browser AC describing what that route shows.
+- Auth-gated surfaces: state the route's POST-navigation idle frame (a signed-in
+  view), NOT what \`/\` shows at first load.
+
+## Forbidden story patterns (PM must NOT emit)
+- "Define an app-state store / context for route+auth state" → use \`useAppHarness\`
+- "Author a window.__harness / test seam" → PRE-BAKED in \`src/lib/app-harness.tsx\`
+- "Set up Tailwind / tsconfig / Next config" → done in nextjs-base
+- "Install Next.js / React / TypeScript" → done in nextjs-base
+- "Bootstrap project from scratch" → done in nextjs-base
+
+## Required story patterns
+- "Add the <name> route at \`src/app/<route>/page.tsx\` rendering <surface>"
+- "Add the <resource> table/list with <columns> on the <route> route"
+- "Wire <action> (create/update/delete) and call \`recordMutation('<action>', ok)\`"
+- "Gate <route> behind auth; call \`setAuthStatus\` when the session resolves"
+
+## Authoring visual tests (QA probes)
+- \`appearance\` → ONE screenshot of the feature's ROUTE (post-navigation idle).
+- \`state\` / \`behavior\` → a \`flow:\` that navigates + acts, then \`assert\`s
+  \`window.__harness.snapshot()\` (PRE-BAKED seam) — e.g. after a create,
+  \`assert snapshot.lastMutation.ok eq true\`. Do NOT author an idle screenshot
+  for post-action state.
+- \`build\` → no visual test (a unit/typecheck covers it).
+The seam exposes \`{ route, authStatus, lastMutation, ready }\`. Assert those keys.
+
+## Conventions
+- One route = one \`src/app/<route>/page.tsx\`; shared UI under \`src/components/\`.
+- Call the seam from a client component on each route so QA can verify it.
+- Mount a feature by REGISTERING \`src/features/<name>.feature.tsx\` (additive) OR
+  by adding its route page — both are disjoint paths, so parallel stories never
+  collide on a hot wiring file.
+`;
+
+const NEXTJS_DASHBOARD_AUGMENTS: Array<{ path: string; content: string }> = [
+  // SCAFFOLD.md FIRST — convention (mirror of NEXTJS_DASHBOARD_SCAFFOLD_CONTRACT).
+  { path: 'SCAFFOLD.md', content: NEXTJS_DASHBOARD_SCAFFOLD_CONTRACT },
+  // Generator-owned seam shape contract (tamper-guarded).
+  { path: '__harness.schema.json', content: DASHBOARD_HARNESS_SCHEMA_JSON },
+  // The real, self-contained app-state seam module.
+  { path: 'src/lib/app-harness.tsx', content: APP_HARNESS_SEAM_TSX },
+];
+
 // PR-13 — nextjs-base config extracted to a top-level const so derivative
 // starter packs can spread it (`{ ...NEXTJS_BASE_PACK, type: 'nextjs-...' }`)
 // during the registry literal's construction. Inlining inside the literal
@@ -1006,6 +1203,11 @@ const NEXTJS_BASE_PACK: BoilerplateMetadata = {
   templateRepo: 'futurator-repos/template-nextjs',
   status: 'wired',
   domain: 'general',
+  // D1-A1 (2026-06-22) — this pack ships scripts/generate-wiring.mjs +
+  // src/features/*.feature.tsx (FEATURE_WIRING_AUGMENTS), so it uses the
+  // progressive-feature-registration model. Inherited by every nextjs-*
+  // starter via createStarterPack. sst/vite/mobile omit it → route-based.
+  wiring: 'feature-registry',
   capabilities: [
     'Generic Next.js 16 with App Router, TypeScript strict, Tailwind v4, shadcn primitives',
     "No domain-specific scaffolding — best fit when the intent doesn't match a more specific starter",
@@ -1481,6 +1683,23 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
       'frontend-design@anthropic-official',
       'algorithmic-art@anthropic-official',
     ],
+    // D1-A2/A3/A4/A10 (2026-06-22) — game-domain few-shots live HERE as DATA,
+    // not hardcoded in pm-plan-prompt.ts. The prompt pulls these when present
+    // and falls back to a domain-neutral spanning set otherwise, so a SaaS /
+    // dashboard / API plan is never dragged toward sprite/HUD framing. Spread
+    // the inherited base pmContext so framework/conventions/scaffoldedAlready
+    // are preserved (shallow override would otherwise drop them).
+    pmContext: {
+      ...NEXTJS_BASE_PACK.pmContext!,
+      exampleBrowserAc: [
+        'At game start (before any input) the canvas shows the player sprite standing on the ground band, with the score HUD reading "0" in the top-left corner.',
+        'After pressing Space once, the player sprite rises visibly above the ground band within 500ms, then falls back (a jump arc).',
+        'On collision with an obstacle, a "GAME OVER" overlay appears centered over the canvas.',
+      ],
+      exampleDomainTypes: 'GameStatus, Entity, GameState',
+      coupledSiblingExample:
+        'story A implements ghost movement/state, sibling B implements "Pacman eats a frightened ghost" — B\'s tests assume A\'s entities B never saw, both pass alone, and the merged union fails the wave gate.',
+    },
     augmentFiles: NEXTJS_CANVAS_GAME_AUGMENTS,
     scaffoldContract: NEXTJS_CANVAS_GAME_SCAFFOLD_CONTRACT,
     // VQA v3 E2 (H6/H8) — the verifiability seam. v1 ships for canvas-game
@@ -1527,7 +1746,17 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     displayName: 'Next.js — Dashboard',
     icon: '📊',
     domain: 'dashboard',
+    // D1-A7 (2026-06-22) — kept 'stub' (not yet selectable in the picker) until
+    // the augment set is e2e-verified on a real clone, BUT it now ships a REAL
+    // generic app-state seam + non-game scaffold contract (the augments below).
+    // The moment the operator verifies the clone compiles on EC2, flip to
+    // 'wired'. The seam/contract are real data today, so a dashboard plan gets
+    // first-class route + state-oracle support.
     status: 'stub',
+    // D1-A1 — multi-route app: features mount on real routes (NOT the
+    // single-page feature-registration model). Overrides the base's
+    // 'feature-registry' so the PM prompt renders route-mounting guidance.
+    wiring: 'route',
     capabilities: [
       'Recharts + tanstack-table primitives wired to URL state',
       'Filter / sort / pagination patterns with shareable URLs',
@@ -1546,6 +1775,33 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     // dashboard stories tend to be data-shape changes that are better
     // tested at the data-pipeline layer than via DOM tests.
     defaultSkillLoadout: ['frontend-design@anthropic-official'],
+    // D1-A7 — non-game scaffold contract (route-based required/forbidden patterns).
+    scaffoldContract: NEXTJS_DASHBOARD_SCAFFOLD_CONTRACT,
+    // D1-A6 — the generic app-state seam (real module shipped in augments below).
+    augmentFiles: NEXTJS_DASHBOARD_AUGMENTS,
+    // D1-A6 — generic app-state verifiability seam: route / auth / last-mutation.
+    // Mirrors GameState's role for non-game apps so `verify:'state'/'behavior'`
+    // ACs get a deterministic oracle instead of screenshot-only judging.
+    testHarness: {
+      globalKey: 'window.__harness',
+      readySignal: 'ready',
+      snapshotShape: Object.fromEntries(
+        Object.entries(DASHBOARD_SNAPSHOT_SHAPE).map(([k, v]) => [`snapshot.${k}`, v]),
+      ),
+    },
+    // D1-A2/A3/A4/A10 — non-game few-shots as DATA (dashboard voice), so a
+    // dashboard plan is never dragged toward sprite/HUD framing.
+    pmContext: {
+      ...NEXTJS_BASE_PACK.pmContext!,
+      exampleBrowserAc: [
+        'On the /reports route, the page shows a "Total Revenue" card with a numeric value and a line chart with at least one plotted series. FAIL if the card or chart is missing or shows "no data".',
+        'On the /users route, a table renders with a header row ("Name", "Email", "Role") and at least one data row. FAIL if the table is empty or absent.',
+        'After clicking "Add user" and submitting the form, a new row appears at the top of the users table. FAIL if no row is added.',
+      ],
+      exampleDomainTypes: 'User, Metric, DashboardConfig',
+      coupledSiblingExample:
+        'story A builds the "invoice list" route and sibling B builds "marking an invoice paid updates the account-balance card" — B\'s tests assume A\'s invoice rows B never saw, both pass alone, and the merged union fails the wave gate.',
+    },
   }),
 };
 

@@ -182,11 +182,65 @@ export function createEpicRepo({ ddb, tableName = DEFAULT_TABLE } = {}) {
     return { updated: true, storyId, index: idx };
   }
 
+  /**
+   * D3-2 (2026-06-22) — record the source files a story's DEV agent ACTUALLY
+   * edited (measured by the dev-scope gate), UNIONed with any previously
+   * recorded set. Distinct from `updateStoryTouchPoints` (which sets the
+   * DECLARED scope): this never feeds the gate's declared set — it only widens
+   * collision detection in `computeStoryWavesWithTouchPoints` so two siblings
+   * that both touched an undeclared shared file serialize on the next wave
+   * computation. Idempotent + monotonic (union grows, never shrinks).
+   *
+   * @param {string} epicId
+   * @param {string} storyId
+   * @param {string[]} actualTouchPoints - measured edited source files
+   * @returns {Promise<{updated:boolean, reason?:string, storyId?:string, merged?:string[]}>}
+   */
+  async function updateStoryActualTouchPoints(epicId, storyId, actualTouchPoints) {
+    if (!Array.isArray(actualTouchPoints)) {
+      return { updated: false, reason: 'actualTouchPoints must be an array' };
+    }
+    const clean = actualTouchPoints.filter((p) => typeof p === 'string' && p.trim().length > 0);
+    if (clean.length === 0) {
+      return { updated: false, reason: 'no actual touch points to record' };
+    }
+    const epic = await getEpicById(epicId);
+    if (!epic || !Array.isArray(epic.stories)) {
+      return { updated: false, reason: 'epic-or-stories-not-found' };
+    }
+    const idx = epic.stories.findIndex((s) => s.storyId === storyId);
+    if (idx === -1) {
+      return { updated: false, reason: 'story-not-found', storyId };
+    }
+    // Union with the existing measured set (monotonic; survives retries).
+    const existing = Array.isArray(epic.stories[idx].actualTouchPoints)
+      ? epic.stories[idx].actualTouchPoints
+      : [];
+    const merged = [...new Set([...existing, ...clean])].sort();
+    const now = new Date().toISOString();
+    await ddb.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { epicId },
+        UpdateExpression: `SET #stories[${idx}].#atp = :atp, #stories[${idx}].#atpAt = :now, #updatedAt = :now`,
+        ExpressionAttributeNames: {
+          '#stories': 'stories',
+          '#atp': 'actualTouchPoints',
+          '#atpAt': 'actualTouchPointsAt',
+          '#updatedAt': 'updatedAt',
+        },
+        ExpressionAttributeValues: { ':atp': merged, ':now': now },
+      }),
+    );
+    return { updated: true, storyId, index: idx, merged };
+  }
+
   return {
     getEpicById,
     persistInferenceResult,
     updateStoryStatus,
     persistStoryWorkSummary,
     updateStoryTouchPoints,
+    updateStoryActualTouchPoints,
   };
 }

@@ -58,10 +58,23 @@ export function computeStoryWaves(
  * obey constraint 1 (legacy plans / hand-written imports stay valid).
  * Deterministic: stories are placed in (dependency-wave, declaration-order)
  * order, so the same plan always serializes the same way.
+ *
+ * D3-2 (2026-06-22) — collision detection unions each story's DECLARED
+ * `touchPoints` with its MEASURED `actualTouchPoints` (the files its DEV agent
+ * actually edited on a prior run, recorded by the dev-scope gate). So two
+ * siblings that BOTH edited an undeclared shared file (pacmanv3: `pacman.ts`)
+ * are serialized on the NEXT wave computation — turning the merge-time collision
+ * the PM under-declared into a scheduler-time serialization. The union only
+ * adds constraints (more serialization of genuine collisions); it never lowers
+ * parallelism of stories that don't actually share a file.
  */
 export function computeStoryWavesWithTouchPoints(
   stories: Array<
-    Pick<EpicStory, 'storyId' | 'dependsOn'> & { touchPoints?: string[]; order?: number }
+    Pick<EpicStory, 'storyId' | 'dependsOn'> & {
+      touchPoints?: string[];
+      actualTouchPoints?: string[];
+      order?: number;
+    }
   >,
   opts: { epicWideSentinel?: string } = {},
 ): Map<string, number> {
@@ -84,7 +97,10 @@ export function computeStoryWavesWithTouchPoints(
   });
 
   for (const story of sorted) {
-    const raw = (story.touchPoints ?? []).map(normalize).filter(Boolean);
+    // D3-2 — union DECLARED + MEASURED touch points for collision detection.
+    const raw = [...(story.touchPoints ?? []), ...(story.actualTouchPoints ?? [])]
+      .map(normalize)
+      .filter(Boolean);
     const isEpicWide = raw.includes(sentinel);
     const paths = raw.filter((p) => p !== sentinel);
 
@@ -124,6 +140,75 @@ export function assignStoryWaves<T extends Pick<EpicStory, 'storyId' | 'dependsO
 ): (T & { wave: number })[] {
   const waves = computeStoryWaves(stories);
   return stories.map((s) => ({ ...s, wave: waves.get(s.storyId) ?? 0 }));
+}
+
+/**
+ * D3-2 (2026-06-22) — the mid-plan re-serialize CONSUMER (TS side, called from
+ * the wave launcher). Recompute the ideal wave assignment honoring DECLARED ∪
+ * MEASURED touch points (`computeStoryWavesWithTouchPoints` unions
+ * `actualTouchPoints`), then apply the new wave ONLY to a still-reassignable
+ * story (pending/draft/unset status) and ONLY when it moves FORWARD. This:
+ *   - serializes a still-pending sibling that now collides on a file neither
+ *     declared (the recorded actual edits finally change behavior);
+ *   - NEVER yanks a running/done story back, and never pulls a pending story
+ *     into an already-dispatched earlier wave (forward-only guard).
+ *
+ * No-op on a fresh plan (no story has `actualTouchPoints` until the dev-scope
+ * gate records one), so first-launch behavior is byte-identical. Only a
+ * re-launch after a prior run's measurements can change anything.
+ *
+ * @returns the (possibly) re-waved stories + the list of stories that moved.
+ */
+export function recomputePendingStoryWaves<
+  T extends Pick<EpicStory, 'storyId' | 'dependsOn'> & {
+    wave?: number;
+    status?: string;
+    touchPoints?: string[];
+    actualTouchPoints?: string[];
+    order?: number;
+  },
+>(
+  stories: T[],
+): { stories: T[]; changed: { storyId: string; fromWave: number; toWave: number }[] } {
+  if (!Array.isArray(stories) || stories.length === 0) {
+    return { stories: stories ?? [], changed: [] };
+  }
+  // Gate on MEASURED data: only re-serialize when at least one story has a
+  // recorded actualTouchPoints set. Without that, a from-scratch recompute would
+  // re-litigate DECLARED-touch-point waves that plan-apply already decided
+  // (e.g. intentionally co-scheduled stories), changing behavior for no reason.
+  // The whole point of D3-2 is to act on NEW (measured) collision info only.
+  const hasMeasured = stories.some(
+    (s) => Array.isArray(s.actualTouchPoints) && s.actualTouchPoints.length > 0,
+  );
+  if (!hasMeasured) {
+    return { stories, changed: [] };
+  }
+  const ideal = computeStoryWavesWithTouchPoints(
+    stories.map((s, i) => ({
+      storyId: s.storyId,
+      dependsOn: s.dependsOn ?? [],
+      touchPoints: s.touchPoints,
+      actualTouchPoints: s.actualTouchPoints,
+      order: s.order ?? i,
+    })),
+  );
+  const reassignable = (s: T) =>
+    s.status === undefined || s.status === null || s.status === 'pending' || s.status === 'draft';
+
+  const changed: { storyId: string; fromWave: number; toWave: number }[] = [];
+  const out = stories.map((s) => {
+    const cur = s.wave ?? 0;
+    const next = ideal.get(s.storyId) ?? cur;
+    // Forward-only, reassignable-only: never pull a story earlier, never move a
+    // running/done one.
+    if (reassignable(s) && next > cur) {
+      changed.push({ storyId: s.storyId, fromWave: cur, toWave: next });
+      return { ...s, wave: next };
+    }
+    return s;
+  });
+  return { stories: out, changed };
 }
 
 /** Group stories by their wave number. */

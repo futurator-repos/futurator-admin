@@ -92,9 +92,26 @@ function extractExt(seg) {
 }
 
 /**
- * Detect every pair of stories whose touchPoints overlap.
+ * The collision surface of a story = its DECLARED touchPoints UNIONed with its
+ * MEASURED actualTouchPoints (D3-2, 2026-06-22). The dev-scope gate records the
+ * source files a story's DEV agent actually edited; unioning them here means two
+ * siblings that both touched an undeclared shared file (the pacmanv3 pacman.ts
+ * collision) are detected as colliding and serialized on the next wave
+ * recompute — turning a merge-time conflict into a scheduler-time decision. The
+ * union only ADDS collisions (genuine shared files); it never hides a declared
+ * one. De-duplicated so a path declared AND measured isn't double-counted.
  *
- * @param {Array<{ storyId: string, touchPoints?: string[] }>} stories
+ * @param {{ touchPoints?: string[], actualTouchPoints?: string[] }} story
+ * @returns {string[]}
+ */
+function collisionSurface(story) {
+  return [...new Set([...(story.touchPoints || []), ...(story.actualTouchPoints || [])])];
+}
+
+/**
+ * Detect every pair of stories whose collision surfaces overlap.
+ *
+ * @param {Array<{ storyId: string, touchPoints?: string[], actualTouchPoints?: string[] }>} stories
  * @returns {Array<{ a: string, b: string, paths: string[] }>}
  */
 export function detectCollisions(stories) {
@@ -103,9 +120,11 @@ export function detectCollisions(stories) {
     for (let j = i + 1; j < stories.length; j++) {
       const a = stories[i];
       const b = stories[j];
+      const surfaceA = collisionSurface(a);
+      const surfaceB = collisionSurface(b);
       const intersects = [];
-      for (const pa of a.touchPoints || []) {
-        for (const pb of b.touchPoints || []) {
+      for (const pa of surfaceA) {
+        for (const pb of surfaceB) {
           if (globsIntersect(pa, pb)) intersects.push(`${pa} ∩ ${pb}`);
         }
       }
@@ -198,4 +217,59 @@ function normalizeWaves(stories) {
   for (const s of stories) {
     s.wave = rank.get(s.wave ?? 0) ?? s.wave;
   }
+}
+
+/**
+ * D3-2 (2026-06-22) — the mid-plan re-serialize CONSUMER. Recompute waves over
+ * an epic's persisted stories (honoring declared + MEASURED `actualTouchPoints`
+ * via `detectCollisions`'s union) and return ONLY the stories that are still
+ * runnable AND whose wave changed — so a caller persists just those, never
+ * disturbing a story already running or done.
+ *
+ * This is what makes the recorded actual edits actually change behavior: after
+ * wave N's stories record what they really touched, calling this before wave
+ * N+1 dispatches serializes a still-pending sibling that now collides on a
+ * file neither declared. Idempotent: a second call with no new collisions
+ * returns [].
+ *
+ * Stories with a terminal/active status (done, in_review, blocked, running,
+ * queued) keep their wave — only `pending`/`draft` stories may be re-serialized
+ * (moving a running/merged story's wave would be meaningless). Their fixed
+ * waves still act as collision anchors for the pending ones.
+ *
+ * @param {Array<{ storyId, wave?, dependsOn?, touchPoints?, actualTouchPoints?, complexity?, collisionsWith?, status? }>} stories
+ * @param {object} [opts]
+ * @param {Set<string>|string[]} [opts.reassignableStatuses] - statuses eligible to move (default: pending, draft, undefined)
+ * @returns {{ changed: Array<{ storyId, fromWave: number, toWave: number }>, stories: Array<object> }}
+ */
+export function recomputePendingWaves(stories, opts = {}) {
+  if (!Array.isArray(stories) || stories.length === 0) {
+    return { changed: [], stories: stories ?? [] };
+  }
+  const reassignable = new Set(
+    opts.reassignableStatuses
+      ? Array.isArray(opts.reassignableStatuses)
+        ? opts.reassignableStatuses
+        : [...opts.reassignableStatuses]
+      : ['pending', 'draft'],
+  );
+  const isReassignable = (s) => s.status === undefined || s.status === null || reassignable.has(s.status);
+
+  const before = new Map(stories.map((s) => [s.storyId, s.wave ?? 0]));
+  const { stories: recomputed } = reassignWaves(stories);
+
+  const changed = [];
+  for (const s of recomputed) {
+    const original = stories.find((o) => o.storyId === s.storyId);
+    if (!original || !isReassignable(original)) {
+      // Pin non-reassignable stories back to their original wave (an anchor).
+      s.wave = before.get(s.storyId);
+      continue;
+    }
+    const fromWave = before.get(s.storyId) ?? 0;
+    if ((s.wave ?? 0) !== fromWave) {
+      changed.push({ storyId: s.storyId, fromWave, toWave: s.wave ?? 0 });
+    }
+  }
+  return { changed, stories: recomputed };
 }

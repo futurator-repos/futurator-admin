@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { globsIntersect, detectCollisions, reassignWaves } from '../glob-intersect.mjs';
+import {
+  globsIntersect,
+  detectCollisions,
+  reassignWaves,
+  recomputePendingWaves,
+} from '../glob-intersect.mjs';
 
 describe('globsIntersect', () => {
   it('identical globs intersect', () => {
@@ -177,5 +182,76 @@ describe('reassignWaves', () => {
     ];
     const { reassignments } = reassignWaves(stories);
     expect(reassignments).toEqual([]);
+  });
+});
+
+// D3-2 (2026-06-22) — collision detection unions DECLARED + MEASURED edits.
+describe('detectCollisions — actualTouchPoints union (D3-2)', () => {
+  it('detects a collision on a file only present in actualTouchPoints', () => {
+    const stories = [
+      { storyId: 'A', touchPoints: ['src/a.ts'], actualTouchPoints: ['src/game/pacman.ts'] },
+      { storyId: 'B', touchPoints: ['src/b.ts'], actualTouchPoints: ['src/game/pacman.ts'] },
+    ];
+    const collisions = detectCollisions(stories);
+    expect(collisions).toHaveLength(1);
+    expect(collisions[0]).toMatchObject({ a: 'A', b: 'B' });
+  });
+
+  it('detects when one declared the file and the other only measured it', () => {
+    const stories = [
+      { storyId: 'A', touchPoints: ['src/shared.ts'] },
+      { storyId: 'B', touchPoints: ['src/b.ts'], actualTouchPoints: ['src/shared.ts'] },
+    ];
+    expect(detectCollisions(stories)).toHaveLength(1);
+  });
+
+  it('does NOT invent collisions when actual sets are disjoint', () => {
+    const stories = [
+      { storyId: 'A', touchPoints: ['src/a.ts'], actualTouchPoints: ['src/a.ts', 'src/util.ts'] },
+      { storyId: 'B', touchPoints: ['src/b.ts'], actualTouchPoints: ['src/b.ts'] },
+    ];
+    expect(detectCollisions(stories)).toEqual([]);
+  });
+});
+
+describe('recomputePendingWaves — D3-2 mid-plan re-serialize consumer', () => {
+  it('serializes two pending siblings that collide only on actualTouchPoints', () => {
+    const stories = [
+      { storyId: 'A', wave: 1, status: 'pending', touchPoints: ['src/a.ts'], actualTouchPoints: ['src/game/pacman.ts'] },
+      { storyId: 'B', wave: 1, status: 'pending', touchPoints: ['src/b.ts'], actualTouchPoints: ['src/game/pacman.ts'] },
+    ];
+    const { changed } = recomputePendingWaves(stories);
+    expect(changed).toHaveLength(1);
+    // One of the two siblings is bumped off wave 1.
+    const moved = changed[0];
+    expect(['A', 'B']).toContain(moved.storyId);
+    expect(moved.toWave).toBeGreaterThan(moved.fromWave);
+  });
+
+  it('returns [] when nothing collides (idempotent)', () => {
+    const stories = [
+      { storyId: 'A', wave: 1, status: 'pending', touchPoints: ['src/a.ts'] },
+      { storyId: 'B', wave: 1, status: 'pending', touchPoints: ['src/b.ts'] },
+    ];
+    expect(recomputePendingWaves(stories).changed).toEqual([]);
+  });
+
+  it('never moves a non-reassignable (running/done) story — it anchors instead', () => {
+    // A is already running on wave 1; B is pending and now collides with A on a
+    // measured file. A must stay put (can't un-run it); B must be the one bumped.
+    const stories = [
+      { storyId: 'A', wave: 1, status: 'running', complexity: 'standard', touchPoints: ['src/a.ts'], actualTouchPoints: ['src/shared.ts'] },
+      { storyId: 'B', wave: 1, status: 'pending', complexity: 'standard', touchPoints: ['src/b.ts'], actualTouchPoints: ['src/shared.ts'] },
+    ];
+    const { changed, stories: out } = recomputePendingWaves(stories);
+    const byId = Object.fromEntries(out.map((s) => [s.storyId, s]));
+    expect(byId.A.wave).toBe(1); // anchored
+    expect(changed.map((c) => c.storyId)).toEqual(['B']);
+    expect(byId.B.wave).toBeGreaterThan(1);
+  });
+
+  it('handles empty / missing input gracefully', () => {
+    expect(recomputePendingWaves([]).changed).toEqual([]);
+    expect(recomputePendingWaves(null).changed).toEqual([]);
   });
 });

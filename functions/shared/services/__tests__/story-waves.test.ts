@@ -162,4 +162,123 @@ describe('computeStoryWavesWithTouchPoints', () => {
     expect(run().get('A')).toBe(0);
     expect(run().get('B')).toBe(1);
   });
+
+  // D3-2 (2026-06-22) — collision detection unions DECLARED touchPoints with
+  // MEASURED actualTouchPoints, so two siblings that both edited an undeclared
+  // shared file (the pacmanv3 pacman.ts collision) serialize on the next run.
+  it('serializes siblings that collide only on actualTouchPoints (D3-2)', () => {
+    const waves = computeStoryWavesWithTouchPoints([
+      // Disjoint DECLARED scopes — would run parallel under declared-only.
+      {
+        storyId: 'A',
+        dependsOn: [],
+        touchPoints: ['src/a.ts'],
+        actualTouchPoints: ['src/game/pacman.ts'],
+        order: 0,
+      },
+      {
+        storyId: 'B',
+        dependsOn: [],
+        touchPoints: ['src/b.ts'],
+        actualTouchPoints: ['src/game/pacman.ts'],
+        order: 1,
+      },
+    ]);
+    expect(waves.get('A')).toBe(0);
+    expect(waves.get('B')).toBe(1); // bumped — they actually both touch pacman.ts
+  });
+
+  it('serializes when one declares the file and the other only measured it (D3-2)', () => {
+    const waves = computeStoryWavesWithTouchPoints([
+      { storyId: 'A', dependsOn: [], touchPoints: ['src/shared.ts'], order: 0 },
+      {
+        storyId: 'B',
+        dependsOn: [],
+        touchPoints: ['src/b.ts'],
+        actualTouchPoints: ['src/shared.ts'],
+        order: 1,
+      },
+    ]);
+    expect(waves.get('A')).toBe(0);
+    expect(waves.get('B')).toBe(1);
+  });
+
+  it('does NOT lower parallelism when actual sets are disjoint (D3-2 safety)', () => {
+    const waves = computeStoryWavesWithTouchPoints([
+      {
+        storyId: 'A',
+        dependsOn: [],
+        touchPoints: ['src/a.ts'],
+        actualTouchPoints: ['src/a.ts', 'src/util.ts'],
+        order: 0,
+      },
+      {
+        storyId: 'B',
+        dependsOn: [],
+        touchPoints: ['src/b.ts'],
+        actualTouchPoints: ['src/b.ts'],
+        order: 1,
+      },
+    ]);
+    expect(waves.get('A')).toBe(0);
+    expect(waves.get('B')).toBe(0); // genuinely disjoint → stay parallel
+  });
+});
+
+import { recomputePendingStoryWaves } from '../story-waves';
+
+describe('recomputePendingStoryWaves — D3-2 mid-plan re-serialize consumer (TS)', () => {
+  it('is a no-op on a fresh plan (no actualTouchPoints recorded yet)', () => {
+    const stories = [
+      { storyId: 'A', dependsOn: [], wave: 0, status: 'pending', touchPoints: ['src/a.ts'] },
+      { storyId: 'B', dependsOn: [], wave: 0, status: 'pending', touchPoints: ['src/b.ts'] },
+    ];
+    const { changed } = recomputePendingStoryWaves(stories);
+    expect(changed).toEqual([]);
+  });
+
+  it('bumps a still-pending sibling that now collides on a measured file', () => {
+    const stories = [
+      {
+        storyId: 'A',
+        dependsOn: [],
+        wave: 0,
+        status: 'pending',
+        touchPoints: ['src/a.ts'],
+        actualTouchPoints: ['src/game/pacman.ts'],
+        order: 0,
+      },
+      {
+        storyId: 'B',
+        dependsOn: [],
+        wave: 0,
+        status: 'pending',
+        touchPoints: ['src/b.ts'],
+        actualTouchPoints: ['src/game/pacman.ts'],
+        order: 1,
+      },
+    ];
+    const { stories: out, changed } = recomputePendingStoryWaves(stories);
+    expect(changed).toHaveLength(1);
+    expect(changed[0].storyId).toBe('B'); // later-ordered sibling bumps
+    expect(changed[0].toWave).toBeGreaterThan(changed[0].fromWave);
+    const byId = Object.fromEntries(out.map((s) => [s.storyId, s]));
+    expect(byId.A.wave).toBe(0);
+    expect(byId.B.wave).toBe(1);
+  });
+
+  it('never moves a done/running story and never pulls a pending one earlier (forward-only)', () => {
+    // A already ran on wave 0 (done). B is pending, parked on wave 1, and its
+    // ideal recompute would be wave 0 (no real collision) — but it must NOT be
+    // pulled back into the already-dispatched wave 0.
+    const stories = [
+      { storyId: 'A', dependsOn: [], wave: 0, status: 'done', touchPoints: ['src/a.ts'] },
+      { storyId: 'B', dependsOn: [], wave: 1, status: 'pending', touchPoints: ['src/b.ts'] },
+    ];
+    const { stories: out, changed } = recomputePendingStoryWaves(stories);
+    expect(changed).toEqual([]); // B stays at wave 1 (forward-only)
+    const byId = Object.fromEntries(out.map((s) => [s.storyId, s]));
+    expect(byId.A.wave).toBe(0);
+    expect(byId.B.wave).toBe(1);
+  });
 });

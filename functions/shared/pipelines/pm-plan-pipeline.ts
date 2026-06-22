@@ -49,6 +49,12 @@ export function generatePmPlanPipeline(args: {
    * driven path sets this; the daemon inlines the real docs from disk.
    */
   priorArtifacts?: string;
+  /**
+   * D4 (2026-06-22) — COMPACT RETRY. Threaded to `buildPmPlanPrompt`; set by the
+   * concept-driver when re-firing a pm-plan whose prior attempt overflowed the
+   * output cap (terminal-but-no-epics), so the re-generation aims smaller.
+   */
+  compact?: boolean;
 }): PipelineDefinition {
   const prompt = buildPmPlanPrompt(args);
   return {

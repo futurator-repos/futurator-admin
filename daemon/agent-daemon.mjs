@@ -177,6 +177,8 @@ import { isStepOutputComplete, classifyCompletion } from './lib/done-detector.mj
 // short-circuits no-op stories without spawning the LLM. See
 // daemon/lib/prework-gate.mjs.
 import { evaluatePreworkGate, renderGateEvidence } from './lib/prework-gate.mjs';
+// D4(a) — proactive plan-gen budget guard (large grounded spec → compact first attempt).
+import { applyProactivePlanBudget } from './lib/plan-budget.mjs';
 // Pipeline v2.0 PR-4 — touch-point inference. When the planner left a
 // story's `touchPoints` empty, the daemon infers them at dispatch time
 // (heuristic-first, Haiku fallback) so the prework gate / scope-violation
@@ -1915,6 +1917,38 @@ async function executeShellStep(jobId, step, workingDir, variables) {
       if (step.captureAs) variables[step.captureAs] = stdout;
       if (step.captureStderrAs) variables[step.captureStderrAs] = stderr;
 
+      // D3-2 (2026-06-22) — persist the MEASURED edit set from the dev-scope
+      // gate as the story's actualTouchPoints, so a future wave computation
+      // serializes stories that genuinely collide on a file neither declared.
+      // Runs on pass AND fail (we want the measurement either way). Best-effort:
+      // a persistence error never blocks the pipeline. Recorded separately from
+      // the DECLARED touchPoints — it never feeds the gate's enforced set.
+      if (step.id === 'dev-scope-check') {
+        try {
+          const m = /__DEV_SCOPE_ACTUAL__\s*([^\n]*)/.exec(stdout || '');
+          const files = (m?.[1] || '').trim().split(/\s+/).filter(Boolean);
+          const epicId = variables.EPIC_ID;
+          const storyId = variables.STORY_ID;
+          if (
+            files.length > 0 &&
+            epicId &&
+            epicId !== '(not provided)' &&
+            storyId &&
+            storyId !== 'unknown'
+          ) {
+            const res = await epicRepo.updateStoryActualTouchPoints(epicId, storyId, files);
+            if (res?.updated) {
+              log(
+                'info',
+                `[${jobId.slice(0, 8)}] dev-scope: recorded ${files.length} actual touch point(s) for story ${storyId} (merged=${res.merged?.length ?? '?'})`,
+              );
+            }
+          }
+        } catch (err) {
+          log('warn', `[${jobId.slice(0, 8)}] dev-scope actualTouchPoints persist failed (non-blocking): ${err.message}`);
+        }
+      }
+
       // 2026-06-03 — apply step.extractors for SHELL steps too. Previously only
       // the AGENT-step path ran extractors, so qa-report (a shell step) never
       // populated OVERALL_VERDICT / TEST_RESULTS / SCREENSHOTS — the QA-report
@@ -2195,8 +2229,29 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   }
 
   // 1. Template substitution
-  const prompt = substituteTemplate(step.prompt, variables);
+  let prompt = substituteTemplate(step.prompt, variables);
   log('debug', `Prompt after substitution: ${prompt.length} chars`);
+
+  // D4(a) (2026-06-22) — PROACTIVE plan-gen budget guard. Now that the real
+  // grounded spec is inlined (PRIOR_ARTIFACTS above), measure the rendered
+  // pm-plan prompt: if it's large enough to risk a mid-JSON output overflow,
+  // prepend a compact directive so the FIRST attempt aims small (instead of
+  // overflowing and relying on D4(b)'s reactive re-fire). No-op for every other
+  // step and for small prompts.
+  if (step.id === 'pm-plan') {
+    const maxOutputTokens = Number(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS) || undefined;
+    const budgeted = applyProactivePlanBudget(prompt, {
+      rigor: variables.PLAN_RIGOR,
+      maxOutputTokens,
+    });
+    if (budgeted.injected) {
+      prompt = budgeted.prompt;
+      log(
+        'info',
+        `[${jobId.slice(0, 8)}] plan-budget: large pm-plan prompt (${prompt.length} chars, cap=${maxOutputTokens ?? 'default'}) — injected proactive compact directive (≤${budgeted.storyBudget} stories)`,
+      );
+    }
+  }
 
   // 2. Resolve session resume
   const resumeSession = step.resumeFromStep ? sessions[step.resumeFromStep] : undefined;

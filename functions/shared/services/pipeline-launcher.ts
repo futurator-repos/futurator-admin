@@ -1,6 +1,8 @@
 import type { EpicStory, EpicWorkflow } from '../types/epic-workflow';
 import type { AgentJob, PipelineDefinition } from '../types/agent-orchestrator';
 import type { PlanRigor } from '../types/plan';
+// D3-2 — mid-plan re-serialize from persisted actualTouchPoints (no-op on fresh plans).
+import { recomputePendingStoryWaves } from './story-waves';
 
 /**
  * Pipeline-mode launcher — Stories 16.1 + 16.2.
@@ -202,7 +204,19 @@ export async function launchPipelineWave(
       message: 'Epic has no stories to start',
     };
   }
-  const waveStories = epic.stories.filter((s) => (s.wave ?? 0) === waveNumber);
+
+  // D3-2 (2026-06-22) — mid-plan re-serialize. Before selecting this wave's
+  // stories, recompute waves honoring each pending story's DECLARED ∪ MEASURED
+  // touch points (`actualTouchPoints`, recorded by the dev-scope gate on a prior
+  // run). A still-pending sibling that now collides on a file neither declared
+  // is bumped to a later wave HERE — so it serializes instead of colliding at
+  // the merge gate. No-op on a fresh plan (no story has actualTouchPoints yet);
+  // forward-only + reassignable-only, so a running/done story is never moved.
+  // The bumped waves ride out on `updatedStories` (the caller persists them).
+  const { stories: rewaved, changed: reserialized } = recomputePendingStoryWaves(epic.stories);
+  const effectiveStories = reserialized.length > 0 ? rewaved : epic.stories;
+
+  const waveStories = effectiveStories.filter((s) => (s.wave ?? 0) === waveNumber);
   if (waveStories.length === 0) {
     return {
       ok: false,
@@ -242,7 +256,9 @@ export async function launchPipelineWave(
     `/home/ubuntu/worktrees/${appWorktreeSlug}/${planOpts!.planSlug}/${storyId}`;
 
   const jobIds: string[] = [];
-  const mutable = epic.stories.map((s) => ({ ...s }));
+  // Build the mutable copy from the (possibly re-waved) stories so the D3-2
+  // bumps persist alongside the jobId/status writes below.
+  const mutable = effectiveStories.map((s) => ({ ...s }));
   const byId = new Map(mutable.map((s) => [s.storyId, s] as const));
   for (const story of waveStories) {
     const jobId = deps.uuid();

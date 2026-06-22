@@ -599,3 +599,66 @@ describe('nextjs-canvas-game — VQA v3 verifiability seam (E2)', () => {
     expect(schema.snapshot).toEqual(fromContract);
   });
 });
+
+describe('nextjs-dashboard — generic app-state seam + non-game scaffold contract (D1-A6/A7)', () => {
+  const dash = BOILERPLATE_REGISTRY['nextjs-dashboard'];
+
+  it('is route-mode (not feature-registry) so the PM mounts features on real routes', () => {
+    expect(dash.wiring).toBe('route');
+    expect(dash.domain).toBe('dashboard');
+  });
+
+  it('declares a generic app-state testHarness (route / auth / last-mutation)', () => {
+    expect(dash.testHarness?.globalKey).toBe('window.__harness');
+    expect(dash.testHarness?.readySignal).toBe('ready');
+    const shape = dash.testHarness?.snapshotShape ?? {};
+    for (const key of [
+      'snapshot.route',
+      'snapshot.authStatus',
+      'snapshot.lastMutation',
+      'snapshot.ready',
+    ]) {
+      expect(shape[key]).toBeDefined();
+    }
+    expect(shape['snapshot.authStatus'].enum).toContain('authenticated');
+  });
+
+  it('ships the REAL seam module, PRODUCTION-ABSENT (env-guarded), not a game seam', () => {
+    const seam = dash.augmentFiles?.find((f) => f.path === 'src/lib/app-harness.tsx');
+    expect(seam?.content).toContain('AppHarnessProvider');
+    expect(seam?.content).toContain('useAppHarness');
+    expect(seam?.content).toContain('window.__harness');
+    expect(seam?.content).toContain("process.env.NEXT_PUBLIC_TEST_HARNESS !== '1'");
+    // Generic app-state, NOT game state.
+    expect(seam?.content).toContain('recordMutation');
+    expect(seam?.content).not.toContain('GameState');
+    // Publish happens INSIDE the guard.
+    const guardIdx = seam!.content.indexOf('NEXT_PUBLIC_TEST_HARNESS');
+    const publishIdx = seam!.content.indexOf('.__harness =');
+    expect(publishIdx).toBeGreaterThan(guardIdx);
+  });
+
+  it('SCAFFOLD.md is a route-based contract that pre-bakes the seam', () => {
+    expect(dash.scaffoldContract).toMatch(/__harness/);
+    expect(dash.scaffoldContract).toMatch(/PRE-BAKED|do NOT author/i);
+    expect(dash.scaffoldContract).toMatch(/MULTI-ROUTE|src\/app\/<route>/);
+    // augmentFiles[0] invariant: SCAFFOLD.md mirrors scaffoldContract.
+    expect(dash.augmentFiles?.[0].path).toBe('SCAFFOLD.md');
+    expect(dash.augmentFiles?.[0].content).toBe(dash.scaffoldContract);
+  });
+
+  it('schema.json matches testHarness.snapshotShape (no drift)', () => {
+    const file = dash.augmentFiles?.find((f) => f.path === '__harness.schema.json');
+    const schema = JSON.parse(file!.content) as {
+      globalKey: string;
+      snapshot: Record<string, { type: string; enum?: string[] }>;
+    };
+    const fromContract = Object.fromEntries(
+      Object.entries(dash.testHarness!.snapshotShape).map(([k, v]) => [
+        k.replace(/^snapshot\./, ''),
+        v,
+      ]),
+    );
+    expect(schema.snapshot).toEqual(fromContract);
+  });
+});

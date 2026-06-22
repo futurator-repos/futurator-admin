@@ -63,6 +63,16 @@ export function buildPmPlanPrompt(args: {
    * eager-PM path (no approved docs exist) → the prompt stays intent-only.
    */
   priorArtifacts?: string;
+  /**
+   * D4 (2026-06-22) — COMPACT RETRY. Set true when a prior pm-plan generation
+   * overflowed the CLI output cap (CLAUDE_CODE_MAX_OUTPUT_TOKENS) and produced
+   * NO closeable PLAN_JSON (the pacmanv3 32K truncation). The driver re-fires
+   * the generation with this flag so it deterministically aims for a smaller
+   * rendered plan — tighter story ceilings + an explicit extreme-brevity
+   * directive — instead of re-overflowing identically. Cures the re-overflow
+   * the cap-raise + budget-ask only mitigated.
+   */
+  compact?: boolean;
 }): string {
   const meta = BOILERPLATE_REGISTRY[args.boilerplateType];
   if (!meta) {
@@ -76,7 +86,59 @@ export function buildPmPlanPrompt(args: {
   }
 
   const rigorGuidance = renderRigorGuidance(args.rigor);
-  const exampleStoryDescription = `Define the core domain types under \`${ctx.conventions.typesPath}\` (DinoState, Obstacle, GameState — adjust to the intent). Export from a barrel file.`;
+
+  // D1-A1..A10 (2026-06-22) — de-game the prompt. The structural RULES are
+  // universal, but the EXAMPLES and the feature-mounting MODEL must come from
+  // the boilerplate (data-driven) instead of being hardcoded to canvas-game /
+  // single-page. Each helper falls back to a domain-NEUTRAL value so a non-game
+  // app (SaaS dashboard, API admin, multi-route product) never inherits sprite/
+  // HUD/single-page assumptions. See docs/concepts/pipeline-v3/root-cause-
+  // remediation-plan.md §D1.
+  //
+  // A1: feature-registration is a CAPABILITY of nextjs-* starters, not law.
+  const wiringMode = meta.wiring ?? 'route';
+  const usesFeatureRegistry = wiringMode === 'feature-registry';
+  // A2/A3: browser-AC exemplars — game flavor only when the registry provides it.
+  const browserAcExamples =
+    ctx.exampleBrowserAc && ctx.exampleBrowserAc.length > 0
+      ? ctx.exampleBrowserAc
+      : [
+          'At load, the dashboard shows a "Total Revenue" card with a numeric value and a line chart with at least one plotted series.',
+          'On the signup route, the form shows an "Email" field, a "Password" field, and a "Create account" button that stays disabled until both are filled.',
+          'At load, the top nav shows the app name on the left and a "Sign in" link on the right.',
+        ];
+  const concreteBrowserAc = browserAcExamples[0];
+  // A10: coupled-sibling worked example — neutral CRUD unless the registry overrides.
+  const coupledSiblingExample =
+    ctx.coupledSiblingExample ??
+    'story A builds the "invoice list" module and sibling B builds "marking an invoice paid updates the account balance" — B\'s tests assume A\'s invoice entities B never saw, both pass alone, and the merged union fails the wave gate.';
+
+  // A4: foundation "core domain types" example — neutral placeholder unless the
+  // registry names a domain's types. Never hardcode one domain's entity names.
+  const domainTypesHint = ctx.exampleDomainTypes ?? 'the 2-3 core domain types the intent implies';
+  const exampleStoryDescription = `Define the core domain types under \`${ctx.conventions.typesPath}\` (${domainTypesHint} — adjust to the intent). Export from a barrel file.`;
+
+  // D4 (2026-06-22) — story-count ceiling, tightened on a COMPACT retry so the
+  // re-fired generation deterministically aims smaller than the run that
+  // overflowed (instead of re-emitting the same over-long plan).
+  const storyCeilingLine = args.compact
+    ? args.rigor === 'production'
+      ? 'COMPACT RETRY — the prior generation OVERFLOWED the output cap. Hard limit: ≤ 10 stories total across ALL epics.'
+      : `COMPACT RETRY — the prior generation OVERFLOWED the output cap. Hard limit: ${args.rigor === 'prototype' ? '≤ 4' : '≤ 6'} stories total across ALL epics.`
+    : args.rigor === 'production'
+      ? 'production: aim for ≤ ~18 stories total across all epics.'
+      : 'mvp: 6–12 stories TOTAL across all epics. prototype: ~5.';
+  // A loud banner + brevity overrides, emitted ONLY on the compact retry.
+  const compactBanner = args.compact
+    ? `> ⚠️ COMPACT RETRY: a prior attempt was CUT OFF mid-JSON (output overflow) and
+> produced nothing. You MUST emit a SMALLER plan this time. Merge related
+> requirements aggressively into the fewest vertical slices that still cover
+> them; OMIT \`technicalNotes\` and \`tasks\` unless essential; keep every
+> \`description\` to ONE sentence. A complete, closed, minimal plan is the only
+> acceptable output — exhaustiveness that truncates is a FAILURE.
+
+`
+    : '';
   const exampleStoryCriteria = ctx.exampleAcceptanceCriteria.slice(0, 2).map((text, i) => ({
     id: `AC-S1-${i + 1}`,
     text,
@@ -283,10 +345,7 @@ that can share a wave.**
 
 Same-wave stories are developed **in parallel, blind to each other's code** —
 they meet only at the merge gate, so two siblings must never implement or test
-ONE behavior that spans both. Classic failure: story A implements ghost
-movement/state, sibling B implements "Pacman eats a frightened ghost" — B's
-tests assume A's entities A never saw, both pass alone, and the merged union
-fails the wave gate.
+ONE behavior that spans both. Classic failure: ${coupledSiblingExample}
 
 Rules:
 - An **interaction behavior** between two entities/modules (collision,
@@ -402,22 +461,26 @@ modify (relative to the project root, using the conventional paths above).
   position + a FAIL clause when it's not obvious) beats general adjectives. (PR-63)
 
   ❌ Vague (FAIL the classifier's specificity check): "The login form renders correctly."
-  ✅ Concrete (supports the QA judge): "At game start (before any input) the canvas
-     shows the player sprite standing on the ground band, with the score HUD reading
-     '0' in the top-left corner."
+  ✅ Concrete (supports the QA judge): "${concreteBrowserAc}"
 
   The dev agent mirrors this concrete voice into the story's visualTests \`judge:\`
   block, which is the actual contract the QA judge applies.
 
-  **Browser ACs are verified against the story's own registered feature
-  surface — and HOW depends on the AC's \`verify\` intent (Concept v2).**
-  Visual QA captures each story's feature in ISOLATION (the generated page
-  renders one feature at a time via its registration). A \`needsBrowser\` AC
-  must always describe the story's OWN feature — never what a sibling
-  renders. Then, by intent:
-    • \`verify:'appearance'\` → MUST be idle-visible: true at the INITIAL load
-      frame (no clicks, no keypresses, no elapsed time). Never write a
-      \`click to see\` appearance AC — phrase it about what the load frame
+  **Browser ACs are verified against the story's own deliverable surface —
+  and HOW depends on the AC's \`verify\` intent (Concept v2).**
+  Visual QA captures each story's deliverable ${
+    usesFeatureRegistry
+      ? 'in ISOLATION (the generated page renders one registered feature at a time)'
+      : 'by NAVIGATING to the route the AC names (the route the story mounts its deliverable on)'
+  }. A \`needsBrowser\` AC must always describe the story's OWN deliverable — never
+  what a sibling renders. Then, by intent:
+    • \`verify:'appearance'\` → MUST be idle-visible: true at the deliverable's
+      IDLE FRAME — ${
+        usesFeatureRegistry
+          ? 'the feature’s initial render'
+          : 'the route the feature lives on, post-navigation'
+      }, before any clicks, keypresses, or elapsed time. Never write a
+      \`click to see\` appearance AC — phrase it about what that idle frame
       physically shows.
     • \`verify:'behavior'|'state'\` (with \`when\`/\`then\`) → MAY describe a
       POST-INTERACTION state. The QA probe REACHES it (\`given\`→reach,
@@ -431,36 +494,28 @@ modify (relative to the project root, using the conventional paths above).
   **HARD REQUIREMENT — visual coverage (your plan is REJECTED without it).**
   This app renders a UI, so the plan MUST contain \`needsBrowser: true\` criteria;
   a plan with zero browser ACs fails validation and is regenerated (it would
-  disable visual QA entirely). Per story: renders something on screen (canvas,
-  sprite, component, page, HUD, overlay, background) → ≥1 \`needsBrowser: true\` AC
-  for its idle-visible signal (e.g. "at load the canvas shows the dragon sprite on
-  the ground band", "the HUD reads 'Score: 0' top-left"); pure-logic story (types,
-  reducers, physics/collision math, spawn timing) → NONE (the test suite asserts
-  its dynamics).
+  disable visual QA entirely). Per story: renders something on screen (a page,
+  component, chart, form, table, canvas, overlay, nav) → ≥1 \`needsBrowser: true\`
+  AC for its idle-visible signal, in the concrete screen-verifiable voice, e.g.:
+${browserAcExamples.map((e) => `    - "${e}"`).join('\n')}
+  A pure-logic story (types, reducers, validation/calculation logic, data
+  transforms, timers) → NONE (the test suite asserts its dynamics).
 
-  **Make visibility structural — PROGRESSIVE FEATURE REGISTRATION.** A browser AC
-  is only judgeable if the story's output is REGISTERED as a feature (the
-  registered feature IS the isolation surface visual QA captures). So a story that
-  delivers something visible MUST also mount it in the SAME story: register/extend
-  \`src/features/<slug>.feature.tsx\` (listed in its touchPoints), rendering the
-  deliverable in a meaningful idle state. Therefore:
-  - Do NOT write "unit-test-only" rendering stories asserting mocked canvas-context
-    calls instead of pixels — mount it, then write the browser AC about the idle frame.
-  - The final assembly story composes everything into the real app feature, marks it
-    PRIMARY (\`export const feature = { slug: '<app>', order: 0, primary: true }\`), and
-    RETIRES interim preview features (list the removed files in its touchPoints; it
-    runs in a later wave, so editing earlier-wave files is safe). \`primary: true\`
-    makes the bare route \`/\` render ONLY the real app (previews stay at
-    \`?feature=<slug>\`). It should also carry browser ACs for the composed initial frame.
+  ${renderVisibilityStructuralBlock({ usesFeatureRegistry, ctx })}
 
   **Interaction- and time-gated ACs need a PROBE, not a static frame.** If an AC is
-  only visible AFTER an action or elapsed time (a title screen needing Space/Enter, a
-  HUD that appears once play starts, a GAME OVER / score-changed screen), one idle
-  screenshot CANNOT verify it and a vision judge will false-FAIL it. The visual test
-  MUST carry a \`flow\` that performs the gating interaction then captures, e.g.
-  \`flow: [{ "action": "press", "key": "Enter" }, { "action": "wait", "ms": 500 }, { "action": "screenshot" }]\`,
-  or a deterministic \`{ "action": "assert", "expr": "snapshot.phase", "op": "eq", "expected": "gameover" }\`
-  reading \`window.__harness\`. Plain "what the idle frame shows" ACs stay probe-free.
+  only visible AFTER an action or elapsed time (a screen that appears only after a
+  click/keypress, a panel that loads after a fetch, a confirmation shown after a
+  submit), one idle screenshot CANNOT verify it and a vision judge will false-FAIL
+  it. The visual test MUST carry a \`flow\` that performs the gating interaction then
+  captures, e.g.
+  \`flow: [{ "action": "click", "selector": "<the trigger>" }, { "action": "wait", "ms": 500 }, { "action": "screenshot" }]\`${
+    meta.testHarness
+      ? `,
+  or a deterministic \`{ "action": "assert", "expr": "snapshot.<key>", "op": "eq", "expected": "<value>" }\`
+  reading \`${meta.testHarness.globalKey}\``
+      : ''
+  }. Plain "what the idle frame shows" ACs stay probe-free.
 - Titles are action-oriented ("Implement useGameLoop hook", not "The
   useGameLoop hook").
 - **Stories must respect the existing boilerplate** — if the AC says
@@ -470,12 +525,12 @@ modify (relative to the project root, using the conventional paths above).
 
 ### Output budget — CRITICAL (a truncated plan is REJECTED, costs a full retry)
 
-Your ENTIRE response is the single \`---PLAN_JSON--- … ---END_PLAN_JSON---\`
+${compactBanner}Your ENTIRE response is the single \`---PLAN_JSON--- … ---END_PLAN_JSON---\`
 block and it MUST be fully closed. The platform caps output tokens — an
 over-long plan is cut off **mid-JSON**, the closing fence is never written,
 NOTHING is captured, and the whole plan is rejected. Stay well within budget:
 
-- ${args.rigor === 'production' ? 'production: aim for ≤ ~18 stories total across all epics.' : 'mvp: 6–12 stories TOTAL across all epics. prototype: ~5.'}
+- ${storyCeilingLine}
   Do NOT emit one story (or one epic) per requirement — **group related FRs
   into a single vertical slice**. Coverage is proven by \`requirementRefs\`,
   NOT by story count.
@@ -596,7 +651,7 @@ ${scaffoldContract.trim()}
 /**
  * PR-23d — brownfield clause for kind='change' plans.
  *
- * Plan kind 'change' means the App already has shipped code from a prior plan.
+2 * Plan kind 'change' means the App already has shipped code from a prior plan.
  * The PM must spec ADDITIVE stories only — never recreate types/primitives/
  * files that already exist. The story-context-pack ships the project tree
  * + knowledge index for free, but without an explicit clause the PM tends
@@ -651,6 +706,56 @@ build on what's there, NOT to recreate it.
   \`localStorage\`; called from existing GAME_OVER reducer case."
 
 `;
+}
+
+/**
+ * D1-A1 (2026-06-22) — the "make visibility structural" block, rendered from
+ * the boilerplate's `wiring` capability instead of hardcoding the nextjs-*
+ * feature-registration model as universal law.
+ *
+ *  - feature-registry (nextjs-*): a UI story registers/extends
+ *    `src/features/<slug>.feature.tsx`; the assembly story marks one feature
+ *    `primary` to own `/`.
+ *  - route (default / multi-route apps): a UI story mounts its deliverable on a
+ *    real route under the boilerplate's pages path; visual QA navigates there.
+ *
+ * Either way the universal RULE is identical — "a browser AC is only judgeable
+ * if the deliverable is reachable in the running app" — only the mounting
+ * mechanism differs.
+ */
+function renderVisibilityStructuralBlock(args: {
+  usesFeatureRegistry: boolean;
+  ctx: NonNullable<import('../boilerplates/types').BoilerplateMetadata['pmContext']>;
+}): string {
+  if (args.usesFeatureRegistry) {
+    return `**Make visibility structural — PROGRESSIVE FEATURE REGISTRATION.** A browser AC
+  is only judgeable if the story's output is REGISTERED as a feature (the
+  registered feature IS the isolation surface visual QA captures). So a story that
+  delivers something visible MUST also mount it in the SAME story: register/extend
+  \`src/features/<slug>.feature.tsx\` (listed in its touchPoints), rendering the
+  deliverable in a meaningful idle state. Therefore:
+  - Do NOT write "unit-test-only" rendering stories asserting mocked render calls
+    instead of pixels — mount it, then write the browser AC about the idle frame.
+  - The final assembly story composes everything into the real app feature, marks it
+    PRIMARY (\`export const feature = { slug: '<app>', order: 0, primary: true }\`), and
+    RETIRES interim preview features (list the removed files in its touchPoints; it
+    runs in a later wave, so editing earlier-wave files is safe). \`primary: true\`
+    makes the bare route \`/\` render ONLY the real app (previews stay at
+    \`?feature=<slug>\`). It should also carry browser ACs for the composed initial frame.`;
+  }
+  return `**Make visibility structural — MOUNT ON A REAL ROUTE.** A browser AC is only
+  judgeable if the story's deliverable is REACHABLE in the running app. So a UI
+  story that delivers something visible MUST mount it on a real route in the SAME
+  story: add/extend a page under \`${args.ctx.conventions.pagesOrAppPath}\` (listed
+  in its touchPoints) that renders the deliverable in a meaningful idle state, and
+  write the browser AC about what that route shows post-navigation. Therefore:
+  - Do NOT write "unit-test-only" rendering stories asserting mocked render calls
+    instead of pixels — mount the surface on its route, then write the browser AC.
+  - Each \`needsBrowser\` AC names the route it applies to; the visual test's
+    \`setup\`/\`flow\` navigates there before capturing.
+  - The final assembly story wires the features into the app's primary navigation
+    (the route map / nav / dashboard shell) so the whole product is reachable from
+    \`/\`, and carries browser ACs for the composed landing surface.`;
 }
 
 function renderRigorGuidance(rigor: PlanRigor): string {

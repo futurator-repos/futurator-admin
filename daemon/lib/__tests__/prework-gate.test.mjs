@@ -1,26 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { evaluatePreworkGate, renderGateEvidence } from '../prework-gate.mjs';
 
-// Build injectable fakes for each of the three signal helpers so the
-// orchestrator can be tested without touching the real fs / git / shell.
+// Build injectable fakes for the two signal helpers so the orchestrator can be
+// tested without touching the real fs / git / shell. D2-1 (2026-06-22) deleted
+// the former AC-prose export-name heuristic; the gate is now Signal 1 (recent
+// commits in scope) + Signal 2 (whole-project typecheck clean).
 function makeDeps({
   commits = [],
-  candidates = ['applyGravity'],
-  exportsPresent = ['applyGravity'],
-  exportsMissing = [],
   tscOk = true,
   tscOutput = '',
   tscCached = false,
 } = {}) {
   return {
     collectRecentTouchPointWork: () => ({ skipped: false, commits }),
-    extractCandidateExports: () => candidates,
-    checkExportsPresent: async () => ({
-      allPresent: exportsMissing.length === 0 && exportsPresent.length > 0,
-      present: exportsPresent,
-      missing: exportsMissing,
-      filesScanned: ['src/dino.ts'],
-    }),
     runCachedTypecheck: async () => ({
       ok: tscOk,
       gitSha: 'abc123',
@@ -35,7 +27,6 @@ const baseInput = {
   projectDir: '/proj',
   planStartTime: '2026-04-28T10:00:00Z',
   touchPoints: ['src/dino.ts'],
-  acText: 'Implements `applyGravity`.',
 };
 
 describe('evaluatePreworkGate — decision matrix', () => {
@@ -51,12 +42,6 @@ describe('evaluatePreworkGate — decision matrix', () => {
     expect(v.reason).toContain('touchPoints');
   });
 
-  it('skips gate when no AC text provided', async () => {
-    const v = await evaluatePreworkGate({ ...baseInput, acText: '' });
-    expect(v.shouldSpawnDev).toBe(true);
-    expect(v.reason).toContain('AC text');
-  });
-
   it('fails when no recent commits in scope (Signal 1)', async () => {
     const deps = makeDeps({ commits: [] });
     const v = await evaluatePreworkGate({ ...baseInput, deps });
@@ -65,30 +50,7 @@ describe('evaluatePreworkGate — decision matrix', () => {
     expect(v.evidence.recentCommits).toEqual([]);
   });
 
-  it('fails when no candidate exports extractable (Signal 2 input)', async () => {
-    const deps = makeDeps({
-      commits: [{ sha: 'abc1234', subject: 'init', files: ['src/dino.ts'] }],
-      candidates: [],
-    });
-    const v = await evaluatePreworkGate({ ...baseInput, deps });
-    expect(v.shouldSpawnDev).toBe(true);
-    expect(v.reason).toContain('extractable named exports');
-  });
-
-  it('fails when one or more exports missing from touchPoints (Signal 2)', async () => {
-    const deps = makeDeps({
-      commits: [{ sha: 'abc1234', subject: 'init', files: ['src/dino.ts'] }],
-      candidates: ['applyGravity', 'startJump'],
-      exportsPresent: ['applyGravity'],
-      exportsMissing: ['startJump'],
-    });
-    const v = await evaluatePreworkGate({ ...baseInput, deps });
-    expect(v.shouldSpawnDev).toBe(true);
-    expect(v.reason).toContain('not found');
-    expect(v.reason).toContain('startJump');
-  });
-
-  it('fails when typecheck fails (Signal 3)', async () => {
+  it('fails when typecheck fails (Signal 2)', async () => {
     const deps = makeDeps({
       commits: [{ sha: 'abc1234', subject: 'init', files: ['src/dino.ts'] }],
       tscOk: false,
@@ -100,25 +62,32 @@ describe('evaluatePreworkGate — decision matrix', () => {
     expect(v.evidence.typecheck.output).toContain('TS2322');
   });
 
-  it('passes when all three signals green', async () => {
+  it('passes when both signals green', async () => {
     const deps = makeDeps({
       commits: [{ sha: 'abc1234', subject: 'init dino', files: ['src/dino.ts'] }],
-      candidates: ['applyGravity'],
-      exportsPresent: ['applyGravity'],
       tscOk: true,
     });
     const v = await evaluatePreworkGate({ ...baseInput, deps });
     expect(v.shouldSpawnDev).toBe(false);
     expect(v.reason).toContain('gate-passed');
     expect(v.evidence.recentCommits.length).toBe(1);
-    expect(v.evidence.exportsPresent).toEqual(['applyGravity']);
     expect(v.evidence.typecheck.ok).toBe(true);
+  });
+
+  it('does not require AC text (heuristic removed in D2-1)', async () => {
+    const deps = makeDeps({
+      commits: [{ sha: 'abc1234', subject: 'init dino', files: ['src/dino.ts'] }],
+      tscOk: true,
+    });
+    // No acText key at all — gate must still evaluate on its two real signals.
+    const v = await evaluatePreworkGate({ ...baseInput, deps });
+    expect(v.shouldSpawnDev).toBe(false);
   });
 
   it('honors skipTypecheck flag (e.g., for tests)', async () => {
     const deps = makeDeps({
       commits: [{ sha: 'abc1234', subject: 'init', files: ['src/dino.ts'] }],
-      tscOk: false, // even with tsc=fail, skipTypecheck bypasses Signal 3
+      tscOk: false, // even with tsc=fail, skipTypecheck bypasses Signal 2
     });
     const v = await evaluatePreworkGate({ ...baseInput, skipTypecheck: true, deps });
     expect(v.shouldSpawnDev).toBe(false);
@@ -146,9 +115,6 @@ describe('renderGateEvidence', () => {
       reason: 'gate-passed',
       evidence: {
         recentCommits: [{ sha: 'abc1234', subject: 'init dino', files: ['src/dino.ts'] }],
-        candidateExports: ['applyGravity', 'startJump'],
-        exportsPresent: ['applyGravity', 'startJump'],
-        exportsMissing: [],
         typecheck: { ok: true, cached: true, output: '' },
       },
     };
@@ -157,8 +123,6 @@ describe('renderGateEvidence', () => {
     expect(md).toContain('skip-dev');
     expect(md).toContain('Recent commits in scope');
     expect(md).toContain('abc1234 — init dino');
-    expect(md).toContain('AC-derived candidate exports');
-    expect(md).toContain('applyGravity');
     expect(md).toContain('Typecheck');
     expect(md).toContain('OK: true (cached)');
   });
@@ -169,9 +133,6 @@ describe('renderGateEvidence', () => {
       reason: 'gate-failed: typecheck not clean',
       evidence: {
         recentCommits: [],
-        candidateExports: [],
-        exportsPresent: [],
-        exportsMissing: [],
         typecheck: { ok: false, cached: false, output: 'TS2322: bad types' },
       },
     };

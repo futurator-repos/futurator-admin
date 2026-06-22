@@ -1,7 +1,7 @@
 // Pipeline v2.0 efficiency fix T0.2 — daemon-side pre-DEV gate.
 //
-// Combines three deterministic bash/code signals to decide whether the DEV
-// agent needs to run at all for a given story. When all three are green, the
+// Combines two deterministic bash/code signals to decide whether the DEV
+// agent needs to run at all for a given story. When both are green, the
 // daemon flips the job to COMPLETED_VIA_PREWORK without spawning the LLM.
 // dino1 forensic projects this would have eliminated 7 of 9 DEV spawns
 // (~$10–15 saved per Plan against pre-scaffolded boilerplates).
@@ -11,29 +11,35 @@
 //     Reuses collectRecentTouchPointWork from prework-check.mjs (already
 //     shipped per v1 dev-correction Epic D.5).
 //
-//   Signal 2 — AC's named exports present in touchPoint files
-//     extractCandidateExports + checkExportsPresent (ac-export-detector.mjs).
-//     Conservative match; missing any candidate fails the signal.
-//
-//   Signal 3 — project still type-checks clean
+//   Signal 2 — project still type-checks clean
 //     runCachedTypecheck (cached-tsc.mjs). Cached on git SHA so siblings
-//     in the same wave don't re-run.
+//     in the same wave don't re-run. This is the AUTHORITATIVE, AST-grounded
+//     check: a clean whole-project typecheck already proves every declared
+//     export resolves through the real import graph.
+//
+// Root-cause remediation D2-1 (2026-06-22): the former Signal 2 — an
+// AC-prose export-name heuristic (extractCandidateExports / checkExportsPresent)
+// — was deleted. It mined identifiers from prose with regex and string-matched
+// them against raw file text, never against the resolved import graph, so it
+// produced misleading "candidate export not found" noise (e.g. `drawOverlays`
+// for a file that exports `drawTitleScreen…`). The typecheck below subsumes it
+// correctly. See docs/concepts/pipeline-v3/root-cause-remediation-plan.md §D2.
 //
 // Pure orchestrator — no DDB, no spawn. Caller decides what to do with the
 // verdict (the wiring lives in agent-daemon.mjs::executePipeline).
 
 import { collectRecentTouchPointWork } from '../pipelines/lib/prework-check.mjs';
-import { extractCandidateExports, checkExportsPresent } from './ac-export-detector.mjs';
 import { runCachedTypecheck } from './cached-tsc.mjs';
 
 /**
- * Run the three signals and return a structured verdict.
+ * Run the two signals and return a structured verdict.
  *
  * @param {object} input
  * @param {string} input.projectDir
  * @param {string|null|undefined} input.planStartTime - ISO; passed to git log --since
  * @param {string[]} input.touchPoints
- * @param {string} input.acText - the AC bullets (plain text — multi-line OK)
+ * @param {string} [input.acText] - DEPRECATED/unused since D2-1 (kept for caller
+ *   compatibility; the export-name heuristic that consumed it was deleted).
  * @param {string} [input.runCommand] - typecheck command
  * @param {boolean} [input.skipTypecheck] - tests only; bypass tsc signal
  * @param {object} [input.deps] - injectable for tests
@@ -42,9 +48,6 @@ import { runCachedTypecheck } from './cached-tsc.mjs';
  *   reason: string,
  *   evidence: {
  *     recentCommits: { sha: string, subject: string, files: string[] }[],
- *     candidateExports: string[],
- *     exportsPresent: string[],
- *     exportsMissing: string[],
  *     typecheck: { ok: boolean, cached: boolean, output: string },
  *   },
  * }>}
@@ -54,7 +57,6 @@ export async function evaluatePreworkGate(input) {
     projectDir,
     planStartTime,
     touchPoints,
-    acText,
     runCommand,
     skipTypecheck = false,
     deps = {},
@@ -65,9 +67,6 @@ export async function evaluatePreworkGate(input) {
   }
   if (!Array.isArray(touchPoints) || touchPoints.length === 0) {
     return verdict(true, 'gate-skipped: no touchPoints declared', emptyEvidence());
-  }
-  if (typeof acText !== 'string' || acText.trim().length === 0) {
-    return verdict(true, 'gate-skipped: no AC text', emptyEvidence());
   }
 
   // ── Signal 1: recent commits in scope ──
@@ -80,9 +79,6 @@ export async function evaluatePreworkGate(input) {
   const recentCommits = commitReport?.skipped ? [] : commitReport.commits || [];
   const evidence = {
     recentCommits,
-    candidateExports: [],
-    exportsPresent: [],
-    exportsMissing: [],
     typecheck: { ok: false, cached: false, output: '' },
   };
 
@@ -90,31 +86,7 @@ export async function evaluatePreworkGate(input) {
     return verdict(true, 'gate-failed: no recent commits touching touchPoints', evidence);
   }
 
-  // ── Signal 2: AC named exports present ──
-  const candidates = (deps.extractCandidateExports || extractCandidateExports)(acText);
-  evidence.candidateExports = candidates;
-
-  if (candidates.length === 0) {
-    return verdict(true, 'gate-failed: no extractable named exports in AC text', evidence);
-  }
-
-  const exportsCheck = await (deps.checkExportsPresent || checkExportsPresent)({
-    candidates,
-    touchPoints,
-    projectDir,
-  });
-  evidence.exportsPresent = exportsCheck.present;
-  evidence.exportsMissing = exportsCheck.missing;
-
-  if (!exportsCheck.allPresent) {
-    return verdict(
-      true,
-      `gate-failed: ${exportsCheck.missing.length} candidate export(s) not found: ${exportsCheck.missing.join(', ')}`,
-      evidence,
-    );
-  }
-
-  // ── Signal 3: project type-checks clean ──
+  // ── Signal 2: project type-checks clean (authoritative AST check) ──
   if (skipTypecheck) {
     evidence.typecheck = { ok: true, cached: false, output: '(skipped per input)' };
   } else {
@@ -128,10 +100,10 @@ export async function evaluatePreworkGate(input) {
     }
   }
 
-  // All three green.
+  // Both signals green.
   return verdict(
     false,
-    `gate-passed: ${recentCommits.length} commit(s), ${exportsCheck.present.length} export(s), tsc clean${evidence.typecheck.cached ? ' (cached)' : ''}`,
+    `gate-passed: ${recentCommits.length} commit(s), tsc clean${evidence.typecheck.cached ? ' (cached)' : ''}`,
     evidence,
   );
 }
@@ -163,18 +135,6 @@ export function renderGateEvidence(verdictObj, storyId) {
     lines.push('');
   }
 
-  if (ev.candidateExports.length > 0) {
-    lines.push('## AC-derived candidate exports');
-    lines.push(`Candidates: ${ev.candidateExports.join(', ')}`);
-    if (ev.exportsPresent.length > 0) {
-      lines.push(`Present:   ${ev.exportsPresent.join(', ')}`);
-    }
-    if (ev.exportsMissing.length > 0) {
-      lines.push(`Missing:   ${ev.exportsMissing.join(', ')}`);
-    }
-    lines.push('');
-  }
-
   if (ev.typecheck.output || typeof ev.typecheck.ok === 'boolean') {
     lines.push('## Typecheck');
     lines.push(`OK: ${ev.typecheck.ok}${ev.typecheck.cached ? ' (cached)' : ''}`);
@@ -197,9 +157,6 @@ function verdict(shouldSpawnDev, reason, evidence) {
 function emptyEvidence() {
   return {
     recentCommits: [],
-    candidateExports: [],
-    exportsPresent: [],
-    exportsMissing: [],
     typecheck: { ok: false, cached: false, output: '' },
   };
 }

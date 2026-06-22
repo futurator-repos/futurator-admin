@@ -7,6 +7,9 @@ import { buildAgentConfig } from './role-policy';
 import { buildFrameworkDetectSnippet, buildPortDrainLines } from './framework-detect';
 // PR-91-followup (Story 2-A-3-1) — API-AUTHOR step before test-author.
 import { buildApiAuthorPrompt } from '../prompts/api-author-prompt';
+// D2-2 (2026-06-22) — infer the contract module dir from the story's touch
+// points instead of hardcoding `src/`. Pure function; no heavy/circular dep.
+import { inferModuleDirFromTouchPoints } from './api-author-pipeline';
 // PR-73 + PR-85 wired in: shell-time trailer emission for the per-story
 // commit (Skills-Used / Skills-Manifest-Sha). Previously the helpers lived
 // in the daemon and were never imported; now they live here so the
@@ -199,6 +202,24 @@ export function generateStoryPipeline(
     (tp): tp is string => typeof tp === 'string' && tp.length > 0 && !tp.startsWith('<'),
   );
   const quotedTouchPoints = shipTouchPoints.map((tp) => `'${tp.replace(/'/g, "'\\''")}'`).join(' ');
+  // D2-2 (2026-06-22) — infer the api-author contract module dir from the
+  // story's touch points instead of the hardcoded `src/` placeholder, so the
+  // frozen `.d.ts` lands at the story's real module boundary (a story under
+  // `functions/api/foo/` no longer gets a top-level `src/index.d.ts`). When
+  // inference is ambiguous/empty, fall back to the boilerplate's source root
+  // (sst → `functions`, nextjs → `src`) — never worse than the old hardcode.
+  const inferredModule = inferModuleDirFromTouchPoints(shipTouchPoints);
+  const apiModuleDir =
+    inferredModule.moduleDir ||
+    (BOILERPLATE_REGISTRY[boilerplateKind]?.pmContext?.conventions.sourceRoot || 'src').replace(
+      /\/+$/,
+      '',
+    );
+  const contractRelPath = `${apiModuleDir.replace(/\/+$/, '')}/index.d.ts`;
+  // D3-1 (2026-06-22): the declared touch points, one per line, for the
+  // dev-scope enforcement gate's heredoc. Newlines can't appear in a path, so
+  // a quoted-delimiter heredoc lands them verbatim (no shell interpretation).
+  const touchPointsHeredoc = shipTouchPoints.join('\n');
 
   return {
     initialVariables: {
@@ -320,12 +341,11 @@ export function generateStoryPipeline(
                 storyId: story.storyId,
                 storyTitle: story.title,
                 acceptanceCriteria: story.description || '',
-                // Touch-point inference happens daemon-side at dispatch;
-                // when absent, the daemon emits attention.api-author-
-                // ambiguous-module and the operator picks. Until the
-                // inference wire-in lands, the empty string causes the
-                // agent to declare the module relative to the story id.
-                moduleDir: 'src',
+                // D2-2 (2026-06-22) — inferred from the story's touch points
+                // (deepest common ancestor), falling back to the boilerplate's
+                // source root. Replaces the hardcoded `src/` placeholder that
+                // mis-placed the frozen contract for non-`src/` modules.
+                moduleDir: apiModuleDir,
                 existingExports: { types: [], constants: [] },
               }),
               extractors: {},
@@ -342,37 +362,49 @@ export function generateStoryPipeline(
             // api-author forever (it re-made the same read-only decision), so the
             // foundation story — and the whole plan — was blocked.
             //
-            // Correct scope (REPORT-ONLY — always exits 0, never blocks the
-            // story). An ABSENT/empty contract is the tolerated no-frozen-surface
-            // case (the pre-E4-S2 behavior) → pass, dev uses the existing types.
-            // When api-author DID write a contract, run the project's LOCAL tsc
-            // (never `npx` — that fetches the decoy `tsc` npm package when
-            // typescript isn't resolvable) and merely WARN in the log if it does
-            // not typecheck. The first cut hard-failed on both absence AND
-            // isolated-`.d.ts` tsc fragility (relative-import resolution), wedging
-            // the foundation story and the whole plan. Re-hardening to enforcement
-            // needs a proven isolated typecheck (or a wave-level check); until
-            // then, surfacing beats wedging. Pacman1-safe either way.
+            // Correct scope. An ABSENT/empty contract is the tolerated
+            // no-frozen-surface case (the pre-E4-S2 behavior) → pass, dev uses
+            // the existing types.
+            //
+            // D2-3 re-hardening (2026-06-22) — the proper fix for the feature I
+            // had to neuter. The first enforced cut ran an ISOLATED single-`.d.ts`
+            // tsc (`tsc <CONTRACT>`), which mis-resolves the contract's relative
+            // imports and false-failed, so it was downgraded to warn-only. Now
+            // that D2-2 places the contract at its REAL module dir, validate it
+            // with a WHOLE-PROJECT `tsc --noEmit` (no file arg → uses tsconfig,
+            // so every import resolves through the real graph). Enforcement is
+            // PRECISE: the build fails this step ONLY when the contract file
+            // itself appears in the tsc errors (its own surface is broken);
+            // pre-existing/unrelated scaffold errors are surfaced as a WARN and
+            // do NOT wedge the story. Never `npx` (that fetches the decoy `tsc`
+            // npm package when typescript isn't resolvable) — only the project's
+            // local tsc. tsc unavailable → skip (pacman1-safe).
             {
               id: 'api-contract-freeze',
               stepType: 'shell' as const,
               command:
                 `cd ${workingDir} && ` +
-                `CONTRACT="src/index.d.ts"; ` +
+                `CONTRACT="${contractRelPath}"; ` +
                 `if [ ! -s "$CONTRACT" ]; then ` +
                 `  echo "API_CONTRACT_ABSENT: no $CONTRACT — story has no frozen contract surface (pre-baked/existing types); nothing to freeze, continuing to dev"; exit 0; ` +
                 `fi; ` +
                 `TSC="./node_modules/.bin/tsc"; ` +
                 `if [ -x "$TSC" ] && [ -f tsconfig.json ]; then ` +
-                `  if "$TSC" --noEmit --skipLibCheck "$CONTRACT" > /tmp/contract-tsc.log 2>&1; then ` +
-                `    echo "API_CONTRACT_FROZEN_OK sha=$(sha256sum "$CONTRACT" 2>/dev/null | cut -d' ' -f1)"; ` +
+                `  if "$TSC" --noEmit > /tmp/contract-tsc.log 2>&1; then ` +
+                `    echo "API_CONTRACT_FROZEN_OK sha=$(sha256sum "$CONTRACT" 2>/dev/null | cut -d' ' -f1) (whole-project tsc clean)"; ` +
+                `  elif grep -qF "$CONTRACT" /tmp/contract-tsc.log; then ` +
+                `    echo "API_CONTRACT_BROKEN — the frozen contract $CONTRACT does not typecheck against the project (its declared surface is invalid). Fix the contract before dev builds on it:"; ` +
+                `    grep -F "$CONTRACT" /tmp/contract-tsc.log | head -20; ` +
+                `    exit 1; ` +
                 `  else ` +
-                `    echo "API_CONTRACT_TSC_WARN — the contract did not typecheck in isolation (may be import resolution, not a real defect) — surfaced, NOT blocking (E4-S2):"; ` +
+                `    echo "API_CONTRACT_TSC_WARN — project tsc has errors, but NONE reference $CONTRACT (pre-existing/unrelated scaffold noise) — surfaced, NOT blocking:"; ` +
                 `    tail -20 /tmp/contract-tsc.log; ` +
                 `  fi; ` +
                 `else echo "API_CONTRACT_FROZEN_OK (local tsc/tsconfig unavailable — typecheck skipped)"; fi`,
               timeout: 120000,
               captureAs: 'API_CONTRACT_FREEZE_OUTPUT',
+              expectExitCode: 0,
+              onFail: { action: 'fail' as const, injectAs: 'API_CONTRACT_ERROR' },
             },
           ] as unknown as PipelineStep[])
         : ([] as PipelineStep[])),
@@ -713,6 +745,29 @@ Re-emit the authored test file list (REQUIRED — the pipeline re-stages exactly
           ] as PipelineStep[])
         : []),
 
+      // D3-1 (2026-06-22) — pre-DEV baseline for the dev-scope enforcement
+      // gate. Distinct from capture-dev-baseline (the FIRST step, used by the
+      // commit/lint snapshot-diff which intentionally includes api-author +
+      // test-author writes in the story's ship delta). This second baseline is
+      // captured AFTER api-author/test-author/stage-test-files and immediately
+      // BEFORE DEV, so the post-DEV delta against it isolates exactly the files
+      // DEV itself wrote — the input the scope gate needs to verify DEV stayed
+      // within its declared touch points. No-op outside a git repo.
+      {
+        id: 'capture-predev-baseline',
+        stepType: 'shell' as const,
+        command:
+          `cd ${workingDir} && mkdir -p .pipeline && ` +
+          `if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then ` +
+          `  git diff --name-only > .pipeline/${story.storyId}-predev-dirty.txt 2>/dev/null || true; ` +
+          `  git ls-files --others --exclude-standard > .pipeline/${story.storyId}-predev-untracked.txt 2>/dev/null || true; ` +
+          `  echo "PREDEV_BASELINE_CAPTURED story=${story.storyId}"; ` +
+          `else echo "PREDEV_BASELINE_SKIPPED_NOT_A_REPO story=${story.storyId}"; fi`,
+        timeout: 10000,
+        captureAs: 'CAPTURE_PREDEV_BASELINE_OUTPUT',
+        onFail: { action: 'continue' as const },
+      } as unknown as PipelineStep,
+
       // 1. Dev implements story
       // (capture-dev-baseline moved to the TOP of steps[] — see the
       // pacman1 root-cause note there. The commit step's snapshot-diff now
@@ -837,7 +892,30 @@ Worked behavior probe (start → advance time → observe + assert):
     <what the mid-play screenshot must show; explicit FAIL conditions>
 \`\`\`
 `
-                  : ''
+                  : `
+
+### Worked interaction probe (for ACs gated behind a click or navigation)
+
+This app has no test-state seam, so a behavior/state AC is verified by REACHING
+the state then judging the screenshot. When an AC is only visible after an
+interaction (open a menu, submit a form, navigate to a route, expand a row),
+author an L2 entry whose \`flow\` performs the gating action, waits, then
+captures — the judge reads the resulting pixels:
+\`\`\`
+- id: VT-${story.storyId}-1
+  criteriaRef: AC-S<storyNum>-<n>
+  description: <one sentence>
+  setup: navigate to the route this story's deliverable lives on
+  expect: <concrete post-action result, e.g. "a new row labelled 'Untitled' appears at the top of the table">
+  level: L2
+  flow:
+    - { action: click, selector: "<the trigger, e.g. button with text 'Add item'>" }
+    - { action: wait, ms: 400 }
+    - { action: screenshot, label: "after-action" }
+  judge: |
+    <what the after-action screenshot must show; explicit FAIL conditions>
+\`\`\`
+`
               } The QA pipeline routes every entry to an LLM judge that
 will look at a screenshot of your built code and decide pass/fail from the
 PIXELS — not from your tests, not from your diff. So **the test's \`judge:\`
@@ -1235,6 +1313,98 @@ Output only what you changed, then:
             },
           ] as PipelineStep[])
         : []),
+
+      // D3-1 (2026-06-22) — dev-scope enforcement gate. Root-cause fix for the
+      // touch-point honesty gap (Disease D3): the wave scheduler serializes
+      // same-wave stories only when they DECLARE the same file, and nothing
+      // downstream verified DEV obeyed its declared touchPoints. Two stories
+      // that both edited an UNDECLARED shared file (pacmanv3: pacman.ts) looked
+      // disjoint to the scheduler, ran in one wave, and collided at wave-merge —
+      // where the probabilistic LLM resolver was the only safety net. The PM
+      // prompt's promise ("dishonest touch points cost a failed gate") was false.
+      //
+      // This gate makes it true: it diffs the files DEV actually edited (post-DEV
+      // delta vs capture-predev-baseline) against the declared touchPoints and
+      // FAILS the story on any out-of-scope SOURCE edit — converting a future
+      // merge-time conflict into a deterministic pre-merge gate at the exact
+      // point the collision is introduced. Mirrors tamper-check (source instead
+      // of test files). Self-skips when the gate can't be meaningfully enforced
+      // (no declared touchPoints, broad `**` globs, no predev baseline, not a
+      // repo). Test/scaffold/config/infra files are excluded (DEV is not
+      // accountable for them here; tamper-check owns test files). Set
+      // DEV_SCOPE_ENFORCE=0 in the daemon env to downgrade to warn-only.
+      {
+        id: 'dev-scope-check',
+        stepType: 'shell' as const,
+        command:
+          `cd ${workingDir} && mkdir -p .pipeline && ` +
+          // Declared touch points → file, verbatim via quoted-delimiter heredoc.
+          `cat > .pipeline/${story.storyId}-declared-tp.txt << 'EOF_DEVSCOPE'\n` +
+          `${touchPointsHeredoc}\n` +
+          `EOF_DEVSCOPE\n` +
+          // Unenforceable cases self-skip (fail-open).
+          `if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo '__DEV_SCOPE_SKIP__ not-a-repo'; exit 0; fi; ` +
+          `if ! grep -q '[^[:space:]]' .pipeline/${story.storyId}-declared-tp.txt 2>/dev/null; then echo '__DEV_SCOPE_SKIP__ no-declared-touchpoints'; exit 0; fi; ` +
+          `if grep -q '\\*\\*' .pipeline/${story.storyId}-declared-tp.txt 2>/dev/null; then echo '__DEV_SCOPE_SKIP__ broad-glob-touchpoints (cannot enforce)'; exit 0; fi; ` +
+          `PRE_DIRTY=".pipeline/${story.storyId}-predev-dirty.txt"; PRE_UNTRACKED=".pipeline/${story.storyId}-predev-untracked.txt"; ` +
+          `if [ ! -f "$PRE_DIRTY" ] || [ ! -f "$PRE_UNTRACKED" ]; then echo '__DEV_SCOPE_SKIP__ no-predev-baseline (fail-open)'; exit 0; fi; ` +
+          // Post-DEV delta vs the predev baseline = exactly what DEV wrote.
+          `POST_DIRTY=$(mktemp); POST_UNTRACKED=$(mktemp); DELTA=$(mktemp); ` +
+          `git diff --name-only > "$POST_DIRTY" 2>/dev/null || true; ` +
+          `git ls-files --others --exclude-standard > "$POST_UNTRACKED" 2>/dev/null || true; ` +
+          `sort -o "$PRE_DIRTY" "$PRE_DIRTY" 2>/dev/null || true; sort -o "$PRE_UNTRACKED" "$PRE_UNTRACKED" 2>/dev/null || true; ` +
+          `sort -o "$POST_DIRTY" "$POST_DIRTY" 2>/dev/null || true; sort -o "$POST_UNTRACKED" "$POST_UNTRACKED" 2>/dev/null || true; ` +
+          `comm -23 "$POST_DIRTY" "$PRE_DIRTY" > "$DELTA" 2>/dev/null || true; ` +
+          `comm -23 "$POST_UNTRACKED" "$PRE_UNTRACKED" >> "$DELTA" 2>/dev/null || true; ` +
+          // Keep only source files DEV is accountable for: drop infra, test
+          // files (tamper-check owns them), and root config files.
+          `SRC=$(mktemp); ` +
+          `grep -E '\\.(ts|tsx|js|jsx|mjs|cjs)$' "$DELTA" 2>/dev/null ` +
+          `  | grep -vE '^(node_modules/|\\.pipeline/|\\.mycelium/|knowledge/|\\.context/)' ` +
+          `  | grep -vE '\\.(test|spec)\\.[jt]sx?$|(^|/)__tests__/|^e2e/|^tests/' ` +
+          `  | grep -vE '(^|/)(vite|vitest|tailwind|next|eslint|postcss)\\.config\\.[jt]s$' ` +
+          `  | sort -u > "$SRC" 2>/dev/null || true; ` +
+          `if [ ! -s "$SRC" ]; then echo '__DEV_SCOPE_CLEAN__ (no source files edited beyond infra/tests/config)'; exit 0; fi; ` +
+          // D3-2 — emit the MEASURED edit set (all source files DEV touched,
+          // in- or out-of-scope) so the daemon can persist it as the story's
+          // actualTouchPoints. The scheduler unions these on the next wave
+          // computation to serialize stories that genuinely collide on a file
+          // neither declared. Single space-joined line, easy to parse.
+          `echo "__DEV_SCOPE_ACTUAL__ $(tr '\\n' ' ' < "$SRC" 2>/dev/null)"; ` +
+          // For each edited source file, in-scope iff it matches a declared
+          // touch point exactly, as a glob, or as a directory prefix. `case`
+          // patterns: quoted arm = literal, unquoted $tp = glob-active, "$tp"/*
+          // = directory prefix. Lenient by design — false positives block a
+          // legit story, so matching errs toward in-scope.
+          `VIOLATIONS=""; ` +
+          `while IFS= read -r f; do ` +
+          `  [ -z "$f" ] && continue; ` +
+          `  inscope=0; ` +
+          `  while IFS= read -r tp; do ` +
+          `    [ -z "$tp" ] && continue; ` +
+          `    case "$f" in ` +
+          `      "$tp") inscope=1; break;; ` +
+          `      "$tp"/*) inscope=1; break;; ` +
+          `      $tp) inscope=1; break;; ` +
+          `    esac; ` +
+          `  done < .pipeline/${story.storyId}-declared-tp.txt; ` +
+          `  [ "$inscope" -eq 0 ] && VIOLATIONS="$VIOLATIONS $f"; ` +
+          `done < "$SRC"; ` +
+          `if [ -n "$VIOLATIONS" ]; then ` +
+          `  if [ "\${DEV_SCOPE_ENFORCE:-1}" = "0" ]; then ` +
+          `    echo "__DEV_SCOPE_WARN__ out-of-scope source edits (enforcement disabled via DEV_SCOPE_ENFORCE=0):$VIOLATIONS"; exit 0; ` +
+          `  fi; ` +
+          `  echo "__DEV_SCOPE_VIOLATION__ DEV edited source file(s) outside this story's declared touch points:$VIOLATIONS"; ` +
+          `  echo '--- Declared touch points ---'; cat .pipeline/${story.storyId}-declared-tp.txt; ` +
+          `  echo "These undeclared edits are the merge-collision disease (D3): a sibling story in the same wave may edit the same file, and the collision only surfaces at wave-merge. FIX: declare every file this story changes in its touchPoints so the scheduler serializes colliding stories, or keep the change within the declared set."; ` +
+          `  exit 1; ` +
+          `fi; ` +
+          `echo "__DEV_SCOPE_CLEAN__ all edited source file(s) within declared touch points"`,
+        timeout: 30000,
+        captureAs: 'DEV_SCOPE_OUTPUT',
+        expectExitCode: 0,
+        onFail: { action: 'fail' as const, injectAs: 'DEV_SCOPE_ERROR' },
+      } as unknown as PipelineStep,
 
       // PR-36 — baseline-diff regression gate (Story 2-A-4-3). v2.5 §14.
       //

@@ -264,10 +264,6 @@ describe('buildPmPlanPrompt — prose slimming preserves keyed text (v3 E2-S1)',
       'REJECTED at the', // touch-points hard rule (kept verbatim)
       'your plan is REJECTED without it', // visual-coverage hard requirement
       'needsBrowser: true',
-      'PROGRESSIVE FEATURE REGISTRATION',
-      'src/features/',
-      'primary: true',
-      'window.__harness',
       "verify:'appearance'",
       'idle-visible',
       'POST-INTERACTION',
@@ -277,6 +273,45 @@ describe('buildPmPlanPrompt — prose slimming preserves keyed text (v3 E2-S1)',
     ]) {
       expect(p).toContain(keyed);
     }
+  });
+
+  // D1-A1 (2026-06-22) — feature-registration is a CAPABILITY of nextjs-*
+  // starters (wiring: 'feature-registry'), not universal law. nextjs-base HAS
+  // that wiring, so its prompt keeps the registration block; the harness/seam
+  // language only appears for a boilerplate that actually ships a testHarness
+  // (canvas-game), never leaked into a seam-less app.
+  it('renders feature-registry block for a feature-registry boilerplate', () => {
+    for (const keyed of ['PROGRESSIVE FEATURE REGISTRATION', 'src/features/', 'primary: true']) {
+      expect(p).toContain(keyed);
+    }
+    // No seam on nextjs-base → no __harness probe language.
+    expect(p).not.toContain('window.__harness');
+  });
+
+  it('renders the seam probe language ONLY for a boilerplate with a testHarness', () => {
+    const game = buildPmPlanPrompt({
+      ...baseArgs,
+      boilerplateType: 'nextjs-canvas-game',
+      rigor: 'mvp',
+    });
+    expect(game).toContain('window.__harness');
+    // And the game few-shots are data-driven from the registry, not the prompt.
+    expect(game).toContain('GAME OVER');
+  });
+
+  // D1-A1/A2/A3 (2026-06-22) — a route-based (non-feature-registry) boilerplate
+  // must NOT inherit the single-page feature-registration model or game/sprite
+  // few-shots. sst is route/API-based (no `wiring`).
+  it('renders route-mounting (NOT feature-registration) for a route-based boilerplate', () => {
+    const sst = buildPmPlanPrompt({ ...baseArgs, boilerplateType: 'sst', rigor: 'mvp' });
+    expect(sst).toContain('MOUNT ON A REAL ROUTE');
+    expect(sst).not.toContain('PROGRESSIVE FEATURE REGISTRATION');
+    expect(sst).not.toContain('src/features/');
+    expect(sst).not.toContain('primary: true');
+    // De-gamed: no sprite/HUD/Pacman few-shots bleed into a non-game plan.
+    expect(sst).not.toContain('sprite');
+    expect(sst).not.toContain('Pacman');
+    expect(sst).not.toContain('DinoState');
   });
 
   it('carries the output-budget contract (the 32K-cap truncation fix)', () => {
@@ -293,6 +328,34 @@ describe('buildPmPlanPrompt — prose slimming preserves keyed text (v3 E2-S1)',
       rigor: 'production',
     });
     expect(prod).toMatch(/≤ ~18 stories/);
+  });
+
+  // D4 (2026-06-22) — COMPACT RETRY. After an overflow (terminal-empty prior
+  // attempt), the re-fired generation must aim SMALLER, not re-emit the same
+  // over-long plan that truncated.
+  it('compact retry tightens the budget and adds the overflow banner', () => {
+    const normal = buildPmPlanPrompt({ ...baseArgs, boilerplateType: 'nextjs-base', rigor: 'mvp' });
+    const compact = buildPmPlanPrompt({
+      ...baseArgs,
+      boilerplateType: 'nextjs-base',
+      rigor: 'mvp',
+      compact: true,
+    });
+    // Normal mvp = 6–12 ceiling; compact = a tighter hard limit + banner.
+    expect(normal).toMatch(/6–12 stories/);
+    expect(normal).not.toContain('COMPACT RETRY');
+    expect(compact).toContain('COMPACT RETRY');
+    expect(compact).toMatch(/≤ 6 stories total/);
+    expect(compact).not.toMatch(/6–12 stories/);
+    // Production compact is tighter than its ~18 default.
+    const prodCompact = buildPmPlanPrompt({
+      ...baseArgs,
+      boilerplateType: 'nextjs-base',
+      rigor: 'production',
+      compact: true,
+    });
+    expect(prodCompact).toMatch(/≤ 10 stories total/);
+    expect(prodCompact).not.toMatch(/≤ ~18 stories/);
   });
 
   it('still no larger than the pre-slim prompt (regression ceiling)', () => {

@@ -117,23 +117,46 @@ function lensesForRigor(rigor) {
 }
 
 function buildEvidencePrompt({ storiesInput, port, healthPath, shotDir }) {
+  // D1-A9 (2026-06-22) — route-aware capture topology. Feature-registry apps
+  // (nextjs-*) isolate each story's surface via `/?feature=<slug>`; route-based
+  // apps (SaaS/API/multi-route) have NO such isolation — the deliverable lives
+  // on a real route the AC names. featureSlugsForStory returns [] for the
+  // latter, so we adapt the capture instructions instead of hardcoding the
+  // single-page `?feature=` topology (which screenshots the wrong surface).
+  const anySlugs = storiesInput.some((s) => Array.isArray(s.featureSlugs) && s.featureSlugs.length > 0);
+  const captureSteps = anySlugs
+    ? [
+        'For EACH story, capture PNG screenshot evidence of ITS OWN surface:',
+        `1. If the story has featureSlugs, prefer feature isolation:`,
+        `   http://localhost:${port}/?feature=<slug> (the generated page renders ONLY that feature).`,
+        `2. If a feature page renders empty/meaningless, try the composed root and the`,
+        '   anchored section #feature-<slug> (scroll it into view before shooting).',
+        '3. If the story has NO featureSlugs, it mounts on a real route — navigate to the',
+        "   route named in the acceptance criterion's text/setup (e.g. /dashboard, /signup)",
+        '   and capture THAT surface; fall back to the composed root only if no route is named.',
+      ]
+    : [
+        'For EACH story, capture PNG screenshot evidence of ITS OWN surface. This app is',
+        'route-based (no feature-isolation query param):',
+        '1. Navigate to the real route the acceptance criterion names in its text/setup',
+        '   (e.g. /dashboard, /signup, /invoices) and screenshot that surface.',
+        '2. If the criterion needs an interaction first (click/fill/submit), perform it,',
+        '   then screenshot the resulting state.',
+        '3. Only if no route is discernible, capture the composed root.',
+      ];
   return [
     'You are the wave-gate visual EVIDENCE agent. A dev server for the merged',
     `candidate is ALREADY RUNNING at http://localhost:${port}${healthPath} — do NOT start,`,
     'stop or restart it, and do NOT run a build.',
     '',
     'INPUT — stories merged in this wave, with their registered feature slugs',
-    'and the browser-verifiable acceptance criteria to capture evidence for:',
+    '(empty for route-based apps) and the browser-verifiable acceptance criteria',
+    'to capture evidence for:',
     '```json',
     JSON.stringify(storiesInput, null, 2),
     '```',
     '',
-    'For EACH story, capture PNG screenshot evidence of ITS OWN surface:',
-    `1. Prefer feature isolation: http://localhost:${port}/?feature=<slug> for each`,
-    '   of the story\'s featureSlugs (the generated page renders ONLY that feature).',
-    `2. If a feature page renders empty/meaningless, try the composed root and the`,
-    '   anchored section #feature-<slug> (scroll it into view before shooting).',
-    '3. If the story has no featureSlugs, capture the composed root.',
+    ...captureSteps,
     `Also capture the composed root once as ${shotDir}/root.png.`,
     '',
     `Write ALL screenshots under ${shotDir}/ (it exists). Use`,

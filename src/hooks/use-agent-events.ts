@@ -29,6 +29,21 @@ export function useAgentEvents(
     didFinalFetch.current = false;
   }, []);
 
+  // D5 (2026-06-22) — stale live-log root fix, part 1: reset the FETCH CURSOR
+  // when the job changes (a retry mints a NEW jobId), so the new job's events
+  // are fetched from seq 0. Otherwise lastSeq still holds the dead job's higher
+  // cursor and the new job's early events (eventSeq < that) are silently skipped
+  // by the `after=lastSeq` server filter. Refs only here — NO setState in an
+  // effect (that trips react-hooks/set-state-in-effect + cascading renders).
+  // The DISPLAY is scoped to the current job by the return-time filter below,
+  // so a dead prior job's failures never render alongside the live run (pre-fix
+  // they did, and every retry looked like "failing again" — misled the operator
+  // 4× in the pacmanv3 session).
+  useEffect(() => {
+    lastSeq.current = '000000';
+    didFinalFetch.current = false;
+  }, [jobId]);
+
   useEffect(() => {
     if (!jobId) return;
 
@@ -72,5 +87,14 @@ export function useAgentEvents(
     return () => clearInterval(interval);
   }, [jobId, jobStatus]);
 
-  return { events, isPolling, reset };
+  // D5 part 2: scope the returned events to the CURRENT job. The internal
+  // `events` buffer may still hold a prior job's events (the poller only ever
+  // appends); filtering on return guarantees the live-log shows ONLY this job's
+  // stream — pure, no state mutation, so no cascading-render / ref-write lint.
+  const scopedEvents = useMemo(
+    () => (jobId ? events.filter((e) => String(e.jobId) === String(jobId)) : events),
+    [events, jobId],
+  );
+
+  return { events: scopedEvents, isPolling, reset };
 }

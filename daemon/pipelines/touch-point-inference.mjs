@@ -480,12 +480,21 @@ export async function inferTouchPoints(opts) {
     };
   });
 
+  // D3-2 (2026-06-22) — carry each story's persisted actualTouchPoints (the
+  // files its DEV agent actually edited on a prior run, recorded by the
+  // dev-scope gate) into the collision input, so `detectCollisions` unions them
+  // with the (re-inferred) declared set. Two siblings that collided only on a
+  // measured-but-undeclared file then serialize on this recompute.
+  const actualByStoryId = new Map(
+    (epic.stories || []).map((s) => [s.storyId, s.actualTouchPoints]),
+  );
   const waveInput = perStory.map((s) => ({
     storyId: s.storyId,
     wave: s.wave,
     dependsOn: s.dependsOn,
     complexity: s.complexity,
     touchPoints: s.touchPoints,
+    actualTouchPoints: actualByStoryId.get(s.storyId),
     collisionsWith: s.collisionsWith,
   }));
   const collisionsDetected = detectCollisions(waveInput);

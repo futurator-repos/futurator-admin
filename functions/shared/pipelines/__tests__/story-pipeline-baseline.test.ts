@@ -146,7 +146,7 @@ describe('PR-41 — tamper-check promoted to mvp+ rigor (Story 2-A-5-1)', () => 
   });
 });
 
-describe('v3 E4-S2 — contract freeze (report-only after pacmanv3 fix)', () => {
+describe('v3 E4-S2 — contract freeze (D2-3 precise whole-project enforcement)', () => {
   it('mvp/production insert api-contract-freeze between api-author and dev', () => {
     for (const rigor of ['mvp', 'production'] as const) {
       const ids = generateStoryPipeline(story, 'Test Epic', workingDir, { rigor }).steps.map(
@@ -158,30 +158,51 @@ describe('v3 E4-S2 — contract freeze (report-only after pacmanv3 fix)', () => 
     }
   });
 
-  it('is REPORT-ONLY: skip-if-absent, local tsc, warns (never blocks/loops)', () => {
-    // Regression guard (pacmanv3, 2026-06-20): api-author legitimately writes no
-    // contract when types are pre-baked, and isolated-`.d.ts` tsc is fragile —
-    // so this gate must never fail the story.
+  it('D2-3: precise enforcement — absent skips, contract-broken blocks, unrelated noise warns', () => {
+    // D2-3 re-hardening (2026-06-22): the contract now lands at its real module
+    // dir (D2-2), so it's validated with a WHOLE-PROJECT tsc and ENFORCED —
+    // but precisely: only a tsc error that references the contract file blocks;
+    // pre-existing/unrelated scaffold errors merely warn (no false wedge).
     const freeze = generateStoryPipeline(story, 'Test Epic', workingDir, {
       rigor: 'mvp',
     }).steps.find((s) => s.id === 'api-contract-freeze') as unknown as {
       command: string;
       loopTo?: string;
-      onFail?: unknown;
+      onFail?: { action: string; injectAs?: string };
       expectExitCode?: number;
     };
-    // Absent → exit 0 (continue to dev); the old hard-fail markers are gone.
+    // Absent contract → exit 0 (continue to dev); the old hard-fail markers gone.
     expect(freeze.command).toMatch(/API_CONTRACT_ABSENT[\s\S]*exit 0/);
     expect(freeze.command).not.toMatch(/API_CONTRACT_MISSING/);
-    expect(freeze.command).not.toMatch(/API_CONTRACT_TSC_FAILED/);
-    // tsc failure only WARNS — no `exit 1`, no loop, no onFail.
+    // Contract's OWN surface broken → block (exit 1 + daemon-visible onFail).
+    expect(freeze.command).toMatch(/API_CONTRACT_BROKEN[\s\S]*exit 1/);
+    expect(freeze.onFail?.action).toBe('fail');
+    expect(freeze.onFail?.injectAs).toBe('API_CONTRACT_ERROR');
+    expect(freeze.expectExitCode).toBe(0);
+    // Project tsc noise NOT referencing the contract → warn only (no wedge).
     expect(freeze.command).toMatch(/API_CONTRACT_TSC_WARN/);
-    expect(freeze.command).not.toMatch(/exit 1/);
-    expect(freeze.loopTo).toBeUndefined();
-    expect(freeze.onFail).toBeUndefined();
-    // Uses the project's LOCAL tsc, never the decoy-prone `npx tsc`.
+    // Whole-project tsc (no single-file arg), via the LOCAL tsc, never `npx tsc`.
+    expect(freeze.command).toMatch(/"\$TSC" --noEmit >/);
     expect(freeze.command).toMatch(/node_modules\/\.bin\/tsc/);
     expect(freeze.command).not.toMatch(/npx tsc/);
+    expect(freeze.loopTo).toBeUndefined();
+  });
+
+  it('D2-2: contract path + api-author moduleDir are inferred from touch points (not hardcoded src)', () => {
+    // Deep, agreeing touch points → the contract lands at their common module
+    // boundary, not a top-level `src/index.d.ts`.
+    const deepStory = {
+      ...story,
+      touchPoints: ['functions/api/billing/handler.ts', 'functions/api/billing/schema.ts'],
+    } as EpicStory;
+    const steps = generateStoryPipeline(deepStory, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    }).steps as unknown as Array<{ id: string; command?: string; prompt?: string }>;
+    const freeze = steps.find((s) => s.id === 'api-contract-freeze');
+    expect(freeze?.command).toContain('CONTRACT="functions/api/billing/index.d.ts"');
+    expect(freeze?.command).not.toContain('CONTRACT="src/index.d.ts"');
+    const apiAuthor = steps.find((s) => s.id === 'api-author');
+    expect(apiAuthor?.prompt).toContain('functions/api/billing');
   });
 
   it('prototype has neither api-author nor the freeze gate', () => {
@@ -190,6 +211,49 @@ describe('v3 E4-S2 — contract freeze (report-only after pacmanv3 fix)', () => 
     }).steps.map((s) => s.id);
     expect(ids).not.toContain('api-author');
     expect(ids).not.toContain('api-contract-freeze');
+  });
+});
+
+describe('D3 — dev-scope enforcement gate (D3-1) + measured-set emission (D3-2)', () => {
+  // A story whose touch points are deep & specific enough to enforce.
+  const scoped = {
+    ...story,
+    touchPoints: ['src/game/pacman.ts', 'src/game/ghost.ts'],
+  } as EpicStory;
+
+  it('inserts capture-predev-baseline before dev and dev-scope-check after it', () => {
+    const ids = generateStoryPipeline(scoped, 'Test Epic', workingDir, { rigor: 'mvp' }).steps.map(
+      (s) => s.id,
+    );
+    expect(ids).toContain('capture-predev-baseline');
+    expect(ids).toContain('dev-scope-check');
+    expect(ids.indexOf('capture-predev-baseline')).toBeLessThan(ids.indexOf('dev'));
+    expect(ids.indexOf('dev-scope-check')).toBeGreaterThan(ids.indexOf('dev'));
+  });
+
+  it('D3-1: fails the story on out-of-scope source edits (blocking, daemon-visible)', () => {
+    const gate = generateStoryPipeline(scoped, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    }).steps.find((s) => s.id === 'dev-scope-check') as unknown as {
+      command: string;
+      expectExitCode?: number;
+      onFail?: { action: string; injectAs?: string };
+    };
+    expect(gate.command).toMatch(/__DEV_SCOPE_VIOLATION__[\s\S]*exit 1/);
+    expect(gate.expectExitCode).toBe(0);
+    expect(gate.onFail?.action).toBe('fail');
+    expect(gate.onFail?.injectAs).toBe('DEV_SCOPE_ERROR');
+    // Self-skips when it can't enforce (broad globs / no touch points / no baseline).
+    expect(gate.command).toMatch(/__DEV_SCOPE_SKIP__/);
+    // Operator escape hatch.
+    expect(gate.command).toMatch(/DEV_SCOPE_ENFORCE/);
+  });
+
+  it('D3-2: emits the measured edit set for the daemon to persist as actualTouchPoints', () => {
+    const gate = generateStoryPipeline(scoped, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+    }).steps.find((s) => s.id === 'dev-scope-check') as unknown as { command: string };
+    expect(gate.command).toContain('__DEV_SCOPE_ACTUAL__');
   });
 });
 

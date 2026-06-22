@@ -214,6 +214,33 @@ export interface BoilerplateMetadata {
      * boilerplate-specific (e.g., Next: "next dev exits 0", Vite: "vite build exits 0").
      */
     exampleAcceptanceCriteria: string[];
+
+    /**
+     * D1-A2/A3 (2026-06-22) — 2-3 BROWSER-AC exemplars in THIS boilerplate's
+     * domain voice, used as the "concrete, screen-verifiable" examples in the
+     * PM prompt's visual-coverage block. Replaces the hardcoded canvas/sprite/HUD
+     * few-shot that biased every plan toward games. Absent → the prompt falls
+     * back to a domain-neutral spanning set (dashboard card / form field / nav).
+     * Each must be screen-verifiable: count + color/style + position + a fail
+     * clause where the signal isn't obvious.
+     */
+    exampleBrowserAc?: string[];
+
+    /**
+     * D1-A4 (2026-06-22) — neutral hint for the foundation "define core domain
+     * types" example story. e.g. game: "GameStatus, Entity, GameState";
+     * dashboard: "Metric, Series, DashboardConfig". Absent → a domain-neutral
+     * placeholder ("the 2-3 core domain types the intent implies"). NEVER
+     * hardcode one domain's entity names into the universal example.
+     */
+    exampleDomainTypes?: string;
+
+    /**
+     * D1-A10 (2026-06-22) — a coupled-sibling worked example in this domain (the
+     * anti-pattern where ONE behavior spans two parallel stories). Absent → a
+     * domain-neutral CRUD example. Avoids Pacman-as-universal-law in the prompt.
+     */
+    coupledSiblingExample?: string;
   };
 
   // ── Pipeline v2.0 PR-8 (Q2.3) — QA-stage context ────────────────────────
@@ -287,6 +314,26 @@ export interface BoilerplateMetadata {
    * GitHub template the daemon clones.
    */
   baseStarter?: BoilerplateType;
+
+  /**
+   * D1-A1 (2026-06-22) — UI feature-mounting model, consumed by
+   * `buildPmPlanPrompt` to render the "make visibility structural" block.
+   *
+   *  - `'feature-registry'`: the nextjs-* starters ship `scripts/generate-wiring.mjs`
+   *    + a `src/features/*.feature.tsx` registry, so a UI story makes its output
+   *    judgeable by REGISTERING a feature (additive, no hot-file conflicts) and the
+   *    final assembly marks one feature `primary` to own `/`. Inherited by every
+   *    nextjs-base derivative via `createStarterPack`.
+   *  - `'route'` (or undefined): features mount on their own real routes; visual QA
+   *    reaches each by navigating to the route the AC names. The general default
+   *    for multi-route apps (SaaS dashboards, API admins) where `/` is a
+   *    marketing/login page, not the feature surface.
+   *
+   * Before this flag, the prompt emitted feature-registration as universal law,
+   * corrupting the file layout of any non-single-page app. The block is now
+   * rendered from this capability instead.
+   */
+  wiring?: 'feature-registry' | 'route';
 
   /**
    * Domain taxonomy for the recommender + UI grouping. `general` is the
