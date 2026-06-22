@@ -128,7 +128,7 @@ A three-depth ladder — only the last needs the smart layer:
    > edges, or use ts-morph/knip/madge --ts-config). Out-degree/ownership/cohesion are safe;
    > inbound fan-in is not. See `applicator-editor-unification-plan.md` Tooling finding #3.
    >
-   > ✅ **RESOLVED 2026-06-19** by `scripts/refactor-recon/alias-resolve.mjs` — a deterministic
+   > ✅ **RESOLVED 2026-06-19** by `daemon/scripts/refactor-recon/alias-resolve.mjs` — a deterministic
    > post-processor that recomputes the import graph from source with tsconfig-`paths`
    > resolution, keyed by `source_file`. Validated: `button.tsx` in-degree **1 → 115** (exact
    > ground truth); design-system verdict flipped false→correct. It also revealed applicator has

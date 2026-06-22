@@ -29,11 +29,15 @@ const run = (cmd, cmdArgs, opts = {}) => {
   catch (e) { if (opts.allowFail) { console.error(`  (non-fatal: exit ${e.status})`); return null } throw e }
 }
 
-// resolve a python that can `import graphify`
+// resolve a python that can `import graphify`.
+// Order: explicit GRAPHIFY_PYTHON env → per-repo saved hint → the conventional
+// EC2 daemon venv (kept isolated from system python) → bare python3.
 function graphifyPython() {
   const saved = path.join(outDir, '.graphify_python')
   const cands = []
+  if (process.env.GRAPHIFY_PYTHON) cands.push(process.env.GRAPHIFY_PYTHON)
   if (fs.existsSync(saved)) cands.push(fs.readFileSync(saved, 'utf8').trim())
+  cands.push('/opt/graphify-venv/bin/python')
   cands.push('python3')
   for (const py of cands) {
     try { execFileSync(py, ['-c', 'import graphify'], { stdio: 'ignore' }); return py } catch {}

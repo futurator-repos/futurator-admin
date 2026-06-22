@@ -7,7 +7,7 @@
 > [`refactoring-recon-experiment-applicator.md`](./concepts/refactoring-recon-experiment-applicator.md),
 > [`applicator-editor-unification-plan.md`](./concepts/applicator-editor-unification-plan.md),
 > [`applicator-assessment-plan.md`](./concepts/applicator-assessment-plan.md).
-> **Validated artifacts:** `scripts/refactor-recon/alias-resolve.mjs`, `scripts/refactor-recon/hotspot-detect.mjs`,
+> **Validated artifacts:** `daemon/scripts/refactor-recon/alias-resolve.mjs`, `daemon/scripts/refactor-recon/hotspot-detect.mjs`,
 > the saved `/assess-codebase` dynamic workflow.
 
 ## Goal & shape
@@ -32,7 +32,7 @@ Epic E (fix loop) are fast-follows — the recon report alone is shippable value
 
 Turn the two validated scripts + graphify + knip into a single headless command the daemon runs.
 
-- **A1 — `recon.mjs` orchestrator.** One command: `node scripts/refactor-recon/recon.mjs <repo>` that runs graphify (AST, `--directed`) → `alias-resolve.mjs` → `hotspot-detect.mjs`, writing `graphify-out/{graph.resolved.json, resolved-imports.json, hotspots.json}` + a `REPORT.md`.
+- **A1 — `recon.mjs` orchestrator.** One command: `node daemon/scripts/refactor-recon/recon.mjs <repo>` that runs graphify (AST, `--directed`) → `alias-resolve.mjs` → `hotspot-detect.mjs`, writing `graphify-out/{graph.resolved.json, resolved-imports.json, hotspots.json}` + a `REPORT.md`.
   - _AC1:_ single invocation produces all four artifacts on `applicator` with zero manual steps.
   - _AC2:_ pure-deterministic (0 LLM tokens); completes < 3 min on 700-file repo.
   - _AC3:_ exits non-zero with a specific message if graphify/knip missing; idempotent re-run.
