@@ -578,6 +578,14 @@ describe('nextjs-canvas-game — VQA v3 verifiability seam (E2)', () => {
     expect(game.scaffoldContract).toMatch(/PRE-BAKED|do NOT author/i);
   });
 
+  it('SCAFFOLD.md forbids testing the feature descriptor (promote-to-primary disease)', () => {
+    // slug/order/primary are mutated by the promotion lifecycle — freezing them
+    // in a unit test makes the assembly story's contract unsatisfiable.
+    expect(game.scaffoldContract).toMatch(/DESCRIPTOR is NOT a test surface/);
+    expect(game.scaffoldContract).toMatch(/NEVER write a test that asserts/);
+    expect(game.scaffoldContract).toMatch(/feature\.slug/);
+  });
+
   it('ships a committed __harness.schema.json that matches testHarness.snapshotShape (E5.5)', () => {
     const file = game.augmentFiles?.find((f) => f.path === '__harness.schema.json');
     expect(file).toBeDefined();

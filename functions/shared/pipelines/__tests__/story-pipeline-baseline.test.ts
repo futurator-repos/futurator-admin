@@ -214,6 +214,36 @@ describe('v3 E4-S2 — contract freeze (D2-3 precise whole-project enforcement)'
   });
 });
 
+describe('feature descriptor is not a test surface (promote-to-primary disease, 2026-06-22)', () => {
+  it('test-author prompt forbids asserting the descriptor — ONLY for feature-registry apps', () => {
+    const game = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+      boilerplateKind: 'nextjs-canvas-game',
+    }).steps.find((s) => s.id === 'test-author') as unknown as { prompt: string };
+    expect(game.prompt).toContain('feature DESCRIPTOR is NOT a test surface');
+    expect(game.prompt).toMatch(/NEVER write .*feature\.slug\/order\/primary/);
+
+    // A route-based / non-feature-registry app must NOT carry the rule (no descriptor).
+    const sst = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+      boilerplateKind: 'sst',
+    }).steps.find((s) => s.id === 'test-author') as unknown as { prompt: string } | undefined;
+    if (sst) expect(sst.prompt).not.toContain('feature DESCRIPTOR is NOT a test surface');
+  });
+
+  it('test-fix prompt gives a NARROW carve-out to retire a superseded descriptor test (feature-registry only)', () => {
+    const fix = generateStoryPipeline(story, 'Test Epic', workingDir, {
+      rigor: 'mvp',
+      boilerplateKind: 'nextjs-canvas-game',
+    }).steps.find((s) => s.id === 'test-fix') as unknown as { prompt: string };
+    expect(fix.prompt).toMatch(/EXCEPTION \(feature promotion/);
+    expect(fix.prompt).toMatch(/SUPERSEDED interim-preview contract/i);
+    expect(fix.prompt).toContain('NEVER weaken a behavior test to pass');
+    // The blanket "do not edit/delete test files" rule is still present.
+    expect(fix.prompt).toContain('Do NOT edit or delete the test files');
+  });
+});
+
 describe('D3 — dev-scope enforcement gate (D3-1) + measured-set emission (D3-2)', () => {
   // A story whose touch points are deep & specific enough to enforce.
   const scoped = {

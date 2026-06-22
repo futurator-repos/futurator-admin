@@ -736,12 +736,13 @@ function renderVisibilityStructuralBlock(args: {
   deliverable in a meaningful idle state. Therefore:
   - Do NOT write "unit-test-only" rendering stories asserting mocked render calls
     instead of pixels — mount it, then write the browser AC about the idle frame.
-  - The final assembly story composes everything into the real app feature, marks it
-    PRIMARY (\`export const feature = { slug: '<app>', order: 0, primary: true }\`), and
-    RETIRES interim preview features (list the removed files in its touchPoints; it
-    runs in a later wave, so editing earlier-wave files is safe). \`primary: true\`
-    makes the bare route \`/\` render ONLY the real app (previews stay at
-    \`?feature=<slug>\`). It should also carry browser ACs for the composed initial frame.`;
+  - The final assembly story marks its feature PRIMARY (\`export const feature =
+    { slug: '<app>', order: 0, primary: true }\`) in its OWN feature file, DELETES each
+    retired preview \`*.feature.tsx\` AND its colocated test (list them in touchPoints),
+    and carries a browser AC for the composed \`/\` frame.
+  - \`slug\`/\`order\`/\`primary\` are generator-read WIRING the promotion MUTATES — NEVER
+    write an AC that unit-tests them (a preview freezing them makes the promotion
+    unsatisfiable); verify "primary at \`/\`" with a browser AC.`;
   }
   return `**Make visibility structural — MOUNT ON A REAL ROUTE.** A browser AC is only
   judgeable if the story's deliverable is REACHABLE in the running app. So a UI

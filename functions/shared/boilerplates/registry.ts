@@ -224,6 +224,23 @@ Worked behavior probe:
 The seam exposes \`{ status, score, tick, entities, gameOver }\` + any field
 you add to \`GameState\` (e.g. \`lives\`). Assert against those keys.
 
+## The feature DESCRIPTOR is NOT a test surface (slug / order / primary)
+\`feature.slug\`, \`feature.order\`, and \`feature.primary\` are WIRING metadata:
+\`generate-wiring.mjs\` reads them by STATIC PARSE and visual QA verifies the
+right app renders at \`/\`. They are MUTATED by the promotion lifecycle — the
+final-assembly story flips an interim preview's \`primary\`/\`order\`/\`slug\` to the
+real app values. A unit test asserting \`feature.slug\` / \`feature.order\` /
+\`feature.primary\` therefore FREEZES a transient value as a permanent contract:
+once the feature is promoted that test is unsatisfiable AND the promotion story
+cannot fix it (it must not edit another story's test). HARD RULES:
+- NEVER write a test that asserts \`feature.slug\`, \`feature.order\`, or
+  \`feature.primary\`. Test the component's RENDERED OUTPUT instead.
+- The promotion/assembly story sets \`primary: true\`; that is verified by the
+  generator + the \`/\` visual-QA frame, NOT by a unit test.
+- An interim preview and the final assembly should be SEPARATE feature files;
+  the assembly DELETES each retired preview \`*.feature.tsx\` AND its colocated
+  test, listing both in its \`touchPoints\`.
+
 ## Conventions
 - Add domain entity types to \`src/game/types.ts\` (extend, don't replace)
 - Place new entities under \`src/game/entities/<name>.ts\`

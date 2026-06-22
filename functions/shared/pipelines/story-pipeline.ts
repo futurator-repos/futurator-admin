@@ -144,6 +144,11 @@ export function generateStoryPipeline(
   const seamSnapshotKeys = seam
     ? Object.keys(seam.snapshotShape).map((k) => k.replace(/^snapshot\./, ''))
     : [];
+  // 2026-06-22 — feature-registry apps mutate a feature's slug/order/primary
+  // descriptor during the promotion lifecycle, so tests must NOT freeze it
+  // (the promote-to-primary disease). Gate the test-author rule to those apps.
+  const usesFeatureRegistry =
+    (BOILERPLATE_REGISTRY[boilerplateKind]?.wiring ?? 'route') === 'feature-registry';
   const testsOn = rigor !== 'prototype';
   // PR-41 (Story 2-A-5-1): tamper-check promoted from production-only to
   // mvp+. The Phase 1 implementation gated this to production rigor because
@@ -436,7 +441,23 @@ ${story.description}
 
 ## VERIFICATION (dino4 fix):
 - Do NOT run \`npm test\`, \`npx vitest\`, \`npm run dev\`, or any test/build runner. The downstream \`test-gate-red\` (production rigor only) and \`test-verify\` (mvp+) shell steps run them for you. Your job is to author tests, not verify they fail.
-- Do NOT Read a file you just Wrote — Write/Edit error on failure; their silent return IS the verification.
+- Do NOT Read a file you just Wrote — Write/Edit error on failure; their silent return IS the verification.${
+                usesFeatureRegistry
+                  ? `
+
+## HARD RULE — the feature DESCRIPTOR is NOT a test surface
+A \`src/features/*.feature.tsx\` exports \`feature = { slug, order, primary }\`. Those
+are WIRING metadata: \`scripts/generate-wiring.mjs\` reads them by static parse and
+visual QA verifies the right app renders at \`/\`. The promotion lifecycle MUTATES
+them (the final-assembly story flips an interim preview's \`primary\`/\`order\`/\`slug\`).
+So if you assert \`feature.slug\`, \`feature.order\`, or \`feature.primary\`, you FREEZE a
+transient value as a permanent contract — when the feature is promoted your test
+becomes unsatisfiable and the promotion story CANNOT fix it (it must not edit your
+test). NEVER write \`expect(...feature.slug/order/primary...)\`. Assert the
+component's RENDERED OUTPUT instead (what it shows on screen). Promotion to primary
+is verified by the generator + the \`/\` visual frame, not by a unit test.`
+                  : ''
+              }
 
 ## EARLY-EXIT (dino4 fix — no-op detection):
 If the story's acceptance criteria are ALREADY covered by existing test files in this project (e.g. a prior TEST-agent run left behind \`src/foo.story.test.ts\`), DO NOT re-author them. Instead emit:
@@ -1167,7 +1188,12 @@ This is the authoritative \`test-verify\` output (the single-pass runner — do 
 Fix the IMPLEMENTATION so these tests pass.
 - Do NOT edit or delete the test files — they are the contract (tamper-check reverts edits and fails the step).
 - If the story wording contradicts a test, follow the test.
-- Stay within this story's declared touch points; if a real fix needs a file outside them, say so in WORK_SUMMARY rather than editing it.
+- Stay within this story's declared touch points; if a real fix needs a file outside them, say so in WORK_SUMMARY rather than editing it.${
+                usesFeatureRegistry
+                  ? `
+- EXCEPTION (feature promotion only): if a FAILING test asserts a feature's OLD descriptor (\`feature.slug\` / \`feature.order\` / \`feature.primary\`) for the feature THIS story promotes to \`primary\`, that test is a SUPERSEDED interim-preview contract — the promotion is REQUIRED to change exactly those values, so no code can satisfy both it and your story's test. You MAY delete that one superseded test file (and the retired preview \`*.feature.tsx\` it covers). Name every removed file in WORK_SUMMARY. This is the ONLY case you may remove a test — NEVER weaken a behavior test to pass.`
+                  : ''
+              }
 
 Output only what you changed, then:
 ---WORK_SUMMARY---

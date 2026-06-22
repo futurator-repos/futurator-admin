@@ -277,9 +277,22 @@ export default function PacmanFeature() {
   set, the bare route \`/\` renders ONLY primary features; interim preview
   features stay reachable via \`?feature=<slug>\` but are removed from \`/\`. The
   final-assembly story MUST mark its feature primary (and should delete the
-  retired preview \`*.feature.tsx\` files) so the shipped app and final QA both
-  see the real game at \`/\`, not the preview gallery. No primary set → \`/\`
-  stacks every feature (the interim-development default).
+  retired preview \`*.feature.tsx\` files AND their colocated tests) so the
+  shipped app and final QA both see the real game at \`/\`, not the preview
+  gallery. No primary set → \`/\` stacks every feature (the interim default).
+
+## The descriptor is NOT a test surface (slug / order / primary) — READ THIS
+
+\`slug\`, \`order\`, and \`primary\` are WIRING metadata: this generator reads them
+by STATIC PARSE, and visual QA verifies the right app renders at \`/\`. They are
+**mutated by the promotion lifecycle** — the final-assembly story flips a
+preview's \`primary\`/\`order\`/\`slug\` to the real values. So a unit test that
+asserts \`feature.slug\` / \`feature.order\` / \`feature.primary\` freezes a transient
+value as a permanent contract: once the feature is promoted, that test becomes
+unsatisfiable and the promotion story cannot fix it (it must not edit another
+story's test). **NEVER assert the descriptor in a test** — test the component's
+rendered output instead. Promotion to \`primary\` is verified by this generator +
+the \`/\` visual frame, never by a unit test.
 
 Because each feature is its own file on a disjoint path, two stories adding
 two features never conflict — the single biggest merge-conflict source
