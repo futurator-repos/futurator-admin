@@ -78,3 +78,46 @@ export interface HotspotsReport {
   counts: Partial<Record<HotspotKind, number>>;
   hotspots: AuditHotspot[];
 }
+
+/**
+ * One L3 adjudication verdict on a hotspot (Epic C). The `version-adjudicator`
+ * reads the code and either confirms the deterministic finding or REJECTS it
+ * (the `primitives` false-positive case). Only confirmed findings reach the plan.
+ */
+export interface HotspotVerdict {
+  hotspotTitle: string;
+  kind: HotspotKind;
+  /** Adversarial outcome — confirmed (real) or rejected (detector was wrong). */
+  verdict: 'confirmed' | 'rejected';
+  /** Why — grounded in code the adjudicator read. */
+  rationale: string;
+  /** Confidence 0–1 (the workflow may threshold on a majority). */
+  confidence?: number;
+}
+
+/**
+ * A durable audit record (Epic C, `futurator-refactor-audits`). The events
+ * stream is ephemeral (7-day TTL) and the MVP report rides the job row; this is
+ * the durable home for an L3-adjudicated audit — the verdicts + generated plan
+ * that seed dev stories must outlive both. One table per concern.
+ */
+export interface RefactorAuditRecord {
+  /** PK. */
+  auditId: string;
+  /** GSI hashKey (projectId-createdAt-index). */
+  projectId: string;
+  projectPath: string;
+  /** FK to the producing AgentJob. */
+  jobId: string;
+  /** recon-only (Epic B) vs L3-completed (Epic C). */
+  status: 'recon-only' | 'adjudicated';
+  counts: Partial<Record<HotspotKind, number>>;
+  hotspots: AuditHotspot[];
+  /** L3 adversarial verdicts (Epic C; absent for recon-only). */
+  verdicts?: HotspotVerdict[];
+  /** The L3-generated draft plan (planOutputSchema shape; Epic C). */
+  plan?: unknown;
+  /** GSI rangeKey. */
+  createdAt: string;
+  createdBy: string;
+}

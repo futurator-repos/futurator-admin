@@ -78,4 +78,7 @@ export const TABLE_NAMES = {
   // SCORECARDS_TABLE; FUTURATOR_SCORECARDS kept as a documented alias.
   scorecards:
     process.env.SCORECARDS_TABLE || process.env.FUTURATOR_SCORECARDS || 'futurator-scorecards',
+  // Refactoring Assessment Module (Epic C) — durable adjudicated audits. PK
+  // auditId; GSI projectId-createdAt-index lists a project's audits newest-first.
+  refactorAudits: process.env.REFACTOR_AUDITS_TABLE || 'futurator-refactor-audits',
 } as const;

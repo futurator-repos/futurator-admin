@@ -465,6 +465,28 @@ export default $config({
       },
     });
 
+    // ── Refactoring Assessment Module (Epic C) — durable audit results ──
+    // The events stream is ephemeral (7-day TTL) and the MVP report rides the
+    // job row; this table is the durable home for L3-adjudicated audits (the
+    // verdicts + generated plan that seed dev stories must outlive both). One
+    // table per concern. PK = auditId; GSI lists a project's audits newest-first.
+    // PITR on — an adjudicated plan is durable history.
+    const refactorAuditsTable = new sst.aws.Dynamo('RefactorAuditsTable', {
+      fields: { auditId: 'string', projectId: 'string', createdAt: 'string' },
+      primaryIndex: { hashKey: 'auditId' },
+      globalIndexes: {
+        'projectId-createdAt-index': { hashKey: 'projectId', rangeKey: 'createdAt' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-refactor-audits',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── F22 — dev/staging promotion-ladder subdomains (deployment-v2.5.md §14) ──
     // Two static-hosting shells the deploy/promote agents `aws s3 sync` INTO
     // (NOT StaticSite — that would purge synced apps every deploy). Each fronted
@@ -955,6 +977,7 @@ export default $config({
         pushSubscriptionsTable,
         skillProposalsTable,
         scorecardsTable,
+        refactorAuditsTable,
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
@@ -989,6 +1012,8 @@ export default $config({
         REFLECTIONS_TABLE: reflectionsTable.name,
         // Plan Retrospect — Reality Check scorecards (plan-retrospect-spec §5).
         SCORECARDS_TABLE: scorecardsTable.name,
+        // Refactoring Assessment Module (Epic C) — durable adjudicated audits.
+        REFACTOR_AUDITS_TABLE: refactorAuditsTable.name,
         // F22 — dev/staging subdomain hosting (deployment-v2.5.md §14). Presence
         // flips deploy-targets.ts to byte-copy promotion; absence = fallback.
         DEV_ENV_BUCKET: devEnvBucket.name,

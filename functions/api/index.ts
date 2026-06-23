@@ -46,6 +46,7 @@ import * as userRepo from '../shared/repositories/user-repository';
 import * as alertRepo from '../shared/repositories/alert-repository';
 import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as propagatorRepo from '../shared/repositories/propagator-proposals-repository';
+import * as refactorAuditsRepo from '../shared/repositories/refactor-audits-repository';
 import {
   ingestPropagatorProposalsSchema,
   rejectPropagatorProposalSchema,
@@ -133,7 +134,11 @@ import {
   launchPlanQaAggregate,
   launchPlanQaExecute,
 } from '../shared/services/visual-qa-launcher';
-import { resolveQaContext, resolveHasSeam } from '../shared/services/qa-boilerplate-resolver';
+import {
+  resolveQaContext,
+  resolveHasSeam,
+  resolveSeamContract,
+} from '../shared/services/qa-boilerplate-resolver';
 import { defaultCostCeiling } from '../shared/services/cost-ceiling-defaults';
 import { launchDevServer } from '../shared/services/dev-server-launcher';
 import { generateStoryPipeline } from '../shared/pipelines/story-pipeline';
@@ -221,6 +226,7 @@ import {
   validatePlanOutputJson,
   epicsToPlanOutput,
 } from '../shared/services/plan-generation-service';
+import { validateVerifyCoverage } from '../shared/schemas/plan-output-schema';
 import { buildPmPlanPrompt } from '../shared/prompts/pm-plan-prompt';
 import { computePlanWaves, epicsInPlanWave } from '../shared/services/plan-waves';
 import type { PipelineDefinition } from '../shared/types/agent-orchestrator';
@@ -2039,6 +2045,19 @@ app.post('/api/plans/:id/apply-plan', async (c) => {
     if (coverageError) {
       return c.json({ error: { code: 'VISUAL_COVERAGE_MISSING', message: coverageError } }, 400);
     }
+    // CS-1 (Concept v2.1) — every needsBrowser AC must carry a `verify` intent
+    // so QA can route it to the right oracle. Prototype rigor is exempt (visual
+    // QA is skipped there). Caught at concept so the gap never reaches QA execute
+    // (the pamcan6 disease: browser ACs with no verify → blind idle-frame judge).
+    if (plan.rigor !== 'prototype') {
+      const verifyErrors = validateVerifyCoverage(output);
+      if (verifyErrors.length > 0) {
+        return c.json(
+          { error: { code: 'VERIFY_INTENT_MISSING', message: verifyErrors.join(' ') } },
+          400,
+        );
+      }
+    }
   }
 
   const result = await applyPlanOutput(plan, output, {
@@ -2765,6 +2784,19 @@ app.post('/api/plans/:id/import-plan', async (c) => {
     if (coverageError) {
       return c.json({ error: { code: 'VISUAL_COVERAGE_MISSING', message: coverageError } }, 400);
     }
+    // CS-1 (Concept v2.1) — verify-intent coverage on the operator-import path
+    // too (an imported plan must carry `verify` on browser ACs, same as PM
+    // output). Prototype rigor exempt; legacy round-trip exports parse because
+    // this gate is NOT in validatePlanOutputJson.
+    if (plan.rigor !== 'prototype') {
+      const verifyErrors = validateVerifyCoverage(output);
+      if (verifyErrors.length > 0) {
+        return c.json(
+          { error: { code: 'VERIFY_INTENT_MISSING', message: verifyErrors.join(' ') } },
+          400,
+        );
+      }
+    }
   }
 
   // Replace semantics — wipe the existing tree exactly like regenerate.
@@ -3439,6 +3471,9 @@ app.post('/api/plans/:id/qa-review', async (c) => {
   // VQA v3 (E2/E4) — does this app ship the __harness seam? Routes
   // state/behavior ACs to the deterministic L2-state oracle at aggregate.
   const hasSeam = await resolveHasSeam(plan, { getApp: appRepo.getApp });
+  // QAA-1 — the seam shape (snapshot keys + status enum) drives the QA-AUTHOR
+  // compiler to synthesize executable probes from each state/behavior AC's prose.
+  const seam = await resolveSeamContract(plan, { getApp: appRepo.getApp });
   const result = await launchPlanQaAggregate(
     plan,
     epics,
@@ -3452,7 +3487,7 @@ app.post('/api/plans/:id/qa-review', async (c) => {
       buildQaExecutePipeline,
       uuid: () => crypto.randomUUID(),
     },
-    { boilerplate, hasSeam },
+    { boilerplate, hasSeam, seam },
   );
 
   if (!result.ok) {
@@ -3558,6 +3593,8 @@ app.post('/api/plans/:id/qa-contract/approve', async (c) => {
   const now = new Date().toISOString();
   // PR-8g — boilerplate-aware execute (Next.js → :3000, Vite → :5173, etc).
   const boilerplate = await resolveQaContext(plan, { getApp: appRepo.getApp });
+  // DV-2 — the seam hook drives qa-prepare's SEAM_NEVER_PUBLISHED static catch.
+  const seamContract = await resolveSeamContract(plan, { getApp: appRepo.getApp });
   const result = await launchPlanQaExecute(
     plan,
     flatTests,
@@ -3571,7 +3608,7 @@ app.post('/api/plans/:id/qa-contract/approve', async (c) => {
       buildQaExecutePipeline,
       uuid: () => crypto.randomUUID(),
     },
-    { boilerplate },
+    { boilerplate, seamHook: seamContract?.seamHook },
   );
 
   if (!result.ok) {
@@ -3696,6 +3733,8 @@ app.post('/api/plans/:id/qa-tests/:testId/retry', async (c) => {
   const now = new Date().toISOString();
   // PR-8g — single-test retries also need the right boilerplate context.
   const boilerplate = await resolveQaContext(plan, { getApp: appRepo.getApp });
+  // DV-2 — carry the seam hook so single-test retries get the same static catch.
+  const seamContract = await resolveSeamContract(plan, { getApp: appRepo.getApp });
   const result = await launchPlanQaExecute(
     plan,
     [target],
@@ -3709,7 +3748,7 @@ app.post('/api/plans/:id/qa-tests/:testId/retry', async (c) => {
       buildQaExecutePipeline,
       uuid: () => crypto.randomUUID(),
     },
-    { boilerplate },
+    { boilerplate, seamHook: seamContract?.seamHook },
   );
   if (!result.ok) {
     return c.json({ planId, testId, error: result.message }, 400);
@@ -7091,6 +7130,35 @@ app.post('/api/party/projects/:id/assess', async (c) => {
   });
 
   return c.json({ jobId, projectId: parsed.data.projectId }, 202);
+});
+
+/**
+ * Refactoring Assessment Module (Epic C, §9.4) — list a project's durable
+ * audits, newest-first. Used for audit history (the MVP dashboard reads the
+ * live job row; this surfaces past adjudicated audits beyond the events TTL).
+ */
+app.get('/api/party/projects/:id/audits', async (c) => {
+  const projectId = c.req.param('id');
+  const parsed = assessProjectParamsSchema.safeParse({ projectId });
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid projectId');
+  }
+  const audits = await refactorAuditsRepo.listAuditsByProject(parsed.data.projectId);
+  return c.json({ audits });
+});
+
+/**
+ * Refactoring Assessment Module (Epic C, §9.5) — fetch one durable audit by id
+ * (its hotspots + L3 verdicts + generated plan draft).
+ */
+app.get('/api/refactor-audits/:auditId', async (c) => {
+  const auditId = c.req.param('auditId');
+  if (!auditId || !/^[a-f0-9-]{8,}$/i.test(auditId)) {
+    throw new ValidationError('invalid auditId');
+  }
+  const audit = await refactorAuditsRepo.getAudit(auditId);
+  if (!audit) throw new NotFoundError('RefactorAudit', auditId);
+  return c.json(audit);
 });
 
 // ──────────────────────────────────────────────────────────────────────
@@ -11853,10 +11921,12 @@ app.delete('/api/apps/:appId', authMiddleware, async (c) => {
   try {
     const reflectionsDeleted = await reflectionsRepo.deleteReflectionsByProject(appId);
     await mergeLockRepo.deleteMergeLock(appId);
+    // Refactoring Assessment Module (Epic C) — purge durable audit rows too.
+    const auditsDeleted = await refactorAuditsRepo.deleteAuditsForProject(appId);
     results.push({
       step: 'reflections+lock',
       status: 'done',
-      detail: `${reflectionsDeleted} reflections`,
+      detail: `${reflectionsDeleted} reflections, ${auditsDeleted} audits`,
     });
   } catch (err) {
     results.push({ step: 'reflections+lock', status: 'error', detail: String(err) });
