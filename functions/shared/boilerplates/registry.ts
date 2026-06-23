@@ -356,7 +356,12 @@ export type GameAction<TEntity extends Entity = Entity> =
   | { type: 'tick'; dtSec: number }
   | { type: 'addEntity'; entity: TEntity }
   | { type: 'removeEntity'; id: string }
-  | { type: 'addScore'; delta: number };
+  | { type: 'addScore'; delta: number }
+  // VQA v3 Phase 2b — TEST-ONLY force-state action. The seam wrapper handles it
+  // (sets status directly) so a QA probe can reach a terminal state (over/win)
+  // deterministically in <1 frame instead of playing to it. Never dispatched by
+  // app code; only via window.__harness.forceStatus under NEXT_PUBLIC_TEST_HARNESS.
+  | { type: '__force'; status: string };
 
 export type GameReducer<TEntity extends Entity = Entity> = (
   state: GameState<TEntity>,
@@ -374,8 +379,16 @@ export function useGameStateMachine<TEntity extends Entity = Entity>(
   reducer: GameReducer<TEntity>,
   initial: GameState<TEntity>,
 ) {
+  // VQA v3 Phase 2b — the seam wrapper intercepts the TEST-ONLY \`__force\`
+  // action (set status directly) before delegating to the app reducer, so a QA
+  // probe can reach a terminal state deterministically. Pure for all real actions.
+  const wrapped = useCallback(
+    (s: GameState<TEntity>, a: GameAction<TEntity>): GameState<TEntity> =>
+      a.type === '__force' ? { ...s, status: (a as { status: string }).status } : reducer(s, a),
+    [reducer],
+  );
   const [state, dispatch] = useReducer(
-    reducer as React.Reducer<GameState<TEntity>, GameAction<TEntity>>,
+    wrapped as React.Reducer<GameState<TEntity>, GameAction<TEntity>>,
     initial,
   );
   const ref = useRef(state);
@@ -403,8 +416,24 @@ export function useGameStateMachine<TEntity extends Entity = Entity>(
       // GameState (e.g. \`lives\`) ride along automatically.
       snapshot: () => ({ ...ref.current, gameOver: ref.current.status === 'over' }),
       events: [] as unknown[],
+      // VQA v3 Phase 2b — TEST-ONLY command channel so a QA probe can DRIVE the
+      // game (not just observe): \`dispatch\` any GameAction, \`forceStatus\` to
+      // jump to a terminal state (over/win) deterministically. Tree-shaken in
+      // production with the rest of the seam (the NEXT_PUBLIC_TEST_HARNESS guard).
+      dispatch: (action: GameAction<TEntity>) => safeDispatch(action),
+      forceStatus: (status: string) => safeDispatch({ type: '__force', status } as GameAction<TEntity>),
     };
-  }, []);
+  }, [safeDispatch]);
+
+  // VQA v3 Phase 2b — push a status-transition event so a probe can
+  // \`waitForEvent\` on \`events\` (e.g. wait until a 'win' transition fires)
+  // rather than only polling the latest snapshot.
+  useEffect(() => {
+    if (process.env.NEXT_PUBLIC_TEST_HARNESS !== '1') return;
+    if (typeof window === 'undefined') return;
+    const h = (window as unknown as { __harness?: { events?: unknown[] } }).__harness;
+    if (h && Array.isArray(h.events)) h.events.push({ type: 'status', value: state.status, at: Date.now() });
+  }, [state.status]);
 
   return [state, safeDispatch, ref] as const;
 }

@@ -41,6 +41,7 @@ export const probeStepActionSchema = z.enum([
   // VQA v3 Phase 2 — agentic event-driven verbs
   'waitForEvent',
   'repeat',
+  'force',
   // H10 coverage-class gaps
   'viewport',
   'upload',
@@ -86,6 +87,7 @@ export const probeStepSchema = z.object({
   budgetMs: z.number().optional(),
   intervalMs: z.number().optional(),
   step: repeatInnerStepSchema.optional(),
+  status: z.string().optional(),
   // H10 grammar gaps
   w: z.number().optional(),
   h: z.number().optional(),

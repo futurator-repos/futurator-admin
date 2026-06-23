@@ -473,17 +473,28 @@ modify (relative to the project root, using the conventional paths above).
   for the composed initial frame — what a user sees the moment the page
   loads.
 
-  **Interaction- and time-gated ACs need a PROBE, not a static frame.** If
-  an AC can only be seen AFTER an action or elapsed time — a start/title
-  screen that needs Space/Enter to begin, a HUD that appears once play
-  starts, a GAME OVER / level-complete / score-changed screen — a single
-  idle screenshot CANNOT verify it and a vision judge will false-FAIL it.
-  For these the visual test MUST carry a \`flow\` that performs the gating
-  interaction then captures the result, e.g.
-  \`flow: [{ "action": "press", "key": "Enter" }, { "action": "wait", "ms": 500 }, { "action": "screenshot" }]\`,
-  or a deterministic \`{ "action": "assert", "expr": "snapshot.phase", "op": "eq", "expected": "gameover" }\`
-  reading \`window.__harness\` when a state is hard to reach by input alone.
-  Plain "what the idle frame shows" ACs stay probe-free.
+  **Interaction- and time-gated ACs need a PROBE, not a static frame.** If an AC is
+  only visible AFTER an action or elapsed time (a screen that appears only after a
+  click/keypress, a panel that loads after a fetch, a confirmation shown after a
+  submit), one idle screenshot CANNOT verify it and a vision judge will false-FAIL
+  it. The visual test MUST carry a \`flow\` that performs the gating interaction then
+  captures, e.g.
+  \`flow: [{ "action": "click", "selector": "<the trigger>" }, { "action": "wait", "ms": 500 }, { "action": "screenshot" }]\`${
+    meta.testHarness
+      ? `,
+  or a deterministic \`{ "action": "assert", "expr": "snapshot.<key>", "op": "eq", "expected": "<value>" }\`
+  reading \`${meta.testHarness.globalKey}\`.
+  For a state that needs DRIVING to a terminal event (e.g. a game-over / win
+  screen, a countdown finishing), use the agentic verbs against the seam — do
+  NOT mark it idle-visible:
+    • reach by FORCING the state deterministically:
+      \`flow: [{ "action": "force", "status": "over" }, { "action": "waitForEvent", "expr": "snapshot.status", "op": "eq", "expected": "over" }, { "action": "screenshot" }, { "action": "assert", "expr": "snapshot.status", "op": "eq", "expected": "over" }]\`
+    • or reach by PLAYING until the event fires:
+      \`flow: [{ "action": "press", "key": "Enter" }, { "action": "repeat", "step": { "action": "press", "key": "ArrowLeft" }, "untilExpr": "snapshot.status", "untilOp": "eq", "untilExpected": "over", "maxIterations": 200, "budgetMs": 30000 }, { "action": "screenshot" }]\`
+  A test marked level L2 MUST carry such a flow (a flowless L2 is rejected as
+  CONTRACT_INCOMPLETE and blocks the gate)`
+      : ''
+  }. Plain "what the idle frame shows" ACs stay probe-free.
 - Titles are action-oriented ("Implement useGameLoop hook", not "The
   useGameLoop hook").
 - **Stories must respect the existing boilerplate** — if the AC says
