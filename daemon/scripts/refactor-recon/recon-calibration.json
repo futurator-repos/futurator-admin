@@ -23,11 +23,36 @@
   ],
   "$comment_convention": "Framework-convention filenames that are REQUIRED to repeat across dirs (Next.js App Router). Excluded from duplicate-subsystem detection so they never produce 'route.ts ×N' false positives (FR7).",
 
+  "coLocatedConventionFilenames": [
+    "types.ts",
+    "types.tsx",
+    "utils.ts",
+    "utils.tsx",
+    "constants.ts",
+    "constants.tsx",
+    "errors.ts",
+    "helpers.ts",
+    "helpers.tsx",
+    "styles.ts",
+    "config.ts",
+    "schema.ts",
+    "schemas.ts",
+    "hooks.ts",
+    "context.ts",
+    "context.tsx",
+    "store.ts",
+    "actions.ts",
+    "selectors.ts",
+    "validation.ts",
+    "validators.ts"
+  ],
+  "$comment_coLocated": "Generic per-module CO-LOCATED files that legitimately recur once per feature module (every module has its own types.ts/utils.ts). They share a basename but are NOT a duplicated subsystem — 'consolidate the 10 types.ts onto one' is wrong advice. Excluded from duplicate-subsystem. Genuine copy-paste duplication of these is left to L3 adjudication / manual review, not the deterministic detector.",
+
   "uiDirPattern": "components/(ui|primitives)/",
   "$comment_uiDir": "Files under these dirs are design-system primitives. Duplicate basenames among them roll up under design-system-consolidation instead of duplicate-subsystem (FR7).",
 
   "versionMarkerPattern": "(-v[123]\\b|version[123]|enhanced|hierarchical|legacy|deprecated|-old\\b|-new\\b|copy|_bak)",
-  "$comment_versionMarker": "Filenames carrying explicit version/legacy markers → duplicate-subsystem 'version-marker' hotspot (legacy candidates for retire via extract→repoint→delete).",
+  "$comment_versionMarker": "Path SEGMENTS carrying explicit version/legacy markers. hotspot-detect clusters by the FIRST version-marked segment (the 'version root'), so a whole versioned directory (onboarding-v2/**) collapses to ONE legacy-root candidate instead of flagging every file inside it. Avoids the inflated '135 version-marker files' count.",
 
   "thresholds": {
     "godObjectMinMethods": 12,

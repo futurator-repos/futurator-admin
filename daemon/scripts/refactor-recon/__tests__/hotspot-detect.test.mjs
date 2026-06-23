@@ -63,6 +63,17 @@ function writeFixture(target, { calibration } = {}) {
   nodes.push({ id: 'deadB', label: 'used-dynamically.ts', source_file: 'src/lib/used-dynamically.ts', community: 5, resolved_in_degree: 5 });
   hubs.push({ file: 'src/lib/used-dynamically.ts', inDegree: 5 });
 
+  // --- 5. co-located convention files (types.ts ×3) — must NOT be a duplicate ---
+  for (const dir of ['feature-a', 'feature-b', 'feature-c']) {
+    nodes.push({ id: `types/${dir}`, label: 'types.ts', source_file: `src/components/${dir}/types.ts`, community: 6, resolved_in_degree: 8 });
+    hubs.push({ file: `src/components/${dir}/types.ts`, inDegree: 8 });
+  }
+
+  // --- 6. version-marked dir (onboarding-v2/** = 4 files) → ONE legacy root, not 4 ---
+  for (const f of ['steps/a.ts', 'steps/b.ts', 'audio/c.ts', 'index-x.ts']) {
+    nodes.push({ id: `v2/${f}`, label: f.split('/').pop(), source_file: `src/components/onboarding-v2/${f}`, community: 7, resolved_in_degree: 1 });
+  }
+
   fs.writeFileSync(path.join(target, 'graph.resolved.json'), JSON.stringify({ nodes, links }));
   fs.writeFileSync(
     path.join(target, 'resolved-imports.json'),
@@ -107,6 +118,24 @@ describe('hotspot-detect — validated invariants (NFR2 regression lock)', () =>
       .map((h) => h.title);
     expect(dupTitles.some((t) => /route\.ts/.test(t))).toBe(false);
     expect(dupTitles.some((t) => /page\.tsx/.test(t))).toBe(false);
+  });
+
+  it('does NOT flag co-located convention files (types.ts ×3) as a duplicate subsystem', () => {
+    const out = runDetect(dir);
+    const dupTitles = out.hotspots
+      .filter((h) => h.kind === 'duplicate-subsystem')
+      .map((h) => h.title);
+    expect(dupTitles.some((t) => /types\.ts/.test(t))).toBe(false);
+  });
+
+  it('clusters a version-marked dir into ONE legacy root, not per-file', () => {
+    const out = runDetect(dir);
+    const ver = out.hotspots.find((h) => h.kind === 'duplicate-subsystem' && /legacy root/.test(h.title));
+    expect(ver, 'version-root hotspot present').toBeTruthy();
+    // onboarding-v2/** (4 files) collapses to a single root
+    expect(ver.evidence.count).toBe(1);
+    expect(ver.evidence.totalFiles).toBe(4);
+    expect(ver.evidence.roots[0].root).toBe('src/components/onboarding-v2');
   });
 
   it('detects the god-object by method out-degree', () => {

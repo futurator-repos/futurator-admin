@@ -134,15 +134,20 @@ for (const n of nodes) {
 }
 
 // ---------- 2. DUPLICATE SUBSYSTEMS (same basename across dirs + version markers) ----------
-// Exclude framework-convention filenames — these are REQUIRED to repeat, not duplication.
+// Exclude framework-convention filenames (route.ts ×N) AND generic co-located
+// per-module files (types.ts/utils.ts/errors.ts …) — both legitimately recur
+// once per module and are NOT a duplicated subsystem. Flagging "consolidate the
+// 10 types.ts onto one" is wrong advice; genuine copy-paste dupes of these are
+// left to L3 adjudication / manual review.
 const CONVENTION = new Set(calibration.conventionFilenames)
+const CO_LOCATED = new Set(calibration.coLocatedConventionFilenames || [])
 const UI_DIR_RE = new RegExp(calibration.uiDirPattern)
 const isUiFile = (f) => UI_DIR_RE.test(f || '')
 const fileNodes = nodes.filter(isFileNode)
 const byBase = new Map()
 for (const n of fileNodes) {
   const b = base(n.source_file)
-  if (CONVENTION.has(b)) continue // framework convention, not duplication
+  if (CONVENTION.has(b) || CO_LOCATED.has(b)) continue // recurs per-module, not duplication
   if (!byBase.has(b)) byBase.set(b, new Map())
   byBase.get(b).set(n.source_file, importersOf(n)) // dedupe per file
 }
@@ -161,15 +166,39 @@ for (const [b, files] of byBase) {
     suggestedAction: `Consolidate the ${list.length} "${b}" implementations onto the highest-fan-in one (${list[0].f}); repoint the rest, then delete after grep shows zero dependents.`,
   })
 }
+// Cluster version-marked paths by their FIRST version-marked path segment (the
+// "version root"), so a whole versioned dir (onboarding-v2/**) collapses to ONE
+// legacy-root candidate instead of flagging every file inside it (the inflated
+// "135 version-marker files" bug). A file-level marker (draft-editor-v2.tsx)
+// stays its own root.
 const VER = new RegExp(calibration.versionMarkerPattern, 'i')
-const verFiles = [...new Set(fileNodes.map(n => n.source_file).filter(f => VER.test(f)))]
-if (verFiles.length) {
-  const score = Math.min(100, 30 + verFiles.length * 2)
+const verRoots = new Map() // versionRoot -> Set(files)
+for (const n of fileNodes) {
+  const f = n.source_file
+  if (!f) continue
+  const segs = f.split('/')
+  let root = null
+  const acc = []
+  for (const seg of segs) {
+    acc.push(seg)
+    if (VER.test(seg)) { root = acc.join('/'); break }
+  }
+  if (!root) continue
+  if (!verRoots.has(root)) verRoots.set(root, new Set())
+  verRoots.get(root).add(f)
+}
+if (verRoots.size) {
+  const roots = [...verRoots.entries()]
+    .map(([root, files]) => ({ root, files: files.size }))
+    .sort((a, z) => z.files - a.files)
+  const totalFiles = roots.reduce((s, r) => s + r.files, 0)
+  const score = Math.min(100, 30 + roots.length * 4)
   hotspots.push({
     kind: 'duplicate-subsystem', score, severity: sev(score),
-    title: `Version-marker files (legacy candidates): ${verFiles.length}`,
-    files: verFiles.slice(0, 30), evidence: { count: verFiles.length },
-    suggestedAction: `Adjudicate each version-marked path: confirm the current version, prove the old one orphaned (resolved in-degree + grep), then retire via extract→repoint→delete.`,
+    title: `Version-marked paths: ${roots.length} legacy root(s) (${totalFiles} files)`,
+    files: roots.slice(0, 30).map(r => `${r.root}  (${r.files} file${r.files === 1 ? '' : 's'})`),
+    evidence: { count: roots.length, totalFiles, roots: roots.slice(0, 20) },
+    suggestedAction: `Each version-marked root is a legacy candidate. Confirm the current version, prove the old root orphaned (resolved in-degree + grep), then retire the whole root via extract→repoint→delete.`,
   })
 }
 
