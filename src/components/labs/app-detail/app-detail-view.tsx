@@ -17,6 +17,7 @@ import { V2RoadmapStrip } from './v2-roadmap-strip';
 import { SourceTabContent } from './source-tab';
 import { PerformanceTab } from './performance-tab';
 import { AppPartyView } from './app-party-view';
+import { AssessTab } from './assess/assess-tab';
 
 interface DeployRow {
   jobId: string;
@@ -38,7 +39,10 @@ export function AppDetailView({ appId }: { appId: string }) {
   const params = useSearchParams();
   const tabParam = params.get('tab');
   const initialTab =
-    tabParam === 'party' || tabParam === 'source' || tabParam === 'performance'
+    tabParam === 'party' ||
+    tabParam === 'source' ||
+    tabParam === 'performance' ||
+    tabParam === 'assess'
       ? tabParam
       : 'overview';
 
@@ -79,6 +83,10 @@ export function AppDetailView({ appId }: { appId: string }) {
 
   const defaultBranch = repoData?.repo.default_branch;
   const hasSourceTab = !!(app.boilerplateType && app.bootstrappedAt);
+  // Refactoring Assessment (Epic D) — brownfield apps carry an explicit
+  // githubRepoUrl (any org). The /assess endpoint enforces brownfield-only
+  // server-side; this is the UX gate (FR30).
+  const hasAssessTab = !!app.githubRepoUrl;
 
   return (
     <div className="space-y-6">
@@ -104,6 +112,7 @@ export function AppDetailView({ appId }: { appId: string }) {
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           {hasSourceTab && <TabsTrigger value="source">Source</TabsTrigger>}
+          {hasAssessTab && <TabsTrigger value="assess">Assess</TabsTrigger>}
           <TabsTrigger value="party">Party</TabsTrigger>
           {/* Story 1.8.5 — Performance tab (always shown; empty state when no plans) */}
           <TabsTrigger value="performance">Performance</TabsTrigger>
@@ -123,6 +132,12 @@ export function AppDetailView({ appId }: { appId: string }) {
         {hasSourceTab && (
           <TabsContent value="source" className="mt-4">
             <SourceTabContent app={app} defaultBranch={defaultBranch} />
+          </TabsContent>
+        )}
+
+        {hasAssessTab && (
+          <TabsContent value="assess" className="mt-4">
+            <AssessTab app={app} />
           </TabsContent>
         )}
 

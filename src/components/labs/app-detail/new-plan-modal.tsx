@@ -20,15 +20,28 @@ export function NewPlanModal({
   hasExistingPlans,
   open,
   onOpenChange,
+  initialIntent,
 }: {
   appId: string;
   hasExistingPlans: boolean;
   open: boolean;
   onOpenChange: (next: boolean) => void;
+  /**
+   * FR36 — optional seed for the intent box (the Refactoring Assessment "Create
+   * plan" action passes the compiled hotspot summary). Re-seeds whenever it
+   * changes (e.g. the operator picks a different hotspot before opening).
+   */
+  initialIntent?: string;
 }) {
   const router = useRouter();
   const create = useCreatePlanForApp(appId);
-  const [intent, setIntent] = useState('');
+  const [intent, setIntent] = useState(initialIntent ?? '');
+  // Re-seed when the caller supplies a new initialIntent (controlled seed).
+  const [seededFrom, setSeededFrom] = useState(initialIntent ?? '');
+  if (initialIntent !== undefined && initialIntent !== seededFrom) {
+    setSeededFrom(initialIntent);
+    setIntent(initialIntent);
+  }
   const [rigor, setRigor] = useState<'prototype' | 'mvp' | 'production'>('mvp');
   const [slug, setSlug] = useState('');
   // YOLO — default ON. On → the whole Concept chain auto-approves (autopilot):
