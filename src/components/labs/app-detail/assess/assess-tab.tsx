@@ -24,6 +24,7 @@ import {
 import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-output';
 import { NewPlanModal } from '../new-plan-modal';
 import { HotspotDashboard } from './hotspot-dashboard';
+import { HotspotGraph } from './hotspot-graph';
 
 /**
  * Compile selected hotspots into a NewPlanModal intent seed (FR35). Pure +
@@ -105,6 +106,7 @@ export function AssessTab({ app }: { app: App }) {
 
   const [planOpen, setPlanOpen] = useState(false);
   const [planIntent, setPlanIntent] = useState('');
+  const [view, setView] = useState<'hotspots' | 'graph'>('hotspots');
 
   // Stash the new jobId in the URL (preserve appId + tab=assess).
   const setAuditJob = useCallback(
@@ -318,8 +320,39 @@ export function AssessTab({ app }: { app: App }) {
 
       {report.status === 'scored' && (
         <>
-          {hotspots.length > 0 && (
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {/* Hotspots | Graph view toggle */}
+            <div
+              style={{
+                display: 'inline-flex',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                overflow: 'hidden',
+              }}
+            >
+              {(['hotspots', 'graph'] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => setView(v)}
+                  data-testid={`assess-view-${v}`}
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: view === v ? 'var(--background)' : 'var(--text-dim)',
+                    background: view === v ? 'var(--foreground)' : 'transparent',
+                    border: 'none',
+                    padding: '5px 12px',
+                    cursor: 'pointer',
+                    textTransform: 'capitalize',
+                  }}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+            <div style={{ flex: 1 }} />
+            {hotspots.length > 0 && (
               <button
                 type="button"
                 onClick={() => onCreatePlan(hotspots)}
@@ -337,9 +370,13 @@ export function AssessTab({ app }: { app: App }) {
               >
                 Create plan from all hotspots →
               </button>
-            </div>
+            )}
+          </div>
+          {view === 'hotspots' ? (
+            <HotspotDashboard hotspots={hotspots} onCreatePlan={onCreatePlan} />
+          ) : (
+            <HotspotGraph hotspots={hotspots} />
           )}
-          <HotspotDashboard hotspots={hotspots} onCreatePlan={onCreatePlan} />
         </>
       )}
 
