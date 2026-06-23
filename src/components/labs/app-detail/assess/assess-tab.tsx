@@ -60,13 +60,23 @@ function downloadAuditJson(args: {
   counts: Record<string, number>;
   hotspots: AuditHotspot[];
   generatedAt: string;
+  detectedCount?: number;
+  shownCount?: number;
+  toolStatus?: Record<string, string>;
+  graphAvailable?: boolean;
 }) {
   const payload = {
-    schema: 'futurator.refactor-audit/v1',
+    schema: 'futurator.refactor-audit/v2',
     appId: args.appId,
     jobId: args.jobId,
     auditId: args.auditId ?? null,
     generatedAt: args.generatedAt,
+    // audit-context so iterative review knows what ran: tool availability +
+    // whether the report was capped + whether the code graph was produced.
+    toolStatus: args.toolStatus ?? {},
+    detectedCount: args.detectedCount ?? args.hotspots.length,
+    shownCount: args.shownCount ?? args.hotspots.length,
+    graphAvailable: args.graphAvailable ?? false,
     counts: args.counts,
     hotspotCount: args.hotspots.length,
     hotspots: args.hotspots,
@@ -102,7 +112,10 @@ export function AssessTab({ app }: { app: App }) {
 
   // Live job takes precedence; otherwise derive from the durable record.
   const report = jobId ? selectAuditReport(job) : reportFromRecord(selectedRecord);
-  const currentAuditId = jobId ? job?.refactorAuditSummary?.auditId : selectedRecord?.auditId;
+  // Audit-context (auditId, toolStatus, detected/shown, graphAvailable) — present
+  // on both the job summary and the durable record.
+  const currentSummary = jobId ? job?.refactorAuditSummary : selectedRecord;
+  const currentAuditId = currentSummary?.auditId;
 
   const [planOpen, setPlanOpen] = useState(false);
   const [planIntent, setPlanIntent] = useState('');
@@ -159,6 +172,10 @@ export function AssessTab({ app }: { app: App }) {
                 counts: report.counts,
                 hotspots: report.hotspots,
                 generatedAt: new Date().toISOString(),
+                detectedCount: currentSummary?.detectedCount,
+                shownCount: currentSummary?.shownCount,
+                toolStatus: currentSummary?.toolStatus,
+                graphAvailable: currentSummary?.graphAvailable,
               })
             }
             data-testid="assess-export"
@@ -315,6 +332,26 @@ export function AssessTab({ app }: { app: App }) {
           }}
         >
           Assessment failed: {report.message}
+        </div>
+      )}
+
+      {report.status === 'scored' && currentSummary?.toolStatus?.knip === 'unavailable' && (
+        <div
+          data-testid="assess-knip-banner"
+          style={{
+            fontSize: 11,
+            color: 'var(--warning)',
+            border: '1px solid color-mix(in srgb, var(--warning) 30%, transparent)',
+            borderRadius: 8,
+            padding: '6px 10px',
+          }}
+        >
+          Dead-code: knip unavailable (the recon box has no node_modules for this clone) — showing
+          the weaker alias-resolve orphan signal (needs-review).
+          {currentSummary?.detectedCount != null &&
+            currentSummary?.shownCount != null &&
+            currentSummary.detectedCount > currentSummary.shownCount &&
+            ` · ${currentSummary.detectedCount} detected, top ${currentSummary.shownCount} shown.`}
         </div>
       )}
 

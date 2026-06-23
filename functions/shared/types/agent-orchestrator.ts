@@ -566,6 +566,11 @@ export interface AgentJob {
     reportPath: string | null;
     /** Whether the file-level graph projection was uploaded to S3 (Graph tab). */
     graphAvailable?: boolean;
+    /** Total hotspots detected vs shown (surfaces any cap — no silent truncation). */
+    detectedCount?: number;
+    shownCount?: number;
+    /** Recon tool availability (e.g. { graphify:'ok', knip:'unavailable' }). */
+    toolStatus?: Record<string, string>;
   };
 
   /**

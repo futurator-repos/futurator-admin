@@ -801,6 +801,10 @@ function runValidations(validations, variables) {
 //   - Auth-recovery does NOT count against MAX_DEV_ATTEMPTS_PER_STORY (T0.3) —
 //     auth failures are infrastructure, not bad-prompt failures.
 const AUTH_RECOVERY_BACKOFF_MS = [5_000, 30_000];
+// pacman7 — Anthropic 529 "overloaded" storms can last minutes. Back off longer
+// and more times than auth recovery; these do NOT count against the story's
+// dev-retry budget (overload is infrastructure, not a bad prompt).
+const OVERLOAD_BACKOFF_MS = [15_000, 45_000, 90_000, 90_000];
 // PR-6 (C): if the OAuth access token expires within this window, force a
 // pre-spawn reload + probe. Eliminates the "token died mid-stream" race for
 // the common case where the Mac Keychain push happened recently and the
@@ -808,9 +812,9 @@ const AUTH_RECOVERY_BACKOFF_MS = [5_000, 30_000];
 const PRESPAWN_EXPIRY_THRESHOLD_MS = 5 * 60 * 1000;
 
 async function runAgentWithAuthRecovery(jobId, stepId, agentId, prompt, opts = {}) {
-  let attempt = 0;
-  let lastErr = null;
-  while (attempt <= AUTH_RECOVERY_BACKOFF_MS.length) {
+  let attempt = 0; // auth-recovery attempts
+  let overloadAttempt = 0; // pacman7 — transient API-overload retries (separate budget)
+  while (true) {
     // PR-6 (C): pre-spawn token-expiry check. Refresh-from-file if the access
     // token expires soon — cheap insurance against the race that bit dino1's
     // reviewer step.
@@ -831,49 +835,72 @@ async function runAgentWithAuthRecovery(jobId, stepId, agentId, prompt, opts = {
       return await runAgent(jobId, stepId, agentId, prompt, opts);
     } catch (err) {
       const isAuthErr = err?.code === 'AUTH_FAILED';
-      if (!isAuthErr || attempt >= AUTH_RECOVERY_BACKOFF_MS.length) {
-        // Either non-auth failure (re-throw immediately) OR exhausted recovery.
-        if (isAuthErr) {
-          // Tag the final error so handleJobFailure can route to a distinct
-          // attention category instead of the generic auth-expired path.
-          err.code = 'AUTH_RECOVERY_EXHAUSTED';
-          err.authRecoveryAttempts = attempt;
-        }
-        throw err;
-      }
+      const isOverload = err?.code === 'OVERLOADED';
 
-      lastErr = err;
-      const backoffMs = AUTH_RECOVERY_BACKOFF_MS[attempt];
-      attempt += 1;
-      log(
-        'warn',
-        `[${jobId.slice(0, 8)}] auth recovery attempt ${attempt}/${AUTH_RECOVERY_BACKOFF_MS.length}: re-reading OAuth + sleeping ${backoffMs}ms`,
-      );
-      pushEvent(jobId, stepId, agentId, 'status', {
-        text: `[SYSTEM] auth-recovery attempt ${attempt}/${AUTH_RECOVERY_BACKOFF_MS.length} — reloading OAuth file in ${Math.round(backoffMs / 1000)}s`,
-      });
-
-      await new Promise((r) => setTimeout(r, backoffMs));
-      try {
-        loadOAuth(`auth-error-recovery-${attempt}`);
-        await probeAuth();
-      } catch (probeErr) {
-        log('warn', `[${jobId.slice(0, 8)}] auth recovery probe threw: ${probeErr.message}`);
-        // Fall through — retry runAgent anyway; the next iteration's reject
-        // will surface the actual auth issue if probe was lying.
-      }
-      if (!authState.valid) {
+      // pacman7 — transient API overload: back off and retry WITHOUT consuming
+      // the story's dev-retry budget and WITHOUT reloading OAuth (auth is fine,
+      // the API is just overloaded). Separate budget from auth recovery.
+      if (isOverload && overloadAttempt < OVERLOAD_BACKOFF_MS.length) {
+        const backoffMs = OVERLOAD_BACKOFF_MS[overloadAttempt];
+        overloadAttempt += 1;
         log(
           'warn',
-          `[${jobId.slice(0, 8)}] auth recovery: probe still invalid after reload; will retry anyway in case Mac Keychain push is in flight`,
+          `[${jobId.slice(0, 8)}] API overloaded: backing off ${Math.round(backoffMs / 1000)}s (attempt ${overloadAttempt}/${OVERLOAD_BACKOFF_MS.length})`,
         );
-      } else {
-        log('info', `[${jobId.slice(0, 8)}] auth recovery: OAuth re-validated; retrying step`);
+        pushEvent(jobId, stepId, agentId, 'status', {
+          text: `[SYSTEM] api-overload backoff ${overloadAttempt}/${OVERLOAD_BACKOFF_MS.length} — retrying in ${Math.round(backoffMs / 1000)}s (does not consume a story retry)`,
+        });
+        await new Promise((r) => setTimeout(r, backoffMs));
+        continue;
       }
+
+      if (isAuthErr && attempt < AUTH_RECOVERY_BACKOFF_MS.length) {
+        lastErr = err;
+        const backoffMs = AUTH_RECOVERY_BACKOFF_MS[attempt];
+        attempt += 1;
+        log(
+          'warn',
+          `[${jobId.slice(0, 8)}] auth recovery attempt ${attempt}/${AUTH_RECOVERY_BACKOFF_MS.length}: re-reading OAuth + sleeping ${backoffMs}ms`,
+        );
+        pushEvent(jobId, stepId, agentId, 'status', {
+          text: `[SYSTEM] auth-recovery attempt ${attempt}/${AUTH_RECOVERY_BACKOFF_MS.length} — reloading OAuth file in ${Math.round(backoffMs / 1000)}s`,
+        });
+
+        await new Promise((r) => setTimeout(r, backoffMs));
+        try {
+          loadOAuth(`auth-error-recovery-${attempt}`);
+          await probeAuth();
+        } catch (probeErr) {
+          log('warn', `[${jobId.slice(0, 8)}] auth recovery probe threw: ${probeErr.message}`);
+          // Fall through — retry runAgent anyway; the next iteration's reject
+          // will surface the actual auth issue if probe was lying.
+        }
+        if (!authState.valid) {
+          log(
+            'warn',
+            `[${jobId.slice(0, 8)}] auth recovery: probe still invalid after reload; will retry anyway in case Mac Keychain push is in flight`,
+          );
+        } else {
+          log('info', `[${jobId.slice(0, 8)}] auth recovery: OAuth re-validated; retrying step`);
+        }
+        continue;
+      }
+
+      // Non-transient failure, or transient budget exhausted → tag + re-throw.
+      if (isAuthErr) {
+        // Route to a distinct attention category instead of the generic path.
+        err.code = 'AUTH_RECOVERY_EXHAUSTED';
+        err.authRecoveryAttempts = attempt;
+      } else if (isOverload) {
+        err.code = 'OVERLOADED_EXHAUSTED';
+        err.overloadAttempts = overloadAttempt;
+      }
+      throw err;
     }
   }
-  // unreachable; while-loop returns or throws
-  throw lastErr;
+  // The while(true) loop only exits via `return` (success) or `throw` above.
+  // `lastErr` is retained only for clarity in logs during transient retries.
+  void lastErr;
 }
 
 // ── Run a single Claude CLI agent ──
@@ -1035,6 +1062,30 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
         (finalResult.total_cost_usd || 0) === 0 &&
         !finalResult.result?.trim();
       const isRateLimit = /429|rate.?limit/i.test(allOutput);
+
+      // pacman7 (2026-06-23) — transient API overload (Anthropic 529 /
+      // "overloaded_error" / 5xx) with NO captured work. This is NOT an auth or
+      // prompt failure: the agent never ran, the error is in the streamed text
+      // (finalResult is usually null → it would otherwise fall through to the
+      // success path with 0 tokens and empty output, failing every downstream
+      // gate). Tag it so runAgentWithAuthRecovery backs off and retries WITHOUT
+      // consuming the story's dev-retry budget (the 529 storm burned all 3
+      // retries because each immediate retry hit 529 again). Checked BEFORE the
+      // auth/silent-zero-cost branch so a 529 isn't misrouted as an auth failure.
+      const isOverloaded =
+        /overloaded_error|\boverloaded\b|API Error:\s*(500|502|503|504|529)/i.test(
+          allOutput + agentTextBuffer,
+        );
+      if (isOverloaded && classifyCompletion(agentTextBuffer) === 'none') {
+        const msg = 'Claude API overloaded (transient 5xx) — backing off to retry.';
+        log('warn', `Step ${stepId}: ${msg}`);
+        pushEvent(jobId, stepId, agentId, 'status', {
+          text: '[SYSTEM] terminationReason=API_OVERLOADED — transient; backing off and retrying (does not consume a story retry)',
+        });
+        const oErr = new Error(msg);
+        oErr.code = 'OVERLOADED';
+        return reject(oErr);
+      }
 
       if (isAuthError || silentZeroCost) {
         // Mark auth as invalid so the next heartbeat reflects reality immediately.
@@ -7131,6 +7182,9 @@ async function executeRefactorAuditJob(job) {
       // Lambda-served dashboard can render it (the EC2 disk is unreadable to
       // the API). ~27KB on applicator; well under the 400KB DDB item limit.
       hotspots,
+      detectedCount: hs.detectedCount ?? hotspots.length,
+      shownCount: hs.shownCount ?? hotspots.length,
+      toolStatus: hs.toolStatus ?? {},
       reportPath: existsSync(reportPath) ? reportPath : null,
     };
   }
@@ -7237,6 +7291,9 @@ async function executeRefactorAuditJob(job) {
               counts: result.counts ?? {},
               hotspots: result.hotspots ?? [],
               graphAvailable: graphUploaded,
+              detectedCount: result.detectedCount ?? result.hotspotCount ?? 0,
+              shownCount: result.shownCount ?? result.hotspotCount ?? 0,
+              toolStatus: result.toolStatus ?? {},
               ...(adjudicated ? { verdicts: l3.verdicts, plan: l3.plan } : {}),
               createdAt: new Date().toISOString(),
               createdBy: job.createdBy || 'daemon',
@@ -7256,6 +7313,9 @@ async function executeRefactorAuditJob(job) {
           reportPath: result.reportPath ?? null,
           auditId,
           graphAvailable: graphUploaded,
+          detectedCount: result.detectedCount ?? result.hotspotCount ?? 0,
+          shownCount: result.shownCount ?? result.hotspotCount ?? 0,
+          toolStatus: result.toolStatus ?? {},
         },
       });
       log('info', `[${short}] refactor-audit completed (hotspots=${result.hotspotCount ?? 0}${adjudicated ? `, L3 confirmed=${l3.confirmed.length}` : ''})`);

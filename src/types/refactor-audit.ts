@@ -79,6 +79,9 @@ export interface RefactorAuditRecord {
   plan?: unknown;
   /** Whether the file-level graph projection was uploaded to S3. */
   graphAvailable?: boolean;
+  detectedCount?: number;
+  shownCount?: number;
+  toolStatus?: Record<string, string>;
   createdAt: string;
   createdBy: string;
 }

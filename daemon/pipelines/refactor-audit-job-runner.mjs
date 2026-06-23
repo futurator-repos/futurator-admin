@@ -359,5 +359,15 @@ export async function runRefactorAuditJob(job, deps) {
   // size budget); the full array travels on the durable job-row summary.
   await emit('assess.completed', { hotspotCount, counts, reportPath });
 
-  return { ok: true, status: 'completed', hotspotCount, counts, hotspots, reportPath };
+  return {
+    ok: true,
+    status: 'completed',
+    hotspotCount,
+    counts,
+    hotspots,
+    reportPath,
+    detectedCount: artifacts?.detectedCount ?? hotspotCount,
+    shownCount: artifacts?.shownCount ?? hotspotCount,
+    toolStatus: artifacts?.toolStatus ?? {},
+  };
 }
