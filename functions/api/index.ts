@@ -7173,6 +7173,18 @@ app.get('/api/refactor-audits/:auditId', async (c) => {
   return c.json(audit);
 });
 
+/**
+ * Refactoring Assessment Module (Epic C, CRUD) — delete one durable audit.
+ */
+app.delete('/api/refactor-audits/:auditId', async (c) => {
+  const auditId = c.req.param('auditId');
+  if (!auditId || !/^[a-f0-9-]{8,}$/i.test(auditId)) {
+    throw new ValidationError('invalid auditId');
+  }
+  await refactorAuditsRepo.deleteAudit(auditId);
+  return c.json({ deleted: auditId });
+});
+
 // ──────────────────────────────────────────────────────────────────────
 // Migrate-module endpoints (Story 15.6 — UI for brownfield migrations)
 //

@@ -13,7 +13,14 @@ import { useCallback, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import type { App } from '@/types/app';
 import type { AuditHotspot } from '@/types/refactor-audit';
-import { useRunAppAudit, useAppAuditJob, selectAuditReport } from '@/hooks/use-app-audit';
+import {
+  useRunAppAudit,
+  useAppAuditJob,
+  selectAuditReport,
+  useAppAudits,
+  useDeleteAudit,
+  reportFromRecord,
+} from '@/hooks/use-app-audit';
 import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-output';
 import { NewPlanModal } from '../new-plan-modal';
 import { HotspotDashboard } from './hotspot-dashboard';
@@ -40,6 +47,40 @@ export function buildPlanIntent(hotspots: AuditHotspot[]): string {
   return `${intent.slice(0, CAP - 40).trimEnd()}\n… (truncated; see the hotspot report)`;
 }
 
+/**
+ * Trigger a browser download of the assessment as a JSON file. Pure-ish (the DOM
+ * side-effect is unavoidable); kept here so the export shape is one place. The
+ * file is shareable for auditing / further-improvement review.
+ */
+function downloadAuditJson(args: {
+  appId: string;
+  jobId: string | null;
+  auditId?: string;
+  counts: Record<string, number>;
+  hotspots: AuditHotspot[];
+  generatedAt: string;
+}) {
+  const payload = {
+    schema: 'futurator.refactor-audit/v1',
+    appId: args.appId,
+    jobId: args.jobId,
+    auditId: args.auditId ?? null,
+    generatedAt: args.generatedAt,
+    counts: args.counts,
+    hotspotCount: args.hotspots.length,
+    hotspots: args.hotspots,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `assessment-${args.appId}-${(args.jobId ?? 'latest').slice(0, 8)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export function AssessTab({ app }: { app: App }) {
   const router = useRouter();
   const params = useSearchParams();
@@ -47,7 +88,20 @@ export function AssessTab({ app }: { app: App }) {
 
   const run = useRunAppAudit(app.appId);
   const { data: job } = useAppAuditJob(jobId);
-  const report = selectAuditReport(job);
+
+  // Durable persistence: with no live ?auditJob (e.g. opened on another
+  // computer), load the project's stored audits from AWS and render the latest.
+  const { data: auditsData } = useAppAudits(jobId ? null : app.appId);
+  const audits = auditsData?.audits ?? [];
+  const deleteAudit = useDeleteAudit(app.appId);
+  const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
+  const selectedRecord = jobId
+    ? null
+    : (audits.find((a) => a.auditId === selectedAuditId) ?? audits[0] ?? null);
+
+  // Live job takes precedence; otherwise derive from the durable record.
+  const report = jobId ? selectAuditReport(job) : reportFromRecord(selectedRecord);
+  const currentAuditId = jobId ? job?.refactorAuditSummary?.auditId : selectedRecord?.auditId;
 
   const [planOpen, setPlanOpen] = useState(false);
   const [planIntent, setPlanIntent] = useState('');
@@ -92,6 +146,36 @@ export function AssessTab({ app }: { app: App }) {
             — it never edits code.
           </p>
         </div>
+        {report.status === 'scored' && (
+          <button
+            type="button"
+            onClick={() =>
+              downloadAuditJson({
+                appId: app.appId,
+                jobId: report.jobId,
+                auditId: currentAuditId,
+                counts: report.counts,
+                hotspots: report.hotspots,
+                generatedAt: new Date().toISOString(),
+              })
+            }
+            data-testid="assess-export"
+            title="Download this assessment as JSON (share for auditing)"
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--foreground)',
+              background: 'transparent',
+              border: '1px solid var(--border)',
+              borderRadius: 6,
+              padding: '7px 12px',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            ⇩ Export JSON
+          </button>
+        )}
         <button
           type="button"
           onClick={startAudit}
@@ -118,6 +202,80 @@ export function AssessTab({ app }: { app: App }) {
               : 'Assess'}
         </button>
       </div>
+
+      {/* Durable history — past assessments stored in AWS (cross-machine). Only
+          shown when not following a live job and ≥1 stored audit exists. */}
+      {!jobId && audits.length > 0 && (
+        <div
+          data-testid="assess-history"
+          style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}
+        >
+          <span
+            style={{
+              fontSize: 10,
+              textTransform: 'uppercase',
+              letterSpacing: '0.08em',
+              color: 'var(--text-faint)',
+            }}
+          >
+            history
+          </span>
+          {audits.map((a) => {
+            const active = a.auditId === (selectedRecord?.auditId ?? audits[0]?.auditId);
+            return (
+              <span
+                key={a.auditId}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontSize: 11,
+                  fontFamily: 'var(--font-mono)',
+                  color: active ? 'var(--foreground)' : 'var(--text-dim)',
+                  border: `1px solid ${active ? 'var(--foreground)' : 'var(--border)'}`,
+                  borderRadius: 6,
+                  padding: '3px 7px',
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => setSelectedAuditId(a.auditId)}
+                  title={`${a.status} · ${a.hotspots?.length ?? 0} hotspots · ${a.createdAt}`}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'inherit',
+                    cursor: 'pointer',
+                    padding: 0,
+                  }}
+                >
+                  {a.createdAt.slice(0, 16).replace('T', ' ')}
+                  {a.status === 'adjudicated' ? ' ·L3' : ''}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (selectedAuditId === a.auditId) setSelectedAuditId(null);
+                    deleteAudit.mutate(a.auditId);
+                  }}
+                  title="Delete this stored assessment"
+                  aria-label="Delete assessment"
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'var(--text-faint)',
+                    cursor: 'pointer',
+                    padding: 0,
+                    fontSize: 12,
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       {run.error && (
         <div

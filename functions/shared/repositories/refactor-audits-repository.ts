@@ -56,6 +56,14 @@ export async function listAuditsByProject(
   return (res.Items as RefactorAuditRecord[]) ?? [];
 }
 
+/** Delete one audit by id (the CRUD delete). */
+export async function deleteAudit(auditId: string): Promise<void> {
+  const { DeleteCommand } = await import('@aws-sdk/lib-dynamodb');
+  await docClient.send(
+    new DeleteCommand({ TableName: TABLE_NAMES.refactorAudits, Key: { auditId } }),
+  );
+}
+
 /**
  * Delete every audit for a project (app-delete cascade). Volume is low (a few
  * per app), so a GSI Query + per-item delete is fine. Returns the count deleted.

@@ -18,11 +18,11 @@
  * project_api_client_path_convention) — do NOT prefix paths with `/api`.
  */
 
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api-client';
 import { useAgentJob } from '@/hooks/use-agent-job';
 import type { AgentJob } from '@/types/agent-orchestrator';
-import type { AuditHotspot, HotspotKind } from '@/types/refactor-audit';
+import type { AuditHotspot, HotspotKind, RefactorAuditRecord } from '@/types/refactor-audit';
 
 /** Optional knobs the operator can pass when starting an audit. */
 export interface RunAppAuditInput {
@@ -95,4 +95,56 @@ export function selectAuditReport(job: AgentJob | undefined | null): AuditReport
   }
   // PENDING / RUNNING
   return { status: 'assessing', jobId };
+}
+
+// ── Durable persistence (CRUD) — assessments survive across machines/sessions ──
+// The recon report rides the no-TTL job row during/after a run; but a fresh
+// browser (another computer, no ?auditJob in the URL) has no job to read. The
+// daemon also writes every completed audit to the durable futurator-refactor-audits
+// table, so these hooks let the UI load past assessments anywhere.
+
+const QK_AUDITS = (appId: string) => ['app-audits', appId] as const;
+
+/** List a project's durable audits, newest-first (§9.4). */
+export function useAppAudits(appId: string | null) {
+  return useQuery({
+    queryKey: QK_AUDITS(appId ?? ''),
+    queryFn: () => api.get<{ audits: RefactorAuditRecord[] }>(`/party/projects/${appId}/audits`),
+    enabled: !!appId,
+    staleTime: 60_000,
+  });
+}
+
+/** Fetch one durable audit record by id (§9.5) — its hotspots + verdicts + plan. */
+export function useAuditRecord(auditId: string | null) {
+  return useQuery({
+    queryKey: ['audit-record', auditId],
+    queryFn: () => api.get<RefactorAuditRecord>(`/refactor-audits/${auditId}`),
+    enabled: !!auditId,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** Delete a durable audit (CRUD). Invalidates the app's audit list on success. */
+export function useDeleteAudit(appId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (auditId: string) => api.delete<{ deleted: string }>(`/refactor-audits/${auditId}`),
+    onSuccess: () => {
+      if (appId) qc.invalidateQueries({ queryKey: QK_AUDITS(appId) });
+    },
+  });
+}
+
+/** Derive the dashboard view from a durable audit record (cross-machine load). */
+export function reportFromRecord(rec: RefactorAuditRecord | undefined | null): AuditReport {
+  if (!rec) return { status: 'idle' };
+  return {
+    status: 'scored',
+    jobId: rec.jobId,
+    hotspots: rec.hotspots ?? [],
+    counts: rec.counts ?? {},
+    hotspotCount: rec.hotspots?.length ?? 0,
+    reportPath: null,
+  };
 }

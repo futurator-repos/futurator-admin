@@ -54,6 +54,33 @@ export interface HotspotsReport {
   hotspots: AuditHotspot[];
 }
 
+/** One L3 adjudication verdict (mirror of the backend type). */
+export interface HotspotVerdict {
+  hotspotTitle: string;
+  kind: HotspotKind;
+  verdict: 'confirmed' | 'rejected';
+  rationale: string;
+  confidence?: number;
+}
+
+/**
+ * A durable audit record (`futurator-refactor-audits`) — what the CRUD/history
+ * endpoints return. Mirror of `functions/shared/types/refactor-audit.ts`.
+ */
+export interface RefactorAuditRecord {
+  auditId: string;
+  projectId: string;
+  projectPath: string;
+  jobId: string;
+  status: 'recon-only' | 'adjudicated';
+  counts: Partial<Record<HotspotKind, number>>;
+  hotspots: AuditHotspot[];
+  verdicts?: HotspotVerdict[];
+  plan?: unknown;
+  createdAt: string;
+  createdBy: string;
+}
+
 /**
  * The hotspot workstreams the dashboard groups by (FR32). The detector kinds
  * fold into four operator-facing workstreams.
