@@ -621,7 +621,7 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           // never becomes ready (e.g. a static-preview mount, not the live game —
           // the pamcan6 root cause), record SEAM_ABSENT so the judge blocks
           // structurally instead of asserting against undefined (a silent mismatch).
-          `    const needsSeam = (t.flow || []).some(s => s.action === 'assert' || s.action === 'waitForEvent');`,
+          `    const needsSeam = (t.flow || []).some(s => s.action === 'assert' || s.action === 'waitForEvent' || s.action === 'repeat');`,
           `    if (needsSeam) {`,
           `      try { await page.waitForFunction('window.__harness && window.__harness.ready === true', { timeout: 5000 }); }`,
           `      catch (e) { stepLog.push({ action: 'seam-ready', ok: false, error: 'SEAM_ABSENT: window.__harness never became ready within 5s — the verifiability seam is not mounted (feature likely a static preview, not the live game)' }); }`,
@@ -665,6 +665,42 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `          if (!pass) {`,
           `            throw new Error('ASSERT_FAILED: ' + (step.expr || '') + ' ' + (step.op || 'eq') + ' ' + JSON.stringify(step.expected) + ' (actual=' + JSON.stringify(actual) + ')');`,
           `          }`,
+          `        }`,
+          // VQA v3 Phase 2 (2026-06-23) — waitForEvent: block until a seam
+          // condition holds (poll-until-event). The page-function inlines its own
+          // assertOp (browser context can't see the node-side one).
+          `        else if (step.action === 'waitForEvent') {`,
+          `          try {`,
+          `            await page.waitForFunction((args) => {`,
+          `              const expr = args[0], op = args[1], expected = args[2];`,
+          `              const cmp = (o, a, e) => { switch (o || 'eq') { case 'eq': return a === e; case 'neq': return a !== e; case 'gt': return Number(a) > Number(e); case 'gte': return Number(a) >= Number(e); case 'lt': return Number(a) < Number(e); case 'lte': return Number(a) <= Number(e); case 'contains': return Array.isArray(a) ? a.includes(e) : String(a).includes(String(e)); case 'truthy': return !!a; case 'falsy': return !a; default: return false; } };`,
+          `              const h = window.__harness; if (!h) return false;`,
+          `              const root = { snapshot: (typeof h.snapshot === 'function' ? h.snapshot() : h.snapshot), events: h.events };`,
+          `              const actual = String(expr || '').split('.').reduce((o, k) => (o == null ? undefined : o[k]), root);`,
+          `              return cmp(op, actual, expected);`,
+          `            }, [step.expr, step.op, step.expected], { timeout: Math.min(step.timeoutMs || 5000, 15000), polling: 100 });`,
+          `          } catch (we) { throw new Error('WAIT_EVENT_TIMEOUT: ' + (step.expr || '') + ' ' + (step.op || 'eq') + ' ' + JSON.stringify(step.expected) + ' not met in ' + (step.timeoutMs || 5000) + 'ms'); }`,
+          `        }`,
+          // VQA v3 Phase 2 — repeat: drive an inner action until a seam condition
+          // holds or the bounded budget elapses (the genuine "press until the
+          // ghost catches pacman → status==='over'" reach-to-event).
+          `        else if (step.action === 'repeat') {`,
+          `          const maxIter = Math.min(step.maxIterations || 50, 500);`,
+          `          const budgetMs = Math.min(step.budgetMs || 15000, 60000);`,
+          `          const t0 = Date.now();`,
+          `          const inner = step.step || {};`,
+          `          let met = false;`,
+          `          for (let i = 0; i < maxIter && (Date.now() - t0) < budgetMs; i++) {`,
+          `            if (inner.action === 'press') { await page.keyboard.press(inner.key || 'Space'); }`,
+          `            else if (inner.action === 'hold') { await page.keyboard.down(inner.key || 'Space'); await page.waitForTimeout(Math.min(inner.ms || 120, 2000)); await page.keyboard.up(inner.key || 'Space'); }`,
+          `            else if (inner.action === 'pointer' || inner.action === 'tap') { if (inner.selector) { await page.click(inner.selector, { timeout: 3000 }); } else { await page.mouse.click(inner.x || 0, inner.y || 0); } }`,
+          `            else if (inner.action === 'click' && inner.selector) { await page.click(inner.selector, { timeout: 3000 }); }`,
+          `            else if (inner.action === 'wait') { await page.waitForTimeout(Math.min(inner.ms || 100, 2000)); }`,
+          `            const av = await page.evaluate((expr) => { const h = window.__harness; if (!h) return undefined; const root = { snapshot: (typeof h.snapshot === 'function' ? h.snapshot() : h.snapshot), events: h.events }; return String(expr || '').split('.').reduce((o, k) => (o == null ? undefined : o[k]), root); }, step.untilExpr || '');`,
+          `            if (assertOp(step.untilOp, av, step.untilExpected)) { met = true; break; }`,
+          `            await page.waitForTimeout(Math.min(step.intervalMs || 80, 2000));`,
+          `          }`,
+          `          if (!met) { throw new Error('REPEAT_UNMET: until ' + (step.untilExpr || '') + ' ' + (step.untilOp || 'eq') + ' ' + JSON.stringify(step.untilExpected) + ' not satisfied within ' + maxIter + ' iters / ' + budgetMs + 'ms'); }`,
           `        }`,
           `        stepLog.push({ action: step.action, ok: true });`,
           `      } catch (stepErr) {`,

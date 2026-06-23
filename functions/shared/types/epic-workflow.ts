@@ -170,6 +170,12 @@ export type ProbeStepAction =
   | 'drag'
   | 'assert'
   | 'seed'
+  // ── VQA v3 Phase 2 — agentic event-driven verbs ──
+  /** Block until a `window.__harness` condition holds (poll-until-event). */
+  | 'waitForEvent'
+  /** Repeat an inner action until a `window.__harness` condition holds or budget
+   *  elapses (e.g. press a key until status===over). The genuine reach-to-event. */
+  | 'repeat'
   // ── H10 coverage-class grammar gaps ──
   | 'viewport'
   | 'upload'
@@ -213,6 +219,23 @@ export interface VisualTestFlowStep {
   op?: AssertOp;
   /** For `assert` — expected value (compared per `op`). */
   expected?: string | number | boolean;
+
+  // ── VQA v3 Phase 2 — agentic event-driven verbs ──
+  /** For `assert`/`waitForEvent`/`repeat` — max time to wait/poll (ms). */
+  timeoutMs?: number;
+  /** For `repeat` — the inner action to repeat (a press/hold/pointer/tap/click/wait). */
+  step?: VisualTestFlowStep;
+  /** For `repeat` — the until-condition (JSON-path into the harness snapshot). */
+  untilExpr?: string;
+  /** For `repeat` — until-condition operator. */
+  untilOp?: AssertOp;
+  /** For `repeat` — until-condition expected value. */
+  untilExpected?: string | number | boolean;
+  /** For `repeat` — safety caps so the loop is bounded. */
+  maxIterations?: number;
+  budgetMs?: number;
+  /** For `repeat` — delay between iterations (ms). */
+  intervalMs?: number;
 
   // ── H10 coverage-class grammar gaps ──
   /** For `viewport` — width/height. */

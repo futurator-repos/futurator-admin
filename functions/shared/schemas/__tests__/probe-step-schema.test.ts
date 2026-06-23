@@ -27,6 +27,41 @@ describe('probeStepSchema (VQA v3 — E2.1)', () => {
     expect(result.success).toBe(true);
   });
 
+  it('Phase2 — accepts a waitForEvent step (poll seam until event)', () => {
+    const result = probeStepSchema.safeParse({
+      action: 'waitForEvent',
+      expr: 'snapshot.status',
+      op: 'eq',
+      expected: 'over',
+      timeoutMs: 5000,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('Phase2 — accepts a repeat step (drive an inner action until an event)', () => {
+    const result = probeStepSchema.safeParse({
+      action: 'repeat',
+      step: { action: 'press', key: 'ArrowLeft' },
+      untilExpr: 'snapshot.status',
+      untilOp: 'eq',
+      untilExpected: 'over',
+      maxIterations: 200,
+      budgetMs: 30000,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('Phase2 — rejects a repeat inner step outside the simple-action set', () => {
+    const result = probeStepSchema.safeParse({
+      action: 'repeat',
+      step: { action: 'assert', expr: 'x', op: 'eq', expected: 1 },
+      untilExpr: 'snapshot.status',
+      untilOp: 'eq',
+      untilExpected: 'over',
+    });
+    expect(result.success).toBe(false);
+  });
+
   it('AC1 — accepts a clock step', () => {
     expect(
       probeStepSchema.safeParse({ action: 'clock', clockMode: 'runFor', ms: 5000 }).success,
