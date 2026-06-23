@@ -118,3 +118,75 @@ describe('renderHandoffMarkdown', () => {
     expect(md).toContain('- Verify: boot; screenshot ?feature=x');
   });
 });
+
+describe('FL-1 routing — structural verdicts → distinct fix actions', () => {
+  it('a SEAM_NEVER_PUBLISHED failure mints a BUILD story (not "fix visual regression")', () => {
+    const { minted, escalations } = buildVqaFixStories({
+      existingStories: [owner],
+      fixForward: [
+        handoff('AC-1', 'S1', { observed: 'SEAM_NEVER_PUBLISHED: no source imports useGameStateMachine' }),
+      ],
+      waveNumber: 2,
+      uuid,
+    });
+    expect(escalations).toHaveLength(0);
+    expect(minted[0].fixRoute).toBe('dev-build');
+    expect(minted[0].fixRouteClass).toBe('seam-not-mounted');
+    expect(minted[0].title).toMatch(/build the feature/i);
+    expect(minted[0].description).toMatch(/\*\*Remedy \(dev-build\)/);
+  });
+
+  it('a FLOW_NOOP failure mints a re-author-interaction story', () => {
+    const { minted } = buildVqaFixStories({
+      existingStories: [owner],
+      fixForward: [handoff('AC-1', 'S1', { observed: 'FLOW_NOOP: frame identical to idle' })],
+      waveNumber: 2,
+      uuid,
+    });
+    expect(minted[0].fixRoute).toBe('reauthor-probe');
+  });
+
+  it('an ac-wording-only bundle ESCALATES to the operator (not minted)', () => {
+    const { minted, escalations } = buildVqaFixStories({
+      existingStories: [owner],
+      fixForward: [
+        handoff('AC-1', 'S1', { triage: { classification: 'ac-wording', summary: 'unverifiable' } }),
+      ],
+      waveNumber: 2,
+      uuid,
+    });
+    expect(minted).toHaveLength(0);
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0].reason).toBe('operator-route');
+    expect(escalations[0].route.route).toBe('operator');
+  });
+});
+
+describe('FL-2 — minted criteria preserve verify + observable for deterministic re-verify', () => {
+  it('carries verify/thenObservable/BDD onto the fix-story criteria', () => {
+    const { minted } = buildVqaFixStories({
+      existingStories: [owner],
+      fixForward: [
+        handoff('AC-1', 'S1', {
+          verify: 'behavior',
+          thenObservable: 'the game status becomes over',
+          given: 'a game in progress',
+          when: 'the player loses',
+          then: 'a GAME OVER overlay shows',
+        }),
+      ],
+      waveNumber: 2,
+      uuid,
+    });
+    expect(minted[0].criteria[0]).toEqual({
+      id: 'AC-1',
+      text: 'criterion AC-1',
+      needsBrowser: true,
+      verify: 'behavior',
+      thenObservable: 'the game status becomes over',
+      given: 'a game in progress',
+      when: 'the player loses',
+      then: 'a GAME OVER overlay shows',
+    });
+  });
+});

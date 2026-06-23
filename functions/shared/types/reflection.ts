@@ -19,6 +19,11 @@
 export type ReflectionTarget =
   | 'project-claude-md'
   | 'project-skill'
+  // FL-3 (agentic-l2-autonomy-backlog §5) — records a confirmed VQA fix (its
+  // triage class + probe change) to the project's VQA-fix ledger so the learning
+  // loop can mine recurring fix patterns. `content`: { acId, triageClass,
+  // probeChange?, rationale? }.
+  | 'story.vqa.fix'
   | 'agent-persona'
   | 'org-skill'
   | 'pipeline-config'

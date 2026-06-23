@@ -43,6 +43,7 @@ const TARGET_CHIPS: { key: TargetChip; label: string }[] = [
   { key: 'all', label: 'All targets' },
   { key: 'project-claude-md', label: 'CLAUDE.md' },
   { key: 'project-skill', label: 'Project skills' },
+  { key: 'story.vqa.fix', label: 'VQA fixes' },
   { key: 'org-skill', label: 'Org skills' },
   { key: 'agent-persona', label: 'Personas' },
   { key: 'pipeline-config', label: 'Pipeline tuning' },
@@ -52,6 +53,7 @@ const TARGET_CHIPS: { key: TargetChip; label: string }[] = [
 const TARGET_COLOR: Record<ReflectionTarget, string> = {
   'project-claude-md': 'var(--accent-blue, #3b82f6)',
   'project-skill': 'var(--success, #10b981)',
+  'story.vqa.fix': 'var(--accent-blue, #3b82f6)',
   'org-skill': 'var(--warning, #f59e0b)',
   'agent-persona': 'var(--destructive, #ef4444)',
   'pipeline-config': 'var(--muted-foreground, #6b7280)',

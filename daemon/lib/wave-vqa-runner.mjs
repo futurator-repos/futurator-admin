@@ -315,6 +315,14 @@ function buildHandoff({ story, ac, votes, evidence, triage, attempts, port }) {
       : null,
     attempts: attempts || [],
     expected: ac.text,
+    // FL-2 (agentic-l2-autonomy-backlog §5) — carry the AC's verify intent +
+    // observable so a minted fix story's QA re-run re-authors a DETERMINISTIC
+    // probe (qa-author) and the loop exits on a seam assert, not a vision judge.
+    ...(ac.verify ? { verify: ac.verify } : {}),
+    ...(ac.thenObservable ? { thenObservable: ac.thenObservable } : {}),
+    ...(ac.given ? { given: ac.given } : {}),
+    ...(ac.when ? { when: ac.when } : {}),
+    ...(ac.then ? { then: ac.then } : {}),
     observed: votes
       .filter((v) => v.verdict === 'FAIL')
       .map((v) => v.observation)

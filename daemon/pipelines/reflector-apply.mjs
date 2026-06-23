@@ -40,7 +40,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { parse as parseYaml, stringify as yamlStringify } from 'yaml';
@@ -107,6 +107,10 @@ export async function applyReflection({
     }
     case 'project-skill': {
       outcome = await applyProjectSkillProposal({ workingDir, projectSlug, proposal, log });
+      break;
+    }
+    case 'story.vqa.fix': {
+      outcome = await applyVqaFixProposal({ workingDir, proposal, log });
       break;
     }
     case 'org-skill':
@@ -230,6 +234,55 @@ async function applyProjectSkillProposal({ workingDir, projectSlug, proposal, lo
     };
   }
   return installFederationSkill({ workingDir, projectSlug, proposal, c: obj, log });
+}
+
+// ── target=story.vqa.fix ──────────────────────────────────────────────
+
+/** FL-3 — the project's VQA-fix ledger (mined by later REFLECTOR runs). */
+const VQA_FIX_LEDGER_REL = '.context/vqa-fixes.jsonl';
+
+/**
+ * FL-3 (agentic-l2-autonomy-backlog §5) — record a confirmed VQA fix to the
+ * project's append-only ledger so the learning loop can mine recurring fix
+ * patterns (a triage class + probe change that keeps recurring is a candidate
+ * for a CLAUDE.md rule or a new skill). `content`: { acId, triageClass,
+ * probeChange?, rationale? }. Pure append + idempotent on proposal id.
+ */
+async function applyVqaFixProposal({ workingDir, proposal, log }) {
+  const c = proposal.content ?? {};
+  const triageClass = c.triageClass ?? c.class ?? c.routeClass;
+  if (!triageClass) {
+    return {
+      ok: false,
+      reason: 'vqa-fix-payload-malformed',
+      error: 'content.triageClass (or class/routeClass) is required',
+    };
+  }
+  const ledgerPath = join(workingDir, VQA_FIX_LEDGER_REL);
+  const record = {
+    id: proposal.id,
+    acId: c.acId ?? null,
+    storyId: c.storyId ?? null,
+    triageClass,
+    probeChange: c.probeChange ?? null,
+    rationale: proposal.rationale ?? c.rationale ?? '',
+  };
+  try {
+    // Idempotency: skip if this proposal id is already in the ledger.
+    if (existsSync(ledgerPath)) {
+      const existing = readFileSync(ledgerPath, 'utf-8');
+      if (existing.includes(`"id":${JSON.stringify(proposal.id)}`)) {
+        log('info', `reflector-apply story.vqa.fix: ${proposal.id} already recorded (idempotent)`);
+        return { ok: true, idempotent: true };
+      }
+    } else {
+      mkdirSync(join(workingDir, '.context'), { recursive: true });
+    }
+    appendFileSync(ledgerPath, JSON.stringify(record) + '\n', 'utf-8');
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: 'vqa-fix-write-failed', error: String(err?.message || err) };
+  }
 }
 
 async function installFederationSkill({ workingDir, projectSlug, proposal, c, log }) {
@@ -408,6 +461,8 @@ async function commitReflection({ workingDir, proposal, target, spawnImpl }) {
     pathsToAdd = ['CLAUDE.md'];
   } else if (target === 'project-skill') {
     pathsToAdd = ['.claude/skills.manifest.yaml', '.claude/skills/'];
+  } else if (target === 'story.vqa.fix') {
+    pathsToAdd = [VQA_FIX_LEDGER_REL];
   } else {
     return { ok: false, reason: 'no-paths-for-target' };
   }

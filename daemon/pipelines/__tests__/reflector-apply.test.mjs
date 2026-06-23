@@ -464,3 +464,72 @@ describe('applyReflection — soft fail on writer errors', () => {
     }
   });
 });
+
+describe('applyReflection — target=story.vqa.fix (FL-3)', () => {
+  it('appends a VQA-fix record to the project ledger and returns applied', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'reflector-apply-vqa-'));
+    const spawnSpy = vi.fn(() => makeFakeProc({ stdout: '', exitCode: 0 }));
+    try {
+      const r = await applyReflection({
+        workingDir: dir,
+        projectSlug: 'test',
+        proposal: {
+          id: 'refl-vqa-1',
+          target: 'story.vqa.fix',
+          content: {
+            acId: 'AC-7',
+            storyId: 'S3',
+            triageClass: 'seam-not-mounted',
+            probeChange: 'authored force→assert probe for status:over',
+          },
+          rationale: 'recurring static-preview mount',
+        },
+        spawnImpl: spawnSpy,
+      });
+      expect(r.status).toBe('applied');
+      expect(r.target).toBe('story.vqa.fix');
+      const ledger = readFileSync(join(dir, '.context/vqa-fixes.jsonl'), 'utf-8').trim();
+      const record = JSON.parse(ledger);
+      expect(record.id).toBe('refl-vqa-1');
+      expect(record.triageClass).toBe('seam-not-mounted');
+      expect(record.acId).toBe('AC-7');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('is idempotent — re-applying the same proposal id does not duplicate the ledger line', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'reflector-apply-vqa2-'));
+    const spawnSpy = vi.fn(() => makeFakeProc({ stdout: '', exitCode: 0 }));
+    const proposal = {
+      id: 'refl-vqa-2',
+      target: 'story.vqa.fix',
+      content: { acId: 'AC-1', triageClass: 'flow-noop' },
+    };
+    try {
+      await applyReflection({ workingDir: dir, projectSlug: 't', proposal, spawnImpl: spawnSpy });
+      const second = await applyReflection({ workingDir: dir, projectSlug: 't', proposal, spawnImpl: spawnSpy });
+      expect(second.status).toBe('applied');
+      const lines = readFileSync(join(dir, '.context/vqa-fixes.jsonl'), 'utf-8').trim().split('\n');
+      expect(lines).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns failed when the payload has no triage class', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'reflector-apply-vqa3-'));
+    try {
+      const r = await applyReflection({
+        workingDir: dir,
+        projectSlug: 't',
+        proposal: { id: 'refl-vqa-3', target: 'story.vqa.fix', content: { acId: 'AC-1' } },
+        spawnImpl: vi.fn(() => makeFakeProc({})),
+      });
+      expect(r.status).toBe('failed');
+      expect(r.reason).toBe('vqa-fix-payload-malformed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

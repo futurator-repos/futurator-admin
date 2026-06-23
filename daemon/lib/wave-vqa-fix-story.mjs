@@ -12,7 +12,17 @@
  * per plan. A recurrence becomes an `escalations` entry — the caller writes
  * a HIGH operator card instead of minting; that is the end of the
  * self-correction ladder.
+ *
+ * FL-1 (agentic-l2-autonomy-backlog §5) — routes the bundle through
+ * `vqa-triage-router`: a SEAM_NEVER_PUBLISHED / SEAM_ABSENT / CONTRACT_INCOMPLETE
+ * failure mints a "build the feature" story (not a generic "fix visual
+ * regression"); a FLOW_NOOP a "fix the interaction" story; and a bundle that is
+ * ONLY operator/environment is escalated to the operator instead of minted.
+ * FL-2 — the minted criteria preserve the AC's `verify` + `thenObservable`
+ * (+ given/when/then) so the fix story's QA re-run re-authors a DETERMINISTIC
+ * probe (qa-author), closing the loop on a seam assert, not a vision re-judge.
  */
+import { routeVqaFailure, summarizeRoutes } from './vqa-triage-router.mjs';
 
 /**
  * @param {object} args
@@ -40,24 +50,52 @@ export function buildVqaFixStories({ existingStories, fixForward, waveNumber, uu
       (s) => s.origin === 'wave-vqa-fix' && (s.dependsOn || []).includes(ownerId),
     );
     if (alreadyTried) {
-      escalations.push({ ownerId, handoffs });
+      escalations.push({ ownerId, handoffs, reason: 'recurrence' });
       continue;
     }
     const owner = stories.find((s) => s.storyId === ownerId);
     const suspected = [...new Set(handoffs.flatMap((h) => h.triage?.suspectedFiles || []))];
     const acList = handoffs.map((h) => h.acId).join(', ');
+
+    // FL-1 — route each failure, then reduce to the bundle's dominant remedy.
+    const routes = handoffs.map((h) =>
+      routeVqaFailure({ classification: h.triage?.classification, rationale: h.observed }),
+    );
+    const route = summarizeRoutes(routes);
+    // A bundle that is ONLY operator/environment is not a dev story — hand it to
+    // the operator (a HIGH card) instead of minting work no dev agent can clear.
+    if (!route.autoMint) {
+      escalations.push({ ownerId, handoffs, route, reason: 'operator-route' });
+      continue;
+    }
+
     minted.push({
       storyId: uuid(),
       order: stories.length + minted.length,
       wave: maxWave + 1,
-      title: `Fix visual regression: ${acList} — ${(owner?.title || ownerId).slice(0, 80)}`,
-      description: renderHandoffMarkdown({ handoffs, waveNumber }),
+      title: `${route.title}: ${acList} — ${(owner?.title || ownerId).slice(0, 80)}`,
+      description: renderHandoffMarkdown({ handoffs, waveNumber, route }),
       status: 'pending',
       dependsOn: [ownerId],
       touchPoints: suspected.length > 0 ? suspected : owner?.touchPoints || [],
-      criteria: handoffs.map((h) => ({ id: h.acId, text: h.acText, needsBrowser: true })),
+      // FL-2 — carry the AC's verify intent + observable through so the fix
+      // story's QA re-run re-authors a deterministic probe (qa-author) and the
+      // loop exits on a seam assert, not a fresh vision judge.
+      criteria: handoffs.map((h) => ({
+        id: h.acId,
+        text: h.acText,
+        needsBrowser: true,
+        ...(h.verify ? { verify: h.verify } : {}),
+        ...(h.thenObservable ? { thenObservable: h.thenObservable } : {}),
+        ...(h.given ? { given: h.given } : {}),
+        ...(h.when ? { when: h.when } : {}),
+        ...(h.then ? { then: h.then } : {}),
+      })),
       hasBrowserTests: true,
       origin: 'wave-vqa-fix',
+      // FL-1 — machine-readable route so the claims surface / fixer can branch.
+      fixRoute: route.route,
+      fixRouteClass: route.routeClass,
       // P3 (pong1 2026-06-12) — machine-readable provenance: the wave whose
       // VQA gate confirmed the failure. The daemon uses this to rebuild the
       // originating card's dedupKey (wave-vqa:<plan>:<epic>:<fixesWave>:
@@ -73,13 +111,15 @@ export function buildVqaFixStories({ existingStories, fixForward, waveNumber, uu
 }
 
 /** The handoff packet rendered as the fix story's description (markdown). */
-export function renderHandoffMarkdown({ handoffs, waveNumber }) {
+export function renderHandoffMarkdown({ handoffs, waveNumber, route }) {
   return [
     `Auto-minted by the wave ${waveNumber} VQA gate (fix-forward). A judge`,
     `panel confirmed the browser criteria below FAIL on the MERGED candidate;`,
     `the in-gate fixer could not clear them. Full handoff packets are also at`,
     '`.context/vqa-handoffs/<acId>.json` in the repo.',
     '',
+    // FL-1 — the routed remedy so the dev agent fixes the RIGHT layer.
+    ...(route ? [`**Remedy (${route.route}):** ${route.guidance}`, ''] : []),
     ...handoffs.flatMap((h) =>
       [
         `## ${h.acId}: ${h.acText}`,

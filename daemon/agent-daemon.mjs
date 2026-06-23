@@ -202,8 +202,12 @@ import { runReflectorJob } from './pipelines/reflector-job-runner.mjs';
 // Plan Retrospect — The Assessor job runner + daemon-side scorecard store.
 import { runScorecardAssessJob } from './pipelines/scorecard-assess-job-runner.mjs';
 import { getStoredStageRow, putAssessorSlices } from './lib/scorecard-store.mjs';
-// Refactoring Assessment Module (Epic B2) — deterministic recon runner.
-import { runRefactorAuditJob } from './pipelines/refactor-audit-job-runner.mjs';
+// Refactoring Assessment Module (Epic B2/C) — deterministic recon runner +
+// optional L3 adjudication.
+import {
+  runRefactorAuditJob,
+  runL3Adjudication,
+} from './pipelines/refactor-audit-job-runner.mjs';
 // Epic 4 (2026-05-20) — track Skill tool_use activations into
 // .context/loaded-skills.json so the per-story commit's Skills-Used
 // trailer populates with real content.
@@ -3721,6 +3725,7 @@ const FREE_AGENT_SESSIONS_TABLE =
 const AGENT_FLAGS_TABLE = process.env.AGENT_FLAGS_TABLE || 'futurator-agent-flags';
 // 2026-05-27 PR D.a/b — attention items + per-category remediation policies.
 const ATTENTION_ITEMS_TABLE = process.env.ATTENTION_ITEMS_TABLE || 'futurator-attention-items';
+const REFACTOR_AUDITS_TABLE = process.env.REFACTOR_AUDITS_TABLE || 'futurator-refactor-audits';
 const REMEDIATION_POLICIES_TABLE =
   process.env.REMEDIATION_POLICIES_TABLE || 'futurator-remediation-policies';
 const PARTY_PROJECTS_ROOT = process.env.PROJECTS_ROOT || '/home/ubuntu/projects';
@@ -6081,18 +6086,39 @@ async function executeWaveMergeJob(job) {
               uuid: randomUUID,
             });
             for (const esc of escalations) {
+              const acs = esc.handoffs.map((h) => h.acId).join(', ');
+              // FL-1 — two escalation reasons need different operator copy:
+              //  • 'operator-route' — the failure is not machine-actionable
+              //    (ac-wording / environment); routed to the operator on FIRST
+              //    occurrence, not a recurrence.
+              //  • 'recurrence' (default) — a fix story already ran and the AC
+              //    failed again; the end of the auto-correction ladder.
+              const isOperatorRoute = esc.reason === 'operator-route';
+              const title = isOperatorRoute
+                ? `VQA: ${acs} needs an operator decision (${esc.route?.routeClass || 'not auto-fixable'})`
+                : `VQA fix story already attempted for ${esc.ownerId.slice(0, 8)} — operator decision needed`;
+              const body = isOperatorRoute
+                ? `Wave ${p.waveNumber} VQA confirmed ${acs} failing, but it is not machine-actionable. ` +
+                  `${esc.route?.guidance || ''} Decide: reword the AC, fix manually, or accept.`
+                : `Wave ${p.waveNumber} VQA confirmed ${acs} ` +
+                  `failing AGAIN after an auto-minted fix story already ran for this story. ` +
+                  `Not minting another (one per owning story). Decide: reword the AC, fix manually, or accept.`;
               await writeAttentionItem(
                 ddb,
                 {
                   planId: p.planId,
                   severity: 'high',
                   category: 'wave-vqa-failed',
-                  title: `VQA fix story already attempted for ${esc.ownerId.slice(0, 8)} — operator decision needed`,
-                  body:
-                    `Wave ${p.waveNumber} VQA confirmed ${esc.handoffs.map((h) => h.acId).join(', ')} ` +
-                    `failing AGAIN after an auto-minted fix story already ran for this story. ` +
-                    `Not minting another (one per owning story). Decide: reword the AC, fix manually, or accept.`,
-                  context: { epicId: p.epicId, storyId: esc.ownerId, waveNumber: p.waveNumber, handoffs: esc.handoffs },
+                  title,
+                  body,
+                  context: {
+                    epicId: p.epicId,
+                    storyId: esc.ownerId,
+                    waveNumber: p.waveNumber,
+                    handoffs: esc.handoffs,
+                    reason: esc.reason || 'recurrence',
+                    route: esc.route?.route,
+                  },
                   dedupKey: `wave-vqa-escalated:${p.planId}:${esc.ownerId}`,
                 },
                 log,
@@ -7127,6 +7153,67 @@ async function executeRefactorAuditJob(job) {
     }
 
     if (result.ok) {
+      // Epic C — optional L3 adjudication (gated by payload.runL3). This IS an
+      // LLM spend (spawnGateAgent), unlike recon. A self-contained inline prompt
+      // (the .claude workflow + version-adjudicator are the operator-invocable
+      // local equivalents, not shipped here). Best-effort: an L3 failure still
+      // ships the recon-only audit.
+      let l3 = null;
+      if (job.refactorAuditPayload?.runL3 && (result.hotspots?.length ?? 0) > 0) {
+        try {
+          await pushEvent(jobId, 'assess.l3', 'L3-ADJUDICATOR', 'assess.l3.started', {
+            hotspotCount: result.hotspots.length,
+          });
+          l3 = await runL3Adjudication(job, result.hotspots, {
+            topN: job.refactorAuditPayload.topN,
+            runL3Agent: async (prompt) => {
+              const res = await spawnGateAgent(
+                { role: 'l3-adjudicator', prompt, cwd: projectPath },
+                { short },
+              );
+              if (res?.ok === false) throw new Error(`L3 agent spawn failed: ${(res.output || '').slice(-300)}`);
+              return { output: res?.output || '' };
+            },
+          });
+          await pushEvent(jobId, 'assess.l3', 'L3-ADJUDICATOR', 'assess.l3.completed', {
+            confirmed: l3?.confirmed?.length ?? 0,
+            rejected: (l3?.verdicts?.length ?? 0) - (l3?.confirmed?.length ?? 0),
+            hasPlan: !!l3?.plan,
+          });
+        } catch (l3err) {
+          log('warn', `[${short}] refactor-audit L3 stage failed (recon-only audit kept): ${l3err?.message || l3err}`);
+          await pushEvent(jobId, 'assess.l3', 'L3-ADJUDICATOR', 'assess.l3.failed', {
+            message: String(l3err?.message || l3err).slice(0, 500),
+          });
+        }
+      }
+
+      // Write the durable audit row (always — recon-only or adjudicated) so the
+      // report survives the 7-day events TTL and the §9.4/9.5 endpoints can read it.
+      const auditId = randomUUID();
+      const adjudicated = !!(l3 && l3.ok);
+      try {
+        await ddb.send(
+          new PutCommand({
+            TableName: REFACTOR_AUDITS_TABLE,
+            Item: {
+              auditId,
+              projectId: job.refactorAuditPayload?.projectId || job.projectId,
+              projectPath,
+              jobId,
+              status: adjudicated ? 'adjudicated' : 'recon-only',
+              counts: result.counts ?? {},
+              hotspots: result.hotspots ?? [],
+              ...(adjudicated ? { verdicts: l3.verdicts, plan: l3.plan } : {}),
+              createdAt: new Date().toISOString(),
+              createdBy: job.createdBy || 'daemon',
+            },
+          }),
+        );
+      } catch (auditErr) {
+        log('warn', `[${short}] refactor-audit durable-write failed (non-fatal): ${auditErr?.message || auditErr}`);
+      }
+
       await updateJobFields(jobId, {
         status: 'COMPLETED',
         refactorAuditSummary: {
@@ -7134,9 +7221,10 @@ async function executeRefactorAuditJob(job) {
           counts: result.counts ?? {},
           hotspots: result.hotspots ?? [],
           reportPath: result.reportPath ?? null,
+          auditId,
         },
       });
-      log('info', `[${short}] refactor-audit completed (hotspots=${result.hotspotCount ?? 0})`);
+      log('info', `[${short}] refactor-audit completed (hotspots=${result.hotspotCount ?? 0}${adjudicated ? `, L3 confirmed=${l3.confirmed.length}` : ''})`);
     } else {
       await updateJobFields(jobId, {
         status: 'FAILED',
