@@ -1,11 +1,39 @@
 # QA Review Stage Enhancement — Plan of Action: Genuinely Agentic L2
 
-> **Status:** PLAN (ready to implement) · **Created:** 2026-06-23
+> **Status:** Phases 0–3 BUILT + DEPLOYED to production (2026-06-23). Remaining: the
+> cross-session QA-AUTHOR agent + concept-stage `verify` intent (see §8). · **Created:** 2026-06-23
 > **Author:** `QAreview-agentic` session (multi-agent audit: 4 parallel deep-dives → adversarial verification → synthesis; all load-bearing claims verified against live code)
 > **Trigger run:** `plan_pamcan6_mqphhdgo` (appId `pamcan6`) · QA job `979c6b82-1e0d-4d41-a3e9-fef1e22f1616` (COMPLETED, BLOCKING)
 > **Design of record:** [`vqa-qa-review-redesign.md`](./vqa-qa-review-redesign.md) §3.1–3.7, [`vqa-qa-review-prd.md`](./vqa-qa-review-prd.md). This doc is the **enforcement/implementation layer** that promotes that design from paper to code — not a re-design.
 
 **One-line thesis:** The v3 redesign already designs the cure (L2-state seam, reach→act→observe, deterministic exit gate). pamcan6 proves the gap is **enforcement + a missing event-wait/force-state primitive**, not design. Promote the paper to code, and make every level↔evidence binding a _gate_, not prose.
+
+---
+
+## ✅ Build & deploy status (2026-06-23)
+
+All executor + enforcement phases are \*\*built, tested (181 QA tests + `node --check`
+
+- esbuild scaffold guards), and deployed to production\*\* (`origin/main` @ `8a4c277`,
+  `sst deploy --stage production`). Commits (cherry-picked clean onto main):
+
+| Phase                          | Status      | Commit (main) | What landed                                                                                                                      |
+| ------------------------------ | ----------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| **0** — contract guards        | ✅ deployed | `a21f358`     | `CONTRACT_INCOMPLETE` (flowless L2 blocks), `FLOW_NOOP` (idle-identical blocks), stepLog→judge, aggregator `STRUCTURAL_BLOCK_RE` |
+| **1** — seam self-verification | ✅ deployed | `f641bf7`     | `SEAM_ABSENT` readiness gate, poll-assert, `'win'` enum                                                                          |
+| **2a** — agentic verbs         | ✅ deployed | `44b3319`     | `waitForEvent`, `repeat…until-event`                                                                                             |
+| **2b** — force-state seam      | ✅ deployed | `8a4c277`     | scaffold `dispatch`/`forceStatus`/`__force`/events (new apps), `force` probe verb                                                |
+| **3** — authoring guidance     | ✅ deployed | `8a4c277`     | pm-plan teaches the agentic flows; enforcement = the Phase-0 gate                                                                |
+| scaffold-syntax guard          | ✅ deployed | `8a4c277`     | esbuild-checks every shipped `.ts/.tsx` scaffold                                                                                 |
+
+**Effect now live:** no more fake greens — a flowless "L2", a static-preview app with
+no published seam, or an all-identical capture each blocks with a precise reason. New
+apps can drive keys until an event or force terminal states (gameover/win).
+
+**Remaining (cross-session, by design):** §8 — the QA-AUTHOR agent that auto-authors
+the flows, gated on the concept stage emitting `verify` intent on ACs. The deployed
+gates now FORCE this (block until a real game + real flows exist); §8 is the handoff
+to make it autonomous.
 
 ---
 
@@ -200,6 +228,48 @@ This guarantees AC-S7-1/3/5 surface as REAL_DEFECT send-backs, AC-S7-4 as FLOW_N
 | `functions/shared/services/visual-test-classifier.ts` | level preserve `:230-241`; `needs-probe` resolution `:599-626`                                                                                                                                                          |
 | `daemon/pipelines/lib/visual-tests-writer.mjs`        | writer validation `:111-121`                                                                                                                                                                                            |
 | `docs/concepts/pipeline-v3/vqa-qa-review-redesign.md` | §3.1–3.7 — design of record                                                                                                                                                                                             |
+
+---
+
+## 8. Concept-stage coordination — handoff to `concept-develop`
+
+The executor + enforcement side is **done and live**. What remains to make agentic L2
+_autonomous_ (flows authored without an operator) lives in the concept→authoring track.
+This is the contract `QAreview-agentic` needs from `concept-develop`:
+
+**What is now READY for you on the QA side (deployed):**
+
+- The probe grammar supports the full agentic set: `press/hold/pointer/tap/click/wait/
+clock/assert/waitForEvent/repeat/force` (`functions/shared/types/epic-workflow.ts`
+  `ProbeStepAction`; zod in `functions/shared/schemas/probe-step-schema.ts`).
+- The runtime executes them against `window.__harness` with a readiness gate, poll-assert,
+  event-wait, drive-until-event, and force-state (`visual-qa-pipeline.ts` `runFlow`).
+- The deterministic gate blocks a `level:'L2'` test that lacks a flow
+  (`CONTRACT_INCOMPLETE`) and a seam-asserting flow whose seam never published
+  (`SEAM_ABSENT`). So a half-authored probe can no longer pass.
+- New canvas-game apps publish a DRIVABLE seam (`dispatch`/`forceStatus`/`events`).
+
+**What `concept-develop` must deliver (the two missing pieces):**
+
+1. **PM emits `verify` intent on every AC** (`AcceptanceCriterion.verify` is already in the
+   type — `build | appearance | state | behavior | manual`). Today plans ship ACs with no
+   `verify`, so the classifier's oracle-routing (`visual-test-classifier.ts`
+   `deriveLevelFromVerify` / `resolvedLevel`) stays dormant and everything falls to the
+   shape classifier. Emit it at plan time (the altitude rule: PM sets intent, QA-AUTHOR
+   sets the concrete L-level). This is the single highest-leverage upstream change.
+2. **QA-AUTHOR step authors the flow + asserts at story-dev start** (redesign §3.4), when
+   the seam shape is known. For a `behavior`/`state` AC it must emit a probe using the
+   verbs above — e.g. `force`/`waitForEvent`/`assert` for a terminal-state overlay, or
+   `repeat…until-event` to play to it. The Phase-0 gate already REJECTS a `behavior`/`state`
+   AC that arrives without one, so this closes the loop deterministically.
+
+**Boundary note:** force-state is new-apps-only (the boilerplate scaffold change); existing
+app worktrees keep the observe-only seam. And a _green_ run also needs the DEV side to mount
+the real game — `SEAM_ABSENT`/`CONTRACT_INCOMPLETE` now force that, but the dev prompt should
+keep steering it (`pm-plan-prompt.ts` already does for the assembly story).
+
+> Cross-referenced into `concept-stage-v2-bmad.md` (the concept session's doc) so the
+> `verify`-intent + QA-AUTHOR work is picked up there.
 
 ---
 

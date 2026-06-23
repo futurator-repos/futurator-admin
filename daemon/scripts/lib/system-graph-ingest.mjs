@@ -34,9 +34,13 @@ export const SYSTEM_GRAPH_EDGE_TYPES = new Set([
   // ── Concept v2 doc-engine (E6 / Story 6.2) ─────────────────────────────
   'DERIVED_FROM', // document → upstream document (spec-chain lineage, 6.3)
   'REFERENCES', // story → docSection (citation, 6.3)
-  'GOVERNS', // docSection → code node (doc→code, 6.4)
+  'GOVERNS', // docSection / docShard → code node (doc→code, 6.4 + ADC E5)
   'DESCRIBES', // docSection → blast-reachable infra (doc→code, 6.4)
   'SPECIFIES', // document/docSection → plan/epic/story (6.4)
+  // ── Agentic Document Center (E5.2) — subsystem god-doc layer ────────────
+  'CONTAINS', // godDoc → docShard (the god doc owns its subsystem shards)
+  'DEPENDS_ON', // docShard → docShard (shard-level dependency, from imports)
+  'PROPOSES', // concept document → godDoc / docShard (intention edge, E6.1)
 ]);
 
 // Scalar / string-array node props the ingest is allowed to persist. Memgraph
@@ -62,6 +66,13 @@ export const SYSTEM_GRAPH_NODE_PROPS = [
   'rev', // document revision
   'sectionCount', // document section count
   'provenance', // EXTRACTED | INFERRED | derived (edge/node provenance)
+  // ── Agentic Document Center (E5.2) — docShard / godDoc node props ───────
+  'boundary', // docShard module-boundary path (e.g. 'src/auth')
+  'members', // docShard member code nodeIds (string[])
+  'depends', // docShard depended-on shardKeys (string[])
+  'memberCount', // docShard member count
+  'shardKey', // docShard / godDoc primary join key ('§sys:<path>')
+  'shardKeys', // godDoc contained shardKeys (string[])
 ];
 
 /**

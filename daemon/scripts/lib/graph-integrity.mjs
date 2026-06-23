@@ -35,6 +35,29 @@ export const ORPHAN_HARD_FAIL_KINDS = new Set([
   'externalService',
 ]);
 
+/**
+ * Kinds for which a degree-0 node is a LEGITIMATE floater, not an extractor bug
+ * — the soft "warning" bucket, never a hard-fail. `file`/`dir` are soft by
+ * construction (a brand-new file with no article yet, or a dir). The doc-engine
+ * adds `document`/`docSection` (a narrative section cited by no story is
+ * legitimate). The Agentic Document Center adds `docShard`/`godDoc`: a god doc
+ * whose CONTAINS edges haven't been ingested yet, or a shard governing nothing
+ * live, is a legitimately-unlinked state — it warns + exits 0, it does NOT trip
+ * the non-`file` degree-0 tripwire.
+ *
+ * This is the inverse view of `ORPHAN_HARD_FAIL_KINDS` (the actual gate is keyed
+ * off the hard-fail set so an UNKNOWN/fabricated kind still hard-fails — the
+ * tripwire is NARROWED here for these named soft kinds, not DISABLED).
+ */
+export const SOFT_ORPHAN_KINDS = new Set([
+  'file',
+  'dir',
+  'document',
+  'docSection',
+  'docShard',
+  'godDoc',
+]);
+
 /** `src/components` → `dir/src--components`; root → `dir/.`. */
 export function dirNodeId(dirPath) {
   if (!dirPath || dirPath === '.' || dirPath === '') return 'dir/.';

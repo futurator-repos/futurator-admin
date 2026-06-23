@@ -1,3 +1,5 @@
+import type { AuditHotspot, HotspotKind } from './refactor-audit';
+
 // ── Job status ──
 //
 // State machine (Pipeline v1 — Epic 1, Story 1.1):
@@ -548,11 +550,20 @@ export interface AgentJob {
    */
   refactorAuditSummary?: {
     hotspotCount: number;
-    counts: Record<string, number>;
+    counts: Partial<Record<HotspotKind, number>>;
+    /**
+     * The full ranked hotspot list (MVP transport). The recon writes
+     * `hotspots.json` to the EC2 clone disk, which the API Lambda can't read —
+     * so the daemon denormalizes the array onto this no-TTL job row and the
+     * dashboard reads it via `GET /agent-jobs/:id`. ~27KB on applicator, well
+     * under the 400KB DDB item limit. Epic C may later move the source to the
+     * durable `futurator-refactor-audits` table.
+     */
+    hotspots?: AuditHotspot[];
     /** FK into futurator-refactor-audits (Epic C durable persistence). */
     auditId?: string;
     /** `<projectPath>/graphify-out/REPORT.md`. */
-    reportPath: string;
+    reportPath: string | null;
   };
 
   /**

@@ -43,6 +43,11 @@ import {
   reportDeadCode,
   classifyGenuineOrphans,
 } from './lib/graph-integrity.mjs';
+import { extractSubsystems } from './extractors/subsystem-extract.mjs';
+import { extractConceptDocs } from './extractors/doc-extract.mjs';
+import { upsertExtractedFacts as upsertDocFacts } from './lib/system-graph-ingest.mjs';
+import { touchPointToNodeId } from './ground-truth-injection.mjs';
+import { globsIntersect } from '../pipelines/lib/glob-intersect.mjs';
 import { runAnalytics, buildInsightsDoc } from './graph-analytics.mjs';
 import { readContracts, federateContracts, writeFederation } from './lib/federation.mjs';
 import {
@@ -89,6 +94,7 @@ function parseArgs() {
     federationConfig: join(__dirname, '..', 'config', 'federation.json'),
     waveGate: null,
     atCommit: null,
+    docScan: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -128,6 +134,9 @@ function parseArgs() {
         break;
       case '--at-commit':
         parsed.atCommit = args[++i];
+        break;
+      case '--doc-scan':
+        parsed.docScan = true;
         break;
       case '--help':
         printUsage();
@@ -174,6 +183,9 @@ Optional:
   --federation-config <path>  Join-strategy config (default: daemon/config/federation.json)
   --wave-gate <id>        Wave-gate id stamped onto appended :ContractRevision nodes (Epic 6.2)
   --at-commit <sha>       Commit stamped onto appended revisions (default: git HEAD of the repo)
+  --doc-scan              Run ONLY the Agentic Document Center pass (subsystem
+                          shards + god docs + GOVERNS/PROPOSES), skipping the
+                          full article embed/upsert. Fired on artifact apply/gate.
   --help                  Show this help message
 `);
 }
@@ -374,6 +386,16 @@ async function main() {
   const config = parseArgs();
   const startTime = Date.now();
 
+  // ── --doc-scan: run ONLY the Agentic Document Center pass ─────────────
+  // The apply-artifact endpoint + the readiness gate enqueue a fast
+  // `graph-sync --doc-scan` (Story 6.5 pattern) so approved specs reflect into
+  // the graph without a full article re-embed. Idempotent MERGE makes replay free.
+  if (config.docScan) {
+    log(`Document-center scan for project: ${config.project}`);
+    await processDocumentFacts(config);
+    return;
+  }
+
   log(`Starting sync for project: ${config.project}`);
   log(`Knowledge dir: ${config.knowledgeDir}`);
   log(`State file: ${config.stateFile}`);
@@ -426,6 +448,7 @@ async function main() {
     log('Nothing to sync — all articles up to date');
     await processAstFacts(config);
     await processSystemGraphFacts(config);
+    await processDocumentFacts(config);
     await processGraphIntegrity(config);
     await writeGraphSnapshot(config);
     await writeGitGraphSnapshotLocal(config);
@@ -646,6 +669,9 @@ async function main() {
 
   // ── Step 8.45: System graph grounding (Pipeline v3 / Epic 1) ─────
   await processSystemGraphFacts(config);
+
+  // ── Step 8.46: Agentic Document Center — subsystem shards + god docs ─
+  await processDocumentFacts(config);
 
   // ── Step 8.47: Graph integrity — orphans + dead code (Epic 2) ────
   await processGraphIntegrity(config);
@@ -1054,6 +1080,234 @@ async function processSystemGraphFacts(config) {
       );
       log(`System graph CALLS_ENDPOINT: ${edgeUpserts} edges`);
     }
+  } finally {
+    await session.close();
+    await driver.close();
+  }
+}
+
+// ── Agentic Document Center: subsystem shards + god docs (E3.5 / E5 / E6.1) ──
+
+/**
+ * Resolve a story/shard touchPoint (or member) to the code nodeIds it governs,
+ * reusing the SAME oracle DEV uses (`touchPointToNodeId`, ground-truth-injection.mjs)
+ * for literals and `glob-intersect.mjs` for glob patterns. A literal that doesn't
+ * exist as a `:Node`, or a glob matching zero known code nodes, is NEVER turned
+ * into a bogus edge — it is returned on `ambiguous[]`.
+ *
+ * @param {string} tp                touchPoint (literal path, code/ nodeId, or glob)
+ * @param {Set<string>} codeNodeIds  the project's existing `code/*` nodeIds
+ * @returns {{ matched: string[], ambiguous: object[] }}
+ */
+export function resolveGovernsTargets(tp, codeNodeIds) {
+  const isGlob = /[*?[\]{}]/.test(String(tp));
+  if (!isGlob) {
+    const id = tp.startsWith('code/') ? tp : touchPointToNodeId(tp);
+    if (codeNodeIds.has(id)) return { matched: [id], ambiguous: [] };
+    return { matched: [], ambiguous: [{ touchPoint: tp, reason: 'no-matching-code-node' }] };
+  }
+  // Glob: compare against each code node's path-shaped tail (strip `code/`, `--`→`/`).
+  const matched = [];
+  for (const id of codeNodeIds) {
+    const relPath = id.replace(/^code\//, '').replace(/--/g, '/');
+    if (globsIntersect(tp, relPath)) matched.push(id);
+  }
+  matched.sort();
+  if (matched.length === 0) {
+    return { matched: [], ambiguous: [{ touchPoint: tp, reason: 'glob-matched-no-code-node' }] };
+  }
+  return { matched, ambiguous: [] };
+}
+
+/**
+ * The Agentic Document Center graph step. Deterministic, zero-LLM, MERGE-on-nodeId
+ * idempotent — mirrors `processSystemGraphFacts` (read .mycelium, session
+ * lifecycle, log lines). Runs AFTER processSystemGraphFacts, BEFORE
+ * processGraphIntegrity. Steps:
+ *
+ *   1. subsystem-extract → docShard nodes + shard→shard DEPENDS_ON edges, plus a
+ *      synthetic `godDoc/<docType>/<slug>` node CONTAINS-ing each shard.
+ *   2. docShard GOVERNS its member code nodes — every member is normalized via
+ *      `touchPointToNodeId`; a member with no `:Node` → ambiguous[], never a
+ *      bogus edge. (Glob members are expanded via glob-intersect.)
+ *   3. PROPOSES: each concept `document` (architecture/prd/ux on disk) PROPOSES
+ *      the godDoc — the intention edge from the spec to the codebase-reactive doc.
+ *   4. Prune-on-tombstone: docShard nodes whose shardKey is no longer produced by
+ *      the current extract are marked `status:'pruned'` (a vanished module
+ *      boundary), and stale GOVERNS/CONTAINS edges from them are removed — edges
+ *      to deleted shards never accumulate.
+ *
+ * Prototype / empty project (no ast-facts files ⇒ no shards) → log + skip,
+ * zero nodes, byte-identical to today.
+ */
+async function processDocumentFacts(config) {
+  const root = join(config.knowledgeDir, '..');
+  const subsysEnv = extractSubsystems(root);
+  const shardNodes = (subsysEnv.nodes || []).filter((n) => n.kind === 'docShard');
+
+  if (shardNodes.length === 0) {
+    log('No subsystem shards (prototype/empty project) — skipping document-center grounding');
+    return;
+  }
+
+  const docType = 'architecture'; // the god-doc family this layer projects
+  const slug = config.project;
+  const godDocId = `godDoc/${docType}/${slug}`;
+  const today = new Date().toISOString().split('T')[0];
+
+  // Concept documents present on disk → PROPOSES sources (intention edges).
+  const { nodes: conceptNodes } = extractConceptDocs(root);
+  const conceptDocs = conceptNodes.filter((n) => n.kind === 'document');
+
+  const driver = createDriver();
+  const session = driver.session();
+  try {
+    // The set of existing code nodeIds — the GOVERNS resolution domain.
+    const codeRes = await session.run(
+      `MATCH (n:Node {projectId: $projectId, kind: 'file'})
+       WHERE coalesce(n.status,'active') <> 'pruned'
+       RETURN n.nodeId AS id`,
+      { projectId: slug },
+    );
+    const codeNodeIds = new Set(codeRes.records.map((r) => r.get('id')));
+
+    // 1) Ingest docShard nodes + DEPENDS_ON edges + the godDoc node + CONTAINS.
+    const godNode = {
+      nodeId: godDocId,
+      kind: 'godDoc',
+      label: docType,
+      docType,
+      shardKeys: shardNodes.map((n) => n.nodeId).sort(),
+      projectId: slug,
+    };
+    const containsEdges = shardNodes.map((n) => ({
+      type: 'CONTAINS',
+      source: godDocId,
+      target: n.nodeId,
+      provenance: 'EXTRACTED',
+    }));
+    const ingestDoc = {
+      nodes: [godNode, ...shardNodes],
+      edges: [...(subsysEnv.edges || []), ...containsEdges],
+    };
+    const { nodeUpserts, edgeUpserts, skippedEdges } = await upsertDocFacts(
+      session,
+      slug,
+      ingestDoc,
+      today,
+    );
+    if (skippedEdges.length > 0) {
+      log(`document-center: ${skippedEdges.length} edges/nodes skipped (unresolved or not allowlisted)`);
+    }
+
+    // 2) docShard GOVERNS its member code nodes (touchPointToNodeId / glob-intersect).
+    let governsEdges = 0;
+    const ambiguous = [...(subsysEnv.ambiguous || [])];
+    for (const shard of shardNodes) {
+      for (const member of shard.members || []) {
+        const { matched, ambiguous: amb } = resolveGovernsTargets(member, codeNodeIds);
+        ambiguous.push(...amb);
+        for (const target of matched) {
+          await session.run(
+            `MATCH (a:Node {nodeId: $s}) MATCH (b:Node {nodeId: $t})
+             MERGE (a)-[r:GOVERNS]->(b) SET r.updated = $today, r.provenance = 'EXTRACTED'`,
+            { s: shard.nodeId, t: target, today },
+          );
+          governsEdges++;
+        }
+      }
+    }
+
+    // 3) PROPOSES: each concept document → the godDoc (intention edge).
+    let proposesEdges = 0;
+    for (const doc of conceptDocs) {
+      // The concept document node may not be ingested in this session (doc-extract
+      // runs its own ingest elsewhere); MERGE the source node defensively so the
+      // intention edge always forms, then the edge.
+      await session.run(
+        `MERGE (a:Node {nodeId: $s})
+           ON CREATE SET a.kind = $kind, a.projectId = $projectId, a.label = $label,
+                         a.docType = $docType, a.status = 'active', a.updated = $today
+         WITH a
+         MATCH (b:Node {nodeId: $t})
+         MERGE (a)-[r:PROPOSES]->(b) SET r.updated = $today, r.provenance = 'EXTRACTED'`,
+        {
+          s: doc.nodeId,
+          t: godDocId,
+          kind: 'document',
+          projectId: slug,
+          label: doc.label ?? doc.nodeId,
+          docType: doc.docType ?? null,
+          today,
+        },
+      );
+      proposesEdges++;
+    }
+
+    // 4) Prune-on-tombstone: docShards no longer produced by the current extract.
+    const liveShardKeys = new Set(shardNodes.map((n) => n.nodeId));
+    const existing = await session.run(
+      `MATCH (n:Node {projectId: $projectId, kind: 'docShard'})
+       WHERE coalesce(n.status,'active') <> 'pruned'
+       RETURN n.nodeId AS id`,
+      { projectId: slug },
+    );
+    let prunedShards = 0;
+    for (const rec of existing.records) {
+      const id = rec.get('id');
+      if (liveShardKeys.has(id)) continue;
+      // Vanished module boundary — tombstone it and drop its outgoing GOVERNS/
+      // CONTAINS/DEPENDS_ON edges so edges to deleted shards never accumulate.
+      await session.run(
+        `MATCH (n:Node {nodeId: $id}) SET n.status = 'pruned', n.updated = $today
+         WITH n OPTIONAL MATCH (n)-[r:GOVERNS|DEPENDS_ON]->() DELETE r`,
+        { id, today },
+      );
+      await session.run(
+        `MATCH (g:Node)-[r:CONTAINS]->(n:Node {nodeId: $id}) DELETE r`,
+        { id },
+      );
+      prunedShards++;
+    }
+
+    // Write a per-scan summary report next to the other graph reports.
+    const graphDir = join(config.knowledgeDir, '_graph');
+    await mkdir(graphDir, { recursive: true });
+    const reportPath = join(graphDir, 'documents.json');
+    const tmp = reportPath + '.tmp';
+    await writeFile(
+      tmp,
+      JSON.stringify(
+        {
+          projectId: slug,
+          generatedAt: new Date().toISOString(),
+          godDoc: godDocId,
+          shardCount: shardNodes.length,
+          nodeUpserts,
+          dependsEdges: edgeUpserts - containsEdges.length,
+          containsEdges: containsEdges.length,
+          governsEdges,
+          proposesEdges,
+          prunedShards,
+          cycles: subsysEnv.cycles || [],
+          ambiguous,
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+    await rename(tmp, reportPath);
+
+    log(
+      `Document center: ${shardNodes.length} shard(s), ${governsEdges} GOVERNS, ` +
+        `${proposesEdges} PROPOSES, ${prunedShards} pruned, ${ambiguous.length} ambiguous` +
+        ((subsysEnv.cycles || []).length ? `, ${subsysEnv.cycles.length} dep-cycle(s) reported` : ''),
+    );
+  } catch (err) {
+    // Non-blocking like the snapshot/analytics steps — a missing Memgraph or a
+    // query error must not fail the sync; real extractor bugs surface via orphans.
+    logError(`document-center pass failed (non-blocking): ${err.message}`);
   } finally {
     await session.close();
     await driver.close();

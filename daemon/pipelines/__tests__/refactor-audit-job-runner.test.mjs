@@ -137,9 +137,14 @@ describe('runRefactorAuditJob — lifecycle', () => {
       onChunk('stdout', '▶ node hotspot-detect.mjs out\n');
       return { code: 0 };
     });
+    const sampleHotspots = [
+      { kind: 'god-object', score: 90, severity: 'critical', title: 'X', files: ['a.ts'], evidence: {}, suggestedAction: 'split' },
+      { kind: 'dead-code', score: 30, severity: 'medium', title: 'Y', files: ['b.ts'], evidence: {}, suggestedAction: 'delete' },
+    ];
     const readArtifacts = vi.fn(async () => ({
       hotspotCount: 4,
       counts: { 'god-object': 1, 'design-system-consolidation': 1, 'duplicate-subsystem': 1, 'dead-code': 1 },
+      hotspots: sampleHotspots,
       reportPath: '/home/ubuntu/projects/applicator/graphify-out/REPORT.md',
     }));
 
@@ -147,6 +152,7 @@ describe('runRefactorAuditJob — lifecycle', () => {
 
     expect(res.ok).toBe(true);
     expect(res.hotspotCount).toBe(4);
+    expect(res.hotspots).toEqual(sampleHotspots); // full array travels on the summary
     expect(readArtifacts).toHaveBeenCalledOnce();
 
     const types = events.map((e) => e.eventType);

@@ -217,9 +217,12 @@ export async function runRefactorAuditJob(job, deps) {
 
   const hotspotCount = artifacts?.hotspotCount ?? 0;
   const counts = artifacts?.counts ?? {};
+  const hotspots = Array.isArray(artifacts?.hotspots) ? artifacts.hotspots : [];
   const reportPath = artifacts?.reportPath ?? null;
 
+  // The completed EVENT stays lean (counts only — events have a 7-day TTL and a
+  // size budget); the full array travels on the durable job-row summary.
   await emit('assess.completed', { hotspotCount, counts, reportPath });
 
-  return { ok: true, status: 'completed', hotspotCount, counts, reportPath };
+  return { ok: true, status: 'completed', hotspotCount, counts, hotspots, reportPath };
 }

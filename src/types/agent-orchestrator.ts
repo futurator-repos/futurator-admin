@@ -1,3 +1,5 @@
+import type { AuditHotspot, HotspotKind } from './refactor-audit';
+
 // ── Job status ──
 //
 // Pipeline v1 (Story 1.1) extends the enum with NEEDS_ATTENTION,
@@ -204,9 +206,11 @@ export interface AgentJob {
    */
   refactorAuditSummary?: {
     hotspotCount: number;
-    counts: Record<string, number>;
+    counts: Partial<Record<HotspotKind, number>>;
+    /** Full ranked hotspot list (MVP transport — see backend mirror). */
+    hotspots?: AuditHotspot[];
     auditId?: string;
-    reportPath: string;
+    reportPath: string | null;
   };
 }
 

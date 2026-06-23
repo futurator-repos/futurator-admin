@@ -7,6 +7,22 @@
 **Scope:** the **Concept** (planning) stage only — everything between user `intent` and the **Start development** button. Developing / QA / Deploy stages are unchanged except where they _consume_ the enriched plan (§6).
 **Sister doc:** `vqa-qa-review-redesign.md` (VQA v3) — meets this design **at the acceptance criterion**; coordination resolved in its §9. The AC's BDD triple is the input to VQA v3's probe compiler.
 
+> **[QAreview-agentic · 2026-06-23] Coordination — the QA executor + enforcement is now BUILT & DEPLOYED.**
+> The pamcan6 audit drove `qa-l2-agentic-enhancement-plan.md` (Phases 0–3, live on
+> `origin/main` @ `8a4c277`). Two things are now needed FROM this Concept stage to make
+> agentic L2 autonomous (full contract in that plan's **§8**):
+>
+> 1. **PM must emit `verify` intent on every AC** (`AcceptanceCriterion.verify` — already in
+>    the type). Plans currently ship without it, so the QA classifier's oracle-routing
+>    (`deriveLevelFromVerify`/`resolvedLevel`) stays dormant. Highest-leverage upstream change.
+> 2. **The QA-AUTHOR step must author the probe flow** (`force`/`waitForEvent`/`repeat`/
+>    `assert`) for `behavior`/`state` ACs at story-dev start. The deployed Phase-0 gate already
+>    BLOCKS such an AC that arrives without a flow (`CONTRACT_INCOMPLETE`), so the loop closes
+>    deterministically once authoring emits flows.
+>
+> Everything the probe needs is live: the full agentic grammar, the drivable
+> `window.__harness` seam (new apps), event-waits, force-state, and the structural gates.
+
 > **Changelog v0.5 → v0.6** (2026-06-16, six-adversary stress test — see §13 W-list):
 >
 > - **7 BLOCKERs / 5 SHOULD-FIX surfaced (§13).** Design is directionally sound; the gaps are "the doc assumed a primitive the codebase lacks" + two factual errors, now corrected inline.

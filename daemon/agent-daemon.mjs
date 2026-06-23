@@ -7097,9 +7097,14 @@ async function executeRefactorAuditJob(job) {
     const outDir = pathJoin(repo, 'graphify-out');
     const hs = JSON.parse(readFileSync(pathJoin(outDir, 'hotspots.json'), 'utf8'));
     const reportPath = pathJoin(outDir, 'REPORT.md');
+    const hotspots = Array.isArray(hs.hotspots) ? hs.hotspots : [];
     return {
-      hotspotCount: Array.isArray(hs.hotspots) ? hs.hotspots.length : 0,
+      hotspotCount: hotspots.length,
       counts: hs.counts && typeof hs.counts === 'object' ? hs.counts : {},
+      // MVP transport — the full array rides the no-TTL job row so the
+      // Lambda-served dashboard can render it (the EC2 disk is unreadable to
+      // the API). ~27KB on applicator; well under the 400KB DDB item limit.
+      hotspots,
       reportPath: existsSync(reportPath) ? reportPath : null,
     };
   }
@@ -7127,6 +7132,7 @@ async function executeRefactorAuditJob(job) {
         refactorAuditSummary: {
           hotspotCount: result.hotspotCount ?? 0,
           counts: result.counts ?? {},
+          hotspots: result.hotspots ?? [],
           reportPath: result.reportPath ?? null,
         },
       });
