@@ -1,0 +1,225 @@
+/**
+ * refactor-audit-job-runner.mjs — Refactoring Assessment Module (Epic B2).
+ *
+ * Daemon-side runner for a PENDING `jobType: 'refactor-audit'` row. UNLIKE the
+ * reflector / scorecard-assess runners, this is NOT an agent step — the recon
+ * stage is DETERMINISTIC and spends ~0 LLM tokens. The runner orchestrates a
+ * plain `recon.mjs` Node child:
+ *
+ *   1. Validate the job-row shape (validateRefactorAuditJob).
+ *   2. Emit `assess.started`.
+ *   3. Run `recon.mjs` (injected `deps.runRecon`) streaming chunks → the runner
+ *      detects stage transitions from recon's `▶ <cmd>` markers and emits
+ *      `assess.step.started` / `assess.step.output` per stage (graphify → knip →
+ *      alias-resolve → hotspot-detect).
+ *   4. On a non-zero exit, classify the failure (graphify-missing / degenerate-
+ *      build / recon-error) and emit `assess.failed` + an attention item.
+ *   5. On success, read `graphify-out/hotspots.json` + `REPORT.md` (injected
+ *      `deps.readArtifacts`), emit `assess.completed{ hotspotCount, counts,
+ *      reportPath }`, and return the counts for the job-row summary.
+ *
+ * The runner triggers nothing else — Create-plan (Epic D3) and the optional L3
+ * adjudication (Epic C) are separate, operator-gated steps.
+ *
+ * Test mode: every effect (`runRecon`, `readArtifacts`, `pushEvent`,
+ * `writeAttentionItem`) is injected, so unit tests exercise the routing +
+ * step-detection + failure classification without spawning a process or
+ * touching DDB. Production wiring lives in `agent-daemon.mjs::executeRefactorAuditJob`.
+ */
+
+/** The four deterministic recon stages, in order. */
+export const ASSESS_STEPS = ['graphify', 'knip', 'alias-resolve', 'hotspot-detect'];
+
+/** Cap a streamed chunk before it goes into a DDB event row. */
+const MAX_CHUNK = 4000;
+
+/**
+ * Validate the job-row shape. Mirrors validateScorecardAssessJob /
+ * validatePartyBootstrapJob so the daemon can reject malformed jobs with a
+ * clear reason.
+ *
+ * @param {object} job
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+export function validateRefactorAuditJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'refactor-audit') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.refactorAuditPayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'refactorAuditPayload-missing' };
+  if (typeof p.projectId !== 'string' || p.projectId.length === 0) {
+    return { ok: false, reason: 'projectId-missing' };
+  }
+  if (typeof p.projectPath !== 'string' || p.projectPath.length === 0) {
+    return { ok: false, reason: 'projectPath-missing' };
+  }
+  return { ok: true };
+}
+
+/**
+ * Detect which recon stage a streamed line belongs to, from recon.mjs's
+ * `▶ <cmd>` markers. Returns one of ASSESS_STEPS or null (not a stage line).
+ */
+export function detectStep(line) {
+  if (typeof line !== 'string') return null;
+  if (!line.includes('▶')) return null;
+  if (/graphify-build\.py/.test(line)) return 'graphify';
+  if (/\bknip\b/.test(line)) return 'knip';
+  if (/alias-resolve\.mjs/.test(line)) return 'alias-resolve';
+  if (/hotspot-detect\.mjs/.test(line)) return 'hotspot-detect';
+  return null;
+}
+
+/**
+ * Classify a recon exit code into a stable `assess.failed` reason.
+ *   2 → graphify-missing (recon.mjs process.exit(2))
+ *   3 → degenerate-build (graphify-build.py exit 3, re-raised by recon.mjs)
+ *   * → recon-error (any other thrown failure)
+ */
+export function classifyReconFailure(code) {
+  if (code === 2) return 'graphify-missing';
+  if (code === 3) return 'degenerate-build';
+  return 'recon-error';
+}
+
+/**
+ * Build the terminal event for the runner. Pure so tests can assert the shape.
+ */
+export function buildAssessEvent(kind, data = {}) {
+  if (kind === 'completed') {
+    return {
+      eventType: 'assess.completed',
+      payload: {
+        hotspotCount: data.hotspotCount ?? 0,
+        counts: data.counts ?? {},
+        reportPath: data.reportPath ?? null,
+        ...(data.auditId ? { auditId: data.auditId } : {}),
+      },
+    };
+  }
+  if (kind === 'failed') {
+    return {
+      eventType: 'assess.failed',
+      payload: { reason: data.reason ?? 'recon-error', message: String(data.message ?? '').slice(0, 1500) },
+    };
+  }
+  return { eventType: 'assess.started', payload: { projectId: data.projectId } };
+}
+
+/**
+ * @param {object} job  the AgentJob row (jobType 'refactor-audit')
+ * @param {{
+ *   paused?: boolean,
+ *   runRecon: (args: { projectPath: string, src?: string, skipGraphify?: boolean,
+ *                       onChunk: (stream: 'stdout'|'stderr', data: string) => void })
+ *             => Promise<{ code: number, killed?: boolean, stderrTail?: string }>,
+ *   readArtifacts: (args: { projectPath: string })
+ *             => Promise<{ hotspotCount: number, counts: Record<string, number>, reportPath: string }>,
+ *   pushEvent?: (jobId: string, stepId: string, agentId: string, eventType: string, data: object) => Promise<void>,
+ *   writeAttentionItem?: (item: object) => Promise<void>,
+ * }} deps
+ * @returns {Promise<{ ok: boolean, status?: string, reason?: string, error?: string,
+ *                     hotspotCount?: number, counts?: object, reportPath?: string }>}
+ */
+export async function runRefactorAuditJob(job, deps) {
+  const validation = validateRefactorAuditJob(job);
+  if (!validation.ok) return { ok: false, reason: `validation: ${validation.reason}` };
+
+  // Gate behind agent.paused like the other runners; the daemon re-enqueues.
+  if (deps?.paused === true) return { ok: true, status: 'gated', reason: 'agent.paused' };
+
+  const { jobId } = job;
+  const { projectId, projectPath, src, skipGraphify } = job.refactorAuditPayload;
+  const emit = async (eventType, data) => {
+    if (typeof deps.pushEvent === 'function') {
+      await deps.pushEvent(jobId, `assess.${eventType.split('.')[1] || 'step'}`, 'RECON', eventType, data);
+    }
+  };
+
+  await emit('assess.started', { projectId });
+
+  // Stream chunks → detect stage transitions → emit per-stage events.
+  let currentStep = null;
+  let buffered = '';
+  const onChunk = (stream, data) => {
+    const text = String(data ?? '');
+    // stage detection runs line-wise so a marker split across chunks is still caught.
+    buffered += text;
+    let nl;
+    while ((nl = buffered.indexOf('\n')) >= 0) {
+      const line = buffered.slice(0, nl);
+      buffered = buffered.slice(nl + 1);
+      const step = detectStep(line);
+      if (step && step !== currentStep) {
+        currentStep = step;
+        void emit('assess.step.started', { step });
+      }
+    }
+    void emit('assess.step.output', {
+      step: currentStep ?? 'recon',
+      stream,
+      data: text.slice(0, MAX_CHUNK),
+    });
+  };
+
+  let recon;
+  try {
+    recon = await deps.runRecon({ projectPath, src, skipGraphify, onChunk });
+  } catch (err) {
+    const message = String(err?.message || err);
+    await emit('assess.failed', { reason: 'recon-error', message });
+    await deps.writeAttentionItem?.({
+      projectId,
+      severity: 'medium',
+      category: 'other',
+      title: `Refactor audit recon threw for ${projectId}`,
+      body: message.slice(0, 1500),
+      dedupKey: `refactor-audit-recon-threw:${projectId}`,
+    });
+    return { ok: false, reason: 'recon-threw', error: message };
+  }
+
+  const code = recon?.code ?? 1;
+  if (code !== 0) {
+    const reason = classifyReconFailure(code);
+    const message = recon?.killed
+      ? 'recon child was killed (timeout)'
+      : recon?.stderrTail || `recon exited ${code}`;
+    await emit('assess.failed', { reason, message });
+    await deps.writeAttentionItem?.({
+      projectId,
+      severity: 'medium',
+      category: 'other',
+      title: `Refactor audit failed (${reason}) for ${projectId}`,
+      body: String(message).slice(0, 1500),
+      dedupKey: `refactor-audit-failed:${reason}:${projectId}`,
+    });
+    return { ok: false, reason, error: String(message) };
+  }
+
+  // Success → read the machine + human artifacts.
+  let artifacts;
+  try {
+    artifacts = await deps.readArtifacts({ projectPath });
+  } catch (err) {
+    const message = String(err?.message || err);
+    await emit('assess.failed', { reason: 'recon-error', message: `artifact read failed: ${message}` });
+    await deps.writeAttentionItem?.({
+      projectId,
+      severity: 'medium',
+      category: 'other',
+      title: `Refactor audit produced no readable hotspots.json for ${projectId}`,
+      body: message.slice(0, 1500),
+      dedupKey: `refactor-audit-artifacts:${projectId}`,
+    });
+    return { ok: false, reason: 'artifacts-unreadable', error: message };
+  }
+
+  const hotspotCount = artifacts?.hotspotCount ?? 0;
+  const counts = artifacts?.counts ?? {};
+  const reportPath = artifacts?.reportPath ?? null;
+
+  await emit('assess.completed', { hotspotCount, counts, reportPath });
+
+  return { ok: true, status: 'completed', hotspotCount, counts, reportPath };
+}

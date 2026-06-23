@@ -51,7 +51,15 @@ if (!skipGraphify) {
   if (!py) { console.error('! graphify not importable. Install: uv tool install graphifyy  (or pip install graphifyy)'); process.exit(2) }
   // fresh audit: remove a stale graph so graphify's overwrite-guard can't pin an old build
   try { fs.rmSync(path.join(outDir, 'graph.json')) } catch {}
-  run(py, [path.join(HERE, 'graphify-build.py'), repo, src, outDir]) // exits 3 on degenerate build → recon aborts
+  // graphify-build.py exits 3 on a degenerate build — re-raise that as recon's
+  // own exit 3 so the daemon can classify it as `degenerate-build` (FR22),
+  // distinct from exit 2 (graphify-missing) and exit 1 (other recon error).
+  try {
+    run(py, [path.join(HERE, 'graphify-build.py'), repo, src, outDir])
+  } catch (e) {
+    if (e.status === 3) { console.error('! graphify produced a degenerate build (too few nodes/edges)'); process.exit(3) }
+    throw e
+  }
 } else if (!fs.existsSync(path.join(outDir, 'graph.json'))) {
   console.error('! --skip-graphify but no graph.json present'); process.exit(2)
 }

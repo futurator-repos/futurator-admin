@@ -82,6 +82,7 @@ import {
   JOB_HANDLER_SKILL_INSTALL,
   JOB_HANDLER_REFLECTOR,
   JOB_HANDLER_SCORECARD_ASSESS,
+  JOB_HANDLER_REFACTOR_AUDIT,
 } from './pipelines/job-router.mjs';
 import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
 import { runPartyBootstrap } from './pipelines/party-bootstrap.mjs';
@@ -201,6 +202,8 @@ import { runReflectorJob } from './pipelines/reflector-job-runner.mjs';
 // Plan Retrospect — The Assessor job runner + daemon-side scorecard store.
 import { runScorecardAssessJob } from './pipelines/scorecard-assess-job-runner.mjs';
 import { getStoredStageRow, putAssessorSlices } from './lib/scorecard-store.mjs';
+// Refactoring Assessment Module (Epic B2) — deterministic recon runner.
+import { runRefactorAuditJob } from './pipelines/refactor-audit-job-runner.mjs';
 // Epic 4 (2026-05-20) — track Skill tool_use activations into
 // .context/loaded-skills.json so the per-story commit's Skills-Used
 // trailer populates with real content.
@@ -6314,6 +6317,8 @@ async function runJobAsync(job) {
       await executeReflectorJob(job);
     } else if (handler === JOB_HANDLER_SCORECARD_ASSESS) {
       await executeScorecardAssessJob(job);
+    } else if (handler === JOB_HANDLER_REFACTOR_AUDIT) {
+      await executeRefactorAuditJob(job);
     } else {
       await executePipeline(job);
     }
@@ -6454,7 +6459,7 @@ function classifyAgentForSpend(job) {
   if (t.startsWith('party-')) return 'party';
   if (t === 'free-agent-session') return 'free-agent';
   if (t === 'app-bootstrap') return 'app-bootstrap';
-  if (t === 'wave-merge' || t === 'epic-dev' || t === 'skill-scout' || t === 'skill-install' || t === 'reflector' || t === 'scorecard-assess') {
+  if (t === 'wave-merge' || t === 'epic-dev' || t === 'skill-scout' || t === 'skill-install' || t === 'reflector' || t === 'scorecard-assess' || t === 'refactor-audit') {
     return 'pipeline-v2';
   }
   return 'other';
@@ -7013,6 +7018,132 @@ async function executeScorecardAssessJob(job) {
       errorMessage: err?.message || String(err),
     });
     log('error', `[${short}] assessor threw: ${err?.message || err}`);
+    throw err;
+  }
+}
+
+/**
+ * Refactoring Assessment Module (Epic B2) — daemon handler for a
+ * `jobType: 'refactor-audit'` row. Spawns `recon.mjs` as a PLAIN NODE CHILD
+ * (NOT spawnGateAgent — recon is deterministic and spends ~0 LLM tokens;
+ * routing it through the agent path would burn OAuth budget and trip the auth
+ * circuit-breaker). Streams stdout/stderr as `assess.*` events; on success
+ * reads `hotspots.json` + `REPORT.md` and writes the summary onto the job row.
+ * Report-only — it NEVER mutates the assessed code.
+ */
+async function executeRefactorAuditJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+  const p = job.refactorAuditPayload || {};
+  const projectPath = p.projectPath || job.workingDir;
+
+  log('info', `[${short}] Routing to refactor-audit (recon)`, {
+    projectId: p.projectId,
+    projectPath,
+  });
+
+  // FR17 — read-only safety: recon may only run inside the party projects root,
+  // and the clone must exist. Never let an audit escape to e.g. the homepage repo.
+  if (!projectPath || !projectPath.startsWith(PARTY_PROJECTS_ROOT) || !existsSync(projectPath)) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: `refactor-audit refused: projectPath '${projectPath}' is not an existing path under ${PARTY_PROJECTS_ROOT}`,
+    });
+    log('warn', `[${short}] refactor-audit refused unsafe projectPath: ${projectPath}`);
+    return;
+  }
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'refactor-audit',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  const reconPath = new URL('./scripts/refactor-recon/recon.mjs', import.meta.url).pathname;
+
+  // Spawn recon.mjs as a plain Node child (detached pgroup → killable on
+  // timeout via registerChild). Resolves with the exit code + a stderr tail.
+  async function runRecon({ projectPath: repo, src, skipGraphify, onChunk }) {
+    return await new Promise((resolve) => {
+      const args = [reconPath, repo];
+      if (src) args.push('--src', src);
+      if (skipGraphify) args.push('--skip-graphify');
+      const proc = spawn(process.execPath, args, {
+        cwd: repo,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, FORCE_COLOR: '0' },
+        detached: true,
+      });
+      registerChild(jobId, proc);
+      let stderrTail = '';
+      proc.stdout.on('data', (d) => onChunk('stdout', d.toString()));
+      proc.stderr.on('data', (d) => {
+        const s = d.toString();
+        stderrTail = (stderrTail + s).slice(-2000);
+        onChunk('stderr', s);
+      });
+      proc.on('error', (err) => {
+        unregisterChild(jobId, proc);
+        resolve({ code: 1, stderrTail: String(err?.message || err) });
+      });
+      proc.on('close', (code, signal) => {
+        unregisterChild(jobId, proc);
+        resolve({ code: code ?? 1, killed: signal != null, stderrTail });
+      });
+    });
+  }
+
+  function readArtifacts({ projectPath: repo }) {
+    const outDir = pathJoin(repo, 'graphify-out');
+    const hs = JSON.parse(readFileSync(pathJoin(outDir, 'hotspots.json'), 'utf8'));
+    const reportPath = pathJoin(outDir, 'REPORT.md');
+    return {
+      hotspotCount: Array.isArray(hs.hotspots) ? hs.hotspots.length : 0,
+      counts: hs.counts && typeof hs.counts === 'object' ? hs.counts : {},
+      reportPath: existsSync(reportPath) ? reportPath : null,
+    };
+  }
+
+  try {
+    const paused = await isAgentPausedCached();
+    const result = await runRefactorAuditJob(job, {
+      paused,
+      runRecon,
+      readArtifacts,
+      pushEvent,
+      writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
+    });
+
+    if (result.ok && result.status === 'gated') {
+      // Paused mid-flight — return to PENDING so the daemon re-picks it later.
+      await updateJobFields(jobId, { status: 'PENDING' });
+      log('info', `[${short}] refactor-audit gated (agent.paused) — re-queued`);
+      return;
+    }
+
+    if (result.ok) {
+      await updateJobFields(jobId, {
+        status: 'COMPLETED',
+        refactorAuditSummary: {
+          hotspotCount: result.hotspotCount ?? 0,
+          counts: result.counts ?? {},
+          reportPath: result.reportPath ?? null,
+        },
+      });
+      log('info', `[${short}] refactor-audit completed (hotspots=${result.hotspotCount ?? 0})`);
+    } else {
+      await updateJobFields(jobId, {
+        status: 'FAILED',
+        errorMessage: result.error || result.reason || 'unknown',
+      });
+      log('warn', `[${short}] refactor-audit failed: ${result.reason}`);
+    }
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] refactor-audit threw: ${err?.message || err}`);
     throw err;
   }
 }
