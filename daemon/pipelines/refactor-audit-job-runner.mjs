@@ -106,6 +106,90 @@ export function buildAssessEvent(kind, data = {}) {
   return { eventType: 'assess.started', payload: { projectId: data.projectId } };
 }
 
+// ── Epic C: optional L3 adjudication (the agentic stage after recon) ──
+// The daemon path uses a SELF-CONTAINED inline prompt (the .claude workflow +
+// version-adjudicator agent are the operator-invocable local equivalents, not
+// shipped to the EC2 box). A single agent reads the hotspots + code, adversarially
+// confirms/rejects each, and judges the confirmed set into a planOutputSchema plan.
+
+/** Build the inline L3 adjudication prompt. Pure. */
+export function buildL3Prompt(hotspots, topN = 40) {
+  const top = (hotspots || []).slice(0, topN);
+  return `You are the L3 refactoring adjudicator + judge. You are in a migrated brownfield repo;
+\`graphify-out/\` holds the deterministic recon artifacts. A detector flagged these ${top.length} hotspots:
+
+${JSON.stringify(top, null, 2)}
+
+For EACH hotspot, ADVERSARIALLY verify it from the actual code (Read/Grep/Glob the implicated files +
+their real importers; prefer graphify-out/graph.resolved.json + resolved-imports.json for trustworthy
+fan-in — raw graph in-degree is NOT reliable on alias-heavy code). The detector has known blind spots
+(unresolved @/ aliases, AST-blind JSX/instance dispatch, filename collisions that look like duplication).
+The canonical false-positive: a 'primitives' dir flagged as a duplicate design system was actually a
+separate CV-export rendering layer — REJECT findings you cannot prove from code. Default to skepticism.
+
+Then FUSE the CONFIRMED findings (exclude rejected ones) into a draft plan. Sequence every refactor as a
+Strangler-Fig: extract shared core → repoint dependents → delete old path (deletion dependsOn its
+extract/repoint). Add a characterization-net (Playwright) story BEFORE any deletion/repoint on a route
+lacking tests. touchPoints MUST be REAL existing relative paths (or <EPIC_WIDE>); never package.json/
+tsconfig/lockfiles/absolute paths. Each story ≥1 criterion; UI-bearing → ≥1 needsBrowser:true. name is
+kebab-case; description ≥20 chars; ids E1.., S1.. dependsOn earlier siblings only.
+
+End your reply with EXACTLY this block and nothing after:
+
+---L3---
+{
+  "verdicts": [{ "hotspotTitle": "...", "kind": "...", "verdict": "confirmed"|"rejected", "rationale": "...", "confidence": 0.0 }],
+  "plan": { "plan": { "name": "...", "description": "...", "epics": [ { "id": "E1", "title": "...", "goal": "...", "stories": [ { "id": "S1", "touchPoints": ["..."], "criteria": [ { "id": "AC1", "text": "...", "needsBrowser": false } ] } ] } ] } }
+}
+---END_L3---
+
+If every hotspot is rejected, emit "plan": null.`;
+}
+
+/** Parse the agent's ---L3--- block into { verdicts, confirmed, plan }. Pure. */
+export function parseL3Output(text) {
+  const out = { verdicts: [], confirmed: [], plan: null };
+  if (!text || typeof text !== 'string') return out;
+  const m = text.match(/---L3---\s*([\s\S]*?)\s*---END_L3---/);
+  const raw = m ? m[1] : text;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // tolerate a trailing-prose wrapper: grab the outermost {...}
+    const brace = raw.match(/\{[\s\S]*\}/);
+    if (!brace) return out;
+    try { parsed = JSON.parse(brace[0]); } catch { return out; }
+  }
+  out.verdicts = Array.isArray(parsed?.verdicts) ? parsed.verdicts : [];
+  out.confirmed = out.verdicts.filter((v) => v && v.verdict === 'confirmed');
+  out.plan = parsed?.plan ?? null;
+  return out;
+}
+
+/**
+ * Run the L3 adjudication stage. Spawns ONE agent (the LLM-spend path) via the
+ * injected runL3Agent, parses its output, and returns the structured result.
+ *
+ * @param {object} job
+ * @param {AuditHotspot[]} hotspots  the recon hotspots (from the job summary)
+ * @param {{ runL3Agent: (prompt: string) => Promise<{ output: string }>,
+ *           topN?: number, pushEvent?: Function }} deps
+ * @returns {Promise<{ ok: boolean, verdicts: object[], confirmed: object[], plan: any, error?: string }>}
+ */
+export async function runL3Adjudication(job, hotspots, deps) {
+  const topN = deps?.topN ?? job?.refactorAuditPayload?.topN ?? 40;
+  const prompt = buildL3Prompt(hotspots, topN);
+  let res;
+  try {
+    res = await deps.runL3Agent(prompt);
+  } catch (err) {
+    return { ok: false, verdicts: [], confirmed: [], plan: null, error: String(err?.message || err) };
+  }
+  const parsed = parseL3Output(res?.output || '');
+  return { ok: true, ...parsed };
+}
+
 /**
  * @param {object} job  the AgentJob row (jobType 'refactor-audit')
  * @param {{

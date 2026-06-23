@@ -16,6 +16,9 @@ import {
   buildAssessEvent,
   runRefactorAuditJob,
   ASSESS_STEPS,
+  buildL3Prompt,
+  parseL3Output,
+  runL3Adjudication,
 } from '../refactor-audit-job-runner.mjs';
 
 function auditJob(overrides = {}) {
@@ -195,5 +198,77 @@ describe('runRefactorAuditJob — lifecycle', () => {
     const res = await runRefactorAuditJob({ jobType: 'wrong' }, { runRecon: vi.fn() });
     expect(res.ok).toBe(false);
     expect(res.reason).toMatch(/^validation:/);
+  });
+});
+
+describe('L3 adjudication (Epic C)', () => {
+  const HS = [
+    { kind: 'god-object', title: 'God-object: X (44 methods)', files: ['a.ts'], severity: 'critical' },
+    { kind: 'dead-code', title: 'Dead files: 3', files: ['b.ts'], severity: 'medium' },
+  ];
+
+  it('buildL3Prompt embeds the hotspots, the adversarial guard, and the output markers', () => {
+    const p = buildL3Prompt(HS, 40);
+    expect(p).toMatch(/God-object: X/);
+    expect(p).toMatch(/REJECT findings you cannot prove/);
+    expect(p).toMatch(/primitives/); // the canonical false-positive guard
+    expect(p).toMatch(/---L3---/);
+    expect(p).toMatch(/Strangler-Fig/);
+  });
+
+  it('buildL3Prompt caps to topN', () => {
+    const many = Array.from({ length: 100 }, (_, i) => ({ kind: 'god-object', title: `H${i}`, files: [] }));
+    const p = buildL3Prompt(many, 5);
+    expect(p).toMatch(/these 5 hotspots/);
+  });
+
+  it('parseL3Output extracts verdicts + plan from the ---L3--- block', () => {
+    const text =
+      'some thinking...\n---L3---\n' +
+      JSON.stringify({
+        verdicts: [
+          { hotspotTitle: 'A', kind: 'god-object', verdict: 'confirmed', rationale: 'r' },
+          { hotspotTitle: 'B', kind: 'dead-code', verdict: 'rejected', rationale: 'name collision' },
+        ],
+        plan: { plan: { name: 'fix-x', description: 'd'.repeat(25), epics: [] } },
+      }) +
+      '\n---END_L3---\n';
+    const out = parseL3Output(text);
+    expect(out.verdicts).toHaveLength(2);
+    expect(out.confirmed).toHaveLength(1);
+    expect(out.confirmed[0].hotspotTitle).toBe('A');
+    expect(out.plan.plan.name).toBe('fix-x');
+  });
+
+  it('parseL3Output tolerates a bare object with no markers', () => {
+    const out = parseL3Output(JSON.stringify({ verdicts: [{ verdict: 'confirmed', kind: 'x', hotspotTitle: 't', rationale: 'r' }], plan: null }));
+    expect(out.confirmed).toHaveLength(1);
+    expect(out.plan).toBeNull();
+  });
+
+  it('parseL3Output returns empty on garbage', () => {
+    expect(parseL3Output('no json here')).toEqual({ verdicts: [], confirmed: [], plan: null });
+    expect(parseL3Output('')).toEqual({ verdicts: [], confirmed: [], plan: null });
+  });
+
+  it('runL3Adjudication spawns the agent and returns parsed result', async () => {
+    const runL3Agent = vi.fn(async () => ({
+      output: '---L3---\n' + JSON.stringify({
+        verdicts: [{ hotspotTitle: 'A', kind: 'god-object', verdict: 'confirmed', rationale: 'r' }],
+        plan: { plan: { name: 'fix', description: 'x'.repeat(25), epics: [] } },
+      }) + '\n---END_L3---',
+    }));
+    const res = await runL3Adjudication(auditJob(), HS, { runL3Agent });
+    expect(res.ok).toBe(true);
+    expect(res.confirmed).toHaveLength(1);
+    expect(res.plan).toBeTruthy();
+    expect(runL3Agent).toHaveBeenCalledOnce();
+  });
+
+  it('runL3Adjudication fails cleanly when the agent throws', async () => {
+    const runL3Agent = vi.fn(async () => { throw new Error('spawn died'); });
+    const res = await runL3Adjudication(auditJob(), HS, { runL3Agent });
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/spawn died/);
   });
 });
