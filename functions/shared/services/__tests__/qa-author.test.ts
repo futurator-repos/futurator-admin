@@ -120,7 +120,7 @@ describe('authorProbeFlow — QAA-1 flow synthesis', () => {
     });
   });
 
-  it('uses a key-press reach when there is no status transition to force', () => {
+  it('uses a key-press reach, prefixed with a start reach on a start-gated app', () => {
     const r = authorProbeFlow(
       vt({}),
       ac({
@@ -131,10 +131,64 @@ describe('authorProbeFlow — QAA-1 flow synthesis', () => {
       GAME_SEAM,
     );
     expect(r.action).toBe('authored');
-    expect(r.test.flow![0]).toEqual({ action: 'press', key: 'Space' });
+    // Gap 1 — start-gated: press ENTER to leave the start screen first…
+    expect(r.test.flow![0]).toEqual({ action: 'press', key: 'Enter' });
+    // …then the AC's own key-press reach, and a seam assert.
+    expect(r.test.flow!.some((s) => s.action === 'press' && s.key === 'Space')).toBe(true);
     expect(r.test.flow!.some((s) => s.action === 'assert' && s.expr === 'snapshot.score')).toBe(
       true,
     );
+  });
+
+  it('does NOT prefix a start reach when the reach forces state directly', () => {
+    const r = authorProbeFlow(
+      vt({ level: 'L2' }),
+      ac({ verify: 'behavior', thenObservable: 'the game status becomes over' }),
+      GAME_SEAM,
+    );
+    expect(r.test.flow![0]).toEqual({ action: 'force', status: 'over' });
+  });
+
+  it('Gap 2 — authors an L2-VISION probe (reach → screenshot, no assert) for a visual observable', () => {
+    const r = authorProbeFlow(
+      vt({ level: 'L2' }),
+      ac({
+        verify: 'behavior',
+        when: 'clicking the Frightened toggle button',
+        thenObservable: 'all four ghosts turn into dark-blue rounded blobs with white dot eyes',
+      }),
+      GAME_SEAM,
+    );
+    expect(r.action).toBe('authored');
+    expect(r.note).toMatch(/vision/i);
+    // start reach (press Enter) then the click on the named control, then a screenshot…
+    expect(r.test.flow!.some((s) => s.action === 'click' && s.selector === 'text=Frightened')).toBe(
+      true,
+    );
+    expect(r.test.flow!.some((s) => s.action === 'screenshot')).toBe(true);
+    // …and NO assert (the observable is visual, not a seam state).
+    expect(r.test.flow!.some((s) => s.action === 'assert')).toBe(false);
+  });
+
+  it('Gap 1 — authors a start-reach for a start-gated appearance AC (gameplay content)', () => {
+    const r = authorProbeFlow(
+      vt({}),
+      ac({ verify: 'appearance', text: 'at load the maze shows blue wall tiles' }),
+      GAME_SEAM,
+    );
+    expect(r.action).toBe('authored');
+    expect(r.test.level).toBe('L1'); // still the cheap idle judge, just on the started frame
+    expect(r.test.flow![0]).toEqual({ action: 'press', key: 'Enter' });
+    expect(r.test.flow!.some((s) => s.action === 'screenshot')).toBe(true);
+  });
+
+  it('Gap 1 — leaves a start-SCREEN appearance AC idle-judged (no start reach)', () => {
+    const r = authorProbeFlow(
+      vt({}),
+      ac({ verify: 'appearance', text: 'at load the title screen shows "Press ENTER to Start"' }),
+      GAME_SEAM,
+    );
+    expect(r.action).toBe('skipped');
   });
 
   it('keeps a test that already carries an oracle (DEV did its job)', () => {
@@ -164,8 +218,14 @@ describe('authorProbeFlow — QAA-1 flow synthesis', () => {
     expect(r.test.flow).toBeUndefined();
   });
 
-  it('skips non-state/behavior ACs', () => {
-    expect(authorProbeFlow(vt({}), ac({ verify: 'appearance' }), GAME_SEAM).action).toBe('skipped');
+  it('skips build ACs, and appearance on a NON-start-gated app', () => {
+    // A non-game seam (no idle/running status enum) is not start-gated → an
+    // appearance AC is judged on the idle frame as-is (no authored flow).
+    const NON_GATED: SeamContract = { snapshotKeys: ['route', 'score'], seamHook: 'useAppHarness' };
+    expect(
+      authorProbeFlow(vt({}), ac({ verify: 'appearance', text: 'at load a card shows' }), NON_GATED)
+        .action,
+    ).toBe('skipped');
     expect(authorProbeFlow(vt({}), ac({ verify: 'build' }), GAME_SEAM).action).toBe('skipped');
   });
 
@@ -183,12 +243,17 @@ describe('authorProbeFlows — plan-wide pass', () => {
     ];
     const criteriaByRef = new Map<string, AcceptanceCriterion>([
       ['AC-1', ac({ id: 'AC-1', verify: 'behavior', thenObservable: 'status becomes over' })],
-      ['AC-2', ac({ id: 'AC-2', verify: 'appearance' })],
+      // a start-SCREEN appearance AC stays idle-judged (untouched)
+      [
+        'AC-2',
+        ac({ id: 'AC-2', verify: 'appearance', text: 'the title screen shows Press ENTER' }),
+      ],
+      // a state AC with no mappable observable AND no derivable reach → unmappable
       ['AC-3', ac({ id: 'AC-3', verify: 'state', thenObservable: 'unmappable foo bar' })],
     ]);
     const { tests: out, log } = authorProbeFlows({ tests, criteriaByRef, seam: GAME_SEAM });
     expect(out[0].flow?.length).toBeGreaterThan(0);
-    expect(out[1].flow).toBeUndefined(); // appearance untouched
+    expect(out[1].flow).toBeUndefined(); // start-screen appearance untouched
     expect(out[2].flow).toBeUndefined(); // unmappable left flow-less
     expect(log.map((l) => `${l.testId}:${l.action}`)).toEqual(['VT-1:authored', 'VT-3:unmappable']);
   });

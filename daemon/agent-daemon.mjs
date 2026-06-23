@@ -855,7 +855,6 @@ async function runAgentWithAuthRecovery(jobId, stepId, agentId, prompt, opts = {
       }
 
       if (isAuthErr && attempt < AUTH_RECOVERY_BACKOFF_MS.length) {
-        lastErr = err;
         const backoffMs = AUTH_RECOVERY_BACKOFF_MS[attempt];
         attempt += 1;
         log(
@@ -898,9 +897,7 @@ async function runAgentWithAuthRecovery(jobId, stepId, agentId, prompt, opts = {
       throw err;
     }
   }
-  // The while(true) loop only exits via `return` (success) or `throw` above.
-  // `lastErr` is retained only for clarity in logs during transient retries.
-  void lastErr;
+  // (unreachable — the while(true) loop only exits via `return` or `throw`)
 }
 
 // ── Run a single Claude CLI agent ──
