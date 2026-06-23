@@ -176,6 +176,9 @@ export type ProbeStepAction =
   /** Repeat an inner action until a `window.__harness` condition holds or budget
    *  elapses (e.g. press a key until status===over). The genuine reach-to-event. */
   | 'repeat'
+  /** TEST-ONLY: jump the game to a terminal state via window.__harness.forceStatus
+   *  (Phase 2b) — reach gameover/win deterministically without playing to it. */
+  | 'force'
   // ── H10 coverage-class grammar gaps ──
   | 'viewport'
   | 'upload'
@@ -236,6 +239,8 @@ export interface VisualTestFlowStep {
   budgetMs?: number;
   /** For `repeat` — delay between iterations (ms). */
   intervalMs?: number;
+  /** For `force` — the status to jump to (e.g. 'over', 'win'). */
+  status?: string;
 
   // ── H10 coverage-class grammar gaps ──
   /** For `viewport` — width/height. */

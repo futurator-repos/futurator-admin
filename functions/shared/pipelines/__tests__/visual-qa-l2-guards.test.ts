@@ -168,4 +168,10 @@ describe('qa-prepare runFlow — Phase1 seam/assert hardening', () => {
     expect(prepCmd).toContain("step.action === 'repeat'");
     expect(prepCmd).toContain('REPEAT_UNMET');
   });
+
+  it('Phase2b: implements force (jump to a terminal state via the seam command)', () => {
+    expect(prepCmd).toContain("step.action === 'force'");
+    expect(prepCmd).toContain('forceStatus');
+    expect(prepCmd).toContain('FORCE_UNAVAILABLE');
+  });
 });

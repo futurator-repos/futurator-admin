@@ -513,7 +513,16 @@ ${browserAcExamples.map((e) => `    - "${e}"`).join('\n')}
     meta.testHarness
       ? `,
   or a deterministic \`{ "action": "assert", "expr": "snapshot.<key>", "op": "eq", "expected": "<value>" }\`
-  reading \`${meta.testHarness.globalKey}\``
+  reading \`${meta.testHarness.globalKey}\`.
+  For a state that needs DRIVING to a terminal event (e.g. a game-over / win
+  screen, a countdown finishing), use the agentic verbs against the seam — do
+  NOT mark it idle-visible:
+    • reach by FORCING the state deterministically:
+      \`flow: [{ "action": "force", "status": "over" }, { "action": "waitForEvent", "expr": "snapshot.status", "op": "eq", "expected": "over" }, { "action": "screenshot" }, { "action": "assert", "expr": "snapshot.status", "op": "eq", "expected": "over" }]\`
+    • or reach by PLAYING until the event fires:
+      \`flow: [{ "action": "press", "key": "Enter" }, { "action": "repeat", "step": { "action": "press", "key": "ArrowLeft" }, "untilExpr": "snapshot.status", "untilOp": "eq", "untilExpected": "over", "maxIterations": 200, "budgetMs": 30000 }, { "action": "screenshot" }]\`
+  A test marked level L2 MUST carry such a flow (a flowless L2 is rejected as
+  CONTRACT_INCOMPLETE and blocks the gate)`
       : ''
   }. Plain "what the idle frame shows" ACs stay probe-free.
 - Titles are action-oriented ("Implement useGameLoop hook", not "The

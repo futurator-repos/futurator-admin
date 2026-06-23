@@ -51,6 +51,11 @@ describe('probeStepSchema (VQA v3 — E2.1)', () => {
     expect(result.success).toBe(true);
   });
 
+  it('Phase2b — accepts a force step (jump to a terminal status)', () => {
+    const result = probeStepSchema.safeParse({ action: 'force', status: 'win' });
+    expect(result.success).toBe(true);
+  });
+
   it('Phase2 — rejects a repeat inner step outside the simple-action set', () => {
     const result = probeStepSchema.safeParse({
       action: 'repeat',

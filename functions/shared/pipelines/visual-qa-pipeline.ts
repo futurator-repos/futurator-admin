@@ -621,7 +621,7 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           // never becomes ready (e.g. a static-preview mount, not the live game —
           // the pamcan6 root cause), record SEAM_ABSENT so the judge blocks
           // structurally instead of asserting against undefined (a silent mismatch).
-          `    const needsSeam = (t.flow || []).some(s => s.action === 'assert' || s.action === 'waitForEvent' || s.action === 'repeat');`,
+          `    const needsSeam = (t.flow || []).some(s => s.action === 'assert' || s.action === 'waitForEvent' || s.action === 'repeat' || s.action === 'force');`,
           `    if (needsSeam) {`,
           `      try { await page.waitForFunction('window.__harness && window.__harness.ready === true', { timeout: 5000 }); }`,
           `      catch (e) { stepLog.push({ action: 'seam-ready', ok: false, error: 'SEAM_ABSENT: window.__harness never became ready within 5s — the verifiability seam is not mounted (feature likely a static preview, not the live game)' }); }`,
@@ -701,6 +701,13 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `            await page.waitForTimeout(Math.min(step.intervalMs || 80, 2000));`,
           `          }`,
           `          if (!met) { throw new Error('REPEAT_UNMET: until ' + (step.untilExpr || '') + ' ' + (step.untilOp || 'eq') + ' ' + JSON.stringify(step.untilExpected) + ' not satisfied within ' + maxIter + ' iters / ' + budgetMs + 'ms'); }`,
+          `        }`,
+          // VQA v3 Phase 2b — force: jump the game to a terminal state via the
+          // test-only seam command (reach gameover/win deterministically). No-ops
+          // (then a downstream assert fails loudly) if the app's seam lacks it.
+          `        else if (step.action === 'force') {`,
+          `          const forced = await page.evaluate((s) => { const h = window.__harness; if (h && typeof h.forceStatus === 'function') { h.forceStatus(s); return true; } return false; }, step.status || 'over');`,
+          `          if (!forced) { throw new Error('FORCE_UNAVAILABLE: window.__harness.forceStatus is not exposed (seam is observe-only or unmounted) — cannot reach ' + (step.status || 'over')); }`,
           `        }`,
           `        stepLog.push({ action: step.action, ok: true });`,
           `      } catch (stepErr) {`,
