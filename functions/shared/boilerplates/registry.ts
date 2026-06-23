@@ -1760,6 +1760,9 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     testHarness: {
       globalKey: 'window.__harness',
       readySignal: 'ready',
+      // DV-2 — a live game feature MUST import+call this hook to publish the seam;
+      // a static preview never does (the SEAM_NEVER_PUBLISHED static catch).
+      seamHook: 'useGameStateMachine',
       // jsonPath form (`snapshot.<key>`) derived from the shared shape const so
       // the registry, the `__harness.schema.json` file, and the probe `assert`
       // citations never diverge.
@@ -1831,6 +1834,9 @@ export const BOILERPLATE_REGISTRY: Record<BoilerplateType, BoilerplateMetadata> 
     testHarness: {
       globalKey: 'window.__harness',
       readySignal: 'ready',
+      // DV-2 — the generic app-state seam publisher; a real route/feature calls
+      // it, a static stub does not (the SEAM_NEVER_PUBLISHED static catch).
+      seamHook: 'useAppHarness',
       snapshotShape: Object.fromEntries(
         Object.entries(DASHBOARD_SNAPSHOT_SHAPE).map(([k, v]) => [`snapshot.${k}`, v]),
       ),

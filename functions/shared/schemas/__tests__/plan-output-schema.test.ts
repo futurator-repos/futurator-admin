@@ -6,6 +6,8 @@ import {
   verifyIntentSchema,
   manualReasonSchema,
   validateReferenceSections,
+  validateVerifyCoverage,
+  planOutputSchema,
   type PlanOutput,
 } from '../plan-output-schema';
 import { generateSectionManifest } from '../../concept/section-manifest';
@@ -256,5 +258,77 @@ describe('validateReferenceSections (Concept v2 — E4.2)', () => {
   it("skips 'harness' references (resolved at the gate, not here)", () => {
     const errs = validateReferenceSections(planWith('snapshot.gameState', 'harness'), {});
     expect(errs).toEqual([]);
+  });
+});
+
+/**
+ * CS-1 (Concept v2.1 / agentic-l2-autonomy-backlog §2) — `verify` is MANDATORY
+ * on every browser-bearing AC, enforced at the gate (not in the always-on
+ * schema, so legacy round-trips still parse). Plus the schema coherence rule
+ * verify:'build' ⇒ not needsBrowser.
+ */
+describe('validateVerifyCoverage (CS-1 — mandatory verify on browser ACs)', () => {
+  function planWithAc(ac: Record<string, unknown>): PlanOutput {
+    return {
+      plan: {
+        name: 'demo-plan',
+        description: 'a plan long enough to satisfy the schema minimum.',
+        epics: [
+          {
+            id: 'E1',
+            title: 'Epic one',
+            goal: 'a goal long enough to pass the schema.',
+            dependsOn: [],
+            stories: [
+              {
+                id: 'S1',
+                title: 'Story one',
+                description: 'a description long enough.',
+                dependsOn: [],
+                touchPoints: ['src/a.ts'],
+                criteria: [{ id: 'AC-1', text: 'a criterion', ...ac }],
+              },
+            ],
+          },
+        ],
+      },
+    } as unknown as PlanOutput;
+  }
+
+  it('rejects a needsBrowser AC with no verify', () => {
+    const errs = validateVerifyCoverage(planWithAc({ needsBrowser: true }));
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toContain('AC-1');
+    expect(errs[0]).toContain('verify');
+  });
+
+  it('accepts a needsBrowser AC that carries a verify intent', () => {
+    expect(validateVerifyCoverage(planWithAc({ needsBrowser: true, verify: 'behavior' }))).toEqual(
+      [],
+    );
+  });
+
+  it('does not require verify on a non-browser AC', () => {
+    expect(validateVerifyCoverage(planWithAc({ needsBrowser: false }))).toEqual([]);
+  });
+
+  it("schema rejects verify:'build' with needsBrowser:true (coherence)", () => {
+    const r = acceptanceCriterionSchema.safeParse({
+      id: 'AC-1',
+      text: 'a build check',
+      needsBrowser: true,
+      verify: 'build',
+    });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.path.includes('needsBrowser'))).toBe(true);
+    }
+  });
+
+  it('legacy plan (browser AC, no verify) still PARSES through planOutputSchema', () => {
+    // The mandatory-verify rule must NOT live in the always-on schema, or the
+    // export round-trip of pre-Concept-v2 plans breaks.
+    const r = planOutputSchema.safeParse(planWithAc({ needsBrowser: true }));
+    expect(r.success).toBe(true);
   });
 });

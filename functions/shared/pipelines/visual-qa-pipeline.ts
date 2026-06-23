@@ -256,6 +256,14 @@ export interface QaPipelineInputs {
    * check. Defaults false (no seam → vision tiers, as before).
    */
   hasSeam?: boolean;
+  /**
+   * DV-2 (agentic-l2-autonomy-backlog §4) — the scaffold hook a feature must
+   * import to publish `window.__harness`. When set, qa-prepare statically greps
+   * the app `src/` for it; an un-imported hook on a seam-asserting plan blocks
+   * as `SEAM_NEVER_PUBLISHED` before any screenshot (cheaper than runtime
+   * `SEAM_ABSENT`). Comes from `BOILERPLATE_REGISTRY[type].testHarness.seamHook`.
+   */
+  seamHook?: string;
 }
 
 /**
@@ -466,6 +474,20 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
   const l1Json = JSON.stringify(l1Tests);
   const l2Json = JSON.stringify(l2Tests);
 
+  // DV-2 (agentic-l2-autonomy-backlog §4) — static SEAM_NEVER_PUBLISHED catch.
+  // A seam-bearing boilerplate ships the publishing hook in its scaffold, but a
+  // static-preview mount never imports it, so `window.__harness` never publishes
+  // and every seam-asserting probe burns a 5s runtime SEAM_ABSENT timeout. When
+  // (a) the boilerplate declares a `seamHook` AND (b) the plan has ≥1 probe that
+  // needs the seam, qa-prepare greps the app `src/` for an import of that hook
+  // (outside its own definition file) and writes `seam-wiring.json`; qa-judge-l2
+  // converts an un-imported seam into a precise pre-screenshot block.
+  const SEAM_FLOW_ACTIONS = new Set(['assert', 'waitForEvent', 'repeat', 'force']);
+  const seamHook = inputs.seamHook;
+  const seamExpected =
+    !!seamHook &&
+    allVisualTests.some((t) => (t.flow ?? []).some((s) => SEAM_FLOW_ACTIONS.has(s.action)));
+
   const cdnPrefix = `https://futurator.ai/${snapshotPrefix}`;
   const tmpResultsDir = `/tmp/qa-${jobId}`;
 
@@ -512,6 +534,20 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           // before boot, or QA screenshots the starter scaffold instead of the
           // integrated app. No-op for apps without a generator.
           `{ [ -f scripts/generate-wiring.mjs ] && node scripts/generate-wiring.mjs || true; }`,
+          // DV-2 — static seam-wiring check. The scaffold always SHIPS the seam
+          // hook; the disease is a feature that never IMPORTS it (static preview).
+          // Grep src for files that reference the hook but are NOT its definition;
+          // if none, the seam can never publish — record it so qa-judge-l2 blocks
+          // each seam probe as SEAM_NEVER_PUBLISHED (cheaper than 5s SEAM_ABSENT).
+          ...(seamExpected
+            ? [
+                `SEAM_HOOK=${JSON.stringify(seamHook)}`,
+                `SEAM_IMPORTERS=$(grep -rlE "\\b\${SEAM_HOOK}\\b" src 2>/dev/null | xargs -r grep -L "export \\(function\\|const\\) \${SEAM_HOOK}" 2>/dev/null | head -20 | tr '\\n' ',')`,
+                `if [ -n "$SEAM_IMPORTERS" ]; then SEAM_IMPORTED=true; else SEAM_IMPORTED=false; fi`,
+                `printf '{"seamExpected":true,"seamHook":"%s","seamImported":%s,"importers":"%s"}\\n' "$SEAM_HOOK" "$SEAM_IMPORTED" "$SEAM_IMPORTERS" > ${tmpResultsDir}/seam-wiring.json`,
+                `echo "[qa-prepare] seam-wiring: hook=$SEAM_HOOK imported=$SEAM_IMPORTED importers=[$SEAM_IMPORTERS]"`,
+              ]
+            : []),
           `# Detached subshell so npm reparents to init and bash never wait4()s on it.`,
           `# QA_DEV_CMD is set by the framework-detect snippet above.`,
           // VQA v3 E2 — turn ON the verifiability seam for THIS dev server only.
@@ -1039,6 +1075,9 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           // baseline) before spending a Sonnet call. ei.tests[id].identical is
           // already computed by qa-prepare.
           `let ei = null; try { ei = JSON.parse(fs.readFileSync('${tmpResultsDir}/evidence-integrity.json', 'utf8')); } catch (e) {}`,
+          // DV-2 — static seam-wiring sidecar (written by qa-prepare when the plan
+          // expects a seam). Drives the SEAM_NEVER_PUBLISHED pre-judge block below.
+          `let sw = null; try { sw = JSON.parse(fs.readFileSync('${tmpResultsDir}/seam-wiring.json', 'utf8')); } catch (e) {}`,
           `function judgeOne(t) { return new Promise((resolve) => {`,
           `  const start = Date.now();`,
           `  const wallclockMs = (t.budgetWallclockSec ? t.budgetWallclockSec * 1000 : defaultWallclockMs);`,
@@ -1052,6 +1091,14 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           // non-blocking re-bucket (this MUST block — author a probe / build it).
           `  if (!Array.isArray(t.flow) || t.flow.length === 0) {`,
           `    resolve({ testId: t.id, level: 'L2', verdict: 'fail', observability: 'observable', rationale: 'CONTRACT_INCOMPLETE: L2 test has no executable flow (no interaction ran) — author a press/wait/assert probe, or the interactive feature is not built', screenshotUrl, costUsd: 0, durationMs: Date.now() - start });`,
+          `    return;`,
+          `  }`,
+          // DV-2 SEAM_NEVER_PUBLISHED — qa-prepare's STATIC grep found that NO
+          // source file imports the seam hook, so window.__harness can never
+          // publish. Block each seam-needing probe up front with a precise
+          // diagnosis instead of paying the 5s-per-test runtime SEAM_ABSENT wait.
+          `  if (sw && sw.seamExpected && sw.seamImported === false && Array.isArray(t.flow) && t.flow.some(s => s.action === 'assert' || s.action === 'waitForEvent' || s.action === 'repeat' || s.action === 'force')) {`,
+          `    resolve({ testId: t.id, level: 'L2', verdict: 'fail', observability: 'observable', rationale: 'SEAM_NEVER_PUBLISHED: no source file imports ' + (sw.seamHook || 'the seam hook') + ' — the verifiability seam ships in the scaffold but no feature mounts it (static preview, not the live app). Build the feature that calls the seam hook.', screenshotUrl, costUsd: 0, durationMs: Date.now() - start });`,
           `    return;`,
           `  }`,
           // Phase1 SEAM_ABSENT — a seam-asserting flow ran but window.__harness

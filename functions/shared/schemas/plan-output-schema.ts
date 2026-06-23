@@ -66,6 +66,21 @@ export const acceptanceCriterionSchema = z
         message: "A 'manual' acceptance criterion requires a manualReason from the closed enum.",
       });
     }
+    // CS-1 coherence rule (safe in the always-on schema because legacy ACs
+    // carry NO `verify`, so this never fires on round-tripped legacy plans):
+    // `build` is a non-visual check (lint/typecheck/unit/HTTP-200) — it must
+    // never claim a browser. Mirrors `deriveNeedsBrowser('build') === false`.
+    // The MANDATORY-`verify`-on-browser-ACs rule lives in
+    // `validateVerifyCoverage` (gate-only) — NOT here — so the export
+    // round-trip of pre-Concept-v2 plans (which lack `verify`) still parses.
+    if (ac.verify === 'build' && ac.needsBrowser === true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['needsBrowser'],
+        message:
+          "verify:'build' is a non-visual check and must not set needsBrowser:true. Use appearance|state|behavior for browser-verified criteria.",
+      });
+    }
   });
 
 /** Concept v2 — AC-mapped task in the DEV checklist. */
@@ -174,6 +189,34 @@ export function validateTouchPointHygiene(output: PlanOutput): string[] {
         if (INFRA_TOUCH_POINT_RE.test(tp)) {
           errors.push(
             `Story ${story.id} (epic ${epic.id}) touch point "${tp}" is template-owned shared infrastructure — stories must never modify dependency manifests, lockfiles, or build/test config. Re-scope the story to use what the scaffold provides.`,
+          );
+        }
+      }
+    }
+  }
+  return errors;
+}
+
+/**
+ * CS-1 (Concept v2.1 / agentic-l2-autonomy-backlog §2) — `verify` is MANDATORY
+ * on every browser-bearing AC, enforced at the CONCEPT GATE (not in the
+ * always-on schema, so the export round-trip of pre-Concept-v2 plans still
+ * parses). The pamcan6 disease: a plan shipped `needsBrowser:true` ACs with NO
+ * `verify` intent, so the QA classifier's oracle routing (`deriveLevelFromVerify`)
+ * stayed dormant and every dynamic AC collapsed to a blind idle-frame vision
+ * judge → false pass/fail. The PM owns the INTENT (build|appearance|state|
+ * behavior|manual); the QA-AUTHOR later compiles it into the concrete L-level +
+ * probe (altitude rule). Returns one error per offending AC so the gate can
+ * reject/repair the freshly generated plan before it reaches story-dev.
+ */
+export function validateVerifyCoverage(output: PlanOutput): string[] {
+  const errors: string[] = [];
+  for (const epic of output.plan.epics) {
+    for (const story of epic.stories) {
+      for (const ac of story.criteria) {
+        if (ac.needsBrowser === true && !ac.verify) {
+          errors.push(
+            `Story ${story.id} (epic ${epic.id}) criterion ${ac.id} is needsBrowser:true but has no \`verify\` intent — add one of appearance|state|behavior|manual so QA can route it to the right oracle (a browser AC with no verify collapses to a blind idle-frame judge).`,
           );
         }
       }

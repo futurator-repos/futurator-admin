@@ -325,12 +325,17 @@ export function serializeStoryContextPack(pack) {
       const verifyTag = ac.verify
         ? ` [verify=${ac.verify}${ac.verify === 'manual' && ac.manualReason ? `:${ac.manualReason}` : ''}]`
         : '';
-      if (ac.given || ac.when || ac.then) {
+      if (ac.given || ac.when || ac.then || ac.thenObservable) {
         // BDD form — fall back to `text` only when no triple is present.
         out.push(`- ${ac.id || '?'}${verifyTag}${flag}`);
         if (ac.given) out.push(`  - Given ${ac.given}`);
         if (ac.when) out.push(`  - When ${ac.when}`);
         if (ac.then) out.push(`  - Then ${ac.then}`);
+        // CS-3 (agentic-l2-autonomy-backlog §2) — render the prose-observable
+        // outcome too. It is the QA-AUTHOR's compile target (QAA-2: thenObservable
+        // → a concrete window.__harness assert), so it MUST reach the story-dev
+        // context, not just live in the pack object unrendered.
+        if (ac.thenObservable) out.push(`  - And observable: ${ac.thenObservable}`);
       } else {
         out.push(`- ${ac.id || '?'}: ${ac.text}${verifyTag}${flag}`);
       }

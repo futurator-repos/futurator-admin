@@ -175,3 +175,70 @@ describe('qa-prepare runFlow — Phase1 seam/assert hardening', () => {
     expect(prepCmd).toContain('FORCE_UNAVAILABLE');
   });
 });
+
+/**
+ * DV-2 (agentic-l2-autonomy-backlog §4) — SEAM_NEVER_PUBLISHED static catch.
+ * qa-prepare greps the app src/ for an import of the boilerplate's seam hook;
+ * an un-imported hook on a seam-asserting plan blocks each probe pre-screenshot.
+ */
+describe('DV-2 — SEAM_NEVER_PUBLISHED static seam-wiring catch', () => {
+  const seamTest = aug({
+    id: 'l2-seam',
+    criteriaRef: 'AC-9',
+    description: 'game over overlay',
+    setup: '/',
+    expect: 'a GAME OVER overlay shows after the player loses',
+    level: 'L2',
+    flow: [
+      { action: 'force', status: 'over' },
+      {
+        action: 'waitForEvent',
+        expr: 'snapshot.status',
+        op: 'eq',
+        expected: 'over',
+        timeoutMs: 5000,
+      },
+      { action: 'screenshot', label: 'after' },
+      { action: 'assert', expr: 'snapshot.status', op: 'eq', expected: 'over' },
+    ],
+  });
+
+  function buildSeamPipeline(seamHook?: string) {
+    return buildQaExecutePipeline({
+      plan: PLAN,
+      allVisualTests: [seamTest],
+      snapshotPrefix: 'qa-snapshots/pacman-x/job/',
+      jobId: 'job-seam',
+      seamHook,
+    });
+  }
+
+  const cmds = (seamHook?: string) => {
+    const p = buildSeamPipeline(seamHook);
+    const prep = p.steps.find((x) => x.id === 'qa-prepare');
+    const l2 = p.steps.find((x) => x.id === 'qa-judge-l2');
+    return {
+      prep: typeof prep?.command === 'string' ? prep.command : '',
+      l2: typeof l2?.command === 'string' ? l2.command : '',
+    };
+  };
+
+  it('qa-prepare greps src for the seam hook and writes seam-wiring.json (when seamHook + seam probes present)', () => {
+    const { prep } = cmds('useGameStateMachine');
+    expect(prep).toContain('useGameStateMachine');
+    expect(prep).toContain('seam-wiring.json');
+    expect(prep).toContain('SEAM_IMPORTED');
+  });
+
+  it('qa-judge-l2 blocks an un-imported seam as SEAM_NEVER_PUBLISHED', () => {
+    const { l2 } = cmds('useGameStateMachine');
+    expect(l2).toContain('SEAM_NEVER_PUBLISHED');
+    expect(l2).toContain('seam-wiring.json');
+    expect(l2).toContain('sw.seamImported === false');
+  });
+
+  it('is a no-op when the boilerplate declares no seam hook', () => {
+    const { prep } = cmds(undefined);
+    expect(prep).not.toContain('seam-wiring.json');
+  });
+});

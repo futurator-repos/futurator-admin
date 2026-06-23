@@ -3,6 +3,9 @@ import type { EpicStory, EpicWorkflow, VisualTestDef, VerifyIntent } from '../ty
 import type { Plan } from '../types/plan';
 import type { BoilerplateMetadata } from '../boilerplates/types';
 import { classifyVisualTest } from './visual-test-classifier';
+import { authorProbeFlows } from './qa-author';
+import type { SeamContract } from './qa-boilerplate-resolver';
+import type { AcceptanceCriterion } from '../types/epic-workflow';
 
 /**
  * Visual-QA launcher — Story 16.3 + Pipeline v2.0 PR-8a (plan-scoped).
@@ -342,6 +345,7 @@ export interface PlanQaDeps extends Omit<VisualQaDeps, 'buildQaPipeline'> {
     jobId: string;
     boilerplate?: BoilerplateMetadata['qaContext'];
     port?: number;
+    seamHook?: string;
   }) => PipelineDefinition;
 }
 
@@ -371,7 +375,12 @@ export async function launchPlanQaAggregate(
   userId: string,
   now: string,
   deps: PlanQaDeps,
-  options: { boilerplate?: BoilerplateMetadata['qaContext']; hasSeam?: boolean } = {},
+  options: {
+    boilerplate?: BoilerplateMetadata['qaContext'];
+    hasSeam?: boolean;
+    /** QAA-1 — the boilerplate's seam shape; enables deterministic probe authoring. */
+    seam?: SeamContract;
+  } = {},
 ): Promise<PlanQaAggregateResult> {
   if (epics.length === 0) {
     return { ok: false, code: 'no-visual-tests', message: 'Plan has no epics.' };
@@ -401,11 +410,39 @@ export async function launchPlanQaAggregate(
   const acceptanceCriteria: Array<{ id: string; needsBrowser: boolean; verify?: VerifyIntent }> =
     [];
   const needsBrowserByAcId = new Map<string, boolean>();
+  const criteriaByRef = new Map<string, AcceptanceCriterion>();
   for (const epic of enrichedEpics) {
     for (const story of epic.stories) {
       for (const c of story.criteria ?? []) {
         acceptanceCriteria.push({ id: c.id, needsBrowser: c.needsBrowser, verify: c.verify });
         needsBrowserByAcId.set(c.id, c.needsBrowser);
+        criteriaByRef.set(c.id, c);
+      }
+    }
+  }
+
+  // QAA-1 (agentic-l2-autonomy-backlog §3) — the QA-AUTHOR compiler. For each
+  // state/behavior AC whose test arrived without a deterministic oracle, author
+  // an executable probe (reach → screenshot → assert) from the AC's BDD prose +
+  // the boilerplate's seam shape, BEFORE classification — so the synthesized
+  // flow is classified L2-state and shown in the operator's contract-review
+  // draft. No-op when the boilerplate ships no seam. Deterministic-first: a test
+  // whose prose maps to no published key is left flow-less for CONTRACT_INCOMPLETE.
+  if (options.seam) {
+    for (const epic of enrichedEpics) {
+      for (const s of epic.stories) {
+        if (!s.visualTests || s.visualTests.length === 0) continue;
+        const { tests: authored, log } = authorProbeFlows({
+          tests: s.visualTests,
+          criteriaByRef,
+          seam: options.seam,
+        });
+        s.visualTests = authored;
+        for (const entry of log) {
+          console.log(
+            `[qa-author] ${plan.name}/${s.storyId} ${entry.testId}: ${entry.action} — ${entry.note}`,
+          );
+        }
       }
     }
   }
@@ -502,7 +539,12 @@ export async function launchPlanQaExecute(
   userId: string,
   now: string,
   deps: PlanQaDeps,
-  options: { boilerplate?: BoilerplateMetadata['qaContext']; port?: number } = {},
+  options: {
+    boilerplate?: BoilerplateMetadata['qaContext'];
+    port?: number;
+    /** DV-2 — the boilerplate's seam-publishing hook; enables the SEAM_NEVER_PUBLISHED catch. */
+    seamHook?: string;
+  } = {},
 ): Promise<PlanQaExecuteResult> {
   if (approvedTests.length === 0) {
     return {
@@ -531,6 +573,7 @@ export async function launchPlanQaExecute(
     jobId,
     boilerplate: options.boilerplate,
     port: options.port,
+    seamHook: options.seamHook,
   });
 
   const port = options.port ?? options.boilerplate?.defaultPort ?? 5173;

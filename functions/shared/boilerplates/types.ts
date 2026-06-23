@@ -294,6 +294,16 @@ export interface BoilerplateMetadata {
     snapshotShape: Record<string, { type: string; enum?: string[] }>;
     /** Test-mode boundary stubs (OAuth/payment/chat-partner) the seam can install (E11). */
     stubs?: string[];
+    /**
+     * DV-2 (agentic-l2-autonomy-backlog §4) — the scaffold hook a FEATURE must
+     * import+call to publish `globalKey` (e.g. `useGameStateMachine`,
+     * `useAppHarness`). QA's static `SEAM_NEVER_PUBLISHED` detector greps the
+     * app `src/` for an import of this symbol OUTSIDE its own definition file:
+     * the hook always exists in the scaffold, but a static-preview mount never
+     * imports it, so the seam never publishes. When set, QA can catch that
+     * pre-screenshot (cheaper than the 5s runtime `SEAM_ABSENT` per test).
+     */
+    seamHook?: string;
   };
 
   // ── PR-13 — Starter pack architecture (Option A) ────────────────────────

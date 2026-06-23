@@ -323,6 +323,7 @@ describe('Story Context Pack — BMAD-grade enrichment (Concept v2 E3.2–E3.4)'
           given: 'a game in playing state',
           when: 'the ball hits a paddle',
           then: 'the score increments by 1',
+          thenObservable: 'the game score becomes at least 1',
           verify: 'behavior',
         },
         {
@@ -353,6 +354,8 @@ describe('Story Context Pack — BMAD-grade enrichment (Concept v2 E3.2–E3.4)'
     expect(md).toContain('- Given a game in playing state');
     expect(md).toContain('- When the ball hits a paddle');
     expect(md).toContain('- Then the score increments by 1');
+    // CS-3 — the prose-observable (QA-AUTHOR's compile target) is rendered too
+    expect(md).toContain('- And observable: the game score becomes at least 1');
     // manual carries its reason
     expect(md).toContain('[verify=manual:real-payment]');
     // tasks with acRefs + done box

@@ -408,6 +408,15 @@ modify (relative to the project root, using the conventional paths above).
   the \`needsBrowser\` ACs of the code story that builds the feature instead.
 - Each story has the AC count appropriate for the rigor (see "Rigor" above).
   Mark \`needsBrowser: true\` for criteria that need visual/DOM verification.
+- **HARD REQUIREMENT (rejected at the concept gate): every \`needsBrowser:true\` AC
+  MUST carry a \`verify\` of \`appearance\`, \`state\`, \`behavior\`, or \`manual\` — never
+  omit it and never use \`build\` with \`needsBrowser:true\`.** A browser AC with no
+  verify intent leaves QA unable to route it and collapses to a blind idle-frame
+  judge (false pass/fail). For \`state\`/\`behavior\` ACs ALSO write a
+  \`thenObservable\` — a prose statement of the deterministic signal QA will read
+  from the app's test harness (e.g. "the game status becomes over", "the score is
+  at least 100"); the QA author compiles it into a concrete \`window.__harness\`
+  assertion, so name the observable in plain words, not code.
 - **Set a \`verify\` intent on every AC (Concept v2).** This is YOUR planning-time
   signal of HOW the claim is checked; the QA author later compiles it into the
   concrete test. Choose one:

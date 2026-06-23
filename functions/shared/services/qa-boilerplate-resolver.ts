@@ -78,3 +78,37 @@ export async function resolveHasSeam(
   const normalized = normalizeBoilerplateType(app.boilerplateType);
   return !!BOILERPLATE_REGISTRY[normalized]?.testHarness;
 }
+
+/**
+ * QAA-1/QAA-2 (agentic-l2-autonomy-backlog §3) — the full seam contract for the
+ * App's boilerplate: the snapshot keys + status enum the QA-AUTHOR compiler reads
+ * to compile a `thenObservable` into a concrete `window.__harness` assert (and to
+ * validate the emitted `expr` is a member of the LOCKED snapshot shape — RULE-4,
+ * never assert a key the app doesn't publish). Returns `undefined` for legacy /
+ * seam-less boilerplates (compiler is a no-op then). Same App→type lookup as the
+ * resolvers above.
+ */
+export interface SeamContract {
+  /** Bare snapshot keys (the `snapshot.` prefix stripped), e.g. `['status','score']`. */
+  snapshotKeys: string[];
+  /** Enum of the `status` key when declared, e.g. `['idle','running','over','win']`. */
+  statusEnum?: string[];
+  /** DV-2 — the publishing hook QA greps for (the SEAM_NEVER_PUBLISHED static catch). */
+  seamHook?: string;
+}
+
+export async function resolveSeamContract(
+  plan: Plan,
+  deps: QaBoilerplateResolverDeps,
+): Promise<SeamContract | undefined> {
+  const appId = (plan as Plan & { appId?: string }).appId;
+  if (!appId) return undefined;
+  const app = await deps.getApp(appId);
+  if (!app?.boilerplateType) return undefined;
+  const normalized = normalizeBoilerplateType(app.boilerplateType);
+  const harness = BOILERPLATE_REGISTRY[normalized]?.testHarness;
+  if (!harness) return undefined;
+  const snapshotKeys = Object.keys(harness.snapshotShape).map((k) => k.replace(/^snapshot\./, ''));
+  const statusEnum = harness.snapshotShape['snapshot.status']?.enum;
+  return { snapshotKeys, statusEnum, seamHook: harness.seamHook };
+}
