@@ -161,4 +161,11 @@ describe('qa-prepare runFlow — Phase1 seam/assert hardening', () => {
     expect(prepCmd).toContain('const deadline = Date.now()');
     expect(prepCmd).toContain('while (!pass && Date.now() < deadline)');
   });
+
+  it('Phase2: implements waitForEvent (poll seam until event) and repeat (drive-until-event)', () => {
+    expect(prepCmd).toContain("step.action === 'waitForEvent'");
+    expect(prepCmd).toContain('WAIT_EVENT_TIMEOUT');
+    expect(prepCmd).toContain("step.action === 'repeat'");
+    expect(prepCmd).toContain('REPEAT_UNMET');
+  });
 });
