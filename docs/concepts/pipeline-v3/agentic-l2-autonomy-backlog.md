@@ -1,6 +1,6 @@
 # Agentic L2 Autonomy — Pending Developments (Concept + Dev)
 
-> **Status:** IN PROGRESS — Wave A + Wave B (keystone) **built & tested** 2026-06-23 (not yet committed/deployed at time of writing) · **Created:** 2026-06-23
+> **Status:** IN PROGRESS — Waves A + B (keystone) + C (fix-loop) **built, tested & committed** on `feat/pipeline-v3` (862c4ef, 50742cf); not yet deployed · **Created:** 2026-06-23
 > **Author:** `QAreview-agentic`
 
 ## ⚙️ Build progress (2026-06-23)
