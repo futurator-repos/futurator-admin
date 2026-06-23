@@ -616,6 +616,16 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `    const page = await browser.newPage({ viewport: { width: parseInt(vp[0], 10) || 1280, height: parseInt(vp[1], 10) || 720 } });`,
           `    const base = 'http://localhost:' + port;`,
           `    await page.goto(base + withBase(t.url), { waitUntil: 'load', timeout: 15000 });`,
+          // Phase1 (2026-06-23) SEAM-READINESS GATE — a flow that asserts the
+          // deterministic seam needs window.__harness to actually publish. If it
+          // never becomes ready (e.g. a static-preview mount, not the live game —
+          // the pamcan6 root cause), record SEAM_ABSENT so the judge blocks
+          // structurally instead of asserting against undefined (a silent mismatch).
+          `    const needsSeam = (t.flow || []).some(s => s.action === 'assert' || s.action === 'waitForEvent');`,
+          `    if (needsSeam) {`,
+          `      try { await page.waitForFunction('window.__harness && window.__harness.ready === true', { timeout: 5000 }); }`,
+          `      catch (e) { stepLog.push({ action: 'seam-ready', ok: false, error: 'SEAM_ABSENT: window.__harness never became ready within 5s — the verifiability seam is not mounted (feature likely a static preview, not the live game)' }); }`,
+          `    }`,
           `    for (const step of (t.flow || [])) {`,
           `      try {`,
           `        if (step.action === 'navigate') { await page.goto(base + withBase(step.url), { waitUntil: 'load', timeout: 15000 }); }`,
@@ -636,13 +646,23 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `        else if (step.action === 'network') { await page.context().setOffline(step.network === 'offline'); }`,
           // VQA v3 (E5.3) — L2-state assert oracle: read window.__harness deterministically, compare, fail loud.
           `        else if (step.action === 'assert') {`,
-          `          const actual = await page.evaluate((expr) => {`,
-          `            const h = window.__harness;`,
-          `            if (!h) return undefined;`,
-          `            const root = { snapshot: (typeof h.snapshot === 'function' ? h.snapshot() : h.snapshot), events: h.events };`,
-          `            return String(expr || '').split('.').reduce((o, k) => (o == null ? undefined : o[k]), root);`,
-          `          }, step.expr || '');`,
-          `          if (!assertOp(step.op, actual, step.expected)) {`,
+          // Phase1 (2026-06-23) — POLL the seam, don't one-shot it. A terminal
+          // state (gameover/win) may land a few frames after the act; retry until
+          // the assert passes or step.timeoutMs (default 3s) elapses, so a true
+          // post-interaction state isn't missed by a single early read.
+          `          const deadline = Date.now() + Math.min(step.timeoutMs || 3000, 15000);`,
+          `          let actual; let pass = false;`,
+          `          do {`,
+          `            actual = await page.evaluate((expr) => {`,
+          `              const h = window.__harness;`,
+          `              if (!h) return undefined;`,
+          `              const root = { snapshot: (typeof h.snapshot === 'function' ? h.snapshot() : h.snapshot), events: h.events };`,
+          `              return String(expr || '').split('.').reduce((o, k) => (o == null ? undefined : o[k]), root);`,
+          `            }, step.expr || '');`,
+          `            pass = assertOp(step.op, actual, step.expected);`,
+          `            if (!pass) await page.waitForTimeout(100);`,
+          `          } while (!pass && Date.now() < deadline);`,
+          `          if (!pass) {`,
           `            throw new Error('ASSERT_FAILED: ' + (step.expr || '') + ' ' + (step.op || 'eq') + ' ' + JSON.stringify(step.expected) + ' (actual=' + JSON.stringify(actual) + ')');`,
           `          }`,
           `        }`,
@@ -991,6 +1011,17 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `    resolve({ testId: t.id, level: 'L2', verdict: 'fail', observability: 'observable', rationale: 'CONTRACT_INCOMPLETE: L2 test has no executable flow (no interaction ran) — author a press/wait/assert probe, or the interactive feature is not built', screenshotUrl, costUsd: 0, durationMs: Date.now() - start });`,
           `    return;`,
           `  }`,
+          // Phase1 SEAM_ABSENT — a seam-asserting flow ran but window.__harness
+          // never published (static-preview mount, not the live game). The
+          // runFlow readiness gate recorded a 'seam-ready' failure. Block
+          // structurally (more diagnostic than FLOW_NOOP) — don't judge the idle frame.
+          `  try {`,
+          `    const slSeam = JSON.parse(fs.readFileSync('${tmpResultsDir}/screenshots/' + t.id + '-flow.json', 'utf8'));`,
+          `    if (Array.isArray(slSeam) && slSeam.some(s => s && s.error && /SEAM_ABSENT/.test(s.error))) {`,
+          `      resolve({ testId: t.id, level: 'L2', verdict: 'fail', observability: 'observable', rationale: 'SEAM_ABSENT: window.__harness never published — the verifiability seam is not mounted (feature is likely a static preview, not the live game)', screenshotUrl, costUsd: 0, durationMs: Date.now() - start });`,
+          `      return;`,
+          `    }`,
+          `  } catch (e) {}`,
           // Phase0 FLOW_NOOP — the flow ran but produced a frame byte-identical to
           // the shared idle baseline (bad selector / ignored key / unmounted
           // window.__harness). No visible effect ⇒ not a real post-interaction

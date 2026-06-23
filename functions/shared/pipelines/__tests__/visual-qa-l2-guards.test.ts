@@ -137,4 +137,28 @@ describe('qa-judge-l2 — Phase0 guards present', () => {
     expect(l2cmd).toContain('stepSummary');
     expect(l2cmd).not.toContain('they show POST-INTERACTION state, not the idle load frame');
   });
+
+  it('Phase1: promotes a seam-asserting flow with no published seam to SEAM_ABSENT', () => {
+    expect(l2cmd).toContain('SEAM_ABSENT');
+  });
+});
+
+describe('qa-prepare runFlow — Phase1 seam/assert hardening', () => {
+  const prepCmd = (() => {
+    const p = buildPipeline();
+    const s = p.steps.find((x) => x.id === 'qa-prepare');
+    return typeof s?.command === 'string' ? s.command : '';
+  })();
+
+  it('waits for window.__harness.ready before a seam-asserting flow (records SEAM_ABSENT on timeout)', () => {
+    expect(prepCmd).toContain('waitForFunction');
+    expect(prepCmd).toContain('window.__harness && window.__harness.ready === true');
+    expect(prepCmd).toContain('seam-ready');
+    expect(prepCmd).toContain('SEAM_ABSENT');
+  });
+
+  it('polls the assert until the deadline instead of a one-shot read', () => {
+    expect(prepCmd).toContain('const deadline = Date.now()');
+    expect(prepCmd).toContain('while (!pass && Date.now() < deadline)');
+  });
 });

@@ -243,7 +243,7 @@ you add to \`GameState\` (e.g. \`lives\`). Assert against those keys.
 // sync. Domain games ADD keys to GameState (e.g. `lives`); those ride the
 // snapshot additively and need no change here.
 const CANVAS_GAME_SNAPSHOT_SHAPE: Record<string, { type: string; enum?: string[] }> = {
-  status: { type: 'string', enum: ['idle', 'running', 'paused', 'over'] },
+  status: { type: 'string', enum: ['idle', 'running', 'paused', 'over', 'win'] },
   score: { type: 'number' },
   tick: { type: 'number' },
   entities: { type: 'array' },
@@ -277,7 +277,7 @@ const NEXTJS_CANVAS_GAME_AUGMENTS: Array<{ path: string; content: string }> = [
  * \`src/game/entities/<name>.ts\`. Do NOT replace these primitives.
  */
 
-export type GameStatus = 'idle' | 'running' | 'paused' | 'over';
+export type GameStatus = 'idle' | 'running' | 'paused' | 'over' | 'win';
 
 export interface Entity {
   id: string;
