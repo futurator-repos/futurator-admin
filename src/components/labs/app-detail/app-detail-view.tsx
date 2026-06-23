@@ -18,6 +18,8 @@ import { SourceTabContent } from './source-tab';
 import { PerformanceTab } from './performance-tab';
 import { AppPartyView } from './app-party-view';
 import { AssessTab } from './assess/assess-tab';
+import { RefactorGraph } from './assess/refactor-graph';
+import { useAppAudits } from '@/hooks/use-app-audit';
 
 interface DeployRow {
   jobId: string;
@@ -42,9 +44,16 @@ export function AppDetailView({ appId }: { appId: string }) {
     tabParam === 'party' ||
     tabParam === 'source' ||
     tabParam === 'performance' ||
-    tabParam === 'assess'
+    tabParam === 'assess' ||
+    tabParam === 'graph'
       ? tabParam
       : 'overview';
+
+  // App-level Graph tab: enabled once an assessment has produced a code graph.
+  // Reuses the durable audit list; latest audit's graphAvailable gates the tab.
+  const { data: auditsData } = useAppAudits(appId);
+  const latestAudit = auditsData?.audits?.[0] ?? null;
+  const hasGraph = !!latestAudit?.graphAvailable;
 
   // Pre-fetch repo summary so the Source tab has defaultBranch without an
   // additional waterfall. We can only know if the app is bootstrapped after the
@@ -113,6 +122,15 @@ export function AppDetailView({ appId }: { appId: string }) {
           <TabsTrigger value="overview">Overview</TabsTrigger>
           {hasSourceTab && <TabsTrigger value="source">Source</TabsTrigger>}
           {hasAssessTab && <TabsTrigger value="assess">Assess</TabsTrigger>}
+          {hasAssessTab && (
+            <TabsTrigger
+              value="graph"
+              disabled={!hasGraph}
+              title={hasGraph ? undefined : 'Run an assessment first to generate the code graph'}
+            >
+              Graph
+            </TabsTrigger>
+          )}
           <TabsTrigger value="party">Party</TabsTrigger>
           {/* Story 1.8.5 — Performance tab (always shown; empty state when no plans) */}
           <TabsTrigger value="performance">Performance</TabsTrigger>
@@ -138,6 +156,16 @@ export function AppDetailView({ appId }: { appId: string }) {
         {hasAssessTab && (
           <TabsContent value="assess" className="mt-4">
             <AssessTab app={app} />
+          </TabsContent>
+        )}
+
+        {hasAssessTab && hasGraph && (
+          <TabsContent value="graph" className="mt-4">
+            <RefactorGraph
+              appId={app.appId}
+              hotspots={latestAudit?.hotspots ?? []}
+              graphAvailable={hasGraph}
+            />
           </TabsContent>
         )}
 
