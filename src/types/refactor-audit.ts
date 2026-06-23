@@ -77,6 +77,8 @@ export interface RefactorAuditRecord {
   hotspots: AuditHotspot[];
   verdicts?: HotspotVerdict[];
   plan?: unknown;
+  /** Whether the file-level graph projection was uploaded to S3. */
+  graphAvailable?: boolean;
   createdAt: string;
   createdBy: string;
 }

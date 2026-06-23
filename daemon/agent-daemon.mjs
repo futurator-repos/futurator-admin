@@ -7193,35 +7193,10 @@ async function executeRefactorAuditJob(job) {
         }
       }
 
-      // Write the durable audit row (always — recon-only or adjudicated) so the
-      // report survives the 7-day events TTL and the §9.4/9.5 endpoints can read it.
-      const auditId = randomUUID();
-      const adjudicated = !!(l3 && l3.ok);
-      try {
-        await ddb.send(
-          new PutCommand({
-            TableName: REFACTOR_AUDITS_TABLE,
-            Item: {
-              auditId,
-              projectId: job.refactorAuditPayload?.projectId || job.projectId,
-              projectPath,
-              jobId,
-              status: adjudicated ? 'adjudicated' : 'recon-only',
-              counts: result.counts ?? {},
-              hotspots: result.hotspots ?? [],
-              ...(adjudicated ? { verdicts: l3.verdicts, plan: l3.plan } : {}),
-              createdAt: new Date().toISOString(),
-              createdBy: job.createdBy || 'daemon',
-            },
-          }),
-        );
-      } catch (auditErr) {
-        log('warn', `[${short}] refactor-audit durable-write failed (non-fatal): ${auditErr?.message || auditErr}`);
-      }
-
       // Upload the file-level graph projection to S3 (scoped knowledge-live path,
       // CLAUDE.md-allowed) so the Assess Graph tab can render the real code graph
-      // with communities + the hotspot overlay. Non-fatal.
+      // with communities + the hotspot overlay. Non-fatal. Done BEFORE the durable
+      // write so graphAvailable is recorded on the row.
       let graphUploaded = false;
       try {
         const graphUiPath = pathJoin(projectPath, 'graphify-out', 'graph-ui.json');
@@ -7243,6 +7218,33 @@ async function executeRefactorAuditJob(job) {
         }
       } catch (gerr) {
         log('warn', `[${short}] refactor-audit graph S3 upload failed (non-fatal): ${gerr?.message || gerr}`);
+      }
+
+      // Write the durable audit row (always — recon-only or adjudicated) so the
+      // report survives the 7-day events TTL and the §9.4/9.5 endpoints can read it.
+      const auditId = randomUUID();
+      const adjudicated = !!(l3 && l3.ok);
+      try {
+        await ddb.send(
+          new PutCommand({
+            TableName: REFACTOR_AUDITS_TABLE,
+            Item: {
+              auditId,
+              projectId: job.refactorAuditPayload?.projectId || job.projectId,
+              projectPath,
+              jobId,
+              status: adjudicated ? 'adjudicated' : 'recon-only',
+              counts: result.counts ?? {},
+              hotspots: result.hotspots ?? [],
+              graphAvailable: graphUploaded,
+              ...(adjudicated ? { verdicts: l3.verdicts, plan: l3.plan } : {}),
+              createdAt: new Date().toISOString(),
+              createdBy: job.createdBy || 'daemon',
+            },
+          }),
+        );
+      } catch (auditErr) {
+        log('warn', `[${short}] refactor-audit durable-write failed (non-fatal): ${auditErr?.message || auditErr}`);
       }
 
       await updateJobFields(jobId, {

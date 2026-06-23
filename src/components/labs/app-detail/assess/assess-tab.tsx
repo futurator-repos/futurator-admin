@@ -24,7 +24,7 @@ import {
 import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-output';
 import { NewPlanModal } from '../new-plan-modal';
 import { HotspotDashboard } from './hotspot-dashboard';
-import { HotspotGraph } from './hotspot-graph';
+import { RefactorGraph } from './refactor-graph';
 
 /**
  * Compile selected hotspots into a NewPlanModal intent seed (FR35). Pure +
@@ -375,7 +375,13 @@ export function AssessTab({ app }: { app: App }) {
           {view === 'hotspots' ? (
             <HotspotDashboard hotspots={hotspots} onCreatePlan={onCreatePlan} />
           ) : (
-            <HotspotGraph hotspots={hotspots} />
+            <RefactorGraph
+              appId={app.appId}
+              hotspots={hotspots}
+              graphAvailable={
+                jobId ? job?.refactorAuditSummary?.graphAvailable : selectedRecord?.graphAvailable
+              }
+            />
           )}
         </>
       )}

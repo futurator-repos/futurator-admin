@@ -118,6 +118,8 @@ export interface RefactorAuditRecord {
   /** The L3-generated draft plan (planOutputSchema shape; Epic C). */
   plan?: unknown;
   /** GSI rangeKey. */
+  /** Whether the file-level graph projection was uploaded to S3. */
+  graphAvailable?: boolean;
   createdAt: string;
   createdBy: string;
 }
