@@ -56,8 +56,11 @@
   "uiDirPattern": "components/(ui|primitives)/",
   "$comment_uiDir": "Files under these dirs are design-system primitives. Duplicate basenames among them roll up under design-system-consolidation instead of duplicate-subsystem (FR7).",
 
-  "versionMarkerPattern": "(-v[123]\\b|version[123]|enhanced|hierarchical|legacy|deprecated|-old\\b|-new\\b|copy|_bak)",
-  "$comment_versionMarker": "Path SEGMENTS carrying explicit version/legacy markers. hotspot-detect clusters by the FIRST version-marked segment (the 'version root'), so a whole versioned directory (onboarding-v2/**) collapses to ONE legacy-root candidate instead of flagging every file inside it. Avoids the inflated '135 version-marker files' count.",
+  "versionMarkerPattern": "(-v[123]\\b|version[123]|legacy|deprecated|-old\\b|copy|_bak)",
+  "$comment_versionMarker": "Path SEGMENTS carrying explicit LEGACY markers. hotspot-detect clusters by the FIRST marked segment (the 'version root'), collapsing a versioned dir (onboarding-v2/**) to ONE legacy-root candidate. NOTE: 'enhanced'/'hierarchical'/'-new' were REMOVED — they're feature-descriptive (often the CURRENT model, e.g. migrate-to-hierarchical proves hierarchical is new), not legacy. Numbered versions are handled by the highest-in-family=current rule; migrations/ + migrate-* are excluded.",
+
+  "duplicateExcludeDirs": ["variants", "__mocks__", "__fixtures__"],
+  "$comment_dupExcludeDirs": "Files under these path segments are intentional sibling variants/mocks that legitimately share a basename (e.g. sections/experience/variants/list.tsx vs sections/projects/variants/list.tsx) — excluded from duplicate-subsystem so they aren't flagged 'consolidate onto one'.",
 
   "thresholds": {
     "godObjectMinMethods": 12,

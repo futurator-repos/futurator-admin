@@ -80,6 +80,23 @@ function writeFixture(target, { calibration } = {}) {
   // a test file with a version marker must NOT be flagged as a legacy root
   nodes.push({ id: 'vtest', label: 'x.test.ts', source_file: 'src/components/onboarding-v2/__tests__/x.test.ts', community: 7, resolved_in_degree: 0 });
 
+  // --- 7b. feature-name + migration markers must NOT be flagged legacy (fix#1) ---
+  nodes.push({ id: 'enh', label: 'enhanced-section.ts', source_file: 'src/types/enhanced-section.ts', community: 8, resolved_in_degree: 2 });
+  nodes.push({ id: 'hier', label: 'hierarchical-gen.ts', source_file: 'src/lib/ai/hierarchical-gen.ts', community: 8, resolved_in_degree: 2 });
+  nodes.push({ id: 'mig', label: 'migrate-to-hierarchical.ts', source_file: 'src/lib/migrations/migrate-to-hierarchical.ts', community: 8, resolved_in_degree: 1 });
+
+  // --- 7c. variants/ siblings sharing a basename must NOT be a dup (fix#2) ---
+  nodes.push({ id: 'va', label: 'widget.tsx', source_file: 'src/components/sections/experience/variants/widget.tsx', community: 8, resolved_in_degree: 3 });
+  nodes.push({ id: 'vb', label: 'widget.tsx', source_file: 'src/components/sections/projects/variants/widget.tsx', community: 8, resolved_in_degree: 3 });
+  hubs.push({ file: 'src/components/sections/experience/variants/widget.tsx', inDegree: 3 });
+  hubs.push({ file: 'src/components/sections/projects/variants/widget.tsx', inDegree: 3 });
+
+  // --- 7d. a dup with one copy inside a legacy root (flow-v1) → suppressed (fix#3) ---
+  nodes.push({ id: 'ofv1', label: 'OnboardingFlow.tsx', source_file: 'src/components/flow-v1/OnboardingFlow.tsx', community: 8, resolved_in_degree: 2 });
+  nodes.push({ id: 'ofv2', label: 'OnboardingFlow.tsx', source_file: 'src/components/flow-v2/OnboardingFlow.tsx', community: 8, resolved_in_degree: 2 });
+  hubs.push({ file: 'src/components/flow-v1/OnboardingFlow.tsx', inDegree: 2 });
+  hubs.push({ file: 'src/components/flow-v2/OnboardingFlow.tsx', inDegree: 2 });
+
   // --- 8. a Repository god-object → role-aware advice (NOT "split into repositories") ---
   nodes.push({ id: 'repo', label: 'OrgsRepository', source_file: 'src/db/orgs-table.ts', community: 9, resolved_in_degree: 20 });
   hubs.push({ file: 'src/db/orgs-table.ts', inDegree: 20 });
@@ -154,6 +171,30 @@ describe('hotspot-detect — validated invariants (NFR2 regression lock)', () =>
     // flow family: v1 is legacy (kept), v2 is current (dropped)
     expect(rootPaths).toContain('src/components/flow-v1');
     expect(rootPaths).not.toContain('src/components/flow-v2');
+  });
+
+  it('does NOT flag feature-name (enhanced/hierarchical) or migration files as legacy (fix#1)', () => {
+    const out = runDetect(dir);
+    const ver = out.hotspots.find((h) => h.kind === 'duplicate-subsystem' && /legacy root/.test(h.title));
+    const roots = JSON.stringify(ver?.evidence.roots || []);
+    expect(/enhanced|hierarchical|migrate/.test(roots)).toBe(false);
+  });
+
+  it('does NOT flag variants/ siblings as a duplicate subsystem (fix#2)', () => {
+    const out = runDetect(dir);
+    const dupTitles = out.hotspots
+      .filter((h) => h.kind === 'duplicate-subsystem')
+      .map((h) => h.title);
+    expect(dupTitles.some((t) => /widget\.tsx/.test(t))).toBe(false);
+  });
+
+  it('suppresses a duplicate whose copy lives in a flagged legacy root (fix#3)', () => {
+    const out = runDetect(dir);
+    const dupTitles = out.hotspots
+      .filter((h) => h.kind === 'duplicate-subsystem')
+      .map((h) => h.title);
+    // OnboardingFlow.tsx is in flow-v1 (legacy) + flow-v2 (current) → not a standalone dup
+    expect(dupTitles.some((t) => /OnboardingFlow\.tsx/.test(t))).toBe(false);
   });
 
   it('gives role-aware god-object advice (a Repository is not told to "split into repositories")', () => {

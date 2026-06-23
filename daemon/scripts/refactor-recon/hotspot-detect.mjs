@@ -167,42 +167,23 @@ for (const n of nodes) {
 // left to L3 adjudication / manual review.
 const CONVENTION = new Set(calibration.conventionFilenames)
 const CO_LOCATED = new Set(calibration.coLocatedConventionFilenames || [])
+const DUP_EXCLUDE_DIRS = calibration.duplicateExcludeDirs || ['variants', '__mocks__', '__fixtures__']
+const inDupExcludedDir = (f) => DUP_EXCLUDE_DIRS.some((d) => (f || '').includes(`/${d}/`)) // fix#2
 const UI_DIR_RE = new RegExp(calibration.uiDirPattern)
 const isUiFile = (f) => UI_DIR_RE.test(f || '')
 const fileNodes = nodes.filter(isFileNode)
-const byBase = new Map()
-for (const n of fileNodes) {
-  const b = base(n.source_file)
-  if (CONVENTION.has(b) || CO_LOCATED.has(b)) continue // recurs per-module, not duplication
-  if (!byBase.has(b)) byBase.set(b, new Map())
-  byBase.get(b).set(n.source_file, importersOf(n)) // dedupe per file
-}
-const dsComponentDups = [] // UI-component dups → rolled up under design-system-consolidation
-for (const [b, files] of byBase) {
-  if (files.size < 2) continue
-  const list = [...files.entries()].map(([f, imp]) => ({ f, imp })).sort((a, z) => z.imp - a.imp)
-  const totalImp = list.reduce((s, x) => s + x.imp, 0)
-  if (totalImp === 0) continue // both dead → handled by dead-code, not duplication
-  if (list.every(x => isUiFile(x.f))) { dsComponentDups.push({ name: b, copies: list.length, importers: totalImp }); continue }
-  const score = Math.min(100, 25 + list.length * 8 + Math.min(40, totalImp / 3))
-  hotspots.push({
-    kind: 'duplicate-subsystem', score, severity: sev(score),
-    title: `Duplicate "${b}" in ${list.length} locations (Σ${totalImp} importers)`,
-    files: list.map(x => x.f), evidence: { copies: list },
-    suggestedAction: `Consolidate the ${list.length} "${b}" implementations onto the highest-fan-in one (${list[0].f}); repoint the rest, then delete after grep shows zero dependents.`,
-  })
-}
-// Cluster version-marked paths by their FIRST version-marked path segment (the
-// "version root"), so a whole versioned dir (onboarding-v2/**) collapses to ONE
-// legacy-root candidate instead of flagging every file inside it (the inflated
-// "135 version-marker files" bug). A file-level marker (draft-editor-v2.tsx)
-// stays its own root.
-const VER = new RegExp(calibration.versionMarkerPattern, 'i')
 const IS_TEST = (f) => /(^|\/)__tests__\//.test(f) || /\.(test|spec)\.[tj]sx?$/.test(f)
+// migration scripts describe moving TO the new model — not a legacy root (fix#1)
+const IS_MIGRATION = (f) => /(^|\/)migrations?\//.test(f) || /(^|\/)migrate-/.test(f)
+
+// --- 2a. VERSION ROOTS first (so dup detection can defer legacy copies to them) ---
+// Cluster version-marked paths by their FIRST marked segment (the "version root"),
+// so a whole versioned dir (onboarding-v2/**) collapses to ONE legacy-root candidate.
+const VER = new RegExp(calibration.versionMarkerPattern, 'i')
 const verRoots = new Map() // versionRoot -> Set(files)
 for (const n of fileNodes) {
   const f = n.source_file
-  if (!f || IS_TEST(f)) continue // tests aren't legacy roots to retire
+  if (!f || IS_TEST(f) || IS_MIGRATION(f)) continue
   const segs = f.split('/')
   let root = null
   const acc = []
@@ -214,17 +195,15 @@ for (const n of fileNodes) {
   if (!verRoots.has(root)) verRoots.set(root, new Set())
   verRoots.get(root).add(f)
 }
-// A version-marked root with a NUMERIC version (…-v2/-v3/version2) is only legacy
-// if it is NOT the highest version in its family — v3 alongside v2 is the CURRENT
-// one, not a legacy candidate. Non-numeric markers (enhanced/hierarchical/legacy/
-// -old/copy) can't be compared, so they stay flagged for adjudication.
+// A NUMERIC version (…-v2/version2) is legacy only if NOT the highest in its family
+// (v2+v3 → v3 current, drop; lone -v2 stays). Non-numeric markers stay flagged.
 function numericVersion(root) {
   const seg = root.split('/').pop() || ''
   const m = seg.match(/(?:-v|version)([0-9]+)\b/i)
   return m ? { family: root.replace(/(?:-v|version)[0-9]+\b/i, ''), version: parseInt(m[1], 10) } : null
 }
 const maxByFamily = new Map()
-const versionsByFamily = new Map() // family -> Set(versions)
+const versionsByFamily = new Map()
 for (const root of verRoots.keys()) {
   const v = numericVersion(root)
   if (!v) continue
@@ -234,11 +213,45 @@ for (const root of verRoots.keys()) {
 }
 const legacyRoots = [...verRoots.entries()].filter(([root]) => {
   const v = numericVersion(root)
-  // Drop the CURRENT (highest) version only when the family has MULTIPLE versions
-  // (v2+v3 → v3 is current, drop it; v2 is legacy, keep). A lone -v2 stays flagged.
   const isCurrent = v && v.version === maxByFamily.get(v.family) && versionsByFamily.get(v.family).size >= 2
   return !isCurrent
 })
+const legacyPrefixes = legacyRoots.map(([root]) => root)
+const inLegacyRoot = (f) => legacyPrefixes.some((p) => f === p || f.startsWith(p + '/')) // fix#3
+
+// --- 2b. basename duplicate detection ---
+const byBase = new Map()
+for (const n of fileNodes) {
+  const f = n.source_file
+  const b = base(f)
+  if (CONVENTION.has(b) || CO_LOCATED.has(b)) continue // recurs per-module, not duplication
+  if (inDupExcludedDir(f)) continue // intentional sibling variants/mocks (fix#2)
+  if (!byBase.has(b)) byBase.set(b, new Map())
+  byBase.get(b).set(f, importersOf(n)) // dedupe per file
+}
+const dsComponentDups = [] // UI-component dups → rolled up under design-system-consolidation
+for (const [b, files] of byBase) {
+  if (files.size < 2) continue
+  // fix#3: drop copies inside a flagged legacy root (retired wholesale by the
+  // version-marker finding); if <2 remain it's not a standalone duplicate.
+  const list = [...files.entries()]
+    .map(([f, imp]) => ({ f, imp }))
+    .filter((x) => !inLegacyRoot(x.f))
+    .sort((a, z) => z.imp - a.imp)
+  if (list.length < 2) continue
+  const totalImp = list.reduce((s, x) => s + x.imp, 0)
+  if (totalImp === 0) continue // both dead → handled by dead-code, not duplication
+  if (list.every((x) => isUiFile(x.f))) { dsComponentDups.push({ name: b, copies: list.length, importers: totalImp }); continue }
+  const score = Math.min(100, 25 + list.length * 8 + Math.min(40, totalImp / 3))
+  hotspots.push({
+    kind: 'duplicate-subsystem', score, severity: sev(score),
+    title: `Duplicate "${b}" in ${list.length} locations (Σ${totalImp} importers)`,
+    files: list.map((x) => x.f), evidence: { copies: list },
+    suggestedAction: `Consolidate the ${list.length} "${b}" implementations onto the highest-fan-in one (${list[0].f}); repoint the rest, then delete after grep shows zero dependents.`,
+  })
+}
+
+// --- 2c. emit the version-marker hotspot ---
 if (legacyRoots.length) {
   const roots = legacyRoots
     .map(([root, files]) => ({ root, files: files.size }))
@@ -248,7 +261,7 @@ if (legacyRoots.length) {
   hotspots.push({
     kind: 'duplicate-subsystem', score, severity: sev(score),
     title: `Version-marked paths: ${roots.length} legacy root(s) (${totalFiles} files)`,
-    files: roots.slice(0, 30).map(r => `${r.root}  (${r.files} file${r.files === 1 ? '' : 's'})`),
+    files: roots.slice(0, 30).map((r) => `${r.root}  (${r.files} file${r.files === 1 ? '' : 's'})`),
     evidence: { count: roots.length, totalFiles, roots: roots.slice(0, 20) },
     suggestedAction: `Each is a legacy candidate (the current/highest version is excluded). Confirm it's superseded, prove the old root orphaned (resolved in-degree + grep), then retire the whole root via extract→repoint→delete.`,
   })
