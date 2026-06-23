@@ -19,6 +19,7 @@ import {
   buildL3Prompt,
   parseL3Output,
   runL3Adjudication,
+  findCharacterizationGateViolations,
 } from '../refactor-audit-job-runner.mjs';
 
 function auditJob(overrides = {}) {
@@ -270,5 +271,51 @@ describe('L3 adjudication (Epic C)', () => {
     const res = await runL3Adjudication(auditJob(), HS, { runL3Agent });
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/spawn died/);
+  });
+});
+
+describe('findCharacterizationGateViolations (Epic E1)', () => {
+  const plan = (stories) => ({ plan: { name: 'x', description: 'y'.repeat(25), epics: [{ id: 'E1', stories }] } });
+
+  it('flags a deletion story with no characterization net in its epic', () => {
+    const v = findCharacterizationGateViolations(
+      plan([
+        { id: 'S1', title: 'Delete legacy profile-v1', criteria: [{ id: 'AC1', text: 'old path removed' }] },
+      ]),
+    );
+    expect(v).toHaveLength(1);
+    expect(v[0]).toMatchObject({ epicId: 'E1', storyId: 'S1' });
+  });
+
+  it('passes when a deletion story dependsOn a characterization-net story', () => {
+    const v = findCharacterizationGateViolations(
+      plan([
+        { id: 'S1', title: 'Characterization net for /edit', criteria: [{ id: 'AC1', text: 'playwright covers edit flow', needsBrowser: true }] },
+        { id: 'S2', title: 'Delete legacy editor', dependsOn: ['S1'], criteria: [{ id: 'AC1', text: 'remove old editor' }] },
+      ]),
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it('passes when any net story exists in the epic (sequenced before)', () => {
+    const v = findCharacterizationGateViolations(
+      plan([
+        { id: 'S1', title: 'E2E smoke net', criteria: [{ id: 'AC1', text: 'smoke test', needsBrowser: true }] },
+        { id: 'S2', title: 'Repoint imports to canonical', criteria: [{ id: 'AC1', text: 'repoint dependents' }] },
+      ]),
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it('ignores non-mutating stories', () => {
+    const v = findCharacterizationGateViolations(
+      plan([{ id: 'S1', title: 'Add a feature flag', criteria: [{ id: 'AC1', text: 'flag added' }] }]),
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it('returns [] for a null/empty plan', () => {
+    expect(findCharacterizationGateViolations(null)).toEqual([]);
+    expect(findCharacterizationGateViolations({ plan: { epics: [] } })).toEqual([]);
   });
 });

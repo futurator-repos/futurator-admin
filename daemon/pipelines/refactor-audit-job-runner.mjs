@@ -187,7 +187,58 @@ export async function runL3Adjudication(job, hotspots, deps) {
     return { ok: false, verdicts: [], confirmed: [], plan: null, error: String(err?.message || err) };
   }
   const parsed = parseL3Output(res?.output || '');
-  return { ok: true, ...parsed };
+  const gateViolations = findCharacterizationGateViolations(parsed.plan);
+  return { ok: true, ...parsed, gateViolations };
+}
+
+// ── Epic E1: characterization-net gate ──
+// A deletion/repoint story is dangerous on a no-test app. This deterministic
+// check scans a generated planOutput and flags any deletion/repoint story that
+// does NOT (transitively, within its epic) depend on a characterization-net
+// story (a thin Playwright net authored first). It's a guard rail on the L3
+// plan — the dev pipeline is what actually enforces tests-before-mutation at
+// run time (E2), but flagging here catches a mis-sequenced plan before it ships.
+
+const DELETION_RE = /\b(delete|remove|drop|retire|repoint|consolidat|migrat|extract)\b/i;
+const CHAR_NET_RE = /\b(characteriz|playwright|test net|e2e|smoke|golden|snapshot|baseline test)\b/i;
+
+/**
+ * @param {any} planOutput  a { plan: { epics: [{ stories: [...] }] } } tree
+ * @returns {Array<{ epicId: string, storyId: string, reason: string }>}
+ */
+export function findCharacterizationGateViolations(planOutput) {
+  const epics = planOutput?.plan?.epics;
+  if (!Array.isArray(epics)) return [];
+  const violations = [];
+  for (const epic of epics) {
+    const stories = Array.isArray(epic?.stories) ? epic.stories : [];
+    // ids of stories that ARE a characterization net (by title/criteria text).
+    const netIds = new Set(
+      stories
+        .filter((s) => {
+          const text = `${s?.title || ''} ${(s?.criteria || []).map((c) => c?.text || '').join(' ')}`;
+          return CHAR_NET_RE.test(text) || (s?.criteria || []).some((c) => c?.needsBrowser);
+        })
+        .map((s) => s.id),
+    );
+    for (const s of stories) {
+      const text = `${s?.title || ''} ${(s?.criteria || []).map((c) => c?.text || '').join(' ')}`;
+      const isMutator = DELETION_RE.test(text);
+      if (!isMutator || netIds.has(s.id)) continue;
+      const deps = Array.isArray(s?.dependsOn) ? s.dependsOn : [];
+      const guardedByNet = deps.some((d) => netIds.has(d));
+      // a net story anywhere earlier in the epic also counts (sequenced before).
+      const hasAnyNet = netIds.size > 0;
+      if (!guardedByNet && !hasAnyNet) {
+        violations.push({
+          epicId: epic.id,
+          storyId: s.id,
+          reason: 'deletion/repoint story with no characterization-net dependency or sibling',
+        });
+      }
+    }
+  }
+  return violations;
 }
 
 /**

@@ -7179,7 +7179,12 @@ async function executeRefactorAuditJob(job) {
             confirmed: l3?.confirmed?.length ?? 0,
             rejected: (l3?.verdicts?.length ?? 0) - (l3?.confirmed?.length ?? 0),
             hasPlan: !!l3?.plan,
+            // E1 — flag a mis-sequenced plan (deletion/repoint with no test net).
+            gateViolations: l3?.gateViolations?.length ?? 0,
           });
+          if (l3?.gateViolations?.length) {
+            log('warn', `[${short}] L3 plan has ${l3.gateViolations.length} characterization-gate violation(s) — operator should review before executing`);
+          }
         } catch (l3err) {
           log('warn', `[${short}] refactor-audit L3 stage failed (recon-only audit kept): ${l3err?.message || l3err}`);
           await pushEvent(jobId, 'assess.l3', 'L3-ADJUDICATOR', 'assess.l3.failed', {
