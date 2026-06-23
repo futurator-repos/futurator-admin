@@ -692,14 +692,20 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `            actual = await page.evaluate((expr) => {`,
           `              const h = window.__harness;`,
           `              if (!h) return undefined;`,
-          `              const root = { snapshot: (typeof h.snapshot === 'function' ? h.snapshot() : h.snapshot), events: h.events };`,
+          `              const root = { snapshot: (typeof h.snapshot === 'function' ? h.snapshot() : h.snapshot), events: h.events, eventTypes: Array.isArray(h.events) ? h.events.map(e => (e && (e.type || e.kind || e.name)) || e).filter(v => v != null) : [] };`,
           `              return String(expr || '').split('.').reduce((o, k) => (o == null ? undefined : o[k]), root);`,
           `            }, step.expr || '');`,
           `            pass = assertOp(step.op, actual, step.expected);`,
           `            if (!pass) await page.waitForTimeout(100);`,
           `          } while (!pass && Date.now() < deadline);`,
           `          if (!pass) {`,
-          `            throw new Error('ASSERT_FAILED: ' + (step.expr || '') + ' ' + (step.op || 'eq') + ' ' + JSON.stringify(step.expected) + ' (actual=' + JSON.stringify(actual) + ')');`,
+          // DV-3 (agentic-l2-autonomy-backlog §4) — declare-conform runtime half.
+          // Distinguish a key the running app NEVER publishes (snapshot-shape
+          // drift: the author asserted snapshot.score but the app never sets it)
+          // from a genuine value mismatch — otherwise drift reads as a silent
+          // undefined-vs-expected fail. RULE-4 is the author-side half (qa-author).
+          `            const drift = await page.evaluate((expr) => { const h = window.__harness; if (!h) return false; const snap = (typeof h.snapshot === 'function' ? h.snapshot() : h.snapshot) || {}; const parts = String(expr || '').split('.'); if (parts[0] === 'snapshot' && parts[1] != null) { return !(parts[1] in snap); } return false; }, step.expr || '');`,
+          `            throw new Error((drift ? 'SNAPSHOT_KEY_DRIFT: ' : 'ASSERT_FAILED: ') + (step.expr || '') + ' ' + (step.op || 'eq') + ' ' + JSON.stringify(step.expected) + ' (actual=' + JSON.stringify(actual) + (drift ? '; the running app never publishes this snapshot key — declare-conform drift, the seam shape and the asserted key disagree' : '') + ')');`,
           `          }`,
           `        }`,
           // VQA v3 Phase 2 (2026-06-23) — waitForEvent: block until a seam
@@ -711,7 +717,7 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `              const expr = args[0], op = args[1], expected = args[2];`,
           `              const cmp = (o, a, e) => { switch (o || 'eq') { case 'eq': return a === e; case 'neq': return a !== e; case 'gt': return Number(a) > Number(e); case 'gte': return Number(a) >= Number(e); case 'lt': return Number(a) < Number(e); case 'lte': return Number(a) <= Number(e); case 'contains': return Array.isArray(a) ? a.includes(e) : String(a).includes(String(e)); case 'truthy': return !!a; case 'falsy': return !a; default: return false; } };`,
           `              const h = window.__harness; if (!h) return false;`,
-          `              const root = { snapshot: (typeof h.snapshot === 'function' ? h.snapshot() : h.snapshot), events: h.events };`,
+          `              const root = { snapshot: (typeof h.snapshot === 'function' ? h.snapshot() : h.snapshot), events: h.events, eventTypes: Array.isArray(h.events) ? h.events.map(e => (e && (e.type || e.kind || e.name)) || e).filter(v => v != null) : [] };`,
           `              const actual = String(expr || '').split('.').reduce((o, k) => (o == null ? undefined : o[k]), root);`,
           `              return cmp(op, actual, expected);`,
           `            }, [step.expr, step.op, step.expected], { timeout: Math.min(step.timeoutMs || 5000, 15000), polling: 100 });`,
@@ -745,6 +751,18 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `          const forced = await page.evaluate((s) => { const h = window.__harness; if (h && typeof h.forceStatus === 'function') { h.forceStatus(s); return true; } return false; }, step.status || 'over');`,
           `          if (!forced) { throw new Error('FORCE_UNAVAILABLE: window.__harness.forceStatus is not exposed (seam is observe-only or unmounted) — cannot reach ' + (step.status || 'over')); }`,
           `        }`,
+          // QR-4 (agentic-l2-autonomy-backlog §6) — seed: drive the seam to an
+          // initial state via the test-only dispatch command (e.g. seed a score /
+          // entities before the act). JSON value if parseable, else the raw value.
+          // Fails loud if the seam exposes no dispatch (was a phantom no-op before).
+          `        else if (step.action === 'seed') {`,
+          `          const seeded = await page.evaluate((v) => { const h = window.__harness; if (h && typeof h.dispatch === 'function') { let a = v; try { a = JSON.parse(v); } catch (e) {} h.dispatch(a); return true; } return false; }, step.value || '');`,
+          `          if (!seeded) { throw new Error('SEED_UNAVAILABLE: window.__harness.dispatch is not exposed (seam cannot be seeded) — remove the seed step or expose dispatch'); }`,
+          `        }`,
+          // QR-4 — NO silent pass for a grammar verb the driver does not implement
+          // (upload/download/stroke today). A phantom ok:true is false confidence —
+          // mark it failed so the contract surfaces the gap instead of green-lighting.
+          `        else { throw new Error('UNIMPLEMENTED_VERB: \\'' + step.action + '\\' is in the probe grammar but has no driver handler — do not treat as a passing step'); }`,
           `        stepLog.push({ action: step.action, ok: true });`,
           `      } catch (stepErr) {`,
           `        stepLog.push({ action: step.action, ok: false, error: String(stepErr).slice(0, 200) });`,
@@ -963,6 +981,17 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `  const start = Date.now();`,
           `  const wallclockMs = (t.budgetWallclockSec ? t.budgetWallclockSec * 1000 : defaultWallclockMs);`,
           `  const screenshotUrl = cdnPrefix + t.id + '.png';`,
+          // QAA-3 / QR-1 (agentic-l2-autonomy-backlog §3/§6) — route a needs-probe
+          // test to the honest lane AT EXECUTE: an interaction/temporal-gated
+          // expectation with no probe flow cannot be verified by one idle frame, so
+          // a vision judge would false pass/fail it. Resolve 'uncertain' (operator
+          // triage, non-blocking) before spending a judge call — belt-and-braces
+          // with the aggregate-time needs-probe re-bucket.
+          `  const interactionGated = /\\b(after|once|when|until|press\\w*|click\\w*|tap\\w*|key|score|points?|game[\\s-]?over|level[\\s-]?complete|victory|win|paused|restart|play again|elapsed|seconds?|ticks?|countdown|animat\\w*|motion|moving|spawn\\w*|collide|collision)\\b/i.test(t.expect || '');`,
+          `  if (interactionGated && (!Array.isArray(t.flow) || t.flow.length === 0)) {`,
+          `    resolve({ testId: t.id, level: 'L1', verdict: 'uncertain', observability: 'not-idle-observable', rationale: 'NEEDS_PROBE: interaction/temporal-gated expectation with no probe flow — a single idle frame cannot verify this (author a press/wait/assert probe)', screenshotUrl, costUsd: 0, durationMs: Date.now() - start });`,
+          `    return;`,
+          `  }`,
           // 2026-06-01 — judge reads the LOCAL screenshot file (rendered by the
           // Read tool) instead of a CDN URL it cannot fetch from the sandbox
           // (the L2 "Unable to fetch the screenshot URL" failure). screenshotUrl

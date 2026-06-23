@@ -876,6 +876,21 @@ the fences below.${
                 seam
                   ? `
 
+### Build contract (DV-1/DV-4 — the seam must publish, the states must render)
+
+Before authoring tests, the feature you SHIP must satisfy two things or QA blocks it deterministically:
+
+  1. **Mount the REAL feature, not a static preview (DV-1).** The primary/assembled
+     feature MUST import and call the seam hook \`${seam.seamHook ?? 'the boilerplate seam hook'}\`
+     (and run its loop/input) so \`${seam.globalKey}\` actually publishes under the QA
+     harness. A preview that never calls it ⇒ QA blocks every probe as
+     \`SEAM_NEVER_PUBLISHED\` (a static grep catches it before any screenshot).
+  2. **Render the state-gated UI each [verify=state]/[verify=behavior] AC describes (DV-4).**
+     For an AC like "a GAME OVER overlay shows on loss", build a component that
+     renders when \`snapshot.status === 'over'\`. QA will FORCE that state via the
+     seam and assert your overlay is present — if you don't build it, the forced
+     state has nothing to show and the AC fails as a real defect.
+
 ### Route each criterion by its [verify=…] tag (VQA v3 probe model)
 
 A static idle screenshot cannot observe interaction, elapsed time, or

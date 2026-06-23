@@ -242,3 +242,38 @@ describe('DV-2 — SEAM_NEVER_PUBLISHED static seam-wiring catch', () => {
     expect(prep).not.toContain('seam-wiring.json');
   });
 });
+
+describe('interpreter honesty — QR-3 / QR-4 / QAA-3 / DV-3 guards', () => {
+  const prepCmd = (() => {
+    const p = buildPipeline();
+    const s = p.steps.find((x) => x.id === 'qa-prepare');
+    return typeof s?.command === 'string' ? s.command : '';
+  })();
+  const l1cmd = (() => {
+    const p = buildPipeline();
+    const s = p.steps.find((x) => x.id === 'qa-judge-l1');
+    return typeof s?.command === 'string' ? s.command : '';
+  })();
+
+  it('QR-4: implements the seed verb via the seam dispatch (no longer a phantom no-op)', () => {
+    expect(prepCmd).toContain("step.action === 'seed'");
+    expect(prepCmd).toContain('SEED_UNAVAILABLE');
+  });
+
+  it('QR-4: an unimplemented grammar verb FAILS loud instead of silently passing', () => {
+    expect(prepCmd).toContain('UNIMPLEMENTED_VERB');
+  });
+
+  it('QR-3: exposes eventTypes in the seam eval root for events-stream assertions', () => {
+    expect(prepCmd).toContain('eventTypes');
+  });
+
+  it('DV-3: distinguishes a never-published snapshot key (drift) from a value mismatch', () => {
+    expect(prepCmd).toContain('SNAPSHOT_KEY_DRIFT');
+  });
+
+  it('QAA-3: routes an interaction-gated L1 test with no flow to the honest NEEDS_PROBE lane', () => {
+    expect(l1cmd).toContain('NEEDS_PROBE');
+    expect(l1cmd).toContain('interactionGated');
+  });
+});

@@ -225,6 +225,42 @@ export function validateVerifyCoverage(output: PlanOutput): string[] {
   return errors;
 }
 
+/**
+ * CS-2 (Concept v2.1 / agentic-l2-autonomy-backlog §2) — collect every
+ * `verify:'manual'` AC so the concept gate can SURFACE them to the operator for
+ * confirmation (with the `manualReason`), without reclassifying them — the W5
+ * altitude rule: Concept only FLAGS `manual`; the `manual→behavior` downgrade is
+ * the QA-AUTHOR's call at story-dev (when a stub seam is known). Non-blocking:
+ * these are valid ACs, surfaced for a human decision, not rejected.
+ */
+export interface ManualAcFlag {
+  epicId: string;
+  storyId: string;
+  acId: string;
+  text: string;
+  manualReason?: string;
+}
+
+export function collectManualAcs(output: PlanOutput): ManualAcFlag[] {
+  const flags: ManualAcFlag[] = [];
+  for (const epic of output.plan.epics) {
+    for (const story of epic.stories) {
+      for (const ac of story.criteria) {
+        if (ac.verify === 'manual') {
+          flags.push({
+            epicId: epic.id,
+            storyId: story.id,
+            acId: ac.id,
+            text: ac.text,
+            manualReason: ac.manualReason,
+          });
+        }
+      }
+    }
+  }
+  return flags;
+}
+
 export function validatePlanReferences(output: PlanOutput): string[] {
   const errors: string[] = [];
 

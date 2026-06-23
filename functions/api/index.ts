@@ -226,7 +226,7 @@ import {
   validatePlanOutputJson,
   epicsToPlanOutput,
 } from '../shared/services/plan-generation-service';
-import { validateVerifyCoverage } from '../shared/schemas/plan-output-schema';
+import { validateVerifyCoverage, collectManualAcs } from '../shared/schemas/plan-output-schema';
 import { buildPmPlanPrompt } from '../shared/prompts/pm-plan-prompt';
 import { computePlanWaves, epicsInPlanWave } from '../shared/services/plan-waves';
 import type { PipelineDefinition } from '../shared/types/agent-orchestrator';
@@ -2113,7 +2113,13 @@ app.post('/api/plans/:id/apply-plan', async (c) => {
     );
   }
 
-  return c.json({ plan: result.plan, epics: result.epics });
+  // CS-2 — surface (do not reclassify) any verify:'manual' ACs so the operator
+  // can confirm them with their reason. Non-blocking; empty array when none.
+  return c.json({
+    plan: result.plan,
+    epics: result.epics,
+    manualAcsForReview: collectManualAcs(output),
+  });
 });
 
 // POST /api/plans/:id/apply-concept-plan — persist the Concept Router's output.
@@ -2829,7 +2835,13 @@ app.post('/api/plans/:id/import-plan', async (c) => {
     );
   }
 
-  return c.json({ plan: result.plan, epics: result.epics });
+  // CS-2 — surface (do not reclassify) any verify:'manual' ACs so the operator
+  // can confirm them with their reason. Non-blocking; empty array when none.
+  return c.json({
+    plan: result.plan,
+    epics: result.epics,
+    manualAcsForReview: collectManualAcs(output),
+  });
 });
 
 // POST /api/plans/:id/start — kick the plan from concept into developing.

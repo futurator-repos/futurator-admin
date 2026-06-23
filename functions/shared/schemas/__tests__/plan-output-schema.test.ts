@@ -7,6 +7,7 @@ import {
   manualReasonSchema,
   validateReferenceSections,
   validateVerifyCoverage,
+  collectManualAcs,
   planOutputSchema,
   type PlanOutput,
 } from '../plan-output-schema';
@@ -330,5 +331,56 @@ describe('validateVerifyCoverage (CS-1 — mandatory verify on browser ACs)', ()
     // export round-trip of pre-Concept-v2 plans breaks.
     const r = planOutputSchema.safeParse(planWithAc({ needsBrowser: true }));
     expect(r.success).toBe(true);
+  });
+});
+
+describe('collectManualAcs (CS-2 — surface manual ACs for operator confirmation)', () => {
+  function planWithCriteria(criteria) {
+    return {
+      plan: {
+        name: 'demo-plan',
+        description: 'a plan long enough to satisfy the schema minimum.',
+        epics: [
+          {
+            id: 'E1',
+            title: 'Epic one',
+            goal: 'a goal long enough to pass.',
+            dependsOn: [],
+            stories: [
+              {
+                id: 'S1',
+                title: 'Story one',
+                description: 'a description long enough.',
+                dependsOn: [],
+                touchPoints: ['src/a.ts'],
+                criteria,
+              },
+            ],
+          },
+        ],
+      },
+    };
+  }
+
+  it('collects every manual AC with its reason, and nothing else', () => {
+    const flags = collectManualAcs(
+      planWithCriteria([
+        { id: 'AC-1', text: 'real stripe charge', verify: 'manual', manualReason: 'real-payment' },
+        { id: 'AC-2', text: 'idle frame', needsBrowser: true, verify: 'appearance' },
+      ]),
+    );
+    expect(flags).toHaveLength(1);
+    expect(flags[0]).toMatchObject({
+      acId: 'AC-1',
+      manualReason: 'real-payment',
+      storyId: 'S1',
+      epicId: 'E1',
+    });
+  });
+
+  it('returns [] when there are no manual ACs', () => {
+    expect(
+      collectManualAcs(planWithCriteria([{ id: 'AC-1', text: 'x', verify: 'build' }])),
+    ).toEqual([]);
   });
 });
