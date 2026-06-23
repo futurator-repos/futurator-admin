@@ -44,7 +44,12 @@
     "actions.ts",
     "selectors.ts",
     "validation.ts",
-    "validators.ts"
+    "validators.ts",
+    "shared.ts",
+    "shared.tsx",
+    "client.tsx",
+    "server.ts",
+    "server.tsx"
   ],
   "$comment_coLocated": "Generic per-module CO-LOCATED files that legitimately recur once per feature module (every module has its own types.ts/utils.ts). They share a basename but are NOT a duplicated subsystem — 'consolidate the 10 types.ts onto one' is wrong advice. Excluded from duplicate-subsystem. Genuine copy-paste duplication of these is left to L3 adjudication / manual review, not the deterministic detector.",
 

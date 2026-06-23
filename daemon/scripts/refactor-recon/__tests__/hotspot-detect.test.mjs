@@ -74,6 +74,21 @@ function writeFixture(target, { calibration } = {}) {
     nodes.push({ id: `v2/${f}`, label: f.split('/').pop(), source_file: `src/components/onboarding-v2/${f}`, community: 7, resolved_in_degree: 1 });
   }
 
+  // --- 7. a version FAMILY (flow-v1 + flow-v2) → v2 is current (dropped), v1 legacy ---
+  nodes.push({ id: 'flowv1', label: 'a.ts', source_file: 'src/components/flow-v1/a.ts', community: 8, resolved_in_degree: 1 });
+  nodes.push({ id: 'flowv2', label: 'a.ts', source_file: 'src/components/flow-v2/a.ts', community: 8, resolved_in_degree: 1 });
+  // a test file with a version marker must NOT be flagged as a legacy root
+  nodes.push({ id: 'vtest', label: 'x.test.ts', source_file: 'src/components/onboarding-v2/__tests__/x.test.ts', community: 7, resolved_in_degree: 0 });
+
+  // --- 8. a Repository god-object → role-aware advice (NOT "split into repositories") ---
+  nodes.push({ id: 'repo', label: 'OrgsRepository', source_file: 'src/db/orgs-table.ts', community: 9, resolved_in_degree: 20 });
+  hubs.push({ file: 'src/db/orgs-table.ts', inDegree: 20 });
+  for (let i = 0; i < 14; i++) {
+    const mid = `repo.m${i}`;
+    nodes.push({ id: mid, label: `m${i}`, source_file: 'src/db/orgs-table.ts', community: 9 });
+    links.push({ source: 'repo', target: mid, relation: 'method' });
+  }
+
   fs.writeFileSync(path.join(target, 'graph.resolved.json'), JSON.stringify({ nodes, links }));
   fs.writeFileSync(
     path.join(target, 'resolved-imports.json'),
@@ -128,14 +143,35 @@ describe('hotspot-detect — validated invariants (NFR2 regression lock)', () =>
     expect(dupTitles.some((t) => /types\.ts/.test(t))).toBe(false);
   });
 
-  it('clusters a version-marked dir into ONE legacy root, not per-file', () => {
+  it('clusters version-marked dirs into legacy roots (per-dir, not per-file) and excludes the current version + tests', () => {
     const out = runDetect(dir);
     const ver = out.hotspots.find((h) => h.kind === 'duplicate-subsystem' && /legacy root/.test(h.title));
     expect(ver, 'version-root hotspot present').toBeTruthy();
-    // onboarding-v2/** (4 files) collapses to a single root
-    expect(ver.evidence.count).toBe(1);
-    expect(ver.evidence.totalFiles).toBe(4);
-    expect(ver.evidence.roots[0].root).toBe('src/components/onboarding-v2');
+    const rootPaths = ver.evidence.roots.map((r) => r.root);
+    // onboarding-v2 (lone, 4 files) collapses to one root; its __tests__ file is excluded
+    expect(rootPaths).toContain('src/components/onboarding-v2');
+    expect(ver.evidence.roots.find((r) => r.root === 'src/components/onboarding-v2').files).toBe(4);
+    // flow family: v1 is legacy (kept), v2 is current (dropped)
+    expect(rootPaths).toContain('src/components/flow-v1');
+    expect(rootPaths).not.toContain('src/components/flow-v2');
+  });
+
+  it('gives role-aware god-object advice (a Repository is not told to "split into repositories")', () => {
+    const out = runDetect(dir);
+    const repo = out.hotspots.find((h) => h.kind === 'god-object' && /OrgsRepository/.test(h.title));
+    expect(repo, 'OrgsRepository god-object present').toBeTruthy();
+    expect(repo.evidence.role).toBe('repository');
+    expect(repo.suggestedAction).toMatch(/already a repository/i);
+    expect(repo.suggestedAction).not.toMatch(/into ~?\d+ domain repositories/);
+  });
+
+  it('surfaces toolStatus + detected/shown counts (no silent truncation)', () => {
+    const out = runDetect(dir);
+    expect(out.toolStatus).toBeTruthy();
+    expect(out.toolStatus.knip).toMatch(/ok|empty|unavailable/);
+    expect(out.detectedCount).toBe(out.shownCount); // fixture is small — nothing capped
+    const total = Object.values(out.counts).reduce((s, n) => s + n, 0);
+    expect(total).toBe(out.hotspots.length); // counts match emitted set exactly
   });
 
   it('detects the god-object by method out-degree', () => {

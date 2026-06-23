@@ -26,7 +26,9 @@ const outDir = path.resolve(args[0] || '.')
 const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : null }
 const repo = flag('--repo') || path.dirname(outDir)
 const knipPath = flag('--knip') || path.join(outDir, 'knip.json')
-const TOP = parseInt(flag('--top') || '40', 10)
+// Default high so the REPORT is complete (no silent truncation); L3 passes its
+// own smaller --top for token-bounding. detectedCount/shownCount surface any cap.
+const TOP = parseInt(flag('--top') || '500', 10)
 
 const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')) } catch { return null } }
 
@@ -120,16 +122,40 @@ function parseKnipDeadFiles(k) {
 }
 
 // ---------- 1. GOD-OBJECTS (class with many methods + many importers) ----------
+// Role-aware advice: a Repository/Adapter with many methods is often legitimate
+// (CRUD per table / per-provider), so "split into N domain repositories" is wrong
+// advice. Tailor the suggestion to the class role and note when it may be by-design.
+function classRole(label) {
+  if (/Repository$/.test(label)) return 'repository'
+  if (/Adapter$/.test(label)) return 'adapter'
+  if (/(Service|Manager|Engine|Orchestrator)$/.test(label)) return 'service'
+  return 'class'
+}
+function godAdvice(label, role, methods) {
+  const n = Math.max(2, Math.round(methods / 7))
+  switch (role) {
+    case 'repository':
+      return `${label} is already a repository (${methods} methods). A single-table repo with many CRUD/query methods is often legitimate — confirm it spans multiple aggregates before splitting; if so, split by bounded context (e.g. reads vs writes, or per-entity), NOT into more generic "repositories".`
+    case 'adapter':
+      return `${label} is an adapter (${methods} methods). Extract shared behavior into a thin base adapter and keep provider-specifics small; do NOT split into "repositories".`
+    case 'service':
+      return `Split ${label} along responsibility seams into ~${n} focused services; repoint callers per-responsibility.`
+    default:
+      return `Split ${label} along its method seams into ~${n} smaller units; repoint importers per-unit.`
+  }
+}
 for (const n of nodes) {
   const methods = methodsOut.get(n.id) || 0
   if (methods < TH.godObjectMinMethods) continue
   const imp = importersOf(n)
-  const score = Math.min(100, methods * 1.2 + imp)
+  const role = classRole(n.label || '')
+  // a low-fan-in repository/adapter is very likely by-design → soften the score a touch
+  const score = Math.min(100, methods * 1.2 + imp) * (role === 'repository' || role === 'adapter' ? 0.85 : 1)
   hotspots.push({
     kind: 'god-object', score, severity: sev(score),
     title: `God-object: ${n.label} (${methods} methods, ${imp} importers)`,
-    files: [n.source_file], evidence: { methods, importers: imp, community: n.community },
-    suggestedAction: `Split ${n.label} into ~${Math.max(2, Math.round(methods / 7))} domain repositories along its method seams; repoint importers per-domain.`,
+    files: [n.source_file], evidence: { methods, importers: imp, community: n.community, role, file: n.source_file },
+    suggestedAction: godAdvice(n.label, role, methods),
   })
 }
 
@@ -172,10 +198,11 @@ for (const [b, files] of byBase) {
 // "135 version-marker files" bug). A file-level marker (draft-editor-v2.tsx)
 // stays its own root.
 const VER = new RegExp(calibration.versionMarkerPattern, 'i')
+const IS_TEST = (f) => /(^|\/)__tests__\//.test(f) || /\.(test|spec)\.[tj]sx?$/.test(f)
 const verRoots = new Map() // versionRoot -> Set(files)
 for (const n of fileNodes) {
   const f = n.source_file
-  if (!f) continue
+  if (!f || IS_TEST(f)) continue // tests aren't legacy roots to retire
   const segs = f.split('/')
   let root = null
   const acc = []
@@ -187,8 +214,33 @@ for (const n of fileNodes) {
   if (!verRoots.has(root)) verRoots.set(root, new Set())
   verRoots.get(root).add(f)
 }
-if (verRoots.size) {
-  const roots = [...verRoots.entries()]
+// A version-marked root with a NUMERIC version (…-v2/-v3/version2) is only legacy
+// if it is NOT the highest version in its family — v3 alongside v2 is the CURRENT
+// one, not a legacy candidate. Non-numeric markers (enhanced/hierarchical/legacy/
+// -old/copy) can't be compared, so they stay flagged for adjudication.
+function numericVersion(root) {
+  const seg = root.split('/').pop() || ''
+  const m = seg.match(/(?:-v|version)([0-9]+)\b/i)
+  return m ? { family: root.replace(/(?:-v|version)[0-9]+\b/i, ''), version: parseInt(m[1], 10) } : null
+}
+const maxByFamily = new Map()
+const versionsByFamily = new Map() // family -> Set(versions)
+for (const root of verRoots.keys()) {
+  const v = numericVersion(root)
+  if (!v) continue
+  maxByFamily.set(v.family, Math.max(maxByFamily.get(v.family) ?? 0, v.version))
+  if (!versionsByFamily.has(v.family)) versionsByFamily.set(v.family, new Set())
+  versionsByFamily.get(v.family).add(v.version)
+}
+const legacyRoots = [...verRoots.entries()].filter(([root]) => {
+  const v = numericVersion(root)
+  // Drop the CURRENT (highest) version only when the family has MULTIPLE versions
+  // (v2+v3 → v3 is current, drop it; v2 is legacy, keep). A lone -v2 stays flagged.
+  const isCurrent = v && v.version === maxByFamily.get(v.family) && versionsByFamily.get(v.family).size >= 2
+  return !isCurrent
+})
+if (legacyRoots.length) {
+  const roots = legacyRoots
     .map(([root, files]) => ({ root, files: files.size }))
     .sort((a, z) => z.files - a.files)
   const totalFiles = roots.reduce((s, r) => s + r.files, 0)
@@ -198,7 +250,7 @@ if (verRoots.size) {
     title: `Version-marked paths: ${roots.length} legacy root(s) (${totalFiles} files)`,
     files: roots.slice(0, 30).map(r => `${r.root}  (${r.files} file${r.files === 1 ? '' : 's'})`),
     evidence: { count: roots.length, totalFiles, roots: roots.slice(0, 20) },
-    suggestedAction: `Each version-marked root is a legacy candidate. Confirm the current version, prove the old root orphaned (resolved in-degree + grep), then retire the whole root via extract→repoint→delete.`,
+    suggestedAction: `Each is a legacy candidate (the current/highest version is excluded). Confirm it's superseded, prove the old root orphaned (resolved in-degree + grep), then retire the whole root via extract→repoint→delete.`,
   })
 }
 
@@ -262,8 +314,10 @@ for (const [c, ns] of commNodes) {
 // files into safe-candidate (knip says unused AND resolved fan-in 0 — two methods
 // agree) vs needs-review (knip says unused but the resolver found importers — a
 // likely knip miss on dynamic import / alias / string registry). Never blind-delete.
+let knipStatus = 'ok'
 if (knip) {
   const deadFiles = parseKnipDeadFiles(knip)
+  if (deadFiles.length === 0) knipStatus = 'empty'
   const safe = [], review = []
   for (const f of deadFiles) {
     const fanIn = inDegByFile.get(f) ?? inDegByFile.get(normalizeRel(f)) ?? 0
@@ -291,18 +345,56 @@ if (knip) {
   }
   if (!deadFiles.length) console.error('  (knip.json parsed but reported no unused files)')
 } else {
-  console.error(`! no knip.json at ${knipPath} — dead-code category skipped. Generate: cd ${repo} && npx knip --reporter json > ${path.join(outDir, 'knip.json')}`)
+  // knip unavailable (brownfield clone has no node_modules on the recon box, or
+  // knip crashed). Fall back to a DEPS-FREE weak signal: alias-resolved zero-fan-in
+  // files that aren't entrypoints/conventions/tests. Clearly labelled needs-review.
+  knipStatus = 'unavailable'
+  const EXCLUDE_DEAD = (f) =>
+    CONVENTION.has(base(f)) ||
+    CO_LOCATED.has(base(f)) ||
+    IS_TEST(f) ||
+    /\.d\.ts$/.test(f) ||
+    /\.config\.[tj]s$/.test(f) ||
+    /\.stories\.[tj]sx?$/.test(f) ||
+    /(^|\/)(middleware|instrumentation)\.[tj]s$/.test(f)
+  const orphans = fileNodes
+    .map((n) => n.source_file)
+    .filter(Boolean)
+    .filter((f) => !inDegByFile.has(f) && !EXCLUDE_DEAD(f))
+  if (orphans.length) {
+    const score = Math.min(40, 12 + orphans.length / 4)
+    hotspots.push({
+      kind: 'dead-code', score, severity: sev(score),
+      title: `Possible orphans: ${orphans.length} files with zero alias-resolved fan-in (no knip — needs-review)`,
+      files: orphans.slice(0, 40),
+      evidence: { confidence: 'needs-review', orphanCount: orphans.length, knip: 'unavailable' },
+      suggestedAction: `knip was unavailable (the recon box has no node_modules for this clone), so this is the WEAKER alias-resolve-only signal: files nothing imports. Expect false positives (route entrypoints, dynamic imports, string registries). Adjudicate each; do NOT auto-delete. For a high-confidence pass, run recon with the project's deps installed so knip can cross-check.`,
+    })
+  }
+  console.error(`! no/empty knip.json at ${knipPath} — using deps-free orphan fallback (${orphans.length} candidates).`)
 }
 
 // ---------- rank + emit ----------
 hotspots.sort((a, z) => z.score - a.score)
-const out = { generatedAt: null, repo, graphifyOutDir: outDir, counts: {}, hotspots: hotspots.slice(0, TOP) }
-for (const h of hotspots) out.counts[h.kind] = (out.counts[h.kind] || 0) + 1
+const emitted = hotspots.slice(0, TOP)
+const out = {
+  generatedAt: null,
+  repo,
+  graphifyOutDir: outDir,
+  // No silent truncation: counts are over the EMITTED set (match what's shown);
+  // detectedCount vs shownCount surface any cap.
+  detectedCount: hotspots.length,
+  shownCount: emitted.length,
+  toolStatus: { graphify: 'ok', knip: knipStatus },
+  counts: {},
+  hotspots: emitted,
+}
+for (const h of emitted) out.counts[h.kind] = (out.counts[h.kind] || 0) + 1
 fs.writeFileSync(path.join(outDir, 'hotspots.json'), JSON.stringify(out, null, 2))
 
-console.log(`HOTSPOTS for ${path.basename(repo)} — ${hotspots.length} found\n`)
+console.log(`HOTSPOTS for ${path.basename(repo)} — ${hotspots.length} detected, ${emitted.length} shown (knip:${knipStatus})\n`)
 console.log(`by kind: ${Object.entries(out.counts).map(([k, v]) => `${k}=${v}`).join('  ')}\n`)
-for (const h of hotspots.slice(0, TOP)) {
+for (const h of emitted) {
   console.log(`[${h.severity.toUpperCase().padEnd(8)} ${String(Math.round(h.score)).padStart(3)}] ${h.title}`)
 }
-console.log(`\nwrote ${path.join(path.relative(repo, outDir) || outDir, 'hotspots.json')} (top ${Math.min(TOP, hotspots.length)})`)
+console.log(`\nwrote ${path.join(path.relative(repo, outDir) || outDir, 'hotspots.json')} (${emitted.length} of ${hotspots.length})`)
