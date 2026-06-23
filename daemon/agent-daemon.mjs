@@ -7219,6 +7219,32 @@ async function executeRefactorAuditJob(job) {
         log('warn', `[${short}] refactor-audit durable-write failed (non-fatal): ${auditErr?.message || auditErr}`);
       }
 
+      // Upload the file-level graph projection to S3 (scoped knowledge-live path,
+      // CLAUDE.md-allowed) so the Assess Graph tab can render the real code graph
+      // with communities + the hotspot overlay. Non-fatal.
+      let graphUploaded = false;
+      try {
+        const graphUiPath = pathJoin(projectPath, 'graphify-out', 'graph-ui.json');
+        if (existsSync(graphUiPath)) {
+          const s3mod = await import('@aws-sdk/client-s3');
+          if (!_s3Client) _s3Client = new s3mod.S3Client({ region: REGION });
+          const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
+          const projectId = job.refactorAuditPayload?.projectId || job.projectId;
+          await _s3Client.send(
+            new s3mod.PutObjectCommand({
+              Bucket: bucket,
+              Key: `knowledge-live/${projectId}/_refactor/graph.json`,
+              Body: readFileSync(graphUiPath),
+              ContentType: 'application/json',
+              CacheControl: 'no-cache',
+            }),
+          );
+          graphUploaded = true;
+        }
+      } catch (gerr) {
+        log('warn', `[${short}] refactor-audit graph S3 upload failed (non-fatal): ${gerr?.message || gerr}`);
+      }
+
       await updateJobFields(jobId, {
         status: 'COMPLETED',
         refactorAuditSummary: {
@@ -7227,6 +7253,7 @@ async function executeRefactorAuditJob(job) {
           hotspots: result.hotspots ?? [],
           reportPath: result.reportPath ?? null,
           auditId,
+          graphAvailable: graphUploaded,
         },
       });
       log('info', `[${short}] refactor-audit completed (hotspots=${result.hotspotCount ?? 0}${adjudicated ? `, L3 confirmed=${l3.confirmed.length}` : ''})`);

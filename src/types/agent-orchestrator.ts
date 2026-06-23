@@ -211,6 +211,8 @@ export interface AgentJob {
     hotspots?: AuditHotspot[];
     auditId?: string;
     reportPath: string | null;
+    /** Whether the file-level graph projection was uploaded to S3 (Graph tab). */
+    graphAvailable?: boolean;
   };
 }
 

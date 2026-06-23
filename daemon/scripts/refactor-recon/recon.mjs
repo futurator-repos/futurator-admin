@@ -80,6 +80,10 @@ run('node', [path.join(HERE, 'alias-resolve.mjs'), repo, '--graph', path.join(ou
 // 4) hotspot-detect (ranked hotspots)
 run('node', [path.join(HERE, 'hotspot-detect.mjs'), outDir, '--repo', repo])
 
+// 4b) graph-project (file-level graph for the UI: communities + alias-resolved
+// edges + hotspot membership). Non-fatal — the report stands without it.
+run('node', [path.join(HERE, 'graph-project.mjs'), outDir, '--repo', repo], { allowFail: true })
+
 // 5) REPORT.md
 const hs = JSON.parse(fs.readFileSync(path.join(outDir, 'hotspots.json'), 'utf8'))
 const ri = (() => { try { return JSON.parse(fs.readFileSync(path.join(outDir, 'resolved-imports.json'), 'utf8')) } catch { return null } })()

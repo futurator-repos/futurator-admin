@@ -196,7 +196,11 @@ if (graphPath && fs.existsSync(graphPath)) {
   console.log(`\nmerged resolved_in_degree onto ${touched} graph nodes -> ${path.relative(repoRoot, outPath) || outPath}`)
 }
 
-// persist the resolved import map for the hotspot detector
+// persist the resolved import map for the hotspot detector + the graph projection.
+// edges = the trustworthy alias-resolved file→file import graph (graphify's own
+// edges are alias-blind); the graph view renders these.
+const edges = []
+for (const [src, tset] of outDeg) for (const t of tset) edges.push({ source: src, target: t })
 const outJson = {
   generatedAt: null,
   repo: repoRoot,
@@ -204,6 +208,7 @@ const outJson = {
   aliasResolved: resolvedAlias,
   aliasUnresolved: unresolvedAlias,
   hubs: rank,
+  edges,
 }
 const reconDir = graphPath ? path.dirname(graphPath) : path.join(repoRoot, 'graphify-out')
 try { fs.mkdirSync(reconDir, { recursive: true }) } catch {}
