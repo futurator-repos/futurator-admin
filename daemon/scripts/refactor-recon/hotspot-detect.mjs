@@ -14,11 +14,13 @@
 //                low-cohesion-split · dead-code
 //
 // USAGE:
-//   node hotspot-detect.mjs <graphifyOutDir> [--repo <root>] [--knip <knip.json>] [--top N]
+//   node hotspot-detect.mjs <graphifyOutDir> [--repo <root>] [--knip <knip.json>] [--top N] [--calibration <path>]
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
+const HERE = path.dirname(fileURLToPath(import.meta.url))
 const args = process.argv.slice(2)
 const outDir = path.resolve(args[0] || '.')
 const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : null }
@@ -27,6 +29,28 @@ const knipPath = flag('--knip') || path.join(outDir, 'knip.json')
 const TOP = parseInt(flag('--top') || '40', 10)
 
 const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')) } catch { return null } }
+
+// ── A4: calibration config (externalized framework heuristics) ──
+// --calibration <path> overrides the sibling recon-calibration.json default so
+// other frameworks can tune CONVENTION filenames / UI-dir / thresholds.
+const calibration = loadCalibration(flag('--calibration') || path.join(HERE, 'recon-calibration.json'))
+
+function loadCalibration(p) {
+  const DEFAULTS = {
+    conventionFilenames: ['route.ts', 'route.tsx', 'route.js', 'page.tsx', 'page.jsx', 'layout.tsx',
+      'loading.tsx', 'error.tsx', 'not-found.tsx', 'template.tsx', 'default.tsx', 'middleware.ts',
+      'index.ts', 'index.tsx', 'index.js', 'opengraph-image.tsx', 'sitemap.ts', 'robots.ts'],
+    uiDirPattern: 'components/(ui|primitives)/',
+    versionMarkerPattern: '(-v[123]\\b|version[123]|enhanced|hierarchical|legacy|deprecated|-old\\b|-new\\b|copy|_bak)',
+    thresholds: { godObjectMinMethods: 12, lowCohesionMinNodes: 25, lowCohesionMaxCohesion: 0.12, severityCritical: 80, severityHigh: 55, severityMedium: 30 },
+  }
+  const loaded = readJson(p)
+  if (!loaded) { if (p) console.error(`  (calibration ${p} unreadable — using built-in defaults)`); return DEFAULTS }
+  // shallow-merge so a partial config still gets every default key
+  return { ...DEFAULTS, ...loaded, thresholds: { ...DEFAULTS.thresholds, ...(loaded.thresholds || {}) } }
+}
+
+const TH = calibration.thresholds
 
 // prefer the resolved graph (carries resolved_in_degree)
 const graph = readJson(path.join(outDir, 'graph.resolved.json')) || readJson(path.join(outDir, 'graph.json'))
@@ -54,12 +78,51 @@ for (const l of links) {
 }
 
 const hotspots = []
-const sev = (s) => s >= 80 ? 'critical' : s >= 55 ? 'high' : s >= 30 ? 'medium' : 'low'
+const sev = (s) => s >= TH.severityCritical ? 'critical' : s >= TH.severityHigh ? 'high' : s >= TH.severityMedium ? 'medium' : 'low'
+
+// strip a leading "./" / repo-abs prefix so knip paths and resolved-import keys compare
+function normalizeRel(f) {
+  if (!f) return f
+  let r = String(f).replace(/^\.\//, '')
+  if (path.isAbsolute(r)) { const rel = path.relative(repo, r); if (rel && !rel.startsWith('..')) r = rel }
+  return r
+}
+
+// A2: parse `knip --reporter json` across versions. Known shapes:
+//   v5+ object map:   { "files": ["a.ts", ...], "issues": [{ file, exports, ... }] }
+//   older/array form: [{ file, ... }]  OR  { files: [{name|file}], ... }
+//   "unused files" may live under .files (string[]), .issues[].file with a
+//   files-type flag, or per-file issue objects with no exports. Be liberal.
+function parseKnipDeadFiles(k) {
+  const out = new Set()
+  const add = (v) => { const r = normalizeRel(typeof v === 'string' ? v : (v?.file || v?.name)); if (r) out.add(r) }
+  if (Array.isArray(k)) { for (const it of k) add(it); return [...out] }
+  if (k && typeof k === 'object') {
+    // top-level unused-files list (most common: string[])
+    if (Array.isArray(k.files)) for (const f of k.files) add(f)
+    // some versions nest unused files under issues with a type/marker
+    if (Array.isArray(k.issues)) {
+      for (const i of k.issues) {
+        if (!i) continue
+        // a whole-file issue: unused/isUnused flag, OR an issue with no symbol-level detail
+        if (i.unused === true || i.isUnused === true || i.type === 'files') add(i.file || i.name)
+        // some shapes carry { files: { 'path': true } } per issue
+        if (i.files && typeof i.files === 'object' && !Array.isArray(i.files)) for (const f of Object.keys(i.files)) add(f)
+      }
+    }
+    // object-map form { 'path/to/file.ts': { ... } } where the value flags a file
+    for (const [key, val] of Object.entries(k)) {
+      if (key === 'files' || key === 'issues') continue
+      if (/\.(tsx?|jsx?|mjs|cjs)$/.test(key) && val) add(key)
+    }
+  }
+  return [...out]
+}
 
 // ---------- 1. GOD-OBJECTS (class with many methods + many importers) ----------
 for (const n of nodes) {
   const methods = methodsOut.get(n.id) || 0
-  if (methods < 12) continue
+  if (methods < TH.godObjectMinMethods) continue
   const imp = importersOf(n)
   const score = Math.min(100, methods * 1.2 + imp)
   hotspots.push({
@@ -72,10 +135,9 @@ for (const n of nodes) {
 
 // ---------- 2. DUPLICATE SUBSYSTEMS (same basename across dirs + version markers) ----------
 // Exclude framework-convention filenames — these are REQUIRED to repeat, not duplication.
-const CONVENTION = new Set(['route.ts', 'route.tsx', 'route.js', 'page.tsx', 'page.jsx', 'layout.tsx',
-  'loading.tsx', 'error.tsx', 'not-found.tsx', 'template.tsx', 'default.tsx', 'middleware.ts',
-  'index.ts', 'index.tsx', 'index.js', 'opengraph-image.tsx', 'sitemap.ts', 'robots.ts'])
-const isUiFile = (f) => /components\/(ui|primitives)\//.test(f || '')
+const CONVENTION = new Set(calibration.conventionFilenames)
+const UI_DIR_RE = new RegExp(calibration.uiDirPattern)
+const isUiFile = (f) => UI_DIR_RE.test(f || '')
 const fileNodes = nodes.filter(isFileNode)
 const byBase = new Map()
 for (const n of fileNodes) {
@@ -99,7 +161,7 @@ for (const [b, files] of byBase) {
     suggestedAction: `Consolidate the ${list.length} "${b}" implementations onto the highest-fan-in one (${list[0].f}); repoint the rest, then delete after grep shows zero dependents.`,
   })
 }
-const VER = /(-v[123]\b|version[123]|enhanced|hierarchical|legacy|deprecated|-old\b|-new\b|copy|_bak)/i
+const VER = new RegExp(calibration.versionMarkerPattern, 'i')
 const verFiles = [...new Set(fileNodes.map(n => n.source_file).filter(f => VER.test(f)))]
 if (verFiles.length) {
   const score = Math.min(100, 30 + verFiles.length * 2)
@@ -113,8 +175,11 @@ if (verFiles.length) {
 
 // ---------- 3. DESIGN-SYSTEM CONSOLIDATION (canonical UI hub vs duplicate UI dirs) ----------
 const uiDirs = new Map()
+// derive the dir-capture from the calibrated UI pattern: capture everything up
+// to and including the ui|primitives segment (drop the trailing slash group).
+const UI_DIR_CAPTURE = new RegExp(`(.*${calibration.uiDirPattern.replace(/\/$/, '').replace('(ui|primitives)', '(?:ui|primitives)')})\\/`)
 for (const n of fileNodes) {
-  const m = /(.*components\/(?:ui|primitives))\//.exec(n.source_file || '')
+  const m = UI_DIR_CAPTURE.exec(n.source_file || '')
   if (!m) continue
   uiDirs.set(m[1], (uiDirs.get(m[1]) || 0) + importersOf(n))
 }
@@ -149,11 +214,11 @@ const labelComm = (c) => {
   return top ? `${base(dirOf(top.source_file))}/… (${top.label})` : `community ${c}`
 }
 for (const [c, ns] of commNodes) {
-  if (ns.length < 25) continue
+  if (ns.length < TH.lowCohesionMinNodes) continue
   const inE = internal.get(c) || 0, bE = boundary.get(c) || 0
   const cohesion = inE + bE === 0 ? 0 : inE / (inE + bE)
-  if (cohesion > 0.12) continue
-  const score = Math.min(100, 30 + ns.length / 2 + (0.12 - cohesion) * 200)
+  if (cohesion > TH.lowCohesionMaxCohesion) continue
+  const score = Math.min(100, 30 + ns.length / 2 + (TH.lowCohesionMaxCohesion - cohesion) * 200)
   hotspots.push({
     kind: 'low-cohesion-split', score, severity: sev(score),
     title: `Low-cohesion module (${ns.length} nodes, cohesion ${cohesion.toFixed(3)}): ${labelComm(c)}`,
@@ -163,20 +228,39 @@ for (const [c, ns] of commNodes) {
   })
 }
 
-// ---------- 5. DEAD-CODE (knip ∩ zero resolved fan-in = high confidence) ----------
+// ---------- 5. DEAD-CODE (knip ∩ resolved fan-in = confidence labels) ----------
+// A2: robustly parse knip --reporter json ACROSS VERSIONS, then split the dead
+// files into safe-candidate (knip says unused AND resolved fan-in 0 — two methods
+// agree) vs needs-review (knip says unused but the resolver found importers — a
+// likely knip miss on dynamic import / alias / string registry). Never blind-delete.
 if (knip) {
-  // knip --reporter json shape: { files: [...], issues: [{file, exports, ...}] } (version-dependent)
-  const deadFiles = new Set([...(knip.files || []), ...((knip.issues || []).filter(i => i.unused || i.isUnused).map(i => i.file))].filter(Boolean))
-  const confirmed = [...deadFiles].filter(f => (inDegByFile.get(f) ?? 0) === 0)
-  if (confirmed.length) {
-    const score = Math.min(70, 20 + confirmed.length)
+  const deadFiles = parseKnipDeadFiles(knip)
+  const safe = [], review = []
+  for (const f of deadFiles) {
+    const fanIn = inDegByFile.get(f) ?? inDegByFile.get(normalizeRel(f)) ?? 0
+    ;(fanIn === 0 ? safe : review).push({ f, fanIn })
+  }
+  if (safe.length) {
+    const score = Math.min(70, 20 + safe.length)
     hotspots.push({
       kind: 'dead-code', score, severity: sev(score),
-      title: `Dead files: ${confirmed.length} knip-flagged AND zero resolved fan-in`,
-      files: confirmed.slice(0, 40), evidence: { knipFlagged: deadFiles.size, confirmedZeroFanIn: confirmed.length },
-      suggestedAction: `Safe-delete candidates (two methods agree). Still gate behind a behavioral net; verify no dynamic import via grep.`,
+      title: `Dead files: ${safe.length} safe-candidate (knip-unused AND zero resolved fan-in)`,
+      files: safe.map(x => x.f).slice(0, 40),
+      evidence: { knipFlagged: deadFiles.length, confirmedZeroFanIn: safe.length, needsReview: review.length, confidence: 'safe-candidate' },
+      suggestedAction: `Safe-delete candidates (two methods agree). Still gate behind a behavioral net; verify no dynamic import via grep before deleting.`,
     })
   }
+  if (review.length) {
+    const score = Math.min(45, 15 + review.length)
+    hotspots.push({
+      kind: 'dead-code', score, severity: sev(score),
+      title: `Possibly-dead files: ${review.length} knip-unused BUT resolver found importers (needs-review)`,
+      files: review.map(x => x.f).slice(0, 40),
+      evidence: { knipFlagged: deadFiles.length, needsReview: review.length, confidence: 'needs-review' },
+      suggestedAction: `knip flagged these unused, but alias-resolution found importers — likely a knip miss (dynamic import / string registry / re-export). Adjudicate each before any delete; do NOT auto-remove.`,
+    })
+  }
+  if (!deadFiles.length) console.error('  (knip.json parsed but reported no unused files)')
 } else {
   console.error(`! no knip.json at ${knipPath} — dead-code category skipped. Generate: cd ${repo} && npx knip --reporter json > ${path.join(outDir, 'knip.json')}`)
 }

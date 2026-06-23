@@ -1,0 +1,41 @@
+{
+  "$comment": "Detector calibration for hotspot-detect.mjs (Epic A4). Externalized so other frameworks/repos can tune the heuristics without editing the detector. Loaded by hotspot-detect.mjs with these values as the built-in default; pass --calibration <path> to override. Defaults are tuned for Next.js App Router + TS.",
+
+  "conventionFilenames": [
+    "route.ts",
+    "route.tsx",
+    "route.js",
+    "page.tsx",
+    "page.jsx",
+    "layout.tsx",
+    "loading.tsx",
+    "error.tsx",
+    "not-found.tsx",
+    "template.tsx",
+    "default.tsx",
+    "middleware.ts",
+    "index.ts",
+    "index.tsx",
+    "index.js",
+    "opengraph-image.tsx",
+    "sitemap.ts",
+    "robots.ts"
+  ],
+  "$comment_convention": "Framework-convention filenames that are REQUIRED to repeat across dirs (Next.js App Router). Excluded from duplicate-subsystem detection so they never produce 'route.ts ×N' false positives (FR7).",
+
+  "uiDirPattern": "components/(ui|primitives)/",
+  "$comment_uiDir": "Files under these dirs are design-system primitives. Duplicate basenames among them roll up under design-system-consolidation instead of duplicate-subsystem (FR7).",
+
+  "versionMarkerPattern": "(-v[123]\\b|version[123]|enhanced|hierarchical|legacy|deprecated|-old\\b|-new\\b|copy|_bak)",
+  "$comment_versionMarker": "Filenames carrying explicit version/legacy markers → duplicate-subsystem 'version-marker' hotspot (legacy candidates for retire via extract→repoint→delete).",
+
+  "thresholds": {
+    "godObjectMinMethods": 12,
+    "lowCohesionMinNodes": 25,
+    "lowCohesionMaxCohesion": 0.12,
+    "severityCritical": 80,
+    "severityHigh": 55,
+    "severityMedium": 30
+  },
+  "$comment_thresholds": "godObjectMinMethods: a class needs ≥ this many method-out edges to count. lowCohesion*: community size + internal/(internal+boundary) cohesion gate. severity*: score buckets (≥critical→critical, ≥high→high, ≥medium→medium, else low)."
+}
