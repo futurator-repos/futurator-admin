@@ -175,6 +175,73 @@ export function StoryLiveOutput({ jobId, hideResponse }: StoryLiveOutputProps) {
         }
         continue;
       }
+      // Data Privacy lane emits privacy.* events (3rd-party audit trail).
+      if (et.startsWith('privacy.')) {
+        const x = ev as AgentEvent & {
+          projectPath?: string;
+          serviceHost?: string;
+          note?: string;
+          source?: string;
+          version?: string;
+          tier?: string;
+          cards?: number;
+          regulation?: string;
+          detected?: number;
+          scannedFiles?: number;
+          totalDetected?: number;
+          regulations?: string[];
+          durationMs?: number;
+          stream?: string;
+          data?: string;
+          reason?: string;
+          message?: string;
+        };
+        const common = { stepId: ev.stepId, agentId: ev.agentId, timestamp: ev.timestamp };
+        if (et === 'privacy.started') {
+          items.push({
+            type: 'step_start',
+            text: `Data Privacy Assessment started${x.serviceHost ? ` · service ${x.serviceHost}` : ''}`,
+            ...common,
+          });
+        } else if (et === 'privacy.transfer') {
+          items.push({ type: 'status', text: `↔ ${x.note || 'data boundary'}`, ...common });
+        } else if (et === 'privacy.rulepack') {
+          items.push({
+            type: 'status',
+            text: `⇩ rulepack ${x.version || '?'} (tier ${x.tier || '?'}, ${x.cards ?? 0} cards) from ${x.source || '?'}`,
+            ...common,
+          });
+        } else if (et === 'privacy.regulation') {
+          items.push({
+            type: 'status',
+            text: `  ${x.regulation}: ${x.detected ?? 0} findings · ${x.scannedFiles ?? 0} files`,
+            ...common,
+          });
+        } else if (et === 'privacy.step.output') {
+          for (const raw of String(x.data || '').split('\n')) {
+            const line = raw.replace(/\s+$/, '');
+            if (line)
+              items.push({
+                type: x.stream === 'stderr' ? 'error' : 'status',
+                text: line,
+                ...common,
+              });
+          }
+        } else if (et === 'privacy.completed') {
+          items.push({
+            type: 'status',
+            text: `✓ privacy completed — ${x.totalDetected ?? 0} findings (${(x.regulations || []).join(', ')})${x.durationMs ? ` · ${x.durationMs}ms` : ''}`,
+            ...common,
+          });
+        } else if (et === 'privacy.failed') {
+          items.push({
+            type: 'error',
+            text: `PRIVACY FAILED [${x.reason || 'error'}] ${x.message || ''}`,
+            ...common,
+          });
+        }
+        continue;
+      }
       if (ev.eventType === 'tool_use') {
         const match = toolResultsByIdx[resultIdx];
         resultIdx++;

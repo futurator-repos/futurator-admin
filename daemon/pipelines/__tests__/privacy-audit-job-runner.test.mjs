@@ -80,19 +80,39 @@ describe('summarizePrivacyReport', () => {
 });
 
 describe('runPrivacyAuditJob', () => {
-  it('happy path emits started→completed and returns the summary + report', async () => {
+  it('happy path emits the full audit trail (started→transfer→rulepack→regulation→completed)', async () => {
     const events = [];
     const pushEvent = vi.fn(async (_j, _s, _a, et) => events.push(et));
     const res = await runPrivacyAuditJob(job(), {
       runPrivacy: vi.fn(async () => ({ code: 0 })),
-      readReport: vi.fn(async () => report(120)),
+      readReport: vi.fn(async () => ({ ...report(120), rulepack_source: 'https://svc/v1/rulepack' })),
       pushEvent,
+      serviceUrl: 'https://fm43v45ux7.execute-api.us-east-1.amazonaws.com',
     });
     expect(res.ok).toBe(true);
     expect(res.summary.totalDetected).toBe(121);
     expect(res.report).toBeTruthy(); // full report for S3
+    // 3rd-party audit trail is in the log
     expect(events).toContain('privacy.started');
+    expect(events).toContain('privacy.transfer'); // data-boundary note
+    expect(events).toContain('privacy.rulepack'); // what came back from the service
+    expect(events).toContain('privacy.regulation'); // per-reg breakdown
     expect(events).toContain('privacy.completed');
+  });
+
+  it('transfer event names the service host (never the token)', async () => {
+    const data = [];
+    const pushEvent = vi.fn(async (_j, _s, _a, et, d) => data.push({ et, d }));
+    await runPrivacyAuditJob(job(), {
+      runPrivacy: vi.fn(async () => ({ code: 0 })),
+      readReport: vi.fn(async () => report(10)),
+      pushEvent,
+      serviceUrl: 'https://host.example.com/base?secret=should-not-appear',
+    });
+    const started = data.find((x) => x.et === 'privacy.started');
+    expect(started.d.serviceHost).toBe('host.example.com');
+    const all = JSON.stringify(data);
+    expect(all).not.toMatch(/should-not-appear/); // query/token never logged
   });
 
   it('classifies a child failure (non-fatal upstream)', async () => {

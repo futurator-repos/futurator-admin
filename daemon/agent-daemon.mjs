@@ -7232,6 +7232,7 @@ async function executeRefactorAuditJob(job) {
           runPrivacy: runPrivacyChild,
           readReport: async (p) => JSON.parse(readFileSync(p, 'utf8')),
           pushEvent,
+          serviceUrl: process.env.PRIVACY_SERVICE_URL || '',
         }).catch((e) => ({ ok: false, reason: 'privacy-threw', error: String(e?.message || e) }))
       : null;
 

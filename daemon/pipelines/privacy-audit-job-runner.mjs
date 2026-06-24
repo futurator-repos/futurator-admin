@@ -91,7 +91,20 @@ export async function runPrivacyAuditJob(job, deps) {
       ? deps.pushEvent(jobId, 'privacy', 'PRIVACY', eventType, data)
       : Promise.resolve();
 
-  await emit('privacy.started', { projectPath });
+  // serviceHost — host only (never the key), so the log shows WHERE rules came
+  // from without leaking the token. The 3rd-party boundary is auditable.
+  const serviceHost = (() => {
+    try { return deps?.serviceUrl ? new URL(deps.serviceUrl).host : null; } catch { return deps?.serviceUrl ?? null; }
+  })();
+  await emit('privacy.started', { projectPath, serviceHost });
+  // Audit the data boundary BEFORE the run: only rules cross in, only findings
+  // (to a LOCAL file) cross out — the source code never leaves the box.
+  await emit('privacy.transfer', {
+    direction: 'boundary',
+    note: serviceHost
+      ? `outbound: GET ${serviceHost}/v1/rulepack (rules in) · source code NOT transmitted · findings written to ${outPath} (local)`
+      : 'no service configured — using bundled rulepack (no network)',
+  });
 
   let run;
   try {
@@ -125,10 +138,25 @@ export async function runPrivacyAuditJob(job, deps) {
   }
 
   const summary = summarizePrivacyReport(report);
+  // Audit the inbound transfer that actually happened: which rulepack came back
+  // from the 3rd party (source URL, version, tier, card count) — traceability.
+  await emit('privacy.rulepack', {
+    source: report?.rulepack_source ?? null,
+    version: report?.rulepack_version ?? null,
+    tier: report?.tier ?? null,
+    cards: report?.cards_loaded ?? 0,
+  });
+  // Per-regulation finding counts (so the log shows the result breakdown, not
+  // just a total).
+  for (const reg of summary.regulations) {
+    const s = summary.byRegulation[reg];
+    if (s) await emit('privacy.regulation', { regulation: reg, detected: s.detectedCount, scannedFiles: s.scannedFiles });
+  }
   await emit('privacy.completed', {
     totalDetected: summary.totalDetected,
     tier: summary.tier,
     regulations: summary.regulations,
+    durationMs: summary.durationMs,
   });
   return { ok: true, status: 'completed', summary, report, outPath };
 }
