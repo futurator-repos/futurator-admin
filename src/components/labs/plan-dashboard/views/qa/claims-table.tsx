@@ -502,6 +502,40 @@ function ClaimDetail({ row, planId }: { row: ClaimRow; planId: string }) {
           </Field>
         )}
 
+        {/* Stage A.3 — human-tier banner */}
+        {test.humanVerify && (
+          <Field label="Human-verified">
+            <span style={{ fontSize: 12, color: 'var(--warning, #f59e0b)', lineHeight: 1.45 }}>
+              ⓘ This claim is not machine-judgeable
+              {test.humanVerifyReason ? ` (${test.humanVerifyReason})` : ''} — reach the state by
+              playing, then Accept it if correct.
+            </span>
+          </Field>
+        )}
+
+        {/* Stage A.4 — the actual Playwright script QA ran (visible scripts) */}
+        {test.generatedScript && (
+          <Field label="Playwright script QA ran">
+            <pre
+              style={{
+                margin: 0,
+                padding: '8px 10px',
+                fontSize: 11,
+                lineHeight: 1.5,
+                fontFamily: 'var(--font-mono)',
+                color: 'var(--text)',
+                background: 'var(--surface)',
+                border: '1px solid var(--border)',
+                borderRadius: 4,
+                overflowX: 'auto',
+                whiteSpace: 'pre',
+              }}
+            >
+              {test.generatedScript}
+            </pre>
+          </Field>
+        )}
+
         {/* Gate history */}
         {claim && claim.attempts.length > 0 && (
           <Field label="History at the wave gates (merged code)">

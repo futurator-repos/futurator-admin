@@ -560,6 +560,11 @@ interface VtJoinEntry {
   description?: string;
   expect: string;
   level?: VqaTestLevel;
+  /** Stage A.4 — the generated Playwright script (visible-scripts) for this test. */
+  generatedScript?: string;
+  /** Stage A.3 — human-tier test (operator approves; not machine-judged). */
+  humanVerify?: boolean;
+  humanVerifyReason?: string;
 }
 
 function buildVtJoin(epics: EpicWorkflow[]): Map<string, VtJoinEntry> {
@@ -577,6 +582,9 @@ function buildVtJoin(epics: EpicWorkflow[]): Map<string, VtJoinEntry> {
           description: vt.description,
           expect: vt.expect,
           level: vt.level,
+          generatedScript: vt.generatedScript,
+          humanVerify: vt.humanVerify,
+          humanVerifyReason: vt.humanVerifyReason,
         });
       }
     }
@@ -767,6 +775,9 @@ function buildVqaRollup(
                 ? undefined
                 : classifyVqaFailure(meta?.expect, tr.rationale, tr.observability),
             accepted: isAccepted || undefined,
+            generatedScript: meta?.generatedScript,
+            humanVerify: meta?.humanVerify,
+            humanVerifyReason: meta?.humanVerifyReason,
           },
           isAccepted,
         );

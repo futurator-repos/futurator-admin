@@ -144,10 +144,21 @@ function isStartScreenObservable(text: string | undefined): boolean {
   );
 }
 
-/** The reach that leaves a start-gated app's idle screen and enters gameplay. */
+/**
+ * The reach that leaves a start-gated app's idle screen and enters gameplay.
+ *
+ * pacman4 — a canvas game's "START" button is drawn ON THE CANVAS (pixels), not a
+ * DOM element, so a Playwright text selector can't click it and a single key may
+ * be the wrong one. We fire ALL the common "begin" triggers — press Enter, press
+ * Space, and click the page centre (where a START button is almost always drawn) —
+ * so SOMETHING starts the game regardless of how the app wired it. All are safe on
+ * an idle start screen. (640,360 = centre of the default 1280×720 QA viewport.)
+ */
 function deriveStartReach(): VisualTestFlowStep[] {
   return [
     { action: 'press', key: 'Enter' },
+    { action: 'press', key: 'Space' },
+    { action: 'pointer', x: 640, y: 360 },
     { action: 'wait', ms: 600 },
   ];
 }

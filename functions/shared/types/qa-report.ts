@@ -144,6 +144,11 @@ export interface VqaTestResult {
    * don't count toward the VQA fail tally or the plan's blocking verdict.
    */
   accepted?: boolean;
+  /** Stage A.4 — the generated Playwright script for this test (visible-scripts). */
+  generatedScript?: string;
+  /** Stage A.3 — human-tier test: operator approves manually (not machine-judged). */
+  humanVerify?: boolean;
+  humanVerifyReason?: string;
 }
 
 /**

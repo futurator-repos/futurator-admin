@@ -78,6 +78,11 @@ export interface VqaTestResult {
   observability?: 'observable' | 'not-idle-observable';
   /** B#2 — operator accepted this failure as a known limitation (non-blocking). */
   accepted?: boolean;
+  /** Stage A.4 — the generated Playwright script for this test (visible-scripts). */
+  generatedScript?: string;
+  /** Stage A.3 — human-tier test: operator approves manually (not machine-judged). */
+  humanVerify?: boolean;
+  humanVerifyReason?: string;
 }
 
 /** PR-8d — execute-stage lifecycle. Drives ContractGate visibility,

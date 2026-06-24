@@ -208,6 +208,27 @@ describe('authorProbeFlow — QAA-1 flow synthesis', () => {
     expect(r.test.flow!.some((s) => s.action === 'screenshot')).toBe(true);
   });
 
+  it('pacman4 — start reach fires Enter + Space + a centre click (canvas START button is not a DOM element)', () => {
+    const r = authorProbeFlow(
+      vt({}),
+      ac({
+        verify: 'behavior',
+        when: 'after clicking the START button',
+        thenObservable: 'the score increases',
+      }),
+      GAME_SEAM,
+    );
+    expect(r.action).toBe('authored');
+    const f = r.test.flow!;
+    expect(f.some((s) => s.action === 'press' && s.key === 'Enter')).toBe(true);
+    expect(f.some((s) => s.action === 'press' && s.key === 'Space')).toBe(true);
+    expect(f.some((s) => s.action === 'pointer')).toBe(true);
+    // and it still carries the explicit click on the named control + a generated script
+    expect(f.some((s) => s.action === 'click' && s.selector === 'text=START')).toBe(true);
+    expect(typeof r.test.generatedScript).toBe('string');
+    expect(r.test.generatedScript).toContain('page.keyboard.press');
+  });
+
   it('Gap 1 — leaves a start-SCREEN appearance AC idle-judged (no start reach)', () => {
     const r = authorProbeFlow(
       vt({}),
