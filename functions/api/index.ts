@@ -13404,6 +13404,7 @@ app.put('/api/github/pat', authMiddleware, async (c) => {
 // POST   /api/ultracode/runs            — create a run (QUEUED) + enqueue the daemon job
 // GET    /api/ultracode/runs            — operator-scoped corpus list
 // GET    /api/ultracode/runs/:id        — one run (owner-scoped)
+// DELETE /api/ultracode/runs/:id        — dismiss/delete a run (owner-scoped, idempotent)
 // GET    /api/ultracode/runs/:id/events — live stream (long-poll; reuses agent-events, keyed by runId)
 // GET    /api/ultracode/runs/:id/scorecard — the scored result once the daemon completes
 //
@@ -13481,6 +13482,18 @@ app.get('/api/ultracode/runs/:id', async (c) => {
     throw new AppError('FORBIDDEN', 'Only the run owner can view it', 403);
   }
   return c.json(run);
+});
+
+app.delete('/api/ultracode/runs/:id', async (c) => {
+  const operatorId = c.get('user').userId;
+  const runId = c.req.param('id');
+  const run = await ultracodeRunsRepo.getRun(runId);
+  if (!run) return c.json({ ok: true }); // already gone — idempotent
+  if (run.operatorId !== operatorId) {
+    throw new AppError('FORBIDDEN', 'Only the run owner can delete it', 403);
+  }
+  await ultracodeRunsRepo.deleteRun(runId);
+  return c.json({ ok: true });
 });
 
 app.get('/api/ultracode/runs/:id/events', async (c) => {

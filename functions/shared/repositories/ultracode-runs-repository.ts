@@ -6,7 +6,13 @@
  *   GSI status-createdAt-index (daemon/ops queries). 90-day TTL on `expiresAt`.
  */
 
-import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  DeleteCommand,
+  GetCommand,
+  PutCommand,
+  QueryCommand,
+  UpdateCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { docClient, TABLE_NAMES } from '../dynamo-client';
 import type { UltracodeRun, UltracodeRunSummary } from '../types/ultracode-run';
 import { toRunSummary } from '../types/ultracode-run';
@@ -39,6 +45,11 @@ export async function listRunsByOperator(
     }),
   );
   return ((result.Items as UltracodeRun[]) || []).map(toRunSummary);
+}
+
+/** Delete a run row (operator dismisses an errored/old run from the corpus). */
+export async function deleteRun(runId: string): Promise<void> {
+  await docClient.send(new DeleteCommand({ TableName: TABLE_NAMES.ultracodeRuns, Key: { runId } }));
 }
 
 /**

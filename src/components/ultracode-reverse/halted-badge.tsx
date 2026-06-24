@@ -1,5 +1,6 @@
 'use client';
 
+import { Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import type { UltracodeSideStatus } from '@/types/ultracode-run';
 
@@ -8,7 +9,8 @@ export function HaltedBadge({ status }: { status: UltracodeSideStatus }) {
   switch (status) {
     case 'RUNNING':
       return (
-        <Badge variant="secondary" className="animate-pulse">
+        <Badge variant="secondary" className="flex items-center gap-1">
+          <Loader2 className="h-3 w-3 animate-spin" />
           running…
         </Badge>
       );

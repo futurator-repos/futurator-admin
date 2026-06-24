@@ -69,6 +69,7 @@ function UltracodeReverseContent() {
         </div>
         <div className="space-y-4 lg:col-span-2">
           <DualLiveView
+            run={run}
             case1Status={run?.case1Status ?? 'PENDING'}
             case2Status={run?.case2Status ?? 'PENDING'}
             case1Messages={case1Messages}
