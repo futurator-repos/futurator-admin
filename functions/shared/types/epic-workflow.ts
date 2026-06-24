@@ -326,6 +326,14 @@ export interface VisualTestDef {
    * Authored by the QA-AUTHOR; advisory (the runtime still executes `flow`).
    */
   generatedScript?: string;
+  /**
+   * pacman4 — marks a flow the QA-AUTHOR compiler synthesized (vs a DEV-authored
+   * flow). An auto-authored flow is RE-AUTHORED on every run so deployed authoring
+   * improvements (e.g. a hardened start reach) actually take effect on existing
+   * plans — without this the first-authored flow is sticky and never refreshes.
+   * DEV-authored flows (no marker) are kept untouched.
+   */
+  qaAuthored?: boolean;
 }
 
 /**

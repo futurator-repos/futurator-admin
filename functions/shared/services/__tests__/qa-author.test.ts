@@ -238,6 +238,51 @@ describe('authorProbeFlow — QAA-1 flow synthesis', () => {
     expect(r.action).toBe('skipped');
   });
 
+  it('pacman4 — RE-AUTHORS our own prior flow so deployed start-reach improvements apply (not sticky)', () => {
+    // a flow WE authored before (qaAuthored / generatedScript present) with the OLD
+    // single press-Enter start must be refreshed to the hardened Enter+Space+click.
+    const stale = vt({
+      level: 'L2',
+      qaAuthored: true,
+      generatedScript: 'old',
+      flow: [
+        { action: 'press', key: 'Enter' },
+        { action: 'click', selector: 'text=START' },
+        { action: 'screenshot', label: 'after' },
+      ],
+    });
+    const r = authorProbeFlow(
+      stale,
+      ac({
+        verify: 'behavior',
+        when: 'after clicking the START button',
+        thenObservable: 'the score increases',
+      }),
+      GAME_SEAM,
+    );
+    expect(r.action).toBe('authored'); // NOT 'kept'
+    expect(r.test.flow!.some((x) => x.action === 'press' && x.key === 'Space')).toBe(true); // hardened
+    expect(r.test.flow!.some((x) => x.action === 'pointer')).toBe(true); // center click
+    expect(r.test.qaAuthored).toBe(true);
+  });
+
+  it('KEEPS a genuinely DEV-authored flow (no qaAuthored / generatedScript marker)', () => {
+    const dev = vt({
+      level: 'L2',
+      flow: [
+        { action: 'press', key: 'Enter' },
+        { action: 'assert', expr: 'snapshot.status', op: 'eq', expected: 'running' },
+      ],
+    });
+    const r = authorProbeFlow(
+      dev,
+      ac({ verify: 'behavior', thenObservable: 'status over' }),
+      GAME_SEAM,
+    );
+    expect(r.action).toBe('kept');
+    expect(r.test).toBe(dev);
+  });
+
   it('keeps a test that already carries an oracle (DEV did its job)', () => {
     const existing = vt({
       level: 'L2',

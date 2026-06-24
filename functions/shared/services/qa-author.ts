@@ -395,9 +395,15 @@ export function authorProbeFlow(
   ac: AcceptanceCriterion | undefined,
   seam: SeamContract | undefined,
 ): AuthorResult {
-  // Don't clobber a flow the DEV/author already built with a real interaction.
-  if (hasAuthoredFlow(test.flow)) {
-    return { test, action: 'kept', note: 'test already carries an authored interaction flow' };
+  // Keep ONLY a flow a DEV hand-authored. A flow WE synthesized on a prior run
+  // (marked qaAuthored, or pre-marker: carrying a generatedScript) is RE-AUTHORED
+  // here so deployed authoring improvements (e.g. the hardened start reach) take
+  // effect on existing plans — otherwise the first-authored flow is sticky and a
+  // deploy has no effect on a re-run (pacman4: stale press-Enter start kept,
+  // canvas START never dismissed → FLOW_NOOP forever).
+  const weAuthoredItBefore = !!test.qaAuthored || !!test.generatedScript;
+  if (hasAuthoredFlow(test.flow) && !weAuthoredItBefore) {
+    return { test, action: 'kept', note: 'test already carries a DEV-authored interaction flow' };
   }
 
   const verify = ac?.verify;
@@ -451,6 +457,7 @@ export function authorProbeFlow(
       ...test,
       humanVerify: true,
       humanVerifyReason: reason,
+      qaAuthored: true,
       ...(evidence.length > 0
         ? { flow: evidence, generatedScript: flowToPlaywright(evidence) }
         : {}),
@@ -480,6 +487,7 @@ export function authorProbeFlow(
         flow,
         judge: postInteractionJudge(test, ac),
         generatedScript: flowToPlaywright(flow),
+        qaAuthored: true,
       },
       action: 'authored',
       note: 'start-gated appearance → press to start; judge the gameplay frame, not the start screen',
@@ -554,6 +562,7 @@ export function authorProbeFlow(
       flow,
       judge: postInteractionJudge(test, ac, beforeAfter),
       generatedScript: flowToPlaywright(flow),
+      qaAuthored: true,
     },
     action: 'authored',
     note: assert
