@@ -47,6 +47,11 @@ import * as alertRepo from '../shared/repositories/alert-repository';
 import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as propagatorRepo from '../shared/repositories/propagator-proposals-repository';
 import * as refactorAuditsRepo from '../shared/repositories/refactor-audits-repository';
+import * as ultracodeRunsRepo from '../shared/repositories/ultracode-runs-repository';
+import {
+  createUltracodeRunSchema,
+  buildUltracodeRun,
+} from '../shared/schemas/ultracode-run-schema';
 import {
   ingestPropagatorProposalsSchema,
   rejectPropagatorProposalSchema,
@@ -13388,6 +13393,115 @@ app.put('/api/github/pat', authMiddleware, async (c) => {
     const msg = err instanceof Error ? err.message : 'Unknown error during PAT rotation';
     return c.json({ error: 'rotation-failed', message: msg }, 502);
   }
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Ultracode-Reverse bench — run lifecycle (data plane).
+//
+// POST   /api/ultracode/runs            — create a run (QUEUED) + enqueue the daemon job
+// GET    /api/ultracode/runs            — operator-scoped corpus list
+// GET    /api/ultracode/runs/:id        — one run (owner-scoped)
+// GET    /api/ultracode/runs/:id/events — live stream (long-poll; reuses agent-events, keyed by runId)
+// GET    /api/ultracode/runs/:id/scorecard — the scored result once the daemon completes
+//
+// All scoring runs on the daemon (symmetric frame: both engines are single `claude` runs at the
+// same model+effort). The API only enqueues + reads. Owner-scoped like free-agent.
+// ────────────────────────────────────────────────────────────────────────
+
+app.post('/api/ultracode/runs', async (c) => {
+  const operatorId = c.get('user').userId;
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = createUltracodeRunSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid body');
+  }
+  const runId = crypto.randomUUID();
+  const run = buildUltracodeRun(parsed.data, { runId, operatorId });
+  run.jobId = runId; // jobId === runId
+  await ultracodeRunsRepo.createRun(run);
+
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId: runId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: operatorId,
+    workingDir: `/home/ubuntu/ultracode-bench/${runId}`,
+    jobType: 'ultracode-bench',
+    ultracodeBenchPayload: {
+      runId,
+      operatorId,
+      intent: run.intent,
+      target: run.target,
+      rigor: run.rigor,
+      reps: run.reps,
+      model: 'opus',
+      effort: 'xhigh',
+      judge: false,
+      captureTimeoutMs: 120000,
+    },
+    pipeline: { agents: {}, steps: [] },
+  } as never);
+
+  return c.json(
+    {
+      runId,
+      status: run.status,
+      intent: run.intent,
+      target: run.target,
+      rigor: run.rigor,
+      createdAt: run.createdAt,
+    },
+    201,
+  );
+});
+
+app.get('/api/ultracode/runs', async (c) => {
+  const operatorId = c.get('user').userId;
+  const limit = Math.min(Number(c.req.query('limit')) || 50, 100);
+  const runs = await ultracodeRunsRepo.listRunsByOperator(operatorId, limit);
+  return c.json({ runs });
+});
+
+app.get('/api/ultracode/runs/:id', async (c) => {
+  const operatorId = c.get('user').userId;
+  const run = await ultracodeRunsRepo.getRun(c.req.param('id'));
+  if (!run) throw new NotFoundError('UltracodeRun', c.req.param('id'));
+  if (run.operatorId !== operatorId) {
+    throw new AppError('FORBIDDEN', 'Only the run owner can view it', 403);
+  }
+  return c.json(run);
+});
+
+app.get('/api/ultracode/runs/:id/events', async (c) => {
+  const operatorId = c.get('user').userId;
+  const runId = c.req.param('id');
+  const run = await ultracodeRunsRepo.getRun(runId);
+  if (!run) throw new NotFoundError('UltracodeRun', runId);
+  if (run.operatorId !== operatorId) {
+    throw new AppError('FORBIDDEN', 'Only the run owner can stream it', 403);
+  }
+  const after = c.req.query('after') || '000000';
+  const { events, lastSeq } = await agentEventsRepo.getEventsAfter(runId, after, 200);
+  return c.json({ events, lastSeq, status: run.status });
+});
+
+app.get('/api/ultracode/runs/:id/scorecard', async (c) => {
+  const operatorId = c.get('user').userId;
+  const run = await ultracodeRunsRepo.getRun(c.req.param('id'));
+  if (!run) throw new NotFoundError('UltracodeRun', c.req.param('id'));
+  if (run.operatorId !== operatorId) {
+    throw new AppError('FORBIDDEN', 'Only the run owner can view it', 403);
+  }
+  return c.json({
+    status: run.status,
+    scorecard: run.scorecard ?? null,
+    structuralScore: run.structuralScore,
+    guardrailUplift: run.guardrailUplift,
+    verdict: run.verdict,
+    confound: run.confound,
+  });
 });
 
 // Global error handler

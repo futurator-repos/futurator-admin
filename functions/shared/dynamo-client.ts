@@ -81,4 +81,8 @@ export const TABLE_NAMES = {
   // Refactoring Assessment Module (Epic C) — durable adjudicated audits. PK
   // auditId; GSI projectId-createdAt-index lists a project's audits newest-first.
   refactorAudits: process.env.REFACTOR_AUDITS_TABLE || 'futurator-refactor-audits',
+  // Ultracode-Reverse bench — one row per bench run (Case 1 ultracode vs Case 2
+  // projector, scored). Additive; never reshapes a shared table. PK runId; GSIs
+  // operator-createdAt-index + status-createdAt-index; 90-day TTL on `expiresAt`.
+  ultracodeRuns: process.env.ULTRACODE_RUNS_TABLE || 'futurator-ultracode-runs',
 } as const;

@@ -369,7 +369,12 @@ export interface AgentJob {
     // Refactoring Assessment Module (Epic B). Deterministic recon (~0 LLM)
     // over a migrated brownfield clone + optional L3 adjudication (Epic C).
     // Daemon's executeRefactorAuditJob runs recon.mjs as a plain Node child.
-    | 'refactor-audit';
+    | 'refactor-audit'
+    // Ultracode-Reverse bench. The daemon's executeUltracodeBenchJob captures a
+    // real `ultracode` planner run (halt-on-script-write, before fan-out), runs
+    // the Case-2 projector, scores both with the spikes/ultra-reverse engine, and
+    // writes the scorecard to the ultracode-runs table. Payload below.
+    | 'ultracode-bench';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -543,6 +548,32 @@ export interface AgentJob {
     topN?: number;
     /** Data Privacy Assessment lane — run privacy-recon in PARALLEL with recon. */
     runPrivacy?: boolean;
+  };
+
+  /**
+   * Ultracode-Reverse bench. Set when `jobType === 'ultracode-bench'`. `jobId === runId`.
+   *
+   * SYMMETRIC FRAME (2026-06-24): both engines run a SINGLE `claude` invocation at the SAME
+   * model + effort, on the daemon, differing ONLY in the prompt — Case 1 = native `ultracode`
+   * (captured via kill-on-script-write halt), Case 2 = our Futurator Workflow Author meta-prompt
+   * (`claude -p`, output-only, no execution). The daemon AST-parses BOTH scripts into the
+   * DecisionPlan IR and scores them. Guardrails are a later layer, not part of this frame.
+   */
+  ultracodeBenchPayload?: {
+    runId: string;
+    operatorId: string;
+    intent: string;
+    target: 'greenfield' | 'brownfield';
+    rigor: 'prototype' | 'mvp' | 'production';
+    reps: number;
+    /** Both engines run at the SAME model + effort (the isolated variable is the prompt). */
+    model?: string; // default 'opus' (Opus 4.8)
+    effort?: string; // default 'xhigh'
+    /** Version of the Futurator Workflow Author meta-prompt used for Case 2. */
+    metaPromptVersion?: string;
+    judge?: boolean;
+    captureTimeoutMs?: number;
+    claudeVersion?: string;
   };
 
   /**
