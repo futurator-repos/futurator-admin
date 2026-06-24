@@ -47,6 +47,9 @@ export const JOB_HANDLER_SCORECARD_ASSESS = 'scorecard-assess';
 // Refactoring Assessment Module (Epic B). Deterministic recon (~0 LLM) over a
 // migrated brownfield clone; the runner spawns recon.mjs as a plain Node child.
 export const JOB_HANDLER_REFACTOR_AUDIT = 'refactor-audit';
+// Ultracode-Reverse bench. The runner spawns two single `claude` runs (Case 1 = native
+// ultracode w/ capture+halt, Case 2 = our meta-prompt), AST-parses both, scores, persists.
+export const JOB_HANDLER_ULTRACODE_BENCH = 'ultracode-bench';
 
 /**
  * Decide which handler should run a given job.
@@ -80,6 +83,7 @@ export function selectHandler(job) {
   if (job.jobType === 'reflector') return JOB_HANDLER_REFLECTOR;
   if (job.jobType === 'scorecard-assess') return JOB_HANDLER_SCORECARD_ASSESS;
   if (job.jobType === 'refactor-audit') return JOB_HANDLER_REFACTOR_AUDIT;
+  if (job.jobType === 'ultracode-bench') return JOB_HANDLER_ULTRACODE_BENCH;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
 }

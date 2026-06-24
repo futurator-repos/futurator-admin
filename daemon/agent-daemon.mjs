@@ -83,7 +83,12 @@ import {
   JOB_HANDLER_REFLECTOR,
   JOB_HANDLER_SCORECARD_ASSESS,
   JOB_HANDLER_REFACTOR_AUDIT,
+  JOB_HANDLER_ULTRACODE_BENCH,
 } from './pipelines/job-router.mjs';
+import { runUltracodeBenchJob } from './pipelines/ultracode-bench-job-runner.mjs';
+import { makeCaptureDeps } from './pipelines/ultracode-bench-capture.mjs';
+import { case1ToDecision } from './lib/ultracode/case1-to-decision.mjs';
+import { computeStructuralDiff } from './lib/ultracode/structural-diff.mjs';
 import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
 import { runPartyBootstrap } from './pipelines/party-bootstrap.mjs';
 import { runPartyInspect } from './pipelines/party-inspector.mjs';
@@ -241,6 +246,7 @@ try {
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const JOBS_TABLE = process.env.JOBS_TABLE || 'futurator-agent-jobs';
 const EVENTS_TABLE = process.env.AGENT_EVENTS_TABLE || 'futurator-agent-events';
+const ULTRACODE_RUNS_TABLE = process.env.ULTRACODE_RUNS_TABLE || 'futurator-ultracode-runs';
 const EPICS_TABLE = process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflows';
 // Pipeline v2 / Story 1.4.3 — App-bootstrap saga reads + updates the App row.
 const APPS_TABLE = process.env.APPS_TABLE || 'futurator-apps';
@@ -6395,6 +6401,8 @@ async function runJobAsync(job) {
       await executeScorecardAssessJob(job);
     } else if (handler === JOB_HANDLER_REFACTOR_AUDIT) {
       await executeRefactorAuditJob(job);
+    } else if (handler === JOB_HANDLER_ULTRACODE_BENCH) {
+      await executeUltracodeBenchJob(job);
     } else {
       await executePipeline(job);
     }
@@ -6535,7 +6543,7 @@ function classifyAgentForSpend(job) {
   if (t.startsWith('party-')) return 'party';
   if (t === 'free-agent-session') return 'free-agent';
   if (t === 'app-bootstrap') return 'app-bootstrap';
-  if (t === 'wave-merge' || t === 'epic-dev' || t === 'skill-scout' || t === 'skill-install' || t === 'reflector' || t === 'scorecard-assess' || t === 'refactor-audit') {
+  if (t === 'wave-merge' || t === 'epic-dev' || t === 'skill-scout' || t === 'skill-install' || t === 'reflector' || t === 'scorecard-assess' || t === 'refactor-audit' || t === 'ultracode-bench') {
     return 'pipeline-v2';
   }
   return 'other';
@@ -7094,6 +7102,89 @@ async function executeScorecardAssessJob(job) {
       errorMessage: err?.message || String(err),
     });
     log('error', `[${short}] assessor threw: ${err?.message || err}`);
+    throw err;
+  }
+}
+
+/**
+ * Ultracode-Reverse bench — daemon handler for a `jobType: 'ultracode-bench'` row.
+ * Wires the real OAuth-safe `claude` spawns + the vendored scorers into the DI runner. The runner
+ * orchestrates the symmetric two-`claude` rep loop (Case 1 native ultracode w/ capture+halt, Case 2
+ * our meta-prompt), AST-parses both, structurally diffs, and writes the scorecard to the
+ * ultracode-runs table. The kill-on-script-write halt + headless ultracode trigger are EC2-validated
+ * (see docs/concepts/pipeline-v3/ultracode-bench-ec2-validation.md) — tainted reps are excluded.
+ */
+async function executeUltracodeBenchJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+  const p = job.ultracodeBenchPayload || {};
+  log('info', `[${short}] Routing to ultracode-bench`, {
+    runId: p.runId,
+    intent: (p.intent || '').slice(0, 80),
+    reps: p.reps,
+  });
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'ultracode-bench',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  // updateRun writes to the (additive) ultracode-runs table, keyed by runId. Mirrors updateJobFields.
+  const updateRun = async (runId, fields) => {
+    const entries = Object.entries(fields).filter(([, v]) => v !== undefined);
+    if (entries.length === 0) return;
+    entries.push(['updatedAt', new Date().toISOString()]);
+    const names = {};
+    const values = {};
+    const expr = [];
+    for (const [k, v] of entries) {
+      names[`#${k}`] = k;
+      values[`:${k}`] = v;
+      expr.push(`#${k} = :${k}`);
+    }
+    await ddb.send(
+      new UpdateCommand({
+        TableName: ULTRACODE_RUNS_TABLE,
+        Key: { runId },
+        UpdateExpression: `SET ${expr.join(', ')}`,
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+      }),
+    );
+  };
+
+  try {
+    const metaPrompt = readFileSync(new URL('./lib/ultracode/meta-prompt-v0.md', import.meta.url), 'utf8');
+    const capture = makeCaptureDeps({ claudeBin: CLAUDE_BIN, stripApiKey, loadOAuth, metaPrompt, log });
+    const paused = await isAgentPausedCached();
+
+    const result = await runUltracodeBenchJob(job, {
+      paused,
+      captureCase1: capture.captureCase1,
+      runCase2: capture.runCase2,
+      parseScript: (js) => case1ToDecision(js),
+      scorePlans: (a, b) => computeStructuralDiff(a, b),
+      pushEvent,
+      updateRun,
+    });
+
+    if (result.ok) {
+      await updateJobFields(jobId, {
+        status: 'COMPLETED',
+        ultracodeBenchReps: result.reps ?? 0,
+        ultracodeBenchTainted: result.tainted ?? 0,
+      });
+      log('info', `[${short}] ultracode-bench completed (reps=${result.reps}, tainted=${result.tainted})`);
+    } else {
+      await updateJobFields(jobId, {
+        status: 'FAILED',
+        errorMessage: result.error || result.reason || 'unknown',
+      });
+      log('warn', `[${short}] ultracode-bench failed: ${result.reason || result.error}`);
+    }
+  } catch (err) {
+    await updateJobFields(jobId, { status: 'FAILED', errorMessage: err?.message || String(err) });
+    log('error', `[${short}] ultracode-bench threw: ${err?.message || err}`);
     throw err;
   }
 }

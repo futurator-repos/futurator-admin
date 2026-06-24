@@ -1,0 +1,69 @@
+{
+  "plan": {
+    "name": "habit-tracker",
+    "description": "A small shared habit tracker with web + mobile surfaces.",
+    "epics": [
+      {
+        "id": "E1",
+        "title": "Backend contract",
+        "goal": "HabitsTable + API endpoints",
+        "dependsOn": [],
+        "stories": [
+          {
+            "id": "S1",
+            "title": "Define HabitsTable schema",
+            "description": "Create the DynamoDB table + types.",
+            "dependsOn": [],
+            "touchPoints": ["functions/shared/schemas/habits.ts"],
+            "references": [{ "source": "architecture", "section": "Data model" }],
+            "criteria": [{ "id": "AC1", "text": "Table type compiles", "needsBrowser": false, "verify": "build" }]
+          },
+          {
+            "id": "S2",
+            "title": "Habit endpoints",
+            "description": "GET/POST /api/habits.",
+            "dependsOn": ["S1"],
+            "touchPoints": ["functions/api/habits.ts"],
+            "references": [{ "source": "prd", "section": "Endpoints" }],
+            "criteria": [{ "id": "AC2", "text": "POST creates a habit", "needsBrowser": false, "verify": "state" }]
+          },
+          {
+            "id": "S4",
+            "title": "Repo-wide logging convention",
+            "description": "Cross-cutting: add structured logging.",
+            "dependsOn": [],
+            "touchPoints": ["<EPIC_WIDE>"],
+            "references": [],
+            "criteria": [{ "id": "AC4", "text": "Logger compiles", "needsBrowser": false, "verify": "build" }]
+          },
+          {
+            "id": "S5",
+            "title": "Shared util module",
+            "description": "A small independent helper, distinct file from S1.",
+            "dependsOn": [],
+            "touchPoints": ["functions/shared/lib/util.ts"],
+            "references": [{ "source": "architecture", "section": "Utilities" }],
+            "criteria": [{ "id": "AC5", "text": "Util compiles", "needsBrowser": false, "verify": "build" }]
+          }
+        ]
+      },
+      {
+        "id": "E2",
+        "title": "Web surface",
+        "goal": "Habit list UI",
+        "dependsOn": ["E1"],
+        "stories": [
+          {
+            "id": "S3",
+            "title": "HabitList component",
+            "description": "Render habits from the API.",
+            "dependsOn": [],
+            "touchPoints": ["src/components/HabitList.tsx"],
+            "references": [{ "source": "ux", "section": "Habit list" }],
+            "criteria": [{ "id": "AC3", "text": "List renders habits", "needsBrowser": true, "verify": "appearance" }]
+          }
+        ]
+      }
+    ]
+  }
+}
