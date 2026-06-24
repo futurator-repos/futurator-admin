@@ -224,6 +224,7 @@ describe('reducePlan — plan-wave advancement', () => {
     expect(generatePlanBuildPipeline).toHaveBeenCalledWith(
       '/home/ubuntu/projects/pong-classic',
       'pong-classic',
+      undefined, // pacman4 — seamHook (no getSeamHookForPlan dep in this test)
     );
     expect(updatePlanFields).toHaveBeenCalledWith(
       'plan-1',

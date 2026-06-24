@@ -14,9 +14,11 @@ import * as agentJobsRepo from '../repositories/agent-jobs-repository';
 import * as epicRepo from '../repositories/epic-workflow-repository';
 import * as planRepo from '../repositories/plan-repository';
 import * as attentionRepo from '../repositories/attention-items-repository';
+import * as appRepo from '../repositories/app-repository';
 import { generateStoryPipeline } from '../pipelines/story-pipeline';
 import { generateWaveBuildPipeline } from '../pipelines/wave-build-pipeline';
 import { generatePlanBuildPipeline } from '../pipelines/plan-build-pipeline';
+import { resolveSeamContract } from './qa-boilerplate-resolver';
 import { type WaveReducerDeps } from './wave-reducer';
 import { type PlanReducerDeps } from './plan-reducer';
 
@@ -64,5 +66,9 @@ export function buildPlanReducerDeps(): PlanReducerDeps {
     ...buildWaveReducerDeps(),
     updatePlanFields: planRepo.updatePlanFields,
     generatePlanBuildPipeline,
+    // pacman4 — resolve the boilerplate's seam hook so the plan-build gate can
+    // require the game is actually mounted (reuses the QA-side seam resolver).
+    getSeamHookForPlan: async (plan) =>
+      (await resolveSeamContract(plan, { getApp: appRepo.getApp }))?.seamHook,
   };
 }

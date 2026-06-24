@@ -27,7 +27,65 @@ import { buildFrameworkDetectSnippet, buildPortReclaimSnippet } from './framewor
 export function generatePlanBuildPipeline(
   workingDir: string,
   planName: string,
+  seamHook?: string,
 ): PipelineDefinition {
+  // pacman4 — the EARLY seam-mount gate. A seam-bearing boilerplate (canvas-game,
+  // dashboard) declares a `seamHook` (e.g. useGameStateMachine); the assembled app
+  // MUST import+call it or `window.__harness` never publishes — the "static
+  // preview, not the live app" failure that reached QA unwired across pacman3/4/6/7.
+  // We run the SAME two-stage, false-pass-proof check QA's DV-2 uses (the tested
+  // daemon lib seam-mount-check.mjs), HERE — at plan-build, on the assembled app,
+  // once. A failure routes the plan to 'fixing' (plan-reducer), not 'review', so an
+  // unwired game is blocked the moment it's assembled, not 5h later at final QA.
+  // Only emitted when the boilerplate has a seam (back-compat: no seamHook → no step).
+  const seamSteps = seamHook
+    ? [
+        {
+          id: 'plan-seam-check',
+          stepType: 'shell' as const,
+          command: [
+            `cd ${workingDir}`,
+            // Uses the canonical, unit-tested checker (daemon/lib/seam-mount-check.mjs)
+            // via the established /opt/futurator-daemon import pattern — single source
+            // of truth for the false-pass-proof two-stage grep.
+            `node -e "import('file:///opt/futurator-daemon/lib/seam-mount-check.mjs').then(m => { const r = m.checkSeamMounted({ projectDir: process.cwd(), seamHook: ${JSON.stringify(seamHook)} }); if (r.checked && !r.mounted) { console.error('SEAM_NEVER_PUBLISHED: ' + r.reason); process.exit(1); } console.log('SEAM_MOUNT_OK: ' + r.reason); }).catch(e => { console.error('seam-check error (non-blocking): ' + e.message); })"`,
+          ].join('\n'),
+          timeout: 30000,
+          captureAs: 'SEAM_OUTPUT',
+          captureStderrAs: 'SEAM_ERROR',
+          onFail: {
+            action: 'retry_step' as const,
+            targetStep: 'plan-seam-fix',
+            injectAs: 'SEAM_ERROR',
+          },
+          loopTo: 'plan-seam-fix',
+        },
+        {
+          id: 'plan-seam-fix',
+          agentId: 'DEV',
+          prompt: `The assembled app for plan "${planName}" never mounts the verifiability seam — the game/primary feature is not wired, so it renders as a static preview (this is why QA fails with SEAM_NEVER_PUBLISHED and the dev preview is blank).
+
+Seam check:
+{{SEAM_ERROR}}
+
+Fix it: the PRIMARY/assembled feature must IMPORT and CALL \`${seamHook}\` and actually run the app (mount the component, run the loop/input), so the live game renders and \`window.__harness\` publishes under the test harness. This is an INTEGRATION wiring fix — the engine/render functions likely exist but are never called. Do NOT just define them; WIRE them so the app runs.
+
+Working directory: ${workingDir}
+
+---WORK_SUMMARY---
+[What you wired so the seam mounts]
+---END_WORK_SUMMARY---`,
+          extractors: {
+            WORK_SUMMARY: {
+              type: 'between' as const,
+              startDelimiter: '---WORK_SUMMARY---',
+              endDelimiter: '---END_WORK_SUMMARY---',
+            },
+          },
+          validations: [],
+        },
+      ]
+    : [];
   return {
     maxIterations: 2,
     agents: {
@@ -83,6 +141,10 @@ Working directory: ${workingDir}
         },
         validations: [],
       },
+      // 2b. Seam-mount gate (pacman4) — after the build compiles, before the
+      // server check. Blocks an unwired game (seam declared but never imported)
+      // from reaching 'review'. Empty for non-seam boilerplates.
+      ...seamSteps,
       // 3. Server health check — uses nohup + redirect to avoid daemon-stdout-hang (see 2026-04-21 incident)
       //
       // PR-59 (2026-05-13) — runtime framework detection. Was hardcoded to

@@ -87,9 +87,20 @@ export interface PlanReducerDeps extends WaveReducerDeps {
   /**
    * Pipeline builder for the plan-level final build-check. In production this
    * is `generatePlanBuildPipeline` from functions/shared/pipelines; in tests,
-   * a stub.
+   * a stub. `seamHook` (pacman4) adds the seam-mount gate for seam-bearing
+   * boilerplates — an unwired game fails the build-check → plan goes to 'fixing'.
    */
-  generatePlanBuildPipeline: (workingDir: string, planName: string) => PipelineDefinition;
+  generatePlanBuildPipeline: (
+    workingDir: string,
+    planName: string,
+    seamHook?: string,
+  ) => PipelineDefinition;
+  /**
+   * pacman4 — resolve the boilerplate's verifiability seam hook for this plan
+   * (e.g. useGameStateMachine), so the plan-build gate can require it's mounted.
+   * Optional: absent in tests / non-seam contexts → no seam gate.
+   */
+  getSeamHookForPlan?: (plan: Plan) => Promise<string | undefined>;
 }
 
 export type PlanReducerResult =
@@ -306,7 +317,10 @@ export async function reducePlan(
     // Create it.
     const jobId = deps.uuid();
     const now = deps.now();
-    const pipeline = deps.generatePlanBuildPipeline(plan.workingDir, plan.name);
+    // pacman4 — resolve the seam hook so the build-check also gates "is the game
+    // actually mounted" (unwired apps fail here → 'fixing', never reach 'review').
+    const seamHook = deps.getSeamHookForPlan ? await deps.getSeamHookForPlan(plan) : undefined;
+    const pipeline = deps.generatePlanBuildPipeline(plan.workingDir, plan.name, seamHook);
     await deps.createJob({
       jobId,
       status: 'PENDING',
