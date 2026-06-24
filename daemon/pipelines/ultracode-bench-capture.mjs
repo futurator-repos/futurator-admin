@@ -111,10 +111,19 @@ export function makeCaptureDeps(cfg) {
       'bypassPermissions',
     ];
     if (effort) args.push('--effort', effort); // [VERIFY] exact CLI effort flag on EC2
-    const child = spawn(claudeBin, args, {
+    // claudeBin resolves to the cli.js symlink (/usr/bin/claude → …/cli.js). Like the rest of the
+    // daemon (agent-daemon.mjs: spawn(process.execPath, [CLAUDE_BIN, …])) it must be run as
+    // `node cli.js`, NOT exec'd directly — a direct spawn ENOENTs. And without an 'error' listener
+    // a spawn failure is an unhandled 'error' event that crashes the WHOLE daemon; capture it and
+    // throw so the runner's try/catch marks the run ERROR (pacman ultracode-bench crash 2026-06-24).
+    const child = spawn(process.execPath, [claudeBin, ...args], {
       cwd,
       env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
       stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    let spawnError = null;
+    child.on('error', (e) => {
+      spawnError = e;
     });
 
     const projDir = sessionProjectDir(cwd);
@@ -123,6 +132,7 @@ export function makeCaptureDeps(cfg) {
 
     try {
       while (Date.now() < deadline) {
+        if (spawnError) throw new Error(`claude spawn failed (case1): ${spawnError.message}`);
         const scriptPath = findGeneratedScript(projDir);
         if (scriptPath) {
           const meta = readWfMeta(scriptPath);
@@ -179,7 +189,8 @@ function killTree(child) {
 
 function spawnCapture(bin, args, opts) {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Run the cli.js symlink via node, matching captureCase1 + the daemon's spawn pattern.
+    const child = spawn(process.execPath, [bin, ...args], { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     child.stdout.on('data', (d) => {
       out += d;
