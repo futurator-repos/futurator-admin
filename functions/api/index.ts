@@ -6175,12 +6175,14 @@ app.post('/api/epic-workflows/:id/deploy', async (c) => {
   // doubles as the URL segment and the S3 folder for staging/production.
   const appName = epic.workingDir.split('/').filter(Boolean).pop() || 'app';
   // F29 — dev is PLAN-scoped: resolve the plan once so a dev preview lands at
-  // dev.futurator.ai/<plan>/ (plan.name is the locked kebab slug), while
-  // staging/production stay app-scoped. Reused by the production bookkeeping
-  // block below.
+  // dev.futurator.ai/<plan>/. Use the CLEAN plan slug `plan.appId` (e.g.
+  // `pacman4`), NOT `plan.name` — the latter carries a uniqueness hash
+  // (`pacman4-initial-22z3j`, auto-generated `${appId}-${kind}-${shortHash}`)
+  // that leaked into the dev URL. Falls back to the working-dir leaf. Reused by
+  // the production bookkeeping block below.
   const plan = epic.planId ? await planRepo.getPlanById(epic.planId) : null;
   const target = resolveDeployTarget(
-    { planSlug: plan?.name || appName, appId: appName },
+    { planSlug: plan?.appId || appName, appId: appName },
     environment,
   );
   const publicUrl = target.publicUrl;
@@ -6292,8 +6294,9 @@ app.post('/api/plans/:id/promote', async (c) => {
   if (!deployEpic) throw new ValidationError('No epics to promote.');
 
   const appName = deployEpic.workingDir.split('/').filter(Boolean).pop() || plan.name;
-  // F29 — dev source keys on the plan, staging/prod on the app.
-  const identity = { planSlug: plan.name, appId: appName };
+  // F29 — dev source keys on the CLEAN plan slug (plan.appId, e.g. `pacman4`),
+  // staging/prod on the app. plan.name carries a uniqueness hash — don't use it.
+  const identity = { planSlug: plan.appId || appName, appId: appName };
   const srcTarget = resolveDeployTarget(identity, src);
   const dstTarget = resolveDeployTarget(identity, to);
 

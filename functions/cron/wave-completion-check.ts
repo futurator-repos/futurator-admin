@@ -294,8 +294,13 @@ export const handler = async () => {
                 .slice()
                 .sort((a, b) => (b.epicWave ?? 0) - (a.epicWave ?? 0))[0];
               const appName = deployEpic.workingDir.split('/').filter(Boolean).pop() || plan.name;
-              // F29 — dev preview is PLAN-scoped: dev.futurator.ai/<plan>/.
-              const target = resolveDeployTarget({ planSlug: plan.name, appId: appName }, 'dev');
+              // F29 — dev preview is PLAN-scoped at the CLEAN slug
+              // dev.futurator.ai/<plan.appId>/ (NOT plan.name, which carries a
+              // uniqueness hash like `pacman4-initial-22z3j`).
+              const target = resolveDeployTarget(
+                { planSlug: plan.appId || appName, appId: appName },
+                'dev',
+              );
               const devJobId = planDepsShared.uuid();
               await planDepsShared.createJob(
                 buildDeployJob({
