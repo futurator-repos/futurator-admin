@@ -161,6 +161,24 @@ await page.screenshot({ path: 'VT-…-after.png' });
 
 ## 4. Staged build plan
 
+> **BUILD STATUS (2026-06-24):** Stages A, B, C **built & tested** on `feat/pipeline-v3`
+> (commits after `06f3b28`), NOT yet deployed. Logic is complete + unit-tested; the
+> remaining pieces are UI-rendering polish, called out per stage below.
+>
+> - **A ✅** before/after frames, title idle-judge, Human tier (non-blocking
+>   HUMAN*REQUIRED verdict + forced evidence), `flow-to-playwright` + `generatedScript`
+>   on every authored test. \_UI remainder:* render `generatedScript` + a Human badge in
+>   `claims-table.tsx` (data is authored & persisted; the human verdict is already
+>   surfaced via the `HUMAN_REQUIRED` rationale).
+> - **B ✅** `selectDeliveryTests` — final QA runs the curated delivery set (all
+>   interaction/state/behavior/human tests + ≤2 appearance/epic; overflow deferred to the
+>   wave gate), wired at aggregate + execute. _UI remainder:_ group the review table by
+>   journey/capability instead of epic; surface the "deferred to wave gate" count.
+> - **C ✅** optional `deliveryJourneys` on the plan schema + `validateDeliveryJourneys`
+>   gate + PM-prompt guidance. _Follow-up:_ consume the DECLARED journeys for explicit
+>   grouping/selection (today the selector is heuristic; the validated source now exists)
+>   - persist journeys through `applyPlanOutput`/round-trip.
+
 ### Stage A — tactical, low-risk (no change to what QA _is_)
 
 1. **Before/after frames for Behavior tests.** When the compiler authors a behavioral
