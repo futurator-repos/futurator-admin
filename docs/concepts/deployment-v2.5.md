@@ -433,23 +433,35 @@ Encode it durably in `sst.config.ts`: prefer a native `Router` edge/function opt
 
 **Part B — code (plan/app identity).** Change `resolveDeployTarget(slug, env)` → `resolveDeployTarget({ planSlug, appId }, env)` and resolve per-env: dev → host `dev.futurator.ai`, identity `planSlug`, prefix `''`; staging → `stage.futurator.ai`, `appId`, `''`; prod → `futurator.ai`, `appId`, `apps/`. The deploy/promote/cron call sites already hold the plan row — pass both `plan.name` and `plan.appId`. The daemon writeback needs no change (URLs flow from the resolved target).
 
-### 15.5 Build-once tradeoff (a decision to make)
+**Part C — the test-harness contract (load-bearing; raised by the QA-review session, 2026-06-19).** QA's L2 state probes (`assert`/`force`/`waitForEvent`) read `window.__harness`, which the app only publishes when built with `NEXT_PUBLIC_TEST_HARNESS=1` (`registry.ts:427`). Today QA boots its **own** dev server with that flag (`visual-qa-pipeline.ts:523`). For QA to verify the **deployed** `dev.futurator.ai/<plan>` artifact instead (the F11 root fix), **the dev build MUST set `NEXT_PUBLIC_TEST_HARNESS=1`** — otherwise `window.__harness` is absent and every L2 probe fails `SEAM_ABSENT`. The contract:
 
-Identity/base-path differs per env (`/<plan>/` vs `/<app>/` vs `/apps/<app>/`), so each hop **rebuilds** — byte-identical copy can't survive a plan→app identity change. Two options:
+| Env                | Harness                               | Owner                                                                                     |
+| ------------------ | ------------------------------------- | ----------------------------------------------------------------------------------------- |
+| **dev**            | **ON** (`NEXT_PUBLIC_TEST_HARNESS=1`) | **deployment** — inject in the dev build (`build-deploy-pipeline`, `environment==='dev'`) |
+| **staging / prod** | **OFF**                               | the seam is production-absent **by design** — never ship a test seam to users             |
 
-- **(Recommended) Hybrid:** dev = per-plan preview (rebuild is fine — throwaway QA view); make **staging↔prod share `/apps/<app>/`** (i.e. `stage.futurator.ai/apps/<app>`) so the _consumer-facing_ hop is a true byte-copy — "what you approved is what ships."
-- **(Prettier) Full identity URLs** (`stage.futurator.ai/<app>`) accepting a rebuild on every hop — fine for prototyping. (Overlaps fixes-plan **Q11**.)
+QA owns the seam (publishes on the flag); deployment owns building **dev** with the flag and **never** staging/prod.
+
+### 15.5 Build-once tradeoff — settled by Part C
+
+Two things force **dev → staging to always rebuild**, never byte-copy: (1) the identity change (`<plan>` → `<app>`), and (2) the harness flip (ON → OFF, Part C). So byte-identical "build once, promote" applies **only to the staging↔prod hop** (both harness-off, app-identity) — which is the consumer-facing one that matters. One decision remains, for that hop:
+
+- **(Recommended) Hybrid:** make **staging↔prod share `/apps/<app>/`** (i.e. `stage.futurator.ai/apps/<app>`) so staging→prod is a true byte-copy — "what you approved is what ships."
+- **(Prettier) Full identity URL** (`stage.futurator.ai/<app>`) accepting a rebuild on the staging→prod hop too — fine for prototyping. (Overlaps fixes-plan **Q11**.)
+
+Either way, dev is a per-plan, harness-ON rebuild — and that's correct, not a regression.
 
 ### 15.6 Rollout order
 
 1. Add the CF index-rewrite to dev/staging Routers (SST) + `sst deploy` → verify `dev.futurator.ai/apps/<id>/` → 200 (still appId-keyed).
-2. Implement plan/app identity (Part B) → verify dev keyed by plan.
+2. Implement plan/app identity (Part B) **+ harness-ON dev build (Part C)** → verify dev keyed by plan and `window.__harness` present on `dev.futurator.ai/<plan>` (and absent on staging/prod).
 3. `DEPLOY_ENV_SUBDOMAINS=on`.
 4. Run one plan end-to-end: `dev.futurator.ai/<plan>` → promote → `stage.futurator.ai/<app>` → `futurator.ai/apps/<app>`. Retire the `apps/_dev/` + `apps/_staging/` fallback prefixes.
 
 ### 15.7 Cross-stage impact — other agents must adapt
 
 - **QA-review session (`QAreview-agentic`):** dev becomes a **real, plan-scoped, immutable** `dev.futurator.ai/<plan>` URL — exactly the mechanism F11/Q-C9/Q7 wanted ("QA against the dev-deploy URL instead of booting `next dev` in the shared worktree"). The impl-pass _serialized_ F11 but deferred this root fix to Q7/Q11; the plan-scoped dev URL is what unblocks it. QA should: point "Open in dev" + its verification at `dev.futurator.ai/<plan>`, and resolve F11/Q-C9 by targeting it. (QA owns its own rubric/criteria updates.)
+  - **Accepted from QA (2026-06-19):** the **harness contract** (Part C) is the load-bearing integration point — deployment builds **dev** with `NEXT_PUBLIC_TEST_HARNESS=1` so QA's `window.__harness` probes work against the deployed artifact; staging/prod stay harness-off. This is folded into F29 (no longer an open gap).
 - **concept-develop / pipeline owner:** adopt the plan-vs-app identity in any deploy-adjacent design; the `resolveDeployTarget` signature change ripples to deploy/promote/cron call sites.
 
 See fixes-plan **F29** (Track H) for the tracked remediation + hand-off.

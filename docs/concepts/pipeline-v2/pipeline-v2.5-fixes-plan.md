@@ -915,6 +915,11 @@ on the working fallback prefixes `apps/_dev/`, `apps/_staging/` on the prod buck
 - **(B) Code** — adopt **plan-vs-app identity**: `resolveDeployTarget({planSlug, appId}, env)`
   → dev = `dev.futurator.ai/<plan>` (plan-scoped), staging = `stage.futurator.ai/<app>`,
   prod = `futurator.ai/apps/<app>`. The deploy/promote/cron call sites pass both ids.
+- **(C) Harness contract** (load-bearing; raised + accepted from `QAreview-agentic` 2026-06-19) —
+  the **dev** build MUST set `NEXT_PUBLIC_TEST_HARNESS=1` so QA's `window.__harness` L2 probes
+  (`registry.ts:427`, `visual-qa-pipeline.ts:523`) work against the deployed `dev.futurator.ai/<plan>`
+  artifact, else `SEAM_ABSENT`. **staging/prod build harness-OFF** (seam is production-absent by
+  design). Deployment owns injecting the flag in the dev deploy pipeline; QA owns the seam.
 
 **Why subdomains, not the `apps/_dev/` path-prefix.** Separate origin = browser-level
 isolation of cookies/`localStorage`/`IndexedDB`/service-worker scope — required once apps
@@ -922,9 +927,10 @@ store state (a shared-origin path-prefix shares a game's high-score store across
 envs); plus blast-radius (can't touch the homepage bucket) and per-env controls. Path-prefix
 is fine only for stateless static apps / as the zero-infra stopgap.
 
-**Build-once tradeoff.** Identity/base differs per env → rebuild per hop. Optionally align
-staging↔prod base (`/apps/<app>/`) to keep a byte-copy on the consumer-facing hop (overlaps
-**Q11**).
+**Build-once tradeoff.** Two things force **dev→staging to always rebuild** (never byte-copy):
+the identity change (`<plan>`→`<app>`) and the harness flip (ON→OFF, change C). So byte-copy
+applies **only to staging↔prod** — align their base (`/apps/<app>/`) to keep it (overlaps **Q11**).
+Dev is a per-plan, harness-ON rebuild by design — not a regression.
 
 **Effort:** M (infra + code). **Track:** H. **Status:** proposed.
 
@@ -934,6 +940,12 @@ staging↔prod base (`/apps/<app>/`) to keep a byte-copy on the consumer-facing 
 > immutable**: `dev.futurator.ai/<plan>` is the merged plan QA reviews. Please (a) point
 > "Open in dev" + your verification at it, and (b) resolve F11/Q-C9 by targeting it (close out
 > Q7). You own the corresponding rubric/criteria updates (DP-I1 / Q-C9 / Q7).
+>
+> **✅ Accepted your 2026-06-19 feedback:** the `window.__harness` requirement is now change
+> **(C)** above — deployment builds dev with `NEXT_PUBLIC_TEST_HARNESS=1`, staging/prod
+> harness-off. Agreed dev→staging is a rebuild (identity + harness), byte-copy only staging↔prod.
+> No overlap with your QA-side files; we run in parallel, integration point = QA verifies
+> `dev.futurator.ai/<plan>` once F29 ships.
 >
 > **Hand-off — concept/pipeline owner:** the plan-vs-app identity + the `resolveDeployTarget`
 > signature change ripple to all deploy/promote/cron call sites.
