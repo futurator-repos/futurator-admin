@@ -200,7 +200,15 @@ for (const n of fileNodes) {
 function numericVersion(root) {
   const seg = root.split('/').pop() || ''
   const m = seg.match(/(?:-v|version)([0-9]+)\b/i)
-  return m ? { family: root.replace(/(?:-v|version)[0-9]+\b/i, ''), version: parseInt(m[1], 10) } : null
+  if (!m) return null
+  // Family = the version-stripped basename (ext + dir-agnostic), so onboarding-v2/
+  // (a dir) and types/onboarding-v3.ts (a file elsewhere) are the SAME family —
+  // v3 is then recognized as current and onboarding-v3.ts isn't flagged legacy.
+  const family = seg
+    .replace(/(?:-v|version)[0-9]+\b/i, '')
+    .replace(/\.(tsx?|jsx?|mjs|cjs)$/i, '')
+    .toLowerCase()
+  return { family, version: parseInt(m[1], 10) }
 }
 const maxByFamily = new Map()
 const versionsByFamily = new Map()

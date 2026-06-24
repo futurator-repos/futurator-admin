@@ -77,6 +77,9 @@ function writeFixture(target, { calibration } = {}) {
   // --- 7. a version FAMILY (flow-v1 + flow-v2) → v2 is current (dropped), v1 legacy ---
   nodes.push({ id: 'flowv1', label: 'a.ts', source_file: 'src/components/flow-v1/a.ts', community: 8, resolved_in_degree: 1 });
   nodes.push({ id: 'flowv2', label: 'a.ts', source_file: 'src/components/flow-v2/a.ts', community: 8, resolved_in_degree: 1 });
+  // cross-dir family: a v3 FILE in a different dir is the same "onboarding" family
+  // as the onboarding-v2 dir below → v3 is current (must NOT be flagged legacy).
+  nodes.push({ id: 'onbv3type', label: 'onboarding-v3.ts', source_file: 'src/types/onboarding-v3.ts', community: 8, resolved_in_degree: 2 });
   // a test file with a version marker must NOT be flagged as a legacy root
   nodes.push({ id: 'vtest', label: 'x.test.ts', source_file: 'src/components/onboarding-v2/__tests__/x.test.ts', community: 7, resolved_in_degree: 0 });
 
@@ -171,6 +174,9 @@ describe('hotspot-detect — validated invariants (NFR2 regression lock)', () =>
     // flow family: v1 is legacy (kept), v2 is current (dropped)
     expect(rootPaths).toContain('src/components/flow-v1');
     expect(rootPaths).not.toContain('src/components/flow-v2');
+    // cross-dir family: onboarding-v2 (dir) is legacy (kept), onboarding-v3.ts is current (dropped)
+    expect(rootPaths).toContain('src/components/onboarding-v2');
+    expect(rootPaths).not.toContain('src/types/onboarding-v3.ts');
   });
 
   it('does NOT flag feature-name (enhanced/hierarchical) or migration files as legacy (fix#1)', () => {
