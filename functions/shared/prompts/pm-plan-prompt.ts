@@ -591,6 +591,14 @@ JSON in a code block.
           }
         ]
       }
+    ],
+    "deliveryJourneys": [
+      {
+        "id": "J1",
+        "title": "<a headline user-facing flow, e.g. 'Load and start playing'>",
+        "narrative": "<one line: the integrated path a real user walks>",
+        "acRefs": ["AC-S1-1"]
+      }
     ]
   }
 }
@@ -609,6 +617,14 @@ JSON in a code block.
   slices with disjoint touch points and independent behaviors.
 - **Respect the boilerplate**: never propose "create a new <framework> project"
   or "scaffold from scratch" — the scaffold exists. Add to it.
+- **Delivery journeys (Stage C — final-QA source).** Emit 2–5 \`deliveryJourneys\`
+  that CLUSTER the plan's acceptance criteria into the headline, user-facing flows
+  a real person walks end-to-end (e.g. "Load & start", "Play & score",
+  "Win / lose & restart"). Each journey's \`acRefs\` MUST cite real AC ids from the
+  stories above (validated — dangling refs are rejected). These drive the FINAL QA
+  stage (which verifies the integrated product per journey, not every AC in
+  isolation — the wave gate already checks each AC). Group by VALUE/journey, never
+  by epic or technical layer. Optional but strongly preferred for any UI-bearing plan.
 - Output the JSON between the fences. Nothing else.
 
 ## Final self-check (run mentally BEFORE emitting)

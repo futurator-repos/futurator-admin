@@ -7,6 +7,8 @@ import {
   manualReasonSchema,
   validateReferenceSections,
   validateVerifyCoverage,
+  validateDeliveryJourneys,
+  deliveryJourneySchema,
   collectManualAcs,
   planOutputSchema,
   type PlanOutput,
@@ -382,5 +384,82 @@ describe('collectManualAcs (CS-2 — surface manual ACs for operator confirmatio
     expect(
       collectManualAcs(planWithCriteria([{ id: 'AC-1', text: 'x', verify: 'build' }])),
     ).toEqual([]);
+  });
+});
+
+describe('deliveryJourneys (Stage C — final-QA journeys)', () => {
+  function planWithJourneys(journeys) {
+    return {
+      plan: {
+        name: 'demo-plan',
+        description: 'a plan long enough to satisfy the schema minimum.',
+        epics: [
+          {
+            id: 'E1',
+            title: 'Epic one',
+            goal: 'a goal long enough to pass.',
+            dependsOn: [],
+            stories: [
+              {
+                id: 'S1',
+                title: 'Story one',
+                description: 'a description long enough.',
+                dependsOn: [],
+                touchPoints: ['src/a.ts'],
+                criteria: [
+                  { id: 'AC-1', text: 'a criterion' },
+                  { id: 'AC-2', text: 'another' },
+                ],
+              },
+            ],
+          },
+        ],
+        deliveryJourneys: journeys,
+      },
+    };
+  }
+
+  it('deliveryJourneySchema accepts a well-formed journey', () => {
+    const r = deliveryJourneySchema.safeParse({
+      id: 'J1',
+      title: 'Load & start',
+      acRefs: ['AC-1'],
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('planOutputSchema accepts a plan with deliveryJourneys (and without)', () => {
+    expect(
+      planOutputSchema.safeParse(planWithJourneys([{ id: 'J1', title: 'Load', acRefs: ['AC-1'] }]))
+        .success,
+    ).toBe(true);
+    const noJourneys = planWithJourneys(undefined);
+    delete noJourneys.plan.deliveryJourneys;
+    expect(planOutputSchema.safeParse(noJourneys).success).toBe(true);
+  });
+
+  it('validateDeliveryJourneys rejects a dangling acRef', () => {
+    const errs = validateDeliveryJourneys(
+      planWithJourneys([{ id: 'J1', title: 'X', acRefs: ['AC-1', 'AC-999'] }]),
+    );
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toContain('AC-999');
+  });
+
+  it('validateDeliveryJourneys rejects a journey with no acRefs', () => {
+    const errs = validateDeliveryJourneys(planWithJourneys([{ id: 'J1', title: 'X', acRefs: [] }]));
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatch(/no acRefs/);
+  });
+
+  it('validateDeliveryJourneys passes when all refs resolve, and is a no-op without journeys', () => {
+    expect(
+      validateDeliveryJourneys(
+        planWithJourneys([{ id: 'J1', title: 'X', acRefs: ['AC-1', 'AC-2'] }]),
+      ),
+    ).toEqual([]);
+    const noJ = planWithJourneys(undefined);
+    delete noJ.plan.deliveryJourneys;
+    expect(validateDeliveryJourneys(noJ)).toEqual([]);
   });
 });

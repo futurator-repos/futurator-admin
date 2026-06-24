@@ -5,6 +5,7 @@ import {
   planOutputSchema,
   validatePlanReferences,
   validateTouchPointHygiene,
+  validateDeliveryJourneys,
   type PlanOutput,
 } from '../schemas/plan-output-schema';
 import { computeStoryWavesWithTouchPoints } from './story-waves';
@@ -109,6 +110,13 @@ export function validatePlanOutputJson(parsed: unknown): PlanOutput {
   const hygieneErrors = validateTouchPointHygiene(result.data);
   if (hygieneErrors.length > 0) {
     throw new Error(`PLAN_JSON touch-point errors: ${hygieneErrors.join('; ')}`);
+  }
+
+  // Stage C — PM-declared delivery journeys must reference real ACs. Additive:
+  // a plan without journeys produces no errors, so legacy plans are unaffected.
+  const journeyErrors = validateDeliveryJourneys(result.data);
+  if (journeyErrors.length > 0) {
+    throw new Error(`PLAN_JSON delivery-journey errors: ${journeyErrors.join('; ')}`);
   }
 
   return result.data;

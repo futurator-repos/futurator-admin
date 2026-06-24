@@ -141,14 +141,35 @@ export const epicOutputSchema = z.object({
   stories: z.array(storyOutputSchema).min(1, 'Each epic must have at least one story'),
 });
 
+/**
+ * Stage C (qa-review-delivery-rethink §4) — a DELIVERY JOURNEY: a headline,
+ * user-facing flow the FINAL QA stage verifies on the merged plan (dev). The PM
+ * declares 2–5 of these by CLUSTERING the plan's acceptance criteria into the
+ * integrated paths a real user walks ("load & start", "play & score", "win/lose")
+ * — so final QA is journey-driven, not a replay of every per-AC test grouped by
+ * epic. Optional + additive: a plan without journeys falls back to the heuristic
+ * delivery selector (Stage B). `acRefs` cite the ACs the journey covers.
+ */
+export const deliveryJourneySchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(3),
+  /** One-line narrative of the integrated path a user walks. */
+  narrative: z.string().optional(),
+  /** AC ids this journey exercises end-to-end (must resolve to real criteria). */
+  acRefs: z.array(z.string()).default([]),
+});
+
 export const planOutputSchema = z.object({
   plan: z.object({
     name: z.string().regex(PLAN_NAME_REGEX),
     description: z.string().min(20),
     epics: z.array(epicOutputSchema).min(1, 'Plan must have at least one epic'),
+    /** Stage C — optional PM-declared delivery journeys for final QA (see schema above). */
+    deliveryJourneys: z.array(deliveryJourneySchema).optional(),
   }),
 });
 
+export type DeliveryJourney = z.infer<typeof deliveryJourneySchema>;
 export type PlanOutput = z.infer<typeof planOutputSchema>;
 export type EpicOutput = z.infer<typeof epicOutputSchema>;
 export type StoryOutput = z.infer<typeof storyOutputSchema>;
@@ -259,6 +280,38 @@ export function collectManualAcs(output: PlanOutput): ManualAcFlag[] {
     }
   }
   return flags;
+}
+
+/**
+ * Stage C — validate PM-declared delivery journeys: every `acRefs` entry must
+ * resolve to a real acceptance-criterion id somewhere in the plan, and each
+ * journey must cite at least one AC. Additive (no journeys → no errors), so it
+ * never breaks legacy plans. Returns one error per dangling reference.
+ */
+export function validateDeliveryJourneys(output: PlanOutput): string[] {
+  const journeys = output.plan.deliveryJourneys;
+  if (!journeys || journeys.length === 0) return [];
+  const acIds = new Set<string>();
+  for (const epic of output.plan.epics) {
+    for (const story of epic.stories) {
+      for (const ac of story.criteria) acIds.add(ac.id);
+    }
+  }
+  const errors: string[] = [];
+  for (const j of journeys) {
+    if (!j.acRefs || j.acRefs.length === 0) {
+      errors.push(`Delivery journey "${j.id}" cites no acRefs — a journey must cover ≥1 AC.`);
+      continue;
+    }
+    for (const ref of j.acRefs) {
+      if (!acIds.has(ref)) {
+        errors.push(
+          `Delivery journey "${j.id}" references AC "${ref}", which is not an acceptance criterion in this plan.`,
+        );
+      }
+    }
+  }
+  return errors;
 }
 
 export function validatePlanReferences(output: PlanOutput): string[] {
