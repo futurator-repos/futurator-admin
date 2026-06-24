@@ -465,6 +465,33 @@ export default $config({
       },
     });
 
+    // ── Ultracode-Reverse bench — one row per bench run (Case 1 ultracode vs ──
+    // Case 2 projector, scored). Additive; never reshapes a shared table. PK runId;
+    // GSI operator-createdAt-index (my runs, newest first); GSI status-createdAt-index
+    // (daemon/ops). PITR on (corpus is durable). 90-day TTL on `expiresAt`.
+    const ultracodeRunsTable = new sst.aws.Dynamo('UltracodeRunsTable', {
+      fields: {
+        runId: 'string',
+        operatorId: 'string',
+        status: 'string',
+        createdAt: 'string',
+      },
+      primaryIndex: { hashKey: 'runId' },
+      globalIndexes: {
+        'operator-createdAt-index': { hashKey: 'operatorId', rangeKey: 'createdAt' },
+        'status-createdAt-index': { hashKey: 'status', rangeKey: 'createdAt' },
+      },
+      ttl: 'expiresAt',
+      transform: {
+        table: {
+          name: 'futurator-ultracode-runs',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── F22 — dev/staging promotion-ladder subdomains (deployment-v2.5.md §14) ──
     // Two static-hosting shells the deploy/promote agents `aws s3 sync` INTO
     // (NOT StaticSite — that would purge synced apps every deploy). Each fronted
@@ -946,6 +973,7 @@ export default $config({
         agentSessionsTable,
         agentConversationsTable,
         timingSummaryTable,
+        ultracodeRunsTable,
         freeAgentSessionsTable,
         freeAgentConversationsTable,
         agentFlagsTable,
@@ -989,6 +1017,8 @@ export default $config({
         REFLECTIONS_TABLE: reflectionsTable.name,
         // Plan Retrospect — Reality Check scorecards (plan-retrospect-spec §5).
         SCORECARDS_TABLE: scorecardsTable.name,
+        // Ultracode-Reverse bench — run/corpus rows (API writes QUEUED + reads).
+        ULTRACODE_RUNS_TABLE: ultracodeRunsTable.name,
         // F22 — dev/staging subdomain hosting (deployment-v2.5.md §14). Presence
         // flips deploy-targets.ts to byte-copy promotion; absence = fallback.
         DEV_ENV_BUCKET: devEnvBucket.name,

@@ -367,7 +367,12 @@ export interface AgentJob {
     // Refactoring Assessment Module (Epic B). Deterministic recon (~0 LLM)
     // over a migrated brownfield clone + optional L3 adjudication (Epic C).
     // Daemon's executeRefactorAuditJob runs recon.mjs as a plain Node child.
-    | 'refactor-audit';
+    | 'refactor-audit'
+    // Ultracode-Reverse bench. The daemon's executeUltracodeBenchJob captures a
+    // real `ultracode` planner run (halt-on-script-write, before fan-out), runs
+    // the Case-2 projector, scores both with the spikes/ultra-reverse engine, and
+    // writes the scorecard to the ultracode-runs table. Payload below.
+    | 'ultracode-bench';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -539,6 +544,27 @@ export interface AgentJob {
     runL3?: boolean;
     /** Hotspots passed to L3 (default 40, matches `hotspot-detect --top`). */
     topN?: number;
+  };
+
+  /**
+   * Ultracode-Reverse bench. Set when `jobType === 'ultracode-bench'`. `jobId === runId`.
+   * The daemon captures the real `ultracode` planner (kill-on-script-write halt), runs the
+   * Case-2 projector on `planOutput` (precomputed by the API for the same intent), scores both,
+   * and writes the result to the ultracode-runs table. `judge` is opt-in (cost-bearing).
+   */
+  ultracodeBenchPayload?: {
+    runId: string;
+    operatorId: string;
+    intent: string;
+    target: 'greenfield' | 'brownfield';
+    rigor: 'prototype' | 'mvp' | 'production';
+    reps: number;
+    judge?: boolean;
+    captureTimeoutMs?: number;
+    /** Precomputed Case-2 plan output for the same intent (projector input). */
+    planOutput?: unknown;
+    promptVersion?: string;
+    claudeVersion?: string;
   };
 
   /**
