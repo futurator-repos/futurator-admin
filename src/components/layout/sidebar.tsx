@@ -43,6 +43,7 @@ const sections: NavSection[] = [
       { href: '/migrate', label: 'Migrate', icon: '🚚' },
       { href: '/labs', label: 'Labs', icon: '🧪' },
       { href: '/labs/skills', label: 'Skills', icon: '🧩' },
+      { href: '/labs/ultracode-reverse', label: 'Ultracode Reverse', icon: '🔬' },
     ],
   },
 ];
