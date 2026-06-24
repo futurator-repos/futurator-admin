@@ -14,9 +14,6 @@
  * process or DDB.
  */
 
-/** Cap per regulation for the row/UI; the full set is uploaded to S3 for export. */
-export const PRIVACY_TOP_PER_REG = 80;
-
 export function validatePrivacyAuditJob(job) {
   if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
   if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
@@ -35,10 +32,22 @@ export function classifyPrivacyFailure(code, stderrTail = '') {
   return 'privacy-error';
 }
 
+/** How many top-by-score example files to keep per category for drill-down. */
+export const PRIVACY_SAMPLE_FILES_PER_CATEGORY = 20;
+
+const SEV_RANK = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
+const worseOf = (a, b) => ((SEV_RANK[b] ?? 0) > (SEV_RANK[a] ?? 0) ? b : a);
+
 /**
- * Reduce a raw privacy report into the capped, grouped summary that rides the
- * job row + durable record. Keeps full counts (by regulation/severity/category)
- * but only the top-N hotspots per regulation (by score). Pure.
+ * Reduce a raw privacy report into a CATEGORY-FIRST summary. The scanner emits
+ * one finding per (category × file) — ~9.7k findings is really ~12 categories
+ * each touching hundreds of files. A flat top-N list shows the same category
+ * repeated; the useful unit is the CATEGORY (what kind of risk, how widespread,
+ * worst files). So we group by category: per regulation → categories[] sorted
+ * severity-then-breadth, each with a distinct fileCount, severity counts, the
+ * shared remediation/citation, and the top-N worst files (by score) for
+ * drill-down. Bounded (~12 cats × 20 files); the FULL per-finding set is in S3.
+ * Pure.
  */
 export function summarizePrivacyReport(report) {
   const regulations = Array.isArray(report?.regulations) ? report.regulations : [];
@@ -48,17 +57,69 @@ export function summarizePrivacyReport(report) {
     const slice = report.by_regulation?.[reg] || {};
     const all = Array.isArray(slice.hotspots) ? slice.hotspots : [];
     totalAll += all.length;
-    // counts by category (for honest grouping even though we cap the list)
-    const byCategory = {};
-    for (const h of all) byCategory[h.category || 'uncategorized'] = (byCategory[h.category || 'uncategorized'] || 0) + 1;
-    const top = [...all].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, PRIVACY_TOP_PER_REG);
+
+    const cats = new Map();
+    for (const h of all) {
+      const key = h.category || 'uncategorized';
+      let c = cats.get(key);
+      if (!c) {
+        c = {
+          category: key,
+          regulation: h.regulation,
+          files: new Map(), // file -> max score
+          critical: 0, high: 0, medium: 0, low: 0, info: 0,
+          severity: 'low',
+          maxScore: 0,
+          remediation: h.remediation,
+          solutionCeiling: h.solution_ceiling,
+          citation: h.citation,
+          card: h.card,
+        };
+        cats.set(key, c);
+      }
+      const sev = h.severity || 'low';
+      if (typeof c[sev] === 'number') c[sev] += 1;
+      c.severity = worseOf(c.severity, sev);
+      const prev = c.files.get(h.file) ?? -1;
+      if ((h.score ?? 0) > prev) c.files.set(h.file, h.score ?? 0);
+      // carry the representative remediation/citation from the worst finding
+      if ((h.score ?? 0) > c.maxScore) {
+        c.maxScore = h.score ?? 0;
+        c.remediation = h.remediation;
+        c.solutionCeiling = h.solution_ceiling;
+        c.citation = h.citation;
+        c.card = h.card;
+      }
+    }
+
+    const categories = [...cats.values()]
+      .map((c) => ({
+        category: c.category,
+        regulation: c.regulation,
+        severity: c.severity,
+        score: c.maxScore,
+        fileCount: c.files.size,
+        critical: c.critical,
+        high: c.high,
+        medium: c.medium,
+        low: c.low,
+        remediation: c.remediation,
+        solutionCeiling: c.solutionCeiling,
+        citation: c.citation,
+        card: c.card,
+        sampleFiles: [...c.files.entries()]
+          .map(([file, score]) => ({ file, score }))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, PRIVACY_SAMPLE_FILES_PER_CATEGORY),
+      }))
+      .sort((a, b) => (SEV_RANK[b.severity] - SEV_RANK[a.severity]) || b.fileCount - a.fileCount);
+
     byRegulation[reg] = {
       scannedFiles: slice.scanned_files ?? 0,
       summary: slice.summary || {},
       detectedCount: all.length,
-      shownCount: top.length,
-      byCategory,
-      hotspots: top,
+      categoryCount: categories.length,
+      categories,
     };
   }
   return {

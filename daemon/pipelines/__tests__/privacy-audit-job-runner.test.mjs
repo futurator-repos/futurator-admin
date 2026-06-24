@@ -8,7 +8,7 @@ import {
   classifyPrivacyFailure,
   summarizePrivacyReport,
   runPrivacyAuditJob,
-  PRIVACY_TOP_PER_REG,
+  PRIVACY_SAMPLE_FILES_PER_CATEGORY,
 } from '../privacy-audit-job-runner.mjs';
 
 const job = (over = {}) => ({
@@ -16,7 +16,7 @@ const job = (over = {}) => ({
   refactorAuditPayload: { projectId: 'applicator', projectPath: '/home/ubuntu/projects/applicator', ...over },
 });
 
-// a realistic (shrunk) privacy-recon report
+// a realistic (shrunk) privacy-recon report — one finding per (category × file)
 const report = (gdprN = 200) => ({
   tier: 'pro',
   rulepack_version: 'abc',
@@ -28,14 +28,15 @@ const report = (gdprN = 200) => ({
       scanned_files: 1498,
       summary: { critical: 50, high: gdprN - 50, total: gdprN },
       hotspots: Array.from({ length: gdprN }, (_, i) => ({
-        category: i % 2 ? 'Consent' : 'Automated Decisions',
-        regulation: 'GDPR — Article 22',
+        category: i < 50 ? 'Password Storage' : 'Re-identification by Linkage',
+        regulation: i < 50 ? 'GDPR — Article 32' : 'GDPR — Article 4',
         severity: i < 50 ? 'critical' : 'high',
-        score: 100 - (i % 60),
+        score: i < 50 ? 95 - (i % 20) : 71 - (i % 20),
         title: `finding ${i}`,
-        file: `src/f${i}.ts`,
+        file: `src/f${i}.ts`, // distinct file per finding
+        remediation: i < 50 ? 'hash passwords' : 'k-anonymize',
         citation: ['https://eur-lex.europa.eu/eli/reg/2016/679/oj'],
-        card: '[[Automated Decisions]]',
+        card: '[[card]]',
       })),
     },
     'eu-ai-act': {
@@ -62,20 +63,29 @@ describe('classifyPrivacyFailure', () => {
   });
 });
 
-describe('summarizePrivacyReport', () => {
-  it('caps hotspots per regulation but keeps full counts', () => {
+describe('summarizePrivacyReport — category-first', () => {
+  it('groups findings into categories with distinct fileCount + worst files', () => {
     const s = summarizePrivacyReport(report(200));
     expect(s.tier).toBe('pro');
     expect(s.totalDetected).toBe(201); // 200 gdpr + 1 ai-act
     const g = s.byRegulation.gdpr;
     expect(g.detectedCount).toBe(200);
-    expect(g.shownCount).toBe(PRIVACY_TOP_PER_REG); // capped at 80
-    expect(g.hotspots.length).toBe(PRIVACY_TOP_PER_REG);
-    // category counts cover the FULL set, not just the shown ones
-    const catTotal = Object.values(g.byCategory).reduce((a, b) => a + b, 0);
-    expect(catTotal).toBe(200);
-    // top hotspot is the highest score
-    expect(g.hotspots[0].score).toBeGreaterThanOrEqual(g.hotspots[1].score);
+    expect(g.categoryCount).toBe(2); // Password Storage + Re-identification
+    // critical category sorts first
+    expect(g.categories[0].category).toBe('Password Storage');
+    expect(g.categories[0].severity).toBe('critical');
+    expect(g.categories[0].fileCount).toBe(50); // distinct files
+    expect(g.categories[0].critical).toBe(50);
+    // breadth-second category
+    expect(g.categories[1].category).toBe('Re-identification by Linkage');
+    expect(g.categories[1].fileCount).toBe(150);
+    // sample files capped + sorted by score desc
+    expect(g.categories[1].sampleFiles.length).toBe(PRIVACY_SAMPLE_FILES_PER_CATEGORY);
+    expect(g.categories[1].sampleFiles[0].score).toBeGreaterThanOrEqual(
+      g.categories[1].sampleFiles[1].score,
+    );
+    // representative remediation carried from the worst finding
+    expect(g.categories[0].remediation).toBe('hash passwords');
   });
 });
 

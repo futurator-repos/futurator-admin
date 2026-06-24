@@ -1,16 +1,18 @@
 'use client';
 
 /**
- * Data Privacy Assessment dashboard (sibling to the hotspot dashboard). Renders
- * the capped/grouped PrivacyAuditSummary: per-regulation sections (GDPR, EU AI
- * Act) with severity count chips, category rollups, and expandable findings that
- * cite the primary law (clickable). Decision-support, not legal advice.
+ * Data Privacy Assessment dashboard — CATEGORY-FIRST. The scanner emits one
+ * finding per (category × file), so a flat list shows the same category repeated
+ * hundreds of times. The real unit is the CATEGORY: what kind of risk, how
+ * widespread (distinct files), and the worst files. Per regulation we render
+ * category rows (critical first), each expandable to its top files + the shared
+ * remediation + clickable primary-law citation. Decision-support, not legal advice.
  */
 
 import { useState } from 'react';
 import type {
   PrivacyAuditSummary,
-  PrivacyHotspot,
+  PrivacyCategory,
   PrivacyRegulationSlice,
 } from '@/types/refactor-audit';
 
@@ -68,7 +70,8 @@ export function PrivacyDashboard({ privacy }: { privacy?: PrivacyAuditSummary })
         }}
       >
         <span style={{ fontWeight: 600, color: 'var(--foreground)' }}>
-          {privacy.totalDetected ?? 0} privacy findings
+          {privacy.totalDetected ?? 0} findings across{' '}
+          {regs.reduce((n, r) => n + (privacy.byRegulation?.[r]?.categoryCount ?? 0), 0)} categories
         </span>
         <span>· tier {privacy.tier ?? '?'}</span>
         {privacy.cardsLoaded != null && <span>· {privacy.cardsLoaded} rule cards</span>}
@@ -86,9 +89,6 @@ export function PrivacyDashboard({ privacy }: { privacy?: PrivacyAuditSummary })
 
 function RegulationSection({ reg, slice }: { reg: string; slice: PrivacyRegulationSlice }) {
   const sev = slice.summary || {};
-  const topCategories = Object.entries(slice.byCategory || {})
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 8);
   return (
     <div data-testid={`privacy-reg-${reg}`}>
       <div
@@ -98,8 +98,8 @@ function RegulationSection({ reg, slice }: { reg: string; slice: PrivacyRegulati
           {REG_LABEL[reg] || reg}
         </span>
         <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
-          {slice.detectedCount} findings · {slice.scannedFiles} files scanned
-          {slice.shownCount < slice.detectedCount ? ` · top ${slice.shownCount} shown` : ''}
+          {slice.categoryCount} categories · {slice.detectedCount} findings · {slice.scannedFiles}{' '}
+          files scanned
         </span>
         <div style={{ flex: 1 }} />
         {(['critical', 'high', 'medium', 'low'] as const)
@@ -109,16 +109,6 @@ function RegulationSection({ reg, slice }: { reg: string; slice: PrivacyRegulati
           ))}
       </div>
 
-      {topCategories.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
-          {topCategories.map(([cat, n]) => (
-            <span key={cat} style={catChipStyle} title={`${n} findings`}>
-              {cat} · {n}
-            </span>
-          ))}
-        </div>
-      )}
-
       <div
         style={{
           border: '1px solid var(--border)',
@@ -127,20 +117,20 @@ function RegulationSection({ reg, slice }: { reg: string; slice: PrivacyRegulati
           overflow: 'hidden',
         }}
       >
-        {slice.hotspots.map((h, i) => (
-          <PrivacyRow key={`${reg}-${i}`} h={h} />
+        {(slice.categories ?? []).map((c) => (
+          <CategoryRow key={c.category} c={c} />
         ))}
       </div>
     </div>
   );
 }
 
-function PrivacyRow({ h }: { h: PrivacyHotspot }) {
+function CategoryRow({ c }: { c: PrivacyCategory }) {
   const [open, setOpen] = useState(false);
   return (
     <div
-      data-testid="privacy-finding"
-      data-severity={h.severity}
+      data-testid="privacy-category"
+      data-severity={c.severity}
       style={{ borderBottom: '1px solid var(--border)' }}
     >
       <button
@@ -159,17 +149,7 @@ function PrivacyRow({ h }: { h: PrivacyHotspot }) {
           textAlign: 'left',
         }}
       >
-        <SevChip sev={h.severity} />
-        <span
-          style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 10,
-            color: 'var(--text-faint)',
-            minWidth: 28,
-          }}
-        >
-          {Math.round(h.score)}
-        </span>
+        <SevChip sev={c.severity} />
         <span
           style={{
             fontSize: 12,
@@ -180,8 +160,18 @@ function PrivacyRow({ h }: { h: PrivacyHotspot }) {
             whiteSpace: 'nowrap',
           }}
         >
-          {h.category}
-          <span style={{ color: 'var(--text-faint)' }}> — {h.regulation}</span>
+          {c.category}
+          <span style={{ color: 'var(--text-faint)' }}> — {c.regulation}</span>
+        </span>
+        <span
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            color: 'var(--text-dim)',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {c.fileCount} file{c.fileCount === 1 ? '' : 's'}
         </span>
         <span style={{ color: 'var(--text-faint)', fontSize: 10 }}>{open ? '▼' : '▶'}</span>
       </button>
@@ -196,26 +186,16 @@ function PrivacyRow({ h }: { h: PrivacyHotspot }) {
             gap: 6,
           }}
         >
-          <div style={{ color: 'var(--foreground)' }}>{h.title}</div>
-          <div>
-            <span style={metaLabel}>file</span> <code style={codeChip}>{h.file}</code>
-          </div>
-          {h.snippet && (
+          {c.remediation && (
             <div>
-              <span style={metaLabel}>signals</span>{' '}
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10 }}>{h.snippet}</span>
+              <span style={metaLabel}>remediation</span> {c.remediation}
+              {c.solutionCeiling ? ` (${c.solutionCeiling})` : ''}
             </div>
           )}
-          {h.remediation && (
-            <div>
-              <span style={metaLabel}>remediation</span> {h.remediation}
-              {h.solution_ceiling ? ` (${h.solution_ceiling})` : ''}
-            </div>
-          )}
-          {Array.isArray(h.citation) && h.citation.length > 0 && (
+          {Array.isArray(c.citation) && c.citation.length > 0 && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
               <span style={metaLabel}>citation</span>
-              {[...new Set(h.citation)].map((url) => (
+              {[...new Set(c.citation)].map((url) => (
                 <a
                   key={url}
                   href={url}
@@ -228,6 +208,31 @@ function PrivacyRow({ h }: { h: PrivacyHotspot }) {
               ))}
             </div>
           )}
+          <div>
+            <span style={metaLabel}>
+              worst files
+              {c.fileCount > c.sampleFiles.length
+                ? ` (top ${c.sampleFiles.length} of ${c.fileCount})`
+                : ''}
+            </span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 }}>
+              {c.sampleFiles.map((f) => (
+                <div key={f.file} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <span
+                    style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 9,
+                      color: 'var(--text-faint)',
+                      minWidth: 24,
+                    }}
+                  >
+                    {Math.round(f.score)}
+                  </span>
+                  <code style={codeChip}>{f.file}</code>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -289,11 +294,4 @@ const codeChip: React.CSSProperties = {
   background: 'color-mix(in srgb, var(--foreground) 5%, transparent)',
   padding: '1px 5px',
   borderRadius: 3,
-};
-const catChipStyle: React.CSSProperties = {
-  fontSize: 10,
-  color: 'var(--text-dim)',
-  border: '1px solid var(--border)',
-  borderRadius: 10,
-  padding: '1px 8px',
 };

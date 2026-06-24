@@ -80,13 +80,29 @@ export interface PrivacyHotspot {
   card?: string;
 }
 
+export interface PrivacyCategory {
+  category: string;
+  regulation: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+  score: number;
+  fileCount: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  remediation?: string;
+  solutionCeiling?: string;
+  citation?: string[];
+  card?: string;
+  sampleFiles: Array<{ file: string; score: number }>;
+}
+
 export interface PrivacyRegulationSlice {
   scannedFiles: number;
   summary: Partial<Record<'critical' | 'high' | 'medium' | 'low' | 'info' | 'total', number>>;
   detectedCount: number;
-  shownCount: number;
-  byCategory: Record<string, number>;
-  hotspots: PrivacyHotspot[];
+  categoryCount: number;
+  categories: PrivacyCategory[];
 }
 
 export interface PrivacyAuditSummary {

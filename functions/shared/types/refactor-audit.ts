@@ -115,14 +115,40 @@ export interface PrivacyHotspot {
   card?: string;
 }
 
-/** Per-regulation slice in the capped privacy summary. */
+/**
+ * A privacy CATEGORY rollup (the real unit — the scanner emits one finding per
+ * category×file, so a category typically spans hundreds of files). Carries the
+ * distinct fileCount, severity breakdown, the shared remediation/citation, and
+ * the worst N files for drill-down.
+ */
+export interface PrivacyCategory {
+  category: string;
+  regulation: string;
+  /** Worst severity present in the category. */
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+  /** Max finding score in the category. */
+  score: number;
+  /** Distinct files this category touches. */
+  fileCount: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  remediation?: string;
+  solutionCeiling?: string;
+  citation?: string[];
+  card?: string;
+  /** Top-N worst files by score, for drill-down. */
+  sampleFiles: Array<{ file: string; score: number }>;
+}
+
+/** Per-regulation slice — category-first. */
 export interface PrivacyRegulationSlice {
   scannedFiles: number;
   summary: Partial<Record<'critical' | 'high' | 'medium' | 'low' | 'info' | 'total', number>>;
   detectedCount: number;
-  shownCount: number;
-  byCategory: Record<string, number>;
-  hotspots: PrivacyHotspot[];
+  categoryCount: number;
+  categories: PrivacyCategory[];
 }
 
 /**
