@@ -1,4 +1,4 @@
-import type { AuditHotspot, HotspotKind } from './refactor-audit';
+import type { AuditHotspot, HotspotKind, PrivacyAuditSummary } from './refactor-audit';
 
 // ── Job status ──
 //
@@ -218,6 +218,8 @@ export interface AgentJob {
     shownCount?: number;
     /** Recon tool availability (e.g. { graphify:'ok', knip:'unavailable' }). */
     toolStatus?: Record<string, string>;
+    /** Data Privacy Assessment summary (when runPrivacy was set). */
+    privacy?: PrivacyAuditSummary;
   };
 }
 

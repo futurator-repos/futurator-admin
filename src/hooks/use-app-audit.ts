@@ -30,6 +30,8 @@ export interface RunAppAuditInput {
   skipGraphify?: boolean;
   runL3?: boolean;
   topN?: number;
+  /** Run the Data Privacy Assessment lane in parallel with recon. */
+  runPrivacy?: boolean;
 }
 
 interface RunAppAuditResponse {

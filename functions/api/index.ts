@@ -7170,6 +7170,9 @@ app.post('/api/party/projects/:id/assess', async (c) => {
         : {}),
       ...(parsedBody.data.runL3 !== undefined ? { runL3: parsedBody.data.runL3 } : {}),
       ...(parsedBody.data.topN !== undefined ? { topN: parsedBody.data.topN } : {}),
+      ...(parsedBody.data.runPrivacy !== undefined
+        ? { runPrivacy: parsedBody.data.runPrivacy }
+        : {}),
     },
   });
 

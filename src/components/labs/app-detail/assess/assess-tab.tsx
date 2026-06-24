@@ -25,6 +25,7 @@ import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-o
 import { NewPlanModal } from '../new-plan-modal';
 import { HotspotDashboard } from './hotspot-dashboard';
 import { RefactorGraph } from './refactor-graph';
+import { PrivacyDashboard } from './privacy-dashboard';
 
 /**
  * Compile selected hotspots into a NewPlanModal intent seed (FR35). Pure +
@@ -123,7 +124,10 @@ export function AssessTab({ app }: { app: App }) {
 
   const [planOpen, setPlanOpen] = useState(false);
   const [planIntent, setPlanIntent] = useState('');
-  const [view, setView] = useState<'hotspots' | 'graph'>('hotspots');
+  const [view, setView] = useState<'hotspots' | 'graph' | 'privacy'>('hotspots');
+  const [includePrivacy, setIncludePrivacy] = useState(false);
+  const privacy = currentSummary?.privacy;
+  const privacyRunning = report.status === 'assessing' && !!jobId && includePrivacy;
 
   // Stash the new jobId in the URL (preserve appId + tab=assess).
   const setAuditJob = useCallback(
@@ -138,7 +142,7 @@ export function AssessTab({ app }: { app: App }) {
 
   const startAudit = () => {
     run.mutate(
-      {},
+      { runPrivacy: includePrivacy },
       {
         onSuccess: (res) => setAuditJob(res.jobId),
       },
@@ -199,6 +203,27 @@ export function AssessTab({ app }: { app: App }) {
             ⇩ Export JSON
           </button>
         )}
+        <label
+          title="Run the Data Privacy Assessment (GDPR + EU AI Act) in parallel with the refactoring recon"
+          style={{
+            fontSize: 11,
+            color: 'var(--text-dim)',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 5,
+            cursor: report.status === 'assessing' ? 'not-allowed' : 'pointer',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={includePrivacy}
+            onChange={(e) => setIncludePrivacy(e.target.checked)}
+            disabled={report.status === 'assessing'}
+            data-testid="assess-include-privacy"
+          />
+          Include data privacy
+        </label>
         <button
           type="button"
           onClick={startAudit}
@@ -324,6 +349,12 @@ export function AssessTab({ app }: { app: App }) {
               ? 'Assessment failed — log:'
               : 'Running recon on the EC2 clone…'}
           </div>
+          {privacyRunning && (
+            <div style={{ fontSize: 11, color: 'var(--accent-blue)', marginTop: 8 }}>
+              <span className="animate-pulse">●</span> Data Privacy Assessment running in parallel
+              (GDPR + EU AI Act)…
+            </div>
+          )}
           <StoryLiveOutput jobId={logJobId} hideResponse />
         </div>
       )}
@@ -360,26 +391,28 @@ export function AssessTab({ app }: { app: App }) {
                 overflow: 'hidden',
               }}
             >
-              {(['hotspots', 'graph'] as const).map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => setView(v)}
-                  data-testid={`assess-view-${v}`}
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 600,
-                    color: view === v ? 'var(--background)' : 'var(--text-dim)',
-                    background: view === v ? 'var(--foreground)' : 'transparent',
-                    border: 'none',
-                    padding: '5px 12px',
-                    cursor: 'pointer',
-                    textTransform: 'capitalize',
-                  }}
-                >
-                  {v}
-                </button>
-              ))}
+              {(['hotspots', 'graph', ...(privacy ? (['privacy'] as const) : [])] as const).map(
+                (v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => setView(v)}
+                    data-testid={`assess-view-${v}`}
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: view === v ? 'var(--background)' : 'var(--text-dim)',
+                      background: view === v ? 'var(--foreground)' : 'transparent',
+                      border: 'none',
+                      padding: '5px 12px',
+                      cursor: 'pointer',
+                      textTransform: 'capitalize',
+                    }}
+                  >
+                    {v === 'privacy' ? 'Data Privacy' : v}
+                  </button>
+                ),
+              )}
             </div>
             <div style={{ flex: 1 }} />
             {hotspots.length > 0 && (
@@ -402,9 +435,10 @@ export function AssessTab({ app }: { app: App }) {
               </button>
             )}
           </div>
-          {view === 'hotspots' ? (
+          {view === 'hotspots' && (
             <HotspotDashboard hotspots={hotspots} onCreatePlan={onCreatePlan} />
-          ) : (
+          )}
+          {view === 'graph' && (
             <RefactorGraph
               appId={app.appId}
               hotspots={hotspots}
@@ -413,6 +447,7 @@ export function AssessTab({ app }: { app: App }) {
               }
             />
           )}
+          {view === 'privacy' && <PrivacyDashboard privacy={privacy} />}
           {/* Persistent assessment log — stays available after completion (the
               events stream lives 7 days) so the run is auditable post-hoc. */}
           {logJobId && (

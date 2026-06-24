@@ -1,4 +1,4 @@
-import type { AuditHotspot, HotspotKind } from './refactor-audit';
+import type { AuditHotspot, HotspotKind, PrivacyAuditSummary } from './refactor-audit';
 
 // ── Job status ──
 //
@@ -541,6 +541,8 @@ export interface AgentJob {
     runL3?: boolean;
     /** Hotspots passed to L3 (default 40, matches `hotspot-detect --top`). */
     topN?: number;
+    /** Data Privacy Assessment lane — run privacy-recon in PARALLEL with recon. */
+    runPrivacy?: boolean;
   };
 
   /**
@@ -571,6 +573,8 @@ export interface AgentJob {
     shownCount?: number;
     /** Recon tool availability (e.g. { graphify:'ok', knip:'unavailable' }). */
     toolStatus?: Record<string, string>;
+    /** Data Privacy Assessment summary (when runPrivacy was set). */
+    privacy?: PrivacyAuditSummary;
   };
 
   /**

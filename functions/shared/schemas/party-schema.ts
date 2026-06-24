@@ -198,6 +198,7 @@ export const assessProjectBodySchema = z.object({
   skipGraphify: z.boolean().optional(),
   runL3: z.boolean().optional(),
   topN: z.number().int().min(1).max(500).optional(),
+  runPrivacy: z.boolean().optional(),
 });
 
 /**

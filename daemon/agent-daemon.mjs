@@ -208,6 +208,8 @@ import {
   runRefactorAuditJob,
   runL3Adjudication,
 } from './pipelines/refactor-audit-job-runner.mjs';
+// Data Privacy Assessment lane (parallel sibling to recon).
+import { runPrivacyAuditJob } from './pipelines/privacy-audit-job-runner.mjs';
 // Epic 4 (2026-05-20) — track Skill tool_use activations into
 // .context/loaded-skills.json so the per-story commit's Skills-Used
 // trailer populates with real content.
@@ -7186,8 +7188,53 @@ async function executeRefactorAuditJob(job) {
     };
   }
 
+  // ── Data Privacy Assessment (parallel lane, opt-in via payload.runPrivacy) ──
+  // privacy-recon is an independent deterministic child (rulepack-in, findings-out
+  // to a local file; source never leaves). Runs CONCURRENTLY with the refactoring
+  // recon — both finish in ~max(recon, privacy) not the sum.
+  function runPrivacyChild({ projectPath: repo, outPath, onChunk }) {
+    const reconPath = process.env.PRIVACY_RECON_PATH || '/opt/data-privacy-platform/scripts/privacy-recon.mjs';
+    const svc = process.env.PRIVACY_SERVICE_URL || '';
+    const token = process.env.PRIVACY_API_KEY || '';
+    return new Promise((resolve) => {
+      if (!existsSync(reconPath)) {
+        resolve({ code: 1, stderrTail: `privacy-recon not found at ${reconPath}` });
+        return;
+      }
+      const args = [reconPath, repo, '--regulation', 'all', '--out', outPath];
+      if (svc) args.push('--service', svc);
+      if (token) args.push('--token', token);
+      const proc = spawn(process.execPath, args, {
+        cwd: repo,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, FORCE_COLOR: '0' },
+        detached: true,
+      });
+      registerChild(jobId, proc);
+      let stderrTail = '';
+      proc.stdout.on('data', (d) => onChunk('stdout', d.toString()));
+      proc.stderr.on('data', (d) => {
+        const s = d.toString();
+        stderrTail = (stderrTail + s).slice(-2000);
+        onChunk('stderr', s);
+      });
+      proc.on('error', (err) => { unregisterChild(jobId, proc); resolve({ code: 1, stderrTail: String(err?.message || err) }); });
+      proc.on('close', (code, signal) => { unregisterChild(jobId, proc); resolve({ code: code ?? 1, killed: signal != null, stderrTail }); });
+    });
+  }
+
   try {
     const paused = await isAgentPausedCached();
+    // Start privacy FIRST (non-blocking) so it overlaps recon.
+    const privacyPromise = job.refactorAuditPayload?.runPrivacy
+      ? runPrivacyAuditJob(job, {
+          paused,
+          runPrivacy: runPrivacyChild,
+          readReport: async (p) => JSON.parse(readFileSync(p, 'utf8')),
+          pushEvent,
+        }).catch((e) => ({ ok: false, reason: 'privacy-threw', error: String(e?.message || e) }))
+      : null;
+
     const result = await runRefactorAuditJob(job, {
       paused,
       runRecon,
@@ -7271,6 +7318,46 @@ async function executeRefactorAuditJob(job) {
         log('warn', `[${short}] refactor-audit graph S3 upload failed (non-fatal): ${gerr?.message || gerr}`);
       }
 
+      // Await the parallel privacy lane (started before recon). Best-effort: a
+      // privacy failure never fails the refactoring audit. Full findings → S3
+      // (export); the capped/grouped summary → the row + durable record.
+      let privacySummary = null;
+      if (privacyPromise) {
+        try {
+          const pr = await privacyPromise;
+          if (pr?.ok && pr.summary) {
+            privacySummary = pr.summary;
+            // upload the FULL privacy report to a scoped S3 path for export.
+            try {
+              const s3mod = await import('@aws-sdk/client-s3');
+              if (!_s3Client) _s3Client = new s3mod.S3Client({ region: REGION });
+              const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
+              const projectId = job.refactorAuditPayload?.projectId || job.projectId;
+              if (pr.report) {
+                await _s3Client.send(
+                  new s3mod.PutObjectCommand({
+                    Bucket: bucket,
+                    Key: `knowledge-live/${projectId}/_refactor/privacy.json`,
+                    Body: JSON.stringify(pr.report),
+                    ContentType: 'application/json',
+                    CacheControl: 'no-cache',
+                  }),
+                );
+                privacySummary.fullReportAvailable = true;
+              }
+            } catch (s3e) {
+              log('warn', `[${short}] privacy S3 upload failed (non-fatal): ${s3e?.message || s3e}`);
+            }
+            log('info', `[${short}] privacy-audit completed (${privacySummary.totalDetected} findings, tier ${privacySummary.tier})`);
+          } else if (pr && !pr.ok) {
+            privacySummary = { failed: true, reason: pr.reason, error: String(pr.error || '').slice(0, 500) };
+            log('warn', `[${short}] privacy-audit failed (non-fatal): ${pr.reason}`);
+          }
+        } catch (perr) {
+          privacySummary = { failed: true, reason: 'privacy-threw', error: String(perr?.message || perr).slice(0, 500) };
+        }
+      }
+
       // Write the durable audit row (always — recon-only or adjudicated) so the
       // report survives the 7-day events TTL and the §9.4/9.5 endpoints can read it.
       const auditId = randomUUID();
@@ -7292,6 +7379,7 @@ async function executeRefactorAuditJob(job) {
               shownCount: result.shownCount ?? result.hotspotCount ?? 0,
               toolStatus: result.toolStatus ?? {},
               ...(adjudicated ? { verdicts: l3.verdicts, plan: l3.plan } : {}),
+              ...(privacySummary ? { privacy: privacySummary } : {}),
               createdAt: new Date().toISOString(),
               createdBy: job.createdBy || 'daemon',
             },
@@ -7313,9 +7401,10 @@ async function executeRefactorAuditJob(job) {
           detectedCount: result.detectedCount ?? result.hotspotCount ?? 0,
           shownCount: result.shownCount ?? result.hotspotCount ?? 0,
           toolStatus: result.toolStatus ?? {},
+          ...(privacySummary ? { privacy: privacySummary } : {}),
         },
       });
-      log('info', `[${short}] refactor-audit completed (hotspots=${result.hotspotCount ?? 0}${adjudicated ? `, L3 confirmed=${l3.confirmed.length}` : ''})`);
+      log('info', `[${short}] refactor-audit completed (hotspots=${result.hotspotCount ?? 0}${adjudicated ? `, L3 confirmed=${l3.confirmed.length}` : ''}${privacySummary && !privacySummary.failed ? `, privacy=${privacySummary.totalDetected}` : ''})`);
     } else {
       await updateJobFields(jobId, {
         status: 'FAILED',

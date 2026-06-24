@@ -95,6 +95,56 @@ export interface HotspotVerdict {
   confidence?: number;
 }
 
+// ── Data Privacy Assessment lane (sibling to refactoring) ──
+
+/** One privacy finding from privacy-recon (by_regulation[reg].hotspots[]). */
+export interface PrivacyHotspot {
+  category: string;
+  regulation: string; // e.g. "GDPR — Article 22"
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+  score: number;
+  confidence?: number;
+  title: string;
+  file: string;
+  snippet?: string;
+  remediation?: string;
+  solution_ceiling?: string;
+  /** Clickable primary-law URLs. */
+  citation?: string[];
+  /** `[[card-name]]` reference for MCP grounding. */
+  card?: string;
+}
+
+/** Per-regulation slice in the capped privacy summary. */
+export interface PrivacyRegulationSlice {
+  scannedFiles: number;
+  summary: Partial<Record<'critical' | 'high' | 'medium' | 'low' | 'info' | 'total', number>>;
+  detectedCount: number;
+  shownCount: number;
+  byCategory: Record<string, number>;
+  hotspots: PrivacyHotspot[];
+}
+
+/**
+ * Capped/grouped privacy summary that rides the job row + durable record. The
+ * FULL finding set (can be ~10k) is uploaded to S3 (`_refactor/privacy.json`);
+ * this keeps full counts but only the top-N hotspots per regulation.
+ */
+export interface PrivacyAuditSummary {
+  /** Set when the privacy lane failed (recon still succeeds). */
+  failed?: boolean;
+  reason?: string;
+  error?: string;
+  tier?: string;
+  rulepackVersion?: string | null;
+  cardsLoaded?: number;
+  regulations?: string[];
+  totalDetected?: number;
+  durationMs?: number | null;
+  fullReportAvailable?: boolean;
+  byRegulation?: Record<string, PrivacyRegulationSlice>;
+}
+
 /**
  * A durable audit record (Epic C, `futurator-refactor-audits`). The events
  * stream is ephemeral (7-day TTL) and the MVP report rides the job row; this is
@@ -123,6 +173,8 @@ export interface RefactorAuditRecord {
   detectedCount?: number;
   shownCount?: number;
   toolStatus?: Record<string, string>;
+  /** Data Privacy Assessment summary (when runPrivacy was set). */
+  privacy?: PrivacyAuditSummary;
   createdAt: string;
   createdBy: string;
 }

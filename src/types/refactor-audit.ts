@@ -63,6 +63,46 @@ export interface HotspotVerdict {
   confidence?: number;
 }
 
+// ── Data Privacy Assessment lane (mirror of backend) ──
+
+export interface PrivacyHotspot {
+  category: string;
+  regulation: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+  score: number;
+  confidence?: number;
+  title: string;
+  file: string;
+  snippet?: string;
+  remediation?: string;
+  solution_ceiling?: string;
+  citation?: string[];
+  card?: string;
+}
+
+export interface PrivacyRegulationSlice {
+  scannedFiles: number;
+  summary: Partial<Record<'critical' | 'high' | 'medium' | 'low' | 'info' | 'total', number>>;
+  detectedCount: number;
+  shownCount: number;
+  byCategory: Record<string, number>;
+  hotspots: PrivacyHotspot[];
+}
+
+export interface PrivacyAuditSummary {
+  failed?: boolean;
+  reason?: string;
+  error?: string;
+  tier?: string;
+  rulepackVersion?: string | null;
+  cardsLoaded?: number;
+  regulations?: string[];
+  totalDetected?: number;
+  durationMs?: number | null;
+  fullReportAvailable?: boolean;
+  byRegulation?: Record<string, PrivacyRegulationSlice>;
+}
+
 /**
  * A durable audit record (`futurator-refactor-audits`) — what the CRUD/history
  * endpoints return. Mirror of `functions/shared/types/refactor-audit.ts`.
@@ -82,6 +122,7 @@ export interface RefactorAuditRecord {
   detectedCount?: number;
   shownCount?: number;
   toolStatus?: Record<string, string>;
+  privacy?: PrivacyAuditSummary;
   createdAt: string;
   createdBy: string;
 }
