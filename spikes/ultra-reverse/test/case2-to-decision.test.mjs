@@ -28,28 +28,29 @@ test('projects to a schema-valid DecisionPlan tagged case2-planspec', () => {
   assert.equal(p.pattern, 'greenfield-build');
 });
 
-test('wave layering — S1‖S4 then S2 then S3 (parallel-barrier on the independent wave)', () => {
+test('wave layering — collision-aware: {S1,S5}‖ then S4(EPIC_WIDE) then S2 then S3', () => {
   const p = case2ToDecision(planOutput, { target: 'greenfield', rigor: 'mvp' });
-  assert.equal(p.phases.length, 3); // 3 waves
-  assert.equal(phase(p, 'wave-1').mode, 'parallel-barrier');
+  assert.equal(p.phases.length, 4); // S1‖S5 | S4 | S2 | S3
+  assert.equal(phase(p, 'wave-1').mode, 'parallel-barrier'); // S1 + S5 — disjoint files, no deps
   assert.equal(phase(p, 'wave-1').fanOut.axis, 'stories');
-  assert.equal(phase(p, 'wave-1').fanOut.width, 2); // S1 + S4 are independent
-  assert.equal(phase(p, 'wave-2').mode, 'sequential'); // S2 depends on S1
-  assert.equal(phase(p, 'wave-3').mode, 'sequential'); // S3 (epic E2 depends on E1)
-  assert.deepEqual(p.edges, [['wave-1', 'wave-2'], ['wave-2', 'wave-3']]);
+  assert.equal(phase(p, 'wave-1').fanOut.width, 2);
+  assert.equal(phase(p, 'wave-2').mode, 'sequential'); // S4 is <EPIC_WIDE> → a wave to itself
+  assert.equal(phase(p, 'wave-2').agents.length, 1);
+  assert.equal(phase(p, 'wave-3').mode, 'sequential'); // S2 depends on S1
+  assert.equal(phase(p, 'wave-4').mode, 'sequential'); // S3 (epic E2 depends on E1)
+  assert.deepEqual(p.edges, [['wave-1', 'wave-2'], ['wave-2', 'wave-3'], ['wave-3', 'wave-4']]);
 });
 
-test('guardrails — every agent carries agentType + testTier; worktree only off <EPIC_WIDE>', () => {
+test('guardrails — every agent carries agentType + testTier; <EPIC_WIDE> story is not isolated', () => {
   const p = case2ToDecision(planOutput, { target: 'greenfield', rigor: 'production' });
   const agents = allAgents(p);
-  assert.equal(agents.length, 4); // S1..S4
+  assert.equal(agents.length, 5); // S1..S5
   assert.ok(agents.every((a) => a.agentType === 'DEV')); // every story typed (Case 1 lacks this)
   assert.ok(agents.every((a) => a.testTier === 'L2')); // production → L2
   assert.ok(agents.every((a) => a.hasSchema === true));
-  // S4 is <EPIC_WIDE> → not worktree-isolated; the file-scoped stories are
-  const wave1 = phase(p, 'wave-1').agents;
-  const isoCount = wave1.filter((a) => a.isolation === 'worktree').length;
-  assert.equal(isoCount, 1); // S1 (file touchPoint) isolated; S4 (<EPIC_WIDE>) not
+  // 4 file-scoped stories worktree-isolated; S4 (<EPIC_WIDE>) is not
+  assert.equal(agents.filter((a) => a.isolation === 'worktree').length, 4);
+  assert.equal(agents.filter((a) => a.isolation === 'none').length, 1);
 });
 
 test('rigor drives test tier + verify presence', () => {
@@ -65,12 +66,15 @@ test('declarative plan records its lossy fields (no script reduce/barrier-reason
   assert.ok(p.extraction.lossy.some((s) => /no-script-reduce/.test(s)));
 });
 
-test('computeWaves throws on a dependency cycle', () => {
+test('computeWaves is cycle-SAFE (caps at wave 0, matches the real fn — no throw)', () => {
+  // mirrors computeStoryWaves cycle safety; cycle DETECTION is a validator concern (guardrail)
   const cyclic = [
-    { id: 'S1', epicId: 'E1', dependsOn: ['S2'], epicDependsOn: [] },
-    { id: 'S2', epicId: 'E1', dependsOn: ['S1'], epicDependsOn: [] },
+    { storyId: 'S1', dependsOn: ['S2'], touchPoints: [], order: 0 },
+    { storyId: 'S2', dependsOn: ['S1'], touchPoints: [], order: 1 },
   ];
-  assert.throws(() => computeWaves(cyclic), /cycle/);
+  const waves = computeWaves(cyclic);
+  const placed = waves.flat();
+  assert.equal(placed.length, 2); // both stories placed, no crash
 });
 
 test('cross-engine: a Case-1 greenfield-build script and the Case-2 greenfield plan pattern-match', () => {

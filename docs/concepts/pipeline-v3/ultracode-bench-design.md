@@ -312,17 +312,25 @@ on the judge panel (§7), guardrail uplift (§8), N-reps, and a minimal results 
 
 ## 10. Open questions carried into implementation
 
-1. **[blocker] Live cancel keystroke** that provably yields `agentCount:0` on 2.1.186 — the last M0 [VERIFY]
-   (strategy §5.4). Candidates: backspace right after the keyword, `alt+w`, `Esc`, approval-card **No**.
-2. **[blocker→resolving] IR fidelity** — does Case 2's wave-breakdown project onto `phases` faithfully enough
-   that `axis_match`/`barrier_placement` are meaningful, or does the work-breakdown↔call-graph gap dominate?
-   The `extraction.lossy` exclusion (§4) is the mitigation; validate it on the first real pair.
-3. **[high] Case-2 fairness confound** — the cost-tiered chain vs single-shot xhigh-Opus. Stamped per
-   scorecard (§0); revisit only if it visibly pollutes scores (strategy §8.1).
-4. **[med] Width `'dynamic'`** — runtime-decided fan widths can't be read statically from a script; they are
-   logged to `extraction.lossy` and excluded from `fanout_width_delta`. Confirm how often this fires.
-5. **[med] Judge variance / blind integrity** — 3 judges, randomized A/B, report stdev; verify the relabel
-   truly strips provenance (no leakage via phase naming idioms).
+> **Implementation status (2026-06-23, `spikes/ultra-reverse/`, 30/30 tests green on node v26.3.1).**
+> All buildable items are built; the one genuinely-open item (#1) needs a human at an interactive terminal.
+
+1. **[OPEN — needs a human] Live cancel keystroke** that provably yields `agentCount:0` on 2.1.186 — the last
+   M0 [VERIFY] (strategy §5.4). Capture + verify tooling is built (`capture/script-capture.mjs`,
+   `capture/verify-capture.mjs`); a person must run one `ultracode` session, cancel, and confirm PASS.
+   Candidates: backspace right after the keyword, `alt+w`, `Esc`, approval-card **No**.
+2. **[RESOLVED] IR fidelity** — both projectors land in the IR and the structural diff discriminates
+   (unrelated plans score ~0 on `pattern_match`; identical plans 1.0). `extraction.lossy` exclusion works;
+   the real-services projector + drift guard (`case2-to-decision-real.mjs`, `test/case2-real.test.mjs`)
+   prove the wave layering matches deployed behavior. Validate further on the first *real* Case-1 pair.
+3. **[high — stamped] Case-2 fairness confound** — recorded per scorecard (§0); unchanged. Revisit only if
+   it visibly pollutes scores (strategy §8.1).
+4. **[RESOLVED] Width `'dynamic'`** — the parser logs runtime-decided widths to `extraction.lossy` and
+   `fanout_width_delta` excludes them (verified: `dev.workflow.js` fan-out over `stories` → `'dynamic'`).
+5. **[RESOLVED in harness] Judge variance / blind integrity** — `judge-panel.mjs` does seeded A/B relabel
+   (provenance stripped in `renderPlanForJudge`), 3-judge averaging with single-outlier rejection, and the
+   no-justification→null honesty downgrade; tests cover un-mapping + outlier drop. Live-model variance (stdev
+   across reps) is measured once the live judge is activated.
 6. **[low] Preview drift** — re-confirm primitive signatures + capture layout after each `claude update`;
    record `claude --version` on every run (currently 2.1.186).
 

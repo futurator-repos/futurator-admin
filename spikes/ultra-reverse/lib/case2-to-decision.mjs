@@ -30,14 +30,13 @@ export function case2ToDecision(planOutput, ctx = {}) {
   const devModel = ctx.devModel ?? 'default';
   const testTier = RIGOR_TIER[rigor] ?? 'L1';
 
-  const epics = planOutput?.plan?.epics ?? [];
-  const stories = flattenStories(epics);
+  const storyById = new Map(flattenStories(planOutput?.plan?.epics ?? []).map((s) => [s.id, s]));
 
-  // ── wave layering (mirrors computePlanWaves: topo layers; throw on cycle) ────
-  const waves = computeWaves(stories);
+  // ── wave layering (faithful port of the real collision-aware computeStoryWavesWithTouchPoints) ──
+  const waves = computeWaves(waveInput(planOutput));
 
   const phases = waves.map((wave, i) => {
-    const agents = wave.map((s) => storyToAgent(s, { devModel, testTier }));
+    const agents = wave.map((id) => storyToAgent(storyById.get(id), { devModel, testTier }));
     return {
       name: `wave-${i + 1}`,
       mode: wave.length > 1 ? 'parallel-barrier' : 'sequential',
@@ -81,12 +80,37 @@ function inferVerify(rigor) {
 
 function flattenStories(epics) {
   const out = [];
+  let order = 0;
   for (const e of epics) {
     for (const s of e.stories ?? []) {
-      out.push({ ...s, epicId: e.id, epicDependsOn: e.dependsOn ?? [] });
+      out.push({ ...s, epicId: e.id, epicDependsOn: e.dependsOn ?? [], order: order++ });
     }
   }
   return out;
+}
+
+/**
+ * Shared wave-layering INPUT: flatten plan stories and expand cross-epic dependencies into
+ * story-level `dependsOn` (a story in epic E2 that depends on E1 depends on all of E1's stories).
+ * Both `computeWaves` (plain) and `case2-to-decision-real.mjs` (real services) consume THIS, so the
+ * two layerings are identical-by-construction — the drift-guard test asserts it.
+ * @returns {Array<{storyId:string, dependsOn:string[], touchPoints:string[], order:number}>}
+ */
+export function waveInput(planOutput) {
+  const stories = flattenStories(planOutput?.plan?.epics ?? []);
+  const byId = new Set(stories.map((s) => s.id));
+  const storiesByEpic = new Map();
+  for (const s of stories) {
+    if (!storiesByEpic.has(s.epicId)) storiesByEpic.set(s.epicId, []);
+    storiesByEpic.get(s.epicId).push(s.id);
+  }
+  return stories.map((s) => {
+    const deps = new Set();
+    for (const d of s.dependsOn ?? []) if (byId.has(d)) deps.add(d);
+    for (const ep of s.epicDependsOn ?? []) for (const sid of storiesByEpic.get(ep) ?? []) deps.add(sid);
+    deps.delete(s.id);
+    return { storyId: s.id, dependsOn: [...deps], touchPoints: s.touchPoints ?? [], order: s.order };
+  });
 }
 
 /** Per-story → DecisionPlan Agent, carrying the guardrails Case 2 wins on (design §8). */
@@ -106,37 +130,75 @@ function storyToAgent(s, { devModel, testTier }) {
 }
 
 /**
- * Topological wave layering over stories. A story's predecessors are its intra-epic `dependsOn`
- * plus every story whose epic is in this story's epic `dependsOn` (cross-epic ordering).
- * Throws on a dependency cycle — mirrors computePlanWaves (plan-waves.ts).
+ * Wave layering — a faithful plain-JS PORT of the real `computeStoryWavesWithTouchPoints`
+ * (functions/shared/services/story-waves.ts). Two constraints, earliest wave satisfying both:
+ *   1. dependency order — strictly after every dep's placed wave;
+ *   2. touch-point disjointness — no two stories in a wave share a file; a `<EPIC_WIDE>` story
+ *      gets a wave to itself.
+ * Cycle-SAFE (caps at wave 0, does not throw) — matching the real fn; cycle detection is a
+ * validator concern (solutioning-gate / computePlanWaves), surfaced via guardrail validator_conformance.
+ * `case2-to-decision-real.mjs` calls the real fn on the same `waveInput`; the drift-guard test asserts
+ * this port and the real fn agree.
+ *
+ * @param {ReturnType<typeof waveInput>} input   from waveInput(planOutput)
+ * @returns {string[][]}  array of waves, each an array of storyIds, in wave order
  */
-export function computeWaves(stories) {
-  const byId = new Map(stories.map((s) => [s.id, s]));
-  const storiesByEpic = new Map();
-  for (const s of stories) {
-    if (!storiesByEpic.has(s.epicId)) storiesByEpic.set(s.epicId, []);
-    storiesByEpic.get(s.epicId).push(s.id);
+export function computeWaves(input, opts = {}) {
+  const sentinel = opts.epicWideSentinel ?? '<EPIC_WIDE>';
+  const byId = new Map(input.map((s) => [s.storyId, s]));
+
+  // dependsOn-only waves (cycle-safe walk, cap 0) — mirrors computeStoryWaves
+  const depWave = new Map();
+  const walk = (id, visited = new Set()) => {
+    if (depWave.has(id)) return depWave.get(id);
+    if (visited.has(id)) return 0; // cycle safety
+    visited.add(id);
+    const s = byId.get(id);
+    if (!s || !s.dependsOn || s.dependsOn.length === 0) { depWave.set(id, 0); return 0; }
+    const dw = s.dependsOn.filter((d) => byId.has(d)).map((d) => walk(d, visited));
+    const w = dw.length === 0 ? 0 : Math.max(...dw) + 1;
+    depWave.set(id, w);
+    return w;
+  };
+  for (const s of input) walk(s.storyId);
+
+  // collision-aware placement — mirrors computeStoryWavesWithTouchPoints
+  const normalize = (p) => p.trim().replace(/^\.\//, '');
+  const placed = new Map();
+  const claims = new Map();
+  const claimFor = (w) => { if (!claims.has(w)) claims.set(w, { paths: new Set(), epicWide: false, count: 0 }); return claims.get(w); };
+  const sorted = [...input].sort((a, b) => {
+    const dw = (depWave.get(a.storyId) ?? 0) - (depWave.get(b.storyId) ?? 0);
+    return dw !== 0 ? dw : (a.order ?? 0) - (b.order ?? 0);
+  });
+  for (const s of sorted) {
+    const raw = (s.touchPoints ?? []).map(normalize).filter(Boolean);
+    const isEpicWide = raw.includes(sentinel);
+    const paths = raw.filter((p) => p !== sentinel);
+    let w = 0;
+    for (const dep of s.dependsOn ?? []) { const dwp = placed.get(dep); if (dwp !== undefined) w = Math.max(w, dwp + 1); }
+    const collides = (wave) => {
+      const c = claims.get(wave);
+      if (!c) return false;
+      if (c.epicWide) return true;
+      if (isEpicWide) return c.count > 0;
+      for (const p of paths) if (c.paths.has(p)) return true;
+      return false;
+    };
+    while (collides(w)) w += 1;
+    placed.set(s.storyId, w);
+    const c = claimFor(w);
+    c.count += 1;
+    if (isEpicWide) c.epicWide = true;
+    for (const p of paths) c.paths.add(p);
   }
 
-  const preds = new Map(); // storyId → Set(predecessor storyIds)
-  for (const s of stories) {
-    const set = new Set();
-    for (const d of s.dependsOn ?? []) if (byId.has(d)) set.add(d);
-    for (const ep of s.epicDependsOn ?? []) for (const sid of storiesByEpic.get(ep) ?? []) set.add(sid);
-    set.delete(s.id);
-    preds.set(s.id, set);
-  }
-
-  const placed = new Set();
+  const maxW = Math.max(0, ...[...placed.values()]);
   const waves = [];
-  let guard = stories.length + 1;
-  while (placed.size < stories.length && guard-- > 0) {
-    const layer = stories.filter((s) => !placed.has(s.id) && [...preds.get(s.id)].every((p) => placed.has(p)));
-    if (layer.length === 0) throw new Error('case2ToDecision: dependency cycle in stories (no acyclic wave layering)');
-    for (const s of layer) placed.add(s.id);
-    waves.push(layer);
+  for (let w = 0; w <= maxW; w++) {
+    const layer = input.filter((s) => placed.get(s.storyId) === w).map((s) => s.storyId);
+    if (layer.length) waves.push(layer);
   }
-  if (placed.size < stories.length) throw new Error('case2ToDecision: dependency cycle (guard tripped)');
   return waves;
 }
 

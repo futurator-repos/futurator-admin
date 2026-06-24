@@ -9,15 +9,16 @@
 //
 // --case1 accepts a raw workflow `.js` OR a `*.case1.json` produced by capture/script-capture.mjs.
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 
 import { case1ToDecision } from '../lib/case1-to-decision.mjs';
-import { case2ToDecision } from '../lib/case2-to-decision.mjs';
+import { case2ToDecisionReal } from '../lib/case2-to-decision-real.mjs';
 import { sliceScore } from '../lib/structural-diff.mjs';
 import { guardrailUplift } from '../lib/guardrail-uplift.mjs';
 import { emitSlices } from '../lib/scorecard-emit.mjs';
 import { validateDecisionPlan } from '../lib/decision-schema.mjs';
+import { createStore } from '../lib/store.mjs';
 
 const a = parseArgs(process.argv.slice(2));
 if (!a.case1 || !a.case2) {
@@ -33,7 +34,7 @@ const c1 = case1ToDecision(scriptJs);
 // ── Case 2: planOutput → DecisionPlan ──────────────────────────────────────────
 const planOutput = JSON.parse(readFileSync(resolve(a.case2), 'utf8'));
 const ctx = { target: a.target ?? 'greenfield', rigor: a.rigor ?? 'production' };
-const c2 = case2ToDecision(planOutput, ctx);
+const c2 = await case2ToDecisionReal(planOutput, ctx); // deployed-fidelity layering (falls back to plain port)
 
 for (const [label, plan] of [['case1', c1], ['case2', c2]]) {
   const v = validateDecisionPlan(plan);
@@ -47,12 +48,11 @@ const guardrail = guardrailUplift(c2, planOutput, { validatorPassed: true });
 const runId = `slice-${basename(a.case1).replace(/\.[^.]+$/, '')}-${Date.now()}`;
 const slices = emitSlices({ structural, guardrail, runId });
 
-// ── persist (slice: JSON file; DDB/S3 is M5) ────────────────────────────────────
+// ── persist via the pluggable store (FileStore locally; DynamoDB+S3 when configured, §8.3) ──────
 const outDir = a.out ?? join(process.cwd(), 'ultra-reverse-runs');
-mkdirSync(outDir, { recursive: true });
+const store = createStore({ dir: outDir });
 const record = { runId, ctx, structural, guardrail, slices, case1: c1, case2: c2, capturedAt: new Date().toISOString() };
-const outPath = join(outDir, `${runId}.scorecard.json`);
-writeFileSync(outPath, JSON.stringify(record, null, 2));
+const outPath = await store.put(record);
 
 // ── report ──────────────────────────────────────────────────────────────────────
 console.log(`\n▸ ultra-reverse slice — ${runId}`);

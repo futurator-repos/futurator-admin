@@ -35,6 +35,15 @@
             "touchPoints": ["<EPIC_WIDE>"],
             "references": [],
             "criteria": [{ "id": "AC4", "text": "Logger compiles", "needsBrowser": false, "verify": "build" }]
+          },
+          {
+            "id": "S5",
+            "title": "Shared util module",
+            "description": "A small independent helper, distinct file from S1.",
+            "dependsOn": [],
+            "touchPoints": ["functions/shared/lib/util.ts"],
+            "references": [{ "source": "architecture", "section": "Utilities" }],
+            "criteria": [{ "id": "AC5", "text": "Util compiles", "needsBrowser": false, "verify": "build" }]
           }
         ]
       },
