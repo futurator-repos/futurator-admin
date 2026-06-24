@@ -548,9 +548,12 @@ export interface AgentJob {
 
   /**
    * Ultracode-Reverse bench. Set when `jobType === 'ultracode-bench'`. `jobId === runId`.
-   * The daemon captures the real `ultracode` planner (kill-on-script-write halt), runs the
-   * Case-2 projector on `planOutput` (precomputed by the API for the same intent), scores both,
-   * and writes the result to the ultracode-runs table. `judge` is opt-in (cost-bearing).
+   *
+   * SYMMETRIC FRAME (2026-06-24): both engines run a SINGLE `claude` invocation at the SAME
+   * model + effort, on the daemon, differing ONLY in the prompt — Case 1 = native `ultracode`
+   * (captured via kill-on-script-write halt), Case 2 = our Futurator Workflow Author meta-prompt
+   * (`claude -p`, output-only, no execution). The daemon AST-parses BOTH scripts into the
+   * DecisionPlan IR and scores them. Guardrails are a later layer, not part of this frame.
    */
   ultracodeBenchPayload?: {
     runId: string;
@@ -559,11 +562,13 @@ export interface AgentJob {
     target: 'greenfield' | 'brownfield';
     rigor: 'prototype' | 'mvp' | 'production';
     reps: number;
+    /** Both engines run at the SAME model + effort (the isolated variable is the prompt). */
+    model?: string; // default 'opus' (Opus 4.8)
+    effort?: string; // default 'xhigh'
+    /** Version of the Futurator Workflow Author meta-prompt used for Case 2. */
+    metaPromptVersion?: string;
     judge?: boolean;
     captureTimeoutMs?: number;
-    /** Precomputed Case-2 plan output for the same intent (projector input). */
-    planOutput?: unknown;
-    promptVersion?: string;
     claudeVersion?: string;
   };
 
