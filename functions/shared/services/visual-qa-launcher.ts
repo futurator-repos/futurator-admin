@@ -589,7 +589,15 @@ export async function launchPlanQaExecute(
 
   // Every test must have a level. Defensive — the contract approval API enforces
   // this, but pipeline builders rely on it.
+  // pacman3 FIX 1b — a test carrying an executable INTERACTION flow MUST run as L2
+  // (run the flow + multi-frame judge). Force it here so an operator's L1 level
+  // edit, a stale persisted level, or an mvp rigor cap can't route a
+  // post-interaction flow to the single-static-frame L1 judge (→ false UNCERTAIN).
   const finalTests: FlatVisualTest[] = authoredTests.map((t) => {
+    const hasInteractionFlow =
+      Array.isArray(t.flow) &&
+      t.flow.some((s) => s.action !== 'screenshot' && s.action !== 'navigate');
+    if (hasInteractionFlow) return { ...t, level: 'L2' };
     if (t.level) return t;
     const c = classifyVisualTest(t);
     return { ...t, level: c.level };

@@ -21,7 +21,7 @@ import {
   useDeleteAudit,
   reportFromRecord,
 } from '@/hooks/use-app-audit';
-import { AssessLiveLog } from './assess-live-log';
+import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-output';
 import { NewPlanModal } from '../new-plan-modal';
 import { HotspotDashboard } from './hotspot-dashboard';
 import { RefactorGraph } from './refactor-graph';
@@ -116,6 +116,10 @@ export function AssessTab({ app }: { app: App }) {
   // on both the job summary and the durable record.
   const currentSummary = jobId ? job?.refactorAuditSummary : selectedRecord;
   const currentAuditId = currentSummary?.auditId;
+  // The job whose log we stream — the live URL job, or the producing job of the
+  // selected durable record (events persist 7 days, so a finished audit's log is
+  // still viewable). Drives the persistent collapsible log.
+  const logJobId = jobId ?? selectedRecord?.jobId ?? null;
 
   const [planOpen, setPlanOpen] = useState(false);
   const [planIntent, setPlanIntent] = useState('');
@@ -310,10 +314,18 @@ export function AssessTab({ app }: { app: App }) {
         </div>
       )}
 
-      {/* Live recon log (assess.* event stream + copy-logs) — shown while
-          running AND after a failure, so the error is auditable. */}
-      {jobId && (report.status === 'assessing' || report.status === 'failed') && (
-        <AssessLiveLog jobId={jobId} job={job} />
+      {/* Live assessment log — the SAME StoryLiveOutput component the pipeline
+          dev stage uses (now renders assess.* recon events). Shown prominently
+          while running / on failure. */}
+      {logJobId && (report.status === 'assessing' || report.status === 'failed') && (
+        <div>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>
+            {report.status === 'failed'
+              ? 'Assessment failed — log:'
+              : 'Running recon on the EC2 clone…'}
+          </div>
+          <StoryLiveOutput jobId={logJobId} hideResponse />
+        </div>
       )}
 
       {report.status === 'scored' && currentSummary?.toolStatus?.knip === 'unavailable' && (
@@ -400,6 +412,25 @@ export function AssessTab({ app }: { app: App }) {
                 jobId ? job?.refactorAuditSummary?.graphAvailable : selectedRecord?.graphAvailable
               }
             />
+          )}
+          {/* Persistent assessment log — stays available after completion (the
+              events stream lives 7 days) so the run is auditable post-hoc. */}
+          {logJobId && (
+            <details style={{ marginTop: 4 }}>
+              <summary
+                style={{
+                  fontSize: 12,
+                  color: 'var(--text-dim)',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                }}
+              >
+                Assessment log
+              </summary>
+              <div style={{ marginTop: 8 }}>
+                <StoryLiveOutput jobId={logJobId} hideResponse />
+              </div>
+            </details>
           )}
         </>
       )}

@@ -19,7 +19,7 @@ import { PerformanceTab } from './performance-tab';
 import { AppPartyView } from './app-party-view';
 import { AssessTab } from './assess/assess-tab';
 import { RefactorGraph } from './assess/refactor-graph';
-import { useAppAudits } from '@/hooks/use-app-audit';
+import { useAppAudits, useRefactorGraphAvailable } from '@/hooks/use-app-audit';
 
 interface DeployRow {
   jobId: string;
@@ -49,11 +49,13 @@ export function AppDetailView({ appId }: { appId: string }) {
       ? tabParam
       : 'overview';
 
-  // App-level Graph tab: enabled once an assessment has produced a code graph.
-  // Reuses the durable audit list; latest audit's graphAvailable gates the tab.
+  // App-level Graph tab: enabled once an assessment has produced + uploaded a
+  // code graph. Gated on the S3 graph (HEAD) — resilient to the durable audit
+  // table (the graph's home is S3). The durable list still feeds hotspots.
   const { data: auditsData } = useAppAudits(appId);
   const latestAudit = auditsData?.audits?.[0] ?? null;
-  const hasGraph = !!latestAudit?.graphAvailable;
+  const { data: graphInS3 } = useRefactorGraphAvailable(appId);
+  const hasGraph = !!graphInS3;
 
   // Pre-fetch repo summary so the Source tab has defaultBranch without an
   // additional waterfall. We can only know if the app is bootstrapped after the

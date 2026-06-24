@@ -105,6 +105,33 @@ export function selectAuditReport(job: AgentJob | undefined | null): AuditReport
 
 const QK_AUDITS = (appId: string) => ['app-audits', appId] as const;
 
+/** Public S3 home of the file-level code graph the daemon uploads per app. */
+const REFACTOR_GRAPH_S3 = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
+
+/**
+ * Whether a code graph exists for the app (cheap S3 HEAD). Gates the Graph tab
+ * resiliently — the graph's home is S3 (daemon s3-daemon-access works), so this
+ * doesn't depend on the durable audit table. Returns true once an assessment
+ * has produced + uploaded a graph.
+ */
+export function useRefactorGraphAvailable(appId: string | null) {
+  return useQuery({
+    queryKey: ['refactor-graph-available', appId],
+    queryFn: async () => {
+      const res = await fetch(
+        `${REFACTOR_GRAPH_S3}/${encodeURIComponent(appId!)}/_refactor/graph.json`,
+        {
+          method: 'HEAD',
+        },
+      );
+      return res.ok;
+    },
+    enabled: !!appId,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
 /** List a project's durable audits, newest-first (§9.4). */
 export function useAppAudits(appId: string | null) {
   return useQuery({

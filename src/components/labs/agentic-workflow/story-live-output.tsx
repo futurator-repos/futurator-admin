@@ -120,6 +120,61 @@ export function StoryLiveOutput({ jobId, hideResponse }: StoryLiveOutputProps) {
     let resultIdx = 0;
 
     for (const ev of events) {
+      // Refactor-audit recon emits assess.* events (not the agent taxonomy).
+      // Map them into the SAME action list so the assessment log uses this exact
+      // UI: step transitions + per-line recon stdout/stderr + terminal/failure.
+      const et = String(ev.eventType);
+      if (et.startsWith('assess.')) {
+        const x = ev as AgentEvent & {
+          step?: string;
+          stream?: string;
+          data?: string;
+          reason?: string;
+          message?: string;
+          hotspotCount?: number;
+          confirmed?: number;
+          rejected?: number;
+        };
+        const common = { stepId: ev.stepId, agentId: ev.agentId, timestamp: ev.timestamp };
+        if (et === 'assess.started') {
+          items.push({ type: 'step_start', text: 'Assessment started', ...common });
+        } else if (et === 'assess.step.started') {
+          items.push({ type: 'step_start', text: `▶ ${x.step || 'step'}`, ...common });
+        } else if (et === 'assess.step.output') {
+          for (const raw of String(x.data || '').split('\n')) {
+            const line = raw.replace(/\s+$/, '');
+            if (line)
+              items.push({
+                type: x.stream === 'stderr' ? 'error' : 'status',
+                text: line,
+                ...common,
+              });
+          }
+        } else if (et === 'assess.completed') {
+          items.push({
+            type: 'status',
+            text: `✓ completed — ${x.hotspotCount ?? 0} hotspots`,
+            ...common,
+          });
+        } else if (et === 'assess.failed') {
+          items.push({
+            type: 'error',
+            text: `FAILED [${x.reason || 'error'}] ${x.message || ''}`,
+            ...common,
+          });
+        } else if (et === 'assess.l3.started') {
+          items.push({ type: 'step_start', text: 'L3 adjudication started', ...common });
+        } else if (et === 'assess.l3.completed') {
+          items.push({
+            type: 'status',
+            text: `L3 — ${x.confirmed ?? 0} confirmed, ${x.rejected ?? 0} rejected`,
+            ...common,
+          });
+        } else if (et === 'assess.l3.failed') {
+          items.push({ type: 'error', text: `L3 FAILED — ${x.message || ''}`, ...common });
+        }
+        continue;
+      }
       if (ev.eventType === 'tool_use') {
         const match = toolResultsByIdx[resultIdx];
         resultIdx++;

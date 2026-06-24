@@ -277,6 +277,34 @@ function hasAuthoredFlow(flow: VisualTestFlowStep[] | undefined): boolean {
   return Array.isArray(flow) && flow.some((s) => s && !PASSIVE_ACTIONS.has(s.action));
 }
 
+/**
+ * pacman3 — the post-interaction END STATE the vision judge must score, in plain
+ * words. CRITICAL: the recurring backwards-FAIL came from the judge reading a
+ * "transitions FROM title TO running" AC and fixating on the TITLE (the pre-state)
+ * — it then FAILED a screenshot that correctly showed the running game. We strip
+ * the "from … to" preamble and keep only the END state, so the judge scores what
+ * the final frame should actually show. Prefer thenObservable/then; else parse the
+ * "to <X>" clause; else the whole claim.
+ */
+function deriveEndStateExpectation(test: VisualTestDef, ac: AcceptanceCriterion | undefined): string {
+  const obs = (ac?.thenObservable || ac?.then || '').trim();
+  if (obs) return obs.replace(/[.;]\s*$/, '');
+  const text = (ac?.text || test.expect || '').trim();
+  const m = /\b(?:transitions?|changes?|switch(?:es)?|goes|moves?|advances?|turns?)\b[^.]*?\bto\b\s+(.+)/i.exec(
+    text,
+  );
+  if (m) return m[1].trim().replace(/[.;]\s*$/, '');
+  return text.replace(/[.;]\s*$/, '');
+}
+
+/** A judge directive that pins the vision judge to the POST-interaction frame. */
+function postInteractionJudge(test: VisualTestDef, ac: AcceptanceCriterion | undefined): string {
+  return (
+    `After the scripted interaction runs, the FINAL screenshot must show: ${deriveEndStateExpectation(test, ac)}. ` +
+    `Judge ONLY this post-interaction state — do NOT expect a title, start, or pre-interaction screen.`
+  );
+}
+
 /** Combined natural-language source for reach/observable parsing — the AC's BDD
  *  prose when available, plus the test's own fields (so authoring works at the
  *  EXECUTE chokepoint where only the visual test, not the AC, is in hand). */
@@ -360,7 +388,7 @@ export function authorProbeFlow(
       { action: 'screenshot', label: 'after-start' },
     ];
     return {
-      test: { ...test, level: 'L1', flow },
+      test: { ...test, level: 'L1', flow, judge: postInteractionJudge(test, ac) },
       action: 'authored',
       note: 'start-gated appearance → press to start; judge the gameplay frame, not the start screen',
     };
@@ -409,7 +437,7 @@ export function authorProbeFlow(
       : []),
   ];
   return {
-    test: { ...test, level: 'L2', flow },
+    test: { ...test, level: 'L2', flow, judge: postInteractionJudge(test, ac) },
     action: 'authored',
     note: assert
       ? `authored ${flow.length}-step L2-state probe → assert ${assert.expr} ${assert.op} ${JSON.stringify(assert.expected)}`

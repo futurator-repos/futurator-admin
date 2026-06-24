@@ -11,6 +11,7 @@ import {
   capVisionLevelByRigor,
   isDeterministicLevel,
   isInteractionGated,
+  DEFAULT_COST_BY_LEVEL,
 } from '../visual-test-classifier';
 import type { VisualTestDef } from '../../types/epic-workflow';
 
@@ -167,7 +168,10 @@ describe('classifyVisualTest — fixture-driven (reviewer §16.1)', () => {
 });
 
 describe('classifyVisualTest — rigor floor (PR-8f #2)', () => {
-  it('floors L2 to L0 at prototype rigor', () => {
+  it('EXEMPTS an interaction-flow L2 from the prototype rigor cap (interaction must run)', () => {
+    // pacman3 — a test with an executable interaction flow cannot be verified by a
+    // static L0/L1 frame, so rigor does NOT downgrade it (the cap is a vision-cost
+    // ceiling, not a reason to skip a required interaction).
     const t = vt('vt-flow', {
       flow: [
         { action: 'navigate', url: '/' },
@@ -177,9 +181,19 @@ describe('classifyVisualTest — rigor floor (PR-8f #2)', () => {
       expect: 'clicking Start transitions menu to game-active state',
     });
     const result = classifyVisualTest(t, 'prototype');
+    expect(result.level).toBe('L2');
+    expect(result.rigorFloored).toBeUndefined();
+  });
+
+  it('still floors an explicit L2 with NO interaction flow at prototype', () => {
+    const t = vt('vt-static-l2', {
+      level: 'L2',
+      screenshot: { selector: '#root' },
+      expect: 'a specific element shown at a concrete position',
+    });
+    const result = classifyVisualTest(t, 'prototype');
     expect(result.level).toBe('L0');
     expect(result.rigorFloored).toBe(true);
-    expect(result.reason).toMatch(/forced L0 by prototype rigor/);
   });
 
   it('floors L1 to L0 at prototype rigor', () => {
@@ -192,7 +206,7 @@ describe('classifyVisualTest — rigor floor (PR-8f #2)', () => {
     expect(result.rigorFloored).toBe(true);
   });
 
-  it('floors L2 to L1 at mvp rigor', () => {
+  it('EXEMPTS an interaction-flow L2 from the mvp rigor cap', () => {
     const t = vt('vt-flow', {
       flow: [
         { action: 'navigate', url: '/' },
@@ -200,6 +214,17 @@ describe('classifyVisualTest — rigor floor (PR-8f #2)', () => {
         { action: 'screenshot', label: 'after' },
       ],
       expect: 'clicking Start transitions menu to game-active state',
+    });
+    const result = classifyVisualTest(t, 'mvp');
+    expect(result.level).toBe('L2');
+    expect(result.rigorFloored).toBeUndefined();
+  });
+
+  it('still floors an explicit L2 with NO interaction flow at mvp', () => {
+    const t = vt('vt-static-l2', {
+      level: 'L2',
+      screenshot: { selector: '#root' },
+      expect: 'a specific element shown at a concrete position',
     });
     const result = classifyVisualTest(t, 'mvp');
     expect(result.level).toBe('L1');
@@ -278,9 +303,10 @@ describe('aggregateVisualTests — rigor flow-through (PR-8f #2)', () => {
       }),
     ];
     const report = aggregateVisualTests(tests, [], 'prototype');
-    expect(report.byLevel).toEqual({ L0: 3, L1: 0, L2: 0 });
-    // Cost projection collapses to L0 ($0).
-    expect(report.estimatedCostUsd).toBe(0);
+    // pacman3 — the interaction-flow test is rigor-exempt (stays L2); the static
+    // L1 + L0 tests still collapse to L0 at prototype.
+    expect(report.byLevel).toEqual({ L0: 2, L1: 0, L2: 1 });
+    expect(report.estimatedCostUsd).toBe(DEFAULT_COST_BY_LEVEL.L2);
   });
 
   it('caps at mvp — L1 + L0 only', () => {
@@ -299,7 +325,9 @@ describe('aggregateVisualTests — rigor flow-through (PR-8f #2)', () => {
       }),
     ];
     const report = aggregateVisualTests(tests, [], 'mvp');
-    expect(report.byLevel).toEqual({ L0: 0, L1: 2, L2: 0 });
+    // pacman3 — the interaction-flow test stays L2 (rigor-exempt); the static
+    // screenshot test stays L1.
+    expect(report.byLevel).toEqual({ L0: 0, L1: 1, L2: 1 });
   });
 
   it('production — full classification preserved', () => {

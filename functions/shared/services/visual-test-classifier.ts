@@ -270,10 +270,22 @@ export function classifyVisualTest(
 
   // Rigor cap — applied before the needsBrowser floor so that
   // needsBrowser can override even a rigor-capped L0.
+  //
+  // pacman3 EXEMPTION — a test that carries an executable INTERACTION flow (a
+  // step beyond screenshot/navigate) MUST run as L2: the whole point is that the
+  // claim is only verifiable AFTER the scripted interaction, and the L2 capture
+  // runs the flow + multi-frame judge. Capping it to L1 (mvp) would route a
+  // post-interaction frame to the single-static-frame judge → UNCERTAIN/false
+  // verdicts (the recurring "same screenshot, can't verify" disease). Rigor is a
+  // COST ceiling on VISION spend, not a reason to skip a required interaction —
+  // so flow-bearing tests are exempt from the downgrade.
   let level = result.level;
   let reason = result.reason;
   let rigorFloored = false;
-  if (planRigor) {
+  const hasInteractionFlow =
+    Array.isArray(test.flow) &&
+    test.flow.some((s) => s.action !== 'screenshot' && s.action !== 'navigate');
+  if (planRigor && !hasInteractionFlow) {
     const ceiling = RIGOR_MAX_LEVEL[planRigor];
     const capped = capLevel(level, ceiling);
     if (capped !== level) {
@@ -281,6 +293,8 @@ export function classifyVisualTest(
       level = capped;
       rigorFloored = true;
     }
+  } else if (planRigor && hasInteractionFlow && level === 'L2') {
+    reason = `${reason} (rigor-exempt: carries an executable interaction flow — runs as L2 regardless of ${planRigor})`;
   }
 
   // PR-62 — needsBrowser floor (after rigor cap so it wins).
