@@ -63,7 +63,8 @@ export async function runAgentTurn(job, ctx) {
   const cwd = session.Item?.cwd || process.env.HOME || '/tmp';
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(process.execPath, [ctx.claudeBin, ...args], {
+    // claude ≥2.1.19x is a native binary — spawn it directly, not via `node` (see CLAUDE_BIN note).
+    const proc = spawn(ctx.claudeBin, args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, FORCE_COLOR: '0' },

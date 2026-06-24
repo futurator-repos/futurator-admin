@@ -13440,9 +13440,15 @@ app.post('/api/ultracode/runs', async (c) => {
       rigor: run.rigor,
       reps: run.reps,
       model: 'opus',
-      effort: 'xhigh',
+      // CLI `--effort` accepts only low|medium|high|max — 'xhigh' (an Agent-tool effort) is
+      // rejected by the claude CLI and makes the capture spawn exit instantly. 'max' is the
+      // CLI's highest tier (pacman ultracode-bench, 2026-06-24).
+      effort: 'max',
       judge: false,
-      captureTimeoutMs: 120000,
+      // The ultracode planner front-loads heavy thinking before it persists a workflow script;
+      // 120s wasn't enough for the capture to see one. 300s gives the planner room (the capture
+      // still kills early the moment a size-stable wf.json appears).
+      captureTimeoutMs: 300000,
     },
     pipeline: { agents: {}, steps: [] },
   } as never);

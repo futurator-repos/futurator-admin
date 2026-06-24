@@ -227,7 +227,12 @@ import { createMemoryStore, provisionMemoryRoot } from './lib/memory-store.mjs';
 import { readClaudeMd } from './lib/claude-md-loader.mjs';
 import { createPatRetry } from './lib/pat-retry.mjs';
 
-// Resolve the full path to `claude` binary at startup
+// Resolve the full path to `claude` binary at startup.
+// NB: Claude Code ≥2.1.19x ships a NATIVE compiled binary (bin/claude.exe) — it must be
+// spawned DIRECTLY (`spawn(CLAUDE_BIN, args)`), NOT via `node` (older builds shipped a cli.js
+// that `node` could run; the native binary makes `node claude.exe` throw ERR_UNKNOWN_FILE_EXTENSION).
+// Direct exec also works for the legacy cli.js via its shebang — it's the universal pattern, and the
+// one epic-dev/party/free-agent spawns already use (2026-06-25 claude-upgrade fix).
 let CLAUDE_BIN = 'claude';
 try {
   CLAUDE_BIN = execSync('which claude', { encoding: 'utf8' }).trim();
@@ -474,7 +479,7 @@ function loadOAuth(reason = 'startup') {
 function probeAuth() {
   return new Promise((resolve) => {
     const args = ['-p', 'ok', '--model', 'haiku', '--output-format', 'json'];
-    const proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
+    const proc = spawn(CLAUDE_BIN, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       // Belt-and-suspenders: strip ANTHROPIC_API_KEY from child env so the CLI
       // cannot pick it up even if something sets it after daemon startup.
@@ -959,7 +964,7 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
     }
 
     try {
-      assertSpawnAllowed(process.execPath, [CLAUDE_BIN, ...args], cwd);
+      assertSpawnAllowed(CLAUDE_BIN, args, cwd);
     } catch (err) {
       if (err instanceof ShellGuardViolation) {
         log('error', `shell-guard refused agent step ${stepId}: ${err.message}`, err.details);
@@ -970,7 +975,7 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
     }
     // Use node directly to execute claude's cli.js — avoids shell interpretation
     // issues AND works on Linux where spawn without shell can't handle shebangs
-    const proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
+    const proc = spawn(CLAUDE_BIN, args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       // stripApiKey: defense against anything setting ANTHROPIC_API_KEY at
@@ -4488,7 +4493,7 @@ function resolveWaveMergeConflictOnce({ worktreeDir, conflictedFiles, conflictSt
     };
     let proc;
     try {
-      proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
+      proc = spawn(CLAUDE_BIN, args, {
         cwd: worktreeDir,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
@@ -4640,7 +4645,7 @@ function fixWaveMergeBuildOnce(
     };
     let proc;
     try {
-      proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
+      proc = spawn(CLAUDE_BIN, args, {
         cwd: worktreeDir,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
@@ -4772,7 +4777,7 @@ function spawnGateAgentOnce({ role, prompt, cwd, round }, { short } = {}) {
     };
     let proc;
     try {
-      proc = spawn(process.execPath, [CLAUDE_BIN, ...args], {
+      proc = spawn(CLAUDE_BIN, args, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),

@@ -74,6 +74,12 @@ function readWfMeta(scriptPath) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// The claude CLI `--effort` flag accepts ONLY low|medium|high|max. 'xhigh' (a valid Agent-tool
+// effort elsewhere) is rejected and makes the spawn exit instantly — normalize anything invalid to
+// 'max' (the CLI's highest tier) so an old payload can't silently kill the capture.
+const VALID_EFFORT = new Set(['low', 'medium', 'high', 'max']);
+const normEffort = (e) => (VALID_EFFORT.has(e) ? e : 'max');
+
 /**
  * Build the real capture deps for the runner.
  * @param {object} cfg
@@ -110,13 +116,13 @@ export function makeCaptureDeps(cfg) {
       '--permission-mode',
       'bypassPermissions',
     ];
-    if (effort) args.push('--effort', effort); // [VERIFY] exact CLI effort flag on EC2
-    // claudeBin resolves to the cli.js symlink (/usr/bin/claude → …/cli.js). Like the rest of the
-    // daemon (agent-daemon.mjs: spawn(process.execPath, [CLAUDE_BIN, …])) it must be run as
-    // `node cli.js`, NOT exec'd directly — a direct spawn ENOENTs. And without an 'error' listener
-    // a spawn failure is an unhandled 'error' event that crashes the WHOLE daemon; capture it and
-    // throw so the runner's try/catch marks the run ERROR (pacman ultracode-bench crash 2026-06-24).
-    const child = spawn(process.execPath, [claudeBin, ...args], {
+    const eff1 = normEffort(effort);
+    if (eff1) args.push('--effort', eff1);
+    // claude ≥2.1.19x is a NATIVE binary — spawn it DIRECTLY (not via node; node can't run an ELF).
+    // Without an 'error' listener a spawn failure is an unhandled 'error' event that crashes the
+    // WHOLE daemon; capture it and throw so the runner's try/catch marks the run ERROR
+    // (pacman ultracode-bench crash 2026-06-24 + claude-upgrade native-binary fix 2026-06-25).
+    const child = spawn(claudeBin, args, {
       cwd,
       env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
       stdio: ['ignore', 'ignore', 'ignore'],
@@ -163,7 +169,8 @@ export function makeCaptureDeps(cfg) {
     loadOAuth?.('ultracode-bench-case2');
     const prompt = `${metaPrompt}\n\nINTENT:\n${intent}`;
     const args = ['-p', prompt, '--model', model, '--permission-mode', 'bypassPermissions'];
-    if (effort) args.push('--effort', effort);
+    const eff2 = normEffort(effort);
+    if (eff2) args.push('--effort', eff2);
     const out = await spawnCapture(claudeBin, args, {
       cwd,
       env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
@@ -189,8 +196,8 @@ function killTree(child) {
 
 function spawnCapture(bin, args, opts) {
   return new Promise((resolve, reject) => {
-    // Run the cli.js symlink via node, matching captureCase1 + the daemon's spawn pattern.
-    const child = spawn(process.execPath, [bin, ...args], { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
+    // claude ≥2.1.19x is a native binary — spawn directly (see captureCase1).
+    const child = spawn(bin, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     child.stdout.on('data', (d) => {
       out += d;

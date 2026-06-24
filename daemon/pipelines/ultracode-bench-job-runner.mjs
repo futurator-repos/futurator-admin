@@ -57,8 +57,11 @@ export async function runUltracodeBenchJob(job, deps) {
   const { runId } = p;
   const reps = p.reps;
   const model = p.model || 'opus';
-  const effort = p.effort || 'xhigh';
-  const captureTimeoutMs = p.captureTimeoutMs || 120000;
+  // 'max' is the CLI's highest effort tier (the old 'xhigh' default is rejected by the claude CLI).
+  const effort = p.effort || 'max';
+  // The ultracode planner front-loads heavy thinking before persisting a script; floor the capture
+  // window at 300s so an older payload (120000) can't undercut it before the API Lambda redeploys.
+  const captureTimeoutMs = Math.max(p.captureTimeoutMs || 0, 300000);
   const ev = (stepId, agentId, type, data) => deps.pushEvent(runId, stepId, agentId, type, data);
 
   await deps.updateRun(runId, {
