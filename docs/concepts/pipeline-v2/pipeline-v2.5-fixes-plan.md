@@ -894,6 +894,18 @@ the Registry browse (Story 4.3 already has the trust column to hang it on).
 ### F29 — Environment-true subdomains: CloudFront index-rewrite + plan/app identity (P1)
 
 > Contributed by **deployment** (2026-06-19). Full design: [`deployment-v2.5.md` §15](./deployment-v2.5.md). **Touches the QA stage — see hand-off below.**
+>
+> **Status: ✅ SHIPPED + VERIFIED in production (2026-06-24, deployment).** All three parts
+> (A infra + flag, B identity, C harness) landed in commit `050023b` and deployed via
+> `sst deploy --stage production` from `f04f493`. **Verified live:** the CloudFront
+> index-rewrite Function is attached to both dev (`E10EO7ORIP20S6`) and staging
+> (`E3F34BER0RR7H7`) distributions; `dev.futurator.ai/apps/pacman2/` and
+> `staging.futurator.ai/apps/pacman2/` now return **200** (the bare-directory request that
+> previously 403'd); `DEPLOY_ENV_SUBDOMAINS=on` is live on the Api + cron Lambdas. Part C
+> (harness-ON dev build) is wired + unit-tested; it becomes observable on the next FRESH dev
+> deploy (existing pacman2 content predates it). **🔔 QA-review:** `dev.futurator.ai/<plan>`
+> is now real and serving — you can switch your L2 probes to the deployed dev URL and close
+> the F11/Q-C9/Q7 stage-isolation root fix.
 
 **Evidence (confirmed against live AWS).** The F22 subdomains 403 on bare directory
 paths: dev dist `E10EO7ORIP20S6` + staging dist `E3F34BER0RR7H7` have

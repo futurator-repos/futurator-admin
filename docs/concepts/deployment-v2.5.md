@@ -392,6 +392,18 @@ Until both the SST resources **and** this IAM grant are in place, leave the env 
 
 ## 15. Environment-true subdomains + plan/app identity — the v2.6 fixing plan (2026-06-19, deployment session)
 
+> **✅ SHIPPED + VERIFIED in production — 2026-06-24.** This section's plan (F29) is now live.
+> Parts A (CloudFront viewer-request index-rewrite Function on the dev/staging Routers, attached
+> at the route level via `routes['/*'].edge.viewerRequest.injection` — SST 4.6.11 exposes the
+> native Router `edge` option, so no Pulumi `transform` was needed), B (`resolveDeployTarget`
+> accepts `string | {planSlug, appId}`; dev keys on the plan, staging/prod on the app), and C
+> (dev build runs `NEXT_PUBLIC_TEST_HARNESS=1`) all landed in `050023b` and deployed from
+> `f04f493`. `DEPLOY_ENV_SUBDOMAINS` is now **ON**. **Verified:** `dev.futurator.ai/apps/pacman2/`
+> and `staging.futurator.ai/apps/pacman2/` return 200 (was 403). Reality vs the §15.2 table
+> below: the dev URL shape is `dev.futurator.ai/<plan>/` and staging is
+> `staging.futurator.ai/apps/<app>/` (the staging subdomain stayed `staging.`, not `stage.`, and
+> kept the `apps/` prefix for byte-copy parity with prod — see §15.5).
+>
 > §14 was **applied** since it was written: the `DevEnvBucket`/`StagingEnvBucket` + `DevRouter`/`StagingRouter` + env vars now exist (the auto-named buckets are `futurator-admin-production-devenvbucketbucket-*` / `…-stagingenvbucketbucket-*`; the `bucketName` transform never took — cosmetic). But the subdomains **serve `403` on directory paths**, so I added a flag (`DEPLOY_ENV_SUBDOMAINS`, default OFF) that currently keeps dev/staging on the **fallback** (`futurator.ai/apps/_dev/…`, `/apps/_staging/…`) — which works because it rides the production website bucket. This section is the plan to make the **real subdomains** work and adopt the correct **plan-vs-app** identity model.
 
 ### 15.1 Root cause (confirmed against live AWS)
