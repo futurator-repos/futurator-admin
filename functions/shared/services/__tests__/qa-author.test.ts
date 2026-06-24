@@ -149,6 +149,27 @@ describe('authorProbeFlow — QAA-1 flow synthesis', () => {
     expect(r.test.flow![0]).toEqual({ action: 'force', status: 'over' });
   });
 
+  it('FIX 2 — sets a post-interaction judge on the END state, stripping the "from title to" preamble', () => {
+    // pacman3 iconic case: the judge must score the RUNNING state, not the title.
+    const r = authorProbeFlow(
+      vt({
+        level: 'L2',
+        expect:
+          'After pressing Enter, the game transitions from title to running with maze, dots, pac-man, and ghosts visible',
+      }),
+      ac({
+        verify: undefined,
+        text: 'After pressing Enter, the game transitions from title to running with maze, dots, pac-man, and ghosts visible',
+      }),
+      GAME_SEAM,
+    );
+    expect(r.action).toBe('authored');
+    expect(r.test.judge).toContain('running with maze, dots, pac-man, and ghosts visible');
+    expect(r.test.judge).toMatch(/do NOT expect a title/i);
+    // and it must NOT tell the judge to look for the title screen
+    expect(r.test.judge).not.toMatch(/transitions from title/i);
+  });
+
   it('Gap 2 — authors an L2-VISION probe (reach → screenshot, no assert) for a visual observable', () => {
     const r = authorProbeFlow(
       vt({ level: 'L2' }),

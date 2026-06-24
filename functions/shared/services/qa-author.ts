@@ -286,13 +286,17 @@ function hasAuthoredFlow(flow: VisualTestFlowStep[] | undefined): boolean {
  * the final frame should actually show. Prefer thenObservable/then; else parse the
  * "to <X>" clause; else the whole claim.
  */
-function deriveEndStateExpectation(test: VisualTestDef, ac: AcceptanceCriterion | undefined): string {
+function deriveEndStateExpectation(
+  test: VisualTestDef,
+  ac: AcceptanceCriterion | undefined,
+): string {
   const obs = (ac?.thenObservable || ac?.then || '').trim();
   if (obs) return obs.replace(/[.;]\s*$/, '');
   const text = (ac?.text || test.expect || '').trim();
-  const m = /\b(?:transitions?|changes?|switch(?:es)?|goes|moves?|advances?|turns?)\b[^.]*?\bto\b\s+(.+)/i.exec(
-    text,
-  );
+  const m =
+    /\b(?:transitions?|changes?|switch(?:es)?|goes|moves?|advances?|turns?)\b[^.]*?\bto\b\s+(.+)/i.exec(
+      text,
+    );
   if (m) return m[1].trim().replace(/[.;]\s*$/, '');
   return text.replace(/[.;]\s*$/, '');
 }
