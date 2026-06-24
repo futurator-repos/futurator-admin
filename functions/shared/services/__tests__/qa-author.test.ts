@@ -208,19 +208,32 @@ describe('authorProbeFlow — QAA-1 flow synthesis', () => {
     expect(r.test).toBe(existing);
   });
 
-  it('leaves an unmappable behavior AC flow-less (CONTRACT_INCOMPLETE will block)', () => {
+  it('on a start-gated app even an unreachable observable gets a start reach (non-idle frame)', () => {
+    // pacman3 fix: the floor is "different screenshot, not idle". A behavior AC
+    // whose specific observable we cannot reach still gets [press Enter, screenshot]
+    // so the judge sees the running game, never the identical idle frame.
     const r = authorProbeFlow(
       vt({ level: 'L2' }),
       ac({ verify: 'behavior', thenObservable: 'the leaderboard shows the top 10 players' }),
       GAME_SEAM,
+    );
+    expect(r.action).toBe('authored');
+    expect(r.test.flow![0]).toEqual({ action: 'press', key: 'Enter' });
+    expect(r.test.flow!.some((s) => s.action === 'screenshot')).toBe(true);
+  });
+
+  it('leaves a behavior AC flow-less ONLY when not start-gated and no reach is derivable', () => {
+    const NON_GATED: SeamContract = { snapshotKeys: ['route'], seamHook: 'useAppHarness' };
+    const r = authorProbeFlow(
+      vt({ level: 'L2' }),
+      ac({ verify: 'behavior', thenObservable: 'the leaderboard shows the top 10 players' }),
+      NON_GATED,
     );
     expect(r.action).toBe('unmappable');
     expect(r.test.flow).toBeUndefined();
   });
 
   it('skips build ACs, and appearance on a NON-start-gated app', () => {
-    // A non-game seam (no idle/running status enum) is not start-gated → an
-    // appearance AC is judged on the idle frame as-is (no authored flow).
     const NON_GATED: SeamContract = { snapshotKeys: ['route', 'score'], seamHook: 'useAppHarness' };
     expect(
       authorProbeFlow(vt({}), ac({ verify: 'appearance', text: 'at load a card shows' }), NON_GATED)
@@ -229,32 +242,75 @@ describe('authorProbeFlow — QAA-1 flow synthesis', () => {
     expect(authorProbeFlow(vt({}), ac({ verify: 'build' }), GAME_SEAM).action).toBe('skipped');
   });
 
-  it('is a no-op when no seam exists', () => {
-    expect(authorProbeFlow(vt({}), ac({ verify: 'behavior' }), undefined).action).toBe('skipped');
+  it('without a seam, still authors an L2-vision reach when the AC describes one', () => {
+    const r = authorProbeFlow(
+      vt({}),
+      ac({ verify: 'behavior', when: 'the user presses the space bar', thenObservable: 'a thing' }),
+      undefined,
+    );
+    expect(r.action).toBe('authored');
+    expect(r.test.flow!.some((s) => s.action === 'press' && s.key === 'Space')).toBe(true);
+    expect(r.test.flow!.some((s) => s.action === 'assert')).toBe(false); // no seam → no assert
+  });
+
+  it('without a seam and no derivable reach, returns unmappable', () => {
+    const r = authorProbeFlow(
+      vt({ level: 'L2' }),
+      ac({ verify: 'behavior', thenObservable: 'foo bar baz' }),
+      undefined,
+    );
+    expect(r.action).toBe('unmappable');
+  });
+
+  it('authors a flow for an OLD-PLAN L2 test with NO verify, from its expect text', () => {
+    // pacman3: old plans have no `verify`. The trigger is level:'L2' + prose.
+    const r = authorProbeFlow(
+      vt({ level: 'L2', expect: 'After pressing ArrowRight, Pac-Man moves rightward from spawn' }),
+      ac({ verify: undefined, text: 'After pressing ArrowRight, Pac-Man moves rightward' }),
+      GAME_SEAM,
+    );
+    expect(r.action).toBe('authored');
+    expect(r.test.flow![0]).toEqual({ action: 'press', key: 'Enter' }); // start-gate
+    expect(r.test.flow!.some((s) => s.action === 'press' && s.key === 'ArrowRight')).toBe(true);
+  });
+
+  it('promotes an interaction/temporal-gated test (e.g. "after a few seconds") to a waited L2 flow', () => {
+    const r = authorProbeFlow(
+      vt({
+        level: 'L1',
+        expect: 'After the game has been running for a few seconds, ghosts disperse',
+      }),
+      ac({ verify: undefined, text: 'After a few seconds the ghosts leave the vault' }),
+      GAME_SEAM,
+    );
+    expect(r.action).toBe('authored');
+    expect(r.test.level).toBe('L2');
+    expect(r.test.flow!.some((s) => s.action === 'wait' && (s.ms ?? 0) >= 3000)).toBe(true);
   });
 });
 
 describe('authorProbeFlows — plan-wide pass', () => {
-  it('enriches the right tests and logs authored/unmappable only', () => {
+  it('enriches interaction tests, skips static/build/start-screen, logs authored only', () => {
     const tests = [
       vt({ id: 'VT-1', criteriaRef: 'AC-1' }),
       vt({ id: 'VT-2', criteriaRef: 'AC-2' }),
       vt({ id: 'VT-3', criteriaRef: 'AC-3' }),
     ];
     const criteriaByRef = new Map<string, AcceptanceCriterion>([
+      // behavior with a status target → authored (force over)
       ['AC-1', ac({ id: 'AC-1', verify: 'behavior', thenObservable: 'status becomes over' })],
       // a start-SCREEN appearance AC stays idle-judged (untouched)
       [
         'AC-2',
         ac({ id: 'AC-2', verify: 'appearance', text: 'the title screen shows Press ENTER' }),
       ],
-      // a state AC with no mappable observable AND no derivable reach → unmappable
-      ['AC-3', ac({ id: 'AC-3', verify: 'state', thenObservable: 'unmappable foo bar' })],
+      // a build AC → skipped (no browser interaction)
+      ['AC-3', ac({ id: 'AC-3', verify: 'build', text: 'the module typechecks' })],
     ]);
     const { tests: out, log } = authorProbeFlows({ tests, criteriaByRef, seam: GAME_SEAM });
-    expect(out[0].flow?.length).toBeGreaterThan(0);
+    expect(out[0].flow?.length).toBeGreaterThan(0); // authored
     expect(out[1].flow).toBeUndefined(); // start-screen appearance untouched
-    expect(out[2].flow).toBeUndefined(); // unmappable left flow-less
-    expect(log.map((l) => `${l.testId}:${l.action}`)).toEqual(['VT-1:authored', 'VT-3:unmappable']);
+    expect(out[2].flow).toBeUndefined(); // build skipped
+    expect(log.map((l) => `${l.testId}:${l.action}`)).toEqual(['VT-1:authored']);
   });
 });

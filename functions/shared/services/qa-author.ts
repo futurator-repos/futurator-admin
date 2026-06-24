@@ -28,6 +28,7 @@ import type {
   AssertOp,
 } from '../types/epic-workflow';
 import type { SeamContract } from './qa-boilerplate-resolver';
+import { isInteractionGated } from './visual-test-classifier';
 
 /** A compiled deterministic assertion against the seam snapshot. */
 export interface CompiledAssert {
@@ -126,10 +127,11 @@ export function compileObservableToAssert(
  * carries both `idle` and `running` boots to a "Press ENTER to Start" screen, so
  * the idle frame is the start screen — gameplay content (maze, sprites, HUD) is
  * NOT visible until the game starts. Probes must leave idle before observing.
+ * Guards undefined seam (non-canvas apps).
  */
-function isStartGated(seam: SeamContract): boolean {
+function isStartGated(seam: SeamContract | undefined): boolean {
   return (
-    !!seam.statusEnum && seam.statusEnum.includes('idle') && seam.statusEnum.includes('running')
+    !!seam?.statusEnum && seam.statusEnum.includes('idle') && seam.statusEnum.includes('running')
   );
 }
 
@@ -141,9 +143,7 @@ function isStartScreenObservable(text: string | undefined): boolean {
   );
 }
 
-/** The reach that leaves a start-gated app's idle screen and enters gameplay.
- *  Press the start key (triggers the app's REAL start handler — more reliable
- *  than forcing the status flag, which may not initialize the world). */
+/** The reach that leaves a start-gated app's idle screen and enters gameplay. */
 function deriveStartReach(): VisualTestFlowStep[] {
   return [
     { action: 'press', key: 'Enter' },
@@ -151,31 +151,95 @@ function deriveStartReach(): VisualTestFlowStep[] {
   ];
 }
 
-/**
- * Derive the "reach" steps that drive the app to the asserted state, from the
- * AC's `when` clause + the compiled assertion. Prefers the DETERMINISTIC seam
- * `force` for a status transition (no flaky gameplay, and it bypasses the
- * keyboard start-gate); else a click on a named control (Gap 2); else a key
- * press parsed from `when`. Returns [] when no reach is derivable. `assert` may
- * be null (a visual/non-seam observable) — then only `when`-derived reaches apply.
- */
-function deriveReachSteps(
-  ac: Pick<AcceptanceCriterion, 'when' | 'verify'>,
-  assert: CompiledAssert | null,
-  seam: SeamContract,
-): VisualTestFlowStep[] {
-  const when = (ac.when || '').toLowerCase();
+/** Normalize a captured key word into a Playwright key name (null if not a key). */
+function normalizeKey(raw: string | undefined): string | null {
+  const k = String(raw || '')
+    .toLowerCase()
+    .replace(/[^a-z]/g, '');
+  if (!k) return null;
+  if (k === 'space' || k === 'spacebar') return 'Space';
+  if (k === 'enter' || k === 'return') return 'Enter';
+  if (k === 'escape' || k === 'esc') return 'Escape';
+  if (k === 'arrowup' || k === 'up') return 'ArrowUp';
+  if (k === 'arrowdown' || k === 'down') return 'ArrowDown';
+  if (k === 'arrowleft' || k === 'left') return 'ArrowLeft';
+  if (k === 'arrowright' || k === 'right') return 'ArrowRight';
+  if (k.length === 1) return k; // single-letter key (w/a/s/d/etc.)
+  return null;
+}
 
-  // Deterministic reach: force a status transition (the seam's forceStatus) to a
-  // non-idle target the boilerplate declares. Bypasses the keyboard start-gate.
+/** Parse the first key press described in prose ("press ArrowRight", "pressing W",
+ *  "the Space key", "right arrow"). Returns a Playwright key name or null. */
+function parseKey(text: string): string | null {
+  let m =
+    /\bpress(?:ing|es|ed)?\s+(?:and\s+hold\s+)?(?:the\s+)?["'`]?(arrow\s?(?:up|down|left|right)|space\s?bar|space|enter|return|escape|esc|[a-z])\b/i.exec(
+      text,
+    );
+  if (m) return normalizeKey(m[1]);
+  m = /\b(arrow\s?(?:up|down|left|right)|space\s?bar|enter|escape)\s+key\b/i.exec(text);
+  if (m) return normalizeKey(m[1]);
+  m = /\b(up|down|left|right)\s+arrow\b/i.exec(text);
+  if (m) return normalizeKey('arrow' + m[1]);
+  return null;
+}
+
+/** Parse "click(ing) the <label> button/toggle/…" → the control's visible label. */
+function parseClickLabel(text: string): string | null {
+  const m =
+    /(?:clic\w*|tap\w*)\s+(?:on\s+)?(?:the\s+)?["'`]?([A-Za-z0-9][\w .-]*?)["'`]?\s+(?:button|toggle|tab|link|switch|control|icon)\b/i.exec(
+      text,
+    );
+  return m ? m[1].trim() : null;
+}
+
+/** Parse an elapsed-time reach ("after 3 seconds", "a few seconds", "over time"). */
+function parseWaitMs(text: string): number {
+  const m = /\b(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s)\b/i.exec(text);
+  if (m) return Math.min(Math.round(parseFloat(m[1]) * 1000), 15000);
+  if (/\b(a few|several|some|a couple of|a number of)\s+seconds\b/i.test(text)) return 3000;
+  if (
+    /\bover time\b|\bafter (?:a|some) (?:while|moment|few moments|time)\b|\beventually\b/i.test(
+      text,
+    )
+  )
+    return 3000;
+  return 0;
+}
+
+/**
+ * Derive the interaction reach (the steps that change app state before the
+ * screenshot) from the AC/test prose. Order:
+ *   1. force a status transition — ONLY when prose describes NO explicit
+ *      interaction (terminal states like game-over/win that are hard to script);
+ *   2. an explicit click on a named control;
+ *   3. an explicit key press;
+ *   4. an elapsed-time wait (additive — can follow a press).
+ * Returns { steps, isForce }. `isForce` tells the caller to skip the start-gate
+ * prefix (force sets state directly, bypassing the keyboard start screen).
+ */
+function deriveReach(
+  srcText: string,
+  whenText: string,
+  assert: CompiledAssert | null,
+  seam: SeamContract | undefined,
+): { steps: VisualTestFlowStep[]; isForce: boolean } {
+  const explicitInteraction =
+    !!parseKey(whenText) ||
+    !!parseClickLabel(whenText) ||
+    /\b(press|click|tap|type|drag|swipe|move|arrow|key)\b/i.test(whenText);
+
+  // 1. force — deterministic reach to a declared non-idle status, only when no
+  // explicit interaction is scriptable from the prose.
+  const waitMs = parseWaitMs(srcText);
   if (
     assert &&
     assert.expr === 'snapshot.status' &&
     typeof assert.expected === 'string' &&
     assert.expected !== 'idle' &&
-    (seam.statusEnum?.includes(assert.expected) ?? false)
+    (seam?.statusEnum?.includes(assert.expected) ?? false) &&
+    !explicitInteraction
   ) {
-    return [
+    const steps: VisualTestFlowStep[] = [
       { action: 'force', status: assert.expected },
       {
         action: 'waitForEvent',
@@ -185,52 +249,53 @@ function deriveReachSteps(
         timeoutMs: 5000,
       },
     ];
+    // Elapsed-time observable ("after a few seconds…") — let the forced state run
+    // so time-dependent content (ghosts dispersing, animations) actually develops.
+    if (waitMs) steps.push({ action: 'wait', ms: waitMs });
+    return { steps, isForce: true };
   }
 
-  // Click reach (Gap 2) — "click(ing) the <label> button/toggle/…" → click the
-  // control by its visible text. Best-effort: a wrong selector fails the step
-  // (→ honest 'uncertain'), never a false pass. Only when `when` says click/tap.
-  if (/\bclic\w*|\btap\w*/.test(when)) {
-    const m =
-      /(?:clic\w*|tap\w*)\s+(?:on\s+)?(?:the\s+)?["']?([a-z0-9][\w -]*?)["']?\s+(?:button|toggle|tab|link|switch|control|icon)\b/i.exec(
-        ac.when || '',
-      );
-    if (m) {
-      return [
-        { action: 'click', selector: `text=${m[1].trim()}` },
-        { action: 'wait', ms: 400 },
-      ];
-    }
+  const steps: VisualTestFlowStep[] = [];
+  const label = parseClickLabel(whenText) || parseClickLabel(srcText);
+  const key = parseKey(whenText) || parseKey(srcText);
+  if (label) {
+    steps.push({ action: 'click', selector: `text=${label}` }, { action: 'wait', ms: 400 });
+  } else if (key) {
+    steps.push({ action: 'press', key }, { action: 'wait', ms: 400 });
   }
-
-  // Key-press reach parsed from the `when` clause.
-  const keyMap: ReadonlyArray<{ re: RegExp; key: string }> = [
-    { re: /\b(space ?bar|space)\b/, key: 'Space' },
-    { re: /\benter|return\b/, key: 'Enter' },
-    { re: /\barrow ?up|up arrow\b/, key: 'ArrowUp' },
-    { re: /\barrow ?down|down arrow\b/, key: 'ArrowDown' },
-    { re: /\barrow ?left|left arrow\b/, key: 'ArrowLeft' },
-    { re: /\barrow ?right|right arrow\b/, key: 'ArrowRight' },
-    { re: /\bescape|esc\b/, key: 'Escape' },
-  ];
-  for (const { re, key } of keyMap) {
-    if (re.test(when)) {
-      return [
-        { action: 'press', key },
-        { action: 'wait', ms: 400 },
-      ];
-    }
-  }
-
-  // No reach derivable.
-  return [];
+  if (waitMs) steps.push({ action: 'wait', ms: waitMs });
+  return { steps, isForce: false };
 }
 
-/** Does this flow already carry a deterministic oracle (assert / waitForEvent)? */
-function hasOracle(flow: VisualTestFlowStep[] | undefined): boolean {
-  return (
-    Array.isArray(flow) && flow.some((s) => s.action === 'assert' || s.action === 'waitForEvent')
-  );
+/** Passive steps that don't change app state — a flow of only these is NOT a
+ *  real authored reach and should be (re)authored. */
+const PASSIVE_ACTIONS = new Set(['screenshot', 'navigate']);
+
+/** True when the flow already carries a real interaction/oracle the author/dev
+ *  built (any step beyond passive screenshot/navigate). Don't clobber it. */
+function hasAuthoredFlow(flow: VisualTestFlowStep[] | undefined): boolean {
+  return Array.isArray(flow) && flow.some((s) => s && !PASSIVE_ACTIONS.has(s.action));
+}
+
+/** Combined natural-language source for reach/observable parsing — the AC's BDD
+ *  prose when available, plus the test's own fields (so authoring works at the
+ *  EXECUTE chokepoint where only the visual test, not the AC, is in hand). */
+function sourceTextFor(test: VisualTestDef, ac: AcceptanceCriterion | undefined): string {
+  return [
+    ac?.thenObservable,
+    ac?.then,
+    ac?.when,
+    ac?.text,
+    test.expect,
+    test.action,
+    test.setup,
+    test.description,
+  ]
+    .filter(Boolean)
+    .join('  ');
+}
+function whenTextFor(test: VisualTestDef, ac: AcceptanceCriterion | undefined): string {
+  return [ac?.when, test.action, test.expect, test.setup].filter(Boolean).join('  ');
 }
 
 export type AuthorAction = 'kept' | 'authored' | 'unmappable' | 'skipped';
@@ -242,54 +307,52 @@ export interface AuthorResult {
 }
 
 /**
- * QAA-1 — author (or repair) the probe flow for ONE test against its AC + seam.
- *   • not a browser-verifiable AC, or no seam → `skipped` (untouched).
- *   • already has an assert/waitForEvent oracle (or an authored appearance flow)
- *     → `kept` (DEV did its job).
- *   • `appearance` on a START-GATED app (Gap 1) → author a press-to-start reach so
- *     the L1 judge scores the gameplay frame, not the Press-ENTER start screen
- *     (start-screen ACs stay idle-judged).
- *   • `state`/`behavior` whose prose compiles to a seam assert → `authored`
- *     (L2-state: reach → screenshot → assert).
- *   • `state`/`behavior` with a VISUAL (non-seam) observable but a derivable reach
- *     (Gap 2) → `authored` (L2-vision: reach → screenshot, judged by vision).
- *   • otherwise → `unmappable` (flow-less; the CONTRACT_INCOMPLETE gate blocks it).
+ * QAA-1 (pacman3 rewrite) — author (or repair) the probe flow for ONE visual
+ * test so the QA capture stage takes a POST-INTERACTION screenshot, not the idle
+ * frame. Works off the TEST's own fields (expect/action/setup) when no AC is in
+ * hand (the execute chokepoint), enriched by the AC's BDD prose when available.
  *
- * On a start-gated app, any `press`/`click` reach is prefixed with a start reach
- * (the keyboard does nothing on the start screen); a `force` reach is not (it
- * bypasses the start-gate by setting state directly).
+ * Crucially it is NOT gated on `verify` (old plans have none) — the trigger is
+ * the test's interaction INTENT: `level:'L2'`, a `state`/`behavior` verify, or
+ * interaction/temporal-gated prose ("after pressing…", "when…reaches…", "after a
+ * few seconds…", "game over"). The seam is OPTIONAL: with it we add a
+ * deterministic `assert` (L2-state) and detect the start-gate; without it we
+ * still author a reach → screenshot (L2-vision).
+ *
+ * Outcomes:
+ *   • flow already has a real interaction step → `kept` (don't clobber DEV/author).
+ *   • not interaction-driven (a static "at load" claim) → `skipped` (idle judge).
+ *   • the observable IS the start screen itself → `skipped` (idle judge).
+ *   • otherwise → `authored`: [start-reach?] → reach → screenshot → [assert?].
+ *   • interaction-implied but no reach AND not start-gated → `unmappable`.
+ *
+ * Start-gate: on a start-gated app every keyboard/click reach is prefixed with a
+ * press-Enter start (the keyboard is inert on the title screen); a `force` reach
+ * is exempt (it sets state directly). The start reach alone guarantees a non-idle
+ * frame even when no specific reach is parseable.
  */
 export function authorProbeFlow(
   test: VisualTestDef,
   ac: AcceptanceCriterion | undefined,
   seam: SeamContract | undefined,
 ): AuthorResult {
-  if (!seam || !ac) {
-    return { test, action: 'skipped', note: 'no seam or no linked AC' };
+  // Don't clobber a flow the DEV/author already built with a real interaction.
+  if (hasAuthoredFlow(test.flow)) {
+    return { test, action: 'kept', note: 'test already carries an authored interaction flow' };
   }
-  const verify = ac.verify;
-  if (verify !== 'state' && verify !== 'behavior' && verify !== 'appearance') {
-    return {
-      test,
-      action: 'skipped',
-      note: `verify:${verify ?? 'none'} is not browser-verifiable here`,
-    };
-  }
-  if (hasOracle(test.flow)) {
-    return { test, action: 'kept', note: 'test already carries an assert/waitForEvent oracle' };
-  }
-  const startGated = isStartGated(seam);
 
-  // ── appearance (Gap 1) ── On a start-gated app the idle frame IS the
-  // Press-ENTER start screen, so a gameplay-content appearance AC can't be seen
-  // at idle (the pamcan7 maze/ghost UNCERTAINs). Author a press-to-start reach so
-  // the L1 judge scores the started frame. ACs about the start screen stay idle.
+  const verify = ac?.verify;
+  const srcText = sourceTextFor(test, ac);
+  const whenText = whenTextFor(test, ac);
+  const startGated = isStartGated(seam);
+  const isL2 = test.level === 'L2';
+  const gated = isInteractionGated(srcText);
+
+  // ── appearance (Gap 1) ── A start-gated gameplay-content appearance AC can't be
+  // seen on the idle (start) frame — press to start, then judge the gameplay
+  // frame. Start-screen ACs and non-gated appearance stay idle-judged.
   if (verify === 'appearance') {
-    if (Array.isArray(test.flow) && test.flow.length > 0) {
-      return { test, action: 'kept', note: 'appearance test already has an authored flow' };
-    }
-    const obs = [ac.thenObservable, ac.then, ac.text, test.expect].filter(Boolean).join(' ');
-    if (!startGated || isStartScreenObservable(obs)) {
+    if (!startGated || isStartScreenObservable(srcText)) {
       return { test, action: 'skipped', note: 'appearance judged on the idle frame as-is' };
     }
     const flow: VisualTestFlowStep[] = [
@@ -303,53 +366,54 @@ export function authorProbeFlow(
     };
   }
 
-  // ── state / behavior ──
-  // Compile the prose-observable (prefer thenObservable; fall back to then, expect).
-  const assert =
-    compileObservableToAssert(ac.thenObservable, seam) ||
-    compileObservableToAssert(ac.then, seam) ||
-    compileObservableToAssert(test.expect, seam);
-  const reach = deriveReachSteps(ac, assert, seam);
-  // Prefix a start reach on a start-gated app UNLESS the reach forces state
-  // directly (force bypasses the start-gate).
+  // Does this test imply an interaction at all?
+  const needsFlow = isL2 || verify === 'state' || verify === 'behavior' || gated;
+  if (!needsFlow) {
+    return { test, action: 'skipped', note: 'static/idle claim — no interaction implied' };
+  }
+  // The observable IS the start screen itself (e.g. "title shows Press ENTER") and
+  // nothing happens "after/when" → judge it on the idle frame.
+  if (isStartScreenObservable(srcText) && !/\b(after|once|when)\b/i.test(srcText)) {
+    return { test, action: 'skipped', note: 'observable is the start screen itself — idle judge' };
+  }
+
+  // Compile a deterministic seam assert when possible (L2-state); else null (L2-vision).
+  const assert = seam
+    ? compileObservableToAssert(ac?.thenObservable, seam) ||
+      compileObservableToAssert(ac?.then, seam) ||
+      compileObservableToAssert(test.expect, seam)
+    : null;
+
+  const { steps: reach, isForce } = deriveReach(srcText, whenText, assert, seam);
+
+  // Start-gate prefix — unless force (bypasses it) or the reach already starts by
+  // pressing Enter (don't double-press the start key).
+  const startsWithEnter = reach[0]?.action === 'press' && reach[0]?.key === 'Enter';
   const startReach: VisualTestFlowStep[] =
-    startGated && !reach.some((s) => s.action === 'force') ? deriveStartReach() : [];
+    startGated && !isForce && !startsWithEnter ? deriveStartReach() : [];
 
-  if (assert) {
-    const flow: VisualTestFlowStep[] = [
-      ...startReach,
-      ...reach,
-      { action: 'screenshot', label: 'after' },
-      { action: 'assert', expr: assert.expr, op: assert.op, expected: assert.expected },
-    ];
+  const allReach = [...startReach, ...reach];
+  if (allReach.length === 0) {
     return {
-      test: { ...test, level: 'L2', flow },
-      action: 'authored',
-      note: `authored ${flow.length}-step L2-state probe → assert ${assert.expr} ${assert.op} ${JSON.stringify(assert.expected)}`,
+      test,
+      action: 'unmappable',
+      note: `interaction implied but no reach derivable from "${srcText.slice(0, 70)}" (and not start-gated) — left flow-less so CONTRACT_INCOMPLETE blocks it`,
     };
   }
 
-  if (reach.length > 0) {
-    // Gap 2 — the observable is VISUAL (no seam key), but a reach IS derivable →
-    // an L2-VISION probe: reach the state, screenshot, let the vision judge
-    // compare. Better than a flow-less CONTRACT_INCOMPLETE dead-end (pamcan7
-    // AC-S4-4: "click Frightened toggle → ghosts turn dark-blue").
-    const flow: VisualTestFlowStep[] = [
-      ...startReach,
-      ...reach,
-      { action: 'screenshot', label: 'after' },
-    ];
-    return {
-      test: { ...test, level: 'L2', flow },
-      action: 'authored',
-      note: `authored ${flow.length}-step L2-vision probe (reach → screenshot; observable is visual, not seam-assertable)`,
-    };
-  }
-
+  const flow: VisualTestFlowStep[] = [
+    ...allReach,
+    { action: 'screenshot', label: 'after' },
+    ...(assert
+      ? [{ action: 'assert' as const, expr: assert.expr, op: assert.op, expected: assert.expected }]
+      : []),
+  ];
   return {
-    test,
-    action: 'unmappable',
-    note: `no assert (prose maps to no key in [${seam.snapshotKeys.join(', ')}]) and no reach derivable from when="${(ac.when || '').slice(0, 60)}" — left flow-less so CONTRACT_INCOMPLETE blocks it`,
+    test: { ...test, level: 'L2', flow },
+    action: 'authored',
+    note: assert
+      ? `authored ${flow.length}-step L2-state probe → assert ${assert.expr} ${assert.op} ${JSON.stringify(assert.expected)}`
+      : `authored ${flow.length}-step L2-vision probe (reach → screenshot; observable is visual / no seam key)`,
   };
 }
 

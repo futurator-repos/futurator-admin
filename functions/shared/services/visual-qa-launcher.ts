@@ -3,7 +3,7 @@ import type { EpicStory, EpicWorkflow, VisualTestDef, VerifyIntent } from '../ty
 import type { Plan } from '../types/plan';
 import type { BoilerplateMetadata } from '../boilerplates/types';
 import { classifyVisualTest } from './visual-test-classifier';
-import { authorProbeFlows } from './qa-author';
+import { authorProbeFlows, authorProbeFlow } from './qa-author';
 import type { SeamContract } from './qa-boilerplate-resolver';
 import type { AcceptanceCriterion } from '../types/epic-workflow';
 
@@ -428,23 +428,33 @@ export async function launchPlanQaAggregate(
   // flow is classified L2-state and shown in the operator's contract-review
   // draft. No-op when the boilerplate ships no seam. Deterministic-first: a test
   // whose prose maps to no published key is left flow-less for CONTRACT_INCOMPLETE.
-  if (options.seam) {
-    for (const epic of enrichedEpics) {
-      for (const s of epic.stories) {
-        if (!s.visualTests || s.visualTests.length === 0) continue;
-        const { tests: authored, log } = authorProbeFlows({
-          tests: s.visualTests,
-          criteriaByRef,
-          seam: options.seam,
-        });
-        s.visualTests = authored;
-        for (const entry of log) {
-          console.log(
-            `[qa-author] ${plan.name}/${s.storyId} ${entry.testId}: ${entry.action} — ${entry.note}`,
-          );
-        }
+  // Runs ALWAYS (not gated on a seam) — authoring derives a reach → screenshot
+  // from the AC/test prose even without a seam (L2-vision); the seam only adds a
+  // deterministic assert. pacman3 fix: authored flows MUST be persisted into
+  // `updatedStoriesByEpic` so the EXECUTE stage (which screenshots from the
+  // PERSISTED story.visualTests) sees them — otherwise the capture stage re-reads
+  // flow-less tests and screenshots the idle frame every time (the "same
+  // screenshot" disease). authorProbeFlow is also re-run at execute as a
+  // belt-and-braces chokepoint, but persisting here keeps the draft + approve
+  // round-trip consistent.
+  for (const epic of enrichedEpics) {
+    let epicChanged = updatedStoriesByEpic.has(epic.epicId);
+    for (const s of epic.stories) {
+      if (!s.visualTests || s.visualTests.length === 0) continue;
+      const { tests: authored, log } = authorProbeFlows({
+        tests: s.visualTests,
+        criteriaByRef,
+        seam: options.seam,
+      });
+      s.visualTests = authored;
+      if (log.some((e) => e.action === 'authored')) epicChanged = true;
+      for (const entry of log) {
+        console.log(
+          `[qa-author] ${plan.name}/${s.storyId} ${entry.testId}: ${entry.action} — ${entry.note}`,
+        );
       }
     }
+    if (epicChanged) updatedStoriesByEpic.set(epic.epicId, epic.stories);
   }
 
   // Now classify each test with both rigor + the AC's needsBrowser flag.
@@ -544,6 +554,10 @@ export async function launchPlanQaExecute(
     port?: number;
     /** DV-2 — the boilerplate's seam-publishing hook; enables the SEAM_NEVER_PUBLISHED catch. */
     seamHook?: string;
+    /** QAA-1 — the seam shape; enables deterministic assert authoring + start-gate detection. */
+    seam?: SeamContract;
+    /** QAA-1 — AC lookup by criteriaRef; enriches reach/observable parsing (optional). */
+    criteriaByRef?: ReadonlyMap<string, AcceptanceCriterion>;
   } = {},
 ): Promise<PlanQaExecuteResult> {
   if (approvedTests.length === 0) {
@@ -554,9 +568,28 @@ export async function launchPlanQaExecute(
     };
   }
 
-  // Every approved test must have a level. Defensive — the contract
-  // approval API enforces this, but pipeline builders rely on it.
-  const finalTests: FlatVisualTest[] = approvedTests.map((t) => {
+  // pacman3 fix — the EXECUTE chokepoint. This is the last step before the QA
+  // capture stage takes screenshots, so author probe flows HERE over the exact
+  // tests about to be captured. An L2 / interaction-gated test that arrives with
+  // no flow (DEV skipped it, or the aggregate-time authoring didn't persist) gets
+  // a reach → screenshot synthesized from its own prose, guaranteeing a
+  // post-interaction frame instead of the idle frame (the recurring "same
+  // screenshot" failure). authorProbeFlow is pure + idempotent (a flow already
+  // carrying a real interaction is kept untouched). Works off the test's
+  // expect/action fields even when no AC is in hand; the seam adds an assert.
+  const cRef = options.criteriaByRef ?? new Map<string, AcceptanceCriterion>();
+  const authoredTests: FlatVisualTest[] = approvedTests.map((t) => {
+    const ac = t.criteriaRef ? cRef.get(t.criteriaRef) : undefined;
+    const r = authorProbeFlow(t, ac, options.seam);
+    if (r.action === 'authored') {
+      console.log(`[qa-author:execute] ${plan.name} ${t.id}: authored — ${r.note}`);
+    }
+    return r.test as FlatVisualTest;
+  });
+
+  // Every test must have a level. Defensive — the contract approval API enforces
+  // this, but pipeline builders rely on it.
+  const finalTests: FlatVisualTest[] = authoredTests.map((t) => {
     if (t.level) return t;
     const c = classifyVisualTest(t);
     return { ...t, level: c.level };

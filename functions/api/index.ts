@@ -3607,6 +3607,17 @@ app.post('/api/plans/:id/qa-contract/approve', async (c) => {
   const boilerplate = await resolveQaContext(plan, { getApp: appRepo.getApp });
   // DV-2 — the seam hook drives qa-prepare's SEAM_NEVER_PUBLISHED static catch.
   const seamContract = await resolveSeamContract(plan, { getApp: appRepo.getApp });
+  // QAA-1 (pacman3) — build the AC lookup so the execute-time probe authoring can
+  // read each test's BDD `when`/`then` (not just the test's own expect/action).
+  const criteriaByRef = new Map<
+    string,
+    import('../shared/types/epic-workflow').AcceptanceCriterion
+  >();
+  for (const epic of epics) {
+    for (const story of epic.stories) {
+      for (const cAc of story.criteria ?? []) criteriaByRef.set(cAc.id, cAc);
+    }
+  }
   const result = await launchPlanQaExecute(
     plan,
     flatTests,
@@ -3620,7 +3631,7 @@ app.post('/api/plans/:id/qa-contract/approve', async (c) => {
       buildQaExecutePipeline,
       uuid: () => crypto.randomUUID(),
     },
-    { boilerplate, seamHook: seamContract?.seamHook },
+    { boilerplate, seamHook: seamContract?.seamHook, seam: seamContract, criteriaByRef },
   );
 
   if (!result.ok) {
@@ -3722,6 +3733,12 @@ app.post('/api/plans/:id/qa-tests/:testId/retry', async (c) => {
     epicTitle?: string;
   };
   let target: FlatTest | undefined;
+  // QAA-1 — capture the owning story's criteria so execute-time probe authoring
+  // can read the target test's AC `when`/`then`.
+  const criteriaByRef = new Map<
+    string,
+    import('../shared/types/epic-workflow').AcceptanceCriterion
+  >();
   for (const epicId of plan.epicIds ?? []) {
     const epic = await epicRepo.getEpicById(epicId);
     if (!epic) continue;
@@ -3735,6 +3752,7 @@ app.post('/api/plans/:id/qa-tests/:testId/retry', async (c) => {
           epicId: epic.epicId,
           epicTitle: epic.title,
         };
+        for (const cAc of story.criteria ?? []) criteriaByRef.set(cAc.id, cAc);
         break;
       }
     }
@@ -3760,7 +3778,7 @@ app.post('/api/plans/:id/qa-tests/:testId/retry', async (c) => {
       buildQaExecutePipeline,
       uuid: () => crypto.randomUUID(),
     },
-    { boilerplate, seamHook: seamContract?.seamHook },
+    { boilerplate, seamHook: seamContract?.seamHook, seam: seamContract, criteriaByRef },
   );
   if (!result.ok) {
     return c.json({ planId, testId, error: result.message }, 400);
