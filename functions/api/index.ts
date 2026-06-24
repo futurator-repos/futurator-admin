@@ -3778,7 +3778,14 @@ app.post('/api/plans/:id/qa-tests/:testId/retry', async (c) => {
       buildQaExecutePipeline,
       uuid: () => crypto.randomUUID(),
     },
-    { boilerplate, seamHook: seamContract?.seamHook, seam: seamContract, criteriaByRef },
+    // Single-test retry: run EXACTLY this test (Stage B — no delivery curation).
+    {
+      boilerplate,
+      seamHook: seamContract?.seamHook,
+      seam: seamContract,
+      criteriaByRef,
+      curateDelivery: false,
+    },
   );
   if (!result.ok) {
     return c.json({ planId, testId, error: result.message }, 400);
@@ -6164,10 +6171,18 @@ app.post('/api/epic-workflows/:id/deploy', async (c) => {
     ? body.environment
     : 'production';
 
-  // Derive app name from working directory (last segment) — the slug that
-  // doubles as the URL segment and the S3 folder.
+  // Derive app name from working directory (last segment) — the APP slug that
+  // doubles as the URL segment and the S3 folder for staging/production.
   const appName = epic.workingDir.split('/').filter(Boolean).pop() || 'app';
-  const target = resolveDeployTarget(appName, environment);
+  // F29 — dev is PLAN-scoped: resolve the plan once so a dev preview lands at
+  // dev.futurator.ai/<plan>/ (plan.name is the locked kebab slug), while
+  // staging/production stay app-scoped. Reused by the production bookkeeping
+  // block below.
+  const plan = epic.planId ? await planRepo.getPlanById(epic.planId) : null;
+  const target = resolveDeployTarget(
+    { planSlug: plan?.name || appName, appId: appName },
+    environment,
+  );
   const publicUrl = target.publicUrl;
 
   const jobId = crypto.randomUUID();
@@ -6197,15 +6212,12 @@ app.post('/api/epic-workflows/:id/deploy', async (c) => {
     // the Deploy report can render history. Legacy plans without the field
     // are seeded with the current job as their first history entry.
     await epicRepo.updateEpicFields(epicId, { deployJobId: jobId });
-    if (epic.planId) {
-      const plan = await planRepo.getPlanById(epic.planId);
-      if (plan) {
-        const history = plan.deployJobIds ?? [];
-        if (!history.includes(jobId)) {
-          await planRepo.updatePlanFields(plan.planId, {
-            deployJobIds: [...history, jobId],
-          });
-        }
+    if (plan) {
+      const history = plan.deployJobIds ?? [];
+      if (!history.includes(jobId)) {
+        await planRepo.updatePlanFields(plan.planId, {
+          deployJobIds: [...history, jobId],
+        });
       }
     }
 
@@ -6280,8 +6292,10 @@ app.post('/api/plans/:id/promote', async (c) => {
   if (!deployEpic) throw new ValidationError('No epics to promote.');
 
   const appName = deployEpic.workingDir.split('/').filter(Boolean).pop() || plan.name;
-  const srcTarget = resolveDeployTarget(appName, src);
-  const dstTarget = resolveDeployTarget(appName, to);
+  // F29 — dev source keys on the plan, staging/prod on the app.
+  const identity = { planSlug: plan.name, appId: appName };
+  const srcTarget = resolveDeployTarget(identity, src);
+  const dstTarget = resolveDeployTarget(identity, to);
 
   const jobId = crypto.randomUUID();
   const now = new Date().toISOString();

@@ -4,8 +4,17 @@ import type { Plan } from '../types/plan';
 import type { BoilerplateMetadata } from '../boilerplates/types';
 import { classifyVisualTest } from './visual-test-classifier';
 import { authorProbeFlows, authorProbeFlow } from './qa-author';
+import { selectDeliveryTests } from './qa-delivery-selector';
 import type { SeamContract } from './qa-boilerplate-resolver';
 import type { AcceptanceCriterion } from '../types/epic-workflow';
+
+/**
+ * Stage B — max representative APPEARANCE/idle tests final QA runs per capability
+ * (epic); the overflow defers to the wave gate. 2 keeps a couple of "does it look
+ * right" checks per capability without re-litigating every static AC. Raise toward
+ * Infinity to restore the pre-Stage-B "run every test" behavior.
+ */
+const DELIVERY_APPEARANCE_CAP_PER_EPIC = 2;
 
 /**
  * Visual-QA launcher — Story 16.3 + Pipeline v2.0 PR-8a (plan-scoped).
@@ -493,13 +502,40 @@ export async function launchPlanQaAggregate(
     };
   }
 
+  // Stage B (qa-review-delivery-rethink §3.1) — curate the DELIVERY set. Final QA
+  // verifies the integrated product's journeys, not a replay of every per-AC test
+  // (the wave gate already did that exhaustively on merged code). Keep all
+  // interaction/state/behavior/human tests; cap representative appearance checks
+  // per capability; DEFER the redundant static appearance overflow to the wave
+  // gate. Conservative + logged; `appearanceCapPerEpic` controls aggressiveness.
+  const deliveryTests = (() => {
+    const { selected, deferred, log } = selectDeliveryTests({
+      tests: allVisualTests,
+      criteriaByRef,
+      appearanceCapPerEpic: DELIVERY_APPEARANCE_CAP_PER_EPIC,
+    });
+    if (deferred.length > 0) {
+      console.log(
+        `[qa-delivery] ${plan.name}: final QA runs ${selected.length} delivery tests; ` +
+          `deferred ${deferred.length} redundant static appearance test(s) to the wave gate: ` +
+          deferred.map((d) => d.id).join(', '),
+      );
+      for (const e of log.filter((x) => !x.kept)) {
+        console.log(`[qa-delivery]   defer ${e.testId} — ${e.reason}`);
+      }
+    }
+    // Safety: never let curation empty the run (e.g. all-appearance single-epic
+    // plan with cap 0) — fall back to the full set.
+    return selected.length > 0 ? selected : allVisualTests;
+  })();
+
   const jobId = deps.uuid();
   const appName = plan.name;
   const snapshotPrefix = `qa-snapshots/${appName}/${jobId}/`;
 
   const pipeline = deps.buildQaAggregatePipeline({
     plan,
-    allVisualTests,
+    allVisualTests: deliveryTests,
     snapshotPrefix,
     jobId,
     boilerplate: options.boilerplate,
@@ -522,7 +558,7 @@ export async function launchPlanQaAggregate(
     },
   });
 
-  return { ok: true, jobId, updatedStoriesByEpic, testCount: allVisualTests.length };
+  return { ok: true, jobId, updatedStoriesByEpic, testCount: deliveryTests.length };
 }
 
 export type PlanQaExecuteResult =
@@ -558,6 +594,9 @@ export async function launchPlanQaExecute(
     seam?: SeamContract;
     /** QAA-1 — AC lookup by criteriaRef; enriches reach/observable parsing (optional). */
     criteriaByRef?: ReadonlyMap<string, AcceptanceCriterion>;
+    /** Stage B — set false to run EXACTLY the given tests (no delivery curation),
+     *  e.g. a single-test retry. Default true: curate to the delivery set. */
+    curateDelivery?: boolean;
   } = {},
 ): Promise<PlanQaExecuteResult> {
   if (approvedTests.length === 0) {
@@ -578,7 +617,20 @@ export async function launchPlanQaExecute(
   // carrying a real interaction is kept untouched). Works off the test's
   // expect/action fields even when no AC is in hand; the seam adds an assert.
   const cRef = options.criteriaByRef ?? new Map<string, AcceptanceCriterion>();
-  const authoredTests: FlatVisualTest[] = approvedTests.map((t) => {
+  // Stage B — apply the SAME delivery curation at execute as at aggregate, so what
+  // RUNS matches the curated draft (the approve path reads all story.visualTests;
+  // without this, curation at aggregate wouldn't actually reduce execution). A
+  // single-test retry (one test) always clears the per-epic cap, so retries are
+  // unaffected. Disabled when the caller opts out (curateDelivery === false).
+  const toRun =
+    options.curateDelivery === false
+      ? approvedTests
+      : selectDeliveryTests({
+          tests: approvedTests,
+          criteriaByRef: cRef,
+          appearanceCapPerEpic: DELIVERY_APPEARANCE_CAP_PER_EPIC,
+        }).selected;
+  const authoredTests: FlatVisualTest[] = toRun.map((t) => {
     const ac = t.criteriaRef ? cRef.get(t.criteriaRef) : undefined;
     const r = authorProbeFlow(t, ac, options.seam);
     if (r.action === 'authored' || r.action === 'human') {
