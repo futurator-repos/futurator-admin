@@ -18,10 +18,11 @@ epic**. That is a _development_ verification pointed at a _finished product_ —
 granularity, largely redundant with the wave gate, and it produces noise (isolated
 intermediate-state tests, un-automatable terminal-state tests, single-frame movement tests).
 
-Rethink: **final QA verifies the DELIVERED PRODUCT's key journeys on the assembled app** — a small
-curated set, not every AC — and every test carries a **complexity tier** that routes it to the
-right verifier, including a first-class **Human** tier the operator approves. The generated
-Playwright script becomes a **visible, editable artifact**.
+Rethink: **final QA verifies the DELIVERED PRODUCT's key journeys on the merged PLAN in the dev
+environment** (`dev.futurator.ai/<plan>`, plan-scoped) — a small curated set, not every AC — and
+every test carries a **complexity tier** that routes it to the right verifier, including a
+first-class **Human** tier the operator approves. The generated Playwright script becomes a
+**visible, editable artifact**. (Terminology: dev = **plan**, staging/prod = **app** — see §3.1.)
 
 ---
 
@@ -83,8 +84,34 @@ Symptoms this conflation produced on pacman3:
 - **Wave gate = development verification.** Keep exhaustive, per-AC, on merged code. This is the
   right home for "every AC was built." No change to its purpose.
 - **Final QA = delivery verification.** A **small, curated set of journey/capability tests** on the
-  assembled app. It does NOT re-litigate every AC — it confirms the integrated product delivers its
-  headline value and the critical user journeys work end-to-end.
+  **merged PLAN in the dev environment** — NOT re-litigating every AC. It confirms the integrated
+  product delivers its headline value and the critical journeys work end-to-end.
+
+**Terminology — plan vs app (aligned with `deployment-v2.5.md` §15.2, F29).** The three
+environments have distinct identities, and QA lives at the first one:
+
+| Env         | Identity               | URL                        | What QA does here                                                                                                        |
+| ----------- | ---------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **dev**     | **plan** (`plan.name`) | `dev.futurator.ai/<plan>`  | **QA reviews the merged plan** (waves merged), before it's accepted as the app. Plan-scoped + immutable. **Harness ON.** |
+| **staging** | **app** (`appId`)      | `stage.futurator.ai/<app>` | post-merge smoke of the app's release candidate. **Harness OFF.**                                                        |
+| **prod**    | **app** (`appId`)      | `futurator.ai/apps/<app>`  | live app. **Harness OFF.**                                                                                               |
+
+So "QA Review" verifies the **plan in dev**, not "the app" — the app exists only after the plan
+merges to `main` (staging → prod). This doc says **"merged plan (dev)"** everywhere it previously
+said "assembled app."
+
+**Environment-aware seam contract (F29 Part C coordination).** The `window.__harness` seam is
+production-absent by design — it only publishes under `NEXT_PUBLIC_TEST_HARNESS=1`, which the
+deployment ladder bakes into the **dev** build only. Therefore the structural verdicts
+`SEAM_ABSENT` / `SEAM_NEVER_PUBLISHED` must be **environment-aware**:
+
+- on **dev** (harness ON) → a missing seam is a **hard, blocking** regression (today's behavior);
+- on **staging/prod** (harness OFF) → a missing seam is **expected, non-blocking** — seam-asserting
+  probes are skipped/N-A, never a defect. (A harness-off staging smoke must not misread the absent
+  seam as a regression.)
+
+QA owns this gating; it lands when QA cuts over from booting its own `next dev` to verifying against
+`dev.futurator.ai/<plan>` (the F11/Q-C9/Q7 root fix, unblocked by F29).
 
 For pacman3, final QA becomes ~4 journeys instead of 16 ACs:
 

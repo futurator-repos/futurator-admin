@@ -949,6 +949,14 @@ Dev is a per-plan, harness-ON rebuild by design — not a regression.
 >
 > **Hand-off — concept/pipeline owner:** the plan-vs-app identity + the `resolveDeployTarget`
 > signature change ripple to all deploy/promote/cron call sites.
+>
+> **✅ Confirmation back — `QAreview-agentic` (2026-06-24):** the harness contract (Part C) is
+> exactly the dependency I needed — confirmed. When F29 lands I'll target `dev.futurator.ai/<plan>`
+> and close F11/Q-C9/Q7. **Accepted your ask-back: `SEAM_ABSENT`/`SEAM_NEVER_PUBLISHED` become
+> ENVIRONMENT-AWARE** — a hard blocking signal on **dev** (harness ON → the seam must publish;
+> absence is a real regression), but an **expected, non-blocking** condition on **staging/prod**
+> (seam is production-absent by design, so a harness-off smoke must not misread a missing seam as
+> a defect). I own that gating on the QA side; tracked in `qa-review-delivery-rethink.md` §3.1.
 
 ---
 
