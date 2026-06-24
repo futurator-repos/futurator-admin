@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { resolveDeployTarget, isDeployEnvironment, DEPLOY_ENVIRONMENTS } from '../deploy-targets';
 
 describe('resolveDeployTarget', () => {
@@ -32,6 +32,49 @@ describe('resolveDeployTarget', () => {
       expect(t.publicUrl.endsWith(t.basePath)).toBe(true);
       expect(t.invalidationPath).toBe(`${t.basePath}*`);
     }
+  });
+});
+
+describe('deploy identity (F29 — dev keys on plan, staging/prod on app)', () => {
+  const ENV = {
+    DEPLOY_ENV_SUBDOMAINS: 'on',
+    DEV_ENV_BUCKET: 'futurator-admin-dev-env',
+    DEV_ENV_CF_ID: 'DEVCF',
+    STAGING_ENV_BUCKET: 'futurator-admin-staging-env',
+    STAGING_ENV_CF_ID: 'STGCF',
+  } as const;
+  beforeEach(() => Object.assign(process.env, ENV));
+  afterEach(() => {
+    for (const k of Object.keys(ENV)) delete process.env[k as keyof typeof ENV];
+  });
+
+  it('dev is PLAN-scoped → dev.futurator.ai/<plan>/ (bare root segment, no apps/)', () => {
+    const t = resolveDeployTarget({ planSlug: 'cool-plan', appId: 'pacman' }, 'dev');
+    expect(t.appName).toBe('cool-plan');
+    expect(t.s3Prefix).toBe('cool-plan/');
+    expect(t.basePath).toBe('/cool-plan/');
+    expect(t.publicUrl).toBe('https://dev.futurator.ai/cool-plan/');
+  });
+
+  it('staging + production are APP-scoped and share a base → byte-copy promotable', () => {
+    const staging = resolveDeployTarget({ planSlug: 'cool-plan', appId: 'pacman' }, 'staging');
+    const prod = resolveDeployTarget({ planSlug: 'cool-plan', appId: 'pacman' }, 'production');
+    expect(staging.publicUrl).toBe('https://staging.futurator.ai/apps/pacman/');
+    expect(prod.publicUrl).toBe('https://futurator.ai/apps/pacman/');
+    // The shared base path is what makes staging→prod a pure S3 copy.
+    expect(staging.basePath).toBe(prod.basePath);
+    expect(staging.basePath).toBe('/apps/pacman/');
+  });
+
+  it('dev base differs from staging → dev→staging is a rebuild, not a copy', () => {
+    const dev = resolveDeployTarget({ planSlug: 'cool-plan', appId: 'pacman' }, 'dev');
+    const staging = resolveDeployTarget({ planSlug: 'cool-plan', appId: 'pacman' }, 'staging');
+    expect(dev.basePath).not.toBe(staging.basePath);
+  });
+
+  it('a bare string stays back-compat (planSlug = appId = the string)', () => {
+    const dev = resolveDeployTarget('solo', 'dev');
+    expect(dev.publicUrl).toBe('https://dev.futurator.ai/solo/');
   });
 });
 

@@ -101,15 +101,15 @@ const PUBLIC_ORIGIN = 'https://futurator.ai';
  */
 function envHosting(): Record<DeployEnvironment, EnvHosting> {
   // Subdomain mode (dev./staging.futurator.ai) is gated behind an EXPLICIT
-  // opt-in flag, not just the presence of the bucket coords. The F22 subdomain
-  // Routers front their S3 buckets via an OAC + S3 REST origin with NO
-  // directory-index rewrite, so a bare `…/apps/<slug>/` request 403s (the key
-  // `apps/<slug>/` isn't an object). Until a CloudFront index-rewrite Function
-  // is added to those Routers (deployment-v2.5.md §14), we run dev/staging in
-  // FALLBACK mode on the production website bucket (futurator-ai-website), whose
-  // CloudFront serves directory-index correctly — the same path prod uses. Flip
-  // `DEPLOY_ENV_SUBDOMAINS=on` (Api + WaveCompletionCheck) to re-enable once the
-  // index-rewrite ships. 2026-06-18, deployment session.
+  // opt-in flag, not just the presence of the bucket coords. The subdomain
+  // Routers front their S3 buckets via a REST origin with NO directory-index
+  // rewrite, so a bare `…/<slug>/` request used to 403 (the key `<slug>/` isn't
+  // an object). F29 adds a CloudFront viewer-request index-rewrite Function to
+  // the Dev/Staging Routers (sst.config.ts) — `/<x>/` → `/<x>/index.html` — so
+  // directory-index now resolves there too. With the function shipped, flip
+  // `DEPLOY_ENV_SUBDOMAINS=on` (Api + WaveCompletionCheck). When the flag is
+  // off we still degrade to FALLBACK mode on the production website bucket
+  // (futurator-ai-website), which serves directory-index via website-hosting.
   const subdomainsEnabled = process.env.DEPLOY_ENV_SUBDOMAINS === 'on';
   const devBucket = subdomainsEnabled ? process.env.DEV_ENV_BUCKET : undefined;
   const devCf = subdomainsEnabled ? process.env.DEV_ENV_CF_ID : undefined;
@@ -130,7 +130,12 @@ function envHosting(): Record<DeployEnvironment, EnvHosting> {
             bucket: devBucket,
             cloudfrontDistributionId: devCf,
             origin: 'https://dev.futurator.ai',
-            pathPrefix: 'apps/',
+            // dev is PLAN-scoped and gets the bare root segment:
+            // dev.futurator.ai/<plan>/. No `apps/` prefix — the dev subdomain
+            // hosts only plan previews, and a base distinct from staging/prod
+            // (`/apps/<app>/`) is intentional: dev→staging is ALWAYS a rebuild
+            // (plan→app identity + harness ON→OFF), never a byte-copy (F29).
+            pathPrefix: '',
             provisioned: true,
           }
         : {
@@ -146,6 +151,10 @@ function envHosting(): Record<DeployEnvironment, EnvHosting> {
             bucket: stagingBucket,
             cloudfrontDistributionId: stagingCf,
             origin: 'https://staging.futurator.ai',
+            // staging is APP-scoped and KEEPS the `apps/` prefix so its base
+            // (`/apps/<app>/`) is byte-identical to production's — that shared
+            // base is exactly what makes staging→prod a pure S3 copy (true
+            // build-once for the consumer-facing hop). F29.
             pathPrefix: 'apps/',
             provisioned: true,
           }
@@ -160,14 +169,37 @@ function envHosting(): Record<DeployEnvironment, EnvHosting> {
 }
 
 /**
- * Resolve where to publish `appName` for `environment`. `appName` should be
- * the working-dir leaf (the same slug the deploy agent has always used:
- * `epic.workingDir.split('/').pop()`).
+ * Deploy identity (F29). Environments are keyed by DIFFERENT slugs:
+ *   • dev               → the PLAN slug (`plan.name`) — QA reviews a plan's
+ *     merged branches; concurrent plans targeting the same app must not collide.
+ *   • staging/production → the APP slug (working-dir leaf) — the merged app.
+ *
+ * Mirrors git: `plan/<name>` (dev) → merge to `main` = the app (staging→prod).
+ *
+ * Pass a bare string for the legacy single-slug behaviour (planSlug = appId =
+ * the string) — read-side callers that only have one identifier still work.
+ * Pass `{ planSlug, appId }` from the deploy/promote/cron call sites that know
+ * both, so dev keys on the plan and staging/prod key on the app.
+ */
+export type DeployIdentity = string | { planSlug: string; appId: string };
+
+/** Pick the URL/S3 segment for `environment` from a deploy identity. */
+function segmentFor(identity: DeployIdentity, environment: DeployEnvironment): string {
+  const { planSlug, appId } =
+    typeof identity === 'string' ? { planSlug: identity, appId: identity } : identity;
+  return environment === 'dev' ? planSlug : appId;
+}
+
+/**
+ * Resolve where to publish a build for `environment`. `identity` is either the
+ * working-dir leaf (legacy single slug) or `{ planSlug, appId }` — dev keys on
+ * the plan, staging/production on the app (see {@link DeployIdentity}).
  */
 export function resolveDeployTarget(
-  appName: string,
+  identity: DeployIdentity,
   environment: DeployEnvironment,
 ): ResolvedDeployTarget {
+  const appName = segmentFor(identity, environment);
   const h = envHosting()[environment];
   const s3Prefix = `${h.pathPrefix}${appName}/`;
   const basePath = `/${s3Prefix}`;

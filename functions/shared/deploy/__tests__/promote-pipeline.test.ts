@@ -67,15 +67,19 @@ describe('framework-aware prompts (A2)', () => {
     expect(prompt).toContain('dist/');
   });
 
-  it('copy-mode prompt still says do NOT rebuild and has a single sync', () => {
+  it('copy-mode prompt (staging→prod build-once) says do NOT rebuild and has a single sync', () => {
+    // F29 — the byte-copy hop is staging→prod (shared /apps/<app>/ base), NOT
+    // dev→staging (dev is plan-scoped at a different base, so it rebuilds).
     process.env.DEPLOY_ENV_SUBDOMAINS = 'on';
     process.env.DEV_ENV_BUCKET = 'futurator-admin-dev-env';
     process.env.DEV_ENV_CF_ID = 'DEVCF';
     process.env.STAGING_ENV_BUCKET = 'futurator-admin-staging-env';
     process.env.STAGING_ENV_CF_ID = 'STGCF';
-    const dev = resolveDeployTarget('dino1', 'dev');
     const staging = resolveDeployTarget('dino1', 'staging');
-    const prompt = promptOf(buildPromotePipeline('/w/dino1', dev, staging, { smoke: true }));
+    const prod = resolveDeployTarget('dino1', 'production');
+    expect(staging.basePath).toBe('/apps/dino1/');
+    expect(prod.basePath).toBe('/apps/dino1/');
+    const prompt = promptOf(buildPromotePipeline('/w/dino1', staging, prod, { smoke: true }));
     expect(prompt).not.toContain('npm run build');
     expect(prompt).toContain('NO rebuild');
     const syncCount = (prompt.match(/aws s3 sync/g) ?? []).length;
@@ -85,6 +89,23 @@ describe('framework-aware prompts (A2)', () => {
     delete process.env.DEV_ENV_CF_ID;
     delete process.env.STAGING_ENV_BUCKET;
     delete process.env.STAGING_ENV_CF_ID;
+  });
+});
+
+describe('test-harness contract (F29 Part C)', () => {
+  it('the DEV build sets NEXT_PUBLIC_TEST_HARNESS=1 (publishes window.__harness for QA)', () => {
+    const dev = resolveDeployTarget('dino1', 'dev');
+    const prompt = buildDeployPipeline('/w/dino1', dev).steps[0].prompt ?? '';
+    expect(prompt).toContain('NEXT_PUBLIC_TEST_HARNESS=1 npm run build');
+  });
+
+  it('staging + production builds do NOT set the harness flag (production-absent by design)', () => {
+    for (const env of ['staging', 'production'] as const) {
+      const t = resolveDeployTarget('dino1', env);
+      const prompt = buildDeployPipeline('/w/dino1', t).steps[0].prompt ?? '';
+      expect(prompt).not.toContain('NEXT_PUBLIC_TEST_HARNESS');
+      expect(prompt).toContain('npm run build');
+    }
   });
 });
 
@@ -106,20 +127,36 @@ describe('buildPromotePipeline mode selection', () => {
     expect(prompt).toContain('REBUILD');
   });
 
-  it('COPIES (build-once) when base paths match — provisioned subdomain buckets', () => {
+  it('COPIES (build-once) when base paths match — staging→prod on provisioned buckets', () => {
     process.env.DEPLOY_ENV_SUBDOMAINS = 'on';
     process.env.DEV_ENV_BUCKET = 'futurator-admin-dev-env';
     process.env.DEV_ENV_CF_ID = 'DEVCF';
     process.env.STAGING_ENV_BUCKET = 'futurator-admin-staging-env';
     process.env.STAGING_ENV_CF_ID = 'STGCF';
-    const dev = resolveDeployTarget('dino1', 'dev');
     const staging = resolveDeployTarget('dino1', 'staging');
-    expect(dev.basePath).toBe('/apps/dino1/');
+    const prod = resolveDeployTarget('dino1', 'production');
     expect(staging.basePath).toBe('/apps/dino1/');
-    const prompt = promptOf(buildPromotePipeline('/w/dino1', dev, staging, { smoke: true }));
+    expect(prod.basePath).toBe('/apps/dino1/');
+    const prompt = promptOf(buildPromotePipeline('/w/dino1', staging, prod, { smoke: true }));
     expect(prompt).not.toContain('npm run build');
-    expect(prompt).toContain('aws s3 sync s3://futurator-admin-dev-env/apps/dino1/');
-    expect(prompt).toContain('s3://futurator-admin-staging-env/apps/dino1/');
+    expect(prompt).toContain('aws s3 sync s3://futurator-admin-staging-env/apps/dino1/');
+    expect(prompt).toContain('s3://futurator-ai-website/apps/dino1/');
+  });
+
+  it('REBUILDS dev→staging in subdomain mode (plan→app base change), dev is plan-scoped', () => {
+    process.env.DEPLOY_ENV_SUBDOMAINS = 'on';
+    process.env.DEV_ENV_BUCKET = 'futurator-admin-dev-env';
+    process.env.DEV_ENV_CF_ID = 'DEVCF';
+    process.env.STAGING_ENV_BUCKET = 'futurator-admin-staging-env';
+    process.env.STAGING_ENV_CF_ID = 'STGCF';
+    const dev = resolveDeployTarget({ planSlug: 'my-plan', appId: 'dino1' }, 'dev');
+    const staging = resolveDeployTarget({ planSlug: 'my-plan', appId: 'dino1' }, 'staging');
+    expect(dev.publicUrl).toBe('https://dev.futurator.ai/my-plan/');
+    expect(staging.publicUrl).toBe('https://staging.futurator.ai/apps/dino1/');
+    expect(dev.basePath).not.toBe(staging.basePath);
+    const prompt = promptOf(buildPromotePipeline('/w/dino1', dev, staging, { smoke: true }));
+    expect(prompt).toContain('npm run build');
+    expect(prompt).toContain('REBUILD');
   });
 
   it('archives the release on production promotion', () => {

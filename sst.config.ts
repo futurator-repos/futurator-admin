@@ -509,13 +509,44 @@ export default $config({
       access: 'public',
       transform: { bucket: { bucketName: 'futurator-admin-staging-env' } },
     });
+    // F29 — CloudFront directory-index rewrite. The Routers front their S3
+    // buckets via a REST origin (no S3 website-hosting), so a bare directory
+    // request like `/<plan>/` maps to the S3 key `<plan>/`, which is not an
+    // object → 403. A viewer-request CloudFront Function rewrites directory and
+    // extensionless paths to their `index.html` (the same rewrite SST's
+    // StaticSite injects automatically, which a bare Router does not). This is
+    // what makes `dev.futurator.ai/<plan>/` and `staging.futurator.ai/apps/<app>/`
+    // actually serve their SPA shell. Injected at the top of the generated
+    // `handler(event)`, operating on `event.request`.
+    const indexRewriteInjection = `
+      var req = event.request;
+      var uri = req.uri;
+      if (uri.endsWith('/')) {
+        req.uri = uri + 'index.html';
+      } else if (!uri.split('/').pop().includes('.')) {
+        req.uri = uri + '/index.html';
+      }
+    `;
+    // The edge function is attached at the ROUTE level: for a bucket route SST
+    // wires the viewer-request association from `route.edge.viewerRequest` (the
+    // top-level Router `edge` is not applied to bucket origins). router.ts ~L1988.
     const devRouter = new sst.aws.Router('DevRouter', {
       domain: 'dev.futurator.ai',
-      routes: { '/*': { bucket: devEnvBucket } },
+      routes: {
+        '/*': {
+          bucket: devEnvBucket,
+          edge: { viewerRequest: { injection: indexRewriteInjection } },
+        },
+      },
     });
     const stagingRouter = new sst.aws.Router('StagingRouter', {
       domain: 'staging.futurator.ai',
-      routes: { '/*': { bucket: stagingEnvBucket } },
+      routes: {
+        '/*': {
+          bucket: stagingEnvBucket,
+          edge: { viewerRequest: { injection: indexRewriteInjection } },
+        },
+      },
     });
 
     // ── Pipeline v2 — Phase 1 (Story 1.1.2) — GitHub PAT secret ──
@@ -1016,6 +1047,10 @@ export default $config({
         REFACTOR_AUDITS_TABLE: refactorAuditsTable.name,
         // F22 — dev/staging subdomain hosting (deployment-v2.5.md §14). Presence
         // flips deploy-targets.ts to byte-copy promotion; absence = fallback.
+        // F29 — subdomains turned ON: the Routers now carry the CloudFront
+        // index-rewrite Function (above), so dev.futurator.ai/<plan>/ and
+        // staging.futurator.ai/apps/<app>/ serve their SPA shell instead of 403.
+        DEPLOY_ENV_SUBDOMAINS: 'on',
         DEV_ENV_BUCKET: devEnvBucket.name,
         DEV_ENV_CF_ID: devRouter.distributionID,
         STAGING_ENV_BUCKET: stagingEnvBucket.name,
@@ -1384,6 +1419,9 @@ export default $config({
           TIMING_SUMMARY_TABLE: timingSummaryTable.name,
           // F22 — wave-completion-check calls resolveDeployTarget too (it
           // enqueues the dev-deploy), so it needs the same subdomain coords.
+          // F29 — subdomains ON (index-rewrite Function shipped); dev preview
+          // lands at dev.futurator.ai/<plan>/.
+          DEPLOY_ENV_SUBDOMAINS: 'on',
           DEV_ENV_BUCKET: devEnvBucket.name,
           DEV_ENV_CF_ID: devRouter.distributionID,
           STAGING_ENV_BUCKET: stagingEnvBucket.name,

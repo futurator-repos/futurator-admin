@@ -35,6 +35,14 @@ export function buildDeployPipeline(
   // Next.js `basePath` must NOT have a trailing slash (and never be '/'); Vite
   // `base` keeps the trailing slash. Compute the Next.js form once (A2).
   const basePathNoSlash = basePath.replace(/\/$/, '');
+  // F29 — the test-harness contract. ONLY the dev artifact is built with
+  // `NEXT_PUBLIC_TEST_HARNESS=1`, which makes the scaffold publish the
+  // `window.__harness` verifiability seam that headless QA's L2 state probes
+  // (assert/force/waitForEvent) read. staging/production build WITHOUT it, so
+  // the seam is production-absent by design. Deployment owns injecting the
+  // flag; QA owns the seam (registry.ts). dev→staging therefore always REBUILDS
+  // (harness ON→OFF, on top of the plan→app base change).
+  const harnessEnv = target.environment === 'dev' ? 'NEXT_PUBLIC_TEST_HARNESS=1 ' : '';
   const archiveStep = opts.archiveReleaseId
     ? `\n\n4b. Archive this release for rollback: \`aws s3 sync s3://${s3Bucket}/${s3Prefix} s3://${s3Bucket}/${releaseArchivePrefix(target.appName, opts.archiveReleaseId)}\` (copy, no --delete).`
     : '';
@@ -67,7 +75,7 @@ Steps (execute in order, each step must succeed before the next):
    - Else if \`${workingDir}/vite.config.ts\` or \`.js\` exists -> VITE. Edit vite.config to set \`base: '${basePath}'\` (WITH trailing slash) inside defineConfig({ ... }), replacing any existing \`base\`. The build output dir is \`dist/\`.
    - Else inspect ${workingDir}/package.json: read the \`build\` script to infer the framework and its output dir (commonly \`out\`, \`dist\`, or \`build\`). Patch the relevant config so assets are prefixed with ${basePathNoSlash} (path-style frameworks) or ${basePath} (slash-style).
 
-2. Run the build: \`cd ${workingDir} && npm run build\`. If build fails because of missing deps, run \`npm install\` and retry the build once. Do not proceed past this step unless the build succeeds.
+2. Run the build: \`cd ${workingDir} && ${harnessEnv}npm run build\`.${harnessEnv ? ` The \`${harnessEnv.trim()}\` env prefix is REQUIRED for this (dev) environment — it must be present on every build invocation; do not drop it.` : ''} If build fails because of missing deps, run \`npm install\` and retry the build once with the exact same command. Do not proceed past this step unless the build succeeds.
 
 3. Identify the build output directory (\`out/\` for Next.js, \`dist/\` for Vite, otherwise per the package.json build log). Confirm it exists with \`ls\`. Call it <outputDir>.
 
