@@ -7154,6 +7154,11 @@ async function executeUltracodeBenchJob(job) {
   };
 
   try {
+    // The capture spawns `claude` with `cwd: job.workingDir` (a greenfield path the API mints as
+    // /home/ubuntu/ultracode-bench/<runId>) — but nothing else provisions it (no repo clone/worktree
+    // step for a greenfield bench). A non-existent cwd makes Node's spawn throw `spawn <bin> ENOENT`,
+    // which masquerades as a missing binary. Ensure it exists first (pacman ultracode-bench, 2026-06-24).
+    mkdirSync(job.workingDir, { recursive: true });
     const metaPrompt = readFileSync(new URL('./lib/ultracode/meta-prompt-v0.md', import.meta.url), 'utf8');
     const capture = makeCaptureDeps({ claudeBin: CLAUDE_BIN, stripApiKey, loadOAuth, metaPrompt, log });
     const paused = await isAgentPausedCached();
