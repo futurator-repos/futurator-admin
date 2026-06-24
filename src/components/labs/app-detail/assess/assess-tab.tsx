@@ -21,7 +21,7 @@ import {
   useDeleteAudit,
   reportFromRecord,
 } from '@/hooks/use-app-audit';
-import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-output';
+import { AssessLiveLog } from './assess-live-log';
 import { NewPlanModal } from '../new-plan-modal';
 import { HotspotDashboard } from './hotspot-dashboard';
 import { RefactorGraph } from './refactor-graph';
@@ -310,29 +310,10 @@ export function AssessTab({ app }: { app: App }) {
         </div>
       )}
 
-      {/* Live recon progress while the daemon runs. */}
-      {report.status === 'assessing' && jobId && (
-        <div>
-          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>
-            Running recon on the EC2 clone…
-          </div>
-          <StoryLiveOutput jobId={jobId} hideResponse />
-        </div>
-      )}
-
-      {report.status === 'failed' && (
-        <div
-          data-testid="assess-failed"
-          style={{
-            fontSize: 12,
-            color: 'var(--destructive)',
-            border: '1px solid color-mix(in srgb, var(--destructive) 30%, transparent)',
-            borderRadius: 8,
-            padding: 10,
-          }}
-        >
-          Assessment failed: {report.message}
-        </div>
+      {/* Live recon log (assess.* event stream + copy-logs) — shown while
+          running AND after a failure, so the error is auditable. */}
+      {jobId && (report.status === 'assessing' || report.status === 'failed') && (
+        <AssessLiveLog jobId={jobId} job={job} />
       )}
 
       {report.status === 'scored' && currentSummary?.toolStatus?.knip === 'unavailable' && (
