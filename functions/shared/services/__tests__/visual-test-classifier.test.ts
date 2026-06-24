@@ -11,6 +11,7 @@ import {
   capVisionLevelByRigor,
   isDeterministicLevel,
   isInteractionGated,
+  isHumanComplexity,
   DEFAULT_COST_BY_LEVEL,
 } from '../visual-test-classifier';
 import type { VisualTestDef } from '../../types/epic-workflow';
@@ -873,5 +874,23 @@ describe('aggregateVisualTests — interaction-gated needs-probe fallback (no ve
     expect(report.coverageWarnings.some((w) => w.kind === 'interaction-gated-no-probe')).toBe(
       false,
     );
+  });
+});
+
+describe('isHumanComplexity — Stage A.3 human tier detector', () => {
+  it('flags subjective quality claims', () => {
+    expect(isHumanComplexity('the controls feel responsive and smooth')).toBe(true);
+    expect(isHumanComplexity('the animation is juicy and satisfying')).toBe(true);
+    expect(isHumanComplexity('it looks polished and professional')).toBe(true);
+  });
+  it('flags terminal-overlay end states', () => {
+    expect(isHumanComplexity('the GAME OVER overlay displays in red')).toBe(true);
+    expect(isHumanComplexity('a YOU WIN! screen appears')).toBe(true);
+    expect(isHumanComplexity('a STAGE 1 CLEAR overlay shows')).toBe(true);
+  });
+  it('does NOT flag ordinary automatable claims', () => {
+    expect(isHumanComplexity('the maze shows blue wall tiles at load')).toBe(false);
+    expect(isHumanComplexity('after pressing ArrowRight pac-man moves right')).toBe(false);
+    expect(isHumanComplexity('the score is at least 100')).toBe(false);
   });
 });

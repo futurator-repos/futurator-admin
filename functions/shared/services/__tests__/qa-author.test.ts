@@ -90,7 +90,10 @@ describe('compileObservableToAssert — QAA-2 prose→assert', () => {
 });
 
 describe('authorProbeFlow — QAA-1 flow synthesis', () => {
-  it('authors the pamcan6 GAME OVER probe (force → waitForEvent → screenshot → assert)', () => {
+  it('Stage A.3 — a GAME OVER terminal-overlay AC routes to the HUMAN tier with a forced evidence frame', () => {
+    // Operator's stated workflow (pacman3 Image 19): terminal-overlay states are
+    // unreliable to reach+judge → surface for manual approval, with a forced
+    // evidence screenshot so the operator has something to look at.
     const r = authorProbeFlow(
       vt({ level: 'L2' }),
       ac({
@@ -102,22 +105,24 @@ describe('authorProbeFlow — QAA-1 flow synthesis', () => {
       }),
       GAME_SEAM,
     );
-    expect(r.action).toBe('authored');
-    expect(r.test.level).toBe('L2');
+    expect(r.action).toBe('human');
+    expect(r.test.humanVerify).toBe(true);
     const flow = r.test.flow!;
     expect(flow[0]).toEqual({ action: 'force', status: 'over' });
-    expect(flow[1]).toMatchObject({
-      action: 'waitForEvent',
-      expr: 'snapshot.status',
-      expected: 'over',
-    });
     expect(flow.some((s) => s.action === 'screenshot')).toBe(true);
-    expect(flow[flow.length - 1]).toEqual({
-      action: 'assert',
-      expr: 'snapshot.status',
-      op: 'eq',
-      expected: 'over',
-    });
+    // human evidence is NOT machine-asserted (operator judges)
+    expect(flow.some((s) => s.action === 'assert')).toBe(false);
+  });
+
+  it('Stage A.3 — a SUBJECTIVE quality AC ("feels responsive") routes to the human tier', () => {
+    const r = authorProbeFlow(
+      vt({ level: 'L2' }),
+      ac({ verify: 'behavior', thenObservable: 'the controls feel responsive and smooth' }),
+      GAME_SEAM,
+    );
+    expect(r.action).toBe('human');
+    expect(r.test.humanVerify).toBe(true);
+    expect(r.test.humanVerifyReason).toMatch(/subjective/i);
   });
 
   it('uses a key-press reach, prefixed with a start reach on a start-gated app', () => {

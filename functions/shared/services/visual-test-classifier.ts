@@ -134,6 +134,35 @@ export function isInteractionGated(expect: string | undefined): boolean {
   return INTERACTION_GATED_PATTERNS.some((p) => p.test(expect));
 }
 
+/**
+ * Stage A (qa-review-delivery-rethink §3.2) — HUMAN-complexity detector.
+ *
+ * Some acceptance criteria are unreliable to verify automatically and are better
+ * approved by a human (the operator's stated, accepted workflow — pacman3 Image 19):
+ *
+ *  • SUBJECTIVE quality ("feels responsive", "smooth", "juicy", "polished") — no
+ *    pixel oracle exists; only a human can judge.
+ *  • TERMINAL-OVERLAY end states ("GAME OVER", "you win", "stage clear",
+ *    "victory/defeat screen") — reaching them reliably needs real play, and even
+ *    forced they often render content a vision judge mis-scores; the operator
+ *    reaches the state by playing and approves.
+ *
+ * A human-tier test is NOT auto-FAILed — the QA stage surfaces it for manual
+ * approval. Distinct from interaction-gating (which is automatable via a probe).
+ */
+export const HUMAN_COMPLEXITY_PATTERNS: ReadonlyArray<RegExp> = [
+  // subjective / perceptual quality — no deterministic or vision oracle
+  /\b(feels?|smooth\w*|responsive\w*|snappy|juic[ey]|polished?|satisfying|intuitive|fun|natural[\s-]?feeling|pleasant|delightful)\b/i,
+  /\b(easy to (use|read|understand)|looks? (nice|great|professional|polished))\b/i,
+  // terminal-overlay end states — reliable reach + judge needs a human
+  /\bgame[\s-]?over\b|\byou (win|lose|won|lost)\b|\bvictory\b|\bdefeat\b|\bstage[\s-]?\d*\s*clear\b|\blevel[\s-]?\d*\s*complete\b|\bwin (overlay|screen)\b|\bgame[\s-]?over (overlay|screen)\b/i,
+];
+
+export function isHumanComplexity(text: string | undefined): boolean {
+  if (!text) return false;
+  return HUMAN_COMPLEXITY_PATTERNS.some((p) => p.test(text));
+}
+
 export interface ClassificationResult {
   level: VisualTestLevel;
   /** Human-readable reason — surfaced in the contract review UI so the

@@ -308,6 +308,24 @@ export interface VisualTestDef {
   /** Cost budget in USD. Same kill semantics. L0 has no cost so this is a
    *  no-op there; meaningful for L1/L2. */
   budgetCostUsd?: number;
+
+  // ── Stage A (qa-review-delivery-rethink §3.2) — complexity tier ─────
+  /**
+   * Human-complexity tier. True when the AC is subjective ("feels responsive",
+   * "smooth") or a terminal-overlay state ("game over / you win") that is
+   * unreliable to reach + judge automatically. The QA stage does NOT auto-FAIL
+   * a humanVerify test — it surfaces it to the operator for manual approval
+   * (the operator's stated, accepted workflow). Set by the QA-AUTHOR compiler.
+   */
+  humanVerify?: boolean;
+  /** Human-readable reason the test is human-tier (subjective / terminal-state). */
+  humanVerifyReason?: string;
+  /**
+   * Stage A — the generated Playwright script (a faithful translation of `flow`),
+   * surfaced in the review UI so the operator can inspect/edit the actual script.
+   * Authored by the QA-AUTHOR; advisory (the runtime still executes `flow`).
+   */
+  generatedScript?: string;
 }
 
 /**

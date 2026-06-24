@@ -28,7 +28,8 @@ import type {
   AssertOp,
 } from '../types/epic-workflow';
 import type { SeamContract } from './qa-boilerplate-resolver';
-import { isInteractionGated } from './visual-test-classifier';
+import { isInteractionGated, isHumanComplexity } from './visual-test-classifier';
+import { flowToPlaywright } from './flow-to-playwright';
 
 /** A compiled deterministic assertion against the seam snapshot. */
 export interface CompiledAssert {
@@ -301,10 +302,25 @@ function deriveEndStateExpectation(
   return text.replace(/[.;]\s*$/, '');
 }
 
-/** A judge directive that pins the vision judge to the POST-interaction frame. */
-function postInteractionJudge(test: VisualTestDef, ac: AcceptanceCriterion | undefined): string {
+/** A judge directive that pins the vision judge to the POST-interaction frame.
+ *  When `beforeAfter`, the judge gets two frames (baseline + result) and is told
+ *  to verify the CHANGE between them (the only way to confirm e.g. movement). */
+function postInteractionJudge(
+  test: VisualTestDef,
+  ac: AcceptanceCriterion | undefined,
+  beforeAfter = false,
+): string {
+  const end = deriveEndStateExpectation(test, ac);
+  if (beforeAfter) {
+    return (
+      `Two screenshots were captured: frame 1 = BEFORE the action (baseline), frame 2 = AFTER. ` +
+      `Compare them and judge whether the expected CHANGE occurred: ${end}. ` +
+      `PASS only if frame 2 differs from frame 1 in the expected way; if the two frames look the ` +
+      `same (no effect) FAIL. Do NOT expect a title/start screen.`
+    );
+  }
   return (
-    `After the scripted interaction runs, the FINAL screenshot must show: ${deriveEndStateExpectation(test, ac)}. ` +
+    `After the scripted interaction runs, the FINAL screenshot must show: ${end}. ` +
     `Judge ONLY this post-interaction state — do NOT expect a title, start, or pre-interaction screen.`
   );
 }
@@ -330,7 +346,7 @@ function whenTextFor(test: VisualTestDef, ac: AcceptanceCriterion | undefined): 
   return [ac?.when, test.action, test.expect, test.setup].filter(Boolean).join('  ');
 }
 
-export type AuthorAction = 'kept' | 'authored' | 'unmappable' | 'skipped';
+export type AuthorAction = 'kept' | 'authored' | 'unmappable' | 'skipped' | 'human';
 
 export interface AuthorResult {
   test: VisualTestDef;
@@ -380,6 +396,61 @@ export function authorProbeFlow(
   const isL2 = test.level === 'L2';
   const gated = isInteractionGated(srcText);
 
+  // ── Human complexity tier (Stage A) ── Subjective ("feels responsive") or
+  // terminal-overlay ("game over", "you win") ACs are unreliable to verify
+  // automatically; surface them to the operator for manual approval instead of
+  // auto-FAILing. We still author a best-effort reach + screenshot so the
+  // operator has EVIDENCE to look at, but mark humanVerify so the verdict lane
+  // is "human-required", not pass/fail. (verify:'manual' ACs also land here.)
+  if (verify === 'manual' || isHumanComplexity(srcText)) {
+    const reason =
+      verify === 'manual'
+        ? 'AC marked verify:manual'
+        : /\b(feels?|smooth|responsive|juic|polished|satisfying|intuitive)\b/i.test(srcText)
+          ? 'subjective quality — no automatable oracle'
+          : 'terminal-overlay end state — reliable reach + judge needs a human';
+    // Best-effort evidence: force the terminal status if we can, else just start.
+    const evidence: VisualTestFlowStep[] = [];
+    const termMatch = seam?.statusEnum?.find((v) => new RegExp(`\\b${v}\\b`, 'i').test(srcText));
+    const term =
+      termMatch ||
+      (/\bgame[\s-]?over\b|\byou (lose|lost)\b|\bdefeat\b/i.test(srcText) &&
+      seam?.statusEnum?.includes('over')
+        ? 'over'
+        : /\byou (win|won)\b|\bvictory\b|\bwin\b/i.test(srcText) &&
+            seam?.statusEnum?.includes('win')
+          ? 'win'
+          : undefined);
+    if (term && term !== 'idle') {
+      evidence.push(
+        { action: 'force', status: term },
+        {
+          action: 'waitForEvent',
+          expr: 'snapshot.status',
+          op: 'eq',
+          expected: term,
+          timeoutMs: 5000,
+        },
+        { action: 'screenshot', label: 'human-evidence' },
+      );
+    } else if (startGated) {
+      evidence.push(...deriveStartReach(), { action: 'screenshot', label: 'human-evidence' });
+    }
+    const enriched: VisualTestDef = {
+      ...test,
+      humanVerify: true,
+      humanVerifyReason: reason,
+      ...(evidence.length > 0
+        ? { flow: evidence, generatedScript: flowToPlaywright(evidence) }
+        : {}),
+    };
+    return {
+      test: enriched,
+      action: 'human',
+      note: `human-tier (${reason}) — surfaced for operator approval${evidence.length ? ' with forced evidence frame' : ''}`,
+    };
+  }
+
   // ── appearance (Gap 1) ── A start-gated gameplay-content appearance AC can't be
   // seen on the idle (start) frame — press to start, then judge the gameplay
   // frame. Start-screen ACs and non-gated appearance stay idle-judged.
@@ -392,7 +463,13 @@ export function authorProbeFlow(
       { action: 'screenshot', label: 'after-start' },
     ];
     return {
-      test: { ...test, level: 'L1', flow, judge: postInteractionJudge(test, ac) },
+      test: {
+        ...test,
+        level: 'L1',
+        flow,
+        judge: postInteractionJudge(test, ac),
+        generatedScript: flowToPlaywright(flow),
+      },
       action: 'authored',
       note: 'start-gated appearance → press to start; judge the gameplay frame, not the start screen',
     };
@@ -433,19 +510,46 @@ export function authorProbeFlow(
     };
   }
 
-  const flow: VisualTestFlowStep[] = [
-    ...allReach,
-    { action: 'screenshot', label: 'after' },
-    ...(assert
-      ? [{ action: 'assert' as const, expr: assert.expr, op: assert.op, expected: assert.expected }]
-      : []),
-  ];
+  // Build the flow. Three shapes:
+  //  • L2-state (assert): deterministic seam read is the oracle → single
+  //    post-interaction frame + assert.
+  //  • L2-vision WITH a real action: capture a BEFORE (post-start baseline) and
+  //    an AFTER so the judge can verify a CHANGE (e.g. movement) — a lone "after"
+  //    frame can't prove directional movement (pacman3 Image 20). (Stage A.1)
+  //  • L2-vision floor (only a start reach, no specific action): single frame.
+  let flow: VisualTestFlowStep[];
+  let beforeAfter = false;
+  if (assert) {
+    flow = [
+      ...allReach,
+      { action: 'screenshot', label: 'after' },
+      { action: 'assert', expr: assert.expr, op: assert.op, expected: assert.expected },
+    ];
+  } else if (reach.length > 0) {
+    beforeAfter = true;
+    flow = [
+      ...startReach,
+      { action: 'screenshot', label: 'before' },
+      ...reach,
+      { action: 'screenshot', label: 'after' },
+    ];
+  } else {
+    flow = [...allReach, { action: 'screenshot', label: 'after' }];
+  }
   return {
-    test: { ...test, level: 'L2', flow, judge: postInteractionJudge(test, ac) },
+    test: {
+      ...test,
+      level: 'L2',
+      flow,
+      judge: postInteractionJudge(test, ac, beforeAfter),
+      generatedScript: flowToPlaywright(flow),
+    },
     action: 'authored',
     note: assert
       ? `authored ${flow.length}-step L2-state probe → assert ${assert.expr} ${assert.op} ${JSON.stringify(assert.expected)}`
-      : `authored ${flow.length}-step L2-vision probe (reach → screenshot; observable is visual / no seam key)`,
+      : beforeAfter
+        ? `authored ${flow.length}-step L2-vision probe (before/after frames → judge compares the change)`
+        : `authored ${flow.length}-step L2-vision probe (start → screenshot)`,
   };
 }
 

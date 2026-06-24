@@ -981,6 +981,8 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `  const start = Date.now();`,
           `  const wallclockMs = (t.budgetWallclockSec ? t.budgetWallclockSec * 1000 : defaultWallclockMs);`,
           `  const screenshotUrl = cdnPrefix + t.id + '.png';`,
+          // Stage A.3 — HUMAN-tier tests bypass the machine judge (operator approves).
+          `  if (t.humanVerify) { resolve({ testId: t.id, level: 'L1', verdict: 'uncertain', observability: 'not-observable', rationale: 'HUMAN_REQUIRED: ' + (t.humanVerifyReason || 'subjective/terminal state — operator verifies') + ' (approve manually if correct)', screenshotUrl, costUsd: 0, durationMs: Date.now() - start }); return; }`,
           // QAA-3 / QR-1 (agentic-l2-autonomy-backlog §3/§6) — route a needs-probe
           // test to the honest lane AT EXECUTE: an interaction/temporal-gated
           // expectation with no probe flow cannot be verified by one idle frame, so
@@ -988,7 +990,13 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           // triage, non-blocking) before spending a judge call — belt-and-braces
           // with the aggregate-time needs-probe re-bucket.
           `  const interactionGated = /\\b(after|once|when|until|press\\w*|click\\w*|tap\\w*|key|score|points?|game[\\s-]?over|level[\\s-]?complete|victory|win|paused|restart|play again|elapsed|seconds?|ticks?|countdown|animat\\w*|motion|moving|spawn\\w*|collide|collision)\\b/i.test(t.expect || '');`,
-          `  if (interactionGated && (!Array.isArray(t.flow) || t.flow.length === 0)) {`,
+          // Stage A.2 (pacman3 Image 18) — a TITLE/START-screen AC ("title shows
+          // PACS 3 / Press ENTER to Play; no maze visible") IS the idle frame, so
+          // it is idle-verifiable even though it mentions "Press ENTER" (which trips
+          // the interaction-gated regex). Exempt start-screen observables from the
+          // NEEDS_PROBE bounce so they get judged on the idle frame, not stuck uncertain.
+          `  const isStartScreen = /\\b(start screen|title screen|press\\s+(enter|space|start)|main menu|splash|landing screen|start button|how to play|instructions screen)\\b/i.test(t.expect || '') && !/\\b(after|once|when)\\b/i.test(t.expect || '');`,
+          `  if (interactionGated && !isStartScreen && (!Array.isArray(t.flow) || t.flow.length === 0)) {`,
           `    resolve({ testId: t.id, level: 'L1', verdict: 'uncertain', observability: 'not-idle-observable', rationale: 'NEEDS_PROBE: interaction/temporal-gated expectation with no probe flow — a single idle frame cannot verify this (author a press/wait/assert probe)', screenshotUrl, costUsd: 0, durationMs: Date.now() - start });`,
           `    return;`,
           `  }`,
@@ -1111,6 +1119,11 @@ export function buildQaExecutePipeline(inputs: QaPipelineInputs): PipelineDefini
           `  const start = Date.now();`,
           `  const wallclockMs = (t.budgetWallclockSec ? t.budgetWallclockSec * 1000 : defaultWallclockMs);`,
           `  const screenshotUrl = cdnPrefix + t.id + '.png';`,
+          // Stage A.3 (qa-review-delivery-rethink §3.2) — HUMAN-tier tests are NOT
+          // auto-judged: subjective/terminal-overlay ACs are surfaced to the operator
+          // for manual approval. Resolve non-blocking with a HUMAN_REQUIRED rationale +
+          // the captured evidence frame; never pass/fail by machine.
+          `  if (t.humanVerify) { resolve({ testId: t.id, level: 'L2', verdict: 'uncertain', observability: 'not-observable', rationale: 'HUMAN_REQUIRED: ' + (t.humanVerifyReason || 'subjective/terminal state — operator verifies') + ' (evidence frame captured; approve manually if correct)', screenshotUrl, costUsd: 0, durationMs: Date.now() - start }); return; }`,
           // Phase0 RULE-1 (CONTRACT_INCOMPLETE) — an L2 ("interaction flow") test
           // that arrives with NO flow ran ZERO interactions; the capture loop
           // screenshotted the idle frame (runOne), identical to an L1. Judging it

@@ -447,7 +447,7 @@ export async function launchPlanQaAggregate(
         seam: options.seam,
       });
       s.visualTests = authored;
-      if (log.some((e) => e.action === 'authored')) epicChanged = true;
+      if (log.some((e) => e.action === 'authored' || e.action === 'human')) epicChanged = true;
       for (const entry of log) {
         console.log(
           `[qa-author] ${plan.name}/${s.storyId} ${entry.testId}: ${entry.action} — ${entry.note}`,
@@ -581,8 +581,8 @@ export async function launchPlanQaExecute(
   const authoredTests: FlatVisualTest[] = approvedTests.map((t) => {
     const ac = t.criteriaRef ? cRef.get(t.criteriaRef) : undefined;
     const r = authorProbeFlow(t, ac, options.seam);
-    if (r.action === 'authored') {
-      console.log(`[qa-author:execute] ${plan.name} ${t.id}: authored — ${r.note}`);
+    if (r.action === 'authored' || r.action === 'human') {
+      console.log(`[qa-author:execute] ${plan.name} ${t.id}: ${r.action} — ${r.note}`);
     }
     return r.test as FlatVisualTest;
   });
