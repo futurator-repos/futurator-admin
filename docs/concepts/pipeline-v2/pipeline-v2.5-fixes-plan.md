@@ -409,6 +409,10 @@ deploy a first-class, observable, immutable artifact with its own `deployEnviron
 **Recommend Q7 resolve to "QA against the dev-deploy URL."** (Bears on F22 — once the
 dev/staging subdomains exist, that URL is per-env and stable.)
 
+> **Update (2026-06-19, deployment):** **F29** makes that URL concrete — `dev.futurator.ai/<plan>`,
+> plan-scoped and immutable (the merged plan QA reviews). When F29 lands, QA can switch from
+> booting `next dev` in the shared worktree to verifying that URL, closing Q-C9/Q7 at the root.
+
 ### F12 — QA scores broken/missing evidence as blocking defects (P1)
 
 > Contributed by **QAreview-agentic** (2026-06-18).
@@ -887,21 +891,68 @@ the Registry browse (Story 4.3 already has the trust column to hang it on).
 
 **Effort:** M. **Track:** I. **Status:** proposed.
 
+### F29 — Environment-true subdomains: CloudFront index-rewrite + plan/app identity (P1)
+
+> Contributed by **deployment** (2026-06-19). Full design: [`deployment-v2.5.md` §15](./deployment-v2.5.md). **Touches the QA stage — see hand-off below.**
+
+**Evidence (confirmed against live AWS).** The F22 subdomains 403 on bare directory
+paths: dev dist `E10EO7ORIP20S6` + staging dist `E3F34BER0RR7H7` have
+`DefaultRootObject:""`, **`FunctionAssociations:0`**, an S3 **REST** origin + OAC, and the
+buckets have **no website hosting** — so `dev.futurator.ai/<x>/` → S3 key `<x>/` (not an
+object) → 403 (only `…/index.html` + assets serve). Prod works only because
+`futurator-ai-website` is a website-hosting bucket. The fix is what `StaticSite` does
+automatically (proven in-account: `futurator-production-AdminSiteCloudfrontFunctionRequest-*`)
+and a bare `Router` doesn't. (Until fixed, `DEPLOY_ENV_SUBDOMAINS` is OFF → dev/staging run
+on the working fallback prefixes `apps/_dev/`, `apps/_staging/` on the prod bucket.)
+
+**Two coupled changes.**
+
+- **(A) Infra** — attach a CloudFront viewer-request Function (`cloudfront-js-2.0`)
+  rewriting `/<x>/`→`/<x>/index.html` and `/`→`/index.html` to the dev + staging Routers
+  (durable in `sst.config.ts`: native Router edge option if the installed SST exposes one,
+  else a Pulumi `aws.cloudfront.Function` via the Router `transform`). Then flip
+  `DEPLOY_ENV_SUBDOMAINS=on`.
+- **(B) Code** — adopt **plan-vs-app identity**: `resolveDeployTarget({planSlug, appId}, env)`
+  → dev = `dev.futurator.ai/<plan>` (plan-scoped), staging = `stage.futurator.ai/<app>`,
+  prod = `futurator.ai/apps/<app>`. The deploy/promote/cron call sites pass both ids.
+
+**Why subdomains, not the `apps/_dev/` path-prefix.** Separate origin = browser-level
+isolation of cookies/`localStorage`/`IndexedDB`/service-worker scope — required once apps
+store state (a shared-origin path-prefix shares a game's high-score store across all three
+envs); plus blast-radius (can't touch the homepage bucket) and per-env controls. Path-prefix
+is fine only for stateless static apps / as the zero-infra stopgap.
+
+**Build-once tradeoff.** Identity/base differs per env → rebuild per hop. Optionally align
+staging↔prod base (`/apps/<app>/`) to keep a byte-copy on the consumer-facing hop (overlaps
+**Q11**).
+
+**Effort:** M (infra + code). **Track:** H. **Status:** proposed.
+
+> **🔔 Hand-off — QA-review session (`QAreview-agentic`):** this directly enables your
+> deferred root fix. **F11/Q-C9/Q7** wanted "QA against the dev-deploy URL instead of booting
+> `next dev` in the shared worktree." Once F29 lands, that URL is **real, plan-scoped, and
+> immutable**: `dev.futurator.ai/<plan>` is the merged plan QA reviews. Please (a) point
+> "Open in dev" + your verification at it, and (b) resolve F11/Q-C9 by targeting it (close out
+> Q7). You own the corresponding rubric/criteria updates (DP-I1 / Q-C9 / Q7).
+>
+> **Hand-off — concept/pipeline owner:** the plan-vs-app identity + the `resolveDeployTarget`
+> signature change ripple to all deploy/promote/cron call sites.
+
 ---
 
 ## 4. Workstreams
 
-| Track | Theme                                           | Findings                                    | Owner          | Status                                                                         |
-| ----- | ----------------------------------------------- | ------------------------------------------- | -------------- | ------------------------------------------------------------------------------ |
-| **A** | Perf / token reduction                          | F1, F6, F7, F8(part), F9                    | _unclaimed_    | proposed                                                                       |
-| **B** | Correctness / observability                     | F2, F3, F4                                  | _unclaimed_    | proposed                                                                       |
-| **C** | Learning loop                                   | F5, F8(part)                                | _unclaimed_    | proposed                                                                       |
-| **D** | Planning / parallelism                          | F10                                         | _unclaimed_    | proposed                                                                       |
-| **E** | Context management (design)                     | see §5                                      | _unclaimed_    | proposed                                                                       |
-| **F** | QA evidence integrity & stage isolation         | F11, F12, F13                               | _unclaimed_    | proposed                                                                       |
-| **G** | Knowledge-graph integrity & grounding substrate | F14, F15, F16, F17, F18                     | **graphify**   | F17/F18 shipped; F14–F16 proposed                                              |
-| **H** | Deployment control panel & promotion ladder     | F19, F20, F21, F22, F23 (+ F11 deploy side) | **deployment** | F19/F20/F21 + F22-reconcile shipped (`1755365`); F22-subdomains + F23 proposed |
-| **I** | Skill activation, discovery & trust integration | F24, F25, F26, F27, F28 (+ F5 loop side)    | _unclaimed_    | proposed; **F26 is a pre-deploy gate for the Skills-Institution branch**       |
+| Track | Theme                                           | Findings                                         | Owner          | Status                                                                                         |
+| ----- | ----------------------------------------------- | ------------------------------------------------ | -------------- | ---------------------------------------------------------------------------------------------- |
+| **A** | Perf / token reduction                          | F1, F6, F7, F8(part), F9                         | _unclaimed_    | proposed                                                                                       |
+| **B** | Correctness / observability                     | F2, F3, F4                                       | _unclaimed_    | proposed                                                                                       |
+| **C** | Learning loop                                   | F5, F8(part)                                     | _unclaimed_    | proposed                                                                                       |
+| **D** | Planning / parallelism                          | F10                                              | _unclaimed_    | proposed                                                                                       |
+| **E** | Context management (design)                     | see §5                                           | _unclaimed_    | proposed                                                                                       |
+| **F** | QA evidence integrity & stage isolation         | F11, F12, F13                                    | _unclaimed_    | proposed                                                                                       |
+| **G** | Knowledge-graph integrity & grounding substrate | F14, F15, F16, F17, F18                          | **graphify**   | F17/F18 shipped; F14–F16 proposed                                                              |
+| **H** | Deployment control panel & promotion ladder     | F19, F20, F21, F22, F23, F29 (+ F11 deploy side) | **deployment** | F19/F20/F21 shipped; **F29 enables QA's F11/Q7 root fix**; F22-subdomains + F23 + F29 proposed |
+| **I** | Skill activation, discovery & trust integration | F24, F25, F26, F27, F28 (+ F5 loop side)         | _unclaimed_    | proposed; **F26 is a pre-deploy gate for the Skills-Institution branch**                       |
 
 ---
 
@@ -1105,4 +1156,5 @@ merge 269s · `8c39c9f7` vqa 369s · `805cdb92` vqa 339s.
 | 2026-06-18 | deployment                   | Deployment-stage findings from building + shipping the v2.5 promotion-ladder control panel (brick1 went live dev→staging→prod). New **Track H**: F19 (DEPLOY*URL extractor truncated dev/staging URLs at `*`→ dead "Open in dev" link — **shipped`1755365`**), F20 (Vite-only deploy prompts vs Next.js apps → agent improvised; framework-aware now — **shipped `1755365`**; does NOT close F11), F21 (dev/staging deploys unobservable + smoke unsurfaced → per-env streaming + smoke badge/soft-gate — **shipped `1755365`**), F22 (build-once not real — fallback prefixes force rebuild-per-rung; dual-prod-path reconcile **shipped**, subdomain provisioning **open**, recipe in `deployment-v2.5.md §14`), F23 (MCP-config missing → halts **every** agent spawn; 2-line `existsSync`+`mkdirSync`self-heal — **open**, owner graphify). Added F11 agent-notes (deploy still rewrites QA's`next.config.ts` post-F20 → Q7/Q11), Q11/Q12, roadmap slots (F23→Phase 1, F22→Phase 3), Appendix B refs. Reconciled the deployment rubric's forward-refs "F14/F15" → canonical **F22/F23**. Same lesson as F11/F12/F14 — clean agents, leaky harness.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | 2026-06-18 | graphify                     | Knowledge-graph (knowledge-compile output) forensic on the same pacman3 run — broken graph on correct code (177/290, 29 unconnected, Orphan invariant FAIL 20). Added new **Track G** + F14 (truncated ast-facts = last story's worktree scope, not the project), F15 (additive ingest never prunes deleted-source zombies), F16 (orphan invariant computed but swallowed at `exit 3`), F17 (job-UUID `projectId` strands file nodes → silent DEFINES loss — **shipped `0d5dd6a`**), F18 (living docs float; new `REFERENCES` doc→code edge layer for living docs, plan-docs excluded — **shipped `0445e6a`**). F16 → Phase 1, F14 → Phase 2, F15 → Phase 3; open Q8/Q9/Q10; Appendix B refs. After fixes: pacman3 graph 212/526, 0 orphans. Same lesson as F11/F12 — clean agents, leaky harness.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | 2026-06-18 | Claude (skills)              | Skill-management forensic on the same pacman3 run, through the lens of the (built, unshipped) Skills-Institution branch. New **Track I** + F24 (activation collapse — 5.2% of sessions, 1.5% of 66 skills used; push relevant bodies per-story + activation-as-reflector-signal), F25 (scout dormancy — `skillScoutRuns:[]`; no intent-aware trigger; add T-intent at plan-build), **F26 ⚠️ pre-deploy gate** (Story 4.2's trusted-only vendor gate silently blocks scout community installs; scout↔inbox are two disconnected trust authorities — wire scout `surface-card`→inbox proposal, ship with 4.2), F27 (embeddings sidecar write-only → no load-time relevance ranking; read it in skills-prompt), F28 (no usage telemetry → dead skills never pruned; populate `index.usage.json`/`maturity`, auto-deprecate 0-activation skills). Added F5 agent-note (E1 apply loop + poller now built — but still blocked by F5's IAM write-fail + mvp-no-story-reflection; fix IAM first). Appendix B refs. Lesson: Skills-Institution fixed **curation/security/authoring**; the forensic shows the live bottlenecks are **activation, discovery, and retrieval** — and our security gate needs the scout→inbox bridge before it deploys.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 2026-06-19 | deployment                   | **Environment-true subdomains plan (F29, Track H).** Confirmed against live AWS _why_ `dev.futurator.ai` 403s: dev/staging dists (`E10EO7ORIP20S6`/`E3F34BER0RR7H7`) have `DefaultRootObject:""`, `FunctionAssociations:0`, S3 REST origin + OAC, buckets no website hosting → bare `…/<id>/` 403 (index.html + assets DO serve); prod works only because its bucket is website-hosting. Fix = CloudFront viewer-request index-rewrite Function on the dev/staging Routers (the pattern `StaticSite` auto-creates, proven in-account) + adopt **plan-vs-app identity** (dev=`dev.futurator.ai/<plan>`, staging=`stage.futurator.ai/<app>`, prod=`futurator.ai/apps/<app>`). Documented the subdomain-vs-path-prefix rationale (origin isolation of cookies/localStorage/SW once apps store state; blast-radius; per-env controls) + build-once tradeoff (Q11). Full design: deployment-v2.5.md §15. **🔔 Notifies the QA-review session:** the plan-scoped immutable `dev.futurator.ai/<plan>` is exactly the mechanism F11/Q-C9/Q7 deferred — QA should target it and close out its stage-isolation root fix. Status: proposed (infra + code; not yet implemented).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | 2026-06-18 | Claude (implementation pass) | **Reconciled all findings against current code + implemented the in-repo set.** De-bias: **F1 dropped as a false finding** (no in-loop `tsc` step exists — `test-verify`=vitest, `lint-verify`=eslint; the "thrash" was ad-hoc agent Bash calls). Confirmed **F17/F18/F19/F20/F21 already shipped**. **Implemented this session** (focused tests green; daemon `.mjs` need rsync+restart to take effect): **F2** (`retryOf` chain), **F3** (forensic retry-union + `costReconciliation`), **F4** (`totalStories` rollup), **F6** (hard cost gate at wave boundary), **F11** (serialize QA vs dev-deploy — race removed; deeper QA→dev-deploy-URL/env-base-path root fix deferred to Q7/Q11), **F12/F13** (QA evidence-integrity gate + `errored` lane + probe-gated L2), **F14** (graph-sync refuse-to-narrow + `ast-facts.full.json`; wave-close `regenAstFacts` daemon hook deferred), **F15** (delete-aware code-node prune; infra-node prune deferred), **F16** (orphan-invariant surfaced as `orphan-signal.json` + attention log; downstream consumer deferred), **F23** (MCP-config self-heal), **F24** (per-story top-3 skill-body push), **F26** (`fromBulk` gate adapter + `/api/skills/gate/bulk` route; daemon-side `emitBulkProposal` call deferred), **F27** (embeddings relevance ranking). Commits `25acde1` (fixes), `a066b75` (rubric v1.0-draft + plan-retrospect-spec), `26337ad` (Plan Retrospect feature). **Still infra-only:** F5 (reflections IAM grant), F22 (dev/staging subdomains). The Plan Retrospect feature (this doc's companion scorecard-spec, now `plan-retrospect-spec.md`) is the mechanism that will re-score every future run against the v1.0 rubric. |

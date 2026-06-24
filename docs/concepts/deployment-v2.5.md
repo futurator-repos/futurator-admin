@@ -387,3 +387,69 @@ Until both the SST resources **and** this IAM grant are in place, leave the env 
 ### Cost
 
 ~$0 at rest: CloudFront has no fixed fee (1 TB/mo free tier), S3 storage is pennies, ACM certs are free, Route53 records are free (zone already paid). No always-on compute.
+
+---
+
+## 15. Environment-true subdomains + plan/app identity — the v2.6 fixing plan (2026-06-19, deployment session)
+
+> §14 was **applied** since it was written: the `DevEnvBucket`/`StagingEnvBucket` + `DevRouter`/`StagingRouter` + env vars now exist (the auto-named buckets are `futurator-admin-production-devenvbucketbucket-*` / `…-stagingenvbucketbucket-*`; the `bucketName` transform never took — cosmetic). But the subdomains **serve `403` on directory paths**, so I added a flag (`DEPLOY_ENV_SUBDOMAINS`, default OFF) that currently keeps dev/staging on the **fallback** (`futurator.ai/apps/_dev/…`, `/apps/_staging/…`) — which works because it rides the production website bucket. This section is the plan to make the **real subdomains** work and adopt the correct **plan-vs-app** identity model.
+
+### 15.1 Root cause (confirmed against live AWS)
+
+`dev` dist `E10EO7ORIP20S6` and `staging` dist `E3F34BER0RR7H7`: `DefaultRootObject:""`, **`FunctionAssociations:0`**, origin = S3 **REST** endpoint + OAC; buckets have **no website hosting**. So `dev.futurator.ai/<x>/` maps to the S3 key `<x>/` (not an object) → **403** (only explicit `…/index.html` + assets serve). Production works only because `futurator-ai-website` is a **website-hosting** bucket (auto-serves index docs for directory paths). The fix is the thing `StaticSite` does automatically and a bare `Router` does not — proven in-account by `futurator-production-AdminSiteCloudfrontFunctionRequest-*`.
+
+### 15.2 The identity model: dev = plan, staging/prod = app
+
+| Env         | Identity               | URL                        | Rationale                                                                                                                                     |
+| ----------- | ---------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **dev**     | **plan** (`plan.name`) | `dev.futurator.ai/<plan>`  | Tests _this plan's_ merged branches in QA, before it's accepted as the app. Plan-scoped so concurrent plans (even for one app) don't collide. |
+| **staging** | **app** (`appId`)      | `stage.futurator.ai/<app>` | The QA-approved plan = the app's next-release candidate. One staging slot per app.                                                            |
+| **prod**    | **app** (`appId`)      | `futurator.ai/apps/<app>`  | Live app. Unchanged.                                                                                                                          |
+
+Mirrors git: `plan/<name>` (dev) → merge to `main` = the app (staging→prod). Today `deploy-targets` keys all three by the working-dir leaf (≈ appId) — that's the gap.
+
+### 15.3 Why subdomains over `futurator.ai/apps/_dev/<id>` (the path-prefix)
+
+- **Browser-origin isolation (the decisive one):** a subdomain is a separate origin → separate cookies, `localStorage`, `IndexedDB`, and service-worker scope. The path-prefix shares the prod origin, so dev/staging/prod **share client state** (a game's `localStorage` high score is one store across all three; a prod service worker can intercept `_dev` paths). This is exactly the failure class once apps "store users' scores / DB data."
+- **Blast radius:** separate buckets — dev/staging can't touch the public homepage bucket (`futurator-ai-website`, the 2026-04-15 incident class).
+- **Per-env controls:** can password/WAF/cache staging independently of prod.
+- Path-prefix is fine **only** for stateless static apps + as the zero-infra stopgap (it works today). Subdomains are the durable choice for a stateful, demoable pipeline. Both coexist via the `DEPLOY_ENV_SUBDOMAINS` flag.
+
+### 15.4 The fix — two coupled parts
+
+**Part A — infra (make the subdomains serve).** Attach a CloudFront **viewer-request Function** (`cloudfront-js-2.0`) to the dev + staging Routers that rewrites directory/extensionless URIs → `…/index.html`:
+
+```js
+function handler(event) {
+  var req = event.request,
+    uri = req.uri;
+  if (uri.endsWith('/')) req.uri = uri + 'index.html';
+  else if (!uri.split('/').pop().includes('.')) req.uri = uri + '/index.html';
+  return req;
+}
+```
+
+Encode it durably in `sst.config.ts`: prefer a native `Router` edge/function option **if the installed SST v4 exposes one** (verify — platform sources aren't in `node_modules`); otherwise create a Pulumi `aws.cloudfront.Function` and attach it to each Router's default cache behavior via the Router's `transform`. (CLI attach is a viable _stopgap_ for an imminent demo, but it drifts — a later `sst deploy` reverts it, so land the SST version.) Then flip `DEPLOY_ENV_SUBDOMAINS=on` on the Api + WaveCompletionCheck functions.
+
+**Part B — code (plan/app identity).** Change `resolveDeployTarget(slug, env)` → `resolveDeployTarget({ planSlug, appId }, env)` and resolve per-env: dev → host `dev.futurator.ai`, identity `planSlug`, prefix `''`; staging → `stage.futurator.ai`, `appId`, `''`; prod → `futurator.ai`, `appId`, `apps/`. The deploy/promote/cron call sites already hold the plan row — pass both `plan.name` and `plan.appId`. The daemon writeback needs no change (URLs flow from the resolved target).
+
+### 15.5 Build-once tradeoff (a decision to make)
+
+Identity/base-path differs per env (`/<plan>/` vs `/<app>/` vs `/apps/<app>/`), so each hop **rebuilds** — byte-identical copy can't survive a plan→app identity change. Two options:
+
+- **(Recommended) Hybrid:** dev = per-plan preview (rebuild is fine — throwaway QA view); make **staging↔prod share `/apps/<app>/`** (i.e. `stage.futurator.ai/apps/<app>`) so the _consumer-facing_ hop is a true byte-copy — "what you approved is what ships."
+- **(Prettier) Full identity URLs** (`stage.futurator.ai/<app>`) accepting a rebuild on every hop — fine for prototyping. (Overlaps fixes-plan **Q11**.)
+
+### 15.6 Rollout order
+
+1. Add the CF index-rewrite to dev/staging Routers (SST) + `sst deploy` → verify `dev.futurator.ai/apps/<id>/` → 200 (still appId-keyed).
+2. Implement plan/app identity (Part B) → verify dev keyed by plan.
+3. `DEPLOY_ENV_SUBDOMAINS=on`.
+4. Run one plan end-to-end: `dev.futurator.ai/<plan>` → promote → `stage.futurator.ai/<app>` → `futurator.ai/apps/<app>`. Retire the `apps/_dev/` + `apps/_staging/` fallback prefixes.
+
+### 15.7 Cross-stage impact — other agents must adapt
+
+- **QA-review session (`QAreview-agentic`):** dev becomes a **real, plan-scoped, immutable** `dev.futurator.ai/<plan>` URL — exactly the mechanism F11/Q-C9/Q7 wanted ("QA against the dev-deploy URL instead of booting `next dev` in the shared worktree"). The impl-pass _serialized_ F11 but deferred this root fix to Q7/Q11; the plan-scoped dev URL is what unblocks it. QA should: point "Open in dev" + its verification at `dev.futurator.ai/<plan>`, and resolve F11/Q-C9 by targeting it. (QA owns its own rubric/criteria updates.)
+- **concept-develop / pipeline owner:** adopt the plan-vs-app identity in any deploy-adjacent design; the `resolveDeployTarget` signature change ripples to deploy/promote/cron call sites.
+
+See fixes-plan **F29** (Track H) for the tracked remediation + hand-off.
