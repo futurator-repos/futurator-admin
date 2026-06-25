@@ -32,6 +32,8 @@ export interface RunAppAuditInput {
   topN?: number;
   /** Run the Data Privacy Assessment lane in parallel with recon. */
   runPrivacy?: boolean;
+  /** 'internal' (our own scanner, default) | 'external' (GDPR service). */
+  privacyMode?: 'internal' | 'external';
 }
 
 interface RunAppAuditResponse {

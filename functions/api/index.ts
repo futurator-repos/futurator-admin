@@ -7181,6 +7181,9 @@ app.post('/api/party/projects/:id/assess', async (c) => {
       ...(parsedBody.data.runPrivacy !== undefined
         ? { runPrivacy: parsedBody.data.runPrivacy }
         : {}),
+      ...(parsedBody.data.privacyMode !== undefined
+        ? { privacyMode: parsedBody.data.privacyMode }
+        : {}),
     },
   });
 

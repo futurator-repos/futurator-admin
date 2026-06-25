@@ -199,6 +199,8 @@ export const assessProjectBodySchema = z.object({
   runL3: z.boolean().optional(),
   topN: z.number().int().min(1).max(500).optional(),
   runPrivacy: z.boolean().optional(),
+  // 'internal' (our own deterministic scanner, default) | 'external' (GDPR service).
+  privacyMode: z.enum(['internal', 'external']).optional(),
 });
 
 /**

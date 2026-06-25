@@ -548,6 +548,8 @@ export interface AgentJob {
     topN?: number;
     /** Data Privacy Assessment lane — run privacy-recon in PARALLEL with recon. */
     runPrivacy?: boolean;
+    /** 'internal' (our own scanner, default) | 'external' (GDPR service). */
+    privacyMode?: 'internal' | 'external';
   };
 
   /**

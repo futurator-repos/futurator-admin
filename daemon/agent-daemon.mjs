@@ -7296,18 +7296,29 @@ async function executeRefactorAuditJob(job) {
   // privacy-recon is an independent deterministic child (rulepack-in, findings-out
   // to a local file; source never leaves). Runs CONCURRENTLY with the refactoring
   // recon — both finish in ~max(recon, privacy) not the sum.
+  // privacyMode: 'internal' (default — our own deterministic scanner, fully
+  // local, no network) | 'external' (the data-privacy-platform GDPR service).
+  const privacyMode = job.refactorAuditPayload?.privacyMode || 'internal';
+  const privacySrc = job.refactorAuditPayload?.src || 'src';
   function runPrivacyChild({ projectPath: repo, outPath, onChunk }) {
-    const reconPath = process.env.PRIVACY_RECON_PATH || '/opt/data-privacy-platform/scripts/privacy-recon.mjs';
     const svc = process.env.PRIVACY_SERVICE_URL || '';
     const token = process.env.PRIVACY_API_KEY || '';
+    const internalPath = new URL('./scripts/refactor-recon/privacy-scan-internal.mjs', import.meta.url).pathname;
+    const reconPath =
+      privacyMode === 'external'
+        ? process.env.PRIVACY_RECON_PATH || '/opt/data-privacy-platform/scripts/privacy-recon.mjs'
+        : internalPath;
     return new Promise((resolve) => {
       if (!existsSync(reconPath)) {
-        resolve({ code: 1, stderrTail: `privacy-recon not found at ${reconPath}` });
+        resolve({ code: 1, stderrTail: `privacy scanner not found at ${reconPath}` });
         return;
       }
-      const args = [reconPath, repo, '--regulation', 'all', '--out', outPath];
-      if (svc) args.push('--service', svc);
-      if (token) args.push('--token', token);
+      // Internal: our scanner takes <repo> --src <src> --out. External: the
+      // service runner takes <repo> --regulation all --service --token --out.
+      const args =
+        privacyMode === 'external'
+          ? [reconPath, repo, '--regulation', 'all', '--out', outPath, ...(svc ? ['--service', svc] : []), ...(token ? ['--token', token] : [])]
+          : [reconPath, repo, '--src', privacySrc, '--out', outPath];
       const proc = spawn(process.execPath, args, {
         cwd: repo,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -7336,7 +7347,8 @@ async function executeRefactorAuditJob(job) {
           runPrivacy: runPrivacyChild,
           readReport: async (p) => JSON.parse(readFileSync(p, 'utf8')),
           pushEvent,
-          serviceUrl: process.env.PRIVACY_SERVICE_URL || '',
+          // Internal mode is fully local → no service host in the boundary note.
+          serviceUrl: privacyMode === 'external' ? process.env.PRIVACY_SERVICE_URL || '' : '',
         }).catch((e) => ({ ok: false, reason: 'privacy-threw', error: String(e?.message || e) }))
       : null;
 
