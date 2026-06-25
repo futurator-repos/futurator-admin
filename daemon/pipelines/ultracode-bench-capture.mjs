@@ -172,8 +172,14 @@ export function makeCaptureDeps(cfg) {
 
       function finish(result) {
         if (settled) return;
-        if (result && !result.tainted && latestUsage && !result.tokens) {
-          result = { ...result, tokens: latestUsage };
+        if (result && !result.tainted && !result.tokens) {
+          // We halt the instant the plan is produced, BEFORE the CLI finalizes that turn's output
+          // usage — so the streamed output count is unreliable. Input is accurate; estimate output
+          // from the authored plan's size (~4 chars/token) so the number is meaningful, and flag it.
+          const input = latestUsage?.input ?? 0;
+          const estOut = Math.round((result.scriptJs || '').length / 4);
+          const output = Math.max(latestUsage?.output ?? 0, estOut);
+          if (input || output) result = { ...result, tokens: { input, output, outputApprox: true } };
         }
         settled = true;
         clearTimeout(timer);

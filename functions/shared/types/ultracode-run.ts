@@ -135,9 +135,9 @@ export interface UltracodeRun {
   /** Wall-clock planning time per engine (ms). */
   case1DurationMs?: number;
   case2DurationMs?: number;
-  /** Token usage per engine. */
-  case1Tokens?: { input: number; output: number };
-  case2Tokens?: { input: number; output: number };
+  /** Token usage per engine. `outputApprox` = output estimated from plan size (Case 1 halts early). */
+  case1Tokens?: { input: number; output: number; outputApprox?: boolean };
+  case2Tokens?: { input: number; output: number; outputApprox?: boolean };
 
   // ── provenance / honesty ──
   confound: typeof ULTRACODE_CONFOUND;

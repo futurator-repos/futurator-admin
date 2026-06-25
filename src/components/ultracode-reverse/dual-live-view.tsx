@@ -121,7 +121,7 @@ interface SidePanelProps {
   plan?: UltracodeDecisionPlan;
   script?: string;
   durationMs?: number;
-  tokens?: { input: number; output: number };
+  tokens?: { input: number; output: number; outputApprox?: boolean };
 }
 
 function SidePanel({
@@ -138,7 +138,9 @@ function SidePanel({
   const runActive = !!runStatus && ACTIVE_STATUSES.has(runStatus);
   const meta = [
     fmtDur(durationMs),
-    tokens ? `${fmtTok(tokens.output)} out · ${fmtTok(tokens.input)} in` : null,
+    tokens
+      ? `${tokens.outputApprox ? '~' : ''}${fmtTok(tokens.output)} out · ${fmtTok(tokens.input)} in`
+      : null,
   ]
     .filter(Boolean)
     .join(' · ');
