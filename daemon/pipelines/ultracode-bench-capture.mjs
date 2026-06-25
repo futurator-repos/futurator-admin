@@ -146,6 +146,7 @@ export function makeCaptureDeps(cfg) {
       let settled = false;
       let buf = '';
       let blockingRateLimit = false;
+      let capturing = false; // a scriptPath was seen; we're retrying the read
 
       const timer = setTimeout(
         () => finish(fallbackOrTaint(`timeout after ${captureTimeoutMs}ms — no Workflow plan in stream`)),
@@ -173,11 +174,28 @@ export function makeCaptureDeps(cfg) {
       }
 
       child.on('error', (e) => finish(tainted(`claude spawn failed (case1): ${e.message}`)));
-      child.on('close', () =>
-        finish(fallbackOrTaint('stream ended before a Workflow plan was produced')),
-      );
+      child.on('close', () => {
+        // If we're mid-capture (path seen, retrying the read), let that resolve.
+        if (!capturing) finish(fallbackOrTaint('stream ended before a Workflow plan was produced'));
+      });
+
+      // The Workflow tool returns the persisted path slightly before the file is flushed; retry the
+      // read for a short window (the file persists independently of the live process).
+      function captureFrom(path) {
+        capturing = true;
+        let tries = 0;
+        const attempt = () => {
+          if (settled) return;
+          const plan = readWorkflowPlan(path);
+          if (plan) return finish(plan);
+          if (++tries >= 15) return finish(fallbackOrTaint(`scriptPath never became readable: ${path}`));
+          setTimeout(attempt, 300); // up to ~4.5s
+        };
+        attempt();
+      }
 
       child.stdout.on('data', (chunk) => {
+        if (capturing) return;
         buf += chunk.toString();
         let nl;
         while ((nl = buf.indexOf('\n')) >= 0) {
@@ -191,8 +209,7 @@ export function makeCaptureDeps(cfg) {
           // The Workflow tool_result carries the persisted plan's absolute path.
           const m = line.match(/\/[^"\s\\]*\/workflows\/scripts\/[^"\s\\]*\.js/);
           if (m) {
-            const plan = readWorkflowPlan(m[0]);
-            finish(plan ?? tainted(`Workflow returned an unreadable scriptPath: ${m[0]}`));
+            captureFrom(m[0]);
             return;
           }
         }
