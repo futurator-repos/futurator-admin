@@ -143,6 +143,9 @@ export interface UltracodeRun {
   confound: typeof ULTRACODE_CONFOUND;
   claudeVersion?: string;
   promptVersion?: string;
+  /** The exact Case-2 meta-prompt that produced this run (for the export / prompt-improvement loop). */
+  metaPromptVersion?: string;
+  metaPrompt?: string;
   /** Reps excluded because capture left agents running (agentCount>0). */
   taintedReps?: number;
   errorMessage?: string;

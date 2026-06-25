@@ -7165,6 +7165,9 @@ async function executeUltracodeBenchJob(job) {
     // which masquerades as a missing binary. Ensure it exists first (pacman ultracode-bench, 2026-06-24).
     mkdirSync(job.workingDir, { recursive: true });
     const metaPrompt = readFileSync(new URL('./lib/ultracode/meta-prompt-v0.md', import.meta.url), 'utf8');
+    // Persist the exact Case-2 meta-prompt that produced this run so the JSON export is
+    // self-contained for the prompt-improvement loop (the agent edits the prompt it's given).
+    await updateRun(p.runId, { metaPromptVersion: 'futurator-workflow-author-v0', metaPrompt });
     const capture = makeCaptureDeps({ claudeBin: CLAUDE_BIN, stripApiKey, loadOAuth, metaPrompt, log });
     const paused = await isAgentPausedCached();
 

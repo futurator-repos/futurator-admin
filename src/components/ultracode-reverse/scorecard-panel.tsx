@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Copy, Download } from 'lucide-react';
+import { EXPORT_GOALS, GOAL_LABEL, buildExport, type ExportGoal } from '@/lib/ultracode-export';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
@@ -110,6 +111,70 @@ function CompareRow({ label, a, b }: { label: string; a: string | number; b: str
   );
 }
 
+/** Compound-goal JSON export for the prompt-improvement loop. */
+function ExportBar({ run }: { run: UltracodeRun }) {
+  const [goals, setGoals] = useState<ExportGoal[]>(['replicate']);
+  const [copied, setCopied] = useState(false);
+  const toggle = (g: ExportGoal) =>
+    setGoals((cur) => (cur.includes(g) ? cur.filter((x) => x !== g) : [...cur, g]));
+  const json = () => JSON.stringify(buildExport(run, goals, new Date().toISOString()), null, 2);
+  const download = () => {
+    const blob = new Blob([json()], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ultracode-${run.runId.slice(0, 8)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  const copy = () =>
+    navigator.clipboard?.writeText(json()).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+
+  const btn =
+    'flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground';
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-sm font-medium">Export for prompt improvement</span>
+        <div className="flex items-center gap-1.5">
+          <button onClick={copy} className={btn} disabled={goals.length === 0}>
+            {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+            {copied ? 'Copied' : 'Copy JSON'}
+          </button>
+          <button onClick={download} className={btn} disabled={goals.length === 0}>
+            <Download className="h-3 w-3" />
+            Download
+          </button>
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-xs text-muted-foreground">Goals (compound):</span>
+        {EXPORT_GOALS.map((g) => (
+          <button
+            key={g}
+            onClick={() => toggle(g)}
+            className={cn(
+              'rounded-full border px-2 py-0.5 text-[11px] transition-colors',
+              goals.includes(g)
+                ? 'border-primary bg-primary/10 text-foreground'
+                : 'border-border text-muted-foreground hover:bg-muted/50',
+            )}
+          >
+            {GOAL_LABEL[g]}
+          </button>
+        ))}
+      </div>
+      <p className="mt-1.5 text-[10px] text-muted-foreground">
+        One JSON per run: both plans + scripts + the Case-2 meta-prompt + signals, plus a framing
+        per selected goal (objective + directional dimensions + ranked asks) for your expert agent.
+      </p>
+    </div>
+  );
+}
+
 function Pending({ status }: { status: string }) {
   return (
     <Card>
@@ -151,6 +216,8 @@ export function ScorecardPanel({ run, scorecard }: ScorecardPanelProps) {
         {scorecard.verdict && <Badge variant="secondary">{scorecard.verdict}</Badge>}
       </CardHeader>
       <CardContent className="space-y-5">
+        <ExportBar run={run} />
+
         {c1 && c2 ? (
           <>
             <div>

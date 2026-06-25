@@ -82,6 +82,8 @@ export interface UltracodeRun {
   claudeVersion?: string;
   taintedReps?: number;
   errorMessage?: string;
+  metaPromptVersion?: string;
+  metaPrompt?: string;
   case1Plan?: UltracodeDecisionPlan;
   case2Plan?: UltracodeDecisionPlan;
   case1Script?: string;
