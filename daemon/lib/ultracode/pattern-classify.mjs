@@ -23,12 +23,22 @@ export function classifyPattern(phaseNames, features = {}) {
     return 'build-verify-fix';
   }
 
-  // plan-synthesis-critique: Design-Dimensions/Expert → Synthesize → Critique
-  if (has(/dimension|expert|breakdown|elicit|design/) && has(/synth|assemble|merge|combine|decompose/) && has(/critique|review|refine/)) {
+  // plan-synthesis-critique: Design/Architecture/Domain decomposition → Synthesize → Critique.
+  // (Broadened so real ultracode plans like Foundation→Domain Plans→Critique→Synthesis are
+  // recognized instead of falling through to 'other' — 2026-06-25.)
+  const planDecomp = /dimension|expert|breakdown|elicit|design|architect|foundation|domain|subsystem|component|aspect/;
+  if (
+    has(planDecomp) &&
+    has(/synth|assemble|merge|combine|decompose|consolidat|final plan|plan doc/) &&
+    has(/critique|review|refine|assess|evaluat/)
+  ) {
     return 'plan-synthesis-critique';
   }
-  // looser plan-synthesis: a breakdown/decompose pair without a build phase
-  if (has(/breakdown|elicit|dimension|decompose/) && !has(/build|implement|scaffold/)) {
+  // looser plan-synthesis: a breakdown/decompose/domain-expert phase with no build phase
+  if (
+    has(/breakdown|elicit|dimension|decompose|domain|subsystem|architect|foundation/) &&
+    !has(/build|implement|scaffold/)
+  ) {
     return 'plan-synthesis-critique';
   }
 

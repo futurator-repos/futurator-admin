@@ -107,6 +107,8 @@ export async function runUltracodeBenchJob(job, deps) {
         effort,
         cwd: job.workingDir,
         rep: i,
+        // Live-stream Case 2's script as it's generated (its stdout IS the script).
+        onToken: (text) => ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.token', { text }),
       });
       const case2Plan = deps.parseScript(c2.scriptJs);
       await ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.ready', { rep: i });
@@ -116,6 +118,12 @@ export async function runUltracodeBenchJob(job, deps) {
         structural,
         case1Pattern: case1Plan.pattern,
         case2Pattern: case2Plan.pattern,
+        // Keep the artifacts so the UI can show the captured plans + raw scripts (a
+        // representative rep is persisted on the run row at COMPLETE).
+        case1Plan,
+        case2Plan,
+        case1Script: cap.scriptJs,
+        case2Script: c2.scriptJs,
       });
     }
   } catch (err) {
@@ -141,6 +149,8 @@ export async function runUltracodeBenchJob(job, deps) {
 
   await deps.updateRun(runId, { status: 'SCORING' });
   const agg = aggregate(remaining);
+  // Representative rep (the last clean one) whose plans + scripts back the UI detail view.
+  const rep = remaining[remaining.length - 1];
   const scorecard = {
     structural: { score: agg.score, perMetric: agg.perMetric },
     slices: agg.slices,
@@ -162,6 +172,11 @@ export async function runUltracodeBenchJob(job, deps) {
     summarySlices: agg.slices.slice(0, 10),
     scorecard,
     taintedReps: tainted,
+    // Artifacts for the UI detail view (phases, subagents, raw scripts).
+    case1Plan: rep?.case1Plan,
+    case2Plan: rep?.case2Plan,
+    case1Script: rep?.case1Script,
+    case2Script: rep?.case2Script,
   });
   await ev('final', 'system', 'ultracode-bench.complete', {
     structuralScore: agg.score,

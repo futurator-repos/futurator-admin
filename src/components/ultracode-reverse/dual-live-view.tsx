@@ -8,8 +8,10 @@ import {
   type FreeAgentMessage,
 } from '@/components/free-agent/message-thread';
 import { HaltedBadge } from './halted-badge';
+import { PlanView } from './plan-view';
 import {
   ACTIVE_STATUSES,
+  type UltracodeDecisionPlan,
   type UltracodeRun,
   type UltracodeRunStatus,
   type UltracodeSideStatus,
@@ -104,9 +106,11 @@ interface SidePanelProps {
   status: UltracodeSideStatus;
   messages: FreeAgentMessage[];
   runStatus?: UltracodeRunStatus;
+  plan?: UltracodeDecisionPlan;
+  script?: string;
 }
 
-function SidePanel({ title, subtitle, status, messages, runStatus }: SidePanelProps) {
+function SidePanel({ title, subtitle, status, messages, runStatus, plan, script }: SidePanelProps) {
   const runActive = !!runStatus && ACTIVE_STATUSES.has(runStatus);
 
   let empty: React.ReactNode = null;
@@ -161,9 +165,13 @@ function SidePanel({ title, subtitle, status, messages, runStatus }: SidePanelPr
         <HaltedBadge status={status} />
       </CardHeader>
       <CardContent className="flex-1 p-0">
-        <div className="h-[420px] overflow-hidden">
-          {empty ?? (
-            <FreeAgentMessageThread messages={messages} isProcessing={status === 'RUNNING'} />
+        <div className="h-[460px] overflow-hidden">
+          {plan ? (
+            <PlanView plan={plan} script={script} />
+          ) : (
+            (empty ?? (
+              <FreeAgentMessageThread messages={messages} isProcessing={status === 'RUNNING'} />
+            ))
           )}
         </div>
       </CardContent>
@@ -196,6 +204,8 @@ export function DualLiveView({
           status={case1Status}
           messages={case1Messages}
           runStatus={run?.status}
+          plan={run?.case1Plan}
+          script={run?.case1Script}
         />
         <SidePanel
           title="Case 2 — Futurator meta-prompt"
@@ -203,6 +213,8 @@ export function DualLiveView({
           status={case2Status}
           messages={case2Messages}
           runStatus={run?.status}
+          plan={run?.case2Plan}
+          script={run?.case2Script}
         />
       </div>
     </div>

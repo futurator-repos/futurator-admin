@@ -53,6 +53,37 @@ export interface UltracodeScorecard {
   observations?: string[];
 }
 
+/** A subagent the plan spawns (parsed from the captured script). */
+export interface UltracodePlanAgent {
+  role: string;
+  hasSchema: boolean;
+  model: string;
+  isolation: 'none' | 'worktree';
+  agentType?: string | null;
+}
+
+/** One phase of the plan (parsed). */
+export interface UltracodePlanPhase {
+  name: string;
+  mode: 'sequential' | 'parallel-barrier' | 'streaming';
+  fanOut: { axis: string; width: number | 'dynamic' } | null;
+  agents: UltracodePlanAgent[];
+  barrierReason?: string;
+}
+
+/** The normalized DecisionPlan IR both engines reduce to (mirrors daemon/lib/ultracode). */
+export interface UltracodeDecisionPlan {
+  pattern: string;
+  qualityPatterns: string[];
+  phases: UltracodePlanPhase[];
+  verify: { present: boolean; kind: string };
+  reduceSteps: number;
+  earlyExit: boolean;
+  edges: Array<[string, string]>;
+  source: string;
+  extraction: { lossy: string[] };
+}
+
 export interface UltracodeRun {
   runId: string;
   operatorId: string;
@@ -84,6 +115,16 @@ export interface UltracodeRun {
   scorecard?: UltracodeScorecard;
   scorecardS3Key?: string;
   artifactKeys?: string[];
+
+  // ── captured artifacts (representative rep) for the UI detail view ──
+  /** Parsed plan from native ultracode (Case 1): phases, subagents, fan-out. */
+  case1Plan?: UltracodeDecisionPlan;
+  /** Parsed plan from our meta-prompt (Case 2). */
+  case2Plan?: UltracodeDecisionPlan;
+  /** Raw captured workflow script (Case 1). */
+  case1Script?: string;
+  /** Raw generated workflow script (Case 2). */
+  case2Script?: string;
 
   // ── provenance / honesty ──
   confound: typeof ULTRACODE_CONFOUND;

@@ -226,16 +226,36 @@ export function makeCaptureDeps(cfg) {
   }
 
   /** CASE 2 — spawn `claude -p` with the meta-prompt; the whole stdout IS the script. */
-  async function runCase2({ intent, model = 'opus', effort = 'xhigh', cwd }) {
+  async function runCase2({ intent, model = 'opus', effort = 'xhigh', cwd, onToken }) {
     loadOAuth?.('ultracode-bench-case2');
     const prompt = `${metaPrompt}\n\nINTENT:\n${intent}`;
     const args = ['-p', prompt, '--model', model, '--permission-mode', 'bypassPermissions'];
     const eff2 = normEffort(effort);
     if (eff2) args.push('--effort', eff2);
-    const out = await spawnCapture(claudeBin, args, {
-      cwd,
-      env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
-    });
+    // Stream Case 2's output (its stdout IS the script) to the UI, throttled to ~1 event / 750ms
+    // so we don't hammer the events table.
+    let pending = '';
+    let lastFlush = 0;
+    const flush = () => {
+      if (pending && onToken) onToken(pending);
+      pending = '';
+    };
+    const out = await spawnCapture(
+      claudeBin,
+      args,
+      { cwd, env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }) },
+      onToken
+        ? (chunk) => {
+            pending += chunk;
+            const now = Date.now();
+            if (now - lastFlush > 750) {
+              lastFlush = now;
+              flush();
+            }
+          }
+        : undefined,
+    );
+    flush();
     return { scriptJs: extractScript(out) };
   }
 
@@ -255,13 +275,15 @@ function killTree(child) {
   }
 }
 
-function spawnCapture(bin, args, opts) {
+function spawnCapture(bin, args, opts, onChunk) {
   return new Promise((resolve, reject) => {
     // claude ≥2.1.19x is a native binary — spawn directly (see captureCase1).
     const child = spawn(bin, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     child.stdout.on('data', (d) => {
-      out += d;
+      const s = d.toString();
+      out += s;
+      if (onChunk) onChunk(s);
     });
     child.on('error', reject);
     child.on('close', () => resolve(out));

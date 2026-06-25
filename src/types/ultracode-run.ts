@@ -30,6 +30,34 @@ export interface UltracodeScorecard {
   observations?: string[];
 }
 
+export interface UltracodePlanAgent {
+  role: string;
+  hasSchema: boolean;
+  model: string;
+  isolation: 'none' | 'worktree';
+  agentType?: string | null;
+}
+
+export interface UltracodePlanPhase {
+  name: string;
+  mode: 'sequential' | 'parallel-barrier' | 'streaming';
+  fanOut: { axis: string; width: number | 'dynamic' } | null;
+  agents: UltracodePlanAgent[];
+  barrierReason?: string;
+}
+
+export interface UltracodeDecisionPlan {
+  pattern: string;
+  qualityPatterns: string[];
+  phases: UltracodePlanPhase[];
+  verify: { present: boolean; kind: string };
+  reduceSteps: number;
+  earlyExit: boolean;
+  edges: Array<[string, string]>;
+  source: string;
+  extraction: { lossy: string[] };
+}
+
 export interface UltracodeRun {
   runId: string;
   operatorId: string;
@@ -51,6 +79,10 @@ export interface UltracodeRun {
   claudeVersion?: string;
   taintedReps?: number;
   errorMessage?: string;
+  case1Plan?: UltracodeDecisionPlan;
+  case2Plan?: UltracodeDecisionPlan;
+  case1Script?: string;
+  case2Script?: string;
   createdAt: string;
   updatedAt: string;
 }
