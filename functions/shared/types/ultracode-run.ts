@@ -60,6 +60,11 @@ export interface UltracodePlanAgent {
   model: string;
   isolation: 'none' | 'worktree';
   agentType?: string | null;
+  effort?: string | null;
+  /** The agent's prompt (capped) so the UI can show what each subagent is told to do. */
+  prompt?: string;
+  /** True when the prompt is composed by a fn/expr rather than a string literal. */
+  promptDynamic?: boolean;
 }
 
 /** One phase of the plan (parsed). */

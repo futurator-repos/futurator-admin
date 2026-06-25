@@ -43,11 +43,21 @@ export function RunHistory({
   const { data, isLoading } = useUltracodeRuns();
   const del = useDeleteUltracodeRun();
   const runs = data?.runs ?? [];
+  const failed = runs.filter((r) => r.status === 'ERROR');
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
         <CardTitle>Corpus</CardTitle>
+        {failed.length > 0 && (
+          <button
+            onClick={() => failed.forEach((r) => del.mutate(r.runId))}
+            className="rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-destructive"
+            title="Remove all failed runs"
+          >
+            Clear failed ({failed.length})
+          </button>
+        )}
       </CardHeader>
       <CardContent className="space-y-2">
         {isLoading ? (
@@ -101,9 +111,9 @@ export function RunHistory({
                       e.stopPropagation();
                       del.mutate(r.runId);
                     }}
-                    title="Dismiss this run"
-                    aria-label="Dismiss this run"
-                    className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+                    title="Remove this run"
+                    aria-label="Remove this run"
+                    className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground opacity-60 transition-opacity hover:bg-muted hover:text-destructive hover:opacity-100"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>

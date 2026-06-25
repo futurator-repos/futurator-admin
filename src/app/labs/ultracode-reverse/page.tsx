@@ -9,8 +9,10 @@
  * Static-export safe: the active run is a `?runId=` query param, never a path param.
  */
 
-import { Suspense, useEffect } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { AppShell } from '@/components/layout/app-shell';
 import { AuthGuard } from '@/components/auth/auth-guard';
 import { useUltracodeReverseStore } from '@/stores/ultracode-reverse-store';
@@ -39,6 +41,8 @@ function UltracodeReverseContent() {
     useUltracodeRun(activeRunId);
   const scorecardQuery = useUltracodeScorecard(activeRunId, isTerminal);
 
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+
   const select = (runId: string) => {
     setActiveRunId(runId);
     router.replace(`/labs/ultracode-reverse?runId=${runId}`);
@@ -61,14 +65,30 @@ function UltracodeReverseContent() {
             Native <code>ultracode</code> vs. our reverse-engineered planner, same frame, scored.
           </p>
         </div>
+        <button
+          onClick={() => setLeftCollapsed((v) => !v)}
+          className="flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-muted/50"
+          title={
+            leftCollapsed ? 'Show the new-run + corpus panel' : 'Hide the panel for more width'
+          }
+        >
+          {leftCollapsed ? (
+            <PanelLeftOpen className="h-4 w-4" />
+          ) : (
+            <PanelLeftClose className="h-4 w-4" />
+          )}
+          {leftCollapsed ? 'Show panel' : 'Hide panel'}
+        </button>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="space-y-4 lg:col-span-1">
-          <IntentForm onRun={onRun} disabled={running} />
-          <RunHistory activeRunId={activeRunId} onSelect={select} />
-        </div>
-        <div className="space-y-4 lg:col-span-2">
+      <div className={cn('grid grid-cols-1 gap-4', !leftCollapsed && 'lg:grid-cols-3')}>
+        {!leftCollapsed && (
+          <div className="space-y-4 lg:col-span-1">
+            <IntentForm onRun={onRun} disabled={running} />
+            <RunHistory activeRunId={activeRunId} onSelect={select} />
+          </div>
+        )}
+        <div className={cn('space-y-4', !leftCollapsed && 'lg:col-span-2')}>
           <DualLiveView
             run={run}
             case1Status={run?.case1Status ?? 'PENDING'}

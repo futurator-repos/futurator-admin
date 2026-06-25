@@ -90,9 +90,11 @@ function parse(source, lossy) {
         if (name === 'phase') {
           phaseMarkers.push({ pos: pos(node), title: literalString(node.arguments[0]) ?? '' });
         } else if (name === 'agent') {
+          const litPrompt = literalString(node.arguments[0]);
           agentCalls.push({
             pos: pos(node),
-            promptText: literalString(node.arguments[0]) ?? txt(node.arguments[0]),
+            promptText: litPrompt ?? txt(node.arguments[0]),
+            promptDynamic: litPrompt == null, // prompt is built by a fn/expr, not a literal
             opts: node.arguments[1] && ts.isObjectLiteralExpression(node.arguments[1]) ? node.arguments[1] : null,
           });
         } else if (name === 'parallel' || name === 'pipeline') {
@@ -270,15 +272,21 @@ function agentFromOpts(a, sf) {
   const label = literalString(get('label'));
   const agentType = literalString(get('agentType'));
   const model = literalString(get('model')) ?? 'default';
+  const effort = literalString(get('effort'));
   const isoNode = get('isolation');
   const isolation = literalString(isoNode) === 'worktree' ? 'worktree' : 'none';
   const hasSchema = get('schema') != null;
+  const PROMPT_CAP = 4000; // keep the row well under DynamoDB's 400KB limit
   return {
     role: label || agentType || inferRole(a.promptText),
     hasSchema,
     model,
     isolation,
     agentType: agentType ?? null, // Case 1 scripts rarely set agentType (pipeline-spec §6.1)
+    effort: effort ?? null,
+    // The agent's prompt so the UI can show what each subagent is actually told to do.
+    prompt: String(a.promptText || '').slice(0, PROMPT_CAP),
+    promptDynamic: !!a.promptDynamic, // prompt is composed by a fn/expr — see the script
   };
 }
 

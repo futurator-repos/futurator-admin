@@ -36,6 +36,9 @@ export interface UltracodePlanAgent {
   model: string;
   isolation: 'none' | 'worktree';
   agentType?: string | null;
+  effort?: string | null;
+  prompt?: string;
+  promptDynamic?: boolean;
 }
 
 export interface UltracodePlanPhase {
