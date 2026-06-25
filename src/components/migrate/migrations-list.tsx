@@ -1,8 +1,10 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { formatDistanceToNow } from 'date-fns';
 import {
+  ArrowRight,
   GitBranch,
   GitMerge,
   GitPullRequest,
@@ -12,6 +14,7 @@ import {
   Upload,
   UploadCloud,
 } from 'lucide-react';
+import { links } from '@/lib/links';
 import { Button } from '@/components/ui/button';
 import { useMigrations, useUpdateMigration } from '@/hooks/use-migrations';
 import { useRefreshProjectMutation } from '@/hooks/use-party-projects';
@@ -135,12 +138,20 @@ function MigrationCard(p: CardProps) {
       data-testid={`migration-card-${m.projectId}`}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
+        <Link
+          href={links.app(m.projectId)}
+          className="group min-w-0 flex-1 rounded-md outline-none focus-visible:ring-1 focus-visible:ring-accent-purple/40"
+          title={`Open ${m.displayName} in Labs → Assess`}
+          data-testid={`migration-open-${m.projectId}`}
+        >
           <div className="flex items-center gap-2">
             <span className="text-base" aria-hidden>
               {m.icon}
             </span>
-            <span className="truncate text-sm font-semibold">{m.displayName}</span>
+            <span className="truncate text-sm font-semibold group-hover:underline">
+              {m.displayName}
+            </span>
+            <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
             <span className="font-mono text-[11px] text-muted-foreground">{m.projectId}</span>
             <ProjectStatusBadge status={m.bmadStatus} />
           </div>
@@ -167,7 +178,7 @@ function MigrationCard(p: CardProps) {
               <span className="font-mono opacity-70">{m.lastCommitSha.slice(0, 7)}</span>
             )}
           </div>
-        </div>
+        </Link>
         <div className="flex shrink-0 items-center gap-2">
           <Button
             size="sm"
