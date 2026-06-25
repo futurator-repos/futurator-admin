@@ -315,7 +315,9 @@ export function buildExport(
     rigor: run.rigor,
     benchFrame:
       'claude opus-4.8 · effort max · symmetric frame — only the prompt differs (Case 1 native ultracode, Case 2 our meta-prompt)',
-    metaPromptVersion: run.metaPromptVersion ?? null,
+    // Falls back to the known current version when the daemon hasn't persisted it yet (e.g. runs
+    // before the per-run meta-prompt persist landed). The full text comes from the row (run.metaPrompt).
+    metaPromptVersion: run.metaPromptVersion ?? 'futurator-workflow-author-v0',
     metaPrompt: run.metaPrompt ?? null,
     case1: caseBlock(
       'native-ultracode',
