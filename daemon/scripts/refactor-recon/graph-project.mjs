@@ -81,10 +81,15 @@ if (files.length > MAX_NODES) {
 }
 const keep = new Set(files)
 
-// ── 5. emit CanvasNode/CanvasLink shape (+ community/fanIn/hotspot metadata) ──
+// ── 5. emit CanvasNode/CanvasLink shape (+ community/fanIn/hotspot/role metadata) ──
+// fileRoles (from alias-resolve, via the shared privacy-detectors) tags WHERE infra
+// is established / where 3rd-party services are called / which AI + db are used — so
+// the graph (and the AI agent exploring it) can distinguish these node classes.
+const fileRoles = resolved.fileRoles || {}
 const nodes = files.map((f) => {
   const meta = fileNodes.get(f)
   const kinds = [...(hotspotKindsByFile.get(f) || [])]
+  const fr = fileRoles[f]
   return {
     id: f,
     title: base(f),
@@ -94,6 +99,12 @@ const nodes = files.map((f) => {
     fanIn: meta.fanIn,
     hotspotKinds: kinds, // [] for non-hotspot files
     isHotspot: kinds.length > 0,
+    // architecture/privacy role: 'infra' | 'db' | 'ai' | 'thirdParty' | null
+    role: fr?.role ?? null,
+    roleKinds: fr?.kinds ?? [],
+    // concrete providers detected on this file (e.g. "Anthropic (Claude API)") —
+    // the agent reads these to answer "what 3rd-party services / which AI".
+    providers: fr ? fr.detections.map((d) => ({ provider: d.provider, kind: d.kind, residency: d.residency })) : [],
   }
 })
 const links = edges.map((e) => ({ source: e.source, target: e.target, type: 'IMPORTS' }))

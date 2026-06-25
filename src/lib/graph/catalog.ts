@@ -126,6 +126,25 @@ export function communityColor(community: number): string {
   ];
 }
 
+/**
+ * Architecture / data-privacy role palette (Roles overlay). Distinguishes WHERE
+ * infrastructure is established vs WHERE 3rd-party services / AI / databases are
+ * called — driven by the shared privacy-detectors (one source of truth with the
+ * internal scanner). Keyed by the node's `role` from graph-ui.json.
+ */
+export type GraphRole = 'infra' | 'db' | 'ai' | 'thirdParty';
+
+export const ROLE_META: Record<GraphRole, { color: string; label: string }> = {
+  infra: { color: '#f59e0b', label: 'Infrastructure (IaC)' },
+  db: { color: '#22c55e', label: 'Data store' },
+  ai: { color: '#a855f7', label: 'AI provider' },
+  thirdParty: { color: '#ec4899', label: '3rd-party service' },
+};
+
+export function roleColor(role: string | null | undefined): string | null {
+  return role && role in ROLE_META ? ROLE_META[role as GraphRole].color : null;
+}
+
 /** Layered-Lanes columns. We only have two real layers (CODE, DOCS). */
 export interface Lane {
   key: string;

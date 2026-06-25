@@ -9,6 +9,7 @@ import {
   kindMeta,
   laneX,
   LANES,
+  roleColor,
   type LayoutMode,
   type NodeShape,
 } from '@/lib/graph/catalog';
@@ -37,6 +38,8 @@ export interface CanvasLink {
 export interface NodeMetric {
   centrality?: number | null;
   community?: number | null;
+  /** architecture/privacy role for the Roles overlay: infra|db|ai|thirdParty. */
+  role?: string | null;
 }
 
 interface FGInstance {
@@ -56,6 +59,8 @@ export interface GraphCanvasProps {
   maxCentrality: number;
   /** colour by community + size by centrality */
   xray: boolean;
+  /** when 'role', colour lit nodes by their architecture/privacy role instead of community. */
+  colorBy?: 'community' | 'role';
   /** translucent community blobs behind the graph */
   zones: boolean;
   searchMatch: { matchIds: Set<string>; neighborIds: Set<string> } | null;
@@ -151,6 +156,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
     metrics,
     maxCentrality,
     xray,
+    colorBy = 'community',
     zones,
     searchMatch,
     similarSet,
@@ -281,6 +287,9 @@ export function GraphCanvas(props: GraphCanvasProps) {
   const colorFor = (n: CanvasNode): string => {
     if (!isLit(n.id)) return theme.dim;
     if (!searchMatch && similarSet.has(n.id)) return SIMILAR;
+    // Roles overlay: colour by architecture/privacy role (infra/db/ai/thirdParty);
+    // role-less nodes stay dim so the tagged classes stand out.
+    if (colorBy === 'role') return roleColor(metrics[n.id]?.role) ?? theme.dim;
     const comm = communityOf(n);
     if ((xray || layout === 'community') && comm != null) return communityColor(comm);
     return kindMeta(n.kind, n.type).color;

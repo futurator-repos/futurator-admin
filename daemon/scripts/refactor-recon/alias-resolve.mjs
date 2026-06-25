@@ -19,6 +19,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { classifyFile, primaryRole } from './privacy-detectors.mjs'
 
 const args = process.argv.slice(2)
 const repoRoot = path.resolve(args[0] || '.')
@@ -133,12 +134,20 @@ const rel = (f) => path.relative(repoRoot, f)
 
 const inDeg = new Map()       // targetRel -> Set(importerRel)
 const outDeg = new Map()      // importerRel -> Set(targetRel)
+// per-file privacy/architecture role (infra/db/ai/thirdParty) for the graph view —
+// SAME shared detectors the internal privacy scanner uses, so "the graph distinguishes
+// where infra is established vs where 3rd-party services are called" stays in lockstep.
+const fileRoles = {}          // relFile -> { role, kinds, detections:[{kind,provider,residency}] }
 let total = 0, resolvedAlias = 0, unresolvedAlias = 0, external = 0
 
 for (const f of files) {
   const code = fs.readFileSync(f, 'utf8')
   const dir = path.dirname(f)
-  for (const spec of specifiers(code)) {
+  const fr = rel(f)
+  const specs = specifiers(code)
+  const { kinds, detections } = classifyFile(fr, specs)
+  if (detections.length) fileRoles[fr] = { role: primaryRole(kinds), kinds, detections }
+  for (const spec of specs) {
     total++
     const isAlias = aliases.some(a => spec === a.from.replace(/\/$/, '') || spec.startsWith(a.from))
     const target = resolveSpec(spec, dir, aliases)
@@ -148,7 +157,7 @@ for (const f of files) {
       continue
     }
     if (isAlias) resolvedAlias++
-    const tr = rel(target), fr = rel(f)
+    const tr = rel(target)
     if (tr === fr) continue
     if (!inDeg.has(tr)) inDeg.set(tr, new Set())
     inDeg.get(tr).add(fr)
@@ -209,6 +218,7 @@ const outJson = {
   aliasUnresolved: unresolvedAlias,
   hubs: rank,
   edges,
+  fileRoles,
 }
 const reconDir = graphPath ? path.dirname(graphPath) : path.join(repoRoot, 'graphify-out')
 try { fs.mkdirSync(reconDir, { recursive: true }) } catch {}

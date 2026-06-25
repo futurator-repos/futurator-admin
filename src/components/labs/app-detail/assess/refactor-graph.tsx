@@ -19,11 +19,17 @@ import {
   type CanvasLink,
   type NodeMetric,
 } from '@/components/development/graph-canvas';
+import { ROLE_META, type GraphRole } from '@/lib/graph/catalog';
 import type { AuditHotspot } from '@/types/refactor-audit';
 import { buildHotspotGraph } from './hotspot-graph';
 
 const S3_BASE = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
 
+interface UiProvider {
+  provider: string;
+  kind: string;
+  residency: string;
+}
 interface UiGraphNode {
   id: string;
   title: string;
@@ -31,6 +37,10 @@ interface UiGraphNode {
   fanIn: number;
   hotspotKinds: string[];
   isHotspot: boolean;
+  // architecture/privacy role from the shared detectors (graph-ui.json):
+  role?: string | null;
+  roleKinds?: string[];
+  providers?: UiProvider[];
 }
 interface UiGraph {
   nodeCount: number;
@@ -55,6 +65,7 @@ export function RefactorGraph({
 }) {
   const [mode, setMode] = useState<FilterMode>('highlight');
   const [zones, setZones] = useState(true);
+  const [colorBy, setColorBy] = useState<'community' | 'role'>('community');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [fitToken, setFitToken] = useState(1);
 
@@ -105,9 +116,12 @@ export function RefactorGraph({
     }));
     const metrics: Record<string, NodeMetric> = {};
     let maxCentrality = 1;
+    const roleCounts: Partial<Record<GraphRole, number>> = {};
     for (const n of nodes) {
-      metrics[n.id] = { community: n.community, centrality: n.fanIn };
+      metrics[n.id] = { community: n.community, centrality: n.fanIn, role: n.role ?? null };
       if (n.fanIn > maxCentrality) maxCentrality = n.fanIn;
+      if (n.role && n.role in ROLE_META)
+        roleCounts[n.role as GraphRole] = (roleCounts[n.role as GraphRole] ?? 0) + 1;
     }
     const searchMatch = mode === 'highlight' ? { matchIds: hotspotIds, neighborIds } : null;
     return {
@@ -116,6 +130,7 @@ export function RefactorGraph({
       maxCentrality,
       searchMatch,
       hotspotCount: hotspotIds.size,
+      roleCounts,
     };
   }, [graph, mode]);
 
@@ -183,6 +198,45 @@ export function RefactorGraph({
             </button>
           ))}
         </div>
+        {/* colour-by: community (Leiden) vs architecture/privacy role */}
+        <div
+          style={{
+            display: 'inline-flex',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            overflow: 'hidden',
+          }}
+        >
+          {(
+            [
+              ['community', 'Communities'],
+              ['role', 'Roles'],
+            ] as ['community' | 'role', string][]
+          ).map(([m, label]) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setColorBy(m)}
+              data-testid={`graph-color-${m}`}
+              title={
+                m === 'role'
+                  ? 'Colour by architecture/privacy role: infra · data store · AI · 3rd-party'
+                  : 'Colour by Leiden community'
+              }
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: colorBy === m ? 'var(--background)' : 'var(--text-dim)',
+                background: colorBy === m ? 'var(--foreground)' : 'transparent',
+                border: 'none',
+                padding: '4px 10px',
+                cursor: 'pointer',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <label
           style={{
             fontSize: 11,
@@ -227,6 +281,7 @@ export function RefactorGraph({
           metrics={view.metrics}
           maxCentrality={view.maxCentrality}
           xray
+          colorBy={colorBy}
           zones={zones}
           searchMatch={view.searchMatch}
           similarSet={EMPTY_SET}
@@ -234,14 +289,47 @@ export function RefactorGraph({
           onSelect={(n) => setSelectedId(n?.id ?? null)}
         />
       </div>
+      {/* role legend — only meaningful in the Roles overlay */}
+      {colorBy === 'role' && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11 }}>
+          {(Object.keys(ROLE_META) as GraphRole[]).map((r) => (
+            <span
+              key={r}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
+                color: 'var(--text-dim)',
+              }}
+            >
+              <span
+                style={{
+                  width: 9,
+                  height: 9,
+                  borderRadius: '50%',
+                  background: ROLE_META[r].color,
+                  display: 'inline-block',
+                }}
+              />
+              {ROLE_META[r].label}
+              {view.roleCounts[r] ? ` (${view.roleCounts[r]})` : ''}
+            </span>
+          ))}
+          <span style={{ color: 'var(--text-dim)', opacity: 0.6 }}>· untagged = dim</span>
+        </div>
+      )}
       {selectedId && (
         <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}>
           {selectedId}
           {(() => {
             const n = graph!.nodes.find((x) => x.id === selectedId);
-            return n
-              ? ` — community ${n.community ?? '?'} · fan-in ${n.fanIn}${n.hotspotKinds.length ? ` · ${n.hotspotKinds.join(', ')}` : ''}`
-              : '';
+            if (!n) return '';
+            const providers = (n.providers ?? []).map((p) => `${p.provider} [${p.residency}]`);
+            return ` — community ${n.community ?? '?'} · fan-in ${n.fanIn}${
+              n.role ? ` · role: ${n.role}` : ''
+            }${providers.length ? ` · ${providers.join(', ')}` : ''}${
+              n.hotspotKinds.length ? ` · ${n.hotspotKinds.join(', ')}` : ''
+            }`;
           })()}
         </div>
       )}
