@@ -1,16 +1,18 @@
 /**
- * ultracode-bench-capture.mjs — the REAL `claude` spawns + capture (the EC2-validation-needed core).
+ * ultracode-bench-capture.mjs — the REAL `claude` spawns + capture.
  *
- * ⚠️ UNPROVEN UNTIL VALIDATED ON REAL EC2 (see docs/.../ultracode-bench-ec2-validation.md):
- *   1. Does headless `claude -p "ultracode <intent>"` actually invoke the planner and write a
- *      `workflows/scripts/<name>-wf_<id>.js` (print mode may be TUI-only)? If not, capture is dead
- *      and the node-pty fallback is the only path.
- *   2. Does SIGKILL after the script lands provably leave `agentCount === 0` (no subagents spawned)?
+ * Case 1 (native ultracode) — VALIDATED 2026-06-25. Headless `claude -p "ultracode <intent>"`
+ * invokes the built-in Workflow tool on its FIRST turn and persists the plan to
+ * ~/.claude/projects/<munged-cwd>/<session>/workflows/scripts/<name>-wf_<id>.js (sibling manifest
+ * one dir up: workflows/wf_<id>.json carries agentCount/phases). We stream `--output-format
+ * stream-json` and HALT the instant the Workflow tool returns that scriptPath — the earliest
+ * deterministic "plan produced" point — then read the script.
+ *   We no longer poll the filesystem for a SIZE-STABLE, agentCount===0 wf.json: the Workflow tool
+ *   spawns its sub-agents on the SAME turn it persists the script, so a zero-agent snapshot is
+ *   unobservable (that race tainted every run). agentCount is recorded for reporting, never tainted.
+ *   A filesystem scan (findGeneratedScript) remains a fallback if the path isn't seen in the stream.
  *
- * Halt design (addresses the critique's chunked-write race): we do NOT kill on the first `.js` byte.
- * We wait until the sibling `wf_<id>.json` EXISTS and is SIZE-STABLE across two poll ticks (it carries
- * the authoritative `agentCount`), THEN read it and SIGKILL. A missing/empty wf.json at timeout ⇒
- * TAINTED (never trust a defaulted agentCount:0). agentCount > 0 ⇒ TAINTED.
+ * Case 2 (our meta-prompt) — `claude -p` output-only; the whole stdout IS the script.
  *
  * Spawns reuse the daemon's OAuth path (stripApiKey + loadOAuth) — the daemon deletes
  * ANTHROPIC_API_KEY and runs Claude on the Max/OAuth subscription. NEVER introduce an API key here.
@@ -72,7 +74,22 @@ function readWfMeta(scriptPath) {
   }
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Read a persisted workflow plan + its manifest (agentCount/phases recorded for reporting only). */
+function readWorkflowPlan(scriptPath) {
+  try {
+    const scriptJs = readFileSync(scriptPath, 'utf8');
+    if (!scriptJs.trim()) return null;
+    const meta = readWfMeta(scriptPath);
+    return {
+      scriptJs,
+      agentCount: meta?.agentCount ?? null,
+      tainted: false,
+      phases: meta?.phases ?? [],
+    };
+  } catch {
+    return null;
+  }
+}
 
 // The claude CLI `--effort` flag accepts ONLY low|medium|high|max. 'xhigh' (a valid Agent-tool
 // effort elsewhere) is rejected and makes the spawn exit instantly — normalize anything invalid to
@@ -98,15 +115,12 @@ export function makeCaptureDeps(cfg) {
     log = () => {},
   } = cfg;
 
-  /** CASE 1 — spawn native ultracode, watch the scripts dir, kill on stable wf.json. */
-  async function captureCase1({
-    intent,
-    model = 'opus',
-    effort = 'xhigh',
-    cwd,
-    captureTimeoutMs = 120000,
-    pollMs = 150,
-  }) {
+  /**
+   * CASE 1 — run native ultracode headless; stream the JSON events and HALT the instant the
+   * Workflow tool returns its persisted scriptPath (the earliest deterministic "plan produced").
+   * claude ≥2.1.19x is a native binary — spawn it DIRECTLY (node can't run an ELF).
+   */
+  function captureCase1({ intent, model = 'opus', effort = 'xhigh', cwd, captureTimeoutMs = 120000 }) {
     loadOAuth?.('ultracode-bench-case1');
     const args = [
       '-p',
@@ -115,53 +129,75 @@ export function makeCaptureDeps(cfg) {
       model,
       '--permission-mode',
       'bypassPermissions',
+      '--output-format',
+      'stream-json',
+      '--verbose',
     ];
     const eff1 = normEffort(effort);
     if (eff1) args.push('--effort', eff1);
-    // claude ≥2.1.19x is a NATIVE binary — spawn it DIRECTLY (not via node; node can't run an ELF).
-    // Without an 'error' listener a spawn failure is an unhandled 'error' event that crashes the
-    // WHOLE daemon; capture it and throw so the runner's try/catch marks the run ERROR
-    // (pacman ultracode-bench crash 2026-06-24 + claude-upgrade native-binary fix 2026-06-25).
+
     const child = spawn(claudeBin, args, {
       cwd,
       env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
-      stdio: ['ignore', 'ignore', 'ignore'],
-    });
-    let spawnError = null;
-    child.on('error', (e) => {
-      spawnError = e;
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    const projDir = sessionProjectDir(cwd);
-    const deadline = Date.now() + captureTimeoutMs;
-    let prevWfSize = -1;
+    return new Promise((resolve) => {
+      let settled = false;
+      let buf = '';
+      let blockingRateLimit = false;
 
-    try {
-      while (Date.now() < deadline) {
-        if (spawnError) throw new Error(`claude spawn failed (case1): ${spawnError.message}`);
-        const scriptPath = findGeneratedScript(projDir);
-        if (scriptPath) {
-          const meta = readWfMeta(scriptPath);
-          if (meta && meta.size === prevWfSize && meta.size > 0) {
-            // wf.json size stable across two ticks → safe to read + kill
-            const scriptJs = readFileSync(scriptPath, 'utf8');
-            killTree(child);
-            if (meta.agentCount == null) return tainted('wf.json missing agentCount');
-            if (meta.agentCount > 0)
-              return tainted(`agentCount=${meta.agentCount} (agents spawned before halt)`);
-            return { scriptJs, agentCount: 0, tainted: false, phases: meta.phases };
-          }
-          prevWfSize = meta ? meta.size : -1; // wf.json not there yet (only the .js) → keep waiting
-        }
-        await sleep(pollMs);
-      }
-      killTree(child);
-      return tainted(
-        `timeout after ${captureTimeoutMs}ms — no stable wf.json (headless ultracode may not write a script)`,
+      const timer = setTimeout(
+        () => finish(fallbackOrTaint(`timeout after ${captureTimeoutMs}ms — no Workflow plan in stream`)),
+        captureTimeoutMs,
       );
-    } finally {
-      killTree(child);
-    }
+
+      function finish(result) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        killTree(child);
+        resolve(result);
+      }
+
+      // Last resort: the scriptPath wasn't in the stream → scan the session dir once.
+      function fallbackOrTaint(reason) {
+        try {
+          const sp = findGeneratedScript(sessionProjectDir(cwd));
+          const plan = sp && readWorkflowPlan(sp);
+          if (plan) return plan;
+        } catch {
+          /* ignore */
+        }
+        return tainted(blockingRateLimit ? 'rate limited (5h window, overage rejected)' : reason);
+      }
+
+      child.on('error', (e) => finish(tainted(`claude spawn failed (case1): ${e.message}`)));
+      child.on('close', () =>
+        finish(fallbackOrTaint('stream ended before a Workflow plan was produced')),
+      );
+
+      child.stdout.on('data', (chunk) => {
+        buf += chunk.toString();
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          // Cheap blocking-rate-limit guard (no full parse).
+          if (line.includes('rate_limit_event') && line.includes('"status"') && !line.includes('"allowed"')) {
+            blockingRateLimit = true;
+          }
+          // The Workflow tool_result carries the persisted plan's absolute path.
+          const m = line.match(/\/[^"\s\\]*\/workflows\/scripts\/[^"\s\\]*\.js/);
+          if (m) {
+            const plan = readWorkflowPlan(m[0]);
+            finish(plan ?? tainted(`Workflow returned an unreadable scriptPath: ${m[0]}`));
+            return;
+          }
+        }
+      });
+    });
   }
 
   /** CASE 2 — spawn `claude -p` with the meta-prompt; the whole stdout IS the script. */
