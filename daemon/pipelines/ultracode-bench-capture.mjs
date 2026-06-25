@@ -206,6 +206,14 @@ export function makeCaptureDeps(cfg) {
           if (line.includes('rate_limit_event') && line.includes('"status"') && !line.includes('"allowed"')) {
             blockingRateLimit = true;
           }
+          // A hard CLI error (e.g. "Not logged in · Please run /login", auth/credits) surfaces as a
+          // result event with is_error:true — report it verbatim so the UI shows the real reason
+          // instead of a misleading "no Workflow plan" (daemon-logged-out incident 2026-06-25).
+          if (line.includes('"type":"result"') && line.includes('"is_error":true')) {
+            const em = line.match(/"result":"((?:[^"\\]|\\.)*)"/);
+            finish(tainted(`claude error: ${em ? em[1] : 'CLI reported is_error'}`));
+            return;
+          }
           // The Workflow tool_result carries the persisted plan's absolute path.
           const m = line.match(/\/[^"\s\\]*\/workflows\/scripts\/[^"\s\\]*\.js/);
           if (m) {
