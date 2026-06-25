@@ -91,6 +91,22 @@ function readWorkflowPlan(scriptPath) {
   }
 }
 
+/** Extract {input,output} token counts from a stream-json line carrying a usage object. */
+function parseUsage(line) {
+  try {
+    const ev = JSON.parse(line);
+    const u = ev?.message?.usage || ev?.usage;
+    if (!u) return null;
+    return {
+      input:
+        (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0),
+      output: u.output_tokens || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // The claude CLI `--effort` flag accepts ONLY low|medium|high|max. 'xhigh' (a valid Agent-tool
 // effort elsewhere) is rejected and makes the spawn exit instantly — normalize anything invalid to
 // 'max' (the CLI's highest tier) so an old payload can't silently kill the capture.
@@ -147,6 +163,7 @@ export function makeCaptureDeps(cfg) {
       let buf = '';
       let blockingRateLimit = false;
       let capturing = false; // a scriptPath was seen; we're retrying the read
+      let latestUsage = null; // most recent token usage seen in the stream
 
       const timer = setTimeout(
         () => finish(fallbackOrTaint(`timeout after ${captureTimeoutMs}ms — no Workflow plan in stream`)),
@@ -155,6 +172,9 @@ export function makeCaptureDeps(cfg) {
 
       function finish(result) {
         if (settled) return;
+        if (result && !result.tainted && latestUsage && !result.tokens) {
+          result = { ...result, tokens: latestUsage };
+        }
         settled = true;
         clearTimeout(timer);
         killTree(child);
@@ -206,6 +226,10 @@ export function makeCaptureDeps(cfg) {
           if (line.includes('rate_limit_event') && line.includes('"status"') && !line.includes('"allowed"')) {
             blockingRateLimit = true;
           }
+          // Track token usage (cumulative on assistant/result events) for the planning-cost metric.
+          if (line.includes('"usage"')) {
+            latestUsage = parseUsage(line) ?? latestUsage;
+          }
           // A hard CLI error (e.g. "Not logged in · Please run /login", auth/credits) surfaces as a
           // result event with is_error:true — report it verbatim so the UI shows the real reason
           // instead of a misleading "no Workflow plan" (daemon-logged-out incident 2026-06-25).
@@ -225,38 +249,85 @@ export function makeCaptureDeps(cfg) {
     });
   }
 
-  /** CASE 2 — spawn `claude -p` with the meta-prompt; the whole stdout IS the script. */
-  async function runCase2({ intent, model = 'opus', effort = 'xhigh', cwd, onToken }) {
+  /**
+   * CASE 2 — our meta-prompt. Runs with stream-json so we can (a) live-stream the script as it's
+   * authored and (b) capture token usage. The model's full text response IS the script; the
+   * authoritative copy is the `result` event, with assistant text as the streaming/fallback source.
+   */
+  function runCase2({ intent, model = 'opus', effort = 'xhigh', cwd, onToken }) {
     loadOAuth?.('ultracode-bench-case2');
     const prompt = `${metaPrompt}\n\nINTENT:\n${intent}`;
-    const args = ['-p', prompt, '--model', model, '--permission-mode', 'bypassPermissions'];
+    const args = [
+      '-p',
+      prompt,
+      '--model',
+      model,
+      '--permission-mode',
+      'bypassPermissions',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+    ];
     const eff2 = normEffort(effort);
     if (eff2) args.push('--effort', eff2);
-    // Stream Case 2's output (its stdout IS the script) to the UI, throttled to ~1 event / 750ms
-    // so we don't hammer the events table.
-    let pending = '';
-    let lastFlush = 0;
-    const flush = () => {
-      if (pending && onToken) onToken(pending);
-      pending = '';
-    };
-    const out = await spawnCapture(
-      claudeBin,
-      args,
-      { cwd, env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }) },
-      onToken
-        ? (chunk) => {
-            pending += chunk;
-            const now = Date.now();
-            if (now - lastFlush > 750) {
-              lastFlush = now;
-              flush();
-            }
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(claudeBin, args, {
+        cwd,
+        env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let buf = '';
+      let assistantText = '';
+      let resultText = '';
+      let usage = null;
+      let pending = '';
+      let lastFlush = 0;
+      const flush = () => {
+        if (pending && onToken) onToken(pending);
+        pending = '';
+      };
+
+      child.on('error', reject);
+      child.stdout.on('data', (chunk) => {
+        buf += chunk.toString();
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (!line.trim()) continue;
+          let ev;
+          try {
+            ev = JSON.parse(line);
+          } catch {
+            continue;
           }
-        : undefined,
-    );
-    flush();
-    return { scriptJs: extractScript(out) };
+          const u = parseUsage(line);
+          if (u) usage = u;
+          if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
+            const t = ev.message.content
+              .filter((p) => p?.type === 'text')
+              .map((p) => p.text)
+              .join('');
+            if (t) {
+              assistantText += t;
+              pending += t;
+            }
+          } else if (ev.type === 'result' && typeof ev.result === 'string') {
+            resultText = ev.result;
+          }
+          const now = Date.now();
+          if (now - lastFlush > 750) {
+            lastFlush = now;
+            flush();
+          }
+        }
+      });
+      child.on('close', () => {
+        flush();
+        resolve({ scriptJs: extractScript(resultText || assistantText), tokens: usage });
+      });
+    });
   }
 
   return { captureCase1, runCase2 };
@@ -273,21 +344,6 @@ function killTree(child) {
   } catch {
     /* ignore */
   }
-}
-
-function spawnCapture(bin, args, opts, onChunk) {
-  return new Promise((resolve, reject) => {
-    // claude ≥2.1.19x is a native binary — spawn directly (see captureCase1).
-    const child = spawn(bin, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    child.stdout.on('data', (d) => {
-      const s = d.toString();
-      out += s;
-      if (onChunk) onChunk(s);
-    });
-    child.on('error', reject);
-    child.on('close', () => resolve(out));
-  });
 }
 
 /** Pull the workflow script out of the model's stdout (the meta-prompt asks for script-only output). */

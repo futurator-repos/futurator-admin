@@ -86,6 +86,10 @@ export interface UltracodeRun {
   case2Plan?: UltracodeDecisionPlan;
   case1Script?: string;
   case2Script?: string;
+  case1DurationMs?: number;
+  case2DurationMs?: number;
+  case1Tokens?: { input: number; output: number };
+  case2Tokens?: { input: number; output: number };
   createdAt: string;
   updatedAt: string;
 }

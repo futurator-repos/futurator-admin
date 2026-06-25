@@ -131,6 +131,14 @@ export interface UltracodeRun {
   /** Raw generated workflow script (Case 2). */
   case2Script?: string;
 
+  // ── per-case measurability ──
+  /** Wall-clock planning time per engine (ms). */
+  case1DurationMs?: number;
+  case2DurationMs?: number;
+  /** Token usage per engine. */
+  case1Tokens?: { input: number; output: number };
+  case2Tokens?: { input: number; output: number };
+
   // ── provenance / honesty ──
   confound: typeof ULTRACODE_CONFOUND;
   claudeVersion?: string;

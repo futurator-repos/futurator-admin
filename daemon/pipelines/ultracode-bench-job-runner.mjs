@@ -76,6 +76,7 @@ export async function runUltracodeBenchJob(job, deps) {
     for (let i = 0; i < reps; i++) {
       // ── CASE 1 — native ultracode, capture + halt ──
       await ev(`case1-rep${i}`, 'case1', 'ultracode-bench.case1.start', { rep: i, model, effort });
+      const t0 = Date.now();
       const cap = await deps.captureCase1({
         intent: p.intent,
         model,
@@ -84,6 +85,7 @@ export async function runUltracodeBenchJob(job, deps) {
         rep: i,
         captureTimeoutMs,
       });
+      const case1DurationMs = Date.now() - t0;
       if (cap.tainted) {
         tainted++;
         await ev(`case1-rep${i}`, 'case1', 'ultracode-bench.case1.tainted', {
@@ -97,10 +99,21 @@ export async function runUltracodeBenchJob(job, deps) {
         agentCount: cap.agentCount,
       });
       const case1Plan = deps.parseScript(cap.scriptJs);
+      // Publish Case 1 immediately so the UI shows it WHILE Case 2 is still running (the two run
+      // sequentially; Case 1 ~halts minutes before Case 2 finishes).
+      await deps.updateRun(runId, {
+        case1Status: 'HALTED',
+        case1Pattern: case1Plan.pattern,
+        case1Plan,
+        case1Script: cap.scriptJs,
+        case1DurationMs,
+        case1Tokens: cap.tokens,
+      });
 
       // ── CASE 2 — our meta-prompt, output-only ──
       await deps.updateRun(runId, { case2Status: 'RUNNING' });
       await ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.start', { rep: i, model, effort });
+      const t1 = Date.now();
       const c2 = await deps.runCase2({
         intent: p.intent,
         model,
@@ -110,6 +123,7 @@ export async function runUltracodeBenchJob(job, deps) {
         // Live-stream Case 2's script as it's generated (its stdout IS the script).
         onToken: (text) => ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.token', { text }),
       });
+      const case2DurationMs = Date.now() - t1;
       const case2Plan = deps.parseScript(c2.scriptJs);
       await ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.ready', { rep: i });
 
@@ -124,6 +138,10 @@ export async function runUltracodeBenchJob(job, deps) {
         case2Plan,
         case1Script: cap.scriptJs,
         case2Script: c2.scriptJs,
+        case1DurationMs,
+        case2DurationMs,
+        case1Tokens: cap.tokens,
+        case2Tokens: c2.tokens,
       });
     }
   } catch (err) {
@@ -177,6 +195,11 @@ export async function runUltracodeBenchJob(job, deps) {
     case2Plan: rep?.case2Plan,
     case1Script: rep?.case1Script,
     case2Script: rep?.case2Script,
+    // Per-case planning time + token usage (the measurability the operator asked for).
+    case1DurationMs: rep?.case1DurationMs,
+    case2DurationMs: rep?.case2DurationMs,
+    case1Tokens: rep?.case1Tokens,
+    case2Tokens: rep?.case2Tokens,
   });
   await ev('final', 'system', 'ultracode-bench.complete', {
     structuralScore: agg.score,

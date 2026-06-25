@@ -17,6 +17,18 @@ import {
   type UltracodeSideStatus,
 } from '@/types/ultracode-run';
 
+function fmtDur(ms?: number): string | null {
+  if (!ms || ms < 0) return null;
+  const s = Math.round(ms / 1000);
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m${String(s % 60).padStart(2, '0')}s` : `${s}s`;
+}
+
+function fmtTok(n?: number): string {
+  if (n == null) return '—';
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
 /** Live-ticking mm:ss since `from`. */
 function Elapsed({ from }: { from?: string }) {
   const [now, setNow] = useState(() => Date.now());
@@ -108,10 +120,28 @@ interface SidePanelProps {
   runStatus?: UltracodeRunStatus;
   plan?: UltracodeDecisionPlan;
   script?: string;
+  durationMs?: number;
+  tokens?: { input: number; output: number };
 }
 
-function SidePanel({ title, subtitle, status, messages, runStatus, plan, script }: SidePanelProps) {
+function SidePanel({
+  title,
+  subtitle,
+  status,
+  messages,
+  runStatus,
+  plan,
+  script,
+  durationMs,
+  tokens,
+}: SidePanelProps) {
   const runActive = !!runStatus && ACTIVE_STATUSES.has(runStatus);
+  const meta = [
+    fmtDur(durationMs),
+    tokens ? `${fmtTok(tokens.output)} out · ${fmtTok(tokens.input)} in` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   let empty: React.ReactNode = null;
   if (messages.length === 0) {
@@ -161,6 +191,9 @@ function SidePanel({ title, subtitle, status, messages, runStatus, plan, script 
         <div>
           <CardTitle className="text-sm">{title}</CardTitle>
           <p className="text-xs text-muted-foreground">{subtitle}</p>
+          {meta && (
+            <p className="mt-0.5 text-[10px] tabular-nums text-muted-foreground">⏱ {meta}</p>
+          )}
         </div>
         <HaltedBadge status={status} />
       </CardHeader>
@@ -206,6 +239,8 @@ export function DualLiveView({
           runStatus={run?.status}
           plan={run?.case1Plan}
           script={run?.case1Script}
+          durationMs={run?.case1DurationMs}
+          tokens={run?.case1Tokens}
         />
         <SidePanel
           title="Case 2 — Futurator meta-prompt"
@@ -215,6 +250,8 @@ export function DualLiveView({
           runStatus={run?.status}
           plan={run?.case2Plan}
           script={run?.case2Script}
+          durationMs={run?.case2DurationMs}
+          tokens={run?.case2Tokens}
         />
       </div>
     </div>
