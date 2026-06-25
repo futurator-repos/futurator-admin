@@ -45,7 +45,8 @@ function UltracodeReverseContent() {
   };
 
   const onRun = () => {
-    createRun(draft);
+    // Jump straight to the new run so you watch it stream/capture instead of staying on the old one.
+    createRun(draft, { onSuccess: (data) => select(data.runId) });
   };
 
   const running =

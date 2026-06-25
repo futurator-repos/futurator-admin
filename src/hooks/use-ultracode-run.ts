@@ -69,7 +69,7 @@ export interface UseUltracodeRunApi {
   isTerminal: boolean;
   case1Messages: FreeAgentMessage[];
   case2Messages: FreeAgentMessage[];
-  createRun(input: CreateRunInput): void;
+  createRun(input: CreateRunInput, opts?: { onSuccess?: (data: CreateRunResponse) => void }): void;
   isCreating: boolean;
 }
 
