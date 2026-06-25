@@ -126,6 +126,8 @@ export function AssessTab({ app }: { app: App }) {
   const [planIntent, setPlanIntent] = useState('');
   const [view, setView] = useState<'hotspots' | 'graph' | 'privacy'>('hotspots');
   const [includePrivacy, setIncludePrivacy] = useState(false);
+  // 'internal' = our own deterministic scanner (default); 'external' = GDPR service.
+  const [privacyMode, setPrivacyMode] = useState<'internal' | 'external'>('internal');
   const privacy = currentSummary?.privacy;
   const privacyRunning = report.status === 'assessing' && !!jobId && includePrivacy;
 
@@ -142,7 +144,7 @@ export function AssessTab({ app }: { app: App }) {
 
   const startAudit = () => {
     run.mutate(
-      { runPrivacy: includePrivacy },
+      { runPrivacy: includePrivacy, ...(includePrivacy ? { privacyMode } : {}) },
       {
         onSuccess: (res) => setAuditJob(res.jobId),
       },
@@ -224,6 +226,51 @@ export function AssessTab({ app }: { app: App }) {
           />
           Include data privacy
         </label>
+        {includePrivacy && (
+          <div
+            role="radiogroup"
+            aria-label="Privacy scanner mode"
+            data-testid="assess-privacy-mode"
+            style={{
+              display: 'inline-flex',
+              border: '1px solid var(--border)',
+              borderRadius: 6,
+              overflow: 'hidden',
+              fontSize: 11,
+            }}
+          >
+            {(['internal', 'external'] as const).map((mode) => {
+              const active = privacyMode === mode;
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => setPrivacyMode(mode)}
+                  disabled={report.status === 'assessing'}
+                  data-testid={`assess-privacy-mode-${mode}`}
+                  title={
+                    mode === 'internal'
+                      ? 'Our own deterministic scanner — source never leaves the box (GDPR + EU AI Act, code + IaC)'
+                      : 'External GDPR service (data-privacy-platform)'
+                  }
+                  style={{
+                    padding: '5px 10px',
+                    border: 'none',
+                    fontWeight: active ? 600 : 400,
+                    color: active ? 'var(--background)' : 'var(--text-dim)',
+                    background: active ? 'var(--foreground)' : 'transparent',
+                    cursor: report.status === 'assessing' ? 'not-allowed' : 'pointer',
+                    textTransform: 'capitalize',
+                  }}
+                >
+                  {mode}
+                </button>
+              );
+            })}
+          </div>
+        )}
         <button
           type="button"
           onClick={startAudit}
