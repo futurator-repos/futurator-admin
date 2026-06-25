@@ -102,8 +102,7 @@ function dims(c1: PlanSignals, c2: PlanSignals): Dim[] {
       rank2: c2.pattern === 'other' ? 0 : 1,
       ideal: 1,
       cost: 'cheap',
-      lever_hint:
-        'classify the task and pick the matching named skeleton explicitly (e.g. plan-synthesis-critique) rather than improvising structure.',
+      lever_hint: `Case 1 selected the '${c1.pattern}' skeleton; Case 2 chose '${c2.pattern}'. Add task-classification guidance so Case 2 picks the '${c1.pattern}' skeleton for this class of intent.`,
     },
     {
       lever: 'verification',
@@ -115,8 +114,7 @@ function dims(c1: PlanSignals, c2: PlanSignals): Dim[] {
       rank2: c2.verifyRank,
       ideal: 2, // at least perspective-diverse
       cost: 'cheap',
-      lever_hint:
-        'add explicit guidance to instantiate a verification phase — perspective-diverse critics or adversarial refuters — and keep survivors.',
+      lever_hint: `Case 1 used '${c1.verifyKind}' verification; Case 2 used '${c2.verifyKind}'. Add explicit guidance to instantiate a verification phase (perspective-diverse critics or adversarial refuters) and keep survivors.`,
     },
     {
       lever: 'structure',

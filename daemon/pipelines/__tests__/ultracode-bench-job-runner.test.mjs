@@ -93,7 +93,8 @@ describe('runUltracodeBenchJob', () => {
     });
     const out = await runUltracodeBenchJob(makeJob({ reps: 2 }), deps);
     expect(out).toMatchObject({ ok: false, reason: 'all-reps-tainted', tainted: 2 });
-    expect(deps.runCase2).not.toHaveBeenCalled(); // never scored a tainted capture
+    // Case 2 runs in PARALLEL so it IS invoked, but a tainted rep is never SCORED.
+    expect(deps.scorePlans).not.toHaveBeenCalled();
     const final = deps.updateRun.mock.calls.at(-1)[1];
     expect(final.status).toBe('ERROR');
     expect(final.taintedReps).toBe(2);

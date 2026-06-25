@@ -68,7 +68,7 @@ export async function runUltracodeBenchJob(job, deps) {
   await deps.updateRun(runId, {
     status: 'CAPTURING',
     case1Status: 'RUNNING',
-    case2Status: 'PENDING',
+    case2Status: 'RUNNING', // both engines run in parallel
   });
 
   const remaining = []; // per-rep results
@@ -76,75 +76,85 @@ export async function runUltracodeBenchJob(job, deps) {
   const taintReasons = []; // the specific reason each excluded rep failed (for an honest error msg)
   try {
     for (let i = 0; i < reps; i++) {
-      // ── CASE 1 — native ultracode, capture + halt ──
-      await ev(`case1-rep${i}`, 'case1', 'ultracode-bench.case1.start', { rep: i, model, effort });
       const t0 = Date.now();
-      const cap = await deps.captureCase1({
-        intent: p.intent,
-        model,
-        effort,
-        cwd: job.workingDir,
-        rep: i,
-        captureTimeoutMs,
-      });
-      const case1DurationMs = Date.now() - t0;
-      if (cap.tainted) {
-        tainted++;
-        if (cap.taintReason) taintReasons.push(cap.taintReason);
-        await ev(`case1-rep${i}`, 'case1', 'ultracode-bench.case1.tainted', {
-          rep: i,
-          reason: cap.taintReason,
-        });
-        continue; // exclude this rep — never count a non-clean capture
-      }
-      await ev(`case1-rep${i}`, 'case1', 'ultracode-bench.case1.halted', {
-        rep: i,
-        agentCount: cap.agentCount,
-      });
-      const case1Plan = deps.parseScript(cap.scriptJs);
-      // Publish Case 1 immediately so the UI shows it WHILE Case 2 is still running (the two run
-      // sequentially; Case 1 ~halts minutes before Case 2 finishes).
-      await deps.updateRun(runId, {
-        case1Status: 'HALTED',
-        case1Pattern: case1Plan.pattern,
-        case1Plan,
-        case1Script: cap.scriptJs,
-        case1DurationMs,
-        case1Tokens: cap.tokens,
-      });
-
-      // ── CASE 2 — our meta-prompt, output-only ──
-      await deps.updateRun(runId, { case2Status: 'RUNNING' });
+      await ev(`case1-rep${i}`, 'case1', 'ultracode-bench.case1.start', { rep: i, model, effort });
       await ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.start', { rep: i, model, effort });
-      const t1 = Date.now();
-      const c2 = await deps.runCase2({
-        intent: p.intent,
-        model,
-        effort,
-        cwd: job.workingDir,
-        rep: i,
-        // Live-stream Case 2's script as it's generated (its stdout IS the script).
-        onToken: (text) => ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.token', { text }),
-      });
-      const case2DurationMs = Date.now() - t1;
-      const case2Plan = deps.parseScript(c2.scriptJs);
-      await ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.ready', { rep: i });
 
-      const structural = deps.scorePlans(case1Plan, case2Plan);
+      // Run BOTH engines in PARALLEL — independent claude processes, same intent, only the prompt
+      // differs. Each persists its own result the instant it finishes, so whichever halts first
+      // fills its panel; wall-clock ≈ max(case1, case2) instead of the sum.
+      const case1P = deps
+        .captureCase1({ intent: p.intent, model, effort, cwd: job.workingDir, rep: i, captureTimeoutMs })
+        .then(async (cap) => {
+          const case1DurationMs = Date.now() - t0;
+          if (cap.tainted) {
+            await ev(`case1-rep${i}`, 'case1', 'ultracode-bench.case1.tainted', {
+              rep: i,
+              reason: cap.taintReason,
+            });
+            return { cap, case1DurationMs, tainted: true };
+          }
+          await ev(`case1-rep${i}`, 'case1', 'ultracode-bench.case1.halted', {
+            rep: i,
+            agentCount: cap.agentCount,
+          });
+          const case1Plan = deps.parseScript(cap.scriptJs);
+          await deps.updateRun(runId, {
+            case1Status: 'HALTED',
+            case1Pattern: case1Plan.pattern,
+            case1Plan,
+            case1Script: cap.scriptJs,
+            case1DurationMs,
+            case1Tokens: cap.tokens,
+          });
+          return { cap, case1Plan, case1DurationMs };
+        });
+
+      const case2P = deps
+        .runCase2({
+          intent: p.intent,
+          model,
+          effort,
+          cwd: job.workingDir,
+          rep: i,
+          onToken: (text) => ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.token', { text }),
+        })
+        .then(async (c2) => {
+          const case2DurationMs = Date.now() - t0;
+          const case2Plan = deps.parseScript(c2.scriptJs);
+          await ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.ready', { rep: i });
+          await deps.updateRun(runId, {
+            case2Status: 'COMPLETE',
+            case2Pattern: case2Plan.pattern,
+            case2Plan,
+            case2Script: c2.scriptJs,
+            case2DurationMs,
+            case2Tokens: c2.tokens,
+          });
+          return { c2, case2Plan, case2DurationMs };
+        });
+
+      const [R1, R2] = await Promise.all([case1P, case2P]);
+
+      if (R1.tainted) {
+        tainted++;
+        if (R1.cap.taintReason) taintReasons.push(R1.cap.taintReason);
+        continue; // Case 1 produced no usable plan — exclude this rep (Case 2 is still shown)
+      }
+
+      const structural = deps.scorePlans(R1.case1Plan, R2.case2Plan);
       remaining.push({
         structural,
-        case1Pattern: case1Plan.pattern,
-        case2Pattern: case2Plan.pattern,
-        // Keep the artifacts so the UI can show the captured plans + raw scripts (a
-        // representative rep is persisted on the run row at COMPLETE).
-        case1Plan,
-        case2Plan,
-        case1Script: cap.scriptJs,
-        case2Script: c2.scriptJs,
-        case1DurationMs,
-        case2DurationMs,
-        case1Tokens: cap.tokens,
-        case2Tokens: c2.tokens,
+        case1Pattern: R1.case1Plan.pattern,
+        case2Pattern: R2.case2Plan.pattern,
+        case1Plan: R1.case1Plan,
+        case2Plan: R2.case2Plan,
+        case1Script: R1.cap.scriptJs,
+        case2Script: R2.c2.scriptJs,
+        case1DurationMs: R1.case1DurationMs,
+        case2DurationMs: R2.case2DurationMs,
+        case1Tokens: R1.cap.tokens,
+        case2Tokens: R2.c2.tokens,
       });
     }
   } catch (err) {
