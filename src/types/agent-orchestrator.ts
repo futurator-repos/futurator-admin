@@ -138,6 +138,23 @@ export interface ValidationResult {
   details: string;
 }
 
+/**
+ * One lane (agent) of a dual-agent comparison run. Mirror of
+ * `DualAgentLaneResult` in `functions/shared/types/agent-orchestrator.ts`.
+ */
+export interface DualAgentLaneResult {
+  lane: 'A' | 'B';
+  label: string;
+  withGraph: boolean;
+  answer: string;
+  latencyMs: number;
+  tokens: { input: number; output: number };
+  costUsd: number | null;
+  toolCalls: number;
+  graphToolCalls: number;
+  error?: string;
+}
+
 export interface AgentJob {
   jobId: string;
   status: AgentJobStatus;
@@ -204,6 +221,15 @@ export interface AgentJob {
    * Mirror of `AgentJob.refactorAuditSummary` in
    * `functions/shared/types/agent-orchestrator.ts`.
    */
+  /** Dual-agent comparison result (jobType 'dual-agent-compare'), denormalized
+   *  onto the job row by the daemon. Mirror of the backend field. */
+  dualAgentCompareResult?: {
+    question: string;
+    model: string;
+    agentA: DualAgentLaneResult;
+    agentB: DualAgentLaneResult;
+  };
+
   refactorAuditSummary?: {
     hotspotCount: number;
     counts: Partial<Record<HotspotKind, number>>;

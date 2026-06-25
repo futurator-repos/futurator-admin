@@ -207,6 +207,31 @@ export interface PipelineDefinition {
   initialSessions?: Record<string, string>;
 }
 
+// ── Dual-agent comparison ──
+
+/** One lane (agent) of a dual-agent comparison run. */
+export interface DualAgentLaneResult {
+  /** 'A' = vanilla tools · 'B' = vanilla + Mycelium graph MCP. */
+  lane: 'A' | 'B';
+  label: string;
+  /** Whether this lane had the Mycelium graph MCP tools attached. */
+  withGraph: boolean;
+  /** The agent's final answer text (empty on error/timeout). */
+  answer: string;
+  /** Wall-clock latency of the spawn, ms. */
+  latencyMs: number;
+  /** Token usage as reported by the CLI stream. */
+  tokens: { input: number; output: number };
+  /** CLI-reported notional cost (total_cost_usd), or null if absent. */
+  costUsd: number | null;
+  /** Total tool calls the agent made. */
+  toolCalls: number;
+  /** Of those, how many were Mycelium graph tools (mcp__mycelium__*). 0 for lane A. */
+  graphToolCalls: number;
+  /** Set when the spawn errored or timed out (answer may be partial/empty). */
+  error?: string;
+}
+
 // ── Job (stored in DynamoDB) ──
 
 export interface AgentJob {
@@ -374,7 +399,13 @@ export interface AgentJob {
     // real `ultracode` planner run (halt-on-script-write, before fan-out), runs
     // the Case-2 projector, scores both with the spikes/ultra-reverse engine, and
     // writes the scorecard to the ultracode-runs table. Payload below.
-    | 'ultracode-bench';
+    | 'ultracode-bench'
+    // Dual-agent comparison harness. The daemon's executeDualAgentCompareJob spawns
+    // TWO `claude` agents on the SAME question over an assessed app's clone — Agent A
+    // with vanilla tools, Agent B additionally equipped with the Mycelium graph MCP —
+    // and captures each one's answer, latency, tokens, cost, and graph-tool usage so
+    // the operator can judge whether the graph yields better answers. Payload below.
+    | 'dual-agent-compare';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -550,6 +581,31 @@ export interface AgentJob {
     runPrivacy?: boolean;
     /** 'internal' (our own scanner, default) | 'external' (GDPR service). */
     privacyMode?: 'internal' | 'external';
+  };
+
+  /**
+   * Dual-agent comparison harness. Set when `jobType === 'dual-agent-compare'`.
+   * The daemon spawns TWO `claude` agents on the SAME `question` in the assessed
+   * app's clone (`projectPath`): Agent A with vanilla tools, Agent B additionally
+   * given the Mycelium graph MCP tools. The isolated variable is graph access.
+   */
+  dualAgentComparePayload?: {
+    projectId: string;
+    projectPath: string;
+    /** The natural-language question both agents answer about the codebase. */
+    question: string;
+    /** Both agents run at the SAME model (the isolated variable is graph access). */
+    model?: string; // default 'opus'
+    /** Per-agent wall-clock cap before the spawn is killed (default 240000). */
+    timeoutMs?: number;
+  };
+
+  /** Result of a `dual-agent-compare` run — denormalized onto the job row (MVP transport). */
+  dualAgentCompareResult?: {
+    question: string;
+    model: string;
+    agentA: DualAgentLaneResult; // vanilla tools
+    agentB: DualAgentLaneResult; // + Mycelium graph MCP
   };
 
   /**

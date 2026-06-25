@@ -25,6 +25,7 @@ import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-o
 import { NewPlanModal } from '../new-plan-modal';
 import { HotspotDashboard } from './hotspot-dashboard';
 import { RefactorGraph } from './refactor-graph';
+import { AgentCompare } from './agent-compare';
 import { PrivacyDashboard } from './privacy-dashboard';
 
 /**
@@ -486,13 +487,16 @@ export function AssessTab({ app }: { app: App }) {
             <HotspotDashboard hotspots={hotspots} onCreatePlan={onCreatePlan} />
           )}
           {view === 'graph' && (
-            <RefactorGraph
-              appId={app.appId}
-              hotspots={hotspots}
-              graphAvailable={
-                jobId ? job?.refactorAuditSummary?.graphAvailable : selectedRecord?.graphAvailable
-              }
-            />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <RefactorGraph
+                appId={app.appId}
+                hotspots={hotspots}
+                graphAvailable={
+                  jobId ? job?.refactorAuditSummary?.graphAvailable : selectedRecord?.graphAvailable
+                }
+              />
+              <AgentCompare appId={app.appId} />
+            </div>
           )}
           {view === 'privacy' && <PrivacyDashboard privacy={privacy} />}
           {/* Persistent assessment log — stays available after completion (the

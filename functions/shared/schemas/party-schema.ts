@@ -204,6 +204,17 @@ export const assessProjectBodySchema = z.object({
 });
 
 /**
+ * Dual-agent comparison harness — body for
+ * `POST /api/party/projects/:id/agent-compare`. Spawns two agents (vanilla vs
+ * + graph MCP) on the same question over the assessed clone.
+ */
+export const compareAgentsBodySchema = z.object({
+  question: z.string().min(3).max(2000),
+  model: z.string().min(1).max(64).optional(),
+  timeoutMs: z.number().int().min(30000).max(600000).optional(),
+});
+
+/**
  * Party docs are scoped. `session` docs belong to a single debate (S3 key
  * `party-docs/<projectId>/_session/<sessionId>/<file>`); `shared` docs are
  * project-level knowledge visible in every debate of the project

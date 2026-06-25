@@ -50,6 +50,10 @@ export const JOB_HANDLER_REFACTOR_AUDIT = 'refactor-audit';
 // Ultracode-Reverse bench. The runner spawns two single `claude` runs (Case 1 = native
 // ultracode w/ capture+halt, Case 2 = our meta-prompt), AST-parses both, scores, persists.
 export const JOB_HANDLER_ULTRACODE_BENCH = 'ultracode-bench';
+// Dual-agent comparison harness. The runner spawns two `claude` agents on the
+// same question over an assessed app's clone — Agent A vanilla, Agent B + the
+// Mycelium graph MCP — and captures answer/latency/tokens/cost/graph-tool usage.
+export const JOB_HANDLER_DUAL_AGENT_COMPARE = 'dual-agent-compare';
 
 /**
  * Decide which handler should run a given job.
@@ -84,8 +88,25 @@ export function selectHandler(job) {
   if (job.jobType === 'scorecard-assess') return JOB_HANDLER_SCORECARD_ASSESS;
   if (job.jobType === 'refactor-audit') return JOB_HANDLER_REFACTOR_AUDIT;
   if (job.jobType === 'ultracode-bench') return JOB_HANDLER_ULTRACODE_BENCH;
+  if (job.jobType === 'dual-agent-compare') return JOB_HANDLER_DUAL_AGENT_COMPARE;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
+}
+
+/**
+ * Structural check for dual-agent-compare jobs. Rejects malformed rows before
+ * the daemon spawns two `claude` agents. Returns { ok } or { ok:false, reason }.
+ */
+export function validateDualAgentCompareJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'dual-agent-compare') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.dualAgentComparePayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'dualAgentComparePayload-missing' };
+  if (!p.projectId) return { ok: false, reason: 'projectId-missing' };
+  if (!p.projectPath) return { ok: false, reason: 'projectPath-missing' };
+  if (!p.question || !String(p.question).trim()) return { ok: false, reason: 'question-missing' };
+  return { ok: true };
 }
 
 /**

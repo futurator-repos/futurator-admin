@@ -68,6 +68,7 @@ import {
   validateAppBootstrapJob,
   validateFreeAgentSessionJob,
   validateWaveMergeJob,
+  validateDualAgentCompareJob,
   JOB_HANDLER_EPIC_DEV,
   JOB_HANDLER_PARTY_BOOTSTRAP,
   JOB_HANDLER_PARTY_INSPECT,
@@ -84,9 +85,12 @@ import {
   JOB_HANDLER_SCORECARD_ASSESS,
   JOB_HANDLER_REFACTOR_AUDIT,
   JOB_HANDLER_ULTRACODE_BENCH,
+  JOB_HANDLER_DUAL_AGENT_COMPARE,
 } from './pipelines/job-router.mjs';
 import { runUltracodeBenchJob } from './pipelines/ultracode-bench-job-runner.mjs';
 import { makeCaptureDeps } from './pipelines/ultracode-bench-capture.mjs';
+import { runDualAgentCompare } from './pipelines/dual-agent-compare-runner.mjs';
+import { makeDualAgentCapture } from './pipelines/dual-agent-compare-capture.mjs';
 import { case1ToDecision } from './lib/ultracode/case1-to-decision.mjs';
 import { computeStructuralDiff } from './lib/ultracode/structural-diff.mjs';
 import { runEpicDevPipeline } from './pipelines/epic-dev-pipeline.mjs';
@@ -165,7 +169,7 @@ import {
 // for Bash tool_use events. Replaces prompt prose ("Do NOT run npm create
 // vite") with SIGTERM-on-match. See daemon/lib/bash-deny-patterns.mjs.
 import { matchesDenyPattern } from './lib/bash-deny-patterns.mjs';
-import { myceliumMcpSpawn } from './lib/mcp-config.mjs';
+import { myceliumMcpSpawn, myceliumMcpSpawnForced } from './lib/mcp-config.mjs';
 import {
   writeAttentionItem,
   autoResolveAttentionByDedupKey,
@@ -6408,6 +6412,8 @@ async function runJobAsync(job) {
       await executeRefactorAuditJob(job);
     } else if (handler === JOB_HANDLER_ULTRACODE_BENCH) {
       await executeUltracodeBenchJob(job);
+    } else if (handler === JOB_HANDLER_DUAL_AGENT_COMPARE) {
+      await executeDualAgentCompareJob(job);
     } else {
       await executePipeline(job);
     }
@@ -7211,6 +7217,100 @@ async function executeUltracodeBenchJob(job) {
  * reads `hotspots.json` + `REPORT.md` and writes the summary onto the job row.
  * Report-only — it NEVER mutates the assessed code.
  */
+/**
+ * Dual-agent comparison harness — daemon handler for `jobType: 'dual-agent-compare'`.
+ * Spawns TWO `claude` agents on the SAME question over the assessed app's clone:
+ * Agent A with vanilla tools, Agent B additionally given the Mycelium graph MCP
+ * (forced on regardless of MYCELIUM_MCP, since graph access IS the variable under
+ * test). Captures each lane's answer/latency/tokens/cost/graph-tool usage and
+ * denormalizes the result onto the job row. Read-only: agents never edit code,
+ * and the clone never leaves the box.
+ */
+async function executeDualAgentCompareJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  const validation = validateDualAgentCompareJob(job);
+  if (!validation.ok) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: `dual-agent-compare invalid: ${validation.reason}`,
+    });
+    log('warn', `[${short}] dual-agent-compare invalid: ${validation.reason}`);
+    return;
+  }
+
+  const p = job.dualAgentComparePayload;
+  const projectPath = p.projectPath || job.workingDir;
+
+  // Same read-only safety boundary as refactor-audit: the clone must exist under
+  // the party projects root. Never let an agent escape to another repo.
+  if (!projectPath || !projectPath.startsWith(PARTY_PROJECTS_ROOT) || !existsSync(projectPath)) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: `dual-agent-compare refused: projectPath '${projectPath}' is not an existing path under ${PARTY_PROJECTS_ROOT}`,
+    });
+    log('warn', `[${short}] dual-agent-compare refused unsafe projectPath: ${projectPath}`);
+    return;
+  }
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'dual-agent-compare',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  try {
+    // Lane B's graph tools — forced on (not gated by MYCELIUM_MCP). Under
+    // bypassPermissions, --mcp-config alone makes the tools available.
+    const graphMcpArgs = myceliumMcpSpawnForced(undefined).args;
+    const { captureLane } = makeDualAgentCapture({
+      claudeBin: CLAUDE_BIN,
+      stripApiKey,
+      loadOAuth,
+      graphMcpArgs,
+      log,
+    });
+
+    const run = await runDualAgentCompare(
+      {
+        question: p.question,
+        projectPath,
+        model: p.model || 'opus',
+        timeoutMs: p.timeoutMs || 240000,
+      },
+      {
+        captureLane,
+        // Adapt the runner's {type,...} events onto the daemon's event sink.
+        pushEvent: ({ type, ...data }) => pushEvent(jobId, 'dual-agent-compare', null, type, data),
+        log,
+        jobId,
+      },
+    );
+
+    if (run.ok) {
+      await updateJobFields(jobId, {
+        status: 'COMPLETED',
+        dualAgentCompareResult: run.result,
+      });
+      log(
+        'info',
+        `[${short}] dual-agent-compare completed (A: ${run.result.agentA.latencyMs}ms / B: ${run.result.agentB.latencyMs}ms, B graph calls ${run.result.agentB.graphToolCalls})`,
+      );
+    } else {
+      await updateJobFields(jobId, {
+        status: 'FAILED',
+        errorMessage: run.reason || 'unknown',
+      });
+      log('warn', `[${short}] dual-agent-compare failed: ${run.reason}`);
+    }
+  } catch (err) {
+    await updateJobFields(jobId, { status: 'FAILED', errorMessage: err?.message || String(err) });
+    log('error', `[${short}] dual-agent-compare threw: ${err?.message || err}`);
+    throw err;
+  }
+}
+
 async function executeRefactorAuditJob(job) {
   const { jobId } = job;
   const short = jobId.slice(0, 8);

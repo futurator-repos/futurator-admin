@@ -116,6 +116,7 @@ import {
   refreshProjectParamsSchema,
   assessProjectParamsSchema,
   assessProjectBodySchema,
+  compareAgentsBodySchema,
   updateMigrationInputSchema,
 } from '../shared/schemas/party-schema';
 import {
@@ -7184,6 +7185,61 @@ app.post('/api/party/projects/:id/assess', async (c) => {
       ...(parsedBody.data.privacyMode !== undefined
         ? { privacyMode: parsedBody.data.privacyMode }
         : {}),
+    },
+  });
+
+  return c.json({ jobId, projectId: parsed.data.projectId }, 202);
+});
+
+/**
+ * POST /api/party/projects/:id/agent-compare — dual-agent comparison harness.
+ * Enqueues a `dual-agent-compare` job: the daemon spawns two agents (vanilla vs
+ * + Mycelium graph MCP) on the same question over the assessed clone, so the
+ * operator can compare answer quality, latency, and token/cost. Brownfield-only.
+ */
+app.post('/api/party/projects/:id/agent-compare', async (c) => {
+  const projectId = c.req.param('id');
+  const parsed = assessProjectParamsSchema.safeParse({ projectId });
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid projectId');
+  }
+
+  const rawBody = (await c.req.json().catch(() => ({}))) as unknown;
+  const parsedBody = compareAgentsBodySchema.safeParse(rawBody ?? {});
+  if (!parsedBody.success) {
+    throw new ValidationError(parsedBody.error.errors[0]?.message || 'invalid compare body');
+  }
+
+  const project = await partyProjectsRepo.getProject(parsed.data.projectId);
+  if (!project) throw new NotFoundError('PartyProject', parsed.data.projectId);
+  if (project.kind !== 'brownfield') {
+    throw new AppError(
+      'INVALID_FOR_GREENFIELD',
+      'Agent comparison is only valid for migrated brownfield Party projects',
+      400,
+    );
+  }
+  if (!project.path) {
+    throw new AppError('INVALID_STATE', 'Brownfield project has no clone path on disk', 409);
+  }
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: c.get('user').userId,
+    workingDir: project.path,
+    jobType: 'dual-agent-compare',
+    projectId: parsed.data.projectId,
+    dualAgentComparePayload: {
+      projectId: parsed.data.projectId,
+      projectPath: project.path,
+      question: parsedBody.data.question,
+      ...(parsedBody.data.model ? { model: parsedBody.data.model } : {}),
+      ...(parsedBody.data.timeoutMs !== undefined ? { timeoutMs: parsedBody.data.timeoutMs } : {}),
     },
   });
 

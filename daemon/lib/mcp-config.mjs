@@ -62,6 +62,16 @@ function ensureConfig() {
  */
 export function myceliumMcpSpawn(existingAllowedTools) {
   if (!isMyceliumMcpEnabled()) return { args: [], allowedTools: existingAllowedTools };
+  return myceliumMcpSpawnForced(existingAllowedTools);
+}
+
+/**
+ * Like `myceliumMcpSpawn` but NOT gated behind `MYCELIUM_MCP=on`. The dual-agent
+ * comparison harness uses this to give Agent B the graph tools regardless of the
+ * global flag — graph access IS the isolated variable under test there, so it
+ * must not depend on a deploy-wide toggle.
+ */
+export function myceliumMcpSpawnForced(existingAllowedTools) {
   const path = ensureConfig();
   const toolNames = MYCELIUM_TOOLS.map((t) => `mcp__mycelium__${t}`).join(',');
   // Only EXTEND an existing allowlist; agents without one run permissively
