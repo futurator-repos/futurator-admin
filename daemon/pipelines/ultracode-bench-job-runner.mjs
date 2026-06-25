@@ -59,9 +59,10 @@ export async function runUltracodeBenchJob(job, deps) {
   const model = p.model || 'opus';
   // 'max' is the CLI's highest effort tier (the old 'xhigh' default is rejected by the claude CLI).
   const effort = p.effort || 'max';
-  // The ultracode planner front-loads heavy thinking before persisting a script; floor the capture
-  // window at 300s so an older payload (120000) can't undercut it before the API Lambda redeploys.
-  const captureTimeoutMs = Math.max(p.captureTimeoutMs || 0, 300000);
+  // Opus·max Case 1 authoring runs ~4.5–5min and was timing out at 300s; floor the capture window at
+  // 600s so an older/short payload can't undercut it. The capture still halts early the instant the
+  // plan's scriptPath appears, so this only bites a genuinely slow/stuck run.
+  const captureTimeoutMs = Math.max(p.captureTimeoutMs || 0, 600000);
   const ev = (stepId, agentId, type, data) => deps.pushEvent(runId, stepId, agentId, type, data);
 
   await deps.updateRun(runId, {
@@ -72,6 +73,7 @@ export async function runUltracodeBenchJob(job, deps) {
 
   const remaining = []; // per-rep results
   let tainted = 0;
+  const taintReasons = []; // the specific reason each excluded rep failed (for an honest error msg)
   try {
     for (let i = 0; i < reps; i++) {
       // ── CASE 1 — native ultracode, capture + halt ──
@@ -88,6 +90,7 @@ export async function runUltracodeBenchJob(job, deps) {
       const case1DurationMs = Date.now() - t0;
       if (cap.tainted) {
         tainted++;
+        if (cap.taintReason) taintReasons.push(cap.taintReason);
         await ev(`case1-rep${i}`, 'case1', 'ultracode-bench.case1.tainted', {
           rep: i,
           reason: cap.taintReason,
@@ -158,10 +161,12 @@ export async function runUltracodeBenchJob(job, deps) {
     await deps.updateRun(runId, {
       status: 'ERROR',
       case1Status: 'ERROR',
-      errorMessage: `all ${reps} reps tainted (no clean zero-agent capture)`,
+      errorMessage: `Case 1 produced no usable plan in ${reps} rep(s): ${[...new Set(taintReasons)].join('; ') || 'tainted'}`,
       taintedReps: tainted,
     });
-    await ev('final', 'system', 'ultracode-bench.error', { reason: 'all-reps-tainted' });
+    await ev('final', 'system', 'ultracode-bench.error', {
+      reason: [...new Set(taintReasons)].join('; ') || 'all-reps-tainted',
+    });
     return { ok: false, reason: 'all-reps-tainted', tainted };
   }
 

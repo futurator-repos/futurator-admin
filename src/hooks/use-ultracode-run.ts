@@ -120,10 +120,14 @@ function applyEvents(
       });
     } else if (kind === 'tainted' || kind === 'error') {
       active = null;
+      const reason = typeof ev.reason === 'string' ? ev.reason : '';
       next.push({
         id: `${channel}-${kind}-${ev.eventSeq}`,
         role: 'system',
-        content: kind === 'tainted' ? 'Rep tainted (agents ran) — excluded' : 'Run errored',
+        content:
+          kind === 'tainted'
+            ? `Rep excluded — ${reason || 'no usable plan captured'}`
+            : `Run errored${reason ? ` — ${reason}` : ''}`,
         timestamp: ev.timestamp,
       });
     }

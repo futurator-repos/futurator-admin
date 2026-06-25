@@ -13449,10 +13449,9 @@ app.post('/api/ultracode/runs', async (c) => {
       // CLI's highest tier (pacman ultracode-bench, 2026-06-24).
       effort: 'max',
       judge: false,
-      // The ultracode planner front-loads heavy thinking before it persists a workflow script;
-      // 120s wasn't enough for the capture to see one. 300s gives the planner room (the capture
-      // still kills early the moment a size-stable wf.json appears).
-      captureTimeoutMs: 300000,
+      // Opus·max Case 1 authoring runs ~4.5–5min; 300s was timing out at the edge. 600s gives room
+      // (the capture still halts early the instant the plan's scriptPath appears in the stream).
+      captureTimeoutMs: 600000,
     },
     pipeline: { agents: {}, steps: [] },
   } as never);
