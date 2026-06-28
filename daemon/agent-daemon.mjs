@@ -86,6 +86,8 @@ import {
   JOB_HANDLER_REFACTOR_AUDIT,
   JOB_HANDLER_ULTRACODE_BENCH,
   JOB_HANDLER_DUAL_AGENT_COMPARE,
+  JOB_HANDLER_SCAN_ENGINE,
+  validateScanEngineJob,
 } from './pipelines/job-router.mjs';
 import { runUltracodeBenchJob } from './pipelines/ultracode-bench-job-runner.mjs';
 import { makeCaptureDeps } from './pipelines/ultracode-bench-capture.mjs';
@@ -216,9 +218,12 @@ import { getStoredStageRow, putAssessorSlices } from './lib/scorecard-store.mjs'
 import {
   runRefactorAuditJob,
   runL3Adjudication,
+  findCharacterizationGateViolations,
 } from './pipelines/refactor-audit-job-runner.mjs';
 // Data Privacy Assessment lane (parallel sibling to recon).
-import { runPrivacyAuditJob } from './pipelines/privacy-audit-job-runner.mjs';
+import { runPrivacyAuditJob, summarizePrivacyReport } from './pipelines/privacy-audit-job-runner.mjs';
+// Refactoring Scan Engine v2 — hybrid deterministic + swarm orchestration core.
+import { runScanEngine } from './pipelines/scan-engine-job-runner.mjs';
 // Epic 4 (2026-05-20) — track Skill tool_use activations into
 // .context/loaded-skills.json so the per-story commit's Skills-Used
 // trailer populates with real content.
@@ -6414,6 +6419,8 @@ async function runJobAsync(job) {
       await executeUltracodeBenchJob(job);
     } else if (handler === JOB_HANDLER_DUAL_AGENT_COMPARE) {
       await executeDualAgentCompareJob(job);
+    } else if (handler === JOB_HANDLER_SCAN_ENGINE) {
+      await executeScanEngineJob(job);
     } else {
       await executePipeline(job);
     }
@@ -7307,6 +7314,190 @@ async function executeDualAgentCompareJob(job) {
   } catch (err) {
     await updateJobFields(jobId, { status: 'FAILED', errorMessage: err?.message || String(err) });
     log('error', `[${short}] dual-agent-compare threw: ${err?.message || err}`);
+    throw err;
+  }
+}
+
+/**
+ * Refactoring Scan Engine v2 — daemon handler for `jobType: 'scan-engine'`.
+ * Hybrid deterministic recon + LLM swarm. Runs recon.mjs + subsystem-decompose
+ * + internal privacy (all ~0 LLM) deterministically, then a bounded swarm of
+ * per-subsystem analyzers + cross-cutting passes (spawnGateAgent), maps + dedupes
+ * into a dimension-tagged ScanFinding pool, generates a phased dependency-ordered
+ * plan (char-net-gated), and writes the report. Report-only; clone never leaves
+ * the box. The pure orchestration lives in runScanEngine; this wires real deps.
+ */
+async function executeScanEngineJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  const validation = validateScanEngineJob(job);
+  if (!validation.ok) {
+    await updateJobFields(jobId, { status: 'FAILED', errorMessage: `scan-engine invalid: ${validation.reason}` });
+    log('warn', `[${short}] scan-engine invalid: ${validation.reason}`);
+    return;
+  }
+  const p = job.scanEnginePayload;
+  const projectPath = p.projectPath || job.workingDir;
+  if (!projectPath || !projectPath.startsWith(PARTY_PROJECTS_ROOT) || !existsSync(projectPath)) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: `scan-engine refused: projectPath '${projectPath}' is not an existing path under ${PARTY_PROJECTS_ROOT}`,
+    });
+    log('warn', `[${short}] scan-engine refused unsafe projectPath: ${projectPath}`);
+    return;
+  }
+
+  await updateJobFields(jobId, { status: 'RUNNING', phase: 'scan-engine', lastHeartbeatAt: new Date().toISOString() });
+
+  const reconPath = new URL('./scripts/refactor-recon/recon.mjs', import.meta.url).pathname;
+  const decomposePath = new URL('./scripts/refactor-recon/subsystem-decompose.mjs', import.meta.url).pathname;
+  const privacyPath = new URL('./scripts/refactor-recon/privacy-scan-internal.mjs', import.meta.url).pathname;
+
+  // Spawn a plain Node child (deterministic stages — never the agent path).
+  const spawnNode = (args, cwd) =>
+    new Promise((resolve) => {
+      const proc = spawn(process.execPath, args, {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, FORCE_COLOR: '0' },
+        detached: true,
+      });
+      registerChild(jobId, proc);
+      let tail = '';
+      proc.stderr.on('data', (d) => { tail = (tail + d.toString()).slice(-2000); });
+      proc.on('error', (err) => { unregisterChild(jobId, proc); resolve({ code: 1, tail: String(err?.message || err) }); });
+      proc.on('close', (code) => { unregisterChild(jobId, proc); resolve({ code: code ?? 1, tail }); });
+    });
+
+  const sePush = (type, data = {}) => pushEvent(jobId, 'scan-engine', null, type, data);
+
+  try {
+    const result = await runScanEngine(job, {
+      projectName: p.projectId || job.projectId,
+      concurrency: 6,
+      runRecon: ({ projectPath: repo, src }) => spawnNode([reconPath, repo, ...(src ? ['--src', src] : [])], repo),
+      runDecompose: ({ projectPath: repo, cap }) =>
+        spawnNode([decomposePath, pathJoin(repo, 'graphify-out'), '--repo', repo, ...(cap ? ['--cap', String(cap)] : [])], repo),
+      readArtifacts: async ({ projectPath: repo }) => {
+        const od = pathJoin(repo, 'graphify-out');
+        const rj = (f) => { try { return JSON.parse(readFileSync(pathJoin(od, f), 'utf8')); } catch { return null; } };
+        // Internal privacy scanner — deterministic, ~0 LLM, source stays on the box.
+        let privacySummary = null;
+        try {
+          await spawnNode([privacyPath, repo, '--src', p.src || 'src', '--out', pathJoin(od, 'privacy.json')], repo);
+          const pr = rj('privacy.json');
+          if (pr) privacySummary = summarizePrivacyReport(pr);
+        } catch (pe) { log('warn', `[${short}] scan-engine privacy lane failed (non-fatal): ${pe?.message || pe}`); }
+        const graph = rj('graph.resolved.json') || rj('graph.json') || { nodes: [] };
+        const resolved = rj('resolved-imports.json') || {};
+        return {
+          hotspots: (rj('hotspots.json') || {}).hotspots || [],
+          shards: rj('subsystem-shards.json') || { shards: [] },
+          privacySummary,
+          anchoredPaths: new Set((graph.nodes || []).map((n) => n.source_file).filter(Boolean)),
+          hubs: resolved.hubs || [],
+        };
+      },
+      spawnAgent: async ({ role, prompt }) => {
+        const res = await spawnGateAgent({ role, prompt, cwd: projectPath }, { short });
+        if (res?.ok === false) throw new Error(`scan agent ${role} failed: ${(res.output || '').slice(-200)}`);
+        return res?.output || '';
+      },
+      checkGate: (planOutput) => findCharacterizationGateViolations(planOutput),
+      pushEvent: sePush,
+      log,
+    });
+
+    if (!result.ok) {
+      await updateJobFields(jobId, { status: 'FAILED', errorMessage: `scan-engine: ${result.reason}` });
+      log('warn', `[${short}] scan-engine failed: ${result.reason}`);
+      return;
+    }
+
+    // Write the report into the clone (docs/refactoring-scan.md) for export.
+    let reportPath = null;
+    try {
+      const docsDir = pathJoin(projectPath, 'docs');
+      mkdirSync(docsDir, { recursive: true });
+      reportPath = pathJoin(docsDir, 'refactoring-scan.md');
+      writeFileSync(reportPath, result.reportMarkdown || '# Refactoring & System-Design Scan\n');
+    } catch (we) { log('warn', `[${short}] scan-engine report write failed (non-fatal): ${we?.message || we}`); }
+
+    // Upload the full scan to S3 (the UI fetches it like graph.json).
+    let scanAvailable = false;
+    const projectId = p.projectId || job.projectId;
+    try {
+      const s3mod = await import('@aws-sdk/client-s3');
+      if (!_s3Client) _s3Client = new s3mod.S3Client({ region: REGION });
+      const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
+      await _s3Client.send(
+        new s3mod.PutObjectCommand({
+          Bucket: bucket,
+          Key: `knowledge-live/${projectId}/_refactor/scan.json`,
+          Body: JSON.stringify({
+            findings: result.findings,
+            phases: result.phases,
+            planOutput: result.planOutput,
+            gateViolations: result.gateViolations,
+            counts: result.counts,
+            lowConfidence: result.lowConfidence,
+            reportMarkdown: result.reportMarkdown,
+          }),
+          ContentType: 'application/json',
+          CacheControl: 'no-cache',
+        }),
+      );
+      scanAvailable = true;
+    } catch (s3e) { log('warn', `[${short}] scan-engine S3 upload failed (non-fatal): ${s3e?.message || s3e}`); }
+
+    // Durable record (status 'scan-v2') + denormalized summary on the row.
+    const auditId = randomUUID();
+    try {
+      await ddb.send(
+        new PutCommand({
+          TableName: REFACTOR_AUDITS_TABLE,
+          Item: {
+            auditId,
+            projectId,
+            projectPath,
+            jobId,
+            status: 'scan-v2',
+            counts: result.counts?.byDimension || {},
+            hotspots: [],
+            scanFindings: result.findings,
+            phases: result.phases,
+            plan: result.planOutput,
+            gateViolations: result.gateViolations,
+            lowConfidence: result.lowConfidence,
+            scanAvailable,
+            createdAt: new Date().toISOString(),
+            createdBy: job.createdBy || 'daemon',
+          },
+        }),
+      );
+    } catch (ae) { log('warn', `[${short}] scan-engine durable-write failed (non-fatal): ${ae?.message || ae}`); }
+
+    await updateJobFields(jobId, {
+      status: 'COMPLETED',
+      scanEngineSummary: {
+        auditId,
+        findingCount: result.findings.length,
+        counts: result.counts,
+        phaseCount: result.phases.length,
+        gateViolations: result.gateViolations.length,
+        lowConfidence: result.lowConfidence,
+        scanAvailable,
+        reportPath,
+      },
+    });
+    log(
+      'info',
+      `[${short}] scan-engine completed (${result.findings.length} findings, ${result.phases.length} phases, ${result.gateViolations.length} gate-violations${result.lowConfidence ? ', LOW-CONFIDENCE decomposition' : ''})`,
+    );
+  } catch (err) {
+    await updateJobFields(jobId, { status: 'FAILED', errorMessage: err?.message || String(err) });
+    log('error', `[${short}] scan-engine threw: ${err?.message || err}`);
     throw err;
   }
 }

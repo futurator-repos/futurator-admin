@@ -405,7 +405,10 @@ export interface AgentJob {
     // with vanilla tools, Agent B additionally equipped with the Mycelium graph MCP —
     // and captures each one's answer, latency, tokens, cost, and graph-tool usage so
     // the operator can judge whether the graph yields better answers. Payload below.
-    | 'dual-agent-compare';
+    | 'dual-agent-compare'
+    // Refactoring Scan Engine v2. Hybrid deterministic recon + LLM swarm →
+    // dimension-tagged findings + a phased dependency-ordered plan. Payload below.
+    | 'scan-engine';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -598,6 +601,38 @@ export interface AgentJob {
     model?: string; // default 'opus'
     /** Per-agent wall-clock cap before the spawn is killed (default 240000). */
     timeoutMs?: number;
+  };
+
+  /**
+   * Refactoring Scan Engine v2 input. Set when `jobType === 'scan-engine'`. The
+   * daemon's executeScanEngineJob runs recon + subsystem-decompose + the LLM
+   * swarm over the brownfield clone and writes a phased plan.
+   */
+  scanEnginePayload?: {
+    projectId: string;
+    projectPath: string;
+    /** Source subdir for recon (`--src`). Default 'src'. */
+    src?: string;
+    /** Max subsystems given a dedicated analyzer (cap/sample). Default 24. */
+    cap?: number;
+  };
+
+  /** Denormalized headline of a `scan-engine` run; the full scan rides S3. */
+  scanEngineSummary?: {
+    auditId: string;
+    findingCount: number;
+    counts: {
+      total: number;
+      deterministic: number;
+      llm: number;
+      byDimension: Record<string, number>;
+    };
+    phaseCount: number;
+    gateViolations: number;
+    lowConfidence: boolean;
+    /** Whether scan.json was uploaded to S3 (knowledge-live/<id>/_refactor/scan.json). */
+    scanAvailable: boolean;
+    reportPath: string | null;
   };
 
   /** Result of a `dual-agent-compare` run — denormalized onto the job row (MVP transport). */

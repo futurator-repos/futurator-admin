@@ -215,6 +215,15 @@ export const compareAgentsBodySchema = z.object({
 });
 
 /**
+ * Refactoring Scan Engine v2 — body for `POST /api/party/projects/:id/scan-engine`.
+ * Hybrid deterministic recon + LLM swarm over the migrated brownfield clone.
+ */
+export const scanEngineBodySchema = z.object({
+  src: z.string().min(1).max(128).optional(),
+  cap: z.number().int().min(1).max(200).optional(),
+});
+
+/**
  * Party docs are scoped. `session` docs belong to a single debate (S3 key
  * `party-docs/<projectId>/_session/<sessionId>/<file>`); `shared` docs are
  * project-level knowledge visible in every debate of the project

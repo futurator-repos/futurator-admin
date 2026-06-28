@@ -54,6 +54,9 @@ export const JOB_HANDLER_ULTRACODE_BENCH = 'ultracode-bench';
 // same question over an assessed app's clone — Agent A vanilla, Agent B + the
 // Mycelium graph MCP — and captures answer/latency/tokens/cost/graph-tool usage.
 export const JOB_HANDLER_DUAL_AGENT_COMPARE = 'dual-agent-compare';
+// Refactoring Scan Engine v2. Hybrid deterministic recon + LLM swarm → a
+// dimension-tagged finding pool + a phased, dependency-ordered refactoring plan.
+export const JOB_HANDLER_SCAN_ENGINE = 'scan-engine';
 
 /**
  * Decide which handler should run a given job.
@@ -89,6 +92,7 @@ export function selectHandler(job) {
   if (job.jobType === 'refactor-audit') return JOB_HANDLER_REFACTOR_AUDIT;
   if (job.jobType === 'ultracode-bench') return JOB_HANDLER_ULTRACODE_BENCH;
   if (job.jobType === 'dual-agent-compare') return JOB_HANDLER_DUAL_AGENT_COMPARE;
+  if (job.jobType === 'scan-engine') return JOB_HANDLER_SCAN_ENGINE;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
 }
@@ -106,6 +110,21 @@ export function validateDualAgentCompareJob(job) {
   if (!p.projectId) return { ok: false, reason: 'projectId-missing' };
   if (!p.projectPath) return { ok: false, reason: 'projectPath-missing' };
   if (!p.question || !String(p.question).trim()) return { ok: false, reason: 'question-missing' };
+  return { ok: true };
+}
+
+/**
+ * Structural check for scan-engine jobs (Refactoring Scan Engine v2). Rejects
+ * malformed rows before the daemon runs recon + spawns the LLM swarm.
+ */
+export function validateScanEngineJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'scan-engine') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.scanEnginePayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'scanEnginePayload-missing' };
+  if (!p.projectId) return { ok: false, reason: 'projectId-missing' };
+  if (!p.projectPath) return { ok: false, reason: 'projectPath-missing' };
   return { ok: true };
 }
 

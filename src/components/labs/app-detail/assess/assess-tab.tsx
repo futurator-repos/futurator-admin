@@ -26,6 +26,8 @@ import { NewPlanModal } from '../new-plan-modal';
 import { HotspotDashboard } from './hotspot-dashboard';
 import { RefactorGraph } from './refactor-graph';
 import { AgentCompare } from './agent-compare';
+import { ScanReport } from './scan-report';
+import { useRunScanEngine } from '@/hooks/use-scan-engine';
 import { PrivacyDashboard } from './privacy-dashboard';
 
 /**
@@ -142,6 +144,27 @@ export function AssessTab({ app }: { app: App }) {
     },
     [params, router],
   );
+
+  // ── Refactoring Scan Engine v2 (hybrid recon + swarm) — its own polled job. ──
+  const scanJobId = params.get('scanJob');
+  const { data: scanJob } = useAppAuditJob(scanJobId);
+  const scanRun = useRunScanEngine(app.appId);
+  const scanStatus = scanJob?.status;
+  const scanRunning = !!scanJobId && scanStatus !== 'COMPLETED' && scanStatus !== 'FAILED';
+  const scanSummary = scanJob?.scanEngineSummary;
+  const scanAvailable = !!scanSummary?.scanAvailable;
+  const setScanJob = useCallback(
+    (id: string) => {
+      const next = new URLSearchParams(params.toString());
+      next.set('tab', 'assess');
+      next.set('scanJob', id);
+      router.replace(`?${next.toString()}`);
+    },
+    [params, router],
+  );
+  const startScan = () => {
+    scanRun.mutate({}, { onSuccess: (res) => setScanJob(res.jobId) });
+  };
 
   const startAudit = () => {
     run.mutate(
@@ -535,6 +558,88 @@ export function AssessTab({ app }: { app: App }) {
           app&apos;s refactor hotspots.
         </div>
       )}
+
+      {/* ── Refactoring Scan Engine v2 — hybrid deterministic recon + LLM swarm
+          → dimension-tagged findings + a phased, dependency-ordered plan. ── */}
+      <div
+        data-testid="scan-engine-section"
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+          borderTop: '1px solid var(--border)',
+          paddingTop: 16,
+          marginTop: 4,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <h3 style={{ fontSize: 14, fontWeight: 600, color: 'var(--foreground)', margin: 0 }}>
+              Refactoring Scan v2 (hybrid)
+            </h3>
+            <p style={{ fontSize: 12, color: 'var(--text-dim)', margin: '4px 0 0' }}>
+              Deterministic recon builds the structural skeleton, then an LLM swarm (per-subsystem +
+              cross-cutting passes) adds the semantic findings recon can&apos;t see. Output: a
+              dimension-tagged priority matrix (architecture · safety · compliance · quality ·
+              correctness) and a phased, dependency-ordered plan. Report-only.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={startScan}
+            disabled={scanRun.isPending || scanRunning}
+            data-testid="scan-engine-run"
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--background)',
+              background: 'var(--foreground)',
+              border: 'none',
+              borderRadius: 6,
+              padding: '7px 14px',
+              cursor: scanRun.isPending || scanRunning ? 'not-allowed' : 'pointer',
+              opacity: scanRun.isPending || scanRunning ? 0.5 : 1,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {scanRunning
+              ? 'Scanning…'
+              : scanRun.isPending
+                ? 'Starting…'
+                : scanAvailable
+                  ? 'Re-scan'
+                  : 'Run v2 scan'}
+          </button>
+        </div>
+        {scanRunning && (
+          <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+            Running recon → subsystem decomposition → swarm → phased plan (a few minutes)…
+          </div>
+        )}
+        {scanStatus === 'FAILED' && (
+          <div style={{ fontSize: 11, color: 'var(--destructive)' }}>
+            Scan failed: {scanJob?.errorMessage || 'unknown error'}
+          </div>
+        )}
+        <ScanReport appId={app.appId} available={scanAvailable} />
+        {scanJobId && (
+          <details>
+            <summary
+              style={{
+                fontSize: 12,
+                color: 'var(--text-dim)',
+                cursor: 'pointer',
+                userSelect: 'none',
+              }}
+            >
+              Scan log
+            </summary>
+            <div style={{ marginTop: 8 }}>
+              <StoryLiveOutput jobId={scanJobId} hideResponse />
+            </div>
+          </details>
+        )}
+      </div>
 
       <NewPlanModal
         appId={app.appId}

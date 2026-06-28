@@ -117,6 +117,7 @@ import {
   assessProjectParamsSchema,
   assessProjectBodySchema,
   compareAgentsBodySchema,
+  scanEngineBodySchema,
   updateMigrationInputSchema,
 } from '../shared/schemas/party-schema';
 import {
@@ -7240,6 +7241,65 @@ app.post('/api/party/projects/:id/agent-compare', async (c) => {
       question: parsedBody.data.question,
       ...(parsedBody.data.model ? { model: parsedBody.data.model } : {}),
       ...(parsedBody.data.timeoutMs !== undefined ? { timeoutMs: parsedBody.data.timeoutMs } : {}),
+    },
+  });
+
+  return c.json({ jobId, projectId: parsed.data.projectId }, 202);
+});
+
+/**
+ * POST /api/party/projects/:id/scan-engine — Refactoring Scan Engine v2.
+ * Enqueues a `scan-engine` job: deterministic recon + subsystem decomposition +
+ * an LLM swarm produce a dimension-tagged finding pool and a phased, dependency-
+ * ordered refactoring plan. Brownfield-only.
+ */
+app.post('/api/party/projects/:id/scan-engine', async (c) => {
+  const projectId = c.req.param('id');
+  const parsed = assessProjectParamsSchema.safeParse({ projectId });
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid projectId');
+  }
+
+  const rawBody = (await c.req.json().catch(() => ({}))) as unknown;
+  const parsedBody = scanEngineBodySchema.safeParse(rawBody ?? {});
+  if (!parsedBody.success) {
+    throw new ValidationError(parsedBody.error.errors[0]?.message || 'invalid scan-engine body');
+  }
+
+  const project = await partyProjectsRepo.getProject(parsed.data.projectId);
+  if (!project) throw new NotFoundError('PartyProject', parsed.data.projectId);
+  if (project.kind !== 'brownfield') {
+    throw new AppError(
+      'INVALID_FOR_GREENFIELD',
+      'Scan engine is only valid for migrated brownfield Party projects',
+      400,
+    );
+  }
+  if (!project.path) {
+    throw new AppError('INVALID_STATE', 'Brownfield project has no clone path on disk', 409);
+  }
+
+  const sessionBusy = await partySessionsRepo.hasProcessingSession(parsed.data.projectId);
+  if (sessionBusy) {
+    throw new AppError('PROJECT_BUSY', 'A session for this project is currently processing', 409);
+  }
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: c.get('user').userId,
+    workingDir: project.path,
+    jobType: 'scan-engine',
+    projectId: parsed.data.projectId,
+    scanEnginePayload: {
+      projectId: parsed.data.projectId,
+      projectPath: project.path,
+      ...(parsedBody.data.src ? { src: parsedBody.data.src } : {}),
+      ...(parsedBody.data.cap !== undefined ? { cap: parsedBody.data.cap } : {}),
     },
   });
 

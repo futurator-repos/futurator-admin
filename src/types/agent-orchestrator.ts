@@ -221,6 +221,24 @@ export interface AgentJob {
    * Mirror of `AgentJob.refactorAuditSummary` in
    * `functions/shared/types/agent-orchestrator.ts`.
    */
+  /** Refactoring Scan Engine v2 summary (jobType 'scan-engine'), denormalized
+   *  onto the job row. Full scan rides S3 (_refactor/scan.json). */
+  scanEngineSummary?: {
+    auditId: string;
+    findingCount: number;
+    counts: {
+      total: number;
+      deterministic: number;
+      llm: number;
+      byDimension: Record<string, number>;
+    };
+    phaseCount: number;
+    gateViolations: number;
+    lowConfidence: boolean;
+    scanAvailable: boolean;
+    reportPath: string | null;
+  };
+
   /** Dual-agent comparison result (jobType 'dual-agent-compare'), denormalized
    *  onto the job row by the daemon. Mirror of the backend field. */
   dualAgentCompareResult?: {
