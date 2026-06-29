@@ -241,6 +241,32 @@ export default $config({
       },
     });
 
+    // ── Pipeline-3 plan-spec graph (StoryNode rows; development-plan §5.1) ──
+    // One-table-per-concern: the converged plan_spec lands here as StoryNode
+    // rows. PK storyId; GSI-1 frontier scan per plan by state, GSI-2 cohortBatch
+    // grouping for UI/merge.
+    const planSpecGraphTable = new sst.aws.Dynamo('PlanSpecGraphTable', {
+      fields: {
+        storyId: 'string',
+        planId: 'string',
+        state: 'string',
+        cohortBatch: 'number',
+      },
+      primaryIndex: { hashKey: 'storyId' },
+      globalIndexes: {
+        'planId-state-index': { hashKey: 'planId', rangeKey: 'state' },
+        'planId-cohortBatch-index': { hashKey: 'planId', rangeKey: 'cohortBatch' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-plan-spec-graph',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
     // ── Labs Party Tables (Epic 15) ──
     const partyProjectsTable = new sst.aws.Dynamo('PartyProjectsTable', {
       fields: { projectId: 'string' },
@@ -1014,6 +1040,7 @@ export default $config({
         propagatorProposalsTable,
         agentEventsTable,
         epicWorkflowsTable,
+        planSpecGraphTable,
         projectRegistryTable,
         partyProjectsTable,
         partySessionsTable,
@@ -1057,6 +1084,7 @@ export default $config({
         PROPAGATOR_SIBLING_PIPELINES: process.env.PROPAGATOR_SIBLING_PIPELINES ?? '{}',
         AGENT_EVENTS_TABLE: agentEventsTable.name,
         EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
+        PLAN_SPEC_GRAPH_TABLE: planSpecGraphTable.name,
         PROJECT_REGISTRY_TABLE: projectRegistryTable.name,
         PARTY_PROJECTS_TABLE: partyProjectsTable.name,
         PARTY_SESSIONS_TABLE: partySessionsTable.name,
@@ -1434,6 +1462,7 @@ export default $config({
           agentJobsTable,
           agentEventsTable,
           epicWorkflowsTable,
+          planSpecGraphTable,
           plansTable,
           appsTable,
           attentionItemsTable,
@@ -1443,6 +1472,7 @@ export default $config({
           AGENT_JOBS_TABLE: agentJobsTable.name,
           AGENT_EVENTS_TABLE: agentEventsTable.name,
           EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
+          PLAN_SPEC_GRAPH_TABLE: planSpecGraphTable.name,
           PLANS_TABLE: plansTable.name,
           APPS_TABLE: appsTable.name,
           ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
@@ -1555,6 +1585,7 @@ export default $config({
           appsTable,
           plansTable,
           epicWorkflowsTable,
+          planSpecGraphTable,
           agentJobsTable,
           agentEventsTable,
           timingSummaryTable,
@@ -1563,6 +1594,7 @@ export default $config({
           APPS_TABLE: appsTable.name,
           PLANS_TABLE: plansTable.name,
           EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
+          PLAN_SPEC_GRAPH_TABLE: planSpecGraphTable.name,
           AGENT_JOBS_TABLE: agentJobsTable.name,
           AGENT_EVENTS_TABLE: agentEventsTable.name,
           TIMING_SUMMARY_TABLE: timingSummaryTable.name,

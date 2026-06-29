@@ -21,6 +21,8 @@ export const TABLE_NAMES = {
   agentEvents: process.env.AGENT_EVENTS_TABLE || 'futurator-agent-events',
   partyEvents: process.env.PARTY_EVENTS_TABLE || 'futurator-party-events',
   epicWorkflows: process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflows',
+  // Pipeline-3 — StoryNode rows from a converged plan_spec (development-plan §5.1).
+  planSpecGraph: process.env.PLAN_SPEC_GRAPH_TABLE || 'futurator-plan-spec-graph',
   projectRegistry: process.env.PROJECT_REGISTRY_TABLE || 'futurator-project-registry',
   partyProjects: process.env.PARTY_PROJECTS_TABLE || 'futurator-party-projects',
   partySessions: process.env.PARTY_SESSIONS_TABLE || 'futurator-party-sessions',
