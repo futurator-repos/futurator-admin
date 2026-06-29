@@ -31,6 +31,7 @@ import { registerChild, unregisterChild } from './lib/child-tracker.mjs';
 import { assertSpawnAllowed, ShellGuardViolation } from './lib/shell-guard.mjs';
 import { freezeFlagsOntoJob } from '../lib/pipeline-flags.mjs';
 import { buildGateSpawn } from '../lib/gate-settings.mjs';
+import { buildSubagentInjectionArgs } from '../lib/subagent-start.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -271,6 +272,11 @@ export async function runEpicDevPipeline(opts) {
     ledgerPath: join(projectRoot, '.pipeline', 'gate-events.jsonl'),
   });
 
+  // ── Pipeline-3: AC-aware laziness injection (development-plan §5.3) ─────────
+  // The single-source SubagentStart seam; today it carries the laziness ruleset
+  // (P3_LAZY_MODE), later instincts + a facts pack. [] when nothing is active.
+  const injectionArgs = buildSubagentInjectionArgs({ p3Flags });
+
   const args = [
     '-p', prompt,
     '--model', payload.orchestratorModel,
@@ -278,6 +284,7 @@ export async function runEpicDevPipeline(opts) {
     '--verbose',
     '--permission-mode', 'bypassPermissions',
     ...gate.args,
+    ...injectionArgs,
   ];
 
   logger.info?.(
