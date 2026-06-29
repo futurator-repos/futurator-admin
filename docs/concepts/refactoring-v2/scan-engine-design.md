@@ -9,6 +9,93 @@
 
 ---
 
+## 0. As-Built Status (hand-off summary — read this first)
+
+> This section reflects what is **actually shipped** in Futurator-Admin as of the latest commit, for
+> agents working on code-quality / refactoring / compliance concepts. §1–§9 below are the original
+> design; this section is the source of truth where they differ.
+
+**Status: BUILT + TESTED, first real run validated** on `applicator-onboarding` (a Next.js/AWS app):
+271 findings (46 deterministic + 225 swarm), 5 dimensions, compliance + infra populated.
+
+**How to run it:** Labs → Assess → "Refactoring Scan v2 (hybrid)" → _Run v2 scan_. One daemon job
+(`jobType: 'scan-engine'`). API: `POST /api/party/projects/:id/scan-engine` (brownfield-only). The
+full result lands in S3 `knowledge-live/<appId>/_refactor/scan.json` (+ `docs/refactoring-scan.md`
+in the clone); a headline rides `scanEngineSummary` on the job row. Report-only — never edits code.
+
+**The pipeline (deterministic-first, ~0-LLM where possible):**
+
+```
+git clone → recon.mjs (graphify · knip · alias-resolve · hotspot-detect · graph-project)
+  → subsystem-decompose.mjs   (named/scoped subsystems from parent-dir + hotspots + hubs)
+  → privacy-scan-internal.mjs (GDPR + EU AI Act — ZERO LLM)
+  → infra-extract.mjs         (AWS/db/AI/3rd-party + IaC inventory — ZERO LLM)   ← §10
+  → tests-detect.mjs          (TDD-maturity — ZERO LLM)
+  → LLM swarm (parallel): per-subsystem analyzers + 5 cross-cutting passes
+      (error-handling · magic-numbers · type-safety · ui-centralization · safety-security)
+  → version-adjudicator + anchored-path guard → union + dedupe
+  → phase-planner.mjs (topo-sort over a rework DAG → Phase 0..6, char-net-gated)
+  → maturity-score.mjs (the RAG scorecard)                                       ← §11
+  → aggregator report-writer (markdown)
+```
+
+**The five finding dimensions:** `architecture` · `safety-security` · `compliance` ·
+`code-quality-refactoring` · `correctness`. Compliance findings cost **zero LLM** (the internal
+privacy scanner is complete).
+
+**Module map (file → role):**
+
+| Concern                                                     | File(s)                                                                             | Tests |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------- | ----- |
+| Subsystem decomposition                                     | `daemon/scripts/refactor-recon/subsystem-decompose.mjs`                             | ✓     |
+| Canonical finding shape                                     | `functions/shared/schemas/scan-finding-schema.ts`                                   | ✓     |
+| Deterministic→ScanFinding mappers                           | `daemon/pipelines/lib/scan-finding-map.mjs`                                         | ✓     |
+| Swarm prompts + parser                                      | `daemon/pipelines/lib/scan-engine-prompts.mjs`                                      | —     |
+| Orchestration core                                          | `daemon/pipelines/scan-engine-job-runner.mjs`                                       | ✓     |
+| Phased plan (the differentiator)                            | `daemon/pipelines/lib/phase-planner.mjs`                                            | ✓     |
+| **Infra inventory** (§10)                                   | `daemon/scripts/refactor-recon/infra-extract.mjs`                                   | ✓     |
+| **Maturity scorecard** (§11)                                | `daemon/pipelines/lib/maturity-score.mjs`                                           | ✓     |
+| TDD-maturity detector                                       | `daemon/scripts/refactor-recon/tests-detect.mjs`                                    | ✓     |
+| Privacy/compliance scanner                                  | `daemon/scripts/refactor-recon/privacy-scan-internal.mjs` + `privacy-detectors.mjs` | ✓     |
+| Daemon job handler                                          | `executeScanEngineJob` in `daemon/agent-daemon.mjs`                                 | —     |
+| UI (report, matrix, phases, scorecard, infra, plan-builder) | `src/components/labs/app-detail/assess/scan-report.tsx`                             | ✓     |
+
+**Sequencing of the scan authorities (why order matters):** `infra-extract` runs **before** the
+compliance/AI-Act reasoning because it is the source of truth they consume — it produces the
+`external[]` list (every processor data LEAVES the account to: external AI, Supabase, Auth0, …),
+which is exactly what GDPR Art. 44 (transfers) and the EU AI Act key off. The privacy scanner and
+infra inventory share `privacy-detectors.mjs`, so the role/residency taxonomy is identical across
+the graph, the scanner, and the infra map (no divergent re-detection). Front-end↔infra security is
+surfaced by the `boundaries` count (client vs server files, files touching external) and the
+`safety-security` cross-cutting pass.
+
+**The phased plan (as-built ladder):** Phase 0 stop-the-bleeding (dead code + High/Medium Trivial
+quick-wins) → 1 constants & contracts → 2 shared helpers → 3 UI centralization → 4 god-file
+decomposition → 5 correctness → 6 scale. Routing is text-driven for LLM findings (they carry no
+structural hints) — see `assignBand` in `phase-planner.mjs`. Every mutating phase auto-injects a
+characterization-net story so the generated `planOutput` passes `findCharacterizationGateViolations`
+by construction.
+
+**Assessment → real refactoring (the bridge):** the scan report's _Recommended Sequencing_ has
+per-phase checkboxes → _Create plan from N phases →_ compiles a dependency-ordered, Strangler-Fig,
+char-net-gated intent → `NewPlanModal` → the existing dev pipeline (`buildScanPlanIntent`).
+
+**Honest boundaries / not-yet-built:**
+
+- **Infra is static inference, not live probing.** Tier 1 (which services, from SDK imports + IaC
+  files) is built. Tier 2 (deep configs — ALB rules, Lambda memory, CloudFront behaviours — via an
+  LLM cartographer reading IaC) and Tier 3 (probing real AWS state) are designed, not built.
+- **eslint-health** is a maturity axis but reports `unmeasured` — running eslint on an arbitrary
+  clone needs its config+deps installed first (install → lint → weight code>tests>libs is the next
+  detector). **SDD-driven** axis is a stub for the parallel spec-driven-development work.
+- **knip** is best-effort; when it doesn't run, the clutter axis is flagged degraded and dead-code
+  falls back to the orphan heuristic (`needs-review`).
+- Single-app / single-audit; no cross-portfolio roll-up yet.
+
+See §10 (Infra) and §11 (Maturity) for the modules added after the original design.
+
+---
+
 ## 1. Thesis & Why Hybrid
 
 The v1 refactoring pipeline already ships a **cheap deterministic recon** (`recon.mjs` →
@@ -426,3 +513,62 @@ findings are dropped before the writer, so no tokens are spent narrating halluci
 7. **Aggregator context limits.** A very large repo may exceed the single report-writer's context even
    after category-rolling. _Open: do we shard the writer by dimension and stitch, risking the loss of
    cross-dimension `(overlaps)` dedupe that the single-writer design exists to provide?_
+
+---
+
+## 10. Infrastructure module (as-built)
+
+**File:** `daemon/scripts/refactor-recon/infra-extract.mjs` · **UI:** the "Infrastructure" sub-tab in
+`scan-report.tsx`.
+
+**What it does.** A deterministic inventory of HOW the app's infra works, so the scan can explain it
+and — critically — **feed the compliance / EU-AI-Act authorities a single source of truth** instead
+of each lane re-detecting providers. It walks the clone and classifies every import + IaC file:
+
+- **AWS services** via an `@aws-sdk/client-*` catalog (`AWS_SERVICES`): DynamoDB, RDS, S3, Lambda,
+  CloudFront, ALB/ELB, API Gateway, Cognito, SES, SNS, SQS, EventBridge, Step Functions, Secrets
+  Manager, SSM, KMS, CloudWatch, Bedrock, Textract/Rekognition/…, ECS/EC2, Amplify — each tagged with
+  a `category` (compute/database/storage/network/auth/messaging/ai/secrets/…) and `dataStore` flag.
+- **Databases / AI / 3rd-party** via the shared `privacy-detectors.mjs` (residency-aware).
+- **IaC / deploy** via path detection: SST, Terraform, Pulumi, Serverless, CloudFormation/SAM, CDK,
+  Amplify, Vercel, Docker.
+
+**The cross-link that feeds the other authorities** — `inventory.external[]`: every processor data
+LEAVES the account to (external AI like Claude/OpenAI/Gemini, Supabase, Auth0, Stripe, …). This is
+exactly the GDPR Art. 44 (cross-border transfer) + EU AI Act ("is data sent as-is to an external
+provider?") surface. AWS in-account services (DynamoDB, S3, Bedrock) are excluded from `external`.
+`boundaries` (client vs server files, files touching external) is the front-end↔infra security
+surface the `safety-security` pass reasons over.
+
+**Verified on applicator-onboarding:** DynamoDB (41 files), S3, 4 external AI providers, Auth0,
+CDK/Docker/Vercel, 40 files touching external processors.
+
+**Tiers (honest boundary):** Tier 1 (which services + IaC presence) = built. Tier 2 (deep configs:
+ALB listener rules, Lambda memory/timeout, CloudFront behaviours) needs an LLM "infra cartographer"
+reading the IaC files — designed, not built. Tier 3 (live AWS state) needs probing real AWS —
+out of scope (the scan never leaves the box).
+
+---
+
+## 11. Maturity scorecard module (as-built)
+
+**File:** `daemon/pipelines/lib/maturity-score.mjs` (+ `tests-detect.mjs`) · **UI:** `MaturityScorecard`
+in `scan-report.tsx`.
+
+The high-level RAG overview above the findings — a score per maturity axis, deterministic + ~0 LLM,
+derived from the finding pool + cheap detector summaries. Axes with no signal report `unmeasured`
+(with a "+ add detector" CTA) rather than a fake score.
+
+| Axis                           | Source                                              | Status                         |
+| ------------------------------ | --------------------------------------------------- | ------------------------------ |
+| Component-driven (anti-inline) | UI-centralization findings + design-system hotspots | live                           |
+| Dead code / clutter            | knip / dead-code findings                           | live (degraded if knip absent) |
+| Structure sanity               | god-objects + duplicate-subsystems                  | live                           |
+| Type safety                    | unsafe-cast / unvalidated findings                  | live                           |
+| Security & compliance          | High safety-security + compliance findings          | live                           |
+| Graph installed                | graph built?                                        | live                           |
+| TDD maturity                   | `tests-detect.mjs` (test/source ratio + runner)     | live                           |
+| Eslint health                  | (needs install-then-lint detector)                  | `unmeasured`                   |
+| SDD-driven                     | (parallel spec-driven-development work)             | `unmeasured`                   |
+
+`overall` averages only the measured axes. Tunable thresholds live in `computeMaturity`.
