@@ -52,11 +52,26 @@ export interface ScanPhase {
   items: string[];
 }
 
+export interface MaturityAxis {
+  key: string;
+  label: string;
+  score: number | null;
+  status: 'good' | 'fair' | 'poor' | 'unmeasured';
+  detail: string;
+  measured: boolean;
+}
+export interface Maturity {
+  axes: MaturityAxis[];
+  overall: number | null;
+}
+
 export interface ScanReport {
   findings: ScanFinding[];
   phases: ScanPhase[];
   /** The generated planOutput (epics/stories) — present in scan.json. */
   planOutput?: unknown;
+  /** Codebase maturity scorecard (the high-level RAG overview). */
+  maturity?: Maturity;
   gateViolations: Array<{ epicId: string; storyId: string; reason: string }>;
   counts: {
     total: number;

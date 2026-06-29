@@ -7353,6 +7353,7 @@ async function executeScanEngineJob(job) {
   const reconPath = new URL('./scripts/refactor-recon/recon.mjs', import.meta.url).pathname;
   const decomposePath = new URL('./scripts/refactor-recon/subsystem-decompose.mjs', import.meta.url).pathname;
   const privacyPath = new URL('./scripts/refactor-recon/privacy-scan-internal.mjs', import.meta.url).pathname;
+  const testsPath = new URL('./scripts/refactor-recon/tests-detect.mjs', import.meta.url).pathname;
 
   // Spawn a plain Node child (deterministic stages — never the agent path).
   const spawnNode = (args, cwd) =>
@@ -7391,10 +7392,20 @@ async function executeScanEngineJob(job) {
         } catch (pe) { log('warn', `[${short}] scan-engine privacy lane failed (non-fatal): ${pe?.message || pe}`); }
         const graph = rj('graph.resolved.json') || rj('graph.json') || { nodes: [] };
         const resolved = rj('resolved-imports.json') || {};
+        const hotspotsDoc = rj('hotspots.json') || {};
+        // TDD-maturity detector — deterministic file-walk, always runnable.
+        let tests = null;
+        try {
+          await spawnNode([testsPath, repo, '--out', pathJoin(od, 'tests.json')], repo);
+          tests = rj('tests.json');
+        } catch (te) { log('warn', `[${short}] scan-engine tests detector failed (non-fatal): ${te?.message || te}`); }
         return {
-          hotspots: (rj('hotspots.json') || {}).hotspots || [],
+          hotspots: hotspotsDoc.hotspots || [],
           shards: rj('subsystem-shards.json') || { shards: [] },
           privacySummary,
+          tests,
+          // knip actually produced data? (else the clutter axis is degraded)
+          knipRan: hotspotsDoc.toolStatus?.knip === 'ok',
           anchoredPaths: new Set((graph.nodes || []).map((n) => n.source_file).filter(Boolean)),
           hubs: resolved.hubs || [],
         };
@@ -7442,6 +7453,7 @@ async function executeScanEngineJob(job) {
             gateViolations: result.gateViolations,
             counts: result.counts,
             lowConfidence: result.lowConfidence,
+            maturity: result.maturity,
             reportMarkdown: result.reportMarkdown,
           }),
           ContentType: 'application/json',
@@ -7489,6 +7501,7 @@ async function executeScanEngineJob(job) {
         lowConfidence: result.lowConfidence,
         scanAvailable,
         reportPath,
+        maturity: result.maturity,
       },
     });
     log(

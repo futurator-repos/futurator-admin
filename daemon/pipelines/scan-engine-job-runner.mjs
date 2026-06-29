@@ -9,6 +9,7 @@
 
 import { hotspotToFinding, privacyToFindings, dropUnanchored, locPath } from './lib/scan-finding-map.mjs';
 import { planPhases, toPlanOutput } from './lib/phase-planner.mjs';
+import { computeMaturity } from './lib/maturity-score.mjs';
 import {
   analyzerPrompt,
   crossCuttingPrompt,
@@ -142,6 +143,18 @@ export async function runScanEngine(job, deps) {
   // (e/f) union + dedupe.
   const findings = dedupe([...detFindings, ...llmFindings]);
 
+  // Maturity scorecard — the high-level RAG overview (deterministic, ~0 LLM).
+  const maturity = computeMaturity({
+    findings,
+    hotspots,
+    tests: art.tests || null,
+    eslint: art.eslint || null,
+    graphAvailable: anchored.size > 0,
+    knipRan: !!art.knipRan,
+    sdd: art.sdd || null,
+  });
+  pushEvent('scan.maturity', { overall: maturity.overall });
+
   // (g) phased plan + char-net gate.
   const plan = planPhases(findings);
   const byId = new Map(findings.map((f) => [f.id, f]));
@@ -170,6 +183,7 @@ export async function runScanEngine(job, deps) {
     gateViolations,
     reportMarkdown,
     lowConfidence,
+    maturity,
     counts: {
       total: findings.length,
       deterministic: detFindings.length,

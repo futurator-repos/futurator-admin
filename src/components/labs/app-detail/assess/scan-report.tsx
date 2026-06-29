@@ -12,7 +12,82 @@ import {
   useScanReport,
   type ScanFinding,
   type ScanReport as ScanReportData,
+  type MaturityAxis,
 } from '@/hooks/use-scan-engine';
+
+const STATUS_COLOR: Record<string, string> = {
+  good: 'var(--success, #22c55e)',
+  fair: 'var(--warning, #f59e0b)',
+  poor: 'var(--destructive, #ef4444)',
+  unmeasured: 'var(--text-dim)',
+};
+
+/** The high-level codebase maturity overview — a RAG dot per axis (design: the
+ *  "checkbox-matrix higher overview"). Filled dots = score/5; unmeasured axes
+ *  show a CTA instead of a fake score. */
+function MaturityScorecard({ axes, overall }: { axes: MaturityAxis[]; overall: number | null }) {
+  const dots = (score: number | null) => {
+    if (score == null) return '○○○○○';
+    const filled = Math.round(score * 5);
+    return '●'.repeat(filled) + '○'.repeat(5 - filled);
+  };
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        padding: 12,
+        background: 'var(--bg-elev)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
+        <h4 style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', margin: 0 }}>
+          Codebase Maturity
+        </h4>
+        {overall != null && (
+          <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+            overall {Math.round(overall * 100)}%
+          </span>
+        )}
+      </div>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
+          gap: 6,
+        }}
+      >
+        {axes.map((a) => (
+          <div
+            key={a.key}
+            title={a.detail}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              fontSize: 11.5,
+              padding: '3px 4px',
+            }}
+          >
+            <span
+              style={{
+                color: STATUS_COLOR[a.status],
+                fontFamily: 'var(--font-mono)',
+                letterSpacing: 1,
+              }}
+            >
+              {dots(a.score)}
+            </span>
+            <span style={{ color: 'var(--foreground)', flex: 1 }}>{a.label}</span>
+            <span style={{ color: STATUS_COLOR[a.status], fontSize: 10.5 }}>
+              {a.measured ? a.status : '+ add detector'}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /**
  * Download the full v2 scan as a JSON file — for auditing / sharing the scan back
@@ -136,6 +211,9 @@ export function ScanReport({
   return (
     <div data-testid="scan-report" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <Header report={report} appId={appId} />
+      {report.maturity?.axes?.length ? (
+        <MaturityScorecard axes={report.maturity.axes} overall={report.maturity.overall} />
+      ) : null}
       <PriorityMatrix findings={report.findings} />
       <ByDimension findings={report.findings} />
       <Phases report={report} onCreatePlan={onCreatePlan} />
