@@ -51,6 +51,10 @@ export const scanFindingSchema = z.object({
   /** Structured pointer (methods/importers/community/copies/cohesion) — NEVER a code dump. */
   evidence: z.record(z.unknown()).default({}),
   source: z.enum(['deterministic', 'llm']),
+  /** The swarm task that produced this finding — a subsystem shardKey, a
+   *  cross-cutting pass area, or 'deterministic'. The merge key for granular
+   *  (mid-grained) re-scans: a targeted re-run swaps only findings sharing it. */
+  producedBy: z.string().optional(),
   /** Adjudicated findings only. */
   confidence: z.number().min(0).max(1).optional(),
   /** Other finding ids this remediation must follow (foundations-first). */

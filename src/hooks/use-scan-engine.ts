@@ -24,6 +24,14 @@ export interface RunScanEngineInput {
   privacyMode?: 'internal' | 'external';
   /** 'full' (default, recon + swarm) | 'deterministic' (no swarm; ~0 LLM tokens). */
   mode?: 'full' | 'deterministic';
+  /** Granular re-scan: re-run ONLY these swarm tasks (subsystem shardKeys and/or
+   *  cross-cutting pass areas) and merge into the persisted scan — a few agents
+   *  instead of ~48. */
+  targets?: string[];
+  /** Reuse cached recon (skip graphify/decompose/deps). Default true when targeted. */
+  reuseRecon?: boolean;
+  /** Auto-target the subsystems whose files changed since the last-scanned SHA. */
+  autoTargetChanged?: boolean;
 }
 
 export type ScanDimension =
@@ -44,6 +52,10 @@ export interface ScanFinding {
   suggestion: string;
   evidence?: Record<string, unknown>;
   source: 'deterministic' | 'llm';
+  /** The swarm task that produced this finding — a subsystem shardKey, a
+   *  cross-cutting pass area, or 'deterministic'. The merge key for granular
+   *  re-scans (group findings by it to offer per-task re-runs). */
+  producedBy?: string;
   dependsOn?: string[];
   overlaps?: string[];
 }
@@ -123,6 +135,10 @@ export interface ScanReport {
   };
   lowConfidence: boolean;
   reportMarkdown?: string;
+  /** Provenance for granular re-scans (set by the daemon on upload). */
+  scannedSha?: string | null;
+  scannedAt?: string;
+  mode?: 'full' | 'deterministic' | 'targeted';
 }
 
 export function useRunScanEngine(appId: string | null) {

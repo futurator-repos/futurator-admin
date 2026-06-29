@@ -619,6 +619,13 @@ export interface AgentJob {
     privacyMode?: 'internal' | 'external';
     /** 'full' (default, recon + LLM swarm) | 'deterministic' (no swarm; ~0 LLM). */
     mode?: 'full' | 'deterministic';
+    /** Granular re-scan: re-run only these swarm tasks (subsystem shardKeys and/or
+     *  cross-cutting pass areas) and merge into the persisted scan. */
+    targets?: string[];
+    /** Reuse cached recon (skip graphify/decompose/deps). Default true when targeted. */
+    reuseRecon?: boolean;
+    /** Auto-target the subsystems whose files changed since the last-scanned SHA. */
+    autoTargetChanged?: boolean;
   };
 
   /** Denormalized headline of a `scan-engine` run; the full scan rides S3. */

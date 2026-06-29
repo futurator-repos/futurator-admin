@@ -7433,47 +7433,58 @@ async function executeScanEngineJob(job) {
       },
       runDecompose: ({ projectPath: repo, cap }) =>
         spawnNode([decomposePath, pathJoin(repo, 'graphify-out'), '--repo', repo, ...(cap ? ['--cap', String(cap)] : [])], repo),
-      readArtifacts: async ({ projectPath: repo }) => {
+      readArtifacts: async ({ projectPath: repo, reuseDetectors }) => {
         const od = pathJoin(repo, 'graphify-out');
         const rj = (f) => { try { return JSON.parse(readFileSync(pathJoin(od, f), 'utf8')); } catch { return null; } };
-        // Privacy/compliance lane. Default 'internal' (our own scanner, ~0 LLM,
-        // source stays on the box); 'external' routes to the data-privacy service.
+        // reuseDetectors (targeted re-scan over unchanged structure): read the
+        // detector outputs the PRIOR recon already wrote to graphify-out/ instead of
+        // re-spawning them — ~0 wall-clock, keeps the maturity inputs identical.
         let privacySummary = null;
-        try {
-          if ((p.privacyMode || 'internal') === 'external') {
-            const extPath = process.env.PRIVACY_RECON_PATH || '/opt/data-privacy-platform/scripts/privacy-recon.mjs';
-            const svc = process.env.PRIVACY_SERVICE_URL || '';
-            const token = process.env.PRIVACY_SERVICE_TOKEN || '';
-            await spawnNode([extPath, repo, '--regulation', 'all', '--out', pathJoin(od, 'privacy.json'), ...(svc ? ['--service', svc] : []), ...(token ? ['--token', token] : [])], repo);
-          } else {
-            await spawnNode([privacyPath, repo, '--src', p.src || 'src', '--out', pathJoin(od, 'privacy.json')], repo);
-          }
+        let tests = null;
+        let infra = null;
+        let eslint = null;
+        if (reuseDetectors) {
           const pr = rj('privacy.json');
           if (pr) privacySummary = summarizePrivacyReport(pr);
-        } catch (pe) { log('warn', `[${short}] scan-engine privacy lane failed (non-fatal): ${pe?.message || pe}`); }
+          tests = rj('tests.json');
+          infra = rj('infra.json');
+          eslint = rj('eslint.json');
+        } else {
+          // Privacy/compliance lane. Default 'internal' (our own scanner, ~0 LLM,
+          // source stays on the box); 'external' routes to the data-privacy service.
+          try {
+            if ((p.privacyMode || 'internal') === 'external') {
+              const extPath = process.env.PRIVACY_RECON_PATH || '/opt/data-privacy-platform/scripts/privacy-recon.mjs';
+              const svc = process.env.PRIVACY_SERVICE_URL || '';
+              const token = process.env.PRIVACY_SERVICE_TOKEN || '';
+              await spawnNode([extPath, repo, '--regulation', 'all', '--out', pathJoin(od, 'privacy.json'), ...(svc ? ['--service', svc] : []), ...(token ? ['--token', token] : [])], repo);
+            } else {
+              await spawnNode([privacyPath, repo, '--src', p.src || 'src', '--out', pathJoin(od, 'privacy.json')], repo);
+            }
+            const pr = rj('privacy.json');
+            if (pr) privacySummary = summarizePrivacyReport(pr);
+          } catch (pe) { log('warn', `[${short}] scan-engine privacy lane failed (non-fatal): ${pe?.message || pe}`); }
+          // TDD-maturity detector — deterministic file-walk, always runnable.
+          try {
+            await spawnNode([testsPath, repo, '--out', pathJoin(od, 'tests.json')], repo);
+            tests = rj('tests.json');
+          } catch (te) { log('warn', `[${short}] scan-engine tests detector failed (non-fatal): ${te?.message || te}`); }
+          // Infrastructure inventory — deterministic AWS/db/AI/3rd-party + IaC map.
+          try {
+            await spawnNode([infraPath, repo, '--src', p.src || 'src', '--out', pathJoin(od, 'infra.json')], repo);
+            infra = rj('infra.json');
+          } catch (ie) { log('warn', `[${short}] scan-engine infra extractor failed (non-fatal): ${ie?.message || ie}`); }
+          // Eslint-health detector — runs the repo's own eslint (needs deps; best-effort).
+          if (depsInstalled) {
+            try {
+              await spawnNode([eslintPath, repo, '--out', pathJoin(od, 'eslint.json')], repo);
+              eslint = rj('eslint.json');
+            } catch (ee) { log('warn', `[${short}] scan-engine eslint detector failed (non-fatal): ${ee?.message || ee}`); }
+          }
+        }
         const graph = rj('graph.resolved.json') || rj('graph.json') || { nodes: [] };
         const resolved = rj('resolved-imports.json') || {};
         const hotspotsDoc = rj('hotspots.json') || {};
-        // TDD-maturity detector — deterministic file-walk, always runnable.
-        let tests = null;
-        try {
-          await spawnNode([testsPath, repo, '--out', pathJoin(od, 'tests.json')], repo);
-          tests = rj('tests.json');
-        } catch (te) { log('warn', `[${short}] scan-engine tests detector failed (non-fatal): ${te?.message || te}`); }
-        // Infrastructure inventory — deterministic AWS/db/AI/3rd-party + IaC map.
-        let infra = null;
-        try {
-          await spawnNode([infraPath, repo, '--src', p.src || 'src', '--out', pathJoin(od, 'infra.json')], repo);
-          infra = rj('infra.json');
-        } catch (ie) { log('warn', `[${short}] scan-engine infra extractor failed (non-fatal): ${ie?.message || ie}`); }
-        // Eslint-health detector — runs the repo's own eslint (needs deps; best-effort).
-        let eslint = null;
-        if (depsInstalled) {
-          try {
-            await spawnNode([eslintPath, repo, '--out', pathJoin(od, 'eslint.json')], repo);
-            eslint = rj('eslint.json');
-          } catch (ee) { log('warn', `[${short}] scan-engine eslint detector failed (non-fatal): ${ee?.message || ee}`); }
-        }
         return {
           hotspots: hotspotsDoc.hotspots || [],
           shards: rj('subsystem-shards.json') || { shards: [] },
@@ -7498,6 +7509,39 @@ async function executeScanEngineJob(job) {
         return res?.output || '';
       },
       checkGate: (planOutput) => findCharacterizationGateViolations(planOutput),
+      // Targeted re-scan merges into the last persisted scan.json (fetched from S3).
+      readPriorScan: async () => {
+        try {
+          const s3mod = await import('@aws-sdk/client-s3');
+          if (!_s3Client) _s3Client = new s3mod.S3Client({ region: REGION });
+          const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
+          const projectId = p.projectId || job.projectId;
+          const res = await _s3Client.send(new s3mod.GetObjectCommand({ Bucket: bucket, Key: `knowledge-live/${projectId}/_refactor/scan.json` }));
+          const body = await res.Body.transformToString();
+          return JSON.parse(body);
+        } catch (e) {
+          log('info', `[${short}] scan-engine no prior scan.json to merge (${e?.name || e?.message || e})`);
+          return null;
+        }
+      },
+      // Can a targeted re-scan reuse the cached recon instead of rebuilding it?
+      reconAvailable: ({ projectPath: repo }) => {
+        const od = pathJoin(repo, 'graphify-out');
+        return existsSync(pathJoin(od, 'subsystem-shards.json')) &&
+          (existsSync(pathJoin(od, 'graph.resolved.json')) || existsSync(pathJoin(od, 'graph.json')));
+      },
+      // git-diff the files that changed since the last-scanned SHA (auto-target).
+      changedFiles: (sinceSha) =>
+        new Promise((resolve) => {
+          if (!sinceSha) return resolve(null);
+          const proc = spawn('git', ['-C', projectPath, 'diff', '--name-only', `${sinceSha}..HEAD`], {
+            stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, FORCE_COLOR: '0' },
+          });
+          let out = '';
+          proc.stdout.on('data', (d) => { out += d.toString(); });
+          proc.on('error', () => resolve(null));
+          proc.on('close', (code) => resolve(code === 0 ? out.split('\n').map((s) => s.trim()).filter(Boolean) : null));
+        }),
       pushEvent: sePush,
       log,
     });
@@ -7516,6 +7560,18 @@ async function executeScanEngineJob(job) {
       reportPath = pathJoin(docsDir, 'refactoring-scan.md');
       writeFileSync(reportPath, result.reportMarkdown || '# Refactoring & System-Design Scan\n');
     } catch (we) { log('warn', `[${short}] scan-engine report write failed (non-fatal): ${we?.message || we}`); }
+
+    // The clone's current HEAD — stamped on the scan so a later auto-target re-scan
+    // can `git diff <scannedSha>..HEAD` and re-run only the changed subsystems.
+    const scannedSha = await new Promise((resolve) => {
+      try {
+        const proc = spawn('git', ['-C', projectPath, 'rev-parse', 'HEAD'], { stdio: ['ignore', 'pipe', 'ignore'] });
+        let out = '';
+        proc.stdout.on('data', (d) => { out += d.toString(); });
+        proc.on('error', () => resolve(null));
+        proc.on('close', (code) => resolve(code === 0 ? out.trim() : null));
+      } catch { resolve(null); }
+    });
 
     // Upload the full scan to S3 (the UI fetches it like graph.json).
     let scanAvailable = false;
@@ -7538,6 +7594,11 @@ async function executeScanEngineJob(job) {
             maturity: result.maturity,
             infra: result.infra,
             reportMarkdown: result.reportMarkdown,
+            // Provenance for granular re-scans: the merge key vocabulary + the SHA
+            // an auto-target re-scan diffs against.
+            scannedSha,
+            mode: result.mode,
+            scannedAt: new Date().toISOString(),
           }),
           ContentType: 'application/json',
           CacheControl: 'no-cache',

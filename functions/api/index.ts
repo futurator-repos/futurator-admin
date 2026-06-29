@@ -7304,6 +7304,13 @@ app.post('/api/party/projects/:id/scan-engine', async (c) => {
         ? { privacyMode: parsedBody.data.privacyMode }
         : {}),
       ...(parsedBody.data.mode !== undefined ? { mode: parsedBody.data.mode } : {}),
+      ...(parsedBody.data.targets !== undefined ? { targets: parsedBody.data.targets } : {}),
+      ...(parsedBody.data.reuseRecon !== undefined
+        ? { reuseRecon: parsedBody.data.reuseRecon }
+        : {}),
+      ...(parsedBody.data.autoTargetChanged !== undefined
+        ? { autoTargetChanged: parsedBody.data.autoTargetChanged }
+        : {}),
     },
   });
 

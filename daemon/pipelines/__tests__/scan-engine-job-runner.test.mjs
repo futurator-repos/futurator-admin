@@ -84,6 +84,86 @@ describe('runScanEngine', () => {
     expect(r.reportMarkdown).toMatch(/Refactoring & System-Design Scan/);
   });
 
+  // ── Granular (targeted) re-scan — merge into the persisted scan ──
+  // A prior scan with attributable LLM findings (producedBy = task key) + a
+  // deterministic one. Targeting a single pass re-runs only that pass.
+  const priorScan = {
+    scannedSha: 'aaaa1111',
+    findings: [
+      { id: 'p-eh-1', source: 'llm', producedBy: 'error-handling', dimension: 'correctness', severity: 'High', effort: 'Small', location: 'src/api/route.ts:12', issue: 'fetch never checks res.ok', suggestion: 'route through apiFetch' },
+      { id: 'p-ss-1', source: 'llm', producedBy: 'safety-security', dimension: 'safety-security', severity: 'High', effort: 'Medium', location: 'src/lib/store.ts:5', issue: 'stale security finding to be replaced', suggestion: 'x' },
+      { id: 'p-sys-1', source: 'llm', producedBy: '§sys:src--lib', dimension: 'architecture', severity: 'Medium', effort: 'Medium', location: 'src/lib/store.ts:99', issue: 'subsystem finding kept untouched', suggestion: 'y' },
+      { id: 'p-det-1', source: 'deterministic', producedBy: 'deterministic', dimension: 'code-quality-refactoring', severity: 'Medium', effort: 'Small', location: 'src/lib/old.ts:1', issue: 'prior deterministic finding', suggestion: 'z' },
+    ],
+  };
+
+  function targetedDeps(over = {}) {
+    return baseDeps({
+      readPriorScan: async () => priorScan,
+      reconAvailable: () => true,
+      spawnAgent: async ({ role }) => {
+        if (role === 'scan-xcut:safety-security') {
+          return `---FINDINGS---{"findings":[
+            {"dimension":"safety-security","severity":"High","effort":"Small","location":"src/lib/store.ts:5","issue":"FRESH security finding from re-run","suggestion":"sanitize"}
+          ]}---END_FINDINGS---`;
+        }
+        return '---FINDINGS---{"findings":[]}---END_FINDINGS---';
+      },
+      ...over,
+    });
+  }
+  const targetedJob = (payload) => ({ ...job, scanEnginePayload: { ...job.scanEnginePayload, ...payload } });
+
+  it('targeted re-run swaps the targeted task, keeps the rest, reuses recon', async () => {
+    let reconCalls = 0;
+    const deps = targetedDeps({ runRecon: async () => { reconCalls++; return { code: 0 }; } });
+    const r = await runScanEngine(targetedJob({ targets: ['safety-security'] }), deps);
+    expect(r.ok).toBe(true);
+    expect(r.mode).toBe('targeted');
+    expect(reconCalls).toBe(0); // reuseRecon (default) skipped recon entirely
+    const issues = r.findings.map((f) => f.issue);
+    // fresh safety finding replaced the stale one
+    expect(issues).toContain('FRESH security finding from re-run');
+    expect(issues).not.toContain('stale security finding to be replaced');
+    // untargeted prior findings preserved
+    expect(issues).toContain('fetch never checks res.ok'); // error-handling pass
+    expect(issues).toContain('subsystem finding kept untouched'); // §sys:src--lib
+    expect(issues).toContain('prior deterministic finding'); // deterministic layer
+    // report regenerated deterministically (no writer agent)
+    expect(r.reportMarkdown).toMatch(/targeted/);
+  });
+
+  it('a targeted re-run with zero fresh findings REMOVES the targeted task\'s old findings', async () => {
+    const deps = targetedDeps({ spawnAgent: async () => '---FINDINGS---{"findings":[]}---END_FINDINGS---' });
+    const r = await runScanEngine(targetedJob({ targets: ['safety-security'] }), deps);
+    const issues = r.findings.map((f) => f.issue);
+    expect(issues).not.toContain('stale security finding to be replaced'); // vanished = "fixed"
+    expect(issues).toContain('fetch never checks res.ok'); // others untouched
+  });
+
+  it('auto-target diffs the changed files onto the owning subsystems', async () => {
+    let changedSinceSha = null;
+    const deps = targetedDeps({
+      runRecon: async () => ({ code: 0 }), // autoTarget refreshes recon
+      changedFiles: async (sha) => { changedSinceSha = sha; return ['src/lib/store.ts']; },
+    });
+    const r = await runScanEngine(targetedJob({ autoTargetChanged: true }), deps);
+    expect(r.ok).toBe(true);
+    expect(changedSinceSha).toBe('aaaa1111'); // diffed against the recorded SHA
+    // src/lib/store.ts belongs to §sys:src--lib → that shard's analyzer re-ran; the
+    // untargeted error-handling pass is preserved from the prior scan.
+    expect(r.findings.map((f) => f.issue)).toContain('fetch never checks res.ok');
+  });
+
+  it('targeted with NO prior scan degrades to a full scan', async () => {
+    // baseDeps' full swarm (error-handling returns the anchored route.ts finding).
+    const deps = baseDeps({ readPriorScan: async () => null, reconAvailable: () => true });
+    const r = await runScanEngine(targetedJob({ targets: ['safety-security'] }), deps);
+    expect(r.ok).toBe(true);
+    // full swarm ran → the anchored error-handling finding from baseDeps is present
+    expect(r.findings.map((f) => f.location)).toContain('src/api/route.ts:12');
+  });
+
   it("deterministic mode skips the swarm (no LLM agents) but still maps + plans", async () => {
     let agentCalls = 0;
     const deps = baseDeps({ spawnAgent: async () => { agentCalls++; return '---FINDINGS---{"findings":[]}---END_FINDINGS---'; } });

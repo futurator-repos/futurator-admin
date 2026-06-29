@@ -46,6 +46,8 @@ function seedFor(pass, { hotspots, hubs }) {
 }
 
 const norm = (s) => String(s || '').toLowerCase().split(/\s+/).slice(0, 5).join(' ');
+/** Normalize a repo-relative path so git-diff output and shard members compare equal. */
+const normRel = (s) => String(s || '').replace(/^\.\//, '').replace(/^\/+/, '');
 
 /** Union + collapse duplicates: same file+issue → keep deterministic / higher severity. */
 function dedupe(findings) {
@@ -74,13 +76,19 @@ function countsByDimension(findings) {
   return c;
 }
 
-/** Deterministic markdown report (no LLM) — used by the cheap 'deterministic' mode. */
-function deterministicReport(projectName, findings, phases, maturity) {
+/** Deterministic markdown report (no LLM) — used by the cheap 'deterministic' and
+ *  'targeted' modes (targeted regenerates the report deterministically over the
+ *  merged finding set, so a partial re-run never costs a writer agent). */
+function deterministicReport(projectName, findings, phases, maturity, kind = 'deterministic') {
   const byId = new Map(findings.map((f) => [f.id, f]));
+  const note =
+    kind === 'targeted'
+      ? '> Targeted re-scan: a subset of the swarm was re-run and merged into the prior scan; report regenerated deterministically.'
+      : '> Deterministic re-scan (no LLM swarm): structural + compliance + infra findings only.';
   const lines = [
-    `# ${projectName} — Refactoring & System-Design Scan (deterministic)`,
+    `# ${projectName} — Refactoring & System-Design Scan (${kind})`,
     '',
-    '> Deterministic re-scan (no LLM swarm): structural + compliance + infra findings only.',
+    note,
     '',
     `## Maturity — overall ${maturity?.overall != null ? Math.round(maturity.overall * 100) + '%' : 'n/a'}`,
     ...(maturity?.axes || []).map((a) => `- ${a.label}: ${a.measured ? a.status : 'unmeasured'} — ${a.detail}`),
@@ -101,13 +109,16 @@ function deterministicReport(projectName, findings, phases, maturity) {
 }
 
 /**
- * @param {object} job   AgentJob (jobType 'scan-engine'); scanEnginePayload {projectId,projectPath,src,cap}
+ * @param {object} job   AgentJob (jobType 'scan-engine'); scanEnginePayload {projectId,projectPath,src,cap,mode,targets,reuseRecon,autoTargetChanged}
  * @param {object} deps
  *   - runRecon({projectPath, src}) → { code }
  *   - runDecompose({projectPath, cap}) → { code }
- *   - readArtifacts({projectPath}) → { hotspots[], shards:{shards[],lowConfidence}, privacySummary?, anchoredPaths:Set<string>, hubs:[{file,inDegree}] }
+ *   - readArtifacts({projectPath, reuseDetectors}) → { hotspots[], shards:{shards[],lowConfidence}, privacySummary?, anchoredPaths:Set<string>, hubs:[{file,inDegree}] }
  *   - spawnAgent({role, prompt}) → string  (agent stdout/output)
  *   - checkGate(planOutput) → violations[]
+ *   - readPriorScan() → prior scan.json object | null      (targeted-merge source)
+ *   - reconAvailable({projectPath}) → boolean              (can reuse cached recon?)
+ *   - changedFiles(sinceSha) → string[] | null             (git diff for auto-target)
  *   - pushEvent(type, data?) / log(level,msg) / concurrency / projectName
  */
 export async function runScanEngine(job, deps) {
@@ -117,26 +128,60 @@ export async function runScanEngine(job, deps) {
   const pushEvent = deps.pushEvent || (() => {});
   const log = deps.log || (() => {});
   const concurrency = deps.concurrency || 6;
-  // 'deterministic' = recon + detectors + maturity + plan, NO LLM swarm / writer
-  // (~0 tokens) — the cheap granular re-scan that refreshes structure/hotspots/
-  // infra/dead-code without re-spending the ~48-agent swarm.
-  const mode = p.mode === 'deterministic' ? 'deterministic' : 'full';
-  if (!projectPath) return { ok: false, reason: 'projectPath-missing' };
 
+  // ── Mode resolution ──────────────────────────────────────────────────────
+  // 'full'          recon + the whole swarm + an LLM-written report (the default).
+  // 'deterministic' recon + detectors + plan, NO LLM swarm/writer (~0 tokens).
+  // 'targeted'      reuse the persisted scan.json and re-run only a CHOSEN SUBSET of
+  //                 swarm tasks (specific subsystems / cross-cutting passes), merging
+  //                 the fresh results in — a few agents instead of ~48. Triggered by
+  //                 an explicit `targets[]` OR `autoTargetChanged` (git-diff the
+  //                 subsystems whose files moved since the last-scanned SHA).
+  const explicitTargets = Array.isArray(p.targets) ? p.targets.filter(Boolean) : [];
+  const autoTarget = !!p.autoTargetChanged;
+  const targeted = explicitTargets.length > 0 || autoTarget;
+  const mode = targeted ? 'targeted' : p.mode === 'deterministic' ? 'deterministic' : 'full';
+  // autoTarget refreshes structure (code moved → fresh recon); explicit targets reuse
+  // the cached recon by default (you're re-running an LLM pass over unchanged code).
+  let reuseRecon = targeted && !autoTarget ? p.reuseRecon !== false : false;
+
+  if (!projectPath) return { ok: false, reason: 'projectPath-missing' };
   pushEvent('scan.started', { projectId: p.projectId, mode });
 
-  // (b) recon — reused. Trust gate on exit code.
-  const recon = await deps.runRecon({ projectPath, src: p.src });
-  if (recon && recon.code !== 0) {
-    if (recon.code === 2) return { ok: false, reason: 'graphify-missing' };
-    if (recon.code === 3) return { ok: false, reason: 'degenerate-build' };
-    return { ok: false, reason: `recon-error-${recon.code}` };
+  // ── (a) Load the prior scan first — targeted merges INTO it ──
+  let priorScan = null;
+  if (targeted && deps.readPriorScan) priorScan = await deps.readPriorScan();
+  const priorFindings = Array.isArray(priorScan?.findings) ? priorScan.findings : [];
+  // No prior scan to merge into → there is nothing to preserve, so a "targeted"
+  // request degrades to a real full scan (every shard runs) and the user still
+  // gets complete output instead of a sparse partial.
+  const effectiveTargeted = targeted && !!priorScan;
+  if (targeted && !priorScan) {
+    log('warn', '[scan-engine] targeted/auto re-scan but no prior scan.json — running a full scan');
+    reuseRecon = false;
   }
-  pushEvent('scan.recon.done', {});
 
-  // (c) subsystem decomposition.
-  await deps.runDecompose({ projectPath, cap: p.cap });
-  const art = await deps.readArtifacts({ projectPath });
+  // ── (b) recon — reused when targeted+reuseRecon AND the cached artifacts exist;
+  //         missing artifacts fall back to a fresh recon (never swarm blind). ──
+  const canReuse = reuseRecon && (!deps.reconAvailable || deps.reconAvailable({ projectPath }));
+  if (reuseRecon && !canReuse) {
+    log('info', '[scan-engine] reuseRecon requested but recon artifacts missing — running fresh recon');
+  }
+  if (canReuse) {
+    pushEvent('scan.recon.reused', {});
+  } else {
+    const recon = await deps.runRecon({ projectPath, src: p.src });
+    if (recon && recon.code !== 0) {
+      if (recon.code === 2) return { ok: false, reason: 'graphify-missing' };
+      if (recon.code === 3) return { ok: false, reason: 'degenerate-build' };
+      return { ok: false, reason: `recon-error-${recon.code}` };
+    }
+    pushEvent('scan.recon.done', {});
+    await deps.runDecompose({ projectPath, cap: p.cap });
+  }
+  reuseRecon = canReuse; // the EFFECTIVE value from here on
+
+  const art = await deps.readArtifacts({ projectPath, reuseDetectors: reuseRecon });
   const hotspots = art.hotspots || [];
   const shards = art.shards?.shards || [];
   const lowConfidence = !!art.shards?.lowConfidence;
@@ -144,46 +189,87 @@ export async function runScanEngine(job, deps) {
   const hubSet = new Set((art.hubs || []).map((h) => h.file));
   pushEvent('scan.decomposed', { shards: shards.length, analyzed: shards.filter((s) => s.analyze).length, lowConfidence });
 
-  // (d-pre) deterministic findings — zero LLM.
+  // ── (c) Resolve the target set. Explicit targets pass through; auto-target maps
+  //        the git-changed files onto the subsystems that own them. ──
+  const targetSet = new Set(explicitTargets);
+  if (effectiveTargeted && autoTarget) {
+    const sinceSha = priorScan?.scannedSha || null;
+    const changed = sinceSha && deps.changedFiles ? await deps.changedFiles(sinceSha) : null;
+    if (changed && changed.length) {
+      const changedSet = new Set(changed.map(normRel));
+      for (const s of shards) {
+        if ((s.members || []).some((f) => changedSet.has(normRel(f)))) targetSet.add(s.shardKey);
+      }
+    }
+    pushEvent('scan.autotarget', { sinceSha, changedFiles: changed ? changed.length : 0, targets: [...targetSet] });
+  }
+
+  // ── (d-pre) deterministic findings — zero LLM. `producedBy` is the merge key. ──
   const detFindings = [
     ...hotspots.map((h) => hotspotToFinding(h, hubSet)),
     ...(art.privacySummary ? privacyToFindings(art.privacySummary) : []),
-  ];
+  ].map((f) => ({ ...f, producedBy: 'deterministic' }));
 
-  // (d) LLM swarm — analyzers for analyzed shards + cross-cutting passes. SKIPPED
-  // in deterministic mode (~0 LLM tokens; deterministic findings only).
+  /** Run a set of swarm tasks → flat findings, each stamped with its task key. */
+  async function runSwarm(tasks) {
+    const perAgent = [];
+    await pool(tasks, concurrency, async (t, i) => {
+      pushEvent('scan.agent.start', { role: t.role, label: t.label });
+      const text = await deps.spawnAgent({ role: t.role, prompt: t.prompt });
+      const parsed = text && !text.__error ? parseAndValidate(text, t.ctx) : [];
+      perAgent[i] = parsed.map((f) => ({ ...f, producedBy: t.ctx.area }));
+      pushEvent('scan.agent.done', { role: t.role, label: t.label, findings: parsed.length });
+      return text;
+    });
+    const out = [];
+    perAgent.forEach((parsed) => { if (parsed) out.push(...parsed); });
+    return out;
+  }
+
+  // ── (d) LLM swarm. full → every analyzed shard + all passes. targeted → only the
+  //        shards/passes whose key ∈ targetSet. deterministic → none. ──
   let llmFindings = [];
-  if (mode === 'deterministic') {
-    pushEvent('scan.swarm.skipped', { reason: 'deterministic-mode' });
-  } else {
-    const analyzeShards = shards.filter((s) => s.analyze);
+  if (mode !== 'deterministic') {
+    const analyzeShards = shards.filter((s) => s.analyze && (!effectiveTargeted || targetSet.has(s.shardKey)));
+    const passes = CROSS_CUTTING.filter((pass) => !effectiveTargeted || targetSet.has(pass.area));
     const tasks = [
       ...analyzeShards.map((s) => ({ role: `scan-analyzer:${s.name}`, label: s.name, prompt: analyzerPrompt(s), ctx: { area: s.shardKey } })),
-      ...CROSS_CUTTING.map((pass) => ({
+      ...passes.map((pass) => ({
         role: `scan-xcut:${pass.area}`,
         label: pass.title || pass.area,
         prompt: crossCuttingPrompt(pass, seedFor(pass, { hotspots, hubs: art.hubs || [] })),
         ctx: { area: pass.area, dimension: pass.dimension },
       })),
     ];
-    pushEvent('scan.swarm.started', { agents: tasks.length });
-    const perAgent = []; // findings parsed per task (reused for the union below)
-    await pool(tasks, concurrency, async (t, i) => {
-      pushEvent('scan.agent.start', { role: t.role, label: t.label });
-      const text = await deps.spawnAgent({ role: t.role, prompt: t.prompt });
-      const parsed = text && !text.__error ? parseAndValidate(text, t.ctx) : [];
-      perAgent[i] = parsed;
-      pushEvent('scan.agent.done', { role: t.role, label: t.label, findings: parsed.length });
-      return text;
+    pushEvent(effectiveTargeted ? 'scan.targeted.started' : 'scan.swarm.started', {
+      agents: tasks.length,
+      ...(effectiveTargeted ? { targets: [...targetSet], reuseRecon } : {}),
     });
-    perAgent.forEach((parsed) => { if (parsed) llmFindings.push(...parsed); });
+    llmFindings = await runSwarm(tasks);
     const before = llmFindings.length;
     llmFindings = dropUnanchored(llmFindings, anchored); // hallucination guard
-    pushEvent('scan.swarm.done', { llmFindings: llmFindings.length, droppedUnanchored: before - llmFindings.length });
+    pushEvent(effectiveTargeted ? 'scan.targeted.done' : 'scan.swarm.done', {
+      llmFindings: llmFindings.length,
+      droppedUnanchored: before - llmFindings.length,
+    });
+  } else {
+    pushEvent('scan.swarm.skipped', { reason: 'deterministic-mode' });
   }
 
-  // (e/f) union + dedupe.
-  const findings = dedupe([...detFindings, ...llmFindings]);
+  // ── (e/f) union + dedupe. Targeted MERGES into the prior scan: keep every prior
+  //         finding NOT produced by a re-run task; swap in the fresh results. A
+  //         re-run task that now returns ZERO findings → its old findings simply
+  //         vanish (= "confirm I fixed these"). ──
+  let findings;
+  if (effectiveTargeted) {
+    const keptLlm = priorFindings.filter((f) => f.source === 'llm' && !targetSet.has(f.producedBy));
+    const det = reuseRecon
+      ? priorFindings.filter((f) => f.source === 'deterministic')
+      : detFindings; // fresh recon → fresh deterministic layer
+    findings = dedupe([...det, ...keptLlm, ...llmFindings]);
+  } else {
+    findings = dedupe([...detFindings, ...llmFindings]);
+  }
 
   // Maturity scorecard — the high-level RAG overview (deterministic, ~0 LLM).
   const maturity = computeMaturity({
@@ -205,11 +291,13 @@ export async function runScanEngine(job, deps) {
   if (gateViolations.length) log('warn', `[scan-engine] ${gateViolations.length} characterization-gate violation(s) — review before executing`);
   pushEvent('scan.planned', { phases: plan.phases.length, gateViolations: gateViolations.length });
 
-  // (f) aggregator report (markdown). LLM in full mode; deterministic mode writes a
-  // cheap structured summary (no LLM).
+  // (f) aggregator report (markdown). LLM only on a full scan; deterministic AND
+  // targeted modes regenerate it deterministically over the (merged) finding set so
+  // a partial re-run never costs a writer agent.
+  const cheapReport = mode === 'deterministic' || effectiveTargeted;
   let reportMarkdown = '';
-  if (mode === 'deterministic') {
-    reportMarkdown = deterministicReport(projectName, findings, plan.phases, maturity);
+  if (cheapReport) {
+    reportMarkdown = deterministicReport(projectName, findings, plan.phases, maturity, effectiveTargeted ? 'targeted' : 'deterministic');
   } else
   try {
     reportMarkdown = await deps.spawnAgent({
@@ -223,6 +311,7 @@ export async function runScanEngine(job, deps) {
 
   return {
     ok: true,
+    mode,
     findings,
     phases: plan.phases,
     planOutput,
@@ -230,11 +319,13 @@ export async function runScanEngine(job, deps) {
     reportMarkdown,
     lowConfidence,
     maturity,
-    infra: art.infra || null,
+    // targeted+reuse may not re-read infra.json — fall back to the prior scan's inventory.
+    infra: art.infra || (effectiveTargeted ? priorScan?.infra : null) || null,
     counts: {
       total: findings.length,
-      deterministic: detFindings.length,
-      llm: llmFindings.length,
+      // derived from the MERGED set so targeted re-runs report accurate totals.
+      deterministic: findings.filter((f) => f.source === 'deterministic').length,
+      llm: findings.filter((f) => f.source === 'llm').length,
       byDimension: countsByDimension(findings),
     },
   };

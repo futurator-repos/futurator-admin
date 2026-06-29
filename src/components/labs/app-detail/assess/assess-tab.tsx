@@ -92,6 +92,15 @@ export function AssessTab({ app }: { app: App }) {
   const startScan = (mode: 'full' | 'deterministic' = 'full') => {
     scanRun.mutate({ privacyMode, mode }, { onSuccess: (res) => setScanJob(res.jobId) });
   };
+  // Granular re-scan: re-run a subset of the swarm (targets) or auto-target the
+  // git-changed subsystems, merging into the persisted scan — a few agents, not ~48.
+  const rescanParts = (input: {
+    targets?: string[];
+    reuseRecon?: boolean;
+    autoTargetChanged?: boolean;
+  }) => {
+    scanRun.mutate({ privacyMode, ...input }, { onSuccess: (res) => setScanJob(res.jobId) });
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -245,6 +254,8 @@ export function AssessTab({ app }: { app: App }) {
         )}
         <ScanReport
           appId={app.appId}
+          scanRunning={scanRunning}
+          onRescan={rescanParts}
           onCreatePlan={(intent) => {
             setPlanIntent(intent);
             setPlanOpen(true);

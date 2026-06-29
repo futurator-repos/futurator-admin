@@ -226,6 +226,16 @@ export const scanEngineBodySchema = z.object({
   // 'full' (default — deterministic recon + LLM swarm) | 'deterministic' (recon +
   // detectors + maturity + plan only, NO swarm → ~0 LLM tokens; cheap re-scan).
   mode: z.enum(['full', 'deterministic']).optional(),
+  // Granular (mid-grained) re-scan: re-run ONLY these swarm tasks — subsystem
+  // shardKeys (e.g. `§sys:src--lib`) and/or cross-cutting pass areas (e.g.
+  // `safety-security`) — and merge the fresh results into the persisted scan.
+  targets: z.array(z.string().min(1).max(200)).max(200).optional(),
+  // Reuse the cached recon (skip graphify/decompose/deps). Defaults true for a
+  // targeted re-scan; set false to refresh structure first (after a code change).
+  reuseRecon: z.boolean().optional(),
+  // Auto-target: git-diff the subsystems whose files changed since the last-scanned
+  // SHA and re-run only those. Refreshes recon (code moved).
+  autoTargetChanged: z.boolean().optional(),
 });
 
 /**

@@ -6,8 +6,10 @@
 > `full` (recon + whole swarm) and `deterministic` (recon + detectors, ~0 LLM).
 > This adds `targeted` (recon-reuse + a chosen subset of swarm tasks).
 >
-> **Status:** design only. Builds on the shipped `scan-engine` job + the S3-persisted
-> `scan.json` + the `mode` payload field.
+> **Status:** BUILT (Phase 1 + git-diff auto-target), 2026-06-30 — on `feat/pipeline-v3`,
+> tested (9 runner specs green), not yet deployed. Builds on the shipped `scan-engine`
+> job + the S3-persisted `scan.json` + the `mode` payload field. Decision: a re-run that
+> returns zero findings for a task REMOVES that task's old findings (confirm-fixed).
 
 ---
 
@@ -185,16 +187,22 @@ is the selected analyzers.
 
 ## 9. Phased build
 
-- **Phase 1 (MVP, ~1 build):** `producedBy` tag; `targets` + `reuseRecon` payload;
-  the runner targeted-merge path; `deps.readPriorScan` (S3 fetch in the daemon); the
-  "Re-run parts" panel (passes + analyzed subsystems, checkboxes, agent-count
-  estimate). Reuses recon by default. Tests: merge keeps untargeted + swaps targeted +
-  removes zeroed.
-- **Phase 2 (later):** inline per-dimension/per-subsystem `↻`; **git-diff
-  auto-targeting** (diff the clone HEAD vs the last-scanned SHA → auto-select the
-  subsystems whose files changed → "re-scan what changed"); per-finding re-verify
-  (re-run the adjudicator on one finding). The git-diff one is the highest-value
-  follow-up — it makes re-scan-after-a-fix fully automatic.
+- **Phase 1 — BUILT:** `producedBy` tag (runner + `scan-finding-schema.ts`); `targets`
+  - `reuseRecon` + `autoTargetChanged` payload (`party-schema`, `agent-orchestrator`,
+    API route); the runner targeted-merge path (`scan-engine-job-runner.mjs` —
+    `targeted` mode, `runSwarm`, prior-merge, zero-result removal); daemon deps
+    `readPriorScan` (S3 GetObject), `reconAvailable`, `changedFiles` (git diff),
+    `reuseDetectors` in `readArtifacts`, `scannedSha` stamped on upload; the "Re-run
+    parts" panel (`scan-report.tsx` `RerunParts` — passes + subsystems grouped by
+    `producedBy`, agent-count estimate, reuse-recon toggle, "Re-scan changed files").
+    **+ git-diff auto-target** (promoted from Phase 2): `autoTargetChanged` diffs the
+    clone vs the recorded `scannedSha` and re-runs only the changed subsystems. Tests:
+    merge keeps untargeted + swaps targeted + removes zeroed + reuses recon + auto-target
+    maps changed files + no-prior degrades to full (9 specs green).
+- **Phase 2 (later):** inline per-dimension/per-subsystem `↻` (one-click from where
+  you read); per-finding re-verify (re-run the adjudicator on a single finding);
+  auto-target of cross-cutting passes (today auto-target selects subsystems only —
+  changed code that affects a cross-cutting concern needs an explicit pass selection).
 
 ---
 

@@ -319,6 +319,265 @@ function downloadScanJson(report: ScanReportData, appId: string) {
 const SEV_ORDER = ['High', 'Medium', 'Low–Med', 'Low'];
 const EFF_ORDER = ['Trivial', 'Small', 'Medium', 'Large'];
 
+/** Re-scan request shape — handled by the parent (POSTs scan-engine + tracks the job). */
+export type RescanInput = { targets?: string[]; reuseRecon?: boolean; autoTargetChanged?: boolean };
+
+/** The 5 cross-cutting passes (stable `producedBy` keys), with display labels. */
+const CROSS_CUTTING_PASSES: { area: string; label: string }[] = [
+  { area: 'error-handling', label: 'Error handling' },
+  { area: 'magic-numbers', label: 'Magic numbers' },
+  { area: 'type-safety', label: 'Type safety' },
+  { area: 'ui-centralization', label: 'UI centralization' },
+  { area: 'safety-security', label: 'Safety & security' },
+];
+
+const subsystemLabel = (key: string) => key.replace(/^§sys:/, '').replace(/--/g, '/');
+
+/**
+ * Granular re-scan panel — re-run only PART of the swarm and merge into the
+ * persisted scan. Cross-cutting passes + analyzed subsystems are listed with their
+ * current finding counts (grouped by `producedBy`); each selected task is ~1 agent
+ * (vs ~48 for a full scan). A re-run that returns zero findings for a task removes
+ * its old findings (= "confirm I fixed these"). Also offers a one-click
+ * "Re-scan changed files" when the scan recorded the SHA it ran against.
+ */
+function RerunParts({
+  report,
+  onRescan,
+  scanRunning,
+}: {
+  report: ScanReportData;
+  onRescan: (input: RescanInput) => void;
+  scanRunning?: boolean;
+}) {
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [reuseRecon, setReuseRecon] = useState(true);
+  const [showAllSubsystems, setShowAllSubsystems] = useState(false);
+
+  // Group findings by their producing task (the merge key).
+  const counts = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const f of report.findings) if (f.producedBy) m[f.producedBy] = (m[f.producedBy] || 0) + 1;
+    return m;
+  }, [report.findings]);
+
+  const subsystems = useMemo(
+    () =>
+      Object.keys(counts)
+        .filter((k) => k.startsWith('§sys:'))
+        .sort((a, b) => counts[b] - counts[a]),
+    [counts],
+  );
+  const attributable = useMemo(
+    () => report.findings.filter((f) => f.producedBy && f.producedBy !== 'deterministic').length,
+    [report.findings],
+  );
+
+  const toggle = (key: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  // Older scans (pre-producedBy) can't be sliced; a full re-scan re-stamps them.
+  if (!attributable) {
+    return (
+      <details data-testid="scan-rerun-parts">
+        <summary style={{ fontSize: 12, color: 'var(--text-dim)', cursor: 'pointer' }}>
+          Re-run parts
+        </summary>
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '8px 0' }}>
+          This scan predates per-task tagging — run one full <strong>Re-scan</strong> to enable
+          granular re-runs.
+        </div>
+      </details>
+    );
+  }
+
+  const selectedList = [...selected];
+  const visibleSubsystems = showAllSubsystems ? subsystems : subsystems.slice(0, 8);
+
+  const chip = (key: string, label: string, count: number) => {
+    const on = selected.has(key);
+    return (
+      <label
+        key={key}
+        title={key}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          fontSize: 11,
+          border: `1px solid ${on ? 'color-mix(in srgb, var(--accent-blue) 55%, var(--border))' : 'var(--border)'}`,
+          borderRadius: 8,
+          padding: '3px 9px',
+          cursor: scanRunning ? 'not-allowed' : 'pointer',
+          background: on
+            ? 'color-mix(in srgb, var(--accent-blue) 10%, transparent)'
+            : 'var(--background)',
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={on}
+          disabled={scanRunning}
+          onChange={() => toggle(key)}
+          data-testid={`scan-rerun-task-${key}`}
+        />
+        <span style={{ color: 'var(--foreground)' }}>{label}</span>
+        <span style={{ color: 'var(--text-dim)' }}>({count})</span>
+      </label>
+    );
+  };
+
+  return (
+    <details data-testid="scan-rerun-parts">
+      <summary
+        style={{ fontSize: 12, color: 'var(--text-dim)', cursor: 'pointer', userSelect: 'none' }}
+      >
+        Re-run parts{' '}
+        <span style={{ color: 'var(--text-dim)' }}>
+          — re-scan selected subsystems / passes (~1 agent each)
+        </span>
+      </summary>
+      <div
+        style={{
+          marginTop: 8,
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          padding: 12,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+          background: 'var(--bg-elev)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+            selected: <strong style={{ color: 'var(--foreground)' }}>{selectedList.length}</strong>{' '}
+            task{selectedList.length === 1 ? '' : 's'} (~{selectedList.length} agent
+            {selectedList.length === 1 ? '' : 's'})
+          </span>
+          <label
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 11,
+              color: 'var(--text-dim)',
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={reuseRecon}
+              disabled={scanRunning}
+              onChange={(e) => setReuseRecon(e.target.checked)}
+              data-testid="scan-rerun-reuse-recon"
+            />
+            reuse recon (faster; untick after a code change)
+          </label>
+          <div style={{ flex: 1 }} />
+          {report.scannedSha && (
+            <button
+              type="button"
+              onClick={() => onRescan({ autoTargetChanged: true })}
+              disabled={scanRunning}
+              data-testid="scan-rerun-changed"
+              title={`Diff the clone against the last-scanned commit (${report.scannedSha.slice(0, 7)}) and re-scan only the subsystems whose files changed`}
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: 'var(--foreground)',
+                background: 'transparent',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                padding: '5px 10px',
+                cursor: scanRunning ? 'not-allowed' : 'pointer',
+                opacity: scanRunning ? 0.6 : 1,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              ↻ Re-scan changed files
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onRescan({ targets: selectedList, reuseRecon })}
+            disabled={scanRunning || selectedList.length === 0}
+            data-testid="scan-rerun-selected"
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: selectedList.length ? 'var(--background)' : 'var(--text-dim)',
+              background: selectedList.length ? 'var(--foreground)' : 'transparent',
+              border: '1px solid var(--border)',
+              borderRadius: 6,
+              padding: '5px 10px',
+              cursor: scanRunning || !selectedList.length ? 'not-allowed' : 'pointer',
+              opacity: scanRunning || !selectedList.length ? 0.6 : 1,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            ↻ Re-run selected
+          </button>
+        </div>
+
+        <div>
+          <div
+            style={{ fontSize: 11, fontWeight: 600, color: 'var(--foreground)', margin: '0 0 5px' }}
+          >
+            Cross-cutting passes
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {CROSS_CUTTING_PASSES.filter((pass) => counts[pass.area]).map((pass) =>
+              chip(pass.area, pass.label, counts[pass.area]),
+            )}
+          </div>
+        </div>
+
+        {subsystems.length > 0 && (
+          <div>
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: 'var(--foreground)',
+                margin: '0 0 5px',
+              }}
+            >
+              Subsystems{' '}
+              <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
+                (by current finding count)
+              </span>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {visibleSubsystems.map((key) => chip(key, subsystemLabel(key), counts[key]))}
+              {subsystems.length > 8 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllSubsystems((v) => !v)}
+                  style={{
+                    fontSize: 11,
+                    color: 'var(--accent-blue)',
+                    background: 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {showAllSubsystems ? 'show fewer' : `+${subsystems.length - 8} more`}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
 /**
  * Compile the SELECTED phases into a dependency-ordered NewPlanModal intent seed —
  * the bridge from assessment to a real, executable refactoring plan. Frames every
@@ -378,9 +637,14 @@ const DIMENSIONS: { key: string; label: string }[] = [
 export function ScanReport({
   appId,
   onCreatePlan,
+  onRescan,
+  scanRunning,
 }: {
   appId: string;
   onCreatePlan?: (intent: string) => void;
+  /** Granular re-scan handler (parent POSTs scan-engine + tracks the job). */
+  onRescan?: (input: RescanInput) => void;
+  scanRunning?: boolean;
 }) {
   // Self-loads the last persisted scan from S3 (keyed by appId) — survives reloads
   // without the producing job in the URL.
@@ -443,6 +707,9 @@ export function ScanReport({
 
       {view === 'report' ? (
         <>
+          {onRescan ? (
+            <RerunParts report={report} onRescan={onRescan} scanRunning={scanRunning} />
+          ) : null}
           {report.maturity?.axes?.length ? (
             <MaturityScorecard axes={report.maturity.axes} overall={report.maturity.overall} />
           ) : null}
