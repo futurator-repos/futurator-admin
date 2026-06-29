@@ -621,7 +621,14 @@ export function AssessTab({ app }: { app: App }) {
             Scan failed: {scanJob?.errorMessage || 'unknown error'}
           </div>
         )}
-        <ScanReport appId={app.appId} available={scanAvailable} />
+        <ScanReport
+          appId={app.appId}
+          available={scanAvailable}
+          onCreatePlan={(intent) => {
+            setPlanIntent(intent);
+            setPlanOpen(true);
+          }}
+        />
         {scanJobId && (
           <details>
             <summary

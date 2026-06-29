@@ -42,6 +42,50 @@ function downloadScanJson(report: ScanReportData, appId: string) {
 }
 
 const SEV_ORDER = ['High', 'Medium', 'Low–Med', 'Low'];
+const EFF_ORDER = ['Trivial', 'Small', 'Medium', 'Large'];
+
+/**
+ * Compile the SELECTED phases into a dependency-ordered NewPlanModal intent seed —
+ * the bridge from assessment to a real, executable refactoring plan. Frames every
+ * item as a Strangler-Fig and demands a characterization net before any mutation
+ * (the same discipline the deterministic phase-planner already enforces). Capped
+ * at 2000 chars (NewPlanModal limit).
+ */
+export function buildScanPlanIntent(report: ScanReportData, selected: Set<number>): string {
+  const byId = new Map(report.findings.map((f) => [f.id, f]));
+  const phases = report.phases
+    .filter((p) => selected.has(p.phase))
+    .sort((a, b) => a.phase - b.phase);
+  if (!phases.length) return '';
+  const head = [
+    'Refactor this codebase in the phase order below — foundations before consumers, to minimize rework.',
+    'Sequence each item as a Strangler-Fig: extract shared core → repoint dependents → delete the old path,',
+    'every deletion/repoint gated on grep-zero + a passing test. Add a characterization test net BEFORE any',
+    'deletion/repoint on routes that lack coverage.',
+    '',
+  ];
+  const lines: string[] = [];
+  for (const p of phases) {
+    lines.push(`## Phase ${p.phase} — ${p.name}  (${p.why})`);
+    const items = p.items
+      .map((id) => byId.get(id))
+      .filter((f): f is ScanFinding => !!f)
+      .sort(
+        (a, b) =>
+          SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity) ||
+          EFF_ORDER.indexOf(a.effort) - EFF_ORDER.indexOf(b.effort),
+      )
+      .slice(0, 25);
+    for (const f of items)
+      lines.push(`- [${f.severity}/${f.effort}] ${f.issue} → ${f.suggestion} (${f.location})`);
+    lines.push('');
+  }
+  const intent = [...head, ...lines].join('\n');
+  const CAP = 2000;
+  return intent.length <= CAP
+    ? intent
+    : `${intent.slice(0, CAP - 40).trimEnd()}\n… (truncated; see the full scan)`;
+}
 const sevColor: Record<string, string> = {
   High: 'var(--destructive, #ef4444)',
   Medium: 'var(--warning, #f59e0b)',
@@ -56,7 +100,15 @@ const DIMENSIONS: { key: string; label: string }[] = [
   { key: 'correctness', label: 'Correctness' },
 ];
 
-export function ScanReport({ appId, available }: { appId: string; available: boolean }) {
+export function ScanReport({
+  appId,
+  available,
+  onCreatePlan,
+}: {
+  appId: string;
+  available: boolean;
+  onCreatePlan?: (intent: string) => void;
+}) {
   const { data: report, isLoading } = useScanReport(appId, available);
 
   if (!available) {
@@ -86,7 +138,7 @@ export function ScanReport({ appId, available }: { appId: string; available: boo
       <Header report={report} appId={appId} />
       <PriorityMatrix findings={report.findings} />
       <ByDimension findings={report.findings} />
-      <Phases report={report} />
+      <Phases report={report} onCreatePlan={onCreatePlan} />
     </div>
   );
 }
@@ -287,28 +339,93 @@ function ByDimension({ findings }: { findings: ScanFinding[] }) {
   );
 }
 
-function Phases({ report }: { report: ScanReportData }) {
+function Phases({
+  report,
+  onCreatePlan,
+}: {
+  report: ScanReportData;
+  onCreatePlan?: (intent: string) => void;
+}) {
   const byId = useMemo(() => new Map(report.findings.map((f) => [f.id, f])), [report.findings]);
+  // Pre-select the two safest early phases (lowest numbers) as a sensible default.
+  const [selected, setSelected] = useState<Set<number>>(() => {
+    const nums = report.phases.map((p) => p.phase).sort((a, b) => a - b);
+    return new Set(nums.slice(0, 2));
+  });
+  const toggle = (n: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(n)) next.delete(n);
+      else next.add(n);
+      return next;
+    });
+  const selectedCount = selected.size;
+
   return (
     <div>
-      <h4 style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', margin: '0 0 8px' }}>
-        Recommended Sequencing
-      </h4>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          margin: '0 0 8px',
+          flexWrap: 'wrap',
+        }}
+      >
+        <h4 style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', margin: 0 }}>
+          Recommended Sequencing
+        </h4>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          check phases → turn into an executable refactoring plan
+        </span>
+        <div style={{ flex: 1 }} />
+        {onCreatePlan && (
+          <button
+            type="button"
+            onClick={() => onCreatePlan(buildScanPlanIntent(report, selected))}
+            disabled={selectedCount === 0}
+            data-testid="scan-create-plan"
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: selectedCount ? 'var(--accent-blue)' : 'var(--text-dim)',
+              background: 'transparent',
+              border: '1px solid color-mix(in srgb, var(--accent-blue) 40%, transparent)',
+              borderRadius: 6,
+              padding: '5px 10px',
+              cursor: selectedCount ? 'pointer' : 'not-allowed',
+              opacity: selectedCount ? 1 : 0.5,
+            }}
+          >
+            Create plan from {selectedCount} phase{selectedCount === 1 ? '' : 's'} →
+          </button>
+        )}
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {report.phases.map((p) => (
           <div
             key={p.phase}
             style={{
-              border: '1px solid var(--border)',
+              border: `1px solid ${selected.has(p.phase) ? 'color-mix(in srgb, var(--accent-blue) 50%, var(--border))' : 'var(--border)'}`,
               borderRadius: 8,
               padding: 10,
               background: 'var(--bg-elev)',
             }}
           >
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-              <strong style={{ fontSize: 12.5, color: 'var(--foreground)' }}>
-                Phase {p.phase} — {p.name}
-              </strong>
+              <label
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.has(p.phase)}
+                  onChange={() => toggle(p.phase)}
+                  data-testid={`scan-phase-check-${p.phase}`}
+                />
+                <strong style={{ fontSize: 12.5, color: 'var(--foreground)' }}>
+                  Phase {p.phase} — {p.name}
+                </strong>
+              </label>
               <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
                 {p.tag} · {p.items.length} item{p.items.length === 1 ? '' : 's'}
               </span>
