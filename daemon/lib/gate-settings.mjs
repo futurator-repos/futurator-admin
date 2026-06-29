@@ -15,13 +15,18 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { flagMode } from './pipeline-flags.mjs';
 
-/** Absolute path to the gate hook script. Guarded for non-file test URLs. */
-export function resolveGateHookPath() {
+/** Absolute path to a hook script. Guarded for non-file test URLs. */
+function resolveHookPath(relFromLib) {
   try {
-    return fileURLToPath(new URL('./pretool-gate.mjs', import.meta.url));
+    return fileURLToPath(new URL(relFromLib, import.meta.url));
   } catch {
-    return join(dirname(fileURLToPath(import.meta.url)), 'pretool-gate.mjs');
+    return join(dirname(fileURLToPath(import.meta.url)), relFromLib);
   }
+}
+
+/** Absolute path to the gate hook script. */
+export function resolveGateHookPath() {
+  return resolveHookPath('./pretool-gate.mjs');
 }
 
 /**
@@ -36,36 +41,55 @@ export function resolveGateHookPath() {
  * @returns {{ settingsPath: string|null, args: string[], env: Record<string,string> }}
  */
 export function buildGateSpawn(opts = {}) {
-  const mode = flagMode(opts.p3Flags, 'P3_GATE_MODE'); // off | audit | enforce
-  if (!mode || mode === 'off') return { settingsPath: null, args: [], env: {} };
+  const gateMode = flagMode(opts.p3Flags, 'P3_GATE_MODE'); // off | audit | enforce
+  const costMode = flagMode(opts.p3Flags, 'P3_COST_CEILING'); // off | observe | enforce
+  const gateOn = gateMode && gateMode !== 'off';
+  const costOn = costMode && costMode !== 'off';
+  if (!gateOn && !costOn) return { settingsPath: null, args: [], env: {} };
 
-  const settings = {
-    hooks: {
-      PreToolUse: [
-        {
-          matcher: 'Edit|Write|MultiEdit|Bash',
-          hooks: [{ type: 'command', command: `node ${JSON.stringify(resolveGateHookPath())}` }],
-        },
-      ],
-    },
-  };
+  // One settings.json carries every dev-spawn hook concern so a single --settings
+  // flag covers PreToolUse (gate) + statusLine + PostToolUse (cost ceiling).
+  const hooks = {};
+  const env = {};
+
+  if (gateOn) {
+    hooks.PreToolUse = [
+      {
+        matcher: 'Edit|Write|MultiEdit|Bash',
+        hooks: [{ type: 'command', command: `node ${JSON.stringify(resolveGateHookPath())}` }],
+      },
+    ];
+    env.FUTURATOR_GATE_MODE = gateMode;
+    env.FUTURATOR_TOUCH_POINTS = JSON.stringify(opts.touchPoints || []);
+    env.FUTURATOR_FORBIDDEN_AREAS = JSON.stringify(opts.forbiddenAreas || []);
+    if (opts.ledgerPath) env.FUTURATOR_GATE_LEDGER = opts.ledgerPath;
+  }
+
+  if (costOn) {
+    // statusLine on EVERY process writes its authoritative spend; PostToolUse
+    // reconciles + enforces the mid-turn ceiling (development-plan §5.4).
+    hooks.statusLine = { type: 'command', command: `node ${JSON.stringify(resolveHookPath('../hooks/statusline-cost.mjs'))}` };
+    hooks.PostToolUse = [
+      {
+        matcher: 'Edit|Write|MultiEdit|Bash',
+        hooks: [{ type: 'command', command: `node ${JSON.stringify(resolveHookPath('../hooks/posttool-ceiling.mjs'))}` }],
+      },
+    ];
+    env.FUTURATOR_COST_CEILING = costMode;
+    if (opts.ceilingUsd != null) env.FUTURATOR_COST_CEILING_USD = String(opts.ceilingUsd);
+    if (opts.harnessCostDir) env.FUTURATOR_HARNESS_COST_DIR = opts.harnessCostDir;
+    if (opts.haltDir) env.FUTURATOR_HALT_DIR = opts.haltDir;
+  }
 
   const dir = opts.settingsDir || tmpdir();
   const settingsPath = join(dir, `futurator-gate-settings-${String(opts.jobId || 'job').slice(0, 24)}.json`);
   try {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(settingsPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
+    writeFileSync(settingsPath, JSON.stringify({ hooks }, null, 2), { mode: 0o600 });
   } catch {
-    // If we can't write settings, don't half-wire the gate — fall back to legacy.
+    // If we can't write settings, don't half-wire — fall back to legacy.
     return { settingsPath: null, args: [], env: {} };
   }
-
-  const env = {
-    FUTURATOR_GATE_MODE: mode,
-    FUTURATOR_TOUCH_POINTS: JSON.stringify(opts.touchPoints || []),
-    FUTURATOR_FORBIDDEN_AREAS: JSON.stringify(opts.forbiddenAreas || []),
-  };
-  if (opts.ledgerPath) env.FUTURATOR_GATE_LEDGER = opts.ledgerPath;
 
   return { settingsPath, args: ['--settings', settingsPath], env };
 }

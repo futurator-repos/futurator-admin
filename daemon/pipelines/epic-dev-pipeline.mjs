@@ -270,6 +270,11 @@ export async function runEpicDevPipeline(opts) {
     touchPoints: [], // coarse at orchestrator scope (spans all stories)
     forbiddenAreas: Array.isArray(payload.forbiddenAreas) ? payload.forbiddenAreas : [],
     ledgerPath: join(projectRoot, '.pipeline', 'gate-events.jsonl'),
+    // Cost ceiling (development-plan §5.4) — harness-cost dir scoped PER JOB so
+    // reconcile never mixes concurrent jobs' sessions; halt sentinel under cwd.
+    ceilingUsd: payload.costCeilingUsd ?? job.costCeilingUsd,
+    harnessCostDir: join(projectRoot, '.pipeline', 'harness-cost', String(job.jobId)),
+    haltDir: projectRoot,
   });
 
   // ── Pipeline-3: AC-aware laziness injection (development-plan §5.3) ─────────

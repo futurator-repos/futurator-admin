@@ -10,6 +10,10 @@
  * asserts the shared roles produce byte-identical AgentConfig strings on
  * both sides; drift on either side fails CI.
  *
+ * Pipeline-3: buildAgentConfig delegates model selection to model-router's
+ * `selectModel` when no explicit model is passed. Routing is OFF by default
+ * (P3_MODEL_ROUTING), so output is byte-identical to legacy unless opted in.
+ *
  * ── Roles covered ──────────────────────────────────────────────────────────
  *
  * Shared with the TS resolver: TEST, DEV, REVIEWER, COMPILER, QA, PM,
@@ -37,6 +41,8 @@
  *   allowedTools shapes (per-project array, empty-string explicit no-tool)
  *   and stay out of scope here.
  */
+
+import { selectModel } from '../../lib/model-router.mjs';
 
 const BASELINE_DENY = ['Task', 'Agent', 'WebFetch', 'WebSearch'];
 
@@ -203,7 +209,7 @@ const ROLE_BASE = {
  *   maxTurns?: number,
  * }}
  */
-export function buildAgentConfig({ role, name, model, rigor }) {
+export function buildAgentConfig({ role, name, model, rigor, complexity, chars, items, env }) {
   const base = ROLE_BASE[role];
   if (!base) {
     throw new Error(`role-policy: unknown role "${role}". Known: ${Object.keys(ROLE_BASE).join(', ')}`);
@@ -215,7 +221,15 @@ export function buildAgentConfig({ role, name, model, rigor }) {
     allowedTools: allowed.join(','),
     disallowedTools: disallowed.join(','),
   };
-  if (model !== undefined) out.model = model;
+  // Pipeline-3 model routing (development-plan §5.4): when no explicit model is
+  // given, ask the router. It returns the (undefined) default unless
+  // P3_MODEL_ROUTING=on, so legacy output is byte-identical — the parity test
+  // and every existing caller are unaffected.
+  let resolvedModel = model;
+  if (resolvedModel === undefined) {
+    resolvedModel = selectModel({ role, complexity, rigor, chars, items, defaultModel: undefined, env });
+  }
+  if (resolvedModel !== undefined) out.model = resolvedModel;
   // PR-38 — apply per-rigor turn cap when rigor is provided. Daemon-only
   // roles + missing rigor → no cap. The Claude CLI treats missing
   // `--max-turns` as no cap.
