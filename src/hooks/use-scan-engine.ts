@@ -65,6 +65,33 @@ export interface Maturity {
   overall: number | null;
 }
 
+export interface InfraEntry {
+  provider?: string;
+  service?: string;
+  category?: string;
+  residency?: string;
+  external?: boolean;
+  dataStore?: boolean;
+  fileCount: number;
+  files: string[];
+}
+export interface InfraInventory {
+  aws: InfraEntry[];
+  databases: InfraEntry[];
+  ai: InfraEntry[];
+  thirdParty: InfraEntry[];
+  iac: { provider: string; fileCount: number; files: string[] }[];
+  boundaries: { clientFiles: number; serverFiles: number; externalTouchingFiles: number };
+  external: { provider: string; kind: string; fileCount: number }[];
+  summary: {
+    awsServiceCount: number;
+    dataStoreCount: number;
+    aiCount: number;
+    externalProcessorCount: number;
+    iacProviders: string[];
+  };
+}
+
 export interface ScanReport {
   findings: ScanFinding[];
   phases: ScanPhase[];
@@ -72,6 +99,8 @@ export interface ScanReport {
   planOutput?: unknown;
   /** Codebase maturity scorecard (the high-level RAG overview). */
   maturity?: Maturity;
+  /** Infrastructure inventory (AWS/db/AI/3rd-party + IaC) — feeds compliance. */
+  infra?: InfraInventory;
   gateViolations: Array<{ epicId: string; storyId: string; reason: string }>;
   counts: {
     total: number;

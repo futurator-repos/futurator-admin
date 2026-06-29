@@ -7354,6 +7354,7 @@ async function executeScanEngineJob(job) {
   const decomposePath = new URL('./scripts/refactor-recon/subsystem-decompose.mjs', import.meta.url).pathname;
   const privacyPath = new URL('./scripts/refactor-recon/privacy-scan-internal.mjs', import.meta.url).pathname;
   const testsPath = new URL('./scripts/refactor-recon/tests-detect.mjs', import.meta.url).pathname;
+  const infraPath = new URL('./scripts/refactor-recon/infra-extract.mjs', import.meta.url).pathname;
 
   // Spawn a plain Node child (deterministic stages — never the agent path).
   const spawnNode = (args, cwd) =>
@@ -7399,11 +7400,18 @@ async function executeScanEngineJob(job) {
           await spawnNode([testsPath, repo, '--out', pathJoin(od, 'tests.json')], repo);
           tests = rj('tests.json');
         } catch (te) { log('warn', `[${short}] scan-engine tests detector failed (non-fatal): ${te?.message || te}`); }
+        // Infrastructure inventory — deterministic AWS/db/AI/3rd-party + IaC map.
+        let infra = null;
+        try {
+          await spawnNode([infraPath, repo, '--src', p.src || 'src', '--out', pathJoin(od, 'infra.json')], repo);
+          infra = rj('infra.json');
+        } catch (ie) { log('warn', `[${short}] scan-engine infra extractor failed (non-fatal): ${ie?.message || ie}`); }
         return {
           hotspots: hotspotsDoc.hotspots || [],
           shards: rj('subsystem-shards.json') || { shards: [] },
           privacySummary,
           tests,
+          infra,
           // knip actually produced data? (else the clutter axis is degraded)
           knipRan: hotspotsDoc.toolStatus?.knip === 'ok',
           anchoredPaths: new Set((graph.nodes || []).map((n) => n.source_file).filter(Boolean)),
@@ -7454,6 +7462,7 @@ async function executeScanEngineJob(job) {
             counts: result.counts,
             lowConfidence: result.lowConfidence,
             maturity: result.maturity,
+            infra: result.infra,
             reportMarkdown: result.reportMarkdown,
           }),
           ContentType: 'application/json',

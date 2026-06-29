@@ -13,7 +13,159 @@ import {
   type ScanFinding,
   type ScanReport as ScanReportData,
   type MaturityAxis,
+  type InfraInventory,
+  type InfraEntry,
 } from '@/hooks/use-scan-engine';
+
+/**
+ * Infrastructure tab — how the app's infra works: AWS services, databases, AI
+ * providers, 3rd-party services, IaC, the front-end↔infra boundary, and (the key
+ * cross-link) what data LEAVES to external processors — the precise input the
+ * GDPR / EU-AI-Act / data-privacy authorities consume. Deterministic inventory.
+ */
+function InfraGroup({
+  title,
+  entries,
+  label,
+}: {
+  title: string;
+  entries: InfraEntry[];
+  label: (e: InfraEntry) => string;
+}) {
+  if (!entries.length) return null;
+  return (
+    <div>
+      <div
+        style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)', margin: '0 0 4px' }}
+      >
+        {title}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {entries.map((e, i) => (
+          <span
+            key={i}
+            title={e.files.join('\n')}
+            style={{
+              fontSize: 11,
+              color: 'var(--text-dim)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: '3px 9px',
+              background: 'var(--background)',
+            }}
+          >
+            <strong style={{ color: 'var(--foreground)' }}>{label(e)}</strong> · {e.fileCount}f
+            {e.residency ? (
+              <span
+                style={{ color: e.residency === 'external' ? 'var(--warning)' : 'var(--text-dim)' }}
+              >
+                {' '}
+                · {e.residency}
+              </span>
+            ) : null}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianceCount: number }) {
+  return (
+    <div data-testid="infra-map" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 14,
+          fontSize: 11.5,
+          color: 'var(--text-dim)',
+        }}
+      >
+        <span>{infra.summary.awsServiceCount} AWS services</span>
+        <span>{infra.summary.dataStoreCount} data stores</span>
+        <span>{infra.summary.aiCount} AI providers</span>
+        <span>IaC: {infra.summary.iacProviders.join(', ') || 'none detected'}</span>
+        <span>
+          boundary: {infra.boundaries.clientFiles} client / {infra.boundaries.serverFiles} server ·{' '}
+          {infra.boundaries.externalTouchingFiles} files touch external
+        </span>
+      </div>
+
+      {/* The cross-link: what data leaves the account → the compliance authorities. */}
+      {infra.external.length > 0 && (
+        <div
+          style={{
+            border: '1px solid color-mix(in srgb, var(--warning) 45%, var(--border))',
+            borderRadius: 10,
+            padding: 10,
+            background: 'color-mix(in srgb, var(--warning) 6%, transparent)',
+          }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>
+            ⚠ Data may leave to {infra.external.length} external processor
+            {infra.external.length === 1 ? '' : 's'} → feeds GDPR Art. 44 + EU AI Act
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', margin: '4px 0 6px' }}>
+            These are the cross-border / 3rd-party transfer surfaces the privacy + AI-Act scans key
+            off ({complianceCount} compliance finding{complianceCount === 1 ? '' : 's'} this scan).
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {infra.external.map((e, i) => (
+              <span
+                key={i}
+                style={{
+                  fontSize: 11,
+                  color: 'var(--foreground)',
+                  border: '1px solid color-mix(in srgb, var(--warning) 50%, var(--border))',
+                  borderRadius: 8,
+                  padding: '3px 9px',
+                }}
+              >
+                {e.provider}{' '}
+                <span style={{ color: 'var(--text-dim)' }}>
+                  ({e.kind} · {e.fileCount}f)
+                </span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <InfraGroup
+        title="AWS services"
+        entries={infra.aws}
+        label={(e) =>
+          `${e.service}${e.category ? ` (${e.category})` : ''}${e.dataStore ? ' · store' : ''}`
+        }
+      />
+      <InfraGroup title="Databases" entries={infra.databases} label={(e) => e.provider || ''} />
+      <InfraGroup
+        title="AI providers"
+        entries={infra.ai}
+        label={(e) => `${e.provider}${e.external ? ' · external' : ' · in-account'}`}
+      />
+      <InfraGroup
+        title="3rd-party services"
+        entries={infra.thirdParty}
+        label={(e) => e.provider || ''}
+      />
+      <InfraGroup
+        title="Infrastructure-as-Code / deploy"
+        entries={infra.iac.map((i) => ({
+          provider: i.provider,
+          fileCount: i.fileCount,
+          files: i.files,
+        }))}
+        label={(e) => e.provider || ''}
+      />
+      <div style={{ fontSize: 10.5, color: 'var(--text-dim)', fontStyle: 'italic' }}>
+        Static inference from SDK imports + IaC files — service configs (ALB rules, Lambda memory,
+        CloudFront behaviours) and live AWS state are not probed.
+      </div>
+    </div>
+  );
+}
 
 const STATUS_COLOR: Record<string, string> = {
   good: 'var(--success, #22c55e)',
@@ -185,6 +337,7 @@ export function ScanReport({
   onCreatePlan?: (intent: string) => void;
 }) {
   const { data: report, isLoading } = useScanReport(appId, available);
+  const [view, setView] = useState<'report' | 'infra'>('report');
 
   if (!available) {
     return (
@@ -211,12 +364,61 @@ export function ScanReport({
   return (
     <div data-testid="scan-report" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <Header report={report} appId={appId} />
-      {report.maturity?.axes?.length ? (
-        <MaturityScorecard axes={report.maturity.axes} overall={report.maturity.overall} />
-      ) : null}
-      <PriorityMatrix findings={report.findings} />
-      <ByDimension findings={report.findings} />
-      <Phases report={report} onCreatePlan={onCreatePlan} />
+      {/* Report | Infrastructure sub-tab */}
+      <div
+        style={{
+          display: 'inline-flex',
+          alignSelf: 'flex-start',
+          border: '1px solid var(--border)',
+          borderRadius: 6,
+          overflow: 'hidden',
+        }}
+      >
+        {(
+          [
+            ['report', 'Findings & Plan'],
+            ['infra', 'Infrastructure'],
+          ] as ['report' | 'infra', string][]
+        ).map(([v, label]) => (
+          <button
+            key={v}
+            type="button"
+            onClick={() => setView(v)}
+            data-testid={`scan-view-${v}`}
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: view === v ? 'var(--background)' : 'var(--text-dim)',
+              background: view === v ? 'var(--foreground)' : 'transparent',
+              border: 'none',
+              padding: '5px 12px',
+              cursor: 'pointer',
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {view === 'report' ? (
+        <>
+          {report.maturity?.axes?.length ? (
+            <MaturityScorecard axes={report.maturity.axes} overall={report.maturity.overall} />
+          ) : null}
+          <PriorityMatrix findings={report.findings} />
+          <ByDimension findings={report.findings} />
+          <Phases report={report} onCreatePlan={onCreatePlan} />
+        </>
+      ) : report.infra ? (
+        <InfraMap
+          infra={report.infra}
+          complianceCount={report.counts.byDimension?.compliance ?? 0}
+        />
+      ) : (
+        <div style={{ padding: 14, fontSize: 12, color: 'var(--text-dim)' }}>
+          No infrastructure inventory in this scan — re-scan to generate it.
+        </div>
+      )}
     </div>
   );
 }

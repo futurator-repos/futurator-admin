@@ -184,6 +184,7 @@ export async function runScanEngine(job, deps) {
     reportMarkdown,
     lowConfidence,
     maturity,
+    infra: art.infra || null,
     counts: {
       total: findings.length,
       deterministic: detFindings.length,
