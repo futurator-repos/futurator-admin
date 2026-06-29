@@ -55,6 +55,8 @@ export interface ScanPhase {
 export interface ScanReport {
   findings: ScanFinding[];
   phases: ScanPhase[];
+  /** The generated planOutput (epics/stories) — present in scan.json. */
+  planOutput?: unknown;
   gateViolations: Array<{ epicId: string; storyId: string; reason: string }>;
   counts: {
     total: number;

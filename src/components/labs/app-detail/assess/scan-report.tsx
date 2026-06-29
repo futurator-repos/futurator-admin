@@ -14,6 +14,33 @@ import {
   type ScanReport as ScanReportData,
 } from '@/hooks/use-scan-engine';
 
+/**
+ * Download the full v2 scan as a JSON file — for auditing / sharing the scan back
+ * for tuning. Self-contained: findings + phases + the generated planOutput + counts.
+ */
+function downloadScanJson(report: ScanReportData, appId: string) {
+  const payload = {
+    schema: 'futurator.refactor-scan-v2/v1',
+    appId,
+    generatedAt: new Date().toISOString(),
+    counts: report.counts,
+    lowConfidence: report.lowConfidence,
+    gateViolations: report.gateViolations,
+    phases: report.phases,
+    planOutput: report.planOutput ?? null,
+    findings: report.findings,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `scan-v2-${appId}-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 const SEV_ORDER = ['High', 'Medium', 'Low–Med', 'Low'];
 const sevColor: Record<string, string> = {
   High: 'var(--destructive, #ef4444)',
@@ -56,7 +83,7 @@ export function ScanReport({ appId, available }: { appId: string; available: boo
 
   return (
     <div data-testid="scan-report" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <Header report={report} />
+      <Header report={report} appId={appId} />
       <PriorityMatrix findings={report.findings} />
       <ByDimension findings={report.findings} />
       <Phases report={report} />
@@ -64,7 +91,7 @@ export function ScanReport({ appId, available }: { appId: string; available: boo
   );
 }
 
-function Header({ report }: { report: ScanReportData }) {
+function Header({ report, appId }: { report: ScanReportData; appId: string }) {
   return (
     <div
       style={{
@@ -96,6 +123,25 @@ function Header({ report }: { report: ScanReportData }) {
           ⚠ low-confidence decomposition
         </span>
       )}
+      <div style={{ flex: 1 }} />
+      <button
+        type="button"
+        onClick={() => downloadScanJson(report, appId)}
+        data-testid="scan-export-json"
+        title="Download the full scan (findings + phases + plan) as JSON for auditing"
+        style={{
+          fontSize: 11,
+          fontWeight: 600,
+          color: 'var(--foreground)',
+          background: 'transparent',
+          border: '1px solid var(--border)',
+          borderRadius: 6,
+          padding: '4px 10px',
+          cursor: 'pointer',
+        }}
+      >
+        ⇩ Export JSON
+      </button>
     </div>
   );
 }

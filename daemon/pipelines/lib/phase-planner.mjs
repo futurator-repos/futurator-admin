@@ -43,41 +43,58 @@ const PHASE_WHY = [
 
 const has = (s, re) => typeof s === 'string' && re.test(s);
 
+// Band-routing signals derived from the finding's issue+suggestion TEXT — needed
+// because LLM findings (the bulk) don't carry the structural evidence hints the
+// deterministic mapper attaches. Tuned against the first real-app run (applicator-
+// onboarding, 271 findings) where magic-numbers, hand-rolled-UI, and Trivial
+// quick-wins were all collapsing into Phase 5.
+const FOUNDATION_RE =
+  /\bmagic numbers?\b|\bcentraliz|\bnamed constants?\b|\bsingle source of truth\b|\bscattered\b[^.]{0,40}\bconstants?\b|\bhard-?coded\b[^.]{0,40}\b(constant|threshold|limit)\b|\bshould be (a |an )?(named )?constants?\b|\bnot reusing\b[^.]{0,30}\bcentralized\b|\bconstants?\b[^.]{0,30}\bduplicat|\bduplicat\w*\b[^.]{0,30}\bconstants?\b/i;
+const HELPER_RE =
+  /\bextract\b[^.]{0,40}\b(helper|function|util|service)\b|\bshared (helper|util|function)\b|\bwitherrorhandling\b|\bapifetch\b|\bbatch(put|delete|write)\b|\bmakeeventid\b|\bemitevent\b|\bduplicat\w*\b[^.]{0,30}\blogic\b|\bconsolidat\w*\b[^.]{0,30}\b(logic|function|implementation|helper)\b|\bupsertfileversioned\b/i;
+const UI_RE =
+  /\bhand-?rolled\b|\binline (style|color|class)\b|\bhard-?coded\b[^.]{0,30}\b(color|inline)\b|\bbadges?\b|\bpills?\b|\bcallout\b|\bdesign system\b|\bcentralized (badge|component)\b|\bdomain component\b|\bshould (be |use )(a )?(shared|centralized) component\b/i;
+const SCALE_RE = /\bauth(oriz|enticat)?\b|\bpaginat|\bgsi\b|\bbackground job\b|\bthroughput\b|\bo\(n/i;
+
 /**
- * Heuristic initial band (0..6) for a finding, from its dimension + the
- * deterministic evidence hints the mappers attach (§5.4 canonical ladder).
+ * Heuristic initial band (0..6) for a finding (§5.4 canonical ladder). Uses the
+ * deterministic evidence hints when present, else the issue+suggestion text so
+ * LLM findings route correctly too.
  */
 export function assignBand(f) {
   const e = f.evidence || {};
   const kind = e.hotspotKind || '';
   const sug = f.suggestion || '';
+  const txt = `${f.issue || ''} ${sug}`;
   const eff = f.effort;
+  const sev = f.severity;
 
-  // Phase 0 — stop-the-bleeding: safe dead code + mechanical fixes.
+  // Phase 0 — stop-the-bleeding: ALL dead code (delete candidates, gated downstream)
+  // + mechanical fixes.
   if (e.mechanical) return 0;
-  if (kind === 'dead-code' && (eff === 'Trivial' || eff === 'Small') && e.safeCandidate !== false) return 0;
+  if (kind === 'dead-code') return 0;
 
-  // Phase 1 — shared constants & contracts (foundations).
+  // Deterministic structural kinds route by KIND first (reliable, no text guessing).
+  if (kind === 'design-system-consolidation') return 3; // UI
+  if (kind === 'duplicate-subsystem' || e.helperExtraction) return 2; // helpers
+  if (kind === 'god-object' || e.godFile) return 4; // god-file
   if (e.foundationKind === 'contract' || e.foundationKind === 'constant' || e.foundationKind === 'type') return 1;
-  if (e.isFoundation && has(sug, /\b(constant|threshold|envelope|contract|type|schema|enum)\b/i)) return 1;
 
-  // Phase 2 — shared infrastructure helpers (collapse duplication).
-  if (kind === 'duplicate-subsystem' || e.helperExtraction) return 2;
-  if (has(sug, /\b(helper|hof|batch(put|delete)?|apifetch|upsert|makeeventid|emitevent)\b/i)) return 2;
-
-  // Phase 3 — UI centralization.
-  if (f.area === 'UI' || f.dimension === 'ui' || kind === 'design-system-consolidation') return 3;
-
-  // Phase 4 — god-file decomposition.
-  if (kind === 'god-object' || e.godFile) return 4;
+  // Text-based routing for LLM findings (no evidence hints). UI precedence over the
+  // generic "centralize" token so "centralized Badge component" → UI, not foundations.
+  if (f.area === 'UI' || f.dimension === 'ui' || UI_RE.test(txt)) return 3;
+  if ((e.isFoundation && has(sug, /\b(constant|threshold|envelope|contract|type|schema|enum)\b/i)) || FOUNDATION_RE.test(txt)) return 1;
+  if (HELPER_RE.test(txt)) return 2;
 
   // Phase 6 — scale & quality (largest, lowest urgency).
-  if (eff === 'Large' && (f.dimension === 'safety-security' || has(sug, /\b(auth|paginat|gsi|index|perf|scale|background)\b/i))) return 6;
+  if (eff === 'Large' && (f.dimension === 'safety-security' || SCALE_RE.test(txt))) return 6;
 
-  // Phase 5 — correctness fixes (default for correctness; otherwise a sane middle).
-  if (f.dimension === 'correctness') return 5;
+  // Phase 0 (quick-wins) — Trivial, isolated, urgent fixes that need no shared seam.
+  if (eff === 'Trivial' && (sev === 'High' || sev === 'Medium')) return 0;
+
+  // Phase 5 — correctness/safety fixes (the entangled remainder).
+  if (f.dimension === 'correctness' || f.dimension === 'safety-security' || f.dimension === 'compliance') return 5;
   if (f.dimension === 'architecture') return 2;
-  if (f.dimension === 'safety-security' || f.dimension === 'compliance') return 5;
   return 5;
 }
 

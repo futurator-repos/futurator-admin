@@ -56,6 +56,52 @@ describe('assignBand — canonical 0..6 ladder', () => {
   });
 });
 
+// Regression lock against the first real-app run (applicator-onboarding) where
+// these classes collapsed into Phase 5. LLM findings carry no evidence hints —
+// routing must work off issue+suggestion text.
+describe('assignBand — real-data rebalance (text-driven, no evidence hints)', () => {
+  const llm = (over) => f('x', { source: 'llm', evidence: {}, ...over });
+
+  it('magic-number / centralization LLM findings → Phase 1 (foundations)', () => {
+    expect(assignBand(llm({ dimension: 'code-quality-refactoring', issue: 'Scattered magic numbers for section thresholds; no centralized constants', suggestion: 'centralize in constants', effort: 'Small' }))).toBe(1);
+    expect(assignBand(llm({ dimension: 'code-quality-refactoring', issue: 'Magic number 500 (debounce delay in ms)', suggestion: 'should be a named constant', effort: 'Trivial' }))).toBe(1);
+    expect(assignBand(llm({ dimension: 'code-quality-refactoring', issue: 'S3 cache constants hardcoded, not reusing centralized values', suggestion: 'reuse centralized config', effort: 'Medium' }))).toBe(1);
+  });
+
+  it('hand-rolled / inline-color UI LLM findings → Phase 3 (UI centralization)', () => {
+    expect(assignBand(llm({ dimension: 'architecture', area: '§sys:src--components--onboarding-v2', issue: 'Proficiency badge colors hand-rolled with hardcoded inline color mappings', suggestion: 'extract a MaturityBadge', effort: 'Medium' }))).toBe(3);
+    expect(assignBand(llm({ dimension: 'architecture', issue: 'Alert/callout boxes repeatedly hand-rolled across 51 files', suggestion: 'centralized Callout component', effort: 'Large' }))).toBe(3);
+  });
+
+  it('duplicated-logic LLM findings → Phase 2 (helpers)', () => {
+    expect(assignBand(llm({ dimension: 'code-quality-refactoring', issue: 'calculateProfileCompleteness duplicated; same logic in two files', suggestion: 'extract a shared helper', effort: 'Small' }))).toBe(2);
+  });
+
+  it('High/Medium Trivial isolated bugs → Phase 0 (quick wins)', () => {
+    expect(assignBand(llm({ dimension: 'safety-security', issue: 'API key fragments logged to console', suggestion: 'redact before logging', severity: 'High', effort: 'Trivial' }))).toBe(0);
+    expect(assignBand(llm({ dimension: 'correctness', issue: 'Unsafe environment variable fallback to localhost in production', suggestion: 'throw if unset', severity: 'High', effort: 'Trivial' }))).toBe(0);
+  });
+
+  it('non-Trivial correctness/safety stays in Phase 5', () => {
+    expect(assignBand(llm({ dimension: 'correctness', issue: 'API response parsed without schema validation', suggestion: 'validate with zod', severity: 'High', effort: 'Small' }))).toBe(5);
+  });
+
+  it('produces a populated Phase 0 + Phase 1 on a mixed real-ish set', () => {
+    const set = [
+      llm({ id: 'a', dimension: 'safety-security', issue: 'API key logged', suggestion: 'redact', severity: 'High', effort: 'Trivial' }),
+      llm({ id: 'b', dimension: 'code-quality-refactoring', issue: 'Magic numbers scattered', suggestion: 'centralize constants', effort: 'Small' }),
+      llm({ id: 'c', dimension: 'architecture', issue: 'badge colors hand-rolled inline', suggestion: 'Badge component', effort: 'Medium' }),
+      f('d', { evidence: { hotspotKind: 'god-object', godFile: true }, effort: 'Large' }),
+    ];
+    const plan = planPhases(set);
+    const phases = new Set(plan.phases.map((p) => p.phase));
+    expect(phases.has(0)).toBe(true); // quick win
+    expect(phases.has(1)).toBe(true); // constants
+    expect(phases.has(3)).toBe(true); // UI
+    expect(phases.has(4)).toBe(true); // god-file
+  });
+});
+
 describe('deriveDependencies', () => {
   it('consumer → foundation (fan-in rule)', () => {
     const foundation = f('F', { evidence: { isFoundation: true, artifact: 'IMPACT_THRESHOLD', foundationKind: 'constant' } });
