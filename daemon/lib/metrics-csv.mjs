@@ -58,6 +58,73 @@ function csvPath(workingDir) {
   return join(workingDir, '.pipeline', 'metrics.csv');
 }
 
+// ── Pipeline-3 A/B channel (development-plan §8) ──────────────────────────────
+// A separate, narrow csv that records one (lever, mode, metric) observation at a
+// time alongside the resolved flag-set, so off-vs-on arms can be pivoted on
+// matched epics without polluting the v2 step_complete schema. "arm" is the
+// resolved mode of the lever's own flag (off | audit | enforce | on | …), which
+// is exactly the A/B grouping key the success-metrics table compares.
+
+const P3_HEADER =
+  'timestamp,planId,epicId,storyId,flag,arm,metric,value,unit,detail\n';
+
+function p3CsvPath(workingDir) {
+  return join(workingDir, '.pipeline', 'p3-metrics.csv');
+}
+
+/**
+ * Append one Pipeline-3 A/B observation. Lazily writes the header.
+ *
+ * @param {{
+ *   workingDir: string,
+ *   event: {
+ *     timestamp?: string,
+ *     planId: string,
+ *     epicId?: string,
+ *     storyId?: string,
+ *     flag: string,    // e.g. 'P3_LAZY_MODE'
+ *     arm: string,     // resolved mode of that flag, the A/B grouping key
+ *     metric: string,  // e.g. 'loc' | 'tokens' | 'wallMs' | 'wouldBlock'
+ *     value: number|string,
+ *     unit?: string,
+ *     detail?: string,
+ *   },
+ * }} args
+ * @returns {string} the path written to
+ */
+export function appendP3Metric({ workingDir, event }) {
+  const path = p3CsvPath(workingDir);
+  if (!existsSync(path)) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, P3_HEADER, 'utf-8');
+  }
+  appendFileSync(path, formatP3Row(event), 'utf-8');
+  return path;
+}
+
+function formatP3Row(event) {
+  const cols = [
+    event.timestamp || new Date().toISOString(),
+    event.planId,
+    event.epicId ?? '',
+    event.storyId ?? '',
+    event.flag,
+    event.arm ?? '',
+    event.metric,
+    event.value ?? '',
+    event.unit ?? '',
+    event.detail ?? '',
+  ];
+  return cols.map(csvEscape).join(',') + '\n';
+}
+
+/** Read the p3 A/B channel back into rows. Empty when missing. */
+export function readP3Metrics(workingDir) {
+  const path = p3CsvPath(workingDir);
+  if (!existsSync(path)) return [];
+  return parseCsv(readFileSync(path, 'utf-8'));
+}
+
 function csvEscape(value) {
   if (value === undefined || value === null) return '';
   const s = String(value);

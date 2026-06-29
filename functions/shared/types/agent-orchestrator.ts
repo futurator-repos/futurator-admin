@@ -770,6 +770,42 @@ export interface AgentJob {
     };
     messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
   };
+
+  // ── Pipeline-3 (development-plan §7) — additive, all optional ──────────────
+  // The resolved P3 flag-set, frozen onto the job at claim by
+  // `daemon/lib/pipeline-flags.mjs#freezeFlagsOntoJob`. Once present, a job's
+  // P3 behavior is fixed for its lifetime even if operator env changes. Absent
+  // on legacy jobs ⇒ every capability reads its OFF default.
+  p3Flags?: Partial<{
+    P3_GATE_MODE: 'off' | 'audit' | 'enforce';
+    P3_LAZY_MODE: 'off' | 'lite' | 'full' | 'ultra';
+    P3_COST_CEILING: 'off' | 'observe' | 'enforce';
+    P3_READY_FRONTIER: 'off' | 'shadow' | 'on';
+    P3_BOUND_AC_GATE: 'off' | 'shadow' | 'on';
+    P3_WORKTREE_CACHE: 'off' | 'on';
+    P3_SESSION_REUSE: 'off' | 'dev_compile' | 'full';
+    P3_COMPACTION: 'off' | 'on';
+  }>;
+  /**
+   * StoryNode linkage (Phase 2B). When a job is minted from a `plan-spec-graph`
+   * StoryNode rather than a legacy wave story, this points back at the node that
+   * is the unit of schedule/spec/completion (the job stays the unit of
+   * execution). Absent on legacy jobs.
+   */
+  storyNodeRef?: { storyId: string; planId: string };
+  /** Resolved dev-job scope contract (Phase 2A) — touches/forbidden/binding env. */
+  devContractRef?: { allowedPaths: string[]; forbiddenAreas: string[] };
+  /** Atomic-claim lease state (Phase 2A). */
+  claimOwner?: string;
+  claimToken?: string;
+  claimExpiresAt?: string;
+  /** StoryNode lifecycle mirror (Phase 2A): blocked|ready|claimed|developing|merging|verifying|done|failed. */
+  storyState?: string;
+  dependsOn?: string[];
+  /** Worktree isolation (Phase 3A). */
+  worktreePath?: string;
+  worktreeBranch?: string;
+  depCacheMode?: 'shared' | 'symlink-ro' | 'independent';
 }
 
 // ── Epic-dev payload types (Arch Doc §3) ──
