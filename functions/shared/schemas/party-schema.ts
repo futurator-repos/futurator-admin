@@ -223,6 +223,9 @@ export const scanEngineBodySchema = z.object({
   cap: z.number().int().min(1).max(200).optional(),
   // 'internal' (our own scanner, default) | 'external' (GDPR service).
   privacyMode: z.enum(['internal', 'external']).optional(),
+  // 'full' (default — deterministic recon + LLM swarm) | 'deterministic' (recon +
+  // detectors + maturity + plan only, NO swarm → ~0 LLM tokens; cheap re-scan).
+  mode: z.enum(['full', 'deterministic']).optional(),
 });
 
 /**

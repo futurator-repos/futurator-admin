@@ -10,7 +10,8 @@
  * The v1 deterministic-only "Refactoring Assessment" was retired in favour of this.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useRouter, useSearchParams } from 'next/navigation';
 import type { App } from '@/types/app';
 import type { AuditHotspot } from '@/types/refactor-audit';
@@ -19,7 +20,7 @@ import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-o
 import { NewPlanModal } from '../new-plan-modal';
 import { AgentCompare } from './agent-compare';
 import { ScanReport } from './scan-report';
-import { useRunScanEngine } from '@/hooks/use-scan-engine';
+import { useRunScanEngine, useScanReport } from '@/hooks/use-scan-engine';
 
 /**
  * Compile selected hotspots into a NewPlanModal intent seed (FR35). Pure +
@@ -45,6 +46,7 @@ export function buildPlanIntent(hotspots: AuditHotspot[]): string {
 export function AssessTab({ app }: { app: App }) {
   const router = useRouter();
   const params = useSearchParams();
+  const queryClient = useQueryClient();
 
   const [planOpen, setPlanOpen] = useState(false);
   const [planIntent, setPlanIntent] = useState('');
@@ -63,7 +65,19 @@ export function AssessTab({ app }: { app: App }) {
   const scanTerminal = scanStatus === 'COMPLETED' || scanStatus === 'FAILED';
   const scanRunning = scanRun.isPending || (!!scanJobId && !scanTerminal);
   const scanSummary = scanJob?.scanEngineSummary;
-  const scanAvailable = !!scanSummary?.scanAvailable;
+  // A prior scan persists on S3 (shared react-query cache with ScanReport) — so the
+  // button reads "Re-scan" + the report shows even on a fresh load with no ?scanJob.
+  const { data: persistedScan } = useScanReport(app.appId);
+  const hasScan = !!persistedScan || !!scanSummary?.scanAvailable;
+
+  // When a running scan completes, refetch the persisted scan + graph so the new
+  // results replace the old ones without a manual reload.
+  useEffect(() => {
+    if (scanStatus === 'COMPLETED') {
+      queryClient.invalidateQueries({ queryKey: ['scan-report', app.appId] });
+      queryClient.invalidateQueries({ queryKey: ['refactor-graph-available', app.appId] });
+    }
+  }, [scanStatus, app.appId, queryClient]);
 
   const setScanJob = useCallback(
     (id: string) => {
@@ -75,8 +89,8 @@ export function AssessTab({ app }: { app: App }) {
     },
     [params, router],
   );
-  const startScan = () => {
-    scanRun.mutate({ privacyMode }, { onSuccess: (res) => setScanJob(res.jobId) });
+  const startScan = (mode: 'full' | 'deterministic' = 'full') => {
+    scanRun.mutate({ privacyMode, mode }, { onSuccess: (res) => setScanJob(res.jobId) });
   };
 
   return (
@@ -142,9 +156,35 @@ export function AssessTab({ app }: { app: App }) {
               );
             })}
           </div>
+          {/* Quick re-scan: deterministic only (recon + detectors + plan, no LLM
+              swarm) → ~0 tokens. Shown once a scan exists, since it refreshes the
+              cheap layer without re-spending the ~48-agent swarm. */}
+          {hasScan && (
+            <button
+              type="button"
+              onClick={() => startScan('deterministic')}
+              disabled={scanRunning}
+              data-testid="scan-engine-quick"
+              title="Re-run only the deterministic layer (recon + hotspots + infra + dead-code + maturity + plan) — no LLM swarm, ~0 tokens"
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: 'var(--foreground)',
+                background: 'transparent',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                padding: '7px 12px',
+                cursor: scanRunning ? 'not-allowed' : 'pointer',
+                opacity: scanRunning ? 0.6 : 1,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              ↻ Quick re-scan (~0 tokens)
+            </button>
+          )}
           <button
             type="button"
-            onClick={startScan}
+            onClick={() => startScan('full')}
             disabled={scanRunning}
             data-testid="scan-engine-run"
             style={{
@@ -181,7 +221,7 @@ export function AssessTab({ app }: { app: App }) {
               ? 'Starting…'
               : scanRunning
                 ? 'Scanning…'
-                : scanAvailable
+                : hasScan
                   ? 'Re-scan'
                   : 'Run v2 scan'}
           </button>
@@ -205,7 +245,6 @@ export function AssessTab({ app }: { app: App }) {
         )}
         <ScanReport
           appId={app.appId}
-          available={scanAvailable}
           onCreatePlan={(intent) => {
             setPlanIntent(intent);
             setPlanOpen(true);

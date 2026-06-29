@@ -41,10 +41,16 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     isHotKind(hotspots, 'design-system-consolidation') * 3;
   add('component-driven', 'Component-driven (anti-inline)', scoreFromCount(uiDebt, 24), `${uiDebt} UI-centralization signals`);
 
-  // 2. Clutter / dead code (knip).
+  // 2. Clutter / dead code (knip). Score on the dead-FILE count (knip-unused +
+  // zero-fan-in), not the rolled-up finding rows — 321 dead files must read poor,
+  // not "good" because it's one finding row.
   if (knipRan) {
-    const dead = byDim(findings, 'code-quality-refactoring').filter((f) => (f.evidence || {}).hotspotKind === 'dead-code').length + isHotKind(hotspots, 'dead-code');
-    add('clutter', 'Dead code / clutter (knip)', scoreFromCount(dead, 30), `${dead} dead-code findings`);
+    const deadFiles = (hotspots || [])
+      .filter((h) => h.kind === 'dead-code')
+      .reduce((n, h) => n + ((h.evidence || {}).knipFlagged || (h.evidence || {}).confirmedZeroFanIn || 0), 0);
+    const deadFindings = byDim(findings, 'code-quality-refactoring').filter((f) => (f.evidence || {}).hotspotKind === 'dead-code').length;
+    const dead = Math.max(deadFiles, deadFindings);
+    add('clutter', 'Dead code / clutter (knip)', scoreFromCount(dead, 150), `${dead} dead files`);
   } else {
     add('clutter', 'Dead code / clutter (knip)', null, 'knip did not run — no dead-code signal', false);
   }

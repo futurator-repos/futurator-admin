@@ -377,24 +377,17 @@ const DIMENSIONS: { key: string; label: string }[] = [
 
 export function ScanReport({
   appId,
-  available,
   onCreatePlan,
 }: {
   appId: string;
-  available: boolean;
   onCreatePlan?: (intent: string) => void;
 }) {
-  const { data: report, isLoading } = useScanReport(appId, available);
+  // Self-loads the last persisted scan from S3 (keyed by appId) — survives reloads
+  // without the producing job in the URL.
+  const { data: report, isLoading } = useScanReport(appId);
   const [view, setView] = useState<'report' | 'infra'>('report');
 
-  if (!available) {
-    return (
-      <div style={{ padding: 14, fontSize: 12, color: 'var(--text-dim)' }}>
-        No v2 scan yet. Run a scan to generate the dimension-tagged findings + phased plan.
-      </div>
-    );
-  }
-  if (isLoading) {
+  if (isLoading && !report) {
     return (
       <div style={{ padding: 14, fontSize: 12, color: 'var(--text-dim)' }}>
         Loading scan report…
@@ -403,8 +396,8 @@ export function ScanReport({
   }
   if (!report) {
     return (
-      <div style={{ padding: 14, fontSize: 12, color: 'var(--warning)' }}>
-        Scan report not available yet — re-run the scan to regenerate it.
+      <div style={{ padding: 14, fontSize: 12, color: 'var(--text-dim)' }}>
+        No v2 scan yet. Run a scan to generate the dimension-tagged findings + phased plan.
       </div>
     );
   }

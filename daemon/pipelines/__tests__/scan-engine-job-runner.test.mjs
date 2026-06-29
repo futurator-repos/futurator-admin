@@ -83,4 +83,18 @@ describe('runScanEngine', () => {
     const r = await runScanEngine(job, baseDeps());
     expect(r.reportMarkdown).toMatch(/Refactoring & System-Design Scan/);
   });
+
+  it("deterministic mode skips the swarm (no LLM agents) but still maps + plans", async () => {
+    let agentCalls = 0;
+    const deps = baseDeps({ spawnAgent: async () => { agentCalls++; return '---FINDINGS---{"findings":[]}---END_FINDINGS---'; } });
+    const detJob = { ...job, scanEnginePayload: { ...job.scanEnginePayload, mode: 'deterministic' } };
+    const r = await runScanEngine(detJob, deps);
+    expect(r.ok).toBe(true);
+    expect(agentCalls).toBe(0); // NO swarm + NO report-writer LLM call
+    expect(r.counts.llm).toBe(0);
+    // deterministic findings (hotspots + privacy) still present + planned
+    expect(r.findings.length).toBeGreaterThan(0);
+    expect(r.phases.length).toBeGreaterThan(0);
+    expect(r.reportMarkdown).toMatch(/deterministic/);
+  });
 });

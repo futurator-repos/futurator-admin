@@ -21,8 +21,8 @@ import {
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { spawn, execSync } from 'child_process';
-import { mkdirSync, existsSync, readFileSync, statSync, appendFileSync } from 'fs';
-import { join as pathJoin } from 'path';
+import { mkdirSync, existsSync, readFileSync, statSync, appendFileSync, readdirSync } from 'fs';
+import { join as pathJoin, extname as pathExtname, relative as pathRelative } from 'path';
 import { createHash } from 'node:crypto';
 import { totalmem, freemem, loadavg } from 'os';
 import {
@@ -7403,6 +7403,26 @@ async function executeScanEngineJob(job) {
 
   const sePush = (type, data = {}) => pushEvent(jobId, 'scan-engine', null, type, data);
 
+  // Collect every real source file (relative) so the anchored-path guard drops
+  // only HALLUCINATED paths, not real files graphify didn't node-ify.
+  function walkSourceFiles(repo, into = new Set()) {
+    const EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
+    const IGNORE = new Set(['node_modules', '.next', 'dist', 'out', 'build', '.git', 'coverage']);
+    const walk = (dir) => {
+      let entries = [];
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.name.startsWith('.') && e.name !== '.') continue;
+        if (IGNORE.has(e.name)) continue;
+        const full = pathJoin(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else if (EXTS.has(pathExtname(e.name)) && !e.name.endsWith('.d.ts')) into.add(pathRelative(repo, full));
+      }
+    };
+    walk(repo);
+    return into;
+  }
+
   try {
     const result = await runScanEngine(job, {
       projectName: p.projectId || job.projectId,
@@ -7463,7 +7483,12 @@ async function executeScanEngineJob(job) {
           eslint,
           // knip actually produced data? (else the clutter axis is degraded)
           knipRan: hotspotsDoc.toolStatus?.knip === 'ok',
-          anchoredPaths: new Set((graph.nodes || []).map((n) => n.source_file).filter(Boolean)),
+          // Anchor = graphify nodes ∪ the REAL on-disk source files. graphify only
+          // node-ifies reachable/parsed files (~1.5k here), so anchoring to it alone
+          // dropped valid findings in real-but-ungraphed files (the "203 dropped"
+          // over-drop). Walking the repo keeps the guard (hallucinated paths still
+          // dropped) without losing real findings.
+          anchoredPaths: walkSourceFiles(repo, new Set((graph.nodes || []).map((n) => n.source_file).filter(Boolean))),
           hubs: resolved.hubs || [],
         };
       },

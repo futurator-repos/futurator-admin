@@ -617,6 +617,8 @@ export interface AgentJob {
     cap?: number;
     /** Privacy lane: 'internal' (our scanner, default) | 'external' (GDPR service). */
     privacyMode?: 'internal' | 'external';
+    /** 'full' (default, recon + LLM swarm) | 'deterministic' (no swarm; ~0 LLM). */
+    mode?: 'full' | 'deterministic';
   };
 
   /** Denormalized headline of a `scan-engine` run; the full scan rides S3. */

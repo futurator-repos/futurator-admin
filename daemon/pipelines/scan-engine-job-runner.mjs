@@ -74,6 +74,32 @@ function countsByDimension(findings) {
   return c;
 }
 
+/** Deterministic markdown report (no LLM) — used by the cheap 'deterministic' mode. */
+function deterministicReport(projectName, findings, phases, maturity) {
+  const byId = new Map(findings.map((f) => [f.id, f]));
+  const lines = [
+    `# ${projectName} — Refactoring & System-Design Scan (deterministic)`,
+    '',
+    '> Deterministic re-scan (no LLM swarm): structural + compliance + infra findings only.',
+    '',
+    `## Maturity — overall ${maturity?.overall != null ? Math.round(maturity.overall * 100) + '%' : 'n/a'}`,
+    ...(maturity?.axes || []).map((a) => `- ${a.label}: ${a.measured ? a.status : 'unmeasured'} — ${a.detail}`),
+    '',
+    '## Priority Matrix',
+    '| Finding | Severity | Effort | Dimension | Location |',
+    '|---|---|---|---|---|',
+    ...findings.map((f) => `| ${f.issue} | ${f.severity} | ${f.effort} | ${f.dimension} | ${f.location} |`),
+    '',
+    '## Recommended Sequencing',
+    ...phases.flatMap((p) => [
+      `**Phase ${p.phase} — ${p.name}** (${p.tag}) — ${p.why}`,
+      ...p.items.slice(0, 30).map((id) => `- ${byId.get(id)?.issue || id}`),
+      '',
+    ]),
+  ];
+  return lines.join('\n');
+}
+
 /**
  * @param {object} job   AgentJob (jobType 'scan-engine'); scanEnginePayload {projectId,projectPath,src,cap}
  * @param {object} deps
@@ -91,9 +117,13 @@ export async function runScanEngine(job, deps) {
   const pushEvent = deps.pushEvent || (() => {});
   const log = deps.log || (() => {});
   const concurrency = deps.concurrency || 6;
+  // 'deterministic' = recon + detectors + maturity + plan, NO LLM swarm / writer
+  // (~0 tokens) — the cheap granular re-scan that refreshes structure/hotspots/
+  // infra/dead-code without re-spending the ~48-agent swarm.
+  const mode = p.mode === 'deterministic' ? 'deterministic' : 'full';
   if (!projectPath) return { ok: false, reason: 'projectPath-missing' };
 
-  pushEvent('scan.started', { projectId: p.projectId });
+  pushEvent('scan.started', { projectId: p.projectId, mode });
 
   // (b) recon — reused. Trust gate on exit code.
   const recon = await deps.runRecon({ projectPath, src: p.src });
@@ -120,33 +150,37 @@ export async function runScanEngine(job, deps) {
     ...(art.privacySummary ? privacyToFindings(art.privacySummary) : []),
   ];
 
-  // (d) LLM swarm — analyzers for analyzed shards + cross-cutting passes.
-  const analyzeShards = shards.filter((s) => s.analyze);
-  const tasks = [
-    ...analyzeShards.map((s) => ({ role: `scan-analyzer:${s.name}`, label: s.name, prompt: analyzerPrompt(s), ctx: { area: s.shardKey } })),
-    ...CROSS_CUTTING.map((pass) => ({
-      role: `scan-xcut:${pass.area}`,
-      label: pass.title || pass.area,
-      prompt: crossCuttingPrompt(pass, seedFor(pass, { hotspots, hubs: art.hubs || [] })),
-      ctx: { area: pass.area, dimension: pass.dimension },
-    })),
-  ];
-  pushEvent('scan.swarm.started', { agents: tasks.length });
-  const perAgent = []; // findings parsed per task (reused for the union below)
-  const outputs = await pool(tasks, concurrency, async (t, i) => {
-    pushEvent('scan.agent.start', { role: t.role, label: t.label });
-    const text = await deps.spawnAgent({ role: t.role, prompt: t.prompt });
-    const parsed = text && !text.__error ? parseAndValidate(text, t.ctx) : [];
-    perAgent[i] = parsed;
-    pushEvent('scan.agent.done', { role: t.role, label: t.label, findings: parsed.length });
-    return text;
-  });
+  // (d) LLM swarm — analyzers for analyzed shards + cross-cutting passes. SKIPPED
+  // in deterministic mode (~0 LLM tokens; deterministic findings only).
   let llmFindings = [];
-  perAgent.forEach((parsed) => { if (parsed) llmFindings.push(...parsed); });
-  void outputs;
-  const before = llmFindings.length;
-  llmFindings = dropUnanchored(llmFindings, anchored); // hallucination guard
-  pushEvent('scan.swarm.done', { llmFindings: llmFindings.length, droppedUnanchored: before - llmFindings.length });
+  if (mode === 'deterministic') {
+    pushEvent('scan.swarm.skipped', { reason: 'deterministic-mode' });
+  } else {
+    const analyzeShards = shards.filter((s) => s.analyze);
+    const tasks = [
+      ...analyzeShards.map((s) => ({ role: `scan-analyzer:${s.name}`, label: s.name, prompt: analyzerPrompt(s), ctx: { area: s.shardKey } })),
+      ...CROSS_CUTTING.map((pass) => ({
+        role: `scan-xcut:${pass.area}`,
+        label: pass.title || pass.area,
+        prompt: crossCuttingPrompt(pass, seedFor(pass, { hotspots, hubs: art.hubs || [] })),
+        ctx: { area: pass.area, dimension: pass.dimension },
+      })),
+    ];
+    pushEvent('scan.swarm.started', { agents: tasks.length });
+    const perAgent = []; // findings parsed per task (reused for the union below)
+    await pool(tasks, concurrency, async (t, i) => {
+      pushEvent('scan.agent.start', { role: t.role, label: t.label });
+      const text = await deps.spawnAgent({ role: t.role, prompt: t.prompt });
+      const parsed = text && !text.__error ? parseAndValidate(text, t.ctx) : [];
+      perAgent[i] = parsed;
+      pushEvent('scan.agent.done', { role: t.role, label: t.label, findings: parsed.length });
+      return text;
+    });
+    perAgent.forEach((parsed) => { if (parsed) llmFindings.push(...parsed); });
+    const before = llmFindings.length;
+    llmFindings = dropUnanchored(llmFindings, anchored); // hallucination guard
+    pushEvent('scan.swarm.done', { llmFindings: llmFindings.length, droppedUnanchored: before - llmFindings.length });
+  }
 
   // (e/f) union + dedupe.
   const findings = dedupe([...detFindings, ...llmFindings]);
@@ -171,8 +205,12 @@ export async function runScanEngine(job, deps) {
   if (gateViolations.length) log('warn', `[scan-engine] ${gateViolations.length} characterization-gate violation(s) — review before executing`);
   pushEvent('scan.planned', { phases: plan.phases.length, gateViolations: gateViolations.length });
 
-  // (f) aggregator report (markdown).
+  // (f) aggregator report (markdown). LLM in full mode; deterministic mode writes a
+  // cheap structured summary (no LLM).
   let reportMarkdown = '';
+  if (mode === 'deterministic') {
+    reportMarkdown = deterministicReport(projectName, findings, plan.phases, maturity);
+  } else
   try {
     reportMarkdown = await deps.spawnAgent({
       role: 'scan-report-writer',

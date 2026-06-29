@@ -22,6 +22,8 @@ export interface RunScanEngineInput {
   cap?: number;
   /** 'internal' (our own scanner, default) | 'external' (GDPR service). */
   privacyMode?: 'internal' | 'external';
+  /** 'full' (default, recon + swarm) | 'deterministic' (no swarm; ~0 LLM tokens). */
+  mode?: 'full' | 'deterministic';
 }
 
 export type ScanDimension =
@@ -130,8 +132,13 @@ export function useRunScanEngine(appId: string | null) {
   });
 }
 
-/** Fetch the full scan report from S3 (uploaded by the daemon). Gated by `enabled`. */
-export function useScanReport(appId: string | null, enabled: boolean) {
+/**
+ * Fetch the full scan report from S3 (uploaded by the daemon, keyed by appId).
+ * Enabled whenever appId is set — so a PRIOR scan PERSISTS across reloads /
+ * fresh sessions WITHOUT needing the producing job in the URL (scans are
+ * expensive; the S3 object is the durable store). Returns null if none yet.
+ */
+export function useScanReport(appId: string | null) {
   return useQuery({
     queryKey: ['scan-report', appId],
     queryFn: async (): Promise<ScanReport | null> => {
@@ -141,7 +148,7 @@ export function useScanReport(appId: string | null, enabled: boolean) {
       if (!res.ok) return null;
       return (await res.json()) as ScanReport;
     },
-    enabled: !!appId && enabled,
+    enabled: !!appId,
     staleTime: 60_000,
     retry: false,
   });
