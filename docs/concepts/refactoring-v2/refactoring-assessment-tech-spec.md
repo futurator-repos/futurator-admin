@@ -20,10 +20,11 @@ assessment** across five dimensions, (b) an **infrastructure map**, (c) a **matu
 (d) a **phased, dependency-ordered refactoring plan** that hands off to the dev pipeline. Two
 generations, layered:
 
-- **v1 — deterministic recon + L3 adjudication** (the foundation): cheap (~0 LLM, <3 min) structural
-  truth — graph, fan-in, dead code, god-objects, duplicate subsystems — plus an optional LLM
-  adjudication that confirms findings and emits a Strangler-Fig plan. Privacy/compliance lane + a
-  file-level graph view + a dual-agent graph-vs-vanilla comparison harness.
+- **v1 — deterministic recon + L3 adjudication** (the foundation, now consumed BY v2): cheap (~0 LLM,
+  <3 min) structural truth — graph, fan-in, dead code, god-objects, duplicate subsystems — plus an
+  optional LLM adjudication. Its `recon.mjs` chain + the privacy/graph/dual-agent pieces are reused
+  wholesale by v2; **the standalone v1 "Refactoring Assessment" UI has been retired** (route + job
+  kind kept but unexposed). The Assess tab is now v2-only.
 - **v2 — hybrid scan engine** (the current headline): v1 recon builds the skeleton and **seeds an
   LLM swarm** (per-subsystem + cross-cutting passes) that catches the semantic findings recon is
   blind to; an aggregator produces Executive themes + a Severity×Effort matrix + the phased plan;
@@ -35,6 +36,9 @@ generations, layered:
 
 ```
 INGEST   git clone → EC2 clone under /home/ubuntu/projects/<projectId>  (source never leaves the box)
+   │
+DEPS     npm install --ignore-scripts (best-effort, 240s cap) → node_modules   [§4.2]
+         so knip (dead-code) + eslint (lint health) can resolve imports
    │
 DETERMINISTIC RECON (recon.mjs, ~0 LLM)                                        [§4]
    graphify-build.py → graph.json            (AST symbol graph + Leiden communities)
@@ -49,6 +53,7 @@ SCAN-ENGINE EXTRAS (deterministic, ~0 LLM)
    privacy-scan-internal.mjs → privacy.json          (GDPR + EU AI Act)                 [§6]
    infra-extract.mjs → infra.json                    (file-first infra inventory)        [§7]
    tests-detect.mjs → tests.json                     (TDD maturity)                      [§8.2]
+   eslint-detect.mjs → eslint.json                   (eslint health; needs deps)         [§8.2]
    │
 LLM SWARM (parallel, bounded concurrency 6)                                    [§8.1]
    per-subsystem analyzers  +  5 cross-cutting passes (error/magic-numbers/type-safety/ui/security)
@@ -69,6 +74,13 @@ deterministic stage is a plain Node child process (never the agent path — they
 LLM swarm uses `spawnGateAgent` (OAuth/Max subscription). The API Lambda only enqueues jobs + serves
 results.
 
+**Live streaming.** Every stage emits `scan.*` events (`scan.deps.installing/done`, `scan.recon.done`,
+`scan.decomposed`, `scan.swarm.started`, **per-agent `scan.agent.start/done`** with a finding count,
+`scan.maturity`, `scan.planned`, `scan.report.done`) rendered in the Assess-tab "Scan log (live)"
+(`StoryLiveOutput`) so the operator watches each subsystem analyzer + cross-cutting pass in real time.
+The UI running-state is LOCAL-first (set on POST success) so the spinner shows immediately, independent
+of the URL/poll round-trip in the static export.
+
 ---
 
 ## 3. Component & file map
@@ -85,6 +97,7 @@ results.
 | Detectors | Internal privacy scanner              | `daemon/scripts/refactor-recon/privacy-scan-internal.mjs`                                     | ✓           |
 | Detectors | Infra inventory (file-first)          | `daemon/scripts/refactor-recon/infra-extract.mjs`                                             | ✓           |
 | Detectors | TDD-maturity                          | `daemon/scripts/refactor-recon/tests-detect.mjs`                                              | ✓           |
+| Detectors | Eslint-health (best-effort)           | `daemon/scripts/refactor-recon/eslint-detect.mjs`                                             | ✓           |
 | v2        | Subsystem decomposer                  | `daemon/scripts/refactor-recon/subsystem-decompose.mjs`                                       | ✓           |
 | v2        | Finding schema                        | `functions/shared/schemas/scan-finding-schema.ts`                                             | ✓           |
 | v2        | Deterministic→finding mappers         | `daemon/pipelines/lib/scan-finding-map.mjs`                                                   | ✓           |
@@ -98,7 +111,7 @@ results.
 | Daemon    | Job handlers + dispatch               | `daemon/agent-daemon.mjs`, `daemon/pipelines/job-router.mjs`                                  | ✓ (router)  |
 | API       | Routes + schemas                      | `functions/api/index.ts`, `functions/shared/schemas/party-schema.ts`                          | —           |
 | Types     | Job + record contracts                | `functions/shared/types/agent-orchestrator.ts` + `refactor-audit.ts` (+ `src/types/` mirrors) | —           |
-| UI        | Assess tab + all views                | `src/components/labs/app-detail/assess/*`                                                     | ✓           |
+| UI        | Assess tab (v2-only) + views          | `src/components/labs/app-detail/assess/*` (legacy v1 "Refactoring Assessment" UI retired)     | ✓           |
 | UI        | Hooks                                 | `src/hooks/use-app-audit.ts`, `use-scan-engine.ts`, `use-agent-compare.ts`                    | —           |
 
 ---
@@ -113,9 +126,13 @@ with `source_file`, `community` (Leiden), edges (defines/imports/calls). Degener
 nodes/edges) exit 3 → recon aborts (the structural substrate isn't trustworthy enough to ground a
 swarm).
 
-**4.2 knip** — `npx knip --reporter json` → `knip.json`. Best-effort dead-code feed; `toolStatus.knip`
-records `ok|empty|unavailable`. When unavailable, dead-code falls back to a zero-fan-in orphan
-heuristic flagged `needs-review`.
+**4.2 deps + knip** — the scan-engine runs a best-effort `npm install --ignore-scripts --no-audit
+--no-fund` (or `npm ci` when a lockfile exists; `--ignore-scripts` is a security boundary — never run
+an untrusted clone's postinstall) with a 240s cap **before** recon, so knip + eslint can resolve
+imports (emits `scan.deps.installing` / `scan.deps.done`). knip then runs `npx knip --reporter json`
+→ `knip.json`; `toolStatus.knip` records `ok|empty|unavailable`. If the install fails/times out (slow
+deps, private registry, OOM), knip + eslint degrade gracefully: dead-code falls back to a zero-fan-in
+orphan heuristic flagged `needs-review`, and the eslint axis stays `unmeasured`.
 
 **4.3 alias-resolve** (`alias-resolve.mjs`) — recomputes the file→file import graph from source with
 tsconfig path-alias + extension + index resolution (graphify's edges are alias-blind). Emits
@@ -162,9 +179,13 @@ subsystems from recon outputs (NOT a hand-authored list): **parent-directory bou
 robust fallback when Leiden communities are degenerate), each shard carrying `members[]` (scoped
 read-set), `depends[]` (cross-module `§sys:` edges from `resolved-imports`), `fanInTotal`, `roleMix`,
 `hotspotCount`, and a **`focus`** line synthesised from that shard's hotspots + top hubs. Ranks
-hotspot-bearing + high-fan-in shards first; `--cap N` (default 24) shards get a dedicated analyzer,
-the rest are sampled (logged). Emits `lowConfidence` when one boundary holds >70% of files or there's
-a single boundary.
+hotspot-bearing + high-fan-in shards first. The cap is **soft**: `analyze = (rank < cap) ||
+hotspotCount > 0`, so **every hotspot-bearing shard gets a dedicated analyzer regardless of `--cap`
+(default 24)** — the cap only bounds the non-hotspot top-by-rank tail; the rest are sampled (logged).
+On a debt-heavy repo this means the swarm scales up (observed: applicator-onboarding → 482 shards,
+43 analyzed = all 43 hotspot-bearing, 48 swarm agents). Emits `lowConfidence` when one boundary holds
+
+> 70% of files or there's a single boundary.
 
 ---
 
@@ -231,8 +252,15 @@ designed, not built.
 
 Compliance findings cost **zero LLM** (the internal privacy scanner is complete; unioned at merge).
 
-**8.2 tests-detect** (`tests-detect.mjs`) — file-walk: test/source file ratio + runner detection
-(vitest/jest/playwright/test-script) → `tests.json` (feeds the maturity TDD axis).
+**8.2 deterministic maturity detectors** (~0 LLM, feed the scorecard §10):
+
+- **tests-detect** (`tests-detect.mjs`) — file-walk: test/source file ratio + runner detection
+  (vitest/jest/playwright/test-script) → `tests.json` (TDD-maturity axis). Always runnable.
+- **eslint-detect** (`eslint-detect.mjs`) — runs the repo's OWN eslint (`npx --no-install eslint . -f
+json`; needs the deps installed in §4.2), then `summarizeEslint` weights **code > tests > warnings**
+  (code errors ×1, test errors ×0.3, warnings ×0.25) so the score floats on production-code lint
+  health → `eslint.json` (eslint-health axis). Best-effort: no config/deps → `runnable:false` →
+  axis `unmeasured`.
 
 ---
 
@@ -277,7 +305,7 @@ fake score. `scoreFromCount(n, worstAt)` = `clamp(1 - n/worstAt)`.
 | security & compliance          | High safety-security + compliance findings          | live                           |
 | graph installed                | graph built?                                        | live                           |
 | TDD maturity                   | `tests-detect` ratio + runner                       | live                           |
-| eslint health                  | (needs install-then-lint detector)                  | unmeasured                     |
+| eslint health                  | `eslint-detect` (code>tests>warnings)               | live (best-effort; needs deps) |
 | SDD-driven                     | (parallel spec-driven-development work)             | unmeasured                     |
 
 ---
@@ -328,13 +356,13 @@ Job kind `dual-agent-compare`; result rides the job row.
 
 **13.1 API routes** (`functions/api/index.ts`, brownfield-only, JWT-auth):
 
-| Method · Route                                   | Enqueues / returns                                                                        |
-| ------------------------------------------------ | ----------------------------------------------------------------------------------------- |
-| `POST /api/party/projects/:id/assess`            | v1 `refactor-audit` job (body: `src, skipGraphify, runL3, topN, runPrivacy, privacyMode`) |
-| `POST /api/party/projects/:id/scan-engine`       | v2 `scan-engine` job (body: `src, cap`)                                                   |
-| `POST /api/party/projects/:id/agent-compare`     | `dual-agent-compare` job (body: `question, model, timeoutMs`)                             |
-| `GET /api/party/projects/:id/audits`             | durable audits list                                                                       |
-| `GET /api/refactor-audits/:auditId` · `DELETE …` | one durable record / delete                                                               |
+| Method · Route                                   | Enqueues / returns                                                                                                                                                 |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `POST /api/party/projects/:id/assess`            | v1 `refactor-audit` job (body: `src, skipGraphify, runL3, topN, runPrivacy, privacyMode`). Route + job kept; **UI retired** — no longer exposed in the Assess tab. |
+| `POST /api/party/projects/:id/scan-engine`       | v2 `scan-engine` job (body: `src, cap, privacyMode` — `internal` default \| `external` GDPR service)                                                               |
+| `POST /api/party/projects/:id/agent-compare`     | `dual-agent-compare` job (body: `question, model, timeoutMs`)                                                                                                      |
+| `GET /api/party/projects/:id/audits`             | durable audits list                                                                                                                                                |
+| `GET /api/refactor-audits/:auditId` · `DELETE …` | one durable record / delete                                                                                                                                        |
 
 **13.2 Daemon job kinds** (`job-router.mjs` `selectHandler` → `agent-daemon.mjs` executors):
 `refactor-audit` → `executeRefactorAuditJob` · `scan-engine` → `executeScanEngineJob` ·
@@ -377,15 +405,20 @@ reasoning because its `external[]` list (every processor data leaves to) is exac
 
 ## 16. As-built vs designed-not-built
 
-**Built + tested + deployed:** all of §4–§13 (v1 recon + L3 + privacy + graph + dual-agent; v2
-subsystem decomposition + swarm + adjudication + dedupe + maturity + phase-planner + infra + bridge +
-export). First real run validated on `applicator-onboarding` (271 findings, 5 dimensions, infra
-signal HIGH).
+**Built + tested + deployed:** all of §4–§13 — v2 subsystem decomposition + swarm + adjudication +
+dedupe + maturity + phase-planner + file-first infra + bridge + export; the deterministic detectors
+(privacy, infra, tests, **eslint**) + the best-effort `npm install` that lets knip + eslint run; v2
+uploads `graph.json` (Graph tab populates after a v2 scan); the v2 **External\|Internal privacy
+toggle**; **live per-agent streaming** (`scan.*` events incl. `scan.agent.start/done`, deps steps) +
+a reliable running-state/spinner; the **v1 deterministic-only "Refactoring Assessment" UI is retired**
+(its route + job kind remain but are unexposed — the Assess tab is v2-only). Multiple real runs on
+`applicator-onboarding` (e.g. 308 findings across 5 dimensions, 6 phases, 41 hotspots).
 
 **Designed, not built:** infra Tier 2 (LLM cartographer for deep IaC configs) + Tier 3 (live-AWS
-probing); the eslint-health detector (install-then-lint, weight code>tests>libs); the SDD-driven
-axis; per-language graphify adapters (non-JS/TS gets a thin skeleton); cross-portfolio roll-up;
-sharded aggregator for very large repos.
+probing); the **SDD-driven** maturity axis; per-language graphify adapters (non-JS/TS gets a thin
+skeleton); cross-portfolio roll-up; sharded aggregator for very large repos. **Environment-dependent:**
+the `npm install` is best-effort (240s cap, `--ignore-scripts`) — on a slow/private/OOM-prone clone it
+degrades and knip + eslint report unmeasured.
 
 ---
 
@@ -407,7 +440,8 @@ sharded aggregator for very large repos.
 
 `scan-finding-schema.test.ts` · `phase-planner.test.mjs` · `scan-finding-map.test.mjs` ·
 `subsystem-decompose.test.mjs` · `scan-engine-job-runner.test.mjs` · `maturity-score.test.mjs` ·
-`infra-extract.test.mjs` · `tests-detect` (in maturity test) · `build-scan-plan-intent.test.ts` ·
+`infra-extract.test.mjs` · `eslint-detect.test.mjs` · `tests-detect` (in maturity test) ·
+`build-scan-plan-intent.test.ts` · `build-plan-intent.test.ts` (v1 intent, retained) ·
 `hotspot-detect.test.mjs` (v1 regression) · `graph-project-roles.test.mjs` ·
 `dual-agent-compare-runner.test.mjs` · privacy detector/scanner tests. Deterministic cores are pure
 
