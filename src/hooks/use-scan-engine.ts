@@ -65,29 +65,38 @@ export interface Maturity {
   overall: number | null;
 }
 
-export interface InfraEntry {
-  provider?: string;
-  service?: string;
-  category?: string;
-  residency?: string;
-  external?: boolean;
-  dataStore?: boolean;
+export interface InfraService {
+  name: string;
+  kind: string;
+  cloud: string;
+  residency: string | null;
+  dataStore: boolean;
+  /** how it was found: iac-declared | platform-config | env-key | sdk-import. */
+  detectedBy: string[];
+  confidence: 'high' | 'medium' | 'low';
+  declares: string[];
   fileCount: number;
   files: string[];
 }
 export interface InfraInventory {
-  aws: InfraEntry[];
-  databases: InfraEntry[];
-  ai: InfraEntry[];
-  thirdParty: InfraEntry[];
-  iac: { provider: string; fileCount: number; files: string[] }[];
+  services: InfraService[];
+  iac: { provider: string; file: string }[];
+  external: { provider: string; kind: string; fileCount: number; detectedBy?: string[] }[];
+  clouds: string[];
   boundaries: { clientFiles: number; serverFiles: number; externalTouchingFiles: number };
-  external: { provider: string; kind: string; fileCount: number }[];
+  signalQuality: {
+    level: 'high' | 'medium' | 'low';
+    iacDeclared: boolean;
+    iacFiles: number;
+    hasEnvExample: boolean;
+    detail: string;
+  };
   summary: {
-    awsServiceCount: number;
+    serviceCount: number;
     dataStoreCount: number;
     aiCount: number;
     externalProcessorCount: number;
+    clouds: string[];
     iacProviders: string[];
   };
 }

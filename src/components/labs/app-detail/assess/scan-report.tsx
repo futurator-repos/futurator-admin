@@ -14,65 +14,100 @@ import {
   type ScanReport as ScanReportData,
   type MaturityAxis,
   type InfraInventory,
-  type InfraEntry,
+  type InfraService,
 } from '@/hooks/use-scan-engine';
 
+const CONF_COLOR: Record<string, string> = {
+  high: 'var(--success, #22c55e)',
+  medium: 'var(--warning, #f59e0b)',
+  low: 'var(--text-dim)',
+};
+
 /**
- * Infrastructure tab — how the app's infra works: AWS services, databases, AI
- * providers, 3rd-party services, IaC, the front-end↔infra boundary, and (the key
+ * Infrastructure tab — how the app's infra works, FILE-FIRST + provider-agnostic.
+ * Groups services by cloud, marks each declared (IaC/config — authoritative) vs
+ * inferred (SDK/env), shows an overall infra signal-quality rating, and (the key
  * cross-link) what data LEAVES to external processors — the precise input the
- * GDPR / EU-AI-Act / data-privacy authorities consume. Deterministic inventory.
+ * GDPR / EU-AI-Act / data-privacy authorities consume.
  */
-function InfraGroup({
-  title,
-  entries,
-  label,
-}: {
-  title: string;
-  entries: InfraEntry[];
-  label: (e: InfraEntry) => string;
-}) {
-  if (!entries.length) return null;
+function InfraCloudGroup({ cloud, services }: { cloud: string; services: InfraService[] }) {
+  if (!services.length) return null;
   return (
     <div>
       <div
         style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)', margin: '0 0 4px' }}
       >
-        {title}
+        {cloud}{' '}
+        <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>({services.length})</span>
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-        {entries.map((e, i) => (
-          <span
-            key={i}
-            title={e.files.join('\n')}
-            style={{
-              fontSize: 11,
-              color: 'var(--text-dim)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              padding: '3px 9px',
-              background: 'var(--background)',
-            }}
-          >
-            <strong style={{ color: 'var(--foreground)' }}>{label(e)}</strong> · {e.fileCount}f
-            {e.residency ? (
-              <span
-                style={{ color: e.residency === 'external' ? 'var(--warning)' : 'var(--text-dim)' }}
-              >
+        {services.map((s, i) => {
+          const declared =
+            s.detectedBy.includes('iac-declared') || s.detectedBy.includes('platform-config');
+          return (
+            <span
+              key={i}
+              title={`detected by: ${s.detectedBy.join(', ')}${s.declares.length ? `\ndeclares: ${s.declares.join(', ')}` : ''}\n${s.files.join('\n')}`}
+              style={{
+                fontSize: 11,
+                color: 'var(--text-dim)',
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                padding: '3px 9px',
+                background: 'var(--background)',
+              }}
+            >
+              <strong style={{ color: 'var(--foreground)' }}>{s.name}</strong>
+              <span> · {s.kind}</span>
+              {s.dataStore ? <span> · store</span> : null}
+              <span style={{ color: CONF_COLOR[s.confidence] }}>
                 {' '}
-                · {e.residency}
+                · {declared ? 'declared' : 'inferred'}
               </span>
-            ) : null}
-          </span>
-        ))}
+              {s.residency === 'external' ? (
+                <span style={{ color: 'var(--warning)' }}> · external</span>
+              ) : null}
+            </span>
+          );
+        })}
       </div>
     </div>
   );
 }
 
 function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianceCount: number }) {
+  const byCloud = useMemo(() => {
+    const m: Record<string, InfraService[]> = {};
+    for (const s of infra.services) (m[s.cloud] ||= []).push(s);
+    return m;
+  }, [infra.services]);
+  const cloudOrder = Object.keys(byCloud).sort((a, b) => byCloud[b].length - byCloud[a].length);
+  const sig = infra.signalQuality;
+  const sigColor =
+    sig.level === 'high'
+      ? 'var(--success, #22c55e)'
+      : sig.level === 'medium'
+        ? 'var(--warning, #f59e0b)'
+        : 'var(--destructive, #ef4444)';
+
   return (
     <div data-testid="infra-map" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* Signal-quality banner — how well this codebase EXPRESSES its infra. */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          fontSize: 11.5,
+          border: `1px solid ${sigColor}`,
+          borderRadius: 8,
+          padding: '6px 10px',
+        }}
+      >
+        <strong style={{ color: sigColor }}>Infra signal: {sig.level.toUpperCase()}</strong>
+        <span style={{ color: 'var(--text-dim)' }}>{sig.detail}</span>
+      </div>
+
       <div
         style={{
           display: 'flex',
@@ -82,10 +117,10 @@ function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianc
           color: 'var(--text-dim)',
         }}
       >
-        <span>{infra.summary.awsServiceCount} AWS services</span>
+        <span>clouds: {infra.clouds.join(', ') || 'none'}</span>
+        <span>{infra.summary.serviceCount} services</span>
         <span>{infra.summary.dataStoreCount} data stores</span>
-        <span>{infra.summary.aiCount} AI providers</span>
-        <span>IaC: {infra.summary.iacProviders.join(', ') || 'none detected'}</span>
+        <span>IaC: {infra.summary.iacProviders.join(', ') || 'none declared'}</span>
         <span>
           boundary: {infra.boundaries.clientFiles} client / {infra.boundaries.serverFiles} server ·{' '}
           {infra.boundaries.externalTouchingFiles} files touch external
@@ -132,36 +167,47 @@ function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianc
         </div>
       )}
 
-      <InfraGroup
-        title="AWS services"
-        entries={infra.aws}
-        label={(e) =>
-          `${e.service}${e.category ? ` (${e.category})` : ''}${e.dataStore ? ' · store' : ''}`
-        }
-      />
-      <InfraGroup title="Databases" entries={infra.databases} label={(e) => e.provider || ''} />
-      <InfraGroup
-        title="AI providers"
-        entries={infra.ai}
-        label={(e) => `${e.provider}${e.external ? ' · external' : ' · in-account'}`}
-      />
-      <InfraGroup
-        title="3rd-party services"
-        entries={infra.thirdParty}
-        label={(e) => e.provider || ''}
-      />
-      <InfraGroup
-        title="Infrastructure-as-Code / deploy"
-        entries={infra.iac.map((i) => ({
-          provider: i.provider,
-          fileCount: i.fileCount,
-          files: i.files,
-        }))}
-        label={(e) => e.provider || ''}
-      />
+      {cloudOrder.map((cloud) => (
+        <InfraCloudGroup key={cloud} cloud={cloud} services={byCloud[cloud]} />
+      ))}
+
+      {infra.iac.length > 0 && (
+        <div>
+          <div
+            style={{
+              fontSize: 11.5,
+              fontWeight: 600,
+              color: 'var(--foreground)',
+              margin: '0 0 4px',
+            }}
+          >
+            IaC / config files (declared)
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {infra.iac.map((i, idx) => (
+              <span
+                key={idx}
+                title={i.file}
+                style={{
+                  fontSize: 11,
+                  color: 'var(--text-dim)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                  padding: '3px 9px',
+                  fontFamily: 'var(--font-mono)',
+                }}
+              >
+                {i.provider}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ fontSize: 10.5, color: 'var(--text-dim)', fontStyle: 'italic' }}>
-        Static inference from SDK imports + IaC files — service configs (ALB rules, Lambda memory,
-        CloudFront behaviours) and live AWS state are not probed.
+        File-first: IaC/config files are read as authoritative (declared); SDK imports + env keys
+        are inferred. Service-level configs (ALB rules, Lambda memory, …) and live cloud state are
+        not probed.
       </div>
     </div>
   );
