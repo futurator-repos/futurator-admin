@@ -17,6 +17,50 @@ import { ScanCommand, UpdateCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { randomUUID } from 'node:crypto';
 import { shouldCompact } from './session-warmth.mjs';
 
+// ── Pipeline-3: dual-threshold compaction policy (development-plan §5.3) ───────
+// jcode's constants. The 200k window has a SOFT (0.80) and HARD (0.95) line:
+// soft = compact opportunistically at an idle boundary; hard = must compact
+// before the next turn or we risk overflow. RECENT turns are kept VERBATIM (a
+// load-bearing floor so compaction can't drop the live working set); images are
+// flattened to a flat token cost rather than re-counted per pixel.
+export const CONTEXT_WINDOW_TOKENS = 200_000;
+export const COMPACT_SOFT = 0.8;
+export const COMPACT_HARD = 0.95;
+export const RECENT_TURNS_TO_KEEP = 10;
+export const IMAGE_FLAT_TOKENS = 1600;
+
+/** Flat token cost for N images (jcode flat-1600), not per-pixel. */
+export function flattenImageTokens(imageCount) {
+  return Math.max(0, Number(imageCount) || 0) * IMAGE_FLAT_TOKENS;
+}
+
+/**
+ * Decide whether/how to compact given the live token count.
+ *   tokenCount ≥ HARD×window → 'hard' (must compact now)
+ *   tokenCount ≥ SOFT×window → 'soft' (compact at the next idle boundary)
+ *   else                     → 'none'
+ *
+ * @returns {{ action:'none'|'soft'|'hard', fraction:number, keepTurns:number }}
+ */
+export function decideCompaction({ tokenCount, windowTokens = CONTEXT_WINDOW_TOKENS, keepTurns = RECENT_TURNS_TO_KEEP } = {}) {
+  const t = Number(tokenCount) || 0;
+  const fraction = windowTokens > 0 ? Math.round((t / windowTokens) * 1000) / 1000 : 0;
+  let action = 'none';
+  if (fraction >= COMPACT_HARD) action = 'hard';
+  else if (fraction >= COMPACT_SOFT) action = 'soft';
+  return { action, fraction, keepTurns };
+}
+
+/**
+ * Partition a turn list into { summarize, keep }: the last `keepTurns` are kept
+ * verbatim; everything before is summarized into one block. PURE.
+ */
+export function planCompaction(turns = [], keepTurns = RECENT_TURNS_TO_KEEP) {
+  const arr = Array.isArray(turns) ? turns : [];
+  if (arr.length <= keepTurns) return { summarize: [], keep: arr.slice() };
+  return { summarize: arr.slice(0, arr.length - keepTurns), keep: arr.slice(arr.length - keepTurns) };
+}
+
 export class Compactor {
   constructor(ddb, opts = {}) {
     this.ddb = ddb;
