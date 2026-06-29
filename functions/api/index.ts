@@ -136,6 +136,7 @@ import {
   isValidSourceCommitSha,
 } from '../shared/services/pipeline-launcher';
 import { launchStoryRerun } from '../shared/services/story-rerun-launcher';
+import { handlePlanSpecIngest } from '../shared/services/plan-spec-route';
 import {
   launchVisualQa,
   launchPlanQaAggregate,
@@ -1610,6 +1611,15 @@ app.post('/api/plans/:id/check-wave-completion', async (c) => {
   } finally {
     await planRepo.releasePlanReduceLock(planId, token);
   }
+});
+
+// Pipeline-3 (development-plan §5.1) — land a converged plan_spec as StoryNode
+// rows in the plan-spec-graph table. Used by the Concept driver on convergence
+// and as a manual/replay endpoint. The handler asserts the whole contract
+// (DAG/touches/dup) and rejects atomically (422) — nothing half-ingested.
+app.post('/api/plans/:id/plan-spec', async (c) => {
+  const res = await handlePlanSpecIngest({ planId: c.req.param('id'), body: await c.req.json() });
+  return c.json(res.json, res.status as 200 | 400 | 422);
 });
 
 // pacman1 (2026-06-11) — operator retry for a failed wave gate (merge +

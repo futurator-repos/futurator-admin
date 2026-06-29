@@ -1614,8 +1614,44 @@ async function writeHeartbeat() {
 // resumeFromWaveResults. The poll loop will then pick the new job up
 // and spawn a new orchestrator that skips completed waves.
 let lastStaleScanAt = 0;
-// 2026-05-27 (unification) — `lastFreeAgentGcAt` removed; assist worktrees
-// are reaped by the unified hourly worktree-reaper now.
+// Pipeline-3 (development-plan §5.2) — ready-frontier shadow scan throttle.
+// Inert unless P3_READY_FRONTIER is set; logs would-dispatch vs legacy waves.
+let lastFrontierScanAt = 0;
+const FRONTIER_SCAN_INTERVAL_MS = parseInt(process.env.P3_FRONTIER_SCAN_INTERVAL_MS || '60000', 10);
+const PLAN_SPEC_GRAPH_TABLE = process.env.PLAN_SPEC_GRAPH_TABLE || 'futurator-plan-spec-graph';
+
+// Throttled, inert-by-default. When P3_READY_FRONTIER=shadow|on, scan the
+// plan-spec-graph for ingested plans and log what continuous Kahn dispatch WOULD
+// do for each — the A/B substrate that proves the frontier matches dependency
+// order before any live 'on' flip. Shadow only here; the 'on' enqueue path is a
+// follow-up that mints AgentJobs from claimed StoryNodes.
+async function runFrontierShadowScan() {
+  const mode = (process.env.P3_READY_FRONTIER || 'off').toLowerCase();
+  if (mode === 'off') return;
+  try {
+    const { runFrontierTick } = await import('./lib/story-dispatch-driver.mjs');
+    // Low-volume table; a scan projecting just planId is cheap at this cadence.
+    const { Items } = await ddb.send(
+      new ScanCommand({ TableName: PLAN_SPEC_GRAPH_TABLE, ProjectionExpression: 'planId' }),
+    );
+    const planIds = [...new Set((Items || []).map((i) => i.planId).filter(Boolean))];
+    for (const planId of planIds) {
+      const res = await runFrontierTick({
+        ddb,
+        table: PLAN_SPEC_GRAPH_TABLE,
+        planId,
+        // Force shadow here regardless of 'on' — live dispatch is a follow-up.
+        p3Flags: { P3_READY_FRONTIER: 'shadow' },
+        log,
+      });
+      if (res.frontier.length) {
+        log('info', `[frontier-shadow] plan ${planId}: would dispatch ${res.frontier.length} ready stories [${res.frontier.join(', ')}]`);
+      }
+    }
+  } catch (err) {
+    log('warn', `[frontier-shadow] scan failed (non-blocking): ${err.message}`);
+  }
+}
 
 async function scanStaleEpicDevJobs() {
   try {
@@ -8446,6 +8482,13 @@ async function poll() {
       if (Date.now() - lastStaleScanAt >= STALE_SCAN_INTERVAL_MS) {
         lastStaleScanAt = Date.now();
         scanStaleEpicDevJobs().catch((e) => log('error', `Stale scan uncaught: ${e.message}`));
+      }
+
+      // Pipeline-3 ready-frontier shadow scan — inert unless P3_READY_FRONTIER
+      // is set. Throttled; logs would-dispatch vs legacy waves (development-plan §5.2).
+      if (Date.now() - lastFrontierScanAt >= FRONTIER_SCAN_INTERVAL_MS) {
+        lastFrontierScanAt = Date.now();
+        runFrontierShadowScan().catch((e) => log('error', `Frontier scan uncaught: ${e.message}`));
       }
 
       // 2026-05-27 (unification) — the dedicated free-agent GC tick was
