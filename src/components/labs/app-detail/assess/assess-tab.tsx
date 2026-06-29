@@ -146,15 +146,23 @@ export function AssessTab({ app }: { app: App }) {
   );
 
   // ── Refactoring Scan Engine v2 (hybrid recon + swarm) — its own polled job. ──
-  const scanJobId = params.get('scanJob');
+  // LOCAL state is the source of truth (set synchronously on start) so the running
+  // state + live log show immediately, even before router.replace lands in the
+  // static export. The URL is updated too, for reload/resume.
+  const [localScanJob, setLocalScanJob] = useState<string | null>(null);
+  const scanJobId = localScanJob ?? params.get('scanJob');
   const { data: scanJob } = useAppAuditJob(scanJobId);
-  const scanRun = useRunScanEngine(app.appId);
   const scanStatus = scanJob?.status;
-  const scanRunning = !!scanJobId && scanStatus !== 'COMPLETED' && scanStatus !== 'FAILED';
+  const scanRun = useRunScanEngine(app.appId);
+  const scanTerminal = scanStatus === 'COMPLETED' || scanStatus === 'FAILED';
+  // Running = the POST is in flight, OR we have a job that hasn't reached a
+  // terminal state yet (undefined status during the first poll counts as running).
+  const scanRunning = scanRun.isPending || (!!scanJobId && !scanTerminal);
   const scanSummary = scanJob?.scanEngineSummary;
   const scanAvailable = !!scanSummary?.scanAvailable;
   const setScanJob = useCallback(
     (id: string) => {
+      setLocalScanJob(id);
       const next = new URLSearchParams(params.toString());
       next.set('tab', 'assess');
       next.set('scanJob', id);
@@ -587,9 +595,12 @@ export function AssessTab({ app }: { app: App }) {
           <button
             type="button"
             onClick={startScan}
-            disabled={scanRun.isPending || scanRunning}
+            disabled={scanRunning}
             data-testid="scan-engine-run"
             style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
               fontSize: 12,
               fontWeight: 600,
               color: 'var(--background)',
@@ -597,23 +608,44 @@ export function AssessTab({ app }: { app: App }) {
               border: 'none',
               borderRadius: 6,
               padding: '7px 14px',
-              cursor: scanRun.isPending || scanRunning ? 'not-allowed' : 'pointer',
-              opacity: scanRun.isPending || scanRunning ? 0.5 : 1,
+              cursor: scanRunning ? 'not-allowed' : 'pointer',
+              opacity: scanRunning ? 0.6 : 1,
               whiteSpace: 'nowrap',
             }}
           >
-            {scanRunning
-              ? 'Scanning…'
-              : scanRun.isPending
-                ? 'Starting…'
+            {scanRunning && (
+              <span
+                aria-hidden
+                style={{
+                  width: 11,
+                  height: 11,
+                  border: '2px solid var(--background)',
+                  borderTopColor: 'transparent',
+                  borderRadius: '50%',
+                  display: 'inline-block',
+                  animation: 'spin 0.7s linear infinite',
+                }}
+              />
+            )}
+            {scanRun.isPending
+              ? 'Starting…'
+              : scanRunning
+                ? 'Scanning…'
                 : scanAvailable
                   ? 'Re-scan'
                   : 'Run v2 scan'}
           </button>
+          <style>{'@keyframes spin{to{transform:rotate(360deg)}}'}</style>
         </div>
         {scanRunning && (
           <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-            Running recon → subsystem decomposition → swarm → phased plan (a few minutes)…
+            Running recon → subsystem decomposition → swarm → phased plan (a few minutes). Watch the
+            <strong> Scan log</strong> below for live progress.
+          </div>
+        )}
+        {scanRun.isError && (
+          <div style={{ fontSize: 11, color: 'var(--destructive)' }}>
+            Could not start scan: {(scanRun.error as Error)?.message || 'request failed'}
           </div>
         )}
         {scanStatus === 'FAILED' && (
@@ -630,7 +662,7 @@ export function AssessTab({ app }: { app: App }) {
           }}
         />
         {scanJobId && (
-          <details>
+          <details open={scanRunning}>
             <summary
               style={{
                 fontSize: 12,
@@ -639,7 +671,7 @@ export function AssessTab({ app }: { app: App }) {
                 userSelect: 'none',
               }}
             >
-              Scan log
+              Scan log {scanRunning ? '(live)' : ''}
             </summary>
             <div style={{ marginTop: 8 }}>
               <StoryLiveOutput jobId={scanJobId} hideResponse />

@@ -123,19 +123,27 @@ export async function runScanEngine(job, deps) {
   // (d) LLM swarm — analyzers for analyzed shards + cross-cutting passes.
   const analyzeShards = shards.filter((s) => s.analyze);
   const tasks = [
-    ...analyzeShards.map((s) => ({ role: `scan-analyzer:${s.name}`, prompt: analyzerPrompt(s), ctx: { area: s.shardKey } })),
+    ...analyzeShards.map((s) => ({ role: `scan-analyzer:${s.name}`, label: s.name, prompt: analyzerPrompt(s), ctx: { area: s.shardKey } })),
     ...CROSS_CUTTING.map((pass) => ({
       role: `scan-xcut:${pass.area}`,
+      label: pass.title || pass.area,
       prompt: crossCuttingPrompt(pass, seedFor(pass, { hotspots, hubs: art.hubs || [] })),
       ctx: { area: pass.area, dimension: pass.dimension },
     })),
   ];
   pushEvent('scan.swarm.started', { agents: tasks.length });
-  const outputs = await pool(tasks, concurrency, (t) => deps.spawnAgent({ role: t.role, prompt: t.prompt }));
-  let llmFindings = [];
-  outputs.forEach((text, i) => {
-    if (text && !text.__error) llmFindings.push(...parseAndValidate(text, tasks[i].ctx));
+  const perAgent = []; // findings parsed per task (reused for the union below)
+  const outputs = await pool(tasks, concurrency, async (t, i) => {
+    pushEvent('scan.agent.start', { role: t.role, label: t.label });
+    const text = await deps.spawnAgent({ role: t.role, prompt: t.prompt });
+    const parsed = text && !text.__error ? parseAndValidate(text, t.ctx) : [];
+    perAgent[i] = parsed;
+    pushEvent('scan.agent.done', { role: t.role, label: t.label, findings: parsed.length });
+    return text;
   });
+  let llmFindings = [];
+  perAgent.forEach((parsed) => { if (parsed) llmFindings.push(...parsed); });
+  void outputs;
   const before = llmFindings.length;
   llmFindings = dropUnanchored(llmFindings, anchored); // hallucination guard
   pushEvent('scan.swarm.done', { llmFindings: llmFindings.length, droppedUnanchored: before - llmFindings.length });

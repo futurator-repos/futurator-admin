@@ -175,6 +175,75 @@ export function StoryLiveOutput({ jobId, hideResponse }: StoryLiveOutputProps) {
         }
         continue;
       }
+      // Refactoring Scan v2 emits scan.* lifecycle + per-agent events so the
+      // operator can watch recon → decomposition → the swarm → plan in real time.
+      if (et.startsWith('scan.')) {
+        const x = ev as AgentEvent & {
+          shards?: number;
+          analyzed?: number;
+          lowConfidence?: boolean;
+          agents?: number;
+          role?: string;
+          label?: string;
+          findings?: number;
+          llmFindings?: number;
+          droppedUnanchored?: number;
+          overall?: number;
+          phases?: number;
+          gateViolations?: number;
+          reason?: string;
+        };
+        const common = { stepId: ev.stepId, agentId: ev.agentId, timestamp: ev.timestamp };
+        const who = x.label || (x.role || '').replace(/^scan-(analyzer|xcut):/, '');
+        if (et === 'scan.started') {
+          items.push({ type: 'step_start', text: 'Scan v2 started', ...common });
+        } else if (et === 'scan.recon.done') {
+          items.push({ type: 'status', text: '✓ deterministic recon complete', ...common });
+        } else if (et === 'scan.decomposed') {
+          items.push({
+            type: 'status',
+            text: `subsystems: ${x.shards ?? 0} (${x.analyzed ?? 0} analyzed)${x.lowConfidence ? ' · low-confidence' : ''}`,
+            ...common,
+          });
+        } else if (et === 'scan.swarm.started') {
+          items.push({
+            type: 'step_start',
+            text: `▶ LLM swarm — ${x.agents ?? 0} agents`,
+            ...common,
+          });
+        } else if (et === 'scan.agent.start') {
+          items.push({ type: 'status', text: `  ↳ analyzing ${who}…`, ...common });
+        } else if (et === 'scan.agent.done') {
+          items.push({
+            type: 'status',
+            text: `  ✓ ${who}${x.findings != null ? ` — ${x.findings} finding${x.findings === 1 ? '' : 's'}` : ''}`,
+            ...common,
+          });
+        } else if (et === 'scan.swarm.done') {
+          items.push({
+            type: 'status',
+            text: `✓ swarm done — ${x.llmFindings ?? 0} findings (${x.droppedUnanchored ?? 0} dropped as unanchored)`,
+            ...common,
+          });
+        } else if (et === 'scan.maturity') {
+          items.push({
+            type: 'status',
+            text: `maturity ${Math.round((x.overall ?? 0) * 100)}%`,
+            ...common,
+          });
+        } else if (et === 'scan.planned') {
+          items.push({
+            type: 'status',
+            text: `plan: ${x.phases ?? 0} phases${x.gateViolations ? ` · ⚠ ${x.gateViolations} gate-violations` : ''}`,
+            ...common,
+          });
+        } else if (et === 'scan.report.done') {
+          items.push({ type: 'status', text: '✓ report written', ...common });
+        } else if (et === 'scan.failed') {
+          items.push({ type: 'error', text: `FAILED — ${x.reason || 'error'}`, ...common });
+        }
+        continue;
+      }
       // Data Privacy lane emits privacy.* events (3rd-party audit trail).
       if (et.startsWith('privacy.')) {
         const x = ev as AgentEvent & {
