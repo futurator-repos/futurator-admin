@@ -29,6 +29,8 @@ import { spawn as realSpawn } from 'node:child_process';
 import { mergeRubric } from './lib/rubric-merge.mjs';
 import { registerChild, unregisterChild } from './lib/child-tracker.mjs';
 import { assertSpawnAllowed, ShellGuardViolation } from './lib/shell-guard.mjs';
+import { freezeFlagsOntoJob } from '../lib/pipeline-flags.mjs';
+import { buildGateSpawn } from '../lib/gate-settings.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -252,17 +254,36 @@ export async function runEpicDevPipeline(opts) {
     logger.warn?.(`[epic-dev-pipeline] failed to persist prompt log: ${err.message}`);
   }
 
+  // ── Pipeline-3: live pretool-gate (development-plan §5.4) ──────────────────
+  // Resolve the frozen P3 flag-set (claim-time normally; fallback here for
+  // direct callers), then build the PreToolUse gate settings + env. When
+  // P3_GATE_MODE is off/absent, buildGateSpawn returns no-ops and the spawn is
+  // byte-for-byte the legacy path. The orchestrator's session settings cover its
+  // subagents, so this reaches the agents that actually write code under
+  // bypassPermissions. Phase-1 coarse: risk-tier + epic-level forbiddenAreas
+  // live; per-story touchPoints stay at the post-diff backstop.
+  const p3Flags = freezeFlagsOntoJob(job, { env: process.env });
+  const gate = buildGateSpawn({
+    jobId: job.jobId,
+    p3Flags,
+    touchPoints: [], // coarse at orchestrator scope (spans all stories)
+    forbiddenAreas: Array.isArray(payload.forbiddenAreas) ? payload.forbiddenAreas : [],
+    ledgerPath: join(projectRoot, '.pipeline', 'gate-events.jsonl'),
+  });
+
   const args = [
     '-p', prompt,
     '--model', payload.orchestratorModel,
     '--output-format', 'stream-json',
     '--verbose',
     '--permission-mode', 'bypassPermissions',
+    ...gate.args,
   ];
 
   logger.info?.(
     `[epic-dev-pipeline] spawning orchestrator job=${job.jobId} epic=${job.epicId} ` +
-      `model=${payload.orchestratorModel} stories=${payload.stories.length}`,
+      `model=${payload.orchestratorModel} stories=${payload.stories.length}` +
+      (gate.env.FUTURATOR_GATE_MODE ? ` gate=${gate.env.FUTURATOR_GATE_MODE}` : ''),
   );
 
   const pushEvent = opts.pushEvent;
@@ -300,7 +321,7 @@ export async function runEpicDevPipeline(opts) {
 
   const child = spawn(claudeBin, args, {
     cwd: projectRoot,
-    env: { ...process.env, ...(opts.env || {}) },
+    env: { ...process.env, ...(opts.env || {}), ...gate.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   registerChild(job.jobId, child);
