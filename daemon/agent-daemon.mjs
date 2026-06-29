@@ -7355,6 +7355,7 @@ async function executeScanEngineJob(job) {
   const privacyPath = new URL('./scripts/refactor-recon/privacy-scan-internal.mjs', import.meta.url).pathname;
   const testsPath = new URL('./scripts/refactor-recon/tests-detect.mjs', import.meta.url).pathname;
   const infraPath = new URL('./scripts/refactor-recon/infra-extract.mjs', import.meta.url).pathname;
+  const eslintPath = new URL('./scripts/refactor-recon/eslint-detect.mjs', import.meta.url).pathname;
 
   // Spawn a plain Node child (deterministic stages — never the agent path).
   const spawnNode = (args, cwd) =>
@@ -7372,22 +7373,61 @@ async function executeScanEngineJob(job) {
       proc.on('close', (code) => { unregisterChild(jobId, proc); resolve({ code: code ?? 1, tail }); });
     });
 
+  // Spawn an arbitrary command with a hard timeout — for the best-effort
+  // `npm install` (so knip + eslint can resolve deps). NEVER fatal.
+  const spawnCmd = (cmd, args, cwd, timeoutMs) =>
+    new Promise((resolve) => {
+      const proc = spawn(cmd, args, { cwd, stdio: ['ignore', 'ignore', 'ignore'], env: { ...process.env, FORCE_COLOR: '0' }, detached: true });
+      registerChild(jobId, proc);
+      const timer = setTimeout(() => { try { process.kill(-proc.pid, 'SIGKILL'); } catch { try { proc.kill('SIGKILL'); } catch { /* ignore */ } } }, timeoutMs);
+      proc.on('error', () => { clearTimeout(timer); unregisterChild(jobId, proc); resolve({ code: 1 }); });
+      proc.on('close', (code) => { clearTimeout(timer); unregisterChild(jobId, proc); resolve({ code: code ?? 1 }); });
+    });
+
+  // Install deps so knip (dead-code) + eslint (lint health) can run. --ignore-scripts
+  // is a SECURITY boundary (never run an untrusted clone's postinstall). Best-effort.
+  let depsInstalled = false;
+  async function ensureDeps(repo) {
+    if (!existsSync(pathJoin(repo, 'package.json'))) return;
+    if (existsSync(pathJoin(repo, 'node_modules'))) { depsInstalled = true; return; }
+    sePush('scan.deps.installing', {});
+    const hasLock = existsSync(pathJoin(repo, 'package-lock.json'));
+    const args = hasLock
+      ? ['ci', '--ignore-scripts', '--no-audit', '--no-fund']
+      : ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefer-offline'];
+    const r = await spawnCmd('npm', args, repo, 240000);
+    depsInstalled = r.code === 0 && existsSync(pathJoin(repo, 'node_modules'));
+    log('info', `[${short}] scan-engine npm ${args[0]} ${depsInstalled ? 'ok' : 'failed/timeout — knip+eslint degrade'}`);
+    sePush('scan.deps.done', { ok: depsInstalled });
+  }
+
   const sePush = (type, data = {}) => pushEvent(jobId, 'scan-engine', null, type, data);
 
   try {
     const result = await runScanEngine(job, {
       projectName: p.projectId || job.projectId,
       concurrency: 6,
-      runRecon: ({ projectPath: repo, src }) => spawnNode([reconPath, repo, ...(src ? ['--src', src] : [])], repo),
+      runRecon: async ({ projectPath: repo, src }) => {
+        await ensureDeps(repo); // so recon's knip stage can resolve imports
+        return spawnNode([reconPath, repo, ...(src ? ['--src', src] : [])], repo);
+      },
       runDecompose: ({ projectPath: repo, cap }) =>
         spawnNode([decomposePath, pathJoin(repo, 'graphify-out'), '--repo', repo, ...(cap ? ['--cap', String(cap)] : [])], repo),
       readArtifacts: async ({ projectPath: repo }) => {
         const od = pathJoin(repo, 'graphify-out');
         const rj = (f) => { try { return JSON.parse(readFileSync(pathJoin(od, f), 'utf8')); } catch { return null; } };
-        // Internal privacy scanner — deterministic, ~0 LLM, source stays on the box.
+        // Privacy/compliance lane. Default 'internal' (our own scanner, ~0 LLM,
+        // source stays on the box); 'external' routes to the data-privacy service.
         let privacySummary = null;
         try {
-          await spawnNode([privacyPath, repo, '--src', p.src || 'src', '--out', pathJoin(od, 'privacy.json')], repo);
+          if ((p.privacyMode || 'internal') === 'external') {
+            const extPath = process.env.PRIVACY_RECON_PATH || '/opt/data-privacy-platform/scripts/privacy-recon.mjs';
+            const svc = process.env.PRIVACY_SERVICE_URL || '';
+            const token = process.env.PRIVACY_SERVICE_TOKEN || '';
+            await spawnNode([extPath, repo, '--regulation', 'all', '--out', pathJoin(od, 'privacy.json'), ...(svc ? ['--service', svc] : []), ...(token ? ['--token', token] : [])], repo);
+          } else {
+            await spawnNode([privacyPath, repo, '--src', p.src || 'src', '--out', pathJoin(od, 'privacy.json')], repo);
+          }
           const pr = rj('privacy.json');
           if (pr) privacySummary = summarizePrivacyReport(pr);
         } catch (pe) { log('warn', `[${short}] scan-engine privacy lane failed (non-fatal): ${pe?.message || pe}`); }
@@ -7406,12 +7446,21 @@ async function executeScanEngineJob(job) {
           await spawnNode([infraPath, repo, '--src', p.src || 'src', '--out', pathJoin(od, 'infra.json')], repo);
           infra = rj('infra.json');
         } catch (ie) { log('warn', `[${short}] scan-engine infra extractor failed (non-fatal): ${ie?.message || ie}`); }
+        // Eslint-health detector — runs the repo's own eslint (needs deps; best-effort).
+        let eslint = null;
+        if (depsInstalled) {
+          try {
+            await spawnNode([eslintPath, repo, '--out', pathJoin(od, 'eslint.json')], repo);
+            eslint = rj('eslint.json');
+          } catch (ee) { log('warn', `[${short}] scan-engine eslint detector failed (non-fatal): ${ee?.message || ee}`); }
+        }
         return {
           hotspots: hotspotsDoc.hotspots || [],
           shards: rj('subsystem-shards.json') || { shards: [] },
           privacySummary,
           tests,
           infra,
+          eslint,
           // knip actually produced data? (else the clutter axis is degraded)
           knipRan: hotspotsDoc.toolStatus?.knip === 'ok',
           anchoredPaths: new Set((graph.nodes || []).map((n) => n.source_file).filter(Boolean)),
@@ -7470,6 +7519,23 @@ async function executeScanEngineJob(job) {
         }),
       );
       scanAvailable = true;
+      // Also upload the file-level graph projection so the Graph tab populates
+      // after a v2 scan (parity with the v1 audit path; closes the 403 on the
+      // graph.json probe for v2-only apps).
+      try {
+        const graphUiPath = pathJoin(projectPath, 'graphify-out', 'graph-ui.json');
+        if (existsSync(graphUiPath)) {
+          await _s3Client.send(
+            new s3mod.PutObjectCommand({
+              Bucket: bucket,
+              Key: `knowledge-live/${projectId}/_refactor/graph.json`,
+              Body: readFileSync(graphUiPath),
+              ContentType: 'application/json',
+              CacheControl: 'no-cache',
+            }),
+          );
+        }
+      } catch (ge) { log('warn', `[${short}] scan-engine graph S3 upload failed (non-fatal): ${ge?.message || ge}`); }
     } catch (s3e) { log('warn', `[${short}] scan-engine S3 upload failed (non-fatal): ${s3e?.message || s3e}`); }
 
     // Durable record (status 'scan-v2') + denormalized summary on the row.

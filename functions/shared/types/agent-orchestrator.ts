@@ -615,6 +615,8 @@ export interface AgentJob {
     src?: string;
     /** Max subsystems given a dedicated analyzer (cap/sample). Default 24. */
     cap?: number;
+    /** Privacy lane: 'internal' (our scanner, default) | 'external' (GDPR service). */
+    privacyMode?: 'internal' | 'external';
   };
 
   /** Denormalized headline of a `scan-engine` run; the full scan rides S3. */

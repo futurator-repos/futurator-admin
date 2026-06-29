@@ -197,6 +197,20 @@ export function StoryLiveOutput({ jobId, hideResponse }: StoryLiveOutputProps) {
         const who = x.label || (x.role || '').replace(/^scan-(analyzer|xcut):/, '');
         if (et === 'scan.started') {
           items.push({ type: 'step_start', text: 'Scan v2 started', ...common });
+        } else if (et === 'scan.deps.installing') {
+          items.push({
+            type: 'status',
+            text: 'installing dependencies (for knip + eslint)…',
+            ...common,
+          });
+        } else if (et === 'scan.deps.done') {
+          items.push({
+            type: 'status',
+            text: (ev as AgentEvent & { ok?: boolean }).ok
+              ? '✓ dependencies installed'
+              : '⚠ deps unavailable — knip/eslint degrade',
+            ...common,
+          });
         } else if (et === 'scan.recon.done') {
           items.push({ type: 'status', text: '✓ deterministic recon complete', ...common });
         } else if (et === 'scan.decomposed') {

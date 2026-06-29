@@ -7300,6 +7300,9 @@ app.post('/api/party/projects/:id/scan-engine', async (c) => {
       projectPath: project.path,
       ...(parsedBody.data.src ? { src: parsedBody.data.src } : {}),
       ...(parsedBody.data.cap !== undefined ? { cap: parsedBody.data.cap } : {}),
+      ...(parsedBody.data.privacyMode !== undefined
+        ? { privacyMode: parsedBody.data.privacyMode }
+        : {}),
     },
   });
 

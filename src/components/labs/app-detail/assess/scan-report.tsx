@@ -298,6 +298,8 @@ function downloadScanJson(report: ScanReportData, appId: string) {
     generatedAt: new Date().toISOString(),
     counts: report.counts,
     lowConfidence: report.lowConfidence,
+    maturity: report.maturity ?? null,
+    infra: report.infra ?? null,
     gateViolations: report.gateViolations,
     phases: report.phases,
     planOutput: report.planOutput ?? null,

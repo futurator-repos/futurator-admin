@@ -221,6 +221,8 @@ export const compareAgentsBodySchema = z.object({
 export const scanEngineBodySchema = z.object({
   src: z.string().min(1).max(128).optional(),
   cap: z.number().int().min(1).max(200).optional(),
+  // 'internal' (our own scanner, default) | 'external' (GDPR service).
+  privacyMode: z.enum(['internal', 'external']).optional(),
 });
 
 /**

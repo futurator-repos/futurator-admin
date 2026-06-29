@@ -20,6 +20,8 @@ const S3_BASE = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowled
 export interface RunScanEngineInput {
   src?: string;
   cap?: number;
+  /** 'internal' (our own scanner, default) | 'external' (GDPR service). */
+  privacyMode?: 'internal' | 'external';
 }
 
 export type ScanDimension =
