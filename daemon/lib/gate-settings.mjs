@@ -81,6 +81,18 @@ export function buildGateSpawn(opts = {}) {
     if (opts.haltDir) env.FUTURATOR_HALT_DIR = opts.haltDir;
   }
 
+  // Instinct-loop observation capture (development-plan §5.5, Pillar 3). Enabled
+  // whenever the gate is on (audit/enforce) so the learning loop accumulates data
+  // during the gate's audit rollout. Observe-only: appends, never affects the run.
+  if (gateOn && opts.observeLog) {
+    const observeHook = { type: 'command', command: `node ${JSON.stringify(resolveHookPath('../hooks/posttool-observe.mjs'))}` };
+    if (hooks.PostToolUse) hooks.PostToolUse[0].hooks.push(observeHook);
+    else hooks.PostToolUse = [{ matcher: 'Edit|Write|MultiEdit|Bash', hooks: [observeHook] }];
+    env.FUTURATOR_OBSERVE_LOG = opts.observeLog;
+    if (opts.agentRole) env.FUTURATOR_AGENT_ROLE = opts.agentRole;
+    if (opts.headSha) env.FUTURATOR_HEAD_SHA = opts.headSha;
+  }
+
   const dir = opts.settingsDir || tmpdir();
   const settingsPath = join(dir, `futurator-gate-settings-${String(opts.jobId || 'job').slice(0, 24)}.json`);
   try {

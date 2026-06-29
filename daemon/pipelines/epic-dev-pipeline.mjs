@@ -275,6 +275,9 @@ export async function runEpicDevPipeline(opts) {
     ceilingUsd: payload.costCeilingUsd ?? job.costCeilingUsd,
     harnessCostDir: join(projectRoot, '.pipeline', 'harness-cost', String(job.jobId)),
     haltDir: projectRoot,
+    // Instinct-loop observation capture (observe-only; rides the gate audit).
+    observeLog: join(projectRoot, '.pipeline', 'observations.jsonl'),
+    agentRole: 'orchestrator',
   });
 
   // ── Pipeline-3: AC-aware laziness injection (development-plan §5.3) ─────────
