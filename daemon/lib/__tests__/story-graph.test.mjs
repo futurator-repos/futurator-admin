@@ -100,10 +100,11 @@ describe('applyTransition state machine', () => {
 });
 
 describe('atomic-claim builders', () => {
-  it('claim condition only fires on a ready/expired-lease row', () => {
+  it('claim condition only fires on a ready/expired-lease row (state aliased)', () => {
     const p = buildClaimParams({ table: 't', storyId: 's', owner: 'o', token: 'k', now: 0 });
-    expect(p.ConditionExpression).toMatch(/storyState = :ready/);
+    expect(p.ConditionExpression).toMatch(/#state = :ready/);
     expect(p.ConditionExpression).toMatch(/claimExpiresAt < :now/);
+    expect(p.ExpressionAttributeNames['#state']).toBe('state');
     expect(p.ExpressionAttributeValues[':owner']).toBe('o');
   });
   it('release returns to ready and clears the claim', () => {
@@ -113,7 +114,7 @@ describe('atomic-claim builders', () => {
   });
   it('decrement is conditional on counter > 0; unblock flips at 0', () => {
     expect(buildDecrementDepParams({ table: 't', storyId: 's', now: 0 }).ConditionExpression).toMatch(/unblockedDepsCount > :zero/);
-    expect(buildUnblockParams({ table: 't', storyId: 's', now: 0 }).ConditionExpression).toMatch(/storyState = :blocked AND unblockedDepsCount = :zero/);
+    expect(buildUnblockParams({ table: 't', storyId: 's', now: 0 }).ConditionExpression).toMatch(/#state = :blocked AND unblockedDepsCount = :zero/);
   });
 });
 
@@ -148,7 +149,7 @@ describe('atomic-claim race semantics', () => {
     const res = await recordDependencyDone({ ddb, table: 't', storyId: 's', UpdateCommand: fakeCmd });
     expect(res.unblocked).toBe(true);
     expect(calls.some((u) => u.startsWith('ADD'))).toBe(true);
-    expect(calls.some((u) => u.includes('storyState = :ready'))).toBe(true);
+    expect(calls.some((u) => u.includes('#state = :ready'))).toBe(true);
   });
   it('recordDependencyDone does not unblock when deps remain', async () => {
     const ddb2 = { send: async () => ({ Attributes: { unblockedDepsCount: 2 } }) };

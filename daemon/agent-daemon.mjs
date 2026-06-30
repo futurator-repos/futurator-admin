@@ -1709,7 +1709,9 @@ async function executeStoryDevJob(job) {
       await ddb.send(new UpdateCommand({
         TableName: PLAN_SPEC_GRAPH_TABLE,
         Key: { storyId: sid },
-        UpdateExpression: 'SET storyState = :s, updatedAt = :n',
+        // `state` is the GSI key the ingest writes + a DynamoDB reserved word.
+        UpdateExpression: 'SET #state = :s, updatedAt = :n',
+        ExpressionAttributeNames: { '#state': 'state' },
         ExpressionAttributeValues: { ':s': state, ':n': new Date().toISOString() },
       }));
     } catch (e) {

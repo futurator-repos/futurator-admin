@@ -23,10 +23,13 @@ export function buildClaimParams({ table, storyId, owner, token, leaseMs = DEFAU
     TableName: table,
     Key: { storyId },
     // Claim only a ready story whose lease is absent or already expired.
+    // `state` is a DynamoDB reserved word + the GSI key the ingest writes, so it
+    // MUST be aliased (#state) and match the ingest's field name exactly.
     UpdateExpression:
-      'SET storyState = :claimed, claimOwner = :owner, claimToken = :token, claimExpiresAt = :exp, updatedAt = :now',
+      'SET #state = :claimed, claimOwner = :owner, claimToken = :token, claimExpiresAt = :exp, updatedAt = :now',
     ConditionExpression:
-      'storyState = :ready AND (attribute_not_exists(claimExpiresAt) OR claimExpiresAt < :now)',
+      '#state = :ready AND (attribute_not_exists(claimExpiresAt) OR claimExpiresAt < :now)',
+    ExpressionAttributeNames: { '#state': 'state' },
     ExpressionAttributeValues: {
       ':claimed': 'claimed',
       ':ready': 'ready',
@@ -61,8 +64,9 @@ export function buildReleaseParams({ table, storyId, token, now = Date.now() }) 
     TableName: table,
     Key: { storyId },
     UpdateExpression:
-      'SET storyState = :ready, updatedAt = :now REMOVE claimOwner, claimToken, claimExpiresAt',
+      'SET #state = :ready, updatedAt = :now REMOVE claimOwner, claimToken, claimExpiresAt',
     ConditionExpression: 'claimToken = :token',
+    ExpressionAttributeNames: { '#state': 'state' },
     ExpressionAttributeValues: {
       ':ready': 'ready',
       ':now': new Date(now).toISOString(),
@@ -96,8 +100,9 @@ export function buildUnblockParams({ table, storyId, now = Date.now() }) {
   return {
     TableName: table,
     Key: { storyId },
-    UpdateExpression: 'SET storyState = :ready, updatedAt = :now',
-    ConditionExpression: 'storyState = :blocked AND unblockedDepsCount = :zero',
+    UpdateExpression: 'SET #state = :ready, updatedAt = :now',
+    ConditionExpression: '#state = :blocked AND unblockedDepsCount = :zero',
+    ExpressionAttributeNames: { '#state': 'state' },
     ExpressionAttributeValues: {
       ':ready': 'ready',
       ':blocked': 'blocked',
