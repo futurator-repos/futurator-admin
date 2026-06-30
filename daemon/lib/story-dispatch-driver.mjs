@@ -51,7 +51,11 @@ export async function runFrontierTick({
   if (mode === 'off') return { mode, frontier: [], dispatched: [], lost: [] };
 
   const rows = await loadNodes({ ddb, table, planId });
-  const nodes = rows.map((r) => ({ storyId: r.storyId, depends_on: r.depends_on || [], state: r.state || r.storyState }));
+  // Keep the FULL row (title, acceptanceCriteria, touches, appId, workingDir, …)
+  // so the 'on' enqueue can mint a complete story-dev job — only normalize the
+  // lifecycle field name. story-graph reads just storyId/depends_on/state; extra
+  // fields are harmless.
+  const nodes = rows.map((r) => ({ ...r, depends_on: r.depends_on || [], state: r.state || r.storyState }));
 
   const res = await dispatchReadyFrontier({ nodes, mode, ddb, table, owner, capacity, enqueue, now, log });
   return { mode, frontier: res.frontier, dispatched: res.dispatched, lost: res.lost };
