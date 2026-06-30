@@ -42,14 +42,14 @@ describe('buildStoryDevJob', () => {
 });
 
 describe('handleStoryCompletion', () => {
-  it('binds from <BINDING>, runs tests, done → merging + propagate', async () => {
+  it('binds from <BINDING>, runs tests, done → done + propagate', async () => {
     const devOutput = 'work...\n<BINDING>{"a1":{"testRef":"t.test.ts","testKind":"unit"}}</BINDING>';
     const r = await handleStoryCompletion({
       storyNode: storyNode(), devOutput, headSha: 'SHA',
       executors: { unit: async () => ({ passed: true }) },
     });
     expect(r.verdict.status).toBe('done');
-    expect(r.newState).toBe('merging');
+    expect(r.newState).toBe('done');
     expect(r.propagate).toBe(true);
     expect(r.acceptanceCriteria[0].testBinding.status).toBe('passing');
   });
@@ -109,7 +109,7 @@ describe('runStoryDevJob (injected spawn)', () => {
     },
   });
 
-  it('success path: completion done → updateStoryState(merging) + propagate', async () => {
+  it('success path: completion done → updateStoryState(done) + propagate', async () => {
     const states = []; let propagated = false;
     const r = await runStoryDevJob({
       job: job(), eventLogDir: mkdtempSync(join(tmpdir(), 'log-')),
@@ -123,8 +123,8 @@ describe('runStoryDevJob (injected spawn)', () => {
       },
     });
     expect(r.exitCode).toBe(0);
-    expect(r.newState).toBe('merging');
-    expect(states).toContain('merging');
+    expect(r.newState).toBe('done');
+    expect(states).toContain('done');
     expect(propagated).toBe(true);
   });
 

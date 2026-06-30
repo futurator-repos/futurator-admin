@@ -45,9 +45,10 @@ export async function handleStoryCompletion({
   const verdict = evaluateCompletion({ acceptanceCriteria, currentHeadSha: headSha, reviewerVerdicts, needsHuman });
 
   // 4) map verdict → StoryNode lifecycle state.
-  //    done → merging (the integrate stage flips to verifying→done on merge);
-  //    failing/blocked/needs-human → failed (operator/retry re-opens).
-  const newState = verdict.status === 'done' ? 'merging' : 'failed';
+  //    In the shared-tree model the per-story commit IS the integration (no
+  //    merge step), so a passing+committed+test-verified story is DONE outright.
+  //    failing/blocked/needs-human → failed (fix-forward/retry re-opens).
+  const newState = verdict.status === 'done' ? 'done' : 'failed';
 
   return {
     verdict,
