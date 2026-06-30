@@ -92,6 +92,7 @@ import {
 } from './pipelines/job-router.mjs';
 import { runStoryDevJob } from './pipelines/story-dev-pipeline.mjs';
 import { propagateCompletion, dependentsOf } from './lib/story-dispatch-driver.mjs';
+import { defaultExecutors } from './lib/test-executors.mjs';
 import { runUltracodeBenchJob } from './pipelines/ultracode-bench-job-runner.mjs';
 import { makeCaptureDeps } from './pipelines/ultracode-bench-capture.mjs';
 import { runDualAgentCompare } from './pipelines/dual-agent-compare-runner.mjs';
@@ -1746,6 +1747,8 @@ async function executeStoryDevJob(job) {
       spawn,
       claudeBin: CLAUDE_BIN,
       headSha,
+      // Real bound-AC test executors run in the story's worktree.
+      executors: defaultExecutors({ cwd: job.workingDir }),
       updateStoryState,
       propagateCompletion: propagate,
       logger: { info: (m) => log('info', m), warn: (m) => log('warn', m), error: (m) => log('error', m) },
