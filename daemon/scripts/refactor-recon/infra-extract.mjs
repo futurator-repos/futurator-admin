@@ -67,7 +67,8 @@ export function detectCloudSdk(spec) {
   return null;
 }
 
-// ── Config / IaC file recognition (by name) ──
+// ── Config / IaC file recognition (by NAME). Ambiguous .yaml/.json (k8s, CFN, SAM,
+// ArgoCD, Crossplane, ARM) need content — see classifyConfigByContent. ──
 export function configFileType(rel) {
   const base = rel.split('/').pop();
   if (/(^|\/)schema\.prisma$/.test(rel)) return 'prisma';
@@ -75,19 +76,57 @@ export function configFileType(rel) {
   if (/(^|\/)cdk\.json$/.test(rel)) return 'cdk';
   if (/(^|\/)cdktf\.json$/.test(rel)) return 'cdktf';
   if (/(^|\/)drizzle\.config\.(ts|mjs|js)$/.test(rel)) return 'drizzle';
-  if (/\.tf$|\.tf\.json$/.test(rel)) return 'terraform';
+  if (/\.tf$|\.tf\.json$|\.tofu$/.test(rel)) return 'terraform';
+  if (/(^|\/)terragrunt\.hcl$/.test(rel)) return 'terragrunt';
+  if (/\.bicep$/.test(rel)) return 'bicep';
+  if (/(^|\/)azuredeploy\.json$/.test(rel)) return 'arm';
   if (/(^|\/)serverless\.ya?ml$/.test(rel)) return 'serverless';
-  if (/(^|\/)docker-compose\.ya?ml$/.test(rel)) return 'docker-compose';
+  if (/(^|\/)(docker-compose|compose)\.ya?ml$/.test(rel)) return 'docker-compose';
+  if (/(^|\/)Dockerfile(\.[\w-]+)?$/.test(rel)) return 'docker';
+  if (/\.pkr\.hcl$|(^|\/)packer\.json$/.test(rel)) return 'packer';
+  if (/(^|\/)Vagrantfile$/.test(rel)) return 'vagrant';
+  if (/(^|\/)(flake|default|shell)\.nix$/.test(rel)) return 'nix';
   if (/(^|\/)Pulumi\.[^/]*\.?ya?ml$/.test(rel)) return 'pulumi';
-  if (/(^|\/)(template|cloudformation)\.ya?ml$/.test(rel)) return 'cloudformation';
+  if (/(^|\/)Chart\.ya?ml$/.test(rel)) return 'helm';
+  if (/(^|\/)kustomization\.ya?ml$/.test(rel)) return 'kustomize';
+  // config management
+  if (/(^|\/)(playbook|site)\.ya?ml$|(^|\/)ansible\.cfg$|(^|\/)(roles|playbooks)\//.test(rel)) return 'ansible';
+  if (/(^|\/)(metadata\.rb|Berksfile)$|(^|\/)(recipes|cookbooks)\/.*\.rb$/.test(rel)) return 'chef';
+  if (/\.pp$|(^|\/)Puppetfile$/.test(rel)) return 'puppet';
+  if (/\.sls$/.test(rel)) return 'salt';
+  // migrations
+  if (/(^|\/)(flyway\.conf|flyway\.toml)$|(^|\/)db\/migration\//.test(rel)) return 'flyway';
+  if (/(^|\/)(liquibase\.properties|changelog.*\.xml)$/.test(rel)) return 'liquibase';
+  if (/(^|\/)alembic\.ini$|(^|\/)alembic\/versions\//.test(rel)) return 'alembic';
+  // platform
   if (base === 'vercel.json') return 'platform:Vercel';
   if (base === 'netlify.toml') return 'platform:Netlify';
   if (base === 'fly.toml') return 'platform:Fly.io';
   if (base === 'render.yaml') return 'platform:Render';
   if (base === 'app.yaml' || base === 'app.yml') return 'platform:GCP App Engine';
   if (base === 'Procfile') return 'platform:Heroku';
+  // CI deploy
   if (/(^|\/)\.github\/workflows\/[^/]+\.ya?ml$/.test(rel)) return 'gh-workflow';
-  if (/(^|\/)\.env\.(example|sample|template)$/.test(rel)) return 'env-example';
+  if (/(^|\/)\.gitlab-ci\.ya?ml$/.test(rel)) return 'gitlab-ci';
+  if (/(^|\/)\.circleci\/config\.ya?ml$/.test(rel)) return 'circleci';
+  if (/(^|\/)\.env\.(example|sample|template|dist)$/.test(rel)) return 'env-example';
+  return null;
+}
+
+// Content-based classifier for ambiguous .yaml/.yml/.json that the name didn't decide
+// (K8s/CFN/SAM/ArgoCD/Flux/Crossplane/ARM all look alike by extension). Order matters:
+// the most specific apiGroups (crossplane/argo/flux) are checked before generic K8s.
+export function classifyConfigByContent(rel, content) {
+  if (configFileType(rel)) return null;
+  if (!/\.(ya?ml|json)$/.test(rel)) return null;
+  const c = String(content || '');
+  if (/Transform:\s*AWS::Serverless/m.test(c)) return 'sam';
+  if (/AWSTemplateFormatVersion/.test(c) || /Type:\s*['"]?AWS::[A-Za-z0-9]+::/m.test(c)) return 'cloudformation';
+  if (/Microsoft\.[A-Za-z]+\//.test(c) && /(deploymentTemplate\.json|"resources"\s*:)/.test(c)) return 'arm';
+  if (/\.crossplane\.io\//.test(c)) return 'crossplane';
+  if (/argoproj\.io\//.test(c)) return 'argocd';
+  if (/toolkit\.fluxcd\.io\//.test(c)) return 'flux';
+  if (/^apiVersion:\s*\S/m.test(c) && /^kind:\s*(Deployment|Service|StatefulSet|DaemonSet|ReplicaSet|Ingress|ConfigMap|Pod|Job|CronJob|Namespace|PersistentVolumeClaim|Secret|ServiceAccount|Role|RoleBinding|HorizontalPodAutoscaler|NetworkPolicy)\b/m.test(c)) return 'kubernetes';
   return null;
 }
 
@@ -157,6 +196,9 @@ function detectIacImport(spec) {
 const STANDING_RE = /\bRDS\b|Aurora|Cosmos|Cloud SQL|App Service|Service Bus|ALB|ELB|NAT|EC2|Fargate|ECS|\(self-hosted\)/i;
 export function costModelFor(s) {
   if (s.kind === 'iac' || s.kind === 'secrets') return 'none';
+  // bare hyperscaler catch-all (from AWS_/GCP_/AZURE_ env keys) = credentials, not a
+  // specific billable service → not a cost source.
+  if (s.kind === 'platform' && ['AWS', 'GCP', 'Azure'].includes(s.cloud)) return 'none';
   const ownCloud = s.residency === 'in-account' || ['AWS', 'GCP', 'Azure', 'self-hosted'].includes(s.cloud);
   if (ownCloud) return STANDING_RE.test(s.name) ? 'standing' : 'metered';
   if (s.cloud === 'platform' || s.cloud === 'Supabase' || s.cloud === 'managed') return 'subscription';
@@ -167,11 +209,60 @@ export function costModelFor(s) {
 // IaC strength tier per config kind: resource-declaring ≫ schema/migrations >
 // platform-config > deploy-automation. The maturity axis weights these.
 export function iacTier(ctype) {
-  if (['terraform', 'sst', 'pulumi', 'cloudformation', 'serverless', 'cdk', 'cdktf'].includes(ctype)) return 'resource';
-  if (['prisma', 'drizzle'].includes(ctype)) return 'migrations';
+  if (['terraform', 'terragrunt', 'sst', 'pulumi', 'cloudformation', 'sam', 'bicep', 'arm', 'serverless', 'cdk', 'cdktf'].includes(ctype)) return 'resource';
+  if (['prisma', 'drizzle', 'flyway', 'liquibase', 'alembic'].includes(ctype)) return 'migrations';
+  if (['kubernetes', 'helm', 'kustomize', 'crossplane', 'argocd', 'flux'].includes(ctype)) return 'orchestration';
+  if (['ansible', 'chef', 'puppet', 'salt'].includes(ctype)) return 'config-mgmt';
+  if (['docker', 'docker-compose', 'packer', 'vagrant', 'nix'].includes(ctype)) return 'container';
   if (ctype && ctype.startsWith('platform:')) return 'platform';
-  if (ctype === 'gh-workflow') return 'ci';
+  if (['gh-workflow', 'gitlab-ci', 'circleci'].includes(ctype)) return 'ci';
   return 'other';
+}
+
+// ── Resource extraction from general-purpose-language IaC (SST/CDK/Pulumi) ──
+// These split resources across infra/*.ts modules, NOT just the entry config — so
+// extraction must run on every IaC-importing file, else real tables/buckets look
+// "inferred" (the click-ops false alarm). Each entry: [regex, friendlyName, kind].
+const SST_RES = [
+  [/\bsst\.aws\.Function\b|\bnew\s+Function\b/, 'Lambda', 'compute'],
+  [/\bsst\.aws\.(Dynamo|Table)\b|\bnew\s+Table\b/, 'DynamoDB', 'database'],
+  [/\bsst\.aws\.Bucket\b|\bnew\s+Bucket\b/, 'S3', 'storage'],
+  [/\bsst\.aws\.Postgres\b|\bsst\.aws\.Aurora\b|\bnew\s+RDS\b/, 'RDS/Aurora', 'database'],
+  [/\bsst\.aws\.Queue\b|\bnew\s+Queue\b/, 'SQS', 'messaging'],
+  [/\bsst\.aws\.Topic\b|\bnew\s+Topic\b/, 'SNS', 'messaging'],
+  [/\bsst\.aws\.Cron\b|\bnew\s+Cron\b/, 'EventBridge (cron)', 'messaging'],
+  [/\bsst\.aws\.Cdn\b|\bnew\s+(StaticSite|NextjsSite|SvelteKitSite|AstroSite)\b|\bsst\.aws\.(Nextjs|StaticSite|SvelteKit|Astro|React)\b/, 'CloudFront', 'network'],
+  [/\bsst\.aws\.ApiGatewayV2\b|\bsst\.aws\.Api\b|\bnew\s+Api\b/, 'API Gateway', 'network'],
+];
+const CDK_RES = [
+  [/\bnew\s+(?:s3\.)?Bucket\b/, 'S3', 'storage'],
+  [/\bnew\s+(?:dynamodb\.)?Table\b/, 'DynamoDB', 'database'],
+  [/\bnew\s+(?:lambda(?:_nodejs|\.)?\.?)?(?:NodejsFunction|Function)\b/, 'Lambda', 'compute'],
+  [/\bnew\s+(?:rds\.)?(?:DatabaseInstance|DatabaseCluster|ServerlessCluster)\b/, 'RDS', 'database'],
+  [/\bnew\s+(?:sqs\.)?Queue\b/, 'SQS', 'messaging'],
+  [/\bnew\s+(?:sns\.)?Topic\b/, 'SNS', 'messaging'],
+  [/\bnew\s+(?:cloudfront\.)?Distribution\b/, 'CloudFront', 'network'],
+  [/\bnew\s+(?:apigateway\w*\.)?(?:RestApi|HttpApi|LambdaRestApi)\b/, 'API Gateway', 'network'],
+];
+const PULUMI_RES = [
+  [/\bnew\s+aws\.s3\.Bucket(?:V2)?\b/, 'S3', 'storage', 'AWS'],
+  [/\bnew\s+aws\.dynamodb\.Table\b/, 'DynamoDB', 'database', 'AWS'],
+  [/\bnew\s+aws\.lambda\.(?:Function|CallbackFunction)\b/, 'Lambda', 'compute', 'AWS'],
+  [/\bnew\s+aws\.rds\.\w+/, 'RDS', 'database', 'AWS'],
+  [/\bnew\s+gcp\.storage\.Bucket\b/, 'Cloud Storage', 'storage', 'GCP'],
+  [/\bnew\s+gcp\.\w+/, 'GCP resource', 'compute', 'GCP'],
+  [/\bnew\s+azure(?:-native|nm)?\.\w+/, 'Azure resource', 'compute', 'Azure'],
+];
+
+/** Extract declared cloud resources from a general-purpose IaC file's content. */
+export function extractIacResources(content, tool) {
+  const out = [];
+  const seen = new Set();
+  const add = (name, kind, cloud) => { const k = `${cloud}:${name}`; if (seen.has(k)) return; seen.add(k); out.push({ name, kind, cloud, residency: 'in-account', dataStore: kind === 'database' || kind === 'storage' }); };
+  if (tool === 'SST') for (const [re, name, kind] of SST_RES) { if (re.test(content)) add(name, kind, 'AWS'); }
+  else if (tool === 'AWS CDK') for (const [re, name, kind] of CDK_RES) { if (re.test(content)) add(name, kind, 'AWS'); }
+  else if (tool === 'Pulumi') for (const [re, name, kind, cloud] of PULUMI_RES) { if (re.test(content)) add(name, kind, cloud); }
+  return out;
 }
 
 /** Parse a config/IaC file's content into declared detections (high confidence). */
@@ -211,26 +302,36 @@ export function parseConfig(type, content, rel) {
   } else if (type === 'pulumi' || type === 'cloudformation') {
     push({ name: type === 'pulumi' ? 'Pulumi' : 'CloudFormation/SAM', kind: 'iac', cloud: 'unknown', residency: 'in-account' });
   } else if (type === 'sst') {
-    // SST v3 (sst.aws.*) + v2 (new Bucket/Table/Function from sst/constructs).
+    // SST v3 (sst.aws.*) + v2 (new Bucket/Table/Function). Resources often live in
+    // infra/*.ts modules too — those are caught in the code-file pass (extractIacResources).
     push({ name: 'SST', kind: 'iac', cloud: 'AWS', residency: 'in-account' });
-    const seen = new Set();
-    const addRes = (name, kind) => { const k = `AWS:${name}`; if (seen.has(k)) return; seen.add(k); push({ name, kind, cloud: 'AWS', residency: 'in-account', dataStore: kind === 'database' || kind === 'storage' }); };
-    const SST_RES = [
-      [/\bsst\.aws\.Function\b|\bnew\s+Function\b/, 'Lambda', 'compute'],
-      [/\bsst\.aws\.(Dynamo|Table)\b|\bnew\s+Table\b/, 'DynamoDB', 'database'],
-      [/\bsst\.aws\.Bucket\b|\bnew\s+Bucket\b/, 'S3', 'storage'],
-      [/\bsst\.aws\.Postgres\b|\bsst\.aws\.Aurora\b|\bnew\s+RDS\b/, 'RDS/Aurora', 'database'],
-      [/\bsst\.aws\.Queue\b|\bnew\s+Queue\b/, 'SQS', 'messaging'],
-      [/\bsst\.aws\.Topic\b|\bnew\s+Topic\b/, 'SNS', 'messaging'],
-      [/\bsst\.aws\.Cron\b|\bnew\s+Cron\b/, 'EventBridge (cron)', 'messaging'],
-      [/\bsst\.aws\.Cdn\b|\bnew\s+(StaticSite|NextjsSite|SvelteKitSite|AstroSite)\b|\bsst\.aws\.(Nextjs|StaticSite|SvelteKit|Astro|React)\b/, 'CloudFront', 'network'],
-      [/\bsst\.aws\.ApiGatewayV2\b|\bsst\.aws\.Api\b|\bnew\s+Api\b/, 'API Gateway', 'network'],
-    ];
-    for (const [re, name, kind] of SST_RES) if (re.test(content)) addRes(name, kind);
+    for (const r of extractIacResources(content, 'SST')) push(r);
   } else if (type === 'cdk') {
     push({ name: 'AWS CDK', kind: 'iac', cloud: 'AWS', residency: 'in-account' });
   } else if (type === 'cdktf') {
     push({ name: 'Terraform CDK', kind: 'iac', cloud: 'multi', residency: 'in-account' });
+  } else if (type === 'bicep') {
+    push({ name: 'Bicep', kind: 'iac', cloud: 'Azure', residency: 'in-account' });
+    const BICEP_RES = [[/Microsoft\.Web\/sites/i, 'App Service', 'compute'], [/Microsoft\.Sql/i, 'Azure SQL', 'database'], [/Microsoft\.Storage/i, 'Blob Storage', 'storage'], [/Microsoft\.DocumentDB|Microsoft\.DBforPostgreSQL/i, 'Cosmos/Postgres', 'database'], [/Microsoft\.ServiceBus/i, 'Service Bus', 'messaging']];
+    for (const [re, name, kind] of BICEP_RES) if (re.test(content)) push({ name, kind, cloud: 'Azure', residency: 'in-account', dataStore: kind === 'database' || kind === 'storage' });
+  } else if (type === 'arm') {
+    push({ name: 'ARM template', kind: 'iac', cloud: 'Azure', residency: 'in-account' });
+  } else if (type === 'sam') {
+    push({ name: 'AWS SAM', kind: 'iac', cloud: 'AWS', residency: 'in-account' });
+  } else if (type === 'kubernetes' || type === 'helm' || type === 'kustomize' || type === 'crossplane') {
+    push({ name: { kubernetes: 'Kubernetes', helm: 'Helm', kustomize: 'Kustomize', crossplane: 'Crossplane' }[type], kind: 'iac', cloud: 'k8s', residency: 'in-account' });
+  } else if (type === 'argocd' || type === 'flux') {
+    push({ name: type === 'argocd' ? 'ArgoCD' : 'Flux', kind: 'iac', cloud: 'k8s', residency: 'in-account' });
+  } else if (type === 'ansible' || type === 'chef' || type === 'puppet' || type === 'salt') {
+    push({ name: { ansible: 'Ansible', chef: 'Chef', puppet: 'Puppet', salt: 'Salt' }[type], kind: 'iac', cloud: 'multi', residency: 'in-account' });
+  } else if (type === 'docker' || type === 'packer' || type === 'vagrant' || type === 'nix') {
+    push({ name: { docker: 'Docker', packer: 'Packer', vagrant: 'Vagrant', nix: 'Nix' }[type], kind: 'iac', cloud: 'any', residency: 'in-account' });
+  } else if (type === 'terragrunt') {
+    push({ name: 'Terragrunt', kind: 'iac', cloud: 'multi', residency: 'in-account' });
+  } else if (type === 'gitlab-ci' || type === 'circleci') {
+    push({ name: type === 'gitlab-ci' ? 'GitLab CI' : 'CircleCI', kind: 'iac', cloud: 'unknown', residency: 'in-account', detectedBy: 'platform-config' });
+  } else if (type === 'flyway' || type === 'liquibase' || type === 'alembic') {
+    push({ name: { flyway: 'Flyway', liquibase: 'Liquibase', alembic: 'Alembic' }[type] + ' (migrations)', kind: 'database', cloud: 'managed', residency: 'varies', dataStore: true });
   } else if (type === 'drizzle') {
     push({ name: 'Drizzle (migrations)', kind: 'database', cloud: 'managed', residency: 'varies', dataStore: true, declares: ['drizzle.config'] });
   } else if (type && type.startsWith('platform:')) {
@@ -284,25 +385,34 @@ export function buildInfraInventory(files = []) {
     if (d.residency === 'external' && rel) externalTouchedBy.add(rel);
   };
 
+  // tiers that count as genuine infra-as-code (drive the HIGH signal); platform-config
+  // + CI-deploy are weaker (medium).
+  const GENUINE_IAC = new Set(['resource', 'migrations', 'orchestration', 'config-mgmt', 'container']);
   for (const f of files) {
     if (f.isClient) clientFiles++;
     else serverFiles++;
-    const ctype = configFileType(f.rel);
-    if (ctype && typeof f.content === 'string') {
-      if (ctype !== 'env-example' && ctype !== 'gh-workflow' && !ctype.startsWith('platform:')) iacDeclared = true;
+    // name first; fall back to content sniffing for ambiguous yaml/json.
+    const ctype = configFileType(f.rel) || (typeof f.content === 'string' ? classifyConfigByContent(f.rel, f.content) : null);
+    if (ctype) {
       if (ctype === 'env-example') hasEnvExample = true;
-      const dets = parseConfig(ctype, f.content, f.rel);
+      const dets = parseConfig(ctype, f.content || '', f.rel);
       if (dets.length) { for (const d of dets) record(d, f.rel); if (d_isIacKind(dets)) iacDeclared = true; }
-      // record the raw IaC file presence, tiered by strength.
       const tier = iacTier(ctype);
       if (ctype !== 'env-example') iac.push({ provider: prettyConfigType(ctype), file: f.rel, tier });
-      if (tier === 'resource' || tier === 'migrations') iacDeclared = true;
-      continue;
+      if (GENUINE_IAC.has(tier)) iacDeclared = true;
+      // a config file isn't ALSO a code file — don't fall through to import scanning.
+      if (configFileType(f.rel)) continue;
     }
-    // code file → IaC tooling import (declared infra) → SDK → import inference
+    // code file → IaC tooling import (declared infra; extract resources from the
+    // module — SST/CDK/Pulumi split resources across infra/*.ts) → SDK → import infer
+    const fileIac = (f.specifiers || []).reduce((acc, s) => acc || detectIacImport(s), null);
+    if (fileIac) {
+      record({ name: fileIac.name, kind: 'iac', cloud: fileIac.cloud, residency: 'in-account', detectedBy: 'iac-import', confidence: 'high' }, f.rel);
+      iacDeclared = true;
+      if (typeof f.content === 'string') for (const r of extractIacResources(f.content, fileIac.name)) record({ ...r, detectedBy: 'iac-declared', confidence: 'high' }, f.rel);
+    }
     for (const spec of f.specifiers || []) {
-      const ic = detectIacImport(spec);
-      if (ic) { record({ name: ic.name, kind: 'iac', cloud: ic.cloud, residency: 'in-account', detectedBy: 'iac-import', confidence: 'high' }, f.rel); iacDeclared = true; continue; }
+      if (detectIacImport(spec)) continue; // handled above
       const c = detectCloudSdk(spec);
       if (c) { record({ ...c, detectedBy: 'sdk-import', confidence: 'medium' }, f.rel); continue; }
       const d = classifyImport(spec);
@@ -330,7 +440,7 @@ export function buildInfraInventory(files = []) {
   // many are DECLARED in code vs only inferred-from-usage? Low ratio = the click-ops
   // smell (resources used but declared nowhere — invisible to cost/audit/repro). ──
   const DECLARED_BY = new Set(['iac-declared', 'iac-import', 'platform-config']);
-  const provisionable = services.filter((s) => (s.costModel === 'standing' || s.costModel === 'metered') && ['AWS', 'GCP', 'Azure', 'self-hosted'].includes(s.cloud));
+  const provisionable = services.filter((s) => (s.costModel === 'standing' || s.costModel === 'metered') && ['AWS', 'GCP', 'Azure', 'self-hosted'].includes(s.cloud) && !['platform', 'iac', 'secrets'].includes(s.kind));
   const declaredProvisionable = provisionable.filter((s) => s.detectedBy.some((d) => DECLARED_BY.has(d)));
   const iacCoverage = {
     provisionable: provisionable.length,
@@ -338,7 +448,10 @@ export function buildInfraInventory(files = []) {
     ratio: provisionable.length ? declaredProvisionable.length / provisionable.length : null,
     undeclared: provisionable.filter((s) => !s.detectedBy.some((d) => DECLARED_BY.has(d))).map((s) => s.name).slice(0, 12),
   };
-  const resourceIacFiles = iac.filter((i) => i.tier === 'resource' || i.tier === 'migrations').length;
+  const resourceIacFiles = iac.filter((i) => ['resource', 'migrations', 'orchestration', 'config-mgmt', 'container'].includes(i.tier)).length;
+  // IaC files grouped by family/tier (for the report's tiered display).
+  const iacByTier = {};
+  for (const i of iac) (iacByTier[i.tier || 'other'] ||= []).push(i.provider);
 
   // infra signal quality — the "how well does this codebase express its infra" rating.
   const iacFiles = iac.length;
@@ -373,6 +486,7 @@ export function buildInfraInventory(files = []) {
       clouds,
       iacProviders: [...new Set(iac.map((i) => i.provider))],
       resourceIacFiles,
+      iacByTier,
       costSurface,
       iacCoverage,
     },
@@ -382,7 +496,15 @@ export function buildInfraInventory(files = []) {
 function d_isIacKind(dets) { return dets.some((d) => d.kind === 'iac'); }
 function prettyConfigType(t) {
   if (t.startsWith('platform:')) return t.slice('platform:'.length);
-  return { prisma: 'Prisma', terraform: 'Terraform', serverless: 'Serverless', 'docker-compose': 'Docker Compose', pulumi: 'Pulumi', cloudformation: 'CloudFormation', sst: 'SST', cdk: 'AWS CDK', cdktf: 'Terraform CDK', drizzle: 'Drizzle', 'gh-workflow': 'CI workflow' }[t] || t;
+  return {
+    prisma: 'Prisma', terraform: 'Terraform', terragrunt: 'Terragrunt', serverless: 'Serverless',
+    'docker-compose': 'Docker Compose', docker: 'Dockerfile', pulumi: 'Pulumi', cloudformation: 'CloudFormation',
+    sam: 'AWS SAM', bicep: 'Bicep', arm: 'ARM', sst: 'SST', cdk: 'AWS CDK', cdktf: 'Terraform CDK',
+    kubernetes: 'Kubernetes', helm: 'Helm', kustomize: 'Kustomize', crossplane: 'Crossplane',
+    argocd: 'ArgoCD', flux: 'Flux', ansible: 'Ansible', chef: 'Chef', puppet: 'Puppet', salt: 'Salt',
+    packer: 'Packer', vagrant: 'Vagrant', nix: 'Nix', drizzle: 'Drizzle', flyway: 'Flyway',
+    liquibase: 'Liquibase', alembic: 'Alembic', 'gh-workflow': 'CI workflow', 'gitlab-ci': 'GitLab CI', circleci: 'CircleCI',
+  }[t] || t;
 }
 function mapPrivacyKind(k) { return k === 'thirdParty' ? 'third-party' : k; }
 function cloudForProvider(d) {
@@ -408,8 +530,9 @@ function specifiers(code) {
 function walk(dir, root, acc = []) {
   let entries = [];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return acc; }
+  const ALLOW_DOT = new Set(['.github', '.circleci']);
   for (const e of entries) {
-    if (e.name.startsWith('.') && e.name !== '.' && e.name !== '.github' && !/^\.env\.(example|sample|template)$/.test(e.name)) continue;
+    if (e.name.startsWith('.') && e.name !== '.' && !ALLOW_DOT.has(e.name) && !/^\.env\.(example|sample|template|dist)$/.test(e.name) && !/^\.gitlab-ci\.ya?ml$/.test(e.name)) continue;
     if (IGNORE.has(e.name)) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) walk(full, root, acc);
@@ -429,10 +552,21 @@ function main(argv) {
     const rel = path.relative(repo, full);
     const ctype = configFileType(rel);
     const isCode = EXTS.includes(path.extname(full));
-    if (!ctype && !isCode) continue;
+    // ambiguous yaml/json/hcl/bicep need content for content-classification.
+    const isAmbiguous = !ctype && /\.(ya?ml|json|hcl|bicep)$/.test(rel);
+    if (!ctype && !isCode && !isAmbiguous) continue;
     let code = '';
-    try { code = fs.readFileSync(full, 'utf8'); } catch { continue; }
-    files.push({ rel, specifiers: isCode ? specifiers(code) : [], content: ctype ? code : undefined, isClient: isCode && /^\s*['"]use client['"]/m.test(code) });
+    try { if (fs.statSync(full).size < 512 * 1024) code = fs.readFileSync(full, 'utf8'); } catch { continue; }
+    const specs = isCode ? specifiers(code) : [];
+    // include content for code files that declare infra (under infra/stacks, or that
+    // import an IaC tool) so SST/CDK/Pulumi resources in modules are extracted.
+    const iacModule = isCode && (/(^|\/)(infra|stacks|stack|deploy)\//.test(rel) || /aws-cdk-lib|@aws-cdk\/|['"]sst['"]|['"]sst\/|@pulumi\/|cdktf/.test(code));
+    files.push({
+      rel,
+      specifiers: specs,
+      content: ctype || isAmbiguous || iacModule ? code : undefined,
+      isClient: isCode && /^\s*['"]use client['"]/m.test(code),
+    });
   }
   const inv = buildInfraInventory(files);
   try { fs.mkdirSync(path.dirname(out), { recursive: true }); } catch { /* ignore */ }

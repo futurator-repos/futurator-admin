@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildInfraInventory, parseConfig, detectCloudSdk, configFileType } from '../infra-extract.mjs';
+import { buildInfraInventory, parseConfig, detectCloudSdk, configFileType, classifyConfigByContent, extractIacResources } from '../infra-extract.mjs';
 
 const svc = (inv, name) => inv.services.find((s) => s.name === name || s.name.startsWith(name));
 
@@ -158,5 +158,76 @@ describe('IaC detection — SST, CDK, cost surface + coverage', () => {
     ]);
     expect(inv.iacCoverage.declared).toBe(inv.iacCoverage.provisionable);
     expect(inv.iacCoverage.ratio).toBe(1);
+  });
+
+  it('extracts SST resources from an infra/ MODULE, not just sst.config.ts (the Mycelium fix)', () => {
+    const inv = buildInfraInventory([
+      { rel: 'sst.config.ts', content: 'export default { async run(){ await import("./infra/storage"); new sst.aws.Nextjs("Web"); } }', specifiers: ['sst'] },
+      { rel: 'infra/storage.ts', specifiers: ['sst'], content: 'export const table = new sst.aws.Dynamo("T"); export const bucket = new sst.aws.Bucket("B");' },
+      { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb', '@aws-sdk/client-s3'] },
+    ]);
+    const dynamo = svc(inv, 'DynamoDB');
+    expect(dynamo.detectedBy).toContain('iac-declared'); // declared in the module, not just inferred
+    expect(inv.iacCoverage.ratio).toBe(1); // DynamoDB + S3 both declared → no click-ops alarm
+  });
+
+  it('bare hyperscaler catch-all (AWS_ env keys) is NOT counted as a cost source or provisionable', () => {
+    const inv = buildInfraInventory([
+      { rel: '.env.example', content: 'AWS_REGION=us-east-1\nAWS_ACCESS_KEY_ID=' },
+      { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] },
+    ]);
+    const aws = svc(inv, 'AWS');
+    expect(aws.costModel).toBe('none'); // credentials catch-all, not a billable service
+    expect(inv.iacCoverage.provisionable).toBe(1); // only DynamoDB, not the bare AWS entry
+  });
+});
+
+describe('Comprehensive IaC families — any project type', () => {
+  it('recognizes the full taxonomy by filename', () => {
+    expect(configFileType('main.bicep')).toBe('bicep');
+    expect(configFileType('infra/terragrunt.hcl')).toBe('terragrunt');
+    expect(configFileType('Dockerfile')).toBe('docker');
+    expect(configFileType('Vagrantfile')).toBe('vagrant');
+    expect(configFileType('flake.nix')).toBe('nix');
+    expect(configFileType('charts/app/Chart.yaml')).toBe('helm');
+    expect(configFileType('k8s/kustomization.yaml')).toBe('kustomize');
+    expect(configFileType('playbook.yml')).toBe('ansible');
+    expect(configFileType('cookbooks/web/metadata.rb')).toBe('chef');
+    expect(configFileType('manifests/web.pp')).toBe('puppet');
+    expect(configFileType('states/web.sls')).toBe('salt');
+    expect(configFileType('.gitlab-ci.yml')).toBe('gitlab-ci');
+    expect(configFileType('.circleci/config.yml')).toBe('circleci');
+  });
+
+  it('content-classifies ambiguous yaml (K8s / CloudFormation / SAM / ArgoCD / Flux)', () => {
+    expect(classifyConfigByContent('deploy.yaml', 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web')).toBe('kubernetes');
+    expect(classifyConfigByContent('stack.yaml', 'AWSTemplateFormatVersion: "2010-09-09"\nResources:\n  Fn:\n    Type: AWS::Lambda::Function')).toBe('cloudformation');
+    expect(classifyConfigByContent('template.yaml', 'Transform: AWS::Serverless-2016-10-31\nResources: {}')).toBe('sam');
+    expect(classifyConfigByContent('argo-app.yaml', 'apiVersion: argoproj.io/v1alpha1\nkind: Application')).toBe('argocd');
+    expect(classifyConfigByContent('rel.yaml', 'apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease')).toBe('flux');
+    expect(classifyConfigByContent('package.json', '{"name":"x"}')).toBe(null); // not infra
+  });
+
+  it('a Kubernetes/Helm repo (no own-cloud SDK) reads as IaC-declared, not "no IaC"', () => {
+    const inv = buildInfraInventory([
+      { rel: 'charts/app/Chart.yaml', content: 'apiVersion: v2\nname: app' },
+      { rel: 'k8s/deploy.yaml', content: 'apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: web}' },
+    ]);
+    expect(inv.signalQuality.level).toBe('high');
+    expect(inv.summary.resourceIacFiles).toBeGreaterThan(0);
+    expect(inv.iac.some((i) => i.tier === 'orchestration')).toBe(true);
+  });
+
+  it('extractIacResources handles CDK + Pulumi construct syntax', () => {
+    const cdk = extractIacResources('const b = new Bucket(this, "B"); new dynamodb.Table(this, "T");', 'AWS CDK').map((r) => r.name);
+    expect(cdk).toEqual(expect.arrayContaining(['S3', 'DynamoDB']));
+    const pulumi = extractIacResources('const b = new aws.s3.BucketV2("b"); new aws.dynamodb.Table("t", {});', 'Pulumi').map((r) => r.name);
+    expect(pulumi).toEqual(expect.arrayContaining(['S3', 'DynamoDB']));
+  });
+
+  it('Ansible (config-mgmt) is recognized as its own family, not provisioning', () => {
+    const inv = buildInfraInventory([{ rel: 'playbook.yml', content: '- hosts: web\n  tasks: []' }]);
+    expect(inv.iac.some((i) => i.tier === 'config-mgmt')).toBe(true);
+    expect(inv.signalQuality.level).toBe('high');
   });
 });

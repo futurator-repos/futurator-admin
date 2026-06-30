@@ -208,6 +208,7 @@ export async function runScanEngine(job, deps) {
   const detFindings = [
     ...hotspots.map((h) => hotspotToFinding(h, hubSet)),
     ...(art.privacySummary ? privacyToFindings(art.privacySummary) : []),
+    ...(Array.isArray(art.security?.findings) ? art.security.findings : []),
   ].map((f) => ({ ...f, producedBy: 'deterministic' }));
 
   /** Run a set of swarm tasks → flat findings, each stamped with its task key. */
@@ -289,6 +290,7 @@ export async function runScanEngine(job, deps) {
     knipRan: !!art.knipRan,
     sdd: art.sdd || null,
     infra,
+    security: art.security?.summary || null,
   });
   pushEvent('scan.maturity', { overall: maturity.overall });
 

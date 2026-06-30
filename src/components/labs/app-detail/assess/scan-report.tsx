@@ -78,12 +78,31 @@ function InfraCloudGroup({ cloud, services }: { cloud: string; services: InfraSe
 const IAC_TIER_LABEL: Record<string, string> = {
   resource: 'resource-declaring IaC',
   migrations: 'schema / migrations',
+  orchestration: 'K8s / orchestration',
+  'config-mgmt': 'config management',
+  container: 'container / image',
   platform: 'platform config',
   ci: 'deploy automation (CI)',
   other: 'config',
 };
+const GENUINE_IAC_TIER = new Set([
+  'resource',
+  'migrations',
+  'orchestration',
+  'config-mgmt',
+  'container',
+]);
 const IAC_TIER_RANK = (t?: string) =>
-  ({ resource: 4, migrations: 3, platform: 2, ci: 1, other: 0 })[t || 'other'] ?? 0;
+  ({
+    resource: 7,
+    migrations: 6,
+    orchestration: 5,
+    'config-mgmt': 4,
+    container: 3,
+    platform: 2,
+    ci: 1,
+    other: 0,
+  })[t || 'other'] ?? 0;
 
 const COST_MODEL_META: Record<string, { label: string; note: string; color: string }> = {
   standing: {
@@ -322,7 +341,7 @@ function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianc
                   style={{
                     fontSize: 11,
                     color: 'var(--text-dim)',
-                    border: `1px solid ${i.tier === 'resource' || i.tier === 'migrations' ? 'color-mix(in srgb, var(--success) 40%, var(--border))' : 'var(--border)'}`,
+                    border: `1px solid ${GENUINE_IAC_TIER.has(i.tier || '') ? 'color-mix(in srgb, var(--success) 40%, var(--border))' : 'var(--border)'}`,
                     borderRadius: 8,
                     padding: '3px 9px',
                     fontFamily: 'var(--font-mono)',

@@ -7551,6 +7551,7 @@ async function executeScanEngineJob(job) {
   const testsPath = new URL('./scripts/refactor-recon/tests-detect.mjs', import.meta.url).pathname;
   const infraPath = new URL('./scripts/refactor-recon/infra-extract.mjs', import.meta.url).pathname;
   const eslintPath = new URL('./scripts/refactor-recon/eslint-detect.mjs', import.meta.url).pathname;
+  const securityPath = new URL('./scripts/refactor-recon/security-scan.mjs', import.meta.url).pathname;
 
   // Spawn a plain Node child (deterministic stages — never the agent path).
   const spawnNode = (args, cwd) =>
@@ -7638,12 +7639,14 @@ async function executeScanEngineJob(job) {
         let tests = null;
         let infra = null;
         let eslint = null;
+        let security = null;
         if (reuseDetectors) {
           const pr = rj('privacy.json');
           if (pr) privacySummary = summarizePrivacyReport(pr);
           tests = rj('tests.json');
           infra = rj('infra.json');
           eslint = rj('eslint.json');
+          security = rj('security.json');
         } else {
           // Privacy/compliance lane. Default 'internal' (our own scanner, ~0 LLM,
           // source stays on the box); 'external' routes to the data-privacy service.
@@ -7676,6 +7679,11 @@ async function executeScanEngineJob(job) {
               eslint = rj('eslint.json');
             } catch (ee) { log('warn', `[${short}] scan-engine eslint detector failed (non-fatal): ${ee?.message || ee}`); }
           }
+          // Security & secrets/env-hygiene detector — deterministic, always runnable.
+          try {
+            await spawnNode([securityPath, repo, '--src', p.src || 'src', '--out', pathJoin(od, 'security.json')], repo);
+            security = rj('security.json');
+          } catch (se) { log('warn', `[${short}] scan-engine security detector failed (non-fatal): ${se?.message || se}`); }
         }
         const graph = rj('graph.resolved.json') || rj('graph.json') || { nodes: [] };
         const resolved = rj('resolved-imports.json') || {};
@@ -7687,6 +7695,7 @@ async function executeScanEngineJob(job) {
           tests,
           infra,
           eslint,
+          security,
           // knip actually produced data? (else the clutter axis is degraded)
           knipRan: hotspotsDoc.toolStatus?.knip === 'ok',
           // Anchor = graphify nodes ∪ the REAL on-disk source files. graphify only

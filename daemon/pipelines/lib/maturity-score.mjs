@@ -29,9 +29,10 @@ const isHotKind = (hotspots, kind) => (hotspots || []).filter((h) => h.kind === 
  *   - knipRan: boolean          whether knip actually produced data (else clutter is degraded)
  *   - sdd:     {specCount}|null  spec-driven signal (their other-session work)
  *   - infra:   InfraInventory|null  from infra-extract (for the Infra-as-code axis)
+ *   - security: SecuritySummary|null from security-scan (secrets/env-hygiene axis)
  * @returns {{ axes: Array, overall: number|null }}
  */
-export function computeMaturity({ findings = [], hotspots = [], tests = null, eslint = null, graphAvailable = false, knipRan = false, sdd = null, infra = null } = {}) {
+export function computeMaturity({ findings = [], hotspots = [], tests = null, eslint = null, graphAvailable = false, knipRan = false, sdd = null, infra = null, security = null } = {}) {
   const axes = [];
   const add = (key, label, score, detail, measured = true) =>
     axes.push({ key, label, score, status: statusFor(measured ? score : null), detail, measured });
@@ -127,6 +128,31 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     }
   } else {
     add('infra-declared', 'Infra-as-code (declared)', null, 'add infra detector', false);
+  }
+
+  // 11. Secrets & config hygiene — deterministic, always measurable. Hardcoded
+  //     secrets / committed .env / browser-exposed secrets are weighted hardest;
+  //     env-config smells (no .env.example, no validation) add lighter penalty.
+  if (security) {
+    const e = security.env || {};
+    const critical = (security.secrets || 0) + (security.secretFiles || 0) + (security.publicSecrets || 0) + (security.weakFallbacks || 0);
+    const weighted =
+      critical * 2 +
+      (e.committedEnvFiles > 0 ? 3 : 0) +
+      (e.committedEnvFiles > 0 && !e.gitignoreCoversEnv ? 2 : 0) +
+      (!e.hasExample && e.usedKeys > 0 ? 1 : 0) +
+      (e.usedKeys >= 8 && !e.hasValidation ? 1 : 0) +
+      (security.dangerousSinks || 0) * 0.5 +
+      (security.insecureConfig || 0) * 0.5 +
+      (security.supplyChain && security.supplyChain.hasPackageJson && !security.supplyChain.hasLockfile ? 1 : 0);
+    const bits = [];
+    if (critical) bits.push(`${critical} secret/leak`);
+    if (e.committedEnvFiles) bits.push(`${e.committedEnvFiles} committed .env`);
+    if (!e.hasExample && e.usedKeys) bits.push('no .env.example');
+    if (security.dangerousSinks) bits.push(`${security.dangerousSinks} dangerous sink(s)`);
+    add('secrets-config-hygiene', 'Secrets & config hygiene', scoreFromCount(weighted, 12), bits.length ? bits.join(' · ') : 'no secret/env-hygiene issues found');
+  } else {
+    add('secrets-config-hygiene', 'Secrets & config hygiene', null, 'add security detector', false);
   }
 
   const measured = axes.filter((a) => a.measured && typeof a.score === 'number');

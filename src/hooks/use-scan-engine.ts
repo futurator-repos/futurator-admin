@@ -125,7 +125,15 @@ export interface InfraInventory {
   iac: {
     provider: string;
     file: string;
-    tier?: 'resource' | 'migrations' | 'platform' | 'ci' | 'other';
+    tier?:
+      | 'resource'
+      | 'migrations'
+      | 'orchestration'
+      | 'config-mgmt'
+      | 'container'
+      | 'platform'
+      | 'ci'
+      | 'other';
   }[];
   external: { provider: string; kind: string; fileCount: number; detectedBy?: string[] }[];
   clouds: string[];
@@ -147,6 +155,7 @@ export interface InfraInventory {
     clouds: string[];
     iacProviders: string[];
     resourceIacFiles?: number;
+    iacByTier?: Record<string, string[]>;
     costSurface?: CostSurface;
     iacCoverage?: IacCoverage;
   };

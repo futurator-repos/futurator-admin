@@ -11,11 +11,25 @@ import { analyzeTests } from '../../scripts/refactor-recon/tests-detect.mjs';
 const finding = (over) => ({ dimension: 'correctness', severity: 'Medium', issue: '', suggestion: '', evidence: {}, ...over });
 
 describe('computeMaturity', () => {
-  it('returns all ten axes', () => {
+  it('returns all eleven axes', () => {
     const { axes } = computeMaturity({});
     expect(axes.map((a) => a.key).sort()).toEqual(
-      ['clutter', 'component-driven', 'eslint-health', 'graph-installed', 'infra-declared', 'sdd-driven', 'security-compliance', 'structure-sanity', 'tdd-maturity', 'type-safety'].sort(),
+      ['clutter', 'component-driven', 'eslint-health', 'graph-installed', 'infra-declared', 'sdd-driven', 'secrets-config-hygiene', 'security-compliance', 'structure-sanity', 'tdd-maturity', 'type-safety'].sort(),
     );
+  });
+
+  it('Secrets & config hygiene axis: hardcoded secrets + committed .env score poor; clean scores good', () => {
+    const dirty = computeMaturity({
+      security: { secrets: 3, secretFiles: 1, publicSecrets: 1, weakFallbacks: 0, dangerousSinks: 2, insecureConfig: 0, env: { committedEnvFiles: 1, gitignoreCoversEnv: false, hasExample: false, usedKeys: 12, hasValidation: false }, supplyChain: { hasPackageJson: true, hasLockfile: true } },
+    }).axes.find((a) => a.key === 'secrets-config-hygiene');
+    expect(dirty.measured).toBe(true);
+    expect(dirty.status).toBe('poor');
+    expect(dirty.detail).toMatch(/secret|\.env/);
+
+    const clean = computeMaturity({
+      security: { secrets: 0, secretFiles: 0, publicSecrets: 0, weakFallbacks: 0, dangerousSinks: 0, insecureConfig: 0, env: { committedEnvFiles: 0, gitignoreCoversEnv: true, hasExample: true, usedKeys: 10, hasValidation: true }, supplyChain: { hasPackageJson: true, hasLockfile: true } },
+    }).axes.find((a) => a.key === 'secrets-config-hygiene');
+    expect(clean.status).toBe('good');
   });
 
   it('Infra-as-code axis: scores own-cloud resource declaration coverage (catches click-ops)', () => {
