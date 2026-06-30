@@ -25,7 +25,21 @@ export interface RunAsPipeline3Deps {
 
 export interface RunAsPipeline3Response {
   status: number;
-  json: { ok: boolean; summary?: unknown; errors?: string[]; planId?: string; stories?: number };
+  json: {
+    ok: boolean;
+    summary?: unknown;
+    errors?: string[];
+    // `error` (singular) mirrors the joined `errors` so the api-client surfaces
+    // the real reason instead of a generic "Request failed".
+    error?: string;
+    planId?: string;
+    stories?: number;
+  };
+}
+
+/** Shape a rejection so BOTH `errors[]` (tests) and `error` (api-client) carry it. */
+function reject(status: number, errors: string[]): RunAsPipeline3Response {
+  return { status, json: { ok: false, errors, error: errors.join('; ') } };
 }
 
 export async function handleRunAsPipeline3(args: {
@@ -36,7 +50,7 @@ export async function handleRunAsPipeline3(args: {
   const now = deps.now ?? (() => new Date().toISOString());
 
   const plan = await deps.getPlanById(planId);
-  if (!plan) return { status: 404, json: { ok: false, errors: [`plan ${planId} not found`] } };
+  if (!plan) return reject(404, [`plan ${planId} not found`]);
 
   const epics: EpicWorkflow[] = [];
   for (const epicId of plan.epicIds || []) {
@@ -44,18 +58,20 @@ export async function handleRunAsPipeline3(args: {
     if (epic) epics.push(epic);
   }
   if (epics.length === 0) {
-    return { status: 422, json: { ok: false, errors: ['plan has no epics to convert'] } };
+    return reject(422, [
+      `Plan is still in "${plan.status}" — no epics to convert yet. Let the concept chain finish (it produces the epic/story breakdown), then run this again.`,
+    ]);
   }
 
   const spec = convertPlanToPlanSpec(plan, epics, now());
   if (spec.stories.length === 0) {
-    return { status: 422, json: { ok: false, errors: ['no runnable stories (all skipped?)'] } };
+    return reject(422, ['no runnable stories (all skipped?)']);
   }
 
   const repo = deps.repo ?? { batchPutStoryNodes };
   const result = await ingestPlanSpec(spec, { repo, now });
   if (!result.ok) {
-    return { status: 422, json: { ok: false, errors: result.errors } };
+    return reject(422, result.errors || ['ingest rejected the converted spec']);
   }
   return {
     status: 200,

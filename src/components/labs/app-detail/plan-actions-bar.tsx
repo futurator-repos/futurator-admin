@@ -31,6 +31,9 @@ export function PlanActionsBar({ plan }: { plan: Plan }) {
   const runAsP3 = useMutation<RunAsPipeline3Result>({
     mutationFn: () => api.post<RunAsPipeline3Result>(`/plans/${plan.planId}/run-as-pipeline-3`, {}),
   });
+  // The converter needs the epic/story breakdown, which only exists once the
+  // concept chain has produced epics — gate the trigger on that.
+  const hasEpics = (plan.epicIds?.length ?? 0) > 0;
 
   const abandonButton = (
     <Button
@@ -87,7 +90,8 @@ export function PlanActionsBar({ plan }: { plan: Plan }) {
           <span className="text-sm text-muted-foreground">Abandoned.</span>
         )}
 
-        {/* Pipeline-3 test bridge — available for plans that have epics to convert. */}
+        {/* Pipeline-3 test bridge — needs the epic/story breakdown, which only
+            exists AFTER the concept chain finishes. Gate the button on epics. */}
         {(plan.status === 'concept' ||
           plan.status === 'developing' ||
           plan.status === 'review') && (
@@ -95,23 +99,32 @@ export function PlanActionsBar({ plan }: { plan: Plan }) {
             variant="outline"
             size="sm"
             onClick={() => runAsP3.mutate()}
-            disabled={runAsP3.isPending}
-            title="Convert this plan to a plan_spec and ingest it as StoryNode rows (Pipeline-3)"
+            disabled={runAsP3.isPending || !hasEpics}
+            title={
+              hasEpics
+                ? 'Convert this plan to a plan_spec and ingest it as StoryNode rows (Pipeline-3)'
+                : 'Available once the concept finishes and produces epics/stories'
+            }
           >
             {runAsP3.isPending ? 'Converting…' : 'Run as Pipeline-3'}
           </Button>
         )}
+        {!hasEpics &&
+          (plan.status === 'concept' ||
+            plan.status === 'developing' ||
+            plan.status === 'review') && (
+            <span className="text-xs text-muted-foreground">waiting for concept → epics</span>
+          )}
         {runAsP3.isSuccess && runAsP3.data?.ok && (
           <span className="text-xs text-success">
             Ingested {runAsP3.data.stories ?? 0} stories → plan-spec-graph
           </span>
         )}
-        {runAsP3.isSuccess && runAsP3.data && !runAsP3.data.ok && (
+        {runAsP3.isError && (
           <span className="text-xs text-destructive">
-            Rejected: {(runAsP3.data.errors || []).slice(0, 2).join('; ')}
+            {(runAsP3.error as Error)?.message || 'Failed to convert.'}
           </span>
         )}
-        {runAsP3.isError && <span className="text-xs text-destructive">Failed to convert.</span>}
       </div>
 
       <Dialog open={confirmAbandon} onOpenChange={setConfirmAbandon}>
