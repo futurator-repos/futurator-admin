@@ -1749,8 +1749,10 @@ async function executeStoryDevJob(job) {
       spawn,
       claudeBin: CLAUDE_BIN,
       headSha,
-      // Real bound-AC test executors run in the story's worktree.
+      // Real bound-AC test executors run in the shared plan tree.
       executors: defaultExecutors({ cwd: job.workingDir }),
+      // Per-story commit (development-plan §4.1) — daemonGit runs as the repo owner.
+      git: daemonGit,
       updateStoryState,
       propagateCompletion: propagate,
       logger: { info: (m) => log('info', m), warn: (m) => log('warn', m), error: (m) => log('error', m) },

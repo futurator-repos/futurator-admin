@@ -18,6 +18,7 @@ import { freezeFlagsOntoJob } from '../lib/pipeline-flags.mjs';
 import { buildGateSpawn } from '../lib/gate-settings.mjs';
 import { buildSubagentInjectionArgs } from '../lib/subagent-start.mjs';
 import { handleStoryCompletion } from '../lib/story-completion-handler.mjs';
+import { integrateStory } from '../lib/story-integrate.mjs';
 
 /** Build the single-story dev prompt. PURE. Requires the agent to emit <BINDING>. */
 export function buildStoryDevPrompt(payload) {
@@ -119,11 +120,28 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     return { exitCode, newState: 'failed' };
   }
 
-  // Deterministic completion verdict (bound-AC gate).
+  // ── Integrate (development-plan §4.1): commit THIS story's files to the plan
+  // branch under the commit lock. No branch, no merge. The commit SHA is what
+  // the bound-AC tests bind against (staleness guard). Skipped when no git
+  // helper is injected (unit tests) — then we fall back to deps.headSha.
+  let headSha = deps.headSha || '';
+  if (deps.git) {
+    const integ = await integrateStory({
+      repoDir: projectRoot,
+      touches: payload.touches || [],
+      storyId: payload.storyId,
+      title: payload.title,
+      git: deps.git,
+    });
+    if (integ.committed && integ.sha) headSha = integ.sha;
+    else if (!integ.committed) logger.warn?.(`[story-dev] ${payload.storyId} integrate: ${integ.reason}`);
+  }
+
+  // Deterministic completion verdict (bound-AC gate), bound to the committed SHA.
   const completion = await handleStoryCompletion({
     storyNode: { storyId: payload.storyId, acceptanceCriteria: payload.acceptanceCriteria },
     devOutput: output,
-    headSha: deps.headSha || '',
+    headSha,
     executors: deps.executors || {},
     now: deps.now,
   });
