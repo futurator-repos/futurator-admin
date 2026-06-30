@@ -87,8 +87,11 @@ import {
   JOB_HANDLER_ULTRACODE_BENCH,
   JOB_HANDLER_DUAL_AGENT_COMPARE,
   JOB_HANDLER_SCAN_ENGINE,
+  JOB_HANDLER_STORY_DEV,
   validateScanEngineJob,
 } from './pipelines/job-router.mjs';
+import { runStoryDevJob } from './pipelines/story-dev-pipeline.mjs';
+import { propagateCompletion, dependentsOf } from './lib/story-dispatch-driver.mjs';
 import { runUltracodeBenchJob } from './pipelines/ultracode-bench-job-runner.mjs';
 import { makeCaptureDeps } from './pipelines/ultracode-bench-capture.mjs';
 import { runDualAgentCompare } from './pipelines/dual-agent-compare-runner.mjs';
@@ -1625,36 +1628,133 @@ const FRONTIER_SCAN_INTERVAL_MS = parseInt(process.env.P3_FRONTIER_SCAN_INTERVAL
 const PLAN_SPEC_GRAPH_TABLE = process.env.PLAN_SPEC_GRAPH_TABLE || 'futurator-plan-spec-graph';
 
 // Throttled, inert-by-default. When P3_READY_FRONTIER=shadow|on, scan the
-// plan-spec-graph for ingested plans and log what continuous Kahn dispatch WOULD
-// do for each — the A/B substrate that proves the frontier matches dependency
-// order before any live 'on' flip. Shadow only here; the 'on' enqueue path is a
-// follow-up that mints AgentJobs from claimed StoryNodes.
-async function runFrontierShadowScan() {
+// plan-spec-graph for ingested plans and dispatch each plan's ready frontier:
+// shadow LOGS would-dispatch (the A/B substrate vs legacy waves); on CLAIMS each
+// ready story atomically and mints a `story-dev` AgentJob the poll loop runs.
+async function runFrontierScan() {
   const mode = (process.env.P3_READY_FRONTIER || 'off').toLowerCase();
   if (mode === 'off') return;
   try {
-    const { runFrontierTick } = await import('./lib/story-dispatch-driver.mjs');
+    const [{ runFrontierTick }, { buildStoryDevContract, buildStoryDevJob, mintStoryDevJob }] = await Promise.all([
+      import('./lib/story-dispatch-driver.mjs'),
+      import('./lib/story-job-minter.mjs'),
+    ]);
     // Low-volume table; a scan projecting just planId is cheap at this cadence.
     const { Items } = await ddb.send(
       new ScanCommand({ TableName: PLAN_SPEC_GRAPH_TABLE, ProjectionExpression: 'planId' }),
     );
     const planIds = [...new Set((Items || []).map((i) => i.planId).filter(Boolean))];
+
     for (const planId of planIds) {
+      // In 'on' mode, resolve the plan's working dir + appId once so the minter
+      // can build runnable story-dev jobs.
+      let plan = null;
+      if (mode === 'on') {
+        const r = await ddb.send(new GetCommand({ TableName: PLANS_TABLE, Key: { planId } })).catch(() => null);
+        plan = r?.Item || null;
+      }
+
+      const enqueue = async (storyNode) => {
+        const contract = buildStoryDevContract({ storyNode });
+        const row = buildStoryDevJob({
+          storyNode,
+          planId,
+          appId: storyNode.appId || plan?.appId || '',
+          workingDir: plan?.workingDir || storyNode.workingDir || '',
+          contract,
+          claimToken: storyNode.claimToken,
+          jobId: randomUUID(),
+        });
+        if (!row.workingDir) {
+          log('warn', `[frontier] story ${storyNode.storyId} has no resolvable workingDir — skipping mint`);
+          return;
+        }
+        await mintStoryDevJob({ ddb, table: JOBS_TABLE, row });
+        log('info', `[frontier] minted story-dev job ${row.jobId.slice(0, 8)} for story ${storyNode.storyId}`);
+      };
+
       const res = await runFrontierTick({
         ddb,
         table: PLAN_SPEC_GRAPH_TABLE,
         planId,
-        // Force shadow here regardless of 'on' — live dispatch is a follow-up.
-        p3Flags: { P3_READY_FRONTIER: 'shadow' },
+        p3Flags: { P3_READY_FRONTIER: mode },
+        owner: 'daemon',
+        enqueue: mode === 'on' ? enqueue : undefined,
         log,
       });
-      if (res.frontier.length) {
+      if (mode === 'shadow' && res.frontier.length) {
         log('info', `[frontier-shadow] plan ${planId}: would dispatch ${res.frontier.length} ready stories [${res.frontier.join(', ')}]`);
+      }
+      if (mode === 'on' && res.dispatched.length) {
+        log('info', `[frontier] plan ${planId}: dispatched ${res.dispatched.length} stories [${res.dispatched.join(', ')}]`);
       }
     }
   } catch (err) {
-    log('warn', `[frontier-shadow] scan failed (non-blocking): ${err.message}`);
+    log('warn', `[frontier] scan failed (non-blocking): ${err.message}`);
   }
+}
+
+// Pipeline-3 (development-plan §4) — execute one per-story dev job: run a single
+// Claude scoped to the story's touches under the live gate, then apply the
+// deterministic completion verdict to the StoryNode + unblock its dependents.
+async function executeStoryDevJob(job) {
+  const short = job.jobId.slice(0, 8);
+  const storyId = job.storyNodeRef?.storyId;
+  const planId = job.storyNodeRef?.planId;
+  await updateJobFields(job.jobId, { status: 'RUNNING', lastHeartbeatAt: new Date().toISOString() });
+
+  const updateStoryState = async ({ storyId: sid, state }) => {
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: PLAN_SPEC_GRAPH_TABLE,
+        Key: { storyId: sid },
+        UpdateExpression: 'SET storyState = :s, updatedAt = :n',
+        ExpressionAttributeValues: { ':s': state, ':n': new Date().toISOString() },
+      }));
+    } catch (e) {
+      log('warn', `[${short}] story state update failed (non-blocking): ${e.message}`);
+    }
+  };
+
+  const propagate = async ({ completedStoryId }) => {
+    try {
+      const { Items } = await ddb.send(new QueryCommand({
+        TableName: PLAN_SPEC_GRAPH_TABLE,
+        IndexName: 'planId-cohortBatch-index',
+        KeyConditionExpression: 'planId = :p',
+        ExpressionAttributeValues: { ':p': planId },
+      }));
+      const nodes = (Items || []).map((r) => ({ storyId: r.storyId, depends_on: r.depends_on || [] }));
+      const deps = dependentsOf(nodes, completedStoryId);
+      const { unblocked } = await propagateCompletion({ ddb, table: PLAN_SPEC_GRAPH_TABLE, completedStoryId, dependents: deps });
+      if (unblocked.length) log('info', `[${short}] story ${completedStoryId} done → unblocked [${unblocked.join(', ')}]`);
+    } catch (e) {
+      log('warn', `[${short}] dependency propagation failed (non-blocking): ${e.message}`);
+    }
+  };
+
+  let headSha = '';
+  try {
+    const r = await daemonGit(['rev-parse', 'HEAD'], job.workingDir);
+    if (r.code === 0) headSha = r.stdout.trim();
+  } catch { /* tolerate */ }
+
+  const result = await runStoryDevJob({
+    job,
+    eventLogDir: EVENT_LOG_DIR,
+    deps: {
+      spawn,
+      claudeBin: CLAUDE_BIN,
+      headSha,
+      updateStoryState,
+      propagateCompletion: propagate,
+      logger: { info: (m) => log('info', m), warn: (m) => log('warn', m), error: (m) => log('error', m) },
+    },
+  });
+
+  const ok = result.exitCode === 0 && result.newState !== 'failed';
+  await updateJobFields(job.jobId, { status: ok ? 'COMPLETED' : 'FAILED', updatedAt: new Date().toISOString() });
+  log(ok ? 'info' : 'error', `[${short}] story-dev ${storyId} → ${result.newState || `exit ${result.exitCode}`}`);
 }
 
 async function scanStaleEpicDevJobs() {
@@ -6485,6 +6585,8 @@ async function runJobAsync(job) {
       await executeDualAgentCompareJob(job);
     } else if (handler === JOB_HANDLER_SCAN_ENGINE) {
       await executeScanEngineJob(job);
+    } else if (handler === JOB_HANDLER_STORY_DEV) {
+      await executeStoryDevJob(job);
     } else {
       await executePipeline(job);
     }
@@ -8525,7 +8627,7 @@ async function poll() {
       // is set. Throttled; logs would-dispatch vs legacy waves (development-plan §5.2).
       if (Date.now() - lastFrontierScanAt >= FRONTIER_SCAN_INTERVAL_MS) {
         lastFrontierScanAt = Date.now();
-        runFrontierShadowScan().catch((e) => log('error', `Frontier scan uncaught: ${e.message}`));
+        runFrontierScan().catch((e) => log('error', `Frontier scan uncaught: ${e.message}`));
       }
 
       // Pipeline-3 mid-turn cost-ceiling halt watch (development-plan §5.4). Only

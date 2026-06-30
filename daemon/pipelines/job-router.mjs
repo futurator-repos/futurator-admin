@@ -11,6 +11,9 @@
 
 export const JOB_HANDLER_LEGACY = 'legacy';
 export const JOB_HANDLER_EPIC_DEV = 'epic-dev';
+// Pipeline-3 (development-plan §4) — per-story dev. One Claude per ready StoryNode,
+// minted by ready-frontier, scoped to the story's touches under the live gate.
+export const JOB_HANDLER_STORY_DEV = 'story-dev';
 export const JOB_HANDLER_PARTY_BOOTSTRAP = 'party-bootstrap';
 export const JOB_HANDLER_PARTY_INSPECT = 'party-inspect';
 export const JOB_HANDLER_PARTY_TURN = 'party-turn';
@@ -93,6 +96,7 @@ export function selectHandler(job) {
   if (job.jobType === 'ultracode-bench') return JOB_HANDLER_ULTRACODE_BENCH;
   if (job.jobType === 'dual-agent-compare') return JOB_HANDLER_DUAL_AGENT_COMPARE;
   if (job.jobType === 'scan-engine') return JOB_HANDLER_SCAN_ENGINE;
+  if (job.jobType === 'story-dev') return JOB_HANDLER_STORY_DEV;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
 }
