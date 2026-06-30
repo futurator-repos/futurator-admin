@@ -19,6 +19,7 @@ import { buildGateSpawn } from '../lib/gate-settings.mjs';
 import { buildSubagentInjectionArgs } from '../lib/subagent-start.mjs';
 import { handleStoryCompletion } from '../lib/story-completion-handler.mjs';
 import { integrateStory } from '../lib/story-integrate.mjs';
+import { planBranchName } from '../lib/plan-branch.mjs';
 
 /** Build the single-story dev prompt. PURE. Requires the agent to emit <BINDING>. */
 export function buildStoryDevPrompt(payload) {
@@ -131,6 +132,8 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       touches: payload.touches || [],
       storyId: payload.storyId,
       title: payload.title,
+      // Per-PLAN branch (development-plan §4.1); slug if available, else planId.
+      planBranch: planBranchName(payload.planSlug || payload.planId),
       git: deps.git,
     });
     if (integ.committed && integ.sha) headSha = integ.sha;

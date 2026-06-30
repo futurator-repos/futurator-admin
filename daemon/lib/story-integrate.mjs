@@ -11,6 +11,7 @@
 // helper that runs git as the repo owner.
 
 import { withCommitLock } from './commit-lock.mjs';
+import { ensurePlanBranch } from './plan-branch.mjs';
 
 /** Quote a path list for `git add` (defensive against spaces/globs). */
 function stageArgs(touches) {
@@ -26,14 +27,23 @@ function stageArgs(touches) {
  *   touches: string[],
  *   storyId: string,
  *   title?: string,
+ *   planBranch?: string,   // when set, ensure the tree is on it before committing
  *   git: (args: string[], cwd: string) => Promise<{ code: number, stdout: string, stderr: string }>,
  *   lock?: typeof withCommitLock,
  * }} args
- * @returns {Promise<{ committed: boolean, sha?: string, reason?: string }>}
+ * @returns {Promise<{ committed: boolean, sha?: string, reason?: string, branch?: string }>}
  */
-export async function integrateStory({ repoDir, touches, storyId, title, git, lock = withCommitLock }) {
+export async function integrateStory({ repoDir, touches, storyId, title, planBranch, git, lock = withCommitLock }) {
   if (!git) throw new Error('integrateStory: git helper required');
   return lock(repoDir, async () => {
+    // Put the shared tree on the plan branch (idempotent) before the first commit.
+    let branch;
+    if (planBranch) {
+      const b = await ensurePlanBranch({ repoDir, branch: planBranch, git });
+      branch = b.branch;
+      if (b.reason) return { committed: false, reason: `plan-branch: ${b.reason}` };
+    }
+
     // Stage the story's files.
     const add = await git(['add', ...stageArgs(touches)], repoDir);
     if (add.code !== 0) return { committed: false, reason: `git add failed: ${(add.stderr || '').slice(0, 200)}` };
@@ -41,15 +51,15 @@ export async function integrateStory({ repoDir, touches, storyId, title, git, lo
     // Nothing staged (story wrote nothing, or files unchanged) → no commit.
     const staged = await git(['diff', '--cached', '--name-only'], repoDir);
     if (staged.code === 0 && !staged.stdout.trim()) {
-      return { committed: false, reason: 'nothing to commit' };
+      return { committed: false, reason: 'nothing to commit', branch };
     }
 
     const msg = `story(${storyId}): ${title || 'implement'}\n\nPipeline-3 per-story commit (shared-tree, no merge).`;
     const commit = await git(['commit', '-m', msg], repoDir);
-    if (commit.code !== 0) return { committed: false, reason: `git commit failed: ${(commit.stderr || '').slice(0, 200)}` };
+    if (commit.code !== 0) return { committed: false, reason: `git commit failed: ${(commit.stderr || '').slice(0, 200)}`, branch };
 
     const head = await git(['rev-parse', 'HEAD'], repoDir);
     const sha = head.code === 0 ? head.stdout.trim() : undefined;
-    return { committed: true, sha };
+    return { committed: true, sha, branch };
   });
 }

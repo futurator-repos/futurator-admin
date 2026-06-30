@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { withCommitLock, isLocked, _reset } from '../commit-lock.mjs';
 import { integrateStory } from '../story-integrate.mjs';
+import { planBranchName, ensurePlanBranch, mergePlanToMain } from '../plan-branch.mjs';
 
 describe('commit-lock', () => {
   beforeEach(() => _reset());
@@ -80,5 +81,77 @@ describe('integrateStory', () => {
     const r = await integrateStory({ repoDir: '/r', touches: ['x.ts'], storyId: 's', git });
     expect(r.committed).toBe(false);
     expect(r.reason).toMatch(/git add failed/);
+  });
+
+  it('planBranch → ensures the branch before committing', async () => {
+    const { git, calls } = fakeGit({
+      'rev-parse --abbrev-ref': { code: 0, stdout: 'main\n' },
+      'rev-parse --verify': { code: 1, stdout: '' }, // branch doesn't exist
+      checkout: { code: 0 },
+      add: { code: 0 }, 'diff --cached': { code: 0, stdout: 'x.ts\n' }, commit: { code: 0 },
+      'rev-parse': { code: 0, stdout: 'sha9\n' },
+    });
+    const r = await integrateStory({ repoDir: '/r', touches: ['x.ts'], storyId: 's', planBranch: 'plan/p1', git });
+    expect(r.committed).toBe(true);
+    expect(r.branch).toBe('plan/p1');
+    expect(calls.some((c) => c.startsWith('checkout -b plan/p1'))).toBe(true);
+  });
+});
+
+describe('plan-branch', () => {
+  function fakeGit(script) {
+    const calls = [];
+    const git = async (args) => {
+      calls.push(args.join(' '));
+      const key = args.slice(0, 2).join(' ');
+      const r = script[key] ?? script[args[0]] ?? { code: 0, stdout: '', stderr: '' };
+      return r;
+    };
+    return { git, calls };
+  }
+
+  it('planBranchName sanitizes ids into a valid ref', () => {
+    expect(planBranchName('plan_dino1_mr0')).toBe('plan/plan_dino1_mr0');
+    expect(planBranchName('weird/slug name')).toBe('plan/weird-slug-name');
+  });
+
+  it('ensurePlanBranch: no-op when already on the branch', async () => {
+    const { git, calls } = fakeGit({ 'rev-parse --abbrev-ref': { code: 0, stdout: 'plan/p1\n' } });
+    const r = await ensurePlanBranch({ repoDir: '/r', branch: 'plan/p1', git });
+    expect(r).toEqual({ branch: 'plan/p1', created: false, switched: false });
+    expect(calls.length).toBe(1); // only the HEAD check
+  });
+
+  it('ensurePlanBranch: checks out an existing branch', async () => {
+    const { git, calls } = fakeGit({
+      'rev-parse --abbrev-ref': { code: 0, stdout: 'main\n' },
+      'rev-parse --verify': { code: 0, stdout: 'sha\n' }, // exists
+      checkout: { code: 0 },
+    });
+    const r = await ensurePlanBranch({ repoDir: '/r', branch: 'plan/p1', git });
+    expect(r.switched).toBe(true);
+    expect(r.created).toBe(false);
+    expect(calls.some((c) => c === 'checkout plan/p1')).toBe(true);
+  });
+
+  it('mergePlanToMain: checks out main and merges --no-ff', async () => {
+    const { git, calls } = fakeGit({
+      checkout: { code: 0 }, merge: { code: 0 }, 'rev-parse': { code: 0, stdout: 'mainsha\n' },
+    });
+    const r = await mergePlanToMain({ repoDir: '/r', branch: 'plan/p1', git });
+    expect(r.merged).toBe(true);
+    expect(r.sha).toBe('mainsha');
+    expect(calls.some((c) => c === 'checkout main')).toBe(true);
+    expect(calls.some((c) => c.startsWith('merge --no-ff plan/p1'))).toBe(true);
+  });
+
+  it('mergePlanToMain: conflict → abort, not merged', async () => {
+    const { git, calls } = fakeGit({
+      checkout: { code: 0 }, merge: { code: 1, stdout: 'CONFLICT' },
+    });
+    const r = await mergePlanToMain({ repoDir: '/r', branch: 'plan/p1', git });
+    expect(r.merged).toBe(false);
+    expect(r.reason).toMatch(/conflict/i);
+    expect(calls.some((c) => c === 'merge --abort')).toBe(true);
   });
 });
