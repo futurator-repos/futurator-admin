@@ -11,11 +11,47 @@ import { analyzeTests } from '../../scripts/refactor-recon/tests-detect.mjs';
 const finding = (over) => ({ dimension: 'correctness', severity: 'Medium', issue: '', suggestion: '', evidence: {}, ...over });
 
 describe('computeMaturity', () => {
-  it('returns all nine axes', () => {
+  it('returns all ten axes', () => {
     const { axes } = computeMaturity({});
     expect(axes.map((a) => a.key).sort()).toEqual(
-      ['clutter', 'component-driven', 'eslint-health', 'graph-installed', 'sdd-driven', 'security-compliance', 'structure-sanity', 'tdd-maturity', 'type-safety'].sort(),
+      ['clutter', 'component-driven', 'eslint-health', 'graph-installed', 'infra-declared', 'sdd-driven', 'security-compliance', 'structure-sanity', 'tdd-maturity', 'type-safety'].sort(),
     );
+  });
+
+  it('Infra-as-code axis: scores own-cloud resource declaration coverage (catches click-ops)', () => {
+    // 3 own-cloud resources, only 1 declared in-repo → poor coverage (the click-ops smell)
+    const infra = {
+      summary: { serviceCount: 3, resourceIacFiles: 0 },
+      iac: [],
+      signalQuality: { level: 'medium' },
+      iacCoverage: { provisionable: 3, declared: 1, ratio: 1 / 3, undeclared: ['DynamoDB', 'S3'] },
+    };
+    const a = computeMaturity({ infra }).axes.find((x) => x.key === 'infra-declared');
+    expect(a.measured).toBe(true);
+    expect(a.status).toBe('poor'); // ratio 0.33 < 0.4
+    expect(a.detail).toMatch(/click-ops|undeclared/);
+  });
+
+  it('Infra-as-code axis: full declaration scores good', () => {
+    const infra = {
+      summary: { serviceCount: 2, resourceIacFiles: 1 },
+      iac: [{ provider: 'SST', tier: 'resource' }],
+      signalQuality: { level: 'high' },
+      iacCoverage: { provisionable: 2, declared: 2, ratio: 1, undeclared: [] },
+    };
+    const a = computeMaturity({ infra }).axes.find((x) => x.key === 'infra-declared');
+    expect(a.status).toBe('good');
+  });
+
+  it('Infra-as-code axis: managed/PaaS app declared as code (no own-cloud resources) → satisfied', () => {
+    const infra = {
+      summary: { serviceCount: 1, resourceIacFiles: 0 },
+      iac: [{ provider: 'Prisma', tier: 'migrations' }],
+      signalQuality: { level: 'medium' },
+      iacCoverage: { provisionable: 0, declared: 0, ratio: null, undeclared: [] },
+    };
+    const a = computeMaturity({ infra }).axes.find((x) => x.key === 'infra-declared');
+    expect(a.score).toBe(1);
   });
 
   it('marks tests/eslint/sdd unmeasured when no summary is given; clutter degraded when knip did not run', () => {

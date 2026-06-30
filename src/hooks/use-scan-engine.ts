@@ -81,22 +81,52 @@ export interface Maturity {
   overall: number | null;
 }
 
+/** Potential-cost model (cost SURFACE, not dollars — live rates are not probed). */
+export type CostModel =
+  | 'standing'
+  | 'metered'
+  | 'subscription'
+  | 'connectivity'
+  | 'none'
+  | 'unknown';
 export interface InfraService {
   name: string;
   kind: string;
   cloud: string;
   residency: string | null;
   dataStore: boolean;
-  /** how it was found: iac-declared | platform-config | env-key | sdk-import. */
+  /** how it was found: iac-declared | iac-import | platform-config | env-key | sdk-import. */
   detectedBy: string[];
   confidence: 'high' | 'medium' | 'low';
   declares: string[];
   fileCount: number;
   files: string[];
+  /** billing model of this cost surface (see CostModel). */
+  costModel?: CostModel;
+}
+export interface CostSurface {
+  standing: number;
+  metered: number;
+  subscription: number;
+  connectivity: number;
+}
+export interface IacCoverage {
+  /** own-cloud resources that should be declared in code. */
+  provisionable: number;
+  /** ...of which are actually declared (IaC/CDK/SST/platform-config). */
+  declared: number;
+  /** declared / provisionable (null when nothing is provisionable). */
+  ratio: number | null;
+  /** names of own-cloud resources used in code but declared nowhere (click-ops smell). */
+  undeclared: string[];
 }
 export interface InfraInventory {
   services: InfraService[];
-  iac: { provider: string; file: string }[];
+  iac: {
+    provider: string;
+    file: string;
+    tier?: 'resource' | 'migrations' | 'platform' | 'ci' | 'other';
+  }[];
   external: { provider: string; kind: string; fileCount: number; detectedBy?: string[] }[];
   clouds: string[];
   boundaries: { clientFiles: number; serverFiles: number; externalTouchingFiles: number };
@@ -107,6 +137,8 @@ export interface InfraInventory {
     hasEnvExample: boolean;
     detail: string;
   };
+  costSurface?: CostSurface;
+  iacCoverage?: IacCoverage;
   summary: {
     serviceCount: number;
     dataStoreCount: number;
@@ -114,6 +146,9 @@ export interface InfraInventory {
     externalProcessorCount: number;
     clouds: string[];
     iacProviders: string[];
+    resourceIacFiles?: number;
+    costSurface?: CostSurface;
+    iacCoverage?: IacCoverage;
   };
 }
 

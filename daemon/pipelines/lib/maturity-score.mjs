@@ -28,9 +28,10 @@ const isHotKind = (hotspots, kind) => (hotspots || []).filter((h) => h.kind === 
  *   - graphAvailable: boolean
  *   - knipRan: boolean          whether knip actually produced data (else clutter is degraded)
  *   - sdd:     {specCount}|null  spec-driven signal (their other-session work)
+ *   - infra:   InfraInventory|null  from infra-extract (for the Infra-as-code axis)
  * @returns {{ axes: Array, overall: number|null }}
  */
-export function computeMaturity({ findings = [], hotspots = [], tests = null, eslint = null, graphAvailable = false, knipRan = false, sdd = null } = {}) {
+export function computeMaturity({ findings = [], hotspots = [], tests = null, eslint = null, graphAvailable = false, knipRan = false, sdd = null, infra = null } = {}) {
   const axes = [];
   const add = (key, label, score, detail, measured = true) =>
     axes.push({ key, label, score, status: statusFor(measured ? score : null), detail, measured });
@@ -93,6 +94,39 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     add('sdd-driven', 'SDD-driven (specs)', scoreFromCount(Math.max(0, 8 - sdd.specCount), 8), `${sdd.specCount} spec files`);
   } else {
     add('sdd-driven', 'SDD-driven (specs)', null, 'add SDD detector (your spec work)', false);
+  }
+
+  // 10. Infra-as-code (declared) — the cost-center precondition + agent-tractability
+  //     ("Futurator-ready"). Scores the PROPERTY (infra declared in version-controlled
+  //     code), NOT the artifact: true-IaC/CDK/SST/Pulumi, schema migrations, or
+  //     platform-config all satisfy it. The smell it catches: own-cloud resources USED
+  //     in code (SDK/env) but declared NOWHERE in the repo — click-ops, invisible to
+  //     cost estimation / audit / reproduction. (Caveat in the detail: undeclared
+  //     resources might live in a sibling infra repo a single-app upload can't see.)
+  if (infra && infra.summary) {
+    const cov = infra.iacCoverage || infra.summary.iacCoverage;
+    const anyResourceIac = (infra.summary.resourceIacFiles || 0) > 0 || (infra.iac || []).some((i) => i.tier === 'resource' || i.tier === 'migrations');
+    if (cov && cov.provisionable > 0) {
+      // ratio of own-cloud resources declared in-repo vs only inferred-from-usage
+      const undeclared = cov.provisionable - cov.declared;
+      add('infra-declared', 'Infra-as-code (declared)', cov.ratio,
+        `${cov.declared}/${cov.provisionable} cloud resources declared in-repo` +
+        (undeclared > 0 ? ` · ${undeclared} used-but-undeclared (${(cov.undeclared || []).slice(0, 4).join(', ')}${undeclared > 4 ? '…' : ''}) — click-ops risk or sibling infra repo` : ' — fully declared'));
+    } else if (anyResourceIac) {
+      // managed/PaaS or self-hosted app whose infra IS declared as code, nothing
+      // un-declarable left → property satisfied via a (possibly lighter) mechanism.
+      add('infra-declared', 'Infra-as-code (declared)', 1, 'infra declared as code (IaC / migrations / platform config)');
+    } else if (infra.summary.serviceCount === 0) {
+      add('infra-declared', 'Infra-as-code (declared)', null, 'no provisionable infra detected — nothing to declare', false);
+    } else {
+      // services used but none own-cloud-provisionable & no resource IaC: pure 3rd-party
+      // SaaS, or platform-only. Lean on the signal level rather than a hard penalty.
+      const lvl = infra.signalQuality?.level;
+      add('infra-declared', 'Infra-as-code (declared)', lvl === 'high' ? 1 : lvl === 'medium' ? 0.5 : 0.25,
+        infra.signalQuality?.detail || 'infra not declared in version-controlled code');
+    }
+  } else {
+    add('infra-declared', 'Infra-as-code (declared)', null, 'add infra detector', false);
   }
 
   const measured = axes.filter((a) => a.measured && typeof a.score === 'number');

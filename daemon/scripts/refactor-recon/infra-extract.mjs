@@ -71,6 +71,10 @@ export function detectCloudSdk(spec) {
 export function configFileType(rel) {
   const base = rel.split('/').pop();
   if (/(^|\/)schema\.prisma$/.test(rel)) return 'prisma';
+  if (/(^|\/)sst\.config\.(ts|mjs|js)$/.test(rel)) return 'sst';
+  if (/(^|\/)cdk\.json$/.test(rel)) return 'cdk';
+  if (/(^|\/)cdktf\.json$/.test(rel)) return 'cdktf';
+  if (/(^|\/)drizzle\.config\.(ts|mjs|js)$/.test(rel)) return 'drizzle';
   if (/\.tf$|\.tf\.json$/.test(rel)) return 'terraform';
   if (/(^|\/)serverless\.ya?ml$/.test(rel)) return 'serverless';
   if (/(^|\/)docker-compose\.ya?ml$/.test(rel)) return 'docker-compose';
@@ -128,6 +132,48 @@ const ENV_KEY = [
 
 const CONF_RANK = { high: 3, medium: 2, low: 1 };
 
+// ── IaC tooling imported in CODE (aws-cdk-lib, sst, pulumi, cdktf) — this IS infra
+// declared in version-controlled code, so it counts toward the IaC property. (Without
+// this they fall through to classifyImport and get mislabeled 3rd-party/inferred.) ──
+const IAC_IMPORT = [
+  { re: /^aws-cdk-lib(\/|$)|^@aws-cdk\//, name: 'AWS CDK', cloud: 'AWS' },
+  { re: /^cdktf(\/|$)|^@cdktf\//, name: 'Terraform CDK', cloud: 'multi' },
+  { re: /^sst(\/|$)|^@serverless-stack\//, name: 'SST', cloud: 'AWS' },
+  { re: /^@pulumi\//, name: 'Pulumi', cloud: 'multi' },
+];
+function detectIacImport(spec) {
+  for (const s of IAC_IMPORT) if (s.re.test(spec)) return { name: s.name, cloud: s.cloud };
+  return null;
+}
+
+// ── Cost surface (Inform-phase): every detected service is a billable RELATIONSHIP
+// ("cost surface opened"), even at $0. Classify the cost MODEL so the report can list
+// potential cost sources without claiming dollars (live rates are not probed):
+//   standing    — bills even idle (RDS, Fargate/ECS, NAT, ALB, EC2)
+//   metered     — pay-per-use (S3, on-demand DynamoDB, Lambda, CloudFront, SES, tokens)
+//   subscription— SaaS tier (Vercel, Supabase, Auth0, email providers)
+//   connectivity— a 3rd-party API you call, billed by THEM (OpenAI, Anthropic, Stripe)
+//   none        — not itself billable (IaC tooling, secrets managers)
+const STANDING_RE = /\bRDS\b|Aurora|Cosmos|Cloud SQL|App Service|Service Bus|ALB|ELB|NAT|EC2|Fargate|ECS|\(self-hosted\)/i;
+export function costModelFor(s) {
+  if (s.kind === 'iac' || s.kind === 'secrets') return 'none';
+  const ownCloud = s.residency === 'in-account' || ['AWS', 'GCP', 'Azure', 'self-hosted'].includes(s.cloud);
+  if (ownCloud) return STANDING_RE.test(s.name) ? 'standing' : 'metered';
+  if (s.cloud === 'platform' || s.cloud === 'Supabase' || s.cloud === 'managed') return 'subscription';
+  if (s.cloud === '3rd-party') return s.kind === 'ai' || s.kind === 'payment' ? 'connectivity' : 'subscription';
+  return 'unknown';
+}
+
+// IaC strength tier per config kind: resource-declaring ≫ schema/migrations >
+// platform-config > deploy-automation. The maturity axis weights these.
+export function iacTier(ctype) {
+  if (['terraform', 'sst', 'pulumi', 'cloudformation', 'serverless', 'cdk', 'cdktf'].includes(ctype)) return 'resource';
+  if (['prisma', 'drizzle'].includes(ctype)) return 'migrations';
+  if (ctype && ctype.startsWith('platform:')) return 'platform';
+  if (ctype === 'gh-workflow') return 'ci';
+  return 'other';
+}
+
 /** Parse a config/IaC file's content into declared detections (high confidence). */
 export function parseConfig(type, content, rel) {
   const out = [];
@@ -164,6 +210,29 @@ export function parseConfig(type, content, rel) {
     }
   } else if (type === 'pulumi' || type === 'cloudformation') {
     push({ name: type === 'pulumi' ? 'Pulumi' : 'CloudFormation/SAM', kind: 'iac', cloud: 'unknown', residency: 'in-account' });
+  } else if (type === 'sst') {
+    // SST v3 (sst.aws.*) + v2 (new Bucket/Table/Function from sst/constructs).
+    push({ name: 'SST', kind: 'iac', cloud: 'AWS', residency: 'in-account' });
+    const seen = new Set();
+    const addRes = (name, kind) => { const k = `AWS:${name}`; if (seen.has(k)) return; seen.add(k); push({ name, kind, cloud: 'AWS', residency: 'in-account', dataStore: kind === 'database' || kind === 'storage' }); };
+    const SST_RES = [
+      [/\bsst\.aws\.Function\b|\bnew\s+Function\b/, 'Lambda', 'compute'],
+      [/\bsst\.aws\.(Dynamo|Table)\b|\bnew\s+Table\b/, 'DynamoDB', 'database'],
+      [/\bsst\.aws\.Bucket\b|\bnew\s+Bucket\b/, 'S3', 'storage'],
+      [/\bsst\.aws\.Postgres\b|\bsst\.aws\.Aurora\b|\bnew\s+RDS\b/, 'RDS/Aurora', 'database'],
+      [/\bsst\.aws\.Queue\b|\bnew\s+Queue\b/, 'SQS', 'messaging'],
+      [/\bsst\.aws\.Topic\b|\bnew\s+Topic\b/, 'SNS', 'messaging'],
+      [/\bsst\.aws\.Cron\b|\bnew\s+Cron\b/, 'EventBridge (cron)', 'messaging'],
+      [/\bsst\.aws\.Cdn\b|\bnew\s+(StaticSite|NextjsSite|SvelteKitSite|AstroSite)\b|\bsst\.aws\.(Nextjs|StaticSite|SvelteKit|Astro|React)\b/, 'CloudFront', 'network'],
+      [/\bsst\.aws\.ApiGatewayV2\b|\bsst\.aws\.Api\b|\bnew\s+Api\b/, 'API Gateway', 'network'],
+    ];
+    for (const [re, name, kind] of SST_RES) if (re.test(content)) addRes(name, kind);
+  } else if (type === 'cdk') {
+    push({ name: 'AWS CDK', kind: 'iac', cloud: 'AWS', residency: 'in-account' });
+  } else if (type === 'cdktf') {
+    push({ name: 'Terraform CDK', kind: 'iac', cloud: 'multi', residency: 'in-account' });
+  } else if (type === 'drizzle') {
+    push({ name: 'Drizzle (migrations)', kind: 'database', cloud: 'managed', residency: 'varies', dataStore: true, declares: ['drizzle.config'] });
   } else if (type && type.startsWith('platform:')) {
     push({ name: type.slice('platform:'.length), kind: 'platform', cloud: 'platform', residency: 'varies', detectedBy: 'platform-config' });
   } else if (type === 'gh-workflow') {
@@ -224,12 +293,16 @@ export function buildInfraInventory(files = []) {
       if (ctype === 'env-example') hasEnvExample = true;
       const dets = parseConfig(ctype, f.content, f.rel);
       if (dets.length) { for (const d of dets) record(d, f.rel); if (d_isIacKind(dets)) iacDeclared = true; }
-      // record the raw IaC file presence
-      if (ctype !== 'env-example') iac.push({ provider: prettyConfigType(ctype), file: f.rel });
+      // record the raw IaC file presence, tiered by strength.
+      const tier = iacTier(ctype);
+      if (ctype !== 'env-example') iac.push({ provider: prettyConfigType(ctype), file: f.rel, tier });
+      if (tier === 'resource' || tier === 'migrations') iacDeclared = true;
       continue;
     }
-    // code file → SDK/import inference
+    // code file → IaC tooling import (declared infra) → SDK → import inference
     for (const spec of f.specifiers || []) {
+      const ic = detectIacImport(spec);
+      if (ic) { record({ name: ic.name, kind: 'iac', cloud: ic.cloud, residency: 'in-account', detectedBy: 'iac-import', confidence: 'high' }, f.rel); iacDeclared = true; continue; }
       const c = detectCloudSdk(spec);
       if (c) { record({ ...c, detectedBy: 'sdk-import', confidence: 'medium' }, f.rel); continue; }
       const d = classifyImport(spec);
@@ -239,12 +312,33 @@ export function buildInfraInventory(files = []) {
   }
 
   const services = [...merged.values()]
-    .map((e) => ({ name: e.name, kind: e.kind, cloud: e.cloud, residency: e.residency, dataStore: e.dataStore, detectedBy: [...e.detectedBy], confidence: e.confidence, declares: [...e.declares].slice(0, 6), fileCount: e.files.size, files: [...e.files].sort().slice(0, 8) }))
+    .map((e) => {
+      const s = { name: e.name, kind: e.kind, cloud: e.cloud, residency: e.residency, dataStore: e.dataStore, detectedBy: [...e.detectedBy], confidence: e.confidence, declares: [...e.declares].slice(0, 6), fileCount: e.files.size, files: [...e.files].sort().slice(0, 8) };
+      return { ...s, costModel: costModelFor(s) };
+    })
     .sort((a, b) => CONF_RANK[b.confidence] - CONF_RANK[a.confidence] || b.fileCount - a.fileCount);
 
   const external = services.filter((s) => s.residency === 'external').map((s) => ({ provider: s.name, kind: s.kind, fileCount: s.fileCount, detectedBy: s.detectedBy }));
   const clouds = [...new Set(services.map((s) => s.cloud))].filter((c) => c && c !== 'unknown');
   const dataStoreCount = services.filter((s) => s.dataStore).length;
+
+  // ── Cost surface: potential cost sources grouped by model (no dollars — see above) ──
+  const costSurface = { standing: 0, metered: 0, subscription: 0, connectivity: 0 };
+  for (const s of services) if (costSurface[s.costModel] != null) costSurface[s.costModel]++;
+
+  // ── IaC coverage: of the OWN-CLOUD resources you provision (standing/metered), how
+  // many are DECLARED in code vs only inferred-from-usage? Low ratio = the click-ops
+  // smell (resources used but declared nowhere — invisible to cost/audit/repro). ──
+  const DECLARED_BY = new Set(['iac-declared', 'iac-import', 'platform-config']);
+  const provisionable = services.filter((s) => (s.costModel === 'standing' || s.costModel === 'metered') && ['AWS', 'GCP', 'Azure', 'self-hosted'].includes(s.cloud));
+  const declaredProvisionable = provisionable.filter((s) => s.detectedBy.some((d) => DECLARED_BY.has(d)));
+  const iacCoverage = {
+    provisionable: provisionable.length,
+    declared: declaredProvisionable.length,
+    ratio: provisionable.length ? declaredProvisionable.length / provisionable.length : null,
+    undeclared: provisionable.filter((s) => !s.detectedBy.some((d) => DECLARED_BY.has(d))).map((s) => s.name).slice(0, 12),
+  };
+  const resourceIacFiles = iac.filter((i) => i.tier === 'resource' || i.tier === 'migrations').length;
 
   // infra signal quality — the "how well does this codebase express its infra" rating.
   const iacFiles = iac.length;
@@ -269,6 +363,8 @@ export function buildInfraInventory(files = []) {
     clouds,
     boundaries: { clientFiles, serverFiles, externalTouchingFiles: externalTouchedBy.size },
     signalQuality,
+    costSurface,
+    iacCoverage,
     summary: {
       serviceCount: services.length,
       dataStoreCount,
@@ -276,6 +372,9 @@ export function buildInfraInventory(files = []) {
       externalProcessorCount: external.length,
       clouds,
       iacProviders: [...new Set(iac.map((i) => i.provider))],
+      resourceIacFiles,
+      costSurface,
+      iacCoverage,
     },
   };
 }
@@ -283,12 +382,12 @@ export function buildInfraInventory(files = []) {
 function d_isIacKind(dets) { return dets.some((d) => d.kind === 'iac'); }
 function prettyConfigType(t) {
   if (t.startsWith('platform:')) return t.slice('platform:'.length);
-  return { prisma: 'Prisma', terraform: 'Terraform', serverless: 'Serverless', 'docker-compose': 'Docker Compose', pulumi: 'Pulumi', cloudformation: 'CloudFormation', 'gh-workflow': 'CI workflow' }[t] || t;
+  return { prisma: 'Prisma', terraform: 'Terraform', serverless: 'Serverless', 'docker-compose': 'Docker Compose', pulumi: 'Pulumi', cloudformation: 'CloudFormation', sst: 'SST', cdk: 'AWS CDK', cdktf: 'Terraform CDK', drizzle: 'Drizzle', 'gh-workflow': 'CI workflow' }[t] || t;
 }
 function mapPrivacyKind(k) { return k === 'thirdParty' ? 'third-party' : k; }
 function cloudForProvider(d) {
   if (d.kind === 'db') return d.provider === 'DynamoDB' ? 'AWS' : d.provider === 'Supabase' ? 'Supabase' : 'managed';
-  if (d.kind === 'ai') return '3rd-party';
+  if (d.kind === 'infra') return 'unknown'; // IaC tool not matched by IAC_IMPORT (e.g. Serverless Framework import)
   return '3rd-party';
 }
 

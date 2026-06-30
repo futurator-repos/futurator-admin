@@ -102,3 +102,61 @@ describe('buildInfraInventory — operator scenarios (none AWS)', () => {
     expect(inv.signalQuality.level).toBe('low');
   });
 });
+
+describe('IaC detection — SST, CDK, cost surface + coverage', () => {
+  it('detects SST resources from sst.config.ts → high signal, AWS resources declared', () => {
+    expect(configFileType('sst.config.ts')).toBe('sst');
+    const inv = buildInfraInventory([
+      { rel: 'sst.config.ts', content: 'export default { app(){return{name:"x"}}, async run(){ const t = new sst.aws.Dynamo("T"); const b = new sst.aws.Bucket("B"); new sst.aws.Function("F",{handler:"h"}); } }' },
+    ]);
+    expect(inv.signalQuality.level).toBe('high');
+    expect(svc(inv, 'DynamoDB')).toBeTruthy();
+    expect(svc(inv, 'S3')).toBeTruthy();
+    expect(svc(inv, 'Lambda')).toBeTruthy();
+    expect(inv.iac.some((i) => i.provider === 'SST' && i.tier === 'resource')).toBe(true);
+  });
+
+  it('reclassifies aws-cdk-lib import as DECLARED IaC (not 3rd-party inferred)', () => {
+    const inv = buildInfraInventory([{ rel: 'infra/stack.ts', specifiers: ['aws-cdk-lib', 'aws-cdk-lib/aws-s3'] }]);
+    const cdk = svc(inv, 'AWS CDK');
+    expect(cdk).toBeTruthy();
+    expect(cdk.cloud).toBe('AWS');
+    expect(cdk.detectedBy).toContain('iac-import');
+    expect(cdk.kind).toBe('iac');
+    expect(inv.signalQuality.level).toBe('high'); // IaC declared in code
+  });
+
+  it('cost surface: own-cloud resources are metered/standing; 3rd-party AI is connectivity', () => {
+    const inv = buildInfraInventory([
+      { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] }, // metered
+      { rel: 'src/rds.ts', specifiers: ['@aws-sdk/client-rds'] }, // standing
+      { rel: 'src/ai.ts', specifiers: ['openai'] }, // connectivity
+    ]);
+    expect(svc(inv, 'DynamoDB').costModel).toBe('metered');
+    expect(svc(inv, 'RDS').costModel).toBe('standing');
+    expect(svc(inv, 'OpenAI').costModel).toBe('connectivity');
+    expect(inv.costSurface.metered).toBeGreaterThanOrEqual(1);
+    expect(inv.costSurface.standing).toBeGreaterThanOrEqual(1);
+    expect(inv.costSurface.connectivity).toBeGreaterThanOrEqual(1);
+  });
+
+  it('iacCoverage flags own-cloud resources used-but-undeclared (click-ops smell)', () => {
+    // DynamoDB + S3 used via SDK, nothing declares them → coverage 0
+    const inv = buildInfraInventory([
+      { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb', '@aws-sdk/client-s3'] },
+    ]);
+    expect(inv.iacCoverage.provisionable).toBe(2);
+    expect(inv.iacCoverage.declared).toBe(0);
+    expect(inv.iacCoverage.ratio).toBe(0);
+    expect(inv.iacCoverage.undeclared).toEqual(expect.arrayContaining(['DynamoDB', 'S3']));
+  });
+
+  it('iacCoverage = 1 when SST declares the same resources the SDK uses', () => {
+    const inv = buildInfraInventory([
+      { rel: 'sst.config.ts', content: 'new sst.aws.Dynamo("T"); new sst.aws.Bucket("B");' },
+      { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb', '@aws-sdk/client-s3'] },
+    ]);
+    expect(inv.iacCoverage.declared).toBe(inv.iacCoverage.provisionable);
+    expect(inv.iacCoverage.ratio).toBe(1);
+  });
+});

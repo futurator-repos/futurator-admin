@@ -75,6 +75,102 @@ function InfraCloudGroup({ cloud, services }: { cloud: string; services: InfraSe
   );
 }
 
+const IAC_TIER_LABEL: Record<string, string> = {
+  resource: 'resource-declaring IaC',
+  migrations: 'schema / migrations',
+  platform: 'platform config',
+  ci: 'deploy automation (CI)',
+  other: 'config',
+};
+const IAC_TIER_RANK = (t?: string) =>
+  ({ resource: 4, migrations: 3, platform: 2, ci: 1, other: 0 })[t || 'other'] ?? 0;
+
+const COST_MODEL_META: Record<string, { label: string; note: string; color: string }> = {
+  standing: {
+    label: 'Standing',
+    note: 'bills even idle (RDS, Fargate, NAT, ALB, EC2)',
+    color: 'var(--destructive, #ef4444)',
+  },
+  metered: {
+    label: 'Metered',
+    note: 'pay-per-use (S3, DynamoDB, Lambda, SES, tokens)',
+    color: 'var(--warning, #f59e0b)',
+  },
+  subscription: {
+    label: 'Subscription',
+    note: 'SaaS tier (Vercel, Supabase, Auth0)',
+    color: 'var(--accent-blue, #3b82f6)',
+  },
+  connectivity: {
+    label: '3rd-party API',
+    note: 'you call it, they meter it (OpenAI, Anthropic, Stripe)',
+    color: 'var(--warning, #f59e0b)',
+  },
+};
+
+/** Cost surface — every detected service is a billable RELATIONSHIP ($0 until used).
+ *  The FinOps "Inform" view: enumerate cost sources by model so they're visible
+ *  before the first invoice. Dollars are NOT computed (live rates not probed). */
+function CostSurfacePanel({ infra }: { infra: InfraInventory }) {
+  const groups = useMemo(() => {
+    const m: Record<string, InfraService[]> = {};
+    for (const s of infra.services) {
+      const cm = s.costModel || 'unknown';
+      if (cm === 'none' || cm === 'unknown') continue;
+      (m[cm] ||= []).push(s);
+    }
+    return m;
+  }, [infra.services]);
+  const order = ['standing', 'metered', 'subscription', 'connectivity'].filter(
+    (k) => groups[k]?.length,
+  );
+  if (!order.length) return null;
+  return (
+    <div
+      data-testid="cost-surface"
+      style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 10 }}
+    >
+      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>
+        Potential cost sources{' '}
+        <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
+          — billable relationships ($0 until used; live rates not probed)
+        </span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+        {order.map((cm) => {
+          const meta = COST_MODEL_META[cm];
+          return (
+            <div key={cm}>
+              <div style={{ fontSize: 11, color: meta.color, fontWeight: 600 }}>
+                {meta.label}{' '}
+                <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>· {meta.note}</span>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 3 }}>
+                {groups[cm].map((s, i) => (
+                  <span
+                    key={i}
+                    title={`${s.kind}${s.cloud ? ` · ${s.cloud}` : ''} · detected by ${s.detectedBy.join(', ')}`}
+                    style={{
+                      fontSize: 11,
+                      color: 'var(--text-dim)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 8,
+                      padding: '2px 8px',
+                    }}
+                  >
+                    <strong style={{ color: 'var(--foreground)' }}>{s.name}</strong>
+                    {s.cloud && s.cloud !== '3rd-party' ? <span> · {s.cloud}</span> : null}
+                  </span>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianceCount: number }) {
   const byCloud = useMemo(() => {
     const m: Record<string, InfraService[]> = {};
@@ -83,6 +179,7 @@ function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianc
   }, [infra.services]);
   const cloudOrder = Object.keys(byCloud).sort((a, b) => byCloud[b].length - byCloud[a].length);
   const sig = infra.signalQuality;
+  const cov = infra.iacCoverage || infra.summary.iacCoverage;
   const sigColor =
     sig.level === 'high'
       ? 'var(--success, #22c55e)'
@@ -107,6 +204,36 @@ function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianc
         <strong style={{ color: sigColor }}>Infra signal: {sig.level.toUpperCase()}</strong>
         <span style={{ color: 'var(--text-dim)' }}>{sig.detail}</span>
       </div>
+
+      {/* IaC coverage — of the cloud resources this app provisions, how many are
+          declared in code? (cost-center precondition + agent-tractability). */}
+      {cov && cov.provisionable > 0 && (
+        <div
+          data-testid="iac-coverage"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 11.5,
+            border: `1px solid ${cov.ratio === 1 ? 'color-mix(in srgb, var(--success) 45%, var(--border))' : 'color-mix(in srgb, var(--warning) 45%, var(--border))'}`,
+            borderRadius: 8,
+            padding: '6px 10px',
+          }}
+        >
+          <strong
+            style={{
+              color: cov.ratio === 1 ? 'var(--success, #22c55e)' : 'var(--warning, #f59e0b)',
+            }}
+          >
+            Infra-as-code: {cov.declared}/{cov.provisionable} declared
+          </strong>
+          <span style={{ color: 'var(--text-dim)' }}>
+            {cov.ratio === 1
+              ? 'every cloud resource is declared in code'
+              : `${cov.provisionable - cov.declared} used but not declared in this repo (${cov.undeclared.slice(0, 4).join(', ')}${cov.undeclared.length > 4 ? '…' : ''}) — click-ops risk, or declared in a sibling infra repo`}
+          </span>
+        </div>
+      )}
 
       <div
         style={{
@@ -167,6 +294,8 @@ function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianc
         </div>
       )}
 
+      <CostSurfacePanel infra={infra} />
+
       {cloudOrder.map((cloud) => (
         <InfraCloudGroup key={cloud} cloud={cloud} services={byCloud[cloud]} />
       ))}
@@ -184,22 +313,25 @@ function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianc
             IaC / config files (declared)
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {infra.iac.map((i, idx) => (
-              <span
-                key={idx}
-                title={i.file}
-                style={{
-                  fontSize: 11,
-                  color: 'var(--text-dim)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 8,
-                  padding: '3px 9px',
-                  fontFamily: 'var(--font-mono)',
-                }}
-              >
-                {i.provider}
-              </span>
-            ))}
+            {[...infra.iac]
+              .sort((a, b) => IAC_TIER_RANK(b.tier) - IAC_TIER_RANK(a.tier))
+              .map((i, idx) => (
+                <span
+                  key={idx}
+                  title={`${i.file}${i.tier ? ` · ${IAC_TIER_LABEL[i.tier] || i.tier}` : ''}`}
+                  style={{
+                    fontSize: 11,
+                    color: 'var(--text-dim)',
+                    border: `1px solid ${i.tier === 'resource' || i.tier === 'migrations' ? 'color-mix(in srgb, var(--success) 40%, var(--border))' : 'var(--border)'}`,
+                    borderRadius: 8,
+                    padding: '3px 9px',
+                    fontFamily: 'var(--font-mono)',
+                  }}
+                >
+                  {i.provider}
+                  {i.tier === 'ci' ? <span style={{ color: 'var(--text-dim)' }}> · ci</span> : null}
+                </span>
+              ))}
           </div>
         </div>
       )}

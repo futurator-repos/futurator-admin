@@ -275,6 +275,10 @@ export async function runScanEngine(job, deps) {
     findings = dedupe([...detFindings, ...llmFindings]);
   }
 
+  // Infra inventory — targeted+reuse may not re-read infra.json, so fall back to the
+  // prior scan's inventory. Used by both the maturity axis and the return.
+  const infra = art.infra || (effectiveTargeted ? priorScan?.infra : null) || null;
+
   // Maturity scorecard — the high-level RAG overview (deterministic, ~0 LLM).
   const maturity = computeMaturity({
     findings,
@@ -284,6 +288,7 @@ export async function runScanEngine(job, deps) {
     graphAvailable: anchored.size > 0,
     knipRan: !!art.knipRan,
     sdd: art.sdd || null,
+    infra,
   });
   pushEvent('scan.maturity', { overall: maturity.overall });
 
@@ -325,8 +330,7 @@ export async function runScanEngine(job, deps) {
     reportMarkdown,
     lowConfidence,
     maturity,
-    // targeted+reuse may not re-read infra.json — fall back to the prior scan's inventory.
-    infra: art.infra || (effectiveTargeted ? priorScan?.infra : null) || null,
+    infra,
     counts: {
       total: findings.length,
       // derived from the MERGED set so targeted re-runs report accurate totals.
