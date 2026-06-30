@@ -149,6 +149,20 @@ export function useRunScanEngine(appId: string | null) {
 }
 
 /**
+ * Cancel a running (or pending) scan. The daemon SIGKILLs the scan's child
+ * processes (npm/graphify/knip/eslint/swarm) and flips the job terminal.
+ */
+export function useCancelScan(appId: string | null) {
+  return useMutation({
+    mutationFn: (jobId: string) =>
+      api.post<{ ok: boolean; jobId: string; status: string }>(
+        `/party/projects/${appId}/scan-engine/${jobId}/cancel`,
+        {},
+      ),
+  });
+}
+
+/**
  * Fetch the full scan report from S3 (uploaded by the daemon, keyed by appId).
  * Enabled whenever appId is set — so a PRIOR scan PERSISTS across reloads /
  * fresh sessions WITHOUT needing the producing job in the URL (scans are

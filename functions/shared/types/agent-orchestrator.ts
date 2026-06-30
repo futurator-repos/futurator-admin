@@ -357,6 +357,9 @@ export interface AgentJob {
   waveResults?: Record<string, WaveResult>;
   resumeFromWaveResults?: Record<string, WaveResult>;
   lastHeartbeatAt?: string;
+  /** Operator-requested abort: the daemon's poller SIGKILLs the job's children and
+   *  flips the job terminal. Set by the abort/cancel endpoints. */
+  abortRequested?: boolean;
 
   // Party module (Epic 15) — alternate execution model dispatched by the
   // daemon's job-router via `jobType`. Each payload is optional and mutually

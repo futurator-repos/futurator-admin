@@ -214,6 +214,10 @@ export async function runScanEngine(job, deps) {
   async function runSwarm(tasks) {
     const perAgent = [];
     await pool(tasks, concurrency, async (t, i) => {
+      // Operator cancelled — stop spawning NEW agents (don't burn tokens re-running
+      // tasks that will be killed anyway). In-flight children are SIGKILLed by the
+      // daemon's abort poller.
+      if (deps.shouldAbort && deps.shouldAbort()) { perAgent[i] = []; return; }
       pushEvent('scan.agent.start', { role: t.role, label: t.label });
       const text = await deps.spawnAgent({ role: t.role, prompt: t.prompt });
       const parsed = text && !text.__error ? parseAndValidate(text, t.ctx) : [];
@@ -294,7 +298,9 @@ export async function runScanEngine(job, deps) {
   // (f) aggregator report (markdown). LLM only on a full scan; deterministic AND
   // targeted modes regenerate it deterministically over the (merged) finding set so
   // a partial re-run never costs a writer agent.
-  const cheapReport = mode === 'deterministic' || effectiveTargeted;
+  // deterministic + targeted always skip the LLM writer; a cancelled run does too
+  // (the result is being thrown away — don't spend a writer agent on it).
+  const cheapReport = mode === 'deterministic' || effectiveTargeted || !!(deps.shouldAbort && deps.shouldAbort());
   let reportMarkdown = '';
   if (cheapReport) {
     reportMarkdown = deterministicReport(projectName, findings, plan.phases, maturity, effectiveTargeted ? 'targeted' : 'deterministic');

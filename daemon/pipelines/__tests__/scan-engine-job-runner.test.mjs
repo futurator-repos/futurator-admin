@@ -164,6 +164,17 @@ describe('runScanEngine', () => {
     expect(r.findings.map((f) => f.location)).toContain('src/api/route.ts:12');
   });
 
+  it('shouldAbort short-circuits the swarm — no agents spawn once cancelled', async () => {
+    let agentCalls = 0;
+    const deps = baseDeps({
+      shouldAbort: () => true, // operator cancelled before the swarm started
+      spawnAgent: async () => { agentCalls++; return '---FINDINGS---{"findings":[]}---END_FINDINGS---'; },
+    });
+    const r = await runScanEngine(job, deps);
+    expect(r.ok).toBe(true);
+    expect(agentCalls).toBe(0); // no LLM tokens burned on a cancelled scan
+  });
+
   it("deterministic mode skips the swarm (no LLM agents) but still maps + plans", async () => {
     let agentCalls = 0;
     const deps = baseDeps({ spawnAgent: async () => { agentCalls++; return '---FINDINGS---{"findings":[]}---END_FINDINGS---'; } });

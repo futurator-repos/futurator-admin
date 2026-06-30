@@ -7519,6 +7519,25 @@ async function executeScanEngineJob(job) {
 
   await updateJobFields(jobId, { status: 'RUNNING', phase: 'scan-engine', lastHeartbeatAt: new Date().toISOString() });
 
+  // ── Operator cancel ──────────────────────────────────────────────────────
+  // A scan is a long chain of child processes (npm install, graphify, knip,
+  // eslint, the swarm). Poll the job row for `abortRequested`; when set, SIGKILL
+  // this job's tracked children so the in-flight stage dies promptly. The current
+  // stage then resolves with a non-zero code / throws, and we flip the job terminal
+  // with a clean "cancelled" message (see the aborted checks below).
+  let aborted = false;
+  const abortPoll = setInterval(async () => {
+    try {
+      const row = await ddb.send(new GetCommand({ TableName: JOBS_TABLE, Key: { jobId } }));
+      if (row?.Item?.abortRequested) {
+        aborted = true;
+        clearInterval(abortPoll);
+        const n = signalChildrenForJob(jobId, 'SIGKILL');
+        log('warn', `[${short}] scan-engine cancel requested — SIGKILLed ${n} child(ren)`);
+      }
+    } catch { /* transient DDB read error — try again next tick */ }
+  }, 3000);
+
   const reconPath = new URL('./scripts/refactor-recon/recon.mjs', import.meta.url).pathname;
   const decomposePath = new URL('./scripts/refactor-recon/subsystem-decompose.mjs', import.meta.url).pathname;
   const privacyPath = new URL('./scripts/refactor-recon/privacy-scan-internal.mjs', import.meta.url).pathname;
@@ -7711,9 +7730,20 @@ async function executeScanEngineJob(job) {
           proc.on('error', () => resolve(null));
           proc.on('close', (code) => resolve(code === 0 ? out.split('\n').map((s) => s.trim()).filter(Boolean) : null));
         }),
+      shouldAbort: () => aborted,
       pushEvent: sePush,
       log,
     });
+
+    // Operator cancelled mid-run — the killed child surfaced as a non-ok result (or
+    // an empty one). Flip terminal with a clean message; don't persist a partial scan.
+    if (aborted) {
+      clearInterval(abortPoll);
+      sePush('scan.cancelled', {});
+      await updateJobFields(jobId, { status: 'FAILED', triggeredBy: 'OPERATOR_ABORT', errorMessage: 'scan cancelled by operator' });
+      log('warn', `[${short}] scan-engine cancelled by operator`);
+      return;
+    }
 
     if (!result.ok) {
       await updateJobFields(jobId, { status: 'FAILED', errorMessage: `scan-engine: ${result.reason}` });
@@ -7839,9 +7869,19 @@ async function executeScanEngineJob(job) {
       `[${short}] scan-engine completed (${result.findings.length} findings, ${result.phases.length} phases, ${result.gateViolations.length} gate-violations${result.lowConfidence ? ', LOW-CONFIDENCE decomposition' : ''})`,
     );
   } catch (err) {
+    // A cancel SIGKILLs children mid-stage, which usually throws here — report it as
+    // a clean cancellation (terminal, not a noisy failure that triggers retries).
+    if (aborted) {
+      sePush('scan.cancelled', {});
+      await updateJobFields(jobId, { status: 'FAILED', triggeredBy: 'OPERATOR_ABORT', errorMessage: 'scan cancelled by operator' });
+      log('warn', `[${short}] scan-engine cancelled by operator (mid-stage)`);
+      return;
+    }
     await updateJobFields(jobId, { status: 'FAILED', errorMessage: err?.message || String(err) });
     log('error', `[${short}] scan-engine threw: ${err?.message || err}`);
     throw err;
+  } finally {
+    clearInterval(abortPoll);
   }
 }
 

@@ -20,7 +20,7 @@ import { StoryLiveOutput } from '@/components/labs/agentic-workflow/story-live-o
 import { NewPlanModal } from '../new-plan-modal';
 import { AgentCompare } from './agent-compare';
 import { ScanReport } from './scan-report';
-import { useRunScanEngine, useScanReport } from '@/hooks/use-scan-engine';
+import { useCancelScan, useRunScanEngine, useScanReport } from '@/hooks/use-scan-engine';
 
 /**
  * Compile selected hotspots into a NewPlanModal intent seed (FR35). Pure +
@@ -62,8 +62,13 @@ export function AssessTab({ app }: { app: App }) {
   const { data: scanJob } = useAppAuditJob(scanJobId);
   const scanStatus = scanJob?.status;
   const scanRun = useRunScanEngine(app.appId);
+  const scanCancel = useCancelScan(app.appId);
   const scanTerminal = scanStatus === 'COMPLETED' || scanStatus === 'FAILED';
   const scanRunning = scanRun.isPending || (!!scanJobId && !scanTerminal);
+  // Was this terminal FAILED actually an operator cancel? (calmer message, not an error.)
+  const scanCancelled =
+    scanStatus === 'FAILED' &&
+    (scanJob?.triggeredBy === 'OPERATOR_ABORT' || /cancel/i.test(scanJob?.errorMessage || ''));
   const scanSummary = scanJob?.scanEngineSummary;
   // A prior scan persists on S3 (shared react-query cache with ScanReport) — so the
   // button reads "Re-scan" + the report shows even on a fresh load with no ?scanJob.
@@ -100,6 +105,9 @@ export function AssessTab({ app }: { app: App }) {
     autoTargetChanged?: boolean;
   }) => {
     scanRun.mutate({ privacyMode, ...input }, { onSuccess: (res) => setScanJob(res.jobId) });
+  };
+  const cancelScan = () => {
+    if (scanJobId) scanCancel.mutate(scanJobId);
   };
 
   return (
@@ -174,7 +182,7 @@ export function AssessTab({ app }: { app: App }) {
               onClick={() => startScan('deterministic')}
               disabled={scanRunning}
               data-testid="scan-engine-quick"
-              title="Re-run only the deterministic layer (recon + hotspots + infra + dead-code + maturity + plan) — no LLM swarm, ~0 tokens"
+              title="Re-run only the deterministic layer (recon + hotspots + infra + dead-code + maturity + plan). No LLM swarm → $0 / 0 tokens, but it still runs npm install + graphify + knip + eslint on the box, so it takes ~1–2 min. Use Cancel to stop it."
               style={{
                 fontSize: 11,
                 fontWeight: 600,
@@ -188,7 +196,7 @@ export function AssessTab({ app }: { app: App }) {
                 whiteSpace: 'nowrap',
               }}
             >
-              ↻ Quick re-scan (~0 tokens)
+              ↻ Quick re-scan (no LLM)
             </button>
           )}
           <button
@@ -234,12 +242,40 @@ export function AssessTab({ app }: { app: App }) {
                   ? 'Re-scan'
                   : 'Run v2 scan'}
           </button>
+          {/* Cancel — only while a scan is in flight. SIGKILLs the box-side child
+              processes (npm/graphify/knip/eslint/swarm). */}
+          {scanRunning && scanJobId && (
+            <button
+              type="button"
+              onClick={cancelScan}
+              disabled={scanCancel.isPending}
+              data-testid="scan-engine-cancel"
+              title="Stop this scan — kills the recon/swarm processes on the box"
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color: 'var(--destructive, #ef4444)',
+                background: 'transparent',
+                border: '1px solid color-mix(in srgb, var(--destructive) 45%, var(--border))',
+                borderRadius: 6,
+                padding: '7px 12px',
+                cursor: scanCancel.isPending ? 'not-allowed' : 'pointer',
+                opacity: scanCancel.isPending ? 0.6 : 1,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {scanCancel.isPending ? 'Cancelling…' : '✕ Cancel'}
+            </button>
+          )}
           <style>{'@keyframes spin{to{transform:rotate(360deg)}}'}</style>
         </div>
         {scanRunning && (
           <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-            Running deps → recon → subsystem decomposition → swarm → phased plan (a few minutes).
-            Watch the <strong>Scan log</strong> below for live progress.
+            {scanCancel.isSuccess
+              ? 'Cancelling — stopping the scan processes on the box…'
+              : 'Running deps → recon → subsystem decomposition → swarm → phased plan (a few minutes). Watch the '}
+            {!scanCancel.isSuccess && <strong>Scan log</strong>}
+            {!scanCancel.isSuccess && ' below for live progress.'}
           </div>
         )}
         {scanRun.isError && (
@@ -247,11 +283,21 @@ export function AssessTab({ app }: { app: App }) {
             Could not start scan: {(scanRun.error as Error)?.message || 'request failed'}
           </div>
         )}
-        {scanStatus === 'FAILED' && (
+        {scanCancel.isError && (
           <div style={{ fontSize: 11, color: 'var(--destructive)' }}>
-            Scan failed: {scanJob?.errorMessage || 'unknown error'}
+            Could not cancel: {(scanCancel.error as Error)?.message || 'request failed'}
           </div>
         )}
+        {scanStatus === 'FAILED' &&
+          (scanCancelled ? (
+            <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+              Scan cancelled. The previous scan (if any) is unchanged.
+            </div>
+          ) : (
+            <div style={{ fontSize: 11, color: 'var(--destructive)' }}>
+              Scan failed: {scanJob?.errorMessage || 'unknown error'}
+            </div>
+          ))}
         <ScanReport
           appId={app.appId}
           scanRunning={scanRunning}

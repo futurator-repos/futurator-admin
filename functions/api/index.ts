@@ -7343,6 +7343,46 @@ app.post('/api/party/projects/:id/scan-engine', async (c) => {
 });
 
 /**
+ * POST /api/party/projects/:id/scan-engine/:jobId/cancel — operator cancel.
+ * RUNNING → set `abortRequested` so the daemon's poller SIGKILLs the scan's child
+ * processes and flips it terminal; PENDING → flip FAILED directly (no live process).
+ */
+app.post('/api/party/projects/:id/scan-engine/:jobId/cancel', async (c) => {
+  const projectId = c.req.param('id');
+  const jobId = c.req.param('jobId');
+  const parsed = assessProjectParamsSchema.safeParse({ projectId });
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.errors[0]?.message || 'invalid projectId');
+  }
+
+  const job = await agentJobsRepo.getJobById(jobId);
+  if (!job) throw new NotFoundError('AgentJob', jobId);
+  if (job.jobType !== 'scan-engine' || job.projectId !== parsed.data.projectId) {
+    throw new AppError('JOB_MISMATCH', 'Job does not belong to this project scan', 409);
+  }
+  if (job.status !== 'RUNNING' && job.status !== 'PENDING') {
+    throw new AppError('NOT_CANCELLABLE', `Cannot cancel: scan is ${job.status}`, 409);
+  }
+
+  if (job.status === 'RUNNING') {
+    // Don't pre-flip status — the daemon attributes the cancellation cleanly on the
+    // child's exit (sets FAILED + triggeredBy=OPERATOR_ABORT + "cancelled" message).
+    await agentJobsRepo.updateJobFields(jobId, {
+      abortRequested: true,
+      triggeredBy: 'OPERATOR_ABORT',
+    });
+  } else {
+    await agentJobsRepo.updateJobFields(jobId, {
+      status: 'FAILED',
+      triggeredBy: 'OPERATOR_ABORT',
+      errorMessage: 'scan cancelled by operator',
+    });
+  }
+
+  return c.json({ ok: true, jobId, status: job.status === 'RUNNING' ? 'cancelling' : 'cancelled' });
+});
+
+/**
  * Refactoring Assessment Module (Epic C, §9.4) — list a project's durable
  * audits, newest-first. Used for audit history (the MVP dashboard reads the
  * live job row; this surfaces past adjudicated audits beyond the events TTL).
