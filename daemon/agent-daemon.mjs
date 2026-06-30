@@ -167,6 +167,10 @@ import {
   killAllChildren,
   getChildCount,
 } from './pipelines/lib/child-tracker.mjs';
+// Pipeline-3 (development-plan §5.4/§9) — fact-force memo TTL sweep + mid-turn
+// cost-ceiling halt watch.
+import { startGateMemoSweep } from './lib/gate-memo-sweep.mjs';
+import { checkAndSignalHalt } from './lib/halt-watch.mjs';
 // Pipeline v2.0 efficiency fix B8 — deterministic deny-pattern enforcement
 // for Bash tool_use events. Replaces prompt prose ("Do NOT run npm create
 // vite") with SIGTERM-on-match. See daemon/lib/bash-deny-patterns.mjs.
@@ -5558,7 +5562,31 @@ async function enforceWaveBudgetGate(planRow, p, short) {
   try {
     const ceiling = Number(planRow?.costCeilingUsd);
     if (!Number.isFinite(ceiling) || ceiling <= 0) return false; // no ceiling set → back-compat: no enforcement
-    const total = Number(planRow?.totalCostUsd) || 0;
+    let total = Number(planRow?.totalCostUsd) || 0;
+
+    // Pipeline-3 (development-plan §5.4) — reconcile the TRUE per-process spend
+    // (harness-cost bridge) before the gate reads it. observe logs the ~10× gap
+    // and keeps the internal total; enforce uses the reconciled total so the
+    // ceiling fires on real spend. Fail-open (keeps `total` on any error).
+    const ceilingMode = (process.env.P3_COST_CEILING || 'off').toLowerCase();
+    if (ceilingMode !== 'off' && planRow?.workingDir) {
+      try {
+        const [{ reconcileWaveCost }, { join: joinPath }] = await Promise.all([
+          import('./lib/cost-reconcile-gate.mjs'),
+          import('node:path'),
+        ]);
+        const r = reconcileWaveCost({
+          harnessCostDir: joinPath(planRow.workingDir, '.pipeline', 'harness-cost'),
+          internalTotalUsd: total,
+          ceilingUsd: ceiling,
+          mode: ceilingMode,
+          log,
+        });
+        total = r.effectiveTotal;
+      } catch (e) {
+        log('warn', `[${short}] cost reconcile skipped (non-blocking): ${e.message}`);
+      }
+    }
 
     // Reuse the existing cost-meter decision math. We inflate the ceiling by
     // the overrun tolerance so `terminate` fires only once spend is past the
@@ -8253,6 +8281,15 @@ async function poll() {
   log('info', `  Claude:     ${CLAUDE_BIN}`);
   log('info', `  OAuth file: ${OAUTH_CREDS_PATH}`);
 
+  // Pipeline-3 — fact-force memo TTL sweep (development-plan §9, open-question 7).
+  // Mandatory before enforce-at-scale; harmless (unref'd interval) otherwise.
+  try {
+    startGateMemoSweep();
+    log('info', '  Gate memo:  30-min TTL sweep started');
+  } catch (err) {
+    log('warn', `  Gate memo:  sweep start failed (non-blocking): ${err.message}`);
+  }
+
   loadOAuth('startup');
   await probeAuth();
 
@@ -8489,6 +8526,18 @@ async function poll() {
       if (Date.now() - lastFrontierScanAt >= FRONTIER_SCAN_INTERVAL_MS) {
         lastFrontierScanAt = Date.now();
         runFrontierShadowScan().catch((e) => log('error', `Frontier scan uncaught: ${e.message}`));
+      }
+
+      // Pipeline-3 mid-turn cost-ceiling halt watch (development-plan §5.4). Only
+      // meaningful in enforce mode (the PostToolUse hook writes the sentinel
+      // then); each active job's workingDir is checked for .futurator/halt and
+      // its children signalled to stop. Cheap (one existsSync per active job).
+      if ((process.env.P3_COST_CEILING || 'off').toLowerCase() === 'enforce') {
+        for (const [jobId, info] of activeJobs) {
+          if (!info?.workingDir) continue;
+          const h = checkAndSignalHalt({ dir: info.workingDir, jobId, signalChildren: signalChildrenForJob });
+          if (h.halted) log('warn', `[cost-ceiling] halted job ${jobId} mid-turn: ${h.reason}`);
+        }
       }
 
       // 2026-05-27 (unification) — the dedicated free-agent GC tick was

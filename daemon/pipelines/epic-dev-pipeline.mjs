@@ -273,7 +273,9 @@ export async function runEpicDevPipeline(opts) {
     // Cost ceiling (development-plan §5.4) — harness-cost dir scoped PER JOB so
     // reconcile never mixes concurrent jobs' sessions; halt sentinel under cwd.
     ceilingUsd: payload.costCeilingUsd ?? job.costCeilingUsd,
-    harnessCostDir: join(projectRoot, '.pipeline', 'harness-cost', String(job.jobId)),
+    // Per-workingDir (not per-job): all of a plan's jobs write here, deduped by
+    // globally-unique sessionId, so the wave-budget reconcile sums the whole plan.
+    harnessCostDir: join(projectRoot, '.pipeline', 'harness-cost'),
     haltDir: projectRoot,
     // Instinct-loop observation capture (observe-only; rides the gate audit).
     observeLog: join(projectRoot, '.pipeline', 'observations.jsonl'),
