@@ -5,13 +5,21 @@ import { runStoryBindings } from '../test-binding-runner.mjs';
 const ac = (kind, testRef) => ({ id: 'a1', testBinding: { status: 'bound', testRef, testKind: kind } });
 
 describe('defaultExecutors', () => {
-  it('unit executor runs `vitest run <testRef>` and maps exit 0 → passed', async () => {
+  it('unit executor runs `vitest run <file>` and maps exit 0 → passed', async () => {
     const calls = [];
     const spawnSync = (cmd, args) => { calls.push([cmd, ...args]); return { status: 0, stdout: 'ok', stderr: '' }; };
     const ex = defaultExecutors({ cwd: '/w', spawnSync });
-    const r = await ex.unit(ac('unit', 'foo.test.ts -t bar'));
+    const r = await ex.unit(ac('unit', 'foo.test.ts'));
     expect(r.passed).toBe(true);
-    expect(calls[0]).toEqual(['npx', 'vitest', 'run', 'foo.test.ts -t bar']);
+    expect(calls[0]).toEqual(['npx', 'vitest', 'run', 'foo.test.ts']);
+  });
+
+  it('extracts the FILE from vitest report-notation testRefs (file > describe > it)', async () => {
+    const calls = [];
+    const spawnSync = (cmd, args) => { calls.push([cmd, ...args]); return { status: 0 }; };
+    const ex = defaultExecutors({ cwd: '/w', spawnSync });
+    await ex.unit(ac('unit', 'src/x/__tests__/dino.test.ts > initiateJump — launches > makes vy negative (AC-S2-2)'));
+    expect(calls[0]).toEqual(['npx', 'vitest', 'run', 'src/x/__tests__/dino.test.ts']);
   });
 
   it('non-zero exit → failed with tail detail', async () => {

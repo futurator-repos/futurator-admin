@@ -38,8 +38,16 @@ export function defaultExecutors({ cwd, spawnSync = nodeSpawnSync, timeoutMs } =
   const vitest = async (ac) => {
     const testRef = ac.testBinding?.testRef;
     if (!testRef) return { passed: false, detail: 'no testRef bound' };
-    // testRef is a vitest filter — pass it through `vitest run`.
-    return runCommand(spawnSync, 'npx', ['vitest', 'run', testRef], { cwd, timeoutMs });
+    // Agents emit testRefs in vitest's REPORT notation, e.g.
+    //   "src/x/__tests__/dino.test.ts > describe — … > it — … (AC-S2-2)"
+    // `vitest run <ref>` would treat the whole string as a FILE filter → no
+    // match → exit 1. Take the file segment (before the first " > ") and run
+    // THAT file: a story-level gate passes iff all its tests pass, which is
+    // exactly the bound-AC contract — and it's robust against agent-generated
+    // test-name strings (no fragile `-t` regex). Per-test precision can come
+    // later if partial-credit reporting is ever needed.
+    const filePath = String(testRef).split(' > ')[0].trim();
+    return runCommand(spawnSync, 'npx', ['vitest', 'run', filePath], { cwd, timeoutMs });
   };
   return {
     unit: vitest,
