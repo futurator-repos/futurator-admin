@@ -19,6 +19,7 @@ import { buildGateSpawn } from '../lib/gate-settings.mjs';
 import { buildSubagentInjectionArgs } from '../lib/subagent-start.mjs';
 import { handleStoryCompletion } from '../lib/story-completion-handler.mjs';
 import { integrateStory } from '../lib/story-integrate.mjs';
+import { extractAssistantText } from '../lib/stream-json-text.mjs';
 import { planBranchName } from '../lib/plan-branch.mjs';
 
 /** Build the single-story dev prompt. PURE. Requires the agent to emit <BINDING>. */
@@ -140,10 +141,14 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     else if (!integ.committed) logger.warn?.(`[story-dev] ${payload.storyId} integrate: ${integ.reason}`);
   }
 
+  // Decode the stream-json transcript to the agent's plain text so the <BINDING>
+  // manifest parses (its JSON is escaped inside stream-json text fields).
+  const devText = extractAssistantText(output) || output;
+
   // Deterministic completion verdict (bound-AC gate), bound to the committed SHA.
   const completion = await handleStoryCompletion({
     storyNode: { storyId: payload.storyId, acceptanceCriteria: payload.acceptanceCriteria },
-    devOutput: output,
+    devOutput: devText,
     headSha,
     executors: deps.executors || {},
     now: deps.now,
