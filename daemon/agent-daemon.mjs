@@ -1758,7 +1758,10 @@ async function executeStoryDevJob(job) {
   });
 
   const ok = result.exitCode === 0 && result.newState !== 'failed';
-  await updateJobFields(job.jobId, { status: ok ? 'COMPLETED' : 'FAILED', updatedAt: new Date().toISOString() });
+  // updateJobFields ALWAYS appends updatedAt — do NOT pass it (duplicate path →
+  // "Two document paths overlap" → the status write throws → the job never
+  // reaches terminal → the poll loop re-runs it forever).
+  await updateJobFields(job.jobId, { status: ok ? 'COMPLETED' : 'FAILED' });
   log(ok ? 'info' : 'error', `[${short}] story-dev ${storyId} → ${result.newState || `exit ${result.exitCode}`}`);
 }
 
