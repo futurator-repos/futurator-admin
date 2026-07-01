@@ -1685,6 +1685,19 @@ async function runFrontierScan() {
           return;
         }
         await mintStoryDevJob({ ddb, table: JOBS_TABLE, row });
+        // Link the story row → its story-dev job so Labs3 can stream the live log
+        // (the story detail fetches events via story.jobId). Best-effort — a miss
+        // only costs the log link, never the run. #state is unrelated here.
+        try {
+          await ddb.send(new UpdateCommand({
+            TableName: PLAN_SPEC_GRAPH_TABLE,
+            Key: { storyId: storyNode.storyId },
+            UpdateExpression: 'SET jobId = :j, updatedAt = :now',
+            ExpressionAttributeValues: { ':j': row.jobId, ':now': new Date().toISOString() },
+          }));
+        } catch (e) {
+          log('warn', `[frontier] story ${storyNode.storyId} jobId link failed (non-blocking): ${e.message}`);
+        }
         log('info', `[frontier] minted story-dev job ${row.jobId.slice(0, 8)} for story ${storyNode.storyId}`);
       };
 
