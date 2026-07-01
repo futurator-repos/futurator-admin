@@ -1769,6 +1769,18 @@ async function executeStoryDevJob(job) {
   // resolves the same rigor the reflector/compile phases use.
   if (job.storyDevPayload) job.storyDevPayload.rigor = rigor;
 
+  // Resolve the boilerplate's qaContext (dev command / port / seam) so the
+  // `browser` bound-AC executor can serve the app + drive Playwright against
+  // `window.__harness`. Absent → browser ACs stay fail-closed (never fake-pass).
+  let qaContext;
+  try {
+    const appRowQa = await getAppRow(appId);
+    const { getGateEntry } = await import('./lib/gate-registry.mjs');
+    qaContext = getGateEntry(appRowQa?.boilerplateType || 'nextjs-base')?.qaContext;
+  } catch (e) {
+    log('warn', `[${short}] qaContext resolve failed (browser ACs fail-closed): ${e.message}`);
+  }
+
   const result = await runStoryDevJob({
     job,
     eventLogDir: EVENT_LOG_DIR,
@@ -1776,8 +1788,9 @@ async function executeStoryDevJob(job) {
       spawn,
       claudeBin: CLAUDE_BIN,
       headSha,
-      // Real bound-AC test executors run in the shared plan tree.
-      executors: defaultExecutors({ cwd: job.workingDir }),
+      // Real bound-AC test executors run in the shared plan tree. qaContext
+      // enables the browser/__harness executor for kind=browser behavioral ACs.
+      executors: defaultExecutors({ cwd: job.workingDir, qaContext }),
       // Per-story commit (development-plan §4.1) — daemonGit runs as the repo owner.
       git: daemonGit,
       updateStoryState,

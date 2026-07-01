@@ -6,12 +6,15 @@
 //   unit / integration → `npx vitest run <testRef>` (testRef is a vitest filter)
 //   typecheck          → `npx tsc --noEmit`
 //   lint               → `npx eslint <touched>`
-//   browser / manual   → NOT auto-run (browser → existing probe harness later;
-//                        manual → routed to human by the completion gate)
+//   browser            → serve the app + Playwright + assert __harness.snapshot()
+//                        (browser-probe-executor), WHEN a qaContext is resolvable
+//                        for the boilerplate; without one it stays fail-closed.
+//   manual             → NOT auto-run (routed to human by the completion gate)
 //
 // Spawn is injected so the dispatch logic unit-tests without running anything.
 
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
+import { makeBrowserExecutor } from './browser-probe-executor.mjs';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -31,10 +34,12 @@ function runCommand(spawnSync, cmd, args, { cwd, timeoutMs }) {
 /**
  * Build the default executor set bound to a worktree.
  *
- * @param {{ cwd: string, spawnSync?: Function, timeoutMs?: number }} opts
+ * @param {{ cwd: string, qaContext?: object, spawnSync?: Function, timeoutMs?: number }} opts
+ *   qaContext (from the boilerplate gate-registry) enables the `browser`
+ *   executor — without it, the runner's fail-closed `browser` default applies.
  * @returns {Record<string, (ac:object)=>Promise<{passed:boolean,detail?:string}>>}
  */
-export function defaultExecutors({ cwd, spawnSync = nodeSpawnSync, timeoutMs } = {}) {
+export function defaultExecutors({ cwd, qaContext, spawnSync = nodeSpawnSync, timeoutMs } = {}) {
   const vitest = async (ac) => {
     const testRef = ac.testBinding?.testRef;
     if (!testRef) return { passed: false, detail: 'no testRef bound' };
@@ -49,7 +54,7 @@ export function defaultExecutors({ cwd, spawnSync = nodeSpawnSync, timeoutMs } =
     const filePath = String(testRef).split(' > ')[0].trim();
     return runCommand(spawnSync, 'npx', ['vitest', 'run', filePath], { cwd, timeoutMs });
   };
-  return {
+  const executors = {
     unit: vitest,
     integration: vitest,
     typecheck: async () => runCommand(spawnSync, 'npx', ['tsc', '--noEmit'], { cwd, timeoutMs }),
@@ -57,8 +62,11 @@ export function defaultExecutors({ cwd, spawnSync = nodeSpawnSync, timeoutMs } =
       const target = ac.testBinding?.testRef || '.';
       return runCommand(spawnSync, 'npx', ['eslint', target], { cwd, timeoutMs });
     },
-    // browser/manual intentionally absent → test-binding-runner falls back to unit
-    // for browser (which will fail-closed without a real probe harness — safe), and
-    // manual ACs are skipped by the runner and routed to human by the gate.
   };
+  // Only add `browser` when we can actually serve the app (qaContext present).
+  // When absent we leave the key OFF so the test-binding-runner's fail-closed
+  // `browser` default applies — never fake-pass an unverified behavioral AC.
+  // `manual` stays absent → routed to human by the completion gate.
+  if (qaContext) executors.browser = makeBrowserExecutor({ cwd, qaContext });
+  return executors;
 }
