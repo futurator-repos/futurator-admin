@@ -99,8 +99,18 @@ export function ProjectHero({ plan, model }: { plan: PlanWithEpics; model: Story
           <HeroMetric label="Progress" value={`${model.pct}%`} />
           <HeroMetric label="Frontier" value={String(model.frontier.length)} />
           <HeroMetric
+            label="Time"
+            value={fmtDuration(model.durationMs)}
+            title={
+              model.slowestMs
+                ? `Σ agent wall-clock across ${model.done} run stories · slowest ${fmtDuration(model.slowestMs)}`
+                : 'no stories have run yet'
+            }
+          />
+          <HeroMetric label="Tokens" value={fmtTokens(model.tokens)} />
+          <HeroMetric
             label="Cost"
-            value={`$${(plan.totalCostUsd ?? 0).toFixed(2)}`}
+            value={`$${(model.costUsd || plan.totalCostUsd || 0).toFixed(2)}`}
             color="var(--amber)"
           />
         </div>
@@ -113,13 +123,15 @@ function HeroMetric({
   label,
   value,
   color = 'var(--foreground)',
+  title,
 }: {
   label: string;
   value: string;
   color?: string;
+  title?: string;
 }) {
   return (
-    <div style={{ textAlign: 'right' }}>
+    <div style={{ textAlign: 'right' }} title={title}>
       <div
         style={{
           fontSize: 8,
@@ -134,4 +146,24 @@ function HeroMetric({
       <div style={{ fontSize: 22, color, fontWeight: 300, letterSpacing: '-0.01em' }}>{value}</div>
     </div>
   );
+}
+
+/** ms → compact h/m/s (— when nothing has run). */
+export function fmtDuration(ms: number): string {
+  if (!ms || ms < 1000) return ms ? '<1s' : '—';
+  const s = Math.round(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
+/** token count → compact k/M. */
+function fmtTokens(n: number): string {
+  if (!n) return '0';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
 }

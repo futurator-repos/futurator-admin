@@ -54,6 +54,15 @@ export interface StoryGraphModel {
   done: number;
   /** 0–100, rounded. */
   pct: number;
+  // ── Time intelligence (rolled up from the per-story write-back) ──────────
+  /** Σ costUsd across stories that have run. */
+  costUsd: number;
+  /** Σ durationMs (agent wall-clock) across stories that have run. */
+  durationMs: number;
+  /** Σ input + output tokens across stories that have run. */
+  tokens: number;
+  /** The single slowest story's durationMs (the timing tail). */
+  slowestMs: number;
 }
 
 const ALL_STATES: StoryNodeState[] = [
@@ -122,7 +131,24 @@ export function buildStoryGraphModel(rows: StoryNodeRow[]): StoryGraphModel {
   const pct = total === 0 ? 0 : Math.round((done / total) * 100);
   const frontier = rows.filter((r) => r.state === 'ready');
 
-  return { byBatch, byEpic, stateCounts, frontier, total, done, pct };
+  const costUsd = rows.reduce((a, r) => a + (r.costUsd ?? 0), 0);
+  const durationMs = rows.reduce((a, r) => a + (r.durationMs ?? 0), 0);
+  const tokens = rows.reduce((a, r) => a + (r.inputTokens ?? 0) + (r.outputTokens ?? 0), 0);
+  const slowestMs = rows.reduce((a, r) => Math.max(a, r.durationMs ?? 0), 0);
+
+  return {
+    byBatch,
+    byEpic,
+    stateCounts,
+    frontier,
+    total,
+    done,
+    pct,
+    costUsd,
+    durationMs,
+    tokens,
+    slowestMs,
+  };
 }
 
 /** Job ids for every story that has been dispatched (story-dev AgentJobs). */

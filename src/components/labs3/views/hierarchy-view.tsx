@@ -640,9 +640,24 @@ function StoryRow({
             {prog}%
           </span>
         </div>
-        <MetricChip label="time" value={fmtSec(elapsed)} color="var(--text-dim)" />
-        <MetricChip label="tokens" value={fmtTokens(jobTokens(job))} color="var(--cyan)" />
-        <MetricChip label="cost" value={fmtCost(jobCost(job))} color="var(--amber)" />
+        {/* Prefer the per-story write-back (persisted at completion) over the
+            live job — that's where duration/cost/tokens actually land. Fall back
+            to the running job's live figures while a story is still in flight. */}
+        <MetricChip
+          label="time"
+          value={fmtSec(story.durationMs ? story.durationMs / 1000 : elapsed)}
+          color="var(--text-dim)"
+        />
+        <MetricChip
+          label="tokens"
+          value={fmtTokens((story.inputTokens ?? 0) + (story.outputTokens ?? 0) || jobTokens(job))}
+          color="var(--cyan)"
+        />
+        <MetricChip
+          label="cost"
+          value={fmtCost(story.costUsd ?? jobCost(job))}
+          color="var(--amber)"
+        />
         <StoryNodeStatePill state={story.state} pulse={isActive} />
         {retryAttempt > 0 && <RetryPill attempt={retryAttempt} max={3} />}
       </div>
