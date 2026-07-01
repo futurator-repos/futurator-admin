@@ -91,6 +91,26 @@ describe('parseChurn', () => {
       { a: 'src/a.ts', b: 'src/b.ts', together: 2, confidence: 1 },
     ]);
   });
+
+  it('excludes build artifacts / generated / vendor from churn + coupling', () => {
+    const raw = [
+      `${REC}h1${SEP}Alice`,
+      `src/a.ts`,
+      `.open-next/assets/BUILD_ID`,
+      `.open-next/.build/open-next.config.mjs`,
+      `node_modules/x/index.js`,
+      `pnpm-lock.yaml`,
+      `dist/bundle.min.js`,
+      ``,
+      `${REC}h2${SEP}Alice`,
+      `src/a.ts`,
+      `.open-next/assets/BUILD_ID`,
+    ].join('\n');
+    const r = parseChurn(raw);
+    expect(r.churnByFile).toEqual({ 'src/a.ts': 2 }); // artifacts filtered out
+    expect(Object.keys(r.churnByFile)).not.toContain('.open-next/assets/BUILD_ID');
+    expect(r.temporalCoupling).toEqual([]); // no artifact co-change pairs
+  });
 });
 
 describe('parseShortlog', () => {

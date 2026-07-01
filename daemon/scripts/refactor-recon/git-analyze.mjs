@@ -43,6 +43,11 @@ const finding = (o) => ({
   dependsOn: [],
 });
 
+// Build artifacts / generated / vendored files pollute churn·coupling·bus-factor
+// (they change on every build, always together) — exclude them so the signal is real code.
+export const IGNORED_PATH =
+  /(^|\/)(node_modules|\.next|\.open-next|\.turbo|\.vercel|dist|out|build|coverage|vendor|\.git|graphify-out)\/|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb|BUILD_ID)$|\.min\.(js|css)$|\.(map|lock)$/;
+
 // ── pure parsers ────────────────────────────────────────────────────────────
 
 /**
@@ -131,7 +136,8 @@ export function parseChurn(raw, { topN = 25, maxPairFiles = 40 } = {}) {
       curAuthor = line.slice(1).split(SEP)[1] || '';
       curFiles = new Set();
     } else if (line.trim() && curFiles) {
-      curFiles.add(line.trim());
+      const f = line.trim();
+      if (!IGNORED_PATH.test(f)) curFiles.add(f); // skip build artifacts / generated / vendor
     }
   }
   flush();
