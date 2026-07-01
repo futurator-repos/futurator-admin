@@ -426,6 +426,10 @@ export interface AgentJob {
     // (clone → materialize worktree → inject placeholders → npm install →
     // BMAD bootstrap → commit + push). Payload below.
     | 'app-bootstrap'
+    // Labs3 fast path (2026-07-01) — intent → plan_spec. Waits for the app
+    // scaffold, then one Claude call generates StoryNodes the ready-frontier
+    // runs (no epics/waves). Payload: quickPlanspecPayload below.
+    | 'quick-planspec'
     // Epic 18 / Story 18.5 — Free Claude Code Agent session turn. Payload below.
     | 'free-agent-session'
     // Pipeline v2 Phase 3-C Epic 3 (2026-05-20) — SKILL-SCOUT agent runs.
@@ -504,6 +508,17 @@ export interface AgentJob {
    * Pipeline v2 Phase 1 / Story 1.4.4 — payload consumed by
    * `daemon/pipelines/app-bootstrap.mjs`. Set when `jobType === 'app-bootstrap'`.
    */
+  /**
+   * Labs3 fast path (2026-07-01) — the quick-planspec generation job. The
+   * daemon waits for `appBootstrapJobId` to scaffold the fresh app, then turns
+   * `intent` into StoryNodes for `planId`/`appId`.
+   */
+  quickPlanspecPayload?: {
+    planId: string;
+    appId: string;
+    intent: string;
+    appBootstrapJobId?: string;
+  };
   appBootstrapPayload?: {
     appId: string;
     // PR-13 — keep this loose (`string`) so adding new starter packs in

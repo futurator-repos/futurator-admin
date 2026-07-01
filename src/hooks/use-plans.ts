@@ -52,6 +52,21 @@ export function usePlan(planId: string | null) {
   });
 }
 
+/**
+ * Labs3 fast path — intent → a running Pipeline-3 plan (no concept chain).
+ * Scaffolds a fresh app + a quick-planspec generation job. Returns the new planId.
+ */
+export function useQuickP3Plan() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { intent: string; name?: string }) =>
+      api.post<{ planId: string; appId: string; jobId: string }>('/plans/quick-p3', input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['plans'] });
+    },
+  });
+}
+
 export function useCreatePlanFromIntent() {
   const queryClient = useQueryClient();
   return useMutation({

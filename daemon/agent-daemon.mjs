@@ -88,9 +88,11 @@ import {
   JOB_HANDLER_DUAL_AGENT_COMPARE,
   JOB_HANDLER_SCAN_ENGINE,
   JOB_HANDLER_STORY_DEV,
+  JOB_HANDLER_QUICK_PLANSPEC,
   validateScanEngineJob,
 } from './pipelines/job-router.mjs';
 import { runStoryDevJob } from './pipelines/story-dev-pipeline.mjs';
+import { runQuickPlanspecJob } from './pipelines/quick-planspec-runner.mjs';
 import { propagateCompletion, dependentsOf } from './lib/story-dispatch-driver.mjs';
 import { defaultExecutors } from './lib/test-executors.mjs';
 // P3-parity glue (INT wiring): full story-state write-back, fire-and-forget
@@ -1710,6 +1712,25 @@ async function runFrontierScan() {
 // Pipeline-3 (development-plan §4) — execute one per-story dev job: run a single
 // Claude scoped to the story's touches under the live gate, then apply the
 // deterministic completion verdict to the StoryNode + unblock its dependents.
+// quick-planspec — intent → plan_spec ingest (the Labs3 fast path). Builds the
+// injected I/O the pure runner needs (job read, StoryNode batch-put, attention).
+async function executeQuickPlanspecJob(job) {
+  await runQuickPlanspecJob(job, {
+    spawn,
+    claudeBin: CLAUDE_BIN,
+    eventLogDir: EVENT_LOG_DIR,
+    getJob: async (id) => (await ddb.send(new GetCommand({ TableName: JOBS_TABLE, Key: { jobId: id } }))).Item,
+    batchPutStoryNodes: async (rows) => {
+      for (const Item of rows) {
+        await ddb.send(new PutCommand({ TableName: PLAN_SPEC_GRAPH_TABLE, Item }));
+      }
+    },
+    updateJobFields,
+    writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
+    log,
+  });
+}
+
 async function executeStoryDevJob(job) {
   const short = job.jobId.slice(0, 8);
   const storyId = job.storyNodeRef?.storyId;
@@ -6791,6 +6812,8 @@ async function runJobAsync(job) {
       await executeScanEngineJob(job);
     } else if (handler === JOB_HANDLER_STORY_DEV) {
       await executeStoryDevJob(job);
+    } else if (handler === JOB_HANDLER_QUICK_PLANSPEC) {
+      await executeQuickPlanspecJob(job);
     } else {
       await executePipeline(job);
     }
@@ -7749,6 +7772,7 @@ async function executeScanEngineJob(job) {
   const sddPath = new URL('./scripts/refactor-recon/sdd-detect.mjs', import.meta.url).pathname;
   const stackProfilePath = new URL('./scripts/refactor-recon/stack-profile.mjs', import.meta.url).pathname;
   const aiReadinessPath = new URL('./scripts/refactor-recon/ai-readiness.mjs', import.meta.url).pathname;
+  const gitAnalyzePath = new URL('./scripts/refactor-recon/git-analyze.mjs', import.meta.url).pathname;
 
   // Spawn a plain Node child (deterministic stages — never the agent path).
   const spawnNode = (args, cwd) =>
@@ -7840,6 +7864,7 @@ async function executeScanEngineJob(job) {
         let sdd = null;
         let stack = null;
         let aiReadiness = null;
+        let gitEvolution = null;
         if (reuseDetectors) {
           const pr = rj('privacy.json');
           if (pr) privacySummary = summarizePrivacyReport(pr);
@@ -7850,6 +7875,7 @@ async function executeScanEngineJob(job) {
           sdd = rj('sdd.json');
           stack = rj('stack-profile.json');
           aiReadiness = rj('ai-readiness.json');
+          gitEvolution = rj('git-evolution.json');
         } else {
           // Privacy/compliance lane. Default 'internal' (our own scanner, ~0 LLM,
           // source stays on the box); 'external' routes to the data-privacy service.
@@ -7902,6 +7928,11 @@ async function executeScanEngineJob(job) {
             await spawnNode([aiReadinessPath, repo, '--out', pathJoin(od, 'ai-readiness.json')], repo);
             aiReadiness = rj('ai-readiness.json');
           } catch (are) { log('warn', `[${short}] scan-engine ai-readiness detector failed (non-fatal): ${are?.message || are}`); }
+          // Git & Evolution detector — deterministic git-history read (churn/coupling/bus-factor), always runnable.
+          try {
+            await spawnNode([gitAnalyzePath, repo, '--out', pathJoin(od, 'git-evolution.json')], repo);
+            gitEvolution = rj('git-evolution.json');
+          } catch (ge) { log('warn', `[${short}] scan-engine git-analyze detector failed (non-fatal): ${ge?.message || ge}`); }
         }
         const graph = rj('graph.resolved.json') || rj('graph.json') || { nodes: [] };
         const resolved = rj('resolved-imports.json') || {};
@@ -7920,6 +7951,7 @@ async function executeScanEngineJob(job) {
           sdd,
           stack,
           aiReadiness,
+          gitEvolution,
           // knip actually produced data? (else the clutter axis is degraded)
           knipRan: hotspotsDoc.toolStatus?.knip === 'ok',
           // Anchor = graphify nodes ∪ the REAL on-disk source files. graphify only
@@ -8037,6 +8069,7 @@ async function executeScanEngineJob(job) {
             infra: result.infra,
             stack: result.stack,
             aiReadiness: result.aiReadiness,
+            gitEvolution: result.gitEvolution,
             // Per-step token/cost ledger produced by the runner (C-LEDGER shapes).
             timeline: result.timeline,
             cost: result.cost,

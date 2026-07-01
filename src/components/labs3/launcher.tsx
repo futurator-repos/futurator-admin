@@ -3,7 +3,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMutation } from '@tanstack/react-query';
-import { usePlansList } from '@/hooks/use-plans';
+import { usePlansList, useQuickP3Plan } from '@/hooks/use-plans';
 import { useDaemonStatus } from '@/hooks/use-daemon-status';
 import { api } from '@/lib/api-client';
 import type { PlanSummary } from '@/types/plan';
@@ -39,6 +39,99 @@ const h1: React.CSSProperties = {
   margin: 0,
 };
 
+// Intent → Pipeline-3 in one step: scaffolds a fresh app, one Claude call turns
+// the idea into StoryNodes, the frontier runs it. No epics/waves.
+function QuickCreate() {
+  const router = useRouter();
+  const quick = useQuickP3Plan();
+  const [intent, setIntent] = useState('');
+  const [name, setName] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = () => {
+    setErr(null);
+    quick.mutate(
+      { intent: intent.trim(), name: name.trim() || undefined },
+      {
+        onSuccess: (r) => router.push(`/labs3/?planId=${r.planId}`),
+        onError: (e) => setErr(e instanceof Error ? e.message : 'Create failed'),
+      },
+    );
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: 22,
+        padding: 16,
+        borderRadius: 10,
+        border: '1px solid var(--border)',
+        background: 'var(--card, transparent)',
+      }}
+    >
+      <div style={{ fontSize: 12.5, color: 'var(--text-dim)', marginBottom: 8 }}>
+        New Pipeline-3 plan from an idea — no epics/waves. Scaffolds a fresh app and generates the
+        story graph directly.
+      </div>
+      <textarea
+        value={intent}
+        onChange={(e) => setIntent(e.target.value)}
+        placeholder="Describe an app idea… e.g. a dino runner game with arrow-key controls, obstacles, and a score"
+        rows={3}
+        style={{
+          width: '100%',
+          resize: 'vertical',
+          fontSize: 13,
+          padding: '9px 11px',
+          borderRadius: 8,
+          border: '1px solid var(--border-2, var(--border))',
+          background: 'var(--background)',
+          color: 'var(--foreground)',
+          fontFamily: 'inherit',
+        }}
+      />
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="name (optional)"
+          style={{
+            flex: 1,
+            fontSize: 12.5,
+            padding: '7px 10px',
+            borderRadius: 6,
+            border: '1px solid var(--border-2, var(--border))',
+            background: 'var(--background)',
+            color: 'var(--foreground)',
+          }}
+        />
+        <button
+          type="button"
+          onClick={submit}
+          disabled={quick.isPending || intent.trim().length < 3}
+          style={{
+            fontSize: 12.5,
+            fontWeight: 500,
+            padding: '7px 16px',
+            borderRadius: 6,
+            border: '1px solid var(--accent-blue)',
+            background: 'var(--accent-blue)',
+            color: '#fff',
+            cursor: quick.isPending || intent.trim().length < 3 ? 'default' : 'pointer',
+            opacity: quick.isPending || intent.trim().length < 3 ? 0.55 : 1,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {quick.isPending ? 'Creating…' : 'Create & Run Pipeline-3'}
+        </button>
+      </div>
+      {err && (
+        <div style={{ marginTop: 7, fontSize: 11.5, color: 'var(--warning, #f97316)' }}>{err}</div>
+      )}
+    </div>
+  );
+}
+
 export function Labs3Launcher() {
   const { data: plans, isLoading, error } = usePlansList();
   const { data: daemon } = useDaemonStatus();
@@ -63,6 +156,8 @@ export function Labs3Launcher() {
         </Link>
         .
       </p>
+
+      <QuickCreate />
 
       {dispatchOff && (
         <div

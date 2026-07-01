@@ -2056,6 +2056,123 @@ app.post('/api/plans/from-intent', async (c) => {
   return c.json({ planId, pmJobId, bmadJobId, plan }, 201);
 });
 
+// POST /api/plans/quick-p3 — Labs3 fast path (2026-07-01). Intent → a running
+// Pipeline-3 plan with NO concept chain: scaffold a fresh nextjs-canvas-game app,
+// then a `quick-planspec` daemon job turns the intent into StoryNodes the ready-
+// frontier dispatches. For rapidly testing many plans.
+app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = z
+    .object({
+      intent: z.string().min(3, 'intent must be at least 3 chars'),
+      name: z.string().optional(),
+    })
+    .safeParse(body);
+  if (!parsed.success)
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
+  const { intent } = parsed.data;
+
+  // Unique throwaway app slug (fresh app per intent) — sanitized + random suffix.
+  const base =
+    (parsed.data.name || intent)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 24) || 'quick';
+  const appId = `${base.replace(/^[^a-z]/, 'q')}-${crypto.randomUUID().slice(0, 6)}`.slice(0, 40);
+  const boilerplateType = normalizeBoilerplateType('nextjs-canvas-game');
+  const meta = BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType];
+  const now = new Date().toISOString();
+
+  // Scaffold the repo from the boilerplate template.
+  const [tOwner, tRepo] = meta.templateRepo.split('/');
+  try {
+    const { data } = await createRepoFromTemplate(tOwner, tRepo, appId);
+    if ('existing' in data && data.existing)
+      throw new AppError('REPO_EXISTS', `repo ${appId} exists`, 409);
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    if (err instanceof GitHubError)
+      return c.json(
+        { error: { code: 'GITHUB_ERROR', message: err.message } },
+        githubRelayStatus(err) as 400,
+      );
+    throw err;
+  }
+
+  const app: App = {
+    appId,
+    displayName: base,
+    workingDir: `/home/ubuntu/projects/${appId}`,
+    executionMode: 'pipeline',
+    currentlyDeployedPlanId: null,
+    deployJobIds: [],
+    workingTreeStatus: 'clean',
+    boilerplateType,
+    bmadEnabled: false,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const bootstrapJobId = crypto.randomUUID();
+  await appRepo.createAppAndBootstrapJob(app, {
+    jobId: bootstrapJobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user.userId,
+    workingDir: app.workingDir,
+    jobType: 'app-bootstrap',
+    appBootstrapPayload: {
+      appId,
+      boilerplateType,
+      bmadEnabled: false,
+      augmentFiles: meta.augmentFiles,
+      packageJsonScripts: meta.packageJsonScripts ?? null,
+      packageJsonDevDependencies: meta.packageJsonDevDependencies ?? null,
+      defaultSkillLoadout: meta.defaultSkillLoadout ?? null,
+    },
+  });
+
+  const planId = crypto.randomUUID();
+  const plan: Plan = {
+    planId,
+    name: appId,
+    displayName: `${base} — quick`,
+    intent,
+    description: '',
+    status: 'concept',
+    epicIds: [],
+    appId,
+    workingDir: app.workingDir,
+    executionMode: 'pipeline',
+    rigor: 'mvp',
+    totalCostUsd: 0,
+    totalStories: 0,
+    doneStories: 0,
+    costCeilingUsd: defaultCostCeiling('mvp'),
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user.userId,
+  };
+  await planRepo.createPlan(plan);
+
+  // The generation job — waits for the scaffold, then one Claude call → StoryNodes.
+  const genJobId = crypto.randomUUID();
+  await agentJobsRepo.createJob({
+    jobId: genJobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: user.userId,
+    workingDir: app.workingDir,
+    jobType: 'quick-planspec',
+    quickPlanspecPayload: { planId, appId, intent, appBootstrapJobId: bootstrapJobId },
+  });
+
+  return c.json({ planId, appId, jobId: genJobId }, 201);
+});
+
 /**
  * Upsert a PartyProject row and enqueue a `party-bootstrap` job for a Plan.
  * Shared between plan-create and the retroactive install endpoint.

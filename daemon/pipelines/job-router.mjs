@@ -60,6 +60,7 @@ export const JOB_HANDLER_DUAL_AGENT_COMPARE = 'dual-agent-compare';
 // Refactoring Scan Engine v2. Hybrid deterministic recon + LLM swarm → a
 // dimension-tagged finding pool + a phased, dependency-ordered refactoring plan.
 export const JOB_HANDLER_SCAN_ENGINE = 'scan-engine';
+export const JOB_HANDLER_QUICK_PLANSPEC = 'quick-planspec';
 
 /**
  * Decide which handler should run a given job.
@@ -97,6 +98,7 @@ export function selectHandler(job) {
   if (job.jobType === 'dual-agent-compare') return JOB_HANDLER_DUAL_AGENT_COMPARE;
   if (job.jobType === 'scan-engine') return JOB_HANDLER_SCAN_ENGINE;
   if (job.jobType === 'story-dev') return JOB_HANDLER_STORY_DEV;
+  if (job.jobType === 'quick-planspec') return JOB_HANDLER_QUICK_PLANSPEC;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
 }
