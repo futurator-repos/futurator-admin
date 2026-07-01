@@ -1,5 +1,5 @@
 import type { Plan } from '../types/plan';
-import type { EpicWorkflow } from '../types/epic-workflow';
+import type { EpicWorkflow, AcceptanceCriterion } from '../types/epic-workflow';
 import { hasSection, type SectionManifest, type ArtifactKind } from '../concept/section-manifest';
 
 /**
@@ -35,6 +35,32 @@ export interface GateInput {
   manifests?: Partial<Record<ArtifactKind, SectionManifest>>;
   /** PRD functional-requirement ids, when known (E9.2 coverage). */
   prdRequirementIds?: string[];
+}
+
+/** Matches a normative EARS/requirements keyword in prose AC text. */
+const NORMATIVE_RE = /\b(shall|must)\b/i;
+
+/**
+ * AC-shape check (TDD blueprint §9). Returns a finding per non-manual AC that is
+ * NOT executable-shaped — i.e. has neither a Given/When/Then scenario nor a
+ * normative SHALL/MUST statement. Pure; exported for direct testing. Manual ACs
+ * are exempt (a human confirms them; they need no machine-testable shape).
+ */
+export function validateAcShape(
+  criteria: Pick<AcceptanceCriterion, 'id' | 'text' | 'given' | 'when' | 'then' | 'verify'>[],
+): string[] {
+  const findings: string[] = [];
+  for (const c of criteria) {
+    if (c.verify === 'manual') continue;
+    const hasScenario = Boolean(c.given || c.when || c.then);
+    const hasNormative = NORMATIVE_RE.test(c.text || '');
+    if (!hasScenario && !hasNormative) {
+      findings.push(
+        `AC ${c.id} is not test-shaped (no Given/When/Then scenario and no SHALL/MUST in text) — normalize to EARS + GWT before Implementation.`,
+      );
+    }
+  }
+  return findings;
 }
 
 export function runSolutioningGate(input: GateInput): GateResult {
@@ -132,6 +158,14 @@ export function runSolutioningGate(input: GateInput): GateResult {
       );
     }
   }
+
+  // ── AC-shape (TDD blueprint §9) — OpenSpec-style testable-shape check ──
+  // Every non-manual AC should be executable-shaped: either a Given/When/Then
+  // scenario or a normative SHALL/MUST statement (OpenSpec `validator.ts` requires
+  // both a normative keyword AND ≥1 scenario). DARK in Wave-0: surfaced as
+  // non-blocking conditions only; becomes rigor-scaled (error at production) in
+  // Stage 1 once Cartographer normalizes AC to EARS+GWT upstream.
+  for (const f of validateAcShape(allCriteria)) conditions.push(f);
 
   // ── E9.5 [W7c] — route↔AC reconciliation ──
   if (input.plan.conceptPlan && !input.plan.conceptPlan.uiBearing) {

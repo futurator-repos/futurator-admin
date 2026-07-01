@@ -138,25 +138,51 @@ export function topoLevels(nodes) {
   return level;
 }
 
+// How far along a story is — used ONLY by the graded frontier modes (§6) to
+// decide whether a dependency is "far enough" to unblock a dependent. `failed`
+// is -1 so it never satisfies a dependent. Kahn (the default) ignores this.
+const STATE_RANK = Object.freeze({
+  failed: -1, blocked: 0, ready: 1, claimed: 2, developing: 3,
+  merging: 4, verifying: 5, done: 6,
+});
+
+// The minimum dependency rank that satisfies a dependent, per frontier mode.
+//   kahn     — dep must be fully `done` (rank 6): today's behavior, unchanged.
+//   contract — dep integrated/committed (rank 4, `merging`): contract frozen, so
+//              a dependent's test-authoring can begin against the contract.
+//   green    — dep's bound tests pass (rank 5, `verifying`): pre-merge start.
+const FRONTIER_MIN_RANK = Object.freeze({ kahn: 6, contract: 4, green: 5 });
+
+/** True when `depNode` is far enough along to satisfy a dependent, under `mode`. */
+export function depSatisfies(depNode, mode = 'kahn') {
+  if (!depNode) return false;
+  const min = FRONTIER_MIN_RANK[mode] ?? FRONTIER_MIN_RANK.kahn;
+  const rank = STATE_RANK[depNode.state];
+  return typeof rank === 'number' && rank >= min;
+}
+
 /**
  * The ready frontier: storyIds dispatchable right now. A story is dispatchable
- * when it is NOT terminal/in-flight AND every dependency is `done`.
+ * when it is NOT terminal/in-flight AND every dependency is satisfied.
  *
- * Pass the live node set (each with `state` + `depends_on`). This is the
- * continuous-Kahn replacement for the wave barrier — call it after every
- * completion to find newly-unblocked work.
+ * `opts.mode` (default 'kahn') selects the graded readiness (§6). In 'kahn' this
+ * is byte-identical to the legacy "every dep is done" rule — the default single-
+ * arg call `readyFrontier(nodes)` is unchanged, so this is a DARK scaffold behind
+ * `P3_FRONTIER_MODE` (the live dispatch call site is not switched in Wave-0).
  *
  * @param {Array<{storyId, depends_on?, state}>} nodes
+ * @param {{ mode?: 'kahn'|'contract'|'green' }} [opts]
  * @returns {string[]} dispatchable storyIds, deterministic (sorted)
  */
-export function readyFrontier(nodes) {
+export function readyFrontier(nodes, opts = {}) {
   const map = byId(nodes);
-  const isDone = (id) => map.get(id)?.state === 'done';
+  const mode = opts.mode || 'kahn';
+  const satisfied = (id) => depSatisfies(map.get(id), mode);
   const out = [];
   for (const n of nodes) {
     if (n.state !== 'blocked' && n.state !== 'ready') continue;
     const deps = (n.depends_on || []).filter((d) => map.has(d));
-    if (deps.every(isDone)) out.push(n.storyId);
+    if (deps.every(satisfied)) out.push(n.storyId);
   }
   return out.sort();
 }

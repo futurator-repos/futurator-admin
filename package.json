@@ -91,6 +91,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
+    "@stryker-mutator/core": "^9.6.1",
+    "@stryker-mutator/vitest-runner": "^9.6.1",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^6",
     "@testing-library/react": "^16",
@@ -106,6 +108,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.2",
     "eslint-config-prettier": "^10",
+    "fast-check": "^4.8.0",
     "husky": "^9",
     "jsdom": "^26",
     "knip": "^5",

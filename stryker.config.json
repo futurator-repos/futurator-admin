@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Mutation testing for P0/high-criticality pure modules (TDD blueprint §7, Stage 4). Scoped small on purpose — ratchet `mutate` outward as more deterministic gates land. Run: npx stryker run",
+  "packageManager": "npm",
+  "testRunner": "vitest",
+  "reporters": ["html", "clear-text", "progress"],
+  "coverageAnalysis": "perTest",
+  "mutate": [
+    "functions/shared/services/quality-gate.ts",
+    "functions/shared/services/solutioning-gate.ts"
+  ],
+  "thresholds": { "high": 80, "low": 60, "break": 50 }
+}

@@ -28,6 +28,12 @@ export const P3_FLAGS = Object.freeze({
   P3_LAZY_MODE: { values: ['off', 'lite', 'full', 'ultra'], default: 'off' },
   P3_COST_CEILING: { values: ['off', 'observe', 'enforce'], default: 'off' },
   P3_READY_FRONTIER: { values: ['off', 'shadow', 'on'], default: 'off' },
+  // Graded ready-frontier (TDD blueprint §6). 'kahn' = legacy: a dependent
+  // unblocks only when every dep is fully `done`. 'contract' = a dependent may
+  // start once its deps are integrated/committed (contract frozen), so
+  // test-authoring parallelizes against the contract. 'green' = start once deps'
+  // tests pass (pre-merge). First value is the OFF/legacy default.
+  P3_FRONTIER_MODE: { values: ['kahn', 'contract', 'green'], default: 'kahn' },
   P3_BOUND_AC_GATE: { values: ['off', 'shadow', 'on'], default: 'off' },
   P3_WORKTREE_CACHE: { values: ['off', 'on'], default: 'off' },
   P3_SESSION_REUSE: { values: ['off', 'dev_compile', 'full'], default: 'off' },
