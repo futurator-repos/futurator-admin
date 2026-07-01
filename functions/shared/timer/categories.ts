@@ -275,6 +275,12 @@ export const CLASSIFICATION_TABLE: Record<AgentEventType, EventClassification> =
   claude_md_loaded: {
     default: 'compile',
   },
+
+  // A story-dev agent's skills-loaded audit signal — a zero-duration marker, not
+  // deliverable work. Classify as 'compile' alongside the other loadout markers.
+  skill_loaded: {
+    default: 'compile',
+  },
 };
 
 /**

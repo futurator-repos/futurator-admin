@@ -12,6 +12,7 @@ const COLOR_BY_TYPE: Record<AgentEventType, string> = {
   status: 'var(--text-dim)',
   extraction: 'var(--accent-blue)',
   validation: 'var(--warning)',
+  skill_loaded: 'var(--accent-purple)',
 };
 
 function fmtTime(iso: string): string {
@@ -34,6 +35,8 @@ function summarize(ev: AgentEvent): string {
   if (ev.eventType === 'validation')
     return `${ev.validationPassed ? 'PASS' : 'FAIL'}: ${ev.validationLabel}`;
   if (ev.eventType === 'status' || ev.eventType === 'text_delta') return ev.text ?? '';
+  if (ev.eventType === 'skill_loaded')
+    return `🎓 ${ev.text ?? `loaded skills: ${(ev.skills ?? []).join(', ')}`}`;
   return ev.text ?? '';
 }
 
@@ -84,9 +87,7 @@ export function LogEntry({ event }: { event: AgentEvent }) {
       >
         {event.stepId}
       </span>
-      <span style={{ color: 'var(--text-dim)', flex: 1, lineHeight: 1.5 }}>
-        {summarize(event)}
-      </span>
+      <span style={{ color: 'var(--text-dim)', flex: 1, lineHeight: 1.5 }}>{summarize(event)}</span>
     </div>
   );
 }

@@ -129,6 +129,24 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     p3Flags,
   });
 
+  // Stream a "skills loaded" audit signal (mirrors Claude Code's terminal
+  // skill-load notice). PUSH-injected skill bodies never fire a `Skill` tool_use
+  // event, so without this the operator can only see the loadout post-hoc in the
+  // commit trailer — never live. buildSkillsInjection just recorded the pushed
+  // set to `.context/loaded-skills.json`, so read it back (no re-rank/re-embed).
+  try {
+    const loaded = readStoryLoadedSkills(projectRoot);
+    if (loaded.length && deps.pushEvent) {
+      const names = loaded.map((s) => s.skill).filter(Boolean);
+      await deps.pushEvent(job.jobId, STORY_DEV_STEP_ID, STORY_DEV_AGENT_ID, 'skill_loaded', {
+        text: `loaded ${names.length} skill${names.length === 1 ? '' : 's'}: ${names.join(', ')}`,
+        skills: names,
+      });
+    }
+  } catch {
+    /* non-blocking telemetry — a missed event never affects the run */
+  }
+
   ensureDir(eventLogDir);
   const stdoutPath = join(eventLogDir, `${job.jobId}.story-dev.stdout.log`);
 

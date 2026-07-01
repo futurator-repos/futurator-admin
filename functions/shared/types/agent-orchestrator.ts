@@ -983,6 +983,7 @@ export type AgentEventType =
   | 'step_error'
   | 'extraction'
   | 'validation'
+  | 'skill_loaded'
   | 'compilation-started'
   | 'compilation-completed'
   | 'compilation-failed'
@@ -1032,6 +1033,9 @@ export interface AgentEvent {
 
   // text_delta / status
   text?: string;
+
+  // skill_loaded — skills PUSH-injected into a story-dev agent
+  skills?: string[];
 
   // tool_use
   toolName?: string;

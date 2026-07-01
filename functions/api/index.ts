@@ -1763,6 +1763,94 @@ app.get('/api/plans/:id/skills-learnings', async (c) => {
   });
 });
 
+// Pipeline-3 — full plan-development export for offline audit.
+// GET /api/plans/:id/export-p3
+// Bundles everything an auditor needs in ONE JSON: the plan row, every StoryNode
+// (state, metrics, bound-ACs, loadedSkills, jobId), each story-dev job WITH its
+// full event stream (timestamp + eventType + agent text — the live log, incl. the
+// `skill_loaded` events), the forensic skills rollup, and the reflector proposals.
+// Read-only. Lets the operator grep timestamps/agent text without the browser.
+app.get('/api/plans/:id/export-p3', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId).catch(() => null);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  const projectSlug = (plan as { appId?: string; name?: string }).appId ?? plan.name ?? planId;
+
+  const [storyRows, allJobs] = await Promise.all([
+    storyNodeRepo.getPlanStoryNodes(planId).catch(() => []),
+    agentJobsRepo.scanAllJobs().catch(() => []),
+  ]);
+
+  // Every AgentJob tied to this plan via storyNodeRef (story-dev + any others).
+  const planJobs = allJobs.filter((j) => {
+    const ref = (j as unknown as { storyNodeRef?: { planId?: string } }).storyNodeRef;
+    return ref?.planId === planId;
+  });
+
+  // Paginate a job's event stream to the end. Hard cap (20k events/job) is an
+  // audit-safety backstop, never a real story-dev volume.
+  const EVENT_PAGE = 500;
+  const MAX_PAGES = 40;
+  const allEvents = async (jobId: string) => {
+    const out: AgentEvent[] = [];
+    let after = '000000';
+    for (let p = 0; p < MAX_PAGES; p++) {
+      const { events, lastSeq } = await agentEventsRepo.getEventsAfter(jobId, after, EVENT_PAGE);
+      out.push(...events);
+      if (events.length < EVENT_PAGE || !lastSeq || lastSeq === after) break;
+      after = lastSeq;
+    }
+    return out;
+  };
+
+  const jobs = await Promise.all(
+    planJobs.map(async (j) => {
+      const ref = (j as unknown as { storyNodeRef?: { storyId?: string } }).storyNodeRef;
+      const events = await allEvents(j.jobId).catch(() => [] as AgentEvent[]);
+      return {
+        jobId: j.jobId,
+        jobType: (j as { jobType?: string }).jobType ?? null,
+        storyId: ref?.storyId ?? null,
+        status: j.status,
+        createdAt: j.createdAt,
+        updatedAt: j.updatedAt,
+        totalCost: (j as { totalCost?: number }).totalCost ?? null,
+        eventCount: events.length,
+        events: events.map((e) => ({
+          seq: e.seq,
+          timestamp: e.timestamp,
+          eventType: e.eventType,
+          stepId: e.stepId,
+          agentId: e.agentId,
+          text: e.text,
+          toolName: e.toolName,
+          toolInput: e.toolInput,
+          cost: e.cost,
+          ...(e.skills ? { skills: e.skills } : {}),
+        })),
+      };
+    }),
+  );
+
+  const { activatedSkills, perJob } = buildForensicSkills(
+    storyRows as unknown as Parameters<typeof buildForensicSkills>[0],
+    planJobs as unknown as Parameters<typeof buildForensicSkills>[1],
+  );
+  const reflections = await reflectionsService.listReflections({ projectSlug }).catch(() => []);
+
+  return c.json({
+    schema: 'futurator.p3-plan-export/v1',
+    exportedAt: new Date().toISOString(),
+    planId,
+    projectSlug,
+    plan,
+    stories: storyRows,
+    jobs,
+    skills: { activatedSkills, perJob },
+    reflections,
+  });
+});
+
 // pacman1 (2026-06-11) — operator retry for a failed wave gate (merge +
 // build-check). The wave-reducer only auto-re-mints TRANSIENT failures;
 // real build failures halt the epic in 'fixing' and, before this route,

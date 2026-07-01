@@ -279,7 +279,8 @@ export type AgentEventType =
   | 'step_complete'
   | 'step_error'
   | 'extraction'
-  | 'validation';
+  | 'validation'
+  | 'skill_loaded';
 
 export interface AgentEvent {
   jobId: string;
@@ -298,6 +299,8 @@ export interface AgentEvent {
   durationMs?: number;
   variableName?: string;
   variableValue?: string;
+  /** For `skill_loaded` events — the skills PUSH-injected into this story-dev agent. */
+  skills?: string[];
   extractorType?: string;
   validationLabel?: string;
   validationPassed?: boolean;

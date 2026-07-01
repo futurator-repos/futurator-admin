@@ -1,6 +1,9 @@
 'use client';
 
+import { useState } from 'react';
 import Link from 'next/link';
+import { Download, Loader2 } from 'lucide-react';
+import { api } from '@/lib/api-client';
 import type { PlanWithEpics } from '@/hooks/use-plans';
 import type { StoryGraphModel } from './adapter';
 import { PLAN_STATUS_META } from '@/components/labs/plan-dashboard/constants';
@@ -38,6 +41,8 @@ export function ProjectHero({ plan, model }: { plan: PlanWithEpics; model: Story
         <span>Plan Spec</span>
         <span>/</span>
         <span style={{ color: 'var(--text-dim)' }}>{name}</span>
+        <span style={{ flex: 1 }} />
+        <ExportJsonButton planId={plan.planId} name={name} />
       </div>
 
       <div style={{ display: 'flex', alignItems: 'flex-end', gap: 28, flexWrap: 'wrap' }}>
@@ -145,6 +150,71 @@ function HeroMetric({
       </div>
       <div style={{ fontSize: 22, color, fontWeight: 300, letterSpacing: '-0.01em' }}>{value}</div>
     </div>
+  );
+}
+
+/**
+ * Downloads the full plan-development audit bundle (plan + stories + every
+ * story-dev job's complete event stream with timestamps + agent text + the
+ * skill_loaded signals + reflections) as one JSON file. Mirrors the legacy
+ * pipeline's forensic export, but sourced from the P3 /export-p3 endpoint that
+ * discovers jobs via storyNodeRef.planId (legacy discovers via plan.epicIds,
+ * which P3 jobs lack).
+ */
+function ExportJsonButton({ planId, name }: { planId: string; name: string }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const download = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const data = await api.get<unknown>(`/plans/${planId}/export-p3`);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const slug = name.replace(/[^a-z0-9-]+/gi, '-').toLowerCase();
+      a.download = `p3-plan-${slug}-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'export failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={download}
+      disabled={busy}
+      title={
+        err ??
+        'Download the full plan development (logs + timestamps + agent text) as JSON for audit'
+      }
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 9px',
+        borderRadius: 4,
+        border: `1px solid ${err ? 'var(--destructive)' : 'var(--border)'}`,
+        background: 'var(--bg-elev)',
+        color: err ? 'var(--destructive)' : 'var(--text-dim)',
+        fontFamily: 'var(--font-mono)',
+        fontSize: 9,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        cursor: busy ? 'wait' : 'pointer',
+      }}
+    >
+      {busy ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
+      {err ? 'Retry export' : 'Export JSON'}
+    </button>
   );
 }
 

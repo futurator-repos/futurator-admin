@@ -103,7 +103,11 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
     const sp = new URLSearchParams(params.toString());
     sp.set('subtab', next);
     if (extra) for (const [k, v] of Object.entries(extra)) sp.set(k, v);
-    router.replace(`/labs3/?${sp.toString()}`);
+    // scroll:false — selecting a story deep in the Stories list must NOT yank the
+    // viewport back to the top. Without this, clicking a batch-1/2 story looked
+    // like a full page "refresh" (batch-0 clicks were invisible only because the
+    // scroll was already at the top).
+    router.replace(`/labs3/?${sp.toString()}`, { scroll: false });
   }
 
   // ── Loading / not-found ─────────────────────────────────────────────
