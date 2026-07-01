@@ -198,7 +198,12 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
       if (!boot?.ok) {
         return done({ passed: false, detail: `dev server did not boot (status=${boot?.status ?? 'unknown'})` });
       }
-      const url = `http://127.0.0.1:${boot.port}${qaContext.healthcheckPath ?? '/'}`;
+      // Navigate via `localhost`, NOT 127.0.0.1: Next.js 16 dev only allow-lists
+      // `localhost` as a dev origin, so a 127.0.0.1 page has its /_next resources
+      // cross-origin-blocked → the client never hydrates → the client-mounted
+      // window.__harness never appears → false "seam not mounted". (Verified live:
+      // 0.0.0.0-served app, 127.0.0.1 → harness absent, localhost → harness present.)
+      const url = `http://localhost:${boot.port}${qaContext.healthcheckPath ?? '/'}`;
       const playwright = await getPlaywright();
       return done(await runBrowserProbe({ url, actions: probe.actions, assertions: probe.assertions, playwright, log }));
     } catch (err) {
