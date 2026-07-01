@@ -6,6 +6,8 @@ interface DaemonStatus {
   alive: boolean;
   lastSeen: string | null;
   ageMs?: number;
+  /** Pipeline-3 ready-frontier dispatch mode: 'off' | 'shadow' | 'on' | null (unknown). */
+  p3ReadyFrontier?: string | null;
 }
 
 export function useDaemonStatus() {

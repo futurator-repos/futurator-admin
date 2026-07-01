@@ -28,6 +28,7 @@ import Link from 'next/link';
 import { usePlan } from '@/hooks/use-plans';
 import { useApp } from '@/hooks/use-apps';
 import { useStoryNodes } from '@/hooks/use-story-nodes';
+import { useDaemonStatus } from '@/hooks/use-daemon-status';
 import { Labs3Header } from './labs3-header';
 import { ProjectHero } from './project-hero';
 import { PipelineStrip } from './pipeline-strip';
@@ -68,6 +69,18 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
   // Single snapshot fetch — refetchInterval self-gates on active stories.
   const { data: stories } = useStoryNodes(planId);
   const rows = useMemo(() => stories ?? [], [stories]);
+  const { data: daemon } = useDaemonStatus();
+
+  // Dispatch warning: stories are ingested and pending, but the daemon's
+  // ready-frontier isn't 'on' — so nothing will actually build. Without this the
+  // graph just sits idle and looks like a silent hang.
+  const frontier = daemon?.p3ReadyFrontier;
+  const dispatchStalled =
+    rows.length > 0 &&
+    daemon?.alive === true &&
+    frontier != null &&
+    frontier !== 'on' &&
+    rows.some((r) => r.state === 'ready' || r.state === 'blocked');
   const model = useMemo(() => buildStoryGraphModel(rows), [rows]);
 
   // ── Sub-tab state (URL > localStorage > default 'graph') ────────────
@@ -166,6 +179,25 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
   return (
     <div style={{ color: 'var(--foreground)' }}>
       <Labs3Header planId={planId} />
+      {dispatchStalled && (
+        <div
+          role="status"
+          style={{
+            margin: '0 0 4px',
+            padding: '9px 14px',
+            borderRadius: 8,
+            border: '1px solid var(--warning, #f97316)',
+            background: 'color-mix(in srgb, var(--warning, #f97316) 10%, transparent)',
+            color: 'var(--foreground)',
+            fontSize: 12.5,
+            lineHeight: 1.5,
+          }}
+        >
+          Stories are ingested but the daemon dispatch frontier is <code>{frontier}</code> — nothing
+          will build until <code>P3_READY_FRONTIER=on</code> on the daemon. The graph below is the
+          plan, not live progress.
+        </div>
+      )}
       <ProjectHero plan={plan} model={model} />
       <PipelineStrip model={model} onSelectBatch={() => goToSubtab('graph')} />
 

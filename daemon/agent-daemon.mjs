@@ -1590,6 +1590,11 @@ async function writeHeartbeat() {
           createdAt: new Date().toISOString(),
           activeCount: activeJobs.size,
           maxConcurrent: MAX_CONCURRENT,
+          // Pipeline-3 ready-frontier dispatch mode (off|shadow|on). Surfaced so
+          // Labs3 can tell the operator whether ingested StoryNodes will actually
+          // be dispatched — an ingested plan whose frontier is off/shadow sits
+          // idle, which otherwise looks like a silent hang.
+          p3ReadyFrontier: (process.env.P3_READY_FRONTIER || 'off').toLowerCase(),
           // Story 20.16 — ConcurrencyManager snapshot. Lives alongside
           // the legacy `processes` array; UI diagnostics can use either.
           // The snapshot is cheap to compute (in-memory map walk) so we

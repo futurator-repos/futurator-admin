@@ -974,7 +974,10 @@ app.get('/api/daemon/status', async (c) => {
     return c.json({ alive: false, lastSeen: null });
   }
   const ageMs = Date.now() - new Date(heartbeat.updatedAt).getTime();
-  return c.json({ alive: ageMs < 10_000, lastSeen: heartbeat.updatedAt, ageMs });
+  // p3ReadyFrontier (off|shadow|on) lets Labs3 warn when ingested StoryNodes
+  // won't dispatch. Older heartbeats predate the field → null (unknown).
+  const p3ReadyFrontier = (heartbeat as { p3ReadyFrontier?: string }).p3ReadyFrontier ?? null;
+  return c.json({ alive: ageMs < 10_000, lastSeen: heartbeat.updatedAt, ageMs, p3ReadyFrontier });
 });
 
 // ── Epic Workflows (Labs — Agentic Workflow) ──
