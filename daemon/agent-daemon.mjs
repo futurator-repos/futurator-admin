@@ -22,7 +22,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { spawn, execSync } from 'child_process';
 import { mkdirSync, existsSync, readFileSync, statSync, appendFileSync, readdirSync } from 'fs';
-import { join as pathJoin, extname as pathExtname, relative as pathRelative } from 'path';
+import { join as pathJoin, extname as pathExtname, relative as pathRelative, basename as pathBasename } from 'path';
 import { createHash } from 'node:crypto';
 import { totalmem, freemem, loadavg } from 'os';
 import {
@@ -93,6 +93,12 @@ import {
 import { runStoryDevJob } from './pipelines/story-dev-pipeline.mjs';
 import { propagateCompletion, dependentsOf } from './lib/story-dispatch-driver.mjs';
 import { defaultExecutors } from './lib/test-executors.mjs';
+// P3-parity glue (INT wiring): full story-state write-back, fire-and-forget
+// code-knowledge-graph compile, and the reflector enqueue that P3's
+// plan-reducer bypass otherwise drops.
+import { buildStoryStateUpdate } from './lib/story-persist.mjs';
+import { runStoryCompileGraph } from './pipelines/lib/story-compile-graph.mjs';
+import { enqueueStoryReflector } from './pipelines/lib/story-reflector-hook.mjs';
 import { runUltracodeBenchJob } from './pipelines/ultracode-bench-job-runner.mjs';
 import { makeCaptureDeps } from './pipelines/ultracode-bench-capture.mjs';
 import { runDualAgentCompare } from './pipelines/dual-agent-compare-runner.mjs';
@@ -1704,15 +1710,26 @@ async function executeStoryDevJob(job) {
   const planId = job.storyNodeRef?.planId;
   await updateJobFields(job.jobId, { status: 'RUNNING', lastHeartbeatAt: new Date().toISOString() });
 
-  const updateStoryState = async ({ storyId: sid, state }) => {
+  // Read the plan row ONCE for rigor (gates skills commit trailer + reflector
+  // firing) and appId (the code-knowledge-graph namespace).
+  let planRow = null;
+  try {
+    planRow = (await ddb.send(new GetCommand({ TableName: PLANS_TABLE, Key: { planId } }))).Item;
+  } catch { /* tolerate — fall back to defaults */ }
+  const rigor = planRow?.rigor || 'mvp';
+  const appId = planRow?.appId || pathBasename(job.workingDir || '');
+
+  const updateStoryState = async ({ storyId: sid, state, verdict, acceptanceCriteria, commitSha, metrics, loadedSkills }) => {
     try {
+      // Glue aliases EVERY key (#state is a reserved word + GSI key), flattens
+      // metrics{} → cost/tokens/duration, persists the loaded skill set (forensic
+      // Skills tab reads it off the row), and appends updatedAt EXACTLY ONCE
+      // (no "Two document paths overlap"). We supply Key + TableName.
+      const upd = buildStoryStateUpdate({ state, verdict, acceptanceCriteria, commitSha, metrics, loadedSkills });
       await ddb.send(new UpdateCommand({
         TableName: PLAN_SPEC_GRAPH_TABLE,
         Key: { storyId: sid },
-        // `state` is the GSI key the ingest writes + a DynamoDB reserved word.
-        UpdateExpression: 'SET #state = :s, updatedAt = :n',
-        ExpressionAttributeNames: { '#state': 'state' },
-        ExpressionAttributeValues: { ':s': state, ':n': new Date().toISOString() },
+        ...upd,
       }));
     } catch (e) {
       log('warn', `[${short}] story state update failed (non-blocking): ${e.message}`);
@@ -1742,6 +1759,10 @@ async function executeStoryDevJob(job) {
     if (r.code === 0) headSha = r.stdout.trim();
   } catch { /* tolerate */ }
 
+  // Thread rigor to the dev pipeline so it gates the skills commit trailer and
+  // resolves the same rigor the reflector/compile phases use.
+  if (job.storyDevPayload) job.storyDevPayload.rigor = rigor;
+
   const result = await runStoryDevJob({
     job,
     eventLogDir: EVENT_LOG_DIR,
@@ -1755,16 +1776,107 @@ async function executeStoryDevJob(job) {
       git: daemonGit,
       updateStoryState,
       propagateCompletion: propagate,
+      // Live streaming into agent-events (use-agent-events reads it) + bounded
+      // fix-forward attempt budget.
+      pushEvent,
+      maxAttempts: MAX_DEV_ATTEMPTS_PER_STORY,
       logger: { info: (m) => log('info', m), warn: (m) => log('warn', m), error: (m) => log('error', m) },
     },
   });
 
   const ok = result.exitCode === 0 && result.newState !== 'failed';
+
+  if (ok) {
+    // Fire-and-forget: grow the code-knowledge-graph (the real Graph tab's data
+    // source) after every green story. Non-blocking — never fails the job.
+    runStoryCompileGraph({
+      projectId: appId,
+      workingDir: job.workingDir,
+      storyId,
+      planId,
+      headSha: result.commitSha,
+      rigor,
+      deps: {
+        spawn,
+        claudeBin: CLAUDE_BIN,
+        logger: { info: (m) => log('info', m), warn: (m) => log('warn', m) },
+      },
+    }).catch(() => { /* non-blocking */ });
+
+    // Enqueue the story-scope reflector that P3's plan-reducer bypass drops.
+    // Idempotent per scope; only fires when the rigor gate passes (production).
+    enqueueStoryReflector({
+      ddb,
+      plan: planRow,
+      storyId,
+      scope: 'story',
+      createJob: async (payload) => {
+        await ddb.send(new PutCommand({ TableName: JOBS_TABLE, Item: payload }));
+        return payload.jobId;
+      },
+      uuid: randomUUID,
+      log,
+    }).catch(() => { /* non-blocking */ });
+
+    // Plan-close reflector: story-scope reflection is production-only (v2.5
+    // §38.1), so an MVP plan would learn NOTHING from a completed run. When THIS
+    // story completing means every story is done, enqueue a PLAN-scope reflector
+    // (fires under any rigor) — the P3 equivalent of plan-reducer's plan-close
+    // reflection. The hook's conditional stamp on the plan row makes it
+    // idempotent, so concurrent last-completions race safely (exactly one wins).
+    try {
+      const { Items } = await ddb.send(new QueryCommand({
+        TableName: PLAN_SPEC_GRAPH_TABLE,
+        IndexName: 'planId-cohortBatch-index',
+        KeyConditionExpression: 'planId = :p',
+        ExpressionAttributeValues: { ':p': planId },
+      }));
+      const nodes = Items || [];
+      // Treat the just-completed story as done regardless of GSI propagation lag
+      // (its 'done' write may not be visible on the eventually-consistent index yet).
+      const allDone =
+        nodes.length > 0 && nodes.every((n) => n.state === 'done' || n.storyId === storyId);
+      if (allDone) {
+        await enqueueStoryReflector({
+          ddb,
+          plan: planRow,
+          scope: 'plan',
+          createJob: async (payload) => {
+            await ddb.send(new PutCommand({ TableName: JOBS_TABLE, Item: payload }));
+            return payload.jobId;
+          },
+          uuid: randomUUID,
+          log,
+        });
+      }
+    } catch (e) {
+      log('warn', `[${short}] plan-close reflector check failed (non-blocking): ${e.message}`);
+    }
+  } else if (result.attemptsUsed >= MAX_DEV_ATTEMPTS_PER_STORY) {
+    // Bounded fix-forward exhausted — surface for operator attention with the
+    // real failing-test detail from the last attempt.
+    await writeAttentionItem(ddb, {
+      planId,
+      dedupKey: `story-dev-fix-exhausted:${storyId}`,
+      severity: 'high',
+      category: 'dev-retry-exhausted',
+      title: `Story ${storyId} exhausted ${result.attemptsUsed} dev attempts`,
+      body: result.lastFailureDetail || 'bound-AC never passed',
+      context: { jobId: job.jobId, planId, storyId, attempts: result.attemptsUsed },
+      suggestedActions: [
+        { label: 'Retry step', kind: 'retry-step' },
+        { label: 'Skip story', kind: 'skip-step' },
+        { label: 'Open logs', kind: 'open-logs' },
+      ],
+    }, log);
+  }
+
   // updateJobFields ALWAYS appends updatedAt — do NOT pass it (duplicate path →
   // "Two document paths overlap" → the status write throws → the job never
   // reaches terminal → the poll loop re-runs it forever).
   await updateJobFields(job.jobId, { status: ok ? 'COMPLETED' : 'FAILED' });
-  log(ok ? 'info' : 'error', `[${short}] story-dev ${storyId} → ${result.newState || `exit ${result.exitCode}`}`);
+  log(ok ? 'info' : 'error', `[${short}] story-dev ${storyId} → ${result.newState || `exit ${result.exitCode}`}` +
+    (result.attemptsUsed ? ` (${result.attemptsUsed} attempt${result.attemptsUsed === 1 ? '' : 's'})` : ''));
 }
 
 async function scanStaleEpicDevJobs() {
@@ -7552,6 +7664,7 @@ async function executeScanEngineJob(job) {
   const infraPath = new URL('./scripts/refactor-recon/infra-extract.mjs', import.meta.url).pathname;
   const eslintPath = new URL('./scripts/refactor-recon/eslint-detect.mjs', import.meta.url).pathname;
   const securityPath = new URL('./scripts/refactor-recon/security-scan.mjs', import.meta.url).pathname;
+  const sddPath = new URL('./scripts/refactor-recon/sdd-detect.mjs', import.meta.url).pathname;
 
   // Spawn a plain Node child (deterministic stages — never the agent path).
   const spawnNode = (args, cwd) =>
@@ -7640,6 +7753,7 @@ async function executeScanEngineJob(job) {
         let infra = null;
         let eslint = null;
         let security = null;
+        let sdd = null;
         if (reuseDetectors) {
           const pr = rj('privacy.json');
           if (pr) privacySummary = summarizePrivacyReport(pr);
@@ -7647,6 +7761,7 @@ async function executeScanEngineJob(job) {
           infra = rj('infra.json');
           eslint = rj('eslint.json');
           security = rj('security.json');
+          sdd = rj('sdd.json');
         } else {
           // Privacy/compliance lane. Default 'internal' (our own scanner, ~0 LLM,
           // source stays on the box); 'external' routes to the data-privacy service.
@@ -7684,6 +7799,11 @@ async function executeScanEngineJob(job) {
             await spawnNode([securityPath, repo, '--src', p.src || 'src', '--out', pathJoin(od, 'security.json')], repo);
             security = rj('security.json');
           } catch (se) { log('warn', `[${short}] scan-engine security detector failed (non-fatal): ${se?.message || se}`); }
+          // SDD-readiness detector — content-signal (design intent anywhere), always runnable.
+          try {
+            await spawnNode([sddPath, repo, '--out', pathJoin(od, 'sdd.json')], repo);
+            sdd = rj('sdd.json');
+          } catch (de) { log('warn', `[${short}] scan-engine SDD detector failed (non-fatal): ${de?.message || de}`); }
         }
         const graph = rj('graph.resolved.json') || rj('graph.json') || { nodes: [] };
         const resolved = rj('resolved-imports.json') || {};
@@ -7696,6 +7816,7 @@ async function executeScanEngineJob(job) {
           infra,
           eslint,
           security,
+          sdd,
           // knip actually produced data? (else the clutter axis is degraded)
           knipRan: hotspotsDoc.toolStatus?.knip === 'ok',
           // Anchor = graphify nodes ∪ the REAL on-disk source files. graphify only

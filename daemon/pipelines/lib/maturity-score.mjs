@@ -90,11 +90,22 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     add('tdd-maturity', 'TDD maturity (tests written)', null, 'add tests detector', false);
   }
 
-  // 9. SDD-driven (spec-driven development).
+  // 9. SDD-driven (captured design intent). 0 specs → 0 (a spec-less brownfield can't
+  //    be changed safely). Otherwise: presence (0.3) + signal DIVERSITY (ADRs / PRDs /
+  //    design / stories / API-contracts, +0.14 each) — breadth of intent beats volume.
   if (sdd && sdd.specCount != null) {
-    add('sdd-driven', 'SDD-driven (specs)', scoreFromCount(Math.max(0, 8 - sdd.specCount), 8), `${sdd.specCount} spec files`);
+    const score = sdd.specCount === 0 ? 0 : clamp01(0.3 + 0.14 * (sdd.signals || 0));
+    const t = sdd.byType || {};
+    const present = [
+      t.adr ? `${t.adr} ADR` : '',
+      t.prd ? `${t.prd} PRD` : '',
+      t.designDoc || t.design ? `${t.designDoc || t.design} design` : '',
+      t.story ? `${t.story} story` : '',
+      t.apiContract ? `${t.apiContract} API-contract` : '',
+    ].filter(Boolean).join(' · ');
+    add('sdd-driven', 'SDD-driven (design intent)', score, sdd.specCount === 0 ? 'no captured design intent — characterize before refactor' : `${sdd.specCount} spec artifact(s): ${present || 'docs'}`);
   } else {
-    add('sdd-driven', 'SDD-driven (specs)', null, 'add SDD detector (your spec work)', false);
+    add('sdd-driven', 'SDD-driven (design intent)', null, 'add SDD detector', false);
   }
 
   // 10. Infra-as-code (declared) — the cost-center precondition + agent-tractability

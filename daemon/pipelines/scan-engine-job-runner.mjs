@@ -209,6 +209,7 @@ export async function runScanEngine(job, deps) {
     ...hotspots.map((h) => hotspotToFinding(h, hubSet)),
     ...(art.privacySummary ? privacyToFindings(art.privacySummary) : []),
     ...(Array.isArray(art.security?.findings) ? art.security.findings : []),
+    ...(Array.isArray(art.sdd?.findings) ? art.sdd.findings : []),
   ].map((f) => ({ ...f, producedBy: 'deterministic' }));
 
   /** Run a set of swarm tasks → flat findings, each stamped with its task key. */
@@ -288,7 +289,7 @@ export async function runScanEngine(job, deps) {
     eslint: art.eslint || null,
     graphAvailable: anchored.size > 0,
     knipRan: !!art.knipRan,
-    sdd: art.sdd || null,
+    sdd: art.sdd?.summary || null,
     infra,
     security: art.security?.summary || null,
   });

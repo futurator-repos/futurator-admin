@@ -90,6 +90,16 @@ describe('computeMaturity', () => {
     expect(axes.find((a) => a.key === 'structure-sanity').status).toBe('poor');
   });
 
+  it('SDD axis: spec-less → poor; diverse design intent → good', () => {
+    const none = computeMaturity({ sdd: { specCount: 0, signals: 0, byType: {} } }).axes.find((a) => a.key === 'sdd-driven');
+    expect(none.measured).toBe(true);
+    expect(none.status).toBe('poor');
+    expect(none.detail).toMatch(/characterize/);
+
+    const rich = computeMaturity({ sdd: { specCount: 12, signals: 4, byType: { adr: 3, design: 4, apiContract: 2, prd: 3 } } }).axes.find((a) => a.key === 'sdd-driven');
+    expect(rich.status).toBe('good'); // 0.3 + 0.14*4 = 0.86
+  });
+
   it('lights up TDD maturity from a tests summary', () => {
     const { axes } = computeMaturity({ tests: { testFiles: 30, sourceFiles: 100, ratio: 0.3, runner: 'vitest', hasTests: true } });
     const tdd = axes.find((a) => a.key === 'tdd-maturity');
