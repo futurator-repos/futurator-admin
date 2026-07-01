@@ -40,6 +40,40 @@ describe('classifyAcs', () => {
     expect(b.advisoryTaste.map((x) => x.id)).toEqual(['t']);
     expect(b.manual.map((x) => x.id)).toEqual(['m']);
   });
+
+  it('advisory class WINS over the manual/browser routing (stays non-blocking)', () => {
+    // A browser/appearance advisory AC bound as manual must NOT fall into the
+    // manual bucket — else it routes to pending → needs-human and fails the story.
+    const b = classifyAcs([
+      ac('vt', { acClass: 'advisory-taste', verify: 'manual' }),
+      ac('vs', { acClass: 'advisory-security', testBinding: { testKind: 'manual' } }),
+      ac('bm', { acClass: 'deterministic', verify: 'manual' }),
+    ]);
+    expect(b.advisoryTaste.map((x) => x.id)).toEqual(['vt']);
+    expect(b.advisorySecurity.map((x) => x.id)).toEqual(['vs']);
+    expect(b.manual.map((x) => x.id)).toEqual(['bm']); // only the deterministic-manual AC
+  });
+});
+
+describe('evaluateCompletion — advisory browser AC does not stall the story', () => {
+  const SHA = 'sha1';
+  it('deterministic pass + failing advisory-taste browser AC → done (not needs-human)', () => {
+    const r = evaluateCompletion({
+      acceptanceCriteria: [
+        passing('det', SHA),
+        ac('vis', {
+          acClass: 'advisory-taste',
+          needsBrowser: true,
+          verify: 'appearance',
+          testBinding: { status: 'failing', testKind: 'manual' },
+        }),
+      ],
+      currentHeadSha: SHA,
+    });
+    expect(r.status).toBe('done'); // advisory visual defers to the VQA wave gate
+    expect(r.done).toBe(true);
+    expect(r.pending).toEqual([]);
+  });
 });
 
 describe('bindAc / applyBindings', () => {

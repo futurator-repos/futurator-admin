@@ -44,11 +44,16 @@ export function parseBindingManifest(text) {
 export function classifyAcs(acs = []) {
   const buckets = { deterministic: [], advisoryTaste: [], advisorySecurity: [], manual: [] };
   for (const ac of acs) {
-    if (ac.verify === 'manual' || ac.testBinding?.testKind === 'manual') { buckets.manual.push(ac); continue; }
     const cls = ac.acClass || 'deterministic';
-    if (cls === 'advisory-security') buckets.advisorySecurity.push(ac);
-    else if (cls === 'advisory-taste') buckets.advisoryTaste.push(ac);
-    else buckets.deterministic.push(ac);
+    // Advisory class takes PRECEDENCE over the manual/browser routing. An
+    // advisory AC is non-blocking by design (only advisory-security can block,
+    // via a reviewer fail); routing it to `manual` first would land a browser/
+    // appearance advisory AC in pending → needs-human and wrongly FAIL the story
+    // (its visual check belongs at the VQA wave gate, not the per-story gate).
+    if (cls === 'advisory-security') { buckets.advisorySecurity.push(ac); continue; }
+    if (cls === 'advisory-taste') { buckets.advisoryTaste.push(ac); continue; }
+    if (ac.verify === 'manual' || ac.testBinding?.testKind === 'manual') { buckets.manual.push(ac); continue; }
+    buckets.deterministic.push(ac);
   }
   return buckets;
 }
