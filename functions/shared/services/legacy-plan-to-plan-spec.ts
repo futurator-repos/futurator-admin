@@ -78,6 +78,76 @@ function storyToNode(story: EpicStory, epic: EpicWorkflow): StoryNode {
   };
 }
 
+// ── Dependency derivation (for legacy plans that carry no story-level deps) ──
+
+const FOUNDATION_RE =
+  /\b(types?|constants?|config(uration)?|setup|scaffold(ing)?|schema|enums?|interfaces?|boilerplate|registry|register|models?)\b/i;
+const INTEGRATION_RE =
+  /\b(assembl\w*|integrat\w*|compose|composit\w*|end-to-end|full[- ](game|app|build|flow)|the complete)\b/i;
+
+/** foundation < feature < integration — a strict layer order (used as a DAG spine). */
+const LAYER = { foundation: 0, feature: 1, integration: 2 } as const;
+type StoryLayer = keyof typeof LAYER;
+
+function classifyStory(s: StoryNode): StoryLayer {
+  const title = s.title || '';
+  const epicWide = (s.touches || []).includes(EPIC_WIDE_TOUCH);
+  // Integration first: an "assemble the whole thing" / epic-wide story must land last.
+  if (epicWide || INTEGRATION_RE.test(title)) return 'integration';
+  if (FOUNDATION_RE.test(title)) return 'foundation';
+  return 'feature';
+}
+
+function concreteTouches(s: StoryNode): string[] {
+  return (s.touches || []).filter((t) => t && t !== EPIC_WIDE_TOUCH);
+}
+
+/**
+ * Derive story dependency edges when the legacy plan carries NONE — the common
+ * case, since the epic/story model has no story-level ordering, so every story
+ * lands in one flat `cohortBatch` and the ready-frontier can't stage the work.
+ *
+ * Produces a DAG so ingest's Kahn layering yields real batches:
+ *   - A strict class spine (foundation → feature → integration): every story
+ *     depends on ALL stories in a strictly-lower layer. Because layers are a
+ *     total order, these cross-layer edges can never form a cycle.
+ *   - A same-layer shared-touch edge (earlier→later in list order) whenever two
+ *     stories write the same concrete file, so siblings that would collide on a
+ *     shared file are serialized instead of racing the commit lock.
+ *
+ * No-op when ANY story already declares `depends_on` (a plan with real edges is
+ * trusted verbatim) or when there are fewer than 2 stories.
+ *
+ * @returns the number of edges added (0 when skipped) — handy for tests/telemetry.
+ */
+export function deriveStoryDependencies(stories: StoryNode[]): number {
+  if (stories.length < 2) return 0;
+  if (stories.some((s) => (s.depends_on?.length ?? 0) > 0)) return 0; // trust real deps
+
+  const layers = stories.map((s) => LAYER[classifyStory(s)]);
+  const touchSets = stories.map((s) => new Set(concreteTouches(s)));
+  let added = 0;
+
+  for (let i = 0; i < stories.length; i++) {
+    const deps = new Set<string>();
+    for (let j = 0; j < stories.length; j++) {
+      if (j === i) continue;
+      if (layers[j] < layers[i]) {
+        deps.add(stories[j].storyId); // lower layer → dependency (acyclic by construction)
+      } else if (layers[j] === layers[i] && j < i && touchSets[i].size) {
+        for (const t of touchSets[j])
+          if (touchSets[i].has(t)) {
+            deps.add(stories[j].storyId);
+            break;
+          }
+      }
+    }
+    stories[i].depends_on = [...deps];
+    added += deps.size;
+  }
+  return added;
+}
+
 /**
  * Convert a legacy plan + its epics into a plan_spec. PURE.
  *
@@ -92,6 +162,11 @@ export function convertPlanToPlanSpec(plan: Plan, epics: EpicWorkflow[], now: st
       stories.push(storyToNode(story, epic));
     }
   }
+
+  // Legacy plans usually carry no story-level dependencies → one flat batch.
+  // Derive a foundation→feature→integration DAG so the frontier stages real
+  // waves. No-op when the plan already declares its own edges.
+  deriveStoryDependencies(stories);
 
   // Filter depends_on to ids present in the spec so a stale cross-epic / removed
   // reference can't dangling-reject the whole conversion.
