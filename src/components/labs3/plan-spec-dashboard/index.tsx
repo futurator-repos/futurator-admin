@@ -40,6 +40,9 @@ import { HierarchyView } from '../views/hierarchy-view';
 import { StreamView } from '../views/stream-view';
 import { QaReviewView } from '../views/qa-review-view';
 import { GrowthView } from '../views/growth-view';
+// Legacy code-knowledge-graph view — project-scoped Memgraph/Mycelium viewer.
+// Reused here as the 'codegraph' surface (the REAL "Graph" tab).
+import { GraphView } from '@/components/labs/plan-dashboard/views/graph-view';
 
 const VALID_SUBTABS: Labs3Subtab[] = LABS3_SUBTABS.map((t) => t.id);
 
@@ -170,6 +173,10 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
 
       <div style={{ paddingTop: 24, paddingBottom: 60 }}>
         {activeSubtab === 'graph' && <SpecGraphView {...viewProps} />}
+
+        {/* Code knowledge graph — files/symbols/imports grown by the compile phase
+            after every green story. projectId = appId (same as legacy GraphView). */}
+        {activeSubtab === 'codegraph' && <GraphView projectId={appId} />}
 
         {activeSubtab === 'gitgraph' && (
           <Labs3GitGraphView

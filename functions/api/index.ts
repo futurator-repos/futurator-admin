@@ -178,6 +178,8 @@ import { reducePlan } from '../shared/services/plan-reducer';
 import { buildPlanReducerDeps } from '../shared/services/reduce-deps';
 // PR-76 (Story 3-E-3-1) — Reflection Inbox service + types.
 import * as reflectionsService from '../shared/services/reflections-service';
+// Pipeline-3 parity (G4) — forensic Skills & Learnings rollup for a plan.
+import { buildForensicSkills } from '../shared/services/story-forensic-skills';
 import type { ReflectionStatus } from '../shared/types/reflection';
 import { buildQaReport } from '../shared/repositories/qa-report-aggregator';
 import { buildDeployReport } from '../shared/repositories/deploy-report-aggregator';
@@ -1685,6 +1687,79 @@ app.get('/api/plans/:id/instincts', async (c) => {
   return c.json(feed);
 });
 
+// Pipeline-3 parity (G4) — Skills & Learnings forensic rollup for a plan.
+// GET /api/plans/:id/skills-learnings
+// Surfaces, for the Labs3 "Skills & Learnings" tab:
+//   - activatedSkills / perJob : skills the plan's story-dev jobs actually loaded
+//     (buildForensicSkills over the plan-spec-graph rows + story-dev job rows).
+//   - reflectorJobs            : the REFLECTOR jobs the story-reflector-hook
+//     enqueued at story close (the P3 gap plan-reducer used to fill).
+//   - reflections              : REFLECTOR's distilled proposals for the project.
+// Read-only. Returns empty arrays for a plan never run as Pipeline-3 so the tab
+// always renders (mirrors the /story-nodes + /instincts seams above).
+app.get('/api/plans/:id/skills-learnings', async (c) => {
+  const planId = c.req.param('id');
+  const plan = await planRepo.getPlanById(planId).catch(() => null);
+  const projectSlug =
+    (plan as { appId?: string; name?: string } | null)?.appId ?? plan?.name ?? planId;
+
+  const [storyRows, allJobs] = await Promise.all([
+    storyNodeRepo.getPlanStoryNodes(planId).catch(() => []),
+    agentJobsRepo.scanAllJobs().catch(() => []),
+  ]);
+
+  // P3 story-dev jobs for this plan — carry storyNodeRef.planId.
+  const planJobs = allJobs.filter((j) => {
+    const ref = (j as unknown as { storyNodeRef?: { planId?: string } }).storyNodeRef;
+    return ref?.planId === planId;
+  });
+
+  // REFLECTOR jobs the hook enqueued for this plan.
+  const reflectorJobs = allJobs
+    .filter((j) => {
+      if ((j as { jobType?: string }).jobType !== 'reflector') return false;
+      const p = (j as unknown as { reflectorPayload?: { planId?: string } }).reflectorPayload;
+      return p?.planId === planId;
+    })
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+    .slice(0, 20)
+    .map((j) => {
+      const p = (
+        j as unknown as {
+          reflectorPayload?: {
+            scope?: string;
+            storyId?: string;
+            waveNumber?: number | null;
+          };
+        }
+      ).reflectorPayload;
+      return {
+        jobId: j.jobId,
+        status: j.status,
+        createdAt: j.createdAt,
+        scope: p?.scope ?? null,
+        storyId: p?.storyId ?? null,
+        waveNumber: p?.waveNumber ?? null,
+      };
+    });
+
+  const { activatedSkills, perJob } = buildForensicSkills(
+    storyRows as unknown as Parameters<typeof buildForensicSkills>[0],
+    planJobs as unknown as Parameters<typeof buildForensicSkills>[1],
+  );
+
+  const reflections = await reflectionsService.listReflections({ projectSlug }).catch(() => []);
+
+  return c.json({
+    planId,
+    projectSlug,
+    activatedSkills,
+    perJob,
+    reflectorJobs,
+    reflections,
+  });
+});
+
 // pacman1 (2026-06-11) — operator retry for a failed wave gate (merge +
 // build-check). The wave-reducer only auto-re-mints TRANSIENT failures;
 // real build failures halt the epic in 'fixing' and, before this route,
@@ -1953,7 +2028,7 @@ app.post('/api/plans/from-intent', async (c) => {
     devModel: plan.devModel,
     // PR-13 — `nextjs` was renamed to `nextjs-base` (the registry key).
     boilerplateType: 'nextjs-base',
-    rigor: plan.rigor,
+    rigor: plan.rigor ?? 'mvp',
     kind: plan.kind, // PR-23d — drives the brownfield clause for change plans.
   });
   await agentJobsRepo.createJob({
@@ -2723,7 +2798,7 @@ app.post('/api/plans/:id/regenerate', async (c) => {
     executionMode: plan.executionMode,
     devModel: plan.devModel,
     boilerplateType: regenBoilerplateType,
-    rigor: plan.rigor,
+    rigor: plan.rigor ?? 'mvp',
     kind: plan.kind, // PR-23d
   });
   await agentJobsRepo.createJob({
@@ -10855,7 +10930,10 @@ app.post('/api/conversations/:conversationId/messages', async (c) => {
       mode: conversation.mode,
       systemPromptSource: conversation.systemPromptSource,
     },
-  } as import('../shared/types/agent-orchestrator').AgentJob);
+    // Intentionally a partial agent-turn job: `agentTurnPayload` is a
+    // daemon-only side-channel field not on the base AgentJob shape, so the
+    // structural cast can't overlap — coerce via `unknown`.
+  } as unknown as import('../shared/types/agent-orchestrator').AgentJob);
 
   await agentConversationsRepo.updateConversationFields(conversationId, {
     messageCount: conversation.messageCount + 1,
@@ -11286,7 +11364,9 @@ app.post('/api/apps', authMiddleware, async (c) => {
         409,
       );
     }
-    createdRepo = data;
+    // Unwrap the idempotent { existing, repo } shape — the `existing:true`
+    // case already threw above, so any remaining wrapper carries the repo.
+    createdRepo = 'existing' in data ? data.repo : data;
   } catch (err) {
     if (err instanceof AppError) throw err;
     if (err instanceof GitHubError) {
@@ -12464,8 +12544,8 @@ app.post('/api/apps/:appId/plans', authMiddleware, async (c) => {
       intent: plan.intent,
       executionMode: plan.executionMode,
       devModel: plan.devModel,
-      boilerplateType: appRow.boilerplateType ?? 'nextjs',
-      rigor: plan.rigor,
+      boilerplateType: normalizeBoilerplateType(appRow.boilerplateType ?? 'nextjs'),
+      rigor: plan.rigor ?? 'mvp',
       kind: parsed.data.kind, // PR-23d — brownfield mode for kind='change'.
     });
     await agentJobsRepo.createJob({

@@ -19,7 +19,7 @@ function plan(extras: Partial<Plan> & { appId?: string } = {}): Plan {
     createdAt: '',
     updatedAt: '',
     createdBy: 'tester',
-    ...(extras as Plan),
+    ...extras,
   };
 }
 

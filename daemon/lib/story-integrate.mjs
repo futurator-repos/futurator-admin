@@ -30,10 +30,11 @@ function stageArgs(touches) {
  *   planBranch?: string,   // when set, ensure the tree is on it before committing
  *   git: (args: string[], cwd: string) => Promise<{ code: number, stdout: string, stderr: string }>,
  *   lock?: typeof withCommitLock,
+ *   extraCommitFlagBodies?: string[],  // additional -m bodies (skills trailer, metadata); ARRAY args — NO shell-quoting
  * }} args
  * @returns {Promise<{ committed: boolean, sha?: string, reason?: string, branch?: string }>}
  */
-export async function integrateStory({ repoDir, touches, storyId, title, planBranch, git, lock = withCommitLock }) {
+export async function integrateStory({ repoDir, touches, storyId, title, planBranch, git, lock = withCommitLock, extraCommitFlagBodies = [] }) {
   if (!git) throw new Error('integrateStory: git helper required');
   return lock(repoDir, async () => {
     // Put the shared tree on the plan branch (idempotent) before the first commit.
@@ -55,7 +56,10 @@ export async function integrateStory({ repoDir, touches, storyId, title, planBra
     }
 
     const msg = `story(${storyId}): ${title || 'implement'}\n\nPipeline-3 per-story commit (shared-tree, no merge).`;
-    const commit = await git(['commit', '-m', msg], repoDir);
+    const commit = await git(
+      ['commit', '-m', msg, ...extraCommitFlagBodies.flatMap((b) => ['-m', b])],
+      repoDir,
+    );
     if (commit.code !== 0) return { committed: false, reason: `git commit failed: ${(commit.stderr || '').slice(0, 200)}`, branch };
 
     const head = await git(['rev-parse', 'HEAD'], repoDir);

@@ -18,7 +18,9 @@ vi.mock('../../scripts/lib/voyage-embed.mjs', () => ({
   embedText: (...args) => embedTextMock(...args),
 }));
 
-const { buildSkillsPushPrompt, buildSkillsPromptLine } = await import('../skills-prompt.mjs');
+const { buildSkillsPushPrompt, buildSkillsPromptLine, selectPushedSkillNames } = await import(
+  '../skills-prompt.mjs'
+);
 
 let wd;
 
@@ -123,5 +125,53 @@ describe('buildSkillsPushPrompt', () => {
     expect(applyIdx).toBeGreaterThanOrEqual(0);
     // Pushed bodies are truncated — neither full 20k body survives intact.
     expect(out.includes(huge)).toBe(false);
+  });
+});
+
+describe('selectPushedSkillNames', () => {
+  it('returns the SAME skills whose bodies buildSkillsPushPrompt injects', async () => {
+    for (const n of ['s1', 's2', 's3', 's4', 's5']) {
+      writeSkill(n, `${n} desc`, `${n.toUpperCase()}-BODY content`);
+    }
+    writeSidecar({
+      s1: [1, 0],
+      s2: [0.9, 0.1],
+      s3: [0.8, 0.2],
+      s4: [0.1, 0.9],
+      s5: [0, 1],
+    });
+    embedTextMock.mockResolvedValue([1, 0]); // closest to s1,s2,s3
+
+    const { pushed, ranked } = await selectPushedSkillNames(wd, 'story text');
+    expect(ranked).toBe(true);
+    expect(pushed).toEqual(['s1', 's2', 's3']); // top-3 by cosine, in rank order
+
+    // And they match the bodies actually pushed into the prompt.
+    const out = await buildSkillsPushPrompt(wd, 'story text');
+    for (const name of pushed) expect(out).toContain(`${name.toUpperCase()}-BODY`);
+  });
+
+  it('returns [] when there is no relevance signal (name-list fallback path)', async () => {
+    writeSkill('alpha', 'alpha desc', 'ALPHA-BODY');
+    writeSkill('zeta', 'zeta desc', 'ZETA-BODY');
+    // No sidecar → not ranked, no pins → buildSkillsPushPrompt pushes no body.
+    const { pushed, ranked } = await selectPushedSkillNames(wd, 'do a thing');
+    expect(ranked).toBe(false);
+    expect(pushed).toEqual([]);
+    expect(embedTextMock).not.toHaveBeenCalled();
+  });
+
+  it('returns [] with no story text (mirrors the sync fallback)', async () => {
+    writeSkill('alpha', 'alpha desc');
+    expect(await selectPushedSkillNames(wd, '')).toEqual({ pushed: [], ranked: false });
+  });
+
+  it('does not throw when embedText fails', async () => {
+    writeSkill('alpha', 'alpha desc', 'ALPHA-BODY');
+    writeSidecar({ alpha: [1, 0] });
+    embedTextMock.mockRejectedValue(new Error('VOYAGE_API_KEY not set'));
+    const res = await selectPushedSkillNames(wd, 'task');
+    // embed failure → rankLoadoutItems reports ranked:false → name-list fallback.
+    expect(res.pushed).toEqual([]);
   });
 });

@@ -31,7 +31,7 @@ describe('PR-59 — framework-detect snippet', () => {
   it('detects Next.js → port 3000 + --hostname flag', () => {
     const s = buildFrameworkDetectSnippet({ cwd });
     expect(s).toMatch(/grep -q '"next"' package\.json/);
-    expect(s).toMatch(/QA_FRAMEWORK=next.*QA_PORT=3000/s);
+    expect(s).toMatch(/QA_FRAMEWORK=next[\s\S]*QA_PORT=3000/);
     // Critical: Next.js wants --hostname, not --host. spyhunter-1 hit the
     // mirror-image bug (--hostname against Vite); guard both directions.
     expect(s).toMatch(/QA_FRAMEWORK=next[\s\S]*?--hostname 0\.0\.0\.0/);
@@ -40,7 +40,7 @@ describe('PR-59 — framework-detect snippet', () => {
   it('detects Vite → port 5173 + --host flag', () => {
     const s = buildFrameworkDetectSnippet({ cwd });
     expect(s).toMatch(/grep -q '"vite"' package\.json/);
-    expect(s).toMatch(/QA_FRAMEWORK=vite.*QA_PORT=5173/s);
+    expect(s).toMatch(/QA_FRAMEWORK=vite[\s\S]*QA_PORT=5173/);
     // Vite uses --host (no "name"). spyhunter-1 forensic 2026-05-08.
     expect(s).toMatch(/QA_FRAMEWORK=vite[\s\S]*?--host 0\.0\.0\.0/);
     // Make sure we don't accidentally pass --hostname to Vite.

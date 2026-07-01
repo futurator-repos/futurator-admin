@@ -212,8 +212,12 @@ function SkillsPanel({ planId }: { planId: string }) {
     isLoading: fLoading,
     error: fError,
   } = useQuery({
-    queryKey: ['plan-forensic-skills', planId],
-    queryFn: () => api.get<{ skills?: ForensicSkills }>(`/plans/${planId}/timing/forensic`),
+    queryKey: ['plan-skills-learnings', planId],
+    // P3-aware route: discovers story-dev jobs by storyNodeRef.planId and reads
+    // the loaded skill set off the plan-spec-graph rows. The legacy
+    // /timing/forensic discovered jobs via plan.epicIds — which P3 jobs don't
+    // carry — so it always came back empty for a Pipeline-3 run.
+    queryFn: () => api.get<ForensicSkills>(`/plans/${planId}/skills-learnings`),
     staleTime: 60_000,
   });
 
@@ -228,11 +232,11 @@ function SkillsPanel({ planId }: { planId: string }) {
     return m;
   }, [catalog?.skills]);
 
-  const activated = forensic?.skills?.activatedSkills ?? [];
+  const activated = forensic?.activatedSkills ?? [];
 
   const jobsForSkill = useMemo(() => {
     const m = new Map<string, string[]>();
-    for (const j of forensic?.skills?.perJob ?? []) {
+    for (const j of forensic?.perJob ?? []) {
       for (const s of j.skills ?? []) {
         const arr = m.get(s.skill) ?? [];
         arr.push(j.jobId);
@@ -240,7 +244,7 @@ function SkillsPanel({ planId }: { planId: string }) {
       }
     }
     return m;
-  }, [forensic?.skills?.perJob]);
+  }, [forensic?.perJob]);
 
   return (
     <Panel

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { resolveRolePolicy, policyToAgentConfig } from '../role-policy';
 // Daemon mirror is .mjs; vitest resolves both ext flavors at runtime.
-// @ts-expect-error — pure-JS mirror has no .d.ts
+// (pure-JS mirror has no .d.ts, but the module now resolves under the current tsconfig)
 import {
   buildAgentConfig as buildAgentConfigMjs,
   SHARED_ROLES,

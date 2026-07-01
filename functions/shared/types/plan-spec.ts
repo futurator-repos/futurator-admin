@@ -103,6 +103,25 @@ export type StoryNodeState =
   | 'done'
   | 'failed';
 
+/**
+ * Deterministic completion verdict written by the story-dev pipeline.
+ * Mirrors the return shape of `evaluateCompletion` in completion-gate.mjs.
+ */
+export interface StoryVerdict {
+  done: boolean;
+  status: 'done' | 'failing' | 'blocked' | 'needs-human';
+  /** AC ids that failed their deterministic bound test. */
+  failing: string[];
+  /** AC ids blocked by an advisory-security reviewer fail. */
+  blocking: string[];
+  /** AC ids with non-blocking advisory-taste reviewer fails. */
+  attention: string[];
+  /** AC ids awaiting manual verification. */
+  pending: string[];
+  /** Human-readable failure reasons (one per blocking issue). */
+  reasons: string[];
+}
+
 /** The persisted plan-spec-graph row (StoryNode + scheduling/lifecycle columns). */
 export interface StoryNodeRow extends StoryNode {
   planId: string;
@@ -119,4 +138,17 @@ export interface StoryNodeRow extends StoryNode {
   version: number;
   createdAt: string;
   updatedAt: string;
+  // ── Runtime write-back (G1 — story-dev-pipeline run results) ──────────────
+  /** HEAD SHA of the per-story commit (staleness guard for bound-AC tests). */
+  commitSha?: string;
+  /** Completion verdict from evaluateCompletion (deterministic oracle). */
+  verdict?: StoryVerdict;
+  /** Total agent cost in USD for the last dev run. */
+  costUsd?: number;
+  /** Input token count for the last dev run. */
+  inputTokens?: number;
+  /** Output token count for the last dev run. */
+  outputTokens?: number;
+  /** Wall-clock duration of the last dev run in milliseconds. */
+  durationMs?: number;
 }

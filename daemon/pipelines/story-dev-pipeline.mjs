@@ -16,11 +16,31 @@ import { join, resolve } from 'node:path';
 import { registerChild, unregisterChild } from './lib/child-tracker.mjs';
 import { freezeFlagsOntoJob } from '../lib/pipeline-flags.mjs';
 import { buildGateSpawn } from '../lib/gate-settings.mjs';
-import { buildSubagentInjectionArgs } from '../lib/subagent-start.mjs';
 import { handleStoryCompletion } from '../lib/story-completion-handler.mjs';
 import { integrateStory } from '../lib/story-integrate.mjs';
 import { extractAssistantText } from '../lib/stream-json-text.mjs';
 import { planBranchName } from '../lib/plan-branch.mjs';
+// P3-parity glue (INT wiring): streaming events, skills injection/commit trailer,
+// bounded fix-forward retry. buildSubagentInjectionArgs is now folded into
+// buildSkillsInjection (single --append-system-prompt), so it is no longer
+// imported directly here.
+import {
+  createStoryEventStream,
+  STORY_DEV_STEP_ID,
+  STORY_DEV_AGENT_ID,
+} from './lib/story-dev-events.mjs';
+import {
+  buildSkillsInjection,
+  trackSkillActivations,
+  buildStoryCommitFlags,
+  resetStorySkills,
+  readStoryLoadedSkills,
+} from './lib/story-skills-inject.mjs';
+import {
+  buildPriorFailureBlock,
+  classifyRetryable,
+  shouldRetry,
+} from './lib/story-retry.mjs';
 
 /** Build the single-story dev prompt. PURE. Requires the agent to emit <BINDING>. */
 export function buildStoryDevPrompt(payload) {
@@ -46,6 +66,12 @@ export function buildStoryDevPrompt(payload) {
     `<BINDING>`,
     `{ ${(payload.acceptanceCriteria || []).map((ac) => `"${ac.id}": { "testRef": "<test selector>", "testKind": "unit|integration|browser|manual" }`).join(', ')} }`,
     `</BINDING>`,
+    // Bounded fix-forward: on a retry the ONLY new instruction is the real
+    // failing-test output from the prior attempt. Scope (touches/forbidden) is
+    // unchanged — this is a same-scope re-spawn, not a new story.
+    payload.priorFailure
+      ? '\n# Prior attempt failed the bound tests — fix ONLY this:\n' + payload.priorFailure
+      : '',
   ].filter((l) => l !== '').join('\n');
 }
 
@@ -67,6 +93,17 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
   if (!payload) throw new Error('runStoryDevJob: job.storyDevPayload required');
   const projectRoot = resolve(job.workingDir);
 
+  // Per-story skill isolation — clear any loadout tracked from a prior story so
+  // the commit trailer reflects only THIS story's activations.
+  resetStorySkills(projectRoot);
+  const maxAttempts = deps.maxAttempts ?? 2;
+  let attemptsUsed = 0;
+  let lastFailureDetail = null;
+  let completion = null;
+  let headSha = deps.headSha || '';
+  let runMetrics = null;
+  let exitCode = 0;
+
   const p3Flags = freezeFlagsOntoJob(job, { env: process.env });
   const gate = buildGateSpawn({
     jobId: job.jobId,
@@ -82,82 +119,152 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     observeLog: join(projectRoot, '.pipeline', 'observations.jsonl'),
     agentRole: 'story-dev',
   });
-  const injectionArgs = buildSubagentInjectionArgs({ p3Flags });
-
-  const prompt = buildStoryDevPrompt(payload);
-  const args = [
-    '-p', prompt,
-    '--output-format', 'stream-json',
-    '--verbose',
-    '--permission-mode', 'bypassPermissions',
-    ...gate.args,
-    ...injectionArgs,
-  ];
+  // Single --append-system-prompt: gate injection + the skills PUSH loadout
+  // (top-ranked skills' instructions) folded together by the glue. Computed
+  // ONCE per story (not per attempt) — the loadout is scope-, not attempt-,
+  // dependent.
+  const injectionArgs = await buildSkillsInjection({
+    workingDir: projectRoot,
+    storyText: buildStoryDevPrompt(payload),
+    p3Flags,
+  });
 
   ensureDir(eventLogDir);
   const stdoutPath = join(eventLogDir, `${job.jobId}.story-dev.stdout.log`);
 
-  logger.info?.(`[story-dev] spawning story=${payload.storyId} touches=[${(payload.touches || []).join(', ')}]` +
-    (gate.env.FUTURATOR_GATE_MODE ? ` gate=${gate.env.FUTURATOR_GATE_MODE}` : ''));
+  // Bounded fix-forward loop (development-plan §4.4). Each attempt re-spawns the
+  // SAME-scoped agent; on a failing bound-AC we feed back the REAL failing-test
+  // output and re-run the SAME deterministic bound tests (the agent cannot
+  // self-pass — testBinding.status is set only by the real executor exit code).
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    attemptsUsed = attempt;
+    const pf = attempt > 1 ? buildPriorFailureBlock(completion) : null;
+    const prompt = buildStoryDevPrompt({ ...payload, priorFailure: pf });
+    const args = [
+      '-p', prompt,
+      '--output-format', 'stream-json',
+      '--verbose',
+      '--permission-mode', 'bypassPermissions',
+      ...gate.args,
+      ...injectionArgs,
+    ];
 
-  const child = spawn(claudeBin, args, {
-    cwd: projectRoot,
-    env: { ...process.env, ...gate.env },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  registerChild(job.jobId, child);
+    logger.info?.(`[story-dev] spawning story=${payload.storyId} attempt=${attempt}/${maxAttempts} touches=[${(payload.touches || []).join(', ')}]` +
+      (gate.env.FUTURATOR_GATE_MODE ? ` gate=${gate.env.FUTURATOR_GATE_MODE}` : ''));
 
-  let output = '';
-  const outFile = createWriteStream(stdoutPath, { flags: 'a' });
-  child.stdout.on('data', (c) => { output += c.toString('utf8'); try { outFile.write(c); } catch { /* ignore */ } });
-  child.stderr.on('data', (c) => logger.warn?.(`[story-dev:${job.jobId}:stderr] ${c.toString('utf8').trimEnd()}`));
-
-  const exitCode = await new Promise((res) => {
-    child.on('error', (err) => { unregisterChild(job.jobId, child); logger.error?.(`[story-dev] spawn error: ${err.message}`); res(-1); });
-    child.on('close', (code) => { unregisterChild(job.jobId, child); outFile.end(); res(code ?? 0); });
-  });
-
-  if (exitCode !== 0) {
-    await deps.updateStoryState?.({ storyId: payload.storyId, state: 'failed', reason: `dev exit ${exitCode}` });
-    return { exitCode, newState: 'failed' };
-  }
-
-  // ── Integrate (development-plan §4.1): commit THIS story's files to the plan
-  // branch under the commit lock. No branch, no merge. The commit SHA is what
-  // the bound-AC tests bind against (staleness guard). Skipped when no git
-  // helper is injected (unit tests) — then we fall back to deps.headSha.
-  let headSha = deps.headSha || '';
-  if (deps.git) {
-    const integ = await integrateStory({
-      repoDir: projectRoot,
-      touches: payload.touches || [],
-      storyId: payload.storyId,
-      title: payload.title,
-      // Per-PLAN branch (development-plan §4.1); slug if available, else planId.
-      planBranch: planBranchName(payload.planSlug || payload.planId),
-      git: deps.git,
+    const startedAt = (deps.now?.() ?? Date.now());
+    const evstream = createStoryEventStream({
+      pushEvent: deps.pushEvent,
+      jobId: job.jobId,
+      stepId: STORY_DEV_STEP_ID,
+      agentId: STORY_DEV_AGENT_ID,
+      logger,
     });
-    if (integ.committed && integ.sha) headSha = integ.sha;
-    else if (!integ.committed) logger.warn?.(`[story-dev] ${payload.storyId} integrate: ${integ.reason}`);
+    evstream.emitStepStart(`story ${payload.storyId} attempt ${attempt}`);
+
+    const child = spawn(claudeBin, args, {
+      cwd: projectRoot,
+      env: { ...process.env, ...gate.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    registerChild(job.jobId, child);
+
+    // extractAssistantText (below) REQUIRES the raw stream-json buffer, so keep
+    // accumulating `output` AND feed the same chunk to the live event stream.
+    let output = '';
+    const outFile = createWriteStream(stdoutPath, { flags: 'a' });
+    child.stdout.on('data', (c) => {
+      const s = c.toString('utf8');
+      output += s;
+      evstream.ingest(s);
+      try { outFile.write(c); } catch { /* ignore */ }
+    });
+    child.stderr.on('data', (c) => logger.warn?.(`[story-dev:${job.jobId}:stderr] ${c.toString('utf8').trimEnd()}`));
+
+    exitCode = await new Promise((res) => {
+      child.on('error', (err) => { unregisterChild(job.jobId, child); logger.error?.(`[story-dev] spawn error: ${err.message}`); res(-1); });
+      child.on('close', (code) => { unregisterChild(job.jobId, child); outFile.end(); res(code ?? 0); });
+    });
+
+    evstream.finalize();
+    runMetrics = { ...evstream.metrics, durationMs: (deps.now?.() ?? Date.now()) - startedAt };
+
+    if (exitCode !== 0) {
+      // Spawn crash is NOT an AC failure — do not consume a fix-forward attempt;
+      // escalate immediately.
+      evstream.emitStepError(`dev exit ${exitCode}`);
+      await deps.updateStoryState?.({ storyId: payload.storyId, state: 'failed', reason: `dev exit ${exitCode}`, metrics: runMetrics });
+      break;
+    }
+
+    // Populate .context/loaded-skills.json from the transcript so the commit
+    // trailer below is non-empty.
+    trackSkillActivations({ workingDir: projectRoot, rawOutput: output });
+
+    // ── Integrate (development-plan §4.1): commit THIS story's files to the plan
+    // branch under the commit lock, stamping the per-story skills commit trailer.
+    // The commit SHA is what the bound-AC tests bind against (staleness guard) —
+    // a fresh headSha PER attempt so the deterministic oracle is never stale.
+    // Skipped when no git helper is injected (unit tests) — fall back to headSha.
+    if (deps.git) {
+      const integ = await integrateStory({
+        repoDir: projectRoot,
+        touches: payload.touches || [],
+        storyId: payload.storyId,
+        title: payload.title,
+        // Per-PLAN branch (development-plan §4.1); slug if available, else planId.
+        planBranch: planBranchName(payload.planSlug || payload.planId),
+        git: deps.git,
+        extraCommitFlagBodies: buildStoryCommitFlags({ workingDir: projectRoot, rigor: payload.rigor || 'mvp' }),
+      });
+      if (integ.committed && integ.sha) headSha = integ.sha;
+      else if (!integ.committed) logger.warn?.(`[story-dev] ${payload.storyId} integrate: ${integ.reason}`);
+    }
+
+    // Decode the stream-json transcript to the agent's plain text so the
+    // <BINDING> manifest parses (its JSON is escaped inside stream-json fields).
+    const devText = extractAssistantText(output) || output;
+
+    // Deterministic completion verdict (bound-AC gate), bound to the committed SHA.
+    completion = await handleStoryCompletion({
+      storyNode: { storyId: payload.storyId, acceptanceCriteria: payload.acceptanceCriteria },
+      devOutput: devText,
+      headSha,
+      executors: deps.executors || {},
+      now: deps.now,
+    });
+
+    // The dev step spawn completed (regardless of AC pass/fail) — emit metrics.
+    evstream.emitStepComplete(runMetrics);
+
+    // Persist the FULL post-run story state (state + bound ACs + commit + cost
+    // + the loaded skill set so the forensic Skills tab reads it from the row).
+    await deps.updateStoryState?.({
+      storyId: payload.storyId,
+      state: completion.newState,
+      verdict: completion.verdict,
+      acceptanceCriteria: completion.acceptanceCriteria,
+      commitSha: headSha,
+      metrics: runMetrics,
+      loadedSkills: readStoryLoadedSkills(projectRoot),
+    });
+
+    if (completion.newState === 'done') {
+      if (completion.propagate) await deps.propagateCompletion?.({ completedStoryId: payload.storyId });
+      break;
+    }
+    lastFailureDetail = buildPriorFailureBlock(completion);
+    if (!shouldRetry(completion, attempt, maxAttempts) || !classifyRetryable(completion)) break;
   }
 
-  // Decode the stream-json transcript to the agent's plain text so the <BINDING>
-  // manifest parses (its JSON is escaped inside stream-json text fields).
-  const devText = extractAssistantText(output) || output;
-
-  // Deterministic completion verdict (bound-AC gate), bound to the committed SHA.
-  const completion = await handleStoryCompletion({
-    storyNode: { storyId: payload.storyId, acceptanceCriteria: payload.acceptanceCriteria },
-    devOutput: devText,
-    headSha,
-    executors: deps.executors || {},
-    now: deps.now,
-  });
-
-  await deps.updateStoryState?.({ storyId: payload.storyId, state: completion.newState, verdict: completion.verdict });
-  if (completion.propagate) {
-    await deps.propagateCompletion?.({ completedStoryId: payload.storyId });
-  }
-
-  return { exitCode, verdict: completion.verdict, newState: completion.newState };
+  return {
+    exitCode,
+    verdict: completion?.verdict,
+    newState: completion?.newState || 'failed',
+    attemptsUsed,
+    lastFailureDetail,
+    acceptanceCriteria: completion?.acceptanceCriteria,
+    metrics: runMetrics,
+    commitSha: headSha,
+  };
 }

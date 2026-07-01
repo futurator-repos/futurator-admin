@@ -1,9 +1,12 @@
-import type {
-  PipelineDefinition,
-  PipelineStep,
-  ConcurrencyClass,
-} from '../types/agent-orchestrator';
+import type { PipelineDefinition, PipelineStep } from '../types/agent-orchestrator';
 import type { EpicStory } from '../types/epic-workflow';
+
+/**
+ * Pipeline slot class. The shared `agent-orchestrator` types don't export a
+ * named union for this today, so it's declared locally (mirrors
+ * arch-shard-compile-pipeline) rather than importing a non-existent member.
+ */
+export type ConcurrencyClass = 'background' | 'interactive' | 'critical';
 import { buildAgentConfig } from './role-policy';
 import { deriveProjectId } from './derive-project-id';
 

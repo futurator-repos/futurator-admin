@@ -35,6 +35,8 @@
     "sst.config.ts",
     "docs/concepts/agentic-office",
     "docs/concepts/v0-graph",
-    "docs/concepts/claude-graph"
+    "docs/concepts/claude-graph",
+    "repos",
+    "daemon/scripts/__fixtures__"
   ]
 }

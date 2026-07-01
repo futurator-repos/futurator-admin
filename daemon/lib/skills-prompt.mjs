@@ -456,3 +456,42 @@ export async function buildSkillsPushPrompt(workingDir, storyText) {
     return buildSkillsPromptLine(workingDir);
   }
 }
+
+/**
+ * Which skills would {@link buildSkillsPushPrompt} inject the BODY of for this
+ * story — i.e. the skills the dev agent is actually made to apply.
+ *
+ * PUSH-injected skills never fire a `Skill` tool_use event (the body is already
+ * in the system prompt, and the header explicitly tells the agent NOT to re-open
+ * them), so `trackSkillActivations` (which scans stream-json for tool_use) can't
+ * see them. This mirrors the exact selection in `buildSkillsPushPrompt` so the
+ * P3 glue can record the pushed set as the story's loaded skills — otherwise
+ * every story reports zero skills even though a curated set was applied.
+ *
+ * Returns `{ pushed, ranked }` — `pushed` is the ordered top-N body skill names,
+ * `ranked` whether a real relevance signal (cosine or manifest pin) picked them.
+ * Never throws; returns `{ pushed: [], ranked: false }` on any failure or when
+ * no body would be pushed (mirrors the name-list fallback).
+ *
+ * @param {string} workingDir
+ * @param {string} storyText
+ * @returns {Promise<{ pushed: string[], ranked: boolean }>}
+ */
+export async function selectPushedSkillNames(workingDir, storyText) {
+  const empty = { pushed: [], ranked: false };
+  if (!workingDir || !storyText || typeof storyText !== 'string' || !storyText.trim()) {
+    return empty;
+  }
+  try {
+    const loadout = collectLoadout(workingDir);
+    if (!loadout || loadout.items.length === 0) return empty;
+    const { items: ordered, ranked } = await rankLoadoutItems(loadout, storyText);
+    if (ordered.length === 0) return empty;
+    const hasPins = ordered.some((i) => i.pinned);
+    if (!ranked && !hasPins) return empty; // name-list fallback: nothing pushed
+    const top = ordered.filter((i) => i.body && i.body.trim()).slice(0, MAX_PUSHED_BODIES);
+    return { pushed: top.map((i) => i.name), ranked };
+  } catch {
+    return empty;
+  }
+}

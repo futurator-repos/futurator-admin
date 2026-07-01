@@ -61,6 +61,25 @@ export interface BoundAcceptanceCriterion {
 
 export type StoryComplexity = 'trivial' | 'standard' | 'complex' | 'architectural';
 
+/**
+ * Verdict written back by the completion gate after each dev attempt.
+ * Mirrors the evaluateCompletion return shape from daemon/lib/completion-gate.mjs.
+ */
+export interface StoryVerdict {
+  done: boolean;
+  status: 'done' | 'failing' | 'blocked' | 'needs-human';
+  /** AC ids whose deterministic bound-test did not pass (or is stale). */
+  failing: string[];
+  /** AC ids that blocked due to advisory-security reviewer fail. */
+  blocking: string[];
+  /** AC ids with advisory-taste reviewer fail (non-blocking operator note). */
+  attention: string[];
+  /** AC ids with unresolved manual checks. */
+  pending: string[];
+  /** Human-readable reason per failing/blocking entry. */
+  reasons: string[];
+}
+
 /** The persisted plan-spec-graph row (StoryNode + scheduling/lifecycle columns). */
 export interface StoryNodeRow {
   /** GLOBALLY stable, Mycelium-issued. Not epic-local. */
@@ -88,6 +107,21 @@ export interface StoryNodeRow {
   version: number;
   createdAt: string;
   updatedAt: string;
+
+  // ── Post-run write-back fields (G1 story-persist / executeStoryDevJob) ──
+
+  /** Git commit SHA after integrateStory completes. */
+  commitSha?: string;
+  /** Completion gate verdict from the last dev attempt. */
+  verdict?: StoryVerdict;
+  /** Approximate USD cost of the dev agent run (summed from stream events). */
+  costUsd?: number;
+  /** Prompt token count for the dev agent run. */
+  inputTokens?: number;
+  /** Completion token count for the dev agent run. */
+  outputTokens?: number;
+  /** Wall-clock milliseconds from spawn to close for the dev agent run. */
+  durationMs?: number;
 }
 
 // ── Instinct loop (development-plan §5.5) — the Skills & Learnings surface. ──

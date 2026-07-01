@@ -9,7 +9,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { App } from '../../shared/types/app';
-import type { Plan } from '../../shared/types/plan';
+import type { Plan, PlanKind } from '../../shared/types/plan';
 import type { TimerSlice } from '../../shared/timer/types';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
@@ -66,8 +66,8 @@ function makePlan(
   appId: string,
   status: string = 'delivered',
   epicCount: number = 2,
-  kind: string = 'initial',
-): Plan & { appId: string; kind: string } {
+  kind: PlanKind = 'initial',
+): Plan & { appId: string; kind: PlanKind } {
   return {
     planId,
     name: planId,

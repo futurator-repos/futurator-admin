@@ -342,9 +342,13 @@ export async function reducePlan(
     return { kind: 'plan-build-check-pending' };
   }
   if (!isJobStatusSuccess(buildJob.status)) {
-    if (plan.status !== 'fixing') {
-      await deps.updatePlanFields(plan.planId, { status: 'fixing' });
-    }
+    // At this point plan.status is always 'developing': the guard at the top of
+    // this function narrowed it to 'developing' | 'fixing', and the recovery
+    // block above (~L220) already flipped any lingering 'fixing' back to
+    // 'developing'. So the previous `if (plan.status !== 'fixing')` guard was
+    // always true — the flip-to-'fixing' write always runs. Kept unconditional
+    // to preserve that exact runtime behavior while staying type-safe.
+    await deps.updatePlanFields(plan.planId, { status: 'fixing' });
     return { kind: 'plan-fixing', reason: 'build-check-failed' };
   }
 

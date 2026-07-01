@@ -31,8 +31,13 @@ import {
   addEpicToPlan,
   transitionPlanStatus,
 } from '../plan-repository';
-import type { Plan } from '../../types/plan';
+import type { Plan, PlanStatus } from '../../types/plan';
 import { planNameSchema } from '../../schemas/plan-schema';
+
+// The runtime status schema (planStatusSchema / PLAN_LEGAL_TRANSITIONS) carries
+// 'abandoned' as a terminal status, but the PlanStatus TS type in types/plan.ts
+// still lags it. Cast until the type catches up (a no-op once 'abandoned' lands).
+const ABANDONED = 'abandoned' as PlanStatus;
 
 function basePlan(overrides: Partial<Plan> = {}): Plan {
   return {
@@ -55,16 +60,12 @@ function basePlan(overrides: Partial<Plan> = {}): Plan {
 }
 
 describe('planNameSchema', () => {
-  it.each([
-    'pong-classic',
-    'my-cool-app',
-    'abc',
-    'a-b-c-d',
-    'a1-b2',
-    'a'.repeat(41),
-  ])('accepts valid name "%s"', (name) => {
-    expect(planNameSchema.safeParse(name).success).toBe(true);
-  });
+  it.each(['pong-classic', 'my-cool-app', 'abc', 'a-b-c-d', 'a1-b2', 'a'.repeat(41)])(
+    'accepts valid name "%s"',
+    (name) => {
+      expect(planNameSchema.safeParse(name).success).toBe(true);
+    },
+  );
 
   it.each([
     ['PONG', 'uppercase'],
@@ -204,7 +205,7 @@ describe('getActivePlanForApp (App/Plan v1)', () => {
     sendMock.mockResolvedValueOnce({
       Items: [
         basePlan({ planId: 'p1', appId: 'dino3', status: 'delivered' }),
-        basePlan({ planId: 'p2', appId: 'dino3', status: 'abandoned' }),
+        basePlan({ planId: 'p2', appId: 'dino3', status: ABANDONED }),
       ],
     });
     expect(await getActivePlanForApp('dino3')).toBe(null);
@@ -269,13 +270,13 @@ describe('transitionPlanStatus (App/Plan v1)', () => {
     sendMock
       .mockResolvedValueOnce({ Item: basePlan({ status: 'developing' }) })
       .mockResolvedValueOnce({});
-    expect((await transitionPlanStatus('plan-1', 'abandoned')).status).toBe('abandoned');
+    expect((await transitionPlanStatus('plan-1', ABANDONED)).status).toBe('abandoned');
 
     sendMock.mockReset();
     sendMock
       .mockResolvedValueOnce({ Item: basePlan({ status: 'review' }) })
       .mockResolvedValueOnce({});
-    expect((await transitionPlanStatus('plan-1', 'abandoned')).status).toBe('abandoned');
+    expect((await transitionPlanStatus('plan-1', ABANDONED)).status).toBe('abandoned');
   });
 
   it('rejects illegal transitions (delivered is terminal)', async () => {
@@ -287,7 +288,7 @@ describe('transitionPlanStatus (App/Plan v1)', () => {
   });
 
   it('rejects illegal transitions (abandoned is terminal)', async () => {
-    sendMock.mockResolvedValueOnce({ Item: basePlan({ status: 'abandoned' }) });
+    sendMock.mockResolvedValueOnce({ Item: basePlan({ status: ABANDONED }) });
     await expect(transitionPlanStatus('plan-1', 'developing')).rejects.toMatchObject({
       code: 'ILLEGAL_TRANSITION',
     });

@@ -26,11 +26,29 @@ export interface Labs3ViewProps {
   onSelectStory?: (storyId: string) => void;
 }
 
-/** Labs3 surfaces — the SDD analogue of legacy DevelopingSubtab. */
-export type Labs3Subtab = 'graph' | 'gitgraph' | 'stories' | 'qa' | 'growth' | 'stream';
+/**
+ * Labs3 surfaces — the SDD analogue of legacy DevelopingSubtab.
+ *
+ * Tab semantics:
+ *   'graph'     — dependency DAG / dev-plan (schedule). LABELED "Plan".
+ *   'codegraph' — code knowledge graph (Memgraph/Mycelium). LABELED "Graph".
+ *                 Grows after every green story via the compile phase.
+ *                 Reuses legacy GraphView(projectId=appId).
+ */
+export type Labs3Subtab =
+  | 'graph'
+  | 'codegraph'
+  | 'gitgraph'
+  | 'stories'
+  | 'qa'
+  | 'growth'
+  | 'stream';
 
 export const LABS3_SUBTABS: { id: Labs3Subtab; label: string }[] = [
-  { id: 'graph', label: 'Graph' },
+  // Dependency DAG — the schedule. Previously mislabeled "Graph".
+  { id: 'graph', label: 'Plan' },
+  // Code knowledge graph (files/symbols/imports) — the REAL "Graph".
+  { id: 'codegraph', label: 'Graph' },
   { id: 'gitgraph', label: 'Git Graph' },
   { id: 'stories', label: 'Stories' },
   { id: 'qa', label: 'QA' },

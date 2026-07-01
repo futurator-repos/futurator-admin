@@ -27,11 +27,17 @@ export type AgentJobStatus =
   | 'STALE' // epic-dev: heartbeat exceeded threshold, awaiting resume respawn
   | 'NEEDS_ATTENTION' // recoverable failure; awaiting operator action (Pipeline v1 §8)
   | 'COMPLETED_VIA_SALVAGE' // terminal success: extracted output applied without re-running the agent
+  | 'COMPLETED_VIA_TALK' // terminal success: operator resolved the job via the Talk-apply flow
+  // (from NEEDS_ATTENTION); the applied output advances the wave like the other
+  // COMPLETED_VIA_* statuses. See agent-job-state-machine.ts (SUCCESS_STATUSES).
   | 'COMPLETED_VIA_PREWORK' // Pipeline v2.0 T0.2: daemon-side gate verified the AC was already
   // satisfied (recent commits + named exports + tsc clean) BEFORE spawning DEV.
   // Terminal success; no LLM was invoked. Wave/plan reducers treat this like
   // any other COMPLETED_VIA_* status.
-  | 'MANUALLY_SKIPPED'; // terminal: operator skipped a skipTolerant step
+  | 'MANUALLY_SKIPPED' // terminal: operator skipped a skipTolerant step
+  | 'ORPHANED'; // App/Plan v1 — Plan went terminal before this job dispatched; the
+// daemon writes ORPHANED (from PENDING) instead of spawning. Terminal failure-ish
+// (not a success — wave/plan reducers do not advance past it as a completion).
 
 // ── Escalation + trigger metadata (Pipeline v1 §9.2 + §FR-9) ──
 
@@ -151,6 +157,26 @@ export interface PipelineStep {
   validations?: ValidationConfig[];
   loopTo?: string; // step ID: if validations fail, run that step then re-check this one
 
+  // ── Pipeline v1 — Failure recovery gates (Epic 1, §9.2) ──
+  /**
+   * Story 1.5 — when `false`, the Salvage action is refused for this step even
+   * if extractors fired (the extracted output isn't safe to apply without the
+   * agent having actually run). Absent / `true` ⇒ Salvage allowed.
+   */
+  salvageable?: boolean;
+  /**
+   * Story 1.6 — per-step cap on consecutive Retry jobs (walking the `retryOf`
+   * chain). When the chain reaches this length the Retry endpoint refuses.
+   * Absent ⇒ the endpoint default (3) applies.
+   */
+  maxConsecutiveRetries?: number;
+  /**
+   * Story 1.7 — when `true`, the operator Skip action is allowed for this step
+   * (its output is not required by downstream steps). Absent / `false` ⇒ Skip
+   * is refused.
+   */
+  skipTolerant?: boolean;
+
   /**
    * Pipeline v2 Phase 2-A — PR-51 (2026-05-07).
    *
@@ -232,6 +258,15 @@ export interface DualAgentLaneResult {
   error?: string;
 }
 
+// ── Concurrency slot class ──
+//
+// Pipeline v2 Story 2.6 / 6.3 — a job's scheduling priority for daemon slot
+// acquisition. 'background' yields to interactive/critical work (used by
+// wave-compile / arch-shard-compile); 'critical' preempts. The pipeline
+// builders (wave-compile-pipeline, arch-shard-compile-pipeline) import this
+// named union rather than re-declaring it locally.
+export type ConcurrencyClass = 'background' | 'interactive' | 'critical';
+
 // ── Job (stored in DynamoDB) ──
 
 export interface AgentJob {
@@ -270,6 +305,21 @@ export interface AgentJob {
   stepResults?: StepResult[];
   totalCost?: number;
   errorMessage?: string;
+
+  /**
+   * Pipeline v2 Story 2.6 / 6.3 — the job's daemon slot-acquisition priority.
+   * Mutated by `POST /api/jobs/:jobId/promote-class`. Absent on legacy jobs
+   * (the daemon defaults them to 'interactive'). Compile jobs (wave-compile,
+   * arch-shard-compile) run as 'background' so they yield to active dev/review.
+   */
+  concurrencyClass?: ConcurrencyClass;
+  /**
+   * Pipeline v1 Story 4.3 — per-job cost cap in USD. Raised by
+   * `POST /api/jobs/:jobId/raise-cost-ceiling`; the daemon's cost meter halts
+   * the job into NEEDS_ATTENTION (triggeredBy 'COST_CEILING') when exceeded.
+   * Absent ⇒ no per-job cap (the plan-level ceiling still applies).
+   */
+  costCeilingUsd?: number;
 
   /**
    * QA send-back remediation marker (2026-06-03). Set by the send-back

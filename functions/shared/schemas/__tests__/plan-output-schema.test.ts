@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { z } from 'zod';
 import {
   acceptanceCriterionSchema,
   storyOutputSchema,
@@ -337,7 +338,11 @@ describe('validateVerifyCoverage (CS-1 — mandatory verify on browser ACs)', ()
 });
 
 describe('collectManualAcs (CS-2 — surface manual ACs for operator confirmation)', () => {
-  function planWithCriteria(criteria) {
+  // Fixtures are written in the PM's INPUT shape (pre-parse: `needsBrowser`,
+  // `dependsOn`, `acceptanceCriteria` optional). `collectManualAcs` consumes the
+  // parsed `PlanOutput` type, so we assert the fixture back to it — the fields it
+  // reads (ids + `verify`/`manualReason`) are all present.
+  function planWithCriteria(criteria: z.input<typeof acceptanceCriterionSchema>[]): PlanOutput {
     return {
       plan: {
         name: 'demo-plan',
@@ -347,6 +352,7 @@ describe('collectManualAcs (CS-2 — surface manual ACs for operator confirmatio
             id: 'E1',
             title: 'Epic one',
             goal: 'a goal long enough to pass.',
+            acceptanceCriteria: '',
             dependsOn: [],
             stories: [
               {
@@ -361,7 +367,7 @@ describe('collectManualAcs (CS-2 — surface manual ACs for operator confirmatio
           },
         ],
       },
-    };
+    } as PlanOutput;
   }
 
   it('collects every manual AC with its reason, and nothing else', () => {
@@ -388,7 +394,11 @@ describe('collectManualAcs (CS-2 — surface manual ACs for operator confirmatio
 });
 
 describe('deliveryJourneys (Stage C — final-QA journeys)', () => {
-  function planWithJourneys(journeys) {
+  // See planWithCriteria above — input-shaped fixture asserted back to PlanOutput.
+  // `journeys` accepts `undefined` so the "no journeys" cases can pass it directly.
+  function planWithJourneys(
+    journeys: z.input<typeof deliveryJourneySchema>[] | undefined,
+  ): PlanOutput {
     return {
       plan: {
         name: 'demo-plan',
@@ -398,6 +408,7 @@ describe('deliveryJourneys (Stage C — final-QA journeys)', () => {
             id: 'E1',
             title: 'Epic one',
             goal: 'a goal long enough to pass.',
+            acceptanceCriteria: '',
             dependsOn: [],
             stories: [
               {
@@ -409,14 +420,14 @@ describe('deliveryJourneys (Stage C — final-QA journeys)', () => {
                 criteria: [
                   { id: 'AC-1', text: 'a criterion' },
                   { id: 'AC-2', text: 'another' },
-                ],
+                ] as z.input<typeof acceptanceCriterionSchema>[],
               },
             ],
           },
         ],
         deliveryJourneys: journeys,
       },
-    };
+    } as PlanOutput;
   }
 
   it('deliveryJourneySchema accepts a well-formed journey', () => {

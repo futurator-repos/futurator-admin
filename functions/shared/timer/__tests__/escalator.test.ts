@@ -17,7 +17,7 @@
 //   6. default hint applied to obscure category ('git')
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { Plan } from '../../types/plan';
+import type { Plan, PlanKind } from '../../types/plan';
 import type { App } from '../../types/app';
 import type { TimerSlice } from '../types';
 import type { AggregationResult } from '../aggregator';
@@ -64,8 +64,8 @@ function makePlan(
   planId: string = 'plan-1',
   appId: string = 'app-1',
   epicCount: number = 2,
-  kind: string = 'initial',
-): Plan & { appId: string; kind: string } {
+  kind: PlanKind = 'initial',
+): Plan & { appId: string; kind: PlanKind } {
   return {
     planId,
     name: 'test-plan',

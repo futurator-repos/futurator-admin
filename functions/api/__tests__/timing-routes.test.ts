@@ -152,6 +152,10 @@ function makeAggregate(totalMs = 300_000): AggregationResult {
       bootstrap: zero,
       fix: zero,
       idle: zero,
+      'baseline-check': zero,
+      'tamper-check': zero,
+      'merge-gate': zero,
+      'vqa-gate': zero,
       unattributed: zero,
     },
   };
@@ -280,8 +284,7 @@ function buildTestApp(): Hono {
     const categoryDurations: Record<string, number[]> = {};
 
     for (const app_ of allApps) {
-      const appBoilerplate: string =
-        ((app_ as Record<string, unknown>).boilerplateType as string) ?? 'nextjs';
+      const appBoilerplate: string = app_.boilerplateType ?? 'nextjs';
       if (appBoilerplate !== templateType) continue;
 
       const plans = await listPlansByApp(app_.appId);
@@ -587,6 +590,7 @@ describe('Timer Intelligence API routes', () => {
         slices,
         aggregate: agg,
         cohort: null,
+        skills: null,
         narrative:
           'Total attributed time: 5m 0s. Largest category: dev (100%, 5m 0s). Only one category recorded; no other meaningful breakdown available. No cohort baseline yet (need 5+ similar plans). Collect more plans to unlock cohort-based recommendations.',
       });
@@ -630,6 +634,7 @@ describe('Timer Intelligence API routes', () => {
         slices: [],
         aggregate: makeAggregate(0),
         cohort: null,
+        skills: null,
         narrative:
           'Total attributed time: 0s (no events recorded). No category data available. Only one category recorded; no other meaningful breakdown available. No cohort baseline yet (need 5+ similar plans). Collect more plans to unlock cohort-based recommendations.',
       });
