@@ -102,6 +102,61 @@ describe('assignBand — real-data rebalance (text-driven, no evidence hints)', 
   });
 });
 
+// C6 — module-aware banding. Deterministic module scanners tag findings with
+// evidence.security / .compliance / .sdd (+ evidence.check). Those must route by
+// MODULE, never collapse into Phase 5 'Correctness' (reserved for correctness).
+describe('assignBand — module-aware banding (C6)', () => {
+  it('security secret/env finding does NOT land in Phase 5 (Correctness)', () => {
+    const secret = f('sec', {
+      source: 'deterministic',
+      dimension: 'safety-security',
+      evidence: { security: true, check: 'hardcoded-secret' },
+    });
+    // Trivial/Small → stop-the-bleeding; larger → early foundations. Never 5.
+    expect(assignBand({ ...secret, effort: 'Trivial' })).toBe(0);
+    expect(assignBand({ ...secret, effort: 'Small' })).toBe(0);
+    expect(assignBand({ ...secret, effort: 'Large' })).toBe(1);
+    expect(assignBand({ ...secret, effort: 'Large' })).not.toBe(5);
+  });
+
+  it('security env-hygiene finding (no-env-example) does NOT land in Phase 5', () => {
+    const envIssue = f('env', {
+      source: 'deterministic',
+      dimension: 'safety-security',
+      effort: 'Medium',
+      evidence: { security: true, check: 'no-env-example' },
+    });
+    expect(assignBand(envIssue)).not.toBe(5);
+    expect(assignBand(envIssue)).toBe(1);
+  });
+
+  it('compliance finding does NOT land in Phase 5 (Correctness) → Phase 1', () => {
+    const compliance = f('comp', {
+      source: 'deterministic',
+      dimension: 'compliance',
+      effort: 'Medium',
+      evidence: { compliance: true },
+    });
+    expect(assignBand(compliance)).not.toBe(5);
+    expect(assignBand(compliance)).toBe(1);
+  });
+
+  it('sdd finding routes to Phase 1 foundations, not Phase 5', () => {
+    const sdd = f('sdd', {
+      source: 'deterministic',
+      dimension: 'code-quality-refactoring',
+      effort: 'Small',
+      evidence: { sdd: true, check: 'no-api-contract' },
+    });
+    expect(assignBand(sdd)).toBe(1);
+    expect(assignBand(sdd)).not.toBe(5);
+  });
+
+  it('dimension correctness is still the only thing reserved for Phase 5', () => {
+    expect(assignBand(f('cor', { dimension: 'correctness', effort: 'Small' }))).toBe(5);
+  });
+});
+
 describe('deriveDependencies', () => {
   it('consumer → foundation (fan-in rule)', () => {
     const foundation = f('F', { evidence: { isFoundation: true, artifact: 'IMPACT_THRESHOLD', foundationKind: 'constant' } });

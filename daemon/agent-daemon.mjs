@@ -238,6 +238,7 @@ import {
 import { runPrivacyAuditJob, summarizePrivacyReport } from './pipelines/privacy-audit-job-runner.mjs';
 // Refactoring Scan Engine v2 — hybrid deterministic + swarm orchestration core.
 import { runScanEngine } from './pipelines/scan-engine-job-runner.mjs';
+import { enrichInfraWithGraph } from './scripts/refactor-recon/infra-extract.mjs';
 // Epic 4 (2026-05-20) — track Skill tool_use activations into
 // .context/loaded-skills.json so the per-story commit's Skills-Used
 // trailer populates with real content.
@@ -7665,6 +7666,7 @@ async function executeScanEngineJob(job) {
   const eslintPath = new URL('./scripts/refactor-recon/eslint-detect.mjs', import.meta.url).pathname;
   const securityPath = new URL('./scripts/refactor-recon/security-scan.mjs', import.meta.url).pathname;
   const sddPath = new URL('./scripts/refactor-recon/sdd-detect.mjs', import.meta.url).pathname;
+  const stackProfilePath = new URL('./scripts/refactor-recon/stack-profile.mjs', import.meta.url).pathname;
 
   // Spawn a plain Node child (deterministic stages — never the agent path).
   const spawnNode = (args, cwd) =>
@@ -7754,6 +7756,7 @@ async function executeScanEngineJob(job) {
         let eslint = null;
         let security = null;
         let sdd = null;
+        let stack = null;
         if (reuseDetectors) {
           const pr = rj('privacy.json');
           if (pr) privacySummary = summarizePrivacyReport(pr);
@@ -7762,6 +7765,7 @@ async function executeScanEngineJob(job) {
           eslint = rj('eslint.json');
           security = rj('security.json');
           sdd = rj('sdd.json');
+          stack = rj('stack-profile.json');
         } else {
           // Privacy/compliance lane. Default 'internal' (our own scanner, ~0 LLM,
           // source stays on the box); 'external' routes to the data-privacy service.
@@ -7804,19 +7808,28 @@ async function executeScanEngineJob(job) {
             await spawnNode([sddPath, repo, '--out', pathJoin(od, 'sdd.json')], repo);
             sdd = rj('sdd.json');
           } catch (de) { log('warn', `[${short}] scan-engine SDD detector failed (non-fatal): ${de?.message || de}`); }
+          // Stack-profile detector — language/framework/archetype fingerprint, always runnable.
+          try {
+            await spawnNode([stackProfilePath, repo, '--out', pathJoin(od, 'stack-profile.json')], repo);
+            stack = rj('stack-profile.json');
+          } catch (spe) { log('warn', `[${short}] scan-engine stack-profile detector failed (non-fatal): ${spe?.message || spe}`); }
         }
         const graph = rj('graph.resolved.json') || rj('graph.json') || { nodes: [] };
         const resolved = rj('resolved-imports.json') || {};
         const hotspotsDoc = rj('hotspots.json') || {};
+        // Graph-informed IaC (pass 2): annotate infra services with fanIn/centralized
+        // using the resolved import graph. No-op when the graph is unavailable.
+        const enrichedInfra = infra && graph ? enrichInfraWithGraph(infra, graph, resolved) : infra;
         return {
           hotspots: hotspotsDoc.hotspots || [],
           shards: rj('subsystem-shards.json') || { shards: [] },
           privacySummary,
           tests,
-          infra,
+          infra: enrichedInfra,
           eslint,
           security,
           sdd,
+          stack,
           // knip actually produced data? (else the clutter axis is degraded)
           knipRan: hotspotsDoc.toolStatus?.knip === 'ok',
           // Anchor = graphify nodes ∪ the REAL on-disk source files. graphify only
@@ -7929,6 +7942,7 @@ async function executeScanEngineJob(job) {
             lowConfidence: result.lowConfidence,
             maturity: result.maturity,
             infra: result.infra,
+            stack: result.stack,
             reportMarkdown: result.reportMarkdown,
             // Provenance for granular re-scans: the merge key vocabulary + the SHA
             // an auto-target re-scan diffs against.

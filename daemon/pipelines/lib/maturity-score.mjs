@@ -30,18 +30,19 @@ const isHotKind = (hotspots, kind) => (hotspots || []).filter((h) => h.kind === 
  *   - sdd:     {specCount}|null  spec-driven signal (their other-session work)
  *   - infra:   InfraInventory|null  from infra-extract (for the Infra-as-code axis)
  *   - security: SecuritySummary|null from security-scan (secrets/env-hygiene axis)
- * @returns {{ axes: Array, overall: number|null }}
+ *   - stack:   StackProfile|null   used only for readiness (ts-strict) — safe to ignore if null
+ * @returns {{ axes: Array, readiness: Array, overall: number|null }}
  */
-export function computeMaturity({ findings = [], hotspots = [], tests = null, eslint = null, graphAvailable = false, knipRan = false, sdd = null, infra = null, security = null } = {}) {
+export function computeMaturity({ findings = [], hotspots = [], tests = null, eslint = null, graphAvailable = false, knipRan = false, sdd = null, infra = null, security = null, stack = null } = {}) {
   const axes = [];
-  const add = (key, label, score, detail, measured = true) =>
-    axes.push({ key, label, score, status: statusFor(measured ? score : null), detail, measured });
+  const add = (key, label, module, score, detail, measured = true) =>
+    axes.push({ key, label, module, score, status: statusFor(measured ? score : null), detail, measured });
 
   // 1. Component-driven (anti-inline): UI-centralization debt.
   const uiDebt =
     reInIssue(findings, /\bhand-?rolled\b|\binline (style|color|class)\b|\bduplicated? (ui )?component|\bdesign system\b|\bpills?\b|\bbadges?\b/i) +
     isHotKind(hotspots, 'design-system-consolidation') * 3;
-  add('component-driven', 'Component-driven (anti-inline)', scoreFromCount(uiDebt, 24), `${uiDebt} UI-centralization signals`);
+  add('component-driven', 'Component-driven (anti-inline)', 'architecture', scoreFromCount(uiDebt, 24), `${uiDebt} UI-centralization signals`);
 
   // 2. Clutter / dead code (knip). Score on the dead-FILE count (knip-unused +
   // zero-fan-in), not the rolled-up finding rows — 321 dead files must read poor,
@@ -52,32 +53,29 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
       .reduce((n, h) => n + ((h.evidence || {}).knipFlagged || (h.evidence || {}).confirmedZeroFanIn || 0), 0);
     const deadFindings = byDim(findings, 'code-quality-refactoring').filter((f) => (f.evidence || {}).hotspotKind === 'dead-code').length;
     const dead = Math.max(deadFiles, deadFindings);
-    add('clutter', 'Dead code / clutter (knip)', scoreFromCount(dead, 150), `${dead} dead files`);
+    add('clutter', 'Dead code / clutter (knip)', 'architecture', scoreFromCount(dead, 150), `${dead} dead files`);
   } else {
-    add('clutter', 'Dead code / clutter (knip)', null, 'knip did not run — no dead-code signal', false);
+    add('clutter', 'Dead code / clutter (knip)', 'architecture', null, 'knip did not run — no dead-code signal', false);
   }
 
   // 3. Structure sanity: god-objects + duplicate subsystems.
   const structDebt = isHotKind(hotspots, 'god-object') + isHotKind(hotspots, 'duplicate-subsystem') + isHotKind(hotspots, 'low-cohesion-split');
-  add('structure-sanity', 'Structure sanity (god/duplicate)', scoreFromCount(structDebt, 30), `${structDebt} god-objects / duplicate subsystems`);
+  add('structure-sanity', 'Structure sanity (god/duplicate)', 'architecture', scoreFromCount(structDebt, 30), `${structDebt} god-objects / duplicate subsystems`);
 
   // 4. Type safety.
   const typeDebt = reInIssue(findings, /\bunsafe (type )?cast\b|\bas any\b|\bas unknown\b|without (runtime )?validation\b|\btype guard\b|\buntyped\b|: any\b/i);
-  add('type-safety', 'Type safety', scoreFromCount(typeDebt, 40), `${typeDebt} unsafe-cast / unvalidated findings`);
+  add('type-safety', 'Type safety', 'code-quality', scoreFromCount(typeDebt, 40), `${typeDebt} unsafe-cast / unvalidated findings`);
 
   // 5. Security & compliance.
   const secHigh = [...byDim(findings, 'safety-security'), ...byDim(findings, 'compliance')].filter((f) => f.severity === 'High').length;
-  add('security-compliance', 'Security & compliance', scoreFromCount(secHigh, 20), `${secHigh} High security/compliance findings`);
+  add('security-compliance', 'Security & compliance', 'security', scoreFromCount(secHigh, 20), `${secHigh} High security/compliance findings`);
 
-  // 6. Graph installed (always measurable).
-  add('graph-installed', 'Graph installed', graphAvailable ? 1 : 0, graphAvailable ? 'code graph built' : 'no code graph', true);
-
-  // 7. Eslint health.
+  // 6. Eslint health. (graph-installed is now a readiness item, not a quality axis.)
   if (eslint && eslint.runnable) {
     // weighted issues per ~100 source files → score
-    add('eslint-health', 'Eslint health', scoreFromCount(eslint.weighted, 400), `${eslint.errors} errors · ${eslint.warnings} warnings (code-weighted ${eslint.weighted})`);
+    add('eslint-health', 'Eslint health', 'code-quality', scoreFromCount(eslint.weighted, 400), `${eslint.errors} errors · ${eslint.warnings} warnings (code-weighted ${eslint.weighted})`);
   } else {
-    add('eslint-health', 'Eslint health', null, eslint ? 'eslint not runnable (no config/deps)' : 'add eslint detector', false);
+    add('eslint-health', 'Eslint health', 'code-quality', null, eslint ? 'eslint not runnable (no config/deps)' : 'add eslint detector', false);
   }
 
   // 8. TDD maturity (tests written).
@@ -85,9 +83,9 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     const ratio = tests.ratio ?? (tests.sourceFiles ? tests.testFiles / tests.sourceFiles : 0);
     // ratio 0 → 0; ratio ≥ 0.3 (a test per ~3 source files) → 1.0
     const score = tests.hasTests ? clamp01(ratio / 0.3) : 0;
-    add('tdd-maturity', 'TDD maturity (tests written)', score, `${tests.testFiles} test files / ${tests.sourceFiles} source (${Math.round(ratio * 100)}%)${tests.runner ? ` · ${tests.runner}` : ''}`);
+    add('tdd-maturity', 'TDD maturity (tests written)', 'testing', score, `${tests.testFiles} test files / ${tests.sourceFiles} source (${Math.round(ratio * 100)}%)${tests.runner ? ` · ${tests.runner}` : ''}`);
   } else {
-    add('tdd-maturity', 'TDD maturity (tests written)', null, 'add tests detector', false);
+    add('tdd-maturity', 'TDD maturity (tests written)', 'testing', null, 'add tests detector', false);
   }
 
   // 9. SDD-driven (captured design intent). 0 specs → 0 (a spec-less brownfield can't
@@ -103,9 +101,9 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
       t.story ? `${t.story} story` : '',
       t.apiContract ? `${t.apiContract} API-contract` : '',
     ].filter(Boolean).join(' · ');
-    add('sdd-driven', 'SDD-driven (design intent)', score, sdd.specCount === 0 ? 'no captured design intent — characterize before refactor' : `${sdd.specCount} spec artifact(s): ${present || 'docs'}`);
+    add('sdd-driven', 'SDD-driven (design intent)', 'sdd', score, sdd.specCount === 0 ? 'no captured design intent — characterize before refactor' : `${sdd.specCount} spec artifact(s): ${present || 'docs'}`);
   } else {
-    add('sdd-driven', 'SDD-driven (design intent)', null, 'add SDD detector', false);
+    add('sdd-driven', 'SDD-driven (design intent)', 'sdd', null, 'add SDD detector', false);
   }
 
   // 10. Infra-as-code (declared) — the cost-center precondition + agent-tractability
@@ -121,24 +119,24 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     if (cov && cov.provisionable > 0) {
       // ratio of own-cloud resources declared in-repo vs only inferred-from-usage
       const undeclared = cov.provisionable - cov.declared;
-      add('infra-declared', 'Infra-as-code (declared)', cov.ratio,
+      add('infra-declared', 'Infra-as-code (declared)', 'infra', cov.ratio,
         `${cov.declared}/${cov.provisionable} cloud resources declared in-repo` +
         (undeclared > 0 ? ` · ${undeclared} used-but-undeclared (${(cov.undeclared || []).slice(0, 4).join(', ')}${undeclared > 4 ? '…' : ''}) — click-ops risk or sibling infra repo` : ' — fully declared'));
     } else if (anyResourceIac) {
       // managed/PaaS or self-hosted app whose infra IS declared as code, nothing
       // un-declarable left → property satisfied via a (possibly lighter) mechanism.
-      add('infra-declared', 'Infra-as-code (declared)', 1, 'infra declared as code (IaC / migrations / platform config)');
+      add('infra-declared', 'Infra-as-code (declared)', 'infra', 1, 'infra declared as code (IaC / migrations / platform config)');
     } else if (infra.summary.serviceCount === 0) {
-      add('infra-declared', 'Infra-as-code (declared)', null, 'no provisionable infra detected — nothing to declare', false);
+      add('infra-declared', 'Infra-as-code (declared)', 'infra', null, 'no provisionable infra detected — nothing to declare', false);
     } else {
       // services used but none own-cloud-provisionable & no resource IaC: pure 3rd-party
       // SaaS, or platform-only. Lean on the signal level rather than a hard penalty.
       const lvl = infra.signalQuality?.level;
-      add('infra-declared', 'Infra-as-code (declared)', lvl === 'high' ? 1 : lvl === 'medium' ? 0.5 : 0.25,
+      add('infra-declared', 'Infra-as-code (declared)', 'infra', lvl === 'high' ? 1 : lvl === 'medium' ? 0.5 : 0.25,
         infra.signalQuality?.detail || 'infra not declared in version-controlled code');
     }
   } else {
-    add('infra-declared', 'Infra-as-code (declared)', null, 'add infra detector', false);
+    add('infra-declared', 'Infra-as-code (declared)', 'infra', null, 'add infra detector', false);
   }
 
   // 11. Secrets & config hygiene — deterministic, always measurable. Hardcoded
@@ -161,12 +159,31 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     if (e.committedEnvFiles) bits.push(`${e.committedEnvFiles} committed .env`);
     if (!e.hasExample && e.usedKeys) bits.push('no .env.example');
     if (security.dangerousSinks) bits.push(`${security.dangerousSinks} dangerous sink(s)`);
-    add('secrets-config-hygiene', 'Secrets & config hygiene', scoreFromCount(weighted, 12), bits.length ? bits.join(' · ') : 'no secret/env-hygiene issues found');
+    add('secrets-config-hygiene', 'Secrets & config hygiene', 'security', scoreFromCount(weighted, 12), bits.length ? bits.join(' · ') : 'no secret/env-hygiene issues found');
   } else {
-    add('secrets-config-hygiene', 'Secrets & config hygiene', null, 'add security detector', false);
+    add('secrets-config-hygiene', 'Secrets & config hygiene', 'security', null, 'add security detector', false);
   }
 
   const measured = axes.filter((a) => a.measured && typeof a.score === 'number');
   const overall = measured.length ? measured.reduce((s, a) => s + a.score, 0) / measured.length : null;
-  return { axes, overall };
+
+  // Readiness — binary checks (NOT scored quality). Derived from the same summaries.
+  const readiness = [];
+  const addR = (key, label, present, detail) => readiness.push({ key, label, present: !!present, detail });
+  addR('graph-built', 'Code graph built', graphAvailable, graphAvailable ? 'code graph available' : 'run graph build (graphify)');
+  addR('iac-present', 'Infra-as-code present', infra ? (infra.signalQuality?.iacDeclared || (infra.iac || []).length > 0) : false,
+    infra ? 'IaC declared in repo' : 'no infra summary — run infra detector');
+  addR('tests-present', 'Tests present', tests ? tests.hasTests : false, tests ? (tests.hasTests ? `${tests.testFiles} test files` : 'no test files found') : 'run tests detector');
+  addR('lockfile', 'Dependency lockfile', security ? security.supplyChain?.hasLockfile : false,
+    security ? (security.supplyChain?.hasLockfile ? 'lockfile committed' : 'no lockfile — pin dependencies') : 'run security detector');
+  addR('env-example', '.env.example present', security ? security.env?.hasExample : false,
+    security ? (security.env?.hasExample ? '.env.example committed' : 'add a .env.example') : 'run security detector');
+  addR('eslint-config', 'ESLint configured', eslint ? eslint.runnable : false,
+    eslint ? (eslint.runnable ? 'eslint runnable' : 'eslint not runnable (no config/deps)') : 'run eslint detector');
+  addR('specs-present', 'Specs present', sdd ? (sdd.hasSpecs ?? (sdd.specCount || 0) > 0) : false,
+    sdd ? ((sdd.hasSpecs ?? (sdd.specCount || 0) > 0) ? `${sdd.specCount ?? '?'} spec artifact(s)` : 'no captured specs/design intent') : 'run SDD detector');
+  const tsStrict = !!(stack && (stack.frameworks || []).some((f) => /typescript|\bts\b/i.test(f)) && stack.tsStrict);
+  addR('ts-strict', 'TypeScript strict', tsStrict, tsStrict ? 'strict mode on' : 'unknown or not strict');
+
+  return { axes, readiness, overall };
 }

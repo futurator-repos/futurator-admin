@@ -188,4 +188,26 @@ describe('runScanEngine', () => {
     expect(r.phases.length).toBeGreaterThan(0);
     expect(r.reportMarkdown).toMatch(/deterministic/);
   });
+
+  it('deterministic mode MERGES prior swarm (LLM) findings instead of wiping them', async () => {
+    let agentCalls = 0;
+    const deps = baseDeps({
+      readPriorScan: async () => priorScan,
+      spawnAgent: async () => { agentCalls++; return '---FINDINGS---{"findings":[]}---END_FINDINGS---'; },
+    });
+    const detJob = { ...job, scanEnginePayload: { ...job.scanEnginePayload, mode: 'deterministic' } };
+    const r = await runScanEngine(detJob, deps);
+    expect(r.ok).toBe(true);
+    expect(r.mode).toBe('deterministic');
+    expect(agentCalls).toBe(0); // no swarm ran — cheap structural refresh only
+    const issues = r.findings.map((f) => f.issue);
+    // prior LLM findings PRESERVED (not wiped by the deterministic re-run)
+    expect(issues).toContain('fetch never checks res.ok');
+    expect(issues).toContain('stale security finding to be replaced');
+    expect(issues).toContain('subsystem finding kept untouched');
+    // fresh deterministic layer present (hotspots)
+    expect(r.findings.some((f) => f.source === 'deterministic')).toBe(true);
+    // merged set retains the LLM layer
+    expect(r.counts.llm).toBeGreaterThan(0);
+  });
 });

@@ -75,10 +75,35 @@ export interface MaturityAxis {
   status: 'good' | 'fair' | 'poor' | 'unmeasured';
   detail: string;
   measured: boolean;
+  /** which module this quality axis rolls up under (infra|security|compliance|architecture|code-quality|testing|sdd). */
+  module?: string;
+}
+/** Binary readiness check (present/absent) — separate from the quality RAG axes. */
+export interface ReadinessItem {
+  key: string;
+  label: string;
+  present: boolean;
+  detail: string;
 }
 export interface Maturity {
   axes: MaturityAxis[];
+  readiness?: ReadinessItem[];
   overall: number | null;
+}
+
+/** Deterministic stack/tech-profile of the scanned repo (scan.json key "stack"). */
+export interface StackProfile {
+  languages: { lang: string; files: number; pct: number }[];
+  primaryLanguage: string | null;
+  runtime: string | null;
+  packageManager: string | null;
+  frameworks: string[];
+  ui: string[];
+  databases: string[];
+  buildTools: string[];
+  monorepo: string | null;
+  archetype: string;
+  summary: string;
 }
 
 /** Potential-cost model (cost SURFACE, not dollars — live rates are not probed). */
@@ -103,6 +128,10 @@ export interface InfraService {
   files: string[];
   /** billing model of this cost surface (see CostModel). */
   costModel?: CostModel;
+  /** graph-informed: number of files whose imports resolve to this service. */
+  fanIn?: number;
+  /** graph-informed: usage concentrated in <=3 files or behind one dir. */
+  centralized?: boolean;
 }
 export interface CostSurface {
   standing: number;
@@ -170,6 +199,8 @@ export interface ScanReport {
   maturity?: Maturity;
   /** Infrastructure inventory (AWS/db/AI/3rd-party + IaC) — feeds compliance. */
   infra?: InfraInventory;
+  /** Deterministic stack/tech profile of the scanned repo. */
+  stack?: StackProfile;
   gateViolations: Array<{ epicId: string; storyId: string; reason: string }>;
   counts: {
     total: number;

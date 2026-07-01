@@ -411,6 +411,22 @@ export function buildInfraInventory(files = []) {
       iacDeclared = true;
       if (typeof f.content === 'string') for (const r of extractIacResources(f.content, fileIac.name)) record({ ...r, detectedBy: 'iac-declared', confidence: 'high' }, f.rel);
     }
+    // Content-based IaC extraction — declared infra with NO re-detectable import.
+    // SST v3 uses the ambient `sst.aws.*` global (no import at all); Pulumi/CDK
+    // constructs may also appear in modules whose import wasn't matched. Run the
+    // construct extractor by content signature regardless of import; record() dedupes
+    // by name so the import-based path above is not double-counted.
+    if (typeof f.content === 'string') {
+      const contentTool =
+        /\bsst\.aws\./.test(f.content) ? 'SST' :
+        /\bnew\s+aws\.\w+\./.test(f.content) ? 'Pulumi' :
+        /aws-cdk-lib|@aws-cdk\//.test(f.content) || /\bcdk\.(App|Stack)\b/.test(f.content) ? 'AWS CDK' :
+        null;
+      if (contentTool) {
+        for (const r of extractIacResources(f.content, contentTool)) record({ ...r, detectedBy: 'iac-declared', confidence: 'high' }, f.rel);
+        iacDeclared = true;
+      }
+    }
     for (const spec of f.specifiers || []) {
       if (detectIacImport(spec)) continue; // handled above
       const c = detectCloudSdk(spec);
@@ -493,6 +509,51 @@ export function buildInfraInventory(files = []) {
   };
 }
 
+/**
+ * Pass 2 — graph-informed IaC enrichment. Given the inventory from
+ * buildInfraInventory plus a knowledge graph ({nodes:[{source_file}]}) and its
+ * resolved import topology ({hubs:[{file,inDegree}]} and/or an importsByFile map),
+ * annotate each service with:
+ *   - fanIn: how many distinct files reach this service. Precise when an import
+ *     graph is available (sum of hub in-degrees for the service's files); otherwise
+ *     approximated by the service's own file count.
+ *   - centralized: true when usage is concentrated in <=3 files OR sits behind a
+ *     single directory (a single, swappable seam vs. sprawled coupling).
+ * Pure: returns a NEW inventory, never mutates. Defensive: null graph/resolved →
+ * inventory returned unchanged.
+ * @param {object} inventory — output of buildInfraInventory
+ * @param {{nodes?:Array<{source_file?:string}>}|null} graph
+ * @param {{hubs?:Array<{file:string,inDegree?:number}>, importsByFile?:Record<string,string[]>}|null} resolved
+ */
+export function enrichInfraWithGraph(inventory, graph, resolved) {
+  if (!inventory || !graph || !resolved) return inventory;
+  const hubsByFile = new Map();
+  if (Array.isArray(resolved.hubs)) for (const h of resolved.hubs) if (h && h.file) hubsByFile.set(h.file, Number(h.inDegree) || 0);
+  const importsByFile = resolved.importsByFile && typeof resolved.importsByFile === 'object' ? resolved.importsByFile : null;
+
+  const services = (inventory.services || []).map((s) => {
+    const files = Array.isArray(s.files) ? s.files : [];
+    const base = typeof s.fileCount === 'number' ? s.fileCount : files.length;
+    // fanIn — prefer precise import-graph in-degree summed over the service's files.
+    let fanIn = base;
+    if (hubsByFile.size) {
+      const summed = files.reduce((acc, f) => acc + (hubsByFile.get(f) || 0), 0);
+      if (summed > 0) fanIn = summed;
+    } else if (importsByFile) {
+      const fileSet = new Set(files);
+      let count = 0;
+      for (const [, imports] of Object.entries(importsByFile)) if (Array.isArray(imports) && imports.some((t) => fileSet.has(t))) count++;
+      if (count > 0) fanIn = count;
+    }
+    // centralized — concentrated usage (<=3 files) or behind a single directory.
+    const dirs = new Set(files.map((f) => f.split('/').slice(0, -1).join('/')));
+    const centralized = base <= 3 || dirs.size <= 1;
+    return { ...s, fanIn, centralized };
+  });
+
+  return { ...inventory, services };
+}
+
 function d_isIacKind(dets) { return dets.some((d) => d.kind === 'iac'); }
 function prettyConfigType(t) {
   if (t.startsWith('platform:')) return t.slice('platform:'.length);
@@ -560,7 +621,7 @@ function main(argv) {
     const specs = isCode ? specifiers(code) : [];
     // include content for code files that declare infra (under infra/stacks, or that
     // import an IaC tool) so SST/CDK/Pulumi resources in modules are extracted.
-    const iacModule = isCode && (/(^|\/)(infra|stacks|stack|deploy)\//.test(rel) || /aws-cdk-lib|@aws-cdk\/|['"]sst['"]|['"]sst\/|@pulumi\/|cdktf/.test(code));
+    const iacModule = isCode && (/(^|\/)(infra|stacks|stack|deploy)\//.test(rel) || /aws-cdk-lib|@aws-cdk\/|['"]sst['"]|['"]sst\/|sst\.aws\.|@pulumi\/|cdktf|\bnew\s+aws\.\w+\./.test(code));
     files.push({
       rel,
       specifiers: specs,

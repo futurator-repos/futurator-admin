@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildInfraInventory, parseConfig, detectCloudSdk, configFileType, classifyConfigByContent, extractIacResources } from '../infra-extract.mjs';
+import { buildInfraInventory, parseConfig, detectCloudSdk, configFileType, classifyConfigByContent, extractIacResources, enrichInfraWithGraph } from '../infra-extract.mjs';
 
 const svc = (inv, name) => inv.services.find((s) => s.name === name || s.name.startsWith(name));
 
@@ -179,6 +179,71 @@ describe('IaC detection — SST, CDK, cost surface + coverage', () => {
     const aws = svc(inv, 'AWS');
     expect(aws.costModel).toBe('none'); // credentials catch-all, not a billable service
     expect(inv.iacCoverage.provisionable).toBe(1); // only DynamoDB, not the bare AWS entry
+  });
+});
+
+describe('C4 — content-based IaC extraction (no import present)', () => {
+  it('extracts SST v3 resources from ambient sst.aws.* with NO sst import', () => {
+    // SST v3 infra modules use the ambient `sst.aws.*` global — no import at all.
+    const inv = buildInfraInventory([
+      { rel: 'infra/storage.ts', content: 'export const table = new sst.aws.Dynamo("T");\nexport const bucket = new sst.aws.Bucket("B");\nexport const fn = new sst.aws.Function("F", { handler: "h" });' },
+    ]);
+    const dynamo = svc(inv, 'DynamoDB');
+    expect(dynamo).toBeTruthy();
+    expect(dynamo.detectedBy).toContain('iac-declared');
+    expect(dynamo.confidence).toBe('high');
+    expect(svc(inv, 'S3')).toBeTruthy();
+    expect(svc(inv, 'Lambda')).toBeTruthy();
+    expect(inv.signalQuality.level).toBe('high'); // content-declared IaC, no import
+    expect(inv.signalQuality.iacDeclared).toBe(true);
+  });
+
+  it('extracts Pulumi resources from `new aws.*` constructs with NO @pulumi import', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/index.ts', content: 'const b = new aws.s3.BucketV2("b");\nconst t = new aws.dynamodb.Table("t", {});' },
+    ]);
+    expect(svc(inv, 'S3')).toBeTruthy();
+    expect(svc(inv, 'DynamoDB')).toBeTruthy();
+    expect(svc(inv, 'S3').detectedBy).toContain('iac-declared');
+    expect(inv.signalQuality.level).toBe('high');
+  });
+
+  it('does not false-positive on plain code with no IaC construct signature', () => {
+    const inv = buildInfraInventory([
+      { rel: 'src/util.ts', content: 'export const add = (a, b) => a + b;\nconst x = new Map();', specifiers: ['lodash'] },
+    ]);
+    expect(inv.signalQuality.iacDeclared).toBe(false);
+    expect(inv.services).toHaveLength(0);
+  });
+});
+
+describe('C5 — enrichInfraWithGraph (graph-informed fan-in / centralization)', () => {
+  it('annotates fanIn + centralized per service', () => {
+    const inv = buildInfraInventory([
+      { rel: 'src/a/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] }, // 1 file → centralized
+      { rel: 'src/b/x.ts', specifiers: ['@aws-sdk/client-s3'] },
+      { rel: 'src/c/y.ts', specifiers: ['@aws-sdk/client-s3'] },
+      { rel: 'src/d/z.ts', specifiers: ['@aws-sdk/client-s3'] },
+      { rel: 'src/e/w.ts', specifiers: ['@aws-sdk/client-s3'] }, // 4 files, 4 dirs → not centralized
+    ]);
+    const graph = { nodes: [{ source_file: 'src/a/db.ts' }] };
+    const resolved = { hubs: [{ file: 'src/a/db.ts', inDegree: 5 }] };
+    const enriched = enrichInfraWithGraph(inv, graph, resolved);
+
+    const dynamo = enriched.services.find((s) => s.name === 'DynamoDB');
+    const s3 = enriched.services.find((s) => s.name === 'S3');
+    expect(dynamo.fanIn).toBe(5); // from hub in-degree
+    expect(dynamo.centralized).toBe(true); // single file
+    expect(s3.fanIn).toBe(4); // no hub match → falls back to file count
+    expect(s3.centralized).toBe(false); // spread across 4 dirs
+    // pure: original inventory untouched
+    expect(inv.services.find((s) => s.name === 'DynamoDB').fanIn).toBeUndefined();
+  });
+
+  it('returns inventory unchanged when graph/resolved are null (defensive)', () => {
+    const inv = buildInfraInventory([{ rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] }]);
+    expect(enrichInfraWithGraph(inv, null, null)).toBe(inv);
+    expect(enrichInfraWithGraph(inv, { nodes: [] }, null)).toBe(inv);
   });
 });
 

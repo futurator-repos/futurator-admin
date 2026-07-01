@@ -11,11 +11,13 @@ import { analyzeTests } from '../../scripts/refactor-recon/tests-detect.mjs';
 const finding = (over) => ({ dimension: 'correctness', severity: 'Medium', issue: '', suggestion: '', evidence: {}, ...over });
 
 describe('computeMaturity', () => {
-  it('returns all eleven axes', () => {
-    const { axes } = computeMaturity({});
+  it('returns all quality axes (graph-installed moved to readiness)', () => {
+    const { axes, readiness } = computeMaturity({});
     expect(axes.map((a) => a.key).sort()).toEqual(
-      ['clutter', 'component-driven', 'eslint-health', 'graph-installed', 'infra-declared', 'sdd-driven', 'secrets-config-hygiene', 'security-compliance', 'structure-sanity', 'tdd-maturity', 'type-safety'].sort(),
+      ['clutter', 'component-driven', 'eslint-health', 'infra-declared', 'sdd-driven', 'secrets-config-hygiene', 'security-compliance', 'structure-sanity', 'tdd-maturity', 'type-safety'].sort(),
     );
+    expect(axes.map((a) => a.key)).not.toContain('graph-installed');
+    expect(readiness.map((r) => r.key)).toContain('graph-built');
   });
 
   it('Secrets & config hygiene axis: hardcoded secrets + committed .env score poor; clean scores good', () => {
@@ -69,13 +71,13 @@ describe('computeMaturity', () => {
   });
 
   it('marks tests/eslint/sdd unmeasured when no summary is given; clutter degraded when knip did not run', () => {
-    const { axes } = computeMaturity({ graphAvailable: true });
+    const { axes, readiness } = computeMaturity({ graphAvailable: true });
     const get = (k) => axes.find((a) => a.key === k);
     expect(get('tdd-maturity').status).toBe('unmeasured');
     expect(get('eslint-health').status).toBe('unmeasured');
     expect(get('sdd-driven').status).toBe('unmeasured');
     expect(get('clutter').measured).toBe(false);
-    expect(get('graph-installed').status).toBe('good'); // graphAvailable true
+    expect(readiness.find((r) => r.key === 'graph-built').present).toBe(true); // graphAvailable true
   });
 
   it('scores component-driven poor when UI debt is high', () => {

@@ -148,9 +148,10 @@ export async function runScanEngine(job, deps) {
   if (!projectPath) return { ok: false, reason: 'projectPath-missing' };
   pushEvent('scan.started', { projectId: p.projectId, mode });
 
-  // ── (a) Load the prior scan first — targeted merges INTO it ──
+  // ── (a) Load the prior scan first — targeted merges INTO it, and deterministic
+  //         re-runs MERGE (keep prior swarm/LLM findings, swap the det layer). ──
   let priorScan = null;
-  if (targeted && deps.readPriorScan) priorScan = await deps.readPriorScan();
+  if ((targeted || mode === 'deterministic') && deps.readPriorScan) priorScan = await deps.readPriorScan();
   const priorFindings = Array.isArray(priorScan?.findings) ? priorScan.findings : [];
   // No prior scan to merge into → there is nothing to preserve, so a "targeted"
   // request degrades to a real full scan (every shard runs) and the user still
@@ -273,6 +274,11 @@ export async function runScanEngine(job, deps) {
       ? priorFindings.filter((f) => f.source === 'deterministic')
       : detFindings; // fresh recon → fresh deterministic layer
     findings = dedupe([...det, ...keptLlm, ...llmFindings]);
+  } else if (mode === 'deterministic' && priorScan) {
+    // Deterministic re-run: swap the fresh deterministic layer in, but PRESERVE the
+    // prior swarm (LLM) findings — a cheap structural refresh must never wipe the
+    // expensive LLM pass.
+    findings = dedupe([...detFindings, ...priorFindings.filter((f) => f.source === 'llm')]);
   } else {
     findings = dedupe([...detFindings, ...llmFindings]);
   }
@@ -292,6 +298,7 @@ export async function runScanEngine(job, deps) {
     sdd: art.sdd?.summary || null,
     infra,
     security: art.security?.summary || null,
+    stack: art.stack || null,
   });
   pushEvent('scan.maturity', { overall: maturity.overall });
 
@@ -334,6 +341,7 @@ export async function runScanEngine(job, deps) {
     lowConfidence,
     maturity,
     infra,
+    stack: art.stack?.profile || art.stack || null,
     counts: {
       total: findings.length,
       // derived from the MERGED set so targeted re-runs report accurate totals.

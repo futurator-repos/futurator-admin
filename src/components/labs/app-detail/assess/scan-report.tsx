@@ -11,8 +11,11 @@ import { useMemo, useState } from 'react';
 import {
   useScanReport,
   type ScanFinding,
+  type ScanDimension,
   type ScanReport as ScanReportData,
   type MaturityAxis,
+  type ReadinessItem,
+  type StackProfile,
   type InfraInventory,
   type InfraService,
 } from '@/hooks/use-scan-engine';
@@ -371,15 +374,18 @@ const STATUS_COLOR: Record<string, string> = {
   unmeasured: 'var(--text-dim)',
 };
 
-/** The high-level codebase maturity overview — a RAG dot per axis (design: the
+/** RAG dots for a 0–1 quality score (filled = score/5; null → all empty). */
+function maturityDots(score: number | null): string {
+  if (score == null) return '○○○○○';
+  const filled = Math.round(score * 5);
+  return '●'.repeat(filled) + '○'.repeat(5 - filled);
+}
+
+/** The high-level QUALITY overview — a RAG dot per axis (design: the
  *  "checkbox-matrix higher overview"). Filled dots = score/5; unmeasured axes
- *  show a CTA instead of a fake score. */
+ *  show a CTA instead of a fake score. Binary readiness lives separately. */
 function MaturityScorecard({ axes, overall }: { axes: MaturityAxis[]; overall: number | null }) {
-  const dots = (score: number | null) => {
-    if (score == null) return '○○○○○';
-    const filled = Math.round(score * 5);
-    return '●'.repeat(filled) + '○'.repeat(5 - filled);
-  };
+  const dots = maturityDots;
   return (
     <div
       style={{
@@ -391,7 +397,7 @@ function MaturityScorecard({ axes, overall }: { axes: MaturityAxis[]; overall: n
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
         <h4 style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', margin: 0 }}>
-          Codebase Maturity
+          Quality
         </h4>
         {overall != null && (
           <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
@@ -434,6 +440,240 @@ function MaturityScorecard({ axes, overall }: { axes: MaturityAxis[]; overall: n
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Stack Profile header — the deterministic tech-profile of the scanned repo (the
+ * "what is this?" line): a one-line summary + chips for the detected frameworks,
+ * UI libs, and databases. Purely informational; feeds no scoring.
+ */
+function StackProfileHeader({ stack }: { stack: StackProfile }) {
+  const chips: { text: string; group: string }[] = [
+    ...stack.frameworks.map((f) => ({ text: f, group: 'framework' })),
+    ...stack.ui.map((u) => ({ text: u, group: 'ui' })),
+    ...stack.databases.map((d) => ({ text: d, group: 'db' })),
+  ];
+  return (
+    <div
+      data-testid="scan-stack-profile"
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        padding: 12,
+        background: 'var(--bg-elev)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: chips.length ? 8 : 0,
+      }}
+    >
+      <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)' }}>
+        {stack.summary || 'Stack profile'}
+      </div>
+      {chips.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {chips.map((c, i) => (
+            <span
+              key={`${c.group}-${c.text}-${i}`}
+              title={c.group}
+              style={{
+                fontSize: 11,
+                color: 'var(--text-dim)',
+                border: '1px solid var(--border)',
+                borderRadius: 999,
+                padding: '2px 9px',
+                background: 'var(--background)',
+              }}
+            >
+              <strong style={{ color: 'var(--foreground)' }}>{c.text}</strong>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Readiness checklist — BINARY present/absent checks (graph built? IaC? tests?
+ * lockfile? …), kept SEPARATE from the quality RAG scorecard. A compact row of
+ * ✓/✗ items so "is this codebase set up for agentic work?" reads at a glance.
+ */
+function ReadinessChecklist({ items }: { items: ReadinessItem[] }) {
+  if (!items.length) return null;
+  return (
+    <div
+      data-testid="scan-readiness"
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        padding: 12,
+        background: 'var(--bg-elev)',
+      }}
+    >
+      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', marginBottom: 8 }}>
+        Readiness
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {items.map((it) => (
+          <span
+            key={it.key}
+            title={it.detail}
+            data-testid={`scan-readiness-${it.key}`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              fontSize: 11.5,
+              color: 'var(--text-dim)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: '3px 10px',
+            }}
+          >
+            <span
+              style={{
+                color: it.present ? 'var(--success, #22c55e)' : 'var(--destructive, #ef4444)',
+                fontWeight: 700,
+              }}
+            >
+              {it.present ? '✓' : '✗'}
+            </span>
+            <span style={{ color: 'var(--foreground)' }}>{it.label}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Per-module tab config: which finding dimension + quality-axis module it maps
+ *  to, and which deterministic/LLM authority MEASURES it (the caption). */
+type ModuleTabConfig = {
+  module: string;
+  /** dimension to filter findings by (undefined → use the custom finding filter). */
+  dimension?: ScanDimension;
+  authority: string;
+  label: string;
+};
+const MODULE_TABS: Record<string, ModuleTabConfig> = {
+  security: {
+    module: 'security',
+    dimension: 'safety-security',
+    authority: 'deterministic security scan + swarm safety pass',
+    label: 'Security',
+  },
+  compliance: {
+    module: 'compliance',
+    dimension: 'compliance',
+    authority: 'GDPR / EU-AI-Act privacy scan (data-leaving-the-account)',
+    label: 'Compliance',
+  },
+  architecture: {
+    module: 'architecture',
+    dimension: 'architecture',
+    authority: 'graph decomposition + structure recon',
+    label: 'Architecture',
+  },
+  'code-quality': {
+    module: 'code-quality',
+    dimension: 'code-quality-refactoring',
+    authority: 'ESLint + type-safety + refactoring swarm',
+    label: 'Code quality',
+  },
+  testing: {
+    module: 'testing',
+    authority: 'TDD-maturity detector',
+    label: 'Testing',
+  },
+};
+
+/** The scan sub-tabs (view switcher). Overview + Infrastructure + one per module + Plan. */
+type ScanView =
+  | 'overview'
+  | 'infra'
+  | 'security'
+  | 'compliance'
+  | 'architecture'
+  | 'code-quality'
+  | 'testing'
+  | 'plan';
+const SCAN_TABS: [ScanView, string][] = [
+  ['overview', 'Overview'],
+  ['infra', 'Infrastructure'],
+  ['security', 'Security'],
+  ['compliance', 'Compliance'],
+  ['architecture', 'Architecture'],
+  ['code-quality', 'Code quality'],
+  ['testing', 'Testing'],
+  ['plan', 'Plan'],
+];
+
+/**
+ * A module tab — one dimension's findings via the existing PriorityMatrix table,
+ * captioned with what MEASURED it plus that module's quality RAG dot(s) pulled
+ * from the maturity scorecard (axes tagged with the same `module`).
+ */
+function ModuleTab({ report, cfg }: { report: ScanReportData; cfg: ModuleTabConfig }) {
+  const findings = useMemo(() => {
+    if (cfg.dimension) return report.findings.filter((f) => f.dimension === cfg.dimension);
+    // Testing has no dedicated dimension — key off the finding area/issue.
+    return report.findings.filter(
+      (f) => /test|spec|coverage|tdd/i.test(f.area) || /\btest(s|ing)?\b|coverage/i.test(f.issue),
+    );
+  }, [report.findings, cfg]);
+  const axes = useMemo(
+    () => (report.maturity?.axes ?? []).filter((a) => a.module === cfg.module),
+    [report.maturity, cfg.module],
+  );
+
+  return (
+    <div
+      data-testid={`scan-module-${cfg.module}`}
+      style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: 10,
+          fontSize: 11,
+          color: 'var(--text-dim)',
+        }}
+      >
+        <span>
+          Measured by:{' '}
+          <strong style={{ color: 'var(--foreground)', fontWeight: 600 }}>{cfg.authority}</strong>
+        </span>
+        <div style={{ flex: 1 }} />
+        {axes.map((a) => (
+          <span
+            key={a.key}
+            title={a.detail}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          >
+            <span
+              style={{
+                color: STATUS_COLOR[a.status],
+                fontFamily: 'var(--font-mono)',
+                letterSpacing: 1,
+              }}
+            >
+              {maturityDots(a.score)}
+            </span>
+            <span style={{ color: 'var(--foreground)' }}>{a.label}</span>
+          </span>
+        ))}
+      </div>
+      {findings.length ? (
+        <PriorityMatrix findings={findings} />
+      ) : (
+        <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '8px 0' }}>
+          No {cfg.label.toLowerCase()} findings in this scan.
+        </div>
+      )}
     </div>
   );
 }
@@ -800,7 +1040,7 @@ export function ScanReport({
   // Self-loads the last persisted scan from S3 (keyed by appId) — survives reloads
   // without the producing job in the URL.
   const { data: report, isLoading } = useScanReport(appId);
-  const [view, setView] = useState<'report' | 'infra'>('report');
+  const [view, setView] = useState<ScanView>('overview');
 
   if (isLoading && !report) {
     return (
@@ -820,22 +1060,19 @@ export function ScanReport({
   return (
     <div data-testid="scan-report" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <Header report={report} appId={appId} />
-      {/* Report | Infrastructure sub-tab */}
+      {/* Module sub-tabs: Overview | Infrastructure | Security | Compliance |
+          Architecture | Code quality | Testing | Plan. */}
       <div
         style={{
           display: 'inline-flex',
+          flexWrap: 'wrap',
           alignSelf: 'flex-start',
           border: '1px solid var(--border)',
           borderRadius: 6,
           overflow: 'hidden',
         }}
       >
-        {(
-          [
-            ['report', 'Findings & Plan'],
-            ['infra', 'Infrastructure'],
-          ] as ['report' | 'infra', string][]
-        ).map(([v, label]) => (
+        {SCAN_TABS.map(([v, label]) => (
           <button
             key={v}
             type="button"
@@ -856,28 +1093,39 @@ export function ScanReport({
         ))}
       </div>
 
-      {view === 'report' ? (
+      {view === 'overview' ? (
         <>
-          {onRescan ? (
-            <RerunParts report={report} onRescan={onRescan} scanRunning={scanRunning} />
+          {report.stack ? <StackProfileHeader stack={report.stack} /> : null}
+          {report.maturity?.readiness?.length ? (
+            <ReadinessChecklist items={report.maturity.readiness} />
           ) : null}
           {report.maturity?.axes?.length ? (
             <MaturityScorecard axes={report.maturity.axes} overall={report.maturity.overall} />
           ) : null}
-          <PriorityMatrix findings={report.findings} />
           <ByDimension findings={report.findings} />
+          {onRescan ? (
+            <RerunParts report={report} onRescan={onRescan} scanRunning={scanRunning} />
+          ) : null}
+        </>
+      ) : view === 'infra' ? (
+        report.infra ? (
+          <InfraMap
+            infra={report.infra}
+            complianceCount={report.counts.byDimension?.compliance ?? 0}
+          />
+        ) : (
+          <div style={{ padding: 14, fontSize: 12, color: 'var(--text-dim)' }}>
+            No infrastructure inventory in this scan — re-scan to generate it.
+          </div>
+        )
+      ) : view === 'plan' ? (
+        <>
+          <PriorityMatrix findings={report.findings} />
           <Phases report={report} onCreatePlan={onCreatePlan} />
         </>
-      ) : report.infra ? (
-        <InfraMap
-          infra={report.infra}
-          complianceCount={report.counts.byDimension?.compliance ?? 0}
-        />
-      ) : (
-        <div style={{ padding: 14, fontSize: 12, color: 'var(--text-dim)' }}>
-          No infrastructure inventory in this scan — re-scan to generate it.
-        </div>
-      )}
+      ) : MODULE_TABS[view] ? (
+        <ModuleTab report={report} cfg={MODULE_TABS[view]} />
+      ) : null}
     </div>
   );
 }

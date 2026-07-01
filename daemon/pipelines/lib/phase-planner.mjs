@@ -43,6 +43,20 @@ const PHASE_WHY = [
 
 const has = (s, re) => typeof s === 'string' && re.test(s);
 
+// Security checks (security-scan.mjs) that are secret/env HYGIENE — cheap, urgent,
+// isolated. These route to Phase 0/1 (module-aware, C6) rather than Phase 5.
+const SECRET_ENV_CHECKS = new Set([
+  'hardcoded-secret',
+  'public-prefix-secret',
+  'weak-fallback-secret',
+  'committed-secret-file',
+  'committed-env',
+  'gitignore-env',
+  'no-env-example',
+  'undocumented-env',
+  'no-env-validation',
+]);
+
 // Band-routing signals derived from the finding's issue+suggestion TEXT — needed
 // because LLM findings (the bulk) don't carry the structural evidence hints the
 // deterministic mapper attaches. Tuned against the first real-app run (applicator-
@@ -68,6 +82,21 @@ export function assignBand(f) {
   const txt = `${f.issue || ''} ${sug}`;
   const eff = f.effort;
   const sev = f.severity;
+
+  // ── Module-aware routing (C6) ──────────────────────────────────────────────
+  // Deterministic module scanners (security-scan / sdd-detect) tag findings with
+  // module evidence flags (evidence.security / .compliance / .sdd + evidence.check).
+  // Route those by MODULE first — BEFORE the text heuristics below — so they never
+  // collapse into Phase 5 'Correctness' (now reserved for dimension 'correctness').
+  // These flags never co-occur with the structural hints (hotspotKind/foundationKind)
+  // handled further down, so dead-code / god-file / UI routing is preserved.
+  if (e.sdd === true) return 1; // design intent / ADRs / API contracts → foundations
+  if (e.compliance === true || f.dimension === 'compliance') return 1; // never Phase 5
+  const isSecurity = e.security === true || f.dimension === 'safety-security';
+  if (isSecurity && SECRET_ENV_CHECKS.has(e.check)) {
+    // Secret / env hygiene: quick wins stop-the-bleeding; the rest stay early, not 5.
+    return eff === 'Trivial' || eff === 'Small' ? 0 : 1;
+  }
 
   // Phase 0 — stop-the-bleeding: ALL dead code (delete candidates, gated downstream)
   // + mechanical fixes.
