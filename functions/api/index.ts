@@ -3494,6 +3494,21 @@ app.delete('/api/plans/:id', async (c) => {
     });
   }
 
+  // 5b. Plan-spec-graph StoryNodes (Pipeline-3). A plan run "as Pipeline-3"
+  // ingests StoryNode rows into a separate table that nothing else cleaned —
+  // orphans kept the plan visible in Labs3 (and re-dispatchable by the ready-
+  // frontier) after the plan row was gone.
+  try {
+    const dropped = await storyNodeRepo.deletePlanStoryNodes(planId);
+    results.push({ step: 'story-nodes', status: 'done', detail: `${dropped} StoryNodes` });
+  } catch (err) {
+    results.push({
+      step: 'story-nodes',
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   // 6. Delete the plan row.
   await planRepo.deletePlan(planId);
   results.push({ step: 'plan', status: 'done' });
@@ -12263,6 +12278,10 @@ app.delete('/api/apps/:appId', authMiddleware, async (c) => {
     for (const epicId of plan.epicIds || []) {
       await epicRepo.deleteEpic(epicId).catch(() => undefined);
     }
+    // Pipeline-3 StoryNodes live in a separate table nothing else cleaned —
+    // without this a deleted app's plan kept showing (and stayed re-dispatchable)
+    // in Labs3.
+    await storyNodeRepo.deletePlanStoryNodes(plan.planId).catch(() => 0);
     await planRepo.deletePlan(plan.planId).catch(() => undefined);
   }
   results.push({

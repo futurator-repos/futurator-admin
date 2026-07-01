@@ -26,6 +26,30 @@ export async function batchPutStoryNodes(rows: StoryNodeRow[]): Promise<void> {
   }
 }
 
+/**
+ * Delete every StoryNode row for a plan (plan-spec-graph). Called by the plan-
+ * delete + app-delete cascades so a deleted plan/app leaves no orphaned rows for
+ * Labs3 to render (or for the ready-frontier to re-dispatch). Best-effort per
+ * chunk; returns the number of rows deleted. No-op (0) when the plan was never
+ * ingested as Pipeline-3.
+ */
+export async function deletePlanStoryNodes(planId: string): Promise<number> {
+  const rows = await getPlanStoryNodes(planId);
+  let deleted = 0;
+  for (let i = 0; i < rows.length; i += 25) {
+    const chunk = rows.slice(i, i + 25);
+    await docClient.send(
+      new BatchWriteCommand({
+        RequestItems: {
+          [TABLE]: chunk.map((r) => ({ DeleteRequest: { Key: { storyId: r.storyId } } })),
+        },
+      }),
+    );
+    deleted += chunk.length;
+  }
+  return deleted;
+}
+
 export async function getStoryNode(storyId: string): Promise<StoryNodeRow | null> {
   const res = await docClient.send(new GetCommand({ TableName: TABLE, Key: { storyId } }));
   return (res.Item as StoryNodeRow) || null;
