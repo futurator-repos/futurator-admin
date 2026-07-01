@@ -1050,7 +1050,7 @@ function GitTab({ git }: { git?: GitEvolution }) {
                       : 'var(--border)',
                 }}
               >
-                {h.file.split('/').pop()}
+                {shortPath(h.file)}
                 <span style={{ color: 'var(--text-dim)' }}> · {h.churn}</span>
               </span>
             ))}
@@ -1084,9 +1084,9 @@ function GitTab({ git }: { git?: GitEvolution }) {
                   fontFamily: 'var(--font-mono)',
                 }}
               >
-                <span style={{ color: 'var(--foreground)' }}>{c.a.split('/').pop()}</span>
+                <span style={{ color: 'var(--foreground)' }}>{shortPath(c.a)}</span>
                 {' ⇄ '}
-                <span style={{ color: 'var(--foreground)' }}>{c.b.split('/').pop()}</span>{' '}
+                <span style={{ color: 'var(--foreground)' }}>{shortPath(c.b)}</span>{' '}
                 <span>
                   · {c.together}× · {Math.round(c.confidence * 100)}%
                 </span>
@@ -1618,6 +1618,200 @@ export function buildScanPlanIntent(report: ScanReportData, selected: Set<number
     ? intent
     : `${intent.slice(0, CAP - 40).trimEnd()}\n… (truncated; see the full scan)`;
 }
+/** Last two path segments — disambiguates same-basename files (many route.ts). */
+export function shortPath(p: string): string {
+  const parts = String(p || '')
+    .split('/')
+    .filter(Boolean);
+  return parts.length <= 1 ? String(p || '') : parts.slice(-2).join('/');
+}
+
+const DIM_LABEL: Record<string, string> = {
+  'safety-security': 'Safety & security',
+  compliance: 'Compliance',
+  architecture: 'Architecture',
+  'code-quality-refactoring': 'Code quality / refactoring',
+  correctness: 'Correctness',
+};
+const DIM_ORDER = [
+  'safety-security',
+  'compliance',
+  'architecture',
+  'code-quality-refactoring',
+  'correctness',
+];
+
+/**
+ * Compile the full scan into a shareable Markdown report for the codebase's own agent:
+ * exec summary + problems grouped by dimension & sorted by severity + infra/git highlights
+ * + the selected-phase refactoring plan. Every problem carries file:line + a suggested fix
+ * so an agent can act directly.
+ */
+export function buildMarkdownReport(
+  report: ScanReportData,
+  appId: string,
+  selectedPhases: Set<number>,
+): string {
+  const L: string[] = [];
+  const sha = report.scannedSha ? ` · commit \`${report.scannedSha.slice(0, 7)}\`` : '';
+  L.push(`# ${appId} — Code Quality & Refactoring Report`);
+  L.push('');
+  L.push(`> Generated ${new Date().toISOString()} · Refactoring Scan v2 (hybrid), report-only.`);
+  if (report.stack?.summary) L.push(`> **Stack:** ${report.stack.summary}`);
+  L.push(
+    `> **${report.counts.total} findings** (${report.counts.deterministic} deterministic + ${report.counts.llm} swarm) · ${report.phases.length} phases${sha}`,
+  );
+  L.push('');
+
+  // Executive summary
+  L.push('## Executive summary');
+  if (report.maturity?.overall != null)
+    L.push(`- **Maturity: ${Math.round(report.maturity.overall * 100)}%** overall`);
+  if (report.maturity?.readiness?.length) {
+    L.push(
+      `- **Readiness:** ${report.maturity.readiness.map((r) => `${r.present ? '✓' : '✗'} ${r.label}`).join(' · ')}`,
+    );
+  }
+  for (const a of report.maturity?.axes ?? []) {
+    if (a.measured) L.push(`- ${a.label}: **${a.status}** — ${a.detail}`);
+  }
+  L.push('');
+
+  // Problems grouped by dimension, sorted by severity then effort
+  L.push('## Problems by area');
+  L.push('');
+  const byDim: Record<string, ScanFinding[]> = {};
+  for (const f of report.findings) (byDim[f.dimension] ||= []).push(f);
+  const CAP = 50;
+  for (const dim of DIM_ORDER) {
+    const group = byDim[dim];
+    if (!group?.length) continue;
+    group.sort(
+      (a, b) =>
+        SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity) ||
+        EFF_ORDER.indexOf(a.effort) - EFF_ORDER.indexOf(b.effort),
+    );
+    L.push(`### ${DIM_LABEL[dim] || dim} (${group.length})`);
+    for (const f of group.slice(0, CAP)) {
+      L.push(
+        `- **${f.severity}** · ${f.effort} — ${f.issue} — \`${f.location}\`${f.suggestion ? ` → ${f.suggestion}` : ''}`,
+      );
+    }
+    if (group.length > CAP) L.push(`- _…+${group.length - CAP} more (see the full scan)_`);
+    L.push('');
+  }
+
+  // Infrastructure
+  const infra = report.infra;
+  if (infra) {
+    L.push('## Infrastructure');
+    L.push(
+      `- Clouds: ${infra.clouds.join(', ') || 'none'} · ${infra.summary.serviceCount} services · IaC: ${infra.summary.iacProviders.join(', ') || 'none declared'}`,
+    );
+    const cov = infra.iacCoverage || infra.summary.iacCoverage;
+    if (cov && cov.provisionable > 0) {
+      L.push(
+        `- IaC coverage: ${cov.declared}/${cov.provisionable} own-cloud resources declared${cov.undeclared.length ? ` — used-but-undeclared: ${cov.undeclared.join(', ')}` : ''}`,
+      );
+    }
+    if (infra.deployScripts?.length) {
+      L.push(
+        `- ⚠ ${infra.deployScripts.length} hand-rolled deploy artifact(s) (not IaC): ${infra.deployScripts.map((d) => shortPath(d.file)).join(', ')}`,
+      );
+    }
+    if (infra.external?.length)
+      L.push(
+        `- External processors (GDPR/AI-Act): ${infra.external.map((e) => e.provider).join(', ')}`,
+      );
+    L.push('');
+  }
+
+  // Git & Evolution
+  const git = report.gitEvolution;
+  if (git?.isRepo) {
+    L.push('## Git & Evolution');
+    L.push(
+      `- ${git.commits.total} commits · ${git.branches.total} branch(es) (${git.branches.stale} stale) · ${git.tags} tags · ${git.commits.conventionalPct}% conventional`,
+    );
+    if (git.hotFiles?.length)
+      L.push(
+        `- Churn hotspots: ${git.hotFiles
+          .slice(0, 10)
+          .map((h) => `${shortPath(h.file)} (${h.churn})`)
+          .join(', ')}`,
+      );
+    if (git.temporalCoupling?.length)
+      L.push(
+        `- Hidden coupling (co-change): ${git.temporalCoupling
+          .slice(0, 6)
+          .map((c) => `${shortPath(c.a)} ⇄ ${shortPath(c.b)} (${Math.round(c.confidence * 100)}%)`)
+          .join(', ')}`,
+      );
+    if (git.busFactor)
+      L.push(
+        `- Bus factor: ${git.busFactor.singleAuthorFiles} single-author files · ${git.busFactor.topAuthors.map((a) => `${a.name} ${a.pct}%`).join(', ')}`,
+      );
+    L.push('');
+  }
+
+  // Recommended plan (selected phases, else all)
+  const usePhases = selectedPhases.size
+    ? selectedPhases
+    : new Set(report.phases.map((p) => p.phase));
+  const byId = new Map(report.findings.map((f) => [f.id, f]));
+  const phases = report.phases
+    .filter((p) => usePhases.has(p.phase))
+    .sort((a, b) => a.phase - b.phase);
+  if (phases.length) {
+    L.push('## Recommended refactoring plan');
+    L.push(
+      selectedPhases.size
+        ? `_Selected phases. Sequence foundations→consumers; each item as a Strangler-Fig (extract → repoint → delete, gated on grep-zero + a passing test)._`
+        : `_All phases (select phases in the Plan tab to narrow)._`,
+    );
+    L.push('');
+    for (const p of phases) {
+      L.push(`### Phase ${p.phase} — ${p.name}`);
+      if (p.why) L.push(`_${p.why}_`);
+      const items = p.items
+        .map((id) => byId.get(id))
+        .filter((f): f is ScanFinding => !!f)
+        .sort(
+          (a, b) =>
+            SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity) ||
+            EFF_ORDER.indexOf(a.effort) - EFF_ORDER.indexOf(b.effort),
+        )
+        .slice(0, 30);
+      items.forEach((f, i) =>
+        L.push(
+          `${i + 1}. **${f.severity}/${f.effort}** ${f.issue}${f.suggestion ? ` → ${f.suggestion}` : ''} (\`${f.location}\`)`,
+        ),
+      );
+      if (p.items.length > 30) L.push(`   _…+${p.items.length - 30} more_`);
+      L.push('');
+    }
+  }
+
+  L.push('---');
+  L.push(
+    '_Generated by Futurator Refactoring Scan v2 — deterministic recon + LLM swarm. Report-only; no code was modified._',
+  );
+  return L.join('\n');
+}
+
+function downloadMarkdown(report: ScanReportData, appId: string, selectedPhases: Set<number>) {
+  const md = buildMarkdownReport(report, appId, selectedPhases);
+  const blob = new Blob([md], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `code-quality-report-${appId}-${new Date().toISOString().slice(0, 10)}.md`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 const sevColor: Record<string, string> = {
   High: 'var(--destructive, #ef4444)',
   Medium: 'var(--warning, #f59e0b)',
@@ -1745,7 +1939,7 @@ export function ScanReport({
       ) : view === 'plan' ? (
         <>
           <PriorityMatrix findings={report.findings} />
-          <Phases report={report} onCreatePlan={onCreatePlan} />
+          <Phases report={report} appId={appId} onCreatePlan={onCreatePlan} />
           <TimelineCostPanel timeline={report.timeline} cost={report.cost} />
         </>
       ) : MODULE_TABS[view] ? (
@@ -1953,9 +2147,11 @@ function ByDimension({ findings }: { findings: ScanFinding[] }) {
 
 function Phases({
   report,
+  appId,
   onCreatePlan,
 }: {
   report: ScanReportData;
+  appId: string;
   onCreatePlan?: (intent: string) => void;
 }) {
   const byId = useMemo(() => new Map(report.findings.map((f) => [f.id, f])), [report.findings]);
@@ -1991,6 +2187,24 @@ function Phases({
           check phases → turn into an executable refactoring plan
         </span>
         <div style={{ flex: 1 }} />
+        <button
+          type="button"
+          onClick={() => downloadMarkdown(report, appId, selected)}
+          data-testid="scan-export-md"
+          title="Download a Markdown code-quality report (problems grouped + sorted + the selected-phase plan) to share with the codebase's agent"
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            color: 'var(--foreground)',
+            background: 'transparent',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '5px 10px',
+            cursor: 'pointer',
+          }}
+        >
+          ⬇ Download MD report
+        </button>
         {onCreatePlan && (
           <button
             type="button"
