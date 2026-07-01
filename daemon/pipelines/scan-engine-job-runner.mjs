@@ -241,6 +241,7 @@ export async function runScanEngine(job, deps) {
     ...(Array.isArray(art.security?.findings) ? art.security.findings : []),
     ...(Array.isArray(art.sdd?.findings) ? art.sdd.findings : []),
     ...(Array.isArray(art.aiReadiness?.findings) ? art.aiReadiness.findings : []),
+    ...(Array.isArray(art.gitEvolution?.findings) ? art.gitEvolution.findings : []),
   ].map((f) => ({ ...f, producedBy: 'deterministic' }));
 
   // Per-task ledger steps collected across every runSwarm call (analyzer + pass).
@@ -331,6 +332,9 @@ export async function runScanEngine(job, deps) {
   // AI-readiness — targeted+reuse may not re-read the detector; fall back to prior.
   const aiReadiness = art.aiReadiness || (effectiveTargeted ? priorScan?.aiReadiness : null) || null;
 
+  // Git & Evolution — targeted+reuse may not re-read the detector; fall back to prior.
+  const gitEvolution = art.gitEvolution || (effectiveTargeted ? priorScan?.gitEvolution : null) || null;
+
   // Maturity scorecard — the high-level RAG overview (deterministic, ~0 LLM).
   const maturity = computeMaturity({
     findings,
@@ -344,6 +348,7 @@ export async function runScanEngine(job, deps) {
     security: art.security?.summary || null,
     stack: art.stack || null,
     aiReadiness,
+    git: gitEvolution,
   });
   pushEvent('scan.maturity', { overall: maturity.overall });
 
@@ -398,6 +403,7 @@ export async function runScanEngine(job, deps) {
     maturity,
     infra,
     aiReadiness,
+    gitEvolution,
     timeline,
     cost,
     stack: art.stack?.profile || art.stack || null,

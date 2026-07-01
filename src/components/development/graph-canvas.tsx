@@ -63,6 +63,13 @@ export interface GraphCanvasProps {
   colorBy?: 'community' | 'role';
   /** translucent community blobs behind the graph */
   zones: boolean;
+  /**
+   * Finding-lens overlay (assessment concerns). When set, lens-matching nodes
+   * glow with their per-node lens colour (halo + size ∝ `score`, 0..1) while
+   * every other node dims to low opacity (kept visible, not hidden). Independent
+   * of the community/role colour overlays and of `searchMatch`.
+   */
+  lens?: { color: Record<string, string>; score: Record<string, number> } | null;
   searchMatch: { matchIds: Set<string>; neighborIds: Set<string> } | null;
   similarSet: Set<string>;
   selectedId: string | null;
@@ -158,6 +165,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
     xray,
     colorBy = 'community',
     zones,
+    lens = null,
     searchMatch,
     similarSet,
     selectedId,
@@ -270,6 +278,8 @@ export function GraphCanvas(props: GraphCanvasProps) {
   }, [fitToken]);
 
   const isLit = (id: string): boolean => {
+    // Lens overlay drives lit/dim when active (it replaces the hotspot highlight).
+    if (lens) return lens.color[id] != null;
     if (!searchMatch) return true;
     return searchMatch.matchIds.has(id) || searchMatch.neighborIds.has(id);
   };
@@ -280,12 +290,15 @@ export function GraphCanvas(props: GraphCanvasProps) {
     if (xray && maxCentrality > 0)
       r = meta.base + ((metrics[n.id]?.centrality ?? 0) / maxCentrality) * 16;
     if (searchMatch?.matchIds.has(n.id)) r *= 2.0;
+    if (lens?.color[n.id] != null) r += 2 + (lens.score[n.id] ?? 0) * 6;
     if (selectedId === n.id) r = Math.max(r, 8);
     return r;
   };
 
   const colorFor = (n: CanvasNode): string => {
     if (!isLit(n.id)) return theme.dim;
+    // Lens overlay: lit nodes wear their lens (module) colour.
+    if (lens) return lens.color[n.id] ?? theme.dim;
     if (!searchMatch && similarSet.has(n.id)) return SIMILAR;
     // Roles overlay: colour by architecture/privacy role (infra/db/ai/thirdParty);
     // role-less nodes stay dim so the tagged classes stand out.
@@ -308,6 +321,18 @@ export function GraphCanvas(props: GraphCanvasProps) {
       ctx.fillStyle = theme.dim;
       ctx.fill();
       return;
+    }
+    // lens glow — halo intensity ∝ facet score
+    if (lens?.color[n.id] != null) {
+      const col = lens.color[n.id];
+      const sc = lens.score[n.id] ?? 0;
+      ctx.save();
+      ctx.shadowColor = col;
+      ctx.shadowBlur = 8 + sc * 16;
+      drawShape(ctx, meta.shape, x, y, r + 1.5);
+      ctx.fillStyle = col;
+      ctx.fill();
+      ctx.restore();
     }
     // selection / similarity ring
     if (selectedId === n.id) {
@@ -344,7 +369,8 @@ export function GraphCanvas(props: GraphCanvasProps) {
     }
     // label
     const matched = !!searchMatch?.matchIds.has(n.id);
-    if (matched || selectedId === n.id || globalScale > 1.7 || (xray && r > 14)) {
+    const lensLit = lens?.color[n.id] != null;
+    if (matched || lensLit || selectedId === n.id || globalScale > 1.7 || (xray && r > 14)) {
       const fontSize = Math.max(2.6, 10 / globalScale);
       ctx.font = `${fontSize}px ui-sans-serif, system-ui`;
       ctx.textAlign = 'center';
@@ -371,7 +397,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
     const e = raw as CanvasLink;
     const s = endpointId(e.source);
     const t = endpointId(e.target);
-    if (searchMatch && !(isLit(s) && isLit(t))) return theme.dim;
+    if ((searchMatch || lens) && !(isLit(s) && isLit(t))) return theme.dim;
     if (e.type === 'CONTAINS') return theme.contain;
     return edgeMeta(e.type).color;
   };

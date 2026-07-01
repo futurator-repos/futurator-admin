@@ -32,9 +32,10 @@ const isHotKind = (hotspots, kind) => (hotspots || []).filter((h) => h.kind === 
  *   - security: SecuritySummary|null from security-scan (secrets/env-hygiene axis)
  *   - stack:   StackProfile|null   used only for readiness (ts-strict) — safe to ignore if null
  *   - aiReadiness: AiReadiness|null from ai-readiness detector (AI-onboarding axis + readiness)
+ *   - git:     GitEvolution|null   from git-analyze detector (branch/commit/bus-factor axes + readiness)
  * @returns {{ axes: Array, readiness: Array, overall: number|null }}
  */
-export function computeMaturity({ findings = [], hotspots = [], tests = null, eslint = null, graphAvailable = false, knipRan = false, sdd = null, infra = null, security = null, stack = null, aiReadiness = null } = {}) {
+export function computeMaturity({ findings = [], hotspots = [], tests = null, eslint = null, graphAvailable = false, knipRan = false, sdd = null, infra = null, security = null, stack = null, aiReadiness = null, git = null } = {}) {
   const axes = [];
   const add = (key, label, module, score, detail, measured = true) =>
     axes.push({ key, label, module, score, status: statusFor(measured ? score : null), detail, measured });
@@ -185,6 +186,39 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     add('ai-readiness', 'AI-readiness (agent onboarding)', 'ai', null, 'add AI detector', false);
   }
 
+  // 13-15. Git & Evolution — branch/commit hygiene + bus-factor (change-history provenance).
+  //        Only measurable when the git detector ran against a real repo; a non-repo or
+  //        missing detector reports 'add git detector' rather than a fake score.
+  if (git && git.isRepo) {
+    const b = git.branches || {};
+    const c = git.commits || {};
+    const bf = git.busFactor || {};
+
+    // 13. Branch hygiene — stale branches relative to total. 0 stale → 1.0.
+    const branchScore = b.total > 0 ? clamp01(1 - (b.stale || 0) / b.total) : 1;
+    add('branch-hygiene', 'Branch hygiene', 'git', branchScore, `${b.stale || 0}/${b.total || 0} stale branches (on ${b.current || '?'})`);
+
+    // 14. Commit hygiene — conventional-commit adoption + small, focused commits.
+    const convScore = clamp01((c.conventionalPct || 0) / 100);
+    // avg commit touching ≤5 files → 1.0; ≥30 files → 0.0.
+    const sizeScore = scoreFromCount(Math.max(0, (c.avgSizeFiles || 0) - 5), 25);
+    add('commit-hygiene', 'Commit hygiene', 'git', (convScore + sizeScore) / 2, `${c.conventionalPct || 0}% conventional · ~${Math.round((c.avgSizeFiles || 0) * 10) / 10} files/commit`);
+
+    // 15. Bus factor — share of files with a single author (knowledge concentration).
+    const totalFiles = Object.keys(git.churnByFile || {}).length;
+    const busScore = totalFiles > 0 ? clamp01(1 - (bf.singleAuthorFiles || 0) / totalFiles) : null;
+    const topAuthor = (bf.topAuthors || [])[0];
+    add('bus-factor', 'Bus factor (author spread)', 'git', busScore, totalFiles > 0 ? `${bf.singleAuthorFiles || 0}/${totalFiles} single-author files${topAuthor ? ` · top ${topAuthor.name} ${topAuthor.pct}%` : ''}` : 'no tracked files', totalFiles > 0);
+  } else if (git) {
+    add('branch-hygiene', 'Branch hygiene', 'git', null, 'not a git repo — no branch history', false);
+    add('commit-hygiene', 'Commit hygiene', 'git', null, 'not a git repo — no commit history', false);
+    add('bus-factor', 'Bus factor (author spread)', 'git', null, 'not a git repo — no authorship history', false);
+  } else {
+    add('branch-hygiene', 'Branch hygiene', 'git', null, 'add git detector', false);
+    add('commit-hygiene', 'Commit hygiene', 'git', null, 'add git detector', false);
+    add('bus-factor', 'Bus factor (author spread)', 'git', null, 'add git detector', false);
+  }
+
   const measured = axes.filter((a) => a.measured && typeof a.score === 'number');
   const overall = measured.length ? measured.reduce((s, a) => s + a.score, 0) / measured.length : null;
 
@@ -205,6 +239,13 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     sdd ? ((sdd.hasSpecs ?? (sdd.specCount || 0) > 0) ? `${sdd.specCount ?? '?'} spec artifact(s)` : 'no captured specs/design intent') : 'run SDD detector');
   const tsStrict = !!(stack && (stack.frameworks || []).some((f) => /typescript|\bts\b/i.test(f)) && stack.tsStrict);
   addR('ts-strict', 'TypeScript strict', tsStrict, tsStrict ? 'strict mode on' : 'unknown or not strict');
+
+  // Git & Evolution readiness — only when the git detector ran.
+  if (git) {
+    addR('git-repo', 'Git repository', git.isRepo, git.isRepo ? `${git.commits?.total ?? '?'} commits · ${git.branches?.total ?? '?'} branches` : 'not a git repo — no history/provenance signal');
+    addR('git-tags', 'Release tags', (git.tags || 0) > 0, (git.tags || 0) > 0 ? `${git.tags} tag(s)` : 'no release tags');
+    addR('conventional-commits', 'Conventional commits', (git.commits?.conventionalPct || 0) >= 50, `${git.commits?.conventionalPct || 0}% conventional-commit messages`);
+  }
 
   // AI-onboarding readiness — only when the AI detector ran.
   if (aiReadiness) {

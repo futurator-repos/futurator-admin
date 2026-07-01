@@ -257,6 +257,42 @@ describe('runScanEngine', () => {
     expect(r.aiReadiness).toBe(aiReadiness);
   });
 
+  // ── C-GIT: git-evolution findings land in the deterministic pool + result ──
+  it('folds gitEvolution.findings into the deterministic pool and returns gitEvolution', async () => {
+    const gitEvolution = {
+      isRepo: true, shallow: false,
+      branches: { total: 3, stale: 1, current: 'main' },
+      commits: { total: 120, last30d: 12, avgSizeFiles: 4, conventionalPct: 40 },
+      tags: 2,
+      churnByFile: { 'src/lib/store.ts': 30 },
+      hotFiles: [{ file: 'src/lib/store.ts', churn: 30 }],
+      temporalCoupling: [],
+      busFactor: { singleAuthorFiles: 8, topAuthors: [{ name: 'Alice', pct: 70 }] },
+      summary: 'git history present',
+      findings: [
+        { id: 'git-1', source: 'deterministic', dimension: 'code-quality-refactoring', severity: 'Low', effort: 'Small', location: 'HEAD:1', issue: 'low conventional-commit adoption', suggestion: 'adopt conventional commits', dependsOn: [] },
+      ],
+    };
+    const deps = baseDeps({
+      readArtifacts: async () => ({
+        hotspots: [{ kind: 'god-object', score: 90, severity: 'critical', title: 'God-object: store', files: ['src/lib/store.ts'], evidence: { methods: 40, file: 'src/lib/store.ts' }, suggestedAction: 'split' }],
+        shards: { shards: [{ shardKey: '§sys:src--lib', name: 'src/lib', members: ['src/lib/store.ts'], depends: [], focus: 'x', analyze: true }], lowConfidence: false },
+        anchoredPaths: new Set(['src/lib/store.ts']),
+        hubs: [{ file: 'src/lib/store.ts', inDegree: 38 }],
+        gitEvolution,
+      }),
+    });
+    const r = await runScanEngine(job, deps);
+    expect(r.ok).toBe(true);
+    // deterministic git-evolution finding merged into the pool
+    const git = r.findings.find((f) => f.issue === 'low conventional-commit adoption');
+    expect(git).toBeTruthy();
+    expect(git.source).toBe('deterministic');
+    expect(git.producedBy).toBe('deterministic');
+    // gitEvolution echoed on the result
+    expect(r.gitEvolution).toBe(gitEvolution);
+  });
+
   it('deterministic mode MERGES prior swarm (LLM) findings instead of wiping them', async () => {
     let agentCalls = 0;
     const deps = baseDeps({

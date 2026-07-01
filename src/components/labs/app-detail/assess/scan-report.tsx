@@ -8,6 +8,7 @@
  */
 
 import { useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   useScanReport,
   type ScanFinding,
@@ -21,6 +22,7 @@ import {
   type ScanStep,
   type ScanCost,
   type AiReadiness,
+  type GitEvolution,
 } from '@/hooks/use-scan-engine';
 
 const CONF_COLOR: Record<string, string> = {
@@ -28,6 +30,36 @@ const CONF_COLOR: Record<string, string> = {
   medium: 'var(--warning, #f59e0b)',
   low: 'var(--text-dim)',
 };
+
+/**
+ * "View on graph" affordance — a small link that jumps to the app-level Graph tab
+ * with this module's finding-lens preselected (?tab=graph&lens=<dim>), so the
+ * operator sees exactly which file nodes this concern lights up. Dim keys:
+ * security|compliance|infra|ai|tests|architecture|code-quality.
+ */
+function ViewOnGraphLink({ dim }: { dim: string }) {
+  const router = useRouter();
+  return (
+    <button
+      type="button"
+      onClick={() => router.push(`?tab=graph&lens=${dim}`)}
+      data-testid={`scan-view-on-graph-${dim}`}
+      title="Highlight the files this concern touches on the code graph"
+      style={{
+        fontSize: 11,
+        fontWeight: 600,
+        color: 'var(--accent-blue, #3b82f6)',
+        background: 'transparent',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      View on graph →
+    </button>
+  );
+}
 
 /**
  * Infrastructure tab — how the app's infra works, FILE-FIRST + provider-agnostic.
@@ -885,6 +917,224 @@ function AiReadinessTab({ ai, findings }: { ai?: AiReadiness; findings: ScanFind
   );
 }
 
+/**
+ * Git & Evolution tab (C-GIT) — the deterministic parse of the repo's git history
+ * (the TIME axis the import graph can't see): branch/commit hygiene, churn
+ * hotspots, temporal coupling (co-change pairs), and bus-factor. Author emails are
+ * never surfaced (names/counts only). Guards when no git analysis ran; degrades on
+ * a shallow clone.
+ */
+function GitTab({ git }: { git?: GitEvolution }) {
+  if (!git) {
+    return (
+      <div style={{ padding: 14, fontSize: 12, color: 'var(--text-dim)' }}>
+        No git analysis in this scan — re-scan to generate it.
+      </div>
+    );
+  }
+  const hotFiles = git.hotFiles ?? [];
+  const coupling = git.temporalCoupling ?? [];
+  const topAuthors = git.busFactor?.topAuthors ?? [];
+  const churnMax = hotFiles.length ? hotFiles[0].churn || 1 : 1;
+  const chipStyle = {
+    fontSize: 11,
+    color: 'var(--text-dim)',
+    border: '1px solid var(--border)',
+    borderRadius: 8,
+    padding: '3px 9px',
+    fontFamily: 'var(--font-mono)' as const,
+  };
+
+  return (
+    <div
+      data-testid="scan-module-git"
+      style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+    >
+      {/* Header card — summary + the "measured by" caption. */}
+      <div
+        style={{
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          padding: 12,
+          background: 'var(--bg-elev)',
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: 10,
+          }}
+        >
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)', flex: 1 }}>
+            {git.summary || 'Git & evolution'}
+          </div>
+          {git.shallow ? (
+            <span
+              title="Shallow clone — churn / coupling / bus-factor are limited"
+              style={{ fontSize: 10.5, color: 'var(--warning, #f59e0b)', fontWeight: 600 }}
+            >
+              ⚠ shallow clone
+            </span>
+          ) : null}
+        </div>
+        <div style={{ fontSize: 10.5, color: 'var(--text-dim)', marginTop: 6 }}>
+          Measured by:{' '}
+          <strong style={{ color: 'var(--foreground)', fontWeight: 600 }}>git history</strong>
+        </div>
+        {git.isRepo ? (
+          <div
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: 14,
+              marginTop: 8,
+              fontSize: 11.5,
+              color: 'var(--text-dim)',
+            }}
+          >
+            <span>
+              branches: <strong style={{ color: 'var(--foreground)' }}>{git.branches.total}</strong>
+              {git.branches.stale > 0 ? (
+                <span style={{ color: 'var(--warning, #f59e0b)' }}>
+                  {' '}
+                  · {git.branches.stale} stale
+                </span>
+              ) : null}
+              {git.branches.current ? <span> · on {git.branches.current}</span> : null}
+            </span>
+            <span>
+              commits: <strong style={{ color: 'var(--foreground)' }}>{git.commits.total}</strong> ·{' '}
+              {git.commits.last30d} in 30d · {git.commits.conventionalPct}% conventional · ~
+              {git.commits.avgSizeFiles} files/commit
+            </span>
+            <span>
+              tags: <strong style={{ color: 'var(--foreground)' }}>{git.tags}</strong>
+            </span>
+          </div>
+        ) : (
+          <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 8 }}>
+            Not a git repository — no history / provenance signal.
+          </div>
+        )}
+      </div>
+
+      {/* Churn hotspots — files by change frequency (churn = commit count). */}
+      {hotFiles.length > 0 && (
+        <div>
+          <div
+            style={{
+              fontSize: 11.5,
+              fontWeight: 600,
+              color: 'var(--foreground)',
+              margin: '0 0 4px',
+            }}
+          >
+            Churn hotspots{' '}
+            <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
+              (top {hotFiles.length} by change frequency)
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {hotFiles.map((h, i) => (
+              <span
+                key={`${h.file}-${i}`}
+                title={h.file}
+                style={{
+                  ...chipStyle,
+                  color: 'var(--foreground)',
+                  borderColor:
+                    h.churn >= churnMax * 0.66
+                      ? 'color-mix(in srgb, var(--warning) 45%, var(--border))'
+                      : 'var(--border)',
+                }}
+              >
+                {h.file.split('/').pop()}
+                <span style={{ color: 'var(--text-dim)' }}> · {h.churn}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Temporal coupling — files that co-change (the import graph can't see this). */}
+      {coupling.length > 0 && (
+        <div>
+          <div
+            style={{
+              fontSize: 11.5,
+              fontWeight: 600,
+              color: 'var(--foreground)',
+              margin: '0 0 4px',
+            }}
+          >
+            Temporal coupling{' '}
+            <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
+              (top co-change pairs — hidden dependencies)
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {coupling.map((c, i) => (
+              <div
+                key={`${c.a}-${c.b}-${i}`}
+                style={{
+                  fontSize: 11,
+                  color: 'var(--text-dim)',
+                  fontFamily: 'var(--font-mono)',
+                }}
+              >
+                <span style={{ color: 'var(--foreground)' }}>{c.a.split('/').pop()}</span>
+                {' ⇄ '}
+                <span style={{ color: 'var(--foreground)' }}>{c.b.split('/').pop()}</span>{' '}
+                <span>
+                  · {c.together}× · {Math.round(c.confidence * 100)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Bus factor — knowledge concentration (names/counts only; no emails). */}
+      {git.busFactor && (
+        <div>
+          <div
+            style={{
+              fontSize: 11.5,
+              fontWeight: 600,
+              color: 'var(--foreground)',
+              margin: '0 0 4px',
+            }}
+          >
+            Bus factor{' '}
+            <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
+              ({git.busFactor.singleAuthorFiles} single-author file
+              {git.busFactor.singleAuthorFiles === 1 ? '' : 's'})
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {topAuthors.map((a, i) => (
+              <span key={`${a.name}-${i}`} style={{ ...chipStyle, fontFamily: 'inherit' }}>
+                <strong style={{ color: 'var(--foreground)' }}>{a.name}</strong>
+                <span> · {a.pct}%</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {git.findings?.length ? (
+        <PriorityMatrix findings={git.findings} />
+      ) : (
+        <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '4px 0' }}>
+          No git-evolution findings in this scan.
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Per-module tab config: which finding dimension + quality-axis module it maps
  *  to, and which deterministic/LLM authority MEASURES it (the caption). */
 type ModuleTabConfig = {
@@ -893,6 +1143,8 @@ type ModuleTabConfig = {
   dimension?: ScanDimension;
   authority: string;
   label: string;
+  /** graph finding-lens key for the "View on graph" deep-link. */
+  lens: string;
 };
 const MODULE_TABS: Record<string, ModuleTabConfig> = {
   security: {
@@ -900,29 +1152,34 @@ const MODULE_TABS: Record<string, ModuleTabConfig> = {
     dimension: 'safety-security',
     authority: 'deterministic security scan + swarm safety pass',
     label: 'Security',
+    lens: 'security',
   },
   compliance: {
     module: 'compliance',
     dimension: 'compliance',
     authority: 'GDPR / EU-AI-Act privacy scan (data-leaving-the-account)',
     label: 'Compliance',
+    lens: 'compliance',
   },
   architecture: {
     module: 'architecture',
     dimension: 'architecture',
     authority: 'graph decomposition + structure recon',
     label: 'Architecture',
+    lens: 'architecture',
   },
   'code-quality': {
     module: 'code-quality',
     dimension: 'code-quality-refactoring',
     authority: 'ESLint + type-safety + refactoring swarm',
     label: 'Code quality',
+    lens: 'code-quality',
   },
   testing: {
     module: 'testing',
     authority: 'TDD-maturity detector',
     label: 'Testing',
+    lens: 'tests',
   },
 };
 
@@ -936,6 +1193,7 @@ type ScanView =
   | 'code-quality'
   | 'testing'
   | 'ai'
+  | 'git'
   | 'plan';
 const SCAN_TABS: [ScanView, string][] = [
   ['overview', 'Overview'],
@@ -946,6 +1204,7 @@ const SCAN_TABS: [ScanView, string][] = [
   ['code-quality', 'Code quality'],
   ['testing', 'Testing'],
   ['ai', 'AI'],
+  ['git', 'Git'],
   ['plan', 'Plan'],
 ];
 
@@ -1005,6 +1264,7 @@ function ModuleTab({ report, cfg }: { report: ScanReportData; cfg: ModuleTabConf
             <span style={{ color: 'var(--foreground)' }}>{a.label}</span>
           </span>
         ))}
+        <ViewOnGraphLink dim={cfg.lens} />
       </div>
       {findings.length ? (
         <PriorityMatrix findings={findings} />
@@ -1035,6 +1295,7 @@ function downloadScanJson(report: ScanReportData, appId: string) {
     maturity: report.maturity ?? null,
     infra: report.infra ?? null,
     aiReadiness: report.aiReadiness ?? null,
+    gitEvolution: report.gitEvolution ?? null,
     gateViolations: report.gateViolations,
     phases: report.phases,
     planOutput: report.planOutput ?? null,
@@ -1458,17 +1719,29 @@ export function ScanReport({
         </>
       ) : view === 'infra' ? (
         report.infra ? (
-          <InfraMap
-            infra={report.infra}
-            complianceCount={report.counts.byDimension?.compliance ?? 0}
-          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <ViewOnGraphLink dim="infra" />
+            </div>
+            <InfraMap
+              infra={report.infra}
+              complianceCount={report.counts.byDimension?.compliance ?? 0}
+            />
+          </div>
         ) : (
           <div style={{ padding: 14, fontSize: 12, color: 'var(--text-dim)' }}>
             No infrastructure inventory in this scan — re-scan to generate it.
           </div>
         )
       ) : view === 'ai' ? (
-        <AiReadinessTab ai={report.aiReadiness} findings={report.findings} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <ViewOnGraphLink dim="ai" />
+          </div>
+          <AiReadinessTab ai={report.aiReadiness} findings={report.findings} />
+        </div>
+      ) : view === 'git' ? (
+        <GitTab git={report.gitEvolution} />
       ) : view === 'plan' ? (
         <>
           <PriorityMatrix findings={report.findings} />

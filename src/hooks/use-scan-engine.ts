@@ -223,6 +223,34 @@ export interface AiReadiness {
   summary: string;
 }
 
+/** Git & Evolution profile of the scanned repo (C-GIT), from git-analyze.mjs.
+ *  Deterministic parse of the repo's .git history; author emails never leak
+ *  (aggregated to names/counts only). Degrades gracefully on shallow clones. */
+export interface GitEvolution {
+  isRepo: boolean;
+  shallow: boolean;
+  branches: { total: number; stale: number; current: string };
+  commits: {
+    total: number;
+    last30d: number;
+    avgSizeFiles: number;
+    conventionalPct: number;
+  };
+  tags: number;
+  /** file → commit count (change frequency). */
+  churnByFile: Record<string, number>;
+  /** top ~25 files by churn. */
+  hotFiles: { file: string; churn: number }[];
+  /** top co-change pairs (temporal coupling the import graph can't see). */
+  temporalCoupling: { a: string; b: string; together: number; confidence: number }[];
+  busFactor: {
+    singleAuthorFiles: number;
+    topAuthors: { name: string; pct: number }[];
+  };
+  summary: string;
+  findings: ScanFinding[];
+}
+
 export interface ScanReport {
   findings: ScanFinding[];
   phases: ScanPhase[];
@@ -253,6 +281,8 @@ export interface ScanReport {
   cost?: ScanCost;
   /** AI-readiness profile of the scanned repo (C-AI). */
   aiReadiness?: AiReadiness;
+  /** Git & Evolution profile of the scanned repo (C-GIT). */
+  gitEvolution?: GitEvolution;
 }
 
 export function useRunScanEngine(appId: string | null) {

@@ -14,13 +14,18 @@ describe('computeMaturity', () => {
   it('returns all quality axes (graph-installed moved to readiness)', () => {
     const { axes, readiness } = computeMaturity({});
     expect(axes.map((a) => a.key).sort()).toEqual(
-      ['ai-readiness', 'clutter', 'component-driven', 'eslint-health', 'infra-declared', 'sdd-driven', 'secrets-config-hygiene', 'security-compliance', 'structure-sanity', 'tdd-maturity', 'type-safety'].sort(),
+      ['ai-readiness', 'branch-hygiene', 'bus-factor', 'clutter', 'commit-hygiene', 'component-driven', 'eslint-health', 'infra-declared', 'sdd-driven', 'secrets-config-hygiene', 'security-compliance', 'structure-sanity', 'tdd-maturity', 'type-safety'].sort(),
     );
     expect(axes.map((a) => a.key)).not.toContain('graph-installed');
     expect(readiness.map((r) => r.key)).toContain('graph-built');
     // ai-readiness axis is unmeasured (CTA) when no AI detector is passed; no AI readiness items.
     expect(axes.find((a) => a.key === 'ai-readiness').measured).toBe(false);
     expect(readiness.map((r) => r.key)).not.toContain('ai-onboarding');
+    // git axes unmeasured (CTA) when no git detector is passed; no git readiness items.
+    expect(axes.find((a) => a.key === 'branch-hygiene').measured).toBe(false);
+    expect(axes.find((a) => a.key === 'commit-hygiene').measured).toBe(false);
+    expect(axes.find((a) => a.key === 'bus-factor').measured).toBe(false);
+    expect(readiness.map((r) => r.key)).not.toContain('git-repo');
   });
 
   it('AI-readiness: axis scores on breadth and adds binary readiness items when aiReadiness is passed', () => {
@@ -146,6 +151,59 @@ describe('computeMaturity', () => {
     const tdd = axes.find((a) => a.key === 'tdd-maturity');
     expect(tdd.status).toBe('good'); // ratio 0.3 → 1.0
     expect(tdd.detail).toMatch(/vitest/);
+  });
+
+  it('Git axes: healthy repo scores well and adds git readiness items', () => {
+    const git = {
+      isRepo: true,
+      shallow: false,
+      branches: { total: 4, stale: 0, current: 'main' },
+      commits: { total: 500, last30d: 40, avgSizeFiles: 3, conventionalPct: 90 },
+      tags: 12,
+      churnByFile: { 'a.ts': 10, 'b.ts': 5, 'c.ts': 3, 'd.ts': 2 },
+      hotFiles: [{ file: 'a.ts', churn: 10 }],
+      temporalCoupling: [],
+      busFactor: { singleAuthorFiles: 0, topAuthors: [{ name: 'Alice', pct: 60 }] },
+      summary: 'healthy',
+      findings: [],
+    };
+    const { axes, readiness } = computeMaturity({ git });
+    const branch = axes.find((a) => a.key === 'branch-hygiene');
+    const commit = axes.find((a) => a.key === 'commit-hygiene');
+    const bus = axes.find((a) => a.key === 'bus-factor');
+    expect(branch.module).toBe('git');
+    expect(branch.measured).toBe(true);
+    expect(branch.score).toBe(1); // 0 stale
+    expect(commit.status).toBe('good'); // 90% conventional + small commits
+    expect(bus.score).toBe(1); // 0 single-author files
+    expect(readiness.find((r) => r.key === 'git-repo').present).toBe(true);
+    expect(readiness.find((r) => r.key === 'git-tags').present).toBe(true);
+    expect(readiness.find((r) => r.key === 'conventional-commits').present).toBe(true);
+  });
+
+  it('Git axes: not a repo → unmeasured axes, git-repo readiness false', () => {
+    const { axes, readiness } = computeMaturity({ git: { isRepo: false, shallow: false, tags: 0, commits: {}, branches: {}, churnByFile: {}, busFactor: {} } });
+    expect(axes.find((a) => a.key === 'branch-hygiene').measured).toBe(false);
+    expect(readiness.find((r) => r.key === 'git-repo').present).toBe(false);
+    expect(readiness.find((r) => r.key === 'conventional-commits').present).toBe(false);
+  });
+
+  it('Git axes: stale branches + low conventional adoption score poorly', () => {
+    const git = {
+      isRepo: true,
+      shallow: false,
+      branches: { total: 20, stale: 18, current: 'main' },
+      commits: { total: 300, last30d: 5, avgSizeFiles: 40, conventionalPct: 5 },
+      tags: 0,
+      churnByFile: { 'a.ts': 10, 'b.ts': 5 },
+      busFactor: { singleAuthorFiles: 2, topAuthors: [{ name: 'Solo', pct: 95 }] },
+      summary: 'risky',
+      findings: [],
+    };
+    const { axes } = computeMaturity({ git });
+    expect(axes.find((a) => a.key === 'branch-hygiene').status).toBe('poor'); // 18/20 stale
+    expect(axes.find((a) => a.key === 'commit-hygiene').status).toBe('poor'); // 5% conv, huge commits
+    expect(axes.find((a) => a.key === 'bus-factor').status).toBe('poor'); // 2/2 single-author
   });
 
   it('overall averages only measured axes', () => {
