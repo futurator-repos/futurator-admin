@@ -165,6 +165,8 @@ export interface InfraInventory {
       | 'other';
   }[];
   external: { provider: string; kind: string; fileCount: number; detectedBy?: string[] }[];
+  /** hand-rolled deploy scripts / inline IAM policies (non-IaC / click-ops signal). */
+  deployScripts?: { file: string; kind: 'shell-deploy' | 'iam-policy'; provisions: string[] }[];
   clouds: string[];
   boundaries: { clientFiles: number; serverFiles: number; externalTouchingFiles: number };
   signalQuality: {

@@ -357,6 +357,28 @@ export function parseConfig(type, content, rel) {
   return out;
 }
 
+// Hand-rolled deploy detection — the OPPOSITE of IaC. A deploy.sh that shells out to
+// the cloud CLI, or an inline IAM policy JSON committed beside it, means resources are
+// provisioned OUT of code review / drift-detection (click-ops via script). Makes the
+// IaC-coverage finding precise: "declared nowhere" → "deployed by this shell script".
+export function detectDeployScript(rel, content) {
+  const base = rel.split('/').pop() || '';
+  const c = String(content || '');
+  if (/(^|\/)deploy[\w.-]*\.sh$/i.test(rel) || (/\.sh$/.test(rel) && /\b(aws|gcloud|az|kubectl|serverless)\s+\w/.test(c))) {
+    const provisions = [];
+    if (/aws\s+lambda/i.test(c)) provisions.push('Lambda');
+    if (/aws\s+iam/i.test(c)) provisions.push('IAM');
+    if (/aws\s+s3/i.test(c)) provisions.push('S3');
+    if (/aws\s+dynamodb/i.test(c)) provisions.push('DynamoDB');
+    if (/aws\s+(ecs|ec2|cloudfront|apigateway)/i.test(c)) provisions.push('other-AWS');
+    return { kind: 'shell-deploy', provisions };
+  }
+  if (/(^|\/)([\w-]*[-.])?(trust-)?policy\.json$/i.test(base) || (/\.json$/.test(rel) && /"Effect"\s*:/.test(c) && /"Action"\s*:/.test(c) && /"Statement"\s*:/.test(c))) {
+    return { kind: 'iam-policy', provisions: [] };
+  }
+  return null;
+}
+
 /**
  * Pure inventory builder.
  * @param {Array<{rel,isClient?,specifiers?,content?}>} files — content set for config files
@@ -364,6 +386,7 @@ export function parseConfig(type, content, rel) {
 export function buildInfraInventory(files = []) {
   const merged = new Map(); // name -> service
   const iac = [];
+  const deployScripts = [];
   let clientFiles = 0;
   let serverFiles = 0;
   const externalTouchedBy = new Set();
@@ -391,6 +414,9 @@ export function buildInfraInventory(files = []) {
   for (const f of files) {
     if (f.isClient) clientFiles++;
     else serverFiles++;
+    // hand-rolled deploy (non-IaC) — capture + skip further processing.
+    const ds = detectDeployScript(f.rel, f.content);
+    if (ds) { deployScripts.push({ file: f.rel, kind: ds.kind, provisions: ds.provisions }); continue; }
     // name first; fall back to content sniffing for ambiguous yaml/json.
     const ctype = configFileType(f.rel) || (typeof f.content === 'string' ? classifyConfigByContent(f.rel, f.content) : null);
     if (ctype) {
@@ -488,6 +514,7 @@ export function buildInfraInventory(files = []) {
   return {
     services,
     iac,
+    deployScripts,
     external,
     clouds,
     boundaries: { clientFiles, serverFiles, externalTouchingFiles: externalTouchedBy.size },
@@ -503,6 +530,7 @@ export function buildInfraInventory(files = []) {
       iacProviders: [...new Set(iac.map((i) => i.provider))],
       resourceIacFiles,
       iacByTier,
+      deployScriptCount: deployScripts.length,
       costSurface,
       iacCoverage,
     },
@@ -615,7 +643,9 @@ function main(argv) {
     const isCode = EXTS.includes(path.extname(full));
     // ambiguous yaml/json/hcl/bicep need content for content-classification.
     const isAmbiguous = !ctype && /\.(ya?ml|json|hcl|bicep)$/.test(rel);
-    if (!ctype && !isCode && !isAmbiguous) continue;
+    // hand-rolled deploy scripts / inline IAM policies (non-IaC signal).
+    const isDeployish = /\.sh$/.test(rel) || /(^|\/)([\w-]*[-.])?(trust-)?policy\.json$/i.test(rel);
+    if (!ctype && !isCode && !isAmbiguous && !isDeployish) continue;
     let code = '';
     try { if (fs.statSync(full).size < 512 * 1024) code = fs.readFileSync(full, 'utf8'); } catch { continue; }
     const specs = isCode ? specifiers(code) : [];
@@ -625,7 +655,7 @@ function main(argv) {
     files.push({
       rel,
       specifiers: specs,
-      content: ctype || isAmbiguous || iacModule ? code : undefined,
+      content: ctype || isAmbiguous || iacModule || isDeployish ? code : undefined,
       isClient: isCode && /^\s*['"]use client['"]/m.test(code),
     });
   }

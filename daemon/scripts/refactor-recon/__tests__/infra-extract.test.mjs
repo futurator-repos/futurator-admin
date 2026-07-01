@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildInfraInventory, parseConfig, detectCloudSdk, configFileType, classifyConfigByContent, extractIacResources, enrichInfraWithGraph } from '../infra-extract.mjs';
+import { buildInfraInventory, parseConfig, detectCloudSdk, configFileType, classifyConfigByContent, extractIacResources, enrichInfraWithGraph, detectDeployScript } from '../infra-extract.mjs';
 
 const svc = (inv, name) => inv.services.find((s) => s.name === name || s.name.startsWith(name));
 
@@ -288,6 +288,21 @@ describe('Comprehensive IaC families — any project type', () => {
     expect(cdk).toEqual(expect.arrayContaining(['S3', 'DynamoDB']));
     const pulumi = extractIacResources('const b = new aws.s3.BucketV2("b"); new aws.dynamodb.Table("t", {});', 'Pulumi').map((r) => r.name);
     expect(pulumi).toEqual(expect.arrayContaining(['S3', 'DynamoDB']));
+  });
+
+  it('detects hand-rolled deploy scripts + inline IAM policy (non-IaC / click-ops)', () => {
+    expect(detectDeployScript('infra/lambda/graph-sync/deploy.sh', 'aws lambda update-function-code ...\naws iam put-role-policy ...')).toMatchObject({ kind: 'shell-deploy' });
+    expect(detectDeployScript('infra/lambda/graph-sync/deploy.sh', 'aws lambda update-function-code').provisions).toContain('Lambda');
+    expect(detectDeployScript('infra/lambda/graph-sync/trust-policy.json', '{"Statement":[{"Effect":"Allow","Action":"sts:AssumeRole"}]}')).toMatchObject({ kind: 'iam-policy' });
+    expect(detectDeployScript('src/app.ts', 'export const x = 1')).toBe(null);
+    const inv = buildInfraInventory([
+      { rel: 'infra/lambda/graph-sync/deploy.sh', content: 'aws lambda update-function-code\naws iam put-role-policy' },
+      { rel: 'infra/lambda/graph-sync/custom-policy.json', content: '{"Statement":[{"Effect":"Allow","Action":"dynamodb:*"}]}' },
+      { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] },
+    ]);
+    expect(inv.deployScripts.length).toBe(2);
+    expect(inv.summary.deployScriptCount).toBe(2);
+    expect(inv.deployScripts.some((d) => d.kind === 'shell-deploy' && d.provisions.includes('Lambda'))).toBe(true);
   });
 
   it('Ansible (config-mgmt) is recognized as its own family, not provisioning', () => {

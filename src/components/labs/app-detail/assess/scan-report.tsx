@@ -361,6 +361,49 @@ function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianc
         </div>
       )}
 
+      {infra.deployScripts && infra.deployScripts.length > 0 && (
+        <div
+          style={{
+            border: '1px solid color-mix(in srgb, var(--warning) 45%, var(--border))',
+            borderRadius: 10,
+            padding: 10,
+            background: 'color-mix(in srgb, var(--warning) 6%, transparent)',
+          }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>
+            ⚠ {infra.deployScripts.length} hand-rolled deploy artifact
+            {infra.deployScripts.length === 1 ? '' : 's'} (not IaC)
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', margin: '4px 0 6px' }}>
+            Resources provisioned by shell scripts / inline IAM policies — outside code review +
+            drift detection. This is why cloud resources can read “used but not declared”.
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {infra.deployScripts.map((d, i) => (
+              <span
+                key={i}
+                title={d.file}
+                style={{
+                  fontSize: 11,
+                  color: 'var(--text-dim)',
+                  border: '1px solid color-mix(in srgb, var(--warning) 50%, var(--border))',
+                  borderRadius: 8,
+                  padding: '3px 9px',
+                  fontFamily: 'var(--font-mono)',
+                }}
+              >
+                {d.file.split('/').pop()}
+                <span style={{ color: 'var(--foreground)' }}>
+                  {' '}
+                  · {d.kind === 'iam-policy' ? 'IAM policy' : 'deploy script'}
+                </span>
+                {d.provisions?.length ? <span> · {d.provisions.join(', ')}</span> : null}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ fontSize: 10.5, color: 'var(--text-dim)', fontStyle: 'italic' }}>
         File-first: IaC/config files are read as authoritative (declared); SDK imports + env keys
         are inferred. Service-level configs (ALB rules, Lambda memory, …) and live cloud state are
@@ -983,6 +1026,10 @@ function downloadScanJson(report: ScanReportData, appId: string) {
     schema: 'futurator.refactor-scan-v2/v1',
     appId,
     generatedAt: new Date().toISOString(),
+    scannedSha: report.scannedSha ?? null,
+    scannedAt: report.scannedAt ?? null,
+    mode: report.mode ?? null,
+    stack: report.stack ?? null,
     counts: report.counts,
     lowConfidence: report.lowConfidence,
     maturity: report.maturity ?? null,
@@ -1400,6 +1447,9 @@ export function ScanReport({
           ) : null}
           {report.maturity?.axes?.length ? (
             <MaturityScorecard axes={report.maturity.axes} overall={report.maturity.overall} />
+          ) : null}
+          {report.timeline?.length || report.cost ? (
+            <TimelineCostPanel timeline={report.timeline} cost={report.cost} />
           ) : null}
           <ByDimension findings={report.findings} />
           {onRescan ? (
