@@ -63,6 +63,18 @@ export async function bootDevServer({
   const devCommand = qaContext?.devCommand ?? 'npm run dev -- --port';
   const serverLog = logFile ?? `/tmp/wave-vqa-devserver-${p}.log`;
 
+  // This IS the QA dev server — the one boot that must expose the behavioral
+  // `window.__harness` seam so probes can drive/observe the app. Boilerplates
+  // gate that seam behind an env flag (e.g. NEXT_PUBLIC_TEST_HARNESS==='1',
+  // inlined by Next at dev-server start) and tree-shake it out otherwise, so
+  // WITHOUT setting it here the seam never mounts and every behavioral probe
+  // fails "seam not mounted". Default to the Next flag; a boilerplate can
+  // override via qaContext.harnessEnv (harmless unused vars on other stacks).
+  const harnessEnv = qaContext?.harnessEnv ?? { NEXT_PUBLIC_TEST_HARNESS: '1' };
+  const envPrefix = Object.entries(harnessEnv)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(' ');
+
   await drainPort({ port: p, shell, cwd });
 
   // Regenerate generated wiring before boot (no-op without a generator).
@@ -72,8 +84,9 @@ export async function bootDevServer({
     60_000,
   );
 
-  log('info', `[dev-server-boot] booting "${devCommand} ${p}" in ${cwd} (log ${serverLog})`);
-  await shell(`(nohup ${devCommand} ${p} > ${serverLog} 2>&1 </dev/null &)`, cwd, 30_000);
+  log('info', `[dev-server-boot] booting "${envPrefix} ${devCommand} ${p}" in ${cwd} (log ${serverLog})`);
+  // Env assignment precedes nohup so it applies to nohup AND the dev-server child.
+  await shell(`(${envPrefix} nohup ${devCommand} ${p} > ${serverLog} 2>&1 </dev/null &)`, cwd, 30_000);
 
   let status = '000';
   for (let i = 0; i < tries; i++) {
