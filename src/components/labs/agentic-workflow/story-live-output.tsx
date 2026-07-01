@@ -106,6 +106,32 @@ function formatActionForCopy(a: Action, idx: number): string {
   return header;
 }
 
+// ── Scan progress (built purely from the scan.* event stream) ──
+// Stage tracker: deps → recon → decompose → swarm → report → done. The swarm is
+// a counted sub-progress (total = scan.swarm.started.agents; done = # of
+// scan.agent.done). Per-step durations come from scan.agent.start → matching
+// scan.agent.done (by label). Optional token counter when scan.agent.done
+// carries {tokens}.
+const SCAN_STAGES = ['deps', 'recon', 'decompose', 'swarm', 'report', 'done'] as const;
+
+interface ScanProgress {
+  stageIndex: number;
+  swarmTotal: number;
+  swarmDone: number;
+  inFlight: string | null;
+  slowest: { label: string; ms: number } | null;
+  totalTokens: number;
+  hasTokens: boolean;
+  overall: number; // 0..1
+}
+
+function fmtDur(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+}
+
 export function StoryLiveOutput({ jobId, hideResponse }: StoryLiveOutputProps) {
   const { data: job } = useAgentJob(jobId);
   const { events } = useAgentEvents(jobId, job?.status);
@@ -408,6 +434,79 @@ export function StoryLiveOutput({ jobId, hideResponse }: StoryLiveOutputProps) {
     return allText.trim();
   }, [events]);
 
+  // Live scan progress — derived from the scan.* stream only (no backend dep).
+  const scanProgress = useMemo<ScanProgress | null>(() => {
+    const scanEvents = events.filter((e) => String(e.eventType).startsWith('scan.'));
+    if (scanEvents.length === 0) return null;
+    const seen = new Set<string>();
+    let swarmTotal = 0;
+    let swarmDone = 0;
+    let totalTokens = 0;
+    let hasTokens = false;
+    const starts = new Map<string, number>();
+    const pending: string[] = [];
+    let slowest: { label: string; ms: number } | null = null;
+    for (const ev of scanEvents) {
+      const et = String(ev.eventType);
+      seen.add(et);
+      const x = ev as AgentEvent & {
+        agents?: number;
+        role?: string;
+        label?: string;
+        tokens?: number;
+      };
+      const who = x.label || (x.role || '').replace(/^scan-(analyzer|xcut):/, '');
+      const ts = Date.parse(ev.timestamp);
+      if (et === 'scan.swarm.started') {
+        swarmTotal = x.agents ?? 0;
+      } else if (et === 'scan.agent.start') {
+        if (who) {
+          if (!Number.isNaN(ts)) starts.set(who, ts);
+          pending.push(who);
+        }
+      } else if (et === 'scan.agent.done') {
+        swarmDone++;
+        if (who) {
+          const idx = pending.lastIndexOf(who);
+          if (idx !== -1) pending.splice(idx, 1);
+          const s = starts.get(who);
+          if (s != null && !Number.isNaN(ts)) {
+            const ms = ts - s;
+            if (ms >= 0 && (!slowest || ms > slowest.ms)) slowest = { label: who, ms };
+          }
+        }
+        if (typeof x.tokens === 'number') {
+          hasTokens = true;
+          totalTokens += x.tokens;
+        }
+      }
+    }
+    // Each milestone marks the END of a phase, i.e. the START of the next.
+    let stageIndex = 0; // deps
+    if (seen.has('scan.deps.done')) stageIndex = 1; // recon
+    if (seen.has('scan.recon.done')) stageIndex = 2; // decompose
+    if (seen.has('scan.decomposed')) stageIndex = 3; // swarm
+    if (seen.has('scan.swarm.done')) stageIndex = 4; // report
+    if (seen.has('scan.report.done')) stageIndex = 5; // done
+    // 5 phase-transitions to reach 'done'; swarm sub-progress lives inside phase 3.
+    let overall = stageIndex / 5;
+    if (stageIndex === 3 && swarmTotal > 0) overall = (3 + swarmDone / swarmTotal) / 5;
+    overall = Math.max(0, Math.min(1, overall));
+    return {
+      stageIndex,
+      swarmTotal,
+      swarmDone,
+      inFlight: pending.length > 0 ? pending[pending.length - 1] : null,
+      slowest,
+      totalTokens,
+      hasTokens,
+      overall,
+    };
+  }, [events]);
+
+  const scanRunning =
+    !!scanProgress && (!job || (job.status !== 'COMPLETED' && job.status !== 'FAILED'));
+
   const lastAction = actions[actions.length - 1];
 
   const copyAllActions = async () => {
@@ -431,6 +530,54 @@ export function StoryLiveOutput({ jobId, hideResponse }: StoryLiveOutputProps) {
 
   return (
     <div className="space-y-3">
+      {/* Live scan progress bar — only while the scan is running. */}
+      {scanRunning && scanProgress && (
+        <div
+          data-testid="scan-progress"
+          className="rounded border border-input px-3 py-2 space-y-1.5"
+        >
+          <div className="flex flex-wrap items-center gap-1 text-[10px] font-mono">
+            {SCAN_STAGES.map((s, i) => (
+              <span key={s} className="flex items-center gap-1">
+                {i > 0 && <span className="text-muted-foreground/30">→</span>}
+                <span
+                  className={
+                    i < scanProgress.stageIndex
+                      ? 'text-green-500'
+                      : i === scanProgress.stageIndex
+                        ? 'text-foreground font-semibold'
+                        : 'text-muted-foreground/50'
+                  }
+                >
+                  {s}
+                  {s === 'swarm' && scanProgress.swarmTotal > 0
+                    ? ` ${scanProgress.swarmDone}/${scanProgress.swarmTotal}`
+                    : ''}
+                </span>
+              </span>
+            ))}
+          </div>
+          <div className="h-1.5 w-full rounded bg-muted overflow-hidden">
+            <div
+              className="h-full bg-green-500 transition-all"
+              style={{ width: `${Math.round(scanProgress.overall * 100)}%` }}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] font-mono text-muted-foreground">
+            <span>{Math.round(scanProgress.overall * 100)}%</span>
+            {scanProgress.inFlight && (
+              <span className="text-purple-400 truncate">▶ {scanProgress.inFlight}</span>
+            )}
+            {scanProgress.slowest && (
+              <span>
+                slowest: {scanProgress.slowest.label} {fmtDur(scanProgress.slowest.ms)}
+              </span>
+            )}
+            {scanProgress.hasTokens && <span>{scanProgress.totalTokens.toLocaleString()} tok</span>}
+          </div>
+        </div>
+      )}
+
       {/* Current thought */}
       {latestThought && (
         <div className="rounded bg-muted/40 px-2 py-1 text-[11px] text-muted-foreground italic line-clamp-2">

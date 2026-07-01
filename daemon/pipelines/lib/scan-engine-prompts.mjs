@@ -36,6 +36,8 @@ DEPENDS ON: ${JSON.stringify((shard.depends || []).slice(0, 10))}
 
 Find concrete refactoring/quality/correctness/safety issues IN THESE FILES that a structural graph cannot see: fragile parsing, missing error checks, unsafe casts, dead/parallel code, duplicated logic, magic numbers, leaky abstractions, contract drift. Prefer the files named in FOCUS.
 
+If graph search tools (mcp) are available, use them to find importers/callers and cross-module usage before concluding; otherwise rely on the seeded hot files.
+
 ${FINDING_SHAPE}`;
 }
 
@@ -85,6 +87,8 @@ ${pass.instruction}
 
 DETERMINISTIC CANDIDATE SITES to confirm first (recon flagged these; verify each, then sweep for siblings):
 ${seed || '(no pre-flagged candidates — sweep by pattern)'}
+
+If graph search tools (mcp) are available, use them to find importers/callers and cross-module usage before concluding; otherwise rely on the seeded hot files.
 
 For each confirmed finding set dimension (default "${pass.dimension}"), severity, effort, a REAL location file:line, the issue, and the ONE centralized fix.
 ${FINDING_SHAPE}`;

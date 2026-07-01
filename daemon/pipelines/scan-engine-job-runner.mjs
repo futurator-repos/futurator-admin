@@ -76,6 +76,30 @@ function countsByDimension(findings) {
   return c;
 }
 
+/** Unwrap the spawnAgent result. New contract → { output, tokens, costUsd,
+ *  durationMs }; tolerate a bare string (legacy) and a { __error } shape. */
+function agentOutput(res) {
+  if (res && typeof res === 'object' && !Array.isArray(res) && 'output' in res) return res.output;
+  return res; // legacy string OR { __error }
+}
+const agentMetric = (res, key) => (res && typeof res === 'object' && res[key] != null ? res[key] : null);
+
+/** Roll a ScanStep[] into a ScanCost (C-LEDGER): totals + per-kind tokens/usd/ms. */
+function buildCost(steps) {
+  const byKind = {};
+  let totalTokens = 0;
+  let totalUsd = 0;
+  for (const s of steps) {
+    const k = byKind[s.kind] || (byKind[s.kind] = { tokens: 0, usd: 0, ms: 0 });
+    k.tokens += s.tokens || 0;
+    k.usd += s.costUsd || 0;
+    k.ms += s.durationMs || 0;
+    totalTokens += s.tokens || 0;
+    totalUsd += s.costUsd || 0;
+  }
+  return { totalTokens, totalUsd, byKind };
+}
+
 /** Deterministic markdown report (no LLM) — used by the cheap 'deterministic' and
  *  'targeted' modes (targeted regenerates the report deterministically over the
  *  merged finding set, so a partial re-run never costs a writer agent). */
@@ -114,7 +138,7 @@ function deterministicReport(projectName, findings, phases, maturity, kind = 'de
  *   - runRecon({projectPath, src}) → { code }
  *   - runDecompose({projectPath, cap}) → { code }
  *   - readArtifacts({projectPath, reuseDetectors}) → { hotspots[], shards:{shards[],lowConfidence}, privacySummary?, anchoredPaths:Set<string>, hubs:[{file,inDegree}] }
- *   - spawnAgent({role, prompt}) → string  (agent stdout/output)
+ *   - spawnAgent({role, prompt}) → { output, tokens?, costUsd?, durationMs? }  (or a bare string, legacy)
  *   - checkGate(planOutput) → violations[]
  *   - readPriorScan() → prior scan.json object | null      (targeted-merge source)
  *   - reconAvailable({projectPath}) → boolean              (can reuse cached recon?)
@@ -168,9 +192,12 @@ export async function runScanEngine(job, deps) {
   if (reuseRecon && !canReuse) {
     log('info', '[scan-engine] reuseRecon requested but recon artifacts missing — running fresh recon');
   }
+  // recon step for the timeline ledger — deterministic (no LLM), so tokens/cost null.
+  let reconStep = null;
   if (canReuse) {
     pushEvent('scan.recon.reused', {});
   } else {
+    const reconT0 = Date.now();
     const recon = await deps.runRecon({ projectPath, src: p.src });
     if (recon && recon.code !== 0) {
       if (recon.code === 2) return { ok: false, reason: 'graphify-missing' };
@@ -179,6 +206,8 @@ export async function runScanEngine(job, deps) {
     }
     pushEvent('scan.recon.done', {});
     await deps.runDecompose({ projectPath, cap: p.cap });
+    const reconMs = recon && recon.durationMs != null ? recon.durationMs : Date.now() - reconT0;
+    reconStep = { step: 'recon', label: 'recon + decompose', kind: 'recon', durationMs: reconMs, tokens: null, costUsd: null };
   }
   reuseRecon = canReuse; // the EFFECTIVE value from here on
 
@@ -211,23 +240,34 @@ export async function runScanEngine(job, deps) {
     ...(art.privacySummary ? privacyToFindings(art.privacySummary) : []),
     ...(Array.isArray(art.security?.findings) ? art.security.findings : []),
     ...(Array.isArray(art.sdd?.findings) ? art.sdd.findings : []),
+    ...(Array.isArray(art.aiReadiness?.findings) ? art.aiReadiness.findings : []),
   ].map((f) => ({ ...f, producedBy: 'deterministic' }));
 
+  // Per-task ledger steps collected across every runSwarm call (analyzer + pass).
+  const swarmSteps = [];
   /** Run a set of swarm tasks → flat findings, each stamped with its task key. */
   async function runSwarm(tasks) {
     const perAgent = [];
+    const stepAt = [];
     await pool(tasks, concurrency, async (t, i) => {
       // Operator cancelled — stop spawning NEW agents (don't burn tokens re-running
       // tasks that will be killed anyway). In-flight children are SIGKILLed by the
       // daemon's abort poller.
       if (deps.shouldAbort && deps.shouldAbort()) { perAgent[i] = []; return; }
       pushEvent('scan.agent.start', { role: t.role, label: t.label });
-      const text = await deps.spawnAgent({ role: t.role, prompt: t.prompt });
-      const parsed = text && !text.__error ? parseAndValidate(text, t.ctx) : [];
+      const t0 = Date.now();
+      const res = await deps.spawnAgent({ role: t.role, prompt: t.prompt });
+      const output = agentOutput(res);
+      const tokens = agentMetric(res, 'tokens');
+      const costUsd = agentMetric(res, 'costUsd');
+      // Prefer the daemon-provided spawn timing; fall back to a monotonic measure.
+      const durationMs = agentMetric(res, 'durationMs') != null ? res.durationMs : Date.now() - t0;
+      const parsed = output && !output.__error ? parseAndValidate(output, t.ctx) : [];
       perAgent[i] = parsed.map((f) => ({ ...f, producedBy: t.ctx.area }));
-      pushEvent('scan.agent.done', { role: t.role, label: t.label, findings: parsed.length });
-      return text;
+      stepAt[i] = { step: t.role, label: t.label, kind: t.kind || 'other', durationMs, tokens, costUsd };
+      pushEvent('scan.agent.done', { role: t.role, label: t.label, findings: parsed.length, tokens, costUsd, durationMs });
     });
+    stepAt.forEach((s) => { if (s) swarmSteps.push(s); });
     const out = [];
     perAgent.forEach((parsed) => { if (parsed) out.push(...parsed); });
     return out;
@@ -240,10 +280,11 @@ export async function runScanEngine(job, deps) {
     const analyzeShards = shards.filter((s) => s.analyze && (!effectiveTargeted || targetSet.has(s.shardKey)));
     const passes = CROSS_CUTTING.filter((pass) => !effectiveTargeted || targetSet.has(pass.area));
     const tasks = [
-      ...analyzeShards.map((s) => ({ role: `scan-analyzer:${s.name}`, label: s.name, prompt: analyzerPrompt(s), ctx: { area: s.shardKey } })),
+      ...analyzeShards.map((s) => ({ role: `scan-analyzer:${s.name}`, label: s.name, kind: 'analyzer', prompt: analyzerPrompt(s), ctx: { area: s.shardKey } })),
       ...passes.map((pass) => ({
         role: `scan-xcut:${pass.area}`,
         label: pass.title || pass.area,
+        kind: 'pass',
         prompt: crossCuttingPrompt(pass, seedFor(pass, { hotspots, hubs: art.hubs || [] })),
         ctx: { area: pass.area, dimension: pass.dimension },
       })),
@@ -287,6 +328,9 @@ export async function runScanEngine(job, deps) {
   // prior scan's inventory. Used by both the maturity axis and the return.
   const infra = art.infra || (effectiveTargeted ? priorScan?.infra : null) || null;
 
+  // AI-readiness — targeted+reuse may not re-read the detector; fall back to prior.
+  const aiReadiness = art.aiReadiness || (effectiveTargeted ? priorScan?.aiReadiness : null) || null;
+
   // Maturity scorecard — the high-level RAG overview (deterministic, ~0 LLM).
   const maturity = computeMaturity({
     findings,
@@ -299,6 +343,7 @@ export async function runScanEngine(job, deps) {
     infra,
     security: art.security?.summary || null,
     stack: art.stack || null,
+    aiReadiness,
   });
   pushEvent('scan.maturity', { overall: maturity.overall });
 
@@ -317,18 +362,29 @@ export async function runScanEngine(job, deps) {
   // (the result is being thrown away — don't spend a writer agent on it).
   const cheapReport = mode === 'deterministic' || effectiveTargeted || !!(deps.shouldAbort && deps.shouldAbort());
   let reportMarkdown = '';
+  let reportStep = null;
   if (cheapReport) {
     reportMarkdown = deterministicReport(projectName, findings, plan.phases, maturity, effectiveTargeted ? 'targeted' : 'deterministic');
   } else
   try {
-    reportMarkdown = await deps.spawnAgent({
+    const t0 = Date.now();
+    const res = await deps.spawnAgent({
       role: 'scan-report-writer',
       prompt: reportWriterPrompt({ projectName, findings, phases: plan.phases, lowConfidence }),
     });
+    const out = agentOutput(res);
+    reportMarkdown = typeof out === 'string' ? out : '';
+    const durationMs = agentMetric(res, 'durationMs') != null ? res.durationMs : Date.now() - t0;
+    reportStep = { step: 'scan-report-writer', label: 'report writer', kind: 'report', durationMs, tokens: agentMetric(res, 'tokens'), costUsd: agentMetric(res, 'costUsd') };
   } catch (e) {
     log('warn', `[scan-engine] report writer failed: ${e?.message || e}`);
   }
   pushEvent('scan.report.done', { bytes: (reportMarkdown || '').length });
+
+  // ── Execution ledger (C-LEDGER): recon → swarm tasks → report writer. ──
+  const timeline = [...(reconStep ? [reconStep] : []), ...swarmSteps, ...(reportStep ? [reportStep] : [])];
+  const cost = buildCost(timeline);
+  pushEvent('scan.timeline', { steps: timeline.length, totalTokens: cost.totalTokens });
 
   return {
     ok: true,
@@ -341,6 +397,9 @@ export async function runScanEngine(job, deps) {
     lowConfidence,
     maturity,
     infra,
+    aiReadiness,
+    timeline,
+    cost,
     stack: art.stack?.profile || art.stack || null,
     counts: {
       total: findings.length,

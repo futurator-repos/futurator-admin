@@ -18,6 +18,9 @@ import {
   type StackProfile,
   type InfraInventory,
   type InfraService,
+  type ScanStep,
+  type ScanCost,
+  type AiReadiness,
 } from '@/hooks/use-scan-engine';
 
 const CONF_COLOR: Record<string, string> = {
@@ -548,6 +551,297 @@ function ReadinessChecklist({ items }: { items: ReadinessItem[] }) {
   );
 }
 
+/** Human ms formatter — sub-second → "845ms", else "1.2s" / "1m03s". */
+function fmtMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m${String(Math.round(s % 60)).padStart(2, '0')}s`;
+}
+/** Compact token count — 12300 → "12.3k". */
+function fmtTokens(t: number | null): string {
+  if (t == null) return '—';
+  if (t < 1000) return String(t);
+  return `${(t / 1000).toFixed(1)}k`;
+}
+/** Dollars with cents (or sub-cent) — 0.0042 → "$0.004". */
+function fmtUsd(u: number | null): string {
+  if (u == null) return '—';
+  if (u === 0) return '$0';
+  return u < 0.01 ? `$${u.toFixed(4)}` : `$${u.toFixed(2)}`;
+}
+const STEP_KIND_COLOR: Record<string, string> = {
+  recon: 'var(--text-dim)',
+  analyzer: 'var(--accent-blue, #3b82f6)',
+  pass: 'var(--warning, #f59e0b)',
+  report: 'var(--success, #22c55e)',
+  other: 'var(--text-dim)',
+};
+
+/**
+ * Timeline & cost — the scan's execution ledger (C-LEDGER). Steps sorted
+ * slowest-first so the heavy contributors are obvious, each with duration +
+ * tokens + $; topped by the rolled-up totals and a per-kind breakdown. Makes the
+ * scan auditable (why it took as long / cost as much as it did).
+ */
+function TimelineCostPanel({ timeline, cost }: { timeline?: ScanStep[]; cost?: ScanCost }) {
+  const steps = useMemo(
+    () => [...(timeline ?? [])].sort((a, b) => b.durationMs - a.durationMs),
+    [timeline],
+  );
+  if (!steps.length && !cost) return null;
+  const kindOrder = cost
+    ? Object.keys(cost.byKind).sort((a, b) => cost.byKind[b].ms - cost.byKind[a].ms)
+    : [];
+  return (
+    <div
+      data-testid="scan-timeline"
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        padding: 12,
+        background: 'var(--bg-elev)',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 8,
+          marginBottom: 8,
+          flexWrap: 'wrap',
+        }}
+      >
+        <h4 style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', margin: 0 }}>
+          Timeline &amp; cost
+        </h4>
+        {cost && (
+          <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+            {fmtTokens(cost.totalTokens)} tokens · {fmtUsd(cost.totalUsd)} · {steps.length} step
+            {steps.length === 1 ? '' : 's'}
+          </span>
+        )}
+      </div>
+
+      {kindOrder.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+          {kindOrder.map((k) => (
+            <span
+              key={k}
+              style={{
+                fontSize: 11,
+                color: 'var(--text-dim)',
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                padding: '2px 9px',
+              }}
+            >
+              <strong style={{ color: STEP_KIND_COLOR[k] || 'var(--foreground)' }}>{k}</strong> ·{' '}
+              {fmtMs(cost!.byKind[k].ms)} · {fmtTokens(cost!.byKind[k].tokens)} ·{' '}
+              {fmtUsd(cost!.byKind[k].usd)}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {steps.length > 0 && (
+        <div
+          style={{
+            maxHeight: 360,
+            overflow: 'auto',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+          }}
+        >
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
+            <thead>
+              <tr style={{ position: 'sticky', top: 0, background: 'var(--bg-elev)' }}>
+                {['Step', 'Kind', 'Duration', 'Tokens', 'Cost'].map((h) => (
+                  <th
+                    key={h}
+                    style={{
+                      textAlign: h === 'Step' || h === 'Kind' ? 'left' : 'right',
+                      padding: '6px 8px',
+                      color: 'var(--text-dim)',
+                      borderBottom: '1px solid var(--border)',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {steps.map((s, i) => (
+                <tr key={`${s.step}-${i}`} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <td style={{ padding: '6px 8px', color: 'var(--foreground)' }}>{s.label}</td>
+                  <td
+                    style={{
+                      padding: '6px 8px',
+                      color: STEP_KIND_COLOR[s.kind] || 'var(--text-dim)',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {s.kind}
+                  </td>
+                  <td
+                    style={{
+                      padding: '6px 8px',
+                      color: 'var(--foreground)',
+                      textAlign: 'right',
+                      fontFamily: 'var(--font-mono)',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {fmtMs(s.durationMs)}
+                  </td>
+                  <td
+                    style={{
+                      padding: '6px 8px',
+                      color: 'var(--text-dim)',
+                      textAlign: 'right',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    {fmtTokens(s.tokens)}
+                  </td>
+                  <td
+                    style={{
+                      padding: '6px 8px',
+                      color: 'var(--text-dim)',
+                      textAlign: 'right',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    {fmtUsd(s.costUsd)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * AI module tab — the repo's AI-readiness profile (C-AI): the summary line, a
+ * present/absent chip per detected tool, the skill/agent/command/MCP counts, and
+ * any AI-readiness findings via the shared PriorityMatrix.
+ */
+function AiReadinessTab({ ai, findings }: { ai?: AiReadiness; findings: ScanFinding[] }) {
+  const aiFindings = useMemo(
+    () =>
+      findings.filter(
+        (f) =>
+          f.producedBy === 'ai-readiness' || /ai-readiness|agentic|claude[- ]?code/i.test(f.area),
+      ),
+    [findings],
+  );
+  if (!ai) {
+    return (
+      <div style={{ padding: 14, fontSize: 12, color: 'var(--text-dim)' }}>
+        No AI-readiness profile in this scan — re-scan to generate it.
+      </div>
+    );
+  }
+  const counts: { label: string; value: number }[] = [
+    { label: 'skills', value: ai.skillCount },
+    { label: 'agents', value: ai.agentCount },
+    { label: 'commands', value: ai.commandCount },
+    { label: 'MCP', value: ai.hasMcp ? 1 : 0 },
+  ];
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div
+        style={{
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          padding: 12,
+          background: 'var(--bg-elev)',
+        }}
+      >
+        <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)' }}>
+          {ai.summary || 'AI readiness'}
+        </div>
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 14,
+            marginTop: 8,
+            fontSize: 11.5,
+            color: 'var(--text-dim)',
+          }}
+        >
+          {counts.map((c) => (
+            <span key={c.label}>
+              <strong style={{ color: 'var(--foreground)' }}>{c.value}</strong> {c.label}
+            </span>
+          ))}
+          <span>
+            Claude Code:{' '}
+            <strong
+              style={{ color: ai.hasClaudeCode ? 'var(--success, #22c55e)' : 'var(--text-dim)' }}
+            >
+              {ai.hasClaudeCode ? 'yes' : 'no'}
+            </strong>
+          </span>
+          <span>
+            hooks:{' '}
+            <strong style={{ color: ai.hasHooks ? 'var(--success, #22c55e)' : 'var(--text-dim)' }}>
+              {ai.hasHooks ? 'yes' : 'no'}
+            </strong>
+          </span>
+        </div>
+      </div>
+
+      {ai.tools.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {ai.tools.map((t, i) => (
+            <span
+              key={`${t.name}-${i}`}
+              title={`${t.detail}${t.files.length ? `\n${t.files.join('\n')}` : ''}`}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                fontSize: 11.5,
+                color: 'var(--text-dim)',
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                padding: '3px 10px',
+                background: 'var(--background)',
+              }}
+            >
+              <span
+                style={{
+                  color: t.present ? 'var(--success, #22c55e)' : 'var(--destructive, #ef4444)',
+                  fontWeight: 700,
+                }}
+              >
+                {t.present ? '✓' : '✗'}
+              </span>
+              <span style={{ color: 'var(--foreground)' }}>{t.name}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {aiFindings.length ? (
+        <PriorityMatrix findings={aiFindings} />
+      ) : (
+        <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '4px 0' }}>
+          No AI-readiness findings in this scan.
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Per-module tab config: which finding dimension + quality-axis module it maps
  *  to, and which deterministic/LLM authority MEASURES it (the caption). */
 type ModuleTabConfig = {
@@ -598,6 +892,7 @@ type ScanView =
   | 'architecture'
   | 'code-quality'
   | 'testing'
+  | 'ai'
   | 'plan';
 const SCAN_TABS: [ScanView, string][] = [
   ['overview', 'Overview'],
@@ -607,6 +902,7 @@ const SCAN_TABS: [ScanView, string][] = [
   ['architecture', 'Architecture'],
   ['code-quality', 'Code quality'],
   ['testing', 'Testing'],
+  ['ai', 'AI'],
   ['plan', 'Plan'],
 ];
 
@@ -691,9 +987,12 @@ function downloadScanJson(report: ScanReportData, appId: string) {
     lowConfidence: report.lowConfidence,
     maturity: report.maturity ?? null,
     infra: report.infra ?? null,
+    aiReadiness: report.aiReadiness ?? null,
     gateViolations: report.gateViolations,
     phases: report.phases,
     planOutput: report.planOutput ?? null,
+    timeline: report.timeline ?? null,
+    cost: report.cost ?? null,
     findings: report.findings,
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -1118,10 +1417,13 @@ export function ScanReport({
             No infrastructure inventory in this scan — re-scan to generate it.
           </div>
         )
+      ) : view === 'ai' ? (
+        <AiReadinessTab ai={report.aiReadiness} findings={report.findings} />
       ) : view === 'plan' ? (
         <>
           <PriorityMatrix findings={report.findings} />
           <Phases report={report} onCreatePlan={onCreatePlan} />
+          <TimelineCostPanel timeline={report.timeline} cost={report.cost} />
         </>
       ) : MODULE_TABS[view] ? (
         <ModuleTab report={report} cfg={MODULE_TABS[view]} />

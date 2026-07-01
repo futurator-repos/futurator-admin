@@ -31,9 +31,10 @@ const isHotKind = (hotspots, kind) => (hotspots || []).filter((h) => h.kind === 
  *   - infra:   InfraInventory|null  from infra-extract (for the Infra-as-code axis)
  *   - security: SecuritySummary|null from security-scan (secrets/env-hygiene axis)
  *   - stack:   StackProfile|null   used only for readiness (ts-strict) — safe to ignore if null
+ *   - aiReadiness: AiReadiness|null from ai-readiness detector (AI-onboarding axis + readiness)
  * @returns {{ axes: Array, readiness: Array, overall: number|null }}
  */
-export function computeMaturity({ findings = [], hotspots = [], tests = null, eslint = null, graphAvailable = false, knipRan = false, sdd = null, infra = null, security = null, stack = null } = {}) {
+export function computeMaturity({ findings = [], hotspots = [], tests = null, eslint = null, graphAvailable = false, knipRan = false, sdd = null, infra = null, security = null, stack = null, aiReadiness = null } = {}) {
   const axes = [];
   const add = (key, label, module, score, detail, measured = true) =>
     axes.push({ key, label, module, score, status: statusFor(measured ? score : null), detail, measured });
@@ -164,6 +165,26 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     add('secrets-config-hygiene', 'Secrets & config hygiene', 'security', null, 'add security detector', false);
   }
 
+  // 12. AI-readiness (agent-onboarding) — breadth of agent-facing scaffolding:
+  //     CLAUDE.md / AGENTS.md instructions (baseline), then +0.1 each for skills,
+  //     subagents, MCP, hooks, and slash-commands. No AI-onboarding file at all → 0.
+  const aiAgentsMd = (aiReadiness?.tools || []).some((t) => /agents\.md/i.test(t.name) && t.present);
+  if (aiReadiness) {
+    const score = !aiReadiness.hasClaudeCode && !aiAgentsMd
+      ? 0
+      : clamp01(
+          0.4 +
+            0.1 * (aiReadiness.skillCount > 0) +
+            0.1 * (aiReadiness.agentCount > 0) +
+            0.1 * !!aiReadiness.hasMcp +
+            0.1 * !!aiReadiness.hasHooks +
+            0.1 * (aiReadiness.commandCount > 0),
+        );
+    add('ai-readiness', 'AI-readiness (agent onboarding)', 'ai', score, aiReadiness.summary || `${aiReadiness.skillCount} skills · ${aiReadiness.agentCount} agents`);
+  } else {
+    add('ai-readiness', 'AI-readiness (agent onboarding)', 'ai', null, 'add AI detector', false);
+  }
+
   const measured = axes.filter((a) => a.measured && typeof a.score === 'number');
   const overall = measured.length ? measured.reduce((s, a) => s + a.score, 0) / measured.length : null;
 
@@ -184,6 +205,14 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     sdd ? ((sdd.hasSpecs ?? (sdd.specCount || 0) > 0) ? `${sdd.specCount ?? '?'} spec artifact(s)` : 'no captured specs/design intent') : 'run SDD detector');
   const tsStrict = !!(stack && (stack.frameworks || []).some((f) => /typescript|\bts\b/i.test(f)) && stack.tsStrict);
   addR('ts-strict', 'TypeScript strict', tsStrict, tsStrict ? 'strict mode on' : 'unknown or not strict');
+
+  // AI-onboarding readiness — only when the AI detector ran.
+  if (aiReadiness) {
+    const onboarding = aiReadiness.hasClaudeCode || aiAgentsMd;
+    addR('ai-onboarding', 'AI agent onboarding', onboarding, onboarding ? 'CLAUDE.md / AGENTS.md present' : 'no CLAUDE.md or AGENTS.md');
+    addR('ai-mcp', 'MCP servers configured', aiReadiness.hasMcp, aiReadiness.hasMcp ? 'MCP config present' : 'no MCP servers configured');
+    addR('ai-skills', 'Agent skills', aiReadiness.skillCount > 0, aiReadiness.skillCount > 0 ? `${aiReadiness.skillCount} skill(s)` : 'no agent skills');
+  }
 
   return { axes, readiness, overall };
 }

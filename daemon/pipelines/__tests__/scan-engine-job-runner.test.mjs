@@ -189,6 +189,74 @@ describe('runScanEngine', () => {
     expect(r.reportMarkdown).toMatch(/deterministic/);
   });
 
+  // ── C-LEDGER: timeline + cost from spawnAgent metrics ──
+  it('records a timeline + cost ledger from spawnAgent {output,tokens,costUsd,durationMs}', async () => {
+    const events = [];
+    const deps = baseDeps({
+      pushEvent: (type, data) => events.push({ type, data }),
+      spawnAgent: async ({ role }) => {
+        if (role === 'scan-report-writer') return { output: '# demo — Refactoring & System-Design Scan', tokens: 500, costUsd: 0.02, durationMs: 1000 };
+        if (role.startsWith('scan-xcut:error-handling')) {
+          return {
+            output: '---FINDINGS---{"findings":[{"dimension":"correctness","severity":"High","effort":"Medium","location":"src/api/route.ts:12","issue":"fetch never checks res.ok","suggestion":"x"}]}---END_FINDINGS---',
+            tokens: 100, costUsd: 0.001, durationMs: 200,
+          };
+        }
+        return { output: '---FINDINGS---{"findings":[]}---END_FINDINGS---', tokens: 50, costUsd: 0.0005, durationMs: 100 };
+      },
+    });
+    const r = await runScanEngine(job, deps);
+    expect(r.ok).toBe(true);
+    // timeline: recon + one step per swarm task + the report writer, all kinded
+    expect(Array.isArray(r.timeline)).toBe(true);
+    expect(r.timeline.some((s) => s.kind === 'recon')).toBe(true);
+    expect(r.timeline.some((s) => s.kind === 'analyzer')).toBe(true);
+    expect(r.timeline.some((s) => s.kind === 'pass')).toBe(true);
+    expect(r.timeline.some((s) => s.kind === 'report')).toBe(true);
+    // per-step metrics come straight from the dep (durationMs preferred over measured)
+    const eh = r.timeline.find((s) => s.step === 'scan-xcut:error-handling');
+    expect(eh).toMatchObject({ kind: 'pass', tokens: 100, costUsd: 0.001, durationMs: 200 });
+    // cost rollup: totals + byKind
+    expect(r.cost.totalTokens).toBeGreaterThan(0);
+    expect(r.cost.totalUsd).toBeGreaterThan(0);
+    expect(r.cost.byKind.report).toMatchObject({ tokens: 500, usd: 0.02, ms: 1000 });
+    // events: scan.agent.done carries the metrics; a final scan.timeline is emitted
+    const done = events.find((e) => e.type === 'scan.agent.done' && e.data.role === 'scan-xcut:error-handling');
+    expect(done.data).toMatchObject({ tokens: 100, costUsd: 0.001, durationMs: 200 });
+    const tl = events.find((e) => e.type === 'scan.timeline');
+    expect(tl.data.steps).toBe(r.timeline.length);
+    expect(tl.data.totalTokens).toBe(r.cost.totalTokens);
+  });
+
+  // ── C-AI: ai-readiness findings land in the deterministic pool + result ──
+  it('folds aiReadiness.findings into the deterministic pool and returns aiReadiness', async () => {
+    const aiReadiness = {
+      hasClaudeCode: false, skillCount: 0, agentCount: 0, commandCount: 0, hasMcp: false, hasHooks: false,
+      tools: [], summary: 'no agent scaffolding',
+      findings: [
+        { id: 'ai-1', source: 'deterministic', dimension: 'code-quality-refactoring', severity: 'Low', effort: 'Small', location: 'CLAUDE.md:1', issue: 'no CLAUDE.md / agent onboarding', suggestion: 'add one', dependsOn: [] },
+      ],
+    };
+    const deps = baseDeps({
+      readArtifacts: async () => ({
+        hotspots: [{ kind: 'god-object', score: 90, severity: 'critical', title: 'God-object: store', files: ['src/lib/store.ts'], evidence: { methods: 40, file: 'src/lib/store.ts' }, suggestedAction: 'split' }],
+        shards: { shards: [{ shardKey: '§sys:src--lib', name: 'src/lib', members: ['src/lib/store.ts'], depends: [], focus: 'x', analyze: true }], lowConfidence: false },
+        anchoredPaths: new Set(['src/lib/store.ts']),
+        hubs: [{ file: 'src/lib/store.ts', inDegree: 38 }],
+        aiReadiness,
+      }),
+    });
+    const r = await runScanEngine(job, deps);
+    expect(r.ok).toBe(true);
+    // deterministic ai-readiness finding merged into the pool
+    const ai = r.findings.find((f) => f.issue === 'no CLAUDE.md / agent onboarding');
+    expect(ai).toBeTruthy();
+    expect(ai.source).toBe('deterministic');
+    expect(ai.producedBy).toBe('deterministic');
+    // aiReadiness echoed on the result
+    expect(r.aiReadiness).toBe(aiReadiness);
+  });
+
   it('deterministic mode MERGES prior swarm (LLM) findings instead of wiping them', async () => {
     let agentCalls = 0;
     const deps = baseDeps({

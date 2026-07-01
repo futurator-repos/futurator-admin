@@ -14,10 +14,49 @@ describe('computeMaturity', () => {
   it('returns all quality axes (graph-installed moved to readiness)', () => {
     const { axes, readiness } = computeMaturity({});
     expect(axes.map((a) => a.key).sort()).toEqual(
-      ['clutter', 'component-driven', 'eslint-health', 'infra-declared', 'sdd-driven', 'secrets-config-hygiene', 'security-compliance', 'structure-sanity', 'tdd-maturity', 'type-safety'].sort(),
+      ['ai-readiness', 'clutter', 'component-driven', 'eslint-health', 'infra-declared', 'sdd-driven', 'secrets-config-hygiene', 'security-compliance', 'structure-sanity', 'tdd-maturity', 'type-safety'].sort(),
     );
     expect(axes.map((a) => a.key)).not.toContain('graph-installed');
     expect(readiness.map((r) => r.key)).toContain('graph-built');
+    // ai-readiness axis is unmeasured (CTA) when no AI detector is passed; no AI readiness items.
+    expect(axes.find((a) => a.key === 'ai-readiness').measured).toBe(false);
+    expect(readiness.map((r) => r.key)).not.toContain('ai-onboarding');
+  });
+
+  it('AI-readiness: axis scores on breadth and adds binary readiness items when aiReadiness is passed', () => {
+    const aiReadiness = {
+      hasClaudeCode: true,
+      skillCount: 3,
+      agentCount: 2,
+      commandCount: 4,
+      hasMcp: true,
+      hasHooks: true,
+      tools: [{ name: 'AGENTS.md', present: false, detail: '', files: [] }],
+      summary: '3 skills · 2 agents · MCP · hooks',
+    };
+    const { axes, readiness } = computeMaturity({ aiReadiness });
+    const axis = axes.find((a) => a.key === 'ai-readiness');
+    expect(axis.measured).toBe(true);
+    expect(axis.score).toBeCloseTo(0.9); // 0.4 + 5*0.1
+    expect(axis.status).toBe('good');
+    // binary readiness items present only when aiReadiness passed
+    expect(readiness.find((r) => r.key === 'ai-onboarding').present).toBe(true);
+    expect(readiness.find((r) => r.key === 'ai-mcp').present).toBe(true);
+    expect(readiness.find((r) => r.key === 'ai-skills').present).toBe(true);
+
+    // AGENTS.md alone (no CLAUDE.md, no extras) satisfies onboarding → baseline 0.4
+    const bare = computeMaturity({
+      aiReadiness: { hasClaudeCode: false, skillCount: 0, agentCount: 0, commandCount: 0, hasMcp: false, hasHooks: false, tools: [{ name: 'AGENTS.md', present: true, detail: '', files: [] }], summary: 'AGENTS.md' },
+    });
+    expect(bare.axes.find((a) => a.key === 'ai-readiness').score).toBeCloseTo(0.4);
+    expect(bare.readiness.find((r) => r.key === 'ai-onboarding').present).toBe(true);
+    expect(bare.readiness.find((r) => r.key === 'ai-skills').present).toBe(false);
+
+    // no onboarding file at all → 0
+    const none = computeMaturity({
+      aiReadiness: { hasClaudeCode: false, skillCount: 0, agentCount: 0, commandCount: 0, hasMcp: false, hasHooks: false, tools: [], summary: 'none' },
+    });
+    expect(none.axes.find((a) => a.key === 'ai-readiness').score).toBe(0);
   });
 
   it('Secrets & config hygiene axis: hardcoded secrets + committed .env score poor; clean scores good', () => {

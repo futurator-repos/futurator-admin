@@ -190,6 +190,37 @@ export interface InfraInventory {
   };
 }
 
+/** One entry in the scan's execution ledger (C-LEDGER) — a recon step, an
+ *  analyzer/pass agent, or the report writer. tokens/costUsd are null when the
+ *  step spent no LLM (deterministic recon) or the cost is unknown. */
+export interface ScanStep {
+  step: string;
+  label: string;
+  kind: 'recon' | 'analyzer' | 'pass' | 'report' | 'other';
+  durationMs: number;
+  tokens: number | null;
+  costUsd: number | null;
+}
+
+/** Rolled-up cost of a scan (C-LEDGER), aggregated from the timeline steps. */
+export interface ScanCost {
+  totalTokens: number;
+  totalUsd: number;
+  byKind: Record<string, { tokens: number; usd: number; ms: number }>;
+}
+
+/** AI-readiness profile of the scanned repo (C-AI), from ai-readiness.mjs. */
+export interface AiReadiness {
+  hasClaudeCode: boolean;
+  skillCount: number;
+  agentCount: number;
+  commandCount: number;
+  hasMcp: boolean;
+  hasHooks: boolean;
+  tools: { name: string; present: boolean; detail: string; files: string[] }[];
+  summary: string;
+}
+
 export interface ScanReport {
   findings: ScanFinding[];
   phases: ScanPhase[];
@@ -214,6 +245,12 @@ export interface ScanReport {
   scannedSha?: string | null;
   scannedAt?: string;
   mode?: 'full' | 'deterministic' | 'targeted';
+  /** Execution ledger of the scan (C-LEDGER) — per-step timing/tokens/cost. */
+  timeline?: ScanStep[];
+  /** Rolled-up cost of the scan (C-LEDGER). */
+  cost?: ScanCost;
+  /** AI-readiness profile of the scanned repo (C-AI). */
+  aiReadiness?: AiReadiness;
 }
 
 export function useRunScanEngine(appId: string | null) {

@@ -5015,7 +5015,19 @@ const GATE_AGENT_ROLES = {
   }),
 };
 
-async function spawnGateAgent({ role, prompt, cwd, round }, { short } = {}) {
+// Scan-engine swarm roles are dynamic strings not present in GATE_AGENT_ROLES:
+//   'scan-analyzer:<name>', 'scan-xcut:<area>', 'scan-report-writer'.
+// They resolve to a dedicated cfg (model upgrade + read-tool set) below.
+const isScanRole = (role) =>
+  !!role &&
+  (role.startsWith('scan-analyzer') || role.startsWith('scan-xcut') || role === 'scan-report-writer');
+// One-time note: the Mycelium graph MCP serves a FIXED global Memgraph
+// (bolt://localhost:7687 in lib/mcp-config.mjs), NOT a per-scan-repo
+// cwd/graphify-out graph — so wiring it into scan agents would point them at the
+// wrong graph. We do the model upgrade only. (Logged once at first scan spawn.)
+let _scanMcpNoteLogged = false;
+
+async function spawnGateAgent({ role, prompt, cwd, round, jobId }, { short } = {}) {
   if (authState.expiresAt && authState.expiresAt - Date.now() < PRESPAWN_EXPIRY_THRESHOLD_MS) {
     try {
       loadOAuth(`gate-${role}-prespawn`);
@@ -5024,7 +5036,7 @@ async function spawnGateAgent({ role, prompt, cwd, round }, { short } = {}) {
       /* spawn anyway — Keychain push may be in flight */
     }
   }
-  const first = await spawnGateAgentOnce({ role, prompt, cwd, round }, { short });
+  const first = await spawnGateAgentOnce({ role, prompt, cwd, round, jobId }, { short });
   if (first.ok || !first.infra) return first;
   log(
     'warn',
@@ -5036,21 +5048,40 @@ async function spawnGateAgent({ role, prompt, cwd, round }, { short } = {}) {
   } catch {
     /* spawn anyway */
   }
-  return spawnGateAgentOnce({ role, prompt, cwd, round }, { short });
+  return spawnGateAgentOnce({ role, prompt, cwd, round, jobId }, { short });
 }
 
-function spawnGateAgentOnce({ role, prompt, cwd, round }, { short } = {}) {
+function spawnGateAgentOnce({ role, prompt, cwd, round, jobId }, { short } = {}) {
   return new Promise((resolve) => {
-    const cfg = (GATE_AGENT_ROLES[role] || GATE_AGENT_ROLES.judge)(round);
+    const scan = isScanRole(role);
+    // Scan swarm cfg: bigger model than the haiku 'judge' fallback + a read-tool
+    // set so analyzers can Grep/Glob the repo. No --mcp-config (see note above).
+    const cfg = scan
+      ? {
+          model: process.env.SCAN_SWARM_MODEL || 'claude-sonnet-4-6',
+          timeoutMs: 8 * 60 * 1000,
+          allowedTools: 'Read,Grep,Glob',
+        }
+      : (GATE_AGENT_ROLES[role] || GATE_AGENT_ROLES.judge)(round);
+    if (scan && !_scanMcpNoteLogged) {
+      _scanMcpNoteLogged = true;
+      log('info', '[scan] graph MCP not per-repo — model-upgrade only');
+    }
     const args = ['-p', prompt, '--model', cfg.model];
+    // Scan roles capture per-agent tokens/cost via the CLI's JSON envelope.
+    if (scan) args.push('--output-format', 'json');
     if (cfg.bypass) args.push('--permission-mode', 'bypassPermissions', '--add-dir', cwd);
     else args.push('--allowedTools', cfg.allowedTools);
+    // Scan roles report usage; non-scan roles keep the legacy shape untouched.
+    const scanUsage = scan ? { tokens: null, costUsd: null } : undefined;
     let settled = false;
-    const done = (ok, output, reason, infra = false) => {
+    const done = (ok, output, reason, infra = false, usage = scanUsage) => {
       if (settled) return;
       settled = true;
       if (!ok && reason) log('warn', `[${short || 'wave-vqa'}] gate ${role}: ${reason}`);
-      resolve({ ok, output, infra, reason });
+      const res = { ok, output, infra, reason };
+      if (usage !== undefined) res.usage = usage;
+      resolve(res);
     };
     let proc;
     try {
@@ -5062,6 +5093,8 @@ function spawnGateAgentOnce({ role, prompt, cwd, round }, { short } = {}) {
     } catch (err) {
       return done(false, '', `spawn threw: ${err.message}`, true);
     }
+    // Make scan agents killable by the abort poller (signalChildrenForJob).
+    if (jobId) registerChild(jobId, proc);
     const timer = setTimeout(
       () => {
         try {
@@ -5069,6 +5102,7 @@ function spawnGateAgentOnce({ role, prompt, cwd, round }, { short } = {}) {
         } catch {
           /* best effort */
         }
+        if (jobId) unregisterChild(jobId, proc);
         done(false, '', `timed out after ${Math.round(cfg.timeoutMs / 60000)}m`, true);
       },
       cfg.timeoutMs,
@@ -5082,10 +5116,39 @@ function spawnGateAgentOnce({ role, prompt, cwd, round }, { short } = {}) {
     proc.stderr?.on('data', (c) => (stderrTail = (stderrTail + c.toString('utf8')).slice(-1500)));
     proc.on('error', (err) => {
       clearTimeout(timer);
+      if (jobId) unregisterChild(jobId, proc);
       done(false, '', `process error: ${err.message}`, true);
     });
     proc.on('close', (code) => {
       clearTimeout(timer);
+      if (jobId) unregisterChild(jobId, proc);
+      // Scan roles: parse the --output-format json envelope for output + usage.
+      // Defensive — a parse failure falls back to raw stdout with null usage.
+      if (scan) {
+        let output = stdoutBuf;
+        let usage = { tokens: null, costUsd: null };
+        try {
+          const parsed = JSON.parse(stdoutBuf);
+          if (typeof parsed.result === 'string') output = parsed.result;
+          const u = parsed.usage || {};
+          const summed = (Number(u.input_tokens) || 0) + (Number(u.output_tokens) || 0);
+          const tokens = summed > 0 ? summed : Number(u.total_tokens) || null;
+          usage = { tokens, costUsd: parsed.total_cost_usd ?? null };
+        } catch {
+          /* non-JSON stdout — keep raw output, usage stays null */
+        }
+        if (code === 0) return done(true, output, undefined, false, usage);
+        const infra =
+          stdoutBuf.trim().length === 0 ||
+          /401|authentication|OAuth|credentials|overloaded|rate.?limit/i.test(stderrTail);
+        return done(
+          false,
+          output,
+          `claude exited ${code}${infra ? ' (infra)' : ''}: ${(stderrTail || stdoutBuf).slice(-300)}`,
+          infra,
+          usage,
+        );
+      }
       if (code === 0) return done(true, stdoutBuf);
       const infra =
         stdoutBuf.trim().length === 0 ||
@@ -7672,6 +7735,7 @@ async function executeScanEngineJob(job) {
   const securityPath = new URL('./scripts/refactor-recon/security-scan.mjs', import.meta.url).pathname;
   const sddPath = new URL('./scripts/refactor-recon/sdd-detect.mjs', import.meta.url).pathname;
   const stackProfilePath = new URL('./scripts/refactor-recon/stack-profile.mjs', import.meta.url).pathname;
+  const aiReadinessPath = new URL('./scripts/refactor-recon/ai-readiness.mjs', import.meta.url).pathname;
 
   // Spawn a plain Node child (deterministic stages — never the agent path).
   const spawnNode = (args, cwd) =>
@@ -7762,6 +7826,7 @@ async function executeScanEngineJob(job) {
         let security = null;
         let sdd = null;
         let stack = null;
+        let aiReadiness = null;
         if (reuseDetectors) {
           const pr = rj('privacy.json');
           if (pr) privacySummary = summarizePrivacyReport(pr);
@@ -7771,6 +7836,7 @@ async function executeScanEngineJob(job) {
           security = rj('security.json');
           sdd = rj('sdd.json');
           stack = rj('stack-profile.json');
+          aiReadiness = rj('ai-readiness.json');
         } else {
           // Privacy/compliance lane. Default 'internal' (our own scanner, ~0 LLM,
           // source stays on the box); 'external' routes to the data-privacy service.
@@ -7818,6 +7884,11 @@ async function executeScanEngineJob(job) {
             await spawnNode([stackProfilePath, repo, '--out', pathJoin(od, 'stack-profile.json')], repo);
             stack = rj('stack-profile.json');
           } catch (spe) { log('warn', `[${short}] scan-engine stack-profile detector failed (non-fatal): ${spe?.message || spe}`); }
+          // AI-readiness detector — Claude Code / skills / MCP / hooks fingerprint, always runnable.
+          try {
+            await spawnNode([aiReadinessPath, repo, '--out', pathJoin(od, 'ai-readiness.json')], repo);
+            aiReadiness = rj('ai-readiness.json');
+          } catch (are) { log('warn', `[${short}] scan-engine ai-readiness detector failed (non-fatal): ${are?.message || are}`); }
         }
         const graph = rj('graph.resolved.json') || rj('graph.json') || { nodes: [] };
         const resolved = rj('resolved-imports.json') || {};
@@ -7835,6 +7906,7 @@ async function executeScanEngineJob(job) {
           security,
           sdd,
           stack,
+          aiReadiness,
           // knip actually produced data? (else the clutter axis is degraded)
           knipRan: hotspotsDoc.toolStatus?.knip === 'ok',
           // Anchor = graphify nodes ∪ the REAL on-disk source files. graphify only
@@ -7847,9 +7919,12 @@ async function executeScanEngineJob(job) {
         };
       },
       spawnAgent: async ({ role, prompt }) => {
-        const res = await spawnGateAgent({ role, prompt, cwd: projectPath }, { short });
+        // jobId makes the swarm+report-writer children killable by the abort poller.
+        const res = await spawnGateAgent({ role, prompt, cwd: projectPath, jobId }, { short });
         if (res?.ok === false) throw new Error(`scan agent ${role} failed: ${(res.output || '').slice(-200)}`);
-        return res?.output || '';
+        // Per-step attribution: the runner reads {output, tokens, costUsd}. Defensive
+        // — usage is null when the CLI didn't emit a JSON envelope.
+        return { output: res?.output || '', tokens: res?.usage?.tokens ?? null, costUsd: res?.usage?.costUsd ?? null };
       },
       checkGate: (planOutput) => findCharacterizationGateViolations(planOutput),
       // Targeted re-scan merges into the last persisted scan.json (fetched from S3).
@@ -7948,6 +8023,10 @@ async function executeScanEngineJob(job) {
             maturity: result.maturity,
             infra: result.infra,
             stack: result.stack,
+            aiReadiness: result.aiReadiness,
+            // Per-step token/cost ledger produced by the runner (C-LEDGER shapes).
+            timeline: result.timeline,
+            cost: result.cost,
             reportMarkdown: result.reportMarkdown,
             // Provenance for granular re-scans: the merge key vocabulary + the SHA
             // an auto-target re-scan diffs against.
@@ -8552,6 +8631,51 @@ async function handleJobFailure(job, err) {
   }
 }
 
+// FIX 1a — one-time boot sweep for orphaned scan-engine jobs. A daemon restart
+// loses the in-memory child tracker, so a scan that was mid-flight sits RUNNING
+// forever and sticks the UI on "scanning…". Flip any scan-engine job left RUNNING
+// with a stale heartbeat to FAILED so the operator can re-launch. Never touches a
+// job currently running on THIS daemon (activeJobs), and is best-effort.
+async function reapOrphanedScanJobs() {
+  const SCAN_ORPHAN_STALE_MS = 8 * 60 * 1000;
+  try {
+    const { Items } = await ddb.send(
+      new QueryCommand({
+        TableName: JOBS_TABLE,
+        IndexName: 'status-createdAt-index',
+        KeyConditionExpression: '#s = :running',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':running': 'RUNNING' },
+        Limit: 50,
+      }),
+    );
+    if (!Items || Items.length === 0) return;
+    const now = Date.now();
+    const orphans = Items.filter((j) => {
+      if (j.jobType !== 'scan-engine') return false;
+      if (activeJobs.has(j.jobId)) return false; // owned by this daemon — not dead
+      const beatAt =
+        Date.parse(j.lastHeartbeatAt || j.updatedAt || j.createdAt || '') || 0;
+      return now - beatAt > SCAN_ORPHAN_STALE_MS;
+    });
+    for (const job of orphans) {
+      try {
+        await updateJobFields(job.jobId, {
+          status: 'FAILED',
+          errorMessage: 'orphaned by daemon restart',
+          triggeredBy: 'RETRY_EXHAUSTED',
+        });
+        log('warn', `[${job.jobId.slice(0, 8)}] orphaned scan-engine job reaped → FAILED (daemon restart)`);
+      } catch (err) {
+        log('error', `Failed to reap orphaned scan-engine job ${job.jobId.slice(0, 8)}: ${err.message}`);
+      }
+    }
+    if (orphans.length) log('info', `Boot sweep: reaped ${orphans.length} orphaned scan-engine job(s)`);
+  } catch (err) {
+    log('warn', `[boot] scan-engine orphan sweep failed (non-blocking): ${err.message}`);
+  }
+}
+
 async function poll() {
   log('info', 'Agent daemon started');
   // Print a deploy fingerprint so logs make stale deploys obvious. The
@@ -8654,6 +8778,9 @@ async function poll() {
   } catch (err) {
     log('error', `[unification-migration] uncaught failure: ${err.message}`);
   }
+
+  // FIX 1a — reap scan-engine jobs orphaned RUNNING by a prior daemon crash/restart.
+  await reapOrphanedScanJobs();
 
   // 2026-05-19 — Phase 1 worktree rollout. Hourly reaper for per-story
   // worktrees + coordinator worktrees + node_modules store entries +
