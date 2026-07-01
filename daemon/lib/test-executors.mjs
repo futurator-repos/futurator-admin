@@ -39,7 +39,7 @@ function runCommand(spawnSync, cmd, args, { cwd, timeoutMs }) {
  *   executor — without it, the runner's fail-closed `browser` default applies.
  * @returns {Record<string, (ac:object)=>Promise<{passed:boolean,detail?:string}>>}
  */
-export function defaultExecutors({ cwd, qaContext, spawnSync = nodeSpawnSync, timeoutMs } = {}) {
+export function defaultExecutors({ cwd, qaContext, spawnSync = nodeSpawnSync, timeoutMs, log } = {}) {
   const vitest = async (ac) => {
     const testRef = ac.testBinding?.testRef;
     if (!testRef) return { passed: false, detail: 'no testRef bound' };
@@ -67,6 +67,6 @@ export function defaultExecutors({ cwd, qaContext, spawnSync = nodeSpawnSync, ti
   // When absent we leave the key OFF so the test-binding-runner's fail-closed
   // `browser` default applies — never fake-pass an unverified behavioral AC.
   // `manual` stays absent → routed to human by the completion gate.
-  if (qaContext) executors.browser = makeBrowserExecutor({ cwd, qaContext });
+  if (qaContext) executors.browser = makeBrowserExecutor({ cwd, qaContext, deps: { log } });
   return executors;
 }

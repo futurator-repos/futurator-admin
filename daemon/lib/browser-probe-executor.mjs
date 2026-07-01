@@ -160,11 +160,22 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
   const drainPort = deps.drainPort || realDrainPort;
   const shell = deps.shell || realShell;
   const log = deps.log || (() => {});
+  // bootDevServer/wave-vqa call log with a single-arg message; adapt to (level,msg).
+  const bootLog = (m) => { try { log('info', `[browser-probe:dev-server] ${m}`); } catch { /* best-effort */ } };
   const getPlaywright = deps.playwright ? async () => deps.playwright : async () => import('playwright');
 
   return async (ac) => {
+    // Surface EVERY outcome to the daemon journal (grep `[browser-probe]`) so a
+    // browser-AC failure is diagnosable — seam-not-mounted vs a named assertion
+    // vs boot failure — instead of a silent `failing` on the story row.
+    const done = (r) => {
+      try {
+        log('info', `[browser-probe] ac=${ac?.id ?? '?'} passed=${r.passed} :: ${r.detail || ''}`);
+      } catch { /* best-effort */ }
+      return r;
+    };
     if (!qaContext) {
-      return { passed: false, detail: 'browser AC needs a served app but no qaContext for this boilerplate' };
+      return done({ passed: false, detail: 'browser AC needs a served app but no qaContext for this boilerplate' });
     }
     const probe = parseProbe({
       when: ac?.when,
@@ -173,21 +184,21 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
       text: ac?.text || ac?.testBinding?.testRef,
     });
     if (!probe.interpretable) {
-      return { passed: false, detail: `browser probe not interpretable: ${probe.reason}` };
+      return done({ passed: false, detail: `browser probe not interpretable: ${probe.reason}` });
     }
 
     const port = qaContext.defaultPort ?? 3000;
     let boot;
     try {
-      boot = await bootDevServer({ cwd, qaContext, port, shell, log });
+      boot = await bootDevServer({ cwd, qaContext, port, shell, log: bootLog });
       if (!boot?.ok) {
-        return { passed: false, detail: `dev server did not boot (status=${boot?.status ?? 'unknown'})` };
+        return done({ passed: false, detail: `dev server did not boot (status=${boot?.status ?? 'unknown'})` });
       }
       const url = `http://127.0.0.1:${boot.port}${qaContext.healthcheckPath ?? '/'}`;
       const playwright = await getPlaywright();
-      return await runBrowserProbe({ url, actions: probe.actions, assertions: probe.assertions, playwright, log });
+      return done(await runBrowserProbe({ url, actions: probe.actions, assertions: probe.assertions, playwright, log }));
     } catch (err) {
-      return { passed: false, detail: `browser probe error: ${err?.message || err}` };
+      return done({ passed: false, detail: `browser probe error: ${err?.message || err}` });
     } finally {
       try {
         if (boot?.stop) await boot.stop();

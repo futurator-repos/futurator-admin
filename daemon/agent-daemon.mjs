@@ -1790,7 +1790,7 @@ async function executeStoryDevJob(job) {
       headSha,
       // Real bound-AC test executors run in the shared plan tree. qaContext
       // enables the browser/__harness executor for kind=browser behavioral ACs.
-      executors: defaultExecutors({ cwd: job.workingDir, qaContext }),
+      executors: defaultExecutors({ cwd: job.workingDir, qaContext, log: (lvl, m) => log(lvl, `[${short}] ${m}`) }),
       // Per-story commit (development-plan §4.1) — daemonGit runs as the repo owner.
       git: daemonGit,
       updateStoryState,
