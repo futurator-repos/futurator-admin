@@ -102,7 +102,11 @@ export function parseProbe({ when, thenObservable, then, text } = {}) {
  * @returns {Promise<{ passed:boolean, detail:string }>}
  */
 export async function runBrowserProbe({ url, actions = [], assertions = [], playwright, timeoutMs = 30_000, log = () => {} }) {
-  const { chromium } = playwright;
+  // Playwright is CommonJS: `await import('playwright')` exposes chromium on
+  // `.default`, NOT as a top-level named export (that's undefined). Accept both
+  // shapes (real dynamic import, and the flat `{ chromium }` the tests inject).
+  const chromium = playwright?.chromium ?? playwright?.default?.chromium;
+  if (!chromium) return { passed: false, detail: 'playwright chromium unavailable (import interop)' };
   let browser;
   try {
     browser = await chromium.launch({ headless: true });

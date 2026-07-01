@@ -78,6 +78,18 @@ describe('runBrowserProbe', () => {
     expect(page.calls.waits).toBe(1);
   });
 
+  it('handles the CommonJS dynamic-import shape (chromium on .default)', async () => {
+    const { pw } = fakePlaywright({ snapshots: [{ status: 'running', score: 42 }] });
+    // Real `await import('playwright')` puts chromium on `.default`, not top-level.
+    const r = await runBrowserProbe({
+      url: 'http://127.0.0.1:3000/',
+      actions: [],
+      assertions: [{ field: 'status', op: 'eq', value: 'running' }],
+      playwright: { default: pw },
+    });
+    expect(r.passed).toBe(true);
+  });
+
   it('fails and names the offending field when the snapshot is wrong', async () => {
     const { pw } = fakePlaywright({ snapshots: [{ status: 'idle', score: 0 }] });
     const r = await runBrowserProbe({
