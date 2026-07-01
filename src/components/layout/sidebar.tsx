@@ -42,6 +42,7 @@ const sections: NavSection[] = [
       { href: '/debates', label: 'Debates', icon: '💬' },
       { href: '/migrate', label: 'Migrate', icon: '🚚' },
       { href: '/labs', label: 'Labs', icon: '🧪' },
+      { href: '/labs3', label: 'Labs3', icon: '🧬' },
       { href: '/labs/skills', label: 'Skills', icon: '🧩' },
       { href: '/labs/ultracode-reverse', label: 'Ultracode Reverse', icon: '🔬' },
     ],
@@ -82,7 +83,10 @@ function SectionGroup({
   collapsed: boolean;
   pathname: string;
 }) {
-  const hasActiveChild = section.items.some((item) => pathname.startsWith(item.href));
+  // Boundary-aware so '/labs' does not light up on '/labs3' (trailingSlash: '/labs3/').
+  const hasActiveChild = section.items.some(
+    (item) => pathname === item.href || pathname.startsWith(item.href + '/'),
+  );
   const [open, setOpen] = useState(hasActiveChild);
 
   return (
@@ -112,7 +116,7 @@ function SectionGroup({
       {(open || collapsed) && (
         <div className={cn(!collapsed && 'ml-4 border-l border-border pl-1')}>
           {section.items.map((item) => {
-            const isActive = pathname.startsWith(item.href);
+            const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
             return (
               <NavLink key={item.href} item={item} collapsed={collapsed} isActive={isActive} />
             );

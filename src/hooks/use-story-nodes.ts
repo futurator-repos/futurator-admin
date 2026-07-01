@@ -1,0 +1,61 @@
+'use client';
+import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import { api } from '@/lib/api-client';
+import type { StoryNodeRow, StoryNodeState } from '@/types/plan-spec';
+
+/**
+ * The lifecycle states that mean a plan-spec graph is still moving — any row in
+ * one of these makes the snapshot worth polling. Exported so B2-B7 reuse the
+ * exact same "is this plan live?" predicate (no drift between poll-gating and
+ * pulse animation).
+ */
+export const ACTIVE_STORY_NODE_STATES: ReadonlySet<StoryNodeState> = new Set<StoryNodeState>([
+  'ready',
+  'claimed',
+  'developing',
+  'merging',
+  'verifying',
+]);
+
+/** True when any row is in an active (still-moving) state. */
+export function hasActiveStory(rows: StoryNodeRow[] | undefined): boolean {
+  return !!rows?.some((r) => ACTIVE_STORY_NODE_STATES.has(r.state));
+}
+
+/**
+ * The full plan-spec-graph snapshot for a plan (GET /plans/:id/story-nodes).
+ * Polls every 2s while any story is active (ready/claimed/developing/merging/
+ * verifying), otherwise stops — mirroring the live-graph driver. Returns []
+ * (not an error) for a plan that hasn't been ingested as Pipeline-3 yet.
+ */
+export function useStoryNodes(planId: string | null): UseQueryResult<StoryNodeRow[]> {
+  return useQuery({
+    queryKey: ['story-nodes', planId],
+    queryFn: () =>
+      api.get<{ stories: StoryNodeRow[] }>(`/plans/${planId}/story-nodes`).then((d) => d.stories),
+    enabled: !!planId,
+    refetchInterval: (query) => (hasActiveStory(query.state.data) ? 2_000 : false),
+  });
+}
+
+/**
+ * The ready-frontier (or any single-state slice) for a plan via the
+ * planId-state-index GSI. Defaults to 'ready' — the stories the daemon's
+ * ready-frontier is about to dispatch.
+ */
+export function useStoryFrontier(
+  planId: string | null,
+  state: StoryNodeState = 'ready',
+): UseQueryResult<StoryNodeRow[]> {
+  return useQuery({
+    queryKey: ['story-nodes', planId, state],
+    queryFn: () =>
+      api
+        .get<{ stories: StoryNodeRow[] }>(`/plans/${planId}/story-nodes?state=${state}`)
+        .then((d) => d.stories),
+    enabled: !!planId,
+    // A frontier of an active state is inherently churny — poll it; a terminal
+    // slice ('done'/'failed'/'blocked') is stable, so don't.
+    refetchInterval: ACTIVE_STORY_NODE_STATES.has(state) ? 2_000 : false,
+  });
+}

@@ -155,6 +155,11 @@ import { aggregateOrchestratorMetrics } from '../shared/services/epic-orchestrat
 import { enqueueResumeJob } from '../shared/services/resume-job';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
 import * as planRepo from '../shared/repositories/plan-repository';
+// Pipeline-3 (development-plan §5.1) — Labs3 read seams over the plan-spec-graph
+// + the instinct loop. READ-only; ingest stays POST /plans/:id/{plan-spec,run-as-pipeline-3}.
+import * as storyNodeRepo from '../shared/repositories/story-node-repository';
+import * as instinctRepo from '../shared/repositories/instinct-repository';
+import type { StoryNodeState } from '../shared/types/plan-spec';
 // Plan Retrospect — Reality Check scorer (plan-retrospect-spec §4a/§7.1).
 import { scoreDeterministic, resolveEpics, resolvePlanJobIds } from '../shared/scorecard';
 import { composeRealityCheck } from '../shared/scorecard/compose';
@@ -1635,6 +1640,49 @@ app.post('/api/plans/:id/run-as-pipeline-3', async (c) => {
     },
   });
   return c.json(res.json, res.status as 200 | 404 | 422);
+});
+
+// Pipeline-3 (development-plan §5.1) — Labs3 READ over the plan-spec-graph.
+// GET /api/plans/:id/story-nodes            → full live snapshot (planId-cohortBatch-index)
+// GET /api/plans/:id/story-nodes?state=<s>  → single-state slice (planId-state-index; the ready-frontier)
+// Returns { stories: [] } for a plan never ingested as Pipeline-3 (not a 404)
+// so the dashboard's poll loop stays quiet instead of erroring.
+const STORY_NODE_STATES: ReadonlySet<StoryNodeState> = new Set<StoryNodeState>([
+  'blocked',
+  'ready',
+  'claimed',
+  'developing',
+  'merging',
+  'verifying',
+  'done',
+  'failed',
+]);
+app.get('/api/plans/:id/story-nodes', async (c) => {
+  const planId = c.req.param('id');
+  const state = c.req.query('state');
+  if (state !== undefined) {
+    if (!STORY_NODE_STATES.has(state as StoryNodeState)) {
+      return c.json(
+        {
+          error: `Invalid state '${state}'. Expected one of: ${[...STORY_NODE_STATES].join(', ')}`,
+        },
+        400,
+      );
+    }
+    const stories = await storyNodeRepo.getPlanStoryNodesByState(planId, state as StoryNodeState);
+    return c.json({ stories });
+  }
+  const stories = await storyNodeRepo.getPlanStoryNodes(planId);
+  return c.json({ stories });
+});
+
+// Pipeline-3 (development-plan §5.5) — Labs3 READ over the instinct loop:
+// raw observations, distilled + promoted instincts, and live-gate would-blocks.
+// Greenfield seam — returns empty arrays until a Lambda-reachable source is
+// wired (see instinct-repository), so the Skills & Learnings panel always renders.
+app.get('/api/plans/:id/instincts', async (c) => {
+  const feed = await instinctRepo.getPlanInstincts(c.req.param('id'));
+  return c.json(feed);
 });
 
 // pacman1 (2026-06-11) — operator retry for a failed wave gate (merge +

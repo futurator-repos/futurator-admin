@@ -56,14 +56,23 @@ export async function getPlanStoryNodesByState(
   planId: string,
   state: StoryNodeState,
 ): Promise<StoryNodeRow[]> {
-  const res = await docClient.send(
-    new QueryCommand({
-      TableName: TABLE,
-      IndexName: PLAN_STATE_INDEX,
-      KeyConditionExpression: 'planId = :p AND #s = :st',
-      ExpressionAttributeNames: { '#s': 'state' },
-      ExpressionAttributeValues: { ':p': planId, ':st': state },
-    }),
-  );
-  return (res.Items as StoryNodeRow[]) || [];
+  // Paginate: DynamoDB returns ≤1MB/query, and 'done'/'blocked' slices can grow
+  // past that on a large plan — without the loop the Labs3 read silently truncates.
+  const out: StoryNodeRow[] = [];
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const res = await docClient.send(
+      new QueryCommand({
+        TableName: TABLE,
+        IndexName: PLAN_STATE_INDEX,
+        KeyConditionExpression: 'planId = :p AND #s = :st',
+        ExpressionAttributeNames: { '#s': 'state' },
+        ExpressionAttributeValues: { ':p': planId, ':st': state },
+        ExclusiveStartKey,
+      }),
+    );
+    out.push(...((res.Items as StoryNodeRow[]) || []));
+    ExclusiveStartKey = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (ExclusiveStartKey);
+  return out;
 }
