@@ -24,8 +24,8 @@
  */
 
 const VOYAGE_API_URL = 'https://api.voyageai.com/v1/embeddings';
-const VOYAGE_MODEL = 'voyage-3-large';
-const EMBEDDING_DIM = 1024;
+export const VOYAGE_MODEL = 'voyage-3-large';
+export const EMBEDDING_DIM = 1024;
 const MAX_BATCH_SIZE = 128;
 const MAX_RETRIES = 3;
 const COST_PER_MILLION_TOKENS = 0.06;

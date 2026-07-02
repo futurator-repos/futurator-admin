@@ -25,8 +25,9 @@
 // error is swallowed and surfaced only on the returned `reason`.
 
 import { spawn as realSpawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getCompileSteps, getCompilerAgent } from '../compile-pipeline.mjs';
 
 // The 3 COMPILE steps we run on the per-story path (in execution order). We omit
@@ -69,6 +70,43 @@ function runProc(spawn, file, args, { cwd, env, timeout } = {}) {
       }, timeout);
     }
   });
+}
+
+/**
+ * W1.2 (P3_SEMANTIC_COMPILE) — run ts-morph `semantic-extract.mjs` and write its
+ * cross-file CALLS/RENDERS facts to `.mycelium/semantic-facts.json` so the very
+ * next `compile-sync` (graph-sync's `processSystemGraphFacts`) ingests real
+ * symbol-level dependency edges — which per-story tree-sitter (same-file only)
+ * misses. Isolated in its own try/catch: a ts-morph failure must NEVER abort the
+ * graph sync. `on` = every story; `cohort` = only the last story of a cohort
+ * (ts-morph loads the whole TS program, so cohort-close is the cheaper default).
+ */
+/** Pure gate: does P3_SEMANTIC_COMPILE fire this cycle? Default 'off' → never. */
+export function shouldRunSemantic(semanticCompile, isCohortClose) {
+  return semanticCompile === 'on' || (semanticCompile === 'cohort' && !!isCohortClose);
+}
+
+async function maybeRunSemanticExtract({ spawn, workingDir, semanticCompile, isCohortClose, timeout, log, warn }) {
+  if (!shouldRunSemantic(semanticCompile, isCohortClose)) return;
+  try {
+    const script = fileURLToPath(new URL('../../scripts/semantic-extract.mjs', import.meta.url));
+    const { code, stdout, stderr, timedOut } = await runProc(
+      spawn,
+      process.execPath,
+      [script, '--root', workingDir],
+      { cwd: workingDir, timeout: timeout || 300_000 },
+    );
+    if (code !== 0 || !stdout.trim()) {
+      warn(`semantic-extract exit ${code}${timedOut ? ' (timeout)' : ''}${stderr ? `: ${stderr.slice(0, 200)}` : ''} — skipping semantic facts`);
+      return;
+    }
+    const outDir = join(workingDir, '.mycelium');
+    await mkdir(outDir, { recursive: true });
+    await writeFile(join(outDir, 'semantic-facts.json'), stdout, 'utf-8');
+    log(`semantic-extract wrote ${stdout.length}B of cross-file facts (mode=${semanticCompile})`);
+  } catch (err) {
+    warn(`semantic-extract failed (non-blocking): ${err?.message || err}`);
+  }
 }
 
 /** Read { nodeCount, edgeCount, generatedAt } from the graph snapshot, or null if absent/unreadable. */
@@ -124,6 +162,10 @@ export async function runStoryCompileGraph({
   headSha,
   rigor = 'mvp',
   loadedSkills = [],
+  // W1.2 — P3_SEMANTIC_COMPILE ('off'|'cohort'|'on'), resolved by the caller.
+  // `isCohortClose` lets 'cohort' mode fire only on the last story of a cohort.
+  semanticCompile = 'off',
+  isCohortClose = false,
   deps = {},
 } = {}) {
   const spawn = deps.spawn || realSpawn;
@@ -161,6 +203,14 @@ export async function runStoryCompileGraph({
     for (const stepId of STORY_COMPILE_STEP_IDS) {
       const step = byId.get(stepId);
       if (!step) continue;
+
+      // Materialize cross-file semantic facts immediately BEFORE the graph sync
+      // so they're ingested in the same cycle (dark unless P3_SEMANTIC_COMPILE on).
+      if (stepId === 'compile-sync') {
+        await maybeRunSemanticExtract({
+          spawn, workingDir, semanticCompile, isCohortClose, timeout: step.timeout, log, warn,
+        });
+      }
 
       if (step.stepType === 'agent') {
         // compile-knowledge — inject the captured diff + a work summary into the

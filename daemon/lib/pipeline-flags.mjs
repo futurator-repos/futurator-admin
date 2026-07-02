@@ -38,6 +38,26 @@ export const P3_FLAGS = Object.freeze({
   P3_WORKTREE_CACHE: { values: ['off', 'on'], default: 'off' },
   P3_SESSION_REUSE: { values: ['off', 'dev_compile', 'full'], default: 'off' },
   P3_COMPACTION: { values: ['off', 'on'], default: 'off' },
+  // ── TDD-native rollout (implementation-plan waves) — all default OFF ──
+  // Quality verdict (PASS/CONCERNS/FAIL/WAIVED) + risk-tiered reviewer. shadow =
+  // compute the verdict but discard reviewer output (byte-identical completion).
+  P3_QUALITY_GATE: { values: ['off', 'shadow', 'on'], default: 'off' },
+  // Split the single story spawn into Test-Author → Implementer (RED-first +
+  // tamper). off = today's single untrimmed dev spawn.
+  P3_TEST_AUTHOR_SPLIT: { values: ['off', 'on'], default: 'off' },
+  // Emit deterministic TESTS/COVERS graph edges (testRef → symbol) at compile.
+  P3_TEST_COVER_EDGES: { values: ['off', 'on'], default: 'off' },
+  // Run ts-morph semantic-extract (cross-file CALLS/RENDERS) at compile. cohort =
+  // only on the last story of a cohort; on = every story.
+  P3_SEMANTIC_COMPILE: { values: ['off', 'cohort', 'on'], default: 'off' },
+  // Split story-compile-graph into a deterministic AST lane (per story) + an LLM
+  // article lane (cohort/plan close).
+  P3_GRAPH_GROWTH_SPLIT: { values: ['off', 'on'], default: 'off' },
+  // Surgical cross-story regression: run only prior tests covering changed
+  // symbols after a commit (replaces the retired wave-merge full-suite gate).
+  P3_SELECTIVE_REGRESSION: { values: ['off', 'shadow', 'on'], default: 'off' },
+  // Scope the reflector prompt to landing targets + emit skill-requirement.
+  P3_REFLECTOR_SCOPE: { values: ['off', 'on'], default: 'off' },
 });
 
 export const P3_FLAG_NAMES = Object.freeze(Object.keys(P3_FLAGS));

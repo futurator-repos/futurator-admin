@@ -209,6 +209,12 @@ function renderLoadout(items) {
  * @returns {{ vectors: Record<string, number[]> } | null}
  */
 function loadEmbeddingsSidecar(skillsDir) {
+  // W1.1 (D1) — gate the ACTIVATION, not just the writer. Publishing the sidecar
+  // otherwise silently lights up cosine BODY-push on the LIVE DEV/TEST/API_AUTHOR
+  // path (agent-daemon.mjs step executor) → different generated code. Until an
+  // operator sets SKILLS_EMBED_RANK=on, ranking stays inert (flat name list),
+  // byte-identical to today, even if index.embeddings.json exists on disk.
+  if (process.env.SKILLS_EMBED_RANK !== 'on') return null;
   try {
     const sidecarPath = join(skillsDir, '..', 'index.embeddings.json');
     const parsed = JSON.parse(readFileSync(sidecarPath, 'utf8'));

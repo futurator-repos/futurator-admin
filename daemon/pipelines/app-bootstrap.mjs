@@ -39,6 +39,7 @@ import { runNpmInstall } from '../lib/app-bootstrap-steps/npm-install.mjs';
 import { runVendorSkills } from '../lib/app-bootstrap-steps/vendor-skills.mjs';
 import { runBmadBootstrap } from '../lib/app-bootstrap-steps/bmad-bootstrap.mjs';
 import { runReconcileSkillsManifest } from '../lib/app-bootstrap-steps/reconcile-skills-manifest.mjs';
+import { runEmbedSkills } from '../lib/app-bootstrap-steps/embed-skills.mjs';
 import { runCommitAndPush } from '../lib/app-bootstrap-steps/commit-and-push.mjs';
 
 export const APP_BOOTSTRAP_STEPS = [
@@ -51,6 +52,7 @@ export const APP_BOOTSTRAP_STEPS = [
   'vendor-skills',          // Epic 2 Story 2.3 — fetch SKILL.md bodies via skills-sync.mjs
   'bmad-bootstrap',
   'reconcile-skills-manifest', // Skills Mgmt 0.3 — pin all on-disk skills (incl. bmad) before commit
+  'embed-skills',           // W1.1 — write the skill embeddings sidecar (read gated by SKILLS_EMBED_RANK)
   'commit-and-push',
 ];
 
@@ -182,6 +184,7 @@ export async function runAppBootstrap(job, ctx) {
     vendorSkills: steps.vendorSkills ?? runVendorSkills,
     bmadBootstrap: steps.bmadBootstrap ?? runBmadBootstrap,
     reconcileSkillsManifest: steps.reconcileSkillsManifest ?? runReconcileSkillsManifest,
+    embedSkills: steps.embedSkills ?? runEmbedSkills,
     commitAndPush: steps.commitAndPush ?? runCommitAndPush,
   };
 
@@ -385,6 +388,21 @@ export async function runAppBootstrap(job, ctx) {
       reconciledCount: reconcileResult.reconciledCount,
       onDiskCount: reconcileResult.onDiskCount,
       manifestCount: reconcileResult.manifestCount,
+    });
+
+    // 5c. EMBED-SKILLS (W1.1) — write the embeddings sidecar so the ranker can
+    // PUSH skill BODIES. Non-blocking; the sidecar is only read when
+    // SKILLS_EMBED_RANK=on, so this is dark by default.
+    await emitStarted('embed-skills');
+    const embedResult = await stepFns.embedSkills({
+      worktreeDir,
+      onOutput: makeOutputSink('embed-skills'),
+    });
+    await emitCompleted('embed-skills', {
+      skipped: !!embedResult.skipped,
+      reason: embedResult.reason,
+      count: embedResult.count,
+      model: embedResult.model,
     });
 
     // 6. COMMIT-AND-PUSH

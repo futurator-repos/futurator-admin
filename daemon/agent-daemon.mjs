@@ -1849,6 +1849,12 @@ async function executeStoryDevJob(job) {
       planId,
       headSha: result.commitSha,
       rigor,
+      // W1.2 (P3_SEMANTIC_COMPILE, default off) — grow real cross-file CALLS/
+      // RENDERS edges via ts-morph at compile. Read from env like the frontier
+      // path; 'cohort' stays inert until the cohort-close signal is wired.
+      semanticCompile: ['cohort', 'on'].includes(process.env.P3_SEMANTIC_COMPILE)
+        ? process.env.P3_SEMANTIC_COMPILE
+        : 'off',
       deps: {
         spawn,
         claudeBin: CLAUDE_BIN,
