@@ -119,6 +119,130 @@ flow deterministically — that is our AC→acceptance-test bridge for UI.
 
 ---
 
+## 3a. Execution semantics — who authors, who runs, who reviews
+
+### Test types live on two independent axes
+
+Don't conflate them:
+
+- **Runner axis** (`testKind`, already in our schema: `unit | integration | browser | manual`) — _how_ a
+  bound test executes. Static L0 (lint/typecheck/format) sits below `unit` as the implied base.
+- **Intent axis** (`verify`: `appearance | behavior | manual`) — _what kind of proof_ the AC demands;
+  this picks the L-level and whether a VQA probe is required.
+
+Three things people miscount as "types" but are actually roles, not types:
+
+- **Regression** — not authored; the accumulated _union_ of every prior story's bound tests, re-run
+  against the new HEAD (legacy `baseline-regression`). The "living regression suite" is the whole corpus.
+- **Smoke** — a curated handful of the L2 delivery journeys on the merged plan.
+- **Mutation** (Stryker, L2 nightly) — a test-_of_-tests (adequacy), the deterministic replacement for a
+  reviewer judging "is this test meaningful?" Property-based (fast-check) is an optional `unit` flavor.
+
+Concrete mapping: unit → vitest touched-files (per-story); integration/API → vitest + Hono routes, with
+**contract tests derived from our Zod schemas** (L1); browser → VQA v3 behavioral probes on
+`window.__harness` (L2); manual → operator confirmation, never auto-passed.
+
+### Tests are authored at the SCOPE that owns the behavior — not by one global agent
+
+| Test scope                             | Who authors                                                                                                                      | When                       |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| **Unit + behavior for a story's ACs**  | that story's **per-story Test-Author** (spawned in `story-dev-pipeline`, isolated to its ACs + `touches` + frozen dep-contracts) | as the story is dispatched |
+| **Contract / interface**               | the **contract-owning story** (API-author role) — the frozen sync point                                                          | at that story's dev        |
+| **Cross-story e2e / delivery / smoke** | authored **once at plan scope** — our existing `qa-author` + PM delivery-journeys at `launchPlanQaAggregate`                     | at the wave/plan gate      |
+
+A single global test-author writing every test up-front re-introduces the wave barrier P3 deleted, bloats
+context (the whole plan in one window), and writes against imagined interfaces. Per-story authoring rides
+the frontier's concurrency (N small authors ≈ one author's wall-clock) and composes with the graded
+frontier (§6): a dependent's Test-Author starts the instant the dependency's contract freezes. **Faster** =
+per-story parallel; **optimal** = the by-scope hybrid above — author the _top_ of the pyramid (e2e/journeys)
+once at plan scope, the _base_ (unit/behavior) per story.
+
+### The AC is the spine — four actors, one job each
+
+```
+AC (unbound)  ── "what must be true", as Given/When/Then + a verify intent
+   │
+   ▼  TEST-AUTHOR: writes a failing test, binds AC.id → testRef   → AC (bound)
+   │              (produces the proof-shape; does NOT judge it)
+   ▼  ORACLE run #1 (RED, pre-impl): test-binding-runner executes → all must FAIL
+   │              assertRedFirst ✓   (proves the test isn't a tautology)
+   ▼  IMPLEMENTER: minimal code to green; may NOT edit tests (detectTestTampering)
+   ▼  ORACLE run #2 (GREEN, post-impl): runner stamps status=passing|failing, lastRunSha=HEAD
+   │              ← pass/fail is DECIDED HERE. Objective, by real exit code. No LLM.
+   ▼  COMPLETION-GATE: done ⇔ every deterministic AC status==passing && sha==HEAD
+   ▼  REVIEWER (fresh ctx, risk-tiered — only P0/P1 or on CONCERNS):
+   │              judges what the oracle CAN'T: test honesty, security (BLOCK), taste (note)
+   ▼  QUALITY-GATE: PASS / CONCERNS / FAIL / WAIVED  → propagate to dependents
+```
+
+Read as four one-line jobs: the **AC** defines _what must be true_; the **Test-Author** turns each AC into
+_an executable test that would prove it_; the **test runs (oracle)** decide _whether it's in fact true right
+now_ — objectively, no agent; the **Reviewer** judges _only what the oracle can't_ (test honesty, security,
+taste) and can hard-block **only** on security. The reviewer never overrides a passing/failing test. As
+Stage-4 mutation testing lands (the deterministic "is this test meaningful?" check), the reviewer shrinks to
+security + taste and is spawned only for high-risk stories — the "gates are free, agents are not" arc:
+every question we can make objective, we take away from the LLM.
+
+## 3b. Legacy → P3: the corrected branch model, and what we inherit vs retire
+
+**Correction to the branch/commit/merge model (verified in the live step pipeline, `story-pipeline.ts`,
+`useEpicOrchestrator` defaults false — _not_ the orchestrator template).** Integration is a **three-part
+split**, not "per-story" or "per-wave" alone:
+
+- **Branch: per-STORY** — each story develops in its own worktree on `wip/<storyId>`
+  (`worktree-paths.mjs:89`, `story-worktree.mjs:141`).
+- **Commit: per-STORY** — on that `wip/<storyId>` branch (`compile-commit-on-pass`, `story-pipeline.ts:1914`).
+- **Merge: per-WAVE** — one `wave-merge` job `git merge --no-ff`s every wave story's `wip` branch into a
+  throwaway candidate off `plan/<slug>` (wave 0 → `main`, later → prior wave's SHA), runs the **full
+  suite**, and atomically advances `plan/<slug>` **only on green** (`wave-merge-runner.mjs`).
+
+So legacy **branches+commits per story but _integrates_ per wave, behind a wave-level full-suite build
+gate.** **P3 drops both the per-story worktree and the per-wave merge barrier**: one shared `plan/<slug>`
+branch, per-story commit under a lock (`integrateStory`), disjoint `touches` prevent conflicts, single
+`mergePlanToMain` at deploy. The "wave" (`cohortBatch`) demotes from an _integration boundary_ to a pure
+_scheduling level_. → **commit-per-story, branch-per-plan, integrate continuously.**
+
+**On the "agents communicate faster via contracts" claim — half true, and it matters.**
+
+- **Intra-story: TRUE.** `API_AUTHOR` writes a `.d.ts`, `api-contract-freeze` type-checks it, DEV conforms
+  through the frozen tests. A real, machine-checked contract.
+- **Cross-story: NOT true today.** Inter-story communication is **prose** — `WORK_SUMMARY` blocks →
+  `prevWorkSummaries` in the Story Context Pack, injected as `<project_context>` text
+  (`story-context-pack.mjs:168`). It is not a contract. So contract-fast cross-story communication is the
+  thing P3 **adds** (the `contract_frozen` signal, §6), not something inherited.
+
+**What we inherit vs retire (dev-loop core; compiler/reflector handled in §15):**
+
+| Legacy stage                                       | Into P3 as                                                                                                      | Note                                                  |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `API_AUTHOR` `.d.ts` + `api-contract-freeze` (tsc) | **TAKE + ELEVATE** — contract becomes the cross-story `contract_frozen` sync signal; tsc → an L0 bound-executor | fills P3's missing typecheck gate + enables earn-time |
+| `TEST` author (fresh spawn)                        | **TAKE** — the one new per-story spawn (isolated test-author)                                                   | the only mandatory context split                      |
+| `test-gate-red`                                    | **PORTED** (`assertRedFirst`, Wave-0) — wire it                                                                 | near-free on the oracle                               |
+| `ac-coverage-gate`                                 | **TAKE** — every AC bound _and_ passing @HEAD                                                                   | strengthens `completion-gate`                         |
+| DEV (sees `{{TEST_FILES}}`)                        | **TAKE transformed** → IMPLEMENTER sees committed RED tests, may not edit                                       | keeps "conform to tests"                              |
+| `test-verify`                                      | **NATIVE** — it _is_ P3's oracle (`test-binding-runner`)                                                        | already there                                         |
+| `lint-verify`                                      | **TAKE** as an L0 bound-executor (eslint)                                                                       | P3 lacks it                                           |
+| `tamper-check`                                     | **PORTED** (`detectTestTampering`, Wave-0) — wire it                                                            | test immutability                                     |
+| `dev-scope-check`                                  | **ALREADY IN P3, and better** — live PreToolUse vs post-hoc revert                                              | keep P3's                                             |
+| REVIEWER (fresh, gating, max 3)                    | **TAKE transformed** → fresh + risk-tiered + advisory (only security blocks)                                    | oracle decides done; kills triple-fail                |
+| Story Context Pack / `prevWorkSummaries`           | **TAKE** as secondary prose context                                                                             | an aid, not the sync gate                             |
+| Skills PUSH injection                              | **ALREADY IN P3** — but make it role-parametrized (§16)                                                         | inject role-relevant skills to each split agent       |
+| `compile-commit-on-pass`                           | **TAKE transformed** → commit onto shared `plan/<slug>` under lock                                              | already P3's `integrateStory`                         |
+| per-story `wip` worktree + branch                  | **RETIRE** (optional only for speculative `green`-mode)                                                         | P3 = shared tree + disjoint touches                   |
+| per-wave `wave-merge` + candidate worktree         | **RETIRE the path — port its regression safety** (see ⚠️)                                                       | continuous commit replaces the barrier                |
+| `baseline-regression` (wave full-suite)            | **TAKE** as a continuous / cohort-close regression gate                                                         | see ⚠️ + §17 selective regression                     |
+| step-machine (18 shell steps, `maxIterations:3`)   | **RETIRE** — replaced by 2-spawn + in-process oracle                                                            | this is the P3 win                                    |
+
+**⚠️ The safety we must not silently drop.** Legacy's per-wave `wave-merge` ran the **full suite against
+the _integrated_ state** and advanced only on green — that is what caught **cross-story regressions** (story
+B breaking story A's tests). P3's `completion-gate` only checks the **current story's** ACs @HEAD, so on a
+shared branch a later story can green its own bindings while silently breaking an earlier one. **Removing
+the wave-merge barrier owes a replacement:** run the accumulated bound-test corpus (all prior stories'
+bindings) after each commit or at cohort-close. §17 makes this _surgical_ (only the tests covering changed
+symbols) via the dependency graph.
+
+---
+
 ## 4. The three seams (exact, code-cited)
 
 ### Seam 1 — split the single spawn (test-author ≠ implementer)
@@ -360,3 +484,121 @@ rigor we haven't yet verified is real.
 - **Two "legacy" execution models** (linear `story-pipeline.ts` vs Task-subagent `epic-orchestrator`) —
   we port the _gates_ (shared substrate), not either orchestration shell; P3's frontier is the
   orchestrator.
+
+---
+
+## 15. The learning meta-loop (reflector + instincts)
+
+The pipeline has **two learning loops that have been competing**, and P3 should reconcile them by role.
+
+- **Instinct loop (deterministic, works):** `posttool-observe.mjs` appends structured PostToolUse events →
+  `instinct-distiller.mjs` scores recurring patterns (support ≥5) → `instinct-promote.mjs` graduates
+  high-confidence ones (≥0.6 advisory, ≥0.8 gate) into **Mycelium graph nodes** re-injected into future
+  spawns (`instinct-injector.mjs`). Closes **without repo-write privilege or a human confirm**.
+- **Reflector (LLM, semantic, never landed):** fully wired end-to-end — typed `futurator-reflections` rows
+  → operator confirm (UI Reflection Inbox) → `reflection-apply-poller` → `applyReflection` authors real
+  `.claude/skills/<name>/SKILL.md` + CLAUDE.md decisions with `REFLECTOR-APPLY` commit trailers. **But
+  `git log --grep=REFLECTOR-APPLY` is empty** — zero have landed. Three stacked causes: a v1 stub returned
+  `[]` (9 jobs, 0 rows); a latent sort-key bug (`reflectionId` vs `id`); an **IAM block on the LLM
+  privileged-write path** (which is _why_ the instinct loop was built to route around it). Plus **4 of 7
+  apply targets are deferred** (`org-skill`, `agent-persona`, `pipeline-config`, `tool-wrapper`) — exactly
+  the "innovation / pipeline-change" categories, so they propose into a void.
+
+**The meta-loop is the third loop above the double loop** (§3): gates catch defects in _this_ story; the
+meta-loop improves the _skills and gates that govern the next_ story. P3 makes it finally work because the
+TDD gates emit the richest structured signal we've ever had — feed both loops from it:
+
+- **RED-first violation** → a test-authoring learning ("this AC produced a tautological test").
+- **Tamper event** → an instinct.
+- **Unbindable AC** → a **skill requirement** ("we lack a technique for testing X") — real evidence, feeds
+  skill-scout (§16).
+- **Mutation survivor** (Stage 4) → "this test is weak."
+- **Quality-gate reason codes / retry / cost-ceiling** → categorizable efficiency learnings.
+
+**Design decisions:**
+
+1. **Deterministic lane = default.** Route every TDD gate event into `posttool-observe` so the instinct
+   loop learns from it — no human, no IAM. This carries the _bulk_ of lessons-learned because it actually
+   closes.
+2. **Semantic lane = reflector, honestly scoped.** Keep it LLM-authored + human-gated (authoring a skill or
+   changing a gate threshold _should_ be deliberate). But **scope it to targets that land**
+   (`project-claude-md`, `project-skill`, and the new _skill-requirement_ output). Stop proposing the four
+   deferred targets into a void; route **pipeline/innovation** proposals to a **visible** operator surface
+   (the Labs3 Growth tab) with evidence attached — a reviewable backlog, not a starved DDB row. Optionally
+   auto-confirm only the safest target (a high-confidence CLAUDE.md rule that passes the Gate-1 scan).
+
+---
+
+## 16. Skills for every agent
+
+**Two problems, both fixable at a clean seam.**
+
+1. **Skill _bodies_ aren't being pushed today.** `buildSkillsPushPrompt` (`daemon/lib/skills-prompt.mjs`)
+   needs a per-project embeddings sidecar `.claude/index.embeddings.json` (built by
+   `scripts/ingest-skills.mjs --embed`). **It's absent in this repo**, and there's no manifest with pins,
+   so PUSH refuses to inject bodies and falls back to the flat name list — **agents get skill _names_, not
+   _instructions_.** _Fix:_ build the sidecar at app-setup / plan-start so PUSH actually fires.
+2. **Skill loading is coupled to a role set.** Two call-sites gate it: `SKILLS_PUSH_ROLES =
+{DEV,TEST,API_AUTHOR}` (`agent-daemon.mjs:2683`) and the **non-role-aware** `buildSkillsInjection`
+   (`story-skills-inject.mjs:62`) called once for the single P3 dev spawn (`story-dev-pipeline.mjs:126`).
+   `skills-prompt.mjs` is already role-agnostic. _Fix:_ add a `role` param to `buildSkillsInjection`, call
+   it **once per spawned P3 agent** with role-appropriate `storyText` (test-author → AC/spec →
+   test-authoring skills; implementer → impl prompt → impl skills; reviewer → diff/risk → review skills),
+   and **share one push-role policy** between both seams. That makes injection universal across the split
+   with role-relevant ranking.
+
+**Growing the module (skill-scout).** Scout is fully coded and routable but **dormant here** (no
+`~/.futurator/skill-federation.yaml`, no `.claude/skills.manifest.yaml`; the 7 live skills came from the
+`skills-lock.json` vercel path). Keep `skills-lock.json` as the live store and wire scout to **propose
+against it**, fed by the meta-loop: an **unbindable-AC skill-requirement** (§15) becomes a scout/reflector
+proposal → the skills gate → install. That's the module growing from real pipeline signal, not a dormant
+catalog. Skills a story loaded are already recorded (`loaded-skills.json` → `Skills-Used:` commit trailer →
+Skills tab), so per-agent activation stays auditable after the split.
+
+---
+
+## 17. Dependency-first code graph
+
+The user priority: **set nodes and edges right, dependencies first** — because the reverse-dependency edge
+is what powers impact analysis, cheap regression, and refactoring/quality. Ground truth from the code:
+
+- The graph has **two edge families in one Memgraph `:Node` model**: **deterministic AST edges**
+  (`IMPORTS`, `CALLS`, `RENDERS`, `DEFINES`, `CONTAINS`, via tree-sitter + ts-morph) and **LLM-guessed
+  semantic edges** (`DEPENDS_ON`, `VALIDATES`, `INFORMS`… authored by the Haiku compiler as `[[wikilinks]]`).
+- **The defect:** the impact engine (`impact-propagation.mjs`) traverses the **LLM-guessed** edges and **is
+  not wired into any runtime path**. `CALLS` per-story is **same-file only**; real cross-file `CALLS`/
+  `RENDERS` (`semantic-extract.mjs`, ts-morph) run **only at bootstrap**. **No `TESTS`/`COVERS` edge exists
+  at all.** Per-story writes race (compile-thrash = 47% of legacy wall-clock; `index.md` last-write-wins).
+
+**The design law (same as the gates): structural truth is deterministic; semantic color is LLM.** The AST
+extractor owns every dependency edge; the Haiku compiler is demoted to authoring article prose and semantic
+annotations only — it must **never** mint a structural dependency edge. Tag every edge with provenance so
+traversals trust AST and treat LLM edges as advisory.
+
+**Decisions (priority order):**
+
+1. **Add a deterministic `TESTS`/`COVERS` edge (`testRef → symbol`)** — the missing edge, and the one TDD
+   uniquely enables: `testBinding` already maps **AC → testRef**; an AST pass resolves **testRef → symbol**.
+   Now the graph closes the loop **symbol → tests → ACs → stories.**
+2. **Run `semantic-extract` (cross-file `CALLS`/`RENDERS`) on every compile, not just bootstrap** — the
+   biggest fix for symbol-level impact.
+3. **Repoint `impact-propagation` at the deterministic `IMPORTS`/`CALLS`/`RENDERS`/`TESTS` edges, reverse-
+   traverse (`<-[:IMPORTS|CALLS]-`), split the overloaded `DEPENDS_ON`, and actually invoke it.**
+4. **Split `story-compile-graph`** into a **deterministic AST lane** (per story, idempotent `MERGE`:
+   ast-extract + semantic-extract + TESTS edge) and an **LLM article lane** (batched at cohort/plan close) —
+   killing the thrash/races. This is the graph-side "commit less, integrate continuously." The in-flight
+   ADC work (`subsystem-extract.mjs` + deterministic `doc-router.ts`) is already on this path; extend it
+   down to symbol + test granularity.
+
+**Why this pays off three times (the synergy with TDD):**
+
+- **Impact / refactoring:** "change symbol X → its callers, its covering tests, the ACs and stories at
+  risk" — real, not guessed.
+- **Selective regression (the §3b ⚠️ fix):** when a story changes symbol X, reverse-traverse `TESTS` to run
+  _only_ the prior tests covering X — the cross-story-regression safety **and** a token/time win (surgical,
+  not full-suite).
+- **Quality/hotspots:** "high fan-in (`IMPORTS`) × high churn × zero covering tests" = a ranked refactoring
+  hotspot from real edges.
+
+So "dependencies right" is not graph hygiene — it is the substrate that makes the gates, the cheap
+regression, and the learning loop smart.
