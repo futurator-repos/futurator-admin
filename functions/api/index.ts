@@ -235,6 +235,7 @@ import {
 import { markForRegen, recordApproval } from '../shared/concept/artifact-version';
 import type { ArtifactKind } from '../shared/concept/section-manifest';
 import { runSolutioningGate } from '../shared/services/solutioning-gate';
+import { normalizeCriteria } from '../shared/services/ac-cartographer';
 import {
   parsePlanOutput,
   applyPlanOutput,
@@ -3284,6 +3285,20 @@ app.post('/api/plans/:id/start', async (c) => {
     throw new ValidationError('Plan has no epics to start — generate them first via /apply-plan');
   }
 
+  // W1.3 Cartographer (AC_CARTOGRAPHER=on, default off → dark). Stamp SHADOW
+  // normalization fields (normalizedText/normalizedGwt/riskTag) on each AC —
+  // never overwriting text/given/when/then — so the quality gate has a P-band
+  // and the AC-shape gate can be promoted. With the flag off, nothing is
+  // written and the solutioning-gate below is byte-identical.
+  const cartographerOn = process.env.AC_CARTOGRAPHER === 'on';
+  if (cartographerOn) {
+    for (const epic of epics) {
+      for (const story of epic.stories ?? []) {
+        if (story.criteria?.length) story.criteria = normalizeCriteria(story.criteria);
+      }
+    }
+  }
+
   const planWaves = computePlanWaves(epics);
   const firstWaveEpics = epicsInPlanWave(epics, planWaves, 0);
   if (firstWaveEpics.length === 0) {
@@ -3300,7 +3315,13 @@ app.post('/api/plans/:id/start', async (c) => {
   // v3 E1-S2 — feed the PRD's FR ids (captured at PRD-apply time) so the gate's
   // dormant coverage branch fires: an epic graph that drops a PRD requirement is
   // flagged (error at production, condition at mvp). Absent for prototype/legacy.
-  const gate = runSolutioningGate({ plan, epics, prdRequirementIds: plan.prdRequirementIds });
+  const gate = runSolutioningGate({
+    plan,
+    epics,
+    prdRequirementIds: plan.prdRequirementIds,
+    // W1.3 — promote AC-shape findings to rigor-scaled only when Cartographer ran.
+    acShapeSeverity: cartographerOn ? 'scaled' : 'condition',
+  });
   // v3 E7-S1 — a YOLO (autopilot) run is unattended, so a blocking gate would
   // wedge it forever with no operator to clear the violation. YOLO bypasses the
   // BLOCK (the verdict + reasons are still recorded below, E1-S4 / E7-S2), the

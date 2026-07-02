@@ -123,6 +123,17 @@ export interface AcceptanceCriterion {
   verify?: VerifyIntent;
   /** Required iff `verify === 'manual'`; validated against the closed enum at the gate. */
   manualReason?: ManualReason;
+
+  // ── W1.3 Cartographer (implementation-plan) — SHADOW normalization fields.
+  //    Populated only when AC_CARTOGRAPHER=on; NEVER overwrite `text`/`given`/
+  //    `when`/`then` (the safety review's key mitigation), so the existing BDD
+  //    gate check on the original fields is unchanged when the flag is off. ──
+  /** EARS-normative restatement of `text` (SHALL/MUST). */
+  normalizedText?: string;
+  /** Structured Given-When-Then echo (never replaces the originals). */
+  normalizedGwt?: { given: string; when: string; then: string };
+  /** BMAD P0–P3 risk tier; the source of the quality gate's P-band (W2.1). */
+  riskTag?: 'P0' | 'P1' | 'P2' | 'P3';
 }
 
 /**

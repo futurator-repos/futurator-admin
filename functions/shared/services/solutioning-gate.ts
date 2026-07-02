@@ -35,6 +35,13 @@ export interface GateInput {
   manifests?: Partial<Record<ArtifactKind, SectionManifest>>;
   /** PRD functional-requirement ids, when known (E9.2 coverage). */
   prdRequirementIds?: string[];
+  /**
+   * W1.3 — severity for the AC-shape findings. 'condition' (default) surfaces
+   * them non-blocking (today's behavior); 'scaled' promotes to rigor-scaled
+   * (condition@mvp, error@production). The caller sets 'scaled' only when
+   * AC_CARTOGRAPHER=on, keeping the gate byte-identical by default.
+   */
+  acShapeSeverity?: 'condition' | 'scaled';
 }
 
 /** Matches a normative EARS/requirements keyword in prose AC text. */
@@ -163,9 +170,11 @@ export function runSolutioningGate(input: GateInput): GateResult {
   // Every non-manual AC should be executable-shaped: either a Given/When/Then
   // scenario or a normative SHALL/MUST statement (OpenSpec `validator.ts` requires
   // both a normative keyword AND ≥1 scenario). DARK in Wave-0: surfaced as
-  // non-blocking conditions only; becomes rigor-scaled (error at production) in
-  // Stage 1 once Cartographer normalizes AC to EARS+GWT upstream.
-  for (const f of validateAcShape(allCriteria)) conditions.push(f);
+  // non-blocking conditions only, unless the caller promotes to rigor-scaled
+  // (W1.3, AC_CARTOGRAPHER=on) once Cartographer has normalized AC upstream.
+  const pushAcShape =
+    input.acShapeSeverity === 'scaled' ? scaled : (m: string) => conditions.push(m);
+  for (const f of validateAcShape(allCriteria)) pushAcShape(f);
 
   // ── E9.5 [W7c] — route↔AC reconciliation ──
   if (input.plan.conceptPlan && !input.plan.conceptPlan.uiBearing) {
