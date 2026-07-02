@@ -1852,6 +1852,36 @@ async function executeStoryDevJob(job) {
           log('warn', `[${short}] contract_frozen write failed (non-blocking): ${e.message}`);
         }
       },
+      // W2.1b — risk-tiered reviewer. Fresh read-only Claude over the diff + ACs;
+      // ADVISORY (only fed into the verdict when P3_QUALITY_GATE=on, inside
+      // handleStoryCompletion). Non-blocking → empty verdicts on any failure.
+      spawnReviewer: async ({ acceptanceCriteria, headSha: sha }) => {
+        try {
+          const [{ buildReviewerPrompt, parseReviewerVerdict }, { extractAssistantText }] = await Promise.all([
+            import('./lib/story-reviewer.mjs'),
+            import('./lib/stream-json-text.mjs'),
+          ]);
+          let diff = '';
+          try {
+            const d = await daemonGit(['diff', `${sha}~1`, sha], job.workingDir);
+            diff = String(d.stdout || '');
+          } catch { /* no diff → reviewer judges from ACs only */ }
+          const prompt = buildReviewerPrompt({ storyTitle: job.storyDevPayload?.title, acceptanceCriteria, diff });
+          const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose',
+            '--permission-mode', 'bypassPermissions', '--allowedTools', 'Read,Grep,Glob'];
+          const out = await new Promise((res) => {
+            let o = '';
+            const c = spawn(CLAUDE_BIN, args, { cwd: job.workingDir, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+            c.stdout.on('data', (ch) => { o += ch.toString('utf8'); });
+            c.on('error', () => res(''));
+            c.on('close', () => res(o));
+          });
+          return parseReviewerVerdict(extractAssistantText(out) || out);
+        } catch (e) {
+          log('warn', `[${short}] reviewer spawn failed (non-blocking): ${e.message}`);
+          return { verdicts: {}, needsHuman: [] };
+        }
+      },
       // W5.1 — selective cross-story regression (dark unless P3_SELECTIVE_REGRESSION).
       // Reverse-impact this story's changed files → the prior tests covering them,
       // and (in 'on') run only those. Non-blocking; Memgraph-down → skip.

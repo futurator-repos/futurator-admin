@@ -354,6 +354,8 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       now: deps.now,
       // W2.1 — additive quality verdict (dark unless P3_QUALITY_GATE on/shadow).
       qualityMode: flagMode(p3Flags, 'P3_QUALITY_GATE'),
+      // W2.1b — risk-tiered reviewer (only fed into the verdict when qualityMode==='on').
+      spawnReviewer: deps.spawnReviewer,
     });
 
     // The dev step spawn completed (regardless of AC pass/fail) — emit metrics.

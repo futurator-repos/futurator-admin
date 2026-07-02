@@ -10,6 +10,7 @@ import { parseBindingManifest, applyBindings, evaluateCompletion } from './compl
 import { runStoryBindings } from './test-binding-runner.mjs';
 import { computeQualityInput } from './quality-input.mjs';
 import { evaluateQualityGate } from './quality-gate.mjs';
+import { shouldReview, parseReviewerVerdict } from './story-reviewer.mjs';
 
 /**
  * @param {{
@@ -36,6 +37,9 @@ export async function handleStoryCompletion({
   // newState/propagate (the authoritative deterministic completion-gate rules);
   // it's an observability + future-reviewer signal.
   qualityMode = 'off',
+  // W2.1b — risk-tiered reviewer spawn: async ({acceptanceCriteria, headSha}) =>
+  // { verdicts:{acId:'pass'|'fail'}, needsHuman:[] } (or { text }). Absent → skip.
+  spawnReviewer,
 }) {
   const authored = storyNode.acceptanceCriteria || [];
 
@@ -48,25 +52,36 @@ export async function handleStoryCompletion({
     acceptanceCriteria: bound, headSha, executors, now,
   });
 
+  // W2.1 — the quality verdict (also decides whether a reviewer is warranted).
+  let qualityVerdict;
+  if (qualityMode && qualityMode !== 'off') {
+    try { qualityVerdict = evaluateQualityGate(computeQualityInput(acceptanceCriteria)); }
+    catch { qualityVerdict = undefined; }
+  }
+
+  // W2.1b — risk-tiered reviewer. Runs in a FRESH context and is ADVISORY. We
+  // only FEED its verdict into the deterministic gate when qualityMode==='on'
+  // (in 'shadow' we may compute the quality verdict but the completion stays
+  // byte-identical). Absent spawnReviewer / not-high-risk → no-op.
+  let effReviewerVerdicts = reviewerVerdicts;
+  let effNeedsHuman = needsHuman;
+  if (qualityMode === 'on' && typeof spawnReviewer === 'function' && shouldReview(acceptanceCriteria, qualityVerdict)) {
+    try {
+      const rv = await spawnReviewer({ acceptanceCriteria, headSha });
+      const parsed = rv && rv.verdicts ? rv : parseReviewerVerdict(rv?.text || '');
+      if (parsed.verdicts) effReviewerVerdicts = { ...reviewerVerdicts, ...parsed.verdicts };
+      if (Array.isArray(parsed.needsHuman)) effNeedsHuman = [...needsHuman, ...parsed.needsHuman];
+    } catch { /* reviewer failure is non-blocking → keep the original (empty) verdicts */ }
+  }
+
   // 3) the deterministic completion verdict.
-  const verdict = evaluateCompletion({ acceptanceCriteria, currentHeadSha: headSha, reviewerVerdicts, needsHuman });
+  const verdict = evaluateCompletion({ acceptanceCriteria, currentHeadSha: headSha, reviewerVerdicts: effReviewerVerdicts, needsHuman: effNeedsHuman });
 
   // 4) map verdict → StoryNode lifecycle state.
   //    In the shared-tree model the per-story commit IS the integration (no
   //    merge step), so a passing+committed+test-verified story is DONE outright.
   //    failing/blocked/needs-human → failed (fix-forward/retry re-opens).
   const newState = verdict.status === 'done' ? 'done' : 'failed';
-
-  // 5) W2.1 — additive quality verdict (dark unless P3_QUALITY_GATE on/shadow).
-  //    Does NOT influence newState/propagate above.
-  let qualityVerdict;
-  if (qualityMode && qualityMode !== 'off') {
-    try {
-      qualityVerdict = evaluateQualityGate(computeQualityInput(acceptanceCriteria));
-    } catch {
-      qualityVerdict = undefined; // non-blocking — never let quality math fail a story
-    }
-  }
 
   return {
     verdict,
