@@ -1852,6 +1852,46 @@ async function executeStoryDevJob(job) {
           log('warn', `[${short}] contract_frozen write failed (non-blocking): ${e.message}`);
         }
       },
+      // W5.1 — selective cross-story regression (dark unless P3_SELECTIVE_REGRESSION).
+      // Reverse-impact this story's changed files → the prior tests covering them,
+      // and (in 'on') run only those. Non-blocking; Memgraph-down → skip.
+      selectiveRegression: async ({ headSha: sha, jobId }) => {
+        const flag = process.env.P3_SELECTIVE_REGRESSION || 'off';
+        if (flag === 'off' || !sha) return;
+        try {
+          const d = await daemonGit(['diff', '--name-only', `${sha}~1`, sha], job.workingDir);
+          const changedFiles = String(d.stdout || '').split('\n').map((s) => s.trim())
+            .filter(Boolean).filter((f) => !/\.(test|spec)\./.test(f));
+          if (!changedFiles.length) return;
+          const changedNodeIds = changedFiles.map((f) => `code/${f.replace(/\//g, '--')}`);
+          const [{ createDriver }, { queryImpact }, { runSelectiveRegression }] = await Promise.all([
+            import('./scripts/lib/memgraph-driver.mjs'),
+            import('./scripts/lib/impact-propagation.mjs'),
+            import('./lib/selective-regression.mjs'),
+          ]);
+          const driver = createDriver();
+          try {
+            const runTest = flag === 'on'
+              ? (testNodeId) => new Promise((res) => {
+                  const path = String(testNodeId).replace(/^code\//, '').replace(/--/g, '/');
+                  const c = spawn('/bin/sh', ['-c', `npx vitest run ${path}`], { cwd: job.workingDir, stdio: 'ignore' });
+                  c.on('error', () => res({ passed: false }));
+                  c.on('close', (code) => res({ passed: code === 0 }));
+                })
+              : undefined;
+            const r = await runSelectiveRegression({ flag, changedNodeIds, driver, queryImpact, runTest });
+            log('info', `[${short}] selective-regression (${r.mode}): ${r.selected.length} covering test(s)` +
+              (r.regressions.length ? `, ${r.regressions.length} REGRESSION(S): ${r.regressions.join(', ')}` : ''));
+            if (r.regressions.length) {
+              try { await pushEvent(jobId, 'story-dev', 'dev', 'step_error', { text: `selective regression: ${r.regressions.length} prior test(s) now failing: ${r.regressions.join(', ')}` }); } catch { /* telemetry */ }
+            }
+          } finally {
+            try { await driver.close?.(); } catch { /* best-effort */ }
+          }
+        } catch (e) {
+          log('warn', `[${short}] selective-regression skipped (non-blocking): ${e.message}`);
+        }
+      },
       // Live streaming into agent-events (use-agent-events reads it) + bounded
       // fix-forward attempt budget.
       pushEvent,

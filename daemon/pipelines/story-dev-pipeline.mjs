@@ -320,6 +320,14 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       catch (e) { logger.warn?.(`[story-dev] ${payload.storyId} contract_frozen mark failed (non-blocking): ${e.message}`); }
     }
 
+    // W5.1 — selective cross-story regression (dark unless P3_SELECTIVE_REGRESSION).
+    // Non-blocking detection: run only the prior tests covering a symbol THIS
+    // story changed (the retired wave-merge full-suite safety, made surgical).
+    if (flagMode(p3Flags, 'P3_SELECTIVE_REGRESSION') !== 'off' && deps.selectiveRegression) {
+      try { await deps.selectiveRegression({ storyId: payload.storyId, headSha, jobId: job.jobId }); }
+      catch (e) { logger.warn?.(`[story-dev] ${payload.storyId} selective-regression failed (non-blocking): ${e.message}`); }
+    }
+
     // W2.2 — post-hoc tamper audit (the live gate already forbids editing the
     // authored tests; this surfaces any leak). Warn only, never fails the story.
     if (split?.ownedTestFiles?.length && deps.git) {
