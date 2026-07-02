@@ -448,6 +448,7 @@ async function main() {
     log('Nothing to sync — all articles up to date');
     await processAstFacts(config);
     await processSystemGraphFacts(config);
+    await processTestCoverFacts(config); // W3.3 — dark unless P3_TEST_COVER_EDGES=on
     await processDocumentFacts(config);
     await processGraphIntegrity(config);
     await writeGraphSnapshot(config);
@@ -669,6 +670,9 @@ async function main() {
 
   // ── Step 8.45: System graph grounding (Pipeline v3 / Epic 1) ─────
   await processSystemGraphFacts(config);
+
+  // ── Step 8.455: Test-cover edges (W3.3) — dark unless P3_TEST_COVER_EDGES=on
+  await processTestCoverFacts(config);
 
   // ── Step 8.46: Agentic Document Center — subsystem shards + god docs ─
   await processDocumentFacts(config);
@@ -999,6 +1003,57 @@ async function processAstFacts(config) {
  * Story SG-1.1 (ingest); SG-1.2/1.4/1.5 produce the envelopes; SG-1.6 adds the
  * env-join + CALLS_ENDPOINT passes.
  */
+/**
+ * W3.3 (P3_TEST_COVER_EDGES) — MERGE deterministic `TESTS` edges (test file →
+ * exercised source file) from `.mycelium/test-cover-facts.json`. SAFETY: gated on
+ * the flag (D1 — dark on the unflagged live graph-sync path) and TOTALLY wrapped
+ * in try/catch (D2 — a failure here must never abort processGraphIntegrity /
+ * the snapshot / the S3 backup that run after it). MERGE-only-when-both-endpoints
+ * exist (never creates nodes → preserves the orphan/dead-code invariants), exactly
+ * like the IMPORTS block.
+ */
+async function processTestCoverFacts(config) {
+  try {
+    if (process.env.P3_TEST_COVER_EDGES !== 'on') return; // dark by default
+    const myceliumDir = join(config.knowledgeDir, '..', '.mycelium');
+    const p = join(myceliumDir, 'test-cover-facts.json');
+    if (!existsSync(p)) return;
+    let doc;
+    try {
+      doc = JSON.parse(await readFile(p, 'utf-8'));
+    } catch (err) {
+      logError(`test-cover-facts malformed: ${err.message}`);
+      return;
+    }
+    const edges = Array.isArray(doc?.edges) ? doc.edges : [];
+    if (!edges.length) return;
+
+    const driver = createDriver();
+    const session = driver.session();
+    let testsEdges = 0;
+    try {
+      for (const e of edges) {
+        if (!e || e.type !== 'TESTS' || !e.from || !e.to) continue;
+        const fromId = fileToCodeNodeId(e.from);
+        const toId = fileToCodeNodeId(e.to);
+        const r = await session.run(
+          `MATCH (a:Node {nodeId: $fromId, projectId: $projectId})
+           MATCH (b:Node {nodeId: $toId, projectId: $projectId})
+           MERGE (a)-[:TESTS]->(b)
+           RETURN 1`,
+          { fromId, toId, projectId: config.project },
+        );
+        if (r.records.length > 0) testsEdges++;
+      }
+      log(`Test-cover grounding: ${testsEdges} TESTS edges (${edges.length} candidate)`);
+    } finally {
+      await session.close();
+    }
+  } catch (err) {
+    logError(`test-cover pass failed (non-blocking): ${err.message}`);
+  }
+}
+
 async function processSystemGraphFacts(config) {
   const myceliumDir = join(config.knowledgeDir, '..', '.mycelium');
   const readJson = async (file) => {

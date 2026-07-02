@@ -26,9 +26,11 @@
 
 import { spawn as realSpawn } from 'node:child_process';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getCompileSteps, getCompilerAgent } from '../compile-pipeline.mjs';
+import { buildTestCoverFacts } from '../../scripts/lib/test-cover-resolve.mjs';
 
 // The 3 COMPILE steps we run on the per-story path (in execution order). We omit
 // compile-commit-on-pass (INT already committed) and compile-push (wave/epic
@@ -121,6 +123,26 @@ async function maybeRunSemanticExtract({ spawn, workingDir, semanticCompile, isC
     log(`semantic-extract wrote ${stdout.length}B of cross-file facts (mode=${semanticCompile})`);
   } catch (err) {
     warn(`semantic-extract failed (non-blocking): ${err?.message || err}`);
+  }
+}
+
+/**
+ * W3.3 (P3_TEST_COVER_EDGES) — write `.mycelium/test-cover-facts.json` from the
+ * deterministic ast-facts so the very next graph-sync's `processTestCoverFacts`
+ * MERGEs the TESTS edges. Dark unless the flag is on; non-blocking.
+ */
+async function maybeWriteTestCoverFacts({ workingDir, log, warn }) {
+  if (process.env.P3_TEST_COVER_EDGES !== 'on') return;
+  try {
+    const astPath = join(workingDir, '.mycelium', 'ast-facts.json');
+    if (!existsSync(astPath)) return;
+    const astFacts = JSON.parse(await readFile(astPath, 'utf8'));
+    const facts = buildTestCoverFacts(astFacts);
+    await mkdir(join(workingDir, '.mycelium'), { recursive: true });
+    await writeFile(join(workingDir, '.mycelium', 'test-cover-facts.json'), JSON.stringify(facts), 'utf-8');
+    log(`test-cover: wrote ${facts.edges.length} TESTS edge candidate(s)`);
+  } catch (err) {
+    warn(`test-cover producer failed (non-blocking): ${err?.message || err}`);
   }
 }
 
@@ -229,6 +251,8 @@ export async function runStoryCompileGraph({
         await maybeRunSemanticExtract({
           spawn, workingDir, semanticCompile, isCohortClose, timeout: step.timeout, log, warn,
         });
+        // Materialize TESTS-edge facts (from ast-facts) so this same sync ingests them.
+        await maybeWriteTestCoverFacts({ workingDir, log, warn });
       }
 
       if (step.stepType === 'agent') {
