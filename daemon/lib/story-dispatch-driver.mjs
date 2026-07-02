@@ -49,6 +49,7 @@ export async function runFrontierTick({
 }) {
   const mode = flagMode(p3Flags, 'P3_READY_FRONTIER'); // off | shadow | on
   if (mode === 'off') return { mode, frontier: [], dispatched: [], lost: [] };
+  const frontierMode = flagMode(p3Flags, 'P3_FRONTIER_MODE'); // kahn | contract | green
 
   const rows = await loadNodes({ ddb, table, planId });
   // Keep the FULL row (title, acceptanceCriteria, touches, appId, workingDir, …)
@@ -57,7 +58,7 @@ export async function runFrontierTick({
   // fields are harmless.
   const nodes = rows.map((r) => ({ ...r, depends_on: r.depends_on || [], state: r.state || r.storyState }));
 
-  const res = await dispatchReadyFrontier({ nodes, mode, ddb, table, owner, capacity, enqueue, now, log });
+  const res = await dispatchReadyFrontier({ nodes, mode, frontierMode, ddb, table, owner, capacity, enqueue, now, log });
   return { mode, frontier: res.frontier, dispatched: res.dispatched, lost: res.lost };
 }
 

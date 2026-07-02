@@ -42,9 +42,13 @@ export async function dispatchReadyFrontier(args) {
     nodes = [], mode = 'off', ddb, table, owner = 'daemon',
     enqueue, capacity = Infinity, now = Date.now(),
     makeToken = defaultMakeToken, log = () => {},
+    // W3.2 — graded readiness (P3_FRONTIER_MODE). 'kahn' (default) is byte-
+    // identical to the single-arg call; 'contract'/'green' let a dependent start
+    // earlier (see story-graph depSatisfies).
+    frontierMode = 'kahn',
   } = args;
 
-  const frontier = readyFrontier(nodes);
+  const frontier = readyFrontier(nodes, { mode: frontierMode });
   if (mode === 'off') return { frontier, dispatched: [], lost: [], shadow: false };
 
   if (mode === 'shadow') {

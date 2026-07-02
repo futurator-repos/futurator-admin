@@ -312,6 +312,14 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       else if (!integ.committed) logger.warn?.(`[story-dev] ${payload.storyId} integrate: ${integ.reason}`);
     }
 
+    // W3.2 — contract_frozen: once the story's code is committed, mark it far
+    // enough along (merging) so a dependent can start early under a graded
+    // frontier mode. Dark under default kahn; guarded + non-blocking.
+    if (flagMode(p3Flags, 'P3_FRONTIER_MODE') !== 'kahn' && deps.markContractFrozen) {
+      try { await deps.markContractFrozen({ storyId: payload.storyId, sha: headSha }); }
+      catch (e) { logger.warn?.(`[story-dev] ${payload.storyId} contract_frozen mark failed (non-blocking): ${e.message}`); }
+    }
+
     // W2.2 — post-hoc tamper audit (the live gate already forbids editing the
     // authored tests; this surfaces any leak). Warn only, never fails the story.
     if (split?.ownedTestFiles?.length && deps.git) {

@@ -1705,7 +1705,7 @@ async function runFrontierScan() {
         ddb,
         table: PLAN_SPEC_GRAPH_TABLE,
         planId,
-        p3Flags: { P3_READY_FRONTIER: mode },
+        p3Flags: { P3_READY_FRONTIER: mode, P3_FRONTIER_MODE: (process.env.P3_FRONTIER_MODE || 'kahn') },
         owner: 'daemon',
         enqueue: mode === 'on' ? enqueue : undefined,
         log,
@@ -1787,7 +1787,14 @@ async function executeStoryDevJob(job) {
       const nodes = (Items || []).map((r) => ({ storyId: r.storyId, depends_on: r.depends_on || [] }));
       const deps = dependentsOf(nodes, completedStoryId);
       const { unblocked } = await propagateCompletion({ ddb, table: PLAN_SPEC_GRAPH_TABLE, completedStoryId, dependents: deps });
-      if (unblocked.length) log('info', `[${short}] story ${completedStoryId} done → unblocked [${unblocked.join(', ')}]`);
+      if (unblocked.length) {
+        log('info', `[${short}] story ${completedStoryId} done → unblocked [${unblocked.join(', ')}]`);
+        // W3.4 — force the next daemon poll (~POLL_INTERVAL, 3s) to run the frontier
+        // scan instead of idling up to P3_FRONTIER_SCAN_INTERVAL_MS (60s). Kills the
+        // last structural dead-time between a story finishing and its dependents
+        // dispatching. No-op when the frontier is off (scan early-returns).
+        lastFrontierScanAt = 0;
+      }
     } catch (e) {
       log('warn', `[${short}] dependency propagation failed (non-blocking): ${e.message}`);
     }
@@ -1829,6 +1836,22 @@ async function executeStoryDevJob(job) {
       git: daemonGit,
       updateStoryState,
       propagateCompletion: propagate,
+      // W3.2 — contract_frozen signal (dark under P3_FRONTIER_MODE=kahn): flip the
+      // story to 'merging' after its integrate commit so a dependent's test-author
+      // can start early in contract/green mode. Best-effort; the driver reads
+      // storyState.
+      markContractFrozen: async ({ storyId }) => {
+        try {
+          await ddb.send(new UpdateCommand({
+            TableName: PLAN_SPEC_GRAPH_TABLE,
+            Key: { storyId },
+            UpdateExpression: 'SET storyState = :m, updatedAt = :now',
+            ExpressionAttributeValues: { ':m': 'merging', ':now': new Date().toISOString() },
+          }));
+        } catch (e) {
+          log('warn', `[${short}] contract_frozen write failed (non-blocking): ${e.message}`);
+        }
+      },
       // Live streaming into agent-events (use-agent-events reads it) + bounded
       // fix-forward attempt budget.
       pushEvent,
