@@ -287,6 +287,64 @@ export async function propagateImpact(nodeId, driver, opts = {}) {
   }
 }
 
+// ── W4.1: read-only reverse impact over DETERMINISTIC structural edges ──
+//
+// The legacy propagateImpact above traverses the LLM-authored semantic edges
+// (DEPENDS_ON/VALIDATES/…) FORWARD and WRITES flags — and has zero callers. The
+// query below answers the real refactoring question — "if I change X, what
+// depends on it?" — by reverse-traversing only the AST-derived structural edges,
+// which are trustworthy. It is REPORT-ONLY (no SET), and needs no graph-sync
+// change: the edge TYPE (not a provenance property) already separates
+// deterministic edges from the guessed semantic ones, so we never rename or
+// migrate DEPENDS_ON (the safety review's hard constraint).
+
+export const STRUCTURAL_EDGE_TYPES = ['IMPORTS', 'CALLS', 'RENDERS', 'TESTS'];
+
+/** Pure: the reverse-impact Cypher. `(changed)<-[:IMPORTS|CALLS|RENDERS|TESTS]-(dependent)`. */
+export function buildReverseImpactCypher(maxHops = 4) {
+  const n = Number(maxHops);
+  const hops = Number.isFinite(n) ? Math.max(1, Math.min(6, n)) : 4;
+  const types = STRUCTURAL_EDGE_TYPES.join('|');
+  return [
+    'MATCH (changed:Node {nodeId: $nodeId})',
+    `MATCH path = (changed)<-[:${types}*1..${hops}]-(dependent:Node)`,
+    'WHERE dependent.nodeId <> $nodeId',
+    'RETURN dependent.nodeId AS nodeId, dependent.kind AS kind,',
+    '       dependent.label AS label, length(path) AS hops',
+    'ORDER BY hops ASC',
+  ].join('\n');
+}
+
+/** True for a test-file node (used to surface the covering tests of a change). */
+function isTestNode(n) {
+  return /\.(test|spec)\.[cm]?[jt]sx?/.test(String(n.label || n.nodeId || ''));
+}
+
+/**
+ * Read-only impact query: who transitively depends on `nodeId`, via the
+ * deterministic structural edges, reverse. Never writes. Surfaces the impacted
+ * set + the subset that are covering tests (for selective regression, W5).
+ *
+ * @returns {Promise<{ sourceNodeId:string, impacted:Array<{nodeId,kind,label,hops}>, tests:string[] }>}
+ */
+export async function queryImpact(nodeId, driver, { maxHops = 4 } = {}) {
+  const session = driver.session();
+  try {
+    const res = await session.run(buildReverseImpactCypher(maxHops), { nodeId });
+    const byId = new Map();
+    for (const r of res.records) {
+      const hops = typeof r.get('hops') === 'object' ? r.get('hops').toNumber() : Number(r.get('hops'));
+      const n = { nodeId: r.get('nodeId'), kind: String(r.get('kind') || ''), label: String(r.get('label') || ''), hops };
+      const e = byId.get(n.nodeId);
+      if (!e || n.hops < e.hops) byId.set(n.nodeId, n); // keep the shortest path
+    }
+    const impacted = [...byId.values()];
+    return { sourceNodeId: nodeId, impacted, tests: impacted.filter(isTestNode).map((n) => n.nodeId) };
+  } finally {
+    await session.close();
+  }
+}
+
 // ── Batch Propagation ──
 
 /**
