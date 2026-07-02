@@ -20,6 +20,10 @@ import { handleStoryCompletion } from '../lib/story-completion-handler.mjs';
 import { integrateStory } from '../lib/story-integrate.mjs';
 import { extractAssistantText } from '../lib/stream-json-text.mjs';
 import { planBranchName } from '../lib/plan-branch.mjs';
+import { runStoryBindings } from '../lib/test-binding-runner.mjs';
+import { detectTestTampering } from '../lib/tdd-gates.mjs';
+// W2.2 (P3_TEST_AUTHOR_SPLIT) — isolated Test-Author phase + implementer prompt.
+import { runTestAuthorPhase, buildImplementerPrompt } from './lib/test-author-phase.mjs';
 // P3-parity glue (INT wiring): streaming events, skills injection/commit trailer,
 // bounded fix-forward retry. buildSubagentInjectionArgs is now folded into
 // buildSkillsInjection (single --append-system-prompt), so it is no longer
@@ -150,6 +154,70 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
   ensureDir(eventLogDir);
   const stdoutPath = join(eventLogDir, `${job.jobId}.story-dev.stdout.log`);
 
+  // ── W2.2 Test-Author phase (dark unless P3_TEST_AUTHOR_SPLIT=on) ──
+  // Precede the implementer with an isolated Test-Author that authors FAILING
+  // tests, proves them RED, and commits a `test(): RED` checkpoint. On ANY error
+  // we fall open to the legacy single untrimmed dev spawn (byte-identical).
+  const splitOn = flagMode(p3Flags, 'P3_TEST_AUTHOR_SPLIT') === 'on';
+  let split = null;
+  // Minimal one-shot spawn (no fix-forward loop) used only by the Test-Author.
+  const spawnClaudeOnce = (onePrompt) => new Promise((res) => {
+    const oneArgs = [
+      '-p', onePrompt, '--output-format', 'stream-json', '--verbose',
+      '--permission-mode', 'bypassPermissions', ...gate.args, ...injectionArgs,
+    ];
+    let out = '';
+    const c = spawn(claudeBin, oneArgs, { cwd: projectRoot, env: { ...process.env, ...gate.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    c.stdout.on('data', (ch) => { out += ch.toString('utf8'); });
+    c.on('error', () => res({ exitCode: -1, text: '' }));
+    c.on('close', (code) => res({ exitCode: code ?? 0, text: extractAssistantText(out) || out }));
+  });
+  if (splitOn) {
+    try {
+      split = await runTestAuthorPhase({
+        payload,
+        headSha,
+        spawnOnce: ({ prompt }) => spawnClaudeOnce(prompt),
+        commitRed: async ({ label }) => {
+          if (!deps.git) return { committed: false };
+          const integ = await integrateStory({
+            repoDir: projectRoot, touches: payload.touches || [], storyId: payload.storyId,
+            title: label, planBranch: planBranchName(payload.planSlug || payload.planId), git: deps.git,
+          });
+          let files = [];
+          try {
+            if (integ.committed && integ.sha) {
+              const d = await deps.git(['diff', '--name-only', `${integ.sha}~1`, integ.sha], projectRoot);
+              files = String(d.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+            }
+          } catch { /* best-effort file list */ }
+          return { committed: integ.committed, sha: integ.sha, files };
+        },
+        runBindings: ({ acceptanceCriteria, headSha: sha }) =>
+          runStoryBindings({ acceptanceCriteria, headSha: sha, executors: deps.executors || {}, now: deps.now }),
+        logger,
+      });
+      if (split?.redSha) headSha = split.redSha;
+    } catch (e) {
+      logger.warn?.(`[story-dev] ${payload.storyId} test-author phase failed → single-spawn fallback: ${e.message}`);
+      split = null;
+    }
+  }
+  // When split succeeded, forbid the implementer from editing the authored tests
+  // via the LIVE gate (deterministic in-turn block, stronger than a post-hoc
+  // revert). Rebuilt only in the split path; the default `gate` is untouched.
+  const implGate = split?.ownedTestFiles?.length
+    ? buildGateSpawn({
+        jobId: job.jobId, p3Flags, touchPoints: payload.touches || [],
+        forbiddenAreas: [...(payload.forbiddenAreas || []), ...split.ownedTestFiles],
+        ledgerPath: join(projectRoot, '.pipeline', 'gate-events.jsonl'),
+        ceilingUsd: payload.costCeilingUsd ?? job.costCeilingUsd,
+        harnessCostDir: join(projectRoot, '.pipeline', 'harness-cost'),
+        haltDir: projectRoot, observeLog: join(projectRoot, '.pipeline', 'observations.jsonl'),
+        agentRole: 'story-dev',
+      })
+    : gate;
+
   // Bounded fix-forward loop (development-plan §4.4). Each attempt re-spawns the
   // SAME-scoped agent; on a failing bound-AC we feed back the REAL failing-test
   // output and re-run the SAME deterministic bound tests (the agent cannot
@@ -157,13 +225,17 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     attemptsUsed = attempt;
     const pf = attempt > 1 ? buildPriorFailureBlock(completion) : null;
-    const prompt = buildStoryDevPrompt({ ...payload, priorFailure: pf });
+    // Split path: implement against the committed tests (trimmed prompt).
+    // Default path: the single untrimmed dev prompt (author + implement).
+    const prompt = split
+      ? buildImplementerPrompt({ ...payload, priorFailure: pf }, split.ownedTestFiles)
+      : buildStoryDevPrompt({ ...payload, priorFailure: pf });
     const args = [
       '-p', prompt,
       '--output-format', 'stream-json',
       '--verbose',
       '--permission-mode', 'bypassPermissions',
-      ...gate.args,
+      ...implGate.args,
       ...injectionArgs,
     ];
 
@@ -182,7 +254,7 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
 
     const child = spawn(claudeBin, args, {
       cwd: projectRoot,
-      env: { ...process.env, ...gate.env },
+      env: { ...process.env, ...implGate.env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     registerChild(job.jobId, child);
@@ -239,6 +311,17 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       else if (!integ.committed) logger.warn?.(`[story-dev] ${payload.storyId} integrate: ${integ.reason}`);
     }
 
+    // W2.2 — post-hoc tamper audit (the live gate already forbids editing the
+    // authored tests; this surfaces any leak). Warn only, never fails the story.
+    if (split?.ownedTestFiles?.length && deps.git) {
+      try {
+        const d = await deps.git(['diff', '--name-only', `${headSha}~1`, headSha], projectRoot);
+        const changed = String(d.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+        const tamper = detectTestTampering(split.ownedTestFiles, changed);
+        if (!tamper.ok) logger.warn?.(`[story-dev] ${payload.storyId} implementer touched authored test(s): ${tamper.tampered.join(', ')}`);
+      } catch { /* audit only */ }
+    }
+
     // Decode the stream-json transcript to the agent's plain text so the
     // <BINDING> manifest parses (its JSON is escaped inside stream-json fields).
     const devText = extractAssistantText(output) || output;
@@ -246,7 +329,9 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     // Deterministic completion verdict (bound-AC gate), bound to the committed SHA.
     completion = await handleStoryCompletion({
       storyNode: { storyId: payload.storyId, acceptanceCriteria: payload.acceptanceCriteria },
-      devOutput: devText,
+      // Split path: the AC→test <BINDING> comes from the Test-Author, not the
+      // implementer (which only implements). Default path: the dev's own output.
+      devOutput: split ? split.bindingOutput : devText,
       headSha,
       executors: deps.executors || {},
       now: deps.now,
