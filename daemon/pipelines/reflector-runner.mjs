@@ -219,11 +219,27 @@ export function buildForensicEvent({ scope, output, durationMs, tokensConsumed, 
  * NO domain examples are baked in (no game/app specifics): categories are
  * described generically so the same prompt serves every project.
  */
-export function buildReflectorAgentPrompt({ scope, projectSlug, planSummary, evidenceBlocks }) {
+export function buildReflectorAgentPrompt({
+  scope, projectSlug, planSummary, evidenceBlocks,
+  // Connector C — P3_REFLECTOR_SCOPE. When on, scope the proposable targets to
+  // the ones that actually LAND (project-claude-md, project-skill,
+  // skill-requirement) instead of proposing org-skill/etc. into a void. Default
+  // off → today's prompt is byte-identical (dark on the live legacy path).
+  scopeToLanding = process.env.P3_REFLECTOR_SCOPE === 'on',
+}) {
   const blocks = (evidenceBlocks || [])
     .filter((b) => b && b.title && b.body)
     .map((b) => `## ${b.title}\n${String(b.body).slice(0, 6000)}`)
     .join('\n\n');
+  const targetsBlock = scopeToLanding
+    ? `Targets you may propose (choose per proposal):
+- target "project-claude-md", action "append-line": one concise imperative rule line for this project's CLAUDE.md (conventions, pitfalls proven by this run).
+- target "project-skill", action "propose": a reusable technique worth packaging as a skill for this project's agents (set "skillName" in kebab-case).
+- target "skill-requirement", action "propose": when a story AC could NOT be bound to a test because the pipeline LACKS a testing technique — name the missing capability (set "skillName" in kebab-case). This becomes a skill-scout request, not a repo write.`
+    : `Targets you may propose (choose per proposal):
+- target "project-claude-md", action "append-line": one concise imperative rule line for this project's CLAUDE.md (conventions, pitfalls to avoid, environment quirks proven by this run).
+- target "project-skill", action "propose": a reusable technique worth packaging as a skill for this project's agents (set "skillName" in kebab-case).
+- target "org-skill", action "propose": only if the technique is clearly project-agnostic.`;
   return `You are the REFLECTOR for the "${projectSlug}" project. A ${scope} just completed. Your job: distill what this run TAUGHT US into a small number of durable, reusable proposals so future agent runs do not repeat the same mistakes or rediscover the same techniques.
 
 You are in the project working directory. You may Read/Grep/Glob the repo (e.g. CLAUDE.md to avoid duplicate rules, source files referenced by the evidence) but you must NOT modify anything — you only PROPOSE.
@@ -242,10 +258,7 @@ What makes a GOOD proposal (quality bar — fewer, better):
 - It is non-duplicative: if CLAUDE.md already says it, do not re-propose it.
 - Skip it if unsure: an empty list is a valid, honest answer.
 
-Targets you may propose (choose per proposal):
-- target "project-claude-md", action "append-line": one concise imperative rule line for this project's CLAUDE.md (conventions, pitfalls to avoid, environment quirks proven by this run).
-- target "project-skill", action "propose": a reusable technique worth packaging as a skill for this project's agents (set "skillName" in kebab-case).
-- target "org-skill", action "propose": only if the technique is clearly project-agnostic.
+${targetsBlock}
 
 Emit AT MOST 5 proposals. End your reply with EXACTLY this block:
 
@@ -268,6 +281,7 @@ The JSON array may be empty ([]). "confidence" is 0..1. Include "skillName" for 
 const REFLECTION_TARGETS = new Set([
   'project-claude-md',
   'project-skill',
+  'skill-requirement', // Connector C — a request for a missing testing skill → scout ledger
   'agent-persona',
   'org-skill',
   'pipeline-config',

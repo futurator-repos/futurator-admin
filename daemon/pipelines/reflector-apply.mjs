@@ -113,6 +113,13 @@ export async function applyReflection({
       outcome = await applyVqaFixProposal({ workingDir, proposal, log });
       break;
     }
+    case 'skill-requirement': {
+      // Connector C — a request for a missing testing skill. NOT a repo write:
+      // append to a scout-readable ledger (like story.vqa.fix), so SKILL-SCOUT
+      // can turn recurring requirements into skill proposals.
+      outcome = await applySkillRequirementProposal({ workingDir, proposal, log });
+      break;
+    }
     case 'org-skill':
     case 'agent-persona':
     case 'pipeline-config':
@@ -234,6 +241,50 @@ async function applyProjectSkillProposal({ workingDir, projectSlug, proposal, lo
     };
   }
   return installFederationSkill({ workingDir, projectSlug, proposal, c: obj, log });
+}
+
+// ── target=skill-requirement (Connector C) ────────────────────────────
+
+/** Scout-readable ledger of requested-but-missing skills. */
+const SKILL_REQUIREMENT_LEDGER_REL = '.context/skill-requirements.jsonl';
+
+/**
+ * Record a requested skill capability (from an unbindable AC) to an append-only
+ * ledger SKILL-SCOUT mines — the "feeds skill-scout, not a repo write" path.
+ * `content` may be a string (the requirement) or an object. Pure append +
+ * idempotent on proposal id. Mirrors applyVqaFixProposal.
+ */
+async function applySkillRequirementProposal({ workingDir, proposal, log }) {
+  const c = proposal.content;
+  const requirement = typeof c === 'string' ? c : (c?.requirement ?? c?.description ?? '');
+  const skillName = proposal.skillName ?? (typeof c === 'object' ? c?.skillName : undefined) ?? null;
+  if (!requirement && !skillName) {
+    return { ok: false, reason: 'skill-requirement-payload-malformed', error: 'content (requirement) or skillName is required' };
+  }
+  const ledgerPath = join(workingDir, SKILL_REQUIREMENT_LEDGER_REL);
+  const record = {
+    id: proposal.id,
+    skillName,
+    requirement,
+    rationale: proposal.rationale ?? '',
+    evidence: Array.isArray(proposal.evidence) ? proposal.evidence : [],
+  };
+  try {
+    if (existsSync(ledgerPath)) {
+      const existing = readFileSync(ledgerPath, 'utf-8');
+      if (existing.includes(`"id":${JSON.stringify(proposal.id)}`)) {
+        log('info', `reflector-apply skill-requirement: ${proposal.id} already recorded (idempotent)`);
+        return { ok: true, idempotent: true };
+      }
+    } else {
+      mkdirSync(join(workingDir, '.context'), { recursive: true });
+    }
+    appendFileSync(ledgerPath, JSON.stringify(record) + '\n', 'utf-8');
+    log('info', `reflector-apply skill-requirement: recorded ${skillName || '(unnamed)'} for scout`);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: 'skill-requirement-ledger-write-failed', error: err.message };
+  }
 }
 
 // ── target=story.vqa.fix ──────────────────────────────────────────────
