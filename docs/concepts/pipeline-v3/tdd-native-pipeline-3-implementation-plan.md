@@ -35,6 +35,12 @@ runner, non-blocking); (c) reflector scope (`P3_REFLECTOR_SCOPE`) + `skill-requi
 `.context/skill-requirements.jsonl` scout ledger. Every capability stays behind its flag — the next step
 is a staged A/B enablement, not more code.
 
+**Post-plan deferrals also completed** (188 tests green, `tsc` 0): the **W2.1b risk-tiered reviewer
+spawn** (fresh read-only reviewer for P0/P1-or-CONCERNS stories; its verdict is fed into the deterministic
+gate only when `P3_QUALITY_GATE=on`, so `shadow` stays byte-identical; graceful no-op when absent) and the
+**cohort-close signal** (`isLastInCohort` → `isCohortClose`, activating `P3_SEMANTIC_COMPILE=cohort` and the
+`P3_GRAPH_GROWTH_SPLIT` article lane). Nothing is left deferred.
+
 ## Governing law
 
 1. **Every new _gate_ is proven deterministic and unit-tested before any new _spawn_ consumes it.**
