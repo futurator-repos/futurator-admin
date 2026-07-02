@@ -5,6 +5,36 @@
 > multi-agent workflow (25 agents, 0 errors). The safety pass overturned the design's optimism on
 > 6 of 11 items — their real "dark" status and required mitigations are captured per-card.
 
+## Build status (2026-07-02)
+
+**All 12 wave items' deterministic cores are shipped, tested, and dark** — 11 feature commits
+(`0cb4069..81ff88b` on `feat/pipeline-v3`), 145 tests green, `tsc` 0, lint clean. Nothing changes on any
+live path (legacy or P3-default) until an operator flips a flag.
+
+| Item                                                    | Flag                      | Status                             |
+| ------------------------------------------------------- | ------------------------- | ---------------------------------- |
+| Flag registry (7 flags)                                 | —                         | ✅ shipped                         |
+| W1.1 skills embeddings sidecar + read-gate              | `SKILLS_EMBED_RANK`       | ✅ shipped                         |
+| W1.2 semantic-extract per-compile                       | `P3_SEMANTIC_COMPILE`     | ✅ shipped                         |
+| W1.3 ac-cartographer (shadow fields + severity)         | `AC_CARTOGRAPHER`         | ✅ shipped                         |
+| W2.1 quality verdict (P-band, additive)                 | `P3_QUALITY_GATE`         | ✅ shipped                         |
+| W2.2 test-author split (RED gate + tamper, fail-open)   | `P3_TEST_AUTHOR_SPLIT`    | ✅ shipped                         |
+| W3.1 skills role policy + role param                    | —                         | ✅ shipped                         |
+| W3.2 graded frontier (`contract_frozen`)                | `P3_FRONTIER_MODE`        | ✅ shipped                         |
+| W3.3 TESTS edge (allowlist + resolver)                  | `P3_TEST_COVER_EDGES`     | ✅ core; ⏳ graph-sync ingest pass |
+| W3.4 inline frontier tick (60s→~3s)                     | —                         | ✅ shipped                         |
+| W4.1 reverse impact (`queryImpact`, by-type, no rename) | (report-only)             | ✅ shipped                         |
+| W4.2 graph growth split (per-story / cohort lanes)      | `P3_GRAPH_GROWTH_SPLIT`   | ✅ shipped                         |
+| W4.3 learning meta-loop (instincts from TDD telemetry)  | (observe-gated)           | ✅ core; ⏳ reflector-prompt scope |
+| W5.1 selective regression (pure selection core)         | `P3_SELECTIVE_REGRESSION` | ✅ core; ⏳ daemon driver wiring   |
+
+**Remaining = integration wiring only** (the deterministic cores above are done + tested): (a) the
+`graph-sync` `main()` `processTestCoverFacts` ingestion pass + the compile-time producer that writes
+`test-cover-facts.json` (touches the unflagged-live `graph-sync` — needs careful review of its
+session/MERGE internals); (b) the selective-regression daemon wiring (changed-files→node-ids + a Memgraph
+driver handle + test-node→executor map); (c) the reflector-prompt scope change (LLM prompt: add
+`skill-requirement` to `REFLECTION_TARGETS` + a scout-enqueue path). Each stays behind its flag.
+
 ## Governing law
 
 1. **Every new _gate_ is proven deterministic and unit-tested before any new _spawn_ consumes it.**
