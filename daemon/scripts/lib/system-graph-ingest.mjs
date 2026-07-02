@@ -41,6 +41,9 @@ export const SYSTEM_GRAPH_EDGE_TYPES = new Set([
   'CONTAINS', // godDoc → docShard (the god doc owns its subsystem shards)
   'DEPENDS_ON', // docShard → docShard (shard-level dependency, from imports)
   'PROPOSES', // concept document → godDoc / docShard (intention edge, E6.1)
+  // ── W3.3 (P3_TEST_COVER_EDGES) — deterministic test→symbol coverage ─────
+  'TESTS', // test-file → exercised symbol (the TDD traceability edge)
+  'COVERS', // alias reserved for a future coverage-report-derived edge
 ]);
 
 // Scalar / string-array node props the ingest is allowed to persist. Memgraph
