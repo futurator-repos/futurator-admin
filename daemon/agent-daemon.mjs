@@ -1935,6 +1935,24 @@ async function executeStoryDevJob(job) {
   if (ok) {
     // Fire-and-forget: grow the code-knowledge-graph (the real Graph tab's data
     // source) after every green story. Non-blocking — never fails the job.
+    // W1.2/W4.2 — cohort-close signal: is this the last story of its cohortBatch
+    // to finish? Fires the cohort-batched semantic-extract + LLM article lane once
+    // per cohort. Best-effort; failure → false (per-story behavior unchanged).
+    let isCohortClose = false;
+    try {
+      const { Items } = await ddb.send(new QueryCommand({
+        TableName: PLAN_SPEC_GRAPH_TABLE,
+        IndexName: 'planId-cohortBatch-index',
+        KeyConditionExpression: 'planId = :p',
+        ExpressionAttributeValues: { ':p': planId },
+      }));
+      const { isLastInCohort } = await import('./lib/story-graph.mjs');
+      isCohortClose = isLastInCohort(
+        (Items || []).map((r) => ({ storyId: r.storyId, cohortBatch: r.cohortBatch, state: r.state, storyState: r.storyState })),
+        storyId,
+      );
+    } catch { /* best-effort — default per-story */ }
+
     runStoryCompileGraph({
       projectId: appId,
       workingDir: job.workingDir,
@@ -1942,6 +1960,7 @@ async function executeStoryDevJob(job) {
       planId,
       headSha: result.commitSha,
       rigor,
+      isCohortClose,
       // W1.2 (P3_SEMANTIC_COMPILE, default off) — grow real cross-file CALLS/
       // RENDERS edges via ts-morph at compile. Read from env like the frontier
       // path; 'cohort' stays inert until the cohort-close signal is wired.

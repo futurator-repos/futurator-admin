@@ -187,6 +187,26 @@ export function readyFrontier(nodes, opts = {}) {
   return out.sort();
 }
 
+/**
+ * Cohort-close signal (W1.2/W4.2): is `completedStoryId` the LAST story of its
+ * cohortBatch to finish? True iff every OTHER story sharing its cohortBatch is
+ * `done` (the completed story's own row is already `done` by call time). Used to
+ * fire the cohort-batched semantic-extract + LLM article lane exactly once per
+ * cohort instead of per story. Best-effort (concurrent finishers may both/neither
+ * see it — acceptable for a dark, idempotent compile).
+ */
+export function isLastInCohort(nodes, completedStoryId) {
+  const map = byId(nodes);
+  const me = map.get(completedStoryId);
+  if (!me || me.cohortBatch == null) return false;
+  for (const n of nodes) {
+    if (n.storyId === completedStoryId) continue;
+    if (n.cohortBatch !== me.cohortBatch) continue;
+    if ((n.state || n.storyState) !== 'done') return false;
+  }
+  return true;
+}
+
 /** True when a single story's deps are all satisfied by `doneSet`. */
 export function isStoryDispatchable(node, doneSet) {
   if (!node) return false;
