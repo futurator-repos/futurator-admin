@@ -131,6 +131,7 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     workingDir: projectRoot,
     storyText: buildStoryDevPrompt(payload),
     p3Flags,
+    role: 'story-dev', // W3.1 — code-producing → PUSH (unchanged default behavior)
   });
 
   // Stream a "skills loaded" audit signal (mirrors Claude Code's terminal

@@ -245,7 +245,7 @@ import { enrichInfraWithGraph } from './scripts/refactor-recon/infra-extract.mjs
 // .context/loaded-skills.json so the per-story commit's Skills-Used
 // trailer populates with real content.
 import { recordSkillActivation } from './lib/loaded-skills-tracker.mjs';
-import { buildSkillsPromptLine, buildSkillsPushPrompt } from './lib/skills-prompt.mjs';
+import { buildSkillsPromptLine, buildSkillsPushPrompt, SKILLS_PUSH_ROLES } from './lib/skills-prompt.mjs';
 import { startFederationBackupSchedule } from './lib/federation-backup.mjs';
 import { createFederationResolver } from './lib/federation-resolver.mjs';
 import { createMemoryStore, provisionMemoryRoot } from './lib/memory-store.mjs';
@@ -2686,7 +2686,8 @@ async function executeStep(jobId, step, agents, workingDir, variables, sessions,
   // substituted prompt, so the conventions are in-context, not waiting on a
   // Skill-tool call. The flat name+description list stays as the fallback for
   // the remaining skills (and for all other roles).
-  const SKILLS_PUSH_ROLES = new Set(['DEV', 'TEST', 'API_AUTHOR']);
+  // W3.1 — one shared push-role policy (imported), so this seam and the P3
+  // story pipeline agree. DEV/TEST/API_AUTHOR stay push (unchanged).
   const skillsSection = SKILLS_PUSH_ROLES.has(step.agentId)
     ? await buildSkillsPushPrompt(effectiveCwd, prompt)
     : buildSkillsPromptLine(effectiveCwd);

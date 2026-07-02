@@ -23,7 +23,7 @@
 // and the commit path are never blocked by optional enrichment.
 
 import { buildInjection, claudeCodeAppendArgs } from '../../lib/subagent-start.mjs';
-import { buildSkillsPushPrompt, selectPushedSkillNames } from '../../lib/skills-prompt.mjs';
+import { buildSkillsPushPrompt, buildSkillsPromptLine, selectPushedSkillNames, SKILLS_PUSH_ROLES } from '../../lib/skills-prompt.mjs';
 import {
   buildSkillSourceLookup,
   readLoadedSkills,
@@ -59,14 +59,17 @@ import { buildSkillsCommitFlags } from './commit-metadata.mjs';
  * }} opts
  * @returns {Promise<string[]>} spawn args: [] or ['--append-system-prompt', combined]
  */
-export async function buildSkillsInjection({ workingDir, storyText, p3Flags }) {
+export async function buildSkillsInjection({ workingDir, storyText, p3Flags, role }) {
   try {
     const baseText = buildInjection({ p3Flags });
+    // W3.1 — role-aware. Code-producing roles (or the default, role omitted) PUSH
+    // skill bodies; non-push roles (e.g. a reviewer) get the flat PULL list.
+    const push = !role || SKILLS_PUSH_ROLES.has(role);
     let skillsText = null;
     try {
-      skillsText = await buildSkillsPushPrompt(workingDir, storyText);
+      skillsText = push ? await buildSkillsPushPrompt(workingDir, storyText) : buildSkillsPromptLine(workingDir);
     } catch {
-      // skills push failed (no loadout, embed error, etc.) — use base only
+      // skills build failed (no loadout, embed error, etc.) — use base only
     }
     // Record the PUSHED skills as this story's loaded set. PUSH-injected bodies
     // never fire a `Skill` tool_use event (the header tells the agent not to
@@ -74,7 +77,7 @@ export async function buildSkillsInjection({ workingDir, storyText, p3Flags }) {
     // story's Skills-Used trailer + the forensic Skills tab would report zero
     // even though a curated set was applied. Best-effort; never blocks the spawn.
     try {
-      const { pushed } = await selectPushedSkillNames(workingDir, storyText);
+      const { pushed } = push ? await selectPushedSkillNames(workingDir, storyText) : { pushed: [] };
       if (pushed && pushed.length) {
         const sourceLookup = buildSkillSourceLookup(workingDir);
         for (const skillName of pushed) {

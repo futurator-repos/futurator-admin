@@ -240,6 +240,16 @@ function loadEmbeddingsSidecar(skillsDir) {
  * @param {string} workingDir — the agent's cwd (per-story worktree or trunk)
  * @returns {string | null}
  */
+// W3.1 — the single canonical push-role policy, shared by the generic step
+// executor (agent-daemon) and the P3 story pipeline (story-skills-inject). A
+// code-PRODUCING role gets skill BODIES pushed; every other role (reviewers,
+// compilers, reflectors) gets the flat name list (PULL). Includes both the
+// legacy agentIds and the P3 role names so both seams agree.
+export const SKILLS_PUSH_ROLES = new Set([
+  'DEV', 'TEST', 'API_AUTHOR', // legacy step-pipeline agentIds
+  'story-dev', 'test-author', 'implementer', // pipeline-3 role names
+]);
+
 export function buildSkillsPromptLine(workingDir) {
   if (!workingDir) return null;
   try {
