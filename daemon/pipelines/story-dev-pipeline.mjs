@@ -14,7 +14,7 @@ import { spawn as realSpawn } from 'node:child_process';
 import { createWriteStream, mkdirSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { registerChild, unregisterChild } from './lib/child-tracker.mjs';
-import { freezeFlagsOntoJob } from '../lib/pipeline-flags.mjs';
+import { freezeFlagsOntoJob, flagMode } from '../lib/pipeline-flags.mjs';
 import { buildGateSpawn } from '../lib/gate-settings.mjs';
 import { handleStoryCompletion } from '../lib/story-completion-handler.mjs';
 import { integrateStory } from '../lib/story-integrate.mjs';
@@ -250,6 +250,8 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       headSha,
       executors: deps.executors || {},
       now: deps.now,
+      // W2.1 — additive quality verdict (dark unless P3_QUALITY_GATE on/shadow).
+      qualityMode: flagMode(p3Flags, 'P3_QUALITY_GATE'),
     });
 
     // The dev step spawn completed (regardless of AC pass/fail) — emit metrics.
