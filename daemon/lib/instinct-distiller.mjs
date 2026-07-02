@@ -13,7 +13,12 @@ const SUPPORT_FOR_FULL_CONFIDENCE = 5;
 /** Stable grouping key for an observation: what went wrong, where, for whom. */
 function observationKey(o) {
   const target = pathPattern(o.target);
-  return [o.role || 'any', o.tool || 'any', o.exitOutcome || o.gateTier || 'n/a', target].join('|');
+  // W4.3 — a TDD signal discriminates the group so tamper/redFirst/coverage/
+  // mutation don't collapse into one 'n/a' bucket.
+  const signal =
+    (o.tamper && 'tamper') || (o.redFirstFail && 'redFirst') || (o.coverageGap && 'covGap') ||
+    (o.mutationSurvivor && 'mutation') || o.exitOutcome || o.gateTier || 'n/a';
+  return [o.role || 'any', o.tool || 'any', signal, target].join('|');
 }
 
 /** Generalize a concrete path to a coarse glob so instincts aren't per-file. */
@@ -28,6 +33,11 @@ export function pathPattern(target) {
 function describe(sample, support) {
   const where = pathPattern(sample.target);
   if (sample.scopeViolation) return `Edits to ${where} repeatedly fell outside story scope (${support}×) — confirm ${where} is in touches before writing.`;
+  // W4.3 — TDD-gate telemetry patterns.
+  if (sample.tamper) return `The implementer tried to edit authored tests on ${where} (${support}×) — implement to green; never touch the tests.`;
+  if (sample.redFirstFail) return `Authored tests on ${where} passed before implementation (${support}×) — write a genuinely failing (RED) test first.`;
+  if (sample.coverageGap) return `ACs on ${where} shipped without a covering test (${support}×) — bind every AC to a real test.`;
+  if (sample.mutationSurvivor) return `Tests on ${where} missed injected mutations (${support}×) — assert behavior, not just execution.`;
   if (sample.gateTier === 'block' || sample.exitOutcome === 'blocked') return `${sample.tool} on ${where} was blocked ${support}× — treat as high-risk; state callers/rollback first.`;
   if (sample.exitOutcome === 'fail') return `${sample.tool} on ${where} failed ${support}× — check the failing test before re-attempting.`;
   return `Recurring pattern on ${where} (${support}×).`;
@@ -45,7 +55,8 @@ function describe(sample, support) {
 export function distill(observations = [], { minSupport = 2 } = {}) {
   const groups = new Map();
   for (const o of observations) {
-    const negative = o.scopeViolation || o.gateTier === 'block' || o.exitOutcome === 'blocked' || o.exitOutcome === 'fail';
+    const negative = o.scopeViolation || o.gateTier === 'block' || o.exitOutcome === 'blocked' || o.exitOutcome === 'fail'
+      || o.tamper || o.redFirstFail || o.coverageGap || o.mutationSurvivor;
     if (!negative) continue;
     const key = observationKey(o);
     const g = groups.get(key) || { support: 0, sample: o };

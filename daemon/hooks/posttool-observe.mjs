@@ -15,6 +15,18 @@ export function buildObservation(payload = {}, env = {}) {
   const input = payload.tool_input || payload.toolInput || {};
   const target = input.file_path || (input.command ? String(input.command).slice(0, 120) : '') || '';
   const exit = payload.tool_response?.exitCode ?? payload.exitCode;
+  // W4.3 — additive TDD/gate telemetry the instinct distiller can group on. Only
+  // included when present (identical shape by default), so this is purely
+  // additive and doubly-inert at default-off (the hook only runs when the gate
+  // set FUTURATOR_OBSERVE_LOG). Flat fields (not nested) to match the distiller.
+  const extra = {};
+  const set = (k, v) => { if (v !== undefined && v !== null && v !== '') extra[k] = v; };
+  set('scopeViolation', payload.scopeViolation ?? env.FUTURATOR_SCOPE_VIOLATION);
+  set('gateTier', payload.gateTier ?? env.FUTURATOR_GATE_TIER);
+  set('tamper', payload.tamper ?? env.FUTURATOR_TAMPER);
+  set('redFirstFail', payload.redFirstFail ?? env.FUTURATOR_RED_FIRST_FAIL);
+  set('coverageGap', payload.coverageGap ?? env.FUTURATOR_COVERAGE_GAP);
+  set('mutationSurvivor', payload.mutationSurvivor ?? env.FUTURATOR_MUTATION_SURVIVOR);
   return {
     at: new Date().toISOString(),
     session: payload.session_id || env.CLAUDE_SESSION_ID || 'nosession',
@@ -23,6 +35,7 @@ export function buildObservation(payload = {}, env = {}) {
     target,
     exitOutcome: typeof exit === 'number' ? (exit === 0 ? 'ok' : 'fail') : undefined,
     sha: env.FUTURATOR_HEAD_SHA || undefined,
+    ...extra,
   };
 }
 
