@@ -1878,6 +1878,9 @@ async function executeStoryDevJob(job) {
       semanticCompile: ['cohort', 'on'].includes(process.env.P3_SEMANTIC_COMPILE)
         ? process.env.P3_SEMANTIC_COMPILE
         : 'off',
+      // W4.2 (P3_GRAPH_GROWTH_SPLIT, default off) — deterministic per-story lane;
+      // LLM article lane deferred to cohort close.
+      growthSplit: process.env.P3_GRAPH_GROWTH_SPLIT === 'on',
       deps: {
         spawn,
         claudeBin: CLAUDE_BIN,

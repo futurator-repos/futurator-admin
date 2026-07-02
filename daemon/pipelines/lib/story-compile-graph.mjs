@@ -36,6 +36,21 @@ import { getCompileSteps, getCompilerAgent } from '../compile-pipeline.mjs';
 const STORY_COMPILE_STEP_IDS = ['compile-diff', 'compile-knowledge', 'compile-sync'];
 
 /**
+ * W4.2 (P3_GRAPH_GROWTH_SPLIT) — which compile steps run this cycle. When the
+ * split is on, the PER-STORY lane is deterministic-only (diff + sync; the
+ * semantic-extract runs inside the loop), dropping the Haiku `compile-knowledge`
+ * LLM step from the hot path — that article/god-doc authoring moves to the
+ * cohort/plan-close batch. Kills the per-story compile-thrash + write races.
+ * Off (default) → today's full 3-step run. PURE.
+ */
+export function resolveCompileSteps(growthSplit, isCohortClose) {
+  if (!growthSplit) return STORY_COMPILE_STEP_IDS;
+  return isCohortClose
+    ? STORY_COMPILE_STEP_IDS // cohort close: run the LLM article lane too
+    : STORY_COMPILE_STEP_IDS.filter((id) => id !== 'compile-knowledge');
+}
+
+/**
  * Run one child process to completion, collecting stdout/stderr. Resolves (never
  * rejects) with { code, stdout, stderr, timedOut }. Honors an optional timeout by
  * killing the child and resolving with timedOut:true.
@@ -166,6 +181,9 @@ export async function runStoryCompileGraph({
   // `isCohortClose` lets 'cohort' mode fire only on the last story of a cohort.
   semanticCompile = 'off',
   isCohortClose = false,
+  // W4.2 — P3_GRAPH_GROWTH_SPLIT: deterministic per-story lane + cohort-close
+  // article lane. Off (default) → today's full compile.
+  growthSplit = false,
   deps = {},
 } = {}) {
   const spawn = deps.spawn || realSpawn;
@@ -198,9 +216,10 @@ export async function runStoryCompileGraph({
     const compilerCfg = getCompilerAgent().COMPILER;
 
     let diffManifest = '';
-    log(`compile phase for story=${storyId} project=${projectId} headSha=${headSha || '(none)'}`);
+    const runSteps = resolveCompileSteps(growthSplit, isCohortClose);
+    log(`compile phase for story=${storyId} project=${projectId} headSha=${headSha || '(none)'} steps=[${runSteps.join(',')}]`);
 
-    for (const stepId of STORY_COMPILE_STEP_IDS) {
+    for (const stepId of runSteps) {
       const step = byId.get(stepId);
       if (!step) continue;
 
