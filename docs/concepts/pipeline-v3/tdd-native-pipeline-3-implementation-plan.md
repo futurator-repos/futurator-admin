@@ -311,6 +311,43 @@ Dependency order (from the verified `dependsOn`): W1 items have none; `coverage-
 
 ---
 
+## Addendum — agent handoffs & dead-time (investigated 2026-07-02)
+
+**Dead-time ledger (measured):** (a) step→step inside a job is already ~0 in BOTH pipelines — legacy
+`executePipeline` is an in-process loop with in-memory `{{VAR}}` handoff (`agent-daemon.mjs:3202,3495`),
+and P3's `runStoryDevJob` is sequential JS. (b) story-done → dependent dispatched: legacy paid 2–5 min
+(wave cron); **P3 still pays up to 60 s** — `propagateCompletion` flips `blocked→ready` inline
+(`agent-daemon.mjs:1789`) but dispatch waits for the next scan (`FRONTIER_SCAN_INTERVAL_MS=60000`,
+`:1642/:9013`). (c) minted→pickup: 3 s poll (`POLL_INTERVAL`, `:286`). (d) spawn cold start ≈30 s + ~27 k
+cache-creation tokens — the dominant cost; `P3_SESSION_REUSE` exists in the flag registry but is
+**unimplemented** in the P3 path (the `--resume` machinery exists at `:954` / `agent-turn.mjs:57`).
+
+**JS-orchestration reality check (our own spike, `spikes/v3-hybrid/probes/README.md:50-51`):** dynamic
+workflows make the handoff control-flow ~instant, but the spawn — not the handoff — is the bottleneck:
+serial 20.6 s vs workflow 104.9 s (B2); swarm 93.7 s vs serial 14.2 s (C1, "overhead dominates on easy
+bugs"). The daemon's `.mjs` pipelines already ARE in-process JS orchestrators spawning the Claude CLI —
+same architecture as ultracode's scripts, already integrated with DDB/events. **Do not adopt an external
+workflow harness for the pipeline.** jcode's in-process session objects + socket `comm_report` handoff do
+not transfer (we spawn a CLI, we don't own the provider connection); its portable lessons are
+event-driven continuation, KV-cache prefix reuse, and same-role session resume.
+
+**Decisions bound into the waves above:**
+
+1. **W2.2 handoff spec:** Test-Author → Implementer is **intra-job, in-process** — Test-Author returns →
+   daemon parses `<BINDING>` → RED oracle → `test():` commit → Implementer spawns in the same JS tick.
+   In-memory + committed-files handoff; no DB round-trip. The split adds one cold start and **zero
+   dead-time**.
+2. **NEW W3.4 · `frontier-inline-tick` (safe-dark, S):** fire `runFrontierTick` inline immediately after
+   `propagateCompletion` unblocks dependents (`agent-daemon.mjs:~1789`), keeping the 60 s scan as
+   backstop. Kills the last structural gap; doubly important under `P3_FRONTIER_MODE=contract` (an
+   early-start signal must not sleep a minute). P3-off unaffected (whole path frontier-gated).
+3. **Isolation Law constraint on session reuse:** NEVER `--resume` the Test-Author's session for the
+   Implementer — it would leak the test-author's reasoning and reintroduce circular validation. Session
+   reuse is legal only **within a role** (attempt-2 resumes attempt-1; dev→compile via
+   `P3_SESSION_REUSE=dev_compile`). Across the role boundary, cut cold start with a **byte-identical
+   shared prompt prefix** (legacy precedent `story-pipeline.ts:799-803`) so spawn #2 pays cache-read, and
+   keep the Test-Author on a cheap model.
+
 ## Open questions for the operator
 
 1. **AC priority field.** `coverage-quality-wire`'s P-band + `graded`/risk-tiered reviewer need a priority
