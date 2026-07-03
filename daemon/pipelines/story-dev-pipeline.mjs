@@ -23,7 +23,7 @@ import { planBranchName } from '../lib/plan-branch.mjs';
 import { runStoryBindings } from '../lib/test-binding-runner.mjs';
 import { detectTestTampering } from '../lib/tdd-gates.mjs';
 // W2.2 (P3_TEST_AUTHOR_SPLIT) — isolated Test-Author phase + implementer prompt.
-import { runTestAuthorPhase, buildImplementerPrompt } from './lib/test-author-phase.mjs';
+import { runTestAuthorPhase, buildImplementerPrompt, parsePorcelainTestFiles } from './lib/test-author-phase.mjs';
 // P3-parity glue (INT wiring): streaming events, skills injection/commit trailer,
 // bounded fix-forward retry. buildSubagentInjectionArgs is now folded into
 // buildSkillsInjection (single --append-system-prompt), so it is no longer
@@ -161,14 +161,30 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
   // we fall open to the legacy single untrimmed dev spawn (byte-identical).
   const splitOn = flagMode(p3Flags, 'P3_TEST_AUTHOR_SPLIT') === 'on';
   let split = null;
+  // pacman3 canary fix: the Test-Author writes NEW test files, which are never in
+  // the story's `touches` — the shared gate flagged its own work as out-of-scope
+  // (audit today; a hard block in enforce). Give it a dedicated gate whose scope
+  // additionally allows test files.
+  const testAuthorGate = splitOn
+    ? buildGateSpawn({
+        jobId: job.jobId, p3Flags,
+        touchPoints: [...(payload.touches || []), '**/*.test.*', '**/*.spec.*'],
+        forbiddenAreas: payload.forbiddenAreas || [],
+        ledgerPath: join(projectRoot, '.pipeline', 'gate-events.jsonl'),
+        ceilingUsd: payload.costCeilingUsd ?? job.costCeilingUsd,
+        harnessCostDir: join(projectRoot, '.pipeline', 'harness-cost'),
+        haltDir: projectRoot, observeLog: join(projectRoot, '.pipeline', 'observations.jsonl'),
+        agentRole: 'test-author',
+      })
+    : gate;
   // Minimal one-shot spawn (no fix-forward loop) used only by the Test-Author.
   const spawnClaudeOnce = (onePrompt) => new Promise((res) => {
     const oneArgs = [
       '-p', onePrompt, '--output-format', 'stream-json', '--verbose',
-      '--permission-mode', 'bypassPermissions', ...gate.args, ...injectionArgs,
+      '--permission-mode', 'bypassPermissions', ...testAuthorGate.args, ...injectionArgs,
     ];
     let out = '';
-    const c = spawn(claudeBin, oneArgs, { cwd: projectRoot, env: { ...process.env, ...gate.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const c = spawn(claudeBin, oneArgs, { cwd: projectRoot, env: { ...process.env, ...testAuthorGate.env }, stdio: ['ignore', 'pipe', 'pipe'] });
     c.stdout.on('data', (ch) => { out += ch.toString('utf8'); });
     c.on('error', () => res({ exitCode: -1, text: '' }));
     c.on('close', (code) => res({ exitCode: code ?? 0, text: extractAssistantText(out) || out }));
@@ -187,17 +203,29 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
         spawnOnce: ({ prompt }) => spawnClaudeOnce(prompt),
         commitRed: async ({ label }) => {
           if (!deps.git) return { committed: false };
+          // pacman3 canary fix: the authored tests are NEW files outside the
+          // story's `touches`, so staging by touches alone committed 0 test files
+          // (no RED audit trail, no tamper baseline). Discover them from git
+          // status and stage them explicitly alongside the touches.
+          let authoredTests = [];
+          try {
+            const st = await deps.git(['status', '--porcelain'], projectRoot);
+            authoredTests = parsePorcelainTestFiles(st.stdout);
+          } catch { /* best-effort — fall back to touches-only staging */ }
           const integ = await integrateStory({
-            repoDir: projectRoot, touches: payload.touches || [], storyId: payload.storyId,
+            repoDir: projectRoot,
+            touches: [...(payload.touches || []), ...authoredTests],
+            storyId: payload.storyId,
             title: label, planBranch: planBranchName(payload.planSlug || payload.planId), git: deps.git,
           });
-          let files = [];
+          let files = authoredTests;
           try {
             if (integ.committed && integ.sha) {
               const d = await deps.git(['diff', '--name-only', `${integ.sha}~1`, integ.sha], projectRoot);
-              files = String(d.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+              const committed = String(d.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+              if (committed.length) files = committed;
             }
-          } catch { /* best-effort file list */ }
+          } catch { /* keep the status-derived list */ }
           return { committed: integ.committed, sha: integ.sha, files };
         },
         runBindings: ({ acceptanceCriteria, headSha: sha }) =>

@@ -14,6 +14,25 @@
 import { parseBindingManifest, applyBindings } from '../../lib/completion-gate.mjs';
 import { assertRedFirst } from '../../lib/tdd-gates.mjs';
 
+/** Test-file matcher shared by the RED-commit staging + the gate scope. */
+export const TEST_FILE_RE = /\.(test|spec)\.[cm]?[jt]sx?$/;
+
+/**
+ * pacman3 canary fix (2026-07-03): the RED commit staged only the story's
+ * `touches`, which never include test files → "RED confirmed — 0 test file(s)"
+ * and no tamper protection. Parse `git status --porcelain` for the authored
+ * test files so commitRed can stage them explicitly. Handles renames. PURE.
+ */
+export function parsePorcelainTestFiles(stdout) {
+  return String(stdout || '')
+    .split('\n')
+    .map((l) => {
+      const p = l.slice(3).trim();
+      return p.includes(' -> ') ? p.split(' -> ').pop().trim() : p;
+    })
+    .filter((f) => f && TEST_FILE_RE.test(f));
+}
+
 /**
  * The Test-Author prompt: author FAILING tests for each AC + emit <BINDING>.
  * Isolated context — it must not see or write implementation code (that would
@@ -37,7 +56,9 @@ export function buildStoryTestPrompt(payload) {
     `- Author ONLY test files. Do NOT write, stub, or scaffold implementation code.`,
     `- Each test MUST FAIL right now (the feature does not exist yet) — this is the RED state.`,
     `- Do not weaken a test to make it pass; a test that passes before implementation is invalid.`,
-    `- You may ONLY create/modify test files under: ${(payload.touches || []).join(', ')}`,
+    `- CREATE new test files as SIBLINGS of the code under test (e.g. src/x/foo.test.ts for`,
+    `  src/x/foo.ts). Test files (*.test.*, *.spec.*) are in scope; the story's implementation`,
+    `  files are NOT yours to touch: ${(payload.touches || []).join(', ')}`,
     ``,
     `# Required: bind each AC to its test`,
     `<BINDING>`,

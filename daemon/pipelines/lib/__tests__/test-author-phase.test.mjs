@@ -3,7 +3,25 @@ import {
   buildStoryTestPrompt,
   buildImplementerPrompt,
   runTestAuthorPhase,
+  parsePorcelainTestFiles,
 } from '../test-author-phase.mjs';
+
+describe('parsePorcelainTestFiles (pacman3 canary fix)', () => {
+  it('collects new/modified test files from git status --porcelain', () => {
+    const out = parsePorcelainTestFiles([
+      '?? src/game/pacman/movement.test.ts',
+      ' M src/game/pacman/ghost-ai.test.ts',
+      'A  src/game/pacman/movement.ts', // impl file — excluded
+      '?? notes.md',
+    ].join('\n'));
+    expect(out).toEqual(['src/game/pacman/movement.test.ts', 'src/game/pacman/ghost-ai.test.ts']);
+  });
+  it('handles renames and empty input', () => {
+    expect(parsePorcelainTestFiles('R  old.test.ts -> src/new.test.ts')).toEqual(['src/new.test.ts']);
+    expect(parsePorcelainTestFiles('')).toEqual([]);
+    expect(parsePorcelainTestFiles(undefined)).toEqual([]);
+  });
+});
 
 const payload = {
   storyId: 'S1',

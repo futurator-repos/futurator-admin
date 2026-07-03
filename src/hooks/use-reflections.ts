@@ -35,7 +35,8 @@ export function useReflections(
   if (args.projectSlug) params.set('projectSlug', args.projectSlug);
   if (args.status) params.set('status', args.status);
   const qs = params.toString();
-  const url = qs ? `/api/reflections?${qs}` : '/api/reflections';
+  // api-client base already ends in /api — an /api-prefixed path 404s (/api/api/…).
+  const url = qs ? `/reflections?${qs}` : '/reflections';
 
   return useQuery({
     queryKey: ['reflections', args.projectSlug ?? null, args.status ?? null],
@@ -48,7 +49,7 @@ export function useReflectionDecision() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (args: { projectSlug: string; id: string; decision: ReflectionDecision }) => {
-      const url = `/api/reflections/${encodeURIComponent(args.projectSlug)}/${encodeURIComponent(args.id)}/${args.decision}`;
+      const url = `/reflections/${encodeURIComponent(args.projectSlug)}/${encodeURIComponent(args.id)}/${args.decision}`;
       return api.post<{ item: ReflectionItem }>(url, {});
     },
     onSuccess: () => {
