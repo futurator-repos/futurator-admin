@@ -21,7 +21,7 @@
  *                      legacy Labs view state)
  */
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 import Link from 'next/link';
@@ -83,16 +83,31 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
     rows.some((r) => r.state === 'ready' || r.state === 'blocked');
   const model = useMemo(() => buildStoryGraphModel(rows), [rows]);
 
-  // ── Sub-tab state (URL > localStorage > default 'graph') ────────────
+  // ── Sub-tab state (local override > URL > localStorage > 'graph') ────
+  // pacman3 canary bug (2026-07-03): router.replace schedules the searchParams
+  // update as a low-priority TRANSITION, and this dashboard re-renders on every
+  // daemon/story/event poll — the pending tab switch was starved for seconds, so
+  // clicks felt dead ("like a layer blocking the tabs"). Flip LOCAL state
+  // immediately on click for an instant response; the URL sync trails behind for
+  // deep-links, and the effect below reconciles back/forward navigation.
   const urlSubtab = params.get('subtab');
+  const [subtabOverride, setSubtabOverride] = useState<Labs3Subtab | null>(null);
+  // A URL change (back/forward, external link) wins over a stale override —
+  // React's render-time state-adjustment pattern (no effect, no extra commit).
+  const [lastUrlSubtab, setLastUrlSubtab] = useState(urlSubtab);
+  if (urlSubtab !== lastUrlSubtab) {
+    setLastUrlSubtab(urlSubtab);
+    if (isSubtab(urlSubtab)) setSubtabOverride(urlSubtab);
+  }
   const activeSubtab: Labs3Subtab = useMemo(() => {
+    if (subtabOverride) return subtabOverride;
     if (isSubtab(urlSubtab)) return urlSubtab;
     if (typeof window !== 'undefined') {
       const stored = window.localStorage.getItem(SUBTAB_KEY);
       if (isSubtab(stored)) return stored;
     }
     return 'graph';
-  }, [urlSubtab]);
+  }, [subtabOverride, urlSubtab]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -100,6 +115,7 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
   }, [activeSubtab]);
 
   function goToSubtab(next: Labs3Subtab, extra?: Record<string, string>) {
+    setSubtabOverride(next); // instant — never wait on the router transition
     const sp = new URLSearchParams(params.toString());
     sp.set('subtab', next);
     if (extra) for (const [k, v] of Object.entries(extra)) sp.set(k, v);
