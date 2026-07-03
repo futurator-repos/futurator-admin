@@ -21,6 +21,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAgentJob } from '@/hooks/use-agent-job';
 import { useAgentEvents } from '@/hooks/use-agent-events';
+import { StoryStagePipeline } from '../plan-spec-dashboard/story-stage-pipeline';
 import type { AgentJob, AgentEvent } from '@/types/agent-orchestrator';
 import type {
   StoryNodeRow,
@@ -734,6 +735,9 @@ function StoryDetailPanel({
       }}
     >
       <StoryDetailTabs active={tab} onChange={setTab} />
+      {/* The multi-agent sub-pipeline for THIS story: Test-Author → Implementer →
+          Reviewer → Compile, derived live from the event stream. */}
+      <StoryStagePipeline events={events} />
       {tab === 'logs' ? (
         <StoryLogsPane events={events} />
       ) : (

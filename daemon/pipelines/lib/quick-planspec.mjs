@@ -144,6 +144,19 @@ function acClassOf(ac) {
 }
 
 /**
+ * BMAD P0–P3 risk tier (mirror of functions/shared/services/ac-cartographer.ts
+ * deriveRiskTag — the daemon can't import TS). Quick-flow plans bypass the API's
+ * Cartographer, so without this the quality gate's P-bands are all vacuous and
+ * the risk-tiered reviewer never fires. PURE.
+ */
+export function deriveRiskTag(ac) {
+  if (ac.acClass === 'advisory-security') return 'P0';
+  if (ac.verify === 'behavior' || ac.verify === 'appearance' || ac.needsBrowser) return 'P1';
+  if (ac.given || ac.when || ac.then) return 'P2';
+  return 'P3';
+}
+
+/**
  * Parse the model's output into StoryNodes. Coerces loose shapes, assigns stable
  * storyIds, fills sane defaults, and derives dependency edges. Never throws.
  *
@@ -177,6 +190,7 @@ export function parseQuickPlanspec(text) {
         verify,
         testBinding: { status: 'unbound' },
         acClass: acClassOf(ac),
+        riskTag: deriveRiskTag({ ...ac, verify, needsBrowser, acClass: acClassOf(ac) }),
       };
     });
     const touchesIn = Array.isArray(s.touches) ? s.touches.filter((x) => typeof x === 'string' && x.trim()) : [];

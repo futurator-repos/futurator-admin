@@ -70,6 +70,26 @@ export function targetFile(toolName, toolInput = {}) {
   return ['Edit', 'Write', 'MultiEdit'].includes(toolName) ? (toolInput.file_path || null) : null;
 }
 
+/**
+ * pacman2 canary bug (2026-07-03): agents pass ABSOLUTE file paths while
+ * touchPoints are repo-RELATIVE globs, so the scope gate "blocked" the agent's
+ * own declared files (phantom would-blocks in audit; real blocks in enforce).
+ * Relativize against the first repo root that prefixes the path. Roots, in
+ * order: FUTURATOR_HALT_DIR (the spawn's projectRoot, set by gate-settings),
+ * CLAUDE_PROJECT_DIR (set by Claude Code for hooks), cwd. PURE.
+ */
+export function toRepoRelative(file, roots = []) {
+  const f = String(file || '');
+  if (!f.startsWith('/')) return f; // already relative
+  for (const root of roots) {
+    if (!root) continue;
+    const r = String(root).replace(/\/+$/, '');
+    if (f === r) return '.';
+    if (f.startsWith(r + '/')) return f.slice(r.length + 1);
+  }
+  return f; // outside every known root — leave absolute (forbidden-area checks still apply)
+}
+
 // ── decision: pure, deterministic. main() maps it to exit codes + fact-force memo. ──
 export function decide(payload, policy = {}) {
   const { toolName, toolInput } = payload;
@@ -237,8 +257,17 @@ export function main(env = process.env) {
 
     const raw = (() => { try { return readFileSync(0, 'utf8'); } catch { return ''; } })();
     const payload = parseHookPayload(raw, env);
+    // Relativize the tool's absolute file path against the repo root BEFORE the
+    // scope check, so it compares like-for-like with the relative touchPoints.
+    const rawFile = targetFile(payload.toolName, payload.toolInput);
+    if (rawFile) {
+      payload.toolInput = {
+        ...payload.toolInput,
+        file_path: toRepoRelative(rawFile, [env.FUTURATOR_HALT_DIR, env.CLAUDE_PROJECT_DIR, process.cwd()]),
+      };
+    }
     const file = targetFile(payload.toolName, payload.toolInput);
-    const policy = resolvePolicyForTarget(file, basePolicy);
+    const policy = resolvePolicyForTarget(rawFile || file, basePolicy);
     const d = decide(payload, policy);
     const enforce = policy.mode === 'enforce';
 

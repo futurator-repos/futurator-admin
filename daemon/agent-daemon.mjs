@@ -1857,6 +1857,10 @@ async function executeStoryDevJob(job) {
       // handleStoryCompletion). Non-blocking → empty verdicts on any failure.
       spawnReviewer: async ({ acceptanceCriteria, headSha: sha }) => {
         try {
+          // Sub-pipeline visibility: reviewer is its own stage (stepId 'reviewer').
+          await pushEvent(job.jobId, 'reviewer', 'reviewer', 'step_start', {
+            text: `reviewer: fresh-context review of ${acceptanceCriteria.length} AC(s) @${String(sha || '').slice(0, 7)}`,
+          }).catch(() => {});
           const [{ buildReviewerPrompt, parseReviewerVerdict }, { extractAssistantText }] = await Promise.all([
             import('./lib/story-reviewer.mjs'),
             import('./lib/stream-json-text.mjs'),
@@ -1876,9 +1880,17 @@ async function executeStoryDevJob(job) {
             c.on('error', () => res(''));
             c.on('close', () => res(o));
           });
-          return parseReviewerVerdict(extractAssistantText(out) || out);
+          const parsed = parseReviewerVerdict(extractAssistantText(out) || out);
+          const fails = Object.values(parsed.verdicts).filter((v) => v === 'fail').length;
+          await pushEvent(job.jobId, 'reviewer', 'reviewer', 'step_complete', {
+            text: `reviewer verdicts: ${Object.keys(parsed.verdicts).length} AC(s), ${fails} fail, needs-human [${parsed.needsHuman.join(', ') || 'none'}]`,
+          }).catch(() => {});
+          return parsed;
         } catch (e) {
           log('warn', `[${short}] reviewer spawn failed (non-blocking): ${e.message}`);
+          await pushEvent(job.jobId, 'reviewer', 'reviewer', 'step_error', {
+            text: `reviewer failed (non-blocking): ${e.message}`,
+          }).catch(() => {});
           return { verdicts: {}, needsHuman: [] };
         }
       },
@@ -1953,6 +1965,10 @@ async function executeStoryDevJob(job) {
       );
     } catch { /* best-effort — default per-story */ }
 
+    // Sub-pipeline visibility: compile is its own stage (stepId 'compile').
+    pushEvent(job.jobId, 'compile', 'compiler', 'step_start', {
+      text: `compile: growing the code knowledge graph for ${storyId.slice(0, 8)}`,
+    }).catch(() => {});
     runStoryCompileGraph({
       projectId: appId,
       workingDir: job.workingDir,
@@ -1975,7 +1991,11 @@ async function executeStoryDevJob(job) {
         claudeBin: CLAUDE_BIN,
         logger: { info: (m) => log('info', m), warn: (m) => log('warn', m) },
       },
-    }).catch(() => { /* non-blocking */ });
+    }).then((r) => pushEvent(job.jobId, 'compile', 'compiler', r?.ran ? 'step_complete' : 'step_error', {
+      text: r?.ran
+        ? `compile done — graph ${r.graphUpdated ? 'updated' : 'unchanged'}${r.reason ? ` (${r.reason})` : ''}`
+        : `compile skipped: ${r?.reason || 'unknown'}`,
+    }).catch(() => {})).catch(() => { /* non-blocking */ });
 
     // Enqueue the story-scope reflector that P3's plan-reducer bypass drops.
     // Idempotent per scope; only fires when the rigor gate passes (production).

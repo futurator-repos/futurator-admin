@@ -175,6 +175,12 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
   });
   if (splitOn) {
     try {
+      // Sub-pipeline visibility: the Test-Author is its own stage in the story
+      // timeline (stepId 'test-author'), so the UI can render
+      // Test-Author → Implementer → Reviewer → Compile distinctly.
+      await deps.pushEvent?.(job.jobId, 'test-author', 'test-author', 'step_start', {
+        text: `test-author: writing failing tests for ${payload.storyId}`,
+      })?.catch?.(() => {});
       split = await runTestAuthorPhase({
         payload,
         headSha,
@@ -199,8 +205,14 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
         logger,
       });
       if (split?.redSha) headSha = split.redSha;
+      await deps.pushEvent?.(job.jobId, 'test-author', 'test-author', 'step_complete', {
+        text: `RED confirmed — ${split.ownedTestFiles.length} test file(s) committed @${(split.redSha || '').slice(0, 7)}`,
+      })?.catch?.(() => {});
     } catch (e) {
       logger.warn?.(`[story-dev] ${payload.storyId} test-author phase failed → single-spawn fallback: ${e.message}`);
+      await deps.pushEvent?.(job.jobId, 'test-author', 'test-author', 'step_error', {
+        text: `test-author failed (${e.message}) — fail-open to single-spawn dev`,
+      }).catch?.(() => {});
       split = null;
     }
   }

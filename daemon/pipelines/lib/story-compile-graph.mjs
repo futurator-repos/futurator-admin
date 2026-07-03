@@ -127,6 +127,39 @@ async function maybeRunSemanticExtract({ spawn, workingDir, semanticCompile, isC
 }
 
 /**
+ * pacman2 canary fix (2026-07-03) — the P3 compile subset never ran the legacy
+ * `compile-ast` step (compile-pipeline.mjs has no such id), so `.mycelium/
+ * ast-facts.json` was never written and graph-sync had NO structural facts to
+ * ingest → empty Graph tab. Run ast-extract over the story's diff manifest
+ * before compile-sync, mirroring the legacy step. Deterministic tree-sitter,
+ * always non-blocking.
+ */
+async function runAstExtract({ spawn, workingDir, diffManifest, log, warn }) {
+  try {
+    if (!diffManifest || !diffManifest.trim()) return;
+    const outDir = join(workingDir, '.mycelium');
+    await mkdir(outDir, { recursive: true });
+    const manifestPath = join(outDir, 'last-diff-manifest.txt');
+    await writeFile(manifestPath, diffManifest, 'utf-8');
+    const script = fileURLToPath(new URL('../../scripts/ast-extract.mjs', import.meta.url));
+    const { code, stdout, stderr, timedOut } = await runProc(
+      spawn,
+      process.execPath,
+      [script, '--root', workingDir, '--diff-manifest-file', manifestPath],
+      { cwd: workingDir, timeout: 120_000 },
+    );
+    if (code !== 0 || !stdout.trim()) {
+      warn(`ast-extract exit ${code}${timedOut ? ' (timeout)' : ''}${stderr ? `: ${stderr.slice(0, 200)}` : ''} — skipping ast facts`);
+      return;
+    }
+    await writeFile(join(outDir, 'ast-facts.json'), stdout, 'utf-8');
+    log(`ast-extract wrote ${stdout.length}B of structural facts`);
+  } catch (err) {
+    warn(`ast-extract failed (non-blocking): ${err?.message || err}`);
+  }
+}
+
+/**
  * W3.3 (P3_TEST_COVER_EDGES) — write `.mycelium/test-cover-facts.json` from the
  * deterministic ast-facts so the very next graph-sync's `processTestCoverFacts`
  * MERGEs the TESTS edges. Dark unless the flag is on; non-blocking.
@@ -248,6 +281,9 @@ export async function runStoryCompileGraph({
       // Materialize cross-file semantic facts immediately BEFORE the graph sync
       // so they're ingested in the same cycle (dark unless P3_SEMANTIC_COMPILE on).
       if (stepId === 'compile-sync') {
+        // Structural facts FIRST (the legacy compile-ast parity step) so the
+        // same sync ingests real functions/classes/imports — the Graph tab's fuel.
+        await runAstExtract({ spawn, workingDir, diffManifest, log, warn });
         await maybeRunSemanticExtract({
           spawn, workingDir, semanticCompile, isCohortClose, timeout: step.timeout, log, warn,
         });
