@@ -209,7 +209,11 @@ export function costModelFor(s) {
 // IaC strength tier per config kind: resource-declaring ≫ schema/migrations >
 // platform-config > deploy-automation. The maturity axis weights these.
 export function iacTier(ctype) {
-  if (['terraform', 'terragrunt', 'sst', 'pulumi', 'cloudformation', 'sam', 'bicep', 'arm', 'serverless', 'cdk', 'cdktf'].includes(ctype)) return 'resource';
+  // CDKTF was archived by HashiCorp on 2025-12-10. It IS still infra (kept detected),
+  // but it must NOT score as a healthy 'resource'-tier signal — gradeIacMaturity flags
+  // it as a deprecation finding instead.
+  if (ctype === 'cdktf') return 'deprecated';
+  if (['terraform', 'terragrunt', 'sst', 'pulumi', 'cloudformation', 'sam', 'bicep', 'arm', 'serverless', 'cdk'].includes(ctype)) return 'resource';
   if (['prisma', 'drizzle', 'flyway', 'liquibase', 'alembic'].includes(ctype)) return 'migrations';
   if (['kubernetes', 'helm', 'kustomize', 'crossplane', 'argocd', 'flux'].includes(ctype)) return 'orchestration';
   if (['ansible', 'chef', 'puppet', 'salt'].includes(ctype)) return 'config-mgmt';
@@ -511,7 +515,7 @@ export function buildInfraInventory(files = []) {
           : 'sparse infra signal — manual review recommended',
   };
 
-  return {
+  const inventory = {
     services,
     iac,
     deployScripts,
@@ -535,6 +539,12 @@ export function buildInfraInventory(files = []) {
       iacCoverage,
     },
   };
+  // ── Part A: deterministic IaC maturity grade (state/env/modularity/testing/
+  //   governance/drift-cost) + deprecated-toolchain catalog. Needs the raw file
+  //   set (backends, tftest, rego, tags, regions live in file content). ──
+  inventory.iacMaturity = gradeIacMaturity(inventory, files);
+  inventory.summary.iacMaturityLevel = inventory.iacMaturity.level;
+  return inventory;
 }
 
 /**
@@ -602,6 +612,274 @@ function cloudForProvider(d) {
   return '3rd-party';
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// PART A — IaC MATURITY GRADING (deterministic, ~0 tokens, file/content-based).
+//
+// Grades the six rubric dimensions INDEPENDENTLY (they may be uneven — that is the
+// whole point), then rolls up to an overall 0–4 level with the doc's min-gated rule:
+//   • cannot be L≥2 without remote/managed state + all-infra-in-code (low undeclared)
+//   • cannot be L≥3 without IaC tests + policy/scanning + drift/cost gate
+// Also emits a deprecated-toolchain catalog + ScanFindings. NEVER probes live cloud,
+// NEVER runs terraform/pulumi — it detects the PRESENCE of signals in files only.
+// ════════════════════════════════════════════════════════════════════════════
+
+const LEVEL_NAMES = ['ClickOps', 'Repeatable', 'Defined', 'Managed', 'Optimizing'];
+
+// Doc-verified (mid-2026) archived / deprecated / EOL IaC toolchain. Each match runs
+// against a context {rels, files:[{rel,content}], allContent, allSpecs}.
+const DEPRECATED_TOOLCHAIN = [
+  {
+    id: 'cdktf', tool: 'CDKTF (Terraform CDK)', status: 'archived', eolDate: '2025-12-10', severity: 'medium',
+    remediation: 'Migrate to Terraform/OpenTofu (HCL) or Pulumi.',
+    detail: 'CDKTF was archived by HashiCorp on 2025-12-10 ("did not find product-market fit at scale") — still deployable but unmaintained.',
+    match: ({ rels, allSpecs, allContent }) => rels.some((r) => /(^|\/)cdktf\.json$/.test(r)) || /\bcdktf\b|@cdktf\//.test(allSpecs) || /['"]cdktf['"]|@cdktf\//.test(allContent),
+  },
+  {
+    id: 'tfsec', tool: 'tfsec', status: 'merged-into-trivy', eolDate: null, severity: 'low',
+    remediation: 'Replace tfsec with `trivy config` (tfsec merged into the Trivy family, Aqua 2023).',
+    detail: 'tfsec joined Trivy in 2023; engineering attention moved to Trivy.',
+    match: ({ rels }) => rels.some((r) => /(^|\/)\.tfsec(\/|$)/.test(r)),
+  },
+  {
+    id: 'terrascan', tool: 'Terrascan', status: 'archived', eolDate: '2025-11-20', severity: 'low',
+    remediation: 'Migrate policy scanning to Checkov or Trivy; Terrascan was archived by Tenable on 2025-11-20.',
+    detail: 'Terrascan archived by Tenable on 2025-11-20 (read-only).',
+    match: ({ rels }) => rels.some((r) => /(^|\/)(terrascan\.(toml|ya?ml)|\.terrascan)$/i.test(r)),
+  },
+  {
+    id: 'terraformer', tool: 'Terraformer (generated code)', status: 'archived', eolDate: '2026-03-16', severity: 'low',
+    remediation: 'Refactor generated `tfer--` resources into hand-authored modules; Terraformer is one-shot only (archived 2026-03-16), never a pipeline.',
+    detail: 'Auto-generated `tfer--` resource names are unrefactored Terraformer output (Terraformer archived 2026-03-16).',
+    match: ({ rels, allContent }) => rels.some((r) => /tfer(--|_)/.test(r)) || /"?tfer(--|_)/.test(allContent),
+  },
+  {
+    id: 'gcp-deployment-manager', tool: 'GCP Deployment Manager', status: 'eol', eolDate: '2026-03-31', severity: 'high',
+    remediation: 'URGENT: run DM Convert → Terraform / Infrastructure Manager before the 2026-03-31 EOL, then abandon the DM deployment.',
+    detail: 'GCP Deployment Manager reaches end of support 2026-03-31; all related APIs stop working after that date.',
+    match: ({ rels, files }) => rels.some((r) => /\.jinja$/.test(r)) || files.some((f) => /\.ya?ml$/.test(f.rel) && /(^|\n)\s*resources\s*:/.test(f.content) && /type\s*:\s*[\w./-]*(gcp-types\/|compute\.v1\.|storage\.v1\.|\.jinja)/.test(f.content)),
+  },
+  {
+    id: 'driftctl', tool: 'driftctl', status: 'maintenance', eolDate: null, severity: 'low',
+    remediation: 'Migrate drift detection to cloud-concierge or scheduled `plan`/`preview --expect-no-changes`; driftctl has been in maintenance mode since 2023.',
+    detail: 'driftctl has been in maintenance mode since 2023 (last release Dec 2023).',
+    match: ({ rels }) => rels.some((r) => /(^|\/)(\.?driftctl\.(ya?ml|toml))$/i.test(r)),
+  },
+];
+
+/**
+ * Grade IaC maturity from the raw file set (rel + content). Pure, deterministic.
+ * @param {object} inventory — output of buildInfraInventory (uses iacCoverage/signalQuality)
+ * @param {Array<{rel,content?,specifiers?}>} files — same shape buildInfraInventory receives
+ * @returns iacMaturity object (see SHARED DATA CONTRACT)
+ */
+export function gradeIacMaturity(inventory = {}, files = []) {
+  const norm = (files || []).map((f) => ({ rel: f.rel || '', content: typeof f.content === 'string' ? f.content : '', specs: (f.specifiers || []).join(' ') }));
+  const rels = norm.map((f) => f.rel);
+  const allContent = norm.map((f) => f.content).join('\n');
+  const allSpecs = norm.map((f) => f.specs).join(' ');
+  const tfFiles = norm.filter((f) => /\.tf$|\.tf\.json$|\.tofu$/.test(f.rel));
+  const tfContent = tfFiles.map((f) => f.content).join('\n');
+  const pulumiYaml = norm.filter((f) => /(^|\/)Pulumi\.ya?ml$/.test(f.rel));
+
+  const hasSst = rels.some((r) => /(^|\/)sst\.config\.(ts|mjs|js)$/.test(r)) || /\bsst\.aws\./.test(allContent) || /from\s+['"]sst['"]|['"]sst\//.test(allContent) || /\bsst\b/.test(allSpecs);
+  const hasCdk = rels.some((r) => /(^|\/)cdk\.json$/.test(r)) || /aws-cdk-lib|@aws-cdk\//.test(allSpecs + ' ' + allContent);
+  const hasPulumi = pulumiYaml.length > 0 || /@pulumi\//.test(allSpecs) || /\bnew\s+(aws|gcp|azure)\.\w+\./.test(allContent);
+  const hasTf = tfFiles.length > 0;
+  const iacPresent = !!inventory.signalQuality?.iacDeclared || hasSst || hasCdk || hasPulumi || hasTf;
+
+  const findings = [];
+  const mkFinding = (o) => ({ id: o.id, title: o.title, detail: o.detail, dimension: o.dimension, severity: o.severity, producedBy: 'deterministic', evidence: { iac: true, ...(o.evidence || {}) }, files: o.files || [] });
+
+  // ── Deprecated-toolchain catalog + findings ──
+  const deprecated = [];
+  const depCtx = { rels, files: norm, allContent, allSpecs };
+  for (const d of DEPRECATED_TOOLCHAIN) {
+    if (!d.match(depCtx)) continue;
+    deprecated.push({ tool: d.tool, status: d.status, eolDate: d.eolDate, remediation: d.remediation, severity: d.severity });
+    findings.push(mkFinding({ id: `iac:deprecated:${d.id}`, title: `Deprecated IaC toolchain: ${d.tool}`, detail: `${d.detail} Remediation: ${d.remediation}`, dimension: 'infrastructure', severity: d.severity, evidence: { deprecatedTool: d.tool, status: d.status, eolDate: d.eolDate } }));
+  }
+
+  // ── 1. State & provisioning ──
+  const backends = [...tfContent.matchAll(/backend\s+"([a-z0-9_]+)"/gi)].map((m) => m[1].toLowerCase());
+  const REMOTE_TF = ['s3', 'gcs', 'azurerm', 'remote', 'http', 'oss', 'cos', 'pg', 'kubernetes'];
+  const hasRemoteTfBackend = backends.some((b) => REMOTE_TF.includes(b));
+  const hasLocalTfBackend = backends.some((b) => b === 'local');
+  const pulumiBackendUrl = (pulumiYaml.map((f) => f.content).join('\n').match(/backend\s*:\s*[\s\S]*?url\s*:\s*["']?([a-z0-9+]+:\/\/[^\s"']+)/i) || [])[1] || null;
+  const pulumiRemote = hasPulumi && (!pulumiBackendUrl || /^(s3|gs|azblob):\/\//i.test(pulumiBackendUrl)); // Pulumi Cloud default OR object-store backend
+  const pulumiLocalBackend = !!pulumiBackendUrl && /^file:\/\//i.test(pulumiBackendUrl);
+  const committedState = rels.some((r) => /(^|\/)terraform\.tfstate(\.backup)?$/.test(r) || /(^|\/)\.pulumi\/(stacks\/|[^/]*\.json$)/.test(r) || /(^|\/)\.terraform\/terraform\.tfstate$/.test(r));
+  const hasLock = /dynamodb_table\s*=/.test(tfContent) || /use_lockfile\s*=\s*true/.test(tfContent) || hasSst || pulumiRemote;
+
+  let stateLevel, stateEvidence;
+  const stateGaps = [];
+  if (!iacPresent) {
+    stateLevel = 0; stateEvidence = 'No IaC detected — provisioning is manual / click-ops.';
+    stateGaps.push('Adopt an IaC tool (Terraform/OpenTofu, Pulumi, SST, or CDK).');
+  } else if (committedState) {
+    stateLevel = 1; stateEvidence = 'State file committed to the repository (local / mishandled state).';
+    stateGaps.push('Remove committed state; move to a remote, locked, encrypted backend.');
+  } else if (hasRemoteTfBackend || pulumiRemote || hasSst || hasCdk) {
+    stateLevel = 2;
+    stateEvidence = hasSst ? 'SST platform-managed state.'
+      : hasRemoteTfBackend ? `Remote Terraform backend (${[...new Set(backends)].join(', ')}).`
+        : hasCdk ? 'CloudFormation-managed state (CDK).'
+          : 'Managed Pulumi state backend.';
+    if (!hasLock) stateGaps.push('No state locking detected (add DynamoDB lock table / use_lockfile).');
+  } else {
+    stateLevel = 1;
+    stateEvidence = hasLocalTfBackend || pulumiLocalBackend ? 'Local state backend.' : 'IaC present but no remote state backend declared (defaults to local).';
+    stateGaps.push('Configure a remote, locked backend (S3+DynamoDB / GCS / Pulumi Cloud).');
+  }
+  if (committedState) {
+    findings.push(mkFinding({ id: 'iac:committed-state', title: 'IaC state file committed to the repository', detail: 'A terraform.tfstate / .pulumi state file is committed — it embeds provider secrets and outputs in plaintext and corrupts under concurrent edits. Remove it and adopt a remote, locked, encrypted backend.', dimension: 'security', severity: 'high', evidence: { committedState: true }, files: rels.filter((r) => /tfstate|\.pulumi\//.test(r)).slice(0, 8) }));
+  } else if (iacPresent && stateLevel < 2) {
+    findings.push(mkFinding({ id: 'iac:no-remote-state', title: 'No remote/locked IaC state backend', detail: 'IaC is declared but state appears local — remote + locked state is the Level 1→2 boundary.', dimension: 'infrastructure', severity: 'medium' }));
+  }
+
+  // ── 2. Env separation ──
+  const envSet = new Set();
+  for (const r of rels) {
+    let m;
+    if ((m = r.match(/(^|\/)Pulumi\.([a-z0-9-]+)\.ya?ml$/i)) && m[2].toLowerCase() !== 'yaml') envSet.add(m[2].toLowerCase());
+    if ((m = r.match(/(^|\/)environments?\/([a-z0-9-]+)\//i))) envSet.add(m[2].toLowerCase());
+    if ((m = r.match(/(^|\/)[a-z0-9-]*?(dev|develop|staging|stage|prod|production|test|qa|nonprod)[a-z0-9-]*\.tfvars$/i))) envSet.add(m[2].toLowerCase());
+  }
+  const workspaceInCi = /terraform\s+workspace|TF_WORKSPACE/.test(allContent);
+  const sstStage = /--stage\b|SST_STAGE/.test(allContent);
+  const envNames = [...envSet];
+  let envLevel, envEvidence;
+  const envGaps = [];
+  if (envNames.length >= 2) {
+    envLevel = 2; envEvidence = `Separate environments: ${envNames.join(', ')}.`;
+  } else if (workspaceInCi || sstStage || envNames.length === 1) {
+    envLevel = 1;
+    envEvidence = envNames.length === 1 ? `Single environment (${envNames[0]}) with stage/workspace tooling.` : 'Stage/workspace tooling present but environments not clearly separated.';
+    envGaps.push('Add per-environment stacks/dirs/tfvars (dev/staging/prod) with separate state.');
+  } else {
+    envLevel = 0; envEvidence = 'No environment separation detected (single-env or none).';
+    envGaps.push('Introduce dev/staging/prod separation (Pulumi stacks / environments/ dirs / per-env tfvars).');
+  }
+
+  // ── 3. Modularity ──
+  const resRe = /(^|\n)\s*resource\s+"[a-z0-9_]+"/gi;
+  const tfResourceCount = (tfContent.match(resRe) || []).length;
+  const rootTfResourceCount = tfFiles.filter((f) => !/(^|\/)modules?\//.test(f.rel)).reduce((n, f) => n + (f.content.match(resRe) || []).length, 0);
+  const hasModuleBlocks = /(^|\n)\s*module\s+"[^"]+"\s*\{/m.test(tfContent);
+  const hasModulesDir = rels.some((r) => /(^|\/)modules?\//.test(r));
+  const pinnedModuleSource = /source\s*=\s*["'][^"']*\?ref=/.test(tfContent) || /(^|\n)\s*version\s*=\s*["'][~>=0-9]/.test(tfContent) || /source\s*=\s*["'][\w.-]+\/[\w.-]+\/[\w.-]+["']/.test(tfContent);
+  const hasComponentResource = /extends\s+(pulumi\.)?ComponentResource|\bComponentResource\b/.test(allContent);
+  const tferSmell = /tfer(--|_)/.test(allContent) || rels.some((r) => /tfer(--|_)/.test(r));
+  let modLevel, modEvidence;
+  const modGaps = [];
+  if ((hasModuleBlocks || hasModulesDir || hasComponentResource) && pinnedModuleSource) {
+    modLevel = 3; modEvidence = 'Composed from pinned / versioned modules.';
+  } else if (hasModuleBlocks || hasModulesDir || hasComponentResource) {
+    modLevel = 2; modEvidence = hasComponentResource ? 'Pulumi ComponentResource abstractions present.' : 'Terraform modules present.';
+    modGaps.push('Pin/version module sources (?ref= / version =).');
+  } else if (tfResourceCount > 0 || hasSst || hasCdk || hasPulumi) {
+    modLevel = 1; modEvidence = rootTfResourceCount > 0 ? `Monolithic config (${rootTfResourceCount} resources in root, no modules).` : 'Resources declared inline, no module abstraction.';
+    modGaps.push('Extract repeated blocks into reusable modules / ComponentResources.');
+  } else {
+    modLevel = 0; modEvidence = 'No IaC resources to modularize.';
+  }
+  if (tferSmell) modGaps.push('Refactor auto-generated tfer-- resources (Terraformer output) into hand-authored modules.');
+
+  // ── 4. Testing ──
+  const hasTftest = rels.some((r) => /\.tftest\.hcl$/.test(r));
+  const hasTerratest = /github\.com\/gruntwork-io\/terratest/.test(allContent) || /\bterratest\b/.test(allSpecs);
+  const hasPulumiUnit = /@pulumi\/pulumi/.test(`${allContent} ${allSpecs}`) && /setMocks|runtime\.setMocks/.test(allContent);
+  let testLevel, testEvidence;
+  const testGaps = [];
+  if (hasTerratest && (hasTftest || hasPulumiUnit)) {
+    testLevel = 3; testEvidence = 'Unit (native/Pulumi) + integration (Terratest) tests present.';
+  } else if (hasTftest || hasPulumiUnit || hasTerratest) {
+    testLevel = 2; testEvidence = hasTftest ? 'Native tftest.hcl tests present.' : hasPulumiUnit ? 'Pulumi unit tests (mocked) present.' : 'Terratest integration tests present.';
+    testGaps.push('Add the complementary test layer (unit ↔ integration).');
+  } else {
+    testLevel = 0; testEvidence = 'No IaC tests detected.';
+    if (iacPresent) testGaps.push('Add native tftest.hcl / Pulumi unit tests, then Terratest for integration.');
+  }
+
+  // ── 5. Governance ──
+  const hasCrossGuard = rels.some((r) => /(^|\/)PulumiPolicy\.ya?ml$/.test(r)) || /new\s+PolicyPack\(|@pulumi\/policy/.test(`${allContent} ${allSpecs}`);
+  const hasRego = rels.some((r) => /\.rego$/.test(r));
+  const hasCheckov = rels.some((r) => /(^|\/)\.checkov\.ya?ml$/.test(r));
+  const hasTrivyConfig = rels.some((r) => /(^|\/)(trivy\.ya?ml|\.trivyignore)$/.test(r));
+  const hasSentinel = rels.some((r) => /\.sentinel$/.test(r));
+  const policyAsCode = hasCrossGuard || hasSentinel || hasRego;
+  const staticScan = hasCheckov || hasTrivyConfig;
+  let govLevel, govEvidence;
+  const govGaps = [];
+  if (policyAsCode) {
+    govLevel = 3; govEvidence = hasCrossGuard ? 'Pulumi CrossGuard policy pack.' : hasSentinel ? 'Sentinel policies.' : 'OPA/Conftest (.rego) policies.';
+    if (!staticScan) govGaps.push('Add Checkov/Trivy static misconfig scanning.');
+  } else if (staticScan) {
+    govLevel = 2; govEvidence = hasCheckov ? 'Checkov static scanning configured.' : 'Trivy config scanning configured.';
+    govGaps.push('Add policy-as-code (CrossGuard / OPA / Sentinel), advisory → mandatory.');
+  } else {
+    govLevel = 0; govEvidence = 'No policy-as-code or misconfig scanning detected.';
+    if (iacPresent) govGaps.push('Add Checkov/Trivy scanning + a policy pack.');
+  }
+
+  // ── 6. Drift & cost ──
+  const infracost = rels.some((r) => /(^|\/)infracost\.ya?ml$/.test(r)) || /\binfracost\b/i.test(allContent);
+  const driftCheck = /expect-no-changes/i.test(allContent) && /\bcron\b|schedule\s*:/i.test(allContent);
+  // tag taxonomy — default_tags (TF) + Pulumi/inline `tags` maps
+  const tagKeys = new Set();
+  for (const m of allContent.matchAll(/default_tags\s*\{([\s\S]*?)\}/gi)) for (const km of m[1].matchAll(/([A-Za-z][\w-]*)\s*=/g)) tagKeys.add(km[1]);
+  for (const m of allContent.matchAll(/\btags\s*[:=]\s*\{([\s\S]*?)\}/gi)) for (const km of m[1].matchAll(/["']?([A-Za-z][\w-]*)["']?\s*[:=]/g)) tagKeys.add(km[1]);
+  const normSet = new Set([...tagKeys].map((k) => k.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase().replace(/_/g, '-')));
+  const REQUIRED_TAGS = ['team', 'environment', 'service', 'cost-center'];
+  const TAG_ALIAS = { team: ['team'], environment: ['environment', 'env'], service: ['service', 'service-name', 'svc'], 'cost-center': ['cost-center', 'costcenter', 'cost-centre'] };
+  const present = REQUIRED_TAGS.filter((t) => (TAG_ALIAS[t] || [t]).some((a) => normSet.has(a)));
+  if (normSet.has('data-classification') || normSet.has('data-class')) present.push('data-classification');
+  const missing = REQUIRED_TAGS.filter((t) => !present.includes(t));
+  const coveragePct = Math.round((present.filter((p) => REQUIRED_TAGS.includes(p)).length / REQUIRED_TAGS.length) * 100);
+  const tagTaxonomy = { present, missing, coveragePct };
+  // regions
+  const regionSet = new Set();
+  for (const m of allContent.matchAll(/region["']?\s*[:=]\s*["']?([a-z]{2}-[a-z]+-\d)\b/gi)) regionSet.add(m[1].toLowerCase());
+  const regions = [...regionSet];
+  const regionPolicyPin = /deny[\s\S]{0,80}region|region[\s\S]{0,40}(eu-central-1|allowed_regions)/i.test(allContent);
+  const regionPinned = (regions.length === 1) || (regions.length >= 1 && regionPolicyPin);
+
+  let dcLevel, dcEvidence;
+  const dcGaps = [];
+  if (driftCheck && infracost) {
+    dcLevel = 3; dcEvidence = 'Scheduled drift check + Infracost cost gate.';
+  } else if (driftCheck || infracost || coveragePct >= 75) {
+    dcLevel = 2;
+    dcEvidence = [driftCheck ? 'scheduled drift check' : null, infracost ? 'Infracost cost gate' : null, coveragePct >= 75 ? `tag taxonomy ${coveragePct}%` : null].filter(Boolean).join(' + ');
+    if (!driftCheck) dcGaps.push('Add a scheduled plan/preview --expect-no-changes drift check.');
+    if (!infracost) dcGaps.push('Add an Infracost cost gate in CI.');
+  } else {
+    dcLevel = 0; dcEvidence = 'No drift check, cost gate, or tag taxonomy detected.';
+    if (iacPresent) { dcGaps.push('Add scheduled drift detection (--expect-no-changes).'); dcGaps.push('Enforce a 4-tag cost taxonomy (team/environment/service/cost-center).'); }
+  }
+  if (missing.length && dcLevel > 0) dcGaps.push(`Tag taxonomy missing: ${missing.join(', ')}.`);
+
+  const dimensions = {
+    state: { level: stateLevel, evidence: stateEvidence, gaps: stateGaps },
+    envSeparation: { level: envLevel, evidence: envEvidence, gaps: envGaps },
+    modularity: { level: modLevel, evidence: modEvidence, gaps: modGaps },
+    testing: { level: testLevel, evidence: testEvidence, gaps: testGaps },
+    governance: { level: govLevel, evidence: govEvidence, gaps: govGaps },
+    driftCost: { level: dcLevel, evidence: dcEvidence, gaps: dcGaps },
+  };
+
+  // ── Roll-up (min-gated, per contract): overall = lowest blocking dimension ──
+  const ratio = inventory.iacCoverage?.ratio;
+  const allInCode = ratio == null ? true : ratio >= 0.8; // low undeclared
+  const remoteOrManaged = stateLevel >= 2;
+  let level = 0;
+  if (iacPresent) level = 1;
+  if (level >= 1 && remoteOrManaged && allInCode) level = 2;
+  if (level >= 2 && testLevel >= 2 && govLevel >= 2 && dcLevel >= 2) level = 3;
+  if (level >= 3 && envLevel >= 2 && modLevel >= 3 && testLevel >= 3 && govLevel >= 3 && dcLevel >= 3) level = 4;
+
+  return { level, levelName: LEVEL_NAMES[level], dimensions, deprecated, regions, regionPinned, tagTaxonomy, findings };
+}
+
 // ── CLI ──
 const EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
 const IGNORE = new Set(['node_modules', '.next', 'dist', 'out', 'build', '.git', 'coverage']);
@@ -619,9 +897,11 @@ function specifiers(code) {
 function walk(dir, root, acc = []) {
   let entries = [];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return acc; }
-  const ALLOW_DOT = new Set(['.github', '.circleci']);
+  const ALLOW_DOT = new Set(['.github', '.circleci', '.tfsec', '.pulumi']);
+  // IaC-maturity dotfiles worth surfacing (governance/drift/deprecated catalogs).
+  const ALLOW_DOT_FILE = /^\.(checkov\.ya?ml|trivyignore|driftctl\.(ya?ml|toml)|terrascan)$/i;
   for (const e of entries) {
-    if (e.name.startsWith('.') && e.name !== '.' && !ALLOW_DOT.has(e.name) && !/^\.env\.(example|sample|template|dist)$/.test(e.name) && !/^\.gitlab-ci\.ya?ml$/.test(e.name)) continue;
+    if (e.name.startsWith('.') && e.name !== '.' && !ALLOW_DOT.has(e.name) && !ALLOW_DOT_FILE.test(e.name) && !/^\.env\.(example|sample|template|dist)$/.test(e.name) && !/^\.gitlab-ci\.ya?ml$/.test(e.name)) continue;
     if (IGNORE.has(e.name)) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) walk(full, root, acc);
@@ -645,7 +925,11 @@ function main(argv) {
     const isAmbiguous = !ctype && /\.(ya?ml|json|hcl|bicep)$/.test(rel);
     // hand-rolled deploy scripts / inline IAM policies (non-IaC signal).
     const isDeployish = /\.sh$/.test(rel) || /(^|\/)([\w-]*[-.])?(trust-)?policy\.json$/i.test(rel);
-    if (!ctype && !isCode && !isAmbiguous && !isDeployish) continue;
+    // Part A: IaC-maturity aux files — state, tests, policy, tags, deprecated tools.
+    const isIacAux = /(\.tftest\.hcl|\.rego|\.sentinel|\.jinja|\.tfvars|\.tfstate(\.backup)?)$/i.test(rel)
+      || /(^|\/)(PulumiPolicy\.ya?ml|infracost\.ya?ml|trivy\.ya?ml|\.trivyignore|terrascan\.(toml|ya?ml)|driftctl\.(ya?ml|toml)|\.checkov\.ya?ml)$/i.test(rel)
+      || /(^|\/)\.pulumi\//.test(rel) || /(^|\/)\.tfsec\//.test(rel) || /tfer(--|_)/.test(rel) || /_test\.go$/.test(rel);
+    if (!ctype && !isCode && !isAmbiguous && !isDeployish && !isIacAux) continue;
     let code = '';
     try { if (fs.statSync(full).size < 512 * 1024) code = fs.readFileSync(full, 'utf8'); } catch { continue; }
     const specs = isCode ? specifiers(code) : [];
@@ -655,7 +939,7 @@ function main(argv) {
     files.push({
       rel,
       specifiers: specs,
-      content: ctype || isAmbiguous || iacModule || isDeployish ? code : undefined,
+      content: ctype || isAmbiguous || iacModule || isDeployish || isIacAux ? code : undefined,
       isClient: isCode && /^\s*['"]use client['"]/m.test(code),
     });
   }
@@ -663,7 +947,7 @@ function main(argv) {
   try { fs.mkdirSync(path.dirname(out), { recursive: true }); } catch { /* ignore */ }
   fs.writeFileSync(out, JSON.stringify({ generatedAt: null, root: repo, ...inv }, null, 2));
   console.error(
-    `[infra-extract] signal:${inv.signalQuality.level} clouds:${inv.clouds.join('/') || 'none'} services:${inv.summary.serviceCount} stores:${inv.summary.dataStoreCount} external:${inv.summary.externalProcessorCount} → ${out}`,
+    `[infra-extract] signal:${inv.signalQuality.level} iac-maturity:L${inv.iacMaturity.level}(${inv.iacMaturity.levelName}) clouds:${inv.clouds.join('/') || 'none'} services:${inv.summary.serviceCount} stores:${inv.summary.dataStoreCount} external:${inv.summary.externalProcessorCount} → ${out}`,
   );
 }
 

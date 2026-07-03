@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildInfraInventory, parseConfig, detectCloudSdk, configFileType, classifyConfigByContent, extractIacResources, enrichInfraWithGraph, detectDeployScript } from '../infra-extract.mjs';
+import { buildInfraInventory, parseConfig, detectCloudSdk, configFileType, classifyConfigByContent, extractIacResources, enrichInfraWithGraph, detectDeployScript, gradeIacMaturity, iacTier } from '../infra-extract.mjs';
 
 const svc = (inv, name) => inv.services.find((s) => s.name === name || s.name.startsWith(name));
 
@@ -309,5 +309,247 @@ describe('Comprehensive IaC families — any project type', () => {
     const inv = buildInfraInventory([{ rel: 'playbook.yml', content: '- hosts: web\n  tasks: []' }]);
     expect(inv.iac.some((i) => i.tier === 'config-mgmt')).toBe(true);
     expect(inv.signalQuality.level).toBe('high');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Part A — IaC maturity grading + deprecated-toolchain catalog (deterministic)
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('gradeIacMaturity — state & provisioning dimension', () => {
+  it('remote Terraform backend (s3) → state L2, remoteOrManaged, no committed-state finding', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'terraform {\n backend "s3" { bucket = "st" \n dynamodb_table = "locks" }\n}\nprovider "aws" { region = "eu-central-1" }\nresource "aws_s3_bucket" "b" {}' },
+    ]);
+    expect(inv.iacMaturity.dimensions.state.level).toBe(2);
+    expect(inv.iacMaturity.dimensions.state.gaps).not.toContain('No state locking detected (add DynamoDB lock table / use_lockfile).');
+    expect(inv.iacMaturity.findings.some((f) => f.id === 'iac:committed-state')).toBe(false);
+  });
+
+  it('local Terraform backend → state L1 + a no-remote-state finding', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'terraform { backend "local" {} }\nprovider "aws" {}\nresource "aws_s3_bucket" "b" {}' },
+    ]);
+    expect(inv.iacMaturity.dimensions.state.level).toBe(1);
+    const f = inv.iacMaturity.findings.find((x) => x.id === 'iac:no-remote-state');
+    expect(f).toBeTruthy();
+    expect(f.dimension).toBe('infrastructure');
+    expect(f.evidence.iac).toBe(true);
+  });
+
+  it('committed terraform.tfstate → state capped at L1 + HIGH security finding (evidence.iac)', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'terraform { backend "s3" {} }\nresource "aws_s3_bucket" "b" {}' },
+      { rel: 'infra/terraform.tfstate', content: '{"version":4,"resources":[]}' },
+    ]);
+    expect(inv.iacMaturity.dimensions.state.level).toBe(1);
+    const f = inv.iacMaturity.findings.find((x) => x.id === 'iac:committed-state');
+    expect(f).toBeTruthy();
+    expect(f.severity).toBe('high');
+    expect(f.dimension).toBe('security');
+    expect(f.producedBy).toBe('deterministic');
+    expect(f.evidence.iac).toBe(true);
+  });
+
+  it('SST → platform-managed state (auto-pass) → state L2', () => {
+    const inv = buildInfraInventory([
+      { rel: 'sst.config.ts', content: 'export default { async run(){ new sst.aws.Bucket("B"); } }' },
+    ]);
+    expect(inv.iacMaturity.dimensions.state.level).toBe(2);
+  });
+
+  it('no IaC at all → state L0, overall ClickOps (L0)', () => {
+    const inv = buildInfraInventory([{ rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] }]);
+    expect(inv.iacMaturity.dimensions.state.level).toBe(0);
+    expect(inv.iacMaturity.level).toBe(0);
+    expect(inv.iacMaturity.levelName).toBe('ClickOps');
+  });
+});
+
+describe('gradeIacMaturity — env separation dimension', () => {
+  it('Pulumi dev/staging/prod stacks → env L2', () => {
+    const inv = buildInfraInventory([
+      { rel: 'Pulumi.yaml', content: 'name: app\nruntime: nodejs' },
+      { rel: 'Pulumi.dev.yaml', content: 'config: {}' },
+      { rel: 'Pulumi.staging.yaml', content: 'config: {}' },
+      { rel: 'Pulumi.prod.yaml', content: 'config: {}' },
+    ]);
+    expect(inv.iacMaturity.dimensions.envSeparation.level).toBe(2);
+    expect(inv.iacMaturity.dimensions.envSeparation.evidence).toMatch(/dev/);
+  });
+
+  it('per-env tfvars in environments/ dirs → env L2', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
+      { rel: 'environments/dev/dev.tfvars', content: 'region = "eu-central-1"' },
+      { rel: 'environments/prod/prod.tfvars', content: 'region = "eu-central-1"' },
+    ]);
+    expect(inv.iacMaturity.dimensions.envSeparation.level).toBe(2);
+  });
+
+  it('single-env only → env L0 with a gap', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
+    ]);
+    expect(inv.iacMaturity.dimensions.envSeparation.level).toBe(0);
+    expect(inv.iacMaturity.dimensions.envSeparation.gaps.length).toBeGreaterThan(0);
+  });
+});
+
+describe('gradeIacMaturity — modularity dimension', () => {
+  it('module blocks + modules/ dir + pinned version → modularity L3', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'module "net" {\n source = "terraform-aws-modules/vpc/aws"\n version = "5.1.0"\n}' },
+      { rel: 'modules/net/main.tf', content: 'resource "aws_vpc" "v" {}' },
+    ]);
+    expect(inv.iacMaturity.dimensions.modularity.level).toBe(3);
+  });
+
+  it('root monolith (many resources, no modules) → modularity L1', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: Array.from({ length: 6 }, (_, i) => `resource "aws_s3_bucket" "b${i}" {}`).join('\n') },
+    ]);
+    expect(inv.iacMaturity.dimensions.modularity.level).toBe(1);
+    expect(inv.iacMaturity.dimensions.modularity.evidence).toMatch(/[Mm]onolith/);
+  });
+
+  it('tfer-- generated names → a refactor-smell gap on modularity', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "tfer--my-bucket" {}' },
+    ]);
+    expect(inv.iacMaturity.dimensions.modularity.gaps.some((g) => /tfer--/.test(g))).toBe(true);
+  });
+});
+
+describe('gradeIacMaturity — testing & governance dimensions', () => {
+  it('*.tftest.hcl → testing L2', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
+      { rel: 'tests/bucket.tftest.hcl', content: 'run "ok" { command = plan }' },
+    ]);
+    expect(inv.iacMaturity.dimensions.testing.level).toBe(2);
+  });
+
+  it('checkov config → governance L2 (static scanning)', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
+      { rel: '.checkov.yaml', content: 'framework:\n  - terraform' },
+    ]);
+    expect(inv.iacMaturity.dimensions.governance.level).toBe(2);
+  });
+
+  it('OPA/Conftest .rego policy → governance L3 (policy-as-code)', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
+      { rel: 'policy/deny.rego', content: 'package main\ndeny[msg] { true }' },
+    ]);
+    expect(inv.iacMaturity.dimensions.governance.level).toBe(3);
+  });
+});
+
+describe('gradeIacMaturity — drift/cost, tags, regions', () => {
+  it('default_tags 4-tag coverage → 100% taxonomy, regions extracted + pinned', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'provider "aws" {\n region = "eu-central-1"\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n service = "api"\n cost-center = "cc-1"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}' },
+    ]);
+    expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(100);
+    expect(inv.iacMaturity.tagTaxonomy.missing).toEqual([]);
+    expect(inv.iacMaturity.regions).toContain('eu-central-1');
+    expect(inv.iacMaturity.regionPinned).toBe(true);
+  });
+
+  it('partial tags → coverage < 100 with the missing keys listed', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'provider "aws" {\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}' },
+    ]);
+    expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(50);
+    expect(inv.iacMaturity.tagTaxonomy.missing).toEqual(expect.arrayContaining(['service', 'cost-center']));
+  });
+
+  it('scheduled drift + infracost → driftCost L3', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
+      { rel: '.github/workflows/drift.yml', content: 'on:\n  schedule:\n    - cron: "0 6 * * *"\njobs:\n  drift:\n    steps:\n      - run: pulumi preview --expect-no-changes\n      - run: infracost diff' },
+    ]);
+    expect(inv.iacMaturity.dimensions.driftCost.level).toBe(3);
+  });
+});
+
+describe('gradeIacMaturity — deprecated toolchain catalog', () => {
+  it('cdktf.json is now a WARNING (deprecation) — still detected as infra, no longer resource-tier', () => {
+    // flip: cdktf must NOT be scored resource-tier, but MUST still be detected + flagged.
+    expect(iacTier('cdktf')).toBe('deprecated');
+    const inv = buildInfraInventory([
+      { rel: 'cdktf.json', content: '{"language":"typescript","app":"npx ts-node main.ts"}' },
+    ]);
+    // still detected as infra (not silently dropped)
+    expect(inv.signalQuality.iacDeclared).toBe(true);
+    expect(inv.services.some((s) => /Terraform CDK/.test(s.name))).toBe(true);
+    // now a deprecation finding + catalog entry
+    const dep = inv.iacMaturity.deprecated.find((d) => /CDKTF/.test(d.tool));
+    expect(dep).toBeTruthy();
+    expect(dep.eolDate).toBe('2025-12-10');
+    expect(dep.severity).toBe('medium');
+    const f = inv.iacMaturity.findings.find((x) => x.id === 'iac:deprecated:cdktf');
+    expect(f).toBeTruthy();
+    expect(f.dimension).toBe('infrastructure');
+    expect(f.evidence.iac).toBe(true);
+  });
+
+  it('cdktf import in code is also flagged (still infra, deprecated)', () => {
+    const inv = buildInfraInventory([{ rel: 'infra/main.ts', specifiers: ['cdktf', 'cdktf/lib/aws'] }]);
+    expect(inv.iacMaturity.deprecated.some((d) => /CDKTF/.test(d.tool))).toBe(true);
+  });
+
+  it('GCP Deployment Manager (*.jinja) → HIGH/urgent deprecation (EOL 2026-03-31)', () => {
+    const inv = buildInfraInventory([
+      { rel: 'dm/vm.jinja', content: 'resources:\n- name: vm\n  type: compute.v1.instance' },
+    ]);
+    const dep = inv.iacMaturity.deprecated.find((d) => /Deployment Manager/.test(d.tool));
+    expect(dep).toBeTruthy();
+    expect(dep.severity).toBe('high');
+    expect(dep.status).toBe('eol');
+    expect(dep.eolDate).toBe('2026-03-31');
+    const f = inv.iacMaturity.findings.find((x) => x.id === 'iac:deprecated:gcp-deployment-manager');
+    expect(f.severity).toBe('high');
+  });
+
+  it('tfsec + terrascan + driftctl configs → low-severity deprecation entries', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
+      { rel: '.tfsec/config.yml', content: 'exclude: []' },
+      { rel: 'terrascan.toml', content: '[rules]' },
+      { rel: '.driftctl.yml', content: 'driftignore: []' },
+    ]);
+    const tools = inv.iacMaturity.deprecated.map((d) => d.tool);
+    expect(tools.some((t) => /tfsec/.test(t))).toBe(true);
+    expect(tools.some((t) => /Terrascan/.test(t))).toBe(true);
+    expect(tools.some((t) => /driftctl/.test(t))).toBe(true);
+    expect(inv.iacMaturity.deprecated.filter((d) => /tfsec|Terrascan|driftctl/.test(d.tool)).every((d) => d.severity === 'low')).toBe(true);
+  });
+});
+
+describe('gradeIacMaturity — roll-up (min-gated, uneven grades)', () => {
+  it('SST-heavy, all-in-code, no tests/policy/drift → overall L2 (Defined), testing/governance gaps stay L0', () => {
+    const inv = buildInfraInventory([
+      { rel: 'sst.config.ts', content: 'export default { async run(){ const t = new sst.aws.Dynamo("T"); const b = new sst.aws.Bucket("B"); } }' },
+      { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb', '@aws-sdk/client-s3'] },
+    ]);
+    // all provisionable declared → allInCode; SST → remote state → L2 achievable
+    expect(inv.iacMaturity.level).toBe(2);
+    expect(inv.iacMaturity.levelName).toBe('Defined');
+    // uneven: testing & governance still 0
+    expect(inv.iacMaturity.dimensions.testing.level).toBe(0);
+    expect(inv.iacMaturity.dimensions.governance.level).toBe(0);
+  });
+
+  it('cannot reach L2 with undeclared (click-ops) resources even with SST present', () => {
+    const inv = buildInfraInventory([
+      { rel: 'sst.config.ts', content: 'export default { async run(){ new sst.aws.Bucket("B"); } }' },
+      { rel: 'infra/lambda/graph-sync/deploy.sh', content: 'aws lambda update-function-code\naws dynamodb create-table' },
+      { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb', '@aws-sdk/client-rds'] }, // undeclared → low coverage
+    ]);
+    expect(inv.iacMaturity.level).toBe(1); // gated down: not all-infra-in-code
+    expect(inv.iacMaturity.levelName).toBe('Repeatable');
   });
 });

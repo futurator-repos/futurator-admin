@@ -91,6 +91,7 @@ export function assignBand(f) {
   // These flags never co-occur with the structural hints (hotspotKind/foundationKind)
   // handled further down, so dead-code / god-file / UI routing is preserved.
   if (e.sdd === true) return 1; // design intent / ADRs / API contracts → foundations
+  if (e.iac === true || (f.dimension === 'infrastructure' && e.iac)) return 1; // IaC maturity/migration → foundations (state/modules precede everything)
   if (e.compliance === true || f.dimension === 'compliance') return 1; // never Phase 5
   const isSecurity = e.security === true || f.dimension === 'safety-security';
   if (isSecurity && SECRET_ENV_CHECKS.has(e.check)) {

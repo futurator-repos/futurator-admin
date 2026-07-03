@@ -114,6 +114,69 @@ describe('computeMaturity', () => {
     expect(a.score).toBe(1);
   });
 
+  it('Infra-as-code axis: rubric maturity level blends into the coverage score', () => {
+    // Fully declared (coverage ratio 1) but ClickOps rubric (level 1) → blended to
+    // mean(1, 0.25) = 0.625, no longer a clean "good".
+    const infra = {
+      summary: { serviceCount: 2, resourceIacFiles: 1 },
+      iac: [{ provider: 'SST', tier: 'resource' }],
+      signalQuality: { level: 'high' },
+      iacCoverage: { provisionable: 2, declared: 2, ratio: 1, undeclared: [] },
+      iacMaturity: {
+        level: 1,
+        levelName: 'Repeatable',
+        dimensions: {
+          state: { level: 1, evidence: 'local state file', gaps: [] },
+          envSeparation: { level: 0, evidence: 'single shared config', gaps: [] },
+        },
+      },
+    };
+    const a = computeMaturity({ infra }).axes.find((x) => x.key === 'infra-declared');
+    expect(a.measured).toBe(true);
+    expect(a.score).toBeCloseTo((1 + 1 / 4) / 2); // mean(coverageRatio, level/4)
+    expect(a.detail).toMatch(/maturity L1 Repeatable/);
+    // rubric-derived readiness reflects the low dimensions
+    const { readiness } = computeMaturity({ infra });
+    expect(readiness.find((r) => r.key === 'remote-state').present).toBe(false); // state.level 1 < 2
+    expect(readiness.find((r) => r.key === 'env-separation').present).toBe(false); // envSep.level 0 < 2
+  });
+
+  it('Infra-as-code axis: remote-state & env-separation readiness true at rubric level >= 2', () => {
+    const infra = {
+      summary: { serviceCount: 2, resourceIacFiles: 1 },
+      iac: [{ provider: 'SST', tier: 'resource' }],
+      signalQuality: { level: 'high' },
+      iacCoverage: { provisionable: 2, declared: 2, ratio: 1, undeclared: [] },
+      iacMaturity: {
+        level: 3,
+        levelName: 'Managed',
+        dimensions: {
+          state: { level: 3, evidence: 'S3 remote backend', gaps: [] },
+          envSeparation: { level: 2, evidence: 'dev/stage/prod stacks', gaps: [] },
+        },
+      },
+    };
+    const { readiness } = computeMaturity({ infra });
+    expect(readiness.find((r) => r.key === 'remote-state').present).toBe(true);
+    expect(readiness.find((r) => r.key === 'env-separation').present).toBe(true);
+  });
+
+  it('Infra-as-code axis: no iacMaturity (old scan) → no blend, no rubric readiness items', () => {
+    const infra = {
+      summary: { serviceCount: 2, resourceIacFiles: 1 },
+      iac: [{ provider: 'SST', tier: 'resource' }],
+      signalQuality: { level: 'high' },
+      iacCoverage: { provisionable: 2, declared: 2, ratio: 1, undeclared: [] },
+      // iacMaturity intentionally absent
+    };
+    const { axes, readiness } = computeMaturity({ infra });
+    const a = axes.find((x) => x.key === 'infra-declared');
+    expect(a.score).toBe(1); // unblended coverage ratio
+    expect(a.detail).not.toMatch(/maturity L/);
+    expect(readiness.map((r) => r.key)).not.toContain('remote-state');
+    expect(readiness.map((r) => r.key)).not.toContain('env-separation');
+  });
+
   it('marks tests/eslint/sdd unmeasured when no summary is given; clutter degraded when knip did not run', () => {
     const { axes, readiness } = computeMaturity({ graphAvailable: true });
     const get = (k) => axes.find((a) => a.key === k);

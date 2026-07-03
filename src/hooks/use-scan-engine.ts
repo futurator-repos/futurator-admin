@@ -149,6 +149,42 @@ export interface IacCoverage {
   /** names of own-cloud resources used in code but declared nowhere (click-ops smell). */
   undeclared: string[];
 }
+/** One IaC-maturity dimension grade (state/env/modularity/testing/governance/drift-cost).
+ *  Per-dimension grades are independent and MAY be uneven — that's the point. */
+export interface IacDimension {
+  level: number;
+  evidence: string;
+  gaps: string[];
+}
+/** A deprecated/EOL IaC tool detected in the repo (cdktf, tfsec, DM, Terraformer output, …). */
+export interface DeprecatedTool {
+  tool: string;
+  status: string;
+  eolDate: string | null;
+  remediation: string;
+  severity: 'high' | 'medium' | 'low';
+}
+/** IaC maturity grade of the scanned repo (5-level model, 6 dimensions), produced
+ *  deterministically inside infra-extract.mjs. Roll-up is min-gated: overall level =
+ *  the LOWEST blocking dimension. */
+export interface IacMaturity {
+  level: number;
+  levelName: 'ClickOps' | 'Repeatable' | 'Defined' | 'Managed' | 'Optimizing';
+  dimensions: {
+    state: IacDimension;
+    envSeparation: IacDimension;
+    modularity: IacDimension;
+    testing: IacDimension;
+    governance: IacDimension;
+    driftCost: IacDimension;
+  };
+  deprecated: DeprecatedTool[];
+  regions: string[];
+  regionPinned: boolean;
+  tagTaxonomy: { present: string[]; missing: string[]; coveragePct: number };
+  findings: ScanFinding[];
+}
+
 export interface InfraInventory {
   services: InfraService[];
   iac: {
@@ -178,6 +214,8 @@ export interface InfraInventory {
   };
   costSurface?: CostSurface;
   iacCoverage?: IacCoverage;
+  /** IaC maturity grade (5-level model, 6 dimensions) — produced by infra-extract.mjs. */
+  iacMaturity?: IacMaturity;
   summary: {
     serviceCount: number;
     dataStoreCount: number;
@@ -189,7 +227,39 @@ export interface InfraInventory {
     iacByTier?: Record<string, string[]>;
     costSurface?: CostSurface;
     iacCoverage?: IacCoverage;
+    iacMaturity?: IacMaturity;
   };
+}
+
+/** One resource to import into IaC — seeded from iacCoverage.undeclared + deployScripts.
+ *  priority = graph fanIn × git churn (stateful + high-fan-in + hot imports first). */
+export interface IacImport {
+  resource: string;
+  source: string;
+  priority: number;
+}
+/** One step in the stack-aware Infrastructure migration track (rubric gap → doc playbook). */
+export interface IacPlanStep {
+  phase: number;
+  title: string;
+  dimension: string;
+  why: string;
+  /** stack-aware tooling: pulumi|terraform|opentofu|cdk|sst|gcp-im. */
+  tool: string;
+  commands: string[];
+  imports?: IacImport[];
+  /** "plan/preview must show zero changes before commit" — the characterization-gate analogue. */
+  goldenRule: string;
+}
+/** Stack-aware Infrastructure migration track, produced by iac-phase-planner.mjs.
+ *  Gap-driven: only emits steps for MISSING dimensions. */
+export interface IacPlan {
+  currentLevel: number;
+  targetLevel: number;
+  levelName: string;
+  /** "Level N -> N+1: next 3 actions". */
+  nextThree: { title: string; dimension: string; action: string }[];
+  track: IacPlanStep[];
 }
 
 /** One entry in the scan's execution ledger (C-LEDGER) — a recon step, an
@@ -283,6 +353,8 @@ export interface ScanReport {
   aiReadiness?: AiReadiness;
   /** Git & Evolution profile of the scanned repo (C-GIT). */
   gitEvolution?: GitEvolution;
+  /** Stack-aware Infrastructure migration track (Part B) — produced by iac-phase-planner.mjs. */
+  iacPlan?: IacPlan;
 }
 
 export function useRunScanEngine(appId: string | null) {

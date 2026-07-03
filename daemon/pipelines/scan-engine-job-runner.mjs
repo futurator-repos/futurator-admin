@@ -10,6 +10,7 @@
 import { hotspotToFinding, privacyToFindings, dropUnanchored, locPath } from './lib/scan-finding-map.mjs';
 import { planPhases, toPlanOutput } from './lib/phase-planner.mjs';
 import { computeMaturity } from './lib/maturity-score.mjs';
+import { planIacTrack } from './lib/iac-phase-planner.mjs';
 import {
   analyzerPrompt,
   crossCuttingPrompt,
@@ -242,6 +243,7 @@ export async function runScanEngine(job, deps) {
     ...(Array.isArray(art.sdd?.findings) ? art.sdd.findings : []),
     ...(Array.isArray(art.aiReadiness?.findings) ? art.aiReadiness.findings : []),
     ...(Array.isArray(art.gitEvolution?.findings) ? art.gitEvolution.findings : []),
+    ...(Array.isArray(art.infra?.iacMaturity?.findings) ? art.infra.iacMaturity.findings : []),
   ].map((f) => ({ ...f, producedBy: 'deterministic' }));
 
   // Per-task ledger steps collected across every runSwarm call (analyzer + pass).
@@ -335,6 +337,12 @@ export async function runScanEngine(job, deps) {
   // Git & Evolution — targeted+reuse may not re-read the detector; fall back to prior.
   const gitEvolution = art.gitEvolution || (effectiveTargeted ? priorScan?.gitEvolution : null) || null;
 
+  // IaC migration track — gap-driven, stack-aware phased plan derived from the infra
+  // inventory's iacMaturity (attached deterministically by infra-extract). A targeted/
+  // deterministic re-scan reusing prior infra that predates iacMaturity is tolerated:
+  // planIacTrack guards on the maturity object internally. ~0 tokens (pure lib).
+  const iacPlan = infra ? planIacTrack(infra, { stack: art.stack || null, gitEvolution }) : null;
+
   // Maturity scorecard — the high-level RAG overview (deterministic, ~0 LLM).
   const maturity = computeMaturity({
     findings,
@@ -402,6 +410,7 @@ export async function runScanEngine(job, deps) {
     lowConfidence,
     maturity,
     infra,
+    iacPlan,
     aiReadiness,
     gitEvolution,
     timeline,

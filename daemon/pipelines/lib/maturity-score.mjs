@@ -118,24 +118,34 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
   if (infra && infra.summary) {
     const cov = infra.iacCoverage || infra.summary.iacCoverage;
     const anyResourceIac = (infra.summary.resourceIacFiles || 0) > 0 || (infra.iac || []).some((i) => i.tier === 'resource' || i.tier === 'migrations');
+    // iacMaturity is the 5-level rubric grade produced deterministically by
+    // infra-extract; null on old scans. When present, BLEND the rubric level into
+    // the coverage-based quality score (a repo can be fully-declared yet still be
+    // ClickOps-adjacent — no remote state, no env separation). Blend keeps this a
+    // quality AXIS: score = mean(level/4, coverageRatio).
+    const mat = infra.iacMaturity || null;
+    const blendLevel = (score) => (mat ? (score + mat.level / 4) / 2 : score);
+    const levelTag = mat ? ` · maturity L${mat.level} ${mat.levelName}` : '';
     if (cov && cov.provisionable > 0) {
       // ratio of own-cloud resources declared in-repo vs only inferred-from-usage
       const undeclared = cov.provisionable - cov.declared;
-      add('infra-declared', 'Infra-as-code (declared)', 'infra', cov.ratio,
+      add('infra-declared', 'Infra-as-code (declared)', 'infra', blendLevel(cov.ratio),
         `${cov.declared}/${cov.provisionable} cloud resources declared in-repo` +
-        (undeclared > 0 ? ` · ${undeclared} used-but-undeclared (${(cov.undeclared || []).slice(0, 4).join(', ')}${undeclared > 4 ? '…' : ''}) — click-ops risk or sibling infra repo` : ' — fully declared'));
+        (undeclared > 0 ? ` · ${undeclared} used-but-undeclared (${(cov.undeclared || []).slice(0, 4).join(', ')}${undeclared > 4 ? '…' : ''}) — click-ops risk or sibling infra repo` : ' — fully declared') +
+        levelTag);
     } else if (anyResourceIac) {
       // managed/PaaS or self-hosted app whose infra IS declared as code, nothing
       // un-declarable left → property satisfied via a (possibly lighter) mechanism.
-      add('infra-declared', 'Infra-as-code (declared)', 'infra', 1, 'infra declared as code (IaC / migrations / platform config)');
+      add('infra-declared', 'Infra-as-code (declared)', 'infra', blendLevel(1), `infra declared as code (IaC / migrations / platform config)${levelTag}`);
     } else if (infra.summary.serviceCount === 0) {
       add('infra-declared', 'Infra-as-code (declared)', 'infra', null, 'no provisionable infra detected — nothing to declare', false);
     } else {
       // services used but none own-cloud-provisionable & no resource IaC: pure 3rd-party
       // SaaS, or platform-only. Lean on the signal level rather than a hard penalty.
       const lvl = infra.signalQuality?.level;
-      add('infra-declared', 'Infra-as-code (declared)', 'infra', lvl === 'high' ? 1 : lvl === 'medium' ? 0.5 : 0.25,
-        infra.signalQuality?.detail || 'infra not declared in version-controlled code');
+      const base = lvl === 'high' ? 1 : lvl === 'medium' ? 0.5 : 0.25;
+      add('infra-declared', 'Infra-as-code (declared)', 'infra', blendLevel(base),
+        (infra.signalQuality?.detail || 'infra not declared in version-controlled code') + levelTag);
     }
   } else {
     add('infra-declared', 'Infra-as-code (declared)', 'infra', null, 'add infra detector', false);
@@ -228,6 +238,18 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
   addR('graph-built', 'Code graph built', graphAvailable, graphAvailable ? 'code graph available' : 'run graph build (graphify)');
   addR('iac-present', 'Infra-as-code present', infra ? (infra.signalQuality?.iacDeclared || (infra.iac || []).length > 0) : false,
     infra ? 'IaC declared in repo' : 'no infra summary — run infra detector');
+  // Rubric-derived binary readiness — only when the 5-level maturity model ran.
+  // state.level >= 2 == remote/managed backend (not local-only); envSeparation.level
+  // >= 2 == distinct dev/stage/prod configs (not a single shared blob).
+  if (infra && infra.iacMaturity) {
+    const dims = infra.iacMaturity.dimensions || {};
+    const remoteState = (dims.state?.level ?? 0) >= 2;
+    const envSep = (dims.envSeparation?.level ?? 0) >= 2;
+    addR('remote-state', 'Remote/managed state', remoteState,
+      dims.state?.evidence || (remoteState ? 'remote/managed state backend' : 'local-only or no state backend'));
+    addR('env-separation', 'Environment separation', envSep,
+      dims.envSeparation?.evidence || (envSep ? 'distinct dev/stage/prod configs' : 'no environment separation'));
+  }
   addR('tests-present', 'Tests present', tests ? tests.hasTests : false, tests ? (tests.hasTests ? `${tests.testFiles} test files` : 'no test files found') : 'run tests detector');
   addR('lockfile', 'Dependency lockfile', security ? security.supplyChain?.hasLockfile : false,
     security ? (security.supplyChain?.hasLockfile ? 'lockfile committed' : 'no lockfile — pin dependencies') : 'run security detector');

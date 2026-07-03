@@ -23,6 +23,9 @@ import {
   type ScanCost,
   type AiReadiness,
   type GitEvolution,
+  type IacMaturity,
+  type DeprecatedTool,
+  type IacPlan,
 } from '@/hooks/use-scan-engine';
 
 const CONF_COLOR: Record<string, string> = {
@@ -228,7 +231,485 @@ function CostSurfacePanel({ infra }: { infra: InfraInventory }) {
   );
 }
 
-function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianceCount: number }) {
+// ── IaC maturity (Part C) ────────────────────────────────────────────────────
+const IAC_DIM_LABEL: Record<string, string> = {
+  state: 'State & provisioning',
+  envSeparation: 'Env separation',
+  modularity: 'Modularity',
+  testing: 'IaC testing',
+  governance: 'Governance / policy',
+  driftCost: 'Drift & cost',
+};
+const IAC_DIM_ORDER = [
+  'state',
+  'envSeparation',
+  'modularity',
+  'testing',
+  'governance',
+  'driftCost',
+] as const;
+
+/** RAG color for a 0–4 IaC maturity level (0 ClickOps → 4 Optimizing). */
+function iacLevelColor(level: number): string {
+  if (level >= 4) return 'var(--success, #22c55e)';
+  if (level >= 3) return 'var(--accent-blue, #3b82f6)';
+  if (level >= 1) return 'var(--warning, #f59e0b)';
+  return 'var(--destructive, #ef4444)';
+}
+/** Filled/empty dots for a 0–4 level. */
+function iacLevelDots(level: number): string {
+  const l = Math.max(0, Math.min(4, Math.round(level || 0)));
+  return '●'.repeat(l) + '○'.repeat(4 - l);
+}
+
+/**
+ * IaC Maturity card (Part C) — the headline maturity grade: a level badge
+ * ("L1 — Repeatable") + the 6-dimension rubric as a mini-grid (level dots +
+ * one-line evidence + top gap per dimension). The card's tooltip carries the
+ * doc's diagnostic question. Renders nothing gracefully when no maturity ran.
+ */
+function IacMaturityCard({ maturity }: { maturity?: IacMaturity }) {
+  if (!maturity) return null;
+  const lvlColor = iacLevelColor(maturity.level);
+  return (
+    <div
+      data-testid="iac-maturity"
+      title="When did prod last change from a laptop without a PR?"
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        padding: 12,
+        background: 'var(--bg-elev)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span
+          style={{
+            fontSize: 12,
+            fontWeight: 700,
+            color: 'var(--background)',
+            background: lvlColor,
+            borderRadius: 6,
+            padding: '3px 9px',
+          }}
+        >
+          L{maturity.level} — {maturity.levelName}
+        </span>
+        <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)' }}>
+          IaC maturity
+        </span>
+        <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
+          overall = lowest blocking dimension
+        </span>
+      </div>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+          gap: 6,
+        }}
+      >
+        {IAC_DIM_ORDER.map((key) => {
+          const d = maturity.dimensions[key];
+          if (!d) return null;
+          const c = iacLevelColor(d.level);
+          const topGap = d.gaps?.[0];
+          return (
+            <div
+              key={key}
+              title={d.gaps?.length ? `gaps: ${d.gaps.join(' · ')}` : d.evidence}
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 2,
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                padding: '6px 8px',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span
+                  style={{
+                    color: c,
+                    fontFamily: 'var(--font-mono)',
+                    letterSpacing: 1,
+                    fontSize: 11.5,
+                  }}
+                >
+                  {iacLevelDots(d.level)}
+                </span>
+                <span
+                  style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)', flex: 1 }}
+                >
+                  {IAC_DIM_LABEL[key]}
+                </span>
+                <span style={{ fontSize: 10.5, color: c, fontWeight: 600 }}>L{d.level}</span>
+              </div>
+              {d.evidence ? (
+                <div style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>{d.evidence}</div>
+              ) : null}
+              {topGap ? (
+                <div style={{ fontSize: 10.5, color: 'var(--warning, #f59e0b)' }}>
+                  gap: {topGap}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * State & env strip (Part C) — the Level 1↔2 boundary at a glance: the state
+ * backend (remote/local/**committed state!** in red), env separation, regions,
+ * and the GDPR region-pin status. Reads maturity.dimensions.state/envSeparation
+ * + maturity.regions/regionPinned.
+ */
+function StateEnvStrip({ maturity }: { maturity?: IacMaturity }) {
+  if (!maturity) return null;
+  const state = maturity.dimensions.state;
+  const env = maturity.dimensions.envSeparation;
+  const committed = /commit|tfstate|state in repo/i.test(
+    `${state?.evidence ?? ''} ${(state?.gaps ?? []).join(' ')}`,
+  );
+  const regions = maturity.regions ?? [];
+  const cell = (label: string, value: string, color?: string) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 140 }}>
+      <span
+        style={{
+          fontSize: 10,
+          color: 'var(--text-dim)',
+          textTransform: 'uppercase',
+          letterSpacing: 0.4,
+        }}
+      >
+        {label}
+      </span>
+      <span style={{ fontSize: 11.5, fontWeight: 600, color: color || 'var(--foreground)' }}>
+        {value}
+      </span>
+    </div>
+  );
+  return (
+    <div
+      data-testid="iac-state-env"
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 16,
+        border: `1px solid ${committed ? 'var(--destructive, #ef4444)' : 'var(--border)'}`,
+        borderRadius: 10,
+        padding: 10,
+      }}
+    >
+      {cell(
+        'State backend',
+        committed ? '⚠ committed state in repo' : state?.evidence || '—',
+        committed ? 'var(--destructive, #ef4444)' : iacLevelColor(state?.level ?? 0),
+      )}
+      {cell('Env separation', env?.evidence || '—', iacLevelColor(env?.level ?? 0))}
+      {cell('Regions', regions.length ? regions.join(', ') : 'none detected')}
+      {cell(
+        'Residency pin (GDPR)',
+        maturity.regionPinned ? '✓ pinned' : '✗ unpinned',
+        maturity.regionPinned ? 'var(--success, #22c55e)' : 'var(--warning, #f59e0b)',
+      )}
+    </div>
+  );
+}
+
+/**
+ * Tag taxonomy bar (Part C) — 4-tag FinOps coverage (team / environment /
+ * service / cost-center): a coverage meter from tagTaxonomy.coveragePct + chips
+ * for the missing tags. Renders nothing without a taxonomy signal.
+ */
+function TagTaxonomyBar({
+  tax,
+}: {
+  tax?: { present: string[]; missing: string[]; coveragePct: number };
+}) {
+  if (!tax) return null;
+  const pct = Math.max(0, Math.min(100, Math.round(tax.coveragePct || 0)));
+  const color =
+    pct >= 100
+      ? 'var(--success, #22c55e)'
+      : pct >= 50
+        ? 'var(--warning, #f59e0b)'
+        : 'var(--destructive, #ef4444)';
+  return (
+    <div
+      data-testid="iac-tag-taxonomy"
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        padding: 10,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)' }}>
+          Tag taxonomy
+        </span>
+        <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
+          team · environment · service · cost-center
+        </span>
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 11, fontWeight: 600, color }}>{pct}%</span>
+      </div>
+      <div style={{ height: 6, borderRadius: 4, background: 'var(--border)', overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: color }} />
+      </div>
+      {tax.missing?.length ? (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {tax.missing.map((t, i) => (
+            <span
+              key={i}
+              style={{
+                fontSize: 10.5,
+                color: 'var(--warning, #f59e0b)',
+                border: '1px solid color-mix(in srgb, var(--warning) 45%, var(--border))',
+                borderRadius: 8,
+                padding: '2px 8px',
+              }}
+            >
+              missing: {t}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Deprecated toolchain (Part C) — red chips for detected EOL/archived IaC tools
+ * (cdktf, tfsec, Deployment Manager, Terraformer output, …), each carrying its
+ * EOL date and the remediation on hover. Renders nothing when clean.
+ */
+function DeprecatedToolchain({ items }: { items?: DeprecatedTool[] }) {
+  if (!items?.length) return null;
+  const sevColorMap: Record<string, string> = {
+    high: 'var(--destructive, #ef4444)',
+    medium: 'var(--warning, #f59e0b)',
+    low: 'var(--text-dim)',
+  };
+  return (
+    <div data-testid="iac-deprecated" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)' }}>
+        Deprecated toolchain{' '}
+        <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>({items.length})</span>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {items.map((d, i) => {
+          const c = sevColorMap[d.severity] || 'var(--destructive, #ef4444)';
+          return (
+            <span
+              key={i}
+              title={`${d.status}${d.eolDate ? ` · EOL ${d.eolDate}` : ''}\n→ ${d.remediation}`}
+              style={{
+                fontSize: 11,
+                color: c,
+                border: `1px solid color-mix(in srgb, ${c} 55%, var(--border))`,
+                borderRadius: 8,
+                padding: '2px 9px',
+                background: `color-mix(in srgb, ${c} 8%, transparent)`,
+              }}
+            >
+              <strong>{d.tool}</strong>
+              {d.eolDate ? (
+                <span style={{ color: 'var(--text-dim)' }}> · EOL {d.eolDate}</span>
+              ) : null}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Migration path panel (Part C) — the "Level N → N+1: next 3 actions" callout
+ * (plan.nextThree) with the full stack-aware track collapsible. Each track step
+ * shows its tool + concrete commands (monospace), the golden-rule note, and any
+ * seeded import targets as chips. Renders nothing without a plan.
+ */
+function MigrationPathPanel({ plan }: { plan?: IacPlan | null }) {
+  if (!plan) return null;
+  const next = plan.nextThree ?? [];
+  const track = plan.track ?? [];
+  return (
+    <div
+      data-testid="iac-migration"
+      style={{
+        border: '1px solid color-mix(in srgb, var(--accent-blue) 40%, var(--border))',
+        borderRadius: 10,
+        padding: 12,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        background: 'color-mix(in srgb, var(--accent-blue) 5%, transparent)',
+      }}
+    >
+      <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)' }}>
+        Level {plan.currentLevel} → Level {plan.targetLevel}
+        <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
+          {' '}
+          — next {next.length} action{next.length === 1 ? '' : 's'}
+        </span>
+      </div>
+      {next.length ? (
+        <ol
+          style={{
+            margin: 0,
+            paddingLeft: 18,
+            fontSize: 11.5,
+            color: 'var(--foreground)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+          }}
+        >
+          {next.map((a, i) => (
+            <li key={i}>
+              <strong>{a.title}</strong>{' '}
+              <span style={{ color: 'var(--accent-blue, #3b82f6)' }}>[{a.dimension}]</span>
+              <div style={{ color: 'var(--text-dim)' }}>{a.action}</div>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          Already at target — no gap-driven actions.
+        </div>
+      )}
+      {track.length ? (
+        <details>
+          <summary
+            style={{
+              fontSize: 11,
+              color: 'var(--text-dim)',
+              cursor: 'pointer',
+              userSelect: 'none',
+            }}
+          >
+            Full migration track ({track.length} step{track.length === 1 ? '' : 's'})
+          </summary>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+            {track.map((s, i) => (
+              <div
+                key={i}
+                style={{
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                  padding: 10,
+                  background: 'var(--bg-elev)',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                  <strong style={{ fontSize: 12, color: 'var(--foreground)' }}>
+                    Phase {s.phase} — {s.title}
+                  </strong>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: 'var(--background)',
+                      background: 'var(--accent-blue, #3b82f6)',
+                      borderRadius: 5,
+                      padding: '1px 7px',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    {s.tool}
+                  </span>
+                  <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>{s.dimension}</span>
+                </div>
+                {s.why ? (
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: 'var(--text-dim)',
+                      margin: '3px 0',
+                      fontStyle: 'italic',
+                    }}
+                  >
+                    {s.why}
+                  </div>
+                ) : null}
+                {s.commands?.length ? (
+                  <pre
+                    style={{
+                      margin: '4px 0',
+                      padding: 8,
+                      background: 'var(--background)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 6,
+                      fontSize: 10.5,
+                      fontFamily: 'var(--font-mono)',
+                      color: 'var(--foreground)',
+                      overflowX: 'auto',
+                      whiteSpace: 'pre',
+                    }}
+                  >
+                    {s.commands.join('\n')}
+                  </pre>
+                ) : null}
+                {s.imports?.length ? (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, margin: '4px 0' }}>
+                    {s.imports.slice(0, 8).map((im, j) => (
+                      <span
+                        key={j}
+                        title={`${im.source} · priority ${im.priority}`}
+                        style={{
+                          fontSize: 10.5,
+                          color: 'var(--text-dim)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 8,
+                          padding: '2px 8px',
+                          fontFamily: 'var(--font-mono)',
+                        }}
+                      >
+                        import {im.resource}
+                      </span>
+                    ))}
+                    {s.imports.length > 8 ? (
+                      <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
+                        +{s.imports.length - 8} more
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
+                {s.goldenRule ? (
+                  <div style={{ fontSize: 10.5, color: 'var(--success, #22c55e)' }}>
+                    ✓ golden rule: {s.goldenRule}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function InfraMap({
+  infra,
+  complianceCount,
+  maturity,
+  plan,
+}: {
+  infra: InfraInventory;
+  complianceCount: number;
+  maturity?: IacMaturity;
+  plan?: IacPlan | null;
+}) {
   const byCloud = useMemo(() => {
     const m: Record<string, InfraService[]> = {};
     for (const s of infra.services) (m[s.cloud] ||= []).push(s);
@@ -262,6 +743,18 @@ function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianc
         <span style={{ color: 'var(--text-dim)' }}>{sig.detail}</span>
       </div>
 
+      {/* IaC maturity (Part C): the rubric grade + supporting strips, then the
+          stack-aware migration path — high up, right under the signal. */}
+      {maturity ? (
+        <>
+          <IacMaturityCard maturity={maturity} />
+          <StateEnvStrip maturity={maturity} />
+          <TagTaxonomyBar tax={maturity.tagTaxonomy} />
+          <DeprecatedToolchain items={maturity.deprecated} />
+        </>
+      ) : null}
+      <MigrationPathPanel plan={plan} />
+
       {/* IaC coverage — of the cloud resources this app provisions, how many are
           declared in code? (cost-center precondition + agent-tractability). */}
       {cov && cov.provisionable > 0 && (
@@ -289,6 +782,49 @@ function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianc
               ? 'every cloud resource is declared in code'
               : `${cov.provisionable - cov.declared} used but not declared in this repo (${cov.undeclared.slice(0, 4).join(', ')}${cov.undeclared.length > 4 ? '…' : ''}) — click-ops risk, or declared in a sibling infra repo`}
           </span>
+        </div>
+      )}
+
+      {infra.deployScripts && infra.deployScripts.length > 0 && (
+        <div
+          style={{
+            border: '1px solid color-mix(in srgb, var(--warning) 45%, var(--border))',
+            borderRadius: 10,
+            padding: 10,
+            background: 'color-mix(in srgb, var(--warning) 6%, transparent)',
+          }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>
+            ⚠ {infra.deployScripts.length} hand-rolled deploy artifact
+            {infra.deployScripts.length === 1 ? '' : 's'} (not IaC)
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', margin: '4px 0 6px' }}>
+            Resources provisioned by shell scripts / inline IAM policies — outside code review +
+            drift detection. This is why cloud resources can read “used but not declared”.
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {infra.deployScripts.map((d, i) => (
+              <span
+                key={i}
+                title={d.file}
+                style={{
+                  fontSize: 11,
+                  color: 'var(--text-dim)',
+                  border: '1px solid color-mix(in srgb, var(--warning) 50%, var(--border))',
+                  borderRadius: 8,
+                  padding: '3px 9px',
+                  fontFamily: 'var(--font-mono)',
+                }}
+              >
+                {d.file.split('/').pop()}
+                <span style={{ color: 'var(--foreground)' }}>
+                  {' '}
+                  · {d.kind === 'iam-policy' ? 'IAM policy' : 'deploy script'}
+                </span>
+                {d.provisions?.length ? <span> · {d.provisions.join(', ')}</span> : null}
+              </span>
+            ))}
+          </div>
         </div>
       )}
 
@@ -389,49 +925,6 @@ function InfraMap({ infra, complianceCount }: { infra: InfraInventory; complianc
                   {i.tier === 'ci' ? <span style={{ color: 'var(--text-dim)' }}> · ci</span> : null}
                 </span>
               ))}
-          </div>
-        </div>
-      )}
-
-      {infra.deployScripts && infra.deployScripts.length > 0 && (
-        <div
-          style={{
-            border: '1px solid color-mix(in srgb, var(--warning) 45%, var(--border))',
-            borderRadius: 10,
-            padding: 10,
-            background: 'color-mix(in srgb, var(--warning) 6%, transparent)',
-          }}
-        >
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>
-            ⚠ {infra.deployScripts.length} hand-rolled deploy artifact
-            {infra.deployScripts.length === 1 ? '' : 's'} (not IaC)
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', margin: '4px 0 6px' }}>
-            Resources provisioned by shell scripts / inline IAM policies — outside code review +
-            drift detection. This is why cloud resources can read “used but not declared”.
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {infra.deployScripts.map((d, i) => (
-              <span
-                key={i}
-                title={d.file}
-                style={{
-                  fontSize: 11,
-                  color: 'var(--text-dim)',
-                  border: '1px solid color-mix(in srgb, var(--warning) 50%, var(--border))',
-                  borderRadius: 8,
-                  padding: '3px 9px',
-                  fontFamily: 'var(--font-mono)',
-                }}
-              >
-                {d.file.split('/').pop()}
-                <span style={{ color: 'var(--foreground)' }}>
-                  {' '}
-                  · {d.kind === 'iam-policy' ? 'IAM policy' : 'deploy script'}
-                </span>
-                {d.provisions?.length ? <span> · {d.provisions.join(', ')}</span> : null}
-              </span>
-            ))}
           </div>
         </div>
       )}
@@ -1612,6 +2105,24 @@ export function buildScanPlanIntent(report: ScanReportData, selected: Set<number
       lines.push(`- [${f.severity}/${f.effort}] ${f.issue} → ${f.suggestion} (${f.location})`);
     lines.push('');
   }
+
+  // Infrastructure (IaC) track — appended when the selected phases include infra
+  // findings (evidence.iac). Gap-driven, stack-aware; plan/preview only (never live).
+  const selectedIds = new Set(phases.flatMap((p) => p.items));
+  const hasInfra = report.findings.some((f) => selectedIds.has(f.id) && f.evidence?.iac === true);
+  if (hasInfra && report.iacPlan) {
+    const plan = report.iacPlan;
+    lines.push(
+      `## Infrastructure track — Level ${plan.currentLevel} → ${plan.targetLevel} (IaC maturity)`,
+    );
+    lines.push(
+      'Golden rule: plan/preview must show ZERO changes before commit. Never run terraform/pulumi live — one-shot import only.',
+    );
+    for (const s of plan.track.slice(0, 8))
+      lines.push(`- [${s.tool}] Phase ${s.phase} ${s.title}: ${s.commands.join(' ; ')}`);
+    lines.push('');
+  }
+
   const intent = [...head, ...lines].join('\n');
   const CAP = 2000;
   return intent.length <= CAP
@@ -1723,6 +2234,35 @@ export function buildMarkdownReport(
       L.push(
         `- External processors (GDPR/AI-Act): ${infra.external.map((e) => e.provider).join(', ')}`,
       );
+    L.push('');
+  }
+
+  // Infrastructure track (IaC maturity → stack-aware migration path)
+  const iacMat = report.infra?.iacMaturity;
+  const iacPlan = report.iacPlan;
+  if (iacPlan || iacMat?.deprecated?.length) {
+    L.push('### Infrastructure track');
+    if (iacMat) L.push(`- **Current level:** L${iacMat.level} — ${iacMat.levelName}`);
+    if (iacPlan) {
+      L.push(`- **Target level:** L${iacPlan.targetLevel} (${iacPlan.levelName})`);
+      if (iacPlan.nextThree?.length) {
+        L.push(`- **Next actions (Level ${iacPlan.currentLevel} → ${iacPlan.currentLevel + 1}):**`);
+        iacPlan.nextThree.forEach((a) => L.push(`  - ${a.title} [${a.dimension}] — ${a.action}`));
+      }
+      for (const s of iacPlan.track ?? []) {
+        L.push(`- **Phase ${s.phase} — ${s.title}** (${s.tool} · ${s.dimension})`);
+        if (s.why) L.push(`  - _${s.why}_`);
+        for (const cmd of s.commands ?? []) L.push(`  - \`${cmd}\``);
+        if (s.goldenRule) L.push(`  - Golden rule: ${s.goldenRule}`);
+      }
+    }
+    if (iacMat?.deprecated?.length) {
+      L.push('- **Deprecated toolchain:**');
+      for (const d of iacMat.deprecated)
+        L.push(
+          `  - ${d.tool} — ${d.status}${d.eolDate ? ` (EOL ${d.eolDate})` : ''} → ${d.remediation}`,
+        );
+    }
     L.push('');
   }
 
@@ -1920,6 +2460,8 @@ export function ScanReport({
             <InfraMap
               infra={report.infra}
               complianceCount={report.counts.byDimension?.compliance ?? 0}
+              maturity={report.infra.iacMaturity}
+              plan={report.iacPlan}
             />
           </div>
         ) : (

@@ -8222,6 +8222,7 @@ async function executeScanEngineJob(job) {
             lowConfidence: result.lowConfidence,
             maturity: result.maturity,
             infra: result.infra,
+            iacPlan: result.iacPlan,
             stack: result.stack,
             aiReadiness: result.aiReadiness,
             gitEvolution: result.gitEvolution,
