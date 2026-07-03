@@ -419,6 +419,17 @@ describe('gradeIacMaturity — modularity dimension', () => {
     ]);
     expect(inv.iacMaturity.dimensions.modularity.gaps.some((g) => /tfer--/.test(g))).toBe(true);
   });
+
+  it('app src/modules/ folder (no .tf) is NOT read as Terraform modules — SST repo stays L1', () => {
+    const inv = buildInfraInventory([
+      { rel: 'sst.config.ts', content: 'export default { app() {}, async run() { new sst.aws.Function("f", {}); } }' },
+      { rel: 'src/modules/auth/index.ts', content: 'export const auth = () => {};' },
+      { rel: 'src/modules/billing/index.ts', content: 'export const billing = () => {};' },
+    ]);
+    expect(inv.iacMaturity.dimensions.modularity.level).toBe(1);
+    expect(inv.iacMaturity.dimensions.modularity.evidence).not.toMatch(/Terraform modules present/);
+    expect(inv.iacMaturity.dimensions.modularity.evidence).toMatch(/inline|no module abstraction/i);
+  });
 });
 
 describe('gradeIacMaturity — testing & governance dimensions', () => {

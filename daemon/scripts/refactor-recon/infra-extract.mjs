@@ -765,7 +765,9 @@ export function gradeIacMaturity(inventory = {}, files = []) {
   const tfResourceCount = (tfContent.match(resRe) || []).length;
   const rootTfResourceCount = tfFiles.filter((f) => !/(^|\/)modules?\//.test(f.rel)).reduce((n, f) => n + (f.content.match(resRe) || []).length, 0);
   const hasModuleBlocks = /(^|\n)\s*module\s+"[^"]+"\s*\{/m.test(tfContent);
-  const hasModulesDir = rels.some((r) => /(^|\/)modules?\//.test(r));
+  // A `modules/` dir is only a Terraform-modularity signal when it actually holds .tf files —
+  // scoping to tfFiles avoids false-positiving on app source folders like src/modules/ (SST/TS repos).
+  const hasModulesDir = tfFiles.some((f) => /(^|\/)modules?\//.test(f.rel));
   const pinnedModuleSource = /source\s*=\s*["'][^"']*\?ref=/.test(tfContent) || /(^|\n)\s*version\s*=\s*["'][~>=0-9]/.test(tfContent) || /source\s*=\s*["'][\w.-]+\/[\w.-]+\/[\w.-]+["']/.test(tfContent);
   const hasComponentResource = /extends\s+(pulumi\.)?ComponentResource|\bComponentResource\b/.test(allContent);
   const tferSmell = /tfer(--|_)/.test(allContent) || rels.some((r) => /tfer(--|_)/.test(r));
