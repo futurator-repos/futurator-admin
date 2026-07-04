@@ -107,8 +107,11 @@ export function QaReviewView({ planId, stories }: QaReviewViewProps) {
  *   [ACTIONS] Approve → staging (W3) / Send-back → mint fix stories
  */
 function DeployedAppQaReview({ planId, report }: { planId: string; report: P3QaReport }) {
-  const devStatus: DevPreviewStatus =
-    report.status === 'failed' ? 'failed' : report.devUrl ? 'live' : 'deploying';
+  // The dev-preview BUILD status is independent of the QA verdict: if the app is
+  // served at devUrl the build succeeded (a failed QA does NOT mean a failed
+  // build — that's what the journey/wiring panels below report). Only show
+  // 'deploying' when there's no URL yet.
+  const devStatus: DevPreviewStatus = report.devUrl ? 'live' : 'deploying';
   // The GET endpoint carries the decision fields on the verdict; the report is
   // display-shaped. Reconstruct the verdict QaActions needs from the report.
   const verdict: P3QaVerdict = {
