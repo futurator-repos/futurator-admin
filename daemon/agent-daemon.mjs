@@ -2242,8 +2242,13 @@ async function scanStaleEpicDevJobs() {
 
     if (!Items || Items.length === 0) return;
 
+    // NOTE (pacman4 root-cause, 2026-07-05): findStaleJobs matches ONLY
+    // epic-dev orchestrator jobs. The old `if (stale.length === 0) return;`
+    // early-exit meant that in a P3 world (no epic-dev jobs ever) the
+    // requeue-orphans and mark-STALE passes below NEVER RAN — every restart-
+    // orphaned story-dev job sat RUNNING forever with its story stuck
+    // 'claimed'. Guard the epic-dev loop only; always run the later passes.
     const stale = findStaleJobs(Items, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS });
-    if (stale.length === 0) return;
 
     for (const job of stale) {
       // Skip jobs currently running on THIS daemon — they aren't actually
