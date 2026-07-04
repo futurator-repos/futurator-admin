@@ -349,7 +349,10 @@ describe('seam-mount static sub-lane (pacman3 root cause)', () => {
     const result = await runP3Qa({
       plan, stories: [], journeys: [],
       playwright: null, spawnJudge: async () => ({ ok: true, output: '' }),
-      s3: async () => ({ code: 0 }), qaContext: { appDir: root }, log: () => {},
+      s3: async () => ({ code: 0 }),
+      // seamHook is BOILERPLATE METADATA (registry testHarness.seamHook) carried
+      // on the p3-qa job — the pipeline never hardcodes an app-kind's hook.
+      qaContext: { appDir: root, seamHook: 'useGameStateMachine' }, log: () => {},
     });
     expect(result.wiring.seamMounted).toBe(false);
     expect(result.wiring.blocking).toBe(true);

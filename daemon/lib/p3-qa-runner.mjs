@@ -451,9 +451,13 @@ export async function runP3Qa({
     // mounted"; this reports the cause "hook never imported"). Fail-open.
     try {
       const { checkSeamMounted } = await import('./seam-mount-check.mjs');
+      // seamHook is BOILERPLATE METADATA (registry testHarness.seamHook),
+      // resolved by the cron and carried on the p3-qa job — the pipeline never
+      // hardcodes an app-kind's hook. Absent → checkSeamMounted returns
+      // checked:false (N/A); the runtime probe still covers "no seam" honestly.
       const seam = checkSeamMounted({
         projectDir: qaContext.appDir,
-        seamHook: qaContext.seamHook || 'useGameStateMachine',
+        seamHook: qaContext.seamHook,
       });
       // Block ONLY on the orphaned-scaffold case (hook DEFINED but never
       // imported — the pacman3 class). A tree without the hook at all is N/A:

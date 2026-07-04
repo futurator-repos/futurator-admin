@@ -398,6 +398,12 @@ export interface AgentJob {
   /** QA-Review W2 — set on a `p3-qa` job: the frozen commit QA pins to. */
   qaCommitSha?: string;
   /**
+   * QA-Review — the boilerplate's seam hook (registry testHarness.seamHook),
+   * resolved at enqueue so the daemon's static seam-mount check knows what to
+   * grep for. Boilerplate metadata, never a pipeline constant.
+   */
+  seamHook?: string;
+  /**
    * Deployment v2.5 — which environment a DEPLOY job publishes to. Set by the
    * deploy endpoint + the cron auto-trigger. The daemon's `postDeployWriteback`
    * advances `main` ONLY when this is `production`; `dev`/`staging` deploys
@@ -531,6 +537,12 @@ export interface AgentJob {
     appId: string;
     intent: string;
     appBootstrapJobId?: string;
+    /**
+     * The boilerplate's seam hook (BOILERPLATE_REGISTRY[type].testHarness
+     * .seamHook) — stamped by the quick-create endpoint so the planner prompt
+     * names the REAL hook instead of hardcoding an app-kind (game/dashboard).
+     */
+    seamHook?: string;
   };
   appBootstrapPayload?: {
     appId: string;

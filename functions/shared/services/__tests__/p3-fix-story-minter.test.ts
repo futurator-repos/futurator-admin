@@ -136,10 +136,13 @@ describe('mintFixStories', () => {
           },
         ],
       }),
+      seamHook: 'useGameStateMachine',
       now,
     });
     expect(rows).toHaveLength(1); // one seam story, no per-journey noise
     expect(rows[0].title).toMatch(/Mount the window\.__harness/);
+    // The hook name comes from BOILERPLATE metadata (the seamHook arg), never
+    // a pipeline constant — passing it must surface it in the story intent.
     expect(rows[0].intent).toMatch(/useGameStateMachine/);
     expect(rows[0].state).toBe('ready');
   });

@@ -35,12 +35,13 @@ async function waitForBootstrap({ getJob, jobId, timeoutMs = 6 * 60_000, pollMs 
 }
 
 /** Spawn one Claude and return its full stream-json stdout. */
-function spawnClaude({ spawn, claudeBin, cwd, prompt, eventLogDir, jobId, gateArgs = [], env = {}, log }) {
+function spawnClaude({ spawn, claudeBin, cwd, prompt, eventLogDir, jobId, gateArgs = [], modelArgs = [], env = {}, log }) {
   const args = [
     '-p', prompt,
     '--output-format', 'stream-json',
     '--verbose',
     '--permission-mode', 'bypassPermissions',
+    ...modelArgs,
     ...gateArgs,
   ];
   try { if (eventLogDir && !existsSync(eventLogDir)) mkdirSync(eventLogDir, { recursive: true }); } catch { /* best-effort */ }
@@ -70,7 +71,7 @@ export async function runQuickPlanspecJob(job, deps) {
     getJob, batchPutStoryNodes, updateJobFields, writeAttentionItem, log = () => {}, now, sleep,
   } = deps;
   const p = job.quickPlanspecPayload || {};
-  const { planId, appId, intent, appBootstrapJobId } = p;
+  const { planId, appId, intent, appBootstrapJobId, seamHook } = p;
   const short = String(job.jobId || '').slice(0, 8);
 
   const fail = async (reason) => {
@@ -92,8 +93,12 @@ export async function runQuickPlanspecJob(job, deps) {
   if (!ready) return fail('app scaffold did not complete (bootstrap failed or timed out)');
 
   // 2) one Claude call: intent → plan_spec.
-  const prompt = buildQuickPlanspecPrompt({ intent, appSlug: appId });
-  const { exitCode, out } = await spawnClaude({ spawn, claudeBin, cwd: job.workingDir, prompt, eventLogDir, jobId: job.jobId, gateArgs, env, log });
+  const prompt = buildQuickPlanspecPrompt({ intent, appSlug: appId, seamHook });
+  // The PLANNER gets the strongest default thinking (model-effort-policy): a
+  // bad plan poisons every downstream story. Adaptive thinking + effort=high.
+  const { resolveAgentPolicy, cliModelArgs } = await import('../lib/model-effort-policy.mjs');
+  const modelArgs = cliModelArgs(resolveAgentPolicy({ role: 'planner' }));
+  const { exitCode, out } = await spawnClaude({ spawn, claudeBin, cwd: job.workingDir, prompt, eventLogDir, jobId: job.jobId, gateArgs, modelArgs, env, log });
   if (exitCode !== 0 && !out) return fail(`generation spawn exited ${exitCode} with no output`);
 
   // 3) parse → StoryNodes.

@@ -109,6 +109,69 @@ npx lint-staged --quiet || true
   },
 ];
 
+// ── ALWAYS-MOUNT harness base (QA-Review seam cure, layer 4) ────────────────
+// The seam previously published ONLY from inside the boilerplate's seam hook —
+// if a dev bypassed the hook (pacman3: hand-rolled useReducer) the publisher
+// was dead code and `window.__harness` never existed, blinding every QA probe.
+// This template-owned file mounts a BASE harness the instant the app boots
+// (Next auto-loads src/instrumentation-client.ts on the client — no layout
+// edit, nothing for a story to forget). The base is honest: `snapshot()`
+// returns `{ registered:false, status:'unregistered' }` until a real store
+// registers, so probes fail with real values ("status is 'unregistered'")
+// instead of the blind "seam not mounted". The boilerplate seam hook, when
+// wired, simply overwrites/extends this base with the live store.
+// GENERIC by design — no game/dashboard specifics; every Next boilerplate
+// inherits it via the base pack.
+const HARNESS_BASE_MOUNT_AUGMENTS: Array<{ path: string; content: string }> = [
+  {
+    path: 'src/instrumentation-client.ts',
+    content: `/**
+ * TEMPLATE-OWNED — do not edit in stories. QA verifiability base mount.
+ *
+ * Mounts a minimal \`window.__harness\` the moment the client boots, gated on
+ * NEXT_PUBLIC_TEST_HARNESS === '1' (build-time inlined; tree-shaken out of
+ * normal builds — the seam is PRODUCTION-ABSENT by design).
+ *
+ * The scaffold's seam hook (see SCAFFOLD.md) publishes the REAL live-state
+ * seam and will overwrite this base when it mounts. Until then the base
+ * answers honestly: snapshot() says nothing registered yet, so QA probes read
+ * concrete values instead of finding no seam at all. A feature may also wire
+ * itself explicitly via \`window.__harness.register(store)\`.
+ */
+
+type HarnessStore = {
+  snapshot: () => Record<string, unknown>;
+  dispatch?: (action: unknown) => void;
+  forceStatus?: (status: string) => void;
+};
+
+export function register() {
+  // Next.js instrumentation-client entrypoint (runs once per client boot).
+  if (process.env.NEXT_PUBLIC_TEST_HARNESS !== '1') return;
+  if (typeof window === 'undefined') return;
+  const w = window as unknown as { __harness?: unknown };
+  if (w.__harness) return; // the real seam beat us — never clobber it
+  let store: HarnessStore | null = null;
+  w.__harness = {
+    ready: true,
+    registered: false,
+    events: [] as unknown[],
+    snapshot: () =>
+      store ? store.snapshot() : { registered: false, status: 'unregistered' },
+    register(s: HarnessStore) {
+      store = s;
+      (w.__harness as { registered?: boolean }).registered = true;
+    },
+    dispatch: (action: unknown) => store?.dispatch?.(action),
+    forceStatus: (status: string) => store?.forceStatus?.(status),
+  };
+}
+
+register();
+`,
+  },
+];
+
 const TEST_INFRA_AUGMENTS: Array<{ path: string; content: string }> = [
   {
     path: 'vitest.config.ts',
@@ -1376,6 +1439,8 @@ const NEXTJS_BASE_PACK: BoilerplateMetadata = {
     ...FEATURE_WIRING_AUGMENTS,
     ...TEST_INFRA_AUGMENTS,
     ...QUALITY_INFRA_AUGMENTS,
+    // Always-mount harness base (seam cure layer 4) — every Next boilerplate.
+    ...HARNESS_BASE_MOUNT_AUGMENTS,
   ],
   // dino1 root-cause (2026-06-10) — the generator's own docblock always said
   // "wire as a package.json prebuild script" but nothing ever did it: the

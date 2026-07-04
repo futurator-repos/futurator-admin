@@ -40,27 +40,30 @@ function seamNotMounted(verdict: P3QaVerdict): boolean {
 }
 
 /** Extract the blocking findings from a verdict (only blockers become stories). */
-function blockingFindings(verdict: P3QaVerdict): Finding[] {
+function blockingFindings(verdict: P3QaVerdict, seamHook?: string): Finding[] {
   const out: Finding[] = [];
 
   // The seam is the FIRST fix: when window.__harness never mounts, every
   // journey fails for the same root cause. Mint ONE dedicated story with the
-  // exact wiring contract (the pacman3 forensic: the scaffold's
-  // useGameStateMachine publishes the seam, but a dev who hand-rolls
-  // useReducer bypasses it — dead code, no seam, all probes blind).
+  // exact wiring contract (the pacman3 forensic: the scaffold's seam hook
+  // publishes the seam, but a dev who hand-rolls their own state container
+  // bypasses it — dead code, no seam, all probes blind). `seamHook` is
+  // BOILERPLATE METADATA (registry testHarness.seamHook) passed by the caller —
+  // never a pipeline constant.
   if (seamNotMounted(verdict)) {
+    const hook = seamHook || 'the scaffold seam hook named in SCAFFOLD.md';
     out.push({
       kind: 'wiring',
       title: 'Mount the window.__harness test seam',
       intent:
         'QA cannot verify this app: window.__harness never mounts in the running build. ' +
-        'The scaffold already ships the seam — src/game/state-machine.ts exports useGameStateMachine, ' +
-        "which publishes window.__harness = { ready:true, snapshot(), dispatch, forceStatus, events } when NEXT_PUBLIC_TEST_HARNESS==='1'. " +
-        'FIX: route the live game state through useGameStateMachine (replace any hand-rolled useReducer for game state ' +
+        `The scaffold already ships the seam — ${hook} publishes ` +
+        "window.__harness = { ready:true, snapshot(), dispatch, forceStatus, events } when NEXT_PUBLIC_TEST_HARNESS==='1'. " +
+        `FIX: route the live app state through ${hook} (replace any hand-rolled useReducer/useState/store for the app's primary state ` +
         'with the scaffold hook — same reducer, same initial state, seam publishes automatically). ' +
-        'Do NOT write a new harness; wire the existing one.',
+        'Do NOT write a new harness; wire the existing one (see SCAFFOLD.md).',
       acText:
-        "With NEXT_PUBLIC_TEST_HARNESS='1', the running app exposes window.__harness with ready:true and a snapshot() function returning the live game state (status, score, and domain fields).",
+        "With NEXT_PUBLIC_TEST_HARNESS='1', the running app exposes window.__harness with ready:true and a snapshot() function returning the live app state (status and domain fields).",
       touches: ['src/**'],
     });
   }
@@ -132,11 +135,13 @@ function blockingFindings(verdict: P3QaVerdict): Finding[] {
 export function mintFixStories(args: {
   plan: Plan;
   verdict: P3QaVerdict;
+  /** Boilerplate seam hook (registry testHarness.seamHook); resolved by callers. */
+  seamHook?: string;
   now?: () => string;
 }): StoryNodeRow[] {
-  const { plan, verdict } = args;
+  const { plan, verdict, seamHook } = args;
   const now = args.now ? args.now() : new Date().toISOString();
-  const findings = blockingFindings(verdict);
+  const findings = blockingFindings(verdict, seamHook);
   const shaTag = (verdict.ranAtSha || 'nosha').slice(0, 7);
 
   // The seam story (if minted) gates the rest: without the seam, no other fix

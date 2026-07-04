@@ -215,13 +215,26 @@ export function buildPromoteJob(params: {
   dst: ResolvedDeployTarget;
   smoke: boolean;
   archiveReleaseId?: string;
+  /** P3 (epic-less) plans: direct plan resolution for postDeployWriteback. */
+  planId?: string;
 }): AgentJob {
-  const { jobId, epicId, workingDir, createdBy, nowIso, src, dst, smoke, archiveReleaseId } =
-    params;
+  const {
+    jobId,
+    epicId,
+    workingDir,
+    createdBy,
+    nowIso,
+    src,
+    dst,
+    smoke,
+    archiveReleaseId,
+    planId,
+  } = params;
   return {
     jobId,
     status: 'PENDING',
     epicId,
+    ...(planId ? { planId } : {}),
     deployEnvironment: dst.environment,
     createdAt: nowIso,
     updatedAt: nowIso,

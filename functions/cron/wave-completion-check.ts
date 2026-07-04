@@ -2,7 +2,11 @@ import * as agentJobsRepo from '../shared/repositories/agent-jobs-repository';
 import * as epicRepo from '../shared/repositories/epic-workflow-repository';
 import * as planRepo from '../shared/repositories/plan-repository';
 import * as appRepo from '../shared/repositories/app-repository';
-import { resolveQaContext, resolveHasSeam } from '../shared/services/qa-boilerplate-resolver';
+import {
+  resolveQaContext,
+  resolveHasSeam,
+  resolveSeamContract,
+} from '../shared/services/qa-boilerplate-resolver';
 // Story 1.8.7 — 3× escalator: fire-and-forget after plan is marked delivered
 import { evaluateThresholds } from '../shared/timer/escalator';
 import { reducePlan, type PlanReducerDeps } from '../shared/services/plan-reducer';
@@ -108,6 +112,11 @@ export const handler = async () => {
         const appId = plan.appId as string;
         const qaJobId = planDepsShared.uuid();
         const nowIso = planDepsShared.now();
+        // Boilerplate metadata: which hook publishes window.__harness for THIS
+        // app (game/dashboard/none) — never a pipeline constant.
+        const seamContract = await resolveSeamContract(plan, { getApp: appRepo.getApp }).catch(
+          () => undefined,
+        );
         await planDepsShared.createJob({
           jobId: qaJobId,
           jobType: 'p3-qa',
@@ -115,6 +124,7 @@ export const handler = async () => {
           planId: plan.planId,
           devUrl: plan.devUrl,
           qaCommitSha: plan.qaCommitSha,
+          seamHook: seamContract?.seamHook,
           workingDir: `${EC2_PROJECTS_ROOT}/${appId}`,
           createdBy: plan.createdBy,
           createdAt: nowIso,
@@ -180,7 +190,14 @@ export const handler = async () => {
       } else {
         try {
           const { mintFixStories } = await import('../shared/services/p3-fix-story-minter');
-          const rows = mintFixStories({ plan, verdict: plan.p3QaVerdict });
+          const seamContract = await resolveSeamContract(plan, { getApp: appRepo.getApp }).catch(
+            () => undefined,
+          );
+          const rows = mintFixStories({
+            plan,
+            verdict: plan.p3QaVerdict,
+            seamHook: seamContract?.seamHook,
+          });
           if (rows.length > 0) {
             const { batchPutStoryNodes } =
               await import('../shared/repositories/story-node-repository');

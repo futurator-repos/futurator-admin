@@ -24,9 +24,14 @@ const MAX_STORIES = 8;
  * The single-call prompt: an intent → a plan_spec the story-dev pipeline can run.
  * Emits ONE JSON object inside <PLAN_SPEC>…</PLAN_SPEC>. No epics/waves.
  *
- * @param {{ intent: string, appSlug: string }} args
+ * `seamHook` is BOILERPLATE METADATA (BOILERPLATE_REGISTRY[type].testHarness
+ * .seamHook, stamped into the job payload by the quick-create endpoint) — the
+ * pipeline itself is app-kind-agnostic; never hardcode a game/dashboard hook here.
+ *
+ * @param {{ intent: string, appSlug: string, seamHook?: string }} args
  */
-export function buildQuickPlanspecPrompt({ intent, appSlug }) {
+export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook }) {
+  const hookName = seamHook || 'the scaffold seam hook named in SCAFFOLD.md';
   return [
     `You are the SPEC planner for a Pipeline-3 build. Turn the operator's idea into a`,
     `minimal, buildable plan_spec — a flat list of stories a coding agent will implement`,
@@ -37,8 +42,8 @@ export function buildQuickPlanspecPrompt({ intent, appSlug }) {
     ``,
     `# The app`,
     `A freshly scaffolded app in this working directory (slug "${appSlug}"). READ the`,
-    `existing files first (package.json, src/) so your touches + tests fit the real`,
-    `structure. It is a Next.js canvas-game boilerplate that exposes a test seam:`,
+    `existing files first (package.json, src/, SCAFFOLD.md) so your touches + tests fit`,
+    `the real structure. The scaffold exposes a test seam:`,
     `\`window.__harness\` (\`.snapshot()\`, \`.forceStatus(x)\`) under NEXT_PUBLIC_TEST_HARNESS.`,
     ``,
     `# Output — EXACTLY one JSON object inside the tags, nothing else:`,
@@ -72,11 +77,10 @@ export function buildQuickPlanspecPrompt({ intent, appSlug }) {
     `  when/thenObservable (e.g. thenObservable "snapshot.status equals 'running' and`,
     `  snapshot.score is greater than 0"). Pure/build ACs use verify "build",`,
     `  needsBrowser false, and a unit-testable claim.`,
-    `- SEAM WIRING (non-negotiable — QA hard-fails without it): the scaffold's`,
-    `  \`useGameStateMachine\` hook (src/game/state-machine.ts) is the ONLY thing that`,
-    `  publishes \`window.__harness\`. The final "Assemble the complete app" story MUST`,
-    `  route the live game state through \`useGameStateMachine(reducer, initialState)\` —`,
-    `  a hand-rolled \`useReducer\` bypasses the seam, the harness never mounts, and`,
+    `- SEAM WIRING (non-negotiable — QA hard-fails without it): ${hookName} is the`,
+    `  ONLY thing that publishes \`window.__harness\`. The final "Assemble the complete`,
+    `  app" story MUST route the live app state through that scaffold hook — a`,
+    `  hand-rolled \`useReducer\`/store bypasses the seam, the harness never mounts, and`,
     `  every deployed-app QA probe fails with SEAM_NEVER_PUBLISHED. The assemble`,
     `  story's ACs MUST include one asserting the seam mounts (e.g. thenObservable`,
     `  "snapshot.status equals 'idle'").`,

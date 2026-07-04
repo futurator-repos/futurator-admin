@@ -49,12 +49,13 @@ author or edit it. For canvas games it exposes `snapshot()` →
 `{ status, score, tick, entities, gameOver }` plus any fields you add to
 `GameState` (e.g. `lives`).
 
-SEAM WIRING — a MUST, not a suggestion: the seam only publishes when the game's
-live state flows through the scaffold hook `useGameStateMachine(reducer,
-initialState)` (src/game/state-machine.ts). Do NOT hand-roll `useReducer` for
-game state — that bypasses the publisher, `window.__harness` never mounts, and
-deployed-app QA hard-fails every probe with SEAM_NEVER_PUBLISHED (the pacman3
-post-mortem). Same reducer, same initial state — just call it through the hook.
+SEAM WIRING — a MUST, not a suggestion: the seam only publishes when the app's
+live state flows through the scaffold's seam hook (its name and location are in
+SCAFFOLD.md — the scaffold file that exports it and assigns `window.__harness`).
+Do NOT hand-roll your own state container (`useReducer`/`useState`/a store) for
+the app's primary state — that bypasses the publisher, `window.__harness` never
+mounts, and deployed-app QA hard-fails every probe with SEAM_NEVER_PUBLISHED.
+Same reducer, same initial state — just route it through the scaffold hook.
 
 Worked example (start, advance time deterministically, then assert + observe):
   flow:

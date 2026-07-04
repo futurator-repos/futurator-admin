@@ -2262,7 +2262,15 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
     createdBy: user.userId,
     workingDir: app.workingDir,
     jobType: 'quick-planspec',
-    quickPlanspecPayload: { planId, appId, intent, appBootstrapJobId: bootstrapJobId },
+    quickPlanspecPayload: {
+      planId,
+      appId,
+      intent,
+      appBootstrapJobId: bootstrapJobId,
+      // Boilerplate metadata, NOT a pipeline constant — the planner prompt
+      // names the real seam hook for whatever boilerplate scaffolded this app.
+      seamHook: meta.testHarness?.seamHook,
+    },
   });
 
   return c.json({ planId, appId, jobId: genJobId }, 201);
@@ -4020,7 +4028,11 @@ app.post('/api/plans/:id/qa/send-back', async (c) => {
     );
   }
   const { mintFixStories } = await import('../shared/services/p3-fix-story-minter');
-  const rows = mintFixStories({ plan, verdict: v });
+  const { resolveSeamContract } = await import('../shared/services/qa-boilerplate-resolver');
+  const seamContract = await resolveSeamContract(plan, { getApp: appRepo.getApp }).catch(
+    () => undefined,
+  );
+  const rows = mintFixStories({ plan, verdict: v, seamHook: seamContract?.seamHook });
   if (rows.length > 0) await storyNodeRepo.batchPutStoryNodes(rows);
   // Flip to fixing, then RESET QA state (REMOVE p3QaJobId AND p3QaVerdict). The
   // verdict MUST be cleared, not stamped with decidedAt: the daemon's next-run
@@ -6786,6 +6798,55 @@ app.post('/api/plans/:id/promote', async (c) => {
   }
   if (to === 'production' && !plan.stagingUrl) {
     throw new ValidationError('Promote to staging before promoting to production.');
+  }
+
+  // ── P3 (epic-less) plans: plan-keyed promote — no epic resolution. ──
+  // Same ladder + pipelines as legacy; identity comes from plan.appId and the
+  // QA-Review Approve gates the FIRST rung (a staging promote requires an
+  // approved verdict pinned to the current qaCommitSha when P3_QA_REVIEW=on).
+  const isP3Promote = (!plan.epicIds || plan.epicIds.length === 0) && Boolean(plan.appId);
+  if (isP3Promote) {
+    if (to === 'staging' && (process.env.P3_QA_REVIEW ?? 'off') === 'on') {
+      const v = plan.p3QaVerdict;
+      const approved =
+        v?.decision === 'approved' && (!plan.qaCommitSha || v.approvedSha === plan.qaCommitSha);
+      if (!approved) {
+        throw new AppError(
+          'QA_NOT_APPROVED',
+          'Promote to staging requires an APPROVED QA Review pinned to the current build. Open the QA tab and Approve (or send back).',
+          400,
+        );
+      }
+    }
+    const appName = plan.appId as string;
+    const identity = { planSlug: appName, appId: appName };
+    const srcT = resolveDeployTarget(identity, src);
+    const dstT = resolveDeployTarget(identity, to);
+    const p3JobId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+    await agentJobsRepo.createJob(
+      buildPromoteJob({
+        jobId: p3JobId,
+        epicId: '',
+        planId: plan.planId,
+        workingDir: plan.workingDir,
+        createdBy: user.userId,
+        nowIso,
+        src: srcT,
+        dst: dstT,
+        smoke: true,
+        archiveReleaseId: to === 'production' ? p3JobId : undefined,
+      }),
+    );
+    if (to === 'production') {
+      const history = plan.deployJobIds ?? [];
+      if (!history.includes(p3JobId)) {
+        await planRepo.updatePlanFields(plan.planId, { deployJobIds: [...history, p3JobId] });
+      }
+    } else {
+      await planRepo.updatePlanFields(plan.planId, { stagingDeployJobId: p3JobId });
+    }
+    return c.json({ jobId: p3JobId, to, publicUrl: dstT.publicUrl }, 201);
   }
 
   // Resolve the deploy epic (highest wave) — same rule as the deploy stage.

@@ -1806,8 +1806,9 @@ async function executeP3QaJob(job) {
       // p3-qa-runner reads qaContext.appDir (orphan scan root + judge/s3 cwd).
       // Passing `workingDir` here left appDir undefined → the orphan/wiring lane
       // silently never ran in production (shipped the pacman3 disease as a
-      // false-pass). Key MUST be `appDir`.
-      qaContext: { appDir: planForQa.workingDir },
+      // false-pass). Key MUST be `appDir`. seamHook is boilerplate metadata
+      // stamped on the job by the cron (never a pipeline constant).
+      qaContext: { appDir: planForQa.workingDir, seamHook: job.seamHook },
       log,
     });
   } catch (e) {
@@ -1989,7 +1990,16 @@ async function executeStoryDevJob(job) {
             diff = String(d.stdout || '');
           } catch { /* no diff → reviewer judges from ACs only */ }
           const prompt = buildReviewerPrompt({ storyTitle: job.storyDevPayload?.title, acceptanceCriteria, diff });
+          // Reviewer effort is risk-tiered (model-effort-policy): cheap (low)
+          // by default; P0/security ACs escalate to high. Plan overrides win.
+          const { resolveAgentPolicy, cliModelArgs } = await import('./lib/model-effort-policy.mjs');
+          const reviewerArgs = cliModelArgs(resolveAgentPolicy({
+            role: 'reviewer',
+            riskTags: acceptanceCriteria.map((a) => a?.riskTag).filter(Boolean),
+            overrides: { model: planRow?.reviewerModel, effort: planRow?.reviewerEffort },
+          }));
           const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose',
+            ...reviewerArgs,
             '--permission-mode', 'bypassPermissions', '--allowedTools', 'Read,Grep,Glob'];
           const out = await new Promise((res) => {
             let o = '';
@@ -6121,20 +6131,30 @@ async function postDeployWriteback(job, variables) {
   // descends from `main`, so the fast-forward is the normal case.
   try {
     const { bareRepoPath, LEGACY_PROJECTS_ROOT } = await import('./lib/story-worktree.mjs');
-    const planBranch = `plan/${plan.name}`;
     const bare = bareRepoPath(plan.appId);
     const proj = `${LEGACY_PROJECTS_ROOT}/${plan.appId}`;
-    const hasPlanBranch = await daemonGit(
-      ['--git-dir', bare, 'rev-parse', '--verify', '--quiet', `refs/heads/${planBranch}`],
-      proj,
-    );
+    // Branch-name unification: legacy plans branch as plan/<plan.name>; P3
+    // (quick-flow) plans branch as plan/<planId>. Try both — first that exists
+    // wins — so a production promote merges main for EITHER lineage.
+    let planBranch = null;
+    for (const candidate of [`plan/${plan.name}`, `plan/${plan.planId}`]) {
+      const has = await daemonGit(
+        ['--git-dir', bare, 'rev-parse', '--verify', '--quiet', `refs/heads/${candidate}`],
+        proj,
+      );
+      if (has.code === 0) {
+        planBranch = candidate;
+        break;
+      }
+    }
+    const hasPlanBranch = { code: planBranch ? 0 : 1 };
     if (hasPlanBranch.code === 0) {
       await daemonGit(['checkout', '-f', 'main'], proj);
       const ff = await daemonGit(['merge', '--ff-only', planBranch], proj);
       if (ff.code === 0) {
         log(
           'info',
-          `[${short}] post-deploy: merged to main — main now at plan/${plan.name} tip; next plan forks brownfield`,
+          `[${short}] post-deploy: merged to main — main now at ${planBranch} tip; next plan forks brownfield`,
         );
         // Push the advanced main to origin so GitHub mirrors the delivered
         // state AND the next plan-create's clean-check (which resolves the

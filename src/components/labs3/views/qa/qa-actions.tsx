@@ -30,7 +30,7 @@
 
 import { useMemo, useState } from 'react';
 import { CheckCircle2, Loader2, Send, ShieldCheck } from 'lucide-react';
-import { useApproveP3Qa, useSendBackP3Qa } from '@/hooks/use-p3-qa-report';
+import { useApproveP3Qa, useSendBackP3Qa, usePromoteP3 } from '@/hooks/use-p3-qa-report';
 import type { P3QaVerdict } from '@/types/qa-review-p3';
 import { shortSha } from './dev-url-card';
 
@@ -112,6 +112,7 @@ const STATE_META: Record<QaActionState, { label: string; color: string }> = {
 export function QaActions({ planId, verdict, currentQaCommitSha }: QaActionsProps) {
   const approve = useApproveP3Qa(planId);
   const sendBack = useSendBackP3Qa(planId);
+  const promote = usePromoteP3(planId);
   const [note, setNote] = useState('');
 
   const state = useMemo(
@@ -262,6 +263,81 @@ export function QaActions({ planId, verdict, currentQaCommitSha }: QaActionsProp
           </button>
         </div>
       </div>
+
+      {/* W3-lite promote ladder — appears once the operator has APPROVED. The
+          API gates each rung (staging: approved verdict; production: staging
+          artifact exists), so these buttons are honest: a refused promote
+          surfaces the server's reason below. */}
+      {verdict?.decision === 'approved' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 8.5,
+              color: 'var(--text-faint)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.2em',
+            }}
+          >
+            Approved {shortSha(verdict.approvedSha ?? '')} — promote
+          </span>
+          <button
+            type="button"
+            onClick={() => promote.mutate({ to: 'staging' })}
+            disabled={promote.isPending}
+            style={{
+              fontSize: 11.5,
+              padding: '6px 14px',
+              borderRadius: 5,
+              border: '1px solid var(--accent-blue)',
+              background: 'var(--accent-blue)',
+              color: '#fff',
+              cursor: promote.isPending ? 'default' : 'pointer',
+              opacity: promote.isPending ? 0.6 : 1,
+            }}
+          >
+            {promote.isPending ? 'Promoting…' : 'Promote to staging'}
+          </button>
+          <button
+            type="button"
+            onClick={() => promote.mutate({ to: 'production' })}
+            disabled={promote.isPending}
+            style={{
+              fontSize: 11.5,
+              padding: '6px 14px',
+              borderRadius: 5,
+              border: '1px solid var(--success)',
+              background: 'transparent',
+              color: 'var(--success)',
+              cursor: promote.isPending ? 'default' : 'pointer',
+              opacity: promote.isPending ? 0.6 : 1,
+            }}
+            title="Requires a staging artifact (promote to staging first). Production merges the plan branch to main."
+          >
+            Promote to production
+          </button>
+          {promote.isSuccess && promote.data && (
+            <a
+              href={promote.data.publicUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 10.5,
+                color: 'var(--accent-blue)',
+              }}
+            >
+              {promote.data.to} → {promote.data.publicUrl} ↗
+            </a>
+          )}
+          {promote.isError && (
+            <span role="alert" style={{ fontSize: 10.5, color: 'var(--destructive)' }}>
+              Promote failed:{' '}
+              {promote.error instanceof Error ? promote.error.message : String(promote.error)}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Blocking/stale reason — always visible, never a silent disable */}
       {reason && (

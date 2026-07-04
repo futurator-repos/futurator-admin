@@ -24,6 +24,9 @@ import { runStoryBindings } from '../lib/test-binding-runner.mjs';
 import { detectTestTampering } from '../lib/tdd-gates.mjs';
 // W2.2 (P3_TEST_AUTHOR_SPLIT) — isolated Test-Author phase + implementer prompt.
 import { runTestAuthorPhase, buildImplementerPrompt, parsePorcelainTestFiles } from './lib/test-author-phase.mjs';
+// Model/effort per agent (adaptive thinking): dev scales with story complexity,
+// test-author thinks hard (tests carry the spec). Env/plan overrides inside.
+import { resolveAgentPolicy, cliModelArgs } from '../lib/model-effort-policy.mjs';
 // P3-parity glue (INT wiring): streaming events, skills injection/commit trailer,
 // bounded fix-forward retry. buildSubagentInjectionArgs is now folded into
 // buildSkillsInjection (single --append-system-prompt), so it is no longer
@@ -181,7 +184,12 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
   const spawnClaudeOnce = (onePrompt) => new Promise((res) => {
     const oneArgs = [
       '-p', onePrompt, '--output-format', 'stream-json', '--verbose',
-      '--permission-mode', 'bypassPermissions', ...testAuthorGate.args, ...injectionArgs,
+      '--permission-mode', 'bypassPermissions',
+      ...cliModelArgs(resolveAgentPolicy({
+        role: 'test-author',
+        overrides: { model: payload.testModel },
+      })),
+      ...testAuthorGate.args, ...injectionArgs,
     ];
     let out = '';
     const c = spawn(claudeBin, oneArgs, { cwd: projectRoot, env: { ...process.env, ...testAuthorGate.env }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -276,6 +284,11 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       '--output-format', 'stream-json',
       '--verbose',
       '--permission-mode', 'bypassPermissions',
+      ...cliModelArgs(resolveAgentPolicy({
+        role: 'dev',
+        complexity: payload.complexity,
+        overrides: { model: payload.devModel, effort: payload.devEffort },
+      })),
       ...implGate.args,
       ...injectionArgs,
     ];

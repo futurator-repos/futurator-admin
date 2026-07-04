@@ -173,3 +173,21 @@ export function useSendBackP3Qa(planId: string | null) {
     },
   });
 }
+
+/**
+ * W3-lite — plan-keyed promote up the ladder. `to: 'staging'` requires an
+ * APPROVED QA verdict server-side (the Approve above is the gate);
+ * `to: 'production'` requires a staging artifact. Body/route mirror the legacy
+ * ladder but resolve identity from plan.appId (no epics).
+ */
+export function usePromoteP3(planId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (args: { to: 'staging' | 'production' }) =>
+      api.post<{ jobId: string; to: string; publicUrl: string }>(`/plans/${planId}/promote`, args),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['p3-qa-report', planId] });
+      qc.invalidateQueries({ queryKey: ['plans', planId] });
+    },
+  });
+}
