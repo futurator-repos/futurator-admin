@@ -34,7 +34,16 @@ export function useStoryNodes(planId: string | null): UseQueryResult<StoryNodeRo
     queryFn: () =>
       api.get<{ stories: StoryNodeRow[] }>(`/plans/${planId}/story-nodes`).then((d) => d.stories),
     enabled: !!planId,
-    refetchInterval: (query) => (hasActiveStory(query.state.data) ? 2_000 : false),
+    // COLD-START TRAP (pacman4, 2026-07-04): `hasActiveStory([])` is false, so a
+    // page opened BEFORE ingest settled into never-poll and showed "0/0 · No
+    // StoryNodes" while the plan was actually building. Empty/undefined data =
+    // pre-ingest → keep polling (5s) until stories exist; then the active-story
+    // cadence takes over (2s while building, stop when settled).
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data || data.length === 0) return 5_000;
+      return hasActiveStory(data) ? 2_000 : false;
+    },
   });
 }
 

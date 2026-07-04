@@ -155,3 +155,29 @@ describe('plan-branch', () => {
     expect(calls.some((c) => c === 'merge --abort')).toBe(true);
   });
 });
+
+describe('pathspec tolerance (pacman4 fix)', () => {
+  it('a declared touch that never materialized does not fail the commit — per-path fallback stages the rest', async () => {
+    const calls = [];
+    const git = async (args) => {
+      calls.push(args.join(' '));
+      const cmd = args.join(' ');
+      if (cmd.startsWith('add ')) {
+        // batch add fails (one pathspec matches nothing)…
+        if (args.length > 3) return { code: 128, stdout: '', stderr: "fatal: pathspec 'src/x.test.tsx' did not match any files" };
+        // …per-path: the real file adds fine, the ghost one fails.
+        return args.includes('src/x.test.tsx') ? { code: 128, stdout: '', stderr: 'no match' } : { code: 0, stdout: '', stderr: '' };
+      }
+      if (cmd.startsWith('diff --cached')) return { code: 0, stdout: 'src/real.ts\n', stderr: '' };
+      if (cmd.startsWith('commit')) return { code: 0, stdout: '', stderr: '' };
+      if (cmd.startsWith('rev-parse')) return { code: 0, stdout: 'abc123\n', stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    const r = await integrateStory({
+      repoDir: '/w', touches: ['src/real.ts', 'src/x.test.tsx'], storyId: 's1', title: 't',
+      git, lock: (_d, fn) => fn(),
+    });
+    expect(r.committed).toBe(true);
+    expect(r.sha).toBe('abc123');
+  });
+});

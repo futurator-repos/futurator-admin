@@ -45,9 +45,25 @@ export async function integrateStory({ repoDir, touches, storyId, title, planBra
       if (b.reason) return { committed: false, reason: `plan-branch: ${b.reason}` };
     }
 
-    // Stage the story's files.
-    const add = await git(['add', ...stageArgs(touches)], repoDir);
-    if (add.code !== 0) return { committed: false, reason: `git add failed: ${(add.stderr || '').slice(0, 200)}` };
+    // Stage the story's files. `git add` HARD-FAILS the whole pathspec list when
+    // ANY entry matches nothing — and a declared touch can legitimately never
+    // materialize (pacman4, 2026-07-04: the planner lists test files in touches;
+    // the test-author placed its tests elsewhere → `pathspec '….test.tsx' did
+    // not match any files` failed otherwise-green stories). Batch add first;
+    // on failure fall back to per-path adds, tolerating individual misses —
+    // the nothing-staged guard below still refuses an empty commit.
+    const paths = stageArgs(touches);
+    const add = await git(['add', ...paths], repoDir);
+    if (add.code !== 0) {
+      let anyAdded = false;
+      for (const p of paths) {
+        const one = await git(['add', '--', p], repoDir);
+        if (one.code === 0) anyAdded = true;
+      }
+      if (!anyAdded) {
+        return { committed: false, reason: `git add failed: ${(add.stderr || '').slice(0, 200)}` };
+      }
+    }
 
     // Nothing staged (story wrote nothing, or files unchanged) → no commit.
     const staged = await git(['diff', '--cached', '--name-only'], repoDir);
