@@ -2339,6 +2339,29 @@ async function scanStaleEpicDevJobs() {
           'warn',
           `[${job.jobId.slice(0, 8)}] non-orchestrator stale job marked STALE (phase=${job.phase || 'pipeline'})`,
         );
+
+        // P3 SELF-HEAL (pacman4 f594a817, 2026-07-05): a stale story-dev job
+        // leaves its StoryNode 'claimed' FOREVER — the frontier's atomic claim
+        // only takes state=ready rows, so the plan wedges until an operator
+        // resets it by hand (three times today). Release the dead job's claim
+        // (condition: still claimed BY this jobId — a re-claimed story is
+        // untouched) so the frontier re-mints. Safe to re-run: the test-author
+        // is retry-idempotent and the completion gate re-verifies bindings.
+        if (job.jobType === 'story-dev' && job.storyNodeRef?.storyId) {
+          try {
+            const { buildOrphanReleaseParams } = await import('./lib/atomic-claim.mjs');
+            await ddb.send(new UpdateCommand(buildOrphanReleaseParams({
+              table: PLAN_SPEC_GRAPH_TABLE,
+              storyId: job.storyNodeRef.storyId,
+              deadJobId: job.jobId,
+            })));
+            log('warn', `[${job.jobId.slice(0, 8)}] released orphaned story claim ${job.storyNodeRef.storyId.slice(0, 8)} → ready (frontier will re-mint)`);
+          } catch (relErr) {
+            if (relErr.name !== 'ConditionalCheckFailedException') {
+              log('warn', `[${job.jobId.slice(0, 8)}] orphan claim release failed (non-blocking): ${relErr.message}`);
+            }
+          }
+        }
         // Best-effort attention item. Skip if the resolver can't find a planId
         // (legacy jobs without epicId linkage).
         try {

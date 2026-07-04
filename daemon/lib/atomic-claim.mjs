@@ -58,6 +58,34 @@ export function buildRenewParams({ table, storyId, token, leaseMs = DEFAULT_LEAS
   };
 }
 
+/**
+ * Build the ORPHAN release params (back to ready, clear claim) — used by the
+ * stale-heartbeat reaper when the claiming JOB is dead (daemon restart/OOM
+ * killed the spawn mid-run; pacman4 f594a817, 2026-07-05). We don't have the
+ * claim token (it lived in the dead process), so the safety condition is
+ * ownership by the DEAD JOB: `state = claimed AND jobId = <deadJobId>` — a
+ * story re-claimed by a live job carries a different jobId and is never
+ * touched. Re-running a partially-done story is safe: the test-author is
+ * retry-idempotent and the completion gate re-verifies every binding. PURE.
+ */
+export function buildOrphanReleaseParams({ table, storyId, deadJobId, now = Date.now() }) {
+  return {
+    TableName: table,
+    Key: { storyId },
+    UpdateExpression:
+      'SET #state = :ready, updatedAt = :now REMOVE claimOwner, claimToken, claimExpiresAt, jobId',
+    ConditionExpression: '#state = :claimed AND jobId = :deadJobId',
+    ExpressionAttributeNames: { '#state': 'state' },
+    ExpressionAttributeValues: {
+      ':ready': 'ready',
+      ':claimed': 'claimed',
+      ':now': new Date(now).toISOString(),
+      ':deadJobId': deadJobId,
+    },
+    ReturnValues: 'ALL_NEW',
+  };
+}
+
 /** Build the release params (back to ready, clear claim) — only our claim. PURE. */
 export function buildReleaseParams({ table, storyId, token, now = Date.now() }) {
   return {
