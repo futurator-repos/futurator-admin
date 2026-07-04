@@ -1113,6 +1113,9 @@ export default $config({
         DEV_ENV_CF_ID: devRouter.distributionID,
         STAGING_ENV_BUCKET: stagingEnvBucket.name,
         STAGING_ENV_CF_ID: stagingRouter.distributionID,
+        // QA-Review W2 — gates GET qa-review-p3 (surfaces only on 'on') + the
+        // approve/send-back write paths. off/shadow → the API returns no report.
+        P3_QA_REVIEW: process.env.P3_QA_REVIEW ?? 'off',
         AGENT_SESSIONS_TABLE: agentSessionsTable.name,
         AGENT_CONVERSATIONS_TABLE: agentConversationsTable.name,
         TIMING_SUMMARY_TABLE: timingSummaryTable.name,
@@ -1486,6 +1489,9 @@ export default $config({
           DEV_ENV_CF_ID: devRouter.distributionID,
           STAGING_ENV_BUCKET: stagingEnvBucket.name,
           STAGING_ENV_CF_ID: stagingRouter.distributionID,
+          // QA-Review W2 — gates the p3-qa auto-enqueue in handleP3Plan (off →
+          // never enqueues). Mirror of the daemon flag; the daemon runs the job.
+          P3_QA_REVIEW: process.env.P3_QA_REVIEW ?? 'off',
         },
       },
     });
