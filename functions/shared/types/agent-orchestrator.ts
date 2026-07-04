@@ -388,6 +388,12 @@ export interface AgentJob {
   phase?: AgentJobPhase;
   epicId?: string;
   /**
+   * QA-Review W1 — set on P3 (epic-less) DEPLOY jobs so `postDeployWriteback`
+   * resolves the plan directly instead of hopping through an epic. Absent on
+   * legacy jobs, which carry `epicId` instead.
+   */
+  planId?: string;
+  /**
    * Deployment v2.5 — which environment a DEPLOY job publishes to. Set by the
    * deploy endpoint + the cron auto-trigger. The daemon's `postDeployWriteback`
    * advances `main` ONLY when this is `production`; `dev`/`staging` deploys

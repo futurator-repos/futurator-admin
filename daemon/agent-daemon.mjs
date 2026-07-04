@@ -101,6 +101,7 @@ import { defaultExecutors } from './lib/test-executors.mjs';
 import { buildStoryStateUpdate } from './lib/story-persist.mjs';
 import { runStoryCompileGraph } from './pipelines/lib/story-compile-graph.mjs';
 import { enqueueStoryReflector } from './pipelines/lib/story-reflector-hook.mjs';
+import { nextStatusOnDispatch, nextStatusOnAllDone } from './lib/p3-lifecycle.mjs';
 import { runUltracodeBenchJob } from './pipelines/ultracode-bench-job-runner.mjs';
 import { makeCaptureDeps } from './pipelines/ultracode-bench-capture.mjs';
 import { runDualAgentCompare } from './pipelines/dual-agent-compare-runner.mjs';
@@ -1759,6 +1760,29 @@ async function executeStoryDevJob(job) {
   const rigor = planRow?.rigor || 'mvp';
   const appId = planRow?.appId || pathBasename(job.workingDir || '');
 
+  // QA-Review W1 (P3_LIFECYCLE) — the plan status driver. A P3 plan is created
+  // at 'concept' and, without the epic-shaped reducer, would stay there forever.
+  // On the first story dispatch, advance concept→developing so the lifecycle
+  // strip reflects reality. Conditional write → idempotent + race-safe (only the
+  // concept→developing transition ever fires here). Dark unless the flag is on.
+  if (process.env.P3_LIFECYCLE === 'on' && planId) {
+    const nextStatus = nextStatusOnDispatch(planRow?.status || 'concept');
+    if (nextStatus) {
+      try {
+        await ddb.send(new UpdateCommand({
+          TableName: PLANS_TABLE,
+          Key: { planId },
+          UpdateExpression: 'SET #s = :next, updatedAt = :now',
+          ConditionExpression: '#s = :concept',
+          ExpressionAttributeNames: { '#s': 'status' },
+          ExpressionAttributeValues: { ':next': nextStatus, ':concept': 'concept', ':now': new Date().toISOString() },
+        }));
+        if (planRow) planRow.status = nextStatus;
+        log('info', `[${short}] plan ${planId.slice(0, 8)} → ${nextStatus} (first dispatch)`);
+      } catch { /* conditional-check fail = another job already advanced it; fine */ }
+    }
+  }
+
   const updateStoryState = async ({ storyId: sid, state, verdict, acceptanceCriteria, commitSha, metrics, loadedSkills }) => {
     try {
       // Glue aliases EVERY key (#state is a reserved word + GSI key), flattens
@@ -2042,6 +2066,32 @@ async function executeStoryDevJob(job) {
           uuid: randomUUID,
           log,
         });
+
+        // QA-Review W1 (P3_LIFECYCLE) — every story done ⇒ advance the plan to
+        // 'review'. This is the trigger the cron's P3 branch watches to auto
+        // dev-deploy the assembled app to dev.futurator.ai/<appId>/ and launch
+        // QA. Conditional write on a pre-review status → idempotent, so the
+        // concurrent last-completions that all see allDone race safely (exactly
+        // one flips it). Dark unless the flag is on.
+        if (process.env.P3_LIFECYCLE === 'on') {
+          const nextStatus = nextStatusOnAllDone(planRow?.status || 'developing');
+          if (nextStatus) {
+            try {
+              await ddb.send(new UpdateCommand({
+                TableName: PLANS_TABLE,
+                Key: { planId },
+                UpdateExpression: 'SET #s = :rev, reviewAt = :now, updatedAt = :now',
+                ConditionExpression: '#s IN (:concept, :developing, :fixing)',
+                ExpressionAttributeNames: { '#s': 'status' },
+                ExpressionAttributeValues: {
+                  ':rev': 'review', ':now': new Date().toISOString(),
+                  ':concept': 'concept', ':developing': 'developing', ':fixing': 'fixing',
+                },
+              }));
+              log('info', `[${short}] plan ${planId.slice(0, 8)} → review (all ${nodes.length} stories done)`);
+            } catch { /* conditional fail = already advanced by a racing completion; fine */ }
+          }
+        }
       }
     } catch (e) {
       log('warn', `[${short}] plan-close reflector check failed (non-blocking): ${e.message}`);
@@ -5794,25 +5844,32 @@ async function executePartyDocsUnlinkJob(job) {
  */
 async function postDeployWriteback(job, variables) {
   if (!variables || variables.DEPLOY_STATUS !== 'success') return;
-  if (!job?.epicId) return;
 
   const short = job.jobId.slice(0, 8);
-  let epic;
-  try {
-    const er = await ddb.send(
-      new GetCommand({ TableName: EPICS_TABLE, Key: { epicId: job.epicId } }),
-    );
-    epic = er.Item;
-  } catch (err) {
-    log('warn', `[${short}] post-deploy: epic read failed: ${err.message}`);
-    return;
+  // QA-Review W1 — resolve the plan. P3 deploy jobs carry `planId` directly
+  // (no epic); legacy deploy jobs carry `epicId` and we hop epic→planId. Prefer
+  // the direct planId when present so P3 dev-deploys record their preview URL.
+  let planId = job.planId || null;
+  if (!planId) {
+    if (!job?.epicId) return;
+    let epic;
+    try {
+      const er = await ddb.send(
+        new GetCommand({ TableName: EPICS_TABLE, Key: { epicId: job.epicId } }),
+      );
+      epic = er.Item;
+    } catch (err) {
+      log('warn', `[${short}] post-deploy: epic read failed: ${err.message}`);
+      return;
+    }
+    if (!epic?.planId) return;
+    planId = epic.planId;
   }
-  if (!epic?.planId) return;
 
   let plan;
   try {
     const pr = await ddb.send(
-      new GetCommand({ TableName: PLANS_TABLE, Key: { planId: epic.planId } }),
+      new GetCommand({ TableName: PLANS_TABLE, Key: { planId } }),
     );
     plan = pr.Item;
   } catch (err) {

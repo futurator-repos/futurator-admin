@@ -31,6 +31,7 @@ import { useStoryNodes } from '@/hooks/use-story-nodes';
 import { useDaemonStatus } from '@/hooks/use-daemon-status';
 import { Labs3Header } from './labs3-header';
 import { ProjectHero } from './project-hero';
+import { LifecycleStrip } from './lifecycle-strip';
 import { PipelineStrip } from './pipeline-strip';
 import { DevelopingSubtabs } from './developing-subtabs';
 import { buildStoryGraphModel, type Labs3ViewProps } from './adapter';
@@ -219,6 +220,7 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
         </div>
       )}
       <ProjectHero plan={plan} model={model} />
+      <LifecycleStrip plan={plan} />
       <PipelineStrip model={model} onSelectBatch={() => goToSubtab('graph')} />
 
       <DevelopingSubtabs active={activeSubtab} onChange={(t) => goToSubtab(t)} />

@@ -135,6 +135,7 @@ Never end the session without emitting a DEPLOY_STATUS line. Never ask for permi
  */
 export function buildDeployJob(params: {
   jobId: string;
+  /** Legacy plans key deploys on an epic; empty string for P3 (plan-keyed). */
   epicId: string;
   workingDir: string;
   createdBy: string;
@@ -142,12 +143,18 @@ export function buildDeployJob(params: {
   target: ResolvedDeployTarget;
   /** When set (production), snapshot the release for rollback. Pass the jobId. */
   archiveReleaseId?: string;
+  /**
+   * QA-Review W1 — P3 (epic-less) plans stamp `planId` directly so the daemon's
+   * postDeployWriteback resolves the plan without an epic hop. Omit for legacy.
+   */
+  planId?: string;
 }): AgentJob {
-  const { jobId, epicId, workingDir, createdBy, nowIso, target, archiveReleaseId } = params;
+  const { jobId, epicId, workingDir, createdBy, nowIso, target, archiveReleaseId, planId } = params;
   return {
     jobId,
     status: 'PENDING',
     epicId,
+    ...(planId ? { planId } : {}),
     deployEnvironment: target.environment,
     createdAt: nowIso,
     updatedAt: nowIso,

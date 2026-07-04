@@ -71,6 +71,10 @@ export interface Plan {
   epicIds: string[];
   workingDir: string;
   deployUrl?: string;
+  /** QA-Review — clickable DEV preview (dev.futurator.ai/<appId>/), harness ON. */
+  devUrl?: string;
+  /** QA-Review — clickable STAGING preview. */
+  stagingUrl?: string;
   devModel?: string;
   devEffort?: string;
   reviewerModel?: string;

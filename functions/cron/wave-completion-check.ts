@@ -50,6 +50,71 @@ export const handler = async () => {
   // routing dedupKey writes through the idempotent upsert.)
   const planDepsShared: PlanReducerDeps = buildPlanReducerDeps();
 
+  // ── QA-Review W1 — P3 plan lifecycle tail (dev-deploy + delivered). ──
+  // A P3 plan carries no epics, so the epic-shaped reducer/QA/deploy path can't
+  // resolve a workingDir. The daemon's P3_LIFECYCLE driver flips the plan to
+  // `review`; this reacts to that by auto-publishing the assembled app to the
+  // DEV preview (dev.futurator.ai/<appId>/, subdomain mode) so the operator can
+  // click exactly what QA will test. At-most-once (guarded by devDeployJobId),
+  // plan-keyed (deploy job stamps planId, not epicId), never throws.
+  const EC2_PROJECTS_ROOT = process.env.EC2_PROJECTS_ROOT || '/home/ubuntu/projects';
+  async function handleP3Plan(plan: Awaited<ReturnType<typeof planRepo.getAllPlans>>[number]) {
+    // 1. Auto dev-deploy on review (once).
+    if (plan.status === 'review' && !plan.devDeployJobId) {
+      try {
+        const appId = plan.appId as string;
+        // F29 — dev preview is keyed on the CLEAN app slug.
+        const target = resolveDeployTarget({ planSlug: appId, appId }, 'dev');
+        const devJobId = planDepsShared.uuid();
+        await planDepsShared.createJob(
+          buildDeployJob({
+            jobId: devJobId,
+            epicId: '', // P3 is plan-keyed
+            planId: plan.planId,
+            workingDir: `${EC2_PROJECTS_ROOT}/${appId}`,
+            createdBy: plan.createdBy,
+            nowIso: planDepsShared.now(),
+            target,
+          }),
+        );
+        await planRepo.updatePlanFields(plan.planId, { devDeployJobId: devJobId });
+        log('info', 'wave-completion-check', 'P3 auto dev-deploy enqueued', {
+          planId: plan.planId,
+          jobId: devJobId,
+          url: target.publicUrl,
+        });
+      } catch (err) {
+        log('error', 'wave-completion-check', 'P3 auto dev-deploy failed (non-fatal)', {
+          planId: plan.planId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // 2. review → delivered when a PRODUCTION deploy job completes (W3 promote).
+    const latestDeployJobId = plan.deployJobIds?.[plan.deployJobIds.length - 1];
+    if (plan.status === 'review' && latestDeployJobId) {
+      try {
+        const deployJob = await agentJobsRepo.getJobById(latestDeployJobId);
+        if (deployJob?.status === 'COMPLETED') {
+          await planRepo.updatePlanFields(plan.planId, {
+            status: 'delivered',
+            deployUrl: deployJob.variables?.DEPLOY_URL,
+          });
+          log('info', 'wave-completion-check', 'P3 plan marked delivered', {
+            planId: plan.planId,
+            deployJobId: latestDeployJobId,
+          });
+        }
+      } catch (err) {
+        log('error', 'wave-completion-check', 'P3 delivered-check failed (non-fatal)', {
+          planId: plan.planId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
   try {
     // ── 1. Plans pass — the authoritative entrypoint post-Story 17.4. ──
     const plans = await planRepo.getAllPlans();
@@ -60,6 +125,16 @@ export const handler = async () => {
 
     for (const plan of activePlans) {
       try {
+        // ── QA-Review W1 — P3 (pipeline-3) plans have NO epics; the epic-shaped
+        // reducer/QA/deploy path below does not apply. The daemon's P3_LIFECYCLE
+        // driver already advanced this plan to `review`, so here we only need the
+        // plan-keyed dev-deploy + delivered detection, then skip the epic loop.
+        const isP3Plan = (!plan.epicIds || plan.epicIds.length === 0) && Boolean(plan.appId);
+        if (isP3Plan) {
+          await handleP3Plan(plan);
+          continue;
+        }
+
         const epicsForPlan = [];
         for (const epicId of plan.epicIds) {
           const epic = await epicRepo.getEpicById(epicId);

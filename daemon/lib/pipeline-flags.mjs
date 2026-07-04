@@ -58,6 +58,11 @@ export const P3_FLAGS = Object.freeze({
   P3_SELECTIVE_REGRESSION: { values: ['off', 'shadow', 'on'], default: 'off' },
   // Scope the reflector prompt to landing targets + emit skill-requirement.
   P3_REFLECTOR_SCOPE: { values: ['off', 'on'], default: 'off' },
+  // QA-Review W1 — the P3 plan lifecycle driver. When on, the daemon advances
+  // plan.status (concept→developing on dispatch, →review when every story is
+  // done + reviewAt), which lets the auto dev-deploy + QA stages engage. Off →
+  // P3 plans stay in 'concept' forever (legacy behavior), no dev-deploy.
+  P3_LIFECYCLE: { values: ['off', 'on'], default: 'off' },
 });
 
 export const P3_FLAG_NAMES = Object.freeze(Object.keys(P3_FLAGS));
