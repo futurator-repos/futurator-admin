@@ -37,6 +37,16 @@ describe('resolveFlags — defaults', () => {
     const f = resolveFlags({ epicId: 'e1', env: {} });
     expect(Object.isFrozen(f)).toBe(true);
   });
+
+  it('P3_QA_REVIEW (W2): defaults off, honors shadow/on, coerces garbage', () => {
+    expect(P3_FLAGS.P3_QA_REVIEW.values).toEqual(['off', 'shadow', 'on']);
+    expect(resolveFlags({ epicId: 'e1', env: {} }).P3_QA_REVIEW).toBe('off');
+    expect(resolveFlags({ epicId: 'e1', env: { P3_QA_REVIEW: 'shadow' } }).P3_QA_REVIEW).toBe('shadow');
+    expect(resolveFlags({ epicId: 'e1', env: { P3_QA_REVIEW: 'on' } }).P3_QA_REVIEW).toBe('on');
+    expect(resolveFlags({ epicId: 'e1', env: { P3_QA_REVIEW: 'banana' } }).P3_QA_REVIEW).toBe('off');
+    expect(isEnabled(resolveFlags({ epicId: 'e1', env: {} }), 'P3_QA_REVIEW')).toBe(false);
+    expect(isEnabled(resolveFlags({ epicId: 'e1', env: { P3_QA_REVIEW: 'on' } }), 'P3_QA_REVIEW')).toBe(true);
+  });
 });
 
 describe('resolveFlags — allowlist gating', () => {

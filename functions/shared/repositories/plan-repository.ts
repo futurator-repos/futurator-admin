@@ -100,6 +100,47 @@ export async function updatePlanFields(
 }
 
 /**
+ * QA-Review W2 — clear the p3QaJobId FK (REMOVE, not SET-null) so the cron's
+ * `!plan.p3QaJobId` guard re-enqueues a fresh QA run after a send-back. The
+ * generic updatePlanFields skips `undefined`, so a dedicated REMOVE is needed.
+ */
+export async function clearP3QaJob(planId: string): Promise<void> {
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.plans,
+      Key: { planId },
+      UpdateExpression: 'REMOVE p3QaJobId SET updatedAt = :now',
+      ExpressionAttributeValues: { ':now': new Date().toISOString() },
+    }),
+  );
+}
+
+/**
+ * QA-Review W2 — persist a fresh P3 QA verdict, shadow-safe. Two guards:
+ *  1. STALE guard — only write if verdict.ranAtSha matches the plan's current
+ *     qaCommitSha (the runner ran against the deployed artifact; if the artifact
+ *     moved on since, this verdict is stale and dropped).
+ *  2. DECISION guard — never clobber an operator decision: if the stored verdict
+ *     already carries decidedAt, a re-run leaves it untouched.
+ * Returns whether it wrote. Reuses updatePlanFields for the write itself.
+ */
+export async function writeP3QaVerdict(
+  planId: string,
+  verdict: NonNullable<Plan['p3QaVerdict']>,
+): Promise<{ written: boolean; reason?: string }> {
+  const plan = await getPlanById(planId);
+  if (!plan) return { written: false, reason: 'plan-not-found' };
+  if (plan.qaCommitSha && verdict.ranAtSha && plan.qaCommitSha !== verdict.ranAtSha) {
+    return { written: false, reason: 'stale-sha' };
+  }
+  if (plan.p3QaVerdict?.decidedAt) {
+    return { written: false, reason: 'human-decided' };
+  }
+  await updatePlanFields(planId, { p3QaVerdict: verdict });
+  return { written: true };
+}
+
+/**
  * Event-driven advancement (2026-05-30) — a short-lived per-plan reduce lock.
  *
  * Both the WaveCompletionCheck cron AND the reactive

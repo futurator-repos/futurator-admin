@@ -61,6 +61,8 @@ export const JOB_HANDLER_DUAL_AGENT_COMPARE = 'dual-agent-compare';
 // dimension-tagged finding pool + a phased, dependency-ordered refactoring plan.
 export const JOB_HANDLER_SCAN_ENGINE = 'scan-engine';
 export const JOB_HANDLER_QUICK_PLANSPEC = 'quick-planspec';
+// QA-Review W2 — the deployed-app QA Review job (journeys + VQA against plan.devUrl).
+export const JOB_HANDLER_P3_QA = 'p3-qa';
 
 /**
  * Decide which handler should run a given job.
@@ -99,6 +101,7 @@ export function selectHandler(job) {
   if (job.jobType === 'scan-engine') return JOB_HANDLER_SCAN_ENGINE;
   if (job.jobType === 'story-dev') return JOB_HANDLER_STORY_DEV;
   if (job.jobType === 'quick-planspec') return JOB_HANDLER_QUICK_PLANSPEC;
+  if (job.jobType === 'p3-qa') return JOB_HANDLER_P3_QA;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
 }
@@ -116,6 +119,23 @@ export function validateDualAgentCompareJob(job) {
   if (!p.projectId) return { ok: false, reason: 'projectId-missing' };
   if (!p.projectPath) return { ok: false, reason: 'projectPath-missing' };
   if (!p.question || !String(p.question).trim()) return { ok: false, reason: 'question-missing' };
+  return { ok: true };
+}
+
+/**
+ * QA-Review W2 — structural check for a p3-qa job. Needs the plan it QAs, the
+ * deployed URL to drive, and the frozen commit it pins to. Rejects malformed
+ * rows before the daemon boots playwright. Returns { ok } or { ok:false, reason }.
+ */
+export function validateP3QaJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'p3-qa') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  if (!job.planId) return { ok: false, reason: 'planId-missing' };
+  if (!job.devUrl || !String(job.devUrl).startsWith('http')) return { ok: false, reason: 'devUrl-missing' };
+  if (!job.qaCommitSha || !/^[a-f0-9]{40}$/.test(String(job.qaCommitSha))) {
+    return { ok: false, reason: 'qaCommitSha-invalid' };
+  }
   return { ok: true };
 }
 

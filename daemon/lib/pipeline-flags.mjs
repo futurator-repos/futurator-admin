@@ -63,6 +63,12 @@ export const P3_FLAGS = Object.freeze({
   // done + reviewAt), which lets the auto dev-deploy + QA stages engage. Off →
   // P3 plans stay in 'concept' forever (legacy behavior), no dev-deploy.
   P3_LIFECYCLE: { values: ['off', 'on'], default: 'off' },
+  // QA-Review W2 — the deployed-app QA Review. THE single flag gating every W2
+  // producer AND read (cron enqueue, daemon runner, API GET, UI branch — the
+  // TS/UI sides read process.env.P3_QA_REVIEW directly, same value strings).
+  // 'shadow' = compute + persist the verdict but never surface / never gate;
+  // 'on' = surface it in the QA Review tab + gate Approve on a clean verdict.
+  P3_QA_REVIEW: { values: ['off', 'shadow', 'on'], default: 'off' },
 });
 
 export const P3_FLAG_NAMES = Object.freeze(Object.keys(P3_FLAGS));

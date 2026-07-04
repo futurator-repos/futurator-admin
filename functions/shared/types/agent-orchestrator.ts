@@ -393,6 +393,10 @@ export interface AgentJob {
    * legacy jobs, which carry `epicId` instead.
    */
   planId?: string;
+  /** QA-Review W2 — set on a `p3-qa` job: the deployed URL QA drives. */
+  devUrl?: string;
+  /** QA-Review W2 — set on a `p3-qa` job: the frozen commit QA pins to. */
+  qaCommitSha?: string;
   /**
    * Deployment v2.5 — which environment a DEPLOY job publishes to. Set by the
    * deploy endpoint + the cron auto-trigger. The daemon's `postDeployWriteback`
@@ -471,7 +475,10 @@ export interface AgentJob {
     | 'dual-agent-compare'
     // Refactoring Scan Engine v2. Hybrid deterministic recon + LLM swarm →
     // dimension-tagged findings + a phased dependency-ordered plan. Payload below.
-    | 'scan-engine';
+    | 'scan-engine'
+    // QA-Review W2 — deployed-app QA of a P3 plan (journeys + VQA against
+    // plan.devUrl, pinned to plan.qaCommitSha). Carries planId/devUrl/qaCommitSha.
+    | 'p3-qa';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;

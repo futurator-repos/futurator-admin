@@ -4,11 +4,27 @@ import {
   validateEpicDevJob,
   validatePartyRefreshJob,
   validateFreeAgentSessionJob,
+  validateP3QaJob,
   JOB_HANDLER_LEGACY,
   JOB_HANDLER_EPIC_DEV,
   JOB_HANDLER_PARTY_REFRESH,
   JOB_HANDLER_FREE_AGENT_SESSION,
+  JOB_HANDLER_P3_QA,
 } from '../job-router.mjs';
+
+const SHA = 'a'.repeat(40);
+
+describe('p3-qa routing (W2)', () => {
+  it('routes jobType p3-qa to the p3-qa handler', () => {
+    expect(selectHandler({ jobType: 'p3-qa', jobId: 'j' })).toBe(JOB_HANDLER_P3_QA);
+  });
+  it('validateP3QaJob requires jobId, planId, http devUrl, 40-hex sha', () => {
+    expect(validateP3QaJob({ jobType: 'p3-qa', jobId: 'j', planId: 'p', devUrl: 'https://dev.futurator.ai/x/', qaCommitSha: SHA }).ok).toBe(true);
+    expect(validateP3QaJob({ jobType: 'p3-qa', jobId: 'j', planId: 'p', devUrl: 'https://x', qaCommitSha: 'short' }).ok).toBe(false);
+    expect(validateP3QaJob({ jobType: 'p3-qa', jobId: 'j', planId: 'p', qaCommitSha: SHA }).reason).toBe('devUrl-missing');
+    expect(validateP3QaJob({ jobType: 'other', jobId: 'j' }).reason).toBe('jobType-mismatch');
+  });
+});
 
 describe('selectHandler', () => {
   it('routes phase=epic-dev to the epic-dev handler', () => {

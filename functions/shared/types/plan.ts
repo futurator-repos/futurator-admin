@@ -48,6 +48,8 @@ import type { PlanKind } from '../schemas/plan-schema';
 import type { ConceptPlan, ConceptArtifactKind } from '../concept/concept-plan';
 import type { ConceptArtifact } from '../concept/artifact-version';
 import type { GateResult } from '../services/solutioning-gate';
+import type { P3QaVerdict } from './qa-review-p3';
+import type { DeliveryJourney } from '../schemas/plan-output-schema';
 export type { PlanKind };
 
 /**
@@ -119,6 +121,20 @@ export interface Plan {
   devDeployJobId?: string;
   /** FK to the most recent STAGING promote job — drives the ladder's staging status. */
   stagingDeployJobId?: string;
+
+  // ── QA-Review W2 — the deployed-app QA of a P3 plan ──
+  // The frozen branch-HEAD SHA the dev artifact built from (40-hex). Stamped
+  // ONCE at dev-deploy from the deploy job's COMMIT_SHA; QA pins to it and
+  // Approve promotes exactly it. Shadow-field discipline: qaCommitSha and
+  // p3QaVerdict are only (re)written on a fresh review/fix cycle — a re-run must
+  // never clobber a human decision (p3QaVerdict.decidedAt/decidedBy).
+  qaCommitSha?: string;
+  /** FK to the most recent P3 QA-Review job. Cleared on send-back so QA re-runs. */
+  p3QaJobId?: string;
+  /** The persisted plan-level QA verdict (journeys + VQA + wiring + decision). */
+  p3QaVerdict?: P3QaVerdict;
+  /** Stage-C — the PM-declared delivery journeys, persisted (was schema-only). */
+  deliveryJourneys?: DeliveryJourney[];
 
   // ── Execution defaults applied to all epics under this plan ──
   devModel?: string;

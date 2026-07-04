@@ -152,6 +152,102 @@ export async function runBrowserProbe({ url, actions = [], assertions = [], play
   }
 }
 
+/** Run one step's replayed action against a live Playwright page. */
+async function replayAction(page, action) {
+  if (!action) return;
+  if (action.type === 'key') await page.keyboard.press(action.key);
+  else if (action.type === 'harness')
+    await page.evaluate(({ m, args }) => window.__harness[m](...args), { m: action.method, args: action.args || [] });
+  else if (action.type === 'wait') await page.waitForTimeout(action.ms);
+}
+
+/** Assert a snapshot against a list of {field,op,value} assertions; returns failure strings. */
+function assertSnapshot(snap, assertions = []) {
+  const failures = [];
+  for (const as of assertions) {
+    const actual = snap ? snap[as.field] : undefined;
+    const ok =
+      as.op === 'gt' ? Number(actual) > as.value : as.op === 'lt' ? Number(actual) < as.value : actual === as.value;
+    if (!ok) failures.push(`snapshot.${as.field}=${JSON.stringify(actual)} not ${as.op} ${JSON.stringify(as.value)}`);
+  }
+  return failures;
+}
+
+/**
+ * Drive a REMOTE deployed url (plan.devUrl — QA-Review W2, NEVER a local dev
+ * server: this must not import dev-server-boot or boot anything) through an
+ * ordered sequence of journey steps, asserting the `window.__harness` snapshot
+ * after each step's replayed action. Reuses the exact seam gate + honesty
+ * contract as `runBrowserProbe` (seam-not-mounted → passed:false; a thrown/
+ * uninterpretable run fails closed — never a fake-pass).
+ *
+ * Frame capture (before/after `page.screenshot()` Buffers per step) is
+ * OPT-IN via `capture` so callers that don't need frames (and tests of the
+ * unrelated `runBrowserProbe`/`makeBrowserExecutor` path) are unaffected.
+ *
+ * @param {{ url:string, steps:Array<{label:string, action?:object, assertions?:object[]}>,
+ *   playwright:object, timeoutMs?:number, log?:Function, capture?:boolean }} opts
+ * @returns {Promise<{ passed:boolean, detail:string, frames:Array<{stepLabel:string, before?:Buffer, after?:Buffer}> }>}
+ */
+export async function runBrowserJourney({
+  url,
+  steps = [],
+  playwright,
+  timeoutMs = 30_000,
+  log = () => {},
+  capture = false,
+}) {
+  const chromium = playwright?.chromium ?? playwright?.default?.chromium;
+  if (!chromium) return { passed: false, detail: 'playwright chromium unavailable (import interop)', frames: [] };
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    // 'load', NOT 'networkidle': a deployed app may keep long-lived connections
+    // (polling, websockets) that never go idle — this only needs the document +
+    // the explicit __harness wait below, which is the real readiness signal.
+    await page.goto(url, { waitUntil: 'load', timeout: timeoutMs });
+    try {
+      await page.waitForFunction(
+        () => window.__harness && typeof window.__harness.snapshot === 'function',
+        { timeout: 10_000 },
+      );
+    } catch {
+      return { passed: false, detail: 'window.__harness seam not mounted on the served app', frames: [] };
+    }
+
+    const frames = [];
+    const failures = [];
+    for (const step of steps) {
+      const label = step?.label ?? '(unlabeled step)';
+      const frame = { stepLabel: label };
+      if (capture) frame.before = await page.screenshot();
+      await replayAction(page, step?.action);
+      if (capture) frame.after = await page.screenshot();
+      if (capture) frames.push(frame);
+
+      const snap = await page.evaluate(() => window.__harness.snapshot());
+      const stepFailures = assertSnapshot(snap, step?.assertions);
+      if (stepFailures.length) failures.push(`${label}: ${stepFailures.join('; ')}`);
+    }
+
+    log('info', `[browser-journey] ${url} → ${failures.length ? 'FAIL' : 'PASS'} (${steps.length} step(s))`);
+    return {
+      passed: failures.length === 0,
+      detail: failures.length ? failures.join(' | ') : `journey passed (${steps.length} step(s))`,
+      frames,
+    };
+  } catch (err) {
+    return { passed: false, detail: `browser journey error: ${err?.message || err}`, frames: [] };
+  } finally {
+    try {
+      if (browser) await browser.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
 /**
  * Build the `browser` executor for a story's worktree. Returns an
  * `async (ac) => { passed, detail }`. Deps are injectable for tests; production

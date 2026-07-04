@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseProbe, runBrowserProbe, makeBrowserExecutor } from '../browser-probe-executor.mjs';
+import { parseProbe, runBrowserProbe, makeBrowserExecutor, runBrowserJourney } from '../browser-probe-executor.mjs';
 
 // The two real dino2 "Wire game loop" behavioral ACs.
 const AC_RUN = {
@@ -162,5 +162,125 @@ describe('makeBrowserExecutor', () => {
     const r = await exec(AC_RUN);
     expect(r.passed).toBe(false);
     expect(r.detail).toMatch(/did not boot/);
+  });
+});
+
+// ── Fake Playwright — journey variant (adds a screenshot() spy + call order) ─
+
+function fakePlaywrightJourney({ snapshots = [{}], harnessMounted = true } = {}) {
+  let snapCalls = 0;
+  let shotCalls = 0;
+  const order = [];
+  const page = {
+    gotoUrl: undefined,
+    calls: { keys: [], harness: [], waits: 0, screenshots: 0, order },
+    goto: async (url) => {
+      page.gotoUrl = url;
+    },
+    waitForFunction: async () => {
+      if (!harnessMounted) throw new Error('timeout');
+    },
+    keyboard: { press: async (k) => { page.calls.keys.push(k); order.push(`act:key:${k}`); } },
+    waitForTimeout: async () => { page.calls.waits += 1; order.push('act:wait'); },
+    screenshot: async () => {
+      shotCalls += 1;
+      page.calls.screenshots = shotCalls;
+      order.push(`shot:${shotCalls}`);
+      return Buffer.from(`frame-${shotCalls}`);
+    },
+    evaluate: async (fn, arg) => {
+      if (arg && arg.m) { page.calls.harness.push([arg.m, arg.args]); order.push(`act:harness:${arg.m}`); return undefined; }
+      return snapshots[Math.min(snapCalls++, snapshots.length - 1)];
+    },
+  };
+  const browser = { newPage: async () => page, close: async () => {} };
+  return { pw: { chromium: { launch: async () => browser } }, page };
+}
+
+describe('runBrowserJourney', () => {
+  const REMOTE_URL = 'https://dev.futurator.ai/plans/p-42';
+
+  it('goes to the injected REMOTE url (no localhost, no dev-server boot)', async () => {
+    const { pw, page } = fakePlaywrightJourney({ snapshots: [{ status: 'running' }] });
+    const r = await runBrowserJourney({
+      url: REMOTE_URL,
+      steps: [{ label: 'start', action: { type: 'key', key: 'Space' }, assertions: [{ field: 'status', op: 'eq', value: 'running' }] }],
+      playwright: pw,
+    });
+    expect(page.gotoUrl).toBe(REMOTE_URL);
+    expect(page.gotoUrl).not.toMatch(/localhost|127\.0\.0\.1/);
+    expect(r.passed).toBe(true);
+  });
+
+  it('captures before/act/after frames in order, per step, only when capture:true', async () => {
+    const { pw, page } = fakePlaywrightJourney({
+      snapshots: [{ status: 'running', score: 5 }, { status: 'over', gameOver: true }],
+    });
+    const steps = [
+      { label: 'press Space', action: { type: 'key', key: 'Space' }, assertions: [{ field: 'status', op: 'eq', value: 'running' }] },
+      { label: 'force over', action: { type: 'harness', method: 'forceStatus', args: ['over'] }, assertions: [{ field: 'gameOver', op: 'eq', value: true }] },
+    ];
+    const r = await runBrowserJourney({ url: REMOTE_URL, steps, playwright: pw, capture: true });
+
+    expect(r.passed).toBe(true);
+    expect(page.calls.order).toEqual([
+      'shot:1', 'act:key:Space', 'shot:2',
+      'shot:3', 'act:harness:forceStatus', 'shot:4',
+    ]);
+    expect(r.frames).toHaveLength(2);
+    expect(r.frames[0].stepLabel).toBe('press Space');
+    expect(Buffer.isBuffer(r.frames[0].before)).toBe(true);
+    expect(Buffer.isBuffer(r.frames[0].after)).toBe(true);
+    expect(r.frames[0].before.toString()).toBe('frame-1');
+    expect(r.frames[0].after.toString()).toBe('frame-2');
+    expect(r.frames[1].stepLabel).toBe('force over');
+    expect(r.frames[1].before.toString()).toBe('frame-3');
+    expect(r.frames[1].after.toString()).toBe('frame-4');
+  });
+
+  it('does not capture frames when capture is omitted (default false)', async () => {
+    const { pw, page } = fakePlaywrightJourney({ snapshots: [{ status: 'running' }] });
+    const r = await runBrowserJourney({
+      url: REMOTE_URL,
+      steps: [{ label: 'press Space', action: { type: 'key', key: 'Space' }, assertions: [{ field: 'status', op: 'eq', value: 'running' }] }],
+      playwright: pw,
+    });
+    expect(r.frames).toEqual([]);
+    expect(page.calls.screenshots).toBe(0);
+  });
+
+  it('fails closed when the __harness seam is not mounted (honesty contract)', async () => {
+    const { pw } = fakePlaywrightJourney({ harnessMounted: false });
+    const r = await runBrowserJourney({
+      url: REMOTE_URL,
+      steps: [{ label: 'press Space', action: { type: 'key', key: 'Space' }, assertions: [] }],
+      playwright: pw,
+      capture: true,
+    });
+    expect(r.passed).toBe(false);
+    expect(r.detail).toMatch(/__harness seam not mounted/);
+    expect(r.frames).toEqual([]);
+  });
+
+  it('fails and names the offending step when a step assertion is wrong (never fake-passes)', async () => {
+    const { pw } = fakePlaywrightJourney({ snapshots: [{ status: 'idle' }] });
+    const r = await runBrowserJourney({
+      url: REMOTE_URL,
+      steps: [{ label: 'press Space', action: { type: 'key', key: 'Space' }, assertions: [{ field: 'status', op: 'eq', value: 'running' }] }],
+      playwright: pw,
+    });
+    expect(r.passed).toBe(false);
+    expect(r.detail).toMatch(/press Space/);
+    expect(r.detail).toMatch(/snapshot\.status/);
+  });
+
+  it('handles the CommonJS dynamic-import shape (chromium on .default)', async () => {
+    const { pw } = fakePlaywrightJourney({ snapshots: [{ status: 'running' }] });
+    const r = await runBrowserJourney({
+      url: REMOTE_URL,
+      steps: [{ label: 'noop', assertions: [{ field: 'status', op: 'eq', value: 'running' }] }],
+      playwright: { default: pw },
+    });
+    expect(r.passed).toBe(true);
   });
 });

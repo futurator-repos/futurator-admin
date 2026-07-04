@@ -2,6 +2,8 @@
  * Client-side Plan types, mirroring functions/shared/types/plan.ts.
  */
 
+import type { P3QaVerdict, DeliveryJourney } from './qa-review-p3';
+
 export type PlanStatus =
   | 'concept'
   | 'developing'
@@ -75,6 +77,15 @@ export interface Plan {
   devUrl?: string;
   /** QA-Review — clickable STAGING preview. */
   stagingUrl?: string;
+  /** FK to the most recent DEV / STAGING deploy jobs (parity with the backend). */
+  devDeployJobId?: string;
+  stagingDeployJobId?: string;
+  // ── QA-Review W2 (mirror of functions/shared/types/plan.ts) ──
+  /** Frozen branch-HEAD SHA the dev artifact built from; QA pins to it. */
+  qaCommitSha?: string;
+  p3QaJobId?: string;
+  p3QaVerdict?: P3QaVerdict;
+  deliveryJourneys?: DeliveryJourney[];
   devModel?: string;
   devEffort?: string;
   reviewerModel?: string;

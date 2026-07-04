@@ -91,6 +91,50 @@ export const handler = async () => {
       }
     }
 
+    // 1b. QA-Review W2 — once the dev-deploy has SETTLED (devUrl + qaCommitSha
+    // stamped by the daemon writeback), auto-enqueue the deployed-app QA Review
+    // (journeys + VQA against devUrl, pinned to qaCommitSha). At-most-once
+    // (guarded by p3QaJobId), flag-gated (P3_QA_REVIEW off/shadow/on — off skips
+    // entirely), never throws. Send-back clears p3QaJobId so a fresh QA re-runs.
+    if (
+      process.env.P3_QA_REVIEW &&
+      process.env.P3_QA_REVIEW !== 'off' &&
+      plan.status === 'review' &&
+      plan.devUrl &&
+      plan.qaCommitSha &&
+      !plan.p3QaJobId
+    ) {
+      try {
+        const appId = plan.appId as string;
+        const qaJobId = planDepsShared.uuid();
+        const nowIso = planDepsShared.now();
+        await planDepsShared.createJob({
+          jobId: qaJobId,
+          jobType: 'p3-qa',
+          status: 'PENDING',
+          planId: plan.planId,
+          devUrl: plan.devUrl,
+          qaCommitSha: plan.qaCommitSha,
+          workingDir: `${EC2_PROJECTS_ROOT}/${appId}`,
+          createdBy: plan.createdBy,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+        await planRepo.updatePlanFields(plan.planId, { p3QaJobId: qaJobId });
+        log('info', 'wave-completion-check', 'P3 QA Review enqueued', {
+          planId: plan.planId,
+          jobId: qaJobId,
+          devUrl: plan.devUrl,
+          sha: plan.qaCommitSha.slice(0, 7),
+        });
+      } catch (err) {
+        log('error', 'wave-completion-check', 'P3 QA Review enqueue failed (non-fatal)', {
+          planId: plan.planId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // 2. review → delivered when a PRODUCTION deploy job completes (W3 promote).
     const latestDeployJobId = plan.deployJobIds?.[plan.deployJobIds.length - 1];
     if (plan.status === 'review' && latestDeployJobId) {

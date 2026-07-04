@@ -70,6 +70,8 @@ Goal: build and publish the web app at ${workingDir} to s3://${s3Bucket}/${s3Pre
 
 Steps (execute in order, each step must succeed before the next):
 
+0. FIRST, before editing ANY file, record the commit you are about to build so QA can pin to it: run \`git -C ${workingDir} rev-parse HEAD\` and remember the 40-character SHA it prints. You will emit it at the end as COMMIT_SHA. Do NOT create any commit yourself at any point — you only edit config, build, and sync.
+
 1. Detect the framework and patch its config so the bundle is served correctly under its base path. Do this BEFORE building — the bundle's asset URLs must be prefixed correctly or the page will 404 its own JS/CSS.
    - If \`${workingDir}/next.config.ts\`, \`.js\`, or \`.mjs\` exists -> NEXT.JS. Edit next.config to ensure: \`output: 'export'\`, \`basePath: '${basePathNoSlash}'\` (NO trailing slash; use an empty string \`''\` if that value is empty — never \`'/'\`), and \`images: { unoptimized: true }\` (required, or \`output: 'export'\` fails the build). Add any of these that are missing; replace any existing \`basePath\`. The build output dir is \`out/\`.
    - Else if \`${workingDir}/vite.config.ts\` or \`.js\` exists -> VITE. Edit vite.config to set \`base: '${basePath}'\` (WITH trailing slash) inside defineConfig({ ... }), replacing any existing \`base\`. The build output dir is \`dist/\`.
@@ -83,16 +85,18 @@ Steps (execute in order, each step must succeed before the next):
 
 5. Invalidate CloudFront: \`aws cloudfront create-invalidation --distribution-id ${cloudfrontDistributionId} --paths "${invalidationPath}"\`
 
-When finished, output these three lines EXACTLY — they are machine-parsed:
+When finished, output these lines EXACTLY — they are machine-parsed:
 
 DEPLOY_URL: ${publicUrl}
 DEPLOY_STATUS: success
+COMMIT_SHA: <the 40-char SHA you recorded in step 0>
 DEPLOY_DETAILS: <one-sentence summary of what you did>
 
 If ANY step above failed and you cannot recover, instead output:
 
 DEPLOY_URL: ${publicUrl}
 DEPLOY_STATUS: failed
+COMMIT_SHA: <the 40-char SHA you recorded in step 0, or omit if unknown>
 DEPLOY_DETAILS: <which step failed and why>
 
 Never end the session without emitting a DEPLOY_STATUS line. Never ask for permission.`,
@@ -110,6 +114,13 @@ Never end the session without emitting a DEPLOY_STATUS line. Never ask for permi
           DEPLOY_STATUS: {
             type: 'regex',
             pattern: '[*_`]*DEPLOY_STATUS[*_`]*:\\s*[*_`]*\\s*(\\w+)',
+          },
+          // QA-Review W2 — the branch-HEAD SHA the dev artifact built from, so
+          // QA pins to a frozen commit and Approve promotes exactly that build.
+          // Only the EC2 agent can rev-parse; absent line → fail-open (no pin).
+          COMMIT_SHA: {
+            type: 'regex',
+            pattern: '[*_`]*COMMIT_SHA[*_`]*:\\s*[*_`]*([a-f0-9]{40})\\b',
           },
           DEPLOY_DETAILS: {
             type: 'regex',

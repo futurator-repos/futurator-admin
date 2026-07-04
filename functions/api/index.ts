@@ -3927,6 +3927,101 @@ app.post('/api/plans/:id/qa-review', async (c) => {
   );
 });
 
+// ── QA-Review W2 — plan-keyed deployed-app QA (journeys + VQA vs plan.devUrl) ──
+// These are DISTINCT from the legacy epic/wave qa-contract endpoints above: they
+// operate on plan.p3QaVerdict (the assembled-app verdict), never on epics.
+
+// GET /api/plans/:id/qa-review-p3 — the deployed-app QA report (flag-gated read).
+// Off (or no verdict yet) → { enabled, report:null } so the UI shows its fallback.
+app.get('/api/plans/:id/qa-review-p3', async (c) => {
+  const planId = c.req.param('id');
+  const enabled = (process.env.P3_QA_REVIEW ?? 'off') !== 'off';
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  const v = plan.p3QaVerdict;
+  if (!enabled || !v) return c.json({ enabled, report: null });
+  const report = {
+    planId,
+    qaCommitSha: plan.qaCommitSha ?? v.ranAtSha ?? '',
+    devUrl: plan.devUrl ?? '',
+    status: v.blocking ? 'failed' : v.status === 'pass' ? 'passed' : 'running',
+    journeys: v.journeys ?? [],
+    vqa: v.vqa ?? [],
+    wiring: v.wiring ?? { orphanModules: [], blocking: false },
+  };
+  return c.json({ enabled: true, report, verdict: v });
+});
+
+// POST /api/plans/:id/qa/approve — operator blesses the assembled build. Only a
+// NON-blocking verdict can be approved; records the decision pinned to the SHA QA
+// ran against (approvedSha) so W3 promotes exactly that build. Never mutates the
+// journeys/vqa — decision-only.
+app.post('/api/plans/:id/qa/approve', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  const v = plan.p3QaVerdict;
+  if (!v) throw new AppError('NO_QA_VERDICT', 'No QA Review verdict to approve yet.', 400);
+  if (v.blocking) {
+    throw new AppError(
+      'QA_BLOCKING',
+      'Cannot approve — the QA Review has blocking failures. Send it back.',
+      400,
+    );
+  }
+  if (v.decidedAt) {
+    throw new AppError(
+      'ALREADY_DECIDED',
+      `QA already ${v.decision ?? 'decided'} at ${v.decidedAt}.`,
+      409,
+    );
+  }
+  const decided = {
+    ...v,
+    decidedAt: new Date().toISOString(),
+    decidedBy: user?.email ?? user?.userId ?? 'operator',
+    decision: 'approved' as const,
+    approvedSha: v.ranAtSha,
+  };
+  await planRepo.updatePlanFields(planId, { p3QaVerdict: decided });
+  return c.json({ ok: true, verdict: decided });
+});
+
+// POST /api/plans/:id/qa/send-back — reject the assembled build. Mints fix
+// StoryNodeRows from the blocking findings onto the plan branch, flips the plan
+// to 'fixing', and CLEARS p3QaJobId so a fresh dev-deploy + QA re-runs on the
+// fixed commit. Body: { note?: string }.
+app.post('/api/plans/:id/qa/send-back', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+  const v = plan.p3QaVerdict;
+  if (!v) throw new AppError('NO_QA_VERDICT', 'No QA Review verdict to send back yet.', 400);
+  if (v.decidedAt) {
+    throw new AppError(
+      'ALREADY_DECIDED',
+      `QA already ${v.decision ?? 'decided'} at ${v.decidedAt}.`,
+      409,
+    );
+  }
+  const { mintFixStories } = await import('../shared/services/p3-fix-story-minter');
+  const rows = mintFixStories({ plan, verdict: v });
+  if (rows.length > 0) await storyNodeRepo.batchPutStoryNodes(rows);
+  const decided = {
+    ...v,
+    decidedAt: new Date().toISOString(),
+    decidedBy: user?.email ?? user?.userId ?? 'operator',
+    decision: 'sent-back' as const,
+  };
+  // Flip to fixing + record the decision, then REMOVE p3QaJobId (a separate
+  // REMOVE — updatePlanFields can't clear a field) so the cron re-enqueues QA.
+  await planRepo.updatePlanFields(planId, { status: 'fixing', p3QaVerdict: decided });
+  await planRepo.clearP3QaJob(planId);
+  return c.json({ ok: true, mintedStories: rows.length, storyIds: rows.map((r) => r.storyId) });
+});
+
 // POST /api/plans/:id/qa-contract/approve
 //   Pipeline v2.0 PR-8d (Q4.2) — operator approves the QA test contract
 //   produced by the aggregate stage. Body may carry edited test fields:

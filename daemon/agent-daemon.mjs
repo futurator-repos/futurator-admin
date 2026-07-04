@@ -89,7 +89,9 @@ import {
   JOB_HANDLER_SCAN_ENGINE,
   JOB_HANDLER_STORY_DEV,
   JOB_HANDLER_QUICK_PLANSPEC,
+  JOB_HANDLER_P3_QA,
   validateScanEngineJob,
+  validateP3QaJob,
 } from './pipelines/job-router.mjs';
 import { runStoryDevJob } from './pipelines/story-dev-pipeline.mjs';
 import { runQuickPlanspecJob } from './pipelines/quick-planspec-runner.mjs';
@@ -1742,6 +1744,94 @@ async function executeQuickPlanspecJob(job) {
     updateJobFields,
     writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
     log,
+  });
+}
+
+// QA-Review W2 — execute a p3-qa job: drive the DEPLOYED dev URL through the
+// plan's journeys (Lane 1) + before/after VQA (Lane 2) + the wiring/orphan check,
+// then persist the plan-level verdict shadow-safely. All heavy deps (playwright,
+// judge, s3) are wired from the daemon's existing gate/shell primitives. Never
+// throws out — a failure marks the job FAILED and leaves the plan verdict alone.
+async function executeP3QaJob(job) {
+  const short = job.jobId.slice(0, 8);
+  const vlog = (level, msg) => log(level, `[${short}] ${msg}`);
+  await updateJobFields(job.jobId, { status: 'RUNNING', lastHeartbeatAt: new Date().toISOString() });
+
+  const check = validateP3QaJob(job);
+  if (!check.ok) {
+    vlog('error', `p3-qa job invalid: ${check.reason}`);
+    await updateJobFields(job.jobId, { status: 'FAILED', error: `invalid p3-qa job: ${check.reason}` });
+    return;
+  }
+
+  // Load the plan + its story rows (touches → orphan check; ACs → journey fallback).
+  const plan = (await ddb.send(new GetCommand({ TableName: PLANS_TABLE, Key: { planId: job.planId } }))).Item;
+  if (!plan) {
+    await updateJobFields(job.jobId, { status: 'FAILED', error: 'plan-not-found' });
+    return;
+  }
+  let stories = [];
+  try {
+    const { Items } = await ddb.send(new QueryCommand({
+      TableName: PLAN_SPEC_GRAPH_TABLE,
+      IndexName: 'planId-cohortBatch-index',
+      KeyConditionExpression: 'planId = :p',
+      ExpressionAttributeValues: { ':p': job.planId },
+    }));
+    stories = Items || [];
+  } catch (e) { vlog('warn', `story read failed (orphan/journey coverage reduced): ${e.message}`); }
+
+  const { runP3Qa } = await import('./lib/p3-qa-runner.mjs');
+  const { defaultShellRunner } = await import('./lib/wave-merge-runner.mjs');
+  let playwright = null;
+  try { playwright = await import('playwright'); }
+  catch (e) { vlog('warn', `playwright import failed — Lane 1 reports seam-unreachable (fail-closed): ${e.message}`); }
+
+  // The job carries the authoritative pin (devUrl + qaCommitSha stamped at deploy).
+  const planForQa = {
+    ...plan,
+    devUrl: job.devUrl || plan.devUrl,
+    qaCommitSha: job.qaCommitSha || plan.qaCommitSha,
+    workingDir: job.workingDir || plan.workingDir,
+  };
+
+  let verdict;
+  try {
+    verdict = await runP3Qa({
+      plan: planForQa,
+      stories,
+      playwright,
+      spawnJudge: (a) => spawnGateAgent({ ...a, role: 'judge' }, { short }),
+      s3: (cmd, cwd, timeoutMs) => defaultShellRunner(cmd, cwd, timeoutMs),
+      qaContext: { workingDir: planForQa.workingDir },
+      log,
+    });
+  } catch (e) {
+    vlog('error', `p3-qa run threw: ${e.message}`);
+    await updateJobFields(job.jobId, { status: 'FAILED', error: e.message });
+    return;
+  }
+
+  // Persist shadow-safely: only under the SHA QA ran against, never over a human
+  // decision (mirrors functions/shared repositories writeP3QaVerdict guards).
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: PLANS_TABLE,
+      Key: { planId: job.planId },
+      UpdateExpression: 'SET p3QaVerdict = :v, updatedAt = :now',
+      ExpressionAttributeValues: { ':v': verdict, ':now': new Date().toISOString(), ':sha': verdict.ranAtSha || '' },
+      ConditionExpression:
+        '(attribute_not_exists(qaCommitSha) OR qaCommitSha = :sha) AND attribute_not_exists(p3QaVerdict.decidedAt)',
+    }));
+    vlog('info', `p3-qa verdict: status=${verdict.status} blocking=${verdict.blocking} journeys=${verdict.journeys?.length ?? 0} orphans=${verdict.wiring?.orphanModules?.length ?? 0}`);
+  } catch (e) {
+    if (e.name === 'ConditionalCheckFailedException') vlog('warn', 'p3-qa verdict dropped (stale SHA or human-decided)');
+    else vlog('warn', `p3-qa verdict persist failed: ${e.message}`);
+  }
+
+  await updateJobFields(job.jobId, {
+    status: 'COMPLETED',
+    variables: { QA_STATUS: verdict.status, QA_BLOCKING: String(verdict.blocking) },
   });
 }
 
@@ -5891,19 +5981,51 @@ async function postDeployWriteback(job, variables) {
   if (deployEnv !== 'production') {
     if (!deployUrl) return;
     const field = deployEnv === 'staging' ? 'stagingUrl' : 'devUrl';
+    // QA-Review W2 — on a DEV deploy, ALSO stamp the frozen commit the artifact
+    // built from (the deploy agent's COMMIT_SHA) so QA pins to it and Approve
+    // promotes exactly it. Shadow-safe: only stamp when the SHA is a valid
+    // 40-hex AND the plan has no human QA decision yet (never re-pin under a
+    // decided verdict). Absent/invalid SHA → devUrl still recorded (fail-open).
+    const commitSha = job.variables?.COMMIT_SHA;
+    const stampSha =
+      deployEnv === 'dev' && typeof commitSha === 'string' && /^[a-f0-9]{40}$/.test(commitSha)
+        ? commitSha
+        : null;
     try {
+      const expr = stampSha
+        ? `SET ${field} = :url, qaCommitSha = :sha, updatedAt = :now`
+        : `SET ${field} = :url, updatedAt = :now`;
+      const vals = stampSha
+        ? { ':url': deployUrl, ':sha': stampSha, ':now': now }
+        : { ':url': deployUrl, ':now': now };
       await ddb.send(
         new UpdateCommand({
           TableName: PLANS_TABLE,
           Key: { planId: plan.planId },
-          UpdateExpression: `SET ${field} = :url, updatedAt = :now`,
-          ExpressionAttributeValues: { ':url': deployUrl, ':now': now },
-          ConditionExpression: 'attribute_exists(planId)',
+          UpdateExpression: expr,
+          ExpressionAttributeValues: vals,
+          // Never re-pin the QA commit under an existing human decision.
+          ConditionExpression: stampSha
+            ? 'attribute_exists(planId) AND attribute_not_exists(p3QaVerdict.decidedAt)'
+            : 'attribute_exists(planId)',
         }),
       );
-      log('info', `[${short}] post-deploy: ${deployEnv} preview recorded — ${deployUrl}`);
+      log('info', `[${short}] post-deploy: ${deployEnv} preview recorded — ${deployUrl}${stampSha ? ` @ ${stampSha.slice(0, 7)}` : ''}`);
     } catch (err) {
-      log('warn', `[${short}] post-deploy: ${deployEnv} preview write failed: ${err.message}`);
+      // A conditional-check failure here means a human already decided — record
+      // just the URL without the SHA re-pin (never lose the preview link).
+      if (err.name === 'ConditionalCheckFailedException' && stampSha) {
+        try {
+          await ddb.send(new UpdateCommand({
+            TableName: PLANS_TABLE, Key: { planId: plan.planId },
+            UpdateExpression: `SET ${field} = :url, updatedAt = :now`,
+            ExpressionAttributeValues: { ':url': deployUrl, ':now': now },
+            ConditionExpression: 'attribute_exists(planId)',
+          }));
+        } catch { /* best-effort */ }
+      } else {
+        log('warn', `[${short}] post-deploy: ${deployEnv} preview write failed: ${err.message}`);
+      }
     }
     return;
   }
@@ -7026,6 +7148,8 @@ async function runJobAsync(job) {
       await executeStoryDevJob(job);
     } else if (handler === JOB_HANDLER_QUICK_PLANSPEC) {
       await executeQuickPlanspecJob(job);
+    } else if (handler === JOB_HANDLER_P3_QA) {
+      await executeP3QaJob(job);
     } else {
       await executePipeline(job);
     }
