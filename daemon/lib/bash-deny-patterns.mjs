@@ -78,6 +78,18 @@ const DENY_PATTERNS = Object.freeze([
     reason:
       'deleting project-essential paths (package.json, node_modules, src/, .git/, _bmad/, etc.) is destructive',
   },
+  {
+    label: 'git-stash-shared-tree',
+    // pacman4 forensic (2026-07-05): a story agent ran `git stash … git stash
+    // pop` to isolate a typecheck. The P3 worktree is SHARED across parallel
+    // in-flight stories — a stash swallows SIBLING stories' uncommitted files,
+    // and the pop can conflict, corrupting work the agent doesn't own. Use
+    // `git diff`/`git status` for inspection instead; never mutate the shared
+    // index/worktree state wholesale. (`stash list`/`show` stay allowed.)
+    pattern: /(^|\s|;|&&|\|\|)\s*git\s+stash\b(?!\s+(list|show)\b)/i,
+    reason:
+      'git stash on the SHARED plan worktree swallows parallel sibling stories’ uncommitted work (pop can conflict/corrupt it) — inspect with git diff/status instead',
+  },
   // Deferred to PR-5+: these would be useful but are too aggressive for v1.
   // - banning `npm install <pkg>` outside the project's existing deps
   // - banning `git push` (currently the daemon does this via app-bootstrap saga)

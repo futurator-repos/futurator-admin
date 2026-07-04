@@ -166,3 +166,15 @@ describe('matchesDenyPattern — B8 runtime tool enforcement', () => {
     expect(r.reason.length).toBeGreaterThan(10);
   });
 });
+
+describe('git-stash-shared-tree (pacman4 forensic)', () => {
+  it('denies git stash / stash pop on the shared worktree', () => {
+    expect(matchesDenyPattern('git stash && npx tsc --noEmit; git stash pop')?.label).toBe('git-stash-shared-tree');
+    expect(matchesDenyPattern('cd /w && git stash pop')?.label).toBe('git-stash-shared-tree');
+  });
+  it('allows read-only stash inspection + unrelated git', () => {
+    expect(matchesDenyPattern('git stash list').denied).toBe(false);
+    expect(matchesDenyPattern('git stash show -p').denied).toBe(false);
+    expect(matchesDenyPattern('git status --porcelain').denied).toBe(false);
+  });
+});

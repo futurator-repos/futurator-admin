@@ -121,6 +121,35 @@ export function buildImplementerPrompt(payload, ownedTestFiles = []) {
 export async function runTestAuthorPhase({ payload, headSha, spawnOnce, commitRed, runBindings, logger }) {
   const log = (m) => { try { logger?.info?.(`[test-author] ${m}`); } catch { /* ignore */ } };
 
+  // RETRY IDEMPOTENCY (pacman4 forensic, 2026-07-05): a revived/retried story
+  // whose ACs are ALREADY BOUND (a prior attempt authored + committed the RED
+  // tests) must NOT re-author — the shared worktree may hold that attempt's
+  // leftover implementation, so freshly-authored tests can pass immediately and
+  // the RED-first gate rejects the whole phase (a wasted spawn + lost
+  // isolation). Instead: reuse the committed tests. Bindings all RED → proceed
+  // straight to the implementer with the existing tests as the baseline. Any
+  // already GREEN → the prior implementation is present; throw a DISTINCT
+  // reason so the caller's fail-open single-spawn finishes the story (its
+  // completion gate re-verifies every binding honestly).
+  const acs = payload.acceptanceCriteria || [];
+  const priorBound = acs.filter((a) => a?.testBinding?.testRef);
+  if (acs.length > 0 && priorBound.length === acs.length) {
+    const { summary } = await runBindings({ acceptanceCriteria: acs, headSha });
+    const red = assertRedFirst(summary);
+    if (!red.ok) {
+      throw new Error(
+        `retry-with-prior-work: ${red.reason} — a prior attempt's implementation is present; single-spawn will complete + the completion gate verifies`,
+      );
+    }
+    const ownedTestFiles = [...new Set(
+      priorBound
+        .map((a) => String(a.testBinding.testRef).split(' > ')[0].trim())
+        .filter((f) => TEST_FILE_RE.test(f)),
+    )];
+    log(`retry: ${acs.length} AC(s) already bound from a prior attempt — reusing committed tests (RED re-confirmed); owns ${ownedTestFiles.length} test file(s)`);
+    return { ownedTestFiles, bindingOutput: '', redSha: headSha, boundCriteria: acs };
+  }
+
   const { exitCode, text } = await spawnOnce({ prompt: buildStoryTestPrompt(payload) });
   if (exitCode !== 0) throw new Error(`test-author spawn exit ${exitCode}`);
 

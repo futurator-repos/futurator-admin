@@ -80,3 +80,45 @@ describe('runTestAuthorPhase', () => {
     ).rejects.toThrow(/RED-first check failed/);
   });
 });
+
+describe('retry idempotency (pacman4 forensic 2026-07-05)', () => {
+  const boundAc = (id, testRef, over = {}) => ({ id, text: 't', testBinding: { status: 'bound', testRef }, ...over });
+  const boundPayload = {
+    ...payload,
+    acceptanceCriteria: [
+      boundAc('AC-1', 'src/game/rules.test.ts > rules > [AC-1] loseLife decrements'),
+      boundAc('AC-2', 'src/components/canvas/HUDOverlay.test.tsx > HUD > [AC-2] shows lives'),
+    ],
+  };
+
+  it('all ACs already bound + bindings RED → reuses committed tests, NO spawn, owns derived files', async () => {
+    let spawned = false;
+    const r = await runTestAuthorPhase(deps({
+      payload: boundPayload,
+      spawnOnce: async () => { spawned = true; return { exitCode: 0, text: bindingText }; },
+      runBindings: async () => ({ acceptanceCriteria: [], summary: { ran: 2, passed: 0, failed: 2 } }),
+    }));
+    expect(spawned).toBe(false);
+    expect(r.ownedTestFiles.sort()).toEqual([
+      'src/components/canvas/HUDOverlay.test.tsx',
+      'src/game/rules.test.ts',
+    ]);
+  });
+
+  it('all ACs bound but a binding already PASSES (leftover impl) → throws the distinct retry reason', async () => {
+    await expect(runTestAuthorPhase(deps({
+      payload: boundPayload,
+      runBindings: async () => ({ acceptanceCriteria: [], summary: { ran: 2, passed: 1, failed: 1 } }),
+    }))).rejects.toThrow(/retry-with-prior-work/);
+  });
+
+  it('PARTIALLY bound ACs still author fresh (no idempotency shortcut)', async () => {
+    let spawned = false;
+    const mixed = { ...payload, acceptanceCriteria: [boundAc('AC-1', 'src/a.test.ts > x'), { id: 'AC-2', text: 'unbound' }] };
+    await runTestAuthorPhase(deps({
+      payload: mixed,
+      spawnOnce: async () => { spawned = true; return { exitCode: 0, text: bindingText }; },
+    }));
+    expect(spawned).toBe(true);
+  });
+});
