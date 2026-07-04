@@ -1787,6 +1787,8 @@ function downloadScanJson(report: ScanReportData, appId: string) {
     lowConfidence: report.lowConfidence,
     maturity: report.maturity ?? null,
     infra: report.infra ?? null,
+    // iacMaturity rides inside infra; iacPlan (the stack-aware migration track) is top-level — export both.
+    iacPlan: report.iacPlan ?? null,
     aiReadiness: report.aiReadiness ?? null,
     gitEvolution: report.gitEvolution ?? null,
     gateViolations: report.gateViolations,
@@ -2186,6 +2188,10 @@ export function buildMarkdownReport(
   for (const a of report.maturity?.axes ?? []) {
     if (a.measured) L.push(`- ${a.label}: **${a.status}** — ${a.detail}`);
   }
+  if (report.cost && (report.cost.totalUsd || report.cost.totalTokens))
+    L.push(
+      `- **Scan cost:** $${report.cost.totalUsd.toFixed(2)} · ${(report.cost.totalTokens / 1000).toFixed(0)}k tokens (${report.mode ?? 'full'} mode)`,
+    );
   L.push('');
 
   // Problems grouped by dimension, sorted by severity then effort
@@ -2234,6 +2240,38 @@ export function buildMarkdownReport(
       L.push(
         `- External processors (GDPR/AI-Act): ${infra.external.map((e) => e.provider).join(', ')}`,
       );
+    const mat = infra.iacMaturity;
+    if (mat) {
+      L.push(
+        `- **IaC maturity: L${mat.level} — ${mat.levelName}** (overall = lowest blocking dimension)`,
+      );
+      const dims = mat.dimensions;
+      if (dims) {
+        const DIM_LBL: Record<string, string> = {
+          state: 'State & provisioning',
+          envSeparation: 'Env separation',
+          modularity: 'Modularity',
+          testing: 'IaC testing',
+          governance: 'Governance / policy',
+          driftCost: 'Drift & cost',
+        };
+        for (const [k, lbl] of Object.entries(DIM_LBL)) {
+          const d = dims[k as keyof typeof dims];
+          if (d)
+            L.push(
+              `  - L${d.level} ${lbl} — ${d.evidence}${d.gaps?.length ? ` _(gap: ${d.gaps[0]})_` : ''}`,
+            );
+        }
+      }
+      if (mat.regions?.length)
+        L.push(
+          `- Regions: ${mat.regions.join(', ')} · residency ${mat.regionPinned ? '✓ pinned' : '✗ not pinned'}`,
+        );
+      if (mat.tagTaxonomy)
+        L.push(
+          `- Tag taxonomy: ${mat.tagTaxonomy.coveragePct}% (${mat.tagTaxonomy.present.join(', ') || 'none'}${mat.tagTaxonomy.missing.length ? ` · missing: ${mat.tagTaxonomy.missing.join(', ')}` : ''})`,
+        );
+    }
     L.push('');
   }
 
@@ -2291,6 +2329,19 @@ export function buildMarkdownReport(
       L.push(
         `- Bus factor: ${git.busFactor.singleAuthorFiles} single-author files · ${git.busFactor.topAuthors.map((a) => `${a.name} ${a.pct}%`).join(', ')}`,
       );
+    L.push('');
+  }
+
+  // AI readiness (agent-onboarding scaffolding)
+  const ai = report.aiReadiness;
+  if (ai) {
+    L.push('## AI readiness');
+    L.push(`- ${ai.summary}`);
+    L.push(
+      `- Claude Code: ${ai.hasClaudeCode ? '✓' : '✗'} · ${ai.skillCount} skills · ${ai.agentCount} agents · ${ai.commandCount} commands · MCP ${ai.hasMcp ? '✓' : '✗'} · hooks ${ai.hasHooks ? '✓' : '✗'}`,
+    );
+    const present = (ai.tools ?? []).filter((t) => t.present);
+    if (present.length) L.push(`- Detected: ${present.map((t) => t.name).join(', ')}`);
     L.push('');
   }
 
