@@ -242,3 +242,75 @@ describe('POST /api/plans/:id/qa/send-back', () => {
     expect(res.status).toBe(409);
   });
 });
+
+describe('POST /api/plans/:id/stories/:storyId/retry', () => {
+  const STORY = 'f594a817-791f-4548-8491-ea8e01b891f3';
+  function storyRow(over: Record<string, unknown> = {}) {
+    return { storyId: STORY, planId: PLAN_ID, state: 'failed', title: 'Assemble', ...over };
+  }
+  function ddbStoryReturns(
+    row: Record<string, unknown> | null,
+    jobRow?: Record<string, unknown> | null,
+  ) {
+    sendMock.mockReset();
+    sendMock.mockImplementation(
+      (cmd: { constructor: { name: string }; input?: Record<string, unknown> }) => {
+        if (cmd.constructor.name === 'GetCommand') {
+          const key = (cmd.input as { Key?: Record<string, unknown> })?.Key ?? {};
+          if ('storyId' in key) return Promise.resolve({ Item: row ?? undefined });
+          if ('jobId' in key) return Promise.resolve({ Item: jobRow ?? undefined });
+          return Promise.resolve({ Item: plan() });
+        }
+        return Promise.resolve({});
+      },
+    );
+  }
+
+  it('failed story → reset to ready (UpdateCommand with the retryable-state condition)', async () => {
+    ddbStoryReturns(storyRow());
+    const res = await app.request(`/api/plans/${PLAN_ID}/stories/${STORY}/retry`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).state).toBe('ready');
+    const upd = sendMock.mock.calls.find(([c]) => c.constructor.name === 'UpdateCommand');
+    expect(String(upd?.[0].input?.UpdateExpression)).toMatch(
+      /REMOVE claimOwner, claimToken, claimExpiresAt, jobId/,
+    );
+  });
+
+  it('done story → 400', async () => {
+    ddbStoryReturns(storyRow({ state: 'done' }));
+    const res = await app.request(`/api/plans/${PLAN_ID}/stories/${STORY}/retry`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('actively-running claimed story (fresh heartbeat) → 409, never double-runs', async () => {
+    ddbStoryReturns(
+      storyRow({
+        state: 'claimed',
+        jobId: 'live-job',
+        claimExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      { jobId: 'live-job', status: 'RUNNING', lastHeartbeatAt: new Date().toISOString() },
+    );
+    const res = await app.request(`/api/plans/${PLAN_ID}/stories/${STORY}/retry`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it('claimed story with a DEAD job (STALE) → released to ready', async () => {
+    ddbStoryReturns(storyRow({ state: 'claimed', jobId: 'dead-job' }), {
+      jobId: 'dead-job',
+      status: 'STALE',
+      updatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+    const res = await app.request(`/api/plans/${PLAN_ID}/stories/${STORY}/retry`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(200);
+  });
+});

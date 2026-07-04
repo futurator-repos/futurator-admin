@@ -1682,6 +1682,61 @@ app.get('/api/plans/:id/story-nodes', async (c) => {
   return c.json({ stories });
 });
 
+// Pipeline-3 — operator RETRY for a wedged story (pacman4 forensics, 2026-07-05).
+// Mirrors the daemon reaper's self-heal, on demand: reset the story to 'ready'
+// (clear claim + jobId) so the frontier re-mints. Safe to re-run: the
+// test-author is retry-idempotent and the completion gate re-verifies every
+// binding. Guard: a story whose job is GENUINELY running (RUNNING + fresh
+// heartbeat + unexpired claim) is refused with 409 — retry is for failed
+// stories and dead claims, never a double-run.
+app.post('/api/plans/:id/stories/:storyId/retry', async (c) => {
+  const planId = c.req.param('id');
+  const storyId = c.req.param('storyId');
+  const story = await storyNodeRepo.getStoryNode(storyId);
+  if (!story || story.planId !== planId) throw new NotFoundError('StoryNode', storyId);
+
+  if (story.state === 'done') {
+    throw new AppError('STORY_DONE', 'Story is done — nothing to retry.', 400);
+  }
+  if (story.state === 'ready' || story.state === 'blocked') {
+    throw new AppError(
+      'STORY_QUEUED',
+      `Story is '${story.state}' — already awaiting the frontier; no retry needed.`,
+      400,
+    );
+  }
+
+  // A claimed story is only retryable when its claim is DEAD: the backing job
+  // is not RUNNING, or its heartbeat is stale (>5 min), or the claim expired.
+  if (story.state === 'claimed' || story.state === 'developing') {
+    const job = story.jobId ? await agentJobsRepo.getJobById(story.jobId) : null;
+    const hb = job?.lastHeartbeatAt ?? job?.updatedAt;
+    const heartbeatFresh = hb ? Date.now() - Date.parse(hb) < 5 * 60 * 1000 : false;
+    const claimLive = story.claimExpiresAt ? Date.parse(story.claimExpiresAt) > Date.now() : false;
+    if (job?.status === 'RUNNING' && (heartbeatFresh || claimLive)) {
+      throw new AppError(
+        'STORY_ACTIVE',
+        'Story is actively running (live heartbeat/claim). Wait, or let the stale reaper handle a crash.',
+        409,
+      );
+    }
+    // Best-effort: retire the dead job so it can't resurrect.
+    if (job && job.status === 'RUNNING') {
+      await agentJobsRepo
+        .updateJobFields(job.jobId, {
+          status: 'STALE',
+          errorMessage: 'Operator retry — claim released, story re-queued.',
+        })
+        .catch(() => {});
+    }
+  }
+
+  // Reset to ready (race-safe: only from a retryable state; a story that just
+  // flipped 'done' in parallel is left alone).
+  await storyNodeRepo.resetStoryForRetry(storyId);
+  return c.json({ ok: true, storyId, state: 'ready' });
+});
+
 // Pipeline-3 (development-plan §5.5) — Labs3 READ over the instinct loop:
 // raw observations, distilled + promoted instincts, and live-gate would-blocks.
 // Greenfield seam — returns empty arrays until a Lambda-reachable source is

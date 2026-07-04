@@ -1,5 +1,5 @@
 'use client';
-import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { api } from '@/lib/api-client';
 import type { StoryNodeRow, StoryNodeState } from '@/types/plan-spec';
 
@@ -66,5 +66,26 @@ export function useStoryFrontier(
     // A frontier of an active state is inherently churny — poll it; a terminal
     // slice ('done'/'failed'/'blocked') is stable, so don't.
     refetchInterval: ACTIVE_STORY_NODE_STATES.has(state) ? 2_000 : false,
+  });
+}
+
+/**
+ * Operator retry for a wedged story (failed, or a dead claim after a daemon
+ * crash). POST /plans/:id/stories/:storyId/retry → the API validates the story
+ * isn't ACTIVELY running (409), retires the dead job, resets the row to
+ * 'ready', and the frontier re-mints. The retry-idempotent test-author reuses
+ * any committed RED tests, so a re-run converges instead of duplicating work.
+ */
+export function useRetryStory(planId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (storyId: string) =>
+      api.post<{ ok: boolean; storyId: string; state: string }>(
+        `/plans/${planId}/stories/${storyId}/retry`,
+        {},
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['story-nodes', planId] });
+    },
   });
 }

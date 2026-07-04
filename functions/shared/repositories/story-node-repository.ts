@@ -55,6 +55,36 @@ export async function getStoryNode(storyId: string): Promise<StoryNodeRow | null
   return (res.Item as StoryNodeRow) || null;
 }
 
+/**
+ * Operator retry (2026-07-05): reset a wedged story to 'ready' + clear its
+ * claim/job so the frontier re-mints. Race-safe: conditioned on a retryable
+ * state — a story that just flipped 'done'/'ready' in parallel is untouched
+ * (the conditional check throws; caller surfaces it). Mirrors the daemon
+ * reaper's buildOrphanReleaseParams semantics, on demand.
+ */
+export async function resetStoryForRetry(storyId: string): Promise<void> {
+  const { UpdateCommand } = await import('@aws-sdk/lib-dynamodb');
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: { storyId },
+      UpdateExpression:
+        'SET #state = :ready, updatedAt = :now REMOVE claimOwner, claimToken, claimExpiresAt, jobId',
+      ConditionExpression: '#state IN (:failed, :claimed, :developing, :merging, :verifying)',
+      ExpressionAttributeNames: { '#state': 'state' },
+      ExpressionAttributeValues: {
+        ':ready': 'ready',
+        ':now': new Date().toISOString(),
+        ':failed': 'failed',
+        ':claimed': 'claimed',
+        ':developing': 'developing',
+        ':merging': 'merging',
+        ':verifying': 'verifying',
+      },
+    }),
+  );
+}
+
 /** All StoryNodes for a plan (paginated). Used to build the live graph snapshot. */
 export async function getPlanStoryNodes(planId: string): Promise<StoryNodeRow[]> {
   const out: StoryNodeRow[] = [];

@@ -20,6 +20,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAgentJob } from '@/hooks/use-agent-job';
+import { useRetryStory } from '@/hooks/use-story-nodes';
 import { useAgentEvents } from '@/hooks/use-agent-events';
 import { StoryStagePipeline } from '../plan-spec-dashboard/story-stage-pipeline';
 import type { AgentJob, AgentEvent } from '@/types/agent-orchestrator';
@@ -661,10 +662,63 @@ function StoryRow({
         />
         <StoryNodeStatePill state={story.state} pulse={isActive} />
         {retryAttempt > 0 && <RetryPill attempt={retryAttempt} max={3} />}
+        <StoryRetryButton story={story} job={job} />
       </div>
 
       {expanded && <StoryDetailPanel story={story} job={job} ac={ac} />}
     </div>
+  );
+}
+
+/**
+ * Operator retry for a wedged story (pacman4 forensics). Shown for:
+ *   - `failed` stories (always — re-queue with a click), and
+ *   - `claimed`/`developing` stories whose backing job is DEAD (STALE/FAILED —
+ *     a daemon restart killed the spawn) — a genuinely-running job hides it.
+ * The API double-guards (409 on a live heartbeat/claim), so a race can't
+ * double-run a story. The retry-idempotent test-author + completion gate make
+ * re-runs converge instead of duplicating work.
+ */
+function StoryRetryButton({ story, job }: { story: StoryNodeRow; job?: AgentJob | null }) {
+  const retry = useRetryStory(story.planId);
+  const deadClaim =
+    (story.state === 'claimed' || story.state === 'developing') &&
+    !!job &&
+    (job.status === 'STALE' || job.status === 'FAILED');
+  const show = story.state === 'failed' || deadClaim;
+  if (!show) return null;
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation(); // the row toggles expand on click
+        if (!retry.isPending) retry.mutate(story.storyId);
+      }}
+      disabled={retry.isPending}
+      title={
+        deadClaim
+          ? 'The claiming job is dead (daemon restart) — release the claim and re-queue this story.'
+          : 'Re-queue this failed story. The frontier re-mints it; committed RED tests are reused.'
+      }
+      style={{
+        fontFamily: 'var(--font-mono)',
+        fontSize: 9,
+        letterSpacing: '0.1em',
+        textTransform: 'uppercase',
+        padding: '3px 9px',
+        borderRadius: 4,
+        border: '1px solid var(--warning, #f97316)',
+        background: retry.isError
+          ? 'color-mix(in srgb, var(--destructive) 12%, transparent)'
+          : 'color-mix(in srgb, var(--warning, #f97316) 10%, transparent)',
+        color: retry.isError ? 'var(--destructive)' : 'var(--warning, #f97316)',
+        cursor: retry.isPending ? 'default' : 'pointer',
+        opacity: retry.isPending ? 0.6 : 1,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {retry.isPending ? 'retrying…' : retry.isError ? 'retry failed — again?' : '↻ retry'}
+    </button>
   );
 }
 
