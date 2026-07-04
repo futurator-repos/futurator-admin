@@ -45,6 +45,10 @@ export type AttentionCategory =
   | 'agent-needs-human'
   // Story 1.3 — daemon-side loop detector forced the step to exit.
   | 'loop-detected'
+  // QA-Review autopilot: the autonomous fix loop consumed its round budget
+  // (P3_QA_AUTOFIX_MAX) and the deployed-app QA is STILL blocking. Operator
+  // reviews the QA tab findings and decides (fix by hand / send back / waive).
+  | 'qa-autofix-exhausted'
   // Story 1.4 — pre-flight validator failure (e.g. folder-exists). Step
   // never spawned Claude; operator must fix the precondition and retry.
   | 'preflight-failed'

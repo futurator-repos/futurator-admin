@@ -81,6 +81,13 @@ export interface WiringReport {
   /** Runtime modules with 0 importers (dead code the assemble step orphaned). */
   orphanModules: string[];
   blocking: boolean;
+  /**
+   * Static seam-mount sub-lane: false when the scaffold's seam hook is defined
+   * but never imported by a feature (the pacman3 root cause — window.__harness
+   * can never publish). Absent when the boilerplate declares no seam.
+   */
+  seamMounted?: boolean;
+  seamDetail?: string;
 }
 
 export type P3QaStatus = 'idle' | 'running' | 'passed' | 'failed';

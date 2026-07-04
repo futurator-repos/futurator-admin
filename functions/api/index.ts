@@ -2156,11 +2156,15 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
     .object({
       intent: z.string().min(3, 'intent must be at least 3 chars'),
       name: z.string().optional(),
+      // QA autopilot toggle (default ON): auto-fix + re-run QA on a blocking
+      // verdict so the operator tests an already-fixed build.
+      qaAutopilot: z.boolean().optional(),
     })
     .safeParse(body);
   if (!parsed.success)
     throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
   const { intent } = parsed.data;
+  const qaAutopilot = parsed.data.qaAutopilot ?? true;
 
   // Unique throwaway app slug (fresh app per intent) — sanitized + random suffix.
   const base =
@@ -2240,6 +2244,8 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
     totalStories: 0,
     doneStories: 0,
     costCeilingUsd: defaultCostCeiling('mvp'),
+    qaAutopilot,
+    qaAutoFixRounds: 0,
     createdAt: now,
     updatedAt: now,
     createdBy: user.userId,

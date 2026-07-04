@@ -131,6 +131,15 @@ export interface Plan {
   qaCommitSha?: string;
   /** FK to the most recent P3 QA-Review job. Cleared on send-back so QA re-runs. */
   p3QaJobId?: string;
+  /**
+   * QA autopilot (set at plan creation, default ON for quick plans): when a
+   * blocking, undecided verdict lands, the cron AUTO-fires the send-back path —
+   * mint fix stories → fixing → fresh dev-deploy → re-QA — up to
+   * P3_QA_AUTOFIX_MAX rounds, so the operator tests an already-fixed build.
+   */
+  qaAutopilot?: boolean;
+  /** Autopilot rounds consumed (budget guard; attention item on exhaustion). */
+  qaAutoFixRounds?: number;
   /** The persisted plan-level QA verdict (journeys + VQA + wiring + decision). */
   p3QaVerdict?: P3QaVerdict;
   /** Stage-C — the PM-declared delivery journeys, persisted (was schema-only). */

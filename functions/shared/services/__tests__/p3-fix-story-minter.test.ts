@@ -94,4 +94,87 @@ describe('mintFixStories', () => {
     const b = mintFixStories({ plan, verdict: v, now });
     expect(a[0].storyId).toBe(b[0].storyId);
   });
+
+  it('seam-not-mounted → ONE seam story with the wiring contract; redundant journey stories suppressed', () => {
+    const rows = mintFixStories({
+      plan,
+      verdict: verdict({
+        journeys: [
+          {
+            id: 'j1',
+            title: 'Play the game',
+            acRefs: ['ac1'],
+            verdict: 'fail',
+            steps: [
+              {
+                label: 's1',
+                action: 'press ArrowUp',
+                deterministic: {
+                  assertion: 'x moves',
+                  passed: false,
+                  detail: 'window.__harness seam not mounted on the served app',
+                },
+              },
+            ],
+          },
+          {
+            id: 'j2',
+            title: 'Score journey',
+            acRefs: ['ac2'],
+            verdict: 'fail',
+            steps: [
+              {
+                label: 's2',
+                action: 'press Space',
+                deterministic: {
+                  assertion: 'score grows',
+                  passed: false,
+                  detail: 'window.__harness seam not mounted on the served app',
+                },
+              },
+            ],
+          },
+        ],
+      }),
+      now,
+    });
+    expect(rows).toHaveLength(1); // one seam story, no per-journey noise
+    expect(rows[0].title).toMatch(/Mount the window\.__harness/);
+    expect(rows[0].intent).toMatch(/useGameStateMachine/);
+    expect(rows[0].state).toBe('ready');
+  });
+
+  it('non-seam failures alongside a seam failure depend_on the seam story (frontier ordering)', () => {
+    const rows = mintFixStories({
+      plan,
+      verdict: verdict({
+        journeys: [
+          {
+            id: 'j1',
+            title: 'Seam-blind journey',
+            acRefs: ['ac1'],
+            verdict: 'fail',
+            steps: [
+              {
+                label: 's1',
+                action: 'load',
+                deterministic: {
+                  assertion: 'seam',
+                  passed: false,
+                  detail: 'window.__harness seam not mounted on the served app',
+                },
+              },
+            ],
+          },
+        ],
+        wiring: { orphanModules: ['src/game/ghost-ai.ts'], blocking: true },
+      }),
+      now,
+    });
+    const seam = rows.find((r) => r.title.startsWith('Mount the window.__harness'))!;
+    const orphan = rows.find((r) => r.title.match(/orphan/i))!;
+    expect(seam.depends_on).toEqual([]);
+    expect(orphan.depends_on).toEqual([seam.storyId]);
+    expect(orphan.state).toBe('blocked');
+  });
 });

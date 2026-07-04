@@ -328,3 +328,31 @@ describe('runP3Qa — no journeys resolvable', () => {
     expect(result.blocking).toBe(false);
   });
 });
+
+describe('seam-mount static sub-lane (pacman3 root cause)', () => {
+  let root;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'p3-qa-seam-'));
+    mkdirSync(join(root, 'src', 'game'), { recursive: true });
+    mkdirSync(join(root, 'src', 'components'), { recursive: true });
+    // The scaffold DEFINES the hook…
+    writeFileSync(join(root, 'src', 'game', 'state-machine.ts'),
+      'export function useGameStateMachine(r, i) { return [i, () => {}]; }\n');
+    // …but the game hand-rolls useReducer and never imports it (pacman3 class).
+    writeFileSync(join(root, 'src', 'components', 'Game.tsx'),
+      "import { useReducer } from 'react';\nexport function Game(){ const [s] = useReducer((x)=>x, {}); return null; }\n");
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it('hook defined but never imported → wiring blocks with seamMounted:false', async () => {
+    const plan = { planId: 'p9', qaCommitSha: 'sha9', devUrl: 'https://dev.futurator.ai/p-9' };
+    const result = await runP3Qa({
+      plan, stories: [], journeys: [],
+      playwright: null, spawnJudge: async () => ({ ok: true, output: '' }),
+      s3: async () => ({ code: 0 }), qaContext: { appDir: root }, log: () => {},
+    });
+    expect(result.wiring.seamMounted).toBe(false);
+    expect(result.wiring.blocking).toBe(true);
+    expect(result.wiring.seamDetail).toMatch(/only DEFINED/);
+  });
+});

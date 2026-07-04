@@ -77,6 +77,9 @@ export interface WiringReport {
   /** Runtime modules with 0 importers (dead code the assemble step orphaned). */
   orphanModules: string[];
   blocking: boolean;
+  /** Static seam-mount sub-lane: false = seam hook never imported (root cause). */
+  seamMounted?: boolean;
+  seamDetail?: string;
 }
 
 export type P3QaStatus = 'idle' | 'running' | 'passed' | 'failed';

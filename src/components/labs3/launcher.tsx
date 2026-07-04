@@ -46,12 +46,13 @@ function QuickCreate() {
   const quick = useQuickP3Plan();
   const [intent, setIntent] = useState('');
   const [name, setName] = useState('');
+  const [qaAutopilot, setQaAutopilot] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
   const submit = () => {
     setErr(null);
     quick.mutate(
-      { intent: intent.trim(), name: name.trim() || undefined },
+      { intent: intent.trim(), name: name.trim() || undefined, qaAutopilot },
       {
         onSuccess: (r) => router.push(`/labs3/?planId=${r.planId}`),
         onError: (e) => setErr(e instanceof Error ? e.message : 'Create failed'),
@@ -90,6 +91,27 @@ function QuickCreate() {
           fontFamily: 'inherit',
         }}
       />
+      <label
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 7,
+          marginTop: 8,
+          fontSize: 12,
+          color: 'var(--text-dim)',
+          cursor: 'pointer',
+          width: 'fit-content',
+        }}
+        title="When QA Review finds blocking failures, the pipeline auto-mints fix stories, re-deploys, and re-runs QA (up to 2 rounds) — you test an already-fixed build."
+      >
+        <input
+          type="checkbox"
+          checked={qaAutopilot}
+          onChange={(e) => setQaAutopilot(e.target.checked)}
+          style={{ accentColor: 'var(--accent-blue)' }}
+        />
+        QA autopilot — auto-fix &amp; re-run QA on failures before I test
+      </label>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
         <input
           value={name}

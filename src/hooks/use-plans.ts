@@ -59,7 +59,7 @@ export function usePlan(planId: string | null) {
 export function useQuickP3Plan() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { intent: string; name?: string }) =>
+    mutationFn: (input: { intent: string; name?: string; qaAutopilot?: boolean }) =>
       api.post<{ planId: string; appId: string; jobId: string }>('/plans/quick-p3', input),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['plans'] });

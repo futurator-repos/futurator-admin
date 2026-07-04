@@ -135,6 +135,77 @@ export const handler = async () => {
       }
     }
 
+    // 1c. QA AUTOPILOT — the autonomous fix loop. When the verdict lands
+    // BLOCKING and undecided, and the plan opted in (qaAutopilot, default ON for
+    // quick plans), auto-fire the send-back path the operator would have
+    // clicked: mint fix stories from the findings → flip to 'fixing' → full QA
+    // reset (REMOVE p3QaJobId/p3QaVerdict/devDeployJobId/qaCommitSha) so the
+    // fixed commit gets a FRESH dev-deploy + SHA pin + QA run. Bounded by
+    // P3_QA_AUTOFIX_MAX rounds (default 2); on exhaustion, surface an attention
+    // item and leave the red verdict for the operator. Human decisions always
+    // win: a decidedAt verdict is never touched.
+    const AUTOFIX_MAX = Number(process.env.P3_QA_AUTOFIX_MAX ?? 2);
+    if (
+      process.env.P3_QA_REVIEW &&
+      process.env.P3_QA_REVIEW !== 'off' &&
+      plan.status === 'review' &&
+      plan.qaAutopilot !== false &&
+      plan.p3QaVerdict?.blocking === true &&
+      !plan.p3QaVerdict.decidedAt
+    ) {
+      const rounds = plan.qaAutoFixRounds ?? 0;
+      if (rounds >= AUTOFIX_MAX) {
+        // Budget exhausted — surface once (dedupKey makes the write idempotent).
+        try {
+          await planDepsShared.writeAttentionItem?.({
+            planId: plan.planId,
+            itemId: planDepsShared.uuid(), // ignored when dedupKey set (idempotent upsert)
+            createdAt: planDepsShared.now(),
+            resolvedAt: null,
+            dedupKey: `p3-qa-autofix-exhausted:${plan.planId}:${plan.p3QaVerdict.ranAtSha ?? ''}`,
+            severity: 'high',
+            category: 'qa-autofix-exhausted',
+            title: `QA autopilot exhausted ${rounds} fix round(s) — still blocking`,
+            body:
+              `The deployed-app QA is still failing after ${rounds} autonomous fix round(s). ` +
+              `Findings: ${plan.p3QaVerdict.journeys?.filter((j) => j.verdict === 'fail').length ?? 0} failed journey(s), ` +
+              `${plan.p3QaVerdict.wiring?.orphanModules?.length ?? 0} orphan module(s). Operator review needed.`,
+            context: {},
+            suggestedActions: [],
+            status: 'open',
+          });
+        } catch {
+          /* attention is best-effort */
+        }
+      } else {
+        try {
+          const { mintFixStories } = await import('../shared/services/p3-fix-story-minter');
+          const rows = mintFixStories({ plan, verdict: plan.p3QaVerdict });
+          if (rows.length > 0) {
+            const { batchPutStoryNodes } =
+              await import('../shared/repositories/story-node-repository');
+            await batchPutStoryNodes(rows);
+          }
+          await planRepo.updatePlanFields(plan.planId, {
+            status: 'fixing',
+            qaAutoFixRounds: rounds + 1,
+          });
+          await planRepo.clearP3QaForRerun(plan.planId);
+          log('info', 'wave-completion-check', 'P3 QA autopilot fix round started', {
+            planId: plan.planId,
+            round: rounds + 1,
+            mintedStories: rows.length,
+          });
+          return; // plan left 'review'; nothing below applies this tick
+        } catch (err) {
+          log('error', 'wave-completion-check', 'P3 QA autopilot round failed (non-fatal)', {
+            planId: plan.planId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
     // 2. review → delivered when a PRODUCTION deploy job completes (W3 promote).
     const latestDeployJobId = plan.deployJobIds?.[plan.deployJobIds.length - 1];
     if (plan.status === 'review' && latestDeployJobId) {

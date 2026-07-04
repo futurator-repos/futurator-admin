@@ -72,6 +72,14 @@ export function buildQuickPlanspecPrompt({ intent, appSlug }) {
     `  when/thenObservable (e.g. thenObservable "snapshot.status equals 'running' and`,
     `  snapshot.score is greater than 0"). Pure/build ACs use verify "build",`,
     `  needsBrowser false, and a unit-testable claim.`,
+    `- SEAM WIRING (non-negotiable — QA hard-fails without it): the scaffold's`,
+    `  \`useGameStateMachine\` hook (src/game/state-machine.ts) is the ONLY thing that`,
+    `  publishes \`window.__harness\`. The final "Assemble the complete app" story MUST`,
+    `  route the live game state through \`useGameStateMachine(reducer, initialState)\` —`,
+    `  a hand-rolled \`useReducer\` bypasses the seam, the harness never mounts, and`,
+    `  every deployed-app QA probe fails with SEAM_NEVER_PUBLISHED. The assemble`,
+    `  story's ACs MUST include one asserting the seam mounts (e.g. thenObservable`,
+    `  "snapshot.status equals 'idle'").`,
     `- Output ONLY the <PLAN_SPEC> block.`,
   ].join('\n');
 }

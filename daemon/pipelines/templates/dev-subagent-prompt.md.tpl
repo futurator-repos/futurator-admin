@@ -47,7 +47,14 @@ post-interaction state and will fail or come back UNVERIFIABLE.
 The `window.__harness` seam is PRE-BAKED by the scaffold (see SCAFFOLD.md) — do NOT
 author or edit it. For canvas games it exposes `snapshot()` →
 `{ status, score, tick, entities, gameOver }` plus any fields you add to
-`GameState` (e.g. `lives`). Conform your running game to that shape; that's all.
+`GameState` (e.g. `lives`).
+
+SEAM WIRING — a MUST, not a suggestion: the seam only publishes when the game's
+live state flows through the scaffold hook `useGameStateMachine(reducer,
+initialState)` (src/game/state-machine.ts). Do NOT hand-roll `useReducer` for
+game state — that bypasses the publisher, `window.__harness` never mounts, and
+deployed-app QA hard-fails every probe with SEAM_NEVER_PUBLISHED (the pacman3
+post-mortem). Same reducer, same initial state — just call it through the hook.
 
 Worked example (start, advance time deterministically, then assert + observe):
   flow:

@@ -213,8 +213,15 @@ describe('runBrowserJourney', () => {
   });
 
   it('captures before/act/after frames in order, per step, only when capture:true', async () => {
+    // TWO evaluate() calls per step now (the BEFORE-action snapshot feeds delta
+    // assertions + the after snapshot): [beforeS1, afterS1, beforeS2, afterS2].
     const { pw, page } = fakePlaywrightJourney({
-      snapshots: [{ status: 'running', score: 5 }, { status: 'over', gameOver: true }],
+      snapshots: [
+        { status: 'idle', score: 0 },
+        { status: 'running', score: 5 },
+        { status: 'running', score: 5 },
+        { status: 'over', gameOver: true },
+      ],
     });
     const steps = [
       { label: 'press Space', action: { type: 'key', key: 'Space' }, assertions: [{ field: 'status', op: 'eq', value: 'running' }] },
@@ -249,17 +256,23 @@ describe('runBrowserJourney', () => {
     expect(page.calls.screenshots).toBe(0);
   });
 
-  it('fails closed when the __harness seam is not mounted (honesty contract)', async () => {
-    const { pw } = fakePlaywrightJourney({ harnessMounted: false });
+  it('fails closed when the __harness seam is not mounted — but still captures frames (DOM-fallback)', async () => {
+    const { pw, page } = fakePlaywrightJourney({ harnessMounted: false });
     const r = await runBrowserJourney({
       url: REMOTE_URL,
       steps: [{ label: 'press Space', action: { type: 'key', key: 'Space' }, assertions: [] }],
       playwright: pw,
       capture: true,
     });
+    // Deterministic verdict unchanged: seam missing = real app failure, blocks.
     expect(r.passed).toBe(false);
     expect(r.detail).toMatch(/__harness seam not mounted/);
-    expect(r.frames).toEqual([]);
+    // NEW (VQA power): actions still replay + frames still captured so Lane 2
+    // and the operator get visual evidence instead of zero artifacts.
+    expect(r.frames).toHaveLength(1);
+    expect(Buffer.isBuffer(r.frames[0].before)).toBe(true);
+    expect(Buffer.isBuffer(r.frames[0].after)).toBe(true);
+    expect(page.calls.order).toContain('act:key:Space');
   });
 
   it('fails and names the offending step when a step assertion is wrong (never fake-passes)', async () => {
@@ -282,5 +295,43 @@ describe('runBrowserJourney', () => {
       playwright: { default: pw },
     });
     expect(r.passed).toBe(true);
+  });
+});
+
+describe('VQA power vocabulary (2026-07-04)', () => {
+  it('parses clicks by quoted text and by named button', () => {
+    const p = parseProbe({ when: 'The user clicks "Start Game" and then clicks the restart button', thenObservable: 'snapshot.status equals running' });
+    expect(p.actions).toEqual([
+      { type: 'click', target: 'Start Game' },
+      { type: 'click', target: 'restart' },
+    ]);
+    expect(p.interpretable).toBe(true);
+  });
+
+  it('parses typing into a named field', () => {
+    const p = parseProbe({ when: 'types "ricardo" into the name field', thenObservable: 'snapshot.player equals ricardo' });
+    expect(p.actions).toEqual([{ type: 'type', text: 'ricardo', target: 'name' }]);
+  });
+
+  it('parses delta assertions (increases/changes) and deep paths', () => {
+    const p = parseProbe({ when: 'presses ArrowUp', thenObservable: 'snapshot.score increases and snapshot.pacman.dir changes' });
+    expect(p.assertions).toEqual([
+      { field: 'score', op: 'increased' },
+      { field: 'pacman.dir', op: 'changed' },
+    ]);
+  });
+
+  it('falls back to a CHANGED-delta when a snapshot path is named without an operator (pacman3 class)', () => {
+    const p = parseProbe({ when: 'pressing a direction key', thenObservable: "snapshot.entities for pacman reflects the new heading" });
+    expect(p.interpretable).toBe(true);
+    expect(p.assertions).toEqual([{ field: 'entities', op: 'changed' }]);
+  });
+
+  it('at least / is not operators parse', () => {
+    const p = parseProbe({ when: 'press Space', thenObservable: 'snapshot.lives is at least 1 and snapshot.status is not idle' });
+    expect(p.assertions).toEqual([
+      { field: 'lives', op: 'gte', value: 1 },
+      { field: 'status', op: 'ne', value: 'idle' },
+    ]);
   });
 });

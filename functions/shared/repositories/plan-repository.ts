@@ -116,18 +116,24 @@ export async function clearP3QaJob(planId: string): Promise<void> {
 }
 
 /**
- * QA-Review W2 — reset QA state for a re-run (called on send-back). REMOVES both
- * p3QaJobId AND p3QaVerdict. Clearing the verdict is essential: a sent-back
- * verdict carries decidedAt, and the daemon's next-run write guards on
- * `attribute_not_exists(p3QaVerdict.decidedAt)` — leaving it in place would
- * permanently block the re-review verdict from ever persisting.
+ * QA-Review W2 — reset QA state for a re-run (send-back / autopilot fix round).
+ * REMOVES p3QaJobId, p3QaVerdict, devDeployJobId AND qaCommitSha:
+ *  - p3QaVerdict: a sent-back verdict carries decidedAt, and the daemon's
+ *    next-run write guards on `attribute_not_exists(p3QaVerdict.decidedAt)` —
+ *    leaving it would permanently block the re-review verdict from persisting.
+ *  - devDeployJobId + qaCommitSha: the cron's dev-deploy fires on
+ *    `!devDeployJobId`; without clearing them the FIXED commit would never be
+ *    re-deployed and re-QA would (with a stale pin) run against the OLD build.
+ * After the fix stories land and the plan re-enters `review`, the full chain
+ * re-fires fresh: dev-deploy → new qaCommitSha stamp → p3-qa → new verdict.
  */
 export async function clearP3QaForRerun(planId: string): Promise<void> {
   await docClient.send(
     new UpdateCommand({
       TableName: TABLE_NAMES.plans,
       Key: { planId },
-      UpdateExpression: 'REMOVE p3QaJobId, p3QaVerdict SET updatedAt = :now',
+      UpdateExpression:
+        'REMOVE p3QaJobId, p3QaVerdict, devDeployJobId, qaCommitSha SET updatedAt = :now',
       ExpressionAttributeValues: { ':now': new Date().toISOString() },
     }),
   );

@@ -444,6 +444,27 @@ export async function runP3Qa({
   let wiring = { orphanModules: [], blocking: false };
   if (qaContext?.appDir) {
     wiring = findOrphanModules({ appDir: qaContext.appDir, builtModules: flattenTouches(stories), log });
+    // Static seam-mount sub-lane (the pacman4/pacman3 gate, previously wired
+    // only into the legacy epic path): grep-level proof of whether any feature
+    // file actually calls the seam hook. Cheap, deterministic, and it makes the
+    // verdict's ROOT CAUSE explicit (journeys report the symptom "seam not
+    // mounted"; this reports the cause "hook never imported"). Fail-open.
+    try {
+      const { checkSeamMounted } = await import('./seam-mount-check.mjs');
+      const seam = checkSeamMounted({
+        projectDir: qaContext.appDir,
+        seamHook: qaContext.seamHook || 'useGameStateMachine',
+      });
+      // Block ONLY on the orphaned-scaffold case (hook DEFINED but never
+      // imported — the pacman3 class). A tree without the hook at all is N/A:
+      // the runtime probe covers "no seam" honestly and there's nothing to wire.
+      if (seam.checked && seam.defined !== false) {
+        wiring = { ...wiring, seamMounted: seam.mounted, seamDetail: seam.reason };
+        if (!seam.mounted) wiring.blocking = true;
+      }
+    } catch (e) {
+      vlog('warn', `seam-mount check skipped (fail-open): ${e?.message || e}`);
+    }
   }
 
   // Infra-flagged steps (harness failures) are excluded — they never block.

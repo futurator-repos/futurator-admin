@@ -59,6 +59,10 @@ export function checkSeamMounted({ projectDir, seamHook, exec }) {
     return {
       checked: true,
       mounted: false,
+      // `defined:false` — the hook is not in this tree AT ALL (non-scaffold app,
+      // synthetic fixture). W2's QA runner treats this as N/A rather than a
+      // wiring block: the runtime probe already covers "no seam" honestly.
+      defined: false,
       importers: [],
       reason: `no source file references ${seamHook} — the verifiability seam ships in the scaffold but no feature mounts it (static preview, not the live app). Build the feature that imports and calls ${seamHook}.`,
     };
@@ -72,6 +76,7 @@ export function checkSeamMounted({ projectDir, seamHook, exec }) {
   return {
     checked: true,
     mounted,
+    defined: true,
     importers,
     reason: mounted
       ? `${seamHook} is imported/used by ${importers.length} feature file(s): ${importers.join(', ')}`

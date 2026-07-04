@@ -23,13 +23,20 @@ export async function installBmad({ projectPath, version, force = false, onOutpu
     }
   }
 
+  // TEA (module code `tea`, npm bmad-method-test-architecture-enterprise) is
+  // the Test Architect module: 9 workflows (test-design, atdd, automate, trace
+  // w/ PASS/CONCERNS/FAIL/WAIVED gate, nfr-assess, ci, test-review, framework)
+  // + a 40-fragment testing knowledge base. Installing it in every generated
+  // app gives pipeline agents (test-author, QA) its knowledge + workflows.
+  // Overridable via BMAD_MODULES for rollback.
+  const modules = process.env.BMAD_MODULES || 'core,bmm,cis,tea';
   const args = [
     `bmad-method@${version}`,
     'install',
     '--directory',
     projectPath,
     '--modules',
-    'core,bmm,cis',
+    modules,
     '--tools',
     'claude-code',
     '--yes',

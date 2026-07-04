@@ -39,6 +39,17 @@ export interface WiringHeadline {
  * are one or more, since an orphan module is a real finding either way.
  */
 export function wiringHeadline(wiring: WiringReport | null | undefined): WiringHeadline {
+  // The seam sub-lane outranks orphans: an unmounted seam is the ROOT CAUSE
+  // (window.__harness can never publish → every journey blind).
+  if (wiring?.seamMounted === false) {
+    return {
+      tone: 'fail',
+      label: 'Wiring: test seam never mounted',
+      detail:
+        wiring.seamDetail ??
+        'the scaffold seam hook is defined but never imported by a feature — window.__harness cannot publish',
+    };
+  }
   const count = wiring?.orphanModules.length ?? 0;
   if (count === 0) {
     return {
@@ -65,8 +76,8 @@ export interface WiringOrphanBannerProps {
 export function WiringOrphanBanner({ wiring }: WiringOrphanBannerProps) {
   const orphanModules = wiring?.orphanModules ?? [];
 
-  // Hidden at 0 — a clean wiring check doesn't need to occupy space.
-  if (orphanModules.length === 0) return null;
+  // Hidden only when EVERYTHING is clean (no orphans AND the seam mounts).
+  if (orphanModules.length === 0 && wiring?.seamMounted !== false) return null;
 
   const headline = wiringHeadline(wiring);
 

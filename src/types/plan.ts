@@ -84,6 +84,9 @@ export interface Plan {
   /** Frozen branch-HEAD SHA the dev artifact built from; QA pins to it. */
   qaCommitSha?: string;
   p3QaJobId?: string;
+  /** QA autopilot: auto-mint fixes + re-run QA on a blocking verdict. */
+  qaAutopilot?: boolean;
+  qaAutoFixRounds?: number;
   p3QaVerdict?: P3QaVerdict;
   deliveryJourneys?: DeliveryJourney[];
   devModel?: string;

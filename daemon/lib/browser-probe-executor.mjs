@@ -50,25 +50,62 @@ function parseActions(src) {
   const wRe = /(\d+)\s*seconds?/gi;
   while ((m = wRe.exec(src))) found.push({ index: m.index, obj: { type: 'wait', ms: Number(m[1]) * 1000 } });
 
+  // VQA power (2026-07-04): CLICK by visible text / accessible name — the
+  // journey vocabulary for start screens, menus, buttons. Prose forms:
+  //   click "Start" | clicks the Start button | clicking on 'Play Again'
+  const clickRe = /click(?:s|ing)?\s+(?:on\s+)?(?:the\s+)?["']([^"']{1,60})["']|click(?:s|ing)?\s+(?:on\s+)?the\s+([\w][\w -]{0,40}?)\s+(?:button|link|tile|card)/gi;
+  while ((m = clickRe.exec(src)))
+    found.push({ index: m.index, obj: { type: 'click', target: (m[1] || m[2]).trim() } });
+
+  // TYPE text (optionally into a named field): types "hello" into the name field
+  const typeRe = /types?\s+["']([^"']{1,120})["'](?:\s+(?:into|in)\s+(?:the\s+)?["']?([\w-]+(?:\s[\w-]+)*?)["']?\s+(?:field|input|box)\b)?/gi;
+  while ((m = typeRe.exec(src)))
+    found.push({ index: m.index, obj: { type: 'type', text: m[1], target: m[2]?.trim() } });
+
   return found.sort((a, b) => a.index - b.index).map((f) => f.obj);
 }
+
+// A snapshot field path: dotted + indexed (score, pacman.dir, entities.ghosts[0].x).
+const FIELD = String.raw`([\w$]+(?:(?:\.[\w$]+)|(?:\[\d+\]))*)`;
 
 /** Extract snapshot assertions from the `thenObservable` prose. */
 function parseAssertions(src) {
   const out = [];
   for (const clause of src.split(/\s+and\s+|,\s*/i)) {
     let m;
-    if ((m = clause.match(/snapshot(?:\(\))?\.?(\w+)\s+(?:is\s+)?greater than\s+([\d.]+)/i))) {
+    if ((m = clause.match(new RegExp(`snapshot(?:\\(\\))?\\.?${FIELD}\\s+(?:is\\s+)?greater than\\s+([\\d.]+)`, 'i')))) {
       out.push({ field: m[1], op: 'gt', value: Number(m[2]) });
-    } else if ((m = clause.match(/snapshot(?:\(\))?\.?(\w+)\s+(?:is\s+)?less than\s+([\d.]+)/i))) {
+    } else if ((m = clause.match(new RegExp(`snapshot(?:\\(\\))?\\.?${FIELD}\\s+(?:is\\s+)?less than\\s+([\\d.]+)`, 'i')))) {
       out.push({ field: m[1], op: 'lt', value: Number(m[2]) });
-    } else if ((m = clause.match(/snapshot(?:\(\))?\.?(\w+)\s+is\s+true\b/i))) {
+    } else if ((m = clause.match(new RegExp(`snapshot(?:\\(\\))?\\.?${FIELD}\\s+(?:is\\s+)?at least\\s+([\\d.]+)`, 'i')))) {
+      out.push({ field: m[1], op: 'gte', value: Number(m[2]) });
+    } else if ((m = clause.match(new RegExp(`snapshot(?:\\(\\))?\\.?${FIELD}\\s+(?:is\\s+)?at most\\s+([\\d.]+)`, 'i')))) {
+      out.push({ field: m[1], op: 'lte', value: Number(m[2]) });
+    } else if ((m = clause.match(new RegExp(`snapshot(?:\\(\\))?\\.?${FIELD}\\s+is\\s+true\\b`, 'i')))) {
       out.push({ field: m[1], op: 'eq', value: true });
-    } else if ((m = clause.match(/snapshot(?:\(\))?\.?(\w+)\s+is\s+false\b/i))) {
+    } else if ((m = clause.match(new RegExp(`snapshot(?:\\(\\))?\\.?${FIELD}\\s+is\\s+false\\b`, 'i')))) {
       out.push({ field: m[1], op: 'eq', value: false });
-    } else if ((m = clause.match(/snapshot(?:\(\))?\.?(\w+)\s+equals?\s+['"]?([\w.-]+)['"]?/i))) {
+    } else if ((m = clause.match(new RegExp(`snapshot(?:\\(\\))?\\.?${FIELD}\\s+is\\s+not\\s+['"]?([\\w.-]+)['"]?`, 'i')))) {
+      out.push({ field: m[1], op: 'ne', value: coerce(m[2]) });
+    } else if ((m = clause.match(new RegExp(`snapshot(?:\\(\\))?\\.?${FIELD}\\s+equals?\\s+['"]?([\\w.-]+)['"]?`, 'i')))) {
       out.push({ field: m[1], op: 'eq', value: coerce(m[2]) });
+    } else if ((m = clause.match(new RegExp(`snapshot(?:\\(\\))?\\.?${FIELD}\\s+(?:has\\s+)?(?:increase[sd]?|grows?|grew|goes up)`, 'i')))) {
+      // DELTA op — compared against the BEFORE-action snapshot.
+      out.push({ field: m[1], op: 'increased' });
+    } else if ((m = clause.match(new RegExp(`snapshot(?:\\(\\))?\\.?${FIELD}\\s+(?:has\\s+)?(?:decrease[sd]?|drops?|goes down)`, 'i')))) {
+      out.push({ field: m[1], op: 'decreased' });
+    } else if ((m = clause.match(new RegExp(`snapshot(?:\\(\\))?\\.?${FIELD}\\s+(?:has\\s+)?(?:change[sd]?|updates?[d]?|differs|reflects)`, 'i')))) {
+      out.push({ field: m[1], op: 'changed' });
     }
+  }
+  // Interpretability fallback (pacman3 forensic: "no snapshot assertion in
+  // 'snapshot.entities f…'"). If the prose NAMES a snapshot path but no operator
+  // matched, the honest deterministic default is a CHANGED-delta on that path —
+  // the action was supposed to affect it. Still a real, before/after-verified
+  // assertion; never a fake-pass.
+  if (out.length === 0) {
+    const named = src.match(new RegExp(`snapshot(?:\\(\\))?\\.${FIELD}`, 'i'));
+    if (named) out.push({ field: named[1], op: 'changed' });
   }
   return out;
 }
@@ -159,15 +196,69 @@ async function replayAction(page, action) {
   else if (action.type === 'harness')
     await page.evaluate(({ m, args }) => window.__harness[m](...args), { m: action.method, args: action.args || [] });
   else if (action.type === 'wait') await page.waitForTimeout(action.ms);
+  else if (action.type === 'click') {
+    // Locator chain: accessible button name first (the robust path), then any
+    // visible text. First match wins; a miss throws → the step fails honestly.
+    const byRole = page.getByRole?.('button', { name: action.target, exact: false });
+    if (byRole && (await byRole.count?.()) > 0) await byRole.first().click();
+    else await page.getByText(action.target, { exact: false }).first().click();
+  } else if (action.type === 'type') {
+    if (action.target) {
+      await page.getByLabel?.(action.target, { exact: false }).first().fill(action.text);
+    } else {
+      await page.keyboard.type(action.text);
+    }
+  }
 }
 
-/** Assert a snapshot against a list of {field,op,value} assertions; returns failure strings. */
-function assertSnapshot(snap, assertions = []) {
+/** Deep-read a dotted/indexed path (score, pacman.dir, ghosts[0].x) off an object. */
+function deepGet(obj, path) {
+  if (obj == null || !path) return undefined;
+  const parts = String(path).replace(/\[(\d+)\]/g, '.$1').split('.');
+  let cur = obj;
+  for (const p of parts) {
+    if (cur == null) return undefined;
+    cur = cur[p];
+  }
+  return cur;
+}
+
+/**
+ * Assert a snapshot against {field,op,value} assertions; returns failure strings.
+ * Delta ops (increased/decreased/changed) compare against `beforeSnap` — the
+ * snapshot taken BEFORE the step's action ran.
+ */
+function assertSnapshot(snap, assertions = [], beforeSnap = undefined) {
   const failures = [];
   for (const as of assertions) {
-    const actual = snap ? snap[as.field] : undefined;
-    const ok =
-      as.op === 'gt' ? Number(actual) > as.value : as.op === 'lt' ? Number(actual) < as.value : actual === as.value;
+    const actual = deepGet(snap, as.field);
+    let ok;
+    if (as.op === 'increased' || as.op === 'decreased' || as.op === 'changed') {
+      const prior = deepGet(beforeSnap, as.field);
+      if (beforeSnap === undefined) {
+        ok = false;
+        failures.push(`snapshot.${as.field}: delta assertion '${as.op}' needs a before-snapshot (none captured)`);
+        continue;
+      }
+      ok =
+        as.op === 'increased'
+          ? Number(actual) > Number(prior)
+          : as.op === 'decreased'
+            ? Number(actual) < Number(prior)
+            : JSON.stringify(actual) !== JSON.stringify(prior);
+      if (!ok)
+        failures.push(
+          `snapshot.${as.field} did not ${as.op === 'changed' ? 'change' : as.op.replace(/d$/, '')} (before=${JSON.stringify(prior)} after=${JSON.stringify(actual)})`,
+        );
+      continue;
+    }
+    ok =
+      as.op === 'gt' ? Number(actual) > as.value
+      : as.op === 'lt' ? Number(actual) < as.value
+      : as.op === 'gte' ? Number(actual) >= as.value
+      : as.op === 'lte' ? Number(actual) <= as.value
+      : as.op === 'ne' ? actual !== as.value
+      : actual === as.value;
     if (!ok) failures.push(`snapshot.${as.field}=${JSON.stringify(actual)} not ${as.op} ${JSON.stringify(as.value)}`);
   }
   return failures;
@@ -212,13 +303,20 @@ export async function runBrowserJourney({
     // (polling, websockets) that never go idle — this only needs the document +
     // the explicit __harness wait below, which is the real readiness signal.
     await page.goto(url, { waitUntil: 'load', timeout: timeoutMs });
+    // DOM-FALLBACK (VQA power, 2026-07-04): a missing seam is a real, blocking
+    // deterministic failure (honesty contract, unchanged) — but it must NOT
+    // blind Lane 2. When the seam is absent we still REPLAY every step's action
+    // (clicks/keys work on the DOM without a seam) and CAPTURE before/after
+    // frames so the VLM judge + operator get visual evidence of the app's
+    // actual behavior instead of zero artifacts.
+    let seamMounted = true;
     try {
       await page.waitForFunction(
         () => window.__harness && typeof window.__harness.snapshot === 'function',
         { timeout: 10_000 },
       );
     } catch {
-      return { passed: false, detail: 'window.__harness seam not mounted on the served app', frames: [] };
+      seamMounted = false;
     }
 
     const frames = [];
@@ -226,14 +324,33 @@ export async function runBrowserJourney({
     for (const step of steps) {
       const label = step?.label ?? '(unlabeled step)';
       const frame = { stepLabel: label };
+      // Before-action snapshot — the baseline for delta assertions
+      // (increased/decreased/changed).
+      const beforeSnap = seamMounted ? await page.evaluate(() => window.__harness.snapshot()) : undefined;
       if (capture) frame.before = await page.screenshot();
-      await replayAction(page, step?.action);
+      try {
+        await replayAction(page, step?.action);
+      } catch (actErr) {
+        failures.push(`${label}: action failed: ${actErr?.message || actErr}`);
+      }
       if (capture) frame.after = await page.screenshot();
       if (capture) frames.push(frame);
 
-      const snap = await page.evaluate(() => window.__harness.snapshot());
-      const stepFailures = assertSnapshot(snap, step?.assertions);
-      if (stepFailures.length) failures.push(`${label}: ${stepFailures.join('; ')}`);
+      if (seamMounted) {
+        const snap = await page.evaluate(() => window.__harness.snapshot());
+        const stepFailures = assertSnapshot(snap, step?.assertions, beforeSnap);
+        if (stepFailures.length) failures.push(`${label}: ${stepFailures.join('; ')}`);
+      } else {
+        failures.push(`${label}: window.__harness seam not mounted on the served app`);
+      }
+    }
+    if (!seamMounted) {
+      log('info', `[browser-journey] ${url} → FAIL seam-not-mounted (${steps.length} step(s) replayed for frames)`);
+      return {
+        passed: false,
+        detail: 'window.__harness seam not mounted on the served app',
+        frames,
+      };
     }
 
     log('info', `[browser-journey] ${url} → ${failures.length ? 'FAIL' : 'PASS'} (${steps.length} step(s))`);

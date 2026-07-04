@@ -30,13 +30,56 @@ interface Finding {
   touches: string[];
 }
 
+/** True iff any failed step's detail names the missing-__harness disease. */
+function seamNotMounted(verdict: P3QaVerdict): boolean {
+  return (verdict.journeys || []).some((j) =>
+    (j.steps || []).some(
+      (s) => !s.deterministic?.passed && /seam not mounted/i.test(s.deterministic?.detail ?? ''),
+    ),
+  );
+}
+
 /** Extract the blocking findings from a verdict (only blockers become stories). */
 function blockingFindings(verdict: P3QaVerdict): Finding[] {
   const out: Finding[] = [];
 
+  // The seam is the FIRST fix: when window.__harness never mounts, every
+  // journey fails for the same root cause. Mint ONE dedicated story with the
+  // exact wiring contract (the pacman3 forensic: the scaffold's
+  // useGameStateMachine publishes the seam, but a dev who hand-rolls
+  // useReducer bypasses it — dead code, no seam, all probes blind).
+  if (seamNotMounted(verdict)) {
+    out.push({
+      kind: 'wiring',
+      title: 'Mount the window.__harness test seam',
+      intent:
+        'QA cannot verify this app: window.__harness never mounts in the running build. ' +
+        'The scaffold already ships the seam — src/game/state-machine.ts exports useGameStateMachine, ' +
+        "which publishes window.__harness = { ready:true, snapshot(), dispatch, forceStatus, events } when NEXT_PUBLIC_TEST_HARNESS==='1'. " +
+        'FIX: route the live game state through useGameStateMachine (replace any hand-rolled useReducer for game state ' +
+        'with the scaffold hook — same reducer, same initial state, seam publishes automatically). ' +
+        'Do NOT write a new harness; wire the existing one.',
+      acText:
+        "With NEXT_PUBLIC_TEST_HARNESS='1', the running app exposes window.__harness with ready:true and a snapshot() function returning the live game state (status, score, and domain fields).",
+      touches: ['src/**'],
+    });
+  }
+
   for (const j of verdict.journeys || []) {
     if (j.verdict !== 'fail') continue;
-    const failedStep = j.steps.find((s) => s.deterministic && !s.deterministic.passed);
+    // When the seam never mounted, every journey fails for that ONE root cause —
+    // minting a story per journey would be redundant noise (the seam story's
+    // re-QA re-verifies them all). Only mint journey stories for failures that
+    // are NOT the seam disease.
+    const nonSeamFailures = j.steps.filter(
+      (s) =>
+        s.deterministic &&
+        !s.deterministic.passed &&
+        !/seam not mounted/i.test(s.deterministic.detail ?? ''),
+    );
+    if (nonSeamFailures.length === 0 && seamNotMounted(verdict)) continue;
+    const failedStep =
+      nonSeamFailures[0] ?? j.steps.find((s) => s.deterministic && !s.deterministic.passed);
     out.push({
       kind: 'journey',
       title: `Fix journey: ${j.title}`,
@@ -96,10 +139,21 @@ export function mintFixStories(args: {
   const findings = blockingFindings(verdict);
   const shaTag = (verdict.ranAtSha || 'nosha').slice(0, 7);
 
+  // The seam story (if minted) gates the rest: without the seam, no other fix
+  // can be verified. Its deterministic id is computed first so siblings can
+  // depend_on it (the frontier then builds it first).
+  const seamFinding = findings.find((f) => f.title.startsWith('Mount the window.__harness'));
+  const seamStoryId = seamFinding
+    ? `qafix-${plan.planId.slice(0, 8)}-${seamFinding.kind}-${shortHash(
+        `${shaTag}:${seamFinding.title}:${seamFinding.touches.join(',')}`,
+      )}`
+    : null;
+
   return findings.map((f) => {
     const storyId = `qafix-${plan.planId.slice(0, 8)}-${f.kind}-${shortHash(
       `${shaTag}:${f.title}:${f.touches.join(',')}`,
     )}`;
+    const dependsOn = seamStoryId && storyId !== seamStoryId ? [seamStoryId] : [];
     const ac: BoundAcceptanceCriterion = {
       id: `${storyId}-ac1`,
       text: f.acText,
@@ -116,14 +170,14 @@ export function mintFixStories(args: {
       title: f.title,
       intent: f.intent,
       acceptanceCriteria: [ac],
-      depends_on: [],
+      depends_on: dependsOn,
       touches: f.touches,
       complexity: 'standard',
       planId: plan.planId,
       appId: plan.appId ?? '',
-      state: 'ready',
-      unblockedDepsCount: 0,
-      cohortBatch: 0,
+      state: dependsOn.length > 0 ? 'blocked' : 'ready',
+      unblockedDepsCount: dependsOn.length,
+      cohortBatch: dependsOn.length > 0 ? 1 : 0,
       version: 1,
       createdAt: now,
       updatedAt: now,
