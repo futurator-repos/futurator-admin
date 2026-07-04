@@ -102,7 +102,8 @@ describe('useP3QaReport', () => {
 
   it('fetches and returns the report when enabled (idle status)', async () => {
     delete process.env.NEXT_PUBLIC_P3_QA_REVIEW;
-    getMock.mockResolvedValue(makeReport({ status: 'idle' }));
+    // The endpoint returns an envelope { enabled, report } — the hook unwraps it.
+    getMock.mockResolvedValue({ enabled: true, report: makeReport({ status: 'idle' }) });
     const { result } = renderHook(() => useP3QaReport('plan-1'), { wrapper });
     expect(result.current.enabled).toBe(true);
     await waitFor(() => expect(result.current.report?.status).toBe('idle'));
@@ -117,7 +118,10 @@ describe('useP3QaReport', () => {
       getMock.mockImplementation(() => {
         calls += 1;
         // First two calls return 'running'; then it flips to 'passed'.
-        return Promise.resolve(makeReport({ status: calls <= 2 ? 'running' : 'passed' }));
+        return Promise.resolve({
+          enabled: true,
+          report: makeReport({ status: calls <= 2 ? 'running' : 'passed' }),
+        });
       });
 
       const { result } = renderHook(() => useP3QaReport('plan-1'), { wrapper });

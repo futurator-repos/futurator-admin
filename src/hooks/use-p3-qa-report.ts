@@ -88,8 +88,14 @@ export function useP3QaReport(planId: string | null): UseP3QaReportResult {
     queryKey: QK_P3_QA(planId ?? ''),
     queryFn: async () => {
       try {
-        const raw = await api.get<P3QaReport>(`/plans/${planId}/qa-review-p3`);
-        return coerceP3QaReport(raw);
+        // The endpoint returns an envelope { enabled, report, verdict } — the
+        // report is nested. Coercing the whole envelope always yields null
+        // (no top-level planId/status), so the view never rendered. Unwrap it.
+        const raw = await api.get<{ enabled?: boolean; report?: unknown }>(
+          `/plans/${planId}/qa-review-p3`,
+        );
+        if (raw && raw.enabled === false) return null;
+        return coerceP3QaReport(raw?.report);
       } catch {
         // A malformed/absent report is a data state (render "no report yet"),
         // never an uncaught exception into the tab.

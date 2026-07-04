@@ -27,6 +27,8 @@ export interface DeterministicResult {
   passed: boolean;
   /** Why it passed/failed (snapshot delta, seam-not-mounted, timeout, …). */
   detail: string;
+  /** True iff a harness/infra failure (not a real app failure) — never blocks. */
+  infra?: boolean;
 }
 
 /** The Lane-2 before/after VQA judgment for one step. */

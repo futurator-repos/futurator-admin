@@ -116,6 +116,24 @@ export async function clearP3QaJob(planId: string): Promise<void> {
 }
 
 /**
+ * QA-Review W2 — reset QA state for a re-run (called on send-back). REMOVES both
+ * p3QaJobId AND p3QaVerdict. Clearing the verdict is essential: a sent-back
+ * verdict carries decidedAt, and the daemon's next-run write guards on
+ * `attribute_not_exists(p3QaVerdict.decidedAt)` — leaving it in place would
+ * permanently block the re-review verdict from ever persisting.
+ */
+export async function clearP3QaForRerun(planId: string): Promise<void> {
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.plans,
+      Key: { planId },
+      UpdateExpression: 'REMOVE p3QaJobId, p3QaVerdict SET updatedAt = :now',
+      ExpressionAttributeValues: { ':now': new Date().toISOString() },
+    }),
+  );
+}
+
+/**
  * QA-Review W2 — persist a fresh P3 QA verdict, shadow-safe. Two guards:
  *  1. STALE guard — only write if verdict.ranAtSha matches the plan's current
  *     qaCommitSha (the runner ran against the deployed artifact; if the artifact

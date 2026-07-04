@@ -118,3 +118,18 @@ describe('findOrphanModules — fail-open honesty contract', () => {
     expect(r).toEqual({ orphanModules: [], blocking: false });
   });
 });
+
+describe('isFrameworkEntry exemption (review fix #10)', () => {
+  it('exempts Next App Router + entry files that framework loads (0 src importers by design)', () => {
+    const root2 = mkdtempSync(join(tmpdir(), 'p3-orphan-fw-'));
+    mkdirSync(join(root2, 'src', 'app'), { recursive: true });
+    // page.tsx is built by the assemble story and has no src importer — but it's
+    // a framework entry, NOT an orphan.
+    writeFileSync(join(root2, 'src', 'app', 'page.tsx'), 'export default function Page(){return null}\n');
+    writeFileSync(join(root2, 'src', 'main.tsx'), 'console.log("entry")\n');
+    const r = findOrphanModules({ appDir: root2, builtModules: ['src/app/page.tsx', 'src/main.tsx'] });
+    expect(r.orphanModules).toEqual([]);
+    expect(r.blocking).toBe(false);
+    rmSync(root2, { recursive: true, force: true });
+  });
+})

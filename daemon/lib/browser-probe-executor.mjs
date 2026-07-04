@@ -198,7 +198,12 @@ export async function runBrowserJourney({
   capture = false,
 }) {
   const chromium = playwright?.chromium ?? playwright?.default?.chromium;
-  if (!chromium) return { passed: false, detail: 'playwright chromium unavailable (import interop)', frames: [] };
+  // `infra:true` marks a failure of the TEST HARNESS itself (no browser, a
+  // network/launch error) — distinct from a real app failure (seam not mounted,
+  // a failed assertion). The QA runner routes infra failures to 'uncertain'
+  // (non-blocking) so a broken test rig never false-blocks a working app; a real
+  // app failure (no `infra` flag) still blocks.
+  if (!chromium) return { passed: false, infra: true, detail: 'playwright chromium unavailable (import interop)', frames: [] };
   let browser;
   try {
     browser = await chromium.launch({ headless: true });
@@ -238,7 +243,11 @@ export async function runBrowserJourney({
       frames,
     };
   } catch (err) {
-    return { passed: false, detail: `browser journey error: ${err?.message || err}`, frames: [] };
+    // A launch/navigation/browser error is a harness/infra failure, not an app
+    // verdict — mark infra so the runner degrades to 'uncertain', not a block.
+    // (Note: the seam-not-mounted return above is deliberately NOT infra — that
+    // IS a real app failure and must block.)
+    return { passed: false, infra: true, detail: `browser journey error: ${err?.message || err}`, frames: [] };
   } finally {
     try {
       if (browser) await browser.close();

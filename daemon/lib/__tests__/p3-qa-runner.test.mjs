@@ -196,6 +196,23 @@ describe('runP3Qa — pacman3-shaped fixture (stub reducer + orphans)', () => {
     expect(result.journeys[0].steps[0].deterministic.passed).toBe(false);
     expect(result.journeys[0].steps[0].deterministic.detail).toMatch(/snapshot\.x/);
   });
+
+  // Review fix #5: a harness/infra failure (no playwright) must NOT block a
+  // possibly-working app — it degrades to uncertain, never a false-block.
+  it('infra failure (no playwright) → journey uncertain, NOT blocking', async () => {
+    const plan = { planId: 'p3', qaCommitSha: 'sha3', devUrl: 'https://dev.futurator.ai/p-3' };
+    const stories = [
+      story({
+        storyId: 's1', touches: ['src/a.ts'],
+        acceptanceCriteria: [{ id: 's1-ac1', text: 't', when: 'press x', thenObservable: 'snapshot.x is greater than 0' }],
+      }),
+    ];
+    const journeys = [{ id: 'j1', title: 'J', acRefs: ['s1-ac1'], steps: [{ acId: 's1-ac1', label: 'press x', when: 'press x', thenObservable: 'snapshot.x is greater than 0' }] }];
+    const result = await runP3Qa({ plan, stories, journeys, playwright: null, spawnJudge: passJudge, s3: okS3, qaContext: {}, log: () => {} });
+    expect(result.blocking).toBe(false);
+    expect(result.journeys[0].verdict).toBe('uncertain');
+    expect(result.journeys[0].steps[0].deterministic.infra).toBe(true);
+  });
 });
 
 // ── fully-wired fixture: blocking:false ───────────────────────────────────

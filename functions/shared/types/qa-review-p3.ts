@@ -27,6 +27,12 @@ export interface DeterministicResult {
   passed: boolean;
   /** Why it passed/failed (snapshot delta, seam-not-mounted, timeout, …). */
   detail: string;
+  /**
+   * True iff this step failed due to a TEST-HARNESS/infra problem (no browser,
+   * launch/nav error) rather than a real app failure. Infra steps are excluded
+   * from the blocking check — they render 'uncertain', never a false-block.
+   */
+  infra?: boolean;
 }
 
 /** The Lane-2 before/after VQA judgment for one step. */

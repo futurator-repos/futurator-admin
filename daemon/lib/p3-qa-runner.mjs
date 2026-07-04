@@ -251,10 +251,16 @@ async function runOneJourney({ journey, url, stories, playwright, spawnJudge, s3
   const vqaFlat = [];
   const journeyIdKey = sanitizeKey(journey?.id || 'journey');
 
+  // A harness/infra failure (no browser, launch/nav error) is NOT an app verdict
+  // — flag every step so the blocking check excludes it and the journey reads
+  // 'uncertain' (never a false-block, never a fake-pass).
+  const infra = !!runResult.infra;
   for (const meta of primaryMeta) {
     const det = !meta.interpretable
       ? { assertion: meta.assertionsDesc, passed: false, detail: `probe not interpretable: ${meta.reason}` }
-      : stepDeterministicFromResult(runResult, meta.label, meta.assertionsDesc);
+      : infra
+        ? { assertion: meta.assertionsDesc, passed: false, infra: true, detail: `harness unavailable: ${runResult.detail}` }
+        : stepDeterministicFromResult(runResult, meta.label, meta.assertionsDesc);
 
     let stepVqa;
     const frame = (runResult.frames || []).find((f) => f.stepLabel === meta.label);
@@ -323,13 +329,21 @@ async function runOneJourney({ journey, url, stories, playwright, spawnJudge, s3
   const deterministicAllPassed = steps.every((s) => s.deterministic.passed);
   const vqaVerdicts = steps.filter((s) => s.vqa).map((s) => s.vqa.verdict);
 
+  // A journey with ZERO executable steps verified NOTHING — reporting 'pass'
+  // (the vacuous every()→true path) would be a fake-pass (honesty contract). A
+  // journey whose acRefs all resolved to non-browser-shaped ACs lands here.
+  // Report 'uncertain' (non-blocking, surfaced to the operator) instead. An
+  // infra failure of the harness likewise reads 'uncertain', never a block.
+  const verdict =
+    infra || steps.length === 0 ? 'uncertain' : combineVerdict(deterministicAllPassed, vqaVerdicts);
+
   return {
     journeyResult: {
       id: journey?.id ?? '',
       title: journey?.title ?? '',
       narrative: journey?.narrative,
       acRefs: Array.isArray(journey?.acRefs) ? journey.acRefs : [],
-      verdict: combineVerdict(deterministicAllPassed, vqaVerdicts),
+      verdict,
       steps,
     },
     vqaFlat,
@@ -432,7 +446,8 @@ export async function runP3Qa({
     wiring = findOrphanModules({ appDir: qaContext.appDir, builtModules: flattenTouches(stories), log });
   }
 
-  const anyJourneyDeterministicFail = journeyResults.some((j) => (j.steps || []).some((s) => s.deterministic?.passed === false));
+  // Infra-flagged steps (harness failures) are excluded — they never block.
+  const anyJourneyDeterministicFail = journeyResults.some((j) => (j.steps || []).some((s) => s.deterministic?.passed === false && !s.deterministic?.infra));
   const anyVqaRealFail = vqaResults.some((v) => v.verdict === 'fail');
   const blocking = anyJourneyDeterministicFail || anyVqaRealFail || wiring.blocking;
 

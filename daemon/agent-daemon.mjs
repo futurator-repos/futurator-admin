@@ -1803,7 +1803,11 @@ async function executeP3QaJob(job) {
       playwright,
       spawnJudge: (a) => spawnGateAgent({ ...a, role: 'judge' }, { short }),
       s3: (cmd, cwd, timeoutMs) => defaultShellRunner(cmd, cwd, timeoutMs),
-      qaContext: { workingDir: planForQa.workingDir },
+      // p3-qa-runner reads qaContext.appDir (orphan scan root + judge/s3 cwd).
+      // Passing `workingDir` here left appDir undefined → the orphan/wiring lane
+      // silently never ran in production (shipped the pacman3 disease as a
+      // false-pass). Key MUST be `appDir`.
+      qaContext: { appDir: planForQa.workingDir },
       log,
     });
   } catch (e) {

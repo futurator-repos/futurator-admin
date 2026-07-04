@@ -3935,7 +3935,9 @@ app.post('/api/plans/:id/qa-review', async (c) => {
 // Off (or no verdict yet) → { enabled, report:null } so the UI shows its fallback.
 app.get('/api/plans/:id/qa-review-p3', async (c) => {
   const planId = c.req.param('id');
-  const enabled = (process.env.P3_QA_REVIEW ?? 'off') !== 'off';
+  // 'shadow' computes + persists the verdict but must NOT surface it in the UI;
+  // only 'on' surfaces. 'off'/'shadow' → enabled:false → the view falls back.
+  const enabled = (process.env.P3_QA_REVIEW ?? 'off') === 'on';
   const plan = await planRepo.getPlanById(planId);
   if (!plan) throw new NotFoundError('Plan', planId);
   const v = plan.p3QaVerdict;
@@ -3957,6 +3959,9 @@ app.get('/api/plans/:id/qa-review-p3', async (c) => {
 // ran against (approvedSha) so W3 promotes exactly that build. Never mutates the
 // journeys/vqa — decision-only.
 app.post('/api/plans/:id/qa/approve', async (c) => {
+  if ((process.env.P3_QA_REVIEW ?? 'off') === 'off') {
+    throw new AppError('QA_REVIEW_DISABLED', 'QA Review (W2) is not enabled.', 404);
+  }
   const planId = c.req.param('id');
   const user = c.get('user');
   const plan = await planRepo.getPlanById(planId);
@@ -3993,8 +3998,10 @@ app.post('/api/plans/:id/qa/approve', async (c) => {
 // to 'fixing', and CLEARS p3QaJobId so a fresh dev-deploy + QA re-runs on the
 // fixed commit. Body: { note?: string }.
 app.post('/api/plans/:id/qa/send-back', async (c) => {
+  if ((process.env.P3_QA_REVIEW ?? 'off') === 'off') {
+    throw new AppError('QA_REVIEW_DISABLED', 'QA Review (W2) is not enabled.', 404);
+  }
   const planId = c.req.param('id');
-  const user = c.get('user');
   const plan = await planRepo.getPlanById(planId);
   if (!plan) throw new NotFoundError('Plan', planId);
   const v = plan.p3QaVerdict;
@@ -4009,16 +4016,13 @@ app.post('/api/plans/:id/qa/send-back', async (c) => {
   const { mintFixStories } = await import('../shared/services/p3-fix-story-minter');
   const rows = mintFixStories({ plan, verdict: v });
   if (rows.length > 0) await storyNodeRepo.batchPutStoryNodes(rows);
-  const decided = {
-    ...v,
-    decidedAt: new Date().toISOString(),
-    decidedBy: user?.email ?? user?.userId ?? 'operator',
-    decision: 'sent-back' as const,
-  };
-  // Flip to fixing + record the decision, then REMOVE p3QaJobId (a separate
-  // REMOVE — updatePlanFields can't clear a field) so the cron re-enqueues QA.
-  await planRepo.updatePlanFields(planId, { status: 'fixing', p3QaVerdict: decided });
-  await planRepo.clearP3QaJob(planId);
+  // Flip to fixing, then RESET QA state (REMOVE p3QaJobId AND p3QaVerdict). The
+  // verdict MUST be cleared, not stamped with decidedAt: the daemon's next-run
+  // write guards on attribute_not_exists(p3QaVerdict.decidedAt), so a lingering
+  // decided verdict would permanently block the re-review from persisting. The
+  // sent-back record lives in the minted fix stories + status='fixing'.
+  await planRepo.updatePlanFields(planId, { status: 'fixing' });
+  await planRepo.clearP3QaForRerun(planId);
   return c.json({ ok: true, mintedStories: rows.length, storyIds: rows.map((r) => r.storyId) });
 });
 
