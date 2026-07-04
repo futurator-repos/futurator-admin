@@ -133,3 +133,18 @@ describe('isFrameworkEntry exemption (review fix #10)', () => {
     rmSync(root2, { recursive: true, force: true });
   });
 })
+
+describe('test-file importers do not mask a runtime orphan (pacman3 disease)', () => {
+  it('flags a module imported ONLY by its own test as a runtime orphan', () => {
+    const r3 = mkdtempSync(join(tmpdir(), 'p3-orphan-test-'));
+    mkdirSync(join(r3, 'src', 'game'), { recursive: true });
+    writeFileSync(join(r3, 'src', 'game', 'ghost-ai.ts'), 'export function ghostAI(){return 1}\n');
+    // Only the TEST imports it — nothing in the app does → runtime orphan.
+    writeFileSync(join(r3, 'src', 'game', 'ghost-ai.test.ts'), "import { ghostAI } from './ghost-ai';\nghostAI();\n");
+    writeFileSync(join(r3, 'src', 'app.ts'), 'export const app = 1;\n');
+    const r = findOrphanModules({ appDir: r3, builtModules: ['src/game/ghost-ai.ts'] });
+    expect(r.orphanModules).toEqual(['src/game/ghost-ai.ts']);
+    expect(r.blocking).toBe(true);
+    rmSync(r3, { recursive: true, force: true });
+  });
+})
