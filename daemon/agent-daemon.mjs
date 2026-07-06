@@ -104,6 +104,7 @@ import { buildStoryStateUpdate } from './lib/story-persist.mjs';
 import { runStoryCompileGraph } from './pipelines/lib/story-compile-graph.mjs';
 import { enqueueStoryReflector } from './pipelines/lib/story-reflector-hook.mjs';
 import { nextStatusOnDispatch, nextStatusOnAllDone } from './lib/p3-lifecycle.mjs';
+import { resolveStampableCommitSha } from './lib/qa-commit-sha.mjs';
 import { runUltracodeBenchJob } from './pipelines/ultracode-bench-job-runner.mjs';
 import { makeCaptureDeps } from './pipelines/ultracode-bench-capture.mjs';
 import { runDualAgentCompare } from './pipelines/dual-agent-compare-runner.mjs';
@@ -6028,11 +6029,21 @@ async function postDeployWriteback(job, variables) {
     // promotes exactly it. Shadow-safe: only stamp when the SHA is a valid
     // 40-hex AND the plan has no human QA decision yet (never re-pin under a
     // decided verdict). Absent/invalid SHA → devUrl still recorded (fail-open).
-    const commitSha = job.variables?.COMMIT_SHA;
-    const stampSha =
-      deployEnv === 'dev' && typeof commitSha === 'string' && /^[a-f0-9]{40}$/.test(commitSha)
-        ? commitSha
-        : null;
+    //
+    // BUG FIX (2026-07-06, pacman4 forensic): this used to read
+    // `job.variables?.COMMIT_SHA` — the ORIGINAL job snapshot captured before
+    // the pipeline ran (no variables yet extracted) — instead of the
+    // `variables` PARAMETER this function receives, which holds the actual
+    // extracted COMMIT_SHA. Silent no-op: qaCommitSha was NEVER stamped for ANY
+    // plan since this feature shipped, so the cron's p3-qa auto-enqueue (which
+    // requires plan.qaCommitSha) never fired — the real deployed-app QA
+    // (journeys+VQA+wiring) never ran, full stop, for every P3 plan. The
+    // fallback per-story testBinding QA tab (which only verifies isolated unit
+    // tests, never the assembled app) was the only thing anyone ever saw —
+    // exactly why an app can show "32/32 AC passing" while Pacman doesn't move.
+    // Extracted to a pure, unit-tested module (qa-commit-sha.mjs) — this file
+    // has zero test coverage, which is exactly how the bug shipped unnoticed.
+    const stampSha = resolveStampableCommitSha({ deployEnv, variables });
     try {
       const expr = stampSha
         ? `SET ${field} = :url, qaCommitSha = :sha, updatedAt = :now`
