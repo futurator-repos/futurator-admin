@@ -51,3 +51,27 @@ export function nextStatusOnDispatch(current) {
 export function nextStatusOnAllDone(current) {
   return REVIEW_FROM.has(current) ? 'review' : null;
 }
+
+/**
+ * True iff EVERY story node is TERMINAL — `done` OR `failed` — meaning there is
+ * no more dev work possible and the plan should advance to `review` (where the
+ * deployed-app QA + operator are the real gate). `justResolvedStoryId` counts as
+ * terminal regardless of GSI propagation lag (its done/failed write may not be
+ * visible on the eventually-consistent index yet).
+ *
+ * pacman4 forensic (2026-07-06): using an all-`done` predicate wedged a plan
+ * with a single terminally-`failed` fix-story in `fixing` FOREVER — QA never got
+ * to judge. PURE.
+ *
+ * @param {Array<{ state?: string, storyId?: string }>} nodes
+ * @param {string} [justResolvedStoryId]
+ */
+export function allStoriesResolved(nodes, justResolvedStoryId) {
+  if (!Array.isArray(nodes) || nodes.length === 0) return false;
+  return nodes.every(
+    (n) =>
+      n?.state === 'done' ||
+      n?.state === 'failed' ||
+      (justResolvedStoryId != null && n?.storyId === justResolvedStoryId),
+  );
+}

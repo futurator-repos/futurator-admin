@@ -103,7 +103,7 @@ import { defaultExecutors } from './lib/test-executors.mjs';
 import { buildStoryStateUpdate } from './lib/story-persist.mjs';
 import { runStoryCompileGraph } from './pipelines/lib/story-compile-graph.mjs';
 import { enqueueStoryReflector } from './pipelines/lib/story-reflector-hook.mjs';
-import { nextStatusOnDispatch, nextStatusOnAllDone } from './lib/p3-lifecycle.mjs';
+import { nextStatusOnDispatch, nextStatusOnAllDone, allStoriesResolved } from './lib/p3-lifecycle.mjs';
 import { resolveStampableCommitSha } from './lib/qa-commit-sha.mjs';
 import { runUltracodeBenchJob } from './pipelines/ultracode-bench-job-runner.mjs';
 import { makeCaptureDeps } from './pipelines/ultracode-bench-capture.mjs';
@@ -2141,66 +2141,10 @@ async function executeStoryDevJob(job) {
       log,
     }).catch(() => { /* non-blocking */ });
 
-    // Plan-close reflector: story-scope reflection is production-only (v2.5
-    // §38.1), so an MVP plan would learn NOTHING from a completed run. When THIS
-    // story completing means every story is done, enqueue a PLAN-scope reflector
-    // (fires under any rigor) — the P3 equivalent of plan-reducer's plan-close
-    // reflection. The hook's conditional stamp on the plan row makes it
-    // idempotent, so concurrent last-completions race safely (exactly one wins).
-    try {
-      const { Items } = await ddb.send(new QueryCommand({
-        TableName: PLAN_SPEC_GRAPH_TABLE,
-        IndexName: 'planId-cohortBatch-index',
-        KeyConditionExpression: 'planId = :p',
-        ExpressionAttributeValues: { ':p': planId },
-      }));
-      const nodes = Items || [];
-      // Treat the just-completed story as done regardless of GSI propagation lag
-      // (its 'done' write may not be visible on the eventually-consistent index yet).
-      const allDone =
-        nodes.length > 0 && nodes.every((n) => n.state === 'done' || n.storyId === storyId);
-      if (allDone) {
-        await enqueueStoryReflector({
-          ddb,
-          plan: planRow,
-          scope: 'plan',
-          createJob: async (payload) => {
-            await ddb.send(new PutCommand({ TableName: JOBS_TABLE, Item: payload }));
-            return payload.jobId;
-          },
-          uuid: randomUUID,
-          log,
-        });
-
-        // QA-Review W1 (P3_LIFECYCLE) — every story done ⇒ advance the plan to
-        // 'review'. This is the trigger the cron's P3 branch watches to auto
-        // dev-deploy the assembled app to dev.futurator.ai/<appId>/ and launch
-        // QA. Conditional write on a pre-review status → idempotent, so the
-        // concurrent last-completions that all see allDone race safely (exactly
-        // one flips it). Dark unless the flag is on.
-        if (process.env.P3_LIFECYCLE === 'on') {
-          const nextStatus = nextStatusOnAllDone(planRow?.status || 'developing');
-          if (nextStatus) {
-            try {
-              await ddb.send(new UpdateCommand({
-                TableName: PLANS_TABLE,
-                Key: { planId },
-                UpdateExpression: 'SET #s = :rev, reviewAt = :now, updatedAt = :now',
-                ConditionExpression: '#s IN (:concept, :developing, :fixing)',
-                ExpressionAttributeNames: { '#s': 'status' },
-                ExpressionAttributeValues: {
-                  ':rev': 'review', ':now': new Date().toISOString(),
-                  ':concept': 'concept', ':developing': 'developing', ':fixing': 'fixing',
-                },
-              }));
-              log('info', `[${short}] plan ${planId.slice(0, 8)} → review (all ${nodes.length} stories done)`);
-            } catch { /* conditional fail = already advanced by a racing completion; fine */ }
-          }
-        }
-      }
-    } catch (e) {
-      log('warn', `[${short}] plan-close reflector check failed (non-blocking): ${e.message}`);
-    }
+    // Plan-close reflector + lifecycle advance now run UNCONDITIONALLY after the
+    // if/else (see maybeAdvancePlanOnAllResolved below the branch) so a FAILING
+    // last story still triggers the transition — a success-only hook wedged
+    // pacman4 in `fixing` forever (27 failed fix-stories → never all-done).
   } else if (result.attemptsUsed >= MAX_DEV_ATTEMPTS_PER_STORY) {
     // Bounded fix-forward exhausted — surface for operator attention with the
     // real failing-test detail from the last attempt.
@@ -2220,12 +2164,78 @@ async function executeStoryDevJob(job) {
     }, log);
   }
 
+  // Advance the plan lifecycle when EVERY story is terminal — runs on BOTH the
+  // success and failure paths (a failing last story must still trigger it).
+  await maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short });
+
   // updateJobFields ALWAYS appends updatedAt — do NOT pass it (duplicate path →
   // "Two document paths overlap" → the status write throws → the job never
   // reaches terminal → the poll loop re-runs it forever).
   await updateJobFields(job.jobId, { status: ok ? 'COMPLETED' : 'FAILED' });
   log(ok ? 'info' : 'error', `[${short}] story-dev ${storyId} → ${result.newState || `exit ${result.exitCode}`}` +
     (result.attemptsUsed ? ` (${result.attemptsUsed} attempt${result.attemptsUsed === 1 ? '' : 's'})` : ''));
+}
+
+/**
+ * P3 lifecycle advance — flip the plan to `review` when EVERY story is TERMINAL
+ * (done OR failed), not only when all are done. pacman4 forensic (2026-07-06):
+ * a failed fix-story is terminal, so an all-`done` predicate wedged the plan in
+ * `fixing` FOREVER (27 failed fix-stories → the "all done → review" check could
+ * never pass, so the assembled-app QA — the REAL gate — never got to judge).
+ * Failed unit-stories surface their own `dev-retry-exhausted` attention items;
+ * the deployed-app QA + operator are the real arbiters, so a partial failure
+ * must advance to review, not deadlock. Also enqueues the plan-close reflector.
+ * Idempotent conditional write → concurrent last-completions race safely.
+ */
+async function maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short }) {
+  try {
+    const { Items } = await ddb.send(new QueryCommand({
+      TableName: PLAN_SPEC_GRAPH_TABLE,
+      IndexName: 'planId-cohortBatch-index',
+      KeyConditionExpression: 'planId = :p',
+      ExpressionAttributeValues: { ':p': planId },
+    }));
+    const nodes = Items || [];
+    if (!allStoriesResolved(nodes, storyId)) return;
+    const failedCount = nodes.filter((n) => n.state === 'failed' && n.storyId !== storyId).length;
+
+    await enqueueStoryReflector({
+      ddb,
+      plan: planRow,
+      scope: 'plan',
+      createJob: async (payload) => {
+        await ddb.send(new PutCommand({ TableName: JOBS_TABLE, Item: payload }));
+        return payload.jobId;
+      },
+      uuid: randomUUID,
+      log,
+    });
+
+    // QA-Review W1 (P3_LIFECYCLE) — advance to `review`, which the cron watches
+    // to auto dev-deploy + launch the real assembled-app QA. Conditional write
+    // on a pre-review status → idempotent. Dark unless the flag is on.
+    if (process.env.P3_LIFECYCLE === 'on') {
+      const nextStatus = nextStatusOnAllDone(planRow?.status || 'developing');
+      if (nextStatus) {
+        try {
+          await ddb.send(new UpdateCommand({
+            TableName: PLANS_TABLE,
+            Key: { planId },
+            UpdateExpression: 'SET #s = :rev, reviewAt = :now, updatedAt = :now',
+            ConditionExpression: '#s IN (:concept, :developing, :fixing)',
+            ExpressionAttributeNames: { '#s': 'status' },
+            ExpressionAttributeValues: {
+              ':rev': 'review', ':now': new Date().toISOString(),
+              ':concept': 'concept', ':developing': 'developing', ':fixing': 'fixing',
+            },
+          }));
+          log('info', `[${short}] plan ${planId.slice(0, 8)} → review (all ${nodes.length} stories resolved${failedCount ? `, ${failedCount} failed — deployed-app QA is the gate` : ''})`);
+        } catch { /* conditional fail = already advanced by a racing completion; fine */ }
+      }
+    }
+  } catch (e) {
+    log('warn', `[${short}] plan-advance check failed (non-blocking): ${e.message}`);
+  }
 }
 
 async function scanStaleEpicDevJobs() {

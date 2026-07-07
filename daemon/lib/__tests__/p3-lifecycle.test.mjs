@@ -4,6 +4,7 @@ import {
   p3DevDeployIdentity,
   nextStatusOnDispatch,
   nextStatusOnAllDone,
+  allStoriesResolved,
 } from '../p3-lifecycle.mjs';
 
 describe('isP3Plan', () => {
@@ -49,5 +50,27 @@ describe('status machine', () => {
     expect(nextStatusOnAllDone('fixing')).toBe('review');
     expect(nextStatusOnAllDone('review')).toBeNull();
     expect(nextStatusOnAllDone('delivered')).toBeNull();
+  });
+});
+
+describe('allStoriesResolved (pacman4 wedge fix)', () => {
+  it('true when every story is done', () => {
+    expect(allStoriesResolved([{ state: 'done' }, { state: 'done' }])).toBe(true);
+  });
+  it('true when stories are a MIX of done and failed (was the wedge)', () => {
+    expect(allStoriesResolved([{ state: 'done' }, { state: 'failed' }])).toBe(true);
+  });
+  it('false when any story is still active (ready/claimed/developing)', () => {
+    expect(allStoriesResolved([{ state: 'done' }, { state: 'claimed' }])).toBe(false);
+    expect(allStoriesResolved([{ state: 'ready' }])).toBe(false);
+  });
+  it('counts the just-resolved story as terminal despite GSI lag', () => {
+    // The current story shows stale 'claimed' on the index but is the one that
+    // just finished — it must not block the advance.
+    expect(allStoriesResolved([{ state: 'done' }, { state: 'claimed', storyId: 's2' }], 's2')).toBe(true);
+  });
+  it('false for an empty/invalid node set', () => {
+    expect(allStoriesResolved([])).toBe(false);
+    expect(allStoriesResolved(null)).toBe(false);
   });
 });
