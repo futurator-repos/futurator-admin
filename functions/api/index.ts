@@ -12831,13 +12831,16 @@ app.delete('/api/apps/:appId', authMiddleware, async (c) => {
   }
 
   // 3. App-level side effects: folder rm + GitHub repo delete + S3
-  // apps/ + knowledge-live/ purge + brownfield PAT secret.
+  // apps/ + knowledge-live/ purge + P3 dev-env (dev.futurator.ai/<appId>/
+  // preview + _qa/<planId>/ QA screenshots) + brownfield PAT secret.
   const artifactResults = await cleanupAppArtifacts(appId, {
     sendSsmCommand,
     waitForSsmOutput,
     deleteGithubRepo: async (owner, name) => {
       await deleteRepo(owner, name);
     },
+    devEnvBucket: process.env.DEV_ENV_BUCKET,
+    planIds: plans.map((p) => p.planId),
   });
   results.push(...artifactResults);
 

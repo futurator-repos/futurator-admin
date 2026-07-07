@@ -117,12 +117,14 @@ describe('cleanupAppArtifacts (2026-05-19)', () => {
       'github-repo',
       's3-apps',
       's3-knowledge',
+      's3-dev-env',
       'brownfield-pat',
     ]);
     // Story 20.11 — party-cleanup is rollout-safe: when no
     // listPartySessionsByProject dep is wired, it skips (not 'done').
+    // s3-dev-env skips when no dev-env bucket is wired (this call passes none).
     for (const r of results) {
-      const expected = r.step === 'party-cleanup' ? 'skipped' : 'done';
+      const expected = r.step === 'party-cleanup' || r.step === 's3-dev-env' ? 'skipped' : 'done';
       expect(r.status, `step ${r.step}: ${r.detail}`).toBe(expected);
     }
     expect(deleteRepo).toHaveBeenCalledWith('futurator-repos', 'snake-4');
@@ -261,6 +263,80 @@ describe('cleanupAppArtifacts (2026-05-19)', () => {
     });
     expect(results.find((r) => r.step === 's3-apps')?.status).toBe('skipped');
     expect(results.find((r) => r.step === 's3-knowledge')?.status).toBe('skipped');
+  });
+});
+
+// ── Pipeline-3 dev-env purge (2026-07-07) — dev preview + QA screenshots ──
+describe('s3-dev-env step', () => {
+  it('skips when no dev-env bucket is wired (legacy apps)', async () => {
+    const results = await cleanupAppArtifacts('snake-4', {
+      ...makeSsmDeps('FOLDER_DELETED'),
+      deleteGithubRepo: vi.fn(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s3Client: makeS3Stub({}) as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      secretsClient: makeSecretsStub() as any,
+    });
+    const dev = results.find((r) => r.step === 's3-dev-env');
+    expect(dev?.status).toBe('skipped');
+    expect(dev?.detail).toContain('no dev-env bucket');
+  });
+
+  it("purges the dev bundle (<appId>/) and each plan's QA frames (_qa/<planId>/) from the dev bucket", async () => {
+    const s3 = makeS3Stub({
+      'snake-4/': ['snake-4/index.html', 'snake-4/assets/app.js'],
+      '_qa/plan-a/': ['_qa/plan-a/sha1/j1/before.png', '_qa/plan-a/sha1/j1/after.png'],
+      '_qa/plan-b/': ['_qa/plan-b/sha2/j1/before.png'],
+    });
+    const results = await cleanupAppArtifacts('snake-4', {
+      ...makeSsmDeps('FOLDER_DELETED'),
+      deleteGithubRepo: vi.fn(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s3Client: s3 as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      secretsClient: makeSecretsStub() as any,
+      devEnvBucket: 'futurator-admin-dev-env',
+      planIds: ['plan-a', 'plan-b'],
+    });
+    const dev = results.find((r) => r.step === 's3-dev-env');
+    expect(dev?.status).toBe('done');
+    expect(dev?.detail).toContain('5 objects'); // 2 bundle + 3 QA frames
+    // Every dev-env list/delete targeted the dev bucket, never the public one.
+    const devBucketOps = s3.sent.filter(
+      (s) => (s.input as { Bucket?: string }).Bucket === 'futurator-admin-dev-env',
+    );
+    expect(devBucketOps.length).toBeGreaterThan(0);
+    // Listed all three prefixes (dev bundle + 2 plan QA prefixes).
+    const listedPrefixes = s3.sent
+      .filter((s) => s.cmd === 'ListObjectsV2Command')
+      .map((s) => (s.input as { Prefix: string }).Prefix);
+    expect(listedPrefixes).toEqual(
+      expect.arrayContaining(['snake-4/', '_qa/plan-a/', '_qa/plan-b/']),
+    );
+  });
+
+  it('surfaces a dev-env list/delete failure as error (cascade continues to secret)', async () => {
+    const s3 = {
+      sent: [] as unknown[],
+      send: vi.fn(async (cmd: { constructor: { name: string }; input: { Bucket?: string } }) => {
+        if (cmd.input.Bucket === 'futurator-admin-dev-env') throw new Error('AccessDenied');
+        if (cmd.constructor.name === 'ListObjectsV2Command')
+          return { Contents: [], IsTruncated: false };
+        return {};
+      }),
+    };
+    const results = await cleanupAppArtifacts('snake-4', {
+      ...makeSsmDeps('FOLDER_DELETED'),
+      deleteGithubRepo: vi.fn(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s3Client: s3 as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      secretsClient: makeSecretsStub() as any,
+      devEnvBucket: 'futurator-admin-dev-env',
+      planIds: ['plan-a'],
+    });
+    expect(results.find((r) => r.step === 's3-dev-env')?.status).toBe('error');
+    expect(results.find((r) => r.step === 'brownfield-pat')).toBeDefined();
   });
 });
 

@@ -1,18 +1,29 @@
 'use client';
 
+import { useState } from 'react';
 import Link from 'next/link';
+import { Trash2 } from 'lucide-react';
+import { DeleteLabs3AppDialog } from './delete-app-dialog';
 
 /**
  * Labs3 header — the SDD sibling of legacy LabsHeader. Sits inside AppShell's
  * <main>. Carries the "L A B S · 3" wordmark and a "Plan Spec Graph" tag so the
  * operator always knows they're on the pipeline-3 surface (not legacy Labs).
  *
- * Intentionally lighter than the legacy header: no Project Selector / Delete
- * affordances — those operate on the legacy epic→wave plan model. Labs3 is a
- * read-only visualization of the plan-spec-graph; the back-link returns to the
- * Apps/Plans hub.
+ * Carries a "Remove app" affordance (parity with legacy Labs) that fires the
+ * full `DELETE /api/apps/:appId` teardown — only rendered once we've resolved
+ * the plan's appId. The back-link returns to the Apps/Plans hub.
  */
-export function Labs3Header({ planId }: { planId: string }) {
+export function Labs3Header({
+  planId,
+  appId,
+  appLabel,
+}: {
+  planId: string;
+  appId?: string | null;
+  appLabel?: string;
+}) {
+  const [deleteOpen, setDeleteOpen] = useState(false);
   return (
     <header
       style={{
@@ -73,6 +84,30 @@ export function Labs3Header({ planId }: { planId: string }) {
           gap: 12,
         }}
       >
+        {appId && (
+          <button
+            type="button"
+            onClick={() => setDeleteOpen(true)}
+            title="Remove this app — deletes the GitHub repo, plans/stories, EC2 worktrees, deployed + dev builds, and QA screenshots"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10,
+              color: 'var(--destructive, #ef4444)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.14em',
+              background: 'none',
+              cursor: 'pointer',
+              padding: '6px 10px',
+              border: '1px solid color-mix(in srgb, var(--destructive, #ef4444) 45%, transparent)',
+              borderRadius: 4,
+            }}
+          >
+            <Trash2 size={12} /> Remove
+          </button>
+        )}
         <Link
           href={`/labs/?planId=${encodeURIComponent(planId)}`}
           style={{
@@ -90,6 +125,15 @@ export function Labs3Header({ planId }: { planId: string }) {
           Legacy view →
         </Link>
       </div>
+
+      {appId && (
+        <DeleteLabs3AppDialog
+          appId={appId}
+          appLabel={appLabel}
+          open={deleteOpen}
+          onOpenChange={setDeleteOpen}
+        />
+      )}
     </header>
   );
 }

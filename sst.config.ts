@@ -1207,6 +1207,20 @@ export default $config({
           actions: ['s3:ListBucket'],
           resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}`],
         },
+        // 2026-07-07 — Pipeline-3 dev-env cleanup. DELETE /api/apps/:appId
+        // also purges the dev preview bundle (dev.futurator.ai/<appId>/) and
+        // each plan's QA screenshots (_qa/<planId>/) from the dev-env bucket,
+        // else a removed app stays live at its dev URL and its VQA frames
+        // linger. The dev-env bucket holds only ephemeral previews + QA
+        // frames, so list/get/delete over the whole bucket is in-scope.
+        {
+          actions: ['s3:ListBucket'],
+          resources: [devEnvBucket.arn],
+        },
+        {
+          actions: ['s3:GetObject', 's3:DeleteObject'],
+          resources: [devEnvBucket.arn.apply((a) => `${a}/*`)],
+        },
         // Story 18.1 — let the API Lambda assume the FreeAgentSessionRole
         // with session tags when opening a new free-agent chat session. The
         // role's trust policy further restricts to this Lambda's role ARN

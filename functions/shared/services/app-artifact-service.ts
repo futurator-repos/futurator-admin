@@ -42,6 +42,23 @@ export interface AppArtifactDeps extends PlanFolderDeps {
   /** Injectable for tests. Defaults to a real client when omitted. */
   secretsClient?: SecretsManagerClient;
   /**
+   * Pipeline-3 dev-env bucket (process.env.DEV_ENV_BUCKET). The P3 dev
+   * preview bundle lands at `s3://<devEnvBucket>/<appId>/` (served at
+   * dev.futurator.ai/<appId>/) and the deployed-app QA before/after
+   * screenshots at `s3://<devEnvBucket>/_qa/<planId>/…`. Neither lives in
+   * the public bucket, so the legacy `apps/`+`knowledge-live/` purge misses
+   * them — a deleted app would still be reachable at its dev URL. When the
+   * bucket is wired, these prefixes are purged too. Omit → dev-env purge
+   * skips (rollout-safe; legacy epic→wave apps have no dev-env artifacts).
+   */
+  devEnvBucket?: string;
+  /**
+   * The plan ids this app owned — used to purge each plan's QA screenshot
+   * prefix (`_qa/<planId>/`) from the dev-env bucket. The caller already
+   * enumerates plans for the branch cascade; pass their ids here.
+   */
+  planIds?: string[];
+  /**
    * Story 20.11 (party-push Epic 20) — list every party session for an
    * app so the cascade can reap branches + worktrees BEFORE the folder
    * `rm -rf`. Wire to `partySessionsRepo.listSessionsByProject` at the
@@ -273,27 +290,29 @@ async function deleteGithubRepoStep(appId: string, deps: AppArtifactDeps): Promi
 }
 
 /**
- * Purge an S3 prefix under the public bucket. Uses ListObjectsV2 +
- * DeleteObjects in pages of 1000 (S3 caps). Idempotent.
+ * Purge an S3 prefix. Uses ListObjectsV2 + DeleteObjects in pages of 1000
+ * (S3 caps). Idempotent. `bucket` defaults to the public bucket; the P3
+ * dev-env purges pass the dev-env bucket explicitly.
  */
-async function purgeS3Prefix(prefix: string, label: string, s3: S3Client): Promise<CleanupStep> {
+async function purgeS3Prefix(
+  prefix: string,
+  label: string,
+  s3: S3Client,
+  bucket: string = FUTURATOR_PUBLIC_BUCKET,
+): Promise<CleanupStep> {
   let total = 0;
   let ContinuationToken: string | undefined;
   try {
     do {
       const page = await s3.send(
-        new ListObjectsV2Command({
-          Bucket: FUTURATOR_PUBLIC_BUCKET,
-          Prefix: prefix,
-          ContinuationToken,
-        }),
+        new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken }),
       );
       const objects: ObjectIdentifier[] =
         page.Contents?.filter((o) => !!o.Key).map((o) => ({ Key: o.Key! })) ?? [];
       if (objects.length > 0) {
         await s3.send(
           new DeleteObjectsCommand({
-            Bucket: FUTURATOR_PUBLIC_BUCKET,
+            Bucket: bucket,
             Delete: { Objects: objects, Quiet: true },
           }),
         );
@@ -313,6 +332,44 @@ async function purgeS3Prefix(prefix: string, label: string, s3: S3Client): Promi
       detail: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/**
+ * Purge the Pipeline-3 dev-env artifacts: the dev preview bundle
+ * (`<appId>/`, served at dev.futurator.ai/<appId>/) and every plan's
+ * deployed-app QA screenshots (`_qa/<planId>/`). Without this a removed app
+ * is still live at its dev URL and its before/after VQA frames linger. One
+ * aggregated step across all prefixes; skipped cleanly when no dev-env
+ * bucket is wired.
+ */
+async function purgeDevEnvArtifacts(
+  appId: string,
+  planIds: string[],
+  bucket: string | undefined,
+  s3: S3Client,
+): Promise<CleanupStep> {
+  if (!bucket) {
+    return { step: 's3-dev-env', status: 'skipped', detail: 'no dev-env bucket wired' };
+  }
+  const prefixes = [`${appId}/`, ...planIds.map((planId) => `_qa/${planId}/`)];
+  let total = 0;
+  const errors: string[] = [];
+  for (const prefix of prefixes) {
+    const r = await purgeS3Prefix(prefix, 's3-dev-env', s3, bucket);
+    if (r.status === 'error') errors.push(`${prefix}: ${r.detail}`);
+    else {
+      const n = Number(/^(\d+)/.exec(r.detail ?? '')?.[1] ?? 0);
+      total += n;
+    }
+  }
+  if (errors.length > 0) {
+    return { step: 's3-dev-env', status: 'error', detail: errors.join('; ').slice(0, 300) };
+  }
+  return {
+    step: 's3-dev-env',
+    status: total > 0 ? 'done' : 'skipped',
+    detail: total > 0 ? `${total} objects (dev bundle + QA frames)` : 'no dev-env objects',
+  };
 }
 
 /**
@@ -356,7 +413,8 @@ async function scheduleSecretDelete(
  *   4. GitHub repo delete (orthogonal — independent network call).
  *   5. S3 apps/<appId>/* purge.
  *   6. S3 knowledge-live/<appId>/* purge.
- *   7. Secrets Manager schedule-delete.
+ *   7. S3 dev-env: <appId>/* (dev preview) + _qa/<planId>/* (QA frames).
+ *   8. Secrets Manager schedule-delete.
  */
 export async function cleanupAppArtifacts(
   appId: string,
@@ -387,6 +445,9 @@ export async function cleanupAppArtifacts(
   results.push(await deleteGithubRepoStep(appId, deps));
   results.push(await purgeS3Prefix(`apps/${appId}/`, 's3-apps', s3));
   results.push(await purgeS3Prefix(`knowledge-live/${appId}/`, 's3-knowledge', s3));
+  // Pipeline-3 dev-env: the dev.futurator.ai/<appId>/ preview bundle + every
+  // plan's `_qa/<planId>/` QA screenshots. Skipped for legacy apps (no bucket).
+  results.push(await purgeDevEnvArtifacts(appId, deps.planIds ?? [], deps.devEnvBucket, s3));
   results.push(await scheduleSecretDelete(appId, secrets));
   return results;
 }

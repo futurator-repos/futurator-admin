@@ -199,7 +199,7 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
 
   return (
     <div style={{ color: 'var(--foreground)' }}>
-      <Labs3Header planId={planId} />
+      <Labs3Header planId={planId} appId={appId} appLabel={plan.displayName ?? plan.name} />
       {dispatchStalled && (
         <div
           role="status"
