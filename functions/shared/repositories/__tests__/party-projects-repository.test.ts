@@ -249,6 +249,20 @@ describe('tryAcquireRefreshLock', () => {
     expect(values[':refreshing']).toBe('REFRESHING');
     expect(values[':healthy']).toBe('HEALTHY');
     expect(values[':drifted']).toBe('DRIFTED');
+    // Recovery set — a failed/corrupted clone must be refreshable (hard reset recovers it).
+    expect(values[':failed']).toBe('FAILED');
+    expect(values[':corrupted']).toBe('CORRUPTED');
+  });
+
+  it('acquires the lock from FAILED — a failed refresh is retryable (recovery)', async () => {
+    sendMock.mockResolvedValue({});
+    const result = await tryAcquireRefreshLock('mycelium');
+    expect(result).toEqual({ ok: true });
+    // The FAILED source state is inside the condition's allowed set, so the
+    // conditional update succeeds rather than throwing → no 409 on retry.
+    const input = extract(sendMock.mock.calls[0][0]);
+    expect(input.ConditionExpression).toContain(':failed');
+    expect(input.ConditionExpression).toContain(':corrupted');
   });
 
   it('returns REFRESH_IN_PROGRESS when current state is REFRESHING', async () => {

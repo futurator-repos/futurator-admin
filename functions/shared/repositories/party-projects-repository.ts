@@ -343,8 +343,13 @@ export async function tryAcquireBootstrapLock(
 }
 
 /**
- * Atomically transition a brownfield project from HEALTHY|DRIFTED → REFRESHING
- * (Story 15.4 AC #7). Returns INVALID_STATE for any other source state.
+ * Atomically transition a brownfield project into REFRESHING (Story 15.4 AC #7).
+ * Allowed source states: HEALTHY | DRIFTED (steady-state re-sync) plus FAILED |
+ * CORRUPTED (recovery) — a refresh is a hard `git reset --hard origin/<branch>`,
+ * so it's the correct way to recover a clone whose prior refresh/bootstrap left
+ * it broken. Mirrors tryAcquireBootstrapLock's recovery set; the sole blocked
+ * source is REFRESHING itself (→ REFRESH_IN_PROGRESS). Returns INVALID_STATE for
+ * any other source state.
  */
 export async function tryAcquireRefreshLock(projectId: string): Promise<RefreshLockResult> {
   const now = new Date().toISOString();
@@ -354,12 +359,15 @@ export async function tryAcquireRefreshLock(projectId: string): Promise<RefreshL
         TableName: TABLE_NAMES.partyProjects,
         Key: { projectId },
         UpdateExpression: 'SET bmadStatus = :refreshing, updatedAt = :now',
-        ConditionExpression: 'attribute_exists(projectId) AND bmadStatus IN (:healthy, :drifted)',
+        ConditionExpression:
+          'attribute_exists(projectId) AND bmadStatus IN (:healthy, :drifted, :failed, :corrupted)',
         ExpressionAttributeValues: {
           ':refreshing': 'REFRESHING',
           ':now': now,
           ':healthy': 'HEALTHY',
           ':drifted': 'DRIFTED',
+          ':failed': 'FAILED',
+          ':corrupted': 'CORRUPTED',
         },
       }),
     );
