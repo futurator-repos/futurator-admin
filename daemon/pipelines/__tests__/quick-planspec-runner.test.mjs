@@ -3,7 +3,16 @@ import { runQuickPlanspecJob } from '../quick-planspec-runner.mjs';
 
 // Minimal fake child: emits `stdout` then closes with `code`.
 function fakeSpawn(stdout, code = 0) {
-  return () => {
+  return fakeSpawnSeq([stdout], code);
+}
+
+// Like fakeSpawn but returns outputs[i] on the i-th spawn (last one repeats).
+function fakeSpawnSeq(outputs, code = 0) {
+  let calls = 0;
+  const fn = () => {
+    const stdout = outputs[Math.min(calls, outputs.length - 1)];
+    calls += 1;
+    fn.calls = calls;
     const handlers = {};
     const child = {
       stdout: { on: (ev, cb) => { if (ev === 'data') setTimeout(() => cb(Buffer.from(stdout)), 0); } },
@@ -12,7 +21,43 @@ function fakeSpawn(stdout, code = 0) {
     };
     return child;
   };
+  fn.calls = 0;
+  return fn;
 }
+
+// A serial plan (god-file reducer.ts across 3 features) — fails the audit.
+const SERIAL_SPEC =
+  '<PLAN_SPEC>' +
+  JSON.stringify({ stories: [
+    { id: 'contract', title: 'Define the contract types', touches: ['src/types.ts'],
+      acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }] },
+    { id: 'movement', title: 'Implement movement', dependsOn: ['contract'], touches: ['src/reducer.ts'],
+      acceptanceCriteria: [{ text: 'movement works well', verify: 'state' }] },
+    { id: 'scoring', title: 'Implement scoring', dependsOn: ['contract'], touches: ['src/reducer.ts'],
+      acceptanceCriteria: [{ text: 'scoring works well', verify: 'state' }] },
+    { id: 'ghosts', title: 'Implement ghosts', dependsOn: ['contract'], touches: ['src/reducer.ts'],
+      acceptanceCriteria: [{ text: 'ghosts work well', verify: 'state' }] },
+    { id: 'assemble', title: 'Assemble the complete app', dependsOn: ['contract', 'movement', 'scoring', 'ghosts'], touches: ['src/app.tsx'],
+      acceptanceCriteria: [{ text: 'runs end to end', verify: 'behavior', needsBrowser: true }] },
+  ] }) +
+  '</PLAN_SPEC>';
+
+// The repaired wide plan: disjoint slices → passes the audit.
+const WIDE_SPEC =
+  '<PLAN_SPEC>' +
+  JSON.stringify({ stories: [
+    { id: 'contract', title: 'Define the contract types', touches: ['src/types.ts'],
+      acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }] },
+    { id: 'movement', title: 'Implement movement', dependsOn: ['contract'], touches: ['src/slices/movement.ts'],
+      acceptanceCriteria: [{ text: 'movement works well', verify: 'state' }] },
+    { id: 'scoring', title: 'Implement scoring', dependsOn: ['contract'], touches: ['src/slices/scoring.ts'],
+      acceptanceCriteria: [{ text: 'scoring works well', verify: 'state' }] },
+    { id: 'ghosts', title: 'Implement ghosts', dependsOn: ['contract'], touches: ['src/slices/ghosts.ts'],
+      acceptanceCriteria: [{ text: 'ghosts work well', verify: 'state' }] },
+    { id: 'assemble', title: 'Assemble the complete app', dependsOn: ['contract', 'movement', 'scoring', 'ghosts'], touches: ['src/app.tsx'],
+      acceptanceCriteria: [{ text: 'runs end to end', verify: 'behavior', needsBrowser: true }] },
+  ] }) +
+  '</PLAN_SPEC>';
 
 const SPEC =
   '<PLAN_SPEC>' +
@@ -76,5 +121,42 @@ describe('runQuickPlanspecJob', () => {
     const r = await runQuickPlanspecJob({ jobId: 'j', quickPlanspecPayload: {} }, deps());
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/missing/);
+  });
+
+  it('does not spawn a repair pass when the plan audits clean', async () => {
+    const spawn = fakeSpawnSeq([WIDE_SPEC]);
+    const d = deps({ spawn });
+    const r = await runQuickPlanspecJob(baseJob, d);
+    expect(r.ok).toBe(true);
+    expect(spawn.calls).toBe(1);
+    expect(r.summary.maxWidth).toBe(3);
+    expect(r.summary.violations).toEqual([]);
+  });
+
+  it('repairs a serial plan: audit fails → second spawn → wide plan ingested', async () => {
+    const spawn = fakeSpawnSeq([SERIAL_SPEC, WIDE_SPEC]);
+    const d = deps({ spawn });
+    const r = await runQuickPlanspecJob(baseJob, d);
+    expect(r.ok).toBe(true);
+    expect(spawn.calls).toBe(2); // plan + repair
+    expect(r.summary.stories).toBe(5);
+    expect(r.summary.maxWidth).toBe(3); // the repaired wide DAG won
+    expect(r.summary.violations).toEqual([]);
+    // no serial-plan attention item on a successful repair
+    const cats = d.writeAttentionItem.mock.calls.map((c) => c[0]?.category);
+    expect(cats).not.toContain('quick-planspec-serial-plan');
+  });
+
+  it('keeps the original + raises attention when the repair does not improve', async () => {
+    const spawn = fakeSpawnSeq([SERIAL_SPEC, SERIAL_SPEC]);
+    const d = deps({ spawn });
+    const r = await runQuickPlanspecJob(baseJob, d);
+    expect(r.ok).toBe(true); // never fail the job over width — safety edges keep it correct
+    expect(spawn.calls).toBe(2);
+    expect(r.summary.violations.length).toBeGreaterThan(0);
+    expect(d.batchPutStoryNodes).toHaveBeenCalledOnce();
+    expect(d.writeAttentionItem).toHaveBeenCalledWith(
+      expect.objectContaining({ category: 'quick-planspec-serial-plan', severity: 'medium' }),
+    );
   });
 });

@@ -9,7 +9,12 @@ import { spawn as realSpawn } from 'node:child_process';
 import { createWriteStream, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { extractAssistantText } from '../lib/stream-json-text.mjs';
-import { buildQuickPlanspecPrompt, parseQuickPlanspec, buildStoryNodeRows } from './lib/quick-planspec.mjs';
+import {
+  buildQuickPlanspecPrompt,
+  buildQuickPlanspecRepairPrompt,
+  parseQuickPlanspec,
+  buildStoryNodeRows,
+} from './lib/quick-planspec.mjs';
 
 const BOOTSTRAP_SUCCESS = new Set(['COMPLETED', 'COMPLETED_VIA_SALVAGE', 'COMPLETED_VIA_PREWORK']);
 
@@ -101,10 +106,46 @@ export async function runQuickPlanspecJob(job, deps) {
   const { exitCode, out } = await spawnClaude({ spawn, claudeBin, cwd: job.workingDir, prompt, eventLogDir, jobId: job.jobId, gateArgs, modelArgs, env, log });
   if (exitCode !== 0 && !out) return fail(`generation spawn exited ${exitCode} with no output`);
 
-  // 3) parse → StoryNodes.
+  // 3) parse → StoryNodes (+ the parallelism audit).
   const text = extractAssistantText(out) || out;
-  const { stories, errors } = parseQuickPlanspec(text);
-  if (errors.length || !stories.length) return fail(`could not parse a plan_spec: ${errors.join('; ') || 'no stories'}`);
+  let parsed = parseQuickPlanspec(text);
+  if (parsed.errors.length || !parsed.stories.length) {
+    return fail(`could not parse a plan_spec: ${parsed.errors.join('; ') || 'no stories'}`);
+  }
+
+  // 3b) deterministic gate + ONE repair pass: a serial plan (linear chain /
+  // god-files) wastes the whole frontier — ask the planner to re-decompose with
+  // the audit findings. Keep whichever plan audits better; never fail the job here.
+  if (parsed.audit.violations.length) {
+    log('warn', `[quick-planspec ${short}] parallelism audit failed: ${parsed.audit.violations.join(' · ')} — running repair pass`);
+    const repairPrompt = buildQuickPlanspecRepairPrompt({
+      intent, appSlug: appId, seamHook, stories: parsed.stories, violations: parsed.audit.violations,
+    });
+    const repair = await spawnClaude({
+      spawn, claudeBin, cwd: job.workingDir, prompt: repairPrompt, eventLogDir,
+      jobId: `${job.jobId}-repair`, gateArgs, modelArgs, env, log,
+    });
+    const reparsed = parseQuickPlanspec(extractAssistantText(repair.out) || repair.out);
+    if (!reparsed.errors.length && reparsed.stories.length
+        && reparsed.audit.violations.length < parsed.audit.violations.length) {
+      log('info', `[quick-planspec ${short}] repair pass accepted (${reparsed.audit.violations.length} violation(s) left, was ${parsed.audit.violations.length})`);
+      parsed = reparsed;
+    } else {
+      log('warn', `[quick-planspec ${short}] repair pass did not improve the plan — keeping the original`);
+    }
+  }
+  const { stories, audit } = parsed;
+
+  // 3c) still serial after repair → ingest anyway (safety edges keep it correct)
+  // but tell the operator loudly; never silently ship a serial plan.
+  if (audit.violations.length) {
+    try {
+      await writeAttentionItem?.({ planId, dedupKey: `quick-planspec-serial:${planId}`, severity: 'medium',
+        category: 'quick-planspec-serial-plan', title: 'Plan is serialized (parallelism audit failed)',
+        body: audit.violations.join('\n'),
+        context: { jobId: job.jobId, planId, appId, levels: audit.levels, maxWidth: audit.maxWidth, criticalPath: audit.criticalPath } });
+    } catch { /* best-effort */ }
+  }
 
   // 4) build rows + ingest → plan-spec-graph. Frontier dispatches from here.
   const { rows, summary } = buildStoryNodeRows({ stories, planId, appId, now });
@@ -115,6 +156,8 @@ export async function runQuickPlanspecJob(job, deps) {
   }
 
   try { await updateJobFields?.(job.jobId, { status: 'COMPLETED' }); } catch { /* best-effort */ }
-  log('info', `[quick-planspec ${short}] ingested ${summary.stories} stories → batches 0..${summary.maxBatch} (${summary.ready} ready)`);
-  return { ok: true, summary };
+  log('info', `[quick-planspec ${short}] ingested ${summary.stories} stories → batches 0..${summary.maxBatch} (${summary.ready} ready) · width ${audit.maxWidth} · path ${audit.criticalPath}`
+    + (audit.safetyEdges ? ` · ${audit.safetyEdges} scope-safety edge(s)` : '')
+    + (audit.modelAuthored ? ' · model-authored DAG' : ' · derived DAG'));
+  return { ok: true, summary: { ...summary, maxWidth: audit.maxWidth, criticalPath: audit.criticalPath, violations: audit.violations } };
 }
