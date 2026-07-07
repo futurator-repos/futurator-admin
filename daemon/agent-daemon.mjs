@@ -1809,7 +1809,15 @@ async function executeP3QaJob(job) {
       // silently never ran in production (shipped the pacman3 disease as a
       // false-pass). Key MUST be `appDir`. seamHook is boilerplate metadata
       // stamped on the job by the cron (never a pipeline constant).
-      qaContext: { appDir: planForQa.workingDir, seamHook: job.seamHook },
+      // screenshotBucket = the DEV-ENV bucket the daemon CAN write to (the
+      // public futurator-ai-website is PutObject-denied to the EC2 role); frames
+      // serve at screenshotBase (dev.futurator.ai) under the `_qa/` prefix.
+      qaContext: {
+        appDir: planForQa.workingDir,
+        seamHook: job.seamHook,
+        screenshotBucket: process.env.DEV_ENV_BUCKET,
+        screenshotBase: process.env.DEV_ENV_BASE || 'https://dev.futurator.ai',
+      },
       log,
     });
   } catch (e) {

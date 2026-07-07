@@ -160,23 +160,26 @@ function combineVerdict(deterministicAllPassed, vqaVerdicts) {
 }
 
 /**
- * Upload one local frame file to S3, namespaced under
- * `p3-qa/<planId>/<qaCommitSha>/<journeyId>/...`. Mirrors the exact
- * `aws s3 cp` shell-command shape used by wave-vqa-runner.mjs's screenshot
- * upload (same bucket/content-type/timeout convention), reused here via the
- * injected `s3` primitive (same `(cmd, cwd, timeoutMs) => {code,stdout,stderr}`
- * shape as that module's `shell`).
+ * Upload one local frame file to S3 → a publicly-reachable URL.
  *
- * A non-zero exit code degrades to an empty URL (non-blocking, logged loudly)
- * — a NORMAL upload failure mode. A genuine THROW from `s3` is deliberately
- * NOT caught here: it is the per-journey infra-throw case this orchestrator's
- * outer try/catch (in `runP3Qa`) is responsible for containing.
+ * BUCKET (2026-07-07 pacman4 fix): writes to the DEV-ENV bucket
+ * (`qaContext.screenshotBucket`, served at `qaContext.screenshotBase` =
+ * https://dev.futurator.ai) under an `_qa/` prefix — NOT the public
+ * `futurator-ai-website` bucket, which the daemon's EC2 role is (correctly)
+ * denied PutObject on (CLAUDE.md scoped-write law). `_qa` is a reserved prefix
+ * (app slugs are kebab-case and never start with `_`), so it never collides
+ * with a deployed app. Missing bucket → skip (empty URL); the verdict still
+ * lands with journeys + wiring, just no frame thumbnails.
+ *
+ * A non-zero exit code degrades to an empty URL (non-blocking, logged loudly).
+ * A genuine THROW from `s3` is deliberately NOT caught here: it is the
+ * per-journey infra-throw case runP3Qa's outer try/catch contains.
  */
-async function uploadFrame({ s3, localPath, key, cwd, log }) {
-  if (typeof s3 !== 'function') return '';
-  const cmd = `timeout 30 aws s3 cp ${localPath} "s3://futurator-ai-website/${key}" --content-type image/png`;
+async function uploadFrame({ s3, localPath, key, cwd, log, bucket, base }) {
+  if (typeof s3 !== 'function' || !bucket) return '';
+  const cmd = `timeout 30 aws s3 cp ${localPath} "s3://${bucket}/${key}" --content-type image/png`;
   const up = await s3(cmd, cwd, 45_000);
-  if (up && up.code === 0) return `https://futurator.ai/${key}`;
+  if (up && up.code === 0) return `${base}/${key}`;
   try {
     log('warn', `[p3-qa-runner] SCREENSHOT_UPLOAD_FAILED for ${key}: ${(up?.stderr || '').slice(0, 200)}`);
   } catch {
@@ -284,13 +287,18 @@ async function runOneJourney({ journey, url, stories, playwright, spawnJudge, s3
         log,
       });
 
-      const keyPrefix = `p3-qa/${planId}/${qaCommitSha}/${journeyIdKey}`;
+      // `_qa/` reserved prefix in the DEV-ENV bucket (served at screenshotBase).
+      const keyPrefix = `_qa/${planId}/${qaCommitSha}/${journeyIdKey}`;
       const stamp = Date.now();
+      const screenshotBucket = qaContext?.screenshotBucket;
+      const screenshotBase = qaContext?.screenshotBase || 'https://dev.futurator.ai';
       const beforeShotUrl = await uploadFrame({
         s3,
         localPath: beforePath,
         key: `${keyPrefix}/${slug}-before-${stamp}.png`,
         cwd: qaContext?.appDir,
+        bucket: screenshotBucket,
+        base: screenshotBase,
         log,
       });
       const afterShotUrl = await uploadFrame({
@@ -298,6 +306,8 @@ async function runOneJourney({ journey, url, stories, playwright, spawnJudge, s3
         localPath: afterPath,
         key: `${keyPrefix}/${slug}-after-${stamp}.png`,
         cwd: qaContext?.appDir,
+        bucket: screenshotBucket,
+        base: screenshotBase,
         log,
       });
 

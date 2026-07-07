@@ -115,6 +115,8 @@ describe('runP3Qa — two journeys (pass + deterministic-fail)', () => {
       playwright,
       spawnJudge: passJudge,
       s3: okS3,
+      // Frames upload to the DEV-ENV bucket, served at dev.futurator.ai/_qa/.
+      qaContext: { screenshotBucket: 'dev-env-bucket', screenshotBase: 'https://dev.futurator.ai' },
       log: () => {},
     });
 
@@ -128,15 +130,15 @@ describe('runP3Qa — two journeys (pass + deterministic-fail)', () => {
     expect(failJourney.verdict).toBe('fail');
     expect(failJourney.steps[0].deterministic.passed).toBe(false);
 
-    // Namespaced S3 URLs: p3-qa/<planId>/<qaCommitSha>/<journeyId>/...
+    // Namespaced URLs: dev.futurator.ai/_qa/<planId>/<qaCommitSha>/<journeyId>/...
     expect(passJourney.steps[0].vqa.beforeShotUrl).toMatch(
-      /^https:\/\/futurator\.ai\/p3-qa\/plan-1\/sha123\/j-pass\//,
+      /^https:\/\/dev\.futurator\.ai\/_qa\/plan-1\/sha123\/j-pass\//,
     );
     expect(passJourney.steps[0].vqa.afterShotUrl).toMatch(
-      /^https:\/\/futurator\.ai\/p3-qa\/plan-1\/sha123\/j-pass\//,
+      /^https:\/\/dev\.futurator\.ai\/_qa\/plan-1\/sha123\/j-pass\//,
     );
     expect(failJourney.steps[0].vqa.beforeShotUrl).toMatch(
-      /^https:\/\/futurator\.ai\/p3-qa\/plan-1\/sha123\/j-fail\//,
+      /^https:\/\/dev\.futurator\.ai\/_qa\/plan-1\/sha123\/j-fail\//,
     );
 
     // Flattened vqa[] carries the same URLs, keyed by journeyId/stepLabel.
@@ -293,7 +295,7 @@ describe('runP3Qa — per-journey fail-open (infra throw continuation)', () => {
     ]);
     // Throw ONLY when uploading a frame namespaced under journey j1.
     const throwingS3 = async (cmd) => {
-      if (cmd.includes('p3-qa/plan-4/sha4/j1/')) throw new Error('s3 cp boom');
+      if (cmd.includes('_qa/plan-4/sha4/j1/')) throw new Error('s3 cp boom');
       return { code: 0, stdout: '', stderr: '' };
     };
 
@@ -304,6 +306,7 @@ describe('runP3Qa — per-journey fail-open (infra throw continuation)', () => {
       playwright,
       spawnJudge: passJudge,
       s3: throwingS3,
+      qaContext: { screenshotBucket: 'dev-env-bucket', screenshotBase: 'https://dev.futurator.ai' },
       log: () => {},
     });
 
@@ -313,7 +316,7 @@ describe('runP3Qa — per-journey fail-open (infra throw continuation)', () => {
     expect(j1.verdict).toBe('uncertain');
     expect(j1.steps).toEqual([]);
     expect(j2.verdict).toBe('pass');
-    expect(j2.steps[0].vqa.beforeShotUrl).toMatch(/^https:\/\/futurator\.ai\/p3-qa\/plan-4\/sha4\/j2\//);
+    expect(j2.steps[0].vqa.beforeShotUrl).toMatch(/^https:\/\/dev\.futurator\.ai\/_qa\/plan-4\/sha4\/j2\//);
   });
 });
 
