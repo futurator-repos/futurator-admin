@@ -4723,13 +4723,21 @@ async function partyTryAcquireRefreshLock(projectId) {
         TableName: PARTY_PROJECTS_TABLE,
         Key: { projectId },
         UpdateExpression: 'SET bmadStatus = :refreshing, updatedAt = :now',
+        // Allow FAILED|CORRUPTED too — a party-refresh is a hard git reset, so
+        // recovery is the point. Critically, this also lets the job's OWN retries
+        // re-acquire the lock: attempt 1 sets REFRESHING → the git op fails →
+        // releaseRefreshLock stamps FAILED → without FAILED here, attempts 2 & 3
+        // die with "refresh lock not acquired: INVALID_STATE", masking the real
+        // failure. Mirrors the shared tryAcquireRefreshLock (API layer).
         ConditionExpression:
-          'attribute_exists(projectId) AND bmadStatus IN (:healthy, :drifted, :refreshing)',
+          'attribute_exists(projectId) AND bmadStatus IN (:healthy, :drifted, :refreshing, :failed, :corrupted)',
         ExpressionAttributeValues: {
           ':refreshing': 'REFRESHING',
           ':now': now,
           ':healthy': 'HEALTHY',
           ':drifted': 'DRIFTED',
+          ':failed': 'FAILED',
+          ':corrupted': 'CORRUPTED',
         },
       }),
     );
