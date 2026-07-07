@@ -214,6 +214,25 @@ to levels `[1,3,1]`, maxWidth 3, criticalPath 3, zero violations — foundation 
 slice layer → assemble. 23 tests green (`quick-planspec.test.mjs`,
 `quick-planspec-runner.test.mjs`).
 
+**Live acceptance benchmark (2026-07-07, real Opus 4.8 one-shot with the new prompt,
+same Pac-Man intent, audited by the shipped `parseQuickPlanspec`+`auditPlanGraph`):**
+
+```
+pacman5 (old prompt): levels [2,1,1,1,1,1,1]  maxWidth 2  criticalPath 7  god-file reducer.ts
+pacman6 (new prompt): levels [1,6,1]          maxWidth 6  criticalPath 3  0 violations, 0 safety edges
+
+B0  Define game contract: state, types, maze, constants   (foundation — contract files)
+B1  movement.ts · pellets.ts · ghosts.ts · collisions.ts · progression.ts · GameCanvas+Hud
+    (6 disjoint slice stories, ALL depending only on the contract — model-authored DAG)
+B2  Assemble the complete app (page.tsx + seam hook + loop; depends on all 7)
+```
+
+Quality held: 33 ACs, 8 behavioral, 16 with `thenObservable`, every named capability
+covered, and the assemble story carries 8 ACs proving each capability through
+`window.__harness.snapshot()` with the seam-mount AC first. Critical path 7 → 3
+(better than halved); width 2 → 6 (= feature count). The repair pass never fired —
+the prompt alone produced a clean wide plan.
+
 Not deployed — operator runs `rsync-daemon.sh` after review.
 
 ---
