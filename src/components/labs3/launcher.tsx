@@ -77,7 +77,7 @@ function QuickCreate() {
       <textarea
         value={intent}
         onChange={(e) => setIntent(e.target.value)}
-        placeholder="Describe an app idea… e.g. a dino runner game with arrow-key controls, obstacles, and a score"
+        placeholder="Describe an app idea… e.g. a kanban board with draggable cards and columns, or a tip calculator with a bill split, or a dino runner game — any app type works"
         rows={3}
         style={{
           width: '100%',

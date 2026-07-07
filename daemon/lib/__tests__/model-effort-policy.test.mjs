@@ -4,8 +4,8 @@ import { resolveAgentPolicy, cliModelArgs } from '../model-effort-policy.mjs';
 const env = {}; // isolate from the host machine's env
 
 describe('resolveAgentPolicy', () => {
-  it('planner gets the strongest default thinking (the plan is the leverage)', () => {
-    expect(resolveAgentPolicy({ role: 'planner', env })).toEqual({ model: 'claude-sonnet-5', effort: 'high' });
+  it('planner gets the strongest default thinking (Opus 4.8 — the plan is the leverage)', () => {
+    expect(resolveAgentPolicy({ role: 'planner', env })).toEqual({ model: 'claude-opus-4-8', effort: 'high' });
   });
 
   it('dev scales with story complexity', () => {

@@ -14,7 +14,7 @@
 //
 //   role          default model        effort           escalation
 //   ─────────────────────────────────────────────────────────────────────────
-//   planner       claude-sonnet-5      high             (quick-planspec: the plan IS the leverage)
+//   planner       claude-opus-4-8      high             (quick-planspec: the plan IS the leverage)
 //   test-author   claude-sonnet-5      high             tests carry the spec
 //   dev           by story complexity:
 //                   trivial   → haiku                  (no adaptive; speed)
@@ -34,7 +34,11 @@
 // drops it automatically.
 
 const DEFAULTS = Object.freeze({
-  planner: { model: 'claude-sonnet-5', effort: 'high' },
+  // 2026-07-07 — planner upgraded to Opus 4.8. The plan is the single highest-
+  // leverage artifact in the pipeline (a shallow plan caps every downstream
+  // story's quality — the "lame app" root cause), so it gets the strongest
+  // model + high adaptive effort. Env-overridable via P3_PLANNER_MODEL.
+  planner: { model: 'claude-opus-4-8', effort: 'high' },
   'test-author': { model: 'claude-sonnet-5', effort: 'high' },
   reviewer: { model: 'claude-sonnet-5', effort: 'low' },
   reflector: { model: 'claude-sonnet-5', effort: 'medium' },
