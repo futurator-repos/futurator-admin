@@ -220,7 +220,7 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
         </div>
       )}
       <ProjectHero plan={plan} model={model} />
-      <LifecycleStrip plan={plan} />
+      <LifecycleStrip plan={plan} onSelectStage={(subtab) => goToSubtab(subtab)} />
       <PipelineStrip model={model} onSelectBatch={() => goToSubtab('graph')} />
 
       <DevelopingSubtabs active={activeSubtab} onChange={(t) => goToSubtab(t)} />

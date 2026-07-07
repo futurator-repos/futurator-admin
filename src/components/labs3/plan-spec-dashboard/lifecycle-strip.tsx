@@ -10,10 +10,16 @@
  * Driven purely by `plan.status` (the daemon's P3_LIFECYCLE driver advances it:
  * concept→developing→review; a production deploy → delivered). When a dev
  * preview exists the QA REVIEW stage grows an "Open dev ↗" link — the exact URL
- * headless QA tests against. Pure/presentational; no data fetching.
+ * headless QA tests against.
+ *
+ * CLICKABLE (2026-07-06 — legacy parity): each stage navigates to the Labs3
+ * subtab that shows it, mirroring the legacy plan-dashboard's clickable
+ * pipeline stages. `onSelectStage` is optional so the component still renders
+ * pure/presentational when the caller has no navigation to offer.
  */
 
 import type { Plan, PlanStatus } from '@/types/plan';
+import type { Labs3Subtab } from './constants';
 
 type StageState = 'done' | 'active' | 'pending';
 
@@ -21,13 +27,15 @@ interface Stage {
   id: string;
   label: string;
   sub: string;
+  /** The Labs3 subtab this stage navigates to when clicked. */
+  subtab: Labs3Subtab;
 }
 
 const STAGES: Stage[] = [
-  { id: 'concept', label: 'Concept', sub: 'intent → plan' },
-  { id: 'development', label: 'Development', sub: 'stories build' },
-  { id: 'qa', label: 'QA Review', sub: 'assembled + tested' },
-  { id: 'deployed', label: 'Deployed', sub: 'promoted live' },
+  { id: 'concept', label: 'Concept', sub: 'intent → plan', subtab: 'graph' },
+  { id: 'development', label: 'Development', sub: 'stories build', subtab: 'stories' },
+  { id: 'qa', label: 'QA Review', sub: 'assembled + tested', subtab: 'qa' },
+  { id: 'deployed', label: 'Deployed', sub: 'promoted live', subtab: 'qa' },
 ];
 
 /** Map plan.status → the index of the CURRENTLY-active lifecycle stage. */
@@ -59,7 +67,14 @@ const COLOR: Record<StageState, string> = {
   pending: 'var(--text-faint)',
 };
 
-export function LifecycleStrip({ plan }: { plan: Plan }) {
+export function LifecycleStrip({
+  plan,
+  onSelectStage,
+}: {
+  plan: Plan;
+  /** Navigate to the subtab that shows this stage (legacy pipeline parity). */
+  onSelectStage?: (subtab: Labs3Subtab) => void;
+}) {
   const active = activeStageIndex(plan.status);
   const devUrl = plan.devUrl;
   const liveUrl = plan.deployUrl;
@@ -88,6 +103,19 @@ export function LifecycleStrip({ plan }: { plan: Plan }) {
         return (
           <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <div
+              role={onSelectStage ? 'button' : undefined}
+              tabIndex={onSelectStage ? 0 : undefined}
+              onClick={onSelectStage ? () => onSelectStage(s.subtab) : undefined}
+              onKeyDown={
+                onSelectStage
+                  ? (e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        onSelectStage(s.subtab);
+                      }
+                    }
+                  : undefined
+              }
               style={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -95,6 +123,7 @@ export function LifecycleStrip({ plan }: { plan: Plan }) {
                 padding: '8px 14px',
                 borderRadius: 7,
                 minWidth: 150,
+                cursor: onSelectStage ? 'pointer' : undefined,
                 border: `1px solid color-mix(in srgb, ${c} ${st === 'pending' ? 30 : 55}%, transparent)`,
                 background: `color-mix(in srgb, ${c} ${st === 'active' ? 12 : 5}%, transparent)`,
                 opacity: st === 'pending' ? 0.55 : 1,
@@ -138,6 +167,7 @@ export function LifecycleStrip({ plan }: { plan: Plan }) {
                     href={link.href}
                     target="_blank"
                     rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
                     style={{
                       fontFamily: 'var(--font-mono)',
                       fontSize: 9.5,
