@@ -41,6 +41,24 @@ export function snapshotDelta(before, after) {
   return JSON.stringify(before) !== JSON.stringify(after);
 }
 
+/**
+ * PURE: the set of TOP-LEVEL snapshot keys whose value changed between two
+ * snapshots (deep-compared via JSON). Used to separate an INPUT-driven change
+ * from AMBIENT drift (an animation frame counter, Date.now(), a render tick that
+ * moves with no input) — the control baseline the liveness gate compares against.
+ * @returns {string[]}
+ */
+export function changedKeys(before, after) {
+  const a = before || {};
+  const b = after || {};
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  const out = [];
+  for (const k of keys) {
+    if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) out.push(k);
+  }
+  return out;
+}
+
 /** Replay one synthetic input against a live Playwright page. */
 async function replayInput(page, input) {
   if (!input) return;
@@ -105,7 +123,16 @@ export async function runBootLiveness({
     }
 
     const before = await page.evaluate(() => window.__harness.snapshot());
-    let after = before;
+    // CONTROL BASELINE (reality-spine review fix): a bare before→after inequality
+    // is fooled by any AMBIENT-changing field (an animation frame counter,
+    // Date.now(), a render tick) — a genuinely FROZEN app whose snapshot happens
+    // to include one would report a delta on every attempt and pass unobserved.
+    // So first read a NO-OP control snapshot (no input replayed) to learn which
+    // fields drift on their own, then require an input to move a field the
+    // control did NOT — proof the change was caused by the input, not the clock.
+    const control = await page.evaluate(() => window.__harness.snapshot());
+    const ambient = new Set(changedKeys(before, control));
+    let after = control;
     let observed = false;
     for (const input of inputs) {
       try {
@@ -116,18 +143,24 @@ export async function runBootLiveness({
         continue;
       }
       after = await page.evaluate(() => window.__harness.snapshot());
-      if (snapshotDelta(before, after)) {
+      // Compare against the CONTROL snapshot and discount fields that already
+      // drift ambiently — only a NON-ambient field change proves interactivity.
+      const moved = changedKeys(control, after).filter((k) => !ambient.has(k));
+      if (moved.length) {
         observed = true;
         break;
       }
     }
 
     if (!observed) {
+      const why = ambient.size
+        ? `no synthetic input moved a NON-ambient snapshot field (ambient-only fields drift: ${[...ambient].join(', ')}; ${inputs.length} input(s) tried)`
+        : `no synthetic input produced an observable state delta (${inputs.length} input(s) tried)`;
       log('info', `[boot-liveness] ${url} → FAIL no-delta (${inputs.length} input(s) replayed)`);
       return {
         passed: false,
         seamMounted: true,
-        detail: `no synthetic input produced an observable state delta (${inputs.length} input(s) tried)`,
+        detail: why,
         before,
         after,
       };

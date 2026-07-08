@@ -93,32 +93,33 @@ function fakePlaywright({ snapshots = [{}], harnessMounted = true } = {}) {
 }
 
 describe('makeStoryDevGateDeps (wiring)', () => {
-  it('greenTrunk composes tsc+build via injected spawnSync', async () => {
-    const spawnSync = () => ({ status: 0, stdout: '', stderr: '' });
-    const deps = makeStoryDevGateDeps({ cwd: '/app', spawnSync, deps: {} });
+  it('greenTrunk composes tsc+build via injected async runner', async () => {
+    const runner = async () => ({ status: 0, stdout: '', stderr: '' });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: {} });
     const r = await deps.greenTrunk({ cwd: '/app' });
     expect(r.passed).toBe(true);
   });
 
   it('greenTrunk fails closed when tsc exits non-zero', async () => {
-    const spawnSync = (cmd, args) =>
+    const runner = async (cmd, args) =>
       args[0] === 'tsc' ? { status: 1, stderr: 'TS' } : { status: 0, stdout: '' };
-    const deps = makeStoryDevGateDeps({ cwd: '/app', spawnSync });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner });
     const r = await deps.greenTrunk({ cwd: '/app' });
     expect(r.passed).toBe(false);
     expect(r.failing).toContain('tsc');
   });
 
   it('foundationGate composes tsc+build+boot-liveness to a green verdict', async () => {
-    const spawnSync = () => ({ status: 0, stdout: '', stderr: '' });
+    const runner = async () => ({ status: 0, stdout: '', stderr: '' });
     const deps = makeStoryDevGateDeps({
       cwd: '/app',
-      spawnSync,
+      runner,
       qaContext: { defaultPort: 3000 },
       deps: {
-        // boot succeeds; playwright fake yields a state delta on the first input.
+        // boot succeeds; playwright fake yields a NON-ambient state delta on the
+        // first input (before={}, control={}, after={x:1}).
         bootDevServer: async () => ({ ok: true, port: 3000, stop: async () => {} }),
-        playwright: fakePlaywright({ snapshots: [{}, { x: 1 }] }),
+        playwright: fakePlaywright({ snapshots: [{}, {}, { x: 1 }] }),
         shell: async () => ({ stdout: '', stderr: '' }),
       },
     });
@@ -128,10 +129,10 @@ describe('makeStoryDevGateDeps (wiring)', () => {
   });
 
   it('foundationGate fails closed when the dev server does not boot', async () => {
-    const spawnSync = () => ({ status: 0, stdout: '', stderr: '' });
+    const runner = async () => ({ status: 0, stdout: '', stderr: '' });
     const deps = makeStoryDevGateDeps({
       cwd: '/app',
-      spawnSync,
+      runner,
       deps: {
         bootDevServer: async () => ({ ok: false, status: '000', stop: async () => {} }),
         playwright: fakePlaywright(),
@@ -142,5 +143,26 @@ describe('makeStoryDevGateDeps (wiring)', () => {
     expect(r.passed).toBe(false);
     expect(r.failing).toContain('boot');
     expect(r.reasons.join(' ')).toMatch(/dev server did not boot/);
+  });
+
+  it('greenTrunk fails closed (tree-moved) when HEAD moves during the check (SHA-pin)', async () => {
+    const runner = async () => ({ status: 0, stdout: '', stderr: '' });
+    // git reports a DIFFERENT head on the second read (a sibling committed mid-check).
+    let reads = 0;
+    const git = async () => ({ code: 0, stdout: reads++ === 0 ? 'aaaaaaa\n' : 'bbbbbbb\n', stderr: '' });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, git });
+    const r = await deps.greenTrunk({ cwd: '/app' });
+    expect(r.passed).toBe(false);
+    expect(r.failing).toContain('tree-moved');
+    expect(r.reasons.join(' ')).toMatch(/MOVING tree/);
+  });
+
+  it('greenTrunk passes when HEAD is stable across the check (SHA-pin no-op)', async () => {
+    const runner = async () => ({ status: 0, stdout: '', stderr: '' });
+    const git = async () => ({ code: 0, stdout: 'aaaaaaa\n', stderr: '' });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, git });
+    const r = await deps.greenTrunk({ cwd: '/app' });
+    expect(r.passed).toBe(true);
+    expect(r.failing).toEqual([]);
   });
 });

@@ -313,6 +313,23 @@ describe('parseQuickPlanspec', () => {
     expect(planShapeRationale).toBe('one game loop; sharding buys nothing');
   });
 
+  it("forces the coherent build-whole story to FOUNDATION despite its 'the complete' title", () => {
+    // "Build the complete <app>" matches INTEGRATION_RE, so classify() alone would
+    // tag it 'integration' and the hardened foundation gate (boot-liveness) would
+    // never run on the exact single-loop shape it targets. planShape wins here.
+    const spec = JSON.stringify({
+      planShape: 'coherent',
+      stories: [
+        { title: 'Build the complete pacman game', touches: ['src/**'], complexity: 'architectural',
+          acceptanceCriteria: [{ text: 'the game runs end to end', verify: 'behavior', needsBrowser: true }] },
+      ],
+    });
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    expect(stories).toHaveLength(1);
+    expect(stories[0].nodeKind).toBe('foundation');
+    expect(stories[0].isFoundation).toBe(true);
+  });
+
   it('defaults planShape to coherent for a single-story plan when the model omits it', () => {
     const spec = JSON.stringify({
       stories: [

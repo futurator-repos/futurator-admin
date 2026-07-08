@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { defaultLivenessInputs, snapshotDelta, runBootLiveness } from '../boot-liveness.mjs';
+import { defaultLivenessInputs, snapshotDelta, changedKeys, runBootLiveness } from '../boot-liveness.mjs';
 
 describe('defaultLivenessInputs (pure)', () => {
   it('returns the fixed ordered battery: 4 keys then a first-button click', () => {
@@ -22,6 +22,18 @@ describe('snapshotDelta (pure)', () => {
   });
   it('is true when shape differs', () => {
     expect(snapshotDelta({}, { a: 1 })).toBe(true);
+  });
+});
+
+describe('changedKeys (pure)', () => {
+  it('lists top-level keys whose value differs', () => {
+    expect(changedKeys({ a: 1, b: 2 }, { a: 1, b: 3 })).toEqual(['b']);
+  });
+  it('is empty for equal snapshots', () => {
+    expect(changedKeys({ a: 1 }, { a: 1 })).toEqual([]);
+  });
+  it('reports added/removed keys', () => {
+    expect(changedKeys({}, { a: 1 }).sort()).toEqual(['a']);
   });
 });
 
@@ -76,8 +88,9 @@ describe('runBootLiveness', () => {
   });
 
   it('passes on the first input that moves state, and stops there', async () => {
-    // before = {}, after first key = { x: 1 } → delta on input #1.
-    const { pw, page } = fakePlaywright({ snapshots: [{}, { x: 1 }] });
+    // before={}, control={} (no ambient drift), after first key = { x: 1 } →
+    // a NON-ambient field moved on input #1.
+    const { pw, page } = fakePlaywright({ snapshots: [{}, {}, { x: 1 }] });
     const r = await runBootLiveness({ url: 'http://x', playwright: pw });
     expect(r.passed).toBe(true);
     expect(r.seamMounted).toBe(true);
@@ -88,8 +101,28 @@ describe('runBootLiveness', () => {
     expect(page.calls.clicks).toBe(0);
   });
 
+  it('fails closed when the ONLY delta is an ambient-drifting field (frozen app with a ticker)', async () => {
+    // before={t:0}, control={t:1} (t drifts with NO input) → ambient={t}. Every
+    // input then only advances t further — no NON-ambient field ever moves, so a
+    // structurally-changing-but-inert app must NOT pass.
+    const { pw } = fakePlaywright({ snapshots: [{ t: 0 }, { t: 1 }, { t: 2 }, { t: 3 }, { t: 4 }, { t: 5 }, { t: 6 }] });
+    const r = await runBootLiveness({ url: 'http://x', playwright: pw });
+    expect(r.passed).toBe(false);
+    expect(r.seamMounted).toBe(true);
+    expect(r.detail).toMatch(/NON-ambient/);
+  });
+
+  it('passes an interactive app that ALSO has an ambient ticker (input moves a non-ambient field)', async () => {
+    // before={t:0,x:0}, control={t:1,x:0} → ambient={t}. First input →
+    // {t:2,x:1}: x (non-ambient) moved → alive, despite the ticker.
+    const { pw } = fakePlaywright({ snapshots: [{ t: 0, x: 0 }, { t: 1, x: 0 }, { t: 2, x: 1 }] });
+    const r = await runBootLiveness({ url: 'http://x', playwright: pw });
+    expect(r.passed).toBe(true);
+    expect(r.seamMounted).toBe(true);
+  });
+
   it('handles the CommonJS dynamic-import shape (chromium on .default)', async () => {
-    const { pw } = fakePlaywright({ snapshots: [{}, { x: 1 }] });
+    const { pw } = fakePlaywright({ snapshots: [{}, {}, { x: 1 }] });
     const r = await runBootLiveness({ url: 'http://x', playwright: { default: pw } });
     expect(r.passed).toBe(true);
   });

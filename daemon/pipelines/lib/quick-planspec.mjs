@@ -689,6 +689,20 @@ export function parseQuickPlanspec(text, { maxStories = MAX_STORIES } = {}) {
     ? obj.planShape
     : (stories.length === 1 ? 'coherent' : 'sharded');
   const planShapeRationale = typeof obj.planShapeRationale === 'string' ? obj.planShapeRationale.slice(0, 300) : '';
+
+  // COHERENT build-whole = FOUNDATION (reality-spine review fix). The coherent
+  // prompt mandates the single story be titled "Build the complete <app>", which
+  // INTEGRATION_RE ("the complete") classifies as 'integration' — so isFoundation
+  // would be false and P3_FOUNDATION_GATE (tsc+build+BOOT-LIVENESS) would never
+  // engage for exactly the single-game-loop shape it was built to catch, leaving
+  // it the weakest per-story gate (green-trunk, no boot-liveness). Force the
+  // coherent plan's sole build-whole story to foundation so the hardened gate
+  // runs on it. planShape is authoritative here over the title-regex classify().
+  if (planShape === 'coherent' && stories.length === 1) {
+    stories[0].nodeKind = 'foundation';
+    stories[0].isFoundation = true;
+  }
+
   return { stories, errors, audit, planShape, planShapeRationale };
 }
 

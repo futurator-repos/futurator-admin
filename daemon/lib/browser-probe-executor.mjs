@@ -26,20 +26,43 @@ function coerce(v) {
   return v;
 }
 
+// Natural-language / shorthand → real DOM KeyboardEvent `key` name. A behavioral
+// AC's prose says "holds the RIGHT arrow" or "press SPACE to jump" — the probe
+// parser captures the bare word ('right'/'space'), but Playwright's
+// `keyboard.down/press` only accepts real key names ('ArrowRight'/'Space') and
+// THROWS `Unknown key: "right"` on the raw word (killing the very held-key
+// feature this file adds). Normalize the captured word to the DOM name; unknown
+// tokens (letters/digits/already-real names like 'Enter'/'ArrowUp') pass through.
+const KEY_ALIASES = {
+  up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
+  arrowup: 'ArrowUp', arrowdown: 'ArrowDown', arrowleft: 'ArrowLeft', arrowright: 'ArrowRight',
+  space: 'Space', spacebar: 'Space', spacebutton: 'Space',
+  enter: 'Enter', return: 'Enter', esc: 'Escape', escape: 'Escape',
+  tab: 'Tab', shift: 'Shift', ctrl: 'Control', control: 'Control', alt: 'Alt',
+  backspace: 'Backspace', delete: 'Delete', del: 'Delete',
+};
+export function normalizeKeyName(raw) {
+  if (!raw) return raw;
+  const k = String(raw).trim();
+  return KEY_ALIASES[k.toLowerCase()] || k;
+}
+
 /** Extract ordered actions from the `when` prose. */
 function parseActions(src) {
   const found = [];
   let m;
 
   const keyRe = /(?:press(?:es|ing)?\s+(?:the\s+)?(\w+))|(?:keydown\s+code=['"]?(\w+)['"]?)/gi;
-  while ((m = keyRe.exec(src))) found.push({ index: m.index, obj: { type: 'key', key: m[1] || m[2] } });
+  while ((m = keyRe.exec(src))) found.push({ index: m.index, obj: { type: 'key', key: normalizeKeyName(m[1] || m[2]) } });
 
   // HELD keys (VQA canvas-game power): "hold ArrowRight", "holding down Space".
   // A held key is dispatched keyboard.down → (settle while held) → keyboard.up,
   // so a continuous-input game (isDown polling) actually moves during the settle
   // window instead of registering a single instantaneous keydown. Optional.
+  // normalizeKeyName maps the captured word ('right'/'space') to the DOM key name
+  // ('ArrowRight'/'Space') so keyboard.down never throws `Unknown key`.
   const holdRe = /hold(?:s|ing)?\s+(?:down\s+)?(?:the\s+)?(\w+)/gi;
-  while ((m = holdRe.exec(src))) found.push({ index: m.index, obj: { type: 'key', key: m[1], hold: true } });
+  while ((m = holdRe.exec(src))) found.push({ index: m.index, obj: { type: 'key', key: normalizeKeyName(m[1]), hold: true } });
 
   const fsRe = /(?:forces?\s+status\s+to\s+['"](\w+)['"])|(?:forceStatus\(['"](\w+)['"]\))/gi;
   while ((m = fsRe.exec(src)))
@@ -495,8 +518,18 @@ export async function runBrowserJourney({
     for (const step of steps) {
       const label = step?.label ?? '(unlabeled step)';
       const frame = { stepLabel: label };
-      const settleN = step?.settle?.frames ?? 8;
-      const pollMs = step?.settle?.pollMs ?? 1000;
+      // SETTLE WINDOW: honour the per-step hint, but FLOOR it whenever the action
+      // is a key (held or not) regardless of the AC's declared `verify` tag — a
+      // continuous-motion AC that the planner mistagged 'state' (or left untagged)
+      // would otherwise fall back to the 2-frame/300ms window and reintroduce the
+      // render race this redesign targets. The code-level signal (a key action)
+      // wins over the model-authored tag.
+      let settleN = step?.settle?.frames ?? 8;
+      let pollMs = step?.settle?.pollMs ?? 1000;
+      if (step?.action?.type === 'key') {
+        settleN = Math.max(settleN, 12);
+        pollMs = Math.max(pollMs, 1200);
+      }
       // Before-action snapshot — the baseline for delta assertions
       // (increased/decreased/changed).
       const beforeSnap = seamMounted ? await page.evaluate(() => window.__harness.snapshot()) : undefined;
@@ -512,11 +545,9 @@ export async function runBrowserJourney({
       }
 
       // Let the game loop integrate the input over real animation frames BEFORE
-      // reading the snapshot / capturing the AFTER frame — the fix for VQA and
-      // deterministic false-negatives on a WORKING canvas game.
+      // reading the snapshot — the fix for deterministic false-negatives on a
+      // WORKING canvas game.
       await settleFrames(page, settleN, { wait });
-      if (capture) frame.after = await page.screenshot();
-      if (capture) frames.push(frame);
 
       if (seamMounted) {
         const readFn = () => page.evaluate(() => window.__harness.snapshot());
@@ -540,7 +571,16 @@ export async function runBrowserJourney({
         failures.push(`${label}: window.__harness seam not mounted on the served app`);
       }
 
-      // Release a HELD key AFTER the observation window.
+      // AFTER frame — captured AFTER the deterministic poll window resolves (not
+      // at the fixed settle mark) so the VQA judge sees the SAME settled state the
+      // deterministic lane used to decide. A step whose true visual change lands
+      // late (within the poll window) would otherwise get a stale 'after' frame
+      // and a false VQA fail. Held keys are still down here (released below), so
+      // the frame shows the app mid-interaction.
+      if (capture) frame.after = await page.screenshot();
+      if (capture) frames.push(frame);
+
+      // Release a HELD key AFTER the observation window + after-frame.
       if (release) await release();
     }
     if (!seamMounted) {
@@ -574,9 +614,36 @@ export async function runBrowserJourney({
 }
 
 /**
+ * Convert a parsed probe (ordered actions + assertions) into `runBrowserJourney`
+ * steps: every action but the last becomes an assertion-less "pre" step so the
+ * app still advances through the whole `when`, and the FINAL action carries the
+ * assertions. Zero actions → one assertion-only step. PURE.
+ */
+function probeToJourneySteps(probe, { label, settle } = {}) {
+  const actions = probe.actions?.length ? probe.actions : [null];
+  const steps = [];
+  for (let i = 0; i < actions.length - 1; i++) {
+    steps.push({ label: `${label}__pre${i}`, action: actions[i], assertions: [], settle });
+  }
+  steps.push({ label, action: actions[actions.length - 1], assertions: probe.assertions, settle });
+  return steps;
+}
+
+/**
  * Build the `browser` executor for a story's worktree. Returns an
  * `async (ac) => { passed, detail }`. Deps are injectable for tests; production
  * defaults boot the real dev server + lazy-import real Playwright.
+ *
+ * DRIVER (reality-spine review fix): the story-level completion gate now shares
+ * the SAME hardened driver as wave QA — `runBrowserJourney` (focusApp +
+ * settleFrames rAF advance + pollUntil settle-window + held-key + key-based
+ * settle floor) — instead of the legacy single-read `runBrowserProbe`. That
+ * closes the render race that made a genuinely-working continuous-movement AC
+ * fail at story-completion time (the fail-closed `requiresBrowser` rule forces
+ * every such AC onto this path, so it must be the hardened one). `observeOnly`
+ * is FALSE here: story granularity may legitimately drive the harness to set up
+ * a slice's precondition — the DRIVE-lane ban is a wave-QA probe policy, and
+ * flipping it here would only ADD false-fails, the opposite of this fix's intent.
  *
  * @param {{ cwd:string, qaContext:object|undefined, deps?:object }} opts
  */
@@ -626,7 +693,12 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
       // 0.0.0.0-served app, 127.0.0.1 → harness absent, localhost → harness present.)
       const url = `http://localhost:${boot.port}${qaContext.healthcheckPath ?? '/'}`;
       const playwright = await getPlaywright();
-      return done(await runBrowserProbe({ url, actions: probe.actions, assertions: probe.assertions, playwright, log }));
+      // A continuous-motion (behavior) AC needs a real settle/poll window; the
+      // key-based floor in runBrowserJourney widens it further for key actions.
+      const settle = ac?.verify === 'behavior' ? { frames: 12, pollMs: 1200 } : undefined;
+      const steps = probeToJourneySteps(probe, { label: ac?.id || 'story-ac', settle });
+      const r = await runBrowserJourney({ url, steps, playwright, log, observeOnly: false });
+      return done({ passed: r.passed, detail: r.detail });
     } catch (err) {
       return done({ passed: false, detail: `browser probe error: ${err?.message || err}` });
     } finally {

@@ -19,6 +19,7 @@ import {
   UpdateCommand,
   PutCommand,
   ScanCommand,
+  TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { spawn, execSync, spawnSync } from 'child_process';
 import { mkdirSync, existsSync, readFileSync, statSync, appendFileSync, readdirSync } from 'fs';
@@ -1655,6 +1656,15 @@ let lastStaleScanAt = 0;
 // Inert unless P3_READY_FRONTIER is set; logs would-dispatch vs legacy waves.
 let lastFrontierScanAt = 0;
 const FRONTIER_SCAN_INTERVAL_MS = parseInt(process.env.P3_FRONTIER_SCAN_INTERVAL_MS || '60000', 10);
+// Reality-Spine review fix — reconciliation sweep throttle. Re-drives the
+// all-resolved → integrate → review advance for developing/fixing plans so a
+// lost/failed integrator enqueue self-heals instead of deadlocking a plan out
+// of review forever (the advance only otherwise fires on a fresh story/integrator
+// completion). Idempotent: maybeAdvancePlanOnAllResolved self-guards on
+// all-resolved, the reflector claim dedupes, and integrator enqueue is
+// at-most-once per head.
+let lastIntegrateSweepAt = 0;
+const INTEGRATE_SWEEP_INTERVAL_MS = parseInt(process.env.P3_INTEGRATE_SWEEP_INTERVAL_MS || '120000', 10);
 const PLAN_SPEC_GRAPH_TABLE = process.env.PLAN_SPEC_GRAPH_TABLE || 'futurator-plan-spec-graph';
 
 // Throttled, inert-by-default. When P3_READY_FRONTIER=shadow|on, scan the
@@ -1982,7 +1992,11 @@ async function executeStoryDevJob(job) {
       // lazy-imports playwright; story-dev-pipeline only decides WHEN to call
       // them (guarded by P3_FOUNDATION_GATE / P3_GREEN_TRUNK). qaContext is also
       // threaded so the foundation gate can resolve the boilerplate dev port.
-      ...makeStoryDevGateDeps({ cwd: job.workingDir, spawnSync, qaContext }),
+      // Tree gates run via an async (non-blocking) spawn — never spawnSync — so
+      // they don't freeze the daemon event loop (and every concurrent sibling
+      // story) for the minutes a cold tsc+build can take. `git: daemonGit` lets
+      // the gate SHA-pin its whole-tree verdict against a concurrent commit.
+      ...makeStoryDevGateDeps({ cwd: job.workingDir, qaContext, git: daemonGit }),
       qaContext,
       // Real bound-AC test executors run in the shared plan tree. qaContext
       // enables the browser/__harness executor for kind=browser behavioral ACs.
@@ -2243,42 +2257,57 @@ async function maybeEnqueueIntegrator({ planId, planRow, headSha, workingDir, sh
     const nowIso = new Date().toISOString();
     const appId = planRow?.appId || pathBasename(workingDir || '');
 
-    // CAS on the slot: only claim if integratorJobId still holds the value we
-    // read (or is absent). The loser of a concurrent race no-ops.
+    // ATOMIC ENQUEUE (reality-spine review fix): the CAS on the plan's
+    // integratorJobId slot AND the job-row Put must land together or not at all.
+    // A prior two-write sequence (Update-then-Put) could partially apply — if the
+    // Put threw (DDB throttle/transient) after the CAS succeeded, or the process
+    // restarted between them, the plan pointed at an integratorJobId that never
+    // existed. Since every story is already resolved, nothing re-invokes the
+    // advance for this plan, so it deadlocked OUT of review forever. A single
+    // TransactWriteItems makes the two writes all-or-nothing.
     try {
-      await ddb.send(new UpdateCommand({
-        TableName: PLANS_TABLE,
-        Key: { planId },
-        UpdateExpression: 'SET integratorJobId = :j, updatedAt = :now',
-        ConditionExpression: prevJobId ? 'integratorJobId = :prev' : 'attribute_not_exists(integratorJobId)',
-        ExpressionAttributeValues: prevJobId
-          ? { ':j': jobId, ':now': nowIso, ':prev': prevJobId }
-          : { ':j': jobId, ':now': nowIso },
+      await ddb.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Update: {
+              TableName: PLANS_TABLE,
+              Key: { planId },
+              UpdateExpression: 'SET integratorJobId = :j, updatedAt = :now',
+              ConditionExpression: prevJobId ? 'integratorJobId = :prev' : 'attribute_not_exists(integratorJobId)',
+              ExpressionAttributeValues: prevJobId
+                ? { ':j': jobId, ':now': nowIso, ':prev': prevJobId }
+                : { ':j': jobId, ':now': nowIso },
+            },
+          },
+          {
+            Put: {
+              TableName: JOBS_TABLE,
+              Item: {
+                jobId,
+                jobType: 'integrator',
+                status: 'PENDING',
+                planId,
+                appId,
+                planSlug: appId,
+                workingDir,
+                integratorModel: planRow?.integratorModel,
+                targetHeadSha: headSha,
+                failureSummary: 'Assemble + green the whole tree before review (Reality-Spine INTEGRATE-RUN). Every story is terminal but no actor has run the assembled artifact as a whole.',
+                createdBy: planRow?.createdBy || 'daemon:integrate-run',
+                createdAt: nowIso,
+                updatedAt: nowIso,
+              },
+            },
+          },
+        ],
       }));
     } catch (e) {
-      if (e.name === 'ConditionalCheckFailedException') return; // another completion claimed the slot
+      // A CAS loss surfaces as a transaction-cancelled (conditional check) —
+      // another completion claimed the slot; no-op. Neither write applied.
+      if (e.name === 'ConditionalCheckFailedException' || e.name === 'TransactionCanceledException') return;
       throw e;
     }
     if (planRow) planRow.integratorJobId = jobId;
-
-    await ddb.send(new PutCommand({
-      TableName: JOBS_TABLE,
-      Item: {
-        jobId,
-        jobType: 'integrator',
-        status: 'PENDING',
-        planId,
-        appId,
-        planSlug: appId,
-        workingDir,
-        integratorModel: planRow?.integratorModel,
-        targetHeadSha: headSha,
-        failureSummary: 'Assemble + green the whole tree before review (Reality-Spine INTEGRATE-RUN). Every story is terminal but no actor has run the assembled artifact as a whole.',
-        createdBy: planRow?.createdBy || 'daemon:integrate-run',
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      },
-    }));
     log('info', `[${short}] plan ${planId.slice(0, 8)} → integrator ${jobId.slice(0, 8)} enqueued for head ${String(headSha).slice(0, 7)}`);
   } catch (e) {
     log('warn', `[${short}] integrator enqueue failed (non-blocking): ${e.message}`);
@@ -2383,8 +2412,8 @@ async function executeIntegratorJob(job) {
       claudeBin: CLAUDE_BIN,
       git: daemonGit,
       headSha,
-      runTreeTypecheck: ({ cwd }) => runTreeTypecheck({ cwd, spawnSync }),
-      runTreeBuild: ({ cwd }) => runTreeBuild({ cwd, spawnSync }),
+      runTreeTypecheck: ({ cwd }) => runTreeTypecheck({ cwd }),
+      runTreeBuild: ({ cwd }) => runTreeBuild({ cwd }),
       runLint: ({ cwd }) => runShellGate('npm', ['run', 'lint'], cwd),
       runTests: ({ cwd }) => runShellGate('npm', ['run', 'test'], cwd),
       bootLiveness,
@@ -2509,6 +2538,42 @@ async function maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short }
     }
   } catch (e) {
     log('warn', `[${short}] plan-advance check failed (non-blocking): ${e.message}`);
+  }
+}
+
+/**
+ * Reality-Spine reconciliation sweep — re-drive the all-resolved → integrate →
+ * review advance for every plan stuck in `developing`/`fixing`. The advance
+ * normally only fires when a NEW story or integrator job completes; if that
+ * enqueue was lost (transient DDB error, process restart at the wrong moment)
+ * the plan — with every story already resolved — has nothing left to re-trigger
+ * it and would deadlock out of review forever. This periodic re-invocation is
+ * the self-heal. maybeAdvancePlanOnAllResolved is idempotent (self-guards on
+ * all-resolved; reflector claim dedupes; integrator enqueue is at-most-once per
+ * head), so a sweep over a plan that is genuinely still developing, or already
+ * advancing, is a cheap no-op. Dark unless P3_LIFECYCLE is on. Never throws out.
+ */
+async function scanStalledPlansForIntegrate() {
+  try {
+    if (envFlag('P3_LIFECYCLE') !== 'on') return;
+    const { Items } = await ddb.send(new ScanCommand({
+      TableName: PLANS_TABLE,
+      FilterExpression: '#s IN (:developing, :fixing)',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':developing': 'developing', ':fixing': 'fixing' },
+    }));
+    const plans = Items || [];
+    for (const planRow of plans) {
+      if (!planRow?.planId) continue;
+      await maybeAdvancePlanOnAllResolved({
+        planId: planRow.planId,
+        planRow,
+        storyId: undefined,
+        short: 'sweep',
+      });
+    }
+  } catch (e) {
+    log('warn', `[sweep] stalled-plan integrate sweep failed (non-blocking): ${e.message}`);
   }
 }
 
@@ -9696,6 +9761,14 @@ async function poll() {
       if (Date.now() - lastStaleScanAt >= STALE_SCAN_INTERVAL_MS) {
         lastStaleScanAt = Date.now();
         scanStaleEpicDevJobs().catch((e) => log('error', `Stale scan uncaught: ${e.message}`));
+      }
+
+      // Reality-Spine reconciliation sweep — re-drive all-resolved plans stuck in
+      // developing/fixing toward integrate/review so a lost integrator enqueue
+      // self-heals. Throttled; idempotent no-op for genuinely-in-flight plans.
+      if (Date.now() - lastIntegrateSweepAt >= INTEGRATE_SWEEP_INTERVAL_MS) {
+        lastIntegrateSweepAt = Date.now();
+        scanStalledPlansForIntegrate().catch((e) => log('error', `Integrate sweep uncaught: ${e.message}`));
       }
 
       // Pipeline-3 ready-frontier shadow scan — inert unless P3_READY_FRONTIER

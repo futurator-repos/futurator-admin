@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { runTreeTypecheck, runTreeBuild, evaluateGreenTrunk } from '../tree-gates.mjs';
 
-// A spawnSync stub: canned { status, stdout, stderr } (or { error }).
-function fakeSpawn(result) {
+// An async runner stub: resolves canned { status, stdout, stderr } (or { error }).
+// The gate runner is now event-based/async (non-blocking) — no more sync spawnSync.
+function fakeRunner(result) {
   const calls = [];
-  const fn = (cmd, args, opts) => {
+  const fn = async (cmd, args, opts) => {
     calls.push({ cmd, args, opts });
     return result;
   };
@@ -13,44 +14,44 @@ function fakeSpawn(result) {
 }
 
 describe('runTreeTypecheck', () => {
-  it('passes on exit 0 and runs `npx tsc --noEmit` in cwd', () => {
-    const spawnSync = fakeSpawn({ status: 0, stdout: '', stderr: '' });
-    const r = runTreeTypecheck({ cwd: '/app', spawnSync });
+  it('passes on exit 0 and runs `npx tsc --noEmit` in cwd', async () => {
+    const runner = fakeRunner({ status: 0, stdout: '', stderr: '' });
+    const r = await runTreeTypecheck({ cwd: '/app', runner });
     expect(r.passed).toBe(true);
     expect(r.detail).toBe('pass');
-    expect(spawnSync.calls[0].cmd).toBe('npx');
-    expect(spawnSync.calls[0].args).toEqual(['tsc', '--noEmit']);
-    expect(spawnSync.calls[0].opts.cwd).toBe('/app');
+    expect(runner.calls[0].cmd).toBe('npx');
+    expect(runner.calls[0].args).toEqual(['tsc', '--noEmit']);
+    expect(runner.calls[0].opts.cwd).toBe('/app');
   });
 
-  it('fails on non-zero exit and surfaces the output tail in detail', () => {
-    const spawnSync = fakeSpawn({ status: 2, stdout: '', stderr: 'error TS2304: Cannot find name X' });
-    const r = runTreeTypecheck({ cwd: '/app', spawnSync });
+  it('fails on non-zero exit and surfaces the output tail in detail', async () => {
+    const runner = fakeRunner({ status: 2, stdout: '', stderr: 'error TS2304: Cannot find name X' });
+    const r = await runTreeTypecheck({ cwd: '/app', runner });
     expect(r.passed).toBe(false);
     expect(r.detail).toMatch(/exit 2/);
     expect(r.detail).toMatch(/TS2304/);
   });
 
-  it('fails closed when spawn returns an error', () => {
-    const spawnSync = fakeSpawn({ error: new Error('ENOENT') });
-    const r = runTreeTypecheck({ cwd: '/app', spawnSync });
+  it('fails closed when the runner returns an error', async () => {
+    const runner = fakeRunner({ error: new Error('ENOENT') });
+    const r = await runTreeTypecheck({ cwd: '/app', runner });
     expect(r.passed).toBe(false);
     expect(r.detail).toMatch(/ENOENT/);
   });
 });
 
 describe('runTreeBuild', () => {
-  it('passes on exit 0 and runs `npm run build` in cwd', () => {
-    const spawnSync = fakeSpawn({ status: 0, stdout: 'built', stderr: '' });
-    const r = runTreeBuild({ cwd: '/app', spawnSync });
+  it('passes on exit 0 and runs `npm run build` in cwd', async () => {
+    const runner = fakeRunner({ status: 0, stdout: 'built', stderr: '' });
+    const r = await runTreeBuild({ cwd: '/app', runner });
     expect(r.passed).toBe(true);
-    expect(spawnSync.calls[0].cmd).toBe('npm');
-    expect(spawnSync.calls[0].args).toEqual(['run', 'build']);
+    expect(runner.calls[0].cmd).toBe('npm');
+    expect(runner.calls[0].args).toEqual(['run', 'build']);
   });
 
-  it('fails on non-zero exit', () => {
-    const spawnSync = fakeSpawn({ status: 1, stdout: '', stderr: 'Build failed' });
-    const r = runTreeBuild({ cwd: '/app', spawnSync });
+  it('fails on non-zero exit', async () => {
+    const runner = fakeRunner({ status: 1, stdout: '', stderr: 'Build failed' });
+    const r = await runTreeBuild({ cwd: '/app', runner });
     expect(r.passed).toBe(false);
     expect(r.detail).toMatch(/exit 1/);
     expect(r.detail).toMatch(/Build failed/);
