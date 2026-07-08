@@ -26,6 +26,9 @@ import {
   type IacMaturity,
   type DeprecatedTool,
   type IacPlan,
+  type InfraResource,
+  type ModuleReadiness,
+  type VerificationBacklogItem,
 } from '@/hooks/use-scan-engine';
 
 const CONF_COLOR: Record<string, string> = {
@@ -61,6 +64,42 @@ function ViewOnGraphLink({ dim }: { dim: string }) {
     >
       View on graph →
     </button>
+  );
+}
+
+/**
+ * "declared (unverified)" vs "verified" — the core honesty signal of the IaC
+ * maturity grade. A static code scan can only ever read what's DECLARED in
+ * text; it can't confirm live state matches. Small inline badge, muted/warning
+ * for declared-only, success for confirmed-verified. Renders nothing when the
+ * engine didn't stamp a basis (older scans).
+ */
+function BasisBadge({ basis }: { basis?: 'declared' | 'verified' }) {
+  if (!basis) return null;
+  const verified = basis === 'verified';
+  const color = verified ? 'var(--success, #22c55e)' : 'var(--warning, #f59e0b)';
+  return (
+    <span
+      title={
+        verified
+          ? 'confirmed against live state'
+          : 'read from IaC/config text only — not confirmed against live state'
+      }
+      style={{
+        fontSize: 9.5,
+        fontWeight: 600,
+        color,
+        border: `1px solid color-mix(in srgb, ${color} 45%, var(--border))`,
+        borderRadius: 6,
+        padding: '1px 6px',
+        marginLeft: 6,
+        textTransform: 'uppercase',
+        letterSpacing: 0.3,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {verified ? 'verified' : 'declared (unverified)'}
+    </span>
   );
 }
 
@@ -108,9 +147,91 @@ function InfraCloudGroup({ cloud, services }: { cloud: string; services: InfraSe
               {s.residency === 'external' ? (
                 <span style={{ color: 'var(--warning)' }}> · external</span>
               ) : null}
+              {s.orphanCandidate ? (
+                <span title={s.orphanReason} style={{ color: 'var(--warning, #f59e0b)' }}>
+                  {' '}
+                  · orphan-candidate
+                </span>
+              ) : null}
             </span>
           );
         })}
+      </div>
+      {services.some((s) => s.resources?.length) ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+          {services
+            .filter((s) => s.resources?.length)
+            .map((s, i) => (
+              <ServiceResourceList key={i} service={s} />
+            ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Per-resource drill-down under a data-store service — the individual
+ * tables/buckets/instances the scan enumerated (services[].resources). Caps
+ * the visible list; each resource chip shows declared-vs-referenced-only,
+ * an UNKNOWN-existence flag, a PII lock chip, and an orphan-candidate chip.
+ */
+function ServiceResourceList({ service }: { service: InfraService }) {
+  const resources = service.resources;
+  if (!resources?.length) return null;
+  const CAP = 12;
+  const visible = resources.slice(0, CAP);
+  const extra = resources.length - visible.length;
+  return (
+    <div
+      data-testid={`infra-resources-${service.name}`}
+      style={{ borderLeft: '2px solid var(--border)', paddingLeft: 8 }}
+    >
+      <div
+        style={{
+          fontSize: 10.5,
+          color: 'var(--text-dim)',
+          marginBottom: 4,
+          display: 'flex',
+          alignItems: 'center',
+        }}
+      >
+        {service.name} resources ({resources.length})
+        <BasisBadge basis={service.basis} />
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+        {visible.map((r: InfraResource, i) => (
+          <span
+            key={i}
+            title={`${r.kind}${r.evidence ? `\n${r.evidence}` : ''}${r.piiReason ? `\nPII: ${r.piiReason}` : ''}`}
+            style={{
+              fontSize: 10.5,
+              color: 'var(--text-dim)',
+              border: '1px solid var(--border)',
+              borderRadius: 7,
+              padding: '2px 7px',
+              background: 'var(--background)',
+            }}
+          >
+            <strong style={{ color: 'var(--foreground)' }}>{r.name}</strong>
+            <span> · {r.declared ? 'declared' : 'referenced-only'}</span>
+            {r.existence === 'unknown' ? (
+              <span style={{ color: 'var(--warning, #f59e0b)' }}> · existence UNKNOWN</span>
+            ) : null}
+            {r.contains_pii ? (
+              <span title={r.piiReason} style={{ color: 'var(--destructive, #ef4444)' }}>
+                {' '}
+                · 🔒 PII
+              </span>
+            ) : null}
+            {r.orphanCandidate ? (
+              <span style={{ color: 'var(--warning, #f59e0b)' }}> · orphan-candidate</span>
+            ) : null}
+          </span>
+        ))}
+        {extra > 0 ? (
+          <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>+{extra} more</span>
+        ) : null}
       </div>
     </div>
   );
@@ -342,9 +463,17 @@ function IacMaturityCard({ maturity }: { maturity?: IacMaturity }) {
                   {iacLevelDots(d.level)}
                 </span>
                 <span
-                  style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)', flex: 1 }}
+                  style={{
+                    fontSize: 11.5,
+                    fontWeight: 600,
+                    color: 'var(--foreground)',
+                    flex: 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                  }}
                 >
                   {IAC_DIM_LABEL[key]}
+                  <BasisBadge basis={d.basis} />
                 </span>
                 <span style={{ fontSize: 10.5, color: c, fontWeight: 600 }}>L{d.level}</span>
               </div>
@@ -431,7 +560,14 @@ function StateEnvStrip({ maturity }: { maturity?: IacMaturity }) {
 function TagTaxonomyBar({
   tax,
 }: {
-  tax?: { present: string[]; missing: string[]; coveragePct: number };
+  tax?: {
+    present: string[];
+    missing: string[];
+    coveragePct: number;
+    requiredTags?: string[];
+    platformImplicit?: string[];
+    detail?: string;
+  };
 }) {
   if (!tax) return null;
   const pct = Math.max(0, Math.min(100, Math.round(tax.coveragePct || 0)));
@@ -453,12 +589,14 @@ function TagTaxonomyBar({
         gap: 6,
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)' }}>
           Tag taxonomy
         </span>
         <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
-          team · environment · service · cost-center
+          {tax.requiredTags?.length
+            ? tax.requiredTags.join(' · ')
+            : 'team · environment · service · cost-center'}
         </span>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, fontWeight: 600, color }}>{pct}%</span>
@@ -466,6 +604,9 @@ function TagTaxonomyBar({
       <div style={{ height: 6, borderRadius: 4, background: 'var(--border)', overflow: 'hidden' }}>
         <div style={{ width: `${pct}%`, height: '100%', background: color }} />
       </div>
+      {tax.detail ? (
+        <div style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>{tax.detail}</div>
+      ) : null}
       {tax.missing?.length ? (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {tax.missing.map((t, i) => (
@@ -480,6 +621,25 @@ function TagTaxonomyBar({
               }}
             >
               missing: {t}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {tax.platformImplicit?.length ? (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {tax.platformImplicit.map((t, i) => (
+            <span
+              key={i}
+              title="platform-implicit — enforced by the platform, not hand-declared as a tag"
+              style={{
+                fontSize: 10.5,
+                color: 'var(--text-dim)',
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                padding: '2px 8px',
+              }}
+            >
+              platform-implicit: {t}
             </span>
           ))}
         </div>
@@ -527,6 +687,149 @@ function DeprecatedToolchain({ items }: { items?: DeprecatedTool[] }) {
                 <span style={{ color: 'var(--text-dim)' }}> · EOL {d.eolDate}</span>
               ) : null}
             </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Verification backlog (Part C honesty signal) — the facts a static code scan
+ * flagged as UNKNOWN rather than silently assuming, each carrying the exact
+ * command an operator can run to confirm it. Collapsed by default; renders
+ * nothing when the engine found nothing to flag.
+ */
+function VerificationBacklogPanel({ items }: { items?: VerificationBacklogItem[] }) {
+  if (!items?.length) return null;
+  return (
+    <details
+      data-testid="iac-verification-backlog"
+      style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 10 }}
+    >
+      <summary
+        style={{
+          fontSize: 11.5,
+          fontWeight: 600,
+          color: 'var(--foreground)',
+          cursor: 'pointer',
+          userSelect: 'none',
+        }}
+      >
+        What a code scan can&apos;t verify ({items.length})
+      </summary>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+        {items.map((it, i) => (
+          <div key={it.id ?? i} style={{ fontSize: 11, color: 'var(--foreground)' }}>
+            <div>
+              {it.fact}{' '}
+              <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>[{it.dimension}]</span>
+            </div>
+            {it.verifyCommand ? (
+              <code
+                style={{
+                  display: 'block',
+                  marginTop: 3,
+                  padding: '4px 8px',
+                  background: 'var(--bg-elev)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 6,
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 10.5,
+                  color: 'var(--accent-blue, #3b82f6)',
+                  overflowX: 'auto',
+                  whiteSpace: 'pre',
+                }}
+              >
+                {it.verifyCommand}
+              </code>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+const READINESS_GATE_LABEL: Record<string, string> = {
+  finops: 'FinOps',
+  privacy: 'Privacy',
+  policyAsCode: 'Policy-as-code',
+};
+
+/** Plan-step unlock keys → the same module labels as READINESS_GATE_LABEL (the
+ *  planner emits kebab-case ids like 'policy-as-code'). */
+const UNLOCK_LABEL: Record<string, string> = {
+  finops: 'FinOps',
+  privacy: 'Privacy',
+  'policy-as-code': 'Policy',
+  policyAsCode: 'Policy',
+};
+
+/**
+ * Module-readiness panel — whether this scan's infra inventory is complete
+ * enough to unlock the downstream FinOps/Privacy/Policy-as-code modules, and
+ * (when blocked) exactly what's missing. Renders nothing without the gate data.
+ */
+function ModuleReadinessPanel({ readiness }: { readiness?: ModuleReadiness }) {
+  if (!readiness) return null;
+  const keys = Object.keys(READINESS_GATE_LABEL) as (keyof ModuleReadiness)[];
+  return (
+    <div
+      data-testid="iac-module-readiness"
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        padding: 10,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+      }}
+    >
+      <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)' }}>
+        Unlocks downstream modules
+      </div>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+          gap: 8,
+        }}
+      >
+        {keys.map((k) => {
+          const g = readiness[k];
+          if (!g) return null;
+          const color = g.ready ? 'var(--success, #22c55e)' : 'var(--warning, #f59e0b)';
+          return (
+            <div
+              key={k}
+              style={{
+                border: `1px solid color-mix(in srgb, ${color} 45%, var(--border))`,
+                borderRadius: 8,
+                padding: '6px 8px',
+              }}
+            >
+              <div style={{ fontSize: 11.5, fontWeight: 600, color }}>
+                {g.ready ? '✓' : '⚠'} {READINESS_GATE_LABEL[k]}
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
+                {g.ready ? 'ready' : 'blocked'}
+              </div>
+              {!g.ready && g.blockedBy?.length ? (
+                <ul
+                  style={{
+                    margin: '4px 0 0',
+                    paddingLeft: 16,
+                    fontSize: 10.5,
+                    color: 'var(--text-dim)',
+                  }}
+                >
+                  {g.blockedBy.map((b, i) => (
+                    <li key={i}>{b}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
           );
         })}
       </div>
@@ -690,6 +993,23 @@ function MigrationPathPanel({ plan }: { plan?: IacPlan | null }) {
                     ✓ golden rule: {s.goldenRule}
                   </div>
                 ) : null}
+                {s.unlocks?.length ? (
+                  <div style={{ marginTop: 4 }}>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 600,
+                        color: 'var(--accent-blue, #3b82f6)',
+                        border:
+                          '1px solid color-mix(in srgb, var(--accent-blue) 45%, var(--border))',
+                        borderRadius: 7,
+                        padding: '1px 7px',
+                      }}
+                    >
+                      unlocks: {s.unlocks.map((u) => UNLOCK_LABEL[u] ?? u).join(' · ')}
+                    </span>
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>
@@ -751,8 +1071,10 @@ function InfraMap({
           <StateEnvStrip maturity={maturity} />
           <TagTaxonomyBar tax={maturity.tagTaxonomy} />
           <DeprecatedToolchain items={maturity.deprecated} />
+          <VerificationBacklogPanel items={maturity.verificationBacklog} />
         </>
       ) : null}
+      <ModuleReadinessPanel readiness={infra.moduleReadiness} />
       <MigrationPathPanel plan={plan} />
 
       {/* IaC coverage — of the cloud resources this app provisions, how many are
@@ -782,6 +1104,12 @@ function InfraMap({
               ? 'every cloud resource is declared in code'
               : `${cov.provisionable - cov.declared} used but not declared in this repo (${cov.undeclared.slice(0, 4).join(', ')}${cov.undeclared.length > 4 ? '…' : ''}) — click-ops risk, or declared in a sibling infra repo`}
           </span>
+          {cov.resourcesTotal != null && cov.resourcesTotal > 0 ? (
+            <span style={{ color: 'var(--text-dim)' }}>
+              · resources: {cov.resourcesDeclared ?? 0}/{cov.resourcesTotal} declared
+              {cov.resourceRatio != null ? ` (${Math.round(cov.resourceRatio * 100)}%)` : ''}
+            </span>
+          ) : null}
         </div>
       )}
 

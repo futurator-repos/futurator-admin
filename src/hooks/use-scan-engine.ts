@@ -114,6 +114,22 @@ export type CostModel =
   | 'connectivity'
   | 'none'
   | 'unknown';
+/** One concrete resource enumerated under a data-store service (e.g. a specific
+ *  DynamoDB table, S3 bucket, RDS instance) — the per-resource drill-down under
+ *  the service-level InfraService entry. */
+export interface InfraResource {
+  name: string;
+  kind: string;
+  declared: boolean;
+  existence: 'declared' | 'unknown';
+  evidence?: string;
+  contains_pii?: boolean;
+  piiReason?: string;
+  orphanCandidate?: boolean;
+  /** 'declared' = read from IaC/config only; 'verified' = confirmed against live state. */
+  basis?: 'declared' | 'verified';
+}
+
 export interface InfraService {
   name: string;
   kind: string;
@@ -132,6 +148,13 @@ export interface InfraService {
   fanIn?: number;
   /** graph-informed: usage concentrated in <=3 files or behind one dir. */
   centralized?: boolean;
+  /** per-resource drill-down (data-store services only) — individual tables/buckets/instances. */
+  resources?: InfraResource[];
+  /** this service looks provisioned but unreferenced anywhere in code (candidate for cleanup). */
+  orphanCandidate?: boolean;
+  orphanReason?: string;
+  /** 'declared' = read from IaC/config only; 'verified' = confirmed against live state. */
+  basis?: 'declared' | 'verified';
 }
 export interface CostSurface {
   standing: number;
@@ -148,6 +171,12 @@ export interface IacCoverage {
   ratio: number | null;
   /** names of own-cloud resources used in code but declared nowhere (click-ops smell). */
   undeclared: string[];
+  /** finer-grained resource-level counterpart to provisionable/declared (per-table/bucket, not per-service). */
+  resourcesTotal?: number;
+  resourcesDeclared?: number;
+  /** resourcesDeclared / resourcesTotal (null/undefined when nothing to measure). */
+  resourceRatio?: number | null;
+  platformConfigDeclared?: number;
 }
 /** One IaC-maturity dimension grade (state/env/modularity/testing/governance/drift-cost).
  *  Per-dimension grades are independent and MAY be uneven — that's the point. */
@@ -155,6 +184,32 @@ export interface IacDimension {
   level: number;
   evidence: string;
   gaps: string[];
+  /** 'declared' = graded from IaC/config text only (unverified); 'verified' = confirmed against live state. */
+  basis?: 'declared' | 'verified';
+}
+
+/** One fact the static scan could not confirm — surfaced instead of silently
+ *  assumed. Each item carries the exact command an operator can run to verify it. */
+export interface VerificationBacklogItem {
+  id: string;
+  fact: string;
+  dimension: string;
+  verifyCommand: string;
+  basis: 'unknown';
+}
+
+/** Readiness gate for one downstream module (FinOps / Privacy / Policy-as-code),
+ *  computed from the infra scan. 'declared' basis = inferred from what's declared
+ *  in code, not from live cloud state. */
+export interface ModuleReadinessGate {
+  ready: boolean;
+  basis: 'declared';
+  blockedBy: string[];
+}
+export interface ModuleReadiness {
+  finops: ModuleReadinessGate;
+  privacy: ModuleReadinessGate;
+  policyAsCode: ModuleReadinessGate;
 }
 /** A deprecated/EOL IaC tool detected in the repo (cdktf, tfsec, DM, Terraformer output, …). */
 export interface DeprecatedTool {
@@ -181,8 +236,21 @@ export interface IacMaturity {
   deprecated: DeprecatedTool[];
   regions: string[];
   regionPinned: boolean;
-  tagTaxonomy: { present: string[]; missing: string[]; coveragePct: number };
+  tagTaxonomy: {
+    present: string[];
+    missing: string[];
+    coveragePct: number;
+    /** tags the rubric actually requires for this stack (drives the "missing" chips). */
+    requiredTags?: string[];
+    /** tags the platform enforces implicitly (e.g. sst:app, sst:stage) — not hand-declared,
+     *  shown separately from the required-tag coverage. */
+    platformImplicit?: string[];
+    /** human phrasing of the coverage finding, e.g. "0% in declared IaC …". Prefer over the raw pct when present. */
+    detail?: string;
+  };
   findings: ScanFinding[];
+  /** facts the static scan could not confirm — each with the exact command to verify it. */
+  verificationBacklog?: VerificationBacklogItem[];
 }
 
 export interface InfraInventory {
@@ -216,6 +284,8 @@ export interface InfraInventory {
   iacCoverage?: IacCoverage;
   /** IaC maturity grade (5-level model, 6 dimensions) — produced by infra-extract.mjs. */
   iacMaturity?: IacMaturity;
+  /** downstream-module readiness gates (FinOps/Privacy/Policy-as-code), computed from this scan. */
+  moduleReadiness?: ModuleReadiness;
   summary: {
     serviceCount: number;
     dataStoreCount: number;
@@ -250,6 +320,8 @@ export interface IacPlanStep {
   imports?: IacImport[];
   /** "plan/preview must show zero changes before commit" — the characterization-gate analogue. */
   goldenRule: string;
+  /** downstream modules this step unlocks once complete (e.g. ['finops','privacy','policy-as-code']). */
+  unlocks?: string[];
 }
 /** Stack-aware Infrastructure migration track, produced by iac-phase-planner.mjs.
  *  Gap-driven: only emits steps for MISSING dimensions. */

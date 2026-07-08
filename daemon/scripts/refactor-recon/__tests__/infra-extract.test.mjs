@@ -1135,3 +1135,18 @@ describe('A6 — PII→store by store NAME (Auth.js adapter)', () => {
     expect(table.contains_pii).toBeUndefined();
   });
 });
+
+describe('B11 — moduleReadiness (downstream unlock gates)', () => {
+  it('blocks finops/privacy/policy when coverage is low, PII stores exist, and no policy pack', () => {
+    const inv = buildInfraInventory([
+      { rel: 'sst.config.ts', content: 'new sst.aws.Nextjs("Site", {})\n// arn:aws:dynamodb:us-east-1:1:table/App_*' },
+      { rel: 'src/auth.ts', specifiers: ['@auth/dynamodb-adapter', '@aws-sdk/client-dynamodb'] },
+    ]);
+    const mr = inv.moduleReadiness;
+    expect(mr.finops.ready).toBe(false);
+    expect(mr.finops.blockedBy.join(' ')).toMatch(/tags|undeclared/i);
+    expect(mr.privacy.blockedBy.join(' ')).toMatch(/PII|classification/i);
+    expect(mr.policyAsCode.ready).toBe(false);
+    expect(mr.policyAsCode.basis).toBe('declared');
+  });
+});

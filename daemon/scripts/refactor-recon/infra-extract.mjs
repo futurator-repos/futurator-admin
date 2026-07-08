@@ -940,7 +940,45 @@ export function buildInfraInventory(files = []) {
   //   set (backends, tftest, rego, tags, regions live in file content). ──
   inventory.iacMaturity = gradeIacMaturity(inventory, files);
   inventory.summary.iacMaturityLevel = inventory.iacMaturity.level;
+  // ── B11: downstream module readiness — what the IaC assessment unlocks. Pure
+  //   derivation from the truthful inventory (coverage + tags + PII). blockedBy is
+  //   the concrete gap list; each ties back to a real detection, never a guess. ──
+  inventory.moduleReadiness = computeModuleReadiness(inventory);
   return inventory;
+}
+
+/**
+ * B11 — derive FinOps / privacy / policy-as-code readiness from the inventory.
+ * Each gate is `ready` only when its concrete blockers are all cleared; blockedBy
+ * lists the exact gaps (declared-basis — a code scan cannot confirm the cloud side).
+ */
+export function computeModuleReadiness(inventory = {}) {
+  const cov = inventory.iacCoverage || {};
+  const mat = inventory.iacMaturity || {};
+  const tax = mat.tagTaxonomy || {};
+  const services = inventory.services || [];
+  const undeclared = Array.isArray(cov.undeclared) ? cov.undeclared : [];
+  const piiStores = services.flatMap((s) => (s.resources || []).filter((r) => r.contains_pii).map((r) => r.name));
+  const govLevel = mat.dimensions?.governance?.level ?? 0;
+
+  const finopsBlocks = [];
+  if ((tax.coveragePct ?? 0) < 100) finopsBlocks.push(`cost tags incomplete (${tax.coveragePct ?? 0}% in declared IaC; missing ${(tax.missing || []).join(', ') || 'tags'})`);
+  if (undeclared.length) finopsBlocks.push(`${undeclared.length} service(s) undeclared — no per-resource cost attribution (${undeclared.slice(0, 4).join(', ')})`);
+
+  const privacyBlocks = [];
+  if (piiStores.length) privacyBlocks.push(`PII stores identified (${piiStores.slice(0, 4).join(', ')}) but encryption-at-rest / residency unverified — see verificationBacklog`);
+  else privacyBlocks.push('no PII→store mapping yet (add data-classification tags / confirm identity stores)');
+
+  const policyBlocks = [];
+  if (govLevel < 2) policyBlocks.push('no policy-as-code / misconfig scanning (Checkov / OPA / CrossGuard)');
+  if (undeclared.length) policyBlocks.push(`declared/undeclared set incomplete — ${undeclared.length} resource(s) outside IaC cannot be policed`);
+
+  const gate = (blockedBy) => ({ ready: blockedBy.length === 0, basis: 'declared', blockedBy });
+  return {
+    finops: gate(finopsBlocks),
+    privacy: gate(privacyBlocks),
+    policyAsCode: gate(policyBlocks),
+  };
 }
 
 /**
