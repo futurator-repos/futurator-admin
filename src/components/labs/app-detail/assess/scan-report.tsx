@@ -423,7 +423,7 @@ function IacMaturityCard({ maturity }: { maturity?: IacMaturity }) {
           IaC maturity
         </span>
         <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
-          overall = lowest blocking dimension
+          {maturity.levelReason ?? 'overall = lowest blocking dimension'}
         </span>
       </div>
       <div
@@ -917,7 +917,7 @@ function MigrationPathPanel({ plan }: { plan?: IacPlan | null }) {
               >
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
                   <strong style={{ fontSize: 12, color: 'var(--foreground)' }}>
-                    Phase {s.phase} — {s.title}
+                    Phase {s.seq ?? i + 1} — {s.title}
                   </strong>
                   <span
                     style={{
@@ -2571,7 +2571,7 @@ export function buildMarkdownReport(
     const mat = infra.iacMaturity;
     if (mat) {
       L.push(
-        `- **IaC maturity: L${mat.level} — ${mat.levelName}** (overall = lowest blocking dimension)`,
+        `- **IaC maturity: L${mat.level} — ${mat.levelName}** (${mat.levelReason ?? 'overall = lowest blocking dimension'})`,
       );
       const dims = mat.dimensions;
       if (dims) {
@@ -2615,12 +2615,12 @@ export function buildMarkdownReport(
         L.push(`- **Next actions (Level ${iacPlan.currentLevel} → ${iacPlan.currentLevel + 1}):**`);
         iacPlan.nextThree.forEach((a) => L.push(`  - ${a.title} [${a.dimension}] — ${a.action}`));
       }
-      for (const s of iacPlan.track ?? []) {
-        L.push(`- **Phase ${s.phase} — ${s.title}** (${s.tool} · ${s.dimension})`);
+      (iacPlan.track ?? []).forEach((s, i) => {
+        L.push(`- **Phase ${s.seq ?? i + 1} — ${s.title}** (${s.tool} · ${s.dimension})`);
         if (s.why) L.push(`  - _${s.why}_`);
         for (const cmd of s.commands ?? []) L.push(`  - \`${cmd}\``);
         if (s.goldenRule) L.push(`  - Golden rule: ${s.goldenRule}`);
-      }
+      });
     }
     if (iacMat?.deprecated?.length) {
       L.push('- **Deprecated toolchain:**');

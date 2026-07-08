@@ -30,7 +30,8 @@ const GOLDEN = {
   opentofu: '`tofu plan` must show "No changes" before you commit.',
   cdk: '`cdk diff` must show no changes before you commit.',
   sst: '`sst diff` must show no changes before you deploy.',
-  'gcp-im': '`terraform plan` (Infrastructure Manager preview) must show "No changes" before you commit.',
+  'gcp-im':
+    '`terraform plan` (Infrastructure Manager preview) must show "No changes" before you commit.',
 };
 
 const TOOLING = {
@@ -40,11 +41,21 @@ const TOOLING = {
       'pulumi import --file resources.json   # bulk-adopt existing resources ({type,name,id}[])',
       'pulumi preview   # MUST show no changes; imported resources are `protect`-ed by default',
     ],
-    envSeparation: ['pulumi stack init dev && pulumi stack init staging && pulumi stack init prod   # per-env stacks + Pulumi.<stack>.yaml'],
-    modularity: ['# extract shared infra into ComponentResource classes / a shared @org/infra package'],
-    testing: ['# Pulumi unit tests: pulumi.runtime.setMocks(...) + jest/mocha; wire as a required CI check'],
-    governance: ['pulumi policy new <pack> --language typescript   # CrossGuard: require tags, pin region, deny public buckets (advisory → mandatory)'],
-    driftCost: ['pulumi preview --expect-no-changes   # schedule via GitHub Actions cron (drift detection)'],
+    envSeparation: [
+      'pulumi stack init dev && pulumi stack init staging && pulumi stack init prod   # per-env stacks + Pulumi.<stack>.yaml',
+    ],
+    modularity: [
+      '# extract shared infra into ComponentResource classes / a shared @org/infra package',
+    ],
+    testing: [
+      '# Pulumi unit tests: pulumi.runtime.setMocks(...) + jest/mocha; wire as a required CI check',
+    ],
+    governance: [
+      'pulumi policy new <pack> --language typescript   # CrossGuard: require tags, pin region, deny public buckets (advisory → mandatory)',
+    ],
+    driftCost: [
+      'pulumi preview --expect-no-changes   # schedule via GitHub Actions cron (drift detection)',
+    ],
     cost: ['# add Infracost PR diff comments to the CI plan step'],
   },
   terraform: {
@@ -54,11 +65,21 @@ const TOOLING = {
       'terraform apply && terraform plan   # MUST show "No changes"; then delete the import blocks',
       '# NOTE: Terraformer is a one-shot bulk export only (archived Mar 16 2026) — NEVER a pipeline step',
     ],
-    envSeparation: ['# split state per env: environments/{dev,staging,prod}/ (or terraform workspace) with per-env *.tfvars'],
-    modularity: ['# extract modules/ with PINNED sources (version = / ?ref=); replace the root-monolith resources'],
-    testing: ['# native tests: *.tftest.hcl (terraform test) + terraform fmt/validate as required CI checks'],
-    governance: ['checkov -d . --compact   # + `trivy config .`; start advisory, promote to mandatory'],
-    driftCost: ['# scheduled `terraform plan` in CI (drift detection — the infra analogue of spec-drift)'],
+    envSeparation: [
+      '# split state per env: environments/{dev,staging,prod}/ (or terraform workspace) with per-env *.tfvars',
+    ],
+    modularity: [
+      '# extract modules/ with PINNED sources (version = / ?ref=); replace the root-monolith resources',
+    ],
+    testing: [
+      '# native tests: *.tftest.hcl (terraform test) + terraform fmt/validate as required CI checks',
+    ],
+    governance: [
+      'checkov -d . --compact   # + `trivy config .`; start advisory, promote to mandatory',
+    ],
+    driftCost: [
+      '# scheduled `terraform plan` in CI (drift detection — the infra analogue of spec-drift)',
+    ],
     cost: ['# Infracost PR diff (infracost.yml) gating cost on PR'],
   },
   opentofu: {
@@ -68,10 +89,16 @@ const TOOLING = {
       'tofu apply && tofu plan   # MUST show "No changes"; then delete the import blocks',
       '# NOTE: Terraformer is a one-shot bulk export only (archived Mar 16 2026) — NEVER a pipeline step',
     ],
-    envSeparation: ['# split state per env: environments/{dev,staging,prod}/ (or tofu workspace) with per-env *.tfvars'],
-    modularity: ['# extract modules/ with PINNED sources (version = / ?ref=); replace the root-monolith resources'],
+    envSeparation: [
+      '# split state per env: environments/{dev,staging,prod}/ (or tofu workspace) with per-env *.tfvars',
+    ],
+    modularity: [
+      '# extract modules/ with PINNED sources (version = / ?ref=); replace the root-monolith resources',
+    ],
     testing: ['# native tests: *.tftest.hcl (tofu test) + tofu fmt/validate as required CI checks'],
-    governance: ['checkov -d . --compact   # + `trivy config .`; start advisory, promote to mandatory'],
+    governance: [
+      'checkov -d . --compact   # + `trivy config .`; start advisory, promote to mandatory',
+    ],
     driftCost: ['# scheduled `tofu plan` in CI (drift detection)'],
     cost: ['# Infracost PR diff (infracost.yml) gating cost on PR'],
   },
@@ -81,10 +108,14 @@ const TOOLING = {
       '# or wrap existing CFN with CfnInclude; adopt one-off resources with: cdk import',
       'cdk diff   # MUST show no changes; WARN: check RemovalPolicy defaults so stateful resources are not destroyed',
     ],
-    envSeparation: ['# separate stacks per env via Stage constructs / cdk.context (dev/staging/prod)'],
+    envSeparation: [
+      '# separate stacks per env via Stage constructs / cdk.context (dev/staging/prod)',
+    ],
     modularity: ['# extract reusable L3 Constructs / a constructs library'],
     testing: ['# CDK assertions (aws-cdk-lib/assertions) + snapshot tests wired into CI'],
-    governance: ['checkov -d cdk.out --compact   # scan synthesized templates; + org policy (advisory → mandatory)'],
+    governance: [
+      'checkov -d cdk.out --compact   # scan synthesized templates; + org policy (advisory → mandatory)',
+    ],
     driftCost: ['# scheduled `cdk diff` in CI (drift detection)'],
     cost: ['# Infracost on the synthesized CloudFormation'],
   },
@@ -94,10 +125,14 @@ const TOOLING = {
       '# adopt existing resources in sst.config.ts (SST v3 is Pulumi-based): use { transform } / the import option',
       'sst diff   # MUST show no changes before you deploy',
     ],
-    envSeparation: ['sst deploy --stage dev|staging|production   # per-stage isolation is built in'],
+    envSeparation: [
+      'sst deploy --stage dev|staging|production   # per-stage isolation is built in',
+    ],
     modularity: ['# extract infra into infra/*.ts modules imported by sst.config.ts'],
     testing: ['# unit-test infra modules (vitest) + `sst diff` as a required CI check'],
-    governance: ['# add a Pulumi CrossGuard pack (SST v3 runs on Pulumi) / checkov on synthesized templates'],
+    governance: [
+      '# add a Pulumi CrossGuard pack (SST v3 runs on Pulumi) / checkov on synthesized templates',
+    ],
     driftCost: ['# scheduled `sst diff` (drift detection); SST reconciles on deploy'],
     cost: ['# Infracost / SST Console cost estimates gating PRs'],
   },
@@ -120,32 +155,51 @@ const TOOLING = {
 // first: state (import) → env/modularity (refactor) → testing → drift/cost → policy. ──
 const DIMENSION_SPECS = [
   {
-    dim: 'state', phase: 2, title: 'Remote state & resource import', keys: ['state'],
-    mutating: true, seedImports: true,
+    dim: 'state',
+    phase: 2,
+    title: 'Remote state & resource import',
+    keys: ['state'],
+    mutating: true,
+    seedImports: true,
     why: 'Get every running resource into remote, locked, version-controlled state — the Level 1→2 boundary everything else builds on.',
   },
   {
-    dim: 'envSeparation', phase: 3, title: 'Environment separation', keys: ['envSeparation'],
+    dim: 'envSeparation',
+    phase: 3,
+    title: 'Environment separation',
+    keys: ['envSeparation'],
     mutating: true,
     why: 'Isolate dev/staging/prod state so a change to one environment can never clobber another.',
   },
   {
-    dim: 'modularity', phase: 3, title: 'Refactor to reusable modules', keys: ['modularity'],
+    dim: 'modularity',
+    phase: 3,
+    title: 'Refactor to reusable modules',
+    keys: ['modularity'],
     mutating: true,
     why: 'Generated/monolithic infra is a starting point — extract DRY, pinned modules so it stays maintainable.',
   },
   {
-    dim: 'testing', phase: 4, title: 'IaC testing', keys: ['testing'],
+    dim: 'testing',
+    phase: 4,
+    title: 'IaC testing',
+    keys: ['testing'],
     mutating: false,
     why: 'Static validation + unit tests as required CI checks — the infrastructure TDD layer.',
   },
   {
-    dim: 'driftCost', phase: 5, title: 'Drift detection & cost gate', keys: ['driftCost', 'cost'],
+    dim: 'driftCost',
+    phase: 5,
+    title: 'Drift detection & cost gate',
+    keys: ['driftCost', 'cost'],
     mutating: false,
     why: 'A scheduled plan/preview is the infra analogue of a spec-conformance check; Infracost gates cost on PR.',
   },
   {
-    dim: 'governance', phase: 6, title: 'Policy-as-code guardrails', keys: ['governance'],
+    dim: 'governance',
+    phase: 6,
+    title: 'Policy-as-code guardrails',
+    keys: ['governance'],
     mutating: false,
     why: 'Misconfig scanning + org policy — start advisory, promote to mandatory.',
   },
@@ -188,7 +242,8 @@ export function detectStackTool(inventory, stack = null) {
 /** churn count for a file from the Git & Evolution report (churnByFile or hotFiles). */
 function churnOf(gitEvolution, file) {
   if (!gitEvolution || !file) return 0;
-  if (gitEvolution.churnByFile && typeof gitEvolution.churnByFile[file] === 'number') return gitEvolution.churnByFile[file];
+  if (gitEvolution.churnByFile && typeof gitEvolution.churnByFile[file] === 'number')
+    return gitEvolution.churnByFile[file];
   if (Array.isArray(gitEvolution.hotFiles)) {
     const h = gitEvolution.hotFiles.find((x) => x && x.file === file);
     if (h && typeof h.churn === 'number') return h.churn;
@@ -231,11 +286,14 @@ function buildImports(inventory, gitEvolution) {
       if (svc && typeof svc.fanIn === 'number' && svc.fanIn > fanIn) fanIn = svc.fanIn;
     }
     const priority = fanIn * (hasGit ? churn : 1);
-    const resource = ds.provisions && ds.provisions.length ? ds.provisions.join(', ') : ds.kind || 'resources';
+    const resource =
+      ds.provisions && ds.provisions.length ? ds.provisions.join(', ') : ds.kind || 'resources';
     out.push({ resource, source: ds.file, priority });
   }
 
-  return out.sort((a, b) => b.priority - a.priority || String(a.resource).localeCompare(String(b.resource)));
+  return out.sort(
+    (a, b) => b.priority - a.priority || String(a.resource).localeCompare(String(b.resource)),
+  );
 }
 
 // Deprecated-toolchain severity → migration phase. EOL/archived tooling is urgent
@@ -350,10 +408,15 @@ export function planIacTrack(inventory, { stack = null, gitEvolution = null } = 
 
   // Merge deprecated-toolchain remediations, then order the whole track foundations-
   // first (by phase). Stable within a phase preserves the DIMENSION_SPECS ordering.
+  // `phase` is the canonical iac-migration.md anchor (state=2, envSep/modularity=3, …) —
+  // it drives foundations-first ordering but is NOT a display ordinal: when a phase is
+  // satisfied-and-skipped (no Phase 2) or two dims share a playbook phase (envSep +
+  // modularity both = 3), rendering it raw shows gaps and duplicates ("Phase 1, 3, 3…").
+  // `seq` is the 1-based position in the emitted track — the number the UI shows.
   const track = [...deprecatedSteps(maturity, tool), ...gapSteps]
     .map((s, i) => ({ ...s, _i: i }))
     .sort((a, b) => a.phase - b.phase || a._i - b._i)
-    .map(({ _i, ...s }) => s);
+    .map(({ _i, ...s }, i) => ({ ...s, seq: i + 1 }));
 
   // "Level N → N+1: next 3 actions" — the highest-leverage steps (foundations first).
   const nextThree = track.slice(0, 3).map((s) => ({

@@ -6,15 +6,40 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildInfraInventory, parseConfig, detectCloudSdk, configFileType, classifyConfigByContent, extractIacResources, enrichInfraWithGraph, detectDeployScript, gradeIacMaturity, iacTier, stripComments, extractIamGrants, parseCfnResources, normalizeArnResource, detectSecretInEnv } from '../infra-extract.mjs';
+import {
+  buildInfraInventory,
+  parseConfig,
+  detectCloudSdk,
+  configFileType,
+  classifyConfigByContent,
+  extractIacResources,
+  enrichInfraWithGraph,
+  detectDeployScript,
+  gradeIacMaturity,
+  iacTier,
+  stripComments,
+  extractIamGrants,
+  parseCfnResources,
+  normalizeArnResource,
+  detectSecretInEnv,
+} from '../infra-extract.mjs';
 
 const svc = (inv, name) => inv.services.find((s) => s.name === name || s.name.startsWith(name));
 
 describe('configFileType + parseConfig (IaC files = authoritative)', () => {
   it('parses a Prisma datasource provider', () => {
     expect(configFileType('prisma/schema.prisma')).toBe('prisma');
-    const d = parseConfig('prisma', 'datasource db {\n provider = "postgresql"\n url = env("DATABASE_URL")\n}', 'prisma/schema.prisma');
-    expect(d[0]).toMatchObject({ name: 'Prisma → postgresql', kind: 'database', detectedBy: 'iac-declared', confidence: 'high' });
+    const d = parseConfig(
+      'prisma',
+      'datasource db {\n provider = "postgresql"\n url = env("DATABASE_URL")\n}',
+      'prisma/schema.prisma',
+    );
+    expect(d[0]).toMatchObject({
+      name: 'Prisma → postgresql',
+      kind: 'database',
+      detectedBy: 'iac-declared',
+      confidence: 'high',
+    });
   });
 
   it('parses Terraform providers + resources → services + cloud', () => {
@@ -33,16 +58,26 @@ describe('configFileType + parseConfig (IaC files = authoritative)', () => {
 
   it('reads env-example value host hint (Hostinger SMTP) without touching .env', () => {
     expect(configFileType('.env.example')).toBe('env-example');
-    const d = parseConfig('env-example', 'SMTP_HOST="smtp.hostinger.com"\nSMTP_PORT=465', '.env.example');
+    const d = parseConfig(
+      'env-example',
+      'SMTP_HOST="smtp.hostinger.com"\nSMTP_PORT=465',
+      '.env.example',
+    );
     expect(d.some((x) => /Hostinger/.test(x.name))).toBe(true);
   });
 });
 
 describe('detectCloudSdk — multi-cloud, not AWS-biased', () => {
   it('detects GCP / Azure / Supabase / Steam SDKs', () => {
-    expect(detectCloudSdk('@google-cloud/firestore')).toMatchObject({ cloud: 'GCP', kind: 'database' });
+    expect(detectCloudSdk('@google-cloud/firestore')).toMatchObject({
+      cloud: 'GCP',
+      kind: 'database',
+    });
     expect(detectCloudSdk('@azure/cosmos')).toMatchObject({ cloud: 'Azure' });
-    expect(detectCloudSdk('@supabase/supabase-js')).toMatchObject({ cloud: 'Supabase', residency: 'external' });
+    expect(detectCloudSdk('@supabase/supabase-js')).toMatchObject({
+      cloud: 'Supabase',
+      residency: 'external',
+    });
     expect(detectCloudSdk('steamworks.js')).toMatchObject({ cloud: '3rd-party', kind: 'gaming' });
     expect(detectCloudSdk('nodemailer')).toMatchObject({ kind: 'email' });
   });
@@ -51,7 +86,11 @@ describe('detectCloudSdk — multi-cloud, not AWS-biased', () => {
 describe('buildInfraInventory — operator scenarios (none AWS)', () => {
   it('GCP app via Terraform (file-first) → high signal, GCP cloud', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: 'provider "google" {}\nresource "google_cloud_run_service" "x" {}\nresource "google_firestore_database" "d" {}' },
+      {
+        rel: 'infra/main.tf',
+        content:
+          'provider "google" {}\nresource "google_cloud_run_service" "x" {}\nresource "google_firestore_database" "d" {}',
+      },
       { rel: 'src/db.ts', specifiers: ['@google-cloud/firestore'] },
     ]);
     expect(inv.clouds).toContain('GCP');
@@ -63,7 +102,11 @@ describe('buildInfraInventory — operator scenarios (none AWS)', () => {
     const inv = buildInfraInventory([
       { rel: 'src/cosmos.ts', specifiers: ['@azure/cosmos'] },
       { rel: 'src/store.ts', specifiers: ['@supabase/supabase-js'] },
-      { rel: '.env.example', content: 'SMTP_HOST=smtp.hostinger.com\nSUPABASE_URL=https://x.supabase.co\nAZURE_TENANT_ID=xxx' },
+      {
+        rel: '.env.example',
+        content:
+          'SMTP_HOST=smtp.hostinger.com\nSUPABASE_URL=https://x.supabase.co\nAZURE_TENANT_ID=xxx',
+      },
     ]);
     expect(inv.clouds).toEqual(expect.arrayContaining(['Azure', 'Supabase']));
     expect(svc(inv, 'Cosmos DB')).toBeTruthy();
@@ -88,7 +131,10 @@ describe('buildInfraInventory — operator scenarios (none AWS)', () => {
 
   it('records provenance (detectedBy) + confidence per service', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: 'provider "azurerm" {}\nresource "azurerm_cosmosdb_account" "c" {}' },
+      {
+        rel: 'infra/main.tf',
+        content: 'provider "azurerm" {}\nresource "azurerm_cosmosdb_account" "c" {}',
+      },
       { rel: 'src/c.ts', specifiers: ['@azure/cosmos'] },
     ]);
     const cosmos = svc(inv, 'Cosmos DB');
@@ -107,7 +153,11 @@ describe('IaC detection — SST, CDK, cost surface + coverage', () => {
   it('detects SST resources from sst.config.ts → high signal, AWS resources declared', () => {
     expect(configFileType('sst.config.ts')).toBe('sst');
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: 'export default { app(){return{name:"x"}}, async run(){ const t = new sst.aws.Dynamo("T"); const b = new sst.aws.Bucket("B"); new sst.aws.Function("F",{handler:"h"}); } }' },
+      {
+        rel: 'sst.config.ts',
+        content:
+          'export default { app(){return{name:"x"}}, async run(){ const t = new sst.aws.Dynamo("T"); const b = new sst.aws.Bucket("B"); new sst.aws.Function("F",{handler:"h"}); } }',
+      },
     ]);
     expect(inv.signalQuality.level).toBe('high');
     expect(svc(inv, 'DynamoDB')).toBeTruthy();
@@ -117,7 +167,9 @@ describe('IaC detection — SST, CDK, cost surface + coverage', () => {
   });
 
   it('reclassifies aws-cdk-lib import as DECLARED IaC (not 3rd-party inferred)', () => {
-    const inv = buildInfraInventory([{ rel: 'infra/stack.ts', specifiers: ['aws-cdk-lib', 'aws-cdk-lib/aws-s3'] }]);
+    const inv = buildInfraInventory([
+      { rel: 'infra/stack.ts', specifiers: ['aws-cdk-lib', 'aws-cdk-lib/aws-s3'] },
+    ]);
     const cdk = svc(inv, 'AWS CDK');
     expect(cdk).toBeTruthy();
     expect(cdk.cloud).toBe('AWS');
@@ -162,8 +214,18 @@ describe('IaC detection — SST, CDK, cost surface + coverage', () => {
 
   it('extracts SST resources from an infra/ MODULE, not just sst.config.ts (the Mycelium fix)', () => {
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: 'export default { async run(){ await import("./infra/storage"); new sst.aws.Nextjs("Web"); } }', specifiers: ['sst'] },
-      { rel: 'infra/storage.ts', specifiers: ['sst'], content: 'export const table = new sst.aws.Dynamo("T"); export const bucket = new sst.aws.Bucket("B");' },
+      {
+        rel: 'sst.config.ts',
+        content:
+          'export default { async run(){ await import("./infra/storage"); new sst.aws.Nextjs("Web"); } }',
+        specifiers: ['sst'],
+      },
+      {
+        rel: 'infra/storage.ts',
+        specifiers: ['sst'],
+        content:
+          'export const table = new sst.aws.Dynamo("T"); export const bucket = new sst.aws.Bucket("B");',
+      },
       { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb', '@aws-sdk/client-s3'] },
     ]);
     const dynamo = svc(inv, 'DynamoDB');
@@ -186,7 +248,11 @@ describe('C4 — content-based IaC extraction (no import present)', () => {
   it('extracts SST v3 resources from ambient sst.aws.* with NO sst import', () => {
     // SST v3 infra modules use the ambient `sst.aws.*` global — no import at all.
     const inv = buildInfraInventory([
-      { rel: 'infra/storage.ts', content: 'export const table = new sst.aws.Dynamo("T");\nexport const bucket = new sst.aws.Bucket("B");\nexport const fn = new sst.aws.Function("F", { handler: "h" });' },
+      {
+        rel: 'infra/storage.ts',
+        content:
+          'export const table = new sst.aws.Dynamo("T");\nexport const bucket = new sst.aws.Bucket("B");\nexport const fn = new sst.aws.Function("F", { handler: "h" });',
+      },
     ]);
     const dynamo = svc(inv, 'DynamoDB');
     expect(dynamo).toBeTruthy();
@@ -200,7 +266,10 @@ describe('C4 — content-based IaC extraction (no import present)', () => {
 
   it('extracts Pulumi resources from `new aws.*` constructs with NO @pulumi import', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/index.ts', content: 'const b = new aws.s3.BucketV2("b");\nconst t = new aws.dynamodb.Table("t", {});' },
+      {
+        rel: 'infra/index.ts',
+        content: 'const b = new aws.s3.BucketV2("b");\nconst t = new aws.dynamodb.Table("t", {});',
+      },
     ]);
     expect(svc(inv, 'S3')).toBeTruthy();
     expect(svc(inv, 'DynamoDB')).toBeTruthy();
@@ -210,7 +279,11 @@ describe('C4 — content-based IaC extraction (no import present)', () => {
 
   it('does not false-positive on plain code with no IaC construct signature', () => {
     const inv = buildInfraInventory([
-      { rel: 'src/util.ts', content: 'export const add = (a, b) => a + b;\nconst x = new Map();', specifiers: ['lodash'] },
+      {
+        rel: 'src/util.ts',
+        content: 'export const add = (a, b) => a + b;\nconst x = new Map();',
+        specifiers: ['lodash'],
+      },
     ]);
     expect(inv.signalQuality.iacDeclared).toBe(false);
     expect(inv.services).toHaveLength(0);
@@ -241,7 +314,9 @@ describe('C5 — enrichInfraWithGraph (graph-informed fan-in / centralization)',
   });
 
   it('returns inventory unchanged when graph/resolved are null (defensive)', () => {
-    const inv = buildInfraInventory([{ rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] }]);
+    const inv = buildInfraInventory([
+      { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] },
+    ]);
     expect(enrichInfraWithGraph(inv, null, null)).toBe(inv);
     expect(enrichInfraWithGraph(inv, { nodes: [] }, null)).toBe(inv);
   });
@@ -265,18 +340,46 @@ describe('Comprehensive IaC families — any project type', () => {
   });
 
   it('content-classifies ambiguous yaml (K8s / CloudFormation / SAM / ArgoCD / Flux)', () => {
-    expect(classifyConfigByContent('deploy.yaml', 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web')).toBe('kubernetes');
-    expect(classifyConfigByContent('stack.yaml', 'AWSTemplateFormatVersion: "2010-09-09"\nResources:\n  Fn:\n    Type: AWS::Lambda::Function')).toBe('cloudformation');
-    expect(classifyConfigByContent('template.yaml', 'Transform: AWS::Serverless-2016-10-31\nResources: {}')).toBe('sam');
-    expect(classifyConfigByContent('argo-app.yaml', 'apiVersion: argoproj.io/v1alpha1\nkind: Application')).toBe('argocd');
-    expect(classifyConfigByContent('rel.yaml', 'apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease')).toBe('flux');
+    expect(
+      classifyConfigByContent(
+        'deploy.yaml',
+        'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web',
+      ),
+    ).toBe('kubernetes');
+    expect(
+      classifyConfigByContent(
+        'stack.yaml',
+        'AWSTemplateFormatVersion: "2010-09-09"\nResources:\n  Fn:\n    Type: AWS::Lambda::Function',
+      ),
+    ).toBe('cloudformation');
+    expect(
+      classifyConfigByContent(
+        'template.yaml',
+        'Transform: AWS::Serverless-2016-10-31\nResources: {}',
+      ),
+    ).toBe('sam');
+    expect(
+      classifyConfigByContent(
+        'argo-app.yaml',
+        'apiVersion: argoproj.io/v1alpha1\nkind: Application',
+      ),
+    ).toBe('argocd');
+    expect(
+      classifyConfigByContent(
+        'rel.yaml',
+        'apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease',
+      ),
+    ).toBe('flux');
     expect(classifyConfigByContent('package.json', '{"name":"x"}')).toBe(null); // not infra
   });
 
   it('a Kubernetes/Helm repo (no own-cloud SDK) reads as IaC-declared, not "no IaC"', () => {
     const inv = buildInfraInventory([
       { rel: 'charts/app/Chart.yaml', content: 'apiVersion: v2\nname: app' },
-      { rel: 'k8s/deploy.yaml', content: 'apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: web}' },
+      {
+        rel: 'k8s/deploy.yaml',
+        content: 'apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: web}',
+      },
     ]);
     expect(inv.signalQuality.level).toBe('high');
     expect(inv.summary.resourceIacFiles).toBeGreaterThan(0);
@@ -284,29 +387,58 @@ describe('Comprehensive IaC families — any project type', () => {
   });
 
   it('extractIacResources handles CDK + Pulumi construct syntax', () => {
-    const cdk = extractIacResources('const b = new Bucket(this, "B"); new dynamodb.Table(this, "T");', 'AWS CDK').map((r) => r.name);
+    const cdk = extractIacResources(
+      'const b = new Bucket(this, "B"); new dynamodb.Table(this, "T");',
+      'AWS CDK',
+    ).map((r) => r.name);
     expect(cdk).toEqual(expect.arrayContaining(['S3', 'DynamoDB']));
-    const pulumi = extractIacResources('const b = new aws.s3.BucketV2("b"); new aws.dynamodb.Table("t", {});', 'Pulumi').map((r) => r.name);
+    const pulumi = extractIacResources(
+      'const b = new aws.s3.BucketV2("b"); new aws.dynamodb.Table("t", {});',
+      'Pulumi',
+    ).map((r) => r.name);
     expect(pulumi).toEqual(expect.arrayContaining(['S3', 'DynamoDB']));
   });
 
   it('detects hand-rolled deploy scripts + inline IAM policy (non-IaC / click-ops)', () => {
-    expect(detectDeployScript('infra/lambda/graph-sync/deploy.sh', 'aws lambda update-function-code ...\naws iam put-role-policy ...')).toMatchObject({ kind: 'shell-deploy' });
-    expect(detectDeployScript('infra/lambda/graph-sync/deploy.sh', 'aws lambda update-function-code').provisions).toContain('Lambda');
-    expect(detectDeployScript('infra/lambda/graph-sync/trust-policy.json', '{"Statement":[{"Effect":"Allow","Action":"sts:AssumeRole"}]}')).toMatchObject({ kind: 'iam-policy' });
+    expect(
+      detectDeployScript(
+        'infra/lambda/graph-sync/deploy.sh',
+        'aws lambda update-function-code ...\naws iam put-role-policy ...',
+      ),
+    ).toMatchObject({ kind: 'shell-deploy' });
+    expect(
+      detectDeployScript('infra/lambda/graph-sync/deploy.sh', 'aws lambda update-function-code')
+        .provisions,
+    ).toContain('Lambda');
+    expect(
+      detectDeployScript(
+        'infra/lambda/graph-sync/trust-policy.json',
+        '{"Statement":[{"Effect":"Allow","Action":"sts:AssumeRole"}]}',
+      ),
+    ).toMatchObject({ kind: 'iam-policy' });
     expect(detectDeployScript('src/app.ts', 'export const x = 1')).toBe(null);
     const inv = buildInfraInventory([
-      { rel: 'infra/lambda/graph-sync/deploy.sh', content: 'aws lambda update-function-code\naws iam put-role-policy' },
-      { rel: 'infra/lambda/graph-sync/custom-policy.json', content: '{"Statement":[{"Effect":"Allow","Action":"dynamodb:*"}]}' },
+      {
+        rel: 'infra/lambda/graph-sync/deploy.sh',
+        content: 'aws lambda update-function-code\naws iam put-role-policy',
+      },
+      {
+        rel: 'infra/lambda/graph-sync/custom-policy.json',
+        content: '{"Statement":[{"Effect":"Allow","Action":"dynamodb:*"}]}',
+      },
       { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] },
     ]);
     expect(inv.deployScripts.length).toBe(2);
     expect(inv.summary.deployScriptCount).toBe(2);
-    expect(inv.deployScripts.some((d) => d.kind === 'shell-deploy' && d.provisions.includes('Lambda'))).toBe(true);
+    expect(
+      inv.deployScripts.some((d) => d.kind === 'shell-deploy' && d.provisions.includes('Lambda')),
+    ).toBe(true);
   });
 
   it('Ansible (config-mgmt) is recognized as its own family, not provisioning', () => {
-    const inv = buildInfraInventory([{ rel: 'playbook.yml', content: '- hosts: web\n  tasks: []' }]);
+    const inv = buildInfraInventory([
+      { rel: 'playbook.yml', content: '- hosts: web\n  tasks: []' },
+    ]);
     expect(inv.iac.some((i) => i.tier === 'config-mgmt')).toBe(true);
     expect(inv.signalQuality.level).toBe('high');
   });
@@ -319,10 +451,16 @@ describe('Comprehensive IaC families — any project type', () => {
 
 describe('P1 — stripComments (comments are never declarations)', () => {
   it('strips // line, /* block */ (code) and leading-# (yaml) but preserves URLs + TS #private', () => {
-    expect(stripComments('const x = 1; // new sst.aws.Dynamo("T")')).not.toMatch(/sst\.aws\.Dynamo/);
-    expect(stripComments('/* new sst.aws.Bucket("B") */ const y = 2;')).not.toMatch(/sst\.aws\.Bucket/);
+    expect(stripComments('const x = 1; // new sst.aws.Dynamo("T")')).not.toMatch(
+      /sst\.aws\.Dynamo/,
+    );
+    expect(stripComments('/* new sst.aws.Bucket("B") */ const y = 2;')).not.toMatch(
+      /sst\.aws\.Bucket/,
+    );
     // URL not eaten as a comment
-    expect(stripComments('const u = "https://api.example.com/v1";')).toMatch(/https:\/\/api\.example\.com/);
+    expect(stripComments('const u = "https://api.example.com/v1";')).toMatch(
+      /https:\/\/api\.example\.com/,
+    );
     // TS private field survives (only yaml/hcl get #-stripping)
     expect(stripComments('class A { #secret = 1; }', 'src/a.ts')).toMatch(/#secret/);
     // yaml leading-# comment removed
@@ -334,7 +472,11 @@ describe('P1 — truth of declaration', () => {
   // (a) a COMMENT mentioning sst.aws.Dynamo does NOT yield a declared DynamoDB.
   it('(a) a comment mentioning sst.aws.Dynamo does not declare a DynamoDB (defect D1)', () => {
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: 'export default { async run(){ // NOTE: X is not declared as sst.aws.Dynamo, it is external\n new sst.aws.Bucket("B"); } }' },
+      {
+        rel: 'sst.config.ts',
+        content:
+          'export default { async run(){ // NOTE: X is not declared as sst.aws.Dynamo, it is external\n new sst.aws.Bucket("B"); } }',
+      },
     ]);
     expect(svc(inv, 'DynamoDB')).toBeFalsy(); // the comment must not mint a table
     expect(svc(inv, 'S3')).toBeTruthy(); // the real construct is still found
@@ -343,7 +485,10 @@ describe('P1 — truth of declaration', () => {
   // (b) a real `new sst.aws.Dynamo(` / TF resource DOES declare a DynamoDB.
   it('(b) a real new sst.aws.Dynamo( construct declares a DynamoDB', () => {
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: 'export default { async run(){ new sst.aws.Dynamo("T"); } }' },
+      {
+        rel: 'sst.config.ts',
+        content: 'export default { async run(){ new sst.aws.Dynamo("T"); } }',
+      },
     ]);
     const d = svc(inv, 'DynamoDB');
     expect(d).toBeTruthy();
@@ -351,7 +496,11 @@ describe('P1 — truth of declaration', () => {
   });
 
   it('(b) a real TF aws_dynamodb_table resource declares a DynamoDB', () => {
-    const d = parseConfig('terraform', 'resource "aws_dynamodb_table" "t" { name = "T" }', 'infra/main.tf');
+    const d = parseConfig(
+      'terraform',
+      'resource "aws_dynamodb_table" "t" { name = "T" }',
+      'infra/main.tf',
+    );
     expect(d.some((x) => x.name === 'DynamoDB' && x.confidence === 'high')).toBe(true);
   });
 
@@ -359,23 +508,38 @@ describe('P1 — truth of declaration', () => {
   it('(c) a UI new Table( class in a real SST file grows no phantom DynamoDB', () => {
     const inv = buildInfraInventory([
       // real SST Lambda declared, plus an unrelated UI grid `new Table(...)`
-      { rel: 'infra/app.ts', content: 'export const fn = new sst.aws.Function("F", { handler: "h" });\nconst grid = new Table({ rows: [] });' },
+      {
+        rel: 'infra/app.ts',
+        content:
+          'export const fn = new sst.aws.Function("F", { handler: "h" });\nconst grid = new Table({ rows: [] });',
+      },
     ]);
     expect(svc(inv, 'Lambda')).toBeTruthy(); // the real construct is detected
     expect(svc(inv, 'DynamoDB')).toBeFalsy(); // the UI `new Table(` is NOT a DynamoDB
   });
 
   it('(c) extractIacResources ignores a bare UI new Table( under the SST tool', () => {
-    const r = extractIacResources('const grid = new Table({ rows: [] });\nconst b = new Box();', 'SST').map((x) => x.name);
+    const r = extractIacResources(
+      'const grid = new Table({ rows: [] });\nconst b = new Box();',
+      'SST',
+    ).map((x) => x.name);
     expect(r).not.toContain('DynamoDB');
     expect(r).not.toContain('S3');
   });
 
   // (d) an ARN in an IAM policy yields a used-but-undeclared reference.
   it('(d) an IAM-policy ARN yields a used-but-undeclared DynamoDB reference', () => {
-    expect(extractIamGrants('"Resource":"arn:aws:dynamodb:us-east-1:123456789012:table/Scores"').map((g) => g.name)).toContain('DynamoDB');
+    expect(
+      extractIamGrants('"Resource":"arn:aws:dynamodb:us-east-1:123456789012:table/Scores"').map(
+        (g) => g.name,
+      ),
+    ).toContain('DynamoDB');
     const inv = buildInfraInventory([
-      { rel: 'infra/lambda/graph-sync/custom-policy.json', content: '{"Statement":[{"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"arn:aws:dynamodb:us-east-1:123456789012:table/Scores"}]}' },
+      {
+        rel: 'infra/lambda/graph-sync/custom-policy.json',
+        content:
+          '{"Statement":[{"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"arn:aws:dynamodb:us-east-1:123456789012:table/Scores"}]}',
+      },
     ]);
     const d = svc(inv, 'DynamoDB');
     expect(d).toBeTruthy();
@@ -387,7 +551,10 @@ describe('P1 — truth of declaration', () => {
   // (e) no infracost detection without a real config/CI artifact.
   it('(e) an infracost mention in prose/comment does NOT count as a cost gate', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}\n# TODO: someday wire up infracost in CI' },
+      {
+        rel: 'infra/main.tf',
+        content: 'resource "aws_s3_bucket" "b" {}\n# TODO: someday wire up infracost in CI',
+      },
     ]);
     expect(inv.iacMaturity.dimensions.driftCost.level).toBe(0); // no artifact → not detected
   });
@@ -395,7 +562,10 @@ describe('P1 — truth of declaration', () => {
   it('(e) infracost IS detected from a real CI-workflow step', () => {
     const inv = buildInfraInventory([
       { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
-      { rel: '.github/workflows/cost.yml', content: 'jobs:\n  cost:\n    steps:\n      - run: infracost diff' },
+      {
+        rel: '.github/workflows/cost.yml',
+        content: 'jobs:\n  cost:\n    steps:\n      - run: infracost diff',
+      },
     ]);
     expect(inv.iacMaturity.dimensions.driftCost.level).toBeGreaterThanOrEqual(2);
   });
@@ -408,16 +578,26 @@ describe('P1 — truth of declaration', () => {
 describe('gradeIacMaturity — state & provisioning dimension', () => {
   it('remote Terraform backend (s3) → state L2, remoteOrManaged, no committed-state finding', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: 'terraform {\n backend "s3" { bucket = "st" \n dynamodb_table = "locks" }\n}\nprovider "aws" { region = "eu-central-1" }\nresource "aws_s3_bucket" "b" {}' },
+      {
+        rel: 'infra/main.tf',
+        content:
+          'terraform {\n backend "s3" { bucket = "st" \n dynamodb_table = "locks" }\n}\nprovider "aws" { region = "eu-central-1" }\nresource "aws_s3_bucket" "b" {}',
+      },
     ]);
     expect(inv.iacMaturity.dimensions.state.level).toBe(2);
-    expect(inv.iacMaturity.dimensions.state.gaps).not.toContain('No state locking detected (add DynamoDB lock table / use_lockfile).');
+    expect(inv.iacMaturity.dimensions.state.gaps).not.toContain(
+      'No state locking detected (add DynamoDB lock table / use_lockfile).',
+    );
     expect(inv.iacMaturity.findings.some((f) => f.id === 'iac:committed-state')).toBe(false);
   });
 
   it('local Terraform backend → state L1 + a no-remote-state finding', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: 'terraform { backend "local" {} }\nprovider "aws" {}\nresource "aws_s3_bucket" "b" {}' },
+      {
+        rel: 'infra/main.tf',
+        content:
+          'terraform { backend "local" {} }\nprovider "aws" {}\nresource "aws_s3_bucket" "b" {}',
+      },
     ]);
     expect(inv.iacMaturity.dimensions.state.level).toBe(1);
     const f = inv.iacMaturity.findings.find((x) => x.id === 'iac:no-remote-state');
@@ -428,7 +608,10 @@ describe('gradeIacMaturity — state & provisioning dimension', () => {
 
   it('committed terraform.tfstate → state capped at L1 + HIGH security finding (evidence.iac)', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: 'terraform { backend "s3" {} }\nresource "aws_s3_bucket" "b" {}' },
+      {
+        rel: 'infra/main.tf',
+        content: 'terraform { backend "s3" {} }\nresource "aws_s3_bucket" "b" {}',
+      },
       { rel: 'infra/terraform.tfstate', content: '{"version":4,"resources":[]}' },
     ]);
     expect(inv.iacMaturity.dimensions.state.level).toBe(1);
@@ -442,13 +625,18 @@ describe('gradeIacMaturity — state & provisioning dimension', () => {
 
   it('SST → platform-managed state (auto-pass) → state L2', () => {
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: 'export default { async run(){ new sst.aws.Bucket("B"); } }' },
+      {
+        rel: 'sst.config.ts',
+        content: 'export default { async run(){ new sst.aws.Bucket("B"); } }',
+      },
     ]);
     expect(inv.iacMaturity.dimensions.state.level).toBe(2);
   });
 
   it('no IaC at all → state L0, overall ClickOps (L0)', () => {
-    const inv = buildInfraInventory([{ rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] }]);
+    const inv = buildInfraInventory([
+      { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] },
+    ]);
     expect(inv.iacMaturity.dimensions.state.level).toBe(0);
     expect(inv.iacMaturity.level).toBe(0);
     expect(inv.iacMaturity.levelName).toBe('ClickOps');
@@ -488,7 +676,10 @@ describe('gradeIacMaturity — env separation dimension', () => {
 describe('gradeIacMaturity — modularity dimension', () => {
   it('module blocks + modules/ dir + pinned version → modularity L3', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: 'module "net" {\n source = "terraform-aws-modules/vpc/aws"\n version = "5.1.0"\n}' },
+      {
+        rel: 'infra/main.tf',
+        content: 'module "net" {\n source = "terraform-aws-modules/vpc/aws"\n version = "5.1.0"\n}',
+      },
       { rel: 'modules/net/main.tf', content: 'resource "aws_vpc" "v" {}' },
     ]);
     expect(inv.iacMaturity.dimensions.modularity.level).toBe(3);
@@ -496,7 +687,12 @@ describe('gradeIacMaturity — modularity dimension', () => {
 
   it('root monolith (many resources, no modules) → modularity L1', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: Array.from({ length: 6 }, (_, i) => `resource "aws_s3_bucket" "b${i}" {}`).join('\n') },
+      {
+        rel: 'infra/main.tf',
+        content: Array.from({ length: 6 }, (_, i) => `resource "aws_s3_bucket" "b${i}" {}`).join(
+          '\n',
+        ),
+      },
     ]);
     expect(inv.iacMaturity.dimensions.modularity.level).toBe(1);
     expect(inv.iacMaturity.dimensions.modularity.evidence).toMatch(/[Mm]onolith/);
@@ -511,7 +707,10 @@ describe('gradeIacMaturity — modularity dimension', () => {
 
   it('app src/modules/ folder (no .tf) is NOT read as Terraform modules — SST repo stays L1', () => {
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: 'export default { app() {}, async run() { new sst.aws.Function("f", {}); } }' },
+      {
+        rel: 'sst.config.ts',
+        content: 'export default { app() {}, async run() { new sst.aws.Function("f", {}); } }',
+      },
       { rel: 'src/modules/auth/index.ts', content: 'export const auth = () => {};' },
       { rel: 'src/modules/billing/index.ts', content: 'export const billing = () => {};' },
     ]);
@@ -552,7 +751,11 @@ describe('gradeIacMaturity — drift/cost, tags, regions', () => {
   // added), so a 4-tag fixture is now PARTIAL coverage (4/7), not 100%.
   it('7-tag full coverage → 100% taxonomy, regions extracted + pinned', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: 'provider "aws" {\n region = "eu-central-1"\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n service = "api"\n cost-center = "cc-1"\n owner = "platform"\n managed-by = "terraform"\n data-classification = "internal"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}' },
+      {
+        rel: 'infra/main.tf',
+        content:
+          'provider "aws" {\n region = "eu-central-1"\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n service = "api"\n cost-center = "cc-1"\n owner = "platform"\n managed-by = "terraform"\n data-classification = "internal"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}',
+      },
     ]);
     expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(100);
     expect(inv.iacMaturity.tagTaxonomy.missing).toEqual([]);
@@ -562,24 +765,40 @@ describe('gradeIacMaturity — drift/cost, tags, regions', () => {
 
   it('the original 4-tag set alone → 57% coverage against the 7-tag taxonomy, missing lists the new 3', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: 'provider "aws" {\n region = "eu-central-1"\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n service = "api"\n cost-center = "cc-1"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}' },
+      {
+        rel: 'infra/main.tf',
+        content:
+          'provider "aws" {\n region = "eu-central-1"\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n service = "api"\n cost-center = "cc-1"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}',
+      },
     ]);
     expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(57);
-    expect(inv.iacMaturity.tagTaxonomy.missing).toEqual(expect.arrayContaining(['owner', 'managed-by', 'data-classification']));
+    expect(inv.iacMaturity.tagTaxonomy.missing).toEqual(
+      expect.arrayContaining(['owner', 'managed-by', 'data-classification']),
+    );
   });
 
   it('partial tags → coverage < 100 with the missing keys listed', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: 'provider "aws" {\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}' },
+      {
+        rel: 'infra/main.tf',
+        content:
+          'provider "aws" {\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}',
+      },
     ]);
     expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(29);
-    expect(inv.iacMaturity.tagTaxonomy.missing).toEqual(expect.arrayContaining(['service', 'cost-center']));
+    expect(inv.iacMaturity.tagTaxonomy.missing).toEqual(
+      expect.arrayContaining(['service', 'cost-center']),
+    );
   });
 
   it('scheduled drift + infracost → driftCost L3', () => {
     const inv = buildInfraInventory([
       { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
-      { rel: '.github/workflows/drift.yml', content: 'on:\n  schedule:\n    - cron: "0 6 * * *"\njobs:\n  drift:\n    steps:\n      - run: pulumi preview --expect-no-changes\n      - run: infracost diff' },
+      {
+        rel: '.github/workflows/drift.yml',
+        content:
+          'on:\n  schedule:\n    - cron: "0 6 * * *"\njobs:\n  drift:\n    steps:\n      - run: pulumi preview --expect-no-changes\n      - run: infracost diff',
+      },
     ]);
     expect(inv.iacMaturity.dimensions.driftCost.level).toBe(3);
   });
@@ -607,7 +826,9 @@ describe('gradeIacMaturity — deprecated toolchain catalog', () => {
   });
 
   it('cdktf import in code is also flagged (still infra, deprecated)', () => {
-    const inv = buildInfraInventory([{ rel: 'infra/main.ts', specifiers: ['cdktf', 'cdktf/lib/aws'] }]);
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.ts', specifiers: ['cdktf', 'cdktf/lib/aws'] },
+    ]);
     expect(inv.iacMaturity.deprecated.some((d) => /CDKTF/.test(d.tool))).toBe(true);
   });
 
@@ -620,7 +841,9 @@ describe('gradeIacMaturity — deprecated toolchain catalog', () => {
     expect(dep.severity).toBe('high');
     expect(dep.status).toBe('eol');
     expect(dep.eolDate).toBe('2026-03-31');
-    const f = inv.iacMaturity.findings.find((x) => x.id === 'iac:deprecated:gcp-deployment-manager');
+    const f = inv.iacMaturity.findings.find(
+      (x) => x.id === 'iac:deprecated:gcp-deployment-manager',
+    );
     expect(f.severity).toBe('high');
   });
 
@@ -635,14 +858,22 @@ describe('gradeIacMaturity — deprecated toolchain catalog', () => {
     expect(tools.some((t) => /tfsec/.test(t))).toBe(true);
     expect(tools.some((t) => /Terrascan/.test(t))).toBe(true);
     expect(tools.some((t) => /driftctl/.test(t))).toBe(true);
-    expect(inv.iacMaturity.deprecated.filter((d) => /tfsec|Terrascan|driftctl/.test(d.tool)).every((d) => d.severity === 'low')).toBe(true);
+    expect(
+      inv.iacMaturity.deprecated
+        .filter((d) => /tfsec|Terrascan|driftctl/.test(d.tool))
+        .every((d) => d.severity === 'low'),
+    ).toBe(true);
   });
 });
 
 describe('gradeIacMaturity — roll-up (min-gated, uneven grades)', () => {
   it('SST-heavy, all-in-code, no tests/policy/drift → overall L2 (Defined), testing/governance gaps stay L0', () => {
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: 'export default { async run(){ const t = new sst.aws.Dynamo("T"); const b = new sst.aws.Bucket("B"); } }' },
+      {
+        rel: 'sst.config.ts',
+        content:
+          'export default { async run(){ const t = new sst.aws.Dynamo("T"); const b = new sst.aws.Bucket("B"); } }',
+      },
       { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb', '@aws-sdk/client-s3'] },
     ]);
     // all provisionable declared → allInCode; SST → remote state → L2 achievable
@@ -655,8 +886,14 @@ describe('gradeIacMaturity — roll-up (min-gated, uneven grades)', () => {
 
   it('cannot reach L2 with undeclared (click-ops) resources even with SST present', () => {
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: 'export default { async run(){ new sst.aws.Bucket("B"); } }' },
-      { rel: 'infra/lambda/graph-sync/deploy.sh', content: 'aws lambda update-function-code\naws dynamodb create-table' },
+      {
+        rel: 'sst.config.ts',
+        content: 'export default { async run(){ new sst.aws.Bucket("B"); } }',
+      },
+      {
+        rel: 'infra/lambda/graph-sync/deploy.sh',
+        content: 'aws lambda update-function-code\naws dynamodb create-table',
+      },
       { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb', '@aws-sdk/client-rds'] }, // undeclared → low coverage
     ]);
     expect(inv.iacMaturity.level).toBe(1); // gated down: not all-infra-in-code
@@ -671,30 +908,56 @@ describe('gradeIacMaturity — roll-up (min-gated, uneven grades)', () => {
 
 describe('gradeIacMaturity — P4 epistemics: basis field on every dimension', () => {
   it('every dimension score carries basis:"declared" (code-only engine, never live-verified)', () => {
-    const inv = buildInfraInventory([{ rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' }]);
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
+    ]);
     for (const dim of Object.values(inv.iacMaturity.dimensions)) expect(dim.basis).toBe('declared');
   });
 
   it('cloud-blind facts NEVER appear as a scored dimension key (D3 guard)', () => {
-    const inv = buildInfraInventory([{ rel: 'sst.config.ts', content: 'export default { async run(){ const t = new sst.aws.Dynamo("T"); } }' }]);
-    expect(Object.keys(inv.iacMaturity.dimensions)).toEqual(['state', 'envSeparation', 'modularity', 'testing', 'governance', 'driftCost']);
-    expect(Object.keys(inv.iacMaturity.dimensions).some((k) => /pitr|versioning|cmk|dlq|deletion/i.test(k))).toBe(false);
+    const inv = buildInfraInventory([
+      {
+        rel: 'sst.config.ts',
+        content: 'export default { async run(){ const t = new sst.aws.Dynamo("T"); } }',
+      },
+    ]);
+    expect(Object.keys(inv.iacMaturity.dimensions)).toEqual([
+      'state',
+      'envSeparation',
+      'modularity',
+      'testing',
+      'governance',
+      'driftCost',
+    ]);
+    expect(
+      Object.keys(inv.iacMaturity.dimensions).some((k) =>
+        /pitr|versioning|cmk|dlq|deletion/i.test(k),
+      ),
+    ).toBe(false);
   });
 });
 
 describe('gradeIacMaturity — P4 epistemics: verificationBacklog', () => {
   it('a DynamoDB + S3 SST app → non-empty backlog, all basis:"unknown", incl. PITR + bucket-versioning verify commands', () => {
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: 'export default { async run(){ const t = new sst.aws.Dynamo("T"); const b = new sst.aws.Bucket("B"); } }' },
+      {
+        rel: 'sst.config.ts',
+        content:
+          'export default { async run(){ const t = new sst.aws.Dynamo("T"); const b = new sst.aws.Bucket("B"); } }',
+      },
     ]);
     const backlog = inv.iacMaturity.verificationBacklog;
     expect(backlog.length).toBeGreaterThan(0);
     expect(backlog.every((b) => b.basis === 'unknown')).toBe(true);
-    expect(backlog.every((b) => typeof b.verifyCommand === 'string' && b.verifyCommand.length > 0)).toBe(true);
+    expect(
+      backlog.every((b) => typeof b.verifyCommand === 'string' && b.verifyCommand.length > 0),
+    ).toBe(true);
     const pitr = backlog.find((b) => b.id === 'verify:cloud-blind:pitr');
     expect(pitr).toBeTruthy();
     expect(pitr.verifyCommand).toMatch(/describe-continuous-backups/);
-    const deletionProtection = backlog.find((b) => b.id === 'verify:cloud-blind:deletion-protection');
+    const deletionProtection = backlog.find(
+      (b) => b.id === 'verify:cloud-blind:deletion-protection',
+    );
     expect(deletionProtection).toBeTruthy();
     const versioning = backlog.find((b) => b.id === 'verify:cloud-blind:bucket-versioning');
     expect(versioning).toBeTruthy();
@@ -707,28 +970,46 @@ describe('gradeIacMaturity — P4 epistemics: verificationBacklog', () => {
 
   it('a queue/messaging service adds a runtime-health/DLQ verify entry', () => {
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: 'export default { async run(){ const q = new sst.aws.Queue("Q"); } }' },
+      {
+        rel: 'sst.config.ts',
+        content: 'export default { async run(){ const q = new sst.aws.Queue("Q"); } }',
+      },
     ]);
-    expect(inv.iacMaturity.verificationBacklog.some((b) => b.id === 'verify:cloud-blind:runtime-health-dlq')).toBe(true);
+    expect(
+      inv.iacMaturity.verificationBacklog.some(
+        (b) => b.id === 'verify:cloud-blind:runtime-health-dlq',
+      ),
+    ).toBe(true);
   });
 
   it('no IaC and no cloud SDK usage at all → verificationBacklog is empty (nothing declared to verify)', () => {
-    const inv = buildInfraInventory([{ rel: 'src/util.ts', content: 'export const add = (a, b) => a + b;' }]);
+    const inv = buildInfraInventory([
+      { rel: 'src/util.ts', content: 'export const add = (a, b) => a + b;' },
+    ]);
     expect(inv.iacMaturity.verificationBacklog).toEqual([]);
   });
 
   it('an SDK-inferred (undeclared) DynamoDB import still seeds cloud-blind PITR/deletion-protection entries, but no per-dimension "declared claim" entries', () => {
-    const inv = buildInfraInventory([{ rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] }]);
+    const inv = buildInfraInventory([
+      { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] },
+    ]);
     const backlog = inv.iacMaturity.verificationBacklog;
     expect(backlog.some((b) => b.id === 'verify:cloud-blind:pitr')).toBe(true);
     // no IaC was declared, so none of the six scored-dimension claims fired.
-    expect(backlog.some((b) => b.id.startsWith('verify:state') || b.id.startsWith('verify:testing'))).toBe(false);
+    expect(
+      backlog.some((b) => b.id.startsWith('verify:state') || b.id.startsWith('verify:testing')),
+    ).toBe(false);
   });
 });
 
 describe('gradeIacMaturity — P5 tag report: declared-IaC coverage vs platform-implicit SST tags', () => {
   it('SST app with zero custom tags declared → 0% "in declared IaC", but platformImplicit lists sst:app/sst:stage', () => {
-    const inv = buildInfraInventory([{ rel: 'sst.config.ts', content: 'export default { async run(){ new sst.aws.Bucket("B"); } }' }]);
+    const inv = buildInfraInventory([
+      {
+        rel: 'sst.config.ts',
+        content: 'export default { async run(){ new sst.aws.Bucket("B"); } }',
+      },
+    ]);
     const t = inv.iacMaturity.tagTaxonomy;
     expect(t.coveragePct).toBe(0);
     expect(t.platformImplicit).toEqual(['sst:app', 'sst:stage']);
@@ -737,13 +1018,19 @@ describe('gradeIacMaturity — P5 tag report: declared-IaC coverage vs platform-
   });
 
   it('a non-SST repo with no tags → platformImplicit stays empty', () => {
-    const inv = buildInfraInventory([{ rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' }]);
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
+    ]);
     expect(inv.iacMaturity.tagTaxonomy.platformImplicit).toEqual([]);
   });
 
   it('REQUIRED_TAGS is exposed and includes the new owner/managed-by/data-classification keys', () => {
-    const inv = buildInfraInventory([{ rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' }]);
-    expect(inv.iacMaturity.tagTaxonomy.requiredTags).toEqual(expect.arrayContaining(['owner', 'managed-by', 'data-classification']));
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
+    ]);
+    expect(inv.iacMaturity.tagTaxonomy.requiredTags).toEqual(
+      expect.arrayContaining(['owner', 'managed-by', 'data-classification']),
+    );
   });
 });
 
@@ -751,7 +1038,10 @@ describe('gradeIacMaturity — P5 driftCheck requires a CI-workflow artifact', (
   it('an "expect-no-changes" + cron mention in a non-CI file (README/comment) does NOT count as a drift gate', () => {
     const inv = buildInfraInventory([
       { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
-      { rel: 'README.md', content: 'Run this on a cron schedule and expect-no-changes from terraform plan.' },
+      {
+        rel: 'README.md',
+        content: 'Run this on a cron schedule and expect-no-changes from terraform plan.',
+      },
     ]);
     expect(inv.iacMaturity.dimensions.driftCost.level).toBe(0);
   });
@@ -764,28 +1054,39 @@ describe('gradeIacMaturity — P5 driftCheck requires a CI-workflow artifact', (
 // ════════════════════════════════════════════════════════════════════════════
 
 describe('P2 — normalizeArnResource', () => {
-  it('collapses table/bucket/function sub-paths to a bare resource name; drops pure *', () => {
-    expect(normalizeArnResource('dynamodb', 'table/Mycelium_*/index/*')).toBe('Mycelium_*');
+  it('collapses sub-paths to a bare name; drops wildcards (a class, not a resource) and template literals', () => {
     expect(normalizeArnResource('dynamodb', 'table/Scores')).toBe('Scores');
     expect(normalizeArnResource('s3', 'mycelium-snapshots/*')).toBe('mycelium-snapshots');
     expect(normalizeArnResource('lambda', 'function:my-fn')).toBe('my-fn');
-    expect(normalizeArnResource('dynamodb', 'table/*')).toBe(null); // no name to enumerate
+    expect(normalizeArnResource('dynamodb', 'table/*')).toBe(null); // pure wildcard, no name
+    expect(normalizeArnResource('dynamodb', 'table/Mycelium_*/index/*')).toBe(null); // prefix wildcard = a class
+    expect(normalizeArnResource('sqs', '${DLQ_NAME}')).toBe(null); // unresolved template literal
   });
 });
 
 describe('P2 — extractIamGrants carries referenced resources[] (existence unknown)', () => {
   it('a table ARN + its /index/* variant collapse to ONE referenced resource', () => {
-    const grants = extractIamGrants('arn:aws:dynamodb:us-east-1:123:table/Scores\narn:aws:dynamodb:us-east-1:123:table/Scores/index/gsi1');
+    const grants = extractIamGrants(
+      'arn:aws:dynamodb:us-east-1:123:table/Scores\narn:aws:dynamodb:us-east-1:123:table/Scores/index/gsi1',
+    );
     const dyn = grants.find((g) => g.name === 'DynamoDB');
     expect(dyn.resources).toHaveLength(1);
-    expect(dyn.resources[0]).toMatchObject({ name: 'Scores', declared: false, existence: 'unknown' });
+    expect(dyn.resources[0]).toMatchObject({
+      name: 'Scores',
+      declared: false,
+      existence: 'unknown',
+    });
   });
 
-  it('tolerates ${REGION}/${ACCT} interpolation and captures the wildcard pattern', () => {
-    const grants = extractIamGrants('const a = `arn:aws:dynamodb:${REGION}:${ACCT}:table/Mycelium_*`;');
+  it('tolerates ${REGION}/${ACCT} interpolation; the wildcard grants the SERVICE but enumerates NO phantom resource', () => {
+    const grants = extractIamGrants(
+      'const a = `arn:aws:dynamodb:${REGION}:${ACCT}:table/Mycelium_*`;',
+    );
     const dyn = grants.find((g) => g.name === 'DynamoDB');
-    expect(dyn.resources.map((r) => r.name)).toContain('Mycelium_*');
-    expect(dyn.resources[0].existence).toBe('unknown');
+    // the grant still proves DynamoDB is referenced (service-level signal preserved)...
+    expect(dyn).toBeTruthy();
+    // ...but `Mycelium_*` names a class, never a countable resource
+    expect(dyn.resources.map((r) => r.name)).not.toContain('Mycelium_*');
   });
 });
 
@@ -819,20 +1120,23 @@ describe('P2 — Mycelium-like SST + IAM-wildcard: 11 tables + snapshots bucket,
   const s3 = () => inv.services.find((s) => s.name === 'S3');
 
   it('enumerates ≥12 resources across DynamoDB + S3', () => {
-    const total = (dynamo().resources.length) + (s3().resources.length);
+    const total = dynamo().resources.length + s3().resources.length;
     expect(total).toBeGreaterThanOrEqual(12);
     // 11 named tables (Nodes…Agents) are present
     expect(dynamo().resources.map((r) => r.name)).toEqual(
-      expect.arrayContaining(['Mycelium_Nodes', 'Mycelium_Edges', 'Mycelium_Projects', 'Mycelium_Agents']),
+      expect.arrayContaining([
+        'Mycelium_Nodes',
+        'Mycelium_Edges',
+        'Mycelium_Projects',
+        'Mycelium_Agents',
+      ]),
     );
     expect(s3().resources.map((r) => r.name)).toContain('mycelium-snapshots');
   });
 
-  it('the ARN wildcard is ONE referenced entry (existence:unknown)', () => {
-    const wc = dynamo().resources.find((r) => r.name === 'Mycelium_*');
-    expect(wc).toBeTruthy();
-    expect(wc.existence).toBe('unknown');
-    expect(wc.declared).toBe(false);
+  it('the ARN wildcard is NOT enumerated (it names a class); the concrete members still are', () => {
+    expect(dynamo().resources.find((r) => r.name === 'Mycelium_*')).toBeFalsy();
+    expect(dynamo().resources.some((r) => r.name === 'Mycelium_Agents')).toBe(true);
   });
 
   it('a referenced-only Mycelium_Agents is existence:unknown, never declared', () => {
@@ -867,14 +1171,20 @@ describe('P2b — name-builders in REGULAR app code (codeText, content not loade
     const inv = buildInfraInventory([
       // DynamoDB service comes from the SDK import (specifier); the auth adapter from a
       // specifier too. The table NAMES live only in codeText (no `content`).
-      { rel: 'src/lib/auth.ts', codeText: authLib, specifiers: ['@aws-sdk/client-dynamodb', '@auth/dynamodb-adapter'] },
+      {
+        rel: 'src/lib/auth.ts',
+        codeText: authLib,
+        specifiers: ['@aws-sdk/client-dynamodb', '@auth/dynamodb-adapter'],
+      },
     ]);
     const dynamo = inv.services.find((s) => s.name === 'DynamoDB');
     expect(dynamo).toBeTruthy();
     const names = dynamo.resources.map((r) => r.name);
     expect(names).toEqual(expect.arrayContaining(['Mycelium_Auth', 'Mycelium_Directory']));
     // referenced-only, never declared
-    expect(dynamo.resources.every((r) => r.existence === 'unknown' && r.declared === false)).toBe(true);
+    expect(dynamo.resources.every((r) => r.existence === 'unknown' && r.declared === false)).toBe(
+      true,
+    );
     // A6 PII-by-name still fires off the codeText-derived resource names
     const auth = dynamo.resources.find((r) => r.name === 'Mycelium_Auth');
     expect(auth.contains_pii).toBe(true);
@@ -894,7 +1204,11 @@ describe('P2b — name-builders in REGULAR app code (codeText, content not loade
 describe('P2 — declared resources carry existence:declared + lift resourceRatio', () => {
   it('SST constructs enumerate one declared resource per invocation', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/storage.ts', content: 'export const t1 = new sst.aws.Dynamo("Scores");\nexport const t2 = new sst.aws.Dynamo("Users");\nexport const b = new sst.aws.Bucket("Assets");' },
+      {
+        rel: 'infra/storage.ts',
+        content:
+          'export const t1 = new sst.aws.Dynamo("Scores");\nexport const t2 = new sst.aws.Dynamo("Users");\nexport const b = new sst.aws.Bucket("Assets");',
+      },
     ]);
     const dynamo = inv.services.find((s) => s.name === 'DynamoDB');
     expect(dynamo.resources.map((r) => r.name).sort()).toEqual(['Scores', 'Users']);
@@ -918,10 +1232,22 @@ Resources:
     Type: AWS::S3::Bucket
   ApiFn:
     Type: AWS::Lambda::Function`;
-    expect(parseCfnResources(cfn).map((r) => r.resourceName).sort()).toEqual(['ApiFn', 'AssetsBucket', 'ScoresTable']);
+    expect(
+      parseCfnResources(cfn)
+        .map((r) => r.resourceName)
+        .sort(),
+    ).toEqual(['ApiFn', 'AssetsBucket', 'ScoresTable']);
     const inv = buildInfraInventory([{ rel: 'stack.yaml', content: cfn }]);
     const dynamo = inv.services.find((s) => s.name === 'DynamoDB');
-    expect(dynamo.resources).toEqual([{ name: 'ScoresTable', kind: 'database', declared: true, existence: 'declared', evidence: 'CloudFormation AWS::DynamoDB::Table' }]);
+    expect(dynamo.resources).toEqual([
+      {
+        name: 'ScoresTable',
+        kind: 'database',
+        declared: true,
+        existence: 'declared',
+        evidence: 'CloudFormation AWS::DynamoDB::Table',
+      },
+    ]);
     expect(inv.services.find((s) => s.name === 'S3').resources[0].name).toBe('AssetsBucket');
     expect(inv.iacCoverage.resourceRatio).toBe(1); // all CFN-declared
   });
@@ -951,15 +1277,32 @@ resources:
 
 describe('P2 — region generality (AWS / GCP / Azure)', () => {
   it('pins a GCP us-central1 region', () => {
-    const inv = buildInfraInventory([{ rel: 'infra/main.tf', content: 'provider "google" { region = "us-central1" }\nresource "google_storage_bucket" "b" {}' }]);
+    const inv = buildInfraInventory([
+      {
+        rel: 'infra/main.tf',
+        content:
+          'provider "google" { region = "us-central1" }\nresource "google_storage_bucket" "b" {}',
+      },
+    ]);
     expect(inv.iacMaturity.regions).toContain('us-central1');
     expect(inv.iacMaturity.regionPinned).toBe(true);
   });
 
   it('captures an Azure eastus2 region and still an AWS eu-central-1', () => {
-    const az = buildInfraInventory([{ rel: 'infra/main.tf', content: 'resource "azurerm_resource_group" "r" { location = "eastus2" }\nresource "azurerm_storage_account" "s" {}' }]);
+    const az = buildInfraInventory([
+      {
+        rel: 'infra/main.tf',
+        content:
+          'resource "azurerm_resource_group" "r" { location = "eastus2" }\nresource "azurerm_storage_account" "s" {}',
+      },
+    ]);
     expect(az.iacMaturity.regions).toContain('eastus2');
-    const aws = buildInfraInventory([{ rel: 'infra/main.tf', content: 'provider "aws" { region = "eu-central-1" }\nresource "aws_s3_bucket" "b" {}' }]);
+    const aws = buildInfraInventory([
+      {
+        rel: 'infra/main.tf',
+        content: 'provider "aws" { region = "eu-central-1" }\nresource "aws_s3_bucket" "b" {}',
+      },
+    ]);
     expect(aws.iacMaturity.regions).toContain('eu-central-1');
   });
 });
@@ -967,12 +1310,21 @@ describe('P2 — region generality (AWS / GCP / Azure)', () => {
 describe('P2 — tag taxonomy scoped to IaC files only', () => {
   it('an app-domain tags: object earns NO cost-taxonomy credit', () => {
     const inv = buildInfraInventory([
-      { rel: 'infra/main.tf', content: 'provider "aws" { default_tags { tags = { team = "core"\n environment = "prod" } } }\nresource "aws_s3_bucket" "b" {}' },
+      {
+        rel: 'infra/main.tf',
+        content:
+          'provider "aws" { default_tags { tags = { team = "core"\n environment = "prod" } } }\nresource "aws_s3_bucket" "b" {}',
+      },
       // a blog post's tag map — must be ignored (previously false-credited via allContent)
-      { rel: 'src/blog.ts', content: 'export const post = { tags: { service: "x", "cost-center": "y" } };' },
+      {
+        rel: 'src/blog.ts',
+        content: 'export const post = { tags: { service: "x", "cost-center": "y" } };',
+      },
     ]);
     expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(29);
-    expect(inv.iacMaturity.tagTaxonomy.missing).toEqual(expect.arrayContaining(['service', 'cost-center']));
+    expect(inv.iacMaturity.tagTaxonomy.missing).toEqual(
+      expect.arrayContaining(['service', 'cost-center']),
+    );
   });
 });
 
@@ -980,7 +1332,11 @@ describe('P2 — platform-config demoted out of the declared set', () => {
   it('iacCoverage exposes a separate platformConfigDeclared tier; CI-deploy never declares a data resource', () => {
     const inv = buildInfraInventory([
       { rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] },
-      { rel: '.github/workflows/deploy.yml', content: 'jobs:\n  deploy:\n    steps:\n      - uses: aws-actions/configure-aws-credentials@v4' },
+      {
+        rel: '.github/workflows/deploy.yml',
+        content:
+          'jobs:\n  deploy:\n    steps:\n      - uses: aws-actions/configure-aws-credentials@v4',
+      },
     ]);
     expect(inv.iacCoverage).toHaveProperty('platformConfigDeclared');
     // DynamoDB is provisioned nowhere in code — a CI workflow using aws-actions does
@@ -991,18 +1347,21 @@ describe('P2 — platform-config demoted out of the declared set', () => {
 });
 
 describe('A4 — orphan triage (retirement signals, never "dead")', () => {
-  it('flags a service (SERVICE-level) when a SCOPE-BOUNDARY/retire comment sits near its declaration', () => {
-    const tf = `
-      resource "aws_dynamodb_table" "OldSessions" {
-        # SCOPE-BOUNDARY: legacy table, retire after migration to Redis
-        name = "OldSessions"
-      }
+  it('a legacy note on ONE table flags that RESOURCE — never the whole generic-typed service', () => {
+    // Retiring "OldSessions" must not mark all of DynamoDB as retiring: the service's
+    // friendly name ("DynamoDB") is a generic type, so it carries no retirement identity.
+    // This is the coarse false-positive the shared-namespace/stopword filter removes.
+    const sst = `
+      // SCOPE-BOUNDARY: legacy table, retire after migration to Redis
+      new sst.aws.Dynamo("OldSessions", {})
     `;
-    const inv = buildInfraInventory([{ rel: 'infra/main.tf', content: tf }]);
+    const inv = buildInfraInventory([{ rel: 'infra/db.ts', content: sst }]);
     const dynamo = svc(inv, 'DynamoDB');
-    expect(dynamo.orphanCandidate).toBe(true);
-    expect(dynamo.basis).toBe('declared');
-    expect(dynamo.orphanReason).toMatch(/retirement signal/);
+    const res = dynamo.resources.find((r) => r.name === 'OldSessions');
+    expect(res?.orphanCandidate).toBe(true);
+    expect(res?.basis).toBe('declared');
+    // the service is not tarred with a retirement reason by its generic type name
+    expect(dynamo.orphanReason || '').not.toMatch(/retirement signal/);
   });
 
   it('flags a RESOURCE-level orphan candidate when the retirement comment sits near the specific resource name', () => {
@@ -1017,7 +1376,9 @@ describe('A4 — orphan triage (retirement signals, never "dead")', () => {
   });
 
   it('flags a service declared in IaC but never imported/used by application code', () => {
-    const inv = buildInfraInventory([{ rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' }]);
+    const inv = buildInfraInventory([
+      { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
+    ]);
     const s3 = svc(inv, 'S3');
     expect(s3.orphanCandidate).toBe(true);
     expect(s3.orphanReason).toMatch(/no application code imports/);
@@ -1048,7 +1409,11 @@ describe('A4 — orphan triage (retirement signals, never "dead")', () => {
 
   it('flags a data store named by a retirement note in a DIFFERENT file (cross-file)', () => {
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: '// MEMGRAPH_* left unset — Memgraph is being retired.\nnew sst.aws.Nextjs("Site", {})' },
+      {
+        rel: 'sst.config.ts',
+        content:
+          '// MEMGRAPH_* left unset — Memgraph is being retired.\nnew sst.aws.Nextjs("Site", {})',
+      },
       { rel: 'src/lib/memgraph.ts', specifiers: ['neo4j-driver'] },
     ]);
     const mg = (inv.services || []).find((s) => /memgraph|neo4j/i.test(s.name));
@@ -1057,21 +1422,46 @@ describe('A4 — orphan triage (retirement signals, never "dead")', () => {
     expect(mg.orphanCandidate).toBe(true);
     expect(mg.basis).toBe('declared');
   });
+
+  it('a retire note mentioning the shared namespace does NOT tar every store in it', () => {
+    // The real-Mycelium bug: a single note near the product name "Mycelium" flagged all
+    // 13 tables — incl. the active PII stores Mycelium_Auth/Mycelium_Directory — because
+    // they share the "mycelium" token. The shared-token (df>=3) filter must suppress that.
+    const dynamoLib = `const prefix = "Mycelium";
+      const AUTH=\`\${prefix}_Auth\`, DIR=\`\${prefix}_Directory\`, AGENTS=\`\${prefix}_Agents\`,
+        NODES=\`\${prefix}_Nodes\`, EDGES=\`\${prefix}_Edges\`;`;
+    const inv = buildInfraInventory([
+      // note names the namespace + a retire verb, but no specific table
+      {
+        rel: 'sst.config.ts',
+        content:
+          '// Mycelium legacy graph is being retired; tables live out-of-band.\nnew sst.aws.Nextjs("MyceliumWeb", { environment:{ DYNAMODB_TABLE_PREFIX:"Mycelium" } })',
+      },
+      { rel: 'src/lib/dynamo.ts', content: dynamoLib, specifiers: ['@aws-sdk/client-dynamodb'] },
+    ]);
+    const dynamo = inv.services.find((s) => s.name === 'DynamoDB');
+    const flagged = dynamo.resources.filter((r) => r.orphanCandidate).map((r) => r.name);
+    expect(flagged).toEqual([]); // no active table is mislabeled a retirement candidate
+    expect(dynamo.resources.some((r) => r.name === 'Mycelium_Auth')).toBe(true); // still enumerated
+  });
 });
 
 describe('A5 — secret-into-Lambda-env detection', () => {
   it('flags a literal secret in a shell --environment Variables={} block', () => {
-    const sh = 'aws lambda update-function-configuration --function-name foo --environment Variables={DB_PASSWORD=hunter2,STAGE=prod}';
+    const sh =
+      'aws lambda update-function-configuration --function-name foo --environment Variables={DB_PASSWORD=hunter2,STAGE=prod}';
     expect(detectSecretInEnv(sh)).toContain('DB_PASSWORD');
   });
 
   it('does not flag a value that references a secret store / CI secret context', () => {
-    const sh = 'aws lambda update-function-configuration --environment Variables={DB_PASSWORD=${SECRET_FROM_CI},STAGE=prod}';
+    const sh =
+      'aws lambda update-function-configuration --environment Variables={DB_PASSWORD=${SECRET_FROM_CI},STAGE=prod}';
     expect(detectSecretInEnv(sh)).toEqual([]);
   });
 
   it('flags a literal secret in a CI-workflow environment: block', () => {
-    const yml = 'jobs:\n  deploy:\n    steps:\n      - run: deploy.sh\n        environment:\n          API_TOKEN: sk-abc123literal\n          STAGE: prod';
+    const yml =
+      'jobs:\n  deploy:\n    steps:\n      - run: deploy.sh\n        environment:\n          API_TOKEN: sk-abc123literal\n          STAGE: prod';
     expect(detectSecretInEnv(yml)).toContain('API_TOKEN');
   });
 
@@ -1081,15 +1471,26 @@ describe('A5 — secret-into-Lambda-env detection', () => {
   });
 
   it('detectDeployScript surfaces secretEnvKeys additively on shell-deploy scripts', () => {
-    const ds = detectDeployScript('scripts/deploy.sh', 'aws lambda update-function-configuration --environment Variables={API_KEY=abc123}');
+    const ds = detectDeployScript(
+      'scripts/deploy.sh',
+      'aws lambda update-function-configuration --environment Variables={API_KEY=abc123}',
+    );
     expect(ds.kind).toBe('shell-deploy');
     expect(ds.secretEnvKeys).toContain('API_KEY');
   });
 
   it('gradeIacMaturity (via buildInfraInventory) emits an infra-security finding for the credential', () => {
-    const files = [{ rel: 'scripts/deploy.sh', content: 'aws lambda update-function-configuration --function-name foo --environment Variables={DB_PASSWORD=hunter2}' }];
+    const files = [
+      {
+        rel: 'scripts/deploy.sh',
+        content:
+          'aws lambda update-function-configuration --function-name foo --environment Variables={DB_PASSWORD=hunter2}',
+      },
+    ];
     const inv = buildInfraInventory(files);
-    const finding = inv.iacMaturity.findings.find((f) => f.id.startsWith('iac:secret-in-lambda-env'));
+    const finding = inv.iacMaturity.findings.find((f) =>
+      f.id.startsWith('iac:secret-in-lambda-env'),
+    );
     expect(finding).toBeDefined();
     expect(finding.dimension).toBe('security');
     expect(finding.severity).toBe('high');
@@ -1120,7 +1521,9 @@ describe('A6 — PII→store by store NAME (Auth.js adapter)', () => {
   });
 
   it('does NOT flag PII without an Auth.js adapter present, even with a matching store name', () => {
-    const inv = buildInfraInventory([{ rel: 'infra/db.ts', content: 'new sst.aws.Dynamo("Users_Auth", {})' }]);
+    const inv = buildInfraInventory([
+      { rel: 'infra/db.ts', content: 'new sst.aws.Dynamo("Users_Auth", {})' },
+    ]);
     const table = svc(inv, 'DynamoDB').resources.find((r) => r.name === 'Users_Auth');
     expect(table.contains_pii).toBeUndefined();
   });
@@ -1139,7 +1542,10 @@ describe('A6 — PII→store by store NAME (Auth.js adapter)', () => {
 describe('B11 — moduleReadiness (downstream unlock gates)', () => {
   it('blocks finops/privacy/policy when coverage is low, PII stores exist, and no policy pack', () => {
     const inv = buildInfraInventory([
-      { rel: 'sst.config.ts', content: 'new sst.aws.Nextjs("Site", {})\n// arn:aws:dynamodb:us-east-1:1:table/App_*' },
+      {
+        rel: 'sst.config.ts',
+        content: 'new sst.aws.Nextjs("Site", {})\n// arn:aws:dynamodb:us-east-1:1:table/App_*',
+      },
       { rel: 'src/auth.ts', specifiers: ['@auth/dynamodb-adapter', '@aws-sdk/client-dynamodb'] },
     ]);
     const mr = inv.moduleReadiness;

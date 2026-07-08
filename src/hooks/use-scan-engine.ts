@@ -225,6 +225,10 @@ export interface DeprecatedTool {
 export interface IacMaturity {
   level: number;
   levelName: 'ClickOps' | 'Repeatable' | 'Defined' | 'Managed' | 'Optimizing';
+  /** The single binding constraint that capped `level` (e.g. "capped at L1 — only 20% of
+   *  infra is declared in code; reach 80% to unlock L2"). Kept honest against the visible
+   *  per-dimension bars, which can hold an L0 while overall sits at L1. */
+  levelReason?: string;
   dimensions: {
     state: IacDimension;
     envSeparation: IacDimension;
@@ -310,7 +314,11 @@ export interface IacImport {
 }
 /** One step in the stack-aware Infrastructure migration track (rubric gap → doc playbook). */
 export interface IacPlanStep {
+  /** Canonical iac-migration.md phase anchor (state=2, envSep/modularity=3, …) — drives
+   *  foundations-first ordering; NOT a display ordinal (phases skip and repeat). */
   phase: number;
+  /** 1-based position in the emitted track — the number the UI renders ("Phase {seq}"). */
+  seq?: number;
   title: string;
   dimension: string;
   why: string;
