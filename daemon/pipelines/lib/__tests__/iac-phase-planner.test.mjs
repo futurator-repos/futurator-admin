@@ -120,15 +120,19 @@ describe('planIacTrack — gap-driven omission', () => {
     expect(dims).toEqual(expect.arrayContaining(['state', 'envSeparation', 'modularity', 'testing', 'driftCost']));
   });
 
-  it('when EVERY dimension is satisfied the track carries no dimension steps', () => {
+  it('when EVERY dimension is satisfied the track carries no dimension steps (adoption is a separate, coverage-gated concern — P3)', () => {
     const sat = maturity({
       level: 3,
       dimensions: Object.fromEntries(
         ['state', 'envSeparation', 'modularity', 'testing', 'governance', 'driftCost'].map((d) => [d, { level: 4, evidence: 'ok', gaps: [] }]),
       ),
     });
+    // NOTE (P3): the default `inventory()` fixture still has iacCoverage.undeclared =
+    // ['DynamoDB', 'S3'], so the adoption step is CORRECTLY still emitted here — it is
+    // gated on iacCoverage truth, independent of the dimension-satisfied() checks.
     const p = planIacTrack(inventory({ iacMaturity: sat }), { gitEvolution: git });
-    expect(p.track.filter((t) => t.dimension !== 'deprecated')).toHaveLength(0);
+    expect(p.track.filter((t) => t.dimension !== 'deprecated' && t.dimension !== 'adoption')).toHaveLength(0);
+    expect(p.track.map((t) => t.dimension)).toEqual(['adoption']);
   });
 });
 
@@ -168,7 +172,9 @@ describe('planIacTrack — nextThree + golden rule', () => {
   it('nextThree is bounded to <= 3 highest-leverage (foundations-first) actions', () => {
     const p = planIacTrack(inventory(), { gitEvolution: git });
     expect(p.nextThree.length).toBeLessThanOrEqual(3);
-    expect(p.nextThree[0].dimension).toBe('state'); // foundations first
+    // P3: the default fixture has undeclared resources (DynamoDB+S3) → the adoption
+    // step (phase 1) leads even 'state' (phase 2) — adopt before you migrate state.
+    expect(p.nextThree[0].dimension).toBe('adoption');
     for (const n of p.nextThree) {
       expect(typeof n.title).toBe('string');
       expect(typeof n.action).toBe('string');
@@ -181,6 +187,58 @@ describe('planIacTrack — nextThree + golden rule', () => {
       expect(step.goldenRule).toMatch(/no changes|No changes/);
     }
     expect(p.track[0].goldenRule).toMatch(/pulumi preview/);
+  });
+});
+
+describe('planIacTrack — P3 adoption step (unmanaged resources into IaC)', () => {
+  it('gated on iacCoverage truth, independent of state being satisfied: leads nextThree, carries imports + unlocks (SST at L2/no-gaps)', () => {
+    const satState = maturity({
+      dimensions: {
+        state: { level: 2, evidence: 'sst remote state', gaps: [] }, // satisfied: level>=target(2), no gaps
+        envSeparation: { level: 0, evidence: 'one env', gaps: ['no per-env stacks'] },
+        modularity: { level: 0, evidence: 'root monolith', gaps: ['no modules'] },
+        testing: { level: 0, evidence: 'no tests', gaps: ['no tftest'] },
+        governance: { level: 3, evidence: 'CrossGuard pack present', gaps: [] },
+        driftCost: { level: 0, evidence: 'no drift check', gaps: ['no scheduled plan'] },
+      },
+    });
+    const inv = inventory({ summary: { iacProviders: ['SST'] }, iacMaturity: satState });
+    const p = planIacTrack(inv, { gitEvolution: git });
+
+    // 'state' dimension step is correctly OMITTED (already satisfied)...
+    expect(p.track.map((t) => t.dimension)).not.toContain('state');
+    // ...but 'adoption' is NOT gated on satisfied('state') — it fires from iacCoverage.
+    const adoption = p.track.find((t) => t.dimension === 'adoption');
+    expect(adoption).toBeDefined();
+    expect(adoption.title).toBe('Adopt unmanaged resources into IaC');
+    expect(p.nextThree[0].dimension).toBe('adoption');
+    expect(adoption.imports.map((i) => i.resource)).toEqual(['DynamoDB', 'S3']);
+    expect(adoption.unlocks).toEqual(['finops', 'privacy', 'policy-as-code']);
+  });
+
+  it('is omitted when coverage is complete (no undeclared, resourceRatio absent)', () => {
+    const inv = inventory({ iacCoverage: { provisionable: 2, declared: 2, ratio: 1, undeclared: [] } });
+    const p = planIacTrack(inv, { gitEvolution: git });
+    expect(p.track.map((t) => t.dimension)).not.toContain('adoption');
+  });
+
+  it('gates on resourceRatio < 1 even when undeclared[] is empty (P2 resource-level truth)', () => {
+    const inv = inventory({ iacCoverage: { provisionable: 3, declared: 2, ratio: 0.66, undeclared: [], resourceRatio: 0.5 } });
+    const p = planIacTrack(inv, { gitEvolution: git });
+    expect(p.track.map((t) => t.dimension)).toContain('adoption');
+  });
+
+  it('is omitted when resourceRatio is present and === 1, even if unrelated fields are stale', () => {
+    const inv = inventory({ iacCoverage: { provisionable: 2, declared: 2, ratio: 1, undeclared: [], resourceRatio: 1 } });
+    const p = planIacTrack(inv, { gitEvolution: git });
+    expect(p.track.map((t) => t.dimension)).not.toContain('adoption');
+  });
+
+  it('degrades gracefully when resourceRatio is absent on an old (pre-P2) inventory — falls back to undeclared[] alone', () => {
+    const inv = inventory(); // default fixture: iacCoverage has no resourceRatio field
+    expect(inv.iacCoverage.resourceRatio).toBeUndefined();
+    const p = planIacTrack(inv, { gitEvolution: git });
+    expect(p.track.map((t) => t.dimension)).toContain('adoption');
   });
 });
 

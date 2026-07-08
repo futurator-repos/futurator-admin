@@ -274,6 +274,60 @@ describe('computeMaturity', () => {
     expect(overall).toBeGreaterThan(0);
     expect(overall).toBeLessThanOrEqual(1);
   });
+
+  it('readiness items carry a basis field: IaC-derived items are "declared", repo-observable items are "verified"', () => {
+    const { readiness } = computeMaturity({ graphAvailable: true, tests: { testFiles: 1, sourceFiles: 1, ratio: 1, hasTests: true } });
+    // every readiness item has a basis string, no undefineds slipping through
+    expect(readiness.every((r) => typeof r.basis === 'string' && r.basis.length > 0)).toBe(true);
+    expect(readiness.find((r) => r.key === 'graph-built').basis).toBe('verified');
+    expect(readiness.find((r) => r.key === 'tests-present').basis).toBe('verified');
+
+    // iac-present is declared-only (parsed from repo IaC, not confirmed against the live cloud account)
+    const infra = { summary: { serviceCount: 2, resourceIacFiles: 1 }, iac: [{ provider: 'SST', tier: 'resource' }], signalQuality: { level: 'high', iacDeclared: true } };
+    const withInfra = computeMaturity({ infra });
+    expect(withInfra.readiness.find((r) => r.key === 'iac-present').basis).toBe('declared');
+
+    // remote-state / env-separation are rubric-derived from declared IaC — also 'declared'
+    const infraWithMaturity = {
+      ...infra,
+      iacCoverage: { provisionable: 2, declared: 2, ratio: 1, undeclared: [] },
+      iacMaturity: {
+        level: 3,
+        levelName: 'Managed',
+        dimensions: {
+          state: { level: 3, evidence: 'S3 remote backend', gaps: [] },
+          envSeparation: { level: 2, evidence: 'dev/stage/prod stacks', gaps: [] },
+        },
+      },
+    };
+    const { readiness: rubricReadiness } = computeMaturity({ infra: infraWithMaturity });
+    expect(rubricReadiness.find((r) => r.key === 'remote-state').basis).toBe('declared');
+    expect(rubricReadiness.find((r) => r.key === 'env-separation').basis).toBe('declared');
+  });
+
+  it('verificationBacklog passes through from infra.iacMaturity, defaults to [] when absent', () => {
+    // no infra at all → empty backlog, key still present
+    const bare = computeMaturity({});
+    expect(bare.verificationBacklog).toEqual([]);
+
+    // infra present but no iacMaturity (old scan) → still empty
+    const noMaturity = computeMaturity({ infra: { summary: { serviceCount: 1, resourceIacFiles: 1 }, iac: [] } });
+    expect(noMaturity.verificationBacklog).toEqual([]);
+
+    // infra.iacMaturity carries a verificationBacklog → surfaced verbatim at the top level
+    const backlog = [
+      { id: 'pitr-1', fact: 'PITR enabled on table X', dimension: 'state', verifyCommand: 'aws dynamodb describe-continuous-backups --table-name X', basis: 'unknown' },
+      { id: 'versioning-1', fact: 'bucket versioning on Y', dimension: 'state', verifyCommand: 'aws s3api get-bucket-versioning --bucket Y', basis: 'unknown' },
+    ];
+    const withBacklog = computeMaturity({
+      infra: {
+        summary: { serviceCount: 1, resourceIacFiles: 1 },
+        iac: [],
+        iacMaturity: { level: 2, levelName: 'Defined', dimensions: {}, verificationBacklog: backlog },
+      },
+    });
+    expect(withBacklog.verificationBacklog).toEqual(backlog);
+  });
 });
 
 describe('analyzeTests', () => {

@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const SRC_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
-const IGNORE = new Set(['node_modules', '.next', 'dist', 'out', 'build', '.git', 'coverage']);
+const IGNORE = new Set(['node_modules', '.next', 'dist', 'out', 'build', '.git', 'coverage', 'graphify-out', 'vendor']);
 const TEST_RE = /\.(test|spec)\.[tj]sx?$/;
 const isTestPath = (rel) => TEST_RE.test(rel) || /(^|\/)(__tests__|__mocks__|e2e|tests?)\//.test(rel);
 

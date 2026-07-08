@@ -30,7 +30,7 @@ const srcSub = flag('--src') || 'src'
 const srcRoot = path.join(repoRoot, srcSub)
 
 const EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']
-const IGNORE = new Set(['node_modules', '.next', 'dist', 'out', 'build', '.git', 'coverage'])
+const IGNORE = new Set(['node_modules', '.next', 'dist', 'out', 'build', '.git', 'coverage', 'graphify-out', 'vendor'])
 
 // --- JSONC: strip comments WITHOUT touching `//` or `/*` inside string literals ---
 function stripJsonc(s) {

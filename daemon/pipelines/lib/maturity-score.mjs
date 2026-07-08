@@ -233,11 +233,15 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
   const overall = measured.length ? measured.reduce((s, a) => s + a.score, 0) / measured.length : null;
 
   // Readiness — binary checks (NOT scored quality). Derived from the same summaries.
+  // Each item carries a `basis`: 'declared' means the fact comes from parsing
+  // declared-in-repo IaC/config (not verified against the live cloud account);
+  // 'verified' means it genuinely reflects a repo-observable fact (a file exists,
+  // a test ran, git history was read directly) — default for most readiness items.
   const readiness = [];
-  const addR = (key, label, present, detail) => readiness.push({ key, label, present: !!present, detail });
+  const addR = (key, label, present, detail, basis = 'verified') => readiness.push({ key, label, present: !!present, detail, basis });
   addR('graph-built', 'Code graph built', graphAvailable, graphAvailable ? 'code graph available' : 'run graph build (graphify)');
   addR('iac-present', 'Infra-as-code present', infra ? (infra.signalQuality?.iacDeclared || (infra.iac || []).length > 0) : false,
-    infra ? 'IaC declared in repo' : 'no infra summary — run infra detector');
+    infra ? 'IaC declared in repo' : 'no infra summary — run infra detector', 'declared');
   // Rubric-derived binary readiness — only when the 5-level maturity model ran.
   // state.level >= 2 == remote/managed backend (not local-only); envSeparation.level
   // >= 2 == distinct dev/stage/prod configs (not a single shared blob).
@@ -246,9 +250,9 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     const remoteState = (dims.state?.level ?? 0) >= 2;
     const envSep = (dims.envSeparation?.level ?? 0) >= 2;
     addR('remote-state', 'Remote/managed state', remoteState,
-      dims.state?.evidence || (remoteState ? 'remote/managed state backend' : 'local-only or no state backend'));
+      dims.state?.evidence || (remoteState ? 'remote/managed state backend' : 'local-only or no state backend'), 'declared');
     addR('env-separation', 'Environment separation', envSep,
-      dims.envSeparation?.evidence || (envSep ? 'distinct dev/stage/prod configs' : 'no environment separation'));
+      dims.envSeparation?.evidence || (envSep ? 'distinct dev/stage/prod configs' : 'no environment separation'), 'declared');
   }
   addR('tests-present', 'Tests present', tests ? tests.hasTests : false, tests ? (tests.hasTests ? `${tests.testFiles} test files` : 'no test files found') : 'run tests detector');
   addR('lockfile', 'Dependency lockfile', security ? security.supplyChain?.hasLockfile : false,
@@ -277,5 +281,11 @@ export function computeMaturity({ findings = [], hotspots = [], tests = null, es
     addR('ai-skills', 'Agent skills', aiReadiness.skillCount > 0, aiReadiness.skillCount > 0 ? `${aiReadiness.skillCount} skill(s)` : 'no agent skills');
   }
 
-  return { axes, readiness, overall };
+  // Verification backlog passthrough — infra-extract's iacMaturity produces a list of
+  // declared-only claims (+ cloud-blind facts like PITR/versioning/CMK) that need a
+  // live `aws ...` call to actually confirm. We don't verify anything here (pure JS,
+  // no I/O) — just surface it so the report can render "declared, not yet verified".
+  const verificationBacklog = (infra && infra.iacMaturity && infra.iacMaturity.verificationBacklog) || [];
+
+  return { axes, readiness, overall, verificationBacklog };
 }

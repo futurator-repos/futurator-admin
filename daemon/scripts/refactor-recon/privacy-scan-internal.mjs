@@ -27,7 +27,7 @@ const src = flag('--src') || 'src'
 const out = flag('--out')
 
 const EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']
-const IGNORE = new Set(['node_modules', '.next', 'dist', 'out', 'build', '.git', 'coverage'])
+const IGNORE = new Set(['node_modules', '.next', 'dist', 'out', 'build', '.git', 'coverage', 'graphify-out', 'vendor'])
 // Scope: skip docs/agent-prompt/test noise (the external scanner's biggest FP source).
 const SKIP_PATH = (rel) =>
   /(^|\/)(docs|_bmad|__tests__|__mocks__|__fixtures__|\.agents)\//.test(rel) ||

@@ -19,6 +19,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import { classifyImport, classifyPath } from './privacy-detectors.mjs';
 
 // ── 1. SDK/package catalog (provider-agnostic cloud + service SDKs) ──
@@ -53,6 +55,8 @@ export const CLOUD_SDK = [
   { re: /^@azure\/identity|^@azure\/functions|^@azure\//, name: 'Azure SDK', kind: 'platform', cloud: 'Azure', residency: 'in-account' },
   // Supabase (managed Postgres + auth + storage)
   { re: /^@supabase\//, name: 'Supabase', kind: 'database', cloud: 'Supabase', residency: 'external', dataStore: true },
+  // Graph databases reached over the shared Bolt driver (self-hosted Memgraph / Neo4j)
+  { re: /^neo4j-driver(\/|$)|^@neo4j\//, name: 'Neo4j/Memgraph (graph DB)', kind: 'database', cloud: 'self-hosted', residency: 'in-account', dataStore: true },
   // Email / messaging 3rd-party
   { re: /^nodemailer/, name: 'SMTP (nodemailer)', kind: 'email', cloud: '3rd-party', residency: 'external' },
   { re: /^resend/, name: 'Resend', kind: 'email', cloud: '3rd-party', residency: 'external' },
@@ -159,6 +163,7 @@ const ENV_KEY = [
   [/^(FIREBASE_)/i, { name: 'Firebase', kind: 'platform', cloud: 'GCP', residency: 'in-account', dataStore: true }],
   [/^AZURE_/i, { name: 'Azure', kind: 'platform', cloud: 'Azure', residency: 'in-account' }],
   [/^AWS_/i, { name: 'AWS', kind: 'platform', cloud: 'AWS', residency: 'in-account' }],
+  [/^(MEMGRAPH_|NEO4J_)/i, { name: 'Neo4j/Memgraph (graph DB)', kind: 'database', cloud: 'self-hosted', residency: 'in-account', dataStore: true }],
   [/^STEAM_/i, { name: 'Steam', kind: 'gaming', cloud: '3rd-party', residency: 'external' }],
   [/^RESEND_/i, { name: 'Resend', kind: 'email', cloud: '3rd-party', residency: 'external' }],
   [/^POSTMARK_/i, { name: 'Postmark', kind: 'email', cloud: '3rd-party', residency: 'external' }],
@@ -227,45 +232,210 @@ export function iacTier(ctype) {
 // These split resources across infra/*.ts modules, NOT just the entry config — so
 // extraction must run on every IaC-importing file, else real tables/buckets look
 // "inferred" (the click-ops false alarm). Each entry: [regex, friendlyName, kind].
+// P1 — CONSTRUCTOR-INVOCATION syntax only. Each construct must be an actual
+// factory/constructor call (followed by `(`), never a bare class token. This kills
+// the phantom-DynamoDB defect where an app's UI `new Table(` / `new Bucket(` class
+// was mis-credited as a declared AWS resource. SST v3 is a factory (`sst.aws.Dynamo(`
+// with or without `new`); CDK/Pulumi are `new <ctor>(`.
 const SST_RES = [
-  [/\bsst\.aws\.Function\b|\bnew\s+Function\b/, 'Lambda', 'compute'],
-  [/\bsst\.aws\.(Dynamo|Table)\b|\bnew\s+Table\b/, 'DynamoDB', 'database'],
-  [/\bsst\.aws\.Bucket\b|\bnew\s+Bucket\b/, 'S3', 'storage'],
-  [/\bsst\.aws\.Postgres\b|\bsst\.aws\.Aurora\b|\bnew\s+RDS\b/, 'RDS/Aurora', 'database'],
-  [/\bsst\.aws\.Queue\b|\bnew\s+Queue\b/, 'SQS', 'messaging'],
-  [/\bsst\.aws\.Topic\b|\bnew\s+Topic\b/, 'SNS', 'messaging'],
-  [/\bsst\.aws\.Cron\b|\bnew\s+Cron\b/, 'EventBridge (cron)', 'messaging'],
-  [/\bsst\.aws\.Cdn\b|\bnew\s+(StaticSite|NextjsSite|SvelteKitSite|AstroSite)\b|\bsst\.aws\.(Nextjs|StaticSite|SvelteKit|Astro|React)\b/, 'CloudFront', 'network'],
-  [/\bsst\.aws\.ApiGatewayV2\b|\bsst\.aws\.Api\b|\bnew\s+Api\b/, 'API Gateway', 'network'],
+  [/\b(?:new\s+)?sst\.aws\.Function\s*\(/, 'Lambda', 'compute'],
+  [/\b(?:new\s+)?sst\.aws\.(?:Dynamo|Table)\s*\(/, 'DynamoDB', 'database'],
+  [/\b(?:new\s+)?sst\.aws\.Bucket\s*\(/, 'S3', 'storage'],
+  [/\b(?:new\s+)?sst\.aws\.(?:Postgres|Aurora)\s*\(/, 'RDS/Aurora', 'database'],
+  [/\b(?:new\s+)?sst\.aws\.Queue\s*\(/, 'SQS', 'messaging'],
+  [/\b(?:new\s+)?sst\.aws\.Topic\s*\(/, 'SNS', 'messaging'],
+  [/\b(?:new\s+)?sst\.aws\.Cron\s*\(/, 'EventBridge (cron)', 'messaging'],
+  [/\b(?:new\s+)?sst\.aws\.(?:Cdn|Nextjs|StaticSite|SvelteKit|Astro|React)\s*\(|\bnew\s+(?:StaticSite|NextjsSite|SvelteKitSite|AstroSite)\s*\(/, 'CloudFront', 'network'],
+  [/\b(?:new\s+)?sst\.aws\.(?:ApiGatewayV2|Api)\s*\(/, 'API Gateway', 'network'],
 ];
 const CDK_RES = [
-  [/\bnew\s+(?:s3\.)?Bucket\b/, 'S3', 'storage'],
-  [/\bnew\s+(?:dynamodb\.)?Table\b/, 'DynamoDB', 'database'],
-  [/\bnew\s+(?:lambda(?:_nodejs|\.)?\.?)?(?:NodejsFunction|Function)\b/, 'Lambda', 'compute'],
-  [/\bnew\s+(?:rds\.)?(?:DatabaseInstance|DatabaseCluster|ServerlessCluster)\b/, 'RDS', 'database'],
-  [/\bnew\s+(?:sqs\.)?Queue\b/, 'SQS', 'messaging'],
-  [/\bnew\s+(?:sns\.)?Topic\b/, 'SNS', 'messaging'],
-  [/\bnew\s+(?:cloudfront\.)?Distribution\b/, 'CloudFront', 'network'],
-  [/\bnew\s+(?:apigateway\w*\.)?(?:RestApi|HttpApi|LambdaRestApi)\b/, 'API Gateway', 'network'],
+  [/\bnew\s+(?:s3\.)?Bucket\s*\(/, 'S3', 'storage'],
+  [/\bnew\s+(?:dynamodb\.)?Table\s*\(/, 'DynamoDB', 'database'],
+  [/\bnew\s+(?:lambda(?:_nodejs|\.)?\.?)?(?:NodejsFunction|Function)\s*\(/, 'Lambda', 'compute'],
+  [/\bnew\s+(?:rds\.)?(?:DatabaseInstance|DatabaseCluster|ServerlessCluster)\s*\(/, 'RDS', 'database'],
+  [/\bnew\s+(?:sqs\.)?Queue\s*\(/, 'SQS', 'messaging'],
+  [/\bnew\s+(?:sns\.)?Topic\s*\(/, 'SNS', 'messaging'],
+  [/\bnew\s+(?:cloudfront\.)?Distribution\s*\(/, 'CloudFront', 'network'],
+  [/\bnew\s+(?:apigateway\w*\.)?(?:RestApi|HttpApi|LambdaRestApi)\s*\(/, 'API Gateway', 'network'],
 ];
 const PULUMI_RES = [
-  [/\bnew\s+aws\.s3\.Bucket(?:V2)?\b/, 'S3', 'storage', 'AWS'],
-  [/\bnew\s+aws\.dynamodb\.Table\b/, 'DynamoDB', 'database', 'AWS'],
-  [/\bnew\s+aws\.lambda\.(?:Function|CallbackFunction)\b/, 'Lambda', 'compute', 'AWS'],
-  [/\bnew\s+aws\.rds\.\w+/, 'RDS', 'database', 'AWS'],
-  [/\bnew\s+gcp\.storage\.Bucket\b/, 'Cloud Storage', 'storage', 'GCP'],
-  [/\bnew\s+gcp\.\w+/, 'GCP resource', 'compute', 'GCP'],
-  [/\bnew\s+azure(?:-native|nm)?\.\w+/, 'Azure resource', 'compute', 'Azure'],
+  [/\bnew\s+aws\.s3\.Bucket(?:V2)?\s*\(/, 'S3', 'storage', 'AWS'],
+  [/\bnew\s+aws\.dynamodb\.Table\s*\(/, 'DynamoDB', 'database', 'AWS'],
+  [/\bnew\s+aws\.lambda\.(?:Function|CallbackFunction)\s*\(/, 'Lambda', 'compute', 'AWS'],
+  [/\bnew\s+aws\.rds\.\w+\s*\(/, 'RDS', 'database', 'AWS'],
+  [/\bnew\s+gcp\.storage\.Bucket\s*\(/, 'Cloud Storage', 'storage', 'GCP'],
+  [/\bnew\s+gcp(?:\.\w+)+\s*\(/, 'GCP resource', 'compute', 'GCP'],
+  [/\bnew\s+azure(?:-native|nm)?(?:\.\w+)+\s*\(/, 'Azure resource', 'compute', 'Azure'],
 ];
 
-/** Extract declared cloud resources from a general-purpose IaC file's content. */
+// P1 — strip comments before construct extraction so a COMMENT that mentions
+// `sst.aws.Dynamo` (e.g. Mycelium sst.config.ts:81 "not declared as sst.aws.Dynamo")
+// can never be read as a declaration (defect D1). Removes // and /* */ (code + HCL)
+// and leading-# comments (yaml/hcl/tfvars/toml). Preserves `://` (URLs) and TS `#`
+// private fields. When `rel` is unknown the content is treated as code (SST/CDK/Pulumi
+// constructs only ever live in general-purpose-language files).
+export function stripComments(content, rel = '') {
+  let c = String(content || '');
+  const codeLike = !rel || /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(rel);
+  const hclLike = /\.(tf|tofu|hcl)$/.test(rel);
+  const hashLike = /\.(ya?ml|tfvars|toml)$/.test(rel) || hclLike;
+  if (codeLike || hclLike) {
+    c = c.replace(/\/\*[\s\S]*?\*\//g, '');
+    c = c.replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  }
+  if (hashLike) c = c.replace(/(^|\s)#[^\n]*/g, '$1');
+  return c;
+}
+
+// P1 — ARN service segment → friendly resource (used-but-undeclared references from
+// IAM policy / permission blocks). NOT a declaration — these are resources the code
+// is granted access to but does not provision here.
+const ARN_SVC = {
+  dynamodb: { name: 'DynamoDB', kind: 'database', dataStore: true },
+  s3: { name: 'S3', kind: 'storage', dataStore: true },
+  lambda: { name: 'Lambda', kind: 'compute' },
+  sqs: { name: 'SQS', kind: 'messaging' },
+  sns: { name: 'SNS', kind: 'messaging' },
+};
+
+// P2 — AWS::Service::Kind (CloudFormation/SAM/serverless resource types) → friendly
+// service. Broader than ARN_SVC because CFN enumerates the full resource graph.
+// value: [friendlyName, kind, dataStore].
+const AWS_SVC_MAP = {
+  dynamodb: ['DynamoDB', 'database', true],
+  s3: ['S3', 'storage', true],
+  lambda: ['Lambda', 'compute', false],
+  sqs: ['SQS', 'messaging', false],
+  sns: ['SNS', 'messaging', false],
+  rds: ['RDS', 'database', true],
+  cloudfront: ['CloudFront', 'network', false],
+  apigateway: ['API Gateway', 'network', false],
+  apigatewayv2: ['API Gateway', 'network', false],
+  cognito: ['Cognito', 'auth', true],
+  serverless: ['Lambda', 'compute', false],
+  ec2: ['EC2', 'compute', false],
+  elasticloadbalancingv2: ['ALB/ELB', 'network', false],
+};
+
+// P2 — normalize the ARN resource segment to a bare resource name. Table/bucket/
+// function sub-paths and /index/* /-* suffixes collapse so the same physical
+// resource is not double-counted. A pure `*` (no name) is dropped.
+export function normalizeArnResource(svc, raw) {
+  let r = String(raw || '').trim();
+  if (!r) return null;
+  if (svc === 'dynamodb') { const mm = r.match(/table\/([^/]+)/i); if (mm) r = mm[1]; }
+  else if (svc === 's3') { r = r.replace(/\/.*$/, ''); }
+  else if (svc === 'lambda') { const mm = r.match(/function:([^:]+)/i); if (mm) r = mm[1]; }
+  else if (svc === 'sqs' || svc === 'sns') { r = r.split(/[:/]/).pop(); }
+  else { r = r.replace(/^[^/:]+[/:]/, ''); }
+  r = (r || '').trim();
+  if (!r || r === '*') return null; // pure wildcard w/ no name → nothing to enumerate
+  return r;
+}
+
+/**
+ * Extract used-but-undeclared references from IAM policy / permission ARNs.
+ * An `arn:aws:<svc>:...:table/…` inside a policy proves the resource is REFERENCED
+ * (granted), not that it is declared here — so each maps to a service tagged
+ * detectedBy 'iam-grant', declared:false (never counted as declared in iacCoverage).
+ * P2 — each grant now also carries resources[]: the specific/​wildcard resource
+ * names from its ARNs, tagged existence:'unknown' (referenced, never declared here).
+ */
+export function extractIamGrants(content) {
+  const out = [];
+  const byService = new Map(); // friendly name -> grant entry (accumulates resources)
+  const seenRes = new Set();
+  // Region + account segments tolerate `${...}` interpolation (SST/CDK build ARNs from
+  // template literals, e.g. arn:aws:dynamodb:${REGION}:${ACCT}:table/Mycelium_*). The
+  // resource capture stops at a quote/backtick/bracket so the literal ends cleanly.
+  for (const m of String(content || '').matchAll(/arn:aws:([a-z0-9-]+):(?:\$\{[^}]*\}|[a-z0-9-]*):(?:\$\{[^}]*\}|[0-9*]*):([^\s"'`\\)}\]]+)/gi)) {
+    const svc = m[1].toLowerCase();
+    const hit = ARN_SVC[svc];
+    if (!hit) continue;
+    let entry = byService.get(hit.name);
+    if (!entry) {
+      entry = { name: hit.name, kind: hit.kind, cloud: 'AWS', residency: 'in-account', dataStore: !!hit.dataStore, detectedBy: 'iam-grant', confidence: 'medium', declared: false, resources: [] };
+      byService.set(hit.name, entry);
+      out.push(entry);
+    }
+    const resName = normalizeArnResource(svc, m[2]);
+    if (resName && !seenRes.has(`${hit.name}:${resName}`)) {
+      seenRes.add(`${hit.name}:${resName}`);
+      entry.resources.push({ name: resName, kind: hit.kind, declared: false, existence: 'unknown', evidence: `IAM grant ARN (${resName.includes('*') ? 'wildcard' : 'specific'})` });
+    }
+  }
+  return out;
+}
+
+// P2 — the logical/resource name of an IaC construct is the first quoted string in
+// its argument list (skipping a leading bare identifier like CDK's `this` scope arg).
+// `stripped` is the comment-free content, `end` the index just past the construct's
+// opening `(`. Returns the name or null (unnamed construct).
+function constructName(stripped, end) {
+  const win = stripped.slice(end, end + 200);
+  const m = win.match(/^\s*(?:[A-Za-z_$][\w$.]*\s*,\s*)?["'`]([^"'`]+)["'`]/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Extract declared cloud resources from a general-purpose IaC file's content.
+ * P2 — each service entry now also carries resources[]: one per construct
+ * INVOCATION (declared:true, existence:'declared'), named by the construct's first
+ * string argument, so 3 `new sst.aws.Dynamo(...)` calls enumerate 3 tables.
+ */
 export function extractIacResources(content, tool) {
+  const bySvc = new Map();
+  const stripped = stripComments(content); // P1: comments are never declarations
+  const RES = tool === 'SST' ? SST_RES : tool === 'AWS CDK' ? CDK_RES : tool === 'Pulumi' ? PULUMI_RES : null;
+  if (!RES) return [];
+  for (const entry of RES) {
+    const [re, name, kind] = entry;
+    const cloud = tool === 'Pulumi' ? (entry[3] || 'AWS') : 'AWS';
+    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+    let m;
+    while ((m = g.exec(stripped))) {
+      const key = `${cloud}:${name}`;
+      let svc = bySvc.get(key);
+      if (!svc) { svc = { name, kind, cloud, residency: 'in-account', dataStore: kind === 'database' || kind === 'storage', resources: [] }; bySvc.set(key, svc); }
+      const rn = constructName(stripped, m.index + m[0].length);
+      const resName = rn || `${name}#${svc.resources.length + 1}`;
+      if (!svc.resources.some((r) => r.name === resName)) svc.resources.push({ name: resName, kind, declared: true, existence: 'declared', evidence: `${tool} construct` });
+      if (g.lastIndex === m.index) g.lastIndex++; // guard against zero-width
+    }
+  }
+  return [...bySvc.values()];
+}
+
+// P2 — enumerate CloudFormation / SAM / serverless `Resources:` blocks. Each resource
+// is `<LogicalId>:` … `Type: AWS::Service::Kind`. Line-based (YAML indentation is not
+// regex-friendly): for every `Type: AWS::…` line, the logical id is the NEAREST
+// preceding bare-key line at strictly-lesser indent (the immediate parent) — so a
+// nested serverless `resources: → Resources: → Bucket: → Type:` credits `Bucket`, not
+// the `Resources:` section header. Returns per-resource records + friendly service.
+const CFN_SECTION_WORDS = new Set(['Resources', 'Properties', 'Outputs', 'Parameters', 'Conditions', 'Mappings', 'Metadata', 'Globals']);
+export function parseCfnResources(content) {
+  const lines = String(content || '').split('\n');
   const out = [];
   const seen = new Set();
-  const add = (name, kind, cloud) => { const k = `${cloud}:${name}`; if (seen.has(k)) return; seen.add(k); out.push({ name, kind, cloud, residency: 'in-account', dataStore: kind === 'database' || kind === 'storage' }); };
-  if (tool === 'SST') for (const [re, name, kind] of SST_RES) { if (re.test(content)) add(name, kind, 'AWS'); }
-  else if (tool === 'AWS CDK') for (const [re, name, kind] of CDK_RES) { if (re.test(content)) add(name, kind, 'AWS'); }
-  else if (tool === 'Pulumi') for (const [re, name, kind, cloud] of PULUMI_RES) { if (re.test(content)) add(name, kind, cloud); }
+  for (let i = 0; i < lines.length; i++) {
+    const tm = lines[i].match(/^(\s*)Type\s*:\s*['"]?(AWS::[A-Za-z0-9]+::[A-Za-z0-9]+)/);
+    if (!tm) continue;
+    const typeIndent = tm[1].length;
+    const type = tm[2];
+    let logicalId = null;
+    for (let j = i - 1; j >= 0; j--) {
+      if (lines[j].trim() === '') continue;
+      const km = lines[j].match(/^(\s*)([A-Za-z][A-Za-z0-9]*)\s*:\s*(?:#.*)?$/);
+      if (km && km[1].length < typeIndent) { logicalId = km[2]; break; }
+    }
+    if (!logicalId || CFN_SECTION_WORDS.has(logicalId)) continue;
+    const svcSeg = type.split('::')[1].toLowerCase();
+    const hit = AWS_SVC_MAP[svcSeg] || [type.replace(/^AWS::/, ''), 'other', false];
+    const key = `${hit[0]}:${logicalId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ service: hit[0], kind: hit[1], dataStore: hit[2], resourceName: logicalId, type });
+  }
   return out;
 }
 
@@ -296,15 +466,34 @@ export function parseConfig(type, content, rel) {
     }
   } else if (type === 'serverless') {
     const m = content.match(/provider:\s*[\s\S]*?name:\s*(aws|google|azure)/i);
-    if (m) { const cloud = m[1] === 'aws' ? 'AWS' : m[1] === 'google' ? 'GCP' : 'Azure'; push({ name: `Serverless → ${cloud}`, kind: 'iac', cloud, residency: 'in-account' }); }
+    const cloud = m ? (m[1] === 'aws' ? 'AWS' : m[1] === 'google' ? 'GCP' : 'Azure') : 'AWS';
+    push({ name: `Serverless → ${cloud}`, kind: 'iac', cloud, residency: 'in-account' });
+    // P2 — functions: map → declared Lambda resources. Capture ONLY the direct
+    // children (function names) at the block's base indent, never nested leaf keys
+    // like `handler:` / `events:`.
+    const fm = content.match(/(^|\n)functions\s*:\s*\n([\s\S]*?)(?=\n[A-Za-z_]|$)/);
+    const fnNames = [];
+    if (fm) {
+      const block = fm[2];
+      const indM = block.match(/^([ \t]+)\S/);
+      if (indM) for (const fx of block.matchAll(new RegExp('(^|\\n)' + indM[1] + '([A-Za-z][\\w-]*)\\s*:', 'g'))) fnNames.push(fx[2]);
+    }
+    if (fnNames.length) push({ name: 'Lambda', kind: 'compute', cloud: 'AWS', residency: 'in-account', resources: fnNames.map((n) => ({ name: n, kind: 'compute', declared: true, existence: 'declared', evidence: 'serverless function' })) });
+    // P2 — resources: block is inline CloudFormation → enumerate it.
+    for (const r of parseCfnResources(content)) push({ name: r.service, kind: r.kind, cloud: 'AWS', residency: 'in-account', dataStore: r.dataStore, resources: [{ name: r.resourceName, kind: r.kind, declared: true, existence: 'declared', evidence: `serverless resources ${r.type}` }] });
   } else if (type === 'docker-compose') {
     for (const m of content.matchAll(/image:\s*['"]?([a-z0-9._/-]+)/gi)) {
       const img = m[1].toLowerCase();
       const svc = /postgres/.test(img) ? 'Postgres' : /mysql|mariadb/.test(img) ? 'MySQL' : /mongo/.test(img) ? 'MongoDB' : /redis/.test(img) ? 'Redis' : null;
       if (svc) push({ name: `${svc} (self-hosted)`, kind: 'database', cloud: 'self-hosted', residency: 'in-account', dataStore: true, declares: [img] });
     }
-  } else if (type === 'pulumi' || type === 'cloudformation') {
-    push({ name: type === 'pulumi' ? 'Pulumi' : 'CloudFormation/SAM', kind: 'iac', cloud: 'unknown', residency: 'in-account' });
+  } else if (type === 'pulumi') {
+    push({ name: 'Pulumi', kind: 'iac', cloud: 'unknown', residency: 'in-account' });
+  } else if (type === 'cloudformation' || type === 'sam') {
+    // P2 — parse the top-level Resources: map into per-resource declared detections
+    // (previously resource-blind — a single 'CloudFormation/SAM' service).
+    push({ name: type === 'sam' ? 'AWS SAM' : 'CloudFormation', kind: 'iac', cloud: 'AWS', residency: 'in-account' });
+    for (const r of parseCfnResources(content)) push({ name: r.service, kind: r.kind, cloud: 'AWS', residency: 'in-account', dataStore: r.dataStore, resources: [{ name: r.resourceName, kind: r.kind, declared: true, existence: 'declared', evidence: `CloudFormation ${r.type}` }] });
   } else if (type === 'sst') {
     // SST v3 (sst.aws.*) + v2 (new Bucket/Table/Function). Resources often live in
     // infra/*.ts modules too — those are caught in the code-file pass (extractIacResources).
@@ -320,8 +509,6 @@ export function parseConfig(type, content, rel) {
     for (const [re, name, kind] of BICEP_RES) if (re.test(content)) push({ name, kind, cloud: 'Azure', residency: 'in-account', dataStore: kind === 'database' || kind === 'storage' });
   } else if (type === 'arm') {
     push({ name: 'ARM template', kind: 'iac', cloud: 'Azure', residency: 'in-account' });
-  } else if (type === 'sam') {
-    push({ name: 'AWS SAM', kind: 'iac', cloud: 'AWS', residency: 'in-account' });
   } else if (type === 'kubernetes' || type === 'helm' || type === 'kustomize' || type === 'crossplane') {
     push({ name: { kubernetes: 'Kubernetes', helm: 'Helm', kustomize: 'Kustomize', crossplane: 'Crossplane' }[type], kind: 'iac', cloud: 'k8s', residency: 'in-account' });
   } else if (type === 'argocd' || type === 'flux') {
@@ -375,12 +562,105 @@ export function detectDeployScript(rel, content) {
     if (/aws\s+s3/i.test(c)) provisions.push('S3');
     if (/aws\s+dynamodb/i.test(c)) provisions.push('DynamoDB');
     if (/aws\s+(ecs|ec2|cloudfront|apigateway)/i.test(c)) provisions.push('other-AWS');
-    return { kind: 'shell-deploy', provisions };
+    // A5 — a secret/credential passed literally into a function's --environment
+    // block (rather than resolved via a secrets manager / CI secret store) is an
+    // infra-security smell: the credential now lives in plaintext deploy history.
+    return { kind: 'shell-deploy', provisions, secretEnvKeys: detectSecretInEnv(c) };
   }
   if (/(^|\/)([\w-]*[-.])?(trust-)?policy\.json$/i.test(base) || (/\.json$/.test(rel) && /"Effect"\s*:/.test(c) && /"Action"\s*:/.test(c) && /"Statement"\s*:/.test(c))) {
     return { kind: 'iam-policy', provisions: [] };
   }
   return null;
+}
+
+// A5 — credential-shaped key names (SECRET/PASSWORD/TOKEN/API_KEY/PRIVATE_KEY/
+// CREDENTIAL). Matched against env-var KEYS only (never values) elsewhere in this
+// file per repo convention; here the VALUE also matters because the whole point is
+// catching a LITERAL secret value landing in a Lambda's env block.
+const CREDENTIAL_KEY_RE = /SECRET|PASSWORD|PASSWD|TOKEN|API[_-]?KEY|APIKEY|PRIVATE[_-]?KEY|CREDENTIAL/i;
+// A value that looks like a real literal (not a placeholder, not a reference to a
+// secret store / env var / CI secret context).
+function isLiteralSecretValue(raw) {
+  const v = String(raw || '').replace(/^["'`]|["'`]$/g, '').trim();
+  if (!v) return false;
+  if (/^\$\{|^\$\(|\bsecrets\.|\bvars\.|process\.env|getenv|<|placeholder|changeme|your[-_]?(key|secret|token|password)|xxx|redacted/i.test(v)) return false;
+  return true;
+}
+/**
+ * A5 — detect a secret/credential passed as a LITERAL value into a function's
+ * `--environment` (shell/CLI deploy) or `environment:` (CI workflow YAML) block.
+ * Returns the flagged key names (empty array if none). Deterministic, no LLM.
+ */
+export function detectSecretInEnv(content) {
+  const c = String(content || '');
+  const flagged = new Set();
+  // Shell/CLI: `--environment Variables={KEY=value,KEY2=value2}` (aws lambda CLI).
+  for (const m of c.matchAll(/--environment\s+["']?Variables=\{([^}]*)\}/gi)) {
+    for (const km of m[1].matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^,}]+)/g)) {
+      if (CREDENTIAL_KEY_RE.test(km[1]) && isLiteralSecretValue(km[2])) flagged.add(km[1]);
+    }
+  }
+  // YAML: an `environment:` block (CI workflow step / IaC config) with `KEY: value`
+  // children at a deeper indent.
+  for (const m of c.matchAll(/\benvironment\s*:\s*\n((?:[ \t]+[A-Za-z_][A-Za-z0-9_]*\s*:.*\n?)+)/gi)) {
+    for (const km of m[1].matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)/g)) {
+      if (CREDENTIAL_KEY_RE.test(km[1]) && isLiteralSecretValue(km[2])) flagged.add(km[1]);
+    }
+  }
+  return [...flagged];
+}
+
+// A6 — Auth.js / next-auth adapter packages (@auth/dynamodb-adapter, @auth/prisma-
+// adapter, @auth/firebase-adapter, …) persist SESSIONS/ACCOUNTS/USERS — i.e. PII —
+// into whatever store they're pointed at. Their presence + a store NAME ending in
+// `_Auth` / `_Directory` is a strong (name-based, not content-inspecting) contains_pii
+// signal for that store.
+const AUTH_ADAPTER_RE = /^@auth\/[\w-]+-adapter$|^@next-auth\/[\w-]+-adapter$/;
+const PII_STORE_NAME_RE = /_(Auth|Directory)$/i;
+
+// A4 — orphan-candidate retirement signals: an explicit `SCOPE-BOUNDARY` marker or a
+// retire/legacy/deprecated comment sitting near the resource's declaration/reference.
+// This is a DECLARED signal (someone wrote it down), never proof the resource is
+// actually dead/unused — basis stays 'declared'.
+// A retirement keyword must be an actual retire/legacy/decommission verb — a
+// `SCOPE-BOUNDARY` marker means "managed elsewhere", NOT "being retired", so it is
+// deliberately NOT a trigger (it caused the active SST/CloudFront stack to be
+// mis-flagged as orphan on Mycelium).
+// Kinds that are the active deploy substrate, never orphan "data left behind".
+const ORPHAN_INELIGIBLE_KINDS = new Set(['iac', 'network', 'platform', 'compute', 'secrets', 'gaming']);
+const RETIREMENT_RE = /\b(?:retire[ds]?|retiring|legacy|deprecated|decommission(?:ed|ing)?|sunset)\b/gi;
+// Distinctive resource-name tokens (>=5 chars) only: a short/generic token like
+// "sst" appears throughout a config file and would match any nearby retire keyword
+// by accident. Substring (not word-boundary) matching so a token still resolves
+// inside snake_case (aws_dynamodb_table) and CamelCase (Memgraph) identifiers.
+function retirementTokens(name) {
+  return [...new Set(String(name || '').toLowerCase().match(/[a-z0-9]{5,}/g) || [])];
+}
+function hasRetirementSignalNear(content, needle) {
+  const tokens = retirementTokens(needle);
+  if (!tokens.length) return false;
+  const c = String(content || '');
+  const re = new RegExp(RETIREMENT_RE.source, 'gi');
+  let m;
+  while ((m = re.exec(c))) {
+    const start = Math.max(0, m.index - 120);
+    const end = Math.min(c.length, m.index + 120);
+    const window = c.slice(start, end).toLowerCase();
+    if (tokens.some((t) => window.includes(t))) return true;
+    if (re.lastIndex === m.index) re.lastIndex++;
+  }
+  return false;
+}
+
+// P2 — merge resource records into a Map keyed by name; a DECLARED record upgrades a
+// prior referenced (existence:'unknown') one, so the same table declared in IaC AND
+// referenced by ARN collapses to one, declared entry.
+function mergeResources(map, list) {
+  for (const r of list || []) {
+    if (!r || !r.name) continue;
+    const prev = map.get(r.name);
+    if (!prev || (r.declared && !prev.declared)) map.set(r.name, { name: r.name, kind: r.kind, declared: !!r.declared, existence: r.existence || (r.declared ? 'declared' : 'unknown'), evidence: r.evidence || '' });
+  }
 }
 
 /**
@@ -396,10 +676,11 @@ export function buildInfraInventory(files = []) {
   const externalTouchedBy = new Set();
   let iacDeclared = false;
   let hasEnvExample = false;
+  let hasAuthAdapter = false; // A6
 
   const record = (d, rel) => {
     const key = d.name;
-    if (!merged.has(key)) merged.set(key, { name: d.name, kind: d.kind, cloud: d.cloud || 'unknown', residency: d.residency || null, dataStore: !!d.dataStore, detectedBy: new Set(), confidence: 'low', files: new Set(), declares: new Set() });
+    if (!merged.has(key)) merged.set(key, { name: d.name, kind: d.kind, cloud: d.cloud || 'unknown', residency: d.residency || null, dataStore: !!d.dataStore, detectedBy: new Set(), confidence: 'low', files: new Set(), declares: new Set(), resources: new Map() });
     const e = merged.get(key);
     if (d.detectedBy) e.detectedBy.add(d.detectedBy);
     if (CONF_RANK[d.confidence] > CONF_RANK[e.confidence]) e.confidence = d.confidence;
@@ -409,8 +690,13 @@ export function buildInfraInventory(files = []) {
     if (d.dataStore) e.dataStore = true;
     if (rel) e.files.add(rel);
     for (const x of d.declares || []) e.declares.add(x);
+    // P2 — merge resource-level records; a DECLARED entry upgrades a prior referenced one.
+    if (Array.isArray(d.resources)) mergeResources(e.resources, d.resources);
     if (d.residency === 'external' && rel) externalTouchedBy.add(rel);
   };
+  // P2 — attach referenced resources (name-builders / TableName / create-args) to an
+  // ALREADY-detected service only; never mint a phantom service from a bare string.
+  const attachResource = (serviceName, res) => { const e = merged.get(serviceName); if (e) mergeResources(e.resources, [res]); };
 
   // tiers that count as genuine infra-as-code (drive the HIGH signal); platform-config
   // + CI-deploy are weaker (medium).
@@ -418,9 +704,14 @@ export function buildInfraInventory(files = []) {
   for (const f of files) {
     if (f.isClient) clientFiles++;
     else serverFiles++;
-    // hand-rolled deploy (non-IaC) — capture + skip further processing.
+    // hand-rolled deploy (non-IaC) — capture + skip further processing. P1: also
+    // mine any IAM-policy ARNs into used-but-undeclared references (declared nowhere).
     const ds = detectDeployScript(f.rel, f.content);
-    if (ds) { deployScripts.push({ file: f.rel, kind: ds.kind, provisions: ds.provisions }); continue; }
+    if (ds) {
+      deployScripts.push({ file: f.rel, kind: ds.kind, provisions: ds.provisions });
+      // ARNs + create-* args are mined in the centralized P2 resource pass below.
+      continue;
+    }
     // name first; fall back to content sniffing for ambiguous yaml/json.
     const ctype = configFileType(f.rel) || (typeof f.content === 'string' ? classifyConfigByContent(f.rel, f.content) : null);
     if (ctype) {
@@ -447,17 +738,21 @@ export function buildInfraInventory(files = []) {
     // construct extractor by content signature regardless of import; record() dedupes
     // by name so the import-based path above is not double-counted.
     if (typeof f.content === 'string') {
+      // P1: strip comments first + require CONSTRUCTOR-INVOCATION syntax, so a comment
+      // mentioning sst.aws.* / new aws.* never mints a phantom resource.
+      const stripped = stripComments(f.content, f.rel);
       const contentTool =
-        /\bsst\.aws\./.test(f.content) ? 'SST' :
-        /\bnew\s+aws\.\w+\./.test(f.content) ? 'Pulumi' :
-        /aws-cdk-lib|@aws-cdk\//.test(f.content) || /\bcdk\.(App|Stack)\b/.test(f.content) ? 'AWS CDK' :
+        /\bsst\.aws\.\w+\s*\(/.test(stripped) ? 'SST' :
+        /\bnew\s+aws\.\w+\.\w+\s*\(/.test(stripped) ? 'Pulumi' :
+        /aws-cdk-lib|@aws-cdk\//.test(stripped) || /\bcdk\.(App|Stack)\b/.test(stripped) ? 'AWS CDK' :
         null;
       if (contentTool) {
-        for (const r of extractIacResources(f.content, contentTool)) record({ ...r, detectedBy: 'iac-declared', confidence: 'high' }, f.rel);
+        for (const r of extractIacResources(stripped, contentTool)) record({ ...r, detectedBy: 'iac-declared', confidence: 'high' }, f.rel);
         iacDeclared = true;
       }
     }
     for (const spec of f.specifiers || []) {
+      if (AUTH_ADAPTER_RE.test(spec)) hasAuthAdapter = true; // A6
       if (detectIacImport(spec)) continue; // handled above
       const c = detectCloudSdk(spec);
       if (c) { record({ ...c, detectedBy: 'sdk-import', confidence: 'medium' }, f.rel); continue; }
@@ -467,9 +762,90 @@ export function buildInfraInventory(files = []) {
     }
   }
 
+  // ── P2 resource pass (runs after service detection so referenced resources attach
+  //   to the services they belong to). Three sources, all comment-stripped:
+  //   (1) IAM-grant / permission-block ARNs (specific + wildcard) → referenced;
+  //   (2) ${PREFIX}_X name-builders + TableName: literals + create-* deploy args;
+  //   (3) buckets from create-bucket / s3 mb args. ──
+  let tablePrefix = null;
+  const tableSuffixes = new Set();
+  const tableNames = new Set();
+  const bucketNames = new Set();
+  for (const f of files) {
+    if (typeof f.content !== 'string') continue;
+    const c = stripComments(f.content, f.rel);
+    if (c.includes('arn:aws:')) for (const g of extractIamGrants(c)) record(g, f.rel);
+    if (!tablePrefix) { const pm = c.match(/(?:TABLE_PREFIX|tablePrefix)\b[^\n]*?["']([A-Za-z][\w-]*)["']/); if (pm) tablePrefix = pm[1]; }
+    for (const m of c.matchAll(/\$\{[^}]*?(?:prefix|PREFIX)[^}]*?\}_([A-Za-z][A-Za-z0-9]*)/g)) tableSuffixes.add(m[1]);
+    for (const m of c.matchAll(/\bTableName\s*:\s*["']([A-Za-z][\w.-]*)["']/g)) tableNames.add(m[1]);
+    for (const m of c.matchAll(/--table-name\s+["']?([A-Za-z][\w.-]*)/g)) tableNames.add(m[1]);
+    for (const m of c.matchAll(/(?:--bucket\s+["']?|s3\s+mb\s+s3:\/\/)([a-z0-9][a-z0-9.-]*)/g)) bucketNames.add(m[1]);
+  }
+  // P2b — mine table/bucket NAME-BUILDERS (${PREFIX}_X / TableName: / --table-name /
+  // --bucket) from regular application code whose content was NOT loaded for service
+  // detection (src/lib/*.ts data-access modules build `${prefix}_Directory` etc.).
+  // These names attach ONLY to services already detected via sdk-import — attachResource
+  // never mints a phantom service — so this widens resource enumeration to the true data
+  // plane without any risk of a phantom service. Comment-stripped first (P1 truth rule),
+  // and NO ARN/service detection runs here (that stays on real f.content only).
+  for (const f of files) {
+    if (typeof f.codeText !== 'string' || !f.codeText) continue;
+    const c = stripComments(f.codeText, f.rel);
+    if (!tablePrefix) { const pm = c.match(/(?:TABLE_PREFIX|tablePrefix)\b[^\n]*?["']([A-Za-z][\w-]*)["']/); if (pm) tablePrefix = pm[1]; }
+    for (const m of c.matchAll(/\$\{[^}]*?(?:prefix|PREFIX)[^}]*?\}_([A-Za-z][A-Za-z0-9]*)/g)) tableSuffixes.add(m[1]);
+    for (const m of c.matchAll(/\bTableName\s*:\s*["']([A-Za-z][\w.-]*)["']/g)) tableNames.add(m[1]);
+    for (const m of c.matchAll(/--table-name\s+["']?([A-Za-z][\w.-]*)/g)) tableNames.add(m[1]);
+    for (const m of c.matchAll(/(?:--bucket\s+["']?|s3\s+mb\s+s3:\/\/)([a-z0-9][a-z0-9.-]*)/g)) bucketNames.add(m[1]);
+  }
+  for (const suf of tableSuffixes) tableNames.add(tablePrefix ? `${tablePrefix}_${suf}` : suf);
+  for (const n of tableNames) attachResource('DynamoDB', { name: n, kind: 'database', declared: false, existence: 'unknown', evidence: 'referenced (table name / ${PREFIX}_X builder)' });
+  for (const n of bucketNames) attachResource('S3', { name: n, kind: 'storage', declared: false, existence: 'unknown', evidence: 'referenced (bucket name)' });
+
+  // A4/A6 — raw (non-comment-stripped) content by file, for retirement-signal
+  // proximity search (A4) and store-name PII flagging (A6).
+  const contentByRel = new Map();
+  for (const f of files) if (typeof f.content === 'string') contentByRel.set(f.rel, f.content);
+
   const services = [...merged.values()]
     .map((e) => {
-      const s = { name: e.name, kind: e.kind, cloud: e.cloud, residency: e.residency, dataStore: e.dataStore, detectedBy: [...e.detectedBy], confidence: e.confidence, declares: [...e.declares].slice(0, 6), fileCount: e.files.size, files: [...e.files].sort().slice(0, 8) };
+      const fileList = [...e.files];
+      // A4 — orphan-candidacy applies ONLY to data/backend services, never to the
+      // active deploy substrate (the IaC tool itself, the CDN/edge, the cloud
+      // platform, the app's own compute, or secrets managers). Flagging those as
+      // "retiring" is the trust-breaking false positive we must not emit.
+      const orphanEligible = !ORPHAN_INELIGIBLE_KINDS.has(e.kind);
+      // A4 — retirement signal (retire|legacy|deprecated|decommission|sunset) naming
+      // this service. Searched across ALL scanned content (the note that a store is
+      // being retired often lives in the platform config, not the store's own file).
+      const retiredByComment = orphanEligible && [...contentByRel.values()].some((c) => hasRetirementSignalNear(c, e.name));
+      // A4 — "a service the app no longer imports": declared in IaC (iac-declared /
+      // iac-import) but never actually reached by application code (no sdk-import /
+      // env-key usage) — the declaration outlived the code that used it.
+      const declaredHere = e.detectedBy.has('iac-declared') || e.detectedBy.has('iac-import');
+      const codeUsed = e.detectedBy.has('sdk-import') || e.detectedBy.has('env-key');
+      const noLongerImported = orphanEligible && declaredHere && !codeUsed;
+      const orphanCandidate = retiredByComment || noLongerImported;
+      const orphanReason = retiredByComment
+        ? 'retirement signal (retire|legacy|deprecated|decommission|sunset) found near this resource'
+        : noLongerImported
+          ? 'declared in IaC but no application code imports/references it'
+          : null;
+
+      const resources = [...e.resources.values()]
+        .map((r) => {
+          // A6 — Auth.js adapter present + store name ends in _Auth/_Directory ⇒
+          // contains_pii by NAME (never content-inspecting; the store may hold
+          // sessions/accounts/users which are PII).
+          const containsPii = hasAuthAdapter && PII_STORE_NAME_RE.test(r.name);
+          // A4 — resource-level retirement signal near this specific resource's name.
+          const resOrphan = fileList.some((rel) => hasRetirementSignalNear(contentByRel.get(rel), r.name));
+          return containsPii || resOrphan
+            ? { ...r, ...(containsPii ? { contains_pii: true, piiReason: 'Auth.js adapter (@auth/*-adapter) present + store name pattern (*_Auth/*_Directory)' } : {}), ...(resOrphan ? { orphanCandidate: true, basis: 'declared' } : {}) }
+            : r;
+        })
+        .sort((a, b) => (b.declared ? 1 : 0) - (a.declared ? 1 : 0) || a.name.localeCompare(b.name))
+        .slice(0, 60);
+      const s = { name: e.name, kind: e.kind, cloud: e.cloud, residency: e.residency, dataStore: e.dataStore, detectedBy: [...e.detectedBy], confidence: e.confidence, declares: [...e.declares].slice(0, 6), fileCount: e.files.size, files: fileList.sort().slice(0, 8), resources, ...(orphanCandidate ? { orphanCandidate: true, orphanReason, basis: 'declared' } : {}) };
       return { ...s, costModel: costModelFor(s) };
     })
     .sort((a, b) => CONF_RANK[b.confidence] - CONF_RANK[a.confidence] || b.fileCount - a.fileCount);
@@ -485,14 +861,34 @@ export function buildInfraInventory(files = []) {
   // ── IaC coverage: of the OWN-CLOUD resources you provision (standing/metered), how
   // many are DECLARED in code vs only inferred-from-usage? Low ratio = the click-ops
   // smell (resources used but declared nowhere — invisible to cost/audit/repro). ──
-  const DECLARED_BY = new Set(['iac-declared', 'iac-import', 'platform-config']);
+  // P2 — DEMOTE 'platform-config' out of DECLARED_BY: a CI workflow using aws-actions
+  // is deploy automation, not a resource declaration. Tracked separately as a weaker tier.
+  const DECLARED_BY = new Set(['iac-declared', 'iac-import']);
+  const DECLARED_WEAK = new Set(['platform-config']);
   const provisionable = services.filter((s) => (s.costModel === 'standing' || s.costModel === 'metered') && ['AWS', 'GCP', 'Azure', 'self-hosted'].includes(s.cloud) && !['platform', 'iac', 'secrets'].includes(s.kind));
-  const declaredProvisionable = provisionable.filter((s) => s.detectedBy.some((d) => DECLARED_BY.has(d)));
+  const isServiceDeclared = (s) => s.detectedBy.some((d) => DECLARED_BY.has(d));
+  const declaredProvisionable = provisionable.filter(isServiceDeclared);
+  // P2 — resource-level truth: of every enumerated provisionable resource, how many
+  // are DECLARED (in IaC) vs merely referenced (ARN/name-builder/TableName)?
+  const provisionableResources = provisionable.flatMap((s) => s.resources || []);
+  const resourcesTotal = provisionableResources.length;
+  const resourcesDeclared = provisionableResources.filter((r) => r.declared).length;
+  // undeclared[] now reflects resource truth: a service is flagged if it is not
+  // service-level-declared OR carries any referenced-only resource (e.g. DynamoDB
+  // present only via an IAM ARN wildcard).
+  const undeclared = provisionable
+    .filter((s) => !isServiceDeclared(s) || (s.resources || []).some((r) => !r.declared))
+    .map((s) => s.name)
+    .slice(0, 12);
   const iacCoverage = {
     provisionable: provisionable.length,
     declared: declaredProvisionable.length,
     ratio: provisionable.length ? declaredProvisionable.length / provisionable.length : null,
-    undeclared: provisionable.filter((s) => !s.detectedBy.some((d) => DECLARED_BY.has(d))).map((s) => s.name).slice(0, 12),
+    platformConfigDeclared: provisionable.filter((s) => !isServiceDeclared(s) && s.detectedBy.some((d) => DECLARED_WEAK.has(d))).length,
+    resourcesTotal,
+    resourcesDeclared,
+    resourceRatio: resourcesTotal ? resourcesDeclared / resourcesTotal : null,
+    undeclared,
   };
   const resourceIacFiles = iac.filter((i) => ['resource', 'migrations', 'orchestration', 'config-mgmt', 'container'].includes(i.tier)).length;
   // IaC files grouped by family/tier (for the report's tiered display).
@@ -699,6 +1095,26 @@ export function gradeIacMaturity(inventory = {}, files = []) {
     findings.push(mkFinding({ id: `iac:deprecated:${d.id}`, title: `Deprecated IaC toolchain: ${d.tool}`, detail: `${d.detail} Remediation: ${d.remediation}`, dimension: 'infrastructure', severity: d.severity, evidence: { deprecatedTool: d.tool, status: d.status, eolDate: d.eolDate } }));
   }
 
+  // ── A5 — secret/credential passed as a literal into a Lambda function's
+  //   --environment / environment: block (deploy scripts + CI/gh-workflow files). ──
+  for (const f of norm) {
+    const isGhWorkflow = /(^|\/)\.github\/workflows\/[^/]+\.ya?ml$/.test(f.rel) || /(^|\/)\.gitlab-ci\.ya?ml$/.test(f.rel) || /(^|\/)\.circleci\/config\.ya?ml$/.test(f.rel);
+    const isDeployScript = /(^|\/)deploy[\w.-]*\.sh$/i.test(f.rel) || (/\.sh$/.test(f.rel) && /\b(aws|gcloud|az|kubectl|serverless)\s+\w/.test(f.content));
+    if (!isGhWorkflow && !isDeployScript) continue;
+    const secretKeys = detectSecretInEnv(f.content);
+    if (secretKeys.length) {
+      findings.push(mkFinding({
+        id: `iac:secret-in-lambda-env:${f.rel}`,
+        title: 'Secret/credential passed into a function environment',
+        detail: `${f.rel} passes what looks like a secret/credential (${secretKeys.join(', ')}) as a LITERAL value into a --environment/environment: block — use a secrets manager (AWS Secrets Manager / SSM Parameter Store) or CI-injected secret references instead.`,
+        dimension: 'security',
+        severity: 'high',
+        evidence: { secretEnvKeys: secretKeys },
+        files: [f.rel],
+      }));
+    }
+  }
+
   // ── 1. State & provisioning ──
   const backends = [...tfContent.matchAll(/backend\s+"([a-z0-9_]+)"/gi)].map((m) => m[1].toLowerCase());
   const REMOTE_TF = ['s3', 'gcs', 'azurerm', 'remote', 'http', 'oss', 'cos', 'pg', 'kubernetes'];
@@ -824,23 +1240,56 @@ export function gradeIacMaturity(inventory = {}, files = []) {
   }
 
   // ── 6. Drift & cost ──
-  const infracost = rels.some((r) => /(^|\/)infracost\.ya?ml$/.test(r)) || /\binfracost\b/i.test(allContent);
-  const driftCheck = /expect-no-changes/i.test(allContent) && /\bcron\b|schedule\s*:/i.test(allContent);
-  // tag taxonomy — default_tags (TF) + Pulumi/inline `tags` maps
+  // P1: Infracost is a real detection ONLY from a named config (infracost.yml) or a
+  // CI-workflow step that invokes it — NEVER an allContent keyword (a prose/comment
+  // mention of "infracost" is not a cost gate).
+  const ciContent = norm
+    .filter((f) => /(^|\/)\.github\/workflows\/[^/]+\.ya?ml$/.test(f.rel) || /(^|\/)\.gitlab-ci\.ya?ml$/.test(f.rel) || /(^|\/)\.circleci\/config\.ya?ml$/.test(f.rel))
+    .map((f) => f.content)
+    .join('\n');
+  const infracost = rels.some((r) => /(^|\/)infracost\.ya?ml$/.test(r)) || /\binfracost\b/i.test(ciContent);
+  // P5 — driftCheck requires a CI-WORKFLOW ARTIFACT context (gh-workflow/gitlab-ci/
+  // circleci file content), never a prose mention of 'expect-no-changes' anywhere in
+  // allContent (a doc string or code comment is not a scheduled drift gate).
+  const driftCheck = !!ciContent && /expect-no-changes/i.test(ciContent) && /\bcron\b|schedule\s*:/i.test(ciContent);
+  // tag taxonomy — default_tags (TF) + Pulumi/inline `tags` maps. P2: scoped to IaC
+  // FILES ONLY (not allContent), so an app-domain `tags:` object (a blog post's tags,
+  // a UI chip list) can no longer earn false cost-taxonomy credit.
+  const isIacTagFile = (f) => /\.(tf|tofu|hcl|bicep)$/i.test(f.rel)
+    || (() => { const t = configFileType(f.rel); return t && ['resource', 'migrations', 'orchestration', 'container', 'config-mgmt'].includes(iacTier(t)); })()
+    || /\bsst\.aws\.\w+\s*\(|\bnew\s+(?:aws|gcp|azure)\.\w+\.|aws-cdk-lib|@aws-cdk\//.test(f.content);
+  const iacTagContent = norm.filter(isIacTagFile).map((f) => f.content).join('\n');
   const tagKeys = new Set();
-  for (const m of allContent.matchAll(/default_tags\s*\{([\s\S]*?)\}/gi)) for (const km of m[1].matchAll(/([A-Za-z][\w-]*)\s*=/g)) tagKeys.add(km[1]);
-  for (const m of allContent.matchAll(/\btags\s*[:=]\s*\{([\s\S]*?)\}/gi)) for (const km of m[1].matchAll(/["']?([A-Za-z][\w-]*)["']?\s*[:=]/g)) tagKeys.add(km[1]);
+  for (const m of iacTagContent.matchAll(/default_tags\s*\{([\s\S]*?)\}/gi)) for (const km of m[1].matchAll(/([A-Za-z][\w-]*)\s*=/g)) tagKeys.add(km[1]);
+  for (const m of iacTagContent.matchAll(/\btags\s*[:=]\s*\{([\s\S]*?)\}/gi)) for (const km of m[1].matchAll(/["']?([A-Za-z][\w-]*)["']?\s*[:=]/g)) tagKeys.add(km[1]);
   const normSet = new Set([...tagKeys].map((k) => k.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase().replace(/_/g, '-')));
-  const REQUIRED_TAGS = ['team', 'environment', 'service', 'cost-center'];
-  const TAG_ALIAS = { team: ['team'], environment: ['environment', 'env'], service: ['service', 'service-name', 'svc'], 'cost-center': ['cost-center', 'costcenter', 'cost-centre'] };
+  // P5/A7 — REQUIRED_TAGS gains owner/managed-by/data-classification (governance
+  // taxonomy, not just the original cost taxonomy).
+  const REQUIRED_TAGS = ['team', 'environment', 'service', 'cost-center', 'owner', 'managed-by', 'data-classification'];
+  const TAG_ALIAS = {
+    team: ['team'], environment: ['environment', 'env'], service: ['service', 'service-name', 'svc'],
+    'cost-center': ['cost-center', 'costcenter', 'cost-centre'], owner: ['owner'],
+    'managed-by': ['managed-by', 'managedby', 'managed_by'], 'data-classification': ['data-classification', 'data-class'],
+  };
   const present = REQUIRED_TAGS.filter((t) => (TAG_ALIAS[t] || [t]).some((a) => normSet.has(a)));
-  if (normSet.has('data-classification') || normSet.has('data-class')) present.push('data-classification');
   const missing = REQUIRED_TAGS.filter((t) => !present.includes(t));
-  const coveragePct = Math.round((present.filter((p) => REQUIRED_TAGS.includes(p)).length / REQUIRED_TAGS.length) * 100);
-  const tagTaxonomy = { present, missing, coveragePct };
-  // regions
+  const coveragePct = Math.round((present.length / REQUIRED_TAGS.length) * 100);
+  // A7 — SST auto-applies `sst:app` / `sst:stage` tags to every resource it
+  // provisions. Those are PLATFORM-IMPLICIT (the operator declared nothing), so they
+  // must never inflate `coveragePct` — but a bare "0%" reads as "no tags anywhere",
+  // which is false for an SST app. Report the two tiers separately and phrase
+  // coverage explicitly against the DECLARED-IaC taxonomy.
+  const platformImplicit = hasSst ? ['sst:app', 'sst:stage'] : [];
+  const tagTaxonomy = {
+    present, missing, coveragePct, requiredTags: REQUIRED_TAGS, platformImplicit,
+    detail: `${coveragePct}% (${present.length}/${REQUIRED_TAGS.length}) tag taxonomy present in declared IaC`
+      + (platformImplicit.length ? `; platform-implicit tags also applied automatically (${platformImplicit.join(', ')}) — not counted, not declared by the operator` : ''),
+  };
+  // regions — P2: generalized beyond AWS (us-east-1) to GCP (us-central1) and Azure
+  // (eastus2). Ordered alternatives, most-specific first: AWS xx-word-N · GCP
+  // word-wordN · Azure wordN (trailing digit required to avoid matching bare words).
   const regionSet = new Set();
-  for (const m of allContent.matchAll(/region["']?\s*[:=]\s*["']?([a-z]{2}-[a-z]+-\d)\b/gi)) regionSet.add(m[1].toLowerCase());
+  for (const m of allContent.matchAll(/(?:region|location)["']?\s*[:=]\s*["']?([a-z]{2}-[a-z]+-\d+|[a-z]+-[a-z]+\d+|[a-z]{3,}\d+)\b/gi)) regionSet.add(m[1].toLowerCase());
   const regions = [...regionSet];
   const regionPolicyPin = /deny[\s\S]{0,80}region|region[\s\S]{0,40}(eu-central-1|allowed_regions)/i.test(allContent);
   const regionPinned = (regions.length === 1) || (regions.length >= 1 && regionPolicyPin);
@@ -860,13 +1309,18 @@ export function gradeIacMaturity(inventory = {}, files = []) {
   }
   if (missing.length && dcLevel > 0) dcGaps.push(`Tag taxonomy missing: ${missing.join(', ')}.`);
 
+  // P4 — every dimension score carries `basis`: 'declared' (code-only claim) vs
+  // 'verified' (independently confirmed against the live cloud). This engine NEVER
+  // probes live cloud, so basis is always 'declared' here — the field exists so a
+  // future live-verification pass has somewhere to upgrade it, and so the report can
+  // never silently present a declared claim as ground truth.
   const dimensions = {
-    state: { level: stateLevel, evidence: stateEvidence, gaps: stateGaps },
-    envSeparation: { level: envLevel, evidence: envEvidence, gaps: envGaps },
-    modularity: { level: modLevel, evidence: modEvidence, gaps: modGaps },
-    testing: { level: testLevel, evidence: testEvidence, gaps: testGaps },
-    governance: { level: govLevel, evidence: govEvidence, gaps: govGaps },
-    driftCost: { level: dcLevel, evidence: dcEvidence, gaps: dcGaps },
+    state: { level: stateLevel, evidence: stateEvidence, gaps: stateGaps, basis: 'declared' },
+    envSeparation: { level: envLevel, evidence: envEvidence, gaps: envGaps, basis: 'declared' },
+    modularity: { level: modLevel, evidence: modEvidence, gaps: modGaps, basis: 'declared' },
+    testing: { level: testLevel, evidence: testEvidence, gaps: testGaps, basis: 'declared' },
+    governance: { level: govLevel, evidence: govEvidence, gaps: govGaps, basis: 'declared' },
+    driftCost: { level: dcLevel, evidence: dcEvidence, gaps: dcGaps, basis: 'declared' },
   };
 
   // ── Roll-up (min-gated, per contract): overall = lowest blocking dimension ──
@@ -879,12 +1333,54 @@ export function gradeIacMaturity(inventory = {}, files = []) {
   if (level >= 2 && testLevel >= 2 && govLevel >= 2 && dcLevel >= 2) level = 3;
   if (level >= 3 && envLevel >= 2 && modLevel >= 3 && testLevel >= 3 && govLevel >= 3 && dcLevel >= 3) level = 4;
 
-  return { level, levelName: LEVEL_NAMES[level], dimensions, deprecated, regions, regionPinned, tagTaxonomy, findings };
+  // ── P4 — epistemics: verificationBacklog. Every score above is basis:'declared'
+  // (parsed from files, never probed live) — one entry per non-trivial declared claim
+  // records HOW an operator would independently confirm it. PLUS a fixed set of
+  // cloud-blind facts that this file-only engine can NEVER assert either way (PITR,
+  // deletion-protection, bucket-versioning, CMK/encryption, runtime-health/DLQ depth,
+  // applied cloud tags, shared-account context) — these appear ONLY here, NEVER as a
+  // scored dimension (asserting the unmeasurable is defect D3).
+  const verificationBacklog = [];
+  const addBacklog = (o) => verificationBacklog.push({ id: o.id, fact: o.fact, dimension: o.dimension, verifyCommand: o.verifyCommand, basis: 'unknown' });
+  if (stateLevel > 0) addBacklog({ id: 'verify:state', fact: stateEvidence, dimension: 'state', verifyCommand: 'terraform state list (or `pulumi stack export`) — confirm the declared backend is live and its resource count matches code' });
+  if (envLevel > 0) addBacklog({ id: 'verify:envSeparation', fact: envEvidence, dimension: 'envSeparation', verifyCommand: 'aws cloudformation list-stacks --query "StackSummaries[].StackName" (or `pulumi stack ls`) — confirm each environment is actually deployed as a distinct stack' });
+  if (modLevel > 0) addBacklog({ id: 'verify:modularity', fact: modEvidence, dimension: 'modularity', verifyCommand: 'terraform providers -json | jq .module_calls — confirm pinned module sources actually resolve to the declared versions' });
+  if (testLevel > 0) addBacklog({ id: 'verify:testing', fact: testEvidence, dimension: 'testing', verifyCommand: 'terraform test (or `go test ./... -run TestTerraform`) — confirm the declared IaC tests currently pass' });
+  if (govLevel > 0) addBacklog({ id: 'verify:governance', fact: govEvidence, dimension: 'governance', verifyCommand: 'checkov -d . --compact (or `conftest test`) — confirm the policy-as-code scan currently passes with 0 hard failures' });
+  if (dcLevel > 0) addBacklog({ id: 'verify:driftCost', fact: dcEvidence, dimension: 'driftCost', verifyCommand: 'terraform plan -detailed-exitcode && infracost breakdown --path . — confirm no live drift and current cost numbers' });
+  // Cloud-blind facts — gated on the resource types actually present so the backlog
+  // stays relevant, but the facts themselves are never derivable from files at all.
+  const svcList = Array.isArray(inventory.services) ? inventory.services : [];
+  const ownCloud = (s) => ['AWS', 'GCP', 'Azure', 'self-hosted'].includes(s.cloud);
+  const hasDbStore = svcList.some((s) => s.dataStore && s.kind === 'database' && ownCloud(s));
+  const hasObjectStore = svcList.some((s) => s.dataStore && s.kind === 'storage' && ownCloud(s));
+  const hasMessaging = svcList.some((s) => s.kind === 'messaging' && ownCloud(s));
+  if (hasDbStore) {
+    addBacklog({ id: 'verify:cloud-blind:pitr', fact: 'Point-in-time recovery (PITR) enabled on declared data-store tables', dimension: 'security', verifyCommand: 'aws dynamodb describe-continuous-backups --table-name <table> (or `aws rds describe-db-instances --query "DBInstances[].BackupRetentionPeriod"`)' });
+    addBacklog({ id: 'verify:cloud-blind:deletion-protection', fact: 'Deletion protection enabled on declared data-store tables', dimension: 'security', verifyCommand: 'aws dynamodb describe-table --table-name <table> --query Table.DeletionProtectionEnabled (or `aws rds describe-db-instances --query "DBInstances[].DeletionProtection"`)' });
+  }
+  if (hasObjectStore) {
+    addBacklog({ id: 'verify:cloud-blind:bucket-versioning', fact: 'Bucket versioning enabled on declared object-store buckets', dimension: 'security', verifyCommand: 'aws s3api get-bucket-versioning --bucket <bucket>' });
+  }
+  if (hasDbStore || hasObjectStore) {
+    addBacklog({ id: 'verify:cloud-blind:cmk-encryption', fact: 'Data stores encrypted with a customer-managed key (CMK) vs default/provider-managed key', dimension: 'security', verifyCommand: 'aws kms describe-key --key-id <key> (or `aws dynamodb describe-table --query Table.SSEDescription` / `aws s3api get-bucket-encryption --bucket <bucket>`)' });
+  }
+  if (hasMessaging) {
+    addBacklog({ id: 'verify:cloud-blind:runtime-health-dlq', fact: 'Runtime health and dead-letter-queue (DLQ) depth of declared messaging resources', dimension: 'infrastructure', verifyCommand: 'aws sqs get-queue-attributes --queue-url <dlq-url> --attribute-names ApproximateNumberOfMessages (or `aws lambda get-function --query Configuration.State`)' });
+  }
+  if (iacPresent) {
+    addBacklog({ id: 'verify:cloud-blind:applied-tags', fact: 'Tags actually applied to live cloud resources vs declared in IaC', dimension: 'governance', verifyCommand: 'aws resourcegroupstaggingapi get-resources --tag-filters Key=team — confirm the declared tag taxonomy is actually applied on live resources' });
+    addBacklog({ id: 'verify:cloud-blind:shared-account', fact: 'Whether the target cloud account is dedicated or shared with other, unrelated workloads', dimension: 'infrastructure', verifyCommand: 'aws sts get-caller-identity && aws organizations describe-account --account-id <id> — confirm the account is not shared with unrelated workloads' });
+  }
+
+  return { level, levelName: LEVEL_NAMES[level], dimensions, deprecated, regions, regionPinned, tagTaxonomy, findings, verificationBacklog };
 }
 
 // ── CLI ──
 const EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
-const IGNORE = new Set(['node_modules', '.next', 'dist', 'out', 'build', '.git', 'coverage']);
+// P0 — 'graphify-out' + 'vendor' are excluded so the walker never re-ingests prior
+// scan artifacts (which ratchets scores upward on every re-scan) or vendored deps.
+const IGNORE = new Set(['node_modules', '.next', 'dist', 'out', 'build', '.git', 'coverage', 'graphify-out', 'vendor']);
 const SPEC_RE = [
   /(?:import|export)\b[^'"`;]*?\bfrom\s*['"]([^'"]+)['"]/g,
   /\bimport\s*['"]([^'"]+)['"]/g,
@@ -912,6 +1408,24 @@ function walk(dir, root, acc = []) {
   return acc;
 }
 
+/**
+ * P5 — dirty-state provenance (best-effort, NEVER author emails/identity): counts
+ * pending changes via `git status --porcelain` + a short digest of the untracked-file
+ * list, so a scan report can flag "this scan ran against an uncommitted/dirty tree"
+ * (which can shift results run-to-run) without embedding any commit/author identity.
+ */
+export function gitDirtyStateProvenance(repo) {
+  try {
+    const out = execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const lines = out.split('\n').filter(Boolean);
+    const untracked = lines.filter((l) => l.startsWith('??')).map((l) => l.slice(3).trim()).sort();
+    const untrackedDigest = crypto.createHash('sha256').update(untracked.join('\n')).digest('hex').slice(0, 16);
+    return { available: true, dirtyCount: lines.length, untrackedCount: untracked.length, untrackedDigest };
+  } catch {
+    return { available: false, dirtyCount: null, untrackedCount: null, untrackedDigest: null };
+  }
+}
+
 function main(argv) {
   const args = argv.slice(2);
   const repo = path.resolve(args[0] || '.');
@@ -919,6 +1433,7 @@ function main(argv) {
   const out = flag('--out') || path.join(repo, 'graphify-out', 'infra.json');
   const all = walk(repo, repo);
   const files = [];
+  const skippedForSize = []; // P5 — files that exceeded the 512KB read cap
   for (const full of all) {
     const rel = path.relative(repo, full);
     const ctype = configFileType(rel);
@@ -933,19 +1448,39 @@ function main(argv) {
       || /(^|\/)\.pulumi\//.test(rel) || /(^|\/)\.tfsec\//.test(rel) || /tfer(--|_)/.test(rel) || /_test\.go$/.test(rel);
     if (!ctype && !isCode && !isAmbiguous && !isDeployish && !isIacAux) continue;
     let code = '';
-    try { if (fs.statSync(full).size < 512 * 1024) code = fs.readFileSync(full, 'utf8'); } catch { continue; }
+    try {
+      const size = fs.statSync(full).size;
+      if (size < 512 * 1024) code = fs.readFileSync(full, 'utf8');
+      else skippedForSize.push(rel);
+    } catch { continue; }
     const specs = isCode ? specifiers(code) : [];
     // include content for code files that declare infra (under infra/stacks, or that
     // import an IaC tool) so SST/CDK/Pulumi resources in modules are extracted.
     const iacModule = isCode && (/(^|\/)(infra|stacks|stack|deploy)\//.test(rel) || /aws-cdk-lib|@aws-cdk\/|['"]sst['"]|['"]sst\/|sst\.aws\.|@pulumi\/|cdktf|\bnew\s+aws\.\w+\./.test(code));
+    const contentVal = ctype || isAmbiguous || iacModule || isDeployish || isIacAux ? code : undefined;
     files.push({
       rel,
       specifiers: specs,
-      content: ctype || isAmbiguous || iacModule || isDeployish || isIacAux ? code : undefined,
+      content: contentVal,
+      // P2b — raw text of regular application code (content NOT loaded for service
+      // detection) so the resource-name-builder pass can enumerate the true data plane
+      // (e.g. `${prefix}_Directory` in src/lib/*.ts). Kept OUT of the service-detection
+      // path on purpose; only the name-builder miner reads it. Skipped when >512KB.
+      codeText: contentVal === undefined && isCode ? code : undefined,
       isClient: isCode && /^\s*['"]use client['"]/m.test(code),
     });
   }
   const inv = buildInfraInventory(files);
+  // P5 — low-confidence note: files skipped by the 512KB read cap (content-based
+  // detections over them are necessarily incomplete).
+  inv.lowConfidence = {
+    skippedForSize,
+    note: skippedForSize.length
+      ? `${skippedForSize.length} file(s) exceeded the 512KB read cap and were skipped (content-based detections may be incomplete): ${skippedForSize.slice(0, 20).join(', ')}${skippedForSize.length > 20 ? ', …' : ''}`
+      : null,
+  };
+  // P5 — dirty-state provenance (best-effort; never author identity).
+  inv.provenance = { git: gitDirtyStateProvenance(repo) };
   try { fs.mkdirSync(path.dirname(out), { recursive: true }); } catch { /* ignore */ }
   fs.writeFileSync(out, JSON.stringify({ generatedAt: null, root: repo, ...inv }, null, 2));
   console.error(

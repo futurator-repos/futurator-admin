@@ -275,7 +275,7 @@ function deprecatedSteps(maturity, tool) {
  *   nextThree:Array<{title:string,dimension:string,action:string}>,
  *   track:Array<{phase:number,title:string,dimension:string,why:string,tool:string,
  *                commands:string[],imports?:Array<{resource,source,priority}>,
- *                goldenRule:string}>,
+ *                unlocks?:string[],goldenRule:string}>,
  * }}
  */
 export function planIacTrack(inventory, { stack = null, gitEvolution = null } = {}) {
@@ -320,6 +320,32 @@ export function planIacTrack(inventory, { stack = null, gitEvolution = null } = 
     };
     if (spec.seedImports && imports.length) step.imports = imports;
     gapSteps.push(step);
+  }
+
+  // P3 — "Adopt unmanaged resources into IaC": gated on iacCoverage TRUTH (the
+  // undeclared[] service list, or — once P2 resource-level fields land — a
+  // resourceRatio < 1), INDEPENDENT of the 'state' dimension's satisfied() check. A
+  // repo can have remote, locked state (state dimension already at target, no gaps)
+  // while individual resources remain undeclared or only IAM-referenced — those must
+  // still surface as an adoption action, or every later step (testing, drift/cost,
+  // governance) silently excludes them. Degrades gracefully when resourceRatio is
+  // absent (older inventories, pre-P2): falls back to the undeclared[] check alone.
+  const coverage = inventory.iacCoverage || {};
+  const hasUndeclared = Array.isArray(coverage.undeclared) && coverage.undeclared.length > 0;
+  const ratioIncomplete = typeof coverage.resourceRatio === 'number' && coverage.resourceRatio < 1;
+  if (hasUndeclared || ratioIncomplete) {
+    const adoptionStep = {
+      phase: 1, // between deprecated-toolchain (0, stop-the-bleeding) and state (2)
+      title: 'Adopt unmanaged resources into IaC',
+      dimension: 'adoption',
+      why: 'Resources are running but not declared in any IaC file (or only referenced via IAM ARNs) — adopt them before other migration work, or state/testing/governance steps will silently exclude them.',
+      tool,
+      commands: toolCmds.state || [],
+      unlocks: ['finops', 'privacy', 'policy-as-code'],
+      goldenRule,
+    };
+    if (imports.length) adoptionStep.imports = imports;
+    gapSteps.push(adoptionStep);
   }
 
   // Merge deprecated-toolchain remediations, then order the whole track foundations-
