@@ -102,6 +102,13 @@ export interface P3QaReport {
   journeys: JourneyResult[];
   vqa: VqaResult[];
   wiring: WiringReport;
+  /**
+   * P3_QA_REVIEW honest-gate (Slice B) — passthrough of plan.qaVerifiedAt: the
+   * ISO timestamp deployed-app QA last passed (non-blocking) for the current
+   * qaCommitSha. ABSENT ⇒ not verified (never ran, blocking, or stale SHA). The
+   * UI's "READY TO DELIVER" chip gates on this (OR an operator Approve).
+   */
+  qaVerifiedAt?: string;
 }
 
 /**

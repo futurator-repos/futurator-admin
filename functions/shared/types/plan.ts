@@ -142,6 +142,19 @@ export interface Plan {
   qaAutoFixRounds?: number;
   /** The persisted plan-level QA verdict (journeys + VQA + wiring + decision). */
   p3QaVerdict?: P3QaVerdict;
+  /**
+   * P3_QA_REVIEW honest-gate (Slice B) — ISO-8601 timestamp set when a
+   * NON-BLOCKING p3QaVerdict is durably recorded for the CURRENT qaCommitSha.
+   * This is the single source of truth for "deployed-app QA has passed":
+   *   isDeliverable(plan) === Boolean(plan.qaVerifiedAt) ||
+   *                          plan.p3QaVerdict?.decision === 'approved'
+   * ABSENT/empty ⇒ deployed-app QA has NOT passed (never ran, ran-and-blocking,
+   * or the pin moved on / SHA is stale). CLEARED (DynamoDB REMOVE) whenever QA is
+   * reset for a re-run (clearP3QaForRerun) AND on a fresh dev deploy (a new SHA
+   * ⇒ QA must re-verify). Distinct from p3QaVerdict.decidedAt — a re-run must
+   * never clobber the human decision, and this field is the AUTOMATED pass mark.
+   */
+  qaVerifiedAt?: string;
   /** Stage-C — the PM-declared delivery journeys, persisted (was schema-only). */
   deliveryJourneys?: DeliveryJourney[];
 

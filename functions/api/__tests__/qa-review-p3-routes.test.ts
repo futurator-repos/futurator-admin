@@ -158,6 +158,78 @@ describe('GET /api/plans/:id/qa-review-p3', () => {
     expect(body.report.journeys).toHaveLength(1);
     expect(body.report.wiring.orphanModules).toContain('src/game/ghost-ai.ts');
   });
+
+  it('Slice B — passes plan.qaVerifiedAt through onto the report', async () => {
+    const VERIFIED = '2026-07-08T12:00:00.000Z';
+    ddbReturns(
+      plan({ qaVerifiedAt: VERIFIED, p3QaVerdict: verdict({ blocking: false, status: 'pass' }) }),
+    );
+    const res = await app.request(`/api/plans/${PLAN_ID}/qa-review-p3`);
+    const body = await res.json();
+    expect(body.report.qaVerifiedAt).toBe(VERIFIED);
+  });
+
+  it('Slice B — absent qaVerifiedAt → report.qaVerifiedAt is undefined (not verified)', async () => {
+    ddbReturns(plan({ p3QaVerdict: verdict({ blocking: false, status: 'pass' }) }));
+    const res = await app.request(`/api/plans/${PLAN_ID}/qa-review-p3`);
+    const body = await res.json();
+    expect(body.report.qaVerifiedAt).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Slice B — promote SOFT-BLOCK on the readiness rule (isDeliverable)
+// ─────────────────────────────────────────────────────────────────────
+describe('POST /api/plans/:id/promote (Slice B QA soft-block)', () => {
+  function promoteReq() {
+    return app.request(`/api/plans/${PLAN_ID}/promote`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to: 'staging' }),
+    });
+  }
+
+  it('no qaVerifiedAt and no approval → 400 QA_NOT_VERIFIED', async () => {
+    // devUrl present (ladder gate ok), blocking verdict, no qaVerifiedAt.
+    ddbReturns(plan({ p3QaVerdict: verdict() }));
+    const res = await promoteReq();
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe('QA_NOT_VERIFIED');
+  });
+
+  it('qaVerifiedAt present (auto-verified) → promote proceeds (201)', async () => {
+    ddbReturns(
+      plan({
+        qaVerifiedAt: '2026-07-08T12:00:00.000Z',
+        p3QaVerdict: verdict({ blocking: false, status: 'pass' }),
+      }),
+    );
+    const res = await promoteReq();
+    expect(res.status).toBe(201);
+  });
+
+  it('operator Approve (decision approved, pinned) → promote proceeds even without qaVerifiedAt', async () => {
+    ddbReturns(
+      plan({
+        p3QaVerdict: verdict({
+          blocking: false,
+          status: 'pass',
+          decision: 'approved',
+          approvedSha: SHA,
+          decidedAt: '2026-07-08T00:00:00Z',
+        }),
+      }),
+    );
+    const res = await promoteReq();
+    expect(res.status).toBe(201);
+  });
+
+  it('flag off → soft-block bypassed entirely (201)', async () => {
+    process.env.P3_QA_REVIEW = 'off';
+    ddbReturns(plan({ p3QaVerdict: verdict() }));
+    const res = await promoteReq();
+    expect(res.status).toBe(201);
+  });
 });
 
 describe('POST /api/plans/:id/qa/approve', () => {

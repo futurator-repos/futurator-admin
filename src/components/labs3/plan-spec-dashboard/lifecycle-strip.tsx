@@ -19,6 +19,7 @@
  */
 
 import type { Plan, PlanStatus } from '@/types/plan';
+import { qaReadiness, type QaReadiness } from '@/hooks/use-p3-qa-report';
 import type { Labs3Subtab } from './constants';
 
 type StageState = 'done' | 'active' | 'pending';
@@ -67,6 +68,31 @@ const COLOR: Record<StageState, string> = {
   pending: 'var(--text-faint)',
 };
 
+/**
+ * The QA REVIEW stage sub-label + dot color reflect the deployed-app QA
+ * readiness (the FROZEN CONTRACT isDeliverable rule) once the plan has reached
+ * that stage — verified/blocking/unverified, not merely "assembled + tested".
+ * Returns null when the stage hasn't been reached (keeps the default label).
+ */
+export function qaStageOverride(
+  plan: Plan,
+  stageReached: boolean,
+): { sub: string; color: string } | null {
+  if (!stageReached) return null;
+  const readiness: QaReadiness = qaReadiness({
+    qaVerifiedAt: plan.qaVerifiedAt,
+    p3QaVerdict: plan.p3QaVerdict,
+  });
+  switch (readiness) {
+    case 'verified':
+      return { sub: 'QA verified', color: 'var(--success)' };
+    case 'blocking':
+      return { sub: 'QA blocking', color: 'var(--destructive)' };
+    default:
+      return { sub: 'QA unverified', color: 'var(--warning)' };
+  }
+}
+
 export function LifecycleStrip({
   plan,
   onSelectStage,
@@ -91,7 +117,10 @@ export function LifecycleStrip({
     >
       {STAGES.map((s, i) => {
         const st = stateFor(i, active);
-        const c = COLOR[st];
+        // QA REVIEW stage reflects deployed-app QA readiness once reached.
+        const qaOv = s.id === 'qa' ? qaStageOverride(plan, i <= active) : null;
+        const c = qaOv ? qaOv.color : COLOR[st];
+        const subLabel = qaOv ? qaOv.sub : s.sub;
         // Contextual affordance: the QA stage surfaces the dev preview link; the
         // Deployed stage surfaces the live link.
         const link =
@@ -161,7 +190,7 @@ export function LifecycleStrip({
                   gap: 8,
                 }}
               >
-                <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{s.sub}</span>
+                <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{subLabel}</span>
                 {link && (
                   <a
                     href={link.href}

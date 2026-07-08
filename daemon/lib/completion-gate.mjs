@@ -40,6 +40,21 @@ export function parseBindingManifest(text) {
   return out;
 }
 
+/**
+ * Does this AC assert genuinely APP-LEVEL behavior that MUST be driven in the real
+ * app through the browser probe executor (window.__harness)? True for a
+ * verify:'behavior' AC or an explicit needsBrowser:true — a mocked-hook unit test
+ * does NOT satisfy such an AC. Advisory ACs are EXCLUDED: advisory-taste/security
+ * are non-blocking by design and their visual/appearance checks belong at the VQA
+ * wave gate, not the per-story browser executor (an advisory appearance AC often
+ * carries needsBrowser but must never be forced to fail-closed here). PURE.
+ */
+export function requiresBrowser(ac) {
+  const cls = ac?.acClass || 'deterministic';
+  if (cls === 'advisory-security' || cls === 'advisory-taste') return false;
+  return ac?.verify === 'behavior' || ac?.needsBrowser === true;
+}
+
 /** Partition ACs by class. `manual` ACs (verify:'manual') are split out. */
 export function classifyAcs(acs = []) {
   const buckets = { deterministic: [], advisoryTaste: [], advisorySecurity: [], manual: [] };
@@ -52,18 +67,49 @@ export function classifyAcs(acs = []) {
     // (its visual check belongs at the VQA wave gate, not the per-story gate).
     if (cls === 'advisory-security') { buckets.advisorySecurity.push(ac); continue; }
     if (cls === 'advisory-taste') { buckets.advisoryTaste.push(ac); continue; }
+    // A behavior/needsBrowser AC is ALWAYS deterministic (verified by the real
+    // browser probe executor) — it can NEVER route to the manual bucket. This
+    // fails CLOSED: without this branch, a mis-declared testKind:'manual' on a
+    // behavior AC would escape to manual → needs-human (operator-escapable) OR,
+    // worse, a testKind:'unit' mocked pass would satisfy it as deterministic.
+    // Keeping it deterministic means deterministicPasses() rejects any non-browser
+    // binding for it. (This is the story-level hole Slice C closes.)
+    if (requiresBrowser(ac)) { buckets.deterministic.push(ac); continue; }
     if (ac.verify === 'manual' || ac.testBinding?.testKind === 'manual') { buckets.manual.push(ac); continue; }
     buckets.deterministic.push(ac);
   }
   return buckets;
 }
 
-/** Immutably bind an AC: set testBinding.status='bound' with the manifest's testRef. */
+/**
+ * Immutably bind an AC from the agent's <BINDING> manifest.
+ *
+ * FAIL CLOSED for app-level behavior: an AC that requiresBrowser() MUST be bound
+ * testKind:'browser'. A 'unit'/'integration'/'manual'/omitted testKind for such an
+ * AC is a MISBINDING — the browser probe executor drives the real app via
+ * window.__harness, so a mocked-hook unit test can never satisfy a behavioral AC.
+ * We record status:'misbound' (a distinct non-passing state) rather than 'bound',
+ * so the deterministic gate treats it as not-done and the runner refuses to run it
+ * as a unit test.
+ */
 export function bindAc(ac, binding) {
   if (!binding || !binding.testRef) return ac;
+  const testKind = binding.testKind || ac.testBinding?.testKind;
+  if (requiresBrowser(ac) && testKind !== 'browser') {
+    return {
+      ...ac,
+      testBinding: {
+        ...(ac.testBinding || {}),
+        status: 'misbound',
+        testRef: binding.testRef,
+        testKind,
+        detail: `behavior/needsBrowser AC must be bound testKind:'browser'; got '${testKind || 'omitted'}' — a mocked-hook test does not satisfy it`,
+      },
+    };
+  }
   return {
     ...ac,
-    testBinding: { ...(ac.testBinding || {}), status: 'bound', testRef: binding.testRef, testKind: binding.testKind || ac.testBinding?.testKind },
+    testBinding: { ...(ac.testBinding || {}), status: 'bound', testRef: binding.testRef, testKind },
   };
 }
 
@@ -75,6 +121,11 @@ export function applyBindings(acs = [], manifest = {}) {
 /** A deterministic AC passes iff bound-test passing AND run against the live SHA. */
 function deterministicPasses(ac, currentHeadSha) {
   const tb = ac.testBinding || {};
+  // FAIL CLOSED: an app-level behavior AC only counts as passing when it was
+  // verified through the BROWSER probe executor. A 'passing' status carried by any
+  // other testKind (a mocked-hook unit test) is the exact hole Slice C closes — it
+  // is NOT a satisfied behavioral AC, no matter what the runner recorded.
+  if (requiresBrowser(ac) && tb.testKind !== 'browser') return false;
   if (tb.status !== 'passing') return false;
   if (currentHeadSha && tb.lastRunSha && tb.lastRunSha !== currentHeadSha) return false; // stale
   return true;
@@ -108,7 +159,8 @@ export function evaluateCompletion({ acceptanceCriteria = [], currentHeadSha, re
     if (!deterministicPasses(ac, currentHeadSha)) {
       failing.push(ac.id);
       const tb = ac.testBinding || {};
-      reasons.push(`${ac.id}: deterministic AC not passing (status=${tb.status || 'unbound'}${tb.lastRunSha && currentHeadSha && tb.lastRunSha !== currentHeadSha ? ', stale-sha' : ''})`);
+      const misbound = requiresBrowser(ac) && tb.testKind !== 'browser';
+      reasons.push(`${ac.id}: deterministic AC not passing (status=${tb.status || 'unbound'}${misbound ? `, misbound: behavior AC needs testKind:'browser' not '${tb.testKind || 'omitted'}'` : ''}${tb.lastRunSha && currentHeadSha && tb.lastRunSha !== currentHeadSha ? ', stale-sha' : ''})`);
     }
   }
   for (const ac of buckets.advisorySecurity) {

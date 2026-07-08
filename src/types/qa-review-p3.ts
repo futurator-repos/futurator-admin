@@ -94,6 +94,14 @@ export interface P3QaReport {
   journeys: JourneyResult[];
   vqa: VqaResult[];
   wiring: WiringReport;
+  /**
+   * ISO-8601 timestamp set when a NON-BLOCKING verdict is durably recorded for
+   * the CURRENT qaCommitSha (deployed-app QA passed). ABSENT/empty ⇒ QA has NOT
+   * passed (never ran, ran-and-blocking, or stale SHA). Passthrough of
+   * plan.qaVerifiedAt on the GET /plans/:id/qa-review-p3 report envelope.
+   * CLIENT MIRROR of functions/shared/types/qa-review-p3.ts — byte-parity.
+   */
+  qaVerifiedAt?: string;
 }
 
 /**

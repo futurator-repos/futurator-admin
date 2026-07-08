@@ -19,21 +19,22 @@
 
 import { useMemo } from 'react';
 import type { StoryNodeRow } from '@/types/plan-spec';
+import type { QaReadiness } from '@/hooks/use-p3-qa-report';
 
 // ── Verdict derivation ───────────────────────────────────────────────
 
-type DeliveryVerdict = 'ready' | 'blocking' | 'in-progress' | 'not-started';
+type DeliveryVerdict = 'ready' | 'blocking' | 'in-progress' | 'not-started' | 'qa-pending';
 
 const VERDICT_META: Record<DeliveryVerdict, { label: string; color: string; help: string }> = {
   ready: {
     label: 'Ready to deliver',
     color: 'var(--success)',
-    help: 'All stories done. Deterministic ACs are passing.',
+    help: 'Deployed-app QA verified. Deterministic ACs are passing.',
   },
   blocking: {
     label: 'Blocking',
     color: 'var(--destructive)',
-    help: 'One or more stories failed. Fix failures before delivering.',
+    help: 'One or more stories failed, or deployed-app QA is blocking. Fix before delivering.',
   },
   'in-progress': {
     label: 'In progress',
@@ -45,13 +46,36 @@ const VERDICT_META: Record<DeliveryVerdict, { label: string; color: string; help
     color: 'var(--text-mute)',
     help: 'No stories have run yet.',
   },
+  'qa-pending': {
+    label: 'QA pending — unverified',
+    color: 'var(--text-mute)',
+    help: 'Unit ACs pass, but deployed-app QA has not verified this commit. Not ready to deliver.',
+  },
 };
 
-function deriveVerdict(stories: StoryNodeRow[]): DeliveryVerdict {
-  if (stories.length === 0) return 'not-started';
-  if (stories.some((s) => s.state === 'failed')) return 'blocking';
-  if (stories.every((s) => s.state === 'done')) return 'ready';
-  return 'in-progress';
+/**
+ * Derive the delivery verdict from unit-AC story state, THEN gate it on the
+ * deployed-app QA readiness (the FROZEN CONTRACT single source of truth):
+ *   readiness 'blocking' → force 'blocking' (never green)
+ *   readiness 'pending'  → a would-be 'ready' becomes neutral 'qa-pending'
+ *   readiness 'verified' or undefined (flag off / no signal) → the story-derived
+ *     verdict stands (legacy behavior when there is no deployed-app QA gate).
+ * This prevents the strip from reading green off the unit-AC rollup alone while
+ * deployed-app QA is unverified or blocking.
+ */
+function deriveVerdict(stories: StoryNodeRow[], qaReadiness?: QaReadiness): DeliveryVerdict {
+  const base: DeliveryVerdict =
+    stories.length === 0
+      ? 'not-started'
+      : stories.some((s) => s.state === 'failed')
+        ? 'blocking'
+        : stories.every((s) => s.state === 'done')
+          ? 'ready'
+          : 'in-progress';
+
+  if (qaReadiness === 'blocking') return 'blocking';
+  if (qaReadiness === 'pending' && base === 'ready') return 'qa-pending';
+  return base;
 }
 
 // ── AC gauges ────────────────────────────────────────────────────────
@@ -85,8 +109,19 @@ function computeAcGauges(stories: StoryNodeRow[]): AcGauges {
 
 // ── Component ────────────────────────────────────────────────────────
 
-export function VerdictStrip({ stories }: { stories: StoryNodeRow[] }) {
-  const verdict = useMemo(() => deriveVerdict(stories), [stories]);
+export function VerdictStrip({
+  stories,
+  qaReadiness,
+}: {
+  stories: StoryNodeRow[];
+  /**
+   * Deployed-app QA readiness. When provided, gates the verdict so it can't read
+   * green while QA is unverified/blocking. Omit (undefined) for legacy behavior
+   * when there is no deployed-app QA signal (flag off / no report).
+   */
+  qaReadiness?: QaReadiness;
+}) {
+  const verdict = useMemo(() => deriveVerdict(stories, qaReadiness), [stories, qaReadiness]);
   const gauges = useMemo(() => computeAcGauges(stories), [stories]);
   const meta = VERDICT_META[verdict];
 

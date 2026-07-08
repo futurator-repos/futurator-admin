@@ -26,7 +26,9 @@ vi.mock('@/lib/api-client', () => ({
 
 import {
   computeP3QaRefetchInterval,
+  isDeliverable,
   isP3QaReviewFlagEnabled,
+  qaReadiness,
   useApproveP3Qa,
   useP3QaReport,
   useSendBackP3Qa,
@@ -62,6 +64,35 @@ describe('computeP3QaRefetchInterval', () => {
     expect(computeP3QaRefetchInterval('passed')).toBe(false);
     expect(computeP3QaRefetchInterval('failed')).toBe(false);
     expect(computeP3QaRefetchInterval(undefined)).toBe(false);
+  });
+});
+
+describe('isDeliverable / qaReadiness (FROZEN CONTRACT readiness rule)', () => {
+  it('isDeliverable is true when qaVerifiedAt is present', () => {
+    expect(isDeliverable({ qaVerifiedAt: '2026-07-08T00:00:00Z' })).toBe(true);
+  });
+
+  it('isDeliverable is true when the verdict decision is approved (no qaVerifiedAt)', () => {
+    expect(isDeliverable({ p3QaVerdict: { decision: 'approved', blocking: false } })).toBe(true);
+  });
+
+  it('isDeliverable is false with no stamp and a blocking (non-approved) verdict', () => {
+    expect(isDeliverable({ p3QaVerdict: { decision: 'sent-back', blocking: true } })).toBe(false);
+    expect(isDeliverable({})).toBe(false);
+  });
+
+  it('qaReadiness → verified when deliverable', () => {
+    expect(qaReadiness({ qaVerifiedAt: 'x' })).toBe('verified');
+    expect(qaReadiness({ p3QaVerdict: { decision: 'approved' } })).toBe('verified');
+  });
+
+  it('qaReadiness → blocking when a blocking, non-approved verdict exists', () => {
+    expect(qaReadiness({ p3QaVerdict: { blocking: true } })).toBe('blocking');
+  });
+
+  it('qaReadiness → pending when no stamp, no approval, and not blocking', () => {
+    expect(qaReadiness({})).toBe('pending');
+    expect(qaReadiness({ p3QaVerdict: { blocking: false } })).toBe('pending');
   });
 });
 

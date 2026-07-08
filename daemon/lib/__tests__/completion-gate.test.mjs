@@ -5,6 +5,7 @@ import {
   bindAc,
   applyBindings,
   evaluateCompletion,
+  requiresBrowser,
 } from '../completion-gate.mjs';
 
 const ac = (id, over = {}) => ({ id, text: `${id} text`, acClass: 'deterministic', testBinding: { status: 'unbound' }, ...over });
@@ -88,6 +89,69 @@ describe('bindAc / applyBindings', () => {
     const acs = applyBindings([ac('a'), ac('b')], { a: { testRef: 'ra' } });
     expect(acs[0].testBinding.status).toBe('bound');
     expect(acs[1].testBinding.status).toBe('unbound');
+  });
+});
+
+describe('behavior-AC browser enforcement (Slice C — close the mocked-unit hole)', () => {
+  const SHA = 'sha-beh';
+  const behaviorAc = (id, over = {}) => ac(id, { verify: 'behavior', needsBrowser: true, ...over });
+
+  it('requiresBrowser: behavior/needsBrowser yes; state/build no; advisory excluded', () => {
+    expect(requiresBrowser({ verify: 'behavior' })).toBe(true);
+    expect(requiresBrowser({ needsBrowser: true })).toBe(true);
+    expect(requiresBrowser({ verify: 'state' })).toBe(false);
+    expect(requiresBrowser({ verify: 'build' })).toBe(false);
+    // advisory ACs are non-blocking / VQA-gated — never forced browser here
+    expect(requiresBrowser({ verify: 'behavior', acClass: 'advisory-taste' })).toBe(false);
+    expect(requiresBrowser({ needsBrowser: true, acClass: 'advisory-security' })).toBe(false);
+  });
+
+  it('bindAc REJECTS a behavior AC bound testKind:unit → misbound (not bound)', () => {
+    const bound = bindAc(behaviorAc('b'), { testRef: 'x.test.ts', testKind: 'unit' });
+    expect(bound.testBinding.status).toBe('misbound');
+    expect(bound.testBinding.detail).toMatch(/browser/);
+  });
+
+  it('bindAc REJECTS an omitted testKind for a behavior AC → misbound', () => {
+    const bound = bindAc(behaviorAc('b'), { testRef: 'probe' });
+    expect(bound.testBinding.status).toBe('misbound');
+  });
+
+  it('bindAc ACCEPTS a behavior AC bound testKind:browser → bound', () => {
+    const bound = bindAc(behaviorAc('b'), { testRef: 'probe:reach', testKind: 'browser' });
+    expect(bound.testBinding.status).toBe('bound');
+    expect(bound.testBinding.testKind).toBe('browser');
+  });
+
+  it('a pure verify:state AC still binds testKind:unit fine (do NOT force browser)', () => {
+    const bound = bindAc(ac('s', { verify: 'state' }), { testRef: 's.test.ts -t x', testKind: 'unit' });
+    expect(bound.testBinding.status).toBe('bound');
+    expect(bound.testBinding.testKind).toBe('unit');
+  });
+
+  it('classifyAcs keeps a behavior AC DETERMINISTIC even when mis-declared manual', () => {
+    const b = classifyAcs([behaviorAc('beh', { testBinding: { testKind: 'manual' } })]);
+    expect(b.deterministic.map((x) => x.id)).toEqual(['beh']); // never routes to manual
+    expect(b.manual).toEqual([]);
+  });
+
+  it('evaluateCompletion: a "passing" behavior AC bound unit does NOT count as done', () => {
+    // Even if some runner recorded status:passing, a non-browser testKind fails closed.
+    const r = evaluateCompletion({
+      acceptanceCriteria: [behaviorAc('beh', { testBinding: { status: 'passing', lastRunSha: SHA, testKind: 'unit' } })],
+      currentHeadSha: SHA,
+    });
+    expect(r.status).toBe('failing');
+    expect(r.failing).toContain('beh');
+    expect(r.reasons.join(' ')).toMatch(/misbound/);
+  });
+
+  it('evaluateCompletion: a behavior AC passing via testKind:browser IS done', () => {
+    const r = evaluateCompletion({
+      acceptanceCriteria: [behaviorAc('beh', { testBinding: { status: 'passing', lastRunSha: SHA, testKind: 'browser' } })],
+      currentHeadSha: SHA,
+    });
+    expect(r.status).toBe('done');
   });
 });
 

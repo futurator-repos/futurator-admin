@@ -40,7 +40,18 @@ export function parsePorcelainTestFiles(stdout) {
  */
 export function buildStoryTestPrompt(payload) {
   const acLines = (payload.acceptanceCriteria || [])
-    .map((ac, i) => `  ${i + 1}. [${ac.id}] ${ac.text}${ac.acClass ? ` (${ac.acClass})` : ''}`)
+    .map((ac, i) => {
+      const browser = ac.verify === 'behavior' || ac.needsBrowser === true;
+      const tags = [
+        ac.acClass ? ac.acClass : null,
+        ac.verify ? `verify:${ac.verify}` : null,
+        browser ? 'needsBrowser:true → bind testKind:browser (NO test file)' : null,
+      ].filter(Boolean).join(', ');
+      const probe = browser && (ac.when || ac.thenObservable)
+        ? `\n     when: ${ac.when || '(unspecified)'} → thenObservable: ${ac.thenObservable || '(unspecified)'}`
+        : '';
+      return `  ${i + 1}. [${ac.id}] ${ac.text}${tags ? ` (${tags})` : ''}${probe}`;
+    })
     .join('\n');
   return [
     `You are the TEST AUTHOR in a spec-driven pipeline. You author the failing tests`,
@@ -51,6 +62,16 @@ export function buildStoryTestPrompt(payload) {
     ``,
     `# Acceptance criteria — write one test per AC that PROVES it`,
     acLines,
+    ``,
+    `# Behavioral ACs are verified in the REAL app, not by a mocked test`,
+    `- An AC marked verify:'behavior' / needsBrowser:true MUST be bound testKind:'browser'.`,
+    `  Do NOT author a unit/integration test file for it — the browser probe executor`,
+    `  drives the running app through window.__harness by reading that AC's`,
+    `  when/thenObservable prose directly. Bind it { "testRef": "<its when/thenObservable`,
+    `  intent>", "testKind": "browser" }; the completion gate REJECTS a 'unit'/'manual'`,
+    `  binding for a behavioral AC (a mocked hook does not satisfy it).`,
+    `- Author real failing unit tests ONLY for pure verify:'state'/'build' ACs on this`,
+    `  slice. Never mock the app to fake a behavioral pass.`,
     ``,
     `# Test-architecture knowledge (TEA)`,
     `If \`_bmad/tea/workflows/testarch/\` exists in this repo, skim these knowledge`,

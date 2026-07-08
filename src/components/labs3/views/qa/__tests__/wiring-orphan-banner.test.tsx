@@ -65,6 +65,29 @@ describe('WiringOrphanBanner', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it('renders nothing when clean and the check did NOT run (hasRun omitted)', () => {
+    const report: WiringReport = { orphanModules: [], blocking: false };
+    const { container } = render(<WiringOrphanBanner wiring={report} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders a green "ran & clean" confirmation when clean AND hasRun (distinct from never-ran)', () => {
+    const report: WiringReport = { orphanModules: [], blocking: false };
+    render(<WiringOrphanBanner wiring={report} hasRun />);
+    const banner = screen.getByTestId('wiring-orphan-banner');
+    expect(banner.getAttribute('data-wiring-state')).toBe('ran-clean');
+    expect(screen.getByText('Wiring: no orphan modules')).toBeInTheDocument();
+    expect(screen.getByText('pass')).toBeInTheDocument();
+  });
+
+  it('still renders the orphan list (not the clean confirmation) when orphans exist even with hasRun', () => {
+    const report: WiringReport = { orphanModules: ['src/ghost-ai.ts'], blocking: true };
+    render(<WiringOrphanBanner wiring={report} hasRun />);
+    const banner = screen.getByTestId('wiring-orphan-banner');
+    expect(banner.getAttribute('data-wiring-state')).not.toBe('ran-clean');
+    expect(screen.getByText('src/ghost-ai.ts')).toBeInTheDocument();
+  });
+
   it('renders every orphan module name and a fail badge when count > 0', () => {
     const report: WiringReport = {
       orphanModules: ['src/ghost-ai.ts', 'src/reducer.ts', 'src/controls.ts'],

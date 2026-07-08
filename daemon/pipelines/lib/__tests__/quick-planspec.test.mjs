@@ -197,6 +197,29 @@ describe('parseQuickPlanspec', () => {
     expect(assemble.depends_on.sort()).toEqual([contract.storyId, list.storyId].sort());
   });
 
+  it('needsBrowser tracks verify:behavior only — a pure verify:state AC is NOT browser-required', () => {
+    // Slice C: the old `verify !== build` rule wrongly flagged pure-reducer state
+    // ACs as needsBrowser, forcing them down the browser path. Tighten to behavior.
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${WIDE_SPEC}</PLAN_SPEC>`);
+    const [, movement, scoring, ghosts] = stories;
+    expect(movement.acceptanceCriteria[0].verify).toBe('behavior');
+    expect(movement.acceptanceCriteria[0].needsBrowser).toBe(true); // app-level
+    expect(scoring.acceptanceCriteria[0].verify).toBe('state');
+    expect(scoring.acceptanceCriteria[0].needsBrowser).toBeUndefined(); // pure reducer → unit
+    expect(ghosts.acceptanceCriteria[0].needsBrowser).toBeUndefined();
+  });
+
+  it('honors an explicit model-authored needsBrowser:true even on a state AC', () => {
+    const spec = JSON.stringify({ stories: [
+      { id: 'c', title: 'Define the contract types', touches: ['src/types.ts'],
+        acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }] },
+      { id: 'x', title: 'Implement widget', dependsOn: ['c'], touches: ['src/slices/x.ts'],
+        acceptanceCriteria: [{ text: 'state flips on toggle', verify: 'state', needsBrowser: true }] },
+    ] });
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    expect(stories[1].acceptanceCriteria[0].needsBrowser).toBe(true);
+  });
+
   it('appearance ACs become advisory-taste; missing ACs synthesize one', () => {
     const { stories } = parseQuickPlanspec(
       `<PLAN_SPEC>${JSON.stringify({ stories: [

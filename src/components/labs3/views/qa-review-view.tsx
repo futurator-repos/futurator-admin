@@ -34,7 +34,7 @@ import { JourneyVerdicts } from './qa/journey-verdicts';
 import { BeforeAfterGallery } from './qa/before-after-gallery';
 import { WiringOrphanBanner } from './qa/wiring-orphan-banner';
 import { QaActions } from './qa/qa-actions';
-import { useP3QaReport } from '@/hooks/use-p3-qa-report';
+import { useP3QaReport, qaReadiness, type QaReadiness } from '@/hooks/use-p3-qa-report';
 import { StoryNodeStatePill } from '@/components/labs3/shared/state-pill';
 import type { StoryNodeRow, StoryNodeState } from '@/types/plan-spec';
 import type { P3QaReport, P3QaVerdict } from '@/types/qa-review-p3';
@@ -55,8 +55,30 @@ export function QaReviewView({ planId, stories }: QaReviewViewProps) {
   // (flag on), show the merged-plan review instead of the per-story testBinding
   // view. Falls back seamlessly when the flag is off or no verdict exists yet.
   const p3Qa = useP3QaReport(planId);
+  // The readiness rule (FROZEN CONTRACT single source of truth). The verdict
+  // carries decision/blocking; the report carries qaVerifiedAt — together they
+  // decide deliverability. Gate on the FLAG ALONE, not on the presence of a
+  // signal: when the gate is on but QA hasn't produced a verdict yet (job still
+  // running), report+verdict are both null and readiness resolves to 'pending'
+  // (neutral) — it must NOT collapse to `null` and let the fallback strip paint
+  // green "Ready to deliver" off the unit-AC rollup. `null` only when the flag
+  // is off → the fallback strip keeps its legacy behavior.
+  const readiness: QaReadiness | null = p3Qa.enabled
+    ? qaReadiness({
+        qaVerifiedAt: p3Qa.report?.qaVerifiedAt,
+        p3QaVerdict: p3Qa.verdict,
+      })
+    : null;
+
   if (p3Qa.enabled && p3Qa.report) {
-    return <DeployedAppQaReview planId={planId} report={p3Qa.report} />;
+    return (
+      <DeployedAppQaReview
+        planId={planId}
+        report={p3Qa.report}
+        verdict={p3Qa.verdict}
+        readiness={readiness ?? 'pending'}
+      />
+    );
   }
 
   if (stories.length === 0) {
@@ -81,8 +103,9 @@ export function QaReviewView({ planId, stories }: QaReviewViewProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* Sticky verdict strip */}
-      <VerdictStrip stories={stories} />
+      {/* Sticky verdict strip — gated on deployed-app QA readiness so it can't
+          read green off the unit-AC rollup while QA is unverified/blocking. */}
+      <VerdictStrip stories={stories} qaReadiness={readiness ?? undefined} />
 
       {/* Cohort-batch matrix — self-suppresses when only 1 batch */}
       <CohortMatrix stories={stories} />
@@ -106,15 +129,27 @@ export function QaReviewView({ planId, stories }: QaReviewViewProps) {
  *   [BEFORE/AFTER GALLERY] Lane 2 — VQA judge on frame pairs
  *   [ACTIONS] Approve → staging (W3) / Send-back → mint fix stories
  */
-function DeployedAppQaReview({ planId, report }: { planId: string; report: P3QaReport }) {
+function DeployedAppQaReview({
+  planId,
+  report,
+  verdict: envelopeVerdict,
+  readiness,
+}: {
+  planId: string;
+  report: P3QaReport;
+  /** The full verdict from the GET envelope (decision/blocking); may be null. */
+  verdict: P3QaVerdict | null;
+  readiness: QaReadiness;
+}) {
   // The dev-preview BUILD status is independent of the QA verdict: if the app is
   // served at devUrl the build succeeded (a failed QA does NOT mean a failed
   // build — that's what the journey/wiring panels below report). Only show
   // 'deploying' when there's no URL yet.
   const devStatus: DevPreviewStatus = report.devUrl ? 'live' : 'deploying';
-  // The GET endpoint carries the decision fields on the verdict; the report is
-  // display-shaped. Reconstruct the verdict QaActions needs from the report.
-  const verdict: P3QaVerdict = {
+  // Prefer the real verdict from the envelope (it carries the operator decision
+  // fields Approve/Send-back need). Fall back to a display-shaped reconstruction
+  // from the report only when the envelope verdict is absent.
+  const verdict: P3QaVerdict = envelopeVerdict ?? {
     status: report.status === 'passed' ? 'pass' : report.status === 'failed' ? 'fail' : 'uncertain',
     blocking: report.status === 'failed',
     ranAtSha: report.qaCommitSha,
@@ -124,11 +159,80 @@ function DeployedAppQaReview({ planId, report }: { planId: string; report: P3QaR
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Deliverability chip — the READINESS RULE made visible. NEVER green off
+          the unit-AC rollup; only when deployed-app QA is verified. */}
+      <ReadinessChip readiness={readiness} />
       <DevUrlCard devUrl={report.devUrl} qaCommitSha={report.qaCommitSha} status={devStatus} />
-      <WiringOrphanBanner wiring={report.wiring} />
+      {/* hasRun: a report exists ⇒ the wiring check ran; lets "ran & clean" show
+          a green confirmation instead of being indistinguishable from "never ran". */}
+      <WiringOrphanBanner wiring={report.wiring} hasRun />
       <JourneyVerdicts journeys={report.journeys} />
       <BeforeAfterGallery journeys={report.journeys} />
       <QaActions planId={planId} verdict={verdict} currentQaCommitSha={report.qaCommitSha} />
+    </div>
+  );
+}
+
+// ── Readiness chip — the FROZEN CONTRACT READY-TO-DELIVER affordance ──
+
+const READINESS_META: Record<QaReadiness, { label: string; color: string; help: string }> = {
+  verified: {
+    label: 'Ready to deliver',
+    color: 'var(--success)',
+    help: 'Deployed-app QA verified for the current commit — this plan is deliverable.',
+  },
+  blocking: {
+    label: 'QA blocking',
+    color: 'var(--destructive)',
+    help: 'The deployed-app QA verdict has blocking failures. Send it back, or override via Approve.',
+  },
+  pending: {
+    label: 'QA pending — unverified',
+    color: 'var(--text-mute)',
+    help: 'Deployed-app QA has not passed for the current commit yet. Not ready to deliver.',
+  },
+};
+
+function ReadinessChip({ readiness }: { readiness: QaReadiness }) {
+  const meta = READINESS_META[readiness];
+  return (
+    <div
+      data-testid="qa-readiness-chip"
+      data-readiness={readiness}
+      title={meta.help}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 10,
+        alignSelf: 'flex-start',
+        padding: '8px 16px',
+        border: `1px solid ${meta.color}`,
+        background: `color-mix(in srgb, ${meta.color} 8%, transparent)`,
+        borderRadius: 2,
+      }}
+    >
+      <span
+        style={{
+          background: meta.color,
+          width: 8,
+          height: 8,
+          borderRadius: '50%',
+          display: 'inline-block',
+          boxShadow: readiness === 'blocking' ? `0 0 10px ${meta.color}` : 'none',
+        }}
+      />
+      <span
+        style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+          color: meta.color,
+          textTransform: 'uppercase',
+          letterSpacing: '0.18em',
+          fontWeight: 500,
+        }}
+      >
+        {meta.label}
+      </span>
     </div>
   );
 }

@@ -4019,6 +4019,9 @@ app.get('/api/plans/:id/qa-review-p3', async (c) => {
     journeys: v.journeys ?? [],
     vqa: v.vqa ?? [],
     wiring: v.wiring ?? { orphanModules: [], blocking: false },
+    // Slice B — passthrough of the automated pass mark so the UI can gate its
+    // "READY TO DELIVER" chip on isDeliverable (qaVerifiedAt OR operator Approve).
+    qaVerifiedAt: plan.qaVerifiedAt,
   };
   return c.json({ enabled: true, report, verdict: v });
 });
@@ -6863,12 +6866,20 @@ app.post('/api/plans/:id/promote', async (c) => {
   if (isP3Promote) {
     if (to === 'staging' && (process.env.P3_QA_REVIEW ?? 'off') === 'on') {
       const v = plan.p3QaVerdict;
+      // Slice B — SOFT-BLOCK on the FROZEN readiness rule (single source of truth):
+      //   isDeliverable === Boolean(plan.qaVerifiedAt) || verdict.decision === 'approved'
+      // qaVerifiedAt is the AUTOMATED pass mark (a non-blocking verdict for the
+      // current build); it is REMOVEd on every fresh dev deploy / QA reset, so its
+      // presence already implies current-SHA verification. The operator Approve
+      // path (decision==='approved', pinned to qaCommitSha) remains the escape
+      // hatch and still works even when QA never auto-passed.
       const approved =
         v?.decision === 'approved' && (!plan.qaCommitSha || v.approvedSha === plan.qaCommitSha);
-      if (!approved) {
+      const deliverable = Boolean(plan.qaVerifiedAt) || approved;
+      if (!deliverable) {
         throw new AppError(
-          'QA_NOT_APPROVED',
-          'Promote to staging requires an APPROVED QA Review pinned to the current build. Open the QA tab and Approve (or send back).',
+          'QA_NOT_VERIFIED',
+          'Promote to staging requires a passing deployed-app QA (auto-verified for this build) OR an operator Approve pinned to the current build. Open the QA tab to review, then Approve or send back.',
           400,
         );
       }

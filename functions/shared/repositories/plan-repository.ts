@@ -132,8 +132,11 @@ export async function clearP3QaForRerun(planId: string): Promise<void> {
     new UpdateCommand({
       TableName: TABLE_NAMES.plans,
       Key: { planId },
+      // qaVerifiedAt REMOVED too — the automated pass mark is only valid for the
+      // build QA ran against; a re-run re-deploys a new SHA, so any prior
+      // verification is stale and must not survive into the new cycle.
       UpdateExpression:
-        'REMOVE p3QaJobId, p3QaVerdict, devDeployJobId, qaCommitSha SET updatedAt = :now',
+        'REMOVE p3QaJobId, p3QaVerdict, devDeployJobId, qaCommitSha, qaVerifiedAt SET updatedAt = :now',
       ExpressionAttributeValues: { ':now': new Date().toISOString() },
     }),
   );
@@ -146,7 +149,13 @@ export async function clearP3QaForRerun(planId: string): Promise<void> {
  *     moved on since, this verdict is stale and dropped).
  *  2. DECISION guard — never clobber an operator decision: if the stored verdict
  *     already carries decidedAt, a re-run leaves it untouched.
- * Returns whether it wrote. Reuses updatePlanFields for the write itself.
+ *
+ * P3_QA_REVIEW honest-gate (Slice B): when the verdict is NON-BLOCKING (and the
+ * two guards above pass — i.e. it ran against the CURRENT qaCommitSha and no
+ * human decision exists), ALSO stamp qaVerifiedAt = now in the SAME conditioned
+ * write. A BLOCKING verdict instead REMOVEs any prior qaVerifiedAt (deployed-app
+ * QA is no longer passing for this build). The human decidedAt is never touched.
+ * Returns whether it wrote.
  */
 export async function writeP3QaVerdict(
   planId: string,
@@ -160,7 +169,20 @@ export async function writeP3QaVerdict(
   if (plan.p3QaVerdict?.decidedAt) {
     return { written: false, reason: 'human-decided' };
   }
-  await updatePlanFields(planId, { p3QaVerdict: verdict });
+  const now = new Date().toISOString();
+  const nonBlocking = verdict.blocking !== true;
+  // Non-blocking ⇒ SET the automated pass mark; blocking ⇒ REMOVE any stale one.
+  const setExpr = nonBlocking
+    ? 'SET p3QaVerdict = :v, qaVerifiedAt = :now, updatedAt = :now'
+    : 'SET p3QaVerdict = :v, updatedAt = :now REMOVE qaVerifiedAt';
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.plans,
+      Key: { planId },
+      UpdateExpression: setExpr,
+      ExpressionAttributeValues: { ':v': verdict, ':now': now },
+    }),
+  );
   return { written: true };
 }
 

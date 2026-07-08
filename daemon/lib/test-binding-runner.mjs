@@ -9,6 +9,8 @@
 // the real ones (unit→vitest filter, integration→vitest, browser→probe harness,
 // lint/typecheck→cached-tsc+eslint), each content-hash-cached upstream.
 
+import { requiresBrowser } from './completion-gate.mjs';
+
 const DEFAULT_EXECUTORS = {
   // each returns { passed: boolean, detail?: string }
   unit: async () => ({ passed: false, detail: 'no unit executor wired' }),
@@ -58,6 +60,20 @@ export async function runStoryBindings({ acceptanceCriteria = [], headSha, execu
     if (isManual || tb.status === 'unbound' || !tb.testRef) {
       out.push(ac);
       skipped += 1;
+      continue;
+    }
+    // FAIL CLOSED: an app-level behavior AC MUST run under the browser probe
+    // executor. `exec[kind] || exec.unit` silently downgraded an unknown/misbound
+    // kind to a unit run — for a behavioral AC that is precisely the mocked-unit
+    // hole (a green mock reported as a satisfied behavior). Never downgrade: record
+    // a fail with a reason so the completion gate keeps the story not-done.
+    if (requiresBrowser(ac) && kind !== 'browser') {
+      ran += 1;
+      failed += 1;
+      out.push(recordResult(ac, {
+        passed: false,
+        detail: `behavior/needsBrowser AC requires testKind:'browser'; refusing to run as '${kind || 'unit'}' (mocked-hook test does not satisfy it)`,
+      }, headSha, at));
       continue;
     }
     const runner = exec[kind] || exec.unit;

@@ -71,13 +71,51 @@ export function wiringHeadline(wiring: WiringReport | null | undefined): WiringH
 
 export interface WiringOrphanBannerProps {
   wiring: WiringReport | null | undefined;
+  /**
+   * True when the deployed-app QA (and thus the wiring check) actually RAN for
+   * this plan — e.g. a report/verdict exists. When the check ran AND is clean,
+   * we render a green "ran & clean" confirmation so it is visibly distinct from
+   * "never ran" (the prior silent-null was indistinguishable from a check that
+   * never executed). Defaults false → legacy behavior (render nothing at 0).
+   */
+  hasRun?: boolean;
 }
 
-export function WiringOrphanBanner({ wiring }: WiringOrphanBannerProps) {
+export function WiringOrphanBanner({ wiring, hasRun = false }: WiringOrphanBannerProps) {
   const orphanModules = wiring?.orphanModules ?? [];
+  const clean = orphanModules.length === 0 && wiring?.seamMounted !== false;
 
-  // Hidden only when EVERYTHING is clean (no orphans AND the seam mounts).
-  if (orphanModules.length === 0 && wiring?.seamMounted !== false) return null;
+  // Clean AND the check RAN → an explicit green confirmation (not silence).
+  if (clean && hasRun) {
+    const headline = wiringHeadline(wiring);
+    return (
+      <div
+        data-testid="wiring-orphan-banner"
+        data-wiring-state="ran-clean"
+        style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
+      >
+        <Banner color="var(--success)">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <StatusChip status="pass" />
+            <span
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 12,
+                fontWeight: 600,
+                color: 'var(--foreground)',
+              }}
+            >
+              {headline.label}
+            </span>
+            <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{headline.detail}</span>
+          </div>
+        </Banner>
+      </div>
+    );
+  }
+
+  // Clean AND the check did NOT run (or unknown) → render nothing (legacy).
+  if (clean) return null;
 
   const headline = wiringHeadline(wiring);
 

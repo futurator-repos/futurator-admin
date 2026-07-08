@@ -88,6 +88,15 @@ export interface Plan {
   qaAutopilot?: boolean;
   qaAutoFixRounds?: number;
   p3QaVerdict?: P3QaVerdict;
+  /**
+   * QA-Review W2 readiness stamp. ISO-8601 timestamp set when a NON-BLOCKING
+   * p3QaVerdict is durably recorded for the CURRENT qaCommitSha (deployed-app QA
+   * passed). ABSENT/empty ⇒ deployed-app QA has NOT passed (never ran,
+   * ran-and-blocking, or stale SHA). Cleared (DynamoDB REMOVE) on a QA reset for
+   * a re-run and on a fresh dev deploy. Single source of truth for
+   * isDeliverable(plan). Mirror of functions/shared/types/plan.ts.
+   */
+  qaVerifiedAt?: string;
   deliveryJourneys?: DeliveryJourney[];
   devModel?: string;
   devEffort?: string;

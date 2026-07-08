@@ -28,9 +28,54 @@ const QK_P3_QA = (planId: string) => ['p3-qa-report', planId] as const;
  * flag registry exists in this repo yet). Defaults ENABLED — only an explicit
  * `'false'` opts out — so an unset env (every local dev shell today) doesn't
  * silently hide the tab once a report exists.
+ *
+ * This client default (enabled) intentionally AGREES with the server default,
+ * which is durable-on in sst.config.ts (`P3_QA_REVIEW ?? 'on'`). Neither side
+ * can silently dark-ship the deployed-app QA gate.
  */
 export function isP3QaReviewFlagEnabled(): boolean {
   return process.env.NEXT_PUBLIC_P3_QA_REVIEW !== 'false';
+}
+
+// ── Readiness rule (FROZEN CONTRACT single source of truth) ───────────
+
+/**
+ * The minimal plan-ish shape the readiness rule needs. Both `Plan`
+ * (src/types/plan.ts) and a report+verdict pair coerce to this.
+ */
+export interface DeliverabilityInput {
+  /** Set when a non-blocking verdict is durable for the current qaCommitSha. */
+  qaVerifiedAt?: string;
+  /** The operator/QA verdict — carries `decision` and `blocking`. */
+  p3QaVerdict?: Partial<Pick<P3QaVerdict, 'decision' | 'blocking'>> | null;
+}
+
+/**
+ * The tri-state the UI renders from. `verified` ⇒ green "ready to deliver";
+ * `blocking` ⇒ red "QA blocking"; `pending` ⇒ neutral "QA pending/unverified"
+ * (NEVER green off a unit-AC rollup alone).
+ */
+export type QaReadiness = 'verified' | 'blocking' | 'pending';
+
+/**
+ * The SINGLE source of truth for "is this plan deliverable?" — verbatim the
+ * FROZEN CONTRACT readiness rule:
+ *   isDeliverable === Boolean(qaVerifiedAt) || p3QaVerdict?.decision === 'approved'
+ */
+export function isDeliverable(input: DeliverabilityInput): boolean {
+  return Boolean(input.qaVerifiedAt) || input.p3QaVerdict?.decision === 'approved';
+}
+
+/**
+ * Map a plan-ish input to the readiness tri-state the UI paints:
+ *   deliverable                              → 'verified' (green, ready)
+ *   not deliverable + a blocking verdict     → 'blocking' (red)
+ *   not deliverable + no verdict / non-block → 'pending'  (neutral, NOT green)
+ */
+export function qaReadiness(input: DeliverabilityInput): QaReadiness {
+  if (isDeliverable(input)) return 'verified';
+  if (input.p3QaVerdict?.blocking) return 'blocking';
+  return 'pending';
 }
 
 /**
@@ -60,6 +105,9 @@ function coerceP3QaReport(raw: unknown): P3QaReport | null {
       journeys: Array.isArray(r.journeys) ? r.journeys : [],
       vqa: Array.isArray(r.vqa) ? r.vqa : [],
       wiring: r.wiring ?? { orphanModules: [], blocking: false },
+      // Passthrough of plan.qaVerifiedAt (the endpoint stamps it on the report
+      // envelope). Drives the readiness rule; absent ⇒ QA has NOT passed.
+      qaVerifiedAt: typeof r.qaVerifiedAt === 'string' ? r.qaVerifiedAt : undefined,
     };
   } catch {
     // Parsing itself blew up (unexpected nested shape) — never throw into the tab.
@@ -71,10 +119,31 @@ export interface UseP3QaReportResult {
   /** False when the client flag is off — the view should fall back to legacy QA. */
   enabled: boolean;
   report: P3QaReport | null;
+  /**
+   * The full verdict from the GET envelope (`{ enabled, report, verdict }`).
+   * Carries `decision` + `blocking` — the readiness rule's `approved`/`blocking`
+   * inputs, which the display-shaped `report` does not encode. `null` until a
+   * verdict exists.
+   */
+  verdict: P3QaVerdict | null;
   isLoading: boolean;
   isError: boolean;
   error: Error | null;
   refetch: () => void;
+}
+
+/** Internal query payload — keeps report + verdict together for the cache. */
+interface P3QaEnvelope {
+  report: P3QaReport | null;
+  verdict: P3QaVerdict | null;
+}
+
+/** Light guard: a verdict is usable only if it has a `status` string. */
+function coerceP3QaVerdict(raw: unknown): P3QaVerdict | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const v = raw as Partial<P3QaVerdict>;
+  if (typeof v.status !== 'string') return null;
+  return v as P3QaVerdict;
 }
 
 /**
@@ -84,33 +153,39 @@ export interface UseP3QaReportResult {
  */
 export function useP3QaReport(planId: string | null): UseP3QaReportResult {
   const flagEnabled = isP3QaReviewFlagEnabled();
-  const query = useQuery({
+  const query = useQuery<P3QaEnvelope>({
     queryKey: QK_P3_QA(planId ?? ''),
     queryFn: async () => {
       try {
         // The endpoint returns an envelope { enabled, report, verdict } — the
         // report is nested. Coercing the whole envelope always yields null
-        // (no top-level planId/status), so the view never rendered. Unwrap it.
-        const raw = await api.get<{ enabled?: boolean; report?: unknown }>(
+        // (no top-level planId/status), so the view never rendered. Unwrap it,
+        // keeping the verdict alongside (it carries decision/blocking that the
+        // display-shaped report does not — the readiness rule needs them).
+        const raw = await api.get<{ enabled?: boolean; report?: unknown; verdict?: unknown }>(
           `/plans/${planId}/qa-review-p3`,
         );
-        if (raw && raw.enabled === false) return null;
-        return coerceP3QaReport(raw?.report);
+        if (raw && raw.enabled === false) return { report: null, verdict: null };
+        return {
+          report: coerceP3QaReport(raw?.report),
+          verdict: coerceP3QaVerdict(raw?.verdict),
+        };
       } catch {
         // A malformed/absent report is a data state (render "no report yet"),
         // never an uncaught exception into the tab.
-        return null;
+        return { report: null, verdict: null };
       }
     },
     enabled: !!planId && flagEnabled,
     staleTime: 3_000,
-    refetchInterval: (q) => computeP3QaRefetchInterval(q.state.data?.status),
+    refetchInterval: (q) => computeP3QaRefetchInterval(q.state.data?.report?.status),
   });
 
   if (!flagEnabled) {
     return {
       enabled: false,
       report: null,
+      verdict: null,
       isLoading: false,
       isError: false,
       error: null,
@@ -120,7 +195,8 @@ export function useP3QaReport(planId: string | null): UseP3QaReportResult {
 
   return {
     enabled: true,
-    report: query.data ?? null,
+    report: query.data?.report ?? null,
+    verdict: query.data?.verdict ?? null,
     isLoading: query.isLoading,
     isError: query.isError,
     error: query.error as Error | null,

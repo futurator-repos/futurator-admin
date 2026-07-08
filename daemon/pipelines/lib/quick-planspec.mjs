@@ -477,7 +477,14 @@ export function parseQuickPlanspec(text, { maxStories = MAX_STORIES } = {}) {
     const acceptanceCriteria = acsIn.map((ac, ai) => {
       const t = typeof ac.text === 'string' && ac.text.length >= 5 ? ac.text : `${ac.text || title} (criterion)`;
       const verify = VERIFY_VALUES.has(ac.verify) ? ac.verify : undefined;
-      const needsBrowser = ac.needsBrowser === true || (verify && verify !== 'build');
+      // needsBrowser means "this AC must be driven in the real app via the browser
+      // probe executor" — i.e. it is genuinely APP-LEVEL behavior. Only verify:'behavior'
+      // qualifies (plus an explicit model-authored needsBrowser:true). A pure
+      // verify:'state' reducer AC or a verify:'appearance' (advisory, VQA-gated) AC is
+      // NOT browser-required; the old `verify !== 'build'` rule wrongly flagged those,
+      // which forced pure-function ACs down the browser path. when/thenObservable
+      // authoring below is untouched — the browser probe parser still reads that prose.
+      const needsBrowser = ac.needsBrowser === true || verify === 'behavior';
       return {
         id: `${storyId}-ac${ai + 1}`,
         text: t,

@@ -30,6 +30,8 @@ import {
   getActivePlanForApp,
   addEpicToPlan,
   transitionPlanStatus,
+  writeP3QaVerdict,
+  clearP3QaForRerun,
 } from '../plan-repository';
 import type { Plan, PlanStatus } from '../../types/plan';
 import { planNameSchema } from '../../schemas/plan-schema';
@@ -300,6 +302,100 @@ describe('transitionPlanStatus (App/Plan v1)', () => {
       code: 'PLAN_NOT_FOUND',
       statusCode: 404,
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// P3_QA_REVIEW honest-gate (Slice B) — qaVerifiedAt lifecycle
+// ─────────────────────────────────────────────────────────────────────
+
+const QA_SHA = 'b'.repeat(40);
+function verdict(over: Record<string, unknown> = {}) {
+  return {
+    status: 'pass',
+    blocking: false,
+    ranAtSha: QA_SHA,
+    journeys: [],
+    vqa: [],
+    wiring: { orphanModules: [], blocking: false },
+    ...over,
+  } as NonNullable<Plan['p3QaVerdict']>;
+}
+
+/** Grab the UpdateExpression string from the last UpdateCommand sent. */
+function lastUpdateExpr(): string {
+  const calls = sendMock.mock.calls.filter(
+    ([c]) => (c as { constructor: { name: string } }).constructor.name === 'UpdateCommand',
+  );
+  const last = calls[calls.length - 1]?.[0] as
+    | { input?: { UpdateExpression?: string } }
+    | undefined;
+  return String(last?.input?.UpdateExpression ?? '');
+}
+
+describe('writeP3QaVerdict (Slice B qaVerifiedAt)', () => {
+  beforeEach(() => {
+    sendMock.mockReset();
+  });
+
+  it('non-blocking verdict + matching SHA → SETs qaVerifiedAt', async () => {
+    sendMock.mockResolvedValueOnce({ Item: basePlan({ qaCommitSha: QA_SHA }) }); // getPlanById
+    sendMock.mockResolvedValueOnce({}); // UpdateCommand
+    const res = await writeP3QaVerdict('plan-1', verdict());
+    expect(res.written).toBe(true);
+    const expr = lastUpdateExpr();
+    expect(expr).toContain('qaVerifiedAt = :now');
+    expect(expr).not.toContain('REMOVE');
+  });
+
+  it('blocking verdict → REMOVEs qaVerifiedAt, never SETs it', async () => {
+    sendMock.mockResolvedValueOnce({ Item: basePlan({ qaCommitSha: QA_SHA }) });
+    sendMock.mockResolvedValueOnce({});
+    const res = await writeP3QaVerdict('plan-1', verdict({ blocking: true, status: 'fail' }));
+    expect(res.written).toBe(true);
+    const expr = lastUpdateExpr();
+    expect(expr).toContain('REMOVE qaVerifiedAt');
+    expect(expr).not.toContain('qaVerifiedAt = :now');
+  });
+
+  it('stale SHA → does NOT write (no qaVerifiedAt stamp)', async () => {
+    sendMock.mockResolvedValueOnce({ Item: basePlan({ qaCommitSha: 'c'.repeat(40) }) });
+    const res = await writeP3QaVerdict('plan-1', verdict()); // ranAtSha = QA_SHA ≠ plan sha
+    expect(res).toEqual({ written: false, reason: 'stale-sha' });
+    expect(sendMock).toHaveBeenCalledTimes(1); // only the getPlanById read
+  });
+
+  it('human already decided → leaves the row untouched', async () => {
+    sendMock.mockResolvedValueOnce({
+      Item: basePlan({
+        qaCommitSha: QA_SHA,
+        p3QaVerdict: verdict({ decidedAt: '2026-07-04T00:00:00Z', decision: 'approved' }),
+      }),
+    });
+    const res = await writeP3QaVerdict('plan-1', verdict());
+    expect(res).toEqual({ written: false, reason: 'human-decided' });
+    expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('clearP3QaForRerun (Slice B)', () => {
+  beforeEach(() => {
+    sendMock.mockReset();
+  });
+
+  it('REMOVEs qaVerifiedAt along with the rest of the QA pin', async () => {
+    sendMock.mockResolvedValueOnce({});
+    await clearP3QaForRerun('plan-1');
+    const expr = lastUpdateExpr();
+    for (const field of [
+      'p3QaJobId',
+      'p3QaVerdict',
+      'devDeployJobId',
+      'qaCommitSha',
+      'qaVerifiedAt',
+    ]) {
+      expect(expr).toContain(field);
+    }
   });
 });
 

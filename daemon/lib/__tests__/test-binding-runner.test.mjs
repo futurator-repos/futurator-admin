@@ -42,6 +42,34 @@ describe('runStoryBindings', () => {
     expect(acceptanceCriteria[0].testBinding.detail).toMatch(/boom/);
   });
 
+  it('FAIL CLOSED: a behavior AC bound testKind:unit is not run as unit — recorded failing', async () => {
+    let unitRan = false;
+    const { acceptanceCriteria, summary } = await runStoryBindings({
+      acceptanceCriteria: [{
+        id: 'beh', verify: 'behavior', needsBrowser: true, acClass: 'deterministic',
+        testBinding: { status: 'bound', testRef: 'x.test.ts', testKind: 'unit' },
+      }],
+      headSha: 'SHA1',
+      executors: { unit: async () => { unitRan = true; return { passed: true }; } },
+    });
+    expect(unitRan).toBe(false); // never silently downgraded to the unit executor
+    expect(acceptanceCriteria[0].testBinding.status).toBe('failing');
+    expect(acceptanceCriteria[0].testBinding.detail).toMatch(/browser/);
+    expect(summary).toEqual({ ran: 1, passed: 0, failed: 1, skipped: 0 });
+  });
+
+  it('a behavior AC bound testKind:browser runs under the browser executor', async () => {
+    const { acceptanceCriteria } = await runStoryBindings({
+      acceptanceCriteria: [{
+        id: 'beh', verify: 'behavior', needsBrowser: true, acClass: 'deterministic',
+        testBinding: { status: 'bound', testRef: 'probe:reach', testKind: 'browser' },
+      }],
+      headSha: 'SHA1',
+      executors: { browser: async () => ({ passed: true }) },
+    });
+    expect(acceptanceCriteria[0].testBinding.status).toBe('passing');
+  });
+
   it('end-to-end: run → evaluateCompletion reports done when all pass at headSha', async () => {
     const headSha = 'SHA9';
     const { acceptanceCriteria } = await runStoryBindings({

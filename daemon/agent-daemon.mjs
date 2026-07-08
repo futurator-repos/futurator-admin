@@ -1828,16 +1828,24 @@ async function executeP3QaJob(job) {
 
   // Persist shadow-safely: only under the SHA QA ran against, never over a human
   // decision (mirrors functions/shared repositories writeP3QaVerdict guards).
+  // P3_QA_REVIEW honest-gate (Slice B): a NON-BLOCKING verdict ALSO stamps
+  // qaVerifiedAt = now (the automated "deployed-app QA passed" mark, gated on the
+  // same SHA/decision guards); a BLOCKING verdict REMOVEs any prior mark. The
+  // SHA condition guarantees qaVerifiedAt only ever reflects the CURRENT build.
   try {
+    const nonBlocking = verdict.blocking !== true;
+    const updateExpr = nonBlocking
+      ? 'SET p3QaVerdict = :v, qaVerifiedAt = :now, updatedAt = :now'
+      : 'SET p3QaVerdict = :v, updatedAt = :now REMOVE qaVerifiedAt';
     await ddb.send(new UpdateCommand({
       TableName: PLANS_TABLE,
       Key: { planId: job.planId },
-      UpdateExpression: 'SET p3QaVerdict = :v, updatedAt = :now',
+      UpdateExpression: updateExpr,
       ExpressionAttributeValues: { ':v': verdict, ':now': new Date().toISOString(), ':sha': verdict.ranAtSha || '' },
       ConditionExpression:
         '(attribute_not_exists(qaCommitSha) OR qaCommitSha = :sha) AND attribute_not_exists(p3QaVerdict.decidedAt)',
     }));
-    vlog('info', `p3-qa verdict: status=${verdict.status} blocking=${verdict.blocking} journeys=${verdict.journeys?.length ?? 0} orphans=${verdict.wiring?.orphanModules?.length ?? 0}`);
+    vlog('info', `p3-qa verdict: status=${verdict.status} blocking=${verdict.blocking} verified=${nonBlocking} journeys=${verdict.journeys?.length ?? 0} orphans=${verdict.wiring?.orphanModules?.length ?? 0}`);
   } catch (e) {
     if (e.name === 'ConditionalCheckFailedException') vlog('warn', 'p3-qa verdict dropped (stale SHA or human-decided)');
     else vlog('warn', `p3-qa verdict persist failed: ${e.message}`);
@@ -6070,10 +6078,17 @@ async function postDeployWriteback(job, variables) {
     // Extracted to a pure, unit-tested module (qa-commit-sha.mjs) — this file
     // has zero test coverage, which is exactly how the bug shipped unnoticed.
     const stampSha = resolveStampableCommitSha({ deployEnv, variables });
+    // P3_QA_REVIEW honest-gate (Slice B): a fresh DEV deploy re-pins the build
+    // (new qaCommitSha), so any prior automated QA pass is now stale — REMOVE
+    // qaVerifiedAt so the plan is NOT deliverable until the deployed-app QA
+    // re-verifies this new SHA. Staging deploys happen AFTER approval and leave
+    // qaVerifiedAt alone.
+    const clearVerified = field === 'devUrl';
     try {
-      const expr = stampSha
+      const setExpr = stampSha
         ? `SET ${field} = :url, qaCommitSha = :sha, updatedAt = :now`
         : `SET ${field} = :url, updatedAt = :now`;
+      const expr = clearVerified ? `${setExpr} REMOVE qaVerifiedAt` : setExpr;
       const vals = stampSha
         ? { ':url': deployUrl, ':sha': stampSha, ':now': now }
         : { ':url': deployUrl, ':now': now };
@@ -6097,7 +6112,9 @@ async function postDeployWriteback(job, variables) {
         try {
           await ddb.send(new UpdateCommand({
             TableName: PLANS_TABLE, Key: { planId: plan.planId },
-            UpdateExpression: `SET ${field} = :url, updatedAt = :now`,
+            UpdateExpression: clearVerified
+              ? `SET ${field} = :url, updatedAt = :now REMOVE qaVerifiedAt`
+              : `SET ${field} = :url, updatedAt = :now`,
             ExpressionAttributeValues: { ':url': deployUrl, ':now': now },
             ConditionExpression: 'attribute_exists(planId)',
           }));

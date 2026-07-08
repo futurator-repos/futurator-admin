@@ -143,6 +143,34 @@ export const handler = async () => {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    } else if (plan.status === 'review' && !plan.p3QaJobId) {
+      // Slice B — VISIBLE SKIP diagnosis. A plan sits in `review` but the
+      // deployed-app QA gate did NOT enqueue: either the flag is off/unset (the
+      // gate is dark-shipped — must be 'on', see FROZEN CONTRACT / sst.config.ts)
+      // or the dev deploy hasn't stamped devUrl+qaCommitSha yet (stuck upstream).
+      // Without this line the gate was a silent no-op — indistinguishable from
+      // "QA passed". Log it every tick so a disabled/stuck gate is diagnosable.
+      const flag = process.env.P3_QA_REVIEW ?? '(unset)';
+      const flagOff = !process.env.P3_QA_REVIEW || process.env.P3_QA_REVIEW === 'off';
+      const reason = flagOff
+        ? 'flag-off (P3_QA_REVIEW not on — deployed-app gate is dark)'
+        : !plan.devUrl
+          ? 'devUrl-missing (dev deploy not settled)'
+          : !plan.qaCommitSha
+            ? 'qaCommitSha-missing (commit not stamped)'
+            : 'unknown';
+      log(
+        'warn',
+        'wave-completion-check',
+        'P3 QA Review SKIPPED — deployed-app gate not enqueued',
+        {
+          planId: plan.planId,
+          reason,
+          flag,
+          hasDevUrl: Boolean(plan.devUrl),
+          hasQaCommitSha: Boolean(plan.qaCommitSha),
+        },
+      );
     }
 
     // 1c. QA AUTOPILOT — the autonomous fix loop. When the verdict lands

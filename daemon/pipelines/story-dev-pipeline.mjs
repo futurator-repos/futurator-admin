@@ -49,10 +49,30 @@ import {
   shouldRetry,
 } from './lib/story-retry.mjs';
 
+/**
+ * Render one AC line with its verification semantics. A behavior/needsBrowser AC
+ * is app-level: it MUST be bound testKind:'browser' (the browser probe executor
+ * drives the real app via window.__harness by reading its when/thenObservable
+ * prose). Surfacing verify/needsBrowser/when/thenObservable per AC is what lets the
+ * agent bind correctly — the completion gate REJECTS a unit/manual binding here.
+ */
+function renderAcLine(ac, i) {
+  const browser = ac.verify === 'behavior' || ac.needsBrowser === true;
+  const tags = [
+    ac.acClass ? ac.acClass : null,
+    ac.verify ? `verify:${ac.verify}` : null,
+    browser ? 'needsBrowser:true → MUST bind testKind:browser' : null,
+  ].filter(Boolean).join(', ');
+  const probe = browser && (ac.when || ac.thenObservable)
+    ? `\n     when: ${ac.when || '(unspecified)'} → thenObservable: ${ac.thenObservable || '(unspecified)'}`
+    : '';
+  return `  ${i + 1}. [${ac.id}] ${ac.text}${tags ? ` (${tags})` : ''}${probe}`;
+}
+
 /** Build the single-story dev prompt. PURE. Requires the agent to emit <BINDING>. */
 export function buildStoryDevPrompt(payload) {
   const acLines = (payload.acceptanceCriteria || [])
-    .map((ac, i) => `  ${i + 1}. [${ac.id}] ${ac.text}${ac.acClass ? ` (${ac.acClass})` : ''}`)
+    .map((ac, i) => renderAcLine(ac, i))
     .join('\n');
   return [
     `You are implementing ONE story in an automated spec-driven pipeline.`,
@@ -73,6 +93,15 @@ export function buildStoryDevPrompt(payload) {
     `<BINDING>`,
     `{ ${(payload.acceptanceCriteria || []).map((ac) => `"${ac.id}": { "testRef": "<test selector>", "testKind": "unit|integration|browser|manual" }`).join(', ')} }`,
     `</BINDING>`,
+    ``,
+    `# BINDING RULES (the completion gate is deterministic and fails CLOSED)`,
+    `- An AC marked verify:'behavior' / needsBrowser:true MUST be bound testKind:'browser'.`,
+    `  The browser executor drives the REAL app through window.__harness by reading that`,
+    `  AC's when/thenObservable prose — no test file is needed for a browser binding.`,
+    `  A mocked-hook unit/integration test does NOT satisfy such an AC and the gate will`,
+    `  REJECT a testKind of 'unit'/'integration'/'manual' for it (the story stays not-done).`,
+    `- A pure verify:'state'/'build' AC on this slice is legitimately a unit test — bind it`,
+    `  testKind:'unit'. Do NOT inflate a pure-function AC to 'browser'.`,
     // Bounded fix-forward: on a retry the ONLY new instruction is the real
     // failing-test output from the prior attempt. Scope (touches/forbidden) is
     // unchanged — this is a same-scope re-spawn, not a new story.
