@@ -20,7 +20,7 @@ import {
   PutCommand,
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { spawn, execSync } from 'child_process';
+import { spawn, execSync, spawnSync } from 'child_process';
 import { mkdirSync, existsSync, readFileSync, statSync, appendFileSync, readdirSync } from 'fs';
 import { join as pathJoin, extname as pathExtname, relative as pathRelative, basename as pathBasename } from 'path';
 import { createHash } from 'node:crypto';
@@ -90,10 +90,21 @@ import {
   JOB_HANDLER_STORY_DEV,
   JOB_HANDLER_QUICK_PLANSPEC,
   JOB_HANDLER_P3_QA,
+  JOB_HANDLER_INTEGRATOR,
   validateScanEngineJob,
   validateP3QaJob,
+  validateIntegratorJob,
 } from './pipelines/job-router.mjs';
 import { runStoryDevJob } from './pipelines/story-dev-pipeline.mjs';
+// Reality-Spine P3 — the whole-tree Integrator + its readiness gate. The daemon
+// wires the real green runners (tree-gates + boot-liveness) and the story-dev
+// gate deps factory (foundation-gate) so S3's foundationGate/greenTrunk resolve.
+import { runIntegratorJob } from './pipelines/integrator-pipeline.mjs';
+import { makeStoryDevGateDeps } from './lib/foundation-gate.mjs';
+import { runTreeTypecheck, runTreeBuild } from './lib/tree-gates.mjs';
+import { runBootLiveness, defaultLivenessInputs } from './lib/boot-liveness.mjs';
+import { bootDevServer } from './lib/dev-server-boot.mjs';
+import { envFlag } from './lib/pipeline-flags.mjs';
 import { runQuickPlanspecJob } from './pipelines/quick-planspec-runner.mjs';
 import { propagateCompletion, dependentsOf } from './lib/story-dispatch-driver.mjs';
 import { defaultExecutors } from './lib/test-executors.mjs';
@@ -103,7 +114,7 @@ import { defaultExecutors } from './lib/test-executors.mjs';
 import { buildStoryStateUpdate } from './lib/story-persist.mjs';
 import { runStoryCompileGraph } from './pipelines/lib/story-compile-graph.mjs';
 import { enqueueStoryReflector } from './pipelines/lib/story-reflector-hook.mjs';
-import { nextStatusOnDispatch, nextStatusOnAllDone, allStoriesResolved } from './lib/p3-lifecycle.mjs';
+import { nextStatusOnDispatch, nextStatusOnAllDone, allStoriesResolved, integrateSatisfied } from './lib/p3-lifecycle.mjs';
 import { resolveStampableCommitSha } from './lib/qa-commit-sha.mjs';
 import { runUltracodeBenchJob } from './pipelines/ultracode-bench-job-runner.mjs';
 import { makeCaptureDeps } from './pipelines/ultracode-bench-capture.mjs';
@@ -1600,7 +1611,7 @@ async function writeHeartbeat() {
           // Labs3 can tell the operator whether ingested StoryNodes will actually
           // be dispatched — an ingested plan whose frontier is off/shadow sits
           // idle, which otherwise looks like a silent hang.
-          p3ReadyFrontier: (process.env.P3_READY_FRONTIER || 'off').toLowerCase(),
+          p3ReadyFrontier: envFlag('P3_READY_FRONTIER'),
           // Story 20.16 — ConcurrencyManager snapshot. Lives alongside
           // the legacy `processes` array; UI diagnostics can use either.
           // The snapshot is cheap to compute (in-memory map walk) so we
@@ -1651,7 +1662,7 @@ const PLAN_SPEC_GRAPH_TABLE = process.env.PLAN_SPEC_GRAPH_TABLE || 'futurator-pl
 // shadow LOGS would-dispatch (the A/B substrate vs legacy waves); on CLAIMS each
 // ready story atomically and mints a `story-dev` AgentJob the poll loop runs.
 async function runFrontierScan() {
-  const mode = (process.env.P3_READY_FRONTIER || 'off').toLowerCase();
+  const mode = envFlag('P3_READY_FRONTIER');
   if (mode === 'off') return;
   try {
     const [{ runFrontierTick }, { buildStoryDevContract, buildStoryDevJob, mintStoryDevJob }] = await Promise.all([
@@ -1709,7 +1720,7 @@ async function runFrontierScan() {
         ddb,
         table: PLAN_SPEC_GRAPH_TABLE,
         planId,
-        p3Flags: { P3_READY_FRONTIER: mode, P3_FRONTIER_MODE: (process.env.P3_FRONTIER_MODE || 'kahn') },
+        p3Flags: { P3_READY_FRONTIER: mode, P3_FRONTIER_MODE: envFlag('P3_FRONTIER_MODE') },
         owner: 'daemon',
         enqueue: mode === 'on' ? enqueue : undefined,
         log,
@@ -1877,7 +1888,7 @@ async function executeStoryDevJob(job) {
   // On the first story dispatch, advance concept→developing so the lifecycle
   // strip reflects reality. Conditional write → idempotent + race-safe (only the
   // concept→developing transition ever fires here). Dark unless the flag is on.
-  if (process.env.P3_LIFECYCLE === 'on' && planId) {
+  if (envFlag('P3_LIFECYCLE') === 'on' && planId) {
     const nextStatus = nextStatusOnDispatch(planRow?.status || 'concept');
     if (nextStatus) {
       try {
@@ -1965,6 +1976,14 @@ async function executeStoryDevJob(job) {
       spawn,
       claudeBin: CLAUDE_BIN,
       headSha,
+      // Reality-Spine P1/P2 — the hardened foundation gate (tsc+build+boot-
+      // liveness, foundation stories) + the per-story green-trunk check
+      // (tsc+build). The factory boots the real dev server (harness seam) and
+      // lazy-imports playwright; story-dev-pipeline only decides WHEN to call
+      // them (guarded by P3_FOUNDATION_GATE / P3_GREEN_TRUNK). qaContext is also
+      // threaded so the foundation gate can resolve the boilerplate dev port.
+      ...makeStoryDevGateDeps({ cwd: job.workingDir, spawnSync, qaContext }),
+      qaContext,
       // Real bound-AC test executors run in the shared plan tree. qaContext
       // enables the browser/__harness executor for kind=browser behavioral ACs.
       executors: defaultExecutors({ cwd: job.workingDir, qaContext, log: (lvl, m) => log(lvl, `[${short}] ${m}`) }),
@@ -2193,6 +2212,217 @@ async function executeStoryDevJob(job) {
 }
 
 /**
+ * Reality-Spine P3 — enqueue the whole-tree Integrator for a plan whose current
+ * app-tree head is not yet integrate-verified. AT-MOST-ONCE per head: skips when
+ * an integrator job for this plan is still in flight (PENDING/RUNNING); otherwise
+ * CAS-claims the `integratorJobId` slot (serializes racing last-completions) and
+ * mints a fresh `integrator` job pinned to `targetHeadSha`. Never throws out.
+ */
+async function maybeEnqueueIntegrator({ planId, planRow, headSha, workingDir, short }) {
+  try {
+    const prevJobId = planRow?.integratorJobId;
+    // AT-MOST-ONCE PER HEAD (the staleness discipline the redesign calls for):
+    // skip if the prior integrator is still in flight, OR if it already ATTEMPTED
+    // this exact head (terminal, same targetHeadSha). Re-enqueue ONLY when the
+    // head has MOVED — i.e. a fix-story commit changed the tree — so an
+    // un-greenable tree can never spin up an infinite series of Opus integrators.
+    // A completed-but-red integrator for the current head leaves the plan
+    // fail-closed OUT of review (its INTEGRATE_GREEN='false' surfaces the stall).
+    if (prevJobId) {
+      try {
+        const existing = (await ddb.send(new GetCommand({ TableName: JOBS_TABLE, Key: { jobId: prevJobId } }))).Item;
+        if (existing) {
+          const inFlight = existing.status === 'PENDING' || existing.status === 'RUNNING';
+          const sameHead = existing.targetHeadSha && existing.targetHeadSha === headSha;
+          if (inFlight || sameHead) return;
+        }
+      } catch { /* tolerate a read miss — fall through to (re)enqueue */ }
+    }
+
+    const jobId = randomUUID();
+    const nowIso = new Date().toISOString();
+    const appId = planRow?.appId || pathBasename(workingDir || '');
+
+    // CAS on the slot: only claim if integratorJobId still holds the value we
+    // read (or is absent). The loser of a concurrent race no-ops.
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: PLANS_TABLE,
+        Key: { planId },
+        UpdateExpression: 'SET integratorJobId = :j, updatedAt = :now',
+        ConditionExpression: prevJobId ? 'integratorJobId = :prev' : 'attribute_not_exists(integratorJobId)',
+        ExpressionAttributeValues: prevJobId
+          ? { ':j': jobId, ':now': nowIso, ':prev': prevJobId }
+          : { ':j': jobId, ':now': nowIso },
+      }));
+    } catch (e) {
+      if (e.name === 'ConditionalCheckFailedException') return; // another completion claimed the slot
+      throw e;
+    }
+    if (planRow) planRow.integratorJobId = jobId;
+
+    await ddb.send(new PutCommand({
+      TableName: JOBS_TABLE,
+      Item: {
+        jobId,
+        jobType: 'integrator',
+        status: 'PENDING',
+        planId,
+        appId,
+        planSlug: appId,
+        workingDir,
+        integratorModel: planRow?.integratorModel,
+        targetHeadSha: headSha,
+        failureSummary: 'Assemble + green the whole tree before review (Reality-Spine INTEGRATE-RUN). Every story is terminal but no actor has run the assembled artifact as a whole.',
+        createdBy: planRow?.createdBy || 'daemon:integrate-run',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      },
+    }));
+    log('info', `[${short}] plan ${planId.slice(0, 8)} → integrator ${jobId.slice(0, 8)} enqueued for head ${String(headSha).slice(0, 7)}`);
+  } catch (e) {
+    log('warn', `[${short}] integrator enqueue failed (non-blocking): ${e.message}`);
+  }
+}
+
+// Reality-Spine P3 — execute the whole-tree Integrator: one Opus agent with
+// whole-tree write authority loops to full green (tsc && lint && test && build
+// && boot-liveness), commits, and stamps the SHA-pinned integrate mark on the
+// plan so the review transition becomes reachable. On green it re-triggers the
+// lifecycle advance; on exhaustion it leaves the plan un-verified (fail-closed).
+async function executeIntegratorJob(job) {
+  const short = job.jobId.slice(0, 8);
+  const planId = job.planId;
+  await updateJobFields(job.jobId, { status: 'RUNNING', lastHeartbeatAt: new Date().toISOString() });
+
+  const check = validateIntegratorJob(job);
+  if (!check.ok) {
+    log('error', `[${short}] integrator job invalid: ${check.reason}`);
+    await updateJobFields(job.jobId, { status: 'FAILED', error: `invalid integrator job: ${check.reason}` });
+    return;
+  }
+
+  let planRow = null;
+  try {
+    planRow = (await ddb.send(new GetCommand({ TableName: PLANS_TABLE, Key: { planId } }))).Item;
+  } catch { /* tolerate — run with job-carried identity */ }
+  const appId = job.appId || planRow?.appId || pathBasename(job.workingDir || '');
+
+  // Resolve the boilerplate qaContext so boot-liveness can serve the app on the
+  // right dev port + healthcheck path (browser probe drives window.__harness).
+  let qaContext;
+  try {
+    const appRowQa = await getAppRow(appId);
+    const { getGateEntry } = await import('./lib/gate-registry.mjs');
+    qaContext = getGateEntry(appRowQa?.boilerplateType || 'nextjs-base')?.qaContext;
+  } catch (e) {
+    log('warn', `[${short}] integrator qaContext resolve failed (boot-liveness fail-closed): ${e.message}`);
+  }
+
+  // The head BEFORE the integrator runs — the fallback pin when the agent makes
+  // no changes (tree already green).
+  let headSha = '';
+  try {
+    const r = await daemonGit(['rev-parse', 'HEAD'], job.workingDir);
+    if (r.code === 0) headSha = r.stdout.trim();
+  } catch { /* tolerate */ }
+
+  // Deterministic green runner: a shell command in the app tree → { passed, detail }.
+  const runShellGate = (cmd, args, cwd) => {
+    try {
+      const res = spawnSync(cmd, args, { cwd, encoding: 'utf8', timeout: 300000 });
+      if (res.error) return { passed: false, detail: `${cmd} error: ${res.error.message}` };
+      const passed = res.status === 0;
+      const tail = ((res.stdout || '') + (res.stderr || '')).trim().slice(-400);
+      return { passed, detail: passed ? 'pass' : `exit ${res.status}: ${tail}` };
+    } catch (e) {
+      return { passed: false, detail: `${cmd} threw: ${e.message}` };
+    }
+  };
+
+  // Boot-liveness dep: boot the served build (harness seam), replay synthetic
+  // inputs, assert an observable state delta. FAIL CLOSED on any boot/probe error.
+  const bootLiveness = async ({ cwd }) => {
+    const port = qaContext?.defaultPort ?? 3000;
+    let boot;
+    try {
+      const { defaultShellRunner } = await import('./lib/wave-merge-runner.mjs');
+      boot = await bootDevServer({
+        cwd,
+        qaContext,
+        port,
+        shell: (cmd, c, t) => defaultShellRunner(cmd, c, t),
+        log: (m) => log('info', `[${short}] boot: ${m}`),
+      });
+      if (!boot?.ok) {
+        return { passed: false, detail: `dev server did not boot (status=${boot?.status ?? 'unknown'})` };
+      }
+      const url = `http://localhost:${boot.port}${qaContext?.healthcheckPath ?? '/'}`;
+      let playwright = null;
+      try { playwright = await import('playwright'); }
+      catch (e) { return { passed: false, detail: `playwright unavailable: ${e.message}` }; }
+      return await runBootLiveness({ url, playwright, inputs: defaultLivenessInputs(), log: (l, m) => log(l, `[${short}] ${m}`) });
+    } catch (e) {
+      return { passed: false, detail: `boot-liveness error: ${e.message}` };
+    } finally {
+      try { if (boot?.stop) await boot.stop(); } catch { /* best-effort */ }
+    }
+  };
+
+  const result = await runIntegratorJob({
+    job: {
+      ...job,
+      appId,
+      planSlug: appId,
+      integratorModel: planRow?.integratorModel || job.integratorModel,
+      costCeilingUsd: planRow?.costCeilingUsd,
+    },
+    eventLogDir: EVENT_LOG_DIR,
+    deps: {
+      spawn,
+      claudeBin: CLAUDE_BIN,
+      git: daemonGit,
+      headSha,
+      runTreeTypecheck: ({ cwd }) => runTreeTypecheck({ cwd, spawnSync }),
+      runTreeBuild: ({ cwd }) => runTreeBuild({ cwd, spawnSync }),
+      runLint: ({ cwd }) => runShellGate('npm', ['run', 'lint'], cwd),
+      runTests: ({ cwd }) => runShellGate('npm', ['run', 'test'], cwd),
+      bootLiveness,
+      updateJobFields,
+      pushEvent,
+      logger: { info: (m) => log('info', m), warn: (m) => log('warn', m), error: (m) => log('error', m) },
+      now: Date.now,
+    },
+  });
+
+  // On green, stamp the SHA-pinned integrate mark so `integrateSatisfied` passes
+  // for this head and review becomes reachable. runIntegratorJob already set the
+  // job to COMPLETED with INTEGRATE_SHA/INTEGRATE_GREEN.
+  if (result.green && result.sha) {
+    try {
+      const nowIso = new Date().toISOString();
+      await ddb.send(new UpdateCommand({
+        TableName: PLANS_TABLE,
+        Key: { planId },
+        UpdateExpression: 'SET integrateVerifiedAt = :now, integrateVerifiedSha = :sha, updatedAt = :now',
+        ExpressionAttributeValues: { ':now': nowIso, ':sha': result.sha },
+      }));
+      if (planRow) { planRow.integrateVerifiedAt = nowIso; planRow.integrateVerifiedSha = result.sha; }
+      log('info', `[${short}] integrator GREEN — plan ${planId.slice(0, 8)} integrate-verified @${String(result.sha).slice(0, 7)}`);
+    } catch (e) {
+      log('warn', `[${short}] integrate-verified stamp failed (non-blocking): ${e.message}`);
+    }
+  } else {
+    log('warn', `[${short}] integrator did NOT reach green (${result.failing?.join(', ') || 'unknown'}) — plan stays un-verified (fail-closed)`);
+  }
+
+  // Re-trigger the lifecycle advance now that the head may be integrate-verified
+  // (green) — flips to review — or still is not (exhausted) — holds, surfacing the
+  // failure to the operator via the completed-but-red integrator job.
+  await maybeAdvancePlanOnAllResolved({ planId, planRow, storyId: undefined, short });
+}
+
+/**
  * P3 lifecycle advance — flip the plan to `review` when EVERY story is TERMINAL
  * (done OR failed), not only when all are done. pacman4 forensic (2026-07-06):
  * a failed fix-story is terminal, so an all-`done` predicate wedged the plan in
@@ -2230,9 +2460,37 @@ async function maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short }
     // QA-Review W1 (P3_LIFECYCLE) — advance to `review`, which the cron watches
     // to auto dev-deploy + launch the real assembled-app QA. Conditional write
     // on a pre-review status → idempotent. Dark unless the flag is on.
-    if (process.env.P3_LIFECYCLE === 'on') {
+    if (envFlag('P3_LIFECYCLE') === 'on') {
       const nextStatus = nextStatusOnAllDone(planRow?.status || 'developing');
       if (nextStatus) {
+        // Reality-Spine P3 (redesign Part 2 P3, Part 3 #2) — the INTEGRATE-RUN
+        // precondition. `review` is unreachable until the whole-tree Integrator
+        // has proven the CURRENT app-tree head fully green + committed it
+        // (integrateVerifiedSha === head). Resolve the live head; if it is not
+        // yet integrate-verified, dispatch the Integrator (at-most-once per
+        // head) and HOLD — do not flip. The Integrator's own green commit
+        // becomes the head it stamps as integrateVerifiedSha, so the re-triggered
+        // advance (from executeIntegratorJob) then finds integrateSatisfied ===
+        // true and flips to review. A later fix-story commit moves the head and
+        // forces a fresh Integrator round. Fail-closed: an unresolvable head or a
+        // still-red tree never advances.
+        const workingDir = planRow?.workingDir;
+        let headSha = '';
+        if (workingDir) {
+          try {
+            const r = await daemonGit(['rev-parse', 'HEAD'], workingDir);
+            if (r.code === 0) headSha = r.stdout.trim();
+          } catch { /* tolerate — headSha stays '' → integrateSatisfied false */ }
+        }
+        if (!integrateSatisfied({ integrateVerifiedSha: planRow?.integrateVerifiedSha, headSha })) {
+          if (workingDir && headSha) {
+            await maybeEnqueueIntegrator({ planId, planRow, headSha, workingDir, short });
+          } else {
+            log('warn', `[${short}] plan ${planId.slice(0, 8)} integrate-gate: no resolvable workingDir/head — holding out of review (fail-closed)`);
+          }
+          return; // do NOT flip to review until the Integrator proves the head green
+        }
+
         try {
           await ddb.send(new UpdateCommand({
             TableName: PLANS_TABLE,
@@ -2245,7 +2503,7 @@ async function maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short }
               ':concept': 'concept', ':developing': 'developing', ':fixing': 'fixing',
             },
           }));
-          log('info', `[${short}] plan ${planId.slice(0, 8)} → review (all ${nodes.length} stories resolved${failedCount ? `, ${failedCount} failed — deployed-app QA is the gate` : ''})`);
+          log('info', `[${short}] plan ${planId.slice(0, 8)} → review (all ${nodes.length} stories resolved, integrate-verified @${String(headSha).slice(0, 7)}${failedCount ? `, ${failedCount} failed — deployed-app QA is the gate` : ''})`);
         } catch { /* conditional fail = already advanced by a racing completion; fine */ }
       }
     }
@@ -7256,6 +7514,8 @@ async function runJobAsync(job) {
       await executeQuickPlanspecJob(job);
     } else if (handler === JOB_HANDLER_P3_QA) {
       await executeP3QaJob(job);
+    } else if (handler === JOB_HANDLER_INTEGRATOR) {
+      await executeIntegratorJob(job);
     } else {
       await executePipeline(job);
     }

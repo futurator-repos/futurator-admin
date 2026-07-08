@@ -34,6 +34,13 @@ function parseActions(src) {
   const keyRe = /(?:press(?:es|ing)?\s+(?:the\s+)?(\w+))|(?:keydown\s+code=['"]?(\w+)['"]?)/gi;
   while ((m = keyRe.exec(src))) found.push({ index: m.index, obj: { type: 'key', key: m[1] || m[2] } });
 
+  // HELD keys (VQA canvas-game power): "hold ArrowRight", "holding down Space".
+  // A held key is dispatched keyboard.down → (settle while held) → keyboard.up,
+  // so a continuous-input game (isDown polling) actually moves during the settle
+  // window instead of registering a single instantaneous keydown. Optional.
+  const holdRe = /hold(?:s|ing)?\s+(?:down\s+)?(?:the\s+)?(\w+)/gi;
+  while ((m = holdRe.exec(src))) found.push({ index: m.index, obj: { type: 'key', key: m[1], hold: true } });
+
   const fsRe = /(?:forces?\s+status\s+to\s+['"](\w+)['"])|(?:forceStatus\(['"](\w+)['"]\))/gi;
   while ((m = fsRe.exec(src)))
     found.push({ index: m.index, obj: { type: 'harness', method: 'forceStatus', args: [m[1] || m[2]] } });
@@ -189,26 +196,164 @@ export async function runBrowserProbe({ url, actions = [], assertions = [], play
   }
 }
 
-/** Run one step's replayed action against a live Playwright page. */
-async function replayAction(page, action) {
-  if (!action) return;
-  if (action.type === 'key') await page.keyboard.press(action.key);
-  else if (action.type === 'harness')
+/** The note recorded when a DRIVE action is refused under observe-only QA. */
+export const OBSERVE_ONLY_NOTE = 'drive action disabled in observe-only QA; reach the state as a user';
+
+/**
+ * Run one step's replayed action against a live Playwright page.
+ *
+ * Returns `{ release?, note? }`:
+ *  - `release` is an async fn to call AFTER the observation window for a HELD
+ *    key (keyboard.up), so the key stays down across the settle+poll.
+ *  - `note` records why an action was skipped (observe-only DRIVE refusal).
+ *
+ * OBSERVE-ONLY (`observeOnly`): the harness DRIVE lane (forceStatus/dispatch)
+ * is refused — a QA probe must reach the state the way a USER would (keys,
+ * clicks). Synthetic keyboard/click INPUT is still allowed (that IS a user).
+ */
+async function replayAction(page, action, { observeOnly = false } = {}) {
+  if (!action) return {};
+  if (action.type === 'harness') {
+    if (observeOnly) return { note: OBSERVE_ONLY_NOTE };
     await page.evaluate(({ m, args }) => window.__harness[m](...args), { m: action.method, args: action.args || [] });
-  else if (action.type === 'wait') await page.waitForTimeout(action.ms);
-  else if (action.type === 'click') {
+    return {};
+  }
+  if (action.type === 'key') {
+    if (action.hold) {
+      // HELD: press down now, release after the observation window so the game
+      // integrates continuous input during the settle (isDown-polling loops).
+      await page.keyboard.down(action.key);
+      return { release: async () => { try { await page.keyboard.up(action.key); } catch { /* best-effort */ } } };
+    }
+    await page.keyboard.press(action.key);
+    return {};
+  }
+  if (action.type === 'wait') { await page.waitForTimeout(action.ms); return {}; }
+  if (action.type === 'click') {
     // Locator chain: accessible button name first (the robust path), then any
     // visible text. First match wins; a miss throws → the step fails honestly.
     const byRole = page.getByRole?.('button', { name: action.target, exact: false });
     if (byRole && (await byRole.count?.()) > 0) await byRole.first().click();
     else await page.getByText(action.target, { exact: false }).first().click();
-  } else if (action.type === 'type') {
+    return {};
+  }
+  if (action.type === 'type') {
     if (action.target) {
       await page.getByLabel?.(action.target, { exact: false }).first().fill(action.text);
     } else {
       await page.keyboard.type(action.text);
     }
+    return {};
   }
+  return {};
+}
+
+/**
+ * Pure `event.code` for a `KeyboardEvent` `key` — the belt-and-suspenders
+ * re-dispatch path needs a `code` (many canvas games read `e.code`, not
+ * `e.key`). ArrowUp→'ArrowUp', Space→'Space', a letter→'KeyX', a digit→'DigitN'.
+ */
+export function codeFor(key) {
+  if (!key) return '';
+  if (/^Arrow(Up|Down|Left|Right)$/.test(key)) return key;
+  if (key === 'Space' || key === ' ') return 'Space';
+  if (/^[a-zA-Z]$/.test(key)) return `Key${key.toUpperCase()}`;
+  if (/^[0-9]$/.test(key)) return `Digit${key}`;
+  return key; // Enter, Escape, Tab, … are already their own code
+}
+
+/**
+ * FOCUS the app before driving it: a canvas game only receives keydown events
+ * when the canvas (or the document) is focused. Click the canvas if present,
+ * else the body. Best-effort — a fake/limited page (no `locator`) no-ops.
+ * Returns which surface was focused ('canvas' | 'body' | 'none').
+ */
+export async function focusApp(page) {
+  if (!page || typeof page.locator !== 'function') return 'none';
+  try {
+    const canvas = page.locator('canvas');
+    if (canvas && typeof canvas.count === 'function' && (await canvas.count()) > 0) {
+      await canvas.first().click();
+      return 'canvas';
+    }
+  } catch { /* fall through to body */ }
+  try {
+    await page.locator('body').first().click();
+    return 'body';
+  } catch { return 'none'; }
+}
+
+/**
+ * Advance `n` real animation frames (a rAF chain) so a game loop integrates the
+ * just-dispatched input before we read the snapshot / capture the AFTER frame.
+ * IMPURE (runs in-page). `{ __settle }` marks the evaluate arg so a fake page
+ * can distinguish it from a snapshot() read. Falls back to an injected/real
+ * `wait` when the page can't evaluate rAF (a minimal fake).
+ */
+export async function settleFrames(page, n = 8, { wait } = {}) {
+  const frames = Math.max(0, Math.floor(Number(n) || 0));
+  if (!frames || !page || typeof page.evaluate !== 'function') return;
+  try {
+    await page.evaluate(
+      ({ __settle }) =>
+        new Promise((resolve) => {
+          let i = 0;
+          const step = () => {
+            if (++i >= __settle) resolve();
+            else requestAnimationFrame(step);
+          };
+          requestAnimationFrame(step);
+        }),
+      { __settle: frames },
+    );
+  } catch {
+    const sleep = typeof wait === 'function' ? wait : (ms) => new Promise((r) => setTimeout(r, ms));
+    await sleep(frames * 16);
+  }
+}
+
+/**
+ * Poll `readFn()` until `assertFn(value)` reports `{ ok:true }` or the window
+ * expires. A game's observable change lands ASYNCHRONOUSLY over several frames,
+ * so a single read-and-assert races the render and manufactures false failures;
+ * polling passes as soon as the assertions hold and only records failure after
+ * the whole window elapses. PURE control-flow (all I/O injected via readFn/wait).
+ *
+ * @returns {Promise<{ok:boolean, value:any, failures:string[]}>}
+ */
+export async function pollUntil(readFn, assertFn, { timeoutMs = 1000, stepMs = 100, wait } = {}) {
+  const sleep = typeof wait === 'function' ? wait : (ms) => new Promise((r) => setTimeout(r, ms));
+  let elapsed = 0;
+  let last;
+  for (;;) {
+    last = await readFn();
+    const verdict = assertFn(last) || {};
+    if (verdict.ok) return { ok: true, value: last, failures: [] };
+    if (elapsed >= timeoutMs) return { ok: false, value: last, failures: verdict.failures || [] };
+    await sleep(stepMs);
+    elapsed += stepMs;
+  }
+}
+
+/**
+ * Belt-and-suspenders re-dispatch of a key as a real DOM KeyboardEvent
+ * (keydown+keyup with a pure `code`), used ONLY inside the poll loop when the
+ * first `keyboard.press` produced no observable delta — some canvas games only
+ * listen on `window` for `e.code`, which `page.keyboard.press` doesn't always
+ * surface identically. This is synthetic USER INPUT (allowed in observe-only).
+ */
+async function redispatchKey(page, key) {
+  if (!page || typeof page.evaluate !== 'function' || !key) return;
+  const code = codeFor(key);
+  try {
+    await page.evaluate(
+      ({ k, c }) => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: k, code: c, bubbles: true }));
+        window.dispatchEvent(new KeyboardEvent('keyup', { key: k, code: c, bubbles: true }));
+      },
+      { k: key, c: code },
+    );
+  } catch { /* best-effort — a fake page may not support KeyboardEvent */ }
 }
 
 /** Deep-read a dotted/indexed path (score, pacman.dir, ghosts[0].x) off an object. */
@@ -287,6 +432,8 @@ export async function runBrowserJourney({
   timeoutMs = 30_000,
   log = () => {},
   capture = false,
+  observeOnly = false,
+  wait,
 }) {
   const chromium = playwright?.chromium ?? playwright?.default?.chromium;
   // `infra:true` marks a failure of the TEST HARNESS itself (no browser, a
@@ -318,31 +465,83 @@ export async function runBrowserJourney({
     } catch {
       seamMounted = false;
     }
+    // The template ALWAYS mounts a BASE __harness stub whose snapshot reports
+    // `{ registered:false }` until the REAL live-state seam registers/overwrites
+    // it. Reading that stub is as blind as no seam at all — so wait (briefly,
+    // best-effort) for a real store to register. If only the base stub ever
+    // appears, treat it as seam-not-mounted (honest FAIL) — never a fake pass.
+    if (seamMounted) {
+      try {
+        await page.waitForFunction(
+          () => {
+            const h = window.__harness;
+            if (!h || typeof h.snapshot !== 'function') return false;
+            const s = h.snapshot();
+            return !s || s.registered !== false;
+          },
+          { timeout: 3_000 },
+        );
+      } catch {
+        seamMounted = false;
+      }
+    }
+    // FOCUS the app (canvas else body) so keyboard input actually reaches a
+    // canvas game — runs even in DOM-fallback (seam absent) so replayed actions
+    // still land. Best-effort: no-ops on a page without `locator`.
+    await focusApp(page);
 
     const frames = [];
     const failures = [];
     for (const step of steps) {
       const label = step?.label ?? '(unlabeled step)';
       const frame = { stepLabel: label };
+      const settleN = step?.settle?.frames ?? 8;
+      const pollMs = step?.settle?.pollMs ?? 1000;
       // Before-action snapshot — the baseline for delta assertions
       // (increased/decreased/changed).
       const beforeSnap = seamMounted ? await page.evaluate(() => window.__harness.snapshot()) : undefined;
       if (capture) frame.before = await page.screenshot();
+
+      let release;
       try {
-        await replayAction(page, step?.action);
+        const acted = await replayAction(page, step?.action, { observeOnly });
+        release = acted?.release;
+        if (acted?.note) log('info', `[browser-journey] ${label}: ${acted.note}`);
       } catch (actErr) {
         failures.push(`${label}: action failed: ${actErr?.message || actErr}`);
       }
+
+      // Let the game loop integrate the input over real animation frames BEFORE
+      // reading the snapshot / capturing the AFTER frame — the fix for VQA and
+      // deterministic false-negatives on a WORKING canvas game.
+      await settleFrames(page, settleN, { wait });
       if (capture) frame.after = await page.screenshot();
       if (capture) frames.push(frame);
 
       if (seamMounted) {
-        const snap = await page.evaluate(() => window.__harness.snapshot());
-        const stepFailures = assertSnapshot(snap, step?.assertions, beforeSnap);
-        if (stepFailures.length) failures.push(`${label}: ${stepFailures.join('; ')}`);
+        const readFn = () => page.evaluate(() => window.__harness.snapshot());
+        const assertFn = (snap) => {
+          const f = assertSnapshot(snap, step?.assertions, beforeSnap);
+          return { ok: f.length === 0, failures: f };
+        };
+        // POLL: pass as soon as the assertions hold vs the pre-action baseline;
+        // only record a failure after the whole window expires (no render race).
+        let poll = await pollUntil(readFn, assertFn, { timeoutMs: pollMs, stepMs: 100, wait });
+        // Belt-and-suspenders: a KEY that produced no delta gets one real DOM
+        // KeyboardEvent re-dispatch (+ re-settle + re-poll) before we fail it —
+        // some games only listen on window for `e.code`.
+        if (!poll.ok && step?.action?.type === 'key') {
+          await redispatchKey(page, step.action.key);
+          await settleFrames(page, settleN, { wait });
+          poll = await pollUntil(readFn, assertFn, { timeoutMs: pollMs, stepMs: 100, wait });
+        }
+        if (!poll.ok) failures.push(`${label}: ${poll.failures.join('; ')}`);
       } else {
         failures.push(`${label}: window.__harness seam not mounted on the served app`);
       }
+
+      // Release a HELD key AFTER the observation window.
+      if (release) await release();
     }
     if (!seamMounted) {
       log('info', `[browser-journey] ${url} → FAIL seam-not-mounted (${steps.length} step(s) replayed for frames)`);

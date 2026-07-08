@@ -38,6 +38,46 @@ export function parsePorcelainTestFiles(stdout) {
  * Isolated context — it must not see or write implementation code (that would
  * reintroduce the circular validation the split exists to prevent). PURE.
  */
+/**
+ * Split-path invariant-authoring block (Reality-Spine #6). PURE.
+ * The single-story path renders its own equivalent (renderInvariantsBlock in
+ * story-dev-pipeline.mjs); in the SPLIT path the TEST AUTHOR authors the
+ * validators — its output becomes the story's devOutput, so the <INVARIANTS>
+ * manifest must originate here or the gate never sees an authored validator and
+ * fails the story closed. Steered to the `*.invariant.test.ts` form because the
+ * RED commit only stages files matching TEST_FILE_RE (a `scripts/invariants/*.mjs`
+ * validator would not be committed at RED and would be lost). Returns '' when the
+ * story declares no invariants (byte-identical prompt for the common case).
+ */
+function renderTestAuthorInvariantsBlock(invariants) {
+  if (!Array.isArray(invariants) || !invariants.length) return '';
+  const declared = invariants
+    .map((inv, i) => `  ${i + 1}. [${inv.id}] ${inv.description}`)
+    .join('\n');
+  const manifestFields = invariants
+    .map((inv) => `"${inv.id}": { "ref": "<path-to-your-invariant-test>", "kind": "test" }`)
+    .join(', ');
+  return [
+    ``,
+    `# Invariant validators (MANDATORY — the gate executes these deterministically)`,
+    `This story declares invariants: properties of the domain data/contract that MUST`,
+    `hold. For EACH one below author an EXECUTABLE validator as a vitest file named`,
+    `src/**/<id>.invariant.test.ts that imports the REAL module/data under test and`,
+    `asserts the property. Use the *.invariant.test.ts form (NOT scripts/invariants/*.mjs)`,
+    `so it is staged with your other RED tests. NEVER vi.mock(/jest.mock( an in-repo`,
+    `module — a mocked validator proves nothing and the gate treats it as failing.`,
+    `Like every test you author it MUST FAIL now (the contract/data does not exist yet).`,
+    ``,
+    `Declared invariants:`,
+    declared,
+    ``,
+    `Emit a manifest mapping each invariant id to its authored validator file:`,
+    `<INVARIANTS>`,
+    `{ ${manifestFields} }`,
+    `</INVARIANTS>`,
+  ].join('\n');
+}
+
 export function buildStoryTestPrompt(payload) {
   const acLines = (payload.acceptanceCriteria || [])
     .map((ac, i) => {
@@ -86,6 +126,8 @@ export function buildStoryTestPrompt(payload) {
     `- CREATE new test files as SIBLINGS of the code under test (e.g. src/x/foo.test.ts for`,
     `  src/x/foo.ts). Test files (*.test.*, *.spec.*) are in scope; the story's implementation`,
     `  files are NOT yours to touch: ${(payload.touches || []).join(', ')}`,
+    ``,
+    renderTestAuthorInvariantsBlock(payload.invariants),
     ``,
     `# Required: bind each AC to its test`,
     `<BINDING>`,

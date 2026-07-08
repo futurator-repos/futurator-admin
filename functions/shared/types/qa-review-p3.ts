@@ -53,6 +53,13 @@ export interface JourneyStep {
   action: string;
   deterministic: DeterministicResult;
   vqa?: StepVqa;
+  /**
+   * True iff this step is a real BLOCKER: a deterministic hard-fail, or an
+   * UNDECIDED step (uninterpretable / drive-disabled) that VQA confirmed as a
+   * fail. A VQA 'fail' on a deterministically-PASSED step is NOT blocking
+   * (confirmatory policy — VQA can never false-block a verified step).
+   */
+  blocking?: boolean;
 }
 
 /** One end-to-end delivery journey run against the assembled app. */

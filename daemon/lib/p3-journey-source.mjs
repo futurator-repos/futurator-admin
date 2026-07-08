@@ -44,6 +44,19 @@ function buildAcIndex(stories) {
   return idx;
 }
 
+/**
+ * A per-step SETTLE hint derived from the AC's `verify` intent (DATA-only — no
+ * I/O; the browser-probe executor consumes it, absent → executor default).
+ * A `behavior` AC (a rAF/game loop where the observable change arrives over
+ * several animation frames) needs a longer rAF settle + a longer poll window
+ * than a `state`/`appearance` AC whose change lands in ~1 frame. This is the
+ * calibration that stops VQA/deterministic false-negatives on a WORKING canvas
+ * game: give the game time to integrate the input before reading the snapshot.
+ */
+function settleFor(ac) {
+  return (ac?.verify === 'behavior') ? { frames: 12, pollMs: 1200 } : { frames: 2, pollMs: 300 };
+}
+
 /** One resolved step: the AC's own prose, ready to spread into `parseProbe`. */
 function toStep(ac) {
   return {
@@ -52,6 +65,7 @@ function toStep(ac) {
     when: ac.when,
     thenObservable: ac.thenObservable,
     then: ac.then,
+    settle: settleFor(ac),
   };
 }
 
@@ -61,6 +75,12 @@ function toStep(ac) {
  * failing the whole journey — a partially-resolvable journey still runs its
  * resolvable steps; the honesty contract lives in the probe driver (an
  * unresolvable AC never fakes a pass), not here.
+ *
+ * STEP ORDER IS LOAD-BEARING: the resolved steps preserve `acRefs` order (which
+ * the derived path keeps in AC declaration order). The driver replays steps in
+ * sequence against a SINGLE live page, so a "press Space to start" AC MUST
+ * precede a "move the player" AC — reordering would drive the game out of order
+ * (move before start) and fabricate a failure. Never sort or dedupe here.
  */
 function resolveSteps(acRefs, acIndex) {
   const steps = [];
@@ -94,7 +114,8 @@ function deriveJourneys(stories) {
  * @param {{ plan?: { deliveryJourneys?: Array<{id:string,title:string,narrative?:string,acRefs?:string[]}> },
  *           stories?: Array<{ storyId:string, title?:string, intent?:string, acceptanceCriteria?: Array<{id:string,text?:string,when?:string,thenObservable?:string,then?:string}> }> }} args
  * @returns {Array<{ id:string, title:string, narrative?:string, acRefs:string[],
- *                    steps: Array<{acId:string,label:string,when:string,thenObservable?:string,then?:string}> }>}
+ *                    steps: Array<{acId:string,label:string,when:string,thenObservable?:string,then?:string,
+ *                                  settle:{frames:number,pollMs:number}}> }>}
  */
 export function resolveJourneys({ plan, stories } = {}) {
   const provided = Array.isArray(plan?.deliveryJourneys) ? plan.deliveryJourneys : [];

@@ -191,6 +191,77 @@ export const handler = async () => {
       plan.p3QaVerdict?.blocking === true &&
       !plan.p3QaVerdict.decidedAt
     ) {
+      // ── Reality-Spine P4 routing (redesign Part 2 P4, Part 5 #4) — the
+      // INTEGRATOR is the FIRST responder to a blocking verdict, for ONE bounded
+      // round. Unlike the per-symptom fix-story minter (which shatters a root
+      // cause into N scope-jailed slices that bounce off AUTOFIX_MAX, D7), the
+      // Integrator holds the WHOLE assembled artifact in one context and fixes
+      // the actual root cause. Only if it can't (round budget spent) do we fall
+      // back to the symptom path below (second responder). Enqueue → flip to
+      // fixing + reset QA so the integrator's fresh commit gets a new dev-deploy,
+      // SHA pin, and re-QA. Human decisions are never touched (guarded above).
+      const INTEGRATOR_ROUNDS_MAX = 1;
+      const intRounds = plan.qaIntegratorRounds ?? 0;
+      if (intRounds < INTEGRATOR_ROUNDS_MAX) {
+        try {
+          const appId = plan.appId as string;
+          const jobId = planDepsShared.uuid();
+          const nowIso = planDepsShared.now();
+          const v = plan.p3QaVerdict;
+          const failedJourneys = v.journeys?.filter((j) => j.verdict === 'fail') ?? [];
+          const orphanCount = v.wiring?.orphanModules?.length ?? 0;
+          const failureSummary =
+            `Deployed-app QA is BLOCKING. ${failedJourneys.length} failed journey(s)` +
+            `${
+              failedJourneys.length
+                ? `: ${failedJourneys
+                    .map((j) => j.title || j.id)
+                    .slice(0, 6)
+                    .join('; ')}`
+                : ''
+            }` +
+            `; ${orphanCount} orphan module(s). Find and fix the ROOT cause across the whole tree, ` +
+            `then leave tsc+lint+test+build+boot-liveness all green.`;
+          await planDepsShared.createJob({
+            jobId,
+            jobType: 'integrator',
+            status: 'PENDING',
+            planId: plan.planId,
+            appId,
+            planSlug: appId,
+            workingDir: `${EC2_PROJECTS_ROOT}/${appId}`,
+            // The head QA ran against (== the tree head; nothing commits between
+            // deploy and this integrator). Pins the daemon's at-most-once-per-head
+            // guard so an exhausted integrator can't loop.
+            targetHeadSha: plan.qaCommitSha ?? plan.p3QaVerdict.ranAtSha,
+            failureSummary,
+            createdBy: plan.createdBy,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          });
+          await planRepo.updatePlanFields(plan.planId, {
+            status: 'fixing',
+            qaIntegratorRounds: intRounds + 1,
+            integratorJobId: jobId,
+          });
+          await planRepo.clearP3QaForRerun(plan.planId);
+          log('info', 'wave-completion-check', 'P3 QA → Integrator (first responder)', {
+            planId: plan.planId,
+            jobId,
+            round: intRounds + 1,
+            failedJourneys: failedJourneys.length,
+            orphans: orphanCount,
+          });
+          return; // plan left 'review' → integrator round; symptom path is the fallback
+        } catch (err) {
+          log('error', 'wave-completion-check', 'P3 QA integrator route failed (non-fatal)', {
+            planId: plan.planId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          // Fall through to the symptom-minting path below.
+        }
+      }
+
       const rounds = plan.qaAutoFixRounds ?? 0;
       if (rounds >= AUTOFIX_MAX) {
         // Budget exhausted — surface once (dedupKey makes the write idempotent).

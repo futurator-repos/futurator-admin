@@ -17,6 +17,12 @@ import { registerChild, unregisterChild } from './lib/child-tracker.mjs';
 import { freezeFlagsOntoJob, flagMode } from '../lib/pipeline-flags.mjs';
 import { buildGateSpawn } from '../lib/gate-settings.mjs';
 import { handleStoryCompletion } from '../lib/story-completion-handler.mjs';
+// Reality-Spine P1/P2 (redesign Part 2, Part 5 #2/#3): foundation-story hardened
+// gate (tsc+build+boot-liveness) and per-story green-trunk check. Both PURE
+// classifiers live in foundation-gate.mjs; the actual gate functions are
+// injected via deps (S7's makeStoryDevGateDeps factory) so this module never
+// spawns tsc/build/playwright itself — it only decides WHEN to call them.
+import { isFoundationStory } from '../lib/foundation-gate.mjs';
 import { integrateStory } from '../lib/story-integrate.mjs';
 import { extractAssistantText } from '../lib/stream-json-text.mjs';
 import { planBranchName } from '../lib/plan-branch.mjs';
@@ -69,6 +75,46 @@ function renderAcLine(ac, i) {
   return `  ${i + 1}. [${ac.id}] ${ac.text}${tags ? ` (${tags})` : ''}${probe}`;
 }
 
+/**
+ * Render the invariant-authoring block (redesign Part 4). Invariants are
+ * domain properties the PLANNER declared ("every declared navigation target
+ * resolves", "seed data satisfies the schema") — the story must author an
+ * EXECUTABLE validator per invariant; the gate (test-binding-runner's
+ * runStoryInvariants) runs it deterministically. PURE — empty string when the
+ * story carries no invariants (byte-identical prompt for non-invariant stories).
+ */
+function renderInvariantsBlock(invariants) {
+  if (!Array.isArray(invariants) || !invariants.length) return '';
+  const declared = invariants
+    .map((inv, i) => `  ${i + 1}. [${inv.id}] ${inv.description}`)
+    .join('\n');
+  const manifestFields = invariants
+    .map((inv) => `"${inv.id}": { "ref": "<path-or-selector>", "kind": "script|test" }`)
+    .join(', ');
+  return [
+    '',
+    '# Invariant validators (MANDATORY — the gate executes these deterministically)',
+    'This story declares invariants: properties of the domain data/contract that MUST',
+    'hold. For EACH one below you MUST author an EXECUTABLE validator:',
+    '  - scripts/invariants/<id>.mjs — standalone, node-runnable, imports the REAL',
+    '    module/data under test, exits non-zero on violation; OR',
+    '  - src/**/<id>.invariant.test.ts — a vitest file importing the REAL module.',
+    'Either form MUST NOT use vi.mock(/jest.mock( of any in-repo module — a mocked',
+    'validator proves nothing and the gate treats it as a failing invariant.',
+    '',
+    'Declared invariants:',
+    declared,
+    '',
+    'When done, emit a manifest mapping each invariant id to its authored validator:',
+    '<INVARIANTS>',
+    `{ ${manifestFields} }`,
+    '</INVARIANTS>',
+    '',
+    'You MAY write and run throwaway validators for any data you author; validators',
+    'for DECLARED invariants above are MANDATORY and WILL be executed by the gate.',
+  ].join('\n');
+}
+
 /** Build the single-story dev prompt. PURE. Requires the agent to emit <BINDING>. */
 export function buildStoryDevPrompt(payload) {
   const acLines = (payload.acceptanceCriteria || [])
@@ -102,6 +148,7 @@ export function buildStoryDevPrompt(payload) {
     `  REJECT a testKind of 'unit'/'integration'/'manual' for it (the story stays not-done).`,
     `- A pure verify:'state'/'build' AC on this slice is legitimately a unit test — bind it`,
     `  testKind:'unit'. Do NOT inflate a pure-function AC to 'browser'.`,
+    renderInvariantsBlock(payload.invariants),
     // Bounded fix-forward: on a retry the ONLY new instruction is the real
     // failing-test output from the prior attempt. Scope (touches/forbidden) is
     // unchanged — this is a same-scope re-spawn, not a new story.
@@ -118,7 +165,14 @@ function ensureDir(d) { try { if (!existsSync(d)) mkdirSync(d, { recursive: true
  *
  * @param {{ job: object, eventLogDir: string, deps?: object }} opts
  *   deps: { spawn, ddb, graphTable, executors, headSha, logger, now,
- *           updateStoryState, propagateCompletion }
+ *           updateStoryState, propagateCompletion,
+ *           foundationGate, greenTrunk, qaContext }
+ *     foundationGate/greenTrunk: async fns from
+ *     daemon/lib/foundation-gate.mjs::makeStoryDevGateDeps({cwd,spawnSync,qaContext})
+ *     — the hardened P1 gate (tsc+build+boot-liveness, foundation stories only)
+ *     and the P2 green-trunk check (tsc+build, non-foundation stories) from the
+ *     Reality-Spine redesign. Absent (or their flag off) → no-op, byte-identical
+ *     to pre-redesign behavior.
  * @returns {Promise<{ exitCode:number, verdict?:object, newState?:string }>}
  */
 export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
@@ -266,7 +320,13 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
           return { committed: integ.committed, sha: integ.sha, files };
         },
         runBindings: ({ acceptanceCriteria, headSha: sha }) =>
-          runStoryBindings({ acceptanceCriteria, headSha: sha, executors: deps.executors || {}, now: deps.now }),
+          // RED-phase: tests are EXPECTED to fail here (no implementation yet),
+          // so no-mock enforcement is off — enforcing it would fail-close a
+          // legitimately red run before the implementer ever spawns.
+          runStoryBindings({
+            acceptanceCriteria, headSha: sha, executors: deps.executors || {}, now: deps.now,
+            cwd: projectRoot, enforceNoMock: false,
+          }),
         logger,
       });
       if (split?.redSha) headSha = split.redSha;
@@ -438,7 +498,58 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       qualityMode: flagMode(p3Flags, 'P3_QUALITY_GATE'),
       // W2.1b — risk-tiered reviewer (only fed into the verdict when qualityMode==='on').
       spawnReviewer: deps.spawnReviewer,
+      // Reality-Spine #5 (no-mock rule): cwd threads through to
+      // runStoryBindings so a state-verify AC bound to a test that mocks the
+      // in-repo module under test is rejected (misbound) instead of passing.
+      cwd: projectRoot,
+      // Reality-Spine #6 (invariant validators): the story's declared
+      // invariants + the raw agent text (for the <INVARIANTS> manifest) —
+      // absent a manifest, invariants stay 'declared' and fail the gate closed.
+      invariants: payload.invariants,
     });
+
+    // Reality-Spine P1/P2 (redesign Part 2, Part 5 #2/#3) — the foundation
+    // gate and green-trunk check run INSIDE the attempt loop, right after the
+    // deterministic AC verdict and BEFORE it is persisted/branches on, so a
+    // failure here consumes a fix-forward retry (same-scope re-spawn with the
+    // real failure text) exactly like a failing bound AC does. Both are
+    // no-ops when their flag is off or the daemon didn't inject the gate.
+    if (
+      flagMode(p3Flags, 'P3_FOUNDATION_GATE') === 'on'
+      && isFoundationStory(payload)
+      && completion.newState === 'done'
+      && deps.foundationGate
+    ) {
+      const fg = await deps.foundationGate({ cwd: projectRoot, headSha, qaContext: deps.qaContext });
+      if (!fg.passed) {
+        completion.newState = 'failed';
+        completion.propagate = false;
+        completion.verdict = {
+          ...completion.verdict,
+          status: 'failing',
+          failing: [...(completion.verdict.failing || []), 'foundation-gate'],
+          reasons: [...(completion.verdict.reasons || []), ...fg.reasons],
+        };
+        lastFailureDetail = fg.reasons.join('\n');
+      }
+    }
+    const gtOn = flagMode(p3Flags, 'P3_GREEN_TRUNK') === 'on' && deps.greenTrunk;
+    if (gtOn && !isFoundationStory(payload) && completion.newState === 'done') {
+      // Foundation stories skip green-trunk: the foundation gate above already
+      // supersets tsc+build+boot for that story.
+      const gt = await deps.greenTrunk({ cwd: projectRoot });
+      if (!gt.passed) {
+        completion.newState = 'failed';
+        completion.propagate = false;
+        completion.verdict = {
+          ...completion.verdict,
+          status: 'failing',
+          failing: [...(completion.verdict.failing || []), 'green-trunk'],
+          reasons: [...(completion.verdict.reasons || []), ...gt.reasons],
+        };
+        lastFailureDetail = gt.reasons.join('\n');
+      }
+    }
 
     // The dev step spawn completed (regardless of AC pass/fail) — emit metrics.
     evstream.emitStepComplete(runMetrics);

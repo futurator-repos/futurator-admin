@@ -66,6 +66,24 @@ describe('buildTwoFrameJudgePrompt', () => {
     expect(prompt).toMatch(/PASS only if frame 2 differs from frame 1/);
   });
 
+  it('encodes the TOLERANCE rubric (ignore incidental rendering variation)', () => {
+    const prompt = buildTwoFrameJudgePrompt({ spec, sourceDiff, beforeFrame: '/tmp/b.png', afterFrame: '/tmp/a.png' });
+    expect(prompt).toMatch(/TOLERANCE/);
+    expect(prompt).toMatch(/IGNORE incidental rendering variation/);
+    expect(prompt).toMatch(/anti-aliasing/);
+    expect(prompt).toMatch(/sub-pixel/);
+  });
+
+  it('encodes the CONFIRMATORY posture (overturn to FAIL only with high-confidence contradiction)', () => {
+    const prompt = buildTwoFrameJudgePrompt({ spec, sourceDiff, beforeFrame: '/tmp/b.png', afterFrame: '/tmp/a.png' });
+    expect(prompt).toMatch(/CONFIRMATORY/);
+    expect(prompt).toMatch(/deterministic assertion has ALREADY decided/);
+    expect(prompt).toMatch(/Overturn it to FAIL ONLY/);
+    expect(prompt).toMatch(/Plausible motion/);
+    // The FAIL rule must require high confidence + a concrete contradiction.
+    expect(prompt).toMatch(/Requires conf=high/);
+  });
+
   it('renders a placeholder fence rather than omitting the diff section when absent', () => {
     const prompt = buildTwoFrameJudgePrompt({
       spec,

@@ -13,7 +13,7 @@
  */
 
 /** The ONE net-new field on an acceptance criterion. */
-export type TestBindingStatus = 'unbound' | 'bound' | 'passing' | 'failing';
+export type TestBindingStatus = 'unbound' | 'bound' | 'passing' | 'failing' | 'misbound';
 export type TestKind = 'unit' | 'integration' | 'browser' | 'manual';
 
 export interface TestBinding {
@@ -63,6 +63,31 @@ export interface SpecShardRef {
 
 export type StoryComplexity = 'trivial' | 'standard' | 'complex' | 'architectural';
 
+/**
+ * Reality-Spine invariant validator status (Part 4 of the redesign): the
+ * planner DECLARES a property of the domain data; the foundation (or coherent
+ * build-whole) story AUTHORS an executable validator; the gate RUNS it.
+ */
+export type InvariantStatus = 'declared' | 'authored' | 'passing' | 'failing';
+
+export interface InvariantValidator {
+  /** Path to the executable validator (script or test) once authored. */
+  ref?: string;
+  kind?: 'script' | 'test';
+  status: InvariantStatus;
+  /** Head SHA the validator last ran against — the staleness guard. */
+  lastRunSha?: string;
+  lastRunAt?: string;
+  detail?: string;
+}
+
+/** A planner-declared property of the domain data/contract that must hold. */
+export interface Invariant {
+  id: string;
+  description: string;
+  validator: InvariantValidator;
+}
+
 export interface StoryNode {
   /** GLOBALLY stable, Mycelium-issued. Not epic-local. */
   storyId: string;
@@ -79,6 +104,12 @@ export interface StoryNode {
   specShardRef?: SpecShardRef;
   complexity: StoryComplexity;
   verifyIntent?: string;
+  /** Reality-Spine planShape classification (mirrors quick-planspec's `classify`). */
+  nodeKind?: 'foundation' | 'feature' | 'integration';
+  /** True iff this story is the contract/scaffold story the foundation gate hardens. */
+  isFoundation?: boolean;
+  /** Planner-declared properties of the domain data this story must satisfy. */
+  invariants?: Invariant[];
 }
 
 export interface PlanSpec {

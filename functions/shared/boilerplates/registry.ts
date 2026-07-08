@@ -152,6 +152,14 @@ export function register() {
   const w = window as unknown as { __harness?: unknown };
   if (w.__harness) return; // the real seam beat us — never clobber it
   let store: HarnessStore | null = null;
+  // OBSERVE-ONLY seam (QA-Review W2): the READ lane (snapshot) + INPUT lane
+  // (synthetic key/click, dispatched by Playwright) are always available under
+  // the test-harness build. The DRIVE lane (dispatch/forceStatus) is gated on a
+  // SEPARATE flag so QA probes reach states as a user, not by forcing them. When
+  // drive is disabled the methods are DEFINED as warning no-ops — never left
+  // undefined (a probe calling an undefined method would throw → a false-fail).
+  const driveEnabled = process.env.NEXT_PUBLIC_TEST_HARNESS_DRIVE === '1';
+  const driveDisabled = () => console.warn('[harness] drive lane disabled (observe-only)');
   w.__harness = {
     ready: true,
     registered: false,
@@ -162,8 +170,8 @@ export function register() {
       store = s;
       (w.__harness as { registered?: boolean }).registered = true;
     },
-    dispatch: (action: unknown) => store?.dispatch?.(action),
-    forceStatus: (status: string) => store?.forceStatus?.(status),
+    dispatch: driveEnabled ? (action: unknown) => store?.dispatch?.(action) : () => driveDisabled(),
+    forceStatus: driveEnabled ? (status: string) => store?.forceStatus?.(status) : () => driveDisabled(),
   };
 }
 
@@ -489,6 +497,13 @@ export function useGameStateMachine<TEntity extends Entity = Entity>(
   useEffect(() => {
     if (process.env.NEXT_PUBLIC_TEST_HARNESS !== '1') return;
     if (typeof window === 'undefined') return;
+    // OBSERVE-ONLY seam: snapshot (READ) is always live under the test build;
+    // the DRIVE lane (dispatch/forceStatus) is gated on a SEPARATE flag so QA
+    // probes reach terminal states as a user plays, not by forcing them. When
+    // disabled, the methods are DEFINED as warning no-ops (never undefined — a
+    // probe calling an undefined method would throw → a false-fail).
+    const driveEnabled = process.env.NEXT_PUBLIC_TEST_HARNESS_DRIVE === '1';
+    const driveDisabled = () => console.warn('[harness] drive lane disabled (observe-only)');
     (window as unknown as { __harness?: unknown }).__harness = {
       ready: true,
       // Generator-owned shape (boilerplate registry testHarness): the raw
@@ -496,12 +511,15 @@ export function useGameStateMachine<TEntity extends Entity = Entity>(
       // GameState (e.g. \`lives\`) ride along automatically.
       snapshot: () => ({ ...ref.current, gameOver: ref.current.status === 'over' }),
       events: [] as unknown[],
-      // VQA v3 Phase 2b — TEST-ONLY command channel so a QA probe can DRIVE the
-      // game (not just observe): \`dispatch\` any GameAction, \`forceStatus\` to
-      // jump to a terminal state (over/win) deterministically. Tree-shaken in
-      // production with the rest of the seam (the NEXT_PUBLIC_TEST_HARNESS guard).
-      dispatch: (action: GameAction<TEntity>) => safeDispatch(action),
-      forceStatus: (status: string) => safeDispatch({ type: '__force', status } as GameAction<TEntity>),
+      // VQA v3 Phase 2b — TEST-ONLY command channel (DRIVE lane), gated on
+      // NEXT_PUBLIC_TEST_HARNESS_DRIVE. Tree-shaken in production with the rest
+      // of the seam (the NEXT_PUBLIC_TEST_HARNESS guard).
+      dispatch: driveEnabled
+        ? (action: GameAction<TEntity>) => safeDispatch(action)
+        : () => driveDisabled(),
+      forceStatus: driveEnabled
+        ? (status: string) => safeDispatch({ type: '__force', status } as GameAction<TEntity>)
+        : () => driveDisabled(),
     };
   }, [safeDispatch]);
 
@@ -1224,10 +1242,17 @@ export function AppHarnessProvider({
     snap.current = { ...snap.current, ready: true };
     if (typeof window === 'undefined') return;
     if (process.env.NEXT_PUBLIC_TEST_HARNESS !== '1') return;
+    // OBSERVE-ONLY seam: this app-state seam exposes only READ (snapshot); it
+    // has no DRIVE lane. Still DEFINE dispatch/forceStatus as warning no-ops
+    // (gated for symmetry with the other seams) so a QA probe that calls them
+    // never hits an undefined method and throws a false-fail.
+    const driveDisabled = () => console.warn('[harness] drive lane disabled (observe-only)');
     (window as unknown as { __harness?: unknown }).__harness = {
       ready: true,
       snapshot: () => api.snapshot(),
       events: [] as unknown[],
+      dispatch: driveDisabled,
+      forceStatus: driveDisabled,
     };
   }, [api]);
 

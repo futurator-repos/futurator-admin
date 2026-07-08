@@ -15,6 +15,7 @@ import {
   parseQuickPlanspec,
   buildStoryNodeRows,
 } from './lib/quick-planspec.mjs';
+import { buildPlanCritiquePrompt, parsePlanCritique, hasCritical } from './lib/plan-critique.mjs';
 
 const BOOTSTRAP_SUCCESS = new Set(['COMPLETED', 'COMPLETED_VIA_SALVAGE', 'COMPLETED_VIA_PREWORK']);
 
@@ -134,20 +135,71 @@ export async function runQuickPlanspecJob(job, deps) {
       log('warn', `[quick-planspec ${short}] repair pass did not improve the plan — keeping the original`);
     }
   }
-  const { stories, audit } = parsed;
-
   // 3c) still serial after repair → ingest anyway (safety edges keep it correct)
   // but tell the operator loudly; never silently ship a serial plan.
-  if (audit.violations.length) {
+  if (parsed.audit.violations.length) {
     try {
       await writeAttentionItem?.({ planId, dedupKey: `quick-planspec-serial:${planId}`, severity: 'medium',
         category: 'quick-planspec-serial-plan', title: 'Plan is serialized (parallelism audit failed)',
-        body: audit.violations.join('\n'),
-        context: { jobId: job.jobId, planId, appId, levels: audit.levels, maxWidth: audit.maxWidth, criticalPath: audit.criticalPath } });
+        body: parsed.audit.violations.join('\n'),
+        context: { jobId: job.jobId, planId, appId, levels: parsed.audit.levels, maxWidth: parsed.audit.maxWidth, criticalPath: parsed.audit.criticalPath } });
     } catch { /* best-effort */ }
   }
 
+  // 3d) adversarial plan-critique (P0 critique — redesign Part 2/Part 5 #8): ONE
+  // cheap fresh-eyes spawn reads the plan the planner just wrote and looks for
+  // dropped capabilities / gameable ACs / wrong planShape / missing seam wiring.
+  // Never fails the job. A critical finding earns ONE bounded regeneration (keep
+  // whichever plan is parseable + not worse); non-critical findings are written
+  // up for the operator, not acted on automatically.
+  let critiqueFindingCount = 0;
+  try {
+    const criticPolicy = resolveAgentPolicy({ role: 'critic' }); // no DEFAULTS entry → falls back to reviewer (sonnet/low)
+    const critiqueModelArgs = cliModelArgs(criticPolicy);
+    const critiquePrompt = buildPlanCritiquePrompt({ intent, appSlug: appId, stories: parsed.stories, planShape: parsed.planShape });
+    const critiqueRun = await spawnClaude({
+      spawn, claudeBin, cwd: job.workingDir, prompt: critiquePrompt, eventLogDir,
+      jobId: `${job.jobId}-critique`, gateArgs, modelArgs: critiqueModelArgs, env, log,
+    });
+    const { findings } = parsePlanCritique(extractAssistantText(critiqueRun.out) || critiqueRun.out);
+    critiqueFindingCount = findings.length;
+    const critical = findings.filter((f) => f.severity === 'critical');
+    const nonCritical = findings.filter((f) => f.severity !== 'critical');
+
+    if (hasCritical(findings)) {
+      log('warn', `[quick-planspec ${short}] plan-critique found ${critical.length} critical finding(s) — running one bounded regeneration`);
+      const critiqueRepairPrompt = buildQuickPlanspecRepairPrompt({
+        intent, appSlug: appId, seamHook, stories: parsed.stories,
+        violations: critical.map((f) => `critique(${f.kind}): ${f.message}${f.storyId ? ` [${f.storyId}]` : ''}`),
+      });
+      const critiqueRepair = await spawnClaude({
+        spawn, claudeBin, cwd: job.workingDir, prompt: critiqueRepairPrompt, eventLogDir,
+        jobId: `${job.jobId}-critique-repair`, gateArgs, modelArgs, env, log,
+      });
+      const reparsed = parseQuickPlanspec(extractAssistantText(critiqueRepair.out) || critiqueRepair.out);
+      if (!reparsed.errors.length && reparsed.stories.length
+          && reparsed.audit.violations.length <= parsed.audit.violations.length) {
+        log('info', `[quick-planspec ${short}] critique repair pass accepted`);
+        parsed = reparsed;
+      } else {
+        log('warn', `[quick-planspec ${short}] critique repair pass did not improve the plan — keeping the original`);
+      }
+    }
+
+    if (nonCritical.length) {
+      try {
+        await writeAttentionItem?.({ planId, dedupKey: `quick-plan-critique:${planId}`, severity: 'low',
+          category: 'quick-plan-critique', title: 'Plan-critique findings',
+          body: nonCritical.map((f) => `[${f.severity}] (${f.kind}) ${f.message}${f.storyId ? ` — story ${f.storyId}` : ''}`).join('\n'),
+          context: { jobId: job.jobId, planId, appId, count: nonCritical.length } });
+      } catch { /* best-effort */ }
+    }
+  } catch (e) {
+    log('warn', `[quick-planspec ${short}] plan-critique spawn failed (non-fatal): ${e?.message || e}`);
+  }
+
   // 4) build rows + ingest → plan-spec-graph. Frontier dispatches from here.
+  const { stories, audit, planShape } = parsed;
   const { rows, summary } = buildStoryNodeRows({ stories, planId, appId, now });
   try {
     await batchPutStoryNodes(rows);
@@ -156,8 +208,8 @@ export async function runQuickPlanspecJob(job, deps) {
   }
 
   try { await updateJobFields?.(job.jobId, { status: 'COMPLETED' }); } catch { /* best-effort */ }
-  log('info', `[quick-planspec ${short}] ingested ${summary.stories} stories → batches 0..${summary.maxBatch} (${summary.ready} ready) · width ${audit.maxWidth} · path ${audit.criticalPath}`
+  log('info', `[quick-planspec ${short}] ingested ${summary.stories} stories → batches 0..${summary.maxBatch} (${summary.ready} ready) · width ${audit.maxWidth} · path ${audit.criticalPath} · shape ${planShape || 'unknown'} · critique ${critiqueFindingCount} finding(s)`
     + (audit.safetyEdges ? ` · ${audit.safetyEdges} scope-safety edge(s)` : '')
     + (audit.modelAuthored ? ' · model-authored DAG' : ' · derived DAG'));
-  return { ok: true, summary: { ...summary, maxWidth: audit.maxWidth, criticalPath: audit.criticalPath, violations: audit.violations } };
+  return { ok: true, summary: { ...summary, maxWidth: audit.maxWidth, criticalPath: audit.criticalPath, violations: audit.violations, planShape, critiqueFindings: critiqueFindingCount } };
 }

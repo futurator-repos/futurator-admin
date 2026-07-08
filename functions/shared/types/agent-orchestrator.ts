@@ -427,6 +427,17 @@ export interface AgentJob {
    *  flips the job terminal. Set by the abort/cancel endpoints. */
   abortRequested?: boolean;
 
+  // Reality-Spine P3 Integrator (jobType==='integrator'). The row is otherwise
+  // schemaless at rest and the daemon routes/reads these off the .mjs job-router;
+  // typed here so the TS enqueue path (wave-completion-check.ts) is honest.
+  /** App/plan slug the integrator operates on. */
+  appId?: string;
+  planSlug?: string;
+  /** Human-readable blocking-verdict summary handed to the integrator prompt. */
+  failureSummary?: string;
+  /** Head SHA the integrator targets — pins the at-most-once-per-head enqueue guard. */
+  targetHeadSha?: string;
+
   // Party module (Epic 15) — alternate execution model dispatched by the
   // daemon's job-router via `jobType`. Each payload is optional and mutually
   // exclusive; exactly one is set per party job.
@@ -484,7 +495,12 @@ export interface AgentJob {
     | 'scan-engine'
     // QA-Review W2 — deployed-app QA of a P3 plan (journeys + VQA against
     // plan.devUrl, pinned to plan.qaCommitSha). Carries planId/devUrl/qaCommitSha.
-    | 'p3-qa';
+    | 'p3-qa'
+    // Reality-Spine P3 (2026-07-08) — the Integrator role: ONE Opus agent with
+    // whole-tree write authority that loops to full green (tsc && lint && test &&
+    // build && boot) then commits, before the plan may enter review. Also the
+    // first responder to a blocking QA verdict. See daemon/pipelines/integrator-pipeline.mjs.
+    | 'integrator';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;

@@ -5,6 +5,7 @@ import {
   nextStatusOnDispatch,
   nextStatusOnAllDone,
   allStoriesResolved,
+  integrateSatisfied,
 } from '../p3-lifecycle.mjs';
 
 describe('isP3Plan', () => {
@@ -72,5 +73,20 @@ describe('allStoriesResolved (pacman4 wedge fix)', () => {
   it('false for an empty/invalid node set', () => {
     expect(allStoriesResolved([])).toBe(false);
     expect(allStoriesResolved(null)).toBe(false);
+  });
+});
+
+describe('integrateSatisfied (Reality-Spine P3 review precondition)', () => {
+  const SHA = 'a'.repeat(40);
+  it('false when the Integrator has never stamped a SHA', () => {
+    expect(integrateSatisfied({ integrateVerifiedSha: undefined, headSha: SHA })).toBe(false);
+    expect(integrateSatisfied({ integrateVerifiedSha: '', headSha: SHA })).toBe(false);
+    expect(integrateSatisfied({})).toBe(false);
+  });
+  it('false when the stamped SHA no longer pins the live head (a fix-story moved it)', () => {
+    expect(integrateSatisfied({ integrateVerifiedSha: SHA, headSha: 'b'.repeat(40) })).toBe(false);
+  });
+  it('true only when the stamp exactly matches the live head', () => {
+    expect(integrateSatisfied({ integrateVerifiedSha: SHA, headSha: SHA })).toBe(true);
   });
 });

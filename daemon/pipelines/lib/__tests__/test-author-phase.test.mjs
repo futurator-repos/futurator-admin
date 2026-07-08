@@ -40,6 +40,23 @@ describe('prompts', () => {
     expect(p).toMatch(/<BINDING>/);
     expect(p).toMatch(/Do NOT write, stub, or scaffold implementation/);
   });
+  it('renders NO invariants block when the story declares none (byte-identical common case)', () => {
+    expect(buildStoryTestPrompt(payload)).not.toMatch(/<INVARIANTS>/);
+  });
+  it('split-path test-author authors declared invariants as *.invariant.test.ts + emits the manifest', () => {
+    const p = buildStoryTestPrompt({
+      ...payload,
+      invariants: [
+        { id: 'S1-inv1', description: 'every declared route resolves to a component' },
+      ],
+    });
+    expect(p).toMatch(/Invariant validators \(MANDATORY/);
+    expect(p).toMatch(/S1-inv1/);
+    expect(p).toMatch(/every declared route resolves/);
+    expect(p).toMatch(/\*\*\/<id>\.invariant\.test\.ts/); // steered to the staged form
+    expect(p).toMatch(/<INVARIANTS>/);
+    expect(p).toMatch(/"S1-inv1": \{ "ref": "<path-to-your-invariant-test>", "kind": "test" \}/);
+  });
   it('implementer prompt lists owned tests and forbids editing them', () => {
     const p = buildImplementerPrompt(payload, ['src/login.test.ts']);
     expect(p).toMatch(/IMPLEMENTER/);

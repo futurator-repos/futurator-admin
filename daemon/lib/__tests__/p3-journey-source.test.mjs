@@ -126,4 +126,40 @@ describe('resolveJourneys', () => {
     const journeys = resolveJourneys({ plan: { deliveryJourneys: [] }, stories: [] });
     expect(journeys).toEqual([]);
   });
+
+  it('sets a per-step settle hint from the AC verify intent (behavior=long rAF/poll, else short)', () => {
+    const stories = [
+      {
+        storyId: 's1',
+        title: 'Mixed verify',
+        acceptanceCriteria: [
+          { id: 'behav', text: 'moves over frames', when: 'holds ArrowRight', thenObservable: 'snapshot.x increases', verify: 'behavior' },
+          { id: 'statey', text: 'toggles a flag', when: 'clicks "Pause"', thenObservable: 'snapshot.paused is true', verify: 'state' },
+        ],
+      },
+    ];
+    const plan = { deliveryJourneys: [{ id: 'j1', title: 'J', acRefs: ['behav', 'statey'] }] };
+    const [journey] = resolveJourneys({ plan, stories });
+    // Order preserved (load-bearing) + settle scaled by verify.
+    expect(journey.steps.map((s) => s.acId)).toEqual(['behav', 'statey']);
+    expect(journey.steps[0].settle).toEqual({ frames: 12, pollMs: 1200 });
+    expect(journey.steps[1].settle).toEqual({ frames: 2, pollMs: 300 });
+  });
+
+  it('derives a SINGLE journey per story with multiple browser-shaped ACs, steps in AC order', () => {
+    const stories = [
+      {
+        storyId: 's1',
+        title: 'Play a run',
+        acceptanceCriteria: [
+          { id: 'start', text: 'start', when: 'presses Space', thenObservable: "snapshot.status equals 'running'", verify: 'behavior' },
+          { id: 'move', text: 'move', when: 'presses ArrowRight', thenObservable: 'snapshot.x increases', verify: 'behavior' },
+          { id: 'score', text: 'score', when: 'eats a pellet', thenObservable: 'snapshot.score increases', verify: 'behavior' },
+        ],
+      },
+    ];
+    const journeys = resolveJourneys({ plan: {}, stories });
+    expect(journeys).toHaveLength(1);
+    expect(journeys[0].steps.map((s) => s.acId)).toEqual(['start', 'move', 'score']);
+  });
 });

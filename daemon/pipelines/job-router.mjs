@@ -63,6 +63,12 @@ export const JOB_HANDLER_SCAN_ENGINE = 'scan-engine';
 export const JOB_HANDLER_QUICK_PLANSPEC = 'quick-planspec';
 // QA-Review W2 — the deployed-app QA Review job (journeys + VQA against plan.devUrl).
 export const JOB_HANDLER_P3_QA = 'p3-qa';
+// Reality-Spine P3 (redesign Part 2 P3 INTEGRATE-RUN) — the whole-tree
+// Integrator. ONE Opus agent with whole-tree write authority loops to full
+// green (tsc && lint && test && build && boot-liveness) then commits; it is the
+// mandatory INTEGRATE-RUN before `review` and the FIRST responder to a blocking
+// QA verdict (before per-symptom fix stories).
+export const JOB_HANDLER_INTEGRATOR = 'integrator';
 
 /**
  * Decide which handler should run a given job.
@@ -102,8 +108,24 @@ export function selectHandler(job) {
   if (job.jobType === 'story-dev') return JOB_HANDLER_STORY_DEV;
   if (job.jobType === 'quick-planspec') return JOB_HANDLER_QUICK_PLANSPEC;
   if (job.jobType === 'p3-qa') return JOB_HANDLER_P3_QA;
+  if (job.jobType === 'integrator') return JOB_HANDLER_INTEGRATOR;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
+}
+
+/**
+ * Reality-Spine P3 — structural check for an integrator job. Rejects malformed
+ * rows before the daemon spawns an Opus whole-tree session. Needs the plan it
+ * integrates (`planId`), an identity (`jobId`), and the app tree it rewrites
+ * (`workingDir`). Returns { ok } or { ok:false, reason }.
+ */
+export function validateIntegratorJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'integrator') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  if (!job.planId) return { ok: false, reason: 'planId-missing' };
+  if (!job.workingDir) return { ok: false, reason: 'workingDir-missing' };
+  return { ok: true };
 }
 
 /**

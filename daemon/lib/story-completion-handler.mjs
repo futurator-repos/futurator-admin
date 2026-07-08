@@ -6,8 +6,9 @@
 // "Done" is a deterministic function of the graph; this is where it's computed.
 // Executors are injected so it unit-tests without running real tests.
 
-import { parseBindingManifest, applyBindings, evaluateCompletion } from './completion-gate.mjs';
-import { runStoryBindings } from './test-binding-runner.mjs';
+import { spawnSync as nodeSpawnSync } from 'node:child_process';
+import { parseBindingManifest, parseInvariantManifest, applyBindings, evaluateCompletion } from './completion-gate.mjs';
+import { runStoryBindings, runStoryInvariants, makeInvariantExecutor } from './test-binding-runner.mjs';
 import { computeQualityInput } from './quality-input.mjs';
 import { evaluateQualityGate } from './quality-gate.mjs';
 import { shouldReview, parseReviewerVerdict } from './story-reviewer.mjs';
@@ -32,6 +33,11 @@ import { shouldReview, parseReviewerVerdict } from './story-reviewer.mjs';
  */
 export async function handleStoryCompletion({
   storyNode, devOutput = '', headSha, executors = {}, reviewerVerdicts = {}, needsHuman = [], now,
+  // Spine no-mock rule + invariant gate. `cwd` is the worktree root (bound files
+  // read relative to it); `invariants` are the story's DECLARED invariants (the
+  // planner's properties); `agentText` carries the <INVARIANTS> manifest (defaults
+  // to devOutput). `readFile`/`invariantExecutor`/`spawnSync` are injectable for tests.
+  cwd, invariants = [], agentText, readFile, invariantExecutor, spawnSync = nodeSpawnSync,
   // W2.1 — P3_QUALITY_GATE ('off'|'shadow'|'on'). When !== 'off', compute the
   // PASS/CONCERNS/FAIL/WAIVED verdict and attach it ADDITIVELY. It never changes
   // newState/propagate (the authoritative deterministic completion-gate rules);
@@ -48,9 +54,36 @@ export async function handleStoryCompletion({
   const bound = applyBindings(authored, manifest);
 
   // 2) run the bound tests deterministically → passing/failing + lastRunSha.
+  //    Threads the no-mock rule (verify:'state' unit/integration ACs may not mock
+  //    the in-repo module under test → status:'misbound').
   const { acceptanceCriteria, summary: bindingSummary } = await runStoryBindings({
-    acceptanceCriteria: bound, headSha, executors, now,
+    acceptanceCriteria: bound, headSha, executors, now, cwd, enforceNoMock: true,
+    ...(readFile ? { readFile } : {}),
   });
+
+  // 2b) invariant validators (redesign Part 4). Parse the <INVARIANTS> manifest to
+  //     bind each declared invariant to its authored validator (declared→authored),
+  //     then run them. Unauthored/mocked/failing invariants block completion.
+  let ranInvariants = [];
+  if (Array.isArray(invariants) && invariants.length) {
+    const invManifest = parseInvariantManifest(agentText != null ? agentText : devOutput);
+    const authoredInvariants = invariants.map((inv) => {
+      const m = invManifest[inv.id];
+      if (!m || !m.ref) return inv;
+      return {
+        ...inv,
+        validator: { ...(inv.validator || {}), ref: m.ref, kind: m.kind || inv.validator?.kind, status: 'authored' },
+      };
+    });
+    const invResult = await runStoryInvariants({
+      invariants: authoredInvariants,
+      headSha,
+      executor: invariantExecutor || makeInvariantExecutor({ cwd, spawnSync }),
+      now,
+      ...(readFile ? { readFile } : {}),
+    });
+    ranInvariants = invResult.invariants;
+  }
 
   // W2.1 — the quality verdict (also decides whether a reviewer is warranted).
   let qualityVerdict;
@@ -75,7 +108,7 @@ export async function handleStoryCompletion({
   }
 
   // 3) the deterministic completion verdict.
-  const verdict = evaluateCompletion({ acceptanceCriteria, currentHeadSha: headSha, reviewerVerdicts: effReviewerVerdicts, needsHuman: effNeedsHuman });
+  const verdict = evaluateCompletion({ acceptanceCriteria, currentHeadSha: headSha, reviewerVerdicts: effReviewerVerdicts, needsHuman: effNeedsHuman, invariants: ranInvariants });
 
   // 4) map verdict → StoryNode lifecycle state.
   //    In the shared-tree model the per-story commit IS the integration (no
@@ -89,6 +122,7 @@ export async function handleStoryCompletion({
     newState,
     propagate: verdict.status === 'done',
     bindingSummary,
+    ...(ranInvariants.length ? { invariants: ranInvariants } : {}),
     ...(qualityVerdict ? { qualityVerdict } : {}),
   };
 }

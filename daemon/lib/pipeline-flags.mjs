@@ -1,10 +1,13 @@
 // pipeline-flags.mjs — the Pipeline-3 flag registry (development-plan §7).
 //
 // One binary, two behaviors. Every P3 capability ships behind an env-sourced
-// flag that defaults OFF, so the legacy daemon path is always the fallback and
-// no big-bang is ever forced. Flags are resolved PER-EPIC, deterministically,
-// and the resolved set is frozen onto `job.p3Flags` at claim so a single job's
-// behavior can never drift mid-flight even if the operator edits env.
+// flag. Most flags still default OFF (legacy daemon path), but as of the
+// quality-defaults rollout (see the P3_FLAGS doc comment below) nine flags
+// plus two new gate flags now default to their QUALITY posture — an operator
+// can still force legacy behavior with an explicit env override. Flags are
+// resolved PER-EPIC, deterministically, and the resolved set is frozen onto
+// `job.p3Flags` at claim so a single job's behavior can never drift mid-flight
+// even if the operator edits env.
 //
 // Rollout gating (per the plan):
 //   • P3_EPIC_ALLOWLIST — comma list; when non-empty, only these epics get ANY
@@ -18,33 +21,48 @@
 import { createHash } from 'node:crypto';
 
 /**
- * The flag registry. Each flag is a small enum: the FIRST value is always the
- * OFF/legacy default. `mode` flags carry their value straight through (after
- * allowlist + rollout gating); there are no boolean-only flags — "off" is just
- * the first enum member, which keeps the A/B channel uniform.
+ * The flag registry. Each flag is a small enum. The FIRST value is always the
+ * OFF/legacy value, but `default` is an independent field — a flag's default
+ * no longer needs to be its first enum member. `mode` flags carry their value
+ * straight through (after allowlist + rollout gating).
+ *
+ * ── Quality-defaults invariant (pipeline-v3 redesign, Part 3 §5 / Part 5 #1) ──
+ * As of this rollout, nine flags below default to their QUALITY posture
+ * (enforce/on/contract) instead of legacy off, and two new flags
+ * (P3_FOUNDATION_GATE, P3_GREEN_TRUNK) default 'on'. Flipping these defaults
+ * is safe ONLY because the allowlist/rollout gate in resolveFlags() is inert
+ * in this single-operator prototype: no P3_EPIC_ALLOWLIST is configured (so
+ * every epic is allowlisted) and no P3_ROLLOUT_PCT is configured (so pct=100
+ * and rolloutBucket()'s 0..99 result is NEVER >= 100 — the rollout gate never
+ * fires). If either env var is ever set, the gating logic re-engages exactly
+ * as designed and CAN force flags back to their default from arbitrary env.
+ * An explicit env override (e.g. P3_GATE_MODE=off) always wins over the
+ * registry default — operator intent is authoritative. daemon/.env currently
+ * pins no P3_ flags, so these registry defaults are what actually runs on the
+ * box today.
  */
 export const P3_FLAGS = Object.freeze({
-  P3_GATE_MODE: { values: ['off', 'audit', 'enforce'], default: 'off' },
+  P3_GATE_MODE: { values: ['off', 'audit', 'enforce'], default: 'enforce' },
   P3_LAZY_MODE: { values: ['off', 'lite', 'full', 'ultra'], default: 'off' },
   P3_COST_CEILING: { values: ['off', 'observe', 'enforce'], default: 'off' },
-  P3_READY_FRONTIER: { values: ['off', 'shadow', 'on'], default: 'off' },
+  P3_READY_FRONTIER: { values: ['off', 'shadow', 'on'], default: 'on' },
   // Graded ready-frontier (TDD blueprint §6). 'kahn' = legacy: a dependent
   // unblocks only when every dep is fully `done`. 'contract' = a dependent may
   // start once its deps are integrated/committed (contract frozen), so
   // test-authoring parallelizes against the contract. 'green' = start once deps'
-  // tests pass (pre-merge). First value is the OFF/legacy default.
-  P3_FRONTIER_MODE: { values: ['kahn', 'contract', 'green'], default: 'kahn' },
-  P3_BOUND_AC_GATE: { values: ['off', 'shadow', 'on'], default: 'off' },
+  // tests pass (pre-merge).
+  P3_FRONTIER_MODE: { values: ['kahn', 'contract', 'green'], default: 'contract' },
+  P3_BOUND_AC_GATE: { values: ['off', 'shadow', 'on'], default: 'on' },
   P3_WORKTREE_CACHE: { values: ['off', 'on'], default: 'off' },
   P3_SESSION_REUSE: { values: ['off', 'dev_compile', 'full'], default: 'off' },
   P3_COMPACTION: { values: ['off', 'on'], default: 'off' },
-  // ── TDD-native rollout (implementation-plan waves) — all default OFF ──
+  // ── TDD-native rollout (implementation-plan waves) ──
   // Quality verdict (PASS/CONCERNS/FAIL/WAIVED) + risk-tiered reviewer. shadow =
   // compute the verdict but discard reviewer output (byte-identical completion).
-  P3_QUALITY_GATE: { values: ['off', 'shadow', 'on'], default: 'off' },
+  P3_QUALITY_GATE: { values: ['off', 'shadow', 'on'], default: 'on' },
   // Split the single story spawn into Test-Author → Implementer (RED-first +
   // tamper). off = today's single untrimmed dev spawn.
-  P3_TEST_AUTHOR_SPLIT: { values: ['off', 'on'], default: 'off' },
+  P3_TEST_AUTHOR_SPLIT: { values: ['off', 'on'], default: 'on' },
   // Emit deterministic TESTS/COVERS graph edges (testRef → symbol) at compile.
   P3_TEST_COVER_EDGES: { values: ['off', 'on'], default: 'off' },
   // Run ts-morph semantic-extract (cross-file CALLS/RENDERS) at compile. cohort =
@@ -55,20 +73,26 @@ export const P3_FLAGS = Object.freeze({
   P3_GRAPH_GROWTH_SPLIT: { values: ['off', 'on'], default: 'off' },
   // Surgical cross-story regression: run only prior tests covering changed
   // symbols after a commit (replaces the retired wave-merge full-suite gate).
-  P3_SELECTIVE_REGRESSION: { values: ['off', 'shadow', 'on'], default: 'off' },
+  P3_SELECTIVE_REGRESSION: { values: ['off', 'shadow', 'on'], default: 'on' },
   // Scope the reflector prompt to landing targets + emit skill-requirement.
   P3_REFLECTOR_SCOPE: { values: ['off', 'on'], default: 'off' },
   // QA-Review W1 — the P3 plan lifecycle driver. When on, the daemon advances
   // plan.status (concept→developing on dispatch, →review when every story is
   // done + reviewAt), which lets the auto dev-deploy + QA stages engage. Off →
   // P3 plans stay in 'concept' forever (legacy behavior), no dev-deploy.
-  P3_LIFECYCLE: { values: ['off', 'on'], default: 'off' },
+  P3_LIFECYCLE: { values: ['off', 'on'], default: 'on' },
   // QA-Review W2 — the deployed-app QA Review. THE single flag gating every W2
   // producer AND read (cron enqueue, daemon runner, API GET, UI branch — the
   // TS/UI sides read process.env.P3_QA_REVIEW directly, same value strings).
   // 'shadow' = compute + persist the verdict but never surface / never gate;
   // 'on' = surface it in the QA Review tab + gate Approve on a clean verdict.
-  P3_QA_REVIEW: { values: ['off', 'shadow', 'on'], default: 'off' },
+  P3_QA_REVIEW: { values: ['off', 'shadow', 'on'], default: 'on' },
+  // Foundation gate (pipeline-v3 redesign): boot-liveness + tsc + build must
+  // pass on foundation stories before dependents unblock. Fail-closed.
+  P3_FOUNDATION_GATE: { values: ['off', 'on'], default: 'on' },
+  // Green-trunk gate (pipeline-v3 redesign): tsc + build must pass on every
+  // story's tree before it can be marked done. Fail-closed.
+  P3_GREEN_TRUNK: { values: ['off', 'on'], default: 'on' },
 });
 
 export const P3_FLAG_NAMES = Object.freeze(Object.keys(P3_FLAGS));
@@ -92,6 +116,23 @@ export function rolloutBucket(flag, epicId) {
 function coerceValue(spec, raw) {
   const v = String(raw ?? '').trim().toLowerCase();
   return spec.values.includes(v) ? v : spec.default;
+}
+
+/**
+ * Read a single flag straight from env, coerced to a valid value (invalid or
+ * absent → the flag's registry default). Skips allowlist/rollout gating
+ * entirely — this is for call sites that want "operator intent, no A/B
+ * machinery" rather than the per-epic resolveFlags() pipeline.
+ *
+ * @param {string} name
+ * @param {Record<string,string|undefined>} [env]
+ * @returns {string|undefined} the resolved value, or undefined if `name` is
+ *   not a known flag.
+ */
+export function envFlag(name, env = process.env) {
+  const spec = P3_FLAGS[name];
+  if (!spec) return undefined;
+  return coerceValue(spec, env[name]);
 }
 
 /**

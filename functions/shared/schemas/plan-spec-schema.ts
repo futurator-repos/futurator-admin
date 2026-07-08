@@ -16,7 +16,13 @@ import { acceptanceCriterionSchema } from './plan-output-schema';
 export const PLAN_SPEC_SCHEMA_VERSION = 'plan-spec/1' as const;
 export const EPIC_WIDE_TOUCH = '<EPIC_WIDE>';
 
-export const testBindingStatusSchema = z.enum(['unbound', 'bound', 'passing', 'failing']);
+export const testBindingStatusSchema = z.enum([
+  'unbound',
+  'bound',
+  'passing',
+  'failing',
+  'misbound',
+]);
 export const testKindSchema = z.enum(['unit', 'integration', 'browser', 'manual']);
 export const acClassSchema = z.enum(['deterministic', 'advisory-taste', 'advisory-security']);
 
@@ -48,6 +54,23 @@ export const specShardRefSchema = z.object({
 
 export const storyComplexitySchema = z.enum(['trivial', 'standard', 'complex', 'architectural']);
 
+export const invariantStatusSchema = z.enum(['declared', 'authored', 'passing', 'failing']);
+
+export const invariantValidatorSchema = z.object({
+  ref: z.string().optional(),
+  kind: z.enum(['script', 'test']).optional(),
+  status: invariantStatusSchema.default('declared'),
+  lastRunSha: z.string().optional(),
+  lastRunAt: z.string().optional(),
+  detail: z.string().optional(),
+});
+
+export const invariantSchema = z.object({
+  id: z.string().min(1),
+  description: z.string().min(5),
+  validator: invariantValidatorSchema.default({ status: 'declared' }),
+});
+
 export const storyNodeSchema = z.object({
   storyId: z.string().min(1),
   cohort: z.object({
@@ -66,6 +89,9 @@ export const storyNodeSchema = z.object({
   specShardRef: specShardRefSchema.optional(),
   complexity: storyComplexitySchema.default('standard'),
   verifyIntent: z.string().optional(),
+  nodeKind: z.enum(['foundation', 'feature', 'integration']).optional(),
+  isFoundation: z.boolean().optional(),
+  invariants: z.array(invariantSchema).default([]),
 });
 
 export const planSpecSchema = z.object({

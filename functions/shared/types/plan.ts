@@ -158,6 +158,27 @@ export interface Plan {
   /** Stage-C — the PM-declared delivery journeys, persisted (was schema-only). */
   deliveryJourneys?: DeliveryJourney[];
 
+  // ── Reality-Spine P3 (redesign Part 2 P3 INTEGRATE-RUN, Part 3 #2) ──
+  // The whole-tree Integrator's green-pass readiness mark. When every story is
+  // terminal, the plan may only advance to `review` once the Integrator has run
+  // ONE agent with whole-tree write authority to a full-green state
+  // (tsc && lint && test && build && boot-liveness) and committed. That commit's
+  // SHA is stamped here; `integrateSatisfied()` gates the review transition on
+  // `integrateVerifiedSha === <live app-tree head>`. A later fix-story commit
+  // moves the head and invalidates the stamp, forcing a fresh Integrator round.
+  /** ISO-8601 timestamp the Integrator reached full green + committed. */
+  integrateVerifiedAt?: string;
+  /** The 40-hex SHA the Integrator committed at full green — pins the readiness. */
+  integrateVerifiedSha?: string;
+  /** FK to the most recent `integrator` job. At-most-once per app-tree head;
+   *  cleared/re-enqueued when the head changes (same staleness discipline as
+   *  `p3QaJobId`). */
+  integratorJobId?: string;
+  /** Rounds the Integrator has been routed as FIRST responder to a blocking QA
+   *  verdict (Part 5 #4). Bounded by INTEGRATOR_ROUNDS_MAX before the pipeline
+   *  falls back to per-symptom fix-story minting. */
+  qaIntegratorRounds?: number;
+
   // ── Execution defaults applied to all epics under this plan ──
   devModel?: string;
   devEffort?: string;

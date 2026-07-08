@@ -12,6 +12,7 @@
 // unbound→bound; the Verify stage runs them and flips passing/failing.
 
 const BINDING_RE = /<BINDING>([\s\S]*?)<\/BINDING>/i;
+const INVARIANTS_RE = /<INVARIANTS>([\s\S]*?)<\/INVARIANTS>/i;
 
 /**
  * Parse a `<BINDING>` manifest out of agent output. Tolerant: accepts the JSON
@@ -36,6 +37,34 @@ export function parseBindingManifest(text) {
   for (const [acId, v] of Object.entries(obj)) {
     if (typeof v === 'string') out[acId] = { testRef: v };
     else if (v && typeof v === 'object') out[acId] = { testRef: v.testRef || v.test || '', testKind: v.testKind || v.kind };
+  }
+  return out;
+}
+
+/**
+ * Parse an `<INVARIANTS>` manifest out of agent output. Mirrors
+ * parseBindingManifest tolerance (tag → fenced → bare JSON). Maps an invariant id
+ * to the validator the story authored: `{ [invariantId]: { ref, kind } }`. Applied
+ * by the caller to flip declared invariants → authored. PURE.
+ */
+export function parseInvariantManifest(text) {
+  if (typeof text !== 'string') return {};
+  const m = INVARIANTS_RE.exec(text);
+  const body = (m ? m[1] : text)
+    .replace(/^```(?:json)?\s*/im, '')
+    .replace(/```\s*$/m, '')
+    .trim();
+  const tryParse = (s) => { try { const j = JSON.parse(s); return j && typeof j === 'object' ? j : null; } catch { return null; } };
+  let obj = tryParse(body);
+  if (!obj) {
+    const brace = /\{[\s\S]*\}/.exec(body);
+    if (brace) obj = tryParse(brace[0]);
+  }
+  if (!obj) return {};
+  const out = {};
+  for (const [id, v] of Object.entries(obj)) {
+    if (typeof v === 'string') out[id] = { ref: v };
+    else if (v && typeof v === 'object') out[id] = { ref: v.ref || v.testRef || v.test || '', kind: v.kind || v.testKind };
   }
   return out;
 }
@@ -139,6 +168,7 @@ function deterministicPasses(ac, currentHeadSha) {
  *   currentHeadSha?: string,
  *   reviewerVerdicts?: Record<string,'pass'|'fail'>,  // advisory-only
  *   needsHuman?: string[],                            // ac ids escalated
+ *   invariants?: object[],                            // ran invariant validators
  * }} args
  * @returns {{
  *   done: boolean,
@@ -147,7 +177,7 @@ function deterministicPasses(ac, currentHeadSha) {
  *   reasons: string[],
  * }}
  */
-export function evaluateCompletion({ acceptanceCriteria = [], currentHeadSha, reviewerVerdicts = {}, needsHuman = [] }) {
+export function evaluateCompletion({ acceptanceCriteria = [], currentHeadSha, reviewerVerdicts = {}, needsHuman = [], invariants = [] }) {
   const buckets = classifyAcs(acceptanceCriteria);
   const failing = [];
   const blocking = [];
@@ -159,8 +189,11 @@ export function evaluateCompletion({ acceptanceCriteria = [], currentHeadSha, re
     if (!deterministicPasses(ac, currentHeadSha)) {
       failing.push(ac.id);
       const tb = ac.testBinding || {};
-      const misbound = requiresBrowser(ac) && tb.testKind !== 'browser';
-      reasons.push(`${ac.id}: deterministic AC not passing (status=${tb.status || 'unbound'}${misbound ? `, misbound: behavior AC needs testKind:'browser' not '${tb.testKind || 'omitted'}'` : ''}${tb.lastRunSha && currentHeadSha && tb.lastRunSha !== currentHeadSha ? ', stale-sha' : ''})`);
+      const browserMisbound = requiresBrowser(ac) && tb.testKind !== 'browser';
+      // A verify:'state' AC carrying status:'misbound' failed the no-mock rule —
+      // surface the concrete mock detail so the reason reads clearly.
+      const stateMisbound = tb.status === 'misbound' && !requiresBrowser(ac);
+      reasons.push(`${ac.id}: deterministic AC not passing (status=${tb.status || 'unbound'}${browserMisbound ? `, misbound: behavior AC needs testKind:'browser' not '${tb.testKind || 'omitted'}'` : ''}${stateMisbound && tb.detail ? `, misbound: ${tb.detail}` : ''}${tb.lastRunSha && currentHeadSha && tb.lastRunSha !== currentHeadSha ? ', stale-sha' : ''})`);
     }
   }
   for (const ac of buckets.advisorySecurity) {
@@ -171,6 +204,17 @@ export function evaluateCompletion({ acceptanceCriteria = [], currentHeadSha, re
   }
   for (const ac of buckets.manual) {
     if (ac.testBinding?.status !== 'passing') { pending.push(ac.id); }
+  }
+
+  // Invariant gate (redesign Part 4) — FAIL CLOSED. An invariant blocks `done`
+  // unless its authored validator is 'passing' AND was run against the live SHA.
+  for (const inv of invariants) {
+    const v = inv?.validator || {};
+    const stale = v.lastRunSha && currentHeadSha && v.lastRunSha !== currentHeadSha;
+    if (v.status !== 'passing' || stale) {
+      failing.push(inv.id);
+      reasons.push(`${inv.id}: invariant not satisfied (status=${v.status || 'declared'}${stale ? ', stale-sha' : ''}${v.detail ? ` — ${v.detail}` : ''})`);
+    }
   }
 
   // Precedence: needs-human > failing > blocked > pending-manual > done.

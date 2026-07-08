@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   parseBindingManifest,
+  parseInvariantManifest,
   classifyAcs,
   bindAc,
   applyBindings,
@@ -25,6 +26,27 @@ describe('parseBindingManifest', () => {
   it('returns {} when absent/unparseable', () => {
     expect(parseBindingManifest('no manifest here')).toEqual({});
     expect(parseBindingManifest('<BINDING>not json</BINDING>')).toEqual({});
+  });
+});
+
+describe('parseInvariantManifest', () => {
+  it('parses an <INVARIANTS> JSON object (object + string forms)', () => {
+    const text = `x\n<INVARIANTS>\n{ "inv-1": { "ref": "scripts/inv/flood.mjs", "kind": "script" }, "inv-2": "v.invariant.test.ts" }\n</INVARIANTS>\ny`;
+    const m = parseInvariantManifest(text);
+    expect(m['inv-1']).toEqual({ ref: 'scripts/inv/flood.mjs', kind: 'script' });
+    expect(m['inv-2']).toEqual({ ref: 'v.invariant.test.ts' });
+  });
+  it('tolerates fenced json and bare json', () => {
+    expect(parseInvariantManifest('```json\n{"a":{"ref":"x","kind":"test"}}\n```')['a']).toEqual({ ref: 'x', kind: 'test' });
+    expect(parseInvariantManifest('{"a":"y"}')['a']).toEqual({ ref: 'y' });
+  });
+  it('accepts testRef/testKind aliases', () => {
+    expect(parseInvariantManifest('{"a":{"testRef":"r","testKind":"script"}}')['a']).toEqual({ ref: 'r', kind: 'script' });
+  });
+  it('returns {} when absent/unparseable/non-string', () => {
+    expect(parseInvariantManifest('nothing here')).toEqual({});
+    expect(parseInvariantManifest('<INVARIANTS>not json</INVARIANTS>')).toEqual({});
+    expect(parseInvariantManifest(null)).toEqual({});
   });
 });
 
@@ -204,5 +226,51 @@ describe('evaluateCompletion truth table', () => {
     });
     expect(r.status).toBe('needs-human');
     expect(r.pending).toContain('m');
+  });
+});
+
+describe('evaluateCompletion — invariant gate (fail closed)', () => {
+  const SHA = 'sha-inv';
+  const invariant = (id, over = {}) => ({ id, description: `${id}`, validator: { status: 'declared', ...over } });
+
+  it('a declared/failing invariant blocks done', () => {
+    const r = evaluateCompletion({
+      acceptanceCriteria: [passing('a', SHA)], currentHeadSha: SHA,
+      invariants: [invariant('inv-1', { status: 'failing', detail: 'no authored validator' })],
+    });
+    expect(r.status).toBe('failing');
+    expect(r.failing).toContain('inv-1');
+    expect(r.reasons.join(' ')).toMatch(/no authored validator/);
+  });
+
+  it('a passing but STALE-sha invariant blocks done', () => {
+    const r = evaluateCompletion({
+      acceptanceCriteria: [passing('a', SHA)], currentHeadSha: SHA,
+      invariants: [invariant('inv-1', { status: 'passing', lastRunSha: 'OLD' })],
+    });
+    expect(r.status).toBe('failing');
+    expect(r.failing).toContain('inv-1');
+    expect(r.reasons.join(' ')).toMatch(/stale-sha/);
+  });
+
+  it('a passing fresh invariant does NOT block done', () => {
+    const r = evaluateCompletion({
+      acceptanceCriteria: [passing('a', SHA)], currentHeadSha: SHA,
+      invariants: [invariant('inv-1', { status: 'passing', lastRunSha: SHA })],
+    });
+    expect(r.status).toBe('done');
+  });
+
+  it('a verify:state AC carrying status:misbound blocks + surfaces the mock detail', () => {
+    const r = evaluateCompletion({
+      acceptanceCriteria: [ac('s', {
+        verify: 'state',
+        testBinding: { status: 'misbound', testKind: 'unit', detail: "bound test s.test.ts mocks in-repo module(s): ./levels (no-mock rule) → misbound" },
+      })],
+      currentHeadSha: SHA,
+    });
+    expect(r.status).toBe('failing');
+    expect(r.failing).toContain('s');
+    expect(r.reasons.join(' ')).toMatch(/no-mock rule/);
   });
 });

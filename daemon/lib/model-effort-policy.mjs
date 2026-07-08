@@ -40,6 +40,14 @@ const DEFAULTS = Object.freeze({
   // model + high adaptive effort. Env-overridable via P3_PLANNER_MODEL.
   planner: { model: 'claude-opus-4-8', effort: 'high' },
   'test-author': { model: 'claude-sonnet-5', effort: 'high' },
+  // Reality-Spine P3 (redesign Part 2, Part 5 #4) — the INTEGRATOR is the ONE
+  // whole-tree actor: it holds the entire assembled artifact in one context and
+  // fixes cross-cutting integration defects no scope-jailed slice can. That is
+  // the pipeline's second-highest-leverage seat after the planner, so it gets
+  // the strongest model + high adaptive effort. Env-overridable via
+  // P3_INTEGRATOR_MODEL / P3_INTEGRATOR_EFFORT; plan.integratorModel wins.
+  // (No 'critic' entry — plan-critique reuses the reviewer fallback.)
+  integrator: { model: 'claude-opus-4-8', effort: 'high' },
   reviewer: { model: 'claude-sonnet-5', effort: 'low' },
   reflector: { model: 'claude-sonnet-5', effort: 'medium' },
   judge: { model: 'haiku', effort: null },

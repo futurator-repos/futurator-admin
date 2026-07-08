@@ -75,6 +75,12 @@ export function buildStoryDevJob({ storyNode, planId, appId, workingDir, contrac
       touches: dev.allowedPaths,
       forbiddenAreas: dev.forbiddenAreas,
       specShardRef: storyNode.specShardRef,
+      // Reality-Spine (foundation-gate.mjs isFoundation/nodeKind + the invariant
+      // gate) — threaded through so the foundation dev prompt and the invariant
+      // executor see the planner's declarations without a second lookup.
+      nodeKind: storyNode.nodeKind,
+      isFoundation: storyNode.isFoundation === true,
+      invariants: storyNode.invariants || [],
     },
   };
 }

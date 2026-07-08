@@ -128,7 +128,7 @@ describe('runQuickPlanspecJob', () => {
     const d = deps({ spawn });
     const r = await runQuickPlanspecJob(baseJob, d);
     expect(r.ok).toBe(true);
-    expect(spawn.calls).toBe(1);
+    expect(spawn.calls).toBe(2); // plan + always-on plan-critique spawn (no repair)
     expect(r.summary.maxWidth).toBe(3);
     expect(r.summary.violations).toEqual([]);
   });
@@ -138,7 +138,7 @@ describe('runQuickPlanspecJob', () => {
     const d = deps({ spawn });
     const r = await runQuickPlanspecJob(baseJob, d);
     expect(r.ok).toBe(true);
-    expect(spawn.calls).toBe(2); // plan + repair
+    expect(spawn.calls).toBe(3); // plan + repair + always-on plan-critique spawn
     expect(r.summary.stories).toBe(5);
     expect(r.summary.maxWidth).toBe(3); // the repaired wide DAG won
     expect(r.summary.violations).toEqual([]);
@@ -152,7 +152,7 @@ describe('runQuickPlanspecJob', () => {
     const d = deps({ spawn });
     const r = await runQuickPlanspecJob(baseJob, d);
     expect(r.ok).toBe(true); // never fail the job over width — safety edges keep it correct
-    expect(spawn.calls).toBe(2);
+    expect(spawn.calls).toBe(3); // plan + repair-attempt + always-on plan-critique spawn
     expect(r.summary.violations.length).toBeGreaterThan(0);
     expect(d.batchPutStoryNodes).toHaveBeenCalledOnce();
     expect(d.writeAttentionItem).toHaveBeenCalledWith(

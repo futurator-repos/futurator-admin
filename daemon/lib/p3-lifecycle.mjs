@@ -75,3 +75,20 @@ export function allStoriesResolved(nodes, justResolvedStoryId) {
       (justResolvedStoryId != null && n?.storyId === justResolvedStoryId),
   );
 }
+
+/**
+ * Reality-Spine P3 (redesign Part 2 P3, Part 3 #2) — is the INTEGRATE-RUN
+ * satisfied for the CURRENT app-tree head? The Integrator's whole-tree green
+ * pass stamps `plan.integrateVerifiedSha` = the SHA it committed; a plan may
+ * only advance from all-stories-terminal to `review` once that stamp EXISTS and
+ * still PINS the live head. A later fix-story commit moves the head, so the
+ * stamp no longer matches → a fresh Integrator round is forced before review is
+ * reachable again. This is the same SHA-pinned readiness discipline as
+ * `qaVerifiedAt`, applied one stage earlier. PURE.
+ *
+ * @param {{ integrateVerifiedSha?: string, headSha?: string }} args
+ * @returns {boolean}
+ */
+export function integrateSatisfied({ integrateVerifiedSha, headSha } = {}) {
+  return Boolean(integrateVerifiedSha) && integrateVerifiedSha === headSha;
+}

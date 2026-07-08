@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runP3Qa, joinDevUrl } from '../p3-qa-runner.mjs';
+import { runP3Qa, joinDevUrl, expandJourneySteps } from '../p3-qa-runner.mjs';
 
 // ── Fake Playwright: one config per sequential chromium.launch() call ──────
 
@@ -33,13 +33,16 @@ function makeFakePlaywright(launchConfigs) {
           waitForFunction: async () => {
             if (cfg.harnessMounted === false) throw new Error('timeout');
           },
-          keyboard: { press: async () => {} },
+          keyboard: { press: async () => {}, down: async () => {}, up: async () => {} },
           waitForTimeout: async () => {},
           screenshot: async () => {
             shotCalls += 1;
             return Buffer.from(`frame-${shotCalls}`);
           },
           evaluate: async (_fn, arg) => {
+            // settleFrames (__settle) and redispatchKey ({k,c}) are not reads —
+            // they must not consume the snapshot sequence.
+            if (arg && (arg.__settle || arg.k)) return undefined;
             if (arg && arg.m) return undefined;
             const snaps = cfg.snapshots || [{}];
             return snaps[Math.min(snapCalls++, snaps.length - 1)];
@@ -52,7 +55,10 @@ function makeFakePlaywright(launchConfigs) {
 }
 
 const passJudge = async () => ({ ok: true, output: 'VERDICT: PASS [conf=high]\nOBSERVATION: looks right' });
+const failJudge = async () => ({ ok: true, output: 'VERDICT: FAIL [conf=high]\nOBSERVATION: frames look identical' });
 const okS3 = async () => ({ code: 0, stdout: '', stderr: '' });
+// No-op poll/settle clock so failing-poll windows cost no real time in tests.
+const fastWait = async () => {};
 
 function story(overrides = {}) {
   return {
@@ -118,6 +124,7 @@ describe('runP3Qa — two journeys (pass + deterministic-fail)', () => {
       // Frames upload to the DEV-ENV bucket, served at dev.futurator.ai/_qa/.
       qaContext: { screenshotBucket: 'dev-env-bucket', screenshotBase: 'https://dev.futurator.ai' },
       log: () => {},
+      wait: fastWait,
     });
 
     expect(result.ranAtSha).toBe('sha123');
@@ -189,7 +196,7 @@ describe('runP3Qa — pacman3-shaped fixture (stub reducer + orphans)', () => {
     const playwright = makeFakePlaywright([{ snapshots: [{ x: 0 }] }]);
     const qaContext = { appDir: root };
 
-    const result = await runP3Qa({ plan, stories, journeys, playwright, spawnJudge: passJudge, s3: okS3, qaContext, log: () => {} });
+    const result = await runP3Qa({ plan, stories, journeys, playwright, spawnJudge: passJudge, s3: okS3, qaContext, log: () => {}, wait: fastWait });
 
     expect(result.blocking).toBe(true);
     expect(result.wiring.orphanModules).toContain('src/game/reducer.ts');
@@ -329,6 +336,86 @@ describe('runP3Qa — no journeys resolvable', () => {
     expect(result.journeys).toEqual([]);
     expect(result.status).toBe('uncertain');
     expect(result.blocking).toBe(false);
+  });
+});
+
+// ── T9c: confirmatory blocking policy (VQA can never false-block det-pass) ──
+
+describe('runP3Qa — confirmatory blocking policy', () => {
+  const plan = { planId: 'pc', qaCommitSha: 'shac', devUrl: 'https://dev.futurator.ai/pc' };
+
+  function oneJourney({ when, thenObservable }) {
+    const stories = [story({ storyId: 's1', acceptanceCriteria: [{ id: 's1-ac1', text: 't', when, thenObservable }] })];
+    const journeys = [{ id: 'j1', title: 'J', acRefs: ['s1-ac1'], steps: [{ acId: 's1-ac1', label: 'step', when, thenObservable }] }];
+    return { stories, journeys };
+  }
+
+  it('det PASS + VQA FAIL → step blocking:false, journey PASS (VQA never false-blocks)', async () => {
+    const { stories, journeys } = oneJourney({ when: 'The user presses Space', thenObservable: "snapshot.status equals 'running'" });
+    const playwright = makeFakePlaywright([{ snapshots: [{ status: 'running' }] }]);
+    const result = await runP3Qa({ plan, stories, journeys, playwright, spawnJudge: failJudge, s3: okS3, qaContext: {}, log: () => {}, wait: fastWait });
+    const step = result.journeys[0].steps[0];
+    expect(step.deterministic.passed).toBe(true);
+    expect(step.vqa.verdict).toBe('fail'); // the VQA fail IS recorded (attention)…
+    expect(step.blocking).toBe(false); // …but it does NOT block
+    expect(result.journeys[0].verdict).toBe('pass');
+    expect(result.blocking).toBe(false);
+  });
+
+  it('det HARD-FAIL → step blocking:true, journey FAIL', async () => {
+    const { stories, journeys } = oneJourney({ when: 'The user presses Space', thenObservable: "snapshot.status equals 'running'" });
+    const playwright = makeFakePlaywright([{ snapshots: [{ status: 'idle' }] }]); // never reaches running
+    const result = await runP3Qa({ plan, stories, journeys, playwright, spawnJudge: passJudge, s3: okS3, qaContext: {}, log: () => {}, wait: fastWait });
+    const step = result.journeys[0].steps[0];
+    expect(step.deterministic.passed).toBe(false);
+    expect(step.blocking).toBe(true);
+    expect(result.journeys[0].verdict).toBe('fail');
+    expect(result.blocking).toBe(true);
+  });
+
+  it('det UNDECIDED (uninterpretable) + high-conf VQA FAIL → blocking:true', async () => {
+    // No snapshot assertion in the prose → the deterministic lane cannot decide.
+    const { stories, journeys } = oneJourney({ when: 'The user presses Space', thenObservable: 'the screen looks polished' });
+    const playwright = makeFakePlaywright([{ snapshots: [{ status: 'running' }] }]);
+    const result = await runP3Qa({ plan, stories, journeys, playwright, spawnJudge: failJudge, s3: okS3, qaContext: {}, log: () => {}, wait: fastWait });
+    const step = result.journeys[0].steps[0];
+    expect(step.deterministic.passed).toBe(false);
+    expect(step.blocking).toBe(true); // undecided + confirmed VQA fail blocks
+    expect(result.blocking).toBe(true);
+  });
+
+  it('det UNDECIDED (uninterpretable) + VQA PASS → non-blocking, journey uncertain', async () => {
+    const { stories, journeys } = oneJourney({ when: 'The user presses Space', thenObservable: 'the screen looks polished' });
+    const playwright = makeFakePlaywright([{ snapshots: [{ status: 'running' }] }]);
+    const result = await runP3Qa({ plan, stories, journeys, playwright, spawnJudge: passJudge, s3: okS3, qaContext: {}, log: () => {}, wait: fastWait });
+    const step = result.journeys[0].steps[0];
+    expect(step.blocking).toBe(false);
+    expect(result.blocking).toBe(false);
+    expect(result.journeys[0].verdict).toBe('uncertain');
+  });
+});
+
+// ── T9d: observe-only expansion drops the harness DRIVE lane ────────────────
+
+describe('expandJourneySteps — observeOnly', () => {
+  const harnessJourney = {
+    id: 'j',
+    steps: [{ acId: 'a1', label: 'force over', when: "The harness forces status to 'over'", thenObservable: "snapshot.status equals 'over'" }],
+  };
+
+  it('observeOnly:true drops the harness action → undecided step, no drive replayed', () => {
+    const { browserSteps, primaryMeta } = expandJourneySteps(harnessJourney, { observeOnly: true });
+    expect(browserSteps).toHaveLength(1);
+    expect(browserSteps[0].action).toBe(null); // the forceStatus drive was dropped
+    expect(browserSteps[0].assertions).toEqual([]); // undecided → no assertions run
+    expect(primaryMeta[0].interpretable).toBe(false);
+    expect(primaryMeta[0].reason).toMatch(/observe-only/);
+  });
+
+  it('observeOnly:false keeps the harness action (drive replayed)', () => {
+    const { browserSteps, primaryMeta } = expandJourneySteps(harnessJourney, { observeOnly: false });
+    expect(browserSteps[0].action).toEqual({ type: 'harness', method: 'forceStatus', args: ['over'] });
+    expect(primaryMeta[0].interpretable).toBe(true);
   });
 });
 

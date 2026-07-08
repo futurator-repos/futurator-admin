@@ -44,7 +44,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { parseProbe, runBrowserJourney } from './browser-probe-executor.mjs';
+import { parseProbe, runBrowserJourney, OBSERVE_ONLY_NOTE } from './browser-probe-executor.mjs';
 import { judgeVqaStep } from './p3-vqa-judge.mjs';
 import { findOrphanModules } from './p3-orphan-check.mjs';
 import { resolveJourneys } from './p3-journey-source.mjs';
@@ -151,10 +151,22 @@ function stepDeterministicFromResult(runResult, stepLabel, assertionsDesc) {
   return { assertion: assertionsDesc, passed: true, detail: 'assertion(s) passed' };
 }
 
-/** Combine one journey's per-step deterministic + VQA outcomes into its overall LaneVerdict. */
+/**
+ * Combine one journey's per-step deterministic + VQA outcomes into its overall
+ * LaneVerdict.
+ *
+ * CONFIRMATORY POLICY (redesign Part 3 / operator's top pain): the DETERMINISTIC
+ * lane — hardened by focus/settle/poll in browser-probe-executor — is the GATE.
+ * VQA is CONFIRMATORY. Callers apply the BLOCKING short-circuit first (any step
+ * with `blocking:true` → journey 'fail'); this function decides the NON-blocking
+ * remainder. When every deterministic step passed, the journey PASSES; a VQA
+ * 'fail' is DOWNGRADED to attention (recorded on the step's rationale, but NEVER
+ * flips a deterministically-verified journey to 'fail'). A step the deterministic
+ * lane could not decide (undecided/undriveable, already proven non-blocking by
+ * the caller) → 'uncertain'. Only a genuinely UNKNOWN VQA also → 'uncertain'.
+ */
 function combineVerdict(deterministicAllPassed, vqaVerdicts) {
-  if (!deterministicAllPassed) return 'fail';
-  if (vqaVerdicts.some((v) => v === 'fail')) return 'fail';
+  if (!deterministicAllPassed) return 'uncertain';
   if (vqaVerdicts.some((v) => v === 'uncertain')) return 'uncertain';
   return 'pass';
 }
@@ -200,31 +212,51 @@ async function uploadFrame({ s3, localPath, key, cwd, log, bucket, base }) {
  *  - `primaryMeta`: one entry per AC carrying everything needed to build the
  *    final JourneyStep + (optionally) judge it visually.
  */
-function expandJourneySteps(journey) {
+export function expandJourneySteps(journey, { observeOnly = false } = {}) {
   const browserSteps = [];
   const primaryMeta = [];
   for (const step of journey?.steps || []) {
     const acId = step?.acId ?? '';
     const rawLabel = step?.label || acId || '(unlabeled step)';
     const probe = parseProbe({ when: step?.when, thenObservable: step?.thenObservable, then: step?.then });
-    const actions = probe.actions?.length ? probe.actions : [null];
+    let actions = probe.actions?.length ? probe.actions : [null];
+
+    // OBSERVE-ONLY: drop the harness DRIVE lane (forceStatus/dispatch). A probe
+    // must reach the state the way a USER would; keys/clicks survive.
+    let droveNothing = false;
+    if (observeOnly) {
+      const kept = actions.filter((a) => !(a && a.type === 'harness'));
+      if (kept.length !== actions.length) {
+        // The AC's ONLY route to its state was the disabled DRIVE lane → the
+        // deterministic lane cannot decide it (we did NOT execute a real drive).
+        // Mark it UNDECIDED (non-blocking on its own), never a hard fail.
+        droveNothing = kept.length === 0;
+        actions = kept.length ? kept : [null];
+      }
+    }
 
     for (let i = 0; i < actions.length - 1; i++) {
-      browserSteps.push({ label: `${rawLabel}__pre${i}__${sanitizeKey(acId)}`, action: actions[i], assertions: [] });
+      browserSteps.push({ label: `${rawLabel}__pre${i}__${sanitizeKey(acId)}`, action: actions[i], assertions: [], settle: step?.settle });
     }
     const finalAction = actions[actions.length - 1];
     const stepLabel = `${acId}::${rawLabel}`;
+    // When the drive was fully disabled, the step is UNDECIDED: no assertions run
+    // (we couldn't reach the state), so the deterministic lane reads 'undecided'
+    // not 'hard-fail'. VQA on the (identical) frames stays confirmatory.
+    const interpretable = probe.interpretable && !droveNothing;
+    const reason = droveNothing ? OBSERVE_ONLY_NOTE : probe.reason;
     browserSteps.push({
       label: stepLabel,
       action: finalAction,
-      assertions: probe.interpretable ? probe.assertions : [],
+      assertions: interpretable ? probe.assertions : [],
+      settle: step?.settle,
     });
 
     primaryMeta.push({
       acId,
       label: stepLabel,
-      interpretable: probe.interpretable,
-      reason: probe.reason,
+      interpretable,
+      reason,
       assertionsDesc: describeAssertions(probe.assertions),
       actionDesc: describeAction(finalAction),
       when: step?.when,
@@ -242,12 +274,12 @@ function expandJourneySteps(journey) {
  * the caller's per-journey try/catch (`runP3Qa`) — this function does not
  * itself fail-open beyond what its callees already guarantee.
  */
-async function runOneJourney({ journey, url, stories, playwright, spawnJudge, s3, qaContext, planId, qaCommitSha, frameRoot, log }) {
-  const { browserSteps, primaryMeta } = expandJourneySteps(journey);
+async function runOneJourney({ journey, url, stories, playwright, spawnJudge, s3, qaContext, planId, qaCommitSha, frameRoot, log, observeOnly = true, wait }) {
+  const { browserSteps, primaryMeta } = expandJourneySteps(journey, { observeOnly });
 
   let runResult = { passed: true, detail: 'no steps to run', frames: [] };
   if (browserSteps.length) {
-    runResult = await runBrowserJourney({ url, steps: browserSteps, playwright, capture: !!frameRoot, log });
+    runResult = await runBrowserJourney({ url, steps: browserSteps, playwright, capture: !!frameRoot, log, observeOnly, wait });
   }
 
   const steps = [];
@@ -328,10 +360,22 @@ async function runOneJourney({ journey, url, stories, playwright, spawnJudge, s3
       });
     }
 
+    // BLOCKING POLICY (confirmatory gate). A VQA fail can NEVER block a step
+    // whose deterministic assertion passed (det.passed===true → both terms
+    // below are false) — that is the fix for VQA false-negatives on a working
+    // canvas game. A step blocks only when the deterministic lane HARD-fails an
+    // interpretable assertion, OR the lane is UNDECIDED (uninterpretable/drive-
+    // disabled, no infra) AND VQA independently confirms a fail.
+    const detHardFail = det.passed === false && meta.interpretable && !det.infra;
+    const detUndecided = det.passed === false && !meta.interpretable && !det.infra;
+    const vqaFail = stepVqa?.verdict === 'fail';
+    const blocking = detHardFail || (detUndecided && vqaFail);
+
     steps.push({
       label: meta.label,
       action: meta.actionDesc,
       deterministic: det,
+      blocking,
       ...(stepVqa ? { vqa: stepVqa } : {}),
     });
   }
@@ -344,8 +388,16 @@ async function runOneJourney({ journey, url, stories, playwright, spawnJudge, s3
   // journey whose acRefs all resolved to non-browser-shaped ACs lands here.
   // Report 'uncertain' (non-blocking, surfaced to the operator) instead. An
   // infra failure of the harness likewise reads 'uncertain', never a block.
+  // BLOCKING short-circuit first (a real blocker → 'fail'); then the confirmatory
+  // remainder. A VQA fail on a deterministically-passed step is NOT blocking, so
+  // it never reaches 'fail' here — the journey stays 'pass'.
+  const anyBlocking = steps.some((s) => s.blocking);
   const verdict =
-    infra || steps.length === 0 ? 'uncertain' : combineVerdict(deterministicAllPassed, vqaVerdicts);
+    infra || steps.length === 0
+      ? 'uncertain'
+      : anyBlocking
+        ? 'fail'
+        : combineVerdict(deterministicAllPassed, vqaVerdicts);
 
   return {
     journeyResult: {
@@ -386,6 +438,12 @@ export async function runP3Qa({
   s3,
   qaContext,
   log = () => {},
+  // OBSERVE-ONLY by default (redesign Part 3 §4): QA probes reach states the way
+  // a user would — the harness DRIVE lane (forceStatus/dispatch) is refused. TRUE
+  // here means agent-daemon needs NO edit to get the safe posture.
+  observeOnly = true,
+  // Injected poll/settle clock (tests pass a no-op); production uses real timers.
+  wait,
 } = {}) {
   const vlog = (level, msg) => {
     try {
@@ -427,6 +485,8 @@ export async function runP3Qa({
         qaCommitSha,
         frameRoot,
         log,
+        observeOnly,
+        wait,
       });
       journeyResults.push(journeyResult);
       vqaResults.push(...vqaFlat);
@@ -481,10 +541,12 @@ export async function runP3Qa({
     }
   }
 
-  // Infra-flagged steps (harness failures) are excluded — they never block.
-  const anyJourneyDeterministicFail = journeyResults.some((j) => (j.steps || []).some((s) => s.deterministic?.passed === false && !s.deterministic?.infra));
-  const anyVqaRealFail = vqaResults.some((v) => v.verdict === 'fail');
-  const blocking = anyJourneyDeterministicFail || anyVqaRealFail || wiring.blocking;
+  // BLOCKING = the per-step confirmatory policy (runOneJourney): a step blocks
+  // only on a deterministic HARD-fail, or an UNDECIDED step that VQA confirms.
+  // A VQA fail alone (on a deterministically-passed step) is downgraded to
+  // attention and CANNOT block — the anyVqaRealFail term is deliberately gone.
+  const anyStepBlocking = journeyResults.some((j) => (j.steps || []).some((s) => s.blocking));
+  const blocking = anyStepBlocking || wiring.blocking;
 
   const anyUncertain = journeyResults.some((j) => j.verdict === 'uncertain') || vqaResults.some((v) => v.verdict === 'uncertain');
   const status = blocking ? 'fail' : journeys.length === 0 || anyUncertain ? 'uncertain' : 'pass';

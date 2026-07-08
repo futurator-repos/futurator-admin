@@ -5,6 +5,7 @@ import {
   parseQuickPlanspec,
   auditPlanGraph,
   buildStoryNodeRows,
+  detectOverSharding,
 } from '../quick-planspec.mjs';
 
 const SPEC = JSON.stringify({
@@ -51,6 +52,31 @@ const GOD_FILE_SPEC = JSON.stringify({
   ],
 });
 
+// An over-sharded plan: 4 "independent" feature stories with disjoint touches
+// that ALL observe the same underlying snapshot root (`entities`) — the
+// pacman6-class smell: looks parallel, is actually one coupled state machine.
+const OVER_SHARDED_SPEC = JSON.stringify({
+  stories: [
+    { id: 'contract', title: 'Define the contract types', touches: ['src/game/types.ts'],
+      acceptanceCriteria: [{ text: 'contract types compile clean', verify: 'build' }] },
+    { id: 'movement', title: 'Implement pacman movement', dependsOn: ['contract'], touches: ['src/slices/movement.ts'],
+      acceptanceCriteria: [{ text: 'arrow key moves pacman', verify: 'behavior', needsBrowser: true,
+        when: 'press ArrowLeft', thenObservable: 'snapshot.entities.pacman.dir equals "left"' }] },
+    { id: 'ghosts', title: 'Implement ghost AI', dependsOn: ['contract'], touches: ['src/slices/ghosts.ts'],
+      acceptanceCriteria: [{ text: 'ghosts leave the vault over time', verify: 'state',
+        thenObservable: "snapshot.entities.ghosts[0].mode equals 'chase'" }] },
+    { id: 'scoring', title: 'Implement scoring', dependsOn: ['contract'], touches: ['src/slices/scoring.ts'],
+      acceptanceCriteria: [{ text: 'eating a pellet raises the score', verify: 'state',
+        thenObservable: 'snapshot.entities.score increases' }] },
+    { id: 'rendering', title: 'Implement level rendering', dependsOn: ['contract'], touches: ['src/slices/render.ts'],
+      acceptanceCriteria: [{ text: 'the maze renders on screen', verify: 'appearance', needsBrowser: true,
+        thenObservable: 'snapshot.entities.level.rendered is true' }] },
+    { id: 'assemble', title: 'Assemble the complete app', dependsOn: ['contract', 'movement', 'ghosts', 'scoring', 'rendering'],
+      touches: ['src/app.tsx'],
+      acceptanceCriteria: [{ text: 'the app runs end to end', verify: 'behavior', needsBrowser: true }] },
+  ],
+});
+
 describe('buildQuickPlanspecPrompt', () => {
   it('embeds the idea, the harness contract, and the PLAN_SPEC output tags', () => {
     const p = buildQuickPlanspecPrompt({ intent: 'a dino runner game', appSlug: 'dino9' });
@@ -72,6 +98,27 @@ describe('buildQuickPlanspecPrompt', () => {
     expect(p).toContain('INTERACTIVITY');
     expect(p).toContain('SEAM WIRING');
   });
+
+  it('teaches planShape right-sizing (coherent vs sharded) with a rationale field', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a pacman game', appSlug: 'pm1' });
+    expect(p).toMatch(/planShape/);
+    expect(p).toContain('coherent');
+    expect(p).toContain('sharded');
+    expect(p).toContain('planShapeRationale');
+    expect(p).toMatch(/COHERENT SHAPE/);
+  });
+
+  it('disables the harness DRIVE lane during QA (observe-only seam)', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a todo app', appSlug: 'td1' });
+    expect(p).toMatch(/observe-only/);
+    expect(p).toMatch(/forceStatus/);
+  });
+
+  it('requires the foundation/build-whole story to declare invariants for authored data', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz1' });
+    expect(p).toMatch(/INVARIANTS/);
+    expect(p).toContain('invariants');
+  });
 });
 
 describe('buildQuickPlanspecRepairPrompt', () => {
@@ -84,6 +131,27 @@ describe('buildQuickPlanspecRepairPrompt', () => {
     expect(p).toContain('Implement movement');
     expect(p).toContain('god-file');
     expect(p).toContain('SEAM WIRING'); // base rules ride along
+  });
+
+  it('renders the WIDTH directive (not COLLAPSE) for a god-file-only violation', () => {
+    const { stories, audit } = parseQuickPlanspec(`<PLAN_SPEC>${GOD_FILE_SPEC}</PLAN_SPEC>`);
+    expect(audit.overSharded).toBe(false);
+    const p = buildQuickPlanspecRepairPrompt({
+      intent: 'a pacman game', appSlug: 'pm1', stories, violations: audit.violations,
+    });
+    expect(p).toMatch(/DECOMPOSITION/);
+    expect(p).not.toContain('# COLLAPSE');
+  });
+
+  it('renders the COLLAPSE directive (in addition to width) for an over-sharded violation', () => {
+    const { stories, audit } = parseQuickPlanspec(`<PLAN_SPEC>${OVER_SHARDED_SPEC}</PLAN_SPEC>`);
+    expect(audit.overSharded).toBe(true);
+    const p = buildQuickPlanspecRepairPrompt({
+      intent: 'a pacman game', appSlug: 'pm1', stories, violations: audit.violations,
+    });
+    expect(p).toContain('# COLLAPSE');
+    expect(p).toMatch(/planShape.*coherent/s);
+    expect(p).toMatch(/DECOMPOSITION/); // width directive still rendered alongside
   });
 });
 
@@ -230,9 +298,137 @@ describe('parseQuickPlanspec', () => {
     expect(stories[0].acceptanceCriteria[0].acClass).toBe('advisory-taste');
     expect(stories[1].acceptanceCriteria).toHaveLength(1); // synthesized
   });
+
+  it('reads planShape + planShapeRationale from the model JSON when present', () => {
+    const spec = JSON.stringify({
+      planShape: 'coherent',
+      planShapeRationale: 'one game loop; sharding buys nothing',
+      stories: [
+        { title: 'Build the complete pacman game', touches: ['src/**'], complexity: 'architectural',
+          acceptanceCriteria: [{ text: 'the game runs end to end', verify: 'behavior', needsBrowser: true }] },
+      ],
+    });
+    const { planShape, planShapeRationale } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    expect(planShape).toBe('coherent');
+    expect(planShapeRationale).toBe('one game loop; sharding buys nothing');
+  });
+
+  it('defaults planShape to coherent for a single-story plan when the model omits it', () => {
+    const spec = JSON.stringify({
+      stories: [
+        { title: 'Build the complete widget', touches: ['src/**'],
+          acceptanceCriteria: [{ text: 'the widget works end to end', verify: 'behavior', needsBrowser: true }] },
+      ],
+    });
+    const { planShape } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    expect(planShape).toBe('coherent');
+  });
+
+  it('defaults planShape to sharded for a multi-story plan when the model omits it', () => {
+    const { planShape } = parseQuickPlanspec(`<PLAN_SPEC>${SPEC}</PLAN_SPEC>`);
+    expect(planShape).toBe('sharded');
+  });
+
+  it('ignores a garbage planShape value and falls back to size-based derivation', () => {
+    const spec = JSON.stringify({ planShape: 'medium-ish', stories: JSON.parse(SPEC).stories });
+    const { planShape } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    expect(planShape).toBe('sharded'); // 3 stories, garbage value ignored
+  });
+
+  it('sets nodeKind/isFoundation on stories, mirroring classify()', () => {
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${SPEC}</PLAN_SPEC>`);
+    const [found, feat, integ] = stories;
+    expect(found.nodeKind).toBe('foundation');
+    expect(found.isFoundation).toBe(true);
+    expect(feat.nodeKind).toBe('feature');
+    expect(feat.isFoundation).toBe(false);
+    expect(integ.nodeKind).toBe('integration');
+    expect(integ.isFoundation).toBe(false);
+  });
+
+  it('parses invariants onto the foundation story: mints ids, drops malformed entries', () => {
+    const spec = JSON.stringify({
+      stories: [
+        { title: 'Define the contract types and state model', touches: ['src/types.ts'],
+          acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }],
+          invariants: [
+            { id: 'maze-reachable', description: 'every pellet cell has a path to the exit' },
+            { description: 'every seeded id resolves in the schema' }, // no id -> minted
+            { description: 'ab' }, // too short -> dropped
+            { id: 'no-description' }, // missing description -> dropped
+            'not an object', // wrong type -> dropped
+          ] },
+        { title: 'Implement the dino entity', dependsOn: [], touches: ['src/dino.ts'],
+          acceptanceCriteria: [{ text: 'dino jumps when Space pressed', verify: 'state' }] },
+      ],
+    });
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    const [found, feat] = stories;
+    expect(found.invariants).toHaveLength(2);
+    expect(found.invariants[0]).toEqual({
+      id: 'maze-reachable',
+      description: 'every pellet cell has a path to the exit',
+      validator: { status: 'declared' },
+    });
+    expect(found.invariants[1].id).toBe(`${found.storyId}-inv2`);
+    expect(found.invariants[1].validator.status).toBe('declared');
+    expect(feat.invariants).toEqual([]); // non-foundation story declared none
+  });
+});
+
+describe('detectOverSharding', () => {
+  const feature = (title, root) => ({
+    title,
+    touches: [`src/slices/${title.replace(/\s+/g, '-').toLowerCase()}.ts`],
+    acceptanceCriteria: [{ text: 'does a thing', thenObservable: `snapshot.${root} changes` }],
+  });
+
+  it('flags 4 feature stories that all observe the same snapshot root (entities)', () => {
+    const stories = [
+      feature('Implement pacman movement', 'entities'),
+      feature('Implement ghost AI', 'entities'),
+      feature('Implement scoring', 'entities'),
+      feature('Implement level rendering', 'entities'),
+    ];
+    const result = detectOverSharding(stories);
+    expect(result.overSharded).toBe(true);
+    expect(result.sharedRoot).toBe('entities');
+    expect(result.coupledCount).toBe(4);
+    expect(result.featureCount).toBe(4);
+  });
+
+  it('does not flag 4 feature stories that each observe a distinct snapshot root', () => {
+    const stories = [
+      feature('Implement routing', 'route'),
+      feature('Implement auth', 'auth'),
+      feature('Implement mutations', 'mutation'),
+      feature('Implement navigation', 'nav'),
+    ];
+    const result = detectOverSharding(stories);
+    expect(result.overSharded).toBe(false);
+  });
+
+  it('never flags fewer than 3 feature stories, even if they share a root', () => {
+    const stories = [feature('Implement movement', 'entities'), feature('Implement scoring', 'entities')];
+    const result = detectOverSharding(stories);
+    expect(result.overSharded).toBe(false);
+    expect(result.featureCount).toBe(2);
+  });
 });
 
 describe('auditPlanGraph', () => {
+  it('flags over-sharding when >60% of feature stories share a snapshot root', () => {
+    const { stories, audit } = parseQuickPlanspec(`<PLAN_SPEC>${OVER_SHARDED_SPEC}</PLAN_SPEC>`);
+    expect(audit.overSharded).toBe(true);
+    expect(audit.sharedRoot).toBe('entities');
+    expect(audit.violations.join(' ')).toMatch(/over-sharded/);
+    expect(audit.violations.join(' ')).toContain('snapshot.entities');
+    expect(audit.violations.join(' ')).toContain("planShape:'coherent'");
+    // Direct call on the normalized stories agrees with the parsed audit.
+    expect(auditPlanGraph(stories).overSharded).toBe(true);
+  });
+
+
   it('flags a linear chain of false dependencies even with disjoint files', () => {
     const chain = JSON.stringify({ stories: [
       { id: 's1', title: 'Define the contract types', touches: ['src/types.ts'],

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runStoryBindings } from '../test-binding-runner.mjs';
+import { runStoryBindings, runStoryInvariants, makeInvariantExecutor } from '../test-binding-runner.mjs';
 import { evaluateCompletion } from '../completion-gate.mjs';
 
 const bound = (id, kind = 'unit', over = {}) => ({
@@ -79,5 +79,159 @@ describe('runStoryBindings', () => {
     });
     const verdict = evaluateCompletion({ acceptanceCriteria, currentHeadSha: headSha });
     expect(verdict.status).toBe('done');
+  });
+});
+
+describe('runStoryBindings — no-mock rule for verify:state ACs', () => {
+  const stateAc = (id, over = {}) => ({
+    id, verify: 'state', acClass: 'deterministic',
+    testBinding: { status: 'bound', testRef: `src/${id}.test.ts`, testKind: 'unit' }, ...over,
+  });
+
+  it('a state/unit AC whose bound test mocks an in-repo module → misbound, not run', async () => {
+    let ran = false;
+    const readFile = async () => `vi.mock('./levels')\nimport { init } from './levels'`;
+    const { acceptanceCriteria, summary } = await runStoryBindings({
+      acceptanceCriteria: [stateAc('a')],
+      headSha: 'SHA1', cwd: '/wt', readFile,
+      executors: { unit: async () => { ran = true; return { passed: true }; } },
+    });
+    expect(ran).toBe(false);
+    expect(acceptanceCriteria[0].testBinding.status).toBe('misbound');
+    expect(acceptanceCriteria[0].testBinding.detail).toMatch(/no-mock rule/);
+    expect(acceptanceCriteria[0].testBinding.detail).toMatch(/\.\/levels/);
+    expect(summary).toEqual({ ran: 1, passed: 0, failed: 1, skipped: 0 });
+  });
+
+  it('an unreadable bound test file → misbound (fail-closed)', async () => {
+    const readFile = async () => { throw new Error('ENOENT'); };
+    const { acceptanceCriteria } = await runStoryBindings({
+      acceptanceCriteria: [stateAc('a')],
+      headSha: 'SHA1', cwd: '/wt', readFile,
+      executors: { unit: async () => ({ passed: true }) },
+    });
+    expect(acceptanceCriteria[0].testBinding.status).toBe('misbound');
+    expect(acceptanceCriteria[0].testBinding.detail).toMatch(/file unreadable/);
+  });
+
+  it('a state/unit AC with clean source runs normally', async () => {
+    const readFile = async () => `import { init } from './levels'\nit('works', () => {})`;
+    const { acceptanceCriteria, summary } = await runStoryBindings({
+      acceptanceCriteria: [stateAc('a')],
+      headSha: 'SHA1', cwd: '/wt', readFile,
+      executors: { unit: async () => ({ passed: true }) },
+    });
+    expect(acceptanceCriteria[0].testBinding.status).toBe('passing');
+    expect(summary).toEqual({ ran: 1, passed: 1, failed: 0, skipped: 0 });
+  });
+
+  it('RED phase: enforceNoMock:false skips the check even for a mocking test', async () => {
+    const readFile = async () => `vi.mock('./levels')`;
+    const { acceptanceCriteria } = await runStoryBindings({
+      acceptanceCriteria: [stateAc('a')],
+      headSha: 'SHA1', cwd: '/wt', readFile, enforceNoMock: false,
+      executors: { unit: async () => ({ passed: true }) },
+    });
+    expect(acceptanceCriteria[0].testBinding.status).toBe('passing');
+  });
+
+  it('the no-mock rule does NOT apply to a non-state (verify undefined) unit AC', async () => {
+    let ran = false;
+    const readFile = async () => `vi.mock('./levels')`; // would violate IF checked
+    const { acceptanceCriteria } = await runStoryBindings({
+      acceptanceCriteria: [{ id: 'p', acClass: 'deterministic', testBinding: { status: 'bound', testRef: 'p.test.ts', testKind: 'unit' } }],
+      headSha: 'SHA1', cwd: '/wt', readFile,
+      executors: { unit: async () => { ran = true; return { passed: true }; } },
+    });
+    expect(ran).toBe(true);
+    expect(acceptanceCriteria[0].testBinding.status).toBe('passing');
+  });
+});
+
+describe('runStoryInvariants', () => {
+  const inv = (id, over = {}) => ({ id, description: `${id} holds`, validator: { status: 'declared', ...over } });
+
+  it('a declared invariant with no authored validator → failing (fail-closed)', async () => {
+    const { invariants, summary } = await runStoryInvariants({
+      invariants: [inv('i1')], headSha: 'SHA1', executor: async () => ({ passed: true }),
+      readFile: async () => '', now: () => 'T',
+    });
+    expect(invariants[0].validator.status).toBe('failing');
+    expect(invariants[0].validator.detail).toMatch(/no authored validator/);
+    expect(summary).toEqual({ ran: 0, passed: 0, failed: 1, skipped: 0 });
+  });
+
+  it('an authored validator that mocks an in-repo module → failing, not executed', async () => {
+    let ran = false;
+    const { invariants } = await runStoryInvariants({
+      invariants: [inv('i1', { status: 'authored', ref: 'v.invariant.test.ts', kind: 'test' })],
+      headSha: 'SHA1',
+      readFile: async () => `vi.mock('@/game/state')`,
+      executor: async () => { ran = true; return { passed: true }; },
+      now: () => 'T',
+    });
+    expect(ran).toBe(false);
+    expect(invariants[0].validator.status).toBe('failing');
+    expect(invariants[0].validator.detail).toMatch(/no-mock rule/);
+  });
+
+  it('an authored+clean validator that passes → passing + lastRunSha stamped', async () => {
+    const { invariants, summary } = await runStoryInvariants({
+      invariants: [inv('i1', { status: 'authored', ref: 'v.mjs', kind: 'script' })],
+      headSha: 'SHA9',
+      readFile: async () => `// pure node script`,
+      executor: async () => ({ passed: true, detail: 'flood-fill ok' }),
+      now: () => 'T1',
+    });
+    expect(invariants[0].validator.status).toBe('passing');
+    expect(invariants[0].validator.lastRunSha).toBe('SHA9');
+    expect(invariants[0].validator.lastRunAt).toBe('T1');
+    expect(invariants[0].validator.detail).toBe('flood-fill ok');
+    expect(summary).toEqual({ ran: 1, passed: 1, failed: 0, skipped: 0 });
+  });
+
+  it('a failing executor → failing status', async () => {
+    const { invariants } = await runStoryInvariants({
+      invariants: [inv('i1', { status: 'authored', ref: 'v.mjs', kind: 'script' })],
+      headSha: 'SHA1', readFile: async () => '// ok',
+      executor: async () => ({ passed: false, detail: 'unreachable pellet' }), now: () => 'T',
+    });
+    expect(invariants[0].validator.status).toBe('failing');
+    expect(invariants[0].validator.detail).toBe('unreachable pellet');
+  });
+
+  it('a throwing executor is a fail, not a crash', async () => {
+    const { invariants } = await runStoryInvariants({
+      invariants: [inv('i1', { status: 'authored', ref: 'v.mjs', kind: 'script' })],
+      headSha: 'SHA1', readFile: async () => '// ok',
+      executor: async () => { throw new Error('boom'); }, now: () => 'T',
+    });
+    expect(invariants[0].validator.status).toBe('failing');
+    expect(invariants[0].validator.detail).toMatch(/boom/);
+  });
+});
+
+describe('makeInvariantExecutor', () => {
+  it('kind:script → node <ref>, exit 0 = pass', async () => {
+    const calls = [];
+    const spawnSync = (cmd, args) => { calls.push([cmd, args]); return { status: 0, stdout: 'ok', stderr: '' }; };
+    const exec = makeInvariantExecutor({ cwd: '/wt', spawnSync });
+    const r = await exec({ validator: { ref: 'scripts/inv/flood.mjs', kind: 'script' } });
+    expect(r.passed).toBe(true);
+    expect(calls[0]).toEqual(['node', ['scripts/inv/flood.mjs']]);
+  });
+
+  it('kind:test → vitest on the file segment of the ref', async () => {
+    const calls = [];
+    const spawnSync = (cmd, args) => { calls.push([cmd, args]); return { status: 1, stdout: '', stderr: 'fail' }; };
+    const exec = makeInvariantExecutor({ cwd: '/wt', spawnSync });
+    const r = await exec({ validator: { ref: 'v.invariant.test.ts > prop > holds', kind: 'test' } });
+    expect(r.passed).toBe(false);
+    expect(calls[0]).toEqual(['npx', ['vitest', 'run', 'v.invariant.test.ts']]);
+  });
+
+  it('no ref → not passed', async () => {
+    const exec = makeInvariantExecutor({ cwd: '/wt', spawnSync: () => ({ status: 0 }) });
+    expect((await exec({ validator: {} })).passed).toBe(false);
   });
 });

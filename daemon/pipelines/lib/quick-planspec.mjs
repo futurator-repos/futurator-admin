@@ -79,6 +79,16 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
     `  name the contract file(s) it implements against.`,
     ``,
     `# THINK FIRST (in this order, before writing JSON)`,
+    `0. SHAPE — decide planShape FIRST, before decomposing anything. Choose "coherent"`,
+    `   when the app is ONE tightly-coupled runtime (a single game loop, one canvas, one`,
+    `   state machine that every capability reads/writes) OR the app is small enough`,
+    `   that fan-out overhead (contract tax, cross-slice wiring) outweighs the benefit`,
+    `   of parallel stories. Choose "sharded" when the capabilities are genuinely`,
+    `   separable behind the frozen contract (distinct routes/views/services, each`,
+    `   reading/writing its OWN slice of state) and the size justifies the width. Write`,
+    `   ONE sentence explaining which you picked and why — this becomes`,
+    `   planShapeRationale. Do not default to sharded out of habit: a shattered coherent`,
+    `   app is a worse plan than a single well-built one.`,
     `1. CAPABILITIES — what is the CORE experience? List the distinct capabilities the`,
     `   operator asked for — every interaction, view, and rule they named. A plan that`,
     `   silently drops half of them produces a hollow, "lame" app that technically runs`,
@@ -110,6 +120,8 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
     `# Output — EXACTLY one JSON object inside the tags, nothing else:`,
     `<PLAN_SPEC>`,
     `{`,
+    `  "planShape": "coherent|sharded",`,
+    `  "planShapeRationale": "one sentence: why this shape fits THIS idea",`,
     `  "stories": [`,
     `    {`,
     `      "id": "kebab-slug-unique-in-this-plan",`,
@@ -121,20 +133,43 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
     `          "when": "(behavioral only) the concrete user action", "thenObservable": "(behavioral only) snapshot.<field> equals/greater-than/contains <value>" }`,
     `      ],`,
     `      "touches": ["src/real/file/glob.ts"],`,
-    `      "complexity": "trivial|standard|complex|architectural"`,
+    `      "complexity": "trivial|standard|complex|architectural",`,
+    `      "invariants": [`,
+    `        { "id": "kebab-slug", "description": "a property of the domain DATA that must hold, in plain terms (foundation story / coherent build-whole story only)" }`,
+    `      ]`,
     `    }`,
     `  ]`,
     `}`,
     `</PLAN_SPEC>`,
     ``,
+    `# COHERENT SHAPE rules (only apply when planShape is "coherent")`,
+    `- Emit EXACTLY ONE story: "id":"build-the-complete-app", "title":"Build the complete`,
+    `  <app>", "touches":["src/**"], "complexity":"complex" or "architectural".`,
+    `- Fold everything into that ONE story: the frozen contract, every capability from`,
+    `  the idea, assembling them, and wiring the seam — all in its intent and`,
+    `  acceptanceCriteria. There is no separate foundation/feature/assemble split.`,
+    `- Its acceptanceCriteria MUST still include: the seam-mount AC (thenObservable`,
+    `  "snapshot.status equals 'idle'" or equivalent), one behavioral AC per capability`,
+    `  named in the idea, and the declared invariants (see below) as ACs the gate can`,
+    `  bind to.`,
+    `- dependsOn is empty (nothing to depend on — it's the only story).`,
+    ``,
     `# HARD RULES`,
     `- At most ${maxStories} stories. Use as many as the idea needs — a tiny idea is 3`,
     `  (foundation, one capability, assemble); never pad, and never drop a named`,
     `  capability.`,
-    `- Structure: 1 foundation story (the contract files: state model + types/constants`,
-    `  that \`snapshot()\` will expose + the slice module signatures), one story PER core`,
-    `  capability from the idea, and a final "Assemble the complete app" story that`,
-    `  wires them into one working app.`,
+    `- Structure (when planShape is "sharded"): 1 foundation story (the contract files:`,
+    `  state model + types/constants that \`snapshot()\` will expose + the slice module`,
+    `  signatures), one story PER core capability from the idea, and a final "Assemble`,
+    `  the complete app" story that wires them into one working app. (When planShape`,
+    `  is "coherent", use the COHERENT SHAPE rules above instead — ONE story only.)`,
+    `- INVARIANTS: the FOUNDATION story (sharded) or the build-whole story (coherent)`,
+    `  MUST declare an "invariants" entry for every non-trivial piece of authored data`,
+    `  it creates — seed data, maps/levels, config, a schema other stories will rely on,`,
+    `  reachability of content. State each as a property of the DATA itself ("every`,
+    `  reachable cell has a path to the exit", "every seeded id is unique and resolves`,
+    `  in the schema") — never skip this because "it's just config"; bad seed/level`,
+    `  data is exactly the class of bug a story-level test cannot catch.`,
     `- PARALLELISM: dependsOn lists ONLY true prerequisites. Feature slices depend on`,
     `  the foundation, not on each other. Stories that can run concurrently MUST have`,
     `  disjoint touches — ownership, never sharing.`,
@@ -160,6 +195,11 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
     `  MUST include one asserting the seam mounts (e.g. thenObservable "snapshot.status`,
     `  equals 'idle'") plus one behavioral AC per core capability proving it works in`,
     `  the assembled app.`,
+    `- QA drives the app as a USER (keyboard/click); NEVER author forceStatus/`,
+    `  __harness.dispatch in a \`when\` — the DRIVE lane is disabled during QA`,
+    `  (observe-only). Write every behavioral \`when\` as a real user action (press a`,
+    `  key, click a labeled control, type into a field), never a harness call that`,
+    `  short-circuits driving the app.`,
     `- Output ONLY the <PLAN_SPEC> block.`,
   ].join('\n');
 }
@@ -178,6 +218,34 @@ export function buildQuickPlanspecRepairPrompt({ intent, appSlug, seamHook, maxS
     const deps = (s.depends_on || []).map((d) => byId.get(d) || d).join(', ') || '(none)';
     return `- "${s.title}" — touches: ${concreteTouches(s).join(', ') || '(none)'} — dependsOn: ${deps}`;
   });
+  const overSharded = (violations || []).some((v) => v.startsWith('over-sharded'));
+  // The WIDTH directive (linear-chain / god-file) — unchanged legacy behavior.
+  const widthDirective = [
+    `Re-emit the FULL corrected <PLAN_SPEC> — every story, same quality rules. Keep the`,
+    `same capabilities and acceptance criteria; change the DECOMPOSITION (touches must`,
+    `be disjoint per-capability slices against the frozen foundation contract) and the`,
+    `GRAPH (dependsOn = foundation only for slices; assemble depends on all) so that`,
+    `every violation above is eliminated.`,
+  ];
+  // The COLLAPSE directive — fires when the audit found feature stories are not
+  // actually independent (they share a snapshot root / runtime state machine).
+  const collapseDirective = [
+    ``,
+    `# COLLAPSE — the audit found your slices are NOT truly independent`,
+    `Your feature stories observe the same underlying runtime state (a shared snapshot`,
+    `root) — that means they are not separable behind the contract; sharding them cost`,
+    `width for nothing (the frontier still has to serialize on the shared state) and`,
+    `risks the exact class of bug that ships when no mind ever runs the whole artifact`,
+    `before commit. Choose ONE:`,
+    `  (a) justify the sharding by naming TRULY independent seams — each feature slice`,
+    `      must assert a DISTINCT snapshot root (its own field/branch of state), not the`,
+    `      same one every other slice touches; or`,
+    `  (b) set "planShape":"coherent" and emit EXACTLY ONE story — "Build the complete`,
+    `      <app>" — touches:["src/**"], folding the contract + every capability +`,
+    `      assemble + seam wiring into its intent and ACs (see the COHERENT SHAPE rules`,
+    `      above).`,
+    `Re-emit the FULL corrected <PLAN_SPEC> reflecting your choice.`,
+  ];
   return [
     buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories }),
     ``,
@@ -188,11 +256,8 @@ export function buildQuickPlanspecRepairPrompt({ intent, appSlug, seamHook, maxS
     `The deterministic audit rejected it:`,
     ...violations.map((v) => `- ${v}`),
     ``,
-    `Re-emit the FULL corrected <PLAN_SPEC> — every story, same quality rules. Keep the`,
-    `same capabilities and acceptance criteria; change the DECOMPOSITION (touches must`,
-    `be disjoint per-capability slices against the frozen foundation contract) and the`,
-    `GRAPH (dependsOn = foundation only for slices; assemble depends on all) so that`,
-    `every violation above is eliminated.`,
+    ...widthDirective,
+    ...(overSharded ? collapseDirective : []),
   ].join('\n');
 }
 
@@ -363,6 +428,61 @@ function normalizeDeps(stories) {
   return meta;
 }
 
+// A `snapshot.<field>` reference anywhere in an AC's prose (when/thenObservable/
+// then/text) — same vocabulary browser-probe-executor's FIELD parses, but we only
+// need the ROOT segment (the first identifier), not the full dotted/indexed path.
+const SNAPSHOT_ROOT_RE = /snapshot(?:\(\))?\.([\w$]+)/gi;
+
+/** The set of snapshot roots a story's ACs observe (across when/then/thenObservable/text). PURE. */
+function snapshotRoots(story) {
+  const roots = new Set();
+  for (const ac of story.acceptanceCriteria || []) {
+    const src = [ac.thenObservable, ac.then, ac.when, ac.text].filter((s) => typeof s === 'string' && s).join(' ');
+    if (!src) continue;
+    SNAPSHOT_ROOT_RE.lastIndex = 0;
+    let m;
+    while ((m = SNAPSHOT_ROOT_RE.exec(src))) roots.add(m[1]);
+  }
+  return roots;
+}
+
+/**
+ * Detect the pacman6-class over-sharding smell: feature stories that LOOK
+ * independent (disjoint touches) but all observe the SAME underlying runtime
+ * state (one snapshot root) — i.e. they are coupled through one runtime state
+ * machine and sharding bought nothing but fan-out tax. PURE.
+ *
+ * HONESTY: this is a coarse backstop, not a full coupling analysis. A dashboard
+ * whose feature stories each assert their OWN distinct snapshot root (route /
+ * auth / mutation / nav) will never trip it — that's a genuinely sharded app.
+ * A pacman-shaped plan where every feature slice's behavioral AC asserts
+ * `snapshot.entities` or `snapshot.status` WILL trip it, because that's exactly
+ * the "6 blind slices around one game loop" shape the redesign targets.
+ *
+ * @param {object[]} stories
+ * @param {{ threshold?: number }} [opts] fraction of feature stories that must
+ *        share a root before it counts as coupling (default 0.6)
+ * @returns {{ overSharded: boolean, sharedRoot?: string, coupledCount: number, featureCount: number }}
+ */
+export function detectOverSharding(stories, { threshold = 0.6 } = {}) {
+  const features = (stories || []).filter((s) => classify(s) === 'feature');
+  if (features.length < 3) return { overSharded: false, coupledCount: 0, featureCount: features.length };
+  const freq = new Map();
+  for (const s of features) {
+    for (const root of snapshotRoots(s)) freq.set(root, (freq.get(root) || 0) + 1);
+  }
+  let sharedRoot;
+  let coupledCount = 0;
+  for (const [root, count] of freq) {
+    if (count > threshold * features.length && count > coupledCount) {
+      sharedRoot = root;
+      coupledCount = count;
+    }
+  }
+  if (!sharedRoot) return { overSharded: false, coupledCount: 0, featureCount: features.length };
+  return { overSharded: true, sharedRoot, coupledCount, featureCount: features.length };
+}
+
 /**
  * Width/critical-path audit of a normalized story DAG. PURE — the deterministic
  * gate behind the runner's repair pass, and the metrics logged at ingest.
@@ -371,14 +491,18 @@ function normalizeDeps(stories) {
  *  - linear-chain: >2 consecutive single-story topo levels before the final level
  *    (false deps or shared files are serializing the build);
  *  - god-file: a concrete path touched by ≥2 FEATURE stories (feature↔feature
- *    sharing always costs width; foundation/assemble sharing is dep-ordered anyway).
+ *    sharing always costs width; foundation/assemble sharing is dep-ordered anyway);
+ *  - over-sharded: >threshold of feature stories observe the same snapshot root —
+ *    they're coupled through one runtime state machine and should collapse to
+ *    planShape:'coherent' (see detectOverSharding).
  *
  * @returns {{ levels:number[], maxWidth:number, criticalPath:number, chainRun:number,
- *             godFiles:{path:string,stories:string[]}[], violations:string[] }}
+ *             godFiles:{path:string,stories:string[]}[], violations:string[],
+ *             overSharded:boolean, sharedRoot?:string }}
  */
 export function auditPlanGraph(stories) {
   if (!stories?.length) {
-    return { levels: [], maxWidth: 0, criticalPath: 0, chainRun: 0, godFiles: [], violations: [] };
+    return { levels: [], maxWidth: 0, criticalPath: 0, chainRun: 0, godFiles: [], violations: [], overSharded: false };
   }
   const levelMap = topoLevels(stories);
   const widths = [];
@@ -410,6 +534,8 @@ export function auditPlanGraph(stories) {
     chainRun = Math.max(chainRun, run);
   }
 
+  const sharding = detectOverSharding(stories);
+
   const violations = [];
   if (chainRun > 2) {
     violations.push(
@@ -421,7 +547,21 @@ export function auditPlanGraph(stories) {
       `god-file: "${g.path}" is touched by ${g.stories.length} feature stories (${g.stories.join(' | ')}) — split it into per-capability slice files`,
     );
   }
-  return { levels, maxWidth, criticalPath, chainRun, godFiles, violations };
+  if (sharding.overSharded) {
+    violations.push(
+      `over-sharded: ${sharding.coupledCount}/${sharding.featureCount} feature stories observe snapshot.${sharding.sharedRoot} — coupled through one runtime state machine; collapse to planShape:'coherent'`,
+    );
+  }
+  return {
+    levels,
+    maxWidth,
+    criticalPath,
+    chainRun,
+    godFiles,
+    violations,
+    overSharded: sharding.overSharded,
+    sharedRoot: sharding.sharedRoot,
+  };
 }
 
 function acClassOf(ac) {
@@ -449,13 +589,24 @@ export function deriveRiskTag(ac) {
  * storyIds, maps story-local slug ids in `dependsOn` to the minted storyIds, fills
  * sane defaults, normalizes the DAG, and audits it. Never throws.
  *
+ * Each story also gets `nodeKind` ('foundation'|'feature'|'integration', mirroring
+ * `classify`), `isFoundation` (nodeKind==='foundation'), and `invariants` (parsed
+ * from the model's `invariants` field — malformed entries dropped, ids minted).
+ *
  * @returns {{ stories: object[], errors: string[],
- *             audit: ReturnType<typeof auditPlanGraph> & { modelAuthored:boolean, cyclesDropped:number, safetyEdges:number } }}
+ *             audit: ReturnType<typeof auditPlanGraph> & { modelAuthored:boolean, cyclesDropped:number, safetyEdges:number },
+ *             planShape: 'coherent'|'sharded', planShapeRationale: string }}
  */
 export function parseQuickPlanspec(text, { maxStories = MAX_STORIES } = {}) {
   const obj = extractJson(text);
   if (!obj || !Array.isArray(obj.stories) || obj.stories.length === 0) {
-    return { stories: [], errors: ['no <PLAN_SPEC> stories JSON found in the output'], audit: auditPlanGraph([]) };
+    return {
+      stories: [],
+      errors: ['no <PLAN_SPEC> stories JSON found in the output'],
+      audit: auditPlanGraph([]),
+      planShape: 'sharded',
+      planShapeRationale: '',
+    };
   }
   const errors = [];
   const raw = obj.stories.slice(0, maxStories);
@@ -501,6 +652,18 @@ export function parseQuickPlanspec(text, { maxStories = MAX_STORIES } = {}) {
     });
     const touchesIn = Array.isArray(s.touches) ? s.touches.filter((x) => typeof x === 'string' && x.trim()) : [];
     const depsIn = Array.isArray(s.dependsOn) ? s.dependsOn.filter((d) => typeof d === 'string') : [];
+    const nodeKind = classify({ title, touches: touchesIn });
+    const invariantsIn = Array.isArray(s.invariants) ? s.invariants : [];
+    let invN = 0;
+    const invariants = invariantsIn
+      .filter(
+        (inv) => inv && typeof inv === 'object' && typeof inv.description === 'string' && inv.description.trim().length >= 5,
+      )
+      .map((inv) => {
+        invN += 1;
+        const id = typeof inv.id === 'string' && inv.id.trim() ? inv.id.trim() : `${storyId}-inv${invN}`;
+        return { id, description: inv.description.slice(0, 300), validator: { status: 'declared' } };
+      });
     return {
       storyId,
       cohort: { epicId: 'quick', epicTitle: 'Quick' },
@@ -511,6 +674,9 @@ export function parseQuickPlanspec(text, { maxStories = MAX_STORIES } = {}) {
       touches: touchesIn.length ? touchesIn : [EPIC_WIDE_TOUCH],
       forbiddenAreas: [],
       complexity: COMPLEXITY_VALUES.has(s.complexity) ? s.complexity : 'standard',
+      nodeKind,
+      isFoundation: nodeKind === 'foundation',
+      invariants,
     };
   });
 
@@ -519,7 +685,11 @@ export function parseQuickPlanspec(text, { maxStories = MAX_STORIES } = {}) {
   for (const s of stories) s.depends_on = s.depends_on.filter((d) => present.has(d) && d !== s.storyId);
   const meta = normalizeDeps(stories);
   const audit = { ...auditPlanGraph(stories), ...meta };
-  return { stories, errors, audit };
+  const planShape = obj.planShape === 'coherent' || obj.planShape === 'sharded'
+    ? obj.planShape
+    : (stories.length === 1 ? 'coherent' : 'sharded');
+  const planShapeRationale = typeof obj.planShapeRationale === 'string' ? obj.planShapeRationale.slice(0, 300) : '';
+  return { stories, errors, audit, planShape, planShapeRationale };
 }
 
 /** Topological level per story (cohortBatch). Assumes a DAG. Pure. */

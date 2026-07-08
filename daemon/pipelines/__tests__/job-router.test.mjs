@@ -5,11 +5,13 @@ import {
   validatePartyRefreshJob,
   validateFreeAgentSessionJob,
   validateP3QaJob,
+  validateIntegratorJob,
   JOB_HANDLER_LEGACY,
   JOB_HANDLER_EPIC_DEV,
   JOB_HANDLER_PARTY_REFRESH,
   JOB_HANDLER_FREE_AGENT_SESSION,
   JOB_HANDLER_P3_QA,
+  JOB_HANDLER_INTEGRATOR,
 } from '../job-router.mjs';
 
 const SHA = 'a'.repeat(40);
@@ -23,6 +25,29 @@ describe('p3-qa routing (W2)', () => {
     expect(validateP3QaJob({ jobType: 'p3-qa', jobId: 'j', planId: 'p', devUrl: 'https://x', qaCommitSha: 'short' }).ok).toBe(false);
     expect(validateP3QaJob({ jobType: 'p3-qa', jobId: 'j', planId: 'p', qaCommitSha: SHA }).reason).toBe('devUrl-missing');
     expect(validateP3QaJob({ jobType: 'other', jobId: 'j' }).reason).toBe('jobType-mismatch');
+  });
+});
+
+describe('integrator routing (Reality-Spine P3)', () => {
+  it('routes jobType integrator to the integrator handler', () => {
+    expect(selectHandler({ jobType: 'integrator', jobId: 'j' })).toBe(JOB_HANDLER_INTEGRATOR);
+  });
+  it('integrator takes precedence over phase=epic-dev', () => {
+    expect(selectHandler({ jobType: 'integrator', phase: 'epic-dev', jobId: 'j' })).toBe(
+      JOB_HANDLER_INTEGRATOR,
+    );
+  });
+  it('validateIntegratorJob passes a well-formed job', () => {
+    expect(
+      validateIntegratorJob({ jobType: 'integrator', jobId: 'j', planId: 'p', workingDir: '/x' }),
+    ).toEqual({ ok: true });
+  });
+  it('validateIntegratorJob flags each missing field with a reason', () => {
+    expect(validateIntegratorJob(null).reason).toBe('job-missing');
+    expect(validateIntegratorJob({ jobType: 'other', jobId: 'j' }).reason).toBe('jobType-mismatch');
+    expect(validateIntegratorJob({ jobType: 'integrator', planId: 'p', workingDir: '/x' }).reason).toBe('jobId-missing');
+    expect(validateIntegratorJob({ jobType: 'integrator', jobId: 'j', workingDir: '/x' }).reason).toBe('planId-missing');
+    expect(validateIntegratorJob({ jobType: 'integrator', jobId: 'j', planId: 'p' }).reason).toBe('workingDir-missing');
   });
 });
 

@@ -1,5 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { parseProbe, runBrowserProbe, makeBrowserExecutor, runBrowserJourney } from '../browser-probe-executor.mjs';
+import {
+  parseProbe,
+  runBrowserProbe,
+  makeBrowserExecutor,
+  runBrowserJourney,
+  codeFor,
+  focusApp,
+  settleFrames,
+  pollUntil,
+  OBSERVE_ONLY_NOTE,
+} from '../browser-probe-executor.mjs';
+
+// A no-op poll/settle clock so failing-poll windows don't spend real time.
+const fastWait = async () => {};
 
 // The two real dino2 "Wire game loop" behavioral ACs.
 const AC_RUN = {
@@ -180,7 +193,11 @@ function fakePlaywrightJourney({ snapshots = [{}], harnessMounted = true } = {})
     waitForFunction: async () => {
       if (!harnessMounted) throw new Error('timeout');
     },
-    keyboard: { press: async (k) => { page.calls.keys.push(k); order.push(`act:key:${k}`); } },
+    keyboard: {
+      press: async (k) => { page.calls.keys.push(k); order.push(`act:key:${k}`); },
+      down: async (k) => { page.calls.down.push(k); order.push(`act:down:${k}`); },
+      up: async (k) => { page.calls.up.push(k); order.push(`act:up:${k}`); },
+    },
     waitForTimeout: async () => { page.calls.waits += 1; order.push('act:wait'); },
     screenshot: async () => {
       shotCalls += 1;
@@ -189,10 +206,18 @@ function fakePlaywrightJourney({ snapshots = [{}], harnessMounted = true } = {})
       return Buffer.from(`frame-${shotCalls}`);
     },
     evaluate: async (fn, arg) => {
+      // settleFrames marks its arg with __settle — it advances rAF, never a
+      // snapshot read, so it must NOT consume the snapshot sequence.
+      if (arg && arg.__settle) return undefined;
+      // redispatchKey passes { k, c } (a synthetic KeyboardEvent) — not a read.
+      if (arg && arg.k) { page.calls.redispatch += 1; order.push(`act:redispatch:${arg.k}`); return undefined; }
       if (arg && arg.m) { page.calls.harness.push([arg.m, arg.args]); order.push(`act:harness:${arg.m}`); return undefined; }
       return snapshots[Math.min(snapCalls++, snapshots.length - 1)];
     },
   };
+  page.calls.down = [];
+  page.calls.up = [];
+  page.calls.redispatch = 0;
   const browser = { newPage: async () => page, close: async () => {} };
   return { pw: { chromium: { launch: async () => browser } }, page };
 }
@@ -281,6 +306,7 @@ describe('runBrowserJourney', () => {
       url: REMOTE_URL,
       steps: [{ label: 'press Space', action: { type: 'key', key: 'Space' }, assertions: [{ field: 'status', op: 'eq', value: 'running' }] }],
       playwright: pw,
+      wait: fastWait,
     });
     expect(r.passed).toBe(false);
     expect(r.detail).toMatch(/press Space/);
@@ -333,5 +359,131 @@ describe('VQA power vocabulary (2026-07-04)', () => {
       { field: 'lives', op: 'gte', value: 1 },
       { field: 'status', op: 'ne', value: 'idle' },
     ]);
+  });
+
+  it('parses a HELD key (hold ArrowRight → { hold:true })', () => {
+    const p = parseProbe({ when: 'The user holds ArrowRight', thenObservable: 'snapshot.x increases' });
+    expect(p.actions).toEqual([{ type: 'key', key: 'ArrowRight', hold: true }]);
+  });
+});
+
+// ── T9b: canvas-game hardening — codeFor / focusApp / settleFrames / pollUntil ─
+
+describe('codeFor (pure KeyboardEvent.code map)', () => {
+  it('maps arrows, space, letters, digits; passes named keys through', () => {
+    expect(codeFor('ArrowUp')).toBe('ArrowUp');
+    expect(codeFor('ArrowRight')).toBe('ArrowRight');
+    expect(codeFor('Space')).toBe('Space');
+    expect(codeFor(' ')).toBe('Space');
+    expect(codeFor('a')).toBe('KeyA');
+    expect(codeFor('X')).toBe('KeyX');
+    expect(codeFor('5')).toBe('Digit5');
+    expect(codeFor('Enter')).toBe('Enter');
+    expect(codeFor('')).toBe('');
+  });
+});
+
+describe('focusApp', () => {
+  function fakeLocatorPage({ canvasCount }) {
+    const clicks = [];
+    const page = {
+      clicks,
+      locator: (sel) => ({
+        count: async () => (sel === 'canvas' ? canvasCount : 1),
+        first: () => ({ click: async () => clicks.push(sel) }),
+      }),
+    };
+    return page;
+  }
+
+  it('clicks the canvas when one is present', async () => {
+    const page = fakeLocatorPage({ canvasCount: 1 });
+    expect(await focusApp(page)).toBe('canvas');
+    expect(page.clicks).toEqual(['canvas']);
+  });
+
+  it('falls back to clicking the body when there is no canvas', async () => {
+    const page = fakeLocatorPage({ canvasCount: 0 });
+    expect(await focusApp(page)).toBe('body');
+    expect(page.clicks).toEqual(['body']);
+  });
+
+  it('no-ops (returns none) on a page without locator', async () => {
+    expect(await focusApp({})).toBe('none');
+  });
+});
+
+describe('settleFrames', () => {
+  it('advances rAF via page.evaluate with an __settle-marked arg', async () => {
+    let seenArg;
+    const page = { evaluate: async (_fn, arg) => { seenArg = arg; } };
+    await settleFrames(page, 12);
+    expect(seenArg).toEqual({ __settle: 12 });
+  });
+
+  it('falls back to the injected wait when page.evaluate throws', async () => {
+    let waited = 0;
+    const page = { evaluate: async () => { throw new Error('no rAF here'); } };
+    await settleFrames(page, 4, { wait: async (ms) => { waited = ms; } });
+    expect(waited).toBe(4 * 16);
+  });
+
+  it('is a no-op for zero/absent frames', async () => {
+    let called = false;
+    const page = { evaluate: async () => { called = true; } };
+    await settleFrames(page, 0);
+    expect(called).toBe(false);
+  });
+});
+
+describe('pollUntil', () => {
+  it('passes as soon as the assertion holds (value changes on the 3rd read)', async () => {
+    let n = 0;
+    const readFn = async () => ++n; // 1, 2, 3, …
+    const assertFn = (v) => ({ ok: v >= 3, failures: v >= 3 ? [] : [`got ${v}`] });
+    const r = await pollUntil(readFn, assertFn, { timeoutMs: 1000, stepMs: 100, wait: fastWait });
+    expect(r.ok).toBe(true);
+    expect(r.value).toBe(3);
+  });
+
+  it('fails after the window when the value never satisfies the assertion', async () => {
+    const readFn = async () => 0;
+    const assertFn = (v) => ({ ok: false, failures: [`stuck at ${v}`] });
+    const r = await pollUntil(readFn, assertFn, { timeoutMs: 300, stepMs: 100, wait: fastWait });
+    expect(r.ok).toBe(false);
+    expect(r.failures).toEqual(['stuck at 0']);
+  });
+});
+
+// ── T9d: observe-only — DRIVE lane refused, INPUT lane preserved ────────────
+
+describe('runBrowserJourney — observeOnly', () => {
+  const REMOTE = 'https://dev.futurator.ai/plans/p-obs';
+
+  it('observeOnly:true does NOT replay a harness DRIVE action (drops it)', async () => {
+    const { pw, page } = fakePlaywrightJourney({ snapshots: [{ status: 'idle' }] });
+    await runBrowserJourney({
+      url: REMOTE,
+      steps: [{ label: 'force over', action: { type: 'harness', method: 'forceStatus', args: ['over'] }, assertions: [] }],
+      playwright: pw,
+      observeOnly: true,
+      wait: fastWait,
+    });
+    expect(page.calls.harness).toEqual([]); // the drive lane was refused
+  });
+
+  it('observeOnly:false (default for direct journeys) DOES replay a harness action', async () => {
+    const { pw, page } = fakePlaywrightJourney({ snapshots: [{ status: 'over' }, { status: 'over' }] });
+    await runBrowserJourney({
+      url: REMOTE,
+      steps: [{ label: 'force over', action: { type: 'harness', method: 'forceStatus', args: ['over'] }, assertions: [{ field: 'status', op: 'eq', value: 'over' }] }],
+      playwright: pw,
+      wait: fastWait,
+    });
+    expect(page.calls.harness).toEqual([['forceStatus', ['over']]]);
+  });
+
+  it('exports the observe-only note constant', () => {
+    expect(OBSERVE_ONLY_NOTE).toMatch(/observe-only/);
   });
 });
