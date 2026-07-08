@@ -945,6 +945,34 @@ function MigrationPathPanel({ plan }: { plan?: IacPlan | null }) {
                     {s.why}
                   </div>
                 ) : null}
+                {s.preflight?.length ? (
+                  <div
+                    style={{
+                      margin: '6px 0',
+                      padding: '6px 9px',
+                      border:
+                        '1px solid color-mix(in srgb, var(--warning, #f59e0b) 45%, var(--border))',
+                      background: 'color-mix(in srgb, var(--warning, #f59e0b) 8%, transparent)',
+                      borderRadius: 6,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: 'var(--warning, #f59e0b)',
+                        marginBottom: 2,
+                      }}
+                    >
+                      ⚠ Before you import — data-protection gate
+                    </div>
+                    {s.preflight.map((p, k) => (
+                      <div key={k} style={{ fontSize: 10.5, color: 'var(--foreground)' }}>
+                        {p}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 {s.commands?.length ? (
                   <pre
                     style={{
@@ -986,6 +1014,39 @@ function MigrationPathPanel({ plan }: { plan?: IacPlan | null }) {
                         +{s.imports.length - 8} more
                       </span>
                     ) : null}
+                  </div>
+                ) : null}
+                {s.retire?.length ? (
+                  <div style={{ margin: '6px 0' }}>
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: 'var(--destructive, #ef4444)',
+                        marginBottom: 2,
+                      }}
+                    >
+                      ⛔ Retire — do NOT adopt ({s.retire.length})
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {s.retire.map((r, j) => (
+                        <span
+                          key={j}
+                          title={`${r.reason}${r.source ? ` · seen in ${r.source}` : ''}`}
+                          style={{
+                            fontSize: 10.5,
+                            color: 'var(--destructive, #ef4444)',
+                            border:
+                              '1px solid color-mix(in srgb, var(--destructive, #ef4444) 45%, var(--border))',
+                            borderRadius: 8,
+                            padding: '2px 8px',
+                            fontFamily: 'var(--font-mono)',
+                          }}
+                        >
+                          {r.resource}
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 ) : null}
                 {s.goldenRule ? (
@@ -1059,8 +1120,13 @@ function InfraMap({
           padding: '6px 10px',
         }}
       >
-        <strong style={{ color: sigColor }}>Infra signal: {sig.level.toUpperCase()}</strong>
-        <span style={{ color: 'var(--text-dim)' }}>{sig.detail}</span>
+        <strong style={{ color: sigColor }}>
+          Infra scan confidence: {sig.level.toUpperCase()}
+        </strong>
+        <span style={{ color: 'var(--text-dim)' }}>
+          {sig.detail} — how much of the inventory is read from files (not a health grade; see
+          maturity below)
+        </span>
       </div>
 
       {/* IaC maturity (Part C): the rubric grade + supporting strips, then the
@@ -2618,7 +2684,10 @@ export function buildMarkdownReport(
       (iacPlan.track ?? []).forEach((s, i) => {
         L.push(`- **Phase ${s.seq ?? i + 1} — ${s.title}** (${s.tool} · ${s.dimension})`);
         if (s.why) L.push(`  - _${s.why}_`);
+        for (const p of s.preflight ?? []) L.push(`  - ⚠ Before import: ${p}`);
         for (const cmd of s.commands ?? []) L.push(`  - \`${cmd}\``);
+        for (const r of s.retire ?? [])
+          L.push(`  - ⛔ Retire (do NOT adopt): ${r.resource} — ${r.reason}`);
         if (s.goldenRule) L.push(`  - Golden rule: ${s.goldenRule}`);
       });
     }

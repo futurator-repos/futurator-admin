@@ -54,3 +54,114 @@ describe('planIacTrack — seq display ordinal', () => {
     expect(plan.track.some((s) => s.dimension === 'state')).toBe(false);
   });
 });
+
+// A graph-sync-shaped inventory: DynamoDB + S3 are the live data plane; Memgraph carries a
+// code-readable retirement signal and lives in infra/graph-sync/ alongside a Lambda; a
+// sibling deploy script in the shared scripts/ dir provisions the stack's SQS.
+const retiringStackInv = () => ({
+  iacMaturity: {
+    level: 1,
+    dimensions: {
+      state: { level: 2, gaps: [] },
+      envSeparation: { level: 1, gaps: ['x'] },
+      modularity: { level: 1, gaps: ['x'] },
+      testing: { level: 0, gaps: ['x'] },
+      governance: { level: 0, gaps: ['x'] },
+      driftCost: { level: 0, gaps: ['x'] },
+    },
+  },
+  iacCoverage: { resourceRatio: 0.1, undeclared: ['DynamoDB', 'Memgraph', 'S3', 'Lambda'] },
+  services: [
+    {
+      name: 'DynamoDB',
+      kind: 'database',
+      dataStore: true,
+      fanIn: 5,
+      files: ['infra/graph-sync/custom-policy.json', 'src/lib/dynamo.ts'],
+    },
+    {
+      name: 'Memgraph',
+      kind: 'database',
+      dataStore: true,
+      orphanCandidate: true,
+      orphanReason: 'retirement signal near this resource',
+      files: ['infra/graph-sync/index.mjs', 'docs/concepts/server.mjs'],
+    },
+    { name: 'S3', kind: 'storage', dataStore: true, fanIn: 2, files: ['sst.config.ts'] },
+    { name: 'Lambda', kind: 'compute', fanIn: 3, files: ['infra/graph-sync/deploy.sh'] },
+  ],
+  deployScripts: [
+    { file: 'scripts/create-agents-table.sh', provisions: ['DynamoDB'], kind: 'deploy' },
+    { file: 'scripts/deploy-graph-sync.sh', provisions: ['SQS'], kind: 'deploy' },
+  ],
+});
+
+describe('planIacTrack — keep/retire classifier + honest sourcing', () => {
+  const adopt = (plan) => plan.track.find((s) => s.dimension === 'adoption');
+
+  it('routes retiring resources to retire[] and NEVER lists them as import targets', () => {
+    const plan = planIacTrack(retiringStackInv());
+    const retired = new Set((plan.retire || []).map((r) => r.resource));
+    const imported = new Set((adopt(plan).imports || []).map((im) => im.resource));
+    // the explicitly-retired store + its whole stack are retire, not adopt
+    expect(retired.has('Memgraph')).toBe(true);
+    expect(retired.has('Lambda')).toBe(true); // co-located in infra/graph-sync/
+    expect(retired.has('SQS')).toBe(true); // sibling script names the stack ("graph-sync")
+    for (const r of retired) expect(imported.has(r)).toBe(false);
+    // the live data plane is still adopted, from a shared scripts/ dir that must NOT propagate
+    expect(imported.has('DynamoDB')).toBe(true);
+    expect(imported.has('S3')).toBe(true);
+  });
+
+  it('sources each import from its DEFINING file, never an IAM policy or docs file', () => {
+    const plan = planIacTrack(retiringStackInv());
+    const dyn = (adopt(plan).imports || []).find((im) => im.resource === 'DynamoDB');
+    // deploy script that creates it wins over the IAM policy (custom-policy.json) it appears in
+    expect(dyn.source).toBe('scripts/create-agents-table.sh');
+    expect(dyn.source).not.toMatch(/policy\.json|docs\//);
+  });
+
+  it('dedupes: a service provisioned by multiple scripts is ONE import entry', () => {
+    const inv = retiringStackInv();
+    inv.deployScripts.push({
+      file: 'scripts/create-agents-table2.sh',
+      provisions: ['DynamoDB'],
+      kind: 'deploy',
+    });
+    const plan = planIacTrack(inv);
+    const dynEntries = (adopt(plan).imports || []).filter((im) => im.resource === 'DynamoDB');
+    expect(dynEntries).toHaveLength(1);
+  });
+
+  it('emits a pre-import data-protection gate when live stores are present', () => {
+    const plan = planIacTrack(retiringStackInv());
+    const pf = adopt(plan).preflight || [];
+    expect(pf.some((p) => /point-in-time recovery|deletion protection/i.test(p))).toBe(true);
+    expect(pf.some((p) => /versioning/i.test(p))).toBe(true);
+  });
+
+  it('attaches the golden rule ONLY to mutating steps', () => {
+    const plan = planIacTrack(retiringStackInv());
+    const g = Object.fromEntries(plan.track.map((s) => [s.dimension, !!s.goldenRule]));
+    expect(g.adoption).toBe(true);
+    expect(g.envSeparation).toBe(true);
+    expect(g.modularity).toBe(true);
+    expect(g.testing).toBe(false);
+    expect(g.driftCost).toBe(false);
+    expect(g.governance).toBe(false);
+  });
+
+  it('does NOT propagate retirement from a shared/root dir (no over-fire)', () => {
+    // A retire signal whose only source is a shared scripts/ file (depth 2) or the repo
+    // root must not tar unrelated resources.
+    const inv = retiringStackInv();
+    inv.services = inv.services.map((s) =>
+      s.name === 'Memgraph' ? { ...s, files: ['scripts/old.sh'] } : s,
+    );
+    const plan = planIacTrack(inv);
+    const retired = new Set((plan.retire || []).map((r) => r.resource));
+    expect(retired.has('Memgraph')).toBe(true); // still retired (its own flag)
+    expect(retired.has('DynamoDB')).toBe(false); // shared scripts/ never propagates
+    expect(retired.has('S3')).toBe(false);
+  });
+});

@@ -326,10 +326,23 @@ export interface IacPlanStep {
   tool: string;
   commands: string[];
   imports?: IacImport[];
-  /** "plan/preview must show zero changes before commit" — the characterization-gate analogue. */
-  goldenRule: string;
+  /** Pre-import safety guards (data-protection): enable backups/versioning BEFORE adopting
+   *  a live resource — a mis-authored import can destroy unprotected data. */
+  preflight?: string[];
+  /** Keep/retire classifier: resources with a code-readable retirement signal — listed as
+   *  "do NOT adopt" so the plan never recommends codifying infra you are deleting. */
+  retire?: IacRetireCandidate[];
+  /** "plan/preview must show zero changes before commit" — the characterization-gate analogue.
+   *  Present only on MUTATING steps (import/env-sep/modularity); omitted on test/policy steps. */
+  goldenRule?: string;
   /** downstream modules this step unlocks once complete (e.g. ['finops','privacy','policy-as-code']). */
   unlocks?: string[];
+}
+/** A resource the plan recommends RETIRING rather than adopting (code-readable retire signal). */
+export interface IacRetireCandidate {
+  resource: string;
+  reason: string;
+  source: string | null;
 }
 /** Stack-aware Infrastructure migration track, produced by iac-phase-planner.mjs.
  *  Gap-driven: only emits steps for MISSING dimensions. */
@@ -340,6 +353,8 @@ export interface IacPlan {
   /** "Level N -> N+1: next 3 actions". */
   nextThree: { title: string; dimension: string; action: string }[];
   track: IacPlanStep[];
+  /** Keep/retire classifier output, hoisted from the adoption step for convenience. */
+  retire?: IacRetireCandidate[];
 }
 
 /** One entry in the scan's execution ledger (C-LEDGER) — a recon step, an

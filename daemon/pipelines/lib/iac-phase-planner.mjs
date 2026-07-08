@@ -122,7 +122,7 @@ const TOOLING = {
   sst: {
     state: [
       '# SST manages remote state via its own backend — no manual state bootstrap needed',
-      '# adopt existing resources in sst.config.ts (SST v3 is Pulumi-based): use { transform } / the import option',
+      '# adopt existing resources in sst.config.ts (SST runs on Pulumi under the hood): use { transform } / the import option',
       'sst diff   # MUST show no changes before you deploy',
     ],
     envSeparation: [
@@ -131,7 +131,7 @@ const TOOLING = {
     modularity: ['# extract infra into infra/*.ts modules imported by sst.config.ts'],
     testing: ['# unit-test infra modules (vitest) + `sst diff` as a required CI check'],
     governance: [
-      '# add a Pulumi CrossGuard pack (SST v3 runs on Pulumi) / checkov on synthesized templates',
+      '# add a Pulumi CrossGuard pack (SST runs on Pulumi under the hood) / checkov on synthesized templates',
     ],
     driftCost: ['# scheduled `sst diff` (drift detection); SST reconciles on deploy'],
     cost: ['# Infracost / SST Console cost estimates gating PRs'],
@@ -193,7 +193,7 @@ const DIMENSION_SPECS = [
     title: 'Drift detection & cost gate',
     keys: ['driftCost', 'cost'],
     mutating: false,
-    why: 'A scheduled plan/preview is the infra analogue of a spec-conformance check; Infracost gates cost on PR.',
+    why: 'Add a scheduled plan/preview (drift detection — the infra analogue of a spec-conformance check) and wire a cost estimate to gate PRs.',
   },
   {
     dim: 'governance',
@@ -251,50 +251,193 @@ function churnOf(gitEvolution, file) {
   return 0;
 }
 
+// Rank a file by how good an ADOPTION SOURCE it is — where the resource is actually
+// DEFINED, not merely referenced. Generic, no repo-specific paths: an IAM policy only
+// proves the resource is granted (not where it lives); a docs/example/demo file is never
+// the thing you adopt; a hand-rolled deploy script IS the click-ops artifact you replace.
+function sourceRank(f) {
+  const s = String(f || '').toLowerCase();
+  if (!s) return -2;
+  if (
+    /(^|\/)(docs?|concepts?|examples?|samples?|demos?|fixtures?)\//.test(s) ||
+    /(^|\/)readme/.test(s)
+  )
+    return -1; // documentation/demo — never the file you adopt from
+  if (/(trust[-_]?)?policy\.json$/.test(s) || /(^|\/)iam[-_/]/.test(s)) return 0; // IAM policy: proves the resource is REFERENCED, not where it's defined
+  if (/\.(sh|bash)$/.test(s)) return 3; // hand-rolled deploy script = the exact artifact to replace with IaC
+  if (/(^|\/)(infra|stacks?|deploy)\//.test(s) || /(^|\/)sst\.config|\.tf$|pulumi\./.test(s))
+    return 2; // infra config that touches it
+  return 1; // application code that references the resource
+}
+function bestSource(files) {
+  const ranked = [...new Set(files || [])]
+    .filter(Boolean)
+    .sort((a, b) => sourceRank(b) - sourceRank(a) || String(a).localeCompare(String(b)));
+  return ranked.find((f) => sourceRank(f) >= 0) || ranked[0] || null;
+}
+
 /**
  * Seed the import list from what the scan already detects: every undeclared
  * provisionable service + every hand-rolled deploy script. priority = fanIn × churn
  * (multiplier is 1 when no git history is available, so ordering degrades to fanIn).
- * Sorted DESC by priority, ties broken by resource name for determinism.
+ *
+ * Two structural rules (keep/retire classifier + honest sourcing):
+ *   - A resource flagged `orphanCandidate` (a code-readable retire/legacy/deprecated
+ *     signal near it) is NEVER an import target — you don't codify infra you're deleting.
+ *     It is routed to `retire[]` instead. This is what stops the plan from telling you to
+ *     adopt a being-retired store.
+ *   - Each import's `source` is the best DEFINING file (deploy script > infra config >
+ *     app code > IAM policy > docs), not just the alphabetically-first file it was seen in.
+ * Imports are DEDUPED by resource so a service provisioned by 3 scripts is one entry.
+ *
+ * @returns {{ imports: Array, retire: Array }}
  */
 function buildImports(inventory, gitEvolution) {
   const hasGit = !!(gitEvolution && (gitEvolution.churnByFile || gitEvolution.hotFiles));
   const servicesByName = new Map((inventory.services || []).map((s) => [s.name, s]));
   const iacCoverage = inventory.iacCoverage || {};
-  const out = [];
+  const deployScripts = inventory.deployScripts || [];
+  const isOrphan = (name) =>
+    !!(servicesByName.get(name) && servicesByName.get(name).orphanCandidate);
+
+  const byResource = new Map(); // resource -> {resource, source, priority}
+  const retire = [];
+  const seenRetire = new Set();
+  const addRetire = (resource, reason, source) => {
+    if (!resource || seenRetire.has(resource)) return;
+    seenRetire.add(resource);
+    retire.push({ resource, reason, source: source || null });
+  };
+  const addImport = (resource, source, priority) => {
+    const cur = byResource.get(resource);
+    if (!cur) {
+      byResource.set(resource, {
+        resource,
+        source: source || 'inferred-from-usage (declared in no IaC file)',
+        priority,
+      });
+      return;
+    }
+    cur.priority = Math.max(cur.priority, priority);
+    if (sourceRank(source) > sourceRank(cur.source)) cur.source = source;
+  };
 
   for (const name of iacCoverage.undeclared || []) {
     const svc = servicesByName.get(name);
+    if (svc && svc.orphanCandidate) {
+      addRetire(
+        name,
+        svc.orphanReason || 'retirement signal found in code',
+        bestSource(svc.files || []),
+      );
+      continue; // never adopt a resource the code says is being retired
+    }
     const fanIn = svc && typeof svc.fanIn === 'number' ? svc.fanIn : 1;
-    const files = svc && Array.isArray(svc.files) ? svc.files : [];
-    const churn = files.reduce((acc, f) => acc + churnOf(gitEvolution, f), 0);
-    const priority = fanIn * (hasGit ? churn : 1);
-    out.push({
-      resource: name,
-      source: files[0] || 'inferred-from-usage (declared in no IaC file)',
-      priority,
-    });
+    const svcFiles = svc && Array.isArray(svc.files) ? svc.files : [];
+    const scriptFiles = deployScripts
+      .filter((ds) => (ds.provisions || []).includes(name))
+      .map((ds) => ds.file);
+    const churn = [...new Set([...svcFiles, ...scriptFiles])].reduce(
+      (acc, f) => acc + churnOf(gitEvolution, f),
+      0,
+    );
+    addImport(name, bestSource([...scriptFiles, ...svcFiles]), fanIn * (hasGit ? churn : 1));
   }
 
-  for (const ds of inventory.deployScripts || []) {
+  for (const ds of deployScripts) {
+    const provisions = (ds.provisions || []).filter(Boolean);
     const churn = churnOf(gitEvolution, ds.file);
-    // deploy scripts are not services; borrow fan-in from the heaviest resource they
-    // provision (a script deploying a high-fan-in Lambda should import first).
+    // a script that provisions ONLY retiring resources is itself retire-not-adopt.
+    if (provisions.length && provisions.every(isOrphan)) {
+      addRetire(provisions.join(', '), 'hand-rolled deploy of retiring resource(s)', ds.file);
+      continue;
+    }
     let fanIn = 1;
-    for (const p of ds.provisions || []) {
+    for (const p of provisions) {
       const svc = servicesByName.get(p);
-      if (svc && typeof svc.fanIn === 'number' && svc.fanIn > fanIn) fanIn = svc.fanIn;
+      if (svc && !svc.orphanCandidate && typeof svc.fanIn === 'number' && svc.fanIn > fanIn)
+        fanIn = svc.fanIn;
     }
     const priority = fanIn * (hasGit ? churn : 1);
-    const resource =
-      ds.provisions && ds.provisions.length ? ds.provisions.join(', ') : ds.kind || 'resources';
-    out.push({ resource, source: ds.file, priority });
+    const targets = provisions.filter((p) => !isOrphan(p));
+    // attribute the script to each concrete service it provisions (dedupes with the loop
+    // above via the Map); a script that names no service keeps one generic entry.
+    if (targets.length) for (const p of targets) addImport(p, ds.file, priority);
+    else if (!provisions.length) addImport(ds.kind || 'resources', ds.file, priority);
   }
 
-  return out.sort(
-    (a, b) => b.priority - a.priority || String(a.resource).localeCompare(String(b.resource)),
-  );
+  // Stack co-location: a retirement note usually names ONE resource (the data store), but
+  // the compute/queue/IAM sitting in the SAME stack directory are the same retiring unit —
+  // adopting them is still "codify what you're deleting". Propagate retire to any adopt
+  // target whose defining file lives under a retiring stack dir. Depth-gated (dir must be
+  // >=2 levels deep) so a note in a shared root (scripts/, src/, or the repo root) can
+  // never tar the whole repo — only a specific leaf stack like infra/lambda/graph-sync/.
+  const retiringDirs = new Set();
+  const retiringTokens = new Set(); // distinctive leaf stack-dir names (e.g. "graph-sync")
+  for (const r of retire) {
+    const d = stackDirOf(r.source);
+    if (!d) continue;
+    retiringDirs.add(d);
+    // the leaf dir name also names the stack — a sibling deploy script like
+    // "deploy-graph-sync-lambda.sh" (in a shared scripts/ dir the dir-rule can't reach)
+    // still belongs to it. Guarded: >=6 chars and not a generic container name.
+    const base = (d.split('/').pop() || '').toLowerCase();
+    if (base.length >= 6 && !GENERIC_STACK_DIRS.has(base)) retiringTokens.add(base);
+  }
+  if (retiringDirs.size || retiringTokens.size) {
+    for (const [resource, im] of [...byResource]) {
+      const src = String(im.source || '');
+      const d = stackDirOf(src);
+      const inDir = d && [...retiringDirs].some((rd) => d === rd || d.startsWith(`${rd}/`));
+      const tokenHit = !inDir && [...retiringTokens].some((t) => src.toLowerCase().includes(t));
+      if (inDir || tokenHit) {
+        byResource.delete(resource);
+        addRetire(
+          resource,
+          inDir
+            ? `co-located in a retiring stack (${d})`
+            : 'part of a retiring stack (deploy artifact names it)',
+          im.source,
+        );
+      }
+    }
+  }
+
+  return {
+    imports: [...byResource.values()].sort(
+      (a, b) => b.priority - a.priority || String(a.resource).localeCompare(String(b.resource)),
+    ),
+    retire,
+  };
 }
+
+// The specific stack directory a file belongs to, or null if it is too shallow to be a
+// distinct stack (repo root or a single shared dir like scripts/ — where a retirement
+// note must NOT propagate to unrelated resources). `a/b/file` → `a/b`; `scripts/x` → null.
+function stackDirOf(file) {
+  const parts = String(file || '').split('/');
+  if (parts.length < 3) return null;
+  return parts.slice(0, -1).join('/');
+}
+// Generic container dir names that do NOT distinctively name a stack — a retirement note
+// under one of these must never propagate to siblings by name alone.
+const GENERIC_STACK_DIRS = new Set([
+  'lambda',
+  'lambdas',
+  'common',
+  'shared',
+  'infra',
+  'stacks',
+  'stack',
+  'deploy',
+  'scripts',
+  'functions',
+  'source',
+  'services',
+  'modules',
+  'config',
+  'resources',
+]);
 
 // Deprecated-toolchain severity → migration phase. EOL/archived tooling is urgent
 // (Phase 0 stop-the-bleeding); low-severity maintenance-mode swaps are Phase 8.
@@ -361,7 +504,7 @@ export function planIacTrack(inventory, { stack = null, gitEvolution = null } = 
     return level >= targetLevel && gaps.length === 0;
   };
 
-  const imports = buildImports(inventory, gitEvolution);
+  const { imports, retire } = buildImports(inventory, gitEvolution);
 
   const gapSteps = [];
   for (const spec of DIMENSION_SPECS) {
@@ -374,7 +517,11 @@ export function planIacTrack(inventory, { stack = null, gitEvolution = null } = 
       why: spec.why,
       tool,
       commands,
-      goldenRule,
+      // The golden rule ("plan/preview must show no changes") only applies to steps that
+      // MUTATE live infra (state/import, env-sep, modularity). Adding CI tests, a policy
+      // pack, or a scheduled drift check changes no live state — attaching it there is the
+      // copy-pasted-boilerplate the report agent flagged. Gate it on the spec's own flag.
+      ...(spec.mutating ? { goldenRule } : {}),
     };
     if (spec.seedImports && imports.length) step.imports = imports;
     gapSteps.push(step);
@@ -392,6 +539,19 @@ export function planIacTrack(inventory, { stack = null, gitEvolution = null } = 
   const hasUndeclared = Array.isArray(coverage.undeclared) && coverage.undeclared.length > 0;
   const ratioIncomplete = typeof coverage.resourceRatio === 'number' && coverage.resourceRatio < 1;
   if (hasUndeclared || ratioIncomplete) {
+    // Pre-import data-protection gate: importing a live resource can DESTROY it if a
+    // mis-authored import recreates it — so enable backups/versioning/deletion-protection
+    // FIRST. Derived from which store KINDS are present (never a hardcoded resource), and
+    // only for stores we are actually going to adopt (orphan/retiring stores excluded).
+    const liveStores = (inventory.services || []).filter((s) => s.dataStore && !s.orphanCandidate);
+    const preflight = [];
+    if (liveStores.some((s) => s.kind === 'database'))
+      preflight.push(
+        'Enable point-in-time recovery + deletion protection on every live data-store table BEFORE import — a mis-authored adopt can destroy unprotected data (see the verification backlog).',
+      );
+    if (liveStores.some((s) => s.kind === 'storage'))
+      preflight.push('Enable versioning on every live object-store bucket BEFORE import.');
+
     const adoptionStep = {
       phase: 1, // between deprecated-toolchain (0, stop-the-bleeding) and state (2)
       title: 'Adopt unmanaged resources into IaC',
@@ -402,7 +562,12 @@ export function planIacTrack(inventory, { stack = null, gitEvolution = null } = 
       unlocks: ['finops', 'privacy', 'policy-as-code'],
       goldenRule,
     };
+    if (preflight.length) adoptionStep.preflight = preflight;
     if (imports.length) adoptionStep.imports = imports;
+    // Keep/retire classifier: resources with a code-readable retirement signal are listed
+    // as "retire, do NOT adopt" on the same step, so the plan never tells you to codify
+    // infra you're deleting (the biggest logic gap the report agent found).
+    if (retire.length) adoptionStep.retire = retire;
     gapSteps.push(adoptionStep);
   }
 
@@ -431,5 +596,7 @@ export function planIacTrack(inventory, { stack = null, gitEvolution = null } = 
     levelName: LEVEL_NAMES[targetLevel] || LEVEL_NAMES[LEVEL_NAMES.length - 1],
     nextThree,
     track,
+    // Keep/retire classifier output, hoisted for consumers that don't walk the track.
+    ...(retire.length ? { retire } : {}),
   };
 }
