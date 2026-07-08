@@ -110,7 +110,15 @@ function BasisBadge({ basis }: { basis?: 'declared' | 'verified' }) {
  * cross-link) what data LEAVES to external processors — the precise input the
  * GDPR / EU-AI-Act / data-privacy authorities consume.
  */
-function InfraCloudGroup({ cloud, services }: { cloud: string; services: InfraService[] }) {
+function InfraCloudGroup({
+  cloud,
+  services,
+  retireSet,
+}: {
+  cloud: string;
+  services: InfraService[];
+  retireSet?: Set<string>;
+}) {
   if (!services.length) return null;
   return (
     <div>
@@ -151,6 +159,18 @@ function InfraCloudGroup({ cloud, services }: { cloud: string; services: InfraSe
                 <span title={s.orphanReason} style={{ color: 'var(--warning, #f59e0b)' }}>
                   {' '}
                   · orphan-candidate
+                </span>
+              ) : !s.orphanCandidate && retireSet?.has(s.name) ? (
+                // The engine found no code-readable retirement signal naming THIS service
+                // directly, but the plan's stack-topology reasoning (co-location / sibling
+                // deploy-artifact naming) still classified it retire — surface that here too,
+                // or this inventory view silently disagrees with the migration plan below.
+                <span
+                  title="classified retire by the migration plan (co-located with / named by a retiring stack) — see Infrastructure track"
+                  style={{ color: 'var(--destructive, #ef4444)' }}
+                >
+                  {' '}
+                  · ⛔ plan: retire
                 </span>
               ) : null}
             </span>
@@ -1097,6 +1117,11 @@ function InfraMap({
     return m;
   }, [infra.services]);
   const cloudOrder = Object.keys(byCloud).sort((a, b) => byCloud[b].length - byCloud[a].length);
+  // Resources the migration PLAN classified retire (stack co-location / sibling-artifact
+  // naming) — a broader, topology-informed signal than the engine's per-resource
+  // orphanCandidate flag. Cross-referenced into the inventory chips below so this view
+  // never silently disagrees with the "Retire — do NOT adopt" list in the plan.
+  const retireSet = useMemo(() => new Set((plan?.retire ?? []).map((r) => r.resource)), [plan]);
   const sig = infra.signalQuality;
   const cov = infra.iacCoverage || infra.summary.iacCoverage;
   const sigColor =
@@ -1197,27 +1222,38 @@ function InfraMap({
             drift detection. This is why cloud resources can read “used but not declared”.
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {infra.deployScripts.map((d, i) => (
-              <span
-                key={i}
-                title={d.file}
-                style={{
-                  fontSize: 11,
-                  color: 'var(--text-dim)',
-                  border: '1px solid color-mix(in srgb, var(--warning) 50%, var(--border))',
-                  borderRadius: 8,
-                  padding: '3px 9px',
-                  fontFamily: 'var(--font-mono)',
-                }}
-              >
-                {d.file.split('/').pop()}
-                <span style={{ color: 'var(--foreground)' }}>
-                  {' '}
-                  · {d.kind === 'iam-policy' ? 'IAM policy' : 'deploy script'}
+            {infra.deployScripts.map((d, i) => {
+              // Mirrors the planner's own resource-naming: a script's provisions[] name
+              // what it creates; an empty-provisions IAM-policy file falls back to `kind`
+              // ('iam-policy') — the same pseudo-resource name the plan's retire[] uses.
+              const dRetire = d.provisions?.length
+                ? d.provisions.some((p) => retireSet.has(p))
+                : retireSet.has(d.kind);
+              return (
+                <span
+                  key={i}
+                  title={dRetire ? `${d.file} — classified retire by the migration plan` : d.file}
+                  style={{
+                    fontSize: 11,
+                    color: 'var(--text-dim)',
+                    border: `1px solid ${dRetire ? 'color-mix(in srgb, var(--destructive, #ef4444) 50%, var(--border))' : 'color-mix(in srgb, var(--warning) 50%, var(--border))'}`,
+                    borderRadius: 8,
+                    padding: '3px 9px',
+                    fontFamily: 'var(--font-mono)',
+                  }}
+                >
+                  {d.file.split('/').pop()}
+                  <span style={{ color: 'var(--foreground)' }}>
+                    {' '}
+                    · {d.kind === 'iam-policy' ? 'IAM policy' : 'deploy script'}
+                  </span>
+                  {d.provisions?.length ? <span> · {d.provisions.join(', ')}</span> : null}
+                  {dRetire ? (
+                    <span style={{ color: 'var(--destructive, #ef4444)' }}> · ⛔ plan: retire</span>
+                  ) : null}
                 </span>
-                {d.provisions?.length ? <span> · {d.provisions.join(', ')}</span> : null}
-              </span>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -1284,7 +1320,12 @@ function InfraMap({
       <CostSurfacePanel infra={infra} />
 
       {cloudOrder.map((cloud) => (
-        <InfraCloudGroup key={cloud} cloud={cloud} services={byCloud[cloud]} />
+        <InfraCloudGroup
+          key={cloud}
+          cloud={cloud}
+          services={byCloud[cloud]}
+          retireSet={retireSet}
+        />
       ))}
 
       {infra.iac.length > 0 && (
