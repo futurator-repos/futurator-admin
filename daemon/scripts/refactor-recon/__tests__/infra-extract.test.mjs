@@ -22,6 +22,8 @@ import {
   parseCfnResources,
   normalizeArnResource,
   detectSecretInEnv,
+  detectMeteringArtifacts,
+  detectIntentionalSeparation,
 } from '../infra-extract.mjs';
 
 const svc = (inv, name) => inv.services.find((s) => s.name === name || s.name.startsWith(name));
@@ -1554,5 +1556,63 @@ describe('B11 — moduleReadiness (downstream unlock gates)', () => {
     expect(mr.privacy.blockedBy.join(' ')).toMatch(/PII|classification/i);
     expect(mr.policyAsCode.ready).toBe(false);
     expect(mr.policyAsCode.basis).toBe('declared');
+  });
+});
+
+describe('Final iteration — metering-source detector (whole-token, no false positives)', () => {
+  it('finds a usage-named resource and a pricing/usage-named file', () => {
+    const inv = buildInfraInventory([
+      { rel: 'src/lib/usage.ts', content: '// model pricing table' },
+      { rel: 'infra/db.ts', content: 'new sst.aws.Dynamo("App_Usage", {})' },
+    ]);
+    const hits = detectMeteringArtifacts([{ rel: 'src/lib/usage.ts' }], inv.services);
+    expect(hits.some((h) => h.kind === 'file' && h.name === 'src/lib/usage.ts')).toBe(true);
+    expect(hits.some((h) => h.kind === 'resource' && h.name === 'App_Usage')).toBe(true);
+  });
+
+  it('does NOT false-match "outage" (usage) or "rateLimiter" (rate) as whole tokens', () => {
+    const inv = buildInfraInventory([
+      {
+        rel: 'infra/db.ts',
+        content:
+          'new sst.aws.Dynamo("App_OutageLog", {})\nnew sst.aws.Dynamo("RateLimiter_Table", {})',
+      },
+    ]);
+    const hits = detectMeteringArtifacts([], inv.services);
+    expect(hits).toEqual([]);
+  });
+
+  it('returns [] when no metering/usage/pricing/billing artifact exists', () => {
+    const inv = buildInfraInventory([
+      { rel: 'infra/db.ts', content: 'new sst.aws.Dynamo("Projects", {})' },
+    ]);
+    expect(detectMeteringArtifacts([{ rel: 'src/lib/db.ts' }], inv.services)).toEqual([]);
+  });
+});
+
+describe('Final iteration — intentional-separation signal (import-substrate fork)', () => {
+  it('prefers a STRONG signal (SCOPE BOUNDARY) over a WEAK one (bash idempotency "already exists") seen first', () => {
+    const files = [
+      { rel: 'scripts/deploy.sh', content: 'echo "role already exists — updating..."' },
+      { rel: 'sst.config.ts', content: '// SCOPE BOUNDARY: these tables are managed OUTSIDE SST' },
+    ];
+    const sep = detectIntentionalSeparation(files);
+    expect(sep.present).toBe(true);
+    expect(sep.evidence).toMatch(/SCOPE BOUNDARY/);
+    expect(sep.evidence).toMatch(/sst\.config\.ts/);
+  });
+
+  it('falls back to the WEAK signal only when no STRONG signal exists anywhere', () => {
+    const files = [
+      { rel: 'scripts/deploy.sh', content: 'echo "role already exists — updating..."' },
+    ];
+    const sep = detectIntentionalSeparation(files);
+    expect(sep.present).toBe(true);
+    expect(sep.evidence).toMatch(/already exists/);
+  });
+
+  it('reports absent when neither signal is present', () => {
+    const files = [{ rel: 'infra/db.ts', content: 'new sst.aws.Dynamo("Projects", {})' }];
+    expect(detectIntentionalSeparation(files)).toEqual({ present: false, evidence: null });
   });
 });

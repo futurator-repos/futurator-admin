@@ -303,10 +303,20 @@ function buildImports(inventory, gitEvolution) {
   const byResource = new Map(); // resource -> {resource, source, priority}
   const retire = [];
   const seenRetire = new Set();
+  // Final-iteration item 5 — retire sequencing needs a KIND per entry to order teardown
+  // generically (compute before messaging before IAM; a data-store kind is never
+  // auto-sequenced — see buildRetireSequence). Real services resolve via servicesByName;
+  // provision-label pseudo-resources (Lambda/IAM/iam-policy — never real service entries,
+  // see buildImports' deployScripts loop) fall back to a small generic name hint.
+  const kindOfRetire = (resource) => {
+    const svc = servicesByName.get(resource);
+    if (svc && svc.kind) return svc.kind;
+    return RETIRE_KIND_HINT[String(resource || '').toLowerCase()] || 'unknown';
+  };
   const addRetire = (resource, reason, source) => {
     if (!resource || seenRetire.has(resource)) return;
     seenRetire.add(resource);
-    retire.push({ resource, reason, source: source || null });
+    retire.push({ resource, reason, source: source || null, kind: kindOfRetire(resource) });
   };
   const addImport = (resource, source, priority) => {
     const cur = byResource.get(resource);
@@ -419,6 +429,79 @@ function stackDirOf(file) {
   if (parts.length < 3) return null;
   return parts.slice(0, -1).join('/');
 }
+// Provision-label pseudo-resources (never real `services[]` entries — see the
+// deployScripts loop above) get a generic kind hint so retire-sequencing can order them.
+const RETIRE_KIND_HINT = {
+  lambda: 'compute',
+  function: 'compute',
+  iam: 'iam',
+  'iam-policy': 'iam',
+  role: 'iam',
+  policy: 'iam',
+  sqs: 'messaging',
+  sns: 'messaging',
+  queue: 'messaging',
+  dlq: 'messaging',
+  topic: 'messaging',
+};
+
+// Final-iteration item 5 — safe teardown ORDER for the retire[] set: disable triggers
+// feeding the retiring compute, then compute, then messaging/queues, then monitoring,
+// then IAM last (roles/policies are commonly still referenced elsewhere until the very
+// end). A database/storage/unknown-kind entry (e.g. a shared, not-Mycelium-owned EC2/DB)
+// is NEVER auto-sequenced — deleting a data store is always a separate human decision,
+// surfaced instead as `excludedFromSequencing`. Purely a generic, kind-based ordering
+// template (like the TOOLING command lists) — not derived per-repo beyond the retire set.
+const RETIRE_SEQ_RANK = { compute: 1, messaging: 2, iam: 3 };
+function buildRetireSequence(retireWithKind) {
+  if (!retireWithKind || !retireWithKind.length) return null;
+  const sequenced = retireWithKind
+    .filter((r) => RETIRE_SEQ_RANK[r.kind] != null)
+    .sort(
+      (a, b) =>
+        RETIRE_SEQ_RANK[a.kind] - RETIRE_SEQ_RANK[b.kind] || a.resource.localeCompare(b.resource),
+    );
+  const excludedFromSequencing = retireWithKind
+    .filter((r) => RETIRE_SEQ_RANK[r.kind] == null)
+    .map((r) => ({
+      resource: r.resource,
+      kind: r.kind,
+      note: 'not auto-sequenced — deleting a data store (or an unrecognized-kind resource) is a separate human decision, not a template step. If shared/owned elsewhere, it may not be yours to delete at all.',
+    }));
+  const computeNames = sequenced.filter((r) => r.kind === 'compute').map((r) => r.resource);
+  const messagingNames = sequenced.filter((r) => r.kind === 'messaging').map((r) => r.resource);
+  const iamNames = sequenced.filter((r) => r.kind === 'iam').map((r) => r.resource);
+  const steps = [];
+  if (computeNames.length) {
+    steps.push({
+      order: steps.length + 1,
+      action:
+        'Disable event-source-mappings / stream subscriptions / triggers feeding the retiring compute — stops new invocations without deleting state.',
+    });
+    steps.push({ order: steps.length + 1, action: `Delete compute: ${computeNames.join(', ')}.` });
+  }
+  if (messagingNames.length)
+    steps.push({
+      order: steps.length + 1,
+      action: `Delete messaging/queue resources: ${messagingNames.join(', ')} — confirm the DLQ-depth verification-backlog item first (a nonzero depth means unprocessed work, not just dead infra).`,
+    });
+  if (computeNames.length || messagingNames.length)
+    steps.push({
+      order: steps.length + 1,
+      action: 'Delete/disable any alarms or monitoring wired to the retiring stack.',
+    });
+  if (iamNames.length)
+    steps.push({
+      order: steps.length + 1,
+      action: `Delete IAM roles/policies LAST, once nothing else references them: ${iamNames.join(', ')}.`,
+    });
+  if (!steps.length && !excludedFromSequencing.length) return null;
+  return {
+    steps,
+    ...(excludedFromSequencing.length ? { excludedFromSequencing } : {}),
+  };
+}
+
 // Generic container dir names that do NOT distinctively name a stack — a retirement note
 // under one of these must never propagate to siblings by name alone.
 const GENERIC_STACK_DIRS = new Set([
@@ -438,6 +521,255 @@ const GENERIC_STACK_DIRS = new Set([
   'config',
   'resources',
 ]);
+
+// ── Final-iteration items 1–3: the plan's DEFINITION OF DONE is a concrete artifact
+// set + a machine-readable manifest, not just a maturity level. ──
+
+// The manifest STANDARD (item 2) — one fixed schema, same shape for every app/tool, so
+// any consumer (FinOps/privacy/policy) reads one contract regardless of what codified the
+// resource. Generated from IaC state + a live reconcile, NEVER hand-authored — this scan
+// is code-only, so it can only emit the schema + a code-derived PREVIEW (see
+// buildManifestPreview): `arn`/`depends_on`/live tags are honestly left unresolved here,
+// not fabricated.
+export const MANIFEST_SCHEMA = {
+  version: '1',
+  description:
+    'Canonical, GENERATED infra manifest — one node per resource + dependency edges. ' +
+    'This code-only scan emits the schema and a best-effort preview, never the generated ' +
+    'manifest itself (that requires a live-reconcile pass — see targetArtifacts).',
+  node: {
+    id: 'string — stable resource identifier (name today; ARN once live-reconciled)',
+    type: 'string — resource kind + service, e.g. "database:DynamoDB"',
+    arn: 'string|null — NOT resolvable from code alone; populated by a live reconcile pass',
+    managed_by: 'the codifying tool name, or UNMANAGED',
+    source: 'declared | referenced-only | inferred — provenance of this entry',
+    verification_status:
+      'declared | verified — declared = code-only claim; verified = confirmed against live state',
+    tags: {
+      owner: 'string|null',
+      cost_center: 'string|null',
+      capability: 'string|null',
+      data_classification: 'string|null',
+    },
+    cost_model: 'standing | metered | subscription | connectivity | none',
+    pii: 'boolean',
+    lifecycle: 'keep | retire',
+    depends_on:
+      'string[] — edges to other node ids; NOT computed by this code-only scan (a real gap, not fabricated — see targetArtifacts)',
+  },
+  edgeTypes: ['depends_on', 'holds_data_of_class', 'managed_by', 'shares'],
+};
+
+/**
+ * Item 2/3 preview — reshapes what the scan ALREADY knows (services/resources +
+ * external/3rd-party detections) into the manifest's node schema, so the schema above is
+ * proven against a real repo, not just documented in the abstract. `depends_on` is
+ * honestly left `[]` (edge computation is a real, not-yet-built gap — flagged in
+ * targetArtifacts, not silently fabricated).
+ */
+function buildManifestPreview(inventory, tool, retireSet, meteringArtifacts) {
+  const nodes = [];
+  const tagStub = () => ({
+    owner: null,
+    cost_center: null,
+    capability: null,
+    data_classification: null,
+  });
+  for (const s of inventory.services || []) {
+    const svcDeclared =
+      (s.detectedBy || []).includes('iac-declared') ||
+      (s.detectedBy || []).includes('platform-config');
+    const svcRetire = retireSet.has(s.name);
+    if (s.resources && s.resources.length) {
+      for (const r of s.resources) {
+        const tags = tagStub();
+        if (r.contains_pii) tags.data_classification = 'PII';
+        nodes.push({
+          id: r.name,
+          type: `${s.kind}:${s.name}`,
+          arn: null,
+          managed_by: r.declared ? tool : 'UNMANAGED',
+          source: r.declared ? 'declared' : 'referenced-only',
+          verification_status: 'declared',
+          tags,
+          cost_model: s.costModel || null,
+          pii: !!r.contains_pii,
+          lifecycle: r.orphanCandidate || svcRetire || retireSet.has(r.name) ? 'retire' : 'keep',
+          depends_on: [],
+        });
+      }
+    } else {
+      nodes.push({
+        id: s.name,
+        type: s.kind,
+        arn: null,
+        managed_by: svcDeclared ? tool : 'UNMANAGED',
+        source: svcDeclared ? 'declared' : 'inferred',
+        verification_status: 'declared',
+        tags: tagStub(),
+        cost_model: s.costModel || null,
+        pii: false,
+        lifecycle: svcRetire ? 'retire' : 'keep',
+        depends_on: [],
+      });
+    }
+  }
+  // 3rd-party services are first-class nodes too, off-cloud + metered — never AWS IaC.
+  const externalNames = new Set((inventory.external || []).map((e) => e.provider));
+  const hasMetering = !!(meteringArtifacts && meteringArtifacts.length);
+  const thirdParty = (inventory.services || [])
+    .filter((s) => externalNames.has(s.name))
+    .map((s) => ({
+      id: s.name,
+      type: 'external-service',
+      cost_model: s.costModel || null,
+      // Never claims WHICH service a found artifact covers — that's a verification call,
+      // not something a code-only scan can attribute with confidence.
+      metering_source: hasMetering
+        ? {
+            present: true,
+            candidates: meteringArtifacts.map((m) => m.name),
+            note: 'not verified to specifically cover this service',
+          }
+        : {
+            present: false,
+            candidates: [],
+            note: 'no usage/billing/pricing artifact detected in-repo — cost is unattributed',
+          },
+      env_key: (s.declares || []).find((d) => /^[A-Z][A-Z0-9_]+$/.test(d)) || null,
+      dpa_required: true,
+      dpa_verified: false, // code cannot confirm a signed DPA exists — always a backlog item
+      basis: 'declared',
+    }));
+  return {
+    nodes,
+    thirdParty,
+    note:
+      'PREVIEW derived from code-only detection — not the generated manifest. depends_on ' +
+      'edges, arn resolution, and tag values require a live-reconcile pass this scan does not perform.',
+  };
+}
+
+/**
+ * Item 1 — the plan's definition of done as a concrete artifact set, stack-aware (never
+ * hardcodes a specific tool beyond what was already detected/recommended elsewhere in
+ * this plan). `imports` (post-retire-routing) tells us whether a data-plane split is
+ * still needed; tagTaxonomy/governance tell us whether the tag module / policy pack exist.
+ */
+function buildTargetArtifacts(tool, maturity, imports) {
+  const mat = maturity || {};
+  const govLevel = mat.dimensions?.governance?.level ?? 0;
+  const tagPct = mat.tagTaxonomy?.coveragePct ?? 0;
+  const dataPlaneNeeded = imports.length > 0;
+  // SST's own native substrate is Pulumi — a companion data-plane project for an SST repo
+  // is idiomatically Pulumi; every other tool is its own natural companion (a second
+  // Terraform/CDK/Pulumi project or workspace, not a tool switch).
+  const companionTool = tool === 'sst' ? 'pulumi' : tool;
+  return [
+    {
+      id: 'compute-stack',
+      kind: 'compute-stack',
+      tool,
+      status: 'exists',
+      description: `${tool}-managed compute — already codified.`,
+    },
+    {
+      id: 'data-plane-stack',
+      kind: 'data-plane-stack',
+      tool: companionTool,
+      status: dataPlaneNeeded ? 'missing' : 'exists',
+      description: dataPlaneNeeded
+        ? `A separate ${companionTool} project for the data plane (the still-undeclared stateful resources), imported and referenced by the compute stack via stack outputs — separates the two lifecycles and kills hardcoded resource-name strings in the compute config.`
+        : 'No undeclared data-plane resources remain to split out.',
+    },
+    {
+      id: 'tag-module',
+      kind: 'tag-module',
+      status: tagPct >= 100 ? 'exists' : 'missing',
+      description: 'One shared tag-taxonomy module, merged onto every resource across both stacks.',
+    },
+    {
+      id: 'policy-pack',
+      kind: 'policy-pack',
+      status: govLevel >= 2 ? 'exists' : 'missing',
+      description:
+        'Policy-as-code pack enforcing the tag taxonomy + encryption + backup posture (advisory → mandatory).',
+    },
+    {
+      id: 'infra-manifest',
+      kind: 'infra-manifest',
+      status: 'missing',
+      description:
+        'ONE generated, machine-readable manifest (see manifestSchema) — the canonical source FinOps/privacy/policy consume. Not yet built by this scan — see manifestPreview for what it will look like, and finopsReadiness for why it currently blocks.',
+    },
+  ];
+}
+
+/**
+ * Item 4 — resolve the import-substrate fork EXPLICITLY when the repo's own code says a
+ * resource is intentionally kept out of the primary tool (SCOPE-BOUNDARY-style signal).
+ * Presenting a single opinionated "adopt in <tool>" command in that situation contradicts
+ * the repo's own documented intent and risks state divergence — so instead the plan
+ * presents the decision, tool-agnostically, with trade-offs. Absent the signal (the common
+ * case), the caller keeps its existing single-recommendation behavior unchanged.
+ */
+function buildImportDecision(tool, inventory) {
+  const sep = inventory.intentionalSeparation;
+  if (!sep || !sep.present) return null;
+  const companionTool = tool === 'sst' ? 'pulumi' : tool;
+  return {
+    context: `The repo documents that these resources are deliberately kept OUTSIDE ${tool} (${sep.evidence}) — declaring them directly in ${tool}'s config risks state divergence with whatever already manages them. This is a decision to make explicitly, not a default to apply silently.`,
+    recommended: 'separate-project',
+    options: [
+      {
+        id: 'separate-project',
+        label: `Separate ${companionTool} project for the data plane, imported and referenced by ${tool} via stack outputs`,
+        recommended: true,
+        tradeoffs: `Clean separation of lifecycles (compute vs data), no state-divergence risk, matches the repo's own documented intent. Adds a second state backend to operate.`,
+      },
+      {
+        id: 'fold-in',
+        label: `Fold the data plane directly into ${tool}'s existing config`,
+        recommended: false,
+        tradeoffs: `Single state backend, simpler day-1 ops — but contradicts the repo's own separation note, and risks ${tool} recreating or conflicting with resources another process manages.`,
+      },
+    ],
+  };
+}
+
+/**
+ * Item 6 — FinOps readiness as a TESTABLE definition of done, not a vibe. `ready` flips
+ * true only when every condition is objectively met; until then `blockedBy` lists the
+ * exact unmet conditions so "start FinOps" has a mechanical green light. The manifest
+ * condition is an HONEST permanent blocker today — this scan emits a schema + preview,
+ * never the generated/reconciled manifest FinOps actually needs (see targetArtifacts).
+ */
+function buildFinopsReadiness(inventory, imports, meteringArtifacts) {
+  const mat = inventory.iacMaturity || {};
+  const tax = mat.tagTaxonomy || {};
+  const blockedBy = [];
+  if (imports.length)
+    blockedBy.push(
+      `${imports.length} live resource(s) still undeclared/unimported: ${imports
+        .slice(0, 4)
+        .map((i) => i.resource)
+        .join(', ')}${imports.length > 4 ? '…' : ''}`,
+    );
+  const tagPct = tax.coveragePct ?? 0;
+  if (tagPct < 100)
+    blockedBy.push(
+      `tag taxonomy incomplete (${tagPct}%; missing: ${(tax.missing || []).join(', ') || 'tags'})`,
+    );
+  blockedBy.push(
+    'infra manifest not yet generated — this scan emits the schema + a code-derived preview only; FinOps needs the generated, live-reconciled manifest (see targetArtifacts)',
+  );
+  const externalCount = (inventory.external || []).length;
+  if (externalCount > 0 && !(meteringArtifacts && meteringArtifacts.length))
+    blockedBy.push(
+      `${externalCount} external/metered service(s) have no detected metering-source pointer (no usage/billing/pricing artifact found in-repo)`,
+    );
+  return { ready: blockedBy.length === 0, basis: 'declared', blockedBy };
+}
 
 // Deprecated-toolchain severity → migration phase. EOL/archived tooling is urgent
 // (Phase 0 stop-the-bleeding); low-severity maintenance-mode swaps are Phase 8.
@@ -568,6 +900,18 @@ export function planIacTrack(inventory, { stack = null, gitEvolution = null } = 
     // as "retire, do NOT adopt" on the same step, so the plan never tells you to codify
     // infra you're deleting (the biggest logic gap the report agent found).
     if (retire.length) adoptionStep.retire = retire;
+    // Item 5 — safe teardown order for whatever's in retire[].
+    const retireSequence = buildRetireSequence(retire);
+    if (retireSequence) adoptionStep.retireSequence = retireSequence;
+    // Item 4 — when the repo's own code says these resources are deliberately kept
+    // separate, present the fork instead of one opinionated command. The commands list
+    // narrows to just the golden-rule verification line (present across every TOOLING
+    // profile) — the opinionated "adopt in <tool>" line only fires without the signal.
+    const importDecision = buildImportDecision(tool, inventory);
+    if (importDecision) {
+      adoptionStep.importDecision = importDecision;
+      adoptionStep.commands = (toolCmds.state || []).filter((c) => /MUST show/i.test(c));
+    }
     gapSteps.push(adoptionStep);
   }
 
@@ -590,12 +934,26 @@ export function planIacTrack(inventory, { stack = null, gitEvolution = null } = 
     action: (s.commands && s.commands[0]) || s.why,
   }));
 
+  // Items 1–3, 6 — the plan's target state: a concrete artifact set + the manifest
+  // standard (schema + a code-derived preview proving it against this repo) + a testable
+  // FinOps definition-of-done. `retireSet` also feeds the manifest preview's lifecycle
+  // field so a retiring resource never reads "keep" there either.
+  const retireSet = new Set(retire.map((r) => r.resource));
+  const meteringArtifacts = inventory.meteringArtifacts || [];
+  const targetArtifacts = buildTargetArtifacts(tool, maturity, imports);
+  const manifestPreview = buildManifestPreview(inventory, tool, retireSet, meteringArtifacts);
+  const finopsReadiness = buildFinopsReadiness(inventory, imports, meteringArtifacts);
+
   return {
     currentLevel,
     targetLevel,
     levelName: LEVEL_NAMES[targetLevel] || LEVEL_NAMES[LEVEL_NAMES.length - 1],
     nextThree,
     track,
+    targetArtifacts,
+    manifestSchema: MANIFEST_SCHEMA,
+    manifestPreview,
+    finopsReadiness,
     // Keep/retire classifier output, hoisted for consumers that don't walk the track.
     ...(retire.length ? { retire } : {}),
   };

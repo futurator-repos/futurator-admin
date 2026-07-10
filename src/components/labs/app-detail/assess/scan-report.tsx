@@ -863,6 +863,201 @@ function ModuleReadinessPanel({ readiness }: { readiness?: ModuleReadiness }) {
  * shows its tool + concrete commands (monospace), the golden-rule note, and any
  * seeded import targets as chips. Renders nothing without a plan.
  */
+const ARTIFACT_STATUS_COLOR: Record<string, string> = {
+  exists: 'var(--success, #22c55e)',
+  missing: 'var(--warning, #f59e0b)',
+  partial: 'var(--warning, #f59e0b)',
+};
+
+/** Item 1 — the plan's definition of done as a concrete artifact set (compute stack,
+ *  data-plane stack, tag module, policy pack, infra manifest), not just a maturity level. */
+function TargetArtifactsPanel({ artifacts }: { artifacts?: IacTargetArtifact[] }) {
+  if (!artifacts?.length) return null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--foreground)' }}>
+        Target artifact set — what &quot;done&quot; physically looks like
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {artifacts.map((a, i) => (
+          <span
+            key={i}
+            title={a.description}
+            style={{
+              fontSize: 10.5,
+              border: `1px solid color-mix(in srgb, ${ARTIFACT_STATUS_COLOR[a.status] ?? 'var(--border)'} 45%, var(--border))`,
+              borderRadius: 8,
+              padding: '2px 8px',
+              color: 'var(--foreground)',
+            }}
+          >
+            {a.status === 'exists' ? '✓' : '○'} {a.id}
+            {a.tool ? <span style={{ color: 'var(--text-dim)' }}> · {a.tool}</span> : null}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Item 6 — FinOps readiness as a testable definition of done: exact unmet conditions,
+ *  never a vibe. `ready` only flips true once every condition is objectively satisfied. */
+function FinopsReadinessPanel({ readiness }: { readiness?: IacFinopsReadiness }) {
+  if (!readiness) return null;
+  const color = readiness.ready ? 'var(--success, #22c55e)' : 'var(--warning, #f59e0b)';
+  return (
+    <div style={{ border: `1px solid ${color}`, borderRadius: 8, padding: '6px 10px' }}>
+      <div style={{ fontSize: 11, fontWeight: 600, color }}>
+        FinOps readiness: {readiness.ready ? 'GREEN — start FinOps' : 'blocked'}
+      </div>
+      {readiness.blockedBy.length ? (
+        <ul
+          style={{ margin: '4px 0 0', paddingLeft: 16, fontSize: 10.5, color: 'var(--text-dim)' }}
+        >
+          {readiness.blockedBy.map((b, i) => (
+            <li key={i}>{b}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+/** Item 2/3 — the manifest STANDARD (a fixed schema, collapsed by default — reference
+ *  material) plus a code-derived PREVIEW proving it against this repo's real detections. */
+function ManifestPanel({
+  schema,
+  preview,
+}: {
+  schema?: IacManifestSchema;
+  preview?: IacManifestPreview;
+}) {
+  if (!schema && !preview) return null;
+  return (
+    <details>
+      <summary
+        style={{ fontSize: 11, color: 'var(--text-dim)', cursor: 'pointer', userSelect: 'none' }}
+      >
+        Infra manifest — schema + preview
+        {preview
+          ? ` (${preview.nodes.length} node${preview.nodes.length === 1 ? '' : 's'}${preview.thirdParty.length ? ` + ${preview.thirdParty.length} 3rd-party` : ''})`
+          : ''}
+      </summary>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+        {preview ? (
+          <div style={{ fontSize: 10.5, color: 'var(--text-dim)', fontStyle: 'italic' }}>
+            {preview.note}
+          </div>
+        ) : null}
+        {preview?.thirdParty.length ? (
+          <div>
+            <div
+              style={{
+                fontSize: 10.5,
+                fontWeight: 600,
+                color: 'var(--foreground)',
+                marginBottom: 4,
+              }}
+            >
+              3rd-party nodes (external, metered off-cloud)
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {preview.thirdParty.map((n, i) => (
+                <div
+                  key={i}
+                  style={{
+                    fontSize: 10.5,
+                    border: '1px solid var(--border)',
+                    borderRadius: 6,
+                    padding: '4px 8px',
+                  }}
+                >
+                  <strong style={{ color: 'var(--foreground)' }}>{n.id}</strong>
+                  <span style={{ color: 'var(--text-dim)' }}> · {n.cost_model}</span>
+                  {n.env_key ? (
+                    <span style={{ color: 'var(--text-dim)' }}> · {n.env_key}</span>
+                  ) : null}
+                  <span
+                    style={{
+                      color: n.metering_source.present
+                        ? 'var(--success, #22c55e)'
+                        : 'var(--warning, #f59e0b)',
+                    }}
+                  >
+                    {' '}
+                    · metering-source:{' '}
+                    {n.metering_source.present
+                      ? n.metering_source.candidates.join(', ')
+                      : 'none detected'}
+                  </span>
+                  <span style={{ color: 'var(--warning, #f59e0b)' }}> · DPA unverified</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {preview?.nodes.length ? (
+          <div>
+            <div
+              style={{
+                fontSize: 10.5,
+                fontWeight: 600,
+                color: 'var(--foreground)',
+                marginBottom: 4,
+              }}
+            >
+              Node preview (first 20 of {preview.nodes.length})
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+              {preview.nodes.slice(0, 20).map((n, i) => (
+                <span
+                  key={i}
+                  title={`type: ${n.type}\nmanaged_by: ${n.managed_by}\nverification_status: ${n.verification_status}\ncost_model: ${n.cost_model ?? 'n/a'}`}
+                  style={{
+                    fontSize: 10,
+                    border: `1px solid ${n.lifecycle === 'retire' ? 'color-mix(in srgb, var(--destructive, #ef4444) 45%, var(--border))' : 'var(--border)'}`,
+                    borderRadius: 7,
+                    padding: '2px 7px',
+                    color:
+                      n.lifecycle === 'retire'
+                        ? 'var(--destructive, #ef4444)'
+                        : 'var(--foreground)',
+                  }}
+                >
+                  {n.id}
+                  {n.pii ? ' 🔒' : ''}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {schema ? (
+          <details>
+            <summary style={{ fontSize: 10.5, color: 'var(--text-dim)', cursor: 'pointer' }}>
+              Manifest schema (reference)
+            </summary>
+            <pre
+              style={{
+                margin: '4px 0 0',
+                padding: 8,
+                background: 'var(--background)',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                fontSize: 10,
+                fontFamily: 'var(--font-mono)',
+                overflowX: 'auto',
+                whiteSpace: 'pre',
+              }}
+            >
+              {JSON.stringify(schema, null, 1)}
+            </pre>
+          </details>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
 function MigrationPathPanel({ plan }: { plan?: IacPlan | null }) {
   if (!plan) return null;
   const next = plan.nextThree ?? [];
@@ -887,6 +1082,8 @@ function MigrationPathPanel({ plan }: { plan?: IacPlan | null }) {
           — next {next.length} action{next.length === 1 ? '' : 's'}
         </span>
       </div>
+      <TargetArtifactsPanel artifacts={plan.targetArtifacts} />
+      <FinopsReadinessPanel readiness={plan.finopsReadiness} />
       {next.length ? (
         <ol
           style={{
@@ -1069,6 +1266,91 @@ function MigrationPathPanel({ plan }: { plan?: IacPlan | null }) {
                     </div>
                   </div>
                 ) : null}
+                {s.retireSequence ? (
+                  <div
+                    style={{
+                      margin: '6px 0',
+                      padding: '6px 9px',
+                      border:
+                        '1px solid color-mix(in srgb, var(--destructive, #ef4444) 35%, var(--border))',
+                      borderRadius: 6,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: 'var(--destructive, #ef4444)',
+                        marginBottom: 3,
+                      }}
+                    >
+                      Safe teardown order
+                    </div>
+                    <ol
+                      style={{
+                        margin: 0,
+                        paddingLeft: 16,
+                        fontSize: 10.5,
+                        color: 'var(--foreground)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 2,
+                      }}
+                    >
+                      {s.retireSequence.steps.map((st, k) => (
+                        <li key={k}>{st.action}</li>
+                      ))}
+                    </ol>
+                    {s.retireSequence.excludedFromSequencing?.length ? (
+                      <div style={{ marginTop: 4, fontSize: 10, color: 'var(--warning, #f59e0b)' }}>
+                        ⚠ not auto-sequenced (separate human decision):{' '}
+                        {s.retireSequence.excludedFromSequencing.map((e) => e.resource).join(', ')}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                {s.importDecision ? (
+                  <div
+                    style={{
+                      margin: '6px 0',
+                      padding: '8px 10px',
+                      border: '1px solid color-mix(in srgb, var(--accent-blue) 40%, var(--border))',
+                      borderRadius: 6,
+                      background: 'color-mix(in srgb, var(--accent-blue) 5%, transparent)',
+                    }}
+                  >
+                    <div style={{ fontSize: 10.5, color: 'var(--foreground)', marginBottom: 6 }}>
+                      {s.importDecision.context}
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {s.importDecision.options.map((o, k) => (
+                        <div
+                          key={k}
+                          style={{
+                            border: `1px solid ${o.recommended ? 'color-mix(in srgb, var(--success, #22c55e) 50%, var(--border))' : 'var(--border)'}`,
+                            borderRadius: 6,
+                            padding: '5px 8px',
+                          }}
+                        >
+                          <div
+                            style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--foreground)' }}
+                          >
+                            {o.label}
+                            {o.recommended ? (
+                              <span style={{ color: 'var(--success, #22c55e)', fontWeight: 700 }}>
+                                {' '}
+                                · recommended
+                              </span>
+                            ) : null}
+                          </div>
+                          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 2 }}>
+                            {o.tradeoffs}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 {s.goldenRule ? (
                   <div style={{ fontSize: 10.5, color: 'var(--success, #22c55e)' }}>
                     ✓ golden rule: {s.goldenRule}
@@ -1096,6 +1378,7 @@ function MigrationPathPanel({ plan }: { plan?: IacPlan | null }) {
           </div>
         </details>
       ) : null}
+      <ManifestPanel schema={plan.manifestSchema} preview={plan.manifestPreview} />
     </div>
   );
 }

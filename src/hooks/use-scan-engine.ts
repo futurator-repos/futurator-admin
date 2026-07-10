@@ -332,6 +332,12 @@ export interface IacPlanStep {
   /** Keep/retire classifier: resources with a code-readable retirement signal — listed as
    *  "do NOT adopt" so the plan never recommends codifying infra you are deleting. */
   retire?: IacRetireCandidate[];
+  /** Safe teardown ORDER for `retire` (compute -> messaging -> IAM; data-store kinds are
+   *  never auto-sequenced — a separate human decision). */
+  retireSequence?: IacRetireSequence;
+  /** Present only when the repo's own code signals the resources are deliberately kept
+   *  OUTSIDE the primary IaC tool — presents the fork instead of one opinionated command. */
+  importDecision?: IacImportDecision;
   /** "plan/preview must show zero changes before commit" — the characterization-gate analogue.
    *  Present only on MUTATING steps (import/env-sep/modularity); omitted on test/policy steps. */
   goldenRule?: string;
@@ -343,6 +349,82 @@ export interface IacRetireCandidate {
   resource: string;
   reason: string;
   source: string | null;
+  /** Generic kind hint (compute/messaging/iam/database/…) used to order teardown. */
+  kind?: string;
+}
+export interface IacRetireSequence {
+  steps: { order: number; action: string }[];
+  /** Resources NOT auto-sequenced (e.g. a shared/not-owned data store) — a human decision. */
+  excludedFromSequencing?: { resource: string; kind: string; note: string }[];
+}
+export interface IacImportDecisionOption {
+  id: string;
+  label: string;
+  recommended: boolean;
+  tradeoffs: string;
+}
+export interface IacImportDecision {
+  context: string;
+  recommended: string;
+  options: IacImportDecisionOption[];
+}
+/** Item 1 — one entry in the plan's concrete definition-of-done artifact set. */
+export interface IacTargetArtifact {
+  id: string;
+  kind: string;
+  tool?: string;
+  status: 'exists' | 'missing' | 'partial';
+  description: string;
+}
+/** Item 2 — the generic, provider-agnostic manifest node/edge schema (a static
+ *  reference object — same shape on every scan, not derived per-repo). */
+export interface IacManifestSchema {
+  version: string;
+  description: string;
+  node: Record<string, unknown>;
+  edgeTypes: string[];
+}
+export interface IacManifestNode {
+  id: string;
+  type: string;
+  arn: string | null;
+  managed_by: string;
+  source: string;
+  verification_status: string;
+  tags: {
+    owner: string | null;
+    cost_center: string | null;
+    capability: string | null;
+    data_classification: string | null;
+  };
+  cost_model: string | null;
+  pii: boolean;
+  lifecycle: 'keep' | 'retire';
+  depends_on: string[];
+}
+export interface IacManifestThirdPartyNode {
+  id: string;
+  type: string;
+  cost_model: string | null;
+  metering_source: { present: boolean; candidates: string[]; note: string };
+  env_key: string | null;
+  dpa_required: boolean;
+  dpa_verified: boolean;
+  basis: string;
+}
+/** Item 2/3 — a code-derived PREVIEW of what the generated manifest will contain, proving
+ *  the schema against this repo's real detections. Never the generated manifest itself. */
+export interface IacManifestPreview {
+  nodes: IacManifestNode[];
+  thirdParty: IacManifestThirdPartyNode[];
+  note: string;
+}
+/** Item 6 — FinOps readiness as a testable definition of done. `ready` only flips true
+ *  once every condition is objectively met; until then `blockedBy` is the exact gap list. */
+export interface IacFinopsReadiness {
+  ready: boolean;
+  basis: string;
+  blockedBy: string[];
 }
 /** Stack-aware Infrastructure migration track, produced by iac-phase-planner.mjs.
  *  Gap-driven: only emits steps for MISSING dimensions. */
@@ -355,6 +437,14 @@ export interface IacPlan {
   track: IacPlanStep[];
   /** Keep/retire classifier output, hoisted from the adoption step for convenience. */
   retire?: IacRetireCandidate[];
+  /** Item 1 — the plan's definition of done as a concrete artifact set. */
+  targetArtifacts?: IacTargetArtifact[];
+  /** Item 2 — the generic manifest schema (static reference, same on every scan). */
+  manifestSchema?: IacManifestSchema;
+  /** Item 2/3 — a code-derived preview of the manifest's contents for this repo. */
+  manifestPreview?: IacManifestPreview;
+  /** Item 6 — testable FinOps definition-of-done. */
+  finopsReadiness?: IacFinopsReadiness;
 }
 
 /** One entry in the scan's execution ledger (C-LEDGER) — a recon step, an

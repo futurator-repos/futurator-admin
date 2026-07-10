@@ -1172,6 +1172,82 @@ export function detectSecretInEnv(content) {
 const AUTH_ADAPTER_RE = /^@auth\/[\w-]+-adapter$|^@next-auth\/[\w-]+-adapter$/;
 const PII_STORE_NAME_RE = /_(Auth|Directory)$/i;
 
+// Final-iteration item 3 — metering-source detector: a per-call-billed 3rd-party service
+// (Anthropic, OpenAI, …) needs SOME in-repo record of where spend is tracked before FinOps
+// can attribute cost to it. Generic whole-token match (never a hardcoded resource/file
+// name) over BOTH resource names and file basenames. Whole-token (not substring) so
+// "outage_log" doesn't false-match "usage" and "rateLimiter" doesn't false-match "rate".
+const METERING_TOKENS = new Set(['usage', 'billing', 'metering', 'spend', 'pricing']);
+function meteringTokenMatch(name) {
+  const tokens = String(name || '')
+    .toLowerCase()
+    .match(/[a-z0-9]+/g);
+  return !!tokens && tokens.some((t) => METERING_TOKENS.has(t));
+}
+/**
+ * Scan the already-detected resource names + file basenames for a usage/pricing/billing
+ * artifact — evidence that SOME in-repo record tracks metered spend. Never claims WHICH
+ * external service it covers (that's a human/verification call); a consumer that finds
+ * ≥1 hit treats it as "a metering artifact exists," not "every 3rd-party call is priced."
+ */
+export function detectMeteringArtifacts(files, services) {
+  const out = [];
+  const seen = new Set();
+  for (const s of services || []) {
+    for (const r of s.resources || []) {
+      if (meteringTokenMatch(r.name) && !seen.has(`res:${r.name}`)) {
+        seen.add(`res:${r.name}`);
+        out.push({
+          kind: 'resource',
+          name: r.name,
+          service: s.name,
+          evidence: 'resource name matches a usage/billing/pricing token',
+        });
+      }
+    }
+  }
+  for (const f of files || []) {
+    const base = (f.rel || '').split('/').pop() || '';
+    if (meteringTokenMatch(base) && !seen.has(`file:${f.rel}`)) {
+      seen.add(`file:${f.rel}`);
+      out.push({
+        kind: 'file',
+        name: f.rel,
+        evidence: 'filename matches a usage/billing/pricing token',
+      });
+    }
+  }
+  return out;
+}
+
+// Final-iteration item 4 — intentional-separation signal: some repos explicitly document
+// that a resource is deliberately kept OUT of the primary IaC tool (e.g. Mycelium's
+// sst.config.ts "SCOPE BOUNDARY … managed OUTSIDE SST … intentionally NOT declared here").
+// That is evidence the authors already chose tool-separation on purpose — the planner
+// should PRESENT the fork (separate project vs fold-in), not silently emit one opinionated
+// import command as if there were no decision. Absence of the signal is the common case;
+// the planner falls back to its existing single-recommendation behavior.
+// STRONG: unambiguous, specifically about IaC-tool scope (never fires on a mundane bash
+// idempotency check). WEAK: "already exist(s)" alone is genuinely common in deploy-script
+// idempotency guards ("role already exists — updating…") — only trusted as a fallback,
+// and only when no STRONG signal exists anywhere in the repo.
+const SEPARATION_RE_STRONG =
+  /\bSCOPE[\s-]?BOUNDARY\b|\bmanaged\s+outside\b|\bout-of-band\b|\bintentionally\s+not\s+declared\b|\bnot\s+declared\s+here\b/i;
+const SEPARATION_RE_WEAK = /\balready\s+exists?\b/i;
+export function detectIntentionalSeparation(files) {
+  let weak = null;
+  for (const f of files || []) {
+    if (typeof f.content !== 'string') continue;
+    const strongHit = f.content.match(SEPARATION_RE_STRONG);
+    if (strongHit) return { present: true, evidence: `"${strongHit[0]}" found in ${f.rel}` };
+    if (!weak) {
+      const weakHit = f.content.match(SEPARATION_RE_WEAK);
+      if (weakHit) weak = { present: true, evidence: `"${weakHit[0]}" found in ${f.rel}` };
+    }
+  }
+  return weak || { present: false, evidence: null };
+}
+
 // A4 — orphan-candidate retirement signals: an explicit `SCOPE-BOUNDARY` marker or a
 // retire/legacy/deprecated comment sitting near the resource's declaration/reference.
 // This is a DECLARED signal (someone wrote it down), never proof the resource is
@@ -1716,6 +1792,10 @@ export function buildInfraInventory(files = []) {
   //   derivation from the truthful inventory (coverage + tags + PII). blockedBy is
   //   the concrete gap list; each ties back to a real detection, never a guess. ──
   inventory.moduleReadiness = computeModuleReadiness(inventory);
+  // Final-iteration items 3/4 — feeds the planner's manifest-preview metering-source
+  // field and the import-substrate-fork decision, respectively.
+  inventory.meteringArtifacts = detectMeteringArtifacts(files, services);
+  inventory.intentionalSeparation = detectIntentionalSeparation(files);
   return inventory;
 }
 
@@ -2653,6 +2733,10 @@ function walk(dir, root, acc = []) {
   } catch {
     return acc;
   }
+  // Sort so file-processing order (and thus any downstream `.slice(0,N)` truncation on
+  // an unsorted list) never depends on filesystem readdir order, which POSIX does not
+  // guarantee stable across runs/filesystems — pins the resource enumeration count.
+  entries.sort((a, b) => a.name.localeCompare(b.name));
   const ALLOW_DOT = new Set(['.github', '.circleci', '.tfsec', '.pulumi']);
   // IaC-maturity dotfiles worth surfacing (governance/drift/deprecated catalogs).
   const ALLOW_DOT_FILE = /^\.(checkov\.ya?ml|trivyignore|driftctl\.(ya?ml|toml)|terrascan)$/i;

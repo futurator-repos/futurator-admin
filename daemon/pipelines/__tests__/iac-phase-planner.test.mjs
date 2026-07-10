@@ -93,6 +93,9 @@ const retiringStackInv = () => ({
   deployScripts: [
     { file: 'scripts/create-agents-table.sh', provisions: ['DynamoDB'], kind: 'deploy' },
     { file: 'scripts/deploy-graph-sync.sh', provisions: ['SQS'], kind: 'deploy' },
+    // empty-provisions IAM-policy file, co-located in the retiring stack dir — mirrors the
+    // real Mycelium shape (custom-policy.json) that retire-sequencing must order LAST.
+    { file: 'infra/graph-sync/custom-policy.json', provisions: [], kind: 'iam-policy' },
   ],
 });
 
@@ -163,5 +166,192 @@ describe('planIacTrack — keep/retire classifier + honest sourcing', () => {
     expect(retired.has('Memgraph')).toBe(true); // still retired (its own flag)
     expect(retired.has('DynamoDB')).toBe(false); // shared scripts/ never propagates
     expect(retired.has('S3')).toBe(false);
+  });
+});
+
+// Full-shape inventory for the final-iteration surfaces: resources[] with PII, external
+// 3rd-party services, tag taxonomy, an intentional-separation signal, and metering
+// artifacts — mirrors the real Mycelium re-scan shape closely enough to exercise every
+// new code path together.
+const fullShapeInv = () => ({
+  iacMaturity: {
+    level: 1,
+    dimensions: {
+      state: { level: 2, gaps: [] },
+      envSeparation: { level: 1, gaps: ['x'] },
+      modularity: { level: 1, gaps: ['x'] },
+      testing: { level: 0, gaps: ['x'] },
+      governance: { level: 0, gaps: ['x'] },
+      driftCost: { level: 0, gaps: ['x'] },
+    },
+    tagTaxonomy: { coveragePct: 0, missing: ['team', 'environment', 'cost-center'] },
+  },
+  iacCoverage: { resourceRatio: 0.1, undeclared: ['DynamoDB'] },
+  iac: [{ provider: 'sst', tier: 'resource' }],
+  intentionalSeparation: { present: true, evidence: '"SCOPE BOUNDARY" found in sst.config.ts' },
+  meteringArtifacts: [{ kind: 'file', name: 'src/lib/usage.ts' }],
+  external: [{ provider: 'Anthropic (Claude API)' }],
+  services: [
+    {
+      name: 'DynamoDB',
+      kind: 'database',
+      dataStore: true,
+      fanIn: 5,
+      files: ['scripts/create-table.sh'],
+      detectedBy: ['sdk-import'],
+      costModel: 'metered',
+      resources: [
+        { name: 'App_Auth', declared: false, contains_pii: true },
+        { name: 'App_Projects', declared: false, contains_pii: false },
+      ],
+    },
+    { name: 'SST', kind: 'iac', detectedBy: ['iac-declared'], files: ['sst.config.ts'] },
+    {
+      name: 'Anthropic (Claude API)',
+      kind: 'ai',
+      cloud: '3rd-party',
+      costModel: 'connectivity',
+      declares: ['ANTHROPIC_API_KEY'],
+      detectedBy: ['sdk-import', 'env-key'],
+    },
+  ],
+  deployScripts: [{ file: 'scripts/create-table.sh', provisions: ['DynamoDB'], kind: 'deploy' }],
+});
+
+describe('Final iteration item 1/2/3 — targetArtifacts + manifest schema/preview', () => {
+  it('emits a stack-aware targetArtifacts[] naming the concrete artifact set', () => {
+    const plan = planIacTrack(fullShapeInv());
+    const ids = plan.targetArtifacts.map((a) => a.id);
+    expect(ids).toEqual([
+      'compute-stack',
+      'data-plane-stack',
+      'tag-module',
+      'policy-pack',
+      'infra-manifest',
+    ]);
+    // SST's companion data-plane substrate is Pulumi (never hardcoded — derived from tool)
+    expect(plan.targetArtifacts.find((a) => a.id === 'data-plane-stack').tool).toBe('pulumi');
+    expect(plan.targetArtifacts.find((a) => a.id === 'infra-manifest').status).toBe('missing');
+  });
+
+  it('exposes a generic manifestSchema (never mentions Mycelium/any app name)', () => {
+    const plan = planIacTrack(fullShapeInv());
+    expect(plan.manifestSchema.node).toHaveProperty('id');
+    expect(plan.manifestSchema.node).toHaveProperty('depends_on');
+    expect(plan.manifestSchema.node).toHaveProperty('verification_status');
+    expect(JSON.stringify(plan.manifestSchema)).not.toMatch(/mycelium/i);
+  });
+
+  it('manifestPreview reshapes real detections into node schema, honestly (arn null, depends_on empty)', () => {
+    const plan = planIacTrack(fullShapeInv());
+    const pii = plan.manifestPreview.nodes.find((n) => n.id === 'App_Auth');
+    expect(pii.pii).toBe(true);
+    expect(pii.tags.data_classification).toBe('PII');
+    expect(pii.arn).toBeNull(); // not derivable from code alone — never fabricated
+    expect(pii.depends_on).toEqual([]); // edge computation is a real, un-built gap
+    expect(pii.verification_status).toBe('declared');
+  });
+
+  it('3rd-party services are first-class manifestPreview.thirdParty nodes, not AWS IaC', () => {
+    const plan = planIacTrack(fullShapeInv());
+    const anthropic = plan.manifestPreview.thirdParty.find(
+      (n) => n.id === 'Anthropic (Claude API)',
+    );
+    expect(anthropic.cost_model).toBe('connectivity');
+    expect(anthropic.env_key).toBe('ANTHROPIC_API_KEY');
+    expect(anthropic.dpa_required).toBe(true);
+    expect(anthropic.dpa_verified).toBe(false); // code can never confirm a signed DPA
+    expect(anthropic.metering_source.present).toBe(true);
+    expect(anthropic.metering_source.candidates).toContain('src/lib/usage.ts');
+  });
+
+  it('metering_source.present is false when no usage/pricing/billing artifact was detected', () => {
+    const inv = fullShapeInv();
+    inv.meteringArtifacts = [];
+    const plan = planIacTrack(inv);
+    expect(plan.manifestPreview.thirdParty[0].metering_source.present).toBe(false);
+  });
+});
+
+describe('Final iteration item 4 — import-substrate fork decision', () => {
+  it('presents the fork (not one opinionated command) when intentionalSeparation is present', () => {
+    const plan = planIacTrack(fullShapeInv());
+    const adopt = plan.track.find((s) => s.dimension === 'adoption');
+    expect(adopt.importDecision).toBeTruthy();
+    expect(adopt.importDecision.options).toHaveLength(2);
+    expect(adopt.importDecision.options.find((o) => o.id === 'separate-project').recommended).toBe(
+      true,
+    );
+    // the opinionated "adopt in sst.config.ts" line is gone; only the golden-rule check remains
+    expect(adopt.commands.some((c) => /adopt existing resources/i.test(c))).toBe(false);
+    expect(adopt.commands.some((c) => /MUST show/i.test(c))).toBe(true);
+  });
+
+  it('keeps the existing single-recommendation behavior when no separation signal exists (default case)', () => {
+    const inv = fullShapeInv();
+    inv.intentionalSeparation = { present: false, evidence: null };
+    const plan = planIacTrack(inv);
+    const adopt = plan.track.find((s) => s.dimension === 'adoption');
+    expect(adopt.importDecision).toBeUndefined();
+    expect(adopt.commands.some((c) => /adopt existing resources/i.test(c))).toBe(true);
+  });
+});
+
+describe('Final iteration item 5 — retire sequencing', () => {
+  it('orders teardown compute -> messaging -> IAM, excludes data-store kinds from auto-sequencing', () => {
+    const plan = planIacTrack(retiringStackInv());
+    const adopt = plan.track.find((s) => s.dimension === 'adoption');
+    const seq = adopt.retireSequence;
+    expect(seq).toBeTruthy();
+    const orderOf = (re) => seq.steps.findIndex((s) => re.test(s.action));
+    const computeIdx = orderOf(/Delete compute/);
+    const messagingIdx = orderOf(/Delete messaging/);
+    const iamIdx = orderOf(/Delete IAM/);
+    expect(computeIdx).toBeGreaterThanOrEqual(0);
+    expect(computeIdx).toBeLessThan(messagingIdx);
+    expect(messagingIdx).toBeLessThan(iamIdx);
+    // Memgraph (kind: database) is never auto-sequenced — a separate human decision
+    expect(seq.excludedFromSequencing.some((r) => r.resource === 'Memgraph')).toBe(true);
+    expect(seq.steps.some((s) => /Memgraph/.test(s.action))).toBe(false);
+  });
+
+  it('returns null when nothing is retiring', () => {
+    const inv = fullShapeInv(); // no orphan/retire signal
+    const plan = planIacTrack(inv);
+    const adopt = plan.track.find((s) => s.dimension === 'adoption');
+    expect(adopt.retireSequence).toBeUndefined();
+  });
+});
+
+describe('Final iteration item 6 — FinOps-readiness testable DoD', () => {
+  it('lists the exact unmet conditions, never asserts ready=true prematurely', () => {
+    const plan = planIacTrack(fullShapeInv());
+    expect(plan.finopsReadiness.ready).toBe(false);
+    expect(plan.finopsReadiness.basis).toBe('declared');
+    const blocked = plan.finopsReadiness.blockedBy.join(' | ');
+    expect(blocked).toMatch(/DynamoDB/); // still-undeclared resource named
+    expect(blocked).toMatch(/tag taxonomy incomplete/);
+    expect(blocked).toMatch(/manifest not yet generated/); // honest permanent blocker today
+  });
+
+  it('does NOT block on metering when an artifact was detected for the only external service', () => {
+    const plan = planIacTrack(fullShapeInv());
+    const blocked = plan.finopsReadiness.blockedBy.join(' | ');
+    expect(blocked).not.toMatch(/metering-source/);
+  });
+
+  it('DOES block on metering when externals exist but nothing was detected', () => {
+    const inv = fullShapeInv();
+    inv.meteringArtifacts = [];
+    const plan = planIacTrack(inv);
+    expect(plan.finopsReadiness.blockedBy.join(' | ')).toMatch(/metering-source/);
+  });
+
+  it('drops the still-undeclared blocker once imports[] is empty (fully adopted)', () => {
+    const inv = fullShapeInv();
+    inv.iacCoverage = { resourceRatio: 1, undeclared: [] };
+    inv.deployScripts = []; // buildImports also seeds from deployScripts independently
+    const plan = planIacTrack(inv);
+    expect(plan.finopsReadiness.blockedBy.some((b) => /still undeclared/.test(b))).toBe(false);
   });
 });
