@@ -355,22 +355,40 @@ function killTree(child) {
   }
 }
 
+// Anchored on the real declaration shape (`export const meta` followed by `=`) so a prose
+// mention of the phrase (e.g. the model narrating "...as required by export const meta...")
+// isn't mistaken for the script start.
+const META_DECL_SOURCE = String.raw`^export const meta\s*=`;
+const META_DECL_RE = new RegExp(META_DECL_SOURCE, 'm');
+
 /**
- * Split the model's stdout into { planText, scriptJs } — fence-aware: if the script is fenced
- * (```js ... ```), everything before the fence is prose/plan; otherwise everything before the
- * `export const meta` start is the plan. planText is '' when no prose precedes the script (the
- * v0 meta-prompt's script-only behavior stays unchanged).
+ * Split the model's stdout into { planText, scriptJs } — fence-aware: if a ``` fence's body
+ * actually contains the `export const meta = ...` declaration, everything before that fence is
+ * prose/plan and the fence is the script; a fence that does NOT contain the declaration (e.g. an
+ * illustrative snippet fenced inside the plan) is ignored rather than trusted. Otherwise, scan the
+ * whole stdout for the LAST anchored `export const meta =` occurrence — everything before it is
+ * the plan. planText is '' when no prose precedes the script (the v0 meta-prompt's script-only
+ * behavior stays unchanged).
  */
 export function splitPlanAndScript(stdout) {
-  const fenced = stdout.match(/```(?:js|javascript)?\s*([\s\S]*?)```/);
-  if (fenced) {
-    const body = fenced[1];
-    const start = body.indexOf('export const meta');
-    const scriptJs = start >= 0 ? body.slice(start).trim() : body.trim();
-    const planText = stdout.slice(0, fenced.index).trim();
-    return { planText, scriptJs };
+  const fenceRe = /```(?:js|javascript)?\s*([\s\S]*?)```/g;
+  let match;
+  while ((match = fenceRe.exec(stdout)) !== null) {
+    const body = match[1];
+    const declMatch = body.match(META_DECL_RE);
+    if (declMatch) {
+      const scriptJs = body.slice(declMatch.index).trim();
+      const planText = stdout.slice(0, match.index).trim();
+      return { planText, scriptJs };
+    }
   }
-  const start = stdout.indexOf('export const meta');
+
+  // No fence's body contains the real declaration (or there are no fences) — fall back to
+  // scanning the full stdout, taking the LAST anchored match so an earlier prose mention (with
+  // the required trailing `=`, e.g. a quoted example) doesn't get confused with the real script.
+  const declMatches = [...stdout.matchAll(new RegExp(META_DECL_SOURCE, 'gm'))];
+  const last = declMatches[declMatches.length - 1];
+  const start = last ? last.index : -1;
   const scriptJs = start >= 0 ? stdout.slice(start).trim() : stdout.trim();
   const planText = start >= 0 ? stdout.slice(0, start).trim() : '';
   return { planText, scriptJs };

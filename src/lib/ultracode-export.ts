@@ -283,10 +283,12 @@ function caseBlock(
   durationMs: number | undefined,
   tokens: unknown,
   sig: PlanSignals | null,
+  planText?: string,
 ) {
   return {
     engine,
     plan: plan ?? null,
+    planText: planText ?? null,
     script: script ?? null,
     durationMs: durationMs ?? null,
     tokens: tokens ?? null,
@@ -332,6 +334,7 @@ export function buildExport(
       run.case2DurationMs,
       run.case2Tokens,
       c2,
+      run.case2PlanText,
     ),
     structuralSimilarity: run.structuralScore ?? null,
     rawMetrics: run.scorecard?.structural?.perMetric ?? {},

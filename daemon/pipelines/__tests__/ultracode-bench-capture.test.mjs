@@ -49,4 +49,33 @@ describe('splitPlanAndScript', () => {
     expect(extractScript(stdout)).toBe(splitPlanAndScript(stdout).scriptJs);
     expect(extractScript(stdout)).toBe('export const meta = { a: 1 };');
   });
+
+  it('a fenced illustrative snippet (no real declaration inside) is ignored — the real unfenced script after it is still extracted', () => {
+    const stdout = [
+      '```',
+      'PLAN: example decomposition shown here for illustration.',
+      '```',
+      '',
+      'export const meta = { agentCount: 3 };',
+      'const z = 2;',
+    ].join('\n');
+    const { planText, scriptJs } = splitPlanAndScript(stdout);
+    expect(scriptJs).toBe('export const meta = { agentCount: 3 };\nconst z = 2;');
+    expect(planText).toBe(
+      '```\nPLAN: example decomposition shown here for illustration.\n```',
+    );
+  });
+
+  it('a prose mention of "export const meta" without a trailing "=" is not confused with the real declaration', () => {
+    const stdout = [
+      'The script begins with export const meta as required by the contract.',
+      '',
+      'export const meta = { name: "x" };',
+    ].join('\n');
+    const { planText, scriptJs } = splitPlanAndScript(stdout);
+    expect(scriptJs).toBe('export const meta = { name: "x" };');
+    expect(planText).toBe(
+      'The script begins with export const meta as required by the contract.',
+    );
+  });
 });
