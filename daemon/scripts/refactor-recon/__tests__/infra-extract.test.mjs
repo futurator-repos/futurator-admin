@@ -322,6 +322,41 @@ describe('C5 — enrichInfraWithGraph (graph-informed fan-in / centralization)',
     expect(enrichInfraWithGraph(inv, null, null)).toBe(inv);
     expect(enrichInfraWithGraph(inv, { nodes: [] }, null)).toBe(inv);
   });
+
+  it('computes serviceDependencyEdges from resolved.edges (real alias-resolved file pairs)', () => {
+    const inv = buildInfraInventory([
+      { rel: 'src/ingest/route.ts', specifiers: ['@aws-sdk/client-s3'] },
+      { rel: 'src/lib/citations.ts', specifiers: ['@anthropic-ai/sdk'] },
+    ]);
+    const graph = { nodes: [] };
+    // the S3-referencing file literally imports the Anthropic-referencing file
+    const resolved = { edges: [{ source: 'src/ingest/route.ts', target: 'src/lib/citations.ts' }] };
+    const enriched = enrichInfraWithGraph(inv, graph, resolved);
+    expect(enriched.serviceDependencyEdges.S3).toContain('Anthropic (Claude API)');
+    // no reverse edge was given, so the inverse direction is not asserted
+    expect(enriched.serviceDependencyEdges['Anthropic (Claude API)']).toBeUndefined();
+  });
+
+  it('excludes self-edges and ignores edges with no service on either end', () => {
+    const inv = buildInfraInventory([
+      { rel: 'src/a.ts', specifiers: ['@aws-sdk/client-s3'] },
+      { rel: 'src/b.ts', specifiers: ['@aws-sdk/client-s3'] },
+    ]);
+    const resolved = {
+      edges: [
+        { source: 'src/a.ts', target: 'src/b.ts' }, // same service (S3) both ends → no self-edge
+        { source: 'src/unrelated1.ts', target: 'src/unrelated2.ts' }, // neither end is a service file
+      ],
+    };
+    const enriched = enrichInfraWithGraph(inv, { nodes: [] }, resolved);
+    expect(enriched.serviceDependencyEdges.S3).toBeUndefined();
+  });
+
+  it('returns {} (not undefined/throw) when resolved has no edges field', () => {
+    const inv = buildInfraInventory([{ rel: 'src/a.ts', specifiers: ['@aws-sdk/client-s3'] }]);
+    const enriched = enrichInfraWithGraph(inv, { nodes: [] }, { hubs: [] });
+    expect(enriched.serviceDependencyEdges).toEqual({});
+  });
 });
 
 describe('Comprehensive IaC families — any project type', () => {

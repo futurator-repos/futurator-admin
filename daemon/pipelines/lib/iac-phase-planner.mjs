@@ -555,7 +555,11 @@ export const MANIFEST_SCHEMA = {
     pii: 'boolean',
     lifecycle: 'keep | retire',
     depends_on:
-      'string[] — edges to other node ids; NOT computed by this code-only scan (a real gap, not fabricated — see targetArtifacts)',
+      'string[] — edges to other node ids, computed at SERVICE granularity from the ' +
+      "alias-resolved file-import graph (which files reference this node's service " +
+      "import files that reference another service's) when a code graph was built for " +
+      'this scan; [] when it was not (a targeted re-scan without graph enrichment, or ' +
+      'a repo with no resolvable internal imports) — never fabricated either way',
   },
   edgeTypes: ['depends_on', 'holds_data_of_class', 'managed_by', 'shares'],
 };
@@ -564,11 +568,15 @@ export const MANIFEST_SCHEMA = {
  * Item 2/3 preview — reshapes what the scan ALREADY knows (services/resources +
  * external/3rd-party detections) into the manifest's node schema, so the schema above is
  * proven against a real repo, not just documented in the abstract. `depends_on` is
- * honestly left `[]` (edge computation is a real, not-yet-built gap — flagged in
- * targetArtifacts, not silently fabricated).
+ * populated from `inventory.serviceDependencyEdges` (enrichInfraWithGraph, cross-
+ * referencing the alias-resolved file-import graph — see infra-extract.mjs) at SERVICE
+ * granularity: a resource-level node inherits its parent service's edge list, since file
+ * attribution doesn't resolve to individual tables/buckets. `[]` when no code graph was
+ * built for this scan (honest degrade, not a crash).
  */
 function buildManifestPreview(inventory, tool, retireSet, meteringArtifacts) {
   const nodes = [];
+  const depsOf = (serviceName) => inventory.serviceDependencyEdges?.[serviceName] || [];
   const tagStub = () => ({
     owner: null,
     cost_center: null,
@@ -595,7 +603,7 @@ function buildManifestPreview(inventory, tool, retireSet, meteringArtifacts) {
           cost_model: s.costModel || null,
           pii: !!r.contains_pii,
           lifecycle: r.orphanCandidate || svcRetire || retireSet.has(r.name) ? 'retire' : 'keep',
-          depends_on: [],
+          depends_on: depsOf(s.name),
         });
       }
     } else {
@@ -610,7 +618,7 @@ function buildManifestPreview(inventory, tool, retireSet, meteringArtifacts) {
         cost_model: s.costModel || null,
         pii: false,
         lifecycle: svcRetire ? 'retire' : 'keep',
-        depends_on: [],
+        depends_on: depsOf(s.name),
       });
     }
   }
@@ -646,7 +654,9 @@ function buildManifestPreview(inventory, tool, retireSet, meteringArtifacts) {
     thirdParty,
     note:
       'PREVIEW derived from code-only detection — not the generated manifest. depends_on ' +
-      'edges, arn resolution, and tag values require a live-reconcile pass this scan does not perform.',
+      'edges are SERVICE-granularity (from the alias-resolved file-import graph, when a ' +
+      'code graph was built for this scan — [] otherwise). arn resolution and live tag ' +
+      'values still require a live-reconcile pass this scan does not perform.',
   };
 }
 

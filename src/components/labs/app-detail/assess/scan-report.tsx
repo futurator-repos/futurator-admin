@@ -29,6 +29,11 @@ import {
   type InfraResource,
   type ModuleReadiness,
   type VerificationBacklogItem,
+  type IacTargetArtifact,
+  type IacManifestSchema,
+  type IacManifestPreview,
+  type IacManifestNode,
+  type IacFinopsReadiness,
 } from '@/hooks/use-scan-engine';
 
 const CONF_COLOR: Record<string, string> = {
@@ -1012,7 +1017,7 @@ function ManifestPanel({
               {preview.nodes.slice(0, 20).map((n, i) => (
                 <span
                   key={i}
-                  title={`type: ${n.type}\nmanaged_by: ${n.managed_by}\nverification_status: ${n.verification_status}\ncost_model: ${n.cost_model ?? 'n/a'}`}
+                  title={`type: ${n.type}\nmanaged_by: ${n.managed_by}\nverification_status: ${n.verification_status}\ncost_model: ${n.cost_model ?? 'n/a'}${n.depends_on.length ? `\ndepends_on: ${n.depends_on.join(', ')}` : ''}`}
                   style={{
                     fontSize: 10,
                     border: `1px solid ${n.lifecycle === 'retire' ? 'color-mix(in srgb, var(--destructive, #ef4444) 45%, var(--border))' : 'var(--border)'}`,
@@ -1026,6 +1031,7 @@ function ManifestPanel({
                 >
                   {n.id}
                   {n.pii ? ' 🔒' : ''}
+                  {n.depends_on.length ? ' →' : ''}
                 </span>
               ))}
             </div>

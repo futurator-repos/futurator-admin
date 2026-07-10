@@ -1851,21 +1851,61 @@ export function computeModuleReadiness(inventory = {}) {
   };
 }
 
+// Final-iteration depends_on edges — cross-references the REAL alias-resolved
+// file-level import graph (`resolved.edges`, written by alias-resolve.mjs; graphify's
+// OWN edges are alias-blind, which is why alias-resolve exists) against which files
+// declare/reference each service, to derive SERVICE-granularity dependency edges: "some
+// file that references service A imports some file that references service B". Never
+// resource-level — file attribution is per-service, not per-table/bucket, so a service
+// enumerated at resource level gets ONE shared edge list, inherited by every resource
+// under it (documented in the manifest schema, never silently overclaimed as precise).
+function computeServiceDependencyEdges(services, resolved) {
+  const edges = Array.isArray(resolved && resolved.edges) ? resolved.edges : null;
+  if (!edges || !edges.length) return {};
+  const fileToServices = new Map(); // file -> Set(serviceName)
+  for (const s of services) {
+    for (const f of Array.isArray(s.files) ? s.files : []) {
+      if (!fileToServices.has(f)) fileToServices.set(f, new Set());
+      fileToServices.get(f).add(s.name);
+    }
+  }
+  const deps = new Map(); // serviceName -> Set(otherServiceName)
+  for (const e of edges) {
+    const fromServices = fileToServices.get(e && e.source);
+    const toServices = fileToServices.get(e && e.target);
+    if (!fromServices || !toServices) continue;
+    for (const a of fromServices) {
+      for (const b of toServices) {
+        if (a === b) continue;
+        if (!deps.has(a)) deps.set(a, new Set());
+        deps.get(a).add(b);
+      }
+    }
+  }
+  const out = {};
+  for (const [name, set] of deps) out[name] = [...set].sort();
+  return out;
+}
+
 /**
  * Pass 2 — graph-informed IaC enrichment. Given the inventory from
  * buildInfraInventory plus a knowledge graph ({nodes:[{source_file}]}) and its
- * resolved import topology ({hubs:[{file,inDegree}]} and/or an importsByFile map),
+ * resolved import topology ({hubs:[{file,inDegree}]}, {edges:[{source,target}]} — real,
+ * alias-resolved file-level import pairs — and/or a legacy importsByFile map),
  * annotate each service with:
  *   - fanIn: how many distinct files reach this service. Precise when an import
  *     graph is available (sum of hub in-degrees for the service's files); otherwise
  *     approximated by the service's own file count.
  *   - centralized: true when usage is concentrated in <=3 files OR sits behind a
  *     single directory (a single, swappable seam vs. sprawled coupling).
+ * Also attaches `serviceDependencyEdges` (service name -> sorted array of other service
+ * names its code imports) at the inventory root — the manifest preview's `depends_on`
+ * source (see iac-phase-planner.mjs).
  * Pure: returns a NEW inventory, never mutates. Defensive: null graph/resolved →
  * inventory returned unchanged.
  * @param {object} inventory — output of buildInfraInventory
  * @param {{nodes?:Array<{source_file?:string}>}|null} graph
- * @param {{hubs?:Array<{file:string,inDegree?:number}>, importsByFile?:Record<string,string[]>}|null} resolved
+ * @param {{hubs?:Array<{file:string,inDegree?:number}>, edges?:Array<{source:string,target:string}>, importsByFile?:Record<string,string[]>}|null} resolved
  */
 export function enrichInfraWithGraph(inventory, graph, resolved) {
   if (!inventory || !graph || !resolved) return inventory;
@@ -1898,7 +1938,8 @@ export function enrichInfraWithGraph(inventory, graph, resolved) {
     return { ...s, fanIn, centralized };
   });
 
-  return { ...inventory, services };
+  const serviceDependencyEdges = computeServiceDependencyEdges(services, resolved);
+  return { ...inventory, services, serviceDependencyEdges };
 }
 
 function d_isIacKind(dets) {

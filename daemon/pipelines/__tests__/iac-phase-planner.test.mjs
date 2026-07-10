@@ -242,14 +242,28 @@ describe('Final iteration item 1/2/3 — targetArtifacts + manifest schema/previ
     expect(JSON.stringify(plan.manifestSchema)).not.toMatch(/mycelium/i);
   });
 
-  it('manifestPreview reshapes real detections into node schema, honestly (arn null, depends_on empty)', () => {
+  it('manifestPreview reshapes real detections into node schema, honestly (arn null, depends_on [] when no graph)', () => {
     const plan = planIacTrack(fullShapeInv());
     const pii = plan.manifestPreview.nodes.find((n) => n.id === 'App_Auth');
     expect(pii.pii).toBe(true);
     expect(pii.tags.data_classification).toBe('PII');
     expect(pii.arn).toBeNull(); // not derivable from code alone — never fabricated
-    expect(pii.depends_on).toEqual([]); // edge computation is a real, un-built gap
+    expect(pii.depends_on).toEqual([]); // this fixture carries no serviceDependencyEdges
     expect(pii.verification_status).toBe('declared');
+  });
+
+  it('depends_on is populated from inventory.serviceDependencyEdges at SERVICE granularity', () => {
+    const inv = fullShapeInv();
+    inv.serviceDependencyEdges = { DynamoDB: ['Anthropic (Claude API)'] };
+    const plan = planIacTrack(inv);
+    // a resource-level node inherits its PARENT SERVICE's edge list
+    const pii = plan.manifestPreview.nodes.find((n) => n.id === 'App_Auth');
+    const other = plan.manifestPreview.nodes.find((n) => n.id === 'App_Projects');
+    expect(pii.depends_on).toEqual(['Anthropic (Claude API)']);
+    expect(other.depends_on).toEqual(['Anthropic (Claude API)']);
+    // a service with no entry in serviceDependencyEdges stays honestly empty
+    const sst = plan.manifestPreview.nodes.find((n) => n.id === 'SST');
+    expect(sst.depends_on).toEqual([]);
   });
 
   it('3rd-party services are first-class manifestPreview.thirdParty nodes, not AWS IaC', () => {
