@@ -68,6 +68,7 @@ import {
   validatePartyRefreshJob,
   validateAppBootstrapJob,
   validateFreeAgentSessionJob,
+  validateQueueRequestJob,
   validateWaveMergeJob,
   validateDualAgentCompareJob,
   JOB_HANDLER_EPIC_DEV,
@@ -79,6 +80,7 @@ import {
   JOB_HANDLER_PARTY_REFRESH,
   JOB_HANDLER_APP_BOOTSTRAP,
   JOB_HANDLER_FREE_AGENT_SESSION,
+  JOB_HANDLER_QUEUE_REQUEST,
   JOB_HANDLER_WAVE_MERGE,
   JOB_HANDLER_SKILL_SCOUT,
   JOB_HANDLER_SKILL_INSTALL,
@@ -137,6 +139,8 @@ import { runAppBootstrap } from './pipelines/app-bootstrap.mjs';
 // 2026-05-27 (unification) — `runFreeAgentGc` removed; its work is now part
 // of the unified `worktree-reaper.mjs` `_assist` namespace classifier.
 import { runFreeAgentSession } from './pipelines/free-agent-session.mjs';
+// Queues module — inbound external REST call runner.
+import { runQueueRequest } from './pipelines/queue-request.mjs';
 // 2026-05-27 (unification) — one-shot startup migration: removes the old
 // `/home/ubuntu/free-agent-worktrees/` root and marks in-flight free-agent
 // sessions EXPIRED so they re-spawn on the unified `_assist` path.
@@ -621,6 +625,12 @@ if (_isSmallHost && _envConcurrent > SMALL_HOST_MAX_CONCURRENT) {
     `[daemon] MAX_CONCURRENT=${_envConcurrent} ignored — host has <3GB RAM, capping at ${SMALL_HOST_MAX_CONCURRENT} (PR-29 OOM protection)`,
   );
 }
+
+// Queues module — the *effective* cap the poll loop enforces. Seeded from the
+// boot MAX_CONCURRENT (env + small-host clamp) and then updated each tick from
+// the operator-set `concurrency.maxConcurrent.<source>` agent-flag (see
+// applyCapOverrideCached below). Kept in lockstep with concurrencyManager._max.
+let effectiveMaxConcurrent = MAX_CONCURRENT;
 
 // Story 20.16 — ConcurrencyManager instance. Lives alongside `activeJobs`:
 // the manager owns "is there capacity to dispatch?" + classifies + chooses
@@ -1607,7 +1617,10 @@ async function writeHeartbeat() {
           updatedAt: new Date().toISOString(),
           createdAt: new Date().toISOString(),
           activeCount: activeJobs.size,
-          maxConcurrent: MAX_CONCURRENT,
+          // Queues module — publish the *live* effective cap (operator override
+          // via agent-flags, applied each poll tick) so the EC2 Monitor reflects
+          // the current ceiling, not the boot-time constant.
+          maxConcurrent: effectiveMaxConcurrent,
           // Pipeline-3 ready-frontier dispatch mode (off|shadow|on). Surfaced so
           // Labs3 can tell the operator whether ingested StoryNodes will actually
           // be dispatched — an ingested plan whose frontier is off/shadow sits
@@ -4780,6 +4793,9 @@ const PARTY_SESSIONS_TABLE = process.env.PARTY_SESSIONS_TABLE || 'futurator-part
 // Story 18.2 — Free Claude Code Agent sessions table (created by sst.config.ts).
 const FREE_AGENT_SESSIONS_TABLE =
   process.env.FREE_AGENT_SESSIONS_TABLE || 'futurator-free-agent-sessions';
+// Queues module — inbound external-call rows (created by sst.config.ts). The
+// daemon writes RUNNING→COMPLETED/FAILED/RESPONDED + appends audit entries.
+const QUEUE_REQUESTS_TABLE = process.env.QUEUE_REQUESTS_TABLE || 'futurator-queue-requests';
 // 2026-05-27 PR B.f — global agent feature flags (e.g. agent.paused).
 const AGENT_FLAGS_TABLE = process.env.AGENT_FLAGS_TABLE || 'futurator-agent-flags';
 // 2026-05-27 PR D.a/b — attention items + per-category remediation policies.
@@ -5400,6 +5416,53 @@ async function isAutoMergeEnabledCached() {
     _autoMergeCache = { value: false, fetchedAt: Date.now() };
   }
   return _autoMergeCache.value;
+}
+
+// Queues module — runtime-settable shared concurrency cap. The operator sets it
+// per daemon target (EC2 vs Local) in the EC2 Monitor; the API writes
+// `concurrency.maxConcurrent.<source>` into the agent-flags table. Each poll
+// tick this reader (5s cache like the pause flag) applies the value to the
+// ConcurrencyManager AND updates `effectiveMaxConcurrent` (the legacy gate).
+//
+// Clamp policy: an *explicit* operator override bypasses the small-host default
+// clamp (the operator is deliberately asking for more slots, e.g. EC2 2→3), but
+// is still bounded to [1,16] and logs a warning past SMALL_HOST_MAX_CONCURRENT
+// on a <3GB host. When no override is set we fall back to the boot MAX_CONCURRENT
+// (which already carries the small-host default clamp).
+const CAP_FLAG_CACHE_MS = 5_000;
+let _capCache = { fetchedAt: 0 };
+const CAP_ABSOLUTE_MAX = 16;
+async function applyCapOverrideCached() {
+  if (Date.now() - _capCache.fetchedAt < CAP_FLAG_CACHE_MS) return;
+  _capCache = { fetchedAt: Date.now() };
+  const flagName =
+    DAEMON_SOURCE === 'ec2' ? 'concurrency.maxConcurrent.ec2' : 'concurrency.maxConcurrent.local';
+  try {
+    const result = await ddb.send(
+      new GetCommand({ TableName: AGENT_FLAGS_TABLE, Key: { flagName } }),
+    );
+    const raw = result?.Item?.value;
+    let next = MAX_CONCURRENT; // default when no/invalid override
+    if (raw !== undefined) {
+      const parsed = Number.parseInt(raw, 10);
+      if (Number.isInteger(parsed) && parsed >= 1) {
+        next = Math.min(parsed, CAP_ABSOLUTE_MAX);
+        if (_isSmallHost && next > SMALL_HOST_MAX_CONCURRENT) {
+          log(
+            'warn',
+            `[cap] operator override ${next} exceeds small-host safe cap ${SMALL_HOST_MAX_CONCURRENT} (<3GB RAM) — honoring override, watch for OOM`,
+          );
+        }
+      }
+    }
+    if (next !== effectiveMaxConcurrent) {
+      effectiveMaxConcurrent = next;
+      concurrencyManager.setMax(next);
+    }
+  } catch (err) {
+    // Fail-safe: keep the current effective cap on a DDB blip.
+    log('warn', `[cap] flag read failed, keeping cap=${effectiveMaxConcurrent}: ${err.message}`);
+  }
 }
 
 /**
@@ -6837,6 +6900,131 @@ async function executeFreeAgentSessionJob(job) {
   }
 }
 
+/**
+ * Queues module — write helper for the queue-requests table. Accepts either a
+ * normal field patch (SET) or the runner's `{ __appendAudit: entry }` sentinel,
+ * which does a DynamoDB `list_append` (seeding the list on first write). Keeps
+ * the pure runner free of DDB imports.
+ */
+async function updateQueueRequest(requestId, patch) {
+  if (patch && patch.__appendAudit) {
+    const entry = patch.__appendAudit;
+    // Seed `audit` as an empty list if absent, then append (idempotent seed).
+    await ddb.send(
+      new UpdateCommand({
+        TableName: QUEUE_REQUESTS_TABLE,
+        Key: { requestId },
+        UpdateExpression: 'SET #a = if_not_exists(#a, :empty)',
+        ExpressionAttributeNames: { '#a': 'audit' },
+        ExpressionAttributeValues: { ':empty': [] },
+      }),
+    );
+    await ddb.send(
+      new UpdateCommand({
+        TableName: QUEUE_REQUESTS_TABLE,
+        Key: { requestId },
+        UpdateExpression: 'SET #a = list_append(#a, :e), updatedAt = :ts',
+        ExpressionAttributeNames: { '#a': 'audit' },
+        ExpressionAttributeValues: { ':e': [entry], ':ts': new Date().toISOString() },
+      }),
+    );
+    return;
+  }
+  const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
+  if (entries.length === 0) return;
+  entries.push(['updatedAt', new Date().toISOString()]);
+  const names = {};
+  const values = {};
+  const sets = [];
+  for (const [k, v] of entries) {
+    names[`#${k}`] = k;
+    values[`:${k}`] = v;
+    sets.push(`#${k} = :${k}`);
+  }
+  await ddb.send(
+    new UpdateCommand({
+      TableName: QUEUE_REQUESTS_TABLE,
+      Key: { requestId },
+      UpdateExpression: `SET ${sets.join(', ')}`,
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+    }),
+  );
+}
+
+/**
+ * Queues module — inbound external REST call handler. The API Lambda writes the
+ * queue-requests row (RECEIVED) + enqueues this job (PENDING); the daemon claims
+ * it under the shared cap and dispatches into daemon/pipelines/queue-request.mjs,
+ * which spawns `claude -p`, streams the live terminal into agent-events, and
+ * writes the result back onto the queue-requests row.
+ */
+async function executeQueueRequestJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+
+  const validation = validateQueueRequestJob(job);
+  if (!validation.ok) {
+    throw new Error(`queue-request job rejected: ${validation.reason}`);
+  }
+
+  log('info', `[${short}] Routing to queue-request runner`, {
+    requestId: job.queueRequestPayload?.requestId,
+    source: job.queueRequestPayload?.source,
+    target: job.queueRequestPayload?.target,
+  });
+
+  await updateJobFields(jobId, {
+    status: 'RUNNING',
+    phase: 'queue-request',
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+
+  try {
+    const outcome = await runQueueRequest(job, {
+      pushEvent,
+      updateRequest: updateQueueRequest,
+      claudeBin: CLAUDE_BIN,
+      spawn,
+      logger: {
+        info: (msg) => log('info', msg),
+        warn: (msg) => log('warn', msg),
+        error: (msg) => log('error', msg),
+      },
+    });
+    // The runner already wrote COMPLETED/FAILED onto the queue-request row; mirror
+    // the outcome onto the agent-job so the poll loop + heartbeat reflect it.
+    if (outcome.ok) {
+      await updateJobFields(jobId, { status: 'COMPLETED' });
+      log('info', `[${short}] queue-request completed`);
+    } else {
+      await updateJobFields(jobId, {
+        status: 'FAILED',
+        errorMessage: outcome.error || 'queue-request failed',
+      });
+      log('warn', `[${short}] queue-request failed: ${outcome.error}`);
+    }
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    // Best-effort: also mark the queue-request row FAILED if the runner threw
+    // before it could persist a terminal state.
+    try {
+      await updateQueueRequest(job.queueRequestPayload?.requestId, {
+        status: 'FAILED',
+        error: err?.message || String(err),
+        completedAt: new Date().toISOString(),
+      });
+    } catch {
+      /* row may not exist / already terminal — non-fatal */
+    }
+    log('error', `[${short}] queue-request failed: ${err?.message || err}`);
+    throw err;
+  }
+}
+
 async function executeAppBootstrapJob(job) {
   const { jobId } = job;
   const short = jobId.slice(0, 8);
@@ -7526,7 +7714,7 @@ async function runJobAsync(job) {
   const handler = selectHandler(job);
   log(
     'info',
-    `[${job.jobId.slice(0, 8)}] Job started (${activeJobs.size}/${MAX_CONCURRENT} concurrent) handler=${handler}`,
+    `[${job.jobId.slice(0, 8)}] Job started (${activeJobs.size}/${effectiveMaxConcurrent} concurrent) handler=${handler}`,
   );
   if (handler !== JOB_HANDLER_EPIC_DEV) {
     log('info', `[${job.jobId.slice(0, 8)}]   Steps: ${job.pipeline?.steps?.length || 0}`);
@@ -7555,6 +7743,8 @@ async function runJobAsync(job) {
       await executeAppBootstrapJob(job);
     } else if (handler === JOB_HANDLER_FREE_AGENT_SESSION) {
       await executeFreeAgentSessionJob(job);
+    } else if (handler === JOB_HANDLER_QUEUE_REQUEST) {
+      await executeQueueRequestJob(job);
     } else if (handler === JOB_HANDLER_WAVE_MERGE) {
       await executeWaveMergeJob(job);
     } else if (handler === JOB_HANDLER_SKILL_SCOUT) {
@@ -9804,6 +9994,11 @@ async function poll() {
         continue;
       }
 
+      // Queues module — apply the operator-set concurrency cap (5s cache).
+      // Mutates effectiveMaxConcurrent + concurrencyManager._max in place so a
+      // change in the EC2 Monitor takes effect within ~5s, no daemon restart.
+      await applyCapOverrideCached();
+
       // snake3 (2026-06-10) — auth circuit breaker. During the 17:50–18:48
       // OAuth outage the daemon kept claiming PENDING jobs and feeding them
       // to a CLI that exits 1 instantly: compile steps FAILED, the conflict
@@ -9835,12 +10030,12 @@ async function poll() {
       // When disabled, fall back to the legacy MAX_CONCURRENT - size gate.
       const hasCapacity = CONCURRENCY_MANAGER_ENABLED
         ? concurrencyManager.canAcquire()
-        : activeJobs.size < MAX_CONCURRENT;
+        : activeJobs.size < effectiveMaxConcurrent;
       if (hasCapacity) {
         const nowIso = new Date().toISOString();
         const queryLimit = CONCURRENCY_MANAGER_ENABLED
           ? CM_CANDIDATE_LIMIT
-          : MAX_CONCURRENT - activeJobs.size;
+          : effectiveMaxConcurrent - activeJobs.size;
         const { Items } = await ddb.send(
           new QueryCommand({
             TableName: JOBS_TABLE,

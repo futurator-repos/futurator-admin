@@ -60,6 +60,14 @@ import type { PropagatorProposal, PropagatorProposalStatus } from '../shared/typ
 import { parseSiblingPipelines, buildSiblingJob } from '../shared/services/propagator-service';
 import { isTerminal as jobIsTerminal } from '../shared/types/agent-job-state-machine';
 import * as agentEventsRepo from '../shared/repositories/agent-events-repository';
+import * as queueRequestsRepo from '../shared/repositories/queue-requests-repository';
+import {
+  ingestQueueRequestSchema,
+  testQueueRequestSchema,
+  respondQueueRequestSchema,
+  setCapSchema,
+} from '../shared/schemas/queue-request-schema';
+import type { QueueRequest, QueueTarget, QueueAuditEntry } from '../shared/types/queue-request';
 import * as reflectionsRepo from '../shared/repositories/reflections-repository';
 import * as mergeLockRepo from '../shared/repositories/merge-lock-repository';
 import * as partyProjectsRepo from '../shared/repositories/party-projects-repository';
@@ -480,6 +488,9 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path === '/api/auth/logout') return next();
   if (c.req.path === '/api/public/projects') return next();
   if (c.req.path === '/api/github/status') return next();
+  // Queues module — external ingest is machine-callable; it is guarded by the
+  // `x-queue-key` shared secret inside the handler, not by the operator JWT.
+  if (c.req.path === '/api/queue/ingest') return next();
   return authMiddleware(c, next);
 });
 
@@ -5844,6 +5855,16 @@ app.get('/api/ec2/status', async (c) => {
   const daemonSource = (heartbeat as { source?: string } | null)?.source || null;
 
   const hb = heartbeat as Record<string, unknown> | null;
+
+  // Queues module — the operator-set desired caps (agent-flags). `maxConcurrent`
+  // above is the LIVE effective cap the daemon publishes; these are the target
+  // values so the EC2 Monitor can render both fields even when the daemon (or the
+  // other target's daemon) isn't running.
+  const [ec2CapOverride, localCapOverride] = await Promise.all([
+    agentFlagsRepo.getMaxConcurrentOverride('ec2'),
+    agentFlagsRepo.getMaxConcurrentOverride('local'),
+  ]);
+
   return c.json({
     instanceId: EC2_INSTANCE_ID,
     state,
@@ -5853,10 +5874,258 @@ app.get('/api/ec2/status', async (c) => {
     lastHeartbeat: heartbeat?.updatedAt || null,
     activeCount: (hb?.activeCount as number) ?? 0,
     maxConcurrent: (hb?.maxConcurrent as number) ?? 0,
+    // Desired caps (null when never set → the daemon uses its boot default).
+    ec2MaxConcurrent: ec2CapOverride,
+    localMaxConcurrent: localCapOverride,
     processes: (hb?.processes as unknown[]) ?? [],
     system: (hb?.system as Record<string, unknown>) ?? null,
     auth: (hb?.auth as Record<string, unknown>) ?? null,
   });
+});
+
+// POST /api/ec2/cap — Queues module. Set the shared concurrency cap for a
+// daemon target (EC2 vs Local). Writes an agent-flags row the daemon reads each
+// poll tick (applied via ConcurrencyManager.setMax within ~5s, no restart). The
+// cap is the SINGLE ceiling shared by pipeline dev, Debates/Party, free-agent,
+// and inbound queue calls — raising it lets more of them run at once.
+app.post('/api/ec2/cap', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = setCapSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
+  }
+  const { target, maxConcurrent } = parsed.data;
+  const user = c.get('user');
+  const flagName =
+    target === 'ec2' ? AGENT_FLAG_KEYS.maxConcurrentEc2 : AGENT_FLAG_KEYS.maxConcurrentLocal;
+  await agentFlagsRepo.setFlag(flagName, String(maxConcurrent), user?.userId || 'operator');
+  return c.json({ ok: true, target, maxConcurrent });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Queues module — inbound external REST calls → capped queue → live execution.
+// ──────────────────────────────────────────────────────────────────────────
+
+const QUEUE_TTL_SECONDS = 30 * 24 * 60 * 60; // 30-day TTL on `expiresAt`
+
+/** Derive the `claude -p` prompt from an inbound call (prompt wins over body). */
+function queuePromptFrom(input: { prompt?: string; body?: unknown }): string {
+  if (input.prompt && input.prompt.trim()) return input.prompt;
+  try {
+    return `Handle this request payload:\n\n${JSON.stringify(input.body, null, 2)}`;
+  } catch {
+    return String(input.body ?? '');
+  }
+}
+
+/**
+ * Create a queue-request row (RECEIVED) and enqueue a `queue-request` agent-job
+ * (PENDING → status QUEUED). Execution then rides the shared ConcurrencyManager
+ * cap. Shared by the public ingest endpoint and the operator Tests endpoint.
+ */
+async function enqueueQueueRequest(opts: {
+  source: string;
+  prompt: string;
+  target: QueueTarget;
+  receiver?: string;
+  callbackUrl?: string;
+  autoRespond: boolean;
+  body?: unknown;
+  method: string;
+  path: string;
+  headers?: Record<string, string>;
+  createdBy: string;
+}): Promise<{ requestId: string; jobId: string }> {
+  const requestId = crypto.randomUUID();
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const workingDir = `/home/ubuntu/queue-runs/${requestId}`;
+
+  const receivedEntry: QueueAuditEntry = {
+    at: now,
+    event: 'received',
+    by: opts.createdBy,
+    detail: `from ${opts.source} (target=${opts.target}, autoRespond=${opts.autoRespond})`,
+  };
+  const queuedEntry: QueueAuditEntry = { at: now, event: 'queued', by: 'system', detail: jobId };
+
+  const row: QueueRequest = {
+    requestId,
+    status: 'QUEUED',
+    source: opts.source,
+    receiver: opts.receiver ?? opts.source,
+    target: opts.target,
+    method: opts.method,
+    path: opts.path,
+    headers: opts.headers,
+    body: opts.body,
+    prompt: opts.prompt,
+    workingDir,
+    autoRespond: opts.autoRespond,
+    callbackUrl: opts.callbackUrl,
+    jobId,
+    createdAt: now,
+    updatedAt: now,
+    queuedAt: now,
+    audit: [receivedEntry, queuedEntry],
+    createdBy: opts.createdBy,
+    expiresAt: Math.floor(Date.now() / 1000) + QUEUE_TTL_SECONDS,
+  };
+  await queueRequestsRepo.createRequest(row);
+
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: opts.createdBy,
+    workingDir,
+    jobType: 'queue-request',
+    queueRequestPayload: {
+      requestId,
+      prompt: opts.prompt,
+      source: opts.source,
+      target: opts.target,
+      workingDir,
+      autoRespond: opts.autoRespond,
+      callbackUrl: opts.callbackUrl,
+    },
+  });
+
+  return { requestId, jobId };
+}
+
+// POST /api/queue/ingest — PUBLIC (machine-callable). Guarded by the
+// `x-queue-key` shared secret. External apps (atlassinator, applicator, gomad,
+// mycelium, …) POST an instruction; we queue it and return 202. If the cap is
+// saturated the job simply waits PENDING — that IS the queue.
+app.post('/api/queue/ingest', async (c) => {
+  const expected = process.env.QUEUE_INGEST_SECRET;
+  const provided = c.req.header('x-queue-key');
+  if (!expected || !provided || provided !== expected) {
+    return c.json(
+      { error: { code: 'AUTH_REQUIRED', message: 'Invalid or missing x-queue-key' } },
+      401,
+    );
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = ingestQueueRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
+  }
+  const input = parsed.data;
+  const { requestId, jobId } = await enqueueQueueRequest({
+    source: input.source,
+    prompt: queuePromptFrom(input),
+    target: input.target ?? 'ec2',
+    receiver: input.receiver,
+    callbackUrl: input.callbackUrl,
+    autoRespond: input.autoRespond ?? false,
+    body: input.body,
+    method: c.req.method,
+    path: c.req.path,
+    createdBy: 'external',
+  });
+  return c.json({ requestId, jobId, status: 'QUEUED' }, 202);
+});
+
+// POST /api/queue/test — operator-fired test call (Tests tab). Authed via the
+// operator JWT; no shared secret. Same enqueue path as ingest.
+app.post('/api/queue/test', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = testQueueRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
+  }
+  const input = parsed.data;
+  const { requestId, jobId } = await enqueueQueueRequest({
+    source: input.source,
+    prompt: queuePromptFrom(input),
+    target: input.target ?? 'ec2',
+    receiver: input.receiver,
+    callbackUrl: input.callbackUrl,
+    autoRespond: input.autoRespond ?? false,
+    body: input.body,
+    method: 'POST',
+    path: '/api/queue/test',
+    createdBy: user?.userId || 'operator',
+  });
+  return c.json({ requestId, jobId, status: 'QUEUED' }, 202);
+});
+
+// GET /api/queue/requests — list recent queue-requests (Queues tab). Optional
+// `?status=QUEUED` filter (via the GSI); default lists everything newest-first.
+app.get('/api/queue/requests', authMiddleware, async (c) => {
+  const status = c.req.query('status');
+  const rows = status
+    ? await queueRequestsRepo.listRequestsByStatus(
+        status as QueueRequest['status'],
+        Number(c.req.query('limit')) || 100,
+      )
+    : await queueRequestsRepo.listAllRequests(Number(c.req.query('limit')) || 200);
+  return c.json({ requests: rows });
+});
+
+// GET /api/queue/requests/:id — one request (Tests/Queues detail).
+app.get('/api/queue/requests/:id', authMiddleware, async (c) => {
+  const row = await queueRequestsRepo.getRequestById(c.req.param('id'));
+  if (!row) throw new NotFoundError('QueueRequest', c.req.param('id'));
+  return c.json(row);
+});
+
+// POST /api/queue/requests/:id/respond — manual respond / re-route. POSTs the
+// captured standard JSON envelope to `receiverUrl` (override) or the stored
+// `callbackUrl`, then marks the row RESPONDED. Used when auto-respond is OFF.
+app.post('/api/queue/requests/:id/respond', authMiddleware, async (c) => {
+  const requestId = c.req.param('id');
+  const user = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = respondQueueRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
+  }
+  const row = await queueRequestsRepo.getRequestById(requestId);
+  if (!row) throw new NotFoundError('QueueRequest', requestId);
+  if (!row.response) {
+    throw new AppError('NOT_READY', 'No response captured yet for this request', 409);
+  }
+  const target = parsed.data.receiverUrl ?? row.callbackUrl;
+  if (!target) {
+    throw new ValidationError('No receiverUrl provided and the request has no callbackUrl');
+  }
+
+  let delivered = false;
+  let deliverError: string | undefined;
+  try {
+    const res = await fetch(target, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(row.response),
+    });
+    delivered = res.ok;
+    if (!res.ok) deliverError = `receiver returned HTTP ${res.status}`;
+  } catch (err) {
+    deliverError = err instanceof Error ? err.message : 'delivery failed';
+  }
+
+  const now = new Date().toISOString();
+  const auditEntry: QueueAuditEntry = {
+    at: now,
+    event: delivered ? 'responded' : 'respond_failed',
+    by: user?.userId || 'operator',
+    detail: delivered ? `sent to ${target}` : `send to ${target} failed: ${deliverError}`,
+  };
+  await queueRequestsRepo.updateRequestFields(requestId, {
+    ...(delivered ? { status: 'RESPONDED', respondedTo: target } : {}),
+    audit: [...row.audit, auditEntry],
+  });
+
+  if (!delivered) {
+    throw new AppError('DELIVERY_FAILED', deliverError || 'Failed to deliver response', 502);
+  }
+  return c.json({ ok: true, respondedTo: target });
 });
 
 app.post('/api/ec2/enable', async (c) => {

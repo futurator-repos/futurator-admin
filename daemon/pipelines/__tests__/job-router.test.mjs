@@ -333,3 +333,50 @@ describe('selectHandler — reflector (Epic 6)', () => {
     ).toBe(JOB_HANDLER_REFLECTOR);
   });
 });
+
+// ── Queues module — queue-request routing + validation ──
+describe('selectHandler — queue-request (Queues module)', () => {
+  it('routes jobType=queue-request to the queue-request handler', async () => {
+    const { selectHandler, JOB_HANDLER_QUEUE_REQUEST } = await import('../../pipelines/job-router.mjs');
+    expect(selectHandler({ jobType: 'queue-request', jobId: 'j' })).toBe(JOB_HANDLER_QUEUE_REQUEST);
+  });
+});
+
+describe('validateQueueRequestJob', () => {
+  it('accepts a well-formed queue-request job', async () => {
+    const { validateQueueRequestJob } = await import('../../pipelines/job-router.mjs');
+    expect(
+      validateQueueRequestJob({
+        jobType: 'queue-request',
+        jobId: 'j',
+        queueRequestPayload: { requestId: 'r1', prompt: 'do a thing' },
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  it('rejects a wrong jobType', async () => {
+    const { validateQueueRequestJob } = await import('../../pipelines/job-router.mjs');
+    expect(validateQueueRequestJob({ jobType: 'legacy', jobId: 'j' }).ok).toBe(false);
+  });
+
+  it('rejects a missing payload / requestId / prompt', async () => {
+    const { validateQueueRequestJob } = await import('../../pipelines/job-router.mjs');
+    expect(validateQueueRequestJob({ jobType: 'queue-request', jobId: 'j' }).reason).toBe(
+      'queueRequestPayload-missing',
+    );
+    expect(
+      validateQueueRequestJob({
+        jobType: 'queue-request',
+        jobId: 'j',
+        queueRequestPayload: { prompt: 'x' },
+      }).reason,
+    ).toBe('requestId-missing');
+    expect(
+      validateQueueRequestJob({
+        jobType: 'queue-request',
+        jobId: 'j',
+        queueRequestPayload: { requestId: 'r1', prompt: '   ' },
+      }).reason,
+    ).toBe('prompt-missing');
+  });
+});

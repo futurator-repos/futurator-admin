@@ -87,4 +87,11 @@ export const TABLE_NAMES = {
   // projector, scored). Additive; never reshapes a shared table. PK runId; GSIs
   // operator-createdAt-index + status-createdAt-index; 90-day TTL on `expiresAt`.
   ultracodeRuns: process.env.ULTRACODE_RUNS_TABLE || 'futurator-ultracode-runs',
+  // Queues module — inbound external REST calls (atlassinator, applicator, gomad,
+  // mycelium, …). One row per call: the rich socket-tester envelope (source /
+  // receiver / headers / body / statuses / timestamps / response / auto-respond).
+  // Execution rides the shared agent-jobs cap via a spawned `queue-request` job.
+  // PK requestId; GSI status-createdAt-index (queue-order drain + ops queries);
+  // GSI source-createdAt-index (per-app history). 30-day TTL on `expiresAt`.
+  queueRequests: process.env.QUEUE_REQUESTS_TABLE || 'futurator-queue-requests',
 } as const;

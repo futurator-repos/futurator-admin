@@ -32,7 +32,26 @@ export interface AgentFlag {
 /** Canonical flag names. Keep in sync with daemon callers. */
 export const AGENT_FLAG_KEYS = {
   paused: 'agent.paused',
+  // Queues module — runtime-settable shared concurrency cap, per daemon target.
+  // The daemon reads the key matching its DAEMON_SOURCE each poll tick and
+  // applies it via ConcurrencyManager.setMax(). Values are integer strings.
+  // A small-host RAM guard in the daemon still clamps EC2 to 2 on <3GB hosts.
+  maxConcurrentEc2: 'concurrency.maxConcurrent.ec2',
+  maxConcurrentLocal: 'concurrency.maxConcurrent.local',
 } as const;
+
+/**
+ * Read a per-target concurrency cap flag as a positive integer. Returns null
+ * when the flag is absent or unparseable (caller falls back to its boot default).
+ */
+export async function getMaxConcurrentOverride(target: 'ec2' | 'local'): Promise<number | null> {
+  const key =
+    target === 'ec2' ? AGENT_FLAG_KEYS.maxConcurrentEc2 : AGENT_FLAG_KEYS.maxConcurrentLocal;
+  const flag = await getFlag(key);
+  if (!flag) return null;
+  const n = Number.parseInt(flag.value, 10);
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
 
 /**
  * Get a single flag row. Returns null when the row is absent (= flag has

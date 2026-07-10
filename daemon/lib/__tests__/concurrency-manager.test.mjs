@@ -257,3 +257,55 @@ describe('isConcurrencyManagerEnabled — AC 9 feature flag', () => {
     else delete process.env.PARTY_PUSH_CONCURRENCY_MANAGER;
   });
 });
+
+// ── Queues module — classifier + runtime-settable cap (setMax) ──
+describe('classifyJob — queue-request', () => {
+  it('classifies queue-request as batch (shares the cap, no jump-ahead)', () => {
+    expect(classifyJob({ jobType: 'queue-request' })).toBe('batch');
+  });
+});
+
+describe('ConcurrencyManager.setMax — runtime-settable cap (Queues module)', () => {
+  const classifier = () => 'batch';
+
+  it('raises the ceiling and lets a previously-blocked job acquire', () => {
+    const cm = new ConcurrencyManager({ maxConcurrent: 2, classifier, logger: silentLogger() });
+    expect(cm.tryAcquire(makeJob({ jobId: 'a', createdAt: '1' })).acquired).toBe(true);
+    expect(cm.tryAcquire(makeJob({ jobId: 'b', createdAt: '2' })).acquired).toBe(true);
+    // At cap — third blocks.
+    expect(cm.canAcquire()).toBe(false);
+    expect(cm.setMax(3)).toBe(true);
+    expect(cm.maxConcurrent).toBe(3);
+    expect(cm.canAcquire()).toBe(true);
+    expect(cm.tryAcquire(makeJob({ jobId: 'c', createdAt: '3' })).acquired).toBe(true);
+  });
+
+  it('lowering below the active count never preempts; drains as slots free', () => {
+    const cm = new ConcurrencyManager({ maxConcurrent: 3, classifier, logger: silentLogger() });
+    cm.tryAcquire(makeJob({ jobId: 'a', createdAt: '1' }));
+    cm.tryAcquire(makeJob({ jobId: 'b', createdAt: '2' }));
+    cm.tryAcquire(makeJob({ jobId: 'c', createdAt: '3' }));
+    expect(cm.activeCount).toBe(3);
+    cm.setMax(2); // below active — no preemption
+    expect(cm.activeCount).toBe(3);
+    expect(cm.canAcquire()).toBe(false);
+    cm.release('a');
+    expect(cm.activeCount).toBe(2);
+    expect(cm.canAcquire()).toBe(false); // still at the new ceiling
+    cm.release('b');
+    expect(cm.canAcquire()).toBe(true);
+  });
+
+  it('rejects a non-positive / non-integer max and keeps the current ceiling', () => {
+    const cm = new ConcurrencyManager({ maxConcurrent: 2, classifier, logger: silentLogger() });
+    expect(cm.setMax(0)).toBe(false);
+    expect(cm.setMax(-1)).toBe(false);
+    expect(cm.setMax(2.5)).toBe(false);
+    expect(cm.maxConcurrent).toBe(2);
+  });
+
+  it('is a no-op (returns false) when the value is unchanged', () => {
+    const cm = new ConcurrencyManager({ maxConcurrent: 2, classifier, logger: silentLogger() });
+    expect(cm.setMax(2)).toBe(false);
+  });
+});

@@ -37,6 +37,7 @@ const sections: NavSection[] = [
       { href: '/development/files', label: 'File Explorer', icon: '📂' },
       { href: '/development/apps', label: 'Apps', icon: '🚀' },
       { href: '/development/monitor', label: 'EC2 Monitor', icon: '📊' },
+      { href: '/development/queues', label: 'Queues', icon: '🧵' },
       { href: '/development/agentic-office', label: 'Agentic Office', icon: '🏢' },
       { href: '/development/graph', label: 'Graph', icon: '🕸️' },
       { href: '/debates', label: 'Debates', icon: '💬' },

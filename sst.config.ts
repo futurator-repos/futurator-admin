@@ -540,6 +540,42 @@ export default $config({
       },
     });
 
+    // ── Queues module — inbound external REST calls (atlassinator, applicator, ──
+    // gomad, mycelium, …). One row per call (the socket-tester envelope);
+    // execution rides the shared agent-jobs cap via a spawned `queue-request`
+    // job. PK requestId; GSI status-createdAt-index (queue drain + ops); GSI
+    // source-createdAt-index (per-app history). 30-day TTL on `expiresAt`.
+    // NOTE: the EC2 daemon reads/writes this table via its own IAM role
+    // (`develope-it-ec2-ssm`) — grant it out-of-band (SST does not manage the daemon).
+    const queueRequestsTable = new sst.aws.Dynamo('QueueRequestsTable', {
+      fields: {
+        requestId: 'string',
+        status: 'string',
+        source: 'string',
+        createdAt: 'string',
+      },
+      primaryIndex: { hashKey: 'requestId' },
+      globalIndexes: {
+        'status-createdAt-index': { hashKey: 'status', rangeKey: 'createdAt' },
+        'source-createdAt-index': { hashKey: 'source', rangeKey: 'createdAt' },
+      },
+      ttl: 'expiresAt',
+      transform: {
+        table: {
+          name: 'futurator-queue-requests',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ── Queues module — shared secret external apps send as `x-queue-key` on ──
+    // POST /api/queue/ingest. Set with:
+    //   npx sst secret set QueueIngestSecret <value> --stage production
+    // Local dev fallback: QUEUE_INGEST_SECRET in .env.local.
+    const queueIngestSecret = new sst.Secret('QueueIngestSecret');
+
     // ── F22 — dev/staging promotion-ladder subdomains (deployment-v2.5.md §14) ──
     // Two static-hosting shells the deploy/promote agents `aws s3 sync` INTO
     // (NOT StaticSite — that would purge synced apps every deploy). Each fronted
@@ -1064,9 +1100,11 @@ export default $config({
         skillProposalsTable,
         scorecardsTable,
         refactorAuditsTable,
+        queueRequestsTable,
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
+        queueIngestSecret,
       ],
       environment: {
         PROJECTS_TABLE: projectsTable.name,
@@ -1103,6 +1141,11 @@ export default $config({
         REFACTOR_AUDITS_TABLE: refactorAuditsTable.name,
         // Ultracode-Reverse bench — run/corpus rows (API writes QUEUED + reads).
         ULTRACODE_RUNS_TABLE: ultracodeRunsTable.name,
+        // Queues module — inbound external-call rows (API writes RECEIVED/QUEUED
+        // + reads for the Queues/Tests tabs; daemon writes RUNNING→COMPLETED).
+        QUEUE_REQUESTS_TABLE: queueRequestsTable.name,
+        // Shared secret external apps present as `x-queue-key` on /api/queue/ingest.
+        QUEUE_INGEST_SECRET: queueIngestSecret.value,
         // F22 — dev/staging subdomain hosting (deployment-v2.5.md §14). Presence
         // flips deploy-targets.ts to byte-copy promotion; absence = fallback.
         // F29 — subdomains turned ON: the Routers now carry the CloudFront

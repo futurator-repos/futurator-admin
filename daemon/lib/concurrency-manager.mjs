@@ -86,9 +86,36 @@ export class ConcurrencyManager {
     return this._active.size;
   }
 
-  /** Max concurrent slots (immutable for the manager's lifetime). */
+  /** Max concurrent slots. Runtime-adjustable via `setMax()` (Queues module). */
   get maxConcurrent() {
     return this._max;
+  }
+
+  /**
+   * Queues module — set the slot ceiling at runtime. The daemon reads the
+   * operator-set cap from the `agent-flags` table each poll tick and calls this
+   * so raising/lowering the cap in the EC2 Monitor takes effect without a daemon
+   * restart. Lowering below the active count never preempts a RUNNING job — the
+   * excess simply drains as slots free (see the never-preempt design note above);
+   * `canAcquire()` returns false until `activeCount < max` again.
+   *
+   * @param {number} max — positive integer
+   * @returns {boolean} true if the ceiling changed
+   */
+  setMax(max) {
+    if (!Number.isInteger(max) || max < 1) {
+      this._logger?.warn?.(
+        `[concurrency] setMax ignored — max must be a positive integer (got ${max})`,
+      );
+      return false;
+    }
+    if (max === this._max) return false;
+    const prev = this._max;
+    this._max = max;
+    this._logger?.info?.(
+      `[concurrency] setMax ${prev} → ${max} (active=${this._active.size})`,
+    );
+    return true;
   }
 
   /**
@@ -239,6 +266,12 @@ export function classifyJob(job) {
     case 'party-docs-unlink':
     case 'party-refresh':
       return 'interactive';
+    // Queues module — external REST calls. An operator may be watching the
+    // Tests tab live, but the caller is a machine and there is no turn-by-turn
+    // human loop, so classify as batch (fail-safe: waits behind interactive
+    // sessions rather than jumping the queue). Still shares the same cap.
+    case 'queue-request':
+      return 'batch';
     default:
       return 'batch';
   }

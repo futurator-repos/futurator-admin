@@ -500,7 +500,12 @@ export interface AgentJob {
     // whole-tree write authority that loops to full green (tsc && lint && test &&
     // build && boot) then commits, before the plan may enter review. Also the
     // first responder to a blocking QA verdict. See daemon/pipelines/integrator-pipeline.mjs.
-    | 'integrator';
+    | 'integrator'
+    // Queues module — one inbound external REST call (atlassinator/applicator/
+    // gomad/mycelium/…). The API writes a queue-requests row + enqueues this job;
+    // the daemon's executeQueueRequestJob spawns `claude -p` and streams the live
+    // terminal into agent-events. Payload below (queueRequestPayload).
+    | 'queue-request';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -885,6 +890,23 @@ export interface AgentJob {
       expiration: string;
     };
     messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  };
+
+  /**
+   * Queues module — payload consumed by `daemon/pipelines/queue-request.mjs`.
+   * Set when `jobType === 'queue-request'`. Carries everything the runner needs
+   * to spawn `claude -p` and (optionally) deliver the answer, without a second
+   * DDB read of the queue-requests row.
+   */
+  queueRequestPayload?: {
+    requestId: string;
+    prompt: string;
+    source?: string;
+    target?: 'ec2' | 'local';
+    workingDir?: string;
+    model?: string;
+    autoRespond?: boolean;
+    callbackUrl?: string;
   };
 
   // ── Pipeline-3 (development-plan §7) — additive, all optional ──────────────

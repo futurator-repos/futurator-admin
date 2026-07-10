@@ -43,6 +43,10 @@ export interface Ec2Status {
   lastHeartbeat: string | null;
   activeCount: number;
   maxConcurrent: number;
+  // Queues module — operator-set desired caps (null when never set → daemon
+  // uses its boot default). `maxConcurrent` above is the live effective cap.
+  ec2MaxConcurrent: number | null;
+  localMaxConcurrent: number | null;
   processes: DaemonProcess[];
   system: SystemStats | null;
   auth: AuthState | null;
@@ -62,6 +66,20 @@ export function useEnableEc2() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => api.post<{ state: string; message: string }>('/ec2/enable', {}),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['ec2-status'] }),
+  });
+}
+
+/**
+ * Queues module — set the shared concurrency cap for a daemon target. Writes an
+ * agent-flags row the daemon applies within ~5s (ConcurrencyManager.setMax, no
+ * restart). This cap is shared by pipeline dev, Debates, free-agent, and queue.
+ */
+export function useSetEc2Cap() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { target: 'ec2' | 'local'; maxConcurrent: number }) =>
+      api.post<{ ok: boolean; target: string; maxConcurrent: number }>('/ec2/cap', vars),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['ec2-status'] }),
   });
 }

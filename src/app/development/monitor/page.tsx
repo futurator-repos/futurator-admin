@@ -4,7 +4,7 @@ import { AppShell } from '@/components/layout/app-shell';
 import { AuthGuard } from '@/components/auth/auth-guard';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useEc2Metrics, useEc2Snapshot } from '@/hooks/use-ec2-metrics';
-import { useEc2Status } from '@/hooks/use-ec2-daemon';
+import { useEc2Status, useSetEc2Cap } from '@/hooks/use-ec2-daemon';
 import { useQueryClient } from '@tanstack/react-query';
 
 const RANGES = [
@@ -118,6 +118,58 @@ function MetricChart({
   );
 }
 
+/**
+ * Queues module — editable concurrency cap. This is the SINGLE ceiling shared by
+ * pipeline dev, Debates/Party, the free-agent chat, and inbound queue calls. The
+ * daemon applies a change within ~5s (no restart). EC2 and Local caps are stored
+ * independently; the daemon that's running reads the one for its source.
+ */
+function CapControl({
+  label,
+  target,
+  value,
+  effective,
+}: {
+  label: string;
+  target: 'ec2' | 'local';
+  value: number | null;
+  effective?: number;
+}) {
+  const setCap = useSetEc2Cap();
+  const current = value ?? effective ?? (target === 'ec2' ? 2 : 3);
+  const commit = (next: number) => {
+    const clamped = Math.max(1, Math.min(16, next));
+    if (clamped === current) return;
+    setCap.mutate({ target, maxConcurrent: clamped });
+  };
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[10px] uppercase text-muted-foreground">{label}</span>
+      <div className="flex items-center rounded-md border border-input overflow-hidden">
+        <button
+          onClick={() => commit(current - 1)}
+          disabled={setCap.isPending || current <= 1}
+          className="px-2 py-0.5 text-xs hover:bg-accent disabled:opacity-40"
+          aria-label={`Decrease ${label} cap`}
+        >
+          −
+        </button>
+        <span className="px-2 text-xs font-mono tabular-nums min-w-[1.5rem] text-center">
+          {setCap.isPending ? '…' : current}
+        </span>
+        <button
+          onClick={() => commit(current + 1)}
+          disabled={setCap.isPending || current >= 16}
+          className="px-2 py-0.5 text-xs hover:bg-accent disabled:opacity-40"
+          aria-label={`Increase ${label} cap`}
+        >
+          +
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function MonitorPage() {
   return (
     <AuthGuard>
@@ -176,8 +228,8 @@ function MonitorContent() {
         <Card>
           <CardContent className="pt-6">
             <p className="text-sm text-muted-foreground">
-              EC2 instance is not running. Toggle the daemon to <strong>EC2</strong> in the
-              header to start it and verify auth.
+              EC2 instance is not running. Toggle the daemon to <strong>EC2</strong> in the header
+              to start it and verify auth.
             </p>
           </CardContent>
         </Card>
@@ -238,8 +290,23 @@ function MonitorContent() {
                   <span className="text-[10px] font-mono text-muted-foreground">
                     {ec2Status?.activeCount ?? 0} / {ec2Status?.maxConcurrent ?? 0} slots
                   </span>
+                  <CapControl
+                    label="EC2 cap"
+                    target="ec2"
+                    value={ec2Status?.ec2MaxConcurrent ?? null}
+                    effective={ec2Status?.maxConcurrent}
+                  />
+                  <CapControl
+                    label="Local cap"
+                    target="local"
+                    value={ec2Status?.localMaxConcurrent ?? null}
+                  />
                 </div>
               </div>
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                Shared cap — pipeline, Debates, free-agent &amp; queue calls all draw from these
+                slots. Changes apply to the running daemon within ~5s.
+              </p>
             </CardHeader>
             <CardContent>
               {/* Concurrency bar */}

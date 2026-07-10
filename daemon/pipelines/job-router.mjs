@@ -25,6 +25,8 @@ export const JOB_HANDLER_PARTY_REFRESH = 'party-refresh';
 export const JOB_HANDLER_APP_BOOTSTRAP = 'app-bootstrap';
 // Epic 18 / Story 18.2 — Free Claude Code Agent session turn.
 export const JOB_HANDLER_FREE_AGENT_SESSION = 'free-agent-session';
+// Queues module — inbound external REST call (atlassinator/applicator/…).
+export const JOB_HANDLER_QUEUE_REQUEST = 'queue-request';
 // 2026-05-19 — Phase 1 worktree rollout. Wave-merge job runs the per-story
 // `git merge --no-ff` sequence + post-merge validation in a coordinator
 // worktree at /home/ubuntu/worktrees/<app>/<plan>/_merge/.
@@ -96,6 +98,7 @@ export function selectHandler(job) {
   if (job.jobType === 'party-refresh') return JOB_HANDLER_PARTY_REFRESH;
   if (job.jobType === 'app-bootstrap') return JOB_HANDLER_APP_BOOTSTRAP;
   if (job.jobType === 'free-agent-session') return JOB_HANDLER_FREE_AGENT_SESSION;
+  if (job.jobType === 'queue-request') return JOB_HANDLER_QUEUE_REQUEST;
   if (job.jobType === 'wave-merge') return JOB_HANDLER_WAVE_MERGE;
   if (job.jobType === 'skill-scout') return JOB_HANDLER_SKILL_SCOUT;
   if (job.jobType === 'skill-install') return JOB_HANDLER_SKILL_INSTALL;
@@ -111,6 +114,23 @@ export function selectHandler(job) {
   if (job.jobType === 'integrator') return JOB_HANDLER_INTEGRATOR;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
+}
+
+/**
+ * Queues module — structural check for a queue-request job. Rejects malformed
+ * rows before the daemon spawns a Claude session for an external call. Needs an
+ * identity (`jobId`), and a payload carrying the originating `requestId` + the
+ * `prompt` handed to `claude -p`. Returns { ok } or { ok:false, reason }.
+ */
+export function validateQueueRequestJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'queue-request') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.queueRequestPayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'queueRequestPayload-missing' };
+  if (!p.requestId) return { ok: false, reason: 'requestId-missing' };
+  if (!p.prompt || !String(p.prompt).trim()) return { ok: false, reason: 'prompt-missing' };
+  return { ok: true };
 }
 
 /**
