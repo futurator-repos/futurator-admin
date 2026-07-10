@@ -1064,6 +1064,14 @@ export default $config({
       architecture: 'arm64',
       memory: '256 MB',
       timeout: '30 seconds',
+      // 2026-07-10 (Queues module) — customer-managed policy attached THROUGH
+      // SST (so it lands in the role's authoritative managedPolicyArns and
+      // survives every deploy, unlike an out-of-band `aws iam attach-role-policy`
+      // which SST would detach). Grants DynamoDB on table/futurator-* (incl. the
+      // queue-requests table, which is deliberately NOT in `link` — see note in
+      // the link array). Managed policies do NOT count against the role's 10,240-
+      // byte inline-policy limit, which the per-table link statements had maxed.
+      policies: ['arn:aws:iam::835745294770:policy/futurator-admin-api-restore'],
       link: [
         projectsTable,
         costsTable,
@@ -1100,11 +1108,21 @@ export default $config({
         skillProposalsTable,
         scorecardsTable,
         refactorAuditsTable,
-        queueRequestsTable,
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
-        queueIngestSecret,
+        // NOTE (2026-07-10 — Queues module): queueRequestsTable and
+        // queueIngestSecret are intentionally NOT linked here. The API role's
+        // single auto-generated inline policy had reached AWS's hard 10,240-byte
+        // limit; adding two more link statements tipped it over and a deploy
+        // stripped the role mid-update (prod DDB outage). The queue table's env
+        // + IAM are provided out-of-band: env vars below reference the component
+        // Outputs directly (no link needed — the code reads process.env only,
+        // never SST Resource.*), and DynamoDB access is granted by the
+        // `futurator-admin-api-restore` managed policy (wildcard on
+        // table/futurator-*). The secret value is baked into env at deploy time
+        // via `.value` (a deploy-time SSM read by the CLI, not a runtime role
+        // permission). See project memory: API-role IAM size ceiling.
       ],
       environment: {
         PROJECTS_TABLE: projectsTable.name,
