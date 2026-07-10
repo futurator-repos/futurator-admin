@@ -24,7 +24,7 @@ function makeDeps(over = {}) {
       agentCount: 0,
       tainted: false,
     })),
-    runCase2: vi.fn(async () => ({ scriptJs: 'export const meta = {}' })),
+    runCase2: vi.fn(async () => ({ scriptJs: 'export const meta = {}', planText: 'my plan' })),
     parseScript: vi.fn((js) => ({
       pattern: js.includes('case2') ? 'greenfield-build' : 'build-verify-fix',
       phases: [],
@@ -65,12 +65,27 @@ describe('runUltracodeBenchJob', () => {
     expect(final.case1Status).toBe('HALTED');
     expect(final.structuralScore).toBe(0.8);
     expect(final.scorecard.slices.some((s) => s.criterionId === 'STRUCT-aggregate')).toBe(true);
+    expect(final.case2PlanText).toBe('my plan');
+
+    // the per-rep case2 update (before scoring) also carries the plan text
+    const case2Update = deps.updateRun.mock.calls.find((c) => c[1].case2Status === 'COMPLETE')[1];
+    expect(case2Update.case2PlanText).toBe('my plan');
 
     // live-stream events for both sides + completion
     const types = deps.pushEvent.mock.calls.map((c) => c[3]);
     expect(types).toContain('ultracode-bench.case1.halted');
     expect(types).toContain('ultracode-bench.case2.ready');
     expect(types).toContain('ultracode-bench.complete');
+  });
+
+  it('truncates an oversized case2 planText to 4000 chars before it lands on the row', async () => {
+    const longPlan = 'x'.repeat(5000);
+    const deps = makeDeps({
+      runCase2: vi.fn(async () => ({ scriptJs: 'export const meta = {}', planText: longPlan })),
+    });
+    await runUltracodeBenchJob(makeJob(), deps);
+    const final = deps.updateRun.mock.calls.at(-1)[1];
+    expect(final.case2PlanText).toHaveLength(4000);
   });
 
   it('paused → no work', async () => {

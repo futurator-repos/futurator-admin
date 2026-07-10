@@ -41,7 +41,7 @@ const CONFOUND_NOTE =
  * @param {object} deps
  *   - paused: boolean
  *   - captureCase1({intent,model,effort,cwd,rep,captureTimeoutMs}) → {scriptJs,agentCount,tainted,taintReason}
- *   - runCase2({intent,model,effort,cwd,rep}) → {scriptJs}
+ *   - runCase2({intent,model,effort,cwd,rep}) → {scriptJs,planText}
  *   - parseScript(scriptJs) → DecisionPlan
  *   - scorePlans(case1Plan, case2Plan) → {score, perMetric}
  *   - pushEvent(runId, stepId, agentId, eventType, data)
@@ -122,16 +122,20 @@ export async function runUltracodeBenchJob(job, deps) {
         .then(async (c2) => {
           const case2DurationMs = Date.now() - t0;
           const case2Plan = deps.parseScript(c2.scriptJs);
+          // Cap the plan text before it lands on the row — same "don't inflate the row" rule as
+          // the other inline artifacts here (scripts/plans are already small; this one is prose).
+          const case2PlanText = (c2.planText || '').slice(0, 4000);
           await ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.ready', { rep: i });
           await deps.updateRun(runId, {
             case2Status: 'COMPLETE',
             case2Pattern: case2Plan.pattern,
             case2Plan,
             case2Script: c2.scriptJs,
+            case2PlanText,
             case2DurationMs,
             case2Tokens: c2.tokens,
           });
-          return { c2, case2Plan, case2DurationMs };
+          return { c2, case2Plan, case2PlanText, case2DurationMs };
         });
 
       const [R1, R2] = await Promise.all([case1P, case2P]);
@@ -151,6 +155,7 @@ export async function runUltracodeBenchJob(job, deps) {
         case2Plan: R2.case2Plan,
         case1Script: R1.cap.scriptJs,
         case2Script: R2.c2.scriptJs,
+        case2PlanText: R2.case2PlanText,
         case1DurationMs: R1.case1DurationMs,
         case2DurationMs: R2.case2DurationMs,
         case1Tokens: R1.cap.tokens,
@@ -210,6 +215,7 @@ export async function runUltracodeBenchJob(job, deps) {
     case2Plan: rep?.case2Plan,
     case1Script: rep?.case1Script,
     case2Script: rep?.case2Script,
+    case2PlanText: rep?.case2PlanText,
     // Per-case planning time + token usage (the measurability the operator asked for).
     case1DurationMs: rep?.case1DurationMs,
     case2DurationMs: rep?.case2DurationMs,

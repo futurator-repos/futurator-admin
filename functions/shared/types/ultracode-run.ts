@@ -130,6 +130,9 @@ export interface UltracodeRun {
   case1Script?: string;
   /** Raw generated workflow script (Case 2). */
   case2Script?: string;
+  /** Prose plan Case 2 emitted before the script (capped to 4000 chars), when the meta-prompt
+   *  invites grounding/planning before authoring. Absent for the historical script-only behavior. */
+  case2PlanText?: string;
 
   // ── per-case measurability ──
   /** Wall-clock planning time per engine (ms). */

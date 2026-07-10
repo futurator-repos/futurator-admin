@@ -12,7 +12,8 @@
  *   unobservable (that race tainted every run). agentCount is recorded for reporting, never tainted.
  *   A filesystem scan (findGeneratedScript) remains a fallback if the path isn't seen in the stream.
  *
- * Case 2 (our meta-prompt) — `claude -p` output-only; the whole stdout IS the script.
+ * Case 2 (our meta-prompt) — `claude -p` output-only; the whole stdout IS the script (any prose
+ *   preceding `export const meta` is captured separately as planText, a scoreable artifact).
  *
  * Spawns reuse the daemon's OAuth path (stripApiKey + loadOAuth) — the daemon deletes
  * ANTHROPIC_API_KEY and runs Claude on the Max/OAuth subscription. NEVER introduce an API key here.
@@ -259,6 +260,7 @@ export function makeCaptureDeps(cfg) {
    * CASE 2 — our meta-prompt. Runs with stream-json so we can (a) live-stream the script as it's
    * authored and (b) capture token usage. The model's full text response IS the script; the
    * authoritative copy is the `result` event, with assistant text as the streaming/fallback source.
+   * Resolves { scriptJs, planText, tokens }.
    */
   function runCase2({ intent, model = 'opus', effort = 'xhigh', cwd, onToken }) {
     loadOAuth?.('ultracode-bench-case2');
@@ -331,7 +333,8 @@ export function makeCaptureDeps(cfg) {
       });
       child.on('close', () => {
         flush();
-        resolve({ scriptJs: extractScript(resultText || assistantText), tokens: usage });
+        const { planText, scriptJs } = splitPlanAndScript(resultText || assistantText);
+        resolve({ scriptJs, planText, tokens: usage });
       });
     });
   }
@@ -352,10 +355,28 @@ function killTree(child) {
   }
 }
 
+/**
+ * Split the model's stdout into { planText, scriptJs } — fence-aware: if the script is fenced
+ * (```js ... ```), everything before the fence is prose/plan; otherwise everything before the
+ * `export const meta` start is the plan. planText is '' when no prose precedes the script (the
+ * v0 meta-prompt's script-only behavior stays unchanged).
+ */
+export function splitPlanAndScript(stdout) {
+  const fenced = stdout.match(/```(?:js|javascript)?\s*([\s\S]*?)```/);
+  if (fenced) {
+    const body = fenced[1];
+    const start = body.indexOf('export const meta');
+    const scriptJs = start >= 0 ? body.slice(start).trim() : body.trim();
+    const planText = stdout.slice(0, fenced.index).trim();
+    return { planText, scriptJs };
+  }
+  const start = stdout.indexOf('export const meta');
+  const scriptJs = start >= 0 ? stdout.slice(start).trim() : stdout.trim();
+  const planText = start >= 0 ? stdout.slice(0, start).trim() : '';
+  return { planText, scriptJs };
+}
+
 /** Pull the workflow script out of the model's stdout (the meta-prompt asks for script-only output). */
 export function extractScript(stdout) {
-  const fenced = stdout.match(/```(?:js|javascript)?\s*([\s\S]*?)```/);
-  const body = fenced ? fenced[1] : stdout;
-  const start = body.indexOf('export const meta');
-  return start >= 0 ? body.slice(start).trim() : body.trim();
+  return splitPlanAndScript(stdout).scriptJs;
 }
