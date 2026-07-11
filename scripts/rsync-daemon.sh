@@ -124,6 +124,16 @@ echo ">>> Ensuring daemon node_modules are current (playwright lib for L2 flow e
 $SSH "$REMOTE_HOST" "cd /opt/futurator-daemon && sudo env PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev --no-audit --no-fund 2>&1 | tail -2" || \
   echo ">>> WARN: daemon npm install failed (non-fatal) — L2 flow tests fall back to idle screenshots"
 
+# ── Ensure DAEMON_SOURCE=ec2 in the remote .env (Queues module) ──
+# The daemon defaults DAEMON_SOURCE to 'local' (agent-daemon.mjs). On the EC2
+# host it MUST be 'ec2' so it (a) reads the correct per-source concurrency cap
+# flag (`concurrency.maxConcurrent.ec2`, set from the EC2 Monitor) and (b)
+# enforces Local/EC2 queue-request target routing. `.env` is rsync-excluded, so
+# this self-heals the value on every deploy and survives instance replacement
+# where a fresh .env would otherwise omit it. Idempotent.
+echo ">>> Ensuring DAEMON_SOURCE=ec2 in remote .env"
+$SSH "$REMOTE_HOST" "grep -q '^DAEMON_SOURCE=' /opt/futurator-daemon/.env && sudo sed -i 's/^DAEMON_SOURCE=.*/DAEMON_SOURCE=ec2/' /opt/futurator-daemon/.env || echo 'DAEMON_SOURCE=ec2' | sudo tee -a /opt/futurator-daemon/.env >/dev/null"
+
 # ── Restart systemd so the running process picks up new code ──
 echo ">>> Restarting futurator-daemon systemd unit"
 $SSH "$REMOTE_HOST" "sudo systemctl restart futurator-daemon"

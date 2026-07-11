@@ -1591,6 +1591,24 @@ async function updateJobFields(jobId, fields) {
 
 const DAEMON_SOURCE = process.env.DAEMON_SOURCE || 'local';
 
+// Queues module — a laptop daemon (DAEMON_SOURCE=local) can run CONCURRENTLY
+// with the EC2 daemon to service 'local'-targeted queue calls. But non-queue
+// jobs (pipeline/party/free-agent) are claimable by any source, so without a
+// guard the laptop would hijack production pipeline jobs and run them in the
+// wrong environment. Set DAEMON_QUEUE_ONLY=1 on such a laptop daemon: it then
+// claims ONLY queue-request jobs (still subject to target routing), leaving
+// everything else to EC2. Unset (EC2 default) → claims all job types.
+const DAEMON_QUEUE_ONLY = process.env.DAEMON_QUEUE_ONLY === '1';
+
+/**
+ * Whether THIS daemon may claim a given PENDING job, combining the queue-only
+ * gate (DAEMON_QUEUE_ONLY) with queue-request target routing (DAEMON_SOURCE).
+ */
+function canClaimJob(job) {
+  if (DAEMON_QUEUE_ONLY && job?.jobType !== 'queue-request') return false;
+  return isJobClaimableBySource(job, DAEMON_SOURCE);
+}
+
 async function writeHeartbeat() {
   try {
     const processes = [];
@@ -10059,12 +10077,10 @@ async function poll() {
             // not the same row a prior iteration dispatched. Stops when
             // either the window is exhausted or capacity runs out (a
             // late-arriving in-flight job changed availableSlots).
-            // Queues module — enforce Local/EC2 target routing: skip a
-            // queue-request row whose target isn't this daemon's DAEMON_SOURCE
-            // (leave it PENDING for the matching daemon). Non-queue jobs pass.
-            const candidates = Items.filter(
-              (j) => !activeJobs.has(j.jobId) && isJobClaimableBySource(j, DAEMON_SOURCE),
-            );
+            // Queues module — enforce Local/EC2 target routing + the queue-only
+            // gate: skip a queue-request whose target isn't this daemon's
+            // DAEMON_SOURCE, and (when DAEMON_QUEUE_ONLY) skip all non-queue jobs.
+            const candidates = Items.filter((j) => !activeJobs.has(j.jobId) && canClaimJob(j));
             const dispatched = new Set();
             while (concurrencyManager.canAcquire() && candidates.length > dispatched.size) {
               const pool = candidates.filter((j) => !dispatched.has(j.jobId));
@@ -10079,8 +10095,8 @@ async function poll() {
           } else {
             for (const job of Items) {
               if (activeJobs.has(job.jobId)) continue;
-              // Queues module — enforce Local/EC2 target routing (see above).
-              if (!isJobClaimableBySource(job, DAEMON_SOURCE)) continue;
+              // Queues module — target routing + queue-only gate (see above).
+              if (!canClaimJob(job)) continue;
               runJobAsync(job).catch((e) => log('error', `runJobAsync uncaught: ${e.message}`));
             }
           }

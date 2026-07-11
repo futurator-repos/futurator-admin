@@ -5939,7 +5939,11 @@ async function enqueueQueueRequest(opts: {
   const requestId = crypto.randomUUID();
   const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
-  const workingDir = `/home/ubuntu/queue-runs/${requestId}`;
+  // Queues module — only the EC2 daemon runs under /home/ubuntu; a local
+  // (laptop) daemon can't create that path. For 'local' targets leave the
+  // scratch dir unset so the daemon runner falls back to QUEUE_RUN_ROOT
+  // (os.tmpdir()/futurator-queue-runs), which resolves per-host.
+  const workingDir = opts.target === 'ec2' ? `/home/ubuntu/queue-runs/${requestId}` : undefined;
 
   const receivedEntry: QueueAuditEntry = {
     at: now,

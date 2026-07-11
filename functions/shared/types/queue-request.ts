@@ -13,9 +13,11 @@
  *     → RUNNING (daemon claims the job) → COMPLETED | FAILED
  *     → RESPONDED (answer delivered to the receiver, auto or manual)
  *
- * `target` records where the operator intended the call to run (EC2 vs the
- * laptop daemon). It is a routing *label* today — whichever daemon is alive
- * claims the job; the cap that applies is the one for that daemon's source.
+ * `target` records where the call runs (EC2 vs the laptop daemon) and is
+ * ENFORCED: the daemon claim loop only picks up a queue-request whose target
+ * matches its own DAEMON_SOURCE (see `isJobClaimableBySource` in job-router.mjs),
+ * so a 'local' call routes to the laptop daemon and 'ec2' to the EC2 daemon. The
+ * cap that applies is the one for that daemon's source.
  */
 
 export type QueueTarget = 'ec2' | 'local';
