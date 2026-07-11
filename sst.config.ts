@@ -1073,41 +1073,29 @@ export default $config({
       // byte inline-policy limit, which the per-table link statements had maxed.
       policies: ['arn:aws:iam::835745294770:policy/futurator-admin-api-restore'],
       link: [
-        projectsTable,
-        costsTable,
-        resourcesTable,
-        auditsTable,
-        schedulesTable,
-        usersTable,
-        alertsTable,
-        agentJobsTable,
-        propagatorProposalsTable,
-        agentEventsTable,
-        epicWorkflowsTable,
-        planSpecGraphTable,
-        projectRegistryTable,
-        partyProjectsTable,
-        partySessionsTable,
-        partyInlineQuestionsTable,
-        plansTable,
-        appsTable,
-        attentionItemsTable,
-        waveConflictsTable,
-        reflectionsTable,
-        agentSessionsTable,
-        agentConversationsTable,
-        timingSummaryTable,
-        ultracodeRunsTable,
-        freeAgentSessionsTable,
-        freeAgentConversationsTable,
-        agentFlagsTable,
-        agentSpendLogTable,
-        fixCyclesTable,
-        remediationPoliciesTable,
-        pushSubscriptionsTable,
-        skillProposalsTable,
-        scorecardsTable,
-        refactorAuditsTable,
+        // ──────────────────────────────────────────────────────────────
+        // 2026-07-11 — DynamoDB tables are intentionally NOT linked here.
+        //
+        // SST emits ONE `dynamodb:*` inline statement per linked table into the
+        // role's single auto-generated inline policy. ~35 tables maxed AWS's hard
+        // 10,240-byte inline-policy limit; the next linked table broke `sst deploy`
+        // at PutRolePolicy and (worse) stripped the role's policy mid-update — a
+        // prod DynamoDB outage (see the Queues-module incident, 2026-07-10).
+        //
+        // Durable fix: all table access now comes from the customer-managed policy
+        // `futurator-admin-api-restore` (`dynamodb:*` on `table/futurator-*` +
+        // index), attached via the `policies:` prop above. Managed policies do NOT
+        // count against the inline 10KB limit, so new tables never grow it.
+        //
+        // Table NAMES still reach the Lambda via the explicit `environment` map
+        // below — the components stay declared, and all repository code reads
+        // `process.env.*_TABLE`, never SST `Resource.<Table>`. Verified 2026-07-11:
+        // the only runtime `Resource.*` uses are the two secrets below.
+        //
+        // Only secrets remain linked: GithubPat + BrownfieldGithubPat are read at
+        // runtime via SST `Resource.*` (load-pat.ts, index.ts) and MUST stay
+        // linked; AnthropicApiKey is kept for symmetry (its env is `.value`-baked).
+        // ──────────────────────────────────────────────────────────────
         githubPat,
         anthropicApiKey,
         brownfieldGithubPat,
