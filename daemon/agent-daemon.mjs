@@ -8553,6 +8553,23 @@ async function executeUltracodeBenchJob(job) {
     const capture = makeCaptureDeps({ claudeBin: CLAUDE_BIN, stripApiKey, loadOAuth, metaPrompt, log });
     const paused = await isAgentPausedCached();
 
+    // True-cancel: the API's cancel route stamps cancelRequestedAt on the run row; the runner
+    // polls this and kills the live claude children within one tick.
+    const isCancelRequested = async (rid) => {
+      try {
+        const r = await ddb.send(
+          new GetCommand({
+            TableName: ULTRACODE_RUNS_TABLE,
+            Key: { runId: rid },
+            ProjectionExpression: 'cancelRequestedAt',
+          }),
+        );
+        return Boolean(r?.Item?.cancelRequestedAt);
+      } catch {
+        return false; // a failed read must never cancel a healthy run
+      }
+    };
+
     const result = await runUltracodeBenchJob(job, {
       paused,
       captureCase1: capture.captureCase1,
@@ -8561,6 +8578,7 @@ async function executeUltracodeBenchJob(job) {
       scorePlans: (a, b) => computeStructuralDiff(a, b),
       pushEvent,
       updateRun,
+      isCancelRequested,
     });
 
     if (result.ok) {
@@ -8568,8 +8586,12 @@ async function executeUltracodeBenchJob(job) {
         status: 'COMPLETED',
         ultracodeBenchReps: result.reps ?? 0,
         ultracodeBenchTainted: result.tainted ?? 0,
+        ...(result.cancelled ? { ultracodeBenchCancelled: true } : {}),
       });
-      log('info', `[${short}] ultracode-bench completed (reps=${result.reps}, tainted=${result.tainted})`);
+      log(
+        'info',
+        `[${short}] ultracode-bench ${result.cancelled ? 'cancelled by operator' : 'completed'} (reps=${result.reps}, tainted=${result.tainted})`,
+      );
     } else {
       await updateJobFields(jobId, {
         status: 'FAILED',
@@ -9699,6 +9721,54 @@ async function reapOrphanedScanJobs() {
   }
 }
 
+// One-time boot sweep for orphaned ultracode-bench RUNS. A daemon restart kills the
+// live capture children, but nothing finalized the run ROW — it sat CAPTURING forever
+// and the bench UI spun on it with no way to stop (deploy-restart incident 2026-07-11,
+// run cf9e7e6a). Any run still mid-flight at boot is by definition dead: its claude
+// children died with the previous daemon process. QUEUED rows are NOT touched (their
+// PENDING job survives the restart and will be claimed normally).
+async function reapOrphanedUltracodeRuns() {
+  try {
+    const { Items } = await ddb.send(
+      new ScanCommand({
+        TableName: ULTRACODE_RUNS_TABLE,
+        FilterExpression: '#s IN (:capturing, :scoring, :halted)',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':capturing': 'CAPTURING',
+          ':scoring': 'SCORING',
+          ':halted': 'HALTED',
+        },
+        ProjectionExpression: 'runId',
+      }),
+    );
+    for (const it of Items || []) {
+      try {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: ULTRACODE_RUNS_TABLE,
+            Key: { runId: it.runId },
+            UpdateExpression:
+              'SET #s = :err, case1Status = :e, case2Status = :e, errorMessage = :msg, updatedAt = :now',
+            ExpressionAttributeNames: { '#s': 'status' },
+            ExpressionAttributeValues: {
+              ':err': 'ERROR',
+              ':e': 'ERROR',
+              ':msg': 'interrupted: daemon restarted mid-run',
+              ':now': new Date().toISOString(),
+            },
+          }),
+        );
+        log('warn', `[${String(it.runId).slice(0, 8)}] orphaned ultracode-bench run finalized → ERROR (daemon restart)`);
+      } catch (err) {
+        log('error', `Failed to finalize orphaned ultracode run ${String(it.runId).slice(0, 8)}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    log('warn', `[boot] ultracode-run orphan sweep failed (non-blocking): ${err.message}`);
+  }
+}
+
 async function poll() {
   log('info', 'Agent daemon started');
   // Print a deploy fingerprint so logs make stale deploys obvious. The
@@ -9804,6 +9874,9 @@ async function poll() {
 
   // FIX 1a — reap scan-engine jobs orphaned RUNNING by a prior daemon crash/restart.
   await reapOrphanedScanJobs();
+
+  // Finalize ultracode-bench runs orphaned mid-flight by a prior restart (zombie-spinner fix).
+  await reapOrphanedUltracodeRuns();
 
   // 2026-05-19 — Phase 1 worktree rollout. Hourly reaper for per-story
   // worktrees + coordinator worktrees + node_modules store entries +

@@ -13,8 +13,15 @@ export type UltracodeRunStatus =
   | 'HALTED'
   | 'SCORING'
   | 'COMPLETE'
-  | 'ERROR';
-export type UltracodeSideStatus = 'PENDING' | 'RUNNING' | 'HALTED' | 'COMPLETE' | 'ERROR';
+  | 'ERROR'
+  | 'CANCELLED';
+export type UltracodeSideStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'HALTED'
+  | 'COMPLETE'
+  | 'ERROR'
+  | 'CANCELLED';
 export type UltracodeTarget = 'greenfield' | 'brownfield';
 export type UltracodeRigor = 'prototype' | 'mvp' | 'production';
 
@@ -70,6 +77,7 @@ export interface UltracodeRun {
   rigor: UltracodeRigor;
   reps: number;
   jobId?: string;
+  cancelRequestedAt?: string;
   case1Status: UltracodeSideStatus;
   case2Status: UltracodeSideStatus;
   case1Pattern?: string;
@@ -113,7 +121,11 @@ export interface UltracodeRunSummary {
 }
 
 /** Terminal statuses — the scorecard is only meaningful once a run reaches one. */
-export const TERMINAL_STATUSES: ReadonlySet<UltracodeRunStatus> = new Set(['COMPLETE', 'ERROR']);
+export const TERMINAL_STATUSES: ReadonlySet<UltracodeRunStatus> = new Set([
+  'COMPLETE',
+  'ERROR',
+  'CANCELLED',
+]);
 /** Statuses during which the live-stream poll should stay hot. */
 export const ACTIVE_STATUSES: ReadonlySet<UltracodeRunStatus> = new Set([
   'QUEUED',

@@ -19,7 +19,9 @@ const DEFAULT_DRAFT: IntentDraft = {
   intent: '',
   target: 'greenfield',
   rigor: 'production',
-  reps: 5,
+  // 1 by default — a rep is two live Opus·max claude runs; the operator opts INTO spending
+  // more, never discovers a 5-rep bill by accident (2026-07-11).
+  reps: 1,
 };
 
 interface UltracodeReverseStore {

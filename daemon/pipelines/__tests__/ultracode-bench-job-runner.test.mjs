@@ -144,3 +144,78 @@ describe('runUltracodeBenchJob', () => {
     expect(deps.updateRun.mock.calls.at(-1)[1].taintedReps).toBe(1);
   });
 });
+
+describe('runUltracodeBenchJob — true cancel', () => {
+  it('cancel requested before a rep starts → CANCELLED, engines never spawn', async () => {
+    const deps = makeDeps({ isCancelRequested: vi.fn(async () => true) });
+    const out = await runUltracodeBenchJob(makeJob(), deps);
+    expect(out).toMatchObject({ ok: true, cancelled: true, reps: 0 });
+    expect(deps.captureCase1).not.toHaveBeenCalled();
+    expect(deps.runCase2).not.toHaveBeenCalled();
+    const final = deps.updateRun.mock.calls.at(-1)[1];
+    expect(final.status).toBe('CANCELLED');
+    expect(final.case1Status).toBe('CANCELLED');
+    expect(final.case2Status).toBe('CANCELLED');
+  });
+
+  it('cancel mid-capture (case1 killed → cancelled-by-operator taint) → CANCELLED, not ERROR', async () => {
+    const deps = makeDeps({
+      isCancelRequested: vi.fn(async () => false), // signal arrives DURING capture, not before
+      captureCase1: vi.fn(async () => ({
+        scriptJs: '',
+        agentCount: null,
+        tainted: true,
+        taintReason: 'cancelled-by-operator',
+      })),
+    });
+    const out = await runUltracodeBenchJob(makeJob({ reps: 3 }), deps);
+    expect(out).toMatchObject({ ok: true, cancelled: true });
+    expect(deps.captureCase1).toHaveBeenCalledTimes(1); // stops after the cancelled rep
+    expect(deps.updateRun.mock.calls.at(-1)[1].status).toBe('CANCELLED');
+  });
+
+  it('cancel mid-capture (case2 child killed → aborted) → CANCELLED and case2 never reads COMPLETE', async () => {
+    const deps = makeDeps({
+      runCase2: vi.fn(async () => ({ scriptJs: '', planText: '', aborted: true })),
+    });
+    const out = await runUltracodeBenchJob(makeJob(), deps);
+    expect(out).toMatchObject({ ok: true, cancelled: true });
+    const patches = deps.updateRun.mock.calls.map(([, p]) => p);
+    expect(patches.some((p) => p.case2Status === 'COMPLETE')).toBe(false);
+    expect(patches.at(-1).status).toBe('CANCELLED');
+  });
+
+  it('passes shouldAbort through to both engines when isCancelRequested is injected', async () => {
+    const deps = makeDeps({ isCancelRequested: vi.fn(async () => false) });
+    await runUltracodeBenchJob(makeJob(), deps);
+    expect(typeof deps.captureCase1.mock.calls[0][0].shouldAbort).toBe('function');
+    expect(typeof deps.runCase2.mock.calls[0][0].shouldAbort).toBe('function');
+  });
+});
+
+describe('runUltracodeBenchJob — case2 honesty guard', () => {
+  it('case2 stdout with no workflow declaration → rep excluded, case2Status ERROR, never COMPLETE', async () => {
+    // The 2026-07-11 auth incident: stdout was "Not logged in · Please run /login" and the old
+    // path recorded it as a COMPLETE 1-line "script" with pattern 'other'.
+    const deps = makeDeps({
+      runCase2: vi.fn(async () => ({ scriptJs: 'Not logged in · Please run /login', planText: '' })),
+    });
+    const out = await runUltracodeBenchJob(makeJob(), deps);
+    expect(out).toMatchObject({ ok: false, reason: 'all-reps-tainted', tainted: 1 });
+    const patches = deps.updateRun.mock.calls.map(([, p]) => p);
+    expect(patches.some((p) => p.case2Status === 'ERROR')).toBe(true);
+    expect(patches.some((p) => p.case2Status === 'COMPLETE')).toBe(false);
+    expect(deps.parseScript).not.toHaveBeenCalledWith('Not logged in · Please run /login');
+  });
+
+  it('a prose mention inside the PLAN does not trip the guard when a real declaration follows', async () => {
+    const deps = makeDeps({
+      runCase2: vi.fn(async () => ({
+        scriptJs: 'export const meta = { name: "x" }\nphase("A")',
+        planText: 'PLAN: the script begins with export const meta as required.',
+      })),
+    });
+    const out = await runUltracodeBenchJob(makeJob(), deps);
+    expect(out).toMatchObject({ ok: true, reps: 1 });
+  });
+});

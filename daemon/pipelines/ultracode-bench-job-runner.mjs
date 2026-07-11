@@ -19,6 +19,8 @@
  * agentCount > 0 is TAINTED and excluded — never silently counted as a clean zero-token capture.
  */
 
+import { CANCELLED_TAINT_REASON } from './ultracode-bench-capture.mjs';
+
 /** Pure structural check, mirrors validateScorecardAssessJob. */
 export function validateUltracodeBenchJob(job) {
   if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
@@ -46,7 +48,8 @@ const CONFOUND_NOTE =
  *   - scorePlans(case1Plan, case2Plan) → {score, perMetric}
  *   - pushEvent(runId, stepId, agentId, eventType, data)
  *   - updateRun(runId, patch) → Promise
- * @returns {Promise<{ok:boolean, reps?:number, tainted?:number, reason?:string, error?:string}>}
+ *   - isCancelRequested?(runId) → Promise<boolean>  (true-cancel: read cancelRequestedAt off the run row)
+ * @returns {Promise<{ok:boolean, reps?:number, tainted?:number, cancelled?:boolean, reason?:string, error?:string}>}
  */
 export async function runUltracodeBenchJob(job, deps) {
   const v = validateUltracodeBenchJob(job);
@@ -73,9 +76,16 @@ export async function runUltracodeBenchJob(job, deps) {
 
   const remaining = []; // per-rep results
   let tainted = 0;
+  let cancelled = false; // operator pressed Cancel — finalize as CANCELLED, never ERROR
   const taintReasons = []; // the specific reason each excluded rep failed (for an honest error msg)
+  // True-cancel signal (optional dep so tests/old wirings stay valid; without it Cancel is inert).
+  const isCancelRequested = deps.isCancelRequested ? () => deps.isCancelRequested(runId) : null;
   try {
     for (let i = 0; i < reps; i++) {
+      if (isCancelRequested && (await isCancelRequested())) {
+        cancelled = true;
+        break;
+      }
       const t0 = Date.now();
       await ev(`case1-rep${i}`, 'case1', 'ultracode-bench.case1.start', { rep: i, model, effort });
       await ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.start', { rep: i, model, effort });
@@ -84,7 +94,15 @@ export async function runUltracodeBenchJob(job, deps) {
       // differs. Each persists its own result the instant it finishes, so whichever halts first
       // fills its panel; wall-clock ≈ max(case1, case2) instead of the sum.
       const case1P = deps
-        .captureCase1({ intent: p.intent, model, effort, cwd: job.workingDir, rep: i, captureTimeoutMs })
+        .captureCase1({
+          intent: p.intent,
+          model,
+          effort,
+          cwd: job.workingDir,
+          rep: i,
+          captureTimeoutMs,
+          shouldAbort: isCancelRequested ?? undefined,
+        })
         .then(async (cap) => {
           const case1DurationMs = Date.now() - t0;
           if (cap.tainted) {
@@ -118,9 +136,26 @@ export async function runUltracodeBenchJob(job, deps) {
           cwd: job.workingDir,
           rep: i,
           onToken: (text) => ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.token', { text }),
+          shouldAbort: isCancelRequested ?? undefined,
         })
         .then(async (c2) => {
           const case2DurationMs = Date.now() - t0;
+          if (c2.aborted) {
+            await ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.cancelled', { rep: i });
+            await deps.updateRun(runId, { case2Status: 'CANCELLED' });
+            return { c2, aborted: true, case2DurationMs };
+          }
+          // Honesty guard (auth-failure incident 2026-07-11): stdout with no real workflow
+          // declaration (login error, refusal, prose-only) must NOT read as COMPLETE — the old
+          // path recorded the error text as a 1-line "script" with pattern 'other'.
+          if (!/^export const meta\s*=/m.test(c2.scriptJs || '')) {
+            await ev(`case2-rep${i}`, 'case2', 'ultracode-bench.case2.tainted', {
+              rep: i,
+              reason: `no workflow script in output: ${(c2.scriptJs || '').slice(0, 120) || '(empty)'}`,
+            });
+            await deps.updateRun(runId, { case2Status: 'ERROR' });
+            return { c2, invalid: true, case2DurationMs };
+          }
           const case2Plan = deps.parseScript(c2.scriptJs);
           // Cap the plan text before it lands on the row — same "don't inflate the row" rule as
           // the other inline artifacts here (scripts/plans are already small; this one is prose).
@@ -140,10 +175,21 @@ export async function runUltracodeBenchJob(job, deps) {
 
       const [R1, R2] = await Promise.all([case1P, case2P]);
 
+      // Operator cancel surfaced through either engine (kill mid-capture) → stop the whole run.
+      if (R1.cap?.taintReason === CANCELLED_TAINT_REASON || R2.aborted) {
+        cancelled = true;
+        break;
+      }
+
       if (R1.tainted) {
         tainted++;
         if (R1.cap.taintReason) taintReasons.push(R1.cap.taintReason);
         continue; // Case 1 produced no usable plan — exclude this rep (Case 2 is still shown)
+      }
+      if (R2.invalid) {
+        tainted++;
+        taintReasons.push('case2 emitted no workflow script');
+        continue; // Case 2 produced no usable plan — nothing to diff this rep
       }
 
       const structural = deps.scorePlans(R1.case1Plan, R2.case2Plan);
@@ -170,6 +216,19 @@ export async function runUltracodeBenchJob(job, deps) {
       taintedReps: tainted,
     });
     return { ok: false, error: err?.message || String(err) };
+  }
+
+  if (cancelled) {
+    await deps.updateRun(runId, {
+      status: 'CANCELLED',
+      case1Status: 'CANCELLED',
+      case2Status: 'CANCELLED',
+      errorMessage: 'Cancelled by operator',
+      taintedReps: tainted,
+    });
+    await ev('final', 'system', 'ultracode-bench.cancelled', { reps: remaining.length, tainted });
+    // ok:true — the job did what was asked (stop); a cancel is not a daemon failure.
+    return { ok: true, cancelled: true, reps: remaining.length, tainted };
   }
 
   if (remaining.length === 0) {

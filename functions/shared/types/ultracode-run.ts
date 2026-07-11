@@ -9,6 +9,8 @@
  *
  * Lifecycle (daemon is the only writer past QUEUED):
  *   QUEUED (API) → CAPTURING → HALTED → SCORING → COMPLETE ; any step → ERROR
+ *   any non-terminal step → CANCELLED (operator cancel: API stamps cancelRequestedAt,
+ *   the daemon kills the live claude children and finalizes the row)
  */
 
 import type { ScorecardSlice } from '../scorecard/types';
@@ -19,10 +21,17 @@ export type UltracodeRunStatus =
   | 'HALTED'
   | 'SCORING'
   | 'COMPLETE'
-  | 'ERROR';
+  | 'ERROR'
+  | 'CANCELLED';
 
 /** Per-engine status, surfaced as the HALTED badge in the dual live view. */
-export type UltracodeSideStatus = 'PENDING' | 'RUNNING' | 'HALTED' | 'COMPLETE' | 'ERROR';
+export type UltracodeSideStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'HALTED'
+  | 'COMPLETE'
+  | 'ERROR'
+  | 'CANCELLED';
 
 export type UltracodeTarget = 'greenfield' | 'brownfield';
 export type UltracodeRigor = 'prototype' | 'mvp' | 'production';
@@ -103,6 +112,9 @@ export interface UltracodeRun {
 
   /** FK to the enqueued daemon job (== runId). Absent for the synchronous M2 path. */
   jobId?: string;
+
+  /** Operator cancel signal (API-stamped); the daemon polls it and kills the live capture. */
+  cancelRequestedAt?: string;
 
   // ── per-engine progress ──
   case1Status: UltracodeSideStatus;

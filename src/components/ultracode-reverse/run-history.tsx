@@ -11,7 +11,7 @@ import { ACTIVE_STATUSES, type UltracodeRunStatus } from '@/types/ultracode-run'
 function statusVariant(s: UltracodeRunStatus): 'default' | 'secondary' | 'destructive' | 'outline' {
   if (s === 'COMPLETE') return 'default';
   if (s === 'ERROR') return 'destructive';
-  if (s === 'QUEUED') return 'outline';
+  if (s === 'QUEUED' || s === 'CANCELLED') return 'outline';
   return 'secondary';
 }
 

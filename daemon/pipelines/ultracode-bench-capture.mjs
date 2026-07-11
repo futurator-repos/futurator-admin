@@ -123,6 +123,12 @@ const normEffort = (e) => (VALID_EFFORT.has(e) ? e : 'max');
  *   - metaPrompt: string      (the Futurator Workflow Author system prompt for Case 2)
  *   - log(level,msg,meta?)
  */
+/**
+ * The taint reason a cancelled Case-1 capture reports — a CONTRACT with the job runner,
+ * which maps it to run status CANCELLED (operator intent) instead of ERROR (a failure).
+ */
+export const CANCELLED_TAINT_REASON = 'cancelled-by-operator';
+
 export function makeCaptureDeps(cfg) {
   const {
     claudeBin = 'claude',
@@ -137,7 +143,7 @@ export function makeCaptureDeps(cfg) {
    * Workflow tool returns its persisted scriptPath (the earliest deterministic "plan produced").
    * claude ≥2.1.19x is a native binary — spawn it DIRECTLY (node can't run an ELF).
    */
-  function captureCase1({ intent, model = 'opus', effort = 'xhigh', cwd, captureTimeoutMs = 120000 }) {
+  function captureCase1({ intent, model = 'opus', effort = 'xhigh', cwd, captureTimeoutMs = 120000, shouldAbort }) {
     loadOAuth?.('ultracode-bench-case1');
     const args = [
       '-p',
@@ -171,8 +177,23 @@ export function makeCaptureDeps(cfg) {
         captureTimeoutMs,
       );
 
+      // True-cancel support: the operator's Cancel button sets cancelRequestedAt on the run row;
+      // the runner injects shouldAbort() and we kill the live child within one poll tick. The
+      // 'cancelled-by-operator' taint reason is a CONTRACT with the runner (it maps it to a
+      // CANCELLED run, not an ERROR).
+      const abortPoll = shouldAbort
+        ? setInterval(async () => {
+            try {
+              if (!settled && (await shouldAbort())) finish(tainted(CANCELLED_TAINT_REASON));
+            } catch {
+              /* a failed cancel check must never kill a healthy capture */
+            }
+          }, 4000)
+        : null;
+
       function finish(result) {
         if (settled) return;
+        if (abortPoll) clearInterval(abortPoll);
         if (result && !result.tainted && !result.tokens) {
           // We halt the instant the plan is produced, BEFORE the CLI finalizes that turn's output
           // usage — so the streamed output count is unreliable. Input is accurate; estimate output
@@ -262,7 +283,7 @@ export function makeCaptureDeps(cfg) {
    * authoritative copy is the `result` event, with assistant text as the streaming/fallback source.
    * Resolves { scriptJs, planText, tokens }.
    */
-  function runCase2({ intent, model = 'opus', effort = 'xhigh', cwd, onToken }) {
+  function runCase2({ intent, model = 'opus', effort = 'xhigh', cwd, onToken, shouldAbort }) {
     loadOAuth?.('ultracode-bench-case2');
     const prompt = `${metaPrompt}\n\nINTENT:\n${intent}`;
     const args = [
@@ -295,6 +316,22 @@ export function makeCaptureDeps(cfg) {
         if (pending && onToken) onToken(pending);
         pending = '';
       };
+
+      // True-cancel: kill the live child on the operator's cancel signal; the close handler
+      // resolves with { aborted: true } so the runner marks the side CANCELLED, never COMPLETE.
+      let aborted = false;
+      const abortPoll = shouldAbort
+        ? setInterval(async () => {
+            try {
+              if (!aborted && (await shouldAbort())) {
+                aborted = true;
+                killTree(child);
+              }
+            } catch {
+              /* a failed cancel check must never kill a healthy run */
+            }
+          }, 4000)
+        : null;
 
       child.on('error', reject);
       child.stdout.on('data', (chunk) => {
@@ -332,7 +369,12 @@ export function makeCaptureDeps(cfg) {
         }
       });
       child.on('close', () => {
+        if (abortPoll) clearInterval(abortPoll);
         flush();
+        if (aborted) {
+          resolve({ scriptJs: '', planText: '', tokens: usage, aborted: true });
+          return;
+        }
         const { planText, scriptJs } = splitPlanAndScript(resultText || assistantText);
         resolve({ scriptJs, planText, tokens: usage });
       });

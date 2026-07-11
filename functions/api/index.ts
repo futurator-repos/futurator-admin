@@ -14595,6 +14595,35 @@ app.delete('/api/ultracode/runs/:id', async (c) => {
   return c.json({ ok: true });
 });
 
+// True cancel — stamps cancelRequestedAt; the daemon polls it (~4s) and kills the live
+// claude children, then finalizes the run CANCELLED. Idempotent; no-op once terminal.
+app.post('/api/ultracode/runs/:id/cancel', async (c) => {
+  const operatorId = c.get('user').userId;
+  const runId = c.req.param('id');
+  const run = await ultracodeRunsRepo.getRun(runId);
+  if (!run) throw new NotFoundError('UltracodeRun', runId);
+  if (run.operatorId !== operatorId) {
+    throw new AppError('FORBIDDEN', 'Only the run owner can cancel it', 403);
+  }
+  if (run.status === 'COMPLETE' || run.status === 'ERROR' || run.status === 'CANCELLED') {
+    return c.json({ ok: true, status: run.status, cancelRequested: false }); // already terminal
+  }
+  await ultracodeRunsRepo.updateRun(runId, {
+    cancelRequestedAt: run.cancelRequestedAt || new Date().toISOString(),
+    // A QUEUED run has no live process to kill — finalize it right here so the UI
+    // doesn't wait for a daemon that will never claim it (the runner also self-guards
+    // if it races this write and claims anyway).
+    ...(run.status === 'QUEUED'
+      ? {
+          status: 'CANCELLED' as const,
+          case1Status: 'CANCELLED' as const,
+          case2Status: 'CANCELLED' as const,
+        }
+      : {}),
+  });
+  return c.json({ ok: true, status: run.status, cancelRequested: true });
+});
+
 app.get('/api/ultracode/runs/:id/events', async (c) => {
   const operatorId = c.get('user').userId;
   const runId = c.req.param('id');

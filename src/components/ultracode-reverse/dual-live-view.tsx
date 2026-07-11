@@ -47,9 +47,45 @@ function Elapsed({ from }: { from?: string }) {
   );
 }
 
+/** The true-cancel affordance — kills the live daemon capture, not just the view. */
+function CancelButton({
+  onCancel,
+  isCancelling,
+}: {
+  onCancel?: () => void;
+  isCancelling?: boolean;
+}) {
+  if (!onCancel) return null;
+  return (
+    <button
+      onClick={onCancel}
+      disabled={isCancelling}
+      className="ml-auto flex shrink-0 items-center gap-1.5 rounded-md border border-destructive/50 px-2.5 py-1 text-xs font-medium text-destructive hover:bg-destructive/10 disabled:opacity-60"
+      title="Stop this run — kills the live claude processes on the daemon"
+    >
+      {isCancelling ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <XCircle className="h-3.5 w-3.5" />
+      )}
+      {isCancelling ? 'Cancelling…' : 'Cancel run'}
+    </button>
+  );
+}
+
 /** Overall run-status line so the operator always knows what's happening. */
-function RunStatusBanner({ run }: { run?: UltracodeRun }) {
+function RunStatusBanner({
+  run,
+  onCancel,
+  isCancelling,
+}: {
+  run?: UltracodeRun;
+  onCancel?: () => void;
+  isCancelling?: boolean;
+}) {
   const base = 'flex items-center gap-2 rounded-md border px-3 py-2 text-sm';
+  // Cancel-pending (stamped but the daemon hasn't finalized yet) reads as cancelling.
+  const cancelPending = !!run?.cancelRequestedAt;
 
   if (!run) {
     return (
@@ -68,6 +104,7 @@ function RunStatusBanner({ run }: { run?: UltracodeRun }) {
           <span>
             Queued — waiting for the daemon to pick up the job… <Elapsed from={run.createdAt} />
           </span>
+          <CancelButton onCancel={onCancel} isCancelling={isCancelling || cancelPending} />
         </div>
       );
     case 'CAPTURING':
@@ -75,9 +112,12 @@ function RunStatusBanner({ run }: { run?: UltracodeRun }) {
         <div className={`${base} border-accent-blue/40 bg-accent-blue/10`}>
           <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
           <span>
-            Capturing — running both engines on the daemon (can take a few minutes).{' '}
+            {cancelPending
+              ? 'Cancelling — stopping the live engines on the daemon…'
+              : 'Capturing — running both engines on the daemon (can take a few minutes).'}{' '}
             <Elapsed from={run.createdAt} /> elapsed
           </span>
+          <CancelButton onCancel={onCancel} isCancelling={isCancelling || cancelPending} />
         </div>
       );
     case 'SCORING':
@@ -87,6 +127,14 @@ function RunStatusBanner({ run }: { run?: UltracodeRun }) {
           <span>
             Scoring the two plans… <Elapsed from={run.createdAt} />
           </span>
+          <CancelButton onCancel={onCancel} isCancelling={isCancelling || cancelPending} />
+        </div>
+      );
+    case 'CANCELLED':
+      return (
+        <div className={`${base} border-border bg-muted/40 text-muted-foreground`}>
+          <XCircle className="h-4 w-4 shrink-0" />
+          <span>Cancelled by operator — the live engines were stopped.</span>
         </div>
       );
     case 'COMPLETE':
@@ -220,6 +268,9 @@ interface DualLiveViewProps {
   case2Status: UltracodeSideStatus;
   case1Messages: FreeAgentMessage[];
   case2Messages: FreeAgentMessage[];
+  /** True cancel — wired to POST /ultracode/runs/:id/cancel; kills the live daemon capture. */
+  onCancel?: () => void;
+  isCancelling?: boolean;
 }
 
 export function DualLiveView({
@@ -228,10 +279,12 @@ export function DualLiveView({
   case2Status,
   case1Messages,
   case2Messages,
+  onCancel,
+  isCancelling,
 }: DualLiveViewProps) {
   return (
     <div className="space-y-3">
-      <RunStatusBanner run={run} />
+      <RunStatusBanner run={run} onCancel={onCancel} isCancelling={isCancelling} />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <SidePanel
           title="Case 1 — ultracode (native, captured)"

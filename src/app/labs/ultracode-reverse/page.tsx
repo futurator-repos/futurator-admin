@@ -37,8 +37,17 @@ function UltracodeReverseContent() {
     if (urlRunId && urlRunId !== activeRunId) setActiveRunId(urlRunId);
   }, [urlRunId, activeRunId, setActiveRunId]);
 
-  const { run, status, isTerminal, case1Messages, case2Messages, createRun, isCreating } =
-    useUltracodeRun(activeRunId);
+  const {
+    run,
+    status,
+    isTerminal,
+    case1Messages,
+    case2Messages,
+    createRun,
+    isCreating,
+    cancelRun,
+    isCancelling,
+  } = useUltracodeRun(activeRunId);
   const scorecardQuery = useUltracodeScorecard(activeRunId, isTerminal);
 
   const [leftCollapsed, setLeftCollapsed] = useState(false);
@@ -53,8 +62,8 @@ function UltracodeReverseContent() {
     createRun(draft, { onSuccess: (data) => select(data.runId) });
   };
 
-  const running =
-    isCreating || (!!status && status !== 'COMPLETE' && status !== 'ERROR' && !!activeRunId);
+  // isTerminal covers COMPLETE/ERROR/CANCELLED — a cancelled run must re-enable "Run bench".
+  const running = isCreating || (!!status && !isTerminal && !!activeRunId);
 
   return (
     <div className="space-y-4">
@@ -95,6 +104,8 @@ function UltracodeReverseContent() {
             case2Status={run?.case2Status ?? 'PENDING'}
             case1Messages={case1Messages}
             case2Messages={case2Messages}
+            onCancel={cancelRun}
+            isCancelling={isCancelling}
           />
           <ScorecardPanel run={run} scorecard={scorecardQuery.data?.scorecard} />
         </div>

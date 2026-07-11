@@ -71,6 +71,9 @@ export interface UseUltracodeRunApi {
   case2Messages: FreeAgentMessage[];
   createRun(input: CreateRunInput, opts?: { onSuccess?: (data: CreateRunResponse) => void }): void;
   isCreating: boolean;
+  /** True cancel — kills the live daemon capture; the run finalizes CANCELLED within ~one poll tick. */
+  cancelRun(): void;
+  isCancelling: boolean;
 }
 
 /** Aggregate one channel's events into terminal-style bubbles; returns the updated active-bubble id. */
@@ -196,6 +199,15 @@ export function useUltracodeRun(runId: string | null): UseUltracodeRunApi {
     },
   });
 
+  const cancelRunMutation = useMutation({
+    mutationFn: () => api.post<{ ok: boolean }>(`/ultracode/runs/${runId}/cancel`, {}),
+    onSuccess: () => {
+      // The daemon flips the row within ~one abort-poll tick; refetch picks it up.
+      queryClient.invalidateQueries({ queryKey: ['ultracode-run', runId] });
+      queryClient.invalidateQueries({ queryKey: ['ultracode-runs'] });
+    },
+  });
+
   return useMemo<UseUltracodeRunApi>(
     () => ({
       run: runQuery.data,
@@ -205,6 +217,8 @@ export function useUltracodeRun(runId: string | null): UseUltracodeRunApi {
       case2Messages: acc.case2,
       createRun: createRunMutation.mutate,
       isCreating: createRunMutation.isPending,
+      cancelRun: cancelRunMutation.mutate,
+      isCancelling: cancelRunMutation.isPending,
     }),
     [
       runQuery.data,
@@ -214,6 +228,8 @@ export function useUltracodeRun(runId: string | null): UseUltracodeRunApi {
       acc.case2,
       createRunMutation.mutate,
       createRunMutation.isPending,
+      cancelRunMutation.mutate,
+      cancelRunMutation.isPending,
     ],
   );
 }
