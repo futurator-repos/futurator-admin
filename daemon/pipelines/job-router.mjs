@@ -117,6 +117,31 @@ export function selectHandler(job) {
 }
 
 /**
+ * Queues module — target routing (Local vs EC2 toggle enforcement).
+ *
+ * A queue-request job carries a `target` ('ec2' | 'local') captured from the
+ * submitter's runtime toggle (the topbar Local/EC2 switch, or an external
+ * caller's explicit `target`). Only the daemon whose `DAEMON_SOURCE` matches
+ * may claim it, so a 'local' call routes to the operator's laptop daemon and an
+ * 'ec2' call to the EC2 daemon. A mismatched job is simply left PENDING for the
+ * correct daemon to claim (or to wait until that daemon comes online) — it never
+ * occupies a concurrency slot on the wrong host.
+ *
+ * Defaults: an absent target resolves to 'ec2' (the always-on workhorse and the
+ * UI's default runtime), mirroring the API's `input.target ?? 'ec2'`. Non-queue
+ * jobs are unaffected — they are claimable by whichever daemon is polling.
+ *
+ * @param {object} job — the PENDING agent-job row
+ * @param {string} daemonSource — this daemon's DAEMON_SOURCE ('ec2' | 'local')
+ * @returns {boolean} true if this daemon may claim the job
+ */
+export function isJobClaimableBySource(job, daemonSource) {
+  if (!job || job.jobType !== 'queue-request') return true;
+  const target = job.queueRequestPayload?.target || 'ec2';
+  return target === daemonSource;
+}
+
+/**
  * Queues module — structural check for a queue-request job. Rejects malformed
  * rows before the daemon spawns a Claude session for an external call. Needs an
  * identity (`jobId`), and a payload carrying the originating `requestId` + the

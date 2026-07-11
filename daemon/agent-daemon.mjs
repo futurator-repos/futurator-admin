@@ -97,6 +97,7 @@ import {
   validateScanEngineJob,
   validateP3QaJob,
   validateIntegratorJob,
+  isJobClaimableBySource,
 } from './pipelines/job-router.mjs';
 import { runStoryDevJob } from './pipelines/story-dev-pipeline.mjs';
 // Reality-Spine P3 — the whole-tree Integrator + its readiness gate. The daemon
@@ -10058,7 +10059,12 @@ async function poll() {
             // not the same row a prior iteration dispatched. Stops when
             // either the window is exhausted or capacity runs out (a
             // late-arriving in-flight job changed availableSlots).
-            const candidates = Items.filter((j) => !activeJobs.has(j.jobId));
+            // Queues module — enforce Local/EC2 target routing: skip a
+            // queue-request row whose target isn't this daemon's DAEMON_SOURCE
+            // (leave it PENDING for the matching daemon). Non-queue jobs pass.
+            const candidates = Items.filter(
+              (j) => !activeJobs.has(j.jobId) && isJobClaimableBySource(j, DAEMON_SOURCE),
+            );
             const dispatched = new Set();
             while (concurrencyManager.canAcquire() && candidates.length > dispatched.size) {
               const pool = candidates.filter((j) => !dispatched.has(j.jobId));
@@ -10073,6 +10079,8 @@ async function poll() {
           } else {
             for (const job of Items) {
               if (activeJobs.has(job.jobId)) continue;
+              // Queues module — enforce Local/EC2 target routing (see above).
+              if (!isJobClaimableBySource(job, DAEMON_SOURCE)) continue;
               runJobAsync(job).catch((e) => log('error', `runJobAsync uncaught: ${e.message}`));
             }
           }

@@ -6,6 +6,7 @@ import {
   validateFreeAgentSessionJob,
   validateP3QaJob,
   validateIntegratorJob,
+  isJobClaimableBySource,
   JOB_HANDLER_LEGACY,
   JOB_HANDLER_EPIC_DEV,
   JOB_HANDLER_PARTY_REFRESH,
@@ -378,5 +379,35 @@ describe('validateQueueRequestJob', () => {
         queueRequestPayload: { requestId: 'r1', prompt: '   ' },
       }).reason,
     ).toBe('prompt-missing');
+  });
+});
+
+describe('isJobClaimableBySource — Local/EC2 target routing', () => {
+  const qJob = (target) => ({
+    jobType: 'queue-request',
+    jobId: 'j',
+    queueRequestPayload: { requestId: 'r', prompt: 'x', ...(target ? { target } : {}) },
+  });
+
+  it('an ec2-targeted job is claimable only by the ec2 daemon', () => {
+    expect(isJobClaimableBySource(qJob('ec2'), 'ec2')).toBe(true);
+    expect(isJobClaimableBySource(qJob('ec2'), 'local')).toBe(false);
+  });
+
+  it('a local-targeted job is claimable only by the local daemon', () => {
+    expect(isJobClaimableBySource(qJob('local'), 'local')).toBe(true);
+    expect(isJobClaimableBySource(qJob('local'), 'ec2')).toBe(false);
+  });
+
+  it('an absent target defaults to ec2 (matches the API default)', () => {
+    expect(isJobClaimableBySource(qJob(undefined), 'ec2')).toBe(true);
+    expect(isJobClaimableBySource(qJob(undefined), 'local')).toBe(false);
+  });
+
+  it('non-queue jobs are always claimable by any source', () => {
+    expect(isJobClaimableBySource({ jobType: 'story-dev', jobId: 'j' }, 'ec2')).toBe(true);
+    expect(isJobClaimableBySource({ jobType: 'party-turn', jobId: 'j' }, 'local')).toBe(true);
+    expect(isJobClaimableBySource({ phase: 'epic-dev', jobId: 'j' }, 'local')).toBe(true);
+    expect(isJobClaimableBySource(null, 'ec2')).toBe(true);
   });
 });
