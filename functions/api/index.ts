@@ -5983,7 +5983,11 @@ async function enqueueQueueRequest(opts: {
     createdAt: now,
     updatedAt: now,
     createdBy: opts.createdBy,
-    workingDir,
+    // AgentJob.workingDir is a required string; for a 'local' target the real
+    // scratch dir is chosen at runtime by the daemon (QUEUE_RUN_ROOT), so use a
+    // neutral placeholder here. The runner uses queueRequestPayload.workingDir
+    // (below), which stays unset for local, and the row's workingDir is unset too.
+    workingDir: workingDir ?? `queue-runs/${requestId}`,
     jobType: 'queue-request',
     queueRequestPayload: {
       requestId,
@@ -6100,12 +6104,29 @@ app.post('/api/queue/requests/:id/respond', authMiddleware, async (c) => {
     throw new ValidationError('No receiverUrl provided and the request has no callbackUrl');
   }
 
+  // Standard X-Futurator-* tracking headers from the stored dispatch provenance
+  // (stamped by the daemon runner on completion). Kept in sync with
+  // daemon/pipelines/queue-request.mjs:queueResponseHeaders so manual "Send
+  // response" carries the same headers as the daemon's auto-respond.
+  const d = row.response.dispatcher ?? ({} as NonNullable<typeof row.response.dispatcher>);
+  const trackingHeaders: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-futurator-request-id': String(row.response.requestId ?? ''),
+    'x-futurator-status': String(row.response.status ?? ''),
+    'x-futurator-ok': String(row.response.ok === true),
+    'x-futurator-dispatcher': String(d.source ?? ''),
+    'x-futurator-host': String(d.host ?? ''),
+    'x-futurator-model': String(d.model ?? ''),
+    'x-futurator-completed-at': String(row.response.completedAt ?? ''),
+    'x-futurator-duration-ms': String(d.durationMs ?? ''),
+  };
+
   let delivered = false;
   let deliverError: string | undefined;
   try {
     const res = await fetch(target, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: trackingHeaders,
       body: JSON.stringify(row.response),
     });
     delivered = res.ok;

@@ -38,6 +38,22 @@ export interface QueueAuditEntry {
   by?: string; // operator id or 'external' | 'daemon' | 'system'
 }
 
+/**
+ * Dispatch provenance stamped onto every completed run — which machine/runtime
+ * ran the call, the model, and timings. Delivered inside the envelope AND as
+ * X-Futurator-* headers on the callback POST so external systems can audit/route
+ * the dispatcher without parsing the body. Written by the daemon runner.
+ */
+export interface QueueDispatcher {
+  source: string; // 'ec2' | 'local' — the runtime that actually ran it
+  host: string; // os.hostname() — distinguishes EC2 vs each laptop
+  model: string; // model used ('default' when unspecified)
+  receivedAt?: string; // job enqueue time
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number; // startedAt → completedAt
+}
+
 /** The standard JSON answer envelope sent back to the receiver. */
 export interface QueueResponseEnvelope {
   requestId: string;
@@ -46,6 +62,7 @@ export interface QueueResponseEnvelope {
   result?: string; // assembled Claude final text
   error?: string;
   completedAt?: string;
+  dispatcher?: QueueDispatcher; // dispatch provenance (machine/runtime/model/timing)
 }
 
 export interface QueueRequest {

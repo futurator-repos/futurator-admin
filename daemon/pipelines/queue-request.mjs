@@ -25,7 +25,7 @@
 
 import { spawn as realSpawn } from 'node:child_process';
 import { mkdirSync as fsMkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, hostname as osHostname } from 'node:os';
 import { join as pathJoin } from 'node:path';
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.QUEUE_REQUEST_TIMEOUT_MS) || 600_000;
@@ -33,6 +33,10 @@ const KILL_GRACE_MS = 5_000;
 const QUEUE_RUN_ROOT = process.env.QUEUE_RUN_ROOT || pathJoin(tmpdir(), 'futurator-queue-runs');
 const EVENT_STEP = 'queue';
 const EVENT_AGENT = '__queue__';
+// Which runtime this daemon is (ec2 | local) — stamped into the response
+// dispatcher block + X-Futurator-* headers so a receiver can track where a call
+// ran. Mirrors the daemon's DAEMON_SOURCE (defaults 'local' off-EC2).
+const DAEMON_SOURCE = process.env.DAEMON_SOURCE || 'local';
 
 /**
  * @param {object} job — agent-jobs row carrying `queueRequestPayload`
@@ -218,6 +222,24 @@ export async function runQueueRequest(job, ctx) {
   else if (exitCode !== 0) error = `claude exited ${exitCode}${stderrBuf ? `: ${stderrBuf.slice(-500)}` : ''}`;
   else if (resultIsError) error = `claude reported an error result`;
 
+  const startedAtMs = Date.parse(startedAt);
+  const completedAtMs = Date.parse(completedAt);
+  // Dispatch provenance — which machine/runtime ran this call, the model, and
+  // timings. Persisted on the row + delivered in the envelope AND as
+  // X-Futurator-* headers so external systems can audit/route the dispatcher.
+  const dispatcher = {
+    source: DAEMON_SOURCE, // 'ec2' | 'local' — the actual runtime that ran it
+    host: osHostname(), // machine id — distinguishes EC2 vs each laptop
+    model: payload.model || 'default',
+    receivedAt: job.createdAt || undefined,
+    startedAt,
+    completedAt,
+    durationMs:
+      Number.isFinite(startedAtMs) && Number.isFinite(completedAtMs)
+        ? Math.max(0, completedAtMs - startedAtMs)
+        : undefined,
+  };
+
   const response = {
     requestId,
     status: ok ? 'COMPLETED' : 'FAILED',
@@ -225,6 +247,7 @@ export async function runQueueRequest(job, ctx) {
     result: assembled || undefined,
     error,
     completedAt,
+    dispatcher,
   };
 
   await updateRequest(requestId, {
@@ -278,12 +301,33 @@ export async function runQueueRequest(job, ctx) {
   return { ok, result: assembled, error };
 }
 
+/**
+ * Standard X-Futurator-* tracking headers derived from a response envelope.
+ * Stamped on EVERY callback delivery (daemon auto-respond here + the API's
+ * manual "Send response") so a receiver can route/audit on the dispatcher
+ * (which machine/runtime, model, status, timing) without parsing the body.
+ * Kept in sync with the equivalent block in functions/api/index.ts.
+ */
+export function queueResponseHeaders(envelope) {
+  const d = (envelope && envelope.dispatcher) || {};
+  return {
+    'x-futurator-request-id': String(envelope?.requestId ?? ''),
+    'x-futurator-status': String(envelope?.status ?? ''),
+    'x-futurator-ok': String(envelope?.ok === true),
+    'x-futurator-dispatcher': String(d.source ?? ''),
+    'x-futurator-host': String(d.host ?? ''),
+    'x-futurator-model': String(d.model ?? ''),
+    'x-futurator-completed-at': String(envelope?.completedAt ?? ''),
+    'x-futurator-duration-ms': String(d.durationMs ?? ''),
+  };
+}
+
 /** POST the standard JSON envelope to a receiver URL. Throws on non-2xx. */
 export async function deliverResponse(fetchImpl, url, envelope) {
   if (typeof fetchImpl !== 'function') throw new Error('fetch is not available');
   const res = await fetchImpl(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...queueResponseHeaders(envelope) },
     body: JSON.stringify(envelope),
   });
   if (!res.ok) throw new Error(`receiver returned HTTP ${res.status}`);
