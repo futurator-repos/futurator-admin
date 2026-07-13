@@ -102,6 +102,13 @@ describe('runStoryDevJob (injected spawn)', () => {
   const job = () => ({
     jobId: 'job-1', workingDir: mkdtempSync(join(tmpdir(), 'sdj-')),
     storyNodeRef: { storyId: 's1', planId: 'p1' },
+    // These two tests exercise the LEGACY single-spawn dev loop, so pin the
+    // split OFF. They used to pass with the split defaulting on only because
+    // the test-author's throw fell OPEN to this same legacy path — that
+    // fail-open was the pacman8 forbidden mechanism (2026-07-11) and is gone;
+    // the split path now fails CLOSED (see pipelines/__tests__/
+    // story-dev-pipeline.test.mjs for that contract).
+    p3Flags: { P3_TEST_AUTHOR_SPLIT: 'off' },
     storyDevPayload: {
       storyId: 's1', planId: 'p1', appId: 'a', title: 'X', intent: 'y', complexity: 'standard',
       touches: ['src/**'], forbiddenAreas: ['secret/**'],

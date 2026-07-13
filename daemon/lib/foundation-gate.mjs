@@ -21,8 +21,9 @@
 
 import { bootDevServer as realBootDevServer } from './dev-server-boot.mjs';
 import { defaultShellRunner as realShell } from './wave-merge-runner.mjs';
-import { runTreeTypecheck, runTreeBuild, evaluateGreenTrunk } from './tree-gates.mjs';
+import { runTreeTypecheck, runTreeBuild, runTreeTests, evaluateGreenTrunk } from './tree-gates.mjs';
 import { runBootLiveness, defaultLivenessInputs } from './boot-liveness.mjs';
+import { envFlag } from './pipeline-flags.mjs';
 
 /**
  * PURE: is this a foundation/scaffold story? Either the planner-set flag or the
@@ -35,15 +36,23 @@ export function isFoundationStory(payload) {
 }
 
 /**
- * PURE: the P1 SCAFFOLD verdict from tsc + build + boot-liveness. Every failing
- * dimension pushes its name into `failing` and a human-readable line into
- * `reasons`. Fail-closed: a missing/undefined result counts as a failure.
+ * PURE: the P1 SCAFFOLD verdict from tsc + build + boot-liveness (+ optional
+ * whole-suite). Every failing dimension pushes its name into `failing` and a
+ * human-readable line into `reasons`. tsc/build/boot fail-closed: a
+ * missing/undefined result counts as a failure.
+ *
+ * PRESENCE SEMANTICS for `tests` (P3_SUITE_GREEN wiring — mirrors
+ * evaluateGreenTrunk): the whole-suite dimension participates ONLY when the
+ * `tests` key is PRESENT. `tests === undefined` → not gated, so every
+ * pre-redesign 3-arg caller ({tsc,build,boot}) stays byte-identical. A
+ * present-but-failed `tests` fails CLOSED with failing entry 'tests' and reason
+ * 'foundation suite failed: <detail>'.
  *
  * @param {{ tsc?:{passed:boolean,detail?:string}, build?:{passed:boolean,detail?:string},
- *           boot?:{passed:boolean,detail?:string} }} opts
+ *           boot?:{passed:boolean,detail?:string}, tests?:{passed:boolean,detail?:string} }} opts
  * @returns {{ passed:boolean, failing:string[], reasons:string[] }}
  */
-export function evaluateFoundationGate({ tsc, build, boot } = {}) {
+export function evaluateFoundationGate({ tsc, build, boot, tests } = {}) {
   const failing = [];
   const reasons = [];
   if (!tsc?.passed) {
@@ -57,6 +66,12 @@ export function evaluateFoundationGate({ tsc, build, boot } = {}) {
   if (!boot?.passed) {
     failing.push('boot');
     reasons.push(`boot-liveness failed: ${boot?.detail ?? 'no result'}`);
+  }
+  // Whole-suite gate: PRESENT-only (undefined → skip, legacy 3-dim verdict);
+  // present-but-failed → fail closed (the cross-plan regression guardrail).
+  if (tests !== undefined && !tests?.passed) {
+    failing.push('tests');
+    reasons.push(`foundation suite failed: ${tests?.detail ?? 'no result'}`);
   }
   return { passed: failing.length === 0, failing, reasons };
 }
@@ -102,14 +117,25 @@ async function pinIfStable(verdict, { git, cwd, head0 }) {
  * spreads the result into agent-daemon's story-dev deps; S3 calls them.
  *
  *   foundationGate({cwd,headSha,qaContext}) → runs tsc + build + boot-liveness
- *     (boots the dev server with the __harness seam env, probes, stops it) →
+ *     (+ the whole-suite `npm run test` when P3_SUITE_GREEN==='on') →
  *     evaluateFoundationGate, SHA-pinned against a concurrent commit.
- *   greenTrunk({cwd}) → runs tsc + build → evaluateGreenTrunk, SHA-pinned.
+ *   greenTrunk({cwd}) → runs tsc + build (+ the whole-suite `npm run test` when
+ *     P3_SUITE_GREEN==='on') → evaluateGreenTrunk, SHA-pinned.
+ *
+ * P3_SUITE_GREEN (slice D — the cross-plan regression guardrail): when 'on',
+ * BOTH gates additionally run runTreeTests over the whole app tree and fold a
+ * red suite into the verdict via the tests-presence semantics, so every story
+ * blocks on the WHOLE suite (a new plan can never break a prior plan's committed
+ * tests). When 'off', the tests key is left undefined and the verdicts are
+ * byte-identical to the pre-redesign tsc+build(+boot) gates. The flag is read via
+ * envFlag(process.env) by default but injectable for tests (deps.suiteGreen = an
+ * explicit 'on'/'off', or deps.env = an env map) so no real spawn/env is needed.
  *
  * Tree checks run via an async (non-blocking) runner so they never freeze the
- * daemon event loop. `deps` (bootDevServer, playwright, shell, log, runner, git)
- * are injectable for tests; the production defaults boot the real dev server,
- * lazy-import real playwright, spawn tsc/build async, and read HEAD via `git`.
+ * daemon event loop. `deps` (bootDevServer, playwright, shell, log, runner, git,
+ * suiteGreen, env) are injectable for tests; the production defaults boot the
+ * real dev server, lazy-import real playwright, spawn tsc/build/test async, read
+ * HEAD via `git`, and read P3_SUITE_GREEN from process.env.
  *
  * @param {{ cwd?:string, runner?:Function, git?:Function, qaContext?:object, deps?:object }} opts
  */
@@ -120,6 +146,10 @@ export function makeStoryDevGateDeps({ cwd, runner, git, qaContext, deps = {} } 
   const log = deps.log || (() => {});
   const treeRunner = runner || deps.runner; // undefined → tree-gates uses its default async spawn
   const gitRunner = git || deps.git;
+  // P3_SUITE_GREEN posture, resolved ONCE at factory time: an explicit
+  // deps.suiteGreen wins (direct 'on'/'off' override), else envFlag over
+  // deps.env or process.env. 'on' → both gates run the whole-suite dimension.
+  const suiteGreen = deps.suiteGreen ?? envFlag('P3_SUITE_GREEN', deps.env || process.env);
 
   // Boot the served app with the seam env (bootDevServer already sets
   // NEXT_PUBLIC_TEST_HARNESS=1) and run the liveness probe; always stop the
@@ -164,15 +194,22 @@ export function makeStoryDevGateDeps({ cwd, runner, git, qaContext, deps = {} } 
       const tsc = await runTreeTypecheck({ cwd: c, runner: treeRunner });
       const build = await runTreeBuild({ cwd: c, runner: treeRunner });
       const boot = await bootAndProbe({ cwd: c, qaContext: qa });
-      const verdict = evaluateFoundationGate({ tsc, build, boot });
+      // Whole-suite dimension only when P3_SUITE_GREEN==='on'; else undefined so
+      // evaluateFoundationGate stays byte-identical to the legacy 3-dim verdict.
+      // The SHA-pin (readHead above → pinIfStable below) wraps the WHOLE check
+      // INCLUDING the suite run — a sibling commit mid-suite still fails closed.
+      const tests = suiteGreen === 'on' ? await runTreeTests({ cwd: c, runner: treeRunner }) : undefined;
+      const verdict = evaluateFoundationGate({ tsc, build, boot, tests });
       return pinIfStable(verdict, { git: gitRunner, cwd: c, head0 });
     },
     greenTrunk: async ({ cwd: c = cwd } = {}) => {
       const head0 = await readHead(gitRunner, c);
-      const verdict = evaluateGreenTrunk({
-        tsc: await runTreeTypecheck({ cwd: c, runner: treeRunner }),
-        build: await runTreeBuild({ cwd: c, runner: treeRunner }),
-      });
+      const tsc = await runTreeTypecheck({ cwd: c, runner: treeRunner });
+      const build = await runTreeBuild({ cwd: c, runner: treeRunner });
+      // Whole-suite dimension only when P3_SUITE_GREEN==='on'; else undefined
+      // (legacy 2-dim verdict). SHA-pin wraps the whole check including the suite.
+      const tests = suiteGreen === 'on' ? await runTreeTests({ cwd: c, runner: treeRunner }) : undefined;
+      const verdict = evaluateGreenTrunk({ tsc, build, tests });
       return pinIfStable(verdict, { git: gitRunner, cwd: c, head0 });
     },
   };

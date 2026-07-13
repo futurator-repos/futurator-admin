@@ -93,6 +93,26 @@ export const P3_FLAGS = Object.freeze({
   // Green-trunk gate (pipeline-v3 redesign): tsc + build must pass on every
   // story's tree before it can be marked done. Fail-closed.
   P3_GREEN_TRUNK: { values: ['off', 'on'], default: 'on' },
+  // Per-story WHOLE-SUITE green trunk (pipeline-v3 redesign, slice D). When 'on',
+  // greenTrunk + foundationGate ALSO run `npm run test` over the ENTIRE app tree
+  // on EVERY story (not just tsc+build). The intent was a cross-plan regression
+  // guardrail: a new brownfield plan can't break a prior plan's committed tests.
+  //
+  // DEFAULT 'off' (three-lens review fix, pacman8 follow-up): per-story
+  // whole-suite over the SHARED per-plan worktree FALSE-FAILS its own siblings.
+  // All stories of one plan run concurrently on ONE branch (commit-lock.mjs), and
+  // the TDD split COMMITS each story's failing (RED) test-author tests to that
+  // shared branch BEFORE its implementer runs (the redSha checkpoint). So sibling
+  // B's greenTrunk `npm run test` would execute sibling A's still-RED tests and
+  // block B for A's in-flight work — penalizing the exact parallel frontier the
+  // pipeline is built to protect. Disjoint-touches enforcement scopes file
+  // WRITES, not the whole suite, so it cannot rescue this. The real cross-plan
+  // guardrail already lives at plan close (the integrator's once-per-plan
+  // whole-tree battery), by which point every RED test-author test of the plan is
+  // finally GREEN — that is the correct place to assert "new plans don't break
+  // prior plans' tests". So this stays OFF by default; an operator may force 'on'
+  // for a single-story plan (no concurrent RED siblings to trip on). Fail-closed.
+  P3_SUITE_GREEN: { values: ['off', 'on'], default: 'off' },
 });
 
 export const P3_FLAG_NAMES = Object.freeze(Object.keys(P3_FLAGS));

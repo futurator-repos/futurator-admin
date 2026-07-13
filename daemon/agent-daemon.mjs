@@ -1797,6 +1797,48 @@ async function executeQuickPlanspecJob(job) {
     },
     updateJobFields,
     writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
+    // Persist the planner narrative/shape onto the plan row. Mirrors the integrator's
+    // plan-row UpdateCommand pattern (grep integrateVerifiedAt) — same table, same
+    // client. Only SETs defined fields so an absent narrative never nulls a column;
+    // named-attr aliases keep it safe against any future reserved word.
+    updatePlanFields: async (planId, fields) => {
+      const sets = [];
+      const names = {};
+      const values = {};
+      for (const [k, v] of Object.entries(fields || {})) {
+        if (v === undefined) continue;
+        sets.push(`#${k} = :${k}`);
+        names[`#${k}`] = k;
+        values[`:${k}`] = v;
+      }
+      if (!sets.length) return; // nothing to persist (all fields undefined)
+      names['#updatedAt'] = 'updatedAt';
+      values[':updatedAt'] = new Date().toISOString();
+      sets.push('#updatedAt = :updatedAt');
+      await ddb.send(new UpdateCommand({
+        TableName: PLANS_TABLE,
+        Key: { planId },
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+      }));
+    },
+    // Brownfield test-law: list the repo's committed test files so the runner can
+    // lock them into every story's forbiddenAreas (prior plans' tests are immutable
+    // across brownfield growth — pacman8 root cause). Uses the daemon's existing
+    // git helper (runs as the repo owner). Fail-soft: any error → [] (plan proceeds).
+    listRepoTestFiles: async (dir) => {
+      try {
+        const r = await daemonGit(['ls-files'], dir);
+        if (r.code !== 0) return [];
+        return r.stdout
+          .split('\n')
+          .map((s) => s.trim())
+          .filter((f) => /\.(test|spec)\.[cm]?[jt]sx?$/.test(f));
+      } catch {
+        return [];
+      }
+    },
     log,
   });
 }
@@ -2237,6 +2279,33 @@ async function executeStoryDevJob(job) {
       title: `Story ${storyId} exhausted ${result.attemptsUsed} dev attempts`,
       body: result.lastFailureDetail || 'bound-AC never passed',
       context: { jobId: job.jobId, planId, storyId, attempts: result.attemptsUsed },
+      suggestedActions: [
+        { label: 'Retry step', kind: 'retry-step' },
+        { label: 'Skip story', kind: 'skip-step' },
+        { label: 'Open logs', kind: 'open-logs' },
+      ],
+    }, log);
+  } else if (result.newState === 'failed' && (result.attemptsUsed || 0) === 0) {
+    // Test-author FAIL-CLOSED before any implementer ever spawned (pipeline-v3
+    // redesign, pacman8). The split path REFUSES the legacy single-spawn fallback
+    // (the implementer authoring its own tests is the forbidden mechanism), so a
+    // test-author that fails its one retry kills the story with attemptsUsed=0.
+    // That value slips through the `>= MAX_DEV_ATTEMPTS_PER_STORY` branch above
+    // (0 >= 5 is false) — so WITHOUT this branch the story dies silent: a
+    // multi-story plan completes missing that feature with nothing in the
+    // operator attention queue (only a timeline event). This is the exact failure
+    // the redesign targets, so it MUST reach the attention queue. Distinct
+    // dedupKey/category from fix-exhausted: no code was written, the operator's
+    // move is different (the test-author, not the implementer, is stuck).
+    await writeAttentionItem(ddb, {
+      planId,
+      dedupKey: `story-dev-test-author-failed:${storyId}`,
+      severity: 'high',
+      category: 'dev-test-author-failed',
+      title: `Story ${storyId} test-author failed — story fails closed (no code written)`,
+      body: result.lastFailureDetail
+        || 'test-author failed twice; the implementer never authors its own tests (no single-spawn fallback)',
+      context: { jobId: job.jobId, planId, storyId, attempts: result.attemptsUsed || 0 },
       suggestedActions: [
         { label: 'Retry step', kind: 'retry-step' },
         { label: 'Skip story', kind: 'skip-step' },

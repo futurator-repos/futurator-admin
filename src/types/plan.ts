@@ -89,6 +89,19 @@ export interface Plan {
   qaAutoFixRounds?: number;
   p3QaVerdict?: P3QaVerdict;
   /**
+   * P3 phased planner (redesign slice A/B) — the quick-planspec planner's
+   * emitted PLAN_THINKING narrative, persisted by the daemon so the reasoning
+   * behind the story DAG survives the one-shot generation call. Rendered on the
+   * Plan tab's narrative panel. Mirror of functions/shared/types/plan.ts.
+   */
+  planNarrative?: string;
+  /**
+   * P3 phased planner — the planner's chosen story-graph shape: `'coherent'` =
+   * a phased 3–7-story chain (foundation → capabilities → assemble); `'sharded'`
+   * = independent parallelizable stories. Mirror of functions/shared/types/plan.ts.
+   */
+  planShape?: 'coherent' | 'sharded';
+  /**
    * QA-Review W2 readiness stamp. ISO-8601 timestamp set when a NON-BLOCKING
    * p3QaVerdict is durably recorded for the CURRENT qaCommitSha (deployed-app QA
    * passed). ABSENT/empty ⇒ deployed-app QA has NOT passed (never ran,

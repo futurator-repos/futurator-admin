@@ -2237,12 +2237,104 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
       // QA autopilot toggle (default ON): auto-fix + re-run QA on a blocking
       // verdict so the operator tests an already-fixed build.
       qaAutopilot: z.boolean().optional(),
+      // Brownfield growth (redesign slice F): when present, grow this EXISTING
+      // app instead of scaffolding a fresh one — no repo mint, no app-bootstrap,
+      // kind='change', and the planner plans against the real code (its prior
+      // tests become LAW). Absent → the greenfield fast path below (unchanged).
+      targetAppId: z.string().optional(),
     })
     .safeParse(body);
   if (!parsed.success)
     throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
   const { intent } = parsed.data;
   const qaAutopilot = parsed.data.qaAutopilot ?? true;
+
+  // ── Brownfield variant — grow an EXISTING app ──────────────────────────────
+  // Diverges hard from the greenfield path: we reuse the app's repo + worktree
+  // (NO createRepoFromTemplate, NO app-bootstrap job) and mint a `change` plan.
+  // The daemon runner skips the bootstrap wait because the payload carries no
+  // appBootstrapJobId; `brownfield: true` flips the planner to the
+  // existing-tests-are-law prompt (slice B threads it through).
+  const targetAppId = parsed.data.targetAppId;
+  if (targetAppId) {
+    const appRow = await appRepo.getApp(targetAppId);
+    if (!appRow) {
+      throw new AppError('APP_NOT_FOUND', `App "${targetAppId}" not found.`, 404);
+    }
+
+    // Concurrency guard — mirror POST /api/apps/:appId/plans. One ACTIVE plan
+    // per app: two live plans share the same `/home/ubuntu/projects/<appId>/`
+    // worktree and would clobber each other's branches.
+    const active = await planRepo.getActivePlanForApp(targetAppId);
+    if (active) {
+      throw new AppError(
+        'PLAN_ALREADY_ACTIVE',
+        `App "${targetAppId}" already has an active Plan: ${active.planId} (${active.status}). Finish or abandon it before starting another.`,
+        409,
+      );
+    }
+
+    const now = new Date().toISOString();
+    // Resolve the seam hook from the EXISTING app's boilerplate (same lookup as
+    // line ~2495) — the planner prompt names the real hook for this app's stack.
+    const bpType = normalizeBoilerplateType(appRow.boilerplateType || 'nextjs-base');
+    const seamHook = BOILERPLATE_REGISTRY[bpType]?.testHarness?.seamHook;
+
+    const planId = crypto.randomUUID();
+    const plan: Plan = {
+      planId,
+      // Multiple plans per app share the worktree, so `name` is a label, not a
+      // path component — auto-generate a non-colliding slug (mirrors the
+      // /api/apps/:appId/plans convention).
+      name: `${targetAppId}-change-${Date.now().toString(36).slice(-5)}`,
+      displayName: `${appRow.displayName ?? targetAppId} — quick change`,
+      intent,
+      description: '',
+      status: 'concept',
+      epicIds: [],
+      kind: 'change',
+      appId: targetAppId,
+      workingDir: appRow.workingDir,
+      executionMode: 'pipeline',
+      rigor: 'mvp',
+      totalCostUsd: 0,
+      totalStories: 0,
+      doneStories: 0,
+      costCeilingUsd: defaultCostCeiling('mvp'),
+      qaAutopilot,
+      qaAutoFixRounds: 0,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: user.userId,
+    };
+    await planRepo.createPlan(plan);
+
+    // The generation job — no scaffold to wait for (existing worktree), so no
+    // appBootstrapJobId. `brownfield: true` → planner plans against real code.
+    // Built as a variable (not a fresh literal) so the extra `brownfield` key
+    // isn't excess-property-checked against quickPlanspecPayload's type; the
+    // daemon reads it at runtime (slice B).
+    const genJobId = crypto.randomUUID();
+    const quickPlanspecPayload = {
+      planId,
+      appId: targetAppId,
+      intent,
+      seamHook,
+      brownfield: true,
+    };
+    await agentJobsRepo.createJob({
+      jobId: genJobId,
+      status: 'PENDING',
+      createdAt: now,
+      updatedAt: now,
+      createdBy: user.userId,
+      workingDir: appRow.workingDir,
+      jobType: 'quick-planspec',
+      quickPlanspecPayload,
+    });
+
+    return c.json({ planId, appId: targetAppId, jobId: genJobId }, 201);
+  }
 
   // Unique throwaway app slug (fresh app per intent) — sanitized + random suffix.
   const base =

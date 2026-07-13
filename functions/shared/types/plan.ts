@@ -179,6 +179,24 @@ export interface Plan {
    *  falls back to per-symptom fix-story minting. */
   qaIntegratorRounds?: number;
 
+  // ── P3 phased planner (redesign slice A/B, 2026-07-11) ──
+  /**
+   * The quick-planspec planner's emitted PLAN_THINKING narrative
+   * (CLASSIFICATION / PHASES+AXIS / QUALITY PATTERNS+RISKS / MODEL ASSIGNMENT),
+   * persisted verbatim by the daemon (quick-planspec-runner → injected
+   * updatePlanFields) so the reasoning behind the story DAG survives past the
+   * one-shot generation call. Rendered on the Plan tab's narrative panel.
+   * ABSENT for legacy plans and non-quick paths (round-trip byte-identical).
+   */
+  planNarrative?: string;
+  /**
+   * The planner's chosen story-graph shape: `'coherent'` = a phased 3–7-story
+   * chain (boot-alive foundation → capability phases → assemble) for a single
+   * cohesive app; `'sharded'` = independent parallelizable stories. Written by
+   * the daemon alongside `planNarrative`. ABSENT until the planner runs.
+   */
+  planShape?: 'coherent' | 'sharded';
+
   // ── Execution defaults applied to all epics under this plan ──
   devModel?: string;
   devEffort?: string;

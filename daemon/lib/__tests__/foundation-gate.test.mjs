@@ -70,6 +70,30 @@ describe('evaluateFoundationGate (pure)', () => {
     expect(r.failing).toEqual(['tsc', 'build', 'boot']);
     expect(r.reasons).toHaveLength(3);
   });
+
+  // ── tests-presence semantics (P3_SUITE_GREEN) ──
+  it('IGNORES the suite dimension when the tests key is ABSENT (3-dim behavior unchanged)', () => {
+    const r = evaluateFoundationGate({
+      tsc: { passed: true },
+      build: { passed: true },
+      boot: { passed: true },
+    });
+    expect(r.passed).toBe(true);
+    expect(r.failing).toEqual([]);
+    expect(r.failing).not.toContain('tests');
+  });
+
+  it('fails CLOSED with a suite reason when a PRESENT tests result failed', () => {
+    const r = evaluateFoundationGate({
+      tsc: { passed: true },
+      build: { passed: true },
+      boot: { passed: true },
+      tests: { passed: false, detail: 'exit 1: 2 failed' },
+    });
+    expect(r.passed).toBe(false);
+    expect(r.failing).toEqual(['tests']);
+    expect(r.reasons[0]).toMatch(/foundation suite failed: exit 1: 2 failed/);
+  });
 });
 
 // ── Factory wiring (injected deps — no real dev server / playwright) ──────────
@@ -164,5 +188,106 @@ describe('makeStoryDevGateDeps (wiring)', () => {
     const r = await deps.greenTrunk({ cwd: '/app' });
     expect(r.passed).toBe(true);
     expect(r.failing).toEqual([]);
+  });
+});
+
+// ── P3_SUITE_GREEN wiring (the cross-plan regression guardrail) ───────────────
+// A runner keyed by command: tsc/build always green, but `npm run test` is RED,
+// so the ONLY way a gate can fail here is if it actually ran the whole suite.
+function keyedRunner({ testStatus }) {
+  const calls = [];
+  const fn = async (cmd, args) => {
+    calls.push({ cmd, args });
+    const isSuite = cmd === 'npm' && args[0] === 'run' && args[1] === 'test';
+    if (isSuite) return { status: testStatus, stdout: '', stderr: '1 failed | 11 passed' };
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  fn.calls = calls;
+  fn.ranSuite = () => calls.some((c) => c.cmd === 'npm' && c.args[0] === 'run' && c.args[1] === 'test');
+  return fn;
+}
+
+describe('makeStoryDevGateDeps — P3_SUITE_GREEN flag', () => {
+  it('flag ON: greenTrunk runs the whole suite and folds a RED suite into the verdict', async () => {
+    const runner = keyedRunner({ testStatus: 1 });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: { suiteGreen: 'on' } });
+    const r = await deps.greenTrunk({ cwd: '/app' });
+    expect(runner.ranSuite()).toBe(true);
+    expect(r.passed).toBe(false);
+    expect(r.failing).toContain('tests');
+    expect(r.reasons.join(' ')).toMatch(/green-trunk suite failed/);
+  });
+
+  it('flag ON: greenTrunk passes when tsc+build AND the whole suite are green', async () => {
+    const runner = keyedRunner({ testStatus: 0 });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: { suiteGreen: 'on' } });
+    const r = await deps.greenTrunk({ cwd: '/app' });
+    expect(runner.ranSuite()).toBe(true);
+    expect(r.passed).toBe(true);
+    expect(r.failing).toEqual([]);
+  });
+
+  it('flag ON: foundationGate fails on a RED suite (with a suite reason)', async () => {
+    const runner = keyedRunner({ testStatus: 1 });
+    const deps = makeStoryDevGateDeps({
+      cwd: '/app',
+      runner,
+      qaContext: { defaultPort: 3000 },
+      deps: {
+        suiteGreen: 'on',
+        bootDevServer: async () => ({ ok: true, port: 3000, stop: async () => {} }),
+        playwright: fakePlaywright({ snapshots: [{}, {}, { x: 1 }] }),
+        shell: async () => ({ stdout: '', stderr: '' }),
+      },
+    });
+    const r = await deps.foundationGate({ cwd: '/app', qaContext: { defaultPort: 3000 } });
+    expect(runner.ranSuite()).toBe(true);
+    expect(r.passed).toBe(false);
+    expect(r.failing).toContain('tests');
+    expect(r.reasons.join(' ')).toMatch(/foundation suite failed/);
+  });
+
+  it('flag OFF: greenTrunk never runs the suite — byte-identical legacy 2-dim verdict', async () => {
+    // Even with a RED suite runner, flag-off greenTrunk must NOT run `npm run
+    // test` and must pass on green tsc+build alone (pre-redesign behavior).
+    const runner = keyedRunner({ testStatus: 1 });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: { suiteGreen: 'off' } });
+    const r = await deps.greenTrunk({ cwd: '/app' });
+    expect(runner.ranSuite()).toBe(false);
+    expect(r.passed).toBe(true);
+    expect(r.failing).toEqual([]);
+    expect(r.failing).not.toContain('tests');
+  });
+
+  it('flag OFF: foundationGate never runs the suite — byte-identical legacy 3-dim verdict', async () => {
+    const runner = keyedRunner({ testStatus: 1 });
+    const deps = makeStoryDevGateDeps({
+      cwd: '/app',
+      runner,
+      qaContext: { defaultPort: 3000 },
+      deps: {
+        suiteGreen: 'off',
+        bootDevServer: async () => ({ ok: true, port: 3000, stop: async () => {} }),
+        playwright: fakePlaywright({ snapshots: [{}, {}, { x: 1 }] }),
+        shell: async () => ({ stdout: '', stderr: '' }),
+      },
+    });
+    const r = await deps.foundationGate({ cwd: '/app', qaContext: { defaultPort: 3000 } });
+    expect(runner.ranSuite()).toBe(false);
+    expect(r.passed).toBe(true);
+    expect(r.failing).toEqual([]);
+  });
+
+  it('resolves the flag from an injected env map (deps.env) when suiteGreen is not given', async () => {
+    const runner = keyedRunner({ testStatus: 1 });
+    const deps = makeStoryDevGateDeps({
+      cwd: '/app',
+      runner,
+      deps: { env: { P3_SUITE_GREEN: 'on' } },
+    });
+    const r = await deps.greenTrunk({ cwd: '/app' });
+    expect(runner.ranSuite()).toBe(true);
+    expect(r.passed).toBe(false);
+    expect(r.failing).toContain('tests');
   });
 });

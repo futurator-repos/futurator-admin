@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMutation } from '@tanstack/react-query';
 import { usePlansList, useQuickP3Plan } from '@/hooks/use-plans';
+import { useApps } from '@/hooks/use-apps';
 import { useDaemonStatus } from '@/hooks/use-daemon-status';
 import { api } from '@/lib/api-client';
 import type { PlanSummary } from '@/types/plan';
@@ -39,26 +40,51 @@ const h1: React.CSSProperties = {
   margin: 0,
 };
 
-// Intent → Pipeline-3 in one step: scaffolds a fresh app, one Claude call turns
-// the idea into StoryNodes, the frontier runs it. No epics/waves.
+// Intent → Pipeline-3 in one step. Two modes:
+//   'new'  — scaffolds a fresh app, one Claude call turns the idea into
+//            StoryNodes, the frontier runs it. No epics/waves.
+//   'grow' — brownfield growth: reuse an EXISTING app (targetAppId) instead of
+//            scaffolding. The planner grows the delivered code and treats the
+//            app's prior tests as law (payload.brownfield=true), so a growth
+//            plan can't silently regress what already shipped.
+type QuickMode = 'new' | 'grow';
+
 function QuickCreate() {
   const router = useRouter();
   const quick = useQuickP3Plan();
+  const { data: apps } = useApps();
+  const [mode, setMode] = useState<QuickMode>('new');
+  const [targetAppId, setTargetAppId] = useState('');
   const [intent, setIntent] = useState('');
   const [name, setName] = useState('');
   const [qaAutopilot, setQaAutopilot] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
+  // Grow mode can't submit until an app is chosen — there is nothing to grow
+  // otherwise, and an empty targetAppId would fall back to a fresh scaffold.
+  const growMissingApp = mode === 'grow' && !targetAppId;
+  const disabled = quick.isPending || intent.trim().length < 3 || growMissingApp;
+
   const submit = () => {
     setErr(null);
     quick.mutate(
-      { intent: intent.trim(), name: name.trim() || undefined, qaAutopilot },
+      {
+        intent: intent.trim(),
+        name: name.trim() || undefined,
+        qaAutopilot,
+        // Only threaded in grow mode — greenfield stays byte-identical.
+        targetAppId: mode === 'grow' ? targetAppId : undefined,
+      },
       {
         onSuccess: (r) => router.push(`/labs3/?planId=${r.planId}`),
         onError: (e) => setErr(e instanceof Error ? e.message : 'Create failed'),
       },
     );
   };
+
+  const sortedApps = (apps ?? [])
+    .slice()
+    .sort((a, b) => (a.displayName ?? a.appId).localeCompare(b.displayName ?? b.appId));
 
   return (
     <div
@@ -70,10 +96,75 @@ function QuickCreate() {
         background: 'var(--card, transparent)',
       }}
     >
-      <div style={{ fontSize: 12.5, color: 'var(--text-dim)', marginBottom: 8 }}>
-        New Pipeline-3 plan from an idea — no epics/waves. Scaffolds a fresh app and generates the
-        story graph directly.
+      {/* Mode switch — New app (greenfield) vs Grow existing app (brownfield). */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+        {(['new', 'grow'] as const).map((m) => {
+          const active = mode === m;
+          return (
+            <button
+              key={m}
+              type="button"
+              onClick={() => {
+                setMode(m);
+                setErr(null);
+              }}
+              style={{
+                fontSize: 11.5,
+                fontWeight: active ? 600 : 400,
+                padding: '4px 11px',
+                borderRadius: 6,
+                border: `1px solid ${active ? 'var(--accent-blue)' : 'var(--border-2, var(--border))'}`,
+                background: active
+                  ? 'color-mix(in srgb, var(--accent-blue) 14%, transparent)'
+                  : 'none',
+                color: active ? 'var(--accent-blue)' : 'var(--text-dim)',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {m === 'new' ? 'New app' : 'Grow existing app'}
+            </button>
+          );
+        })}
       </div>
+      <div style={{ fontSize: 12.5, color: 'var(--text-dim)', marginBottom: 8 }}>
+        {mode === 'new' ? (
+          <>
+            New Pipeline-3 plan from an idea — no epics/waves. Scaffolds a fresh app and generates
+            the story graph directly.
+          </>
+        ) : (
+          <>
+            Grow an existing app — the planner plans against its delivered code and keeps the
+            app&rsquo;s prior tests as law, so the new work can&rsquo;t regress what already
+            shipped.
+          </>
+        )}
+      </div>
+      {mode === 'grow' && (
+        <select
+          value={targetAppId}
+          onChange={(e) => setTargetAppId(e.target.value)}
+          aria-label="App to grow"
+          style={{
+            width: '100%',
+            fontSize: 12.5,
+            padding: '7px 10px',
+            borderRadius: 6,
+            border: '1px solid var(--border-2, var(--border))',
+            background: 'var(--background)',
+            color: 'var(--foreground)',
+            marginBottom: 8,
+          }}
+        >
+          <option value="">Choose an app to grow…</option>
+          {sortedApps.map((a) => (
+            <option key={a.appId} value={a.appId}>
+              {(a.displayName ?? a.appId) === a.appId ? a.appId : `${a.displayName} (${a.appId})`}
+            </option>
+          ))}
+        </select>
+      )}
       <textarea
         value={intent}
         onChange={(e) => setIntent(e.target.value)}
@@ -130,7 +221,8 @@ function QuickCreate() {
         <button
           type="button"
           onClick={submit}
-          disabled={quick.isPending || intent.trim().length < 3}
+          disabled={disabled}
+          title={growMissingApp ? 'Choose an app to grow first' : undefined}
           style={{
             fontSize: 12.5,
             fontWeight: 500,
@@ -139,12 +231,16 @@ function QuickCreate() {
             border: '1px solid var(--accent-blue)',
             background: 'var(--accent-blue)',
             color: '#fff',
-            cursor: quick.isPending || intent.trim().length < 3 ? 'default' : 'pointer',
-            opacity: quick.isPending || intent.trim().length < 3 ? 0.55 : 1,
+            cursor: disabled ? 'default' : 'pointer',
+            opacity: disabled ? 0.55 : 1,
             whiteSpace: 'nowrap',
           }}
         >
-          {quick.isPending ? 'Creating…' : 'Create & Run Pipeline-3'}
+          {quick.isPending
+            ? 'Creating…'
+            : mode === 'grow'
+              ? 'Grow & Run Pipeline-3'
+              : 'Create & Run Pipeline-3'}
         </button>
       </div>
       {err && (

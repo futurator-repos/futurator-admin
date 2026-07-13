@@ -105,7 +105,56 @@ describe('buildQuickPlanspecPrompt', () => {
     expect(p).toContain('coherent');
     expect(p).toContain('sharded');
     expect(p).toContain('planShapeRationale');
-    expect(p).toMatch(/COHERENT SHAPE/);
+    expect(p).toMatch(/PHASED-COHERENT/);
+  });
+
+  it('coherent means PHASED (3–7 stories), never one mega-story — the pacman8 fix', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a pacman game', appSlug: 'pm1' });
+    expect(p).not.toContain('EXACTLY ONE story');
+    expect(p).toMatch(/3–7 stories/);
+    expect(p).toMatch(/NEVER fold the whole app into one story/i);
+    expect(p).toMatch(/boots/i); // boot-alive foundation skeleton
+    expect(p).toMatch(/Assemble & harden/);
+    expect(p).toMatch(/dependsOn CHAIN is fine/);
+  });
+
+  it('emits the PLAN_THINKING contract before PLAN_SPEC with the four labeled sections', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a chess trainer', appSlug: 'ch1' });
+    expect(p).toContain('<PLAN_THINKING>');
+    expect(p).toContain('CLASSIFICATION:');
+    expect(p).toContain('PHASES:');
+    expect(p).toContain('QUALITY PATTERNS & RISKS:');
+    expect(p).toContain('MODEL ASSIGNMENT:');
+    // thinking comes BEFORE the spec block in the output contract
+    expect(p.indexOf('<PLAN_THINKING>')).toBeLessThan(p.indexOf('<PLAN_SPEC>'));
+    expect(p).toMatch(/prose only, NO code fences/);
+  });
+
+  it('carries the 6-AC hard budget and the isolated-test-author sizing rule', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a todo app', appSlug: 'td2' });
+    expect(p).toContain('AC BUDGET');
+    expect(p).toMatch(/at most 6 acceptanceCriteria per story/);
+    expect(p).toMatch(/isolated test-author/);
+  });
+
+  it('teaches the complexity → model ladder and caps architectural seats at 2', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a paint app', appSlug: 'pa1' });
+    expect(p).toContain('COMPLEXITY drives which model');
+    expect(p).toMatch(/at most 2 architectural seats/);
+  });
+
+  it('brownfield prompt swaps the scaffold framing for existing-tests-are-LAW rules', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'add a replay mode', appSlug: 'pm1', brownfield: true });
+    expect(p).toContain('EXISTING TEST FILES ARE LAW');
+    expect(p).toContain('BROWNFIELD');
+    expect(p).toMatch(/GROW the app/);
+    expect(p).toMatch(/never\s+rewrite a working module/);
+    expect(p).toMatch(/keep the WHOLE existing suite green/);
+    expect(p).not.toContain('freshly scaffolded');
+    // the greenfield prompt keeps its framing and never mentions the LAW rule
+    const g = buildQuickPlanspecPrompt({ intent: 'add a replay mode', appSlug: 'pm1' });
+    expect(g).toContain('freshly scaffolded');
+    expect(g).not.toContain('EXISTING TEST FILES ARE LAW');
   });
 
   it('disables the harness DRIVE lane during QA (observe-only seam)', () => {
@@ -133,25 +182,46 @@ describe('buildQuickPlanspecRepairPrompt', () => {
     expect(p).toContain('SEAM WIRING'); // base rules ride along
   });
 
-  it('renders the WIDTH directive (not COLLAPSE) for a god-file-only violation', () => {
+  it('renders the WIDTH directive (not PHASE) for a god-file-only violation', () => {
     const { stories, audit } = parseQuickPlanspec(`<PLAN_SPEC>${GOD_FILE_SPEC}</PLAN_SPEC>`);
     expect(audit.overSharded).toBe(false);
     const p = buildQuickPlanspecRepairPrompt({
       intent: 'a pacman game', appSlug: 'pm1', stories, violations: audit.violations,
     });
     expect(p).toMatch(/DECOMPOSITION/);
-    expect(p).not.toContain('# COLLAPSE');
+    expect(p).not.toContain('# PHASE —');
   });
 
-  it('renders the COLLAPSE directive (in addition to width) for an over-sharded violation', () => {
+  it('renders the PHASE directive (in addition to width) for an over-sharded violation', () => {
     const { stories, audit } = parseQuickPlanspec(`<PLAN_SPEC>${OVER_SHARDED_SPEC}</PLAN_SPEC>`);
     expect(audit.overSharded).toBe(true);
     const p = buildQuickPlanspecRepairPrompt({
       intent: 'a pacman game', appSlug: 'pm1', stories, violations: audit.violations,
     });
-    expect(p).toContain('# COLLAPSE');
+    expect(p).toContain('# PHASE —');
     expect(p).toMatch(/planShape.*coherent/s);
     expect(p).toMatch(/DECOMPOSITION/); // width directive still rendered alongside
+  });
+
+  it('never mandates collapsing to one story — the directive orders coupled slices into phases', () => {
+    // The old COLLAPSE directive ("emit EXACTLY ONE story") minted the pacman8
+    // 16-AC mega-story. The PHASE directive must order, never merge.
+    const { stories, audit } = parseQuickPlanspec(`<PLAN_SPEC>${OVER_SHARDED_SPEC}</PLAN_SPEC>`);
+    const p = buildQuickPlanspecRepairPrompt({
+      intent: 'a pacman game', appSlug: 'pm1', stories, violations: audit.violations,
+    });
+    expect(p).not.toContain('EXACTLY ONE story');
+    expect(p).toMatch(/ORDER the coupled slices into a phased chain/);
+    expect(p).toMatch(/NEVER collapse the plan to a single story/);
+  });
+
+  it('passes brownfield through to the embedded base prompt', () => {
+    const { stories, audit } = parseQuickPlanspec(`<PLAN_SPEC>${GOD_FILE_SPEC}</PLAN_SPEC>`);
+    const p = buildQuickPlanspecRepairPrompt({
+      intent: 'a pacman game', appSlug: 'pm1', brownfield: true, stories, violations: audit.violations,
+    });
+    expect(p).toContain('EXISTING TEST FILES ARE LAW');
+    expect(p).not.toContain('freshly scaffolded');
   });
 });
 
@@ -180,6 +250,36 @@ describe('parseQuickPlanspec', () => {
     const { stories, errors } = parseQuickPlanspec('the model refused and wrote prose only');
     expect(stories).toEqual([]);
     expect(errors[0]).toMatch(/no <PLAN_SPEC>/);
+  });
+
+  it('extracts the PLAN_THINKING narrative when present', () => {
+    const thinking = 'CLASSIFICATION: arcade game, coherent — one game loop.\nPHASES: contract → movement → assemble.';
+    const { planNarrative, stories } = parseQuickPlanspec(
+      `<PLAN_THINKING>\n${thinking}\n</PLAN_THINKING>\n<PLAN_SPEC>${SPEC}</PLAN_SPEC>`,
+    );
+    expect(planNarrative).toBe(thinking);
+    expect(stories).toHaveLength(3); // spec parsing unaffected by the prose block
+  });
+
+  it('returns an empty narrative when PLAN_THINKING is absent', () => {
+    const { planNarrative } = parseQuickPlanspec(`<PLAN_SPEC>${SPEC}</PLAN_SPEC>`);
+    expect(planNarrative).toBe('');
+  });
+
+  it('caps an oversize narrative at 4000 chars (it rides in a plan row)', () => {
+    const big = 'CLASSIFICATION: ' + 'x'.repeat(6000);
+    const { planNarrative } = parseQuickPlanspec(
+      `<PLAN_THINKING>${big}</PLAN_THINKING>\n<PLAN_SPEC>${SPEC}</PLAN_SPEC>`,
+    );
+    expect(planNarrative).toHaveLength(4000);
+  });
+
+  it('keeps the narrative even when the spec JSON is unparseable (traceable artifact)', () => {
+    const { planNarrative, errors } = parseQuickPlanspec(
+      '<PLAN_THINKING>CLASSIFICATION: something</PLAN_THINKING>\nthen the JSON got garbled',
+    );
+    expect(errors[0]).toMatch(/no <PLAN_SPEC>/);
+    expect(planNarrative).toContain('CLASSIFICATION');
   });
 
   it('maps slug dependsOn → minted storyIds and keeps the model-authored wide DAG', () => {
@@ -330,6 +430,42 @@ describe('parseQuickPlanspec', () => {
     expect(stories[0].isFoundation).toBe(true);
   });
 
+  it('forces stories[0] to FOUNDATION on a coherent multi-story plan with no classified foundation', () => {
+    // A phased-coherent model may title its contract story past FOUNDATION_RE
+    // (e.g. "Core loop skeleton") — the boot-liveness gate keys off isFoundation,
+    // so a coherent plan must never ship without a foundation seat.
+    const spec = JSON.stringify({
+      planShape: 'coherent',
+      stories: [
+        { id: 'core', title: 'Core loop skeleton that boots', touches: ['src/core.ts'],
+          acceptanceCriteria: [{ text: 'the skeleton mounts and idles', verify: 'behavior', needsBrowser: true }] },
+        { id: 'movement', title: 'Player movement', dependsOn: ['core'], touches: ['src/movement.ts'],
+          acceptanceCriteria: [{ text: 'arrow key moves the player', verify: 'state' }] },
+        { id: 'ghosts', title: 'Ghost chase behavior', dependsOn: ['movement'], touches: ['src/ghosts.ts'],
+          acceptanceCriteria: [{ text: 'ghosts chase the player', verify: 'state' }] },
+      ],
+    });
+    const { stories, planShape } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    expect(planShape).toBe('coherent');
+    expect(stories.map((s) => s.nodeKind === 'foundation')).toEqual([true, false, false]);
+    expect(stories[0].isFoundation).toBe(true);
+  });
+
+  it('leaves a classified foundation alone on a coherent multi-story plan', () => {
+    const spec = JSON.stringify({
+      planShape: 'coherent',
+      stories: [
+        { id: 'contract', title: 'Define the contract types and state model', touches: ['src/types.ts'],
+          acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }] },
+        { id: 'movement', title: 'Player movement', dependsOn: ['contract'], touches: ['src/movement.ts'],
+          acceptanceCriteria: [{ text: 'arrow key moves the player', verify: 'state' }] },
+      ],
+    });
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    expect(stories[0].isFoundation).toBe(true); // classified, not forced
+    expect(stories[1].isFoundation).toBe(false);
+  });
+
   it('defaults planShape to coherent for a single-story plan when the model omits it', () => {
     const spec = JSON.stringify({
       stories: [
@@ -464,6 +600,54 @@ describe('auditPlanGraph', () => {
     expect(audit.godFiles).toEqual([]);
     expect(audit.maxWidth).toBe(1);
     expect(auditPlanGraph(stories).criticalPath).toBe(5);
+  });
+
+  it('a coherent 5-story phased chain is the intended shape — NO linear-chain violation', () => {
+    const chain = JSON.stringify({ planShape: 'coherent', stories: [
+      { id: 's1', title: 'Define the contract types and boot skeleton', touches: ['src/types.ts', 'src/core.ts'],
+        acceptanceCriteria: [{ text: 'the skeleton boots and idles', verify: 'behavior', needsBrowser: true }] },
+      { id: 's2', title: 'Player movement', dependsOn: ['s1'], touches: ['src/movement.ts'],
+        acceptanceCriteria: [{ text: 'movement works well', verify: 'state' }] },
+      { id: 's3', title: 'Pellet eating', dependsOn: ['s2'], touches: ['src/pellets.ts'],
+        acceptanceCriteria: [{ text: 'pellets get eaten', verify: 'state' }] },
+      { id: 's4', title: 'Ghost chase behavior', dependsOn: ['s3'], touches: ['src/ghosts.ts'],
+        acceptanceCriteria: [{ text: 'ghosts chase well', verify: 'state' }] },
+      { id: 's5', title: 'Assemble & harden the complete app', dependsOn: ['s4'], touches: ['src/app.tsx'],
+        acceptanceCriteria: [{ text: 'the app runs end to end', verify: 'behavior', needsBrowser: true }] },
+    ] });
+    const { stories, audit, planShape } = parseQuickPlanspec(`<PLAN_SPEC>${chain}</PLAN_SPEC>`);
+    expect(planShape).toBe('coherent');
+    expect(audit.violations).toEqual([]);
+    // the SAME graph audited as sharded still trips the chain smell — the skip is
+    // shape-scoped, not a blanket removal of the guardrail
+    expect(auditPlanGraph(stories, { planShape: 'sharded' }).violations.join(' ')).toMatch(/linear-chain/);
+    expect(auditPlanGraph(stories, { planShape: 'coherent' }).violations).toEqual([]);
+  });
+
+  it('mega-story fires at 7 acceptance criteria, not at 6 (hard AC budget)', () => {
+    const ac = (i) => ({ text: `criterion number ${i} holds`, verify: 'state' });
+    const mk = (n) => [{
+      storyId: 'sx', title: 'Build the whole thing', touches: ['src/**'], depends_on: [],
+      acceptanceCriteria: Array.from({ length: n }, (_, i) => ac(i + 1)),
+    }];
+    const at6 = auditPlanGraph(mk(6), { planShape: 'coherent' });
+    expect(at6.violations).toEqual([]);
+    const at7 = auditPlanGraph(mk(7), { planShape: 'coherent' });
+    expect(at7.violations.join(' ')).toMatch(/mega-story/);
+    expect(at7.violations.join(' ')).toContain('"Build the whole thing" has 7 acceptance criteria (max 6)');
+    expect(at7.violations.join(' ')).toMatch(/split it into phased stories/);
+    // shape-independent: a sharded mega-story is just as unbindable
+    expect(auditPlanGraph(mk(7), { planShape: 'sharded' }).violations.join(' ')).toMatch(/mega-story/);
+  });
+
+  it('over-sharded never fires for a coherent plan (shared snapshot root is by design)', () => {
+    const coherent = JSON.stringify({ planShape: 'coherent', ...JSON.parse(OVER_SHARDED_SPEC) });
+    const { audit, planShape } = parseQuickPlanspec(`<PLAN_SPEC>${coherent}</PLAN_SPEC>`);
+    expect(planShape).toBe('coherent');
+    expect(audit.violations.join(' ')).not.toMatch(/over-sharded/);
+    // the detection metric is still reported — only the violation is shape-gated
+    expect(audit.overSharded).toBe(true);
+    expect(audit.sharedRoot).toBe('entities');
   });
 
   it('a wide contract-first plan passes clean', () => {

@@ -103,14 +103,38 @@ export function runTreeBuild({ cwd, runner = defaultTreeRunner, timeoutMs } = {}
 }
 
 /**
- * PURE green-trunk verdict from a typecheck + build result. Every failing
- * dimension pushes its name into `failing` and a human-readable line into
- * `reasons`. Fail-closed: a missing/undefined result counts as a failure.
+ * Whole-tree test suite: `npm run test` over the ENTIRE app tree. ASYNC
+ * (non-blocking). This mirrors the integrator's whole-tree battery — the same
+ * `npm run test` that runs once per plan — but per story, so every story blocks
+ * on the WHOLE suite (see foundation-gate P3_SUITE_GREEN). A full brownfield
+ * suite is the slowest of the three checks, so the ceiling is the generous
+ * 300s DEFAULT_TIMEOUT_MS by default; callers may pass a tighter `timeoutMs`.
+ * @param {{ cwd:string, runner?:Function, timeoutMs?:number }} opts
+ * @returns {Promise<{ passed:boolean, detail:string }>}
+ */
+export function runTreeTests({ cwd, runner = defaultTreeRunner, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  return runCommand(runner, 'npm', ['run', 'test'], { cwd, timeoutMs });
+}
+
+/**
+ * PURE green-trunk verdict from a typecheck + build (+ optional whole-suite)
+ * result. Every failing dimension pushes its name into `failing` and a
+ * human-readable line into `reasons`. tsc/build fail-closed: a missing/undefined
+ * result counts as a failure.
  *
- * @param {{ tsc?:{passed:boolean,detail?:string}, build?:{passed:boolean,detail?:string} }} opts
+ * PRESENCE SEMANTICS for `tests` (P3_SUITE_GREEN wiring): the whole-suite
+ * dimension participates ONLY when the `tests` key is PRESENT. `tests ===
+ * undefined` → not gated, so every pre-redesign 2-arg caller ({tsc,build}) stays
+ * byte-identical (no 'tests' entry, no extra reason). A present-but-failed
+ * `tests` result fails CLOSED with failing entry 'tests' and reason
+ * 'green-trunk suite failed: <detail>'. (Passing an explicit `undefined` is the
+ * flag-off posture; passing a result — even a null-ish one — opts into the gate.)
+ *
+ * @param {{ tsc?:{passed:boolean,detail?:string}, build?:{passed:boolean,detail?:string},
+ *           tests?:{passed:boolean,detail?:string} }} opts
  * @returns {{ passed:boolean, failing:string[], reasons:string[] }}
  */
-export function evaluateGreenTrunk({ tsc, build } = {}) {
+export function evaluateGreenTrunk({ tsc, build, tests } = {}) {
   const failing = [];
   const reasons = [];
   if (!tsc?.passed) {
@@ -120,6 +144,12 @@ export function evaluateGreenTrunk({ tsc, build } = {}) {
   if (!build?.passed) {
     failing.push('build');
     reasons.push(`green-trunk build failed: ${build?.detail ?? 'no result'}`);
+  }
+  // Whole-suite gate: PRESENT-only. undefined → skip (legacy 2-dim verdict);
+  // present-but-failed → fail closed (the cross-plan regression guardrail).
+  if (tests !== undefined && !tests?.passed) {
+    failing.push('tests');
+    reasons.push(`green-trunk suite failed: ${tests?.detail ?? 'no result'}`);
   }
   return { passed: failing.length === 0, failing, reasons };
 }

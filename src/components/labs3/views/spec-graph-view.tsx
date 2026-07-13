@@ -782,6 +782,127 @@ function GraphLegend({ storyCount }: { storyCount: number }) {
   );
 }
 
+// ── Planner narrative panel ─────────────────────────────────────────────────
+//
+// The quick-planspec planner emits a <PLAN_THINKING> narrative (CLASSIFICATION /
+// PHASES+AXIS / QUALITY PATTERNS+RISKS / MODEL ASSIGNMENT) BEFORE the story DAG,
+// persisted onto the Plan row (plan.planNarrative) by the daemon. Rendering it
+// here on the "Plan" subtab is what makes the reasoning behind the graph legible
+// — otherwise the one-shot generation call's thinking is lost. Collapsed by
+// default so it never dominates the graph; the planShape badge stays visible in
+// the header even while collapsed.
+
+function PlanShapeBadge({ shape }: { shape: 'coherent' | 'sharded' }) {
+  const coherent = shape === 'coherent';
+  const color = coherent ? 'rgba(167,139,250,0.9)' : 'rgba(120,147,184,0.9)';
+  const bg = coherent ? 'rgba(167,139,250,0.13)' : 'rgba(120,147,184,0.13)';
+  return (
+    <span
+      style={{
+        fontSize: 9,
+        fontFamily: 'var(--font-mono)',
+        padding: '1px 6px',
+        borderRadius: 8,
+        background: bg,
+        color,
+        letterSpacing: '0.06em',
+        textTransform: 'uppercase',
+        flexShrink: 0,
+      }}
+      title={
+        coherent
+          ? 'Phased chain: foundation → capabilities → assemble'
+          : 'Independent parallelizable stories'
+      }
+    >
+      {shape}
+    </span>
+  );
+}
+
+function PlannerNarrativePanel({
+  narrative,
+  shape,
+}: {
+  narrative?: string;
+  shape?: 'coherent' | 'sharded';
+}) {
+  const [open, setOpen] = useState(false);
+  if (!narrative) return null;
+
+  return (
+    <div
+      style={{
+        background: 'var(--bg-elev)',
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        marginBottom: 12,
+        overflow: 'hidden',
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '9px 14px',
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          color: 'var(--foreground)',
+          textAlign: 'left',
+        }}
+      >
+        <span
+          aria-hidden="true"
+          style={{
+            display: 'inline-block',
+            transform: open ? 'rotate(90deg)' : 'none',
+            transition: 'transform 120ms',
+            color: 'var(--text-mute)',
+            fontSize: 10,
+          }}
+        >
+          ▶
+        </span>
+        <span
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10.5,
+            letterSpacing: '0.1em',
+            textTransform: 'uppercase',
+            color: 'var(--text-faint)',
+          }}
+        >
+          Planner narrative
+        </span>
+        {shape && <PlanShapeBadge shape={shape} />}
+      </button>
+      {open && (
+        <pre
+          style={{
+            margin: 0,
+            padding: '0 16px 14px',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11.5,
+            lineHeight: 1.6,
+            color: 'var(--text-dim)',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            overflowX: 'auto',
+          }}
+        >
+          {narrative}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 // ── Empty state ───────────────────────────────────────────────────────────────
 
 function EmptyState() {
@@ -827,8 +948,10 @@ function EmptyState() {
 
 // ── Top-level view ────────────────────────────────────────────────────────────
 
-export function SpecGraphView({ stories, onSelectStory }: Labs3ViewProps) {
+export function SpecGraphView({ stories, plan, onSelectStory }: Labs3ViewProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const narrative = plan?.planNarrative;
+  const shape = plan?.planShape;
 
   const layout = useMemo(() => buildLayout(stories), [stories]);
 
@@ -851,60 +974,71 @@ export function SpecGraphView({ stories, onSelectStory }: Labs3ViewProps) {
     onSelectStory?.(storyId);
   }
 
-  if (stories.length === 0) return <EmptyState />;
+  if (stories.length === 0)
+    return (
+      <>
+        <PlannerNarrativePanel narrative={narrative} shape={shape} />
+        <EmptyState />
+      </>
+    );
 
   return (
-    <div
-      style={{
-        background: 'var(--bg-elev)',
-        border: '1px solid var(--border)',
-        borderRadius: 10,
-        overflow: 'hidden',
-        fontFamily: 'var(--font-sans)',
-        color: 'var(--foreground)',
-      }}
-    >
-      <GraphLegend storyCount={stories.length} />
-
-      {/* Scrollable canvas */}
+    <>
+      <PlannerNarrativePanel narrative={narrative} shape={shape} />
       <div
         style={{
-          overflowX: 'auto',
-          overflowY: 'auto',
-          maxHeight: 520,
-          position: 'relative',
+          background: 'var(--bg-elev)',
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          overflow: 'hidden',
+          fontFamily: 'var(--font-sans)',
+          color: 'var(--foreground)',
         }}
       >
+        <GraphLegend storyCount={stories.length} />
+
+        {/* Scrollable canvas */}
         <div
           style={{
+            overflowX: 'auto',
+            overflowY: 'auto',
+            maxHeight: 520,
             position: 'relative',
-            width: layout.svgW,
-            height: layout.svgH,
           }}
         >
-          {/* Layer 1 — edge SVG (pointer-events: none so clicks fall through to cards) */}
-          <svg
-            width={layout.svgW}
-            height={layout.svgH}
-            style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
-            aria-hidden="true"
-            dangerouslySetInnerHTML={{ __html: edgeHtml }}
-          />
-
-          {/* Layer 2 — node cards */}
-          {[...layout.nodePos.values()].map((pos) => (
-            <NodeCard
-              key={pos.row.storyId}
-              pos={pos}
-              isSelected={selectedId === pos.row.storyId}
-              onClick={() => handleSelect(pos.row.storyId)}
+          <div
+            style={{
+              position: 'relative',
+              width: layout.svgW,
+              height: layout.svgH,
+            }}
+          >
+            {/* Layer 1 — edge SVG (pointer-events: none so clicks fall through to cards) */}
+            <svg
+              width={layout.svgW}
+              height={layout.svgH}
+              style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
+              aria-hidden="true"
+              dangerouslySetInnerHTML={{ __html: edgeHtml }}
             />
-          ))}
-        </div>
-      </div>
 
-      {/* Detail panel (below canvas) */}
-      {selectedRow != null && <DetailPanel row={selectedRow} onClose={() => setSelectedId(null)} />}
-    </div>
+            {/* Layer 2 — node cards */}
+            {[...layout.nodePos.values()].map((pos) => (
+              <NodeCard
+                key={pos.row.storyId}
+                pos={pos}
+                isSelected={selectedId === pos.row.storyId}
+                onClick={() => handleSelect(pos.row.storyId)}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Detail panel (below canvas) */}
+        {selectedRow != null && (
+          <DetailPanel row={selectedRow} onClose={() => setSelectedId(null)} />
+        )}
+      </div>
+    </>
   );
 }

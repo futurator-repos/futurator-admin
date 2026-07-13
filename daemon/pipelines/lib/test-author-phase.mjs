@@ -3,9 +3,11 @@
 // collapsed. Kept in its own module (all primitives injected) so the live
 // story-dev spawn loop is untouched and the default path is byte-identical.
 //
-// SAFETY: the caller runs this ONLY when P3_TEST_AUTHOR_SPLIT=on, and wraps it in
-// try/catch → fail-open to the legacy single-spawn implementer. Any throw here
-// degrades gracefully; it must never wedge a story.
+// SAFETY: the caller runs this ONLY when P3_TEST_AUTHOR_SPLIT=on, and wraps it
+// in try/catch → ONE retry → then the story FAILS CLOSED (pacman8 incident,
+// 2026-07-11: the old fail-open fell back to the legacy single-spawn, letting
+// the implementer author its own tests — the ONE forbidden mechanism in this
+// pipeline). A throw here may cost the story, never the TDD separation.
 //
 // The daemon-side prompts are authored here (NOT extracted from the live
 // functions/shared/pipelines/story-pipeline.ts TEST step — the safety review's
@@ -178,39 +180,41 @@ export function buildImplementerPrompt(payload, ownedTestFiles = []) {
  *   runBindings: (args:{acceptanceCriteria:object[], headSha:string}) => Promise<{ acceptanceCriteria:object[], summary:object }>,
  *   logger?: object,
  * }} deps
- * @returns {Promise<{ ownedTestFiles:string[], bindingOutput:string, redSha:string, boundCriteria:object[] }>}
- * @throws on any failure — the caller catches and falls open to the single-spawn path.
+ * @returns {Promise<{ ownedTestFiles:string[], bindingOutput:string, redSha:string, boundCriteria:object[], resumed?:boolean }>}
+ * @throws on any FRESH-path failure — the caller retries once, then fails the
+ *   story CLOSED (never the legacy single-spawn; see the SAFETY note above).
  */
 export async function runTestAuthorPhase({ payload, headSha, spawnOnce, commitRed, runBindings, logger }) {
   const log = (m) => { try { logger?.info?.(`[test-author] ${m}`); } catch { /* ignore */ } };
 
-  // RETRY IDEMPOTENCY (pacman4 forensic, 2026-07-05): a revived/retried story
-  // whose ACs are ALREADY BOUND (a prior attempt authored + committed the RED
-  // tests) must NOT re-author — the shared worktree may hold that attempt's
-  // leftover implementation, so freshly-authored tests can pass immediately and
-  // the RED-first gate rejects the whole phase (a wasted spawn + lost
-  // isolation). Instead: reuse the committed tests. Bindings all RED → proceed
-  // straight to the implementer with the existing tests as the baseline. Any
-  // already GREEN → the prior implementation is present; throw a DISTINCT
-  // reason so the caller's fail-open single-spawn finishes the story (its
-  // completion gate re-verifies every binding honestly).
+  // RETRY IDEMPOTENCY (pacman4 forensic, 2026-07-05 · fail-closed rework after
+  // the pacman8 incident, 2026-07-11): a revived/retried story whose ACs are
+  // ALREADY BOUND (a prior attempt authored + committed the RED tests) must NOT
+  // re-author — the shared worktree may hold that attempt's leftover
+  // implementation, so freshly-authored tests can pass immediately and the
+  // RED-first gate rejects the whole phase (a wasted spawn + lost isolation).
+  // Instead: RESUME with the committed tests, whether the bindings are all-RED
+  // or partially GREEN. RED was already proven at the RED commit; on a retry
+  // the correct move is fix-forward by the implementer against the SAME
+  // immutable tests — the completion gate re-verifies every binding honestly
+  // at the final SHA, so a partially-green resume can never fake a pass.
+  // (The old code THREW 'retry-with-prior-work' on any GREEN binding, and the
+  // caller's fail-open sent the story to the legacy single-spawn — the
+  // implementer authored its own tests, the ONE forbidden mechanism here.)
   const acs = payload.acceptanceCriteria || [];
   const priorBound = acs.filter((a) => a?.testBinding?.testRef);
   if (acs.length > 0 && priorBound.length === acs.length) {
+    // Re-run the bindings for telemetry only (all-RED vs prior work present) —
+    // the outcome no longer gates the resume.
     const { summary } = await runBindings({ acceptanceCriteria: acs, headSha });
     const red = assertRedFirst(summary);
-    if (!red.ok) {
-      throw new Error(
-        `retry-with-prior-work: ${red.reason} — a prior attempt's implementation is present; single-spawn will complete + the completion gate verifies`,
-      );
-    }
     const ownedTestFiles = [...new Set(
       priorBound
         .map((a) => String(a.testBinding.testRef).split(' > ')[0].trim())
         .filter((f) => TEST_FILE_RE.test(f)),
     )];
-    log(`retry: ${acs.length} AC(s) already bound from a prior attempt — reusing committed tests (RED re-confirmed); owns ${ownedTestFiles.length} test file(s)`);
-    return { ownedTestFiles, bindingOutput: '', redSha: headSha, boundCriteria: acs };
+    log(`retry: ${acs.length} AC(s) already bound from a prior attempt — reusing committed tests (${red.ok ? 'RED re-confirmed' : `prior work present: ${red.reason} — implementer fixes forward`}); owns ${ownedTestFiles.length} test file(s)`);
+    return { resumed: true, ownedTestFiles, bindingOutput: '', redSha: headSha, boundCriteria: acs };
   }
 
   const { exitCode, text } = await spawnOnce({ prompt: buildStoryTestPrompt(payload) });

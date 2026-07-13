@@ -81,9 +81,10 @@ describe('runTestAuthorPhase', () => {
     expect(r.ownedTestFiles).toEqual(['src/login.test.ts']);
     expect(r.redSha).toBe('redsha');
     expect(r.boundCriteria[0].testBinding.status).toBe('bound');
+    expect(r.resumed).toBeUndefined(); // fresh path — not a retry resume
   });
 
-  it('throws on a non-zero test-author spawn (→ caller fails open)', async () => {
+  it('throws on a non-zero test-author spawn (FRESH path → caller retries once, then fails CLOSED)', async () => {
     await expect(runTestAuthorPhase(deps({ spawnOnce: async () => ({ exitCode: 1, text: '' }) }))).rejects.toThrow(/exit 1/);
   });
 
@@ -108,7 +109,7 @@ describe('retry idempotency (pacman4 forensic 2026-07-05)', () => {
     ],
   };
 
-  it('all ACs already bound + bindings RED → reuses committed tests, NO spawn, owns derived files', async () => {
+  it('all ACs already bound + bindings RED → resumes with committed tests, NO spawn, owns derived files', async () => {
     let spawned = false;
     const r = await runTestAuthorPhase(deps({
       payload: boundPayload,
@@ -116,17 +117,34 @@ describe('retry idempotency (pacman4 forensic 2026-07-05)', () => {
       runBindings: async () => ({ acceptanceCriteria: [], summary: { ran: 2, passed: 0, failed: 2 } }),
     }));
     expect(spawned).toBe(false);
+    expect(r.resumed).toBe(true);
     expect(r.ownedTestFiles.sort()).toEqual([
       'src/components/canvas/HUDOverlay.test.tsx',
       'src/game/rules.test.ts',
     ]);
   });
 
-  it('all ACs bound but a binding already PASSES (leftover impl) → throws the distinct retry reason', async () => {
-    await expect(runTestAuthorPhase(deps({
+  // pacman8 incident (2026-07-11): this case used to THROW 'retry-with-prior-work'
+  // and the caller fell OPEN to the single-spawn dev — the implementer authored
+  // its own tests. RED was already proven at the RED commit; a partially-green
+  // retry resumes fix-forward against the SAME immutable tests (the completion
+  // gate re-verifies every binding honestly, so this can never fake a pass).
+  it('all ACs bound + a binding already PASSES (prior impl present) → still RESUMES, does NOT throw', async () => {
+    let spawned = false;
+    const r = await runTestAuthorPhase(deps({
       payload: boundPayload,
+      spawnOnce: async () => { spawned = true; return { exitCode: 0, text: bindingText }; },
       runBindings: async () => ({ acceptanceCriteria: [], summary: { ran: 2, passed: 1, failed: 1 } }),
-    }))).rejects.toThrow(/retry-with-prior-work/);
+    }));
+    expect(spawned).toBe(false);
+    expect(r.resumed).toBe(true);
+    expect(r.redSha).toBe('sha0'); // resume pins to the incoming head — no new RED commit
+    expect(r.bindingOutput).toBe('');
+    expect(r.boundCriteria).toBe(boundPayload.acceptanceCriteria);
+    expect(r.ownedTestFiles.sort()).toEqual([
+      'src/components/canvas/HUDOverlay.test.tsx',
+      'src/game/rules.test.ts',
+    ]);
   });
 
   it('PARTIALLY bound ACs still author fresh (no idempotency shortcut)', async () => {

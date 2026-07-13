@@ -54,13 +54,22 @@ export function usePlan(planId: string | null) {
 
 /**
  * Labs3 fast path — intent → a running Pipeline-3 plan (no concept chain).
- * Scaffolds a fresh app + a quick-planspec generation job. Returns the new planId.
+ * Greenfield (default): scaffolds a fresh app + a quick-planspec generation job.
+ * Brownfield growth: pass `targetAppId` to grow an EXISTING app instead of
+ * scaffolding — the API reuses that app (no scaffold, kind='change',
+ * payload.brownfield=true so the planner treats the existing tests as law).
+ * The (planId, appId, jobId) response contract is identical either way.
  */
 export function useQuickP3Plan() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { intent: string; name?: string; qaAutopilot?: boolean }) =>
-      api.post<{ planId: string; appId: string; jobId: string }>('/plans/quick-p3', input),
+    mutationFn: (input: {
+      intent: string;
+      name?: string;
+      qaAutopilot?: boolean;
+      /** Brownfield growth — grow this existing App instead of scaffolding a new one. */
+      targetAppId?: string;
+    }) => api.post<{ planId: string; appId: string; jobId: string }>('/plans/quick-p3', input),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['plans'] });
     },

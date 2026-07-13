@@ -75,9 +75,15 @@ export async function runQuickPlanspecJob(job, deps) {
   const {
     spawn = realSpawn, claudeBin = 'claude', eventLogDir, gateArgs, env,
     getJob, batchPutStoryNodes, updateJobFields, writeAttentionItem, log = () => {}, now, sleep,
+    // NEW optional injected deps (redesign slice B). Both fail-soft: absent dep or a
+    // throw only warns — they enrich the plan, they never gate it.
+    updatePlanFields,   // (planId, fields) → persist the planner narrative/shape onto the plan row
+    listRepoTestFiles,  // (workingDir) → committed test-file paths (brownfield test-law)
   } = deps;
   const p = job.quickPlanspecPayload || {};
-  const { planId, appId, intent, appBootstrapJobId, seamHook } = p;
+  // `brownfield` (set by the API for grow-existing-app plans) switches the prompt to
+  // the "existing tests are LAW" variant AND turns on prior-test immutability below.
+  const { planId, appId, intent, appBootstrapJobId, seamHook, brownfield } = p;
   const short = String(job.jobId || '').slice(0, 8);
 
   const fail = async (reason) => {
@@ -99,7 +105,7 @@ export async function runQuickPlanspecJob(job, deps) {
   if (!ready) return fail('app scaffold did not complete (bootstrap failed or timed out)');
 
   // 2) one Claude call: intent → plan_spec.
-  const prompt = buildQuickPlanspecPrompt({ intent, appSlug: appId, seamHook });
+  const prompt = buildQuickPlanspecPrompt({ intent, appSlug: appId, seamHook, brownfield });
   // The PLANNER gets the strongest default thinking (model-effort-policy): a
   // bad plan poisons every downstream story. Adaptive thinking + effort=high.
   const { resolveAgentPolicy, cliModelArgs } = await import('../lib/model-effort-policy.mjs');
@@ -120,7 +126,7 @@ export async function runQuickPlanspecJob(job, deps) {
   if (parsed.audit.violations.length) {
     log('warn', `[quick-planspec ${short}] parallelism audit failed: ${parsed.audit.violations.join(' · ')} — running repair pass`);
     const repairPrompt = buildQuickPlanspecRepairPrompt({
-      intent, appSlug: appId, seamHook, stories: parsed.stories, violations: parsed.audit.violations,
+      intent, appSlug: appId, seamHook, brownfield, stories: parsed.stories, violations: parsed.audit.violations,
     });
     const repair = await spawnClaude({
       spawn, claudeBin, cwd: job.workingDir, prompt: repairPrompt, eventLogDir,
@@ -169,7 +175,7 @@ export async function runQuickPlanspecJob(job, deps) {
     if (hasCritical(findings)) {
       log('warn', `[quick-planspec ${short}] plan-critique found ${critical.length} critical finding(s) — running one bounded regeneration`);
       const critiqueRepairPrompt = buildQuickPlanspecRepairPrompt({
-        intent, appSlug: appId, seamHook, stories: parsed.stories,
+        intent, appSlug: appId, seamHook, brownfield, stories: parsed.stories,
         violations: critical.map((f) => `critique(${f.kind}): ${f.message}${f.storyId ? ` [${f.storyId}]` : ''}`),
       });
       const critiqueRepair = await spawnClaude({
@@ -199,8 +205,49 @@ export async function runQuickPlanspecJob(job, deps) {
   }
 
   // 4) build rows + ingest → plan-spec-graph. Frontier dispatches from here.
-  const { stories, audit, planShape } = parsed;
+  const { stories, audit, planShape, planShapeRationale } = parsed;
   const { rows, summary } = buildStoryNodeRows({ stories, planId, appId, now });
+
+  // 4a) BROWNFIELD PRIOR-TEST IMMUTABILITY (redesign slice B / TDD test-law): a
+  // growth plan must never be able to edit a test committed by an earlier plan —
+  // that is exactly how a green suite silently rots across brownfield iterations
+  // (pacman8: the implementer authored/relaxed its own tests). We union every
+  // committed test-file path into EVERY story's forbiddenAreas; story-job-minter
+  // already folds storyNode.forbiddenAreas into the live gate's deny scope, so the
+  // implementer physically cannot touch a prior test. Fail-soft: absent dep or a
+  // throw just warns and proceeds (greenfield plans never enter this branch).
+  if (brownfield && typeof listRepoTestFiles === 'function') {
+    try {
+      const priorTests = await listRepoTestFiles(job.workingDir);
+      if (priorTests?.length) {
+        for (const row of rows) {
+          row.forbiddenAreas = [...new Set([...(row.forbiddenAreas || []), ...priorTests])];
+        }
+        log('info', `[quick-planspec ${short}] brownfield: ${priorTests.length} prior test file(s) marked immutable (forbiddenAreas)`);
+      }
+    } catch (e) {
+      log('warn', `[quick-planspec ${short}] listRepoTestFiles failed (non-fatal, proceeding): ${e?.message || e}`);
+    }
+  } else if (brownfield) {
+    log('warn', `[quick-planspec ${short}] brownfield plan but no listRepoTestFiles dep — prior tests NOT locked`);
+  }
+
+  // 4b) Persist the planner's thinking onto the plan row for the operator's Plan
+  // tab (redesign root-cause #5: the PLAN narrative was never persisted). Optional
+  // injected dep — absent or a throw only warns; the plan is already parsed and is
+  // about to ingest, so this must never fail the job.
+  if (typeof updatePlanFields === 'function') {
+    try {
+      await updatePlanFields(planId, {
+        planNarrative: parsed.planNarrative?.slice(0, 4000) || undefined,
+        planShape,
+        planShapeRationale: planShapeRationale || undefined,
+      });
+    } catch (e) {
+      log('warn', `[quick-planspec ${short}] updatePlanFields failed (non-fatal): ${e?.message || e}`);
+    }
+  }
+
   try {
     await batchPutStoryNodes(rows);
   } catch (e) {

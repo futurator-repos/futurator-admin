@@ -7,12 +7,14 @@
 //
 //   buildQuickPlanspecPrompt       — the single-call intent → plan_spec prompt
 //   buildQuickPlanspecRepairPrompt — the audit-violation repair pass prompt
-//   parseQuickPlanspec             — extract the <PLAN_SPEC> JSON, coerce to
-//                                    StoryNodes, map slug dependsOn → storyIds,
-//                                    normalize the DAG (cycle-break, anchors,
-//                                    scope-safety edges) + audit it
-//   auditPlanGraph                 — width/critical-path/god-file/linear-chain
-//                                    metrics + violations (pure)
+//   parseQuickPlanspec             — extract the <PLAN_THINKING> narrative + the
+//                                    <PLAN_SPEC> JSON, coerce to StoryNodes, map
+//                                    slug dependsOn → storyIds, normalize the DAG
+//                                    (cycle-break, anchors, scope-safety edges) +
+//                                    audit it (shape-aware)
+//   auditPlanGraph                 — width/critical-path/god-file/linear-chain/
+//                                    mega-story metrics + violations (pure,
+//                                    planShape-aware)
 //   buildStoryNodeRows             — the Kahn layering (cohortBatch /
 //                                    unblockedDepsCount / ready|blocked), a
 //                                    faithful .mjs port of
@@ -41,10 +43,40 @@ const MAX_STORIES = 8;
  * .seamHook, stamped into the job payload by the quick-create endpoint) — the
  * pipeline itself is app-kind-agnostic; never hardcode a game/dashboard hook here.
  *
- * @param {{ intent: string, appSlug: string, seamHook?: string, maxStories?: number }} args
+ * `brownfield` swaps the "freshly scaffolded app" framing for grow-an-existing-app
+ * rules (the app already has code + PASSING tests from prior plans; existing test
+ * files are LAW — a live gate forbids touching them).
+ *
+ * @param {{ intent: string, appSlug: string, seamHook?: string, maxStories?: number, brownfield?: boolean }} args
  */
-export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories = MAX_STORIES }) {
+export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories = MAX_STORIES, brownfield = false }) {
   const hookName = seamHook || 'the scaffold seam hook named in SCAFFOLD.md';
+  // Greenfield: the quick-create endpoint scaffolded the app seconds ago.
+  // Brownfield: a prior plan DELIVERED this app — its tests encode every behavior
+  // already shipped, so the plan must grow the app without invalidating them.
+  const appParagraph = brownfield
+    ? [
+        `# The app (BROWNFIELD — it already exists)`,
+        `The app (slug "${appSlug}") ALREADY EXISTS in this working directory, with code`,
+        `and PASSING tests delivered by prior plans. READ the existing structure FIRST`,
+        `(src/, package.json, existing *.test.* files) so your stories extend what is`,
+        `really there. GROW the app: extend the existing contracts and modules; never`,
+        `rewrite a working module unless the idea itself demands it. The seam on`,
+        `\`window.__harness\` (\`.snapshot()\` returns the live app state; \`.forceStatus(x)\`)`,
+        `is already wired — the deployed-app QA reads app state through it.`,
+        `EXISTING TEST FILES ARE LAW: no story may modify or delete ANY existing`,
+        `*.test.*/*.spec.* file (a live gate blocks the write) — design stories whose`,
+        `changes keep the WHOLE existing suite green. Each story's intent must name the`,
+        `existing contract file(s) it builds against.`,
+      ]
+    : [
+        `# The app`,
+        `A freshly scaffolded app in this working directory (slug "${appSlug}"). READ the`,
+        `existing files FIRST (package.json, src/, SCAFFOLD.md) so your touches + tests fit`,
+        `the real structure and framework. The scaffold exposes a test seam on`,
+        `\`window.__harness\` (\`.snapshot()\` returns the live app state; \`.forceStatus(x)\`)`,
+        `under NEXT_PUBLIC_TEST_HARNESS — the deployed-app QA reads app state through it.`,
+      ];
   return [
     `You are the SPEC planner for a Pipeline-3 build. Turn the operator's idea into a`,
     `buildable plan_spec — a DAG of stories that PARALLEL coding agents implement`,
@@ -58,12 +90,7 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
     `# The idea`,
     intent,
     ``,
-    `# The app`,
-    `A freshly scaffolded app in this working directory (slug "${appSlug}"). READ the`,
-    `existing files FIRST (package.json, src/, SCAFFOLD.md) so your touches + tests fit`,
-    `the real structure and framework. The scaffold exposes a test seam on`,
-    `\`window.__harness\` (\`.snapshot()\` returns the live app state; \`.forceStatus(x)\`)`,
-    `under NEXT_PUBLIC_TEST_HARNESS — the deployed-app QA reads app state through it.`,
+    ...appParagraph,
     ``,
     `# How your plan is EXECUTED (design for this)`,
     `- Stories run as PARALLEL coding agents. A story starts the instant every story in`,
@@ -111,13 +138,26 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
     `   and composes the slices + wires the seam.`,
     `5. SELF-CHECK before emitting — fix the plan, don't ship the smell:`,
     `   (a) does any non-foundation file appear in two stories' touches? split it.`,
-    `   (b) is the graph a chain (each story depending on the previous one)? you`,
-    `       invented false deps — the target shape is foundation → ONE WIDE LAYER of`,
-    `       independent slices → assemble.`,
+    `   (b) sharded only: is the graph a chain (each story depending on the previous`,
+    `       one)? you invented false deps — the sharded target shape is foundation →`,
+    `       ONE WIDE LAYER of independent slices → assemble. (A coherent plan's phased`,
+    `       chain is legitimate when each edge is a TRUE prerequisite.)`,
     `   (c) does every user-driven capability carry a behavioral AC?`,
     `   (d) does the assemble story prove every capability through \`snapshot()\`?`,
     ``,
-    `# Output — EXACTLY one JSON object inside the tags, nothing else:`,
+    `# Output — TWO blocks, in this exact order, nothing else`,
+    `FIRST emit <PLAN_THINKING>…</PLAN_THINKING> — prose only, NO code fences, roughly`,
+    `15-25 lines. Committing your reasoning BEFORE the JSON is the point: the thinking`,
+    `is persisted with the plan and scored later. It MUST contain these labeled sections:`,
+    `- "CLASSIFICATION:" the app archetype, which planShape you chose and why.`,
+    `- "PHASES:" the ordered phases, the decomposition axis you chose, and WHY that axis`,
+    `  is the axis of maximal independence for THIS idea.`,
+    `- "QUALITY PATTERNS & RISKS:" which of the rules below matter most for THIS idea,`,
+    `  and the single riskiest capability.`,
+    `- "MODEL ASSIGNMENT:" one line per story mapping it to a complexity, with a`,
+    `  rationale for every complex/architectural seat.`,
+    ``,
+    `THEN emit EXACTLY one JSON object inside the tags:`,
     `<PLAN_SPEC>`,
     `{`,
     `  "planShape": "coherent|sharded",`,
@@ -135,35 +175,51 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
     `      "touches": ["src/real/file/glob.ts"],`,
     `      "complexity": "trivial|standard|complex|architectural",`,
     `      "invariants": [`,
-    `        { "id": "kebab-slug", "description": "a property of the domain DATA that must hold, in plain terms (foundation story / coherent build-whole story only)" }`,
+    `        { "id": "kebab-slug", "description": "a property of the domain DATA that must hold, in plain terms (foundation story only)" }`,
     `      ]`,
     `    }`,
     `  ]`,
     `}`,
     `</PLAN_SPEC>`,
     ``,
-    `# COHERENT SHAPE rules (only apply when planShape is "coherent")`,
-    `- Emit EXACTLY ONE story: "id":"build-the-complete-app", "title":"Build the complete`,
-    `  <app>", "touches":["src/**"], "complexity":"complex" or "architectural".`,
-    `- Fold everything into that ONE story: the frozen contract, every capability from`,
-    `  the idea, assembling them, and wiring the seam — all in its intent and`,
-    `  acceptanceCriteria. There is no separate foundation/feature/assemble split.`,
-    `- Its acceptanceCriteria MUST still include: the seam-mount AC (thenObservable`,
-    `  "snapshot.status equals 'idle'" or equivalent), one behavioral AC per capability`,
-    `  named in the idea, and the declared invariants (see below) as ACs the gate can`,
-    `  bind to.`,
-    `- dependsOn is empty (nothing to depend on — it's the only story).`,
+    `# PHASED-COHERENT rules (only apply when planShape is "coherent")`,
+    `A coherent app is ONE tightly-coupled runtime — but it is still built in PHASES,`,
+    `never as one story. Emit 3–7 stories forming an ordered NARROW DAG:`,
+    `- (i) ONE foundation story = the FROZEN CONTRACT (the state model, types, the`,
+    `  action/event union, the module signature each later phase implements against)`,
+    `  PLUS a runnable core-runtime skeleton that BOOTS — the loop/mount/seam wiring`,
+    `  compiles, mounts, and publishes \`window.__harness\` from day one. This story`,
+    `  declares the invariants (see below) and carries the seam-mount AC (thenObservable`,
+    `  "snapshot.status equals 'idle'" or equivalent).`,
+    `- (ii) CAPABILITY stories, one cohesive mechanic each, ordered by TRUE`,
+    `  prerequisites. A dependsOn CHAIN is fine and EXPECTED here — capabilities coupled`,
+    `  through the same runtime state genuinely build on each other. Stories may run in`,
+    `  parallel ONLY when their touches are disjoint.`,
+    `- (iii) a final "Assemble & harden" integration story depending on ALL of them,`,
+    `  proving every capability through \`snapshot()\` behavioral ACs.`,
+    `- NEVER fold the whole app into one story — a 16-AC mega-story is unreviewable,`,
+    `  untestable in isolation, and fails the AC BUDGET below.`,
     ``,
     `# HARD RULES`,
     `- At most ${maxStories} stories. Use as many as the idea needs — a tiny idea is 3`,
     `  (foundation, one capability, assemble); never pad, and never drop a named`,
     `  capability.`,
+    `- AC BUDGET (hard): at most 6 acceptanceCriteria per story. A story that needs`,
+    `  more is doing too much — split it into phased stories. Each story must be small`,
+    `  enough that an isolated test-author, given ONLY its ACs, can write its failing`,
+    `  tests before any implementation exists.`,
     `- Structure (when planShape is "sharded"): 1 foundation story (the contract files:`,
     `  state model + types/constants that \`snapshot()\` will expose + the slice module`,
     `  signatures), one story PER core capability from the idea, and a final "Assemble`,
     `  the complete app" story that wires them into one working app. (When planShape`,
-    `  is "coherent", use the COHERENT SHAPE rules above instead — ONE story only.)`,
-    `- INVARIANTS: the FOUNDATION story (sharded) or the build-whole story (coherent)`,
+    `  is "coherent", use the PHASED-COHERENT rules above instead — foundation →`,
+    `  capability phases → assemble.)`,
+    `- COMPLEXITY drives which model implements the story: trivial = a cheap mechanical`,
+    `  model, standard = the normal model, complex = a strong model, architectural = the`,
+    `  strongest model doing contract-defining work. Reserve "architectural" for the`,
+    `  contract/foundation story and genuinely cross-cutting stories — a plan should`,
+    `  have at most 2 architectural seats.`,
+    `- INVARIANTS: the FOUNDATION story (in either shape)`,
     `  MUST declare an "invariants" entry for every non-trivial piece of authored data`,
     `  it creates — seed data, maps/levels, config, a schema other stories will rely on,`,
     `  reachability of content. State each as a property of the DATA itself ("every`,
@@ -200,7 +256,7 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
     `  (observe-only). Write every behavioral \`when\` as a real user action (press a`,
     `  key, click a labeled control, type into a field), never a harness call that`,
     `  short-circuits driving the app.`,
-    `- Output ONLY the <PLAN_SPEC> block.`,
+    `- Output ONLY the <PLAN_THINKING> block followed by the <PLAN_SPEC> block.`,
   ].join('\n');
 }
 
@@ -210,9 +266,9 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
  * a FULL re-emit (same quality rules, corrected decomposition + graph). PURE.
  *
  * @param {{ intent: string, appSlug: string, seamHook?: string, maxStories?: number,
- *           stories: object[], violations: string[] }} args
+ *           brownfield?: boolean, stories: object[], violations: string[] }} args
  */
-export function buildQuickPlanspecRepairPrompt({ intent, appSlug, seamHook, maxStories = MAX_STORIES, stories, violations }) {
+export function buildQuickPlanspecRepairPrompt({ intent, appSlug, seamHook, maxStories = MAX_STORIES, brownfield = false, stories, violations }) {
   const byId = new Map(stories.map((s) => [s.storyId, s.title]));
   const planLines = stories.map((s) => {
     const deps = (s.depends_on || []).map((d) => byId.get(d) || d).join(', ') || '(none)';
@@ -227,11 +283,14 @@ export function buildQuickPlanspecRepairPrompt({ intent, appSlug, seamHook, maxS
     `GRAPH (dependsOn = foundation only for slices; assemble depends on all) so that`,
     `every violation above is eliminated.`,
   ];
-  // The COLLAPSE directive — fires when the audit found feature stories are not
+  // The PHASE directive — fires when the audit found feature stories are not
   // actually independent (they share a snapshot root / runtime state machine).
-  const collapseDirective = [
+  // It replaced the old COLLAPSE directive (which mandated EXACTLY ONE story —
+  // the pacman8 mega-story disaster: 16 ACs no test-author could bind and no
+  // reviewer could hold in one head). Coupled slices get ORDERED, never merged.
+  const phaseDirective = [
     ``,
-    `# COLLAPSE — the audit found your slices are NOT truly independent`,
+    `# PHASE — the audit found your slices are NOT truly independent`,
     `Your feature stories observe the same underlying runtime state (a shared snapshot`,
     `root) — that means they are not separable behind the contract; sharding them cost`,
     `width for nothing (the frontier still has to serialize on the shared state) and`,
@@ -240,14 +299,17 @@ export function buildQuickPlanspecRepairPrompt({ intent, appSlug, seamHook, maxS
     `  (a) justify the sharding by naming TRULY independent seams — each feature slice`,
     `      must assert a DISTINCT snapshot root (its own field/branch of state), not the`,
     `      same one every other slice touches; or`,
-    `  (b) set "planShape":"coherent" and emit EXACTLY ONE story — "Build the complete`,
-    `      <app>" — touches:["src/**"], folding the contract + every capability +`,
-    `      assemble + seam wiring into its intent and ACs (see the COHERENT SHAPE rules`,
-    `      above).`,
+    `  (b) set "planShape":"coherent" and ORDER the coupled slices into a phased chain`,
+    `      per the PHASED-COHERENT rules above: a boot-alive foundation story (the`,
+    `      frozen contract + a runnable skeleton that mounts the seam) → capability`,
+    `      phases in true-prerequisite order → a final "Assemble & harden" story`,
+    `      depending on all.`,
+    `NEVER collapse the plan to a single story — a mega-story fails the AC BUDGET and`,
+    `is unbindable for the isolated test-author.`,
     `Re-emit the FULL corrected <PLAN_SPEC> reflecting your choice.`,
   ];
   return [
-    buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories }),
+    buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories, brownfield }),
     ``,
     `# REPAIR PASS — your previous plan FAILED the parallelism audit`,
     `You already produced this plan:`,
@@ -257,7 +319,7 @@ export function buildQuickPlanspecRepairPrompt({ intent, appSlug, seamHook, maxS
     ...violations.map((v) => `- ${v}`),
     ``,
     ...widthDirective,
-    ...(overSharded ? collapseDirective : []),
+    ...(overSharded ? phaseDirective : []),
   ].join('\n');
 }
 
@@ -279,6 +341,18 @@ function extractJson(text) {
     }
   }
   return null;
+}
+
+// The planner's committed reasoning (<PLAN_THINKING>) — persisted with the plan so
+// a bad decomposition can be traced to a bad classification/axis choice, and so the
+// narrative is scoreable later. Capped: it rides in a DynamoDB plan row.
+const MAX_NARRATIVE_CHARS = 4000;
+
+/** Extract the <PLAN_THINKING> prose block ('' when absent, capped). PURE. */
+function extractNarrative(text) {
+  if (!text || typeof text !== 'string') return '';
+  const m = text.match(/<PLAN_THINKING>\s*([\s\S]*?)\s*<\/PLAN_THINKING>/i);
+  return m ? m[1].slice(0, MAX_NARRATIVE_CHARS) : '';
 }
 
 const FOUNDATION_RE =
@@ -487,20 +561,30 @@ export function detectOverSharding(stories, { threshold = 0.6 } = {}) {
  * Width/critical-path audit of a normalized story DAG. PURE — the deterministic
  * gate behind the runner's repair pass, and the metrics logged at ingest.
  *
- * Violations:
+ * Violations (planShape-aware — pass the parsed shape via opts):
  *  - linear-chain: >2 consecutive single-story topo levels before the final level
- *    (false deps or shared files are serializing the build);
+ *    (false deps or shared files are serializing the build). SKIPPED when
+ *    planShape==='coherent': a phased chain through one coupled runtime is the
+ *    INTENDED coherent shape (PHASED-COHERENT rules), not a smell;
+ *  - mega-story: any story with >6 acceptanceCriteria, regardless of shape — the
+ *    pacman8 failure mode (one 16-AC "Build the complete app" story no isolated
+ *    test-author can bind and no reviewer can hold in one head);
  *  - god-file: a concrete path touched by ≥2 FEATURE stories (feature↔feature
  *    sharing always costs width; foundation/assemble sharing is dep-ordered anyway);
  *  - over-sharded: >threshold of feature stories observe the same snapshot root —
- *    they're coupled through one runtime state machine and should collapse to
- *    planShape:'coherent' (see detectOverSharding).
+ *    they're coupled through one runtime state machine and should re-shape to
+ *    planShape:'coherent' phases (see detectOverSharding). The VIOLATION only
+ *    fires for planShape==='sharded' — a coherent phased plan sharing one snapshot
+ *    root is by design (the metrics fields still report the detection).
  *
+ * @param {object[]} stories
+ * @param {{ planShape?: 'coherent'|'sharded' }} [opts] backward-compatible; omit for
+ *        the legacy shape-agnostic audit (direct metric callers).
  * @returns {{ levels:number[], maxWidth:number, criticalPath:number, chainRun:number,
  *             godFiles:{path:string,stories:string[]}[], violations:string[],
  *             overSharded:boolean, sharedRoot?:string }}
  */
-export function auditPlanGraph(stories) {
+export function auditPlanGraph(stories, { planShape } = {}) {
   if (!stories?.length) {
     return { levels: [], maxWidth: 0, criticalPath: 0, chainRun: 0, godFiles: [], violations: [], overSharded: false };
   }
@@ -537,19 +621,33 @@ export function auditPlanGraph(stories) {
   const sharding = detectOverSharding(stories);
 
   const violations = [];
-  if (chainRun > 2) {
+  // A coherent plan's phased chain is the intended shape — the linear-chain smell
+  // only diagnoses SHARDED plans whose "independent" slices got serialized.
+  if (chainRun > 2 && planShape !== 'coherent') {
     violations.push(
       `linear-chain: ${chainRun} consecutive single-story levels — false dependencies or shared files are serializing the build`,
     );
+  }
+  // Mega-story fires in EVERY shape: >6 ACs means the story is really several
+  // phases, and the isolated test-author cannot bind that many ACs blind.
+  for (const s of stories) {
+    const acCount = (s.acceptanceCriteria || []).length;
+    if (acCount > 6) {
+      violations.push(
+        `mega-story: "${s.title}" has ${acCount} acceptance criteria (max 6) — split it into phased stories`,
+      );
+    }
   }
   for (const g of godFiles) {
     violations.push(
       `god-file: "${g.path}" is touched by ${g.stories.length} feature stories (${g.stories.join(' | ')}) — split it into per-capability slice files`,
     );
   }
-  if (sharding.overSharded) {
+  // Only a SHARDED plan can be over-sharded — coherent phases sharing one snapshot
+  // root is by design. The metric fields below still report the raw detection.
+  if (sharding.overSharded && planShape === 'sharded') {
     violations.push(
-      `over-sharded: ${sharding.coupledCount}/${sharding.featureCount} feature stories observe snapshot.${sharding.sharedRoot} — coupled through one runtime state machine; collapse to planShape:'coherent'`,
+      `over-sharded: ${sharding.coupledCount}/${sharding.featureCount} feature stories observe snapshot.${sharding.sharedRoot} — coupled through one runtime state machine; re-shape to planShape:'coherent' phases`,
     );
   }
   return {
@@ -595,10 +693,14 @@ export function deriveRiskTag(ac) {
  *
  * @returns {{ stories: object[], errors: string[],
  *             audit: ReturnType<typeof auditPlanGraph> & { modelAuthored:boolean, cyclesDropped:number, safetyEdges:number },
- *             planShape: 'coherent'|'sharded', planShapeRationale: string }}
+ *             planShape: 'coherent'|'sharded', planShapeRationale: string,
+ *             planNarrative: string }}
  */
 export function parseQuickPlanspec(text, { maxStories = MAX_STORIES } = {}) {
   const obj = extractJson(text);
+  // The narrative survives even a failed JSON parse — a model that emitted its
+  // thinking but garbled the spec still leaves a traceable artifact.
+  const planNarrative = extractNarrative(text);
   if (!obj || !Array.isArray(obj.stories) || obj.stories.length === 0) {
     return {
       stories: [],
@@ -606,6 +708,7 @@ export function parseQuickPlanspec(text, { maxStories = MAX_STORIES } = {}) {
       audit: auditPlanGraph([]),
       planShape: 'sharded',
       planShapeRationale: '',
+      planNarrative,
     };
   }
   const errors = [];
@@ -684,14 +787,16 @@ export function parseQuickPlanspec(text, { maxStories = MAX_STORIES } = {}) {
   const present = new Set(stories.map((s) => s.storyId));
   for (const s of stories) s.depends_on = s.depends_on.filter((d) => present.has(d) && d !== s.storyId);
   const meta = normalizeDeps(stories);
-  const audit = { ...auditPlanGraph(stories), ...meta };
+  // planShape resolves BEFORE the audit — the audit is shape-aware (a coherent
+  // phased chain is legal; over-sharding only diagnoses sharded plans).
   const planShape = obj.planShape === 'coherent' || obj.planShape === 'sharded'
     ? obj.planShape
     : (stories.length === 1 ? 'coherent' : 'sharded');
   const planShapeRationale = typeof obj.planShapeRationale === 'string' ? obj.planShapeRationale.slice(0, 300) : '';
+  const audit = { ...auditPlanGraph(stories, { planShape }), ...meta };
 
-  // COHERENT build-whole = FOUNDATION (reality-spine review fix). The coherent
-  // prompt mandates the single story be titled "Build the complete <app>", which
+  // COHERENT build-whole = FOUNDATION (reality-spine review fix). The old coherent
+  // prompt mandated a single story titled "Build the complete <app>", which
   // INTEGRATION_RE ("the complete") classifies as 'integration' — so isFoundation
   // would be false and P3_FOUNDATION_GATE (tsc+build+BOOT-LIVENESS) would never
   // engage for exactly the single-game-loop shape it was built to catch, leaving
@@ -702,8 +807,19 @@ export function parseQuickPlanspec(text, { maxStories = MAX_STORIES } = {}) {
     stories[0].nodeKind = 'foundation';
     stories[0].isFoundation = true;
   }
+  // PHASED-COHERENT plans must always carry a foundation story too: the boot-
+  // liveness gate keys off isFoundation, and a model that titled its contract
+  // story past FOUNDATION_RE (e.g. "Core game loop skeleton") would otherwise
+  // ship a coherent plan where the hardened gate never engages. The first story
+  // is the contract-by-construction (the prompt orders foundation first, and
+  // normalizeDeps anchors zero-dep slices on stories[0] when no title classifies
+  // as foundation), so it takes the seat.
+  if (planShape === 'coherent' && !stories.some((s) => s.nodeKind === 'foundation')) {
+    stories[0].nodeKind = 'foundation';
+    stories[0].isFoundation = true;
+  }
 
-  return { stories, errors, audit, planShape, planShapeRationale };
+  return { stories, errors, audit, planShape, planShapeRationale, planNarrative };
 }
 
 /** Topological level per story (cohortBatch). Assumes a DAG. Pure. */

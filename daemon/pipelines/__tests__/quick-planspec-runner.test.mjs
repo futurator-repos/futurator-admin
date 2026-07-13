@@ -1,4 +1,20 @@
 import { describe, it, expect, vi } from 'vitest';
+
+// Seam over the prompt builders: the `brownfield` flag flows through the runner into
+// buildQuickPlanspecPrompt/…RepairPrompt. Slice A adds the "existing tests are LAW"
+// marker to the real prompt text; until it lands in this worktree we assert the flag
+// reaches the builder via this spy (the durable seam). We delegate to the ACTUAL
+// implementations so parse/audit/rows and every existing test behave identically.
+const { promptSpy, repairSpy } = vi.hoisted(() => ({ promptSpy: vi.fn(), repairSpy: vi.fn() }));
+vi.mock('../lib/quick-planspec.mjs', async () => {
+  const actual = await vi.importActual('../lib/quick-planspec.mjs');
+  return {
+    ...actual,
+    buildQuickPlanspecPrompt: (args) => { promptSpy(args); return actual.buildQuickPlanspecPrompt(args); },
+    buildQuickPlanspecRepairPrompt: (args) => { repairSpy(args); return actual.buildQuickPlanspecRepairPrompt(args); },
+  };
+});
+
 import { runQuickPlanspecJob } from '../quick-planspec-runner.mjs';
 
 // Minimal fake child: emits `stdout` then closes with `code`.
@@ -158,5 +174,74 @@ describe('runQuickPlanspecJob', () => {
     expect(d.writeAttentionItem).toHaveBeenCalledWith(
       expect.objectContaining({ category: 'quick-planspec-serial-plan', severity: 'medium' }),
     );
+  });
+
+  it('persists the planner narrative/shape via updatePlanFields (with planShape)', async () => {
+    const updatePlanFields = vi.fn(async () => {});
+    const d = deps({ updatePlanFields });
+    const r = await runQuickPlanspecJob(baseJob, d);
+    expect(r.ok).toBe(true);
+    expect(updatePlanFields).toHaveBeenCalledOnce();
+    const [planIdArg, fields] = updatePlanFields.mock.calls[0];
+    expect(planIdArg).toBe('p1');
+    expect(fields).toEqual(expect.objectContaining({ planShape: 'sharded' }));
+    expect(fields).toHaveProperty('planNarrative'); // key threaded from parsed (value may be undefined pre-slice-A)
+  });
+
+  it('completes when updatePlanFields is absent (optional dep, fail-soft)', async () => {
+    const d = deps(); // no updatePlanFields injected
+    const r = await runQuickPlanspecJob(baseJob, d);
+    expect(r.ok).toBe(true);
+    expect(d.batchPutStoryNodes).toHaveBeenCalledOnce();
+    expect(d.updateJobFields).toHaveBeenCalledWith('j1', { status: 'COMPLETED' });
+  });
+
+  it('never fails the job when updatePlanFields throws', async () => {
+    const updatePlanFields = vi.fn(async () => { throw new Error('ddb boom'); });
+    const d = deps({ updatePlanFields });
+    const r = await runQuickPlanspecJob(baseJob, d);
+    expect(r.ok).toBe(true);
+    expect(d.batchPutStoryNodes).toHaveBeenCalledOnce(); // ingest still ran
+  });
+
+  it('brownfield=true stamps listRepoTestFiles into EVERY ingested row forbiddenAreas', async () => {
+    const priorTests = ['src/movement.test.ts', 'src/app.spec.tsx'];
+    const listRepoTestFiles = vi.fn(async () => priorTests);
+    const brownfieldJob = {
+      ...baseJob,
+      quickPlanspecPayload: { ...baseJob.quickPlanspecPayload, brownfield: true },
+    };
+    const d = deps({ listRepoTestFiles });
+    const r = await runQuickPlanspecJob(brownfieldJob, d);
+    expect(r.ok).toBe(true);
+    expect(listRepoTestFiles).toHaveBeenCalledWith('/w');
+    const rows = d.batchPutStoryNodes.mock.calls[0][0];
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.forbiddenAreas).toEqual(expect.arrayContaining(priorTests));
+    }
+  });
+
+  it('brownfield flag flows into the prompt builder (seam)', async () => {
+    promptSpy.mockClear();
+    const brownfieldJob = {
+      ...baseJob,
+      quickPlanspecPayload: { ...baseJob.quickPlanspecPayload, brownfield: true },
+    };
+    const r = await runQuickPlanspecJob(brownfieldJob, deps());
+    expect(r.ok).toBe(true);
+    expect(promptSpy).toHaveBeenCalledWith(expect.objectContaining({ brownfield: true }));
+  });
+
+  it('greenfield does NOT lock prior tests and passes brownfield falsy to the prompt', async () => {
+    promptSpy.mockClear();
+    const listRepoTestFiles = vi.fn(async () => ['src/x.test.ts']);
+    const d = deps({ listRepoTestFiles });
+    const r = await runQuickPlanspecJob(baseJob, d); // no brownfield in payload
+    expect(r.ok).toBe(true);
+    expect(listRepoTestFiles).not.toHaveBeenCalled();
+    const rows = d.batchPutStoryNodes.mock.calls[0][0];
+    for (const row of rows) expect(row.forbiddenAreas).toEqual([]);
+    expect(promptSpy).toHaveBeenCalledWith(expect.objectContaining({ brownfield: undefined }));
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runTreeTypecheck, runTreeBuild, evaluateGreenTrunk } from '../tree-gates.mjs';
+import { runTreeTypecheck, runTreeBuild, runTreeTests, evaluateGreenTrunk } from '../tree-gates.mjs';
 
 // An async runner stub: resolves canned { status, stdout, stderr } (or { error }).
 // The gate runner is now event-based/async (non-blocking) — no more sync spawnSync.
@@ -58,6 +58,35 @@ describe('runTreeBuild', () => {
   });
 });
 
+describe('runTreeTests', () => {
+  it('passes on exit 0 and runs `npm run test` in cwd with the 300s ceiling', async () => {
+    const runner = fakeRunner({ status: 0, stdout: 'Test Files 12 passed', stderr: '' });
+    const r = await runTreeTests({ cwd: '/app', runner });
+    expect(r.passed).toBe(true);
+    expect(r.detail).toBe('pass');
+    expect(runner.calls[0].cmd).toBe('npm');
+    expect(runner.calls[0].args).toEqual(['run', 'test']);
+    expect(runner.calls[0].opts.cwd).toBe('/app');
+    // default whole-suite ceiling mirrors the integrator battery (300_000ms)
+    expect(runner.calls[0].opts.timeoutMs).toBe(300_000);
+  });
+
+  it('fails on non-zero exit and surfaces the failing-suite tail in detail', async () => {
+    const runner = fakeRunner({ status: 1, stdout: '', stderr: '1 failed | 11 passed' });
+    const r = await runTreeTests({ cwd: '/app', runner });
+    expect(r.passed).toBe(false);
+    expect(r.detail).toMatch(/exit 1/);
+    expect(r.detail).toMatch(/1 failed/);
+  });
+
+  it('fails closed when the runner errors (e.g. a timeout kill)', async () => {
+    const runner = fakeRunner({ error: new Error('timed out after 300000ms') });
+    const r = await runTreeTests({ cwd: '/app', runner });
+    expect(r.passed).toBe(false);
+    expect(r.detail).toMatch(/timed out after 300000ms/);
+  });
+});
+
 describe('evaluateGreenTrunk (pure)', () => {
   it('passes when both tsc and build pass', () => {
     const r = evaluateGreenTrunk({ tsc: { passed: true }, build: { passed: true } });
@@ -91,5 +120,47 @@ describe('evaluateGreenTrunk (pure)', () => {
     const r = evaluateGreenTrunk({});
     expect(r.passed).toBe(false);
     expect(r.failing).toEqual(['tsc', 'build']);
+  });
+
+  // ── tests-presence semantics (P3_SUITE_GREEN) ──
+  it('IGNORES the suite dimension when the tests key is ABSENT (2-dim behavior unchanged)', () => {
+    // A green tsc+build with NO tests key stays green and never lists 'tests' —
+    // this is the flag-off / every-legacy-caller posture, byte-identical.
+    const r = evaluateGreenTrunk({ tsc: { passed: true }, build: { passed: true } });
+    expect(r.passed).toBe(true);
+    expect(r.failing).toEqual([]);
+    expect(r.failing).not.toContain('tests');
+  });
+
+  it('passes when the suite dimension is PRESENT and green', () => {
+    const r = evaluateGreenTrunk({
+      tsc: { passed: true },
+      build: { passed: true },
+      tests: { passed: true },
+    });
+    expect(r.passed).toBe(true);
+    expect(r.failing).toEqual([]);
+  });
+
+  it('fails CLOSED with a suite reason when a PRESENT tests result failed', () => {
+    const r = evaluateGreenTrunk({
+      tsc: { passed: true },
+      build: { passed: true },
+      tests: { passed: false, detail: 'exit 1: 1 failed | 11 passed' },
+    });
+    expect(r.passed).toBe(false);
+    expect(r.failing).toEqual(['tests']);
+    expect(r.reasons[0]).toMatch(/green-trunk suite failed: exit 1: 1 failed/);
+  });
+
+  it('reports tests alongside tsc/build when all three PRESENT dimensions fail', () => {
+    const r = evaluateGreenTrunk({
+      tsc: { passed: false },
+      build: { passed: false },
+      tests: { passed: false },
+    });
+    expect(r.passed).toBe(false);
+    expect(r.failing).toEqual(['tsc', 'build', 'tests']);
+    expect(r.reasons).toHaveLength(3);
   });
 });

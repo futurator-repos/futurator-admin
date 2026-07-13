@@ -166,7 +166,7 @@ function ensureDir(d) { try { if (!existsSync(d)) mkdirSync(d, { recursive: true
  * @param {{ job: object, eventLogDir: string, deps?: object }} opts
  *   deps: { spawn, ddb, graphTable, executors, headSha, logger, now,
  *           updateStoryState, propagateCompletion,
- *           foundationGate, greenTrunk, qaContext }
+ *           foundationGate, greenTrunk, qaContext, buildGateSpawn }
  *     foundationGate/greenTrunk: async fns from
  *     daemon/lib/foundation-gate.mjs::makeStoryDevGateDeps({cwd,spawnSync,qaContext})
  *     — the hardened P1 gate (tsc+build+boot-liveness, foundation stories only)
@@ -195,7 +195,11 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
   let exitCode = 0;
 
   const p3Flags = freezeFlagsOntoJob(job, { env: process.env });
-  const gate = buildGateSpawn({
+  // Gate-builder seam: injectable so the fail-closed/tamper unit tests can
+  // observe the exact scope each spawn runs under (defaults to the real one —
+  // byte-identical behavior when not injected).
+  const buildGate = deps.buildGateSpawn || buildGateSpawn;
+  const gate = buildGate({
     jobId: job.jobId,
     p3Flags,
     // PER-STORY scope — one story per spawn, so the gate enforces exactly this
@@ -243,8 +247,12 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
 
   // ── W2.2 Test-Author phase (dark unless P3_TEST_AUTHOR_SPLIT=on) ──
   // Precede the implementer with an isolated Test-Author that authors FAILING
-  // tests, proves them RED, and commits a `test(): RED` checkpoint. On ANY error
-  // we fall open to the legacy single untrimmed dev spawn (byte-identical).
+  // tests, proves them RED, and commits a `test(): RED` checkpoint. Failure
+  // policy is FAIL CLOSED (pacman8 incident, 2026-07-11): the old fall-open to
+  // the legacy single-spawn let the implementer author its own tests — the ONE
+  // forbidden mechanism in this pipeline. A retried story now RESUMES with its
+  // committed tests inside runTestAuthorPhase; a fresh failure gets ONE retry,
+  // then the story fails without ever spawning the implementer.
   const splitOn = flagMode(p3Flags, 'P3_TEST_AUTHOR_SPLIT') === 'on';
   let split = null;
   // pacman3 canary fix: the Test-Author writes NEW test files, which are never in
@@ -252,7 +260,7 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
   // (audit today; a hard block in enforce). Give it a dedicated gate whose scope
   // additionally allows test files.
   const testAuthorGate = splitOn
-    ? buildGateSpawn({
+    ? buildGate({
         jobId: job.jobId, p3Flags,
         touchPoints: [...(payload.touches || []), '**/*.test.*', '**/*.spec.*'],
         forbiddenAreas: payload.forbiddenAreas || [],
@@ -281,14 +289,16 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     c.on('close', (code) => res({ exitCode: code ?? 0, text: extractAssistantText(out) || out }));
   });
   if (splitOn) {
-    try {
-      // Sub-pipeline visibility: the Test-Author is its own stage in the story
-      // timeline (stepId 'test-author'), so the UI can render
-      // Test-Author → Implementer → Reviewer → Compile distinctly.
-      await deps.pushEvent?.(job.jobId, 'test-author', 'test-author', 'step_start', {
-        text: `test-author: writing failing tests for ${payload.storyId}`,
-      })?.catch?.(() => {});
-      split = await runTestAuthorPhase({
+    // Sub-pipeline visibility: the Test-Author is its own stage in the story
+    // timeline (stepId 'test-author'), so the UI can render
+    // Test-Author → Implementer → Reviewer → Compile distinctly.
+    await deps.pushEvent?.(job.jobId, 'test-author', 'test-author', 'step_start', {
+      text: `test-author: writing failing tests for ${payload.storyId}`,
+    })?.catch?.(() => {});
+    // Fresh call per attempt (same args) — a transient failure (spawn crash,
+    // missing <BINDING>, flaky RED run) gets exactly one more chance.
+    const runPhase = () =>
+      runTestAuthorPhase({
         payload,
         headSha,
         spawnOnce: ({ prompt }) => spawnClaudeOnce(prompt),
@@ -329,25 +339,52 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
           }),
         logger,
       });
-      if (split?.redSha) headSha = split.redSha;
-      await deps.pushEvent?.(job.jobId, 'test-author', 'test-author', 'step_complete', {
-        text: `RED confirmed — ${split.ownedTestFiles.length} test file(s) committed @${(split.redSha || '').slice(0, 7)}`,
-      })?.catch?.(() => {});
+    try {
+      try {
+        split = await runPhase();
+      } catch (first) {
+        logger.warn?.(`[story-dev] ${payload.storyId} test-author phase failed (attempt 1/2) — retrying once: ${first.message}`);
+        split = await runPhase();
+      }
     } catch (e) {
-      logger.warn?.(`[story-dev] ${payload.storyId} test-author phase failed → single-spawn fallback: ${e.message}`);
+      // FAIL CLOSED — never the legacy single-spawn (the implementer would
+      // author the very tests that judge it; pacman8, 2026-07-11). The story
+      // fails here, before any implementer spawn, and fix-forward happens on a
+      // later revival through the resume path above.
+      const msg = `test-author-failed: ${e.message}`;
+      logger.error?.(`[story-dev] ${payload.storyId} test-author failed twice — story fails closed (no single-spawn fallback): ${e.message}`);
       await deps.pushEvent?.(job.jobId, 'test-author', 'test-author', 'step_error', {
-        text: `test-author failed (${e.message}) — fail-open to single-spawn dev`,
-      }).catch?.(() => {});
-      split = null;
+        text: 'test-author failed twice — story fails closed; the implementer never authors its own tests',
+      })?.catch?.(() => {});
+      await deps.updateStoryState?.({ storyId: payload.storyId, state: 'failed', reason: msg });
+      return {
+        exitCode: 0,
+        newState: 'failed',
+        verdict: {
+          status: 'failing',
+          reasons: [msg, 'test-author failed twice — story fails closed; the implementer never authors its own tests'],
+        },
+        attemptsUsed: 0,
+        lastFailureDetail: msg,
+      };
     }
+    if (split?.redSha) headSha = split.redSha;
+    await deps.pushEvent?.(job.jobId, 'test-author', 'test-author', 'step_complete', {
+      text: split.resumed
+        ? `resume — reusing ${split.ownedTestFiles.length} committed test file(s) from a prior attempt`
+        : `RED confirmed — ${split.ownedTestFiles.length} test file(s) committed @${(split.redSha || '').slice(0, 7)}`,
+    })?.catch?.(() => {});
   }
-  // When split succeeded, forbid the implementer from editing the authored tests
-  // via the LIVE gate (deterministic in-turn block, stronger than a post-hoc
-  // revert). Rebuilt only in the split path; the default `gate` is untouched.
-  const implGate = split?.ownedTestFiles?.length
-    ? buildGateSpawn({
+  // In the split path the implementer may not write ANY test file via the LIVE
+  // gate (deterministic in-turn block, stronger than a post-hoc revert): the
+  // authored/owned files by name PLUS the **/*.test.* / **/*.spec.* globs —
+  // its <BINDING> comes from the Test-Author, so a NEW implementer-authored
+  // test could only ever be self-serving. Built ALWAYS when split ran (even a
+  // resume with no derivable owned files); the default `gate` is untouched.
+  const implGate = split
+    ? buildGate({
         jobId: job.jobId, p3Flags, touchPoints: payload.touches || [],
-        forbiddenAreas: [...(payload.forbiddenAreas || []), ...split.ownedTestFiles],
+        forbiddenAreas: [...(payload.forbiddenAreas || []), ...(split.ownedTestFiles || []), '**/*.test.*', '**/*.spec.*'],
         ledgerPath: join(projectRoot, '.pipeline', 'gate-events.jsonl'),
         ceilingUsd: payload.costCeilingUsd ?? job.costCeilingUsd,
         harnessCostDir: join(projectRoot, '.pipeline', 'harness-cost'),
@@ -470,15 +507,23 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       catch (e) { logger.warn?.(`[story-dev] ${payload.storyId} selective-regression failed (non-blocking): ${e.message}`); }
     }
 
-    // W2.2 — post-hoc tamper audit (the live gate already forbids editing the
-    // authored tests; this surfaces any leak). Warn only, never fails the story.
+    // W2.2 — post-hoc tamper audit. The live gate is the primary defense (it
+    // forbids the implementer every test file); this is the deterministic
+    // backstop for a gate leak. Detection runs here (right after integrate, on
+    // this attempt's commit diff); the hit is APPLIED after handleStoryCompletion
+    // below — it fails the attempt (was warn-only) and consumes a fix-forward
+    // retry exactly like a failing bound AC.
+    let tamper = null;
     if (split?.ownedTestFiles?.length && deps.git) {
       try {
         const d = await deps.git(['diff', '--name-only', `${headSha}~1`, headSha], projectRoot);
         const changed = String(d.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
-        const tamper = detectTestTampering(split.ownedTestFiles, changed);
-        if (!tamper.ok) logger.warn?.(`[story-dev] ${payload.storyId} implementer touched authored test(s): ${tamper.tampered.join(', ')}`);
-      } catch { /* audit only */ }
+        const t = detectTestTampering(split.ownedTestFiles, changed);
+        if (!t.ok) {
+          tamper = t;
+          logger.warn?.(`[story-dev] ${payload.storyId} implementer touched authored test(s): ${t.tampered.join(', ')}`);
+        }
+      } catch { /* detection is best-effort — no diff, no verdict */ }
     }
 
     // Decode the stream-json transcript to the agent's plain text so the
@@ -507,6 +552,25 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       // absent a manifest, invariants stay 'declared' and fail the gate closed.
       invariants: payload.invariants,
     });
+
+    // W2.2 tamper escalation — a tamper hit FAILS the attempt regardless of the
+    // AC verdict (a green run over modified acceptance tests proves nothing).
+    // Applied before the foundation/green-trunk gates so no further gate work
+    // is spent on a disqualified attempt.
+    if (tamper) {
+      completion.newState = 'failed';
+      completion.propagate = false;
+      completion.verdict = {
+        ...completion.verdict,
+        status: 'failing',
+        failing: [...(completion.verdict.failing || []), 'test-tampering'],
+        reasons: [
+          ...(completion.verdict.reasons || []),
+          `test-tampering: implementer modified authored test(s): ${tamper.tampered.join(', ')}`,
+        ],
+      };
+      lastFailureDetail = `test-tampering: implementer modified authored test(s): ${tamper.tampered.join(', ')}`;
+    }
 
     // Reality-Spine P1/P2 (redesign Part 2, Part 5 #2/#3) — the foundation
     // gate and green-trunk check run INSIDE the attempt loop, right after the
