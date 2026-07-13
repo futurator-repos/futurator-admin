@@ -7,10 +7,76 @@ import {
   applyBindings,
   evaluateCompletion,
   requiresBrowser,
+  resolveTestRefs,
 } from '../completion-gate.mjs';
 
 const ac = (id, over = {}) => ({ id, text: `${id} text`, acClass: 'deterministic', testBinding: { status: 'unbound' }, ...over });
 const passing = (id, sha, over = {}) => ac(id, { testBinding: { status: 'passing', lastRunSha: sha }, ...over });
+
+describe('resolveTestRefs (F1 — Incident C)', () => {
+  it('a single clean path → one token', () => {
+    expect(resolveTestRefs('src/game/maze.test.ts')).toEqual(['src/game/maze.test.ts']);
+  });
+  it("a 'file > describe > it' selector → the file segment", () => {
+    expect(resolveTestRefs('src/x/dino.test.ts > initiateJump > vy negative (AC-2)'))
+      .toEqual(['src/x/dino.test.ts']);
+  });
+  it('a JSON array of paths → one token per element (prose/selectors normalized)', () => {
+    expect(resolveTestRefs(['a/one.test.ts', 'b/two.test.ts > d > it', 'c/three.test.ts (note)']))
+      .toEqual(['a/one.test.ts', 'b/two.test.ts', 'c/three.test.ts']);
+  });
+  it('a legacy " + "-joined composite with parenthetical prose → one file token per chunk', () => {
+    const ref = 'src/game/maze.test.ts (buildInitialState contract) + src/game/reducer.test.ts (makePacmanReducer/System contract; typecheck enforced separately by the verify:build step)';
+    expect(resolveTestRefs(ref)).toEqual(['src/game/maze.test.ts', 'src/game/reducer.test.ts']);
+  });
+  it('drops empties and coerces non-string / null / empty inputs to []', () => {
+    expect(resolveTestRefs('')).toEqual([]);
+    expect(resolveTestRefs(null)).toEqual([]);
+    expect(resolveTestRefs(undefined)).toEqual([]);
+    expect(resolveTestRefs([])).toEqual([]);
+    expect(resolveTestRefs(['', '  ', 'ok.test.ts'])).toEqual(['ok.test.ts']);
+  });
+
+  // finding-1 (2026-07-14): a standalone PURE-PROSE chunk in a composite must NOT
+  // be silently dropped — that would let the AC green on its remaining real file
+  // while the prose's claim goes UNVERIFIED (false GREEN). It survives as a
+  // non-file token so the executor's TEST_FILE_RE flags it errored (loud).
+  it('a real-file + standalone-prose composite KEEPS the prose as a non-file token (no silent drop)', () => {
+    const ref = 'src/game/reducer.test.ts + (all pellets reachable — enforced by verify:build)';
+    expect(resolveTestRefs(ref)).toEqual([
+      'src/game/reducer.test.ts',
+      '(all pellets reachable — enforced by verify:build)',
+    ]);
+  });
+  it('an all-prose composite still normalizes to non-file tokens (errored loud, never [])', () => {
+    // both chunks are pure prose → both surface as non-file tokens (each errors in
+    // the executor); the OLD code dropped both → [] → a vacuous "no testRef" path.
+    expect(resolveTestRefs('(a) + (b)')).toEqual(['(a)', '(b)']);
+  });
+  it('a truly-empty trailing/leading " + " separator is still dropped silently', () => {
+    expect(resolveTestRefs('src/a.test.ts + ')).toEqual(['src/a.test.ts']);
+    expect(resolveTestRefs(' + src/a.test.ts')).toEqual(['src/a.test.ts']);
+  });
+
+  // finding-2 (2026-07-14): a supported single-file selector whose describe/it name
+  // contains " + " must NOT be mis-split into a bogus extra token — that fabricated
+  // a non-file token → errored binding fault → a permanently un-completable AC for
+  // a LEGITIMATE input (the Incident-C wall, re-opened).
+  it("a selector whose it-name contains ' + ' is NOT mis-split (finding-2)", () => {
+    expect(resolveTestRefs('src/x/foo.test.ts > reducer > adds a + b')).toEqual(['src/x/foo.test.ts']);
+  });
+  it("a ' + ' nested inside trailing prose is healed by re-join, not split", () => {
+    expect(resolveTestRefs('src/a.test.ts (covers X + Y)')).toEqual(['src/a.test.ts']);
+  });
+  it('a genuine composite of two selectors still yields both file tokens', () => {
+    expect(resolveTestRefs('a.test.ts > d > it one + b.test.ts > d > it two'))
+      .toEqual(['a.test.ts', 'b.test.ts']);
+  });
+  it('an array element containing " + " in its selector is a single ref (never split)', () => {
+    expect(resolveTestRefs(['src/x/foo.test.ts > reducer > adds a + b']))
+      .toEqual(['src/x/foo.test.ts']);
+  });
+});
 
 describe('parseBindingManifest', () => {
   it('parses a <BINDING> JSON object', () => {
@@ -18,6 +84,13 @@ describe('parseBindingManifest', () => {
     const m = parseBindingManifest(text);
     expect(m['ac-1']).toEqual({ testRef: 't.test.ts -t x', testKind: 'unit' });
     expect(m['ac-2']).toEqual({ testRef: 'probe:reach' });
+  });
+  it('accepts a JSON ARRAY testRef and stores it verbatim (array form, cross-slice contract)', () => {
+    const m = parseBindingManifest('{"ac-1": ["a.test.ts", "b.test.ts"], "ac-2": {"testRef": ["c.test.ts"], "testKind": "unit"}}');
+    expect(m['ac-1']).toEqual({ testRef: ['a.test.ts', 'b.test.ts'] });
+    expect(m['ac-2']).toEqual({ testRef: ['c.test.ts'], testKind: 'unit' });
+    // and the array is directly resolvable by the runner
+    expect(resolveTestRefs(m['ac-1'].testRef)).toEqual(['a.test.ts', 'b.test.ts']);
   });
   it('tolerates a bare JSON object and fenced json', () => {
     expect(parseBindingManifest('```json\n{"a":{"testRef":"x"}}\n```')['a'].testRef).toBe('x');
@@ -259,6 +332,21 @@ describe('evaluateCompletion — invariant gate (fail closed)', () => {
       invariants: [invariant('inv-1', { status: 'passing', lastRunSha: SHA })],
     });
     expect(r.status).toBe('done');
+  });
+
+  it('F3: a deterministic AC whose binding ERRORED fails with a DISTINCT binding-fault reason', () => {
+    const r = evaluateCompletion({
+      acceptanceCriteria: [ac('a', {
+        testBinding: { status: 'failing', testKind: 'unit', errored: true, lastRunSha: SHA, detail: 'src/x.test.ts: no such test file (unrunnable ref)' },
+      })],
+      currentHeadSha: SHA,
+    });
+    expect(r.status).toBe('failing');
+    expect(r.failing).toContain('a');
+    // distinct from the plain "deterministic AC not passing" reason
+    expect(r.reasons.join(' ')).toMatch(/binding fault \(unrunnable testRef\)/);
+    expect(r.reasons.join(' ')).toMatch(/no such test file/);
+    expect(r.reasons.join(' ')).not.toMatch(/deterministic AC not passing/);
   });
 
   it('a verify:state AC carrying status:misbound blocks + surfaces the mock detail', () => {

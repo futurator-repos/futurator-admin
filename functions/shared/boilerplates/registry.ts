@@ -472,7 +472,17 @@ export function useGameStateMachine<TEntity extends Entity = Entity>(
   // probe can reach a terminal state deterministically. Pure for all real actions.
   const wrapped = useCallback(
     (s: GameState<TEntity>, a: GameAction<TEntity>): GameState<TEntity> =>
-      a.type === '__force' ? { ...s, status: (a as { status: string }).status } : reducer(s, a),
+      a.type === '__force'
+        ? // Incident C / F7 (foundation-green-guarantee-plan.md) — the TEST-ONLY
+          // \`__force\` action carries a raw \`string\` (any QA probe can request any
+          // status label) but \`GameState.status\` is the app's narrow \`GameStatus\`
+          // union. Cast ONLY at this single assignment site so the seam stays
+          // permissive while \`GameStatus\` stays a clean closed union for app code —
+          // widening \`GameStatus\` itself (e.g. \`| (string & {})\`) would leak into
+          // every reducer/branch the app writes. Bare scaffold must \`tsc\`/\`next
+          // build\` clean with zero story code; this was the one failing line.
+          { ...s, status: (a as { status: string }).status as GameState<TEntity>['status'] }
+        : reducer(s, a),
     [reducer],
   );
   const [state, dispatch] = useReducer(

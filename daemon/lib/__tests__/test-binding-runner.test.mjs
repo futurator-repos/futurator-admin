@@ -17,7 +17,7 @@ describe('runStoryBindings', () => {
     expect(acceptanceCriteria[0].testBinding.status).toBe('passing');
     expect(acceptanceCriteria[0].testBinding.lastRunSha).toBe('SHA1');
     expect(acceptanceCriteria[1].testBinding.status).toBe('failing');
-    expect(summary).toEqual({ ran: 2, passed: 1, failed: 1, skipped: 0 });
+    expect(summary).toEqual({ ran: 2, passed: 1, failed: 1, skipped: 0, errored: 0 });
   });
 
   it('skips unbound and manual ACs (left for the gate / human)', async () => {
@@ -55,7 +55,7 @@ describe('runStoryBindings', () => {
     expect(unitRan).toBe(false); // never silently downgraded to the unit executor
     expect(acceptanceCriteria[0].testBinding.status).toBe('failing');
     expect(acceptanceCriteria[0].testBinding.detail).toMatch(/browser/);
-    expect(summary).toEqual({ ran: 1, passed: 0, failed: 1, skipped: 0 });
+    expect(summary).toEqual({ ran: 1, passed: 0, failed: 1, skipped: 0, errored: 0 });
   });
 
   it('a behavior AC bound testKind:browser runs under the browser executor', async () => {
@@ -82,6 +82,81 @@ describe('runStoryBindings', () => {
   });
 });
 
+describe('runStoryBindings — F2 verify-typed routing + F3 errored count (Incident C)', () => {
+  const typecheckAc = (id, over = {}) => ({
+    id, verify: 'build', acClass: 'deterministic',
+    testBinding: { status: 'bound', testRef: `ref-${id}`, testKind: 'unit' }, ...over,
+  });
+
+  it("a verify:'build' AC with NO runnable test refs runs the TYPECHECK executor, not vitest", async () => {
+    let unitRan = false;
+    let typecheckRan = false;
+    const { acceptanceCriteria, summary } = await runStoryBindings({
+      acceptanceCriteria: [typecheckAc('t', { testBinding: { status: 'bound', testRef: 'types compile', testKind: 'unit' } })],
+      headSha: 'SHA1',
+      executors: {
+        unit: async () => { unitRan = true; return { passed: true }; },
+        typecheck: async () => { typecheckRan = true; return { passed: true }; },
+      },
+    });
+    expect(unitRan).toBe(false); // never mis-routed to a vitest filter
+    expect(typecheckRan).toBe(true);
+    expect(acceptanceCriteria[0].testBinding.status).toBe('passing');
+    expect(summary.errored).toBe(0);
+  });
+
+  it("a verify:'build' AC that ALSO carries runnable test-file refs runs those (bound files satisfy it)", async () => {
+    let unitRan = false;
+    let typecheckRan = false;
+    const { acceptanceCriteria } = await runStoryBindings({
+      acceptanceCriteria: [typecheckAc('t', { testBinding: { status: 'bound', testRef: 'src/foundation.test.ts', testKind: 'unit' } })],
+      headSha: 'SHA1',
+      executors: {
+        unit: async () => { unitRan = true; return { passed: true }; },
+        typecheck: async () => { typecheckRan = true; return { passed: true }; },
+      },
+    });
+    expect(unitRan).toBe(true);
+    expect(typecheckRan).toBe(false);
+    expect(acceptanceCriteria[0].testBinding.status).toBe('passing');
+  });
+
+  it("a verify:'build' AC with no runnable refs AND no typecheck executor → binding fault (errored), never silently unit", async () => {
+    let unitRan = false;
+    const { acceptanceCriteria, summary } = await runStoryBindings({
+      acceptanceCriteria: [typecheckAc('t', { testBinding: { status: 'bound', testRef: 'types compile', testKind: 'unit' } })],
+      headSha: 'SHA1',
+      executors: { unit: async () => { unitRan = true; return { passed: true }; } }, // no typecheck wired
+    });
+    expect(unitRan).toBe(false);
+    expect(acceptanceCriteria[0].testBinding.status).toBe('failing');
+    expect(acceptanceCriteria[0].testBinding.errored).toBe(true);
+    expect(acceptanceCriteria[0].testBinding.detail).toMatch(/refusing to mis-route/);
+    expect(summary.errored).toBe(1);
+  });
+
+  it('an executor returning errored:true is counted in summary.errored and stamped on the binding', async () => {
+    const { acceptanceCriteria, summary } = await runStoryBindings({
+      acceptanceCriteria: [bound('a')],
+      headSha: 'SHA1',
+      executors: { unit: async () => ({ passed: false, errored: true, detail: 'no such test file (unrunnable ref)' }) },
+    });
+    expect(acceptanceCriteria[0].testBinding.status).toBe('failing');
+    expect(acceptanceCriteria[0].testBinding.errored).toBe(true);
+    expect(summary).toEqual({ ran: 1, passed: 0, failed: 1, skipped: 0, errored: 1 });
+  });
+
+  it('a clean ran-and-failed executor is NOT errored (distinct from a binding fault)', async () => {
+    const { acceptanceCriteria, summary } = await runStoryBindings({
+      acceptanceCriteria: [bound('a')],
+      headSha: 'SHA1',
+      executors: { unit: async () => ({ passed: false, detail: 'exit 1: AssertionError' }) },
+    });
+    expect(acceptanceCriteria[0].testBinding.errored).toBeUndefined();
+    expect(summary.errored).toBe(0);
+  });
+});
+
 describe('runStoryBindings — no-mock rule for verify:state ACs', () => {
   const stateAc = (id, over = {}) => ({
     id, verify: 'state', acClass: 'deterministic',
@@ -100,7 +175,7 @@ describe('runStoryBindings — no-mock rule for verify:state ACs', () => {
     expect(acceptanceCriteria[0].testBinding.status).toBe('misbound');
     expect(acceptanceCriteria[0].testBinding.detail).toMatch(/no-mock rule/);
     expect(acceptanceCriteria[0].testBinding.detail).toMatch(/\.\/levels/);
-    expect(summary).toEqual({ ran: 1, passed: 0, failed: 1, skipped: 0 });
+    expect(summary).toEqual({ ran: 1, passed: 0, failed: 1, skipped: 0, errored: 0 });
   });
 
   it('an unreadable bound test file → misbound (fail-closed)', async () => {
@@ -122,7 +197,7 @@ describe('runStoryBindings — no-mock rule for verify:state ACs', () => {
       executors: { unit: async () => ({ passed: true }) },
     });
     expect(acceptanceCriteria[0].testBinding.status).toBe('passing');
-    expect(summary).toEqual({ ran: 1, passed: 1, failed: 0, skipped: 0 });
+    expect(summary).toEqual({ ran: 1, passed: 1, failed: 0, skipped: 0, errored: 0 });
   });
 
   it('RED phase: enforceNoMock:false skips the check even for a mocking test', async () => {
@@ -187,7 +262,9 @@ describe('runStoryInvariants', () => {
     });
     expect(invariants[0].validator.status).toBe('failing');
     expect(invariants[0].validator.detail).toMatch(/no authored validator/);
-    expect(summary).toEqual({ ran: 0, passed: 0, failed: 1, skipped: 0 });
+    // an unauthored validator cannot be EXECUTED → counted as a binding fault (errored).
+    expect(invariants[0].validator.errored).toBe(true);
+    expect(summary).toEqual({ ran: 0, passed: 0, failed: 1, skipped: 0, errored: 1 });
   });
 
   it('an authored validator that mocks an in-repo module → failing, not executed', async () => {
@@ -216,7 +293,7 @@ describe('runStoryInvariants', () => {
     expect(invariants[0].validator.lastRunSha).toBe('SHA9');
     expect(invariants[0].validator.lastRunAt).toBe('T1');
     expect(invariants[0].validator.detail).toBe('flood-fill ok');
-    expect(summary).toEqual({ ran: 1, passed: 1, failed: 0, skipped: 0 });
+    expect(summary).toEqual({ ran: 1, passed: 1, failed: 0, skipped: 0, errored: 0 });
   });
 
   it('a failing executor → failing status', async () => {

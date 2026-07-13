@@ -131,9 +131,26 @@ export function buildStoryTestPrompt(payload) {
     ``,
     renderTestAuthorInvariantsBlock(payload.invariants),
     ``,
-    `# Required: bind each AC to its test`,
+    `# Required: bind each AC to its test — MACHINE-RUNNABLE selectors only`,
+    `The completion gate RUNS each "testRef" verbatim as a vitest filter, so for a`,
+    `file-bound (unit/integration) AC it MUST be exactly one of these three shapes —`,
+    `nothing else:`,
+    `  1. a single real test-file path you authored, e.g. "src/x/foo.test.ts";`,
+    `  2. a single-test selector "src/x/foo.test.ts > describe name > it name";`,
+    `  3. a JSON ARRAY of real test-file paths when ONE AC genuinely needs several`,
+    `     files, e.g. ["src/x/a.test.ts", "src/x/b.test.ts"] — the gate runs each`,
+    `     and the AC passes iff every file resolves and passes.`,
+    `FORBIDDEN inside a testRef (they make it un-runnable → the gate can resolve no`,
+    `file → the AC fails FOREVER even though your test files pass — this is the`,
+    `Incident-C wall): prose or free-text descriptions, parenthetical annotations`,
+    `like "(contract)"/"(typecheck)", phrases like "enforced separately by ...", and`,
+    `" + "-joined strings that concatenate multiple files into one ref. If one AC`,
+    `needs several files, use the ARRAY form (shape 3) — NEVER join paths with " + ".`,
+    `(A behavioral/needsBrowser AC is the ONE exception: bind it testKind:'browser'`,
+    `with its when/thenObservable intent as the testRef, per the rule above — never a`,
+    `file path.)`,
     `<BINDING>`,
-    `{ ${(payload.acceptanceCriteria || []).map((ac) => `"${ac.id}": { "testRef": "<test selector>", "testKind": "unit|integration|browser|manual" }`).join(', ')} }`,
+    `{ ${(payload.acceptanceCriteria || []).map((ac) => `"${ac.id}": { "testRef": "src/x/foo.test.ts  (or  \\"src/x/foo.test.ts > describe > it\\"  or  [\\"src/x/a.test.ts\\",\\"src/x/b.test.ts\\"])", "testKind": "unit|integration|browser|manual" }`).join(', ')} }`,
     `</BINDING>`,
   ].filter((l) => l !== '').join('\n');
 }
@@ -244,6 +261,13 @@ export async function runTestAuthorPhase({ payload, headSha, spawnOnce, commitRe
   const ownedTestFiles = (commit && commit.files) || [];
 
   // Prove RED: run the bound tests against the RED commit — they MUST all fail.
+  // BINDING-FAULT passthrough (Incident C / F3): assertRedFirst now REJECTS a
+  // binding that ERRORED (a testRef that resolved to no real test file — an
+  // un-runnable composite/prose ref) as a FAULT, distinct from a genuine RED. We
+  // surface its reason verbatim and fail the FRESH phase closed — we do NOT
+  // catch-and-swallow a binding fault as a normal RED failure, because an errored
+  // binding is NOT proof of RED and would dead-end at completion (the composite-ref
+  // wall). The caller retries once, then fails the story closed.
   const { summary } = await runBindings({ acceptanceCriteria: boundCriteria, headSha: redSha });
   const red = assertRedFirst(summary);
   if (!red.ok) throw new Error(`RED-first check failed: ${red.reason}`);

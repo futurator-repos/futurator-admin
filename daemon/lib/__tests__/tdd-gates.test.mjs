@@ -44,6 +44,25 @@ describe('assertRedFirst', () => {
     expect(r.reason).toMatch(/passed before implementation/);
   });
 
+  it('F3: an ERRORED binding is a BINDING FAULT, not a valid RED (surfaced loudly)', () => {
+    // a binding that could not be executed proves nothing — even though it "failed"
+    const r = assertRedFirst({ ran: 1, passed: 0, failed: 1, errored: 1 });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/binding fault/);
+    expect(r.reason).toMatch(/not a valid RED/);
+  });
+
+  it('F3: errored is checked FIRST — a fault blocks even when the run tallies look RED', () => {
+    const r = assertRedFirst({ ran: 3, passed: 0, failed: 3, errored: 2 });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/binding fault/);
+  });
+
+  it('a genuine ran-and-failed RED (errored:0) stays a valid RED', () => {
+    const r = assertRedFirst({ ran: 3, passed: 0, failed: 3, errored: 0 });
+    expect(r.ok).toBe(true);
+  });
+
   it('rejects when no bound tests ran at all', () => {
     const r = assertRedFirst({ ran: 0, passed: 0, failed: 0 });
     expect(r.ok).toBe(false);

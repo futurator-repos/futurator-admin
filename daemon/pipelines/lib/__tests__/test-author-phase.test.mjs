@@ -5,6 +5,9 @@ import {
   runTestAuthorPhase,
   parsePorcelainTestFiles,
 } from '../test-author-phase.mjs';
+// Slice A owns parseBindingManifest (the canonical-form normalizer); Slice B binds
+// against it via the shared test seam to prove the prompt's testRef shapes parse.
+import { parseBindingManifest } from '../../../lib/completion-gate.mjs';
 
 describe('parsePorcelainTestFiles (pacman3 canary fix)', () => {
   it('collects new/modified test files from git status --porcelain', () => {
@@ -62,6 +65,46 @@ describe('prompts', () => {
     expect(p).toMatch(/IMPLEMENTER/);
     expect(p).toMatch(/src\/login\.test\.ts/);
     expect(p).toMatch(/may NOT create, edit, or delete/);
+  });
+
+  it('F6: <BINDING> instruction demands machine-runnable selectors, teaches the array form, forbids prose/joins', () => {
+    const p = buildStoryTestPrompt(payload);
+    // three runnable shapes, including the JSON ARRAY for genuine multi-file coverage
+    expect(p).toMatch(/MACHINE-RUNNABLE selectors only/);
+    expect(p).toMatch(/single real test-file path/);
+    expect(p).toMatch(/single-test selector/);
+    expect(p).toMatch(/JSON ARRAY of real test-file paths/);
+    expect(p).toMatch(/\["src\/x\/a\.test\.ts", "src\/x\/b\.test\.ts"\]/);
+    // the forbid list — the exact Incident-C composite/prose shapes
+    expect(p).toMatch(/FORBIDDEN inside a testRef/);
+    expect(p).toMatch(/parenthetical annotations/);
+    expect(p).toMatch(/enforced separately by/);
+    expect(p).toMatch(/NEVER join paths with " \+ "/);
+    // the browser AC exception is preserved (its prose testRef is legitimate)
+    expect(p).toMatch(/behavioral\/needsBrowser AC is the ONE exception/);
+  });
+});
+
+// F6 round-trip: the testRef shapes the prompt teaches must survive the real
+// binding parser (Slice A's parseBindingManifest normalizes them to canonical form).
+describe('F6 testRef shapes parse through parseBindingManifest', () => {
+  it('a single-file path binds to that exact ref', () => {
+    const m = parseBindingManifest('<BINDING>{"AC-1":{"testRef":"src/x/foo.test.ts","testKind":"unit"}}</BINDING>');
+    expect(m['AC-1']).toBeTruthy();
+    expect(m['AC-1'].testRef).toBe('src/x/foo.test.ts');
+  });
+  it('a file>describe>it selector binds to that exact ref', () => {
+    const m = parseBindingManifest('<BINDING>{"AC-1":{"testRef":"src/x/foo.test.ts > suite > it works","testKind":"unit"}}</BINDING>');
+    expect(m['AC-1'].testRef).toBe('src/x/foo.test.ts > suite > it works');
+  });
+  it('an ARRAY testRef parses to a manifest entry (Slice A normalizes it to canonical form)', () => {
+    // Race-safe across slices: the acId entry must exist and the parser must not
+    // choke on the array shape. The canonical normalization of the array itself is
+    // Slice A's contract; here we only prove the multi-file shape the prompt emits
+    // is accepted, never dropped on the floor.
+    const m = parseBindingManifest('<BINDING>{"AC-1":{"testRef":["src/x/a.test.ts","src/x/b.test.ts"],"testKind":"unit"}}</BINDING>');
+    expect(m['AC-1']).toBeTruthy();
+    expect(typeof m['AC-1']).toBe('object');
   });
 });
 

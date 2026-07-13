@@ -137,6 +137,34 @@ describe('buildQuickPlanspecPrompt', () => {
     expect(p).toMatch(/isolated test-author/);
   });
 
+  it('F4: demands ATOMIC ACs — one claim per AC, split the story rather than bundle', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a settings panel', appSlug: 'sp1' });
+    expect(p).toContain('ATOMIC ACs');
+    expect(p).toMatch(/EXACTLY ONE verifiable claim/);
+    expect(p).toMatch(/NEVER\s+bundle/);
+    expect(p).toMatch(/SPLIT the story/);
+    // the atomic rule keeps the ≤6 budget as the split trigger, not a bundling license
+    expect(p).toMatch(/never bundle claims to\s*\n?\s*fit the budget/);
+    // generic mechanics only — no app/game-specific claim leaked into the example
+    expect(p).not.toMatch(/buildInitialState|ghosts|pacman/i);
+  });
+
+  it('F5: reserves verify:build for a whole-project compile — data/state properties are verify:state', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz2' });
+    expect(p).toMatch(/"build" is ONLY a genuine whole-project compile/);
+    expect(p).toMatch(/is verify:'state'/);
+    expect(p).toMatch(/NEVER verified by "build"/);
+    // a data/state property must not be mislabeled build (Incident C C3)
+    expect(p).toMatch(/data\/state property is NEVER verified by "build"/);
+  });
+
+  it('F5: forbids declaring one property as BOTH an AC and an invariant (double-declaration)', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz3' });
+    expect(p).toMatch(/ONE HOME per property/);
+    expect(p).toMatch(/never BOTH/);
+    expect(p).toMatch(/Declare\s+data\/schema properties as invariants/);
+  });
+
   it('teaches the complexity → model ladder and caps architectural seats at 2', () => {
     const p = buildQuickPlanspecPrompt({ intent: 'a paint app', appSlug: 'pa1' });
     expect(p).toContain('COMPLEXITY drives which model');

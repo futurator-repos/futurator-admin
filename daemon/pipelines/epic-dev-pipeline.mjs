@@ -288,7 +288,7 @@ export async function runEpicDevPipeline(opts) {
   const injectionArgs = buildSubagentInjectionArgs({ p3Flags });
 
   const args = [
-    '-p', prompt,
+    '-p',
     '--model', payload.orchestratorModel,
     '--output-format', 'stream-json',
     '--verbose',
@@ -339,9 +339,19 @@ export async function runEpicDevPipeline(opts) {
   const child = spawn(claudeBin, args, {
     cwd: projectRoot,
     env: { ...process.env, ...(opts.env || {}), ...gate.env },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   registerChild(job.jobId, child);
+
+  // Deliver the rendered prompt over stdin (claude -p reads the prompt from
+  // stdin when no positional prompt is given). Keeps the large prompt out of
+  // argv (shell-guard scans args) and matches the orchestrator's contract.
+  try {
+    child.stdin?.write?.(prompt);
+    child.stdin?.end?.();
+  } catch {
+    // fall through to close handler
+  }
 
   const stdoutFile = createWriteStream(stdoutPath, { flags: 'a' });
   const stderrFile = createWriteStream(stderrPath, { flags: 'a' });

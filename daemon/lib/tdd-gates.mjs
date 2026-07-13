@@ -46,15 +46,32 @@ export function detectTestTampering(ownedTestFiles = [], changedFiles = []) {
  * rule ("If a test passes before implementation, it's not a valid acceptance
  * test", mirrored from BMAD `*atdd`).
  *
- * @param {{ ran?: number, passed?: number, failed?: number }} summary
- * @returns {{ ok: boolean, ran: number, passed: number, failed: number, reason: string }}
+ * @param {{ ran?: number, passed?: number, failed?: number, errored?: number }} summary
+ * @returns {{ ok: boolean, ran: number, passed: number, failed: number, errored: number, reason: string }}
  */
 export function assertRedFirst(summary = {}) {
   const ran = Number(summary.ran) || 0;
   const passed = Number(summary.passed) || 0;
   const failed = Number(summary.failed) || 0;
+  const errored = Number(summary.errored) || 0;
+  // F3 (Incident C, C5): a binding that ERRORED — an unrunnable testRef (resolved
+  // to no real test file) or a runner fault — is NOT a valid RED. A genuine RED is
+  // a test that RAN and FAILED; a test that CANNOT be executed proves nothing and
+  // silently dead-ends completion (the exact class where a malformed composite
+  // ref "passes" RED then fails forever). Surface it LOUDLY and block. Checked
+  // FIRST: an errored binding is a fault regardless of the run tallies.
+  if (errored > 0) {
+    return {
+      ok: false,
+      ran,
+      passed,
+      failed,
+      errored,
+      reason: `binding fault: ${errored} binding(s) could not be executed (unrunnable testRef) — a test that cannot be executed is not a valid RED`,
+    };
+  }
   if (ran === 0) {
-    return { ok: false, ran, passed, failed, reason: 'no bound tests ran — cannot prove RED-first' };
+    return { ok: false, ran, passed, failed, errored, reason: 'no bound tests ran — cannot prove RED-first' };
   }
   if (passed > 0) {
     return {
@@ -62,8 +79,9 @@ export function assertRedFirst(summary = {}) {
       ran,
       passed,
       failed,
+      errored,
       reason: `${passed} bound test(s) passed before implementation — not a valid RED state (tautology or pre-existing)`,
     };
   }
-  return { ok: true, ran, passed, failed, reason: `all ${failed}/${ran} bound tests RED before implementation` };
+  return { ok: true, ran, passed, failed, errored, reason: `all ${failed}/${ran} bound tests RED before implementation` };
 }
