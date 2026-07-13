@@ -4,15 +4,15 @@ import { resolveAgentPolicy, cliModelArgs } from '../model-effort-policy.mjs';
 const env = {}; // isolate from the host machine's env
 
 describe('resolveAgentPolicy', () => {
-  it('planner gets the strongest default thinking (Fable 5 — the plan is the leverage)', () => {
-    expect(resolveAgentPolicy({ role: 'planner', env })).toEqual({ model: 'claude-fable-5', effort: 'high' });
+  it('planner gets the strongest available default (Opus 4.8 — the plan is the leverage; fable deactivated 2026-07-13)', () => {
+    expect(resolveAgentPolicy({ role: 'planner', env })).toEqual({ model: 'claude-opus-4-8', effort: 'high' });
   });
 
   it('dev scales with story complexity across the three-tier ladder', () => {
     expect(resolveAgentPolicy({ role: 'dev', complexity: 'trivial', env })).toEqual({ model: 'claude-sonnet-5', effort: 'low' });
     expect(resolveAgentPolicy({ role: 'dev', complexity: 'standard', env }).effort).toBe('medium');
     expect(resolveAgentPolicy({ role: 'dev', complexity: 'complex', env })).toEqual({ model: 'claude-opus-4-8', effort: 'high' });
-    expect(resolveAgentPolicy({ role: 'dev', complexity: 'architectural', env })).toEqual({ model: 'claude-fable-5', effort: 'high' });
+    expect(resolveAgentPolicy({ role: 'dev', complexity: 'architectural', env })).toEqual({ model: 'claude-opus-4-8', effort: 'high' });
   });
 
   it('critic resolves its own dedicated seat (opus-4-8/medium), not the reviewer fallback', () => {
