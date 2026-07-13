@@ -308,9 +308,13 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
           // story's `touches`, so staging by touches alone committed 0 test files
           // (no RED audit trail, no tamper baseline). Discover them from git
           // status and stage them explicitly alongside the touches.
+          // -uall (pacman1, 2026-07-13): without it git collapses a fully
+          // untracked directory to one `?? src/game/` entry, so a foundation
+          // story's brand-new test dir yielded 0 matches and no RED commit —
+          // -uall lists every untracked FILE individually.
           let authoredTests = [];
           try {
-            const st = await deps.git(['status', '--porcelain'], projectRoot);
+            const st = await deps.git(['status', '--porcelain', '-uall'], projectRoot);
             authoredTests = parsePorcelainTestFiles(st.stdout);
           } catch { /* best-effort — fall back to touches-only staging */ }
           const integ = await integrateStory({

@@ -68,6 +68,30 @@ export function findStaleJobs(jobs, opts) {
 }
 
 /**
+ * Cross-daemon reap-ownership guard (pacman1 triple-mint, 2026-07-13).
+ *
+ * TWO daemons share the agent-jobs table (EC2 production + an optional laptop
+ * for 'local'-targeted queue calls). The `!activeJobs.has(jobId)` guard at the
+ * reap call site is PROCESS-LOCAL — a laptop daemon's map is empty for every
+ * EC2 job, so it saw EC2's live story-dev jobs (whose lastHeartbeatAt was
+ * written once at start; the claude spawn runs >5 min with no DDB write),
+ * declared them crashed, marked them STALE, and orphan-released their story
+ * claims — the frontier then re-minted a duplicate job every ~5 minutes while
+ * the "dead" implementers kept running (three concurrent claudes racing one
+ * story's files).
+ *
+ * The rule: a daemon may reap ONLY jobs its own source claimed
+ * (`job.claimedBySource`, stamped by runJobAsync at start). Rows from before
+ * the stamp existed have no owner — only the production 'ec2' daemon may reap
+ * those, so a guest laptop can never touch them. PURE.
+ */
+export function canReapJob(job, { source = 'local' } = {}) {
+  const owner = job?.claimedBySource;
+  if (owner) return owner === source;
+  return source === 'ec2';
+}
+
+/**
  * 2026-06-16 — job types whose orphaned-RUNNING rows are SAFE to AUTO-REQUEUE
  * (reset to PENDING) when a daemon restart kills them mid-run, rather than just
  * marked STALE (terminal). These are IDEMPOTENT infra jobs:

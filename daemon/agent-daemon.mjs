@@ -188,6 +188,7 @@ import {
   buildResumeJob,
   isStaleAnyPhase,
   isRequeueableOrphan,
+  canReapJob,
   DEFAULT_STALE_MS,
   REQUEUE_ON_ORPHAN_JOB_TYPES,
 } from './pipelines/stale-heartbeat.mjs';
@@ -1622,6 +1623,16 @@ async function writeHeartbeat() {
         startedAt: info.startedAt,
         workingDir: (info.workingDir || '').split('/').pop() || '',
       });
+      // Per-job liveness refresh (pacman1 triple-mint, 2026-07-13): a story-dev
+      // job's lastHeartbeatAt was written once at start, then the claude spawn
+      // ran >5 min with no DDB write — indistinguishable from a crash to any
+      // stale check that can't see this process's activeJobs. Tick the row
+      // ~every 60s while the job is live so staleness means actual death.
+      // Fire-and-forget: a missed tick only delays the next one.
+      if (!info.jobHbMs || Date.now() - info.jobHbMs > 60_000) {
+        info.jobHbMs = Date.now();
+        updateJobFields(jobId, { lastHeartbeatAt: new Date().toISOString() }).catch(() => {});
+      }
     }
 
     const mem = { totalMem: totalmem(), freeMem: freemem(), loadAvg: loadavg() };
@@ -2706,6 +2717,9 @@ async function scanStaleEpicDevJobs() {
       // dead; their heartbeat is just behind because the pipeline module
       // doesn't tick updatedAt continuously.
       if (activeJobs.has(job.jobId)) continue;
+      // Reap-ownership scope (pacman1 triple-mint, 2026-07-13) — same rule as
+      // the story-dev passes below: never resume another host's live job.
+      if (!canReapJob(job, { source: DAEMON_SOURCE })) continue;
 
       const newJobId = randomUUID();
       const nowIso = new Date().toISOString();
@@ -2760,6 +2774,10 @@ async function scanStaleEpicDevJobs() {
     const requeueOrphans = (Items || []).filter(
       (j) =>
         !activeJobs.has(j.jobId) &&
+        // Reap-ownership scope (pacman1 triple-mint, 2026-07-13): activeJobs is
+        // process-local, so a peer daemon (laptop ↔ EC2) must not requeue or
+        // reap another host's live jobs — only jobs OUR source claimed.
+        canReapJob(j, { source: DAEMON_SOURCE }) &&
         isRequeueableOrphan(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }),
     );
     for (const job of requeueOrphans) {
@@ -2783,6 +2801,11 @@ async function scanStaleEpicDevJobs() {
         // handled above — don't also mark them STALE.
         !isRequeueableOrphan(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }) &&
         !activeJobs.has(j.jobId) &&
+        // Reap-ownership scope (pacman1 triple-mint, 2026-07-13): only jobs OUR
+        // source claimed — a laptop daemon reaping EC2's live story-dev jobs
+        // orphan-released their claims and the frontier re-minted duplicates
+        // every ~5 min while the "dead" implementers kept racing the tree.
+        canReapJob(j, { source: DAEMON_SOURCE }) &&
         isStaleAnyPhase(j, { now: Date.now(), staleMs: STALE_HEARTBEAT_MS }),
     );
     for (const job of otherStale) {
@@ -7798,6 +7821,11 @@ async function runJobAsync(job) {
     model: null,
   });
   jobEventSeqs.set(job.jobId, 0);
+  // Reap-ownership stamp (pacman1 triple-mint, 2026-07-13): record WHICH daemon
+  // source runs this job so the stale reaper (canReapJob) is scoped to its own
+  // jobs — a peer daemon (laptop ↔ EC2) must never reap another host's live
+  // work. Fire-and-forget: a missed stamp only means the legacy ec2-only rule.
+  updateJobFields(job.jobId, { claimedBySource: DAEMON_SOURCE }).catch(() => {});
 
   const handler = selectHandler(job);
   log(

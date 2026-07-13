@@ -5,6 +5,7 @@ import {
   buildResumeJob,
   DEFAULT_STALE_MS,
   isRequeueableOrphan,
+  canReapJob,
   REQUEUE_ON_ORPHAN_JOB_TYPES,
 } from '../stale-heartbeat.mjs';
 
@@ -214,5 +215,31 @@ describe('isRequeueableOrphan', () => {
   it('does NOT requeue a fresh (heartbeating) autopilot concept-gen job', () => {
     const job = { jobId: 'g2', status: 'RUNNING', conceptAutopilotGen: true, updatedAt: fresh };
     expect(isRequeueableOrphan(job, { now: NOW })).toBe(false);
+  });
+});
+
+// Cross-daemon reap-ownership guard (pacman1 triple-mint, 2026-07-13): the
+// laptop daemon reaped EC2's live story-dev jobs (its activeJobs map is
+// process-local), orphan-released their story claims, and the frontier
+// re-minted duplicates every ~5 minutes.
+describe('canReapJob', () => {
+  it('a daemon may reap only jobs its own source claimed', () => {
+    expect(canReapJob({ claimedBySource: 'ec2' }, { source: 'ec2' })).toBe(true);
+    expect(canReapJob({ claimedBySource: 'local' }, { source: 'local' })).toBe(true);
+  });
+
+  it('a peer daemon may NEVER reap another source\'s job (the pacman1 bug)', () => {
+    expect(canReapJob({ claimedBySource: 'ec2' }, { source: 'local' })).toBe(false);
+    expect(canReapJob({ claimedBySource: 'local' }, { source: 'ec2' })).toBe(false);
+  });
+
+  it('legacy rows without a claimedBySource stamp are reaped only by the production ec2 daemon', () => {
+    expect(canReapJob({}, { source: 'ec2' })).toBe(true);
+    expect(canReapJob({}, { source: 'local' })).toBe(false);
+    expect(canReapJob(undefined, { source: 'local' })).toBe(false);
+  });
+
+  it('defaults to the safe posture (local, cannot reap legacy rows) when no source given', () => {
+    expect(canReapJob({})).toBe(false);
   });
 });
