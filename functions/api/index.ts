@@ -334,6 +334,13 @@ import { appCreateInputSchema } from '../shared/schemas/app-create-schema';
 import { sliceForPlan } from '../shared/timer/slicer';
 import { aggregateByCategory } from '../shared/timer/aggregator';
 import { timingCohortQuerySchema } from '../shared/schemas/timing-cohort-query-schema';
+// External pipeline-dispatch API (machine-callable, x-queue-key). Intent → a
+// running Pipeline-3 plan (202) + a public stage-status poll. Logic lives in the
+// service module; index.ts only wires the routes + auth-skip.
+import {
+  handleDispatch as handlePipelineDispatch,
+  handleGetRun as handlePipelineGetRun,
+} from '../shared/services/pipeline-dispatch';
 import { buildForensicPayload } from '../shared/timer/forensic-builder';
 import type { CohortBaseline } from '../shared/timer/forensic-builder';
 import type { TimerCategory } from '../shared/timer/types';
@@ -491,6 +498,11 @@ app.use('/api/*', async (c, next) => {
   // Queues module — external ingest is machine-callable; it is guarded by the
   // `x-queue-key` shared secret inside the handler, not by the operator JWT.
   if (c.req.path === '/api/queue/ingest') return next();
+  // Pipeline-dispatch API — machine-callable (x-queue-key). Dispatch is exact;
+  // the run-status route carries a variable :id so match its prefix. Both
+  // handlers enforce the shared secret internally (fail-closed 401).
+  if (c.req.path === '/api/pipeline/dispatch') return next();
+  if (c.req.path.startsWith('/api/pipeline/runs/')) return next();
   return authMiddleware(c, next);
 });
 
@@ -6152,6 +6164,15 @@ app.post('/api/queue/requests/:id/respond', authMiddleware, async (c) => {
   }
   return c.json({ ok: true, respondedTo: target });
 });
+
+// ── Pipeline-dispatch API (external, x-queue-key) ──
+// POST /api/pipeline/dispatch — { source, intent, name? } → 202 { runId, appId,
+// statusUrl } and kicks off a full Pipeline-3 dev run (reuses the quick-p3 flow).
+// GET  /api/pipeline/runs/:id — external stage poll (concept|developing|vqa|
+// deployment|completed|failed|blocked|queued). Both fail-closed on x-queue-key.
+// Handlers own their auth; these routes are in the auth-skip list above.
+app.post('/api/pipeline/dispatch', (c) => handlePipelineDispatch(c));
+app.get('/api/pipeline/runs/:id', (c) => handlePipelineGetRun(c));
 
 app.post('/api/ec2/enable', async (c) => {
   const { state } = await getInstanceState();
