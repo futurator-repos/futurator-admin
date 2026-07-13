@@ -426,6 +426,13 @@ export interface IacFinopsReadiness {
   basis: string;
   blockedBy: string[];
 }
+/** The authority's growth rule ("birth certificate") — the invariant every NEW resource
+ *  must satisfy so the paid-down debt can never re-accumulate. Static, tool-agnostic. */
+export interface IacGrowthRule {
+  authority: string;
+  rule: string;
+  enforcedBy: string;
+}
 /** Stack-aware Infrastructure migration track, produced by iac-phase-planner.mjs.
  *  Gap-driven: only emits steps for MISSING dimensions. */
 export interface IacPlan {
@@ -445,6 +452,8 @@ export interface IacPlan {
   manifestPreview?: IacManifestPreview;
   /** Item 6 — testable FinOps definition-of-done. */
   finopsReadiness?: IacFinopsReadiness;
+  /** The authority invariant new infra must be born satisfying. */
+  growthRule?: IacGrowthRule;
 }
 
 /** One entry in the scan's execution ledger (C-LEDGER) — a recon step, an

@@ -369,3 +369,21 @@ describe('Final iteration item 6 — FinOps-readiness testable DoD', () => {
     expect(plan.finopsReadiness.blockedBy.some((b) => /still undeclared/.test(b))).toBe(false);
   });
 });
+
+describe('Growth rule (birth certificate) — the authority invariant on the plan', () => {
+  it('every plan carries the static, tool-agnostic IaC growth rule + how it is enforced', () => {
+    const plan = planIacTrack(fullShapeInv());
+    expect(plan.growthRule.authority).toBe('iac');
+    expect(plan.growthRule.rule).toMatch(/BORN declared/);
+    expect(plan.growthRule.rule).toMatch(/tag taxonomy/);
+    expect(plan.growthRule.enforcedBy).toMatch(/policy pack/);
+  });
+
+  it('is identical regardless of detected tool (contract-enforced, not tool-enforced)', () => {
+    const sstPlan = planIacTrack(fullShapeInv());
+    const inv = fullShapeInv();
+    inv.iac = [{ provider: 'terraform', tier: 'resource' }];
+    const tfPlan = planIacTrack(inv);
+    expect(tfPlan.growthRule).toEqual(sstPlan.growthRule);
+  });
+});

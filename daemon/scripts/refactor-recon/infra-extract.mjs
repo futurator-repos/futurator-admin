@@ -2465,12 +2465,15 @@ export function gradeIacMaturity(inventory = {}, files = []) {
     ),
   );
   // P5/A7 — REQUIRED_TAGS gains owner/managed-by/data-classification (governance
-  // taxonomy, not just the original cost taxonomy).
+  // taxonomy, not just the original cost taxonomy). `capability` closes the loop with
+  // the manifest schema's tags.capability field — FinOps cost-per-capability is
+  // unreachable while the taxonomy meter can hit 100% without it.
   const REQUIRED_TAGS = [
     'team',
     'environment',
     'service',
     'cost-center',
+    'capability',
     'owner',
     'managed-by',
     'data-classification',
@@ -2480,6 +2483,7 @@ export function gradeIacMaturity(inventory = {}, files = []) {
     environment: ['environment', 'env'],
     service: ['service', 'service-name', 'svc'],
     'cost-center': ['cost-center', 'costcenter', 'cost-centre'],
+    capability: ['capability', 'cost-capability', 'feature'],
     owner: ['owner'],
     'managed-by': ['managed-by', 'managedby', 'managed_by'],
     'data-classification': ['data-classification', 'data-class'],
@@ -2720,6 +2724,33 @@ export function gradeIacMaturity(inventory = {}, files = []) {
       dimension: 'infrastructure',
       verifyCommand:
         'aws sts get-caller-identity && aws organizations describe-account --account-id <id> — confirm the account is not shared with unrelated workloads',
+    });
+  }
+  // FinOps cloud-blind prerequisites — cost visibility and cost-allocation activation
+  // live in the BILLING console, never in code: declared tags do NOT reach cost
+  // reports until activated there. Gated on a billable cloud actually being present.
+  const hasBillableCloud = svcList.some((s) => ['AWS', 'GCP', 'Azure'].includes(s.cloud));
+  if (hasBillableCloud) {
+    addBacklog({
+      id: 'verify:cloud-blind:cost-visibility',
+      fact: 'Cost visibility enabled in the cloud billing console (Cost Explorer / billing export)',
+      dimension: 'finops',
+      verifyCommand:
+        'aws ce get-cost-and-usage --time-period Start=<YYYY-MM-01>,End=<YYYY-MM-DD> --granularity MONTHLY --metrics UnblendedCost (or GCP BigQuery billing export / Azure Cost Management) — confirm cost data is queryable at all',
+    });
+    addBacklog({
+      id: 'verify:cloud-blind:cost-allocation-tags',
+      fact: 'Cost-allocation tags activated in billing — tags declared in IaC never appear in cost reports until activated',
+      dimension: 'finops',
+      verifyCommand:
+        'aws ce list-cost-allocation-tags --status Active (or GCP label-based export / Azure tag-inheritance policy) — confirm the declared taxonomy keys are Active',
+    });
+    addBacklog({
+      id: 'verify:cloud-blind:org-tag-policy',
+      fact: 'An org-level tag policy enforces the taxonomy on newly created resources account-wide',
+      dimension: 'finops',
+      verifyCommand:
+        'aws organizations describe-effective-policy --policy-type TAG_POLICY (or GCP org-policy constraints / Azure Policy tag rules) — confirm new resources cannot be born untagged',
     });
   }
 

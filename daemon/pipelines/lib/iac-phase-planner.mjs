@@ -531,6 +531,20 @@ const GENERIC_STACK_DIRS = new Set([
 // is code-only, so it can only emit the schema + a code-derived PREVIEW (see
 // buildManifestPreview): `arn`/`depends_on`/live tags are honestly left unresolved here,
 // not fabricated.
+// The authority's GROWTH RULE ("birth certificate") — the invariant every NEW resource
+// must satisfy so the debt this plan pays down can never re-accumulate. Tool-agnostic:
+// enforced on the contract (declared+tagged+protected), not on any specific IaC library.
+export const GROWTH_RULE = {
+  authority: 'iac',
+  rule:
+    'Every new cloud resource is BORN declared in IaC, carrying the full tag taxonomy ' +
+    '(incl. cost-center + capability), with data protection (PITR / versioning / ' +
+    'deletion protection) enabled at creation — never provisioned by hand and retrofitted later.',
+  enforcedBy:
+    'policy pack (see targetArtifacts) + `diff --no-changes` as a required CI check — ' +
+    'advisory first, then mandatory once the backlog is clear',
+};
+
 export const MANIFEST_SCHEMA = {
   version: '1',
   description:
@@ -964,6 +978,7 @@ export function planIacTrack(inventory, { stack = null, gitEvolution = null } = 
     manifestSchema: MANIFEST_SCHEMA,
     manifestPreview,
     finopsReadiness,
+    growthRule: GROWTH_RULE,
     // Keep/retire classifier output, hoisted for consumers that don't walk the track.
     ...(retire.length ? { retire } : {}),
   };

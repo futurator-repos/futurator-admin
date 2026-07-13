@@ -785,13 +785,14 @@ describe('gradeIacMaturity — testing & governance dimensions', () => {
 
 describe('gradeIacMaturity — drift/cost, tags, regions', () => {
   // P5/A7 — REQUIRED_TAGS grew from 4 → 7 (owner/managed-by/data-classification
-  // added), so a 4-tag fixture is now PARTIAL coverage (4/7), not 100%.
-  it('7-tag full coverage → 100% taxonomy, regions extracted + pinned', () => {
+  // added), then → 8 (`capability`, closing the loop with the manifest schema's
+  // tags.capability field), so older partial fixtures score against 8 keys.
+  it('8-tag full coverage → 100% taxonomy, regions extracted + pinned', () => {
     const inv = buildInfraInventory([
       {
         rel: 'infra/main.tf',
         content:
-          'provider "aws" {\n region = "eu-central-1"\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n service = "api"\n cost-center = "cc-1"\n owner = "platform"\n managed-by = "terraform"\n data-classification = "internal"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}',
+          'provider "aws" {\n region = "eu-central-1"\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n service = "api"\n cost-center = "cc-1"\n capability = "graph"\n owner = "platform"\n managed-by = "terraform"\n data-classification = "internal"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}',
       },
     ]);
     expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(100);
@@ -800,7 +801,7 @@ describe('gradeIacMaturity — drift/cost, tags, regions', () => {
     expect(inv.iacMaturity.regionPinned).toBe(true);
   });
 
-  it('the original 4-tag set alone → 57% coverage against the 7-tag taxonomy, missing lists the new 3', () => {
+  it('the original 4-tag set alone → 50% coverage against the 8-tag taxonomy, missing lists the newer keys', () => {
     const inv = buildInfraInventory([
       {
         rel: 'infra/main.tf',
@@ -808,9 +809,9 @@ describe('gradeIacMaturity — drift/cost, tags, regions', () => {
           'provider "aws" {\n region = "eu-central-1"\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n service = "api"\n cost-center = "cc-1"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}',
       },
     ]);
-    expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(57);
+    expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(50);
     expect(inv.iacMaturity.tagTaxonomy.missing).toEqual(
-      expect.arrayContaining(['owner', 'managed-by', 'data-classification']),
+      expect.arrayContaining(['capability', 'owner', 'managed-by', 'data-classification']),
     );
   });
 
@@ -822,9 +823,9 @@ describe('gradeIacMaturity — drift/cost, tags, regions', () => {
           'provider "aws" {\n default_tags {\n tags = {\n team = "core"\n environment = "prod"\n }\n }\n}\nresource "aws_s3_bucket" "b" {}',
       },
     ]);
-    expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(29);
+    expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(25);
     expect(inv.iacMaturity.tagTaxonomy.missing).toEqual(
-      expect.arrayContaining(['service', 'cost-center']),
+      expect.arrayContaining(['service', 'cost-center', 'capability']),
     );
   });
 
@@ -1037,6 +1038,28 @@ describe('gradeIacMaturity — P4 epistemics: verificationBacklog', () => {
       backlog.some((b) => b.id.startsWith('verify:state') || b.id.startsWith('verify:testing')),
     ).toBe(false);
   });
+
+  it('a billable cloud present → FinOps cloud-blind prerequisites (cost visibility, cost-allocation tags, org tag policy) enter the backlog with verifyCommands', () => {
+    const inv = buildInfraInventory([{ rel: 'src/db.ts', specifiers: ['@aws-sdk/client-dynamodb'] }]);
+    const backlog = inv.iacMaturity.verificationBacklog;
+    const finops = backlog.filter((b) => b.dimension === 'finops');
+    expect(finops.map((b) => b.id).sort()).toEqual([
+      'verify:cloud-blind:cost-allocation-tags',
+      'verify:cloud-blind:cost-visibility',
+      'verify:cloud-blind:org-tag-policy',
+    ]);
+    for (const b of finops) {
+      expect(b.basis).toBe('unknown');
+      expect(b.verifyCommand).toMatch(/aws /);
+    }
+  });
+
+  it('a 3rd-party-only repo (no AWS/GCP/Azure service) → no FinOps cloud-blind entries (billing-console facts are irrelevant)', () => {
+    const inv = buildInfraInventory([{ rel: 'src/pay.ts', specifiers: ['stripe'] }]);
+    expect(
+      inv.iacMaturity.verificationBacklog.some((b) => b.dimension === 'finops'),
+    ).toBe(false);
+  });
 });
 
 describe('gradeIacMaturity — P5 tag report: declared-IaC coverage vs platform-implicit SST tags', () => {
@@ -1061,12 +1084,12 @@ describe('gradeIacMaturity — P5 tag report: declared-IaC coverage vs platform-
     expect(inv.iacMaturity.tagTaxonomy.platformImplicit).toEqual([]);
   });
 
-  it('REQUIRED_TAGS is exposed and includes the new owner/managed-by/data-classification keys', () => {
+  it('REQUIRED_TAGS is exposed and includes owner/managed-by/data-classification/capability', () => {
     const inv = buildInfraInventory([
       { rel: 'infra/main.tf', content: 'resource "aws_s3_bucket" "b" {}' },
     ]);
     expect(inv.iacMaturity.tagTaxonomy.requiredTags).toEqual(
-      expect.arrayContaining(['owner', 'managed-by', 'data-classification']),
+      expect.arrayContaining(['owner', 'managed-by', 'data-classification', 'capability']),
     );
   });
 });
@@ -1358,7 +1381,7 @@ describe('P2 — tag taxonomy scoped to IaC files only', () => {
         content: 'export const post = { tags: { service: "x", "cost-center": "y" } };',
       },
     ]);
-    expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(29);
+    expect(inv.iacMaturity.tagTaxonomy.coveragePct).toBe(25);
     expect(inv.iacMaturity.tagTaxonomy.missing).toEqual(
       expect.arrayContaining(['service', 'cost-center']),
     );

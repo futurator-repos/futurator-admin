@@ -32,8 +32,8 @@ import {
   type IacTargetArtifact,
   type IacManifestSchema,
   type IacManifestPreview,
-  type IacManifestNode,
   type IacFinopsReadiness,
+  type IacGrowthRule,
 } from '@/hooks/use-scan-engine';
 
 const CONF_COLOR: Record<string, string> = {
@@ -928,6 +928,30 @@ function FinopsReadinessPanel({ readiness }: { readiness?: IacFinopsReadiness })
   );
 }
 
+/** The authority's growth rule ("birth certificate") — the invariant that keeps the debt
+ *  this plan pays down from ever re-accumulating. Rendered as a standing invariant, not a step. */
+function GrowthRulePanel({ growthRule }: { growthRule?: IacGrowthRule }) {
+  if (!growthRule) return null;
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        padding: '6px 10px',
+        fontSize: 10.5,
+      }}
+    >
+      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--foreground)' }}>
+        Growth rule — the birth certificate for new infra
+      </div>
+      <div style={{ color: 'var(--text-dim)', marginTop: 2 }}>{growthRule.rule}</div>
+      <div style={{ color: 'var(--text-dim)', marginTop: 2 }}>
+        <span style={{ fontWeight: 600 }}>enforced by:</span> {growthRule.enforcedBy}
+      </div>
+    </div>
+  );
+}
+
 /** Item 2/3 — the manifest STANDARD (a fixed schema, collapsed by default — reference
  *  material) plus a code-derived PREVIEW proving it against this repo's real detections. */
 function ManifestPanel({
@@ -1090,6 +1114,7 @@ function MigrationPathPanel({ plan }: { plan?: IacPlan | null }) {
       </div>
       <TargetArtifactsPanel artifacts={plan.targetArtifacts} />
       <FinopsReadinessPanel readiness={plan.finopsReadiness} />
+      <GrowthRulePanel growthRule={plan.growthRule} />
       {next.length ? (
         <ol
           style={{
