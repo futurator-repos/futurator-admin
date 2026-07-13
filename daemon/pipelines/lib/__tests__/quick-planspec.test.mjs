@@ -168,6 +168,18 @@ describe('buildQuickPlanspecPrompt', () => {
     expect(p).toMatch(/INVARIANTS/);
     expect(p).toContain('invariants');
   });
+
+  it('instructs the planner to give every story a phase name drawn from its own PHASES', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz1' });
+    // the field appears in the PLAN_SPEC schema block
+    expect(p).toContain('"phase"');
+    // a HARD RULE teaches phase naming + same-layer/same-phase sharing
+    expect(p).toMatch(/PHASE:/);
+    expect(p).toMatch(/PHASES section of your OWN PLAN_THINKING/);
+    expect(p).toMatch(/same dependency layer that belong to the same phase/i);
+    // generic mechanics only — no hardcoded taxonomy leaked into the prompt
+    expect(p).toMatch(/Never use a hardcoded\/generic taxonomy/);
+  });
 });
 
 describe('buildQuickPlanspecRepairPrompt', () => {
@@ -222,6 +234,14 @@ describe('buildQuickPlanspecRepairPrompt', () => {
     });
     expect(p).toContain('EXISTING TEST FILES ARE LAW');
     expect(p).not.toContain('freshly scaffolded');
+  });
+
+  it('instructs the repair pass to keep a phase name on every re-emitted story', () => {
+    const { stories, audit } = parseQuickPlanspec(`<PLAN_SPEC>${GOD_FILE_SPEC}</PLAN_SPEC>`);
+    const p = buildQuickPlanspecRepairPrompt({
+      intent: 'a pacman game', appSlug: 'pm1', stories, violations: audit.violations,
+    });
+    expect(p).toMatch(/Keep a "phase" name on every story/);
   });
 });
 
@@ -499,6 +519,59 @@ describe('parseQuickPlanspec', () => {
     expect(integ.isFoundation).toBe(false);
   });
 
+  it('coerces a model-authored phase onto each story (trimmed, capped ≤40 chars)', () => {
+    const spec = JSON.stringify({
+      stories: [
+        { id: 'contract', title: 'Define the contract types', phase: '  Foundation  ', touches: ['src/types.ts'],
+          acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }] },
+        { id: 'movement', title: 'Implement movement', dependsOn: ['contract'],
+          phase: 'x'.repeat(60), touches: ['src/slices/movement.ts'],
+          acceptanceCriteria: [{ text: 'arrow key moves the player', verify: 'state' }] },
+        { id: 'assemble', title: 'Assemble the complete app', dependsOn: ['contract', 'movement'],
+          touches: ['src/app.tsx'],
+          acceptanceCriteria: [{ text: 'the app runs end to end', verify: 'behavior', needsBrowser: true }] },
+      ],
+    });
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    const [contract, movement, assemble] = stories;
+    expect(contract.phase).toBe('Foundation'); // trimmed
+    expect(movement.phase).toHaveLength(40); // capped
+    expect(assemble.phase).toBeUndefined(); // absent stays undefined
+  });
+
+  it('carries the parsed phase through buildStoryNodeRows onto the row', () => {
+    const spec = JSON.stringify({
+      stories: [
+        { id: 'contract', title: 'Define the contract types', phase: 'Foundation', touches: ['src/types.ts'],
+          acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }] },
+        { id: 'movement', title: 'Implement movement', dependsOn: ['contract'], phase: 'core-mechanics',
+          touches: ['src/slices/movement.ts'],
+          acceptanceCriteria: [{ text: 'arrow key moves the player', verify: 'state' }] },
+      ],
+    });
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    const { rows } = buildStoryNodeRows({ stories, planId: 'p', appId: 'a' });
+    const byTitle = new Map(rows.map((r) => [r.title, r]));
+    expect(byTitle.get('Define the contract types').phase).toBe('Foundation');
+    expect(byTitle.get('Implement movement').phase).toBe('core-mechanics');
+  });
+
+  it('tolerates an absent or non-string phase (stays undefined, no throw)', () => {
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${SPEC}</PLAN_SPEC>`); // SPEC has no phase
+    expect(stories.every((s) => s.phase === undefined)).toBe(true);
+    const spec = JSON.stringify({
+      stories: [
+        { id: 'c', title: 'Define the contract types', phase: 42, touches: ['src/types.ts'],
+          acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }] },
+        { id: 'x', title: 'Implement widget', dependsOn: ['c'], phase: '   ', touches: ['src/x.ts'],
+          acceptanceCriteria: [{ text: 'widget works fine', verify: 'state' }] },
+      ],
+    });
+    const { stories: s2 } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    expect(s2[0].phase).toBeUndefined(); // non-string ignored
+    expect(s2[1].phase).toBeUndefined(); // whitespace-only trims to empty -> undefined
+  });
+
   it('parses invariants onto the foundation story: mints ids, drops malformed entries', () => {
     const spec = JSON.stringify({
       stories: [
@@ -518,14 +591,36 @@ describe('parseQuickPlanspec', () => {
     const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
     const [found, feat] = stories;
     expect(found.invariants).toHaveLength(2);
+    // Model-emitted slugs are NAMESPACED with the minted storyId: the id feeds
+    // the mandated `<id>.invariant.test.*` file name and the gate's worktree-wide
+    // convention rebind, so a bare slug shared by two stories would bind one
+    // story's gate to the OTHER story's validator file.
     expect(found.invariants[0]).toEqual({
-      id: 'maze-reachable',
+      id: `${found.storyId}-maze-reachable`,
       description: 'every pellet cell has a path to the exit',
       validator: { status: 'declared' },
     });
     expect(found.invariants[1].id).toBe(`${found.storyId}-inv2`);
     expect(found.invariants[1].validator.status).toBe('declared');
     expect(feat.invariants).toEqual([]); // non-foundation story declared none
+  });
+
+  it('namespaces invariant ids per story: the SAME model-emitted slug on two stories yields distinct ids', () => {
+    const spec = JSON.stringify({
+      stories: [
+        { title: 'Define the contract types and state model', touches: ['src/types.ts'],
+          acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }],
+          invariants: [{ id: 'seed-data-valid', description: 'every seeded id resolves in the schema' }] },
+        { title: 'Implement the level loader', dependsOn: [], touches: ['src/levels.ts'],
+          acceptanceCriteria: [{ text: 'levels load without error', verify: 'state' }],
+          invariants: [{ id: 'seed-data-valid', description: 'every level references only seeded ids' }] },
+      ],
+    });
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    const [a, b] = stories;
+    expect(a.invariants[0].id).toBe(`${a.storyId}-seed-data-valid`);
+    expect(b.invariants[0].id).toBe(`${b.storyId}-seed-data-valid`);
+    expect(a.invariants[0].id).not.toBe(b.invariants[0].id);
   });
 });
 

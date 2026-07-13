@@ -11,7 +11,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { buildStoryStateUpdate } from '../story-persist.mjs';
+import {
+  buildStoryStateUpdate,
+  capStageSummaries,
+  STAGE_SUMMARY_PREVIEW_CAP,
+  STAGE_SUMMARIES_MAX_BYTES,
+} from '../story-persist.mjs';
 
 // ── Primary path ──────────────────────────────────────────────────────────────
 
@@ -236,5 +241,101 @@ describe('buildStoryStateUpdate — alias-everything', () => {
   it('does NOT write loadedSkills when omitted', () => {
     const result = buildStoryStateUpdate({ state: 'done', commitSha: 'sha' });
     expect(result.UpdateExpression).not.toContain('loadedSkills');
+  });
+});
+
+// ── invariants persistence (dossier A1) ────────────────────────────────────────
+// The validator bindings previously existed ONLY in the fresh test-author's
+// stdout — a resumed/retried job re-derived manifest={} and fail-closed on
+// 'no authored validator'. Persisting them on the row (exactly like
+// acceptanceCriteria) is what breaks the deterministic retry dead-end.
+
+describe('buildStoryStateUpdate — invariants (A1)', () => {
+  const invariants = [
+    {
+      id: 'inv-1',
+      description: 'every declared target resolves',
+      validator: { ref: 'src/inv-1.invariant.test.ts', kind: 'test', status: 'passing', lastRunSha: 'sha1' },
+    },
+  ];
+
+  it('persists a non-empty invariants array WITH validator state (aliased)', () => {
+    const result = buildStoryStateUpdate({ state: 'done', invariants });
+    expect(result.UpdateExpression).toContain('#invariants = :invariants');
+    expect(result.ExpressionAttributeNames['#invariants']).toBe('invariants');
+    expect(result.ExpressionAttributeValues[':invariants']).toEqual(invariants);
+    expect(result.ExpressionAttributeValues[':invariants'][0].validator.ref).toBe('src/inv-1.invariant.test.ts');
+    expect(result.ExpressionAttributeValues[':invariants'][0].validator.status).toBe('passing');
+  });
+
+  it('does NOT write invariants when the array is empty (never clobber a prior binding)', () => {
+    const result = buildStoryStateUpdate({ state: 'failed', invariants: [] });
+    expect(result.UpdateExpression).not.toContain('invariants');
+    expect(result.ExpressionAttributeNames['#invariants']).toBeUndefined();
+  });
+
+  it('does NOT write invariants when omitted', () => {
+    const result = buildStoryStateUpdate({ state: 'done' });
+    expect(result.UpdateExpression).not.toContain('invariants');
+  });
+});
+
+// ── stageSummaries persistence + size caps (dossier B2) ────────────────────────
+
+describe('buildStoryStateUpdate — stageSummaries', () => {
+  it('persists a stageSummaries object (aliased)', () => {
+    const stageSummaries = {
+      testAuthor: { files: [{ path: 'src/a.test.ts', lines: 10 }], redSha: 'sha1', resumed: false },
+      implementer: { attempts: [{ attempt: 1, commitSha: 'sha2', durationMs: 100 }] },
+    };
+    const result = buildStoryStateUpdate({ state: 'done', stageSummaries });
+    expect(result.UpdateExpression).toContain('#stageSummaries = :stageSummaries');
+    expect(result.ExpressionAttributeNames['#stageSummaries']).toBe('stageSummaries');
+    expect(result.ExpressionAttributeValues[':stageSummaries']).toEqual(stageSummaries);
+  });
+
+  it('does NOT write stageSummaries when omitted', () => {
+    const result = buildStoryStateUpdate({ state: 'done' });
+    expect(result.UpdateExpression).not.toContain('stageSummaries');
+  });
+});
+
+describe('capStageSummaries', () => {
+  it('returns undefined for null/non-object/empty input', () => {
+    expect(capStageSummaries(null)).toBeUndefined();
+    expect(capStageSummaries(undefined)).toBeUndefined();
+    expect(capStageSummaries('x')).toBeUndefined();
+    expect(capStageSummaries({})).toBeUndefined();
+  });
+
+  it('passes a small object through structurally unchanged (deep copy)', () => {
+    const s = { testAuthor: { files: [{ path: 'a', preview: 'short' }], resumed: true } };
+    const out = capStageSummaries(s);
+    expect(out).toEqual(s);
+    expect(out).not.toBe(s); // never mutates the caller's object
+  });
+
+  it(`caps each preview at ${STAGE_SUMMARY_PREVIEW_CAP} chars`, () => {
+    const s = { testAuthor: { files: [{ path: 'a', preview: 'x'.repeat(5000) }] } };
+    const out = capStageSummaries(s);
+    expect(out.testAuthor.files[0].preview.length).toBe(STAGE_SUMMARY_PREVIEW_CAP);
+    // input untouched
+    expect(s.testAuthor.files[0].preview.length).toBe(5000);
+  });
+
+  it(`shrinks/drops previews until the total JSON fits under ${STAGE_SUMMARIES_MAX_BYTES} bytes`, () => {
+    // 40 files × 2000-char previews = ~80KB of preview payload alone.
+    const files = Array.from({ length: 40 }, (_, i) => ({
+      path: `src/f${i}.test.ts`,
+      lines: 50,
+      preview: 'y'.repeat(3000),
+    }));
+    const s = { testAuthor: { files, redSha: 'sha1' } };
+    const out = capStageSummaries(s);
+    expect(Buffer.byteLength(JSON.stringify(out), 'utf8')).toBeLessThanOrEqual(STAGE_SUMMARIES_MAX_BYTES);
+    // structural fields survive — previews are the sacrifice
+    expect(out.testAuthor.files).toHaveLength(40);
+    expect(out.testAuthor.files[0].path).toBe('src/f0.test.ts');
+    expect(out.testAuthor.redSha).toBe('sha1');
   });
 });

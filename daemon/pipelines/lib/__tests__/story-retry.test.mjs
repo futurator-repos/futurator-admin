@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildPriorFailureBlock, classifyRetryable, shouldRetry } from '../story-retry.mjs';
+import { buildPriorFailureBlock, classifyRetryable, findGateDataGaps, shouldRetry } from '../story-retry.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers — mirror the shape produced by handleStoryCompletion
@@ -19,10 +19,11 @@ const failedAc = (id, testKind = 'unit', detail = null, testRef = 'tests/foo.tes
 const browserAc = (id) => failedAc(id, 'browser', null, 'playwright:ac-1');
 const manualAc = (id) => ac(id, { verify: 'manual', testBinding: { status: 'bound', testKind: 'manual', testRef: 'manual:check' } });
 
-const mkCompletion = ({ failingIds = [], acs = [], reasons = [], newState = 'failed' } = {}) => ({
+const mkCompletion = ({ failingIds = [], acs = [], reasons = [], newState = 'failed', invariants } = {}) => ({
   newState,
   verdict: { failing: failingIds, reasons },
   acceptanceCriteria: acs,
+  ...(invariants ? { invariants } : {}),
 });
 
 // ---------------------------------------------------------------------------
@@ -138,9 +139,41 @@ describe('classifyRetryable', () => {
     expect(classifyRetryable(mkCompletion({ failingIds: ['i-1'], acs }))).toBe(true);
   });
 
-  it('returns true when a failing AC is unbound (agent may bind it on retry)', () => {
+  // A6 taxonomy (dossier): an unbound AC is a gate-DATA failure — in the split
+  // model only the test-author emits <BINDING>, so respawning the IMPLEMENTER
+  // can never bind it. Fail fast instead of consuming the fix-forward attempt.
+  // (This deliberately supersedes the old "agent may bind it on retry" rule.)
+  it('returns false when a failing AC is unbound (gate-data: nothing for an implementer respawn to satisfy)', () => {
     const acs = [ac('u-1')]; // unbound, no testKind
-    expect(classifyRetryable(mkCompletion({ failingIds: ['u-1'], acs }))).toBe(true);
+    expect(classifyRetryable(mkCompletion({ failingIds: ['u-1'], acs }))).toBe(false);
+  });
+
+  it('returns false when a failing AC is misbound (gate-data: rebinding is test-author work)', () => {
+    const acs = [ac('m-1', { testBinding: { status: 'misbound', testRef: 't.test.ts', testKind: 'unit' } })];
+    expect(classifyRetryable(mkCompletion({ failingIds: ['m-1'], acs }))).toBe(false);
+  });
+
+  it('returns false when ANY failing entry is a gate-data failure, even beside an agent-fixable one', () => {
+    // Completion needs EVERY entry to pass — one unfixable data gap makes the
+    // re-spawn pure waste regardless of the fixable sibling.
+    const acs = [ac('u-1'), failedAc('f-1', 'unit')];
+    expect(classifyRetryable(mkCompletion({ failingIds: ['u-1', 'f-1'], acs }))).toBe(false);
+  });
+
+  it('returns false for a failing invariant with no authored validator (gate-data)', () => {
+    const invariants = [{ id: 'inv-1', description: 'd', validator: { status: 'failing', detail: 'no authored validator (declared) — fail-closed' } }];
+    expect(classifyRetryable(mkCompletion({ failingIds: ['inv-1'], invariants }))).toBe(false);
+  });
+
+  it('returns true for an authored-but-failing invariant (a failing bound test — agent-fixable)', () => {
+    const invariants = [{ id: 'inv-1', description: 'd', validator: { ref: 'src/inv-1.invariant.test.ts', kind: 'test', status: 'failing' } }];
+    expect(classifyRetryable(mkCompletion({ failingIds: ['inv-1'], invariants }))).toBe(true);
+  });
+
+  it('returns true for pseudo-entries (test-tampering / green-trunk / foundation-gate)', () => {
+    for (const pseudo of ['test-tampering', 'green-trunk', 'foundation-gate']) {
+      expect(classifyRetryable(mkCompletion({ failingIds: [pseudo], acs: [] }))).toBe(true);
+    }
   });
 
   it('returns true when a failing AC has an unknown/future testKind', () => {
@@ -155,9 +188,52 @@ describe('classifyRetryable', () => {
   });
 
   it('returns false when failing ids reference ACs not in acs list (unknown AC → unresolvable)', () => {
-    // AC not found → kind resolves to undefined → not in NON_RETRYABLE_KINDS → retryable.
-    // This is intentional: unknown = try again; the agent may produce the binding.
+    // AC not found → treated as a pseudo-entry (not a data gap, kind unknown →
+    // not in NON_RETRYABLE_KINDS) → retryable. Intentional: unknown = try again.
     expect(classifyRetryable(mkCompletion({ failingIds: ['ghost'], acs: [] }))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findGateDataGaps (A6)
+// ---------------------------------------------------------------------------
+
+describe('findGateDataGaps', () => {
+  it('returns [] for null / no failing entries', () => {
+    expect(findGateDataGaps(null)).toEqual([]);
+    expect(findGateDataGaps(mkCompletion())).toEqual([]);
+  });
+
+  it('names an unbound AC by id', () => {
+    const gaps = findGateDataGaps(mkCompletion({ failingIds: ['u-1'], acs: [ac('u-1')] }));
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toMatch(/^u-1: /);
+    expect(gaps[0]).toMatch(/unbound/);
+  });
+
+  it('names a misbound AC with its binding detail', () => {
+    const acs = [ac('m-1', { testBinding: { status: 'misbound', testRef: 't.test.ts', testKind: 'unit', detail: 'mocks in-repo module' } })];
+    const gaps = findGateDataGaps(mkCompletion({ failingIds: ['m-1'], acs }));
+    expect(gaps[0]).toMatch(/^m-1: /);
+    expect(gaps[0]).toMatch(/misbound/);
+    expect(gaps[0]).toMatch(/mocks in-repo module/);
+  });
+
+  it('names an unauthored invariant; skips authored-but-failing ones', () => {
+    const invariants = [
+      { id: 'inv-a', description: 'd', validator: { status: 'failing' } }, // no ref → gap
+      { id: 'inv-b', description: 'd', validator: { ref: 'src/inv-b.invariant.test.ts', status: 'failing' } }, // authored → fixable
+    ];
+    const gaps = findGateDataGaps(mkCompletion({ failingIds: ['inv-a', 'inv-b'], invariants }));
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toMatch(/^inv-a: /);
+    expect(gaps[0]).toMatch(/no authored validator/);
+  });
+
+  it('ignores pseudo-entries and passing/bound failing ACs', () => {
+    const acs = [failedAc('f-1', 'unit')];
+    const gaps = findGateDataGaps(mkCompletion({ failingIds: ['f-1', 'green-trunk', 'test-tampering'], acs }));
+    expect(gaps).toEqual([]);
   });
 });
 

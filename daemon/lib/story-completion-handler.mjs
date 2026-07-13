@@ -7,11 +7,70 @@
 // Executors are injected so it unit-tests without running real tests.
 
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
+import * as nodeFs from 'node:fs';
+import { join } from 'node:path';
 import { parseBindingManifest, parseInvariantManifest, applyBindings, evaluateCompletion } from './completion-gate.mjs';
 import { runStoryBindings, runStoryInvariants, makeInvariantExecutor } from './test-binding-runner.mjs';
 import { computeQualityInput } from './quality-input.mjs';
 import { evaluateQualityGate } from './quality-gate.mjs';
 import { shouldReview, parseReviewerVerdict } from './story-reviewer.mjs';
+
+// Directories the convention search never descends into (vendored/derived trees
+// can be huge and can never legitimately hold a story-authored validator).
+const REBIND_SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'out', 'coverage']);
+
+/**
+ * Deterministic convention rebind (dossier A1): locate a COMMITTED validator
+ * file for a declared invariant by the naming the test-author prompt MANDATES —
+ * `<invariantId>.invariant.test.*` anywhere in the tree (the prompt's
+ * double-star glob; spelled out here because `*` + `/` ends a block comment).
+ * Used only when BOTH the parsed
+ * <INVARIANTS> manifest AND the persisted validator lack a ref (a resumed job
+ * has bindingOutput='' → manifest {}), so a green-coded story is not
+ * deterministically dead-ended on retry. Existence in the worktree is enough —
+ * the executor runs the file FROM the worktree, so a stale/uncommitted path
+ * simply fails the run (fail-closed, never fail-open). PURE over the injected
+ * fs (default node:fs); returns a cwd-relative posix path or null.
+ *
+ * UNIQUENESS GUARD: parseQuickPlanspec namespaces ids `<storyId>-<slug>` so two
+ * stories can no longer share an id, but plans minted BEFORE that fix (and any
+ * hand-authored rows) may still collide. A rebind must NEVER bind an id to the
+ * wrong story's file, so when MORE THAN ONE file in the tree matches the id the
+ * search returns null — ambiguous → stays 'declared' → the runner fails it
+ * closed, exactly like "not found". This costs a full (depth/skip-bounded) walk
+ * instead of a first-hit return; acceptable for the rare resume-only path.
+ *
+ * @param {{ cwd: string, invariantId: string, fs?: object, maxDepth?: number }} args
+ * @returns {string|null}
+ */
+export function findInvariantValidatorByConvention({ cwd, invariantId, fs = nodeFs, maxDepth = 10 }) {
+  if (!cwd || !invariantId) return null;
+  const prefix = `${invariantId}.invariant.test.`;
+  const matches = [];
+  const walk = (relDir, depth) => {
+    if (depth > maxDepth || matches.length > 1) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(relDir ? join(cwd, relDir) : cwd, { withFileTypes: true });
+    } catch {
+      return; // unreadable dir — skip, never throw into the gate
+    }
+    for (const e of entries) {
+      if (e.isFile?.() && e.name.startsWith(prefix)) {
+        matches.push(relDir ? `${relDir}/${e.name}` : e.name);
+        if (matches.length > 1) return; // ambiguous — no need to keep walking
+      }
+    }
+    for (const e of entries) {
+      if (!e.isDirectory?.()) continue;
+      if (e.name.startsWith('.') || REBIND_SKIP_DIRS.has(e.name)) continue;
+      walk(relDir ? `${relDir}/${e.name}` : e.name, depth + 1);
+      if (matches.length > 1) return;
+    }
+  };
+  walk('', 0);
+  return matches.length === 1 ? matches[0] : null;
+}
 
 /**
  * @param {{
@@ -38,6 +97,8 @@ export async function handleStoryCompletion({
   // planner's properties); `agentText` carries the <INVARIANTS> manifest (defaults
   // to devOutput). `readFile`/`invariantExecutor`/`spawnSync` are injectable for tests.
   cwd, invariants = [], agentText, readFile, invariantExecutor, spawnSync = nodeSpawnSync,
+  // Injected fs for the deterministic convention rebind (default node:fs).
+  fs = nodeFs,
   // W2.1 — P3_QUALITY_GATE ('off'|'shadow'|'on'). When !== 'off', compute the
   // PASS/CONCERNS/FAIL/WAIVED verdict and attach it ADDITIVELY. It never changes
   // newState/propagate (the authoritative deterministic completion-gate rules);
@@ -69,11 +130,28 @@ export async function handleStoryCompletion({
     const invManifest = parseInvariantManifest(agentText != null ? agentText : devOutput);
     const authoredInvariants = invariants.map((inv) => {
       const m = invManifest[inv.id];
-      if (!m || !m.ref) return inv;
-      return {
-        ...inv,
-        validator: { ...(inv.validator || {}), ref: m.ref, kind: m.kind || inv.validator?.kind, status: 'authored' },
-      };
+      if (m && m.ref) {
+        return {
+          ...inv,
+          validator: { ...(inv.validator || {}), ref: m.ref, kind: m.kind || inv.validator?.kind, status: 'authored' },
+        };
+      }
+      // CONVENTION FALLBACK (dossier A1): no manifest entry AND no persisted
+      // validator ref — the exact state every resumed/retried job lands in
+      // (bindingOutput='' → manifest {}). The test-author prompt MANDATES
+      // `**/<id>.invariant.test.*` naming, so a committed file matching the id
+      // is a deterministic rebind (no LLM). Not found → stays declared and the
+      // runner fails it closed exactly as before.
+      if (!inv.validator?.ref && cwd) {
+        const ref = findInvariantValidatorByConvention({ cwd, invariantId: inv.id, fs });
+        if (ref) {
+          return {
+            ...inv,
+            validator: { ...(inv.validator || {}), ref, kind: 'test', status: 'authored' },
+          };
+        }
+      }
+      return inv;
     });
     const invResult = await runStoryInvariants({
       invariants: authoredInvariants,
@@ -103,7 +181,15 @@ export async function handleStoryCompletion({
   // byte-identical). Absent spawnReviewer / not-high-risk → no-op.
   let effReviewerVerdicts = reviewerVerdicts;
   let effNeedsHuman = needsHuman;
-  if (qualityMode === 'on' && typeof spawnReviewer === 'function' && shouldReview(acceptanceCriteria, qualityVerdict)) {
+  // B1+A5: only review an attempt whose deterministic binding summary is clean —
+  // a reviewer over an already-failing attempt is pure waste (the verdict is
+  // failing regardless, and the fix-forward retry re-reviews if it goes green).
+  if (
+    qualityMode === 'on'
+    && typeof spawnReviewer === 'function'
+    && bindingSummary.failed === 0
+    && shouldReview(acceptanceCriteria, qualityVerdict)
+  ) {
     try {
       const rv = await spawnReviewer({ acceptanceCriteria, headSha });
       const parsed = rv && rv.verdicts ? rv : parseReviewerVerdict(rv?.text || '');

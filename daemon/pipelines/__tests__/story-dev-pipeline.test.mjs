@@ -11,7 +11,7 @@
 // Every primitive is injected (spawn, git, gate builder, executors, ddb-side
 // callbacks) — no CLI, no repo, no network.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -257,5 +257,280 @@ describe('runStoryDevJob — TDD fail-closed (P3_TEST_AUTHOR_SPLIT=on)', () => {
     const persisted = updates.find((u) => u.state === 'failed' && u.verdict);
     expect(persisted).toBeTruthy();
     expect(persisted.verdict.failing).toContain('test-tampering');
+  });
+
+  // ── A2 — honest lifecycle states ──────────────────────────────────────────
+  it('(A2) a NON-final failing attempt persists "developing" with the verdict — terminal "failed" never hits the row mid-loop', async () => {
+    const payload = makePayload();
+    // Bound test stays RED on implementer attempt 1, goes GREEN on attempt 2.
+    let implCount = 0;
+    const { spawn, calls } = makeSpawn({
+      testAuthorResults: [{ stdout: BINDING_TEXT, code: 0 }],
+      onImplement: () => { implCount += 1; },
+    });
+    const deps = makeDeps({
+      spawn,
+      git: makeGit({ commitDiffs: [['src/login.test.ts'], ['src/login.ts'], ['src/login.ts']] }),
+      maxAttempts: 2,
+    });
+    deps.executors = { unit: async () => ({ passed: implCount >= 2, detail: implCount >= 2 ? 'pass' : 'fail: still red' }) };
+
+    const r = await runStoryDevJob({ job: makeJob(workingDir, payload), eventLogDir, deps });
+
+    expect(calls.filter((c) => /IMPLEMENTER/.test(c.prompt))).toHaveLength(2);
+    expect(r.newState).toBe('done');
+    // Attempt 1 failed but retries → 'developing' (WITH progress), never 'failed'.
+    const midLoop = updates.find((u) => u.state === 'developing' && u.verdict);
+    expect(midLoop).toBeTruthy();
+    expect(midLoop.verdict.status).toBe('failing');
+    expect(updates.filter((u) => u.state === 'failed')).toHaveLength(0);
+    expect(updates.at(-1).state).toBe('done');
+  });
+
+  // ── A1+A6 — invariant persistence + gate-data fail-fast ───────────────────
+  it('(A1/A6) an unauthored invariant is persisted WITH validator state, fails FAST (no second implementer spawn), and the reason names the data gap', async () => {
+    // Story declares an invariant; the test-author emits NO <INVARIANTS> manifest
+    // and no conventional `<id>.invariant.test.*` file exists in the worktree —
+    // the exact pacman1 dead-end. Respawning the implementer can never fix it.
+    const payload = makePayload({ invariants: [{ id: 'inv-1', description: 'seed data satisfies the schema' }] });
+    const { spawn, calls } = makeSpawn({
+      testAuthorResults: [{ stdout: BINDING_TEXT, code: 0 }],
+      onImplement: () => { implemented = true; },
+    });
+    const r = await runStoryDevJob({
+      job: makeJob(workingDir, payload),
+      eventLogDir,
+      deps: makeDeps({
+        spawn,
+        git: makeGit({ commitDiffs: [['src/login.test.ts'], ['src/login.ts']] }),
+        maxAttempts: 2, // attempts REMAIN — fail-fast is the taxonomy, not exhaustion
+      }),
+    });
+
+    expect(r.newState).toBe('failed');
+    expect(r.verdict.failing).toContain('inv-1');
+    // No fix-forward waste: exactly ONE implementer spawn despite maxAttempts=2.
+    expect(calls.filter((c) => /IMPLEMENTER/.test(c.prompt))).toHaveLength(1);
+    // Terminal failed (not 'developing') because the failure is not agent-fixable.
+    const persisted = updates.find((u) => u.state === 'failed' && u.verdict);
+    expect(persisted).toBeTruthy();
+    // The reason names the data gap (dossier A6).
+    expect(persisted.verdict.reasons.join('\n')).toMatch(/gate-data failure/);
+    expect(persisted.verdict.reasons.join('\n')).toMatch(/inv-1/);
+    // A1: invariants land on the row WITH their run state (fail-closed here).
+    expect(persisted.invariants).toBeTruthy();
+    expect(persisted.invariants[0].id).toBe('inv-1');
+    expect(persisted.invariants[0].validator.status).toBe('failing');
+  });
+
+  // ── B1+A5 — reviewer once per COMMIT, only on green bindings, after dev closes ──
+  // A once-per-JOB memo replayed attempt-1 verdicts verbatim against a retried
+  // attempt's NEW commit — an advisory AC could pass (or permanently fail) on
+  // code the reviewer never saw. The memo keys on headSha: identical code is
+  // never re-reviewed; fresh code always is.
+  const reviewerFlags = { ...FLAGS, P3_QUALITY_GATE: 'on', P3_GREEN_TRUNK: 'on' };
+  const p0Payload = () => makePayload({
+    acceptanceCriteria: [{ id: 'AC-1', text: 'issues a token', riskTag: 'P0' }],
+  });
+
+  it('(B1/A5) reviewer RE-REVIEWS a retried attempt that integrated a NEW commit, and its step opens after the dev step_complete', async () => {
+    const payload = p0Payload();
+    let implCount = 0;
+    let reviewerCalls = 0;
+    const reviewedShas = [];
+    let gtCalls = 0;
+    const { spawn, calls } = makeSpawn({
+      testAuthorResults: [{ stdout: BINDING_TEXT, code: 0 }],
+      onImplement: () => { implCount += 1; },
+    });
+    const deps = makeDeps({
+      spawn,
+      git: makeGit({ commitDiffs: [['src/login.test.ts'], ['src/login.ts'], ['src/login.ts']] }),
+      maxAttempts: 2,
+    });
+    deps.executors = { unit: async () => ({ passed: implCount >= 1 }) };
+    // Attempt 1: bindings GREEN @sha2 → reviewer runs → green-trunk FAILS
+    // (agent-fixable → retry). Attempt 2 integrates a NEW commit (sha3) → the
+    // reviewer MUST respawn: its attempt-1 verdicts describe code that no
+    // longer ships (the once-per-job replay was the LENS-c hole).
+    deps.greenTrunk = async () => {
+      gtCalls += 1;
+      return gtCalls === 1 ? { passed: false, reasons: ['green-trunk: tsc broke'] } : { passed: true, reasons: [] };
+    };
+    deps.spawnReviewer = async ({ headSha }) => {
+      reviewerCalls += 1;
+      reviewedShas.push(headSha);
+      events.push({ stepId: 'reviewer', type: 'step_start', text: 'reviewer spawn' });
+      return { verdicts: { 'AC-1': 'pass' }, needsHuman: [] };
+    };
+    const job = { ...makeJob(workingDir, payload), p3Flags: { ...reviewerFlags } };
+
+    const r = await runStoryDevJob({ job, eventLogDir, deps });
+
+    expect(r.newState).toBe('done');
+    expect(calls.filter((c) => /IMPLEMENTER/.test(c.prompt))).toHaveLength(2);
+    expect(reviewerCalls).toBe(2); // one review PER DISTINCT COMMIT
+    expect(reviewedShas).toEqual(['sha2', 'sha3']); // never a stale replay against new code
+    // green-trunk failure stayed retryable (A6) and persisted honestly (A2).
+    expect(updates.some((u) => u.state === 'developing' && u.verdict)).toBe(true);
+    // Event order (B1): the dev step closes BEFORE the reviewer step opens.
+    const devComplete = events.findIndex((e) => e.stepId === 'story-dev' && e.type === 'step_complete');
+    const reviewerStart = events.findIndex((e) => e.stepId === 'reviewer' && e.type === 'step_start');
+    expect(devComplete).toBeGreaterThanOrEqual(0);
+    expect(reviewerStart).toBeGreaterThan(devComplete);
+    // Reviewer verdicts land in the stage summaries (B2).
+    const done = updates.find((u) => u.state === 'done');
+    expect(done.stageSummaries.reviewer.verdicts).toEqual({ 'AC-1': 'pass' });
+    expect(done.stageSummaries.reviewer.ranAt).toBeTruthy();
+  });
+
+  it('(B1/A5) reviewer is MEMOIZED when the retry integrates NO new commit (same headSha → same code)', async () => {
+    const payload = p0Payload();
+    let implCount = 0;
+    let reviewerCalls = 0;
+    let gtCalls = 0;
+    const { spawn, calls } = makeSpawn({
+      testAuthorResults: [{ stdout: BINDING_TEXT, code: 0 }],
+      onImplement: () => { implCount += 1; },
+    });
+    // Git fake where attempt 2 stages NOTHING: integrate returns committed:false,
+    // headSha stays sha2 — the only case a verdict replay is safe (identical code).
+    const git = (() => {
+      const ok = (stdout = '') => ({ code: 0, stdout: `${stdout}\n`, stderr: '' });
+      let commits = 0;
+      return async (args) => {
+        const a = args.join(' ');
+        if (a === 'rev-parse --abbrev-ref HEAD') return ok('plan/plan-1');
+        if (a === 'status --porcelain') return ok('?? src/login.test.ts');
+        if (args[0] === 'add') return ok('');
+        // Clean tree after the implementer's first commit → 'nothing to commit'.
+        if (a === 'diff --cached --name-only') return ok(commits >= 2 ? '' : 'src/login.test.ts\nsrc/login.ts');
+        if (args[0] === 'commit') { commits += 1; return ok(''); }
+        if (a === 'rev-parse HEAD') return ok(`sha${commits}`);
+        if (args[0] === 'diff' && args[1] === '--name-only') return ok(commits === 2 ? 'src/login.ts' : 'src/login.test.ts');
+        return ok('');
+      };
+    })();
+    const deps = makeDeps({ spawn, git, maxAttempts: 2 });
+    deps.executors = { unit: async () => ({ passed: implCount >= 1 }) };
+    deps.greenTrunk = async () => {
+      gtCalls += 1;
+      return gtCalls === 1 ? { passed: false, reasons: ['green-trunk: tsc broke'] } : { passed: true, reasons: [] };
+    };
+    deps.spawnReviewer = async () => {
+      reviewerCalls += 1;
+      return { verdicts: { 'AC-1': 'pass' }, needsHuman: [] };
+    };
+    const job = { ...makeJob(workingDir, payload), p3Flags: { ...reviewerFlags } };
+
+    const r = await runStoryDevJob({ job, eventLogDir, deps });
+
+    expect(r.newState).toBe('done');
+    expect(r.commitSha).toBe('sha2'); // attempt 2 integrated nothing new
+    expect(calls.filter((c) => /IMPLEMENTER/.test(c.prompt))).toHaveLength(2);
+    expect(reviewerCalls).toBe(1); // same SHA → memo replay, no wasted respawn
+  });
+
+  it('(B1/A5) reviewer is NOT spawned when the deterministic bindings are failing', async () => {
+    const payload = p0Payload();
+    let reviewerCalls = 0;
+    const { spawn } = makeSpawn({
+      testAuthorResults: [{ stdout: BINDING_TEXT, code: 0 }],
+      onImplement: () => { /* never goes green */ },
+    });
+    const deps = makeDeps({
+      spawn,
+      git: makeGit({ commitDiffs: [['src/login.test.ts'], ['src/login.ts']] }),
+      maxAttempts: 1,
+    });
+    deps.executors = { unit: async () => ({ passed: false, detail: 'red' }) };
+    deps.spawnReviewer = async () => { reviewerCalls += 1; return { verdicts: {}, needsHuman: [] }; };
+    const job = { ...makeJob(workingDir, payload), p3Flags: { ...FLAGS, P3_QUALITY_GATE: 'on' } };
+
+    const r = await runStoryDevJob({ job, eventLogDir, deps });
+
+    expect(r.newState).toBe('failed');
+    expect(reviewerCalls).toBe(0); // a reviewer over a failing attempt is waste
+  });
+
+  // ── B2 — stage summaries on the row ───────────────────────────────────────
+  it('(B2) persists structured stageSummaries: test-author files+preview+bindings, per-attempt implementer artifacts', async () => {
+    const payload = makePayload();
+    // Real file in the worktree so the summary captures lines + preview.
+    mkdirSync(join(workingDir, 'src'), { recursive: true });
+    writeFileSync(join(workingDir, 'src', 'login.test.ts'), 'line one\nline two\nline three');
+    const { spawn } = makeSpawn({
+      testAuthorResults: [{ stdout: BINDING_TEXT, code: 0 }],
+      onImplement: () => { implemented = true; },
+    });
+    const r = await runStoryDevJob({
+      job: makeJob(workingDir, payload),
+      eventLogDir,
+      deps: makeDeps({ spawn, git: makeGit({ commitDiffs: [['src/login.test.ts'], ['src/login.ts']] }) }),
+    });
+
+    expect(r.newState).toBe('done');
+    const done = updates.find((u) => u.state === 'done');
+    const ss = done.stageSummaries;
+    expect(ss).toBeTruthy();
+    // test-author stage: authored files with content stats + the parsed bindings.
+    expect(ss.testAuthor.files).toHaveLength(1);
+    expect(ss.testAuthor.files[0].path).toBe('src/login.test.ts');
+    expect(ss.testAuthor.files[0].lines).toBe(3);
+    expect(ss.testAuthor.files[0].preview).toContain('line one');
+    expect(ss.testAuthor.redSha).toBe('sha1');
+    expect(ss.testAuthor.resumed).toBe(false);
+    expect(ss.testAuthor.bindings['AC-1'].testRef).toMatch(/login\.test\.ts/);
+    expect(typeof ss.testAuthor.durationMs).toBe('number');
+    // implementer stage: one attempt with its commit + diff + duration.
+    expect(ss.implementer.attempts).toHaveLength(1);
+    expect(ss.implementer.attempts[0]).toMatchObject({ attempt: 1, commitSha: 'sha2', filesChanged: ['src/login.ts'] });
+    expect(typeof ss.implementer.attempts[0].durationMs).toBe('number');
+    // compile is NOT ours to write — left absent for the compile pipeline.
+    expect(ss.compile).toBeUndefined();
+  });
+
+  it('(B2) caps oversized previews at 2000 chars in the persisted summary', async () => {
+    const payload = makePayload();
+    mkdirSync(join(workingDir, 'src'), { recursive: true });
+    writeFileSync(join(workingDir, 'src', 'login.test.ts'), 'x'.repeat(6000));
+    const { spawn } = makeSpawn({
+      testAuthorResults: [{ stdout: BINDING_TEXT, code: 0 }],
+      onImplement: () => { implemented = true; },
+    });
+    await runStoryDevJob({
+      job: makeJob(workingDir, payload),
+      eventLogDir,
+      deps: makeDeps({ spawn, git: makeGit({ commitDiffs: [['src/login.test.ts'], ['src/login.ts']] }) }),
+    });
+    const done = updates.find((u) => u.state === 'done');
+    expect(done.stageSummaries.testAuthor.files[0].preview.length).toBeLessThanOrEqual(2000);
+  });
+
+  // ── B3 (call-site half) — per-agent skills injection ──────────────────────
+  it('(B3) computes the skills loadout PER agent role: test-author gets its own prompt/role, implementer keeps story-dev', async () => {
+    const payload = makePayload();
+    const injectionCalls = [];
+    const { spawn } = makeSpawn({
+      testAuthorResults: [{ stdout: BINDING_TEXT, code: 0 }],
+      onImplement: () => { implemented = true; },
+    });
+    const deps = makeDeps({ spawn, git: makeGit({ commitDiffs: [['src/login.test.ts'], ['src/login.ts']] }) });
+    deps.buildSkillsInjection = async ({ role, storyText }) => {
+      injectionCalls.push({ role, storyText });
+      return [];
+    };
+
+    const r = await runStoryDevJob({ job: makeJob(workingDir, payload), eventLogDir, deps });
+
+    expect(r.newState).toBe('done');
+    const devCall = injectionCalls.find((c) => c.role === 'story-dev');
+    const taCalls = injectionCalls.filter((c) => c.role === 'test-author');
+    expect(devCall).toBeTruthy();
+    expect(devCall.storyText).toMatch(/implementing ONE story/);
+    expect(taCalls.length).toBeGreaterThanOrEqual(1);
+    expect(taCalls[0].storyText).toMatch(/TEST AUTHOR/);
+    // Never one loadout across roles: the two roles saw DIFFERENT prompt text.
+    expect(taCalls[0].storyText).not.toBe(devCall.storyText);
   });
 });

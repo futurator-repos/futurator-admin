@@ -38,10 +38,14 @@ function writeSidecar(vectors) {
 beforeEach(() => {
   wd = mkdtempSync(join(tmpdir(), 'skp-rank-'));
   embedTextMock.mockReset();
+  // Ranking (sidecar read) is gated behind SKILLS_EMBED_RANK=on in production;
+  // opt in so the re-rank assertions actually exercise the ranked path.
+  vi.stubEnv('SKILLS_EMBED_RANK', 'on');
 });
 
 afterEach(() => {
   rmSync(wd, { recursive: true, force: true });
+  vi.unstubAllEnvs();
 });
 
 describe('buildSkillsPromptLineRanked', () => {
@@ -90,11 +94,13 @@ describe('buildSkillsPromptLineRanked', () => {
   it('keeps pinned skills first even when an unpinned skill ranks higher', async () => {
     writeSkill('alpha', 'alpha desc');
     writeSkill('zeta', 'zeta desc');
-    // Pin alpha via the manifest; zeta is the relevance winner but must stay
-    // in the "Also vendored" section, after the pinned alpha.
+    // Pin alpha via the manifest — a genuine pin now requires a SKILL-SCOUT
+    // rationale (dossier B3: bare installed entries are no longer pins). zeta
+    // is the relevance winner but must stay in the "Also vendored" section,
+    // after the pinned alpha.
     writeFileSync(
       join(wd, '.claude', 'skills.manifest.yaml'),
-      'skills:\n  - source: x\n    skill: alpha\n',
+      'core:\n  - source: x\n    skill: alpha\n    rationale: Alpha carries curated project conventions.\n',
     );
     writeSidecar({ alpha: [1, 0], zeta: [0, 1] });
     embedTextMock.mockResolvedValue([0, 1]); // query ~ zeta

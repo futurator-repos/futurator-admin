@@ -62,6 +62,74 @@ export interface BoundAcceptanceCriterion {
 export type StoryComplexity = 'trivial' | 'standard' | 'complex' | 'architectural';
 
 /**
+ * Reality-Spine invariant validator status (mirrors the backend type): the
+ * planner DECLARES a property of the domain data; the story AUTHORS an
+ * executable validator; the gate RUNS it. Persisted WITH the row so a
+ * resumed/retried job (and the UI) can see the authored binding.
+ */
+export type InvariantStatus = 'declared' | 'authored' | 'passing' | 'failing';
+
+export interface InvariantValidator {
+  /** Path to the executable validator (script or test) once authored. */
+  ref?: string;
+  kind?: 'script' | 'test';
+  status: InvariantStatus;
+  /** Head SHA the validator last ran against — the staleness guard. */
+  lastRunSha?: string;
+  lastRunAt?: string;
+  detail?: string;
+}
+
+/** A planner-declared property of the domain data/contract that must hold. */
+export interface Invariant {
+  id: string;
+  description: string;
+  validator: InvariantValidator;
+}
+
+// ── Stage summaries (dossier B2) — structured per-stage artifacts on the row ──
+// Written by the story-dev pipeline after each attempt so the stage pills can
+// open an audit panel without re-parsing event prose. Size-capped at write time:
+// preview ≤2000 chars/file, total stageSummaries JSON ≤48KB (previews first).
+
+/** One file the Test-Author committed at RED (path + size + capped preview). */
+export interface StageFileSummary {
+  path: string;
+  lines?: number;
+  /** First ≤2000 chars of the file content (may be truncated further/removed
+   *  under the 48KB row cap). */
+  preview?: string;
+}
+
+/** Per-stage structured artifacts persisted on the story row. */
+export interface StageSummaries {
+  testAuthor?: {
+    files: StageFileSummary[];
+    redSha?: string;
+    resumed?: boolean;
+    bindings?: Record<string, { testRef: string; testKind?: string }>;
+    invariantManifest?: Record<string, { ref: string; kind?: string }>;
+    durationMs?: number;
+  };
+  implementer?: {
+    attempts: Array<{
+      attempt: number;
+      commitSha?: string;
+      filesChanged?: string[];
+      durationMs?: number;
+      tokens?: number;
+    }>;
+  };
+  reviewer?: {
+    verdicts?: Record<string, 'pass' | 'fail'>;
+    needsHuman?: string[];
+    ranAt?: string;
+  };
+  /** Populated by the compile pipeline (optional — absent until it runs). */
+  compile?: { status?: string; detail?: string };
+}
+
+/**
  * Verdict written back by the completion gate after each dev attempt.
  * Mirrors the evaluateCompletion return shape from daemon/lib/completion-gate.mjs.
  */
@@ -97,6 +165,12 @@ export interface StoryNodeRow {
   /** Hard-deny globs. */
   forbiddenAreas?: string[];
   complexity: StoryComplexity;
+  /** Planner-declared properties of the domain data this story must satisfy.
+   *  Persisted WITH validator state after each run (dossier A1). */
+  invariants?: Invariant[];
+  /** Planner-emitted short phase name (≤40 chars) — names the batch this story
+   *  belongs to in the UI (fallback "Batch N" when absent). */
+  phase?: string;
   state: StoryNodeState;
   /** depends_on.length at ingest; atomically decremented as deps finish. */
   unblockedDepsCount: number;
@@ -122,6 +196,8 @@ export interface StoryNodeRow {
   outputTokens?: number;
   /** Wall-clock milliseconds from spawn to close for the dev agent run. */
   durationMs?: number;
+  /** Per-stage structured artifacts (test-author/implementer/reviewer/compile). */
+  stageSummaries?: StageSummaries;
 }
 
 // ── Instinct loop (development-plan §5.5) — the Skills & Learnings surface. ──

@@ -41,10 +41,14 @@ function writeSidecar(vectors) {
 beforeEach(() => {
   wd = mkdtempSync(join(tmpdir(), 'skp-push-'));
   embedTextMock.mockReset();
+  // Ranking (sidecar read) is gated behind SKILLS_EMBED_RANK=on in production;
+  // opt in so these tests exercise the PUSH/ranked path they were written for.
+  vi.stubEnv('SKILLS_EMBED_RANK', 'on');
 });
 
 afterEach(() => {
   rmSync(wd, { recursive: true, force: true });
+  vi.unstubAllEnvs();
 });
 
 describe('buildSkillsPushPrompt', () => {

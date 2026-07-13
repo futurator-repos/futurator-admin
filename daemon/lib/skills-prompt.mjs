@@ -54,15 +54,39 @@ function parseSkillMd(raw, fallbackName) {
 }
 
 /**
- * Read the manifest-pinned skill names from `.claude/skills.manifest.yaml`.
- * The manifest is the project's curated loadout (prepin defaults +
- * SKILL-SCOUT confirmations) — those skills get priority in the prompt
- * section over the long tail of vendored federation skills. Tolerant
- * line-parse (`skill: <name>` entries under core/stack/domain/vendor);
- * returns an empty Set on any failure.
+ * A manifest entry counts as a genuine PIN only when it carries a SKILL-SCOUT
+ * rationale (a project-specific, task-shaped reason the skill was curated).
+ *
+ * WHY (dossier B3, 2026-07-13): `prepin-default-skills@v1` and
+ * `reconcile-skills-manifest@v1` write EVERY vendored/on-disk skill into the
+ * manifest with only `{source, skill, version}` — no rationale. The old rule
+ * (`pins.has(name)`) treated all ~58 of those rationale-less entries as pins,
+ * so `rankLoadoutItems` placed them all FIRST unranked (alphabetical) and the
+ * PUSH path shipped the same alphabetically-first 3 skills into every agent of
+ * every story of every app — the cosine relevance ranking never applied.
+ *
+ * Read-side rule (mandatory — existing app manifests must behave correctly
+ * WITHOUT regeneration): rationale-less entries mean the skill is INSTALLED /
+ * AVAILABLE, not pinned. Only a rationale-carrying entry is a curated pin, and
+ * even a pin gets a bounded relevance BOOST (not absolute precedence) downstream.
+ *
+ * @param {string | null | undefined} rationale
+ * @returns {boolean}
+ */
+function isPinRationale(rationale) {
+  return typeof rationale === 'string' && rationale.trim().length > 0;
+}
+
+/**
+ * Read the manifest skill entries from `.claude/skills.manifest.yaml`, mapping
+ * each skill name to its persisted SKILL-SCOUT rationale (or `null` when the
+ * entry is a bare installed/available record). The rationale drives BOTH the
+ * prompt text (project-specific beats the generic SKILL.md description) AND the
+ * pin classification (see {@link isPinRationale}). Tolerant block-parse over
+ * core/stack/domain/vendor; returns an empty Map on any failure.
  *
  * @param {string} workingDir
- * @returns {Set<string>}
+ * @returns {Map<string, string | null>}
  */
 function readManifestPins(workingDir) {
   /** @type {Map<string, string | null>} skill name → scout rationale (when persisted) */
@@ -123,12 +147,14 @@ function collectLoadout(workingDir) {
   const dirStat = statSync(skillsDir);
   if (!dirStat.isDirectory()) return null;
 
-  const pins = readManifestPins(workingDir);
+  const manifest = readManifestPins(workingDir);
   const entries = readdirSync(skillsDir, { withFileTypes: true })
     .filter((e) => e.isDirectory())
     .sort((a, b) => {
-      const ap = pins.has(a.name) ? 0 : 1;
-      const bp = pins.has(b.name) ? 0 : 1;
+      // Curated (rationale-carrying) pins sort first for the no-signal flat
+      // fallback; the ranked PUSH path re-scores everything regardless.
+      const ap = isPinRationale(manifest.get(a.name)) ? 0 : 1;
+      const bp = isPinRationale(manifest.get(b.name)) ? 0 : 1;
       return ap - bp || a.name.localeCompare(b.name);
     })
     .slice(0, MAX_SKILLS);
@@ -140,13 +166,17 @@ function collectLoadout(workingDir) {
       const raw = full.slice(0, 2000);
       // Prefer the manifest's scout rationale (project-specific,
       // task-shaped) over the upstream SKILL.md generic description.
-      const rationale = pins.get(e.name);
-      const text = rationale ? `${e.name}: ${rationale}` : parseSkillMd(raw, e.name);
+      const rationale = manifest.get(e.name);
+      const pinned = isPinRationale(rationale);
+      const text = pinned ? `${e.name}: ${rationale}` : parseSkillMd(raw, e.name);
       // F24 — retain the SKILL.md BODY (truncated to the section budget) so
       // the PUSH variant can inject the top-ranked skills' instructions
       // verbatim, not just their name+description line.
       const body = full.slice(0, MAX_SECTION_CHARS);
-      items.push({ name: e.name, pinned: pins.has(e.name), text, body });
+      // pinned === true ONLY for rationale-carrying (SKILL-SCOUT-curated)
+      // entries — a bare installed/available manifest record is NOT a pin
+      // (dossier B3: prepin-everything must not defeat the ranking).
+      items.push({ name: e.name, pinned, text, body });
     } catch {
       // skill dir without a readable SKILL.md — skip silently
     }
@@ -350,47 +380,106 @@ export async function buildSkillsPromptLineRanked(workingDir, storyText) {
 
 const MAX_PUSHED_BODIES = 3;
 
+// Curated-pin nudge: a SKILL-SCOUT-rationale'd pin gets this ADDED to its
+// cosine score so the project's curated conventions win close ties — but it is
+// a bounded boost, never absolute precedence (dossier B3: pins that bypass the
+// ranking are exactly what shipped 3 alphabetical skills into every agent). A
+// clearly-irrelevant pin (cosine near 0) + 0.10 still loses to a clearly-
+// relevant non-pin (cosine near 1), and still fails the relevance floor below.
+const PIN_BOOST = 0.1;
+
+// Relevance floor: only a skill whose FINAL score (cosine + any pin boost)
+// clears this gets its body PUSHED into the agent's prompt. Nothing clears it →
+// push nothing (flat name list, zero bodies). Voyage-3 cosine for a skill that
+// is genuinely on-topic for the story text runs ~0.4-0.7; unrelated skills sit
+// ~0.1-0.3, so 0.30 is a conservative "actually relevant" gate. Operator-
+// overridable via P3_SKILLS_MIN_SCORE (e.g. lower to push more eagerly).
+const DEFAULT_MIN_SCORE = 0.3;
+
 /**
- * Rank the loadout items by relevance to `storyText` and return the ordered
- * list, reusing F27's cosine path. Pins keep their priority + order; the
- * non-pinned tail is re-ranked by cosine similarity when an embeddings sidecar
- * and a query embedding are both available, otherwise readdir order is kept.
+ * The relevance floor a skill's final score must clear to have its BODY pushed.
+ * Reads P3_SKILLS_MIN_SCORE when it parses to a finite number; otherwise the
+ * documented default. Read per-call so an operator can retune without a daemon
+ * restart between jobs.
  *
- * `ranked` reports whether a real relevance signal was used: when false the
- * order is just readdir/pin order (no sidecar, no key, embed failed), so the
- * PUSH caller must NOT inject bodies of arbitrarily-ordered skills. Never
- * throws.
+ * @returns {number}
+ */
+function skillsMinScore() {
+  const raw = process.env.P3_SKILLS_MIN_SCORE;
+  const n = raw != null && raw !== '' ? Number(raw) : NaN;
+  return Number.isFinite(n) ? n : DEFAULT_MIN_SCORE;
+}
+
+/**
+ * From an already-ranked loadout + its per-name scores, pick the skills whose
+ * body should be pushed: those clearing the relevance floor AND carrying a
+ * readable body, capped at {@link MAX_PUSHED_BODIES}. `ordered` is sorted by
+ * final score descending, so filter-then-slice keeps the top-N by relevance.
+ * Shared by {@link buildSkillsPushPrompt} and {@link selectPushedSkillNames} so
+ * the recorded loaded-set is EXACTLY the pushed set.
+ *
+ * @param {Array<{name:string, body?:string}>} ordered
+ * @param {Map<string, number>} scores
+ * @returns {Array<{name:string, body?:string}>}
+ */
+function selectPushBodies(ordered, scores) {
+  const floor = skillsMinScore();
+  return ordered
+    .filter((i) => (scores.get(i.name) ?? -Infinity) >= floor && i.body && i.body.trim())
+    .slice(0, MAX_PUSHED_BODIES);
+}
+
+/**
+ * Rank the ENTIRE loadout by relevance to `storyText` and return the ordered
+ * list plus each item's final score. Every item — pinned or not — is scored by
+ * cosine similarity of the story text vs the skill's vendored embedding; a
+ * rationale-carrying pin gets a bounded {@link PIN_BOOST} added so curated
+ * conventions win close ties, but NEVER absolute precedence (dossier B3: pins
+ * that bypassed the ranking are what shipped the same alphabetical 3 skills
+ * into every agent). A skill with no vendored vector scores -Infinity and sinks.
+ *
+ * `ranked` reports whether a real relevance signal was used: false when there
+ * is no sidecar, no embed key, or the embed call failed — in which case the
+ * PUSH caller must NOT inject bodies of arbitrarily-ordered skills (it falls
+ * back to the flat name list). `scores` is only meaningful when `ranked`.
+ * Never throws.
  *
  * @param {{ skillsDir: string, items: Array<{name:string, pinned:boolean, text:string, body?:string}> }} loadout
  * @param {string} storyText
- * @returns {Promise<{ items: Array<{name:string, pinned:boolean, text:string, body?:string}>, ranked: boolean }>}
+ * @returns {Promise<{ items: Array<{name:string, pinned:boolean, text:string, body?:string}>, ranked: boolean, scores: Map<string, number> }>}
  */
 async function rankLoadoutItems(loadout, storyText) {
+  const empty = new Map();
   const sidecar = loadEmbeddingsSidecar(loadout.skillsDir);
-  if (!sidecar) return { items: loadout.items, ranked: false };
+  if (!sidecar) return { items: loadout.items, ranked: false, scores: empty };
 
   let queryVec;
   try {
     queryVec = await embedText(storyText.slice(0, 8000), 'query');
   } catch {
-    return { items: loadout.items, ranked: false };
+    return { items: loadout.items, ranked: false, scores: empty };
   }
   if (!Array.isArray(queryVec) || queryVec.length === 0) {
-    return { items: loadout.items, ranked: false };
+    return { items: loadout.items, ranked: false, scores: empty };
   }
 
-  const pinned = loadout.items.filter((i) => i.pinned);
-  const others = loadout.items.filter((i) => !i.pinned);
-  const scored = others.map((it, idx) => {
+  // Score ALL items (pins included) so relevance — not manifest presence —
+  // drives the order. Pins get the bounded additive boost; unscorable skills
+  // (no vector) sink to -Infinity with no boost (can't manufacture relevance).
+  const scores = new Map();
+  const scored = loadout.items.map((it, idx) => {
     const vec = sidecar.vectors[it.name];
-    const score =
+    const base =
       Array.isArray(vec) && vec.length === queryVec.length
         ? cosineSimilarity(queryVec, vec)
         : -Infinity;
+    const score = base === -Infinity ? -Infinity : base + (it.pinned ? PIN_BOOST : 0);
+    scores.set(it.name, score);
     return { it, idx, score };
   });
+  // Stable: ties / unscored keep original readdir (pin-then-alphabetical) order.
   scored.sort((a, b) => b.score - a.score || a.idx - b.idx);
-  return { items: [...pinned, ...scored.map((s) => s.it)], ranked: true };
+  return { items: scored.map((s) => s.it), ranked: true, scores };
 }
 
 /**
@@ -403,7 +492,9 @@ async function rankLoadoutItems(loadout, storyText) {
  *      the top-{@link MAX_PUSHED_BODIES} skills ranked by cosine similarity of
  *      `storyText` (F27's ranking), each truncated to MAX_SECTION_CHARS, with
  *      a strict per-call token budget so the combined bodies never blow the
- *      prompt. Pins rank first (they carry the project's curated conventions).
+ *      prompt. Only skills clearing the relevance floor (P3_SKILLS_MIN_SCORE)
+ *      are pushed; a curated pin gets a bounded score boost but must still be
+ *      relevant to appear (dossier B3).
  *   2. The existing flat name+description loadout for the REMAINING skills, so
  *      the long tail is still discoverable via the Skill tool (fallback PULL).
  *
@@ -424,18 +515,20 @@ export async function buildSkillsPushPrompt(workingDir, storyText) {
     const loadout = collectLoadout(workingDir);
     if (!loadout || loadout.items.length === 0) return null;
 
-    const { items: ordered, ranked } = await rankLoadoutItems(loadout, storyText);
+    const { items: ordered, ranked, scores } = await rankLoadoutItems(loadout, storyText);
     if (ordered.length === 0) return renderLoadout(loadout.items);
 
-    // Only PUSH bodies when there's a real relevance signal to choose them:
-    // a cosine ranking, OR manifest pins (curated project relevance). Without
-    // either, injecting arbitrary readdir-order bodies would waste the budget
-    // on irrelevant skills — fall back to the flat name+description list.
-    const hasPins = ordered.some((i) => i.pinned);
-    if (!ranked && !hasPins) return renderLoadout(ordered);
+    // Bodies are PUSHED only when there is a real relevance signal (sidecar +
+    // query embedding). Without it there is no score to compare to the floor,
+    // so injecting arbitrary readdir-order bodies would just waste the budget
+    // on possibly-irrelevant skills — fall back to the flat name+desc list.
+    if (!ranked) return renderLoadout(ordered);
 
-    // Top-N with a readable body get their SKILL.md injected verbatim.
-    const top = ordered.filter((i) => i.body && i.body.trim()).slice(0, MAX_PUSHED_BODIES);
+    // Relevance floor: inject only the top-N skills whose final score clears
+    // P3_SKILLS_MIN_SCORE. Nothing clears it → push NOTHING (flat list, zero
+    // bodies) — a huge catalog with no on-topic skill for this story must not
+    // force-feed the agent irrelevant instructions.
+    const top = selectPushBodies(ordered, scores);
     if (top.length === 0) return renderLoadout(ordered);
 
     const topNames = new Set(top.map((i) => i.name));
@@ -484,10 +577,10 @@ export async function buildSkillsPushPrompt(workingDir, storyText) {
  * P3 glue can record the pushed set as the story's loaded skills — otherwise
  * every story reports zero skills even though a curated set was applied.
  *
- * Returns `{ pushed, ranked }` — `pushed` is the ordered top-N body skill names,
- * `ranked` whether a real relevance signal (cosine or manifest pin) picked them.
- * Never throws; returns `{ pushed: [], ranked: false }` on any failure or when
- * no body would be pushed (mirrors the name-list fallback).
+ * Returns `{ pushed, ranked }` — `pushed` is the ordered top-N body skill names
+ * (those clearing the relevance floor), `ranked` whether a real cosine relevance
+ * signal picked them. Never throws; returns `{ pushed: [], ranked: false }` on
+ * any failure or when no body would be pushed (mirrors the name-list fallback).
  *
  * @param {string} workingDir
  * @param {string} storyText
@@ -501,11 +594,13 @@ export async function selectPushedSkillNames(workingDir, storyText) {
   try {
     const loadout = collectLoadout(workingDir);
     if (!loadout || loadout.items.length === 0) return empty;
-    const { items: ordered, ranked } = await rankLoadoutItems(loadout, storyText);
+    const { items: ordered, ranked, scores } = await rankLoadoutItems(loadout, storyText);
     if (ordered.length === 0) return empty;
-    const hasPins = ordered.some((i) => i.pinned);
-    if (!ranked && !hasPins) return empty; // name-list fallback: nothing pushed
-    const top = ordered.filter((i) => i.body && i.body.trim()).slice(0, MAX_PUSHED_BODIES);
+    // Mirror buildSkillsPushPrompt EXACTLY: no ranking signal → nothing pushed;
+    // otherwise the same floor-gated top-N (so the recorded loaded-set equals
+    // the bodies actually injected).
+    if (!ranked) return empty; // name-list fallback: nothing pushed
+    const top = selectPushBodies(ordered, scores);
     return { pushed: top.map((i) => i.name), ranked };
   } catch {
     return empty;

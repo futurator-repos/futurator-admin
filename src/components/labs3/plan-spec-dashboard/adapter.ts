@@ -156,6 +156,116 @@ export function storyJobIds(rows: StoryNodeRow[]): string[] {
   return rows.filter((r) => r.jobId).map((r) => r.jobId!);
 }
 
+// ── S1 cross-slice contract mirror (rendered DEFENSIVELY) ────────────────
+//
+// S1 (the plan-spec type owner) threads phase / invariants / stageSummaries
+// onto StoryNodeRow so the daemon can persist per-stage audit artifacts. This
+// slice (S4, the audit UI) only READS them, and may run in a bundle where S1
+// has not yet landed the fields on the client mirror. Rather than redefine the
+// canonical StoryNodeRow (S1 owns it), views read these optional fields through
+// `storyExtras()` — a structural view over the row. EVERY field is optional, so
+// legacy rows (predating stage capture) simply render today's UI unchanged and
+// the new panels fall back to an honest "not captured" message.
+//
+// Shapes mirror the CROSS-SLICE DATA CONTRACT exactly; when S1's typed fields
+// land they are structurally compatible with these reads.
+
+/** One authored test file surfaced by the test-author stage (capped preview). */
+export interface StageAuthoredFile {
+  path: string;
+  lines?: number;
+  /** Capped source preview (≤2000 chars/file at the producer). */
+  preview?: string;
+}
+
+export interface TestAuthorStageSummary {
+  files?: StageAuthoredFile[];
+  redSha?: string;
+  resumed?: boolean;
+  /** AC id → bound test selector + kind. */
+  bindings?: Record<string, { testRef: string; testKind?: string }>;
+  /** Invariant id → validator ref + kind. */
+  invariantManifest?: Record<string, { ref: string; kind?: string }>;
+  durationMs?: number;
+}
+
+export interface ImplementerAttemptSummary {
+  attempt: number;
+  commitSha?: string;
+  filesChanged?: string[];
+  durationMs?: number;
+  tokens?: number;
+}
+
+export interface ImplementerStageSummary {
+  attempts?: ImplementerAttemptSummary[];
+}
+
+export interface ReviewerStageSummary {
+  /** AC id → reviewer verdict. */
+  verdicts?: Record<string, 'pass' | 'fail'>;
+  needsHuman?: string[];
+  ranAt?: string;
+}
+
+export interface CompileStageSummary {
+  status?: string;
+  detail?: string;
+}
+
+export interface StageSummaries {
+  testAuthor?: TestAuthorStageSummary;
+  implementer?: ImplementerStageSummary;
+  reviewer?: ReviewerStageSummary;
+  compile?: CompileStageSummary;
+}
+
+/** A persisted invariant + its validator (mirrors backend Invariant). */
+export interface StoryInvariantView {
+  id: string;
+  description?: string;
+  validator?: {
+    ref?: string;
+    kind?: string;
+    status?: string;
+    detail?: string;
+    lastRunSha?: string;
+  };
+}
+
+/** The S1 contract fields, read structurally off a StoryNodeRow. */
+export interface Labs3StoryExtras {
+  phase?: string;
+  invariants?: StoryInvariantView[];
+  stageSummaries?: StageSummaries;
+}
+
+/**
+ * Read the S1 contract fields off a row without redefining StoryNodeRow.
+ * Cast-through-`unknown` so this compiles whether or not S1 has landed the
+ * typed fields in this bundle's client mirror; the reads stay defensive
+ * (every field optional) so legacy rows are unaffected.
+ */
+export function storyExtras(row: StoryNodeRow): Labs3StoryExtras {
+  return row as unknown as Labs3StoryExtras;
+}
+
+/**
+ * The batch's phase label: the shared planner `phase` when every story in the
+ * batch agrees on one non-empty name, else null (caller falls back to "Batch N").
+ * Mixed or absent phases never invent a name.
+ */
+export function batchPhaseLabel(stories: StoryNodeRow[]): string | null {
+  let phase: string | null = null;
+  for (const s of stories) {
+    const p = storyExtras(s).phase?.trim();
+    if (!p) return null; // any story missing a phase → no shared name
+    if (phase === null) phase = p;
+    else if (phase !== p) return null; // mixed phases → fall back
+  }
+  return phase;
+}
+
 // ── Job metric helpers ───────────────────────────────────────────────
 //
 // Labs3 stories bind directly to a single story-dev AgentJob (no wave/epic

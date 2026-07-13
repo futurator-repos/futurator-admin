@@ -28,6 +28,11 @@ import { extractAssistantText } from '../lib/stream-json-text.mjs';
 import { planBranchName } from '../lib/plan-branch.mjs';
 import { runStoryBindings } from '../lib/test-binding-runner.mjs';
 import { detectTestTampering } from '../lib/tdd-gates.mjs';
+// Stage audit (dossier B2): the <INVARIANTS> parser feeds the test-author stage
+// summary; capStageSummaries enforces the row-size contract (preview ≤2KB/file,
+// total ≤48KB) before every persist.
+import { parseInvariantManifest } from '../lib/completion-gate.mjs';
+import { capStageSummaries } from '../lib/story-persist.mjs';
 // W2.2 (P3_TEST_AUTHOR_SPLIT) — isolated Test-Author phase + implementer prompt.
 import { runTestAuthorPhase, buildImplementerPrompt, parsePorcelainTestFiles } from './lib/test-author-phase.mjs';
 // Model/effort per agent (adaptive thinking): dev scales with story complexity,
@@ -51,7 +56,7 @@ import {
 } from './lib/story-skills-inject.mjs';
 import {
   buildPriorFailureBlock,
-  classifyRetryable,
+  findGateDataGaps,
   shouldRetry,
 } from './lib/story-retry.mjs';
 
@@ -161,6 +166,55 @@ export function buildStoryDevPrompt(payload) {
 function ensureDir(d) { try { if (!existsSync(d)) mkdirSync(d, { recursive: true }); } catch { /* best-effort */ } }
 
 /**
+ * Build the test-author stage summary (dossier B2 contract) from the split
+ * result: authored files (line counts + capped previews read from the
+ * worktree), the RED sha, resume flag, the parsed AC bindings and the
+ * <INVARIANTS> manifest. On a RESUME (bindingOutput='') the invariant manifest
+ * is derived from the payload's PERSISTED validator refs — the same source the
+ * completion gate rebinds from. Fail-soft on every read: an unreadable file
+ * stays path-only.
+ */
+function buildTestAuthorSummary({ split, projectRoot, payloadInvariants, durationMs }) {
+  const files = (split.ownedTestFiles || []).map((path) => {
+    const entry = { path };
+    try {
+      const src = readFileSync(join(projectRoot, path), 'utf8');
+      entry.lines = src.split('\n').length;
+      entry.preview = src.slice(0, 2000);
+    } catch { /* path-only */ }
+    return entry;
+  });
+  const bindings = {};
+  for (const ac of split.boundCriteria || []) {
+    const tb = ac?.testBinding;
+    if (tb?.testRef) bindings[ac.id] = { testRef: tb.testRef, ...(tb.testKind ? { testKind: tb.testKind } : {}) };
+  }
+  let invariantManifest;
+  const parsed = split.bindingOutput ? parseInvariantManifest(split.bindingOutput) : {};
+  const fresh = Object.entries(parsed).filter(([, v]) => v?.ref);
+  if (fresh.length) {
+    invariantManifest = Object.fromEntries(
+      fresh.map(([id, v]) => [id, { ref: v.ref, ...(v.kind ? { kind: v.kind } : {}) }]),
+    );
+  } else if (Array.isArray(payloadInvariants)) {
+    const persisted = payloadInvariants.filter((i) => i?.validator?.ref);
+    if (persisted.length) {
+      invariantManifest = Object.fromEntries(
+        persisted.map((i) => [i.id, { ref: i.validator.ref, ...(i.validator.kind ? { kind: i.validator.kind } : {}) }]),
+      );
+    }
+  }
+  return {
+    files,
+    ...(split.redSha ? { redSha: split.redSha } : {}),
+    resumed: !!split.resumed,
+    ...(Object.keys(bindings).length ? { bindings } : {}),
+    ...(invariantManifest ? { invariantManifest } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+  };
+}
+
+/**
  * Run a story-dev job end to end.
  *
  * @param {{ job: object, eventLogDir: string, deps?: object }} opts
@@ -213,11 +267,17 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     observeLog: join(projectRoot, '.pipeline', 'observations.jsonl'),
     agentRole: 'story-dev',
   });
+  // Injection seam (dossier B3 call-site half): injectable so tests can assert
+  // the loadout is computed PER agent role — the test-author and the implementer
+  // are different agents with different prompts, so they must never share one
+  // ranked loadout (defaults to the real glue; byte-identical when not injected).
+  const buildInjection = deps.buildSkillsInjection || buildSkillsInjection;
   // Single --append-system-prompt: gate injection + the skills PUSH loadout
   // (top-ranked skills' instructions) folded together by the glue. Computed
   // ONCE per story (not per attempt) — the loadout is scope-, not attempt-,
-  // dependent.
-  const injectionArgs = await buildSkillsInjection({
+  // dependent. This is the IMPLEMENTER loadout; the test-author computes its
+  // own per spawn below.
+  const injectionArgs = await buildInjection({
     workingDir: projectRoot,
     storyText: buildStoryDevPrompt(payload),
     p3Flags,
@@ -255,6 +315,11 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
   // then the story fails without ever spawning the implementer.
   const splitOn = flagMode(p3Flags, 'P3_TEST_AUTHOR_SPLIT') === 'on';
   let split = null;
+  // Stage audit trail (dossier B2): structured per-stage artifacts accumulated
+  // across the job and persisted (size-capped) on the story row with every
+  // updateStoryState — the UI's stage pills read this instead of event prose.
+  // `compile` is intentionally absent: the compile pipeline owns that field.
+  const stageSummaries = {};
   // pacman3 canary fix: the Test-Author writes NEW test files, which are never in
   // the story's `touches` — the shared gate flagged its own work as out-of-scope
   // (audit today; a hard block in enforce). Give it a dedicated gate whose scope
@@ -272,22 +337,34 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       })
     : gate;
   // Minimal one-shot spawn (no fix-forward loop) used only by the Test-Author.
-  const spawnClaudeOnce = (onePrompt) => new Promise((res) => {
-    const oneArgs = [
-      '-p', onePrompt, '--output-format', 'stream-json', '--verbose',
-      '--permission-mode', 'bypassPermissions',
-      ...cliModelArgs(resolveAgentPolicy({
-        role: 'test-author',
-        overrides: { model: payload.testModel },
-      })),
-      ...testAuthorGate.args, ...injectionArgs,
-    ];
-    let out = '';
-    const c = spawn(claudeBin, oneArgs, { cwd: projectRoot, env: { ...process.env, ...testAuthorGate.env }, stdio: ['ignore', 'pipe', 'pipe'] });
-    c.stdout.on('data', (ch) => { out += ch.toString('utf8'); });
-    c.on('error', () => res({ exitCode: -1, text: '' }));
-    c.on('close', (code) => res({ exitCode: code ?? 0, text: extractAssistantText(out) || out }));
-  });
+  const spawnClaudeOnce = async (onePrompt) => {
+    // Per-agent skills loadout (dossier B3 call-site half): rank against the
+    // TEST-AUTHOR's OWN prompt under role 'test-author' — never reuse the
+    // implementer's 'story-dev' loadout (different role policy, different
+    // ranking text). buildSkillsInjection never throws (falls back to []).
+    const taInjectionArgs = await buildInjection({
+      workingDir: projectRoot,
+      storyText: onePrompt,
+      p3Flags,
+      role: 'test-author',
+    });
+    return new Promise((res) => {
+      const oneArgs = [
+        '-p', onePrompt, '--output-format', 'stream-json', '--verbose',
+        '--permission-mode', 'bypassPermissions',
+        ...cliModelArgs(resolveAgentPolicy({
+          role: 'test-author',
+          overrides: { model: payload.testModel },
+        })),
+        ...testAuthorGate.args, ...taInjectionArgs,
+      ];
+      let out = '';
+      const c = spawn(claudeBin, oneArgs, { cwd: projectRoot, env: { ...process.env, ...testAuthorGate.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+      c.stdout.on('data', (ch) => { out += ch.toString('utf8'); });
+      c.on('error', () => res({ exitCode: -1, text: '' }));
+      c.on('close', (code) => res({ exitCode: code ?? 0, text: extractAssistantText(out) || out }));
+    });
+  };
   if (splitOn) {
     // Sub-pipeline visibility: the Test-Author is its own stage in the story
     // timeline (stepId 'test-author'), so the UI can render
@@ -343,6 +420,7 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
           }),
         logger,
       });
+    const taStartedAt = Date.now();
     try {
       try {
         split = await runPhase();
@@ -373,6 +451,15 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       };
     }
     if (split?.redSha) headSha = split.redSha;
+    // Structured stage artifact (dossier B2): files + previews + bindings +
+    // invariant manifest — until now this lived only in step_complete prose.
+    try {
+      stageSummaries.testAuthor = buildTestAuthorSummary({
+        split, projectRoot,
+        payloadInvariants: payload.invariants,
+        durationMs: Date.now() - taStartedAt,
+      });
+    } catch { /* audit enrichment — never blocks the story */ }
     await deps.pushEvent?.(job.jobId, 'test-author', 'test-author', 'step_complete', {
       text: split.resumed
         ? `resume — reusing ${split.ownedTestFiles.length} committed test file(s) from a prior attempt`
@@ -423,6 +510,38 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       } catch { /* list-only */ }
     }
   }
+
+  // B1+A5 — the reviewer runs AT MOST ONCE PER COMMIT. handleStoryCompletion
+  // is invoked once per ATTEMPT, so an unmemoized spawnReviewer ran per attempt
+  // (2× per story) for identical advisory value. But a once-per-JOB memo is
+  // UNSAFE: reviewer verdicts carry no SHA guard (unlike testBinding.lastRunSha),
+  // so replaying attempt-1's verdicts verbatim against a retried attempt's NEW
+  // commit lets an advisory AC pass on code the reviewer never saw — and a
+  // stale 'fail' makes every remaining fix-forward attempt unwinnable no matter
+  // what the implementer fixes. Keying the memo on the commit SHA keeps both
+  // properties: identical code is never re-reviewed, while an attempt that
+  // integrated fresh code gets a fresh review of what will actually ship.
+  // Paired with the handler's green-bindings precondition, a reviewer still
+  // never spawns over an already-failing attempt.
+  const reviewerResultBySha = new Map();
+  const spawnReviewerOnce = typeof deps.spawnReviewer === 'function'
+    ? async (rvArgs) => {
+        const shaKey = rvArgs?.headSha || '';
+        if (reviewerResultBySha.has(shaKey)) return reviewerResultBySha.get(shaKey);
+        const rv = await deps.spawnReviewer(rvArgs);
+        const reviewerResult = rv || { verdicts: {}, needsHuman: [] };
+        reviewerResultBySha.set(shaKey, reviewerResult);
+        // Structured stage artifact (dossier B2) — parsed verdicts when the
+        // injected spawn returned them ({text}-shaped results stay event-only).
+        // Latest review wins: it corresponds to the newest integrated commit.
+        stageSummaries.reviewer = {
+          ...(reviewerResult.verdicts ? { verdicts: reviewerResult.verdicts } : {}),
+          ...(Array.isArray(reviewerResult.needsHuman) ? { needsHuman: reviewerResult.needsHuman } : {}),
+          ranAt: new Date().toISOString(),
+        };
+        return reviewerResult;
+      }
+    : undefined;
 
   // Bounded fix-forward loop (development-plan §4.4). Each attempt re-spawns the
   // SAME-scoped agent; on a failing bound-AC we feed back the REAL failing-test
@@ -492,9 +611,16 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
 
     if (exitCode !== 0) {
       // Spawn crash is NOT an AC failure — do not consume a fix-forward attempt;
-      // escalate immediately.
+      // escalate immediately. Terminal by design (A2 applies only to attempts
+      // the loop can still fix forward).
       evstream.emitStepError(`dev exit ${exitCode}`);
-      await deps.updateStoryState?.({ storyId: payload.storyId, state: 'failed', reason: `dev exit ${exitCode}`, metrics: runMetrics });
+      (stageSummaries.implementer ??= { attempts: [] }).attempts.push({
+        attempt, durationMs: runMetrics.durationMs,
+      });
+      await deps.updateStoryState?.({
+        storyId: payload.storyId, state: 'failed', reason: `dev exit ${exitCode}`,
+        metrics: runMetrics, stageSummaries: capStageSummaries(stageSummaries),
+      });
       break;
     }
 
@@ -538,6 +664,17 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       catch (e) { logger.warn?.(`[story-dev] ${payload.storyId} selective-regression failed (non-blocking): ${e.message}`); }
     }
 
+    // This attempt's commit diff — feeds BOTH the tamper backstop below and the
+    // implementer stage summary (dossier B2: per-attempt filesChanged used to be
+    // unstructured event prose). Best-effort: no git / failed diff → empty list.
+    let filesChanged = [];
+    if (deps.git) {
+      try {
+        const d = await deps.git(['diff', '--name-only', `${headSha}~1`, headSha], projectRoot);
+        filesChanged = String(d.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+      } catch { /* best-effort — no diff, no verdict */ }
+    }
+
     // W2.2 — post-hoc tamper audit. The live gate is the primary defense (it
     // forbids the implementer every test file); this is the deterministic
     // backstop for a gate leak. Detection runs here (right after integrate, on
@@ -545,17 +682,32 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     // below — it fails the attempt (was warn-only) and consumes a fix-forward
     // retry exactly like a failing bound AC.
     let tamper = null;
-    if (split?.ownedTestFiles?.length && deps.git) {
-      try {
-        const d = await deps.git(['diff', '--name-only', `${headSha}~1`, headSha], projectRoot);
-        const changed = String(d.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
-        const t = detectTestTampering(split.ownedTestFiles, changed);
-        if (!t.ok) {
-          tamper = t;
-          logger.warn?.(`[story-dev] ${payload.storyId} implementer touched authored test(s): ${t.tampered.join(', ')}`);
-        }
-      } catch { /* detection is best-effort — no diff, no verdict */ }
+    if (split?.ownedTestFiles?.length && filesChanged.length) {
+      const t = detectTestTampering(split.ownedTestFiles, filesChanged);
+      if (!t.ok) {
+        tamper = t;
+        logger.warn?.(`[story-dev] ${payload.storyId} implementer touched authored test(s): ${t.tampered.join(', ')}`);
+      }
     }
+
+    // Structured per-attempt implementer artifact (dossier B2).
+    (stageSummaries.implementer ??= { attempts: [] }).attempts.push({
+      attempt,
+      ...(headSha ? { commitSha: headSha } : {}),
+      ...(filesChanged.length ? { filesChanged } : {}),
+      durationMs: runMetrics.durationMs,
+      ...(runMetrics.inputTokens || runMetrics.outputTokens
+        ? { tokens: (runMetrics.inputTokens || 0) + (runMetrics.outputTokens || 0) }
+        : {}),
+    });
+
+    // B1 — close the dev step BEFORE the completion handler runs: the reviewer
+    // spawn lives INSIDE handleStoryCompletion, so emitting step_complete after
+    // it nested the reviewer's step window inside the dev step's ("dev and
+    // reviewer finished simultaneously" — two agents never actually overlapped,
+    // the event model just said so). Now the reviewer step opens strictly after
+    // the dev step closes in the timeline.
+    evstream.emitStepComplete(runMetrics);
 
     // Decode the stream-json transcript to the agent's plain text so the
     // <BINDING> manifest parses (its JSON is escaped inside stream-json fields).
@@ -572,8 +724,10 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       now: deps.now,
       // W2.1 — additive quality verdict (dark unless P3_QUALITY_GATE on/shadow).
       qualityMode: flagMode(p3Flags, 'P3_QUALITY_GATE'),
-      // W2.1b — risk-tiered reviewer (only fed into the verdict when qualityMode==='on').
-      spawnReviewer: deps.spawnReviewer,
+      // W2.1b — risk-tiered reviewer, memoized per commit SHA (B1+A5: never
+      // re-review identical code, never replay stale verdicts against a NEW
+      // commit) and only spawned by the handler when the binding summary is green.
+      spawnReviewer: spawnReviewerOnce,
       // Reality-Spine #5 (no-mock rule): cwd threads through to
       // runStoryBindings so a state-verify AC bound to a test that mocks the
       // in-repo module under test is rejected (misbound) instead of passing.
@@ -646,19 +800,48 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       }
     }
 
-    // The dev step spawn completed (regardless of AC pass/fail) — emit metrics.
-    evstream.emitStepComplete(runMetrics);
+    // A6 — retryability decided BEFORE the persist so the row never lies about
+    // what happens next. shouldRetry folds in classifyRetryable, which now
+    // fails fast on gate-DATA failures (unbound/misbound bindings, unauthored
+    // invariants) that an implementer respawn can never fix.
+    const willRetry = completion.newState !== 'done' && shouldRetry(completion, attempt, maxAttempts);
+    if (completion.newState !== 'done' && !willRetry && attempt < maxAttempts) {
+      // Failing fast with attempts left → name the data gap on the verdict so
+      // the operator sees WHY no retry happened (dossier A6: the reason must
+      // name the gap, not just "failed").
+      const gaps = findGateDataGaps(completion);
+      if (gaps.length) {
+        completion.verdict = {
+          ...completion.verdict,
+          reasons: [
+            ...(completion.verdict.reasons || []),
+            ...gaps.map((g) => `gate-data failure (not agent-fixable — failing fast): ${g}`),
+          ],
+        };
+      }
+    }
 
-    // Persist the FULL post-run story state (state + bound ACs + commit + cost
-    // + the loaded skill set so the forensic Skills tab reads it from the row).
+    // A2 — honest lifecycle states: a NON-final failing attempt persists
+    // 'developing' (with the verdict/AC/invariant progress) — the old per-attempt
+    // `state: completion.newState` wrote terminal 'failed' onto the row while
+    // attempt 2 was still streaming (pacman1: "FAILED badge + live logs").
+    // Terminal 'failed' lands only when the loop exhausts or the failure is
+    // non-retryable.
+    const persistState = completion.newState === 'done' ? 'done' : willRetry ? 'developing' : 'failed';
+
+    // Persist the FULL post-run story state (state + bound ACs + invariants
+    // WITH their validator bindings (A1 — what a resumed job rebinds from) +
+    // commit + cost + the loaded skill set + the stage audit summaries).
     await deps.updateStoryState?.({
       storyId: payload.storyId,
-      state: completion.newState,
+      state: persistState,
       verdict: completion.verdict,
       acceptanceCriteria: completion.acceptanceCriteria,
+      invariants: completion.invariants,
       commitSha: headSha,
       metrics: runMetrics,
       loadedSkills: readStoryLoadedSkills(projectRoot),
+      stageSummaries: capStageSummaries(stageSummaries),
     });
 
     if (completion.newState === 'done') {
@@ -666,7 +849,7 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       break;
     }
     lastFailureDetail = buildPriorFailureBlock(completion);
-    if (!shouldRetry(completion, attempt, maxAttempts) || !classifyRetryable(completion)) break;
+    if (!willRetry) break;
   }
 
   return {

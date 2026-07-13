@@ -40,12 +40,15 @@ import {
 } from '../shared/state-pill';
 import {
   buildStoryGraphModel,
+  batchPhaseLabel,
+  storyExtras,
   fmtSec,
   fmtCost,
   fmtTokens,
   jobCost,
   jobTokens,
 } from '../plan-spec-dashboard/adapter';
+import type { StoryInvariantView } from '../plan-spec-dashboard/adapter';
 import type { Labs3ViewProps } from '../plan-spec-dashboard/constants';
 
 // Legacy shared primitives (imported unchanged, per the design contract).
@@ -452,12 +455,16 @@ function BatchRow({
   onSelectStory?: (storyId: string) => void;
 }) {
   const isParallel = stories.length > 1;
+  // B4 — when every story in this topological level shares a planner-emitted
+  // phase name, label the batch with it ("Batch N — <phase>"); mixed/absent
+  // phases fall back to the anonymous "Batch N" (batchPhaseLabel → null).
+  const phase = batchPhaseLabel(stories);
   return (
     <div>
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: '20px 110px 1fr',
+          gridTemplateColumns: '20px auto 1fr',
           alignItems: 'center',
           gap: 14,
           padding: '10px 18px 10px 36px',
@@ -472,9 +479,10 @@ function BatchRow({
             color: 'var(--accent-blue)',
             textTransform: 'uppercase',
             letterSpacing: '0.2em',
+            whiteSpace: 'nowrap',
           }}
         >
-          Batch {batch}
+          {phase ? `Batch ${batch} — ${phase}` : `Batch ${batch}`}
         </span>
         <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
           {stories.length} {stories.length === 1 ? 'story' : 'stories'}
@@ -780,6 +788,18 @@ function StoryDetailPanel({
   const [tab, setTab] = useState<'overview' | 'logs'>('overview');
   const sha = latestRunSha(story.acceptanceCriteria);
 
+  // S1 contract fields (rendered defensively — legacy rows have none).
+  const extras = storyExtras(story);
+  const verdict = story.verdict;
+  // A4 chip semantics: a step reads destructive when its OUTCOME failed, not
+  // merely because the process exited. The dev step "failed" when the final
+  // verdict failed; the reviewer "failed" when an advisory-security AC blocked.
+  const verdictFailed = story.state === 'failed' && verdict?.done === false;
+  const blockingReview = (verdict?.blocking?.length ?? 0) > 0;
+  // A3 failure honesty: surface the gate's reasons on a failed story.
+  const reasons = story.state === 'failed' ? (verdict?.reasons ?? []) : [];
+  const invariants = extras.invariants ?? [];
+
   return (
     <div
       style={{
@@ -790,13 +810,22 @@ function StoryDetailPanel({
     >
       <StoryDetailTabs active={tab} onChange={setTab} />
       {/* The multi-agent sub-pipeline for THIS story: Test-Author → Implementer →
-          Reviewer → Compile, derived live from the event stream. */}
-      <StoryStagePipeline events={events} />
+          Reviewer → Compile. The strip derives live from the event stream; each
+          pill is a tab that opens the persisted per-stage audit artifacts. */}
+      <StoryStagePipeline
+        events={events}
+        stageSummaries={extras.stageSummaries}
+        acceptanceCriteria={story.acceptanceCriteria}
+        verdictFailed={verdictFailed}
+        blockingReview={blockingReview}
+      />
       {tab === 'logs' ? (
         <StoryLogsPane events={events} />
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 28 }}>
           <div>
+            {reasons.length > 0 && <FailureReasons reasons={reasons} />}
+
             {story.intent && (
               <>
                 <SectionLabel>Intent</SectionLabel>
@@ -833,6 +862,8 @@ function StoryDetailPanel({
                 </div>
               </>
             )}
+
+            {invariants.length > 0 && <InvariantsSection invariants={invariants} />}
 
             {story.depends_on.length > 0 && (
               <>
@@ -953,6 +984,133 @@ function StoryDetailPanel({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A3 — failure honesty. The completion gate's `verdict.reasons` were invisible
+ * in the UI, so a story could read FAILED with every AC green and no stated
+ * cause. Render them as a prominent destructive-toned list on a failed story.
+ */
+function FailureReasons({ reasons }: { reasons: string[] }) {
+  return (
+    <div
+      role="alert"
+      style={{
+        border: '1px solid color-mix(in srgb, var(--destructive) 45%, transparent)',
+        background: 'color-mix(in srgb, var(--destructive) 8%, transparent)',
+        borderRadius: 6,
+        padding: '12px 14px',
+        marginBottom: 20,
+      }}
+    >
+      <div
+        style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: 8,
+          color: 'var(--destructive)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.24em',
+          marginBottom: 8,
+        }}
+      >
+        Why this story failed
+      </div>
+      <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 5 }}>
+        {reasons.map((r, i) => (
+          <li key={i} style={{ fontSize: 12.5, color: 'var(--foreground)', lineHeight: 1.55 }}>
+            {r}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+const INVARIANT_STATUS_COLOR: Record<string, string> = {
+  passing: 'var(--success)',
+  failing: 'var(--destructive)',
+  authored: 'var(--accent-blue)',
+  declared: 'var(--text-mute)',
+};
+
+/**
+ * A3 — the invariants surface, beside the ACs. A story can fail on an
+ * unbound/failing invariant while every visible AC is green (the dossier's
+ * deterministic dead-end); previously invariants had no chips or rows at all.
+ * Renders each invariant's id, description, a status chip, and any validator
+ * detail whenever the row carries invariants.
+ */
+function InvariantsSection({ invariants }: { invariants: StoryInvariantView[] }) {
+  return (
+    <>
+      <SectionLabel>Invariants · {invariants.length}</SectionLabel>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+        {invariants.map((inv) => {
+          const status = inv.validator?.status ?? 'declared';
+          const color = INVARIANT_STATUS_COLOR[status] ?? 'var(--text-mute)';
+          return (
+            <div key={inv.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+              <span
+                aria-label={`invariant ${status}`}
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 8,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.12em',
+                  padding: '2px 7px',
+                  borderRadius: 3,
+                  border: `1px solid color-mix(in srgb, ${color} 45%, transparent)`,
+                  background: `color-mix(in srgb, ${color} 10%, transparent)`,
+                  color,
+                  flexShrink: 0,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {status}
+              </span>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12, color: 'var(--foreground)', lineHeight: 1.5 }}>
+                  {inv.description || inv.id}
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: 8,
+                    alignItems: 'center',
+                    marginTop: 3,
+                    flexWrap: 'wrap',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 8,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.14em',
+                    color: 'var(--text-faint)',
+                  }}
+                >
+                  <span>{inv.id}</span>
+                  {inv.validator?.ref && <span>{inv.validator.ref}</span>}
+                  {inv.validator?.lastRunSha && (
+                    <span>@{inv.validator.lastRunSha.slice(0, 7)}</span>
+                  )}
+                </div>
+                {inv.validator?.detail && (
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: 'var(--text-mute)',
+                      lineHeight: 1.5,
+                      marginTop: 3,
+                    }}
+                  >
+                    {inv.validator.detail}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
 

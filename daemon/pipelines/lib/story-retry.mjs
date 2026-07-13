@@ -85,34 +85,105 @@ export function buildPriorFailureBlock(completion) {
 }
 
 /**
- * Classify whether a failed completion is retryable (bounded fix-forward).
- *
- * Returns `false` when every failing AC is `browser` or `manual` — those
- * executors are not wired, so re-spawning loops forever on untestable criteria.
- * Returns `false` when there are no failing deterministic ACs (nothing a re-run
- * can fix — e.g. story failed because of `blocked` or `needs-human`).
- * Returns `true` when at least one failing AC has a wired executor kind
- * (unit | integration) or is still unbound (the agent may bind it on retry).
+ * A6 — gate-DATA failures (dossier, pacman1 job 677f9e70): failing entries a
+ * re-spawned IMPLEMENTER can never fix because the gap is pipeline DATA, not
+ * code — the binding/validator wiring comes from the test-author/planner, and
+ * the implementer has no channel to repair it:
+ *   • an AC with NO testRef (unbound — nothing exists for the implementer to
+ *     satisfy; in the split model only the test-author emits <BINDING>),
+ *   • an AC whose binding is `misbound` (wrong testKind / no-mock violation —
+ *     rebinding is test-author data),
+ *   • an invariant with NO authored validator ref (manifest missing and no
+ *     persisted binding — the implementer never authors validators).
+ * Pseudo-entries (test-tampering, green-trunk, foundation-gate) and failing
+ * BOUND tests / authored-but-failing validators are agent-fixable and are NOT
+ * data gaps. PURE over the completion shape.
  *
  * @param {{
  *   verdict?: { failing?: string[] },
  *   acceptanceCriteria?: object[],
+ *   invariants?: object[],
+ * }} completion
+ * @returns {string[]}  one human-readable reason per data gap (empty = none)
+ */
+export function findGateDataGaps(completion) {
+  const { verdict = {}, acceptanceCriteria = [], invariants = [] } = completion || {};
+  const failingIds = Array.isArray(verdict.failing) ? verdict.failing : [];
+  if (!failingIds.length) return [];
+
+  const acMap = new Map(
+    Array.isArray(acceptanceCriteria) ? acceptanceCriteria.map((ac) => [ac.id, ac]) : [],
+  );
+  const invMap = new Map(
+    Array.isArray(invariants) ? invariants.map((inv) => [inv.id, inv]) : [],
+  );
+
+  const gaps = [];
+  for (const id of failingIds) {
+    const inv = invMap.get(id);
+    if (inv) {
+      if (!inv.validator?.ref) {
+        gaps.push(`${id}: invariant has no authored validator (manifest missing, no persisted binding) — an implementer respawn cannot author one`);
+      }
+      continue;
+    }
+    const ac = acMap.get(id);
+    if (!ac) continue; // pseudo-id (test-tampering/green-trunk/foundation-gate) → agent-fixable
+    const tb = ac.testBinding || {};
+    if (tb.status === 'misbound') {
+      gaps.push(`${id}: binding is misbound (${tb.detail || 'wrong testKind / no-mock violation'}) — rebinding is test-author data, not implementer work`);
+    } else if (!tb.testRef) {
+      gaps.push(`${id}: AC is unbound — no test binding exists for an implementer respawn to satisfy`);
+    }
+  }
+  return gaps;
+}
+
+/**
+ * Classify whether a failed completion is retryable (bounded fix-forward).
+ *
+ * Returns `false` when ANY failing entry is a gate-DATA failure (see
+ * findGateDataGaps) — completion needs EVERY entry to pass, so one unfixable
+ * data gap makes a re-spawn pure waste: fail fast instead (dossier A6; the
+ * pacman1 unbound-invariant failure consumed a fix-forward attempt AND a
+ * reviewer for nothing).
+ * Returns `false` when every failing AC is `browser` or `manual` — those
+ * executors are not wired, so re-spawning loops forever on untestable criteria.
+ * Returns `false` when there are no failing deterministic ACs (nothing a re-run
+ * can fix — e.g. story failed because of `blocked` or `needs-human`).
+ * Returns `true` when at least one failing entry is agent-fixable: a failing
+ * BOUND test with a wired executor kind (unit | integration), an
+ * authored-but-failing invariant, or a pseudo-entry (test-tampering,
+ * green-trunk, foundation-gate).
+ *
+ * @param {{
+ *   verdict?: { failing?: string[] },
+ *   acceptanceCriteria?: object[],
+ *   invariants?: object[],
  * }} completion
  * @returns {boolean}
  */
 export function classifyRetryable(completion) {
-  const { verdict = {}, acceptanceCriteria = [] } = completion || {};
+  const { verdict = {}, acceptanceCriteria = [], invariants = [] } = completion || {};
   const failingIds = Array.isArray(verdict.failing) ? verdict.failing : [];
 
   if (!failingIds.length) return false;
+
+  // Gate-DATA failure anywhere → fail fast (respawning cannot clear it).
+  if (findGateDataGaps(completion).length) return false;
 
   const acMap = new Map(
     Array.isArray(acceptanceCriteria)
       ? acceptanceCriteria.map((ac) => [ac.id, ac])
       : [],
   );
+  const invMap = new Map(
+    Array.isArray(invariants) ? invariants.map((inv) => [inv.id, inv]) : [],
+  );
 
   for (const acId of failingIds) {
+    // An authored-but-failing invariant is a failing bound test — retryable.
+    if (invMap.has(acId)) return true;
     const ac = acMap.get(acId);
     // verify='manual' on the AC itself is also a non-retryable signal.
     const kind = ac?.testBinding?.testKind ?? ac?.verify;

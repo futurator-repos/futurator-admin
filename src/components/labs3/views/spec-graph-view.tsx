@@ -18,7 +18,7 @@
  * dangerouslySetInnerHTML for the edge string, idxByStoryId map for O(1) lookup.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { StoryNodeRow, StoryNodeState, TestBindingStatus } from '@/types/plan-spec';
 import type { Labs3ViewProps } from '@/components/labs3/plan-spec-dashboard/adapter';
 import {
@@ -108,6 +108,36 @@ const FALLBACK_COLORS = {
 
 function stateColors(state: StoryNodeState) {
   return STATE_COLORS[state] ?? FALLBACK_COLORS;
+}
+
+// ── Phase (planner-emitted named phase; S1 cross-slice field) ─────────────────
+//
+// StoryNode.phase is added to the shared type by slice S1. We read it via a
+// narrow cast so this consumer compiles whether or not S1 has landed yet, and
+// stays defensive against legacy rows minted before phases existed (undefined /
+// empty → treated as absent, header falls back to the anonymous "BATCH N").
+
+function storyPhase(row: StoryNodeRow): string | undefined {
+  const p = (row as StoryNodeRow & { phase?: unknown }).phase;
+  return typeof p === 'string' && p.trim() ? p.trim() : undefined;
+}
+
+/** First non-empty phase carried by any story in a batch column (else absent). */
+function batchPhase(stories: StoryNodeRow[]): string | undefined {
+  for (const s of stories) {
+    const p = storyPhase(s);
+    if (p) return p;
+  }
+  return undefined;
+}
+
+/** Escape a phase name before it is spliced into the dangerouslySetInnerHTML SVG. */
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 // ── AC rollup ─────────────────────────────────────────────────────────────────
@@ -241,15 +271,23 @@ function buildTouchesOverlay(stories: StoryNodeRow[], nodePos: Map<string, NodeP
   return parts;
 }
 
-/** Batch-level column header labels, rendered inside the SVG. */
-function buildBatchLabels(batches: { batchNum: number; colIdx: number }[]): string[] {
-  return batches.map(({ batchNum, colIdx }) => {
+/**
+ * Batch-level column header labels, rendered inside the SVG.
+ * When the column's stories carry a planner-emitted `phase`, the header reads
+ * "Batch N — <phase>"; legacy columns with no phase fall back to "BATCH N".
+ */
+function buildBatchLabels(
+  batches: { batchNum: number; colIdx: number; stories: StoryNodeRow[] }[],
+): string[] {
+  return batches.map(({ batchNum, colIdx, stories }) => {
     const cx = PAD_X + HALF_W + colIdx * BATCH_STEP;
+    const phase = batchPhase(stories);
+    const label = phase ? `Batch ${batchNum} — ${escapeXml(phase)}` : `BATCH ${batchNum}`;
     return (
       `<text x="${cx}" y="20" text-anchor="middle" ` +
       `font-family="monospace" font-size="9.5" letter-spacing="1.5" ` +
       `fill="rgba(128,128,128,0.45)" style="text-transform:uppercase">` +
-      `BATCH ${batchNum}` +
+      label +
       `</text>` +
       // Vertical column rule
       `<line x1="${cx}" y1="30" x2="${cx}" y2="99999" ` +
@@ -341,6 +379,7 @@ function NodeCard({
     <div
       role="button"
       tabIndex={0}
+      data-story-node=""
       onClick={onClick}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -498,13 +537,34 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-function DetailPanel({ row, onClose }: { row: StoryNodeRow; onClose: () => void }) {
+function DetailPanel({
+  row,
+  onClose,
+  onOpenInStories,
+  titleById,
+  panelRef,
+}: {
+  row: StoryNodeRow;
+  onClose: () => void;
+  onOpenInStories: () => void;
+  /** storyId → title, for resolving depends_on into human-readable titles. */
+  titleById: Map<string, string>;
+  panelRef: React.Ref<HTMLDivElement>;
+}) {
   const acList = row.acceptanceCriteria ?? [];
   const deps = row.depends_on ?? [];
   const touches = row.touches ?? [];
+  const phase = storyPhase(row);
+  // Only surface verdict reasons when the story actually failed — a green story
+  // may still carry a stale verdict from an earlier attempt (dossier A3).
+  const reasons =
+    (row.state === 'failed' || row.verdict?.done === false) && row.verdict?.reasons
+      ? row.verdict.reasons.filter((r) => r && r.trim())
+      : [];
 
   return (
     <div
+      ref={panelRef}
       style={{
         background: 'var(--surface)',
         borderTop: '1px solid var(--border)',
@@ -537,6 +597,23 @@ function DetailPanel({ row, onClose }: { row: StoryNodeRow; onClose: () => void 
             {row.cohort?.epicTitle && <MonoBadge>{row.cohort.epicTitle}</MonoBadge>}
             <MonoBadge>batch {row.cohortBatch ?? 0}</MonoBadge>
             {row.complexity && <MonoBadge>{row.complexity}</MonoBadge>}
+            {phase && (
+              <span
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 10,
+                  padding: '1px 6px',
+                  borderRadius: 8,
+                  background: 'rgba(167,139,250,0.13)',
+                  color: 'rgba(167,139,250,0.9)',
+                  border: '1px solid rgba(167,139,250,0.24)',
+                  whiteSpace: 'nowrap',
+                }}
+                title="Planner phase"
+              >
+                {phase}
+              </span>
+            )}
           </div>
 
           {/* Title */}
@@ -615,22 +692,32 @@ function DetailPanel({ row, onClose }: { row: StoryNodeRow; onClose: () => void 
               <div>
                 <SectionLabel>Depends on ({deps.length})</SectionLabel>
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                  {deps.map((d) => (
-                    <span
-                      key={d}
-                      style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 10,
-                        padding: '2px 6px',
-                        borderRadius: 8,
-                        background: 'rgba(120,147,184,0.13)',
-                        color: 'rgba(120,147,184,0.85)',
-                        border: '1px solid rgba(120,147,184,0.24)',
-                      }}
-                    >
-                      {d.slice(0, 12)}…
-                    </span>
-                  ))}
+                  {deps.map((d) => {
+                    // Resolve to the dependency's title; fall back to a truncated
+                    // id for cross-plan / not-yet-loaded deps.
+                    const depTitle = titleById.get(d);
+                    return (
+                      <span
+                        key={d}
+                        title={depTitle ? `${depTitle}\n${d}` : d}
+                        style={{
+                          fontFamily: depTitle ? 'var(--font-sans)' : 'var(--font-mono)',
+                          fontSize: 10.5,
+                          padding: '2px 6px',
+                          borderRadius: 8,
+                          background: 'rgba(120,147,184,0.13)',
+                          color: 'rgba(120,147,184,0.85)',
+                          border: '1px solid rgba(120,147,184,0.24)',
+                          maxWidth: 200,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {depTitle ?? `${d.slice(0, 12)}…`}
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -670,27 +757,85 @@ function DetailPanel({ row, onClose }: { row: StoryNodeRow; onClose: () => void 
               </div>
             )}
           </div>
+
+          {/* Failure reasons — only when the story failed. A story can fail on
+              unbound invariants while every visible AC is green (dossier A3), so
+              this is the only place the operator sees WHY it went red. */}
+          {reasons.length > 0 && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: '9px 11px',
+                borderRadius: 8,
+                background: 'rgba(239,68,68,0.08)',
+                border: '1px solid rgba(239,68,68,0.24)',
+              }}
+            >
+              <SectionLabel>Failure reasons ({reasons.length})</SectionLabel>
+              <ul
+                style={{
+                  margin: 0,
+                  paddingLeft: 16,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 3,
+                }}
+              >
+                {reasons.map((r, i) => (
+                  <li
+                    key={i}
+                    style={{
+                      fontSize: 12,
+                      lineHeight: 1.5,
+                      color: 'rgba(239,68,68,0.92)',
+                    }}
+                  >
+                    {r}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
 
-        {/* Close button */}
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close story detail"
-          style={{
-            background: 'none',
-            border: 'none',
-            color: 'var(--text-mute)',
-            cursor: 'pointer',
-            fontSize: 18,
-            lineHeight: 1,
-            padding: '0 3px',
-            flexShrink: 0,
-            marginTop: -2,
-          }}
-        >
-          ×
-        </button>
+        {/* Actions: the ONLY remaining navigation path to the Stories tab, plus close */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={onOpenInStories}
+            style={{
+              background: 'rgba(120,147,184,0.13)',
+              border: '1px solid rgba(120,147,184,0.24)',
+              color: 'rgba(120,147,184,0.95)',
+              cursor: 'pointer',
+              fontSize: 11.5,
+              fontWeight: 500,
+              lineHeight: 1,
+              padding: '5px 9px',
+              borderRadius: 7,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Open in Stories →
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close story detail"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-mute)',
+              cursor: 'pointer',
+              fontSize: 18,
+              lineHeight: 1,
+              padding: '0 3px',
+              marginTop: -2,
+            }}
+          >
+            ×
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -950,10 +1095,37 @@ function EmptyState() {
 
 export function SpecGraphView({ stories, plan, onSelectStory }: Labs3ViewProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const narrative = plan?.planNarrative;
   const shape = plan?.planShape;
 
   const layout = useMemo(() => buildLayout(stories), [stories]);
+
+  /** storyId → title, so the detail panel can render depends_on as story titles. */
+  const titleById = useMemo(() => new Map(stories.map((s) => [s.storyId, s.title])), [stories]);
+
+  // Escape + click-outside close the in-place detail panel. Clicks on a node
+  // card ([data-story-node]) are ignored here so the card's own toggle handler
+  // owns node→node switching and same-node close.
+  useEffect(() => {
+    if (selectedId == null) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setSelectedId(null);
+    }
+    function onDown(e: MouseEvent) {
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      if (panelRef.current?.contains(t)) return;
+      if (t.closest('[data-story-node]')) return;
+      setSelectedId(null);
+    }
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onDown);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onDown);
+    };
+  }, [selectedId]);
 
   /**
    * Build the complete SVG inner HTML string: column rules, batch labels,
@@ -969,9 +1141,11 @@ export function SpecGraphView({ stories, plan, onSelectStory }: Labs3ViewProps) 
 
   const selectedRow = selectedId != null ? (layout.nodePos.get(selectedId)?.row ?? null) : null;
 
+  // Clicking a node opens the in-place detail panel — it NO LONGER navigates
+  // away (dossier B4). The panel's "Open in Stories →" button is the sole
+  // remaining path that invokes onSelectStory.
   function handleSelect(storyId: string) {
     setSelectedId((prev) => (prev === storyId ? null : storyId));
-    onSelectStory?.(storyId);
   }
 
   if (stories.length === 0)
@@ -1034,9 +1208,15 @@ export function SpecGraphView({ stories, plan, onSelectStory }: Labs3ViewProps) 
           </div>
         </div>
 
-        {/* Detail panel (below canvas) */}
+        {/* Detail panel (below canvas) — in-place, does not navigate away */}
         {selectedRow != null && (
-          <DetailPanel row={selectedRow} onClose={() => setSelectedId(null)} />
+          <DetailPanel
+            row={selectedRow}
+            onClose={() => setSelectedId(null)}
+            onOpenInStories={() => onSelectStory?.(selectedRow.storyId)}
+            titleById={titleById}
+            panelRef={panelRef}
+          />
         )}
       </div>
     </>

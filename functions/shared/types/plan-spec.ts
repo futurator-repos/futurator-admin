@@ -110,6 +110,52 @@ export interface StoryNode {
   isFoundation?: boolean;
   /** Planner-declared properties of the domain data this story must satisfy. */
   invariants?: Invariant[];
+  /** Planner-emitted short phase name (≤40 chars) — names the batch this story
+   *  belongs to in the UI (fallback "Batch N" when absent). Schema-tolerant. */
+  phase?: string;
+}
+
+// ── Stage summaries (dossier B2) — structured per-stage artifacts on the row ──
+// Written by the story-dev pipeline after each attempt so the UI's stage pills
+// can open an audit panel without re-parsing event prose. Size-capped at write
+// time: preview ≤2000 chars/file, total stageSummaries JSON ≤48KB (previews
+// truncated first).
+
+/** One file the Test-Author committed at RED (path + size + capped preview). */
+export interface StageFileSummary {
+  path: string;
+  lines?: number;
+  /** First ≤2000 chars of the file content (may be truncated further/removed
+   *  under the 48KB row cap). */
+  preview?: string;
+}
+
+/** Per-stage structured artifacts persisted on the story row. */
+export interface StageSummaries {
+  testAuthor?: {
+    files: StageFileSummary[];
+    redSha?: string;
+    resumed?: boolean;
+    bindings?: Record<string, { testRef: string; testKind?: string }>;
+    invariantManifest?: Record<string, { ref: string; kind?: string }>;
+    durationMs?: number;
+  };
+  implementer?: {
+    attempts: Array<{
+      attempt: number;
+      commitSha?: string;
+      filesChanged?: string[];
+      durationMs?: number;
+      tokens?: number;
+    }>;
+  };
+  reviewer?: {
+    verdicts?: Record<string, 'pass' | 'fail'>;
+    needsHuman?: string[];
+    ranAt?: string;
+  };
+  /** Populated by the compile pipeline (optional — absent until it runs). */
+  compile?: { status?: string; detail?: string };
 }
 
 export interface PlanSpec {
@@ -182,4 +228,6 @@ export interface StoryNodeRow extends StoryNode {
   outputTokens?: number;
   /** Wall-clock duration of the last dev run in milliseconds. */
   durationMs?: number;
+  /** Per-stage structured artifacts (test-author/implementer/reviewer/compile). */
+  stageSummaries?: StageSummaries;
 }

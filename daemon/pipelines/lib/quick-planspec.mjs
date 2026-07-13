@@ -166,6 +166,7 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
     `    {`,
     `      "id": "kebab-slug-unique-in-this-plan",`,
     `      "title": "short imperative title",`,
+    `      "phase": "short phase name from your PLAN_THINKING PHASES (≤40 chars)",`,
     `      "intent": "one sentence on what this story delivers (name the contract files it implements against)",`,
     `      "dependsOn": ["id-of-a-true-prerequisite-story"],`,
     `      "acceptanceCriteria": [`,
@@ -226,6 +227,11 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
     `  reachable cell has a path to the exit", "every seeded id is unique and resolves`,
     `  in the schema") — never skip this because "it's just config"; bad seed/level`,
     `  data is exactly the class of bug a story-level test cannot catch.`,
+    `- PHASE: give every story a "phase" — a short name (≤40 chars) taken from the`,
+    `  PHASES section of your OWN PLAN_THINKING for THIS idea (the phase this story`,
+    `  belongs to). Stories in the same dependency layer that belong to the same phase`,
+    `  MUST share the EXACT same phase name. Never use a hardcoded/generic taxonomy —`,
+    `  the names come from your PHASES for this specific idea.`,
     `- PARALLELISM: dependsOn lists ONLY true prerequisites. Feature slices depend on`,
     `  the foundation, not on each other. Stories that can run concurrently MUST have`,
     `  disjoint touches — ownership, never sharing.`,
@@ -281,7 +287,8 @@ export function buildQuickPlanspecRepairPrompt({ intent, appSlug, seamHook, maxS
     `same capabilities and acceptance criteria; change the DECOMPOSITION (touches must`,
     `be disjoint per-capability slices against the frozen foundation contract) and the`,
     `GRAPH (dependsOn = foundation only for slices; assemble depends on all) so that`,
-    `every violation above is eliminated.`,
+    `every violation above is eliminated. Keep a "phase" name on every story (from your`,
+    `PLAN_THINKING PHASES), re-deriving them if your re-shaped decomposition changed.`,
   ];
   // The PHASE directive — fires when the audit found feature stories are not
   // actually independent (they share a snapshot root / runtime state machine).
@@ -689,7 +696,8 @@ export function deriveRiskTag(ac) {
  *
  * Each story also gets `nodeKind` ('foundation'|'feature'|'integration', mirroring
  * `classify`), `isFoundation` (nodeKind==='foundation'), and `invariants` (parsed
- * from the model's `invariants` field — malformed entries dropped, ids minted).
+ * from the model's `invariants` field — malformed entries dropped, ids minted and
+ * namespaced `<storyId>-<slug>` so cross-story slug collisions cannot exist).
  *
  * @returns {{ stories: object[], errors: string[],
  *             audit: ReturnType<typeof auditPlanGraph> & { modelAuthored:boolean, cyclesDropped:number, safetyEdges:number },
@@ -764,13 +772,26 @@ export function parseQuickPlanspec(text, { maxStories = MAX_STORIES } = {}) {
       )
       .map((inv) => {
         invN += 1;
-        const id = typeof inv.id === 'string' && inv.id.trim() ? inv.id.trim() : `${storyId}-inv${invN}`;
+        // Namespace EVERY id with the minted storyId (the no-id fallback already
+        // was). Invariant ids feed the MANDATED validator file name
+        // (`<id>.invariant.test.*`) and the completion gate's convention rebind
+        // searches the WHOLE worktree by that name — the prompt only asks for a
+        // "kebab-slug", so two stories can emit the same slug and story B's gate
+        // would rebind to story A's committed validator, judging B by the wrong
+        // test. storyId is a minted UUID, so the prefix is globally unique.
+        const slug = typeof inv.id === 'string' && inv.id.trim() ? inv.id.trim() : `inv${invN}`;
+        const id = slug.startsWith(`${storyId}-`) ? slug : `${storyId}-${slug}`;
         return { id, description: inv.description.slice(0, 300), validator: { status: 'declared' } };
       });
+    // Planner-emitted phase name (PHASES section of PLAN_THINKING) — the UI renders
+    // named batch headers from it (dossier B4); absent stays undefined, capped ≤40.
+    const phase =
+      typeof s.phase === 'string' && s.phase.trim() ? s.phase.trim().slice(0, 40) : undefined;
     return {
       storyId,
       cohort: { epicId: 'quick', epicTitle: 'Quick' },
       title,
+      phase,
       intent: String(s.intent || s.description || title).slice(0, 400),
       acceptanceCriteria,
       depends_on: depsIn.map((d) => slugToId.get(d) || d),

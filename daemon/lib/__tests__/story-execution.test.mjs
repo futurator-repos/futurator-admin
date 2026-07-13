@@ -39,6 +39,20 @@ describe('buildStoryDevJob', () => {
     expect(row.storyDevPayload.touches).toEqual(['src/auth/**']);
     expect(row.storyDevPayload.acceptanceCriteria).toHaveLength(1);
   });
+
+  it('copies row invariants into the payload WITH their persisted validator state (A1 — never strip the binding)', () => {
+    // A resumed job's ability to complete depends on the row's authored
+    // validator refs surviving the mint verbatim (dossier A1).
+    const invariants = [{
+      id: 'inv-1',
+      description: 'every declared target resolves',
+      validator: { ref: 'src/inv-1.invariant.test.ts', kind: 'test', status: 'authored', lastRunSha: 'sha1' },
+    }];
+    const row = buildStoryDevJob({ storyNode: storyNode({ invariants }), planId: 'p1', appId: 'a', workingDir: '/w', jobId: 'j1', now: 'T' });
+    expect(row.storyDevPayload.invariants).toEqual(invariants);
+    expect(row.storyDevPayload.invariants[0].validator.ref).toBe('src/inv-1.invariant.test.ts');
+    expect(row.storyDevPayload.invariants[0].validator.status).toBe('authored');
+  });
 });
 
 describe('handleStoryCompletion', () => {

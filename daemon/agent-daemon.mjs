@@ -2001,13 +2001,18 @@ async function executeStoryDevJob(job) {
     }
   }
 
-  const updateStoryState = async ({ storyId: sid, state, verdict, acceptanceCriteria, commitSha, metrics, loadedSkills }) => {
+  const updateStoryState = async ({ storyId: sid, state, verdict, acceptanceCriteria, commitSha, metrics, loadedSkills, invariants, stageSummaries }) => {
     try {
       // Glue aliases EVERY key (#state is a reserved word + GSI key), flattens
       // metrics{} → cost/tokens/duration, persists the loaded skill set (forensic
       // Skills tab reads it off the row), and appends updatedAt EXACTLY ONCE
       // (no "Two document paths overlap"). We supply Key + TableName.
-      const upd = buildStoryStateUpdate({ state, verdict, acceptanceCriteria, commitSha, metrics, loadedSkills });
+      // invariants (A1): the validator bindings MUST land on the row — they only
+      // ever existed in the fresh test-author's stdout, so every resumed/retried
+      // job re-derived manifest={} and fail-closed on 'no authored validator'
+      // (pacman1 job 677f9e70: a retried invariant story could NEVER complete).
+      // stageSummaries (B2): structured per-stage artifacts, size-capped upstream.
+      const upd = buildStoryStateUpdate({ state, verdict, acceptanceCriteria, commitSha, metrics, loadedSkills, invariants, stageSummaries });
       await ddb.send(new UpdateCommand({
         TableName: PLAN_SPEC_GRAPH_TABLE,
         Key: { storyId: sid },
