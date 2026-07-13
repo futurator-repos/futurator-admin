@@ -11,7 +11,7 @@ describe('defaultExecutors', () => {
     const ex = defaultExecutors({ cwd: '/w', spawnSync });
     const r = await ex.unit(ac('unit', 'foo.test.ts'));
     expect(r.passed).toBe(true);
-    expect(calls[0]).toEqual(['npx', 'vitest', 'run', 'foo.test.ts']);
+    expect(calls[0]).toEqual(['npx', 'vitest', 'run', '--passWithNoTests=false', 'foo.test.ts']);
   });
 
   it('extracts the FILE from vitest report-notation testRefs (file > describe > it)', async () => {
@@ -19,7 +19,7 @@ describe('defaultExecutors', () => {
     const spawnSync = (cmd, args) => { calls.push([cmd, ...args]); return { status: 0 }; };
     const ex = defaultExecutors({ cwd: '/w', spawnSync });
     await ex.unit(ac('unit', 'src/x/__tests__/dino.test.ts > initiateJump — launches > makes vy negative (AC-S2-2)'));
-    expect(calls[0]).toEqual(['npx', 'vitest', 'run', 'src/x/__tests__/dino.test.ts']);
+    expect(calls[0]).toEqual(['npx', 'vitest', 'run', '--passWithNoTests=false', 'src/x/__tests__/dino.test.ts']);
   });
 
   it('non-zero exit → failed with tail detail', async () => {

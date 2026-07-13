@@ -52,7 +52,12 @@ export function defaultExecutors({ cwd, qaContext, spawnSync = nodeSpawnSync, ti
     // test-name strings (no fragile `-t` regex). Per-test precision can come
     // later if partial-credit reporting is ever needed.
     const filePath = String(testRef).split(' > ')[0].trim();
-    return runCommand(spawnSync, 'npx', ['vitest', 'run', filePath], { cwd, timeoutMs });
+    // --passWithNoTests=false (pacman1, 2026-07-13): the scaffold's vitest
+    // config ships passWithNoTests:true (keeps a fresh app's bare `npm test`
+    // green), which makes a binding whose file segment resolves to NO test
+    // file exit 0 — a vacuous PASS on an AC nobody verified. A bound-AC run
+    // must fail closed when the bound file doesn't match anything.
+    return runCommand(spawnSync, 'npx', ['vitest', 'run', '--passWithNoTests=false', filePath], { cwd, timeoutMs });
   };
   const executors = {
     unit: vitest,
