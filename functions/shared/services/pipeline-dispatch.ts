@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { Context } from 'hono';
 import type { z } from 'zod';
 
@@ -22,50 +24,165 @@ import * as storyNodeRepo from '../repositories/story-node-repository';
 /**
  * External pipeline-dispatch service (NEW machine-callable surface).
  *
- * Reuses the Labs3 `POST /api/plans/quick-p3` create flow verbatim, but reached
- * by an external `x-queue-key` caller instead of the operator JWT. `createdBy`
- * carries the caller's `source` (`external:<source>`) — there is no JWT user —
- * exactly how the queue-ingest path stamps `createdBy: 'external'`.
+ * An external `x-queue-key` caller (mycelium, etc.) POSTs a `seal` (a converged,
+ * approved plan contract) — or a bare `intent` — and Futurator runs a full
+ * Pipeline-3 dev run, tracked via GET /api/pipeline/runs/:id.
  *
- * The stage mapper (`derivePipelineStage`) collapses the full internal
- * plan-status × story-node-state space into the eight external stages the
- * caller polls, honestly: it NEVER reports a later stage than the pipeline is
- * actually in, and every answer names the predicate that fired so it is
- * reproducible from the row fields.
+ * Identity model (the whole point of v2):
+ *   • app.ref → a DETERMINISTIC Futurator appId (`deriveAppId`). Unknown ref →
+ *     GREENFIELD (scaffold a fresh repo, reuses the quick-p3 flow). Known ref →
+ *     ITERATION (new Plan on the existing app + worktree, brownfield planner —
+ *     mirrors the `POST /api/plans` targetAppId branch).
+ *   • seal.id (+ version) → a DETERMINISTIC runId/planId (`deriveRunId`). A
+ *     re-sent same seal+version is IDEMPOTENT (returns the existing run); a new
+ *     version starts a NEW run (re-develop). No seal → random id, no dedup.
+ *   • seal/version/app.ref/git are stamped onto the Plan as `sealProvenance`
+ *     and echoed by the status endpoint. `git` is provenance ONLY in v1
+ *     (recorded, not cloned — Futurator owns the dev repo).
+ *
+ * `createdBy` carries the caller (`external:<source>`) — there is no JWT user,
+ * exactly how the queue-ingest path stamps `createdBy: 'external'`.
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Create — intent → running Pipeline-3 plan (faithful copy of quick-p3).
+// Deterministic identity — appId from (source, ref); runId from (source, seal).
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface CreatePipelineRunInput {
-  intent: string;
-  name?: string;
-  /** Default ON — auto-fix + re-run QA on a blocking verdict. */
-  qaAutopilot?: boolean;
-  /** Stamped onto the app/plan/job rows (no JWT user on the external path). */
-  createdBy: string;
+function slugify(s: string, max = 30): string {
+  const base = s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, max);
+  return base || 'app';
 }
 
-export async function createPipelineRunFromIntent({
-  intent,
-  name,
-  qaAutopilot: qaAutopilotIn,
-  createdBy,
-}: CreatePipelineRunInput): Promise<{ planId: string; appId: string; jobId: string }> {
-  const qaAutopilot = qaAutopilotIn ?? true;
+function shortHash(s: string, n = 6): string {
+  return createHash('sha256').update(s).digest('hex').slice(0, n);
+}
 
-  // Unique throwaway app slug (fresh app per intent) — sanitized + random suffix.
-  const base =
-    (name || intent)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 24) || 'quick';
-  const appId = `${base.replace(/^[^a-z]/, 'q')}-${crypto.randomUUID().slice(0, 6)}`.slice(0, 40);
+/**
+ * Deterministic, human-readable Futurator appId for a caller's stable app ref.
+ * STABLE across seals (depends only on source+ref, never on the display name),
+ * kebab, letter-first, ≤40 chars, collision-safe via a short content hash.
+ */
+export function deriveAppId(source: string, ref: string): string {
+  let id = `${slugify(ref, 30)}-${shortHash(`${source}:${ref}`)}`.slice(0, 40);
+  if (!/^[a-z]/.test(id)) id = `a${id}`.slice(0, 40);
+  return id;
+}
+
+/**
+ * Deterministic UUID-shaped runId/planId for a (source, sealId, version). Same
+ * seal+version → same id (idempotent); a new version → a new id (new run).
+ */
+export function deriveRunId(source: string, sealId: string, version?: string): string {
+  const h = createHash('sha256')
+    .update(`${source}:seal:${sealId}:${version ?? ''}`)
+    .digest('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+/** Throwaway per-call slug when the caller supplies no stable app.ref. */
+function throwawaySlug(seedText: string): string {
+  const base = slugify(seedText, 24);
+  return `${base.replace(/^[^a-z]/, 'q')}-${crypto.randomUUID().slice(0, 6)}`.slice(0, 40);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dispatch — resolve identity, then greenfield-scaffold or iterate.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type DispatchInput = z.infer<typeof dispatchPipelineSchema>;
+
+export interface DispatchResult {
+  runId: string;
+  appId: string;
+  /** true when this dispatch created the app (greenfield); false = iteration. */
+  isNewApp: boolean;
+  /** true when the seal+version was already dispatched — existing run returned. */
+  idempotent: boolean;
+}
+
+type SealProvenance = NonNullable<Plan['sealProvenance']>;
+
+/**
+ * Resolve identity + dispatch. Reuses the quick-p3 create flow for greenfield
+ * and the `POST /api/plans` targetAppId branch for iteration.
+ */
+export async function dispatchPipelineRun(input: DispatchInput): Promise<DispatchResult> {
+  const { source } = input;
+  const document = input.seal?.document ?? input.intent!;
+  const createdBy = `external:${source}`;
+  const now = new Date().toISOString();
+
+  const provenance: SealProvenance = {
+    source,
+    ...(input.app?.ref ? { appRef: input.app.ref } : {}),
+    ...(input.seal?.id ? { sealId: input.seal.id } : {}),
+    ...(input.seal?.version ? { sealVersion: input.seal.version } : {}),
+    ...(input.git ? { git: input.git } : {}),
+    dispatchedAt: now,
+  };
+
+  const hasAppRef = Boolean(input.app?.ref);
+  const hasSeal = Boolean(input.seal?.id);
+
+  // Deterministic ids (or random for the simple, identity-less path).
+  const appId = hasAppRef
+    ? deriveAppId(source, input.app!.ref)
+    : throwawaySlug(input.app?.name || input.name || document);
+  const runId = hasSeal
+    ? deriveRunId(source, input.seal!.id, input.seal!.version)
+    : crypto.randomUUID();
+
+  // Idempotency — a seal already dispatched at this version returns its run.
+  if (hasSeal) {
+    const existing = await planRepo.getPlanById(runId);
+    if (existing) {
+      return { runId, appId: existing.appId ?? appId, isNewApp: false, idempotent: true };
+    }
+  }
+
+  // App resolution — known ref iterates; unknown ref (or no ref) is greenfield.
+  const existingApp = hasAppRef ? await appRepo.getApp(appId) : null;
+
+  if (existingApp) {
+    await createIterationPlan({ app: existingApp, runId, document, provenance, createdBy, now });
+    return { runId, appId, isNewApp: false, idempotent: false };
+  }
+
+  const displayName = input.app?.name || input.name;
+  const created = await createGreenfieldRun({
+    appId,
+    displayName,
+    runId,
+    document,
+    provenance,
+    createdBy,
+    now,
+  });
+  return { runId, appId: created.appId, isNewApp: true, idempotent: false };
+}
+
+/**
+ * GREENFIELD — scaffold a fresh app repo, then plan + planspec (faithful copy of
+ * quick-p3, but with a caller-chosen appId, planId=runId, and provenance).
+ */
+async function createGreenfieldRun(args: {
+  appId: string;
+  displayName?: string;
+  runId: string;
+  document: string;
+  provenance: SealProvenance;
+  createdBy: string;
+  now: string;
+}): Promise<{ appId: string }> {
+  const { appId, displayName, runId, document, provenance, createdBy, now } = args;
+  const base = displayName ? slugify(displayName, 24) : appId;
+
   const boilerplateType = normalizeBoilerplateType('nextjs-canvas-game');
   const meta = BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType];
-  const now = new Date().toISOString();
 
   // Scaffold the repo from the boilerplate template. A GitHubError propagates to
   // the handler, which relays it as an HTTP status (same as quick-p3).
@@ -107,15 +224,15 @@ export async function createPipelineRunFromIntent({
     },
   });
 
-  const planId = crypto.randomUUID();
   const plan: Plan = {
-    planId,
+    planId: runId,
     name: appId,
-    displayName: `${base} — quick`,
-    intent,
+    displayName: `${base} — dispatch`,
+    intent: document,
     description: '',
     status: 'concept',
     epicIds: [],
+    kind: 'initial',
     appId,
     workingDir: app.workingDir,
     executionMode: 'pipeline',
@@ -124,8 +241,9 @@ export async function createPipelineRunFromIntent({
     totalStories: 0,
     doneStories: 0,
     costCeilingUsd: defaultCostCeiling('mvp'),
-    qaAutopilot,
+    qaAutopilot: true,
     qaAutoFixRounds: 0,
+    sealProvenance: provenance,
     createdAt: now,
     updatedAt: now,
     createdBy,
@@ -133,9 +251,8 @@ export async function createPipelineRunFromIntent({
   await planRepo.createPlan(plan);
 
   // The generation job — waits for the scaffold, then one Claude call → StoryNodes.
-  const genJobId = crypto.randomUUID();
   await agentJobsRepo.createJob({
-    jobId: genJobId,
+    jobId: crypto.randomUUID(),
     status: 'PENDING',
     createdAt: now,
     updatedAt: now,
@@ -143,17 +260,87 @@ export async function createPipelineRunFromIntent({
     workingDir: app.workingDir,
     jobType: 'quick-planspec',
     quickPlanspecPayload: {
-      planId,
+      planId: runId,
       appId,
-      intent,
+      intent: document,
       appBootstrapJobId: bootstrapJobId,
-      // Boilerplate metadata, NOT a pipeline constant — the planner prompt names
-      // the real seam hook for whatever boilerplate scaffolded this app.
       seamHook: meta.testHarness?.seamHook,
     },
   });
 
-  return { planId, appId, jobId: genJobId };
+  return { appId };
+}
+
+/**
+ * ITERATION — a new seal on an EXISTING app: new Plan on the existing worktree,
+ * brownfield planner (no scaffold). Mirrors the `POST /api/plans` targetAppId
+ * branch. planId=runId; provenance stamped.
+ */
+async function createIterationPlan(args: {
+  app: App;
+  runId: string;
+  document: string;
+  provenance: SealProvenance;
+  createdBy: string;
+  now: string;
+}): Promise<void> {
+  const { app, runId, document, provenance, createdBy, now } = args;
+  const bpType = normalizeBoilerplateType(app.boilerplateType || 'nextjs-base');
+  const seamHook = BOILERPLATE_REGISTRY[bpType]?.testHarness?.seamHook;
+
+  // Deterministic, non-colliding plan name per seal (createPlan enforces name
+  // uniqueness; the idempotent short-circuit above means this only runs once).
+  const nameSuffix = provenance.sealId
+    ? `seal-${shortHash(`${provenance.sealId}:${provenance.sealVersion ?? ''}`)}`
+    : `change-${runId.slice(0, 5)}`;
+
+  const plan: Plan = {
+    planId: runId,
+    name: `${app.appId}-${nameSuffix}`,
+    displayName: `${app.displayName ?? app.appId} — ${provenance.sealVersion ?? 'change'}`,
+    intent: document,
+    description: '',
+    status: 'concept',
+    epicIds: [],
+    kind: 'change',
+    appId: app.appId,
+    workingDir: app.workingDir,
+    executionMode: 'pipeline',
+    rigor: 'mvp',
+    totalCostUsd: 0,
+    totalStories: 0,
+    doneStories: 0,
+    costCeilingUsd: defaultCostCeiling('mvp'),
+    qaAutopilot: true,
+    qaAutoFixRounds: 0,
+    sealProvenance: provenance,
+    createdAt: now,
+    updatedAt: now,
+    createdBy,
+  };
+  await planRepo.createPlan(plan);
+
+  // Generation job — no scaffold to wait for (existing worktree), so no
+  // appBootstrapJobId; `brownfield: true` → planner plans against real code.
+  // Built as a variable so the extra `brownfield` key isn't excess-property-
+  // checked against quickPlanspecPayload's type (the daemon reads it at runtime).
+  const quickPlanspecPayload = {
+    planId: runId,
+    appId: app.appId,
+    intent: document,
+    seamHook,
+    brownfield: true,
+  };
+  await agentJobsRepo.createJob({
+    jobId: crypto.randomUUID(),
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy,
+    workingDir: app.workingDir,
+    jobType: 'quick-planspec',
+    quickPlanspecPayload,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -362,7 +549,7 @@ function checkQueueKey(c: Context): Response | null {
   return null;
 }
 
-/** POST /api/pipeline/dispatch — external "intent → running P3 plan". */
+/** POST /api/pipeline/dispatch — external "seal/intent → running P3 plan". */
 export async function handleDispatch(c: Context): Promise<Response> {
   const unauth = checkQueueKey(c);
   if (unauth) return unauth;
@@ -380,21 +567,19 @@ export async function handleDispatch(c: Context): Promise<Response> {
       400,
     );
 
-  const { source, intent, name } = parsed.data;
   try {
-    const { planId, appId } = await createPipelineRunFromIntent({
-      intent,
-      name,
-      createdBy: `external:${source}`,
-    });
+    const { runId, appId, isNewApp, idempotent } = await dispatchPipelineRun(parsed.data);
     return c.json(
       {
-        runId: planId,
+        runId,
         appId,
-        statusUrl: `/api/pipeline/runs/${planId}`,
+        isNewApp,
+        idempotent,
+        statusUrl: `/api/pipeline/runs/${runId}`,
         status: 'accepted',
       },
-      202,
+      // 202 for a fresh dispatch; 200 when the seal was already dispatched.
+      idempotent ? 200 : 202,
     );
   } catch (err) {
     // Relay repo/GitHub failures gracefully, exactly like quick-p3.
@@ -423,5 +608,7 @@ export async function handleGetRun(c: Context): Promise<Response> {
   // Same reads GET /api/plans/:id and /story-nodes perform; never-ingested plans
   // return an empty array (not a 404).
   const storyNodes = await storyNodeRepo.getPlanStoryNodes(planId);
-  return c.json(derivePipelineStage(plan, storyNodes));
+  const view = derivePipelineStage(plan, storyNodes);
+  // Echo dispatch provenance so the caller can correlate this run to its seal.
+  return c.json({ runId: planId, appId: plan.appId, provenance: plan.sealProvenance, ...view });
 }

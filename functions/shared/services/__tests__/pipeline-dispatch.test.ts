@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { derivePipelineStage } from '../pipeline-dispatch';
+import { derivePipelineStage, deriveAppId, deriveRunId } from '../pipeline-dispatch';
 import { dispatchPipelineSchema } from '../../schemas/pipeline-dispatch-schema';
 import type { Plan } from '../../types/plan';
 import type { StoryNodeRow, StoryNodeState } from '../../types/plan-spec';
@@ -340,5 +340,91 @@ describe('dispatchPipelineSchema', () => {
     });
     expect(withName.success).toBe(true);
     if (withName.success) expect(withName.data.name).toBe('Snake');
+  });
+
+  it('accepts the mycelium shape (app + seal + git)', () => {
+    const r = dispatchPipelineSchema.safeParse({
+      source: 'mycelium',
+      app: { ref: 'myc-app-abc', name: 'Acme Dashboard' },
+      seal: { id: 'seal-789', version: 'v1.01.203', document: 'The sealed converged plan…' },
+      git: { repoUrl: 'https://github.com/acme/dash', branch: 'plan/seal-789', commit: 'abc123' },
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('requires seal.document (min 3) when seal is present without intent', () => {
+    expect(
+      dispatchPipelineSchema.safeParse({
+        source: 'mycelium',
+        seal: { id: 'seal-1', document: 'hi' },
+      }).success,
+    ).toBe(false);
+    // seal.id missing
+    expect(
+      dispatchPipelineSchema.safeParse({
+        source: 'mycelium',
+        seal: { document: 'a real document' },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a non-url git.repoUrl', () => {
+    expect(
+      dispatchPipelineSchema.safeParse({
+        source: 'mycelium',
+        intent: 'build a thing',
+        git: { repoUrl: 'not-a-url' },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+// ── deterministic identity (deriveAppId / deriveRunId) ──────────────────────
+
+describe('deriveAppId', () => {
+  it('is deterministic for the same (source, ref)', () => {
+    expect(deriveAppId('mycelium', 'myc-app-abc')).toBe(deriveAppId('mycelium', 'myc-app-abc'));
+  });
+
+  it('depends only on source+ref, NOT on any display name (stable across seals)', () => {
+    // Same ref, two calls — must be identical regardless of anything else.
+    const a = deriveAppId('mycelium', 'app-xyz');
+    const b = deriveAppId('mycelium', 'app-xyz');
+    expect(a).toBe(b);
+    // Different source ⇒ different app (namespacing).
+    expect(deriveAppId('mycelium', 'app-xyz')).not.toBe(deriveAppId('debatator', 'app-xyz'));
+    // Different ref ⇒ different app.
+    expect(deriveAppId('mycelium', 'app-1')).not.toBe(deriveAppId('mycelium', 'app-2'));
+  });
+
+  it('produces a kebab, letter-first, ≤40-char slug even for ugly refs', () => {
+    const id = deriveAppId('x', '123 Weird/Ref!!'); // leading digit + junk
+    expect(id).toMatch(/^[a-z][a-z0-9-]*$/);
+    expect(id.length).toBeLessThanOrEqual(40);
+  });
+});
+
+describe('deriveRunId', () => {
+  it('is a deterministic UUID-shaped id for the same (source, seal, version)', () => {
+    const a = deriveRunId('mycelium', 'seal-1', 'v1.0.0');
+    const b = deriveRunId('mycelium', 'seal-1', 'v1.0.0');
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  });
+
+  it('a NEW version yields a NEW run (re-develop), same seal id notwithstanding', () => {
+    expect(deriveRunId('mycelium', 'seal-1', 'v1.0.0')).not.toBe(
+      deriveRunId('mycelium', 'seal-1', 'v1.0.1'),
+    );
+  });
+
+  it('different seal ids yield different runs', () => {
+    expect(deriveRunId('mycelium', 'seal-1', 'v1')).not.toBe(
+      deriveRunId('mycelium', 'seal-2', 'v1'),
+    );
+  });
+
+  it('missing version is stable (undefined === no version)', () => {
+    expect(deriveRunId('mycelium', 'seal-1')).toBe(deriveRunId('mycelium', 'seal-1', undefined));
   });
 });

@@ -79,6 +79,21 @@ export interface Plan {
   appId?: string;
   /** App/Plan v1 — Plan kind ('initial' | 'change' | 'experiment'). */
   kind?: PlanKind;
+  /**
+   * External-dispatch provenance (pipeline-dispatch API — mycelium, etc.). The
+   * seal/version that produced this plan + where it came from. Stored for
+   * traceback and echoed by GET /api/pipeline/runs/:id. In v1 `git` is
+   * PROVENANCE ONLY (recorded, not cloned — Futurator owns the dev repo);
+   * brownfield-clone against these refs is a later phase behind the same fields.
+   */
+  sealProvenance?: {
+    source: string;
+    appRef?: string;
+    sealId?: string;
+    sealVersion?: string;
+    git?: { repoUrl?: string; branch?: string; commit?: string };
+    dispatchedAt: string;
+  };
   /** App/Plan v1 — short label like "v1.1 — mobile pass". */
   iterationLabel?: string;
   /** App/Plan v1 — file paths/globs the iteration must NOT modify. */
