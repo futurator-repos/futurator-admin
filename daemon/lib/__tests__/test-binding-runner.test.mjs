@@ -149,6 +149,35 @@ describe('runStoryBindings — no-mock rule for verify:state ACs', () => {
 });
 
 describe('runStoryInvariants', () => {
+
+  // pacman1 (2026-07-13): the no-mock source read must resolve a RELATIVE
+  // validator ref against the worktree cwd — reading it raw resolves against
+  // the daemon's own cwd, every ref is ENOENT, and the story fails "unreadable
+  // — fail-closed" on all attempts no matter how green the code.
+  it('resolves relative validator refs against cwd for the no-mock read', async () => {
+    const reads = [];
+    const readFile = async (path) => { reads.push(path); return 'import { x } from "./real";'; };
+    const { invariants } = await runStoryInvariants({
+      invariants: [{ id: 'i1', validator: { status: 'authored', ref: 'src/a.invariant.test.ts', kind: 'test' } }],
+      headSha: 'S', cwd: '/work/tree', readFile,
+      executor: async () => ({ passed: true }),
+    });
+    expect(reads).toEqual(['/work/tree/src/a.invariant.test.ts']);
+    expect(invariants[0].validator.status).toBe('passing');
+  });
+
+  it('leaves absolute validator refs untouched and stays fail-closed on a missing file', async () => {
+    const reads = [];
+    const readFile = async (path) => { reads.push(path); throw new Error('ENOENT'); };
+    const { invariants } = await runStoryInvariants({
+      invariants: [{ id: 'i1', validator: { status: 'authored', ref: '/abs/v.test.ts', kind: 'test' } }],
+      headSha: 'S', cwd: '/work/tree', readFile,
+      executor: async () => ({ passed: true }),
+    });
+    expect(reads).toEqual(['/abs/v.test.ts']);
+    expect(invariants[0].validator.status).toBe('failing');
+    expect(invariants[0].validator.detail).toMatch(/unreadable — fail-closed/);
+  });
   const inv = (id, over = {}) => ({ id, description: `${id} holds`, validator: { status: 'declared', ...over } });
 
   it('a declared invariant with no authored validator → failing (fail-closed)', async () => {

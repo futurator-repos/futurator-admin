@@ -26,8 +26,8 @@
 //   dev           by story complexity:
 //                   trivial       → claude-sonnet-5 low   (haiku retired from dev ladder)
 //                   standard      → claude-sonnet-5 medium
-//                   complex       → claude-opus-4-8 high
-//                   architectural → claude-opus-4-8 high
+//                   complex       → claude-opus-4-8 medium
+//                   architectural → claude-opus-4-8 medium
 //   critic        claude-opus-4-8      medium           plan-critique fresh-eyes pass
 //   reviewer      claude-sonnet-5      low              P0/security ACs → high
 //   judge (VQA)   haiku                —                cheap frame verdicts
@@ -75,11 +75,17 @@ const DEFAULTS = Object.freeze({
 // removed on 2026-07-13 (deactivated on the Max subscription; a fable
 // default would fail the spawn). architectural stays a distinct complexity
 // tier so a future stronger model can slot in via one line here.
+// 2026-07-13 (pacman1 forensics): complex/architectural implementers dropped
+// high→medium effort. At effort:high the foundation implementer spent a
+// 3.7-minute silent thinking block on a fully test-specified contract story —
+// the authored tests carry the spec and the deterministic gates carry the
+// safety, so implementer-tier deep thinking buys latency, not correctness.
+// Planner/integrator (the genuinely open-ended seats) stay high.
 const DEV_BY_COMPLEXITY = Object.freeze({
   trivial: { model: 'claude-sonnet-5', effort: 'low' },
   standard: { model: 'claude-sonnet-5', effort: 'medium' },
-  complex: { model: 'claude-opus-4-8', effort: 'high' },
-  architectural: { model: 'claude-opus-4-8', effort: 'high' },
+  complex: { model: 'claude-opus-4-8', effort: 'medium' },
+  architectural: { model: 'claude-opus-4-8', effort: 'medium' },
 });
 
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);

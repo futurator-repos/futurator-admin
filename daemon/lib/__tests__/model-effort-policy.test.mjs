@@ -11,8 +11,8 @@ describe('resolveAgentPolicy', () => {
   it('dev scales with story complexity across the three-tier ladder', () => {
     expect(resolveAgentPolicy({ role: 'dev', complexity: 'trivial', env })).toEqual({ model: 'claude-sonnet-5', effort: 'low' });
     expect(resolveAgentPolicy({ role: 'dev', complexity: 'standard', env }).effort).toBe('medium');
-    expect(resolveAgentPolicy({ role: 'dev', complexity: 'complex', env })).toEqual({ model: 'claude-opus-4-8', effort: 'high' });
-    expect(resolveAgentPolicy({ role: 'dev', complexity: 'architectural', env })).toEqual({ model: 'claude-opus-4-8', effort: 'high' });
+    expect(resolveAgentPolicy({ role: 'dev', complexity: 'complex', env })).toEqual({ model: 'claude-opus-4-8', effort: 'medium' });
+    expect(resolveAgentPolicy({ role: 'dev', complexity: 'architectural', env })).toEqual({ model: 'claude-opus-4-8', effort: 'medium' });
   });
 
   it('critic resolves its own dedicated seat (opus-4-8/medium), not the reviewer fallback', () => {

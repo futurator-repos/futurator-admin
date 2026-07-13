@@ -78,6 +78,11 @@ export async function handleStoryCompletion({
     const invResult = await runStoryInvariants({
       invariants: authoredInvariants,
       headSha,
+      // cwd threads through for the no-mock source read — a relative validator
+      // ref read against the daemon's cwd is always ENOENT ("unreadable —
+      // fail-closed"), which failed every invariant-carrying story on all
+      // attempts (pacman1, 2026-07-13). The executor was already cwd-bound.
+      cwd,
       executor: invariantExecutor || makeInvariantExecutor({ cwd, spawnSync }),
       now,
       ...(readFile ? { readFile } : {}),

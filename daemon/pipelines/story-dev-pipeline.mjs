@@ -11,7 +11,7 @@
 // unit-tests without infrastructure.
 
 import { spawn as realSpawn } from 'node:child_process';
-import { createWriteStream, mkdirSync, existsSync } from 'node:fs';
+import { createWriteStream, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { registerChild, unregisterChild } from './lib/child-tracker.mjs';
 import { freezeFlagsOntoJob, flagMode } from '../lib/pipeline-flags.mjs';
@@ -397,6 +397,33 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       })
     : gate;
 
+  // Chip honesty (pacman1, 2026-07-13): the row was written at claim and then
+  // only terminally, so the UI read "Claimed" for the story's entire life.
+  // Stamp 'developing' once at the first implementer spawn — fire-and-forget;
+  // the frontier only claims 'ready' rows, so an intermediate state never
+  // affects dispatch.
+  try { await deps.updateStoryState?.({ storyId: payload.storyId, state: 'developing' }); }
+  catch { /* telemetry-grade — never blocks the story */ }
+
+  // Inline the authored tests into the implementer prompt (pacman1): they ARE
+  // the story's spec and are known at spawn time — without this the agent
+  // re-opens every test file turn by turn on EVERY attempt. Size-capped and
+  // fail-soft: an unreadable/oversized file stays list-only and the agent
+  // reads it from disk as before.
+  const testContents = {};
+  if (split?.ownedTestFiles?.length) {
+    let budget = 24_000;
+    for (const f of split.ownedTestFiles) {
+      try {
+        const src = readFileSync(join(projectRoot, f), 'utf8');
+        if (src.length <= 8_000 && src.length <= budget) {
+          testContents[f] = src;
+          budget -= src.length;
+        }
+      } catch { /* list-only */ }
+    }
+  }
+
   // Bounded fix-forward loop (development-plan §4.4). Each attempt re-spawns the
   // SAME-scoped agent; on a failing bound-AC we feed back the REAL failing-test
   // output and re-run the SAME deterministic bound tests (the agent cannot
@@ -407,7 +434,7 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     // Split path: implement against the committed tests (trimmed prompt).
     // Default path: the single untrimmed dev prompt (author + implement).
     const prompt = split
-      ? buildImplementerPrompt({ ...payload, priorFailure: pf }, split.ownedTestFiles)
+      ? buildImplementerPrompt({ ...payload, priorFailure: pf }, split.ownedTestFiles, testContents)
       : buildStoryDevPrompt({ ...payload, priorFailure: pf });
     const args = [
       '-p', prompt,

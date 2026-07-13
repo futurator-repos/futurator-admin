@@ -148,13 +148,14 @@ function stampInvariant(inv, patch) {
  *   invariants?: object[],
  *   headSha: string,
  *   executor: (inv)=>Promise<{passed:boolean,detail?:string}>,
+ *   cwd?: string,                      // worktree root — relative validator refs resolve against it
  *   readFile?: (path:string, enc:string)=>Promise<string>,
  *   now?: () => string,
  * }} args
  * @returns {Promise<{ invariants: object[], summary: {ran,passed,failed,skipped} }>}
  */
 export async function runStoryInvariants({
-  invariants = [], headSha, executor, readFile = nodeReadFile, now = () => new Date().toISOString(),
+  invariants = [], headSha, executor, cwd, readFile = nodeReadFile, now = () => new Date().toISOString(),
 }) {
   const at = now();
   const out = [];
@@ -176,11 +177,17 @@ export async function runStoryInvariants({
       failed += 1;
       continue;
     }
-    // no-mock rule on the validator source itself.
+    // no-mock rule on the validator source itself. The manifest's ref is
+    // repo-RELATIVE (authored inside the app worktree), so it MUST resolve
+    // against cwd — reading it raw resolves against the DAEMON's cwd and every
+    // validator comes back ENOENT → "unreadable — fail-closed", failing the
+    // story on all attempts no matter how green the code (pacman1, 2026-07-13;
+    // runStoryBindings has always joined cwd — this mirrors it).
     let source;
     let readErr;
     try {
-      source = await readFile(v.ref, 'utf8');
+      const refPath = cwd && !String(v.ref).startsWith('/') ? join(cwd, v.ref) : v.ref;
+      source = await readFile(refPath, 'utf8');
     } catch (err) {
       readErr = err;
     }

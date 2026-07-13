@@ -143,6 +143,8 @@ describe('runStoryDevJob (injected spawn)', () => {
     });
     expect(r.exitCode).toBe(1);
     expect(r.newState).toBe('failed');
-    expect(states).toEqual(['failed']);
+    // 'developing' is stamped once at the first implementer spawn (chip
+    // honesty, pacman1 2026-07-13) — the terminal state still follows it.
+    expect(states).toEqual(['developing', 'failed']);
   });
 });

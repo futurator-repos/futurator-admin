@@ -157,3 +157,23 @@ describe('retry idempotency (pacman4 forensic 2026-07-05)', () => {
     expect(spawned).toBe(true);
   });
 });
+
+// pacman1 (2026-07-13): the authored tests inline into the implementer prompt.
+describe('buildImplementerPrompt — inline test contents', () => {
+  it('renders inlined sources for files in testContents and keeps others list-only', () => {
+    const p = buildImplementerPrompt(
+      { title: 'T', acceptanceCriteria: [], touches: ['src/x.ts'] },
+      ['src/a.test.ts', 'src/b.test.ts'],
+      { 'src/a.test.ts': 'expect(1).toBe(1);' },
+    );
+    expect(p).toContain('## src/a.test.ts');
+    expect(p).toContain('expect(1).toBe(1);');
+    expect(p).toContain('- src/b.test.ts');
+    expect(p).not.toContain('## src/b.test.ts');
+  });
+
+  it('omits the inline section entirely when no contents are provided (byte-stable legacy prompt shape)', () => {
+    const p = buildImplementerPrompt({ title: 'T', acceptanceCriteria: [], touches: [] }, ['src/a.test.ts']);
+    expect(p).not.toContain('inline (identical to the committed files');
+  });
+});

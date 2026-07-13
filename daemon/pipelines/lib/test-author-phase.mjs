@@ -142,10 +142,22 @@ export function buildStoryTestPrompt(payload) {
  * The Implementer prompt (split variant): tests already exist and are committed;
  * implement the minimum to GREEN and NEVER touch the authored tests. PURE.
  */
-export function buildImplementerPrompt(payload, ownedTestFiles = []) {
+export function buildImplementerPrompt(payload, ownedTestFiles = [], testContents = {}) {
   const acLines = (payload.acceptanceCriteria || [])
     .map((ac, i) => `  ${i + 1}. [${ac.id}] ${ac.text}`)
     .join('\n');
+  // Inline the authored tests (pacman1, 2026-07-13): they ARE the spec and are
+  // known at spawn time — without this the implementer re-opened every test
+  // file turn by turn on every attempt. The caller size-caps `testContents`;
+  // files absent from the map stay list-only and are read from disk as before.
+  const inlined = Object.entries(testContents || {});
+  const inlinedBlock = inlined.length
+    ? [
+        ``,
+        `# The authored tests, inline (identical to the committed files — implement against THESE; no need to re-open them):`,
+        ...inlined.flatMap(([f, src]) => [`## ${f}`, '```', String(src), '```']),
+      ]
+    : [];
   return [
     `You are the IMPLEMENTER in a spec-driven pipeline. The failing tests for this`,
     `story have ALREADY been authored and committed. Make them pass — nothing more.`,
@@ -157,6 +169,7 @@ export function buildImplementerPrompt(payload, ownedTestFiles = []) {
     ``,
     `# The authored tests are the source of truth — you may NOT create, edit, or delete them:`,
     ...(ownedTestFiles.length ? ownedTestFiles.map((f) => `  - ${f}`) : ['  (see the committed test files)']),
+    ...inlinedBlock,
     ``,
     `# Rules`,
     `- Write the MINIMUM implementation that makes the committed tests pass (GREEN).`,
