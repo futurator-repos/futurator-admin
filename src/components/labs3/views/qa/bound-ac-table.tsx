@@ -63,6 +63,7 @@ function buildGroups(stories: StoryNodeRow[]): EpicGroup[] {
 const STATUS_META: Record<TestBindingStatus, { label: string; color: string }> = {
   passing: { label: 'passing', color: 'var(--success)' },
   failing: { label: 'failing', color: 'var(--destructive)' },
+  misbound: { label: 'misbound', color: 'var(--warning)' },
   bound: { label: 'bound', color: 'var(--accent-blue)' },
   unbound: { label: 'unbound', color: 'var(--text-mute)' },
 };

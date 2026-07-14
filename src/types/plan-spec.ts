@@ -31,7 +31,11 @@ export type StoryNodeState =
 export type AcClass = 'deterministic' | 'advisory-taste' | 'advisory-security';
 
 /** The ONE net-new field on an acceptance criterion. */
-export type TestBindingStatus = 'unbound' | 'bound' | 'passing' | 'failing';
+// Keep in sync with functions/shared/types/plan-spec.ts — 'misbound' (a
+// verify:'state' AC whose bound test mocks the module under test) was missing
+// here, so `Record<TestBindingStatus, …>` maps type-checked without it and the
+// UI crashed at runtime on a real misbound AC (pacman3, 2026-07-14).
+export type TestBindingStatus = 'unbound' | 'bound' | 'passing' | 'failing' | 'misbound';
 
 export type TestKind = 'unit' | 'integration' | 'browser' | 'manual';
 

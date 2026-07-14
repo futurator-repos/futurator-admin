@@ -445,6 +445,7 @@ function TestBindingChip({ status }: { status: TestBindingStatus }) {
   const map: Record<TestBindingStatus, { label: string; bg: string; fg: string }> = {
     passing: { label: 'passing', bg: 'rgba(34,197,94,0.14)', fg: 'rgba(34,197,94,0.9)' },
     failing: { label: 'failing', bg: 'rgba(239,68,68,0.14)', fg: 'rgba(239,68,68,0.9)' },
+    misbound: { label: 'misbound', bg: 'rgba(245,158,11,0.14)', fg: 'rgba(245,158,11,0.9)' },
     bound: { label: 'bound', bg: 'rgba(120,147,184,0.14)', fg: 'rgba(120,147,184,0.9)' },
     unbound: { label: 'unbound', bg: 'rgba(128,128,128,0.10)', fg: 'rgba(128,128,128,0.65)' },
   };

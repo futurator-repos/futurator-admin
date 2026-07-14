@@ -101,11 +101,18 @@ const STATE_PROGRESS: Record<StoryNodeState, number> = {
   failed: 100,
 };
 
+// Fallback for any status not in the map — a missing entry must NEVER crash the
+// whole stories view via `undefined.color` (pacman3, 2026-07-14: a plan with a
+// 'misbound' AC unmounted the tree → "This page couldn't load").
+const AC_STATUS_FALLBACK = { glyph: '?', color: 'var(--text-mute)' };
 const AC_STATUS_META: Record<TestBindingStatus, { glyph: string; color: string }> = {
   passing: { glyph: '✓', color: 'var(--success)' },
   failing: { glyph: '✕', color: 'var(--destructive)' },
   bound: { glyph: '○', color: 'var(--accent-blue)' },
   unbound: { glyph: '·', color: 'var(--text-faint)' },
+  // A verify:'state' AC whose bound test mocks the module under test (no-mock
+  // rule) lands here; render it as a warning, never crash.
+  misbound: { glyph: '≠', color: 'var(--warning)' },
 };
 
 const AC_CLASS_COLOR: Record<AcClass, string> = {
@@ -124,7 +131,11 @@ interface AcRollup {
 
 function rollupAc(acs: BoundAcceptanceCriterion[]): AcRollup {
   const r: AcRollup = { passing: 0, failing: 0, bound: 0, unbound: 0, total: acs.length };
-  for (const ac of acs) r[ac.testBinding.status] += 1;
+  for (const ac of acs) {
+    // A 'misbound' AC is not satisfied — count it as failing in the rollup.
+    const k = ac.testBinding.status === 'misbound' ? 'failing' : ac.testBinding.status;
+    r[k] += 1;
+  }
   return r;
 }
 
@@ -529,7 +540,10 @@ function StoryRow({
   onToggle: () => void;
 }) {
   const { data: job } = useAgentJob(story.jobId ?? null);
-  const meta = STORY_NODE_STATE_META[story.state];
+  const meta = STORY_NODE_STATE_META[story.state] ?? {
+    label: story.state,
+    color: 'var(--text-mute)',
+  };
   const prog = STATE_PROGRESS[story.state];
   const isActive = ACTIVE_STORY_NODE_STATES.has(story.state);
   const ac = useMemo(() => rollupAc(story.acceptanceCriteria), [story.acceptanceCriteria]);
@@ -1115,7 +1129,7 @@ function InvariantsSection({ invariants }: { invariants: StoryInvariantView[] })
 }
 
 function AcRow({ ac }: { ac: BoundAcceptanceCriterion }) {
-  const meta = AC_STATUS_META[ac.testBinding.status];
+  const meta = AC_STATUS_META[ac.testBinding.status] ?? AC_STATUS_FALLBACK;
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12 }}>
       <span
