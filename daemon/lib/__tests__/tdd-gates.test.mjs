@@ -33,15 +33,26 @@ describe('detectTestTampering', () => {
 });
 
 describe('assertRedFirst', () => {
-  it('ok when every bound test failed before implementation', () => {
+  it('ok when every bound test failed before implementation (all-RED)', () => {
     const r = assertRedFirst({ ran: 3, passed: 0, failed: 3 });
     expect(r.ok).toBe(true);
+    expect(r.reason).toMatch(/3\/3 bound test\(s\) RED/);
   });
 
-  it('rejects when a test passed before implementation (tautology)', () => {
-    const r = assertRedFirst({ ran: 3, passed: 1, failed: 2 });
+  it('B2 (Incident F): ok when SOME already pass but at least one is RED', () => {
+    // An integration/skeleton story: 2 ACs already satisfied by the live
+    // foundation, 1 genuinely RED — real new work, not a tautology → accept.
+    const r = assertRedFirst({ ran: 3, passed: 2, failed: 1 });
+    expect(r.ok).toBe(true);
+    expect(r.reason).toMatch(/1\/3 bound test\(s\) RED/);
+    expect(r.reason).toMatch(/2 already satisfied by a dependency/);
+  });
+
+  it('B2: rejects when ALL bound tests already pass (nothing to implement)', () => {
+    const r = assertRedFirst({ ran: 3, passed: 3, failed: 0 });
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/passed before implementation/);
+    expect(r.reason).toMatch(/nothing to implement/);
+    expect(r.reason).toMatch(/already pass before implementation/);
   });
 
   it('F3: an ERRORED binding is a BINDING FAULT, not a valid RED (surfaced loudly)', () => {

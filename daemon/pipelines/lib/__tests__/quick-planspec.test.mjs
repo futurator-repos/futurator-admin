@@ -7,6 +7,12 @@ import {
   buildStoryNodeRows,
   detectOverSharding,
 } from '../quick-planspec.mjs';
+// End-to-end scope proof (finding fix): run a parsed walking-skeleton plan through the
+// REAL dev-scope contract + the REAL scope-violation detector — the exact path the
+// foundation's stub writes take at RED — to prove the foundation's declared touches
+// clear its own mandated stub creation, and that OMITTING the stub path is what fails.
+import { buildStoryDevContract } from '../../../lib/story-job-minter.mjs';
+import { detectScopeViolations } from '../scope-violation-detector.mjs';
 
 const SPEC = JSON.stringify({
   stories: [
@@ -114,7 +120,9 @@ describe('buildQuickPlanspecPrompt', () => {
     expect(p).toMatch(/3–7 stories/);
     expect(p).toMatch(/NEVER fold the whole app into one story/i);
     expect(p).toMatch(/boots/i); // boot-alive foundation skeleton
-    expect(p).toMatch(/Assemble & harden/);
+    // Incident F/G: the redundant assemble mega-story is GONE — the foundation
+    // already composed + mounted the app, so no separate assemble story exists.
+    expect(p).toMatch(/NO redundant "assemble" story/i);
     expect(p).toMatch(/dependsOn CHAIN is fine/);
   });
 
@@ -207,6 +215,182 @@ describe('buildQuickPlanspecPrompt', () => {
     expect(p).toMatch(/same dependency layer that belong to the same phase/i);
     // generic mechanics only — no hardcoded taxonomy leaked into the prompt
     expect(p).toMatch(/Never use a hardcoded\/generic taxonomy/);
+  });
+});
+
+// Incident F/G (pacman3): the assembly failures had two roots — (G) a capability
+// slice grabbed APP-LEVEL surface (a second competing feature that also published
+// the seam), and the planner added a redundant assemble mega-story whose job the
+// foundation already did; (F) that assemble story then died on RED-first restating
+// already-true foundation state. Slice A's fix is the WALKING-SKELETON model:
+// the foundation owns ALL app surface + stubs every capability so the app boots
+// live from batch 0, capability slices are PURE modules that replace a stub, and
+// there is no redundant assemble story.
+describe('buildQuickPlanspecPrompt — walking-skeleton app-surface ownership (Incident F/G)', () => {
+  it('carries the APP-SURFACE OWNERSHIP hard rule: only the foundation owns feature/seam/page/composition', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz1' });
+    expect(p).toMatch(/app-surface ownership/i);
+    expect(p).toMatch(/Exactly ONE story owns the APP SURFACE/);
+    // the four app-surface artifacts the foundation exclusively owns
+    expect(p).toMatch(/app feature\/entry/);
+    expect(p).toMatch(/COMPOSITION file/);
+    expect(p).toMatch(/run loop/);
+    // a slice's touches may NOT be a feature / page / seam / composition file
+    expect(p).toMatch(/A slice's touches MUST NOT include ANY `\*\.feature\.\*`/);
+    expect(p).toMatch(/the app page\/entry, the seam file, or the composition\/reducer file/);
+    // applies to BOTH shapes
+    expect(p).toMatch(/applies to BOTH shapes/i);
+    // named as the fix for the competing-feature collision (generic, no pacman)
+    expect(p).toMatch(/competing-feature collision/);
+    expect(p).not.toMatch(/pacman/i);
+  });
+
+  it('describes the foundation as a boots-live walking skeleton that STUBS capabilities and mounts the seam', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz1' });
+    expect(p).toMatch(/WALKING SKELETON/);
+    expect(p).toMatch(/BOOTS LIVE from the very\s+first batch/);
+    // the foundation composes the reducer + runs the loop + mounts the seam
+    expect(p).toMatch(/composes the reducer .*and runs the loop/s);
+    // and stubs every capability so the app boots before any slice lands
+    expect(p).toMatch(/TRIVIAL STUB/);
+    expect(p).toMatch(/BOOTS[\s\S]*?with the seam live BEFORE any capability lands/);
+  });
+
+  it("requires the foundation's touches to cover every file it writes, including capability stub paths", () => {
+    // The walking skeleton MANDATES the foundation create a stub for every capability
+    // module. If the planner omits those stub paths from the foundation's own `touches`,
+    // the foundation's mandated stub write is out-of-scope → the live scope gate rejects
+    // the foundation (or, in pretool-enforce, blocks the write → missing module → boot
+    // fails). The prompt must close that gap.
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz1' });
+    expect(p).toMatch(/foundation's `touches` MUST COVER every file the foundation itself writes/);
+    expect(p).toMatch(/every capability STUB module path/);
+    // both remedies offered: explicit paths OR a covering directory glob
+    expect(p).toMatch(/list each stub path, or declare the stub directory as a glob/);
+    // the foundation↔slice overlap on a stub path is called out as legitimate
+    expect(p).toMatch(/foundation↔slice overlap is legitimate/);
+    // the self-check reinforces it before emit
+    expect(p).toMatch(/does the FOUNDATION's touches cover EVERY file it writes/);
+    // stays generic — no app/game/pacman hardcoding
+    expect(p).not.toMatch(/pacman|ghost|pellet/i);
+  });
+
+  it('puts the SEAM WIRING mandate on the FOUNDATION, not on an assemble story', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz1' });
+    expect(p).toContain('SEAM WIRING');
+    // the mandate now targets the foundation
+    expect(p).toMatch(/The FOUNDATION \(walking skeleton\) story\s*[\s\S]{0,40}?— and ONLY it — MUST route the live app state through that scaffold hook/);
+    // the OLD mandate ("the final Assemble the complete app story MUST route…") is gone
+    expect(p).not.toMatch(/"Assemble the complete app"\s*\n?\s*story MUST route/);
+    // the seam is mounted once, by the foundation; no slice may create a competing feature
+    expect(p).toMatch(/NO capability slice may mount the seam or create a competing/);
+  });
+
+  it('no longer instructs a separate assemble story to compose/mount the app (both shapes)', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz1' });
+    // coherent phased rules: the redundant assemble story is explicitly dropped
+    expect(p).toMatch(/NO redundant "assemble" story/);
+    expect(p).toMatch(/the foundation ALREADY composed the app and\s*\n?\s*mounted the seam/);
+    // sharded structure rule: no separate assemble story either
+    expect(p).toMatch(/There is NO separate "assemble"\s*\n?\s*story — the foundation already assembled/);
+    // any final story is a THIN journeys story that adds NO app surface / composition
+    expect(p).toMatch(/THIN final\s*\n?\s*"end-to-end journeys" story that adds NO app surface and NO composition/);
+    expect(p).toMatch(/Prefer NO final story/);
+  });
+
+  it('requires each capability slice to be a PURE MODULE that replaces its stub and carries its own behavioral AC', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz1' });
+    expect(p).toMatch(/EVERY capability slice is a PURE MODULE ONLY/);
+    expect(p).toMatch(/REPLACES\s*\n?\s*its own stub/);
+    // observable against the already-live app through the seam
+    expect(p).toMatch(/carries its OWN behavioral AC proving its mechanic through `snapshot\(\)` against/);
+  });
+
+  it('the walking-skeleton rules stay generic — no app/game/pacman hardcoding leaks in', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a data dashboard', appSlug: 'db1' });
+    expect(p).not.toMatch(/pacman|ghost|pellet/i);
+  });
+});
+
+// The finding: the walking-skeleton foundation must WRITE a stub for every capability
+// module (hard-imported by the reducer), yet nothing proved that the foundation's own
+// stub writes clear the dev-scope contract. These tests run a parsed walking-skeleton
+// plan through the REAL contract builder + REAL scope detector — the daemon's own path
+// (agent-daemon.mjs builds the contract with NO siblingTouches, so forbiddenAreas is
+// only DANGER_PATHS; the live gate is the touchPoints check against the story's OWN
+// touches). They prove: (1) a foundation whose touches cover the stub dir clears every
+// stub write; (2) a foundation that OMITS the stub path fails on that exact write —
+// which is precisely what the prompt fix instructs the planner to avoid.
+describe('walking-skeleton foundation stub ownership clears the scope contract (finding fix)', () => {
+  // A walking-skeleton plan: the foundation owns app surface + a covering stub glob;
+  // each slice owns exactly its own stub module path.
+  const SKELETON_SPEC = JSON.stringify({
+    planShape: 'coherent',
+    stories: [
+      { id: 'foundation', title: 'Define the contract and boot the app skeleton',
+        touches: ['src/app.tsx', 'src/game/types.ts', 'src/game/reducer.ts', 'src/slices/**'],
+        acceptanceCriteria: [{ text: 'the skeleton mounts and idles', verify: 'behavior', needsBrowser: true }] },
+      { id: 'movement', title: 'Implement movement', dependsOn: ['foundation'], touches: ['src/slices/movement.ts'],
+        acceptanceCriteria: [{ text: 'arrow key moves the player', verify: 'state' }] },
+      { id: 'ghosts', title: 'Implement ghosts', dependsOn: ['foundation'], touches: ['src/slices/ghosts.ts'],
+        acceptanceCriteria: [{ text: 'ghosts leave the vault over time', verify: 'state' }] },
+    ],
+  });
+
+  // The files the foundation MUST write at RED: its app surface + composition + a TRIVIAL
+  // STUB for each capability module the reducer hard-imports.
+  const FOUNDATION_WRITES = [
+    'src/app.tsx', 'src/game/types.ts', 'src/game/reducer.ts',
+    'src/slices/movement.ts', 'src/slices/ghosts.ts', // the stubs
+  ];
+
+  it('a foundation whose touches cover the stub dir clears every one of its stub writes', () => {
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${SKELETON_SPEC}</PLAN_SPEC>`);
+    const foundation = stories.find((s) => s.isFoundation);
+    expect(foundation).toBeTruthy();
+    // The daemon builds the contract with NO siblingTouches (agent-daemon.mjs:1741) —
+    // forbiddenAreas is DANGER_PATHS only; the live check is touchPoints vs own touches.
+    const contract = buildStoryDevContract({ storyNode: foundation });
+    const report = detectScopeViolations({
+      modifiedFiles: FOUNDATION_WRITES,
+      touchPoints: contract.allowedPaths,
+      forbiddenAreas: contract.forbiddenAreas,
+    });
+    expect(report.touchPointsViolations).toEqual([]); // every stub write is in-scope
+    expect(report.forbiddenViolations).toEqual([]); // a stub is never a sibling-forbidden path
+    expect(report.skipped.touchPointsCheck).toBe(false); // the check actually ran
+  });
+
+  it('a foundation that OMITS the stub path fails on its own mandated stub write (the bug the fix prevents)', () => {
+    const OMITTED_SPEC = JSON.stringify({
+      planShape: 'coherent',
+      stories: [
+        { id: 'foundation', title: 'Define the contract and boot the app skeleton',
+          // NOTE: no src/slices coverage — the omission the prompt now forbids.
+          touches: ['src/app.tsx', 'src/game/types.ts', 'src/game/reducer.ts'],
+          acceptanceCriteria: [{ text: 'the skeleton mounts and idles', verify: 'behavior', needsBrowser: true }] },
+        { id: 'ghosts', title: 'Implement ghosts', dependsOn: ['foundation'], touches: ['src/slices/ghosts.ts'],
+          acceptanceCriteria: [{ text: 'ghosts leave the vault over time', verify: 'state' }] },
+      ],
+    });
+    const { stories } = parseQuickPlanspec(`<PLAN_SPEC>${OMITTED_SPEC}</PLAN_SPEC>`);
+    const foundation = stories.find((s) => s.isFoundation);
+    const contract = buildStoryDevContract({ storyNode: foundation });
+    const report = detectScopeViolations({
+      modifiedFiles: ['src/app.tsx', 'src/game/types.ts', 'src/game/reducer.ts', 'src/slices/ghosts.ts'],
+      touchPoints: contract.allowedPaths,
+      forbiddenAreas: contract.forbiddenAreas,
+    });
+    // The stub the foundation had to create is out-of-scope → the foundation fails.
+    expect(report.touchPointsViolations).toEqual([{ file: 'src/slices/ghosts.ts' }]);
+  });
+
+  it('foundation↔slice stub overlap does NOT trip the god-file audit (only feature↔feature does)', () => {
+    // The stub path lives in BOTH the foundation's touches (glob) and the slice's touches
+    // (exact). That overlap is legitimate; the audit must not flag it as a god-file.
+    const { audit } = parseQuickPlanspec(`<PLAN_SPEC>${SKELETON_SPEC}</PLAN_SPEC>`);
+    expect(audit.godFiles).toEqual([]);
+    expect(audit.violations.join(' ')).not.toMatch(/god-file/);
   });
 });
 

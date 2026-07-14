@@ -40,11 +40,23 @@ export function detectTestTampering(ownedTestFiles = [], changedFiles = []) {
 /**
  * RED-first proof. Given the summary of running the story's BOUND tests BEFORE
  * implementation (the shape returned by `runStoryBindings().summary`), assert
- * that they are genuinely red: at least one binding ran and NONE passed. A test
- * that passes before any implementation exists is a tautology (or already-done
- * work) and must be rejected as a valid acceptance test — legacy's `test-gate-red`
- * rule ("If a test passes before implementation, it's not a valid acceptance
- * test", mirrored from BMAD `*atdd`).
+ * that the story has genuine new work to do: at least ONE bound test is RED
+ * (ran-and-failed). Legacy's `test-gate-red` rule ("If a test passes before
+ * implementation, it's not a valid acceptance test") demanded that ALL bound
+ * tests fail — correct for a greenfield story, but WRONG for an integration /
+ * walking-skeleton story built on a live foundation.
+ *
+ * B2 (Incident F): a behavioral/integration AC can be ALREADY satisfied at RED
+ * time because a DEPENDENCY (the walking-skeleton foundation) already provides
+ * that state — e.g. an assemble story asserting `snapshot.status=='idle'` /
+ * `lives==3` when the foundation's initial state already seeds them. Requiring
+ * ALL-RED falsely rejected such stories ("passed before implementation") and,
+ * under pacman8 no-fallback, failed them CLOSED — an integration story building
+ * on a live foundation can NEVER have an all-RED state. So the requirement is
+ * relaxed to AT LEAST ONE RED: that one genuine RED proves the story has real
+ * new work, while the GREEN completion gate still requires ALL bound tests to
+ * pass — so a partially-pre-satisfied story cannot fake completion, and a
+ * story whose tests ALL already pass (nothing to implement) is still rejected.
  *
  * @param {{ ran?: number, passed?: number, failed?: number, errored?: number }} summary
  * @returns {{ ok: boolean, ran: number, passed: number, failed: number, errored: number, reason: string }}
@@ -59,7 +71,7 @@ export function assertRedFirst(summary = {}) {
   // a test that RAN and FAILED; a test that CANNOT be executed proves nothing and
   // silently dead-ends completion (the exact class where a malformed composite
   // ref "passes" RED then fails forever). Surface it LOUDLY and block. Checked
-  // FIRST: an errored binding is a fault regardless of the run tallies.
+  // FIRST (unchanged): an errored binding is a fault regardless of the run tallies.
   if (errored > 0) {
     return {
       ok: false,
@@ -73,15 +85,30 @@ export function assertRedFirst(summary = {}) {
   if (ran === 0) {
     return { ok: false, ran, passed, failed, errored, reason: 'no bound tests ran — cannot prove RED-first' };
   }
-  if (passed > 0) {
+  // B2 (Incident F): a story whose EVERY bound test already passes before any
+  // implementation has nothing to implement — a tautology or work already done
+  // by a dependency with no NEW claim of its own. Still rejected (the GREEN gate
+  // could not tell this apart from real completion, so RED-first must).
+  if (failed === 0) {
     return {
       ok: false,
       ran,
       passed,
       failed,
       errored,
-      reason: `${passed} bound test(s) passed before implementation — not a valid RED state (tautology or pre-existing)`,
+      reason: `all ${ran} bound test(s) already pass before implementation — nothing to implement (tautology or pre-existing)`,
     };
   }
-  return { ok: true, ran, passed, failed, errored, reason: `all ${failed}/${ran} bound tests RED before implementation` };
+  // At least one bound test is RED → the story has genuine new work. When SOME
+  // bound tests already pass (passed>0), those are legitimately satisfied by the
+  // live foundation (Incident F) — note it, don't reject.
+  const preSatisfied = passed > 0 ? ` (${passed} already satisfied by a dependency)` : '';
+  return {
+    ok: true,
+    ran,
+    passed,
+    failed,
+    errored,
+    reason: `${failed}/${ran} bound test(s) RED before implementation${preSatisfied}`,
+  };
 }

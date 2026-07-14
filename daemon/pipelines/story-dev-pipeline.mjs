@@ -791,7 +791,9 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     if (gtOn && !isFoundationStory(payload) && completion.newState === 'done') {
       // Foundation stories skip green-trunk: the foundation gate above already
       // supersets tsc+build+boot for that story.
-      const gt = await deps.greenTrunk({ cwd: projectRoot });
+      // Thread qaContext (B1, Incident G): greenTrunk's per-story boot-liveness
+      // check (P3_STORY_BOOT_GATE) needs it to boot + serve the app.
+      const gt = await deps.greenTrunk({ cwd: projectRoot, qaContext: deps.qaContext });
       if (!gt.passed) {
         completion.newState = 'failed';
         completion.propagate = false;

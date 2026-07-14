@@ -93,6 +93,17 @@ export const P3_FLAGS = Object.freeze({
   // Green-trunk gate (pipeline-v3 redesign): tsc + build must pass on every
   // story's tree before it can be marked done. Fail-closed.
   P3_GREEN_TRUNK: { values: ['off', 'on'], default: 'on' },
+  // Per-story boot-liveness gate (pipeline-v3 redesign, Incident G / B1). When
+  // 'on', the green-trunk check on EVERY non-foundation story ALSO boots the
+  // served app and runs the boot-liveness probe — the incremental integration
+  // proof. With the walking-skeleton foundation owning all app surface, the app
+  // BOOTS LIVE from batch 0, so every story can prove the live app still boots +
+  // is interactive after its change; a competing-feature / wiring break fails the
+  // OFFENDING story immediately (legacy's per-wave validation, ported to the
+  // shared tree and made per-story) instead of surfacing as a late assemble/QA
+  // mystery. 'off' = pre-change green-trunk = tsc+build-only. Foundation stories
+  // are unaffected (foundationGate already boots). Fail-closed.
+  P3_STORY_BOOT_GATE: { values: ['off', 'on'], default: 'on' },
   // Per-story WHOLE-SUITE green trunk (pipeline-v3 redesign, slice D). When 'on',
   // greenTrunk + foundationGate ALSO run `npm run test` over the ENTIRE app tree
   // on EVERY story (not just tsc+build). The intent was a cross-plan regression

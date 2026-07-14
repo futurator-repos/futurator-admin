@@ -119,7 +119,9 @@ function fakePlaywright({ snapshots = [{}], harnessMounted = true } = {}) {
 describe('makeStoryDevGateDeps (wiring)', () => {
   it('greenTrunk composes tsc+build via injected async runner', async () => {
     const runner = async () => ({ status: 0, stdout: '', stderr: '' });
-    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: {} });
+    // storyBootGate off → isolate the tsc+build dimensions (the per-story boot
+    // gate, default ON, has its own dedicated describe below).
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: { storyBootGate: 'off' } });
     const r = await deps.greenTrunk({ cwd: '/app' });
     expect(r.passed).toBe(true);
   });
@@ -127,7 +129,7 @@ describe('makeStoryDevGateDeps (wiring)', () => {
   it('greenTrunk fails closed when tsc exits non-zero', async () => {
     const runner = async (cmd, args) =>
       args[0] === 'tsc' ? { status: 1, stderr: 'TS' } : { status: 0, stdout: '' };
-    const deps = makeStoryDevGateDeps({ cwd: '/app', runner });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: { storyBootGate: 'off' } });
     const r = await deps.greenTrunk({ cwd: '/app' });
     expect(r.passed).toBe(false);
     expect(r.failing).toContain('tsc');
@@ -174,7 +176,7 @@ describe('makeStoryDevGateDeps (wiring)', () => {
     // git reports a DIFFERENT head on the second read (a sibling committed mid-check).
     let reads = 0;
     const git = async () => ({ code: 0, stdout: reads++ === 0 ? 'aaaaaaa\n' : 'bbbbbbb\n', stderr: '' });
-    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, git });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, git, deps: { storyBootGate: 'off' } });
     const r = await deps.greenTrunk({ cwd: '/app' });
     expect(r.passed).toBe(false);
     expect(r.failing).toContain('tree-moved');
@@ -184,7 +186,7 @@ describe('makeStoryDevGateDeps (wiring)', () => {
   it('greenTrunk passes when HEAD is stable across the check (SHA-pin no-op)', async () => {
     const runner = async () => ({ status: 0, stdout: '', stderr: '' });
     const git = async () => ({ code: 0, stdout: 'aaaaaaa\n', stderr: '' });
-    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, git });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, git, deps: { storyBootGate: 'off' } });
     const r = await deps.greenTrunk({ cwd: '/app' });
     expect(r.passed).toBe(true);
     expect(r.failing).toEqual([]);
@@ -210,7 +212,8 @@ function keyedRunner({ testStatus }) {
 describe('makeStoryDevGateDeps — P3_SUITE_GREEN flag', () => {
   it('flag ON: greenTrunk runs the whole suite and folds a RED suite into the verdict', async () => {
     const runner = keyedRunner({ testStatus: 1 });
-    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: { suiteGreen: 'on' } });
+    // storyBootGate off → isolate the suite dimension from the per-story boot gate.
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: { suiteGreen: 'on', storyBootGate: 'off' } });
     const r = await deps.greenTrunk({ cwd: '/app' });
     expect(runner.ranSuite()).toBe(true);
     expect(r.passed).toBe(false);
@@ -220,7 +223,7 @@ describe('makeStoryDevGateDeps — P3_SUITE_GREEN flag', () => {
 
   it('flag ON: greenTrunk passes when tsc+build AND the whole suite are green', async () => {
     const runner = keyedRunner({ testStatus: 0 });
-    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: { suiteGreen: 'on' } });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: { suiteGreen: 'on', storyBootGate: 'off' } });
     const r = await deps.greenTrunk({ cwd: '/app' });
     expect(runner.ranSuite()).toBe(true);
     expect(r.passed).toBe(true);
@@ -251,7 +254,7 @@ describe('makeStoryDevGateDeps — P3_SUITE_GREEN flag', () => {
     // Even with a RED suite runner, flag-off greenTrunk must NOT run `npm run
     // test` and must pass on green tsc+build alone (pre-redesign behavior).
     const runner = keyedRunner({ testStatus: 1 });
-    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: { suiteGreen: 'off' } });
+    const deps = makeStoryDevGateDeps({ cwd: '/app', runner, deps: { suiteGreen: 'off', storyBootGate: 'off' } });
     const r = await deps.greenTrunk({ cwd: '/app' });
     expect(runner.ranSuite()).toBe(false);
     expect(r.passed).toBe(true);
@@ -283,11 +286,109 @@ describe('makeStoryDevGateDeps — P3_SUITE_GREEN flag', () => {
     const deps = makeStoryDevGateDeps({
       cwd: '/app',
       runner,
-      deps: { env: { P3_SUITE_GREEN: 'on' } },
+      deps: { env: { P3_SUITE_GREEN: 'on' }, storyBootGate: 'off' },
     });
     const r = await deps.greenTrunk({ cwd: '/app' });
     expect(runner.ranSuite()).toBe(true);
     expect(r.passed).toBe(false);
     expect(r.failing).toContain('tests');
+  });
+});
+
+// ── P3_STORY_BOOT_GATE wiring (B1, Incident G — per-story boot-liveness) ───────
+// A bootDevServer spy that records how many times it was invoked, so a test can
+// prove the flag-off greenTrunk NEVER boots (byte-identical legacy verdict) and
+// the flag-on greenTrunk DOES.
+function bootSpy({ ok = true } = {}) {
+  const fn = async () => {
+    fn.calls += 1;
+    return { ok, port: 3000, status: ok ? '200' : '000', stop: async () => {} };
+  };
+  fn.calls = 0;
+  return fn;
+}
+
+describe('makeStoryDevGateDeps — P3_STORY_BOOT_GATE flag (greenTrunk per-story boot)', () => {
+  it('flag ON: greenTrunk runs boot-liveness and FAILS a non-foundation story on a dead boot', async () => {
+    const runner = async () => ({ status: 0, stdout: '', stderr: '' });
+    const boot = bootSpy({ ok: false }); // dev server never boots
+    const deps = makeStoryDevGateDeps({
+      cwd: '/app',
+      runner,
+      qaContext: { defaultPort: 3000 },
+      deps: { storyBootGate: 'on', bootDevServer: boot, playwright: fakePlaywright(), shell: async () => ({ stdout: '', stderr: '' }) },
+    });
+    const r = await deps.greenTrunk({ cwd: '/app', qaContext: { defaultPort: 3000 } });
+    expect(boot.calls).toBe(1); // it actually booted the app
+    expect(r.passed).toBe(false);
+    expect(r.failing).toContain('boot');
+    expect(r.reasons.join(' ')).toMatch(/green-trunk boot-liveness failed/);
+  });
+
+  it('flag ON: greenTrunk passes when tsc+build AND the live app boots + is interactive', async () => {
+    const runner = async () => ({ status: 0, stdout: '', stderr: '' });
+    const boot = bootSpy({ ok: true });
+    const deps = makeStoryDevGateDeps({
+      cwd: '/app',
+      runner,
+      qaContext: { defaultPort: 3000 },
+      deps: {
+        storyBootGate: 'on',
+        bootDevServer: boot,
+        // NON-ambient state delta on the first synthetic input → liveness passes.
+        playwright: fakePlaywright({ snapshots: [{}, {}, { x: 1 }] }),
+        shell: async () => ({ stdout: '', stderr: '' }),
+      },
+    });
+    const r = await deps.greenTrunk({ cwd: '/app', qaContext: { defaultPort: 3000 } });
+    expect(boot.calls).toBe(1);
+    expect(r.passed).toBe(true);
+    expect(r.failing).toEqual([]);
+  });
+
+  it('flag OFF: greenTrunk NEVER boots — byte-identical legacy tsc+build verdict', async () => {
+    const runner = async () => ({ status: 0, stdout: '', stderr: '' });
+    const boot = bootSpy({ ok: false }); // would fail IF it ran
+    const deps = makeStoryDevGateDeps({
+      cwd: '/app',
+      runner,
+      qaContext: { defaultPort: 3000 },
+      deps: { storyBootGate: 'off', bootDevServer: boot, playwright: fakePlaywright(), shell: async () => ({ stdout: '', stderr: '' }) },
+    });
+    const r = await deps.greenTrunk({ cwd: '/app', qaContext: { defaultPort: 3000 } });
+    expect(boot.calls).toBe(0); // no boot on the pre-change green-trunk
+    expect(r.passed).toBe(true);
+    expect(r.failing).toEqual([]);
+    expect(r.failing).not.toContain('boot');
+  });
+
+  it('resolves the flag from an injected env map (deps.env) when storyBootGate is not given', async () => {
+    const runner = async () => ({ status: 0, stdout: '', stderr: '' });
+    const boot = bootSpy({ ok: false });
+    const deps = makeStoryDevGateDeps({
+      cwd: '/app',
+      runner,
+      qaContext: { defaultPort: 3000 },
+      deps: { env: { P3_STORY_BOOT_GATE: 'on' }, bootDevServer: boot, playwright: fakePlaywright(), shell: async () => ({ stdout: '', stderr: '' }) },
+    });
+    const r = await deps.greenTrunk({ cwd: '/app', qaContext: { defaultPort: 3000 } });
+    expect(boot.calls).toBe(1);
+    expect(r.passed).toBe(false);
+    expect(r.failing).toContain('boot');
+  });
+
+  it('foundation path is UNAFFECTED by the flag: foundationGate always boots (fails a dead boot even when P3_STORY_BOOT_GATE=off)', async () => {
+    const runner = async () => ({ status: 0, stdout: '', stderr: '' });
+    const boot = bootSpy({ ok: false });
+    const deps = makeStoryDevGateDeps({
+      cwd: '/app',
+      runner,
+      qaContext: { defaultPort: 3000 },
+      deps: { storyBootGate: 'off', bootDevServer: boot, playwright: fakePlaywright(), shell: async () => ({ stdout: '', stderr: '' }) },
+    });
+    const r = await deps.foundationGate({ cwd: '/app', qaContext: { defaultPort: 3000 } });
+    expect(boot.calls).toBe(1); // foundationGate boots regardless of the story-boot flag
+    expect(r.passed).toBe(false);
+    expect(r.failing).toContain('boot');
   });
 });

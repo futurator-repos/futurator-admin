@@ -431,6 +431,32 @@ describe('runStoryDevJob — TDD fail-closed (P3_TEST_AUTHOR_SPLIT=on)', () => {
     expect(reviewerCalls).toBe(1); // same SHA → memo replay, no wasted respawn
   });
 
+  it('(B1) threads deps.qaContext into greenTrunk so its per-story boot check can serve the app', async () => {
+    // Incident G: greenTrunk's P3_STORY_BOOT_GATE boot-liveness needs qaContext to
+    // boot + serve the app. The pipeline must pass it through, not just cwd.
+    const payload = makePayload();
+    const { spawn } = makeSpawn({
+      testAuthorResults: [{ stdout: BINDING_TEXT, code: 0 }],
+      onImplement: () => { implemented = true; },
+    });
+    const deps = makeDeps({
+      spawn,
+      git: makeGit({ commitDiffs: [['src/login.test.ts'], ['src/login.ts']] }),
+      maxAttempts: 1,
+    });
+    deps.qaContext = { defaultPort: 4321, healthcheckPath: '/health' };
+    let gtArg;
+    deps.greenTrunk = async (arg) => { gtArg = arg; return { passed: true, reasons: [] }; };
+    const job = { ...makeJob(workingDir, payload), p3Flags: { ...FLAGS, P3_GREEN_TRUNK: 'on' } };
+
+    const r = await runStoryDevJob({ job, eventLogDir, deps });
+
+    expect(r.newState).toBe('done');
+    expect(gtArg).toBeTruthy();
+    expect(gtArg.qaContext).toEqual({ defaultPort: 4321, healthcheckPath: '/health' });
+    expect(gtArg.cwd).toBeTruthy();
+  });
+
   it('(B1/A5) reviewer is NOT spawned when the deterministic bindings are failing', async () => {
     const payload = p0Payload();
     let reviewerCalls = 0;

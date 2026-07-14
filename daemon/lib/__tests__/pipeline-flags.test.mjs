@@ -71,6 +71,16 @@ describe('P3_FLAGS registry — quality-defaults posture', () => {
     }
   });
 
+  it('B1 (Incident G): registers P3_STORY_BOOT_GATE, values [off,on], default on', () => {
+    expect(P3_FLAGS.P3_STORY_BOOT_GATE).toBeDefined();
+    expect(P3_FLAGS.P3_STORY_BOOT_GATE.values).toEqual(['off', 'on']);
+    expect(P3_FLAGS.P3_STORY_BOOT_GATE.default).toBe('on');
+    // resolves to its default on empty env, honors an explicit off override
+    expect(resolveFlags({ epicId: 'e1', env: {} }).P3_STORY_BOOT_GATE).toBe('on');
+    expect(resolveFlags({ epicId: 'e1', env: { P3_STORY_BOOT_GATE: 'off' } }).P3_STORY_BOOT_GATE).toBe('off');
+    expect(envFlag('P3_STORY_BOOT_GATE', {})).toBe('on');
+  });
+
   it('leaves all other flags at their legacy off default', () => {
     for (const name of UNTOUCHED_OFF_FLAGS) {
       expect(P3_FLAGS[name].default).toBe('off');

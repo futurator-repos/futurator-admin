@@ -119,8 +119,10 @@ async function pinIfStable(verdict, { git, cwd, head0 }) {
  *   foundationGate({cwd,headSha,qaContext}) → runs tsc + build + boot-liveness
  *     (+ the whole-suite `npm run test` when P3_SUITE_GREEN==='on') →
  *     evaluateFoundationGate, SHA-pinned against a concurrent commit.
- *   greenTrunk({cwd}) → runs tsc + build (+ the whole-suite `npm run test` when
- *     P3_SUITE_GREEN==='on') → evaluateGreenTrunk, SHA-pinned.
+ *   greenTrunk({cwd,qaContext}) → runs tsc + build (+ the whole-suite `npm run
+ *     test` when P3_SUITE_GREEN==='on') (+ per-story boot-liveness when
+ *     P3_STORY_BOOT_GATE==='on', reusing foundationGate's boot probe) →
+ *     evaluateGreenTrunk with the boot dimension folded in, SHA-pinned.
  *
  * P3_SUITE_GREEN (slice D — the cross-plan regression guardrail): when 'on',
  * BOTH gates additionally run runTreeTests over the whole app tree and fold a
@@ -150,6 +152,13 @@ export function makeStoryDevGateDeps({ cwd, runner, git, qaContext, deps = {} } 
   // deps.suiteGreen wins (direct 'on'/'off' override), else envFlag over
   // deps.env or process.env. 'on' → both gates run the whole-suite dimension.
   const suiteGreen = deps.suiteGreen ?? envFlag('P3_SUITE_GREEN', deps.env || process.env);
+  // P3_STORY_BOOT_GATE posture (B1, Incident G), same injection contract as
+  // suiteGreen: an explicit deps.storyBootGate wins, else envFlag over deps.env
+  // or process.env. 'on' → greenTrunk (non-foundation stories) ALSO boots the
+  // served app + runs the boot-liveness probe, so a competing-feature/wiring
+  // break fails the OFFENDING story here. foundationGate already boots, so this
+  // only augments greenTrunk.
+  const storyBootGate = deps.storyBootGate ?? envFlag('P3_STORY_BOOT_GATE', deps.env || process.env);
 
   // Boot the served app with the seam env (bootDevServer already sets
   // NEXT_PUBLIC_TEST_HARNESS=1) and run the liveness probe; always stop the
@@ -202,14 +211,36 @@ export function makeStoryDevGateDeps({ cwd, runner, git, qaContext, deps = {} } 
       const verdict = evaluateFoundationGate({ tsc, build, boot, tests });
       return pinIfStable(verdict, { git: gitRunner, cwd: c, head0 });
     },
-    greenTrunk: async ({ cwd: c = cwd } = {}) => {
+    greenTrunk: async ({ cwd: c = cwd, qaContext: qa = qaContext } = {}) => {
       const head0 = await readHead(gitRunner, c);
       const tsc = await runTreeTypecheck({ cwd: c, runner: treeRunner });
       const build = await runTreeBuild({ cwd: c, runner: treeRunner });
       // Whole-suite dimension only when P3_SUITE_GREEN==='on'; else undefined
       // (legacy 2-dim verdict). SHA-pin wraps the whole check including the suite.
       const tests = suiteGreen === 'on' ? await runTreeTests({ cwd: c, runner: treeRunner }) : undefined;
-      const verdict = evaluateGreenTrunk({ tsc, build, tests });
+      // B1 (Incident G) — per-story boot-liveness: only when P3_STORY_BOOT_GATE
+      // ==='on'. Reuse the SAME boot-liveness the foundationGate runs
+      // (bootAndProbe → bootDevServer + defaultLivenessInputs) so a story that
+      // broke the live app (a competing feature, a wiring gap) fails HERE, at the
+      // offending story, not as a late assemble/QA mystery. undefined when the
+      // flag is off → the verdict is byte-identical to the legacy tsc+build check.
+      const boot = storyBootGate === 'on' ? await bootAndProbe({ cwd: c, qaContext: qa }) : undefined;
+      let verdict = evaluateGreenTrunk({ tsc, build, tests });
+      // Fold the boot dimension in with the SAME presence-semantics tree-gates
+      // uses for `tests`: participates ONLY when present (flag on). A
+      // present-but-failed boot fails CLOSED. (Folded here rather than inside
+      // evaluateGreenTrunk so the pure tree-gates verdict stays unchanged and this
+      // slice touches only its own module.)
+      if (boot !== undefined && !boot?.passed) {
+        verdict = {
+          passed: false,
+          failing: [...(verdict.failing || []), 'boot'],
+          reasons: [
+            ...(verdict.reasons || []),
+            `green-trunk boot-liveness failed: ${boot?.detail ?? 'no result'}`,
+          ],
+        };
+      }
       return pinIfStable(verdict, { git: gitRunner, cwd: c, head0 });
     },
   };
