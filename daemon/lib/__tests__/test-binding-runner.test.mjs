@@ -163,9 +163,11 @@ describe('runStoryBindings — no-mock rule for verify:state ACs', () => {
     testBinding: { status: 'bound', testRef: `src/${id}.test.ts`, testKind: 'unit' }, ...over,
   });
 
-  it('a state/unit AC whose bound test mocks an in-repo module → misbound, not run', async () => {
+  it('a state/unit AC whose bound test mocks its OWN sibling impl → misbound, not run', async () => {
+    // testRef src/a.test.ts → sibling module under test = src/a; mocking './a' is
+    // self-validation and MUST stay a violation (Incident D safety invariant).
     let ran = false;
-    const readFile = async () => `vi.mock('./levels')\nimport { init } from './levels'`;
+    const readFile = async () => `vi.mock('./a')\nimport { init } from './a'`;
     const { acceptanceCriteria, summary } = await runStoryBindings({
       acceptanceCriteria: [stateAc('a')],
       headSha: 'SHA1', cwd: '/wt', readFile,
@@ -174,8 +176,36 @@ describe('runStoryBindings — no-mock rule for verify:state ACs', () => {
     expect(ran).toBe(false);
     expect(acceptanceCriteria[0].testBinding.status).toBe('misbound');
     expect(acceptanceCriteria[0].testBinding.detail).toMatch(/no-mock rule/);
-    expect(acceptanceCriteria[0].testBinding.detail).toMatch(/\.\/levels/);
+    expect(acceptanceCriteria[0].testBinding.detail).toMatch(/\.\/a/);
     expect(summary).toEqual({ ran: 1, passed: 0, failed: 1, skipped: 0, errored: 0 });
+  });
+
+  it('a state/unit AC whose bound test mocks a DEPENDENCY (not the sibling) now RUNS (Incident D)', async () => {
+    // ../maze is the foundation's already-verified data module — mocking it to
+    // build a fixture is legitimate isolation, no longer misbound.
+    let ran = false;
+    const readFile = async () => `vi.mock('../maze')\nimport { step } from './a'`;
+    const { acceptanceCriteria, summary } = await runStoryBindings({
+      acceptanceCriteria: [stateAc('a')],
+      headSha: 'SHA1', cwd: '/wt', readFile,
+      executors: { unit: async () => { ran = true; return { passed: true }; } },
+    });
+    expect(ran).toBe(true);
+    expect(acceptanceCriteria[0].testBinding.status).toBe('passing');
+    expect(summary).toEqual({ ran: 1, passed: 1, failed: 0, skipped: 0, errored: 0 });
+  });
+
+  it('a state/unit AC whose bound test mocks a `touches` module → misbound (module under test)', async () => {
+    let ran = false;
+    const readFile = async () => `vi.mock('./levels')`;
+    const { acceptanceCriteria } = await runStoryBindings({
+      acceptanceCriteria: [stateAc('a')],
+      headSha: 'SHA1', cwd: '/wt', readFile, touches: ['src/levels.ts'],
+      executors: { unit: async () => { ran = true; return { passed: true }; } },
+    });
+    expect(ran).toBe(false);
+    expect(acceptanceCriteria[0].testBinding.status).toBe('misbound');
+    expect(acceptanceCriteria[0].testBinding.detail).toMatch(/\.\/levels/);
   });
 
   it('an unreadable bound test file → misbound (fail-closed)', async () => {

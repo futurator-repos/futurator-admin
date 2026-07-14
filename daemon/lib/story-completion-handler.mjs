@@ -97,6 +97,12 @@ export async function handleStoryCompletion({
   // planner's properties); `agentText` carries the <INVARIANTS> manifest (defaults
   // to devOutput). `readFile`/`invariantExecutor`/`spawnSync` are injectable for tests.
   cwd, invariants = [], agentText, readFile, invariantExecutor, spawnSync = nodeSpawnSync,
+  // Incident D — the story's `touches` (the module(s) UNDER TEST). Threaded into
+  // runStoryBindings so the no-mock rule flags ONLY a mock of the module under
+  // test (sibling impl or a `touches` path), not a legitimate dependency mock.
+  // NOT passed to runStoryInvariants — the invariant gate stays strict (an
+  // invariant asserting real foundation data must never mock any in-repo module).
+  touches = [],
   // Injected fs for the deterministic convention rebind (default node:fs).
   fs = nodeFs,
   // W2.1 — P3_QUALITY_GATE ('off'|'shadow'|'on'). When !== 'off', compute the
@@ -118,7 +124,7 @@ export async function handleStoryCompletion({
   //    Threads the no-mock rule (verify:'state' unit/integration ACs may not mock
   //    the in-repo module under test → status:'misbound').
   const { acceptanceCriteria, summary: bindingSummary } = await runStoryBindings({
-    acceptanceCriteria: bound, headSha, executors, now, cwd, enforceNoMock: true,
+    acceptanceCriteria: bound, headSha, executors, now, cwd, enforceNoMock: true, touches,
     ...(readFile ? { readFile } : {}),
   });
 

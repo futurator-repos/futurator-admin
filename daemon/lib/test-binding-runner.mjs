@@ -63,11 +63,12 @@ function testRefFile(testRef) {
  *   cwd?: string,                       // worktree root — bound files read relative to it
  *   readFile?: (path:string, enc:string)=>Promise<string>,  // injectable for tests
  *   enforceNoMock?: boolean,            // GREEN-phase no-mock rule (default ON)
+ *   touches?: string[],                 // the story's `touches` — the module(s) UNDER TEST
  * }} args
  */
 export async function runStoryBindings({
   acceptanceCriteria = [], headSha, executors = {}, now = () => new Date().toISOString(),
-  cwd, readFile = nodeReadFile, enforceNoMock = true,
+  cwd, readFile = nodeReadFile, enforceNoMock = true, touches = [],
 }) {
   const exec = { ...DEFAULT_EXECUTORS, ...executors };
   const at = now();
@@ -101,10 +102,15 @@ export async function runStoryBindings({
       }, headSha, at));
       continue;
     }
-    // NO-MOCK RULE (redesign Part 3 §1): a verify:'state' AC bound to a
-    // unit/integration test must exercise the REAL module under test — it may not
-    // vi.mock/jest.mock an in-repo module. Statically check the bound file BEFORE
-    // running: unreadable OR an in-repo mock ⇒ status:'misbound', do NOT run it.
+    // NO-MOCK RULE (redesign Part 3 §1; NARROWED Incident D): a verify:'state' AC
+    // bound to a unit/integration test must exercise the REAL module UNDER TEST —
+    // it may not vi.mock/jest.mock the module it claims to verify (self-report).
+    // It MAY mock a DEPENDENCY to build a fixture (e.g. a system test mocking the
+    // foundation's ../maze for spawn points — that is legitimate isolation, not a
+    // self-mock). Scope the check to the module under test: the bound test file's
+    // sibling implementation OR a path in the story's `touches`. Statically check
+    // the bound file BEFORE running: unreadable OR a mock of the module under test
+    // ⇒ status:'misbound', do NOT run it.
     if (enforceNoMock && ac.verify === 'state' && (kind === 'unit' || kind === 'integration')) {
       // Check EACH resolved file (a state AC can bind multiple files). Using
       // resolveTestRefs also fixes the array-shape testRef: the old
@@ -120,7 +126,11 @@ export async function runStoryBindings({
         } catch (err) {
           readErr = err;
         }
-        const mock = source != null ? detectInRepoMock(source) : { violation: true, hits: [] };
+        // Narrow scope: pass the file being read (its sibling impl is under test)
+        // plus the story's `touches`. A mock of a mere dependency now passes.
+        const mock = source != null
+          ? detectInRepoMock(source, { testFilePath: file, underTest: touches })
+          : { violation: true, hits: [] };
         if (readErr || mock.violation) {
           const why = readErr ? '(file unreadable)' : mock.hits.join(', ');
           misboundDetail = `verify:'state' AC must exercise the real module — bound test ${file} mocks in-repo module(s): ${why} (no-mock rule) → misbound`;

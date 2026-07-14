@@ -8,18 +8,52 @@ const bindingText = (id, ref = `src/${id}.test.ts`) =>
   `work...\n<BINDING>\n{ "${id}": { "testRef": "${ref}", "testKind": "unit" } }\n</BINDING>\n`;
 
 describe('handleStoryCompletion — no-mock + invariants threaded end-to-end', () => {
-  it('a state AC bound to a mocking test → story fails (misbound), no propagate', async () => {
+  it('a state AC bound to a test mocking its OWN sibling → story fails (misbound), no propagate', async () => {
+    // bindingText('a') binds src/a.test.ts → sibling module under test = src/a;
+    // mocking './a' is self-validation and stays misbound (Incident D invariant).
     const storyNode = { acceptanceCriteria: [ac('a')] };
     const r = await handleStoryCompletion({
       storyNode,
       devOutput: bindingText('a'),
       headSha: 'SHA1',
       cwd: '/wt',
-      readFile: async () => `vi.mock('./levels')`,
+      readFile: async () => `vi.mock('./a')`,
       executors: { unit: async () => ({ passed: true }) },
     });
     expect(r.newState).toBe('failed');
     expect(r.propagate).toBe(false);
+    expect(r.acceptanceCriteria[0].testBinding.status).toBe('misbound');
+  });
+
+  it('a state AC bound to a test mocking a DEPENDENCY → story done (Incident D)', async () => {
+    // ../maze is a dependency (the foundation), not the module under test → the
+    // no-mock rule no longer misbinds it; the story completes.
+    const storyNode = { acceptanceCriteria: [ac('a')] };
+    const r = await handleStoryCompletion({
+      storyNode,
+      devOutput: bindingText('a'),
+      headSha: 'SHA1',
+      cwd: '/wt',
+      readFile: async () => `vi.mock('../maze')\nimport { step } from './a'`,
+      executors: { unit: async () => ({ passed: true }) },
+    });
+    expect(r.newState).toBe('done');
+    expect(r.propagate).toBe(true);
+    expect(r.acceptanceCriteria[0].testBinding.status).toBe('passing');
+  });
+
+  it('touches threads through: a state AC mocking a `touches` module → misbound', async () => {
+    const storyNode = { acceptanceCriteria: [ac('a')] };
+    const r = await handleStoryCompletion({
+      storyNode,
+      devOutput: bindingText('a'),
+      headSha: 'SHA1',
+      cwd: '/wt',
+      touches: ['src/levels.ts'],
+      readFile: async () => `vi.mock('./levels')`,
+      executors: { unit: async () => ({ passed: true }) },
+    });
+    expect(r.newState).toBe('failed');
     expect(r.acceptanceCriteria[0].testBinding.status).toBe('misbound');
   });
 

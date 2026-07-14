@@ -736,6 +736,11 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
       // invariants + the raw agent text (for the <INVARIANTS> manifest) —
       // absent a manifest, invariants stay 'declared' and fail the gate closed.
       invariants: payload.invariants,
+      // Incident D (no-mock narrowing): the story's `touches` are the module(s)
+      // UNDER TEST — a state AC may mock a dependency (e.g. the foundation) but
+      // not the module it verifies. runStoryBindings scopes the no-mock rule to
+      // these + each bound test's sibling impl.
+      touches: payload.touches,
     });
 
     // W2.2 tamper escalation — a tamper hit FAILS the attempt regardless of the
