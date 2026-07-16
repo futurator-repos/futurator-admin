@@ -99,6 +99,15 @@ import {
   validateIntegratorJob,
   isJobClaimableBySource,
 } from './pipelines/job-router.mjs';
+// Servers module (Task 18, spec §5.2) — server-aware poll/claim/heartbeat.
+// All of it is gated behind the `dispatch.serverAware` agent-flag; with the
+// flag off the daemon behaves byte-for-byte like the legacy global-pool poll.
+import { resolveServerId } from './lib/server-identity.mjs';
+import {
+  buildJobClaimParams,
+  buildJobRenewParams,
+  buildJobReleaseParams,
+} from './lib/atomic-claim.mjs';
 import { runStoryDevJob } from './pipelines/story-dev-pipeline.mjs';
 // Reality-Spine P3 — the whole-tree Integrator + its readiness gate. The daemon
 // wires the real green runners (tree-gates + boot-liveness) and the story-dev
@@ -1592,6 +1601,24 @@ async function updateJobFields(jobId, fields) {
 
 const DAEMON_SOURCE = process.env.DAEMON_SOURCE || 'local';
 
+// Servers module (Task 18) — this daemon's fleet identity + servers table.
+// SERVER_ID is what the dispatcher stamps on `assignedServerId`; the daemon
+// polls/claims/heartbeats under it when `dispatch.serverAware` is on.
+const SERVER_ID = resolveServerId(process.env);
+const SERVERS_TABLE = process.env.SERVERS_TABLE || 'futurator-servers';
+// CAS claim lease (matches atomic-claim's DEFAULT_LEASE_MS); renewed at 1/3.
+const JOB_CLAIM_LEASE_MS = 15 * 60 * 1000;
+// Daemon build fingerprint for the servers-row heartbeat (same sha256-over-self
+// scheme the boot banner prints — dino1 stale-deploy lesson, 2026-05-02).
+const DAEMON_VERSION = (() => {
+  try {
+    const buf = readFileSync(new URL(import.meta.url).pathname);
+    return createHash('sha256').update(buf).digest('hex').slice(0, 12);
+  } catch {
+    return 'unknown';
+  }
+})();
+
 // Queues module — a laptop daemon (DAEMON_SOURCE=local) can run CONCURRENTLY
 // with the EC2 daemon to service 'local'-targeted queue calls. But non-queue
 // jobs (pipeline/party/free-agent) are claimable by any source, so without a
@@ -1609,6 +1636,11 @@ function canClaimJob(job) {
   if (DAEMON_QUEUE_ONLY && job?.jobType !== 'queue-request') return false;
   return isJobClaimableBySource(job, DAEMON_SOURCE);
 }
+
+// Servers module (Task 18) — log the missing-row conditional failure once,
+// not every ~10s heartbeat (a destroyed server's daemon keeps ticking until
+// its VM is deleted; its row must NOT be resurrected).
+let _serverRowMissingLogged = false;
 
 async function writeHeartbeat() {
   try {
@@ -1683,6 +1715,49 @@ async function writeHeartbeat() {
         },
       }),
     );
+
+    // Servers module (Task 18, spec §5.2) — heartbeat this daemon's own row in
+    // `futurator-servers` (in ADDITION to the legacy DAEMON_HEARTBEAT row, kept
+    // during migration). Update-only: `attribute_exists(serverId)` so a deleted
+    // server's still-running daemon can never resurrect its row.
+    if (serverAwareDispatch) {
+      try {
+        const nowIso = new Date().toISOString();
+        await ddb.send(
+          new UpdateCommand({
+            TableName: SERVERS_TABLE,
+            Key: { serverId: SERVER_ID },
+            UpdateExpression:
+              'SET lastHeartbeatAt = :now, activeCount = :n, daemonVersion = :v, #system = :sys, updatedAt = :now',
+            ConditionExpression: 'attribute_exists(serverId)',
+            ExpressionAttributeNames: { '#system': 'system' },
+            ExpressionAttributeValues: {
+              ':now': nowIso,
+              ':n': activeJobs.size,
+              ':v': DAEMON_VERSION,
+              ':sys': {
+                totalMem: Math.round(mem.totalMem / 1024 / 1024),
+                freeMem: Math.round(mem.freeMem / 1024 / 1024),
+                loadAvg: mem.loadAvg.map((v) => Math.round(v * 100) / 100),
+              },
+            },
+          }),
+        );
+        _serverRowMissingLogged = false;
+      } catch (err) {
+        if (err?.name === 'ConditionalCheckFailedException') {
+          if (!_serverRowMissingLogged) {
+            _serverRowMissingLogged = true;
+            log(
+              'warn',
+              `[server-heartbeat] no ${SERVER_ID} row in ${SERVERS_TABLE} — server deleted or not yet seeded; heartbeat skipped (logged once)`,
+            );
+          }
+        } else {
+          throw err; // swallowed by the outer non-critical catch
+        }
+      }
+    }
   } catch {
     // Non-critical
   }
@@ -5548,15 +5623,28 @@ async function isAutoMergeEnabledCached() {
 const CAP_FLAG_CACHE_MS = 5_000;
 let _capCache = { fetchedAt: 0 };
 const CAP_ABSOLUTE_MAX = 16;
+// Servers module (Task 18) — `dispatch.serverAware` gate, read alongside the
+// cap flag every poll tick (same 5s cache). OFF (default) ⇒ legacy global-pool
+// polling + unconditional RUNNING write, byte-for-byte. On a DDB blip we keep
+// the last-known value: flapping to OFF mid-blip would drop a fleet daemon
+// back into the global pool and race jobs assigned to other servers.
+let serverAwareDispatch = false;
 async function applyCapOverrideCached() {
   if (Date.now() - _capCache.fetchedAt < CAP_FLAG_CACHE_MS) return;
   _capCache = { fetchedAt: Date.now() };
   const flagName =
     DAEMON_SOURCE === 'ec2' ? 'concurrency.maxConcurrent.ec2' : 'concurrency.maxConcurrent.local';
   try {
-    const result = await ddb.send(
-      new GetCommand({ TableName: AGENT_FLAGS_TABLE, Key: { flagName } }),
-    );
+    const [result, serverAwareResult] = await Promise.all([
+      ddb.send(new GetCommand({ TableName: AGENT_FLAGS_TABLE, Key: { flagName } })),
+      ddb.send(
+        new GetCommand({
+          TableName: AGENT_FLAGS_TABLE,
+          Key: { flagName: 'dispatch.serverAware' },
+        }),
+      ),
+    ]);
+    serverAwareDispatch = serverAwareResult?.Item?.value === 'true';
     const raw = result?.Item?.value;
     let next = MAX_CONCURRENT; // default when no/invalid override
     if (raw !== undefined) {
@@ -7811,6 +7899,51 @@ async function executeWaveMergeJob(job) {
 // ── Poll loop ──
 
 async function runJobAsync(job) {
+  // Servers module (Task 18, spec §5.2) — with `dispatch.serverAware` on, win
+  // the CAS lease BEFORE taking a slot: a conditional PENDING→RUNNING write
+  // pinned to this SERVER_ID (buildJobClaimParams), so N daemons racing the
+  // same row resolve to exactly one winner. Losing the race is normal, not an
+  // error. Flag off ⇒ legacy path: no claim, handlers write RUNNING as before.
+  let jobClaim = null;
+  if (serverAwareDispatch) {
+    const short = job.jobId.slice(0, 8);
+    const { params: claimParams, claimToken } = buildJobClaimParams({
+      tableName: JOBS_TABLE,
+      jobId: job.jobId,
+      serverId: SERVER_ID,
+      nowIso: new Date().toISOString(),
+      leaseMs: JOB_CLAIM_LEASE_MS,
+    });
+    try {
+      await ddb.send(new UpdateCommand(claimParams));
+    } catch (err) {
+      if (err?.name === 'ConditionalCheckFailedException') {
+        log('info', `[${short}] CAS claim lost — another daemon holds this job; skipping`);
+      } else {
+        log('error', `[${short}] CAS claim write failed (job stays PENDING): ${err.message}`);
+      }
+      return;
+    }
+    // Renew the lease at 1/3 of its length while the job runs; cleared (and
+    // the claim released) in the finally-block below. unref'd so a renew
+    // timer never keeps a shutting-down daemon alive.
+    const renewTimer = setInterval(() => {
+      const renewParams = buildJobRenewParams({
+        tableName: JOBS_TABLE,
+        jobId: job.jobId,
+        serverId: SERVER_ID,
+        claimToken,
+        nowIso: new Date().toISOString(),
+        leaseMs: JOB_CLAIM_LEASE_MS,
+      });
+      ddb
+        .send(new UpdateCommand(renewParams))
+        .catch((err) => log('warn', `[${short}] claim lease renew failed: ${err.message}`));
+    }, Math.floor(JOB_CLAIM_LEASE_MS / 3));
+    renewTimer.unref?.();
+    jobClaim = { claimToken, renewTimer };
+  }
+
   // Story 20.16 — acquire the manager slot up-front. Idempotent (selectNext
   // path already pre-checked canAcquire) so this is effectively bookkeeping.
   // When CM_DISABLED the call still runs but the legacy poll-loop gate is
@@ -7905,6 +8038,43 @@ async function runJobAsync(job) {
   } finally {
     activeJobs.delete(job.jobId);
     jobEventSeqs.delete(job.jobId);
+    // Servers module (Task 18) — stop renewing and release the CAS lease,
+    // preserving whatever terminal status the handler wrote (the release SET
+    // re-asserts it while REMOVE-ing the claim fields). If the status can't
+    // be read, skip the release: the lease simply expires and the sweeper's
+    // orphan recovery clears it — never guess a terminal status.
+    if (jobClaim) {
+      clearInterval(jobClaim.renewTimer);
+      try {
+        const fresh = await ddb.send(
+          new GetCommand({
+            TableName: JOBS_TABLE,
+            Key: { jobId: job.jobId },
+            ProjectionExpression: '#s',
+            ExpressionAttributeNames: { '#s': 'status' },
+          }),
+        );
+        const finalStatus = fresh?.Item?.status;
+        if (finalStatus) {
+          await ddb.send(
+            new UpdateCommand(
+              buildJobReleaseParams({
+                tableName: JOBS_TABLE,
+                jobId: job.jobId,
+                serverId: SERVER_ID,
+                claimToken: jobClaim.claimToken,
+                status: finalStatus,
+              }),
+            ),
+          );
+        }
+      } catch (err) {
+        // ConditionalCheckFailed = lease already expired/re-owned — fine.
+        if (err?.name !== 'ConditionalCheckFailedException') {
+          log('warn', `[${job.jobId.slice(0, 8)}] claim release failed: ${err.message}`);
+        }
+      }
+    }
     // Story 20.16 — release the manager slot. Idempotent; double-release
     // is logged as a warn (helps catch lifecycle bugs without crashing).
     concurrencyManager.release(job.jobId);
@@ -10230,19 +10400,39 @@ async function poll() {
         const queryLimit = CONCURRENCY_MANAGER_ENABLED
           ? CM_CANDIDATE_LIMIT
           : effectiveMaxConcurrent - activeJobs.size;
+        // Servers module (Task 18) — with `dispatch.serverAware` on, poll ONLY
+        // the jobs the dispatcher assigned to THIS server (its own partition of
+        // `assignedServerId-status-index`) instead of the global PENDING pool;
+        // the retry-backoff filter is kept. Flag off ⇒ legacy query untouched.
         const { Items } = await ddb.send(
-          new QueryCommand({
-            TableName: JOBS_TABLE,
-            IndexName: 'status-createdAt-index',
-            KeyConditionExpression: '#s = :pending',
-            // Pipeline Enhancement Plan v2 — Phase A.3: skip jobs still
-            // inside their retry backoff window (retryAfter > now).
-            FilterExpression: 'attribute_not_exists(retryAfter) OR retryAfter <= :now',
-            ExpressionAttributeNames: { '#s': 'status' },
-            ExpressionAttributeValues: { ':pending': 'PENDING', ':now': nowIso },
-            Limit: queryLimit,
-            ScanIndexForward: true,
-          }),
+          new QueryCommand(
+            serverAwareDispatch
+              ? {
+                  TableName: JOBS_TABLE,
+                  IndexName: 'assignedServerId-status-index',
+                  KeyConditionExpression: 'assignedServerId = :sid AND #s = :pending',
+                  FilterExpression: 'attribute_not_exists(retryAfter) OR retryAfter <= :now',
+                  ExpressionAttributeNames: { '#s': 'status' },
+                  ExpressionAttributeValues: {
+                    ':sid': SERVER_ID,
+                    ':pending': 'PENDING',
+                    ':now': nowIso,
+                  },
+                  Limit: queryLimit,
+                }
+              : {
+                  TableName: JOBS_TABLE,
+                  IndexName: 'status-createdAt-index',
+                  KeyConditionExpression: '#s = :pending',
+                  // Pipeline Enhancement Plan v2 — Phase A.3: skip jobs still
+                  // inside their retry backoff window (retryAfter > now).
+                  FilterExpression: 'attribute_not_exists(retryAfter) OR retryAfter <= :now',
+                  ExpressionAttributeNames: { '#s': 'status' },
+                  ExpressionAttributeValues: { ':pending': 'PENDING', ':now': nowIso },
+                  Limit: queryLimit,
+                  ScanIndexForward: true,
+                },
+          ),
         );
 
         if (Items?.length > 0) {
@@ -10255,7 +10445,12 @@ async function poll() {
             // Queues module — enforce Local/EC2 target routing + the queue-only
             // gate: skip a queue-request whose target isn't this daemon's
             // DAEMON_SOURCE, and (when DAEMON_QUEUE_ONLY) skip all non-queue jobs.
-            const candidates = Items.filter((j) => !activeJobs.has(j.jobId) && canClaimJob(j));
+            // Server-aware mode replaces source routing entirely (spec §5.2):
+            // the assigned-index partition + the CAS claim's assignedServerId
+            // pin already scope every job to THIS server.
+            const candidates = Items.filter(
+              (j) => !activeJobs.has(j.jobId) && (serverAwareDispatch || canClaimJob(j)),
+            );
             const dispatched = new Set();
             while (concurrencyManager.canAcquire() && candidates.length > dispatched.size) {
               const pool = candidates.filter((j) => !dispatched.has(j.jobId));
@@ -10270,8 +10465,9 @@ async function poll() {
           } else {
             for (const job of Items) {
               if (activeJobs.has(job.jobId)) continue;
-              // Queues module — target routing + queue-only gate (see above).
-              if (!canClaimJob(job)) continue;
+              // Queues module — target routing + queue-only gate (see above);
+              // bypassed in server-aware mode (assigned index + CAS pin).
+              if (!serverAwareDispatch && !canClaimJob(job)) continue;
               runJobAsync(job).catch((e) => log('error', `runJobAsync uncaught: ${e.message}`));
             }
           }
