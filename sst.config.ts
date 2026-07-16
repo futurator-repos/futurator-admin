@@ -1243,8 +1243,8 @@ export default $config({
               Effect: 'Allow',
               Action: ['s3:GetObject', 's3:ListBucket'],
               Resource: [
-                'arn:aws:s3:::futurator-admin-production-adminsiteassetsbucket-czucfmdf',
-                'arn:aws:s3:::futurator-admin-production-adminsiteassetsbucket-czucfmdf/*',
+                'arn:aws:s3:::futurator-admin-production-adminsiteassetsbucket-bcsesuts',
+                'arn:aws:s3:::futurator-admin-production-adminsiteassetsbucket-bcsesuts/*',
               ],
             },
           ],
@@ -1355,7 +1355,7 @@ export default $config({
         SERVERS_TABLE: serversTable.name,
         SERVER_WORKER_POLICY_ARN: serverWorkerPolicy.arn,
         DAEMON_BUNDLE_S3_URI:
-          's3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/daemon/',
+          's3://futurator-admin-production-adminsiteassetsbucket-bcsesuts/develope-it/daemon/',
         // F22 — dev/staging subdomain hosting (deployment-v2.5.md §14). Presence
         // flips deploy-targets.ts to byte-copy promotion; absence = fallback.
         // F29 — subdomains turned ON: the Routers now carry the CloudFront

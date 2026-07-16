@@ -6560,14 +6560,14 @@ app.post('/api/ec2/start-daemon', async (c) => {
   // scripts) so any pipeline change deployed via `aws s3 cp` reaches EC2 on restart.
   const bootstrap = [
     'cd /opt/futurator-daemon',
-    'sudo aws s3 cp s3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/daemon/agent-daemon.mjs ./agent-daemon.mjs',
-    'sudo aws s3 sync s3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/daemon/pipelines/ ./pipelines/ --exclude "__tests__/*"',
+    'sudo aws s3 cp s3://futurator-admin-production-adminsiteassetsbucket-bcsesuts/develope-it/daemon/agent-daemon.mjs ./agent-daemon.mjs',
+    'sudo aws s3 sync s3://futurator-admin-production-adminsiteassetsbucket-bcsesuts/develope-it/daemon/pipelines/ ./pipelines/ --exclude "__tests__/*"',
     // Servers module — agent-daemon.mjs now imports lib/ (server-identity,
     // atomic-claim job builders, creds-fetch); a restart that pulls a new
     // daemon against a stale lib/ crashes on import.
-    'sudo aws s3 sync s3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/daemon/lib/ ./lib/ --exclude "__tests__/*"',
-    'sudo aws s3 sync s3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/daemon/forwarder/ ./forwarder/',
-    'sudo aws s3 sync s3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/daemon/receiver/ ./receiver/',
+    'sudo aws s3 sync s3://futurator-admin-production-adminsiteassetsbucket-bcsesuts/develope-it/daemon/lib/ ./lib/ --exclude "__tests__/*"',
+    'sudo aws s3 sync s3://futurator-admin-production-adminsiteassetsbucket-bcsesuts/develope-it/daemon/forwarder/ ./forwarder/',
+    'sudo aws s3 sync s3://futurator-admin-production-adminsiteassetsbucket-bcsesuts/develope-it/daemon/receiver/ ./receiver/',
     'sudo chown -R ubuntu:ubuntu ./agent-daemon.mjs ./pipelines ./lib ./forwarder ./receiver',
     'sudo systemctl restart futurator-daemon',
     'sleep 2',
