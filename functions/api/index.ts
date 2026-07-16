@@ -8,7 +8,12 @@ import { docClient, TABLE_NAMES } from '../shared/dynamo-client';
 // Servers module (Task 7) — server-aware dispatch wiring.
 import { runDispatchSweep } from '../shared/services/server-dispatcher';
 import { getDispatchPolicy, setDispatchPolicy } from '../shared/services/dispatch-state';
-import { dispatchPolicySchema } from '../shared/schemas/servers-schema';
+import { dispatchPolicySchema, providerCredentialsSchema } from '../shared/schemas/servers-schema';
+import {
+  putProviderCredentials,
+  isProviderConfigured,
+} from '../shared/services/provider-credentials-sm';
+import { PROVIDER_CATALOG } from '../shared/services/compute-providers/catalog';
 import {
   fetchSkillCatalog,
   diffSkillReconciliation,
@@ -6352,6 +6357,37 @@ app.get('/api/servers/assignments', authMiddleware, async (c) => {
       createdAt: r.createdAt,
     }));
   return c.json(assignments);
+});
+
+// POST /api/servers/providers/:provider/credentials — write-only credential
+// storage in Secrets Manager (Task 8). Validated per-provider by
+// `providerCredentialsSchema`'s discriminated union; never echoes secret
+// material back.
+app.post('/api/servers/providers/:provider/credentials', authMiddleware, async (c) => {
+  const provider = c.req.param('provider');
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = providerCredentialsSchema.safeParse({ provider, credentials: body });
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
+  }
+  await putProviderCredentials(parsed.data.provider, parsed.data.credentials);
+  return c.json({ configured: true });
+});
+
+// GET /api/servers/providers — the static provider catalog (Task 8) merged
+// with live `configured` flags from Secrets Manager. Never returns secret
+// material — only presence.
+app.get('/api/servers/providers', authMiddleware, async (c) => {
+  const providers = await Promise.all(
+    PROVIDER_CATALOG.map(async (entry) => ({
+      ...entry,
+      configured:
+        entry.provider === 'aws' || entry.provider === 'local'
+          ? true
+          : await isProviderConfigured(entry.provider),
+    })),
+  );
+  return c.json({ providers });
 });
 
 // ── Pipeline-dispatch API (external, x-queue-key) ──
