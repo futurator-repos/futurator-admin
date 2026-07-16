@@ -73,3 +73,20 @@ CID=$(aws ssm send-command \
 rm -f "$PARAMS_FILE"
 
 log "Pushed OAuth to EC2 (SSM CommandId=$CID). Daemon signalled via SIGUSR1 — will re-probe in seconds."
+
+# 5. Mirror to Secrets Manager so fleet servers (non-AWS: Hetzner/Oracle/GCP)
+#    can fetch the same creds via the admin API relay (GET /api/servers/
+#    agent-credentials). Reuses the exact Keychain JSON already validated above.
+if aws secretsmanager put-secret-value \
+  --secret-id futurator/claude-oauth-credentials \
+  --secret-string "$CREDS" \
+  --region "$REGION" >/dev/null 2>&1; then
+  log "Mirrored OAuth to Secrets Manager (futurator/claude-oauth-credentials)."
+elif aws secretsmanager create-secret \
+  --name futurator/claude-oauth-credentials \
+  --secret-string "$CREDS" \
+  --region "$REGION" >/dev/null 2>&1; then
+  log "Created Secrets Manager secret futurator/claude-oauth-credentials."
+else
+  log "WARN: could not mirror OAuth to Secrets Manager (fleet relay may be stale)."
+fi

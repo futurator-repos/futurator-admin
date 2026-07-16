@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { handle } from 'hono/aws-lambda';
 import { authMiddleware } from '../shared/auth-middleware';
-import { AppError, NotFoundError, ValidationError } from '../shared/errors';
+import { AppError, AuthError, NotFoundError, ValidationError } from '../shared/errors';
 import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { docClient, TABLE_NAMES } from '../shared/dynamo-client';
 // Servers module (Task 7) — server-aware dispatch wiring.
@@ -14,6 +14,7 @@ import {
   isProviderConfigured,
 } from '../shared/services/provider-credentials-sm';
 import { PROVIDER_CATALOG } from '../shared/services/compute-providers/catalog';
+import { getAgentCredentialsForToken } from '../shared/services/agent-credentials-relay';
 import {
   fetchSkillCatalog,
   diffSkillReconciliation,
@@ -514,6 +515,10 @@ app.use('/api/*', async (c, next) => {
   // handlers enforce the shared secret internally (fail-closed 401).
   if (c.req.path === '/api/pipeline/dispatch') return next();
   if (c.req.path.startsWith('/api/pipeline/runs/')) return next();
+  // Servers module — fleet daemons fetch mirrored Claude OAuth creds using their
+  // per-server enrollment token (`x-server-token`), not the operator JWT. The
+  // handler hashes + verifies the token internally (fail-closed 401).
+  if (c.req.path === '/api/servers/agent-credentials') return next();
   return authMiddleware(c, next);
 });
 
@@ -6388,6 +6393,18 @@ app.get('/api/servers/providers', authMiddleware, async (c) => {
     })),
   );
   return c.json({ providers });
+});
+
+// GET /api/servers/agent-credentials — machine-callable (Task 9). A fleet
+// daemon presents its raw enrollment token via `x-server-token`; we hash it,
+// verify the owning server is live, and return the mirrored Claude OAuth
+// credentials JSON. Auth is self-guarded here (route is on the JWT-skip list):
+// 401 on unknown/revoked token, 503 if the secret has not been mirrored yet.
+app.get('/api/servers/agent-credentials', async (c) => {
+  const token = c.req.header('x-server-token');
+  if (!token) throw new AuthError('x-server-token header is required');
+  const credsJson = await getAgentCredentialsForToken(token);
+  return c.body(credsJson, 200, { 'Content-Type': 'application/json' });
 });
 
 // ── Pipeline-dispatch API (external, x-queue-key) ──
