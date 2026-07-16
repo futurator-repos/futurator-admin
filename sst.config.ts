@@ -264,10 +264,23 @@ export default $config({
 
     // ── Agent Orchestrator Tables (Labs) ──
     const agentJobsTable = new sst.aws.Dynamo('AgentJobsTable', {
-      fields: { jobId: 'string', status: 'string', createdAt: 'string' },
+      fields: {
+        jobId: 'string',
+        status: 'string',
+        createdAt: 'string',
+        // Servers module — server-aware dispatcher stamps this; daemons poll
+        // the GSI below for their own assigned jobs. (spec §3.1 / §5)
+        assignedServerId: 'string',
+      },
       primaryIndex: { hashKey: 'jobId' },
       globalIndexes: {
         'status-createdAt-index': { hashKey: 'status', rangeKey: 'createdAt' },
+        // Servers module — per-server job queue: a daemon Queries hashKey =
+        // its own serverId, rangeKey status, to find jobs assigned to it.
+        'assignedServerId-status-index': {
+          hashKey: 'assignedServerId',
+          rangeKey: 'status',
+        },
       },
       transform: {
         table: {
@@ -614,6 +627,25 @@ export default $config({
       transform: {
         table: {
           name: 'futurator-queue-requests',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ── Servers module — multi-provider compute fleet (spec §3.1) ──────────
+    // One row per compute server (Hetzner/Oracle/GCP/EC2/local). PK serverId.
+    // The central server-aware dispatcher (behind flag `dispatch.serverAware`)
+    // stamps assignedServerId on agent-jobs; daemons poll the agent-jobs GSI
+    // `assignedServerId-status-index` for their own work. PAY_PER_REQUEST like
+    // the rest; PITR on (server config + enrollment is durable state).
+    const serversTable = new sst.aws.Dynamo('ServersTable', {
+      fields: { serverId: 'string' },
+      primaryIndex: { hashKey: 'serverId' },
+      transform: {
+        table: {
+          name: 'futurator-servers',
           billingMode: 'PAY_PER_REQUEST',
           pointInTimeRecovery: { enabled: true },
           tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
@@ -1131,6 +1163,90 @@ export default $config({
                 `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-*/index/*`,
               ],
             },
+            // Servers module (spec §3.2) — the API Lambda is the authoritative
+            // writer of each provider's API credentials into Secrets Manager
+            // (`futurator/compute-providers/<provider>`) and reads the daemon's
+            // Claude OAuth material to seed a new server's cloud-init. Carried on
+            // the managed policy (not the `permissions:` inline prop) to keep the
+            // API role off AWS's 10,240-byte inline-policy ceiling.
+            {
+              Sid: 'ServersProviderSecrets',
+              Effect: 'Allow',
+              Action: [
+                'secretsmanager:CreateSecret',
+                'secretsmanager:PutSecretValue',
+                'secretsmanager:GetSecretValue',
+                'secretsmanager:DescribeSecret',
+              ],
+              Resource: [
+                `arn:aws:secretsmanager:eu-central-1:${acctId}:secret:futurator/compute-providers/*`,
+                `arn:aws:secretsmanager:eu-central-1:${acctId}:secret:futurator/claude-oauth-credentials*`,
+              ],
+            },
+            // Servers module (spec §3.2) — the API Lambda mints one scoped IAM
+            // user per provisioned server (path `futurator-servers/`) so each
+            // daemon gets its own least-privilege access keys. Scoped strictly
+            // to that path so it can never touch other principals.
+            {
+              Sid: 'ServersPerServerIamUsers',
+              Effect: 'Allow',
+              Action: [
+                'iam:CreateUser',
+                'iam:DeleteUser',
+                'iam:CreateAccessKey',
+                'iam:DeleteAccessKey',
+                'iam:ListAccessKeys',
+                'iam:AttachUserPolicy',
+                'iam:DetachUserPolicy',
+                'iam:TagUser',
+              ],
+              Resource: [`arn:aws:iam::${acctId}:user/futurator-servers/*`],
+            },
+          ],
+        }),
+      ),
+    });
+
+    // ── Servers module (spec §3.2) — worker managed policy ─────────────────
+    // Each per-server IAM user (minted by the API Lambda on provision) attaches
+    // THIS policy, giving its daemon exactly: DynamoDB on the futurator-* tables
+    // (agent-jobs incl. the assignedServerId GSI, agent-events, agent-flags,
+    // queue-requests, servers, …) plus read of the daemon-bundle S3 prefix that
+    // cloud-init pulls the daemon code from. Inert until a server is provisioned
+    // (Task 8+); the ARN is passed to the API Lambda via SERVER_WORKER_POLICY_ARN.
+    const serverWorkerPolicy = new aws.iam.Policy('ServerWorkerPolicy', {
+      name: 'futurator-server-worker',
+      description: 'DynamoDB + daemon-bundle S3 access for per-server daemon IAM users',
+      policy: accountId.apply((acctId) =>
+        JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [
+            {
+              Sid: 'DaemonDynamoTables',
+              Effect: 'Allow',
+              Action: [
+                'dynamodb:GetItem',
+                'dynamodb:PutItem',
+                'dynamodb:UpdateItem',
+                'dynamodb:DeleteItem',
+                'dynamodb:Query',
+                'dynamodb:Scan',
+                'dynamodb:BatchWriteItem',
+              ],
+              Resource: [
+                `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-*`,
+                `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-*/index/*`,
+              ],
+            },
+            {
+              Sid: 'DaemonBundleRead',
+              Effect: 'Allow',
+              Action: ['s3:GetObject', 's3:ListBucket'],
+              Resource: [
+                'arn:aws:s3:::futurator-admin-production-adminsiteassetsbucket-czucfmdf',
+                'arn:aws:s3:::futurator-admin-production-adminsiteassetsbucket-czucfmdf/*',
+              ],
+            },
           ],
         }),
       ),
@@ -1231,6 +1347,15 @@ export default $config({
         QUEUE_REQUESTS_TABLE: queueRequestsTable.name,
         // Shared secret external apps present as `x-queue-key` on /api/queue/ingest.
         QUEUE_INGEST_SECRET: queueIngestSecret.value,
+        // Servers module — fleet table (server rows) + the worker managed
+        // policy ARN the API attaches to each per-server IAM user on provision
+        // + the S3 prefix cloud-init pulls the daemon bundle from. DynamoDB +
+        // secretsmanager + IAM grants ride the `futurator-admin-api-restore`
+        // managed policy (see apiRestorePolicy above).
+        SERVERS_TABLE: serversTable.name,
+        SERVER_WORKER_POLICY_ARN: serverWorkerPolicy.arn,
+        DAEMON_BUNDLE_S3_URI:
+          's3://futurator-admin-production-adminsiteassetsbucket-czucfmdf/develope-it/daemon/',
         // F22 — dev/staging subdomain hosting (deployment-v2.5.md §14). Presence
         // flips deploy-targets.ts to byte-copy promotion; absence = fallback.
         // F29 — subdomains turned ON: the Routers now carry the CloudFront
@@ -1792,6 +1917,30 @@ export default $config({
             resources: ['arn:aws:ssm:eu-central-1:421515025850:parameter/futurator/_pipeline/*'],
           },
         ],
+      },
+    });
+
+    // ── Cron: Server Dispatch Sweeper (Servers module, spec §5 / §11) ──
+    // Every minute the server-aware dispatcher re-runs the assignment plan:
+    // stamps assignedServerId on newly-PENDING jobs and reassigns jobs stranded
+    // on stale-heartbeat servers. Inert unless flag `dispatch.serverAware` is
+    // on (the handler short-circuits to `{ skipped: true }` otherwise), so a
+    // bare deploy is legacy-safe. DynamoDB access via the same managed policy as
+    // the API Lambda (`futurator-admin-api-restore`, wildcard on futurator-*).
+    new sst.aws.Cron('ServerDispatchSweeper', {
+      schedule: 'rate(1 minute)',
+      function: {
+        handler: 'functions/cron/server-dispatch-sweeper.handler',
+        runtime: 'nodejs22.x',
+        architecture: 'arm64',
+        memory: '256 MB',
+        timeout: '60 seconds',
+        policies: [apiRestorePolicy.arn],
+        environment: {
+          SERVERS_TABLE: serversTable.name,
+          AGENT_JOBS_TABLE: agentJobsTable.name,
+          AGENT_FLAGS_TABLE: agentFlagsTable.name,
+        },
       },
     });
 

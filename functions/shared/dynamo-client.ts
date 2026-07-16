@@ -94,4 +94,8 @@ export const TABLE_NAMES = {
   // PK requestId; GSI status-createdAt-index (queue-order drain + ops queries);
   // GSI source-createdAt-index (per-app history). 30-day TTL on `expiresAt`.
   queueRequests: process.env.QUEUE_REQUESTS_TABLE || 'futurator-queue-requests',
+  // Servers module — one row per compute server (Hetzner/Oracle/GCP/EC2/local).
+  // PK serverId. The server-aware dispatcher reads the fleet from here; the
+  // per-server daemon polls the agent-jobs `assignedServerId-status-index` GSI.
+  servers: process.env.SERVERS_TABLE || 'futurator-servers',
 } as const;
