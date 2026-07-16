@@ -38,6 +38,12 @@ export const AGENT_FLAG_KEYS = {
   // A small-host RAM guard in the daemon still clamps EC2 to 2 on <3GB hosts.
   maxConcurrentEc2: 'concurrency.maxConcurrent.ec2',
   maxConcurrentLocal: 'concurrency.maxConcurrent.local',
+  // Servers module — server-aware dispatch state (functions/shared/services/dispatch-state.ts).
+  // `dispatchServerAware` gates the whole feature; when unset/false the
+  // dispatcher and daemon behave exactly as before (spec Global Constraints).
+  dispatchServerAware: 'dispatch.serverAware',
+  dispatchPolicy: 'dispatch.policy',
+  dispatchAffinityOwners: 'dispatch.affinityOwners',
 } as const;
 
 /**
