@@ -103,6 +103,9 @@ import {
 // All of it is gated behind the `dispatch.serverAware` agent-flag; with the
 // flag off the daemon behaves byte-for-byte like the legacy global-pool poll.
 import { resolveServerId } from './lib/server-identity.mjs';
+// Servers module (Task 19, spec §6) — Claude OAuth relay for fleet daemons
+// that don't have SSM access. Inert (never called) unless ENROLL_TOKEN is set.
+import { fetchAgentCredentials } from './lib/creds-fetch.mjs';
 import {
   buildJobClaimParams,
   buildJobRenewParams,
@@ -323,6 +326,11 @@ const AUTH_PROBE_INTERVAL_MS = parseInt(
   process.env.AUTH_PROBE_INTERVAL_MS || String(60 * 60 * 1000),
   10,
 );
+// Servers module (Task 19, spec §6) — fleet daemons fetch Claude OAuth creds
+// from the admin API using their enrollment token instead of the legacy SSM
+// pull. ENROLL_TOKEN unset (EC2/local seeded daemons) ⇒ fully inert.
+const ADMIN_API_URL = process.env.ADMIN_API_URL || 'https://hub.futurator.ai';
+const ENROLL_TOKEN = process.env.ENROLL_TOKEN || '';
 const EVENT_LOG_DIR = process.env.FUTURATOR_EVENT_LOG_DIR || '/var/log/futurator/events';
 const FORWARDER_POLL_MS = parseInt(process.env.FORWARDER_POLL_MS || '250', 10);
 const DAEMON_RECEIVER_PORT = parseInt(process.env.FUTURATOR_DAEMON_PORT || '17631', 10);
@@ -589,6 +597,23 @@ function probeAuth() {
       resolve();
     });
   });
+}
+
+// Servers module (Task 19, spec §6) — fleet daemons don't have SSM access,
+// so they pull Claude OAuth credentials from the admin API using their
+// per-server enrollment token. EC2/local seeded daemons have no
+// ENROLL_TOKEN and keep the legacy SSM/Keychain-push path untouched (this
+// is a no-op for them). Never throws — auth loss here must not crash the
+// daemon; probeAuth() on the next cycle reports the real auth state.
+async function maybeFetchAgentCredentials(reason) {
+  if (!ENROLL_TOKEN) return false;
+  const ok = await fetchAgentCredentials({
+    adminApiUrl: ADMIN_API_URL,
+    enrollToken: ENROLL_TOKEN,
+    credsPath: OAUTH_CREDS_PATH,
+    log: (level, msg, ctx) => log(level, `[creds-fetch:${reason}] ${msg}`, ctx),
+  });
+  return ok;
 }
 
 function stripApiKey(env) {
@@ -10080,6 +10105,12 @@ async function poll() {
     log('warn', `  Gate memo:  sweep start failed (non-blocking): ${err.message}`);
   }
 
+  // Servers module (Task 19, spec §6) — fleet daemons pull fresh Claude OAuth
+  // creds from the admin API before their first loadOAuth/probeAuth so a
+  // freshly-provisioned server boots authenticated. No-op when ENROLL_TOKEN
+  // is unset (EC2/local seeded daemons).
+  await maybeFetchAgentCredentials('boot');
+
   loadOAuth('startup');
   await probeAuth();
 
@@ -10128,7 +10159,19 @@ async function poll() {
   // don't need to spin.
   setInterval(() => {
     loadOAuth('interval');
-    probeAuth().catch((e) => log('error', `Auth probe failed: ${e.message}`));
+    probeAuth()
+      .then(() => {
+        // Servers module (Task 19, spec §6) — a failed probe on a fleet
+        // daemon may mean its local creds file is stale relative to the
+        // last Re-auth push; pull the current one from the admin API.
+        // No-op when ENROLL_TOKEN is unset (EC2/local seeded daemons).
+        if (!authState.valid) {
+          maybeFetchAgentCredentials('probe-failure').catch((e) =>
+            log('error', `[creds-fetch:probe-failure] uncaught: ${e.message}`),
+          );
+        }
+      })
+      .catch((e) => log('error', `Auth probe failed: ${e.message}`));
   }, AUTH_PROBE_INTERVAL_MS).unref();
 
   // 2026-05-27 (unification) — one-shot startup migration. Removes the legacy
