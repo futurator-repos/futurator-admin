@@ -1,6 +1,7 @@
 'use client';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { FleetTab } from './fleet-tab';
+import { PolicyTab } from './policy-tab';
 
 export function ServersView() {
   return (
@@ -27,8 +28,7 @@ export function ServersView() {
           <p className="text-sm text-muted-foreground">Add Service wizard — coming soon.</p>
         </TabsContent>
         <TabsContent value="dispatch-policy" className="mt-4">
-          {/* Task 23 — Dispatch Policy tab + assignments feed */}
-          <p className="text-sm text-muted-foreground">Dispatch Policy tab — coming soon.</p>
+          <PolicyTab />
         </TabsContent>
       </Tabs>
     </div>
