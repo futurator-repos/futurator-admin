@@ -11,6 +11,7 @@
 // the async wrappers construct the command + interpret ConditionalCheckFailed
 // as "lost the race", not an error.
 
+import crypto from 'node:crypto';
 import { UpdateCommand as RealUpdateCommand } from '@aws-sdk/lib-dynamodb';
 
 const DEFAULT_LEASE_MS = 15 * 60 * 1000; // 15-min lease; renew well before expiry
@@ -136,6 +137,89 @@ export function buildUnblockParams({ table, storyId, now = Date.now() }) {
       ':blocked': 'blocked',
       ':zero': 0,
       ':now': new Date(now).toISOString(),
+    },
+    ReturnValues: 'ALL_NEW',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Agent-job CAS claim (Servers-module Task 17, development-plan Phase C).
+//
+// Same lease pattern as the story claim above, generalized to
+// `futurator-agent-jobs`: a server-aware daemon polls its own PENDING jobs
+// via `assignedServerId-status-index`, then must win a conditional claim
+// before running one — two daemons racing the same assigned job (a restart
+// re-polling mid-lease, or an operator re-pointing `assignedServerId`)
+// resolve to exactly one winner. Key is `jobId` (not `storyId`), and the
+// claim also pins the row to the caller's `assignedServerId` so a daemon can
+// never claim a job the dispatcher assigned to someone else. PURE builders,
+// unit-tested without the SDK.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the conditional-claim UpdateCommand params for an agent job. Mints a
+ * fresh claimToken (crypto random UUID) and returns it alongside the params
+ * — callers need it to renew/release the lease they just won. PURE.
+ */
+export function buildJobClaimParams({ tableName, jobId, serverId, nowIso, leaseMs = DEFAULT_LEASE_MS }) {
+  const nowMs = new Date(nowIso).getTime();
+  const expiresAt = new Date(nowMs + leaseMs).toISOString();
+  const claimToken = crypto.randomUUID();
+  const params = {
+    TableName: tableName,
+    Key: { jobId },
+    UpdateExpression:
+      'SET #status = :running, claimOwner = :sid, claimToken = :tok, claimExpiresAt = :exp, startedAt = :now',
+    ConditionExpression:
+      '#status = :pending AND assignedServerId = :sid AND (attribute_not_exists(claimExpiresAt) OR claimExpiresAt < :now)',
+    ExpressionAttributeNames: { '#status': 'status' },
+    ExpressionAttributeValues: {
+      ':pending': 'PENDING',
+      ':running': 'RUNNING',
+      ':sid': serverId,
+      ':tok': claimToken,
+      ':exp': expiresAt,
+      ':now': nowIso,
+    },
+    ReturnValues: 'ALL_NEW',
+  };
+  return { params, claimToken };
+}
+
+/** Build the lease-renewal params for an agent job (extend expiry, only while WE hold it). PURE. */
+export function buildJobRenewParams({ tableName, jobId, serverId, claimToken, nowIso, leaseMs = DEFAULT_LEASE_MS }) {
+  const nowMs = new Date(nowIso).getTime();
+  const expiresAt = new Date(nowMs + leaseMs).toISOString();
+  return {
+    TableName: tableName,
+    Key: { jobId },
+    UpdateExpression: 'SET claimExpiresAt = :exp',
+    ConditionExpression: 'claimOwner = :sid AND claimToken = :tok',
+    ExpressionAttributeValues: {
+      ':sid': serverId,
+      ':tok': claimToken,
+      ':exp': expiresAt,
+    },
+    ReturnValues: 'ALL_NEW',
+  };
+}
+
+/**
+ * Build the release params for an agent job: set the final status and clear
+ * the claim fields, but only while we still hold the lease (owner + token
+ * match). PURE.
+ */
+export function buildJobReleaseParams({ tableName, jobId, serverId, claimToken, status }) {
+  return {
+    TableName: tableName,
+    Key: { jobId },
+    UpdateExpression: 'SET #status = :status REMOVE claimOwner, claimToken, claimExpiresAt',
+    ConditionExpression: 'claimOwner = :sid AND claimToken = :tok',
+    ExpressionAttributeNames: { '#status': 'status' },
+    ExpressionAttributeValues: {
+      ':status': status,
+      ':sid': serverId,
+      ':tok': claimToken,
     },
     ReturnValues: 'ALL_NEW',
   };
