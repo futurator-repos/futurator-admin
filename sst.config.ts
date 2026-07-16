@@ -714,6 +714,13 @@ export default $config({
     // its env and calls GetSecretValueCommand directly).
     const brownfieldGithubPat = new sst.Secret('BrownfieldGithubPat');
 
+    // Identity Broker (futurator-core) OAuth client secret for futurator-admin,
+    // re-issued when the broker was migrated to 421515025850/eu-central-1 on
+    // 2026-07-16. NEVER commit the value — set it out-of-band:
+    //   npx sst secret set IdentityBrokerClientSecret <secret> --stage production
+    // Used by POST /api/auth/exchange to authenticate the OAuth code exchange.
+    const identityBrokerClientSecret = new sst.Secret('IdentityBrokerClientSecret');
+
     // ── Pipeline v1 — Epic 3 (Talk-to-agent) tables ──
     const agentSessionsTable = new sst.aws.Dynamo('AgentSessionsTable', {
       fields: {
@@ -1269,8 +1276,12 @@ export default $config({
         BMAD_AGENTS_SOURCE: '/home/ubuntu/bmad-agents-source/bmad/agents',
         IDENTITY_BROKER_URL: 'https://auth.futurator.ai/v1',
         IDENTITY_BROKER_JWKS_URL: 'https://auth.futurator.ai/v1/.well-known/jwks.json',
-        IDENTITY_BROKER_CLIENT_ID: 'app_0ed7f7e62b277aca1c1d16a8ee370384',
-        IDENTITY_BROKER_CLIENT_SECRET: '7_oGr8sFcjcRRcO5Z8W_ZbjAupqfNyoiu0TmvPMRp_Q',
+        // Re-registered against the migrated broker (421515025850/eu-central-1)
+        // on 2026-07-16 — the new account's app registry started empty. See
+        // POST https://auth.futurator.ai/v1/apps/register. Client ID is public;
+        // the secret is a `.value`-baked sst.Secret (set out-of-band, not committed).
+        IDENTITY_BROKER_CLIENT_ID: 'app_093dd63b3682344a24c949005d062fd2',
+        IDENTITY_BROKER_CLIENT_SECRET: identityBrokerClientSecret.value,
         ALLOWED_ORIGIN: process.env.ALLOWED_ORIGIN ?? 'https://hub.futurator.ai',
         // Futurator.ai homepage publish pipeline (Stories 14-1, 14-2)
         FUTURATOR_PUBLIC_BUCKET,
