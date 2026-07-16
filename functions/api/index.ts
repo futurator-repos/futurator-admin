@@ -8,7 +8,26 @@ import { docClient, TABLE_NAMES } from '../shared/dynamo-client';
 // Servers module (Task 7) — server-aware dispatch wiring.
 import { runDispatchSweep } from '../shared/services/server-dispatcher';
 import { getDispatchPolicy, setDispatchPolicy } from '../shared/services/dispatch-state';
-import { dispatchPolicySchema, providerCredentialsSchema } from '../shared/schemas/servers-schema';
+import {
+  createServerSchema,
+  updateServerSchema,
+  dispatchPolicySchema,
+  providerCredentialsSchema,
+} from '../shared/schemas/servers-schema';
+// Servers module (Task 15) — fleet CRUD + provisioning lifecycle.
+import {
+  listServers,
+  getServerById,
+  updateServerFields,
+} from '../shared/repositories/servers-repository';
+import {
+  provisionServer,
+  destroyServer,
+  retryServer,
+  stopServer,
+  startServer,
+} from '../shared/services/server-provisioning';
+import type { ComputeServer } from '../shared/types/compute-server';
 import {
   putProviderCredentials,
   isProviderConfigured,
@@ -6405,6 +6424,92 @@ app.get('/api/servers/agent-credentials', async (c) => {
   if (!token) throw new AuthError('x-server-token header is required');
   const credsJson = await getAgentCredentialsForToken(token);
   return c.body(credsJson, 200, { 'Content-Type': 'application/json' });
+});
+
+// ── Servers module (Task 15) — fleet CRUD + provisioning lifecycle ──────────
+
+// The enrollment-token hash is an auth secret (a daemon presenting the raw
+// token gets Claude OAuth creds) — never let it leave the API.
+const sanitizeServer = (server: ComputeServer): Omit<ComputeServer, 'enrollTokenHash'> => {
+  const sanitized: Partial<ComputeServer> = { ...server };
+  delete sanitized.enrollTokenHash;
+  return sanitized as Omit<ComputeServer, 'enrollTokenHash'>;
+};
+
+// GET /api/servers — the fleet (heartbeat snapshot included, DELETED rows
+// filtered by the repository, token hashes stripped).
+app.get('/api/servers', authMiddleware, async (c) => {
+  const servers = await listServers();
+  return c.json({ servers: servers.map(sanitizeServer) });
+});
+
+// POST /api/servers — create + provision (202: the async flow of spec §4.2
+// continues via the sweeper). Local-machine rows return the copy-paste
+// install command (the only time the raw enrollment token is visible).
+app.post('/api/servers', authMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = createServerSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
+  }
+  const result = await provisionServer(parsed.data);
+  return c.json(
+    {
+      server: sanitizeServer(result.server),
+      ...(result.installCommand ? { installCommand: result.installCommand } : {}),
+    },
+    202,
+  );
+});
+
+// PUT /api/servers/:id — operator-editable fields only (name, enabled,
+// maxConcurrent, costPerHour — enforced by updateServerSchema).
+app.put('/api/servers/:id', authMiddleware, async (c) => {
+  const serverId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = updateServerSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
+  }
+  const existing = await getServerById(serverId);
+  if (!existing || existing.status === 'DELETED') {
+    throw new NotFoundError('Server', serverId);
+  }
+  await updateServerFields(serverId, parsed.data);
+  const updated = await getServerById(serverId);
+  return c.json({ server: sanitizeServer(updated ?? existing) });
+});
+
+// POST /api/servers/:id/destroy — deprovision + full revocation (VM deleted
+// at the provider, IAM user removed, enrollment token invalidated).
+app.post('/api/servers/:id/destroy', authMiddleware, async (c) => {
+  await destroyServer(c.req.param('id'));
+  return c.json({ ok: true });
+});
+
+// POST /api/servers/:id/retry — re-run provisioning for an ERROR row
+// (fresh enrollment token + fresh IAM keys).
+app.post('/api/servers/:id/retry', authMiddleware, async (c) => {
+  const result = await retryServer(c.req.param('id'));
+  return c.json(
+    {
+      server: sanitizeServer(result.server),
+      ...(result.installCommand ? { installCommand: result.installCommand } : {}),
+    },
+    202,
+  );
+});
+
+// POST /api/servers/:id/stop | /start — capability-gated billing pause (GCP
+// only; the service 404s when the provider's adapter lacks the capability).
+app.post('/api/servers/:id/stop', authMiddleware, async (c) => {
+  const server = await stopServer(c.req.param('id'));
+  return c.json({ server: sanitizeServer(server) });
+});
+
+app.post('/api/servers/:id/start', authMiddleware, async (c) => {
+  const server = await startServer(c.req.param('id'));
+  return c.json({ server: sanitizeServer(server) });
 });
 
 // ── Pipeline-dispatch API (external, x-queue-key) ──
