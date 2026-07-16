@@ -9,7 +9,7 @@
 set -euo pipefail
 
 INSTANCE_ID="${FUTURATOR_EC2_INSTANCE_ID:-i-0826d68c316ae97dd}"
-REGION="${AWS_REGION:-us-east-1}"
+REGION="${AWS_REGION:-eu-central-1}"
 KEYCHAIN_ACCOUNT="${KEYCHAIN_ACCOUNT:-$(whoami)}"
 KEYCHAIN_SERVICE="${KEYCHAIN_SERVICE:-Claude Code-credentials}"
 
@@ -60,19 +60,19 @@ cat > "$PARAMS_FILE" <<EOF
 {"commands": ["${WRITE_CMD}"]}
 EOF
 
-CID=$(aws ssm send-command \
+# Non-fatal: the EC2 box is optional post-migration (fleet servers get creds
+# via the Secrets Manager mirror below + the admin API relay instead).
+if CID=$(aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --region "$REGION" \
   --document-name AWS-RunShellScript \
   --parameters "file://$PARAMS_FILE" \
-  --query 'Command.CommandId' --output text 2>&1) || {
-  log "ERROR: SSM send-command failed: $CID"
-  rm -f "$PARAMS_FILE"
-  exit 5
-}
+  --query 'Command.CommandId' --output text 2>&1); then
+  log "Pushed OAuth to EC2 (SSM CommandId=$CID). Daemon signalled via SIGUSR1 — will re-probe in seconds."
+else
+  log "WARN: SSM push to EC2 ($INSTANCE_ID) failed — skipping (fleet uses the Secrets Manager mirror): $CID"
+fi
 rm -f "$PARAMS_FILE"
-
-log "Pushed OAuth to EC2 (SSM CommandId=$CID). Daemon signalled via SIGUSR1 — will re-probe in seconds."
 
 # 5. Mirror to Secrets Manager so fleet servers (non-AWS: Hetzner/Oracle/GCP)
 #    can fetch the same creds via the admin API relay (GET /api/servers/
