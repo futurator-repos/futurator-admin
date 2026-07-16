@@ -1271,7 +1271,7 @@ export default $config({
         IDENTITY_BROKER_JWKS_URL: 'https://auth.futurator.ai/v1/.well-known/jwks.json',
         IDENTITY_BROKER_CLIENT_ID: 'app_0ed7f7e62b277aca1c1d16a8ee370384',
         IDENTITY_BROKER_CLIENT_SECRET: '7_oGr8sFcjcRRcO5Z8W_ZbjAupqfNyoiu0TmvPMRp_Q',
-        ALLOWED_ORIGIN: process.env.ALLOWED_ORIGIN ?? 'https://admin.futurator.ai',
+        ALLOWED_ORIGIN: process.env.ALLOWED_ORIGIN ?? 'https://hub.futurator.ai',
         // Futurator.ai homepage publish pipeline (Stories 14-1, 14-2)
         FUTURATOR_PUBLIC_BUCKET,
         FUTURATOR_CF_DISTRIBUTION_ID,
@@ -1449,6 +1449,7 @@ export default $config({
       url: {
         cors: {
           allowOrigins: [
+            'https://hub.futurator.ai',
             'https://admin.futurator.ai',
             'https://futurator.ai',
             'http://localhost:3000',
@@ -1470,7 +1471,7 @@ export default $config({
       timeout: '10 seconds',
       environment: {
         SSM_PREFIX: '/futurator-admin/prod',
-        REDIRECT_BASE_URL: process.env.REDIRECT_BASE_URL ?? 'https://admin.futurator.ai',
+        REDIRECT_BASE_URL: process.env.REDIRECT_BASE_URL ?? 'https://hub.futurator.ai',
       },
       permissions: [
         {
@@ -1810,8 +1811,25 @@ export default $config({
     }
 
     // ── Static Site ──
+    // Custom domain post-migration: Namecheap delegates futurator.ai to THIS
+    // account's Route53 zone (Z01735423VQ2HJJ4D01UJ), so SST auto-discovers the
+    // zone, provisions the us-east-1 ACM cert (DNS-validated), attaches the
+    // CloudFront alias, and writes the A/AAAA record (Mycelium's pattern for
+    // my-celium.futurator.ai).
+    //
+    // We ship on hub.futurator.ai, NOT admin.futurator.ai: the latter's CNAME is
+    // still globally reserved by the DEAD old account's CloudFront distribution
+    // (CNAMEAlreadyExists on attach), and the cross-account reclaim requires
+    // disabling that source dist — impossible without old-account creds. The
+    // admin.futurator.ai ACM cert stays ISSUED and ready; cut over via
+    // ADMIN_SITE_DOMAIN=admin.futurator.ai once the dead account is deleted and
+    // the name frees. ADMIN_SITE_DOMAIN='' falls back to the bare cloudfront URL.
     const site = new sst.aws.StaticSite('AdminSite', {
       path: '.',
+      domain:
+        process.env.ADMIN_SITE_DOMAIN === ''
+          ? undefined
+          : (process.env.ADMIN_SITE_DOMAIN ?? 'hub.futurator.ai'),
       build: {
         command: 'npm run build',
         output: 'out',
