@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-16T01:28:56.748Z",
+  "generatedAt": "2026-07-16T09:46:23.952Z",
   "account": "421515025850",
   "region": "eu-central-1",
   "resources": [
@@ -763,6 +763,24 @@
       "type": "lambda-function",
       "name": "futurator-admin-production-TagAuditorHandlerFunction-trtzverd",
       "arn": "arn:aws:lambda:eu-central-1:421515025850:function:futurator-admin-production-TagAuditorHandlerFunction-trtzverd",
+      "tags": {
+        "App": "futurator-admin",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "ManagedBy": "sst",
+        "Owner": "ricardo",
+        "Service": "admin-hub",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "lambda-function",
+      "name": "futurator-admin-production-ApiFunction-dnokodhz",
+      "arn": "arn:aws:lambda:eu-central-1:421515025850:function:futurator-admin-production-ApiFunction-dnokodhz",
       "tags": {
         "App": "futurator-admin",
         "Capability": "admin-hub",

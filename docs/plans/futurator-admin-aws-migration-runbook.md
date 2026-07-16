@@ -1,6 +1,6 @@
 # Futurator-Admin → New AWS Account: Migration Plan, Runbook & Log
 
-**Owner:** Ricardo · **Date:** 2026-07-15 · **Status:** IN PROGRESS
+**Owner:** Ricardo · **Date:** 2026-07-15 · **Status:** ✅ COMPLETE (infra live; login/EC2/domain deferred by design)
 
 A retarget of Futurator-Admin's existing SST infrastructure into the shared Futurator org AWS
 account, region-aligned with Mycelium, with FinOps born-tagging from day one. This document is
@@ -105,25 +105,19 @@ budget is now IaC.
 | 5   | Deploy            | `sst deploy --stage production` (eu-central-1, `AWS_EC2_METADATA_DISABLED=true`)                                         | **~95% created, then Failed on 4 `SecretMissingError`.** Created: 36 DynamoDB tables (born-tagged), 6 active crons, AuthCallback + URL, `ApiDynamoRestorePolicy`, `FreeAgentSessionRole`, AdminSite CloudFront (`d2vz2g0aamesc6.cloudfront.net`), dev/staging buckets+routers, SNS. Gated resources correctly ABSENT (WaveCompletionCheck/DeployerLambda/ScheduleExecutor/UserSync). **Only the API Lambda is missing** — it references all 4 unset secrets. | SST fails the whole deploy if any referenced `sst.Secret` is unset; everything else still provisioned. Re-run after secrets are set will reconcile the missing API (no state corruption — clean fail at secret resolution).                    |
 | 6   | FinOps            | `generate-manifest.mjs` + `create-budgets.mjs`                                                                           | `manifest/infra.json` = 42 resources (36 tables + 3 lambda + 3 bucket), all `verification_status: verified`; budget **`futurator-admin-monthly`** ($50/mo, tag `App=futurator-admin`, 80% email alert) created                                                                                                                                                                                                                                               | FinOps foundation live: born-tags + budget + manifest. Verified tags on `futurator-plans`: App/CostCenter/Capability/Service/DataClassification all present.                                                                                   |
 
-### ⛔ Single remaining blocker → finish line (operator, ~1 min)
+| 7 | FinOps (IaC) | Promoted the budget to a Pulumi `aws.budgets.Budget` resource; deleted the interim script-budget + `create-budgets.mjs` | Budget now born-in-IaC (state-managed); typecheck green | Only non-IaC FinOps step left = cost-allocation tag activation (billing console). |
+| 8 | Deploy (finish) | Operator set the 4 secrets (dummy); `sst deploy` ×2 (2nd with `EXTRA_ALLOWED_ORIGIN`) | ✅ **COMPLETE.** 1st deploy created the API Lambda + `MonthlyCostBudget`; hit a transient `ApiUrl` 409 (concurrent-update race). 2nd deploy reconciled it + applied CORS origin + rebuilt the UI. **`/api/health` → 200**, **UI → 200**, **CORS preflight → 200** with `Allow-Origin` = the UI CloudFront URL. | The `ApiUrl` 409 is a known flaky Lambda-FunctionUrl/AddPermission race — a plain re-deploy fixes it. Live URLs: API `3hc6clgy32vtbd5xtmbpfjzase0ajqqq.lambda-url.eu-central-1.on.aws`, UI `d2vz2g0aamesc6.cloudfront.net`. |
 
-The deploy is complete except the API Lambda, blocked ONLY on the 4 secrets. Set them (any value unblocks
-the deploy; real values only matter for the specific deferred features), then one redeploy finishes it:
+### ✅ Migration COMPLETE (infra)
 
-```bash
-export AWS_PROFILE=FuturatorClaude AWS_EC2_METADATA_DISABLED=true
-npx sst secret set AnthropicApiKey  <sk-ant-…>   --stage production   # party inline Q&A (deferred) — dummy OK for now
-npx sst secret set GithubPat         <ghp_…>      --stage production   # daemon/GitHub (deferred) — dummy OK for now
-npx sst secret set BrownfieldGithubPat <github_pat_…> --stage production # brownfield party (deferred) — dummy OK
-npx sst secret set QueueIngestSecret <random-strong-value> --stage production # queue ingest (deferred)
-npx sst deploy --stage production    # creates the API Lambda; prints apiUrl + siteUrl
+The full stack is live in **421515025850 / eu-central-1**:
 
-# Then the two-pass CORS (UI has no custom domain; its CloudFront origin is known only post-deploy):
-EXTRA_ALLOWED_ORIGIN=https://d2vz2g0aamesc6.cloudfront.net npx sst deploy --stage production
-# verify:
-curl -s https://<apiUrl>/api/health   # expect 200
-```
+- **UI:** https://d2vz2g0aamesc6.cloudfront.net (200)
+- **API:** https://3hc6clgy32vtbd5xtmbpfjzase0ajqqq.lambda-url.eu-central-1.on.aws (`/api/health` → 200)
+- **AuthCallback:** https://deakzavwonbjdcsekcqgt7wuvu0acrlu.lambda-url.eu-central-1.on.aws
+- 36 born-tagged DynamoDB tables · 4 Lambdas · 6 crons · budget (IaC) · manifest (43 resources).
 
-Do NOT run `sst secret list` (it prints values). UI shell is already reachable at
-`https://d2vz2g0aamesc6.cloudfront.net`; it becomes API-backed after the redeploy above. Login stays
-deferred until the Identity Broker (`futurator-core`) is retargeted.
+**Still deferred (by design):** login (Identity Broker `futurator-core` not yet migrated), EC2/daemon
+(agent-job execution), custom domain/DNS, design-system refactor. **Secrets are dummy** — swap in real
+values when you want Anthropic Q&A / GitHub / queue features. **Cost-allocation tag activation** (Billing
+console) is the one manual FinOps step remaining. Do NOT run `sst secret list` (prints values).
