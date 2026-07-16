@@ -63,13 +63,13 @@ format for consistency across projects.
 
 ## 3. FinOps deliverables (this pass)
 
-| File                                   | Purpose                                                                                                                                                                                                                                                                                                                                               |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `scripts/finops/generate-manifest.mjs` | Enumerates live `futurator-*` DynamoDB tables, `futurator-admin-*` Lambda functions, and `futurator-admin-*` S3 buckets in account 421515025850/eu-central-1, reads tags, writes `manifest/infra.json` (generated, `verification_status: verified` per resource). Idempotent, dependency-free (AWS CLI via `execSync` only).                          |
-| `scripts/finops/create-budgets.mjs`    | Creates (or updates, idempotently) an AWS Budgets monthly COST budget `futurator-admin-monthly`, scoped to tag `App=futurator-admin`, $50 limit, 80%-ACTUAL email alert to `rica.araya.f@gmail.com`. Calls the Budgets API pinned to `--region us-east-1` per the gotcha above; resolves the account id at runtime via `aws sts get-caller-identity`. |
+| File                                                            | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scripts/finops/generate-manifest.mjs`                          | Enumerates live `futurator-*` DynamoDB tables, `futurator-admin-*` Lambda functions, and `futurator-admin-*` S3 buckets in account 421515025850/eu-central-1, reads tags, writes `manifest/infra.json` (generated, `verification_status: verified` per resource). Idempotent, dependency-free (AWS CLI via `execSync` only).                                                                                                                               |
+| **`sst.config.ts` → `aws.budgets.Budget('MonthlyCostBudget')`** | The monthly COST budget (`futurator-admin-monthly`, $50, tag `App=futurator-admin`, 80%-ACTUAL email alert to `rica.araya.f@gmail.com`) is **declared in IaC** — a first-class Pulumi resource, state-managed and torn down with the stack, not an out-of-band script. It provisions with `sst deploy` alongside the rest of the stack. _(The earlier `scripts/finops/create-budgets.mjs` imperative script was removed once this was promoted into IaC.)_ |
 
-Both scripts are additive/read-mostly against the live account (the manifest script is read-only;
-the budgets script's only mutation is the budget object itself) and safe to re-run.
+`generate-manifest.mjs` stays a script (it is a read-only reporting artifact, not infra to declare). The
+budget is now IaC.
 
 ---
 
@@ -77,10 +77,12 @@ the budgets script's only mutation is the budget object itself) and safe to re-r
 
 - [ ] Run `node scripts/finops/generate-manifest.mjs` after the SST retarget deploys, to produce the
       first verified `manifest/infra.json` snapshot.
-- [ ] Run `node scripts/finops/create-budgets.mjs` once billing/cost-allocation tags are active on
-      the account, to stand up the `futurator-admin-monthly` budget + alert.
+- [x] Budget promoted to IaC (`aws.budgets.Budget` in `sst.config.ts`) — provisions with `sst deploy`.
+      The interim script-created budget was deleted so the IaC resource creates cleanly; it re-lands on
+      the finish-line deploy.
 - [ ] Confirm cost-allocation tag activation (`App` key) in Billing → Cost Allocation Tags for the
-      account — Budgets `CostFilters` on an unactivated tag silently under-counts.
+      account — Budgets `CostFilters` on an unactivated tag silently under-counts. **This is the only
+      remaining non-IaC FinOps step** (tag activation is a billing-console/root action with no API/IaC path).
 - [ ] Decide on EC2/daemon stand-up timing (deferred to "next day" per §0) and re-open this runbook's
       §9 log to record it.
 - [ ] Decide on `admin.futurator.ai` custom-domain cutover timing; when ready, budget time for the

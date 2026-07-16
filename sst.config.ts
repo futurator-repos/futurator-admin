@@ -72,6 +72,39 @@ export default $config({
     const ENABLE_COGNITO_SYNC = false;
 
     // ──────────────────────────────────────────────────────────────
+    // FinOps — monthly cost budget, BORN IN IaC (2026-07-16).
+    //
+    // Declared as a first-class Pulumi resource (state-managed, drift-detected,
+    // torn down with the stack) rather than an out-of-band CLI script. Scoped to
+    // the cost-allocation tag App=futurator-admin (applied to every resource via
+    // providers.aws.defaultTags), $50/mo, 80%-ACTUAL email alert.
+    //
+    // AWS Budgets is a global service (single us-east-1 endpoint) but the
+    // resource is account-scoped, so it provisions fine under the eu-central-1
+    // provider. Tag-filter format `user:<Key>$<Value>` is AWS's user-defined
+    // cost-allocation tag syntax. NOTE: the tag must be ACTIVATED in Billing →
+    // Cost Allocation Tags (a one-time console/root action) before it becomes a
+    // billable dimension the budget can group on — see the runbook operator to-dos.
+    // ──────────────────────────────────────────────────────────────
+    new aws.budgets.Budget('MonthlyCostBudget', {
+      name: 'futurator-admin-monthly',
+      budgetType: 'COST',
+      limitAmount: '50',
+      limitUnit: 'USD',
+      timeUnit: 'MONTHLY',
+      costFilters: [{ name: 'TagKeyValue', values: ['user:App$futurator-admin'] }],
+      notifications: [
+        {
+          comparisonOperator: 'GREATER_THAN',
+          threshold: 80,
+          thresholdType: 'PERCENTAGE',
+          notificationType: 'ACTUAL',
+          subscriberEmailAddresses: ['rica.araya.f@gmail.com'],
+        },
+      ],
+    });
+
+    // ──────────────────────────────────────────────────────────────
     // PR-61 (2026-05-13) — build version stamp.
     //
     // Compute the git short hash + ISO timestamp at deploy time and pipe
