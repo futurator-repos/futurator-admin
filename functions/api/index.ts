@@ -3,6 +3,12 @@ import type { Context } from 'hono';
 import { handle } from 'hono/aws-lambda';
 import { authMiddleware } from '../shared/auth-middleware';
 import { AppError, NotFoundError, ValidationError } from '../shared/errors';
+import { QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { docClient, TABLE_NAMES } from '../shared/dynamo-client';
+// Servers module (Task 7) — server-aware dispatch wiring.
+import { runDispatchSweep } from '../shared/services/server-dispatcher';
+import { getDispatchPolicy, setDispatchPolicy } from '../shared/services/dispatch-state';
+import { dispatchPolicySchema } from '../shared/schemas/servers-schema';
 import {
   fetchSkillCatalog,
   diffSkillReconciliation,
@@ -6081,7 +6087,9 @@ async function enqueueQueueRequest(opts: {
   };
   await queueRequestsRepo.createRequest(row);
 
-  await agentJobsRepo.createJob({
+  const jobRow: import('../shared/types/agent-orchestrator').AgentJob & {
+    pinnedServerId?: string;
+  } = {
     jobId,
     status: 'PENDING',
     createdAt: now,
@@ -6102,7 +6110,22 @@ async function enqueueQueueRequest(opts: {
       autoRespond: opts.autoRespond,
       callbackUrl: opts.callbackUrl,
     },
-  });
+  };
+  // Servers module — map the legacy `target` to a dispatch pin so a local-only
+  // call still lands on the Mac daemon under server-aware dispatch; 'ec2' stays
+  // unpinned so policy decides. Inert when `dispatch.serverAware` is off: the
+  // daemon ignores `pinnedServerId` and the sweep below no-ops.
+  if (opts.target === 'local') jobRow.pinnedServerId = 'srv_local_mac';
+  await agentJobsRepo.createJob(jobRow);
+
+  // Servers module — fire-and-forget inline assignment; the 1-min sweeper cron
+  // covers any failure. Gated internally by `dispatch.serverAware` (returns
+  // `{ skipped: true }` without touching DynamoDB when the flag is off).
+  try {
+    await runDispatchSweep();
+  } catch (err) {
+    console.warn('[dispatch] inline sweep failed (sweeper will retry)', err);
+  }
 
   return { requestId, jobId };
 }
@@ -6255,6 +6278,80 @@ app.post('/api/queue/requests/:id/respond', authMiddleware, async (c) => {
     throw new AppError('DELIVERY_FAILED', deliverError || 'Failed to deliver response', 502);
   }
   return c.json({ ok: true, respondedTo: target });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Servers module — operator dispatch policy + the live assignments feed. The
+// per-server fleet CRUD lives in later tasks; these three routes wire the
+// dispatch core (policy engine + sweeper) to the UI. All operator-JWT.
+// ──────────────────────────────────────────────────────────────────────────
+
+// GET /api/servers/policy — the current dispatch policy (falls back to the
+// DEFAULT_DISPATCH_POLICY when unset). Read-only.
+app.get('/api/servers/policy', authMiddleware, async (c) => {
+  const policy = await getDispatchPolicy();
+  return c.json({ policy });
+});
+
+// PUT /api/servers/policy — validate + persist the operator's dispatch policy,
+// then immediately run a sweep so the change takes effect without waiting for
+// the 1-minute cron. Returns the stored policy plus the sweep summary.
+app.put('/api/servers/policy', authMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = dispatchPolicySchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
+  }
+  const user = c.get('user');
+  const policy = await setDispatchPolicy(parsed.data, user?.userId || 'operator');
+  const sweep = await runDispatchSweep();
+  return c.json({ policy, sweep });
+});
+
+// GET /api/servers/assignments — the most recent agent-jobs that carry an
+// `assignedServerId` (PENDING queued + RUNNING claimed), newest-first. Reads
+// the `status-createdAt-index` GSI once per live status and filters to assigned
+// rows; the fleet is small so a bounded per-status scan is cheap.
+app.get('/api/servers/assignments', authMiddleware, async (c) => {
+  const limit = Number(c.req.query('limit')) || 50;
+  interface AssignedJobRow {
+    jobId: string;
+    jobType?: string;
+    status: string;
+    assignedServerId?: string;
+    assignReason?: string;
+    assignedAt?: string;
+    createdAt: string;
+  }
+  const queryAssigned = async (status: 'PENDING' | 'RUNNING'): Promise<AssignedJobRow[]> => {
+    const res = await docClient.send(
+      new QueryCommand({
+        TableName: TABLE_NAMES.agentJobs,
+        IndexName: 'status-createdAt-index',
+        KeyConditionExpression: '#status = :status',
+        FilterExpression: 'attribute_exists(assignedServerId)',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':status': status },
+        ScanIndexForward: false,
+        Limit: 100,
+      }),
+    );
+    return (res.Items as AssignedJobRow[] | undefined) ?? [];
+  };
+  const rows = [...(await queryAssigned('PENDING')), ...(await queryAssigned('RUNNING'))];
+  const assignments = rows
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
+    .slice(0, limit)
+    .map((r) => ({
+      jobId: r.jobId,
+      jobType: r.jobType,
+      status: r.status,
+      assignedServerId: r.assignedServerId,
+      assignReason: r.assignReason,
+      assignedAt: r.assignedAt,
+      createdAt: r.createdAt,
+    }));
+  return c.json(assignments);
 });
 
 // ── Pipeline-dispatch API (external, x-queue-key) ──
