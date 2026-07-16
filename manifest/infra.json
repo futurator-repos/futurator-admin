@@ -1,0 +1,835 @@
+{
+  "generatedAt": "2026-07-16T01:28:56.748Z",
+  "account": "421515025850",
+  "region": "eu-central-1",
+  "resources": [
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-admin-production-AlertsTableTable-bdmafbue",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-admin-production-AlertsTableTable-bdmafbue",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "sst:stage": "production",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Service": "admin-hub",
+        "Environment": "production",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-admin-production-AuditsTableTable-rwsxfosc",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-admin-production-AuditsTableTable-rwsxfosc",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-admin-production-CostsTableTable-hsuzmdfs",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-admin-production-CostsTableTable-hsuzmdfs",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-admin-production-ProjectsTableTable-dtknzfvo",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-admin-production-ProjectsTableTable-dtknzfvo",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-admin-production-ResourcesTableTable-bcoxsbex",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-admin-production-ResourcesTableTable-bcoxsbex",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "sst:stage": "production",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-admin-production-SchedulesTableTable-mvccoceb",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-admin-production-SchedulesTableTable-mvccoceb",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-admin-production-UsersTableTable-rdowssck",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-admin-production-UsersTableTable-rdowssck",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-agent-conversations",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-agent-conversations",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "sst:stage": "production",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "Environment": "production",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-agent-events",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-agent-events",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-agent-flags",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-agent-flags",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "Environment": "production",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-agent-jobs",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-agent-jobs",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Service": "admin-hub",
+        "Environment": "production",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-agent-sessions",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-agent-sessions",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Service": "admin-hub",
+        "Environment": "production",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-agent-spend-log",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-agent-spend-log",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "sst:stage": "production",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-apps",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-apps",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-attention-items",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-attention-items",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-epic-workflows",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-epic-workflows",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-fix-cycles",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-fix-cycles",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "Environment": "production",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-free-agent-conversations",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-free-agent-conversations",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "sst:stage": "production",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-free-agent-sessions",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-free-agent-sessions",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-party-inline-questions",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-party-inline-questions",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Service": "admin-hub",
+        "Environment": "production",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-party-projects",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-party-projects",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-party-sessions",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-party-sessions",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "sst:stage": "production",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-plan-spec-graph",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-plan-spec-graph",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-plans",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-plans",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "Environment": "production",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-project-registry",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-project-registry",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-propagator-proposals",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-propagator-proposals",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-push-subscriptions",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-push-subscriptions",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-queue-requests",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-queue-requests",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-refactor-audits",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-refactor-audits",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-reflections",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-reflections",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "Environment": "production",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-remediation-policies",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-remediation-policies",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-scorecards",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-scorecards",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-skill-proposals",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-skill-proposals",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-timing-summary",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-timing-summary",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-ultracode-runs",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-ultracode-runs",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "futurator:project": "admin-hub",
+        "DataClassification": "internal",
+        "Service": "admin-hub",
+        "Environment": "production",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "dynamodb-table",
+      "name": "futurator-wave-conflicts",
+      "arn": "arn:aws:dynamodb:eu-central-1:421515025850:table/futurator-wave-conflicts",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "sst:stage": "production",
+        "sst:app": "futurator-admin",
+        "ManagedBy": "sst",
+        "CostCenter": "futurator-admin",
+        "Capability": "admin-hub",
+        "futurator:project": "admin-hub",
+        "Environment": "production",
+        "Service": "admin-hub",
+        "DataClassification": "internal",
+        "futurator:managed-by": "sst"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "lambda-function",
+      "name": "futurator-admin-production-PatAgeCheckHandlerFunction-weznsdde",
+      "arn": "arn:aws:lambda:eu-central-1:421515025850:function:futurator-admin-production-PatAgeCheckHandlerFunction-weznsdde",
+      "tags": {
+        "App": "futurator-admin",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "ManagedBy": "sst",
+        "Owner": "ricardo",
+        "Service": "admin-hub",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "lambda-function",
+      "name": "futurator-admin-production-AuthCallbackFunction-bcadsdfa",
+      "arn": "arn:aws:lambda:eu-central-1:421515025850:function:futurator-admin-production-AuthCallbackFunction-bcadsdfa",
+      "tags": {
+        "App": "futurator-admin",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "ManagedBy": "sst",
+        "Owner": "ricardo",
+        "Service": "admin-hub",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "lambda-function",
+      "name": "futurator-admin-production-TagAuditorHandlerFunction-trtzverd",
+      "arn": "arn:aws:lambda:eu-central-1:421515025850:function:futurator-admin-production-TagAuditorHandlerFunction-trtzverd",
+      "tags": {
+        "App": "futurator-admin",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "ManagedBy": "sst",
+        "Owner": "ricardo",
+        "Service": "admin-hub",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "s3-bucket",
+      "name": "futurator-admin-production-adminsiteassetsbucket-bcsesuts",
+      "arn": "arn:aws:s3:::futurator-admin-production-adminsiteassetsbucket-bcsesuts",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "Service": "admin-hub"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "s3-bucket",
+      "name": "futurator-admin-production-devenvbucketbucket-bbufuavr",
+      "arn": "arn:aws:s3:::futurator-admin-production-devenvbucketbucket-bbufuavr",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "Service": "admin-hub"
+      },
+      "verification_status": "verified"
+    },
+    {
+      "type": "s3-bucket",
+      "name": "futurator-admin-production-stagingenvbucketbucket-fousxfta",
+      "arn": "arn:aws:s3:::futurator-admin-production-stagingenvbucketbucket-fousxfta",
+      "tags": {
+        "App": "futurator-admin",
+        "Owner": "ricardo",
+        "ManagedBy": "sst",
+        "sst:app": "futurator-admin",
+        "sst:stage": "production",
+        "Capability": "admin-hub",
+        "CostCenter": "futurator-admin",
+        "DataClassification": "internal",
+        "Environment": "production",
+        "Service": "admin-hub"
+      },
+      "verification_status": "verified"
+    }
+  ]
+}
