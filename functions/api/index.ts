@@ -350,9 +350,9 @@ import { buildCohortKey } from '../shared/timer/cohort';
 import { THRESHOLDS } from '../shared/timer/pipeline-timer-thresholds';
 
 const EC2_INSTANCE_ID = process.env.EC2_INSTANCE_ID || 'i-0826d68c316ae97dd';
-const ec2Client = new EC2Client({ region: 'us-east-1' });
-const ssmClient = new SSMClient({ region: 'us-east-1' });
-const cwClient = new CloudWatchClient({ region: 'us-east-1' });
+const ec2Client = new EC2Client({ region: process.env.AWS_REGION || 'eu-central-1' });
+const ssmClient = new SSMClient({ region: process.env.AWS_REGION || 'eu-central-1' });
+const cwClient = new CloudWatchClient({ region: process.env.AWS_REGION || 'eu-central-1' });
 
 type Env = {
   Variables: {
@@ -5378,7 +5378,7 @@ app.delete('/api/epic-workflows/:id', async (c) => {
   // 3. Delete S3 deployed artifacts
   if (appName && epic.deployUrl) {
     try {
-      const s3 = new S3Client({ region: 'us-east-1' });
+      const s3 = new S3Client({ region: process.env.AWS_REGION || 'eu-central-1' });
       const prefix = `apps/${appName}/`;
       const list = await s3.send(
         new ListObjectsV2Command({ Bucket: 'futurator-ai-website', Prefix: prefix }),
@@ -6613,7 +6613,7 @@ app.delete('/api/ec2/files', async (c) => {
 
   // 3. Delete S3 deployed artifacts at apps/<name>/ (best-effort).
   try {
-    const s3 = new S3Client({ region: 'us-east-1' });
+    const s3 = new S3Client({ region: process.env.AWS_REGION || 'eu-central-1' });
     const prefix = `apps/${name}/`;
     const list = await s3.send(
       new ListObjectsV2Command({ Bucket: 'futurator-ai-website', Prefix: prefix }),
@@ -8441,7 +8441,7 @@ app.delete('/api/refactor-audits/:auditId', async (c) => {
 // ──────────────────────────────────────────────────────────────────────
 
 const secretsManagerClient = new SecretsManagerClient({
-  region: process.env.AWS_REGION || 'us-east-1',
+  region: process.env.AWS_REGION || 'eu-central-1',
 });
 
 /**
@@ -13946,7 +13946,7 @@ app.get('/api/plans/:planId/timing/forensic', async (c) => {
       const plan = await planRepo.getPlanById(planId);
       if (plan && isPlanTerminalForForensic(plan)) {
         try {
-          const s3 = new S3Client({ region: 'us-east-1' });
+          const s3 = new S3Client({ region: process.env.AWS_REGION || 'eu-central-1' });
           const obj = await s3.send(
             new GetObjectCommand({ Bucket: FORENSIC_S3_BUCKET, Key: s3Key }),
           );
@@ -14018,7 +14018,7 @@ app.get('/api/plans/:planId/timing/forensic', async (c) => {
   // need to recompute. Fire-and-forget (don't block the response).
   if (isPlanTerminalForForensic(payload.plan)) {
     const cacheable = JSON.stringify(payload, null, 2);
-    const s3 = new S3Client({ region: 'us-east-1' });
+    const s3 = new S3Client({ region: process.env.AWS_REGION || 'eu-central-1' });
     s3.send(
       new PutObjectCommand({
         Bucket: FORENSIC_S3_BUCKET,
@@ -14083,7 +14083,7 @@ function isRetrospectStage(s: string): s is StageId {
 async function fetchPlanGraphReports(plan: { appId?: string }): Promise<GraphReports | undefined> {
   const appId = plan.appId;
   if (!appId) return undefined;
-  const s3 = new S3Client({ region: 'us-east-1' });
+  const s3 = new S3Client({ region: process.env.AWS_REGION || 'eu-central-1' });
   const read = async (file: string): Promise<unknown> => {
     try {
       const res = await s3.send(
@@ -14552,7 +14552,7 @@ app.get('/api/github/repos/:owner/:name/git-graph', authMiddleware, async (c) =>
  * Returns the parsed GitGraphResponse, or null if absent/unreadable.
  */
 async function readBareRepoGitGraph(appId: string): Promise<unknown | null> {
-  const s3 = new S3Client({ region: 'us-east-1' });
+  const s3 = new S3Client({ region: process.env.AWS_REGION || 'eu-central-1' });
   try {
     const res = await s3.send(
       new GetObjectCommand({

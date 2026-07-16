@@ -422,8 +422,10 @@ export async function cleanupAppArtifacts(
 ): Promise<CleanupStep[]> {
   assertSafeFolderName(appId);
 
-  const s3 = deps.s3Client ?? new S3Client({ region: 'us-east-1' });
-  const secrets = deps.secretsClient ?? new SecretsManagerClient({ region: 'us-east-1' });
+  const s3 = deps.s3Client ?? new S3Client({ region: process.env.AWS_REGION || 'eu-central-1' });
+  const secrets =
+    deps.secretsClient ??
+    new SecretsManagerClient({ region: process.env.AWS_REGION || 'eu-central-1' });
 
   // Sequential — these are independent enough to be parallel, but the
   // sequential trace is easier to read in the response body, and a folder

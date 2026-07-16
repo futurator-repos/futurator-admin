@@ -12,7 +12,7 @@ const MANDATORY_TAGS = [
   'futurator:service-role',
   'futurator:managed-by',
 ];
-const REGIONS = ['us-east-1'];
+const REGIONS = ['eu-central-1'];
 
 function inferServiceType(arn: string): string {
   if (arn.includes(':dynamodb:')) return 'dynamodb';

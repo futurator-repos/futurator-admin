@@ -7,6 +7,7 @@ import { format, subDays } from 'date-fns';
 import { putCostRecord } from '../shared/repositories/cost-repository';
 import { log } from '../shared/logger';
 
+// global service — us-east-1 endpoint only
 const ce = new CostExplorerClient({ region: 'us-east-1' });
 
 export const handler = async () => {

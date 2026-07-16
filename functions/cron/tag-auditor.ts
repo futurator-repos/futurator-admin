@@ -18,7 +18,9 @@ export const handler = async () => {
   const auditDate = format(new Date(), 'yyyy-MM-dd');
 
   try {
-    const client = new ResourceGroupsTaggingAPIClient({ region: 'us-east-1' });
+    const client = new ResourceGroupsTaggingAPIClient({
+      region: process.env.AWS_REGION || 'eu-central-1',
+    });
     const projectStats = new Map<
       string,
       {

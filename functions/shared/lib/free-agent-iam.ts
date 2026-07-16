@@ -23,7 +23,7 @@
 
 import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 
-const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+const AWS_REGION = process.env.AWS_REGION || 'eu-central-1';
 
 const DURATION_SECONDS = 3600; // 1h — STS max for tagged sessions without explicit configuration
 

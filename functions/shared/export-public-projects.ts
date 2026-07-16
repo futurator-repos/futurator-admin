@@ -2,7 +2,8 @@ import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { CloudFrontClient, CreateInvalidationCommand } from '@aws-sdk/client-cloudfront';
 import { getAllProjects } from './repositories/project-repository';
 
-const s3 = new S3Client({ region: 'us-east-1' });
+const s3 = new S3Client({ region: process.env.AWS_REGION || 'eu-central-1' });
+// global service — us-east-1 endpoint only
 const cloudfront = new CloudFrontClient({ region: 'us-east-1' });
 const BUCKET = process.env.FUTURATOR_PUBLIC_BUCKET || '';
 const DISTRIBUTION_ID = process.env.FUTURATOR_CF_DISTRIBUTION_ID || '';

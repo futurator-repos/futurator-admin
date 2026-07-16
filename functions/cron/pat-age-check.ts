@@ -39,7 +39,7 @@ const WARN_DAYS = 80;
 const ESCALATE_DAYS = 100;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-const ssmClient = new SSMClient({ region: 'us-east-1' });
+const ssmClient = new SSMClient({ region: process.env.AWS_REGION || 'eu-central-1' });
 
 /** Returns the age in days between an ISO timestamp and now. */
 function ageInDays(isoString: string): number {

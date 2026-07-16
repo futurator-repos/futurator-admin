@@ -9,7 +9,19 @@ export default $config({
       home: 'aws',
       providers: {
         aws: {
-          region: 'us-east-1',
+          region: 'eu-central-1',
+          defaultTags: {
+            tags: {
+              App: 'futurator-admin',
+              Environment: input?.stage ?? 'production',
+              Owner: 'ricardo',
+              ManagedBy: 'sst',
+              CostCenter: 'futurator-admin',
+              Capability: 'admin-hub',
+              Service: 'admin-hub',
+              DataClassification: 'internal',
+            },
+          },
         },
       },
     };
@@ -52,6 +64,12 @@ export default $config({
           `account; if you just want local dev, use \`sst dev\` (live-Lambda mode).`,
       );
     }
+
+    // 2026-07-15 AWS migration: EC2 daemon NOT migrated yet (cost). Crons that only
+    // work THROUGH the daemon/EC2 are gated off until it lives in the new account.
+    // The Cognito pool did not survive the dead account either.
+    const ENABLE_DAEMON_CRONS = false;
+    const ENABLE_COGNITO_SYNC = false;
 
     // ──────────────────────────────────────────────────────────────
     // PR-61 (2026-05-13) — build version stamp.
@@ -99,7 +117,7 @@ export default $config({
     // ──────────────────────────────────────────────────────────────
     const FUTURATOR_PUBLIC_BUCKET = 'futurator-ai-website';
     const FUTURATOR_CF_DISTRIBUTION_ID = 'E1BI1YWMTLSDTE';
-    const AWS_ACCOUNT_ID = '835745294770';
+    const AWS_ACCOUNT_ID = '421515025850';
 
     // ── DynamoDB Tables ──
     const projectsTable = new sst.aws.Dynamo('ProjectsTable', {
@@ -620,7 +638,6 @@ export default $config({
     // wires the viewer-request association from `route.edge.viewerRequest` (the
     // top-level Router `edge` is not applied to bucket origins). router.ts ~L1988.
     const devRouter = new sst.aws.Router('DevRouter', {
-      domain: 'dev.futurator.ai',
       routes: {
         '/*': {
           bucket: devEnvBucket,
@@ -629,7 +646,6 @@ export default $config({
       },
     });
     const stagingRouter = new sst.aws.Router('StagingRouter', {
-      domain: 'staging.futurator.ai',
       routes: {
         '/*': {
           bucket: stagingEnvBucket,
@@ -1015,12 +1031,12 @@ export default $config({
               Effect: 'Allow',
               Action: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan'],
               Resource: [
-                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-agent-jobs`,
-                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-agent-jobs/index/*`,
-                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-attention-items`,
-                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-plans`,
-                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-free-agent-conversations`,
-                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-free-agent-sessions`,
+                `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-agent-jobs`,
+                `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-agent-jobs/index/*`,
+                `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-attention-items`,
+                `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-plans`,
+                `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-free-agent-conversations`,
+                `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-free-agent-sessions`,
               ],
             },
             {
@@ -1028,7 +1044,7 @@ export default $config({
               Effect: 'Allow',
               Action: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
               Resource: [
-                `arn:aws:dynamodb:us-east-1:${acctId}:table/futurator-free-agent-conversations`,
+                `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-free-agent-conversations`,
               ],
               Condition: {
                 'ForAllValues:StringEquals': {
@@ -1057,6 +1073,29 @@ export default $config({
       ),
     });
 
+    // 2026-07-15 migration: DynamoDB wildcard policy now BORN IN IaC (was a hand-made
+    // ARN in the dead old account). Keeps the API role off AWS's 10,240-byte inline limit.
+    const apiRestorePolicy = new aws.iam.Policy('ApiDynamoRestorePolicy', {
+      name: 'futurator-admin-api-restore',
+      description: 'DynamoDB access for the API Lambda across all futurator-* tables',
+      policy: accountId.apply((acctId) =>
+        JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [
+            {
+              Sid: 'DynamoAllFuturatorTables',
+              Effect: 'Allow',
+              Action: 'dynamodb:*',
+              Resource: [
+                `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-*`,
+                `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-*/index/*`,
+              ],
+            },
+          ],
+        }),
+      ),
+    });
+
     // ── API Lambda ──
     const api = new sst.aws.Function('Api', {
       handler: 'functions/api/index.handler',
@@ -1071,7 +1110,7 @@ export default $config({
       // queue-requests table, which is deliberately NOT in `link` — see note in
       // the link array). Managed policies do NOT count against the role's 10,240-
       // byte inline-policy limit, which the per-table link statements had maxed.
-      policies: ['arn:aws:iam::835745294770:policy/futurator-admin-api-restore'],
+      policies: [apiRestorePolicy.arn],
       link: [
         // ──────────────────────────────────────────────────────────────
         // 2026-07-11 — DynamoDB tables are intentionally NOT linked here.
@@ -1199,7 +1238,7 @@ export default $config({
         IDENTITY_BROKER_JWKS_URL: 'https://auth.futurator.ai/v1/.well-known/jwks.json',
         IDENTITY_BROKER_CLIENT_ID: 'app_0ed7f7e62b277aca1c1d16a8ee370384',
         IDENTITY_BROKER_CLIENT_SECRET: '7_oGr8sFcjcRRcO5Z8W_ZbjAupqfNyoiu0TmvPMRp_Q',
-        ALLOWED_ORIGIN: 'https://admin.futurator.ai',
+        ALLOWED_ORIGIN: process.env.ALLOWED_ORIGIN ?? 'https://admin.futurator.ai',
         // Futurator.ai homepage publish pipeline (Stories 14-1, 14-2)
         FUTURATOR_PUBLIC_BUCKET,
         FUTURATOR_CF_DISTRIBUTION_ID,
@@ -1321,18 +1360,18 @@ export default $config({
         {
           actions: ['ssm:GetParameter'],
           resources: [
-            'arn:aws:ssm:us-east-1:835745294770:parameter/futurator-core/prod/REGISTRATION_API_KEY',
+            'arn:aws:ssm:eu-central-1:421515025850:parameter/futurator-core/prod/REGISTRATION_API_KEY',
           ],
         },
         {
           actions: ['kms:Decrypt'],
-          resources: ['arn:aws:kms:us-east-1:835745294770:alias/aws/ssm'],
+          resources: ['arn:aws:kms:eu-central-1:421515025850:alias/aws/ssm'],
         },
         // Story 1.7.1: PAT rotation — write the new PAT + rotated-at timestamp
         // to the custom /futurator/_pipeline/* SSM paths.
         {
           actions: ['ssm:PutParameter', 'ssm:GetParameter'],
-          resources: ['arn:aws:ssm:us-east-1:835745294770:parameter/futurator/_pipeline/*'],
+          resources: ['arn:aws:ssm:eu-central-1:421515025850:parameter/futurator/_pipeline/*'],
         },
         // Identity Broker management (Phase 2.5): the Admin UI is the
         // authoritative writer of each app's broker-credentials into
@@ -1349,7 +1388,7 @@ export default $config({
             'secretsmanager:TagResource',
           ],
           resources: [
-            'arn:aws:secretsmanager:us-east-1:835745294770:secret:futurator/*/broker-credentials-*',
+            'arn:aws:secretsmanager:eu-central-1:421515025850:secret:futurator/*/broker-credentials-*',
           ],
         },
         // Migrate-module (Epic 18, brownfield Party PAT vault):
@@ -1370,7 +1409,7 @@ export default $config({
             'secretsmanager:TagResource',
           ],
           resources: [
-            'arn:aws:secretsmanager:us-east-1:835745294770:secret:futurator/brownfield-pat/*',
+            'arn:aws:secretsmanager:eu-central-1:421515025850:secret:futurator/brownfield-pat/*',
           ],
         },
       ],
@@ -1380,6 +1419,7 @@ export default $config({
             'https://admin.futurator.ai',
             'https://futurator.ai',
             'http://localhost:3000',
+            ...(process.env.EXTRA_ALLOWED_ORIGIN ? [process.env.EXTRA_ALLOWED_ORIGIN] : []),
           ],
           allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
           allowHeaders: ['Content-Type', 'Authorization', 'X-Correlation-Id'],
@@ -1397,12 +1437,12 @@ export default $config({
       timeout: '10 seconds',
       environment: {
         SSM_PREFIX: '/futurator-admin/prod',
-        REDIRECT_BASE_URL: 'https://admin.futurator.ai',
+        REDIRECT_BASE_URL: process.env.REDIRECT_BASE_URL ?? 'https://admin.futurator.ai',
       },
       permissions: [
         {
           actions: ['ssm:GetParameter'],
-          resources: ['arn:aws:ssm:us-east-1:835745294770:parameter/futurator-admin/prod/*'],
+          resources: ['arn:aws:ssm:eu-central-1:421515025850:parameter/futurator-admin/prod/*'],
         },
       ],
       url: true,
@@ -1472,27 +1512,31 @@ export default $config({
     });
 
     // ── Cron: User Sync ──
-    new sst.aws.Cron('UserSync', {
-      schedule: 'cron(0 8 * * ? *)',
-      function: {
-        handler: 'functions/cron/user-sync.handler',
-        runtime: 'nodejs22.x',
-        architecture: 'arm64',
-        memory: '256 MB',
-        timeout: '30 seconds',
-        link: [usersTable],
-        environment: {
-          USERS_TABLE: usersTable.name,
-          COGNITO_USER_POOL_ID: 'us-east-1_djPwzFjUe',
-        },
-        permissions: [
-          {
-            actions: ['cognito-idp:ListUsers', 'cognito-idp:AdminGetUser'],
-            resources: ['arn:aws:cognito-idp:us-east-1:835745294770:userpool/us-east-1_djPwzFjUe'],
+    if (ENABLE_COGNITO_SYNC) {
+      new sst.aws.Cron('UserSync', {
+        schedule: 'cron(0 8 * * ? *)',
+        function: {
+          handler: 'functions/cron/user-sync.handler',
+          runtime: 'nodejs22.x',
+          architecture: 'arm64',
+          memory: '256 MB',
+          timeout: '30 seconds',
+          link: [usersTable],
+          environment: {
+            USERS_TABLE: usersTable.name,
+            COGNITO_USER_POOL_ID: 'us-east-1_djPwzFjUe',
           },
-        ],
-      },
-    });
+          permissions: [
+            {
+              actions: ['cognito-idp:ListUsers', 'cognito-idp:AdminGetUser'],
+              resources: [
+                'arn:aws:cognito-idp:us-east-1:421515025850:userpool/us-east-1_djPwzFjUe',
+              ],
+            },
+          ],
+        },
+      });
+    }
 
     // ── Cron: Attention Digest (Pipeline v1, Story 6.4) ──
     // Hourly. Surveys every plan's attention items + per-user
@@ -1519,50 +1563,52 @@ export default $config({
     // ── Cron: Wave Completion Check (Story 16.2, extended by Story 17.4 for plan-waves) ──
     // Story 1.8.7: also links timingSummaryTable + appsTable + agentEventsTable
     // so the post-terminal escalator (evaluateThresholds) can read cohort baselines.
-    new sst.aws.Cron('WaveCompletionCheck', {
-      schedule: 'rate(1 minute)',
-      function: {
-        handler: 'functions/cron/wave-completion-check.handler',
-        runtime: 'nodejs22.x',
-        architecture: 'arm64',
-        memory: '256 MB',
-        timeout: '120 seconds',
-        link: [
-          agentJobsTable,
-          agentEventsTable,
-          epicWorkflowsTable,
-          planSpecGraphTable,
-          plansTable,
-          appsTable,
-          attentionItemsTable,
-          timingSummaryTable,
-        ],
-        environment: {
-          AGENT_JOBS_TABLE: agentJobsTable.name,
-          AGENT_EVENTS_TABLE: agentEventsTable.name,
-          EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
-          PLAN_SPEC_GRAPH_TABLE: planSpecGraphTable.name,
-          PLANS_TABLE: plansTable.name,
-          APPS_TABLE: appsTable.name,
-          ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
-          TIMING_SUMMARY_TABLE: timingSummaryTable.name,
-          // F22 — wave-completion-check calls resolveDeployTarget too (it
-          // enqueues the dev-deploy), so it needs the same subdomain coords.
-          // F29 — subdomains ON (index-rewrite Function shipped); dev preview
-          // lands at dev.futurator.ai/<plan>/.
-          DEPLOY_ENV_SUBDOMAINS: 'on',
-          DEV_ENV_BUCKET: devEnvBucket.name,
-          DEV_ENV_CF_ID: devRouter.distributionID,
-          STAGING_ENV_BUCKET: stagingEnvBucket.name,
-          STAGING_ENV_CF_ID: stagingRouter.distributionID,
-          // QA-Review W2 — gates the p3-qa auto-enqueue in handleP3Plan (off →
-          // never enqueues). Mirror of the daemon flag; the daemon runs the job.
-          // DURABLE-ON (operator decision): committed default 'on' so a bare
-          // `sst deploy` can never silently dark-ship the QA gate on this cron.
-          P3_QA_REVIEW: process.env.P3_QA_REVIEW ?? 'on',
+    if (ENABLE_DAEMON_CRONS) {
+      new sst.aws.Cron('WaveCompletionCheck', {
+        schedule: 'rate(1 minute)',
+        function: {
+          handler: 'functions/cron/wave-completion-check.handler',
+          runtime: 'nodejs22.x',
+          architecture: 'arm64',
+          memory: '256 MB',
+          timeout: '120 seconds',
+          link: [
+            agentJobsTable,
+            agentEventsTable,
+            epicWorkflowsTable,
+            planSpecGraphTable,
+            plansTable,
+            appsTable,
+            attentionItemsTable,
+            timingSummaryTable,
+          ],
+          environment: {
+            AGENT_JOBS_TABLE: agentJobsTable.name,
+            AGENT_EVENTS_TABLE: agentEventsTable.name,
+            EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
+            PLAN_SPEC_GRAPH_TABLE: planSpecGraphTable.name,
+            PLANS_TABLE: plansTable.name,
+            APPS_TABLE: appsTable.name,
+            ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
+            TIMING_SUMMARY_TABLE: timingSummaryTable.name,
+            // F22 — wave-completion-check calls resolveDeployTarget too (it
+            // enqueues the dev-deploy), so it needs the same subdomain coords.
+            // F29 — subdomains ON (index-rewrite Function shipped); dev preview
+            // lands at dev.futurator.ai/<plan>/.
+            DEPLOY_ENV_SUBDOMAINS: 'on',
+            DEV_ENV_BUCKET: devEnvBucket.name,
+            DEV_ENV_CF_ID: devRouter.distributionID,
+            STAGING_ENV_BUCKET: stagingEnvBucket.name,
+            STAGING_ENV_CF_ID: stagingRouter.distributionID,
+            // QA-Review W2 — gates the p3-qa auto-enqueue in handleP3Plan (off →
+            // never enqueues). Mirror of the daemon flag; the daemon runs the job.
+            // DURABLE-ON (operator decision): committed default 'on' so a bare
+            // `sst deploy` can never silently dark-ship the QA gate on this cron.
+            P3_QA_REVIEW: process.env.P3_QA_REVIEW ?? 'on',
+          },
         },
-      },
-    });
+      });
+    }
 
     // ──────────────────────────────────────────────────────────────
     // 2026-05-27 PR D.c — CloudWatch → Attention Items bridge.
@@ -1615,33 +1661,35 @@ export default $config({
     // health-check. Scoped to the same instance the API Lambda already
     // controls (no expanded blast radius).
     // ──────────────────────────────────────────────────────────────
-    new sst.aws.Cron('DeployerLambda', {
-      schedule: 'rate(1 minute)',
-      function: {
-        handler: 'functions/cron/deployer-lambda.handler',
-        runtime: 'nodejs22.x',
-        architecture: 'arm64',
-        memory: '256 MB',
-        timeout: '300 seconds',
-        link: [agentFlagsTable, agentEventsTable, attentionItemsTable],
-        environment: {
-          AGENT_FLAGS_TABLE: agentFlagsTable.name,
-          AGENT_EVENTS_TABLE: agentEventsTable.name,
-          ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
-          EC2_INSTANCE_ID: process.env.EC2_INSTANCE_ID ?? 'i-0826d68c316ae97dd',
-        },
-        permissions: [
-          {
-            actions: [
-              'ssm:SendCommand',
-              'ssm:GetCommandInvocation',
-              'ssm:DescribeInstanceInformation',
-            ],
-            resources: ['*'],
+    if (ENABLE_DAEMON_CRONS) {
+      new sst.aws.Cron('DeployerLambda', {
+        schedule: 'rate(1 minute)',
+        function: {
+          handler: 'functions/cron/deployer-lambda.handler',
+          runtime: 'nodejs22.x',
+          architecture: 'arm64',
+          memory: '256 MB',
+          timeout: '300 seconds',
+          link: [agentFlagsTable, agentEventsTable, attentionItemsTable],
+          environment: {
+            AGENT_FLAGS_TABLE: agentFlagsTable.name,
+            AGENT_EVENTS_TABLE: agentEventsTable.name,
+            ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
+            EC2_INSTANCE_ID: process.env.EC2_INSTANCE_ID ?? 'i-0826d68c316ae97dd',
           },
-        ],
-      },
-    });
+          permissions: [
+            {
+              actions: [
+                'ssm:SendCommand',
+                'ssm:GetCommandInvocation',
+                'ssm:DescribeInstanceInformation',
+              ],
+              resources: ['*'],
+            },
+          ],
+        },
+      });
+    }
 
     // ── Cron: Timing Aggregator (Story 1.8.6 — Pipeline v2 Phase 1) ──
     // Every 6 hours. Scans delivered plans, groups by cohortKey, computes
@@ -1696,35 +1744,37 @@ export default $config({
             // Read the rotated-at timestamp + PAT (via SSM).
             // PutParameter is NOT granted here — rotation is API-driven.
             actions: ['ssm:GetParameter'],
-            resources: ['arn:aws:ssm:us-east-1:835745294770:parameter/futurator/_pipeline/*'],
+            resources: ['arn:aws:ssm:eu-central-1:421515025850:parameter/futurator/_pipeline/*'],
           },
         ],
       },
     });
 
     // ── Schedule Executor ──
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- SST resource: created for deployment side-effect
-    const scheduleExecutor = new sst.aws.Function('ScheduleExecutor', {
-      handler: 'functions/cron/schedule-executor.handler',
-      runtime: 'nodejs22.x',
-      architecture: 'arm64',
-      memory: '256 MB',
-      timeout: '120 seconds',
-      link: [schedulesTable],
-      environment: { SCHEDULES_TABLE: schedulesTable.name },
-      permissions: [
-        {
-          actions: ['ec2:StartInstances', 'ec2:StopInstances', 'ec2:DescribeInstances'],
-          resources: ['*'],
-        },
-        { actions: ['ecs:RunTask', 'ecs:StopTask', 'ecs:DescribeTasks'], resources: ['*'] },
-        {
-          actions: ['route53:ChangeResourceRecordSets'],
-          resources: ['arn:aws:route53:::hostedzone/Z002886634JUZ2SIMCMV0'],
-        },
-        { actions: ['iam:PassRole'], resources: ['*'] },
-      ],
-    });
+    if (ENABLE_DAEMON_CRONS) {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars -- SST resource: created for deployment side-effect
+      const scheduleExecutor = new sst.aws.Function('ScheduleExecutor', {
+        handler: 'functions/cron/schedule-executor.handler',
+        runtime: 'nodejs22.x',
+        architecture: 'arm64',
+        memory: '256 MB',
+        timeout: '120 seconds',
+        link: [schedulesTable],
+        environment: { SCHEDULES_TABLE: schedulesTable.name },
+        permissions: [
+          {
+            actions: ['ec2:StartInstances', 'ec2:StopInstances', 'ec2:DescribeInstances'],
+            resources: ['*'],
+          },
+          { actions: ['ecs:RunTask', 'ecs:StopTask', 'ecs:DescribeTasks'], resources: ['*'] },
+          {
+            actions: ['route53:ChangeResourceRecordSets'],
+            resources: ['arn:aws:route53:::hostedzone/Z002886634JUZ2SIMCMV0'],
+          },
+          { actions: ['iam:PassRole'], resources: ['*'] },
+        ],
+      });
+    }
 
     // ── Static Site ──
     const site = new sst.aws.StaticSite('AdminSite', {
@@ -1733,7 +1783,6 @@ export default $config({
         command: 'npm run build',
         output: 'out',
       },
-      domain: 'admin.futurator.ai',
       environment: {
         NEXT_PUBLIC_API_URL: api.url,
         NEXT_PUBLIC_AUTH_CALLBACK_URL: authCallback.url,
