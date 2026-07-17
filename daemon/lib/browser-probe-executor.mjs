@@ -15,6 +15,14 @@
 
 import { bootDevServer as realBootDevServer, drainPort as realDrainPort } from './dev-server-boot.mjs';
 import { defaultShellRunner as realShell } from './wave-merge-runner.mjs';
+import { isRemapActive } from './path-remap.mjs';
+
+// Remapped hosts only: concurrent story-dev jobs in ONE daemon each boot a QA
+// dev server; on the shared default port the second boot finds a squatter
+// (observed live: `status=squatter` on a 2/2-concurrency Mac). Each executor
+// takes the next slot above the default. Fleet/EC2 (remap inactive) keeps the
+// exact default-port behavior.
+let portSlot = 0;
 
 // ── Pure probe interpreter ──────────────────────────────────────────────────
 
@@ -679,7 +687,7 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
       return done({ passed: false, detail: `browser probe not interpretable: ${probe.reason}` });
     }
 
-    const port = qaContext.defaultPort ?? 3000;
+    const port = (qaContext.defaultPort ?? 3000) + (isRemapActive() ? 1 + (portSlot++ % 40) : 0);
     let boot;
     try {
       boot = await bootDevServer({ cwd, qaContext, port, shell, log: bootLog });
