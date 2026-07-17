@@ -40,13 +40,17 @@ describe('buildBootstrapScript', () => {
     expect(external).toEqual([]);
   });
 
-  it('sets HOME itself rather than inheriting it', () => {
+  it('exports HOME for set -u safety and uses literal paths, not $HOME', () => {
     const script = buildBootstrapScript(opts());
+    // The bootstrap body still runs as root and must define HOME (GCE gives it
+    // none) so `set -u` does not abort on any incidental $HOME reference.
+    expect(script).toContain('export HOME=/root');
+    // But paths are now literal (/home/futurator/...), so a stray unbound $HOME
+    // can't creep back in. If any $HOME/ dereference exists it must follow the
+    // export (belt and braces); today there are none.
     const homeExport = script.indexOf('export HOME=');
-    expect(homeExport).toBeGreaterThan(-1);
-    // Every $HOME use must come after the export, or it is unbound again.
     const firstUse = script.indexOf('$HOME/');
-    expect(firstUse).toBeGreaterThan(homeExport);
+    if (firstUse !== -1) expect(firstUse).toBeGreaterThan(homeExport);
   });
 
   it('embeds the server id, enroll token, and DAEMON_SOURCE', () => {
@@ -69,6 +73,22 @@ describe('buildBootstrapScript', () => {
     const script = buildBootstrapScript(opts());
     expect(script).toContain('/etc/systemd/system/futurator-daemon.service');
     expect(script).toContain('systemctl enable futurator-daemon');
+  });
+
+  // Regression: the daemon spawns `claude --dangerously-skip-permissions`, which
+  // Claude refuses to run as root — so a root-owned daemon failed EVERY job
+  // instantly ("cannot be used with root/sudo privileges"). The unit must run
+  // as the non-root futurator user, and Claude must be installed AS that user
+  // so the binary it invokes was never a root install.
+  it('runs the daemon as a non-root user, and Claude belongs to that user', () => {
+    const script = buildBootstrapScript(opts());
+    expect(script).toContain('User=futurator');
+    expect(script).not.toMatch(/^User=root$/m);
+    // creds + daemon live under the user's home, owned by them
+    expect(script).toContain('CLAUDE_CREDENTIALS_PATH=/home/futurator/.claude/.credentials.json');
+    expect(script).toContain('chown -R futurator:futurator');
+    // Claude installed as the user (sudo -u), not as root
+    expect(script).toMatch(/sudo -u futurator[^\n]*claude\.ai\/install\.sh/);
   });
 
   // Regression: GCE re-runs the startup-script on EVERY boot. The plain awscli
@@ -112,6 +132,6 @@ describe('buildBootstrapScript', () => {
 
   it('chmods the credentials file to 600', () => {
     const script = buildBootstrapScript(opts());
-    expect(script).toContain('chmod 600 /root/.claude/.credentials.json');
+    expect(script).toContain('chmod 600 /home/futurator/.claude/.credentials.json');
   });
 });
