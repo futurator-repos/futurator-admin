@@ -53,13 +53,14 @@ export function QueuesTab() {
                 <th className="px-2 py-1.5 text-left font-medium">Status</th>
                 <th className="px-2 py-1.5 text-left font-medium">Source</th>
                 <th className="px-2 py-1.5 text-left font-medium">Target</th>
+                <th className="px-2 py-1.5 text-left font-medium">Machine</th>
                 <th className="px-2 py-1.5 text-left font-medium">Created</th>
               </tr>
             </thead>
             <tbody>
               {requests.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className="px-2 py-6 text-center text-muted-foreground italic">
+                  <td colSpan={5} className="px-2 py-6 text-center text-muted-foreground italic">
                     No requests yet. Fire one from the Tests tab or POST to /api/queue/ingest.
                   </td>
                 </tr>
@@ -78,6 +79,9 @@ export function QueuesTab() {
                     <td className="px-2 py-1.5">{r.source}</td>
                     <td className="px-2 py-1.5 uppercase text-[10px] text-muted-foreground">
                       {r.target}
+                    </td>
+                    <td className="px-2 py-1.5 font-mono text-[10px] text-muted-foreground">
+                      {r.response?.dispatcher?.host ?? '—'}
                     </td>
                     <td className="px-2 py-1.5 font-mono text-[10px] text-muted-foreground">
                       {relTime(r.createdAt)}

@@ -20,6 +20,7 @@ import { Download, FileText, Loader2 } from 'lucide-react';
 import { api } from '@/lib/api-client';
 import { useAgentJobs } from '@/hooks/use-agent-job';
 import { useAgentEvents } from '@/hooks/use-agent-events';
+import { useServers } from '@/hooks/use-servers';
 import { hasActiveStory } from '@/hooks/use-story-nodes';
 import type { AgentJob } from '@/types/agent-orchestrator';
 import type { StoryNodeRow } from '@/types/plan-spec';
@@ -161,6 +162,11 @@ export function StreamView({ planId, stories, onSelectStory }: Labs3ViewProps) {
   const jobIds = useMemo(() => storyJobIds(stories), [stories]);
   const active = hasActiveStory(stories);
   const results = useAgentJobs(jobIds, active);
+  const { data: serversData } = useServers();
+  const serverNameById = useMemo(
+    () => new Map((serversData?.servers ?? []).map((s) => [s.serverId, s.name] as const)),
+    [serversData],
+  );
 
   const jobsById = useMemo(() => {
     const map: Record<string, AgentJob> = {};
@@ -267,6 +273,7 @@ export function StreamView({ planId, stories, onSelectStory }: Labs3ViewProps) {
               key={s.storyId}
               story={s}
               job={s.jobId ? jobsById[s.jobId] : undefined}
+              serverNameById={serverNameById}
               onSelectStory={onSelectStory}
             />
           ))}
@@ -321,10 +328,12 @@ function ToolbarButton({
 function StreamRow({
   story,
   job,
+  serverNameById,
   onSelectStory,
 }: {
   story: StoryNodeRow;
   job: AgentJob | undefined;
+  serverNameById: Map<string, string>;
   onSelectStory?: (storyId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -332,6 +341,9 @@ function StreamRow({
   const { events } = useAgentEvents(story.jobId ?? null, job?.status);
   // Show a short tail when collapsed, the full stream when expanded.
   const visible = open ? events : events.slice(-4);
+  const machineName = job?.assignedServerId
+    ? (serverNameById.get(job.assignedServerId) ?? job.assignedServerId)
+    : null;
 
   return (
     <div style={{ border: '1px solid var(--border)' }}>
@@ -385,7 +397,9 @@ function StreamRow({
             }}
           >
             {story.storyId.slice(0, 10)} · {story.cohort.epicId} · batch {story.cohortBatch}
-            {story.jobId && ` · job ${story.jobId.slice(0, 8)}`} · {events.length} events
+            {story.jobId && ` · job ${story.jobId.slice(0, 8)}`}
+            {machineName && <span title={job?.assignReason}>{` · machine ${machineName}`}</span>}
+            {` · ${events.length} events`}
           </div>
         </div>
         <MetricChip label="tokens" value={fmtTokens(jobTokens(job))} color="var(--cyan)" />

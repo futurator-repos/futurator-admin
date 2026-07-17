@@ -7,7 +7,12 @@ import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { docClient, TABLE_NAMES } from '../shared/dynamo-client';
 // Servers module (Task 7) — server-aware dispatch wiring.
 import { runDispatchSweep } from '../shared/services/server-dispatcher';
-import { getDispatchPolicy, setDispatchPolicy } from '../shared/services/dispatch-state';
+import {
+  getDispatchPolicy,
+  setDispatchPolicy,
+  isServerAwareDispatchEnabled,
+  setServerAwareDispatch,
+} from '../shared/services/dispatch-state';
 import {
   createServerSchema,
   updateServerSchema,
@@ -2274,6 +2279,9 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
       // QA autopilot toggle (default ON): auto-fix + re-run QA on a blocking
       // verdict so the operator tests an already-fixed build.
       qaAutopilot: z.boolean().optional(),
+      // Per-plan QA bypass (default OFF): operator-set; suppresses the p3-qa
+      // stage AND the QA autopilot fix loop; dev-deploy still runs.
+      skipQa: z.boolean().optional(),
       // Brownfield growth (redesign slice F): when present, grow this EXISTING
       // app instead of scaffolding a fresh one — no repo mint, no app-bootstrap,
       // kind='change', and the planner plans against the real code (its prior
@@ -2285,6 +2293,7 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
     throw new ValidationError(parsed.error.issues.map((i) => i.message).join('; '));
   const { intent } = parsed.data;
   const qaAutopilot = parsed.data.qaAutopilot ?? true;
+  const skipQa = parsed.data.skipQa === true;
 
   // ── Brownfield variant — grow an EXISTING app ──────────────────────────────
   // Diverges hard from the greenfield path: we reuse the app's repo + worktree
@@ -2340,6 +2349,7 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
       costCeilingUsd: defaultCostCeiling('mvp'),
       qaAutopilot,
       qaAutoFixRounds: 0,
+      skipQa,
       createdAt: now,
       updatedAt: now,
       createdBy: user.userId,
@@ -2368,6 +2378,8 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
       workingDir: appRow.workingDir,
       jobType: 'quick-planspec',
       quickPlanspecPayload,
+      // Plan-affinity: pin every job of this plan to one dispatch server.
+      affinityKey: `plan:${planId}`,
     });
 
     return c.json({ planId, appId: targetAppId, jobId: genJobId }, 201);
@@ -2414,6 +2426,10 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
     createdAt: now,
     updatedAt: now,
   };
+  // Mint the planId up-front so the app-bootstrap job — the first job of this
+  // plan — can carry the plan-affinity key too (pins the whole plan to one
+  // dispatch server; the app worktree is scaffolded there).
+  const planId = crypto.randomUUID();
   const bootstrapJobId = crypto.randomUUID();
   await appRepo.createAppAndBootstrapJob(app, {
     jobId: bootstrapJobId,
@@ -2432,9 +2448,9 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
       packageJsonDevDependencies: meta.packageJsonDevDependencies ?? null,
       defaultSkillLoadout: meta.defaultSkillLoadout ?? null,
     },
+    affinityKey: `plan:${planId}`,
   });
 
-  const planId = crypto.randomUUID();
   const plan: Plan = {
     planId,
     name: appId,
@@ -2453,6 +2469,7 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
     costCeilingUsd: defaultCostCeiling('mvp'),
     qaAutopilot,
     qaAutoFixRounds: 0,
+    skipQa,
     createdAt: now,
     updatedAt: now,
     createdBy: user.userId,
@@ -2478,6 +2495,8 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
       // names the real seam hook for whatever boilerplate scaffolded this app.
       seamHook: meta.testHarness?.seamHook,
     },
+    // Plan-affinity: pin every job of this plan to one dispatch server.
+    affinityKey: `plan:${planId}`,
   });
 
   return c.json({ planId, appId, jobId: genJobId }, 201);
@@ -6352,6 +6371,30 @@ app.put('/api/servers/policy', authMiddleware, async (c) => {
   return c.json({ policy, sweep });
 });
 
+// GET /api/servers/dispatch — the current server-aware dispatch toggle state.
+// Read-only.
+app.get('/api/servers/dispatch', authMiddleware, async (c) => {
+  const serverAware = await isServerAwareDispatchEnabled();
+  return c.json({ serverAware });
+});
+
+// PUT /api/servers/dispatch — validate + persist the operator's server-aware
+// dispatch toggle. Turning it ON immediately runs a sweep so fleet dispatch
+// takes effect without waiting for the 1-minute cron; turning it OFF just
+// reverts to legacy single-daemon behavior on the next dispatch.
+app.put('/api/servers/dispatch', authMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = z.object({ serverAware: z.boolean() }).safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
+  }
+  const user = c.get('user');
+  const { serverAware } = parsed.data;
+  await setServerAwareDispatch(serverAware, user?.userId || 'operator');
+  const sweep = serverAware ? await runDispatchSweep() : undefined;
+  return c.json({ serverAware, ...(sweep ? { sweep } : {}) });
+});
+
 // GET /api/servers/assignments — the most recent agent-jobs that carry an
 // `assignedServerId` (PENDING queued + RUNNING claimed), newest-first. Reads
 // the `status-createdAt-index` GSI once per live status and filters to assigned
@@ -7474,8 +7517,8 @@ app.post('/api/epic-workflows/:id/deploy', async (c) => {
   // the merge-to-main delivery cleanup. That skip is exactly why plan-2 left
   // main 6 commits behind. With epicId set, production delivery self-cleans
   // and the next plan forks brownfield off the delivered tip.
-  await agentJobsRepo.createJob(
-    buildDeployJob({
+  await agentJobsRepo.createJob({
+    ...buildDeployJob({
       jobId,
       epicId: epic.epicId,
       workingDir: epic.workingDir,
@@ -7485,7 +7528,9 @@ app.post('/api/epic-workflows/:id/deploy', async (c) => {
       // Production publishes snapshot the release so it can be rolled back.
       archiveReleaseId: environment === 'production' ? jobId : undefined,
     }),
-  );
+    // Plan-affinity: a plan-linked deploy pins to the plan's dispatch server.
+    ...(plan?.planId ? { affinityKey: `plan:${plan.planId}` } : {}),
+  });
 
   if (environment === 'production') {
     // Persist on the epic (latest deploy) AND append to plan.deployJobIds so

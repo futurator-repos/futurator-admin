@@ -20,6 +20,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAgentJob } from '@/hooks/use-agent-job';
+import { useServers } from '@/hooks/use-servers';
 import { useRetryStory } from '@/hooks/use-story-nodes';
 import { useAgentEvents } from '@/hooks/use-agent-events';
 import { StoryStagePipeline } from '../plan-spec-dashboard/story-stage-pipeline';
@@ -802,6 +803,14 @@ function StoryDetailPanel({
   const [tab, setTab] = useState<'overview' | 'logs'>('overview');
   const sha = latestRunSha(story.acceptanceCriteria);
 
+  // Servers module — resolve the machine that ran this story's job.
+  const { data: serversData } = useServers();
+  const machineName = useMemo(() => {
+    if (!job?.assignedServerId) return null;
+    const server = (serversData?.servers ?? []).find((s) => s.serverId === job.assignedServerId);
+    return server?.name ?? job.assignedServerId;
+  }, [job, serversData]);
+
   // S1 contract fields (rendered defensively — legacy rows have none).
   const extras = storyExtras(story);
   const verdict = story.verdict;
@@ -987,6 +996,11 @@ function StoryDetailPanel({
               }}
             >
               {story.jobId && <span>job {story.jobId.slice(0, 8)}</span>}
+              {machineName && (
+                <span title={job?.assignReason}>
+                  machine <span style={{ color: 'var(--text-dim)' }}>{machineName}</span>
+                </span>
+              )}
               {sha && (
                 <span>
                   commit <span style={{ color: 'var(--text-dim)' }}>{sha.slice(0, 7)}</span>

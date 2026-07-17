@@ -2,10 +2,56 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
-import { useDispatchPolicy, useSaveDispatchPolicy, useServers } from '@/hooks/use-servers';
+import {
+  useDispatchPolicy,
+  useSaveDispatchPolicy,
+  useServers,
+  useDispatchServerAware,
+  useSetDispatchServerAware,
+} from '@/hooks/use-servers';
 import type { ComputeServer, DispatchMode } from '@/types/servers';
 import { AssignmentsFeed } from './assignments-feed';
+
+/** Server-aware dispatch on/off (spec §5's master gate). ON hands new jobs to
+ * `runDispatchSweep()`'s policy engine, assigning them to fleet servers; OFF
+ * reverts to legacy single-daemon behavior byte-for-byte. Turning it ON
+ * re-sweeps immediately. */
+function ServerAwareDispatchToggle() {
+  const { data, isLoading } = useDispatchServerAware();
+  const setServerAware = useSetDispatchServerAware();
+  const serverAware = data?.serverAware ?? false;
+
+  return (
+    <Card className="space-y-1 p-4">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-semibold">Server-aware dispatch</h2>
+          <p className="text-xs text-muted-foreground">
+            {serverAware
+              ? 'ON — jobs are assigned to fleet servers by the policy below.'
+              : 'OFF — legacy single-daemon behavior; the policy below has no effect.'}
+          </p>
+        </div>
+        <Switch
+          checked={serverAware}
+          onCheckedChange={(checked: boolean) => setServerAware.mutate(checked)}
+          disabled={isLoading || setServerAware.isPending}
+          aria-label="Server-aware dispatch"
+        />
+      </div>
+      {setServerAware.isSuccess && (
+        <span className="text-xs text-success">Saved{serverAware ? ' — re-swept.' : '.'}</span>
+      )}
+      {setServerAware.isError && (
+        <span className="text-xs text-destructive">
+          Failed to save: {(setServerAware.error as Error).message}
+        </span>
+      )}
+    </Card>
+  );
+}
 
 const MODE_COPY: Record<DispatchMode, { label: string; description: string }> = {
   priority: {
@@ -251,6 +297,8 @@ export function PolicyTab() {
 
   return (
     <div className="space-y-6">
+      <ServerAwareDispatchToggle />
+
       <Card className="space-y-4 p-4">
         <div>
           <h2 className="text-sm font-semibold">Mode</h2>

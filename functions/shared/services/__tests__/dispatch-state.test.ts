@@ -22,6 +22,7 @@ import {
   getDispatchPolicy,
   setDispatchPolicy,
   isServerAwareDispatchEnabled,
+  setServerAwareDispatch,
   getAffinityOwners,
   setAffinityOwners,
 } from '../dispatch-state';
@@ -92,6 +93,35 @@ describe('isServerAwareDispatchEnabled', () => {
   it('is true only when the flag value is exactly "true"', async () => {
     getFlagMock.mockResolvedValue(flagRow('true'));
     expect(await isServerAwareDispatchEnabled()).toBe(true);
+  });
+});
+
+describe('setServerAwareDispatch', () => {
+  it('writes the literal string "true" when enabling', async () => {
+    setFlagMock.mockResolvedValue(flagRow('true'));
+    await setServerAwareDispatch(true);
+    expect(setFlagMock).toHaveBeenCalledWith('dispatch.serverAware', 'true', expect.any(String));
+  });
+
+  it('writes the literal string "false" when disabling', async () => {
+    setFlagMock.mockResolvedValue(flagRow('false'));
+    await setServerAwareDispatch(false);
+    expect(setFlagMock).toHaveBeenCalledWith('dispatch.serverAware', 'false', expect.any(String));
+  });
+
+  it('round-trips through isServerAwareDispatchEnabled', async () => {
+    let stored: string | null = null;
+    setFlagMock.mockImplementation(async (_key: string, value: string) => {
+      stored = value;
+      return flagRow(value);
+    });
+    getFlagMock.mockImplementation(async () => (stored ? flagRow(stored) : null));
+
+    await setServerAwareDispatch(true);
+    expect(await isServerAwareDispatchEnabled()).toBe(true);
+
+    await setServerAwareDispatch(false);
+    expect(await isServerAwareDispatchEnabled()).toBe(false);
   });
 });
 

@@ -73,6 +73,29 @@ export function useSaveDispatchPolicy() {
   });
 }
 
+/** Current server-aware dispatch toggle (Dispatch Policy tab). Polls so the
+ * Switch reflects changes made elsewhere without a manual refresh. */
+export function useDispatchServerAware() {
+  return useQuery({
+    queryKey: ['servers', 'dispatch'],
+    queryFn: () => api.get<{ serverAware: boolean }>('/servers/dispatch'),
+    refetchInterval: 5000,
+  });
+}
+
+/** Flip the server-aware dispatch toggle. Turning it ON re-sweeps immediately
+ * so it takes effect without waiting for the 1-minute cron. */
+export function useSetDispatchServerAware() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (serverAware: boolean) =>
+      api.put<{ serverAware: boolean; sweep?: unknown }>('/servers/dispatch', { serverAware }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['servers'] });
+    },
+  });
+}
+
 export interface CreateServerInput {
   name: string;
   provider: ComputeProviderId;

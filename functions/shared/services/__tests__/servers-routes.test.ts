@@ -1,9 +1,11 @@
 /**
  * servers-routes.test.ts — Servers module (Task 7) API wiring.
  *
- * Hermetic coverage of the three operator routes added to the Hono app:
+ * Hermetic coverage of the operator routes added to the Hono app:
  *   GET  /api/servers/policy       → { policy }
  *   PUT  /api/servers/policy       → validates body, saves, runs a sweep → { policy, sweep }
+ *   GET  /api/servers/dispatch     → { serverAware }
+ *   PUT  /api/servers/dispatch     → validates body, saves; sweeps only when turning ON
  *   GET  /api/servers/assignments  → last N agent-jobs carrying assignedServerId
  *
  * `dispatch-state`, `server-dispatcher`, `dynamo-client`, and `auth-middleware`
@@ -21,16 +23,21 @@ vi.mock('../../auth-middleware', () => ({
   ),
 }));
 
-const { getPolicyMock, setPolicyMock, sweepMock, sendMock } = vi.hoisted(() => ({
-  getPolicyMock: vi.fn(),
-  setPolicyMock: vi.fn(),
-  sweepMock: vi.fn(),
-  sendMock: vi.fn(),
-}));
+const { getPolicyMock, setPolicyMock, isServerAwareMock, setServerAwareMock, sweepMock, sendMock } =
+  vi.hoisted(() => ({
+    getPolicyMock: vi.fn(),
+    setPolicyMock: vi.fn(),
+    isServerAwareMock: vi.fn(),
+    setServerAwareMock: vi.fn(),
+    sweepMock: vi.fn(),
+    sendMock: vi.fn(),
+  }));
 
 vi.mock('../dispatch-state', () => ({
   getDispatchPolicy: getPolicyMock,
   setDispatchPolicy: setPolicyMock,
+  isServerAwareDispatchEnabled: isServerAwareMock,
+  setServerAwareDispatch: setServerAwareMock,
 }));
 
 vi.mock('../server-dispatcher', () => ({
@@ -73,6 +80,8 @@ const SWEEP = {
 beforeEach(() => {
   getPolicyMock.mockReset();
   setPolicyMock.mockReset();
+  isServerAwareMock.mockReset();
+  setServerAwareMock.mockReset();
   sweepMock.mockReset();
   sendMock.mockReset();
 });
@@ -113,6 +122,55 @@ describe('PUT /api/servers/policy', () => {
       'u1',
     );
     expect(sweepMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('GET /api/servers/dispatch', () => {
+  it('returns the current server-aware toggle state', async () => {
+    isServerAwareMock.mockResolvedValue(true);
+    const res = await app.request('/api/servers/dispatch');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ serverAware: true });
+  });
+});
+
+describe('PUT /api/servers/dispatch', () => {
+  it('rejects a non-boolean serverAware with 400', async () => {
+    const res = await app.request('/api/servers/dispatch', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ serverAware: 'yes' }),
+    });
+    expect(res.status).toBe(400);
+    expect(setServerAwareMock).not.toHaveBeenCalled();
+    expect(sweepMock).not.toHaveBeenCalled();
+  });
+
+  it('saves and sweeps immediately when turning ON', async () => {
+    setServerAwareMock.mockResolvedValue(undefined);
+    sweepMock.mockResolvedValue(SWEEP);
+    const res = await app.request('/api/servers/dispatch', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ serverAware: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ serverAware: true, sweep: SWEEP });
+    expect(setServerAwareMock).toHaveBeenCalledWith(true, 'u1');
+    expect(sweepMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves without sweeping when turning OFF', async () => {
+    setServerAwareMock.mockResolvedValue(undefined);
+    const res = await app.request('/api/servers/dispatch', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ serverAware: false }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ serverAware: false });
+    expect(setServerAwareMock).toHaveBeenCalledWith(false, 'u1');
+    expect(sweepMock).not.toHaveBeenCalled();
   });
 });
 

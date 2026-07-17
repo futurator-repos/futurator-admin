@@ -944,6 +944,27 @@ export interface AgentJob {
   worktreePath?: string;
   worktreeBranch?: string;
   depCacheMode?: 'shared' | 'symlink-ro' | 'independent';
+
+  // ── Servers module — server-aware dispatch (spec §5) ──────────────────────
+  /**
+   * Dispatch affinity key. Stamped `plan:<planId>` on every plan-scoped job at
+   * creation so `dispatch-policy.ts#planAssignments` pins all of a plan's jobs
+   * to one server (the plan's worktree/branch lives on that box). Absent on
+   * non-plan jobs (queue-request, free-agent-session, app-level skill-scout).
+   */
+  affinityKey?: string;
+  /**
+   * The server this job is assigned to. Normally stamped by the sweeper
+   * (`server-dispatcher.ts`) or the inline daemon self-assign optimization at
+   * creation. The fleet daemon polls the `assignedServerId-status-index`
+   * partition for its own SERVER_ID. Absent ⇒ awaiting sweeper assignment.
+   */
+  assignedServerId?: string;
+  /** ISO timestamp the assignment was stamped. */
+  assignedAt?: string;
+  /** Human-readable why (e.g. `affinity plan:<id> -> <server>`, or
+   *  `inherited: plan affinity (parent <jobId>)` for the daemon self-assign). */
+  assignReason?: string;
 }
 
 // ── Epic-dev payload types (Arch Doc §3) ──

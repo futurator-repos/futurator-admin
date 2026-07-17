@@ -70,8 +70,8 @@ export const handler = async () => {
         // F29 — dev preview is keyed on the CLEAN app slug.
         const target = resolveDeployTarget({ planSlug: appId, appId }, 'dev');
         const devJobId = planDepsShared.uuid();
-        await planDepsShared.createJob(
-          buildDeployJob({
+        await planDepsShared.createJob({
+          ...buildDeployJob({
             jobId: devJobId,
             epicId: '', // P3 is plan-keyed
             planId: plan.planId,
@@ -80,7 +80,9 @@ export const handler = async () => {
             nowIso: planDepsShared.now(),
             target,
           }),
-        );
+          // Plan-affinity: pin every job of this plan to one dispatch server.
+          affinityKey: `plan:${plan.planId}`,
+        });
         await planRepo.updatePlanFields(plan.planId, { devDeployJobId: devJobId });
         log('info', 'wave-completion-check', 'P3 auto dev-deploy enqueued', {
           planId: plan.planId,
@@ -106,7 +108,8 @@ export const handler = async () => {
       plan.status === 'review' &&
       plan.devUrl &&
       plan.qaCommitSha &&
-      !plan.p3QaJobId
+      !plan.p3QaJobId &&
+      plan.skipQa !== true
     ) {
       try {
         const appId = plan.appId as string;
@@ -129,6 +132,8 @@ export const handler = async () => {
           createdBy: plan.createdBy,
           createdAt: nowIso,
           updatedAt: nowIso,
+          // Plan-affinity: pin every job of this plan to one dispatch server.
+          affinityKey: `plan:${plan.planId}`,
         });
         await planRepo.updatePlanFields(plan.planId, { p3QaJobId: qaJobId });
         log('info', 'wave-completion-check', 'P3 QA Review enqueued', {
@@ -152,13 +157,16 @@ export const handler = async () => {
       // "QA passed". Log it every tick so a disabled/stuck gate is diagnosable.
       const flag = process.env.P3_QA_REVIEW ?? '(unset)';
       const flagOff = !process.env.P3_QA_REVIEW || process.env.P3_QA_REVIEW === 'off';
-      const reason = flagOff
-        ? 'flag-off (P3_QA_REVIEW not on — deployed-app gate is dark)'
-        : !plan.devUrl
-          ? 'devUrl-missing (dev deploy not settled)'
-          : !plan.qaCommitSha
-            ? 'qaCommitSha-missing (commit not stamped)'
-            : 'unknown';
+      const reason =
+        plan.skipQa === true
+          ? 'plan.skipQa (operator bypass — deployed-app gate suppressed for this plan)'
+          : flagOff
+            ? 'flag-off (P3_QA_REVIEW not on — deployed-app gate is dark)'
+            : !plan.devUrl
+              ? 'devUrl-missing (dev deploy not settled)'
+              : !plan.qaCommitSha
+                ? 'qaCommitSha-missing (commit not stamped)'
+                : 'unknown';
       log(
         'warn',
         'wave-completion-check',
@@ -188,6 +196,7 @@ export const handler = async () => {
       process.env.P3_QA_REVIEW !== 'off' &&
       plan.status === 'review' &&
       plan.qaAutopilot !== false &&
+      plan.skipQa !== true &&
       plan.p3QaVerdict?.blocking === true &&
       !plan.p3QaVerdict.decidedAt
     ) {
@@ -229,6 +238,8 @@ export const handler = async () => {
             planId: plan.planId,
             appId,
             planSlug: appId,
+            // Plan-affinity: pin every job of this plan to one dispatch server.
+            affinityKey: `plan:${plan.planId}`,
             workingDir: `${EC2_PROJECTS_ROOT}/${appId}`,
             // The head QA ran against (== the tree head; nothing commits between
             // deploy and this integrator). Pins the daemon's at-most-once-per-head
@@ -608,8 +619,8 @@ export const handler = async () => {
                 'dev',
               );
               const devJobId = planDepsShared.uuid();
-              await planDepsShared.createJob(
-                buildDeployJob({
+              await planDepsShared.createJob({
+                ...buildDeployJob({
                   jobId: devJobId,
                   epicId: deployEpic.epicId,
                   workingDir: deployEpic.workingDir,
@@ -617,7 +628,9 @@ export const handler = async () => {
                   nowIso: planDepsShared.now(),
                   target,
                 }),
-              );
+                // Plan-affinity: pin every job of this plan to one dispatch server.
+                affinityKey: `plan:${plan.planId}`,
+              });
               await planRepo.updatePlanFields(plan.planId, { devDeployJobId: devJobId });
               log('info', 'wave-completion-check', 'auto dev-deploy enqueued', {
                 planId: plan.planId,

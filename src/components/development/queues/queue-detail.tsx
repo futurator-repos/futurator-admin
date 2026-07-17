@@ -2,6 +2,8 @@
 import { useMemo, useState } from 'react';
 import { useQueueRequest, useRespondQueueRequest } from '@/hooks/use-queue-requests';
 import { useAgentEvents } from '@/hooks/use-agent-events';
+import { useAgentJob } from '@/hooks/use-agent-job';
+import { useServers } from '@/hooks/use-servers';
 import type { AgentJobStatus } from '@/types/agent-orchestrator';
 import type { QueueRequest, QueueRequestStatus } from '@/types/queue';
 
@@ -175,10 +177,17 @@ function ResponsePanel({ req }: { req: QueueRequest }) {
 
 export function QueueDetail({ requestId }: { requestId: string }) {
   const { data: req, isLoading } = useQueueRequest(requestId);
+  const { data: job } = useAgentJob(req?.jobId ?? null);
+  const { data: serversData } = useServers();
+  const serverNameById = new Map(
+    (serversData?.servers ?? []).map((s) => [s.serverId, s.name] as const),
+  );
 
   if (isLoading || !req) {
     return <div className="text-xs text-muted-foreground">Loading request…</div>;
   }
+
+  const dispatcherHost = req.response?.dispatcher?.host;
 
   return (
     <div className="space-y-4">
@@ -204,6 +213,27 @@ export function QueueDetail({ requestId }: { requestId: string }) {
         <MetaRow label="Receiver" value={req.receiver ?? '—'} />
         <MetaRow label="Callback" value={req.callbackUrl ?? '—'} />
         <MetaRow label="Job" value={req.jobId ?? '—'} />
+        <MetaRow
+          label="Machine"
+          value={
+            job?.assignedServerId || dispatcherHost ? (
+              <span className="inline-flex items-center gap-2">
+                {job?.assignedServerId && (
+                  <span title={job.assignReason}>
+                    {serverNameById.get(job.assignedServerId) ?? job.assignedServerId}
+                  </span>
+                )}
+                {dispatcherHost && (
+                  <span className="font-mono text-[10px] text-muted-foreground">
+                    ({dispatcherHost})
+                  </span>
+                )}
+              </span>
+            ) : (
+              '—'
+            )
+          }
+        />
         <MetaRow
           label="Prompt"
           value={<span className="text-muted-foreground">{req.prompt.slice(0, 400)}</span>}

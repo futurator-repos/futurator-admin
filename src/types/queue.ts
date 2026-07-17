@@ -19,6 +19,18 @@ export interface QueueAuditEntry {
   by?: string;
 }
 
+/** Mirrors `QueueDispatcher` in functions/shared/types/queue-request.ts — which
+ * machine/runtime actually ran the call, the model, and timings. */
+export interface QueueDispatcher {
+  source: string;
+  host: string;
+  model: string;
+  receivedAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+}
+
 export interface QueueResponseEnvelope {
   requestId: string;
   status: QueueRequestStatus;
@@ -26,6 +38,7 @@ export interface QueueResponseEnvelope {
   result?: string;
   error?: string;
   completedAt?: string;
+  dispatcher?: QueueDispatcher;
 }
 
 export interface QueueRequest {

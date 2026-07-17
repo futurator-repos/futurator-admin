@@ -66,6 +66,18 @@ export async function isServerAwareDispatchEnabled(): Promise<boolean> {
   return flag?.value === 'true';
 }
 
+/**
+ * Operator toggle for server-aware dispatch. Stores the literal string
+ * 'true'/'false' so `isServerAwareDispatchEnabled()`'s strict equality check
+ * reads it back correctly.
+ */
+export async function setServerAwareDispatch(
+  enabled: boolean,
+  updatedBy = SYSTEM_UPDATED_BY,
+): Promise<void> {
+  await setFlag(AGENT_FLAG_KEYS.dispatchServerAware, enabled ? 'true' : 'false', updatedBy);
+}
+
 async function readAffinityEntries(): Promise<Record<string, AffinityOwnerEntry>> {
   const flag = await getFlag(AGENT_FLAG_KEYS.dispatchAffinityOwners);
   if (!flag) return {};

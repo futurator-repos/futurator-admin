@@ -36,11 +36,12 @@ vi.mock('../../shared/repositories/agent-jobs-repository', () => ({
   createJob: vi.fn(),
 }));
 vi.mock('../../shared/repositories/app-repository', () => ({ getApp: vi.fn() }));
+const { createJobMock } = vi.hoisted(() => ({ createJobMock: vi.fn() }));
 vi.mock('../../shared/services/reduce-deps', () => ({
   buildPlanReducerDeps: () => ({
     uuid: () => 'uuid-1',
     now: () => '2026-07-08T00:00:00.000Z',
-    createJob: vi.fn(),
+    createJob: createJobMock,
     writeAttentionItem: vi.fn(),
   }),
 }));
@@ -84,6 +85,7 @@ beforeEach(() => {
   logMock.mockReset();
   getAllPlansMock.mockReset();
   updatePlanFieldsMock.mockReset();
+  createJobMock.mockReset();
 });
 
 describe('handleP3Plan — visible SKIP diagnosis (Slice B)', () => {
@@ -130,5 +132,108 @@ describe('handleP3Plan — visible SKIP diagnosis (Slice B)', () => {
     ]);
     await handler();
     expect(skipLogged()).toBe(false);
+  });
+});
+
+describe('handleP3Plan — plan.skipQa (Task C, per-plan QA bypass)', () => {
+  it('flag ON, devUrl + qaCommitSha present, but plan.skipQa → no p3-qa job + SKIP warn with plan.skipQa reason', async () => {
+    process.env.P3_QA_REVIEW = 'on';
+    getAllPlansMock.mockResolvedValue([
+      p3ReviewPlan({ devUrl: 'https://d/', qaCommitSha: 'a'.repeat(40), skipQa: true }),
+    ]);
+    await handler();
+    expect(skipLogged()).toBe(true);
+    expect(skipReason()).toContain('plan.skipQa');
+    const qaCall = createJobMock.mock.calls.find(
+      ([job]) => (job as { jobType?: string }).jobType === 'p3-qa',
+    );
+    expect(qaCall).toBeUndefined();
+  });
+
+  it('flag ON, devUrl + qaCommitSha present, skipQa explicitly false → unchanged: enqueues (no SKIP warn)', async () => {
+    process.env.P3_QA_REVIEW = 'on';
+    getAllPlansMock.mockResolvedValue([
+      p3ReviewPlan({ devUrl: 'https://d/', qaCommitSha: 'a'.repeat(40), skipQa: false }),
+    ]);
+    await handler();
+    expect(skipLogged()).toBe(false);
+    const qaCall = createJobMock.mock.calls.find(
+      ([job]) => (job as { jobType?: string }).jobType === 'p3-qa',
+    );
+    expect(qaCall).toBeDefined();
+  });
+
+  it('flag ON, devUrl + qaCommitSha present, skipQa absent → unchanged: enqueues (no SKIP warn)', async () => {
+    process.env.P3_QA_REVIEW = 'on';
+    getAllPlansMock.mockResolvedValue([
+      p3ReviewPlan({ devUrl: 'https://d/', qaCommitSha: 'a'.repeat(40) }),
+    ]);
+    await handler();
+    expect(skipLogged()).toBe(false);
+    const qaCall = createJobMock.mock.calls.find(
+      ([job]) => (job as { jobType?: string }).jobType === 'p3-qa',
+    );
+    expect(qaCall).toBeDefined();
+  });
+
+  it('blocking undecided verdict + skipQa → QA autopilot fix loop does NOT fire (no integrator job, no fixing transition)', async () => {
+    process.env.P3_QA_REVIEW = 'on';
+    getAllPlansMock.mockResolvedValue([
+      p3ReviewPlan({
+        devUrl: 'https://d/',
+        qaCommitSha: 'a'.repeat(40),
+        p3QaJobId: 'qa-1',
+        skipQa: true,
+        qaAutopilot: true,
+        p3QaVerdict: { blocking: true, ranAtSha: 'a'.repeat(40) },
+      }),
+    ]);
+    await handler();
+    const integratorCall = createJobMock.mock.calls.find(
+      ([job]) => (job as { jobType?: string }).jobType === 'integrator',
+    );
+    expect(integratorCall).toBeUndefined();
+    const firedFixing = updatePlanFieldsMock.mock.calls.some(
+      ([, fields]) => (fields as { status?: string }).status === 'fixing',
+    );
+    expect(firedFixing).toBe(false);
+  });
+
+  it('blocking undecided verdict, skipQa false → QA autopilot fix loop still fires (unchanged)', async () => {
+    process.env.P3_QA_REVIEW = 'on';
+    getAllPlansMock.mockResolvedValue([
+      p3ReviewPlan({
+        devUrl: 'https://d/',
+        qaCommitSha: 'a'.repeat(40),
+        p3QaJobId: 'qa-1',
+        skipQa: false,
+        qaAutopilot: true,
+        p3QaVerdict: { blocking: true, ranAtSha: 'a'.repeat(40) },
+      }),
+    ]);
+    await handler();
+    const integratorCall = createJobMock.mock.calls.find(
+      ([job]) => (job as { jobType?: string }).jobType === 'integrator',
+    );
+    expect(integratorCall).toBeDefined();
+    const firedFixing = updatePlanFieldsMock.mock.calls.some(
+      ([, fields]) => (fields as { status?: string }).status === 'fixing',
+    );
+    expect(firedFixing).toBe(true);
+  });
+});
+
+describe('handleP3Plan — plan-affinity stamping', () => {
+  it('stamps affinityKey `plan:<planId>` on the enqueued p3-qa job', async () => {
+    process.env.P3_QA_REVIEW = 'on';
+    getAllPlansMock.mockResolvedValue([
+      p3ReviewPlan({ devUrl: 'https://d/', qaCommitSha: 'a'.repeat(40) }),
+    ]);
+    await handler();
+    const qaCall = createJobMock.mock.calls.find(
+      ([job]) => (job as { jobType?: string }).jobType === 'p3-qa',
+    );
+    expect(qaCall).toBeDefined();
+    expect((qaCall?.[0] as { affinityKey?: string }).affinityKey).toBe('plan:plan-b');
   });
 });

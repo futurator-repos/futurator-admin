@@ -103,6 +103,15 @@ import {
 // All of it is gated behind the `dispatch.serverAware` agent-flag; with the
 // flag off the daemon behaves byte-for-byte like the legacy global-pool poll.
 import { resolveServerId } from './lib/server-identity.mjs';
+// Servers module (spec §5) — stamp plan-affinity (+ optional self-assign) onto
+// plan-scoped jobs the daemon creates, so the dispatcher pins them to one server.
+import { planAffinityStamp } from './lib/plan-affinity.mjs';
+// Task B (2026-07-17) — Mac/fleet path portability. agent-jobs rows bake
+// fleet-absolute paths (/home/ubuntu/…) at enqueue time; on a host whose roots
+// differ (runner script sets PROJECTS_ROOT / FUTURATOR_WORKTREE_ROOT) they are
+// rewritten ONCE at the job-intake seam (runJobAsync). On fleet/EC2 boxes the
+// remap is inactive (env unset or equal to the legacy defaults) — exact no-op.
+import { remapDaemonPath, remapJobPaths, isRemapActive } from './lib/path-remap.mjs';
 // Servers module (Task 19, spec §6) — Claude OAuth relay for fleet daemons
 // that don't have SSM access. Inert (never called) unless ENROLL_TOKEN is set.
 import { fetchAgentCredentials } from './lib/creds-fetch.mjs';
@@ -169,7 +178,7 @@ import { startReflectionApplyPoller } from './lib/reflection-apply-poller.mjs';
 import { applyReflection } from './pipelines/reflector-apply.mjs';
 // 2026-05-19 — Phase 1 worktree rollout. Materialize per-story worktrees
 // + node_modules symlinks before any pipeline step runs.
-import { setupStoryWorktree, teardownStoryWorktree } from './lib/story-worktree.mjs';
+import { setupStoryWorktree, teardownStoryWorktree, BARE_REPOS_ROOT } from './lib/story-worktree.mjs';
 // Concept v2 (E1.2/E2.4) — land generated concept docs on disk + their manifests.
 import {
   writeConceptArtifact,
@@ -317,6 +326,10 @@ const EPICS_TABLE = process.env.EPIC_WORKFLOWS_TABLE || 'futurator-epic-workflow
 const APPS_TABLE = process.env.APPS_TABLE || 'futurator-apps';
 // PR-22 — post-deploy writebacks read the plan row to derive App linkage.
 const PLANS_TABLE = process.env.PLANS_TABLE || 'futurator-plans';
+// Task B (2026-07-17) — host-local filesystem roots. Fleet/EC2 leaves both
+// envs unset so every derived path is byte-identical to the old literals.
+const DAEMON_PROJECTS_ROOT = process.env.PROJECTS_ROOT || '/home/ubuntu/projects';
+const DAEMON_WORKTREE_ROOT = process.env.FUTURATOR_WORKTREE_ROOT || '/home/ubuntu/worktrees';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS || '3000', 10);
 const OAUTH_CREDS_PATH =
   process.env.CLAUDE_CREDENTIALS_PATH || '/home/ubuntu/.claude/.credentials.json';
@@ -397,8 +410,13 @@ let _lambdaInvokeCmd = null;
 // that have no GitHub repo. Best-effort, fire-and-forget.
 let _s3Client = null;
 function daemonGit(args, cwd) {
+  // Task B (2026-07-17) — on remapped hosts (Mac / non-fleet boxes, detected
+  // via isRemapActive) the daemon runs as the operator user and no `ubuntu`
+  // user exists, so drop the sudo indirection. Fleet/EC2 (remap inactive)
+  // keeps the root→ubuntu sudo spawn byte-for-byte.
+  const [bin, argv] = isRemapActive() ? ['git', args] : ['sudo', ['-n', '-u', 'ubuntu', 'git', ...args]];
   return new Promise((resolve) => {
-    const child = spawn('sudo', ['-n', '-u', 'ubuntu', 'git', ...args], {
+    const child = spawn(bin, argv, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -423,7 +441,7 @@ async function snapshotGitGraph(appId, short) {
       appId,
       bare,
       git: daemonGit,
-      bareOpCwd: '/home/ubuntu/projects',
+      bareOpCwd: DAEMON_PROJECTS_ROOT,
       s3: _s3Client,
       log,
     });
@@ -1893,6 +1911,12 @@ async function runFrontierScan() {
           log('warn', `[frontier] story ${storyNode.storyId} has no resolvable workingDir — skipping mint`);
           return;
         }
+        // Plan-affinity only: the frontier tick has no parent job (it runs on a
+        // scan cadence, not inside a job's execution), so self-assign never
+        // applies — the sweeper picks the owner and every story of the plan
+        // follows it. Self-assigning here would strand ALL stories on whichever
+        // daemon happened to run the scan.
+        Object.assign(row, planAffinityStamp({ planId }));
         await mintStoryDevJob({ ddb, table: JOBS_TABLE, row });
         // Link the story row → its story-dev job so Labs3 can stream the live log
         // (the story detail fetches events via story.jobId). Best-effort — a miss
@@ -2414,7 +2438,16 @@ async function executeStoryDevJob(job) {
       storyId,
       scope: 'story',
       createJob: async (payload) => {
-        await ddb.send(new PutCommand({ TableName: JOBS_TABLE, Item: payload }));
+        // Plan-affinity (+ self-assign when THIS server ran the parent story-dev
+        // job): the reflector reads the plan's worktree, so it belongs on the
+        // same server as the plan.
+        const affinity = planAffinityStamp({
+          planId,
+          parentJob: job,
+          serverId: SERVER_ID,
+          serverAware: serverAwareDispatch,
+        });
+        await ddb.send(new PutCommand({ TableName: JOBS_TABLE, Item: { ...payload, ...affinity } }));
         return payload.jobId;
       },
       uuid: randomUUID,
@@ -2473,7 +2506,7 @@ async function executeStoryDevJob(job) {
 
   // Advance the plan lifecycle when EVERY story is terminal — runs on BOTH the
   // success and failure paths (a failing last story must still trigger it).
-  await maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short });
+  await maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short, parentJob: job });
 
   // updateJobFields ALWAYS appends updatedAt — do NOT pass it (duplicate path →
   // "Two document paths overlap" → the status write throws → the job never
@@ -2490,7 +2523,7 @@ async function executeStoryDevJob(job) {
  * CAS-claims the `integratorJobId` slot (serializes racing last-completions) and
  * mints a fresh `integrator` job pinned to `targetHeadSha`. Never throws out.
  */
-async function maybeEnqueueIntegrator({ planId, planRow, headSha, workingDir, short }) {
+async function maybeEnqueueIntegrator({ planId, planRow, headSha, workingDir, short, parentJob = null }) {
   try {
     const prevJobId = planRow?.integratorJobId;
     // AT-MOST-ONCE PER HEAD (the staleness discipline the redesign calls for):
@@ -2554,6 +2587,14 @@ async function maybeEnqueueIntegrator({ planId, planRow, headSha, workingDir, sh
                 createdBy: planRow?.createdBy || 'daemon:integrate-run',
                 createdAt: nowIso,
                 updatedAt: nowIso,
+                // Plan-affinity (+ self-assign when THIS server ran the parent job).
+                ...planAffinityStamp({
+                  planId,
+                  parentJob,
+                  serverId: SERVER_ID,
+                  serverAware: serverAwareDispatch,
+                  nowIso,
+                }),
               },
             },
           },
@@ -2706,7 +2747,7 @@ async function executeIntegratorJob(job) {
   // Re-trigger the lifecycle advance now that the head may be integrate-verified
   // (green) — flips to review — or still is not (exhausted) — holds, surfacing the
   // failure to the operator via the completed-but-red integrator job.
-  await maybeAdvancePlanOnAllResolved({ planId, planRow, storyId: undefined, short });
+  await maybeAdvancePlanOnAllResolved({ planId, planRow, storyId: undefined, short, parentJob: job });
 }
 
 /**
@@ -2720,7 +2761,7 @@ async function executeIntegratorJob(job) {
  * must advance to review, not deadlock. Also enqueues the plan-close reflector.
  * Idempotent conditional write → concurrent last-completions race safely.
  */
-async function maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short }) {
+async function maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short, parentJob = null }) {
   try {
     const { Items } = await ddb.send(new QueryCommand({
       TableName: PLAN_SPEC_GRAPH_TABLE,
@@ -2737,7 +2778,14 @@ async function maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short }
       plan: planRow,
       scope: 'plan',
       createJob: async (payload) => {
-        await ddb.send(new PutCommand({ TableName: JOBS_TABLE, Item: payload }));
+        // Plan-affinity (+ self-assign when THIS server ran the parent job).
+        const affinity = planAffinityStamp({
+          planId,
+          parentJob,
+          serverId: SERVER_ID,
+          serverAware: serverAwareDispatch,
+        });
+        await ddb.send(new PutCommand({ TableName: JOBS_TABLE, Item: { ...payload, ...affinity } }));
         return payload.jobId;
       },
       uuid: randomUUID,
@@ -2761,7 +2809,9 @@ async function maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short }
         // true and flips to review. A later fix-story commit moves the head and
         // forces a fresh Integrator round. Fail-closed: an unresolvable head or a
         // still-red tree never advances.
-        const workingDir = planRow?.workingDir;
+        // Task B (2026-07-17) — plan rows bake the fleet path; remap to the
+        // host-local root (identity on fleet boxes) before touching git.
+        const workingDir = remapDaemonPath(planRow?.workingDir);
         let headSha = '';
         if (workingDir) {
           try {
@@ -2771,7 +2821,7 @@ async function maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short }
         }
         if (!integrateSatisfied({ integrateVerifiedSha: planRow?.integrateVerifiedSha, headSha })) {
           if (workingDir && headSha) {
-            await maybeEnqueueIntegrator({ planId, planRow, headSha, workingDir, short });
+            await maybeEnqueueIntegrator({ planId, planRow, headSha, workingDir, short, parentJob });
           } else {
             log('warn', `[${short}] plan ${planId.slice(0, 8)} integrate-gate: no resolvable workingDir/head — holding out of review (fail-closed)`);
           }
@@ -2791,6 +2841,23 @@ async function maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short }
             },
           }));
           log('info', `[${short}] plan ${planId.slice(0, 8)} → review (all ${nodes.length} stories resolved, integrate-verified @${String(headSha).slice(0, 7)}${failedCount ? `, ${failedCount} failed — deployed-app QA is the gate` : ''})`);
+          // Task B (2026-07-17) — PUSH-ON-PLAN-CLOSE. Repos move BETWEEN
+          // machines only via GitHub, so the moment a plan flips to review its
+          // branch state must be visible off-box. Best-effort + LOUD: a push
+          // failure never blocks or reverts the flip. Only on remapped hosts
+          // (Mac/fleet dev) — fleet/EC2 stays an exact no-op.
+          if (isRemapActive() && workingDir) {
+            try {
+              const push = await daemonGit(['push', 'origin', 'HEAD'], workingDir);
+              if (push.code === 0) {
+                log('info', `[${short}] plan ${planId.slice(0, 8)} push-on-close: pushed HEAD → origin from ${workingDir}`);
+              } else {
+                log('error', `[${short}] plan ${planId.slice(0, 8)} push-on-close FAILED (exit ${push.code}) in ${workingDir}: ${(push.stderr || push.stdout).trim().slice(0, 300)} — plan is in review anyway; push manually`);
+              }
+            } catch (pushErr) {
+              log('error', `[${short}] plan ${planId.slice(0, 8)} push-on-close threw: ${pushErr.message} — plan is in review anyway; push manually`);
+            }
+          }
         } catch { /* conditional fail = already advanced by a racing completion; fine */ }
       }
     }
@@ -4305,25 +4372,22 @@ async function executePipeline(job) {
   // worktree as a happy reuse (daemon restart picked up the same story).
   if (
     workingDir &&
-    workingDir.startsWith('/home/ubuntu/worktrees/') &&
+    workingDir.startsWith(`${DAEMON_WORKTREE_ROOT}/`) &&
     variables.STORY_ID &&
     variables.STORY_ID !== '(not provided)'
   ) {
     try {
-      // Path shape: /home/ubuntu/worktrees/<app>/<plan>/<storyId>/
-      const parts = workingDir.replace(/\/+$/, '').split('/').filter(Boolean);
-      // [home, ubuntu, worktrees, <app>, <plan>, <storyId>]
-      const appId = parts[3];
-      const planSlug = parts[4];
-      const storyId = parts[5];
+      // Path shape: <DAEMON_WORKTREE_ROOT>/<app>/<plan>/<storyId>/
+      const rel = workingDir.replace(/\/+$/, '').slice(`${DAEMON_WORKTREE_ROOT}/`.length);
+      const [appId, planSlug, storyId] = rel.split('/').filter(Boolean);
       if (!appId || !planSlug || !storyId) {
-        throw new Error(`workingDir does not match /home/ubuntu/worktrees/<app>/<plan>/<story>/ shape: ${workingDir}`);
+        throw new Error(`workingDir does not match ${DAEMON_WORKTREE_ROOT}/<app>/<plan>/<story>/ shape: ${workingDir}`);
       }
       const setup = await setupStoryWorktree({
         appId,
         planSlug,
         storyId,
-        sourceWorktree: `/home/ubuntu/projects/${appId}`,
+        sourceWorktree: `${DAEMON_PROJECTS_ROOT}/${appId}`,
         log: (level, msg) => log(level, msg),
       });
       log(
@@ -7324,6 +7388,17 @@ async function executeAppBootstrapJob(job) {
       writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
       partyCtx: buildPartyCtx(),
       runPartyBootstrap,
+      // 2026-07-17 — host-portable roots. Without these the saga's own
+      // `/home/ubuntu/*` defaults apply, which EACCES on a remapped host
+      // (Mac runner) where /home/ubuntu is not writable. BARE_REPOS_ROOT is
+      // env-driven (FUTURATOR_BARE_REPOS_ROOT, exported by run-fleet-local.sh)
+      // and shared with story-worktree.mjs so both features agree on one
+      // repos root; remapDaemonPath additionally rewrites the /home/ubuntu
+      // default when only PROJECTS_ROOT/FUTURATOR_WORKTREE_ROOT are remapped.
+      // Fleet/EC2 (env unset, remap inactive) resolves to the same
+      // /home/ubuntu/{repos,projects} defaults as before — exact no-op.
+      reposRoot: remapDaemonPath(BARE_REPOS_ROOT),
+      projectsRoot: DAEMON_PROJECTS_ROOT,
       // Epic 3 Story 3.3 (2026-05-20) — saga inserts the T1 SKILL-SCOUT
       // job row directly at bootstrap completion. Pass-through to DDB.
       insertAgentJob: async (newJob) => {
@@ -7964,7 +8039,65 @@ async function executeWaveMergeJob(job) {
 
 // ── Poll loop ──
 
+// Task B (2026-07-17) — REPO MATERIALIZATION for plan-scoped jobs on a fresh
+// machine. Plan-affinity keeps a plan's jobs on one host; when that host has
+// never seen the app, clone it from GitHub into the (already-remapped)
+// workingDir. Git auth rides the insteadOf PAT rewrite that
+// configure-git-identity.sh installs. Rules:
+//   - remapped hosts only (isRemapActive) — fleet/EC2 is an exact no-op;
+//   - plan-scoped jobs only (job.planId) — NEVER queue-requests, which
+//     provision their own run dirs;
+//   - per-story worktree dirs are excluded — setupStoryWorktree owns those;
+//   - no resolvable repo URL ⇒ THROW (loud FAILED job, no silent skip).
+async function materializePlanWorkingDirIfMissing(job) {
+  if (!isRemapActive()) return;
+  // Plan-scope detection: legacy pipeline + integrator jobs stamp a top-level
+  // planId; story-dev / quick-planspec / reflector jobs carry it in their
+  // payload refs. app-bootstrap is EXCLUDED even though it is plan-pinned —
+  // its own bare-clone step is what creates the repo. queue-requests carry no
+  // plan reference at all and are excluded naturally.
+  const planId =
+    job.planId ||
+    job.storyNodeRef?.planId ||
+    job.storyDevPayload?.planId ||
+    job.quickPlanspecPayload?.planId ||
+    job.reflectorPayload?.planId ||
+    null;
+  if (!planId || !job.workingDir || job.jobType === 'app-bootstrap') return;
+  const workingDir = job.workingDir; // remapped at the runJobAsync intake seam
+  if (existsSync(workingDir)) return;
+  if (workingDir.startsWith(`${DAEMON_WORKTREE_ROOT}/`)) return;
+  const short = job.jobId.slice(0, 8);
+  // Fleet convention (derive-project-id.ts): last path segment == appId.
+  const appId =
+    job.appId || job.projectId || pathBasename(workingDir.replace(/\/+$/, ''));
+  const app = await getAppRow(appId);
+  if (!app) {
+    throw new Error(
+      `repo-materialize: workingDir ${workingDir} is missing and no App row exists for '${appId}' (APPS_TABLE) — no repo URL to clone from; refusing to run plan-scoped job without a repo`,
+    );
+  }
+  // Brownfield apps carry githubRepoUrl; greenfield apps fall back to the
+  // futurator-repos/<appId> convention (parse-repo-url.ts).
+  const repoUrl = app.githubRepoUrl || `https://github.com/futurator-repos/${appId}.git`;
+  const parentDir = pathJoin(workingDir, '..');
+  mkdirSync(parentDir, { recursive: true });
+  log('info', `[${short}] repo-materialize: workingDir missing — cloning ${repoUrl} → ${workingDir} (plan ${String(planId).slice(0, 8)})`);
+  const res = await daemonGit(['clone', repoUrl, workingDir], parentDir);
+  if (res.code !== 0) {
+    throw new Error(
+      `repo-materialize: git clone ${repoUrl} → ${workingDir} FAILED (exit ${res.code}): ${(res.stderr || res.stdout).trim().slice(0, 400)}`,
+    );
+  }
+  log('info', `[${short}] repo-materialize: clone complete → ${workingDir}`);
+}
+
 async function runJobAsync(job) {
+  // Task B (2026-07-17) — THE single path-remap seam. Rewrite every baked
+  // fleet-absolute path (workingDir, *Payload path fields, legacy step
+  // command/prompt text) to this host's roots before the claim/handlers see
+  // the job. Exact no-op on fleet/EC2 boxes (remap inactive).
+  remapJobPaths(job);
   // Servers module (Task 18, spec §5.2) — with `dispatch.serverAware` on, win
   // the CAS lease BEFORE taking a slot: a conditional PENDING→RUNNING write
   // pinned to this SERVER_ID (buildJobClaimParams), so N daemons racing the
@@ -8045,6 +8178,12 @@ async function runJobAsync(job) {
   }
 
   try {
+    // Task B (2026-07-17) — clone-if-missing repo materialization. Plan-affinity
+    // pins a plan's jobs to one machine, but a machine seeing the plan for the
+    // first time has no checkout — repos move BETWEEN machines only via GitHub.
+    // Plan-scoped jobs only; a failure throws → handleJobFailure marks FAILED
+    // (loud, no silent skip). Inactive on fleet/EC2 (remap off) — exact no-op.
+    await materializePlanWorkingDirIfMissing(job);
     if (handler === JOB_HANDLER_EPIC_DEV) {
       await executeEpicDevJob(job);
     } else if (handler === JOB_HANDLER_PARTY_BOOTSTRAP) {
@@ -8236,6 +8375,15 @@ async function enqueueRemediationMergeIfNeeded(job) {
           postMergeValidationCmd: null,
         },
         pipeline: { agents: {}, steps: [] },
+        // Plan-affinity (+ self-assign when THIS server ran the parent rerun job):
+        // the merge integrates the fix into plan/<slug> on the plan's worktree.
+        ...planAffinityStamp({
+          planId: rm.planId,
+          parentJob: job,
+          serverId: SERVER_ID,
+          serverAware: serverAwareDispatch,
+          nowIso: now,
+        }),
       },
     }),
   );
@@ -8342,7 +8490,7 @@ async function executeSkillScoutJob(job) {
     const sessions = {};
     const stepResults = [];
     const agents = j.pipeline?.agents || {};
-    const workingDir = j.workingDir || `/home/ubuntu/projects/${j.skillScoutPayload.projectSlug}`;
+    const workingDir = j.workingDir || `${DAEMON_PROJECTS_ROOT}/${j.skillScoutPayload.projectSlug}`;
     const { stepResult } = await executeStep(
       jobId,
       step,
@@ -8423,7 +8571,7 @@ async function executeSkillScoutJob(job) {
   try {
     const result = await runSkillScoutJob(job, {
       federationCache,
-      getProjectPath: (slug) => `/home/ubuntu/projects/${slug}`,
+      getProjectPath: (slug) => `${DAEMON_PROJECTS_ROOT}/${slug}`,
       executeAgentStep,
       applyConfirmedProposals,
       writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
@@ -8489,7 +8637,7 @@ async function executeSkillInstallJob(job) {
       applyConfirmedProposals,
       writeAttentionItem: (item) => writeAttentionItem(ddb, item, log),
       pushEvent,
-      getProjectPath: (slug) => `/home/ubuntu/projects/${slug}`,
+      getProjectPath: (slug) => `${DAEMON_PROJECTS_ROOT}/${slug}`,
     });
 
     if (result.ok) {

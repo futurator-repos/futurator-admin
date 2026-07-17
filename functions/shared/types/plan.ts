@@ -155,6 +155,11 @@ export interface Plan {
   qaAutopilot?: boolean;
   /** Autopilot rounds consumed (budget guard; attention item on exhaustion). */
   qaAutoFixRounds?: number;
+  /**
+   * Per-plan QA bypass — operator-set; suppresses the p3-qa stage AND the QA
+   * autopilot fix loop; dev-deploy still runs.
+   */
+  skipQa?: boolean;
   /** The persisted plan-level QA verdict (journeys + VQA + wiring + decision). */
   p3QaVerdict?: P3QaVerdict;
   /**

@@ -180,6 +180,12 @@ export interface AgentJob {
   /** Phase A.3 retry ladder: ISO timestamp gating daemon re-pick. */
   retryAfter?: string;
 
+  // Servers module — dispatch provenance written by server-dispatcher.ts.
+  // `assignedServerId` resolves to a ComputeServer.name via useServers().
+  assignedServerId?: string;
+  assignedAt?: string;
+  assignReason?: string;
+
   // Pipeline v1 — Failure recovery surface (Stories 1.1–1.8).
   attentionItemIds?: string[];
   salvageableExtractors?: string[];
