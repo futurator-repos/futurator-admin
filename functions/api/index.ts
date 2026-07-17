@@ -26,6 +26,7 @@ import {
   retryServer,
   stopServer,
   startServer,
+  setServerEnabled,
 } from '../shared/services/server-provisioning';
 import type { ComputeServer } from '../shared/types/compute-server';
 import {
@@ -6497,9 +6498,18 @@ app.put('/api/servers/:id', authMiddleware, async (c) => {
   if (!existing || existing.status === 'DELETED') {
     throw new NotFoundError('Server', serverId);
   }
-  await updateServerFields(serverId, parsed.data);
+  const { enabled, ...plainFields } = parsed.data;
+  if (Object.keys(plainFields).length > 0) {
+    await updateServerFields(serverId, plainFields);
+  }
+  // `enabled` is not a plain field: on a provider that can pause billing (GCP)
+  // it stops/starts the actual machine, so it goes through the service.
+  let vmAction: 'stopped' | 'started' | 'none' = 'none';
+  if (enabled !== undefined && enabled !== existing.enabled) {
+    ({ vmAction } = await setServerEnabled(serverId, enabled));
+  }
   const updated = await getServerById(serverId);
-  return c.json({ server: sanitizeServer(updated ?? existing) });
+  return c.json({ server: sanitizeServer(updated ?? existing), vmAction });
 });
 
 // POST /api/servers/:id/destroy — deprovision + full revocation (VM deleted

@@ -16,9 +16,11 @@ import {
   AlertDialogTitle,
   AlertDialogDescription,
 } from '@/components/ui/alert-dialog';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { useServerAction, useUpdateServer, heartbeatState } from '@/hooks/use-servers';
-import type { ComputeServer, ComputeServerStatus } from '@/types/servers';
+import { deriveServerState, disableBehaviour, type ServerTone } from '@/lib/server-state';
+import type { ComputeServer } from '@/types/servers';
 
 const MIN_CAP = 1;
 const MAX_CAP = 16;
@@ -31,25 +33,31 @@ const PROVIDER_LABEL: Record<ComputeServer['provider'], string> = {
   local: 'Local',
 };
 
-const STATUS_VARIANT: Record<
-  ComputeServerStatus,
-  { variant: 'default' | 'secondary' | 'destructive' | 'outline'; className: string }
-> = {
-  ACTIVE: { variant: 'outline', className: 'border-success text-success' },
-  ERROR: { variant: 'destructive', className: '' },
-  PROVISIONING: { variant: 'outline', className: 'border-warning text-warning' },
-  BOOTSTRAPPING: { variant: 'outline', className: 'border-warning text-warning' },
-  PAUSED: { variant: 'secondary', className: 'opacity-70' },
-  DEPROVISIONING: { variant: 'secondary', className: 'opacity-70' },
-  DELETED: { variant: 'secondary', className: 'opacity-50' },
+const TONE_CLASS: Record<ServerTone, string> = {
+  success: 'border-success text-success',
+  warning: 'border-warning text-warning',
+  destructive: 'border-destructive text-destructive',
+  muted: 'opacity-70',
 };
 
-function StatusBadge({ status }: { status: ComputeServerStatus }) {
-  const cfg = STATUS_VARIANT[status] ?? STATUS_VARIANT.PAUSED;
+/**
+ * Shows DERIVED state, not the raw lifecycle field: an ACTIVE row whose daemon
+ * has never reported in is UNREACHABLE, not active. Hover explains what the
+ * state means and what happens next.
+ */
+function StatusBadge({ server, now }: { server: ComputeServer; now: number }) {
+  const state = deriveServerState(server, now);
   return (
-    <Badge variant={cfg.variant} className={cn(cfg.className)}>
-      {status}
-    </Badge>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Badge variant="outline" className={cn(TONE_CLASS[state.tone])}>
+            {state.label}
+          </Badge>
+        }
+      />
+      <TooltipContent>{state.help}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -64,28 +72,31 @@ function secondsAgo(iso: string | undefined, now: number): number | null {
   return Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
 }
 
-function HeartbeatIndicator({ server }: { server: ComputeServer }) {
-  // Ticks every 5s so "last seen Xs ago" and the fresh/stale/dead dot stay
-  // live without a manual refresh (the fleet itself already polls at 5s).
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 5000);
-    return () => clearInterval(id);
-  }, []);
+function HeartbeatIndicator({ server, now }: { server: ComputeServer; now: number }) {
   const state = heartbeatState(server.lastHeartbeatAt, now);
   const age = secondsAgo(server.lastHeartbeatAt, now);
   return (
-    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      <span
-        aria-label={`heartbeat: ${state}`}
-        className={cn('inline-block size-2 rounded-full', HEARTBEAT_DOT_CLASS[state])}
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span
+              aria-label={`heartbeat: ${state}`}
+              className={cn('inline-block size-2 rounded-full', HEARTBEAT_DOT_CLASS[state])}
+            />
+            {state === 'dead' ? (
+              <span>last seen {age === null ? 'never' : `${age}s ago`}</span>
+            ) : (
+              <span className="capitalize">{state}</span>
+            )}
+          </span>
+        }
       />
-      {state === 'dead' ? (
-        <span>last seen {age === null ? 'never' : `${age}s ago`}</span>
-      ) : (
-        <span className="capitalize">{state}</span>
-      )}
-    </span>
+      <TooltipContent>
+        The daemon on this machine reports in every ~10 seconds. The dispatcher only assigns work to
+        servers seen in the last 60s, and reassigns a server&apos;s jobs after 2 minutes of silence.
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -197,8 +208,10 @@ function ProviderActions({ server }: { server: ComputeServer }) {
           }
         />
         <DropdownMenuContent align="end">
-          {showStopStart && server.status === 'ACTIVE' && (
-            <DropdownMenuItem onClick={() => run('stop')}>Stop</DropdownMenuItem>
+          {/* Stop/Start are the same lever as the Enabled toggle for GCP; keep
+              them for explicit use, but only offer the one that applies. */}
+          {showStopStart && server.status !== 'PAUSED' && server.status !== 'ERROR' && (
+            <DropdownMenuItem onClick={() => run('stop')}>Stop (pause billing)</DropdownMenuItem>
           )}
           {showStopStart && server.status === 'PAUSED' && (
             <DropdownMenuItem onClick={() => run('start')}>Start</DropdownMenuItem>
@@ -243,6 +256,17 @@ function ProviderActions({ server }: { server: ComputeServer }) {
 export function ServerCard({ server }: { server: ComputeServer }) {
   const update = useUpdateServer();
   const isLocal = server.serviceType === 'local-machine';
+  // One clock for the whole card — badge and heartbeat must never disagree.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  const disable = disableBehaviour(server);
+  // Only warn about wasted spend where it is actually being wasted: a disabled
+  // box on a provider that bills stopped machines, that still costs money.
+  const showCostWarning = !server.enabled && !!disable.costWarning && server.costPerHour > 0;
 
   return (
     <Card className="p-4">
@@ -258,7 +282,7 @@ export function ServerCard({ server }: { server: ComputeServer }) {
             {server.region} · {server.size} · {server.arch}
           </p>
         </div>
-        <StatusBadge status={server.status} />
+        <StatusBadge server={server} now={now} />
       </div>
 
       {server.statusMessage && (
@@ -266,27 +290,45 @@ export function ServerCard({ server }: { server: ComputeServer }) {
       )}
 
       <div className="mt-3 flex items-center justify-between">
-        <HeartbeatIndicator server={server} />
-        <span className="font-mono text-xs tabular-nums text-muted-foreground">
-          {server.activeCount ?? 0}/{server.maxConcurrent}
-        </span>
+        <HeartbeatIndicator server={server} now={now} />
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span className="font-mono text-xs tabular-nums text-muted-foreground">
+                {server.activeCount ?? 0}/{server.maxConcurrent}
+              </span>
+            }
+          />
+          <TooltipContent>
+            Jobs running now / the cap you set. The dispatcher never exceeds the cap.
+          </TooltipContent>
+        </Tooltip>
       </div>
 
       <div className="mt-1 text-xs text-muted-foreground">${server.costPerHour.toFixed(2)}/hr</div>
 
       <div className="mt-3 flex items-center justify-between">
-        <label className="flex items-center gap-2 text-xs">
-          <Switch
-            checked={server.enabled}
-            onCheckedChange={(checked: boolean) =>
-              update.mutate({ serverId: server.serverId, input: { enabled: checked } })
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <label className="flex items-center gap-2 text-xs">
+                <Switch
+                  checked={server.enabled}
+                  onCheckedChange={(checked: boolean) =>
+                    update.mutate({ serverId: server.serverId, input: { enabled: checked } })
+                  }
+                  disabled={update.isPending}
+                />
+                Enabled
+              </label>
             }
-            disabled={update.isPending}
           />
-          Enabled
-        </label>
+          <TooltipContent>{disable.help}</TooltipContent>
+        </Tooltip>
         <CapStepper server={server} />
       </div>
+
+      {showCostWarning && <p className="mt-2 text-[11px] text-warning">⚠ {disable.costWarning}</p>}
 
       <div className="mt-3">
         {isLocal ? <LocalMachineActions server={server} /> : <ProviderActions server={server} />}

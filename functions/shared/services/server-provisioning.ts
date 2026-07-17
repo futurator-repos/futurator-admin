@@ -365,6 +365,53 @@ export async function refreshProvisioningServers(): Promise<void> {
  * stopped VMs so their adapters deliberately have no stop/start). 404-style
  * error when the provider lacks the capability.
  */
+/**
+ * Toggle a server's participation in dispatch, and — where the provider can
+ * actually pause billing — its machine too.
+ *
+ * Only GCP's adapter implements stop/start, and GCP stop pauses compute
+ * billing. Hetzner and Oracle bill stopped instances at full price, so for
+ * them "disabled" is a dispatch decision only; the UI says so rather than
+ * implying scale-to-zero (destroying is the way to stop cost there).
+ *
+ * `enabled` is persisted BEFORE any provider call: the dispatcher must stop
+ * assigning work immediately, even if the stop API is having a bad day. A
+ * failed stop is reported in `statusMessage`, never swallowed — a machine you
+ * think is paused but isn't is exactly the surprise-bill case.
+ */
+export async function setServerEnabled(
+  serverId: string,
+  enabled: boolean,
+): Promise<{ server: ComputeServer; vmAction: 'stopped' | 'started' | 'none' }> {
+  const server = await requireServer(serverId);
+  await updateServerFields(serverId, { enabled });
+
+  const adapter = ADAPTER_PROVIDERS.has(server.provider) ? getAdapter(server.provider) : undefined;
+  const canPause = Boolean(adapter?.stop && adapter?.start);
+  if (!canPause || server.serviceType !== 'vm') {
+    return { server: { ...server, enabled }, vmAction: 'none' };
+  }
+
+  try {
+    if (!enabled && (server.status === 'ACTIVE' || server.status === 'BOOTSTRAPPING')) {
+      await adapter!.stop!(server.providerRef);
+      await updateServerFields(serverId, { status: 'PAUSED', statusMessage: '' });
+      return { server: { ...server, enabled, status: 'PAUSED' }, vmAction: 'stopped' };
+    }
+    if (enabled && server.status === 'PAUSED') {
+      await adapter!.start!(server.providerRef);
+      await updateServerFields(serverId, { status: 'BOOTSTRAPPING', statusMessage: '' });
+      return { server: { ...server, enabled, status: 'BOOTSTRAPPING' }, vmAction: 'started' };
+    }
+  } catch (err) {
+    const action = enabled ? 'start' : 'stop';
+    const message = `${action} failed: ${errorMessage(err)}`;
+    await updateServerFields(serverId, { statusMessage: message });
+    throw new AppError('PROVIDER_ERROR', message, 502);
+  }
+  return { server: { ...server, enabled }, vmAction: 'none' };
+}
+
 export async function stopServer(serverId: string): Promise<ComputeServer> {
   const server = await requireServer(serverId);
   const adapter = ADAPTER_PROVIDERS.has(server.provider) ? getAdapter(server.provider) : undefined;

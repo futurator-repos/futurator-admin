@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { useServers } from '@/hooks/use-servers';
 import { Button } from '@/components/ui/button';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import {
   Dialog,
   DialogContent,
@@ -86,11 +87,13 @@ export function FleetTab() {
       )}
 
       {!isLoading && !error && servers.length > 0 && (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {servers.map((server) => (
-            <ServerCard key={server.serverId} server={server} />
-          ))}
-        </div>
+        <TooltipProvider>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {servers.map((server) => (
+              <ServerCard key={server.serverId} server={server} />
+            ))}
+          </div>
+        </TooltipProvider>
       )}
 
       <Dialog open={wizardOpen} onOpenChange={setWizardOpen}>

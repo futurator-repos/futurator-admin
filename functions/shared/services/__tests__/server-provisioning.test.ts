@@ -26,7 +26,12 @@ vi.mock('../compute-providers', () => adapters);
 const credentialsSm = vi.hoisted(() => ({ getProviderPlacement: vi.fn() }));
 vi.mock('../provider-credentials-sm', () => credentialsSm);
 
-import { provisionServer, destroyServer, refreshProvisioningServers } from '../server-provisioning';
+import {
+  provisionServer,
+  destroyServer,
+  refreshProvisioningServers,
+  setServerEnabled,
+} from '../server-provisioning';
 import { hashEnrollToken } from '../agent-credentials-relay';
 import type { ComputeServer } from '../../types/compute-server';
 
@@ -72,6 +77,71 @@ beforeEach(() => {
   vi.clearAllMocks();
   process.env.DAEMON_BUNDLE_S3_URI = 's3://bundle-bucket/daemon/';
   process.env.AWS_REGION = 'eu-central-1';
+});
+
+describe('setServerEnabled — the toggle means what the card says', () => {
+  it('GCP: disabling stops the VM (billing pauses) and parks it PAUSED', async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    repo.getServerById.mockResolvedValue(
+      cloudRow({ provider: 'gcp', serviceType: 'vm', status: 'ACTIVE', enabled: true }),
+    );
+    adapters.getAdapter.mockReturnValue({ stop, start: vi.fn() });
+
+    const { vmAction, server } = await setServerEnabled('srv_gcp_1', false);
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(vmAction).toBe('stopped');
+    expect(server.status).toBe('PAUSED');
+  });
+
+  it('GCP: enabling a PAUSED server starts it again', async () => {
+    const start = vi.fn().mockResolvedValue(undefined);
+    repo.getServerById.mockResolvedValue(
+      cloudRow({ provider: 'gcp', serviceType: 'vm', status: 'PAUSED', enabled: false }),
+    );
+    adapters.getAdapter.mockReturnValue({ stop: vi.fn(), start });
+
+    const { vmAction, server } = await setServerEnabled('srv_gcp_1', true);
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(vmAction).toBe('started');
+    expect(server.status).toBe('BOOTSTRAPPING');
+  });
+
+  it('Hetzner: disabling touches no VM — stopping there still bills, so Destroy is the lever', async () => {
+    const stop = vi.fn();
+    repo.getServerById.mockResolvedValue(
+      cloudRow({ provider: 'hetzner', serviceType: 'vm', status: 'ACTIVE', enabled: true }),
+    );
+    // The hetzner adapter has no stop/start capability at all.
+    adapters.getAdapter.mockReturnValue({ provision: vi.fn(), destroy: vi.fn(), status: vi.fn() });
+
+    const { vmAction, server } = await setServerEnabled('srv_hetzner_1', false);
+
+    expect(stop).not.toHaveBeenCalled();
+    expect(vmAction).toBe('none');
+    expect(server.status).toBe('ACTIVE'); // still running, still billing — honestly reported
+    expect(server.enabled).toBe(false); // but the dispatcher skips it
+  });
+
+  it('persists enabled BEFORE calling the provider, so a failed stop still halts dispatch', async () => {
+    repo.getServerById.mockResolvedValue(
+      cloudRow({ provider: 'gcp', serviceType: 'vm', status: 'ACTIVE', enabled: true }),
+    );
+    adapters.getAdapter.mockReturnValue({
+      stop: vi.fn().mockRejectedValue(new Error('GCP is having a bad day')),
+      start: vi.fn(),
+    });
+
+    await expect(setServerEnabled('srv_gcp_1', false)).rejects.toThrow(/stop failed/i);
+
+    // enabled:false was written first — the dispatcher must not keep sending work.
+    expect(repo.updateServerFields).toHaveBeenNthCalledWith(1, 'srv_gcp_1', { enabled: false });
+    // and the failure is recorded, never swallowed (a box you think is paused
+    // but isn't is exactly the surprise-bill case).
+    const messages = repo.updateServerFields.mock.calls.map((c) => c[1]?.statusMessage);
+    expect(messages.some((m?: string) => m?.includes('bad day'))).toBe(true);
+  });
 });
 
 describe('provisionServer — catalog guards (reject BEFORE any side effect)', () => {
