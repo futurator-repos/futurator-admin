@@ -68,7 +68,10 @@ export default $config({
     // 2026-07-15 AWS migration: EC2 daemon NOT migrated yet (cost). Crons that only
     // work THROUGH the daemon/EC2 are gated off until it lives in the new account.
     // The Cognito pool did not survive the dead account either.
-    const ENABLE_DAEMON_CRONS = false;
+    // 2026-07-18: re-enabled — the compute fleet (srv_local_mac + GCP boxes) now
+    // runs live daemons, and the server-aware dispatcher routes cron-minted jobs
+    // (dev-deploy, p3-qa, autopilot) to them by plan affinity.
+    const ENABLE_DAEMON_CRONS = true;
     const ENABLE_COGNITO_SYNC = false;
 
     // ──────────────────────────────────────────────────────────────
