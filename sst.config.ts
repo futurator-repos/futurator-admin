@@ -1252,6 +1252,23 @@ export default $config({
                 'arn:aws:s3:::futurator-admin-production-adminsiteassetsbucket-bcsesuts/*',
               ],
             },
+            // The daemon refuses to boot without a git identity: at startup
+            // scripts/configure-git-identity.sh reads the GitHub PAT from SSM
+            // so pipelines can clone/fetch/push. Without this grant a fleet
+            // server installs cleanly and then crash-loops on "no PAT found in
+            // any SSM path" — exactly what a first GCP box did (40 restarts).
+            // Scoped to the PAT parameters only; the daemon reads nothing else
+            // from SSM.
+            {
+              Sid: 'DaemonGithubPat',
+              Effect: 'Allow',
+              Action: ['ssm:GetParameter', 'ssm:GetParameters'],
+              Resource: [
+                `arn:aws:ssm:eu-central-1:${acctId}:parameter/sst/futurator-admin/production/Secret/GithubPat/value`,
+                `arn:aws:ssm:eu-central-1:${acctId}:parameter/sst/Futurator-Admin/production/Secret/GithubPat/value`,
+                `arn:aws:ssm:eu-central-1:${acctId}:parameter/futurator/_pipeline/github-pat`,
+              ],
+            },
           ],
         }),
       ),
