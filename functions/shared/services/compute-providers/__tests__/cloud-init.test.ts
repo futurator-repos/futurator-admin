@@ -82,13 +82,13 @@ describe('buildBootstrapScript', () => {
   // so the binary it invokes was never a root install.
   it('runs the daemon as a non-root user, and Claude belongs to that user', () => {
     const script = buildBootstrapScript(opts());
-    expect(script).toContain('User=futurator');
+    expect(script).toContain('User=ubuntu');
     expect(script).not.toMatch(/^User=root$/m);
     // creds + daemon live under the user's home, owned by them
-    expect(script).toContain('CLAUDE_CREDENTIALS_PATH=/home/futurator/.claude/.credentials.json');
-    expect(script).toContain('chown -R futurator:futurator');
+    expect(script).toContain('CLAUDE_CREDENTIALS_PATH=/home/ubuntu/.claude/.credentials.json');
+    expect(script).toContain('chown -R ubuntu:ubuntu');
     // Claude installed as the user (sudo -u), not as root
-    expect(script).toMatch(/sudo -u futurator[^\n]*claude\.ai\/install\.sh/);
+    expect(script).toMatch(/sudo -u ubuntu[^\n]*claude\.ai\/install\.sh/);
   });
 
   // Regression: GCE re-runs the startup-script on EVERY boot. The plain awscli
@@ -132,6 +132,6 @@ describe('buildBootstrapScript', () => {
 
   it('chmods the credentials file to 600', () => {
     const script = buildBootstrapScript(opts());
-    expect(script).toContain('chmod 600 /home/futurator/.claude/.credentials.json');
+    expect(script).toContain('chmod 600 /home/ubuntu/.claude/.credentials.json');
   });
 });

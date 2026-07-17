@@ -19,14 +19,15 @@ export interface BootstrapOpts {
 export function buildBootstrapScript(opts: BootstrapOpts): string {
   const awsCliArch = opts.arch === 'arm64' ? 'aarch64' : 'x86_64';
 
-  // The daemon spawns `claude --dangerously-skip-permissions`, which Claude
-  // REFUSES to run as root ("cannot be used with root/sudo privileges"). EC2's
-  // daemon runs as `ubuntu` and is fine; our fleet script ran everything as
-  // root, so every job failed instantly. So: a dedicated non-root `futurator`
-  // user owns the daemon, its home, its credentials, and Claude. The bootstrap
-  // itself still runs as root (that is how cloud-init/metadata runners invoke
-  // it) and drops to the user for the parts that must not be root.
-  const USER = 'futurator';
+  // The daemon must run NON-ROOT (Claude refuses --dangerously-skip-permissions
+  // as root) AND specifically as `ubuntu` with home /home/ubuntu: the daemon
+  // hardcodes ~15 paths under /home/ubuntu (queue-runs, repos, projects,
+  // worktrees, the creds default) because on EC2 it runs as the ubuntu user.
+  // GCE/Hetzner/Oracle images have no ubuntu user by default, so we create one
+  // and mirror EC2 exactly — far more robust than rewriting every path. The
+  // bootstrap body still runs as root (how metadata runners invoke it) and
+  // drops to this user for the parts that must not be root.
+  const USER = 'ubuntu';
   const HOME = `/home/${USER}`;
 
   return `#!/bin/bash
@@ -47,7 +48,11 @@ unzip -q /tmp/awscli.zip -d /tmp && /tmp/aws/install --update
 
 # The non-root user the daemon + Claude run as (idempotent).
 id ${USER} >/dev/null 2>&1 || useradd -m -d ${HOME} -s /bin/bash ${USER}
-mkdir -p /opt/futurator/daemon /etc/futurator ${HOME}/.claude /var/log/futurator/events
+mkdir -p /opt/futurator/daemon /etc/futurator /var/log/futurator/events
+# The user's OWN dirs must be user-owned before we install Claude as them: the
+# installer writes to ~/.claude/downloads, and a root-created ~/.claude fails
+# "Permission denied" under sudo -u. install -d sets the owner atomically.
+install -d -o ${USER} -g ${USER} ${HOME}/.claude
 
 # claude native binary — installed AS ${USER} so it lands in ${HOME}/.local/bin
 # and, crucially, is invoked by a non-root user at runtime. Guarded so a reboot
