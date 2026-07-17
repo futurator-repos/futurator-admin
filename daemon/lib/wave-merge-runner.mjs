@@ -23,6 +23,7 @@
 
 import { existsSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { isRemapActive } from './path-remap.mjs';
 import { dirname } from 'node:path';
 import {
   buildWaveMergeCommand,
@@ -123,7 +124,13 @@ export { runGit as defaultGitRunner, runShell as defaultShellRunner };
 
 function runGit(args, cwd, env = {}) {
   return new Promise((resolve) => {
-    const child = spawn('sudo', ['-n', '-u', 'ubuntu', 'git', ...args], {
+    // Remapped hosts (Mac / non-fleet, via isRemapActive) run as the operator
+    // user with no `ubuntu` account — drop the sudo indirection there.
+    // Fleet/EC2 (remap inactive) keeps the root→ubuntu sudo spawn byte-for-byte.
+    const [bin, argv] = isRemapActive()
+      ? ['git', args]
+      : ['sudo', ['-n', '-u', 'ubuntu', 'git', ...args]];
+    const child = spawn(bin, argv, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...env },
@@ -139,7 +146,11 @@ function runGit(args, cwd, env = {}) {
 
 function runShell(command, cwd, timeoutMs = 600_000) {
   return new Promise((resolve) => {
-    const child = spawn('sudo', ['-n', '-u', 'ubuntu', 'bash', '-c', command], {
+    // Same sudo-drop as runGit: no `ubuntu` user on remapped hosts.
+    const [bin, argv] = isRemapActive()
+      ? ['bash', ['-c', command]]
+      : ['sudo', ['-n', '-u', 'ubuntu', 'bash', '-c', command]];
+    const child = spawn(bin, argv, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

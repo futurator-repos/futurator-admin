@@ -77,7 +77,12 @@ export const ASSIST_STALE_TERMINAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 function runGit(args, cwd) {
   return new Promise((resolve) => {
-    const child = spawn('sudo', ['-n', '-u', 'ubuntu', 'git', ...args], {
+    // Sudo-drop on remapped hosts (no `ubuntu` user) — same idiom as
+    // agent-daemon's daemonGit; fleet/EC2 keeps sudo byte-for-byte.
+    const [bin, argv] = isRemapActive()
+      ? ['git', args]
+      : ['sudo', ['-n', '-u', 'ubuntu', 'git', ...args]];
+    const child = spawn(bin, argv, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

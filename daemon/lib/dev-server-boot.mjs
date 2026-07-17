@@ -26,11 +26,17 @@ export async function drainPort({ port, shell, cwd }) {
   // LISTENING), so the old kill/wait/kill-9 chain was a silent no-op and the
   // fresh boot died with EADDRINUSE against a squatter. fuser/ss are ground
   // truth: graceful TERM by port → wait until ss shows it free → KILL.
+  // fuser/ss are the Linux ground truth (see above); macOS has neither, so a
+  // lsof-based kill/wait runs alongside them (each line no-ops where its tool
+  // is absent). Without this, a Mac probe's stop() silently leaked the dev
+  // server and later boots EADDRINUSE'd against the squatter.
   await shell(
     [
       `fuser -k -TERM ${port}/tcp 2>/dev/null || true`,
-      `for i in $(seq 1 10); do ss -ltn "sport = :${port}" 2>/dev/null | grep -q LISTEN || break; sleep 1; done`,
+      `lsof -ti tcp:${port} 2>/dev/null | xargs kill -TERM 2>/dev/null || true`,
+      `for i in $(seq 1 10); do { ss -ltn "sport = :${port}" 2>/dev/null | grep -q LISTEN || lsof -ti tcp:${port} >/dev/null 2>&1; } || break; sleep 1; done`,
       `fuser -k -KILL ${port}/tcp 2>/dev/null || true`,
+      `lsof -ti tcp:${port} 2>/dev/null | xargs kill -9 2>/dev/null || true`,
       `sleep 1`,
     ].join('\n'),
     cwd,

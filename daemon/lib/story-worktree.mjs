@@ -18,6 +18,7 @@
 
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { isRemapActive } from './path-remap.mjs';
 import { dirname } from 'node:path';
 import { storyBranchName, storyWorktreeDir, WORKTREE_ROOT_DEFAULT } from './worktree-paths.mjs';
 import {
@@ -39,8 +40,13 @@ function runGit(args, cwd) {
   return new Promise((resolve) => {
     // `sudo -u ubuntu` is required when SSM-relayed callers (e.g. the
     // reaper invoked from a CloudWatch event) run as root. The daemon's
-    // own process IS ubuntu, in which case sudo is a no-op cost.
-    const child = spawn('sudo', ['-n', '-u', 'ubuntu', 'git', ...args], {
+    // own process IS ubuntu, in which case sudo is a no-op cost. On remapped
+    // hosts (Mac / non-fleet, via isRemapActive) there is no `ubuntu` user —
+    // run git directly as the operator user.
+    const [bin, argv] = isRemapActive()
+      ? ['git', args]
+      : ['sudo', ['-n', '-u', 'ubuntu', 'git', ...args]];
+    const child = spawn(bin, argv, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -263,15 +269,16 @@ async function resolveParentRef({ bare, planSlug }) {
  */
 function defaultInstallFn(cwd) {
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      'sudo',
-      ['-n', '-u', 'ubuntu', 'npm', 'install', '--prefer-offline', '--no-audit', '--no-fund'],
-      {
-        cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, CI: '1' },
-      },
-    );
+    // Sudo-drop on remapped hosts (no `ubuntu` user) — same idiom as runGit.
+    const npmArgs = ['install', '--prefer-offline', '--no-audit', '--no-fund'];
+    const [bin, argv] = isRemapActive()
+      ? ['npm', npmArgs]
+      : ['sudo', ['-n', '-u', 'ubuntu', 'npm', ...npmArgs]];
+    const child = spawn(bin, argv, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, CI: '1' },
+    });
     let stderr = '';
     child.stderr.on('data', (b) => (stderr += b.toString('utf8').slice(-2000)));
     child.on('close', (code) => {
