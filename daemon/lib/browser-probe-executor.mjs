@@ -24,6 +24,20 @@ import { isRemapActive } from './path-remap.mjs';
 // exact default-port behavior.
 let portSlot = 0;
 
+// Next.js 16 additionally enforces ONE dev server per project dir (a dev lock
+// keyed on the cwd — the second boot exits "already running (PID …)" no matter
+// the port; observed live as status=000 on port 3001 while 3000 served). So
+// concurrent probes on the SAME checkout must serialize their whole
+// boot→journey→stop critical section. Story parallelism is untouched — only
+// the probe sections queue, and each holds the lock for well under a minute.
+const cwdProbeLocks = new Map();
+function withCwdProbeLock(cwd, fn) {
+  const tail = cwdProbeLocks.get(cwd) || Promise.resolve();
+  const run = tail.then(fn, fn);
+  cwdProbeLocks.set(cwd, run.then(() => undefined, () => undefined));
+  return run;
+}
+
 // ── Pure probe interpreter ──────────────────────────────────────────────────
 
 /** Coerce a scalar token: 'true'/'false' → boolean, numeric → Number, else string. */
@@ -687,6 +701,9 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
       return done({ passed: false, detail: `browser probe not interpretable: ${probe.reason}` });
     }
 
+    // Whole boot→journey→stop section runs under the per-cwd probe lock: Next
+    // 16's dev lock allows one dev server per project dir (see cwdProbeLocks).
+    return withCwdProbeLock(cwd, async () => {
     const port = (qaContext.defaultPort ?? 3000) + (isRemapActive() ? 1 + (portSlot++ % 40) : 0);
     let boot;
     try {
@@ -717,5 +734,6 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
         /* best-effort */
       }
     }
+    });
   };
 }

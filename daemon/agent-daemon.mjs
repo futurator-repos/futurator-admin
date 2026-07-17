@@ -2295,8 +2295,32 @@ async function executeStoryDevJob(job) {
           ]);
           let diff = '';
           try {
-            const d = await daemonGit(['diff', `${sha}~1`, sha], job.workingDir);
-            diff = String(d.stdout || '');
+            // A retry attempt may commit NOTHING (the code landed in a prior
+            // attempt), so `sha~1..sha` shows whatever unrelated commit happens
+            // to be head — observed live: a movement retry was reviewed against
+            // an operator hotfix diff and its ACs "failed". Review the story's
+            // OWN commits (message convention `story(<storyId>)`), newest last;
+            // fall back to the attempt diff only when none exist.
+            const rvStoryId = job.storyDevPayload?.storyId;
+            let storyShas = [];
+            if (rvStoryId) {
+              const l = await daemonGit(
+                ['log', '--format=%H', '--grep', `story(${rvStoryId})`, '-n', '10', sha],
+                job.workingDir,
+              );
+              storyShas = String(l.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+            }
+            if (storyShas.length) {
+              const parts = [];
+              for (const s of storyShas.reverse()) {
+                const d = await daemonGit(['show', '--patch', '--format=commit %h %s', s], job.workingDir);
+                parts.push(String(d.stdout || ''));
+              }
+              diff = parts.join('\n');
+            } else {
+              const d = await daemonGit(['diff', `${sha}~1`, sha], job.workingDir);
+              diff = String(d.stdout || '');
+            }
           } catch { /* no diff → reviewer judges from ACs only */ }
           const prompt = buildReviewerPrompt({ storyTitle: job.storyDevPayload?.title, acceptanceCriteria, diff });
           // Reviewer effort is risk-tiered (model-effort-policy): cheap (low)
