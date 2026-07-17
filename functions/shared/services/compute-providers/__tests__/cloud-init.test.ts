@@ -68,7 +68,25 @@ describe('buildBootstrapScript', () => {
   it('installs and enables the futurator-daemon systemd unit', () => {
     const script = buildBootstrapScript(opts());
     expect(script).toContain('/etc/systemd/system/futurator-daemon.service');
-    expect(script).toContain('systemctl enable --now futurator-daemon');
+    expect(script).toContain('systemctl enable futurator-daemon');
+  });
+
+  // Regression: GCE re-runs the startup-script on EVERY boot. The plain awscli
+  // installer exits 1 on an existing install ("Found preexisting AWS CLI
+  // installation"), which under `set -e` aborted the script before the bundle
+  // sync — so a rebooted box silently kept running stale daemon code and could
+  // never repair itself. Our own Stop/Start toggle reboots the VM, so this is
+  // on the happy path, not an edge case.
+  it('is re-runnable: every step tolerates an already-provisioned box', () => {
+    const script = buildBootstrapScript(opts());
+    // awscli: updates instead of dying on a preexisting install.
+    expect(script).toContain('/tmp/aws/install --update');
+    // and restarts the daemon so the freshly-synced code is what actually runs
+    // (`enable --now` no-ops when the unit is already running).
+    expect(script).toContain('systemctl restart futurator-daemon');
+    // directories/symlinks/config use force/idempotent forms.
+    expect(script).toContain('mkdir -p');
+    expect(script).toContain('ln -sf');
   });
 
   it('uses the aarch64 awscli URL for arm64', () => {

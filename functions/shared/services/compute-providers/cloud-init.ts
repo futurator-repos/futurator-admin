@@ -29,9 +29,14 @@ export HOME=/root
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y && apt-get install -y git curl unzip jq
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs
-# awscli v2 (arch-aware)
+# awscli v2 (arch-aware). --update makes this re-runnable: GCE re-runs the
+# startup-script on EVERY boot, and the plain installer exits 1 with "Found
+# preexisting AWS CLI installation" — which under \`set -e\` killed the whole
+# script before the daemon-bundle sync below, so reboots silently kept running
+# stale code and a box could never repair itself.
 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${awsCliArch}.zip" -o /tmp/awscli.zip
-unzip -q /tmp/awscli.zip -d /tmp && /tmp/aws/install
+rm -rf /tmp/aws
+unzip -q /tmp/awscli.zip -d /tmp && /tmp/aws/install --update
 # claude native binary — installs to \$HOME/.local/bin
 curl -fsSL https://claude.ai/install.sh | bash
 ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude || true
@@ -68,6 +73,11 @@ WorkingDirectory=/opt/futurator/daemon
 [Install]
 WantedBy=multi-user.target
 UNITEOF
-systemctl daemon-reload && systemctl enable --now futurator-daemon
+# "enable --now" starts the unit only if it is stopped, so on a re-run it would
+# leave the OLD process serving while the synced code sits unused on disk.
+# restart always adopts what we just pulled.
+systemctl daemon-reload
+systemctl enable futurator-daemon
+systemctl restart futurator-daemon
 `;
 }
