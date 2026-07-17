@@ -75,5 +75,11 @@ export function parseReviewerVerdict(text) {
       if (Array.isArray(arr)) out.needsHuman = arr.map(String);
     } catch { /* ignore */ }
   }
+  // Contradiction rule: an explicit 'pass' verdict IS the reviewer's decision —
+  // a simultaneous needs-human listing for the same AC (models hedge) must not
+  // override it, or a fully-passing story escalates to needs-human with zero
+  // reasons (observed live: movement retry, all-pass verdicts + ac1 escalated).
+  // Escalation stays meaningful for ACs with a 'fail' or NO verdict.
+  out.needsHuman = out.needsHuman.filter((id) => out.verdicts[id] !== 'pass');
   return out;
 }
