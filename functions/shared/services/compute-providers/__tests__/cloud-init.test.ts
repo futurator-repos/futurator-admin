@@ -20,6 +20,35 @@ describe('buildBootstrapScript', () => {
     expect(script.startsWith('#!/bin/bash')).toBe(true);
   });
 
+  // Regression: GCE's metadata script runner gives startup-scripts NO $HOME.
+  // Under `set -u` the bootstrap aborted at the first $HOME reference — claude
+  // installed, the daemon never did, and the server sat in BOOTSTRAPPING
+  // forever. The script runs on a bare VM with an empty environment, so every
+  // variable it reads it must first define. (`bash -n` can't check this — it
+  // parses without evaluating, and passes the buggy script happily.)
+  it('reads no variable it does not define itself', () => {
+    const script = buildBootstrapScript(opts());
+    const assigned = new Set<string>();
+    for (const m of script.matchAll(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=/gm)) {
+      assigned.add(m[1]);
+    }
+    const referenced = new Set<string>();
+    for (const m of script.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g)) {
+      referenced.add(m[1]);
+    }
+    const external = [...referenced].filter((v) => !assigned.has(v));
+    expect(external).toEqual([]);
+  });
+
+  it('sets HOME itself rather than inheriting it', () => {
+    const script = buildBootstrapScript(opts());
+    const homeExport = script.indexOf('export HOME=');
+    expect(homeExport).toBeGreaterThan(-1);
+    // Every $HOME use must come after the export, or it is unbound again.
+    const firstUse = script.indexOf('$HOME/');
+    expect(firstUse).toBeGreaterThan(homeExport);
+  });
+
   it('embeds the server id, enroll token, and DAEMON_SOURCE', () => {
     const script = buildBootstrapScript(
       opts({ serverId: 'srv_abc123', enrollToken: 'tok_xyz789' }),

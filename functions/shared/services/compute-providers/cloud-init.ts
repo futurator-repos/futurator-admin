@@ -21,13 +21,18 @@ export function buildBootstrapScript(opts: BootstrapOpts): string {
 
   return `#!/bin/bash
 set -euo pipefail
+# GCE's metadata script runner executes startup-scripts with NO \$HOME set, so
+# under \`set -u\` any \$HOME reference aborts the whole bootstrap (observed:
+# "line 11: HOME: unbound variable" — claude installed, daemon never did).
+# Pin it: this always runs as root, on every provider.
+export HOME=/root
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y && apt-get install -y git curl unzip jq
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs
 # awscli v2 (arch-aware)
 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${awsCliArch}.zip" -o /tmp/awscli.zip
 unzip -q /tmp/awscli.zip -d /tmp && /tmp/aws/install
-# claude native binary
+# claude native binary — installs to \$HOME/.local/bin
 curl -fsSL https://claude.ai/install.sh | bash
 ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude || true
 mkdir -p /opt/futurator/daemon /etc/futurator /root/.claude
