@@ -94,6 +94,12 @@ fi
 
 aws s3 sync ${opts.bundleS3Uri} /opt/futurator/daemon/
 cd /opt/futurator/daemon && npm install --omit=dev
+# Playwright Chromium for the story-gate browser probes (EC2 gets this via
+# rsync-daemon.sh; fleet boxes must self-provision it or every browser AC
+# fails "Executable doesn't exist"). install-deps aptly runs as root here;
+# the browser cache itself must belong to the daemon user. Idempotent.
+npx --prefix /opt/futurator/daemon playwright install-deps chromium || true
+sudo -u ${USER} -H bash -c 'cd /opt/futurator/daemon && npx playwright install chromium' || true
 # Everything the daemon touches must be owned by the non-root user it runs as.
 chown -R ${USER}:${USER} /opt/futurator ${HOME}/.claude /etc/futurator /var/log/futurator
 
