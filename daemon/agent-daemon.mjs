@@ -567,7 +567,10 @@ function probeAuth() {
       // Belt-and-suspenders: strip ANTHROPIC_API_KEY from child env so the CLI
       // cannot pick it up even if something sets it after daemon startup.
       env: stripApiKey({ ...process.env, FORCE_COLOR: '0' }),
-      timeout: 20000,
+      // 60s: a cold-started native CLI on a laptop can take >30s to first
+      // token (measured 2026-07-17 on macOS); 20s flagged working auth as
+      // "exit 143" every probe. A genuinely hung CLI is still reaped.
+      timeout: 60000,
     });
     let stdout = '';
     let stderr = '';
