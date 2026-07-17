@@ -62,19 +62,43 @@ const FAKE_SERVERS = [
 const FAKE_PROVIDERS = [
   {
     provider: 'hetzner',
-    label: 'Hetzner',
-    serviceTypes: [{ type: 'vm', label: 'VM', available: true }],
-    defaultRegions: ['fsn1'],
-    defaultSizes: ['cax11'],
+    label: 'Hetzner Cloud',
+    summary: 'Cheap EU ARM/x86 VMs.',
+    creatable: true,
+    requiresCredentials: true,
+    credentialFields: [{ name: 'token', label: 'API token', kind: 'password' }],
+    serviceTypes: [{ type: 'vm', label: 'Virtual machine', available: true }],
+    regionSource: 'server',
+    regions: [{ value: 'fsn1', label: 'Falkenstein, DE (fsn1)' }],
+    sizes: [
+      {
+        value: 'cax11',
+        label: 'CAX11 — Ampere ARM',
+        arch: 'arm64',
+        vcpu: 2,
+        memGB: 4,
+        costPerHour: 0.006,
+      },
+    ],
+    defaultMaxConcurrent: 2,
     configured: true,
+    placement: null,
   },
   {
-    provider: 'oracle',
-    label: 'Oracle',
-    serviceTypes: [{ type: 'vm', label: 'VM', available: true }],
-    defaultRegions: ['eu-frankfurt-1'],
-    defaultSizes: ['VM.Standard.A1.Flex'],
+    provider: 'aws',
+    label: 'Amazon Web Services',
+    summary: 'The existing EC2 daemon box.',
+    creatable: false,
+    unavailableNote: 'EC2 instances are declared as IaC in sst.config.ts, not provisioned here.',
+    requiresCredentials: false,
+    credentialFields: [],
+    serviceTypes: [{ type: 'vm', label: 'Virtual machine', available: false }],
+    regionSource: 'none',
+    regions: [],
+    sizes: [],
+    defaultMaxConcurrent: 2,
     configured: true,
+    placement: null,
   },
 ];
 
@@ -210,4 +234,35 @@ test('Servers page renders the fleet and the Dispatch Policy mode selector', asy
 
   // 3. No orphaned-component console errors.
   expect(consoleErrors).toEqual([]);
+});
+
+test('Add Server opens the wizard: creatable providers clickable, AWS disabled with a reason', async ({
+  authedPage,
+}) => {
+  await authedPage.goto('/development/servers/');
+
+  // The wizard is an action on the fleet, reachable by button — not a tab.
+  await expect(authedPage.getByRole('tab', { name: 'Add Service' })).toHaveCount(0);
+  await authedPage.getByRole('button', { name: '+ Add Server' }).first().click();
+
+  const dialog = authedPage.getByRole('dialog');
+  await expect(dialog.getByText('Add server')).toBeVisible();
+
+  // Hetzner is creatable and already configured; its summary sells the choice.
+  await expect(dialog.getByText('Hetzner Cloud')).toBeVisible();
+  await expect(dialog.getByText('Configured ✓')).toBeVisible();
+
+  // AWS has no adapter — it must render disabled WITH the reason, never lead
+  // into a flow that fails after minting an IAM user.
+  const awsCard = dialog.getByRole('button', { name: /Amazon Web Services/ });
+  await expect(awsCard).toBeDisabled();
+  await expect(dialog.getByText(/declared as IaC/)).toBeVisible();
+
+  // Single-service-type providers skip the pointless "Virtual machine" step and
+  // land straight on the shape form (Hetzner is pre-configured).
+  await dialog.getByRole('button', { name: /Hetzner Cloud/ }).click();
+  await expect(dialog.getByLabel('Server name')).toBeVisible();
+  await expect(dialog.getByText('CAX11 — Ampere ARM')).toBeVisible();
+  // Cost is seeded from the catalog, not left at a lying 0.
+  await expect(dialog.getByLabel('Cost / hr (USD)')).toHaveValue('0.006');
 });

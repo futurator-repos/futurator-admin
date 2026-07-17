@@ -23,6 +23,9 @@ vi.mock('../compute-providers/cloud-init', () => cloudInit);
 const adapters = vi.hoisted(() => ({ getAdapter: vi.fn() }));
 vi.mock('../compute-providers', () => adapters);
 
+const credentialsSm = vi.hoisted(() => ({ getProviderPlacement: vi.fn() }));
+vi.mock('../provider-credentials-sm', () => credentialsSm);
+
 import { provisionServer, destroyServer, refreshProvisioningServers } from '../server-provisioning';
 import { hashEnrollToken } from '../agent-credentials-relay';
 import type { ComputeServer } from '../../types/compute-server';
@@ -69,6 +72,86 @@ beforeEach(() => {
   vi.clearAllMocks();
   process.env.DAEMON_BUNDLE_S3_URI = 's3://bundle-bucket/daemon/';
   process.env.AWS_REGION = 'eu-central-1';
+});
+
+describe('provisionServer — catalog guards (reject BEFORE any side effect)', () => {
+  it('rejects a provider with no adapter (aws) instead of failing after minting IAM', async () => {
+    await expect(
+      provisionServer({ ...provisionInput, provider: 'aws', size: 't4g.small' }),
+    ).rejects.toThrow(/IaC|cannot be provisioned/i);
+    expect(iam.createServerIamUser).not.toHaveBeenCalled();
+    expect(repo.createServer).not.toHaveBeenCalled();
+  });
+
+  it('rejects a service type the catalog marks unavailable (GCP Cloud Run Jobs)', async () => {
+    // `createServerSchema` already refuses 'serverless' at the API boundary —
+    // this pins the service-layer guard behind it (defence in depth), hence the
+    // cast past the schema-derived input type.
+    await expect(
+      provisionServer({
+        ...provisionInput,
+        provider: 'gcp',
+        serviceType: 'serverless',
+        size: 'e2-small',
+      } as unknown as Parameters<typeof provisionServer>[0]),
+    ).rejects.toThrow(/v2|does not offer/i);
+    expect(iam.createServerIamUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown shape rather than asking the provider to build it', async () => {
+    await expect(provisionServer({ ...provisionInput, size: 'cax99' })).rejects.toThrow(
+      /Unknown .* size/i,
+    );
+    expect(iam.createServerIamUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown region for a provider that honours per-server regions', async () => {
+    await expect(provisionServer({ ...provisionInput, region: 'mars1' })).rejects.toThrow(
+      /Unknown .* region/i,
+    );
+  });
+
+  it('derives arch from the shape — a client claiming x86_64 for an ARM box is corrected', async () => {
+    const provision = vi.fn().mockResolvedValue({ instanceId: '999' });
+    adapters.getAdapter.mockReturnValue({ provision });
+    iam.createServerIamUser.mockResolvedValue(iamCreds);
+    cloudInit.buildBootstrapScript.mockReturnValue('#!/bin/bash');
+    repo.createServer.mockResolvedValue(undefined);
+
+    // cax11 is Ampere ARM; the request lies about it.
+    const result = await provisionServer({ ...provisionInput, arch: 'x86_64' });
+
+    expect(result.server.arch).toBe('arm64');
+    // The cloud-init that installs an arch-specific awscli must follow the shape.
+    expect(cloudInit.buildBootstrapScript.mock.calls[0][0].arch).toBe('arm64');
+    expect(provision.mock.calls[0][0].arch).toBe('arm64');
+  });
+
+  it('stamps Oracle rows with the credentials region — the adapter ignores per-server regions', async () => {
+    const provision = vi.fn().mockResolvedValue({ instanceId: 'ocid1.instance' });
+    adapters.getAdapter.mockReturnValue({ provision });
+    iam.createServerIamUser.mockResolvedValue(iamCreds);
+    cloudInit.buildBootstrapScript.mockReturnValue('#!/bin/bash');
+    repo.createServer.mockResolvedValue(undefined);
+    credentialsSm.getProviderPlacement.mockResolvedValue({ region: 'eu-frankfurt-1' });
+
+    const result = await provisionServer({
+      ...provisionInput,
+      provider: 'oracle',
+      size: 'VM.Standard.A1.Flex',
+      region: 'somewhere-else-1', // client guess — must not survive
+    });
+
+    expect(result.server.region).toBe('eu-frankfurt-1');
+  });
+
+  it('refuses to provision Oracle when its stored credentials carry no region', async () => {
+    credentialsSm.getProviderPlacement.mockResolvedValue(null);
+    await expect(
+      provisionServer({ ...provisionInput, provider: 'oracle', size: 'VM.Standard.A1.Flex' }),
+    ).rejects.toThrow(/re-save/i);
+    expect(iam.createServerIamUser).not.toHaveBeenCalled();
+  });
 });
 
 describe('provisionServer — cloud path', () => {

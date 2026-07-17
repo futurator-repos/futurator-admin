@@ -74,6 +74,26 @@ export async function getProviderCredentials<T = unknown>(
 }
 
 /**
+ * Where a provider's credentials place every VM they create: Oracle's adapter
+ * uses `credentials.region`, GCP's uses `credentials.zone` — neither honours a
+ * per-server region. The wizard shows this so it can't ask for a placement it
+ * would ignore, and `provisionServer` stamps the row from it.
+ *
+ * Returns ONLY the location. Region/zone are not secret material; nothing else
+ * from the credentials document may cross this boundary.
+ */
+export async function getProviderPlacement(
+  provider: ComputeProviderId,
+): Promise<{ region?: string; zone?: string } | null> {
+  const creds = await getProviderCredentials<{ region?: string; zone?: string }>(provider);
+  if (!creds) return null;
+  const placement: { region?: string; zone?: string } = {};
+  if (typeof creds.region === 'string') placement.region = creds.region;
+  if (typeof creds.zone === 'string') placement.zone = creds.zone;
+  return placement;
+}
+
+/**
  * Whether a provider's credentials secret exists, without fetching its
  * value — cheaper than `getProviderCredentials` when only presence matters.
  */

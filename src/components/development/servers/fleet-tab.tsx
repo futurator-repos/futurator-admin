@@ -1,6 +1,16 @@
 'use client';
+import { useState } from 'react';
 import { useServers } from '@/hooks/use-servers';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { ServerCard } from './server-card';
+import { AddServerWizard } from './add-server-wizard';
 
 function SummaryStrip({
   totalActive,
@@ -31,26 +41,8 @@ function SummaryStrip({
 
 export function FleetTab() {
   const { data, isLoading, error } = useServers();
+  const [wizardOpen, setWizardOpen] = useState(false);
   const servers = (data?.servers ?? []).filter((s) => s.status !== 'DELETED');
-
-  if (isLoading) {
-    return <p className="text-sm text-muted-foreground">Loading fleet…</p>;
-  }
-  if (error) {
-    return (
-      <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
-        Failed to load servers: {(error as Error).message}
-      </div>
-    );
-  }
-
-  if (servers.length === 0) {
-    return (
-      <div className="rounded-md border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-        No servers — add one in Add Service.
-      </div>
-    );
-  }
 
   const totalActive = servers.reduce((sum, s) => sum + (s.activeCount ?? 0), 0);
   const enabled = servers.filter((s) => s.enabled);
@@ -59,16 +51,60 @@ export function FleetTab() {
 
   return (
     <div className="space-y-4">
-      <SummaryStrip
-        totalActive={totalActive}
-        totalCapacity={totalCapacity}
-        costPerHour={costPerHour}
-      />
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {servers.map((server) => (
-          <ServerCard key={server.serverId} server={server} />
-        ))}
+      <div className="flex items-center justify-between gap-3">
+        {isLoading || error ? (
+          <span />
+        ) : (
+          <SummaryStrip
+            totalActive={totalActive}
+            totalCapacity={totalCapacity}
+            costPerHour={costPerHour}
+          />
+        )}
+        <Button size="sm" onClick={() => setWizardOpen(true)}>
+          + Add Server
+        </Button>
       </div>
+
+      {isLoading && <p className="text-sm text-muted-foreground">Loading fleet…</p>}
+
+      {error && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+          Failed to load servers: {(error as Error).message}
+        </div>
+      )}
+
+      {!isLoading && !error && servers.length === 0 && (
+        <div className="rounded-md border border-dashed border-border p-8 text-center">
+          <p className="text-sm text-muted-foreground">
+            No servers yet — add a cloud provider or enrol a machine you own.
+          </p>
+          <Button size="sm" className="mt-3" onClick={() => setWizardOpen(true)}>
+            + Add Server
+          </Button>
+        </div>
+      )}
+
+      {!isLoading && !error && servers.length > 0 && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {servers.map((server) => (
+            <ServerCard key={server.serverId} server={server} />
+          ))}
+        </div>
+      )}
+
+      <Dialog open={wizardOpen} onOpenChange={setWizardOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Add server</DialogTitle>
+            <DialogDescription>
+              Provision a cloud VM or enrol a machine you own. It joins the fleet and the dispatcher
+              starts assigning it work once its daemon reports in.
+            </DialogDescription>
+          </DialogHeader>
+          <AddServerWizard onClose={() => setWizardOpen(false)} />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

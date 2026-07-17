@@ -31,8 +31,10 @@ import { createServerIamUser, deleteServerIamUser } from './server-iam';
 import { buildBootstrapScript } from './compute-providers/cloud-init';
 import { getAdapter } from './compute-providers';
 import type { ProviderRef } from './compute-providers/types';
+import { getCatalogEntry, getCatalogSize } from './compute-providers/catalog';
+import { getProviderPlacement } from './provider-credentials-sm';
 import { hashEnrollToken } from './agent-credentials-relay';
-import { AppError, NotFoundError } from '../errors';
+import { AppError, NotFoundError, ValidationError } from '../errors';
 
 export type CreateServerInput = z.infer<typeof createServerSchema>;
 
@@ -148,6 +150,70 @@ async function runCloudProvision(
 }
 
 /**
+ * Validate a create request against the provider catalog and resolve the two
+ * fields the client must not be trusted to set, BEFORE any IAM user is minted
+ * or any VM is billed:
+ *
+ *  - `arch` follows the shape. A CAX11 (ARM) asked for as x86_64 would get an
+ *    x86 awscli in its cloud-init and boot broken.
+ *  - `region` for Oracle/GCP comes from the stored credentials, because their
+ *    adapters read `credentials.region` / `credentials.zone` and ignore the
+ *    per-server value. Accepting the client's guess would make the fleet card
+ *    claim a location the VM isn't in.
+ *
+ * Also rejects providers with no adapter (`aws` — EC2 is IaC, seeded as
+ * srv_ec2_main) and service types the catalog marks unavailable (Cloud Run
+ * Jobs), which would otherwise fail deep in `getAdapter` after side effects.
+ */
+async function resolveAgainstCatalog(
+  input: CreateServerInput,
+): Promise<{ region: string; arch: 'arm64' | 'x86_64' }> {
+  const entry = getCatalogEntry(input.provider);
+  if (!entry || !entry.creatable) {
+    throw new ValidationError(
+      entry?.unavailableNote ?? `Provider ${input.provider} cannot be provisioned`,
+    );
+  }
+  const serviceType = entry.serviceTypes.find((s) => s.type === input.serviceType);
+  if (!serviceType?.available) {
+    throw new ValidationError(
+      serviceType?.note ?? `${entry.label} does not offer ${input.serviceType} yet`,
+    );
+  }
+
+  if (input.serviceType === 'local-machine') {
+    return { region: 'local', arch: input.arch };
+  }
+
+  const size = getCatalogSize(input.provider, input.size);
+  if (!size) {
+    const known = entry.sizes.map((s) => s.value).join(', ');
+    throw new ValidationError(
+      `Unknown ${entry.label} size "${input.size}" (expected one of: ${known})`,
+    );
+  }
+
+  if (entry.regionSource === 'credentials') {
+    const placement = await getProviderPlacement(input.provider);
+    const region = placement?.zone ?? placement?.region;
+    if (!region) {
+      throw new ValidationError(
+        `${entry.label} credentials are missing a ${input.provider === 'gcp' ? 'zone' : 'region'} — re-save them before provisioning`,
+      );
+    }
+    return { region, arch: size.arch };
+  }
+
+  if (!entry.regions.some((r) => r.value === input.region)) {
+    const known = entry.regions.map((r) => r.value).join(', ');
+    throw new ValidationError(
+      `Unknown ${entry.label} region "${input.region}" (expected one of: ${known})`,
+    );
+  }
+  return { region: input.region, arch: size.arch };
+}
+
+/**
  * Create + provision a server (spec §4.2 step 1 — seconds, never waits for
  * the VM). Local-machine path: no cloud call; the row starts at
  * `BOOTSTRAPPING` and the result carries the install one-liner. Cloud path:
@@ -156,6 +222,7 @@ async function runCloudProvision(
  * the UI can offer Retry / Destroy.
  */
 export async function provisionServer(input: CreateServerInput): Promise<ProvisionResult> {
+  const resolved = await resolveAgainstCatalog(input);
   const serverId = `srv_${input.provider}_${shortId()}`;
   const enrollToken = mintEnrollToken();
   const nowIso = new Date().toISOString();
@@ -164,9 +231,9 @@ export async function provisionServer(input: CreateServerInput): Promise<Provisi
     name: input.name,
     provider: input.provider,
     serviceType: input.serviceType,
-    region: input.region,
+    region: resolved.region,
     size: input.size,
-    arch: input.arch,
+    arch: resolved.arch,
     status: 'BOOTSTRAPPING',
     enabled: true,
     maxConcurrent: input.maxConcurrent,
@@ -182,7 +249,11 @@ export async function provisionServer(input: CreateServerInput): Promise<Provisi
     return { server: base, installCommand: buildLocalInstallCommand(serverId, enrollToken) };
   }
 
-  const outcome = await runCloudProvision(serverId, enrollToken, input);
+  const outcome = await runCloudProvision(serverId, enrollToken, {
+    ...input,
+    region: resolved.region,
+    arch: resolved.arch,
+  });
   const server: ComputeServer = { ...base, ...outcome };
   await createServer(server);
   return { server };

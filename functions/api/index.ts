@@ -31,6 +31,7 @@ import type { ComputeServer } from '../shared/types/compute-server';
 import {
   putProviderCredentials,
   isProviderConfigured,
+  getProviderPlacement,
 } from '../shared/services/provider-credentials-sm';
 import { PROVIDER_CATALOG } from '../shared/services/compute-providers/catalog';
 import { getAgentCredentialsForToken } from '../shared/services/agent-credentials-relay';
@@ -6403,13 +6404,21 @@ app.post('/api/servers/providers/:provider/credentials', authMiddleware, async (
 // material — only presence.
 app.get('/api/servers/providers', authMiddleware, async (c) => {
   const providers = await Promise.all(
-    PROVIDER_CATALOG.map(async (entry) => ({
-      ...entry,
-      configured:
-        entry.provider === 'aws' || entry.provider === 'local'
-          ? true
-          : await isProviderConfigured(entry.provider),
-    })),
+    PROVIDER_CATALOG.map(async (entry) => {
+      // Providers with nothing to store (local) are trivially ready; the rest
+      // report real secret presence. `placement` echoes only the region/zone
+      // baked into stored credentials (Oracle/GCP fix every VM there) so the
+      // wizard can show it instead of asking for a value the adapter ignores.
+      if (!entry.requiresCredentials) {
+        return { ...entry, configured: true, placement: null };
+      }
+      const configured = await isProviderConfigured(entry.provider);
+      const placement =
+        configured && entry.regionSource === 'credentials'
+          ? await getProviderPlacement(entry.provider)
+          : null;
+      return { ...entry, configured, placement };
+    }),
   );
   return c.json({ providers });
 });

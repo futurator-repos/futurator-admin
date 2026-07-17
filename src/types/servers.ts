@@ -56,15 +56,50 @@ export interface ProviderServiceTypeCatalogEntry {
   note?: string;
 }
 
-// Same shape as the backend `ProviderCatalogEntry`, plus the live
-// `configured` flag `GET /servers/providers` merges in from Secrets Manager.
+export type CredentialFieldKind = 'text' | 'password' | 'textarea' | 'list';
+
+export interface ProviderCredentialField {
+  name: string;
+  label: string;
+  kind: CredentialFieldKind;
+  placeholder?: string;
+  help?: string;
+}
+
+export interface ProviderRegionOption {
+  value: string;
+  label: string;
+}
+
+export interface ProviderSizeOption {
+  value: string;
+  label: string;
+  arch: 'arm64' | 'x86_64';
+  vcpu: number;
+  memGB: number;
+  costPerHour: number;
+  note?: string;
+}
+
+// Same shape as the backend `ProviderCatalogEntry`, plus the live `configured`
+// flag and `placement` echo that `GET /servers/providers` merges in.
 export interface ProviderCatalogEntry {
   provider: ComputeProviderId;
   label: string;
+  summary: string;
+  creatable: boolean;
+  unavailableNote?: string;
+  requiresCredentials: boolean;
+  credentialFields: ProviderCredentialField[];
+  credentialsHelpUrl?: string;
   serviceTypes: ProviderServiceTypeCatalogEntry[];
-  defaultRegions: string[];
-  defaultSizes: string[];
+  regionSource: 'server' | 'credentials' | 'none';
+  regions: ProviderRegionOption[];
+  sizes: ProviderSizeOption[];
+  defaultMaxConcurrent: number;
   configured: boolean;
+  /** Oracle/GCP only: where the stored credentials place every VM. */
+  placement: { region?: string; zone?: string } | null;
 }
 
 export interface ServerAssignment {

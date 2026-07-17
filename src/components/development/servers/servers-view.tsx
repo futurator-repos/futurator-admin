@@ -1,14 +1,9 @@
 'use client';
-import { useState } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { FleetTab } from './fleet-tab';
 import { PolicyTab } from './policy-tab';
-import { AddServiceWizard } from './add-service-wizard';
 
 export function ServersView() {
-  // Controlled so the wizard can land the operator back on Fleet, where the
-  // new server's PROVISIONING → ACTIVE progress is visible (5s poll).
-  const [tab, setTab] = useState('fleet');
   return (
     <div className="space-y-4">
       <div>
@@ -19,17 +14,15 @@ export function ServersView() {
         </p>
       </div>
 
-      <Tabs value={tab} onValueChange={setTab}>
+      {/* Adding a server is an action on the fleet, not a place you navigate to
+          — it lives behind the Fleet tab's button. */}
+      <Tabs defaultValue="fleet">
         <TabsList>
           <TabsTrigger value="fleet">Fleet</TabsTrigger>
-          <TabsTrigger value="add-service">Add Service</TabsTrigger>
           <TabsTrigger value="dispatch-policy">Dispatch Policy</TabsTrigger>
         </TabsList>
         <TabsContent value="fleet" className="mt-4">
           <FleetTab />
-        </TabsContent>
-        <TabsContent value="add-service" className="mt-4">
-          <AddServiceWizard onDone={() => setTab('fleet')} />
         </TabsContent>
         <TabsContent value="dispatch-policy" className="mt-4">
           <PolicyTab />
