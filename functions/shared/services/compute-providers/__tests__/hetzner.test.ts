@@ -61,7 +61,9 @@ describe('hetznerAdapter.provision', () => {
     );
     const body = JSON.parse(capturedInit?.body as string);
     expect(body).toEqual({
-      name: 'hetzner-fsn-1',
+      // Slugged label + serverId suffix — Hetzner validates RFC1123 hostnames
+      // and would reject a free-form operator label (see naming.test.ts).
+      name: 'hetzner-fsn-1-srv1',
       server_type: 'cax11',
       image: 'ubuntu-24.04',
       location: 'fsn1',

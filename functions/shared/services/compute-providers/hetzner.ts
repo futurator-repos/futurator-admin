@@ -1,4 +1,5 @@
 import { getProviderCredentials } from '../provider-credentials-sm';
+import { toProviderResourceName } from './naming';
 import type {
   ComputeProviderAdapter,
   ProviderRef,
@@ -62,7 +63,9 @@ async function provision(spec: ProvisionSpec): Promise<ProviderRef> {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      name: spec.name,
+      // Hetzner validates names as RFC1123 hostnames — the operator's label
+      // ("Hetzner box #2") is not one. Same slugging rule as GCE (see naming.ts).
+      name: toProviderResourceName(spec.name, spec.serverId),
       server_type: spec.size,
       image: 'ubuntu-24.04',
       location: spec.region,

@@ -1,5 +1,6 @@
 import { getProviderCredentials } from '../provider-credentials-sm';
 import { gcpAccessToken } from './gcp-auth';
+import { toProviderResourceName } from './naming';
 import type {
   ComputeProviderAdapter,
   ProviderRef,
@@ -76,11 +77,16 @@ function natIpOf(inst: GcpInstance): string | undefined {
 async function provision(spec: ProvisionSpec): Promise<ProviderRef> {
   const creds = await loadCredentials();
   const headers = await authHeader(creds.serviceAccountJson);
+  // GCE names are RFC1035 identifiers, not labels — the operator's free-form
+  // server name would be rejected outright ("Invalid value for field
+  // 'resource.name'"). instanceId must be the name we actually created, since
+  // status/stop/start/destroy address the instance by it.
+  const instanceName = toProviderResourceName(spec.name, spec.serverId);
   const res = await fetch(instancesUrl(creds.projectId, creds.zone), {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      name: spec.name,
+      name: instanceName,
       machineType: `zones/${creds.zone}/machineTypes/${spec.size}`,
       disks: [
         {
@@ -94,7 +100,7 @@ async function provision(spec: ProvisionSpec): Promise<ProviderRef> {
     }),
   });
   await throwOnError(res);
-  return { instanceId: spec.name, zone: creds.zone };
+  return { instanceId: instanceName, zone: creds.zone };
 }
 
 async function status(ref: ProviderRef): Promise<ProviderStatus> {

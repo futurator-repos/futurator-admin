@@ -127,7 +127,9 @@ describe('gcpAdapter.provision', () => {
       'Bearer ya29.prov',
     );
     const body = JSON.parse(capturedInit?.body as string);
-    expect(body.name).toBe('gcp-fra-1');
+    // The instance name is the slugged label + serverId suffix, never the raw
+    // label: GCE rejects anything outside RFC1035 (see naming.test.ts).
+    expect(body.name).toBe('gcp-fra-1-srvgcp1');
     expect(body.machineType).toBe('zones/europe-west3-a/machineTypes/e2-small');
     expect(body.disks[0].boot).toBe(true);
     expect(body.disks[0].autoDelete).toBe(true);
@@ -142,7 +144,9 @@ describe('gcpAdapter.provision', () => {
       key: 'startup-script',
       value: '#!/bin/bash\necho hi',
     });
-    expect(ref).toEqual({ instanceId: 'gcp-fra-1', zone: 'europe-west3-a' });
+    // instanceId MUST be the name we actually created — status/stop/start/
+    // destroy address the instance by it.
+    expect(ref).toEqual({ instanceId: 'gcp-fra-1-srvgcp1', zone: 'europe-west3-a' });
   });
 
   it('throws with the API error message on non-2xx', async () => {
