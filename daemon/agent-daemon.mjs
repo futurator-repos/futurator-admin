@@ -1631,6 +1631,18 @@ const DAEMON_SOURCE = process.env.DAEMON_SOURCE || 'local';
 // polls/claims/heartbeats under it when `dispatch.serverAware` is on.
 const SERVER_ID = resolveServerId(process.env);
 const SERVERS_TABLE = process.env.SERVERS_TABLE || 'futurator-servers';
+// A FLEET daemon is one provisioned by the Servers module: cloud-init (or the
+// local-machine install command) injects SERVER_ID explicitly. The two legacy
+// daemons predate the module and identify only by DAEMON_SOURCE=ec2|local.
+//
+// The distinction matters twice:
+//  1. DAEMON_HEARTBEAT is a SINGLE fixed-key row. A fleet box writing it
+//     hijacks the EC2/local daemon widget — observed live: the row's `source`
+//     became `srv_gcp_zu6y9a`. Fleet daemons report in their own server row.
+//  2. With dispatch.serverAware OFF there is no assigned-index and no CAS
+//     claim, so a fleet box polling the global pool is an uncoordinated worker
+//     racing the Mac/EC2 daemons for the same jobs. It must idle instead.
+const IS_FLEET_DAEMON = Boolean(process.env.SERVER_ID);
 // CAS claim lease (matches atomic-claim's DEFAULT_LEASE_MS); renewed at 1/3.
 const JOB_CLAIM_LEASE_MS = 15 * 60 * 1000;
 // Daemon build fingerprint for the servers-row heartbeat (same sha256-over-self
@@ -1694,10 +1706,13 @@ async function writeHeartbeat() {
 
     const mem = { totalMem: totalmem(), freeMem: freemem(), loadAvg: loadavg() };
 
-    await ddb.send(
-      new PutCommand({
-        TableName: JOBS_TABLE,
-        Item: {
+    // The legacy DAEMON_HEARTBEAT row belongs to the ec2/local daemons — it is
+    // a single fixed key, so a fleet box writing it would overwrite theirs.
+    if (!IS_FLEET_DAEMON) {
+      await ddb.send(
+        new PutCommand({
+          TableName: JOBS_TABLE,
+          Item: {
           jobId: 'DAEMON_HEARTBEAT',
           status: 'ALIVE',
           source: DAEMON_SOURCE,
@@ -1736,16 +1751,24 @@ async function writeHeartbeat() {
             loadedAt: authState.loadedAt ? new Date(authState.loadedAt).toISOString() : null,
             expiresAt: authState.expiresAt ? new Date(authState.expiresAt).toISOString() : null,
             subscriptionType: authState.subscriptionType,
+            },
           },
-        },
-      }),
-    );
+        }),
+      );
+    }
 
     // Servers module (Task 18, spec §5.2) — heartbeat this daemon's own row in
     // `futurator-servers` (in ADDITION to the legacy DAEMON_HEARTBEAT row, kept
     // during migration). Update-only: `attribute_exists(serverId)` so a deleted
     // server's still-running daemon can never resurrect its row.
-    if (serverAwareDispatch) {
+    //
+    // UNCONDITIONAL, per plan Task 18 ("in addition to the legacy row"). It was
+    // gated behind dispatch.serverAware, which made provisioning unverifiable:
+    // a server can only reach ACTIVE via this write, so with dispatch off every
+    // fleet box sat in BOOTSTRAPPING forever even when its daemon was healthy
+    // and polling. Liveness reporting must not depend on the dispatch switch —
+    // that is the same lie as an ACTIVE badge with no heartbeat.
+    {
       try {
         const nowIso = new Date().toISOString();
         await ddb.send(
@@ -10404,7 +10427,28 @@ async function poll() {
       // Queues module — apply the operator-set concurrency cap (5s cache).
       // Mutates effectiveMaxConcurrent + concurrencyManager._max in place so a
       // change in the EC2 Monitor takes effect within ~5s, no daemon restart.
+      // Also refreshes serverAwareDispatch, which the fleet gate below reads.
       await applyCapOverrideCached();
+
+      // Servers module — fleet-daemon gate. A fleet box only has a coordinated
+      // share of the work when dispatch.serverAware is ON: that is what routes
+      // it to its OWN partition of assignedServerId-status-index and makes it
+      // claim via CAS lease. With the flag OFF it would fall back to the legacy
+      // global-pool poll with no atomic claim — an uncoordinated worker racing
+      // the Mac/EC2 daemons for the same rows, i.e. the same job executed
+      // twice. Idle instead (still heartbeating, so the fleet card shows it
+      // alive and waiting rather than pretending to work).
+      if (IS_FLEET_DAEMON && !serverAwareDispatch) {
+        if (Date.now() - (global.__lastFleetGateLogAt || 0) > 60_000) {
+          global.__lastFleetGateLogAt = Date.now();
+          log(
+            'info',
+            `[poll-gate] ${SERVER_ID}: idle — dispatch.serverAware is off, so this fleet server has no assigned queue to poll. Enable it in Servers → Dispatch Policy.`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+        continue;
+      }
 
       // snake3 (2026-06-10) — auth circuit breaker. During the 17:50–18:48
       // OAuth outage the daemon kept claiming PENDING jobs and feeding them
