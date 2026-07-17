@@ -1776,9 +1776,10 @@ async function writeHeartbeat() {
             TableName: SERVERS_TABLE,
             Key: { serverId: SERVER_ID },
             UpdateExpression:
-              'SET lastHeartbeatAt = :now, activeCount = :n, daemonVersion = :v, #system = :sys, auth = :auth, updatedAt = :now',
+              'SET lastHeartbeatAt = :now, activeCount = :n, daemonVersion = :v, #system = :sys, #auth = :auth, updatedAt = :now',
             ConditionExpression: 'attribute_exists(serverId)',
-            ExpressionAttributeNames: { '#system': 'system' },
+            // Both `system` and `auth` are DynamoDB reserved words — must alias.
+            ExpressionAttributeNames: { '#system': 'system', '#auth': 'auth' },
             ExpressionAttributeValues: {
               ':now': nowIso,
               ':n': activeJobs.size,
@@ -1811,8 +1812,15 @@ async function writeHeartbeat() {
               `[server-heartbeat] no ${SERVER_ID} row in ${SERVERS_TABLE} — server deleted or not yet seeded; heartbeat skipped (logged once)`,
             );
           }
+        } else if (err?.name === 'ValidationException') {
+          // A malformed UpdateExpression is a CODE bug, not a transient — it
+          // will fail on EVERY heartbeat, so the box never reaches ACTIVE while
+          // the outer catch silently eats it. (Lived it: `auth` is a reserved
+          // word and wasn't aliased.) Make it LOUD so the next one is minutes,
+          // not another provision cycle. Still don't crash the daemon over it.
+          log('error', `[server-heartbeat] BUG: DynamoDB rejected the write — ${err.message}`);
         } else {
-          throw err; // swallowed by the outer non-critical catch
+          throw err; // genuinely transient — swallowed by the outer catch, retried next tick
         }
       }
     }
