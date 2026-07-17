@@ -5973,14 +5973,27 @@ async function sendSsmCommand(cmd: string): Promise<string> {
 }
 
 async function getInstanceState(): Promise<{ state: string; publicIp?: string }> {
-  const result = await ec2Client.send(
-    new DescribeInstancesCommand({ InstanceIds: [EC2_INSTANCE_ID] }),
-  );
-  const instance = result.Reservations?.[0]?.Instances?.[0];
-  return {
-    state: instance?.State?.Name || 'unknown',
-    publicIp: instance?.PublicIpAddress,
-  };
+  try {
+    const result = await ec2Client.send(
+      new DescribeInstancesCommand({ InstanceIds: [EC2_INSTANCE_ID] }),
+    );
+    const instance = result.Reservations?.[0]?.Instances?.[0];
+    return {
+      state: instance?.State?.Name || 'unknown',
+      publicIp: instance?.PublicIpAddress,
+    };
+  } catch (err) {
+    // The configured instance can legitimately not exist — the AWS migration
+    // left EC2 behind in the old account, and the Servers module is replacing
+    // it with the multi-provider fleet. A missing box is a STATE, not a 500:
+    // throwing here made every 2s poll of the EC2 Monitor an error, flooding
+    // the console and CloudWatch with tens of thousands of failures a day.
+    // Callers already branch on `state !== 'running'`.
+    if ((err as { name?: string })?.name === 'InvalidInstanceID.NotFound') {
+      return { state: 'not-found' };
+    }
+    throw err;
+  }
 }
 
 app.get('/api/ec2/status', async (c) => {

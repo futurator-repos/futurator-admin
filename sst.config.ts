@@ -1174,6 +1174,11 @@ export default $config({
               Effect: 'Allow',
               Action: [
                 'secretsmanager:CreateSecret',
+                // CreateSecret with Tags is authorized as TWO actions — without
+                // TagResource the create fails AccessDenied even though
+                // CreateSecret is allowed. provider-credentials-sm tags every
+                // secret (futurator:provider / managed-by / kind).
+                'secretsmanager:TagResource',
                 'secretsmanager:PutSecretValue',
                 'secretsmanager:GetSecretValue',
                 'secretsmanager:DescribeSecret',
