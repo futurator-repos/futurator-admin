@@ -8078,7 +8078,11 @@ async function executeWaveMergeJob(job) {
 //   - per-story worktree dirs are excluded — setupStoryWorktree owns those;
 //   - no resolvable repo URL ⇒ THROW (loud FAILED job, no silent skip).
 async function materializePlanWorkingDirIfMissing(job) {
-  if (!isRemapActive()) return;
+  // 2026-07-18 (Plan-1 handoff): originally gated to remapped hosts only, but
+  // machine handoff BETWEEN plans needs it on fleet boxes too — a brownfield
+  // plan pinned to a box that never saw the app has no bootstrap job to create
+  // the checkout. Existing dirs (EC2's normal case) still return immediately,
+  // so hosts with the checkout remain exact no-ops.
   // Plan-scope detection: legacy pipeline + integrator jobs stamp a top-level
   // planId; story-dev / quick-planspec / reflector jobs carry it in their
   // payload refs. app-bootstrap is EXCLUDED even though it is plan-pinned —
