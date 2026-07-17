@@ -36,6 +36,12 @@ export interface ComputeServer {
   activeCount?: number;
   daemonVersion?: string;
   system?: { totalMem: number; freeMem: number; loadAvg: number[] };
+  auth?: {
+    valid: boolean;
+    error?: string | null;
+    checkedAt?: number | null;
+    subscriptionType?: string | null;
+  };
   createdAt: string;
   updatedAt: string;
 }

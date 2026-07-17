@@ -66,8 +66,29 @@ function mintEnrollToken(): string {
   return crypto.randomBytes(32).toString('hex');
 }
 
-function adminApiUrl(): string {
-  return process.env.ADMIN_API_URL || process.env.ALLOWED_ORIGIN || 'https://hub.futurator.ai';
+/**
+ * The base URL a fleet server must call back on — it fetches its Claude OAuth
+ * credentials from `<base>/api/servers/agent-credentials` at boot.
+ *
+ * This MUST be the API's own origin, not the site's. `https://hub.futurator.ai`
+ * is CloudFront serving the static admin app: it has no /api behaviour, so
+ * /api/servers/agent-credentials returns the SPA's index.html with HTTP **200**.
+ * `curl -fsS` treats that as success and writes 11KB of HTML into
+ * .credentials.json — the daemon then reports "OAuth file missing or
+ * unreadable" and every Claude call fails "Not logged in". Observed live.
+ *
+ * The API cannot read its own Function URL from env (self-reference is circular
+ * in the SST/Pulumi graph), so we take the origin of the request that asked us
+ * to provision — by definition a URL on which this API is reachable.
+ * ADMIN_API_URL still wins if set (e.g. once the API gets a custom domain).
+ */
+function adminApiUrl(requestOrigin?: string): string {
+  return (
+    process.env.ADMIN_API_URL ||
+    requestOrigin ||
+    process.env.ALLOWED_ORIGIN ||
+    'https://hub.futurator.ai'
+  );
 }
 
 function errorMessage(err: unknown): string {
@@ -79,10 +100,14 @@ function errorMessage(err: unknown): string {
  * env for identity + enrollment, then the daemon entrypoint. Mirrors the env
  * contract of the cloud-init bootstrap (Task 11) minus the VM setup.
  */
-function buildLocalInstallCommand(serverId: string, enrollToken: string): string {
+function buildLocalInstallCommand(
+  serverId: string,
+  enrollToken: string,
+  requestOrigin?: string,
+): string {
   return (
     `SERVER_ID=${serverId} ENROLL_TOKEN=${enrollToken} ` +
-    `ADMIN_API_URL=${adminApiUrl()} DAEMON_SOURCE=${serverId} ` +
+    `ADMIN_API_URL=${adminApiUrl(requestOrigin)} DAEMON_SOURCE=${serverId} ` +
     `node agent-daemon.mjs`
   );
 }
@@ -100,6 +125,7 @@ async function runCloudProvision(
     CreateServerInput,
     'name' | 'provider' | 'region' | 'size' | 'arch' | 'maxConcurrent'
   >,
+  requestOrigin?: string,
 ): Promise<Pick<ComputeServer, 'status' | 'statusMessage' | 'providerRef' | 'iamUserName'>> {
   let iamUserName: string | undefined;
   try {
@@ -112,7 +138,7 @@ async function runCloudProvision(
     const userData = buildBootstrapScript({
       serverId,
       enrollToken,
-      adminApiUrl: adminApiUrl(),
+      adminApiUrl: adminApiUrl(requestOrigin),
       awsAccessKeyId: iamUser.accessKeyId,
       awsSecretAccessKey: iamUser.secretAccessKey,
       awsRegion: process.env.AWS_REGION || 'eu-central-1',
@@ -221,7 +247,10 @@ async function resolveAgainstCatalog(
  * failure the row is saved as `ERROR` (with cleanup) instead of throwing so
  * the UI can offer Retry / Destroy.
  */
-export async function provisionServer(input: CreateServerInput): Promise<ProvisionResult> {
+export async function provisionServer(
+  input: CreateServerInput,
+  opts: { requestOrigin?: string } = {},
+): Promise<ProvisionResult> {
   const resolved = await resolveAgainstCatalog(input);
   const serverId = `srv_${input.provider}_${shortId()}`;
   const enrollToken = mintEnrollToken();
@@ -246,14 +275,18 @@ export async function provisionServer(input: CreateServerInput): Promise<Provisi
 
   if (input.serviceType === 'local-machine') {
     await createServer(base);
-    return { server: base, installCommand: buildLocalInstallCommand(serverId, enrollToken) };
+    return {
+      server: base,
+      installCommand: buildLocalInstallCommand(serverId, enrollToken, opts.requestOrigin),
+    };
   }
 
-  const outcome = await runCloudProvision(serverId, enrollToken, {
-    ...input,
-    region: resolved.region,
-    arch: resolved.arch,
-  });
+  const outcome = await runCloudProvision(
+    serverId,
+    enrollToken,
+    { ...input, region: resolved.region, arch: resolved.arch },
+    opts.requestOrigin,
+  );
   const server: ComputeServer = { ...base, ...outcome };
   await createServer(server);
   return { server };
@@ -290,7 +323,10 @@ export async function destroyServer(serverId: string): Promise<void> {
  * token + fresh IAM keys, same serverId. Local-machine rows just re-mint the
  * token and hand back a new install command.
  */
-export async function retryServer(serverId: string): Promise<ProvisionResult> {
+export async function retryServer(
+  serverId: string,
+  opts: { requestOrigin?: string } = {},
+): Promise<ProvisionResult> {
   const server = await requireServer(serverId);
   if (server.status !== 'ERROR') {
     throw new AppError(
@@ -310,7 +346,7 @@ export async function retryServer(serverId: string): Promise<ProvisionResult> {
     await updateServerFields(serverId, fields);
     return {
       server: { ...server, ...fields } as ComputeServer,
-      installCommand: buildLocalInstallCommand(serverId, enrollToken),
+      installCommand: buildLocalInstallCommand(serverId, enrollToken, opts.requestOrigin),
     };
   }
 
@@ -318,7 +354,7 @@ export async function retryServer(serverId: string): Promise<ProvisionResult> {
   if (server.iamUserName) {
     await deleteServerIamUser(server.iamUserName);
   }
-  const outcome = await runCloudProvision(serverId, enrollToken, server);
+  const outcome = await runCloudProvision(serverId, enrollToken, server, opts.requestOrigin);
   const fields: Partial<ComputeServer> = {
     ...outcome,
     enrollTokenHash: hashEnrollToken(enrollToken),

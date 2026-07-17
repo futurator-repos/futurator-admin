@@ -36,8 +36,35 @@ describe('deriveServerState — liveness, not just lifecycle', () => {
   });
 
   it('ACTIVE only when a heartbeat landed within 60s — the dispatcher rule', () => {
-    expect(deriveServerState(server({ lastHeartbeatAt: ago(10_000) }), NOW).label).toBe('ACTIVE');
-    expect(deriveServerState(server({ lastHeartbeatAt: ago(59_000) }), NOW).label).toBe('ACTIVE');
+    const authOk = { valid: true };
+    expect(
+      deriveServerState(server({ lastHeartbeatAt: ago(10_000), auth: authOk }), NOW).label,
+    ).toBe('ACTIVE');
+    expect(
+      deriveServerState(server({ lastHeartbeatAt: ago(59_000), auth: authOk }), NOW).label,
+    ).toBe('ACTIVE');
+  });
+
+  it('a live daemon that cannot authenticate to Claude is NOT ACTIVE', () => {
+    // The live failure: the box heartbeated happily (green ACTIVE) while every
+    // `claude -p` answered "Not logged in", because the credentials fetch had
+    // written the admin SPA's HTML into .credentials.json.
+    const state = deriveServerState(
+      server({
+        lastHeartbeatAt: ago(5_000),
+        auth: { valid: false, error: 'Not logged in · Please run /login' },
+      }),
+      NOW,
+    );
+    expect(state.label).toBe('NO CLAUDE AUTH');
+    expect(state.tone).toBe('destructive');
+    expect(state.help).toMatch(/fail instantly/i);
+  });
+
+  it('says ACTIVE for older daemons that do not report auth yet', () => {
+    // Fleet rows written before the auth field existed must not read as broken.
+    const state = deriveServerState(server({ lastHeartbeatAt: ago(5_000), auth: undefined }), NOW);
+    expect(state.label).toBe('ACTIVE');
   });
 
   it('goes STALE past 60s — matching when the dispatcher stops assigning', () => {

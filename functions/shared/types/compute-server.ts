@@ -29,6 +29,14 @@ export interface ComputeServer {
   activeCount?: number;
   daemonVersion?: string;
   system?: { totalMem: number; freeMem: number; loadAvg: number[] };
+  /** Reported by the daemon each heartbeat: can this box actually run Claude?
+   *  Liveness (heartbeat) and readiness (auth) are different questions. */
+  auth?: {
+    valid: boolean;
+    error?: string | null;
+    checkedAt?: number | null;
+    subscriptionType?: string | null;
+  };
   createdAt: string;
   updatedAt: string;
 }

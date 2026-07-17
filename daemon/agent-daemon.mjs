@@ -1776,7 +1776,7 @@ async function writeHeartbeat() {
             TableName: SERVERS_TABLE,
             Key: { serverId: SERVER_ID },
             UpdateExpression:
-              'SET lastHeartbeatAt = :now, activeCount = :n, daemonVersion = :v, #system = :sys, updatedAt = :now',
+              'SET lastHeartbeatAt = :now, activeCount = :n, daemonVersion = :v, #system = :sys, auth = :auth, updatedAt = :now',
             ConditionExpression: 'attribute_exists(serverId)',
             ExpressionAttributeNames: { '#system': 'system' },
             ExpressionAttributeValues: {
@@ -1787,6 +1787,16 @@ async function writeHeartbeat() {
                 totalMem: Math.round(mem.totalMem / 1024 / 1024),
                 freeMem: Math.round(mem.freeMem / 1024 / 1024),
                 loadAvg: mem.loadAvg.map((v) => Math.round(v * 100) / 100),
+              },
+              // Liveness is not readiness: a box can heartbeat perfectly while
+              // `claude -p` answers "Not logged in" — which is exactly what a
+              // broken credentials fetch produced, under a green ACTIVE badge.
+              // Report auth so the fleet card can tell the difference.
+              ':auth': {
+                valid: Boolean(authState.valid),
+                error: authState.error ? String(authState.error).slice(0, 200) : null,
+                checkedAt: authState.checkedAt ?? null,
+                subscriptionType: authState.subscriptionType ?? null,
               },
             },
           }),

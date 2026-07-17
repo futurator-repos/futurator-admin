@@ -65,10 +65,22 @@ export function deriveServerState(server: ComputeServer, now: number): DerivedSe
   // actually reporting in. This is where the old badge lied.
   const beat = heartbeatState(server.lastHeartbeatAt, now);
   if (beat === 'fresh') {
+    // Liveness is not readiness. A box heartbeats fine while `claude -p` says
+    // "Not logged in" — which a broken credentials fetch produced under a green
+    // ACTIVE badge. Every job it took would fail instantly, so say it out loud.
+    if (server.auth && !server.auth.valid) {
+      return {
+        label: 'NO CLAUDE AUTH',
+        tone: 'destructive',
+        help: `The daemon is alive but cannot authenticate to Claude${
+          server.auth.error ? ` (${server.auth.error})` : ''
+        }. Every job here would fail instantly. Re-run the Mac OAuth sync to re-arm the fleet, then this recovers on its own.`,
+      };
+    }
     return {
       label: 'ACTIVE',
       tone: 'success',
-      help: 'The daemon reported in within the last 60 seconds. The dispatcher can send this server work.',
+      help: 'The daemon reported in within the last 60 seconds and can authenticate to Claude. The dispatcher can send this server work.',
     };
   }
   if (!server.lastHeartbeatAt) {

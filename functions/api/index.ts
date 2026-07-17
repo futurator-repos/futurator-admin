@@ -6475,7 +6475,11 @@ app.post('/api/servers', authMiddleware, async (c) => {
   if (!parsed.success) {
     throw new ValidationError(parsed.error.issues.map((i) => i.message).join(', '));
   }
-  const result = await provisionServer(parsed.data);
+  // The origin this request arrived on IS a working API base — the fleet
+  // server curls its credentials from it at boot. Never the site URL.
+  const result = await provisionServer(parsed.data, {
+    requestOrigin: new URL(c.req.url).origin,
+  });
   return c.json(
     {
       server: sanitizeServer(result.server),
@@ -6522,7 +6526,9 @@ app.post('/api/servers/:id/destroy', authMiddleware, async (c) => {
 // POST /api/servers/:id/retry — re-run provisioning for an ERROR row
 // (fresh enrollment token + fresh IAM keys).
 app.post('/api/servers/:id/retry', authMiddleware, async (c) => {
-  const result = await retryServer(c.req.param('id'));
+  const result = await retryServer(c.req.param('id'), {
+    requestOrigin: new URL(c.req.url).origin,
+  });
   return c.json(
     {
       server: sanitizeServer(result.server),

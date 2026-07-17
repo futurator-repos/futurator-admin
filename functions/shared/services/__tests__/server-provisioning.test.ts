@@ -79,6 +79,72 @@ beforeEach(() => {
   process.env.AWS_REGION = 'eu-central-1';
 });
 
+describe('adminApiUrl in the bootstrap — must be the API, never the site', () => {
+  // Live failure: the cloud-init curled https://hub.futurator.ai/api/servers/
+  // agent-credentials. That host is CloudFront serving the static SPA — it has
+  // no /api behaviour, so it answered 200 with index.html. `curl -fsS` called
+  // that success and wrote 11KB of HTML into .credentials.json; the daemon then
+  // said "OAuth file missing or unreadable" and every Claude call failed
+  // "Not logged in", while the fleet card cheerfully showed ACTIVE.
+  const LAMBDA_ORIGIN = 'https://3hc6clgy32vtbd5xtmbpfjzase0ajqqq.lambda-url.eu-central-1.on.aws';
+
+  beforeEach(() => {
+    delete process.env.ADMIN_API_URL;
+    delete process.env.ALLOWED_ORIGIN;
+  });
+
+  it('bakes the requesting origin (the real API) into the bootstrap', async () => {
+    adapters.getAdapter.mockReturnValue({
+      provision: vi.fn().mockResolvedValue({ instanceId: '1' }),
+    });
+    iam.createServerIamUser.mockResolvedValue(iamCreds);
+    cloudInit.buildBootstrapScript.mockReturnValue('#!/bin/bash');
+    repo.createServer.mockResolvedValue(undefined);
+
+    await provisionServer({ ...provisionInput }, { requestOrigin: LAMBDA_ORIGIN });
+
+    const opts = cloudInit.buildBootstrapScript.mock.calls[0][0];
+    expect(opts.adminApiUrl).toBe(LAMBDA_ORIGIN);
+    expect(opts.adminApiUrl).not.toContain('hub.futurator.ai');
+  });
+
+  it('local install command points at the API origin too', async () => {
+    repo.createServer.mockResolvedValue(undefined);
+
+    const result = await provisionServer(
+      {
+        name: 'my-mac',
+        provider: 'local',
+        serviceType: 'local-machine',
+        region: 'local',
+        size: 'mac',
+        arch: 'arm64',
+        maxConcurrent: 2,
+        costPerHour: 0,
+      },
+      { requestOrigin: LAMBDA_ORIGIN },
+    );
+
+    expect(result.installCommand).toContain(`ADMIN_API_URL=${LAMBDA_ORIGIN}`);
+  });
+
+  it('an explicit ADMIN_API_URL still wins (custom API domain later)', async () => {
+    process.env.ADMIN_API_URL = 'https://api.futurator.ai';
+    adapters.getAdapter.mockReturnValue({
+      provision: vi.fn().mockResolvedValue({ instanceId: '1' }),
+    });
+    iam.createServerIamUser.mockResolvedValue(iamCreds);
+    cloudInit.buildBootstrapScript.mockReturnValue('#!/bin/bash');
+    repo.createServer.mockResolvedValue(undefined);
+
+    await provisionServer({ ...provisionInput }, { requestOrigin: LAMBDA_ORIGIN });
+
+    expect(cloudInit.buildBootstrapScript.mock.calls[0][0].adminApiUrl).toBe(
+      'https://api.futurator.ai',
+    );
+  });
+});
+
 describe('setServerEnabled — the toggle means what the card says', () => {
   it('GCP: disabling stops the VM (billing pauses) and parks it PAUSED', async () => {
     const stop = vi.fn().mockResolvedValue(undefined);
