@@ -12,11 +12,11 @@ describe('LifecycleStrip — clickable stages (legacy pipeline parity)', () => {
     const onSelectStage = vi.fn();
     render(<LifecycleStrip plan={makePlan()} onSelectStage={onSelectStage} />);
     fireEvent.click(screen.getByText('Concept'));
-    expect(onSelectStage).toHaveBeenCalledWith('graph');
+    expect(onSelectStage).toHaveBeenCalledWith('plan-stage');
     fireEvent.click(screen.getByText('QA Review'));
     expect(onSelectStage).toHaveBeenCalledWith('qa');
     fireEvent.click(screen.getByText('Deployed'));
-    expect(onSelectStage).toHaveBeenCalledWith('qa');
+    expect(onSelectStage).toHaveBeenCalledWith('deploy');
     fireEvent.click(screen.getByText('Development'));
     expect(onSelectStage).toHaveBeenCalledWith('stories');
   });
@@ -25,7 +25,7 @@ describe('LifecycleStrip — clickable stages (legacy pipeline parity)', () => {
     const onSelectStage = vi.fn();
     render(<LifecycleStrip plan={makePlan()} onSelectStage={onSelectStage} />);
     fireEvent.keyDown(screen.getByText('Concept').closest('[role="button"]')!, { key: 'Enter' });
-    expect(onSelectStage).toHaveBeenCalledWith('graph');
+    expect(onSelectStage).toHaveBeenCalledWith('plan-stage');
   });
 
   it('clicking the "Open dev" link does NOT also trigger stage navigation', () => {

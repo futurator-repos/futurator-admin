@@ -102,6 +102,13 @@ export interface Plan {
    */
   planShape?: 'coherent' | 'sharded';
   /**
+   * P3 quick-p3 mint (U4 — PlanningView) — FK to the `quick-planspec` daemon
+   * job enqueued at plan creation. Lets the Plan tab poll `useAgentJob` for
+   * real status/phase/errorMessage. ABSENT for legacy (non-quick) plans.
+   * Mirror of functions/shared/types/plan.ts.
+   */
+  mintJobId?: string;
+  /**
    * QA-Review W2 readiness stamp. ISO-8601 timestamp set when a NON-BLOCKING
    * p3QaVerdict is durably recorded for the CURRENT qaCommitSha (deployed-app QA
    * passed). ABSENT/empty ⇒ deployed-app QA has NOT passed (never ran,

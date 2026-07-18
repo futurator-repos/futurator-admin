@@ -35,13 +35,21 @@ import { LifecycleStrip } from './lifecycle-strip';
 import { PipelineStrip } from './pipeline-strip';
 import { DevelopingSubtabs } from './developing-subtabs';
 import { buildStoryGraphModel, type Labs3ViewProps } from './adapter';
-import { LABS3_SUBTABS, SUBTAB_KEY, type Labs3Subtab } from './constants';
+import {
+  LABS3_SUBTABS,
+  SUBTAB_KEY,
+  subtabsForStage,
+  defaultSubtabForStage,
+  type Labs3Subtab,
+} from './constants';
 import { SpecGraphView } from '../views/spec-graph-view';
 import { Labs3GitGraphView } from '../views/git-graph-view';
 import { HierarchyView } from '../views/hierarchy-view';
 import { StreamView } from '../views/stream-view';
 import { QaReviewView } from '../views/qa-review-view';
 import { GrowthView } from '../views/growth-view';
+import { PlanningView } from '../views/planning-view';
+import { DeployView } from '../views/deploy-view';
 // Legacy code-knowledge-graph view — project-scoped Memgraph/Mycelium viewer.
 // Reused here as the 'codegraph' surface (the REAL "Graph" tab).
 import { GraphView } from '@/components/labs/plan-dashboard/views/graph-view';
@@ -110,10 +118,21 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
     return 'graph';
   }, [subtabOverride, urlSubtab]);
 
+  // Stage-aware tab set (design I2/U3). `allowedSubtabs` is null while the
+  // plan hasn't loaded yet — transient loading states must NOT redirect or
+  // clobber localStorage; only redirect once the plan's stage is known.
+  const allowedSubtabs = plan ? subtabsForStage(plan.status) : null;
+  const effectiveSubtab: Labs3Subtab = useMemo(() => {
+    if (!plan || !allowedSubtabs) return activeSubtab;
+    if (allowedSubtabs.includes(activeSubtab)) return activeSubtab;
+    return defaultSubtabForStage(plan.status);
+  }, [activeSubtab, allowedSubtabs, plan]);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    window.localStorage.setItem(SUBTAB_KEY, activeSubtab);
-  }, [activeSubtab]);
+    if (!plan) return; // don't persist a subtab resolved before the stage is known
+    window.localStorage.setItem(SUBTAB_KEY, effectiveSubtab);
+  }, [effectiveSubtab, plan]);
 
   function goToSubtab(next: Labs3Subtab, extra?: Record<string, string>) {
     setSubtabOverride(next); // instant — never wait on the router transition
@@ -223,16 +242,22 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
       <LifecycleStrip plan={plan} onSelectStage={(subtab) => goToSubtab(subtab)} />
       <PipelineStrip model={model} onSelectBatch={() => goToSubtab('graph')} />
 
-      <DevelopingSubtabs active={activeSubtab} onChange={(t) => goToSubtab(t)} />
+      <DevelopingSubtabs
+        active={effectiveSubtab}
+        onChange={(t) => goToSubtab(t)}
+        subtabs={allowedSubtabs ?? LABS3_SUBTABS.map((t) => t.id)}
+      />
 
       <div style={{ paddingTop: 24, paddingBottom: 60 }}>
-        {activeSubtab === 'graph' && <SpecGraphView {...viewProps} />}
+        {effectiveSubtab === 'plan-stage' && <PlanningView {...viewProps} />}
+
+        {effectiveSubtab === 'graph' && <SpecGraphView {...viewProps} />}
 
         {/* Code knowledge graph — files/symbols/imports grown by the compile phase
             after every green story. projectId = appId (same as legacy GraphView). */}
-        {activeSubtab === 'codegraph' && <GraphView projectId={appId} />}
+        {effectiveSubtab === 'codegraph' && <GraphView projectId={appId} />}
 
-        {activeSubtab === 'gitgraph' && (
+        {effectiveSubtab === 'gitgraph' && (
           <Labs3GitGraphView
             appId={appId}
             githubRepoUrl={githubRepoUrl}
@@ -243,11 +268,11 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
           />
         )}
 
-        {activeSubtab === 'stories' && <HierarchyView {...viewProps} />}
+        {effectiveSubtab === 'stories' && <HierarchyView {...viewProps} />}
 
-        {activeSubtab === 'qa' && <QaReviewView {...viewProps} />}
+        {effectiveSubtab === 'qa' && <QaReviewView {...viewProps} />}
 
-        {activeSubtab === 'growth' && (
+        {effectiveSubtab === 'growth' && (
           <GrowthView
             planId={planId}
             appId={appId}
@@ -256,7 +281,9 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
           />
         )}
 
-        {activeSubtab === 'stream' && <StreamView {...viewProps} />}
+        {effectiveSubtab === 'stream' && <StreamView {...viewProps} />}
+
+        {effectiveSubtab === 'deploy' && <DeployView {...viewProps} />}
       </div>
     </div>
   );

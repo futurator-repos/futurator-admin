@@ -20,6 +20,7 @@
 import { useMemo } from 'react';
 import type { StoryNodeRow } from '@/types/plan-spec';
 import type { QaReadiness } from '@/hooks/use-p3-qa-report';
+import { advisoryChipState, type AcWithAdvisoryVqa } from './bound-ac-table';
 
 // ── Verdict derivation ───────────────────────────────────────────────
 
@@ -63,7 +64,11 @@ const VERDICT_META: Record<DeliveryVerdict, { label: string; color: string; help
  * This prevents the strip from reading green off the unit-AC rollup alone while
  * deployed-app QA is unverified or blocking.
  */
-function deriveVerdict(stories: StoryNodeRow[], qaReadiness?: QaReadiness): DeliveryVerdict {
+function deriveVerdict(
+  stories: StoryNodeRow[],
+  securityFailing: number,
+  qaReadiness?: QaReadiness,
+): DeliveryVerdict {
   const base: DeliveryVerdict =
     stories.length === 0
       ? 'not-started'
@@ -73,7 +78,10 @@ function deriveVerdict(stories: StoryNodeRow[], qaReadiness?: QaReadiness): Deli
           ? 'ready'
           : 'in-progress';
 
-  if (qaReadiness === 'blocking') return 'blocking';
+  // A blocking security-advisory (SEC) reviewer fail must surface even when all
+  // stories are 'done' — SEC ACs never gate story state, but per their contract
+  // (AC_CLASS_META: "can block on a reviewer fail") they DO block delivery.
+  if (qaReadiness === 'blocking' || securityFailing > 0) return 'blocking';
   if (qaReadiness === 'pending' && base === 'ready') return 'qa-pending';
   return base;
 }
@@ -83,28 +91,62 @@ function deriveVerdict(stories: StoryNodeRow[], qaReadiness?: QaReadiness): Deli
 interface AcGauges {
   deterministicPass: number;
   deterministicTotal: number;
-  advisoryPass: number;
+  /** Q1 — observe-only VQA rollup (replaces the old testBinding pass/fail read). Advisory-TASTE only. */
+  advisoryVerified: number;
+  advisoryAttention: number;
+  advisoryNeverRun: number;
   advisoryTotal: number;
+  /** SEC (advisory-security) rolls up off testBinding.status — it can block on a reviewer fail. */
+  securityTotal: number;
+  securityFailing: number;
 }
 
-function computeAcGauges(stories: StoryNodeRow[]): AcGauges {
+/**
+ * Pure — exported for tests. Advisory-TASTE ACs roll up off `advisoryVqa` (never
+ * blocking). SEC (advisory-security) ACs are kept OUT of the advisory-taste bucket
+ * and rolled up off testBinding.status, so a blocking reviewer fail isn't hidden as
+ * a non-blocking "never run".
+ */
+export function computeAcGauges(stories: StoryNodeRow[]): AcGauges {
   let deterministicPass = 0;
   let deterministicTotal = 0;
-  let advisoryPass = 0;
+  let advisoryVerified = 0;
+  let advisoryAttention = 0;
+  let advisoryNeverRun = 0;
   let advisoryTotal = 0;
+  let securityTotal = 0;
+  let securityFailing = 0;
 
   for (const story of stories) {
-    for (const ac of story.acceptanceCriteria) {
+    for (const ac of story.acceptanceCriteria as AcWithAdvisoryVqa[]) {
       if (ac.acClass === 'deterministic') {
         deterministicTotal += 1;
         if (ac.testBinding.status === 'passing') deterministicPass += 1;
-      } else {
-        advisoryTotal += 1;
-        if (ac.testBinding.status === 'passing') advisoryPass += 1;
+        continue;
       }
+      if (ac.acClass === 'advisory-security') {
+        securityTotal += 1;
+        if (ac.testBinding.status === 'failing') securityFailing += 1;
+        continue;
+      }
+      // advisory-taste
+      advisoryTotal += 1;
+      const state = advisoryChipState(ac.advisoryVqa);
+      if (state === 'verified') advisoryVerified += 1;
+      else if (state === 'never-run') advisoryNeverRun += 1;
+      else advisoryAttention += 1; // 'attention' | 'error'
     }
   }
-  return { deterministicPass, deterministicTotal, advisoryPass, advisoryTotal };
+  return {
+    deterministicPass,
+    deterministicTotal,
+    advisoryVerified,
+    advisoryAttention,
+    advisoryNeverRun,
+    advisoryTotal,
+    securityTotal,
+    securityFailing,
+  };
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -121,8 +163,11 @@ export function VerdictStrip({
    */
   qaReadiness?: QaReadiness;
 }) {
-  const verdict = useMemo(() => deriveVerdict(stories, qaReadiness), [stories, qaReadiness]);
   const gauges = useMemo(() => computeAcGauges(stories), [stories]);
+  const verdict = useMemo(
+    () => deriveVerdict(stories, gauges.securityFailing, qaReadiness),
+    [stories, gauges.securityFailing, qaReadiness],
+  );
   const meta = VERDICT_META[verdict];
 
   const doneStories = useMemo(() => stories.filter((s) => s.state === 'done').length, [stories]);
@@ -215,14 +260,36 @@ export function VerdictStrip({
         }
       />
 
-      {/* Advisory AC gauge — only if any exist */}
+      {/* Advisory AC gauge — Q1 observe-only VQA rollup, only if any exist.
+          Counts verified-pass / attention / never-run (not the old testBinding
+          pass/fail read, which was a permanent-FAILING lie for these ACs). */}
       {gauges.advisoryTotal > 0 && (
         <MiniGauge
           label="Advisory AC"
-          pass={gauges.advisoryPass}
+          pass={gauges.advisoryVerified}
           total={gauges.advisoryTotal}
-          color="var(--text-dim)"
-          note="non-blocking"
+          color={gauges.advisoryAttention > 0 ? 'var(--warning)' : 'var(--text-dim)'}
+          note={
+            gauges.advisoryAttention > 0
+              ? `${gauges.advisoryAttention} attention`
+              : gauges.advisoryNeverRun > 0
+                ? `${gauges.advisoryNeverRun} never run`
+                : 'non-blocking'
+          }
+        />
+      )}
+
+      {/* Security AC gauge — SEC (advisory-security) rolls up off testBinding.status
+          and CAN block delivery. Shows pass count; a failing reviewer AC forces red. */}
+      {gauges.securityTotal > 0 && (
+        <MiniGauge
+          label="Security AC"
+          pass={gauges.securityTotal - gauges.securityFailing}
+          total={gauges.securityTotal}
+          color={gauges.securityFailing > 0 ? 'var(--destructive)' : 'var(--success)'}
+          note={
+            gauges.securityFailing > 0 ? `${gauges.securityFailing} blocking` : 'reviewer-gated'
+          }
         />
       )}
 

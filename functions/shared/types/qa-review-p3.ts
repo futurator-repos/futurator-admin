@@ -99,6 +99,34 @@ export interface WiringReport {
 
 export type P3QaStatus = 'idle' | 'running' | 'passed' | 'failed';
 
+/**
+ * Q2 — Agentic VQA lane (BrowserAgent integration). One operator-play-test
+ * finding surfaced by the agentic loop while attempting a delivery journey.
+ * `'blocking'` is the class of defect the agentic lane exists to catch (the
+ * journey could not be completed); `'attention'` is a non-blocking note.
+ */
+export interface AgenticFinding {
+  severity: 'blocking' | 'attention';
+  note: string;
+}
+
+/**
+ * Q2 — one agentic (BrowserAgent) run against a single delivery journey.
+ * `verdict:'skipped'` covers the no-api-key / disabled-flag fail-soft path
+ * (never a QA failure). `frameUrls` are S3/CloudFront step screenshots,
+ * `_qa/<planId>/<sha>/agentic/<journeyId>/step-NNN.png`.
+ */
+export interface AgenticRun {
+  journeyId: string;
+  instruction: string;
+  verdict: 'pass' | 'fail' | 'uncertain' | 'skipped';
+  findings: AgenticFinding[];
+  frameUrls: string[];
+  steps: number;
+  durationMs: number;
+  error?: string;
+}
+
 /** The full plan-keyed QA Review report the daemon writes + the UI reads. */
 export interface P3QaReport {
   planId: string;
@@ -116,6 +144,20 @@ export interface P3QaReport {
    * UI's "READY TO DELIVER" chip gates on this (OR an operator Approve).
    */
   qaVerifiedAt?: string;
+  /**
+   * Q2 — Agentic VQA lane report (BrowserAgent-driven operator-play-test).
+   * ABSENT when the lane didn't run (flag off / plan has no delivery
+   * journeys). `mode` reflects which backend actually drove the browser
+   * (`'headless'` embedded Playwright, or `'extension'` when the operator's
+   * live Chrome was reachable). `skippedReason` covers fail-soft paths
+   * (e.g. `'no-api-key'`) — the lane never fails QA, it just doesn't run.
+   */
+  agentic?: {
+    mode: 'headless' | 'extension';
+    model: string;
+    skippedReason?: string;
+    runs: AgenticRun[];
+  };
 }
 
 /**

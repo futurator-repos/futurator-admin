@@ -10,7 +10,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { VerdictStrip } from '../verdict-strip';
+import { VerdictStrip, computeAcGauges } from '../verdict-strip';
+import type { AcWithAdvisoryVqa } from '../bound-ac-table';
 import type { StoryNodeRow, StoryNodeState } from '@/types/plan-spec';
 
 function makeStory(state: StoryNodeState): StoryNodeRow {
@@ -63,5 +64,56 @@ describe('VerdictStrip — deployed-app QA readiness gate', () => {
   it('keeps legacy behavior (green when all done) when no readiness signal is passed', () => {
     render(<VerdictStrip stories={allDone} />);
     expect(screen.getByText('Ready to deliver')).toBeInTheDocument();
+  });
+});
+
+describe('computeAcGauges — Q1 advisory rollup (verified/attention/never-run)', () => {
+  function advisoryAc(
+    id: string,
+    advisoryVqa?: AcWithAdvisoryVqa['advisoryVqa'],
+  ): AcWithAdvisoryVqa {
+    return {
+      id,
+      text: 'ac',
+      acClass: 'advisory-taste',
+      testBinding: { status: 'unbound' },
+      advisoryVqa,
+    };
+  }
+
+  function storyWithAcs(acs: AcWithAdvisoryVqa[]): StoryNodeRow {
+    return {
+      storyId: 's-1',
+      planId: 'plan-1',
+      appId: 'app-1',
+      cohort: { epicId: 'e1' },
+      title: 't',
+      acceptanceCriteria: acs,
+      depends_on: [],
+      touches: ['src/**'],
+      complexity: 'standard',
+      state: 'done',
+      unblockedDepsCount: 0,
+      cohortBatch: 0,
+      version: 1,
+      createdAt: '',
+      updatedAt: '',
+    };
+  }
+
+  it('counts verified/attention/never-run off advisoryVqa, not testBinding.status', () => {
+    const stories = [
+      storyWithAcs([
+        advisoryAc('a1', { status: 'pass', judgedAt: 't' }),
+        advisoryAc('a2', { status: 'attention', judgedAt: 't' }),
+        advisoryAc('a3', { status: 'error', judgedAt: 't' }),
+        advisoryAc('a4'), // never run
+      ]),
+    ];
+    const gauges = computeAcGauges(stories);
+    expect(gauges.advisoryTotal).toBe(4);
+    expect(gauges.advisoryVerified).toBe(1);
+    expect(gauges.advisoryAttention).toBe(2); // 'attention' + 'error'
+    expect(gauges.advisoryNeverRun).toBe(1);
   });
 });

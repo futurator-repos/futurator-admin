@@ -246,6 +246,16 @@ export interface Plan {
    */
   conceptPlan?: ConceptPlan;
   /**
+   * P3 quick-p3 mint (U4 — PlanningView) — FK to the `quick-planspec` daemon
+   * job enqueued at plan creation (both greenfield scaffold and brownfield
+   * targetAppId branches). The mint is otherwise fire-and-forget from the
+   * API's perspective (the jobId was returned in the create response but
+   * never persisted); this field lets the Plan tab poll `useAgentJob` for
+   * real status/phase/errorMessage instead of inferring everything from
+   * `stories.length===0`. ABSENT for legacy (non-quick) plans.
+   */
+  mintJobId?: string;
+  /**
    * Concept v2 (integration): FK to the `concept-route` AgentJob enqueued at
    * plan creation for mvp/production (absent for prototype — Router bypassed).
    * `POST /api/plans/:id/apply-concept-plan` reads this job's CONCEPT_PLAN_JSON

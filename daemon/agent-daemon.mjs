@@ -2071,6 +2071,54 @@ async function executeP3QaJob(job) {
     workingDir: job.workingDir || plan.workingDir,
   };
 
+  // Q3a — real per-AC source diff for the Lane-2 judge (research: giving the
+  // judge the code that produced the behavior lifts accuracy +6.4-8.7pt over
+  // pixels alone). Best-effort: for each story, git-log the plan branch for its
+  // `story(<storyId>)` commit(s), git-show them, and map EVERY AC of that story
+  // to the concatenated diff (cap 8KB/AC to bound the judge prompt). daemonGit
+  // failures degrade to the runner's textual story-metadata fallback — never
+  // fatal. Runs in the plan worktree so a diff reflects THIS plan's commits.
+  const sourceDiffByAcId = {};
+  const DIFF_CAP_BYTES = 8 * 1024;
+  try {
+    const gitCwd = planForQa.workingDir;
+    if (gitCwd) {
+      for (const s of stories) {
+        const sid = s?.storyId;
+        if (!sid) continue;
+        const acIds = (s.acceptanceCriteria || []).map((a) => a?.id).filter(Boolean);
+        if (!acIds.length) continue;
+        const logRes = await daemonGit(['log', '--format=%H', `--grep=story(${sid})`], gitCwd);
+        if (logRes.code !== 0) continue;
+        const shas = logRes.stdout.split('\n').map((x) => x.trim()).filter(Boolean);
+        if (!shas.length) continue;
+        let diff = '';
+        for (const sha of shas) {
+          const showRes = await daemonGit(['show', '--format=', sha], gitCwd);
+          if (showRes.code === 0 && showRes.stdout) diff += showRes.stdout;
+          if (diff.length >= DIFF_CAP_BYTES) break;
+        }
+        if (!diff) continue;
+        diff = diff.slice(0, DIFF_CAP_BYTES);
+        for (const acId of acIds) sourceDiffByAcId[acId] = diff;
+      }
+    }
+  } catch (e) {
+    vlog('warn', `sourceDiffByAcId build failed (judge falls back to story metadata): ${e.message}`);
+  }
+
+  // Q1 — advisoryVqa writeback (observe steps): persist the per-AC advisory
+  // verdict onto the owning story row via the same story-persist helper the
+  // testBinding writeback uses (whole acceptanceCriteria array). Non-blocking.
+  const persistAdvisory = async ({ storyId, acceptanceCriteria }) => {
+    try {
+      const upd = buildStoryStateUpdate({ acceptanceCriteria });
+      await ddb.send(new UpdateCommand({ TableName: PLAN_SPEC_GRAPH_TABLE, Key: { storyId }, ...upd }));
+    } catch (e) {
+      vlog('warn', `advisoryVqa writeback failed for ${storyId} (non-blocking): ${e.message}`);
+    }
+  };
+
   let verdict;
   try {
     verdict = await runP3Qa({
@@ -2087,12 +2135,25 @@ async function executeP3QaJob(job) {
       // screenshotBucket = the DEV-ENV bucket the daemon CAN write to (the
       // public futurator-ai-website is PutObject-denied to the EC2 role); frames
       // serve at screenshotBase (dev.futurator.ai) under the `_qa/` prefix.
+      // sourceDiffByAcId (Q3a): real git diffs per AC for the Lane-2 judge.
       qaContext: {
         appDir: planForQa.workingDir,
         seamHook: job.seamHook,
         screenshotBucket: process.env.DEV_ENV_BUCKET,
         screenshotBase: process.env.DEV_ENV_BASE || 'https://dev.futurator.ai',
+        sourceDiffByAcId,
       },
+      // Q1 — advisoryVqa writeback for observe (appearance-only) ACs.
+      persistAdvisory,
+      // Q2 — agentic VQA lane. Flag resolves off/shadow/on; env carries the
+      // BROWSER_AGENT_URL/KEY/MODE + AGENTIC_VQA_* knobs the lane reads. A
+      // missing BROWSER_AGENT_API_KEY makes the lane a no-op (never fails QA).
+      agenticMode: envFlag('P3_AGENTIC_VQA'),
+      env: process.env,
+      // Q3b — flag a failed playwright import so the verdict carries an explicit
+      // 'qa-engine-misconfigured' attention marker naming THIS box (not a fake
+      // app failure). `playwright` is null iff the lazy import above threw.
+      qaEngine: { misconfigured: !playwright, box: SERVER_ID },
       log,
     });
   } catch (e) {

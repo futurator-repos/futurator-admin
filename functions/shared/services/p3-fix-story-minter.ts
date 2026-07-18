@@ -22,13 +22,31 @@ function shortHash(s: string): string {
 }
 
 interface Finding {
-  kind: 'journey' | 'vqa' | 'wiring';
+  kind: 'journey' | 'vqa' | 'wiring' | 'agentic';
   title: string;
   intent: string;
   acText: string;
   /** Files the fix should touch (globs). Wiring orphans give concrete files. */
   touches: string[];
 }
+
+/**
+ * The agentic VQA lane (Q2) writes its report onto the persisted verdict at
+ * runtime as `verdict.agentic` (schemaless DynamoDB JSON). The persisted
+ * P3QaVerdict type does not declare it (P3QaReport.agentic is the typed home),
+ * so we read it through this local augmentation rather than widening the shared
+ * type. A `[blocking]` agentic finding means the operator-play-test agent could
+ * not complete the journey — the exact defect class that shipped in every pacman
+ * plan and that the deterministic lanes cannot see.
+ */
+type VerdictWithAgentic = P3QaVerdict & {
+  agentic?: {
+    runs?: Array<{
+      journeyId?: string;
+      findings?: Array<{ severity?: 'blocking' | 'attention'; note?: string }>;
+    }>;
+  };
+};
 
 /** True iff any failed step's detail names the missing-__harness disease. */
 function seamNotMounted(verdict: P3QaVerdict): boolean {
@@ -107,6 +125,30 @@ function blockingFindings(verdict: P3QaVerdict, seamHook?: string): Finding[] {
       acText: `The "${v.stepLabel}" screen renders per the spec (not a placeholder): ${v.rationale}`,
       touches: ['src/**'],
     });
+  }
+
+  // Q2 — agentic operator-play-test blockers. A `[blocking]` agentic finding
+  // means the play-test agent could NOT complete the journey end-to-end (the
+  // pacman defect class the deterministic lanes miss). Only 'blocking' findings
+  // mint stories; 'attention' notes are advisory. The finding note is the story
+  // seed (both intent and AC text).
+  const agenticVerdict = verdict as VerdictWithAgentic;
+  for (const run of agenticVerdict.agentic?.runs || []) {
+    for (const f of run.findings || []) {
+      if (f?.severity !== 'blocking') continue;
+      const note =
+        (f.note || '').trim() || 'the delivery journey could not be completed end-to-end';
+      const journeyLabel = run.journeyId || 'delivery journey';
+      out.push({
+        kind: 'agentic',
+        title: `Fix journey (agentic play-test): ${journeyLabel}`,
+        intent:
+          `The agentic operator-play-test could not complete "${journeyLabel}" against the assembled app: ${note}. ` +
+          'Wire/repair the feature so a real user can complete this journey end-to-end in the running app.',
+        acText: `A user can complete the "${journeyLabel}" journey end-to-end in the deployed app (agentic play-test finding: ${note}).`,
+        touches: ['src/**'],
+      });
+    }
   }
 
   const orphans = verdict.wiring?.orphanModules || [];

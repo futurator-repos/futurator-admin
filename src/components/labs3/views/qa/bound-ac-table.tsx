@@ -29,6 +29,25 @@ import type {
   TestBindingStatus,
 } from '@/types/plan-spec';
 
+// ── Advisory VQA (Q1 — observe-only journey steps) ───────────────────
+//
+// The client mirror (src/types/plan-spec.ts) does not yet carry
+// `BoundAcceptanceCriterion.advisoryVqa` (backend: functions/shared/types/
+// plan-spec.ts:62-68). Shadowed locally rather than editing the foreign
+// mirror file — see build slice deviations. Drop this once the mirror syncs.
+
+/** One AC's observe-only VQA verdict (mirrors the backend `advisoryVqa` field). */
+export interface AdvisoryVqa {
+  status: 'pass' | 'attention' | 'error';
+  judgedAt: string;
+  sha?: string;
+  frameUrl?: string;
+  rationale?: string;
+}
+
+/** A BoundAcceptanceCriterion widened with the not-yet-mirrored advisoryVqa field. */
+export type AcWithAdvisoryVqa = BoundAcceptanceCriterion & { advisoryVqa?: AdvisoryVqa };
+
 // ── Group builder ────────────────────────────────────────────────────
 
 interface EpicGroup {
@@ -37,7 +56,7 @@ interface EpicGroup {
     storyId: string;
     title: string;
     state: StoryNodeRow['state'];
-    acs: BoundAcceptanceCriterion[];
+    acs: AcWithAdvisoryVqa[];
   }>;
 }
 
@@ -137,6 +156,64 @@ function AcClassBadge({ acClass }: { acClass: AcClass }) {
   );
 }
 
+// ── Advisory VQA chip — ADV-class rows (Q1 observe-only journey steps) ──
+//
+// ADV-class rows previously fell through to StatusChip on the AC's
+// testBinding.status, which for an unbound/never-run advisory AC reads
+// 'unbound' but often paints alongside a misleading permanent-FAILING look
+// once a fix-story minter ever touched the row. Advisory rows now read
+// `ac.advisoryVqa` (the observe-only VQA judge verdict) instead:
+//   'pass'      → VERIFIED (green)
+//   'attention' → ATTENTION (amber)
+//   'error'     → ERROR (destructive — judge/harness failure, not a real fail)
+//   absent      → NEVER RUN (neutral grey)
+// Deterministic rows are untouched — they keep StatusChip/testBinding.status.
+
+export type AdvisoryChipState = 'verified' | 'attention' | 'error' | 'never-run';
+
+/** Pure — maps an AC's advisoryVqa (or its absence) to the chip state. */
+export function advisoryChipState(advisoryVqa?: AdvisoryVqa | null): AdvisoryChipState {
+  if (!advisoryVqa) return 'never-run';
+  if (advisoryVqa.status === 'pass') return 'verified';
+  if (advisoryVqa.status === 'attention') return 'attention';
+  return 'error';
+}
+
+const ADVISORY_CHIP_META: Record<AdvisoryChipState, { label: string; color: string }> = {
+  verified: { label: 'verified', color: 'var(--success)' },
+  attention: { label: 'attention', color: 'var(--warning)' },
+  error: { label: 'error', color: 'var(--destructive)' },
+  'never-run': { label: 'never run', color: 'var(--text-mute)' },
+};
+
+function AdvisoryVqaChip({ advisoryVqa }: { advisoryVqa?: AdvisoryVqa }) {
+  const state = advisoryChipState(advisoryVqa);
+  const meta = ADVISORY_CHIP_META[state];
+  return (
+    <span
+      title={
+        advisoryVqa?.rationale ??
+        (state === 'never-run' ? 'No observe-only VQA judge run has recorded a verdict yet.' : '')
+      }
+      style={{
+        fontFamily: 'var(--font-mono)',
+        fontSize: 9.5,
+        fontWeight: 700,
+        letterSpacing: '0.1em',
+        textTransform: 'uppercase',
+        color: meta.color,
+        border: `1px solid color-mix(in srgb, ${meta.color} 50%, transparent)`,
+        background: `color-mix(in srgb, ${meta.color} 8%, transparent)`,
+        borderRadius: 3,
+        padding: '2px 8px',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
 // ── Expander detail ──────────────────────────────────────────────────
 
 function DetailField({ label, children }: { label: string; children: React.ReactNode }) {
@@ -190,9 +267,13 @@ function GwtLine({ prefix, text }: { prefix: string; text: string }) {
   );
 }
 
-function AcDetail({ ac }: { ac: BoundAcceptanceCriterion }) {
+function AcDetail({ ac }: { ac: AcWithAdvisoryVqa }) {
   const { testBinding } = ac;
   const hasGwt = ac.given || ac.when || ac.then;
+  // Only advisory-TASTE rows carry an observe-only VQA verdict. SEC keeps its
+  // testBinding status/detail (see the status-chip note above) — showing SEC an
+  // "observe-only VQA · never run" block would imply a blocking fail is benign.
+  const isAdvisoryTaste = ac.acClass === 'advisory-taste';
 
   return (
     <div
@@ -263,6 +344,56 @@ function AcDetail({ ac }: { ac: BoundAcceptanceCriterion }) {
         )}
       </div>
 
+      {/* Advisory (observe-only) VQA verdict — advisory-taste rows only */}
+      {isAdvisoryTaste && (
+        <DetailField label="Observe-only VQA verdict">
+          {ac.advisoryVqa ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <AdvisoryVqaChip advisoryVqa={ac.advisoryVqa} />
+                <span style={{ fontSize: 10.5, color: 'var(--text-mute)' }}>
+                  {relTime(ac.advisoryVqa.judgedAt)}
+                </span>
+                {ac.advisoryVqa.frameUrl && (
+                  <a
+                    href={ac.advisoryVqa.frameUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      fontSize: 10.5,
+                      color: 'var(--accent-blue)',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    view frame ↗
+                  </a>
+                )}
+              </div>
+              {ac.advisoryVqa.rationale && (
+                <p
+                  style={{
+                    margin: 0,
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                    color: 'var(--text-dim)',
+                    padding: '7px 10px',
+                    borderLeft: `3px solid ${ADVISORY_CHIP_META[advisoryChipState(ac.advisoryVqa)].color}`,
+                    background: 'var(--surface)',
+                    borderRadius: 4,
+                  }}
+                >
+                  {ac.advisoryVqa.rationale}
+                </p>
+              )}
+            </div>
+          ) : (
+            <span style={{ fontSize: 11.5, color: 'var(--text-faint)', fontStyle: 'italic' }}>
+              Never run — no observe-only VQA judge has verified this AC yet.
+            </span>
+          )}
+        </DetailField>
+      )}
+
       {/* Detail / failure message */}
       {testBinding.detail && (
         <DetailField label={testBinding.status === 'failing' ? 'Failure detail' : 'Detail'}>
@@ -297,7 +428,7 @@ function AcAccordionRow({
   open,
   onToggle,
 }: {
-  ac: BoundAcceptanceCriterion;
+  ac: AcWithAdvisoryVqa;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -375,9 +506,17 @@ function AcAccordionRow({
           )}
         </td>
 
-        {/* Status chip */}
+        {/* Status chip — only advisory-TASTE rows read the observe-only VQA
+            verdict. Deterministic AND advisory-security (SEC) rows keep
+            StatusChip on testBinding.status: SEC can block on a reviewer fail
+            and the daemon never writes advisoryVqa for it, so routing it through
+            AdvisoryVqaChip would mask a blocking 'failing' status as grey NEVER RUN. */}
         <td style={{ padding: '9px 18px 9px 10px', width: 100 }}>
-          <StatusChip status={testBinding.status} />
+          {ac.acClass === 'advisory-taste' ? (
+            <AdvisoryVqaChip advisoryVqa={ac.advisoryVqa} />
+          ) : (
+            <StatusChip status={testBinding.status} />
+          )}
         </td>
       </tr>
 

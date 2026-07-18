@@ -25,6 +25,12 @@ vi.mock('@/hooks/use-agent-events', () => ({
 vi.mock('@/hooks/use-story-nodes', () => ({
   useRetryStory: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
 }));
+// StoryDetailPanel resolves the run's server name via useServers() (a useQuery);
+// mocked here like the other data hooks so the suite needs no QueryClientProvider
+// (this suite exercises rendering, not the fleet lookup).
+vi.mock('@/hooks/use-servers', () => ({
+  useServers: () => ({ data: undefined }),
+}));
 
 import { HierarchyView } from '../hierarchy-view';
 import type { StoryNodeRow, StoryNodeState, StoryVerdict } from '@/types/plan-spec';

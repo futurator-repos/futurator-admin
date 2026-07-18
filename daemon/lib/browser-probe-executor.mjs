@@ -636,6 +636,89 @@ export async function runBrowserJourney({
 }
 
 /**
+ * Execute a single OBSERVE step (p3-journey-source.mjs `toObserveStep`): a
+ * pure-appearance AC has no driving action and no deterministic assertion, so
+ * the honest thing to do is navigate to the journey URL, let the app SETTLE, and
+ * capture ONE "after" frame for the single-frame VQA judge. No actions, no
+ * assertions, never a deterministic pass/fail — the runner judges the frame
+ * VQA-primary (attention-only, never blocking; the advisory-taste contract).
+ *
+ * Two entry shapes (both supported for the runner's convenience):
+ *  - REUSE an already-open page (part of a running journey): pass `page`; it
+ *    only re-navigates if the page isn't already at `url`.
+ *  - STANDALONE: pass `playwright`; this launches its own headless browser,
+ *    navigates, captures, and closes it.
+ *
+ * Frame capture reuses the exact `page.screenshot()` path `runBrowserJourney`
+ * uses. Returns `{ ok:true, frames:{ after:<Buffer> }, observe:true }` on success;
+ * a launch/navigation/screenshot error returns `{ ok:false, observe:true,
+ * infra:true, detail }` (honesty contract — never a fabricated frame).
+ *
+ * @param {{ url?:string, step?:{acId?:string,spec?:string,settleMs?:number}, page?:object,
+ *   playwright?:object, settleMs?:number, timeoutMs?:number, log?:Function, wait?:Function }} opts
+ * @returns {Promise<{ ok:boolean, observe:true, frames?:{after:Buffer}, acId?:string,
+ *   spec?:string, infra?:boolean, detail?:string }>}
+ */
+export async function runObserveStep({
+  url,
+  step,
+  page: providedPage,
+  playwright,
+  settleMs,
+  timeoutMs = 30_000,
+  log = () => {},
+  wait,
+} = {}) {
+  const effectiveSettle = Number(step?.settleMs ?? settleMs ?? 1200) || 0;
+  const acId = step?.acId;
+  const spec = step?.spec;
+  const sleep = typeof wait === 'function' ? wait : (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const settleAndShoot = async (page) => {
+    // SETTLE: give the app a beat to paint (fonts/canvas/first render) before
+    // the single frame — the same reason journeys settle before reading state.
+    if (typeof page.waitForTimeout === 'function') await page.waitForTimeout(effectiveSettle);
+    else await sleep(effectiveSettle);
+    // ONE frame, reusing the existing capture path.
+    const after = await page.screenshot();
+    log('info', `[browser-observe] ${acId ?? '?'} captured 1 frame after ${effectiveSettle}ms settle`);
+    return { ok: true, observe: true, frames: { after }, acId, spec };
+  };
+
+  // REUSE path: an already-navigated page from a running journey.
+  if (providedPage) {
+    try {
+      const alreadyThere = url && typeof providedPage.url === 'function' ? providedPage.url() === url : true;
+      if (url && !alreadyThere) await providedPage.goto(url, { waitUntil: 'load', timeout: timeoutMs });
+      return await settleAndShoot(providedPage);
+    } catch (err) {
+      return { ok: false, observe: true, infra: true, detail: `observe step error: ${err?.message || err}`, acId, spec };
+    }
+  }
+
+  // STANDALONE path: launch our own headless browser.
+  const chromium = playwright?.chromium ?? playwright?.default?.chromium;
+  if (!chromium) {
+    return { ok: false, observe: true, infra: true, detail: 'playwright chromium unavailable (import interop)', acId, spec };
+  }
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'load', timeout: timeoutMs });
+    return await settleAndShoot(page);
+  } catch (err) {
+    return { ok: false, observe: true, infra: true, detail: `observe step error: ${err?.message || err}`, acId, spec };
+  } finally {
+    try {
+      if (browser) await browser.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
+/**
  * Convert a parsed probe (ordered actions + assertions) into `runBrowserJourney`
  * steps: every action but the last becomes an assertion-less "pre" step so the
  * app still advances through the whole `when`, and the FINAL action carries the

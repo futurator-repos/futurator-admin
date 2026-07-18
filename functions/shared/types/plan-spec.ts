@@ -50,6 +50,22 @@ export interface BoundAcceptanceCriterion {
   acClass: AcClass;
   /** Optional link to a delivery user-journey this AC validates. */
   validatesUjId?: string;
+  /**
+   * Q1 — observe-only journey step verdict (closes the advisory-AC hole): for
+   * a pure-appearance AC (`verify:'appearance'` / `acClass:'advisory-taste'`
+   * with no `when`), a single-frame VQA judge answers "does this frame
+   * satisfy: <AC text>". NEVER blocking — `'attention'` is the worst outcome,
+   * keeping the advisory-taste=attention-only contract. `'error'` covers a
+   * judge/harness failure (distinct from a genuine `'attention'` finding).
+   * ABSENT ⇒ never run (retires the prior permanent-FAILING lie for these ACs).
+   */
+  advisoryVqa?: {
+    status: 'pass' | 'attention' | 'error';
+    judgedAt: string;
+    sha?: string;
+    frameUrl?: string;
+    rationale?: string;
+  };
 }
 
 /** Pointer into a durable spec_shard; contentHash is BOTH cache key + drift detector. */

@@ -44,8 +44,8 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { parseProbe, runBrowserJourney, OBSERVE_ONLY_NOTE } from './browser-probe-executor.mjs';
-import { judgeVqaStep } from './p3-vqa-judge.mjs';
+import { parseProbe, runBrowserJourney, runObserveStep, OBSERVE_ONLY_NOTE } from './browser-probe-executor.mjs';
+import { judgeVqaStep, judgeObserveStep } from './p3-vqa-judge.mjs';
 import { findOrphanModules } from './p3-orphan-check.mjs';
 import { resolveJourneys } from './p3-journey-source.mjs';
 
@@ -216,6 +216,12 @@ export function expandJourneySteps(journey, { observeOnly = false } = {}) {
   const browserSteps = [];
   const primaryMeta = [];
   for (const step of journey?.steps || []) {
+    // OBSERVE steps (p3-journey-source `toObserveStep`, kind:'observe') have no
+    // driving action and no deterministic assertion — they are handled entirely
+    // by the runner's separate observe path (runObserveStep + single-frame
+    // judge → advisoryVqa), NOT the deterministic browser-journey driver. Skip
+    // them here so they never become an uninterpretable Lane-1 step.
+    if (step?.kind === 'observe') continue;
     const acId = step?.acId ?? '';
     const rawLabel = step?.label || acId || '(unlabeled step)';
     const probe = parseProbe({ when: step?.when, thenObservable: step?.thenObservable, then: step?.then });
@@ -284,7 +290,63 @@ async function runOneJourney({ journey, url, stories, playwright, spawnJudge, s3
 
   const steps = [];
   const vqaFlat = [];
+  const advisoryFlat = [];
   const journeyIdKey = sanitizeKey(journey?.id || 'journey');
+
+  // ── OBSERVE steps (Q1 — advisory-taste appearance ACs) ────────────────────
+  // A pure-appearance AC (no `when`, no deterministic assertion) drove nothing:
+  // navigate → settle → single "after" frame → single-frame VQA judge. The
+  // result is written back per-AC as `advisoryVqa` (attention-only, NEVER
+  // blocking — the advisory-taste contract). Frame capture/judging failures
+  // record status:'error' (a diagnosable engine miss, never a fabricated pass);
+  // a genuine s3 upload THROW propagates to runP3Qa's per-journey escape hatch,
+  // exactly like the action-step path.
+  const screenshotBucket = qaContext?.screenshotBucket;
+  const screenshotBase = qaContext?.screenshotBase || 'https://dev.futurator.ai';
+  for (const obs of journey?.steps || []) {
+    if (obs?.kind !== 'observe') continue;
+    const acId = obs.acId ?? '';
+    let status = 'error';
+    let rationale = '';
+    let frameUrl = '';
+    const observed = await runObserveStep({ url, step: obs, playwright, log, wait });
+    if (observed?.ok && observed.frames?.after && frameRoot) {
+      const slug = sanitizeKey(`observe-${acId}`);
+      const afterPath = join(frameRoot, `${slug}-after.png`);
+      writeFileSync(afterPath, observed.frames.after);
+      const judged = await judgeObserveStep({
+        spec: { id: acId, acText: obs.spec },
+        frame: afterPath,
+        spawnJudge,
+        cwd: qaContext?.appDir,
+        log,
+      });
+      // Map: pass → 'pass'; fail|uncertain → 'attention' (never blocking);
+      // judge/engine failure → 'error' (distinct from a genuine attention).
+      if (!judged.ok) {
+        status = 'error';
+      } else if (judged.verdict === 'pass') {
+        status = 'pass';
+      } else {
+        status = 'attention';
+      }
+      rationale = judged.rationale;
+      const stamp = Date.now();
+      frameUrl = await uploadFrame({
+        s3,
+        localPath: afterPath,
+        key: `_qa/${planId}/${qaCommitSha}/${journeyIdKey}/${slug}-observe-${stamp}.png`,
+        cwd: qaContext?.appDir,
+        bucket: screenshotBucket,
+        base: screenshotBase,
+        log,
+      });
+    } else {
+      status = 'error';
+      rationale = observed?.detail || 'observe frame capture failed';
+    }
+    advisoryFlat.push({ acId, status, judgedAt: new Date().toISOString(), sha: qaCommitSha, frameUrl, rationale });
+  }
 
   // A harness/infra failure (no browser, launch/nav error) is NOT an app verdict
   // — flag every step so the blocking check excludes it and the journey reads
@@ -322,8 +384,6 @@ async function runOneJourney({ journey, url, stories, playwright, spawnJudge, s3
       // `_qa/` reserved prefix in the DEV-ENV bucket (served at screenshotBase).
       const keyPrefix = `_qa/${planId}/${qaCommitSha}/${journeyIdKey}`;
       const stamp = Date.now();
-      const screenshotBucket = qaContext?.screenshotBucket;
-      const screenshotBase = qaContext?.screenshotBase || 'https://dev.futurator.ai';
       const beforeShotUrl = await uploadFrame({
         s3,
         localPath: beforePath,
@@ -409,6 +469,7 @@ async function runOneJourney({ journey, url, stories, playwright, spawnJudge, s3
       steps,
     },
     vqaFlat,
+    advisoryFlat,
   };
 }
 
@@ -444,6 +505,25 @@ export async function runP3Qa({
   observeOnly = true,
   // Injected poll/settle clock (tests pass a no-op); production uses real timers.
   wait,
+  // Q1 — writeback for per-AC advisoryVqa (observe steps). Injected by the daemon
+  // (buildStoryStateUpdate + UpdateCommand on the story row). Default no-op so
+  // pure unit tests need no persistence. Called once per affected story with the
+  // WHOLE mutated acceptanceCriteria array (mirrors testBinding writeback).
+  persistAdvisory,
+  // Q2 — Agentic VQA lane. `agenticMode` is the resolved P3_AGENTIC_VQA flag
+  // ('off'|'shadow'|'on'); 'off' skips the lane, 'shadow' runs+records but never
+  // gates, 'on' lets a [blocking] agentic finding contribute to verdict.blocking.
+  agenticMode = 'off',
+  // Injected agentic runner (tests). Default lazily imports the real lane so the
+  // heavy browser-agent/SDK deps only load when the lane is actually enabled.
+  runAgentic = async (args) => (await import('./agentic-vqa-runner.mjs')).runAgenticVqa(args),
+  // Env passed through to the agentic lane (BROWSER_AGENT_*/AGENTIC_VQA_* keys).
+  env = process.env,
+  // Q3b — { misconfigured, box }: when the daemon's lazy playwright import
+  // FAILED, the daemon flags it here so the verdict carries an explicit
+  // 'qa-engine-misconfigured' attention marker naming the box, distinct from a
+  // real app 'seam unreachable' failure.
+  qaEngine = {},
 } = {}) {
   const vlog = (level, msg) => {
     try {
@@ -470,10 +550,11 @@ export async function runP3Qa({
 
   const journeyResults = [];
   const vqaResults = [];
+  const advisoryResults = [];
 
   for (const journey of journeys) {
     try {
-      const { journeyResult, vqaFlat } = await runOneJourney({
+      const { journeyResult, vqaFlat, advisoryFlat } = await runOneJourney({
         journey,
         url,
         stories,
@@ -490,6 +571,7 @@ export async function runP3Qa({
       });
       journeyResults.push(journeyResult);
       vqaResults.push(...vqaFlat);
+      advisoryResults.push(...(advisoryFlat || []));
     } catch (err) {
       vlog('warn', `journey ${journey?.id ?? '?'} infra-threw — degrading to uncertain (non-blocking), continuing to the next journey: ${err?.message || err}`);
       journeyResults.push({
@@ -541,17 +623,82 @@ export async function runP3Qa({
     }
   }
 
+  // Q1 — persist per-AC advisoryVqa onto the owning story rows (attention-only,
+  // never blocking). Group by story, mutate the in-memory AC, write the WHOLE
+  // acceptanceCriteria array back (mirrors testBinding writeback). A persist
+  // failure is logged, never fatal.
+  if (typeof persistAdvisory === 'function' && advisoryResults.length) {
+    const affected = new Map();
+    for (const adv of advisoryResults) {
+      const story = findStoryForAc(adv.acId, stories);
+      if (!story) continue;
+      const ac = (story.acceptanceCriteria || []).find((a) => a?.id === adv.acId);
+      if (!ac) continue;
+      ac.advisoryVqa = {
+        status: adv.status,
+        judgedAt: adv.judgedAt,
+        ...(adv.sha ? { sha: adv.sha } : {}),
+        ...(adv.frameUrl ? { frameUrl: adv.frameUrl } : {}),
+        ...(adv.rationale ? { rationale: adv.rationale } : {}),
+      };
+      affected.set(story.storyId, story);
+    }
+    for (const story of affected.values()) {
+      try {
+        await persistAdvisory({ storyId: story.storyId, acceptanceCriteria: story.acceptanceCriteria });
+      } catch (e) {
+        vlog('warn', `advisoryVqa writeback failed for ${story.storyId} (non-blocking): ${e?.message || e}`);
+      }
+    }
+  }
+
+  // Q2 — Agentic VQA lane (BrowserAgent operator-play-test). Runs AFTER the
+  // deterministic journeys. It NEVER throws (honesty contract); a missing
+  // BROWSER_AGENT_API_KEY surfaces as report.skippedReason:'no-api-key' and
+  // never fails QA. A [blocking] finding contributes to verdict.blocking ONLY
+  // when the flag is 'on' ('shadow' records the report but never gates).
+  let agentic;
+  if (agenticMode !== 'off') {
+    try {
+      agentic = await runAgentic({
+        plan,
+        journeys,
+        devUrl: plan?.devUrl,
+        sha: qaCommitSha,
+        mode: env.AGENTIC_VQA_MODE || 'auto',
+        s3,
+        log,
+        env,
+        screenshotBucket: qaContext?.screenshotBucket,
+        screenshotBase: qaContext?.screenshotBase,
+      });
+    } catch (err) {
+      vlog('warn', `agentic VQA lane threw (non-blocking): ${err?.message || err}`);
+      agentic = {
+        mode: 'headless',
+        model: env.AGENTIC_VQA_MODEL || 'claude-sonnet-5',
+        skippedReason: `error: ${err?.message || err}`,
+        runs: [],
+      };
+    }
+  }
+  const agenticBlocking =
+    agenticMode === 'on' &&
+    !!agentic &&
+    (agentic.runs || []).some((r) => (r.findings || []).some((f) => f?.severity === 'blocking'));
+
   // BLOCKING = the per-step confirmatory policy (runOneJourney): a step blocks
   // only on a deterministic HARD-fail, or an UNDECIDED step that VQA confirms.
   // A VQA fail alone (on a deterministically-passed step) is downgraded to
   // attention and CANNOT block — the anyVqaRealFail term is deliberately gone.
+  // Plus (flag 'on' only) a blocking agentic finding.
   const anyStepBlocking = journeyResults.some((j) => (j.steps || []).some((s) => s.blocking));
-  const blocking = anyStepBlocking || wiring.blocking;
+  const blocking = anyStepBlocking || wiring.blocking || agenticBlocking;
 
   const anyUncertain = journeyResults.some((j) => j.verdict === 'uncertain') || vqaResults.some((v) => v.verdict === 'uncertain');
   const status = blocking ? 'fail' : journeys.length === 0 || anyUncertain ? 'uncertain' : 'pass';
 
-  return {
+  const out = {
     status,
     blocking,
     ranAtSha: qaCommitSha,
@@ -559,4 +706,16 @@ export async function runP3Qa({
     vqa: vqaResults,
     wiring,
   };
+  if (agentic) out.agentic = agentic;
+  // Q3b — explicit QA-engine-misconfigured marker (playwright import failed on
+  // this box). Non-blocking attention: it means BOTH lanes could not drive a
+  // browser, so the journeys read 'uncertain' for an ENGINE reason, not an app
+  // failure. Names the box (SERVER_ID) so the operator fixes the right host.
+  if (qaEngine?.misconfigured) {
+    out.qaEngineMisconfigured = {
+      box: qaEngine.box || '(unknown box)',
+      note: `qa-engine-misconfigured: playwright/chromium is not available on ${qaEngine.box || 'this QA box'} — deterministic + observe lanes could not drive a browser (this is an ENGINE/install problem on the box, not an app failure). Install the daemon's playwright browsers to restore QA.`,
+    };
+  }
+  return out;
 }

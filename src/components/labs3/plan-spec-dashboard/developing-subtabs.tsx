@@ -43,10 +43,21 @@ import { LABS3_SUBTABS, type Labs3Subtab } from './constants';
 export function DevelopingSubtabs({
   active,
   onChange,
+  subtabs = LABS3_SUBTABS.map((t) => t.id),
 }: {
   active: Labs3Subtab;
   onChange: (t: Labs3Subtab) => void;
+  /**
+   * The stage-filtered, ordered subset of subtab ids to render (design I2/U3
+   * `subtabsForStage`). Defaults to every subtab — legacy/unfiltered callers
+   * (and tests) keep working unchanged.
+   */
+  subtabs?: Labs3Subtab[];
 }) {
+  const visible = subtabs
+    .map((id) => LABS3_SUBTABS.find((t) => t.id === id))
+    .filter((t): t is (typeof LABS3_SUBTABS)[number] => t != null);
+
   return (
     <div style={{ padding: '28px 0 0' }}>
       <div
@@ -60,7 +71,7 @@ export function DevelopingSubtabs({
           overflowX: 'auto',
         }}
       >
-        {LABS3_SUBTABS.map((t) => {
+        {visible.map((t) => {
           const on = active === t.id;
           return (
             <button
@@ -68,7 +79,6 @@ export function DevelopingSubtabs({
               type="button"
               role="tab"
               onClick={() => onChange(t.id)}
-              aria-pressed={on}
               aria-selected={on}
               onMouseEnter={(e) => {
                 if (!on) e.currentTarget.style.color = 'var(--text-dim)';

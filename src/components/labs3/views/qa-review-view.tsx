@@ -32,12 +32,18 @@ import { CohortMatrix } from './qa/cohort-matrix';
 import { DevUrlCard, type DevPreviewStatus } from './qa/dev-url-card';
 import { JourneyVerdicts } from './qa/journey-verdicts';
 import { BeforeAfterGallery } from './qa/before-after-gallery';
+import { AgenticJourneysSection } from './qa/agentic-journeys-section';
 import { WiringOrphanBanner } from './qa/wiring-orphan-banner';
 import { QaActions } from './qa/qa-actions';
-import { useP3QaReport, qaReadiness, type QaReadiness } from '@/hooks/use-p3-qa-report';
+import {
+  useP3QaReport,
+  qaReadiness,
+  type QaReadiness,
+  type P3QaReportWithAgentic,
+} from '@/hooks/use-p3-qa-report';
 import { StoryNodeStatePill } from '@/components/labs3/shared/state-pill';
 import type { StoryNodeRow, StoryNodeState } from '@/types/plan-spec';
-import type { P3QaReport, P3QaVerdict } from '@/types/qa-review-p3';
+import type { P3QaVerdict } from '@/types/qa-review-p3';
 
 // ── View props (matches Labs3ViewProps subset; shell passes full shape) ──
 
@@ -136,7 +142,7 @@ function DeployedAppQaReview({
   readiness,
 }: {
   planId: string;
-  report: P3QaReport;
+  report: P3QaReportWithAgentic;
   /** The full verdict from the GET envelope (decision/blocking); may be null. */
   verdict: P3QaVerdict | null;
   readiness: QaReadiness;
@@ -167,6 +173,7 @@ function DeployedAppQaReview({
           a green confirmation instead of being indistinguishable from "never ran". */}
       <WiringOrphanBanner wiring={report.wiring} hasRun />
       <JourneyVerdicts journeys={report.journeys} />
+      <AgenticJourneysSection agentic={report.agentic} />
       <BeforeAfterGallery journeys={report.journeys} />
       <QaActions planId={planId} verdict={verdict} currentQaCommitSha={report.qaCommitSha} />
     </div>

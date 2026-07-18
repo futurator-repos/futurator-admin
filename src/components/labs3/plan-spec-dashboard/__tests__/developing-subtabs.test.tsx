@@ -49,6 +49,7 @@ describe('DevelopingSubtabs — active tab indicator', () => {
     expect(onChange).toHaveBeenCalledWith('growth');
 
     expect(LABS3_SUBTABS.map((t) => t.id)).toEqual([
+      'plan-stage',
       'graph',
       'codegraph',
       'gitgraph',
@@ -56,6 +57,7 @@ describe('DevelopingSubtabs — active tab indicator', () => {
       'qa',
       'growth',
       'stream',
+      'deploy',
     ]);
   });
 });

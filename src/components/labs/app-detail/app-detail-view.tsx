@@ -13,7 +13,6 @@ import { NewPlanModal } from './new-plan-modal';
 import { DeploysPanel } from './deploys-panel';
 import { AppSettingsDialog } from './app-settings-dialog';
 import { DeleteAppDialog } from './delete-app-dialog';
-import { V2RoadmapStrip } from './v2-roadmap-strip';
 import { SourceTabContent } from './source-tab';
 import { PerformanceTab } from './performance-tab';
 import { AppPartyView } from './app-party-view';
@@ -30,8 +29,19 @@ interface DeployRow {
 /**
  * App detail view — mounted by `/labs/page.tsx` when `?appId=X` is in the
  * URL. Avoids dynamic route segments (incompatible with `output: 'export'`).
+ *
+ * Also reused (unmodified) by `/labs3/page.tsx` for its `?appId=X` app-detail
+ * view (Story U1) — `planHref`, when supplied, retargets Plan Timeline links
+ * at Labs3 plan URLs instead of legacy `/labs?appId=&planId=`. Omitting it
+ * preserves the legacy behavior exactly.
  */
-export function AppDetailView({ appId }: { appId: string }) {
+export function AppDetailView({
+  appId,
+  planHref,
+}: {
+  appId: string;
+  planHref?: (appId: string, planId: string) => string;
+}) {
   const { data, isLoading, error } = useApp(appId);
   const [newPlanOpen, setNewPlanOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -116,8 +126,6 @@ export function AppDetailView({ appId }: { appId: string }) {
         <ConcurrencyBanner appId={app.appId} activePlan={activePlan} />
       ) : null}
 
-      <V2RoadmapStrip />
-
       {/* Story 1.5.2 — Tabbed content: Overview + Source + Performance */}
       <Tabs defaultValue={initialTab}>
         <TabsList>
@@ -145,6 +153,7 @@ export function AppDetailView({ appId }: { appId: string }) {
             canStartNew={canStartNew}
             blockReason={blockReason}
             onStartNew={() => setNewPlanOpen(true)}
+            planHref={planHref}
           />
           <DeploysPanel app={app} recentDeploys={recentDeploys} />
         </TabsContent>

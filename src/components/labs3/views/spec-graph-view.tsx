@@ -19,8 +19,10 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import type { StoryNodeRow, StoryNodeState, TestBindingStatus } from '@/types/plan-spec';
 import type { Labs3ViewProps } from '@/components/labs3/plan-spec-dashboard/adapter';
+import { links3 } from '@/lib/links3';
 import {
   STORY_NODE_STATE_META,
   ACTIVE_STORY_NODE_STATES,
@@ -966,7 +968,12 @@ function PlanShapeBadge({ shape }: { shape: 'coherent' | 'sharded' }) {
   );
 }
 
-function PlannerNarrativePanel({
+/**
+ * Exported (design I2/U4) so PlanningView (plan-stage subtab) can promote
+ * this same narrative block front-and-center once stories are ingested,
+ * instead of duplicating the collapsible-panel markup.
+ */
+export function PlannerNarrativePanel({
   narrative,
   shape,
 }: {
@@ -1051,7 +1058,15 @@ function PlannerNarrativePanel({
 
 // ── Empty state ───────────────────────────────────────────────────────────────
 
-function EmptyState() {
+/**
+ * quick-p3-origin plans (`plan.mintJobId` present) are still being minted by
+ * the quick-planspec daemon job — point the operator at the Planning tab,
+ * which polls that job's live status, rather than the stale
+ * `run-as-pipeline-3` instruction (that endpoint is the LEGACY plan→P3
+ * conversion bridge; quick-p3 plans never call it). Legacy plans genuinely
+ * awaiting that conversion keep a corrected hint naming the real trigger.
+ */
+function EmptyState({ planId, mintJobId }: { planId: string; mintJobId?: string | null }) {
   return (
     <div
       style={{
@@ -1073,20 +1088,23 @@ function EmptyState() {
         No stories ingested yet
       </div>
       <div style={{ fontSize: 12.5, color: 'var(--text-dim)', lineHeight: 1.6 }}>
-        Trigger{' '}
-        <code
-          style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 11.5,
-            padding: '1px 5px',
-            background: 'var(--surface)',
-            borderRadius: 4,
-            border: '1px solid var(--border)',
-          }}
-        >
-          POST /api/plans/:id/run-as-pipeline-3
-        </code>{' '}
-        to ingest the plan spec and seed the dependency graph.
+        {mintJobId ? (
+          <>
+            The planner is still minting this plan.{' '}
+            <Link
+              href={links3.plan(planId, 'plan-stage')}
+              style={{ color: 'var(--accent-blue, var(--foreground))' }}
+            >
+              Watch progress on the Planning tab →
+            </Link>
+          </>
+        ) : (
+          <>
+            This legacy plan has no minted StoryNode graph yet. Use the{' '}
+            <span style={{ fontWeight: 500 }}>Run as Pipeline-3</span> action on the plan row (Labs
+            → plan list) to convert it and seed the dependency graph.
+          </>
+        )}
       </div>
     </div>
   );
@@ -1094,7 +1112,7 @@ function EmptyState() {
 
 // ── Top-level view ────────────────────────────────────────────────────────────
 
-export function SpecGraphView({ stories, plan, onSelectStory }: Labs3ViewProps) {
+export function SpecGraphView({ planId, stories, plan, onSelectStory }: Labs3ViewProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const narrative = plan?.planNarrative;
@@ -1153,7 +1171,7 @@ export function SpecGraphView({ stories, plan, onSelectStory }: Labs3ViewProps) 
     return (
       <>
         <PlannerNarrativePanel narrative={narrative} shape={shape} />
-        <EmptyState />
+        <EmptyState planId={planId} mintJobId={plan?.mintJobId} />
       </>
     );
 

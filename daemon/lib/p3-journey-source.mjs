@@ -33,6 +33,27 @@ function isBrowserShaped(ac) {
   return hasText(ac.when) && (hasText(ac.thenObservable) || hasText(ac.then));
 }
 
+/**
+ * An AC is "observe-shaped" when it is a pure APPEARANCE claim: a rendering /
+ * visual-taste observation with NO driving action (`when`). These are the
+ * `verify:'appearance'` / `acClass:'advisory-taste'` ACs ("maze walls render on
+ * canvas", "HUD shows the score") that `isBrowserShaped` deliberately excludes
+ * (no `when`), so they never became a Lane-1/Lane-2 step and sat FAILING forever
+ * (qa-false-green forensics). They still need SOMETHING to observe (`then` /
+ * `thenObservable`) — a bare tag with no claim isn't judgeable. An observe step
+ * has no action and no deterministic assertion; the runner judges its single
+ * frame VQA-primary (attention-only, never blocking).
+ *
+ * Mutually exclusive with `isBrowserShaped`: that predicate REQUIRES `when`,
+ * this one REQUIRES its absence — an AC can never be both.
+ */
+function isObserveShaped(ac) {
+  if (!ac) return false;
+  if (hasText(ac.when)) return false;
+  const isAppearance = ac.verify === 'appearance' || ac.acClass === 'advisory-taste';
+  return isAppearance && (hasText(ac.thenObservable) || hasText(ac.then));
+}
+
 /** Build an AC-id → AC lookup across every story (dangling acRefs resolve to `undefined`). */
 function buildAcIndex(stories) {
   const idx = new Map();
@@ -70,6 +91,22 @@ function toStep(ac) {
 }
 
 /**
+ * One resolved OBSERVE step: no action, no deterministic assertion — just the
+ * AC's appearance claim as the VQA `spec`, plus a settle window before the
+ * single "after" frame is captured. `kind:'observe'` is what the executor
+ * (browser-probe-executor.mjs) and the runner branch on. `spec` is the AC's own
+ * text (the human-readable claim the single-frame judge is asked to confirm).
+ */
+function toObserveStep(ac) {
+  return {
+    kind: 'observe',
+    acId: ac.id,
+    spec: ac.text || ac.thenObservable || ac.then || ac.id,
+    settleMs: 1200,
+  };
+}
+
+/**
  * Resolve a journey's `acRefs` into probe-ready `steps`. ACs that don't
  * resolve (dangling ref) or aren't browser-shaped are skipped rather than
  * failing the whole journey — a partially-resolvable journey still runs its
@@ -86,23 +123,38 @@ function resolveSteps(acRefs, acIndex) {
   const steps = [];
   for (const ref of acRefs || []) {
     const ac = acIndex.get(ref);
-    if (!ac || !isBrowserShaped(ac)) continue;
-    steps.push(toStep(ac));
+    if (!ac) continue;
+    if (isBrowserShaped(ac)) {
+      // Action step — unchanged (byte-for-byte).
+      steps.push(toStep(ac));
+    } else if (isObserveShaped(ac)) {
+      // ADDITIONALLY: a pure-appearance AC becomes an observe step so it finally
+      // gets VQA coverage (the advisory-AC hole). Interleaves in declaration
+      // order — harmless, an observe step drives nothing.
+      steps.push(toObserveStep(ac));
+    }
+    // else: neither shape (dangling / build-only) — skipped, as before.
   }
   return steps;
 }
 
-/** DERIVE one journey per story that has ≥1 browser-shaped AC. */
+/** DERIVE one journey per story that has ≥1 QUALIFYING AC (browser- or
+ * observe-shaped). Previously only browser-shaped ACs counted, so a story whose
+ * ONLY verifiable ACs are pure-appearance claims produced no journey at all —
+ * its visual ACs were structurally invisible to QA. Now such a story still
+ * yields a journey (observe steps only). Order preserved (declaration order). */
 function deriveJourneys(stories) {
   const journeys = [];
   for (const s of stories || []) {
-    const browserAcs = (s?.acceptanceCriteria || []).filter(isBrowserShaped);
-    if (!browserAcs.length) continue;
+    const qualifyingAcs = (s?.acceptanceCriteria || []).filter(
+      (ac) => isBrowserShaped(ac) || isObserveShaped(ac),
+    );
+    if (!qualifyingAcs.length) continue;
     journeys.push({
       id: `derived-${s.storyId ?? journeys.length}`,
       title: s.title || s.storyId || 'Untitled story',
       narrative: s.intent,
-      acRefs: browserAcs.map((ac) => ac.id),
+      acRefs: qualifyingAcs.map((ac) => ac.id),
     });
   }
   return journeys;
@@ -113,9 +165,14 @@ function deriveJourneys(stories) {
  *
  * @param {{ plan?: { deliveryJourneys?: Array<{id:string,title:string,narrative?:string,acRefs?:string[]}> },
  *           stories?: Array<{ storyId:string, title?:string, intent?:string, acceptanceCriteria?: Array<{id:string,text?:string,when?:string,thenObservable?:string,then?:string}> }> }} args
+ * Each `steps` entry is either an ACTION step (browser-shaped AC:
+ * `{acId,label,when,thenObservable?,then?,settle}`) or an OBSERVE step
+ * (appearance-only AC: `{kind:'observe',acId,spec,settleMs}`).
+ *
  * @returns {Array<{ id:string, title:string, narrative?:string, acRefs:string[],
- *                    steps: Array<{acId:string,label:string,when:string,thenObservable?:string,then?:string,
- *                                  settle:{frames:number,pollMs:number}}> }>}
+ *                    steps: Array<({acId:string,label:string,when:string,thenObservable?:string,then?:string,
+ *                                  settle:{frames:number,pollMs:number}}
+ *                                 |{kind:'observe',acId:string,spec:string,settleMs:number})> }>}
  */
 export function resolveJourneys({ plan, stories } = {}) {
   const provided = Array.isArray(plan?.deliveryJourneys) ? plan.deliveryJourneys : [];

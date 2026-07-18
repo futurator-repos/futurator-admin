@@ -18,6 +18,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api-client';
 import type { P3QaReport, P3QaStatus, P3QaVerdict } from '@/types/qa-review-p3';
+import type { AgenticReport } from '@/components/labs3/views/qa/agentic-journeys-section';
+
+// Q2 — the client mirror (src/types/qa-review-p3.ts) does not yet carry
+// `P3QaReport.agentic` (backend: functions/shared/types/qa-review-p3.ts:
+// 130-161). Widened locally rather than editing the foreign mirror file —
+// see build slice deviations. Drop once the mirror syncs.
+export type P3QaReportWithAgentic = P3QaReport & { agentic?: AgenticReport };
 
 const QK_P3_QA = (planId: string) => ['p3-qa-report', planId] as const;
 
@@ -92,10 +99,10 @@ export function computeP3QaRefetchInterval(status: P3QaStatus | undefined): numb
  * if the shape is unusable. Guards the tab against a partially-written or
  * malformed report row — this must NEVER throw into the caller.
  */
-function coerceP3QaReport(raw: unknown): P3QaReport | null {
+function coerceP3QaReport(raw: unknown): P3QaReportWithAgentic | null {
   try {
     if (!raw || typeof raw !== 'object') return null;
-    const r = raw as Partial<P3QaReport>;
+    const r = raw as Partial<P3QaReportWithAgentic>;
     if (typeof r.planId !== 'string' || typeof r.status !== 'string') return null;
     return {
       planId: r.planId,
@@ -108,6 +115,14 @@ function coerceP3QaReport(raw: unknown): P3QaReport | null {
       // Passthrough of plan.qaVerifiedAt (the endpoint stamps it on the report
       // envelope). Drives the readiness rule; absent ⇒ QA has NOT passed.
       qaVerifiedAt: typeof r.qaVerifiedAt === 'string' ? r.qaVerifiedAt : undefined,
+      // Q2 — passthrough of the agentic (BrowserAgent) lane report. ABSENT
+      // when the lane didn't run (flag off / no delivery journeys) — never
+      // synthesized here, so AgenticJourneysSection can key its render purely
+      // on presence.
+      agentic:
+        r.agentic && typeof r.agentic === 'object' && Array.isArray(r.agentic.runs)
+          ? r.agentic
+          : undefined,
     };
   } catch {
     // Parsing itself blew up (unexpected nested shape) — never throw into the tab.
@@ -118,7 +133,7 @@ function coerceP3QaReport(raw: unknown): P3QaReport | null {
 export interface UseP3QaReportResult {
   /** False when the client flag is off — the view should fall back to legacy QA. */
   enabled: boolean;
-  report: P3QaReport | null;
+  report: P3QaReportWithAgentic | null;
   /**
    * The full verdict from the GET envelope (`{ enabled, report, verdict }`).
    * Carries `decision` + `blocking` — the readiness rule's `approved`/`blocking`
@@ -134,7 +149,7 @@ export interface UseP3QaReportResult {
 
 /** Internal query payload — keeps report + verdict together for the cache. */
 interface P3QaEnvelope {
-  report: P3QaReport | null;
+  report: P3QaReportWithAgentic | null;
   verdict: P3QaVerdict | null;
 }
 

@@ -100,11 +100,20 @@ export async function runQuickPlanspecJob(job, deps) {
   if (!planId || !appId || !intent) return fail('missing planId/appId/intent on quickPlanspecPayload');
   try { await updateJobFields?.(job.jobId, { status: 'RUNNING' }); } catch { /* best-effort */ }
 
+  // Phase markers (U4 — PlanningView phase stepper). Best-effort: a write
+  // failure here must never fail the run — the marker only enriches the UI's
+  // "planner → parallelism-repair → critique → critique-repair → ingest"
+  // stepper, it gates nothing.
+  const markPhase = async (phase) => {
+    try { await updateJobFields?.(job.jobId, { phase }); } catch { /* best-effort */ }
+  };
+
   // 1) wait for the fresh app to finish scaffolding (stories need the repo).
   const ready = await waitForBootstrap({ getJob, jobId: appBootstrapJobId, log, sleep });
   if (!ready) return fail('app scaffold did not complete (bootstrap failed or timed out)');
 
   // 2) one Claude call: intent → plan_spec.
+  await markPhase('planner');
   const prompt = buildQuickPlanspecPrompt({ intent, appSlug: appId, seamHook, brownfield });
   // The PLANNER gets the strongest default thinking (model-effort-policy): a
   // bad plan poisons every downstream story. Adaptive thinking + effort=high.
@@ -125,6 +134,7 @@ export async function runQuickPlanspecJob(job, deps) {
   // the audit findings. Keep whichever plan audits better; never fail the job here.
   if (parsed.audit.violations.length) {
     log('warn', `[quick-planspec ${short}] parallelism audit failed: ${parsed.audit.violations.join(' · ')} — running repair pass`);
+    await markPhase('parallelism-repair');
     const repairPrompt = buildQuickPlanspecRepairPrompt({
       intent, appSlug: appId, seamHook, brownfield, stories: parsed.stories, violations: parsed.audit.violations,
     });
@@ -160,6 +170,7 @@ export async function runQuickPlanspecJob(job, deps) {
   // up for the operator, not acted on automatically.
   let critiqueFindingCount = 0;
   try {
+    await markPhase('critique');
     const criticPolicy = resolveAgentPolicy({ role: 'critic' }); // no DEFAULTS entry → falls back to reviewer (sonnet/low)
     const critiqueModelArgs = cliModelArgs(criticPolicy);
     const critiquePrompt = buildPlanCritiquePrompt({ intent, appSlug: appId, stories: parsed.stories, planShape: parsed.planShape });
@@ -174,6 +185,7 @@ export async function runQuickPlanspecJob(job, deps) {
 
     if (hasCritical(findings)) {
       log('warn', `[quick-planspec ${short}] plan-critique found ${critical.length} critical finding(s) — running one bounded regeneration`);
+      await markPhase('critique-repair');
       const critiqueRepairPrompt = buildQuickPlanspecRepairPrompt({
         intent, appSlug: appId, seamHook, brownfield, stories: parsed.stories,
         violations: critical.map((f) => `critique(${f.kind}): ${f.message}${f.storyId ? ` [${f.storyId}]` : ''}`),
@@ -248,6 +260,7 @@ export async function runQuickPlanspecJob(job, deps) {
     }
   }
 
+  await markPhase('ingest');
   try {
     await batchPutStoryNodes(rows);
   } catch (e) {

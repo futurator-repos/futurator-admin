@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { driveConcept, type ConceptDriverDeps } from '../concept-driver';
 import { reduceConcept } from '../concept-reducer';
 import { seedConceptArtifacts } from '../../concept/artifact-version';
@@ -156,7 +156,12 @@ describe('E7.2 — W8 prototype guarantee + pm-plan ordering', () => {
 });
 
 describe('E7.1 — interaction axis', () => {
-  it('interactive UI plan first enqueues a convergence session (human gate), not an autopilot one-shot', async () => {
+  // Round 1 (concept-driver.ts) deliberately retired the dead-end
+  // `conceptConvergence` job (nothing consumed it → the chain stalled at PRD).
+  // Interactive now enqueues the SAME one-shot artifact generator as autopilot;
+  // the human gate lives downstream in approval — the generator applies as a
+  // DRAFT, so the next drive returns `awaiting-approval` instead of chaining.
+  it('interactive UI plan first enqueues the prd draft, then gates on human approval', async () => {
     const cp = conceptPlan(true);
     const plan = makePlan({
       rigor: 'production',
@@ -165,8 +170,13 @@ describe('E7.1 — interaction axis', () => {
       conceptArtifacts: seedConceptArtifacts(cp.artifacts),
     });
     const h = harness(plan);
-    const res = await driveConcept(plan, h.deps);
-    expect(res.kind).toBe('enqueued-convergence');
+    const first = await driveConcept(h.current, h.deps);
+    expect(first).toMatchObject({ kind: 'enqueued-artifact', artifact: 'prd' });
+    // Generator completes → applied as a DRAFT (interactive never auto-approves),
+    // so the chain pauses on the operator's Approve rather than advancing to ux.
+    h.completeLatestGenerator('prd');
+    const second = await driveConcept(h.current, h.deps);
+    expect(second).toMatchObject({ kind: 'awaiting-approval', artifact: 'prd' });
   });
 });
 

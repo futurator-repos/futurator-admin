@@ -2327,6 +2327,10 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
     const seamHook = BOILERPLATE_REGISTRY[bpType]?.testHarness?.seamHook;
 
     const planId = crypto.randomUUID();
+    // Minted up-front (before createPlan) so the Plan row can carry mintJobId
+    // from creation — U4 PlanningView polls this FK via useAgentJob instead of
+    // inferring mint status from stories.length===0.
+    const genJobId = crypto.randomUUID();
     const plan: Plan = {
       planId,
       // Multiple plans per app share the worktree, so `name` is a label, not a
@@ -2350,6 +2354,7 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
       qaAutopilot,
       qaAutoFixRounds: 0,
       skipQa,
+      mintJobId: genJobId,
       createdAt: now,
       updatedAt: now,
       createdBy: user.userId,
@@ -2361,7 +2366,6 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
     // Built as a variable (not a fresh literal) so the extra `brownfield` key
     // isn't excess-property-checked against quickPlanspecPayload's type; the
     // daemon reads it at runtime (slice B).
-    const genJobId = crypto.randomUUID();
     const quickPlanspecPayload = {
       planId,
       appId: targetAppId,
@@ -2451,6 +2455,10 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
     affinityKey: `plan:${planId}`,
   });
 
+  // Minted up-front (before createPlan) so the Plan row can carry mintJobId
+  // from creation — U4 PlanningView polls this FK via useAgentJob instead of
+  // inferring mint status from stories.length===0.
+  const genJobId = crypto.randomUUID();
   const plan: Plan = {
     planId,
     name: appId,
@@ -2470,6 +2478,7 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
     qaAutopilot,
     qaAutoFixRounds: 0,
     skipQa,
+    mintJobId: genJobId,
     createdAt: now,
     updatedAt: now,
     createdBy: user.userId,
@@ -2477,7 +2486,6 @@ app.post('/api/plans/quick-p3', authMiddleware, async (c) => {
   await planRepo.createPlan(plan);
 
   // The generation job — waits for the scaffold, then one Claude call → StoryNodes.
-  const genJobId = crypto.randomUUID();
   await agentJobsRepo.createJob({
     jobId: genJobId,
     status: 'PENDING',

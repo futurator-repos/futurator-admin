@@ -11,12 +11,15 @@ export function PlanTimeline({
   canStartNew,
   blockReason,
   onStartNew,
+  planHref,
 }: {
   appId: string;
   plans: Plan[];
   canStartNew: boolean;
   blockReason?: string;
   onStartNew: () => void;
+  /** Overrides the Plan Timeline node link target. Defaults to legacy `links.plan`. */
+  planHref?: (appId: string, planId: string) => string;
 }) {
   return (
     <div className="rounded-lg border bg-card p-6">
@@ -29,6 +32,7 @@ export function PlanTimeline({
             index={idx + 1}
             appId={appId}
             isLast={idx === plans.length - 1}
+            planHref={planHref}
           />
         ))}
         <li className="flex md:items-center">
@@ -49,17 +53,20 @@ function PlanTimelineNode({
   index,
   appId,
   isLast,
+  planHref,
 }: {
   plan: Plan;
   index: number;
   appId: string;
   isLast: boolean;
+  planHref?: (appId: string, planId: string) => string;
 }) {
   const glyph = nodeGlyphFor(plan);
+  const href = planHref ? planHref(appId, plan.planId) : links.plan(appId, plan.planId);
   return (
     <li className="flex flex-1 items-center gap-2 md:flex-col md:items-start md:gap-1.5">
       <Link
-        href={links.plan(appId, plan.planId)}
+        href={href}
         className="block min-w-[180px] rounded-md border p-3 transition-shadow hover:shadow-md md:flex-1"
       >
         <div className="flex items-center gap-2">
@@ -71,9 +78,7 @@ function PlanTimelineNode({
             <p className="text-xs text-muted-foreground">{plan.kind ?? 'change'}</p>
           </div>
         </div>
-        <p className="mt-2 text-sm">
-          {plan.iterationLabel ?? plan.displayName ?? '(no label)'}
-        </p>
+        <p className="mt-2 text-sm">{plan.iterationLabel ?? plan.displayName ?? '(no label)'}</p>
         <p className="mt-1 text-xs text-muted-foreground">{plan.status}</p>
       </Link>
       {!isLast && <span className="hidden text-muted-foreground md:inline">━</span>}
@@ -93,7 +98,10 @@ function nodeGlyphFor(plan: Plan): { symbol: string; className: string } {
     case 'developing':
     case 'review':
     case 'fixing':
-      return { symbol: '⊙', className: 'animate-pulse text-accent-blue motion-reduce:animate-none' };
+      return {
+        symbol: '⊙',
+        className: 'animate-pulse text-accent-blue motion-reduce:animate-none',
+      };
     default:
       return { symbol: '○', className: 'text-muted-foreground' };
   }

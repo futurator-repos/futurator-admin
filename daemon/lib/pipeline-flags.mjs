@@ -87,6 +87,16 @@ export const P3_FLAGS = Object.freeze({
   // 'shadow' = compute + persist the verdict but never surface / never gate;
   // 'on' = surface it in the QA Review tab + gate Approve on a clean verdict.
   P3_QA_REVIEW: { values: ['off', 'shadow', 'on'], default: 'on' },
+  // QA-Review W2 — Agentic VQA lane (design I2 §Q2): a computer-use agent
+  // (vendored BrowserAgent core) drives the deployed dev app per delivery
+  // journey, catching the "journey cannot be completed" defect class the
+  // deterministic __harness lanes can't see. 'off' = lane never runs; 'shadow' =
+  // runs + records report.agentic but a [blocking] finding NEVER gates; 'on' = a
+  // [blocking] agentic finding contributes to verdict.blocking. Default 'shadow'
+  // until proven (the lane is model-driven, so it earns gating authority only
+  // after a real run history). A missing BROWSER_AGENT_API_KEY makes the lane a
+  // no-op (skippedReason:'no-api-key'), never a QA failure, at any mode.
+  P3_AGENTIC_VQA: { values: ['off', 'shadow', 'on'], default: 'shadow' },
   // Foundation gate (pipeline-v3 redesign): boot-liveness + tsc + build must
   // pass on foundation stories before dependents unblock. Fail-closed.
   P3_FOUNDATION_GATE: { values: ['off', 'on'], default: 'on' },

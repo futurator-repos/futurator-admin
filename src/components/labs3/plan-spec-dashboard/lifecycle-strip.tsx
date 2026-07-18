@@ -33,10 +33,10 @@ interface Stage {
 }
 
 const STAGES: Stage[] = [
-  { id: 'concept', label: 'Concept', sub: 'intent → plan', subtab: 'graph' },
+  { id: 'concept', label: 'Concept', sub: 'intent → plan', subtab: 'plan-stage' },
   { id: 'development', label: 'Development', sub: 'stories build', subtab: 'stories' },
   { id: 'qa', label: 'QA Review', sub: 'assembled + tested', subtab: 'qa' },
-  { id: 'deployed', label: 'Deployed', sub: 'promoted live', subtab: 'qa' },
+  { id: 'deployed', label: 'Deployed', sub: 'promoted live', subtab: 'deploy' },
 ];
 
 /** Map plan.status → the index of the CURRENTLY-active lifecycle stage. */
@@ -93,6 +93,24 @@ export function qaStageOverride(
   }
 }
 
+/**
+ * The DEPLOYED stage sub-label + dot color reflect real deploy state once
+ * reached, replacing the previously-static 'promoted live' string. Kept
+ * purely plan-row-driven (design U5-override): `plan.deployUrl` present is
+ * the sole live signal available on the row today — richer promoting/failed
+ * states are DeployView's job (B/A5 slice), this override only upgrades the
+ * "it's actually live" case. Returns null (falls back to the default label)
+ * when the stage hasn't been reached or no deploy URL exists yet.
+ */
+export function deployStageOverride(
+  plan: Plan,
+  stageReached: boolean,
+): { sub: string; color: string } | null {
+  if (!stageReached) return null;
+  if (plan.deployUrl) return { sub: 'live · open ↗', color: 'var(--success)' };
+  return null;
+}
+
 export function LifecycleStrip({
   plan,
   onSelectStage,
@@ -117,10 +135,13 @@ export function LifecycleStrip({
     >
       {STAGES.map((s, i) => {
         const st = stateFor(i, active);
-        // QA REVIEW stage reflects deployed-app QA readiness once reached.
+        // QA REVIEW stage reflects deployed-app QA readiness once reached;
+        // DEPLOYED stage reflects real deploy state once reached.
         const qaOv = s.id === 'qa' ? qaStageOverride(plan, i <= active) : null;
-        const c = qaOv ? qaOv.color : COLOR[st];
-        const subLabel = qaOv ? qaOv.sub : s.sub;
+        const deployOv = s.id === 'deployed' ? deployStageOverride(plan, i <= active) : null;
+        const ov = qaOv ?? deployOv;
+        const c = ov ? ov.color : COLOR[st];
+        const subLabel = ov ? ov.sub : s.sub;
         // Contextual affordance: the QA stage surfaces the dev preview link; the
         // Deployed stage surfaces the live link.
         const link =

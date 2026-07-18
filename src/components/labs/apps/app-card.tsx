@@ -6,9 +6,9 @@ import { Card } from '@/components/ui/card';
 import { AppStatusPill } from './app-status-pill';
 import { links } from '@/lib/links';
 
-export function AppCard({ app }: { app: AppCardData }) {
+export function AppCard({ app, href }: { app: AppCardData; href?: string }) {
   return (
-    <Link href={links.app(app.appId)} className="block">
+    <Link href={href ?? links.app(app.appId)} className="block">
       <Card className="h-full cursor-pointer p-4 transition-shadow duration-150 ease-out hover:-translate-y-0.5 hover:shadow-md motion-reduce:transition-none motion-reduce:hover:translate-y-0">
         <div className="flex items-start justify-between">
           <div className="text-3xl">{app.icon ?? '📦'}</div>

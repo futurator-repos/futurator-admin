@@ -8,7 +8,7 @@ import { AppsGridSkeleton } from './apps-grid-skeleton';
 import { EmptyAppsState } from './empty-apps-state';
 import { NewAppModal } from './new-app-modal';
 
-export function AppsGrid() {
+export function AppsGrid({ appHref }: { appHref?: (appId: string) => string } = {}) {
   const { data: apps, isLoading, error } = useApps();
   const [modalOpen, setModalOpen] = useState(false);
 
@@ -38,7 +38,7 @@ export function AppsGrid() {
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3 lg:grid-cols-4">
         {apps.map((app) => (
-          <AppCard key={app.appId} app={app} />
+          <AppCard key={app.appId} app={app} href={appHref?.(app.appId)} />
         ))}
       </div>
       <NewAppModal open={modalOpen} onOpenChange={setModalOpen} />

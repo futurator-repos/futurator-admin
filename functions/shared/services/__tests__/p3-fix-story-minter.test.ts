@@ -88,6 +88,50 @@ describe('mintFixStories', () => {
     expect(rows).toHaveLength(0);
   });
 
+  it('mints a fix story from a blocking agentic finding (kind agentic) using the note as seed', () => {
+    const rows = mintFixStories({
+      plan,
+      verdict: {
+        ...verdict(),
+        // agentic report attached at runtime (schemaless) — not on the typed
+        // P3QaVerdict; the minter reads it through a local augmentation.
+        agentic: {
+          runs: [
+            {
+              journeyId: 'j-start',
+              findings: [
+                {
+                  severity: 'blocking',
+                  note: 'the Start button does nothing — journey cannot begin',
+                },
+                { severity: 'attention', note: 'minor: score font is small' },
+              ],
+            },
+          ],
+        },
+      } as P3QaVerdict,
+      now,
+    });
+    expect(rows).toHaveLength(1); // only the blocking finding mints; attention is advisory
+    expect(rows[0].title).toMatch(/agentic play-test/i);
+    expect(rows[0].intent).toMatch(/Start button does nothing/);
+    expect(rows[0].acceptanceCriteria[0].text).toMatch(/Start button does nothing/);
+    expect(rows[0].acceptanceCriteria[0].needsBrowser).toBe(true);
+    expect(rows[0].state).toBe('ready');
+  });
+
+  it('ignores agentic runs with only attention findings', () => {
+    const rows = mintFixStories({
+      plan,
+      verdict: {
+        ...verdict({ status: 'uncertain', blocking: false }),
+        agentic: { runs: [{ journeyId: 'j', findings: [{ severity: 'attention', note: 'nit' }] }] },
+      } as P3QaVerdict,
+      now,
+    });
+    expect(rows).toHaveLength(0);
+  });
+
   it('is deterministic — same verdict yields the same story ids', () => {
     const v = verdict({ wiring: { orphanModules: ['a.ts'], blocking: true } });
     const a = mintFixStories({ plan, verdict: v, now });

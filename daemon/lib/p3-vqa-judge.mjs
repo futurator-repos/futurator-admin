@@ -135,6 +135,102 @@ export function buildTwoFrameJudgePrompt({ spec, sourceDiff, beforeFrame, afterF
     .join('\n');
 }
 
+// ── Single-frame observe judge (Q1 — advisory-taste appearance ACs) ─────────
+
+/**
+ * Build the SINGLE-frame judge prompt for a pure-appearance observe step. Unlike
+ * the two-frame prompt there is no BEFORE baseline and no expected CHANGE — the
+ * observe step drove nothing, it just navigated + settled + captured one frame.
+ * The judge is asked a static presence question: "does this ONE frame satisfy
+ * the appearance claim". ALWAYS references the single frame path exactly once.
+ * PURE.
+ */
+export function buildSingleFrameJudgePrompt({ spec, frame }) {
+  const acId = spec?.id || spec?.acId || '';
+  const claim = (spec?.acText || spec?.text || spec?.thenObservable || spec?.then || '').trim();
+  const acLine = acId ? `Acceptance criterion: ${acId}${claim ? ` — ${claim}` : ''}` : null;
+  return [
+    'You are the QA-Review observe-step visual judge for a single APPEARANCE claim.',
+    'ONE screenshot was captured after the app loaded and settled — there is no BEFORE frame',
+    'and no action was taken; this is a static observation, not a before/after change.',
+    `Use the Read tool to open the frame at ${frame}, then inspect it.`,
+    '',
+    `Judge whether the frame SATISFIES this appearance claim: ${claim || '(no claim text — judge the criterion below)'}.`,
+    acLine,
+    acLine ? '' : null,
+    'TOLERANCE — this is an ADVISORY visual check (attention-only, never a hard gate). Judge',
+    'whether the described element/rendering is plausibly PRESENT. IGNORE incidental variation',
+    '(fonts/kerning, anti-aliasing, exact colors, animation phase). A blank/error/placeholder',
+    'page that clearly cannot show the claim is a FAIL; a page that plausibly renders it is PASS.',
+    '',
+    'Verdict rules, in order:',
+    '1. PASS — the frame plausibly shows the claimed appearance.',
+    '2. FAIL — the frame concretely CONTRADICTS the claim (blank/error/placeholder, or the',
+    '   claimed element is demonstrably absent). Requires conf=high.',
+    '3. UNCERTAIN — unreadable image, ambiguous, or too close to call (any non-high FAIL).',
+    '',
+    'Output EXACTLY two lines:',
+    'VERDICT: PASS|FAIL|UNCERTAIN [conf=high|low]',
+    'OBSERVATION: <≤200 chars — what the frame does or does not show>',
+  ]
+    .filter((line) => line !== null)
+    .join('\n');
+}
+
+/**
+ * Judge ONE observe-step frame against a pure-appearance AC claim. The runner
+ * maps the returned verdict to an advisory status (pass → 'pass', fail/uncertain
+ * → 'attention', ok:false → 'error') — this NEVER blocks (advisory-taste
+ * contract). Same injected `spawnJudge` shape as `judgeVqaStep`.
+ *
+ * HONESTY / FAIL-OPEN: a missing frame, no `spawnJudge`, a throw, or an
+ * unavailable judge returns `{ ok:false, verdict:'uncertain', rationale }` so
+ * the runner records `status:'error'` (a diagnosable engine failure — NEVER a
+ * fabricated pass).
+ *
+ * @param {{ spec: object, frame: string, spawnJudge: Function, cwd?: string,
+ *           log?: Function }} args
+ * @returns {Promise<{ ok: boolean, verdict: 'pass'|'fail'|'uncertain', rationale: string }>}
+ */
+export async function judgeObserveStep({ spec, frame, spawnJudge, cwd, log = () => {} }) {
+  const vlog = (level, msg) => log(level, `[p3-vqa-judge:observe] ${msg}`);
+
+  if (!frame) {
+    vlog('warn', 'missing frame — degrading to error (non-blocking)');
+    return { ok: false, verdict: 'uncertain', rationale: 'no frame captured for the observe step' };
+  }
+  if (typeof spawnJudge !== 'function') {
+    vlog('warn', 'no spawnJudge injected — degrading to error (non-blocking)');
+    return { ok: false, verdict: 'uncertain', rationale: 'no judge available to invoke' };
+  }
+
+  const prompt = buildSingleFrameJudgePrompt({ spec, frame });
+
+  let judged;
+  try {
+    judged = await spawnJudge({ prompt, cwd });
+  } catch (err) {
+    vlog('warn', `spawnJudge threw: ${err?.message || err} — degrading to error (non-blocking)`);
+    return { ok: false, verdict: 'uncertain', rationale: `judge invocation failed: ${err?.message || err}` };
+  }
+
+  if (judged?.ok === false) {
+    const tail = (judged.reason || judged.output || '').slice(0, 200);
+    vlog('warn', `judge unavailable: ${tail} — degrading to error (non-blocking)`);
+    return { ok: false, verdict: 'uncertain', rationale: `judge unavailable: ${tail || '(no detail)'}` };
+  }
+
+  const parsed = parseJudgeOutput(judged?.output);
+  if (!parsed) {
+    return { ok: true, verdict: 'uncertain', rationale: 'judge output unparseable' };
+  }
+  const verdict =
+    parsed.verdict === 'PASS' ? 'pass' : parsed.verdict === 'FAIL' && parsed.confidence === 'high' ? 'fail' : 'uncertain';
+  const rationale = parsed.observation || '(no observation)';
+  vlog('info', `observe verdict=${verdict} raw=${parsed.verdict} :: ${rationale}`);
+  return { ok: true, verdict, rationale };
+}
+
 /**
  * Map the raw consensus result to the plan-level LaneVerdict
  * ('pass'|'fail'|'uncertain' — functions/shared/types/qa-review-p3.ts). A
