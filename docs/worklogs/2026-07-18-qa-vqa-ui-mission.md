@@ -167,3 +167,128 @@ Wave B (parallel, after A): B2=Q2/Q3 integration (p3-qa-runner, agent-daemon, fl
 fix-minter, git-diff, health) [opus] · B3=U4 PlanningView [sonnet] · B4=U6 QA view [sonnet] ·
 A5=U5 DeployView [sonnet].
 Verify: typecheck+lint+tests, 2 adversarial reviewers (correctness / integration), fix loop.
+
+### I3 — Build complete (workflow wf_06ed3039-098), committed
+
+- 5 wave-A + 4 wave-B slices; 2 slices (B1 agentic runner, B2 QA integration) lost their
+  structured status reports (retry-cap) but their WORK landed fully — verified on disk +
+  by the gate that ran after them. Gate: typecheck 0, changed-file lint clean, next build OK.
+- Adversarial review found 1 major: the new advisory chip treatment swallowed
+  **advisory-security** ACs (a blocking reviewer fail would render as grey NEVER-RUN).
+  Fixed: SEC stays on testBinding StatusChip; only advisory-taste gets advisoryVqa chips.
+- Verified myself: 46/46 daemon node--test across the 5 new test files; 147/147 labs3
+  vitest; key-isolation grep clean (no ANTHROPIC_API_KEY reads in daemon code paths);
+  vitest.config exclusion of the node:test family is legitimate (they run under node --test).
+- Commit: feat(qa-vqa) on feat/aws-migration-eu (64 files, +5733/−807).
+- run-fleet-local.sh: BROWSER_AGENT_API_KEY sourced from the BrowserAgent .env at start
+  (key value never committed); BROWSER_AGENT_URL + AGENTIC_VQA_MODE=auto defaults.
+- Deploying: sst deploy (background) → daemon bundle upload → local daemon restart.
+
+### I4 — Deployed + greenfield plan 0 minted (RUN PHASE start)
+
+- sst deploy ✓ (hub.futurator.ai serves the new UI); daemon bundle uploaded to S3; local
+  Mac daemon restarted on new code (pid 48238) with BROWSER_AGENT_API_KEY (sourced, count-
+  verified, value never printed), BROWSER_AGENT_URL, AGENTIC_VQA_MODE=auto,
+  P3_QUALITY_GATE=shadow. P3_AGENTIC_VQA defaults to shadow.
+- UI verification on live hub: NEW app-centric /labs3 home renders (apps grid + Quick
+  Create toggle + New App); QuickCreate flow worked; stage-aware tabs CONFIRMED (concept
+  stage shows only PLANNING + PLAN); NEW PlanningView live — "Planning… · elapsed · opus-4.8
+  · high effort" + intent echo. mintJobId telemetry wiring proven end-to-end.
+- Greenfield plan 0: **snake-classic** (pixel-art Snake; grid movement, food/growth/score,
+  speed-up, wall/self death, HUD, game-over + restart). planId b17ec708-05af-40ea-8811-
+  9af6d0d2580b, app snake-classic-feda6e, QA autopilot ON (QA NOT bypassed this mission —
+  the new QA engine is the subject under test).
+- UX observations to date: (1) QuickCreate "name" field: first click at wrong y silently
+  dropped typed text into void — field hitbox could be taller/labelled; (2) minor: launcher
+  legacy-plan list shows 3 identical "pacman-fleet-0 — quick change" rows with 0/0 stories
+  (delivered plans could be collapsed/archived by default).
+- Monitor armed on daemon log (planspec/story-dev/p3-qa/agentic events).
+
+### I5 — Plan 0 planning stage observed
+
+- Planner: 9m, opus-4.8/high, planShape **coherent** — 6 stories, clean phased DAG:
+  B0 walking-skeleton/contract → B1 stepping ∥ pixel-art render → B2 eat/grow/score ∥
+  collision-death → B3 HUD+game-over. Width 2 matches fleet cap 2. 21 ACs. Phase marker
+  `phase=planner→…→ingest` visible in job row (A2 wiring proven). Assigned srv_local_mac
+  (local-first ✓).
+- PlanningView live during mint (elapsed, model, intent echo) — worked as designed.
+- **UI defect #1 (fix-round):** stories ingested but the open tab kept showing
+  "Planning… 8m46s / 0/0 stories" until manual reload. Cause: TanStack refetchInterval
+  pauses when the tab is unfocused (refetchIntervalInBackground defaults false) — hidden-tab
+  polling freeze. Fix candidate: refetchIntervalInBackground:true on useStoryNodes /
+  useAgentJob / usePlan polls (cheap), or visibilitychange refetch.
+- Post-reload: stage-aware tabs switched to the developing set (PLAN/STORIES/GIT GRAPH/
+  STREAM/GRAPH), frontier strip live (Batch 0 0/1 · live), narrative panel present.
+- Dev phase running; monitors armed (daemon log + plan-row transitions).
+
+### I6 — Plan 0 dev: story e5057037 (pixel-art render) failed ×2 → repaired + retried
+
+- Skeleton story: RED-first correctly rejected an unrunnable binding, self-healed on retry.
+- Stepping story (0005ff3a): done cleanly, merged.
+- Render story failed both attempts. Diagnosis:
+  - **Pipeline defect #2 (structural, fix-round): touches↔testRef mismatch.** Test-author
+    bound ac2 to `renderSnake` in `src/game/snake/contract.ts`, but declared touches only
+    covered `src/components/canvas/` — the implementer had NO legal file to turn the test
+    green (its out-of-scope work was discarded → "integrate: nothing to commit" → RED both
+    attempts). Nothing validates that a binding's implementation surface lies within
+    touches. Fix candidate: test-author-time check `testRef imports ⊆ touches ∪ existing`,
+    else auto-widen touches or re-author.
+  - **Pipeline defect #3 (noise): advisory-taste ACs still get a per-story browser-probe
+    binding attempt** ("browser probe not interpretable" ×3 for ac1, verify=appearance,
+    acClass=advisory-taste). Non-blocking, but wasteful + confusing; story-level binding
+    should skip advisory-taste entirely (the new wave-gate observe lane owns them now).
+  - Implementer residue `src/app/page.tsx` left dirty (pacman defect #7 recurrence).
+- Operator repair: cleaned tree (kept daemon dirs), widened story touches to include
+  `src/game/snake/contract.ts`, POST /stories/:id/retry → 200, state=ready.
+- Note: hub API is NOT proxied at hub.futurator.ai/api — the UI calls the Lambda URL
+  directly; token store key is `futurator_tokens`.
+
+### I7 — Pipeline defect #4: sibling RED-test contamination (the big one this run)
+
+- Stepping story 0005ff3a implemented correctly (advance/turn committed) but its completion
+  gate went red off the SIBLING render story's artifacts: the sibling's RED-authored
+  contract test imports `renderSnake` (not yet implemented) → whole-tree
+  `project-build.test.ts` (tsc --noEmit) fails + contract tests fail + browser journey
+  FAILs (dev server sees the same tree). Batch-parallel stories poison each other's gates
+  by design when RED-first authors tests before siblings implement. Terminal-failed at 1
+  attempt (no retry for gate-red-not-attributable-to-own-diff).
+- Fix candidates (fix-round): (a) completion gate scopes vitest to the story's own bound
+  testRefs + invariants (not the whole suite) while sibling stories are in flight;
+  (b) project-build/tsc test runs at wave-merge only, not per-story mid-batch;
+  (c) failure attribution — if gate-red files ∉ story touches ∪ testRefs, classify as
+  'sibling-contamination' and auto-requeue instead of terminal fail.
+- Interim: render story done → retried stepping (state=ready). Implementer's own analysis
+  in the job log correctly identified the contamination ("failures are from a sibling RED
+  story — not my touch points") but the gate had no lane to express that.
+
+### I8 — OPERATOR CORRECTION → stage-FIRST navigation redesign (design v2)
+
+Operator: stage chips must BE the navigation (App > Plans > Stage), each stage owning its
+own panel + subtabs; my v1 (one flat tab row filtered by current status) is wrong. New IA:
+
+**URL: /labs3?planId=X&stage=<s>&subtab=<t>** (deep-linkable; legacy subtab-only URLs map
+via stageForSubtab). localStorage STAGE_KEY finally used (per-plan suffix like SUBTAB_KEY).
+
+**5 stages (all ALWAYS clickable — selection ≠ progress; chips show done/active/pending
+progress state PLUS a distinct selected ring):**
+
+1. concept — subtabs: planner (default) | plan
+   · planner = phase stepper + elapsed + model + LIVE planner stream + failure card
+   · plan = narrative front-and-center + spec DAG (existing SpecGraphView)
+2. development — subtabs: stories (default) | graph | gitgraph | codegraph | stream | growth
+   · Topological-frontier strip moves INSIDE this panel (no longer global)
+3. qa — single panel (subtab row hidden when a stage has one subtab): qa-review-view as-is
+4. deployment — DeploymentView: DevUrlCard + dev→staging ladder + promote-to-staging +
+   release history
+5. publish — PublishView (new): production card, promote-to-production CTA (gated on
+   qaReadiness), live URL, published status, release history
+   stageForStatus: concept→1, developing/fixing→2, review→3, delivered→(deployUrl?5:4).
+
+**Planner stream (missing wire):** daemon quick-planspec-runner gets an onText(text)
+callback per parsed assistant chunk → agent-daemon wires it to pushEvent(jobId, <phase>,
+'planner', 'agent_text', {text}) (throttled, capped); UI reuses use-agent-events with
+refetchIntervalInBackground:true. Also fixes UI defect #1 (background-tab poll freeze) on
+useStoryNodes/useAgentJob/use-agent-events polls.
+
+Vercel web-interface-guidelines fetched and applied (URL-synced tabs, focus-visible,
+aria, loading…, purposeful empty states for pending stages).

@@ -1,17 +1,22 @@
 'use client';
 
 /**
- * Labs3 · Deploy view — the review/delivered-stage surface (subtab='deploy').
+ * Labs3 · Deployment view — the DEV → STAGING promotion surface
+ * (design doc I8 slice N3, stage 4 of the stage-first nav).
  *
- * Design doc I2 slice U5/A5. Composes:
+ * Scoped to DEV + STAGING only — production lives on `publish-view.tsx`
+ * (stage 5). Composes:
  *  - DevUrlCard (top) — the exact dev preview URL QA ran against, pinned SHA.
- *  - QA-verified evidence line — `commit <sha> QA-verified` via qaReadiness.
- *  - EnvironmentLadder (READ-ONLY reuse) — dev → staging → production rungs,
- *    each wired to the existing usePromoteApp mutation.
- *  - ReleaseStrip (READ-ONLY reuse) — sticky verdict pill + primary promote
- *    CTA, gated by the pure `canPromote()` helper (deploy-gate.ts) so the
- *    disabled reason is always visible, never a silent no-op.
+ *  - QaEvidenceLine — `commit <sha> QA-verified` via qaReadiness.
+ *  - PromoteCtaBar — explicit "Promote to staging" CTA, disabled-with-reason
+ *    via the pure `canPromote()` helper (deploy-gate.ts). No confirm step —
+ *    promoting to staging is non-destructive (production is untouched).
+ *  - EnvironmentLadder (READ-ONLY reuse, filtered to dev+staging rungs) —
+ *    the visual ladder segment, each rung wired to usePromoteApp.
  *  - ReleaseHistory — last few deploys (labs3-native, read-only).
+ *
+ * Exported as both `DeploymentView` (the I8 name) and `DeployView` (back-compat
+ * — plan-spec-dashboard/index.tsx still imports the old name).
  *
  * Handles plans with zero deploys gracefully: the backend's deploy-report
  * endpoint always returns a report (verdict 'never-deployed', every rung
@@ -24,9 +29,10 @@ import type { Labs3ViewProps } from '../plan-spec-dashboard/constants';
 import { useDeployReport } from '@/hooks/use-deploy-report';
 import { qaReadiness } from '@/hooks/use-p3-qa-report';
 import { EnvironmentLadder } from '@/components/labs/plan-dashboard/views/deploy/environment-ladder';
-import { ReleaseStrip } from '@/components/labs/plan-dashboard/views/deploy/release-strip';
-import { DevUrlCard, shortSha, type DevPreviewStatus } from './qa/dev-url-card';
+import { DevUrlCard, type DevPreviewStatus } from './qa/dev-url-card';
 import { ReleaseHistory } from './deploy/release-history';
+import { QaEvidenceLine } from './deploy/qa-evidence-line';
+import { PromoteCtaBar } from './deploy/promote-cta-bar';
 import { canPromote } from './deploy/deploy-gate';
 
 const cardStyle: React.CSSProperties = {
@@ -47,7 +53,7 @@ function devPreviewStatusFromReport(
   return 'deploying';
 }
 
-export function DeployView(props: Labs3ViewProps) {
+export function DeploymentView(props: Labs3ViewProps) {
   const { planId, plan } = props;
   const { data: report, isLoading, isError, error } = useDeployReport(planId);
 
@@ -86,7 +92,7 @@ export function DeployView(props: Labs3ViewProps) {
             color: 'var(--text-mute)',
           }}
         >
-          Deploy
+          Deployment
         </h2>
         <p style={{ marginTop: 10, color: 'var(--destructive)', fontSize: 13, lineHeight: 1.55 }}>
           {error instanceof Error ? error.message : 'Could not load the deploy report.'}
@@ -94,6 +100,11 @@ export function DeployView(props: Labs3ViewProps) {
       </div>
     );
   }
+
+  // Stage 4 scope — dev + staging rungs only; production is PublishView's job.
+  const devStagingEnvs = (report.environments ?? []).filter(
+    (e) => e.environment === 'dev' || e.environment === 'staging',
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -105,60 +116,22 @@ export function DeployView(props: Labs3ViewProps) {
         />
       )}
 
-      {/* QA-verified evidence line — `commit <sha> QA-verified`, honest tri-state. */}
       <QaEvidenceLine qaCommitSha={plan?.qaCommitSha} readiness={readiness} />
 
-      <ReleaseStrip
-        report={report}
-        epicId={null}
-        canDeploy={gate.canPromote}
-        blockedReason={gate.reason}
+      <PromoteCtaBar
         planId={planId}
+        target="staging"
+        label="Promote to staging"
+        gate={gate}
+        liveUrl={plan?.stagingUrl}
       />
 
-      <EnvironmentLadder environments={report.environments ?? []} planId={planId} />
+      <EnvironmentLadder environments={devStagingEnvs} planId={planId} />
 
       <ReleaseHistory history={report.history ?? []} />
     </div>
   );
 }
 
-function QaEvidenceLine({
-  qaCommitSha,
-  readiness,
-}: {
-  qaCommitSha: string | undefined;
-  readiness: ReturnType<typeof qaReadiness>;
-}) {
-  const sha = shortSha(qaCommitSha ?? '');
-  const meta =
-    readiness === 'verified'
-      ? { text: `commit ${sha} QA-verified`, color: 'var(--success)' }
-      : readiness === 'blocking'
-        ? { text: `commit ${sha} — QA blocking`, color: 'var(--destructive)' }
-        : {
-            text: qaCommitSha ? `commit ${sha} — QA not verified` : 'no QA verdict yet',
-            color: 'var(--text-mute)',
-          };
-
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '8px 4px',
-        fontFamily: 'var(--font-mono)',
-        fontSize: 11,
-        letterSpacing: '0.04em',
-        color: meta.color,
-      }}
-    >
-      <span
-        aria-hidden="true"
-        style={{ width: 6, height: 6, borderRadius: '50%', background: meta.color }}
-      />
-      {meta.text}
-    </div>
-  );
-}
+/** Back-compat alias — plan-spec-dashboard/index.tsx imports the old name. */
+export const DeployView = DeploymentView;

@@ -1,10 +1,11 @@
 'use client';
 
 /**
- * Labs3 sub-tabs — the SDD surface switcher (Graph / Git Graph / Stories / QA /
- * Skills & Learnings / Stream). Forked from legacy DevelopingSubtabs but driven
- * by the Labs3Subtab union + LABS3_SUBTABS from constants so the tab list has a
- * single source of truth shared with the shell's URL validation.
+ * SubtabRow — the stage-scoped surface switcher. Generalized from the old
+ * DevelopingSubtabs: it now takes an explicit `{tabs, active, onChange}` and
+ * holds NO stage knowledge of its own — the shell (PlanSpecDashboard) passes
+ * the selected stage's ordered subtab set. A stage with a single subtab renders
+ * no row at all (the shell omits it).
  *
  * Visuals are intentionally identical to legacy so the two modules read as one
  * design system.
@@ -17,51 +18,38 @@
  * 1. REAL root cause — inline-style key ORDER. React applies a `style` object
  *    as sequential CSSOM property assignments in object-key order. The old
  *    per-button style set `borderBottom: '1px solid <color-or-transparent>'`
- *    and THEN `border: 'none'` afterward (plus a trailing
- *    `borderBottomStyle: 'solid'` bandage). Setting the `border` shorthand
- *    resets every longhand it covers — including the width/color just set by
- *    `borderBottom` — so the final computed border-bottom had NO explicit
- *    color or width, only `style: solid`, which resolves to `currentColor`
- *    (the button's own text color) at the browser-default `medium` width.
- *    Net effect: EVERY tab — active AND inactive — rendered a colored
- *    underline (dim for inactive, bright for active), not just the active
- *    one. That is exactly "underlines span across groups of tabs, active tab
- *    unclear." Fix: reset (`background`/`border: 'none'`) BEFORE setting the
- *    real `borderBottom`, and drop the now-redundant `borderBottomStyle`.
- * 2. Compounding — this fork added `flexWrap: 'wrap'` on the row (legacy
- *    sibling has none) to fit 7 labels instead of legacy's 6. The single
- *    `borderBottom` track lives on the CONTAINER and each button overlays its
- *    own underline onto that exact line via `marginBottom: -1` — correct only
- *    when every tab shares one row. If the row ever wraps, the track sits
- *    under the LAST row only, so a first-row tab's underline floats above
- *    whatever is in row two. Fix: never wrap; scroll horizontally instead, so
- *    the track and every tab's overlaid underline are always on one line.
+ *    and THEN `border: 'none'` afterward. Setting the `border` shorthand resets
+ *    every longhand it covers — including the width/color just set by
+ *    `borderBottom` — so the final computed border-bottom had NO explicit color
+ *    or width, only `style: solid`, resolving to `currentColor` at the default
+ *    `medium` width. Net: EVERY tab rendered a colored underline. Fix: reset
+ *    (`background`/`border: 'none'`) BEFORE setting the real `borderBottom`.
+ * 2. Compounding — `flexWrap: 'wrap'` on the row floated first-row underlines
+ *    above the single container track. Fix: never wrap; scroll horizontally.
  */
 
-import { LABS3_SUBTABS, type Labs3Subtab } from './constants';
+import type { Labs3Subtab } from './constants';
 
-export function DevelopingSubtabs({
+export interface SubtabRowTab {
+  id: Labs3Subtab;
+  label: string;
+}
+
+export function SubtabRow({
+  tabs,
   active,
   onChange,
-  subtabs = LABS3_SUBTABS.map((t) => t.id),
 }: {
+  /** The ordered subtab set to render (already scoped to the selected stage). */
+  tabs: SubtabRowTab[];
   active: Labs3Subtab;
   onChange: (t: Labs3Subtab) => void;
-  /**
-   * The stage-filtered, ordered subset of subtab ids to render (design I2/U3
-   * `subtabsForStage`). Defaults to every subtab — legacy/unfiltered callers
-   * (and tests) keep working unchanged.
-   */
-  subtabs?: Labs3Subtab[];
 }) {
-  const visible = subtabs
-    .map((id) => LABS3_SUBTABS.find((t) => t.id === id))
-    .filter((t): t is (typeof LABS3_SUBTABS)[number] => t != null);
-
   return (
     <div style={{ padding: '28px 0 0' }}>
       <div
         role="tablist"
+        aria-label="Stage surfaces"
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -71,7 +59,7 @@ export function DevelopingSubtabs({
           overflowX: 'auto',
         }}
       >
-        {visible.map((t) => {
+        {tabs.map((t) => {
           const on = active === t.id;
           return (
             <button
@@ -80,6 +68,7 @@ export function DevelopingSubtabs({
               role="tab"
               onClick={() => onChange(t.id)}
               aria-selected={on}
+              className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-blue)] focus-visible:ring-inset"
               onMouseEnter={(e) => {
                 if (!on) e.currentTarget.style.color = 'var(--text-dim)';
               }}
@@ -95,11 +84,9 @@ export function DevelopingSubtabs({
                 fontWeight: 400,
                 letterSpacing: '0.14em',
                 textTransform: 'uppercase',
-                // Reset FIRST — the `border` shorthand resets every longhand
-                // it covers, so it must run before the real borderBottom
-                // value is set, or the color/width below get wiped (see the
-                // file-header note: this ordering bug used to underline
-                // every tab, not just the active one).
+                // Reset FIRST — the `border` shorthand resets every longhand it
+                // covers, so it must run before the real borderBottom value is
+                // set, or the color/width below get wiped (see file-header note).
                 background: 'transparent',
                 border: 'none',
                 borderBottom: `1px solid ${on ? 'var(--foreground)' : 'transparent'}`,

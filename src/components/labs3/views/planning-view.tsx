@@ -32,10 +32,12 @@
  */
 
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { AlertTriangle, Loader2 } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
 import { useAgentJob } from '@/hooks/use-agent-job';
+import { useAgentEvents } from '@/hooks/use-agent-events';
+import type { AgentJobStatus } from '@/types/agent-orchestrator';
 import type { Labs3ViewProps } from '../plan-spec-dashboard/constants';
 import { links3 } from '@/lib/links3';
 import { fmtDuration } from '../plan-spec-dashboard/project-hero';
@@ -207,6 +209,164 @@ function ElapsedTimer({ since }: { since?: string }) {
   );
 }
 
+/**
+ * Pure grouping helper for the planner live-stream pane (I8) — no DOM, unit
+ * testable standalone. Filters `agent_text` events and concatenates each
+ * phase's (`stepId`'s) text in arrival order, returning groups in FIRST-SEEN
+ * phase order. `eventType === 'agent_text'` is a daemon-only value not yet
+ * declared on the shared `AgentEventType` union (owned by another slice) —
+ * compared as a string rather than widening that type, mirroring this
+ * file's existing `job.phase` cast (see file-header deviation note).
+ */
+export function groupAgentTextByPhase(
+  events: { eventType: unknown; stepId?: string; text?: string }[],
+): { phase: string; text: string }[] {
+  const order: string[] = [];
+  const byPhase = new Map<string, string>();
+  for (const e of events) {
+    if ((e.eventType as string) !== 'agent_text' || !e.text) continue;
+    const phase = e.stepId || 'planner';
+    if (!byPhase.has(phase)) {
+      order.push(phase);
+      byPhase.set(phase, '');
+    }
+    byPhase.set(phase, (byPhase.get(phase) || '') + e.text);
+  }
+  return order.map((phase) => ({ phase, text: byPhase.get(phase) || '' }));
+}
+
+/**
+ * Terminal-style live-stream pane for the planner's assistant-text output
+ * (I8 planner-stream wire). Fed by `useAgentEvents` against the mint job —
+ * groups `agent_text` events by `stepId` (the phase the daemon tagged them
+ * with: planner | parallelism-repair | critique | critique-repair) and
+ * renders each group's accumulated text in arrival order.
+ *
+ * Sticks to the bottom on new output unless the operator has scrolled up to
+ * read something (then it stays put until they scroll back down). Open by
+ * default while RUNNING; auto-collapses ONCE when the job leaves RUNNING so
+ * completed plans don't waste vertical space, but stays openable via the
+ * header toggle either way.
+ *
+ * `eventType === 'agent_text'` is a daemon-only value not yet declared on
+ * the shared `AgentEventType` union (owned by another slice) — compared as
+ * a string rather than widening that type, mirroring this file's existing
+ * `job.phase` cast (see file-header deviation note).
+ */
+function PlannerStreamPane({
+  jobId,
+  jobStatus,
+}: {
+  jobId: string | null;
+  jobStatus: AgentJobStatus | undefined;
+}) {
+  const isRunning = jobStatus !== 'COMPLETED' && jobStatus !== 'FAILED';
+  const { events } = useAgentEvents(jobId, jobStatus);
+  // Derived (not effect-driven) open state: defaults to "open while RUNNING,
+  // collapsed once terminal" and an explicit operator toggle overrides that
+  // default for the rest of this pane's lifetime. Avoids a setState-in-effect
+  // cascading-render lint trip for what is really just a derived value.
+  const [userOverride, setUserOverride] = useState<boolean | null>(null);
+  const open = userOverride ?? isRunning;
+
+  const groups = useMemo(() => groupAgentTextByPhase(events), [events]);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  };
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !open || !stickToBottom.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [groups, open]);
+
+  if (!jobId || (!isRunning && groups.length === 0)) return null;
+
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden' }}>
+      <button
+        type="button"
+        onClick={() => setUserOverride(!open)}
+        aria-expanded={open}
+        aria-controls="planner-stream-pane"
+        className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 8,
+          padding: '10px 14px',
+          background: 'var(--bg-elev)',
+          border: 'none',
+          borderBottom: open ? '1px solid var(--border)' : 'none',
+          cursor: 'pointer',
+          textAlign: 'left',
+        }}
+      >
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, ...LABEL }}>
+          {isRunning && <Loader2 size={11} className="animate-spin" />}
+          {isRunning ? 'Streaming planner…' : 'Planner stream'}
+        </span>
+        {open ? (
+          <ChevronUp size={14} color="var(--text-mute)" aria-hidden="true" />
+        ) : (
+          <ChevronDown size={14} color="var(--text-mute)" aria-hidden="true" />
+        )}
+      </button>
+      {open && (
+        <div
+          id="planner-stream-pane"
+          ref={scrollRef}
+          onScroll={handleScroll}
+          role="log"
+          aria-live="polite"
+          aria-label="Planner live output"
+          style={{
+            maxHeight: 260,
+            overflowY: 'auto',
+            padding: '12px 14px',
+            background: '#0b0d12',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11.5,
+            lineHeight: 1.6,
+            color: '#c9d1d9',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {groups.length === 0 ? (
+            <span style={{ color: '#6e7681' }}>Waiting for planner output…</span>
+          ) : (
+            groups.map((g) => (
+              <div key={g.phase} style={{ marginBottom: 10 }}>
+                <div
+                  style={{
+                    color: '#7ee787',
+                    fontSize: 10,
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                    marginBottom: 4,
+                  }}
+                >
+                  {g.phase}
+                </div>
+                {g.text}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BrownfieldBanner({ appId }: { appId: string }) {
   return (
     <div
@@ -288,6 +448,7 @@ export function PlanningView(props: Labs3ViewProps) {
             View dependency graph →
           </Link>
         </Card>
+        <PlannerStreamPane jobId={mintJobId} jobStatus={job?.status} />
       </div>
     );
   }
@@ -308,27 +469,32 @@ export function PlanningView(props: Labs3ViewProps) {
   // FAILED — prominent error card, no fake retry button.
   if (job?.status === 'FAILED') {
     return (
-      <Card>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--destructive)' }}>
-          <AlertTriangle size={15} />
-          <span style={{ ...LABEL, color: 'var(--destructive)' }}>Planning failed</span>
-        </div>
-        <p
-          style={{
-            marginTop: 10,
-            fontFamily: 'var(--font-mono)',
-            fontSize: 12,
-            color: 'var(--text-dim)',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}
-        >
-          {job.errorMessage || 'The mint job failed without an error message.'}
-        </p>
-        <p style={{ marginTop: 10, fontSize: 12, color: 'var(--text-mute)', lineHeight: 1.55 }}>
-          This mint job cannot be retried in place — create a new plan to try again.
-        </p>
-      </Card>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <Card>
+          <div
+            style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--destructive)' }}
+          >
+            <AlertTriangle size={15} />
+            <span style={{ ...LABEL, color: 'var(--destructive)' }}>Planning failed</span>
+          </div>
+          <p
+            style={{
+              marginTop: 10,
+              fontFamily: 'var(--font-mono)',
+              fontSize: 12,
+              color: 'var(--text-dim)',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {job.errorMessage || 'The mint job failed without an error message.'}
+          </p>
+          <p style={{ marginTop: 10, fontSize: 12, color: 'var(--text-mute)', lineHeight: 1.55 }}>
+            This mint job cannot be retried in place — create a new plan to try again.
+          </p>
+        </Card>
+        <PlannerStreamPane jobId={mintJobId} jobStatus={job?.status} />
+      </div>
     );
   }
 
@@ -383,6 +549,7 @@ export function PlanningView(props: Labs3ViewProps) {
           </p>
         )}
       </Card>
+      <PlannerStreamPane jobId={mintJobId} jobStatus={job?.status} />
     </div>
   );
 }

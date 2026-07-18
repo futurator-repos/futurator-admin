@@ -96,6 +96,19 @@ export QUEUE_RUN_ROOT="${QUEUE_RUN_ROOT:-$ROOT/queue-runs}"
 export FUTURATOR_BARE_REPOS_ROOT="${FUTURATOR_BARE_REPOS_ROOT:-$ROOT/repos}"
 export FUTURATOR_LEGACY_PROJECTS_ROOT="${FUTURATOR_LEGACY_PROJECTS_ROOT:-$PROJECTS_ROOT}"
 
+# ── Agentic VQA lane (daemon/lib/agentic-vqa-runner.mjs). The runner reads
+#    BROWSER_AGENT_API_KEY ONLY — never ANTHROPIC_API_KEY, which would flip the
+#    spawned `claude` CLI from the Max subscription to per-token billing. Source
+#    the key from the operator's BrowserAgent project .env when present; absent
+#    key ⇒ the agentic lane self-reports skipped (never fails QA).
+BROWSER_AGENT_ENV="$HOME/GetReal/elevenLabsConcepts/BrowserAgent/.env"
+if [ -z "${BROWSER_AGENT_API_KEY:-}" ] && [ -f "$BROWSER_AGENT_ENV" ]; then
+  BROWSER_AGENT_API_KEY="$(grep '^ANTHROPIC_API_KEY=' "$BROWSER_AGENT_ENV" | head -1 | cut -d= -f2-)"
+fi
+export BROWSER_AGENT_API_KEY
+export BROWSER_AGENT_URL="${BROWSER_AGENT_URL:-http://127.0.0.1:3010}"
+export AGENTIC_VQA_MODE="${AGENTIC_VQA_MODE:-auto}"
+
 LOG_DIR="$ROOT/logs"
 LOG_FILE="$LOG_DIR/daemon.log"
 PID_FILE="$ROOT/daemon.pid"

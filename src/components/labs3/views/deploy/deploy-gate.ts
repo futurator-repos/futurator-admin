@@ -52,3 +52,46 @@ export function canPromote(plan: PromoteGateInput, readiness: QaReadiness): Prom
   }
   return { canPromote: true };
 }
+
+/** The minimal plan-ish shape the production gate needs. */
+export type PublishGateInput = Pick<Plan, 'stagingUrl'> | null | undefined;
+
+/**
+ * Production gate for PublishView's promote-to-production CTA (design doc I8
+ * slice N3). Deliberately separate from `canPromote` (the dev→staging gate)
+ * since publishing is a distinct, irreversible action with its own
+ * prerequisite — a live staging rung, not merely a dev deploy — on top of the
+ * same QA-readiness rule:
+ *
+ *   no plan loaded      → blocked
+ *   no staging deploy   → blocked ("promote to staging first")
+ *   QA not verified     → blocked ("QA blocking" / "QA not verified yet")
+ *   otherwise           → allowed
+ */
+export function canPromoteToProduction(
+  plan: PublishGateInput,
+  readiness: QaReadiness,
+): PromoteGate {
+  if (!plan) {
+    return { canPromote: false, reason: 'Plan not loaded yet.' };
+  }
+  if (!plan.stagingUrl) {
+    return {
+      canPromote: false,
+      reason: 'No staging deploy yet — promote to staging before publishing.',
+    };
+  }
+  if (readiness === 'blocking') {
+    return {
+      canPromote: false,
+      reason: 'QA is blocking — resolve the failing journeys/VQA before publishing.',
+    };
+  }
+  if (readiness === 'pending') {
+    return {
+      canPromote: false,
+      reason: 'QA has not verified this commit yet — run QA before publishing.',
+    };
+  }
+  return { canPromote: true };
+}

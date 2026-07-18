@@ -44,6 +44,10 @@ export function useStoryNodes(planId: string | null): UseQueryResult<StoryNodeRo
       if (!data || data.length === 0) return 5_000;
       return hasActiveStory(data) ? 2_000 : false;
     },
+    // I8 UI defect #1 — a hidden/background tab (operator on another stage
+    // subtab, or another browser tab) would otherwise freeze the poll and the
+    // dev-stage story grid would look stuck even though the daemon kept moving.
+    refetchIntervalInBackground: true,
   });
 }
 

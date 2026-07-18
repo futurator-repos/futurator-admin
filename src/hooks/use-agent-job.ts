@@ -21,6 +21,10 @@ export function useAgentJob(jobId: string | null) {
       if (status === 'COMPLETED' || status === 'FAILED') return false;
       return 1000;
     },
+    // I8 UI defect #1 — keep polling while the operator has this tab/pane
+    // backgrounded (e.g. watching another stage subtab), so the phase stepper
+    // isn't stale when they switch back.
+    refetchIntervalInBackground: true,
   });
 }
 

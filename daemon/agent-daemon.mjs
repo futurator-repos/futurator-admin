@@ -2019,6 +2019,14 @@ async function executeQuickPlanspecJob(job) {
         return [];
       }
     },
+    // I8 planner-stream wire: throttled assistant-text chunks → agent-jobs
+    // events table so PlanningView's live-stream pane has something to read.
+    // Fire-and-forget — pushEvent already handles its own DDB errors, and a
+    // throw here must never fail the mint run.
+    onText: (chunk) => {
+      pushEvent(job.jobId, chunk?.phase || 'planner', 'planner', 'agent_text', { text: chunk?.text || '' })
+        .catch(() => { /* best-effort */ });
+    },
     log,
   });
 }

@@ -40,8 +40,44 @@ async function waitForBootstrap({ getJob, jobId, timeoutMs = 6 * 60_000, pollMs 
   }
 }
 
-/** Spawn one Claude and return its full stream-json stdout. */
-function spawnClaude({ spawn, claudeBin, cwd, prompt, eventLogDir, jobId, gateArgs = [], modelArgs = [], env = {}, log }) {
+// I8 planner-stream wire (Wave N2): batches new assistant text into onText
+// callbacks at most ~1 per intervalMs, capped at capChars per emit — the UI's
+// live-stream pane doesn't need every keystroke, and hammering pushEvent per
+// stream-json line would blow the events table's write budget. Fail-soft: the
+// caller wraps onText in its own try/catch (see below), this never throws.
+function makeTextThrottler({ onText, phase, intervalMs = 1500, capChars = 4000 }) {
+  let buf = '';
+  let timer = null;
+  const flush = () => {
+    if (!buf) return;
+    const text = buf.length > capChars ? buf.slice(buf.length - capChars) : buf;
+    buf = '';
+    try { onText?.({ text, phase }); } catch { /* never fail the run */ }
+  };
+  return {
+    push(chunk) {
+      if (!chunk) return;
+      buf += chunk;
+      if (buf.length > capChars) buf = buf.slice(buf.length - capChars);
+      if (!timer) timer = setTimeout(() => { timer = null; flush(); }, intervalMs);
+    },
+    finalFlush() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      flush();
+    },
+  };
+}
+
+/**
+ * Spawn one Claude and return its full stream-json stdout.
+ *
+ * @param {object} opts
+ * @param {(chunk:{text:string, phase?:string})=>void} [opts.onText]  optional
+ *   injected callback for incremental assistant-text pieces (planner-stream
+ *   wire). Throttled/batched — see makeTextThrottler. Never fails the spawn.
+ * @param {string} [opts.phase]  the phase label to tag onText chunks with.
+ */
+function spawnClaude({ spawn, claudeBin, cwd, prompt, eventLogDir, jobId, gateArgs = [], modelArgs = [], env = {}, log, onText, phase }) {
   const args = [
     '-p', prompt,
     '--output-format', 'stream-json',
@@ -53,13 +89,31 @@ function spawnClaude({ spawn, claudeBin, cwd, prompt, eventLogDir, jobId, gateAr
   try { if (eventLogDir && !existsSync(eventLogDir)) mkdirSync(eventLogDir, { recursive: true }); } catch { /* best-effort */ }
   const stdoutPath = eventLogDir ? join(eventLogDir, `${jobId}.quick-planspec.stdout.log`) : null;
   const outFile = stdoutPath ? createWriteStream(stdoutPath, { flags: 'a' }) : null;
+  const throttler = typeof onText === 'function' ? makeTextThrottler({ onText, phase }) : null;
+  let lastExtractedLen = 0;
   return new Promise((resolve) => {
     const child = spawn(claudeBin, args, { cwd, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
-    child.stdout.on('data', (c) => { out += c.toString('utf8'); try { outFile?.write(c); } catch { /* ignore */ } });
+    child.stdout.on('data', (c) => {
+      out += c.toString('utf8');
+      try { outFile?.write(c); } catch { /* ignore */ }
+      if (throttler) {
+        try {
+          // Mirror the post-close fallback (`extractAssistantText(out) || out`,
+          // step 3 below) so a fake/non-stream-json transcript in tests — or a
+          // real transcript with no complete assistant blocks yet — still
+          // streams something rather than emitting nothing until close.
+          const full = extractAssistantText(out) || out;
+          if (full.length > lastExtractedLen) {
+            throttler.push(full.slice(lastExtractedLen));
+            lastExtractedLen = full.length;
+          }
+        } catch { /* best-effort — never fail the spawn over a stream-parse hiccup */ }
+      }
+    });
     child.stderr.on('data', (c) => log?.('warn', `[quick-planspec:${jobId?.slice(0, 8)}:stderr] ${c.toString('utf8').trimEnd()}`));
-    child.on('error', (err) => { log?.('error', `[quick-planspec] spawn error: ${err.message}`); resolve({ exitCode: -1, out }); });
-    child.on('close', (code) => { try { outFile?.end(); } catch { /* ignore */ } resolve({ exitCode: code ?? 0, out }); });
+    child.on('error', (err) => { throttler?.finalFlush(); log?.('error', `[quick-planspec] spawn error: ${err.message}`); resolve({ exitCode: -1, out }); });
+    child.on('close', (code) => { try { outFile?.end(); } catch { /* ignore */ } throttler?.finalFlush(); resolve({ exitCode: code ?? 0, out }); });
   });
 }
 
@@ -79,6 +133,7 @@ export async function runQuickPlanspecJob(job, deps) {
     // throw only warns — they enrich the plan, they never gate it.
     updatePlanFields,   // (planId, fields) → persist the planner narrative/shape onto the plan row
     listRepoTestFiles,  // (workingDir) → committed test-file paths (brownfield test-law)
+    onText,             // (chunk:{text,phase}) → live planner-stream event (I8). Fail-soft.
   } = deps;
   const p = job.quickPlanspecPayload || {};
   // `brownfield` (set by the API for grow-existing-app plans) switches the prompt to
@@ -119,7 +174,7 @@ export async function runQuickPlanspecJob(job, deps) {
   // bad plan poisons every downstream story. Adaptive thinking + effort=high.
   const { resolveAgentPolicy, cliModelArgs } = await import('../lib/model-effort-policy.mjs');
   const modelArgs = cliModelArgs(resolveAgentPolicy({ role: 'planner' }));
-  const { exitCode, out } = await spawnClaude({ spawn, claudeBin, cwd: job.workingDir, prompt, eventLogDir, jobId: job.jobId, gateArgs, modelArgs, env, log });
+  const { exitCode, out } = await spawnClaude({ spawn, claudeBin, cwd: job.workingDir, prompt, eventLogDir, jobId: job.jobId, gateArgs, modelArgs, env, log, onText, phase: 'planner' });
   if (exitCode !== 0 && !out) return fail(`generation spawn exited ${exitCode} with no output`);
 
   // 3) parse → StoryNodes (+ the parallelism audit).
@@ -140,7 +195,7 @@ export async function runQuickPlanspecJob(job, deps) {
     });
     const repair = await spawnClaude({
       spawn, claudeBin, cwd: job.workingDir, prompt: repairPrompt, eventLogDir,
-      jobId: `${job.jobId}-repair`, gateArgs, modelArgs, env, log,
+      jobId: `${job.jobId}-repair`, gateArgs, modelArgs, env, log, onText, phase: 'parallelism-repair',
     });
     const reparsed = parseQuickPlanspec(extractAssistantText(repair.out) || repair.out);
     if (!reparsed.errors.length && reparsed.stories.length
@@ -176,7 +231,7 @@ export async function runQuickPlanspecJob(job, deps) {
     const critiquePrompt = buildPlanCritiquePrompt({ intent, appSlug: appId, stories: parsed.stories, planShape: parsed.planShape });
     const critiqueRun = await spawnClaude({
       spawn, claudeBin, cwd: job.workingDir, prompt: critiquePrompt, eventLogDir,
-      jobId: `${job.jobId}-critique`, gateArgs, modelArgs: critiqueModelArgs, env, log,
+      jobId: `${job.jobId}-critique`, gateArgs, modelArgs: critiqueModelArgs, env, log, onText, phase: 'critique',
     });
     const { findings } = parsePlanCritique(extractAssistantText(critiqueRun.out) || critiqueRun.out);
     critiqueFindingCount = findings.length;
@@ -192,7 +247,7 @@ export async function runQuickPlanspecJob(job, deps) {
       });
       const critiqueRepair = await spawnClaude({
         spawn, claudeBin, cwd: job.workingDir, prompt: critiqueRepairPrompt, eventLogDir,
-        jobId: `${job.jobId}-critique-repair`, gateArgs, modelArgs, env, log,
+        jobId: `${job.jobId}-critique-repair`, gateArgs, modelArgs, env, log, onText, phase: 'critique-repair',
       });
       const reparsed = parseQuickPlanspec(extractAssistantText(critiqueRepair.out) || critiqueRepair.out);
       if (!reparsed.errors.length && reparsed.stories.length

@@ -1,60 +1,28 @@
 'use client';
 
 /**
- * LifecycleStrip — the plan-level lifecycle (QA-Review W1).
+ * LifecycleStrip — the stage-first NAVIGATOR (design I8 v2).
  *
- * The four macro-stages of a P3 plan, above the batch-level PipelineStrip:
+ * The five macro-stages of a P3 plan ARE the navigation:
  *
- *   CONCEPT ─── DEVELOPMENT ─── QA REVIEW ─── DEPLOYED
+ *   CONCEPT ── DEVELOPMENT ── QA REVIEW ── DEPLOYMENT ── PUBLISH
  *
- * Driven purely by `plan.status` (the daemon's P3_LIFECYCLE driver advances it:
- * concept→developing→review; a production deploy → delivered). When a dev
- * preview exists the QA REVIEW stage grows an "Open dev ↗" link — the exact URL
- * headless QA tests against.
+ * Every chip is ALWAYS a clickable button (selection ≠ progress). Each chip
+ * carries TWO independent signals:
+ *   · progress state (done / active / pending) — derived from `stageForStatus`
+ *     ordering, so it reflects where the plan actually SITS.
+ *   · selected ring + aria-current — reflects which stage panel is OPEN.
  *
- * CLICKABLE (2026-07-06 — legacy parity): each stage navigates to the Labs3
- * subtab that shows it, mirroring the legacy plan-dashboard's clickable
- * pipeline stages. `onSelectStage` is optional so the component still renders
- * pure/presentational when the caller has no navigation to offer.
+ * The QA chip's sub-label reflects deployed-app QA readiness once reached; the
+ * old single "Deployed" chip is split into DEPLOYMENT (dev → staging) and
+ * PUBLISH (production live) variants, each with its own reached-state override.
  */
 
-import type { Plan, PlanStatus } from '@/types/plan';
+import type { Plan } from '@/types/plan';
 import { qaReadiness, type QaReadiness } from '@/hooks/use-p3-qa-report';
-import type { Labs3Subtab } from './constants';
+import { STAGE_DEFS, stageForStatus, stageIndex, type Labs3Stage } from './constants';
 
 type StageState = 'done' | 'active' | 'pending';
-
-interface Stage {
-  id: string;
-  label: string;
-  sub: string;
-  /** The Labs3 subtab this stage navigates to when clicked. */
-  subtab: Labs3Subtab;
-}
-
-const STAGES: Stage[] = [
-  { id: 'concept', label: 'Concept', sub: 'intent → plan', subtab: 'plan-stage' },
-  { id: 'development', label: 'Development', sub: 'stories build', subtab: 'stories' },
-  { id: 'qa', label: 'QA Review', sub: 'assembled + tested', subtab: 'qa' },
-  { id: 'deployed', label: 'Deployed', sub: 'promoted live', subtab: 'deploy' },
-];
-
-/** Map plan.status → the index of the CURRENTLY-active lifecycle stage. */
-export function activeStageIndex(status: PlanStatus): number {
-  switch (status) {
-    case 'concept':
-      return 0;
-    case 'developing':
-    case 'fixing':
-      return 1;
-    case 'review':
-      return 2;
-    case 'delivered':
-      return 3;
-    default:
-      return 0; // archived / unknown → show at concept
-  }
-}
 
 function stateFor(i: number, active: number): StageState {
   if (i < active) return 'done';
@@ -94,15 +62,25 @@ export function qaStageOverride(
 }
 
 /**
- * The DEPLOYED stage sub-label + dot color reflect real deploy state once
- * reached, replacing the previously-static 'promoted live' string. Kept
- * purely plan-row-driven (design U5-override): `plan.deployUrl` present is
- * the sole live signal available on the row today — richer promoting/failed
- * states are DeployView's job (B/A5 slice), this override only upgrades the
- * "it's actually live" case. Returns null (falls back to the default label)
- * when the stage hasn't been reached or no deploy URL exists yet.
+ * The DEPLOYMENT stage sub-label reflects the dev/staging preview once reached
+ * — `plan.devUrl` present is the live signal that a dev preview exists (the
+ * exact URL headless QA tests against). Returns null (default label) otherwise.
  */
 export function deployStageOverride(
+  plan: Plan,
+  stageReached: boolean,
+): { sub: string; color: string } | null {
+  if (!stageReached) return null;
+  if (plan.devUrl) return { sub: 'dev preview live', color: 'var(--success)' };
+  return null;
+}
+
+/**
+ * The PUBLISH stage sub-label reflects real production state once reached —
+ * `plan.deployUrl` present is the sole "it's actually live" signal on the row.
+ * Returns null (default 'promoted live') when not reached or not yet live.
+ */
+export function publishStageOverride(
   plan: Plan,
   stageReached: boolean,
 ): { sub: string; color: string } | null {
@@ -113,13 +91,16 @@ export function deployStageOverride(
 
 export function LifecycleStrip({
   plan,
+  selectedStage,
   onSelectStage,
 }: {
   plan: Plan;
-  /** Navigate to the subtab that shows this stage (legacy pipeline parity). */
-  onSelectStage?: (subtab: Labs3Subtab) => void;
+  /** The stage whose panel is currently open — gets the selected ring. */
+  selectedStage?: Labs3Stage;
+  /** Navigate to a stage's panel. Optional → chips render presentational. */
+  onSelectStage?: (stage: Labs3Stage) => void;
 }) {
-  const active = activeStageIndex(plan.status);
+  const activeIdx = stageIndex(stageForStatus(plan.status, plan));
   const devUrl = plan.devUrl;
   const liveUrl = plan.deployUrl;
 
@@ -133,105 +114,114 @@ export function LifecycleStrip({
         flexWrap: 'wrap',
       }}
     >
-      {STAGES.map((s, i) => {
-        const st = stateFor(i, active);
-        // QA REVIEW stage reflects deployed-app QA readiness once reached;
-        // DEPLOYED stage reflects real deploy state once reached.
-        const qaOv = s.id === 'qa' ? qaStageOverride(plan, i <= active) : null;
-        const deployOv = s.id === 'deployed' ? deployStageOverride(plan, i <= active) : null;
-        const ov = qaOv ?? deployOv;
+      {STAGE_DEFS.map((s, i) => {
+        const st = stateFor(i, activeIdx);
+        const reached = i <= activeIdx;
+        const selected = selectedStage === s.id;
+
+        const ov =
+          s.id === 'qa'
+            ? qaStageOverride(plan, reached)
+            : s.id === 'deployment'
+              ? deployStageOverride(plan, reached)
+              : s.id === 'publish'
+                ? publishStageOverride(plan, reached)
+                : null;
         const c = ov ? ov.color : COLOR[st];
         const subLabel = ov ? ov.sub : s.sub;
-        // Contextual affordance: the QA stage surfaces the dev preview link; the
-        // Deployed stage surfaces the live link.
+
+        // Contextual affordances (only once the stage is reached): QA +
+        // Deployment surface the dev preview link; Publish the production link.
         const link =
-          s.id === 'qa' && devUrl
+          reached && (s.id === 'qa' || s.id === 'deployment') && devUrl
             ? { href: devUrl, text: 'Open dev ↗' }
-            : s.id === 'deployed' && liveUrl
+            : reached && s.id === 'publish' && liveUrl
               ? { href: liveUrl, text: 'Open live ↗' }
               : null;
+
+        const ring = selected ? `0 0 0 1.5px var(--accent-blue)` : 'none';
+
         return (
           <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <div
-              role={onSelectStage ? 'button' : undefined}
-              tabIndex={onSelectStage ? 0 : undefined}
-              onClick={onSelectStage ? () => onSelectStage(s.subtab) : undefined}
-              onKeyDown={
-                onSelectStage
-                  ? (e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        onSelectStage(s.subtab);
-                      }
-                    }
-                  : undefined
-              }
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 2,
-                padding: '8px 14px',
-                borderRadius: 7,
-                minWidth: 150,
-                cursor: onSelectStage ? 'pointer' : undefined,
-                border: `1px solid color-mix(in srgb, ${c} ${st === 'pending' ? 30 : 55}%, transparent)`,
-                background: `color-mix(in srgb, ${c} ${st === 'active' ? 12 : 5}%, transparent)`,
-                opacity: st === 'pending' ? 0.55 : 1,
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: '50%',
-                    background: c,
-                    flexShrink: 0,
-                    ...(st === 'active' ? { animation: 'pulse 1.4s infinite' } : {}),
-                  }}
-                />
-                <span
-                  style={{
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 10,
-                    letterSpacing: '0.12em',
-                    textTransform: 'uppercase',
-                    color: 'var(--foreground)',
-                    fontWeight: st === 'active' ? 600 : 400,
-                  }}
-                >
-                  {s.label}
-                </span>
-              </div>
-              <div
+            <div style={{ position: 'relative', display: 'flex' }}>
+              <button
+                type="button"
+                onClick={onSelectStage ? () => onSelectStage(s.id) : undefined}
+                disabled={!onSelectStage}
+                aria-current={selected ? 'true' : undefined}
+                aria-label={`${s.label} stage — ${subLabel}${selected ? ' (selected)' : ''}`}
+                className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-blue)]"
                 style={{
                   display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 8,
+                  flexDirection: 'column',
+                  gap: 2,
+                  padding: '8px 14px',
+                  borderRadius: 7,
+                  minWidth: 150,
+                  textAlign: 'left',
+                  cursor: onSelectStage ? 'pointer' : 'default',
+                  border: `1px solid color-mix(in srgb, ${c} ${st === 'pending' ? 30 : 55}%, transparent)`,
+                  background: `color-mix(in srgb, ${c} ${selected ? 14 : st === 'active' ? 12 : 5}%, transparent)`,
+                  boxShadow: ring,
+                  opacity: st === 'pending' && !selected ? 0.6 : 1,
+                  transition: 'box-shadow 150ms, background 150ms, opacity 150ms',
                 }}
               >
-                <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{subLabel}</span>
-                {link && (
-                  <a
-                    href={link.href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={(e) => e.stopPropagation()}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: c,
+                      flexShrink: 0,
+                      ...(st === 'active' ? { animation: 'pulse 1.4s infinite' } : {}),
+                    }}
+                  />
+                  <span
                     style={{
                       fontFamily: 'var(--font-mono)',
-                      fontSize: 9.5,
-                      color: 'var(--accent-blue)',
-                      textDecoration: 'none',
-                      whiteSpace: 'nowrap',
+                      fontSize: 10,
+                      letterSpacing: '0.12em',
+                      textTransform: 'uppercase',
+                      color: 'var(--foreground)',
+                      fontWeight: st === 'active' || selected ? 600 : 400,
                     }}
                   >
-                    {link.text}
-                  </a>
-                )}
-              </div>
+                    {s.label}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{subLabel}</span>
+                  {/* reserve room so the overlaid anchor never clips the sublabel */}
+                  {link && <span aria-hidden style={{ width: 64, flexShrink: 0 }} />}
+                </div>
+              </button>
+              {/* External link as a DOM sibling (not nested in the button) so the
+                  markup stays valid and clicking it never fires stage nav. */}
+              {link && (
+                <a
+                  href={link.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-blue)]"
+                  style={{
+                    position: 'absolute',
+                    right: 12,
+                    bottom: 8,
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 9.5,
+                    color: 'var(--accent-blue)',
+                    textDecoration: 'none',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {link.text}
+                </a>
+              )}
             </div>
-            {i < STAGES.length - 1 && (
+            {i < STAGE_DEFS.length - 1 && (
               <span style={{ color: 'var(--text-faint)', fontSize: 12, flexShrink: 0 }}>→</span>
             )}
           </div>

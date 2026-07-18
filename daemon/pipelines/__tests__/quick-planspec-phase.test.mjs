@@ -96,3 +96,40 @@ describe('runQuickPlanspecJob — phase markers', () => {
     expect(d.batchPutStoryNodes).toHaveBeenCalledOnce();
   });
 });
+
+// I8 planner-stream wire — onText emits throttled/batched assistant-text
+// chunks tagged with the current phase, and a throwing onText never fails
+// the run (fire-and-forget, mirrors updateJobFields best-effort contract).
+describe('runQuickPlanspecJob — onText planner-stream wire', () => {
+  it('emits at least one chunk tagged with phase "planner" on the happy path', async () => {
+    const onText = vi.fn();
+    const d = baseDeps({ onText });
+    const r = await runQuickPlanspecJob(baseJob, d);
+    expect(r.ok).toBe(true);
+    expect(onText).toHaveBeenCalled();
+    const phases = onText.mock.calls.map((c) => c[0].phase);
+    expect(phases).toContain('planner');
+    // every chunk carries non-empty text
+    for (const [chunk] of onText.mock.calls) {
+      expect(typeof chunk.text).toBe('string');
+      expect(chunk.text.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('a throwing onText never fails the run', async () => {
+    const onText = vi.fn(() => { throw new Error('ui pipe down'); });
+    const d = baseDeps({ onText });
+    const r = await runQuickPlanspecJob(baseJob, d);
+    expect(r.ok).toBe(true);
+    expect(d.batchPutStoryNodes).toHaveBeenCalledOnce();
+  });
+
+  it('tags chunks with "parallelism-repair" when the repair pass fires', async () => {
+    const onText = vi.fn();
+    const d = baseDeps({ spawn: fakeSpawn(SERIAL_SPEC), onText });
+    const r = await runQuickPlanspecJob(baseJob, d);
+    expect(r.ok).toBe(true);
+    const phases = new Set(onText.mock.calls.map((c) => c[0].phase));
+    expect(phases.has('parallelism-repair')).toBe(true);
+  });
+});

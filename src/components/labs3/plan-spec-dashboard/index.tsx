@@ -6,19 +6,19 @@
  * it fetches the StoryNode snapshot ONCE (useStoryNodes), builds the grouped
  * model, and fans the uniform Labs3ViewProps into each surface's slot.
  *
- * Surfaces (sub-tabs):
- *   graph    — dependency DAG over cohortBatch levels (B3)
- *   gitgraph — per-story commits on branch plan/<id> (B4)
- *   stories  — cohort → batch → story hierarchy + live log/retries (B5)
- *   qa       — bound-AC testBinding rollup + delivery verdict (B6)
- *   growth   — skill catalog + reflections + instinct loop / gate blocks (B7)
- *   stream   — plan-wide forensic surface for all story-dev jobs (B5)
+ * STAGE-FIRST navigation (design I8 v2): the plan lifecycle is five navigable
+ * stages (concept · development · qa · deployment · publish), each owning its
+ * own panel and ordered subtab set. The LifecycleStrip IS the navigator; the
+ * selected stage renders its subtab row (hidden when the stage has a single
+ * surface) then the active view. The topological-frontier PipelineStrip lives
+ * INSIDE the development panel only.
  *
  * URL state (static-export friendly — query params only):
  *   ?planId=<uuid>   — which plan's spec graph to view (required)
- *   ?subtab=<id>     — active surface (defaults to graph; mirrored to
- *                      localStorage under labs3.* keys, never colliding with
- *                      legacy Labs view state)
+ *   ?stage=<id>      — selected lifecycle stage (deep-linkable)
+ *   ?subtab=<id>     — active surface within the stage (deep-linkable)
+ * Legacy `?subtab=`-only URLs resolve their stage via `stageForSubtab`.
+ * Both are mirrored to per-plan localStorage keys (labs3.* namespace).
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -33,13 +33,18 @@ import { Labs3Header } from './labs3-header';
 import { ProjectHero } from './project-hero';
 import { LifecycleStrip } from './lifecycle-strip';
 import { PipelineStrip } from './pipeline-strip';
-import { DevelopingSubtabs } from './developing-subtabs';
+import { SubtabRow } from './developing-subtabs';
 import { buildStoryGraphModel, type Labs3ViewProps } from './adapter';
 import {
-  LABS3_SUBTABS,
-  SUBTAB_KEY,
-  subtabsForStage,
-  defaultSubtabForStage,
+  isStage,
+  isSubtab,
+  stageDef,
+  stageForStatus,
+  stageForSubtab,
+  stageStorageKey,
+  subtabStorageKey,
+  subtabDefs,
+  type Labs3Stage,
   type Labs3Subtab,
 } from './constants';
 import { SpecGraphView } from '../views/spec-graph-view';
@@ -49,16 +54,11 @@ import { StreamView } from '../views/stream-view';
 import { QaReviewView } from '../views/qa-review-view';
 import { GrowthView } from '../views/growth-view';
 import { PlanningView } from '../views/planning-view';
-import { DeployView } from '../views/deploy-view';
+import { DeploymentView } from '../views/deploy-view';
+import { PublishView } from '../views/publish-view';
 // Legacy code-knowledge-graph view — project-scoped Memgraph/Mycelium viewer.
 // Reused here as the 'codegraph' surface (the REAL "Graph" tab).
 import { GraphView } from '@/components/labs/plan-dashboard/views/graph-view';
-
-const VALID_SUBTABS: Labs3Subtab[] = LABS3_SUBTABS.map((t) => t.id);
-
-function isSubtab(v: string | null): v is Labs3Subtab {
-  return v !== null && (VALID_SUBTABS as string[]).includes(v);
-}
 
 /** appId is the App slug; fall back to the workingDir basename when absent. */
 function resolveAppId(plan: { appId?: string; workingDir: string } | undefined): string | null {
@@ -81,8 +81,7 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
   const { data: daemon } = useDaemonStatus();
 
   // Dispatch warning: stories are ingested and pending, but the daemon's
-  // ready-frontier isn't 'on' — so nothing will actually build. Without this the
-  // graph just sits idle and looks like a silent hang.
+  // ready-frontier isn't 'on' — so nothing will actually build.
   const frontier = daemon?.p3ReadyFrontier;
   const dispatchStalled =
     rows.length > 0 &&
@@ -92,58 +91,99 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
     rows.some((r) => r.state === 'ready' || r.state === 'blocked');
   const model = useMemo(() => buildStoryGraphModel(rows), [rows]);
 
-  // ── Sub-tab state (local override > URL > localStorage > 'graph') ────
-  // pacman3 canary bug (2026-07-03): router.replace schedules the searchParams
-  // update as a low-priority TRANSITION, and this dashboard re-renders on every
-  // daemon/story/event poll — the pending tab switch was starved for seconds, so
-  // clicks felt dead ("like a layer blocking the tabs"). Flip LOCAL state
-  // immediately on click for an instant response; the URL sync trails behind for
-  // deep-links, and the effect below reconciles back/forward navigation.
+  // ── Stage + subtab state ────────────────────────────────────────────
+  // pacman3 canary (2026-07-03): router.replace schedules the searchParams
+  // update as a low-priority TRANSITION and this dashboard re-renders on every
+  // poll — the pending switch was starved for seconds, so clicks felt dead.
+  // Flip LOCAL override state immediately on click for instant response; the
+  // URL sync trails behind for deep-links, reconciled here for back/forward.
+  const urlStage = params.get('stage');
   const urlSubtab = params.get('subtab');
+
+  const [stageOverride, setStageOverride] = useState<Labs3Stage | null>(null);
+  const [lastUrlStage, setLastUrlStage] = useState(urlStage);
+  if (urlStage !== lastUrlStage) {
+    setLastUrlStage(urlStage);
+    setStageOverride(isStage(urlStage) ? urlStage : null);
+  }
+
   const [subtabOverride, setSubtabOverride] = useState<Labs3Subtab | null>(null);
-  // A URL change (back/forward, external link) wins over a stale override —
-  // React's render-time state-adjustment pattern (no effect, no extra commit).
   const [lastUrlSubtab, setLastUrlSubtab] = useState(urlSubtab);
   if (urlSubtab !== lastUrlSubtab) {
     setLastUrlSubtab(urlSubtab);
-    if (isSubtab(urlSubtab)) setSubtabOverride(urlSubtab);
+    setSubtabOverride(isSubtab(urlSubtab) ? urlSubtab : null);
   }
-  const activeSubtab: Labs3Subtab = useMemo(() => {
-    if (subtabOverride) return subtabOverride;
-    if (isSubtab(urlSubtab)) return urlSubtab;
-    if (typeof window !== 'undefined') {
-      const stored = window.localStorage.getItem(SUBTAB_KEY);
-      if (isSubtab(stored)) return stored;
+
+  // selectedStage precedence: override(click) > URL ?stage= > legacy
+  // ?subtab=→stage > localStorage > stageForStatus(plan).
+  const selectedStage: Labs3Stage = useMemo(() => {
+    if (stageOverride) return stageOverride;
+    if (isStage(urlStage)) return urlStage;
+    if (!urlStage && isSubtab(urlSubtab)) return stageForSubtab(urlSubtab);
+    if (typeof window !== 'undefined' && plan) {
+      const stored = window.localStorage.getItem(stageStorageKey(planId));
+      if (isStage(stored)) return stored;
     }
-    return 'graph';
-  }, [subtabOverride, urlSubtab]);
+    return plan ? stageForStatus(plan.status, plan) : 'concept';
+  }, [stageOverride, urlStage, urlSubtab, plan, planId]);
 
-  // Stage-aware tab set (design I2/U3). `allowedSubtabs` is null while the
-  // plan hasn't loaded yet — transient loading states must NOT redirect or
-  // clobber localStorage; only redirect once the plan's stage is known.
-  const allowedSubtabs = plan ? subtabsForStage(plan.status) : null;
-  const effectiveSubtab: Labs3Subtab = useMemo(() => {
-    if (!plan || !allowedSubtabs) return activeSubtab;
-    if (allowedSubtabs.includes(activeSubtab)) return activeSubtab;
-    return defaultSubtabForStage(plan.status);
-  }, [activeSubtab, allowedSubtabs, plan]);
+  const def = stageDef(selectedStage);
+  const stageSubtabs = def.subtabs;
 
+  // activeSubtab precedence within the stage: override(click) > URL > storage,
+  // each only if valid FOR THIS STAGE; else the stage's default subtab.
+  const activeSubtab: Labs3Subtab = useMemo(() => {
+    // stageSubtabs / def derive from selectedStage — recompute here so the
+    // memo depends only on selectedStage (not the outer derived consts).
+    const d = stageDef(selectedStage);
+    const stored =
+      typeof window !== 'undefined' && plan
+        ? window.localStorage.getItem(subtabStorageKey(planId))
+        : null;
+    for (const cand of [subtabOverride, urlSubtab, stored]) {
+      if (isSubtab(cand) && d.subtabs.includes(cand)) return cand;
+    }
+    return d.defaultSubtab;
+  }, [subtabOverride, urlSubtab, plan, planId, selectedStage]);
+
+  // Persist selection per-plan (only once the plan — hence its stage — is known).
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (!plan) return; // don't persist a subtab resolved before the stage is known
-    window.localStorage.setItem(SUBTAB_KEY, effectiveSubtab);
-  }, [effectiveSubtab, plan]);
+    if (typeof window === 'undefined' || !plan) return;
+    window.localStorage.setItem(stageStorageKey(planId), selectedStage);
+    window.localStorage.setItem(subtabStorageKey(planId), activeSubtab);
+  }, [selectedStage, activeSubtab, plan, planId]);
 
-  function goToSubtab(next: Labs3Subtab, extra?: Record<string, string>) {
-    setSubtabOverride(next); // instant — never wait on the router transition
+  function pushUrl(
+    next: { stage: Labs3Stage; subtab: Labs3Subtab },
+    extra?: Record<string, string>,
+  ) {
     const sp = new URLSearchParams(params.toString());
-    sp.set('subtab', next);
+    sp.set('planId', planId);
+    sp.set('stage', next.stage);
+    sp.set('subtab', next.subtab);
     if (extra) for (const [k, v] of Object.entries(extra)) sp.set(k, v);
-    // scroll:false — selecting a story deep in the Stories list must NOT yank the
-    // viewport back to the top. Without this, clicking a batch-1/2 story looked
-    // like a full page "refresh" (batch-0 clicks were invisible only because the
-    // scroll was already at the top).
+    // scroll:false — selecting a story deep in a list must not yank the viewport.
     router.replace(`/labs3/?${sp.toString()}`, { scroll: false });
+  }
+
+  function goToStage(stage: Labs3Stage) {
+    const d = stageDef(stage);
+    // Keep the current surface if the target stage also owns it, else its default.
+    const nextSub = d.subtabs.includes(activeSubtab) ? activeSubtab : d.defaultSubtab;
+    setStageOverride(stage);
+    setSubtabOverride(nextSub);
+    pushUrl({ stage, subtab: nextSub });
+  }
+
+  function goToSubtab(subtab: Labs3Subtab, extra?: Record<string, string>) {
+    // A subtab may belong to a different stage (onSelectStory → 'stories',
+    // onOpenGraph → 'graph'); resolve the owning stage when out of the current.
+    const targetStage = stageDef(selectedStage).subtabs.includes(subtab)
+      ? selectedStage
+      : stageForSubtab(subtab);
+    setStageOverride(targetStage);
+    setSubtabOverride(subtab);
+    pushUrl({ stage: targetStage, subtab }, extra);
   }
 
   // ── Loading / not-found ─────────────────────────────────────────────
@@ -239,25 +279,32 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
         </div>
       )}
       <ProjectHero plan={plan} model={model} />
-      <LifecycleStrip plan={plan} onSelectStage={(subtab) => goToSubtab(subtab)} />
-      <PipelineStrip model={model} onSelectBatch={() => goToSubtab('graph')} />
 
-      <DevelopingSubtabs
-        active={effectiveSubtab}
-        onChange={(t) => goToSubtab(t)}
-        subtabs={allowedSubtabs ?? LABS3_SUBTABS.map((t) => t.id)}
-      />
+      <LifecycleStrip plan={plan} selectedStage={selectedStage} onSelectStage={goToStage} />
+
+      {/* ── Selected stage panel ─────────────────────────────────────── */}
+      {selectedStage === 'development' && (
+        <PipelineStrip model={model} onSelectBatch={() => goToSubtab('graph')} />
+      )}
+
+      {stageSubtabs.length > 1 && (
+        <SubtabRow
+          tabs={subtabDefs(stageSubtabs)}
+          active={activeSubtab}
+          onChange={(t) => goToSubtab(t)}
+        />
+      )}
 
       <div style={{ paddingTop: 24, paddingBottom: 60 }}>
-        {effectiveSubtab === 'plan-stage' && <PlanningView {...viewProps} />}
+        {activeSubtab === 'plan-stage' && <PlanningView {...viewProps} />}
 
-        {effectiveSubtab === 'graph' && <SpecGraphView {...viewProps} />}
+        {activeSubtab === 'graph' && <SpecGraphView {...viewProps} />}
 
-        {/* Code knowledge graph — files/symbols/imports grown by the compile phase
-            after every green story. projectId = appId (same as legacy GraphView). */}
-        {effectiveSubtab === 'codegraph' && <GraphView projectId={appId} />}
+        {/* Code knowledge graph — files/symbols/imports grown by the compile
+            phase after every green story. projectId = appId (legacy GraphView). */}
+        {activeSubtab === 'codegraph' && <GraphView projectId={appId} />}
 
-        {effectiveSubtab === 'gitgraph' && (
+        {activeSubtab === 'gitgraph' && (
           <Labs3GitGraphView
             appId={appId}
             githubRepoUrl={githubRepoUrl}
@@ -268,22 +315,24 @@ export function PlanSpecDashboard({ planId }: { planId: string }) {
           />
         )}
 
-        {effectiveSubtab === 'stories' && <HierarchyView {...viewProps} />}
+        {activeSubtab === 'stories' && <HierarchyView {...viewProps} />}
 
-        {effectiveSubtab === 'qa' && <QaReviewView {...viewProps} />}
+        {activeSubtab === 'qa' && <QaReviewView {...viewProps} />}
 
-        {effectiveSubtab === 'growth' && (
+        {activeSubtab === 'growth' && (
           <GrowthView
             planId={planId}
             appId={appId}
             projectSlug={appId ?? ''}
-            onOpenGraph={() => goToSubtab('graph')}
+            onOpenGraph={() => goToSubtab('codegraph')}
           />
         )}
 
-        {effectiveSubtab === 'stream' && <StreamView {...viewProps} />}
+        {activeSubtab === 'stream' && <StreamView {...viewProps} />}
 
-        {effectiveSubtab === 'deploy' && <DeployView {...viewProps} />}
+        {activeSubtab === 'deploy' && <DeploymentView {...viewProps} />}
+
+        {activeSubtab === 'publish' && <PublishView {...viewProps} />}
       </div>
     </div>
   );
