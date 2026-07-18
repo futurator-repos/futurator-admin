@@ -72,13 +72,33 @@ function sanitizeKey(s) {
  * Ensure a fully-qualified URL (BrowserAgent's normalizer mangles bare
  * `host:port`, see assess gaps). Prepends a scheme when none is present. PURE.
  */
-export function ensureUrl(devUrl) {
+export function ensureUrl(devUrl, env = process.env) {
   const raw = String(devUrl || '').trim();
   if (!raw) return raw;
-  if (/^https?:\/\//i.test(raw)) return raw;
-  // localhost/127.* dev servers are http; everything else defaults to https.
-  const scheme = /^(localhost|127\.|0\.0\.0\.0|\[::1\])/i.test(raw) ? 'http' : 'https';
-  return `${scheme}://${raw}`;
+  let url = raw;
+  if (!/^https?:\/\//i.test(url)) {
+    // localhost/127.* dev servers are http; everything else defaults to https.
+    const scheme = /^(localhost|127\.|0\.0\.0\.0|\[::1\])/i.test(url) ? 'http' : 'https';
+    url = `${scheme}://${url}`;
+  }
+  // dev.futurator.ai has no DNS record yet (DevRouter CF alias/cert pending) —
+  // plan rows carry it as the canonical devUrl but a real browser can't resolve
+  // it. Swap the origin for the reachable DevRouter domain, keeping the path.
+  // AGENTIC_VQA_URL_REWRITE format: "<host>=<replacement-host>".
+  const rewrite = env.AGENTIC_VQA_URL_REWRITE || 'dev.futurator.ai=d222fvxm0fq0g3.cloudfront.net';
+  const [fromHost, toHost] = rewrite.split('=');
+  if (fromHost && toHost) {
+    try {
+      const u = new URL(url);
+      if (u.hostname === fromHost) {
+        u.hostname = toHost;
+        url = u.toString();
+      }
+    } catch {
+      /* leave as-is */
+    }
+  }
+  return url;
 }
 
 /**

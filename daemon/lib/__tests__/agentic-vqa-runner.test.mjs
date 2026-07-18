@@ -149,8 +149,20 @@ test('buildInstruction: includes narrative, real-user framing, and verdict remin
 });
 
 test('ensureUrl: prepends a scheme only when missing', () => {
-  assert.equal(ensureUrl('https://dev.futurator.ai/apps/x'), 'https://dev.futurator.ai/apps/x');
-  assert.equal(ensureUrl('dev.futurator.ai/apps/x'), 'https://dev.futurator.ai/apps/x');
+  // dev.futurator.ai has no DNS yet — ensureUrl rewrites it to the reachable
+  // DevRouter CF domain (AGENTIC_VQA_URL_REWRITE, defaulted).
+  assert.equal(
+    ensureUrl('https://dev.futurator.ai/apps/x'),
+    'https://d222fvxm0fq0g3.cloudfront.net/apps/x',
+  );
+  assert.equal(
+    ensureUrl('dev.futurator.ai/apps/x'),
+    'https://d222fvxm0fq0g3.cloudfront.net/apps/x',
+  );
+  assert.equal(
+    ensureUrl('https://dev.futurator.ai/apps/x', { AGENTIC_VQA_URL_REWRITE: 'nope=never' }),
+    'https://dev.futurator.ai/apps/x',
+  );
   assert.equal(ensureUrl('localhost:3000'), 'http://localhost:3000');
 });
 
