@@ -1802,6 +1802,78 @@ app.post('/api/plans/:id/stories/:storyId/retry', async (c) => {
   return c.json({ ok: true, storyId, state: 'ready' });
 });
 
+// POST /api/plans/:id/qa/agentic-run — operator-triggered AGENTIC-ONLY visual QA.
+// Enqueues a p3-qa job that runs ONLY the agentic (BrowserAgent) VQA lane against
+// the plan's dev deploy, pinned to the frozen qaCommitSha, WITHOUT re-running the
+// deterministic journeys/wiring and WITHOUT clobbering the SHA-guarded verdict:
+// the daemon MERGES the agentic report into the existing p3QaVerdict for the same
+// commit (functions/cron/wave-completion-check.ts mints the FULL p3-qa job; this
+// mirrors that job shape + adds the agenticOnly/agenticMode markers the daemon
+// branches on). At-most-recent FK stored on plan.agenticQaJobId (never overwrites
+// p3QaJobId, which guards the full verdict). Body: { mode: auto|headless|extension }.
+const agenticRunSchema = z.object({
+  mode: z.enum(['auto', 'headless', 'extension']).default('auto'),
+});
+app.post('/api/plans/:id/qa/agentic-run', async (c) => {
+  const planId = c.req.param('id');
+  const user = c.get('user');
+  const plan = await planRepo.getPlanById(planId);
+  if (!plan) throw new NotFoundError('Plan', planId);
+
+  const parsed = agenticRunSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) {
+    throw new ValidationError('Invalid agentic-run body — mode must be auto|headless|extension');
+  }
+  const { mode } = parsed.data;
+
+  // Honest 409s — the agentic lane needs a deployed dev URL AND the frozen commit
+  // the deploy pinned; without both there is nothing to visually QA.
+  if (!plan.devUrl) {
+    throw new AppError(
+      'QA_NOT_DEPLOYED',
+      'Plan has no dev deploy URL yet — agentic VQA needs a deployed build to drive.',
+      409,
+    );
+  }
+  if (!plan.qaCommitSha) {
+    throw new AppError(
+      'QA_NO_COMMIT',
+      'Plan has no frozen QA commit (qaCommitSha) yet — the dev deploy must stamp the commit before agentic VQA can pin to it.',
+      409,
+    );
+  }
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const projectsRoot = process.env.EC2_PROJECTS_ROOT || '/home/ubuntu/projects';
+  const appId = (plan.appId as string) || plan.name;
+
+  // Mirror the cron's p3-qa job shape (handleP3Plan) + the agentic-only markers.
+  await agentJobsRepo.createJob({
+    jobId,
+    jobType: 'p3-qa',
+    status: 'PENDING',
+    planId: plan.planId,
+    devUrl: plan.devUrl,
+    qaCommitSha: plan.qaCommitSha,
+    workingDir: `${projectsRoot}/${appId}`,
+    // Agentic-ONLY markers the daemon's executeP3QaJob branches on.
+    agenticOnly: true,
+    agenticMode: mode,
+    // Plan-affinity: pin every job of this plan to one dispatch server.
+    affinityKey: `plan:${plan.planId}`,
+    createdBy: user.userId,
+    createdAt: now,
+    updatedAt: now,
+  } as never);
+
+  // Record the FK on a DEDICATED field — never overwrite plan.p3QaJobId (which
+  // guards the full SHA-pinned verdict). Lets the UI poll the agentic run.
+  await planRepo.updatePlanFields(plan.planId, { agenticQaJobId: jobId });
+
+  return c.json({ jobId }, 202);
+});
+
 // Pipeline-3 (development-plan §5.5) — Labs3 READ over the instinct loop:
 // raw observations, distilled + promoted instincts, and live-gate would-blocks.
 // Greenfield seam — returns empty arrays until a Lambda-reachable source is

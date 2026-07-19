@@ -2067,9 +2067,6 @@ async function executeP3QaJob(job) {
 
   const { runP3Qa } = await import('./lib/p3-qa-runner.mjs');
   const { defaultShellRunner } = await import('./lib/wave-merge-runner.mjs');
-  let playwright = null;
-  try { playwright = await import('playwright'); }
-  catch (e) { vlog('warn', `playwright import failed — Lane 1 reports seam-unreachable (fail-closed): ${e.message}`); }
 
   // The job carries the authoritative pin (devUrl + qaCommitSha stamped at deploy).
   const planForQa = {
@@ -2078,6 +2075,93 @@ async function executeP3QaJob(job) {
     qaCommitSha: job.qaCommitSha || plan.qaCommitSha,
     workingDir: job.workingDir || plan.workingDir,
   };
+
+  // ── SLICE A — agentic-ONLY re-run (operator-triggered from the labs3 QA panel
+  // via POST /api/plans/:id/qa/agentic-run). Skips the deterministic journeys +
+  // wiring/observe/VQA lanes entirely and runs ONLY the agentic VQA lane, then
+  // MERGES its report into the EXISTING p3QaVerdict for the SAME qaCommitSha —
+  // never touching verdict.blocking / qaVerifiedAt / a human decision (that is the
+  // whole point of this lane vs. the full re-QA the cron enqueues). On a SHA
+  // mismatch (the stored verdict pins a different commit) it stores a fresh
+  // agentic-only report on plan.agenticQaReport instead of clobbering the verdict.
+  if (job.agenticOnly) {
+    let result;
+    try {
+      result = await runP3Qa({
+        plan: planForQa,
+        stories,
+        s3: (cmd, cwd, timeoutMs) => defaultShellRunner(cmd, cwd, timeoutMs),
+        qaContext: {
+          appDir: planForQa.workingDir,
+          screenshotBucket: process.env.DEV_ENV_BUCKET,
+          screenshotBase: process.env.DEV_ENV_BASE || 'https://dev.futurator.ai',
+        },
+        agenticOnly: true,
+        // Operator's requested backend mode (auto|headless|extension) overriding
+        // env.AGENTIC_VQA_MODE; the lane still no-ops without BROWSER_AGENT_API_KEY.
+        agenticBackendMode: job.agenticMode,
+        env: process.env,
+        log,
+      });
+    } catch (e) {
+      vlog('error', `agentic-only p3-qa run threw: ${e.message}`);
+      await updateJobFields(job.jobId, { status: 'FAILED', error: e.message });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const sha = result.ranAtSha || planForQa.qaCommitSha || '';
+    try {
+      if (result.merged) {
+        // Nested read-modify-write: ONLY the agentic sub-field, guarded on the
+        // verdict still pinning this SHA and carrying no human decision. The
+        // SHA-guarded verdict + qaVerifiedAt + any decision are left untouched.
+        await ddb.send(new UpdateCommand({
+          TableName: PLANS_TABLE,
+          Key: { planId: job.planId },
+          UpdateExpression: 'SET p3QaVerdict.agentic = :a, updatedAt = :now',
+          ConditionExpression:
+            'p3QaVerdict.ranAtSha = :sha AND attribute_not_exists(p3QaVerdict.decidedAt)',
+          ExpressionAttributeValues: {
+            ':a': result.agentic ?? null,
+            ':sha': sha,
+            ':now': nowIso,
+          },
+        }));
+        vlog('info', `agentic-only VQA merged into p3QaVerdict @ ${sha.slice(0, 7)} (runs=${result.agentic?.runs?.length ?? 0}, mode=${result.agentic?.mode ?? '?'})`);
+      } else {
+        // SHA mismatch (or no stored verdict) — store a fresh agentic-only report
+        // WITHOUT clobbering the SHA-guarded verdict.
+        const fresh = {
+          ranAtSha: sha,
+          generatedAt: nowIso,
+          note: result.note || 'agentic-only run (no matching full QA verdict)',
+          agentic: result.agentic ?? null,
+        };
+        await ddb.send(new UpdateCommand({
+          TableName: PLANS_TABLE,
+          Key: { planId: job.planId },
+          UpdateExpression: 'SET agenticQaReport = :r, updatedAt = :now',
+          ExpressionAttributeValues: { ':r': fresh, ':now': nowIso },
+        }));
+        vlog('info', `agentic-only VQA stored as fresh report (SHA mismatch) @ ${sha.slice(0, 7)}`);
+      }
+    } catch (e) {
+      if (e.name === 'ConditionalCheckFailedException') vlog('warn', 'agentic-only merge dropped (verdict SHA moved or human-decided)');
+      else vlog('warn', `agentic-only persist failed: ${e.message}`);
+    }
+
+    await updateJobFields(job.jobId, {
+      status: 'COMPLETED',
+      variables: { AGENTIC_ONLY: 'true', AGENTIC_MERGED: String(!!result.merged) },
+    });
+    return;
+  }
+
+  // ── Full QA-Review W2 path (deterministic journeys + VQA + wiring/orphan). ──
+  let playwright = null;
+  try { playwright = await import('playwright'); }
+  catch (e) { vlog('warn', `playwright import failed — Lane 1 reports seam-unreachable (fail-closed): ${e.message}`); }
 
   // Q3a — real per-AC source diff for the Lane-2 judge (research: giving the
   // judge the code that produced the behavior lifts accuracy +6.4-8.7pt over

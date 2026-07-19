@@ -173,7 +173,7 @@ function DeployedAppQaReview({
           a green confirmation instead of being indistinguishable from "never ran". */}
       <WiringOrphanBanner wiring={report.wiring} hasRun />
       <JourneyVerdicts journeys={report.journeys} />
-      <AgenticJourneysSection agentic={report.agentic} />
+      <AgenticJourneysSection agentic={report.agentic} planId={planId} devUrl={report.devUrl} />
       <BeforeAfterGallery journeys={report.journeys} />
       <QaActions planId={planId} verdict={verdict} currentQaCommitSha={report.qaCommitSha} />
     </div>

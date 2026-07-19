@@ -265,6 +265,39 @@ export function useSendBackP3Qa(planId: string | null) {
   });
 }
 
+export interface RunAgenticQaInput {
+  /** 'auto' prefers the operator's live Chrome extension, falls back to headless fleet. */
+  mode: 'auto' | 'headless' | 'extension';
+}
+
+export interface RunAgenticQaResponse {
+  planId: string;
+  queued: boolean;
+}
+
+/**
+ * Slice B — operator-facing trigger for an AGENTIC-ONLY visual-QA run against
+ * the plan's dev deploy. Deliberately narrow: it does NOT re-run the full
+ * deterministic QA lane (journeys/wiring/VQA) and does NOT touch the
+ * SHA-guarded P3QaVerdict — it only enqueues a fresh `report.agentic` run.
+ * POST /plans/:id/qa/agentic-run — additive-only route, sibling to (not a
+ * replacement for) the QA-Review W2 endpoints above.
+ *
+ * On success, invalidates the report query so the existing poll (which
+ * speeds up while `report.status === 'running'`) picks up the new run once
+ * the daemon appends it to `report.agentic.runs`.
+ */
+export function useRunAgenticQa(planId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: RunAgenticQaInput) =>
+      api.post<RunAgenticQaResponse>(`/plans/${planId}/qa/agentic-run`, input),
+    onSuccess: () => {
+      if (planId) qc.invalidateQueries({ queryKey: QK_P3_QA(planId) });
+    },
+  });
+}
+
 /**
  * W3-lite — plan-keyed promote up the ladder. `to: 'staging'` requires an
  * APPROVED QA verdict server-side (the Approve above is the gate);

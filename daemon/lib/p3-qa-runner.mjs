@@ -514,6 +514,19 @@ export async function runP3Qa({
   // ('off'|'shadow'|'on'); 'off' skips the lane, 'shadow' runs+records but never
   // gates, 'on' lets a [blocking] agentic finding contribute to verdict.blocking.
   agenticMode = 'off',
+  // SLICE A — agentic-ONLY re-run (operator-triggered from the labs3 QA panel).
+  // When true, SKIP the deterministic journeys + wiring/observe/VQA lanes entirely
+  // and run ONLY the agentic (BrowserAgent) lane. Returns a compact descriptor
+  // `{ agenticOnly, ranAtSha, agentic, merged, note? }` (NOT a P3QaVerdict) — the
+  // daemon persists it by MERGING `agentic` into the existing p3QaVerdict at the
+  // same qaCommitSha, never touching verdict.blocking / qaVerifiedAt / a human
+  // decision. `merged:false` (SHA mismatch or no stored verdict) tells the daemon
+  // to store a fresh agentic-only report instead of clobbering the verdict.
+  agenticOnly = false,
+  // Backend-mode override (auto|headless|extension) for the agentic-only run —
+  // the operator's requested `mode`, overriding env.AGENTIC_VQA_MODE. DISTINCT
+  // from `agenticMode` (the P3_AGENTIC_VQA off|shadow|on flag).
+  agenticBackendMode,
   // Injected agentic runner (tests). Default lazily imports the real lane so the
   // heavy browser-agent/SDK deps only load when the lane is actually enabled.
   runAgentic = async (args) => (await import('./agentic-vqa-runner.mjs')).runAgenticVqa(args),
@@ -540,6 +553,51 @@ export async function runP3Qa({
   const journeys = Array.isArray(providedJourneys) && providedJourneys.length
     ? providedJourneys
     : resolveJourneys({ plan, stories });
+
+  // ── SLICE A — agentic-ONLY path ────────────────────────────────────────────
+  // Operator-triggered visual-QA re-run: NO deterministic journeys, NO wiring,
+  // NO observe/VQA judge — ONLY the agentic (BrowserAgent) lane, with the mode
+  // override the operator asked for. Never gates (verdict.blocking is never
+  // computed here). Early-returns BEFORE any playwright/judge/frame work so the
+  // deterministic lanes are truly skipped. The daemon merges the returned
+  // `agentic` into the stored p3QaVerdict for the SAME qaCommitSha (or stores a
+  // fresh agentic-only report on a SHA mismatch) — this function only decides
+  // which, via `merged`.
+  if (agenticOnly === true) {
+    let agentic;
+    try {
+      agentic = await runAgentic({
+        plan,
+        journeys,
+        devUrl: plan?.devUrl,
+        sha: qaCommitSha,
+        mode: agenticBackendMode || env.AGENTIC_VQA_MODE || 'auto',
+        s3,
+        log,
+        env,
+        screenshotBucket: qaContext?.screenshotBucket,
+        screenshotBase: qaContext?.screenshotBase,
+      });
+    } catch (err) {
+      vlog('warn', `agentic-only VQA lane threw (non-blocking): ${err?.message || err}`);
+      agentic = {
+        mode: 'headless',
+        model: env.AGENTIC_VQA_MODEL || 'claude-sonnet-5',
+        skippedReason: `error: ${err?.message || err}`,
+        runs: [],
+      };
+    }
+    const existing = plan?.p3QaVerdict;
+    const merged = !!qaCommitSha && !!existing && existing.ranAtSha === qaCommitSha;
+    const out = { agenticOnly: true, ranAtSha: qaCommitSha, agentic, merged };
+    if (!merged) {
+      const pin = qaCommitSha ? qaCommitSha.slice(0, 7) : '(no sha)';
+      out.note = existing?.ranAtSha
+        ? `agentic-only run pinned to ${pin} but the stored QA verdict ran at ${existing.ranAtSha.slice(0, 7)} — this report carries ONLY the agentic lane (deterministic journeys + wiring were NOT re-run).`
+        : `agentic-only run pinned to ${pin} with no full QA verdict stored — this report carries ONLY the agentic lane (deterministic journeys + wiring were NOT re-run).`;
+    }
+    return out;
+  }
 
   let frameRoot = null;
   try {

@@ -23,8 +23,9 @@
  */
 
 import { useState } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Play } from 'lucide-react';
 import { Field } from './qa-primitives';
+import { useRunAgenticQa } from '@/hooks/use-p3-qa-report';
 
 // ── Local shadow types (see file header) ─────────────────────────────
 
@@ -354,17 +355,128 @@ function AgenticRunCard({
   );
 }
 
+// ── Run visual QA — Slice B operator trigger ──────────────────────────
+
+/**
+ * True once the mutation error looks like a 409 (a run is already in
+ * flight / conflicting). `api-client.ts` stamps `err.status` on every
+ * non-ok response.
+ */
+export function isAgenticRunConflict(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === 'object' &&
+    'status' in error &&
+    (error as { status?: number }).status === 409
+  );
+}
+
+function RunVisualQaButton({
+  planId,
+  devUrl,
+  agentic,
+}: {
+  planId?: string;
+  devUrl?: string;
+  agentic?: AgenticReport;
+}) {
+  const runAgenticQa = useRunAgenticQa(planId ?? null);
+  // Set once the enqueue POST resolves, together with a snapshot of the run
+  // count at click-time; combined with the current run count below this
+  // DERIVES the optimistic 'Queued…' state during render — no effect
+  // needed, it just falls back to null/false once report.agentic.runs
+  // grows past the snapshot (the existing report hook keeps polling; we
+  // just watch what it hands us on the next render).
+  const [queuedBaseline, setQueuedBaseline] = useState<number | null>(null);
+
+  const runCount = agentic?.runs.length ?? 0;
+  const queued = queuedBaseline !== null && runCount <= queuedBaseline;
+
+  const disabledReason = !planId
+    ? 'No plan selected.'
+    : !devUrl
+      ? 'Deploy a dev build first — no devUrl to visually QA yet.'
+      : null;
+  const disabled = !!disabledReason || runAgenticQa.isPending || queued;
+
+  const conflict = runAgenticQa.isError && isAgenticRunConflict(runAgenticQa.error);
+  const errorMessage = runAgenticQa.isError
+    ? conflict
+      ? 'A visual QA run is already in progress for this plan.'
+      : runAgenticQa.error instanceof Error
+        ? runAgenticQa.error.message
+        : 'Failed to queue the visual QA run.'
+    : null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <button
+        type="button"
+        onClick={() => {
+          if (disabled) return;
+          runAgenticQa.mutate(
+            { mode: 'auto' },
+            {
+              onSuccess: () => setQueuedBaseline(runCount),
+            },
+          );
+        }}
+        disabled={disabled}
+        title={disabledReason ?? 'Enqueue an agentic-only visual QA run against the dev deploy.'}
+        aria-label={disabledReason ? `Run visual QA disabled: ${disabledReason}` : 'Run visual QA'}
+        className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-blue)]"
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          fontSize: 10,
+          letterSpacing: '0.1em',
+          textTransform: 'uppercase',
+          padding: '6px 12px',
+          borderRadius: 5,
+          border: `1px solid ${disabled ? 'var(--border-2)' : 'var(--accent-blue)'}`,
+          background: disabled
+            ? 'transparent'
+            : 'color-mix(in srgb, var(--accent-blue) 10%, transparent)',
+          color: disabled ? 'var(--text-faint)' : 'var(--accent-blue)',
+          fontWeight: 500,
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.55 : 1,
+        }}
+      >
+        {runAgenticQa.isPending || queued ? (
+          <Loader2 size={11} className="animate-spin" aria-hidden />
+        ) : (
+          <Play size={11} aria-hidden />
+        )}
+        {queued ? 'Queued…' : 'Run visual QA'}
+      </button>
+      {errorMessage && (
+        <span
+          role="alert"
+          aria-live="polite"
+          style={{ fontSize: 10.5, color: 'var(--destructive)' }}
+        >
+          {errorMessage}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ── Main export ──────────────────────────────────────────────────────
 
 export interface AgenticJourneysSectionProps {
-  /** report.agentic — ABSENT when the lane didn't run at all (never rendered). */
+  /** report.agentic — ABSENT when the lane hasn't run yet (empty-state, not a skip). */
   agentic?: AgenticReport;
+  /** plan.id — required to enqueue a Run-visual-QA request; absent ⇒ button disabled. */
+  planId?: string;
+  /** plan.devUrl (report.devUrl) — the Run-visual-QA button is disabled without it. */
+  devUrl?: string;
 }
 
-export function AgenticJourneysSection({ agentic }: AgenticJourneysSectionProps) {
+export function AgenticJourneysSection({ agentic, planId, devUrl }: AgenticJourneysSectionProps) {
   const [openId, setOpenId] = useState<string | null>(null);
-
-  if (!agentic) return null;
 
   return (
     <section
@@ -375,15 +487,39 @@ export function AgenticJourneysSection({ agentic }: AgenticJourneysSectionProps)
         <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--foreground)' }}>
           Agentic play-test
         </span>
-        <ModeBadge mode={agentic.mode} model={agentic.model} />
-        {agentic.runs.length > 0 && (
+        {agentic && <ModeBadge mode={agentic.mode} model={agentic.model} />}
+        {agentic && agentic.runs.length > 0 && (
           <span style={{ fontSize: 11, color: 'var(--text-mute)' }}>
             {agentic.runs.length} journey{agentic.runs.length === 1 ? '' : 's'} attempted
           </span>
         )}
+        <div style={{ marginLeft: 'auto' }}>
+          <RunVisualQaButton planId={planId} devUrl={devUrl} agentic={agentic} />
+        </div>
       </header>
 
-      {agentic.skippedReason && (
+      <span style={{ fontSize: 10.5, color: 'var(--text-faint)', lineHeight: 1.4 }}>
+        auto: uses your Chrome via the BrowserAgent extension when its local server is connected;
+        otherwise headless on the fleet.
+      </span>
+
+      {!agentic && (
+        <div
+          style={{
+            padding: '28px 20px',
+            textAlign: 'center',
+            color: 'var(--text-mute)',
+            fontSize: 12,
+            fontFamily: 'var(--font-mono)',
+            border: '1px dashed var(--border-2)',
+            borderRadius: 8,
+          }}
+        >
+          No visual QA runs yet.
+        </div>
+      )}
+
+      {agentic?.skippedReason && (
         <div
           style={{
             padding: '8px 11px',
@@ -399,30 +535,31 @@ export function AgenticJourneysSection({ agentic }: AgenticJourneysSectionProps)
         </div>
       )}
 
-      {agentic.runs.length === 0
-        ? !agentic.skippedReason && (
-            <div
-              style={{
-                padding: '28px 20px',
-                textAlign: 'center',
-                color: 'var(--text-mute)',
-                fontSize: 12,
-                fontFamily: 'var(--font-mono)',
-                border: '1px dashed var(--border-2)',
-                borderRadius: 8,
-              }}
-            >
-              No agentic runs recorded for this QA pass.
-            </div>
-          )
-        : agentic.runs.map((run) => (
-            <AgenticRunCard
-              key={run.journeyId}
-              run={run}
-              open={openId === run.journeyId}
-              onToggle={() => setOpenId((cur) => (cur === run.journeyId ? null : run.journeyId))}
-            />
-          ))}
+      {agentic &&
+        (agentic.runs.length === 0
+          ? !agentic.skippedReason && (
+              <div
+                style={{
+                  padding: '28px 20px',
+                  textAlign: 'center',
+                  color: 'var(--text-mute)',
+                  fontSize: 12,
+                  fontFamily: 'var(--font-mono)',
+                  border: '1px dashed var(--border-2)',
+                  borderRadius: 8,
+                }}
+              >
+                No agentic runs recorded for this QA pass.
+              </div>
+            )
+          : agentic.runs.map((run) => (
+              <AgenticRunCard
+                key={run.journeyId}
+                run={run}
+                open={openId === run.journeyId}
+                onToggle={() => setOpenId((cur) => (cur === run.journeyId ? null : run.journeyId))}
+              />
+            )))}
     </section>
   );
 }

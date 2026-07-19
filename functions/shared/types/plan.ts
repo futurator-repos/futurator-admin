@@ -147,6 +147,13 @@ export interface Plan {
   /** FK to the most recent P3 QA-Review job. Cleared on send-back so QA re-runs. */
   p3QaJobId?: string;
   /**
+   * SLICE A — FK to the most recent operator-triggered AGENTIC-ONLY visual-QA
+   * job (POST /api/plans/:id/qa/agentic-run). DISTINCT from `p3QaJobId` so an
+   * agentic re-run never disturbs the full SHA-guarded verdict; the daemon merges
+   * its report into `p3QaVerdict.agentic`. Lets the UI poll the agentic run.
+   */
+  agenticQaJobId?: string;
+  /**
    * QA autopilot (set at plan creation, default ON for quick plans): when a
    * blocking, undecided verdict lands, the cron AUTO-fires the send-back path —
    * mint fix stories → fixing → fresh dev-deploy → re-QA — up to

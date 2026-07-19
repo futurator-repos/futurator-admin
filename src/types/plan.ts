@@ -84,6 +84,13 @@ export interface Plan {
   /** Frozen branch-HEAD SHA the dev artifact built from; QA pins to it. */
   qaCommitSha?: string;
   p3QaJobId?: string;
+  /**
+   * SLICE A — FK to the most recent operator-triggered AGENTIC-ONLY visual-QA job
+   * (POST /api/plans/:id/qa/agentic-run). Distinct from `p3QaJobId` so an agentic
+   * re-run never disturbs the full SHA-guarded verdict. Mirror of
+   * functions/shared/types/plan.ts.
+   */
+  agenticQaJobId?: string;
   /** QA autopilot: auto-mint fixes + re-run QA on a blocking verdict. */
   qaAutopilot?: boolean;
   qaAutoFixRounds?: number;

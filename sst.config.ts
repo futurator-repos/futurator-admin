@@ -706,6 +706,10 @@ export default $config({
     // wires the viewer-request association from `route.edge.viewerRequest` (the
     // top-level Router `edge` is not applied to bucket origins). router.ts ~L1988.
     const devRouter = new sst.aws.Router('DevRouter', {
+      // dev.futurator.ai — the QA dev-preview links stamped on plan rows.
+      // The futurator.ai Route53 zone lives in THIS account, so SST provisions
+      // the ACM cert (us-east-1) + CF alias + DNS record from this one line.
+      domain: 'dev.futurator.ai',
       routes: {
         '/*': {
           bucket: devEnvBucket,
@@ -714,6 +718,7 @@ export default $config({
       },
     });
     const stagingRouter = new sst.aws.Router('StagingRouter', {
+      domain: 'staging.futurator.ai',
       routes: {
         '/*': {
           bucket: stagingEnvBucket,
