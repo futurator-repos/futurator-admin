@@ -85,12 +85,19 @@ Steps (execute in order, each step must succeed before the next):
 
 5. Invalidate CloudFront: \`aws cloudfront create-invalidation --distribution-id ${cloudfrontDistributionId} --paths "${invalidationPath}"\`
 
+6. MANDATORY cleanup — the framework config you edited in step 1 (\`next.config.ts\`/\`.js\`/\`.mjs\` or \`vite.config.ts\`/\`.js\`, whichever exists) is a mutation shared by every future build of this checkout and must NEVER be left committed to disk. Revert it: run \`git -C ${workingDir} checkout -- next.config.ts next.config.js next.config.mjs vite.config.ts vite.config.js 2>/dev/null; true\` (harmless if some of these paths don't exist). Then run \`git -C ${workingDir} status --porcelain\` and inspect its output:
+   - If the output is EMPTY, the tree is clean.
+   - If the output is NON-EMPTY, the tree is dirty — list the changed paths.
+   Do this step even if an earlier step failed, as long as you got past step 1 (i.e. the config was actually edited).
+
 When finished, output these lines EXACTLY — they are machine-parsed:
 
 DEPLOY_URL: ${publicUrl}
 DEPLOY_STATUS: success
 COMMIT_SHA: <the 40-char SHA you recorded in step 0>
 DEPLOY_DETAILS: <one-sentence summary of what you did>
+DEPLOY_TREE: clean
+(or, if \`git status --porcelain\` was non-empty after the step-6 revert: \`DEPLOY_TREE: dirty <space-separated list of the changed paths>\`)
 
 If ANY step above failed and you cannot recover, instead output:
 
@@ -98,6 +105,7 @@ DEPLOY_URL: ${publicUrl}
 DEPLOY_STATUS: failed
 COMMIT_SHA: <the 40-char SHA you recorded in step 0, or omit if unknown>
 DEPLOY_DETAILS: <which step failed and why>
+DEPLOY_TREE: <clean, or dirty <paths>, from step 6 if you reached it — otherwise omit this line>
 
 Never end the session without emitting a DEPLOY_STATUS line. Never ask for permission.`,
         extractors: {
@@ -126,13 +134,59 @@ Never end the session without emitting a DEPLOY_STATUS line. Never ask for permi
             type: 'regex',
             pattern: '[*_`]*DEPLOY_DETAILS[*_`]*:\\s*[*_`]*\\s*(.+)',
           },
+          // R4 — deploy hygiene. Captures the step-6 cleanup verdict verbatim
+          // ('clean' or 'dirty <paths>') so a missing/failed revert of the
+          // basePath config mutation (the I13 defect-#9 root cause) is
+          // detectable from the job's extracted variables. See treeClean()
+          // below to turn this raw string into the writeback boolean.
+          DEPLOY_TREE: {
+            // Combined char-class (whitespace + markup) in one run, mirroring
+            // DEPLOY_URL's tolerant style — a `\s*[*_\`]*\s*` split (like the
+            // other extractors below) fails to strip a backtick that wraps
+            // the VALUE (e.g. `**DEPLOY_TREE:** \`clean\``), since neither
+            // \s* run consumes a backtick.
+            type: 'regex',
+            pattern: '[*_`]*DEPLOY_TREE[*_`]*:[\\s*_`]*(clean|dirty.*)',
+          },
         },
         validations: [
           { type: 'equals', left: 'DEPLOY_STATUS', right: 'success', label: 'Deploy succeeded' },
+          // R4 — deploy hygiene, ENFORCED (not prompt-only). Assert the extracted
+          // DEPLOY_TREE verdict at the same validation seam DEPLOY_STATUS uses so a
+          // dirty tree (the basePath config mutation left uncommitted — the I13
+          // defect-#9 root cause) records a FAILED validation + `validation` event
+          // instead of passing silently. Fails closed on absence: an omitted
+          // DEPLOY_TREE resolves to the literal 'DEPLOY_TREE' != 'clean' → fail,
+          // mirroring treeClean()'s never-assume-clean contract.
+          {
+            type: 'equals',
+            left: 'DEPLOY_TREE',
+            right: 'clean',
+            label: 'Deploy tree clean (basePath config reverted)',
+          },
         ],
       },
     ],
   };
+}
+
+/**
+ * R4 — deploy hygiene. Parse the extracted `DEPLOY_TREE` variable (raw text
+ * captured by the extractor above, e.g. `'clean'` or `'dirty next.config.ts'`)
+ * into the boolean the job writeback shape wants to surface as `treeClean`.
+ *
+ * Fail-closed on absence: a job that never reached (or never emitted) the
+ * step-6 cleanup is NOT assumed clean — an undefined/empty value parses to
+ * `treeClean: false` so the dirty-tree defect (I13) can't silently regress
+ * into "assume it was fine".
+ *
+ * NOTE: the actual job-writeback consumer that stamps this onto the
+ * Plan/App record lives in `daemon/agent-daemon.mjs` (`postDeployWriteback`),
+ * not in this file — this helper only defines the parsing contract; wiring
+ * it into the daemon writeback is out of this slice's file ownership.
+ */
+export function treeClean(deployTreeVar: string | undefined | null): boolean {
+  return typeof deployTreeVar === 'string' && deployTreeVar.trim().toLowerCase() === 'clean';
 }
 
 /**

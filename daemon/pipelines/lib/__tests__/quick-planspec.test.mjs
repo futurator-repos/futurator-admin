@@ -31,7 +31,11 @@ const WIDE_SPEC = JSON.stringify({
   stories: [
     { id: 'contract', title: 'Define the contract types and state model', touches: ['src/game/types.ts', 'src/game/actions.ts'],
       acceptanceCriteria: [{ text: 'contract types compile clean', verify: 'build' }] },
-    { id: 'movement', title: 'Implement movement slice', dependsOn: ['contract'], touches: ['src/slices/movement.ts'],
+    // The interactive slice OWNS its wiring surface (a *.feature.* file) — required
+    // by the R1 integration-seam rule for a story that carries a browser-driven AC
+    // (the exact "with feature file in touches passes" shape). Its `when` is in the
+    // executable probe grammar (press <Key>), so the R1 probe-grammar lint passes too.
+    { id: 'movement', title: 'Implement movement slice', dependsOn: ['contract'], touches: ['src/features/movement.feature.tsx', 'src/slices/movement.ts'],
       acceptanceCriteria: [{ text: 'arrow key moves the player', verify: 'behavior', needsBrowser: true, when: 'press ArrowLeft', thenObservable: 'snapshot.playerX decreases' }] },
     { id: 'scoring', title: 'Implement scoring slice', dependsOn: ['contract'], touches: ['src/slices/scoring.ts'],
       acceptanceCriteria: [{ text: 'eating a pellet raises the score', verify: 'state', when: 'pellet eaten', thenObservable: 'snapshot.score increases' }] },
@@ -967,6 +971,185 @@ describe('auditPlanGraph', () => {
 
   it('is safe on empty input', () => {
     expect(auditPlanGraph([]).violations).toEqual([]);
+  });
+});
+
+// R1 MINT-TIME ENFORCEMENT — probe-grammar lint + integration-seam rule.
+// Both fire from parsed (coerced) stories so the daemon catches an unexecutable
+// `when` / a wiring-less driven interaction BEFORE any story burns its attempts.
+describe('auditPlanGraph — R1 probe-grammar lint (unexecutable-probe)', () => {
+  // A driven slice that OWNS its wiring (isolating the probe rule from the seam rule).
+  const drivenSlice = (acExtra) =>
+    JSON.stringify({
+      stories: [
+        { id: 'contract', title: 'Define the contract types', touches: ['src/types.ts'],
+          acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }] },
+        { id: 'collision', title: 'Implement collision', dependsOn: ['contract'],
+          touches: ['src/features/game.feature.tsx', 'src/slices/collision.ts'],
+          acceptanceCriteria: [{ text: 'the player dies at the wall', verify: 'behavior', needsBrowser: true, ...acExtra }] },
+      ],
+    });
+
+  it('flags a when-clause the probe grammar cannot execute (zero actions)', () => {
+    // The exact I10 failure: prose with no key/wait/click → parseProbe yields no action.
+    const { audit } = parseQuickPlanspec(
+      `<PLAN_SPEC>${drivenSlice({ when: 'steers the snake into the board edge', thenObservable: "snapshot.status equals 'over'" })}</PLAN_SPEC>`,
+    );
+    expect(audit.violations.join(' ')).toMatch(/unexecutable-probe/);
+    expect(audit.violations.join(' ')).toContain('Implement collision');
+    expect(audit.violations.join(' ')).toMatch(/no executable action/);
+    // it is NOT mislabeled a seam risk — the slice owns a feature file
+    expect(audit.violations.join(' ')).not.toMatch(/unwired-seam-risk/);
+  });
+
+  it('passes a when-clause written in the executable grammar', () => {
+    const { audit } = parseQuickPlanspec(
+      `<PLAN_SPEC>${drivenSlice({ when: 'presses Space and waits 4 seconds', thenObservable: "snapshot.status equals 'over'" })}</PLAN_SPEC>`,
+    );
+    expect(audit.violations.join(' ')).not.toMatch(/unexecutable-probe/);
+    expect(audit.violations).toEqual([]);
+  });
+
+  it('flags a driven AC whose thenObservable names no snapshot assertion', () => {
+    const { audit } = parseQuickPlanspec(
+      `<PLAN_SPEC>${drivenSlice({ when: 'presses Space', thenObservable: 'the player is gone' })}</PLAN_SPEC>`,
+    );
+    expect(audit.violations.join(' ')).toMatch(/unexecutable-probe/);
+    expect(audit.violations.join(' ')).toMatch(/not interpretable/);
+  });
+
+  it('does NOT lint a pure verify:state AC — its `when` is unit prose, never a browser probe', () => {
+    const spec = JSON.stringify({
+      stories: [
+        { id: 'contract', title: 'Define the contract types', touches: ['src/types.ts'],
+          acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }] },
+        { id: 'scoring', title: 'Implement scoring', dependsOn: ['contract'], touches: ['src/slices/scoring.ts'],
+          acceptanceCriteria: [{ text: 'eating a pellet raises the score', verify: 'state',
+            when: 'a pellet is eaten', thenObservable: 'snapshot.score increases' }] },
+      ],
+    });
+    const { audit } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    // 'a pellet is eaten' parses to zero actions, but a unit-bound state AC must NOT
+    // be dragged onto the browser path (false-positive guard) — and no seam risk.
+    expect(audit.violations.join(' ')).not.toMatch(/unexecutable-probe/);
+    expect(audit.violations.join(' ')).not.toMatch(/unwired-seam-risk/);
+  });
+});
+
+describe('auditPlanGraph — R1 integration-seam rule (unwired-seam-risk)', () => {
+  const steeringSlice = (touches) =>
+    JSON.stringify({
+      stories: [
+        { id: 'contract', title: 'Define the contract types', touches: ['src/types.ts'],
+          acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }] },
+        { id: 'steering', title: 'Implement steering', dependsOn: ['contract'], touches,
+          acceptanceCriteria: [{ text: 'left key turns the player', verify: 'behavior', needsBrowser: true,
+            when: 'presses ArrowLeft', thenObservable: 'snapshot.dir equals "left"' }] },
+      ],
+    });
+
+  it('flags a browser-driven slice that owns NO wiring surface', () => {
+    const { audit } = parseQuickPlanspec(`<PLAN_SPEC>${steeringSlice(['src/slices/steering.ts'])}</PLAN_SPEC>`);
+    expect(audit.violations.join(' ')).toMatch(/unwired-seam-risk/);
+    expect(audit.violations.join(' ')).toContain('Implement steering');
+    // the `when` itself is executable, so it is NOT also a probe violation
+    expect(audit.violations.join(' ')).not.toMatch(/unexecutable-probe/);
+  });
+
+  it('passes once the slice owns a *.feature.* wiring file in its touches', () => {
+    const { audit } = parseQuickPlanspec(
+      `<PLAN_SPEC>${steeringSlice(['src/features/steering.feature.tsx', 'src/slices/steering.ts'])}</PLAN_SPEC>`,
+    );
+    expect(audit.violations.join(' ')).not.toMatch(/unwired-seam-risk/);
+    expect(audit.violations).toEqual([]);
+  });
+
+  it('accepts a reducer/composition module as a wiring surface', () => {
+    const { audit } = parseQuickPlanspec(`<PLAN_SPEC>${steeringSlice(['src/game/reducer.ts'])}</PLAN_SPEC>`);
+    expect(audit.violations.join(' ')).not.toMatch(/unwired-seam-risk/);
+  });
+
+  it('exempts the FOUNDATION — it owns app surface by construction', () => {
+    // A single foundation story that drives the app but touches only contract files
+    // must NOT be flagged: the walking skeleton owns the seam/feature by definition.
+    const spec = JSON.stringify({
+      planShape: 'coherent',
+      stories: [
+        { id: 'foundation', title: 'Define the contract types and boot the skeleton',
+          touches: ['src/types.ts', 'src/core.ts'],
+          acceptanceCriteria: [{ text: 'the skeleton boots and idles', verify: 'behavior', needsBrowser: true,
+            when: 'waits 1 seconds', thenObservable: "snapshot.status equals 'idle'" }] },
+      ],
+    });
+    const { stories, audit } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    expect(stories[0].isFoundation).toBe(true);
+    expect(audit.violations.join(' ')).not.toMatch(/unwired-seam-risk/);
+  });
+
+  it('does NOT flag a pure verify:state slice (it drives nothing)', () => {
+    const spec = JSON.stringify({
+      stories: [
+        { id: 'contract', title: 'Define the contract types', touches: ['src/types.ts'],
+          acceptanceCriteria: [{ text: 'types compile clean', verify: 'build' }] },
+        { id: 'scoring', title: 'Implement scoring', dependsOn: ['contract'], touches: ['src/slices/scoring.ts'],
+          acceptanceCriteria: [{ text: 'the score increments', verify: 'state', thenObservable: 'snapshot.score increases' }] },
+      ],
+    });
+    const { audit } = parseQuickPlanspec(`<PLAN_SPEC>${spec}</PLAN_SPEC>`);
+    expect(audit.violations.join(' ')).not.toMatch(/unwired-seam-risk/);
+  });
+});
+
+describe('buildQuickPlanspecRepairPrompt — R1 directives', () => {
+  const stories = [{ storyId: 'a', title: 'Implement collision', depends_on: [], touches: ['src/slices/collision.ts'] }];
+
+  it('renders the PROBE GRAMMAR CONTRACT when an unexecutable-probe violation is present', () => {
+    const p = buildQuickPlanspecRepairPrompt({
+      intent: 'a snake game', appSlug: 'sk1', stories,
+      violations: ['unexecutable-probe: story "Implement collision" AC a-ac1 — when "steers…" yields no executable action'],
+    });
+    expect(p).toContain('PROBE GRAMMAR CONTRACT');
+    expect(p).toContain('presses <Key>');
+    expect(p).toContain('presses Space and waits 4 seconds'); // GOOD example
+    expect(p).toContain('steers the snake into the board edge'); // BAD example
+    expect(p).toMatch(/Rewrite ONLY the flagged/);
+    // orthogonal directive not pulled in
+    expect(p).not.toContain('INTEGRATION SEAM — a driven AC with no wiring home');
+  });
+
+  it('renders the INTEGRATION SEAM directive when an unwired-seam-risk violation is present', () => {
+    const p = buildQuickPlanspecRepairPrompt({
+      intent: 'a snake game', appSlug: 'sk1', stories,
+      violations: ['unwired-seam-risk: story "Implement steering" AC a-ac1 drives the app but its touches own no wiring surface'],
+    });
+    expect(p).toContain('INTEGRATION SEAM — a driven AC with no wiring home');
+    expect(p).toMatch(/MOVE the driven behavioral AC onto the FOUNDATION/);
+    expect(p).not.toContain('PROBE GRAMMAR CONTRACT');
+  });
+
+  it('renders NEITHER R1 directive for a plain width violation', () => {
+    const p = buildQuickPlanspecRepairPrompt({
+      intent: 'a snake game', appSlug: 'sk1', stories,
+      violations: ['god-file: "src/game/reducer.ts" is touched by 3 feature stories'],
+    });
+    expect(p).not.toContain('PROBE GRAMMAR CONTRACT');
+    expect(p).not.toContain('INTEGRATION SEAM — a driven AC with no wiring home');
+  });
+});
+
+describe('buildQuickPlanspecPrompt — R1 contracts', () => {
+  it('states the probe grammar contract with a BAD/GOOD when example', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz9' });
+    expect(p).toContain('PROBE GRAMMAR');
+    expect(p).toContain('presses Space and waits 4 seconds');
+    expect(p).toContain('steers the snake into the board edge');
+  });
+
+  it('states the integration-seam contract with a wiring home', () => {
+    const p = buildQuickPlanspecPrompt({ intent: 'a maze game', appSlug: 'mz9' });
+    expect(p).toContain('INTEGRATION SEAM');
+    expect(p).toMatch(/MUST own the file where/);
+    expect(p).toMatch(/verify:"state"/);
   });
 });
 

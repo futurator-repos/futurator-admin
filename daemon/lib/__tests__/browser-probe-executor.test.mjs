@@ -9,6 +9,9 @@ import {
   settleFrames,
   pollUntil,
   OBSERVE_ONLY_NOTE,
+  classifyProbeFailure,
+  findDirtyBasePathConfig,
+  revertDirtyBasePathConfig,
 } from '../browser-probe-executor.mjs';
 
 // A no-op poll/settle clock so failing-poll windows don't spend real time.
@@ -485,5 +488,200 @@ describe('runBrowserJourney — observeOnly', () => {
 
   it('exports the observe-only note constant', () => {
     expect(OBSERVE_ONLY_NOTE).toMatch(/observe-only/);
+  });
+});
+
+// ── R3 infra-attempt protection ─────────────────────────────────────────────
+
+describe('classifyProbeFailure', () => {
+  it('classifies a boot-result object with status=000', () => {
+    expect(classifyProbeFailure({ ok: false, status: '000' })).toEqual({ infra: true, reason: 'boot-000' });
+  });
+
+  it('classifies a boot-result object with status=404', () => {
+    expect(classifyProbeFailure({ ok: false, status: '404' })).toEqual({ infra: true, reason: 'boot-404' });
+  });
+
+  it('classifies a boot-result object with status=squatter', () => {
+    expect(classifyProbeFailure({ ok: false, status: 'squatter' })).toEqual({ infra: true, reason: 'port-squatter' });
+  });
+
+  it('classifies the executor\'s own "did not boot (status=000)" detail string', () => {
+    expect(classifyProbeFailure('dev server did not boot (status=000)')).toEqual({ infra: true, reason: 'boot-000' });
+  });
+
+  it('classifies the executor\'s own "did not boot (status=404)" detail string', () => {
+    expect(classifyProbeFailure('dev server did not boot (status=404)')).toEqual({ infra: true, reason: 'boot-404' });
+  });
+
+  it('classifies a probe result object with a boot-404 detail', () => {
+    expect(classifyProbeFailure({ passed: false, detail: 'dev server did not boot (status=404)' })).toEqual({ infra: true, reason: 'boot-404' });
+  });
+
+  it('classifies a Playwright navigation timeout as infra', () => {
+    expect(classifyProbeFailure('browser probe error: page.goto: Timeout 30000ms exceeded')).toEqual({ infra: true, reason: 'boot-timeout' });
+  });
+
+  it('classifies a Playwright ACTION/LOCATOR timeout as an APP failure, NOT infra (R2 unwired control)', () => {
+    // runBrowserJourney pushes `<label>: action failed: <playwright error>` — an
+    // unwired control the AC drives times out waiting for the locator. That is a
+    // real defect and must CONSUME an attempt, not earn free infra retries.
+    expect(
+      classifyProbeFailure(
+        "story-ac: action failed: locator.click: Timeout 30000ms exceeded.\nwaiting for locator('button:has-text(\"Start\")')",
+      ),
+    ).toEqual({ infra: false, reason: 'app-fail' });
+  });
+
+  it('classifies a getByRole timeout (no boot signal) as an app failure', () => {
+    expect(
+      classifyProbeFailure({ passed: false, detail: 'getByRole timed out waiting for the Start button' }),
+    ).toEqual({ infra: false, reason: 'app-fail' });
+  });
+
+  it('classifies an unrecognized non-boot status as an app failure, NOT infra', () => {
+    expect(classifyProbeFailure({ ok: false, status: '500' })).toEqual({ infra: false, reason: 'app-fail' });
+  });
+
+  it('classifies a named assertion failure as an app failure', () => {
+    expect(classifyProbeFailure({ passed: false, detail: 'snapshot.status expected \'running\' got \'idle\'' })).toEqual({ infra: false, reason: 'app-fail' });
+  });
+
+  it('classifies "seam not mounted" as an app failure (real integration gap, not infra)', () => {
+    expect(classifyProbeFailure('__harness seam not mounted')).toEqual({ infra: false, reason: 'app-fail' });
+  });
+});
+
+describe('findDirtyBasePathConfig / revertDirtyBasePathConfig', () => {
+  it('finds and reverts an uncommitted next.config.ts declaring a basePath', async () => {
+    const calls = [];
+    const shell = async (cmd) => {
+      calls.push(cmd);
+      if (cmd.startsWith('git status --porcelain -- next.config.ts')) return { stdout: ' M next.config.ts\n' };
+      if (cmd.startsWith('cat next.config.ts')) return { stdout: "module.exports = { basePath: '/snake-classic-feda6e' }" };
+      if (cmd.startsWith('git checkout --')) return { stdout: '' };
+      return { stdout: '' };
+    };
+    const file = await findDirtyBasePathConfig({ cwd: '/w', shell });
+    expect(file).toBe('next.config.ts');
+
+    const log = [];
+    const reverted = await revertDirtyBasePathConfig({ cwd: '/w', shell, log: (m) => log.push(m) });
+    expect(reverted).toBe(true);
+    expect(calls).toContain('git checkout -- next.config.ts');
+    expect(log[0]).toMatch(/dirty-config: reverting uncommitted basePath/);
+  });
+
+  it('does NOT revert a committed basePath (git status clean)', async () => {
+    const shell = async (cmd) => {
+      if (cmd.startsWith('git status --porcelain')) return { stdout: '' }; // clean
+      if (cmd.startsWith('cat next.config.ts')) return { stdout: "basePath: '/x'" };
+      return { stdout: '' };
+    };
+    const file = await findDirtyBasePathConfig({ cwd: '/w', shell });
+    expect(file).toBeNull();
+    const reverted = await revertDirtyBasePathConfig({ cwd: '/w', shell });
+    expect(reverted).toBe(false);
+  });
+
+  it('does NOT revert a COMMITTED basePath even when the file is dirty for another reason', async () => {
+    // The working copy declares a basePath (matches the regex) AND is dirty — but
+    // HEAD already declares that basePath, so it is real committed app config, not
+    // the deploy job's leftover mutation. Reverting would neither remove it nor be
+    // safe (it would discard the unrelated uncommitted edit). Must be a no-op.
+    const calls = [];
+    const shell = async (cmd) => {
+      calls.push(cmd);
+      if (cmd.startsWith('git status --porcelain -- next.config.ts')) return { stdout: ' M next.config.ts\n' };
+      if (cmd.startsWith('cat next.config.ts')) return { stdout: "module.exports = { basePath: '/app', reactStrictMode: false }" };
+      if (cmd.startsWith('git show HEAD:./next.config.ts')) return { stdout: "module.exports = { basePath: '/app', reactStrictMode: true }" };
+      return { stdout: '' };
+    };
+    const file = await findDirtyBasePathConfig({ cwd: '/w', shell });
+    expect(file).toBeNull();
+    const reverted = await revertDirtyBasePathConfig({ cwd: '/w', shell });
+    expect(reverted).toBe(false);
+    expect(calls.some((c) => c.startsWith('git checkout --'))).toBe(false);
+  });
+
+  it('does NOT revert an uncommitted config with no basePath (unrelated dirt)', async () => {
+    const shell = async (cmd) => {
+      if (cmd.startsWith('git status --porcelain -- next.config.ts')) return { stdout: ' M next.config.ts\n' };
+      if (cmd.startsWith('cat next.config.ts')) return { stdout: 'module.exports = { reactStrictMode: true }' };
+      return { stdout: '' };
+    };
+    const reverted = await revertDirtyBasePathConfig({ cwd: '/w', shell });
+    expect(reverted).toBe(false);
+  });
+
+  it('fails open on a shell error (never throws)', async () => {
+    const shell = async () => { throw new Error('boom'); };
+    const reverted = await revertDirtyBasePathConfig({ cwd: '/w', shell });
+    expect(reverted).toBe(false);
+  });
+});
+
+describe('makeBrowserExecutor — 404-at-root dirty-config guard', () => {
+  const qaContext = { defaultPort: 3000, healthcheckPath: '/' };
+
+  it('reverts a dirty basePath on a 404 boot and retries the boot exactly ONCE', async () => {
+    const { pw } = fakePlaywright({ snapshots: [{ status: 'running', score: 7 }] });
+    let bootCalls = 0;
+    const bootDevServer = async () => {
+      bootCalls += 1;
+      if (bootCalls === 1) return { ok: false, status: '404', stop: async () => {} };
+      return { ok: true, port: 3000, stop: async () => {} };
+    };
+    const shellCalls = [];
+    const shell = async (cmd) => {
+      shellCalls.push(cmd);
+      if (cmd.startsWith('git status --porcelain -- next.config.ts')) return { stdout: ' M next.config.ts\n' };
+      if (cmd.startsWith('cat next.config.ts')) return { stdout: "basePath: '/x'" };
+      return { stdout: '' };
+    };
+    const exec = makeBrowserExecutor({
+      cwd: '/w',
+      qaContext,
+      deps: { bootDevServer, drainPort: async () => {}, shell, playwright: pw },
+    });
+    const r = await exec(AC_RUN);
+    expect(r.passed).toBe(true);
+    expect(bootCalls).toBe(2); // exactly one retry
+    expect(shellCalls).toContain('git checkout -- next.config.ts');
+  });
+
+  it('does NOT retry the boot when there is no dirty basePath (plain 404)', async () => {
+    let bootCalls = 0;
+    const bootDevServer = async () => {
+      bootCalls += 1;
+      return { ok: false, status: '404', stop: async () => {} };
+    };
+    const shell = async (cmd) => ({ stdout: '' }); // no dirty config anywhere
+    const exec = makeBrowserExecutor({
+      cwd: '/w',
+      qaContext,
+      deps: { bootDevServer, drainPort: async () => {}, shell, playwright: fakePlaywright().pw },
+    });
+    const r = await exec(AC_RUN);
+    expect(r.passed).toBe(false);
+    expect(bootCalls).toBe(1); // no retry — nothing to fix
+    expect(r.detail).toMatch(/status=404/);
+  });
+
+  it('does NOT touch the 000/squatter no-boot path (guard is 404-only)', async () => {
+    let bootCalls = 0;
+    const bootDevServer = async () => {
+      bootCalls += 1;
+      return { ok: false, status: '000', stop: async () => {} };
+    };
+    const shell = async () => ({ stdout: ' M next.config.ts\n' }); // even if dirty, 000 is not 404
+    const exec = makeBrowserExecutor({
+      cwd: '/w',
+      qaContext,
+      deps: { bootDevServer, drainPort: async () => {}, shell, playwright: fakePlaywright().pw },
+    });
+    const r = await exec(AC_RUN);
+    expect(bootCalls).toBe(1);
+    expect(r.detail).toMatch(/status=000/);
   });
 });

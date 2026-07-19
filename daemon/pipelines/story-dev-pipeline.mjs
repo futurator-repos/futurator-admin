@@ -28,6 +28,10 @@ import { extractAssistantText } from '../lib/stream-json-text.mjs';
 import { planBranchName } from '../lib/plan-branch.mjs';
 import { runStoryBindings } from '../lib/test-binding-runner.mjs';
 import { detectTestTampering } from '../lib/tdd-gates.mjs';
+// R2(a) binding-scope: reuse the daemon's own glob semantics (same matcher the
+// live scope gate uses) to decide whether a to-be-created impl file already lies
+// inside the story's touches — no second glob implementation, no drift.
+import { detectScopeViolations } from './lib/scope-violation-detector.mjs';
 // Stage audit (dossier B2): the <INVARIANTS> parser feeds the test-author stage
 // summary; capStageSummaries enforces the row-size contract (preview ≤2KB/file,
 // total ≤48KB) before every persist.
@@ -59,6 +63,19 @@ import {
   findGateDataGaps,
   shouldRetry,
 } from './lib/story-retry.mjs';
+// R3 — infra-attempt protection (I15). A browser-AC probe / boot-liveness
+// failure that is an INFRA hiccup (dev server didn't boot, a squatter answered
+// the port, the page timed out) is NOT evidence the implementer's diff is wrong,
+// so it must not burn a fix-forward attempt. classifyProbeFailure is the PURE
+// classifier over a probe/boot detail; infra-retry.mjs is the PURE bounded-retry
+// policy. Both are I/O-free — the loop below decides WHEN to consult them.
+import { classifyProbeFailure } from '../lib/browser-probe-executor.mjs';
+import {
+  shouldConsumeAttempt,
+  nextInfraRetry,
+  annotate,
+  MAX_INFRA_RETRIES,
+} from '../lib/infra-retry.mjs';
 
 /**
  * Render one AC line with its verification semantics. A behavior/needsBrowser AC
@@ -163,6 +180,219 @@ export function buildStoryDevPrompt(payload) {
   ].filter((l) => l !== '').join('\n');
 }
 
+// ── R2(a) — binding-scope widening ────────────────────────────────────────────
+// Fix-round defect #2 (2026-07-18): the Test-Author binds an AC to a symbol whose
+// impl file lies OUTSIDE the story's declared `touches` (e.g. it binds
+// `renderSnake` in src/game/snake/contract.ts while touches only cover
+// src/components/canvas/). The live gate then BLOCKS the implementer from creating
+// that file → "integrate: nothing to commit" → the bound test stays RED forever.
+// This inspects each authored test's *to-be-created* relative imports and widens
+// touches to cover them. Deterministic, PURE (fs injected), never fails the story.
+
+const CODE_EXT_RE = /\.(?:d\.ts|[cm]?[jt]sx?)$/;
+const RESOLVE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.d.ts'];
+
+/**
+ * Extract the RELATIVE ('./' or '../') module specifiers a source file imports.
+ * Covers `import … from`, side-effect `import '…'`, `require('…')` and dynamic
+ * `import('…')`. Bare (package) specifiers are ignored. PURE.
+ */
+export function extractRelativeImports(source = '') {
+  const src = String(source || '');
+  const specs = new Set();
+  const patterns = [
+    /\bfrom\s*['"]([^'"]+)['"]/g,
+    /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+    /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+    /\bimport\s+['"]([^'"]+)['"]/g,
+  ];
+  for (const re of patterns) {
+    let m;
+    while ((m = re.exec(src)) !== null) specs.add(m[1]);
+  }
+  return [...specs].filter((s) => s.startsWith('./') || s.startsWith('../'));
+}
+
+/** Resolve a relative specifier against a repo-relative test-file path (forward-slash). */
+function resolveRelativeSpec(fromFile, spec) {
+  const parts = String(fromFile || '').replace(/\\/g, '/').split('/');
+  parts.pop(); // drop the filename → directory
+  for (const seg of String(spec || '').split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { if (parts.length) parts.pop(); }
+    else parts.push(seg);
+  }
+  return parts.join('/');
+}
+
+/** True iff `base` (with or without extension) resolves to a file already on disk. */
+function implAlreadyExists(base, exists) {
+  if (CODE_EXT_RE.test(base)) return !!exists(base);
+  for (const e of RESOLVE_EXTS) if (exists(base + e)) return true;
+  for (const e of RESOLVE_EXTS) if (exists(`${base}/index${e}`)) return true;
+  return false;
+}
+
+/** Widen glob for a to-be-created base: keep an explicit ext, else match any ext. */
+function widenGlobFor(base) {
+  return CODE_EXT_RE.test(base) ? base : `${base}.*`;
+}
+
+/** Is a representative concrete path for `base` already covered by `touches`? */
+function coveredByTouches(base, touches) {
+  const rep = CODE_EXT_RE.test(base) ? base : `${base}.ts`;
+  const { touchPointsViolations, skipped } = detectScopeViolations({
+    modifiedFiles: [rep], touchPoints: touches, forbiddenAreas: [],
+  });
+  // skipped (empty / <UNKNOWN> / <EPIC_WIDE> touches) ⇒ scope already unrestricted.
+  return skipped.touchPointsCheck || touchPointsViolations.length === 0;
+}
+
+/**
+ * Compute the touches globs to ADD so every authored test's to-be-created impl
+ * import is in scope. Imports that already resolve to an on-disk file (an
+ * existing dependency the implementer only READS) are skipped — the gate only
+ * blocks WRITES. Result is de-duped and capped. PURE (fs injected).
+ *
+ * @param {{
+ *   ownedTestFiles: string[],
+ *   touches: string[],
+ *   readFile: (repoRelPath:string) => string,   // throws / returns '' if unreadable
+ *   exists: (repoRelPath:string) => boolean,
+ *   cap?: number,
+ * }} args
+ * @returns {string[]} globs to append to touches (≤ cap)
+ */
+export function computeBindingScopeWidening({ ownedTestFiles = [], touches = [], readFile, exists, cap = 4 }) {
+  const widen = [];
+  const seen = new Set();
+  const tp = Array.isArray(touches) ? touches : [];
+  for (const tf of ownedTestFiles || []) {
+    let src = '';
+    try { src = readFile(tf) || ''; } catch { continue; }
+    for (const spec of extractRelativeImports(src)) {
+      const base = resolveRelativeSpec(tf, spec);
+      if (!base) continue;
+      if (implAlreadyExists(base, exists)) continue;   // existing dep — read-only, no widen
+      if (coveredByTouches(base, tp)) continue;        // already writable in scope
+      const glob = widenGlobFor(base);
+      if (seen.has(glob)) continue;
+      seen.add(glob);
+      widen.push(glob);
+      if (widen.length >= cap) return widen;
+    }
+  }
+  return widen;
+}
+
+// ── R2(b,c) — de-gamed implementer guidance ───────────────────────────────────
+// Two failure classes the split implementer games without this:
+//  #5 goal-misalignment — a browser-probe-only AC gives the implementer no unit
+//     red to chase; it runs a green suite and declares done, never wiring the
+//     behavior into the live app → the gate's browser probe fails.
+//  #4 sibling contamination — the implementer runs the WHOLE suite, sees a
+//     sibling story's RED-first tests fail, and either "fixes" them (scope leak)
+//     or terminal-fails on failures that are not its own.
+
+/** A behavioral / browser-verified AC — the browser probe (not a unit test) judges it. */
+export function isBrowserVerifiedAc(ac) {
+  return ac?.verify === 'behavior' || ac?.needsBrowser === true || ac?.requiresBrowser === true;
+}
+
+/**
+ * Enumerate the browser-verified ACs as explicit "unit tests DO NOT cover this"
+ * obligations. On a retry (priorCompletion supplied) each AC's prior probe
+ * transcript (testBinding.detail from the failed attempt) is threaded in so the
+ * implementer sees exactly what the live app failed to do. PURE.
+ */
+export function renderBrowserVerifiedAcsBlock(acceptanceCriteria = [], priorCompletion = null) {
+  const browserAcs = (acceptanceCriteria || []).filter(isBrowserVerifiedAc);
+  if (!browserAcs.length) return '';
+  const priorMap = new Map(
+    Array.isArray(priorCompletion?.acceptanceCriteria)
+      ? priorCompletion.acceptanceCriteria.map((ac) => [ac.id, ac])
+      : [],
+  );
+  const lines = [
+    '# BROWSER-VERIFIED ACCEPTANCE CRITERIA (green unit tests DO NOT cover these)',
+    'These ACs are verified by a LIVE browser probe that drives the running page',
+    'through window.__harness — NOT by any unit/integration test. A green test suite',
+    'proves NOTHING about them. You MUST wire each behavior into the running app (the',
+    'feature component / page / reducer / event handler) so the probe\'s when → then',
+    'holds in the actual app. Passing the committed unit tests is necessary but NOT',
+    'sufficient: an AC below is UNMET until the app itself behaves as described.',
+    '',
+  ];
+  for (const ac of browserAcs) {
+    lines.push(`- [${ac.id}] ${ac.text || ''}`);
+    if (ac.when || ac.thenObservable || ac.then) {
+      lines.push(`    when: ${ac.when || '(unspecified)'} → then: ${ac.thenObservable || ac.then || '(unspecified)'}`);
+    }
+    const tb = priorMap.get(ac.id)?.testBinding;
+    if (tb && tb.status && tb.status !== 'passing') {
+      lines.push(`    PRIOR PROBE — attempt failed (status: ${tb.status}); the live app did NOT satisfy this:`);
+      const detail = tb.detail ? String(tb.detail) : '(no probe transcript captured)';
+      for (const l of detail.split('\n')) lines.push(`      ${l}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Scope the implementer's self-verification to its OWN bound tests and declare
+ * sibling RED tests expected-to-fail (defect #4). PURE. Empty when no owned
+ * files are known (default/legacy single-spawn path).
+ */
+export function renderOwnTestScopeBlock(ownedTestFiles = []) {
+  if (!ownedTestFiles?.length) return '';
+  return [
+    '# SELF-VERIFICATION SCOPE — verify ONLY your own bound tests',
+    'This story is developed in PARALLEL with sibling stories. When you run tests to',
+    'check your work, run ONLY the files bound to THIS story:',
+    ...ownedTestFiles.map((f) => `    - ${f}`),
+    `e.g.  npx vitest run ${ownedTestFiles.map((f) => `"${f}"`).join(' ')}`,
+    'Other *.test.* / *.spec.* files in the tree belong to sibling stories authored',
+    'RED-first (their tests exist before their implementation lands) — those tests',
+    'WILL fail, and that is EXPECTED. Do NOT investigate, "fix", or modify them: you',
+    'are judged solely on the files listed above and the browser probe. Sibling',
+    'failures in a whole-suite run are NOT your regression.',
+  ].join('\n');
+}
+
+/**
+ * Assemble the de-gaming guidance appended to the implementer prompt (browser-AC
+ * obligations + own-test-scope). Returns '' when neither applies (byte-identical
+ * prompt for a pure-unit story with no owned files). PURE.
+ */
+export function buildImplementerGuidance({ acceptanceCriteria = [], ownedTestFiles = [], priorCompletion = null } = {}) {
+  const parts = [];
+  const browserBlock = renderBrowserVerifiedAcsBlock(acceptanceCriteria, priorCompletion);
+  if (browserBlock) parts.push(browserBlock);
+  const scopeBlock = renderOwnTestScopeBlock(ownedTestFiles);
+  if (scopeBlock) parts.push(scopeBlock);
+  return parts.length ? '\n' + parts.join('\n') : '';
+}
+
+/**
+ * R3 infra-attempt protection — gather THIS attempt's failure-signal text (fresh
+ * from the per-attempt `completion`, so never stale across the fix-forward loop)
+ * for classifyProbeFailure to judge. Pulls each failing browser-AC's live probe
+ * transcript (testBinding.detail) plus the verdict reasons — the latter carry the
+ * foundation-gate / green-trunk boot-liveness failures. PURE. Empty string when
+ * nothing failed, which classifies as an app-fail (fail-closed on the budget).
+ */
+export function collectAttemptFailureDetail(completion) {
+  const parts = [];
+  for (const ac of completion?.acceptanceCriteria || []) {
+    const tb = ac?.testBinding;
+    if (tb && tb.status && tb.status !== 'passing' && tb.detail) parts.push(String(tb.detail));
+  }
+  if (Array.isArray(completion?.verdict?.reasons)) {
+    for (const r of completion.verdict.reasons) parts.push(String(r));
+  }
+  return parts.join('\n');
+}
+
 function ensureDir(d) { try { if (!existsSync(d)) mkdirSync(d, { recursive: true }); } catch { /* best-effort */ } }
 
 /**
@@ -233,6 +463,9 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
   const spawn = deps.spawn || realSpawn;
   const logger = deps.logger || console;
   const claudeBin = deps.claudeBin || 'claude';
+  // Injectable so the infra-retry backoff never blocks a unit test on a real timer
+  // (defaults to a real sleep in production).
+  const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const payload = job.storyDevPayload;
   if (!payload) throw new Error('runStoryDevJob: job.storyDevPayload required');
   const projectRoot = resolve(job.workingDir);
@@ -466,6 +699,43 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
         : `RED confirmed — ${split.ownedTestFiles.length} test file(s) committed @${(split.redSha || '').slice(0, 7)}`,
     })?.catch?.(() => {});
   }
+  // ── R2(a) — binding-scope widening (fix-round defect #2, 2026-07-18) ──
+  // The Test-Author may have bound an AC to a symbol whose impl file lies OUTSIDE
+  // the story's declared touches — the implementer then has NO legal file to turn
+  // that test green (the live gate blocks the write → "nothing to commit" → RED
+  // forever). Deterministically inspect each authored test's to-be-created
+  // relative imports and AUTO-WIDEN touches to cover them (capped 4). This runs
+  // BEFORE implGate/integrate/completion below so the widened scope is what the
+  // implementer gate enforces, what integrate commits, and what the no-mock rule
+  // scopes against. Never fails the story; re-derives deterministically on retry.
+  if (split?.ownedTestFiles?.length) {
+    try {
+      const widen = computeBindingScopeWidening({
+        ownedTestFiles: split.ownedTestFiles,
+        touches: payload.touches || [],
+        readFile: (p) => readFileSync(join(projectRoot, p), 'utf8'),
+        exists: (p) => existsSync(join(projectRoot, p)),
+      });
+      if (widen.length) {
+        payload.touches = [...(payload.touches || []), ...widen];
+        logger.info?.(`[story-dev] ${payload.storyId} binding-scope: widened touches += ${widen.join(', ')}`);
+        await deps.pushEvent?.(job.jobId, 'test-author', 'test-author', 'binding_scope_widened', {
+          text: `binding-scope: widened touches += ${widen.join(', ')}`,
+          files: widen,
+        })?.catch?.(() => {});
+        // Persist to the story row via the existing helper. NOTE: buildStoryStateUpdate
+        // does not yet carry a `touches` field, so this write is currently telemetry
+        // (updatedAt only) — the LOAD-BEARING widening is the in-memory payload.touches
+        // above, which every downstream gate reads this run and which re-derives on
+        // any retry. Wired here so persistence completes with a one-line row-builder add.
+        try { await deps.updateStoryState?.({ storyId: payload.storyId, touches: payload.touches }); }
+        catch { /* telemetry-grade — never blocks the story */ }
+      }
+    } catch (e) {
+      logger.warn?.(`[story-dev] ${payload.storyId} binding-scope widening skipped (non-blocking): ${e.message}`);
+    }
+  }
+
   // In the split path the implementer may not write ANY test file via the LIVE
   // gate (deterministic in-turn block, stronger than a post-hoc revert): the
   // authored/owned files by name PLUS the **/*.test.* / **/*.spec.* globs —
@@ -552,9 +822,19 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
     const pf = attempt > 1 ? buildPriorFailureBlock(completion) : null;
     // Split path: implement against the committed tests (trimmed prompt).
     // Default path: the single untrimmed dev prompt (author + implement).
-    const prompt = split
+    const basePrompt = split
       ? buildImplementerPrompt({ ...payload, priorFailure: pf }, split.ownedTestFiles, testContents)
       : buildStoryDevPrompt({ ...payload, priorFailure: pf });
+    // R2(b,c) — de-game the implementer: enumerate browser-verified ACs as
+    // "green units DO NOT cover this — wire it into the live app" obligations, and
+    // scope self-verification to THIS story's own bound tests (sibling RED tests
+    // fail by design). On a retry (attempt>1) `completion` holds the prior
+    // attempt — its failed browser bindings' probe transcripts are threaded in.
+    const prompt = basePrompt + buildImplementerGuidance({
+      acceptanceCriteria: payload.acceptanceCriteria,
+      ownedTestFiles: split?.ownedTestFiles || [],
+      priorCompletion: attempt > 1 ? completion : null,
+    });
     const args = [
       '-p', prompt,
       '--output-format', 'stream-json',
@@ -804,6 +1084,38 @@ export async function runStoryDevJob({ job, eventLogDir, deps = {} }) {
           reasons: [...(completion.verdict.reasons || []), ...gt.reasons],
         };
         lastFailureDetail = gt.reasons.join('\n');
+      }
+    }
+
+    // ── R3 — infra-attempt protection (I15). Before this failure is allowed to
+    // consume a fix-forward attempt, classify it: a browser-AC probe / boot-
+    // liveness failure that is an INFRA hiccup (dev server didn't boot, a
+    // squatter answered the port, the page timed out) is NOT evidence the
+    // implementer's diff is wrong. If infra, DON'T advance the attempt counter —
+    // consult the bounded infra-retry policy and re-run the SAME attempt after a
+    // backoff. Bounded by MAX_INFRA_RETRIES (tracked on job.infraRetries) so a
+    // host that never recovers falls through to normal attempt accounting and
+    // consumes one. App failures (and an absent/malformed classification) fail
+    // CLOSED — they consume the attempt exactly as before.
+    if (completion.newState !== 'done') {
+      const classification = classifyProbeFailure(collectAttemptFailureDetail(completion));
+      if (!shouldConsumeAttempt(classification)) {
+        const decision = nextInfraRetry(job.infraRetries ?? 0);
+        const annotated = annotate(job, { classification, decision });
+        job.infraRetries = annotated.infraRetries;
+        job.infraRetryReason = annotated.infraRetryReason;
+        job.infraRetryExhausted = annotated.infraRetryExhausted;
+        if (decision.retry) {
+          logger.warn?.(`[story-dev] ${payload.storyId} infra failure (${classification.reason}) — NOT consuming attempt ${attempt}; infra-retry ${decision.attempt}/${MAX_INFRA_RETRIES} after ${decision.delayMs}ms`);
+          await deps.pushEvent?.(job.jobId, STORY_DEV_STEP_ID, STORY_DEV_AGENT_ID, 'infra_retry', {
+            text: `infra failure (${classification.reason}) — not consuming an attempt; retry ${decision.attempt}/${MAX_INFRA_RETRIES} after ${Math.round(decision.delayMs / 1000)}s`,
+          })?.catch?.(() => {});
+          attempt -= 1; // do NOT advance the fix-forward attempt counter — re-run the SAME attempt
+          await sleep(decision.delayMs);
+          continue;
+        }
+        // infra retries exhausted — the host never recovered; fall through and
+        // let this failure consume a real attempt (can't stall forever).
       }
     }
 

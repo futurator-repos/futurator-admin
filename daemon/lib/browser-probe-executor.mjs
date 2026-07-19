@@ -69,6 +69,51 @@ export function normalizeKeyName(raw) {
   return KEY_ALIASES[k.toLowerCase()] || k;
 }
 
+// ── Boot-failure classification (R3, infra-attempt protection) ─────────────
+//
+// A story-level browser-AC failure is either an APP defect (the implementer's
+// code is genuinely wrong — must consume a retry attempt) or an INFRA hiccup
+// (dev server didn't come up, a squatter answered, the page timed out — the
+// implementer's diff may be fine, burning an attempt on it is unfair and
+// exactly the "5 attempts torched on host flake" class from the worklog).
+// This is a PURE classifier over a boot/probe failure's shape — no I/O, no
+// retry policy (that's infra-retry.mjs) — so story-dev-pipeline.mjs (R2's
+// file) can call it without importing anything Playwright-shaped.
+//
+// Accepts either:
+//   - a boot result `{ ok:false, status }` (from dev-server-boot.mjs), or
+//   - a probe/executor result `{ passed:false, detail }`, or
+//   - a bare detail string (e.g. `exec(ac)`'s `.detail`).
+export function classifyProbeFailure(input) {
+  const text = typeof input === 'string' ? input : String(input?.detail ?? '');
+  const rawStatus = input && typeof input === 'object' && 'status' in input ? String(input.status) : undefined;
+  const textStatusMatch = /status=([^)\s]+)/.exec(text);
+  const status = rawStatus ?? textStatusMatch?.[1];
+
+  if (status === 'squatter' || /squatter/i.test(text)) {
+    return { infra: true, reason: 'port-squatter' };
+  }
+  if (status === '404') {
+    return { infra: true, reason: 'boot-404' };
+  }
+  // A Playwright ACTION / LOCATOR / SELECTOR timeout is NOT an infra hiccup: it
+  // means a control the AC drives never appeared or was never interactable —
+  // the exact R2 "unwired control" APP defect. It must CONSUME an attempt, not
+  // earn free non-consuming infra retries. Only a navigation / dev-server boot
+  // timeout (page.goto, "did not boot … timeout") is infra. Distinguish the two
+  // BEFORE the broad text match so an "action failed: … Timeout … waiting for
+  // locator(…)" detail (pushed by runBrowserJourney) falls through to app-fail.
+  const isActionTimeout =
+    /action failed|waiting for (?:locator|selector)|locator\.|getBy(?:Role|Text|Label|TestId|Placeholder)/i.test(text);
+  if (!isActionTimeout && /timeout|timed out/i.test(text)) {
+    return { infra: true, reason: 'boot-timeout' };
+  }
+  if (status === '000' || status === 'unknown' || (!status && /did not boot/i.test(text))) {
+    return { infra: true, reason: 'boot-000' };
+  }
+  return { infra: false, reason: 'app-fail' };
+}
+
 /** Extract ordered actions from the `when` prose. */
 function parseActions(src) {
   const found = [];
@@ -752,6 +797,61 @@ function probeToJourneySteps(probe, { label, settle } = {}) {
  *
  * @param {{ cwd:string, qaContext:object|undefined, deps?:object }} opts
  */
+// 404-at-root dirty-config guard (I13/R3 root cause): a prior dev-deploy job
+// patches a `basePath` into next.config.(ts|js|mjs) IN THE SHARED CHECKOUT
+// and leaves it uncommitted, so every subsequent boot probes `/` against a
+// basePath'd app and gets 404 forever — looking exactly like a real boot
+// failure, burning attempts on nothing the implementer touched. This is a
+// narrow, deterministic recovery: only reverts a config file that BOTH (a)
+// declares a basePath and (b) is uncommitted per git status — never touches
+// a committed basePath (that's a real app config, not drift). Fail-open by
+// design: any exec/parse error just returns false and the caller falls back
+// to the existing no-boot failure path unchanged.
+const BASE_PATH_CONFIG_CANDIDATES = ['next.config.ts', 'next.config.js', 'next.config.mjs'];
+
+/** Find an uncommitted config file that declares a `basePath`, or null. */
+export async function findDirtyBasePathConfig({ cwd, shell }) {
+  for (const file of BASE_PATH_CONFIG_CANDIDATES) {
+    try {
+      const statusResult = await shell(`git status --porcelain -- ${file} 2>/dev/null || true`, cwd, 10_000);
+      if (!/\S/.test(statusResult?.stdout || '')) continue; // not present or clean
+      const contentResult = await shell(`cat ${file} 2>/dev/null || true`, cwd, 10_000);
+      if (!/basePath\s*[:=]/.test(contentResult?.stdout || '')) continue; // working copy has no basePath — unrelated dirt
+      // ONLY uncommitted basePath DRIFT qualifies. If HEAD already declares a
+      // basePath, the working-copy token is a real COMMITTED app config, not the
+      // deploy job's leftover mutation — a `git checkout -- <file>` would then
+      // (a) NOT remove the 404-causing basePath (checkout restores the committed
+      // value) and (b) blow away any UNRELATED uncommitted edits to the same
+      // file. Skip it so the invariant "never touches a committed basePath" holds
+      // and the caller falls through to the pre-existing no-boot failure path.
+      const headResult = await shell(`git show HEAD:./${file} 2>/dev/null || true`, cwd, 10_000);
+      if (/basePath\s*[:=]/.test(headResult?.stdout || '')) continue; // committed basePath — not drift
+      return file;
+    } catch {
+      // fail-open: treat this candidate as clean, keep scanning
+    }
+  }
+  return null;
+}
+
+/**
+ * Revert an uncommitted-basePath config via `git checkout --`. Returns true
+ * only if a dirty basePath file was found AND reverted; false (no-op) on a
+ * clean/committed config or any error — the caller must not retry the boot
+ * unless this returns true.
+ */
+export async function revertDirtyBasePathConfig({ cwd, shell, log = () => {} }) {
+  try {
+    const file = await findDirtyBasePathConfig({ cwd, shell });
+    if (!file) return false;
+    log(`dirty-config: reverting uncommitted basePath (${file})`);
+    await shell(`git checkout -- ${file}`, cwd, 10_000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
   const bootDevServer = deps.bootDevServer || realBootDevServer;
   const drainPort = deps.drainPort || realDrainPort;
@@ -791,6 +891,15 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
     let boot;
     try {
       boot = await bootDevServer({ cwd, qaContext, port, shell, log: bootLog });
+      if (!boot?.ok && classifyProbeFailure(boot).reason === 'boot-404') {
+        // 404-at-root guard: try the dirty-basePath revert ONCE, then retry
+        // the boot ONCE. Any error inside falls open to the pre-existing
+        // no-boot failure path below (never swallows a real failure).
+        const reverted = await revertDirtyBasePathConfig({ cwd, shell, log: bootLog }).catch(() => false);
+        if (reverted) {
+          boot = await bootDevServer({ cwd, qaContext, port, shell, log: bootLog });
+        }
+      }
       if (!boot?.ok) {
         return done({ passed: false, detail: `dev server did not boot (status=${boot?.status ?? 'unknown'})` });
       }

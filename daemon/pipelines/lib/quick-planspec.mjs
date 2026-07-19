@@ -29,6 +29,12 @@
 // dependsOn, and a deterministic audit that flags serial plans for repair.
 
 import { randomUUID } from 'node:crypto';
+// The SAME pure probe interpreter the browser executor runs at story-completion
+// and wave-QA time — so a `when` clause the executor can't perform is caught at
+// MINT time (auditPlanGraph) instead of burning a story's attempts on a probe it
+// can never satisfy (run forensics I10/I11: "steers the snake into the board
+// edge" parsed to zero executable actions). Import is lazy-playwright-safe.
+import { parseProbe } from '../../lib/browser-probe-executor.mjs';
 
 const EPIC_WIDE_TOUCH = '<EPIC_WIDE>';
 const VERIFY_VALUES = new Set(['build', 'appearance', 'state', 'behavior', 'manual']);
@@ -345,6 +351,26 @@ export function buildQuickPlanspecPrompt({ intent, appSlug, seamHook, maxStories
     `  (observe-only). Write every behavioral \`when\` as a real user action (press a`,
     `  key, click a labeled control, type into a field), never a harness call that`,
     `  short-circuits driving the app.`,
+    `- PROBE GRAMMAR (a behavioral \`when\` MUST be executable — the QA probe performs`,
+    `  it LITERALLY): write each \`when\` as concrete user input the probe can perform,`,
+    `  chained in order — \`presses <Key>\` (Space/Enter/ArrowUp|Down|Left|Right/a`,
+    `  letter/digit), \`waits N seconds\`, \`clicks the <Name> button\` / \`clicks 'X'\`,`,
+    `  \`types "text" into the <field> field\`. Vague physics/goal prose the executor`,
+    `  cannot perform drives NOTHING, so \`snapshot()\` never changes and the AC can`,
+    `  never pass. Pair \`thenObservable\` with a \`snapshot.<field>\` claim (equals /`,
+    `  greater than / at least / is true / increases / changes).`,
+    `  BAD when: "guides the player piece toward the goal" (no key/wait — drives nothing).`,
+    `  GOOD when: "presses Space and waits 4 seconds" (the app runs on its own).`,
+    `- INTEGRATION SEAM (a driven interaction needs a wiring home): a story carrying a`,
+    `  browser-driven AC (\`verify:"behavior"\` / \`needsBrowser\`) MUST own the file where`,
+    `  that input is wired — a \`*.feature.*\`, the app page/entry, or the reducer/`,
+    `  composition module. A PURE-MODULE slice cannot wire a new key/click, so PREFER`,
+    `  putting the driven behavioral AC (with its wiring) on the FOUNDATION that owns`,
+    `  app surface and give the slice a \`verify:"state"\` AC proving its logic through`,
+    `  \`snapshot()\`; only add a wiring file to a slice's \`touches\` if that slice must`,
+    `  own the interaction. BAD: a \`src/slices/steering.ts\` slice whose only proof is a`,
+    `  \`press ArrowLeft\` browser AC. GOOD: the foundation wires the keys and carries`,
+    `  that behavioral AC while the steering slice asserts \`verify:"state"\`.`,
     `- Output ONLY the <PLAN_THINKING> block followed by the <PLAN_SPEC> block.`,
   ].join('\n');
 }
@@ -364,6 +390,49 @@ export function buildQuickPlanspecRepairPrompt({ intent, appSlug, seamHook, maxS
     return `- "${s.title}" — touches: ${concreteTouches(s).join(', ') || '(none)'} — dependsOn: ${deps}`;
   });
   const overSharded = (violations || []).some((v) => v.startsWith('over-sharded'));
+  const hasUnexecutableProbe = (violations || []).some((v) => v.startsWith('unexecutable-probe'));
+  const hasUnwiredSeam = (violations || []).some((v) => v.startsWith('unwired-seam-risk'));
+  // PROBE GRAMMAR CONTRACT — the real, executable grammar (parseProbe): the QA probe
+  // performs the `when` literally and reads the `thenObservable` off the live
+  // snapshot. A when it cannot perform is a dead AC. Rewrite ONLY the flagged
+  // when/then clauses into this grammar, preserving their meaning — touch nothing else.
+  const probeGrammarDirective = [
+    ``,
+    `# PROBE GRAMMAR CONTRACT — an unexecutable \`when\` clause was flagged`,
+    `The QA probe performs each behavioral \`when\` LITERALLY as user input, then reads`,
+    `the \`thenObservable\` off \`window.__harness.snapshot()\`. It understands ONLY these`,
+    `\`when\` forms (chain several in one clause, in order):`,
+    `  · \`presses <Key>\` / \`holds <Key>\` — Key ∈ Space, Enter, ArrowUp/Down/Left/Right,`,
+    `    Escape, a single letter or digit`,
+    `  · \`waits N seconds\` — lets the app run/animate N seconds`,
+    `  · \`clicks the <Name> button\` (or \`clicks 'Name'\`) — by visible text / accessible name`,
+    `  · \`types "text" into the <field> field\``,
+    `Vague physics/goal prose the executor cannot perform is a DEAD AC (it drives`,
+    `NOTHING, so \`snapshot()\` never changes and the AC can never pass). The DRIVE lane`,
+    `is a USER — never write \`__harness.dispatch\`/\`forceStatus\` in a \`when\`.`,
+    `The \`thenObservable\` MUST name a \`snapshot.<field>\` claim: \`equals X\`, \`greater than\`,`,
+    `\`less than\`, \`at least\`, \`at most\`, \`is true|false\`, \`increases|decreases|changes\`.`,
+    `BAD  when: "guides the player piece toward the goal"  (no key, no wait — zero actions)`,
+    `GOOD when: "presses Space and waits 4 seconds"     (the app runs on its own to the asserted state)`,
+    `Rewrite ONLY the flagged \`when\`/\`then\` clauses into this executable grammar WITHOUT`,
+    `changing their meaning. Leave every other acceptance criterion exactly as it was.`,
+  ];
+  // INTEGRATION SEAM directive — a driven interaction with no wiring home was flagged.
+  const seamWiringDirective = [
+    ``,
+    `# INTEGRATION SEAM — a driven AC with no wiring home was flagged`,
+    `A story that DRIVES the app (a \`verify:"behavior"\` / \`needsBrowser\` AC) must own the`,
+    `file where that input is WIRED — a \`*.feature.*\`, the app page/entry, or the`,
+    `reducer/composition module — otherwise the key/click it drives has nowhere to live`,
+    `and the probe fails forever (this is exactly how arrow-key steering / a Restart`,
+    `button shipped un-wired). A PURE-MODULE slice cannot wire new input. For each`,
+    `flagged story choose ONE: (a) MOVE the driven behavioral AC onto the FOUNDATION`,
+    `(walking skeleton) that already owns app surface, and give the slice a`,
+    `\`verify:"state"\` AC that proves its logic through \`snapshot()\` instead; or (b) add`,
+    `the MINIMAL wiring file (the \`*.feature.*\`/page/composition where that input binds)`,
+    `to that story's \`touches\`. Never leave a driven interaction owned by a story with`,
+    `no wiring surface.`,
+  ];
   // The WIDTH directive (linear-chain / god-file) — unchanged legacy behavior.
   const widthDirective = [
     `Re-emit the FULL corrected <PLAN_SPEC> — every story, same quality rules. Keep the`,
@@ -413,6 +482,8 @@ export function buildQuickPlanspecRepairPrompt({ intent, appSlug, seamHook, maxS
     ``,
     ...widthDirective,
     ...(overSharded ? phaseDirective : []),
+    ...(hasUnexecutableProbe ? probeGrammarDirective : []),
+    ...(hasUnwiredSeam ? seamWiringDirective : []),
   ].join('\n');
 }
 
@@ -651,6 +722,43 @@ export function detectOverSharding(stories, { threshold = 0.6 } = {}) {
 }
 
 /**
+ * An AC that will be DRIVEN through the browser probe — its `when` is replayed as
+ * real user input (keys/clicks/type) and its `thenObservable` asserted against the
+ * live snapshot. `verify:'behavior'` (always), or an explicit `needsBrowser:true`
+ * that is NOT a pure-appearance AC (advisory-taste is VQA-observed, never driven).
+ * A pure `verify:'state'` AC (no needsBrowser) is UNIT-bound — its `when` is unit
+ * prose ("pellet eaten"), never fed to parseProbe — so it is deliberately excluded
+ * to avoid false-flagging legitimate unit-level when clauses. PURE.
+ */
+function isBrowserDrivenAc(ac) {
+  if (!ac) return false;
+  if (ac.verify === 'appearance') return false; // observe-only (advisory-taste, VQA lane)
+  return ac.verify === 'behavior' || ac.needsBrowser === true;
+}
+
+// The app "WIRING SURFACE": the file family where user input is BOUND to the app's
+// live state — a `*.feature.*`, the app page/entry (`src/app…`, a `*.page.*`), or
+// the reducer/state-machine/composition module. Derived from the scaffold layout
+// the planner prompt names (WALKING SKELETON: feature/seam/page/composition/loop;
+// slice dirs `src/<sliceDir>/**`). A story that DRIVES input (a browser-driven AC)
+// must own one of these, or the interaction has no home: run forensics I9/I10/I14
+// showed arrow-key steering / Restart wiring living in the feature, which the
+// pure-module slice never owned → the probe could never pass and the story burned
+// every attempt. A pure module path (`src/game/collision.ts`, `src/slices/x.ts`)
+// is NOT a wiring surface.
+function matchesWiringSurface(path) {
+  if (typeof path !== 'string' || !path) return false;
+  const p = path.toLowerCase();
+  // feature / app / pages directory or file convention
+  if (/(?:^|\/)(?:features?|app|pages?)(?:\/|\.)/.test(p)) return true;
+  if (/\.(?:feature|page)\.[jt]sx?$/.test(p)) return true;
+  // reducer / state-machine / composition / store module family (input→state wiring),
+  // matched on a path boundary so `restore.ts` / `remapper.ts` never count.
+  if (/(?:^|[/._-])(?:reducer|state[-_.]?machine|composition|compose|store)(?:[/._-]|s?$)/.test(p)) return true;
+  return false;
+}
+
+/**
  * Width/critical-path audit of a normalized story DAG. PURE — the deterministic
  * gate behind the runner's repair pass, and the metrics logged at ingest.
  *
@@ -668,7 +776,17 @@ export function detectOverSharding(stories, { threshold = 0.6 } = {}) {
  *    they're coupled through one runtime state machine and should re-shape to
  *    planShape:'coherent' phases (see detectOverSharding). The VIOLATION only
  *    fires for planShape==='sharded' — a coherent phased plan sharing one snapshot
- *    root is by design (the metrics fields still report the detection).
+ *    root is by design (the metrics fields still report the detection);
+ *  - unexecutable-probe: a browser-DRIVEN AC's `when` clause parses (via the REAL
+ *    parseProbe) to ZERO executable actions, or its assertion is uninterpretable —
+ *    the QA probe can never perform it, so the story would burn every attempt on a
+ *    probe it cannot satisfy (run forensics I10: "steers the snake into the board
+ *    edge"). Shape-INDEPENDENT — an unexecutable when is dead in any plan;
+ *  - unwired-seam-risk: a NON-foundation story carries a browser-driven AC but owns
+ *    NO wiring-surface file (matchesWiringSurface) in its touches — the interaction
+ *    it drives has no home (run forensics I9/I14: arrow-key steering / Restart
+ *    wiring lived in the feature the pure-module slice never owned). The foundation
+ *    owns app surface by construction, so it is exempt. Shape-INDEPENDENT.
  *
  * @param {object[]} stories
  * @param {{ planShape?: 'coherent'|'sharded' }} [opts] backward-compatible; omit for
@@ -743,6 +861,45 @@ export function auditPlanGraph(stories, { planShape } = {}) {
       `over-sharded: ${sharding.coupledCount}/${sharding.featureCount} feature stories observe snapshot.${sharding.sharedRoot} — coupled through one runtime state machine; re-shape to planShape:'coherent' phases`,
     );
   }
+
+  // MINT-TIME PROBE-GRAMMAR LINT (R1): every browser-DRIVEN AC that declares a
+  // `when` must parse (via the REAL parseProbe the executor runs) to at least one
+  // executable action AND an interpretable assertion. A when the probe can't
+  // perform ("steers the snake into the board edge" → zero actions) or a then it
+  // can't read is a DEAD AC that burns the story's attempts — flag it here so the
+  // repair pass rewrites it into the grammar before any story runs. Shape-agnostic.
+  for (const s of stories) {
+    for (const ac of s.acceptanceCriteria || []) {
+      if (!isBrowserDrivenAc(ac)) continue;
+      const when = typeof ac.when === 'string' ? ac.when.trim() : '';
+      if (!when) continue; // no when-clause to execute (pure observation) — nothing to lint
+      const probe = parseProbe({ when: ac.when, thenObservable: ac.thenObservable, then: ac.then, text: ac.text });
+      const zeroActions = !probe.actions || probe.actions.length === 0;
+      if (zeroActions || !probe.interpretable) {
+        const detail = zeroActions
+          ? `when "${when.slice(0, 80)}" yields no executable action (grammar: presses <Key> / holds <Key> / waits N seconds / clicks the <Name> button / clicks 'X' / types "t" into the <field> field)`
+          : `then is not interpretable: ${probe.reason || 'no snapshot.<field> assertion'}`;
+        violations.push(`unexecutable-probe: story "${s.title}" AC ${ac.id || '?'} — ${detail}`);
+      }
+    }
+  }
+
+  // MINT-TIME INTEGRATION-SEAM LINT (R1): a non-foundation story that DRIVES the app
+  // (a browser-driven AC) must own the file where that input is wired — a feature /
+  // app-entry / reducer-composition module. Without one the interaction has nowhere
+  // to live and the probe fails forever. The foundation (walking skeleton) owns app
+  // surface by construction, so it is exempt. Shape-agnostic.
+  for (const s of stories) {
+    if (s.nodeKind === 'foundation') continue;
+    const drivenAc = (s.acceptanceCriteria || []).find(isBrowserDrivenAc);
+    if (!drivenAc) continue;
+    const touches = concreteTouches(s);
+    if (touches.some(matchesWiringSurface)) continue;
+    violations.push(
+      `unwired-seam-risk: story "${s.title}" AC ${drivenAc.id || '?'} drives the app (browser-verified) but its touches own no wiring surface (a *.feature.* / app page-entry / reducer-composition file) — touches: [${touches.join(', ') || 'none'}]; the driven interaction has no home`,
+    );
+  }
+
   return {
     levels,
     maxWidth,

@@ -292,3 +292,131 @@ useStoryNodes/useAgentJob/use-agent-events polls.
 
 Vercel web-interface-guidelines fetched and applied (URL-synced tabs, focus-visible,
 aria, loading…, purposeful empty states for pending stages).
+
+### I9 — Stepping story ×3 → operator wire + defect #5; sst deploy fight
+
+- **Pipeline defect #5 (goal-misalignment): browser-probe-only ACs give the implementer no
+  red to chase.** With widened touches the implementer ran its unit suite, saw green
+  ("nothing to add per minimal-code rule"), never addressed ac3 (arrow-key steering, whose
+  ONLY verification is the gate's browser probe) → "nothing to commit" → probe fail. Fix
+  candidates: implementer prompt must enumerate browser-verified ACs as un-covered-by-unit
+  obligations; or test-author must bind a DOM-level unit test (keydown → dispatch) alongside
+  the probe; or gate feedback (probe transcript) must be injected into attempt 2's prompt.
+- Operator wire (commit 6a20c1c-ish on plan branch): reducer pre-switch 'turn' guard using
+  movement.turn + ArrowKey keydown dispatch in snake.feature.tsx; tsc + snake tests green;
+  story retried (attempt will validate via the gate's own probe).
+- **sst deploy saga:** background-wrapper kills orphaned THREE pulumi providers spinning at
+  ~90-100% CPU holding the state lock; then the poisoned-esbuild "service was stopped"
+  recurred. Remedy (same as pacman mission): kill orphans → rm -rf .sst/platform → sst
+  install → npm cache clean → pin esbuild 0.21.5 in .sst/platform → unlock → detached
+  nohup deploy (attempt 3 in flight). Ops rule: NEVER run sst deploy under a kill-prone
+  background wrapper; always nohup+disown with a log monitor.
+
+### I10 — Batch 1 complete; collision story = probe-vocabulary defect (#6 recurrence)
+
+- Stepping story DONE via operator wire (gate's own probe validated arrow steering).
+- Collision story failed ×1: ac4 when = "steers the snake into the board edge" — not
+  executable by the probe grammar (no concrete keys/wait), so the journey asserted
+  status=over while the snake was mid-board ("running"). Same class as pacman's
+  clicks-grammar lesson: planner authors prose the executor can't perform.
+- Fix: ac4 when → "presses Space and waits 4 seconds while the snake runs unsteered into
+  the right wall" (grammar: `presses Space` → key; `4 seconds` → wait 4000ms; snake spawns
+  (7,10) heading right, wall in ~12 steps ≈1.5s — deterministic). Story retried.
+- Fix-round item: planner prompt must constrain `when` clauses to the probe grammar
+  (press <Key> / waits N seconds / clicks the X button / harness-verb list) — lint at
+  plan-audit time (auditPlanGraph can validate when-clauses against parseProbe and reject
+  unexecutable ones at MINT time, before any story burns attempts).
+- sst deploy attempt 3: provider spinning again at 100% CPU under heavy host load (2
+  concurrent story jobs + dev servers); giving it its full window before escalating.
+
+### I11 — Batches 2-3, integrator, plan reached review
+
+- Collision story done on retry (ac4 rewrite + free host). Eating story done (test-author
+  self-healed a missing BINDING manifest).
+- HUD story: gate probe caught REAL spec drift — AC demands a Restart _button_, implementer
+  shipped "press Space to restart" text. Plus AC precondition "after the game is over" not
+  grammar-executable. Fixed both: rewrote ac3/ac4 when-clauses to executable form; operator
+  commit adds the Restart button (story trailer); story retried. Integrator ran integrate+
+  green (correctly per charter — tree WAS unit-green) but cannot fix probe-only gaps.
+- **Defect #8:** greenfield quick-p3 apps have NO GitHub repo, but integrator push-on-close
+  assumes one (exit 128 "Repository not found") — harmless single-machine, breaks the
+  cross-machine handoff contract for greenfield plans. Fix candidate: create the repo at
+  scaffold (like dispatch flow does) or make push-on-close skip+warn when no remote.
+- Plan advanced to **review** (failed story counts as resolved — known semantics); HUD
+  retry racing the QA cycle; QA will re-run on the fixing loop if needed.
+- Deploy attempt 4: pulumi reconciling 1 pending op from the killed attempt (slow but
+  progressing).
+
+### I12 — FIRST LIVE QA-ENGINE RUN (job 46f0fc72) + two engine fixes
+
+- **The new QA-review stage ran end-to-end on a real plan**: 5 journeys (incl. observe
+  steps), 0 orphans, VQA judging, agentic lane attempted → verdict status=uncertain,
+  blocking=false, verified=true (deterministic lanes green), SHA-pinned 07241e4e.
+- Agentic lane behaved exactly per fail-open design under TWO real faults:
+  (a) extension probe → not reachable → headless fallback ✓; (b) journeys capped 3/5 ✓;
+  (c) **defect: navigated plan.devUrl verbatim → dev.futurator.ai NXDOMAIN** — FIXED:
+  ensureUrl now rewrites the origin to the DevRouter CF domain
+  (AGENTIC_VQA_URL_REWRITE, defaulted; override-able; 15/15 tests) — committed;
+  (d) **operator decision needed: the BrowserAgent API key has NO credits** — every
+  computer-use call 400'd "credit balance too low"; runs recorded as uncertain, QA not
+  failed. Agentic stays effectively skipped until the key is funded or swapped.
+- HUD story: the retry's implementer built a PROPER SnakeHud Restart (onRestart prop) —
+  good; failed only on the dev-server 404 squatter flake (defect #7). ALSO: the retry job
+  reset the branch and orphaned my operator commit + the integrator commit (defect #12
+  recurrence — mid-plan resets orphan commits; recoverable, implementer superseded mine).
+- Daemon restarted (pid 9035) on fresh code (planner stream + URL rewrite); HUD story
+  retried on a quiet host.
+
+### I13 (2026-07-19) — HUD 404 root-caused: dirty basePath; deploy = memory starvation
+
+- **Defect #9 CONFIRMED root of the 4× "dev server did not boot (status=404)":** the
+  dev-deploy job patches `basePath:'/snake-classic-feda6e'` into next.config.ts IN THE
+  SHARED CHECKOUT and leaves it uncommitted — every subsequent local probe hits `/` → 404.
+  (Same class as the pacman GCP "dirty basePath" note.) Fix candidate: deploy pipeline must
+  build with the basePath via env (NEXT_PUBLIC_BASE_PATH / a build-time flag) or revert its
+  config mutation in a finally-step. Cleaned the tree (also discarded an 87-line
+  uncommitted page.tsx rewrite = out-of-scope story residue, defect #7 class), retried HUD.
+- **sst deploy wedge root-caused: memory starvation, not state.** Swap 5.4/6GB, 3.6M
+  pageouts; the x64-under-Rosetta pulumi provider was demand-paged into a 100%-CPU spin
+  (RSS ~480KB). The stripped pending op (sourcemap upload) was real but secondary. Attempt
+  6 running on a quiet system. Ops rule: deploy from this Mac only when the fleet is idle,
+  or move deploys off-host.
+
+### I14 — STAGE-FIRST UI LIVE + verified; deploy cured with arm64 provider
+
+- **Deploy root cause FINAL: the x64 pulumi provider under Rosetta** — after SIGKILLs its
+  translation looped forever (RSS ~0.5-1MB, 100% CPU, zero work) even on a quiet host.
+  Cure: dropped the native darwin-arm64 provider binary into
+  ~/Library/Application Support/sst/plugins/resource-aws-v7.20.0/ → deploy completed in
+  minutes. (x64 backup at /tmp/pulumi-resource-aws.x64.bak. Follow-up: move the whole
+  toolchain to arm64 node so sst/esbuild/providers all install native.)
+- **Stage-first UI verified on hub.futurator.ai** (snake plan): lands on QA REVIEW (current
+  stage) w/ selected ring + "QA verified"; QA panel = READY-TO-DELIVER pill, frozen-commit
+  card, wiring PASS, journey verdicts; CONCEPT → PLANNER|PLAN with minted summary +
+  narrative; DEVELOPMENT → frontier strip inside + 6 dev subtabs + stats. URL carries
+  stage+subtab. Hero cost/tokens live ($2.97 · 34k · 11m27s planning-to-date).
+- HUD story final defect: implementer's SnakeHud had onRestart prop but feature never
+  passed it (integration point outside touches AGAIN — defect #2/#5 family). Operator
+  one-liner wired it; story retried after basePath-clean.
+
+### I15 — PIPELINE FIX ROUND (operator-mandated: roots, not symptoms)
+
+Root-cause fixes to build (targets scouted):
+R1 mint-time enforcement (daemon/pipelines/lib/quick-planspec.mjs): (a) probe-grammar lint —
+every AC when-clause must parse via parseProbe (import from browser-probe-executor);
+unexecutable → audit violation → repair-pass rewrites with the grammar contract in-prompt;
+(b) integration-seam rule — any story with browser-verified ACs must include the feature/
+page wiring surface in touches; planner prompt states both contracts explicitly.
+R2 binding scope + de-gamed implementer (daemon/pipelines/story-dev-pipeline.mjs):
+(a) test-author bindings implement-side must lie within touches ∪ existing files; needs a
+new impl file outside → auto-widen story touches (write-back, logged); (b) implementer
+prompt lists browser-verified ACs as explicit un-covered-by-units obligations, with the
+probe grammar snippet + prior attempt's probe failure transcript on retry; (c) implementer
+verification commands scoped to own bound tests (sibling RED noise labeled expected).
+R3 infra-attempt protection (story-dev-pipeline + browser-probe-executor): boot failures
+(status 000/404-at-root/timeouts) classify infra:true → story auto-requeued (bounded 3
+infra retries) WITHOUT consuming an attempt; 404-at-root additionally checks for an
+uncommitted basePath in next.config → auto `git checkout --` it (logged 'dirty-config').
+R4 deploy hygiene (functions/shared/deploy/build-deploy-pipeline.ts): mandatory final step —
+revert the basePath config mutation after sync (git checkout -- next.config.\*) + verify
+`git status --porcelain` clean; extractor asserts it.

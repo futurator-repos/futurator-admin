@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { resolveDeployTarget, sourceEnvironmentFor } from '../deploy-targets';
 import { buildPromotePipeline, buildPromoteJob, buildRollbackJob } from '../build-promote-pipeline';
-import { buildDeployPipeline } from '../build-deploy-pipeline';
+import { buildDeployPipeline, treeClean } from '../build-deploy-pipeline';
 
 function promptOf(pipeline: ReturnType<typeof buildPromotePipeline>): string {
   return pipeline.steps[0].prompt ?? '';
@@ -106,6 +106,72 @@ describe('test-harness contract (F29 Part C)', () => {
       expect(prompt).not.toContain('NEXT_PUBLIC_TEST_HARNESS');
       expect(prompt).toContain('npm run build');
     }
+  });
+});
+
+describe('R4 — deploy hygiene: mandatory config-revert + DEPLOY_TREE contract', () => {
+  const dev = resolveDeployTarget('dino1', 'dev');
+  const prompt = buildDeployPipeline('/w/dino1', dev).steps[0].prompt ?? '';
+
+  it('prompt has a mandatory step-6 cleanup that reverts the framework config via git checkout --', () => {
+    expect(prompt).toContain('MANDATORY cleanup');
+    expect(prompt).toMatch(
+      /git -C \/w\/dino1 checkout -- next\.config\.ts next\.config\.js next\.config\.mjs vite\.config\.ts vite\.config\.js/,
+    );
+  });
+
+  it('prompt requires running git status --porcelain after the revert', () => {
+    expect(prompt).toContain('git -C /w/dino1 status --porcelain');
+  });
+
+  it('prompt tells the agent to emit a DEPLOY_TREE line on both success and failure', () => {
+    expect(prompt).toContain('DEPLOY_TREE: clean');
+    expect(prompt).toMatch(/DEPLOY_TREE:.*dirty/);
+    // present in the failure-branch instructions too, not just success
+    const failureBranch = prompt.slice(prompt.indexOf('DEPLOY_STATUS: failed'));
+    expect(failureBranch).toContain('DEPLOY_TREE');
+  });
+
+  it('emits a DEPLOY_TREE extractor alongside DEPLOY_URL/COMMIT_SHA', () => {
+    const extractors = buildDeployPipeline('/w/dino1', dev).steps[0].extractors as
+      | Record<string, { pattern: string }>
+      | undefined;
+    expect(extractors?.DEPLOY_TREE?.pattern).toBeTruthy();
+    expect(extractors?.DEPLOY_URL?.pattern).toBeTruthy();
+    expect(extractors?.COMMIT_SHA?.pattern).toBeTruthy();
+  });
+
+  it('DEPLOY_TREE extractor parses a clean verdict', () => {
+    const pattern = buildDeployPipeline('/w/dino1', dev).steps[0].extractors?.DEPLOY_TREE
+      ?.pattern as string;
+    const m = new RegExp(pattern, 's').exec('DEPLOY_TREE: clean');
+    expect(m?.[1]).toBe('clean');
+  });
+
+  it('DEPLOY_TREE extractor parses a dirty verdict with the file list', () => {
+    const pattern = buildDeployPipeline('/w/dino1', dev).steps[0].extractors?.DEPLOY_TREE
+      ?.pattern as string;
+    const m = new RegExp(pattern, 's').exec('DEPLOY_TREE: dirty next.config.ts');
+    expect(m?.[1]).toBe('dirty next.config.ts');
+  });
+
+  it('DEPLOY_TREE extractor tolerates markdown decoration like the other extractors', () => {
+    const pattern = buildDeployPipeline('/w/dino1', dev).steps[0].extractors?.DEPLOY_TREE
+      ?.pattern as string;
+    const m = new RegExp(pattern, 's').exec('**DEPLOY_TREE:** `clean`');
+    expect(m?.[1]).toBe('clean');
+  });
+
+  it('treeClean() parses the extracted variable into the writeback boolean', () => {
+    expect(treeClean('clean')).toBe(true);
+    expect(treeClean('  clean  ')).toBe(true);
+    expect(treeClean('dirty next.config.ts')).toBe(false);
+  });
+
+  it('treeClean() fails closed (false) when DEPLOY_TREE is absent — never assume clean', () => {
+    expect(treeClean(undefined)).toBe(false);
+    expect(treeClean(null)).toBe(false);
+    expect(treeClean('')).toBe(false);
   });
 });
 
