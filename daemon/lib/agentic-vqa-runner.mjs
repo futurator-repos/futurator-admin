@@ -81,11 +81,11 @@ export function ensureUrl(devUrl, env = process.env) {
     const scheme = /^(localhost|127\.|0\.0\.0\.0|\[::1\])/i.test(url) ? 'http' : 'https';
     url = `${scheme}://${url}`;
   }
-  // dev.futurator.ai has no DNS record yet (DevRouter CF alias/cert pending) —
-  // plan rows carry it as the canonical devUrl but a real browser can't resolve
-  // it. Swap the origin for the reachable DevRouter domain, keeping the path.
-  // AGENTIC_VQA_URL_REWRITE format: "<host>=<replacement-host>".
-  const rewrite = env.AGENTIC_VQA_URL_REWRITE || 'dev.futurator.ai=d222fvxm0fq0g3.cloudfront.net';
+  // Optional env-configured origin rewrite for devUrls whose canonical host is
+  // not (yet) resolvable from this box — e.g. a dev subdomain whose DNS alias
+  // is pending. Deployment-specific values live in the daemon env, NEVER in
+  // code. AGENTIC_VQA_URL_REWRITE format: "<host>=<replacement-host>".
+  const rewrite = env.AGENTIC_VQA_URL_REWRITE || '';
   const [fromHost, toHost] = rewrite.split('=');
   if (fromHost && toHost) {
     try {

@@ -149,14 +149,22 @@ test('buildInstruction: includes narrative, real-user framing, and verdict remin
 });
 
 test('ensureUrl: prepends a scheme only when missing', () => {
-  // dev.futurator.ai has no DNS yet — ensureUrl rewrites it to the reachable
-  // DevRouter CF domain (AGENTIC_VQA_URL_REWRITE, defaulted).
+  // Origin rewrite is ENV-CONFIGURED only (no baked deployment defaults in
+  // code): without AGENTIC_VQA_URL_REWRITE the URL passes through untouched.
   assert.equal(
-    ensureUrl('https://dev.futurator.ai/apps/x'),
+    ensureUrl('https://dev.futurator.ai/apps/x', {}),
+    'https://dev.futurator.ai/apps/x',
+  );
+  assert.equal(
+    ensureUrl('https://dev.futurator.ai/apps/x', {
+      AGENTIC_VQA_URL_REWRITE: 'dev.futurator.ai=d222fvxm0fq0g3.cloudfront.net',
+    }),
     'https://d222fvxm0fq0g3.cloudfront.net/apps/x',
   );
   assert.equal(
-    ensureUrl('dev.futurator.ai/apps/x'),
+    ensureUrl('dev.futurator.ai/apps/x', {
+      AGENTIC_VQA_URL_REWRITE: 'dev.futurator.ai=d222fvxm0fq0g3.cloudfront.net',
+    }),
     'https://d222fvxm0fq0g3.cloudfront.net/apps/x',
   );
   assert.equal(

@@ -108,6 +108,10 @@ fi
 export BROWSER_AGENT_API_KEY
 export BROWSER_AGENT_URL="${BROWSER_AGENT_URL:-http://127.0.0.1:3010}"
 export AGENTIC_VQA_MODE="${AGENTIC_VQA_MODE:-auto}"
+# dev.futurator.ai has no DNS alias yet (DevRouter CF cert/alias pending) — until
+# then, rewrite agentic-VQA journey origins to the reachable DevRouter domain.
+# Deployment-specific: lives HERE (env), not in daemon code.
+export AGENTIC_VQA_URL_REWRITE="${AGENTIC_VQA_URL_REWRITE:-dev.futurator.ai=d222fvxm0fq0g3.cloudfront.net}"
 
 LOG_DIR="$ROOT/logs"
 LOG_FILE="$LOG_DIR/daemon.log"
