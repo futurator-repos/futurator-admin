@@ -34,3 +34,12 @@ docs/concepts/agentic-office/
 # Three.js runtime 3D models (gltf/glb, ~150MB). Host on S3 and load at runtime
 # instead of bloating git history.
 public/models/
+
+# Vendored external repos for evaluation/reference (jcode, ecc, BMAD-METHOD,
+# OpenSpec, superpowers, spec-kit, get-shit-done, ponytail) — ~900MB, each with
+# its own .git. Reference material only — never commit.
+repos/
+
+# Scoped-typecheck temp artifacts (agents write these during isolated tsc checks)
+*.tmp.tsbuildinfo
+.tsconfig.check.tmp.json
