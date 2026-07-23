@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:#0a0e14;font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:6px}
+  ::-webkit-scrollbar-track{background:transparent}
+  @keyframes pulseDot{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+<script src="./graph-engine.js"></script>
+</helmet>
+<div style="height:100vh;width:100%;display:flex;flex-direction:column;background:#0a0e14;color:#e6edf3;font-size:13px;overflow:hidden">
+
+  <!-- TOP BAR -->
+  <div style="display:flex;align-items:center;gap:18px;padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.07);background:#0c1118;flex:none">
+    <div style="display:flex;align-items:center;gap:9px">
+      <div style="width:9px;height:9px;border-radius:50%;background:#56B4E9;animation:pulseDot 2.4s ease-in-out infinite"></div>
+      <span style="font-weight:700;letter-spacing:.2px">Mycelium</span>
+      <span style="color:#5f6b7a;font-size:11px">knowledge graph</span>
+    </div>
+    <div style="display:flex;gap:14px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#8b98a9">
+      <span>project <span style="color:#cdd6e0">{{ projectId }}</span></span>
+      <span><span style="color:#cdd6e0">{{ nodeCount }}</span> nodes</span>
+      <span><span style="color:#cdd6e0">{{ edgeCount }}</span> edges</span>
+      <span>knowledge <span style="color:#22c55e">{{ coverage }}</span></span>
+    </div>
+    <div style="flex:1"></div>
+    <!-- mode switcher -->
+    <div style="display:flex;background:#070b10;border:1px solid rgba(255,255,255,0.08);border-radius:9px;padding:3px;gap:2px">
+      <button onClick="{{ pickAtlas }}" style="{{ tabAtlas }}">A · Force Atlas</button>
+      <button onClick="{{ pickLanes }}" style="{{ tabLanes }}">B · Layered Lanes</button>
+      <button onClick="{{ pickOrbit }}" style="{{ tabOrbit }}">C · Blast Orbit</button>
+    </div>
+    <div style="display:flex;gap:6px">
+      <button onClick="{{ toggleXray }}" style="{{ chipXray }}">X-ray</button>
+      <button onClick="{{ toggleDocs }}" style="{{ chipDocs }}">Docs overlay</button>
+      <button onClick="{{ toggleBlast }}" style="{{ chipBlast }}">Blast radius</button>
+      <button onClick="{{ doFit }}" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(255,255,255,0.1);background:#11161f;color:#cdd6e0;font-size:12px;cursor:pointer">Fit</button>
+    </div>
+  </div>
+
+  <!-- SEARCH -->
+  <div style="display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1px solid rgba(255,255,255,0.06);background:#0a0e14;flex:none">
+    <span style="color:#5f6b7a;font-family:'IBM Plex Mono',monospace;font-size:12px">⌕</span>
+    <input value="{{ query }}" onInput="{{ onQuery }}" placeholder="Search — free text, or kind:table  type:READS  auth:false  billable:true  status:active" style="flex:1;background:transparent;border:none;outline:none;color:#e6edf3;font-size:13px;font-family:'IBM Plex Mono',monospace" />
+    <sc-if value="{{ hasQuery }}" hint-placeholder-val="{{ false }}">
+      <span style="font-size:11px;color:#8b98a9;font-family:'IBM Plex Mono',monospace">{{ matchCount }} matches</span>
+      <button onClick="{{ clearQuery }}" style="padding:3px 9px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:#11161f;color:#8b98a9;font-size:11px;cursor:pointer">clear</button>
+    </sc-if>
+  </div>
+
+  <!-- MAIN -->
+  <div style="flex:1;display:flex;min-height:0">
+
+    <!-- LEFT RAIL: filters -->
+    <div style="width:248px;flex:none;border-right:1px solid rgba(255,255,255,0.07);background:#0c1118;overflow-y:auto;padding:14px 12px">
+      <div style="font-size:10.5px;letter-spacing:.7px;color:#5f6b7a;font-weight:600;margin-bottom:8px">LAYERS &amp; KINDS</div>
+      <sc-for list="{{ layerGroups }}" as="g" hint-placeholder-count="6">
+        <div style="margin-bottom:11px">
+          <div style="display:flex;align-items:center;gap:7px;margin-bottom:5px">
+            <span style="width:8px;height:8px;border-radius:2px;background:{{ g.hue }}"></span>
+            <span style="font-size:11px;font-weight:600;color:#aeb9c7;letter-spacing:.3px">{{ g.label }}</span>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:5px">
+            <sc-for list="{{ g.kinds }}" as="k" hint-placeholder-count="3">
+              <button onClick="{{ k.toggle }}" style="{{ k.style }}">
+                <span style="width:8px;height:8px;border-radius:50%;background:{{ k.color }};flex:none"></span>
+                <span>{{ k.kind }}</span>
+                <span style="color:#6b7787;font-family:'IBM Plex Mono',monospace">{{ k.count }}</span>
+              </button>
+            </sc-for>
+          </div>
+        </div>
+      </sc-for>
+
+      <div style="font-size:10.5px;letter-spacing:.7px;color:#5f6b7a;font-weight:600;margin:16px 0 8px">EDGE TYPES</div>
+      <div style="display:flex;flex-direction:column;gap:3px">
+        <sc-for list="{{ edgeTypes }}" as="e" hint-placeholder-count="8">
+          <button onClick="{{ e.toggle }}" style="{{ e.style }}">
+            <span style="width:16px;height:3px;border-radius:2px;background:{{ e.color }};flex:none"></span>
+            <span style="flex:1;text-align:left;font-family:'IBM Plex Mono',monospace;font-size:11px">{{ e.type }}</span>
+            <span style="color:#6b7787;font-family:'IBM Plex Mono',monospace;font-size:11px">{{ e.count }}</span>
+          </button>
+        </sc-for>
+      </div>
+
+      <div style="font-size:10.5px;letter-spacing:.7px;color:#5f6b7a;font-weight:600;margin:16px 0 7px">ENCODING</div>
+      <div style="font-size:10.5px;color:#7c8896;line-height:1.7;font-family:'IBM Plex Mono',monospace">
+        <div>● code &nbsp; ▢ infra &nbsp; ◆ api</div>
+        <div>⬡ events &nbsp; ▮ docs &nbsp; ⬭ contract</div>
+        <div style="margin-top:5px">— extracted &nbsp; --- inferred</div>
+        <div>size = centrality (X-ray)</div>
+        <div><span style="color:#fbbf24">$</span> = billable service</div>
+      </div>
+    </div>
+
+    <!-- CANVAS -->
+    <div style="flex:1;position:relative;min-width:0;background:#0c1118">
+      <canvas ref="{{ canvasRef }}" style="position:absolute;inset:0;width:100%;height:100%;display:block"></canvas>
+      <div style="position:absolute;top:12px;left:14px;display:flex;flex-direction:column;gap:4px;pointer-events:none">
+        <span style="font-size:12px;font-weight:600;color:#cdd6e0">{{ modeTitle }}</span>
+        <span style="font-size:11px;color:#7c8896;max-width:360px">{{ modeHint }}</span>
+      </div>
+      <sc-if value="{{ blastBanner }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;top:12px;right:14px;display:flex;align-items:center;gap:8px;padding:7px 12px;border-radius:9px;background:rgba(244,63,94,0.12);border:1px solid rgba(244,63,94,0.4)">
+          <span style="font-size:12px;color:#fda4af;font-weight:600">⚠ touches a paid API</span>
+        </div>
+      </sc-if>
+      <div ref="{{ tipRef }}" style="position:fixed;pointer-events:none;z-index:50;display:none;background:#0a0e14;border:1px solid rgba(255,255,255,0.14);border-radius:7px;padding:6px 9px;font-size:11.5px;color:#e6edf3;box-shadow:0 8px 24px rgba(0,0,0,0.5);max-width:280px"></div>
+    </div>
+
+    <!-- RIGHT RAIL -->
+    <div style="width:328px;flex:none;border-left:1px solid rgba(255,255,255,0.07);background:#0c1118;overflow-y:auto">
+
+      <!-- inspector -->
+      <div style="padding:14px;border-bottom:1px solid rgba(255,255,255,0.06)">
+        <sc-if value="{{ hasSelection }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">
+            <span style="width:13px;height:13px;border-radius:4px;background:{{ sel.color }};flex:none"></span>
+            <span style="font-weight:700;font-size:14px;line-height:1.2;word-break:break-word">{{ sel.label }}</span>
+          </div>
+          <div style="display:inline-flex;gap:6px;margin-bottom:11px">
+            <span style="font-size:10.5px;font-family:'IBM Plex Mono',monospace;background:rgba(255,255,255,0.06);padding:2px 7px;border-radius:5px;color:#aeb9c7">{{ sel.kind }}</span>
+            <span style="font-size:10.5px;font-family:'IBM Plex Mono',monospace;background:rgba(255,255,255,0.06);padding:2px 7px;border-radius:5px;color:#aeb9c7">{{ sel.layerLabel }}</span>
+          </div>
+          <div style="font-size:11px;color:#9aa6b4;line-height:1.5;margin-bottom:12px">{{ sel.summary }}</div>
+          <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:13px">
+            <sc-for list="{{ sel.props }}" as="p" hint-placeholder-count="3">
+              <div style="display:flex;justify-content:space-between;gap:10px;font-size:11.5px">
+                <span style="color:#6b7787;font-family:'IBM Plex Mono',monospace">{{ p.k }}</span>
+                <span style="color:#cdd6e0;text-align:right;font-family:'IBM Plex Mono',monospace;word-break:break-word">{{ p.v }}</span>
+              </div>
+            </sc-for>
+          </div>
+          <div style="font-size:10.5px;letter-spacing:.6px;color:#5f6b7a;font-weight:600;margin-bottom:7px">CONNECTIONS · {{ sel.degree }}</div>
+          <div style="display:flex;flex-direction:column;gap:7px">
+            <sc-for list="{{ sel.edgeGroups }}" as="grp" hint-placeholder-count="3">
+              <div>
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
+                  <span style="width:14px;height:3px;border-radius:2px;background:{{ grp.color }}"></span>
+                  <span style="font-size:10px;font-family:'IBM Plex Mono',monospace;color:#8b98a9">{{ grp.label }}</span>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:2px;padding-left:20px">
+                  <sc-for list="{{ grp.items }}" as="it" hint-placeholder-count="2">
+                    <button onClick="{{ it.go }}" style="display:flex;align-items:center;gap:6px;background:none;border:none;cursor:pointer;padding:2px 0;text-align:left">
+                      <span style="width:7px;height:7px;border-radius:50%;background:{{ it.color }};flex:none"></span>
+                      <span style="font-size:11.5px;color:#bcc7d4;font-family:'IBM Plex Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ it.label }}</span>
+                    </button>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </sc-if>
+        <sc-if value="{{ noSelection }}" hint-placeholder-val="{{ true }}">
+          <div style="color:#6b7787;font-size:12px;line-height:1.6;padding:6px 0">Click a node to inspect it — its kind, properties, and every relationship grouped by type. In <b style="color:#9aa6b4">Blast Orbit</b> the selection re-centers the graph by hop distance.</div>
+        </sc-if>
+      </div>
+
+      <!-- blast summary -->
+      <sc-if value="{{ showBlast }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:14px;border-bottom:1px solid rgba(255,255,255,0.06)">
+          <div style="font-size:10.5px;letter-spacing:.6px;color:#5f6b7a;font-weight:600;margin-bottom:9px">BLAST RADIUS · ≤2 HOPS · {{ blast.count }} REACHED</div>
+          <sc-for list="{{ blast.layers }}" as="L" hint-placeholder-count="3">
+            <div style="margin-bottom:8px">
+              <div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">
+                <span style="width:8px;height:8px;border-radius:2px;background:{{ L.hue }}"></span>
+                <span style="font-size:11px;font-weight:600;color:#aeb9c7">{{ L.label }}</span>
+                <span style="font-size:10px;color:#6b7787;font-family:'IBM Plex Mono',monospace">{{ L.count }}</span>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:4px;padding-left:15px">
+                <sc-for list="{{ L.items }}" as="it" hint-placeholder-count="2">
+                  <button onClick="{{ it.go }}" style="{{ it.style }}">{{ it.label }}</button>
+                </sc-for>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <!-- analytics accordions -->
+      <div style="padding:6px 0">
+        <!-- god nodes -->
+        <div style="border-bottom:1px solid rgba(255,255,255,0.05)">
+          <button onClick="{{ tGod }}" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:11px 14px;background:none;border:none;cursor:pointer;color:#e6edf3">
+            <span style="font-size:12px;font-weight:600">God-nodes <span style="color:#6b7787;font-weight:400;font-size:11px">· structural load-bearers</span></span>
+            <span style="color:#6b7787">{{ godCaret }}</span>
+          </button>
+          <sc-if value="{{ openGod }}" hint-placeholder-val="{{ true }}">
+            <div style="padding:0 14px 12px;display:flex;flex-direction:column;gap:4px">
+              <sc-for list="{{ godNodes }}" as="n" hint-placeholder-count="5">
+                <button onClick="{{ n.go }}" style="display:flex;align-items:center;gap:8px;padding:5px 7px;border-radius:6px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);cursor:pointer;text-align:left">
+                  <span style="width:8px;height:8px;border-radius:50%;background:{{ n.color }};flex:none"></span>
+                  <span style="flex:1;font-size:11.5px;color:#cdd6e0;font-family:'IBM Plex Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ n.title }}</span>
+                  <span style="font-size:10.5px;color:#56B4E9;font-family:'IBM Plex Mono',monospace">{{ n.score }}</span>
+                </button>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+        <!-- communities -->
+        <div style="border-bottom:1px solid rgba(255,255,255,0.05)">
+          <button onClick="{{ tComm }}" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:11px 14px;background:none;border:none;cursor:pointer;color:#e6edf3">
+            <span style="font-size:12px;font-weight:600">Communities <span style="color:#6b7787;font-weight:400;font-size:11px">· Louvain clusters</span></span>
+            <span style="color:#6b7787">{{ commCaret }}</span>
+          </button>
+          <sc-if value="{{ openComm }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:0 14px 12px;display:flex;flex-direction:column;gap:4px">
+              <sc-for list="{{ communities }}" as="c" hint-placeholder-count="6">
+                <div style="display:flex;align-items:center;gap:8px;font-size:11.5px">
+                  <span style="width:9px;height:9px;border-radius:50%;background:{{ c.color }}"></span>
+                  <span style="flex:1;color:#cdd6e0">{{ c.label }}</span>
+                  <span style="color:#6b7787;font-family:'IBM Plex Mono',monospace">{{ c.count }}</span>
+                </div>
+              </sc-for>
+              <div style="font-size:10.5px;color:#6b7787;margin-top:4px">Turn on <b style="color:#9aa6b4">X-ray</b> to colour nodes by community and size by centrality.</div>
+            </div>
+          </sc-if>
+        </div>
+        <!-- surprising -->
+        <div style="border-bottom:1px solid rgba(255,255,255,0.05)">
+          <button onClick="{{ tSurp }}" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:11px 14px;background:none;border:none;cursor:pointer;color:#e6edf3">
+            <span style="font-size:12px;font-weight:600">Surprising connections <span style="color:#6b7787;font-weight:400;font-size:11px">· cross-community</span></span>
+            <span style="color:#6b7787">{{ surpCaret }}</span>
+          </button>
+          <sc-if value="{{ openSurp }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:0 14px 12px;display:flex;flex-direction:column;gap:5px">
+              <sc-for list="{{ surprising }}" as="s" hint-placeholder-count="5">
+                <button onClick="{{ s.go }}" style="display:flex;align-items:center;gap:5px;padding:4px 0;background:none;border:none;cursor:pointer;text-align:left;font-family:'IBM Plex Mono',monospace;font-size:10.5px">
+                  <span style="width:7px;height:7px;border-radius:50%;background:{{ s.cs }}"></span>
+                  <span style="color:#bcc7d4;max-width:88px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ s.source }}</span>
+                  <span style="color:#f59e0b">{{ s.type }}</span>
+                  <span style="width:7px;height:7px;border-radius:50%;background:{{ s.ct }}"></span>
+                  <span style="color:#bcc7d4;max-width:88px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ s.target }}</span>
+                </button>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+        <!-- integrity -->
+        <div>
+          <button onClick="{{ tInteg }}" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:11px 14px;background:none;border:none;cursor:pointer;color:#e6edf3">
+            <span style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600">Integrity <span style="{{ orphanBadge }}">{{ orphanLabel }}</span></span>
+            <span style="color:#6b7787">{{ integCaret }}</span>
+          </button>
+          <sc-if value="{{ openInteg }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:0 14px 14px">
+              <div style="font-size:10.5px;color:#fca5a5;margin-bottom:4px">Orphans (hard-fail tripwire)</div>
+              <div style="display:flex;flex-direction:column;gap:2px;margin-bottom:9px">
+                <sc-for list="{{ orphans }}" as="o" hint-placeholder-count="2">
+                  <button onClick="{{ o.go }}" style="display:flex;align-items:center;gap:6px;background:none;border:none;cursor:pointer;text-align:left;padding:1px 0">
+                    <span style="width:7px;height:7px;border-radius:50%;background:{{ o.color }}"></span>
+                    <span style="font-size:11px;color:#bcc7d4;font-family:'IBM Plex Mono',monospace">{{ o.label }}</span>
+                    <span style="font-size:10px;color:#6b7787">{{ o.kind }}</span>
+                  </button>
+                </sc-for>
+              </div>
+              <div style="font-size:10.5px;color:#d1a54f;margin-bottom:4px">Dead code (advisory)</div>
+              <div style="display:flex;flex-direction:column;gap:2px">
+                <sc-for list="{{ deadCode }}" as="d" hint-placeholder-count="1">
+                  <button onClick="{{ d.go }}" style="display:flex;align-items:center;gap:6px;background:none;border:none;cursor:pointer;text-align:left;padding:1px 0">
+                    <span style="width:7px;height:7px;border-radius:50%;background:#eab308"></span>
+                    <span style="font-size:11px;color:#bcc7d4;font-family:'IBM Plex Mono',monospace">{{ d.label }}</span>
+                  </button>
+                </sc-for>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:900},&quot;startMode&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;atlas&quot;,&quot;lanes&quot;,&quot;orbit&quot;],&quot;default&quot;:&quot;atlas&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = {
+    ready: false, mode: 'cloud', query: '', matchCount: 0,
+    xray: false, docs: false, blast: false,
+    hiddenKinds: [], hiddenEdges: [],
+    selected: null, blastInfo: null,
+    open: { god: true, comm: false, surp: false, integ: false },
+  };
+
+  constructor(props) {
+    super(props);
+    this.canvasRef = React.createRef();
+    this.tipRef = React.createRef();
+    const sm = { atlas: 'cloud', lanes: 'lanes', orbit: 'radial' }[props && props.startMode] || 'cloud';
+    this.state.mode = sm;
+  }
+
+  async componentDidMount() {
+    for (let i = 0; i < 100 && !window.GraphEngine; i++) await new Promise((r) => setTimeout(r, 30));
+    const mod = await import('./graph-data.js');
+    this.data = mod.buildGraph();
+    const P = window.GRAPH_PALETTE;
+    this.P = P;
+    // catalogs
+    const kc = {}, ec = {};
+    this.data.nodes.forEach((n) => { kc[n.kind] = (kc[n.kind] || 0) + 1; });
+    this.data.edges.forEach((e) => { ec[e.type] = (ec[e.type] || 0) + 1; });
+    this.kindCounts = kc; this.edgeCounts = ec;
+    const LAYER_HUE = { code: '#3b82f6', knowledge: '#f97316', infra: '#10b981', events: '#8b5cf6', api: '#0ea5e9', external: '#f43f5e', docs: '#eab308', contract: '#84cc16' };
+    const LAYER_LABEL = { code: 'Code', knowledge: 'Knowledge', infra: 'Infrastructure', events: 'Events (async)', api: 'API surface', external: 'External services', docs: 'Documents', contract: 'Cross-project' };
+    this.layerHue = LAYER_HUE; this.layerLabelMap = LAYER_LABEL;
+
+    this.eng = new window.GraphEngine(this.canvasRef.current, {
+      onSelect: (n) => this.select(n ? n.nodeId : null),
+      onHover: (n, x, y) => this.hover(n, x, y),
+      onBlast: (info) => this.setState({ blastInfo: info }),
+      onSearch: (c) => this.setState({ matchCount: c }),
+    });
+    this.eng.setData(this.data);
+    this.eng.setMode(this.state.mode);
+    this.eng.setOverlay({ blast: this.state.mode === 'radial' });
+    this.scheduleFit();
+    this.setState({ ready: true, blast: this.state.mode === 'radial' });
+  }
+  componentWillUnmount() { this.eng && this.eng.destroy(); }
+  scheduleFit() { [120, 700, 1500, 2600].forEach((t) => setTimeout(() => this.eng && this.eng.fit(), t)); }
+
+  hover(n, x, y) {
+    const tip = this.tipRef.current; if (!tip) return;
+    if (!n) { tip.style.display = 'none'; return; }
+    const extra = n.method ? ` · ${n.method} ${n.path}` : (n.billable ? ' · billable $' : '');
+    tip.innerHTML = `<b>${n.label || n.title}</b> <span style="color:#8b98a9">${n.kind}</span>${extra}`;
+    tip.style.display = 'block'; tip.style.left = (x + 14) + 'px'; tip.style.top = (y + 14) + 'px';
+  }
+
+  select(id) { this.setState({ selected: id }); this.eng.setSelected(id); }
+  goTo(id) { this.select(id); this.eng.focus(id); }
+
+  setMode(m) {
+    this.setState({ mode: m });
+    this.eng.setMode(m);
+    if (m === 'radial') { this.setState({ blast: true }); this.eng.setOverlay({ blast: true }); }
+    this.scheduleFit();
+  }
+  toggle(key, engFn) {
+    const v = !this.state[key]; this.setState({ [key]: v });
+    if (key === 'xray') this.eng.setOverlay({ xray: v });
+    if (key === 'docs') { this.eng.setOverlay({ includeDocs: v }); this.scheduleFit(); }
+    if (key === 'blast') this.eng.setOverlay({ blast: v });
+  }
+  toggleKind(k) {
+    const s = new Set(this.state.hiddenKinds); s.has(k) ? s.delete(k) : s.add(k);
+    this.setState({ hiddenKinds: [...s] }); this.eng.setHiddenKinds(s);
+  }
+  toggleEdge(t) {
+    const s = new Set(this.state.hiddenEdges); s.has(t) ? s.delete(t) : s.add(t);
+    this.setState({ hiddenEdges: [...s] }); this.eng.setHiddenEdges(s);
+  }
+  onQuery(e) { const q = e.target.value; this.setState({ query: q }); this.eng.setSearch(q); }
+  clearQuery() { this.setState({ query: '', matchCount: 0 }); this.eng.setSearch(''); }
+  toggleSection(k) { this.setState((s) => ({ open: Object.assign({}, s.open, { [k]: !s.open[k] }) })); }
+
+  // ---- styling helpers (runtime UI state) ----
+  tab(active) {
+    return `padding:6px 12px;border-radius:7px;border:none;cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap;` +
+      (active ? 'background:#56B4E9;color:#06121f' : 'background:transparent;color:#8b98a9');
+  }
+  chip(on, color) {
+    return `padding:6px 11px;border-radius:7px;border:1px solid ${on ? color : 'rgba(255,255,255,0.1)'};` +
+      `background:${on ? color + '22' : '#11161f'};color:${on ? color : '#8b98a9'};font-size:12px;cursor:pointer;font-weight:500`;
+  }
+  kindChip(hidden) {
+    return `display:inline-flex;align-items:center;gap:5px;padding:3px 7px;border-radius:6px;border:1px solid rgba(255,255,255,0.07);` +
+      `background:${hidden ? 'transparent' : 'rgba(255,255,255,0.04)'};color:${hidden ? '#5a6573' : '#cdd6e0'};` +
+      `font-size:11px;cursor:pointer;font-family:'IBM Plex Mono',monospace;${hidden ? 'text-decoration:line-through;opacity:.55' : ''}`;
+  }
+  edgeRow(hidden) {
+    return `display:flex;align-items:center;gap:8px;padding:3px 6px;border-radius:5px;background:none;border:none;cursor:pointer;` +
+      `${hidden ? 'opacity:.4' : ''}`;
+  }
+
+  renderVals() {
+    const s = this.state, P = this.P, eng = this.eng;
+    const hiddenK = new Set(s.hiddenKinds), hiddenE = new Set(s.hiddenEdges);
+    const titleMap = { cloud: 'A · Force Atlas', lanes: 'B · Layered Lanes', radial: 'C · Blast Orbit' };
+    const hintMap = {
+      cloud: 'Force-directed cloud. Turn on X-ray to colour by community + size by centrality; click a node to light its neighbourhood.',
+      lanes: 'Nodes pinned into seven vertical layers — Docs → Code → API → Events → Infra → External. Cross-layer edges are the reach story.',
+      radial: 'Select any node to re-centre the graph by hop distance. Rings = hops; blast-radius highlights everything you\u2019d touch within 2 hops.',
+    };
+    const out = {
+      canvasRef: this.canvasRef, tipRef: this.tipRef,
+      projectId: this.data ? this.data.projectId : '…',
+      nodeCount: this.data ? this.data.nodeCount : 0,
+      edgeCount: this.data ? this.data.edgeCount : 0,
+      coverage: this.data ? `${this.data.insights.coverage.filesWithArticle}/${this.data.insights.coverage.files}` : '–',
+      query: s.query, matchCount: s.matchCount, hasQuery: !!s.query, noSelection: !s.selected, hasSelection: !!s.selected,
+      modeTitle: titleMap[s.mode], modeHint: hintMap[s.mode],
+      tabAtlas: this.tab(s.mode === 'cloud'), tabLanes: this.tab(s.mode === 'lanes'), tabOrbit: this.tab(s.mode === 'radial'),
+      chipXray: this.chip(s.xray, '#56B4E9'), chipDocs: this.chip(s.docs, '#eab308'), chipBlast: this.chip(s.blast, '#f43f5e'),
+      pickAtlas: () => this.setMode('cloud'), pickLanes: () => this.setMode('lanes'), pickOrbit: () => this.setMode('radial'),
+      toggleXray: () => this.toggle('xray'), toggleDocs: () => this.toggle('docs'), toggleBlast: () => this.toggle('blast'),
+      doFit: () => this.eng && this.eng.fit(),
+      onQuery: (e) => this.onQuery(e), clearQuery: () => this.clearQuery(),
+      tGod: () => this.toggleSection('god'), tComm: () => this.toggleSection('comm'), tSurp: () => this.toggleSection('surp'), tInteg: () => this.toggleSection('integ'),
+      openGod: s.open.god, openComm: s.open.comm, openSurp: s.open.surp, openInteg: s.open.integ,
+      godCaret: s.open.god ? '▾' : '▸', commCaret: s.open.comm ? '▾' : '▸', surpCaret: s.open.surp ? '▾' : '▸', integCaret: s.open.integ ? '▾' : '▸',
+    };
+    if (!this.data) { out.layerGroups = []; out.edgeTypes = []; out.godNodes = []; out.communities = []; out.surprising = []; out.orphans = []; out.deadCode = []; return out; }
+
+    // layer groups for filters
+    const order = P.LANE_ORDER;
+    const byLayer = {};
+    Object.keys(this.kindCounts).forEach((k) => { const L = P.LAYER_OF[k]; (byLayer[L] = byLayer[L] || []).push(k); });
+    out.layerGroups = order.filter((L) => byLayer[L]).map((L) => ({
+      label: this.layerLabelMap[L], hue: this.layerHue[L],
+      kinds: byLayer[L].sort().map((k) => ({
+        kind: k, color: P.KIND_COLOR[k], count: this.kindCounts[k],
+        style: this.kindChip(hiddenK.has(k)), toggle: () => this.toggleKind(k),
+      })),
+    }));
+
+    // edge types
+    out.edgeTypes = Object.keys(this.edgeCounts).sort((a, b) => this.edgeCounts[b] - this.edgeCounts[a]).map((t) => ({
+      type: t, color: P.EDGE_COLOR[t] || '#94a3b8', count: this.edgeCounts[t],
+      style: this.edgeRow(hiddenE.has(t)), toggle: () => this.toggleEdge(t),
+    }));
+
+    // analytics
+    const ins = this.data.insights;
+    out.godNodes = ins.godNodes.map((n) => ({ title: n.title, color: P.KIND_COLOR[n.kind] || '#94a3b8', score: n.centrality.toFixed(2), go: () => this.goTo(n.id) }));
+    out.communities = ins.communities.map((c) => ({ label: c.label, count: c.count, color: P.COMMUNITY[c.community % 8] }));
+    out.surprising = ins.surprisingConnections.map((c) => ({
+      source: c.sourceTitle, target: c.targetTitle, type: c.type,
+      cs: P.COMMUNITY[c.sourceCommunity % 8], ct: P.COMMUNITY[c.targetCommunity % 8],
+      go: () => this.goTo(c.source),
+    }));
+    out.orphans = ins.orphans.list.map((o) => ({ label: o.title, kind: o.kind, color: P.KIND_COLOR[o.kind] || '#94a3b8', go: () => this.goTo(o.id) }));
+    out.deadCode = ins.deadCode.map((d) => ({ label: d.title, go: () => this.goTo(d.id) }));
+    const orphFail = ins.orphans.status === 'fail';
+    out.orphanLabel = orphFail ? `FAIL · ${ins.orphans.hardFailCount}` : 'PASS';
+    out.orphanBadge = `font-size:10px;font-weight:600;padding:1px 7px;border-radius:5px;` +
+      (orphFail ? 'background:rgba(244,63,94,0.18);color:#fca5a5' : 'background:rgba(34,197,94,0.16);color:#4ade80');
+
+    // selection
+    if (s.selected && eng && eng.byId[s.selected]) {
+      const n = eng.byId[s.selected];
+      const props = [];
+      const push = (k, v) => { if (v !== undefined && v !== null && v !== '') props.push({ k, v: String(v) }); };
+      push('status', n.status); push('community', n.community != null ? this.layerLabelMap[P.LAYER_OF[n.kind]] : null);
+      push('centrality', n.centrality != null ? n.centrality.toFixed(3) : null);
+      push('method', n.method); push('path', n.path); if (n.auth !== undefined) push('auth', n.auth ? 'guarded' : 'public');
+      push('fields', n.fields); push('primaryIndex', n.primaryIndex);
+      push('schedule', n.schedule); push('handler', n.handler);
+      if (n.billable !== undefined) push('billable', n.billable ? `yes · ${n.costUnit}` : 'no');
+      push('docType', n.docType); push('exported', n.exported);
+      // edge groups
+      const adj = eng.adj[n.nodeId] || [];
+      const groups = {};
+      adj.forEach(({ o, e }) => {
+        const other = eng.byId[o]; if (!other) return;
+        const dir = e.source === n.nodeId ? '→' : '←';
+        const key = e.type + dir;
+        (groups[key] = groups[key] || { type: e.type, dir, items: [] }).items.push(other);
+      });
+      const edgeGroups = Object.values(groups).sort((a, b) => b.items.length - a.items.length).map((g) => ({
+        label: `${g.dir === '→' ? '' : '← '}${g.type}${g.dir === '→' ? ' →' : ''}`,
+        color: P.EDGE_COLOR[g.type] || '#94a3b8',
+        items: g.items.slice(0, 8).map((o) => ({ label: o.label, color: P.KIND_COLOR[o.kind] || '#94a3b8', go: () => this.goTo(o.nodeId) })),
+      }));
+      out.sel = {
+        label: n.label || n.title, kind: n.kind, color: P.KIND_COLOR[n.kind] || '#94a3b8',
+        layerLabel: this.layerLabelMap[P.LAYER_OF[n.kind]], summary: n.summary || '',
+        props, degree: n.degree || adj.length, edgeGroups,
+      };
+    }
+
+    // blast panel
+    const bi = s.blastInfo;
+    out.showBlast = !!(bi && bi.count);
+    out.blastBanner = !!(bi && bi.paid && bi.paid.length);
+    if (bi && bi.count) {
+      out.blast = {
+        count: bi.count,
+        layers: order.filter((L) => bi.byLayer[L]).map((L) => ({
+          label: this.layerLabelMap[L], hue: this.layerHue[L], count: bi.byLayer[L].length,
+          items: bi.byLayer[L].slice(0, 10).map((nd) => ({
+            label: nd.label,
+            style: `padding:2px 7px;border-radius:5px;border:1px solid ${nd.kind === 'externalService' && nd.billable ? '#fbbf24' : 'rgba(255,255,255,0.08)'};` +
+              `background:rgba(255,255,255,0.03);color:${nd.kind === 'externalService' && nd.billable ? '#fbbf24' : '#bcc7d4'};font-size:10.5px;cursor:pointer;font-family:'IBM Plex Mono',monospace`,
+            go: () => this.goTo(nd.nodeId),
+          })),
+        })),
+      };
+    }
+    return out;
+  }
+}
+</script>
+</body>
+</html>

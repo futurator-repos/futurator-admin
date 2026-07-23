@@ -420,3 +420,17 @@ uncommitted basePath in next.config → auto `git checkout --` it (logged 'dirty
 R4 deploy hygiene (functions/shared/deploy/build-deploy-pipeline.ts): mandatory final step —
 revert the basePath config mutation after sync (git checkout -- next.config.\*) + verify
 `git status --porcelain` clean; extractor asserts it.
+
+### I16 (2026-07-20) — dev.futurator.ai LIVE; plan 0 QA-verified awaiting deliver
+
+- Plan 0 final QA on the complete app (6/6): verified=true, 5 journeys, 0 orphans. Awaiting
+  the deliver transition (operator hub session expired; re-login pending).
+- Operator ran scripts/attach-dev-staging-domains.sh: certs attached, distributions
+  Deployed, associate-alias moved dev/staging.futurator.ai from the dead account via TXT
+  ownership proofs. **https://dev.futurator.ai/... → 200 valid TLS.** staging 403 =
+  empty bucket (expected). IaC reconcile (sst refresh+deploy) running.
+- Remaining operator items: hub re-login (deliver plan 0 + mint brownfield plan 1),
+  BrowserAgent API credits (agentic lane).
+- New minor defects noted along the way: agentic runner should short-circuit remaining
+  journeys on billing-class 400s; daemon federation-backup S3 endpoint mismatch; monitor
+  hygiene (filter network-flap noise).

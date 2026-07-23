@@ -1,0 +1,29 @@
+{
+  "probe": "E2-prompt-trim",
+  "baselineMvpChars": 21958,
+  "postSlimMvpChars": 20449,
+  "charDelta": 1509,
+  "pctReduction": 6.9,
+  "rows": [
+    {
+      "label": "mvp/nextjs",
+      "chars": 20449,
+      "tokens": 5112,
+      "fieldContractDropped": []
+    },
+    {
+      "label": "production/nextjs+grounded",
+      "chars": 22490,
+      "tokens": 5622,
+      "fieldContractDropped": []
+    },
+    {
+      "label": "prototype/vite",
+      "chars": 19343,
+      "tokens": 4835,
+      "fieldContractDropped": []
+    }
+  ],
+  "fieldContractHeld": true,
+  "verdict": "PASS"
+}

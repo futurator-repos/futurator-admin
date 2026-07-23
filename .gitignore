@@ -43,3 +43,7 @@ repos/
 # Scoped-typecheck temp artifacts (agents write these during isolated tsc checks)
 *.tmp.tsbuildinfo
 .tsconfig.check.tmp.json
+
+# v0.dev-generated graph-explorer prototype (reference UI, uses `any` throughout —
+# not held to product lint). Same category as agentic-office above.
+docs/concepts/v0-graph/
