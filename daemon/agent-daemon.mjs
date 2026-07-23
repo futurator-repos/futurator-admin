@@ -1884,6 +1884,70 @@ let lastIntegrateSweepAt = 0;
 const INTEGRATE_SWEEP_INTERVAL_MS = parseInt(process.env.P3_INTEGRATE_SWEEP_INTERVAL_MS || '120000', 10);
 const PLAN_SPEC_GRAPH_TABLE = process.env.PLAN_SPEC_GRAPH_TABLE || 'futurator-plan-spec-graph';
 
+// C1 — Same-app predecessor precedence (KEYSTONE). Daemon-side replica of
+// plan-repository.ts `listPlansByApp`/`getActivePlanForApp`: the daemon is ESM
+// (.mjs) and cannot import the TS repository, so we re-issue the same query
+// against the plans table. Predicate keys on `appId` + plan-status ONLY — no
+// app content, no per-app logic — so it holds for any app, greenfield or
+// brownfield. Kept in sync with `NON_TERMINAL_STATUSES` in plan-repository.ts.
+const APP_ID_PLANS_GSI = process.env.PLANS_APP_ID_GSI || 'appId-createdAt-index';
+const NON_TERMINAL_PLAN_STATUSES = new Set(['concept', 'developing', 'review', 'fixing']);
+
+// Deterministic ordering: ascending by createdAt, tie-broken by planId. Per
+// open decision O-7, when two seals arrive within one clock tick `createdAt`
+// alone is not reliable, so planId (== deriveRunId, stable + unique) is the
+// deterministic secondary key that makes "earliest non-terminal plan" total.
+function comparePlanOrder(a, b) {
+  const ca = String(a?.createdAt || '');
+  const cb = String(b?.createdAt || '');
+  return ca.localeCompare(cb) || String(a?.planId || '').localeCompare(String(b?.planId || ''));
+}
+
+// Mirror of plan-repository.ts `listPlansByApp`: GSI query with Scan fallback
+// while the GSI provisions. Returns plans sorted by comparePlanOrder.
+async function listPlansByAppDaemon(appId) {
+  let items = [];
+  try {
+    const result = await ddb.send(
+      new QueryCommand({
+        TableName: PLANS_TABLE,
+        IndexName: APP_ID_PLANS_GSI,
+        KeyConditionExpression: 'appId = :appId',
+        ExpressionAttributeValues: { ':appId': appId },
+        ScanIndexForward: true,
+      }),
+    );
+    items = result.Items || [];
+  } catch (err) {
+    if (err?.name === 'ValidationException') {
+      const result = await ddb.send(
+        new ScanCommand({
+          TableName: PLANS_TABLE,
+          FilterExpression: 'appId = :appId',
+          ExpressionAttributeValues: { ':appId': appId },
+        }),
+      );
+      items = result.Items || [];
+    } else {
+      throw err;
+    }
+  }
+  return items.slice().sort(comparePlanOrder);
+}
+
+// C1 predicate — returns the earlier non-terminal same-app plan that should
+// take precedence over `planId`, or null if `planId` may dispatch. Keys ONLY
+// on appId + plan-status. If appId is unresolvable we cannot key on it, so we
+// return null (fail-open: no same-app awareness to enforce).
+async function findPrecedingSameAppPlan({ appId, planId }) {
+  if (!appId) return null;
+  const plans = await listPlansByAppDaemon(appId);
+  const nonTerminal = plans.filter((p) => NON_TERMINAL_PLAN_STATUSES.has(p?.status));
+  if (!nonTerminal.length) return null;
+  const earliest = nonTerminal[0]; // already ordered by comparePlanOrder
+  return earliest && earliest.planId && earliest.planId !== planId ? earliest : null;
+}
+
 // Throttled, inert-by-default. When P3_READY_FRONTIER=shadow|on, scan the
 // plan-spec-graph for ingested plans and dispatch each plan's ready frontier:
 // shadow LOGS would-dispatch (the A/B substrate vs legacy waves); on CLAIMS each
@@ -1903,12 +1967,31 @@ async function runFrontierScan() {
     const planIds = [...new Set((Items || []).map((i) => i.planId).filter(Boolean))];
 
     for (const planId of planIds) {
-      // In 'on' mode, resolve the plan's working dir + appId once so the minter
-      // can build runnable story-dev jobs.
-      let plan = null;
-      if (mode === 'on') {
-        const r = await ddb.send(new GetCommand({ TableName: PLANS_TABLE, Key: { planId } })).catch(() => null);
-        plan = r?.Item || null;
+      // Resolve the plan row once: 'on' mode needs its working dir + appId to
+      // mint runnable story-dev jobs, and the C1 same-app precedence guard
+      // (both modes) keys on its appId + status.
+      const planRes = await ddb.send(new GetCommand({ TableName: PLANS_TABLE, Key: { planId } })).catch(() => null);
+      const plan = planRes?.Item || null;
+
+      // C1 (KEYSTONE) — same-app predecessor precedence. If an EARLIER
+      // non-terminal same-app plan exists, skip this plan's frontier entirely
+      // so its stories stay off the frontier until the predecessor is terminal.
+      // Authoritative for BOTH dispatch + operator paths and BOTH greenfield +
+      // brownfield. Keys on appId + plan-status only. Non-blocking: on any
+      // lookup error we fall open (log + dispatch) rather than wedge the scan.
+      const appIdForPrecedence = plan?.appId || '';
+      let precedingPlan = null;
+      try {
+        precedingPlan = await findPrecedingSameAppPlan({ appId: appIdForPrecedence, planId });
+      } catch (e) {
+        log('warn', `[frontier] C1 precedence lookup failed for plan ${planId} (fail-open): ${e.message}`);
+      }
+      if (precedingPlan) {
+        log(
+          'info',
+          `[frontier] plan ${planId} held by C1 precedence — earlier non-terminal same-app plan ${precedingPlan.planId} (app=${appIdForPrecedence}, status=${precedingPlan.status}) must reach terminal first`,
+        );
+        continue;
       }
 
       const enqueue = async (storyNode) => {
@@ -2423,7 +2506,15 @@ async function executeStoryDevJob(job) {
       qaContext,
       // Real bound-AC test executors run in the shared plan tree. qaContext
       // enables the browser/__harness executor for kind=browser behavioral ACs.
-      executors: defaultExecutors({ cwd: job.workingDir, qaContext, log: (lvl, m) => log(lvl, `[${short}] ${m}`) }),
+      executors: defaultExecutors({
+        cwd: job.workingDir,
+        qaContext,
+        log: (lvl, m) => log(lvl, `[${short}] ${m}`),
+        // D-fix-4 — stream browser-probe lifecycle (parsed actions, per-step
+        // snapshots, per-assertion verdict) into agent-events under this
+        // story-dev job so a browser-AC pass/fail is no longer a black box.
+        emitProbeEvent: (ev) => pushEvent(job.jobId, 'story-dev', 'dev', 'browser_probe', ev),
+      }),
       // Per-story commit (development-plan §4.1) — daemonGit runs as the repo owner.
       git: daemonGit,
       updateStoryState,

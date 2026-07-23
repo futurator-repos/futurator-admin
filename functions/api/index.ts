@@ -6703,9 +6703,14 @@ app.post('/api/servers/:id/start', authMiddleware, async (c) => {
 // ── Pipeline-dispatch API (external, x-queue-key) ──
 // POST /api/pipeline/dispatch — { source, intent, name? } → 202 { runId, appId,
 // statusUrl } and kicks off a full Pipeline-3 dev run (reuses the quick-p3 flow).
+// C2: a dispatch admitted behind a still-in-flight SAME-APP predecessor is still
+// accepted (202) but returned `held: true` / status 'held' — created, kept in
+// `concept` with its generation deferred, so it reports the honest `queued`
+// stage rather than a silent concurrent `developing` plan (no 409 to retry).
 // GET  /api/pipeline/runs/:id — external stage poll (concept|developing|vqa|
-// deployment|completed|failed|blocked|queued). Both fail-closed on x-queue-key.
-// Handlers own their auth; these routes are in the auth-skip list above.
+// deployment|completed|failed|blocked|queued; a held plan reads as `queued`).
+// Both fail-closed on x-queue-key. Handlers own their auth + response JSON;
+// these routes are in the auth-skip list above (thin pass-through delegation).
 app.post('/api/pipeline/dispatch', (c) => handlePipelineDispatch(c));
 app.get('/api/pipeline/runs/:id', (c) => handlePipelineGetRun(c));
 

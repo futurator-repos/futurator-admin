@@ -16,7 +16,12 @@ const failedAc = (id, testKind = 'unit', detail = null, testRef = 'tests/foo.tes
   testBinding: { status: 'failing', testRef, testKind, lastRunSha: 'sha123', ...(detail ? { detail } : {}) },
 });
 
+// un-wired browser AC: no snapshot detail ⇒ the probe never ran (D-fix-2) ⇒ retryable.
 const browserAc = (id) => failedAc(id, 'browser', null, 'playwright:ac-1');
+// ran-and-failed browser AC: detail carries generic harness `snapshot.<field>`
+// evidence ⇒ the probe DID drive the app ⇒ escalate (do NOT loop).
+const ranBrowserAc = (id) =>
+  failedAc(id, 'browser', 'assertSnapshot snapshot.x expected > spawn, got equal', 'playwright:ac-1');
 const manualAc = (id) => ac(id, { verify: 'manual', testBinding: { status: 'bound', testKind: 'manual', testRef: 'manual:check' } });
 
 const mkCompletion = ({ failingIds = [], acs = [], reasons = [], newState = 'failed', invariants } = {}) => ({
@@ -114,8 +119,13 @@ describe('classifyRetryable', () => {
     expect(classifyRetryable(mkCompletion())).toBe(false);
   });
 
-  it('returns false when all failing ACs are browser kind', () => {
+  it('returns true when all failing ACs are UN-WIRED browser (probe never ran → a respawn can mount the seam)', () => {
     const acs = [browserAc('ac-1'), browserAc('ac-2')];
+    expect(classifyRetryable(mkCompletion({ failingIds: ['ac-1', 'ac-2'], acs }))).toBe(true);
+  });
+
+  it('returns false when all failing ACs are RAN-and-failed browser (escalate, do not loop)', () => {
+    const acs = [ranBrowserAc('ac-1'), ranBrowserAc('ac-2')];
     expect(classifyRetryable(mkCompletion({ failingIds: ['ac-1', 'ac-2'], acs }))).toBe(false);
   });
 
@@ -124,9 +134,14 @@ describe('classifyRetryable', () => {
     expect(classifyRetryable(mkCompletion({ failingIds: ['m-1', 'm-2'], acs }))).toBe(false);
   });
 
-  it('returns false when all failing ACs are a mix of browser and manual', () => {
-    const acs = [browserAc('b-1'), manualAc('m-1')];
+  it('returns false when all failing ACs are a mix of RAN-failed browser and manual (all escalate)', () => {
+    const acs = [ranBrowserAc('b-1'), manualAc('m-1')];
     expect(classifyRetryable(mkCompletion({ failingIds: ['b-1', 'm-1'], acs }))).toBe(false);
+  });
+
+  it('returns true for a mix of UN-WIRED browser and manual (the un-wired browser can retry)', () => {
+    const acs = [browserAc('b-1'), manualAc('m-1')];
+    expect(classifyRetryable(mkCompletion({ failingIds: ['b-1', 'm-1'], acs }))).toBe(true);
   });
 
   it('returns true when at least one failing AC is unit kind', () => {
@@ -264,10 +279,10 @@ describe('shouldRetry', () => {
     expect(shouldRetry(retryableCompletion, 4, 3)).toBe(false);
   });
 
-  it('returns false when classifyRetryable returns false (all browser/manual ACs)', () => {
+  it('returns false when classifyRetryable returns false (ran-failed browser / manual ACs)', () => {
     const nonRetryable = mkCompletion({
       failingIds: ['b-1'],
-      acs: [browserAc('b-1')],
+      acs: [ranBrowserAc('b-1')],
     });
     expect(shouldRetry(nonRetryable, 1, 3)).toBe(false);
   });

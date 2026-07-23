@@ -11,8 +11,17 @@
 //   Each retry MUST call integrateStory → fresh headSha before handleStoryCompletion,
 //   else the staleness guard fires and the AC stays 'failing' regardless of the fix.
 
-/** Executor kinds that are not wired — deterministic re-run is useless for these. */
-const NON_RETRYABLE_KINDS = new Set(['browser', 'manual']);
+import { requiresBrowser, browserProbeRan } from '../../lib/completion-gate.mjs';
+
+// D-fix-2: the blanket `'browser'` non-retryable rule is REMOVED. Its old
+// "not wired / escalate, do not loop" justification pointed at an escalation lane
+// that never existed — that lane now DOES exist (completion-gate routes a
+// ran-and-failed browser AC to `needs-human`), so browser retryability is decided
+// per-AC by whether the probe ACTUALLY RAN (see classifyRetryable): a ran-and-failed
+// probe escalates (not looped); an UN-WIRED probe is fix-forward (a re-spawn can
+// mount the seam). Only `manual` stays blanket-non-retryable (no wired executor).
+/** Executor kind with no wired executor — deterministic re-run is useless for it. */
+const NON_RETRYABLE_KINDS = new Set(['manual']);
 
 /**
  * Build a markdown block that summarises the prior attempt's failing tests.
@@ -147,14 +156,21 @@ export function findGateDataGaps(completion) {
  * data gap makes a re-spawn pure waste: fail fast instead (dossier A6; the
  * pacman1 unbound-invariant failure consumed a fix-forward attempt AND a
  * reviewer for nothing).
- * Returns `false` when every failing AC is `browser` or `manual` — those
- * executors are not wired, so re-spawning loops forever on untestable criteria.
+ * D-fix-2 — browser retryability keys on whether the probe RAN, not on the kind:
+ *   • a browser AC whose probe RAN and failed a snapshot assertion is a candidate
+ *     interaction-gated false-negative — completion-gate already escalates it to
+ *     `needs-human` (so it is NOT in `verdict.failing`); if one is seen here it is
+ *     treated as NON-retryable (escalate, don't loop).
+ *   • a browser AC that was UN-WIRED (seam never mounted / app didn't boot) IS
+ *     fix-forward: a re-spawn can mount `window.__harness` → retryable.
+ * Returns `false` when the only failing AC is `manual` — no wired executor, so
+ * re-spawning loops forever on an untestable criterion.
  * Returns `false` when there are no failing deterministic ACs (nothing a re-run
  * can fix — e.g. story failed because of `blocked` or `needs-human`).
  * Returns `true` when at least one failing entry is agent-fixable: a failing
- * BOUND test with a wired executor kind (unit | integration), an
- * authored-but-failing invariant, or a pseudo-entry (test-tampering,
- * green-trunk, foundation-gate).
+ * BOUND test with a wired executor kind (unit | integration), an un-wired browser
+ * AC (respawn can wire it), an authored-but-failing invariant, or a pseudo-entry
+ * (test-tampering, green-trunk, foundation-gate).
  *
  * @param {{
  *   verdict?: { failing?: string[] },
@@ -185,13 +201,21 @@ export function classifyRetryable(completion) {
     // An authored-but-failing invariant is a failing bound test — retryable.
     if (invMap.has(acId)) return true;
     const ac = acMap.get(acId);
+    // D-fix-2 — browser/behavior AC retryability keys on probe-ran, not on kind:
+    // a ran-and-failed probe is escalated (needs-human) not looped; an un-wired
+    // probe is fix-forward (a respawn can mount the seam) → retryable. A browser
+    // AC is either flagged (requiresBrowser) OR bound testKind:'browser'.
+    if (requiresBrowser(ac) || ac?.testBinding?.testKind === 'browser') {
+      if (browserProbeRan(ac)) continue; // ran-and-failed → escalate, do not loop on this AC
+      return true; // un-wired browser probe → a respawn can wire it
+    }
     // verify='manual' on the AC itself is also a non-retryable signal.
     const kind = ac?.testBinding?.testKind ?? ac?.verify;
     // If ANY failing AC is NOT in the non-retryable set the loop is useful.
     if (!NON_RETRYABLE_KINDS.has(kind)) return true;
   }
 
-  // Every failing AC is browser/manual → escalate, do not loop.
+  // Every failing AC is manual, or a ran-and-failed browser AC → escalate, do not loop.
   return false;
 }
 

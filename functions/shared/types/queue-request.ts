@@ -22,6 +22,17 @@
 
 export type QueueTarget = 'ec2' | 'local';
 
+/**
+ * Which inbound mechanism minted this row. `'ingest'` = the queue-request path
+ * (`POST /api/queue/ingest` / `/test`) that spawns a `queue-request` agent-job.
+ * `'dispatch'` = an AUDIT-ONLY row for the pipeline-dispatch/frontier path
+ * (`POST /api/pipeline/dispatch`) — it does NOT spawn a queue-request job; it
+ * links to the created plan/run via `runId`/`planId` so the two paths are both
+ * visible in `/development/queues`. Absent on legacy ingest rows ⇒ treat as
+ * `'ingest'`.
+ */
+export type QueueRequestKind = 'ingest' | 'dispatch';
+
 export type QueueRequestStatus =
   | 'RECEIVED'
   | 'QUEUED'
@@ -69,10 +80,17 @@ export interface QueueRequest {
   requestId: string; // PK
   status: QueueRequestStatus;
 
+  // Discriminator — which inbound mechanism minted the row (absent ⇒ 'ingest').
+  kind?: QueueRequestKind;
+
   // ── Inbound envelope (the socket-tester detail) ──
   source: string; // originating app, e.g. 'atlassinator'
   receiver?: string; // logical receiver name (defaults to source)
-  target: QueueTarget; // 'ec2' | 'local'
+  // Declared request-time routing intent ('ec2' | 'local'). Optional: the
+  // pipeline-dispatch/frontier path declares no target (the executing host is
+  // resolved later from the minted job's assignedServerId), so dispatch audit
+  // rows leave it unset rather than guessing a provider literal.
+  target?: QueueTarget;
   method: string; // HTTP method of the inbound call
   path: string; // inbound path
   headers?: Record<string, string>; // sanitized inbound headers (secret stripped)
@@ -88,6 +106,16 @@ export interface QueueRequest {
 
   // ── Execution linkage ──
   jobId?: string; // spawned agent-job (also the agent-events key)
+  // Dispatch/frontier-path linkage (kind === 'dispatch'). The created run and
+  // plan share one id in that path (planId === runId); both are stored so the
+  // Queues tab can join a dispatch row to its plan and resolve an honest status.
+  runId?: string; // linked pipeline run
+  planId?: string; // linked plan
+  // Display stage captured at write time from `derivePipelineStage(plan,nodes)`
+  // — the honest plan/stage the audit row reflects (e.g. 'queued' | 'concept' |
+  // 'developing' | 'vqa' | 'deployment' | 'completed' | 'failed' | 'blocked').
+  // A read-side join may re-derive it live; this is the write-time snapshot.
+  dispatchStage?: string;
   error?: string; // terminal failure message
 
   // ── Timestamps ──
@@ -107,10 +135,14 @@ export interface QueueRequest {
 export interface QueueRequestSummary {
   requestId: string;
   status: QueueRequestStatus;
+  kind?: QueueRequestKind;
   source: string;
-  target: QueueTarget;
+  target?: QueueTarget;
   autoRespond: boolean;
   jobId?: string;
+  runId?: string;
+  planId?: string;
+  dispatchStage?: string;
   createdAt: string;
   completedAt?: string;
 }
@@ -119,10 +151,14 @@ export function toQueueRequestSummary(r: QueueRequest): QueueRequestSummary {
   return {
     requestId: r.requestId,
     status: r.status,
+    kind: r.kind,
     source: r.source,
     target: r.target,
     autoRespond: r.autoRespond,
     jobId: r.jobId,
+    runId: r.runId,
+    planId: r.planId,
+    dispatchStage: r.dispatchStage,
     createdAt: r.createdAt,
     completedAt: r.completedAt,
   };

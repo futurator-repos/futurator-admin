@@ -18,9 +18,32 @@ import {
 import { docClient, TABLE_NAMES } from '../dynamo-client';
 import type { QueueRequest, QueueRequestStatus } from '../types/queue-request';
 
+/**
+ * Header names never persisted, regardless of caller/mechanism (ingest,
+ * dispatch, or any future writer of this table) — case-insensitive, generic
+ * (not app- or caller-specific). Kept here as a repository-level backstop so
+ * every writer of this table gets the guard even if a call site forgets to
+ * sanitize (defense in depth on top of the caller-side strip).
+ */
+const SECRET_HEADER_NAMES = new Set(['x-queue-key', 'authorization']);
+
+/** Strip secret-bearing headers from a request row before it is persisted. */
+function stripSecretHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (!headers) return headers;
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (SECRET_HEADER_NAMES.has(name.toLowerCase())) continue;
+    out[name] = value;
+  }
+  return out;
+}
+
 export async function createRequest(request: QueueRequest): Promise<QueueRequest> {
-  await docClient.send(new PutCommand({ TableName: TABLE_NAMES.queueRequests, Item: request }));
-  return request;
+  const sanitized: QueueRequest = { ...request, headers: stripSecretHeaders(request.headers) };
+  await docClient.send(new PutCommand({ TableName: TABLE_NAMES.queueRequests, Item: sanitized }));
+  return sanitized;
 }
 
 export async function getRequestById(requestId: string): Promise<QueueRequest | null> {

@@ -223,6 +223,70 @@ export function requiresBrowser(ac) {
   return ac?.verify === 'behavior' || ac?.needsBrowser === true;
 }
 
+// Generic probe-INFRASTRUCTURE phrases meaning "the browser probe could NOT
+// reach the app's harness snapshot" — the app never booted, the reach/act/observe
+// seam (window.__harness) was never mounted, Playwright/Chromium was unavailable,
+// the probe threw, no served app was provided, or the probe prose was not
+// interpretable. These are the driver's OWN vocabulary (browser-probe-executor
+// `done({...})` reasons), NOT any app's content — no game/pacman/domain literal
+// appears here. A `detail` carrying any of these = the probe did NOT run.
+const PROBE_NOT_RUN_MARKERS = [
+  'no qacontext',
+  'needs a served app',
+  'not interpretable',
+  'did not boot',
+  'seam not mounted',
+  'chromium unavailable',
+  'browser probe error',
+  'browser journey error',
+];
+
+/**
+ * Did a browser probe REACH the app's harness snapshot (a real before/after
+ * observation) rather than short-circuit un-wired? Positive evidence: an
+ * assertSnapshot verdict always references the generic harness API surface
+ * `snapshot.<field>` (or a before/after delta comparison); a clean run says
+ * "journey/probe passed". PURE. Keys only on the probe's own output, never on app
+ * content. Falls SAFE = "did not reach" when evidence is absent (→ blocking/retry,
+ * never an auto-accept). PURE.
+ */
+function probeReachedSnapshot(detail) {
+  if (typeof detail !== 'string') return false;
+  const d = detail.toLowerCase();
+  // Any un-wired / infra marker present → the probe never read a snapshot.
+  if (PROBE_NOT_RUN_MARKERS.some((m) => d.includes(m))) return false;
+  // Positive snapshot-stage evidence (harness API surface — app-agnostic).
+  return d.includes('snapshot.') || d.includes('before=') || d.includes('journey passed') || d.includes('probe passed');
+}
+
+/**
+ * Did a behavior/needsBrowser AC's probe ACTUALLY RUN — i.e. drive the served app
+ * and read its `window.__harness` snapshot (a genuine before/after observation) —
+ * as opposed to being un-wired (no served app, seam never mounted, dev server
+ * never booted, Chromium unavailable) or an outright binding fault? A ran-and-failed
+ * browser probe is a candidate interaction-gated VQA FALSE-NEGATIVE (operator-
+ * adjudicable); an un-wired one is a fix-forward / data gap. Classification keys
+ * ONLY on the AC's own kind + its binding's run evidence — NEVER on app/story
+ * identity or app content. PURE.
+ *
+ * Forward-compat: when the executor path persists an explicit `probeRan` boolean
+ * (D-fix-4 probe-observability artifact) it is authoritative; until then the
+ * generic detail-vocabulary heuristic (probeReachedSnapshot) decides.
+ */
+export function browserProbeRan(ac) {
+  const tb = ac?.testBinding || {};
+  // The BINDING KIND is the true "a browser probe drove the app" signal — only a
+  // testKind:'browser' binding invokes the browser probe executor. (requiresBrowser
+  // is the AC's *demand* for browser verification; in the pipeline the two co-occur,
+  // but keying on the kind that actually RAN is the correct probe-ran signal.)
+  if (tb.testKind !== 'browser') return false; // misbound / other kind never drove a browser probe
+  if (tb.errored) return false; // binding fault: unrunnable testRef / runner threw — did not run
+  if (tb.status !== 'passing' && tb.status !== 'failing') return false; // unbound/misbound → never ran
+  if (tb.probeRan === true) return true; // authoritative persisted signal (D-fix-4)
+  if (tb.probeRan === false) return false;
+  return probeReachedSnapshot(tb.detail);
+}
+
 /** Partition ACs by class. `manual` ACs (verify:'manual') are split out. */
 export function classifyAcs(acs = []) {
   const buckets = { deterministic: [], advisoryTaste: [], advisorySecurity: [], manual: [] };
@@ -313,6 +377,7 @@ function deterministicPasses(ac, currentHeadSha) {
  *   done: boolean,
  *   status: 'done'|'failing'|'blocked'|'needs-human',
  *   failing: string[], blocking: string[], attention: string[], pending: string[],
+ *   humanReview: string[],
  *   reasons: string[],
  * }}
  */
@@ -322,28 +387,46 @@ export function evaluateCompletion({ acceptanceCriteria = [], currentHeadSha, re
   const blocking = [];
   const attention = [];
   const pending = [];
+  // D-fix-2 — the browser-AC escalation lane: behavior/needsBrowser ACs whose
+  // probe RAN and failed a snapshot assertion (a candidate interaction-gated VQA
+  // false-negative) land here, NOT in `failing`, so the operator can Accept them
+  // instead of the story fail-closing on a single behavioral read.
+  const humanReview = [];
   const reasons = [];
 
   for (const ac of buckets.deterministic) {
-    if (!deterministicPasses(ac, currentHeadSha)) {
-      failing.push(ac.id);
-      const tb = ac.testBinding || {};
-      // F3 (Incident C, C5): a binding that ERRORED — an unrunnable testRef
-      // (resolved to no real committed test file) or a runner fault — is a
-      // BINDING FAULT, surfaced LOUDLY and kept DISTINCT from a deterministic AC
-      // that merely didn't pass. An errored binding can never be honestly
-      // verified until the testRef is fixed; reading it as a plain "not passing"
-      // is exactly what let Incident C dead-end an un-completable story.
-      if (tb.errored) {
-        reasons.push(`${ac.id}: binding fault (unrunnable testRef): ${tb.detail || 'resolved to no runnable test file'}`);
-        continue;
-      }
-      const browserMisbound = requiresBrowser(ac) && tb.testKind !== 'browser';
-      // A verify:'state' AC carrying status:'misbound' failed the no-mock rule —
-      // surface the concrete mock detail so the reason reads clearly.
-      const stateMisbound = tb.status === 'misbound' && !requiresBrowser(ac);
-      reasons.push(`${ac.id}: deterministic AC not passing (status=${tb.status || 'unbound'}${browserMisbound ? `, misbound: behavior AC needs testKind:'browser' not '${tb.testKind || 'omitted'}'` : ''}${stateMisbound && tb.detail ? `, misbound: ${tb.detail}` : ''}${tb.lastRunSha && currentHeadSha && tb.lastRunSha !== currentHeadSha ? ', stale-sha' : ''})`);
+    if (deterministicPasses(ac, currentHeadSha)) continue;
+    const tb = ac.testBinding || {};
+    const stale = tb.lastRunSha && currentHeadSha && tb.lastRunSha !== currentHeadSha;
+    // D-fix-2 escalation lane. A browser/behavior AC whose probe ACTUALLY RAN
+    // against the LIVE sha and failed its harness-snapshot assertion is a candidate
+    // interaction-gated VQA FALSE-NEGATIVE, not a hard defect — route it to the
+    // operator's documented "Accept for interaction-gated VQA false-negative" lane
+    // instead of fail-closing the story. Classification keys ONLY on AC-kind +
+    // probe-ran (never app identity/content). A browser AC that was UN-WIRED, ran
+    // STALE, ERRORED, or is MISBOUND falls through to the normal deterministic-
+    // failing path below — a re-run / rebind / fix-forward can still clear it.
+    if (browserProbeRan(ac) && !stale) {
+      humanReview.push(ac.id);
+      reasons.push(`${ac.id}: browser AC ran and failed its behavioral assertion — routed to human review (Accept for interaction-gated VQA false-negative, or send back to fix)${tb.detail ? `: ${tb.detail}` : ''}`);
+      continue;
     }
+    failing.push(ac.id);
+    // F3 (Incident C, C5): a binding that ERRORED — an unrunnable testRef
+    // (resolved to no real committed test file) or a runner fault — is a
+    // BINDING FAULT, surfaced LOUDLY and kept DISTINCT from a deterministic AC
+    // that merely didn't pass. An errored binding can never be honestly
+    // verified until the testRef is fixed; reading it as a plain "not passing"
+    // is exactly what let Incident C dead-end an un-completable story.
+    if (tb.errored) {
+      reasons.push(`${ac.id}: binding fault (unrunnable testRef): ${tb.detail || 'resolved to no runnable test file'}`);
+      continue;
+    }
+    const browserMisbound = requiresBrowser(ac) && tb.testKind !== 'browser';
+    // A verify:'state' AC carrying status:'misbound' failed the no-mock rule —
+    // surface the concrete mock detail so the reason reads clearly.
+    const stateMisbound = tb.status === 'misbound' && !requiresBrowser(ac);
+    reasons.push(`${ac.id}: deterministic AC not passing (status=${tb.status || 'unbound'}${browserMisbound ? `, misbound: behavior AC needs testKind:'browser' not '${tb.testKind || 'omitted'}'` : ''}${stateMisbound && tb.detail ? `, misbound: ${tb.detail}` : ''}${stale ? ', stale-sha' : ''})`);
   }
   for (const ac of buckets.advisorySecurity) {
     if (reviewerVerdicts[ac.id] === 'fail') { blocking.push(ac.id); reasons.push(`${ac.id}: advisory-security reviewer fail (blocks)`); }
@@ -366,19 +449,47 @@ export function evaluateCompletion({ acceptanceCriteria = [], currentHeadSha, re
     }
   }
 
-  // Precedence: needs-human > failing > blocked > pending-manual > done.
+  // D-fix-4 — persist the structured browser-probe result onto the verdict so the
+  // human-accept lane (D-fix-2) and the operator UI can render *why* a browser AC
+  // passed/failed without SSHing a fleet host. The probe executor folds its
+  // interpreted action list + asserted expectations + failing-assertion detail
+  // into `testBinding.detail` (the only field the binding runner persists), and
+  // stamps run-evidence the `browserProbeRan` heuristic keys on. We collect one
+  // record per browser-kind AC. App-agnostic: keys ONLY on AC-kind / binding-kind
+  // and echoes whatever the probe produced — no app/story/probe-content literal.
+  const probes = [];
+  for (const ac of acceptanceCriteria) {
+    const tb = ac?.testBinding || {};
+    if (!(requiresBrowser(ac) || tb.testKind === 'browser')) continue;
+    probes.push({
+      acId: ac.id,
+      testKind: tb.testKind || null,
+      status: tb.status || 'unbound',
+      probeRan: browserProbeRan(ac),
+      ...(tb.errored ? { errored: true } : {}),
+      ...(tb.lastRunSha ? { lastRunSha: tb.lastRunSha } : {}),
+      detail: tb.detail || null,
+    });
+  }
+
+  // Precedence: explicit-escalation > failing > blocked > browser-review/pending-manual > done.
+  // A ran-and-failed browser AC (humanReview) escalates to needs-human ONLY when it
+  // is the sole outstanding class — a REAL failing/blocking AC still takes over, so
+  // a genuine defect is never masked by a co-occurring behavioral false-negative.
   const escalated = needsHuman.filter((id) => acceptanceCriteria.some((ac) => ac.id === id));
   let status;
   if (escalated.length) status = 'needs-human';
   else if (failing.length) status = 'failing';
   else if (blocking.length) status = 'blocked';
+  else if (humanReview.length) status = 'needs-human'; // ran-and-failed browser AC → operator Accept lane
   else if (pending.length) status = 'needs-human'; // unresolved manual ACs route to human
   else status = 'done';
 
   return {
     done: status === 'done',
     status,
-    failing, blocking, attention, pending,
+    failing, blocking, attention, pending, humanReview,
     reasons,
+    ...(probes.length ? { probes } : {}),
   };
 }

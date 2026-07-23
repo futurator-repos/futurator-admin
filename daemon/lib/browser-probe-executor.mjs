@@ -227,6 +227,36 @@ export function parseProbe({ when, thenObservable, then, text } = {}) {
   return { actions, assertions, interpretable: true };
 }
 
+// ── Probe-observability helpers (D-fix-4) ───────────────────────────────────
+//
+// These make the browser-probe phase auditable: the interpreted action list,
+// each journey step's ok/err + before/after snapshot, and per-assertion verdict
+// are rendered into a compact, app-agnostic summary. Pure — they read ONLY the
+// probe's own structured output (actions/assertions/step records), never any
+// app/story/probe-content vocabulary.
+
+/** JSON-serialize best-effort (never throws) for a lifecycle log/event payload. */
+function safeJson(v) {
+  try { return JSON.stringify(v); } catch { return String(v); }
+}
+
+/** Human-readable one-token descriptor of a parsed action ('key:ArrowRight(hold)'). */
+function describeAction(a) {
+  if (!a) return 'none';
+  if (a.type === 'key') return `key:${a.key}${a.hold ? '(hold)' : ''}`;
+  if (a.type === 'harness') return `harness:${a.method}(${(a.args || []).map((x) => JSON.stringify(x)).join(',')})`;
+  if (a.type === 'click') return `click:"${a.target}"`;
+  if (a.type === 'type') return `type:"${a.text}"${a.target ? `→${a.target}` : ''}`;
+  if (a.type === 'wait') return `wait:${a.ms}ms`;
+  return a.type || 'action';
+}
+
+/** Human-readable one-token descriptor of a parsed assertion ('pacman.x gt 40'). */
+function describeAssertion(as) {
+  if (!as) return '';
+  return `${as.field} ${as.op}${as.value !== undefined ? ` ${JSON.stringify(as.value)}` : ''}`;
+}
+
 // ── Browser execution (Playwright) ──────────────────────────────────────────
 
 /**
@@ -531,7 +561,7 @@ export async function runBrowserJourney({
   // a failed assertion). The QA runner routes infra failures to 'uncertain'
   // (non-blocking) so a broken test rig never false-blocks a working app; a real
   // app failure (no `infra` flag) still blocks.
-  if (!chromium) return { passed: false, infra: true, detail: 'playwright chromium unavailable (import interop)', frames: [] };
+  if (!chromium) return { passed: false, infra: true, detail: 'playwright chromium unavailable (import interop)', frames: [], stepResults: [] };
   let browser;
   try {
     browser = await chromium.launch({ headless: true });
@@ -582,9 +612,30 @@ export async function runBrowserJourney({
 
     const frames = [];
     const failures = [];
+    // D-fix-4: per-step structured record (interpreted action, before/after
+    // harness snapshot, per-step ok/err) so the probe phase is auditable. Purely
+    // the probe's own output — no app/content assumptions.
+    const stepResults = [];
     for (const step of steps) {
       const label = step?.label ?? '(unlabeled step)';
       const frame = { stepLabel: label };
+      const stepRec = {
+        label,
+        action: step?.action
+          ? {
+              type: step.action.type,
+              ...(step.action.key ? { key: step.action.key } : {}),
+              ...(step.action.hold ? { hold: true } : {}),
+              ...(step.action.target ? { target: step.action.target } : {}),
+              ...(step.action.method ? { method: step.action.method } : {}),
+            }
+          : null,
+        assertions: (step?.assertions || []).map((a) => ({
+          field: a.field, op: a.op, ...(a.value !== undefined ? { value: a.value } : {}),
+        })),
+        ok: true,
+        failures: [],
+      };
       // SETTLE WINDOW: honour the per-step hint, but FLOOR it whenever the action
       // is a key (held or not) regardless of the AC's declared `verify` tag — a
       // continuous-motion AC that the planner mistagged 'state' (or left untagged)
@@ -600,15 +651,19 @@ export async function runBrowserJourney({
       // Before-action snapshot — the baseline for delta assertions
       // (increased/decreased/changed).
       const beforeSnap = seamMounted ? await page.evaluate(() => window.__harness.snapshot()) : undefined;
+      if (seamMounted) stepRec.beforeSnapshot = beforeSnap;
       if (capture) frame.before = await page.screenshot();
 
       let release;
       try {
         const acted = await replayAction(page, step?.action, { observeOnly });
         release = acted?.release;
-        if (acted?.note) log('info', `[browser-journey] ${label}: ${acted.note}`);
+        if (acted?.note) { log('info', `[browser-journey] ${label}: ${acted.note}`); stepRec.note = acted.note; }
       } catch (actErr) {
-        failures.push(`${label}: action failed: ${actErr?.message || actErr}`);
+        const msg = `${label}: action failed: ${actErr?.message || actErr}`;
+        failures.push(msg);
+        stepRec.ok = false;
+        stepRec.failures.push(`action failed: ${actErr?.message || actErr}`);
       }
 
       // Let the game loop integrate the input over real animation frames BEFORE
@@ -633,9 +688,17 @@ export async function runBrowserJourney({
           await settleFrames(page, settleN, { wait });
           poll = await pollUntil(readFn, assertFn, { timeoutMs: pollMs, stepMs: 100, wait });
         }
-        if (!poll.ok) failures.push(`${label}: ${poll.failures.join('; ')}`);
+        if (poll.value !== undefined) stepRec.afterSnapshot = poll.value;
+        if (!poll.ok) {
+          failures.push(`${label}: ${poll.failures.join('; ')}`);
+          stepRec.ok = false;
+          stepRec.failures.push(...poll.failures);
+        }
       } else {
-        failures.push(`${label}: window.__harness seam not mounted on the served app`);
+        const msg = `${label}: window.__harness seam not mounted on the served app`;
+        failures.push(msg);
+        stepRec.ok = false;
+        stepRec.failures.push('window.__harness seam not mounted on the served app');
       }
 
       // AFTER frame — captured AFTER the deterministic poll window resolves (not
@@ -647,6 +710,11 @@ export async function runBrowserJourney({
       if (capture) frame.after = await page.screenshot();
       if (capture) frames.push(frame);
 
+      // D-fix-4: record + stream this step's lifecycle (action → ok/err) so the
+      // probe phase is no longer a black box in the daemon journal.
+      stepResults.push(stepRec);
+      log('info', `[browser-journey:step] ${label} action=${describeAction(stepRec.action)} → ${stepRec.ok ? 'ok' : 'FAIL'}${stepRec.failures.length ? ` (${stepRec.failures.join('; ')})` : ''}`);
+
       // Release a HELD key AFTER the observation window + after-frame.
       if (release) await release();
     }
@@ -656,6 +724,7 @@ export async function runBrowserJourney({
         passed: false,
         detail: 'window.__harness seam not mounted on the served app',
         frames,
+        stepResults,
       };
     }
 
@@ -664,13 +733,14 @@ export async function runBrowserJourney({
       passed: failures.length === 0,
       detail: failures.length ? failures.join(' | ') : `journey passed (${steps.length} step(s))`,
       frames,
+      stepResults,
     };
   } catch (err) {
     // A launch/navigation/browser error is a harness/infra failure, not an app
     // verdict — mark infra so the runner degrades to 'uncertain', not a block.
     // (Note: the seam-not-mounted return above is deliberately NOT infra — that
     // IS a real app failure and must block.)
-    return { passed: false, infra: true, detail: `browser journey error: ${err?.message || err}`, frames: [] };
+    return { passed: false, infra: true, detail: `browser journey error: ${err?.message || err}`, frames: [], stepResults: [] };
   } finally {
     try {
       if (browser) await browser.close();
@@ -857,6 +927,15 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
   const drainPort = deps.drainPort || realDrainPort;
   const shell = deps.shell || realShell;
   const log = deps.log || (() => {});
+  // D-fix-4 — OPTIONAL agent-events stream seam. When a caller (that holds the
+  // story-dev jobId + the pushEvent emitter) binds `deps.emitProbeEvent`, every
+  // probe lifecycle phase is streamed into agent-events under the job. Until then
+  // it is a no-op and the same lifecycle still lands in the daemon journal via
+  // `log`. Forward-compatible exactly like completion-gate's `tb.probeRan` signal
+  // — the executor has no job context of its own, so the emitter must be a closure
+  // the caller pre-binds; wiring it is a one-line change in the executor's builder
+  // (defaultExecutors → makeBrowserExecutor), never inside this module.
+  const emitProbeEvent = deps.emitProbeEvent;
   // bootDevServer/wave-vqa call log with a single-arg message; adapt to (level,msg).
   const bootLog = (m) => { try { log('info', `[browser-probe:dev-server] ${m}`); } catch { /* best-effort */ } };
   const getPlaywright = deps.playwright ? async () => deps.playwright : async () => import('playwright');
@@ -871,6 +950,13 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
       } catch { /* best-effort */ }
       return r;
     };
+    // D-fix-4 — stream one probe lifecycle phase to BOTH the daemon journal and
+    // (when wired) agent-events. Best-effort on each channel; never throws into
+    // the probe. App-agnostic: it carries only the probe's own structured output.
+    const emitProbe = (phase, payload) => {
+      try { log('info', `[browser-probe:${phase}] ac=${ac?.id ?? '?'} ${safeJson(payload)}`); } catch { /* best-effort */ }
+      try { emitProbeEvent?.({ acId: ac?.id, phase, ...payload }); } catch { /* best-effort */ }
+    };
     if (!qaContext) {
       return done({ passed: false, detail: 'browser AC needs a served app but no qaContext for this boilerplate' });
     }
@@ -880,8 +966,19 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
       then: ac?.then,
       text: ac?.text || ac?.testBinding?.testRef,
     });
+    // Interpreted-action list + assertions — surfaced BEFORE execution so an
+    // un-runnable/mis-parsed probe is diagnosable, and appended to the persisted
+    // `detail` so the story verdict records exactly what the probe drove/asserted.
+    const actionsSummary = probe.actions?.length ? probe.actions.map(describeAction).join(', ') : 'none';
+    const assertionsSummary = probe.assertions?.length ? probe.assertions.map(describeAssertion).join(', ') : 'none';
+    emitProbe('parsed', {
+      interpretable: probe.interpretable,
+      actions: probe.actions,
+      assertions: probe.assertions,
+      ...(probe.reason ? { reason: probe.reason } : {}),
+    });
     if (!probe.interpretable) {
-      return done({ passed: false, detail: `browser probe not interpretable: ${probe.reason}` });
+      return done({ passed: false, detail: `browser probe not interpretable: ${probe.reason} :: interpreted[${actionsSummary}]` });
     }
 
     // Whole boot→journey→stop section runs under the per-cwd probe lock: Next
@@ -915,7 +1012,15 @@ export function makeBrowserExecutor({ cwd, qaContext, deps = {} }) {
       const settle = ac?.verify === 'behavior' ? { frames: 12, pollMs: 1200 } : undefined;
       const steps = probeToJourneySteps(probe, { label: ac?.id || 'story-ac', settle });
       const r = await runBrowserJourney({ url, steps, playwright, log, observeOnly: false });
-      return done({ passed: r.passed, detail: r.detail });
+      // D-fix-4 — stream the structured per-step result (interpreted action,
+      // before/after snapshot, per-assertion pass/fail) and fold the interpreted
+      // action list + asserted expectations into the persisted `detail`. Because
+      // the binding runner persists ONLY `detail` onto the AC's testBinding, this
+      // string is the sole in-band channel that carries the probe's structured
+      // result onto the story verdict — the completion-gate then surfaces it.
+      emitProbe('result', { passed: r.passed, detail: r.detail, steps: r.stepResults || [] });
+      const detail = `${r.detail} :: interpreted[${actionsSummary}] asserts[${assertionsSummary}]`;
+      return done({ passed: r.passed, detail });
     } catch (err) {
       return done({ passed: false, detail: `browser probe error: ${err?.message || err}` });
     } finally {

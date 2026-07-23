@@ -72,7 +72,9 @@ describe('queue-requests-repository', () => {
     sendMock.mockResolvedValueOnce({});
     const row = makeRow();
     const out = await createRequest(row);
-    expect(out).toBe(row);
+    // A2: createRequest returns a header-sanitized copy (strips x-queue-key /
+    // authorization), not the input reference — assert value-equality, not identity.
+    expect(out).toEqual(row);
     const cmd = input(sendMock.mock.calls[0][0]);
     expect(cmd.TableName).toBe('test-queue-requests');
     expect(cmd.Item).toEqual(row);

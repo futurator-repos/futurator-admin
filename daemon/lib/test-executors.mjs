@@ -47,7 +47,7 @@ function runCommand(spawnSync, cmd, args, { cwd, timeoutMs }) {
  *   executor — without it, the runner's fail-closed `browser` default applies.
  * @returns {Record<string, (ac:object)=>Promise<{passed:boolean,detail?:string}>>}
  */
-export function defaultExecutors({ cwd, qaContext, spawnSync = nodeSpawnSync, timeoutMs, log, exists = nodeExistsSync } = {}) {
+export function defaultExecutors({ cwd, qaContext, spawnSync = nodeSpawnSync, timeoutMs, log, exists = nodeExistsSync, emitProbeEvent } = {}) {
   // F1 (Incident C, 2026-07-13): an AC's testRef may be a single path, a
   // 'file > describe > it' selector, a JSON array of paths, OR a legacy
   // " + "-joined composite with parenthetical prose. resolveTestRefs normalizes
@@ -106,6 +106,6 @@ export function defaultExecutors({ cwd, qaContext, spawnSync = nodeSpawnSync, ti
   // When absent we leave the key OFF so the test-binding-runner's fail-closed
   // `browser` default applies — never fake-pass an unverified behavioral AC.
   // `manual` stays absent → routed to human by the completion gate.
-  if (qaContext) executors.browser = makeBrowserExecutor({ cwd, qaContext, deps: { log } });
+  if (qaContext) executors.browser = makeBrowserExecutor({ cwd, qaContext, deps: { log, emitProbeEvent } });
   return executors;
 }

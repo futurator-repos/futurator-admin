@@ -87,7 +87,9 @@ POST /api/pipeline/dispatch
     "repoUrl": "https://…",          //             never cloned; Futurator owns the dev repo)
     "branch": "main",
     "commit": "abc123"
-  }
+  },
+  "dependsOn": ["<prior runId or sealId>"],   // optional — ADVISORY ONLY, see §4c
+  "priorPlan": { "sealId": "seal-…", "version": "v1" }  // optional — ADVISORY ONLY, see §4c
 }
 ```
 
@@ -104,8 +106,8 @@ Semantics (all deterministic, all derived server-side):
 - **`seal.document`** is the payload the concept stage transforms into StoryNodes. Send
   the full converged plan text (markdown fine, ≥3 chars enforced, no upper bound).
 - Everything is echoed back as `provenance` on the status endpoint
-  (`{ source, appRef, sealId, sealVersion, git, dispatchedAt }`) so Mycelium can
-  correlate runs to seals without keeping a mapping table.
+  (`{ source, appRef, sealId, sealVersion, git, dependsOn?, dispatchedAt }`) so
+  Mycelium can correlate runs to seals without keeping a mapping table.
 
 ### 4b. Simple shape (throwaway — smoke tests only)
 
@@ -115,6 +117,32 @@ Semantics (all deterministic, all derived server-side):
 
 No `app`/`seal` → random ids, no dedup, always greenfield. Either `seal.document` or
 `intent` must be present.
+
+### 4c. Optional advisory ordering — `dependsOn` / `priorPlan` (ADVISORY ONLY)
+
+Both fields are **optional** and **advisory only** — Futurator stamps and echoes them
+verbatim but **never** uses them to gate admission or frontier scheduling. The
+**authoritative** ordering mechanism is Futurator's own same-app precedence check at the
+daemon frontier: given two non-terminal plans on the same `app.ref`, only the earlier
+one's stories dispatch, full stop, whether or not `dependsOn` is present. These fields
+exist for the case that same-app check can't see — **cross-app** ordering knowledge that
+only the caller (Mycelium) holds.
+
+- **`dependsOn: string[]`** — a list of opaque prior seal ids or `runId`s. Content is
+  never interpreted; Futurator does not verify the referenced run's status and does not
+  block on it.
+- **`priorPlan: { sealId, version? }`** — a structured predecessor reference. Resolved
+  server-side to a `runId` via the **same deterministic** `deriveRunId(source, sealId,
+version)` used for dispatch idempotency (§4a), so a named predecessor maps to a runId
+  without Mycelium maintaining a lookup table. The resolved id is folded into the stamped
+  `dependsOn` list alongside any explicitly supplied ids.
+
+Both are stamped into the Plan's `sealProvenance` at admission and echoed verbatim on
+every `GET /api/pipeline/runs/:runId` poll (§6) — a caller that wants to confirm a
+predecessor was recorded can read it back from `provenance.dependsOn`. **Do not** build
+caller-side logic that assumes Futurator enforces this field; retry/backoff or same-app
+sequencing should rely only on the polled `stage`, never on `dependsOn` having been
+accepted.
 
 ## 5. Dispatch response
 
@@ -157,6 +185,7 @@ Errors (JSON envelope `{ "error": { "code", "message" } }`):
     "appRef": "pacman-web",
     "sealId": "seal-pacman-mvp",
     "sealVersion": "v1",
+    "dependsOn": ["<resolved predecessor runId, if dependsOn/priorPlan was sent>"],
     "dispatchedAt": "2026-07-18T12:00:00.000Z"
   },
   "stage": "developing",
@@ -168,6 +197,10 @@ Errors (JSON envelope `{ "error": { "code", "message" } }`):
   "devUrl": "https://dev.futurator.ai/pacman-web-9emxb1/"
 }
 ```
+
+`provenance.dependsOn` is present only when the dispatch supplied `dependsOn` and/or
+`priorPlan` (§4c); otherwise it is omitted entirely — its presence is informational, never
+a signal Futurator acted on it.
 
 The eight external stages, in pipeline order (mapper is strictly first-match and never
 reports a later stage than reality):

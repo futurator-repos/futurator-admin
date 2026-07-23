@@ -19,6 +19,14 @@ import { z } from 'zod';
  *                       transforms into StoryNodes (replaces bare `intent`).
  *       - `git`         provenance only in v1 (repoUrl/branch/commit recorded +
  *                       echoed; brownfield-clone against it is a later phase).
+ *       - `dependsOn` / `priorPlan` — OPTIONAL, ADVISORY ONLY (C4). Opaque
+ *                       prior seal ids / runIds (or a structured
+ *                       `{sealId, version}` resolved the same deterministic
+ *                       way as idempotency). Stamped into `sealProvenance`
+ *                       and echoed on the status endpoint; Futurator never
+ *                       relies on it for correctness — the same-app
+ *                       precedence check at the dispatch frontier is the
+ *                       sole authoritative ordering gate.
  */
 
 const appIdentitySchema = z.object({
@@ -43,6 +51,17 @@ const gitProvenanceSchema = z.object({
   commit: z.string().optional(),
 });
 
+/**
+ * C4 — optional structured predecessor reference: a prior (sealId, version)
+ * pair. Resolved server-side via the SAME deterministic `deriveRunId(source,
+ * sealId, version)` used for idempotency, so a named predecessor maps to a
+ * runId without Mycelium keeping a mapping table.
+ */
+const priorPlanSchema = z.object({
+  sealId: z.string().min(1, 'priorPlan.sealId is required'),
+  version: z.string().optional(),
+});
+
 export const dispatchPipelineSchema = z
   .object({
     /** Calling app/system id (stamped into `createdBy` + provenance). */
@@ -57,6 +76,33 @@ export const dispatchPipelineSchema = z
     git: gitProvenanceSchema.optional(),
     /** Optional display label (simple path). */
     name: z.string().optional(),
+    /**
+     * Optional caller-declared scaffold template for a GREENFIELD dispatch (a
+     * boilerplate-registry key, e.g. `'nextjs-base'`). Honored verbatim when it
+     * names a known template; otherwise the service falls back to the NEUTRAL
+     * base (`'nextjs-base'`). Absent = neutral base. The dispatch surface never
+     * infers a template from the NL intent (that is a deferred enhancement, O-8)
+     * and never forces a domain-specific (e.g. game) scaffold.
+     */
+    boilerplateType: z.string().min(1).optional(),
+    /**
+     * C4 — OPTIONAL, ADVISORY ONLY. Opaque prior seal ids / runIds that this
+     * dispatch's caller considers predecessors. Futurator stamps and echoes
+     * these verbatim; it never interprets their content and never uses them
+     * to gate admission or frontier scheduling — the same-app precedence
+     * check at the frontier (C1) is the sole AUTHORITATIVE ordering
+     * mechanism. This field exists so a caller with CROSS-APP ordering
+     * knowledge (which C1's same-app check can't see) can express it and
+     * have Futurator round-trip it for correlation.
+     */
+    dependsOn: z.array(z.string().min(1)).optional(),
+    /**
+     * C4 — OPTIONAL, ADVISORY ONLY. A single structured predecessor
+     * reference, resolved to a runId and folded into the stamped
+     * `dependsOn` list (see `priorPlanSchema`). Same non-authoritative
+     * caveat as `dependsOn`.
+     */
+    priorPlan: priorPlanSchema.optional(),
   })
   .refine((v) => Boolean(v.seal?.document) || Boolean(v.intent), {
     message: 'Either seal.document or intent is required',

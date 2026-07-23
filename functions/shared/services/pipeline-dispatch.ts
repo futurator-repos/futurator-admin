@@ -21,6 +21,8 @@ import * as appRepo from '../repositories/app-repository';
 import * as planRepo from '../repositories/plan-repository';
 import * as agentJobsRepo from '../repositories/agent-jobs-repository';
 import * as storyNodeRepo from '../repositories/story-node-repository';
+import * as queueRequestsRepo from '../repositories/queue-requests-repository';
+import type { QueueRequest, QueueRequestStatus } from '../types/queue-request';
 
 /**
  * External pipeline-dispatch service (NEW machine-callable surface).
@@ -40,6 +42,13 @@ import * as storyNodeRepo from '../repositories/story-node-repository';
  *   • seal/version/app.ref/git are stamped onto the Plan as `sealProvenance`
  *     and echoed by the status endpoint. `git` is provenance ONLY in v1
  *     (recorded, not cloned — Futurator owns the dev repo).
+ *   • dependsOn/priorPlan (C4) — OPTIONAL, ADVISORY ONLY. Also stamped onto
+ *     `sealProvenance` and echoed by the status endpoint, but never read by
+ *     any admission or frontier-scheduling code path. C1 (same-app
+ *     precedence at the daemon frontier, `agent-daemon.mjs`) is the sole
+ *     authoritative ordering gate; this field exists so a caller with
+ *     CROSS-APP ordering knowledge (which C1's same-app check can't see) can
+ *     express and round-trip it for correlation.
  *
  * `createdBy` carries the caller (`external:<source>`) — there is no JWT user,
  * exactly how the queue-ingest path stamps `createdBy: 'external'`.
@@ -114,9 +123,50 @@ export interface DispatchResult {
   isNewApp: boolean;
   /** true when the seal+version was already dispatched — existing run returned. */
   idempotent: boolean;
+  /**
+   * C2 — true when admitted behind a still-in-flight same-app predecessor. The
+   * plan is created but held (`concept`, generation deferred). Honest status is
+   * `queued`, never a silent concurrent `developing`.
+   */
+  held: boolean;
+  /** planId of the same-app predecessor this dispatch is held behind (C2). */
+  heldBehind?: string;
 }
 
-type SealProvenance = NonNullable<Plan['sealProvenance']>;
+/**
+ * Local widening of the shared `Plan['sealProvenance']` shape to also carry
+ * the C4 advisory ordering field. `dependsOn` is deliberately NOT added to
+ * the shared `Plan` type (out of this fix's file scope) — TS structural
+ * typing allows a value with extra optional properties to flow into the
+ * narrower `Plan.sealProvenance` field on assignment (no excess-property
+ * check applies to a variable, only to a fresh object literal), and at
+ * runtime/JSON the extra key is simply present and round-trips through
+ * `GET /api/pipeline/runs/:id`'s existing `provenance: plan.sealProvenance`
+ * echo untouched.
+ */
+type SealProvenance = NonNullable<Plan['sealProvenance']> & {
+  /**
+   * C4 — ADVISORY ONLY. Opaque prior seal ids / runIds. Never read by any
+   * admission or frontier-scheduling code path — C1's same-app precedence
+   * check at the frontier remains the sole authoritative gate. Present only
+   * when the caller supplied `dependsOn` and/or `priorPlan`.
+   */
+  dependsOn?: string[];
+  /**
+   * C2 — ADMISSION-TIME HONEST-STATUS MARKER (thin). Set to the planId of the
+   * earliest non-terminal SAME-APP predecessor when this plan was admitted
+   * while that predecessor was still in flight. The plan is still created
+   * (202) but stays `concept` with its generation job deferred, so it cannot
+   * silently develop concurrently; `derivePipelineStage` reads this to report
+   * an honest held/`queued` status instead. Keyed on appId + predecessor
+   * plan-status ONLY — no app content. Round-trips through the status echo so
+   * the caller sees WHICH predecessor it waits on. NOT a scheduler: release of
+   * a held plan (creating its deferred generation job once the predecessor is
+   * terminal) is deferred to O-6; C1's frontier gate is the authoritative
+   * backstop for any held plan that does carry stories.
+   */
+  heldBehind?: string;
+};
 
 /**
  * Resolve identity + dispatch. Reuses the quick-p3 create flow for greenfield
@@ -128,12 +178,25 @@ export async function dispatchPipelineRun(input: DispatchInput): Promise<Dispatc
   const createdBy = `external:${source}`;
   const now = new Date().toISOString();
 
+  // C4 — advisory dependency ordering. `priorPlan` (a structured {sealId,
+  // version} predecessor reference) resolves to a runId via the SAME
+  // deterministic `deriveRunId` used for idempotency — no mapping table
+  // needed. It is folded into the caller's raw `dependsOn` list (opaque ids,
+  // never interpreted). Both are stamped verbatim; neither is consulted by
+  // any admission/frontier code in this file — C1's same-app precedence
+  // check at the frontier remains the sole authoritative gate.
+  const priorPlanRunId = input.priorPlan
+    ? deriveRunId(source, input.priorPlan.sealId, input.priorPlan.version)
+    : undefined;
+  const dependsOn = [...(input.dependsOn ?? []), ...(priorPlanRunId ? [priorPlanRunId] : [])];
+
   const provenance: SealProvenance = {
     source,
     ...(input.app?.ref ? { appRef: input.app.ref } : {}),
     ...(input.seal?.id ? { sealId: input.seal.id } : {}),
     ...(input.seal?.version ? { sealVersion: input.seal.version } : {}),
     ...(input.git ? { git: input.git } : {}),
+    ...(dependsOn.length ? { dependsOn } : {}),
     dispatchedAt: now,
   };
 
@@ -152,7 +215,13 @@ export async function dispatchPipelineRun(input: DispatchInput): Promise<Dispatc
   if (hasSeal) {
     const existing = await planRepo.getPlanById(runId);
     if (existing) {
-      return { runId, appId: existing.appId ?? appId, isNewApp: false, idempotent: true };
+      return {
+        runId,
+        appId: existing.appId ?? appId,
+        isNewApp: false,
+        idempotent: true,
+        held: false,
+      };
     }
   }
 
@@ -160,8 +229,34 @@ export async function dispatchPipelineRun(input: DispatchInput): Promise<Dispatc
   const existingApp = hasAppRef ? await appRepo.getApp(appId) : null;
 
   if (existingApp) {
-    await createIterationPlan({ app: existingApp, runId, document, provenance, createdBy, now });
-    return { runId, appId, isNewApp: false, idempotent: false };
+    // C2 — admission-time honest "held" check (thin, NOT a scheduler). If an
+    // earlier same-app plan is still non-terminal, admit this plan but HOLD it:
+    // keep it `concept`, defer its generation job, and mark it so the status
+    // endpoint reports an honest `queued` (held) stage rather than a silent
+    // concurrent `developing` plan. Keyed on appId + predecessor plan-status
+    // ONLY — never on app/seal content. A brand-new (greenfield) app has no
+    // predecessor, so this only fires on the iteration path. Release of a held
+    // plan is deferred (O-6); C1's frontier gate is the authoritative backstop.
+    const predecessor = await planRepo.getActivePlanForApp(appId);
+    const heldBehind = predecessor?.planId;
+    if (heldBehind) provenance.heldBehind = heldBehind;
+    await createIterationPlan({
+      app: existingApp,
+      runId,
+      document,
+      provenance,
+      createdBy,
+      now,
+      held: Boolean(heldBehind),
+    });
+    return {
+      runId,
+      appId,
+      isNewApp: false,
+      idempotent: false,
+      held: Boolean(heldBehind),
+      heldBehind,
+    };
   }
 
   const displayName = input.app?.name || input.name;
@@ -173,8 +268,11 @@ export async function dispatchPipelineRun(input: DispatchInput): Promise<Dispatc
     provenance,
     createdBy,
     now,
+    boilerplateType: input.boilerplateType,
   });
-  return { runId, appId: created.appId, isNewApp: true, idempotent: false };
+  // Greenfield creates a brand-new app — no same-app predecessor can exist, so a
+  // greenfield dispatch is never held (C2 is an iteration-only concern).
+  return { runId, appId: created.appId, isNewApp: true, idempotent: false, held: false };
 }
 
 /**
@@ -189,12 +287,21 @@ async function createGreenfieldRun(args: {
   provenance: SealProvenance;
   createdBy: string;
   now: string;
+  /** Caller-declared scaffold template; absent/unknown → neutral base. */
+  boilerplateType?: string;
 }): Promise<{ appId: string }> {
   const { appId, displayName, runId, document, provenance, createdBy, now } = args;
   const base = displayName ? slugify(displayName, 24) : appId;
 
-  const boilerplateType = normalizeBoilerplateType('nextjs-canvas-game');
-  const meta = BOILERPLATE_REGISTRY[boilerplateType as BoilerplateType];
+  // Scaffold template: honor the caller-declared `boilerplateType` when it names
+  // a known registry template; otherwise fall back to the NEUTRAL base — NOT a
+  // domain-specific (e.g. game) literal. Template inference from the NL intent is
+  // a deferred enhancement (O-8); the dispatch path never guesses a domain here.
+  const requested = normalizeBoilerplateType(args.boilerplateType);
+  const boilerplateType: BoilerplateType = BOILERPLATE_REGISTRY[requested]
+    ? requested
+    : 'nextjs-base';
+  const meta = BOILERPLATE_REGISTRY[boilerplateType];
 
   // Scaffold the repo from the boilerplate template. A GitHubError propagates to
   // the handler, which relays it as an HTTP status (same as quick-p3).
@@ -295,8 +402,16 @@ async function createIterationPlan(args: {
   provenance: SealProvenance;
   createdBy: string;
   now: string;
+  /**
+   * C2 — when true, an earlier same-app plan is still non-terminal. Admit this
+   * plan (row created) but DEFER its generation job so it stays `concept` and
+   * cannot silently develop concurrently. `provenance.heldBehind` carries the
+   * predecessor id; `derivePipelineStage` reports the honest held/`queued`
+   * status. Creating the deferred job on predecessor-terminal is O-6 (deferred).
+   */
+  held?: boolean;
 }): Promise<void> {
-  const { app, runId, document, provenance, createdBy, now } = args;
+  const { app, runId, document, provenance, createdBy, now, held } = args;
   const bpType = normalizeBoilerplateType(app.boilerplateType || 'nextjs-base');
   const seamHook = BOILERPLATE_REGISTRY[bpType]?.testHarness?.seamHook;
 
@@ -331,6 +446,14 @@ async function createIterationPlan(args: {
     createdBy,
   };
   await planRepo.createPlan(plan);
+
+  // C2 — HELD: an earlier same-app plan is still non-terminal. Admit this plan
+  // (row created above, stays `concept`) but DEFER its generation job so it
+  // cannot silently begin developing concurrently. `derivePipelineStage` reads
+  // `provenance.heldBehind` and reports an honest held/`queued` status. Creating
+  // this deferred job once the predecessor is terminal is a release sweep,
+  // explicitly out of the thin MVP (O-6). Keyed purely on predecessor status.
+  if (held) return;
 
   // Generation job — no scaffold to wait for (existing worktree), so no
   // appBootstrapJobId; `brownfield: true` → planner plans against real code.
@@ -487,6 +610,18 @@ export function derivePipelineStage(plan: Plan, storyNodes: StoryNodeRow[]): Pip
 
   // 4. queued — accepted but nothing dispatched yet.
   if (status === 'concept') {
+    // C2 — HELD behind a same-app predecessor. Admitted (202) but deferred: the
+    // plan stays `concept` with no generation job, so it reports an honest
+    // `queued` (held) stage — never a silent concurrent `developing`. Read the
+    // marker stamped at admission; keyed only on that marker + plan-status, no
+    // app content. Reuses the existing `queued` stage (no new stage value).
+    const heldBehind = (plan.sealProvenance as SealProvenance | undefined)?.heldBehind;
+    if (heldBehind)
+      return view(
+        'queued',
+        `held — same-app predecessor '${heldBehind}' non-terminal (awaiting precedence release)`,
+      );
+
     const nothingProduced =
       storyNodes.length === 0 &&
       !plan.conceptPlan &&
@@ -561,6 +696,133 @@ function checkQueueKey(c: Context): Response | null {
   return null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// A2 — sanitized header capture (secret stripped, mirrors the ingest contract).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Header names never persisted — case-insensitive, generic (not caller-specific). */
+const SECRET_HEADER_NAMES = new Set(['x-queue-key', 'authorization']);
+
+/**
+ * Snapshot every inbound header as a plain object, with secret-bearing headers
+ * stripped. App-agnostic: copies whatever the caller sent verbatim (lower-cased
+ * names, Headers' own iteration order) except the two denylisted names — no
+ * allow-list, no caller/app-specific handling.
+ */
+function sanitizeHeaders(c: Context): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of c.req.raw.headers.entries()) {
+    if (SECRET_HEADER_NAMES.has(name.toLowerCase())) continue;
+    out[name] = value;
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A1 — audit-only queue-request row per inbound dispatch (visible in /queues).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 30-day TTL on the audit row's `expiresAt`, mirroring the ingest path. */
+const QUEUE_REQUEST_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+/**
+ * Map an external pipeline stage → the coarse queue-request status vocabulary
+ * (the audit row's display status). Keys ONLY on the stage enum — no app/seal
+ * content — so it stays app-agnostic. A read-side join (A4) may re-derive live
+ * from the linked plan; `dispatchStage` on the row carries the exact stage.
+ */
+function dispatchStageToRequestStatus(stage: PipelineStage): QueueRequestStatus {
+  switch (stage) {
+    case 'completed':
+      return 'COMPLETED';
+    case 'failed':
+      return 'FAILED';
+    case 'queued':
+      return 'QUEUED';
+    default:
+      // concept | developing | vqa | deployment | blocked → still in flight.
+      return 'RUNNING';
+  }
+}
+
+/**
+ * Write ONE audit-only `queue-requests` row for an inbound dispatch so the
+ * pipeline-dispatch/frontier path is visible in `/development/queues` alongside
+ * ingest rows. It does NOT spawn a queue-request agent-job — it only links to
+ * the created run/plan (`runId`/`planId`, which share one id on this path) and
+ * carries an honest display status derived from the linked plan/stage.
+ *
+ * App-agnostic: a generic `{source, kind, runId, planId, body, headers, status}`
+ * envelope — persists whatever the caller sent (raw parsed JSON body, verbatim,
+ * no field allow-list) plus sanitized headers, with NO seal-/app-specific
+ * columns and no hardcoded provider/target. Best-effort: a write failure never
+ * fails the dispatch (the run is already created) — the caller logs and
+ * continues.
+ *
+ * `rawBody` is the body exactly as `c.req.json()` parsed it — NOT `parsed.data`
+ * (zod's `.safeParse` output), which can drop unknown keys / apply defaults.
+ * Storing the raw object satisfies the A2 AC: re-serializing it reproduces the
+ * request body byte-for-byte (modulo key ordering).
+ */
+async function writeDispatchAuditRow(
+  c: Context,
+  rawBody: unknown,
+  input: DispatchInput,
+  result: DispatchResult,
+): Promise<void> {
+  const { runId } = result;
+  const now = new Date().toISOString();
+
+  // Honest display status: derive from the linked plan/stage. For a just-minted
+  // plan this is 'queued'/'concept'; for the idempotent path it reflects wherever
+  // the plan is now. Never let stage resolution break the audit write.
+  let stage: PipelineStage = 'queued';
+  try {
+    const plan = await planRepo.getPlanById(runId);
+    if (plan) {
+      const storyNodes = await storyNodeRepo.getPlanStoryNodes(runId);
+      stage = derivePipelineStage(plan, storyNodes).stage;
+    }
+  } catch {
+    // fall back to 'queued'
+  }
+
+  const document = input.seal?.document ?? input.intent ?? '';
+  const createdBy = `external:${input.source}`;
+  const row: QueueRequest = {
+    requestId: crypto.randomUUID(),
+    status: dispatchStageToRequestStatus(stage),
+    kind: 'dispatch',
+    source: input.source,
+    receiver: input.source,
+    // No declared `target`: the dispatch/frontier path resolves the executing
+    // host from the minted job's assignedServerId (A4), never a provider literal.
+    method: c.req.method,
+    path: c.req.path,
+    headers: sanitizeHeaders(c), // secret stripped — mirrors the ingest contract.
+    body: rawBody, // exact inbound JSON, verbatim — no field allow-list.
+    prompt: document, // the received order handed to the pipeline
+    autoRespond: false,
+    runId,
+    planId: runId, // planId === runId on the dispatch path
+    dispatchStage: stage,
+    createdAt: now,
+    updatedAt: now,
+    audit: [
+      {
+        at: now,
+        event: 'dispatched',
+        by: createdBy,
+        detail: `runId=${runId} planId=${runId} appId=${result.appId} stage=${stage} (isNewApp=${result.isNewApp}, idempotent=${result.idempotent})`,
+      },
+    ],
+    createdBy,
+    expiresAt: Math.floor(Date.now() / 1000) + QUEUE_REQUEST_TTL_SECONDS,
+  };
+
+  await queueRequestsRepo.createRequest(row);
+}
+
 /** POST /api/pipeline/dispatch — external "seal/intent → running P3 plan". */
 export async function handleDispatch(c: Context): Promise<Response> {
   const unauth = checkQueueKey(c);
@@ -580,7 +842,16 @@ export async function handleDispatch(c: Context): Promise<Response> {
     );
 
   try {
-    const { runId, appId, isNewApp, idempotent } = await dispatchPipelineRun(parsed.data);
+    const dispatchResult = await dispatchPipelineRun(parsed.data);
+    const { runId, appId, isNewApp, idempotent, held, heldBehind } = dispatchResult;
+    // A1 — record one audit-only queue-request row so this dispatch shows up in
+    // /development/queues, linked to its run/plan. Best-effort: a failure here
+    // must not fail an already-created run.
+    try {
+      await writeDispatchAuditRow(c, body, parsed.data, dispatchResult);
+    } catch (auditErr) {
+      console.error('[pipeline-dispatch] audit-row write failed', auditErr);
+    }
     // Repo binding for the caller — the app row exists by now on every path
     // (greenfield creates it before returning; iteration/idempotent found it).
     const app = await appRepo.getApp(appId);
@@ -591,10 +862,18 @@ export async function handleDispatch(c: Context): Promise<Response> {
         repoUrl: repoHtmlUrl(appId, app?.githubRepoUrl),
         isNewApp,
         idempotent,
+        // C2 — honest admission status. A plan admitted behind a still-in-flight
+        // same-app predecessor is 'held' (created, but `concept` + generation
+        // deferred → reported as `queued`), never a silent concurrent developer.
+        // Poll `statusUrl` for the live stage; `heldBehind` names the blocker.
+        held,
+        ...(heldBehind ? { heldBehind } : {}),
         statusUrl: `/api/pipeline/runs/${runId}`,
-        status: 'accepted',
+        status: held ? 'held' : 'accepted',
       },
-      // 202 for a fresh dispatch; 200 when the seal was already dispatched.
+      // 202 for a fresh dispatch (held or not); 200 when the seal was already
+      // dispatched. A held plan is still accepted — the caller can retry the
+      // status poll rather than being refused with a 409.
       idempotent ? 200 : 202,
     );
   } catch (err) {
@@ -626,7 +905,10 @@ export async function handleGetRun(c: Context): Promise<Response> {
   const storyNodes = await storyNodeRepo.getPlanStoryNodes(planId);
   const view = derivePipelineStage(plan, storyNodes);
   const app = plan.appId ? await appRepo.getApp(plan.appId) : null;
-  // Echo dispatch provenance so the caller can correlate this run to its seal.
+  // Echo dispatch provenance so the caller can correlate this run to its
+  // seal. `plan.sealProvenance` carries whatever was actually stamped at
+  // admission — including C4's advisory `dependsOn` when the dispatch
+  // supplied it — so it round-trips here with no extra handling needed.
   return c.json({
     runId: planId,
     appId: plan.appId,
