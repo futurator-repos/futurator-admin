@@ -25,7 +25,10 @@
  * UNTOUCHED — this is a new sibling in the labs3 module.
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { CheckCircle2, Loader2, UserCheck } from 'lucide-react';
+import { api } from '@/lib/api-client';
 import { VerdictStrip } from './qa/verdict-strip';
 import { BoundAcTable } from './qa/bound-ac-table';
 import { CohortMatrix } from './qa/cohort-matrix';
@@ -43,7 +46,12 @@ import {
 } from '@/hooks/use-p3-qa-report';
 import { StoryNodeStatePill } from '@/components/labs3/shared/state-pill';
 import type { StoryNodeRow, StoryNodeState } from '@/types/plan-spec';
-import type { P3QaVerdict } from '@/types/qa-review-p3';
+import type { P3QaVerdict, NeedsHumanVerdict } from '@/types/qa-review-p3';
+
+// D-fix-3 — the runtime story state carried by a quarantined story. Not in the
+// StoryNodeState union yet (shared type gap; the daemon writes it at runtime), so
+// it is compared as a string constant.
+const NEEDS_HUMAN_STATE = 'needs-human';
 
 // ── View props (matches Labs3ViewProps subset; shell passes full shape) ──
 
@@ -109,6 +117,12 @@ export function QaReviewView({ planId, stories }: QaReviewViewProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* D-fix-3 — stories quarantined on a ran-and-failed browser/behavior AC
+          (needs-human). Surfaced with their D-fix-4 probe evidence + an Accept
+          lane so the operator adjudicates an interaction-gated VQA false-negative
+          INFORMED. Self-suppresses when none are quarantined. */}
+      <NeedsHumanReviewSection planId={planId} stories={stories} />
+
       {/* Sticky verdict strip — gated on deployed-app QA readiness so it can't
           read green off the unit-AC rollup while QA is unverified/blocking. */}
       <VerdictStrip stories={stories} qaReadiness={readiness ?? undefined} />
@@ -241,6 +255,299 @@ function ReadinessChip({ readiness }: { readiness: QaReadiness }) {
         {meta.label}
       </span>
     </div>
+  );
+}
+
+// ── D-fix-3 — needs-human quarantine + operator Accept lane ──────────────────
+
+/**
+ * Surfaces every story quarantined in 'needs-human' (its ONLY outstanding
+ * failure is a browser/behavior AC that RAN and failed a snapshot assertion —
+ * D-fix-2). Renders the D-fix-4 probe evidence (interpreted actions / status /
+ * per-assertion detail) so the operator adjudicates an interaction-gated VQA
+ * FALSE-NEGATIVE INFORMED, and an "Accept" button that flips the story done and
+ * unblocks its dependents (POST .../stories/:id/accept). App-agnostic: keys ONLY
+ * on story state + AC-kind + verdict; no app/story/content literal.
+ */
+function NeedsHumanReviewSection({ planId, stories }: { planId: string; stories: StoryNodeRow[] }) {
+  const qc = useQueryClient();
+  const accept = useMutation({
+    mutationFn: (storyId: string) =>
+      api.post<{ ok: boolean; storyId: string; state: string; unblocked: string[] }>(
+        `/plans/${planId}/stories/${storyId}/accept`,
+        {},
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['story-nodes', planId] });
+      qc.invalidateQueries({ queryKey: ['plans', planId] });
+    },
+  });
+
+  const quarantined = useMemo(
+    () => stories.filter((s) => (s.state as string) === NEEDS_HUMAN_STATE),
+    [stories],
+  );
+  if (quarantined.length === 0) return null;
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+        padding: '14px 16px',
+        border: '1px solid var(--warning)',
+        background: 'color-mix(in srgb, var(--warning) 6%, transparent)',
+        borderRadius: 8,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <UserCheck size={14} style={{ color: 'var(--warning)' }} />
+        <span
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            textTransform: 'uppercase',
+            letterSpacing: '0.16em',
+            color: 'var(--warning)',
+            fontWeight: 600,
+          }}
+        >
+          Needs human review · {quarantined.length}
+        </span>
+      </div>
+      <p style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.5, margin: 0 }}>
+        These stories committed working code (their unit ACs passed) but a{' '}
+        <strong>browser/behavior AC ran and failed</strong> a snapshot assertion — a candidate
+        interaction-gated VQA false-negative. They are quarantined, not failed: their dependents
+        wait (blocked) and the plan holds until you adjudicate. Accept to treat the failure as a
+        false-negative and unblock dependents, or send back to fix (leave un-accepted).
+      </p>
+      {quarantined.map((story) => (
+        <NeedsHumanStoryCard
+          key={story.storyId}
+          story={story}
+          accepting={accept.isPending && accept.variables === story.storyId}
+          onAccept={() => accept.mutate(story.storyId)}
+        />
+      ))}
+      {accept.isError && (
+        <span style={{ fontSize: 11, color: 'var(--destructive)', fontFamily: 'var(--font-mono)' }}>
+          Accept failed: {(accept.error as Error)?.message ?? 'unknown error'}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function NeedsHumanStoryCard({
+  story,
+  accepting,
+  onAccept,
+}: {
+  story: StoryNodeRow;
+  accepting: boolean;
+  onAccept: () => void;
+}) {
+  const [open, setOpen] = useState(true);
+  // The story's verdict carries the D-fix-2 human-review lane + D-fix-4 probes.
+  const verdict = (story.verdict as unknown as NeedsHumanVerdict | undefined) ?? undefined;
+  const probes = verdict?.probes ?? [];
+  const reasons = verdict?.reasons ?? [];
+  const humanReview = verdict?.humanReview ?? [];
+  const acById = useMemo(
+    () => new Map((story.acceptanceCriteria ?? []).map((ac) => [ac.id, ac])),
+    [story.acceptanceCriteria],
+  );
+
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border)',
+        background: 'var(--bg-elev)',
+        borderRadius: 6,
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          padding: '10px 12px',
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          style={{
+            flex: 1,
+            textAlign: 'left',
+            background: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            padding: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+          }}
+        >
+          <span style={{ fontSize: 13, color: 'var(--text)', fontWeight: 500 }}>
+            {story.title || story.storyId}
+          </span>
+          <span
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10,
+              color: 'var(--text-mute)',
+            }}
+          >
+            {story.storyId}
+            {humanReview.length > 0 ? ` · AC ${humanReview.join(', ')}` : ''}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={onAccept}
+          disabled={accepting}
+          title="Accept for interaction-gated VQA false-negative — flips the story done and unblocks its dependents."
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '7px 12px',
+            border: '1px solid var(--success)',
+            background: 'color-mix(in srgb, var(--success) 12%, transparent)',
+            color: 'var(--success)',
+            borderRadius: 4,
+            cursor: accepting ? 'default' : 'pointer',
+            opacity: accepting ? 0.6 : 1,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            letterSpacing: '0.04em',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {accepting ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+          Accept (VQA false-negative)
+        </button>
+      </div>
+
+      {open && (
+        <div
+          style={{
+            borderTop: '1px solid var(--border)',
+            padding: '10px 12px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          {reasons.length > 0 && (
+            <ul
+              style={{
+                margin: 0,
+                paddingLeft: 16,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4,
+              }}
+            >
+              {reasons.map((r, i) => (
+                <li key={i} style={{ fontSize: 11.5, color: 'var(--text-dim)', lineHeight: 1.5 }}>
+                  {r}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {probes.length === 0 ? (
+            <span
+              style={{ fontSize: 11, color: 'var(--text-mute)', fontFamily: 'var(--font-mono)' }}
+            >
+              No probe evidence recorded on the verdict (D-fix-4 not present for this run).
+            </span>
+          ) : (
+            probes.map((p) => {
+              const ac = acById.get(p.acId);
+              return (
+                <div
+                  key={p.acId}
+                  style={{
+                    border: '1px solid var(--border)',
+                    borderRadius: 4,
+                    padding: '8px 10px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span
+                      style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 10,
+                        color: 'var(--accent-blue)',
+                      }}
+                    >
+                      {p.acId}
+                    </span>
+                    <ProbeChip label={p.testKind ?? 'unbound'} />
+                    <ProbeChip label={p.status} />
+                    <ProbeChip label={p.probeRan ? 'probe ran' : 'probe did not run'} />
+                    {p.errored && <ProbeChip label="errored" tone="destructive" />}
+                  </div>
+                  {ac?.text && (
+                    <span style={{ fontSize: 11.5, color: 'var(--text-dim)', lineHeight: 1.5 }}>
+                      {ac.text}
+                    </span>
+                  )}
+                  {p.detail && (
+                    <pre
+                      style={{
+                        margin: 0,
+                        padding: '8px 10px',
+                        background: 'var(--bg)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 4,
+                        fontSize: 10.5,
+                        fontFamily: 'var(--font-mono)',
+                        color: 'var(--text-dim)',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                        overflowX: 'auto',
+                      }}
+                    >
+                      {p.detail}
+                    </pre>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProbeChip({ label, tone }: { label: string; tone?: 'destructive' }) {
+  const color = tone === 'destructive' ? 'var(--destructive)' : 'var(--text-mute)';
+  return (
+    <span
+      style={{
+        fontFamily: 'var(--font-mono)',
+        fontSize: 9.5,
+        textTransform: 'uppercase',
+        letterSpacing: '0.08em',
+        color,
+        border: `1px solid ${color}`,
+        borderRadius: 3,
+        padding: '2px 6px',
+      }}
+    >
+      {label}
+    </span>
   );
 }
 

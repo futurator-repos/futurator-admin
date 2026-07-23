@@ -143,3 +143,56 @@ export interface DeliveryJourney {
   narrative?: string;
   acRefs: string[];
 }
+
+// ── D-fix-3 / D-fix-4 — the needs-human quarantine lane ──────────────────────
+//
+// A story lands in 'needs-human' (completion-gate D-fix-2) when its ONLY
+// outstanding failure is a browser/behavior AC that RAN and failed a snapshot
+// assertion — a candidate interaction-gated VQA FALSE-NEGATIVE the operator
+// adjudicates. D-fix-4 persists the structured browser-probe result onto the
+// story verdict so the operator adjudicates INFORMED (interpreted actions,
+// snapshots, per-assertion detail) rather than blind. These mirror the runtime
+// shape evaluateCompletion writes; they are additive to the base StoryVerdict
+// (src/types/plan-spec.ts) — read a story's `verdict` as NeedsHumanVerdict when
+// its state is 'needs-human'. App-agnostic: echoes whatever the probe produced
+// (AC id + kind + status + detail); no app/story/probe-content assumption.
+
+/** One browser-probe record persisted onto a story verdict (D-fix-4). */
+export interface StoryProbeResult {
+  /** The behavioral AC this probe verified. */
+  acId: string;
+  /** Bound test kind (e.g. 'browser') or null if unbound. */
+  testKind: string | null;
+  /** Binding status: passing | failing | misbound | unbound | … */
+  status: string;
+  /** True iff the probe actually ran against the live SHA (has snapshots). */
+  probeRan: boolean;
+  /** True iff the binding ERRORED (unrunnable testRef / runner fault). */
+  errored?: boolean;
+  /** The SHA the probe last ran against (staleness guard). */
+  lastRunSha?: string;
+  /**
+   * The probe's own detail: interpreted action list + asserted expectations +
+   * failing-assertion detail, folded in by the executor. Pretty-printed as-is.
+   */
+  detail: string | null;
+}
+
+/**
+ * The verdict a story carries when quarantined in 'needs-human'. A superset of
+ * the base StoryVerdict (src/types/plan-spec.ts) adding the human-review lane
+ * (`humanReview` AC ids) + the D-fix-4 probe evidence (`probes`).
+ */
+export interface NeedsHumanVerdict {
+  status: 'needs-human' | 'done' | 'failing' | 'blocked';
+  /** Human-readable reasons the gate produced (one per outstanding issue). */
+  reasons?: string[];
+  /** AC ids routed to human review (ran-and-failed browser/behavior ACs). */
+  humanReview?: string[];
+  /** Per browser-AC probe evidence (D-fix-4). */
+  probes?: StoryProbeResult[];
+  failing?: string[];
+  blocking?: string[];
+  attention?: string[];
+  pending?: string[];
+}

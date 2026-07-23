@@ -3,7 +3,7 @@ import type { Context } from 'hono';
 import { handle } from 'hono/aws-lambda';
 import { authMiddleware } from '../shared/auth-middleware';
 import { AppError, AuthError, NotFoundError, ValidationError } from '../shared/errors';
-import { QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { docClient, TABLE_NAMES } from '../shared/dynamo-client';
 // Servers module (Task 7) — server-aware dispatch wiring.
 import { runDispatchSweep } from '../shared/services/server-dispatcher';
@@ -1821,6 +1821,138 @@ app.post('/api/plans/:id/stories/:storyId/retry', async (c) => {
   // flipped 'done' in parallel is left alone).
   await storyNodeRepo.resetStoryForRetry(storyId);
   return c.json({ ok: true, storyId, state: 'ready' });
+});
+
+// Pipeline-3 D-fix-3 — operator ACCEPT for a story quarantined in 'needs-human'.
+// A story lands in 'needs-human' (D-fix-2) when its ONLY outstanding failure is a
+// browser/behavior AC that RAN and failed a snapshot assertion — a candidate
+// interaction-gated VQA FALSE-NEGATIVE, the operator's documented adjudication
+// lane. Accept flips it needs-human → done and runs the SAME dependency
+// propagation the daemon's done-path runs (atomic-claim.mjs: decrement each
+// dependent's unblockedDepsCount, flip it 'blocked' → 'ready' at zero) so the
+// blocked dependents unblock and the app grows organically. The reconciliation
+// sweep then advances the plan once every story is terminal. App-agnostic: keys
+// ONLY on story state; no app/story/content literal. Mirrors the retry route's
+// shape + the daemon propagateCompletion mechanism.
+//
+// NOTE: `state` is typed to the StoryNodeState union which does not yet carry
+// 'needs-human' in the shared type (functions/shared/types/plan-spec.ts —
+// out of this fix's file scope); the runtime row DOES carry it (the daemon writes
+// it), so the guard compares against a string constant to stay honest without a
+// type widen. The done/ready states written here ARE in the union.
+const NEEDS_HUMAN_STATE = 'needs-human';
+const isConditionalFail = (err: unknown): boolean =>
+  (err as { name?: string })?.name === 'ConditionalCheckFailedException';
+app.post('/api/plans/:id/stories/:storyId/accept', async (c) => {
+  const planId = c.req.param('id');
+  const storyId = c.req.param('storyId');
+  const user = c.get('user');
+  const story = await storyNodeRepo.getStoryNode(storyId);
+  if (!story || story.planId !== planId) throw new NotFoundError('StoryNode', storyId);
+
+  // Idempotent: an already-accepted (done) story is a no-op success.
+  if (story.state === 'done') {
+    return c.json({ ok: true, storyId, state: 'done', unblocked: [], alreadyDone: true });
+  }
+  // Accept is ONLY for a story quarantined on a ran-and-failed browser/behavior AC.
+  if ((story.state as string) !== NEEDS_HUMAN_STATE) {
+    throw new AppError(
+      'STORY_NOT_QUARANTINED',
+      `Story is '${story.state}', not '${NEEDS_HUMAN_STATE}'. Accept is only for a story awaiting human review on a ran-and-failed browser/behavior AC.`,
+      400,
+    );
+  }
+
+  const now = new Date().toISOString();
+  const table = TABLE_NAMES.planSpecGraph;
+
+  // 1) Flip needs-human → done, conditioned on it STILL being needs-human so a
+  //    racing accept / a re-run that already went green resolves to one winner.
+  //    Stamp the operator decision for audit.
+  try {
+    await docClient.send(
+      new UpdateCommand({
+        TableName: table,
+        Key: { storyId },
+        UpdateExpression:
+          'SET #state = :done, acceptedAt = :now, acceptedBy = :who, acceptDecision = :verdict, updatedAt = :now',
+        ConditionExpression: '#state = :nh',
+        ExpressionAttributeNames: { '#state': 'state' },
+        ExpressionAttributeValues: {
+          ':done': 'done',
+          ':nh': NEEDS_HUMAN_STATE,
+          ':now': now,
+          ':who': user?.email ?? user?.userId ?? 'operator',
+          ':verdict': 'accepted-vqa-false-negative',
+        },
+      }),
+    );
+  } catch (err) {
+    if (isConditionalFail(err)) {
+      // Someone flipped it first (parallel accept / re-run went green) — re-read.
+      const fresh = await storyNodeRepo.getStoryNode(storyId);
+      return c.json({
+        ok: true,
+        storyId,
+        state: fresh?.state ?? 'done',
+        unblocked: [],
+        raced: true,
+      });
+    }
+    throw err;
+  }
+
+  // 2) Propagate: decrement each dependent's unblockedDepsCount and flip it to
+  //    'ready' at zero — the EXACT atomic mechanism the daemon's
+  //    propagateCompletion / recordDependencyDone use (atomic-claim.mjs).
+  const nodes = await storyNodeRepo.getPlanStoryNodes(planId);
+  const dependents = nodes
+    .filter((n) => (n.depends_on || []).includes(storyId))
+    .map((n) => n.storyId);
+  const unblocked: string[] = [];
+  for (const dep of dependents) {
+    let remaining: number | undefined;
+    try {
+      const res = await docClient.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { storyId: dep },
+          UpdateExpression: 'ADD unblockedDepsCount :neg1 SET updatedAt = :now',
+          ConditionExpression: 'unblockedDepsCount > :zero',
+          ExpressionAttributeValues: { ':neg1': -1, ':zero': 0, ':now': now },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      remaining = Number(res.Attributes?.unblockedDepsCount);
+    } catch (err) {
+      if (isConditionalFail(err)) continue; // already at 0 (idempotent re-delivery)
+      throw err;
+    }
+    if (remaining !== 0) continue;
+    try {
+      await docClient.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { storyId: dep },
+          UpdateExpression: 'SET #state = :ready, updatedAt = :now',
+          ConditionExpression: '#state = :blocked AND unblockedDepsCount = :zero',
+          ExpressionAttributeNames: { '#state': 'state' },
+          ExpressionAttributeValues: {
+            ':ready': 'ready',
+            ':blocked': 'blocked',
+            ':zero': 0,
+            ':now': now,
+          },
+        }),
+      );
+      unblocked.push(dep);
+    } catch (err) {
+      if (isConditionalFail(err)) continue; // someone else flipped it — fine
+      throw err;
+    }
+  }
+
+  return c.json({ ok: true, storyId, state: 'done', unblocked });
 });
 
 // POST /api/plans/:id/qa/agentic-run — operator-triggered AGENTIC-ONLY visual QA.

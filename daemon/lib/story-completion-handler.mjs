@@ -85,7 +85,7 @@ export function findInvariantValidatorByConvention({ cwd, invariantId, fs = node
  * @returns {Promise<{
  *   verdict: object,                       // evaluateCompletion result
  *   acceptanceCriteria: object[],          // updated ACs (bound + run)
- *   newState: 'done'|'failed'|'verifying'|'merging',
+ *   newState: 'done'|'needs-human'|'failed'|'verifying'|'merging',
  *   propagate: boolean,                    // true when done → unblock dependents
  *   bindingSummary: object,
  * }}>}
@@ -210,8 +210,22 @@ export async function handleStoryCompletion({
   // 4) map verdict → StoryNode lifecycle state.
   //    In the shared-tree model the per-story commit IS the integration (no
   //    merge step), so a passing+committed+test-verified story is DONE outright.
-  //    failing/blocked/needs-human → failed (fix-forward/retry re-opens).
-  const newState = verdict.status === 'done' ? 'done' : 'failed';
+  //    D-fix-3 (quarantine, don't wedge): a 'needs-human' verdict — the story's
+  //    ONLY outstanding failure is a browser/behavior AC that RAN and failed a
+  //    snapshot assertion (D-fix-2; a candidate interaction-gated VQA false-
+  //    negative) — is NOT a hard failure. It maps to a DISTINCT, non-terminal,
+  //    operator-actionable 'needs-human' state (NOT 'failed'): the story must not
+  //    cascade-block its dependents (they keep their unblockedDepsCount and wait)
+  //    and the plan must not advance to review as if it failed — it surfaces for
+  //    the operator's Accept lane. Everything else genuinely failing/blocked →
+  //    'failed' (fix-forward/retry re-opens). Keys ONLY on verdict.status — no
+  //    app/story/content literal. `propagate` stays gated on 'done' below, so a
+  //    quarantined story never auto-unblocks a dependent.
+  const newState = verdict.status === 'done'
+    ? 'done'
+    : verdict.status === 'needs-human'
+      ? 'needs-human'
+      : 'failed';
 
   return {
     verdict,

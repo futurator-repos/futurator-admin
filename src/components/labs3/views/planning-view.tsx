@@ -13,9 +13,12 @@
  *   FAILED   — error card with job.errorMessage + retry guidance (no fake
  *              retry button — quick-p3 mint jobs aren't resumable).
  *   ingested — planner narrative promoted front-and-center (shape badge,
- *              story count, rationale, critique/audit notes) above a link
- *              into the Graph tab.
+ *              story count, rationale, critique/audit notes) above the
+ *              dependency graph, rendered INLINE (B2, design D11) rather
+ *              than linked out to a separate subtab — concept is now a
+ *              single continuous panel: Intent → status → graph.
  *
+
  * `mintPhaseSteps()` is exported standalone (pure, no DOM) so the phase→step
  * mapping is unit-testable without rendering.
  *
@@ -31,7 +34,6 @@
  * scope for this slice).
  */
 
-import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { AlertTriangle, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
@@ -39,9 +41,9 @@ import { useAgentJob } from '@/hooks/use-agent-job';
 import { useAgentEvents } from '@/hooks/use-agent-events';
 import type { AgentJobStatus } from '@/types/agent-orchestrator';
 import type { Labs3ViewProps } from '../plan-spec-dashboard/constants';
-import { links3 } from '@/lib/links3';
 import { fmtDuration } from '../plan-spec-dashboard/project-hero';
-import { PlannerNarrativePanel } from './spec-graph-view';
+import { PlannerNarrativePanel, SpecGraphCanvas } from './spec-graph-view';
+import type { StoryNodeRow } from '@/types/plan-spec';
 
 /** The quick-planspec mint job's possible phase markers, in pipeline order. */
 export type MintPhase =
@@ -367,6 +369,142 @@ function PlannerStreamPane({
   );
 }
 
+/**
+ * Small generic chip echoing where a plan's intent was dispatched from
+ * (B1 — mirrors `sealProvenance.source` verbatim, e.g. an external caller
+ * name; renders whatever the field holds, no assumption about the caller).
+ */
+function ProvenanceChip({ source }: { source: string }) {
+  return (
+    <span
+      style={{
+        fontSize: 9,
+        fontFamily: 'var(--font-mono)',
+        padding: '1px 6px',
+        borderRadius: 8,
+        background: 'var(--surface)',
+        border: '1px solid var(--border)',
+        color: 'var(--text-mute)',
+        letterSpacing: '0.06em',
+        textTransform: 'uppercase',
+        flexShrink: 0,
+      }}
+      title="Dispatch source"
+    >
+      {source}
+    </span>
+  );
+}
+
+/**
+ * B1 (design D10) — always-rendered "Intent" card, reusing the
+ * `PlannerNarrativePanel` collapsible-monospace pattern (a seal document can
+ * be long markdown). Called at the top of EVERY concept-stage branch
+ * (RUNNING/PENDING, FAILED, ingested, no-mint-telemetry) so `plan.intent` —
+ * the received order — is visible for the plan's entire life, not just the
+ * sub-minute RUNNING window it used to be inlined in.
+ *
+ * Renders whatever `plan.intent` holds verbatim; no assumption about caller
+ * or content. Returns null only when there's genuinely no intent to show
+ * (legacy plan / not yet persisted) — mirroring `PlannerNarrativePanel`'s
+ * own no-content behavior.
+ */
+function IntentCard({
+  intent,
+  sealProvenance,
+}: {
+  intent?: string;
+  sealProvenance?: { source: string };
+}) {
+  const [open, setOpen] = useState(false);
+  if (!intent) return null;
+
+  return (
+    <div
+      style={{
+        background: 'var(--bg-elev)',
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        overflow: 'hidden',
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls="intent-card-body"
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '9px 14px',
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          color: 'var(--foreground)',
+          textAlign: 'left',
+        }}
+      >
+        <span
+          aria-hidden="true"
+          style={{
+            display: 'inline-block',
+            transform: open ? 'rotate(90deg)' : 'none',
+            transition: 'transform 120ms',
+            color: 'var(--text-mute)',
+            fontSize: 10,
+          }}
+        >
+          ▶
+        </span>
+        <span style={LABEL}>Intent</span>
+        {sealProvenance?.source && <ProvenanceChip source={sealProvenance.source} />}
+      </button>
+      {open && (
+        <pre
+          id="intent-card-body"
+          style={{
+            margin: 0,
+            padding: '0 16px 14px',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11.5,
+            lineHeight: 1.6,
+            color: 'var(--text-dim)',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            overflowX: 'auto',
+          }}
+        >
+          {intent}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+/**
+ * B2 (design D11) — the concept panel's inline dependency graph. Concept is
+ * now a single continuous subtab (STAGE_DEFS['concept'].subtabs ===
+ * ['plan-stage']; `plan-spec-dashboard/constants.ts`), so the graph that used
+ * to live behind its own `graph` subtab renders here, directly below the
+ * mint/planner status, reusing `SpecGraphCanvas` (extracted from
+ * `spec-graph-view.tsx`) — zero duplicated layout/edge/detail-panel logic.
+ * Renders nothing until stories exist; the status card above this already
+ * communicates "still planning" so no redundant empty-state text is needed
+ * here. Pure prop pass-through — no assumption about story count/content.
+ */
+function InlineDependencyGraph({
+  stories,
+  onSelectStory,
+}: {
+  stories: StoryNodeRow[];
+  onSelectStory?: (storyId: string) => void;
+}) {
+  if (stories.length === 0) return null;
+  return <SpecGraphCanvas stories={stories} onSelectStory={onSelectStory} />;
+}
+
 function BrownfieldBanner({ appId }: { appId: string }) {
   return (
     <div
@@ -391,7 +529,7 @@ function BrownfieldBanner({ appId }: { appId: string }) {
 }
 
 export function PlanningView(props: Labs3ViewProps) {
-  const { planId, appId, plan, stories } = props;
+  const { appId, plan, stories } = props;
   const mintJobId = plan?.mintJobId ?? null;
   const { data: job } = useAgentJob(mintJobId);
 
@@ -404,12 +542,11 @@ export function PlanningView(props: Labs3ViewProps) {
   const rawPhase = jobWithPhase?.phase;
   const indeterminate = rawPhase == null || !PHASE_ORDER.some((p) => p.id === rawPhase);
 
-  const graphHref = links3.plan(planId, 'graph');
-
   // Stories ingested — the planner narrative is the plan's front door now.
   if (stories.length > 0) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <IntentCard intent={plan?.intent} sealProvenance={plan?.sealProvenance} />
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={LABEL}>Plan minted</div>
@@ -427,28 +564,9 @@ export function PlanningView(props: Labs3ViewProps) {
               Stories are ingested but no planner narrative was persisted for this plan.
             </p>
           )}
-          <Link
-            href={graphHref}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 6,
-              marginTop: 12,
-              padding: '6px 12px',
-              borderRadius: 6,
-              border: '1px solid var(--border)',
-              background: 'var(--surface)',
-              color: 'var(--foreground)',
-              fontFamily: 'var(--font-mono)',
-              fontSize: 11,
-              letterSpacing: '0.04em',
-              textDecoration: 'none',
-            }}
-          >
-            View dependency graph →
-          </Link>
         </Card>
         <PlannerStreamPane jobId={mintJobId} jobStatus={job?.status} />
+        <InlineDependencyGraph stories={stories} onSelectStory={props.onSelectStory} />
       </div>
     );
   }
@@ -456,13 +574,18 @@ export function PlanningView(props: Labs3ViewProps) {
   // No mint telemetry — either a legacy plan or the FK was never persisted.
   if (!mintJobId) {
     return (
-      <Card>
-        <div style={LABEL}>Planning</div>
-        <p style={{ marginTop: 10, fontSize: 12.5, color: 'var(--text-dim)', lineHeight: 1.55 }}>
-          No mint telemetry for this plan — it predates the quick-planspec job FK, or was created
-          via the legacy planning chain. Watch the Graph tab; stories will appear once ingested.
-        </p>
-      </Card>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <IntentCard intent={plan?.intent} sealProvenance={plan?.sealProvenance} />
+        <Card>
+          <div style={LABEL}>Planning</div>
+          <p style={{ marginTop: 10, fontSize: 12.5, color: 'var(--text-dim)', lineHeight: 1.55 }}>
+            No mint telemetry for this plan — it predates the quick-planspec job FK, or was created
+            via the legacy planning chain. The dependency graph below will populate once stories are
+            ingested.
+          </p>
+        </Card>
+        <InlineDependencyGraph stories={stories} onSelectStory={props.onSelectStory} />
+      </div>
     );
   }
 
@@ -470,6 +593,7 @@ export function PlanningView(props: Labs3ViewProps) {
   if (job?.status === 'FAILED') {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <IntentCard intent={plan?.intent} sealProvenance={plan?.sealProvenance} />
         <Card>
           <div
             style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--destructive)' }}
@@ -494,6 +618,7 @@ export function PlanningView(props: Labs3ViewProps) {
           </p>
         </Card>
         <PlannerStreamPane jobId={mintJobId} jobStatus={job?.status} />
+        <InlineDependencyGraph stories={stories} onSelectStory={props.onSelectStory} />
       </div>
     );
   }
@@ -501,6 +626,7 @@ export function PlanningView(props: Labs3ViewProps) {
   // RUNNING (or PENDING, or job still loading) — the live stepper.
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <IntentCard intent={plan?.intent} sealProvenance={plan?.sealProvenance} />
       {plan?.kind === 'change' && appId && <BrownfieldBanner appId={appId} />}
       <Card>
         <div
@@ -534,22 +660,9 @@ export function PlanningView(props: Labs3ViewProps) {
         >
           <span>opus-4.8 · high effort</span>
         </div>
-
-        {plan?.intent && (
-          <p
-            style={{
-              marginTop: 12,
-              fontSize: 12.5,
-              color: 'var(--text-dim)',
-              lineHeight: 1.55,
-              fontStyle: 'italic',
-            }}
-          >
-            “{plan.intent}”
-          </p>
-        )}
       </Card>
       <PlannerStreamPane jobId={mintJobId} jobStatus={job?.status} />
+      <InlineDependencyGraph stories={stories} onSelectStory={props.onSelectStory} />
     </div>
   );
 }

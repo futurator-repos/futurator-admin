@@ -1110,13 +1110,27 @@ function EmptyState({ planId, mintJobId }: { planId: string; mintJobId?: string 
   );
 }
 
-// ── Top-level view ────────────────────────────────────────────────────────────
+// ── Interactive canvas (extracted for B2 — reused inline by the concept
+//    panel's PlanningView, see planning-view.tsx) ───────────────────────────
 
-export function SpecGraphView({ planId, stories, plan, onSelectStory }: Labs3ViewProps) {
+/**
+ * The interactive dependency-DAG canvas (SVG edge layer + node cards +
+ * in-place detail panel) — everything SpecGraphView renders BELOW the
+ * planner-narrative panel and empty state. Extracted (B2, design D11) so the
+ * concept-stage panel can inline the SAME graph (zero duplicated
+ * layout/edge/detail-panel logic) instead of only linking out to the
+ * `graph` subtab. Returns `null` when there are no stories yet — callers
+ * decide what (if anything) to show in that case.
+ */
+export function SpecGraphCanvas({
+  stories,
+  onSelectStory,
+}: {
+  stories: StoryNodeRow[];
+  onSelectStory?: (storyId: string) => void;
+}) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const narrative = plan?.planNarrative;
-  const shape = plan?.planShape;
 
   const layout = useMemo(() => buildLayout(stories), [stories]);
 
@@ -1167,6 +1181,85 @@ export function SpecGraphView({ planId, stories, plan, onSelectStory }: Labs3Vie
     setSelectedId((prev) => (prev === storyId ? null : storyId));
   }
 
+  if (stories.length === 0) return null;
+
+  return (
+    <div
+      style={{
+        background: 'var(--bg-elev)',
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        overflow: 'hidden',
+        fontFamily: 'var(--font-sans)',
+        color: 'var(--foreground)',
+      }}
+    >
+      <GraphLegend storyCount={stories.length} />
+
+      {/* Scrollable canvas */}
+      <div
+        style={{
+          overflowX: 'auto',
+          overflowY: 'auto',
+          maxHeight: 520,
+          position: 'relative',
+        }}
+      >
+        <div
+          style={{
+            position: 'relative',
+            width: layout.svgW,
+            height: layout.svgH,
+          }}
+        >
+          {/* Layer 1 — edge SVG (pointer-events: none so clicks fall through to cards) */}
+          <svg
+            width={layout.svgW}
+            height={layout.svgH}
+            style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
+            aria-hidden="true"
+            dangerouslySetInnerHTML={{ __html: edgeHtml }}
+          />
+
+          {/* Layer 2 — node cards */}
+          {[...layout.nodePos.values()].map((pos) => (
+            <NodeCard
+              key={pos.row.storyId}
+              pos={pos}
+              isSelected={selectedId === pos.row.storyId}
+              onClick={() => handleSelect(pos.row.storyId)}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Detail panel (below canvas) — in-place, does not navigate away */}
+      {selectedRow != null && (
+        <DetailPanel
+          row={selectedRow}
+          onClose={() => setSelectedId(null)}
+          onOpenInStories={() => onSelectStory?.(selectedRow.storyId)}
+          titleById={titleById}
+          panelRef={panelRef}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Top-level view (used by the development-stage `graph` subtab) ─────────────
+
+/**
+ * SpecGraphView — planner narrative + empty state + the interactive canvas
+ * (`SpecGraphCanvas`). The concept-stage panel (B2, `planning-view.tsx`)
+ * inlines `SpecGraphCanvas` directly instead of this wrapper, since its
+ * narrative is already shown by the concept panel's own status card and its
+ * empty state is redundant with the mint/planner status directly above it.
+ */
+export function SpecGraphView({ planId, stories, plan, onSelectStory }: Labs3ViewProps) {
+  const narrative = plan?.planNarrative;
+  const shape = plan?.planShape;
+
   if (stories.length === 0)
     return (
       <>
@@ -1178,66 +1271,7 @@ export function SpecGraphView({ planId, stories, plan, onSelectStory }: Labs3Vie
   return (
     <>
       <PlannerNarrativePanel narrative={narrative} shape={shape} />
-      <div
-        style={{
-          background: 'var(--bg-elev)',
-          border: '1px solid var(--border)',
-          borderRadius: 10,
-          overflow: 'hidden',
-          fontFamily: 'var(--font-sans)',
-          color: 'var(--foreground)',
-        }}
-      >
-        <GraphLegend storyCount={stories.length} />
-
-        {/* Scrollable canvas */}
-        <div
-          style={{
-            overflowX: 'auto',
-            overflowY: 'auto',
-            maxHeight: 520,
-            position: 'relative',
-          }}
-        >
-          <div
-            style={{
-              position: 'relative',
-              width: layout.svgW,
-              height: layout.svgH,
-            }}
-          >
-            {/* Layer 1 — edge SVG (pointer-events: none so clicks fall through to cards) */}
-            <svg
-              width={layout.svgW}
-              height={layout.svgH}
-              style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
-              aria-hidden="true"
-              dangerouslySetInnerHTML={{ __html: edgeHtml }}
-            />
-
-            {/* Layer 2 — node cards */}
-            {[...layout.nodePos.values()].map((pos) => (
-              <NodeCard
-                key={pos.row.storyId}
-                pos={pos}
-                isSelected={selectedId === pos.row.storyId}
-                onClick={() => handleSelect(pos.row.storyId)}
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* Detail panel (below canvas) — in-place, does not navigate away */}
-        {selectedRow != null && (
-          <DetailPanel
-            row={selectedRow}
-            onClose={() => setSelectedId(null)}
-            onOpenInStories={() => onSelectStory?.(selectedRow.storyId)}
-            titleById={titleById}
-            panelRef={panelRef}
-          />
-        )}
-      </div>
+      <SpecGraphCanvas stories={stories} onSelectStory={onSelectStory} />
     </>
   );
 }

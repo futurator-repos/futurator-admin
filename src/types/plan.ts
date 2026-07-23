@@ -60,6 +60,20 @@ export interface Plan {
   appId?: string;
   /** App/Plan v1 — Plan kind. */
   kind?: PlanKind;
+  /**
+   * External-dispatch provenance (pipeline-dispatch API — mycelium, etc.). The
+   * seal/version that produced this plan + where it came from. Mirror of
+   * `functions/shared/types/plan.ts` (B1 — unblocks a provenance chip on the
+   * Intent card without an unsafe cast).
+   */
+  sealProvenance?: {
+    source: string;
+    appRef?: string;
+    sealId?: string;
+    sealVersion?: string;
+    git?: { repoUrl?: string; branch?: string; commit?: string };
+    dispatchedAt: string;
+  };
   /** App/Plan v1 — short label like "v1.1 — mobile pass". */
   iterationLabel?: string;
   /** App/Plan v1 — file paths/globs the iteration must NOT modify. */

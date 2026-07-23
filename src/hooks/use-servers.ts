@@ -28,6 +28,44 @@ export function heartbeatState(lastHeartbeatAt: string | undefined, now: number)
   return 'dead';
 }
 
+/** Live fleet capacity, derived from the `futurator-servers` rows — the single
+ * source of truth for "which servers are executing right now", replacing the
+ * legacy singleton `DAEMON_HEARTBEAT` read (see `use-ec2-daemon.ts`). */
+export interface FleetCapacity {
+  /** Servers whose daemon is heartbeating (fresh|stale) — any provider. */
+  live: ComputeServer[];
+  /** In-flight jobs summed across live servers. */
+  activeCount: number;
+  /** Concurrency caps summed across live servers. */
+  maxConcurrent: number;
+  /** true when every live slot is taken (new calls queue). */
+  saturated: boolean;
+}
+
+/**
+ * Derive live fleet capacity from the server rows the fleet model owns.
+ *
+ * App-agnostic + provider-agnostic: a server counts as "live" purely on
+ * heartbeat freshness (`heartbeatState` === 'fresh' | 'stale'), never on which
+ * provider it is or any hardcoded server id. `local`, `gcp`, `aws`, `hetzner`,
+ * `oracle` are all treated identically — whichever box is actually beating is
+ * the one running the work.
+ */
+export function deriveFleetCapacity(servers: ComputeServer[], now: number): FleetCapacity {
+  const live = servers.filter((s) => {
+    const beat = heartbeatState(s.lastHeartbeatAt, now);
+    return beat === 'fresh' || beat === 'stale';
+  });
+  const activeCount = live.reduce((n, s) => n + (s.activeCount ?? 0), 0);
+  const maxConcurrent = live.reduce((n, s) => n + (s.maxConcurrent ?? 0), 0);
+  return {
+    live,
+    activeCount,
+    maxConcurrent,
+    saturated: maxConcurrent > 0 && activeCount >= maxConcurrent,
+  };
+}
+
 /** The fleet (Fleet tab). Polls so PROVISIONING → BOOTSTRAPPING → ACTIVE and
  * heartbeats update live without a manual refresh. */
 export function useServers() {

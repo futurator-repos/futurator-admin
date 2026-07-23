@@ -52,6 +52,18 @@ export interface Ec2Status {
   auth: AuthState | null;
 }
 
+/**
+ * @deprecated Legacy singleton read of the fixed-key `DAEMON_HEARTBEAT` row via
+ * `GET /api/ec2/status`. Fleet daemons (`IS_FLEET_DAEMON`) are forbidden to
+ * write that row, so this reports whichever legacy source last wrote it —
+ * "local · offline" while a GCP/other fleet box actually runs the work.
+ *
+ * For "which server is executing / current fleet capacity", use the fleet model
+ * instead: `useServers()` + `deriveFleetCapacity()` / `deriveServerState()`
+ * (`@/hooks/use-servers`, `@/lib/server-state`). The Queues CapStrip has already
+ * migrated (A5); the header `DaemonPanel` (`src/components/labs/runtime-controls.tsx`)
+ * and the other `useEc2Status` consumers are the remaining follow-ups.
+ */
 export function useEc2Status(enabled: boolean) {
   return useQuery({
     queryKey: ['ec2-status'],

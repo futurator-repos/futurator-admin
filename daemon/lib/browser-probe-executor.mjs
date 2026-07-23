@@ -69,6 +69,30 @@ export function normalizeKeyName(raw) {
   return KEY_ALIASES[k.toLowerCase()] || k;
 }
 
+// Real-DOM-key predicate (D-fix-1 part 2). The greedy press regex captures the
+// first word after "press", so a connector phrase like "…presses and holds
+// ArrowRight" makes the bare-press branch emit key='and' → page.keyboard.press
+// ('and') THROWS and poisons the whole journey (a false AC fail). The cure is
+// NOT a blanket "discard non-alias tokens" (that would drop legitimate
+// single-letter keys like 'W'/'P'), nor an arrow/space/game special-case
+// (phrasing-specific). It is a real-key test against the GENERIC DOM key map: a
+// captured, normalized token IS a key iff it is
+//   (1) a canonical KEY_ALIASES value  (ArrowRight, Space, Enter, Escape, Tab, …),
+//   (2) a single alphanumeric char     (a physical 'W'/'P'/'5' key), or
+//   (3) codeFor-known                   (normalizes to a canonical KeyboardEvent.code).
+// A token that fails all three ('and', 'then', 'start') is DROPPED as spurious,
+// never emitted. No app vocabulary — pure KEY_ALIASES + codeFor.
+const KEY_ALIAS_VALUES = new Set(Object.values(KEY_ALIASES));
+const CANONICAL_KEY_CODE = /^(?:Arrow(?:Up|Down|Left|Right)|Space|Key[A-Z]|Digit[0-9])$/;
+export function isRealKey(key) {
+  if (!key) return false;
+  const k = String(key).trim();
+  if (!k) return false;
+  if (KEY_ALIAS_VALUES.has(k)) return true; // ArrowRight, Space, Enter, Escape, Tab, Shift, …
+  if (/^[a-zA-Z0-9]$/.test(k)) return true; // single physical key: 'W', 'P', '5'
+  return CANONICAL_KEY_CODE.test(codeFor(k)); // codeFor-known named key (codeFor is hoisted)
+}
+
 // ── Boot-failure classification (R3, infra-attempt protection) ─────────────
 //
 // A story-level browser-AC failure is either an APP defect (the implementer's
@@ -114,13 +138,19 @@ export function classifyProbeFailure(input) {
   return { infra: false, reason: 'app-fail' };
 }
 
-/** Extract ordered actions from the `when` prose. */
+/**
+ * Extract ordered actions from the `when` prose.
+ * Returns `{ actions, keyIntent, droppedKeys }`:
+ *  - `keyIntent`   — a press/hold verb appeared (the author meant to drive a key).
+ *  - `droppedKeys` — normalized tokens that a press/hold captured but that failed
+ *                    the real-key test (spurious connectors); surfaced so
+ *                    `parseProbe` can fail OPEN when NO key resolves at all.
+ */
 function parseActions(src) {
   const found = [];
   let m;
-
-  const keyRe = /(?:press(?:es|ing)?\s+(?:the\s+)?(\w+))|(?:keydown\s+code=['"]?(\w+)['"]?)/gi;
-  while ((m = keyRe.exec(src))) found.push({ index: m.index, obj: { type: 'key', key: normalizeKeyName(m[1] || m[2]) } });
+  let keyIntent = false;
+  const droppedKeys = [];
 
   // HELD keys (VQA canvas-game power): "hold ArrowRight", "holding down Space".
   // A held key is dispatched keyboard.down → (settle while held) → keyboard.up,
@@ -128,8 +158,36 @@ function parseActions(src) {
   // window instead of registering a single instantaneous keydown. Optional.
   // normalizeKeyName maps the captured word ('right'/'space') to the DOM key name
   // ('ArrowRight'/'Space') so keyboard.down never throws `Unknown key`.
+  //
+  // Parsed FIRST (before bare press) so a bare-press whose span OVERLAPS a hold
+  // match can defer to it — INDEX-PRECEDENCE (D-fix-1 part 1): in
+  // "presses and holds ArrowRight" the hold branch owns the ArrowRight gesture.
+  const holdSpans = [];
   const holdRe = /hold(?:s|ing)?\s+(?:down\s+)?(?:the\s+)?(\w+)/gi;
-  while ((m = holdRe.exec(src))) found.push({ index: m.index, obj: { type: 'key', key: normalizeKeyName(m[1]), hold: true } });
+  while ((m = holdRe.exec(src))) {
+    keyIntent = true;
+    holdSpans.push({ start: m.index, end: m.index + m[0].length });
+    const key = normalizeKeyName(m[1]);
+    if (isRealKey(key)) found.push({ index: m.index, obj: { type: 'key', key, hold: true } });
+    else droppedKeys.push(key);
+  }
+
+  const keyRe = /(?:press(?:es|ing)?\s+(?:the\s+)?(\w+))|(?:keydown\s+code=['"]?(\w+)['"]?)/gi;
+  while ((m = keyRe.exec(src))) {
+    keyIntent = true;
+    const start = m.index;
+    const end = start + m[0].length;
+    // INDEX-PRECEDENCE (part 1): a bare-press span that overlaps a HOLD match is
+    // subsumed by the hold — the hold branch already captured the real key
+    // gesture; skip this (often connector) press capture.
+    if (holdSpans.some((h) => start < h.end && h.start < end)) continue;
+    const key = normalizeKeyName(m[1] || m[2]);
+    // REAL-KEY VALIDATION (part 2): emit only a genuine DOM key; a spurious token
+    // ('and'/'then'/'start') is DROPPED, never emitted — it would throw at
+    // page.keyboard.press() and poison the journey. Legit 'W'/'P' survive.
+    if (isRealKey(key)) found.push({ index: start, obj: { type: 'key', key } });
+    else droppedKeys.push(key);
+  }
 
   const fsRe = /(?:forces?\s+status\s+to\s+['"](\w+)['"])|(?:forceStatus\(['"](\w+)['"]\))/gi;
   while ((m = fsRe.exec(src)))
@@ -159,7 +217,11 @@ function parseActions(src) {
   while ((m = typeRe.exec(src)))
     found.push({ index: m.index, obj: { type: 'type', text: m[1], target: m[2]?.trim() } });
 
-  return found.sort((a, b) => a.index - b.index).map((f) => f.obj);
+  return {
+    actions: found.sort((a, b) => a.index - b.index).map((f) => f.obj),
+    keyIntent,
+    droppedKeys,
+  };
 }
 
 // A snapshot field path: dotted + indexed (score, pacman.dir, entities.ghosts[0].x).
@@ -219,8 +281,23 @@ function parseAssertions(src) {
 export function parseProbe({ when, thenObservable, then, text } = {}) {
   const actionSrc = [when, text].find((s) => s && s.trim()) || '';
   const assertSrc = [thenObservable, then, text].find((s) => s && s.trim()) || '';
-  const actions = parseActions(actionSrc);
+  const { actions, keyIntent, droppedKeys } = parseActions(actionSrc);
   const assertions = parseAssertions(assertSrc);
+  // FAIL-OPEN (D-fix-1 part 3): the prose intended a key gesture but NONE of the
+  // captured tokens resolved to a real DOM key — the primary token is genuinely
+  // unresolvable. Route to human review (interpretable:false) rather than run a
+  // probe that silently omits the key action or throws mid-journey. A connector
+  // dropped ALONGSIDE a resolved key (the 'and' in "presses and holds
+  // ArrowRight") does NOT trip this — a real key survived (anyKeyResolved).
+  const anyKeyResolved = actions.some((a) => a.type === 'key');
+  if (keyIntent && !anyKeyResolved) {
+    return {
+      actions,
+      assertions,
+      interpretable: false,
+      reason: `unresolvable key token(s) [${droppedKeys.join(', ')}] — routed to human review`,
+    };
+  }
   if (assertions.length === 0) {
     return { actions, assertions, interpretable: false, reason: `no snapshot assertion in "${assertSrc.slice(0, 80)}"` };
   }

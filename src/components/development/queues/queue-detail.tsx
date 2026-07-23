@@ -120,6 +120,52 @@ function MetaRow({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
+/** Pretty-prints whatever value is stored — no schema assumptions about its shape.
+ * Renders nothing for an absent/empty value so ingest rows without a body/headers
+ * field don't show a stray empty block. */
+function JsonBlock({ label, value }: { label: string; value: unknown }) {
+  if (value === undefined || value === null) return null;
+  let pretty: string;
+  try {
+    pretty = JSON.stringify(value, null, 2);
+  } catch {
+    pretty = String(value);
+  }
+  if (!pretty || pretty === '{}' || pretty === '[]' || pretty === '""') return null;
+  return (
+    <details>
+      <summary className="cursor-pointer text-[10px] uppercase text-muted-foreground hover:text-foreground">
+        {label}
+      </summary>
+      <pre className="mt-1 rounded-md border border-border bg-muted/30 p-2 text-[11px] font-mono whitespace-pre-wrap break-all max-h-72 overflow-auto">
+        {pretty}
+      </pre>
+    </details>
+  );
+}
+
+/** Call/body inspector (D6b) — renders whatever the stored row carries
+ * (method/path/source/headers/body) for BOTH ingest and dispatch-audit rows.
+ * Pure pretty-print: no field allow-list, no schema assumptions. Header
+ * sanitization (stripping x-queue-key / authorization) happens server-side
+ * at persistence (A2); this only displays what was stored. */
+function CallInspector({ req }: { req: QueueRequest }) {
+  const hasBody = req.body !== undefined && req.body !== null;
+  const hasHeaders = req.headers !== undefined && req.headers !== null;
+  if (!req.method && !req.path && !hasHeaders && !hasBody) return null;
+
+  return (
+    <div className="rounded-md border border-border p-3 space-y-1.5">
+      <span className="text-xs font-medium">Call</span>
+      <MetaRow label="Method" value={req.method || '—'} />
+      <MetaRow label="Path" value={req.path || '—'} />
+      <MetaRow label="Source" value={req.source || '—'} />
+      <JsonBlock label="Headers" value={req.headers} />
+      <JsonBlock label="Body" value={req.body} />
+    </div>
+  );
+}
+
 function ResponsePanel({ req }: { req: QueueRequest }) {
   const respond = useRespondQueueRequest();
   const [receiverUrl, setReceiverUrl] = useState('');
@@ -242,6 +288,9 @@ export function QueueDetail({ requestId }: { requestId: string }) {
           <MetaRow label="Error" value={<span className="text-red-400">{req.error}</span>} />
         )}
       </div>
+
+      {/* Call / body inspector — raw request as received (ingest or dispatch) */}
+      <CallInspector req={req} />
 
       {/* Live terminal */}
       <div className="space-y-1.5">

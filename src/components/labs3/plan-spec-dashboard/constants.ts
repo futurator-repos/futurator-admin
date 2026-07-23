@@ -113,7 +113,16 @@ export const STAGE_DEFS: StageDef[] = [
     id: 'concept',
     label: 'Concept',
     sub: 'intent → plan',
-    subtabs: ['plan-stage', 'graph'],
+    // B2 (design D11): concept is a SINGLE continuous panel — Intent card →
+    // mint/planner status → dependency graph, all inline in `plan-stage`
+    // (see planning-view.tsx). A single-entry subtabs array means the
+    // shell's `stageSubtabs.length > 1` gate (plan-spec-dashboard/index.tsx)
+    // hides the subtab row automatically; no shell change needed. `graph`
+    // stays a valid subtab id (development owns it below) — a bare
+    // `?subtab=graph` deep-link still resolves via `stageForSubtab`'s
+    // earliest-owning-stage lookup, just to `development` now instead of
+    // `concept`.
+    subtabs: ['plan-stage'],
     defaultSubtab: 'plan-stage',
   },
   {

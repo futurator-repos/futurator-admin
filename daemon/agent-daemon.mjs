@@ -2664,7 +2664,47 @@ async function executeStoryDevJob(job) {
     },
   });
 
+  // D-fix-3 — quarantine, don't wedge. A story whose ONLY outstanding failure is
+  // a browser/behavior AC that RAN and failed a snapshot assertion escalates to
+  // verdict.status 'needs-human' (D-fix-2), and handleStoryCompletion maps it to a
+  // distinct newState 'needs-human'. But the story-dev pipeline's per-attempt
+  // persist collapses every non-'done' state to 'failed' (story-dev-pipeline.mjs
+  // persistState) — which would (a) hard-BLOCK its dependents (a dependency in
+  // state='failed' cascades) and (b) let allStoriesResolved count the story as
+  // terminal and advance the plan to review as if it failed. Re-stamp the row to
+  // the non-terminal, operator-actionable 'needs-human' state so its dependents
+  // keep their unblockedDepsCount (stay 'blocked', waiting for the operator's
+  // Accept) and the plan holds in 'developing'. Keys ONLY on newState — no
+  // app/story/content literal. (The clean fix is the pipeline persisting
+  // 'needs-human' directly; that persistState line is outside this fix's file
+  // scope — noted in the fix report.)
+  const needsHuman = result.newState === 'needs-human';
   const ok = result.exitCode === 0 && result.newState !== 'failed';
+
+  if (needsHuman) {
+    await updateStoryState({
+      storyId,
+      state: 'needs-human',
+      verdict: result.verdict,
+      acceptanceCriteria: result.acceptanceCriteria,
+      commitSha: result.commitSha,
+    });
+    // Surface it for the operator's Accept lane (QA Review). Best-effort.
+    await writeAttentionItem(ddb, {
+      planId,
+      dedupKey: `story-needs-human:${storyId}`,
+      severity: 'medium',
+      category: 'story-needs-human',
+      title: `Story ${storyId} needs human review — a browser/behavior AC ran and failed`,
+      body: (result.verdict?.reasons || []).join('\n')
+        || 'A behavioral AC ran and failed its assertion (candidate interaction-gated VQA false-negative). Accept in QA Review, or send back to fix.',
+      context: { jobId: job.jobId, planId, storyId },
+      suggestedActions: [
+        { label: 'Accept — interaction-gated VQA false-negative', kind: 'accept-needs-human' },
+        { label: 'Open logs', kind: 'open-logs' },
+      ],
+    }, log).catch(() => {});
+  }
 
   if (ok) {
     // Fire-and-forget: grow the code-knowledge-graph (the real Graph tab's data
@@ -2795,7 +2835,16 @@ async function executeStoryDevJob(job) {
 
   // Advance the plan lifecycle when EVERY story is terminal — runs on BOTH the
   // success and failure paths (a failing last story must still trigger it).
-  await maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short, parentJob: job });
+  // D-fix-3 — but a 'needs-human' story is explicitly NON-terminal: it must not
+  // trigger a plan advance, nor let the justResolvedStoryId escape hatch inside
+  // allStoriesResolved count it as terminal. The plan holds in 'developing' until
+  // the operator Accepts it (POST .../stories/:id/accept flips it done + unblocks
+  // dependents); the reconciliation sweep (scanStalledPlansForIntegrate,
+  // storyId=undefined) then drives the eventual advance once every story is truly
+  // done/failed. Other stories' completions advance the plan normally.
+  if (!needsHuman) {
+    await maybeAdvancePlanOnAllResolved({ planId, planRow, storyId, short, parentJob: job });
+  }
 
   // updateJobFields ALWAYS appends updatedAt — do NOT pass it (duplicate path →
   // "Two document paths overlap" → the status write throws → the job never
